@@ -121,7 +121,7 @@ if __name__ == "__main__":
         default="example_cartpole.usd",
         help="Path to the output USD file.",
     )
-    parser.add_argument("--num_frames", type=int, default=1200, help="Total number of frames.")
+    parser.add_argument("--num_frames", type=int, default=120000, help="Total number of frames.")
     parser.add_argument("--num_envs", type=int, default=100, help="Total number of simulated environments.")
 
     args = parser.parse_known_args()[0]

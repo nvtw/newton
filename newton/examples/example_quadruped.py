@@ -63,7 +63,7 @@ class Example:
         self.sim_substeps = 10
         self.sim_dt = self.frame_dt / self.sim_substeps
 
-        self.num_envs = num_envs
+        self.num_envs = 1 #num_envs
 
         offsets = newton.examples.compute_env_offsets(self.num_envs)
         for i in range(self.num_envs):
@@ -75,10 +75,10 @@ class Example:
         # finalize model
         self.model = builder.finalize()
 
-        self.solver = newton.solvers.XPBDSolver(self.model)
+        # self.solver = newton.solvers.XPBDSolver(self.model)
         # self.solver = newton.solvers.FeatherstoneSolver(self.model)
         # self.solver = newton.solvers.SemiImplicitSolver(self.model)
-        # self.solver = newton.solvers.MuJoCoSolver(self.model)
+        self.solver = newton.solvers.MuJoCoSolver(self.model)
 
         if stage_path:
             self.renderer = newton.utils.SimRendererOpenGL(self.model, stage_path)
@@ -101,8 +101,9 @@ class Example:
         else:
             self.graph = None
 
-    def simulate(self):
+    def simulate(self): 
         for _ in range(self.sim_substeps):
+            self.contacts = self.model.collide(self.state_0)
             self.state_0.clear_forces()
             self.contacts = self.model.collide(self.state_0)
             self.solver.step(self.model, self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
@@ -149,6 +150,8 @@ if __name__ == "__main__":
         for _ in range(args.num_frames):
             example.step()
             example.render()
+            input("Press Enter to continue...")
+            
 
         if example.renderer:
             example.renderer.save()
