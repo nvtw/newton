@@ -250,6 +250,7 @@ def convert_newton_contacts_to_mjwarp_kernel(
     rigid_contact_tids: wp.array(dtype=wp.int32),
     num_shapes_per_env: int,
     num_envs: int,
+    to_mjc_geom_index: wp.array(dtype=wp.int32),
     # Mujoco warp contacts
     ncon_out: wp.array(dtype=int),
     ncon_hfield_out: wp.array2d(dtype=int),
@@ -322,7 +323,7 @@ def convert_newton_contacts_to_mjwarp_kernel(
 
     dist = -dist
     
-    wp.printf("dist: %f    %f %f %f\n", dist, n.x, n.y, n.z)
+    #wp.printf("dist: %f    %f %f %f\n", dist, n.x, n.y, n.z)
     
     # n = -rigid_contact_normal[tid]
     # p0 = rigid_contact_point0[tid]
@@ -342,7 +343,9 @@ def convert_newton_contacts_to_mjwarp_kernel(
 
 
 
-    geoms = wp.vec2i(shape_a, shape_b)
+    geoms = wp.vec2i(to_mjc_geom_index[shape_a], to_mjc_geom_index[shape_b])
+    #geoms = wp.vec2i(shape_a, shape_b)
+    wp.printf("geoms: %d-> %d, %d-> %d\n", shape_a, geoms[0], shape_b, geoms[1])
 
     worldid = shape_a // num_shapes_per_env
 
@@ -1258,6 +1261,8 @@ class MuJoCoSolver(SolverBase):
                 contacts.rigid_contact_tids,
                 shapes_per_env,
                 self.model.num_envs,
+                self.model.to_mjc_geom_index,
+                # self.model.to_newton_shape_index,
                 # Mujoco warp contacts
                 self.mjw_data.ncon,
                 self.mjw_data.ncon_hfield,
@@ -1702,6 +1707,7 @@ class MuJoCoSolver(SolverBase):
         mj_bodies = [spec.worldbody]
         # mapping from warp body id to mujoco body id
         body_mapping = {-1: 0}
+        shape_mapping = {}
 
         # ensure unique names
         body_names = {}
@@ -1806,6 +1812,9 @@ class MuJoCoSolver(SolverBase):
                         geom_params["conaffinity"] = collision_mask_everything & ~contype
 
                 body.add_geom(**geom_params)
+                if shape in shape_mapping:
+                    raise ValueError(f"Shape {shape} is already present in shape_mapping")
+                shape_mapping[shape] = len(shape_mapping)
 
         # add static geoms attached to the worldbody
         add_geoms(-1, perm_position=model.up_axis == 1)
@@ -2061,6 +2070,29 @@ class MuJoCoSolver(SolverBase):
                 [reverse_body_mapping[i] + 1 for i in range(1, len(reverse_body_mapping))],
                 dtype=wp.int32,
             )
+
+            # Sort shape_mapping by key to ensure correct order
+            sorted_shape_items = sorted(shape_mapping.items(), key=lambda x: x[0])
+            list_shape = [v for k, v in sorted_shape_items]
+            model.to_mjc_geom_index = wp.array(
+                list_shape, dtype=wp.int32
+            )  # pyright: ignore[reportAttributeAccessIssue]
+            reverse_shape_mapping = {v: k for k, v in sorted_shape_items}
+            # mapping from MJC geom index to Newton shape index
+            # sort by MJC geom index to ensure correct order
+            sorted_reverse_shape_items = sorted(reverse_shape_mapping.items(), key=lambda x: x[0])
+            reverse_list = [v for k, v in sorted_reverse_shape_items]
+            model.to_newton_shape_index = wp.array(  # pyright: ignore[reportAttributeAccessIssue]
+                reverse_list,
+                dtype=wp.int32,
+            )
+
+            print("shape_mapping:", sorted_shape_items)
+            print("reverse_shape_mapping:", sorted_reverse_shape_items)
+            print("list_shape:", list_shape)
+            print("reverse_list:", reverse_list)
+            # Wait for user input before proceeding
+            input("Press Enter to continue...")
 
             self.mjw_model = mujoco_warp.put_model(self.mj_model)
             if separate_envs_to_worlds:
