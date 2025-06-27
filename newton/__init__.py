@@ -42,6 +42,9 @@ from .geometry import (
     create_none,
     create_plane,
     create_sphere,
+    SAPBroadPhase,
+    NxNBroadPhase,
+    ExplicitPairsBroadPhase,
 )
 
 # Simulation functionality
@@ -103,6 +106,9 @@ __all__ = [
     "create_none",
     "create_plane",
     "create_sphere",
+    "SAPBroadPhase",
+    "NxNBroadPhase",
+    "ExplicitPairsBroadPhase",
     "eval_fk",
     "eval_ik",
     "solvers",

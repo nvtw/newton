@@ -36,6 +36,8 @@ from .types import (
     Mesh,
 )
 from .utils import compute_shape_radius
+from .broad_phase_sap import SAPBroadPhase
+from .broad_phase_nxn import NxNBroadPhase, ExplicitPairsBroadPhase
 
 
 @wp.func
@@ -92,6 +94,9 @@ __all__ = [
     "SHAPE_FLAG_COLLIDE_SHAPES",
     "SHAPE_FLAG_VISIBLE",
     "Mesh",
+    "SAPBroadPhase",
+    "NxNBroadPhase",
+    "ExplicitPairsBroadPhase",
     "compute_shape_inertia",
     "compute_shape_radius",
     "create_box",
