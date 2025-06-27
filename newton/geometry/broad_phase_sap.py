@@ -20,7 +20,8 @@ from .broad_phase_blocks import binary_search, check_aabb_overlap, proceed_broad
 wp.set_module_options({"enable_backward": False})
 
 snippet = """
-unsigned int i = __float_as_uint(f);
+//unsigned int i = __float_as_uint(f);
+unsigned int i = *(unsigned int*)&f;
 unsigned int mask = (unsigned int)(-(int)(i >> 31)) | 0x80000000;
 unsigned int result = i ^ mask;
 return (int64_t)result;
