@@ -13,12 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import warp as wp
-import numpy as np
-from math import sqrt
 import unittest
+from math import sqrt
 
-from newton import SAPBroadPhase, NxNBroadPhase, ExplicitPairsBroadPhase
+import numpy as np
+import warp as wp
+
+from newton import ExplicitPairsBroadPhase, NxNBroadPhase, SAPBroadPhase
 
 
 def check_aabb_overlap_host(
@@ -86,21 +87,21 @@ class TestBroadPhase(unittest.TestCase):
         # Create random bounding boxes in min-max format
         ngeom = 30
 
-        # Generate random centers and sizes
-        np.random.seed(42)
+        # Generate random centers and sizes using the new Generator API
+        rng = np.random.Generator(np.random.PCG64(42))
 
-        centers = np.random.rand(ngeom, 3) * 3.0
-        sizes = np.random.rand(ngeom, 3) * 2.0  # box half-extent up to 1.0 in each direction
+        centers = rng.random((ngeom, 3)) * 3.0
+        sizes = rng.random((ngeom, 3)) * 2.0  # box half-extent up to 1.0 in each direction
         geom_bounding_box_lower = centers - sizes
         geom_bounding_box_upper = centers + sizes
 
         np_geom_cutoff = np.zeros(ngeom, dtype=np.float32)
         num_groups = 5  # The zero group does not need to be counted
-        np_collision_group = np.random.randint(1, num_groups + 1, size=ngeom, dtype=np.int32)
+        np_collision_group = rng.integers(1, num_groups + 1, size=ngeom, dtype=np.int32)
 
         # Overwrite n random elements with -1
         minus_one_count = int(sqrt(ngeom))  # Number of elements to overwrite with -1
-        random_indices = np.random.choice(ngeom, size=minus_one_count, replace=False)
+        random_indices = rng.choice(ngeom, size=minus_one_count, replace=False)
         np_collision_group[random_indices] = -1
 
         pairs_np = find_overlapping_pairs_np(
@@ -190,7 +191,7 @@ class TestBroadPhase(unittest.TestCase):
             assert len(pairs_np) == num_candidate_pair
 
         # Ensure every element in pairs_wp is also present in pairs_np
-        pairs_np_set = set(tuple(pair) for pair in pairs_np)
+        pairs_np_set = {tuple(pair) for pair in pairs_np}
         for pair in pairs_wp[:num_candidate_pair]:
             assert tuple(pair) in pairs_np_set, f"Pair {tuple(pair)} from Warp not found in numpy pairs"
 
@@ -203,11 +204,11 @@ class TestBroadPhase(unittest.TestCase):
         # Create random bounding boxes in min-max format
         ngeom = 30
 
-        # Generate random centers and sizes
-        np.random.seed(42)
+        # Generate random centers and sizes using the new Generator API
+        rng = np.random.Generator(np.random.PCG64(42))
 
-        centers = np.random.rand(ngeom, 3) * 3.0
-        sizes = np.random.rand(ngeom, 3) * 2.0  # box half-extent up to 1.0 in each direction
+        centers = rng.random((ngeom, 3)) * 3.0
+        sizes = rng.random((ngeom, 3)) * 2.0  # box half-extent up to 1.0 in each direction
         geom_bounding_box_lower = centers - sizes
         geom_bounding_box_upper = centers + sizes
 
@@ -318,7 +319,7 @@ class TestBroadPhase(unittest.TestCase):
             assert len(pairs_np) == num_candidate_pair
 
         # Ensure every element in pairs_wp is also present in pairs_np
-        pairs_np_set = set(pairs_np)
+        pairs_np_set = {tuple(pair) for pair in pairs_np}
         for pair in pairs_wp[:num_candidate_pair]:
             assert tuple(pair) in pairs_np_set, f"Pair {tuple(pair)} from Warp not found in numpy pairs"
 
@@ -331,22 +332,21 @@ class TestBroadPhase(unittest.TestCase):
         # Create random bounding boxes in min-max format
         ngeom = 30
 
-        # Generate random centers and sizes
+        # Generate random centers and sizes using the new Generator API
+        rng = np.random.Generator(np.random.PCG64(42))
 
-        np.random.seed(42)
-
-        centers = np.random.rand(ngeom, 3) * 3.0
-        sizes = np.random.rand(ngeom, 3) * 2.0  # box half-extent up to 1.0 in each direction
+        centers = rng.random((ngeom, 3)) * 3.0
+        sizes = rng.random((ngeom, 3)) * 2.0  # box half-extent up to 1.0 in each direction
         geom_bounding_box_lower = centers - sizes
         geom_bounding_box_upper = centers + sizes
 
         np_geom_cutoff = np.zeros(ngeom, dtype=np.float32)
         num_groups = 5  # The zero group does not need to be counted
-        np_collision_group = np.random.randint(1, num_groups + 1, size=ngeom, dtype=np.int32)
+        np_collision_group = rng.integers(1, num_groups + 1, size=ngeom, dtype=np.int32)
 
         # Overwrite n random elements with -1
         minus_one_count = int(sqrt(ngeom))  # Number of elements to overwrite with -1
-        random_indices = np.random.choice(ngeom, size=minus_one_count, replace=False)
+        random_indices = rng.choice(ngeom, size=minus_one_count, replace=False)
         np_collision_group[random_indices] = -1
 
         upper_bound = ngeom + minus_one_count * num_groups
@@ -446,7 +446,7 @@ class TestBroadPhase(unittest.TestCase):
             assert len(pairs_np) == num_candidate_pair
 
         # Ensure every element in pairs_wp is also present in pairs_np
-        pairs_np_set = set(tuple(pair) for pair in pairs_np)
+        pairs_np_set = {tuple(pair) for pair in pairs_np}
         for pair in pairs_wp[:num_candidate_pair]:
             assert tuple(pair) in pairs_np_set, f"Pair {tuple(pair)} from Warp not found in numpy pairs"
 

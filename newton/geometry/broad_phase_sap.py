@@ -15,8 +15,7 @@
 
 import warp as wp
 
-from .broad_phase_blocks import check_aabb_overlap, write_pair, binary_search, proceed_broad_phase
-
+from .broad_phase_blocks import binary_search, check_aabb_overlap, proceed_broad_phase, write_pair
 
 wp.set_module_options({"enable_backward": False})
 

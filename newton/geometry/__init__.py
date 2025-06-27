@@ -15,6 +15,8 @@
 
 import warp as wp
 
+from .broad_phase_nxn import ExplicitPairsBroadPhase, NxNBroadPhase
+from .broad_phase_sap import SAPBroadPhase
 from .flags import (
     PARTICLE_FLAG_ACTIVE,
     SHAPE_FLAG_COLLIDE_PARTICLES,
@@ -36,8 +38,6 @@ from .types import (
     Mesh,
 )
 from .utils import compute_shape_radius
-from .broad_phase_sap import SAPBroadPhase
-from .broad_phase_nxn import NxNBroadPhase, ExplicitPairsBroadPhase
 
 
 @wp.func
@@ -93,10 +93,10 @@ __all__ = [
     "SHAPE_FLAG_COLLIDE_PARTICLES",
     "SHAPE_FLAG_COLLIDE_SHAPES",
     "SHAPE_FLAG_VISIBLE",
-    "Mesh",
-    "SAPBroadPhase",
-    "NxNBroadPhase",
     "ExplicitPairsBroadPhase",
+    "Mesh",
+    "NxNBroadPhase",
+    "SAPBroadPhase",
     "compute_shape_inertia",
     "compute_shape_radius",
     "create_box",

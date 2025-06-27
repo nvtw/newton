@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import warp as wp
 from typing import Any
+
+import warp as wp
 
 
 @wp.func

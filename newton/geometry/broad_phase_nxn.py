@@ -15,7 +15,7 @@
 
 import warp as wp
 
-from .broad_phase_blocks import check_aabb_overlap, write_pair, proceed_broad_phase
+from .broad_phase_blocks import check_aabb_overlap, proceed_broad_phase, write_pair
 
 
 @wp.kernel
