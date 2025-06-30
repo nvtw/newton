@@ -15,19 +15,7 @@
 
 import warp as wp
 
-
-@wp.struct
-class Geom:
-    transform: wp.transform
-    scale: wp.vec3
-
-
-@wp.struct
-class ContactPoint:
-    pos: wp.vec3
-    normal: wp.vec3
-    tangent: wp.vec3
-    dist: float
+from newton.geometry.types import Geom, ContactPoint
 
 
 @wp.func
@@ -49,6 +37,11 @@ def make_contact_frame(a: wp.vec3):
     a = wp.normalize(a)
     b, c = orthogonals(a)
     return a, b  # z (normal), x (tangent)
+
+
+@wp.func
+def get_contact_points(contact_point: wp.vec3, normal: wp.vec3, dist: float):
+    return contact_point - normal * (0.5 * dist), contact_point + normal * (0.5 * dist)
 
 
 def get_plane_normal(transform: wp.transform):
