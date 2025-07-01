@@ -67,6 +67,44 @@ class Polytope:
 
 
 def build_ccd_generic(support_func: Any):
+    """Build a continuous collision detection (CCD) system using a generic support function.
+
+    This function takes a support function as input and returns a collection of helper functions
+    for performing collision detection between geometric primitives. The support function is used
+    to find the furthest point on a geometry in a given direction.
+
+    The support function must have the following signature:
+        def support_func(geom: Any, geom_type: int, dir: wp.vec3) -> tuple[int, wp.vec3]:
+    The type of geom must be a struct that can look as follows:
+        @wp.struct
+        class Geom:
+            pos: wp.vec3
+            rot: wp.mat33
+            normal: wp.vec3
+            size: wp.vec3
+            index: int
+    Note that only the index member is mandatory. All other members can be chosen as needed for
+    the support function.
+
+    The returned functions implement the GJK (Gilbert-Johnson-Keerthi) and EPA (Expanding Polytope Algorithm)
+    algorithms for computing distances between convex shapes and handling penetration cases.
+
+    Args:
+        support_func: A function that takes a geometry object, geometry type, and direction vector
+            and returns (index, point) where:
+            - index is the index of the support point in the geometry
+            - point is the furthest point on the geometry in the given direction
+
+    Returns:
+        A collection of helper functions including:
+        - _attach_face: Attaches a triangular face to the polytope
+        - _epa_support: Computes support points for EPA algorithm
+        - _linear_combine: Performs linear combination of vertices
+        - _almost_equal: Checks if two vectors are approximately equal
+        - _subdistance: Computes closest point on simplex to origin
+        And other internal functions used by GJK/EPA algorithms.
+    """
+
     @wp.func
     def _attach_face(pt: Polytope, idx: int, v1: int, v2: int, v3: int):
         # compute witness point v
