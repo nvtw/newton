@@ -36,6 +36,7 @@ from .types import (
     Mesh,
 )
 from .utils import compute_shape_radius
+from .gjk import build_ccd_generic
 
 
 @wp.func
@@ -103,4 +104,5 @@ __all__ = [
     "create_sphere",
     "get_shape_radius",
     "transform_inertia",
+    "build_ccd_generic",
 ]
