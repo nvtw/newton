@@ -25,8 +25,6 @@ from newton.geometry import (
 )
 from newton.geometry.gjk import build_ccd_generic
 
-# from .gjk import build_ccd_generic
-
 MAX_ITERATIONS = 10
 
 identity = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
