@@ -19,7 +19,7 @@ from math import sqrt
 import numpy as np
 import warp as wp
 
-from newton import ExplicitPairsBroadPhase, NxNBroadPhase, SAPBroadPhase
+from newton.geometry import BroadPhaseAllPairs, BroadPhaseExplicit, BroadPhaseSAP
 
 
 def check_aabb_overlap_host(
@@ -42,7 +42,7 @@ def check_aabb_overlap_host(
 
 
 # Collision filtering
-def proceed_broad_phase(group_a: int, group_b: int) -> bool:
+def test_group_pair(group_a: int, group_b: int) -> bool:
     if group_a == 0 or group_b == 0:
         return False
     if group_a > 0:
@@ -65,7 +65,7 @@ def find_overlapping_pairs_np(
         for j in range(i + 1, n):
             # Check for overlap in all three axes
             cutoff_combined = max(cutoff[i], cutoff[j])
-            if not proceed_broad_phase(collision_group[i], collision_group[j]):
+            if not test_group_pair(collision_group[i], collision_group[j]):
                 continue
 
             if (
@@ -120,8 +120,8 @@ class TestBroadPhase(unittest.TestCase):
         # is given by n * (n - 1) // 2
         num_lower_tri_elements = ngeom * (ngeom - 1) // 2
 
-        geom_bounding_box_lower_wp = wp.array(geom_bounding_box_lower, dtype=wp.vec3)
-        geom_bounding_box_upper_wp = wp.array(geom_bounding_box_upper, dtype=wp.vec3)
+        geom_lower = wp.array(geom_bounding_box_lower, dtype=wp.vec3)
+        geom_upper = wp.array(geom_bounding_box_upper, dtype=wp.vec3)
         geom_cutoff = wp.array(np_geom_cutoff)
         collision_group = wp.array(np_collision_group)
         num_candidate_pair = wp.array(
@@ -133,14 +133,14 @@ class TestBroadPhase(unittest.TestCase):
         max_candidate_pair = num_lower_tri_elements
         candidate_pair = wp.array(np.zeros((max_candidate_pair, 2), dtype=wp.int32), dtype=wp.vec2i)
 
-        nxn_broadphase = NxNBroadPhase()
+        nxn_broadphase = BroadPhaseAllPairs()
 
         nxn_broadphase.launch(
-            geom_bounding_box_lower_wp,
-            geom_bounding_box_upper_wp,
-            ngeom,
+            geom_lower,
+            geom_upper,
             geom_cutoff,
             collision_group,
+            ngeom,
             candidate_pair,
             num_candidate_pair,
         )
@@ -251,8 +251,8 @@ class TestBroadPhase(unittest.TestCase):
                 print(f"  Pair {i}: bodies {pair}")
 
         # Convert data to Warp arrays
-        geom_bounding_box_lower_wp = wp.array(geom_bounding_box_lower, dtype=wp.vec3)
-        geom_bounding_box_upper_wp = wp.array(geom_bounding_box_upper, dtype=wp.vec3)
+        geom_lower = wp.array(geom_bounding_box_lower, dtype=wp.vec3)
+        geom_upper = wp.array(geom_bounding_box_upper, dtype=wp.vec3)
         geom_cutoff = wp.array(np_geom_cutoff)
         explicit_pairs_wp = wp.array(explicit_pairs, dtype=wp.vec2i)
         num_candidate_pair = wp.array(
@@ -264,11 +264,11 @@ class TestBroadPhase(unittest.TestCase):
         max_candidate_pair = num_pairs_to_check
         candidate_pair = wp.array(np.zeros((max_candidate_pair, 2), dtype=np.int32), dtype=wp.vec2i)
 
-        explicit_broadphase = ExplicitPairsBroadPhase()
+        explicit_broadphase = BroadPhaseExplicit()
 
         explicit_broadphase.launch(
-            geom_bounding_box_lower_wp,
-            geom_bounding_box_upper_wp,
+            geom_lower,
+            geom_upper,
             geom_cutoff,
             explicit_pairs_wp,
             num_pairs_to_check,
@@ -369,8 +369,8 @@ class TestBroadPhase(unittest.TestCase):
         # is given by n * (n - 1) // 2
         num_lower_tri_elements = ngeom * (ngeom - 1) // 2
 
-        geom_bounding_box_lower_wp = wp.array(geom_bounding_box_lower, dtype=wp.vec3)
-        geom_bounding_box_upper_wp = wp.array(geom_bounding_box_upper, dtype=wp.vec3)
+        geom_lower = wp.array(geom_bounding_box_lower, dtype=wp.vec3)
+        geom_upper = wp.array(geom_bounding_box_upper, dtype=wp.vec3)
         geom_cutoff = wp.array(np_geom_cutoff)
         collision_group = wp.array(np_collision_group)
         num_candidate_pair = wp.array(
@@ -382,18 +382,18 @@ class TestBroadPhase(unittest.TestCase):
         max_candidate_pair = num_lower_tri_elements
         candidate_pair = wp.array(np.zeros((max_candidate_pair, 2), dtype=wp.int32), dtype=wp.vec2i)
 
-        sap_broadphase = SAPBroadPhase(
+        sap_broadphase = BroadPhaseSAP(
             max_broad_phase_elements=upper_bound,
             max_num_distinct_positive_groups=num_groups,
             max_num_negative_group_members=minus_one_count,
         )
 
         sap_broadphase.launch(
-            geom_bounding_box_lower_wp,
-            geom_bounding_box_upper_wp,
-            ngeom,
+            geom_lower,
+            geom_upper,
             geom_cutoff,
             collision_group,
+            ngeom,
             candidate_pair,
             num_candidate_pair,
         )
