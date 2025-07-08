@@ -33,6 +33,7 @@ from .types import (
     GEO_PLANE,
     GEO_SDF,
     GEO_SPHERE,
+    MESH_MAXHULLVERT,
     SDF,
     Mesh,
 )
@@ -87,6 +88,7 @@ __all__ = [
     "GEO_PLANE",
     "GEO_SDF",
     "GEO_SPHERE",
+    "MESH_MAXHULLVERT",
     "PARTICLE_FLAG_ACTIVE",
     "SDF",
     "SHAPE_FLAG_COLLIDE_PARTICLES",
