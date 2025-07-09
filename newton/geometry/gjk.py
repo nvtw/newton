@@ -23,8 +23,8 @@ wp.config.enable_backward = False
 
 FLOAT_MIN = -1e30
 FLOAT_MAX = 1e30
-MJ_MINVAL = 1e-15
-MJ_MINVAL2 = MJ_MINVAL * MJ_MINVAL
+MINVAL = 1e-15
+MINVAL2 = MINVAL * MINVAL
 
 mat43 = wp.types.matrix(shape=(4, 3), dtype=float)
 
@@ -145,11 +145,7 @@ def build_ccd_generic(support_func: Any):
 
     @wp.func
     def _almost_equal(v1: wp.vec3, v2: wp.vec3):
-        return (
-            wp.abs(v1[0] - v2[0]) < MJ_MINVAL
-            and wp.abs(v1[1] - v2[1]) < MJ_MINVAL
-            and wp.abs(v1[2] - v2[2]) < MJ_MINVAL
-        )
+        return wp.abs(v1[0] - v2[0]) < MINVAL and wp.abs(v1[1] - v2[1]) < MINVAL and wp.abs(v1[2] - v2[2]) < MINVAL
 
     @wp.func
     def _subdistance(n: int, simplex: mat43):
@@ -194,7 +190,7 @@ def build_ccd_generic(support_func: Any):
         nn = wp.dot(n, n)
         if nn == 0:
             return z, 1
-        if nv != 0 and nn > MJ_MINVAL:
+        if nv != 0 and nn > MINVAL:
             v = (nv / nn) * n
             return v, 0
 
@@ -204,7 +200,7 @@ def build_ccd_generic(support_func: Any):
         nn = wp.dot(n, n)
         if nn == 0:
             return z, 1
-        if nv != 0 and nn > MJ_MINVAL:
+        if nv != 0 and nn > MINVAL:
             v = (nv / nn) * n
             return v, 0
 
@@ -622,7 +618,7 @@ def build_ccd_generic(support_func: Any):
         pr[0] = v1[0] * l1 + v2[0] * l2 + v3[0] * l3
         pr[1] = v1[1] * l1 + v2[1] * l2 + v3[1] * l3
         pr[2] = v1[2] * l1 + v2[2] * l2 + v3[2] * l3
-        return wp.norm_l2(pr - p) < MJ_MINVAL
+        return wp.norm_l2(pr - p) < MINVAL
 
     @wp.func
     def _replace_simplex3(pt: Polytope, v1: int, v2: int, v3: int):
@@ -786,27 +782,27 @@ def build_ccd_generic(support_func: Any):
         _epa_support(pt, 4, geom1, geom2, geomtype1, geomtype2, d3 / wp.norm_l2(d3))
 
         # build hexahedron
-        if _attach_face(pt, 0, 0, 2, 3) < MJ_MINVAL:
+        if _attach_face(pt, 0, 0, 2, 3) < MINVAL:
             simplex, simplex1, simplex2 = _replace_simplex3(pt, 0, 2, 3)
             return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
 
-        if _attach_face(pt, 1, 0, 4, 2) < MJ_MINVAL2:
+        if _attach_face(pt, 1, 0, 4, 2) < MINVAL2:
             simplex, simplex1, simplex2 = _replace_simplex3(pt, 0, 4, 2)
             return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
 
-        if _attach_face(pt, 2, 0, 3, 4) < MJ_MINVAL2:
+        if _attach_face(pt, 2, 0, 3, 4) < MINVAL2:
             simplex, simplex1, simplex2 = _replace_simplex3(pt, 0, 3, 4)
             return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
 
-        if _attach_face(pt, 3, 1, 3, 2) < MJ_MINVAL2:
+        if _attach_face(pt, 3, 1, 3, 2) < MINVAL2:
             simplex, simplex1, simplex2 = _replace_simplex3(pt, 1, 3, 2)
             return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
 
-        if _attach_face(pt, 4, 1, 2, 4) < MJ_MINVAL2:
+        if _attach_face(pt, 4, 1, 2, 4) < MINVAL2:
             simplex, simplex1, simplex2 = _replace_simplex3(pt, 1, 2, 4)
             return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
 
-        if _attach_face(pt, 5, 1, 4, 3) < MJ_MINVAL2:
+        if _attach_face(pt, 5, 1, 4, 3) < MINVAL2:
             simplex, simplex1, simplex2 = _replace_simplex3(pt, 1, 4, 3)
             return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
 
@@ -843,7 +839,7 @@ def build_ccd_generic(support_func: Any):
         """Create polytope for EPA given a 2-simplex from GJK"""
         # get normals in both directions
         n = wp.cross(simplex[1] - simplex[0], simplex[2] - simplex[0])
-        if wp.norm_l2(n) < MJ_MINVAL:
+        if wp.norm_l2(n) < MINVAL:
             pt.status = 2
             return pt
 
@@ -885,22 +881,22 @@ def build_ccd_generic(support_func: Any):
             return pt
 
         # create hexahedron for EPA
-        if _attach_face(pt, 0, 4, 0, 1) < MJ_MINVAL2:
+        if _attach_face(pt, 0, 4, 0, 1) < MINVAL2:
             pt.status = 6
             return pt
-        if _attach_face(pt, 1, 4, 2, 0) < MJ_MINVAL2:
+        if _attach_face(pt, 1, 4, 2, 0) < MINVAL2:
             pt.status = 7
             return pt
-        if _attach_face(pt, 2, 4, 1, 2) < MJ_MINVAL2:
+        if _attach_face(pt, 2, 4, 1, 2) < MINVAL2:
             pt.status = 8
             return pt
-        if _attach_face(pt, 3, 3, 1, 0) < MJ_MINVAL2:
+        if _attach_face(pt, 3, 3, 1, 0) < MINVAL2:
             pt.status = 9
             return pt
-        if _attach_face(pt, 4, 3, 0, 2) < MJ_MINVAL2:
+        if _attach_face(pt, 4, 3, 0, 2) < MINVAL2:
             pt.status = 10
             return pt
-        if _attach_face(pt, 5, 3, 2, 1) < MJ_MINVAL2:
+        if _attach_face(pt, 5, 3, 2, 1) < MINVAL2:
             pt.status = 11
             return pt
 
@@ -946,19 +942,19 @@ def build_ccd_generic(support_func: Any):
         pt.verts2[3] = simplex2[3]
 
         # if the origin is on a face, replace the 3-simplex with a 2-simplex
-        if _attach_face(pt, 0, 0, 1, 2) < MJ_MINVAL2:
+        if _attach_face(pt, 0, 0, 1, 2) < MINVAL2:
             simplex, simplex1, simplex2 = _replace_simplex3(pt, 0, 1, 2)
             return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
 
-        if _attach_face(pt, 1, 0, 3, 1) < MJ_MINVAL2:
+        if _attach_face(pt, 1, 0, 3, 1) < MINVAL2:
             simplex, simplex1, simplex2 = _replace_simplex3(pt, 0, 3, 1)
             return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
 
-        if _attach_face(pt, 2, 0, 2, 3) < MJ_MINVAL2:
+        if _attach_face(pt, 2, 0, 2, 3) < MINVAL2:
             simplex, simplex1, simplex2 = _replace_simplex3(pt, 0, 2, 3)
             return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
 
-        if _attach_face(pt, 3, 3, 2, 1) < MJ_MINVAL2:
+        if _attach_face(pt, 3, 3, 2, 1) < MINVAL2:
             simplex, simplex1, simplex2 = _replace_simplex3(pt, 3, 2, 1)
             return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
 
@@ -1036,7 +1032,7 @@ def build_ccd_generic(support_func: Any):
                 if pt.face_index[i] == -2:
                     continue
 
-                if wp.dot(pt.face_v[i], pt.verts[wi]) - pt.face_dist2[i] > MJ_MINVAL:
+                if wp.dot(pt.face_v[i], pt.verts[wi]) - pt.face_dist2[i] > MINVAL:
                     pt.nmap = _delete_face(pt, i)
                     pt.nedges = _add_edge(pt, pt.face_verts[i][0], pt.face_verts[i][1])
                     pt.nedges = _add_edge(pt, pt.face_verts[i][1], pt.face_verts[i][2])
