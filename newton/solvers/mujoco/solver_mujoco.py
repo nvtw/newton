@@ -1106,6 +1106,7 @@ class MuJoCoSolver(SolverBase):
         update_data_interval: int = 1,
         save_to_mjcf: str | None = None,
         contact_stiffness_time_const: float = 0.02,
+        use_mujoco_contacts: bool = True,
     ):
         """
         Args:
@@ -1127,11 +1128,12 @@ class MuJoCoSolver(SolverBase):
             update_data_interval (int): Frequency (in simulation steps) at which to update the MuJoCo Data object from the Newton state. If 0, Data is never updated after initialization.
             save_to_mjcf (str | None): Optional path to save the generated MJCF model file.
             contact_stiffness_time_const (float): Time constant for contact stiffness in MuJoCo's solver reference model. Defaults to 0.02 (20ms). Can be set to match the simulation timestep for tighter coupling.
-
+            use_mujoco_contacts (bool): If True, use the MuJoCo contact solver. If False, use the Newton contact solver (newton contacts must be passed in through the step function in that case).
         """
         super().__init__(model)
         self.mujoco, self.mujoco_warp = import_mujoco()
         self.contact_stiffness_time_const = contact_stiffness_time_const
+        self.use_mujoco_contacts = use_mujoco_contacts
 
         disableflags = 0
         if disable_contacts:
@@ -1178,13 +1180,11 @@ class MuJoCoSolver(SolverBase):
                 self.update_mjc_data(self.mjw_data, self.model, state_in)
             self.mjw_model.opt.timestep.fill_(dt)
             with wp.ScopedDevice(self.model.device):
-                use_mujoco_contacts = False
-                if not use_mujoco_contacts:
+                if self.use_mujoco_contacts:
+                    self.mujoco_warp.step(self.mjw_model, self.mjw_data, True)
+                else:
                     self.convert_contacts_to_mjwarp(self.model, state_in, contacts)
                     self.mujoco_warp.step(self.mjw_model, self.mjw_data, False)
-                else:
-                    self.mujoco_warp.step(self.mjw_model, self.mjw_data, True)
-                print("step done")
             self.update_newton_state(self.model, state_out, self.mjw_data)
         self._step += 1
         return state_out
