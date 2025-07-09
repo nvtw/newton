@@ -60,64 +60,65 @@ def import_mujoco():
 
 @wp.func
 def orthogonals(a: wp.vec3):
-  y = wp.vec3(0.0, 1.0, 0.0)
-  z = wp.vec3(0.0, 0.0, 1.0)
-  b = wp.where((-0.5 < a[1]) and (a[1] < 0.5), y, z)
-  b = b - a * wp.dot(a, b)
-  b = wp.normalize(b)
-  if wp.length(a) == 0.0:
-    b = wp.vec3(0.0, 0.0, 0.0)
-  c = wp.cross(a, b)
+    y = wp.vec3(0.0, 1.0, 0.0)
+    z = wp.vec3(0.0, 0.0, 1.0)
+    b = wp.where((-0.5 < a[1]) and (a[1] < 0.5), y, z)
+    b = b - a * wp.dot(a, b)
+    b = wp.normalize(b)
+    if wp.length(a) == 0.0:
+        b = wp.vec3(0.0, 0.0, 0.0)
+    c = wp.cross(a, b)
 
-  return b, c
+    return b, c
+
 
 @wp.func
 def make_frame(a: wp.vec3):
-  a = wp.normalize(a)
-  b, c = orthogonals(a)
+    a = wp.normalize(a)
+    b, c = orthogonals(a)
 
-  # fmt: off
-  return wp.mat33(
+    # fmt: off
+    return wp.mat33(
     a.x, a.y, a.z,
     b.x, b.y, b.z,
     c.x, c.y, c.z
   )
-  # fmt: on
+    # fmt: on
+
 
 # Define vec5 as a 5-element vector of float32, matching MuJoCo's convention
 vec5 = wp.types.vector(length=5, dtype=wp.float32)
 
 
-
 @wp.func
 def write_contact(
-  # Data in:
-  # In:
-  dist_in: float,
-  pos_in: wp.vec3,
-  frame_in: wp.mat33,
-  margin_in: float,
-  gap_in: float,
-  condim_in: int,
-  friction_in: vec5,
-  solref_in: wp.vec2f,
-  solreffriction_in: wp.vec2f,
-  solimp_in: vec5,
-  geoms_in: wp.vec2i,
-  worldid_in: int,
-  contact_id_in: int,
-  # Data out:
-  contact_dist_out: wp.array(dtype=float),
-  contact_pos_out: wp.array(dtype=wp.vec3),
-  contact_frame_out: wp.array(dtype=wp.mat33),
-  contact_includemargin_out: wp.array(dtype=float),
-  contact_friction_out: wp.array(dtype=vec5),
-  contact_solref_out: wp.array(dtype=wp.vec2),
-  contact_solreffriction_out: wp.array(dtype=wp.vec2),
-  contact_solimp_out: wp.array(dtype=vec5),
-  contact_dim_out: wp.array(dtype=int),
-  contact_geom_out: wp.array(dtype=wp.vec2i),
-  contact_worldid_out: wp.array(dtype=int),
+    # Data in:
+    # In:
+    dist_in: float,
+    pos_in: wp.vec3,
+    frame_in: wp.mat33,
+    margin_in: float,
+    gap_in: float,
+    condim_in: int,
+    friction_in: vec5,
+    solref_in: wp.vec2f,
+    solreffriction_in: wp.vec2f,
+    solimp_in: vec5,
+    geoms_in: wp.vec2i,
+    worldid_in: int,
+    contact_id_in: int,
+    # Data out:
+    contact_dist_out: wp.array(dtype=float),
+    contact_pos_out: wp.array(dtype=wp.vec3),
+    contact_frame_out: wp.array(dtype=wp.mat33),
+    contact_includemargin_out: wp.array(dtype=float),
+    contact_friction_out: wp.array(dtype=vec5),
+    contact_solref_out: wp.array(dtype=wp.vec2),
+    contact_solreffriction_out: wp.array(dtype=wp.vec2),
+    contact_solimp_out: wp.array(dtype=vec5),
+    contact_dim_out: wp.array(dtype=int),
+    contact_geom_out: wp.array(dtype=wp.vec2i),
+    contact_worldid_out: wp.array(dtype=int),
 ):
     cid = contact_id_in
     contact_dist_out[cid] = dist_in
@@ -133,47 +134,47 @@ def write_contact(
     contact_solimp_out[cid] = solimp_in
 
 
-
 MJ_MINVAL = 2.220446049250313e-16
+
 
 @wp.func
 def contact_params(
-  # Model:
-  geom_condim: wp.array(dtype=int),
-  geom_priority: wp.array(dtype=int),
-  geom_solmix: wp.array2d(dtype=float),
-  geom_solref: wp.array2d(dtype=wp.vec2),
-  geom_solimp: wp.array2d(dtype=vec5),
-  geom_friction: wp.array2d(dtype=wp.vec3),
-  geom_margin: wp.array2d(dtype=float),
-  geom_gap: wp.array2d(dtype=float),
-#   pair_dim: wp.array(dtype=int),
-#   pair_solref: wp.array2d(dtype=wp.vec2),
-#   pair_solreffriction: wp.array2d(dtype=wp.vec2),
-#   pair_solimp: wp.array2d(dtype=vec5),
-#   pair_margin: wp.array2d(dtype=float),
-#   pair_gap: wp.array2d(dtype=float),
-#   pair_friction: wp.array2d(dtype=vec5),
-  # Data in:
-  # collision_pair_in: wp.array(dtype=wp.vec2i),
-  geoms : wp.vec2i,
-  #collision_pairid_in: wp.array(dtype=int),
-  # In:
-  #cid: int,
-  worldid: int,
+    # Model:
+    geom_condim: wp.array(dtype=int),
+    geom_priority: wp.array(dtype=int),
+    geom_solmix: wp.array2d(dtype=float),
+    geom_solref: wp.array2d(dtype=wp.vec2),
+    geom_solimp: wp.array2d(dtype=vec5),
+    geom_friction: wp.array2d(dtype=wp.vec3),
+    geom_margin: wp.array2d(dtype=float),
+    geom_gap: wp.array2d(dtype=float),
+    #   pair_dim: wp.array(dtype=int),
+    #   pair_solref: wp.array2d(dtype=wp.vec2),
+    #   pair_solreffriction: wp.array2d(dtype=wp.vec2),
+    #   pair_solimp: wp.array2d(dtype=vec5),
+    #   pair_margin: wp.array2d(dtype=float),
+    #   pair_gap: wp.array2d(dtype=float),
+    #   pair_friction: wp.array2d(dtype=vec5),
+    # Data in:
+    # collision_pair_in: wp.array(dtype=wp.vec2i),
+    geoms: wp.vec2i,
+    # collision_pairid_in: wp.array(dtype=int),
+    # In:
+    # cid: int,
+    worldid: int,
 ):
-  # geoms = collision_pair_in[cid]
-  # pairid = collision_pairid_in[cid]
+    # geoms = collision_pair_in[cid]
+    # pairid = collision_pairid_in[cid]
 
-#   if pairid > -1:
-#     margin = pair_margin[worldid, pairid]
-#     gap = pair_gap[worldid, pairid]
-#     condim = pair_dim[pairid]
-#     friction = pair_friction[worldid, pairid]
-#     solref = pair_solref[worldid, pairid]
-#     solreffriction = pair_solreffriction[worldid, pairid]
-#     solimp = pair_solimp[worldid, pairid]
-#   else:
+    #   if pairid > -1:
+    #     margin = pair_margin[worldid, pairid]
+    #     gap = pair_gap[worldid, pairid]
+    #     condim = pair_dim[pairid]
+    #     friction = pair_friction[worldid, pairid]
+    #     solref = pair_solref[worldid, pairid]
+    #     solreffriction = pair_solreffriction[worldid, pairid]
+    #     solimp = pair_solimp[worldid, pairid]
+    #   else:
     g1 = geoms[0]
     g2 = geoms[1]
 
@@ -217,10 +218,6 @@ def contact_params(
     return margin, gap, condim, friction, solref, solreffriction, solimp
 
 
-
-
-
-
 @wp.kernel
 def convert_newton_contacts_to_mjwarp_kernel(
     body_q: wp.array(dtype=wp.transform),
@@ -253,7 +250,8 @@ def convert_newton_contacts_to_mjwarp_kernel(
     rigid_contact_offset0: wp.array(dtype=wp.vec3),
     rigid_contact_offset1: wp.array(dtype=wp.vec3),
     rigid_contact_normal: wp.array(dtype=wp.vec3),
-    rigid_contact_thickness: wp.array(dtype=wp.float32),
+    rigid_contact_thickness0: wp.array(dtype=wp.float32),
+    rigid_contact_thickness1: wp.array(dtype=wp.float32),
     rigid_contact_tids: wp.array(dtype=wp.int32),
     num_shapes_per_env: int,
     num_envs: int,
@@ -275,15 +273,15 @@ def convert_newton_contacts_to_mjwarp_kernel(
     contact_worldid_out: wp.array(dtype=int),
 ):
     tid = wp.tid()
-  
+
     # if tid == 0:
-    #     print("convert_newton_contacts_to_mjwarp_kernel")    
+    #     print("convert_newton_contacts_to_mjwarp_kernel")
 
     # Set number of contacts (for a single world)
     if tid == 0:
         ncon_out[0] = rigid_contact_count[0]
 
-    #if tid < num_envs:
+    # if tid < num_envs:
     #    ncon_hfield_out[tid, 0] = 0
 
     if tid >= rigid_contact_count[0]:
@@ -292,46 +290,46 @@ def convert_newton_contacts_to_mjwarp_kernel(
     shape_a = rigid_contact_shape0[tid]
     shape_b = rigid_contact_shape1[tid]
 
-    thickness_a = 0.0
-    thickness_b = 0.0
+    # thickness_a = 0.0
+    # thickness_b = 0.0
 
     body_a = -1
     if shape_a >= 0:
         body_a = shape_body[shape_a]
-        thickness_a = rigid_contact_thickness[shape_a]
+        # thickness_a = rigid_contact_thickness[shape_a]
     body_b = -1
     if shape_b >= 0:
         body_b = shape_body[shape_b]
-        thickness_b = rigid_contact_thickness[shape_b]
-    #if body_a == body_b:
+        # thickness_b = rigid_contact_thickness[shape_b]
+    # if body_a == body_b:
     #    return
 
-    bx_a = rigid_contact_point0[tid]
-    bx_b = rigid_contact_point1[tid]
-    n = rigid_contact_normal[tid]
-
+   
     X_wb_a = wp.transform_identity()
     X_wb_b = wp.transform_identity()
     if body_a >= 0:
         X_wb_a = body_q[body_a]
-        bx_a = wp.transform_point(X_wb_a, bx_a) - thickness_a * n
+
     if body_b >= 0:
         X_wb_b = body_q[body_b]
-        bx_b = wp.transform_point(X_wb_b, bx_b) + thickness_b * n
+
+    bx_a = wp.transform_point(X_wb_a, rigid_contact_point0[tid])
+    bx_b = wp.transform_point(X_wb_b, rigid_contact_point1[tid])
 
     # compute body position in world space
     # bx_a = wp.transform_point(X_wb_a, rigid_contact_point0[tid])
     # bx_b = wp.transform_point(X_wb_b, rigid_contact_point1[tid])
 
-    thickness = rigid_contact_thickness[tid]
-   
-    #n = -n
+    thickness = rigid_contact_thickness0[tid] + rigid_contact_thickness1[tid]
+    # thickness = rigid_contact_thickness[tid]
+
+    n = -rigid_contact_normal[tid]
     dist = wp.dot(n, bx_b - bx_a) - thickness
 
-    dist = -dist
-    
-    #wp.printf("dist: %f    %f %f %f\n", dist, n.x, n.y, n.z)
-    
+    # dist = -dist
+
+    # wp.printf("dist: %f    %f %f %f\n", dist, n.x, n.y, n.z)
+
     # n = -rigid_contact_normal[tid]
     # p0 = rigid_contact_point0[tid]
     # p1 = rigid_contact_point1[tid]
@@ -343,36 +341,29 @@ def convert_newton_contacts_to_mjwarp_kernel(
     # Contact normal: MuJoCo expects normal to point from geom1 to geom2 (see MuJoCo docs)
     # In XPBD kernel, n = -contact_normal[tid], so contact_normal points from shape1 to shape0
     # To match MuJoCo, we need to flip the sign
-    #n = -n
+    # n = -n
 
     # Build contact frame
     frame = make_frame(n)
 
-
-
     geoms = wp.vec2i(to_mjc_geom_index[shape_a], to_mjc_geom_index[shape_b])
-    #geoms = wp.vec2i(shape_a, shape_b)
+    # geoms = wp.vec2i(shape_a, shape_b)
     wp.printf("geoms: %d-> %d, %d-> %d\n", shape_a, geoms[0], shape_b, geoms[1])
 
     worldid = shape_a // num_shapes_per_env
 
     margin, gap, condim, friction, solref, solreffriction, solimp = contact_params(
-      geom_condim,
-      geom_priority,
-      geom_solmix,
-      geom_solref,
-      geom_solimp,
-      geom_friction,
-      geom_margin,
-      geom_gap,
-      geoms,
-      worldid,
+        geom_condim,
+        geom_priority,
+        geom_solmix,
+        geom_solref,
+        geom_solimp,
+        geom_friction,
+        geom_margin,
+        geom_gap,
+        geoms,
+        worldid,
     )
-
-
-
-
-
 
     # # Use sum of offsets as include margin
     # margin = wp.length(rigid_contact_offset0[tid]) + wp.length(rigid_contact_offset1[tid])
@@ -395,7 +386,6 @@ def convert_newton_contacts_to_mjwarp_kernel(
 
     # # Geom ids: shape0 and shape1
     # geoms = wp.vec2i(shape_a, shape_b)
-
 
     # Use the write_contact function to write all the data
     write_contact(
@@ -424,10 +414,6 @@ def convert_newton_contacts_to_mjwarp_kernel(
         contact_geom_out=contact_geom_out,
         contact_worldid_out=contact_worldid_out,
     )
-
-
-
-
 
 
 # @wp.kernel
@@ -460,10 +446,10 @@ def convert_newton_contacts_to_mjwarp_kernel(
 #     contact_dim_out: wp.array(dtype=int),
 #     contact_geom_out: wp.array(dtype=wp.vec2i),
 #     # contact_efc_address: wp.array2d(dtype=int),
-#     contact_worldid_out: wp.array(dtype=int),    
+#     contact_worldid_out: wp.array(dtype=int),
 # ):
 #     tid = wp.tid()
-  
+
 
 #     # Set number of contacts (for a single world)
 #     if tid == 0:
@@ -1365,15 +1351,14 @@ class MuJoCoSolver(SolverBase):
             with wp.ScopedDevice(self.model.device):
                 use_mujoco_contacts = False
                 if not use_mujoco_contacts:
-                    self.convert_contacts_to_mjwarp(model, state_in, contacts)
-                    self.mujoco_warp.step(self.mjw_model, self.mjw_data, True)
-                else:
+                    self.convert_contacts_to_mjwarp(self.model, state_in, contacts)
                     self.mujoco_warp.step(self.mjw_model, self.mjw_data, False)
+                else:
+                    self.mujoco_warp.step(self.mjw_model, self.mjw_data, True)
                 print("step done")
             self.update_newton_state(self.model, state_out, self.mjw_data)
         self._step += 1
         return state_out
-
 
     def convert_contacts_to_mjwarp(self, model: Model, state_in: State, contacts: Contacts):
         shapes_per_env = self.model.shape_count // self.model.num_envs
@@ -1403,7 +1388,8 @@ class MuJoCoSolver(SolverBase):
                 contacts.rigid_contact_offset0,
                 contacts.rigid_contact_offset1,
                 contacts.rigid_contact_normal,
-                contacts.rigid_contact_thickness,
+                contacts.rigid_contact_thickness0,
+                contacts.rigid_contact_thickness1,
                 contacts.rigid_contact_tids,
                 shapes_per_env,
                 self.model.num_envs,
@@ -1425,7 +1411,6 @@ class MuJoCoSolver(SolverBase):
                 self.mjw_data.contact.worldid,
             ],
         )
-
 
     @override
     def notify_model_changed(self, flags: int):
@@ -2334,6 +2319,13 @@ class MuJoCoSolver(SolverBase):
                 for geom_idx, shape_idx in reverse_shape_mapping.items():
                     to_newton_shape_array[geom_idx] = shape_idx
             model.to_newton_shape_index = wp.array(to_newton_shape_array, dtype=wp.int32)  # pyright: ignore[reportAttributeAccessIssue]
+
+            to_mjc_geom_array = np.full(self.mj_model.ngeom, -1, dtype=np.int32)
+            if len(shape_mapping) > 0:
+                reverse_shape_mapping = {v: k for k, v in shape_mapping.items()}
+                for geom_idx, shape_idx in reverse_shape_mapping.items():
+                    to_mjc_geom_array[shape_idx] = geom_idx
+            model.to_mjc_geom_index = wp.array(to_mjc_geom_array, dtype=wp.int32)  # pyright: ignore[reportAttributeAccessIssue]
 
             self.mjw_model = mujoco_warp.put_model(self.mj_model)
             self.mjw_model.opt.graph_conditional = newton.utils.check_conditional_graph_support()
