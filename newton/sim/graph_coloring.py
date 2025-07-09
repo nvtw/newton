@@ -230,7 +230,7 @@ def color_graph(
     else:
         indices = wp.clone(graph_edge_indices, device="cpu")
 
-    num_colors = wp.context.runtime.core.graph_coloring(
+    num_colors = wp.context.runtime.core.wp_graph_coloring(
         num_nodes,
         indices.__ctype__(),
         algorithm.value,
@@ -238,7 +238,7 @@ def color_graph(
     )
 
     if balance_colors:
-        max_min_ratio = wp.context.runtime.core.balance_coloring(
+        max_min_ratio = wp.context.runtime.core.wp_balance_coloring(
             num_nodes,
             indices.__ctype__(),
             num_colors,
@@ -247,8 +247,10 @@ def color_graph(
         )
 
         if max_min_ratio > target_max_min_color_ratio:
-            warp.utils.warn(
-                f"The graph is not optimizable anymore, terminated with a max/min ratio: {max_min_ratio} without reaching the target ratio: {target_max_min_color_ratio}"
+            wp.utils.warn(
+                f"Color balancing terminated early: max/min ratio {max_min_ratio:.3f} "
+                f"exceeds target {target_max_min_color_ratio:.3f}. "
+                "The graph may not be further optimizable."
             )
 
     color_groups = convert_to_color_groups(num_colors, particle_colors, return_wp_array=False)
@@ -265,8 +267,8 @@ def plot_graph(vertices, edges, edge_labels=None):
         edges: A numpy array of shape (M, 2) containing the vertex indices of the edges.
         edge_labels: A list of edge labels.
     """
-    import matplotlib.pyplot as plt
-    import networkx as nx
+    import matplotlib.pyplot as plt  # noqa: PLC0415
+    import networkx as nx  # noqa: PLC0415
 
     if edge_labels is None:
         edge_labels = []

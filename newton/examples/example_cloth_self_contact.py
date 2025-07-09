@@ -31,6 +31,8 @@ import warp.examples
 from pxr import Usd, UsdGeom
 
 import newton
+import newton.geometry.kernels
+import newton.solvers.vbd.solver_vbd
 import newton.utils
 from newton.geometry import PARTICLE_FLAG_ACTIVE
 
@@ -121,7 +123,7 @@ def apply_rotation(
 
 
 class Example:
-    def __init__(self, stage_path="example_cloth_self_contact.usd", num_frames=600):
+    def __init__(self, stage_path="example_cloth_self_contact.usd", num_frames=300):
         fps = 60
         self.frame_dt = 1.0 / fps
         # must be an even number when using CUDA Graph
@@ -232,12 +234,17 @@ class Example:
 
         self.cuda_graph = None
         if self.use_cuda_graph:
-            with wp.ScopedCapture() as capture:
-                self.integrate_frame_substeps()
+            # Initial graph launch, load modules (necessary for drivers prior to CUDA 12.3)
+            wp.set_module_options({"block_dim": 256}, newton.solvers.vbd.solver_vbd)
+            wp.load_module(newton.solvers.vbd.solver_vbd, device=wp.get_device())
+            wp.set_module_options({"block_dim": 16}, newton.geometry.kernels)
+            wp.load_module(newton.geometry.kernels, device=wp.get_device())
 
+            with wp.ScopedCapture() as capture:
+                self.simulate_substeps()
             self.cuda_graph = capture.graph
 
-    def integrate_frame_substeps(self):
+    def simulate_substeps(self):
         self.contacts = self.model.collide(self.state_0)
         for _ in range(self.num_substeps):
             wp.launch(
@@ -259,28 +266,27 @@ class Example:
                 ],
             )
 
-            self.solver.step(self.model, self.state_0, self.state_1, self.control, self.contacts, self.dt)
+            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.dt)
             (self.state_0, self.state_1) = (self.state_1, self.state_0)
 
-    def advance_frame(self):
+    def step(self):
         with wp.ScopedTimer("step", print=False, dict=self.profiler):
             if self.use_cuda_graph:
                 wp.capture_launch(self.cuda_graph)
             else:
-                self.integrate_frame_substeps()
-
-            self.sim_time += self.dt
+                self.simulate_substeps()
+            self.sim_time += self.frame_dt
 
     def run(self):
         for i in range(self.num_frames):
-            self.advance_frame()
+            self.step()
             self.render()
             print(f"[{i:4d}/{self.num_frames}]")
 
             if i != 0 and not i % self.bvh_rebuild_frames and self.use_cuda_graph and self.solver.handle_self_contact:
                 self.solver.rebuild_bvh(self.state_0)
                 with wp.ScopedCapture() as capture:
-                    self.integrate_frame_substeps()
+                    self.simulate_substeps()
                 self.cuda_graph = capture.graph
 
     def render(self):
@@ -298,12 +304,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--device", type=str, default=None, help="Override the default Warp device.")
     parser.add_argument(
-        "--stage_path",
+        "--stage-path",
         type=lambda x: None if x == "None" else str(x),
         default="example_cloth_self_contact.usd",
         help="Path to the output USD file.",
     )
-    parser.add_argument("--num_frames", type=int, default=300, help="Total number of frames.")
+    parser.add_argument("--num-frames", type=int, default=300, help="Total number of frames.")
 
     args = parser.parse_known_args()[0]
 

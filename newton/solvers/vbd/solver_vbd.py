@@ -1880,12 +1880,10 @@ class VBDSolver(SolverBase):
         You may call :meth:`newton.ModelBuilder.color` to color particles or use :meth:`newton.ModelBuilder.set_coloring`
         to provide you own particle coloring.
 
-
     Example
     -------
 
     .. code-block:: python
-
 
         # color particles
         builder.color()
@@ -1898,9 +1896,8 @@ class VBDSolver(SolverBase):
 
         # simulation loop
         for i in range(100):
-            solver.step(model, state_in, state_out, control, contacts, dt)
+            solver.step(state_in, state_out, control, contacts, dt)
             state_in, state_out = state_out, state_in
-
     """
 
     def __init__(
@@ -1942,7 +1939,7 @@ class VBDSolver(SolverBase):
                 If set to a value `k` >= 1, collision detection is applied before every `k` VBD iterations.
         Note:
             - The `integrate_with_external_rigid_solver` argument is an indicator of one-way coupling between rigid body
-              and soft body solvers. If set to Ture, the rigid states should be integrated externally, with `state_in`
+              and soft body solvers. If set to True, the rigid states should be integrated externally, with `state_in`
               passed to `step` function representing the previous rigid state and `state_out` representing the current one. Frictional forces are
               computed accordingly.
             - vertex_collision_buffer_pre_alloc` and `edge_collision_buffer_pre_alloc` are fixed and will not be
@@ -2093,18 +2090,17 @@ class VBDSolver(SolverBase):
         return adjacency
 
     @override
-    def step(self, model: Model, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
-        if model is not self.model:
-            raise ValueError("model must be the one used to initialize VBDSolver")
-
+    def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
         if self.handle_self_contact:
-            self.simulate_one_step_with_collisions_penetration_free(model, state_in, state_out, control, contacts, dt)
+            self.simulate_one_step_with_collisions_penetration_free(state_in, state_out, control, contacts, dt)
         else:
-            self.simulate_one_step_no_self_contact(model, state_in, state_out, control, contacts, dt)
+            self.simulate_one_step_no_self_contact(state_in, state_out, control, contacts, dt)
 
     def simulate_one_step_no_self_contact(
-        self, model: Model, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float
+        self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float
     ):
+        model = self.model
+
         wp.launch(
             kernel=forward_step,
             inputs=[
@@ -2207,10 +2203,12 @@ class VBDSolver(SolverBase):
         )
 
     def simulate_one_step_with_collisions_penetration_free(
-        self, model: Model, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float
+        self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float
     ):
         # collision detection before initialization to compute conservative bounds for initialization
         self.collision_detection_penetration_free(state_in, dt)
+
+        model = self.model
 
         wp.launch(
             kernel=forward_step_penetration_free,
