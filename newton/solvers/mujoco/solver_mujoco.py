@@ -120,6 +120,8 @@ def write_contact(
     contact_geom_out: wp.array(dtype=wp.vec2i),
     contact_worldid_out: wp.array(dtype=int),
 ):
+    # See function write_contact in mujoco_warp, file collision_primitive.py
+
     cid = contact_id_in
     contact_dist_out[cid] = dist_in
     contact_pos_out[cid] = pos_in
@@ -139,7 +141,6 @@ MJ_MINVAL = 2.220446049250313e-16
 
 @wp.func
 def contact_params(
-    # Model:
     geom_condim: wp.array(dtype=int),
     geom_priority: wp.array(dtype=int),
     geom_solmix: wp.array2d(dtype=float),
@@ -148,33 +149,11 @@ def contact_params(
     geom_friction: wp.array2d(dtype=wp.vec3),
     geom_margin: wp.array2d(dtype=float),
     geom_gap: wp.array2d(dtype=float),
-    #   pair_dim: wp.array(dtype=int),
-    #   pair_solref: wp.array2d(dtype=wp.vec2),
-    #   pair_solreffriction: wp.array2d(dtype=wp.vec2),
-    #   pair_solimp: wp.array2d(dtype=vec5),
-    #   pair_margin: wp.array2d(dtype=float),
-    #   pair_gap: wp.array2d(dtype=float),
-    #   pair_friction: wp.array2d(dtype=vec5),
-    # Data in:
-    # collision_pair_in: wp.array(dtype=wp.vec2i),
     geoms: wp.vec2i,
-    # collision_pairid_in: wp.array(dtype=int),
-    # In:
-    # cid: int,
     worldid: int,
 ):
-    # geoms = collision_pair_in[cid]
-    # pairid = collision_pairid_in[cid]
+    # See function contact_params in mujoco_warp, file collision_primitive.py
 
-    #   if pairid > -1:
-    #     margin = pair_margin[worldid, pairid]
-    #     gap = pair_gap[worldid, pairid]
-    #     condim = pair_dim[pairid]
-    #     friction = pair_friction[worldid, pairid]
-    #     solref = pair_solref[worldid, pairid]
-    #     solreffriction = pair_solreffriction[worldid, pairid]
-    #     solimp = pair_solimp[worldid, pairid]
-    #   else:
     g1 = geoms[0]
     g2 = geoms[1]
 
@@ -223,42 +202,27 @@ def convert_newton_contacts_to_mjwarp_kernel(
     body_q: wp.array(dtype=wp.transform),
     shape_body: wp.array(dtype=int),
     # Model:
-    geom_type: wp.array(dtype=int),
     geom_condim: wp.array(dtype=int),
     geom_priority: wp.array(dtype=int),
     geom_solmix: wp.array2d(dtype=float),
     geom_solref: wp.array2d(dtype=wp.vec2),
     geom_solimp: wp.array2d(dtype=vec5),
-    geom_size: wp.array2d(dtype=wp.vec3),
     geom_friction: wp.array2d(dtype=wp.vec3),
     geom_margin: wp.array2d(dtype=float),
     geom_gap: wp.array2d(dtype=float),
-    # pair_dim: wp.array(dtype=int),
-    # pair_solref: wp.array2d(dtype=wp.vec2),
-    # pair_solreffriction: wp.array2d(dtype=wp.vec2),
-    # pair_solimp: wp.array2d(dtype=vec5),
-    # pair_margin: wp.array2d(dtype=float),
-    # pair_gap: wp.array2d(dtype=float),
-    # pair_friction: wp.array2d(dtype=vec5),
     # Newton contacts
     rigid_contact_count: wp.array(dtype=wp.int32),
-    rigid_contact_point_id: wp.array(dtype=wp.int32),
     rigid_contact_shape0: wp.array(dtype=wp.int32),
     rigid_contact_shape1: wp.array(dtype=wp.int32),
     rigid_contact_point0: wp.array(dtype=wp.vec3),
     rigid_contact_point1: wp.array(dtype=wp.vec3),
-    rigid_contact_offset0: wp.array(dtype=wp.vec3),
-    rigid_contact_offset1: wp.array(dtype=wp.vec3),
     rigid_contact_normal: wp.array(dtype=wp.vec3),
     rigid_contact_thickness0: wp.array(dtype=wp.float32),
     rigid_contact_thickness1: wp.array(dtype=wp.float32),
-    rigid_contact_tids: wp.array(dtype=wp.int32),
     num_shapes_per_env: int,
-    num_envs: int,
     to_mjc_geom_index: wp.array(dtype=wp.int32),
     # Mujoco warp contacts
     ncon_out: wp.array(dtype=int),
-    ncon_hfield_out: wp.array2d(dtype=int),
     contact_dist_out: wp.array(dtype=float),
     contact_pos_out: wp.array(dtype=wp.vec3),
     contact_frame_out: wp.array(dtype=wp.mat33),
@@ -269,20 +233,15 @@ def convert_newton_contacts_to_mjwarp_kernel(
     contact_solimp_out: wp.array(dtype=vec5),
     contact_dim_out: wp.array(dtype=int),
     contact_geom_out: wp.array(dtype=wp.vec2i),
-    # contact_efc_address: wp.array2d(dtype=int),
     contact_worldid_out: wp.array(dtype=int),
 ):
-    tid = wp.tid()
+    # See kernel solve_body_contact_positions for reference
 
-    # if tid == 0:
-    #     print("convert_newton_contacts_to_mjwarp_kernel")
+    tid = wp.tid()
 
     # Set number of contacts (for a single world)
     if tid == 0:
         ncon_out[0] = rigid_contact_count[0]
-
-    # if tid < num_envs:
-    #    ncon_hfield_out[tid, 0] = 0
 
     if tid >= rigid_contact_count[0]:
         return
@@ -290,21 +249,13 @@ def convert_newton_contacts_to_mjwarp_kernel(
     shape_a = rigid_contact_shape0[tid]
     shape_b = rigid_contact_shape1[tid]
 
-    # thickness_a = 0.0
-    # thickness_b = 0.0
-
     body_a = -1
     if shape_a >= 0:
         body_a = shape_body[shape_a]
-        # thickness_a = rigid_contact_thickness[shape_a]
     body_b = -1
     if shape_b >= 0:
         body_b = shape_body[shape_b]
-        # thickness_b = rigid_contact_thickness[shape_b]
-    # if body_a == body_b:
-    #    return
 
-   
     X_wb_a = wp.transform_identity()
     X_wb_b = wp.transform_identity()
     if body_a >= 0:
@@ -316,39 +267,18 @@ def convert_newton_contacts_to_mjwarp_kernel(
     bx_a = wp.transform_point(X_wb_a, rigid_contact_point0[tid])
     bx_b = wp.transform_point(X_wb_b, rigid_contact_point1[tid])
 
-    # compute body position in world space
-    # bx_a = wp.transform_point(X_wb_a, rigid_contact_point0[tid])
-    # bx_b = wp.transform_point(X_wb_b, rigid_contact_point1[tid])
-
     thickness = rigid_contact_thickness0[tid] + rigid_contact_thickness1[tid]
-    # thickness = rigid_contact_thickness[tid]
 
     n = -rigid_contact_normal[tid]
     dist = wp.dot(n, bx_b - bx_a) - thickness
 
-    # dist = -dist
-
-    # wp.printf("dist: %f    %f %f %f\n", dist, n.x, n.y, n.z)
-
-    # n = -rigid_contact_normal[tid]
-    # p0 = rigid_contact_point0[tid]
-    # p1 = rigid_contact_point1[tid]
-    # dist = wp.dot(n, p1 - p0) - rigid_contact_thickness[tid]
-
     # Contact position: use midpoint between contact points (as in XPBD kernel)
     pos = 0.5 * (bx_a + bx_b)
-
-    # Contact normal: MuJoCo expects normal to point from geom1 to geom2 (see MuJoCo docs)
-    # In XPBD kernel, n = -contact_normal[tid], so contact_normal points from shape1 to shape0
-    # To match MuJoCo, we need to flip the sign
-    # n = -n
 
     # Build contact frame
     frame = make_frame(n)
 
     geoms = wp.vec2i(to_mjc_geom_index[shape_a], to_mjc_geom_index[shape_b])
-    # geoms = wp.vec2i(shape_a, shape_b)
-    wp.printf("geoms: %d-> %d, %d-> %d\n", shape_a, geoms[0], shape_b, geoms[1])
 
     worldid = shape_a // num_shapes_per_env
 
@@ -364,28 +294,6 @@ def convert_newton_contacts_to_mjwarp_kernel(
         geoms,
         worldid,
     )
-
-    # # Use sum of offsets as include margin
-    # margin = wp.length(rigid_contact_offset0[tid]) + wp.length(rigid_contact_offset1[tid])
-
-    # # Friction: set to default (1.0, 0, 0, 0, 0) unless available from materials
-    # friction = vec5(1.0, 0.0, 0.0, 0.0, 0.0)
-
-    # # Solref/solreffriction: set to softer values for gentler contacts
-    # # Lower damping (first value) and higher time constant (second value) make contacts softer
-    # solref = wp.vec2(0.01, 2.0)  # Reduced damping, increased time constant
-    # solreffriction = wp.vec2(0.01, 2.0)  # Same for friction
-
-    # # Solimp: set to softer values for gentler contacts
-    # # Parameters: (dmin, dmax, width, mid, power)
-    # # Lower dmin/dmax and higher width make contacts softer
-    # solimp = vec5(0.8, 0.9, 0.01, 0.5, 2.0)  # Reduced dmin/dmax, increased width
-
-    # # Contact dimension: 3 for 3D
-    # condim = 3
-
-    # # Geom ids: shape0 and shape1
-    # geoms = wp.vec2i(shape_a, shape_b)
 
     # Use the write_contact function to write all the data
     write_contact(
@@ -414,98 +322,6 @@ def convert_newton_contacts_to_mjwarp_kernel(
         contact_geom_out=contact_geom_out,
         contact_worldid_out=contact_worldid_out,
     )
-
-
-# @wp.kernel
-# def convert_newton_contacts_to_mjwarp_kernel(
-#     # Newton contacts
-#     rigid_contact_count: wp.array(dtype=wp.int32),
-#     rigid_contact_point_id: wp.array(dtype=wp.int32),
-#     rigid_contact_shape0: wp.array(dtype=wp.int32),
-#     rigid_contact_shape1: wp.array(dtype=wp.int32),
-#     rigid_contact_point0: wp.array(dtype=wp.vec3),
-#     rigid_contact_point1: wp.array(dtype=wp.vec3),
-#     rigid_contact_offset0: wp.array(dtype=wp.vec3),
-#     rigid_contact_offset1: wp.array(dtype=wp.vec3),
-#     rigid_contact_normal: wp.array(dtype=wp.vec3),
-#     rigid_contact_thickness: wp.array(dtype=wp.float32),
-#     rigid_contact_tids: wp.array(dtype=wp.int32),
-#     num_shapes_per_env: int,
-#     num_envs: int,
-#     # Mujoco warp contacts
-#     ncon_out: wp.array(dtype=int),
-#     ncon_hfield_out: wp.array2d(dtype=int),
-#     contact_dist_out: wp.array(dtype=float),
-#     contact_pos_out: wp.array(dtype=wp.vec3),
-#     contact_frame_out: wp.array(dtype=wp.mat33),
-#     contact_includemargin_out: wp.array(dtype=float),
-#     contact_friction_out: wp.array(dtype=vec5),
-#     contact_solref_out: wp.array(dtype=wp.vec2),
-#     contact_solreffriction_out: wp.array(dtype=wp.vec2),
-#     contact_solimp_out: wp.array(dtype=vec5),
-#     contact_dim_out: wp.array(dtype=int),
-#     contact_geom_out: wp.array(dtype=wp.vec2i),
-#     # contact_efc_address: wp.array2d(dtype=int),
-#     contact_worldid_out: wp.array(dtype=int),
-# ):
-#     tid = wp.tid()
-
-
-#     # Set number of contacts (for a single world)
-#     if tid == 0:
-#         ncon_out[0] = rigid_contact_count[0]
-
-#     #if tid < num_envs:
-#     #    ncon_hfield_out[tid, 0] = 0
-
-#     if tid >= rigid_contact_count[0]:
-#         return
-
-#     # MuJoCo expects contact distance as signed distance (negative = penetration)
-#     # In XPBD kernel, d = dot(n, bx_b - bx_a) - thickness, and constraint is active if d < 0.
-#     # The correct MuJoCo contact distance is: dot(n, p1 - p0) - thickness
-#     # where n = -contact_normal[tid], p0 = rigid_contact_point0[tid], p1 = rigid_contact_point1[tid]
-#     n = -rigid_contact_normal[tid]
-#     p0 = rigid_contact_point0[tid]
-#     p1 = rigid_contact_point1[tid]
-#     contact_dist_out[tid] = wp.dot(n, p1 - p0) - rigid_contact_thickness[tid]
-
-#     # Contact position: use midpoint between contact points (as in XPBD kernel)
-#     p0 = rigid_contact_point0[tid]
-#     p1 = rigid_contact_point1[tid]
-#     contact_pos_out[tid] = 0.5 * (p0 + p1)
-
-#     # Contact normal: MuJoCo expects normal to point from geom1 to geom2 (see MuJoCo docs)
-#     # In XPBD kernel, n = -contact_normal[tid], so contact_normal points from shape1 to shape0
-#     # To match MuJoCo, we need to flip the sign
-#     n = rigid_contact_normal[tid]
-
-#     # Build contact frame
-#     contact_frame_out[tid] = make_frame(n)
-
-#     # Use sum of offsets as include margin
-#     contact_includemargin_out[tid] = wp.length(rigid_contact_offset0[tid]) + wp.length(rigid_contact_offset1[tid])
-
-#     # Friction: set to default (1.0, 0, 0, 0, 0) unless available from materials
-#     contact_friction_out[tid] = vec5(1.0, 0.0, 0.0, 0.0, 0.0)
-
-#     # Solref/solreffriction: set to default (0.02, 1.0)
-#     contact_solref_out[tid] = wp.vec2(0.02, 1.0)
-#     contact_solreffriction_out[tid] = wp.vec2(0.02, 1.0)
-
-#     # Solimp: set to default (0.9, 0.95, 0.001, 0.5, 2)
-#     contact_solimp_out[tid] = vec5(0.9, 0.95, 0.001, 0.5, 2.0)
-
-#     # Contact dimension: 3 for 3D
-#     contact_dim_out[tid] = 3
-
-#     # Geom ids: shape0 and shape1
-#     shape_0_id = rigid_contact_shape0[tid]
-#     shape_1_id = rigid_contact_shape1[tid]
-#     contact_geom_out[tid] = wp.vec2i(shape_0_id, shape_1_id)
-
-#     # World id: 0 for now
-#     contact_worldid_out[tid] = 0 # shape_0_id // num_shapes_per_env
 
 
 @wp.kernel
@@ -1368,36 +1184,27 @@ class MuJoCoSolver(SolverBase):
             inputs=[
                 state_in.body_q,
                 model.shape_body,
-                self.mjw_model.geom_type,
                 self.mjw_model.geom_condim,
                 self.mjw_model.geom_priority,
                 self.mjw_model.geom_solmix,
                 self.mjw_model.geom_solref,
                 self.mjw_model.geom_solimp,
-                self.mjw_model.geom_size,
                 self.mjw_model.geom_friction,
                 self.mjw_model.geom_margin,
                 self.mjw_model.geom_gap,
                 # Newton contacts
                 contacts.rigid_contact_count,
-                contacts.rigid_contact_point_id,
                 contacts.rigid_contact_shape0,
                 contacts.rigid_contact_shape1,
                 contacts.rigid_contact_point0,
                 contacts.rigid_contact_point1,
-                contacts.rigid_contact_offset0,
-                contacts.rigid_contact_offset1,
                 contacts.rigid_contact_normal,
                 contacts.rigid_contact_thickness0,
                 contacts.rigid_contact_thickness1,
-                contacts.rigid_contact_tids,
                 shapes_per_env,
-                self.model.num_envs,
                 self.model.to_mjc_geom_index,
-                # self.model.to_newton_shape_index,
                 # Mujoco warp contacts
                 self.mjw_data.ncon,
-                self.mjw_data.ncon_hfield,
                 self.mjw_data.contact.dist,
                 self.mjw_data.contact.pos,
                 self.mjw_data.contact.frame,
