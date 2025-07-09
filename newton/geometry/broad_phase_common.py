@@ -68,6 +68,17 @@ def write_pair(
 # Collision filtering
 @wp.func
 def test_group_pair(group_a: int, group_b: int) -> bool:
+    """Test if two collision groups should interact.
+
+    Args:
+        group_a: First collision group ID. Positive values indicate groups that only collide with themselves (and with negative groups).
+                Negative values indicate groups that collide with everything except their negative counterpart.
+                Zero indicates no collisions.
+        group_b: Second collision group ID. Same meaning as group_a.
+
+    Returns:
+        bool: True if the groups should collide, False if they should not.
+    """
     if group_a == 0 or group_b == 0:
         return False
     if group_a > 0:

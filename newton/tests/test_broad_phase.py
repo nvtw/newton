@@ -20,6 +20,7 @@ import numpy as np
 import warp as wp
 
 from newton.geometry import BroadPhaseAllPairs, BroadPhaseExplicit, BroadPhaseSAP
+from newton.geometry.broad_phase_common import test_group_pair
 
 
 def check_aabb_overlap_host(
@@ -41,16 +42,6 @@ def check_aabb_overlap_host(
     )
 
 
-# Collision filtering
-def test_group_pair(group_a: int, group_b: int) -> bool:
-    if group_a == 0 or group_b == 0:
-        return False
-    if group_a > 0:
-        return group_a == group_b or group_b < 0
-    if group_a < 0:
-        return group_a != group_b
-
-
 def find_overlapping_pairs_np(
     box_lower: np.ndarray, box_upper: np.ndarray, cutoff: np.ndarray, collision_group: np.ndarray
 ):
@@ -65,7 +56,7 @@ def find_overlapping_pairs_np(
         for j in range(i + 1, n):
             # Check for overlap in all three axes
             cutoff_combined = max(cutoff[i], cutoff[j])
-            if not test_group_pair(collision_group[i], collision_group[j]):
+            if not test_group_pair(int(collision_group[i]), int(collision_group[j])):
                 continue
 
             if (

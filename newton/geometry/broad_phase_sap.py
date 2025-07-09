@@ -341,21 +341,24 @@ class BroadPhaseSAP:
     ):
         """Launch the sweep and prune broad phase collision detection.
 
-        Finds potentially colliding pairs of geometries using a sweep and prune algorithm along a fixed direction.
-        Handles collision filtering based on collision groups - positive groups only collide with same group or negative groups,
-        negative groups only collide with different negative groups or positive groups.
+        This method performs collision detection between geometries using a sweep and prune algorithm along a fixed axis.
+        It projects the bounding boxes onto the sweep axis, sorts them, and checks for overlaps between nearby boxes.
+        The method also handles collision filtering based on collision groups.
 
         Args:
-            geom_lower: Lower bounds of geometry axis-aligned bounding boxes (in world space)
-            geom_upper: Upper bounds of geometry axis-aligned bounding boxes (in world space)
-            geom_count: Number of active bounding boxes to process
-            geom_cutoffs: Additional enlargement per geometry box
-            geom_collision_groups: Collision group IDs for filtering collisions.
-                                   Positive IDs only collide with same ID or negative IDs.
-                                   Negative IDs only collide with different negative IDs or positive IDs.
-                                   ID 0 does not collide with anything.
-            candidate_pair: Output array to store potentially colliding geometry pairs, their bounding boxes overlap
-            num_candidate_pair: Single element array to store number of candidate pairs found
+            geom_lower: Array of lower bounds for each geometry's AABB
+            geom_upper: Array of upper bounds for each geometry's AABB
+            geom_cutoffs: Array of cutoff distances for each geometry
+            geom_collision_groups: Array of collision group IDs for each geometry. Positive values indicate
+                groups that only collide with themselves (and with negative groups). Negative values indicate
+                groups that collide with everything except their negative counterpart. Zero indicates no collisions.
+            geom_count: Number of active bounding boxes to check
+            candidate_pair: Output array to store overlapping geometry pairs
+            num_candidate_pair: Output array to store number of overlapping pairs found
+
+        The method will populate candidate_pair with the indices of geometry pairs whose AABBs overlap
+        when expanded by their cutoff distances and whose collision groups allow interaction. The number of pairs found
+        will be written to num_candidate_pair[0].
         """
         # TODO: Choose an optimal direction
         # random fixed direction

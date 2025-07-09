@@ -154,14 +154,17 @@ class BroadPhaseAllPairs:
         Args:
             geom_lower: Array of lower bounds for each geometry's AABB
             geom_upper: Array of upper bounds for each geometry's AABB
-            geom_count: Number of active bounding boxes to check
             geom_cutoffs: Array of cutoff distances for each geometry
-            geom_collision_groups: Array of collision group IDs for each geometry
+            geom_collision_groups: Array of collision group IDs for each geometry. Positive values indicate
+                groups that only collide with themselves (and with negative groups). Negative values indicate
+                groups that collide with everything except their negative counterpart. Zero indicates no collisions.
+            geom_count: Number of active bounding boxes to check
             candidate_pair: Output array to store overlapping geometry pairs
             num_candidate_pair: Output array to store number of overlapping pairs found
 
-        The method will populate candidate_pair with the indices of geometry pairs whose AABBs overlap
-        when expanded by their cutoff distances and whose collision groups allow interaction.
+        The method will populate candidate_pair with the indices of geometry pairs (i,j) where i < j whose AABBs overlap
+        when expanded by their cutoff distances and whose collision groups allow interaction. The number of pairs found
+        will be written to num_candidate_pair[0].
         """
         # The number of elements in the lower triangular part of an n x n matrix (excluding the diagonal)
         # is given by n * (n - 1) // 2
@@ -220,8 +223,8 @@ class BroadPhaseExplicit:
             geom_lower: Array of lower bounds for geometry bounding boxes
             geom_upper: Array of upper bounds for geometry bounding boxes
             geom_cutoffs: Array of cutoff distances per geometry box
-            explicit_cancidate_geom_pairs: Array of precomputed geometry pairs to check
-            num_paris_to_check: Number of pairs to check
+            geom_pairs: Array of precomputed geometry pairs to check
+            geom_pair_count: Number of geometry pairs to check
             candidate_pair: Output array to store overlapping geometry pairs
             num_candidate_pair: Output array to store number of overlapping pairs found
 
