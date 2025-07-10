@@ -1181,10 +1181,12 @@ class MuJoCoSolver(SolverBase):
             self.mjw_model.opt.timestep.fill_(dt)
             with wp.ScopedDevice(self.model.device):
                 if self.use_mujoco_contacts:
-                    self.mujoco_warp.step(self.mjw_model, self.mjw_data, True)
+                    self.mjw_model.opt.run_collision_detection = True
+                    self.mujoco_warp.step(self.mjw_model, self.mjw_data)
                 else:
+                    self.mjw_model.opt.run_collision_detection = False
                     self.convert_contacts_to_mjwarp(self.model, state_in, contacts)
-                    self.mujoco_warp.step(self.mjw_model, self.mjw_data, False)
+                    self.mujoco_warp.step(self.mjw_model, self.mjw_data)
             self.update_newton_state(self.model, state_out, self.mjw_data)
         self._step += 1
         return state_out
