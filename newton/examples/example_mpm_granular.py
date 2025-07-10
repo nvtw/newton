@@ -75,7 +75,7 @@ class Example:
     def simulate(self):
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
-            self.solver.step(self.model, self.state_0, self.state_1, None, None, self.sim_dt)
+            self.solver.step(self.state_0, self.state_1, None, None, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
@@ -229,38 +229,41 @@ def _create_collider_mesh(collider: str):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+
+    parser.add_argument("--device", type=str, default=None, help="Override the default Warp device.")
 
     parser.add_argument("--collider", type=str)
 
-    parser.add_argument("--emit_lo", type=float, nargs=3, default=[-1, 0, -1])
-    parser.add_argument("--emit_hi", type=float, nargs=3, default=[1, 2, 1])
+    parser.add_argument("--emit-lo", type=float, nargs=3, default=[-1, 0, -1])
+    parser.add_argument("--emit-hi", type=float, nargs=3, default=[1, 2, 1])
     parser.add_argument("--gravity", type=float, nargs=3, default=[0, -10, 0])
     parser.add_argument("--fps", type=float, default=60.0)
     parser.add_argument("--substeps", type=int, default=1)
 
-    parser.add_argument("--max_fraction", type=float, default=1.0)
+    parser.add_argument("--max-fraction", type=float, default=1.0)
 
     parser.add_argument("--compliance", type=float, default=0.0)
-    parser.add_argument("--poisson_ratio", "-nu", type=float, default=0.3)
-    parser.add_argument("--friction_coeff", "-mu", type=float, default=0.48)
-    parser.add_argument("--yield_stress", "-ys", type=float, default=0.0)
-    parser.add_argument("--compression_yield_stress", "-cys", type=float, default=1.0e8)
-    parser.add_argument("--stretching_yield_stress", "-sys", type=float, default=1.0e8)
+    parser.add_argument("--poisson-ratio", "-nu", type=float, default=0.3)
+    parser.add_argument("--friction-coeff", "-mu", type=float, default=0.48)
+    parser.add_argument("--yield-stress", "-ys", type=float, default=0.0)
+    parser.add_argument("--compression-yield-stress", "-cys", type=float, default=1.0e8)
+    parser.add_argument("--stretching-yield-stress", "-sys", type=float, default=1.0e8)
     parser.add_argument("--unilateral", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--dynamic_grid", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--gauss_seidel", "-gs", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--dynamic-grid", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--gauss-seidel", "-gs", action=argparse.BooleanOptionalAction, default=True)
 
-    parser.add_argument("--max_iterations", "-it", type=int, default=250)
+    parser.add_argument("--max-iterations", "-it", type=int, default=250)
     parser.add_argument("--tolerance", "-tol", type=float, default=1.0e-5)
-    parser.add_argument("--voxel_size", "-dx", type=float, default=0.1)
-    parser.add_argument("--num_frames", type=int, default=300, help="Total number of frames.")
+    parser.add_argument("--voxel-size", "-dx", type=float, default=0.1)
+    parser.add_argument("--num-frames", type=int, default=300, help="Total number of frames.")
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction)
 
-    options = parser.parse_args()
+    args = parser.parse_known_args()[0]
 
-    example = Example(options)
+    with wp.ScopedDevice(args.device):
+        example = Example(args)
 
-    for _ in range(options.num_frames):
-        example.step()
-        example.render()
+        for _ in range(args.num_frames):
+            example.step()
+            example.render()

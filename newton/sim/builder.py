@@ -116,7 +116,7 @@ class ModelBuilder:
         for i in range(10):
             state_0.clear_forces()
             contacts = model.collide(state_0)
-            solver.step(model, state_0, state_1, control, contacts, dt=1.0 / 60.0)
+            solver.step(state_0, state_1, control, contacts, dt=1.0 / 60.0)
             state_0, state_1 = state_1, state_0
 
     Note:
@@ -494,6 +494,9 @@ class ModelBuilder:
             separate_collision_group (bool): if True, the shapes from the articulations in `builder` will all be put into a single new collision group, otherwise, only the shapes in collision group > -1 will be moved to a new group.
         """
 
+        if builder.up_axis != self.up_axis:
+            raise ValueError("Cannot add a builder with a different up axis.")
+
         # explicitly resolve the transform multiplication function to avoid
         # repeatedly resolving builtin overloads during shape transformation
         transform_mul_cfunc = wp.context.runtime.core.wp_builtin_mul_transformf_transformf
@@ -675,9 +678,6 @@ class ModelBuilder:
 
         self.joint_dof_count += builder.joint_dof_count
         self.joint_coord_count += builder.joint_coord_count
-
-        self.up_axis = builder.up_axis
-        self.gravity = builder.gravity
 
         if update_num_env_count:
             self.num_envs += 1
@@ -973,7 +973,7 @@ class ModelBuilder:
             child: The index of the child body.
             parent_xform (Transform): The transform of the joint in the parent body's local frame.
             child_xform (Transform): The transform of the joint in the child body's local frame.
-            axis (AxisType | Vec3 | JointAxis): The axis of rotation in the parent body's local frame, can be a :class:`JointAxis` object whose settings will be used instead of the other arguments.
+            axis (AxisType | Vec3 | JointDofConfig): The axis of rotation in the parent body's local frame, can be a :class:`JointDofConfig` object whose settings will be used instead of the other arguments.
             target: The target angle (in radians) or target velocity of the joint.
             target_ke: The stiffness of the joint target.
             target_kd: The damping of the joint target.

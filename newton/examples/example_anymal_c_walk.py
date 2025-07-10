@@ -18,8 +18,12 @@
 #
 # Shows how to control Anymal C with a pretrained policy.
 #
+# Example usage:
+# uv run --extra cu12 newton/examples/example_anymal_c_walk.py
+#
 ###########################################################################
 
+import sys
 
 import numpy as np
 import torch
@@ -27,6 +31,7 @@ import warp as wp
 
 import newton
 import newton.examples
+import newton.solvers.euler.kernels  # For graph capture on CUDA <12.3
 import newton.utils
 from newton.sim import Control, State
 
@@ -163,6 +168,7 @@ class AnymalController:
         self.dof_q_per_env = model.joint_coord_count
         self.dof_qd_per_env = model.joint_dof_count
         self.num_envs = 1
+        self.ctrl = None
         obs_dim = 37
         self.obs_buf = wp.empty(
             (self.num_envs, obs_dim),
@@ -170,11 +176,7 @@ class AnymalController:
             device=self.device,
         )
 
-    def compute_observations(
-        self,
-        state: State,
-        observations: wp.array,
-    ):
+    def compute_observations(self, state: State, observations: wp.array):
         wp.launch(
             compute_observations_anymal,
             dim=self.num_envs,
@@ -190,12 +192,12 @@ class AnymalController:
             device=self.device,
         )
 
-    def assign_control(self, actions: wp.array, control: Control, state: State):
+    def assign_control(self, control: Control, state: State):
         wp.launch(
             kernel=apply_joint_position_pd_control,
             dim=self.model.joint_count,
             inputs=[
-                wp.from_torch(wp.to_torch(actions).reshape(-1)),
+                wp.from_torch(wp.to_torch(self.ctrl).reshape(-1)),
                 self.action_scale,
                 self.default_joint_q,
                 state.joint_q,
@@ -212,15 +214,14 @@ class AnymalController:
             device=self.model.device,
         )
 
-    def get_control(self, state: State, control: Control):
+    def get_control(self, state: State):
         self.compute_observations(state, self.obs_buf)
         obs_torch = wp.to_torch(self.obs_buf).detach()
-        ctrl = wp.array(torch.clamp(self.policy_model(obs_torch).detach(), -1, 1), dtype=float)
-        self.assign_control(ctrl, control, state)
+        self.ctrl = wp.array(torch.clamp(self.policy_model(obs_torch).detach(), -1, 1), dtype=float)
 
 
 class Example:
-    def __init__(self, stage_path="example_quadruped.usd"):
+    def __init__(self, stage_path="example_anymal_c_walk.usd", headless=False):
         self.device = wp.get_device()
         builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
         builder.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
@@ -301,7 +302,7 @@ class Example:
         # fmt: on
 
         self.solver = newton.solvers.FeatherstoneSolver(self.model)
-        self.renderer = newton.utils.SimRendererOpenGL(self.model, stage_path)
+        self.renderer = None if headless else newton.utils.SimRendererOpenGL(self.model, stage_path)
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -310,9 +311,13 @@ class Example:
         newton.sim.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
 
         self.controller = AnymalController(self.model, self.device)
+        self.controller.get_control(self.state_0)
 
         self.use_cuda_graph = self.device.is_cuda and wp.is_mempool_enabled(wp.get_device())
         if self.use_cuda_graph:
+            # Initial graph launch, load modules (necessary for drivers prior to CUDA 12.3)
+            wp.load_module(newton.solvers.euler.kernels, device=wp.get_device())
+
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph
@@ -323,7 +328,8 @@ class Example:
         self.contacts = self.model.collide(self.state_0, rigid_contact_margin=0.1)
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
-            self.solver.step(self.model, self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+            self.controller.assign_control(self.control, self.state_0)
+            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
@@ -332,7 +338,7 @@ class Example:
                 wp.capture_launch(self.graph)
             else:
                 self.simulate()
-            self.controller.get_control(self.state_0, self.control)
+            self.controller.get_control(self.state_0)
         self.sim_time += self.frame_dt
 
     def render(self):
@@ -351,17 +357,22 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--device", type=str, default=None, help="Override the default Warp device.")
     parser.add_argument(
-        "--stage_path",
+        "--stage-path",
         type=lambda x: None if x == "None" else str(x),
-        default="example_quadruped.usd",
+        default="example_anymal_c_walk.usd",
         help="Path to the output USD file.",
     )
-    parser.add_argument("--num_frames", type=int, default=10000, help="Total number of frames.")
+    parser.add_argument("--num-frames", type=int, default=10000, help="Total number of frames.")
+    parser.add_argument("--headless", action=argparse.BooleanOptionalAction)
 
     args = parser.parse_known_args()[0]
 
+    if wp.get_device(args.device).is_cpu:
+        print("Error: This example requires a GPU device.")
+        sys.exit(1)
+
     with wp.ScopedDevice(args.device):
-        example = Example(stage_path=args.stage_path)
+        example = Example(stage_path=args.stage_path, headless=args.headless)
 
         for _ in range(args.num_frames):
             example.step()
