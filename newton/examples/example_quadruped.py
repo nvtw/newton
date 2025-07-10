@@ -63,7 +63,7 @@ class Example:
         self.sim_substeps = 10
         self.sim_dt = self.frame_dt / self.sim_substeps
 
-        self.num_envs = 1 #num_envs
+        self.num_envs = 3 #num_envs
 
         offsets = newton.examples.compute_env_offsets(self.num_envs)
         for i in range(self.num_envs):

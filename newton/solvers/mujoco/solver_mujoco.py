@@ -2096,11 +2096,38 @@ class MuJoCoSolver(SolverBase):
 
         # now that the model is compiled, get the actual geom indices
         shape_to_geom_idx = {}
+        geom_to_shape_idx = {}
         for shape, geom_name in shape_mapping.items():
             geom_idx = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_GEOM, geom_name)
             if geom_idx >= 0:
                 shape_to_geom_idx[shape] = geom_idx
+                geom_to_shape_idx[geom_idx] = shape
         shape_mapping = shape_to_geom_idx  # Replace with actual indices
+
+        # The current `shape_mapping` only contains the template shapes.
+        # We expand it to cover all shapes in all environments.
+        if separate_envs_to_worlds and model.num_envs > 1:
+            shapes_per_env = model.shape_count // model.num_envs
+            if model.shape_count % model.num_envs != 0:
+                wp.utils.warn(
+                    f"Total shape count {model.shape_count} is not divisible by number of environments {model.num_envs}. "
+                    "Shape mapping to MuJoCo geoms may be incorrect."
+                )
+
+            full_shape_mapping = {}
+            # `geom_to_shape_idx` provides the reverse mapping for the template env: {mj_geom_idx: newton_shape_idx}
+            for geom_idx, template_shape_idx in geom_to_shape_idx.items():
+                # The local index is consistent for a given part of the model across all environments.
+                local_shape_idx = template_shape_idx % shapes_per_env
+                for env_idx in range(model.num_envs):
+                    # Calculate the global Newton shape index for the current environment.
+                    global_shape_idx = env_idx * shapes_per_env + local_shape_idx
+                    # All corresponding shapes map to the same MuJoCo geom index (since mj_model is single-env).
+                    full_shape_mapping[global_shape_idx] = geom_idx
+
+            # Overwrite the single-environment mapping with the full mapping.
+            shape_mapping = full_shape_mapping
+            shape_to_geom_idx = full_shape_mapping
 
         self.mj_data = mujoco.MjData(self.mj_model)
         self.mj_data.nefc = nefc_per_env
@@ -2134,23 +2161,19 @@ class MuJoCoSolver(SolverBase):
                 dtype=wp.int32,
             )
 
-            # build the geom index mappings now that we have the actual indices
-            model.to_mjc_geom_index = shape_mapping  # pyright: ignore[reportAttributeAccessIssue]
-
-            # create reverse mapping and to_newton_shape_index array
-            # use the actual number of geoms from the MuJoCo model
+            # create reverse mapping from MuJoCo geom index to Newton shape index (for the template env)
             to_newton_shape_array = np.full(self.mj_model.ngeom, -1, dtype=np.int32)
-            if len(shape_mapping) > 0:
-                reverse_shape_mapping = {v: k for k, v in shape_mapping.items()}
-                for geom_idx, shape_idx in reverse_shape_mapping.items():
+            if len(geom_to_shape_idx) > 0:
+                for geom_idx, shape_idx in geom_to_shape_idx.items():
                     to_newton_shape_array[geom_idx] = shape_idx
             model.to_newton_shape_index = wp.array(to_newton_shape_array, dtype=wp.int32)  # pyright: ignore[reportAttributeAccessIssue]
 
-            to_mjc_geom_array = np.full(self.mj_model.ngeom, -1, dtype=np.int32)
+            # create mapping from Newton shape index to MuJoCo geom index (for all envs)
+            to_mjc_geom_array = np.full(model.shape_count, -1, dtype=np.int32)
             if len(shape_mapping) > 0:
-                reverse_shape_mapping = {v: k for k, v in shape_mapping.items()}
-                for geom_idx, shape_idx in reverse_shape_mapping.items():
-                    to_mjc_geom_array[shape_idx] = geom_idx
+                for shape_idx, geom_idx in shape_mapping.items():
+                    if shape_idx < len(to_mjc_geom_array):
+                        to_mjc_geom_array[shape_idx] = geom_idx
             model.to_mjc_geom_index = wp.array(to_mjc_geom_array, dtype=wp.int32)  # pyright: ignore[reportAttributeAccessIssue]
 
             self.mjw_model = mujoco_warp.put_model(self.mj_model)
