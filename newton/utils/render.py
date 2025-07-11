@@ -70,8 +70,8 @@ def CreateSimRenderer(renderer):
 
         def __init__(
             self,
-            model: newton.Model,
-            path: str,
+            model: newton.Model | None = None,
+            path: str = "No path specified",
             scaling: float = 1.0,
             fps: int = 60,
             up_axis: newton.AxisType | None = None,
@@ -91,7 +91,10 @@ def CreateSimRenderer(renderer):
                 **render_kwargs: Additional keyword arguments for the underlying renderer.
             """
             if up_axis is None:
-                up_axis = model.up_axis
+                if model:
+                    up_axis = model.up_axis
+                else:
+                    up_axis = "Y"
             up_axis = newton.Axis.from_any(up_axis)
             super().__init__(path, scaling=scaling, fps=fps, up_axis=str(up_axis), **render_kwargs)
             self.scaling = scaling
@@ -99,7 +102,8 @@ def CreateSimRenderer(renderer):
             self.show_joints = show_joints
             self.show_particles = show_particles
             self._instance_key_count = {}
-            self.populate(model)
+            if model:
+                self.populate(model)
 
             self._contact_points0 = None
             self._contact_points1 = None
