@@ -176,9 +176,9 @@ def CreateSimRenderer(renderer):
             Args:
                 body_name_arr (list): A list of body names.
                 bodies_per_env (int, optional): Number of bodies per environment. If > 0 and body_env is provided,
-                                           populates body_env. Defaults to -1.
+                    populates body_env. Defaults to -1.
                 body_env (list, optional): An output list to be populated with environment indices for each body.
-                                         If provided, it will be cleared and filled. Defaults to None.
+                    If provided, it will be cleared and filled. Defaults to None.
             Returns:
                 list: A list of generated body names.
             """
