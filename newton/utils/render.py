@@ -517,7 +517,7 @@ def CreateSimRenderer(renderer):
                 muscle_points (numpy.ndarray): Local positions of muscle attachment points.
                 muscle_activation (numpy.ndarray): Activation level for each muscle, used for color.
             """
-            muscle_count = len(muscle_start) - 1 if muscle_start is not None else 0
+            muscle_count = (len(muscle_start) - 1) if muscle_start is not None else 0
             for m in range(muscle_count):
                 start = int(muscle_start[m])
                 end = int(muscle_start[m + 1])
