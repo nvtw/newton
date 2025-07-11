@@ -408,27 +408,27 @@ class TestBroadPhase(unittest.TestCase):
                 pair = pairs_wp[i]
                 body_a, body_b = pair[0], pair[1]
 
-            # Get bounding boxes for both bodies
-            box_a_lower = geom_bounding_box_lower[body_a]
-            box_a_upper = geom_bounding_box_upper[body_a]
-            box_b_lower = geom_bounding_box_lower[body_b]
-            box_b_upper = geom_bounding_box_upper[body_b]
+                # Get bounding boxes for both bodies
+                box_a_lower = geom_bounding_box_lower[body_a]
+                box_a_upper = geom_bounding_box_upper[body_a]
+                box_b_lower = geom_bounding_box_lower[body_b]
+                box_b_upper = geom_bounding_box_upper[body_b]
 
-            # Get cutoffs for both bodies
-            cutoff_a = np_geom_cutoff[body_a]
-            cutoff_b = np_geom_cutoff[body_b]
+                # Get cutoffs for both bodies
+                cutoff_a = np_geom_cutoff[body_a]
+                cutoff_b = np_geom_cutoff[body_b]
 
-            # Check overlap using the function
-            overlap = check_aabb_overlap_host(
-                wp.vec3(box_a_lower[0], box_a_lower[1], box_a_lower[2]),
-                wp.vec3(box_a_upper[0], box_a_upper[1], box_a_upper[2]),
-                cutoff_a,
-                wp.vec3(box_b_lower[0], box_b_lower[1], box_b_lower[2]),
-                wp.vec3(box_b_upper[0], box_b_upper[1], box_b_upper[2]),
-                cutoff_b,
-            )
+                # Check overlap using the function
+                overlap = check_aabb_overlap_host(
+                    wp.vec3(box_a_lower[0], box_a_lower[1], box_a_lower[2]),
+                    wp.vec3(box_a_upper[0], box_a_upper[1], box_a_upper[2]),
+                    cutoff_a,
+                    wp.vec3(box_b_lower[0], box_b_lower[1], box_b_lower[2]),
+                    wp.vec3(box_b_upper[0], box_b_upper[1], box_b_upper[2]),
+                    cutoff_b,
+                )
 
-            print(f"  Pair {i}: bodies ({body_a}, {body_b}) - overlap: {overlap}")
+                print(f"  Pair {i}: bodies ({body_a}, {body_b}) - overlap: {overlap}")
 
         if len(pairs_np) != num_candidate_pair:
             print(f"len(pairs_np)={len(pairs_np)}, num_candidate_pair={num_candidate_pair}")
