@@ -25,14 +25,13 @@
 
 import numpy as np
 import warp as wp
+from warp.render.imgui_manager import ImGuiManager
 
 import newton
 import newton.examples
 import newton.sim
 import newton.utils
 from newton.utils.recorder import Recorder
-
-from warp.render.imgui_manager import ImGuiManager
 
 try:
     import tkinter as tk

@@ -15,8 +15,6 @@
 
 from __future__ import annotations
 
-from typing import List
-
 import numpy as np
 import warp as wp
 
@@ -34,7 +32,7 @@ class Recorder:
             renderer: The simulation renderer instance.
         """
         self.renderer = renderer
-        self.transforms_history: List[wp.array] = []
+        self.transforms_history: list[wp.array] = []
 
     def record(self, body_transforms: wp.array):
         """
