@@ -30,6 +30,66 @@ import newton
 import newton.examples
 import newton.sim
 import newton.utils
+from newton.utils.recorder import Recorder
+
+from warp.render.imgui_manager import ImGuiManager
+
+
+class RecorderImGuiManager(ImGuiManager):
+    """An ImGui manager for controlling simulation playback with a recorder."""
+
+    def __init__(self, renderer, recorder, example, window_pos=(10, 10), window_size=(300, 120)):
+        super().__init__(renderer)
+        if not self.is_available:
+            return
+
+        self.window_pos = window_pos
+        self.window_size = window_size
+        self.recorder = recorder
+        self.example = example
+        self.selected_frame = 0
+
+    def draw_ui(self):
+        self.imgui.set_next_window_size(self.window_size[0], self.window_size[1], self.imgui.ONCE)
+        self.imgui.set_next_window_position(self.window_pos[0], self.window_pos[1], self.imgui.ONCE)
+
+        self.imgui.begin("Recorder Controls")
+
+        # Start/Stop button
+        if self.example.paused:
+            if self.imgui.button("Resume"):
+                self.example.paused = False
+        else:
+            if self.imgui.button("Pause"):
+                self.example.paused = True
+
+        self.imgui.same_line()
+        # total frames
+        total_frames = len(self.recorder.transforms_history)
+        frame_time = self.selected_frame * self.example.frame_dt
+        self.imgui.text(
+            f"Frame: {self.selected_frame}/{total_frames - 1 if total_frames > 0 else 0} ({frame_time:.2f}s)"
+        )
+
+        # Frame slider
+        if total_frames > 0:
+            changed, self.selected_frame = self.imgui.slider_int("Timeline", self.selected_frame, 0, total_frames - 1)
+            if changed and self.example.paused:
+                self.recorder.playback(self.selected_frame)
+            # Back/Forward buttons
+            if self.imgui.button(" < "):
+                self.selected_frame = max(0, self.selected_frame - 1)
+                if self.example.paused:
+                    self.recorder.playback(self.selected_frame)
+
+            self.imgui.same_line()
+
+            if self.imgui.button(" > "):
+                self.selected_frame = min(total_frames - 1, self.selected_frame + 1)
+                if self.example.paused:
+                    self.recorder.playback(self.selected_frame)
+
+        self.imgui.end()
 
 
 class Example:
@@ -81,9 +141,33 @@ class Example:
         # self.solver = newton.solvers.MuJoCoSolver(self.model)
 
         if stage_path:
-            self.renderer = newton.utils.SimRendererOpenGL(self.model, stage_path)
+            self.renderer = newton.utils.SimRendererOpenGL(path=stage_path)
+            body_names = self.renderer.populate_bodies(self.model.body_key)
+
+            geo_shape = {}
+            self.renderer.populate_shapes(
+                body_names,
+                geo_shape,
+                self.model.shape_body.numpy(),
+                self.model.shape_geo_src,
+                self.model.shape_geo.type.numpy(),
+                self.model.shape_geo.scale.numpy(),
+                self.model.shape_geo.thickness.numpy(),
+                self.model.shape_geo.is_solid.numpy(),
+                self.model.shape_transform.numpy(),
+                self.model.shape_flags.numpy(),
+                self.model.shape_key,
+            )
+
+            self.recorder = Recorder(self.renderer)
+            self.gui = RecorderImGuiManager(self.renderer, self.recorder, self)
+            self.renderer.render_2d_callbacks.append(self.gui.render_frame)
+            self.paused = False
         else:
             self.renderer = None
+            self.recorder = None
+            self.gui = None
+            self.paused = False
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -109,6 +193,9 @@ class Example:
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
+        if self.paused:
+            return
+
         with wp.ScopedTimer("step"):
             if self.use_cuda_graph:
                 wp.capture_launch(self.graph)
@@ -116,14 +203,17 @@ class Example:
                 self.simulate()
         self.sim_time += self.frame_dt
 
+        if self.recorder:
+            self.recorder.record(self.state_0.body_q)
+
     def render(self):
         if self.renderer is None:
             return
 
         with wp.ScopedTimer("render"):
             self.renderer.begin_frame(self.sim_time)
-            self.renderer.render(self.state_0)
-            self.renderer.render_contacts(self.state_0, self.contacts, contact_point_radius=1e-2)
+            if not self.paused:
+                self.renderer.update_body_transforms(self.state_0.body_q)
             self.renderer.end_frame()
 
 
@@ -146,9 +236,14 @@ if __name__ == "__main__":
     with wp.ScopedDevice(args.device):
         example = Example(stage_path=args.stage_path, num_envs=args.num_envs)
 
-        for _ in range(args.num_frames):
-            example.step()
-            example.render()
-
         if example.renderer:
-            example.renderer.save()
+            while example.renderer.is_running():
+                example.step()
+                example.render()
+        else:
+            for _ in range(args.num_frames):
+                example.step()
+                example.render()
+
+        # if example.renderer:
+        #     example.renderer.save()
