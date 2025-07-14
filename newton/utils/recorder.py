@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import List
 
+import numpy as np
 import warp as wp
 
 from newton.utils.render import SimRendererOpenGL
@@ -58,3 +59,29 @@ class Recorder:
 
         body_transforms = self.transforms_history[frame_id]
         self.renderer.update_body_transforms(body_transforms)
+
+    def save_to_file(self, file_path: str):
+        """
+        Saves the recorded transforms history to a file.
+
+        Args:
+            file_path (str): The full path to the file where the transforms will be saved.
+        """
+        history_np = {f"frame_{i}": t.numpy() for i, t in enumerate(self.transforms_history)}
+        np.savez_compressed(file_path, **history_np)
+
+    def load_from_file(self, file_path: str, device=None):
+        """
+        Loads recorded transforms from a file, replacing the current history.
+
+        Args:
+            file_path (str): The full path to the file from which to load the transforms.
+            device: The device to load the transforms onto. If None, uses CPU.
+        """
+        self.transforms_history.clear()
+        with np.load(file_path) as data:
+            frame_keys = sorted(data.keys(), key=lambda x: int(x.split("_")[1]))
+            for key in frame_keys:
+                transform_np = data[key]
+                transform_wp = wp.array(transform_np, dtype=wp.transform, device=device)
+                self.transforms_history.append(transform_wp)

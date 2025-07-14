@@ -34,6 +34,14 @@ from newton.utils.recorder import Recorder
 
 from warp.render.imgui_manager import ImGuiManager
 
+try:
+    import tkinter as tk
+    from tkinter import filedialog
+
+    tkinter_available = True
+except ImportError:
+    tkinter_available = False
+
 
 class RecorderImGuiManager(ImGuiManager):
     """An ImGui manager for controlling simulation playback with a recorder."""
@@ -88,6 +96,39 @@ class RecorderImGuiManager(ImGuiManager):
                 self.selected_frame = min(total_frames - 1, self.selected_frame + 1)
                 if self.example.paused:
                     self.recorder.playback(self.selected_frame)
+
+        self.imgui.separator()
+
+        if tkinter_available:
+            if self.imgui.button("Save"):
+                root = tk.Tk()
+                root.withdraw()  # Hide the main window
+                file_path = filedialog.asksaveasfilename(
+                    defaultextension=".npz",
+                    filetypes=[("Numpy Archives", "*.npz"), ("All files", "*.*")],
+                    title="Save Recording",
+                )
+                if file_path:
+                    self.recorder.save_to_file(file_path)
+
+            self.imgui.same_line()
+
+            if self.imgui.button("Load"):
+                root = tk.Tk()
+                root.withdraw()  # Hide the main window
+                file_path = filedialog.askopenfilename(
+                    filetypes=[("Numpy Archives", "*.npz"), ("All files", "*.*")],
+                    title="Load Recording",
+                )
+                if file_path:
+                    self.recorder.load_from_file(file_path, device=wp.get_device())
+                    # When loading, pause the simulation and go to the first frame
+                    self.example.paused = True
+                    self.selected_frame = 0
+                    if len(self.recorder.transforms_history) > 0:
+                        self.recorder.playback(self.selected_frame)
+        else:
+            self.imgui.text("Install tkinter for file dialogs (pip install tk)")
 
         self.imgui.end()
 
