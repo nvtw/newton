@@ -456,7 +456,7 @@ def CreateSimRenderer(renderer):
             if self.skip_rendering:
                 return
 
-            if self.model.particle_count and self.show_particles:
+            if self.model.particle_count:
                 self.render_particles_and_springs(
                     particle_q=state.particle_q.numpy(),
                     particle_radius=self.model.particle_radius.numpy(),
@@ -493,7 +493,8 @@ def CreateSimRenderer(renderer):
                 spring_indices (numpy.ndarray, optional): Spring indices. Defaults to None.
             """
             # render particles
-            self.render_points("particles", particle_q, radius=particle_radius, colors=(0.8, 0.3, 0.2))
+            if self.show_particles:
+                self.render_points("particles", particle_q, radius=particle_radius, colors=(0.8, 0.3, 0.2))
 
             # render tris
             if tri_indices is not None:
@@ -548,14 +549,14 @@ def CreateSimRenderer(renderer):
 
         def render_contacts(
             self,
-            state: newton.State,
+            body_q: wp.array,
             contacts: newton.Contacts,
             contact_point_radius: float = 1e-3,
         ):
             """
             Render contact points between rigid bodies.
             Args:
-                state (newton.State): The simulation state.
+                body_q (wp.array): Array of body transformations.
                 contacts (newton.Contacts): The contacts to render.
                 contact_point_radius (float, optional): The radius of the contact points.
             """
@@ -571,7 +572,7 @@ def CreateSimRenderer(renderer):
                 kernel=compute_contact_points,
                 dim=contacts.rigid_contact_max,
                 inputs=[
-                    state.body_q,
+                    body_q,
                     self.model.shape_body,
                     contacts.rigid_contact_count,
                     contacts.rigid_contact_shape0,
