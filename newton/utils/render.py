@@ -65,6 +65,8 @@ def compute_contact_points(
 
 
 def CreateSimRenderer(renderer):
+    """A factory function to create a simulation renderer class."""
+
     class SimRenderer(renderer):
         use_unique_colors = True
 
@@ -86,7 +88,7 @@ def CreateSimRenderer(renderer):
                 path (str, optional): The path for the rendered output (e.g., filename for USD, window title for OpenGL).
                 scaling (float, optional): Scaling factor for the rendered output. Defaults to 1.0.
                 fps (int, optional): Frames per second for the rendered output. Defaults to 60.
-                up_axis (str, optional): The up-axis for the scene ("X", "Y", or "Z"). If not provided, it's inferred from the model, or defaults to "Y" if no model is given. Defaults to None.
+                up_axis (newton.AxisType, optional): The up-axis for the scene. If not provided, it's inferred from the model, or defaults to "Z" if no model is given. Defaults to None.
                 show_joints (bool, optional): Whether to visualize joints. Defaults to False.
                 show_particles (bool, optional): Whether to visualize particles. Defaults to True.
                 **render_kwargs: Additional keyword arguments for the underlying renderer.
@@ -95,7 +97,7 @@ def CreateSimRenderer(renderer):
                 if model:
                     up_axis = model.up_axis
                 else:
-                    up_axis = "Y"
+                    up_axis = newton.Axis.Z
             up_axis = newton.Axis.from_any(up_axis)
             super().__init__(path, scaling=scaling, fps=fps, up_axis=str(up_axis), **render_kwargs)
             self.scaling = scaling
@@ -173,7 +175,7 @@ def CreateSimRenderer(renderer):
             if hasattr(self, "complete_setup"):
                 self.complete_setup()
 
-        def populate_bodies(self, body_name_arr, bodies_per_env=-1, body_env=None):
+        def populate_bodies(self, body_name_arr: list, bodies_per_env: int = -1, body_env: list | None = None) -> list:
             """
             Creates and registers rigid bodies in the renderer.
             Args:
@@ -205,20 +207,20 @@ def CreateSimRenderer(renderer):
 
         def populate_shapes(
             self,
-            body_names,
-            geo_shape,
-            shape_body,
-            shape_geo_src,
-            shape_geo_type,
-            shape_geo_scale,
-            shape_geo_thickness,
-            shape_geo_is_solid,
-            shape_transform,
-            shape_flags,
-            shape_key,
-            instance_count=0,
-            use_unique_colors=True,
-        ):
+            body_names: list,
+            geo_shape: dict,
+            shape_body: np.ndarray,
+            shape_geo_src: list,
+            shape_geo_type: np.ndarray,
+            shape_geo_scale: np.ndarray,
+            shape_geo_thickness: np.ndarray,
+            shape_geo_is_solid: np.ndarray,
+            shape_transform: np.ndarray,
+            shape_flags: np.ndarray,
+            shape_key: list,
+            instance_count: int = 0,
+            use_unique_colors: bool = True,
+        ) -> int:
             """
             Populates the renderer with shapes for rigid bodies.
             Args:
@@ -347,18 +349,18 @@ def CreateSimRenderer(renderer):
 
         def populate_joints(
             self,
-            body_names,
-            joint_type,
-            joint_axis,
-            joint_qd_start,
-            joint_dof_dim,
-            joint_parent,
-            joint_child,
-            joint_tf,
-            shape_collision_radius,
-            body_shapes,
-            instance_count=0,
-        ):
+            body_names: list,
+            joint_type: np.ndarray,
+            joint_axis: np.ndarray,
+            joint_qd_start: np.ndarray,
+            joint_dof_dim: np.ndarray,
+            joint_parent: np.ndarray,
+            joint_child: np.ndarray,
+            joint_tf: np.ndarray,
+            shape_collision_radius: np.ndarray,
+            body_shapes: defaultdict,
+            instance_count: int = 0,
+        ) -> int:
             """
             Populates the renderer with joint visualizations.
             Args:
@@ -436,7 +438,7 @@ def CreateSimRenderer(renderer):
                     instance_count += 1
             return instance_count
 
-        def get_new_color(self, instance_count):
+        def get_new_color(self, instance_count: int) -> tuple:
             """Gets a new color from a predefined color map.
             This method provides a new color based on the current instance count,
             cycling through a predefined color map to ensure variety.
@@ -478,10 +480,10 @@ def CreateSimRenderer(renderer):
 
         def render_particles_and_springs(
             self,
-            particle_q,
-            particle_radius,
-            tri_indices=None,
-            spring_indices=None,
+            particle_q: np.ndarray,
+            particle_radius: np.ndarray,
+            tri_indices: np.ndarray | None = None,
+            spring_indices: np.ndarray | None = None,
         ):
             """Renders particles, mesh surface, and springs.
             Args:
@@ -508,11 +510,11 @@ def CreateSimRenderer(renderer):
 
         def render_muscles(
             self,
-            body_q,
-            muscle_start,
-            muscle_links,
-            muscle_points,
-            muscle_activation,
+            body_q: np.ndarray,
+            muscle_start: np.ndarray,
+            muscle_links: np.ndarray,
+            muscle_points: np.ndarray,
+            muscle_activation: np.ndarray,
         ):
             """Renders muscles as line strips.
             Args:
@@ -643,8 +645,8 @@ class SimRendererUsd(CreateSimRenderer(renderer=UsdRenderer)):
     def __init__(
         self,
         model: newton.Model,
-        stage,
-        source_stage=None,
+        stage: str | Usd.Stage,
+        source_stage: str | Usd.Stage | None = None,
         scaling: float = 1.0,
         fps: int = 60,
         up_axis: newton.AxisType | None = None,
@@ -663,7 +665,7 @@ class SimRendererUsd(CreateSimRenderer(renderer=UsdRenderer)):
             source_stage (str | Usd.Stage, optional): The USD stage to use as a source for the output stage.
             scaling (float, optional): Scaling factor for the rendered objects. Defaults to 1.0.
             fps (int, optional): Frames per second for the animation. Defaults to 60.
-            up_axis (newton.AxisType, optional): Up axis for the scene. If None, uses model's up axis.
+            up_axis (newton.AxisType, optional): Up axis for the scene. If None, uses model's up axis. Defaults to None.
             show_joints (bool, optional): Whether to show joint visualizations.  Defaults to False.
             path_body_map (dict, optional): A dictionary mapping prim paths to body IDs.
             path_body_relative_transform (dict, optional): A dictionary mapping prim paths to relative transformations.
@@ -715,7 +717,7 @@ class SimRendererUsd(CreateSimRenderer(renderer=UsdRenderer)):
             state (newton.State): The simulation state to render.
             sim_time (float): The current simulation time.
         """
-        from pxr import Sdf
+        from pxr import Sdf  # noqa: PLC0415
 
         body_q = state.body_q.numpy()
         with Sdf.ChangeBlock():
@@ -731,7 +733,7 @@ class SimRendererUsd(CreateSimRenderer(renderer=UsdRenderer)):
                 full_xform = self._apply_parents_inverse_xform(full_xform, prim_path)
                 self._update_usd_prim_xform(prim_path, full_xform)
 
-    def _apply_parents_inverse_xform(self, full_xform, prim_path):
+    def _apply_parents_inverse_xform(self, full_xform: wp.transform, prim_path: str) -> wp.transform:
         """
         Transformation in Warp sim consists of translation and pure rotation: trnslt and quat.
         Transformations of bodies are stored in body_q in simulation state.
@@ -765,7 +767,7 @@ class SimRendererUsd(CreateSimRenderer(renderer=UsdRenderer)):
 
         Both p_inv_Rot and wp.inv(p_Rot * diag(1/s_x, 1/s_y, 1/s_z)) do not change during sim, so they are computed in __init__.
         """
-        from pxr import Sdf
+        from pxr import Sdf  # noqa: PLC0415
 
         current_prim = self.stage.GetPrimAtPath(Sdf.Path(prim_path))
         parent_path = str(current_prim.GetParent().GetPath())
@@ -785,8 +787,8 @@ class SimRendererUsd(CreateSimRenderer(renderer=UsdRenderer)):
 
         return wp.transform(prim_translate, prim_quat)
 
-    def _update_usd_prim_xform(self, prim_path, warp_xform):
-        from pxr import Gf, Sdf, UsdGeom
+    def _update_usd_prim_xform(self, prim_path: str, warp_xform: wp.transform):
+        from pxr import Gf, Sdf, UsdGeom  # noqa: PLC0415
 
         prim = self.stage.GetPrimAtPath(Sdf.Path(prim_path))
 
@@ -803,8 +805,8 @@ class SimRendererUsd(CreateSimRenderer(renderer=UsdRenderer)):
 
     # TODO: if _compute_parents_inverses turns to be too slow, then we should consider using a UsdGeomXformCache as described here:
     # https://openusd.org/release/api/class_usd_geom_imageable.html#a4313664fa692f724da56cc254bce70fc
-    def _compute_parents_inverses(self, prim_path, time):
-        from pxr import Gf, Sdf, UsdGeom
+    def _compute_parents_inverses(self, prim_path: str, time: Usd.TimeCode) -> tuple[wp.vec3, wp.mat33, wp.quat]:
+        from pxr import Gf, Sdf, UsdGeom  # noqa: PLC0415
 
         prim = self.stage.GetPrimAtPath(Sdf.Path(prim_path))
         xform = UsdGeom.Xform(prim)
@@ -835,7 +837,7 @@ class SimRendererUsd(CreateSimRenderer(renderer=UsdRenderer)):
         Prefix p is for **parent** prim.
         """
 
-        from pxr import Sdf, Usd
+        from pxr import Sdf, Usd  # noqa: PLC0415
 
         if self.path_body_map is None:
             raise ValueError("self.path_body_map must be set before calling _precompute_parents_xform_inverses")
@@ -876,8 +878,8 @@ class SimRendererUsd(CreateSimRenderer(renderer=UsdRenderer)):
             prim = self.stage.GetPrimAtPath(Sdf.Path(prim_path))
             SimRendererUsd._xform_to_tqs(prim)
 
-    def _create_output_stage(self, source_stage, output_stage) -> Usd.Stage:
-        from pxr import Usd
+    def _create_output_stage(self, source_stage: str | Usd.Stage, output_stage: str | Usd.Stage) -> Usd.Stage:
+        from pxr import Usd  # noqa: PLC0415
 
         if isinstance(output_stage, str):
             source_stage = Usd.Stage.Open(source_stage, Usd.Stage.LoadAll)
@@ -900,7 +902,7 @@ class SimRendererUsd(CreateSimRenderer(renderer=UsdRenderer)):
 
         The original transformation stack is assumed to be a rigid transformation.
         """
-        from pxr import Gf, Usd, UsdGeom
+        from pxr import Gf, Usd, UsdGeom  # noqa: PLC0415
 
         if time is None:
             time = Usd.TimeCode.Default()
@@ -954,8 +956,7 @@ class SimRendererOpenGL(CreateSimRenderer(renderer=OpenGLRenderer)):
         scaling (float, optional): Scaling factor for the rendered objects.
             Defaults to 1.0.
         fps (int, optional): Target frames per second. Defaults to 60.
-        up_axis (newton.AxisType, optional): Up axis for the scene. If None,
-            uses model's up axis.
+        up_axis (newton.AxisType, optional): Up axis for the scene. If None, uses model's up axis. Defaults to None.
         show_rigid_contact_points (bool, optional): Whether to show contact
             points. Defaults to False.
         contact_points_radius (float, optional): Radius of contact point
