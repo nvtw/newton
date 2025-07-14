@@ -219,7 +219,7 @@ def convert_newton_contacts_to_mjwarp_kernel(
     rigid_contact_normal: wp.array(dtype=wp.vec3),
     rigid_contact_thickness0: wp.array(dtype=wp.float32),
     rigid_contact_thickness1: wp.array(dtype=wp.float32),
-    num_shapes_per_env: int,
+    bodies_per_env: int,
     to_mjc_geom_index: wp.array(dtype=wp.int32),
     # Mujoco warp contacts
     ncon_out: wp.array(dtype=int),
@@ -293,7 +293,14 @@ def convert_newton_contacts_to_mjwarp_kernel(
 
     geoms = wp.vec2i(to_mjc_geom_index[shape_a], to_mjc_geom_index[shape_b])
 
-    worldid = shape_a // num_shapes_per_env
+    # See kernel update_body_mass_ipos_kernel, line below:
+    #     worldid = wp.tid() // bodies_per_env
+    # which uses the same strategy to determine the world id
+    worldid = 0
+    if body_a >= 0:
+        worldid = body_a // bodies_per_env
+    elif body_b >= 0:
+        worldid = body_b // bodies_per_env
 
     margin, gap, condim, friction, solref, solreffriction, solimp = contact_params(
         geom_condim,
@@ -1133,7 +1140,9 @@ class MuJoCoSolver(SolverBase):
         super().__init__(model)
         self.mujoco, self.mujoco_warp = import_mujoco()
         self.contact_stiffness_time_const = contact_stiffness_time_const
-        self.use_mujoco_contacts = use_mujoco_contacts
+
+        if use_mujoco and not use_mujoco_contacts:
+            print("Setting use_mujoco_contacts to False has no effect when use_mujoco is True")
 
         disableflags = 0
         if disable_contacts:
@@ -1164,6 +1173,9 @@ class MuJoCoSolver(SolverBase):
         self.update_data_interval = update_data_interval
         self._step = 0
 
+        if self.mjw_model is not None:
+            self.mjw_model.opt.run_collision_detection = use_mujoco_contacts
+
     @override
     def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
         if self.use_mujoco:
@@ -1180,19 +1192,18 @@ class MuJoCoSolver(SolverBase):
                 self.update_mjc_data(self.mjw_data, self.model, state_in)
             self.mjw_model.opt.timestep.fill_(dt)
             with wp.ScopedDevice(self.model.device):
-                if self.use_mujoco_contacts:
-                    self.mjw_model.opt.run_collision_detection = True
+                if self.mjw_model.opt.run_collision_detection:
                     self.mujoco_warp.step(self.mjw_model, self.mjw_data)
                 else:
-                    self.mjw_model.opt.run_collision_detection = False
                     self.convert_contacts_to_mjwarp(self.model, state_in, contacts)
                     self.mujoco_warp.step(self.mjw_model, self.mjw_data)
+
             self.update_newton_state(self.model, state_out, self.mjw_data)
         self._step += 1
         return state_out
 
     def convert_contacts_to_mjwarp(self, model: Model, state_in: State, contacts: Contacts):
-        shapes_per_env = self.model.shape_count // self.model.num_envs
+        bodies_per_env = self.model.body_count // self.model.num_envs
         wp.launch(
             convert_newton_contacts_to_mjwarp_kernel,
             dim=(contacts.rigid_contact_max,),
@@ -1216,7 +1227,7 @@ class MuJoCoSolver(SolverBase):
                 contacts.rigid_contact_normal,
                 contacts.rigid_contact_thickness0,
                 contacts.rigid_contact_thickness1,
-                shapes_per_env,
+                bodies_per_env,
                 self.model.to_mjc_geom_index,
                 # Mujoco warp contacts
                 self.mjw_data.ncon,
