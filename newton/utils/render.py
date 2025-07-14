@@ -177,15 +177,15 @@ def CreateSimRenderer(renderer):
 
         def populate_bodies(self, body_name_arr: list, bodies_per_env: int = -1, body_env: list | None = None) -> list:
             """
-            Creates and registers rigid bodies in the renderer.
+            Populates the renderer with body objects.
+
             Args:
-                body_name_arr (list): A list of body names.
-                bodies_per_env (int, optional): Number of bodies per environment. If > 0 and body_env is provided,
-                    populates body_env. Defaults to -1.
-                body_env (list, optional): An output list to be populated with environment indices for each body.
-                    If provided, it will be cleared and filled. Defaults to None.
+                body_name_arr (list): List of body names from the model.
+                bodies_per_env (int, optional): Number of bodies per environment. If -1, all bodies belong to same environment. Defaults to -1.
+                body_env (list, optional): List to store environment IDs for each body. Defaults to None.
+
             Returns:
-                list: A list of generated body names.
+                list: List of generated unique body names in the format "body_{index}_{name}".
             """
             body_names = []
             body_count = len(body_name_arr)
