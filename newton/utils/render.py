@@ -864,7 +864,7 @@ class SimRendererUsd(CreateSimRenderer(renderer=UsdRenderer)):
         Set USD parameters on the output stage to match the simulation settings.
 
         Must be called after _apply_solver_attributes!"""
-        from pxr import Sdf
+        from pxr import Sdf  # noqa: PLC0415
 
         if self.path_body_map is None:
             raise ValueError("self.path_body_map must be set before calling _prepare_output_stage")
