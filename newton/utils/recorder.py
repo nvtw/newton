@@ -22,6 +22,7 @@ import pickle
 from newton.utils.render import SimRendererOpenGL
 from newton.sim.state import State
 from newton.sim.model import Model
+from newton.sim.types import ShapeMaterials, ShapeGeometry
 
 
 class BodyTransformRecorder:
@@ -88,7 +89,7 @@ class BodyTransformRecorder:
                 self.transforms_history.append(transform_wp)
 
 
-class StateRecorder:
+class ModelAndStateRecorder:
     """A class to record and playback simulation model and state."""
 
     def __init__(self):
@@ -104,6 +105,38 @@ class StateRecorder:
             if isinstance(value, wp.array):
                 return value.device
         return None
+
+    def _serialize_value(self, value):
+        if value is None:
+            return None
+
+        if isinstance(value, (int, float, bool, str, list, dict, set, tuple)):
+            return value
+        elif isinstance(value, np.ndarray):
+            return value
+        elif isinstance(value, wp.array):
+            if value.size > 0:
+                return {
+                    "__type__": "wp.array",
+                    "data": value.numpy(),
+                }
+        elif hasattr(type(value), "_wp_struct_meta_"):
+            type_name = type(value).__name__
+            if type_name in ("ShapeMaterials", "ShapeGeometry"):
+                return {
+                    "__type__": type_name,
+                    "data": self._serialize_object_attributes(value),
+                }
+        return None
+
+    def _serialize_object_attributes(self, obj):
+        data = {}
+        attrs = wp.attr(obj) if hasattr(type(obj), "_wp_struct_meta_") else obj.__dict__
+        for name, value in attrs.items():
+            serialized_value = self._serialize_value(value)
+            if serialized_value is not None:
+                data[name] = serialized_value
+        return data
 
     def record(self, state: State):
         """
@@ -126,19 +159,7 @@ class StateRecorder:
         Args:
             model (Model): The simulation model.
         """
-        model_data = {}
-        for name, value in model.__dict__.items():
-            if value is None:
-                continue
-
-            if isinstance(value, (int, float, bool, str)):
-                model_data[name] = value
-            elif isinstance(value, np.ndarray):
-                model_data[name] = value
-            elif isinstance(value, wp.array):
-                if value.size > 0:
-                    model_data[name] = value.numpy()
-        self.model_data = model_data
+        self.model_data = self._serialize_object_attributes(model)
 
     def playback(self, state: State, frame_id: int):
         """
@@ -160,6 +181,34 @@ class StateRecorder:
                 value_wp = wp.array(value_np, device=device)
                 setattr(state, name, value_wp)
 
+    def _deserialize_and_restore_value(self, value, device):
+        if isinstance(value, dict) and "__type__" in value:
+            type_name = value["__type__"]
+            obj_data = value["data"]
+
+            if type_name == "wp.array":
+                return wp.array(obj_data, device=device)
+
+            instance = None
+            if type_name == "ShapeMaterials":
+                instance = ShapeMaterials()
+            elif type_name == "ShapeGeometry":
+                instance = ShapeGeometry()
+
+            if instance:
+                for name, s_value in obj_data.items():
+                    # For wp.structs, we need to handle attribute setting carefully.
+                    if hasattr(type(instance), "_wp_struct_meta_"):
+                        restored_value = self._deserialize_and_restore_value(s_value, device)
+                        if restored_value is not None:
+                            setattr(instance, name, restored_value)
+                    else:
+                        setattr(instance, name, self._deserialize_and_restore_value(s_value, device))
+                return instance
+        elif isinstance(value, np.ndarray):
+            return value
+        return value
+
     def playback_model(self, model: Model):
         """
         Plays back a recorded model by updating its attributes.
@@ -167,19 +216,13 @@ class StateRecorder:
         Args:
             model (Model): The simulation model to restore.
         """
-        annotations = model.__class__.__annotations__
         device = model.device
 
         for name, value in self.model_data.items():
             if hasattr(model, name):
-                if isinstance(value, np.ndarray):
-                    type_hint = str(annotations.get(name, ""))
-                    if "wp.array" in type_hint:
-                        setattr(model, name, wp.array(value, device=device))
-                    else:
-                        setattr(model, name, value)
-                else:
-                    setattr(model, name, value)
+                restored_value = self._deserialize_and_restore_value(value, device)
+                if restored_value is not None:
+                    setattr(model, name, restored_value)
 
     def save_to_file(self, file_path: str):
         """

@@ -31,7 +31,7 @@ import newton
 import newton.examples
 import newton.sim
 import newton.utils
-from newton.utils.recorder import BodyTransformRecorder, StateRecorder
+from newton.utils.recorder import BodyTransformRecorder, ModelAndStateRecorder
 
 try:
     import tkinter as tk
@@ -95,7 +95,7 @@ class RecorderImGuiManager(ImGuiManager):
             if self.imgui.button(" > "):
                 self.selected_frame = min(total_frames - 1, self.selected_frame + 1)
                 if self.example.paused:
-                    self.recorder.playback(self.selected_frame)                    
+                    self.recorder.playback(self.selected_frame)
 
         self.imgui.separator()
 
@@ -110,8 +110,7 @@ class RecorderImGuiManager(ImGuiManager):
                 )
                 if file_path:
                     self.recorder.save_to_file(file_path)
-                    self.state_recorder.save_to_file(file_path+".pkl")
-
+                    self.state_recorder.save_to_file(file_path + ".pkl")
 
             self.imgui.same_line()
 
@@ -124,7 +123,7 @@ class RecorderImGuiManager(ImGuiManager):
                 )
                 if file_path:
                     self.recorder.load_from_file(file_path, device=wp.get_device())
-                    self.state_recorder.load_from_file(file_path+".pkl")
+                    self.state_recorder.load_from_file(file_path + ".pkl")
                     # When loading, pause the simulation and go to the first frame
                     self.example.paused = True
                     self.selected_frame = 0
@@ -204,7 +203,7 @@ class Example:
             )
 
             self.recorder = BodyTransformRecorder(self.renderer)
-            self.state_recorder = StateRecorder()
+            self.state_recorder = ModelAndStateRecorder()
             self.gui = RecorderImGuiManager(self.renderer, self.recorder, self.state_recorder, self)
             self.renderer.render_2d_callbacks.append(self.gui.render_frame)
             self.paused = False
