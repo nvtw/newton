@@ -21,6 +21,7 @@ import pickle
 
 from newton.utils.render import SimRendererOpenGL
 from newton.sim.state import State
+from newton.sim.model import Model
 
 
 class BodyTransformRecorder:
@@ -95,6 +96,7 @@ class StateRecorder:
         Initializes the Recorder.
         """
         self.history: list[dict] = []
+        self.model_data: dict = {}
 
     def _get_device_from_state(self, state: State):
         # device can be retrieved from any warp array attribute in the state
@@ -116,6 +118,28 @@ class StateRecorder:
                 state_data[name] = value.numpy()
         self.history.append(state_data)
 
+    def record_model(self, model: Model):
+        """
+        Records a snapshot of the model's serializable attributes.
+        It stores warp arrays as numpy arrays, and primitive types as-is.
+
+        Args:
+            model (Model): The simulation model.
+        """
+        model_data = {}
+        for name, value in model.__dict__.items():
+            if value is None:
+                continue
+
+            if isinstance(value, (int, float, bool, str)):
+                model_data[name] = value
+            elif isinstance(value, np.ndarray):
+                model_data[name] = value
+            elif isinstance(value, wp.array):
+                if value.size > 0:
+                    model_data[name] = value.numpy()
+        self.model_data = model_data
+
     def playback(self, state: State, frame_id: int):
         """
         Plays back a recorded frame by updating the state.
@@ -136,6 +160,27 @@ class StateRecorder:
                 value_wp = wp.array(value_np, device=device)
                 setattr(state, name, value_wp)
 
+    def playback_model(self, model: Model):
+        """
+        Plays back a recorded model by updating its attributes.
+
+        Args:
+            model (Model): The simulation model to restore.
+        """
+        annotations = model.__class__.__annotations__
+        device = model.device
+
+        for name, value in self.model_data.items():
+            if hasattr(model, name):
+                if isinstance(value, np.ndarray):
+                    type_hint = str(annotations.get(name, ""))
+                    if "wp.array" in type_hint:
+                        setattr(model, name, wp.array(value, device=device))
+                    else:
+                        setattr(model, name, value)
+                else:
+                    setattr(model, name, value)
+
     def save_to_file(self, file_path: str):
         """
         Saves the recorded history to a file using pickle.
@@ -144,7 +189,8 @@ class StateRecorder:
             file_path (str): The full path to the file.
         """
         with open(file_path, "wb") as f:
-            pickle.dump(self.history, f)
+            data_to_save = {"model": self.model_data, "states": self.history}
+            pickle.dump(data_to_save, f)
 
     def load_from_file(self, file_path: str):
         """
@@ -154,4 +200,11 @@ class StateRecorder:
             file_path (str): The full path to the file.
         """
         with open(file_path, "rb") as f:
-            self.history = pickle.load(f)
+            data = pickle.load(f)
+            if isinstance(data, dict) and "states" in data:
+                self.history = data.get("states", [])
+                self.model_data = data.get("model", {})
+            else:
+                # For backward compatibility with old format.
+                self.history = data
+                self.model_data = {}
