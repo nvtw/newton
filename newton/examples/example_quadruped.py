@@ -31,7 +31,7 @@ import newton
 import newton.examples
 import newton.sim
 import newton.utils
-from newton.utils.recorder import BodyTransformRecorder
+from newton.utils.recorder import BodyTransformRecorder, StateRecorder
 
 try:
     import tkinter as tk
@@ -200,12 +200,14 @@ class Example:
             )
 
             self.recorder = BodyTransformRecorder(self.renderer)
+            self.state_recorder = StateRecorder()
             self.gui = RecorderImGuiManager(self.renderer, self.recorder, self)
             self.renderer.render_2d_callbacks.append(self.gui.render_frame)
             self.paused = False
         else:
             self.renderer = None
             self.recorder = None
+            self.state_recorder = None
             self.gui = None
             self.paused = False
 
@@ -245,6 +247,8 @@ class Example:
 
         if self.recorder:
             self.recorder.record(self.state_0.body_q)
+        if self.state_recorder:
+            self.state_recorder.record(self.state_0)
 
     def render(self):
         if self.renderer is None:

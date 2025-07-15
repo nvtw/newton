@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import numpy as np
 import warp as wp
+import pickle
 
 from newton.utils.render import SimRendererOpenGL
+from newton.sim.state import State
 
 
 class BodyTransformRecorder:
@@ -83,3 +85,73 @@ class BodyTransformRecorder:
                 transform_np = data[key]
                 transform_wp = wp.array(transform_np, dtype=wp.transform, device=device)
                 self.transforms_history.append(transform_wp)
+
+
+class StateRecorder:
+    """A class to record and playback simulation model and state."""
+
+    def __init__(self):
+        """
+        Initializes the Recorder.
+        """
+        self.history: list[dict] = []
+
+    def _get_device_from_state(self, state: State):
+        # device can be retrieved from any warp array attribute in the state
+        for _name, value in state.__dict__.items():
+            if isinstance(value, wp.array):
+                return value.device
+        return None
+
+    def record(self, state: State):
+        """
+        Records a snapshot of the state.
+
+        Args:
+            state (State): The simulation state.
+        """
+        state_data = {}
+        for name, value in state.__dict__.items():
+            if isinstance(value, wp.array):
+                state_data[name] = value.numpy()
+        self.history.append(state_data)
+
+    def playback(self, state: State, frame_id: int):
+        """
+        Plays back a recorded frame by updating the state.
+
+        Args:
+            state (State): The simulation state to restore.
+            frame_id (int): The integer index of the frame to be played back.
+        """
+        if not (0 <= frame_id < len(self.history)):
+            print(f"Warning: frame_id {frame_id} is out of bounds. Playback skipped.")
+            return
+
+        state_data = self.history[frame_id]
+        device = self._get_device_from_state(state)
+
+        for name, value_np in state_data.items():
+            if hasattr(state, name):
+                value_wp = wp.array(value_np, device=device)
+                setattr(state, name, value_wp)
+
+    def save_to_file(self, file_path: str):
+        """
+        Saves the recorded history to a file using pickle.
+
+        Args:
+            file_path (str): The full path to the file.
+        """
+        with open(file_path, "wb") as f:
+            pickle.dump(self.history, f)
+
+    def load_from_file(self, file_path: str):
+        """
+        Loads a recorded history from a file, replacing the current history.
+
+        Args:
+            file_path (str): The full path to the file.
+        """
+        with open(file_path, "rb") as f:
+            self.history = pickle.load(f)
