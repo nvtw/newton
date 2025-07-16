@@ -28,18 +28,51 @@ from newton.geometry import raycast
 
 
 @wp.kernel
+def compute_pick_state_kernel(
+    body_q: wp.array(dtype=wp.transform),
+    body_index: int,
+    hit_point_world: wp.vec3,
+    # output
+    pick_body: wp.array(dtype=int),
+    pick_state: wp.array(dtype=float),
+):
+    if body_index < 0:
+        return
+
+    # store body index
+    pick_body[0] = body_index
+
+    # store target world
+    pick_state[3] = hit_point_world[0]
+    pick_state[4] = hit_point_world[1]
+    pick_state[5] = hit_point_world[2]
+
+    # compute and store local space attachment point
+    X_wb = body_q[body_index]
+    X_bw = wp.transform_inverse(X_wb)
+    pick_pos_local = wp.transform_point(X_bw, hit_point_world)
+
+    pick_state[0] = pick_pos_local[0]
+    pick_state[1] = pick_pos_local[1]
+    pick_state[2] = pick_pos_local[2]
+
+
+@wp.kernel
 def apply_picking_force_kernel(
     body_q: wp.array(dtype=wp.transform),
     body_qd: wp.array(dtype=wp.spatial_vector),
     body_f: wp.array(dtype=wp.spatial_vector),
-    pick_body: int,
-    pick_pos_local: wp.vec3,
-    pick_target_world: wp.vec3,
-    pick_stiffness: float,
-    pick_damping: float,
+    pick_body_arr: wp.array(dtype=int),
+    pick_state: wp.array(dtype=float),
 ):
+    pick_body = pick_body_arr[0]
     if pick_body < 0:
         return
+
+    pick_pos_local = wp.vec3(pick_state[0], pick_state[1], pick_state[2])
+    pick_target_world = wp.vec3(pick_state[3], pick_state[4], pick_state[5])
+    pick_stiffness = pick_state[6]
+    pick_damping = pick_state[7]
 
     # world space attachment point
     X_wb = body_q[pick_body]
@@ -61,6 +94,30 @@ def apply_picking_force_kernel(
 
     # apply force and torque
     wp.atomic_add(body_f, pick_body, wp.spatial_vector(t, f))
+    wp.printf("f: %f, %f, %f\n", f[0], f[1], f[2])
+    wp.printf("t: %f, %f, %f\n", t[0], t[1], t[2])
+    wp.printf("pick_body: %d\n", pick_body)
+
+
+@wp.kernel
+def update_pick_target_kernel(
+    p: wp.vec3,
+    d: wp.vec3,
+    pick_camera_front: wp.vec3,
+    # read-write
+    pick_state: wp.array(dtype=float),
+):
+    # project new mouse ray onto the plane defined by the original hit point
+    current_target = wp.vec3(pick_state[3], pick_state[4], pick_state[5])
+    dot_pd = wp.dot(pick_camera_front, d)
+
+    if wp.abs(dot_pd) > 1.0e-6:
+        t = wp.dot(pick_camera_front, current_target - p) / dot_pd
+        new_target = p + d * t
+
+        pick_state[3] = new_target[0]
+        pick_state[4] = new_target[1]
+        pick_state[5] = new_target[2]
 
 
 @wp.kernel
@@ -155,11 +212,15 @@ def CreateSimRenderer(renderer):
             self._contact_points1 = None
 
             # picking state
-            self.pick_body = -1
-            self.pick_pos_local = wp.vec3()
-            self.pick_target_world = wp.vec3()
-            self.pick_stiffness = 200.0
-            self.pick_damping = 20.0
+            self.pick_body = wp.array([-1], dtype=int, device=model.device if model else "cpu")
+            pick_state_np = np.zeros(8, dtype=np.float32)
+            if model:
+                # pick_stiffness = 200.0
+                pick_state_np[6] = 2000.0
+                # pick_damping = 20.0
+                pick_state_np[7] = 20.0
+            self.pick_state = wp.array(pick_state_np, dtype=float, device=model.device if model else "cpu")
+
             self.pick_dist = 0.0
             self.pick_camera_front = wp.vec3()
             self._default_on_mouse_drag = None
@@ -510,6 +571,25 @@ def CreateSimRenderer(renderer):
             """
             return tab10_color_map(instance_count)
 
+        def apply_picking_force(self, state: newton.State):
+            """Applies a force to the body at the picking position.
+            Args:
+                state (newton.State): The simulation state.
+            """
+            # Launch kernel always because of graph capture
+            wp.launch(
+                kernel=apply_picking_force_kernel,
+                dim=1,
+                inputs=[
+                    state.body_q,
+                    state.body_qd,
+                    state.body_f,
+                    self.pick_body,
+                    self.pick_state,
+                ],
+                device=self.model.device,
+            )
+
         def render(self, state: newton.State):
             """
             Updates the renderer with the given simulation state.
@@ -517,24 +597,6 @@ def CreateSimRenderer(renderer):
                 state (newton.State): The simulation state to render.
             """
             self.state = state
-
-            if self.pick_body >= 0:
-                print("apply_picking_force_kernel")
-                wp.launch(
-                    kernel=apply_picking_force_kernel,
-                    dim=1,
-                    inputs=[
-                        state.body_q,
-                        state.body_qd,
-                        state.body_f,
-                        self.pick_body,
-                        self.pick_pos_local,
-                        self.pick_target_world,
-                        self.pick_stiffness,
-                        self.pick_damping,
-                    ],
-                    device=self.model.device,
-                )
 
             if self.skip_rendering:
                 return
@@ -601,11 +663,11 @@ def CreateSimRenderer(renderer):
         def on_mouse_release(self, x, y, button, modifiers):
             # action 0 for release
             print("on_mouse_release")
-            self.pick_body = -1
+            self.pick_body.fill_(-1)
             self.on_mouse_click(x, y, button, 0)
 
         def on_mouse_drag(self, x, y, dx, dy, buttons, modifiers):
-            if self.pick_body < 0:
+            if self.pick_body.numpy()[0] < 0:
                 # default camera controls
                 if self._default_on_mouse_drag:
                     self._default_on_mouse_drag(x, y, dx, dy, buttons, modifiers)
@@ -614,9 +676,17 @@ def CreateSimRenderer(renderer):
             p, d, _ = self.get_world_ray(x, y)
             d = wp.normalize(d)
 
-            # project new mouse ray onto the plane defined by the original hit point
-            t = wp.dot(self.pick_camera_front, self.pick_target_world - p) / wp.dot(self.pick_camera_front, d)
-            self.pick_target_world = p + d * t
+            wp.launch(
+                kernel=update_pick_target_kernel,
+                dim=1,
+                inputs=[
+                    p,
+                    d,
+                    self.pick_camera_front,
+                    self.pick_state,
+                ],
+                device=self.model.device,
+            )
 
         def get_world_ray(self, x: float, y: float) -> tuple[wp.vec3, wp.vec3, np.ndarray]:
             # aspect ratio
@@ -719,18 +789,20 @@ def CreateSimRenderer(renderer):
                 body_index = self.min_body_index.numpy()[0]
 
                 if dist < 1.0e10 and body_index >= 0:
-                    self.pick_body = body_index
                     self.pick_dist = dist
                     self.pick_camera_front = wp.vec3(camera_front[0], camera_front[1], camera_front[2])
 
                     # world space hit point
                     hit_point_world = p + d * dist
-                    self.pick_target_world = hit_point_world
 
-                    # compute local space attachment point
-                    X_wb = self.state.body_q[self.pick_body]
-                    X_bw = wp.transform_inverse(X_wb)
-                    self.pick_pos_local = wp.transform_point(X_bw, hit_point_world)
+                    wp.launch(
+                        kernel=compute_pick_state_kernel,
+                        dim=1,
+                        inputs=[self.state.body_q, body_index, hit_point_world],
+                        outputs=[self.pick_body, self.pick_state],
+                        device=self.model.device,
+                    )
+                    wp.synchronize()
 
                 if debug:
                     if dist < 1.0e10:
