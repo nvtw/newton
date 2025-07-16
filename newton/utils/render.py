@@ -73,6 +73,7 @@ def apply_picking_force_kernel(
     pick_target_world = wp.vec3(pick_state[3], pick_state[4], pick_state[5])
     pick_stiffness = pick_state[6]
     pick_damping = pick_state[7]
+    angular_damping = 1.0  # Damping coefficient for angular velocity
 
     # world space attachment point
     X_wb = body_q[pick_body]
@@ -89,14 +90,11 @@ def apply_picking_force_kernel(
     # compute spring force
     f = pick_stiffness * (pick_target_world - pick_pos_world) - pick_damping * vel_world
 
-    # compute torque
-    t = wp.cross(pick_pos_world - com, f)
+    # compute torque with angular damping
+    t = wp.cross(pick_pos_world - com, f) - angular_damping * omega
 
     # apply force and torque
     wp.atomic_add(body_f, pick_body, wp.spatial_vector(t, f))
-    wp.printf("f: %f, %f, %f\n", f[0], f[1], f[2])
-    wp.printf("t: %f, %f, %f\n", t[0], t[1], t[2])
-    wp.printf("pick_body: %d\n", pick_body)
 
 
 @wp.kernel
@@ -107,17 +105,18 @@ def update_pick_target_kernel(
     # read-write
     pick_state: wp.array(dtype=float),
 ):
-    # project new mouse ray onto the plane defined by the original hit point
+    # get current target position
     current_target = wp.vec3(pick_state[3], pick_state[4], pick_state[5])
-    dot_pd = wp.dot(pick_camera_front, d)
 
-    if wp.abs(dot_pd) > 1.0e-6:
-        t = wp.dot(pick_camera_front, current_target - p) / dot_pd
-        new_target = p + d * t
+    # compute distance from ray origin to current target
+    dist = wp.length(current_target - p)
 
-        pick_state[3] = new_target[0]
-        pick_state[4] = new_target[1]
-        pick_state[5] = new_target[2]
+    # project new target onto sphere with same radius
+    new_target = p + d * dist
+
+    pick_state[3] = new_target[0]
+    pick_state[4] = new_target[1]
+    pick_state[5] = new_target[2]
 
 
 @wp.kernel
@@ -216,9 +215,9 @@ def CreateSimRenderer(renderer):
             pick_state_np = np.zeros(8, dtype=np.float32)
             if model:
                 # pick_stiffness = 200.0
-                pick_state_np[6] = 2000.0
+                pick_state_np[6] = 20000.0
                 # pick_damping = 20.0
-                pick_state_np[7] = 20.0
+                pick_state_np[7] = 2000.0
             self.pick_state = wp.array(pick_state_np, dtype=float, device=model.device if model else "cpu")
 
             self.pick_dist = 0.0
@@ -662,7 +661,6 @@ def CreateSimRenderer(renderer):
 
         def on_mouse_release(self, x, y, button, modifiers):
             # action 0 for release
-            print("on_mouse_release")
             self.pick_body.fill_(-1)
             self.on_mouse_click(x, y, button, 0)
 
@@ -743,7 +741,7 @@ def CreateSimRenderer(renderer):
 
                 p, d, camera_front = self.get_world_ray(x, y)
 
-                debug = True
+                debug = False
                 if debug and isinstance(self, SimRendererOpenGL):
                     p_np = np.array([p[0], p[1], p[2]])
                     d_np = np.array([d[0], d[1], d[2]])

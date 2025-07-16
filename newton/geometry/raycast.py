@@ -186,7 +186,7 @@ def geom_ray_intersect(X_ws: wp.transform, size: wp.vec3, geomtype: int, p: wp.v
 
         if min_t < 1.0e9:
             t_hit = min_t * inv_d_len
-            wp.printf("t_hit: %f\n", t_hit)
+            # wp.printf("t_hit: %f\n", t_hit)
 
     elif geomtype == GEO_CYLINDER:
         r = size[0]
