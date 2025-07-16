@@ -30,13 +30,6 @@ from newton.geometry import (
 MJ_MINVAL = 1e-15
 
 
-@wp.struct
-class Geom:
-    pos: wp.vec3
-    rot: wp.mat33
-    size: wp.vec3
-
-
 @wp.func
 def spinlock_acquire(lock: wp.array(dtype=wp.int32)):
     # Try to acquire the lock by setting it to 1 if it's 0
@@ -51,12 +44,13 @@ def spinlock_release(lock: wp.array(dtype=wp.int32)):
 
 
 @wp.func
-def geom_ray_intersect(geom: Geom, geomtype: int, p: wp.vec3, d: wp.vec3):
+def geom_ray_intersect(X_ws: wp.transform, size: wp.vec3, geomtype: int, p: wp.vec3, d: wp.vec3):
     """
     Computes the intersection of a ray with a geometry.
 
     Args:
-        geom: The geometry to intersect with.
+        X_ws: The world-to-shape transform.
+        size: The size of the geometry.
         geomtype: The type of the geometry.
         p: The origin of the ray.
         d: The direction of the ray.
@@ -66,9 +60,13 @@ def geom_ray_intersect(geom: Geom, geomtype: int, p: wp.vec3, d: wp.vec3):
     """
     t_hit = -1.0
 
+    #pos = wp.transform_get_translation(X_ws)
+    #rot = wp.quat_to_matrix(wp.transform_get_rotation(X_ws))
+    X_sw = wp.transform_inverse(X_ws)
+
     # transform ray to local frame
-    p_local = wp.transpose(geom.rot) @ (p - geom.pos)
-    d_local = wp.transpose(geom.rot) @ d
+    p_local = wp.transform_point(X_sw, p)
+    d_local = wp.transform_vector(X_sw, d)
     d_len_sq = wp.dot(d_local, d_local)
 
     if d_len_sq < MJ_MINVAL:
@@ -79,7 +77,7 @@ def geom_ray_intersect(geom: Geom, geomtype: int, p: wp.vec3, d: wp.vec3):
     d_local_norm = d_local * inv_d_len
 
     if geomtype == GEO_SPHERE:
-        r = geom.size[0]
+        r = size[0]
         oc = p_local
         b = wp.dot(oc, d_local_norm)
         c = wp.dot(oc, oc) - r * r
@@ -102,12 +100,12 @@ def geom_ray_intersect(geom: Geom, geomtype: int, p: wp.vec3, d: wp.vec3):
 
         for i in range(3):
             if wp.abs(d_local[i]) < MJ_MINVAL:
-                if p_local[i] < -geom.size[i] or p_local[i] > geom.size[i]:
+                if p_local[i] < -size[i] or p_local[i] > size[i]:
                     hit = 0
             else:
                 inv_d_i = 1.0 / d_local[i]
-                t1 = (-geom.size[i] - p_local[i]) * inv_d_i
-                t2 = (geom.size[i] - p_local[i]) * inv_d_i
+                t1 = (-size[i] - p_local[i]) * inv_d_i
+                t2 = (size[i] - p_local[i]) * inv_d_i
 
                 if t1 > t2:
                     temp = t1
@@ -124,8 +122,11 @@ def geom_ray_intersect(geom: Geom, geomtype: int, p: wp.vec3, d: wp.vec3):
                 t_hit = t_far
 
     elif geomtype == GEO_CAPSULE:
-        r = geom.size[0]
-        h = geom.size[1]
+
+        # wp.printf("capsule\n")
+
+        r = size[0]
+        h = size[1]
         min_t = 1.0e10
 
         # Intersection with cylinder body
@@ -185,10 +186,11 @@ def geom_ray_intersect(geom: Geom, geomtype: int, p: wp.vec3, d: wp.vec3):
 
         if min_t < 1.0e9:
             t_hit = min_t * inv_d_len
+            wp.printf("t_hit: %f\n", t_hit)
 
     elif geomtype == GEO_CYLINDER:
-        r = geom.size[0]
-        h = geom.size[1]
+        r = size[0]
+        h = size[1]
         min_t = 1.0e10
 
         # Intersection with cylinder body
@@ -282,14 +284,14 @@ def raycast_kernel(
 
     X_ws = wp.mul(X_wb, X_bs)
 
-    geom = Geom()
-    geom.pos = wp.transform_get_translation(X_ws)
-    geom.rot = wp.quat_to_matrix(wp.transform_get_rotation(X_ws))
-    geom.size = geom_size[tid]
+    # geom = Geom()
+    # geom.pos = wp.transform_get_translation(X_ws)
+    # geom.rot = wp.quat_to_matrix(wp.transform_get_rotation(X_ws))
+    # geom.size = geom_size[tid]
 
     geomtype = geom_type[tid]
 
-    t = geom_ray_intersect(geom, geomtype, p, d)
+    t = geom_ray_intersect(X_ws, geom_size[tid], geomtype, p, d)
 
     if t >= 0.0 and t < min_dist[0]:
         spinlock_acquire(lock)

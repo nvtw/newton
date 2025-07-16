@@ -542,44 +542,64 @@ def CreateSimRenderer(renderer):
                 if self.state is None:
                     return
 
-                # build inverse projection view matrix
-                inv_proj = np.linalg.inv(self._projection_matrix.reshape((4, 4)))
-                inv_view = np.linalg.inv(self._view_matrix.reshape((4, 4)))
-                inv_model = np.array(self._inv_model_matrix).reshape((4, 4))
-                inv_mvp = inv_model @ inv_view @ inv_proj
+                # # normalize direction
+                # direction = direction / np.linalg.norm(direction)
 
-                # convert mouse screen coordinates to normalized device coordinates
-                x_ndc = (x / self.screen_width) * 2.0 - 1.0
-                y_ndc = (y / self.screen_height) * 2.0 - 1.0
+                # # set ray origin and direction
+                # p = wp.vec3(camera_pos[0], camera_pos[1], camera_pos[2])
+                # d = wp.vec3(direction[0], direction[1], direction[2])
 
-                # unproject two points, one on the near plane, and one on the far plane
-                p_near_clip = np.array([x_ndc, y_ndc, -1.0, 1.0])
-                p_far_clip = np.array([x_ndc, y_ndc, 1.0, 1.0])
+                # aspect ratio
+                aspect_ratio = self.screen_width / self.screen_height
 
-                # unproject from clip space to world space
-                p_near_world = inv_mvp @ p_near_clip
-                p_far_world = inv_mvp @ p_far_clip
+                # pre-compute factor from vertical FOV
+                fov_rad = np.radians(self.camera_fov)
+                alpha = np.tan(fov_rad * 0.5)  # = tan(fov/2)
 
-                if p_near_world[3] == 0.0 or p_far_world[3] == 0.0:
-                    return
+                # camera vectors → NumPy
+                camera_front = np.array(self._camera_front, dtype=np.float32)
+                camera_up = np.array(self._camera_up, dtype=np.float32)
+                camera_pos = np.array(self._camera_pos, dtype=np.float32)
 
-                # perspective divide
-                p_near_world /= p_near_world[3]
-                p_far_world /= p_far_world[3]
+                # build an orthonormal basis (front, right, up)
+                front = camera_front / np.linalg.norm(camera_front)
+                right = np.cross(front, camera_up)
+                right = right / np.linalg.norm(right)
+                up = np.cross(right, front)  # already unit length
 
-                p = wp.vec3(p_near_world[0], p_near_world[1], p_near_world[2])
-                direction = np.array(
-                    [
-                        p_far_world[0] - p_near_world[0],
-                        p_far_world[1] - p_near_world[1],
-                        p_far_world[2] - p_near_world[2],
-                    ]
-                )
-                direction_norm = np.linalg.norm(direction)
-                if direction_norm == 0.0:
-                    return
-                direction /= direction_norm
-                d = wp.vec3(direction[0], direction[1], direction[2])
+                # normalised pixel coordinates
+                u = 2.0 * (x / self.screen_width) - 1.0  # [-1, 1] left → right
+                v = 2.0 * (y / self.screen_height) - 1.0  # [-1, 1] bottom → top
+
+                # ray direction in world space (before normalisation)
+                direction = front + u * alpha * aspect_ratio * right + v * alpha * up
+                direction = direction / np.linalg.norm(direction)
+
+                # transform ray from render-space (Y-up) to simulation-space (Z-up)
+                inv_model_matrix = self._inv_model_matrix.reshape(4, 4)
+
+                print("inv_model_matrix:")
+                print(inv_model_matrix)
+
+                p_h = np.append(camera_pos, 1.0)
+                p_transformed_h = inv_model_matrix @ p_h
+                p_sim = p_transformed_h[:3]
+
+                d_h = np.append(direction, 0.0)
+                d_transformed_h = inv_model_matrix @ d_h
+                d_sim = d_transformed_h[:3]
+
+                # output
+                p = wp.vec3(p_sim[0], p_sim[1], p_sim[2])  # ray origin
+                d = wp.vec3(d_sim[0], d_sim[1], d_sim[2])  # ray direction
+
+                debug = True
+                if debug and isinstance(self, SimRendererOpenGL):
+                    p_np = p_sim
+                    d_np = d_sim
+                    # use a large length for visualization
+                    end_point = p_np + d_np * 1000.0
+                    self.render_line_strip("__picking_ray__", [p_np, end_point], color=(1.0, 1.0, 0.0), radius=0.005)
 
                 num_geoms = self.model.shape_count
                 if num_geoms == 0:
@@ -615,10 +635,30 @@ def CreateSimRenderer(renderer):
                 dist = self.min_dist.numpy()[0]
                 index = self.min_index.numpy()[0]
                 print("#" * 80)
-                if index != -1:
-                    print(f"Hit geom {index} at distance {dist}")
+                if dist < 1.0e10:
+                    print(f"Hit geom {index} at distance {dist} (out of {num_geoms} total geometries)")
+                    print(f"Mouse coordinates: x={x}, y={y}")
+                    print("""
+    #     #  ###  ##### 
+    #     #   #     #   
+    #     #   #     #   
+    #######   #     #   
+    #     #   #     #   
+    #     #   #     #   
+    #     #  ###    #   
+    """)
                 else:
-                    print("No geometry was hit by the ray")
+                    print(f"No geometry was hit by the ray (out of {num_geoms} total geometries)")
+                    print(f"Mouse coordinates: x={x}, y={y}")
+                print(f"Ray origin: ({p[0]:.3f}, {p[1]:.3f}, {p[2]:.3f})")
+                print(f"Ray direction: ({d[0]:.3f}, {d[1]:.3f}, {d[2]:.3f})")
+                print(f"Camera direction: ({camera_front[0]:.3f}, {camera_front[1]:.3f}, {camera_front[2]:.3f})")
+                # print(f"Camera position: ({self._camera_pos[0]:.3f}, {self._camera_pos[1]:.3f}, {self._camera_pos[2]:.3f})")
+                # # print(f"Camera target: ({self._camera_target[0]:.3f}, {self._camera_target[1]:.3f}, {self._camera_target[2]:.3f})")
+                # print(f"Camera up vector: ({self._camera_up[0]:.3f}, {self._camera_up[1]:.3f}, {self._camera_up[2]:.3f})")
+                # print(f"Camera field of view: {self.camera_fov:.1f} degrees")
+                # print(f"Camera near plane: {self.camera_near_plane:.3f}")
+                # print(f"Camera far plane: {self.camera_far_plane:.3f}")
                 print("#" * 80)
 
         def render_muscles(
