@@ -19,10 +19,12 @@ from collections import defaultdict
 
 import numpy as np
 import warp as wp
+from pyglet.window import mouse
 from warp.render import OpenGLRenderer, UsdRenderer
 from warp.render.utils import solidify_mesh, tab10_color_map
 
 import newton
+from newton.geometry import raycast
 
 
 @wp.kernel
@@ -108,8 +110,17 @@ def CreateSimRenderer(renderer):
             if model:
                 self.populate(model)
 
+            self.state = None
+            self.min_dist = None
+            self.min_index = None
+            self.lock = None
             self._contact_points0 = None
             self._contact_points1 = None
+
+            if isinstance(self, OpenGLRenderer):
+                if not self.headless:
+                    self.window.on_mouse_press = self.on_mouse_press
+                    self.window.on_mouse_release = self.on_mouse_release
 
         def populate(self, model: newton.Model):
             """
@@ -481,6 +492,8 @@ def CreateSimRenderer(renderer):
             if self.model.body_count:
                 self.update_body_transforms(state.body_q)
 
+            self.state = state
+
         def render_particles_and_springs(
             self,
             particle_q: np.ndarray,
@@ -511,6 +524,102 @@ def CreateSimRenderer(renderer):
             # render springs
             if spring_indices is not None:
                 self.render_line_list("springs", particle_q, spring_indices.flatten(), (0.25, 0.5, 0.25), 0.02)
+
+        def on_mouse_press(self, x, y, button, modifiers):
+            # action 1 for press
+            self.on_mouse_click(x, y, button, 1)
+
+        def on_mouse_release(self, x, y, button, modifiers):
+            # action 0 for release
+            self.on_mouse_click(x, y, button, 0)
+
+        def on_mouse_click(self, x, y, button, action):
+            # want to pick on mouse-down events
+            if action != 1:  # Press
+                return
+
+            if button == mouse.RIGHT:  # right-click
+                if self.state is None:
+                    return
+
+                # build inverse projection view matrix
+                inv_proj = np.linalg.inv(self._projection_matrix.reshape((4, 4)))
+                inv_view = np.linalg.inv(self._view_matrix.reshape((4, 4)))
+                inv_model = np.array(self._inv_model_matrix).reshape((4, 4))
+                inv_mvp = inv_model @ inv_view @ inv_proj
+
+                # convert mouse screen coordinates to normalized device coordinates
+                x_ndc = (x / self.screen_width) * 2.0 - 1.0
+                y_ndc = (y / self.screen_height) * 2.0 - 1.0
+
+                # unproject two points, one on the near plane, and one on the far plane
+                p_near_clip = np.array([x_ndc, y_ndc, -1.0, 1.0])
+                p_far_clip = np.array([x_ndc, y_ndc, 1.0, 1.0])
+
+                # unproject from clip space to world space
+                p_near_world = inv_mvp @ p_near_clip
+                p_far_world = inv_mvp @ p_far_clip
+
+                if p_near_world[3] == 0.0 or p_far_world[3] == 0.0:
+                    return
+
+                # perspective divide
+                p_near_world /= p_near_world[3]
+                p_far_world /= p_far_world[3]
+
+                p = wp.vec3(p_near_world[0], p_near_world[1], p_near_world[2])
+                direction = np.array(
+                    [
+                        p_far_world[0] - p_near_world[0],
+                        p_far_world[1] - p_near_world[1],
+                        p_far_world[2] - p_near_world[2],
+                    ]
+                )
+                direction_norm = np.linalg.norm(direction)
+                if direction_norm == 0.0:
+                    return
+                direction /= direction_norm
+                d = wp.vec3(direction[0], direction[1], direction[2])
+
+                num_geoms = self.model.shape_count
+                if num_geoms == 0:
+                    return
+
+                if self.min_dist is None:
+                    self.min_dist = wp.array([1.0e10], dtype=float, device=self.model.device)
+                    self.min_index = wp.array([-1], dtype=int, device=self.model.device)
+                    self.lock = wp.array([0], dtype=wp.int32, device=self.model.device)
+                else:
+                    self.min_dist.fill_(1.0e10)
+                    self.min_index.fill_(-1)
+                    self.lock.zero_()
+
+                wp.launch(
+                    kernel=raycast.raycast_kernel,
+                    dim=num_geoms,
+                    inputs=[
+                        self.state.body_q,
+                        self.model.shape_body,
+                        self.model.shape_transform,
+                        self.model.shape_geo.type,
+                        self.model.shape_geo.scale,
+                        p,
+                        d,
+                        self.lock,
+                    ],
+                    outputs=[self.min_dist, self.min_index],
+                    device=self.model.device,
+                )
+                wp.synchronize()
+
+                dist = self.min_dist.numpy()[0]
+                index = self.min_index.numpy()[0]
+                print("#" * 80)
+                if index != -1:
+                    print(f"Hit geom {index} at distance {dist}")
+                else:
+                    print("No geometry was hit by the ray")
+                print("#" * 80)
 
         def render_muscles(
             self,
