@@ -542,13 +542,6 @@ def CreateSimRenderer(renderer):
                 if self.state is None:
                     return
 
-                # # normalize direction
-                # direction = direction / np.linalg.norm(direction)
-
-                # # set ray origin and direction
-                # p = wp.vec3(camera_pos[0], camera_pos[1], camera_pos[2])
-                # d = wp.vec3(direction[0], direction[1], direction[2])
-
                 # aspect ratio
                 aspect_ratio = self.screen_width / self.screen_height
 
@@ -577,9 +570,6 @@ def CreateSimRenderer(renderer):
 
                 # transform ray from render-space (Y-up) to simulation-space (Z-up)
                 inv_model_matrix = self._inv_model_matrix.reshape(4, 4)
-
-                print("inv_model_matrix:")
-                print(inv_model_matrix)
 
                 p_h = np.append(camera_pos, 1.0)
                 p_transformed_h = inv_model_matrix @ p_h
@@ -634,32 +624,11 @@ def CreateSimRenderer(renderer):
 
                 dist = self.min_dist.numpy()[0]
                 index = self.min_index.numpy()[0]
-                print("#" * 80)
-                if dist < 1.0e10:
-                    print(f"Hit geom {index} at distance {dist} (out of {num_geoms} total geometries)")
-                    print(f"Mouse coordinates: x={x}, y={y}")
-                    print("""
-    #     #  ###  ##### 
-    #     #   #     #   
-    #     #   #     #   
-    #######   #     #   
-    #     #   #     #   
-    #     #   #     #   
-    #     #  ###    #   
-    """)
-                else:
-                    print(f"No geometry was hit by the ray (out of {num_geoms} total geometries)")
-                    print(f"Mouse coordinates: x={x}, y={y}")
-                print(f"Ray origin: ({p[0]:.3f}, {p[1]:.3f}, {p[2]:.3f})")
-                print(f"Ray direction: ({d[0]:.3f}, {d[1]:.3f}, {d[2]:.3f})")
-                print(f"Camera direction: ({camera_front[0]:.3f}, {camera_front[1]:.3f}, {camera_front[2]:.3f})")
-                # print(f"Camera position: ({self._camera_pos[0]:.3f}, {self._camera_pos[1]:.3f}, {self._camera_pos[2]:.3f})")
-                # # print(f"Camera target: ({self._camera_target[0]:.3f}, {self._camera_target[1]:.3f}, {self._camera_target[2]:.3f})")
-                # print(f"Camera up vector: ({self._camera_up[0]:.3f}, {self._camera_up[1]:.3f}, {self._camera_up[2]:.3f})")
-                # print(f"Camera field of view: {self.camera_fov:.1f} degrees")
-                # print(f"Camera near plane: {self.camera_near_plane:.3f}")
-                # print(f"Camera far plane: {self.camera_far_plane:.3f}")
-                print("#" * 80)
+                if debug:
+                    if dist < 1.0e10:
+                        print("#" * 80)
+                        print(f"Hit geom {index} at distance {dist}")
+                        print("#" * 80)
 
         def render_muscles(
             self,
