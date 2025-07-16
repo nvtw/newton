@@ -255,6 +255,7 @@ def raycast_kernel(
     # Output
     min_dist: wp.array(dtype=float),
     min_index: wp.array(dtype=int),
+    min_body_index: wp.array(dtype=int),
 ):
     """
     Computes the intersection of a ray with all geometries in the scene.
@@ -270,6 +271,7 @@ def raycast_kernel(
         lock: Lock array used for synchronization. Expected to be initialized to 0.
         min_dist: A single-element array to store the minimum intersection distance. Expected to be initialized to a large value like 1e10.
         min_index: A single-element array to store the index of the closest geometry. Expected to be initialized to -1.
+        min_body_index: A single-element array to store the body index of the closest geometry. Expected to be initialized to -1.
     """
     tid = wp.tid()
 
@@ -297,6 +299,7 @@ def raycast_kernel(
         spinlock_acquire(lock)
         # Still use an atomic inside the spinlock to get a volatile read
         old_min = wp.atomic_min(min_dist, 0, t)
-        if t < old_min:
+        if t <= old_min:
             min_index[0] = tid
+            min_body_index[0] = b
         spinlock_release(lock)
