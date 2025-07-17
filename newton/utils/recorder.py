@@ -23,7 +23,6 @@ import warp as wp
 from newton.sim.model import Model
 from newton.sim.state import State
 from newton.sim.types import ShapeGeometry, ShapeMaterials
-from newton.utils.render import SimRendererOpenGL
 
 
 class BodyTransformRecorder:
@@ -99,6 +98,18 @@ class ModelAndStateRecorder:
         self.model_data: dict = {}
 
     def _get_device_from_state(self, state: State):
+        """
+        Retrieves the device from a simulation state object.
+
+        This is done by finding the first `wp.array` attribute in the state
+        and returning its device.
+
+        Args:
+            state (State): The simulation state.
+
+        Returns:
+            The device of the state's arrays, or None if no wp.array is found.
+        """
         # device can be retrieved from any warp array attribute in the state
         for _name, value in state.__dict__.items():
             if isinstance(value, wp.array):
@@ -106,6 +117,19 @@ class ModelAndStateRecorder:
         return None
 
     def _serialize_object_attributes(self, obj):
+        """
+        Serializes the attributes of an object.
+
+        This method handles both standard Python objects and Warp structs,
+        preparing them for serialization by converting attributes to a
+        serializable format.
+
+        Args:
+            obj: The object to serialize.
+
+        Returns:
+            A dictionary containing the serialized attributes.
+        """
         data = {}
         attrs = wp.attr(obj) if hasattr(type(obj), "_wp_struct_meta_") else obj.__dict__
         for name, value in attrs.items():
@@ -115,6 +139,20 @@ class ModelAndStateRecorder:
         return data
 
     def _serialize_value(self, value):
+        """
+        Serializes a single value into a Pickle-compatible format.
+
+        Handles various types including primitives, numpy arrays, and warp arrays.
+        Warp arrays are converted to numpy arrays and stored in a dictionary
+        with a type hint. Special handling for `ShapeMaterials` and `ShapeGeometry`.
+
+        Args:
+            value: The value to serialize.
+
+        Returns:
+            A serializable representation of the value, or None if the value
+            type is not supported for serialization.
+        """
         if value is None:
             return None
 
@@ -138,6 +176,19 @@ class ModelAndStateRecorder:
         return None
 
     def _deserialize_and_restore_value(self, value, device):
+        """
+        Deserializes a value and restores it, including to a specific device.
+
+        This is the counterpart to `_serialize_value`. It reconstructs objects,
+        numpy arrays, and warp arrays from their serialized representation.
+
+        Args:
+            value: The serialized value.
+            device: The device to load warp arrays onto.
+
+        Returns:
+            The deserialized value.
+        """
         if isinstance(value, dict) and "__type__" in value:
             type_name = value["__type__"]
             obj_data = value["data"]
