@@ -173,6 +173,8 @@ def CreateSimRenderer(renderer):
             up_axis: newton.AxisType | None = None,
             show_joints: bool = False,
             show_particles: bool = True,
+            pick_stiffness: float = 20000.0,
+            pick_damping: float = 2000.0,
             **render_kwargs,
         ):
             """
@@ -185,6 +187,8 @@ def CreateSimRenderer(renderer):
                 up_axis (newton.AxisType, optional): The up-axis for the scene. If not provided, it's inferred from the model, or defaults to "Z" if no model is given. Defaults to None.
                 show_joints (bool, optional): Whether to visualize joints. Defaults to False.
                 show_particles (bool, optional): Whether to visualize particles. Defaults to True.
+                pick_stiffness (float, optional): Stiffness of the picking force. Defaults to 20000.0.
+                pick_damping (float, optional): Damping of the picking force. Defaults to 2000.0.
                 **render_kwargs: Additional keyword arguments for the underlying renderer.
             """
             if up_axis is None:
@@ -211,13 +215,16 @@ def CreateSimRenderer(renderer):
             self._contact_points1 = None
 
             # picking state
-            self.pick_body = wp.array([-1], dtype=int, device=model.device if model else "cpu")
+            self.pick_body = wp.array([-1], dtype=int, device=model.device if model else "cpu", pinned=True)
+            # pick_state array format (stored in a warp array for graph capture support):
+            # [0:3] - pick point in world space (vec3)
+            # [3:6] - pick target point in world space (vec3)
+            # [6] - pick spring stiffness
+            # [7] - pick spring damping
             pick_state_np = np.zeros(8, dtype=np.float32)
             if model:
-                # pick_stiffness = 200.0
-                pick_state_np[6] = 20000.0
-                # pick_damping = 20.0
-                pick_state_np[7] = 2000.0
+                pick_state_np[6] = pick_stiffness
+                pick_state_np[7] = pick_damping
             self.pick_state = wp.array(pick_state_np, dtype=float, device=model.device if model else "cpu")
 
             self.pick_dist = 0.0
