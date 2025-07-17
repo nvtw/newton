@@ -19,10 +19,10 @@ import warp as wp
 
 from newton.geometry import GEO_BOX, GEO_CAPSULE, GEO_CYLINDER, GEO_SPHERE
 from newton.geometry.raycast import (
-    ray_intersect_geom,
     ray_intersect_box,
     ray_intersect_capsule,
     ray_intersect_cylinder,
+    ray_intersect_geom,
     ray_intersect_sphere,
 )
 from newton.tests.unittest_utils import add_function_test, get_test_devices
