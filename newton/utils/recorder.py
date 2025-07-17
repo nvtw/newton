@@ -80,7 +80,10 @@ class BodyTransformRecorder:
         """
         self.transforms_history.clear()
         with np.load(file_path) as data:
-            frame_keys = sorted(data.keys(), key=lambda x: int(x.split("_")[1]))
+            try:
+                frame_keys = sorted(data.keys(), key=lambda x: int(x.split("_")[1]))
+            except (IndexError, ValueError) as e:
+                raise ValueError(f"Invalid frame key format in file: {e}")
             for key in frame_keys:
                 transform_np = data[key]
                 transform_wp = wp.array(transform_np, dtype=wp.transform, device=device)
