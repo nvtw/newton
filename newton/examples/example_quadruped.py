@@ -73,26 +73,31 @@ class RecorderImGuiManager(ImGuiManager):
         # Frame slider
         if total_frames > 0:
             changed, self.selected_frame = self.imgui.slider_int("Timeline", self.selected_frame, 0, total_frames - 1)
-            if changed and self.example.paused:
-                transforms = self.recorder.playback(self.selected_frame)
-                if transforms:
-                    self.renderer.update_body_transforms(transforms)
-            # Back/Forward buttons
-            if self.imgui.button(" < "):
-                self.selected_frame = max(0, self.selected_frame - 1)
-                if self.example.paused:
-                    transforms = self.recorder.playback(self.selected_frame)
-                    if transforms:
-                        self.renderer.update_body_transforms(transforms)
+    # Add this helper method to the class
+    def _update_frame(self, frame_id):
+        """Update the selected frame and renderer transforms if paused."""
+        self.selected_frame = frame_id
+        if self.example.paused:
+            transforms = self.recorder.playback(self.selected_frame)
+            if transforms:
+                self.renderer.update_body_transforms(transforms)
 
-            self.imgui.same_line()
+    # Frame slider
+    if total_frames > 0:
+        changed, self.selected_frame = self.imgui.slider_int(
+            "Timeline", self.selected_frame, 0, total_frames - 1
+        )
+        if changed and self.example.paused:
+            self._update_frame(self.selected_frame)
 
-            if self.imgui.button(" > "):
-                self.selected_frame = min(total_frames - 1, self.selected_frame + 1)
-                if self.example.paused:
-                    transforms = self.recorder.playback(self.selected_frame)
-                    if transforms:
-                        self.renderer.update_body_transforms(transforms)
+        # Back/Forward buttons
+        if self.imgui.button(" < "):
+            self._update_frame(max(0, self.selected_frame - 1))
+
+        self.imgui.same_line()
+
+        if self.imgui.button(" > "):
+            self._update_frame(min(total_frames - 1, self.selected_frame + 1))
 
         self.imgui.separator()
 
