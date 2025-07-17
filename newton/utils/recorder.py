@@ -15,14 +15,15 @@
 
 from __future__ import annotations
 
-import numpy as np
-import warp as wp
 import pickle
 
-from newton.utils.render import SimRendererOpenGL
-from newton.sim.state import State
+import numpy as np
+import warp as wp
+
 from newton.sim.model import Model
-from newton.sim.types import ShapeMaterials, ShapeGeometry
+from newton.sim.state import State
+from newton.sim.types import ShapeGeometry, ShapeMaterials
+from newton.utils.render import SimRendererOpenGL
 
 
 class BodyTransformRecorder:
