@@ -737,7 +737,7 @@ def CreateSimRenderer(renderer):
             return p, d, camera_front
 
         def on_mouse_click(self, x, y, button, action):
-            from pyglet.window import mouse
+            from pyglet.window import mouse  # noqa: PLC0415
 
             # want to pick on mouse-down events
             if action != 1:  # Press
