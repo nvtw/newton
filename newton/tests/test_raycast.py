@@ -17,7 +17,6 @@ import unittest
 
 import warp as wp
 
-import newton
 from newton.geometry import GEO_BOX, GEO_CAPSULE, GEO_CYLINDER, GEO_SPHERE
 from newton.geometry.raycast import (
     geom_ray_intersect,

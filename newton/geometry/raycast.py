@@ -23,7 +23,6 @@ from newton.geometry import (
     GEO_SPHERE,
 )
 
-
 # A small constant to avoid division by zero and other numerical issues
 MINVAL = 1e-15
 
