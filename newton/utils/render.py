@@ -19,7 +19,6 @@ from collections import defaultdict
 
 import numpy as np
 import warp as wp
-from pyglet.window import mouse
 from warp.render import OpenGLRenderer, UsdRenderer
 from warp.render.utils import solidify_mesh, tab10_color_map
 
@@ -738,6 +737,8 @@ def CreateSimRenderer(renderer):
             return p, d, camera_front
 
         def on_mouse_click(self, x, y, button, action):
+            from pyglet.window import mouse
+
             # want to pick on mouse-down events
             if action != 1:  # Press
                 return
