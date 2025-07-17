@@ -214,7 +214,10 @@ def CreateSimRenderer(renderer):
             self._contact_points1 = None
 
             # picking state
-            self.pick_body = wp.array([-1], dtype=int, device=model.device if model else "cpu", pinned=True)
+            if model and model.device.is_cuda:
+                self.pick_body = wp.array([-1], dtype=int, pinned=True)
+            else:
+                self.pick_body = wp.array([-1], dtype=int, device="cpu")
             # pick_state array format (stored in a warp array for graph capture support):
             # [0:3] - pick point in world space (vec3)
             # [3:6] - pick target point in world space (vec3)
