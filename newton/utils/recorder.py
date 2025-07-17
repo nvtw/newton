@@ -29,14 +29,10 @@ from newton.utils.render import SimRendererOpenGL
 class BodyTransformRecorder:
     """A class to record and playback simulation body transforms."""
 
-    def __init__(self, renderer: SimRendererOpenGL):
+    def __init__(self):
         """
         Initializes the Recorder.
-
-        Args:
-            renderer: The simulation renderer instance.
         """
-        self.renderer = renderer
         self.transforms_history: list[wp.array] = []
 
     def record(self, body_transforms: wp.array):
@@ -49,19 +45,21 @@ class BodyTransformRecorder:
         """
         self.transforms_history.append(wp.clone(body_transforms))
 
-    def playback(self, frame_id: int):
+    def playback(self, frame_id: int) -> wp.array | None:
         """
-        Plays back a recorded frame by updating the renderer with the stored body transforms.
+        Plays back a recorded frame by returning the stored body transforms.
 
         Args:
             frame_id (int): The integer index of the frame to be played back.
+
+        Returns:
+            The body transforms for the given frame, or None if the frame_id is out of bounds.
         """
         if not (0 <= frame_id < len(self.transforms_history)):
             print(f"Warning: frame_id {frame_id} is out of bounds. Playback skipped.")
-            return
+            return None
 
-        body_transforms = self.transforms_history[frame_id]
-        self.renderer.update_body_transforms(body_transforms)
+        return self.transforms_history[frame_id]
 
     def save_to_file(self, file_path: str):
         """
@@ -107,6 +105,15 @@ class ModelAndStateRecorder:
                 return value.device
         return None
 
+    def _serialize_object_attributes(self, obj):
+        data = {}
+        attrs = wp.attr(obj) if hasattr(type(obj), "_wp_struct_meta_") else obj.__dict__
+        for name, value in attrs.items():
+            serialized_value = self._serialize_value(value)
+            if serialized_value is not None:
+                data[name] = serialized_value
+        return data
+
     def _serialize_value(self, value):
         if value is None:
             return None
@@ -130,14 +137,33 @@ class ModelAndStateRecorder:
                 }
         return None
 
-    def _serialize_object_attributes(self, obj):
-        data = {}
-        attrs = wp.attr(obj) if hasattr(type(obj), "_wp_struct_meta_") else obj.__dict__
-        for name, value in attrs.items():
-            serialized_value = self._serialize_value(value)
-            if serialized_value is not None:
-                data[name] = serialized_value
-        return data
+    def _deserialize_and_restore_value(self, value, device):
+        if isinstance(value, dict) and "__type__" in value:
+            type_name = value["__type__"]
+            obj_data = value["data"]
+
+            if type_name == "wp.array":
+                return wp.array(obj_data, device=device)
+
+            instance = None
+            if type_name == "ShapeMaterials":
+                instance = ShapeMaterials()
+            elif type_name == "ShapeGeometry":
+                instance = ShapeGeometry()
+
+            if instance:
+                for name, s_value in obj_data.items():
+                    # For wp.structs, we need to handle attribute setting carefully.
+                    if hasattr(type(instance), "_wp_struct_meta_"):
+                        restored_value = self._deserialize_and_restore_value(s_value, device)
+                        if restored_value is not None:
+                            setattr(instance, name, restored_value)
+                    else:
+                        setattr(instance, name, self._deserialize_and_restore_value(s_value, device))
+                return instance
+        elif isinstance(value, np.ndarray):
+            return value
+        return value
 
     def record(self, state: State):
         """
@@ -181,34 +207,6 @@ class ModelAndStateRecorder:
             if hasattr(state, name):
                 value_wp = wp.array(value_np, device=device)
                 setattr(state, name, value_wp)
-
-    def _deserialize_and_restore_value(self, value, device):
-        if isinstance(value, dict) and "__type__" in value:
-            type_name = value["__type__"]
-            obj_data = value["data"]
-
-            if type_name == "wp.array":
-                return wp.array(obj_data, device=device)
-
-            instance = None
-            if type_name == "ShapeMaterials":
-                instance = ShapeMaterials()
-            elif type_name == "ShapeGeometry":
-                instance = ShapeGeometry()
-
-            if instance:
-                for name, s_value in obj_data.items():
-                    # For wp.structs, we need to handle attribute setting carefully.
-                    if hasattr(type(instance), "_wp_struct_meta_"):
-                        restored_value = self._deserialize_and_restore_value(s_value, device)
-                        if restored_value is not None:
-                            setattr(instance, name, restored_value)
-                    else:
-                        setattr(instance, name, self._deserialize_and_restore_value(s_value, device))
-                return instance
-        elif isinstance(value, np.ndarray):
-            return value
-        return value
 
     def playback_model(self, model: Model):
         """

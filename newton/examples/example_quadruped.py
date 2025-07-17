@@ -33,14 +33,6 @@ import newton.sim
 import newton.utils
 from newton.utils.recorder import BodyTransformRecorder, ModelAndStateRecorder
 
-try:
-    import tkinter as tk
-    from tkinter import filedialog
-
-    tkinter_available = True
-except ImportError:
-    tkinter_available = False
-
 
 class RecorderImGuiManager(ImGuiManager):
     """An ImGui manager for controlling simulation playback with a recorder."""
@@ -83,54 +75,55 @@ class RecorderImGuiManager(ImGuiManager):
         if total_frames > 0:
             changed, self.selected_frame = self.imgui.slider_int("Timeline", self.selected_frame, 0, total_frames - 1)
             if changed and self.example.paused:
-                self.recorder.playback(self.selected_frame)
+                transforms = self.recorder.playback(self.selected_frame)
+                if transforms:
+                    self.renderer.update_body_transforms(transforms)
             # Back/Forward buttons
             if self.imgui.button(" < "):
                 self.selected_frame = max(0, self.selected_frame - 1)
                 if self.example.paused:
-                    self.recorder.playback(self.selected_frame)
+                    transforms = self.recorder.playback(self.selected_frame)
+                    if transforms:
+                        self.renderer.update_body_transforms(transforms)
 
             self.imgui.same_line()
 
             if self.imgui.button(" > "):
                 self.selected_frame = min(total_frames - 1, self.selected_frame + 1)
                 if self.example.paused:
-                    self.recorder.playback(self.selected_frame)
+                    transforms = self.recorder.playback(self.selected_frame)
+                    if transforms:
+                        self.renderer.update_body_transforms(transforms)
 
         self.imgui.separator()
 
-        if tkinter_available:
-            if self.imgui.button("Save"):
-                root = tk.Tk()
-                root.withdraw()  # Hide the main window
-                file_path = filedialog.asksaveasfilename(
-                    defaultextension=".npz",
-                    filetypes=[("Numpy Archives", "*.npz"), ("All files", "*.*")],
-                    title="Save Recording",
-                )
-                if file_path:
-                    self.recorder.save_to_file(file_path)
-                    self.state_recorder.save_to_file(file_path + ".pkl")
+        if self.imgui.button("Save"):
+            file_path = self.open_save_file_dialog(
+                defaultextension=".npz",
+                filetypes=[("Numpy Archives", "*.npz"), ("All files", "*.*")],
+                title="Save Recording",
+            )
+            if file_path:
+                self.recorder.save_to_file(file_path)
+                self.state_recorder.save_to_file(file_path + ".pkl")
 
-            self.imgui.same_line()
+        self.imgui.same_line()
 
-            if self.imgui.button("Load"):
-                root = tk.Tk()
-                root.withdraw()  # Hide the main window
-                file_path = filedialog.askopenfilename(
-                    filetypes=[("Numpy Archives", "*.npz"), ("All files", "*.*")],
-                    title="Load Recording",
-                )
-                if file_path:
-                    self.recorder.load_from_file(file_path, device=wp.get_device())
-                    self.state_recorder.load_from_file(file_path + ".pkl")
-                    # When loading, pause the simulation and go to the first frame
-                    self.example.paused = True
-                    self.selected_frame = 0
-                    if len(self.recorder.transforms_history) > 0:
-                        self.recorder.playback(self.selected_frame)
-        else:
-            self.imgui.text("Install tkinter for file dialogs (pip install tk)")
+        if self.imgui.button("Load"):
+            file_path = self.open_load_file_dialog(
+                filetypes=[("Numpy Archives", "*.npz"), ("All files", "*.*")],
+                title="Load Recording",
+            )
+            if file_path:
+                self.recorder.load_from_file(file_path, device=wp.get_device())
+                self.state_recorder.load_from_file(file_path + ".pkl")
+                # When loading, pause the simulation and go to the first frame
+                self.example.paused = True
+                self.selected_frame = 0
+                if len(self.recorder.transforms_history) > 0:
+                    transforms = self.recorder.playback(self.selected_frame)
+                    if transforms:
+                        self.renderer.update_body_transforms(transforms)
 
         self.imgui.end()
 
@@ -202,7 +195,7 @@ class Example:
                 self.model.shape_key,
             )
 
-            self.recorder = BodyTransformRecorder(self.renderer)
+            self.recorder = BodyTransformRecorder()
             self.state_recorder = ModelAndStateRecorder()
             self.gui = RecorderImGuiManager(self.renderer, self.recorder, self.state_recorder, self)
             self.renderer.render_2d_callbacks.append(self.gui.render_frame)
