@@ -31,13 +31,13 @@ import newton
 import newton.examples
 import newton.sim
 import newton.utils
-from newton.utils.recorder import BodyTransformRecorder, ModelAndStateRecorder
+from newton.utils.recorder import BodyTransformRecorder
 
 
 class RecorderImGuiManager(ImGuiManager):
     """An ImGui manager for controlling simulation playback with a recorder."""
 
-    def __init__(self, renderer, recorder, state_recorder, example, window_pos=(10, 10), window_size=(300, 120)):
+    def __init__(self, renderer, recorder, example, window_pos=(10, 10), window_size=(300, 120)):
         super().__init__(renderer)
         if not self.is_available:
             return
@@ -45,7 +45,6 @@ class RecorderImGuiManager(ImGuiManager):
         self.window_pos = window_pos
         self.window_size = window_size
         self.recorder = recorder
-        self.state_recorder = state_recorder
         self.example = example
         self.selected_frame = 0
 
@@ -105,7 +104,6 @@ class RecorderImGuiManager(ImGuiManager):
             )
             if file_path:
                 self.recorder.save_to_file(file_path)
-                self.state_recorder.save_to_file(file_path + ".pkl")
 
         self.imgui.same_line()
 
@@ -116,7 +114,6 @@ class RecorderImGuiManager(ImGuiManager):
             )
             if file_path:
                 self.recorder.load_from_file(file_path, device=wp.get_device())
-                self.state_recorder.load_from_file(file_path + ".pkl")
                 # When loading, pause the simulation and go to the first frame
                 self.example.paused = True
                 self.selected_frame = 0
@@ -196,14 +193,12 @@ class Example:
             )
 
             self.recorder = BodyTransformRecorder()
-            self.state_recorder = ModelAndStateRecorder()
-            self.gui = RecorderImGuiManager(self.renderer, self.recorder, self.state_recorder, self)
+            self.gui = RecorderImGuiManager(self.renderer, self.recorder, self)
             self.renderer.render_2d_callbacks.append(self.gui.render_frame)
             self.paused = False
         else:
             self.renderer = None
             self.recorder = None
-            self.state_recorder = None
             self.gui = None
             self.paused = False
 
@@ -243,9 +238,6 @@ class Example:
 
         if self.recorder:
             self.recorder.record(self.state_0.body_q)
-        if self.state_recorder:
-            self.state_recorder.record(self.state_0)
-            self.state_recorder.record_model(self.model)
 
     def render(self):
         if self.renderer is None:
