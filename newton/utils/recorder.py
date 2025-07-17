@@ -252,7 +252,11 @@ class ModelAndStateRecorder:
             return
 
         state_data = self.history[frame_id]
-        device = self._get_device_from_state(state)
+        try:
+            device = self._get_device_from_state(state)
+        except ValueError:
+            print("Warning: Unable to determine device from state. Playback skipped.")
+            return
 
         for name, value_np in state_data.items():
             if hasattr(state, name):
