@@ -1293,6 +1293,7 @@ class SimRendererOpenGL(CreateSimRenderer(renderer=OpenGLRenderer)):
         Keyboard shortcuts available during rendering:
 
         - W, A, S, D (or arrow keys) + mouse: FPS-style camera movement
+        - RIGHT-CLICK + DRAG: Pick and move rigid bodies
         - X: Toggle wireframe rendering
         - B: Toggle backface culling
         - C: Toggle coordinate system axes

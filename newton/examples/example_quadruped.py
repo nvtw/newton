@@ -20,6 +20,8 @@
 # from a URDF using the newton.ModelBuilder().
 # Note this example does not include a trained policy.
 #
+# Users can pick bodies by right-clicking and dragging with the mouse.
+#
 ###########################################################################
 
 
