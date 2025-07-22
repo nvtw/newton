@@ -91,12 +91,10 @@ class Example:
             self.recorder = BodyTransformRecorder()
             self.gui = RecorderImGuiManager(self.renderer, self.recorder, self)
             self.renderer.render_2d_callbacks.append(self.gui.render_frame)
-            self.paused = False
         else:
             self.renderer = None
             self.recorder = None
             self.gui = None
-            self.paused = False
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -114,12 +112,22 @@ class Example:
         else:
             self.graph = None
 
+    @property
+    def paused(self):
+        if self.renderer:
+            return self.renderer.paused
+        return False
+
+    @paused.setter
+    def paused(self, value):
+        if self.renderer:
+            self.renderer.paused = value
+
     def simulate(self):
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
             if self.renderer and hasattr(self.renderer, "apply_picking_force"):
                 self.renderer.apply_picking_force(self.state_0)
-                print("apply_picking_force")
             self.contacts = self.model.collide(self.state_0)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
