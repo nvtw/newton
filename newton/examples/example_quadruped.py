@@ -88,23 +88,6 @@ class Example:
 
         if stage_path:
             self.renderer = newton.utils.SimRendererOpenGL(self.model, path=stage_path)
-            body_names = self.renderer.populate_bodies(self.model.body_key)
-
-            geo_shape = {}
-            self.renderer.populate_shapes(
-                body_names,
-                geo_shape,
-                self.model.shape_body.numpy(),
-                self.model.shape_geo_src,
-                self.model.shape_geo.type.numpy(),
-                self.model.shape_geo.scale.numpy(),
-                self.model.shape_geo.thickness.numpy(),
-                self.model.shape_geo.is_solid.numpy(),
-                self.model.shape_transform.numpy(),
-                self.model.shape_flags.numpy(),
-                self.model.shape_key,
-            )
-
             self.recorder = BodyTransformRecorder()
             self.gui = RecorderImGuiManager(self.renderer, self.recorder, self)
             self.renderer.render_2d_callbacks.append(self.gui.render_frame)
@@ -162,7 +145,8 @@ class Example:
         with wp.ScopedTimer("render"):
             self.renderer.begin_frame(self.sim_time)
             if not self.paused:
-                self.renderer.update_body_transforms(self.state_0.body_q)
+                self.renderer.render(self.state_0)
+                self.renderer.render_contacts(self.state_0.body_q, self.contacts, contact_point_radius=1e-2)
             self.renderer.end_frame()
 
 
