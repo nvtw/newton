@@ -740,7 +740,7 @@ def CreateSimRenderer(renderer):
             return p, d, camera_front
 
         def on_mouse_click(self, x, y, button, action):
-            from pyglet.window import mouse
+            from pyglet.window import mouse  # noqa: PLC0415
 
             # want to pick on mouse-down events
             if action != 1:  # Press
@@ -1028,7 +1028,7 @@ class SimRendererUsd(CreateSimRenderer(renderer=UsdRenderer)):
             state (newton.State): The simulation state to render.
             sim_time (float): The current simulation time.
         """
-        from pxr import Sdf
+        from pxr import Sdf  # noqa: PLC0415
 
         body_q = state.body_q.numpy()
         with Sdf.ChangeBlock():
@@ -1078,7 +1078,7 @@ class SimRendererUsd(CreateSimRenderer(renderer=UsdRenderer)):
 
         Both p_inv_Rot and wp.inv(p_Rot * diag(1/s_x, 1/s_y, 1/s_z)) do not change during sim, so they are computed in __init__.
         """
-        from pxr import Sdf
+        from pxr import Sdf  # noqa: PLC0415
 
         current_prim = self.stage.GetPrimAtPath(Sdf.Path(prim_path))
         parent_path = str(current_prim.GetParent().GetPath())
@@ -1099,7 +1099,7 @@ class SimRendererUsd(CreateSimRenderer(renderer=UsdRenderer)):
         return wp.transform(prim_translate, prim_quat)
 
     def _update_usd_prim_xform(self, prim_path: str, warp_xform: wp.transform):
-        from pxr import Gf, Sdf, UsdGeom
+        from pxr import Gf, Sdf, UsdGeom  # noqa: PLC0415
 
         prim = self.stage.GetPrimAtPath(Sdf.Path(prim_path))
 
@@ -1117,7 +1117,7 @@ class SimRendererUsd(CreateSimRenderer(renderer=UsdRenderer)):
     # TODO: if _compute_parents_inverses turns to be too slow, then we should consider using a UsdGeomXformCache as described here:
     # https://openusd.org/release/api/class_usd_geom_imageable.html#a4313664fa692f724da56cc254bce70fc
     def _compute_parents_inverses(self, prim_path: str, time: Usd.TimeCode) -> tuple[wp.vec3, wp.mat33, wp.quat]:
-        from pxr import Gf, Sdf, UsdGeom
+        from pxr import Gf, Sdf, UsdGeom  # noqa: PLC0415
 
         prim = self.stage.GetPrimAtPath(Sdf.Path(prim_path))
         xform = UsdGeom.Xform(prim)
@@ -1148,7 +1148,7 @@ class SimRendererUsd(CreateSimRenderer(renderer=UsdRenderer)):
         Prefix p is for **parent** prim.
         """
 
-        from pxr import Sdf, Usd
+        from pxr import Sdf, Usd  # noqa: PLC0415
 
         if self.path_body_map is None:
             raise ValueError("self.path_body_map must be set before calling _precompute_parents_xform_inverses")
@@ -1175,7 +1175,7 @@ class SimRendererUsd(CreateSimRenderer(renderer=UsdRenderer)):
         Set USD parameters on the output stage to match the simulation settings.
 
         Must be called after _apply_solver_attributes!"""
-        from pxr import Sdf
+        from pxr import Sdf  # noqa: PLC0415
 
         if self.path_body_map is None:
             raise ValueError("self.path_body_map must be set before calling _prepare_output_stage")
@@ -1190,7 +1190,7 @@ class SimRendererUsd(CreateSimRenderer(renderer=UsdRenderer)):
             SimRendererUsd._xform_to_tqs(prim)
 
     def _create_output_stage(self, source_stage: str | Usd.Stage, output_stage: str | Usd.Stage) -> Usd.Stage:
-        from pxr import Usd
+        from pxr import Usd  # noqa: PLC0415
 
         if isinstance(output_stage, str):
             source_stage = Usd.Stage.Open(source_stage, Usd.Stage.LoadAll)
@@ -1213,7 +1213,7 @@ class SimRendererUsd(CreateSimRenderer(renderer=UsdRenderer)):
 
         The original transformation stack is assumed to be a rigid transformation.
         """
-        from pxr import Gf, Usd, UsdGeom
+        from pxr import Gf, Usd, UsdGeom  # noqa: PLC0415
 
         if time is None:
             time = Usd.TimeCode.Default()
