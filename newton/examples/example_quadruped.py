@@ -125,6 +125,8 @@ class RecorderImGuiManager(ImGuiManager):
 
         self.imgui.end()
 
+wp.config.enable_backward = False
+
 
 class Example:
     def __init__(self, stage_path="example_quadruped.usd", num_envs=8):
