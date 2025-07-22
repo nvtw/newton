@@ -14,7 +14,6 @@
 # limitations under the License.
 
 
-import numpy as np
 import warp as wp
 from warp.render.imgui_manager import ImGuiManager
 
@@ -42,6 +41,10 @@ class RecorderImGuiManager(ImGuiManager):
                 self.renderer.update_body_transforms(transforms)
 
     def draw_ui(self):
+        total_frames = len(self.recorder.transforms_history)
+        if not self.example.paused and total_frames > 0:
+            self.selected_frame = total_frames - 1
+
         self.imgui.set_next_window_size(self.window_size[0], self.window_size[1], self.imgui.ONCE)
         self.imgui.set_next_window_position(self.window_pos[0], self.window_pos[1], self.imgui.ONCE)
 
@@ -57,7 +60,6 @@ class RecorderImGuiManager(ImGuiManager):
 
         self.imgui.same_line()
         # total frames
-        total_frames = len(self.recorder.transforms_history)
         frame_time = self.selected_frame * self.example.frame_dt
         self.imgui.text(
             f"Frame: {self.selected_frame}/{total_frames - 1 if total_frames > 0 else 0} ({frame_time:.2f}s)"
