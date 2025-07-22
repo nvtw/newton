@@ -27,103 +27,13 @@
 
 import numpy as np
 import warp as wp
-from warp.render.imgui_manager import ImGuiManager
 
 import newton
 import newton.examples
 import newton.sim
 import newton.utils
 from newton.utils.recorder import BodyTransformRecorder
-
-
-class RecorderImGuiManager(ImGuiManager):
-    """An ImGui manager for controlling simulation playback with a recorder."""
-
-    def __init__(self, renderer, recorder, example, window_pos=(10, 10), window_size=(300, 120)):
-        super().__init__(renderer)
-        if not self.is_available:
-            return
-
-        self.window_pos = window_pos
-        self.window_size = window_size
-        self.recorder = recorder
-        self.example = example
-        self.selected_frame = 0
-
-    def _update_frame(self, frame_id):
-        """Update the selected frame and renderer transforms if paused."""
-        self.selected_frame = frame_id
-        if self.example.paused:
-            transforms = self.recorder.playback(self.selected_frame)
-            if transforms:
-                self.renderer.update_body_transforms(transforms)
-
-    def draw_ui(self):
-        self.imgui.set_next_window_size(self.window_size[0], self.window_size[1], self.imgui.ONCE)
-        self.imgui.set_next_window_position(self.window_pos[0], self.window_pos[1], self.imgui.ONCE)
-
-        self.imgui.begin("Recorder Controls")
-
-        # Start/Stop button
-        if self.example.paused:
-            if self.imgui.button("Resume"):
-                self.example.paused = False
-        else:
-            if self.imgui.button("Pause"):
-                self.example.paused = True
-
-        self.imgui.same_line()
-        # total frames
-        total_frames = len(self.recorder.transforms_history)
-        frame_time = self.selected_frame * self.example.frame_dt
-        self.imgui.text(
-            f"Frame: {self.selected_frame}/{total_frames - 1 if total_frames > 0 else 0} ({frame_time:.2f}s)"
-        )
-
-        # Frame slider
-        if total_frames > 0:
-            changed, self.selected_frame = self.imgui.slider_int("Timeline", self.selected_frame, 0, total_frames - 1)
-            if changed and self.example.paused:
-                self._update_frame(self.selected_frame)
-
-            # Back/Forward buttons
-            if self.imgui.button(" < "):
-                self._update_frame(max(0, self.selected_frame - 1))
-
-            self.imgui.same_line()
-
-            if self.imgui.button(" > "):
-                self._update_frame(min(total_frames - 1, self.selected_frame + 1))
-
-        self.imgui.separator()
-
-        if self.imgui.button("Save"):
-            file_path = self.open_save_file_dialog(
-                defaultextension=".npz",
-                filetypes=[("Numpy Archives", "*.npz"), ("All files", "*.*")],
-                title="Save Recording",
-            )
-            if file_path:
-                self.recorder.save_to_file(file_path)
-
-        self.imgui.same_line()
-
-        if self.imgui.button("Load"):
-            file_path = self.open_load_file_dialog(
-                filetypes=[("Numpy Archives", "*.npz"), ("All files", "*.*")],
-                title="Load Recording",
-            )
-            if file_path:
-                self.recorder.load_from_file(file_path, device=wp.get_device())
-                # When loading, pause the simulation and go to the first frame
-                self.example.paused = True
-                self.selected_frame = 0
-                if len(self.recorder.transforms_history) > 0:
-                    transforms = self.recorder.playback(self.selected_frame)
-                    if transforms:
-                        self.renderer.update_body_transforms(transforms)
-
-        self.imgui.end()
+from newton.utils.recorder_gui import RecorderImGuiManager
 
 wp.config.enable_backward = False
 
@@ -177,7 +87,7 @@ class Example:
         # self.solver = newton.solvers.MuJoCoSolver(self.model)
 
         if stage_path:
-            self.renderer = newton.utils.SimRendererOpenGL(path=stage_path)
+            self.renderer = newton.utils.SimRendererOpenGL(self.model, path=stage_path)
             body_names = self.renderer.populate_bodies(self.model.body_key)
 
             geo_shape = {}
@@ -226,6 +136,7 @@ class Example:
             self.state_0.clear_forces()
             if self.renderer and hasattr(self.renderer, "apply_picking_force"):
                 self.renderer.apply_picking_force(self.state_0)
+                print("apply_picking_force")
             self.contacts = self.model.collide(self.state_0)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
