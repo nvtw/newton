@@ -24,9 +24,10 @@
 #
 ###########################################################################
 
-
 import numpy as np
 import warp as wp
+
+wp.config.enable_backward = False
 
 import newton
 import newton.examples
@@ -34,8 +35,6 @@ import newton.sim
 import newton.utils
 from newton.utils.recorder import BasicRecorder
 from newton.utils.recorder_gui import RecorderImGuiManager
-
-wp.config.enable_backward = False
 
 
 class Example:
