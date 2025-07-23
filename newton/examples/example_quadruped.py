@@ -32,7 +32,7 @@ import newton
 import newton.examples
 import newton.sim
 import newton.utils
-from newton.utils.recorder import BodyTransformRecorder
+from newton.utils.recorder import BasicRecorder
 from newton.utils.recorder_gui import RecorderImGuiManager
 
 wp.config.enable_backward = False
@@ -88,7 +88,7 @@ class Example:
 
         if stage_path:
             self.renderer = newton.utils.SimRendererOpenGL(self.model, path=stage_path)
-            self.recorder = BodyTransformRecorder()
+            self.recorder = BasicRecorder()
             self.gui = RecorderImGuiManager(self.renderer, self.recorder, self)
             self.renderer.render_2d_callbacks.append(self.gui.render_frame)
         else:
@@ -121,7 +121,11 @@ class Example:
     @paused.setter
     def paused(self, value):
         if self.renderer:
+            if self.renderer.paused == value:
+                return
             self.renderer.paused = value
+            if self.gui:
+                self.gui._clear_contact_points()
 
     def simulate(self):
         for _ in range(self.sim_substeps):
@@ -144,7 +148,12 @@ class Example:
         self.sim_time += self.frame_dt
 
         if self.recorder:
-            self.recorder.record(self.state_0.body_q)
+            if self.renderer:
+                self.renderer.compute_contact_rendering_points(self.state_0.body_q, self.contacts)
+                contact_points = [self.renderer.contact_points0, self.renderer.contact_points1]
+                self.recorder.record(self.state_0.body_q, contact_points)
+            else:
+                self.recorder.record(self.state_0.body_q)
 
     def render(self):
         if self.renderer is None:
@@ -154,7 +163,10 @@ class Example:
             self.renderer.begin_frame(self.sim_time)
             if not self.paused:
                 self.renderer.render(self.state_0)
-                self.renderer.render_contacts(self.state_0.body_q, self.contacts, contact_point_radius=1e-2)
+                self.renderer.render_computed_contacts(contact_point_radius=1e-2)
+            else:
+                # in paused mode, the GUI will handle rendering from the recorder
+                pass
             self.renderer.end_frame()
 
 

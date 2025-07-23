@@ -31,14 +31,30 @@ class RecorderImGuiManager(ImGuiManager):
         self.recorder = recorder
         self.example = example
         self.selected_frame = 0
+        self.num_point_clouds_rendered = 0
+
+    def _clear_contact_points(self):
+        """Clears all rendered contact points."""
+        for i in range(self.num_point_clouds_rendered):
+            # use size 1 as size 0 seems to do nothing
+            self.renderer.render_points(f"contact_points{i}", wp.empty(1, dtype=wp.vec3), radius=1e-2)
+        self.num_point_clouds_rendered = 0
 
     def _update_frame(self, frame_id):
         """Update the selected frame and renderer transforms if paused."""
         self.selected_frame = frame_id
         if self.example.paused:
-            transforms = self.recorder.playback(self.selected_frame)
+            transforms, point_clouds = self.recorder.playback(self.selected_frame)
             if transforms:
                 self.renderer.update_body_transforms(transforms)
+
+            self._clear_contact_points()
+            if point_clouds:
+                for i, pc in enumerate(point_clouds):
+                    self.renderer.render_points(
+                        f"contact_points{i}", pc, radius=1e-2, colors=self.renderer.get_new_color(i)
+                    )
+                self.num_point_clouds_rendered = len(point_clouds)
 
     def draw_ui(self):
         total_frames = len(self.recorder.transforms_history)
@@ -104,8 +120,6 @@ class RecorderImGuiManager(ImGuiManager):
                 self.example.paused = True
                 self.selected_frame = 0
                 if len(self.recorder.transforms_history) > 0:
-                    transforms = self.recorder.playback(self.selected_frame)
-                    if transforms:
-                        self.renderer.update_body_transforms(transforms)
+                    self._update_frame(self.selected_frame)
 
         self.imgui.end()

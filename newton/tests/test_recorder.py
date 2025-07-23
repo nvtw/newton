@@ -22,7 +22,7 @@ import warp as wp
 
 import newton
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-from newton.utils.recorder import BodyTransformRecorder, ModelAndStateRecorder
+from newton.utils.recorder import BasicRecorder, ModelAndStateRecorder
 
 wp.config.quiet = True
 
@@ -32,7 +32,7 @@ class TestRecorder(unittest.TestCase):
 
 
 def test_body_transform_recorder(test: TestRecorder, device):
-    recorder = BodyTransformRecorder()
+    recorder = BasicRecorder()
 
     transform1 = wp.array([wp.transform([1, 2, 3], [0, 0, 0, 1])], dtype=wp.transform, device=device)
     transform2 = wp.array([wp.transform([4, 5, 6], [0, 0, 0, 1])], dtype=wp.transform, device=device)
@@ -51,7 +51,7 @@ def test_body_transform_recorder(test: TestRecorder, device):
     try:
         recorder.save_to_file(file_path)
 
-        new_recorder = BodyTransformRecorder()
+        new_recorder = BasicRecorder()
         new_recorder.load_from_file(file_path, device=device)
 
         test.assertEqual(len(new_recorder.transforms_history), 2)

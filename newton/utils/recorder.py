@@ -25,7 +25,7 @@ from newton.sim.state import State
 from newton.sim.types import ShapeGeometry, ShapeMaterials
 
 
-class BodyTransformRecorder:
+class BasicRecorder:
     """A class to record and playback simulation body transforms."""
 
     def __init__(self):
@@ -33,32 +33,41 @@ class BodyTransformRecorder:
         Initializes the Recorder.
         """
         self.transforms_history: list[wp.array] = []
+        self.point_clouds_history: list[list[wp.array]] = []
 
-    def record(self, body_transforms: wp.array):
+    def record(self, body_transforms: wp.array, point_clouds: list[wp.array] | None = None):
         """
         Records a snapshot of body transforms.
 
         Args:
             body_transforms (wp.array): A warp array representing the body transforms.
                 This is typically retrieved from `state.body_q`.
+            point_clouds (list[wp.array] | None): An optional list of warp arrays representing point clouds.
         """
         self.transforms_history.append(wp.clone(body_transforms))
+        if point_clouds:
+            self.point_clouds_history.append([wp.clone(pc) for pc in point_clouds if pc is not None and pc.size > 0])
+        else:
+            self.point_clouds_history.append([])
 
-    def playback(self, frame_id: int) -> wp.array | None:
+    def playback(self, frame_id: int) -> tuple[wp.array | None, list[wp.array] | None]:
         """
-        Plays back a recorded frame by returning the stored body transforms.
+        Plays back a recorded frame by returning the stored body transforms and point cloud.
 
         Args:
             frame_id (int): The integer index of the frame to be played back.
 
         Returns:
-            The body transforms for the given frame, or None if the frame_id is out of bounds.
+            A tuple containing the body transforms and point clouds for the given
+            frame, or (None, None) if the frame_id is out of bounds.
         """
         if not (0 <= frame_id < len(self.transforms_history)):
             print(f"Warning: frame_id {frame_id} is out of bounds. Playback skipped.")
-            return None
+            return None, None
 
-        return self.transforms_history[frame_id]
+        transforms = self.transforms_history[frame_id]
+        point_clouds = self.point_clouds_history[frame_id] if frame_id < len(self.point_clouds_history) else None
+        return transforms, point_clouds
 
     def save_to_file(self, file_path: str):
         """
@@ -68,6 +77,11 @@ class BodyTransformRecorder:
             file_path (str): The full path to the file where the transforms will be saved.
         """
         history_np = {f"frame_{i}": t.numpy() for i, t in enumerate(self.transforms_history)}
+        for i, pc_list in enumerate(self.point_clouds_history):
+            history_np[f"frame_{i}_points_count"] = len(pc_list)
+            for j, pc in enumerate(pc_list):
+                if pc is not None:
+                    history_np[f"frame_{i}_points_{j}"] = pc.numpy()
         np.savez_compressed(file_path, **history_np)
 
     def load_from_file(self, file_path: str, device=None):
@@ -79,19 +93,39 @@ class BodyTransformRecorder:
             device: The device to load the transforms onto. If None, uses CPU.
         """
         self.transforms_history.clear()
+        self.point_clouds_history.clear()
         with np.load(file_path) as data:
             try:
-                frame_keys = sorted(data.keys(), key=lambda x: int(x.split("_")[1]))
+                transform_keys = [k for k in data.keys() if k.startswith("frame_") and "_points" not in k]
+                frame_keys = sorted(transform_keys, key=lambda x: int(x.split("_")[1]))
             except (IndexError, ValueError) as e:
                 raise ValueError(f"Invalid frame key format in file: {e}") from e
             for key in frame_keys:
+                frame_index_str = key.split("_")[1]
                 transform_np = data[key]
                 transform_wp = wp.array(transform_np, dtype=wp.transform, device=device)
                 self.transforms_history.append(transform_wp)
 
+                pc_list = []
+                count_key = f"frame_{frame_index_str}_points_count"
+                if count_key in data:
+                    count = int(data[count_key].item())
+                    for j in range(count):
+                        points_key = f"frame_{frame_index_str}_points_{j}"
+                        if points_key in data:
+                            points_np = data[points_key]
+                            points_wp = wp.array(points_np, dtype=wp.vec3, device=device)
+                            pc_list.append(points_wp)
+                self.point_clouds_history.append(pc_list)
+
 
 class ModelAndStateRecorder:
-    """A class to record and playback simulation model and state."""
+    """A class to record and playback simulation model and state using pickle serialization.
+
+    WARNING: This class uses pickle for serialization which is UNSAFE and can execute
+    arbitrary code when loading files. Only load recordings from TRUSTED sources that
+    you have verified. Loading recordings from untrusted sources could lead to malicious
+    code execution and compromise your system."""
 
     def __init__(self):
         """
