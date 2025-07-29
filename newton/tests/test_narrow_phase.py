@@ -19,7 +19,7 @@ import numpy as np
 import warp as wp
 
 from newton.geometry.narrow_phase import NarrowPhaseContactGeneration
-from newton.geometry.types import GEO_SPHERE, GEO_BOX, GEO_CAPSULE, GEO_CYLINDER, GEO_PLANE
+from newton.geometry.types import GEO_BOX, GEO_CAPSULE, GEO_CYLINDER, GEO_PLANE, GEO_SPHERE
 
 
 def quat_from_euler_degree(e: wp.vec3, i: int, j: int, k: int) -> wp.quat:

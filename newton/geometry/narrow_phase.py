@@ -14,8 +14,9 @@
 # limitations under the License.
 
 import warp as wp
+
 from .primitive_collisions import *
-from .types import GEO_SPHERE, GEO_BOX, GEO_CAPSULE, GEO_CYLINDER, GEO_PLANE
+from .types import GEO_BOX, GEO_CAPSULE, GEO_CYLINDER, GEO_PLANE, GEO_SPHERE
 
 
 @wp.struct
@@ -275,7 +276,7 @@ class NarrowPhaseContactGeneration:
 
     The narrow phase collision detection computes:
     - Contact positions in world space
-    - Contact normals (pointing from first to second geometry in pair) 
+    - Contact normals (pointing from first to second geometry in pair)
     - Contact penetration distances (negative if overlapping)
     - Contact tangent vectors for friction calculations
 
