@@ -214,23 +214,6 @@ class TestNarrowPhase(unittest.TestCase):
         contact_count = self._run_narrow_phase_test(geom_types, geom_data, transforms, expected_contacts=True)
         self.assertGreater(contact_count, 0)
 
-    # def test_plane_ellipsoid_collision(self):
-    #     """Test Plane-Ellipsoid collision detection"""
-    #     geom_types = [GEO_PLANE, GEO_ELLIPSOID]
-
-    #     plane_transform = wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity())
-    #     ellipsoid_transform = wp.transform(wp.vec3(0.0, 0.0, 0.5), wp.quat_identity())
-
-    #     geom_data = [
-    #         wp.vec4(0.0, 0.0, 0.0, 0.0),  # Plane data
-    #         wp.vec4(0.5, 0.7, 1.0, 0.0),  # Ellipsoid radii
-    #     ]
-
-    #     transforms = [plane_transform, ellipsoid_transform]
-
-    #     contact_count = self._run_narrow_phase_test(geom_types, geom_data, transforms, expected_contacts=True)
-    #     self.assertGreater(contact_count, 0)
-
     def test_sphere_sphere_collision(self):
         """Test Sphere-Sphere collision detection"""
         geom_types = [GEO_SPHERE, GEO_SPHERE]
@@ -399,7 +382,7 @@ class TestNarrowPhase(unittest.TestCase):
     #     box1_transform = wp.transform(wp.vec3(0.0, 0.0, 0.0), box1_quat)
 
     #     # Second box at pos="0 0 1.6" with euler="44 0 90" rotation
-    #     box2_quat = quat_from_euler_degree(wp.vec3(44, 0, 90), 0, 2, 1)
+    #     box2_quat = quat_from_euler_degree(wp.vec3(44, 0, 90), 0, 1, 2)
     #     box2_transform = wp.transform(wp.vec3(0.0, 0.0, 1.6), box2_quat)
 
     #     geom_data = [
@@ -490,24 +473,25 @@ class TestNarrowPhase(unittest.TestCase):
         contact_count = self._run_narrow_phase_test(geom_types, geom_data, transforms, expected_contacts=True)
         self.assertGreater(contact_count, 0)
 
-    # def test_sphere_capsule_side(self):
-    #     """Test Sphere-Capsule collision from side (adapted from sphere_capsule fixture)"""
-    #     geom_types = [GEO_SPHERE, GEO_CAPSULE]
+    def test_sphere_capsule_side(self):
+        """Test Sphere-Capsule collision from side (adapted from sphere_capsule fixture)"""
+        geom_types = [GEO_SPHERE, GEO_CAPSULE]
 
-    #     sphere_transform = wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity())
-    #     # Capsule fromto="0.3 0 0 0.7 0 0" - horizontal capsule
-    #     capsule_center = wp.vec3(0.5, 0.0, 0.0)
-    #     capsule_transform = wp.transform(capsule_center, wp.quat_identity())
+        sphere_transform = wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity())
+        # Capsule fromto="0.3 0 0 0.7 0 0" - horizontal capsule
+        # This defines a capsule along the x-axis, centered at x=0.5, with half-length 0.2
+        capsule_quat = quat_from_euler_degree(wp.vec3(0.0, 90.0, 0.0), 0, 1, 2)  # Rotate to align with x-axis
+        capsule_transform = wp.transform(wp.vec3(0.5, 0.0, 0.0), capsule_quat)
 
-    #     geom_data = [
-    #         wp.vec4(0.25, 0.0, 0.0, 0.0),  # Sphere radius = 0.25
-    #         wp.vec4(0.1, 0.2, 0.0, 0.0),  # Capsule: radius=0.1, half_length=0.2
-    #     ]
+        geom_data = [
+            wp.vec4(0.25, 0.0, 0.0, 0.0),  # Sphere radius = 0.25
+            wp.vec4(0.1, 0.2, 0.0, 0.0),  # Capsule: radius=0.1, half_length=0.2
+        ]
 
-    #     transforms = [sphere_transform, capsule_transform]
+        transforms = [sphere_transform, capsule_transform]
 
-    #     contact_count = self._run_narrow_phase_test(geom_types, geom_data, transforms, expected_contacts=True)
-    #     self.assertGreater(contact_count, 0)
+        contact_count = self._run_narrow_phase_test(geom_types, geom_data, transforms, expected_contacts=True)
+        self.assertGreater(contact_count, 0)
 
     def test_sphere_cylinder_corner(self):
         """Test Sphere-Cylinder collision at corner (adapted from sphere_cylinder_corner fixture)"""
@@ -590,59 +574,59 @@ class TestNarrowPhase(unittest.TestCase):
         contact_count = self._run_narrow_phase_test(geom_types, geom_data, transforms, expected_contacts=True)
         self.assertGreater(contact_count, 0)
 
-    # def test_sphere_box_shallow(self):
-    #     """Test Sphere-Box shallow collision (adapted from sphere_box_shallow fixture)"""
-    #     geom_types = [GEO_BOX, GEO_SPHERE]
+    def test_sphere_box_shallow(self):
+        """Test Sphere-Box shallow collision (adapted from sphere_box_shallow fixture)"""
+        geom_types = [GEO_BOX, GEO_SPHERE]
 
-    #     box_transform = wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity())
-    #     sphere_transform = wp.transform(wp.vec3(-0.6, -0.6, 0.7), wp.quat_identity())
+        box_transform = wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity())
+        sphere_transform = wp.transform(wp.vec3(-0.6, -0.6, 0.7), wp.quat_identity())
 
-    #     geom_data = [
-    #         wp.vec4(0.5, 0.5, 0.5, 0.0),  # Box half-extents
-    #         wp.vec4(0.5, 0.0, 0.0, 0.0),  # Sphere radius = 0.5
-    #     ]
+        geom_data = [
+            wp.vec4(0.5, 0.5, 0.5, 0.0),  # Box half-extents
+            wp.vec4(0.5, 0.0, 0.0, 0.0),  # Sphere radius = 0.5
+        ]
 
-    #     transforms = [box_transform, sphere_transform]
+        transforms = [box_transform, sphere_transform]
 
-    #     contact_count = self._run_narrow_phase_test(geom_types, geom_data, transforms, expected_contacts=True)
-    #     self.assertGreater(contact_count, 0)
+        contact_count = self._run_narrow_phase_test(geom_types, geom_data, transforms, expected_contacts=True)
+        self.assertGreater(contact_count, 0)
 
-    # def test_capsule_box_edge(self):
-    #     """Test Capsule-Box edge collision (adapted from capsule_box_edge fixture)"""
-    #     geom_types = [GEO_BOX, GEO_CAPSULE]
+    def test_capsule_box_edge(self):
+        """Test Capsule-Box edge collision (adapted from capsule_box_edge fixture)"""
+        geom_types = [GEO_BOX, GEO_CAPSULE]
 
-    #     box_transform = wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity())
+        box_transform = wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity())
 
-    #     # Capsule at pos="0.4 0.2 0.8" with euler="0 -40 0" rotation
-    #     capsule_quat = quat_from_euler_degree(wp.vec3(0, -40, 0), 0, 1, 2)
-    #     capsule_transform = wp.transform(wp.vec3(0.4, 0.2, 0.8), capsule_quat)
+        # Capsule at pos="0.4 0.2 0.8" with euler="0 -40 0" rotation
+        capsule_quat = quat_from_euler_degree(wp.vec3(0, -40, 0), 0, 1, 2)
+        capsule_transform = wp.transform(wp.vec3(0.4, 0.2, 0.8), capsule_quat)
 
-    #     geom_data = [
-    #         wp.vec4(0.5, 0.4, 0.9, 0.0),  # Box half-extents
-    #         wp.vec4(0.5, 0.8, 0.0, 0.0),  # Capsule: radius=0.5, half_length=0.8
-    #     ]
+        geom_data = [
+            wp.vec4(0.5, 0.4, 0.9, 0.0),  # Box half-extents
+            wp.vec4(0.5, 0.8, 0.0, 0.0),  # Capsule: radius=0.5, half_length=0.8
+        ]
 
-    #     transforms = [box_transform, capsule_transform]
+        transforms = [box_transform, capsule_transform]
 
-    #     contact_count = self._run_narrow_phase_test(geom_types, geom_data, transforms, expected_contacts=True)
-    #     self.assertGreater(contact_count, 0)
+        contact_count = self._run_narrow_phase_test(geom_types, geom_data, transforms, expected_contacts=True)
+        self.assertGreater(contact_count, 0)
 
-    # def test_capsule_box_corner(self):
-    #     """Test Capsule-Box corner collision (adapted from capsule_box_corner fixture)"""
-    #     geom_types = [GEO_BOX, GEO_CAPSULE]
+    def test_capsule_box_corner(self):
+        """Test Capsule-Box corner collision (adapted from capsule_box_corner fixture)"""
+        geom_types = [GEO_BOX, GEO_CAPSULE]
 
-    #     box_transform = wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity())
-    #     capsule_transform = wp.transform(wp.vec3(0.55, 0.6, 0.65), wp.quat_identity())
+        box_transform = wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity())
+        capsule_transform = wp.transform(wp.vec3(0.55, 0.6, 0.65), wp.quat_identity())
 
-    #     geom_data = [
-    #         wp.vec4(0.5, 0.55, 0.6, 0.0),  # Box half-extents
-    #         wp.vec4(0.4, 0.6, 0.0, 0.0),  # Capsule: radius=0.4, half_length=0.6
-    #     ]
+        geom_data = [
+            wp.vec4(0.5, 0.55, 0.6, 0.0),  # Box half-extents
+            wp.vec4(0.4, 0.6, 0.0, 0.0),  # Capsule: radius=0.4, half_length=0.6
+        ]
 
-    #     transforms = [box_transform, capsule_transform]
+        transforms = [box_transform, capsule_transform]
 
-    #     contact_count = self._run_narrow_phase_test(geom_types, geom_data, transforms, expected_contacts=True)
-    #     self.assertGreater(contact_count, 0)
+        contact_count = self._run_narrow_phase_test(geom_types, geom_data, transforms, expected_contacts=True)
+        self.assertGreater(contact_count, 0)
 
     # def test_capsule_box_face_tip(self):
     #     """Test Capsule-Box face tip collision (adapted from capsule_box_face_tip fixture)"""
@@ -661,22 +645,22 @@ class TestNarrowPhase(unittest.TestCase):
     #     contact_count = self._run_narrow_phase_test(geom_types, geom_data, transforms, expected_contacts=True)
     #     self.assertGreater(contact_count, 0)
 
-    # def test_capsule_box_face_flat(self):
-    #     """Test Capsule-Box face flat collision (adapted from capsule_box_face_flat fixture)"""
-    #     geom_types = [GEO_BOX, GEO_CAPSULE]
+    def test_capsule_box_face_flat(self):
+        """Test Capsule-Box face flat collision (adapted from capsule_box_face_flat fixture)"""
+        geom_types = [GEO_BOX, GEO_CAPSULE]
 
-    #     box_transform = wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity())
-    #     capsule_transform = wp.transform(wp.vec3(0.5, 0.2, 0.0), wp.quat_identity())
+        box_transform = wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity())
+        capsule_transform = wp.transform(wp.vec3(0.5, 0.2, 0.0), wp.quat_identity())
 
-    #     geom_data = [
-    #         wp.vec4(0.5, 0.7, 0.9, 0.0),  # Box half-extents
-    #         wp.vec4(0.2, 0.4, 0.0, 0.0),  # Capsule: radius=0.2, half_length=0.4
-    #     ]
+        geom_data = [
+            wp.vec4(0.5, 0.7, 0.9, 0.0),  # Box half-extents
+            wp.vec4(0.2, 0.4, 0.0, 0.0),  # Capsule: radius=0.2, half_length=0.4
+        ]
 
-    #     transforms = [box_transform, capsule_transform]
+        transforms = [box_transform, capsule_transform]
 
-    #     contact_count = self._run_narrow_phase_test(geom_types, geom_data, transforms, expected_contacts=True)
-    #     self.assertGreater(contact_count, 0)
+        contact_count = self._run_narrow_phase_test(geom_types, geom_data, transforms, expected_contacts=True)
+        self.assertGreater(contact_count, 0)
 
     def test_no_collision_distant_spheres(self):
         """Test no collision detection for distant spheres"""

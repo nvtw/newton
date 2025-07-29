@@ -46,7 +46,7 @@ def contact_writer(contact: ContactPoint, args: WriteContactArgs):
 
 
 @wp.kernel(enable_backward=False)
-def narrow_phase(   
+def narrow_phase(
     candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),  # Maybe colliding pairs - usually provided by broad phase
     num_candidate_pair: wp.array(dtype=wp.int32, ndim=1),  # Size one array - usually provided by broad phase
     geom_types: wp.array(dtype=wp.int32, ndim=1),  # All geom types, pairs index into it
@@ -72,6 +72,14 @@ def narrow_phase(
     geom_type_1 = geom_types[pair[0]]
     geom_type_2 = geom_types[pair[1]]
 
+    if geom_type_1 > geom_type_2:
+        tmp = geom_type_1
+        geom_type_1 = geom_type_2
+        geom_type_2 = tmp
+        tmp = pair[0]
+        pair[0] = pair[1]
+        pair[1] = tmp
+
     data_1 = geom_data[pair[0]]
     data_2 = geom_data[pair[1]]
     transform_1 = geom_transform[pair[0]]
@@ -92,7 +100,7 @@ def narrow_phase(
     writer_args.pair = pair
 
     # Plane-Sphere
-    if geom_type_1 == GEO_PLANE and geom_type_2 == GEO_SPHERE:
+    if geom_type_1 == GEO_SPHERE and geom_type_2 == GEO_PLANE:
         plane_normal = wp.transform_vector(transform_1, wp.vec3(0.0, 0.0, 1.0))
         plane_pos = wp.transform_get_translation(transform_1)
         sphere_center = wp.transform_get_translation(transform_2)
@@ -100,7 +108,7 @@ def narrow_phase(
         wp.static(get_plane_sphere(contact_writer))(plane_normal, plane_pos, sphere_center, sphere_radius, writer_args)
 
     # Plane-Box
-    elif geom_type_1 == GEO_PLANE and geom_type_2 == GEO_BOX:
+    elif geom_type_1 == GEO_BOX and geom_type_2 == GEO_PLANE:
         plane_normal = wp.transform_vector(transform_1, wp.vec3(0.0, 0.0, 1.0))
         plane_pos = wp.transform_get_translation(transform_1)
         box_center = wp.transform_get_translation(transform_2)
@@ -111,7 +119,7 @@ def narrow_phase(
         )
 
     # Plane-Capsule
-    elif geom_type_1 == GEO_PLANE and geom_type_2 == GEO_CAPSULE:
+    elif geom_type_1 == GEO_CAPSULE and geom_type_2 == GEO_PLANE:
         plane_normal = wp.transform_vector(transform_1, wp.vec3(0.0, 0.0, 1.0))
         plane_pos = wp.transform_get_translation(transform_1)
         cap_center = wp.transform_get_translation(transform_2)
@@ -123,7 +131,7 @@ def narrow_phase(
         )
 
     # Plane-Cylinder
-    elif geom_type_1 == GEO_PLANE and geom_type_2 == GEO_CYLINDER:
+    elif geom_type_1 == GEO_CYLINDER and geom_type_2 == GEO_PLANE:
         plane_normal = wp.transform_vector(transform_1, wp.vec3(0.0, 0.0, 1.0))
         plane_pos = wp.transform_get_translation(transform_1)
         cylinder_center = wp.transform_get_translation(transform_2)
@@ -135,7 +143,7 @@ def narrow_phase(
         )
 
     # Plane-Ellipsoid
-    # elif geom_type_1 == GEO_PLANE and geom_type_2 == GEO_ELLIPSOID:
+    # elif geom_type_1 == GEO_ELLIPSOID and geom_type_2 == GEO_PLANE:
     #     plane_normal = wp.transform_vector(transform_1, wp.vec3(0.0, 0.0, 1.0))
     #     plane_pos = wp.transform_get_translation(transform_1)
     #     ellipsoid_center = wp.transform_get_translation(transform_2)
@@ -245,7 +253,7 @@ def narrow_phase(
         )
 
     # Capsule-Box
-    elif geom_type_1 == GEO_CAPSULE and geom_type_2 == GEO_BOX:
+    elif geom_type_1 == GEO_BOX and geom_type_2 == GEO_CAPSULE:
         cap_center = wp.transform_get_translation(transform_1)
         cap_axis = wp.transform_vector(transform_1, wp.vec3(0.0, 0.0, 1.0))
         cap_radius = data_1.x
@@ -288,7 +296,9 @@ class NarrowPhaseContactGeneration:
         geom_types: wp.array(dtype=wp.int32, ndim=1),  # All geom types, pairs index into it
         geom_data: wp.array(dtype=wp.vec4, ndim=1),  # Geom data (radius etc.)
         geom_transform: wp.array(dtype=wp.transform, ndim=1),  # In world space
-        geom_source: wp.array(dtype=wp.uint64, ndim=1), # The index into the source array of meshes, sdfs etc, type define by geom_types
+        geom_source: wp.array(
+            dtype=wp.uint64, ndim=1
+        ),  # The index into the source array of meshes, sdfs etc, type define by geom_types
         geom_cutoff: wp.array(dtype=float, ndim=1),  # per-geom (take the max)
         # Outputs
         contact_pair: wp.array(dtype=wp.vec2i),
