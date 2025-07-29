@@ -354,4 +354,7 @@ class NarrowPhaseContactGeneration:
                 contact_count,
             ],
         )
-        # wp.launch(gjk) # TODO: Add GJK narrow phase
+        # TODO: Add GJK narrow phase
+        # wp.launch(gjk)
+
+        # TODO: Add support for meshes and possible SDFs
