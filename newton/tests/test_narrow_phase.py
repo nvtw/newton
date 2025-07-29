@@ -120,9 +120,9 @@ class TestNarrowPhase(unittest.TestCase):
 
             # Validate contact data
             pairs = self.contact_pair.numpy()[:contact_count]
-            positions = self.contact_position.numpy()[:contact_count]
+            # positions = self.contact_position.numpy()[:contact_count]
             normals = self.contact_normal.numpy()[:contact_count]
-            penetrations = self.contact_penetration.numpy()[:contact_count]
+            # penetrations = self.contact_penetration.numpy()[:contact_count]
             tangents = self.contact_tangent.numpy()[:contact_count]
 
             # Basic sanity checks

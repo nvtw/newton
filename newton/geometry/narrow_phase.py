@@ -15,7 +15,20 @@
 
 import warp as wp
 
-from .primitive_collisions import *
+from .primitive_collisions import (
+    ContactPoint,
+    get_box_box,
+    get_capsule_box,
+    get_capsule_capsule,
+    get_plane_box,
+    get_plane_capsule,
+    get_plane_cylinder,
+    get_plane_sphere,
+    get_sphere_box,
+    get_sphere_capsule,
+    get_sphere_cylinder,
+    get_sphere_sphere,
+)
 from .types import GEO_BOX, GEO_CAPSULE, GEO_CYLINDER, GEO_PLANE, GEO_SPHERE
 
 
