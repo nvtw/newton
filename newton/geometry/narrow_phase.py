@@ -271,19 +271,23 @@ class NarrowPhaseContactGeneration:
 
     This class takes candidate collision pairs (typically from a broad phase) and performs detailed
     collision detection between various primitive geometric shapes to generate contact information.
-    It supports collision detection between planes, spheres, boxes, capsules, cylinders, and ellipsoids.
+    It supports collision detection between planes, spheres, boxes, capsules, and cylinders.
 
     The narrow phase collision detection computes:
     - Contact positions in world space
-    - Contact normals (pointing from first to second geometry in pair)
+    - Contact normals (pointing from first to second geometry in pair) 
     - Contact penetration distances (negative if overlapping)
     - Contact tangent vectors for friction calculations
 
     Supported primitive collision pairs:
-    - Plane vs Sphere, Box, Capsule, Cylinder, Ellipsoid
-    - Sphere vs Sphere, Box, Capsule, Cylinder
-    - Box vs Box
-    - Capsule vs Capsule, Box
+    - Plane vs Sphere, Box, Capsule, Cylinder
+    - Sphere vs Sphere, Box, Capsule
+    - Box vs Box, Capsule
+    - Capsule vs Capsule
+
+    The collision detection is performed using analytical methods for each primitive pair type.
+    Multiple contacts may be generated for a single pair depending on the geometry types and
+    configuration. The contacts are returned in world space coordinates.
     """
 
     def __init__(self):
