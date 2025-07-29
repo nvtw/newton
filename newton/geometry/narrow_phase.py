@@ -45,8 +45,8 @@ def contact_writer(contact: ContactPoint, args: WriteContactArgs):
     args.contact_tangent[cid] = contact.tangent
 
 
-@wp.kernel
-def narrow_phase(
+@wp.kernel(enable_backward=False)
+def narrow_phase(   
     candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),  # Maybe colliding pairs - usually provided by broad phase
     num_candidate_pair: wp.array(dtype=wp.int32, ndim=1),  # Size one array - usually provided by broad phase
     geom_types: wp.array(dtype=wp.int32, ndim=1),  # All geom types, pairs index into it
