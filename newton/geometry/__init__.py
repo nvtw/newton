@@ -26,9 +26,9 @@ from .flags import (
 from .gjk import build_ccd_generic
 from .inertia import compute_shape_inertia, transform_inertia
 from .types import (
-    GeoType,
     MESH_MAXHULLVERT,
     SDF,
+    GeoType,
     Mesh,
 )
 from .utils import compute_shape_radius
@@ -73,7 +73,6 @@ def create_none():
 
 
 __all__ = [
-    "GeoType",
     "MESH_MAXHULLVERT",
     "PARTICLE_FLAG_ACTIVE",
     "SDF",
@@ -83,6 +82,7 @@ __all__ = [
     "BroadPhaseAllPairs",
     "BroadPhaseExplicit",
     "BroadPhaseSAP",
+    "GeoType",
     "Mesh",
     "build_ccd_generic",
     "compute_shape_inertia",

@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Sequence
 import enum
+from collections.abc import Sequence
 
 import numpy as np
 import warp as wp

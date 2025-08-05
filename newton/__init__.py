@@ -24,8 +24,8 @@ from .core import (
 
 # Geometry functionality
 from .geometry import (
-    GeoType,
     SDF,
+    GeoType,
     Mesh,
     create_box,
     create_capsule,
@@ -64,7 +64,6 @@ __all__ = [
     "EQ_CONNECT",
     "EQ_JOINT",
     "EQ_WELD",
-    "GeoType",
     "JOINT_BALL",
     "JOINT_D6",
     "JOINT_DISTANCE",
@@ -80,6 +79,7 @@ __all__ = [
     "AxisType",
     "Contacts",
     "Control",
+    "GeoType",
     "Mesh",
     "Model",
     "ModelBuilder",

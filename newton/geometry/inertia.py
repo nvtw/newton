@@ -23,8 +23,8 @@ import numpy as np
 import warp as wp
 
 from .types import (
-    GeoType,
     SDF,
+    GeoType,
     Mesh,
     Vec3,
 )

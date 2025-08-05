@@ -44,12 +44,12 @@ from newton.core.types import (
     nparray,
 )
 from newton.geometry import (
-    GeoType,
     PARTICLE_FLAG_ACTIVE,
     SDF,
     SHAPE_FLAG_COLLIDE_PARTICLES,
     SHAPE_FLAG_COLLIDE_SHAPES,
     SHAPE_FLAG_VISIBLE,
+    GeoType,
     Mesh,
     compute_shape_inertia,
     compute_shape_radius,

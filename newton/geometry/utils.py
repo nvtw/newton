@@ -25,8 +25,8 @@ import warp as wp
 from ..core.types import Vec3, nparray
 from .inertia import compute_mesh_inertia
 from .types import (
-    GeoType,
     SDF,
+    GeoType,
     Mesh,
 )
 
