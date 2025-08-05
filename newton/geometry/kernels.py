@@ -766,6 +766,33 @@ def create_soft_contacts(
 # region Rigid body collision detection
 
 
+@wp.func
+def geo_new_to_old_python(new_geo_type: int) -> int:
+    """Python version: Convert new MuJoCo-compatible geometry type to old collision detection ordering."""
+    if new_geo_type == 0:  # GEO_PLANE
+        return 7
+    elif new_geo_type == 1:  # GEO_HFIELD
+        return 8  # treat as GEO_NONE equivalent
+    elif new_geo_type == 2:  # GEO_SPHERE
+        return 0
+    elif new_geo_type == 3:  # GEO_CAPSULE
+        return 2
+    elif new_geo_type == 4:  # GEO_ELLIPSOID
+        return 8  # treat as GEO_NONE equivalent
+    elif new_geo_type == 5:  # GEO_CYLINDER
+        return 3
+    elif new_geo_type == 6:  # GEO_BOX
+        return 1
+    elif new_geo_type == 7:  # GEO_MESH
+        return 5
+    elif new_geo_type == 8:  # GEO_SDF
+        return 6
+    elif new_geo_type == 9:  # GEO_CONE
+        return 4
+    else:  # GEO_NONE (10) or any other value
+        return 8
+
+
 # NOTE: Kernel is in a unique module to speed up cold-start ModelBuilder.finalize() time
 @wp.kernel(enable_backward=False, module="unique")
 def count_contact_points(
@@ -792,7 +819,7 @@ def count_contact_points(
         type_a = shape_type[shape_a]
         type_b = shape_type[shape_b]
         # unique ordering of shape pairs
-        if type_a < type_b:
+        if geo_new_to_old_python(type_a) < geo_new_to_old_python(type_b):
             actual_shape_a = shape_a
             actual_shape_b = shape_b
             actual_type_a = type_a
@@ -892,7 +919,7 @@ def broadphase_collision_pairs(
     type_a = shape_type[shape_a]
     type_b = shape_type[shape_b]
     # unique ordering of shape pairs
-    if type_a < type_b:
+    if geo_new_to_old_python(type_a) < geo_new_to_old_python(type_b):
         actual_shape_a = shape_a
         actual_shape_b = shape_b
         actual_type_a = type_a

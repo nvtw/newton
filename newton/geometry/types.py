@@ -20,16 +20,18 @@ import warp as wp
 
 from newton.core.types import Devicelike, Vec3, nparray, override
 
-# Shape geometry types
-GEO_SPHERE = wp.constant(0)
-GEO_BOX = wp.constant(1)
-GEO_CAPSULE = wp.constant(2)
-GEO_CYLINDER = wp.constant(3)
-GEO_CONE = wp.constant(4)
-GEO_MESH = wp.constant(5)
-GEO_SDF = wp.constant(6)
-GEO_PLANE = wp.constant(7)
-GEO_NONE = wp.constant(8)
+# Shape geometry types (they match mjGeomTypes in mujoco.h)
+GEO_PLANE = wp.constant(0)
+GEO_HFIELD = wp.constant(1)
+GEO_SPHERE = wp.constant(2)
+GEO_CAPSULE = wp.constant(3)
+GEO_ELLIPSOID = wp.constant(4)
+GEO_CYLINDER = wp.constant(5)
+GEO_BOX = wp.constant(6)
+GEO_MESH = wp.constant(7)
+GEO_SDF = wp.constant(8)
+GEO_CONE = wp.constant(9)
+GEO_NONE = wp.constant(10)
 
 # Default maximum vertices for convex hull approximation
 MESH_MAXHULLVERT = 64
