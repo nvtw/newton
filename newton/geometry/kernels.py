@@ -777,13 +777,32 @@ def create_soft_contacts(
 # GEO_PLANE = wp.constant(7)
 # GEO_NONE = wp.constant(8)
 
-NEW_TO_OLD_MAP = wp.vec(11, wp.int8)(7, 8, 0, 2, 8, 3, 1, 5, 6, 4, 8)
-
 
 @wp.func
 def geo_new_to_old_map(new_geo_type: int) -> int:
-    """Convert new MuJoCo-compatible geometry type to old collision detection ordering."""
-    return int(NEW_TO_OLD_MAP[new_geo_type])
+    """Python version: Convert new MuJoCo-compatible geometry type to old collision detection ordering."""
+    if new_geo_type == 0:  # GeoType.PLANE
+        return 7
+    elif new_geo_type == 1:  # GeoType.HFIELD
+        return 8  # treat as GeoType.NONE equivalent
+    elif new_geo_type == 2:  # GeoType.SPHERE
+        return 0
+    elif new_geo_type == 3:  # GeoType.CAPSULE
+        return 2
+    elif new_geo_type == 4:  # GeoType.ELLIPSOID
+        return 8  # treat as GeoType.NONE equivalent
+    elif new_geo_type == 5:  # GeoType.CYLINDER
+        return 3
+    elif new_geo_type == 6:  # GeoType.BOX
+        return 1
+    elif new_geo_type == 7:  # GeoType.MESH
+        return 5
+    elif new_geo_type == 8:  # GeoType.SDF
+        return 6
+    elif new_geo_type == 9:  # GeoType.CONE
+        return 4
+    else:  # GeoType.NONE (10) or any other value
+        return 8
 
 
 # NOTE: Kernel is in a unique module to speed up cold-start ModelBuilder.finalize() time
