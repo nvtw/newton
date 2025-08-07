@@ -21,19 +21,6 @@ import warp as wp
 
 from newton.core.types import Devicelike, Vec3, nparray, override
 
-# Shape geometry types (they match mjGeomTypes in mujoco.h)
-# GeoType.PLANE = wp.constant(0)
-# GeoType.HFIELD = wp.constant(1)
-# GeoType.SPHERE = wp.constant(2)
-# GeoType.CAPSULE = wp.constant(3)
-# GeoType.ELLIPSOID = wp.constant(4)
-# GeoType.CYLINDER = wp.constant(5)
-# GeoType.BOX = wp.constant(6)
-# GeoType.MESH = wp.constant(7)
-# GeoType.SDF = wp.constant(8)
-# GeoType.CONE = wp.constant(9)
-# GeoType.NONE = wp.constant(10)
-
 
 class GeoType(enum.IntEnum):
     PLANE = 0
