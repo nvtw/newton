@@ -760,6 +760,11 @@ def create_soft_contacts(
 
 
 # TODO: Remove this function - requires adjustments in the two kernels below
+# This function reorders contact pairs based on their geometry type indices to simplify collision detection.
+# It ensures that pairs like sphere-plane and plane-sphere are handled by the same code branch.
+# However, this requires careful handling since the if/elif tree makes assumptions about type ordering
+# (e.g., that SPHERE has the lowest index), which does not hold anymore for the new MuJoCo-compatible ordering.
+# Adjusting the if/elif tree is more tricky than one might expect, so it is postponed for now.
 @wp.func
 def geo_new_to_old_map(new_geo_type: int) -> int:
     """Python version: Convert new MuJoCo-compatible geometry type to old collision detection ordering."""
