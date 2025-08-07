@@ -765,6 +765,18 @@ def create_soft_contacts(
 # However, this requires careful handling since the if/elif tree makes assumptions about type ordering
 # (e.g., that SPHERE has the lowest index), which does not hold anymore for the new MuJoCo-compatible ordering.
 # Adjusting the if/elif tree is more tricky than one might expect, so it is postponed for now.
+
+# For reference: The original type constants before adapting to MuJoCo-compatible ordering
+# GEO_SPHERE = wp.constant(0)
+# GEO_BOX = wp.constant(1)
+# GEO_CAPSULE = wp.constant(2)
+# GEO_CYLINDER = wp.constant(3)
+# GEO_CONE = wp.constant(4)
+# GEO_MESH = wp.constant(5)
+# GEO_SDF = wp.constant(6)
+# GEO_PLANE = wp.constant(7)
+# GEO_NONE = wp.constant(8)
+
 NEW_TO_OLD_MAP = wp.vec(11, wp.int8)(7, 8, 0, 2, 8, 3, 1, 5, 6, 4, 8)
 
 
