@@ -30,11 +30,13 @@ wp.config.enable_backward = False
 
 import newton
 import newton.utils
+from newton.utils.recorder import ModelAndStateRecorder
 
 
 class Example:
-    def __init__(self, stage_path="example_g1.usd", num_envs=8, use_cuda_graph=True):
+    def __init__(self, stage_path="example_g1.usd", num_envs=8, use_cuda_graph=True, recorder=None):
         self.num_envs = num_envs
+        self.recorder = recorder
         self.use_mujoco = True
         articulation_builder = newton.ModelBuilder()
 
@@ -64,6 +66,10 @@ class Example:
 
         # finalize model
         self.model = builder.finalize()
+
+        # Record the model if recorder is provided
+        if self.recorder is not None:
+            self.recorder.record_model(self.model)
 
         self.control = self.model.control()
         if self.use_mujoco:
@@ -134,6 +140,10 @@ class Example:
                 self.simulate()
         self.sim_time += self.frame_dt
 
+        # Record the state if recorder is provided
+        if self.recorder is not None:
+            self.recorder.record(self.state_0)
+
     def render(self):
         if self.renderer is None:
             return
@@ -142,6 +152,12 @@ class Example:
             self.renderer.begin_frame(self.sim_time)
             self.renderer.render(self.state_0)
             self.renderer.end_frame()
+
+    def save_recording(self, file_path="recording.pkl"):
+        """Save the recording to a pickle file if recorder is available."""
+        if self.recorder is not None:
+            self.recorder.save_to_file(file_path)
+            print(f"Recording saved to {file_path}")
 
 
 if __name__ == "__main__":
@@ -164,11 +180,20 @@ if __name__ == "__main__":
         help="Toggle MuJoCo viewer next to Newton renderer when MuJoCoSolver is active.",
     )
     parser.add_argument("--use-cuda-graph", default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument(
+        "--record", default=False, action=argparse.BooleanOptionalAction, help="Enable recording of model and states"
+    )
+    parser.add_argument("--recording-path", type=str, default="recording.pkl", help="Path to save the recording file")
 
     args = parser.parse_known_args()[0]
 
     with wp.ScopedDevice(args.device):
-        example = Example(stage_path=args.stage_path, num_envs=args.num_envs, use_cuda_graph=args.use_cuda_graph)
+        # Create recorder if recording is enabled
+        recorder = ModelAndStateRecorder() if args.record else None
+
+        example = Example(
+            stage_path=args.stage_path, num_envs=args.num_envs, use_cuda_graph=args.use_cuda_graph, recorder=recorder
+        )
 
         show_mujoco_viewer = args.show_mujoco_viewer and example.use_mujoco
         if show_mujoco_viewer:
@@ -188,6 +213,10 @@ if __name__ == "__main__":
                 if not example.solver.use_mujoco:
                     mujoco_warp.get_data_into(mjd, mjm, d)
                 viewer.sync()
+
+        # Save recording if recorder was used
+        if recorder is not None:
+            example.save_recording(args.recording_path)
 
         if example.renderer:
             example.renderer.save()
