@@ -174,34 +174,113 @@ class ModelAndStateRecorder:
                 data[name] = serialized_value
         return data
 
+    def _is_safe_type(self, value, visited=None):
+        """
+        Check if a value is of a safe type that can be serialized.
+
+        Uses a whitelist approach to only allow known safe types:
+        - Primitive types (int, float, bool, str, NoneType)
+        - Collections (list, dict, tuple, set) with safe contents
+        - NumPy arrays
+        - Warp arrays
+
+        Args:
+            value: The value to check.
+            visited: Set of object ids already visited (to prevent infinite recursion).
+
+        Returns:
+            bool: True if the value is safe to serialize, False otherwise.
+        """
+        if visited is None:
+            visited = set()
+
+        # Check for circular references
+        value_id = id(value)
+        if value_id in visited:
+            return True  # Assume safe if already being checked
+        visited.add(value_id)
+
+        try:
+            if value is None:
+                return True
+
+            # Primitive types that are always safe
+            if isinstance(value, (int, float, bool, str, bytes)):
+                return True
+
+            # NumPy arrays are safe
+            if isinstance(value, np.ndarray):
+                return True
+
+            # Warp arrays are safe (we convert them to numpy)
+            if isinstance(value, wp.array):
+                return True
+
+            # For collections, recursively check contents
+            if isinstance(value, (list, tuple)):
+                return all(self._is_safe_type(item, visited.copy()) for item in value)
+            elif isinstance(value, dict):
+                return all(self._is_safe_type(k, visited.copy()) and self._is_safe_type(v, visited.copy())
+                          for k, v in value.items())
+            elif isinstance(value, set):
+                return all(self._is_safe_type(item, visited.copy()) for item in value)
+
+            # For any other type, be conservative and reject it
+            # This avoids the recursion issues with complex objects
+            return False
+
+        finally:
+            visited.discard(value_id)
+
     def _serialize_value(self, value):
         """
         Serializes a single value into a Pickle-compatible format.
 
-        Handles various types including primitives, numpy arrays, and warp arrays.
-        Warp arrays are converted to numpy arrays and stored in a dictionary
-        with a type hint.
+        Uses a whitelist approach to only serialize safe types:
+        primitives, numpy arrays, warp arrays, and safe collections.
+        Function pointers, CDLL objects, and other unsafe types are filtered out.
 
         Args:
             value: The value to serialize.
 
         Returns:
             A serializable representation of the value, or None if the value
-            type is not supported for serialization.
+            type is not safe for serialization.
         """
+        if not self._is_safe_type(value):
+            return None
+
         if value is None:
             return None
 
-        if isinstance(value, (int, float, bool, str, list, dict, set, tuple)):
+        # Handle primitive types
+        if isinstance(value, (int, float, bool, str, bytes)):
             return value
+
+        # Handle collections recursively
+        elif isinstance(value, list):
+            return [self._serialize_value(item) for item in value]
+        elif isinstance(value, tuple):
+            return tuple(self._serialize_value(item) for item in value)
+        elif isinstance(value, dict):
+            return {k: self._serialize_value(v) for k, v in value.items()}
+        elif isinstance(value, set):
+            return {self._serialize_value(item) for item in value}
+
+        # Handle numpy arrays
         elif isinstance(value, np.ndarray):
             return value
+
+        # Handle warp arrays
         elif isinstance(value, wp.array):
             if value.size > 0:
                 return {
                     "__type__": "wp.array",
                     "data": value.numpy(),
                 }
+
+        # For any other type that passed _is_safe_type, return None
+        # This is conservative to avoid serialization issues
         return None
 
     def _deserialize_and_restore_value(self, value, device):
