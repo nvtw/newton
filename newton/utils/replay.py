@@ -15,119 +15,54 @@
 
 from __future__ import annotations
 
-import os
-
+import warp as wp
 from warp.render.imgui_manager import ImGuiManager
 
-from newton.utils.recorder import ModelAndStateRecorder
 
+class ReplayImGuiManager(ImGuiManager):
+    """An ImGui manager for controlling replay playback with recorded data."""
 
-class ReplayViewerManager(ImGuiManager):
-    """A replay viewer manager for controlling playback with recorded data."""
-
-    def __init__(self, renderer, recorder, example, window_pos=(10, 10), window_size=(400, 200)):
+    def __init__(self, renderer, recorder, example, window_pos=(10, 10), window_size=(400, 150)):
         super().__init__(renderer)
         if not self.is_available:
             return
 
         self.window_pos = window_pos
         self.window_size = window_size
-        self.renderer = renderer
         self.recorder = recorder
         self.example = example
-        
-        # Playback state
-        self.current_frame = 0
-        self.total_frames = 0
+        self.selected_frame = 0
+        self.num_point_clouds_rendered = 0
         self.is_playing = False
         self.playback_speed = 1.0
-        self.loaded_file_path = None
-        self.recording_type = None  # 'basic' or 'model_state'
-        
-        # Data containers for different recording types
-        self.model_recorder = None
 
-    def load_recording(self, file_path: str):
-        """Load a recording file."""
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Recording file not found: {file_path}")
+    def _clear_contact_points(self):
+        """Clears all rendered contact points."""
+        for i in range(self.num_point_clouds_rendered):
+            # use size 1 as size 0 seems to do nothing
+            self.renderer.render_points(f"contact_points{i}", wp.empty(1, dtype=wp.vec3), radius=1e-2)
+        self.num_point_clouds_rendered = 0
 
-        self.loaded_file_path = file_path
-
-        try:
-            # Try to load as BasicRecorder format first (.npz)
-            if file_path.lower().endswith('.npz'):
-                self._load_basic_recording(file_path)
-            elif file_path.lower().endswith(('.pkl', '.pickle')):
-                self._load_model_state_recording(file_path)
-            else:
-                # Try to auto-detect format
-                try:
-                    self._load_model_state_recording(file_path)
-                except Exception:
-                    self._load_basic_recording(file_path)
-
-        except Exception as e:
-            raise ValueError(f"Failed to load recording: {e}") from e
-
-        # Reset playback state
-        self.current_frame = 0
-        self.is_playing = False
-
-        # Update display
-        self._update_frame_display()
-
-    def _load_basic_recording(self, file_path: str):
-        """Load BasicRecorder format (.npz)."""
-        # Clear the existing recorder and load new data
-        self.recorder.transforms_history.clear()
-        self.recorder.point_clouds_history.clear()
-        self.recorder.load_from_file(file_path, device="cpu")
-        self.total_frames = len(self.recorder.transforms_history)
-        self.recording_type = 'basic'
-        print(f"Loaded BasicRecorder format: {self.total_frames} frames")
-
-    def _load_model_state_recording(self, file_path: str):
-        """Load ModelAndStateRecorder format (.pkl)."""
-        self.model_recorder = ModelAndStateRecorder()
-        self.model_recorder.load_from_file(file_path)
-        self.total_frames = len(self.model_recorder.history)
-        self.recording_type = 'model_state'
-        print(f"Loaded ModelAndStateRecorder format: {self.total_frames} frames")
-
-    def set_frame(self, frame_index: int):
-        """Set the current frame for display."""
-        if self.total_frames == 0:
+    def _update_frame(self, frame_id):
+        """Update the selected frame and renderer transforms."""
+        total_frames = len(self.recorder.transforms_history)
+        if frame_id < 0 or frame_id >= total_frames:
             return
 
-        self.current_frame = max(0, min(frame_index, self.total_frames - 1))
-        self._update_frame_display()
+        self.selected_frame = frame_id
+        transforms, point_clouds = self.recorder.playback(self.selected_frame)
 
-    def _update_frame_display(self):
-        """Update the renderer with the current frame data."""
-        if self.total_frames == 0:
-            return
+        # Clear previous objects
+        self.renderer.clear_objects()
+        self.renderer.render_ground()
 
-        if self.recording_type == 'basic':
-            self._display_basic_frame()
-        elif self.recording_type == 'model_state':
-            self._display_model_state_frame()
-
-    def _display_basic_frame(self):
-        """Display a frame from BasicRecorder data."""
-        transforms, point_clouds = self.recorder.playback(self.current_frame)
-
-        if transforms is not None:
-            # Clear previous objects
-            self.renderer.clear_objects()
-            self.renderer.render_ground()
-
-            # Render transforms as coordinate frames
+        # Display transforms as spheres
+        if transforms:
             transforms_np = transforms.numpy()
             for i, transform in enumerate(transforms_np):
                 pos = transform[:3]
                 quat = transform[3:7]
-
+                
                 # Render a small sphere at each transform location
                 self.renderer.render_sphere(
                     f"body_{i}",
@@ -137,72 +72,43 @@ class ReplayViewerManager(ImGuiManager):
                     color=(0.8, 0.3, 0.2)
                 )
 
-        # Render point clouds if available
+        # Display point clouds
+        self._clear_contact_points()
         if point_clouds:
             for i, pc in enumerate(point_clouds):
                 if pc is not None and pc.size > 0:
                     self.renderer.render_points(
-                        f"points_{i}",
-                        pc.numpy(),
-                        radius=0.01,
-                        colors=(0.0, 0.7, 1.0)
+                        f"contact_points{i}", pc, radius=1e-2, colors=self.renderer.get_new_color(i)
                     )
+            self.num_point_clouds_rendered = len(point_clouds)
 
-    def _display_model_state_frame(self):
-        """Display a frame from ModelAndStateRecorder data."""
-        if not self.model_recorder or self.current_frame >= len(self.model_recorder.history):
+    def _update_playback(self):
+        """Update automatic playback if playing."""
+        if not self.is_playing:
             return
 
-        # Get the current frame data
-        frame_data = self.model_recorder.history[self.current_frame]
+        total_frames = len(self.recorder.transforms_history)
+        if total_frames == 0:
+            return
 
-        # Clear previous objects
-        self.renderer.clear_objects()
-        self.renderer.render_ground()
+        # Simple frame advance based on playback speed
+        import time
+        if not hasattr(self, '_last_update_time'):
+            self._last_update_time = time.time()
+            return
 
-        # If the frame has body_q data, visualize body positions
-        if 'body_q' in frame_data:
-            body_transforms = frame_data['body_q']
-            for i, transform in enumerate(body_transforms):
-                # Extract position (first 3 elements) and rotation (next 4 elements)
-                pos = transform[:3]
-                quat = transform[3:7] if len(transform) >= 7 else [0, 0, 0, 1]
-                
-                # Render a small sphere at each body location
-                self.renderer.render_sphere(
-                    f"model_body_{i}",
-                    pos=pos,
-                    rot=quat,
-                    radius=0.1,
-                    color=(0.2, 0.8, 0.3)
-                )
+        current_time = time.time()
+        dt = current_time - self._last_update_time
+        frame_dt = (1.0 / 60.0) / self.playback_speed  # Base 60 FPS
 
-    def render_frame(self):
-        """Render frame callback for the renderer."""
-        if self.is_available:
-            self.draw_ui()
-            
-        # Update playback automatically if playing
-        if self.is_playing and self.total_frames > 0:
-            import time
-            current_time = time.time()
-            if not hasattr(self, '_last_update_time'):
-                self._last_update_time = current_time
-            
-            dt = current_time - self._last_update_time
-            frame_dt = 1.0 / (60.0 * self.playback_speed)  # 60 FPS base
-            
-            if dt >= frame_dt:
-                next_frame = self.current_frame + 1
-                if next_frame >= self.total_frames:
-                    next_frame = 0  # Loop back to start
-                self.set_frame(next_frame)
-                self._last_update_time = current_time
+        if dt >= frame_dt:
+            next_frame = (self.selected_frame + 1) % total_frames  # Loop back to start
+            self._update_frame(next_frame)
+            self._last_update_time = current_time
 
     def draw_ui(self):
-        """Draw the GUI interface."""
-        if not self.is_available:
-            return
+        """Draw the replay controls UI."""
+        total_frames = len(self.recorder.transforms_history)
 
         self.imgui.set_next_window_size(self.window_size[0], self.window_size[1], self.imgui.ONCE)
         self.imgui.set_next_window_position(self.window_pos[0], self.window_pos[1], self.imgui.ONCE)
@@ -221,72 +127,75 @@ class ReplayViewerManager(ImGuiManager):
 
         # Step buttons
         if self.imgui.button("<<"):
-            self.set_frame(0)
+            self._update_frame(0)
+            self.is_playing = False
 
         self.imgui.same_line()
         if self.imgui.button("<"):
-            if self.current_frame > 0:
-                self.set_frame(self.current_frame - 1)
+            self._update_frame(max(0, self.selected_frame - 1))
+            self.is_playing = False
 
         self.imgui.same_line()
         if self.imgui.button(">"):
-            if self.current_frame < self.total_frames - 1:
-                self.set_frame(self.current_frame + 1)
+            self._update_frame(min(total_frames - 1, self.selected_frame + 1))
+            self.is_playing = False
 
         self.imgui.same_line()
         if self.imgui.button(">>"):
-            if self.total_frames > 0:
-                self.set_frame(self.total_frames - 1)
+            if total_frames > 0:
+                self._update_frame(total_frames - 1)
+            self.is_playing = False
 
         # Frame slider
-        if self.total_frames > 0:
-            changed, new_frame = self.imgui.slider_int(
-                "Frame",
-                self.current_frame,
-                0,
-                self.total_frames - 1
-            )
+        if total_frames > 0:
+            changed, new_frame = self.imgui.slider_int("Timeline", self.selected_frame, 0, total_frames - 1)
             if changed:
-                self.set_frame(new_frame)
+                self._update_frame(new_frame)
+                self.is_playing = False
 
         # Frame info
-        self.imgui.text(f"Frame: {self.current_frame + 1} / {self.total_frames}")
+        frame_time = self.selected_frame * self.example.frame_dt if total_frames > 0 else 0.0
+        self.imgui.text(f"Frame: {self.selected_frame}/{total_frames - 1 if total_frames > 0 else 0} ({frame_time:.2f}s)")
 
         # Speed control
-        changed, new_speed = self.imgui.slider_float(
-            "Speed",
-            self.playback_speed,
-            0.1,
-            5.0
-        )
+        changed, new_speed = self.imgui.slider_float("Speed", self.playback_speed, 0.1, 5.0)
         if changed:
-            self.playback_speed = max(0.1, min(new_speed, 10.0))
+            self.playback_speed = new_speed
 
         self.imgui.separator()
 
-        # File operations
+        # Load button
         if self.imgui.button("Load Recording"):
             file_path = self.open_load_file_dialog(
-                title="Load Recording",
                 filetypes=[
-                    ("All supported", "*.npz;*.pkl;*.pickle"),
-                    ("BasicRecorder (NPZ)", "*.npz"),
-                    ("ModelAndStateRecorder (PKL)", "*.pkl;*.pickle"),
+                    ("Numpy Archives", "*.npz"),
+                    ("Pickle files", "*.pkl;*.pickle"),
                     ("All files", "*.*")
-                ]
+                ],
+                title="Load Recording",
             )
             if file_path:
                 try:
-                    self.load_recording(file_path)
+                    self.recorder.load_from_file(file_path, device=wp.get_device())
+                    self.selected_frame = 0
+                    self.is_playing = False
+                    if len(self.recorder.transforms_history) > 0:
+                        self._update_frame(self.selected_frame)
                     print(f"✓ Loaded: {file_path}")
                 except Exception as e:
                     print(f"✗ Error loading recording: {e}")
 
         # Recording info
-        if self.loaded_file_path:
-            self.imgui.separator()
-            filename = os.path.basename(self.loaded_file_path)
-            self.imgui.text(f"File: {filename}")
-            self.imgui.text(f"Type: {self.recording_type}")
+        if total_frames > 0:
+            self.imgui.same_line()
+            self.imgui.text(f"Frames: {total_frames}")
 
         self.imgui.end()
+
+        # Update playback
+        self._update_playback()
+
+    def render_frame(self):
+        """Render frame callback for the renderer."""
+        if self.is_available:
+            self.draw_ui()

@@ -31,7 +31,7 @@ import warp as wp
 import newton
 import newton.utils
 from newton.utils.recorder import BasicRecorder
-from newton.utils.recorder_gui import RecorderImGuiManager
+from newton.utils.reply import ReplayImGuiManager
 
 
 class Example:
@@ -39,22 +39,22 @@ class Example:
         # No model needed for replay
         self.model = None
         self.solver = None
-        
+
         # Set up renderer and replay components
         if stage_path:
             # Create SimRendererOpenGL without a model
             self.renderer = newton.utils.SimRendererOpenGL(model=None, path=stage_path)
             self.recorder = BasicRecorder()
-            self.gui = RecorderImGuiManager(self.renderer, self.recorder, self)
+            self.gui = ReplayImGuiManager(self.renderer, self.recorder, self)
             self.renderer.render_2d_callbacks.append(self.gui.render_frame)
         else:
             self.renderer = None
             self.recorder = None
             self.gui = None
-        
+
         # No state needed since we have no model
         self.state = None
-        
+
         # Start in paused mode
         if self.renderer:
             self.renderer.paused = True
@@ -96,12 +96,7 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--device", type=str, default=None, help="Override the default Warp device.")
-    parser.add_argument(
-        "--window-title",
-        type=str,
-        default="Newton Replay Viewer",
-        help="Window title"
-    )
+    parser.add_argument("--window-title", type=str, default="Newton Replay Viewer", help="Window title")
     parser.add_argument(
         "--file",
         "-f",
