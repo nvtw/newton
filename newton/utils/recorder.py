@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import io
 import pickle
 
 import numpy as np
@@ -22,6 +23,159 @@ import warp as wp
 
 from newton.sim.model import Model
 from newton.sim.state import State
+
+from collections.abc import Mapping, Iterable
+import json
+
+
+def serialize_ndarray(arr: np.ndarray) -> dict:
+    """
+    Serialize a numpy ndarray to a dictionary representation.
+
+    Args:
+        arr: The numpy array to serialize.
+
+    Returns:
+        A dictionary containing the array's type, dtype, shape, and data.
+    """
+    return {"__type__": "numpy.ndarray", "dtype": str(arr.dtype), "shape": arr.shape, "data": json.dumps(arr.tolist())}
+
+
+def deserialize_ndarray(data: dict) -> np.ndarray:
+    """
+    Deserialize a dictionary representation back to a numpy ndarray.
+
+    Args:
+        data: Dictionary containing the serialized array data.
+
+    Returns:
+        The reconstructed numpy array.
+    """
+    if data.get("__type__") != "numpy.ndarray":
+        raise ValueError("Invalid data format for numpy array deserialization")
+
+    dtype = np.dtype(data["dtype"])
+    shape = tuple(data["shape"])
+    array_data = json.loads(data["data"])
+
+    return np.array(array_data, dtype=dtype).reshape(shape)
+
+
+def serialize(obj, callback, _visited=None, _path=""):
+    """
+    Recursively serialize an object into a dict, handling primitives,
+    containers, and custom class instances. Calls callback(obj) for every object
+    and replaces obj with the callback's return value before continuing.
+
+    Args:
+        obj: The object to serialize.
+        callback: A function taking two arguments (the object and current path) and returning the (possibly transformed) object.
+        _visited: Internal set to avoid infinite recursion from circular references.
+        _path: Internal parameter tracking the current path/member name.
+    """
+    if _visited is None:
+        _visited = set()
+
+    # Run through callback first (object may be replaced)
+    result = callback(obj, _path)
+    if result is not obj:
+        return result
+
+    obj_id = id(obj)
+    if obj_id in _visited:
+        return "<circular_reference>"
+
+    # Add to visited set (stack-like behavior)
+    _visited.add(obj_id)
+
+    try:
+        # Primitive types
+        if isinstance(obj, (str, int, float, bool, type(None))):
+            return {"__type__": type(obj).__name__, "value": obj}
+
+        # NumPy scalar types
+        if isinstance(obj, np.number):
+            return {
+                "__type__": type(obj).__name__,
+                "value": obj.item(),  # Convert numpy scalar to Python scalar
+            }
+
+        # NumPy arrays
+        if isinstance(obj, np.ndarray):
+            return serialize_ndarray(obj)
+
+        # Mappings (like dict)
+        if isinstance(obj, Mapping):
+            return {
+                "__type__": type(obj).__name__,
+                "items": {
+                    str(k): serialize(v, callback, _visited, f"{_path}.{k}" if _path else str(k))
+                    for k, v in obj.items()
+                },
+            }
+
+        # Iterables (like list, tuple, set)
+        if isinstance(obj, Iterable) and not isinstance(obj, (str, bytes, bytearray)):
+            return {
+                "__type__": type(obj).__name__,
+                "items": [
+                    serialize(item, callback, _visited, f"{_path}[{i}]" if _path else f"[{i}]")
+                    for i, item in enumerate(obj)
+                ],
+            }
+
+        # Custom object — serialize attributes
+        if hasattr(obj, "__dict__"):
+            return {
+                "__type__": obj.__class__.__name__,
+                "__module__": obj.__class__.__module__,
+                "attributes": {
+                    attr: serialize(value, callback, _visited, f"{_path}.{attr}" if _path else attr)
+                    for attr, value in vars(obj).items()
+                },
+            }
+
+        # Fallback — non-serializable type
+        raise ValueError(f"Cannot serialize object of type {type(obj)}")
+    finally:
+        # Remove from visited set when done (stack-like cleanup)
+        _visited.discard(obj_id)
+
+
+
+def serialize_newton(obj):
+    def callback(x, path):
+        print(type(x))
+        if isinstance(x, wp.array):
+            print(f"serialize warp.array at path: {path}")
+            return {"__type__": "warp.array", "data": serialize_ndarray(x.numpy())}
+
+        if isinstance(x, wp.HashGrid):
+            print(f"serialize warp.types.HashGrid at path: {path}")
+            return {"__type__": "warp.HashGrid", "data": None}
+
+        if isinstance(x, wp.Mesh):
+            print(f"serialize warp.Mesh at path: {path}")
+            return {"__type__": "warp.Mesh", "data": None}
+
+        if callable(x):
+            print(f"serialize callable at path: {path}")
+            return {"__type__": "callable", "data": None}
+
+        return x
+
+    return serialize(obj, callback)
+
+
+
+
+# def deserialize_newton(data: dict):
+#     def callback(x, path):
+#         if x.get("__type__") == "warp.array":
+#             return wp.array(deserialize_ndarray(x["data"]))
+#         return x
+#     return deserialize(data, callback)
+
 
 
 class BasicRecorder:
@@ -152,161 +306,6 @@ class ModelAndStateRecorder:
                 return value.device
         return None
 
-    def _serialize_object_attributes(self, obj):
-        """
-        Serializes the attributes of an object.
-
-        This method handles both standard Python objects and Warp structs,
-        preparing them for serialization by converting attributes to a
-        serializable format.
-
-        Args:
-            obj: The object to serialize.
-
-        Returns:
-            A dictionary containing the serialized attributes.
-        """
-        data = {}
-        attrs = wp.attr(obj) if hasattr(type(obj), "_wp_struct_meta_") else obj.__dict__
-        for name, value in attrs.items():
-            serialized_value = self._serialize_value(value)
-            if serialized_value is not None:
-                data[name] = serialized_value
-        return data
-
-    def _is_safe_type(self, value, visited=None):
-        """
-        Check if a value is of a safe type that can be serialized.
-
-        Uses a whitelist approach to only allow known safe types:
-        - Primitive types (int, float, bool, str, NoneType)
-        - Collections (list, dict, tuple, set) with safe contents
-        - NumPy arrays
-        - Warp arrays
-
-        Args:
-            value: The value to check.
-            visited: Set of object ids already visited (to prevent infinite recursion).
-
-        Returns:
-            bool: True if the value is safe to serialize, False otherwise.
-        """
-        if visited is None:
-            visited = set()
-
-        # Check for circular references
-        value_id = id(value)
-        if value_id in visited:
-            return True  # Assume safe if already being checked
-        visited.add(value_id)
-
-        try:
-            if value is None:
-                return True
-
-            # Primitive types that are always safe
-            if isinstance(value, (int, float, bool, str, bytes)):
-                return True
-
-            # NumPy arrays are safe
-            if isinstance(value, np.ndarray):
-                return True
-
-            # Warp arrays are safe (we convert them to numpy)
-            if isinstance(value, wp.array):
-                return True
-
-            # For collections, recursively check contents
-            if isinstance(value, (list, tuple)):
-                return all(self._is_safe_type(item, visited.copy()) for item in value)
-            elif isinstance(value, dict):
-                return all(self._is_safe_type(k, visited.copy()) and self._is_safe_type(v, visited.copy())
-                          for k, v in value.items())
-            elif isinstance(value, set):
-                return all(self._is_safe_type(item, visited.copy()) for item in value)
-
-            # For any other type, be conservative and reject it
-            # This avoids the recursion issues with complex objects
-            return False
-
-        finally:
-            visited.discard(value_id)
-
-    def _serialize_value(self, value):
-        """
-        Serializes a single value into a Pickle-compatible format.
-
-        Uses a whitelist approach to only serialize safe types:
-        primitives, numpy arrays, warp arrays, and safe collections.
-        Function pointers, CDLL objects, and other unsafe types are filtered out.
-
-        Args:
-            value: The value to serialize.
-
-        Returns:
-            A serializable representation of the value, or None if the value
-            type is not safe for serialization.
-        """
-        if not self._is_safe_type(value):
-            return None
-
-        if value is None:
-            return None
-
-        # Handle primitive types
-        if isinstance(value, (int, float, bool, str, bytes)):
-            return value
-
-        # Handle collections recursively
-        elif isinstance(value, list):
-            return [self._serialize_value(item) for item in value]
-        elif isinstance(value, tuple):
-            return tuple(self._serialize_value(item) for item in value)
-        elif isinstance(value, dict):
-            return {k: self._serialize_value(v) for k, v in value.items()}
-        elif isinstance(value, set):
-            return {self._serialize_value(item) for item in value}
-
-        # Handle numpy arrays
-        elif isinstance(value, np.ndarray):
-            return value
-
-        # Handle warp arrays
-        elif isinstance(value, wp.array):
-            if value.size > 0:
-                return {
-                    "__type__": "wp.array",
-                    "data": value.numpy(),
-                }
-
-        # For any other type that passed _is_safe_type, return None
-        # This is conservative to avoid serialization issues
-        return None
-
-    def _deserialize_and_restore_value(self, value, device):
-        """
-        Deserializes a value and restores it, including to a specific device.
-
-        This is the counterpart to `_serialize_value`. It reconstructs objects,
-        numpy arrays, and warp arrays from their serialized representation.
-
-        Args:
-            value: The serialized value.
-            device: The device to load warp arrays onto.
-
-        Returns:
-            The deserialized value.
-        """
-        if isinstance(value, dict) and "__type__" in value:
-            type_name = value["__type__"]
-            obj_data = value["data"]
-
-            if type_name == "wp.array":
-                return wp.array(obj_data, device=device)
-        if isinstance(value, np.ndarray):
-            return value
-        return value
-
     def record(self, state: State):
         """
         Records a snapshot of the state.
@@ -319,16 +318,6 @@ class ModelAndStateRecorder:
             if isinstance(value, wp.array):
                 state_data[name] = value.numpy()
         self.history.append(state_data)
-
-    def record_model(self, model: Model):
-        """
-        Records a snapshot of the model's serializable attributes.
-        It stores warp arrays as numpy arrays, and primitive types as-is.
-
-        Args:
-            model (Model): The simulation model.
-        """
-        self.model_data = self._serialize_object_attributes(model)
 
     def playback(self, state: State, frame_id: int):
         """
@@ -354,6 +343,28 @@ class ModelAndStateRecorder:
                 value_wp = wp.array(value_np, device=device)
                 setattr(state, name, value_wp)
 
+    def record_model(self, model: Model):
+        """
+        Records a snapshot of the model's serializable attributes.
+        It stores warp arrays as numpy arrays, and primitive types as-is.
+
+        Args:
+            model (Model): The simulation model.
+        """
+        self.raw_model = model
+        model_data = {}
+        for name, value in model.__dict__.items():
+            if name == "shape_source":
+                print("shape_source")
+                print(value)
+
+            if isinstance(value, wp.array):
+                model_data[name] = value.numpy()
+                if name == "shape_source2":
+                    print("shape_source2")
+                    print(value.numpy())
+        self.model_data = model_data
+
     def playback_model(self, model: Model):
         """
         Plays back a recorded model by updating its attributes.
@@ -361,21 +372,36 @@ class ModelAndStateRecorder:
         Args:
             model (Model): The simulation model to restore.
         """
-        device = model.device
+        if not self.model_data:
+            print("Warning: No model data to playback.")
+            return
 
-        for name, value in self.model_data.items():
+        try:
+            device = self._get_device_from_state(model)
+        except ValueError:
+            print("Warning: Unable to determine device from state. Playback skipped.")
+            return
+
+        for name, value_np in self.model_data.items():
             if hasattr(model, name):
-                restored_value = self._deserialize_and_restore_value(value, device)
-                if restored_value is not None:
-                    setattr(model, name, restored_value)
+                value_wp = wp.array(value_np, device=device)
+                setattr(model, name, value_wp)
 
     def save_to_file(self, file_path: str):
         """
-        Saves the recorded history to a file using pickle.
+        Saves the recorded history to a file using pickle with unpicklable object handling.
 
         Args:
             file_path (str): The full path to the file.
         """
+        data_to_save = {"model": self.raw_model, "states": self.history}
+        serialized_data = serialize_newton(data_to_save)
+        # Save in a human readable format using JSON
+        import json
+
+        with open(file_path + ".json", "w") as f:
+            json.dump(serialized_data, f, indent=4)
+
         with open(file_path, "wb") as f:
             data_to_save = {"model": self.model_data, "states": self.history}
             pickle.dump(data_to_save, f)
