@@ -146,7 +146,8 @@ def serialize_newton(obj):
             # print(f"serialize warp.array at path: {path}")
             return {
                 "__type__": "warp.array", 
-                "__dtype__": int(x.dtype),
+                #"__dtype__": int(x.dtype),
+                "__dtype__": str(x.dtype), # Not used during deserialization, but useful for debugging
                 "data": serialize_ndarray(x.numpy())}
 
         if isinstance(x, wp.HashGrid):
@@ -328,6 +329,27 @@ def deserialize(data, callback, _path=""):
     return data
 
 
+def extract_type_path(class_str: str) -> str:
+    """
+    Extracts the fully qualified type name from a string like:
+    "<class 'warp.types.uint64'>"
+    """
+    # The format is always "<class '...'>", so we strip the prefix/suffix
+    if class_str.startswith("<class '") and class_str.endswith("'>"):
+        return class_str[len("<class '"):-len("'>")]
+    raise ValueError(f"Unexpected format: {class_str}")
+
+def extract_last_type_name(class_str: str) -> str:
+    """
+    Extracts the last type name from a string like:
+    "<class 'warp.types.uint64'>" -> "uint64"
+    """
+    if class_str.startswith("<class '") and class_str.endswith("'>"):
+        inner = class_str[len("<class '"):-len("'>")]
+        return inner.split('.')[-1]
+    raise ValueError(f"Unexpected format: {class_str}")
+
+
 # returns a model and a state history
 def deserialize_newton(data: dict):
     """
@@ -343,7 +365,13 @@ def deserialize_newton(data: dict):
     def callback(x, path):
         if isinstance(x, dict) and x.get("__type__") == "warp.array":
             # print(f"deserialize warp.array at path: {path}")
-            return wp.array(deserialize_ndarray(x["data"]), dtype=x["__dtype__"])
+            dtype_str = extract_last_type_name(x["__dtype__"])
+            a = getattr(wp.types, dtype_str)
+            #dtype = a()
+            # print(f"dtype: {dtype_str}")
+            result = wp.array(deserialize_ndarray(x["data"]), dtype=a)
+            print(result.dtype)
+            return result
 
         if isinstance(x, dict) and x.get("__type__") == "warp.HashGrid":
             # print(f"deserialize warp.HashGrid at path: {path}")
