@@ -26,6 +26,7 @@ from newton.sim.state import State
 
 from collections.abc import Mapping, Iterable
 import json
+import numpy as np
 
 
 def serialize_ndarray(arr: np.ndarray) -> dict:
@@ -142,40 +143,225 @@ def serialize(obj, callback, _visited=None, _path=""):
         _visited.discard(obj_id)
 
 
-
 def serialize_newton(obj):
-    def callback(x, path):
-        print(type(x))
+    def callback(x, path):        
         if isinstance(x, wp.array):
-            print(f"serialize warp.array at path: {path}")
+            # print(f"serialize warp.array at path: {path}")
             return {"__type__": "warp.array", "data": serialize_ndarray(x.numpy())}
 
         if isinstance(x, wp.HashGrid):
-            print(f"serialize warp.types.HashGrid at path: {path}")
+            # print(f"serialize warp.types.HashGrid at path: {path}")
             return {"__type__": "warp.HashGrid", "data": None}
 
         if isinstance(x, wp.Mesh):
-            print(f"serialize warp.Mesh at path: {path}")
+            # print(f"serialize warp.Mesh at path: {path}")
             return {"__type__": "warp.Mesh", "data": None}
 
+        if isinstance(x, wp.context.Device):
+            return {"__type__": "wp.context.Device", "data": None}        
+
         if callable(x):
-            print(f"serialize callable at path: {path}")
+            # print(f"serialize callable at path: {path}")
             return {"__type__": "callable", "data": None}
+
+        print(type(x))
 
         return x
 
     return serialize(obj, callback)
 
 
+def transfer_to_model(source_dict, target_obj, callback=None, _path=""):
+    """
+    Recursively transfer values from source_dict to target_obj, respecting the tree structure.
+    Only transfers values where both source and target have matching attributes.
+
+    Args:
+        source_dict: Dictionary containing the values to transfer (from deserialization).
+        target_obj: Target object to receive the values.
+        callback: Optional function taking (value, path) and returning transformed value.
+        _path: Internal parameter tracking the current path.
+    """
+    if not hasattr(target_obj, "__dict__"):
+        return
+
+    # Handle case where source_dict is not a dict (primitive value)
+    if not isinstance(source_dict, dict):
+        return
+
+    # Iterate through all attributes of the target object
+    for attr_name in dir(target_obj):
+        # Skip private/magic methods and properties
+        if attr_name.startswith("_"):
+            continue
+
+        # Skip if attribute doesn't exist in target or is not settable
+        if not hasattr(target_obj, attr_name):
+            continue
+
+        try:
+            target_value = getattr(target_obj, attr_name)
+        except (AttributeError, TypeError):
+            # Skip attributes that can't be accessed
+            continue
+
+        # Skip methods and non-data attributes
+        if callable(target_value):
+            continue
+
+        # Check if source_dict has this attribute
+        if attr_name not in source_dict:
+            continue
+
+        source_value = source_dict[attr_name]
+        current_path = f"{_path}.{attr_name}" if _path else attr_name
+
+        # Apply callback if provided
+        if callback is not None:
+            transformed_value = callback(source_value, current_path)
+            if transformed_value is not source_value:
+                source_value = transformed_value
+
+        # Handle different types of values
+        if hasattr(target_value, "__dict__") and isinstance(source_value, dict):
+            # Recursively transfer for custom objects
+            transfer_to_model(source_value, target_value, callback, current_path)
+        elif isinstance(source_value, (list, tuple)) and hasattr(target_value, "__len__"):
+            # Handle sequences - try to transfer if lengths match or target is empty
+            try:
+                if len(target_value) == 0 or len(target_value) == len(source_value):
+                    # For now, just assign the value directly
+                    # In a more sophisticated implementation, you might want to handle
+                    # element-wise transfer for lists of objects
+                    setattr(target_obj, attr_name, source_value)
+            except (TypeError, AttributeError):
+                # If we can't handle the sequence, try direct assignment
+                try:
+                    setattr(target_obj, attr_name, source_value)
+                except (AttributeError, TypeError):
+                    # Skip if we can't set the attribute
+                    pass
+        else:
+            # Direct assignment for primitive types and other values
+            try:
+                setattr(target_obj, attr_name, source_value)
+            except (AttributeError, TypeError):
+                # Skip if we can't set the attribute (e.g., read-only property)
+                pass
 
 
-# def deserialize_newton(data: dict):
-#     def callback(x, path):
-#         if x.get("__type__") == "warp.array":
-#             return wp.array(deserialize_ndarray(x["data"]))
-#         return x
-#     return deserialize(data, callback)
+def deserialize(data, callback, _path=""):
+    """
+    Recursively deserialize a dict back into objects, handling primitives,
+    containers, and custom class instances. Calls callback(obj, path) for every object
+    and replaces obj with the callback's return value before continuing.
 
+    Args:
+        data: The serialized data to deserialize.
+        callback: A function taking two arguments (the data dict and current path) and returning the (possibly transformed) object.
+        _path: Internal parameter tracking the current path/member name.
+    """
+    # Run through callback first (object may be replaced)
+    result = callback(data, _path)
+    if result is not data:
+        return result
+
+    # If not a dict with __type__, return as-is
+    if not isinstance(data, dict) or "__type__" not in data:
+        return data
+
+    type_name = data["__type__"]
+
+    # Primitive types
+    if type_name in ("str", "int", "float", "bool", "NoneType"):
+        return data["value"]
+
+    # NumPy scalar types
+    if type_name.startswith("numpy."):
+        if type_name == "numpy.ndarray":
+            return deserialize_ndarray(data)
+        else:
+            # NumPy scalar types
+            numpy_type = getattr(np, type_name.split(".")[-1])
+            return numpy_type(data["value"])
+
+    # Mappings (like dict)
+    if type_name == "dict":
+        return {k: deserialize(v, callback, f"{_path}.{k}" if _path else k) for k, v in data["items"].items()}
+
+    # Iterables (like list, tuple, set)
+    if type_name in ("list", "tuple", "set"):
+        items = [
+            deserialize(item, callback, f"{_path}[{i}]" if _path else f"[{i}]") for i, item in enumerate(data["items"])
+        ]
+        if type_name == "tuple":
+            return tuple(items)
+        elif type_name == "set":
+            return set(items)
+        else:
+            return items
+
+    # Custom objects
+    if "attributes" in data:
+        # For now, return a simple dict representation
+        # In a full implementation, you might want to reconstruct the actual class
+        return {
+            attr: deserialize(value, callback, f"{_path}.{attr}" if _path else attr)
+            for attr, value in data["attributes"].items()
+        }
+
+    # Unknown type - return the data as-is
+    return data
+
+
+# returns a model and a state history
+def deserialize_newton(data: dict):
+    """
+    Deserialize Newton simulation data using callback approach.
+
+    Args:
+        data: The serialized data containing model and states.
+
+    Returns:
+        The deserialized data structure.
+    """
+
+    def callback(x, path):
+        if isinstance(x, dict) and x.get("__type__") == "warp.array":
+            # print(f"deserialize warp.array at path: {path}")
+            return wp.array(deserialize_ndarray(x["data"]))
+
+        if isinstance(x, dict) and x.get("__type__") == "warp.HashGrid":
+            # print(f"deserialize warp.HashGrid at path: {path}")
+            # Return None or create empty HashGrid as appropriate
+            return None
+
+        if isinstance(x, dict) and x.get("__type__") == "warp.Mesh":
+            # print(f"deserialize warp.Mesh at path: {path}")
+            # Return None or create empty Mesh as appropriate
+            return None
+
+        if isinstance(x, dict) and x.get("__type__") == "callable":
+            # print(f"deserialize callable at path: {path}")
+            # Return None for callables as they can't be serialized/deserialized
+            return None
+
+        return x
+
+    result = deserialize(data, callback)
+
+    # Extract model and states from the deserialized data
+    if isinstance(result, dict) and "model" in result and "states" in result:
+        model_dict = result["model"]
+        state_history = result["states"]
+    else:
+        # Handle case where result is directly the model and states tuple
+        model_dict, state_history = result
+
+    model = Model()
+    transfer_to_model(model_dict, model, None)
+
+    return model, state_history
 
 
 class BasicRecorder:
@@ -396,11 +582,21 @@ class ModelAndStateRecorder:
         """
         data_to_save = {"model": self.raw_model, "states": self.history}
         serialized_data = serialize_newton(data_to_save)
+
+        deserialized_model, deserialized_history = deserialize_newton(serialized_data)
+        print("deserialization done")
+
+        data_to_save2 = {"model": deserialized_model, "states": deserialized_history}
+        serialized_data2 = serialize_newton(data_to_save2)
+
         # Save in a human readable format using JSON
         import json
 
         with open(file_path + ".json", "w") as f:
             json.dump(serialized_data, f, indent=4)
+
+        with open(file_path + ".json2", "w") as f:
+            json.dump(serialized_data2, f, indent=4)
 
         with open(file_path, "wb") as f:
             data_to_save = {"model": self.model_data, "states": self.history}
