@@ -553,7 +553,7 @@ class ModelAndStateRecorder:
         state_data = {}
         for name, value in state.__dict__.items():
             if isinstance(value, wp.array):
-                state_data[name] = value.numpy()
+                state_data[name] = wp.clone(value) # value.numpy()
         self.history.append(state_data)
 
     def playback(self, state: State, frame_id: int):
@@ -575,9 +575,9 @@ class ModelAndStateRecorder:
             print("Warning: Unable to determine device from state. Playback skipped.")
             return
 
-        for name, value_np in state_data.items():
+        for name, value_wp in state_data.items():
             if hasattr(state, name):
-                value_wp = wp.array(value_np, device=device)
+                #value_wp = wp.array(value_np, device=device)
                 setattr(state, name, value_wp)
 
     def record_model(self, model: Model):
