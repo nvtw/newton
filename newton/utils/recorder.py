@@ -15,18 +15,15 @@
 
 from __future__ import annotations
 
-import io
-import pickle
+import json
+from collections.abc import Iterable, Mapping
 
 import numpy as np
 import warp as wp
 
+from newton.geometry import Mesh
 from newton.sim.model import Model
 from newton.sim.state import State
-
-from collections.abc import Mapping, Iterable
-import json
-import numpy as np
 
 
 def serialize_ndarray(arr: np.ndarray) -> dict:
@@ -144,7 +141,7 @@ def serialize(obj, callback, _visited=None, _path=""):
 
 
 def serialize_newton(obj):
-    def callback(x, path):        
+    def callback(x, path):
         if isinstance(x, wp.array):
             # print(f"serialize warp.array at path: {path}")
             return {"__type__": "warp.array", "data": serialize_ndarray(x.numpy())}
@@ -157,21 +154,37 @@ def serialize_newton(obj):
             # print(f"serialize warp.Mesh at path: {path}")
             return {"__type__": "warp.Mesh", "data": None}
 
+        if isinstance(x, Mesh):
+            # print(f"serialize newton.geometry.Mesh at path: {path}")
+            return {
+                "__type__": "newton.geometry.Mesh",
+                "data": {
+                    "vertices": serialize_ndarray(x.vertices),
+                    "indices": serialize_ndarray(x.indices),
+                    "is_solid": x.is_solid,
+                    "has_inertia": x.has_inertia,
+                    "maxhullvert": x.maxhullvert,
+                    "mass": x.mass,
+                    "com": [float(x.com[0]), float(x.com[1]), float(x.com[2])],
+                    "I": serialize_ndarray(np.array(x.I)),
+                }
+            }
+
         if isinstance(x, wp.context.Device):
-            return {"__type__": "wp.context.Device", "data": None}        
+            return {"__type__": "wp.context.Device", "data": None}
 
         if callable(x):
             # print(f"serialize callable at path: {path}")
             return {"__type__": "callable", "data": None}
 
-        print(type(x))
+        # print(type(x))
 
         return x
 
     return serialize(obj, callback)
 
 
-def transfer_to_model(source_dict, target_obj, callback=None, _path=""):
+def transfer_to_model(source_dict, target_obj, post_load_init_callback=None, _path=""):
     """
     Recursively transfer values from source_dict to target_obj, respecting the tree structure.
     Only transfers values where both source and target have matching attributes.
@@ -179,7 +192,7 @@ def transfer_to_model(source_dict, target_obj, callback=None, _path=""):
     Args:
         source_dict: Dictionary containing the values to transfer (from deserialization).
         target_obj: Target object to receive the values.
-        callback: Optional function taking (value, path) and returning transformed value.
+        post_load_init_callback: Optional function taking (target_obj, path) called after all children are processed.
         _path: Internal parameter tracking the current path.
     """
     if not hasattr(target_obj, "__dict__"):
@@ -216,16 +229,10 @@ def transfer_to_model(source_dict, target_obj, callback=None, _path=""):
         source_value = source_dict[attr_name]
         current_path = f"{_path}.{attr_name}" if _path else attr_name
 
-        # Apply callback if provided
-        if callback is not None:
-            transformed_value = callback(source_value, current_path)
-            if transformed_value is not source_value:
-                source_value = transformed_value
-
         # Handle different types of values
         if hasattr(target_value, "__dict__") and isinstance(source_value, dict):
             # Recursively transfer for custom objects
-            transfer_to_model(source_value, target_value, callback, current_path)
+            transfer_to_model(source_value, target_value, post_load_init_callback, current_path)
         elif isinstance(source_value, (list, tuple)) and hasattr(target_value, "__len__"):
             # Handle sequences - try to transfer if lengths match or target is empty
             try:
@@ -248,6 +255,10 @@ def transfer_to_model(source_dict, target_obj, callback=None, _path=""):
             except (AttributeError, TypeError):
                 # Skip if we can't set the attribute (e.g., read-only property)
                 pass
+
+    # Call post_load_init_callback after all children have been processed
+    if post_load_init_callback is not None:
+        post_load_init_callback(target_obj, _path)
 
 
 def deserialize(data, callback, _path=""):
@@ -341,6 +352,28 @@ def deserialize_newton(data: dict):
             # Return None or create empty Mesh as appropriate
             return None
 
+        if isinstance(x, dict) and x.get("__type__") == "newton.geometry.Mesh":
+            # print(f"deserialize newton.geometry.Mesh at path: {path}")
+            mesh_data = x["data"]
+            vertices = deserialize_ndarray(mesh_data["vertices"])
+            indices = deserialize_ndarray(mesh_data["indices"])
+            # Create the mesh without computing inertia since we'll restore the saved values
+            mesh = Mesh(
+                vertices=vertices,
+                indices=indices,
+                compute_inertia=False,
+                is_solid=mesh_data["is_solid"],
+                maxhullvert=mesh_data["maxhullvert"]
+            )
+
+            # Restore the saved inertia properties
+            mesh.has_inertia = mesh_data["has_inertia"]
+            mesh.mass = mesh_data["mass"]
+            mesh.com = wp.vec3(*mesh_data["com"])
+            mesh.I = wp.mat33(deserialize_ndarray(mesh_data["I"]))
+
+            return mesh
+
         if isinstance(x, dict) and x.get("__type__") == "callable":
             # print(f"deserialize callable at path: {path}")
             # Return None for callables as they can't be serialized/deserialized
@@ -350,18 +383,9 @@ def deserialize_newton(data: dict):
 
     result = deserialize(data, callback)
 
-    # Extract model and states from the deserialized data
-    if isinstance(result, dict) and "model" in result and "states" in result:
-        model_dict = result["model"]
-        state_history = result["states"]
-    else:
-        # Handle case where result is directly the model and states tuple
-        model_dict, state_history = result
-
-    model = Model()
-    transfer_to_model(model_dict, model, None)
-
-    return model, state_history
+    # Just return the deserialized result as-is
+    # Don't create any Model instances here
+    return result
 
 
 class BasicRecorder:
@@ -459,19 +483,15 @@ class BasicRecorder:
 
 
 class ModelAndStateRecorder:
-    """A class to record and playback simulation model and state using pickle serialization.
-
-    WARNING: This class uses pickle for serialization which is UNSAFE and can execute
-    arbitrary code when loading files. Only load recordings from TRUSTED sources that
-    you have verified. Loading recordings from untrusted sources could lead to malicious
-    code execution and compromise your system."""
+    """A class to record and playback simulation model and state using JSON serialization."""
 
     def __init__(self):
         """
         Initializes the Recorder.
         """
         self.history: list[dict] = []
-        self.model_data: dict = {}
+        self.raw_model: Model | None = None
+        self.deserialized_model: dict | None = None
 
     def _get_device_from_state(self, state: State):
         """
@@ -531,25 +551,12 @@ class ModelAndStateRecorder:
 
     def record_model(self, model: Model):
         """
-        Records a snapshot of the model's serializable attributes.
-        It stores warp arrays as numpy arrays, and primitive types as-is.
+        Records a snapshot of the model.
 
         Args:
             model (Model): The simulation model.
         """
         self.raw_model = model
-        model_data = {}
-        for name, value in model.__dict__.items():
-            if name == "shape_source":
-                print("shape_source")
-                print(value)
-
-            if isinstance(value, wp.array):
-                model_data[name] = value.numpy()
-                if name == "shape_source2":
-                    print("shape_source2")
-                    print(value.numpy())
-        self.model_data = model_data
 
     def playback_model(self, model: Model):
         """
@@ -558,63 +565,75 @@ class ModelAndStateRecorder:
         Args:
             model (Model): The simulation model to restore.
         """
-        if not self.model_data:
+        if not self.deserialized_model:
             print("Warning: No model data to playback.")
             return
 
-        try:
-            device = self._get_device_from_state(model)
-        except ValueError:
-            print("Warning: Unable to determine device from state. Playback skipped.")
-            return
+        def post_load_init_callback(target_obj, path):
+            if isinstance(target_obj, Mesh):
+                target_obj.finalize()
 
-        for name, value_np in self.model_data.items():
-            if hasattr(model, name):
-                value_wp = wp.array(value_np, device=device)
-                setattr(model, name, value_wp)
+        transfer_to_model(self.deserialized_model, model, post_load_init_callback)
 
     def save_to_file(self, file_path: str):
         """
-        Saves the recorded history to a file using pickle with unpicklable object handling.
+        Saves the recorded model and state history to a JSON file.
 
         Args:
-            file_path (str): The full path to the file.
+            file_path (str): The full path to the file (with or without .json extension).
+        """
+        # Only append .json if not already present
+        if not file_path.endswith(".json"):
+            file_path = file_path + ".json"
+
+        data_to_save = {"model": self.raw_model, "states": self.history}
+        serialized_data = serialize_newton(data_to_save)
+
+        with open(file_path, "w") as f:
+            json.dump(serialized_data, f, indent=2)
+
+        print("Save completed successfully.")
+
+    def save_to_file2(self, file_path: str):
+        """
+        Debugging
         """
         data_to_save = {"model": self.raw_model, "states": self.history}
         serialized_data = serialize_newton(data_to_save)
 
-        deserialized_model, deserialized_history = deserialize_newton(serialized_data)
+        raw = deserialize_newton(serialized_data)
+        deserialized_model = raw["model"]
+        deserialized_history = raw["states"]
         print("deserialization done")
 
-        data_to_save2 = {"model": deserialized_model, "states": deserialized_history}
+        m = Model()
+        transfer_to_model(deserialized_model, m, None)
+
+        data_to_save2 = {"model": m, "states": deserialized_history}
         serialized_data2 = serialize_newton(data_to_save2)
 
-        # Save in a human readable format using JSON
-        import json
-
         with open(file_path + ".json", "w") as f:
-            json.dump(serialized_data, f, indent=4)
+            json.dump(serialized_data, f, indent=2)
 
         with open(file_path + ".json2", "w") as f:
-            json.dump(serialized_data2, f, indent=4)
-
-        with open(file_path, "wb") as f:
-            data_to_save = {"model": self.model_data, "states": self.history}
-            pickle.dump(data_to_save, f)
+            json.dump(serialized_data2, f, indent=2)
 
     def load_from_file(self, file_path: str):
         """
-        Loads a recorded history from a file, replacing the current history.
+        Loads a recorded history from a JSON file, replacing the current history.
 
         Args:
-            file_path (str): The full path to the file.
+            file_path (str): The full path to the file (with or without .json extension).
         """
-        with open(file_path, "rb") as f:
-            data = pickle.load(f)
-            if isinstance(data, dict) and "states" in data:
-                self.history = data.get("states", [])
-                self.model_data = data.get("model", {})
-            else:
-                # For backward compatibility with old format.
-                self.history = data
-                self.model_data = {}
+        # Only append .json if not already present
+        if not file_path.endswith(".json"):
+            file_path = file_path + ".json"
+
+        with open(file_path) as f:
+            serialized_data = json.load(f)
+
+        raw = deserialize_newton(serialized_data)
+        self.deserialized_model = raw["model"]
+        self.history = raw["states"]
+
+        print("Load completed successfully.")

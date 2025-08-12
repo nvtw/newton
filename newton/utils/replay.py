@@ -37,7 +37,7 @@ class ReplayImGuiManager(ImGuiManager):
 
     def _update_frame(self, frame_id):
         """Update the selected frame using ModelAndStateRecorder."""
-        if not self.recorder or not hasattr(self.recorder, 'history'):
+        if not self.recorder or not hasattr(self.recorder, "history"):
             return
         total_frames = len(self.recorder.history)
         if frame_id < 0 or frame_id >= total_frames:
@@ -45,7 +45,7 @@ class ReplayImGuiManager(ImGuiManager):
 
         self.selected_frame = frame_id
         # Update the example's state with the selected frame
-        if hasattr(self.example, 'state') and self.example.state is not None:
+        if hasattr(self.example, "state") and self.example.state is not None:
             self.recorder.playback(self.example.state, self.selected_frame)
 
     def _update_playback(self):
@@ -59,7 +59,8 @@ class ReplayImGuiManager(ImGuiManager):
 
         # Simple frame advance based on playback speed
         import time
-        if not hasattr(self, '_last_update_time'):
+
+        if not hasattr(self, "_last_update_time"):
             self._last_update_time = time.time()
             return
 
@@ -123,7 +124,9 @@ class ReplayImGuiManager(ImGuiManager):
 
         # Frame info
         frame_time = self.selected_frame * self.example.frame_dt if total_frames > 0 else 0.0
-        self.imgui.text(f"Frame: {self.selected_frame}/{total_frames - 1 if total_frames > 0 else 0} ({frame_time:.2f}s)")
+        self.imgui.text(
+            f"Frame: {self.selected_frame}/{total_frames - 1 if total_frames > 0 else 0} ({frame_time:.2f}s)"
+        )
 
         # Speed control
         changed, new_speed = self.imgui.slider_float("Speed", self.playback_speed, 0.1, 5.0)
@@ -135,10 +138,7 @@ class ReplayImGuiManager(ImGuiManager):
         # Load button
         if self.imgui.button("Load Recording"):
             file_path = self.open_load_file_dialog(
-                filetypes=[
-                    ("Pickle files", "*.pkl;*.pickle"),
-                    ("All files", "*.*")
-                ],
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
                 title="Load Recording",
             )
             if file_path:
@@ -146,9 +146,9 @@ class ReplayImGuiManager(ImGuiManager):
                     # Create new recorder and load the file
                     new_recorder = ModelAndStateRecorder()
                     new_recorder.load_from_file(file_path)
-                    
+
                     # Update example with loaded data
-                    if hasattr(self.example, 'load_raw_simulation'):
+                    if hasattr(self.example, "load_raw_simulation"):
                         success = self.example.load_raw_simulation(file_path)
                         if success:
                             self.recorder = self.example.model_recorder

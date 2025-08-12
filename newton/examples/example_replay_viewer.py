@@ -17,7 +17,7 @@
 # Example Replay Viewer
 #
 # Shows how to use the Newton replay viewer to visualize previously
-# recorded simulation data from ModelAndStateRecorder (.pkl) files.
+# recorded simulation data from ModelAndStateRecorder (.json) files.
 #
 # Use the GUI to load recordings and scrub through frames.
 #
@@ -62,30 +62,30 @@ class Example:
         # Frame timing for GUI
         self.frame_dt = 1.0 / 60.0  # 60 FPS
 
-    def load_raw_simulation(self, pickle_path):
+    def load_raw_simulation(self, file_path):
         """
-        Raw testing method to load a simulation pickle file and set up model/state.
+        Raw testing method to load a simulation JSON file and set up model/state.
 
         Args:
-            pickle_path (str): Path to the pickle file (e.g., "C:/tmp/my_simulation.pkl")
+            file_path (str): Path to the JSON file (e.g., "C:/tmp/my_simulation.json")
         """
-        print(f"Loading simulation from: {pickle_path}")
+        print(f"Loading simulation from: {file_path}")
 
         # Create a ModelAndStateRecorder instance
         self.model_recorder = ModelAndStateRecorder()
 
-        # Load the pickle file
+        # Load the JSON file
         try:
-            self.model_recorder.load_from_file(pickle_path)
-            print(f"Successfully loaded pickle file with {len(self.model_recorder.history)} frames")
+            self.model_recorder.load_from_file(file_path)
+            print(f"Successfully loaded JSON file with {len(self.model_recorder.history)} frames")
         except Exception as e:
-            print(f"Error loading pickle file: {e}")
+            print(f"Error loading JSON file: {e}")
             return False
-        
+
         # Extract shape_source from the model data
-        if "shape_source" in self.model_recorder.model_data:
+        if self.model_recorder.deserialized_model and "shape_source" in self.model_recorder.deserialized_model:
             print("Found shape_source in recording")
-            shape_source = self.model_recorder.model_data["shape_source"]
+            shape_source = self.model_recorder.deserialized_model["shape_source"]
             print(f"Shape source contains {len(shape_source)} entries")
         else:
             print("Warning: No shape_source found in recording")
@@ -108,7 +108,7 @@ class Example:
         self._setup_renderer_with_model()
 
         return True
-    
+
     def _setup_renderer_with_model(self):
         """Set up the renderer with the loaded model using the provided pattern."""
         if not self.renderer or not self.model:
@@ -128,7 +128,7 @@ class Example:
             )
             print(f"Set up {len(self.renderer.body_names)} bodies for rendering")
 
-        print("SHAPE SOURCE: ", self.model.shape_source)
+        # print("SHAPE SOURCE: ", self.model.shape_source)
 
         # Setup shapes if available
         if self.model.shape_count:
@@ -149,7 +149,7 @@ class Example:
             print(f"Set up {self.model.shape_count} shapes for rendering")
 
             # Render ground plane if present
-            if hasattr(self.model, 'ground') and self.model.ground:
+            if hasattr(self.model, "ground") and self.model.ground:
                 self.renderer.render_ground(plane=self.model.ground_plane_params)
                 print("Ground plane rendered")
 
@@ -168,17 +168,17 @@ class Example:
 
     def step(self):
         # For testing, cycle through frames automatically
-        if hasattr(self, '_current_frame'):
+        if hasattr(self, "_current_frame"):
             self._current_frame = (self._current_frame + 1) % len(self.model_recorder.history)
         else:
             self._current_frame = 0
-        
+
         # Load every 60th frame (1 second at 60 FPS)
-        if hasattr(self, '_frame_counter'):
+        if hasattr(self, "_frame_counter"):
             self._frame_counter += 1
         else:
             self._frame_counter = 0
-            
+
         if self._frame_counter % 60 == 0:  # Change frame every second
             self.load_frame(self._current_frame)
 
@@ -207,23 +207,23 @@ def main():
         "--file",
         "-f",
         type=str,
-        help="Recording file to load on startup (.pkl for ModelAndStateRecorder)",
+        help="Recording file to load on startup (.json for ModelAndStateRecorder)",
     )
 
     args = parser.parse_args()
 
     print("Newton Physics Replay Viewer")
     print("Use the GUI to load recordings and explore your data.")
-    print("Note: Only pickle files (.pkl) from ModelAndStateRecorder are supported.")
+    print("Note: Only JSON files (.json) from ModelAndStateRecorder are supported.")
     if args.file:
         print(f"Loading: {args.file}")
 
     with wp.ScopedDevice(args.device):
         example = Example(stage_path=args.window_title)
 
-        # RAW TESTING: Load the specific pickle file
-        raw_pickle_path = r"C:\tmp\test.pkl"
-        success = example.load_raw_simulation(raw_pickle_path)
+        # RAW TESTING: Load the specific JSON file
+        raw_json_path = r"C:\tmp\test.json"
+        success = example.load_raw_simulation(raw_json_path)
 
         if not success:
             print("Failed to load simulation. Exiting...")
