@@ -144,7 +144,10 @@ def serialize_newton(obj):
     def callback(x, path):
         if isinstance(x, wp.array):
             # print(f"serialize warp.array at path: {path}")
-            return {"__type__": "warp.array", "data": serialize_ndarray(x.numpy())}
+            return {
+                "__type__": "warp.array", 
+                "__dtype__": int(x.dtype),
+                "data": serialize_ndarray(x.numpy())}
 
         if isinstance(x, wp.HashGrid):
             # print(f"serialize warp.types.HashGrid at path: {path}")
@@ -340,7 +343,7 @@ def deserialize_newton(data: dict):
     def callback(x, path):
         if isinstance(x, dict) and x.get("__type__") == "warp.array":
             # print(f"deserialize warp.array at path: {path}")
-            return wp.array(deserialize_ndarray(x["data"]))
+            return wp.array(deserialize_ndarray(x["data"]), dtype=x["__dtype__"])
 
         if isinstance(x, dict) and x.get("__type__") == "warp.HashGrid":
             # print(f"deserialize warp.HashGrid at path: {path}")

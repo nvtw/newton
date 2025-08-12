@@ -283,26 +283,11 @@ class Example:
     def load_frame(self, frame_id):
         """Load a specific frame from the recorded data."""
         if self.model_recorder and 0 <= frame_id < len(self.model_recorder.history):
-            self.model_recorder.playback(self.state, frame_id)
+            self.model_recorder.playback(self.state, frame_id)            
             print(f"Loaded frame {frame_id}")
             return True
         return False
 
-    def step(self):
-        # For testing, cycle through frames automatically
-        if hasattr(self, "_current_frame"):
-            self._current_frame = (self._current_frame + 1) % len(self.model_recorder.history)
-        else:
-            self._current_frame = 0
-
-        # Load every 60th frame (1 second at 60 FPS)
-        if hasattr(self, "_frame_counter"):
-            self._frame_counter += 1
-        else:
-            self._frame_counter = 0
-
-        if self._frame_counter % 60 == 0:  # Change frame every second
-            self.load_frame(self._current_frame)
 
     def render(self):
         if self.renderer is None:
@@ -313,6 +298,12 @@ class Example:
             # If we have a model and state, render the state (for ModelAndStateRecorder)
             if self.model is not None and self.state is not None:
                 self.renderer.render(self.state)
+                print("RENDERED")
+            else:
+                if(self.model is None):
+                    print("MODEL IS NONE")
+                if(self.state is None):
+                    print("STATE IS NONE")
             # Otherwise, let the replay manager handle display
             self.renderer.end_frame()
 
@@ -359,8 +350,8 @@ def main():
         # Main loop following example_quadruped pattern
         if example.renderer:
             while example.renderer.is_running():
-                example.step()
                 example.render()
+                print("renderloop")
 
 
 if __name__ == "__main__":
