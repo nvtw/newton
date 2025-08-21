@@ -169,7 +169,7 @@ def test_model_and_state_recorder_binary(test: TestRecorder, device):
     """Test model and state recorder with binary CBOR2 format."""
     # Skip binary test if CBOR2 is not available
     try:
-        import cbor2  # noqa: F401
+        import cbor2  # noqa: F401, PLC0415
     except ImportError:
         test.skipTest("cbor2 library not available for binary format testing")
 
