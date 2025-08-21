@@ -340,6 +340,13 @@ add_example_test(
     test_options_cpu={"num_frames": 10},
 )
 
+add_example_test(
+    TestOtherExamples,
+    name="example_replay_viewer",
+    devices=test_devices,
+    test_options={"stage_path": "None", "num_frames": 100},
+    test_options_cpu={"num_frames": 10},
+)
 
 if __name__ == "__main__":
     # force rebuild of all kernels
