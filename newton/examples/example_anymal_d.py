@@ -34,7 +34,9 @@ from newton._src.utils.recorder import ModelAndStateRecorder
 
 
 class Example:
-    def __init__(self, stage_path="example_anymal_d.usd", headless=False, num_envs=8, use_cuda_graph=True, recorder=None):
+    def __init__(
+        self, stage_path="example_anymal_d.usd", headless=False, num_envs=8, use_cuda_graph=True, recorder=None
+    ):
         self.device = wp.get_device()
         self.num_envs = num_envs
         self.recorder = recorder
@@ -176,7 +178,7 @@ if __name__ == "__main__":
             headless=args.headless,
             num_envs=args.num_envs,
             use_cuda_graph=args.use_cuda_graph,
-            recorder=recorder
+            recorder=recorder,
         )
 
         for frame_idx in range(args.num_frames):

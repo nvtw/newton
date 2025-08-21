@@ -185,10 +185,7 @@ if __name__ == "__main__":
         recorder = ModelAndStateRecorder() if args.recording_path else None
 
         example = Example(
-            num_envs=args.num_envs,
-            use_cuda_graph=args.use_cuda_graph,
-            headless=args.headless,
-            recorder=recorder
+            num_envs=args.num_envs, use_cuda_graph=args.use_cuda_graph, headless=args.headless, recorder=recorder
         )
 
         show_mujoco_viewer = args.show_mujoco_viewer and example.use_mujoco

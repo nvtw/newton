@@ -21,8 +21,8 @@ from collections.abc import Iterable, Mapping
 import numpy as np
 import warp as wp
 
-from ..sim import Model, State
 from ..geometry import Mesh
+from ..sim import Model, State
 
 
 def serialize_ndarray(arr: np.ndarray) -> dict:

@@ -170,7 +170,9 @@ if __name__ == "__main__":
         # Create recorder if recording path is provided
         recorder = ModelAndStateRecorder() if args.recording_path else None
 
-        example = Example(stage_path=args.stage_path, num_envs=args.num_envs, use_cuda_graph=args.use_cuda_graph, recorder=recorder)
+        example = Example(
+            stage_path=args.stage_path, num_envs=args.num_envs, use_cuda_graph=args.use_cuda_graph, recorder=recorder
+        )
 
         for frame_idx in range(args.num_frames):
             example.step()
