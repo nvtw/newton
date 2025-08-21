@@ -28,7 +28,6 @@ from ..sim import Model, State
 # Optional CBOR2 support
 try:
     import cbor2
-    import zstandard as zstd
 
     HAS_CBOR2 = True
 except ImportError:
@@ -43,7 +42,7 @@ def _get_serialization_format(file_path: str) -> str:
         file_path: Path to the file
 
     Returns:
-        'json' for .json files, 'cbor2' for .bin files (with zstandard compression)
+        'json' for .json files, 'cbor2' for .bin files
 
     Raises:
         ValueError: If file extension is not supported
@@ -53,9 +52,7 @@ def _get_serialization_format(file_path: str) -> str:
         return "json"
     elif ext == ".bin":
         if not HAS_CBOR2:
-            raise ImportError(
-                "cbor2 and zstandard libraries are required for .bin files. Install with: pip install cbor2 zstandard"
-            )
+            raise ImportError("cbor2 library is required for .bin files. Install with: pip install cbor2")
         return "cbor2"
     else:
         raise ValueError(f"Unsupported file extension '{ext}'. Supported extensions: .json, .bin")
@@ -80,9 +77,32 @@ def serialize_ndarray(arr: np.ndarray, format_type: str = "json") -> dict:
             "data": json.dumps(arr.tolist()),
         }
     elif format_type == "cbor2":
-        # For CBOR2, convert to list for reliable serialization
-        # This is still more efficient than JSON since CBOR2 handles binary data better
-        return {"__type__": "numpy.ndarray", "dtype": str(arr.dtype), "shape": arr.shape, "data": arr.tolist()}
+        # Use efficient binary serialization with float view trick for CBOR2
+        try:
+            # Try to view the array as float32 for efficient binary serialization
+            float_view = arr.view(dtype=np.float32)
+            binary_data = float_view.tobytes()
+
+            return {
+                "__type__": "numpy.ndarray",
+                "dtype": str(arr.dtype),
+                "shape": arr.shape,
+                "binary_data": binary_data,
+                "float_view_shape": float_view.shape,
+                "is_binary": True,
+            }
+        except (ValueError, TypeError):
+            # Fallback to list serialization for dtypes that can't be viewed as float32
+            # print(
+            #     f"Warning: Array with dtype {arr.dtype} cannot be efficiently serialized using binary format. Falling back to list serialization."
+            # )
+            return {
+                "__type__": "numpy.ndarray",
+                "dtype": str(arr.dtype),
+                "shape": arr.shape,
+                "data": arr.tolist(),
+                "is_binary": False,
+            }
     else:
         raise ValueError(f"Unsupported format_type: {format_type}")
 
@@ -103,13 +123,40 @@ def deserialize_ndarray(data: dict, format_type: str = "json") -> np.ndarray:
 
     dtype = np.dtype(data["dtype"])
     shape = tuple(data["shape"])
+
     if format_type == "json":
         array_data = json.loads(data["data"])
         return np.array(array_data, dtype=dtype).reshape(shape)
     elif format_type == "cbor2":
-        # For CBOR2, data is stored as a list (like JSON but more efficient binary encoding)
-        array_data = data["data"]
-        return np.array(array_data, dtype=dtype).reshape(shape)
+        # Check if this is binary serialized data
+        if data.get("is_binary", False) and "binary_data" in data:
+            # Reconstruct from binary data using float view trick
+            binary_data = data["binary_data"]
+            float_view_shape = tuple(data["float_view_shape"])
+
+            # Recreate the float array from binary data
+            reconstructed_flat_array = np.frombuffer(binary_data, dtype=np.float32)
+            reconstructed_float_array = reconstructed_flat_array.reshape(float_view_shape)
+
+            # View it back to the original dtype and reshape
+            final_array = reconstructed_float_array.view(dtype=dtype)
+
+            # Handle potential dimension mismatch after view conversion
+            if final_array.shape != shape:
+                # Try to squeeze or reshape to match the original shape
+                try:
+                    final_array = final_array.squeeze()
+                    if final_array.shape != shape:
+                        final_array = final_array.reshape(shape)
+                except ValueError:
+                    # If reshaping fails, try direct reshape
+                    final_array = final_array.reshape(shape)
+
+            return final_array
+        else:
+            # Fallback to list deserialization for non-binary data
+            array_data = data["data"]
+            return np.array(array_data, dtype=dtype).reshape(shape)
     else:
         raise ValueError(f"Unsupported format_type: {format_type}")
 
@@ -647,12 +694,12 @@ class ModelAndStateRecorder:
     def save_to_file(self, file_path: str):
         """
         Saves the recorded model and state history to a file.
-        Format is determined by file extension: .json for JSON, .bin for compressed CBOR2.
+        Format is determined by file extension: .json for JSON, .bin for CBOR2.
 
         Args:
             file_path (str): The full path to the file (with extension).
                 - .json: Human-readable JSON format
-                - .bin: Compressed binary CBOR2 format (uses zstandard compression)
+                - .bin: Binary CBOR2 format (uncompressed)
         """
         # Determine format based on extension
         try:
@@ -672,46 +719,20 @@ class ModelAndStateRecorder:
             with open(file_path, "w") as f:
                 json.dump(serialized_data, f, indent=2)
         elif format_type == "cbor2":
-            # Use zstandard compression for CBOR2 binary format
+            # Save as uncompressed CBOR2 binary format
             cbor_data = cbor2.dumps(serialized_data)
-            compressor = zstd.ZstdCompressor()
-            compressed_data = compressor.compress(cbor_data)
             with open(file_path, "wb") as f:
-                f.write(compressed_data)
-
-    # def save_to_file2(self, file_path: str):
-    #     """
-    #     Debugging
-    #     """
-    #     data_to_save = {"model": self.raw_model, "states": self.history}
-    #     serialized_data = serialize_newton(data_to_save)
-
-    #     raw = deserialize_newton(serialized_data)
-    #     deserialized_model = raw["model"]
-    #     deserialized_history = raw["states"]
-    #     print("deserialization done")
-
-    #     m = Model()
-    #     transfer_to_model(deserialized_model, m, None)
-
-    #     data_to_save2 = {"model": m, "states": deserialized_history}
-    #     serialized_data2 = serialize_newton(data_to_save2)
-
-    #     with open(file_path + ".json", "w") as f:
-    #         json.dump(serialized_data, f, indent=2)
-
-    #     with open(file_path + ".json2", "w") as f:
-    #         json.dump(serialized_data2, f, indent=2)
+                f.write(cbor_data)
 
     def load_from_file(self, file_path: str):
         """
         Loads a recorded history from a file, replacing the current history.
-        Format is determined by file extension: .json for JSON, .bin for compressed CBOR2.
+        Format is determined by file extension: .json for JSON, .bin for CBOR2.
 
         Args:
             file_path (str): The full path to the file (with extension).
                 - .json: Human-readable JSON format
-                - .bin: Compressed binary CBOR2 format (uses zstandard decompression)
+                - .bin: Binary CBOR2 format (uncompressed)
         """
         # Determine format based on extension
         try:
@@ -732,12 +753,10 @@ class ModelAndStateRecorder:
             with open(file_path) as f:
                 serialized_data = json.load(f)
         elif format_type == "cbor2":
-            # Use zstandard decompression for CBOR2 binary format
+            # Load uncompressed CBOR2 binary format
             with open(file_path, "rb") as f:
-                compressed_data = f.read()
-            decompressor = zstd.ZstdDecompressor()
-            cbor_data = decompressor.decompress(compressed_data)
-            serialized_data = cbor2.loads(cbor_data)
+                file_data = f.read()
+            serialized_data = cbor2.loads(file_data)
 
         raw = deserialize_newton(serialized_data, format_type)
         self.deserialized_model = raw["model"]
