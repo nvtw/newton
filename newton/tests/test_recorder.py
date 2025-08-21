@@ -90,7 +90,8 @@ def _compare_serialized_data(test, data1, data2):
         test.fail(f"Unhandled type for comparison: {type(data1)}")
 
 
-def test_model_and_state_recorder(test: TestRecorder, device):
+def _test_model_and_state_recorder_with_format(test: TestRecorder, device, file_extension: str):
+    """Helper function to test model and state recorder with a specific file format."""
     builder = newton.ModelBuilder()
     body = builder.add_body()
     builder.add_shape_capsule(body)
@@ -109,11 +110,21 @@ def test_model_and_state_recorder(test: TestRecorder, device):
     for state in states:
         recorder.record(state)
 
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(suffix=file_extension, delete=False) as tmp:
         file_path = tmp.name
 
     try:
         recorder.save_to_file(file_path)
+
+        # Verify the file was created with the expected format
+        test.assertTrue(os.path.exists(file_path), f"File {file_path} was not created")
+
+        # For binary files, verify it's actually binary data
+        if file_extension == ".bin":
+            with open(file_path, "rb") as f:
+                data = f.read(10)  # Read first 10 bytes
+                # CBOR2 binary data should not be readable as text
+                test.assertIsInstance(data, bytes, "Binary file should contain bytes")
 
         new_recorder = newton.utils.ModelAndStateRecorder()
         new_recorder.load_from_file(file_path)
@@ -149,6 +160,22 @@ def test_model_and_state_recorder(test: TestRecorder, device):
             os.remove(file_path)
 
 
+def test_model_and_state_recorder_json(test: TestRecorder, device):
+    """Test model and state recorder with JSON format."""
+    _test_model_and_state_recorder_with_format(test, device, ".json")
+
+
+def test_model_and_state_recorder_binary(test: TestRecorder, device):
+    """Test model and state recorder with binary CBOR2 format."""
+    # Skip binary test if CBOR2 is not available
+    try:
+        import cbor2  # noqa: F401
+    except ImportError:
+        test.skipTest("cbor2 library not available for binary format testing")
+
+    _test_model_and_state_recorder_with_format(test, device, ".bin")
+
+
 devices = get_test_devices()
 for device in devices:
     add_function_test(
@@ -157,10 +184,17 @@ for device in devices:
         test_body_transform_recorder,
         devices=[device],
     )
+
     add_function_test(
         TestRecorder,
-        f"test_model_and_state_recorder_{device}",
-        test_model_and_state_recorder,
+        f"test_model_and_state_recorder_json_{device}",
+        test_model_and_state_recorder_json,
+        devices=[device],
+    )
+    add_function_test(
+        TestRecorder,
+        f"test_model_and_state_recorder_binary_{device}",
+        test_model_and_state_recorder_binary,
         devices=[device],
     )
 

@@ -118,7 +118,7 @@ class ReplayViewerGUI(ImGuiManager):
         """Open file browser to select recording file."""
         file_path = self.open_load_file_dialog(
             filetypes=[
-                ("Recording files", "*.json;*.bin"),
+                ("Recording files", ("*.json", "*.bin")),
                 ("JSON files", "*.json"),
                 ("Binary files", "*.bin"),
                 ("All files", "*.*"),
@@ -143,8 +143,11 @@ class Example:
 
         # Set up renderer and replay components
         if stage_path:
-            # Create RendererOpenGL without a model initially
-            self.renderer = newton.viewer.RendererOpenGL(model=None, path=stage_path)
+            # Create OpenGL renderer with a descriptive window title
+            window_title = os.path.basename(stage_path)
+            self.renderer = newton.viewer.RendererOpenGL(model=None, path=window_title)
+            # If you need to load the USD stage, do so separately:
+            # stage = Usd.Stage.Open(stage_path)
             # GUI will be set up when loading recordings
             self.gui = ReplayViewerGUI(self.renderer, self)
             self.renderer.render_2d_callbacks.append(self.gui.render_frame)

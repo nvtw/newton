@@ -196,8 +196,9 @@ def serialize(obj, callback, _visited=None, _path="", format_type="json"):
 
         # NumPy scalar types
         if isinstance(obj, np.number):
+            # Normalize to "numpy.<typename>" for compatibility with deserializer
             return {
-                "__type__": type(obj).__name__,
+                "__type__": f"numpy.{type(obj).__name__}",
                 "value": obj.item(),  # Convert numpy scalar to Python scalar
             }
 
