@@ -31,10 +31,6 @@ from warp.render.imgui_manager import ImGuiManager
 
 import newton
 import newton.utils
-from newton.sim.model import Model
-from newton.sim.state import State
-from newton.utils.recorder import ModelAndStateRecorder
-
 
 
 class ReplayViewerGUI(ImGuiManager):
@@ -73,12 +69,7 @@ class ReplayViewerGUI(ImGuiManager):
             self.imgui.text(f"Total frames: {total_frames}")
 
             # Frame slider
-            changed, new_frame = self.imgui.slider_int(
-                "Frame",
-                self.current_frame,
-                0,
-                total_frames - 1
-            )
+            changed, new_frame = self.imgui.slider_int("Frame", self.current_frame, 0, total_frames - 1)
 
             if changed:
                 self.current_frame = new_frame
@@ -113,8 +104,7 @@ class ReplayViewerGUI(ImGuiManager):
     def _browse_file(self):
         """Open file browser to select JSON file."""
         file_path = self.open_load_file_dialog(
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-            title="Select Recording File"
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")], title="Select Recording File"
         )
         if file_path:
             self.selected_file = os.path.basename(file_path)
@@ -127,15 +117,15 @@ class Example:
     def __init__(self, stage_path="Newton_Replay_Viewer.usd"):
         # Model and state will be set when loading recordings
         self.model = None
-        self.state = State()
+        self.state = newton.State()
         self.solver = None
         self.model_recorder = None
         self.num_envs = 1  # Default number of environments
 
         # Set up renderer and replay components
         if stage_path:
-            # Create SimRendererOpenGL without a model initially
-            self.renderer = newton.utils.SimRendererOpenGL(model=None, path=stage_path)
+            # Create RendererOpenGL without a model initially
+            self.renderer = newton.viewer.RendererOpenGL(model=None, path=stage_path)
             # GUI will be set up when loading recordings
             self.gui = ReplayViewerGUI(self.renderer, self)
             self.renderer.render_2d_callbacks.append(self.gui.render_frame)
@@ -151,11 +141,11 @@ class Example:
         self.frame_dt = 1.0 / 60.0  # 60 FPS
 
     def load_recording(self, file_path):
-        """Load a JSON recording file."""
+        """Load a JSON recording file and set up the complete rendering pipeline."""
         print(f"Loading recording from: {file_path}")
 
         # Create a ModelAndStateRecorder instance
-        self.model_recorder = ModelAndStateRecorder()
+        self.model_recorder = newton.utils.ModelAndStateRecorder()
 
         # Load the JSON file
         try:
@@ -165,69 +155,32 @@ class Example:
             print(f"Error loading JSON file: {e}")
             return False
 
-        # Create new model and state objects
-        self.model = Model()
-        self.state = State()
-
-        # Restore the model from the recording
-        self.model_recorder.playback_model(self.model)
-        print(f"Model restored with {self.model.body_count} bodies")
-
-        # Update renderer with new model
-        if self.renderer:
-            self.renderer.model = self.model
-
-        # Restore the first frame's state
-        if len(self.model_recorder.history) > 0:
-            self.model_recorder.playback(self.state, 0)
-            print("State restored from first frame")
-
-        return True
-
-    def load_raw_simulation(self, file_path):
-        """
-        Raw testing method to load a simulation JSON file and set up model/state.
-
-        Args:
-            file_path (str): Path to the JSON file (e.g., "C:/tmp/my_simulation.json")
-        """
-        print(f"Loading simulation from: {file_path}")
-
-        # Create a ModelAndStateRecorder instance
-        self.model_recorder = ModelAndStateRecorder()
-
-        # Load the JSON file
-        try:
-            self.model_recorder.load_from_file(file_path)
-            print(f"Successfully loaded JSON file with {len(self.model_recorder.history)} frames")
-        except Exception as e:
-            print(f"Error loading JSON file: {e}")
-            return False
-
-        # Extract shape_source from the model data
+        # Extract shape_source from the model data (for debugging)
         if self.model_recorder.deserialized_model and "shape_source" in self.model_recorder.deserialized_model:
             print("Found shape_source in recording")
             shape_source = self.model_recorder.deserialized_model["shape_source"]
             print(f"Shape source contains {len(shape_source)} entries")
         else:
             print("Warning: No shape_source found in recording")
-            shape_source = []
 
-        # Create empty model and state objects
-        self.model = Model()
-        self.state = State()
+        # Create new model and state objects
+        self.model = newton.Model()
+        self.state = newton.State()
 
-        # Use playback_model to restore the model
+        # Restore the model from the recording
         self.model_recorder.playback_model(self.model)
         print(f"Model restored with {self.model.body_count} bodies")
 
-        # Use playback to restore the first frame's state
+        # Restore the first frame's state
         if len(self.model_recorder.history) > 0:
             self.model_recorder.playback(self.state, 0)
             print("State restored from first frame")
 
         # Set up the renderer with the loaded model
         self._setup_renderer_with_model()
+
+        if self.renderer:
+            self.renderer.paused = False
 
         return True
 
@@ -249,8 +202,6 @@ class Example:
                 self.model.body_key, bodies_per_env, self.renderer.body_env
             )
             print(f"Set up {len(self.renderer.body_names)} bodies for rendering")
-
-        # print("SHAPE SOURCE: ", self.model.shape_source)
 
         # Setup shapes if available
         if self.model.shape_count:
@@ -283,11 +234,10 @@ class Example:
     def load_frame(self, frame_id):
         """Load a specific frame from the recorded data."""
         if self.model_recorder and 0 <= frame_id < len(self.model_recorder.history):
-            self.model_recorder.playback(self.state, frame_id)            
+            self.model_recorder.playback(self.state, frame_id)
             print(f"Loaded frame {frame_id}")
             return True
         return False
-
 
     def render(self):
         if self.renderer is None:
@@ -298,11 +248,10 @@ class Example:
             # If we have a model and state, render the state (for ModelAndStateRecorder)
             if self.model is not None and self.state is not None:
                 self.renderer.render(self.state)
-                print("RENDERED")
             else:
-                if(self.model is None):
+                if self.model is None:
                     print("MODEL IS NONE")
-                if(self.state is None):
+                if self.state is None:
                     print("STATE IS NONE")
             # Otherwise, let the replay manager handle display
             self.renderer.end_frame()
@@ -334,24 +283,17 @@ def main():
     with wp.ScopedDevice(args.device):
         example = Example(stage_path=args.window_title)
 
-        # RAW TESTING: Load the specific JSON file
-        raw_json_path = r"C:\tmp\test.json"
-        success = example.load_raw_simulation(raw_json_path)
-
-        if not success:
-            print("Failed to load simulation. Exiting...")
-            return
-
-        # Load file if specified via command line (this will override the raw testing)
+        # Load file if specified via command line (this will override the testing file)
         if args.file:
-            print(f"Command line file loading not implemented yet: {args.file}")
-            # example.load_recording(args.file)  # TODO: Implement this method if needed
+            success = example.load_recording(args.file)
+            if not success:
+                print(f"Failed to load recording: {args.file}")
+                return
 
         # Main loop following example_quadruped pattern
         if example.renderer:
             while example.renderer.is_running():
                 example.render()
-                print("renderloop")
 
 
 if __name__ == "__main__":
