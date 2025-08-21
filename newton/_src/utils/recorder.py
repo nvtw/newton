@@ -263,13 +263,10 @@ def transfer_to_model(source_dict, target_obj, post_load_init_callback=None, _pa
             continue
 
         # Skip if attribute doesn't exist in target or is not settable
-        if not hasattr(target_obj, attr_name):
-            continue
-
         try:
             target_value = getattr(target_obj, attr_name)
-        except (AttributeError, TypeError):
-            # Skip attributes that can't be accessed
+        except (AttributeError, TypeError, RuntimeError):
+            # Skip attributes that can't be accessed (including CUDA stream on CPU devices)
             continue
 
         # Skip methods and non-data attributes
@@ -682,9 +679,6 @@ class ModelAndStateRecorder:
             with open(file_path, "wb") as f:
                 f.write(compressed_data)
 
-        compression_info = " (zstd compressed)" if format_type == "cbor2" else ""
-        print(f"Save completed successfully to {file_path} using {format_type.upper()} format{compression_info}.")
-
     # def save_to_file2(self, file_path: str):
     #     """
     #     Debugging
@@ -748,6 +742,3 @@ class ModelAndStateRecorder:
         raw = deserialize_newton(serialized_data, format_type)
         self.deserialized_model = raw["model"]
         self.history = raw["states"]
-
-        compression_info = " (zstd compressed)" if format_type == "cbor2" else ""
-        print(f"Load completed successfully from {file_path} using {format_type.upper()} format{compression_info}.")
