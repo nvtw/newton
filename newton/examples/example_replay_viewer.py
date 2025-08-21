@@ -17,7 +17,7 @@
 # Example Replay Viewer
 #
 # Shows how to use the Newton replay viewer to visualize previously
-# recorded simulation data from ModelAndStateRecorder (.json) files.
+# recorded simulation data from ModelAndStateRecorder (.json or .bin) files.
 #
 # Use the GUI to load recordings and scrub through frames.
 #
@@ -54,11 +54,24 @@ class ReplayViewerGUI(ImGuiManager):
         self.imgui.begin("Replay Controls")
 
         # File selection
-        self.imgui.text("JSON File:")
+        self.imgui.text("Recording File:")
         self.imgui.same_line()
         self.imgui.text(self.selected_file if self.selected_file else "No file selected")
 
-        if self.imgui.button("Browse..."):
+        # Disable browse button if a file is already loaded
+        file_loaded = self.example.model_recorder and len(self.example.model_recorder.history) > 0
+
+        if file_loaded:
+            self.imgui.push_style_color(self.imgui.COLOR_BUTTON, 0.5, 0.5, 0.5, 1.0)
+            self.imgui.push_style_color(self.imgui.COLOR_BUTTON_HOVERED, 0.5, 0.5, 0.5, 1.0)
+            self.imgui.push_style_color(self.imgui.COLOR_BUTTON_ACTIVE, 0.5, 0.5, 0.5, 1.0)
+
+        button_clicked = self.imgui.button("Browse..." if not file_loaded else "Browse... (disabled)")
+
+        if file_loaded:
+            self.imgui.pop_style_color(3)
+
+        if button_clicked and not file_loaded:
             self._browse_file()
 
         self.imgui.separator()
@@ -97,14 +110,20 @@ class ReplayViewerGUI(ImGuiManager):
                 self.example.load_frame(self.current_frame)
 
         else:
-            self.imgui.text("Load a JSON file to begin playback")
+            self.imgui.text("Load a recording file (.json or .bin) to begin playback")
 
         self.imgui.end()
 
     def _browse_file(self):
-        """Open file browser to select JSON file."""
+        """Open file browser to select recording file."""
         file_path = self.open_load_file_dialog(
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")], title="Select Recording File"
+            filetypes=[
+                ("Recording files", "*.json;*.bin"),
+                ("JSON files", "*.json"),
+                ("Binary files", "*.bin"),
+                ("All files", "*.*"),
+            ],
+            title="Select Recording File",
         )
         if file_path:
             self.selected_file = os.path.basename(file_path)
@@ -141,18 +160,18 @@ class Example:
         self.frame_dt = 1.0 / 60.0  # 60 FPS
 
     def load_recording(self, file_path):
-        """Load a JSON recording file and set up the complete rendering pipeline."""
+        """Load a recording file (.json or .bin) and set up the complete rendering pipeline."""
         print(f"Loading recording from: {file_path}")
 
         # Create a ModelAndStateRecorder instance
         self.model_recorder = newton.utils.ModelAndStateRecorder()
 
-        # Load the JSON file
+        # Load the recording file (format auto-detected from extension)
         try:
             self.model_recorder.load_from_file(file_path)
-            print(f"Successfully loaded JSON file with {len(self.model_recorder.history)} frames")
+            print(f"Successfully loaded recording file with {len(self.model_recorder.history)} frames")
         except Exception as e:
-            print(f"Error loading JSON file: {e}")
+            print(f"Error loading recording file: {e}")
             return False
 
         # Extract shape_source from the model data (for debugging)
@@ -269,14 +288,14 @@ def main():
         "--file",
         "-f",
         type=str,
-        help="Recording file to load on startup (.json for ModelAndStateRecorder)",
+        help="Recording file to load on startup (.json or .bin for ModelAndStateRecorder)",
     )
 
     args = parser.parse_args()
 
     print("Newton Physics Replay Viewer")
     print("Use the GUI to load recordings and explore your data.")
-    print("Note: Only JSON files (.json) from ModelAndStateRecorder are supported.")
+    print("Note: Supports both JSON (.json) and binary (.bin) files from ModelAndStateRecorder.")
     if args.file:
         print(f"Loading: {args.file}")
 

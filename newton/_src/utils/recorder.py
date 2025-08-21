@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable, Mapping
 
 import numpy as np
@@ -24,26 +25,75 @@ import warp as wp
 from ..geometry import Mesh
 from ..sim import Model, State
 
+# Optional CBOR2 support
+try:
+    import cbor2
+    import zstandard as zstd
 
-def serialize_ndarray(arr: np.ndarray) -> dict:
+    HAS_CBOR2 = True
+except ImportError:
+    HAS_CBOR2 = False
+
+
+def _get_serialization_format(file_path: str) -> str:
+    """
+    Determine serialization format based on file extension.
+
+    Args:
+        file_path: Path to the file
+
+    Returns:
+        'json' for .json files, 'cbor2' for .bin files (with zstandard compression)
+
+    Raises:
+        ValueError: If file extension is not supported
+    """
+    _, ext = os.path.splitext(file_path.lower())
+    if ext == ".json":
+        return "json"
+    elif ext == ".bin":
+        if not HAS_CBOR2:
+            raise ImportError(
+                "cbor2 and zstandard libraries are required for .bin files. Install with: pip install cbor2 zstandard"
+            )
+        return "cbor2"
+    else:
+        raise ValueError(f"Unsupported file extension '{ext}'. Supported extensions: .json, .bin")
+
+
+def serialize_ndarray(arr: np.ndarray, format_type: str = "json") -> dict:
     """
     Serialize a numpy ndarray to a dictionary representation.
 
     Args:
         arr: The numpy array to serialize.
+        format_type: The serialization format ('json' or 'cbor2').
 
     Returns:
         A dictionary containing the array's type, dtype, shape, and data.
     """
-    return {"__type__": "numpy.ndarray", "dtype": str(arr.dtype), "shape": arr.shape, "data": json.dumps(arr.tolist())}
+    if format_type == "json":
+        return {
+            "__type__": "numpy.ndarray",
+            "dtype": str(arr.dtype),
+            "shape": arr.shape,
+            "data": json.dumps(arr.tolist()),
+        }
+    elif format_type == "cbor2":
+        # For CBOR2, convert to list for reliable serialization
+        # This is still more efficient than JSON since CBOR2 handles binary data better
+        return {"__type__": "numpy.ndarray", "dtype": str(arr.dtype), "shape": arr.shape, "data": arr.tolist()}
+    else:
+        raise ValueError(f"Unsupported format_type: {format_type}")
 
 
-def deserialize_ndarray(data: dict) -> np.ndarray:
+def deserialize_ndarray(data: dict, format_type: str = "json") -> np.ndarray:
     """
     Deserialize a dictionary representation back to a numpy ndarray.
 
     Args:
         data: Dictionary containing the serialized array data.
+        format_type: The serialization format ('json' or 'cbor2').
 
     Returns:
         The reconstructed numpy array.
@@ -53,12 +103,18 @@ def deserialize_ndarray(data: dict) -> np.ndarray:
 
     dtype = np.dtype(data["dtype"])
     shape = tuple(data["shape"])
-    array_data = json.loads(data["data"])
+    if format_type == "json":
+        array_data = json.loads(data["data"])
+        return np.array(array_data, dtype=dtype).reshape(shape)
+    elif format_type == "cbor2":
+        # For CBOR2, data is stored as a list (like JSON but more efficient binary encoding)
+        array_data = data["data"]
+        return np.array(array_data, dtype=dtype).reshape(shape)
+    else:
+        raise ValueError(f"Unsupported format_type: {format_type}")
 
-    return np.array(array_data, dtype=dtype).reshape(shape)
 
-
-def serialize(obj, callback, _visited=None, _path=""):
+def serialize(obj, callback, _visited=None, _path="", format_type="json"):
     """
     Recursively serialize an object into a dict, handling primitives,
     containers, and custom class instances. Calls callback(obj) for every object
@@ -69,6 +125,7 @@ def serialize(obj, callback, _visited=None, _path=""):
         callback: A function taking two arguments (the object and current path) and returning the (possibly transformed) object.
         _visited: Internal set to avoid infinite recursion from circular references.
         _path: Internal parameter tracking the current path/member name.
+        format_type: The serialization format ('json' or 'cbor2').
     """
     if _visited is None:
         _visited = set()
@@ -99,14 +156,14 @@ def serialize(obj, callback, _visited=None, _path=""):
 
         # NumPy arrays
         if isinstance(obj, np.ndarray):
-            return serialize_ndarray(obj)
+            return serialize_ndarray(obj, format_type)
 
         # Mappings (like dict)
         if isinstance(obj, Mapping):
             return {
                 "__type__": type(obj).__name__,
                 "items": {
-                    str(k): serialize(v, callback, _visited, f"{_path}.{k}" if _path else str(k))
+                    str(k): serialize(v, callback, _visited, f"{_path}.{k}" if _path else str(k), format_type)
                     for k, v in obj.items()
                 },
             }
@@ -116,7 +173,7 @@ def serialize(obj, callback, _visited=None, _path=""):
             return {
                 "__type__": type(obj).__name__,
                 "items": [
-                    serialize(item, callback, _visited, f"{_path}[{i}]" if _path else f"[{i}]")
+                    serialize(item, callback, _visited, f"{_path}[{i}]" if _path else f"[{i}]", format_type)
                     for i, item in enumerate(obj)
                 ],
             }
@@ -127,7 +184,7 @@ def serialize(obj, callback, _visited=None, _path=""):
                 "__type__": obj.__class__.__name__,
                 "__module__": obj.__class__.__module__,
                 "attributes": {
-                    attr: serialize(value, callback, _visited, f"{_path}.{attr}" if _path else attr)
+                    attr: serialize(value, callback, _visited, f"{_path}.{attr}" if _path else attr, format_type)
                     for attr, value in vars(obj).items()
                 },
             }
@@ -139,38 +196,34 @@ def serialize(obj, callback, _visited=None, _path=""):
         _visited.discard(obj_id)
 
 
-def serialize_newton(obj):
+def serialize_newton(obj, format_type: str = "json"):
     def callback(x, path):
         if isinstance(x, wp.array):
-            # print(f"serialize warp.array at path: {path}")
             return {
                 "__type__": "warp.array",
                 # "__dtype__": int(x.dtype),
                 "__dtype__": str(x.dtype),  # Not used during deserialization, but useful for debugging
-                "data": serialize_ndarray(x.numpy()),
+                "data": serialize_ndarray(x.numpy(), format_type),
             }
 
         if isinstance(x, wp.HashGrid):
-            # print(f"serialize warp.types.HashGrid at path: {path}")
             return {"__type__": "warp.HashGrid", "data": None}
 
         if isinstance(x, wp.Mesh):
-            # print(f"serialize warp.Mesh at path: {path}")
             return {"__type__": "warp.Mesh", "data": None}
 
         if isinstance(x, Mesh):
-            # print(f"serialize newton.geometry.Mesh at path: {path}")
             return {
                 "__type__": "newton.geometry.Mesh",
                 "data": {
-                    "vertices": serialize_ndarray(x.vertices),
-                    "indices": serialize_ndarray(x.indices),
+                    "vertices": serialize_ndarray(x.vertices, format_type),
+                    "indices": serialize_ndarray(x.indices, format_type),
                     "is_solid": x.is_solid,
                     "has_inertia": x.has_inertia,
                     "maxhullvert": x.maxhullvert,
                     "mass": x.mass,
                     "com": [float(x.com[0]), float(x.com[1]), float(x.com[2])],
-                    "I": serialize_ndarray(np.array(x.I)),
+                    "I": serialize_ndarray(np.array(x.I), format_type),
                 },
             }
 
@@ -178,14 +231,11 @@ def serialize_newton(obj):
             return {"__type__": "wp.context.Device", "data": None}
 
         if callable(x):
-            # print(f"serialize callable at path: {path}")
             return {"__type__": "callable", "data": None}
-
-        # print(type(x))
 
         return x
 
-    return serialize(obj, callback)
+    return serialize(obj, callback, format_type=format_type)
 
 
 def transfer_to_model(source_dict, target_obj, post_load_init_callback=None, _path=""):
@@ -265,7 +315,7 @@ def transfer_to_model(source_dict, target_obj, post_load_init_callback=None, _pa
         post_load_init_callback(target_obj, _path)
 
 
-def deserialize(data, callback, _path=""):
+def deserialize(data, callback, _path="", format_type="json"):
     """
     Recursively deserialize a dict back into objects, handling primitives,
     containers, and custom class instances. Calls callback(obj, path) for every object
@@ -275,6 +325,7 @@ def deserialize(data, callback, _path=""):
         data: The serialized data to deserialize.
         callback: A function taking two arguments (the data dict and current path) and returning the (possibly transformed) object.
         _path: Internal parameter tracking the current path/member name.
+        format_type: The serialization format ('json' or 'cbor2').
     """
     # Run through callback first (object may be replaced)
     result = callback(data, _path)
@@ -294,7 +345,7 @@ def deserialize(data, callback, _path=""):
     # NumPy scalar types
     if type_name.startswith("numpy."):
         if type_name == "numpy.ndarray":
-            return deserialize_ndarray(data)
+            return deserialize_ndarray(data, format_type)
         else:
             # NumPy scalar types
             numpy_type = getattr(np, type_name.split(".")[-1])
@@ -302,12 +353,15 @@ def deserialize(data, callback, _path=""):
 
     # Mappings (like dict)
     if type_name == "dict":
-        return {k: deserialize(v, callback, f"{_path}.{k}" if _path else k) for k, v in data["items"].items()}
+        return {
+            k: deserialize(v, callback, f"{_path}.{k}" if _path else k, format_type) for k, v in data["items"].items()
+        }
 
     # Iterables (like list, tuple, set)
     if type_name in ("list", "tuple", "set"):
         items = [
-            deserialize(item, callback, f"{_path}[{i}]" if _path else f"[{i}]") for i, item in enumerate(data["items"])
+            deserialize(item, callback, f"{_path}[{i}]" if _path else f"[{i}]", format_type)
+            for i, item in enumerate(data["items"])
         ]
         if type_name == "tuple":
             return tuple(items)
@@ -321,7 +375,7 @@ def deserialize(data, callback, _path=""):
         # For now, return a simple dict representation
         # In a full implementation, you might want to reconstruct the actual class
         return {
-            attr: deserialize(value, callback, f"{_path}.{attr}" if _path else attr)
+            attr: deserialize(value, callback, f"{_path}.{attr}" if _path else attr, format_type)
             for attr, value in data["attributes"].items()
         }
 
@@ -352,12 +406,13 @@ def extract_last_type_name(class_str: str) -> str:
 
 
 # returns a model and a state history
-def deserialize_newton(data: dict):
+def deserialize_newton(data: dict, format_type: str = "json"):
     """
     Deserialize Newton simulation data using callback approach.
 
     Args:
         data: The serialized data containing model and states.
+        format_type: The serialization format ('json' or 'cbor2').
 
     Returns:
         The deserialized data structure.
@@ -365,30 +420,23 @@ def deserialize_newton(data: dict):
 
     def callback(x, path):
         if isinstance(x, dict) and x.get("__type__") == "warp.array":
-            # print(f"deserialize warp.array at path: {path}")
             dtype_str = extract_last_type_name(x["__dtype__"])
             a = getattr(wp.types, dtype_str)
-            # dtype = a()
-            # print(f"dtype: {dtype_str}")
-            result = wp.array(deserialize_ndarray(x["data"]), dtype=a)
-            print(result.dtype)
+            result = wp.array(deserialize_ndarray(x["data"], format_type), dtype=a)
             return result
 
         if isinstance(x, dict) and x.get("__type__") == "warp.HashGrid":
-            # print(f"deserialize warp.HashGrid at path: {path}")
             # Return None or create empty HashGrid as appropriate
             return None
 
         if isinstance(x, dict) and x.get("__type__") == "warp.Mesh":
-            # print(f"deserialize warp.Mesh at path: {path}")
             # Return None or create empty Mesh as appropriate
             return None
 
         if isinstance(x, dict) and x.get("__type__") == "newton.geometry.Mesh":
-            # print(f"deserialize newton.geometry.Mesh at path: {path}")
             mesh_data = x["data"]
-            vertices = deserialize_ndarray(mesh_data["vertices"])
-            indices = deserialize_ndarray(mesh_data["indices"])
+            vertices = deserialize_ndarray(mesh_data["vertices"], format_type)
+            indices = deserialize_ndarray(mesh_data["indices"], format_type)
             # Create the mesh without computing inertia since we'll restore the saved values
             mesh = Mesh(
                 vertices=vertices,
@@ -402,18 +450,17 @@ def deserialize_newton(data: dict):
             mesh.has_inertia = mesh_data["has_inertia"]
             mesh.mass = mesh_data["mass"]
             mesh.com = wp.vec3(*mesh_data["com"])
-            mesh.I = wp.mat33(deserialize_ndarray(mesh_data["I"]))
+            mesh.I = wp.mat33(deserialize_ndarray(mesh_data["I"], format_type))
 
             return mesh
 
         if isinstance(x, dict) and x.get("__type__") == "callable":
-            # print(f"deserialize callable at path: {path}")
             # Return None for callables as they can't be serialized/deserialized
             return None
 
         return x
 
-    result = deserialize(data, callback)
+    result = deserialize(data, callback, format_type=format_type)
 
     # Just return the deserialized result as-is
     # Don't create any Model instances here
@@ -602,22 +649,41 @@ class ModelAndStateRecorder:
 
     def save_to_file(self, file_path: str):
         """
-        Saves the recorded model and state history to a JSON file.
+        Saves the recorded model and state history to a file.
+        Format is determined by file extension: .json for JSON, .bin for compressed CBOR2.
 
         Args:
-            file_path (str): The full path to the file (with or without .json extension).
+            file_path (str): The full path to the file (with extension).
+                - .json: Human-readable JSON format
+                - .bin: Compressed binary CBOR2 format (uses zstandard compression)
         """
-        # Only append .json if not already present
-        if not file_path.endswith(".json"):
-            file_path = file_path + ".json"
+        # Determine format based on extension
+        try:
+            format_type = _get_serialization_format(file_path)
+        except ValueError:
+            # If no extension provided, default to JSON
+            if "." not in os.path.basename(file_path):
+                file_path = file_path + ".json"
+                format_type = "json"
+            else:
+                raise
 
         data_to_save = {"model": self.raw_model, "states": self.history}
-        serialized_data = serialize_newton(data_to_save)
+        serialized_data = serialize_newton(data_to_save, format_type)
 
-        with open(file_path, "w") as f:
-            json.dump(serialized_data, f, indent=2)
+        if format_type == "json":
+            with open(file_path, "w") as f:
+                json.dump(serialized_data, f, indent=2)
+        elif format_type == "cbor2":
+            # Use zstandard compression for CBOR2 binary format
+            cbor_data = cbor2.dumps(serialized_data)
+            compressor = zstd.ZstdCompressor()
+            compressed_data = compressor.compress(cbor_data)
+            with open(file_path, "wb") as f:
+                f.write(compressed_data)
 
-        print("Save completed successfully.")
+        compression_info = " (zstd compressed)" if format_type == "cbor2" else ""
+        print(f"Save completed successfully to {file_path} using {format_type.upper()} format{compression_info}.")
 
     # def save_to_file2(self, file_path: str):
     #     """
@@ -645,20 +711,43 @@ class ModelAndStateRecorder:
 
     def load_from_file(self, file_path: str):
         """
-        Loads a recorded history from a JSON file, replacing the current history.
+        Loads a recorded history from a file, replacing the current history.
+        Format is determined by file extension: .json for JSON, .bin for compressed CBOR2.
 
         Args:
-            file_path (str): The full path to the file (with or without .json extension).
+            file_path (str): The full path to the file (with extension).
+                - .json: Human-readable JSON format
+                - .bin: Compressed binary CBOR2 format (uses zstandard decompression)
         """
-        # Only append .json if not already present
-        if not file_path.endswith(".json"):
-            file_path = file_path + ".json"
+        # Determine format based on extension
+        try:
+            format_type = _get_serialization_format(file_path)
+        except ValueError:
+            # If no extension provided, try .json first for backward compatibility
+            if "." not in os.path.basename(file_path):
+                json_path = file_path + ".json"
+                if os.path.exists(json_path):
+                    file_path = json_path
+                    format_type = "json"
+                else:
+                    raise FileNotFoundError(f"File not found: {file_path} (tried .json extension)") from None
+            else:
+                raise
 
-        with open(file_path) as f:
-            serialized_data = json.load(f)
+        if format_type == "json":
+            with open(file_path) as f:
+                serialized_data = json.load(f)
+        elif format_type == "cbor2":
+            # Use zstandard decompression for CBOR2 binary format
+            with open(file_path, "rb") as f:
+                compressed_data = f.read()
+            decompressor = zstd.ZstdDecompressor()
+            cbor_data = decompressor.decompress(compressed_data)
+            serialized_data = cbor2.loads(cbor_data)
 
-        raw = deserialize_newton(serialized_data)
+        raw = deserialize_newton(serialized_data, format_type)
         self.deserialized_model = raw["model"]
         self.history = raw["states"]
 
-        print("Load completed successfully.")
+        compression_info = " (zstd compressed)" if format_type == "cbor2" else ""
+        print(f"Load completed successfully from {file_path} using {format_type.upper()} format{compression_info}.")
