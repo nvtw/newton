@@ -30,12 +30,14 @@ import mujoco
 
 import newton
 import newton.utils
+from newton._src.utils.recorder import ModelAndStateRecorder
 
 
 class Example:
-    def __init__(self, stage_path="example_anymal_d.usd", headless=False, num_envs=8, use_cuda_graph=True):
+    def __init__(self, stage_path="example_anymal_d.usd", headless=False, num_envs=8, use_cuda_graph=True, recorder=None):
         self.device = wp.get_device()
         self.num_envs = num_envs
+        self.recorder = recorder
 
         articulation_builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         articulation_builder.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
@@ -84,6 +86,11 @@ class Example:
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.model = builder.finalize()
+
+        # Record the model if recorder is provided
+        if self.recorder is not None:
+            self.recorder.record_model(self.model)
+
         self.solver = newton.solvers.SolverMuJoCo(
             self.model, cone=mujoco.mjtCone.mjCONE_ELLIPTIC, impratio=100, iterations=100, ls_iterations=50
         )
@@ -121,6 +128,10 @@ class Example:
                 self.simulate()
         self.sim_time += self.frame_dt
 
+        # Record the state if recorder is provided
+        if self.recorder is not None:
+            self.recorder.record(self.state_0)
+
     def render(self):
         if self.renderer is None:
             return
@@ -129,6 +140,12 @@ class Example:
             self.renderer.begin_frame(self.sim_time)
             self.renderer.render(self.state_0)
             self.renderer.end_frame()
+
+    def save_recording(self, file_path="recording.json"):
+        """Save the recording to a json file if recorder is available."""
+        if self.recorder is not None:
+            self.recorder.save_to_file(file_path)
+            print(f"Recording saved to {file_path}")
 
 
 if __name__ == "__main__":
@@ -146,15 +163,20 @@ if __name__ == "__main__":
     parser.add_argument("--num-envs", type=int, default=8, help="Total number of simulated environments.")
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction)
     parser.add_argument("--use-cuda-graph", default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument("--recording-path", type=str, default=None, help="Path to save the recording file")
 
     args = parser.parse_known_args()[0]
 
     with wp.ScopedDevice(args.device):
+        # Create recorder if recording path is provided
+        recorder = ModelAndStateRecorder() if args.recording_path else None
+
         example = Example(
             stage_path=args.stage_path,
             headless=args.headless,
             num_envs=args.num_envs,
             use_cuda_graph=args.use_cuda_graph,
+            recorder=recorder
         )
 
         for frame_idx in range(args.num_frames):
@@ -163,6 +185,10 @@ if __name__ == "__main__":
 
             if example.renderer is None:
                 print(f"[{frame_idx:4d}/{args.num_frames}]")
+
+        # Save recording if recorder was used
+        if recorder is not None:
+            example.save_recording(args.recording_path)
 
         if example.renderer:
             example.renderer.save()

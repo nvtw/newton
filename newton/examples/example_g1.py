@@ -154,8 +154,8 @@ class Example:
             self.renderer.render(self.state_0)
             self.renderer.end_frame()
 
-    def save_recording(self, file_path="recording.pkl"):
-        """Save the recording to a pickle file if recorder is available."""
+    def save_recording(self, file_path="recording.json"):
+        """Save the recording to a json file if recorder is available."""
         if self.recorder is not None:
             self.recorder.save_to_file(file_path)
             print(f"Recording saved to {file_path}")
@@ -176,16 +176,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("--use-cuda-graph", default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction)
-    parser.add_argument(
-        "--record", default=False, action=argparse.BooleanOptionalAction, help="Enable recording of model and states"
-    )
-    parser.add_argument("--recording-path", type=str, default="recording.pkl", help="Path to save the recording file")
+    parser.add_argument("--recording-path", type=str, default=None, help="Path to save the recording file")
 
     args = parser.parse_known_args()[0]
 
     with wp.ScopedDevice(args.device):
-        # Create recorder if recording is enabled
-        recorder = ModelAndStateRecorder() if args.record else None
+        # Create recorder if recording path is provided
+        recorder = ModelAndStateRecorder() if args.recording_path else None
 
         example = Example(
             num_envs=args.num_envs,
