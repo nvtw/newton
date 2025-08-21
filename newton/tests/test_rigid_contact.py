@@ -19,6 +19,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.core import quat_between_axes
 from newton.tests.unittest_utils import add_function_test, assert_np_equal, get_test_devices
 
 wp.config.quiet = True
@@ -29,7 +30,7 @@ class TestRigidContact(unittest.TestCase):
 
 
 def simulate(solver, model, state_0, state_1, control, sim_dt, substeps):
-    if not isinstance(solver, newton.solvers.MuJoCoSolver):
+    if not isinstance(solver, newton.solvers.SolverMuJoCo):
         contacts = model.collide(state_0, rigid_contact_margin=100.0)
     else:
         contacts = None
@@ -76,7 +77,7 @@ def test_shapes_on_plane(test: TestRigidContact, device, solver_fn):
     # e.g. MuJoCo transforms the mesh to the origin
     mesh_offset = np.array([1.0, 0.0, 0.0], dtype=np.float32)
     vertices += mesh_offset
-    cube_mesh = newton.geometry.Mesh(
+    cube_mesh = newton.Mesh(
         vertices=vertices,
         indices = [
             0, 1, 2,
@@ -116,11 +117,13 @@ def test_shapes_on_plane(test: TestRigidContact, device, solver_fn):
 
         b = builder.add_body(xform=wp.transform(wp.vec3(2.0, y_pos, 1.0), wp.quat_identity()))
         builder.add_joint_free(b)
+        # Apply Y-axis rotation to capsule
+        xform = wp.transform(wp.vec3(), quat_between_axes(newton.Axis.Z, newton.Axis.Y))
         builder.add_shape_capsule(
             body=b,
+            xform=xform,
             radius=0.1 * scale,
             half_height=0.3 * scale,
-            axis=newton.Axis.Y,
         )
         expected_end_positions.append(wp.vec3(2.0, y_pos, 0.1 * scale))
 
@@ -177,17 +180,17 @@ def test_shapes_on_plane(test: TestRigidContact, device, solver_fn):
 
 devices = get_test_devices()
 solvers = {
-    "featherstone": lambda model: newton.solvers.FeatherstoneSolver(model),
-    "mujoco_c": lambda model: newton.solvers.MuJoCoSolver(model, use_mujoco=True),
-    "mujoco_warp": lambda model: newton.solvers.MuJoCoSolver(model, use_mujoco=False),
-    "xpbd": lambda model: newton.solvers.XPBDSolver(model, iterations=2),
-    "semi_implicit": lambda model: newton.solvers.SemiImplicitSolver(model),
+    "featherstone": lambda model: newton.solvers.SolverFeatherstone(model),
+    "mujoco_cpu": lambda model: newton.solvers.SolverMuJoCo(model, use_mujoco_cpu=True),
+    "mujoco_warp": lambda model: newton.solvers.SolverMuJoCo(model, use_mujoco_cpu=False),
+    "xpbd": lambda model: newton.solvers.SolverXPBD(model, iterations=2),
+    "semi_implicit": lambda model: newton.solvers.SolverSemiImplicit(model),
 }
 for device in devices:
     for solver_name, solver_fn in solvers.items():
         if device.is_cpu and solver_name == "mujoco_warp":
             continue
-        if device.is_cuda and solver_name == "mujoco_c":
+        if device.is_cuda and solver_name == "mujoco_cpu":
             continue
         add_function_test(
             TestRigidContact,

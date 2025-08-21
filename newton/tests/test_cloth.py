@@ -20,7 +20,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.geometry import PARTICLE_FLAG_ACTIVE
+from newton import ParticleFlags
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 # fmt: off
@@ -770,6 +770,59 @@ class ClothSim:
 
         self.finalize(handle_self_contact=True, ground=False, use_gravity=True)
 
+    def set_up_enable_tri_contact_experiment(self):
+        # fmt: off
+        vs = [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0],
+        ]
+        fs = [
+            0, 1, 2,
+        ]
+        # fmt: on
+
+        stretching_stiffness = 1e2
+        spring_ke = 1e2
+        bending_ke = 10
+
+        particle_radius = 0.2
+
+        vs = [wp.vec3(v) for v in vs]
+        self.builder.add_cloth_mesh(
+            vertices=vs,
+            indices=fs,
+            scale=1,
+            density=2,
+            pos=wp.vec3(0.0, 0.1, 0.0),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            edge_ke=bending_ke,
+            edge_kd=0.0,
+            tri_ke=stretching_stiffness,
+            tri_ka=stretching_stiffness,
+            tri_kd=0.0,
+            add_springs=self.solver_name == "xpbd",
+            spring_ke=spring_ke,
+            spring_kd=0.0,
+            particle_radius=particle_radius,
+        )
+
+        self.builder.add_particles(
+            pos=[wp.vec3(0.35, 4.0 * particle_radius, 0.35)],
+            vel=[wp.vec3(0.0, 0.0, 0.0)],
+            mass=[0.1],
+            radius=[0.5 * particle_radius],
+        )
+
+        self.fixed_particles = np.arange(0, len(vs))
+
+        self.renderer_scale_factor = 0.1
+
+        self.finalize(ground=False, use_gravity=True)
+        self.soft_contact_margin = particle_radius * 1.1
+        self.model.soft_contact_ke = 1e5
+
     def finalize(self, handle_self_contact=False, ground=True, use_gravity=True):
         builder = newton.ModelBuilder(up_axis="Y")
         builder.add_builder(self.builder)
@@ -785,7 +838,7 @@ class ClothSim:
         self.set_points_fixed(self.model, self.fixed_particles)
 
         if self.solver_name == "vbd":
-            self.solver = newton.solvers.VBDSolver(
+            self.solver = newton.solvers.SolverVBD(
                 model=self.model,
                 iterations=self.iterations,
                 handle_self_contact=handle_self_contact,
@@ -793,12 +846,12 @@ class ClothSim:
                 self_contact_margin=self.self_contact_margin,
             )
         elif self.solver_name == "xpbd":
-            self.solver = newton.solvers.XPBDSolver(
+            self.solver = newton.solvers.SolverXPBD(
                 model=self.model,
                 iterations=self.iterations,
             )
         elif self.solver_name == "semi_implicit":
-            self.solver = newton.solvers.SemiImplicitSolver(self.model)
+            self.solver = newton.solvers.SolverSemiImplicit(self.model)
         else:
             raise ValueError("Unsupported solver type: " + self.solver_name)
 
@@ -826,7 +879,7 @@ class ClothSim:
         self.sim_time = 0.0
 
         if self.do_rendering:
-            self.renderer = newton.utils.SimRendererOpenGL(
+            self.renderer = newton.viewer.RendererOpenGL(
                 path="Test Cloth",
                 model=self.model,
                 scaling=self.renderer_scale_factor,
@@ -852,7 +905,7 @@ class ClothSim:
         if len(fixed_particles):
             flags = model.particle_flags.numpy()
             for fixed_v_id in fixed_particles:
-                flags[fixed_v_id] = wp.uint32(int(flags[fixed_v_id]) & ~int(PARTICLE_FLAG_ACTIVE))
+                flags[fixed_v_id] = flags[fixed_v_id] & ~ParticleFlags.ACTIVE
 
             model.particle_flags = wp.array(flags, device=model.device)
 
@@ -1098,6 +1151,31 @@ def test_cloth_stitching(test, device, solver):
         )
 
 
+def test_cloth_enable_tri_contact(test, device, solver):
+    # Set enable_tri_contact to True
+    example = ClothSim(device, solver)
+    example.set_up_enable_tri_contact_experiment()
+    example.solver.enable_tri_contact = True
+
+    example.run()
+
+    # examine that the vertical coordinate of the last particle is positive
+    final_pos = example.state0.particle_q.numpy()
+    test.assertTrue(final_pos[-1, 1] > 0.0)
+
+    # Set enable_tri_contact to False
+    example = ClothSim(device, solver)
+    example.set_up_enable_tri_contact_experiment()
+    example.solver.enable_tri_contact = False
+
+    example.run()
+
+    # examine that the vertical coordinate of the last particle is negative
+    final_pos = example.state0.particle_q.numpy()
+    print("final_pos", final_pos[-1, 1])
+    test.assertTrue(final_pos[-1, 1] < 0.0)
+
+
 devices = get_test_devices(mode="basic")
 
 
@@ -1126,6 +1204,7 @@ tests_to_run = {
         test_cloth_bending_with_complex_rest_angles,
         test_cloth_free_fall_with_internal_forces_and_damping,
         test_cloth_body_collision,
+        test_cloth_enable_tri_contact,
     ],
     "vbd": [
         test_cloth_free_fall,

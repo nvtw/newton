@@ -23,7 +23,7 @@
 # Future improvements:
 # - Add options to run with a pre-trained policy
 # - Add the Anymal environment
-# - Fix the use_mujoco option (currently crash)
+# - Fix the use-mujoco-cpu option (currently crashes)
 ###########################################################################
 
 import numpy as np
@@ -114,9 +114,7 @@ def _setup_g1(articulation_builder):
         if hash_m in simplified_meshes:
             articulation_builder.shape_source[i] = simplified_meshes[hash_m]
         else:
-            simplified = newton.geometry.utils.remesh_mesh(
-                m, visualize=False, method="convex_hull", recompute_inertia=False
-            )
+            simplified = newton.geometry.remesh_mesh(m, visualize=False, method="convex_hull", recompute_inertia=False)
             articulation_builder.shape_source[i] = simplified
             simplified_meshes[hash_m] = simplified
     root_dofs = 7
@@ -202,7 +200,7 @@ class Example:
         stage_path=None,
         num_envs=1,
         use_cuda_graph=True,
-        use_mujoco=False,
+        use_mujoco_cpu=False,
         randomize=False,
         headless=False,
         actuation="None",
@@ -222,7 +220,7 @@ class Example:
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.num_envs = num_envs
         self.use_cuda_graph = use_cuda_graph
-        self.use_mujoco = use_mujoco
+        self.use_mujoco_cpu = use_mujoco_cpu
         self.actuation = actuation
         solver_iteration = solver_iteration if solver_iteration is not None else 100
         ls_iteration = ls_iteration if ls_iteration is not None else 50
@@ -244,9 +242,9 @@ class Example:
         integrator = integrator if integrator is not None else ROBOT_CONFIGS[robot]["integrator"]
         njmax = njmax if njmax is not None else ROBOT_CONFIGS[robot]["njmax"]
         nconmax = nconmax if nconmax is not None else ROBOT_CONFIGS[robot]["nconmax"]
-        self.solver = newton.solvers.MuJoCoSolver(
+        self.solver = newton.solvers.SolverMuJoCo(
             self.model,
-            use_mujoco=use_mujoco,
+            use_mujoco_cpu=use_mujoco_cpu,
             solver=solver,
             integrator=integrator,
             iterations=solver_iteration,
@@ -256,13 +254,13 @@ class Example:
         )
 
         if stage_path and not headless:
-            self.renderer = newton.utils.SimRendererOpenGL(self.model, stage_path)
+            self.renderer = newton.viewer.RendererOpenGL(self.model, stage_path)
         else:
             self.renderer = None
 
         self.control = self.model.control()
         self.state_0, self.state_1 = self.model.state(), self.model.state()
-        newton.sim.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
         self.graph = None
         if self.use_cuda_graph:
@@ -349,7 +347,10 @@ if __name__ == "__main__":
     parser.add_argument("--num-envs", type=int, default=1, help="Total number of simulated environments.")
     parser.add_argument("--use-cuda-graph", default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument(
-        "--use-mujoco", default=False, action=argparse.BooleanOptionalAction, help="Use Mujoco C (Not yet supported)."
+        "--use-mujoco-cpu",
+        default=False,
+        action=argparse.BooleanOptionalAction,
+        help="Use Mujoco-C CPU (Not yet supported).",
     )
     parser.add_argument(
         "--headless", default=False, action=argparse.BooleanOptionalAction, help="Run the simulation in headless mode."
@@ -358,7 +359,7 @@ if __name__ == "__main__":
         "--show-mujoco-viewer",
         default=False,
         action=argparse.BooleanOptionalAction,
-        help="Toggle MuJoCo viewer next to Newton renderer when MuJoCoSolver is active.",
+        help="Toggle MuJoCo viewer next to Newton renderer when SolverMuJoCo is active.",
     )
 
     parser.add_argument(
@@ -385,9 +386,9 @@ if __name__ == "__main__":
 
     args = parser.parse_known_args()[0]
 
-    if args.use_mujoco:
-        args.use_mujoco = False
-        print("The option ``use_mujoco`` is not yet supported. Disabling it.")
+    if args.use_mujoco_cpu:
+        args.use_mujoco_cpu = False
+        print("The option ``use-mujoco-cpu`` is not yet supported. Disabling it.")
 
     with wp.ScopedDevice(args.device):
         example = Example(
@@ -395,7 +396,7 @@ if __name__ == "__main__":
             stage_path=args.stage_path,
             num_envs=args.num_envs,
             use_cuda_graph=args.use_cuda_graph,
-            use_mujoco=args.use_mujoco,
+            use_mujoco_cpu=args.use_mujoco_cpu,
             randomize=args.random_init,
             headless=args.headless,
             actuation=args.actuation,
@@ -407,7 +408,50 @@ if __name__ == "__main__":
             nconmax=args.nconmax,
         )
 
-        show_mujoco_viewer = args.show_mujoco_viewer and example.use_mujoco
+        # Print simulation configuration summary
+        LABEL_WIDTH = 25
+        TOTAL_WIDTH = 45
+        title = " Simulation Configuration "
+        print(f"\n{title.center(TOTAL_WIDTH, '=')}")
+        print(f"{'Simulation Steps':<{LABEL_WIDTH}}: {args.num_frames * example.sim_substeps}")
+        print(f"{'Environment Count':<{LABEL_WIDTH}}: {args.num_envs}")
+        print(f"{'Robot Type':<{LABEL_WIDTH}}: {args.robot}")
+        print(f"{'Timestep (dt)':<{LABEL_WIDTH}}: {example.sim_dt:.6f}s")
+        print(f"{'Randomize Initial Pose':<{LABEL_WIDTH}}: {args.random_init!s}")
+        print("-" * TOTAL_WIDTH)
+
+        # Map MuJoCo solver enum back to string
+        solver_value = example.solver.mj_model.opt.solver
+        solver_map = {0: "PGS", 1: "CG", 2: "Newton"}  # mjSOL_PGS = 0, mjSOL_CG = 1, mjSOL_NEWTON = 2
+        actual_solver = solver_map.get(solver_value, f"unknown({solver_value})")
+        # Map MuJoCo integrator enum back to string
+        integrator_map = {
+            0: "Euler",
+            1: "RK4",
+            2: "Implicit",
+            3: "Implicitfast",
+        }  # mjINT_EULER = 0, mjINT_RK4 = 1, mjINT_IMPLICIT = 2, mjINT_IMPLICITFAST = 3
+        actual_integrator = integrator_map.get(example.solver.mj_model.opt.integrator, "unknown")
+        # Get actual max constraints and contacts from MuJoCo Warp data
+        actual_njmax = example.solver.mjw_data.njmax
+        actual_nconmax = (
+            example.solver.mjw_data.nconmax // args.num_envs if args.num_envs > 0 else example.solver.mjw_data.nconmax
+        )
+        print(f"{'Solver':<{LABEL_WIDTH}}: {actual_solver}")
+        print(f"{'Integrator':<{LABEL_WIDTH}}: {actual_integrator}")
+        print(f"{'Solver Iterations':<{LABEL_WIDTH}}: {example.solver.mj_model.opt.iterations}")
+        print(f"{'Line Search Iterations':<{LABEL_WIDTH}}: {example.solver.mj_model.opt.ls_iterations}")
+        print(f"{'Max Constraints / env':<{LABEL_WIDTH}}: {actual_njmax}")
+        print(f"{'Max Contacts / env':<{LABEL_WIDTH}}: {actual_nconmax}")
+        print(f"{'Joint DOFs':<{LABEL_WIDTH}}: {example.model.joint_dof_count}")
+        print(f"{'Body Count':<{LABEL_WIDTH}}: {example.model.body_count}")
+        print("-" * TOTAL_WIDTH)
+
+        print(f"{'Execution Device':<{LABEL_WIDTH}}: {wp.get_device()}")
+        print(f"{'Use CUDA Graph':<{LABEL_WIDTH}}: {example.use_cuda_graph!s}")
+        print("=" * TOTAL_WIDTH + "\n")
+
+        show_mujoco_viewer = args.show_mujoco_viewer and example.use_mujoco_cpu
         if show_mujoco_viewer:
             import mujoco
             import mujoco.viewer
@@ -422,7 +466,7 @@ if __name__ == "__main__":
             example.render()
 
             if show_mujoco_viewer:
-                if not example.solver.use_mujoco:
+                if not example.solver.use_mujoco_cpu:
                     mujoco_warp.get_data_into(mjd, mjm, d)
                 viewer.sync()
 
