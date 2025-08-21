@@ -29,7 +29,7 @@ wp.config.enable_backward = False
 
 import newton
 import newton.utils
-from newton.utils.recorder import ModelAndStateRecorder
+from newton._src.utils.recorder import ModelAndStateRecorder
 
 
 class Example:

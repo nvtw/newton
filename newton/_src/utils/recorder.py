@@ -554,7 +554,7 @@ class ModelAndStateRecorder:
         state_data = {}
         for name, value in state.__dict__.items():
             if isinstance(value, wp.array):
-                state_data[name] = wp.clone(value)  # value.numpy()
+                state_data[name] = wp.clone(value)
         self.history.append(state_data)
 
     def playback(self, state: State, frame_id: int):
@@ -570,15 +570,8 @@ class ModelAndStateRecorder:
             return
 
         state_data = self.history[frame_id]
-        try:
-            device = self._get_device_from_state(state)
-        except ValueError:
-            print("Warning: Unable to determine device from state. Playback skipped.")
-            return
-
         for name, value_wp in state_data.items():
             if hasattr(state, name):
-                # value_wp = wp.array(value_np, device=device)
                 setattr(state, name, value_wp)
 
     def record_model(self, model: Model):
@@ -626,29 +619,29 @@ class ModelAndStateRecorder:
 
         print("Save completed successfully.")
 
-    def save_to_file2(self, file_path: str):
-        """
-        Debugging
-        """
-        data_to_save = {"model": self.raw_model, "states": self.history}
-        serialized_data = serialize_newton(data_to_save)
+    # def save_to_file2(self, file_path: str):
+    #     """
+    #     Debugging
+    #     """
+    #     data_to_save = {"model": self.raw_model, "states": self.history}
+    #     serialized_data = serialize_newton(data_to_save)
 
-        raw = deserialize_newton(serialized_data)
-        deserialized_model = raw["model"]
-        deserialized_history = raw["states"]
-        print("deserialization done")
+    #     raw = deserialize_newton(serialized_data)
+    #     deserialized_model = raw["model"]
+    #     deserialized_history = raw["states"]
+    #     print("deserialization done")
 
-        m = Model()
-        transfer_to_model(deserialized_model, m, None)
+    #     m = Model()
+    #     transfer_to_model(deserialized_model, m, None)
 
-        data_to_save2 = {"model": m, "states": deserialized_history}
-        serialized_data2 = serialize_newton(data_to_save2)
+    #     data_to_save2 = {"model": m, "states": deserialized_history}
+    #     serialized_data2 = serialize_newton(data_to_save2)
 
-        with open(file_path + ".json", "w") as f:
-            json.dump(serialized_data, f, indent=2)
+    #     with open(file_path + ".json", "w") as f:
+    #         json.dump(serialized_data, f, indent=2)
 
-        with open(file_path + ".json2", "w") as f:
-            json.dump(serialized_data2, f, indent=2)
+    #     with open(file_path + ".json2", "w") as f:
+    #         json.dump(serialized_data2, f, indent=2)
 
     def load_from_file(self, file_path: str):
         """

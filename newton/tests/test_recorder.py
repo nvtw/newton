@@ -21,7 +21,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.utils.recorder import BasicRecorder, ModelAndStateRecorder
+import newton.utils
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 wp.config.quiet = True
@@ -32,7 +32,7 @@ class TestRecorder(unittest.TestCase):
 
 
 def test_body_transform_recorder(test: TestRecorder, device):
-    recorder = BasicRecorder()
+    recorder = newton.utils.BasicRecorder()
 
     transform1 = wp.array([wp.transform([1, 2, 3], [0, 0, 0, 1])], dtype=wp.transform, device=device)
     transform2 = wp.array([wp.transform([4, 5, 6], [0, 0, 0, 1])], dtype=wp.transform, device=device)
@@ -51,7 +51,7 @@ def test_body_transform_recorder(test: TestRecorder, device):
     try:
         recorder.save_to_file(file_path)
 
-        new_recorder = BasicRecorder()
+        new_recorder = newton.utils.BasicRecorder()
         new_recorder.load_from_file(file_path, device=device)
 
         test.assertEqual(len(new_recorder.transforms_history), 2)
@@ -104,25 +104,45 @@ def test_model_and_state_recorder(test: TestRecorder, device):
         state.body_qd.fill_(wp.spatial_vector([0.1 * i, 0.2 * i, 0.3 * i, 0.4 * i, 0.5 * i, 0.6 * i]))
         states.append(state)
 
-    recorder = ModelAndStateRecorder()
+    recorder = newton.utils.ModelAndStateRecorder()
     recorder.record_model(model)
     for state in states:
         recorder.record(state)
 
-    with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
         file_path = tmp.name
 
     try:
         recorder.save_to_file(file_path)
 
-        new_recorder = ModelAndStateRecorder()
+        new_recorder = newton.utils.ModelAndStateRecorder()
         new_recorder.load_from_file(file_path)
 
-        _compare_serialized_data(test, recorder.model_data, new_recorder.model_data)
+        # Test that the model was loaded correctly
+        test.assertIsNotNone(new_recorder.deserialized_model)
 
+        # Test that we can create a new model and restore it
+        restored_model = newton.Model(device=device)
+        new_recorder.playback_model(restored_model)
+
+        # Basic model validation - check that key properties match
+        test.assertEqual(restored_model.body_count, model.body_count)
+        test.assertEqual(restored_model.joint_count, model.joint_count)
+        test.assertEqual(restored_model.shape_count, model.shape_count)
+
+        # Test state history
         test.assertEqual(len(recorder.history), len(new_recorder.history))
-        for original_state_data, loaded_state_data in zip(recorder.history, new_recorder.history):
-            _compare_serialized_data(test, original_state_data, loaded_state_data)
+
+        # Test that we can restore states
+        for i, original_state in enumerate(states):
+            restored_state = restored_model.state()
+            new_recorder.playback(restored_state, i)
+
+            # Compare the restored state with the original
+            if restored_state.body_q is not None and original_state.body_q is not None:
+                np.testing.assert_allclose(restored_state.body_q.numpy(), original_state.body_q.numpy(), atol=1e-6)
+            if restored_state.body_qd is not None and original_state.body_qd is not None:
+                np.testing.assert_allclose(restored_state.body_qd.numpy(), original_state.body_qd.numpy(), atol=1e-6)
 
     finally:
         if os.path.exists(file_path):
