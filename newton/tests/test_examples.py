@@ -383,6 +383,7 @@ add_example_test(
     test_options_cpu={"num_frames": 10},
 )
 
+
 if __name__ == "__main__":
     # force rebuild of all kernels
     wp.clear_kernel_cache()
