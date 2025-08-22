@@ -77,25 +77,20 @@ def serialize_ndarray(arr: np.ndarray, format_type: str = "json") -> dict:
             "data": json.dumps(arr.tolist()),
         }
     elif format_type == "cbor2":
-        # Use efficient binary serialization with float view trick for CBOR2
         try:
-            # Try to view the array as float32 for efficient binary serialization
-            float_view = arr.view(dtype=np.float32)
-            binary_data = float_view.tobytes()
-
+            arr_c = np.ascontiguousarray(arr)
+            # Required check to test if tobytes will work without using pickle internally
+            # arr.view will throw an exception if the dtype is not supported
+            arr.view(dtype=np.float32)
             return {
                 "__type__": "numpy.ndarray",
-                "dtype": str(arr.dtype),
+                "dtype": arr.dtype.str,  # includes endianness, e.g., '<f4'
                 "shape": arr.shape,
-                "binary_data": binary_data,
-                "float_view_shape": float_view.shape,
-                "is_binary": True,
+                "order": "C",
+                "binary_data": arr_c.tobytes(order="C"),
             }
         except (ValueError, TypeError):
-            # Fallback to list serialization for dtypes that can't be viewed as float32
-            # print(
-            #     f"Warning: Array with dtype {arr.dtype} cannot be efficiently serialized using binary format. Falling back to list serialization."
-            # )
+            # Fallback to list serialization for dtypes that can't be serialized as binary
             return {
                 "__type__": "numpy.ndarray",
                 "dtype": str(arr.dtype),
@@ -128,31 +123,11 @@ def deserialize_ndarray(data: dict, format_type: str = "json") -> np.ndarray:
         array_data = json.loads(data["data"])
         return np.array(array_data, dtype=dtype).reshape(shape)
     elif format_type == "cbor2":
-        # Check if this is binary serialized data
-        if data.get("is_binary", False) and "binary_data" in data:
-            # Reconstruct from binary data using float view trick
-            binary_data = data["binary_data"]
-            float_view_shape = tuple(data["float_view_shape"])
-
-            # Recreate the float array from binary data
-            reconstructed_flat_array = np.frombuffer(binary_data, dtype=np.float32)
-            reconstructed_float_array = reconstructed_flat_array.reshape(float_view_shape)
-
-            # View it back to the original dtype and reshape
-            final_array = reconstructed_float_array.view(dtype=dtype)
-
-            # Handle potential dimension mismatch after view conversion
-            if final_array.shape != shape:
-                # Try to squeeze or reshape to match the original shape
-                try:
-                    final_array = final_array.squeeze()
-                    if final_array.shape != shape:
-                        final_array = final_array.reshape(shape)
-                except ValueError:
-                    # If reshaping fails, try direct reshape
-                    final_array = final_array.reshape(shape)
-
-            return final_array
+        if "binary_data" in data:
+            binary = data["binary_data"]
+            order = data.get("order", "C")
+            arr = np.frombuffer(binary, dtype=dtype)
+            return arr.reshape(shape, order=order)
         else:
             # Fallback to list deserialization for non-binary data
             array_data = data["data"]

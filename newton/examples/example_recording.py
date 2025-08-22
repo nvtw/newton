@@ -29,7 +29,6 @@ wp.config.enable_backward = False
 import newton
 import newton.examples
 import newton.utils
-from newton._src.utils.recorder import ModelAndStateRecorder
 
 
 class Example:
@@ -184,7 +183,7 @@ if __name__ == "__main__":
 
     with wp.ScopedDevice(args.device):
         # Create recorder to capture simulation data if recording path is provided
-        recorder = ModelAndStateRecorder() if args.recording_path else None
+        recorder = newton.utils.ModelAndStateRecorder() if args.recording_path else None
 
         # Initialize the recording example with the recorder
         example = Example(
