@@ -29,17 +29,14 @@ wp.config.enable_backward = False
 
 import newton
 import newton.utils
-from newton._src.utils.recorder import ModelAndStateRecorder
 
 
 class Example:
-    def __init__(self, stage_path="example_g1.usd", num_envs=8, use_cuda_graph=True, headless=False, recorder=None):
+    def __init__(self, num_envs=8, use_cuda_graph=True, headless=False):
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
         self.num_envs = num_envs
-        self.recorder = recorder
-        self.use_mujoco = True
 
         self.device = wp.get_device()
         self.headless = headless
@@ -71,32 +68,19 @@ class Example:
         # finalize model
         self.model = builder.finalize()
 
-        # Record the model if recorder is provided
-        if self.recorder is not None:
-            self.recorder.record_model(self.model)
-
-        if self.use_mujoco:
-            self.sim_substeps = 6
-            self.solver = newton.solvers.SolverMuJoCo(
-                self.model,
-                use_mujoco_cpu=False,
-                solver="newton",
-                integrator="euler",
-                nefc_per_env=300,
-                ncon_per_env=150,
-                cone="elliptic",
-                impratio=100,
-                iterations=100,
-                ls_iterations=50,
-            )
-        else:
-            self.sim_substeps = 10
-            self.solver = newton.solvers.XPBDSolver(
-                self.model,
-                iterations=20,
-                angular_damping=0.01,
-                joint_angular_compliance=1e-3,
-            )
+        self.sim_substeps = 6
+        self.solver = newton.solvers.SolverMuJoCo(
+            self.model,
+            use_mujoco_cpu=False,
+            solver="newton",
+            integrator="euler",
+            nefc_per_env=300,
+            ncon_per_env=150,
+            cone="elliptic",
+            impratio=100,
+            iterations=100,
+            ls_iterations=50,
+        )
 
         self.sim_dt = self.frame_dt / self.sim_substeps
 
@@ -141,10 +125,6 @@ class Example:
                 self.simulate()
         self.sim_time += self.frame_dt
 
-        # Record the state if recorder is provided
-        if self.recorder is not None:
-            self.recorder.record(self.state_0)
-
     def render(self):
         if self.renderer is None:
             return
@@ -153,12 +133,6 @@ class Example:
             self.renderer.begin_frame(self.sim_time)
             self.renderer.render(self.state_0)
             self.renderer.end_frame()
-
-    def save_recording(self, file_path="recording.json"):
-        """Save the recording to a json file if recorder is available."""
-        if self.recorder is not None:
-            self.recorder.save_to_file(file_path)
-            print(f"Recording saved to {file_path}")
 
 
 if __name__ == "__main__":
@@ -176,40 +150,15 @@ if __name__ == "__main__":
     )
     parser.add_argument("--use-cuda-graph", default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction)
-    parser.add_argument("--recording-path", type=str, default=None, help="Path to save the recording file")
 
     args = parser.parse_known_args()[0]
 
     with wp.ScopedDevice(args.device):
-        # Create recorder if recording path is provided
-        recorder = ModelAndStateRecorder() if args.recording_path else None
-
-        example = Example(
-            num_envs=args.num_envs, use_cuda_graph=args.use_cuda_graph, headless=args.headless, recorder=recorder
-        )
-
-        show_mujoco_viewer = args.show_mujoco_viewer and example.use_mujoco
-        if show_mujoco_viewer:
-            import mujoco
-            import mujoco.viewer
-            import mujoco_warp
-
-            mjm, mjd = example.solver.mj_model, example.solver.mj_data
-            m, d = example.solver.mjw_model, example.solver.mjw_data
-            viewer = mujoco.viewer.launch_passive(mjm, mjd)
+        example = Example(num_envs=args.num_envs, use_cuda_graph=args.use_cuda_graph, headless=args.headless)
 
         for _ in range(args.num_frames):
             example.step()
             example.render()
-
-            if show_mujoco_viewer:
-                if not example.solver.use_mujoco_cpu:
-                    mujoco_warp.get_data_into(mjd, mjm, d)
-                viewer.sync()
-
-        # Save recording if recorder was used
-        if recorder is not None:
-            example.save_recording(args.recording_path)
 
         if example.renderer:
             example.renderer.save()

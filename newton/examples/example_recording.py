@@ -14,8 +14,11 @@
 # limitations under the License.
 
 ###########################################################################
-# Loads a MuJoCo model from MJCF into Newton and simulates it using the
-# MuJoCo solver.
+# Example demonstrating how to record a simulation using Newton's recording
+# functionality. Shows how to capture model and state data during simulation
+# and save it to a file for later replay or analysis.
+#
+# Users can pick bodies by right-clicking and dragging with the mouse.
 ###########################################################################
 
 import numpy as np
@@ -26,11 +29,24 @@ wp.config.enable_backward = False
 import newton
 import newton.examples
 import newton.utils
+from newton._src.utils.recorder import ModelAndStateRecorder
 
 
 class Example:
-    def __init__(self, stage_path="example_humanoid.usd", num_envs=8, use_cuda_graph=True):
+    """Example demonstrating simulation recording with Newton.
+
+    This example shows how to:
+    - Set up a recorder to capture simulation data
+    - Record model structure and state data during simulation
+    - Save recorded data to a file for later replay or analysis
+
+    The example uses a humanoid model as the subject being recorded,
+    but the recording techniques apply to any Newton simulation.
+    """
+
+    def __init__(self, stage_path="example_recording.usd", num_envs=8, use_cuda_graph=True, recorder=None):
         self.num_envs = num_envs
+        self.recorder = recorder
 
         use_mujoco_cpu = False
 
@@ -76,6 +92,10 @@ class Example:
         # finalize model
         self.model = builder.finalize()
 
+        # Record the model structure if recorder is provided
+        if self.recorder is not None:
+            self.recorder.record_model(self.model)
+
         self.control = self.model.control()
 
         self.solver = newton.solvers.SolverMuJoCo(
@@ -106,6 +126,9 @@ class Example:
 
     def simulate(self):
         for _ in range(self.sim_substeps):
+            self.state_0.clear_forces()
+            if self.renderer and hasattr(self.renderer, "apply_picking_force"):
+                self.renderer.apply_picking_force(self.state_0)
             self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
@@ -117,6 +140,10 @@ class Example:
                 self.simulate()
         self.sim_time += self.frame_dt
 
+        # Record the current simulation state if recorder is provided
+        if self.recorder is not None:
+            self.recorder.record(self.state_0)
+
     def render(self):
         if self.renderer is None:
             return
@@ -125,6 +152,16 @@ class Example:
             self.renderer.begin_frame(self.sim_time)
             self.renderer.render(self.state_0)
             self.renderer.end_frame()
+
+    def save_recording(self, file_path="recording.json"):
+        """Save the recorded simulation data to a JSON file.
+
+        Args:
+            file_path: Path where the recording will be saved
+        """
+        if self.recorder is not None:
+            self.recorder.save_to_file(file_path)
+            print(f"Recording saved to {file_path}")
 
 
 if __name__ == "__main__":
@@ -135,24 +172,36 @@ if __name__ == "__main__":
     parser.add_argument(
         "--stage-path",
         type=lambda x: None if x == "None" else str(x),
-        default="example_humanoid.usd",
+        default="example_recording.usd",
         help="Path to the output USD file.",
     )
     parser.add_argument("--num-frames", type=int, default=12000, help="Total number of frames.")
     parser.add_argument("--num-envs", type=int, default=9, help="Total number of simulated environments.")
     parser.add_argument("--use-cuda-graph", default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument("--recording-path", type=str, default=None, help="Path to save the recording file")
 
     args = parser.parse_known_args()[0]
 
     with wp.ScopedDevice(args.device):
-        example = Example(stage_path=args.stage_path, num_envs=args.num_envs, use_cuda_graph=args.use_cuda_graph)
+        # Create recorder to capture simulation data if recording path is provided
+        recorder = ModelAndStateRecorder() if args.recording_path else None
 
+        # Initialize the recording example with the recorder
+        example = Example(
+            stage_path=args.stage_path, num_envs=args.num_envs, use_cuda_graph=args.use_cuda_graph, recorder=recorder
+        )
+
+        # Run simulation and record each frame
         for frame_idx in range(args.num_frames):
-            example.step()
+            example.step()  # This will record the state if recorder is active
             example.render()
 
             if example.renderer is None:
                 print(f"[{frame_idx:4d}/{args.num_frames}]")
+
+        # Save the complete recording to file
+        if recorder is not None:
+            example.save_recording(args.recording_path)
 
         if example.renderer:
             example.renderer.save()
