@@ -425,7 +425,7 @@ def deserialize(data, callback, _path="", format_type="json"):
         }
 
     # Unknown type - return the data as-is
-    return data
+    return data["value"] if isinstance(data, dict) and "value" in data else data
 
 
 def extract_type_path(class_str: str) -> str:

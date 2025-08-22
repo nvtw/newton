@@ -27,96 +27,121 @@ import argparse
 import os
 
 import warp as wp
-from warp.render.imgui_manager import ImGuiManager
 
 import newton
 import newton.utils
 
 
-class ReplayViewerGUI(ImGuiManager):
-    """Simple ImGui interface for the replay viewer."""
+class ReplayViewerGL(newton.viewer.ViewerGL):
+    """Custom ViewerGL with integrated replay controls."""
 
-    def __init__(self, renderer, example, window_pos=(10, 10), window_size=(300, 200)):
-        super().__init__(renderer)
-        if not self.is_available:
-            return
-        self.window_pos = window_pos
-        self.window_size = window_size
-        self.example = example
+    def __init__(self, width=1920, height=1080, vsync=False, headless=False):
+        super().__init__(width=width, height=height, vsync=vsync, headless=headless)
+
+        # Replay-specific state
+        self.model_recorder = None
         self.current_frame = 0
         self.selected_file = ""
+        self.num_envs = 1
 
-    def draw_ui(self):
-        """Draw the ImGui interface."""
-        self.imgui.set_next_window_size(self.window_size[0], self.window_size[1], self.imgui.ONCE)
-        self.imgui.set_next_window_position(self.window_pos[0], self.window_pos[1], self.imgui.ONCE)
+        # Set window title
+        self.renderer.set_title("Newton Replay Viewer")
 
-        self.imgui.begin("Replay Controls")
+        # Start paused
+        self._paused = True
 
-        # File selection
-        self.imgui.text("Recording File:")
-        self.imgui.same_line()
-        self.imgui.text(self.selected_file if self.selected_file else "No file selected")
+    def _render_ui(self):
+        """Override the UI rendering to include replay controls."""
+        if not self.ui.is_available:
+            return
 
-        # Disable browse button if a file is already loaded
-        file_loaded = self.example.model_recorder and len(self.example.model_recorder.history) > 0
+        # Render the standard ViewerGL UI
+        self._render_left_panel()
+        self._render_stats_overlay()
 
-        if file_loaded:
-            self.imgui.push_style_color(self.imgui.COLOR_BUTTON, 0.5, 0.5, 0.5, 1.0)
-            self.imgui.push_style_color(self.imgui.COLOR_BUTTON_HOVERED, 0.5, 0.5, 0.5, 1.0)
-            self.imgui.push_style_color(self.imgui.COLOR_BUTTON_ACTIVE, 0.5, 0.5, 0.5, 1.0)
+        # Add our replay controls panel
+        self._render_replay_controls()
 
-        button_clicked = self.imgui.button("Browse..." if not file_loaded else "Browse... (disabled)")
+    def _render_replay_controls(self):
+        """Render the replay controls panel."""
+        imgui = self.ui.imgui
+        io = self.ui.io
 
-        if file_loaded:
-            self.imgui.pop_style_color(3)
+        # Position the replay controls window on the right side
+        window_width = 350
+        window_height = 300
+        imgui.set_next_window_position(io.display_size[0] - window_width - 10, 10)
+        imgui.set_next_window_size(window_width, window_height)
 
-        if button_clicked and not file_loaded:
-            self._browse_file()
+        flags = imgui.WINDOW_NO_RESIZE
 
-        self.imgui.separator()
+        if imgui.begin("Replay Controls", flags=flags):
+            imgui.separator()
 
-        # Frame controls (only show if recording is loaded)
-        if self.example.model_recorder and len(self.example.model_recorder.history) > 0:
-            total_frames = len(self.example.model_recorder.history)
-            self.imgui.text(f"Total frames: {total_frames}")
+            # File selection
+            imgui.text("Recording File:")
+            imgui.text(self.selected_file if self.selected_file else "No file selected")
 
-            # Frame slider
-            changed, new_frame = self.imgui.slider_int("Frame", self.current_frame, 0, total_frames - 1)
+            # Disable browse button if a file is already loaded
+            file_loaded = self.model_recorder and len(self.model_recorder.history) > 0
 
-            if changed:
-                self.current_frame = new_frame
-                self.example.load_frame(self.current_frame)
+            if file_loaded:
+                imgui.push_style_color(imgui.COLOR_BUTTON, 0.5, 0.5, 0.5, 1.0)
+                imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, 0.5, 0.5, 0.5, 1.0)
+                imgui.push_style_color(imgui.COLOR_BUTTON_ACTIVE, 0.5, 0.5, 0.5, 1.0)
 
-            # Playback controls
-            self.imgui.separator()
-            if self.imgui.button("First Frame"):
-                self.current_frame = 0
-                self.example.load_frame(self.current_frame)
+            button_clicked = imgui.button("Browse..." if not file_loaded else "Browse... (disabled)")
 
-            self.imgui.same_line()
-            if self.imgui.button("Previous") and self.current_frame > 0:
-                self.current_frame -= 1
-                self.example.load_frame(self.current_frame)
+            if file_loaded:
+                imgui.pop_style_color(3)
 
-            self.imgui.same_line()
-            if self.imgui.button("Next") and self.current_frame < total_frames - 1:
-                self.current_frame += 1
-                self.example.load_frame(self.current_frame)
+            if button_clicked and not file_loaded:
+                self._browse_file()
 
-            self.imgui.same_line()
-            if self.imgui.button("Last Frame"):
-                self.current_frame = total_frames - 1
-                self.example.load_frame(self.current_frame)
+            imgui.separator()
 
-        else:
-            self.imgui.text("Load a recording file (.json or .bin) to begin playback")
+            # Frame controls (only show if recording is loaded)
+            if self.model_recorder and len(self.model_recorder.history) > 0:
+                total_frames = len(self.model_recorder.history)
+                imgui.text(f"Total frames: {total_frames}")
 
-        self.imgui.end()
+                # Frame slider
+                changed, new_frame = imgui.slider_int("Frame", self.current_frame, 0, total_frames - 1)
+
+                if changed:
+                    self.current_frame = new_frame
+                    self.load_frame(self.current_frame)
+
+                # Playback controls
+                imgui.separator()
+                if imgui.button("First Frame"):
+                    self.current_frame = 0
+                    self.load_frame(self.current_frame)
+
+                imgui.same_line()
+                if imgui.button("Previous") and self.current_frame > 0:
+                    self.current_frame -= 1
+                    self.load_frame(self.current_frame)
+
+                imgui.same_line()
+                if imgui.button("Next") and self.current_frame < total_frames - 1:
+                    self.current_frame += 1
+                    self.load_frame(self.current_frame)
+
+                imgui.same_line()
+                if imgui.button("Last Frame"):
+                    self.current_frame = total_frames - 1
+                    self.load_frame(self.current_frame)
+
+            else:
+                imgui.text("Load a recording file (.json or .bin)")
+                imgui.text("to begin playback")
+
+        imgui.end()
 
     def _browse_file(self):
         """Open file browser to select recording file."""
-        file_path = self.open_load_file_dialog(
+        file_path = self.ui.open_load_file_dialog(
             filetypes=[
                 ("Recording files", ("*.json", "*.bin")),
                 ("JSON files", "*.json"),
@@ -127,40 +152,9 @@ class ReplayViewerGUI(ImGuiManager):
         )
         if file_path:
             self.selected_file = os.path.basename(file_path)
-            success = self.example.load_recording(file_path)
+            success = self.load_recording(file_path)
             if success:
                 self.current_frame = 0
-
-
-class Example:
-    def __init__(self, stage_path="Newton_Replay_Viewer.usd"):
-        # Model and state will be set when loading recordings
-        self.model = None
-        self.state = newton.State()
-        self.solver = None
-        self.model_recorder = None
-        self.num_envs = 1  # Default number of environments
-
-        # Set up renderer and replay components
-        if stage_path:
-            # Create OpenGL renderer with a descriptive window title
-            window_title = os.path.basename(stage_path)
-            self.renderer = newton.viewer.RendererOpenGL(model=None, path=window_title)
-            # If you need to load the USD stage, do so separately:
-            # stage = Usd.Stage.Open(stage_path)
-            # GUI will be set up when loading recordings
-            self.gui = ReplayViewerGUI(self.renderer, self)
-            self.renderer.render_2d_callbacks.append(self.gui.render_frame)
-        else:
-            self.renderer = None
-            self.gui = None
-
-        # Start in paused mode
-        if self.renderer:
-            self.renderer.paused = True
-
-        # Frame timing for GUI
-        self.frame_dt = 1.0 / 60.0  # 60 FPS
 
     def load_recording(self, file_path):
         """Load a recording file (.json or .bin) and set up the complete rendering pipeline."""
@@ -186,97 +180,38 @@ class Example:
             print("Warning: No shape_source found in recording")
 
         # Create new model and state objects
-        self.model = newton.Model()
-        self.state = newton.State()
+        model = newton.Model()
+        state = newton.State()
 
         # Restore the model from the recording
-        self.model_recorder.playback_model(self.model)
-        print(f"Model restored with {self.model.body_count} bodies")
+        self.model_recorder.playback_model(model)
+        print(f"Model restored with {model.body_count} bodies")
+
+        # Set the model in the viewer (this will trigger setup)
+        self.set_model(model)
 
         # Restore the first frame's state
         if len(self.model_recorder.history) > 0:
-            self.model_recorder.playback(self.state, 0)
+            self.model_recorder.playback(state, 0)
             print("State restored from first frame")
 
-        # Set up the renderer with the loaded model
-        self._setup_renderer_with_model()
+            # Log the initial state to the viewer
+            self.log_state(state)
 
-        if self.renderer:
-            self.renderer.paused = False
+        # Unpause the viewer
+        self._paused = False
 
         return True
-
-    def _setup_renderer_with_model(self):
-        """Set up the renderer with the loaded model using the provided pattern."""
-        if not self.renderer or not self.model:
-            return
-
-        print("Setting up renderer with model...")
-
-        # Update renderer model
-        self.renderer.model = self.model
-
-        # Setup body names and environments
-        if self.model.body_count:
-            bodies_per_env = self.model.body_count // self.num_envs
-            self.renderer.body_env = []
-            self.renderer.body_names = self.renderer.populate_bodies(
-                self.model.body_key, bodies_per_env, self.renderer.body_env
-            )
-            print(f"Set up {len(self.renderer.body_names)} bodies for rendering")
-
-        # Setup shapes if available
-        if self.model.shape_count:
-            self.renderer.geo_shape = {}
-            self.renderer_instance_count = self.renderer.populate_shapes(
-                self.renderer.body_names,
-                self.renderer.geo_shape,
-                self.model.shape_body.numpy(),
-                self.model.shape_source,
-                self.model.shape_type.numpy(),
-                self.model.shape_scale.numpy(),
-                self.model.shape_thickness.numpy(),
-                self.model.shape_is_solid.numpy(),
-                self.model.shape_transform.numpy(),
-                self.model.shape_flags.numpy(),
-                self.model.shape_key,
-            )
-            print(f"Set up {self.model.shape_count} shapes for rendering")
-
-            # Render ground plane if present
-            if hasattr(self.model, "ground") and self.model.ground:
-                self.renderer.render_ground(plane=self.model.ground_plane_params)
-                print("Ground plane rendered")
-
-        # Complete setup if method exists
-        if hasattr(self.renderer, "complete_setup"):
-            self.renderer.complete_setup()
-            print("Renderer setup completed")
 
     def load_frame(self, frame_id):
         """Load a specific frame from the recorded data."""
         if self.model_recorder and 0 <= frame_id < len(self.model_recorder.history):
-            self.model_recorder.playback(self.state, frame_id)
+            state = newton.State()
+            self.model_recorder.playback(state, frame_id)
+            self.log_state(state)
             print(f"Loaded frame {frame_id}")
             return True
         return False
-
-    def render(self):
-        if self.renderer is None:
-            return
-
-        with wp.ScopedTimer("render"):
-            self.renderer.begin_frame(0.0)
-            # If we have a model and state, render the state (for ModelAndStateRecorder)
-            if self.model is not None and self.state is not None:
-                self.renderer.render(self.state)
-            else:
-                if self.model is None:
-                    print("MODEL IS NONE")
-                if self.state is None:
-                    print("STATE IS NONE")
-            # Otherwise, let the replay manager handle display
-            self.renderer.end_frame()
 
 
 def main():
@@ -303,19 +238,24 @@ def main():
         print(f"Loading: {args.file}")
 
     with wp.ScopedDevice(args.device):
-        example = Example(stage_path=args.window_title)
+        # Create the replay viewer
+        viewer = ReplayViewerGL()
 
-        # Load file if specified via command line (this will override the testing file)
+        # Set window title if provided
+        if args.window_title != "Newton Replay Viewer":
+            viewer.renderer.set_title(args.window_title)
+
+        # Load file if specified via command line
         if args.file:
-            success = example.load_recording(args.file)
+            success = viewer.load_recording(args.file)
             if not success:
                 print(f"Failed to load recording: {args.file}")
                 return
 
-        # Main loop following example_quadruped pattern
-        if example.renderer:
-            while example.renderer.is_running():
-                example.render()
+        # Main loop using ViewerGL's approach
+        while viewer.is_running():
+            viewer.begin_frame(0.0)
+            viewer.end_frame()
 
 
 if __name__ == "__main__":
