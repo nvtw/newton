@@ -177,26 +177,27 @@ def test_model_and_state_recorder_binary(test: TestRecorder, device):
 
 
 devices = get_test_devices()
-for device in devices:
-    add_function_test(
-        TestRecorder,
-        f"test_body_transform_recorder_{device}",
-        test_body_transform_recorder,
-        devices=[device],
-    )
 
-    add_function_test(
-        TestRecorder,
-        f"test_model_and_state_recorder_json_{device}",
-        test_model_and_state_recorder_json,
-        devices=[device],
-    )
-    add_function_test(
-        TestRecorder,
-        f"test_model_and_state_recorder_binary_{device}",
-        test_model_and_state_recorder_binary,
-        devices=[device],
-    )
+add_function_test(
+    TestRecorder,
+    "test_body_transform_recorder",
+    test_body_transform_recorder,
+    devices=devices,
+)
+
+add_function_test(
+    TestRecorder,
+    "test_model_and_state_recorder_json",
+    test_model_and_state_recorder_json,
+    devices=devices,
+)
+
+add_function_test(
+    TestRecorder,
+    "test_model_and_state_recorder_binary",
+    test_model_and_state_recorder_binary,
+    devices=devices,
+)
 
 if __name__ == "__main__":
     wp.clear_kernel_cache()
