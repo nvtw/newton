@@ -29,7 +29,6 @@
 #
 ###########################################################################
 
-import warp as wp
 
 import newton
 import newton.examples

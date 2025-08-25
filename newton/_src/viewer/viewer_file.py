@@ -19,8 +19,8 @@ from pathlib import Path
 
 import warp as wp
 
-from .viewer import ViewerBase
 from ..utils.recorder import ModelAndStateRecorder
+from .viewer import ViewerBase
 
 
 class ViewerFile(ViewerBase):

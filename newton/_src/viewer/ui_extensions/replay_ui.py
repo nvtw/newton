@@ -16,6 +16,7 @@
 import os
 
 import newton
+
 from ...utils.recorder import ModelAndStateRecorder
 
 
