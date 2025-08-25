@@ -38,14 +38,20 @@ Example usage:
     ```
 """
 
+from .viewer_file import ViewerFile
 from .viewer_gl import ViewerGL
 from .viewer_null import ViewerNull
 from .viewer_rerun import ViewerRerun
 from .viewer_usd import ViewerUSD
 
+# UI Extensions
+from . import ui_extensions
+
 __all__ = [
+    "ViewerFile",
     "ViewerGL",
     "ViewerNull",
     "ViewerRerun",
     "ViewerUSD",
+    "ui_extensions",
 ]

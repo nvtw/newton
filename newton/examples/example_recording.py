@@ -14,11 +14,16 @@
 # limitations under the License.
 
 ###########################################################################
-# Example demonstrating how to record a simulation using Newton's recording
-# functionality. Shows how to capture model and state data during simulation
-# and save it to a file for later replay or analysis.
+# Example Recording
 #
-# Users can pick bodies by right-clicking and dragging with the mouse.
+# Shows how to record a simulation using ViewerFile for automatic recording
+# of model structure and state data during simulation.
+#
+# Recording happens automatically - ViewerFile captures all logged states
+# and saves them when the viewer is closed.
+#
+# Command: python -m newton.examples recording
+#
 ###########################################################################
 
 import numpy as np
@@ -32,24 +37,18 @@ import newton.utils
 
 
 class Example:
-    """Example demonstrating simulation recording with Newton.
+    def __init__(self, viewer):
+        # Setup simulation parameters
+        self.fps = 60
+        self.frame_dt = 1.0 / self.fps
+        self.sim_time = 0.0
+        self.sim_substeps = 10
+        self.sim_dt = self.frame_dt / self.sim_substeps
 
-    This example shows how to:
-    - Set up a recorder to capture simulation data
-    - Record model structure and state data during simulation
-    - Save recorded data to a file for later replay or analysis
+        self.viewer = viewer
+        self.num_envs = 1000
 
-    The example uses a humanoid model as the subject being recorded,
-    but the recording techniques apply to any Newton simulation.
-    """
-
-    def __init__(self, stage_path="example_recording.usd", num_envs=8, use_cuda_graph=True, recorder=None):
-        self.num_envs = num_envs
-        self.recorder = recorder
-
-        use_mujoco_cpu = False
-
-        # set numpy random seed
+        # Set numpy random seed for reproducibility
         self.seed = 123
         self.rng = np.random.default_rng(self.seed)
 
@@ -66,7 +65,7 @@ class Example:
             up_axis="Z",
         )
 
-        # joint initial positions
+        # Joint initial positions
         articulation_builder.joint_q[:7] = [0.0, 0.0, 1.5, *start_rot]
 
         spacing = 3.0
@@ -81,53 +80,34 @@ class Example:
             builder.add_builder(articulation_builder, xform=wp.transform(pos, wp.quat_identity()))
         builder.add_ground_plane()
 
-        self.sim_time = 0.0
-        fps = 60
-        self.frame_dt = 1.0 / fps
-
-        self.sim_substeps = 10
-        self.sim_dt = self.frame_dt / self.sim_substeps
-
-        # finalize model
+        # Finalize model
         self.model = builder.finalize()
-
-        # Record the model structure if recorder is provided
-        if self.recorder is not None:
-            self.recorder.record_model(self.model)
-
         self.control = self.model.control()
 
         self.solver = newton.solvers.SolverMuJoCo(
             self.model,
-            use_mujoco_cpu=use_mujoco_cpu,
+            use_mujoco_cpu=False,
             solver="newton",
             integrator="euler",
             iterations=10,
             ls_iterations=5,
         )
 
-        self.renderer = None
-        if stage_path:
-            self.renderer = newton.viewer.RendererOpenGL(
-                path=stage_path, model=self.model, scaling=1.0, show_joints=True
-            )
-
         self.state_0, self.state_1 = self.model.state(), self.model.state()
 
-        self.use_cuda_graph = (
-            not getattr(self.solver, "use_mujoco_cpu", False) and wp.get_device().is_cuda and use_cuda_graph
-        )
+        self.use_cuda_graph = wp.get_device().is_cuda
 
         if self.use_cuda_graph:
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph
 
+        # Set model in viewer (ViewerFile will automatically record it)
+        self.viewer.set_model(self.model)
+
     def simulate(self):
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
-            if self.renderer and hasattr(self.renderer, "apply_picking_force"):
-                self.renderer.apply_picking_force(self.state_0)
             self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
@@ -139,68 +119,46 @@ class Example:
                 self.simulate()
         self.sim_time += self.frame_dt
 
-        # Record the current simulation state if recorder is provided
-        if self.recorder is not None:
-            self.recorder.record(self.state_0)
-
     def render(self):
-        if self.renderer is None:
-            return
+        self.viewer.begin_frame(self.sim_time)
+        self.viewer.log_state(self.state_0)  # ViewerFile automatically records this
+        self.viewer.end_frame()
 
-        with wp.ScopedTimer("render", active=False):
-            self.renderer.begin_frame(self.sim_time)
-            self.renderer.render(self.state_0)
-            self.renderer.end_frame()
-
-    def save_recording(self, file_path="recording.json"):
-        """Save the recorded simulation data to a JSON file.
-
-        Args:
-            file_path: Path where the recording will be saved
-        """
-        if self.recorder is not None:
-            self.recorder.save_to_file(file_path)
-            print(f"Recording saved to {file_path}")
+    def test(self):
+        pass
 
 
 if __name__ == "__main__":
-    import argparse
+    # Create ViewerFile for automatic recording
+    import sys
 
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--device", type=str, default=None, help="Override the default Warp device.")
-    parser.add_argument(
-        "--stage-path",
-        type=lambda x: None if x == "None" else str(x),
-        default="example_recording.usd",
-        help="Path to the output USD file.",
-    )
-    parser.add_argument("--num-frames", type=int, default=12000, help="Total number of frames.")
-    parser.add_argument("--num-envs", type=int, default=9, help="Total number of simulated environments.")
-    parser.add_argument("--use-cuda-graph", default=True, action=argparse.BooleanOptionalAction)
-    parser.add_argument("--recording-path", type=str, default=None, help="Path to save the recording file")
+    recording_file = "humanoid_recording.bin"
 
-    args = parser.parse_known_args()[0]
+    # Check if user wants a different filename from command line
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+        recording_file = sys.argv[1]
 
-    with wp.ScopedDevice(args.device):
-        # Create recorder to capture simulation data if recording path is provided
-        recorder = newton.utils.ModelAndStateRecorder() if args.recording_path else None
+    print(f"Recording simulation to: {recording_file}")
+    print("ViewerFile will automatically save when the simulation ends.")
 
-        # Initialize the recording example with the recorder
-        example = Example(
-            stage_path=args.stage_path, num_envs=args.num_envs, use_cuda_graph=args.use_cuda_graph, recorder=recorder
-        )
+    # Create ViewerFile with auto_save=False to only save at the end
+    viewer = newton.viewer.ViewerFile(recording_file, auto_save=False)
 
-        # Run simulation and record each frame
-        for frame_idx in range(args.num_frames):
-            example.step()  # This will record the state if recorder is active
-            example.render()
+    # Create example
+    example = Example(viewer)
 
-            if example.renderer is None:
-                print(f"[{frame_idx:4d}/{args.num_frames}]")
+    # Run for a reasonable number of frames
+    max_frames = 1000
+    frame_count = 0
 
-        # Save the complete recording to file
-        if recorder is not None:
-            example.save_recording(args.recording_path)
+    while frame_count < max_frames:
+        example.step()
+        example.render()
+        frame_count += 1
 
-        if example.renderer:
-            example.renderer.save()
+        if frame_count % 100 == 0:
+            print(f"Frame {frame_count}/{max_frames}")
+
+    # Close viewer (automatically saves recording)
+    viewer.close()
+    print(f"Recording completed: {recording_file}")
