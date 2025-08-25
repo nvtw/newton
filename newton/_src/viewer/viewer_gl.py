@@ -1361,19 +1361,6 @@ class ViewerGL(ViewerBase):
                         and renders ImGui UI elements. The function should return
                         None and handle all ImGui calls internally.
             name: Optional name for the UI extension (for debugging)
-
-        Example:
-            ```python
-            def my_custom_ui(viewer):
-                imgui = viewer.ui.imgui
-                if imgui.begin("My Custom Panel"):
-                    imgui.text("Hello from custom UI!")
-                    # Add your UI controls here
-                imgui.end()
-
-
-            viewer.add_custom_ui(my_custom_ui, "MyPanel")
-            ```
         """
         if not callable(render_func):
             raise ValueError("render_func must be callable")
