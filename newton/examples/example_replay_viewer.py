@@ -25,7 +25,7 @@
 #   viewer.log_state(state)  # Records automatically
 #   viewer.close()  # Saves automatically
 #
-# Command: python -m newton.examples integrated_viewer
+# Command: python -m newton.examples.example_replay_viewer
 #
 ###########################################################################
 
