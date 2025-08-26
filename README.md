@@ -102,7 +102,7 @@ uv sync --extra examples
       <code>uv run -m newton.examples basic_joints</code>
     </td>
     <td align="center">
-      <!-- <code>python -m newton.examples basic_viewer</code> -->
+      <!-- <code>uv run -m newton.examples basic_viewer</code> -->
     </td>
   </tr>
 </table>
@@ -222,13 +222,13 @@ uv sync --extra examples
   </tr>
   <tr>
     <td align="center">
-      <code>python -m newton.examples ik_franka</code>
+      <code>uv run -m newton.examples ik_franka</code>
     </td>
     <td align="center">
-      <code>python -m newton.examples ik_h1</code>
+      <code>uv run -m newton.examples ik_h1</code>
     </td>
     <td align="center">
-      <code>python -m newton.examples ik_benchmark</code>
+      <code>uv run -m newton.examples ik_benchmark</code>
     </td>
   </tr>
 </table>
@@ -293,6 +293,65 @@ uv sync --extra examples
     </td>
     <td align="center">
       <code>uv run -m newton.examples selection_articulations</code>
+    </td>
+  </tr>
+</table>
+
+## DiffSim Examples
+
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <a href="newton/examples/diffsim/example_diffsim_ball.py">
+        <img src="docs/images/examples/example_diffsim_ball.jpg" alt="DiffSim Ball">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="newton/examples/diffsim/example_diffsim_cloth.py">
+        <img src="docs/images/examples/example_diffsim_cloth.jpg" alt="DiffSim Cloth">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="newton/examples/diffsim/example_diffsim_drone.py">
+        <img src="docs/images/examples/example_diffsim_drone.jpg" alt="DiffSim Drone">
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <code>uv run -m newton.examples diffsim_ball</code>
+    </td>
+    <td align="center">
+      <code>uv run -m newton.examples diffsim_cloth</code>
+    </td>
+    <td align="center">
+      <code>uv run -m newton.examples diffsim_drone</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="newton/examples/diffsim/example_diffsim_spring_cage.py">
+        <img src="docs/images/examples/example_diffsim_spring_cage.jpg" alt="DiffSim Spring Cage">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="newton/examples/diffsim/example_diffsim_soft_body.py">
+        <img src="docs/images/examples/example_diffsim_soft_body.jpg" alt="DiffSim Soft Body">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <!-- Future diffsim example -->
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <code>uv run -m newton.examples diffsim_spring_cage</code>
+    </td>
+    <td align="center">
+      <code>uv run -m newton.examples diffsim_soft_body</code>
+    </td>
+    <td align="center">
+      <!-- Future diffsim example -->
     </td>
   </tr>
 </table>
