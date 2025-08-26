@@ -263,37 +263,57 @@ add_example_test(
 )
 
 
-class TestBasicRobotExamples(unittest.TestCase):
+class TestRobotExamples(unittest.TestCase):
     pass
 
 
 add_example_test(
-    TestBasicRobotExamples,
-    name="example_cartpole",
+    TestRobotExamples,
+    name="robot.example_robot_cartpole",
     devices=test_devices,
-    test_options={"usd_required": True, "stage_path": "None", "num_frames": 100},
+    test_options={"usd_required": True, "num_frames": 100},
     test_options_cpu={"num_frames": 10},
+    use_viewer=True,
 )
 add_example_test(
-    TestBasicRobotExamples,
-    name="example_g1",
+    TestRobotExamples,
+    name="robot.example_robot_anymal_c_walk",
     devices=test_devices,
-    test_options={"usd_required": True, "num_frames": 500, "headless": True},
+    test_options={"usd_required": True, "num_frames": 500, "torch_required": True},
     test_options_cpu={"num_frames": 10},
+    use_viewer=True,
 )
 add_example_test(
-    TestBasicRobotExamples,
-    name="example_humanoid",
+    TestRobotExamples,
+    name="robot.example_robot_anymal_d",
     devices=test_devices,
-    test_options={"stage_path": "None", "num_frames": 500},
+    test_options={"usd_required": True, "num_frames": 500},
     test_options_cpu={"num_frames": 10},
+    use_viewer=True,
 )
 add_example_test(
-    TestBasicRobotExamples,
-    name="example_quadruped",
+    TestRobotExamples,
+    name="robot.example_robot_g1",
     devices=test_devices,
-    test_options={"stage_path": "None", "num_frames": 1000},
-    test_options_cpu={"num_envs": 10},
+    test_options={"usd_required": True, "num_frames": 500},
+    test_options_cpu={"num_frames": 10},
+    use_viewer=True,
+)
+add_example_test(
+    TestRobotExamples,
+    name="robot.example_robot_h1",
+    devices=test_devices,
+    test_options={"usd_required": True, "num_frames": 500},
+    test_options_cpu={"num_frames": 10},
+    use_viewer=True,
+)
+add_example_test(
+    TestRobotExamples,
+    name="robot.example_robot_humanoid",
+    devices=test_devices,
+    test_options={"num_frames": 500},
+    test_options_cpu={"num_frames": 10},
+    use_viewer=True,
 )
 
 
@@ -304,21 +324,34 @@ class TestAdvancedRobotExamples(unittest.TestCase):
 add_example_test(
     TestAdvancedRobotExamples,
     name="example_robot_manipulating_cloth",
-    devices=test_devices,
+    devices=cuda_test_devices,
     test_options={"stage_path": "None", "num_frames": 300},
     test_options_cpu={"num_frames": 2},
+    use_viewer=True,
 )
 add_example_test(
     TestAdvancedRobotExamples,
-    name="example_anymal_c_walk",
+    name="mpm.example_mpm_anymal",
     devices=cuda_test_devices,
-    test_options={"stage_path": "None", "num_frames": 200, "headless": True, "torch_required": True},
+    test_options={"num_frames": 100, "torch_required": True},
+    use_viewer=True,
 )
+
+
+class TestIKExamples(unittest.TestCase):
+    pass
+
+
+add_example_test(TestIKExamples, name="ik.example_ik_franka", devices=test_devices, use_viewer=True)
+
+add_example_test(TestIKExamples, name="ik.example_ik_h1", devices=test_devices, use_viewer=True)
+
 add_example_test(
-    TestAdvancedRobotExamples,
-    name="example_anymal_c_walk_on_sand",
-    devices=cuda_test_devices,
-    test_options={"stage_path": "None", "num_frames": 100, "headless": True, "torch_required": True},
+    TestIKExamples,
+    name="ik.example_ik_benchmark",
+    devices=test_devices,
+    test_options_cpu={"batch_sizes": [1, 10]},
+    use_viewer=True,
 )
 
 
@@ -369,13 +402,6 @@ add_example_test(
     name="example_rigid_force",
     devices=test_devices,
     test_options={"headless": True},
-)
-add_example_test(
-    TestOtherExamples,
-    name="example_ik_benchmark",
-    devices=test_devices,
-    test_options={"stage_path": "None"},
-    test_options_cpu={"batch_sizes": [1, 10]},
 )
 
 add_example_test(

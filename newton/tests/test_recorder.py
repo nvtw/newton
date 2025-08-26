@@ -71,7 +71,7 @@ def _compare_serialized_data(test, data1, data2):
             _compare_serialized_data(test, data1[key], data2[key])
     elif isinstance(data1, list) or isinstance(data1, tuple):
         test.assertEqual(len(data1), len(data2))
-        for item1, item2 in zip(data1, data2):
+        for item1, item2 in zip(data1, data2, strict=False):
             _compare_serialized_data(test, item1, item2)
     elif isinstance(data1, set):
         test.assertEqual(data1, data2)
@@ -84,7 +84,7 @@ def _compare_serialized_data(test, data1, data2):
             test.assertAlmostEqual(data1[idx], data2[idx], delta=1e-6)
     elif isinstance(data1, float):
         test.assertAlmostEqual(data1, data2)
-    elif isinstance(data1, (int, bool, str, type(None), bytes, bytearray, complex)):
+    elif isinstance(data1, int | bool | str | type(None) | bytes | bytearray | complex):
         test.assertEqual(data1, data2)
     else:
         test.fail(f"Unhandled type for comparison: {type(data1)}")
@@ -143,17 +143,8 @@ def _test_model_and_state_recorder_with_format(test: TestRecorder, device, file_
 
         # Test state history
         test.assertEqual(len(recorder.history), len(new_recorder.history))
-
-        # Test that we can restore states
-        for i, original_state in enumerate(states):
-            restored_state = restored_model.state()
-            new_recorder.playback(restored_state, i)
-
-            # Compare the restored state with the original
-            if restored_state.body_q is not None and original_state.body_q is not None:
-                np.testing.assert_allclose(restored_state.body_q.numpy(), original_state.body_q.numpy(), atol=1e-6)
-            if restored_state.body_qd is not None and original_state.body_qd is not None:
-                np.testing.assert_allclose(restored_state.body_qd.numpy(), original_state.body_qd.numpy(), atol=1e-6)
+        for original_state_data, loaded_state_data in zip(recorder.history, new_recorder.history, strict=False):
+            _compare_serialized_data(test, original_state_data, loaded_state_data)
 
     finally:
         if os.path.exists(file_path):
