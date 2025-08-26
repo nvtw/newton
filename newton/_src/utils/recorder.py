@@ -52,14 +52,10 @@ def _get_serialization_format(file_path: str) -> str:
         return "json"
     elif ext == ".bin":
         if not HAS_CBOR2:
-            raise ImportError(
-                "cbor2 library is required for .bin files. Install with: pip install cbor2"
-            )
+            raise ImportError("cbor2 library is required for .bin files. Install with: pip install cbor2")
         return "cbor2"
     else:
-        raise ValueError(
-            f"Unsupported file extension '{ext}'. Supported extensions: .json, .bin"
-        )
+        raise ValueError(f"Unsupported file extension '{ext}'. Supported extensions: .json, .bin")
 
 
 def serialize_ndarray(arr: np.ndarray, format_type: str = "json") -> dict:
@@ -170,7 +166,7 @@ def serialize(obj, callback, _visited=None, _path="", format_type="json"):
 
     try:
         # Primitive types
-        if isinstance(obj, (str, int, float, bool, type(None))):
+        if isinstance(obj, str | int | float | bool | type(None)):
             return {"__type__": type(obj).__name__, "value": obj}
 
         # NumPy scalar types
@@ -202,7 +198,7 @@ def serialize(obj, callback, _visited=None, _path="", format_type="json"):
             }
 
         # Iterables (like list, tuple, set)
-        if isinstance(obj, Iterable) and not isinstance(obj, (str, bytes, bytearray)):
+        if isinstance(obj, Iterable) and not isinstance(obj, str | bytes | bytearray):
             return {
                 "__type__": type(obj).__name__,
                 "items": [
@@ -247,9 +243,7 @@ def serialize_newton(obj, format_type: str = "json"):
             return {
                 "__type__": "warp.array",
                 # "__dtype__": int(x.dtype),
-                "__dtype__": str(
-                    x.dtype
-                ),  # Not used during deserialization, but useful for debugging
+                "__dtype__": str(x.dtype),  # Not used during deserialization, but useful for debugging
                 "data": serialize_ndarray(x.numpy(), format_type),
             }
 
@@ -330,12 +324,8 @@ def transfer_to_model(source_dict, target_obj, post_load_init_callback=None, _pa
         # Handle different types of values
         if hasattr(target_value, "__dict__") and isinstance(source_value, dict):
             # Recursively transfer for custom objects
-            transfer_to_model(
-                source_value, target_value, post_load_init_callback, current_path
-            )
-        elif isinstance(source_value, (list, tuple)) and hasattr(
-            target_value, "__len__"
-        ):
+            transfer_to_model(source_value, target_value, post_load_init_callback, current_path)
+        elif isinstance(source_value, list | tuple) and hasattr(target_value, "__len__"):
             # Handle sequences - try to transfer if lengths match or target is empty
             try:
                 if len(target_value) == 0 or len(target_value) == len(source_value):
@@ -402,16 +392,13 @@ def deserialize(data, callback, _path="", format_type="json"):
     # Mappings (like dict)
     if type_name == "dict":
         return {
-            k: deserialize(v, callback, f"{_path}.{k}" if _path else k, format_type)
-            for k, v in data["items"].items()
+            k: deserialize(v, callback, f"{_path}.{k}" if _path else k, format_type) for k, v in data["items"].items()
         }
 
     # Iterables (like list, tuple, set)
     if type_name in ("list", "tuple", "set"):
         items = [
-            deserialize(
-                item, callback, f"{_path}[{i}]" if _path else f"[{i}]", format_type
-            )
+            deserialize(item, callback, f"{_path}[{i}]" if _path else f"[{i}]", format_type)
             for i, item in enumerate(data["items"])
         ]
         if type_name == "tuple":
@@ -426,9 +413,7 @@ def deserialize(data, callback, _path="", format_type="json"):
         # For now, return a simple dict representation
         # In a full implementation, you might want to reconstruct the actual class
         return {
-            attr: deserialize(
-                value, callback, f"{_path}.{attr}" if _path else attr, format_type
-            )
+            attr: deserialize(value, callback, f"{_path}.{attr}" if _path else attr, format_type)
             for attr, value in data["attributes"].items()
         }
 
@@ -530,9 +515,7 @@ class BasicRecorder:
         self.transforms_history: list[wp.array] = []
         self.point_clouds_history: list[list[wp.array]] = []
 
-    def record(
-        self, body_transforms: wp.array, point_clouds: list[wp.array] | None = None
-    ):
+    def record(self, body_transforms: wp.array, point_clouds: list[wp.array] | None = None):
         """
         Records a snapshot of body transforms.
 
@@ -543,9 +526,7 @@ class BasicRecorder:
         """
         self.transforms_history.append(wp.clone(body_transforms))
         if point_clouds:
-            self.point_clouds_history.append(
-                [wp.clone(pc) for pc in point_clouds if pc is not None and pc.size > 0]
-            )
+            self.point_clouds_history.append([wp.clone(pc) for pc in point_clouds if pc is not None and pc.size > 0])
         else:
             self.point_clouds_history.append([])
 
@@ -565,11 +546,7 @@ class BasicRecorder:
             return None, None
 
         transforms = self.transforms_history[frame_id]
-        point_clouds = (
-            self.point_clouds_history[frame_id]
-            if frame_id < len(self.point_clouds_history)
-            else None
-        )
+        point_clouds = self.point_clouds_history[frame_id] if frame_id < len(self.point_clouds_history) else None
         return transforms, point_clouds
 
     def save_to_file(self, file_path: str):
@@ -579,9 +556,7 @@ class BasicRecorder:
         Args:
             file_path (str): The full path to the file where the transforms will be saved.
         """
-        history_np = {
-            f"frame_{i}": t.numpy() for i, t in enumerate(self.transforms_history)
-        }
+        history_np = {f"frame_{i}": t.numpy() for i, t in enumerate(self.transforms_history)}
         for i, pc_list in enumerate(self.point_clouds_history):
             history_np[f"frame_{i}_points_count"] = len(pc_list)
             for j, pc in enumerate(pc_list):
@@ -601,11 +576,7 @@ class BasicRecorder:
         self.point_clouds_history.clear()
         with np.load(file_path) as data:
             try:
-                transform_keys = [
-                    k
-                    for k in data.keys()
-                    if k.startswith("frame_") and "_points" not in k
-                ]
+                transform_keys = [k for k in data.keys() if k.startswith("frame_") and "_points" not in k]
                 frame_keys = sorted(transform_keys, key=lambda x: int(x.split("_")[1]))
             except (IndexError, ValueError) as e:
                 raise ValueError(f"Invalid frame key format in file: {e}") from e
@@ -623,9 +594,7 @@ class BasicRecorder:
                         points_key = f"frame_{frame_index_str}_points_{j}"
                         if points_key in data:
                             points_np = data[points_key]
-                            points_wp = wp.array(
-                                points_np, dtype=wp.vec3, device=device
-                            )
+                            points_wp = wp.array(points_np, dtype=wp.vec3, device=device)
                             pc_list.append(points_wp)
                 self.point_clouds_history.append(pc_list)
 
@@ -770,9 +739,7 @@ class ModelAndStateRecorder:
                     file_path = json_path
                     format_type = "json"
                 else:
-                    raise FileNotFoundError(
-                        f"File not found: {file_path} (tried .json extension)"
-                    ) from None
+                    raise FileNotFoundError(f"File not found: {file_path} (tried .json extension)") from None
             else:
                 raise
 
