@@ -291,8 +291,68 @@ def ray_intersect_cylinder(
 
 
 @wp.func
+def ray_intersect_mesh(
+    geom_to_world: wp.transform, ray_origin: wp.vec3, ray_direction: wp.vec3, size: wp.vec3, mesh_id: wp.uint64
+):
+    """Computes ray-mesh intersection using Warp's built-in mesh query.
+
+    Args:
+        geom_to_world: The world transform of the mesh.
+        ray_origin: The origin of the ray in world space.
+        ray_direction: The direction of the ray in world space.
+        size: The 3D scale of the mesh.
+        mesh_id: The Warp mesh ID for raycasting.
+
+    Returns:
+        The distance along the ray to the closest intersection point, or -1.0 if there is no intersection.
+    """
+    t_hit = -1.0
+
+    if mesh_id == wp.uint64(0):
+        return t_hit
+
+    # Transform ray to local frame
+    world_to_geom = wp.transform_inverse(geom_to_world)
+    ray_origin_local = wp.transform_point(world_to_geom, ray_origin)
+    ray_direction_local = wp.transform_vector(world_to_geom, ray_direction)
+
+    # Apply scale transformation - transform ray to mesh's local scaled coordinate system
+    scaled_origin = wp.cw_div(ray_origin_local, size)
+    scaled_direction = wp.cw_div(ray_direction_local, size)
+
+    # Normalize direction for the mesh query
+    dir_length_sq = wp.dot(scaled_direction, scaled_direction)
+    if dir_length_sq < MINVAL:
+        return t_hit
+
+    dir_length = wp.sqrt(dir_length_sq)
+    normalized_direction = scaled_direction / dir_length
+
+    # Warp mesh query variables
+    t = float(0.0)      # hit distance along ray
+    u = float(0.0)      # hit face barycentric u
+    v = float(0.0)      # hit face barycentric v
+    sign = float(0.0)   # hit face sign
+    normal = wp.vec3()  # hit face normal
+    face_index = int(0) # hit face index
+
+    # Perform raycast against the mesh
+    max_t = 1.0e6  # Maximum ray distance
+    if wp.mesh_query_ray(mesh_id, scaled_origin, normalized_direction, max_t, t, u, v, sign, normal, face_index):
+        if t >= 0.0:
+            # Transform hit distance back to world space
+            # Account for scaling and original direction length
+            scale_factor = wp.length(size) / 3.0  # Average scale factor
+            world_dir_length = wp.length(ray_direction_local)
+            if world_dir_length > MINVAL:
+                t_hit = t * scale_factor * dir_length / world_dir_length
+
+    return t_hit
+
+
+@wp.func
 def ray_intersect_geom(
-    geom_to_world: wp.transform, size: wp.vec3, geomtype: int, ray_origin: wp.vec3, ray_direction: wp.vec3
+    geom_to_world: wp.transform, size: wp.vec3, geomtype: int, ray_origin: wp.vec3, ray_direction: wp.vec3, mesh_id: wp.uint64
 ):
     """
     Computes the intersection of a ray with a geometry.
@@ -303,6 +363,7 @@ def ray_intersect_geom(
         geomtype: The type of the geometry.
         ray_origin: The origin of the ray.
         ray_direction: The direction of the ray.
+        mesh_id: The Warp mesh ID for mesh geometries.
 
     Returns:
         The distance along the ray to the closest intersection point, or -1.0 if there is no intersection.
@@ -326,6 +387,9 @@ def ray_intersect_geom(
         h = size[1]
         t_hit = ray_intersect_cylinder(geom_to_world, ray_origin, ray_direction, r, h)
 
+    elif geomtype == GeoType.MESH:
+        t_hit = ray_intersect_mesh(geom_to_world, ray_origin, ray_direction, size, mesh_id)
+
     return t_hit
 
 
@@ -337,6 +401,7 @@ def raycast_kernel(
     shape_transform: wp.array(dtype=wp.transform),
     geom_type: wp.array(dtype=int),
     geom_size: wp.array(dtype=wp.vec3),
+    shape_source_ptr: wp.array(dtype=wp.uint64),
     # Ray
     ray_origin: wp.vec3,
     ray_direction: wp.vec3,
@@ -356,6 +421,7 @@ def raycast_kernel(
         shape_transform: Array of local shape transforms.
         geom_type: Array of geometry types for each geometry.
         geom_size: Array of sizes for each geometry.
+        shape_source_ptr: Array of mesh IDs for mesh geometries (wp.uint64).
         ray_origin: The origin of the ray.
         ray_direction: The direction of the ray.
         lock: Lock array used for synchronization. Expected to be initialized to 0.
@@ -378,7 +444,13 @@ def raycast_kernel(
 
     geomtype = geom_type[tid]
 
-    t = ray_intersect_geom(geom_to_world, geom_size[tid], geomtype, ray_origin, ray_direction)
+    # Get mesh ID for mesh geometries
+    if geomtype == GeoType.MESH:
+        mesh_id = shape_source_ptr[tid]
+    else:
+        mesh_id = wp.uint64(0)
+
+    t = ray_intersect_geom(geom_to_world, geom_size[tid], geomtype, ray_origin, ray_direction, mesh_id)
 
     if t >= 0.0 and t < min_dist[0]:
         _spinlock_acquire(lock)
