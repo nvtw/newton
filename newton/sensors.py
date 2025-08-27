@@ -26,6 +26,6 @@ from ._src.utils.raycast_sensor import (
 
 __all__ = [
     "ContactSensor",
-    "populate_contacts",
     "RaycastSensor",
+    "populate_contacts",
 ]
