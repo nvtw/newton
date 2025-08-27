@@ -321,12 +321,11 @@ def ray_intersect_mesh(
     scaled_direction = wp.cw_div(ray_direction_local, size)
 
     # Normalize direction for the mesh query
-    dir_length_sq = wp.dot(scaled_direction, scaled_direction)
-    if dir_length_sq < MINVAL:
+    scaled_dir_length = wp.length(scaled_direction)
+    if scaled_dir_length < MINVAL:
         return t_hit
 
-    dir_length = wp.sqrt(dir_length_sq)
-    normalized_direction = scaled_direction / dir_length
+    normalized_direction = scaled_direction / scaled_dir_length
 
     # Warp mesh query variables
     t = float(0.0)      # hit distance along ray
@@ -341,11 +340,14 @@ def ray_intersect_mesh(
     if wp.mesh_query_ray(mesh_id, scaled_origin, normalized_direction, max_t, t, u, v, sign, normal, face_index):
         if t >= 0.0:
             # Transform hit distance back to world space
-            # Account for scaling and original direction length
-            scale_factor = wp.length(size) / 3.0  # Average scale factor
-            world_dir_length = wp.length(ray_direction_local)
-            if world_dir_length > MINVAL:
-                t_hit = t * scale_factor * dir_length / world_dir_length
+            # t is distance along normalized_direction in scaled space
+            # Convert to distance along original ray_direction_local
+            original_dir_length = wp.length(ray_direction_local)
+            if original_dir_length > MINVAL:
+                # Convert from distance along normalized scaled direction to distance along original ray
+                # t is distance along normalized_direction
+                # We want distance along ray_direction_local
+                t_hit = t / scaled_dir_length * original_dir_length
 
     return t_hit
 
