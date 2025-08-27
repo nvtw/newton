@@ -291,6 +291,112 @@ def ray_intersect_cylinder(
 
 
 @wp.func
+def ray_intersect_cone(
+    geom_to_world: wp.transform, ray_origin: wp.vec3, ray_direction: wp.vec3, radius: float, half_height: float
+):
+    """Computes ray-cone intersection.
+
+    The cone is oriented along the Z-axis with the tip at +half_height and base at -half_height.
+
+    Args:
+        geom_to_world: The world transform of the cone.
+        ray_origin: The origin of the ray in world space.
+        ray_direction: The direction of the ray in world space.
+        radius: The radius of the cone's base.
+        half_height: Half the height of the cone (distance from center to tip/base).
+
+    Returns:
+        The distance along the ray to the closest intersection point, or -1.0 if there is no intersection.
+    """
+    # transform ray to local frame
+    world_to_geom = wp.transform_inverse(geom_to_world)
+    ray_origin_local = wp.transform_point(world_to_geom, ray_origin)
+    ray_direction_local = wp.transform_vector(world_to_geom, ray_direction)
+
+    t_hit = -1.0
+
+    # Cone geometry: tip at (0, 0, half_height), base at (0, 0, -half_height)
+    # Cone equation in parametric form: x^2 + y^2 = (radius * (half_height - z) / (2 * half_height))^2
+    # Simplified: x^2 + y^2 = k^2 * (half_height - z)^2 where k = radius / (2 * half_height)
+
+    if wp.abs(half_height) < MINVAL:
+        return t_hit
+
+    k = radius / (2.0 * half_height)  # cone slope coefficient
+    k_sq = k * k
+
+    # Ray: P(t) = ray_origin_local + t * ray_direction_local
+    # Substitute into cone equation: (ox + t*dx)^2 + (oy + t*dy)^2 = k^2 * (half_height - (oz + t*dz))^2
+
+    ox, oy, oz = ray_origin_local[0], ray_origin_local[1], ray_origin_local[2]
+    dx, dy, dz = ray_direction_local[0], ray_direction_local[1], ray_direction_local[2]
+
+    # Expand to quadratic equation: at^2 + bt + c = 0
+    # Left side: (ox + t*dx)^2 + (oy + t*dy)^2 = ox^2 + oy^2 + 2t(ox*dx + oy*dy) + t^2(dx^2 + dy^2)
+    # Right side: k^2 * (half_height - oz - t*dz)^2 = k^2 * ((half_height - oz)^2 - 2t(half_height - oz)*dz + t^2*dz^2)
+
+    h_minus_oz = half_height - oz
+
+    a = dx * dx + dy * dy - k_sq * dz * dz
+    b = 2.0 * (ox * dx + oy * dy) + 2.0 * k_sq * h_minus_oz * dz
+    c = ox * ox + oy * oy - k_sq * h_minus_oz * h_minus_oz
+
+    # Solve quadratic equation
+    discriminant = b * b - 4.0 * a * c
+
+    if discriminant < 0.0:
+        return t_hit
+
+    sqrt_discriminant = wp.sqrt(discriminant)
+
+    # Two potential intersection points
+    if wp.abs(a) < MINVAL:
+        # Linear case (ray parallel to cone surface)
+        if wp.abs(b) > MINVAL:
+            t = -c / b
+            z = oz + t * dz
+            if t >= 0.0 and z >= -half_height and z <= half_height:
+                t_hit = t
+    else:
+        # Quadratic case
+        inv_2a = 1.0 / (2.0 * a)
+        t1 = (-b - sqrt_discriminant) * inv_2a
+        t2 = (-b + sqrt_discriminant) * inv_2a
+
+        # Check both intersection points
+        valid_t = -1.0
+
+        # Check t1
+        if t1 >= 0.0:
+            z1 = oz + t1 * dz
+            if z1 >= -half_height and z1 <= half_height:
+                if valid_t < 0.0 or t1 < valid_t:
+                    valid_t = t1
+
+        # Check t2
+        if t2 >= 0.0:
+            z2 = oz + t2 * dz
+            if z2 >= -half_height and z2 <= half_height:
+                if valid_t < 0.0 or t2 < valid_t:
+                    valid_t = t2
+
+        # Check intersection with base disk (z = -half_height)
+        if wp.abs(dz) > MINVAL:
+            t_base = (-half_height - oz) / dz
+            if t_base >= 0.0:
+                x_base = ox + t_base * dx
+                y_base = oy + t_base * dy
+                r_base_sq = x_base * x_base + y_base * y_base
+                if r_base_sq <= radius * radius:
+                    if valid_t < 0.0 or t_base < valid_t:
+                        valid_t = t_base
+
+        t_hit = valid_t
+
+    return t_hit
+
+
+@wp.func
 def ray_intersect_mesh(
     geom_to_world: wp.transform, ray_origin: wp.vec3, ray_direction: wp.vec3, size: wp.vec3, mesh_id: wp.uint64
 ):
@@ -393,6 +499,11 @@ def ray_intersect_geom(
         r = size[0]
         h = size[1]
         t_hit = ray_intersect_cylinder(geom_to_world, ray_origin, ray_direction, r, h)
+
+    elif geomtype == GeoType.CONE:
+        r = size[0]
+        h = size[1]
+        t_hit = ray_intersect_cone(geom_to_world, ray_origin, ray_direction, r, h)
 
     elif geomtype == GeoType.MESH:
         t_hit = ray_intersect_mesh(geom_to_world, ray_origin, ray_direction, size, mesh_id)
