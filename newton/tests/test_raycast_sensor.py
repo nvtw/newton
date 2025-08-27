@@ -14,26 +14,29 @@
 # limitations under the License.
 
 import math
-import os
 import unittest
 
 import numpy as np
 import warp as wp
-from PIL import Image
 
 import newton
 from newton.sensors import RaycastSensor
-from newton.tests.unittest_utils import add_function_test
+from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 EXPORT_IMAGES = False
 
+
 def save_depth_image_as_grayscale(depth_image: np.ndarray, filename: str):
-    """Save a depth image as a grayscale image to C:\\tmp.
+    """Save a depth image as a grayscale image.
 
     Args:
         depth_image: 2D numpy array with depth values (-1.0 for no hit, positive for distances)
         filename: Name of the file (without extension)
-    """  
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return  # Skip if PIL not available
 
     # Handle the depth image: -1.0 means no hit, positive values are distances
     img_data = depth_image.copy().astype(np.float32)
@@ -56,7 +59,6 @@ def save_depth_image_as_grayscale(depth_image: np.ndarray, filename: str):
 
     filepath = f"{filename}.png"
     image.save(filepath)
-    print(f"Saved depth image to: {filepath}")
 
 
 def create_cubemap_scene(device="cpu"):
@@ -122,7 +124,7 @@ def create_cubemap_scene(device="cpu"):
     return model
 
 
-def test_raycast_sensor_cubemap(test: unittest.TestCase, device):
+def test_raycast_sensor_cubemap(test: unittest.TestCase, device, export_images: bool = False):
     """Test raycast sensor by creating cube map views from origin."""
 
     # Create scene with 6 different objects (one for each cube map face)
@@ -131,10 +133,6 @@ def test_raycast_sensor_cubemap(test: unittest.TestCase, device):
 
     # Update body transforms (important for raycast operations)
     newton.eval_fk(model, state.joint_q, state.joint_qd, state)
-
-    print(f"Created scene with {model.body_count} bodies and {len(model.shape_body)} shapes")
-    print("Objects positioned for cube map views:")
-    print("  +X: Capsule, -X: Sphere, +Y: Cone, -Y: Cylinder, +Z: Cube, -Z: Tetrahedron")
 
     # Define 6 cube map camera directions
     cubemap_views = [
@@ -158,12 +156,8 @@ def test_raycast_sensor_cubemap(test: unittest.TestCase, device):
         max_distance=50.0,
     )
 
-    total_hits = 0
-
     # Render each cube map face
     for view_name, position, direction, up in cubemap_views:
-        print(f"Rendering {view_name} view...")
-
         # Update camera pose for this view
         sensor.update_camera_pose(position=position, direction=direction, up=up)
 
@@ -175,29 +169,21 @@ def test_raycast_sensor_cubemap(test: unittest.TestCase, device):
 
         # Count hits for this view
         hits_in_view = np.sum(depth_image > 0)
-        total_hits += hits_in_view
 
-        print(f"  {view_name}: {hits_in_view} pixels hit objects")
-        if hits_in_view > 0:
-            min_depth = np.min(depth_image[depth_image > 0])
-            max_depth = np.max(depth_image[depth_image > 0])
-            print(f"  Depth range: {min_depth:.2f} to {max_depth:.2f}")
+        # Verify each face has at least one hit
+        test.assertGreater(hits_in_view, 0, f"Face {view_name} should detect at least one object hit")
 
-        # Save depth image
-        save_depth_image_as_grayscale(depth_image, f"cubemap_{view_name}")
-
-    # Verify we detected objects
-    test.assertGreater(total_hits, 0, "Should detect objects in cube map views")
-    print(f"Total hits across all views: {total_hits}")
-    print("Cube map rendering complete!")
+        # Save depth image (if enabled)
+        if EXPORT_IMAGES:
+            save_depth_image_as_grayscale(depth_image, f"cubemap_{view_name}")
 
 
 class TestRaycastSensor(unittest.TestCase):
     pass
 
 
-# Register test for both CPU and GPU
-devices = ["cuda:0"]  # Focus on CUDA for now
+# Register test for all available devices
+devices = get_test_devices()
 add_function_test(TestRaycastSensor, "test_raycast_sensor_cubemap", test_raycast_sensor_cubemap, devices=devices)
 
 
