@@ -328,12 +328,12 @@ def ray_intersect_mesh(
     normalized_direction = scaled_direction / scaled_dir_length
 
     # Warp mesh query variables
-    t = float(0.0)      # hit distance along ray
-    u = float(0.0)      # hit face barycentric u
-    v = float(0.0)      # hit face barycentric v
-    sign = float(0.0)   # hit face sign
+    t = float(0.0)  # hit distance along ray
+    u = float(0.0)  # hit face barycentric u
+    v = float(0.0)  # hit face barycentric v
+    sign = float(0.0)  # hit face sign
     normal = wp.vec3()  # hit face normal
-    face_index = int(0) # hit face index
+    face_index = int(0)  # hit face index
 
     # Perform raycast against the mesh
     max_t = 1.0e6  # Maximum ray distance
@@ -354,7 +354,12 @@ def ray_intersect_mesh(
 
 @wp.func
 def ray_intersect_geom(
-    geom_to_world: wp.transform, size: wp.vec3, geomtype: int, ray_origin: wp.vec3, ray_direction: wp.vec3, mesh_id: wp.uint64
+    geom_to_world: wp.transform,
+    size: wp.vec3,
+    geomtype: int,
+    ray_origin: wp.vec3,
+    ray_direction: wp.vec3,
+    mesh_id: wp.uint64,
 ):
     """
     Computes the intersection of a ray with a geometry.
@@ -431,34 +436,185 @@ def raycast_kernel(
         min_index: A single-element array to store the index of the closest geometry. Expected to be initialized to -1.
         min_body_index: A single-element array to store the body index of the closest geometry. Expected to be initialized to -1.
     """
-    tid = wp.tid()
+    shape_idx = wp.tid()
 
     # compute shape transform
-    b = shape_body[tid]
+    b = shape_body[shape_idx]
 
     X_wb = wp.transform_identity()
     if b >= 0:
         X_wb = body_q[b]
 
-    X_bs = shape_transform[tid]
+    X_bs = shape_transform[shape_idx]
 
     geom_to_world = wp.mul(X_wb, X_bs)
 
-    geomtype = geom_type[tid]
+    geomtype = geom_type[shape_idx]
 
     # Get mesh ID for mesh geometries
     if geomtype == GeoType.MESH:
-        mesh_id = shape_source_ptr[tid]
+        mesh_id = shape_source_ptr[shape_idx]
     else:
         mesh_id = wp.uint64(0)
 
-    t = ray_intersect_geom(geom_to_world, geom_size[tid], geomtype, ray_origin, ray_direction, mesh_id)
+    t = ray_intersect_geom(geom_to_world, geom_size[shape_idx], geomtype, ray_origin, ray_direction, mesh_id)
 
     if t >= 0.0 and t < min_dist[0]:
         _spinlock_acquire(lock)
         # Still use an atomic inside the spinlock to get a volatile read
         old_min = wp.atomic_min(min_dist, 0, t)
         if t <= old_min:
-            min_index[0] = tid
+            min_index[0] = shape_idx
             min_body_index[0] = b
         _spinlock_release(lock)
+
+
+@wp.func
+def ray_for_pixel(
+    camera_position: wp.vec3,
+    camera_direction: wp.vec3,
+    camera_up: wp.vec3,
+    camera_right: wp.vec3,
+    fov_scale: float,
+    camera_aspect_ratio: float,
+    resolution: wp.vec2,
+    pixel_x: int,
+    pixel_y: int,
+):
+    """
+    Generate a ray for a given pixel in a perspective camera.
+
+    Args:
+        camera_position: Camera position in world space
+        camera_direction: Camera forward direction (normalized)
+        camera_up: Camera up direction (normalized)
+        camera_right: Camera right direction (normalized)
+        camera_fov: Vertical field of view in radians
+        camera_aspect_ratio: Width/height aspect ratio
+        camera_near_clip: Near clipping plane distance
+        resolution: Image resolution as (width, height)
+        pixel_x: Pixel x coordinate (0 to width-1)
+        pixel_y: Pixel y coordinate (0 to height-1)
+
+    Returns:
+        Tuple of (ray_origin, ray_direction) in world space
+    """
+    # Convert pixel coordinates to normalized device coordinates [-1, 1]
+    # Note: (0,0) is typically top-left, but we want bottom-left for standard camera
+    width = resolution[0]
+    height = resolution[1]
+
+    # Convert to normalized coordinates [-1, 1] with (0,0) at center
+    ndc_x = (2.0 * float(pixel_x) + 1.0) / width - 1.0
+    ndc_y = 1.0 - (2.0 * float(pixel_y) + 1.0) / height  # Flip Y axis
+
+    # Apply field of view and aspect ratio
+    # FOV is typically the vertical field of view
+    # fov_scale = wp.tan(camera_fov * 0.5)
+
+    # Camera space coordinates
+    cam_x = ndc_x * fov_scale * camera_aspect_ratio
+    cam_y = ndc_y * fov_scale
+    cam_z = -1.0  # Forward is negative Z in camera space
+
+    # Ray direction in camera space (not normalized yet)
+    ray_dir_camera = wp.vec3(cam_x, cam_y, cam_z)
+
+    # Transform ray direction from camera space to world space
+    # Camera space to world space: combine right, up, and forward vectors
+    ray_direction_world = (
+        camera_right * ray_dir_camera[0] + camera_up * ray_dir_camera[1] + camera_direction * ray_dir_camera[2]
+    )
+
+    # Normalize the ray direction
+    ray_direction_world = wp.normalize(ray_direction_world)
+
+    # Ray origin is the camera position
+    ray_origin_world = camera_position
+
+    return ray_origin_world, ray_direction_world
+
+
+@wp.kernel
+def raycast_sensor_kernel(
+    # Model
+    body_q: wp.array(dtype=wp.transform),
+    shape_body: wp.array(dtype=int),
+    shape_transform: wp.array(dtype=wp.transform),
+    geom_type: wp.array(dtype=int),
+    geom_size: wp.array(dtype=wp.vec3),
+    shape_source_ptr: wp.array(dtype=wp.uint64),
+    # Camera parameters
+    camera_position: wp.vec3,
+    camera_direction: wp.vec3,
+    camera_up: wp.vec3,
+    camera_right: wp.vec3,
+    fov_scale: float,
+    camera_aspect_ratio: float,
+    resolution: wp.vec2,
+    # Output (per-pixel results)
+    hit_distances: wp.array2d(dtype=float),
+):
+    """
+    Raycast sensor kernel that casts rays for each pixel in an image.
+
+    Each thread processes one pixel, generating a ray and finding the closest intersection.
+
+    Args:
+        body_q: Array of body transforms
+        shape_body: Maps shape index to body index
+        shape_transform: Array of local shape transforms
+        geom_type: Array of geometry types for each geometry
+        geom_size: Array of sizes for each geometry
+        shape_source_ptr: Array of mesh IDs for mesh geometries
+        camera_position: Camera position in world space
+        camera_direction: Camera forward direction (normalized)
+        camera_up: Camera up direction (normalized)
+        camera_right: Camera right direction (normalized)
+        fov_scale: Scale factor for field of view, computed as tan(fov_radians/2) where fov_radians is the vertical field of view angle in radians
+        camera_aspect_ratio: Width/height aspect ratio
+        resolution: Image resolution as (width, height)
+        hit_distances: Output array of hit distances per pixel
+    """
+    pixel_x, pixel_y, shape_idx = wp.tid()
+
+    # Skip if out of bounds
+    if pixel_x >= resolution[0] or pixel_y >= resolution[1]:
+        return
+
+    # Generate ray for this pixel
+    ray_origin, ray_direction = ray_for_pixel(
+        camera_position,
+        camera_direction,
+        camera_up,
+        camera_right,
+        fov_scale,
+        camera_aspect_ratio,
+        resolution,
+        pixel_x,
+        pixel_y,
+    )
+
+    # compute shape transform
+    b = shape_body[shape_idx]
+
+    X_wb = wp.transform_identity()
+    if b >= 0:
+        X_wb = body_q[b]
+
+    X_bs = shape_transform[shape_idx]
+
+    geom_to_world = wp.mul(X_wb, X_bs)
+
+    geomtype = geom_type[shape_idx]
+
+    # Get mesh ID for mesh geometries
+    if geomtype == GeoType.MESH:
+        mesh_id = shape_source_ptr[shape_idx]
+    else:
+        mesh_id = wp.uint64(0)
+
+    t = ray_intersect_geom(geom_to_world, geom_size[shape_idx], geomtype, ray_origin, ray_direction, mesh_id)
+
+    if t >= 0.0:
+        wp.atomic_min(hit_distances, pixel_x, pixel_y, t)

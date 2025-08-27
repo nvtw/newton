@@ -19,7 +19,13 @@ from ._src.utils.contact_sensor import (
     populate_contacts,
 )
 
+# Raycast sensors
+from ._src.utils.raycast_sensor import (
+    RaycastSensor,
+)
+
 __all__ = [
     "ContactSensor",
     "populate_contacts",
+    "RaycastSensor",
 ]
