@@ -45,13 +45,15 @@ def save_depth_image_as_grayscale(depth_image: np.ndarray, filename: str):
     img_data[img_data < 0] = 0
 
     # Normalize positive values to 0-255 range
-    if np.any(img_data > 0):
-        max_depth = np.max(img_data)
-        min_depth = np.min(img_data[img_data > 0])  # Minimum positive depth
-
+    pos_mask = img_data > 0
+    if np.any(pos_mask):
+        pos_vals = img_data[pos_mask]
+        min_depth = pos_vals.min()
+        max_depth = pos_vals.max()
+        denom = max(max_depth - min_depth, 1e-6)
         # Invert: closer objects = brighter, farther = darker
         # Scale to 50-255 range (so background/no-hit stays at 0)
-        img_data[img_data > 0] = 255 - ((img_data[img_data > 0] - min_depth) / (max_depth - min_depth)) * 205
+        img_data[pos_mask] = 255 - ((pos_vals - min_depth) / denom) * 205
 
     # Convert to uint8 and save
     img_data = np.clip(img_data, 0, 255).astype(np.uint8)

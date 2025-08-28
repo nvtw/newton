@@ -23,6 +23,7 @@ from newton import GeoType
 from newton._src.geometry.raycast import (
     ray_intersect_box,
     ray_intersect_capsule,
+    ray_intersect_cone,
     ray_intersect_cylinder,
     ray_intersect_geom,
     ray_intersect_mesh,
@@ -86,6 +87,19 @@ def kernel_test_cylinder(
 ):
     tid = wp.tid()
     out_t[tid] = ray_intersect_cylinder(geom_to_world, ray_origin, ray_direction, r, h)
+
+
+@wp.kernel
+def kernel_test_cone(
+    out_t: wp.array(dtype=float),
+    geom_to_world: wp.transform,
+    ray_origin: wp.vec3,
+    ray_direction: wp.vec3,
+    r: float,
+    h: float,
+):
+    tid = wp.tid()
+    out_t[tid] = ray_intersect_cone(geom_to_world, ray_origin, ray_direction, r, h)
 
 
 @wp.kernel
@@ -225,6 +239,37 @@ def test_ray_intersect_cylinder(test: TestRaycast, device: str):
     test.assertAlmostEqual(out_t.numpy()[0], -1.0, delta=1e-5)
 
 
+def test_ray_intersect_cone(test: TestRaycast, device: str):
+    out_t = wp.zeros(1, dtype=float, device=device)
+    geom_to_world = wp.transform_identity()
+    r = 1.0  # base radius
+    h = 1.0  # half height (so total height is 2.0)
+
+    # Case 1: Hit cone body from the side
+    ray_origin = wp.vec3(-2.0, 0.0, 0.0)
+    ray_direction = wp.vec3(1.0, 0.0, 0.0)
+    wp.launch(kernel_test_cone, dim=1, inputs=[out_t, geom_to_world, ray_origin, ray_direction, r, h], device=device)
+    test.assertAlmostEqual(out_t.numpy()[0], 1.5, delta=1e-3)
+
+    # Case 2: Hit cone base from below
+    ray_origin = wp.vec3(0.0, 0.0, -2.0)
+    ray_direction = wp.vec3(0.0, 0.0, 1.0)
+    wp.launch(kernel_test_cone, dim=1, inputs=[out_t, geom_to_world, ray_origin, ray_direction, r, h], device=device)
+    test.assertAlmostEqual(out_t.numpy()[0], 1.0, delta=1e-3)  # hits base at z=-1
+
+    # Case 3: Miss cone completely
+    ray_origin = wp.vec3(-2.0, 2.0, 0.0)
+    ray_direction = wp.vec3(1.0, 0.0, 0.0)
+    wp.launch(kernel_test_cone, dim=1, inputs=[out_t, geom_to_world, ray_origin, ray_direction, r, h], device=device)
+    test.assertAlmostEqual(out_t.numpy()[0], -1.0, delta=1e-5)
+
+    # Case 4: Ray from above hitting the tip area
+    ray_origin = wp.vec3(0.0, 0.0, 2.0)
+    ray_direction = wp.vec3(0.0, 0.0, -1.0)
+    wp.launch(kernel_test_cone, dim=1, inputs=[out_t, geom_to_world, ray_origin, ray_direction, r, h], device=device)
+    test.assertAlmostEqual(out_t.numpy()[0], 1.0, delta=1e-3)  # hits tip at z=1
+
+
 def test_geom_ray_intersect(test: TestRaycast, device: str):
     out_t = wp.zeros(1, dtype=float, device=device)
     geom_to_world = wp.transform_identity()
@@ -271,6 +316,16 @@ def test_geom_ray_intersect(test: TestRaycast, device: str):
         device=device,
     )
     test.assertAlmostEqual(out_t.numpy()[0], 1.5, delta=1e-5)
+
+    # Cone
+    size = wp.vec3(1.0, 1.0, 0.0)  # r, h
+    wp.launch(
+        kernel_test_geom,
+        dim=1,
+        inputs=[out_t, geom_to_world, size, GeoType.CONE, ray_origin, ray_direction, mesh_id],
+        device=device,
+    )
+    test.assertAlmostEqual(out_t.numpy()[0], 1.5, delta=1e-3)
 
 
 def test_ray_intersect_mesh(test: TestRaycast, device: str):
@@ -399,6 +454,7 @@ for device in devices:
     add_function_test(
         TestRaycast, f"test_ray_intersect_cylinder_{device}", test_ray_intersect_cylinder, devices=[device]
     )
+    add_function_test(TestRaycast, f"test_ray_intersect_cone_{device}", test_ray_intersect_cone, devices=[device])
     add_function_test(TestRaycast, f"test_geom_ray_intersect_{device}", test_geom_ray_intersect, devices=[device])
     add_function_test(TestRaycast, f"test_ray_intersect_mesh_{device}", test_ray_intersect_mesh, devices=[device])
     add_function_test(

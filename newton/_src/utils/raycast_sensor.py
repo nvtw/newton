@@ -23,7 +23,7 @@ from ..sim import Model, State
 
 
 @wp.kernel
-def clamp_no_hits_kernel(depth_image: wp.array(dtype=float), max_dist: float, width: int):
+def clamp_no_hits_kernel(depth_image: wp.array(dtype=float), max_dist: float):
     """Kernel to replace max_distance values with -1.0 to indicate no intersection."""
     tid = wp.tid()
     if depth_image[tid] >= max_dist:
@@ -141,12 +141,6 @@ class RaycastSensor:
         self.camera_up = np.cross(self.camera_right, self.camera_direction)
         self.camera_up = self.camera_up / np.linalg.norm(self.camera_up)
 
-        # Update warp vectors
-        self._camera_position = wp.vec3(*self.camera_position)
-        self._camera_direction = wp.vec3(*self.camera_direction)
-        self._camera_up = wp.vec3(*self.camera_up)
-        self._camera_right = wp.vec3(*self.camera_right)
-
     def eval(self, state: State):
         """Evaluate the raycast sensor to generate a depth image.
 
@@ -163,6 +157,11 @@ class RaycastSensor:
         # We use 3D launch with dimensions (width, height, num_shapes)
         num_shapes = len(self.model.shape_body)
         if num_shapes > 0:
+            # Create warp vectors just before kernel launch
+            camera_position = wp.vec3(*self.camera_position)
+            camera_direction = wp.vec3(*self.camera_direction)
+            camera_up = wp.vec3(*self.camera_up)
+            camera_right = wp.vec3(*self.camera_right)
             wp.launch(
                 kernel=raycast_sensor_kernel,
                 dim=(self.width, self.height, num_shapes),
@@ -175,10 +174,10 @@ class RaycastSensor:
                     self.model.shape_scale,
                     self.model.shape_source_ptr,
                     # Camera parameters
-                    self._camera_position,
-                    self._camera_direction,
-                    self._camera_up,
-                    self._camera_right,
+                    camera_position,
+                    camera_direction,
+                    camera_up,
+                    camera_right,
                     self.fov_scale,
                     self.aspect_ratio,
                     self._resolution,
@@ -198,7 +197,7 @@ class RaycastSensor:
         wp.launch(
             kernel=clamp_no_hits_kernel,
             dim=self.height * self.width,
-            inputs=[flattened_buffer, self.max_distance, self.width],
+            inputs=[flattened_buffer, self.max_distance],
             device=self.device,
         )
 

@@ -308,16 +308,11 @@ def ray_intersect_cone(
     Returns:
         The distance along the ray to the closest intersection point, or -1.0 if there is no intersection.
     """
-    # transform ray to local frame
     world_to_geom = wp.transform_inverse(geom_to_world)
     ray_origin_local = wp.transform_point(world_to_geom, ray_origin)
     ray_direction_local = wp.transform_vector(world_to_geom, ray_direction)
 
     t_hit = -1.0
-
-    # Cone geometry: tip at (0, 0, half_height), base at (0, 0, -half_height)
-    # Cone equation in parametric form: x^2 + y^2 = (radius * (half_height - z) / (2 * half_height))^2
-    # Simplified: x^2 + y^2 = k^2 * (half_height - z)^2 where k = radius / (2 * half_height)
 
     if wp.abs(half_height) < MINVAL:
         return t_hit
@@ -325,15 +320,8 @@ def ray_intersect_cone(
     k = radius / (2.0 * half_height)  # cone slope coefficient
     k_sq = k * k
 
-    # Ray: P(t) = ray_origin_local + t * ray_direction_local
-    # Substitute into cone equation: (ox + t*dx)^2 + (oy + t*dy)^2 = k^2 * (half_height - (oz + t*dz))^2
-
     ox, oy, oz = ray_origin_local[0], ray_origin_local[1], ray_origin_local[2]
     dx, dy, dz = ray_direction_local[0], ray_direction_local[1], ray_direction_local[2]
-
-    # Expand to quadratic equation: at^2 + bt + c = 0
-    # Left side: (ox + t*dx)^2 + (oy + t*dy)^2 = ox^2 + oy^2 + 2t(ox*dx + oy*dy) + t^2(dx^2 + dy^2)
-    # Right side: k^2 * (half_height - oz - t*dz)^2 = k^2 * ((half_height - oz)^2 - 2t(half_height - oz)*dz + t^2*dz^2)
 
     h_minus_oz = half_height - oz
 
@@ -341,7 +329,6 @@ def ray_intersect_cone(
     b = 2.0 * (ox * dx + oy * dy) + 2.0 * k_sq * h_minus_oz * dz
     c = ox * ox + oy * oy - k_sq * h_minus_oz * h_minus_oz
 
-    # Solve quadratic equation
     discriminant = b * b - 4.0 * a * c
 
     if discriminant < 0.0:
@@ -349,49 +336,49 @@ def ray_intersect_cone(
 
     sqrt_discriminant = wp.sqrt(discriminant)
 
-    # Two potential intersection points
+    # Handle two cases for quadratic equation:
+    # Case 1: When a ≈ 0, equation becomes linear (bt + c = 0)
+    # Geometrically, this means the ray is parallel to the cone's surface,
+    # intersecting at most once rather than entering and exiting
     if wp.abs(a) < MINVAL:
-        # Linear case (ray parallel to cone surface)
         if wp.abs(b) > MINVAL:
             t = -c / b
             z = oz + t * dz
             if t >= 0.0 and z >= -half_height and z <= half_height:
                 t_hit = t
+    # Case 2: When a != 0, solve quadratic equation
+    # This is the typical case where ray may enter and exit the cone at different points
     else:
-        # Quadratic case
         inv_2a = 1.0 / (2.0 * a)
         t1 = (-b - sqrt_discriminant) * inv_2a
         t2 = (-b + sqrt_discriminant) * inv_2a
 
-        # Check both intersection points
         valid_t = -1.0
 
-        # Check t1
         if t1 >= 0.0:
             z1 = oz + t1 * dz
             if z1 >= -half_height and z1 <= half_height:
                 if valid_t < 0.0 or t1 < valid_t:
                     valid_t = t1
 
-        # Check t2
         if t2 >= 0.0:
             z2 = oz + t2 * dz
             if z2 >= -half_height and z2 <= half_height:
                 if valid_t < 0.0 or t2 < valid_t:
                     valid_t = t2
 
-        # Check intersection with base disk (z = -half_height)
-        if wp.abs(dz) > MINVAL:
-            t_base = (-half_height - oz) / dz
-            if t_base >= 0.0:
-                x_base = ox + t_base * dx
-                y_base = oy + t_base * dy
-                r_base_sq = x_base * x_base + y_base * y_base
-                if r_base_sq <= radius * radius:
-                    if valid_t < 0.0 or t_base < valid_t:
-                        valid_t = t_base
-
         t_hit = valid_t
+
+    # Check intersection with base disk (z = -half_height) for both cases
+    if wp.abs(dz) > MINVAL:
+        t_base = (-half_height - oz) / dz
+        if t_base >= 0.0:
+            x_base = ox + t_base * dx
+            y_base = oy + t_base * dy
+            r_base_sq = x_base * x_base + y_base * y_base
+            if r_base_sq <= radius * radius:
+                if t_hit < 0.0 or t_base < t_hit:
+                    t_hit = t_base
 
     return t_hit
 
@@ -422,37 +409,27 @@ def ray_intersect_mesh(
     ray_origin_local = wp.transform_point(world_to_geom, ray_origin)
     ray_direction_local = wp.transform_vector(world_to_geom, ray_direction)
 
-    # Apply scale transformation - transform ray to mesh's local scaled coordinate system
     scaled_origin = wp.cw_div(ray_origin_local, size)
     scaled_direction = wp.cw_div(ray_direction_local, size)
 
-    # Normalize direction for the mesh query
     scaled_dir_length = wp.length(scaled_direction)
     if scaled_dir_length < MINVAL:
         return t_hit
 
     normalized_direction = scaled_direction / scaled_dir_length
 
-    # Warp mesh query variables
-    t = float(0.0)  # hit distance along ray
-    u = float(0.0)  # hit face barycentric u
-    v = float(0.0)  # hit face barycentric v
-    sign = float(0.0)  # hit face sign
-    normal = wp.vec3()  # hit face normal
-    face_index = int(0)  # hit face index
+    t = float(0.0)
+    u = float(0.0)
+    v = float(0.0)
+    sign = float(0.0)
+    normal = wp.vec3()
+    face_index = int(0)
 
-    # Perform raycast against the mesh
-    max_t = 1.0e6  # Maximum ray distance
+    max_t = 1.0e6
     if wp.mesh_query_ray(mesh_id, scaled_origin, normalized_direction, max_t, t, u, v, sign, normal, face_index):
         if t >= 0.0:
-            # Transform hit distance back to world space
-            # t is distance along normalized_direction in scaled space
-            # Convert to distance along original ray_direction_local
             original_dir_length = wp.length(ray_direction_local)
             if original_dir_length > MINVAL:
-                # Convert from distance along normalized scaled direction to distance along original ray
-                # t is distance along normalized_direction
-                # We want distance along ray_direction_local
                 t_hit = t / scaled_dir_length * original_dir_length
 
     return t_hit
@@ -610,8 +587,6 @@ def ray_for_pixel(
     Returns:
         Tuple of (ray_origin, ray_direction) in world space
     """
-    # Convert pixel coordinates to normalized device coordinates [-1, 1]
-    # Note: (0,0) is typically top-left, but we want bottom-left for standard camera
     width = resolution[0]
     height = resolution[1]
 
@@ -620,30 +595,19 @@ def ray_for_pixel(
     ndc_y = 1.0 - (2.0 * float(pixel_y) + 1.0) / height  # Flip Y axis
 
     # Apply field of view and aspect ratio
-    # FOV is typically the vertical field of view
-    # fov_scale = wp.tan(camera_fov * 0.5)
-
-    # Camera space coordinates
     cam_x = ndc_x * fov_scale * camera_aspect_ratio
     cam_y = ndc_y * fov_scale
     cam_z = -1.0  # Forward is negative Z in camera space
 
-    # Ray direction in camera space (not normalized yet)
     ray_dir_camera = wp.vec3(cam_x, cam_y, cam_z)
 
-    # Transform ray direction from camera space to world space
-    # Camera space to world space: combine right, up, and forward vectors
+    # Transform ray direction from camera to world space
     ray_direction_world = (
         camera_right * ray_dir_camera[0] + camera_up * ray_dir_camera[1] + camera_direction * ray_dir_camera[2]
     )
-
-    # Normalize the ray direction
     ray_direction_world = wp.normalize(ray_direction_world)
 
-    # Ray origin is the camera position
-    ray_origin_world = camera_position
-
-    return ray_origin_world, ray_direction_world
+    return camera_position, ray_direction_world
 
 
 @wp.kernel
