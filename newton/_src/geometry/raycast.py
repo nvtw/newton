@@ -692,4 +692,4 @@ def raycast_sensor_kernel(
     t = ray_intersect_geom(geom_to_world, geom_size[shape_idx], geomtype, ray_origin, ray_direction, mesh_id)
 
     if t >= 0.0:
-        wp.atomic_min(hit_distances, pixel_x, pixel_y, t)
+        wp.atomic_min(hit_distances, pixel_y, pixel_x, t)
