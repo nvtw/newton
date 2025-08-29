@@ -317,6 +317,9 @@ def ray_intersect_cone(
     if wp.abs(half_height) < MINVAL:
         return t_hit
 
+    if radius <= 0.0:
+        return t_hit
+
     k = radius / (2.0 * half_height)  # cone slope coefficient
     k_sq = k * k
 
@@ -397,7 +400,7 @@ def ray_intersect_mesh(
         mesh_id: The Warp mesh ID for raycasting.
 
     Returns:
-        The distance along the ray to the closest intersection point, or -1.0 if there is no intersection.
+        The Euclidean distance along the ray to the closest intersection point, or -1.0 if there is no intersection.
     """
     t_hit = -1.0
 
@@ -409,8 +412,14 @@ def ray_intersect_mesh(
     ray_origin_local = wp.transform_point(world_to_geom, ray_origin)
     ray_direction_local = wp.transform_vector(world_to_geom, ray_direction)
 
-    scaled_origin = wp.cw_div(ray_origin_local, size)
-    scaled_direction = wp.cw_div(ray_direction_local, size)
+    # Apply scale transformation with per-component clamping to MINVAL
+    safe_size = wp.vec3(
+        size[0] if wp.abs(size[0]) > MINVAL else wp.sign(size[0]) * MINVAL,
+        size[1] if wp.abs(size[1]) > MINVAL else wp.sign(size[1]) * MINVAL,
+        size[2] if wp.abs(size[2]) > MINVAL else wp.sign(size[2]) * MINVAL,
+    )
+    scaled_origin = wp.cw_div(ray_origin_local, safe_size)
+    scaled_direction = wp.cw_div(ray_direction_local, safe_size)
 
     scaled_dir_length = wp.length(scaled_direction)
     if scaled_dir_length < MINVAL:
@@ -430,7 +439,9 @@ def ray_intersect_mesh(
         if t >= 0.0:
             original_dir_length = wp.length(ray_direction_local)
             if original_dir_length > MINVAL:
-                t_hit = t / scaled_dir_length * original_dir_length
+                # Convert from distance along normalized scaled direction
+                # to Euclidean distance along original ray
+                t_hit = t * (original_dir_length / scaled_dir_length)
 
     return t_hit
 
