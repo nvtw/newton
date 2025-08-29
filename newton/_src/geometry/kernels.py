@@ -1247,7 +1247,7 @@ def handle_contact_pairs(
             face_u = float(0.0)
             face_v = float(0.0)
             sign = float(0.0)
-            max_dist = (thickness + rigid_contact_margin) / min_scale_b
+            max_dist = (thickness + rigid_contact_margin + radius_a_eff) / min_scale_b
             res = wp.mesh_query_point_sign_normal(
                 mesh_b, wp.cw_div(query_b_local, geo_scale_b), max_dist, sign, face_index, face_u, face_v
             )
