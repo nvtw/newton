@@ -396,6 +396,7 @@ def test_ray_intersect_mesh(test: TestRaycast, device: str):
     # Case 4: Ray hits quad at angle
     ray_origin = wp.vec3(-2.0, 0.0, 1.0)
     ray_direction = wp.vec3(1.0, 0.0, -0.5)  # Angled ray
+    ray_direction = wp.normalize(ray_direction)
     wp.launch(
         kernel_test_mesh,
         dim=1,

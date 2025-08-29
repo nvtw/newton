@@ -312,78 +312,65 @@ def ray_intersect_cone(
     ray_origin_local = wp.transform_point(world_to_geom, ray_origin)
     ray_direction_local = wp.transform_vector(world_to_geom, ray_direction)
 
-    t_hit = -1.0
-
     if wp.abs(half_height) < MINVAL:
-        return t_hit
+        return -1.0
 
     if radius <= 0.0:
-        return t_hit
+        return -1.0
 
-    k = radius / (2.0 * half_height)  # cone slope coefficient
-    k_sq = k * k
+    # pa = tip (cone extremes), pb = base center, ra = 0 (tip radius), rb = radius (base radius)
+    ro = ray_origin_local
+    rd = ray_direction_local
+    # Check conventions.rst, section "Newton Collision Primitives"
+    pa = wp.vec3(0.0, 0.0, half_height)  # tip at +half_height
+    pb = wp.vec3(0.0, 0.0, -half_height)  # base center at -half_height
+    ra = 0.0  # radius at tip
+    rb = radius  # radius at base
 
-    ox, oy, oz = ray_origin_local[0], ray_origin_local[1], ray_origin_local[2]
-    dx, dy, dz = ray_direction_local[0], ray_direction_local[1], ray_direction_local[2]
+    ba = pb - pa
+    oa = ro - pa
+    ob = ro - pb
+    m0 = wp.dot(ba, ba)
+    m1 = wp.dot(oa, ba)
+    m2 = wp.dot(rd, ba)
+    m3 = wp.dot(rd, oa)
+    m5 = wp.dot(oa, oa)
+    m9 = wp.dot(ob, ba)
 
-    h_minus_oz = half_height - oz
+    # caps
+    if m1 < 0.0:
+        temp = oa * m2 - rd * m1
+        if wp.dot(temp, temp) < (ra * ra * m2 * m2):
+            if wp.abs(m2) > MINVAL:
+                return -m1 / m2
+    elif m9 > 0.0:
+        if wp.abs(m2) > MINVAL:
+            t = -m9 / m2
+            temp_ob = ob + rd * t
+            if wp.dot(temp_ob, temp_ob) < (rb * rb):
+                return t
 
-    a = dx * dx + dy * dy - k_sq * dz * dz
-    b = 2.0 * (ox * dx + oy * dy) + 2.0 * k_sq * h_minus_oz * dz
-    c = ox * ox + oy * oy - k_sq * h_minus_oz * h_minus_oz
+    # body
+    rr = ra - rb
+    hy = m0 + rr * rr
+    k2 = m0 * m0 - m2 * m2 * hy
+    k1 = m0 * m0 * m3 - m1 * m2 * hy + m0 * ra * (rr * m2 * 1.0)
+    k0 = m0 * m0 * m5 - m1 * m1 * hy + m0 * ra * (rr * m1 * 2.0 - m0 * ra)
+    h = k1 * k1 - k2 * k0
 
-    discriminant = b * b - 4.0 * a * c
+    if h < 0.0:
+        return -1.0  # no intersection
 
-    if discriminant < 0.0:
-        return t_hit
+    if wp.abs(k2) < MINVAL:
+        return -1.0  # degenerate case
 
-    sqrt_discriminant = wp.sqrt(discriminant)
+    t = (-k1 - wp.sqrt(h)) / k2
+    y = m1 + t * m2
 
-    # Handle two cases for quadratic equation:
-    # Case 1: When a ≈ 0, equation becomes linear (bt + c = 0)
-    # Geometrically, this means the ray is parallel to the cone's surface,
-    # intersecting at most once rather than entering and exiting
-    if wp.abs(a) < MINVAL:
-        if wp.abs(b) > MINVAL:
-            t = -c / b
-            z = oz + t * dz
-            if t >= 0.0 and z >= -half_height and z <= half_height:
-                t_hit = t
-    # Case 2: When a != 0, solve quadratic equation
-    # This is the typical case where ray may enter and exit the cone at different points
-    else:
-        inv_2a = 1.0 / (2.0 * a)
-        t1 = (-b - sqrt_discriminant) * inv_2a
-        t2 = (-b + sqrt_discriminant) * inv_2a
+    if y < 0.0 or y > m0:
+        return -1.0  # no intersection
 
-        valid_t = -1.0
-
-        if t1 >= 0.0:
-            z1 = oz + t1 * dz
-            if z1 >= -half_height and z1 <= half_height:
-                if valid_t < 0.0 or t1 < valid_t:
-                    valid_t = t1
-
-        if t2 >= 0.0:
-            z2 = oz + t2 * dz
-            if z2 >= -half_height and z2 <= half_height:
-                if valid_t < 0.0 or t2 < valid_t:
-                    valid_t = t2
-
-        t_hit = valid_t
-
-    # Check intersection with base disk (z = -half_height) for both cases
-    if wp.abs(dz) > MINVAL:
-        t_base = (-half_height - oz) / dz
-        if t_base >= 0.0:
-            x_base = ox + t_base * dx
-            y_base = oy + t_base * dy
-            r_base_sq = x_base * x_base + y_base * y_base
-            if r_base_sq <= radius * radius:
-                if t_hit < 0.0 or t_base < t_hit:
-                    t_hit = t_base
-
-    return t_hit
+    return t
 
 
 @wp.func
@@ -400,7 +387,7 @@ def ray_intersect_mesh(
         mesh_id: The Warp mesh ID for raycasting.
 
     Returns:
-        The Euclidean distance along the ray to the closest intersection point, or -1.0 if there is no intersection.
+        The parameter t relative to ray direction magnitude to the closest intersection point, or -1.0 if there is no intersection.
     """
     t_hit = -1.0
 
@@ -440,8 +427,8 @@ def ray_intersect_mesh(
             original_dir_length = wp.length(ray_direction_local)
             if original_dir_length > MINVAL:
                 # Convert from distance along normalized scaled direction
-                # to Euclidean distance along original ray
-                t_hit = t * (original_dir_length / scaled_dir_length)
+                # to parameter t relative to original ray direction magnitude
+                t_hit = t / scaled_dir_length
 
     return t_hit
 
