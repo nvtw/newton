@@ -23,7 +23,7 @@
 ###########################################################################
 
 
-from typing import Any, Tuple
+from typing import Any
 
 import warp as wp
 
@@ -52,7 +52,7 @@ def closest_segment_point(a: wp.vec3, b: wp.vec3, pt: wp.vec3) -> wp.vec3:
 
 
 @wp.func
-def closest_segment_point_and_dist(a: wp.vec3, b: wp.vec3, pt: wp.vec3) -> Tuple[wp.vec3, float]:
+def closest_segment_point_and_dist(a: wp.vec3, b: wp.vec3, pt: wp.vec3) -> tuple[wp.vec3, float]:
     """Returns closest point on the line segment and the distance squared."""
     closest = closest_segment_point(a, b, pt)
     dist = wp.dot((pt - closest), (pt - closest))
@@ -60,7 +60,7 @@ def closest_segment_point_and_dist(a: wp.vec3, b: wp.vec3, pt: wp.vec3) -> Tuple
 
 
 @wp.func
-def closest_segment_to_segment_points(a0: wp.vec3, a1: wp.vec3, b0: wp.vec3, b1: wp.vec3) -> Tuple[wp.vec3, wp.vec3]:
+def closest_segment_to_segment_points(a0: wp.vec3, a1: wp.vec3, b0: wp.vec3, b1: wp.vec3) -> tuple[wp.vec3, wp.vec3]:
     """Returns closest points between two line segments."""
 
     dir_a, len_a = normalize_with_norm(a1 - a0)
@@ -113,7 +113,7 @@ class mat83f(wp.types.matrix(shape=(8, 3), dtype=wp.float32)):
 @wp.func
 def plane_sphere(
     plane_normal: wp.vec3, plane_pos: wp.vec3, sphere_pos: wp.vec3, sphere_radius: float
-) -> Tuple[float, wp.vec3]:
+) -> tuple[float, wp.vec3]:
     # TODO(team): docstring
     dist = wp.dot(sphere_pos - plane_pos, plane_normal) - sphere_radius
     pos = sphere_pos - plane_normal * (sphere_radius + 0.5 * dist)
@@ -127,7 +127,7 @@ def sphere_sphere(
     radius1: float,
     pos2: wp.vec3,
     radius2: float,
-) -> Tuple[float, wp.vec3, wp.vec3]:
+) -> tuple[float, wp.vec3, wp.vec3]:
     """Sphere-sphere collision calculation.
 
     Args:
@@ -162,7 +162,7 @@ def sphere_capsule(
     capsule_axis: wp.vec3,
     capsule_radius: float,
     capsule_half_length: float,
-) -> Tuple[float, wp.vec3, wp.vec3]:
+) -> tuple[float, wp.vec3, wp.vec3]:
     """Core contact geometry calculation for sphere-capsule collision.
 
     Args:
@@ -201,7 +201,7 @@ def capsule_capsule(
     cap2_axis: wp.vec3,
     cap2_radius: float,
     cap2_half_length: float,
-) -> Tuple[float, wp.vec3, wp.vec3]:
+) -> tuple[float, wp.vec3, wp.vec3]:
     """Core contact geometry calculation for capsule-capsule collision.
 
     Args:
@@ -248,7 +248,7 @@ def plane_capsule(
     capsule_axis: wp.vec3,
     capsule_radius: float,
     capsule_half_length: float,
-) -> Tuple[wp.vec2, mat23f, wp.mat33]:
+) -> tuple[wp.vec2, mat23f, wp.mat33]:
     """Core contact geometry calculation for plane-capsule collision.
 
     Args:
@@ -302,7 +302,7 @@ def plane_ellipsoid(
     ellipsoid_pos: wp.vec3,
     ellipsoid_rot: wp.mat33,
     ellipsoid_size: wp.vec3,
-) -> Tuple[float, wp.vec3, wp.vec3]:
+) -> tuple[float, wp.vec3, wp.vec3]:
     """Core contact geometry calculation for plane-ellipsoid collision.
 
     Args:
@@ -334,7 +334,7 @@ def plane_box(
     box_pos: wp.vec3,
     box_rot: wp.mat33,
     box_size: wp.vec3,
-) -> Tuple[wp.vec4, mat43f, wp.vec3]:
+) -> tuple[wp.vec4, mat43f, wp.vec3]:
     """Core contact geometry calculation for plane-box collision.
 
     Args:
@@ -394,7 +394,7 @@ def sphere_cylinder(
     cylinder_axis: wp.vec3,
     cylinder_radius: float,
     cylinder_half_height: float,
-) -> Tuple[float, wp.vec3, wp.vec3]:
+) -> tuple[float, wp.vec3, wp.vec3]:
     """Core contact geometry calculation for sphere-cylinder collision.
 
     Args:
@@ -467,7 +467,7 @@ def plane_cylinder(
     cylinder_axis: wp.vec3,
     cylinder_radius: float,
     cylinder_half_height: float,
-) -> Tuple[wp.vec4, mat43f, wp.vec3]:
+) -> tuple[wp.vec4, mat43f, wp.vec3]:
     """Core contact geometry calculation for plane-cylinder collision.
 
     Args:
@@ -598,7 +598,7 @@ def box_box(
     box2_pos: wp.vec3,
     box2_rot: wp.mat33,
     box2_size: wp.vec3,
-) -> Tuple[vec8f, mat83f, mat83f]:
+) -> tuple[vec8f, mat83f, mat83f]:
     """Core contact geometry calculation for box-box collision.
 
     Args:
@@ -1052,7 +1052,7 @@ def sphere_box(
     box_pos: wp.vec3,
     box_rot: wp.mat33,
     box_size: wp.vec3,
-) -> Tuple[float, wp.vec3, wp.vec3]:
+) -> tuple[float, wp.vec3, wp.vec3]:
     """Core contact geometry calculation for sphere-box collision.
 
     Args:
@@ -1111,7 +1111,7 @@ def capsule_box(
     box_pos: wp.vec3,
     box_rot: wp.mat33,
     box_size: wp.vec3,
-) -> Tuple[wp.vec2, mat23f, mat23f]:
+) -> tuple[wp.vec2, mat23f, mat23f]:
     """Core contact geometry calculation for capsule-box collision.
 
     Args:
