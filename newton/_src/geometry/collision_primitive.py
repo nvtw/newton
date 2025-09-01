@@ -175,9 +175,9 @@ def sphere_capsule(
 
     Returns:
       Tuple containing:
-        contact_dist: Vector of contact distances
-        contact_pos: Matrix of contact positions (one per row)
-        contact_normals: Matrix of contact normal vectors (one per row)
+        dist: Distance between surfaces (negative if overlapping)
+        pos: Contact position (midpoint between closest surface points)
+        normal: Contact normal vector (from sphere toward capsule)
     """
 
     # Calculate capsule segment
@@ -216,9 +216,9 @@ def capsule_capsule(
 
     Returns:
       Tuple containing:
-        contact_dist: Vector of contact distances
-        contact_pos: Matrix of contact positions (one per row)
-        contact_normals: Matrix of contact normal vectors (one per row)
+        dist: Distance between surfaces (negative if overlapping)
+        pos: Contact position (midpoint between closest surface points)
+        normal: Contact normal vector (from first capsule toward second)
     """
 
     # TODO(team): parallel axes case
@@ -314,9 +314,9 @@ def plane_ellipsoid(
 
     Returns:
       Tuple containing:
-        contact_dist: Vector of contact distances
-        contact_pos: Matrix of contact positions (one per row)
-        contact_normals: Matrix of contact normal vectors (one per row)
+        dist: Distance from ellipsoid surface to plane (negative if penetrating)
+        pos: Contact position on ellipsoid surface
+        normal: Contact normal vector (plane normal direction)
     """
     sphere_support = -wp.normalize(wp.cw_mul(wp.transpose(ellipsoid_rot) @ plane_normal, ellipsoid_size))
     pos = ellipsoid_pos + ellipsoid_rot @ wp.cw_mul(sphere_support, ellipsoid_size)
@@ -358,15 +358,15 @@ def plane_box(
     pos = mat43f()
 
     # test all corners, pick bottom 4
-    ncontact = int(0)
+    ncontact = wp.int32(0)
     for i in range(8):
         # get corner in local coordinates
-        corner.x = wp.where(i & 1, box_size.x, -box_size.x)
-        corner.y = wp.where(i & 2, box_size.y, -box_size.y)
-        corner.z = wp.where(i & 4, box_size.z, -box_size.z)
+        corner.x = wp.where((i & 1) != 0, box_size.x, -box_size.x)
+        corner.y = wp.where((i & 2) != 0, box_size.y, -box_size.y)
+        corner.z = wp.where((i & 4) != 0, box_size.z, -box_size.z)
 
         # get corner in global coordinates relative to box center
-        corner = box_rot * corner
+        corner = box_rot @ corner
 
         # compute distance to plane, skip if too far or pointing up
         ldist = wp.dot(plane_normal, corner)
@@ -407,9 +407,9 @@ def sphere_cylinder(
 
     Returns:
       Tuple containing:
-        contact_dist: Vector of contact distances
-        contact_pos: Matrix of contact positions (one per row)
-        contact_normals: Matrix of contact normal vectors (one per row)
+        dist: Distance between surfaces (negative if overlapping)
+        pos: Contact position (midpoint between closest surface points)
+        normal: Contact normal vector (from sphere toward cylinder)
     """
     vec = sphere_pos - cylinder_pos
     x = wp.dot(vec, cylinder_axis)
@@ -840,11 +840,11 @@ def box_box(
         edge2 = (axis_code - 12) % 3
 
         # Set up non-contacting edges ax1, ax2 for box2 and pax1, pax2 for box 1
-        ax1 = wp.int(1 - (edge2 & 1))
-        ax2 = wp.int(2 - (edge2 & 2))
+        ax1 = wp.int32(1 - (edge2 & 1))
+        ax2 = wp.int32(2 - (edge2 & 2))
 
-        pax1 = wp.int(1 - (edge1 & 1))
-        pax2 = wp.int(2 - (edge1 & 2))
+        pax1 = wp.int32(1 - (edge1 & 1))
+        pax2 = wp.int32(2 - (edge1 & 2))
 
         if rot21abs[edge1, ax1] < rot21abs[edge1, ax2]:
             ax1, ax2 = ax2, ax1
@@ -1064,9 +1064,9 @@ def sphere_box(
 
     Returns:
       Tuple containing:
-        contact_dist: Vector of contact distances
-        contact_pos: contact positions
-        contact_normal: contact normal vectors
+        dist: Distance between surfaces (negative if overlapping)
+        pos: Contact position (midpoint between closest surface points)
+        normal: Contact normal vector (from sphere toward box)
     """
 
     center = wp.transpose(box_rot) @ (sphere_pos - box_pos)
@@ -1333,14 +1333,14 @@ def capsule_box(
 
             if axis[ax] * axis[ax] > 0.5:  # second point along the edge of the box
                 m = 2.0 * safe_div(box_size[ax], wp.abs(halfaxis[ax]))
-                secondpos = min(1.0 - wp.float32(mul) * bestsegmentpos, m)
+                secondpos = wp.min(1.0 - wp.float32(mul) * bestsegmentpos, m)
             else:  # second point along a face of the box
                 # check for overshoot again
-                m = 2.0 * min(
+                m = 2.0 * wp.min(
                     safe_div(box_size[ax1], wp.abs(halfaxis[ax1])),
                     safe_div(box_size[ax2], wp.abs(halfaxis[ax2])),
                 )
-                secondpos = -min(1.0 + wp.float32(mul) * bestsegmentpos, m)
+                secondpos = -wp.min(1.0 + wp.float32(mul) * bestsegmentpos, m)
             secondpos *= wp.float32(mul)
 
     elif cltype >= 0 and cltype // 3 == 1:  # we are on box's edge
@@ -1380,7 +1380,7 @@ def capsule_box(
             # and also find the farthest point along the capsule that is above the box
 
             e1 = 2.0 * safe_div(box_size[ax2], wp.abs(halfaxis[ax2]))
-            secondpos = min(e1, secondpos)
+            secondpos = wp.min(e1, secondpos)
 
             if ((axisdir & (1 << ax)) != 0) == ((c1 & (1 << ax2)) != 0):
                 e2 = 1.0 - bestboxpos
@@ -1389,7 +1389,7 @@ def capsule_box(
 
             e1 = box_size[ax] * safe_div(e2, wp.abs(halfaxis[ax]))
 
-            secondpos = min(e1, secondpos)
+            secondpos = wp.min(e1, secondpos)
             secondpos *= wp.float32(mul)
 
     elif cltype < 0:

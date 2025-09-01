@@ -515,12 +515,12 @@ class TestCollisionPrimitives(unittest.TestCase):
     def test_sphere_cylinder(self):
         """Test sphere-cylinder collision."""
         test_cases = [
-            # Sphere hitting cylinder side
-            ([2.0, 0.0, 0.0], 0.5, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 1.0, 1.0),
-            # Sphere hitting cylinder cap
-            ([0.0, 0.0, 2.0], 0.5, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 1.0, 1.0),
-            # Sphere hitting cylinder corner
-            ([2.0, 0.0, 1.5], 0.5, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 1.0, 1.0),
+            # Sphere penetrating cylinder side
+            ([1.4, 0.0, 0.0], 0.5, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 1.0, 1.0),
+            # Sphere penetrating cylinder cap
+            ([0.0, 0.0, 1.4], 0.5, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 1.0, 1.0),
+            # Sphere penetrating cylinder corner
+            ([1.4, 0.0, 1.2], 0.5, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 1.0, 1.0),
         ]
 
         sphere_positions = wp.array([wp.vec3(tc[0][0], tc[0][1], tc[0][2]) for tc in test_cases], dtype=wp.vec3)
@@ -552,9 +552,11 @@ class TestCollisionPrimitives(unittest.TestCase):
 
         distances_np = distances.numpy()
 
-        # All test cases should result in contact (positive or small negative distance)
+        # All test cases should result in penetration (dist <= 0)
         for i in range(len(test_cases)):
-            self.assertLess(distances_np[i], 1.0, msg=f"Distance too large for test case {i}")
+            self.assertLessEqual(
+                distances_np[i], 0.0, msg=f"Expected penetration for test case {i}, got {distances_np[i]}"
+            )
 
     def test_sphere_box(self):
         """Test sphere-box collision."""
@@ -608,7 +610,7 @@ class TestCollisionPrimitives(unittest.TestCase):
             # Capsule above plane
             ([0.0, 0.0, 1.0], [0.0, 0.0, 0.0], [0.0, 0.0, 2.0], [1.0, 0.0, 0.0], 0.5, 1.0),
             # Capsule intersecting plane
-            ([0.0, 0.0, 1.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0], 0.5, 1.0),
+            ([0.0, 0.0, 1.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.3], [1.0, 0.0, 0.0], 0.5, 1.0),
         ]
 
         plane_normals = wp.array([wp.vec3(tc[0][0], tc[0][1], tc[0][2]) for tc in test_cases], dtype=wp.vec3)
@@ -640,13 +642,14 @@ class TestCollisionPrimitives(unittest.TestCase):
 
         distances_np = distances.numpy()
 
-        # Basic sanity checks
-        for i in range(len(test_cases)):
-            # Should have two contact points
-            dist1, dist2 = distances_np[i][0], distances_np[i][1]
-            # Both distances should be finite
-            self.assertNotEqual(dist1, float("inf"))
-            self.assertNotEqual(dist2, float("inf"))
+        # Plane-capsule always returns 2 finite distances: positive=separation, negative=penetration
+        # Case 0: Above plane should have positive distances (separation)
+        self.assertGreater(distances_np[0][0], 0.0, msg="Capsule above plane should have positive distance")
+        self.assertGreater(distances_np[0][1], 0.0, msg="Capsule above plane should have positive distance")
+
+        # Case 1: Intersecting plane should have negative distances (penetration)
+        self.assertLess(distances_np[1][0], 0.0, msg="Intersecting capsule should penetrate plane")
+        self.assertLess(distances_np[1][1], 0.0, msg="Intersecting capsule should penetrate plane")
 
     def test_plane_box(self):
         """Test plane-box collision."""
@@ -850,14 +853,15 @@ class TestCollisionPrimitives(unittest.TestCase):
 
         distances_np = distances.numpy()
 
-        # Basic sanity checks
-        for i in range(len(test_cases)):
-            dist1, dist2 = distances_np[i][0], distances_np[i][1]
-            # At least one distance should be valid (not inf)
-            self.assertTrue(
-                dist1 != float("inf") or dist2 != float("inf"),
-                msg=f"Should have at least one valid contact for test case {i}",
-            )
+        # Capsule-box behavior: intersecting has penetration, separated has positive distances
+        # Case 0 (intersecting): Should have at least one penetrating contact (negative distance)
+        has_penetration = any(d < 0.0 for d in distances_np[0] if d != float("inf"))
+        self.assertTrue(has_penetration, msg="Intersecting capsule-box should have penetrating contact")
+
+        # Case 1 (separated): All finite distances should be positive (separation)
+        finite_distances = [d for d in distances_np[1] if d != float("inf")]
+        for dist in finite_distances:
+            self.assertGreater(dist, 0.0, msg=f"Separated capsule-box should have positive distance, got {dist}")
 
 
 if __name__ == "__main__":
