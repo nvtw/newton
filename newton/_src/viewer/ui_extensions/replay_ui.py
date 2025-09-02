@@ -31,7 +31,7 @@ class ReplayUI:
     Usage:
         viewer = newton.viewer.ViewerGL()
         replay_ui = ReplayUI()
-        viewer.add_custom_ui(replay_ui.render, "ReplayControls")
+        viewer.register_ui_callback(replay_ui.render, "free")
     """
 
     def __init__(self):
@@ -61,15 +61,17 @@ class ReplayUI:
         # Position the replay controls window
         window_width = 400
         window_height = 350
-        imgui.set_next_window_position(io.display_size[0] - window_width - 10, io.display_size[1] - window_height - 10)
-        imgui.set_next_window_size(window_width, window_height)
+        imgui.set_next_window_pos(
+            imgui.ImVec2(io.display_size[0] - window_width - 10, io.display_size[1] - window_height - 10)
+        )
+        imgui.set_next_window_size(imgui.ImVec2(window_width, window_height))
 
-        flags = imgui.WINDOW_NO_RESIZE
+        flags = imgui.WindowFlags_.no_resize.value
 
         if imgui.begin("Replay Controls", flags=flags):
             # Show status message if any
             if self.status_message:
-                imgui.push_style_color(imgui.COLOR_TEXT, *self.status_color)
+                imgui.push_style_color(imgui.Col_.text, imgui.ImVec4(*self.status_color))
                 imgui.text(self.status_message)
                 imgui.pop_style_color()
                 imgui.separator()

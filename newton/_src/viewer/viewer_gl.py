@@ -91,9 +91,6 @@ class ViewerGL(ViewerBase):
             "error_message": "",
         }
 
-        # Custom UI extension system
-        self._custom_ui_renderers = []
-
         self.renderer.register_key_press(self.on_key_press)
         self.renderer.register_key_release(self.on_key_release)
         self.renderer.register_mouse_press(self.on_mouse_press)
@@ -125,7 +122,31 @@ class ViewerGL(ViewerBase):
         # UI visibility toggle
         self.show_ui = True
 
+        # UI callback system - organized by position
+        # positions: "side", "stats", "free"
+        self._ui_callbacks = {"side": [], "stats": [], "free": []}
+
         self.set_model(None)
+
+    def register_ui_callback(self, callback, position="side"):
+        """
+        Register a UI callback to be rendered during the UI phase.
+
+        Args:
+            callback: Function to be called during UI rendering
+            position: Position where the UI should be rendered. One of:
+                     "side" - Side callback (default)
+                     "stats" - Stats/metrics area
+                     "free" - Free-floating UI elements
+        """
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+
+        if position not in self._ui_callbacks:
+            valid_positions = list(self._ui_callbacks.keys())
+            raise ValueError(f"Invalid position '{position}'. Must be one of: {valid_positions}")
+
+        self._ui_callbacks[position].append(callback)
 
     # helper function to create a low resolution sphere mesh for point rendering
     def _create_point_mesh(self):
@@ -164,6 +185,11 @@ class ViewerGL(ViewerBase):
 
         fb_w, fb_h = self.renderer.window.get_framebuffer_size()
         self.camera = Camera(width=fb_w, height=fb_h, up_axis=model.up_axis if model else "Z")
+
+    def set_camera(self, pos: wp.vec3, pitch: float, yaw: float):
+        self.camera.pos = pos
+        self.camera.pitch = pitch
+        self.camera.yaw = yaw
 
     def log_mesh(
         self,
@@ -797,8 +823,9 @@ class ViewerGL(ViewerBase):
         # Render top-right stats overlay
         self._render_stats_overlay()
 
-        # Render custom UI extensions
-        self._render_custom_ui()
+        # allow users to create custom windows
+        for callback in self._ui_callbacks["free"]:
+            callback(self.ui.imgui)
 
     def _render_left_panel(self):
         """
@@ -826,10 +853,7 @@ class ViewerGL(ViewerBase):
             # Model Information section
             if self.model is not None:
                 imgui.set_next_item_open(True, imgui.Cond_.appearing)
-                _open = imgui.collapsing_header("Model Information", flags=header_flags)
-                if isinstance(_open, tuple):
-                    _open = _open[0]
-                if _open:
+                if imgui.collapsing_header("Model Information", flags=header_flags):
                     imgui.separator()
                     imgui.text(f"Environments: {self.model.num_envs}")
                     axis_names = ["X", "Y", "Z"]
@@ -843,10 +867,7 @@ class ViewerGL(ViewerBase):
 
                 # Visualization Controls section
                 imgui.set_next_item_open(True, imgui.Cond_.appearing)
-                _open = imgui.collapsing_header("Visualization", flags=header_flags)
-                if isinstance(_open, tuple):
-                    _open = _open[0]
-                if _open:
+                if imgui.collapsing_header("Visualization", flags=header_flags):
                     imgui.separator()
 
                     # Joint visualization
@@ -873,12 +894,15 @@ class ViewerGL(ViewerBase):
                     show_triangles = self.show_triangles
                     changed, self.show_triangles = imgui.checkbox("Show Cloth", show_triangles)
 
+            imgui.set_next_item_open(True, imgui.Cond_.appearing)
+            if imgui.collapsing_header("Example Options"):
+                # Render UI callbacks for side panel
+                for callback in self._ui_callbacks["side"]:
+                    callback(self.ui.imgui)
+
             # Rendering Options section
             imgui.set_next_item_open(True, imgui.Cond_.appearing)
-            _open = imgui.collapsing_header("Rendering Options")
-            if isinstance(_open, tuple):
-                _open = _open[0]
-            if _open:
+            if imgui.collapsing_header("Rendering Options"):
                 imgui.separator()
 
                 # VSync
@@ -904,10 +928,7 @@ class ViewerGL(ViewerBase):
 
             # Wind Effects section
             imgui.set_next_item_open(False, imgui.Cond_.once)
-            _open = imgui.collapsing_header("Wind")
-            if isinstance(_open, tuple):
-                _open = _open[0]
-            if _open:
+            if imgui.collapsing_header("Wind"):
                 imgui.separator()
 
                 # Wind amplitude slider
@@ -933,10 +954,7 @@ class ViewerGL(ViewerBase):
 
             # Camera Information section
             imgui.set_next_item_open(True, imgui.Cond_.appearing)
-            _open = imgui.collapsing_header("Camera")
-            if isinstance(_open, tuple):
-                _open = _open[0]
-            if _open:
+            if imgui.collapsing_header("Camera"):
                 imgui.separator()
 
                 pos = self.camera.pos
@@ -1029,6 +1047,10 @@ class ViewerGL(ViewerBase):
             imgui.separator()
             imgui.text(f"Unique Objects: {len(self.objects)}")
 
+        # Custom stats
+        for callback in self._ui_callbacks["stats"]:
+            callback(self.ui.imgui)
+
         imgui.end()
 
         # Restore bg color if we pushed it
@@ -1044,10 +1066,7 @@ class ViewerGL(ViewerBase):
         # Selection Panel section
         header_flags = 0
         imgui.set_next_item_open(False, imgui.Cond_.appearing)  # Default to closed
-        _open = imgui.collapsing_header("Selection API", flags=header_flags)
-        if isinstance(_open, tuple):
-            _open = _open[0]
-        if _open:
+        if imgui.collapsing_header("Selection API", flags=header_flags):
             imgui.separator()
 
             # Check if we have state data available
@@ -1404,55 +1423,3 @@ class ViewerGL(ViewerBase):
             else:
                 # For non-numeric values, just show as text
                 imgui.text(f"{name}: {val}")
-
-    def add_custom_ui(self, render_func, name=None):
-        """
-        Add a custom UI render function to the viewer.
-
-        Args:
-            render_func: A callable that takes the viewer instance as an argument
-                        and renders ImGui UI elements. The function should return
-                        None and handle all ImGui calls internally.
-            name: Optional name for the UI extension (for debugging)
-        """
-        if not callable(render_func):
-            raise ValueError("render_func must be callable")
-
-        ui_renderer = {
-            "func": render_func,
-            "name": name or f"CustomUI_{len(self._custom_ui_renderers)}",
-        }
-        self._custom_ui_renderers.append(ui_renderer)
-
-    def remove_custom_ui(self, render_func_or_name):
-        """
-        Remove a custom UI renderer.
-
-        Args:
-            render_func_or_name: Either the render function that was added,
-                                or the name string that was provided when adding.
-        """
-        to_remove = []
-        for i, renderer in enumerate(self._custom_ui_renderers):
-            if (callable(render_func_or_name) and renderer["func"] == render_func_or_name) or (
-                isinstance(render_func_or_name, str) and renderer["name"] == render_func_or_name
-            ):
-                to_remove.append(i)
-
-        # Remove in reverse order to maintain indices
-        for i in reversed(to_remove):
-            del self._custom_ui_renderers[i]
-
-    def _render_custom_ui(self):
-        """
-        Render all custom UI extensions.
-        """
-        if not self.ui.is_available:
-            return
-
-        for renderer in self._custom_ui_renderers:
-            try:
-                renderer["func"](self)
-            except Exception as e:
-                print(f"Error rendering custom UI '{renderer['name']}': {e}")
-                # Continue to render other UI components
