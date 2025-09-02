@@ -843,16 +843,16 @@ def count_contact_points(
     shape_b = shape_ab[1]
 
     if shape_b == -1:
-        actual_shape_a = shape_a
-        actual_type_a = shape_type[shape_a]
+        actual_shape_b = shape_a
+        actual_type_b = shape_type[shape_a]
         # ground plane
-        actual_type_b = GeoType.PLANE
-        actual_shape_b = -1
+        actual_type_a = GeoType.PLANE
+        actual_shape_a = -1
     else:
         type_a = shape_type[shape_a]
         type_b = shape_type[shape_b]
         # unique ordering of shape pairs
-        if geo_new_to_old_map(type_a) < geo_new_to_old_map(type_b):
+        if (type_a) < (type_b):
             actual_shape_a = shape_a
             actual_shape_b = shape_b
             actual_type_a = type_a
@@ -866,17 +866,35 @@ def count_contact_points(
     # determine how many contact points need to be evaluated
     num_contacts = 0
 
+
+    # if (actual_type_a == GeoType.CAPSULE and actual_type_b == GeoType.PLANE) or \
+    #     (actual_type_a == GeoType.BOX and actual_type_b == GeoType.PLANE)or \
+    #         (actual_type_a == GeoType.BOX and actual_type_b == GeoType.CAPSULE):
+    #     tmp = actual_type_a
+    #     actual_type_a = actual_type_b
+    #     actual_type_b = tmp
+    #     tmp = actual_shape_a
+    #     actual_shape_a = actual_shape_b
+    #     actual_shape_b = tmp
+
+
     # PLANE against all other types (ordered by GeoType index)
     if actual_type_a == GeoType.PLANE and actual_type_b == GeoType.PLANE:
         return  # no plane-plane contacts
 
     # SPHERE against all other types (always 1 contact)
-    elif actual_type_a == GeoType.SPHERE:
+    elif actual_type_a == GeoType.SPHERE or actual_type_b == GeoType.SPHERE:
         num_contacts = 1
 
+    elif actual_type_a == GeoType.CAPSULE and actual_type_b == GeoType.BOX:   
+        num_contacts = 8
+
+    elif actual_type_a == GeoType.CYLINDER and actual_type_b == GeoType.BOX:   
+        num_contacts = 8
+
     # CAPSULE against all other types
-    elif actual_type_a == GeoType.CAPSULE and actual_type_b == GeoType.PLANE:
-        if shape_scale[actual_shape_b][0] == 0.0 and shape_scale[actual_shape_b][1] == 0.0:
+    elif actual_type_a == GeoType.PLANE and actual_type_b == GeoType.CAPSULE:
+        if shape_scale[actual_shape_a][0] == 0.0 and shape_scale[actual_shape_a][1] == 0.0:
             num_contacts = 2  # vertex-based collision for infinite plane
         else:
             num_contacts = 2 + 4  # vertex-based collision + plane edges
@@ -885,7 +903,7 @@ def count_contact_points(
         mesh_b = wp.mesh_get(shape_source_ptr[actual_shape_b])
         num_contacts_b = mesh_b.points.shape[0]
         num_contacts = num_contacts_a + num_contacts_b
-    elif actual_type_a == GeoType.CAPSULE:
+    elif actual_type_a == GeoType.CAPSULE or actual_type_b == GeoType.CAPSULE:
         num_contacts = 2
 
     # BOX against all other types
@@ -896,13 +914,25 @@ def count_contact_points(
         mesh_b = wp.mesh_get(shape_source_ptr[actual_shape_b])
         num_contacts_b = mesh_b.points.shape[0]
         num_contacts = num_contacts_a + num_contacts_b
-    elif actual_type_a == GeoType.BOX and actual_type_b == GeoType.PLANE:
-        if shape_scale[actual_shape_b][0] == 0.0 and shape_scale[actual_shape_b][1] == 0.0:
+    elif actual_type_a == GeoType.PLANE and actual_type_b == GeoType.BOX:
+        if shape_scale[actual_shape_a][0] == 0.0 and shape_scale[actual_shape_a][1] == 0.0:
             num_contacts = 8  # vertex-based collision
         else:
             num_contacts = 8 + 4  # vertex-based collision + plane edges
-    elif actual_type_a == GeoType.BOX:
+    
+
+    elif actual_type_a == GeoType.BOX or actual_type_b == GeoType.BOX:
         num_contacts = 8
+
+    elif (actual_type_a == GeoType.PLANE or actual_shape_a == GeoType.ELLIPSOID) and actual_type_b == GeoType.MESH:
+        mesh_b = wp.mesh_get(shape_source_ptr[actual_shape_b])
+        num_contacts_a = mesh_b.points.shape[0]
+        num_contacts = num_contacts_a
+
+    elif (actual_type_a == GeoType.MESH) and actual_type_b == GeoType.CONE:
+        mesh_a = wp.mesh_get(shape_source_ptr[actual_shape_a])
+        num_contacts_a = mesh_a.points.shape[0]
+        num_contacts = num_contacts_a
 
     # MESH against all other types
     elif actual_type_a == GeoType.MESH:
@@ -914,6 +944,8 @@ def count_contact_points(
             num_contacts = num_contacts_a + num_contacts_b
         else:
             num_contacts = num_contacts_a
+
+    
 
     wp.atomic_add(contact_count, 0, num_contacts)
 
