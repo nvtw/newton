@@ -35,7 +35,7 @@ from .collision_primitive import (
 )
 from .flags import ParticleFlags, ShapeFlags
 from .gjk import build_ccd_generic
-from .inertia import compute_shape_inertia, transform_inertia
+from .inertia import compute_shape_inertia, compute_sphere_inertia, transform_inertia
 from .types import (
     MESH_MAXHULLVERT,
     SDF,
@@ -60,6 +60,7 @@ __all__ = [
     "capsule_capsule",
     "compute_shape_inertia",
     "compute_shape_radius",
+    "compute_sphere_inertia",
     "mat23f",
     "mat43f",
     "mat83f",
