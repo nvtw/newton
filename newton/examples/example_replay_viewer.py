@@ -40,7 +40,7 @@ class Example:
         self.viewer = viewer
 
         # Add replay UI extension to the viewer
-        self.replay_ui = newton.viewer.ui_extensions.ReplayUI()
+        self.replay_ui = newton.viewer.ui_extensions.ReplayUI(viewer)
         self.viewer.register_ui_callback(self.replay_ui.render, "free")
 
         # No simulation - this example is purely for replay
