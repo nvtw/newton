@@ -465,11 +465,11 @@ class ViewerBase:
         if hasattr(self, "show_collision_geometry"):
             has_collision = bool(shape_flags & int(newton.ShapeFlags.COLLIDE_SHAPES))
             is_visible = bool(shape_flags & int(newton.ShapeFlags.VISIBLE))
-            
+
             # Get the body this shape belongs to
             shape_body = self.model.shape_body.numpy()
             body_id = shape_body[shape_index]
-            
+
             # Always show environmental shapes (body_id = -1) regardless of toggle
             if body_id < 0:
                 return is_visible
@@ -494,24 +494,17 @@ class ViewerBase:
         if not hasattr(self, "model") or self.model is None:
             return True
 
-        # Get the body this shape belongs to
         shape_body = self.model.shape_body.numpy()
         shape_flags = self.model.shape_flags.numpy()
         current_body = shape_body[shape_index]
 
-        # Check if this body has any visual shapes (shapes without collision)
-        has_visual_shapes = False
-        for i in range(len(shape_body)):
-            if (
-                shape_body[i] == current_body
-                and (shape_flags[i] & int(newton.ShapeFlags.VISIBLE)) != 0
-                and (shape_flags[i] & int(newton.ShapeFlags.COLLIDE_SHAPES)) == 0
-            ):
-                has_visual_shapes = True
-                break
-
-        # If no visual shapes exist for this body, show collision shapes as fallback
-        return not has_visual_shapes
+        # Check if this body has any visual-only shapes
+        return not any(
+            shape_body[i] == current_body
+            and (shape_flags[i] & int(newton.ShapeFlags.VISIBLE))
+            and not (shape_flags[i] & int(newton.ShapeFlags.COLLIDE_SHAPES))
+            for i in range(len(shape_body))
+        )
 
     def _populate_geometry(
         self,

@@ -93,8 +93,6 @@ class ViewerGL(ViewerBase):
 
         # Geometry visualization toggle
         self.show_collision_geometry = False
-        self._geometry_update_pending = False
-        self._original_shape_instances = None  # Store original shapes for restoration
 
         self.renderer.register_key_press(self.on_key_press)
         self.renderer.register_key_release(self.on_key_release)
@@ -463,11 +461,6 @@ class ViewerGL(ViewerBase):
 
             self.ui.end_frame()
             self.ui.render()
-
-        # Process deferred geometry updates after UI is complete
-        if self._geometry_update_pending:
-            self._geometry_update_pending = False
-            self._update_geometry_visibility()
 
         self.renderer.present()
 
@@ -906,7 +899,7 @@ class ViewerGL(ViewerBase):
                         "Show Collision Geometry", show_collision_geometry
                     )
                     if changed:
-                        self._geometry_update_pending = True
+                        self._update_geometry_visibility()
 
             imgui.set_next_item_open(True, imgui.Cond_.appearing)
             if imgui.collapsing_header("Example Options"):
@@ -1443,41 +1436,14 @@ class ViewerGL(ViewerBase):
         if not hasattr(self, "model") or self.model is None:
             return
 
-        if self.show_collision_geometry:
-            # Entering collision geometry mode - store original state
-            if self._original_shape_instances is None:
-                self._original_shape_instances = self._shape_instances.copy()
+        # Clear all shape instances and repopulate with new visibility rules
+        # This is simpler and more reliable than trying to selectively update
+        self._shape_instances.clear()
 
-            # Only clear robot/articulation shapes, not environmental objects
-            self._clear_robot_shapes()
-
-        else:
-            # Exiting collision geometry mode - restore original state if available
-            if self._original_shape_instances is not None:
-                # Clear current robot shapes
-                self._clear_robot_shapes()
-                
-                # Restore original shape instances
-                self._shape_instances = self._original_shape_instances.copy()
-                self._original_shape_instances = None
-
-                # Re-populate the renderer objects from the restored instances
-                if hasattr(self, '_last_state') and self._last_state is not None:
-                    # Update transforms and render the restored instances
-                    for shapes in self._shape_instances.values():
-                        shapes.update(self._last_state)
-                        self.log_instances(
-                            shapes.name,
-                            shapes.mesh,
-                            shapes.world_xforms,
-                            shapes.scales,
-                            shapes.colors,
-                            shapes.materials,
-                        )
-                return
-            else:
-                # No original state to restore, repopulate normally
-                self._clear_robot_shapes()
+        # Remove rendered objects for shapes
+        objects_to_remove = [name for name in self.objects.keys() if name.startswith("/model/shapes/")]
+        for name in objects_to_remove:
+            del self.objects[name]
 
         # Repopulate shapes with new visibility rules
         self._populate_shapes()
@@ -1486,26 +1452,5 @@ class ViewerGL(ViewerBase):
         self.model_changed = True
 
         # Update transforms with current body positions if we have a cached state
-        if hasattr(self, '_last_state') and self._last_state is not None:
-            # Call the parent log_state to update transforms
+        if hasattr(self, "_last_state") and self._last_state is not None:
             super().log_state(self._last_state)
-
-    def _clear_robot_shapes(self):
-        """Clear only robot/articulation shapes, preserving environmental objects like floors."""
-        if not hasattr(self, "model") or self.model is None:
-            return
-
-        # Remove rendered objects for robot shapes only
-        robot_objects_to_remove = []
-        for name in self.objects.keys():
-            if name.startswith("/model/shapes/"):
-                robot_objects_to_remove.append(name)
-
-        for name in robot_objects_to_remove:
-            del self.objects[name]
-
-        # Clear all shape instances - we'll rebuild everything from scratch
-        # This avoids issues with trying to add to already-finalized instances
-        self._shape_instances.clear()
-
-        # Note: We don't clear _geometry_cache as it contains mesh definitions that can be reused
