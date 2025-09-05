@@ -60,6 +60,8 @@ def apply_picking_force_kernel(
     body_f: wp.array(dtype=wp.spatial_vector),
     pick_body_arr: wp.array(dtype=int),
     pick_state: wp.array(dtype=float),
+    body_com: wp.array(dtype=wp.vec3),
+    body_mass: wp.array(dtype=float),
 ):
     pick_body = pick_body_arr[0]
     if pick_body < 0:
@@ -69,14 +71,19 @@ def apply_picking_force_kernel(
     pick_target_world = wp.vec3(pick_state[3], pick_state[4], pick_state[5])
     pick_stiffness = pick_state[6]
     pick_damping = pick_state[7]
-    angular_damping = 1.0  # Damping coefficient for angular velocity
+
+    # Get body properties for stability
+    mass = body_mass[pick_body]
+
+    # Adaptive angular damping based on mass (simple approximation)
+    angular_damping = wp.sqrt(mass) * 0.5  # Scale factor for stability
 
     # world space attachment point
     X_wb = body_q[pick_body]
     pick_pos_world = wp.transform_point(X_wb, pick_pos_local)
 
-    # center of mass
-    com = wp.transform_get_translation(X_wb)
+    # center of mass (corrected calculation)
+    com = wp.transform_point(X_wb, body_com[pick_body])
 
     # get velocity of attachment point
     omega = wp.spatial_top(body_qd[pick_body])
@@ -86,8 +93,20 @@ def apply_picking_force_kernel(
     # compute spring force
     f = pick_stiffness * (pick_target_world - pick_pos_world) - pick_damping * vel_world
 
-    # compute torque with angular damping
+    # Force limiting to prevent instability
+    max_force = mass * 1000.0
+    force_magnitude = wp.length(f)
+    if force_magnitude > max_force:
+        f = f * (max_force / force_magnitude)
+
+    # compute torque with adaptive angular damping
     t = wp.cross(pick_pos_world - com, f) - angular_damping * omega
+
+    # Torque limiting for stability
+    max_torque = mass * 0.0  # Simple torque limit based on mass
+    torque_magnitude = wp.length(t)
+    if torque_magnitude > max_torque:
+        t = t * (max_torque / torque_magnitude)
 
     # apply force and torque
     wp.atomic_add(body_f, pick_body, wp.spatial_vector(t, f))
@@ -106,8 +125,13 @@ def update_pick_target_kernel(
     # compute distance from ray origin to current target
     dist = wp.length(current_target - p)
 
-    # project new target onto sphere with same radius
-    new_target = p + d * dist
+    # Instead of rigid sphere constraint, use a more natural approach
+    # Project new target with some smoothing
+    raw_new_target = p + d * dist
+
+    # Apply smoothing to reduce jitter (simple linear interpolation)
+    smoothing_factor = 0.3  # Adjust this value: 0 = no smoothing, 1 = no movement
+    new_target = current_target * smoothing_factor + raw_new_target * (1.0 - smoothing_factor)
 
     pick_state[3] = new_target[0]
     pick_state[4] = new_target[1]

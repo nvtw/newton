@@ -23,7 +23,7 @@ from .kernels import apply_picking_force_kernel, compute_pick_state_kernel, upda
 
 
 class Picking:
-    def __init__(self, model, pick_stiffness=1000.0, pick_damping=100.0):
+    def __init__(self, model, pick_stiffness=500.0, pick_damping=50.0):
         self.model = model
         self.pick_stiffness = pick_stiffness
         self.pick_damping = pick_damping
@@ -75,6 +75,8 @@ class Picking:
                 state.body_f,
                 self.pick_body,
                 self.pick_state,
+                self.model.body_com,
+                self.model.body_mass,
             ],
             device=self.model.device,
         )

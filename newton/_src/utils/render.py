@@ -65,6 +65,7 @@ def apply_picking_force_kernel(
     body_f: wp.array(dtype=wp.spatial_vector),
     pick_body_arr: wp.array(dtype=int),
     pick_state: wp.array(dtype=float),
+    body_mass: wp.array(dtype=float),
 ):
     pick_body = pick_body_arr[0]
     if pick_body < 0:
@@ -74,7 +75,12 @@ def apply_picking_force_kernel(
     pick_target_world = wp.vec3(pick_state[3], pick_state[4], pick_state[5])
     pick_stiffness = pick_state[6]
     pick_damping = pick_state[7]
-    angular_damping = 1.0  # Damping coefficient for angular velocity
+
+    # Get body properties for stability
+    mass = body_mass[pick_body]
+
+    # Adaptive angular damping based on mass (simple approximation)
+    angular_damping = wp.sqrt(mass) * 0.5  # Scale factor for stability
 
     # world space attachment point
     X_wb = body_q[pick_body]
@@ -91,8 +97,20 @@ def apply_picking_force_kernel(
     # compute spring force
     f = pick_stiffness * (pick_target_world - pick_pos_world) - pick_damping * vel_world
 
-    # compute torque with angular damping
+    # Force limiting to prevent instability
+    max_force = mass * 1000.0
+    force_magnitude = wp.length(f)
+    if force_magnitude > max_force:
+        f = f * (max_force / force_magnitude)
+
+    # compute torque with adaptive angular damping
     t = wp.cross(pick_pos_world - com, f) - angular_damping * omega
+
+    # Torque limiting for stability
+    max_torque = mass * 0.0  # Simple torque limit based on mass
+    torque_magnitude = wp.length(t)
+    if torque_magnitude > max_torque:
+        t = t * (max_torque / torque_magnitude)
 
     # apply force and torque
     wp.atomic_add(body_f, pick_body, wp.spatial_vector(t, f))
@@ -174,8 +192,8 @@ def CreateSimRenderer(renderer):
             up_axis: AxisType | None = None,
             show_joints: bool = False,
             show_particles: bool = True,
-            pick_stiffness: float = 20000.0,
-            pick_damping: float = 2000.0,
+            pick_stiffness: float = 1000.0,
+            pick_damping: float = 100.0,
             **render_kwargs,
         ):
             """
@@ -599,6 +617,7 @@ def CreateSimRenderer(renderer):
                     state.body_f,
                     self.pick_body,
                     self.pick_state,
+                    self.model.body_mass,
                 ],
                 device=self.model.device,
             )
