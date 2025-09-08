@@ -31,7 +31,7 @@ def test_plane_sphere_kernel(
     contact_positions: wp.array(dtype=wp.vec3),
 ):
     tid = wp.tid()
-    dist, pos = geometry.plane_sphere(
+    dist, pos = geometry.collide_plane_sphere(
         plane_normals[tid], plane_positions[tid], sphere_positions[tid], sphere_radii[tid]
     )
     distances[tid] = dist
@@ -49,7 +49,7 @@ def test_sphere_sphere_kernel(
     contact_normals: wp.array(dtype=wp.vec3),
 ):
     tid = wp.tid()
-    dist, pos, normal = geometry.sphere_sphere(pos1[tid], radius1[tid], pos2[tid], radius2[tid])
+    dist, pos, normal = geometry.collide_sphere_sphere(pos1[tid], radius1[tid], pos2[tid], radius2[tid])
     distances[tid] = dist
     contact_positions[tid] = pos
     contact_normals[tid] = normal
@@ -68,7 +68,7 @@ def test_sphere_capsule_kernel(
     contact_normals: wp.array(dtype=wp.vec3),
 ):
     tid = wp.tid()
-    dist, pos, normal = geometry.sphere_capsule(
+    dist, pos, normal = geometry.collide_sphere_capsule(
         sphere_positions[tid],
         sphere_radii[tid],
         capsule_positions[tid],
@@ -96,7 +96,7 @@ def test_capsule_capsule_kernel(
     contact_normals: wp.array(dtype=wp.vec3),
 ):
     tid = wp.tid()
-    dist, pos, normal = geometry.capsule_capsule(
+    dist, pos, normal = geometry.collide_capsule_capsule(
         cap1_positions[tid],
         cap1_axes[tid],
         cap1_radii[tid],
@@ -123,7 +123,7 @@ def test_plane_ellipsoid_kernel(
     contact_normals: wp.array(dtype=wp.vec3),
 ):
     tid = wp.tid()
-    dist, pos, normal = geometry.plane_ellipsoid(
+    dist, pos, normal = geometry.collide_plane_ellipsoid(
         plane_normals[tid],
         plane_positions[tid],
         ellipsoid_positions[tid],
@@ -148,7 +148,7 @@ def test_sphere_cylinder_kernel(
     contact_normals: wp.array(dtype=wp.vec3),
 ):
     tid = wp.tid()
-    dist, pos, normal = geometry.sphere_cylinder(
+    dist, pos, normal = geometry.collide_sphere_cylinder(
         sphere_positions[tid],
         sphere_radii[tid],
         cylinder_positions[tid],
@@ -173,7 +173,7 @@ def test_sphere_box_kernel(
     contact_normals: wp.array(dtype=wp.vec3),
 ):
     tid = wp.tid()
-    dist, pos, normal = geometry.sphere_box(
+    dist, pos, normal = geometry.collide_sphere_box(
         sphere_positions[tid], sphere_radii[tid], box_positions[tid], box_rotations[tid], box_sizes[tid]
     )
     distances[tid] = dist
@@ -194,7 +194,7 @@ def test_plane_capsule_kernel(
     contact_frames: wp.array(dtype=wp.mat33),
 ):
     tid = wp.tid()
-    dist, pos, frame = geometry.plane_capsule(
+    dist, pos, frame = geometry.collide_plane_capsule(
         plane_normals[tid],
         plane_positions[tid],
         capsule_positions[tid],
@@ -219,7 +219,7 @@ def test_plane_box_kernel(
     contact_normals: wp.array(dtype=wp.vec3),
 ):
     tid = wp.tid()
-    dist, pos, normal = geometry.plane_box(
+    dist, pos, normal = geometry.collide_plane_box(
         plane_normals[tid], plane_positions[tid], box_positions[tid], box_rotations[tid], box_sizes[tid]
     )
     distances[tid] = dist
@@ -240,7 +240,7 @@ def test_plane_cylinder_kernel(
     contact_normals: wp.array(dtype=wp.vec3),
 ):
     tid = wp.tid()
-    dist, pos, normal = geometry.plane_cylinder(
+    dist, pos, normal = geometry.collide_plane_cylinder(
         plane_normals[tid],
         plane_positions[tid],
         cylinder_centers[tid],
@@ -266,7 +266,7 @@ def test_box_box_kernel(
     contact_normals: wp.array(dtype=geometry.mat83f),
 ):
     tid = wp.tid()
-    dist, pos, normals = geometry.box_box(
+    dist, pos, normals = geometry.collide_box_box(
         box1_positions[tid],
         box1_rotations[tid],
         box1_sizes[tid],
@@ -293,7 +293,7 @@ def test_capsule_box_kernel(
     contact_normals: wp.array(dtype=geometry.mat23f),
 ):
     tid = wp.tid()
-    dist, pos, normals = geometry.capsule_box(
+    dist, pos, normals = geometry.collide_capsule_box(
         capsule_positions[tid],
         capsule_axes[tid],
         capsule_radii[tid],

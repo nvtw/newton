@@ -97,7 +97,7 @@ def closest_segment_to_segment_points(a0: wp.vec3, a1: wp.vec3, b0: wp.vec3, b1:
 
 # core
 @wp.func
-def plane_sphere(
+def collide_plane_sphere(
     plane_normal: wp.vec3, plane_pos: wp.vec3, sphere_pos: wp.vec3, sphere_radius: float
 ) -> tuple[float, wp.vec3]:
     # TODO(team): docstring
@@ -107,7 +107,7 @@ def plane_sphere(
 
 
 @wp.func
-def sphere_sphere(
+def collide_sphere_sphere(
     # In:
     pos1: wp.vec3,
     radius1: float,
@@ -140,7 +140,7 @@ def sphere_sphere(
 
 
 @wp.func
-def sphere_capsule(
+def collide_sphere_capsule(
     # In:
     sphere_pos: wp.vec3,
     sphere_radius: float,
@@ -173,11 +173,11 @@ def sphere_capsule(
     pt = closest_segment_point(capsule_pos - segment, capsule_pos + segment, sphere_pos)
 
     # Use sphere-sphere collision between sphere and closest point
-    return sphere_sphere(sphere_pos, sphere_radius, pt, capsule_radius)
+    return collide_sphere_sphere(sphere_pos, sphere_radius, pt, capsule_radius)
 
 
 @wp.func
-def capsule_capsule(
+def collide_capsule_capsule(
     # In:
     cap1_pos: wp.vec3,
     cap1_axis: wp.vec3,
@@ -222,11 +222,11 @@ def capsule_capsule(
     )
 
     # Use sphere-sphere collision between closest points
-    return sphere_sphere(pt1, cap1_radius, pt2, cap2_radius)
+    return collide_sphere_sphere(pt1, cap1_radius, pt2, cap2_radius)
 
 
 @wp.func
-def plane_capsule(
+def collide_plane_capsule(
     # In:
     plane_normal: wp.vec3,
     plane_pos: wp.vec3,
@@ -269,10 +269,10 @@ def plane_capsule(
     segment = axis * capsule_half_length
 
     # First contact (positive end of capsule)
-    dist1, pos1 = plane_sphere(n, plane_pos, capsule_pos + segment, capsule_radius)
+    dist1, pos1 = collide_plane_sphere(n, plane_pos, capsule_pos + segment, capsule_radius)
 
     # Second contact (negative end of capsule)
-    dist2, pos2 = plane_sphere(n, plane_pos, capsule_pos - segment, capsule_radius)
+    dist2, pos2 = collide_plane_sphere(n, plane_pos, capsule_pos - segment, capsule_radius)
 
     dist = wp.vec2(dist1, dist2)
     pos = mat23f(pos1[0], pos1[1], pos1[2], pos2[0], pos2[1], pos2[2])
@@ -281,7 +281,7 @@ def plane_capsule(
 
 
 @wp.func
-def plane_ellipsoid(
+def collide_plane_ellipsoid(
     # In:
     plane_normal: wp.vec3,
     plane_pos: wp.vec3,
@@ -313,7 +313,7 @@ def plane_ellipsoid(
 
 
 @wp.func
-def plane_box(
+def collide_plane_box(
     # In:
     plane_normal: wp.vec3,
     plane_pos: wp.vec3,
@@ -372,7 +372,7 @@ def plane_box(
 
 
 @wp.func
-def sphere_cylinder(
+def collide_sphere_cylinder(
     # In:
     sphere_pos: wp.vec3,
     sphere_radius: float,
@@ -419,7 +419,7 @@ def sphere_cylinder(
     # side collision
     if collide_side:
         pos_target = cylinder_pos + a_proj
-        return sphere_sphere(sphere_pos, sphere_radius, pos_target, cylinder_radius)
+        return collide_sphere_sphere(sphere_pos, sphere_radius, pos_target, cylinder_radius)
     # cap collision
     elif collide_cap:
         if x > 0.0:
@@ -431,7 +431,7 @@ def sphere_cylinder(
             pos_cap = cylinder_pos - cylinder_axis * cylinder_half_height
             plane_normal = -cylinder_axis
 
-        dist, pos = plane_sphere(plane_normal, pos_cap, sphere_pos, sphere_radius)
+        dist, pos = collide_plane_sphere(plane_normal, pos_cap, sphere_pos, sphere_radius)
         return dist, pos, -plane_normal  # flip normal after position calculation
     # corner collision
     else:
@@ -441,11 +441,11 @@ def sphere_cylinder(
         cap_offset = cylinder_axis * (wp.sign(x) * cylinder_half_height)
         pos_corner = cylinder_pos + cap_offset + p_proj
 
-        return sphere_sphere(sphere_pos, sphere_radius, pos_corner, 0.0)
+        return collide_sphere_sphere(sphere_pos, sphere_radius, pos_corner, 0.0)
 
 
 @wp.func
-def plane_cylinder(
+def collide_plane_cylinder(
     # In:
     plane_normal: wp.vec3,
     plane_pos: wp.vec3,
@@ -576,7 +576,7 @@ def _compute_rotmore(face_idx: int) -> wp.mat33:
 
 
 @wp.func
-def box_box(
+def collide_box_box(
     # In:
     box1_pos: wp.vec3,
     box1_rot: wp.mat33,
@@ -1031,7 +1031,7 @@ def box_box(
 
 
 @wp.func
-def sphere_box(
+def collide_sphere_box(
     # In:
     sphere_pos: wp.vec3,
     sphere_radius: float,
@@ -1088,7 +1088,7 @@ def sphere_box(
 
 
 @wp.func
-def capsule_box(
+def collide_capsule_box(
     # In:
     capsule_pos: wp.vec3,
     capsule_axis: wp.vec3,
@@ -1408,14 +1408,14 @@ def capsule_box(
     s1_pos_g = box_rot @ s1_pos_l + box_pos
 
     # collide with sphere using core function
-    dist1, pos1, normal1 = sphere_box(s1_pos_g, capsule_radius, box_pos, box_rot, box_size)
+    dist1, pos1, normal1 = collide_sphere_box(s1_pos_g, capsule_radius, box_pos, box_rot, box_size)
 
     if secondpos > -3:  # secondpos was modified
         s2_pos_l = pos + halfaxis * (secondpos + bestsegmentpos)
         s2_pos_g = box_rot @ s2_pos_l + box_pos
 
         # collide with sphere using core function
-        dist2, pos2, normal2 = sphere_box(s2_pos_g, capsule_radius, box_pos, box_rot, box_size)
+        dist2, pos2, normal2 = collide_sphere_box(s2_pos_g, capsule_radius, box_pos, box_rot, box_size)
     else:
         dist2 = wp.inf
         pos2 = wp.vec3()
