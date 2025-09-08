@@ -78,9 +78,6 @@ def apply_picking_force_kernel(
     # Compute critical damping to avoid oscillations: c_critical = 2 * sqrt(k * m)
     pick_damping = 2.0 * wp.sqrt(pick_stiffness * mass)
 
-    # Adaptive angular damping based on mass (simple approximation)
-    angular_damping = 0.0  # wp.sqrt(mass) * 0.5  # Scale factor for stability
-
     # world space attachment point
     X_wb = body_q[pick_body]
     pick_pos_world = wp.transform_point(X_wb, pick_pos_local)
@@ -89,9 +86,7 @@ def apply_picking_force_kernel(
     com = wp.transform_point(X_wb, body_com[pick_body])
 
     # get velocity of attachment point
-    omega = wp.spatial_top(body_qd[pick_body])
     vel_com = wp.spatial_bottom(body_qd[pick_body])
-    vel_world = vel_com + wp.cross(omega, pick_pos_world - com)
 
     # compute spring force with critical damping (only damp linear velocity, not rotational)
     f = pick_stiffness * (pick_target_world - pick_pos_world) - pick_damping * vel_com
