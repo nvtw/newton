@@ -92,6 +92,7 @@ def closest_segment_to_segment_points(a0: wp.vec3, a1: wp.vec3, b0: wp.vec3, b1:
     new_b, d2 = closest_segment_point_and_dist(b0, b1, best_a)
     if d1 < d2:
         return new_a, best_b
+
     return best_a, new_b
 
 
