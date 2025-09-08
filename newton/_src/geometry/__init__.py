@@ -13,15 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from ..core.types import mat23f, mat43f, mat83f, vec8f
 from .broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from .broad_phase_sap import BroadPhaseSAP
 from .collision_primitive import (
     box_box,
     capsule_box,
     capsule_capsule,
-    mat23f,
-    mat43f,
-    mat83f,
     plane_box,
     plane_capsule,
     plane_cylinder,
@@ -31,7 +29,6 @@ from .collision_primitive import (
     sphere_capsule,
     sphere_cylinder,
     sphere_sphere,
-    vec8f,
 )
 from .flags import ParticleFlags, ShapeFlags
 from .gjk import build_ccd_generic

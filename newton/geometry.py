@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ._src.geometry import BroadPhaseAllPairs, BroadPhaseExplicit, BroadPhaseSAP
-from ._src.geometry.collision_primitive import (
+from ._src.geometry import (
+    BroadPhaseAllPairs,
+    BroadPhaseExplicit,
+    BroadPhaseSAP,
     box_box,
     capsule_box,
     capsule_capsule,

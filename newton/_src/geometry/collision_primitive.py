@@ -27,6 +27,8 @@ from typing import Any
 
 import warp as wp
 
+from ..core.types import mat23f, mat43f, mat83f, vec8f
+
 MINVAL = 1e-15
 
 
@@ -91,22 +93,6 @@ def closest_segment_to_segment_points(a0: wp.vec3, a1: wp.vec3, b0: wp.vec3, b1:
     if d1 < d2:
         return new_a, best_b
     return best_a, new_b
-
-
-class vec8f(wp.types.vector(length=8, dtype=wp.float32)):
-    pass
-
-
-class mat23f(wp.types.matrix(shape=(2, 3), dtype=wp.float32)):
-    pass
-
-
-class mat43f(wp.types.matrix(shape=(4, 3), dtype=wp.float32)):
-    pass
-
-
-class mat83f(wp.types.matrix(shape=(8, 3), dtype=wp.float32)):
-    pass
 
 
 # core

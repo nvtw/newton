@@ -19,6 +19,10 @@
 from ._src.core import (
     Axis,
     AxisType,
+    mat23f,
+    mat43f,
+    mat83f,
+    vec8f,
 )
 from ._version import __version__
 
@@ -26,6 +30,10 @@ __all__ = [
     "Axis",
     "AxisType",
     "__version__",
+    "mat23f",
+    "mat43f",
+    "mat83f",
+    "vec8f",
 ]
 
 # ==================================================================================
