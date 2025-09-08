@@ -74,13 +74,16 @@ def apply_picking_force_kernel(
     pick_pos_local = wp.vec3(pick_state[0], pick_state[1], pick_state[2])
     pick_target_world = wp.vec3(pick_state[3], pick_state[4], pick_state[5])
     pick_stiffness = pick_state[6]
-    pick_damping = pick_state[7]
+    # pick_damping from pick_state[7] is ignored - we compute critical damping
 
     # Get body properties for stability
     mass = body_mass[pick_body]
 
+    # Compute critical damping to avoid oscillations: c_critical = 2 * sqrt(k * m)
+    pick_damping = 2.0 * wp.sqrt(pick_stiffness * mass)
+
     # Adaptive angular damping based on mass (simple approximation)
-    angular_damping = wp.sqrt(mass) * 0.5  # Scale factor for stability
+    angular_damping = 0.0  # wp.sqrt(mass) * 0.5  # Scale factor for stability
 
     # world space attachment point
     X_wb = body_q[pick_body]
@@ -94,26 +97,43 @@ def apply_picking_force_kernel(
     vel_com = wp.spatial_bottom(body_qd[pick_body])
     vel_world = vel_com + wp.cross(omega, pick_pos_world - com)
 
-    # compute spring force
-    f = pick_stiffness * (pick_target_world - pick_pos_world) - pick_damping * vel_world
+    # compute spring force with critical damping (only damp linear velocity, not rotational)
+    f = pick_stiffness * (pick_target_world - pick_pos_world) - pick_damping * vel_com
 
     # Force limiting to prevent instability
-    max_force = mass * 1000.0
+    max_force = mass * 10000.0
     force_magnitude = wp.length(f)
     if force_magnitude > max_force:
         f = f * (max_force / force_magnitude)
 
-    # compute torque with adaptive angular damping
-    t = wp.cross(pick_pos_world - com, f) - angular_damping * omega
+    # compute torque (no angular damping)
+    t = wp.cross(pick_pos_world - com, f)
+
+    # Add velocity damping forces (separate from spring constraint damping)
+    velocity_damping_factor = 50.0 * mass  # Mass-dependent velocity damping
+    angular_velocity_damping_factor = 5.0 * mass  # Mass-dependent angular velocity damping
+
+    linear_vel = wp.spatial_bottom(body_qd[pick_body])
+    angular_vel = wp.spatial_top(body_qd[pick_body])
+
+    # Apply velocity damping forces
+    velocity_damping_force = -velocity_damping_factor * linear_vel
+    angular_velocity_damping_torque = -angular_velocity_damping_factor * angular_vel
 
     # Torque limiting for stability
-    max_torque = mass * 0.0  # Simple torque limit based on mass
+    max_torque = mass * 5.0  # Simple torque limit based on mass
     torque_magnitude = wp.length(t)
     if torque_magnitude > max_torque:
         t = t * (max_torque / torque_magnitude)
 
+    # Combine spring torque with angular velocity damping
+    total_torque = t + angular_velocity_damping_torque
+
+    # Combine spring force with velocity damping
+    total_force = f + velocity_damping_force
+
     # apply force and torque
-    wp.atomic_add(body_f, pick_body, wp.spatial_vector(t, f))
+    wp.atomic_add(body_f, pick_body, wp.spatial_vector(total_torque, total_force))
 
 
 @wp.kernel
