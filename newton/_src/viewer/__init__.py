@@ -38,8 +38,6 @@ Example usage:
     ```
 """
 
-# UI Extensions
-from . import ui_extensions
 from .viewer_file import ViewerFile
 from .viewer_gl import ViewerGL
 from .viewer_null import ViewerNull
@@ -52,5 +50,4 @@ __all__ = [
     "ViewerNull",
     "ViewerRerun",
     "ViewerUSD",
-    "ui_extensions",
 ]
