@@ -179,7 +179,7 @@ class Example:
 
 
 if __name__ == "__main__":
-    parser = newton.examples.create_parser(add_help=True)
+    parser = newton.examples.create_parser()
     parser.add_argument(
         "--num-envs",
         type=int,
