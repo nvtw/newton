@@ -168,7 +168,7 @@ class ReplayUI:
         """Load a recording file for playback (same approach as example_replay_viewer.py)."""
         try:
             # Create a new recorder for playback
-            playback_recorder = newton.utils.ModelAndStateRecorder()
+            playback_recorder = newton.utils.RecorderModelAndState()
             playback_recorder.load_from_file(file_path)
 
             self.total_frames = len(playback_recorder.history)

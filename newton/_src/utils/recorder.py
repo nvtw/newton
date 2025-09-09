@@ -505,7 +505,7 @@ def deserialize_newton(data: dict, format_type: str = "json"):
     return result
 
 
-class BasicRecorder:
+class RecorderBasic:
     """A class to record and playback simulation body transforms."""
 
     def __init__(self):
@@ -599,7 +599,7 @@ class BasicRecorder:
                 self.point_clouds_history.append(pc_list)
 
 
-class ModelAndStateRecorder:
+class RecorderModelAndState:
     """A class to record and playback simulation model and state using JSON serialization."""
 
     def __init__(self):

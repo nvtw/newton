@@ -19,7 +19,7 @@ from pathlib import Path
 
 import warp as wp
 
-from ..utils.recorder import ModelAndStateRecorder
+from ..utils.recorder import RecorderModelAndState
 from .viewer import ViewerBase
 
 
@@ -52,7 +52,7 @@ class ViewerFile(ViewerBase):
         self.save_interval = save_interval
 
         # Initialize the recorder
-        self._recorder = ModelAndStateRecorder()
+        self._recorder = RecorderModelAndState()
         self._frame_count = 0
         self._model_recorded = False
 
@@ -143,6 +143,6 @@ class ViewerFile(ViewerBase):
         """Get the number of recorded frames."""
         return self._frame_count
 
-    def get_recorder(self) -> ModelAndStateRecorder:
+    def get_recorder(self) -> RecorderModelAndState:
         """Get access to the underlying recorder for advanced operations."""
         return self._recorder
