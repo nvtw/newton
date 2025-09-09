@@ -187,11 +187,7 @@ class Example:
 
 
 if __name__ == "__main__":
-    # Create parser with common arguments
-    parser = newton.examples.create_parser(add_help=True)
-    parser.description = "Demonstrates inverse kinematics for H1 humanoid robot using Newton physics."
-
     # Parse arguments and initialize viewer
-    viewer, args = newton.examples.init(parser)
+    viewer, args = newton.examples.init()
     example = Example(viewer)
     newton.examples.run(example)

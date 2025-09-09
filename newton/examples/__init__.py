@@ -155,7 +155,7 @@ def init(parser=None):
 
     # parse args
     if parser is None:
-        parser = create_parser()
+        parser = create_parser(add_help=True)
         args = parser.parse_known_args()[0]
     else:
         # When parser is provided, use parse_args() to properly handle --help

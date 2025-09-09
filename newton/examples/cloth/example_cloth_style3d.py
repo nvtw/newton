@@ -181,12 +181,8 @@ class Example:
 
 
 if __name__ == "__main__":
-    # Create parser with common arguments
-    parser = newton.examples.create_parser(add_help=True)
-    parser.description = "Demonstrates cloth simulation with Style3D solver in Newton physics."
-
     # Parse arguments and initialize viewer
-    viewer, args = newton.examples.init(parser)
+    viewer, args = newton.examples.init()
 
     # Create example and run
     example = Example(viewer)
