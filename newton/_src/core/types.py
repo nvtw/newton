@@ -58,22 +58,6 @@ Transform = tuple[Vec3, Quat] | wp.transform
 """A 3D transformation represented as a tuple of 3D translation and rotation quaternion (in XYZW order)."""
 
 
-class vec8f(wp.types.vector(length=8, dtype=wp.float32)):
-    pass
-
-
-class mat23f(wp.types.matrix(shape=(2, 3), dtype=wp.float32)):
-    pass
-
-
-class mat43f(wp.types.matrix(shape=(4, 3), dtype=wp.float32)):
-    pass
-
-
-class mat83f(wp.types.matrix(shape=(8, 3), dtype=wp.float32)):
-    pass
-
-
 # type alias for numpy arrays
 nparray = np.ndarray[Any, np.dtype[Any]]
 
@@ -204,8 +188,4 @@ __all__ = [
     "Vec3",
     "Vec4",
     "flag_to_int",
-    "mat23f",
-    "mat43f",
-    "mat83f",
-    "vec8f",
 ]

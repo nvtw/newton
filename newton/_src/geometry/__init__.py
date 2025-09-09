@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..core.types import mat23f, mat43f, mat83f, vec8f
 from .broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from .broad_phase_sap import BroadPhaseSAP
 from .collision_primitive import (
@@ -67,9 +66,5 @@ __all__ = [
     "compute_shape_inertia",
     "compute_shape_radius",
     "compute_sphere_inertia",
-    "mat23f",
-    "mat43f",
-    "mat83f",
     "transform_inertia",
-    "vec8f",
 ]

@@ -29,10 +29,6 @@ from ._src.geometry import (
     collide_sphere_capsule,
     collide_sphere_cylinder,
     collide_sphere_sphere,
-    mat23f,
-    mat43f,
-    mat83f,
-    vec8f,
 )
 from ._src.geometry.inertia import compute_shape_inertia, transform_inertia
 from ._src.geometry.utils import remesh_mesh
@@ -54,10 +50,6 @@ __all__ = [
     "collide_sphere_cylinder",
     "collide_sphere_sphere",
     "compute_shape_inertia",
-    "mat23f",
-    "mat43f",
-    "mat83f",
     "remesh_mesh",
     "transform_inertia",
-    "vec8f",
 ]

@@ -28,18 +28,11 @@ from .spatial import (
 from .types import (
     Axis,
     AxisType,
-    mat23f,
-    mat43f,
-    mat83f,
-    vec8f,
 )
 
 __all__ = [
     "Axis",
     "AxisType",
-    "mat23f",
-    "mat43f",
-    "mat83f",
     "quat_between_axes",
     "quat_decompose",
     "quat_from_euler",
@@ -49,6 +42,5 @@ __all__ = [
     "quat_twist_angle",
     "transform_twist",
     "transform_wrench",
-    "vec8f",
     "velocity_at_point",
 ]

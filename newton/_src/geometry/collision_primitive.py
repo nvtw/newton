@@ -28,7 +28,11 @@ from typing import Any
 
 import warp as wp
 
-from ..core.types import mat23f, mat43f, mat83f, vec8f
+# Local type definitions for use within kernels
+_vec8f = wp.types.vector(8, wp.float32)
+_mat23f = wp.types.matrix((2, 3), wp.float32)
+_mat43f = wp.types.matrix((4, 3), wp.float32)
+_mat83f = wp.types.matrix((8, 3), wp.float32)
 
 MINVAL = 1e-15
 
@@ -236,7 +240,7 @@ def collide_plane_capsule(
     capsule_axis: wp.vec3,
     capsule_radius: float,
     capsule_half_length: float,
-) -> tuple[wp.vec2, mat23f, wp.mat33]:
+) -> tuple[wp.vec2, wp.types.matrix((2, 3), wp.float32), wp.mat33]:
     """Core contact geometry calculation for plane-capsule collision.
 
     Args:
@@ -277,7 +281,7 @@ def collide_plane_capsule(
     dist2, pos2 = collide_plane_sphere(n, plane_pos, capsule_pos - segment, capsule_radius)
 
     dist = wp.vec2(dist1, dist2)
-    pos = mat23f(pos1[0], pos1[1], pos1[2], pos2[0], pos2[1], pos2[2])
+    pos = _mat23f(pos1[0], pos1[1], pos1[2], pos2[0], pos2[1], pos2[2])
 
     return dist, pos, frame
 
@@ -322,7 +326,7 @@ def collide_plane_box(
     box_pos: wp.vec3,
     box_rot: wp.mat33,
     box_size: wp.vec3,
-) -> tuple[wp.vec4, mat43f, wp.vec3]:
+) -> tuple[wp.vec4, wp.types.matrix((4, 3), wp.float32), wp.vec3]:
     """Core contact geometry calculation for plane-box collision.
 
     Args:
@@ -343,7 +347,7 @@ def collide_plane_box(
     center_dist = wp.dot(box_pos - plane_pos, plane_normal)
 
     dist = wp.vec4(wp.inf)
-    pos = mat43f()
+    pos = _mat43f()
 
     # test all corners, pick bottom 4
     ncontact = wp.int32(0)
@@ -455,7 +459,7 @@ def collide_plane_cylinder(
     cylinder_axis: wp.vec3,
     cylinder_radius: float,
     cylinder_half_height: float,
-) -> tuple[wp.vec4, mat43f, wp.vec3]:
+) -> tuple[wp.vec4, wp.types.matrix((4, 3), wp.float32), wp.vec3]:
     """Core contact geometry calculation for plane-cylinder collision.
 
     Args:
@@ -475,7 +479,7 @@ def collide_plane_cylinder(
 
     # Initialize output matrices
     contact_dist = wp.vec4(wp.inf)
-    contact_pos = mat43f()
+    contact_pos = _mat43f()
     contact_count = 0
 
     n = plane_normal
@@ -586,7 +590,7 @@ def collide_box_box(
     box2_pos: wp.vec3,
     box2_rot: wp.mat33,
     box2_size: wp.vec3,
-) -> tuple[vec8f, mat83f, mat83f]:
+) -> tuple[wp.types.vector(8, wp.float32), wp.types.matrix((8, 3), wp.float32), wp.types.matrix((8, 3), wp.float32)]:
     """Core contact geometry calculation for box-box collision.
 
     Args:
@@ -605,11 +609,11 @@ def collide_box_box(
     """
 
     # Initialize output matrices
-    contact_dist = vec8f()
+    contact_dist = _vec8f()
     for i in range(8):
         contact_dist[i] = wp.inf
-    contact_pos = mat83f()
-    contact_normals = mat83f()
+    contact_pos = _mat83f()
+    contact_normals = _mat83f()
     contact_count = 0
 
     # Compute transforms between box's frames
@@ -706,8 +710,8 @@ def collide_box_box(
     if axis_code == -1:
         return contact_dist, contact_pos, contact_normals
 
-    points = mat83f()
-    depth = vec8f()
+    points = _mat83f()
+    depth = _vec8f()
     max_con_pair = 8
     # 8 contacts should suffice for most configurations
 
@@ -885,7 +889,7 @@ def collide_box_box(
         # Calculate inverse normal for projection
         innorm = wp.where(inv, -1.0, 1.0) / rnorm[2]
 
-        pu = mat43f()
+        pu = _mat43f()
 
         # Project points onto contact plane
         for i in range(4):
@@ -1099,7 +1103,7 @@ def collide_capsule_box(
     box_pos: wp.vec3,
     box_rot: wp.mat33,
     box_size: wp.vec3,
-) -> tuple[wp.vec2, mat23f, mat23f]:
+) -> tuple[wp.vec2, wp.types.matrix((2, 3), wp.float32), wp.types.matrix((2, 3), wp.float32)]:
     """Core contact geometry calculation for capsule-box collision.
 
     Args:
@@ -1288,7 +1292,7 @@ def collide_capsule_box(
         c1 = wp.where((ee2 > 0) == w_neg, 1, 2)
 
     if cltype == -4:  # invalid type
-        return wp.vec2(wp.inf), mat23f(), mat23f()
+        return wp.vec2(wp.inf), _mat23f(), _mat23f()
 
     if cltype >= 0 and cltype // 3 != 1:  # closest to a corner of the box
         c1 = axisdir ^ clcorner
@@ -1425,6 +1429,6 @@ def collide_capsule_box(
 
     return (
         wp.vec2(dist1, dist2),
-        mat23f(pos1[0], pos1[1], pos1[2], pos2[0], pos2[1], pos2[2]),
-        mat23f(normal1[0], normal1[1], normal1[2], normal2[0], normal2[1], normal2[2]),
+        _mat23f(pos1[0], pos1[1], pos1[2], pos2[0], pos2[1], pos2[2]),
+        _mat23f(normal1[0], normal1[1], normal1[2], normal2[0], normal2[1], normal2[2]),
     )
