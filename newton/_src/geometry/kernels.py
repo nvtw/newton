@@ -934,6 +934,9 @@ def geo_new_to_old_map(new_geo_type: int) -> int:
     else:  # GeoType.NONE (10) or any other value
         return 8
 
+@wp.func
+def isCase(actual_type_a: int, actual_type_b: int, target_a: int, target_b: int) -> bool:
+    return (actual_type_a == target_a and actual_type_b == target_b) or (actual_type_a == target_b and actual_type_b == target_a)
 
 @wp.kernel(enable_backward=False)
 def broadphase_collision_pairs(
@@ -1015,42 +1018,44 @@ def broadphase_collision_pairs(
 
     # determine how many contact points need to be evaluated
     num_contacts = 0
-    if actual_type_a == GeoType.SPHERE:
+    if actual_type_a == GeoType.SPHERE or actual_type_b == GeoType.SPHERE:
         num_contacts = 1
-    elif actual_type_a == GeoType.CAPSULE:
-        if actual_type_b == GeoType.PLANE:
-            if shape_scale[actual_shape_b][0] == 0.0 and shape_scale[actual_shape_b][1] == 0.0:
-                num_contacts = 2  # vertex-based collision for infinite plane
-            else:
-                num_contacts = 2 + 4  # vertex-based collision + plane edges
-        elif actual_type_b == GeoType.MESH:
-            num_contacts_a = 2
-            mesh_b = wp.mesh_get(shape_source_ptr[actual_shape_b])
-            if iterate_mesh_vertices:
-                num_contacts_b = mesh_b.points.shape[0]
-            else:
-                num_contacts_b = 0
-            num_contacts = num_contacts_a + num_contacts_b
-            index = wp.atomic_add(contact_count, 0, num_contacts)
-            if index + num_contacts - 1 >= rigid_contact_max:
-                print("Number of rigid contacts exceeded limit. Increase Model.rigid_contact_max.")
-                return
-            # allocate contact points from capsule A against mesh B
-            for i in range(num_contacts_a):
-                contact_shape0[index + i] = actual_shape_a
-                contact_shape1[index + i] = actual_shape_b
-                contact_point_id[index + i] = i
-            # allocate contact points from mesh B against capsule A
-            for i in range(num_contacts_b):
-                contact_shape0[index + num_contacts_a + i] = actual_shape_b
-                contact_shape1[index + num_contacts_a + i] = actual_shape_a
-                contact_point_id[index + num_contacts_a + i] = i
-            if mesh_contact_max > 0 and contact_point_limit and pair_index_ba < contact_point_limit.shape[0]:
-                num_contacts_b = wp.min(mesh_contact_max, num_contacts_b)
-                contact_point_limit[pair_index_ba] = num_contacts_b
-            return
+    # elif actual_type_a == GeoType.CAPSULE:
+    #    if actual_type_b == GeoType.PLANE:
+    elif isCase(actual_type_a, actual_type_b, GeoType.CAPSULE, GeoType.PLANE):
+        if shape_scale[actual_shape_b][0] == 0.0 and shape_scale[actual_shape_b][1] == 0.0:
+            num_contacts = 2  # vertex-based collision for infinite plane
         else:
-            num_contacts = 2
+            num_contacts = 2 + 4  # vertex-based collision + plane edges
+    # elif actual_type_b == GeoType.MESH:
+    elif isCase(actual_type_a, actual_type_b, GeoType.MESH, GeoType.CAPSULE):
+        num_contacts_a = 2
+        mesh_b = wp.mesh_get(shape_source_ptr[actual_shape_b])
+        if iterate_mesh_vertices:
+            num_contacts_b = mesh_b.points.shape[0]
+        else:
+            num_contacts_b = 0
+        num_contacts = num_contacts_a + num_contacts_b
+        index = wp.atomic_add(contact_count, 0, num_contacts)
+        if index + num_contacts - 1 >= rigid_contact_max:
+            print("Number of rigid contacts exceeded limit. Increase Model.rigid_contact_max.")
+            return
+        # allocate contact points from capsule A against mesh B
+        for i in range(num_contacts_a):
+            contact_shape0[index + i] = actual_shape_a
+            contact_shape1[index + i] = actual_shape_b
+            contact_point_id[index + i] = i
+        # allocate contact points from mesh B against capsule A
+        for i in range(num_contacts_b):
+            contact_shape0[index + num_contacts_a + i] = actual_shape_b
+            contact_shape1[index + num_contacts_a + i] = actual_shape_a
+            contact_point_id[index + num_contacts_a + i] = i
+        if mesh_contact_max > 0 and contact_point_limit and pair_index_ba < contact_point_limit.shape[0]:
+            num_contacts_b = wp.min(mesh_contact_max, num_contacts_b)
+            contact_point_limit[pair_index_ba] = num_contacts_b
+        return
+    elif actual_type_a == GeoType.CAPSULE or actual_type_b == GeoType.CAPSULE:        
+        num_contacts = 2
     elif actual_type_a == GeoType.BOX:
         if actual_type_b == GeoType.BOX:
             index = wp.atomic_add(contact_count, 0, 24)
