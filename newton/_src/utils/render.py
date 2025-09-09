@@ -90,9 +90,7 @@ def apply_picking_force_kernel(
     com = wp.transform_point(X_wb, body_com[pick_body])
 
     # get velocity of attachment point
-    omega = wp.spatial_bottom(body_qd[pick_body])
     vel_com = wp.spatial_top(body_qd[pick_body])
-    vel_world = vel_com + wp.cross(omega, pick_pos_world - com)
 
     # compute spring force with critical damping (only damp linear velocity, not rotational)
     f = pick_stiffness * (pick_target_world - pick_pos_world) - pick_damping * vel_com
@@ -223,8 +221,8 @@ def CreateSimRenderer(renderer):
                 up_axis (newton.AxisType, optional): The up-axis for the scene. If not provided, it's inferred from the model, or defaults to "Z" if no model is given. Defaults to None.
                 show_joints (bool, optional): Whether to visualize joints. Defaults to False.
                 show_particles (bool, optional): Whether to visualize particles. Defaults to True.
-                pick_stiffness (float, optional): Stiffness of the picking force. Defaults to 20000.0.
-                pick_damping (float, optional): Damping of the picking force. Defaults to 2000.0.
+                pick_stiffness (float, optional): Stiffness of the picking force. Defaults to 1000.0.
+                pick_damping (float, optional): Damping of the picking force. Defaults to 100.0.
                 **render_kwargs: Additional keyword arguments for the underlying renderer.
             """
             if up_axis is None:
