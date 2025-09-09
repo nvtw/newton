@@ -53,7 +53,7 @@ def _build_command_line_options(test_options: dict[str, Any]) -> list:
         if isinstance(value, bool):
             # Default behavior expecting argparse.BooleanOptionalAction support
             additional_options.append(f"--{'no-' if not value else ''}{key.replace('_', '-')}")
-        if isinstance(value, list):
+        elif isinstance(value, list):
             additional_options.extend([f"--{key.replace('_', '-')}"] + [str(v) for v in value])
         else:
             # Just add --key value
@@ -320,6 +320,14 @@ add_example_test(
 add_example_test(
     TestRobotExamples,
     name="robot.example_robot_humanoid",
+    devices=test_devices,
+    test_options={"num_frames": 500},
+    test_options_cpu={"num_frames": 10},
+    use_viewer=True,
+)
+add_example_test(
+    TestRobotExamples,
+    name="robot.example_robot_ur10",
     devices=test_devices,
     test_options={"num_frames": 500},
     test_options_cpu={"num_frames": 10},
