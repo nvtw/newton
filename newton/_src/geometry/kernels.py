@@ -1107,17 +1107,18 @@ def broadphase_collision_pairs(
             num_contacts = 8 + 4  # vertex-based collision + plane edges
     elif actual_type_a == GeoType.BOX or actual_type_b == GeoType.BOX:
         num_contacts = 8
-    elif actual_type_a == GeoType.MESH:
+    elif actual_type_a == GeoType.MESH and actual_type_b != GeoType.PLANE:
+        if wp.static(wp.config.verbose):
+            print("broadphase_collision_pairs: unsupported geometry type for mesh collision")
+        return
+    elif actual_type_a == GeoType.MESH and actual_type_b == GeoType.MESH:
         mesh_a = wp.mesh_get(shape_source_ptr[actual_shape_a])
         num_contacts_a = mesh_a.points.shape[0]
         num_contacts_b = 0
-        if actual_type_b == GeoType.MESH:
-            mesh_b = wp.mesh_get(shape_source_ptr[actual_shape_b])
-            num_contacts_b = mesh_b.points.shape[0]
-        elif actual_type_b != GeoType.PLANE:
-            if wp.static(wp.config.verbose):
-                print("broadphase_collision_pairs: unsupported geometry type for mesh collision")
-            return
+        
+        mesh_b = wp.mesh_get(shape_source_ptr[actual_shape_b])
+        num_contacts_b = mesh_b.points.shape[0]
+        
         num_contacts = num_contacts_a + num_contacts_b
         if num_contacts > 0:
             index = wp.atomic_add(contact_count, 0, num_contacts)
@@ -1143,7 +1144,37 @@ def broadphase_collision_pairs(
                 if pair_index_ba < contact_point_limit.shape[0]:
                     contact_point_limit[pair_index_ba] = num_contacts_b
         return
-    elif actual_type_a == GeoType.PLANE:
+    elif actual_type_a == GeoType.MESH or actual_type_b == GeoType.MESH:
+        mesh_a = wp.mesh_get(shape_source_ptr[actual_shape_a])
+        num_contacts_a = mesh_a.points.shape[0]
+        num_contacts_b = 0        
+        
+        num_contacts = num_contacts_a + num_contacts_b
+        if num_contacts > 0:
+            index = wp.atomic_add(contact_count, 0, num_contacts)
+            if index + num_contacts - 1 >= rigid_contact_max:
+                print("Mesh contact: Number of rigid contacts exceeded limit. Increase Model.rigid_contact_max.")
+                return
+            # allocate contact points from mesh A against B
+            for i in range(num_contacts_a):
+                contact_shape0[index + i] = actual_shape_a
+                contact_shape1[index + i] = actual_shape_b
+                contact_point_id[index + i] = i
+            # allocate contact points from mesh B against A
+            for i in range(num_contacts_b):
+                contact_shape0[index + num_contacts_a + i] = actual_shape_b
+                contact_shape1[index + num_contacts_a + i] = actual_shape_a
+                contact_point_id[index + num_contacts_a + i] = i
+
+            if mesh_contact_max > 0 and contact_point_limit:
+                num_contacts_a = wp.min(mesh_contact_max, num_contacts_a)
+                num_contacts_b = wp.min(mesh_contact_max, num_contacts_b)
+                if pair_index_ab < contact_point_limit.shape[0]:
+                    contact_point_limit[pair_index_ab] = num_contacts_a
+                if pair_index_ba < contact_point_limit.shape[0]:
+                    contact_point_limit[pair_index_ba] = num_contacts_b
+        return   
+    elif actual_type_a == GeoType.PLANE and actual_type_b == GeoType.PLANE:
         return  # no plane-plane contacts
     else:
         if wp.static(wp.config.verbose):
