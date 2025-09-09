@@ -992,9 +992,9 @@ def broadphase_collision_pairs(
         actual_X_ws_b = X_ws_a
 
     p_a = wp.transform_get_translation(actual_X_ws_a)
-    if actual_type_b == GeoType.PLANE:
-        if actual_type_a == GeoType.PLANE:
-            return
+    if actual_type_a == GeoType.PLANE and actual_type_b == GeoType.PLANE:
+        return
+    if actual_type_a == GeoType.PLANE or actual_type_b == GeoType.PLANE:
         query_b = wp.transform_point(wp.transform_inverse(actual_X_ws_b), p_a)
         scale = shape_scale[actual_shape_b]
         closest = closest_point_plane(scale[0], scale[1], query_b)
