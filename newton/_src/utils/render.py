@@ -90,7 +90,9 @@ def apply_picking_force_kernel(
     com = wp.transform_point(X_wb, body_com[pick_body])
 
     # get velocity of attachment point
-    vel_com = wp.spatial_bottom(body_qd[pick_body])
+    omega = wp.spatial_bottom(body_qd[pick_body])
+    vel_com = wp.spatial_top(body_qd[pick_body])
+    vel_world = vel_com + wp.cross(omega, pick_pos_world - com)
 
     # compute spring force with critical damping (only damp linear velocity, not rotational)
     f = pick_stiffness * (pick_target_world - pick_pos_world) - pick_damping * vel_com
@@ -823,6 +825,7 @@ def CreateSimRenderer(renderer):
                         self.model.shape_transform,
                         self.model.shape_type,
                         self.model.shape_scale,
+                        self.model.shape_source_ptr,
                         p,
                         d,
                         self.lock,
