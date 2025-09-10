@@ -136,7 +136,6 @@ def apply_picking_force_kernel(
     com = wp.transform_point(X_wb, body_com[pick_body])
 
     # get velocity of attachment point
-    omega = wp.spatial_bottom(body_qd[pick_body])
     vel_com = wp.spatial_top(body_qd[pick_body])
 
     # compute spring force with critical damping (only damp linear velocity, not rotational)
