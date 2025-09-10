@@ -47,7 +47,8 @@ class Picking:
         # [6] - pick spring stiffness
         # [7] - pick spring damping
         # [8:11] - original mouse cursor target in world space (vec3)
-        pick_state_np = np.zeros(11, dtype=np.float32)
+        # [11:14] - current world space picked point on geometry (vec3)
+        pick_state_np = np.zeros(14, dtype=np.float32)
         if model:
             pick_state_np[6] = pick_stiffness
             pick_state_np[7] = pick_damping

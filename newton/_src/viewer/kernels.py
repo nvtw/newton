@@ -32,6 +32,15 @@ def compute_pick_state_kernel(
     pick_body: wp.array(dtype=int),
     pick_state: wp.array(dtype=float),
 ):
+    """
+    Initialize the pick state when a body is first picked.
+
+    This kernel stores:
+    - The local space attachment point on the body
+    - The initial world space target position
+    - The original mouse cursor target
+    - The current world space picked point on geometry (for visualization)
+    """
     if body_index < 0:
         return
 
@@ -56,6 +65,11 @@ def compute_pick_state_kernel(
     pick_state[0] = pick_pos_local[0]
     pick_state[1] = pick_pos_local[1]
     pick_state[2] = pick_pos_local[2]
+
+    # store current world space picked point on geometry (initially same as hit point)
+    pick_state[11] = hit_point_world[0]
+    pick_state[12] = hit_point_world[1]
+    pick_state[13] = hit_point_world[2]
 
 
 @wp.kernel
@@ -85,7 +99,7 @@ def apply_picking_force_kernel(
     desired_distance = wp.length(desired_delta)
 
     # Use adaptive movement speed based on distance (gentle movement)
-    max_delta_per_frame = 0.01  # Reduced for gentler movement
+    max_delta_per_frame = 0.02  # Doubled for more responsive movement
 
     if desired_distance > 0.001:  # Avoid division by zero
         # Scale movement speed based on distance (gentler scaling)
@@ -112,6 +126,11 @@ def apply_picking_force_kernel(
     # world space attachment point
     X_wb = body_q[pick_body]
     pick_pos_world = wp.transform_point(X_wb, pick_pos_local)
+
+    # update current world space picked point on geometry (for visualization)
+    pick_state[11] = pick_pos_world[0]
+    pick_state[12] = pick_pos_world[1]
+    pick_state[13] = pick_pos_world[2]
 
     # center of mass (corrected calculation)
     com = wp.transform_point(X_wb, body_com[pick_body])

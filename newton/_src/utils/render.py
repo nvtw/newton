@@ -89,7 +89,7 @@ def apply_picking_force_kernel(
     desired_distance = wp.length(desired_delta)
 
     # Use adaptive movement speed based on distance (gentle movement)
-    max_delta_per_frame = 0.01  # Reduced for gentler movement
+    max_delta_per_frame = 0.02  # Doubled for more responsive movement
 
     if desired_distance > 0.001:  # Avoid division by zero
         # Scale movement speed based on distance (gentler scaling)
