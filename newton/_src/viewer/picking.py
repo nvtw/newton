@@ -42,11 +42,12 @@ class Picking:
         else:
             self.pick_body = wp.array([-1], dtype=int, device="cpu")
         # pick_state array format (stored in a warp array for graph capture support):
-        # [0:3] - pick point in world space (vec3)
+        # [0:3] - pick point in local space (vec3)
         # [3:6] - pick target point in world space (vec3)
         # [6] - pick spring stiffness
         # [7] - pick spring damping
-        pick_state_np = np.zeros(8, dtype=np.float32)
+        # [8:11] - original mouse cursor target in world space (vec3)
+        pick_state_np = np.zeros(11, dtype=np.float32)
         if model:
             pick_state_np[6] = pick_stiffness
             pick_state_np[7] = pick_damping
