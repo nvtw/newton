@@ -1068,20 +1068,20 @@ def broadphase_collision_pairs(
             return
 
 
-    if geo_new_to_old_map(type_a) < geo_new_to_old_map(type_b):
-        actual_shape_a = shape_a
-        actual_shape_b = shape_b
-        actual_type_a = type_a
-        actual_type_b = type_b
-        actual_X_ws_a = X_ws_a
-        actual_X_ws_b = X_ws_b
-    else:
-        actual_shape_a = shape_b
-        actual_shape_b = shape_a
-        actual_type_a = type_b
-        actual_type_b = type_a
-        actual_X_ws_a = X_ws_b
-        actual_X_ws_b = X_ws_a
+    # if geo_new_to_old_map(type_a) < geo_new_to_old_map(type_b):
+    #     actual_shape_a = shape_a
+    #     actual_shape_b = shape_b
+    #     actual_type_a = type_a
+    #     actual_type_b = type_b
+    #     actual_X_ws_a = X_ws_a
+    #     actual_X_ws_b = X_ws_b
+    # else:
+    #     actual_shape_a = shape_b
+    #     actual_shape_b = shape_a
+    #     actual_type_a = type_b
+    #     actual_type_b = type_a
+    #     actual_X_ws_a = X_ws_b
+    #     actual_X_ws_b = X_ws_a
 
     if geo_new_to_old_map(type_a) < geo_new_to_old_map(type_b):
         write_shape_a = shape_a
@@ -1118,12 +1118,31 @@ def broadphase_collision_pairs(
     # elif actual_type_a == GeoType.CAPSULE:
     #    if actual_type_b == GeoType.PLANE:
     elif isCase(actual_type_a, actual_type_b, GeoType.CAPSULE, GeoType.PLANE):
-        if shape_scale[actual_shape_b][0] == 0.0 and shape_scale[actual_shape_b][1] == 0.0:
+        if shape_scale[actual_shape_a][0] == 0.0 and shape_scale[actual_shape_a][1] == 0.0:
             num_contacts = 2  # vertex-based collision for infinite plane
         else:
             num_contacts = 2 + 4  # vertex-based collision + plane edges
+
+
+        allocate_contact_points(
+                num_contacts,
+                write_shape_a,
+                write_shape_b,
+                pair_index_ab,
+                pair_index_ba,
+                rigid_contact_max,
+                contact_count,
+                contact_shape0,
+                contact_shape1,
+                contact_point_id,
+                contact_point_limit,
+            )
+        return
+
+
+
     # elif actual_type_b == GeoType.MESH:
-    elif isCase(actual_type_a, actual_type_b, GeoType.MESH, GeoType.CAPSULE):
+    if isCase(actual_type_a, actual_type_b, GeoType.MESH, GeoType.CAPSULE):
         num_contacts_a = 2
         mesh_b = wp.mesh_get(shape_source_ptr[actual_shape_b])
         if iterate_mesh_vertices:
@@ -1149,6 +1168,12 @@ def broadphase_collision_pairs(
             num_contacts_b = wp.min(mesh_contact_max, num_contacts_b)
             contact_point_limit[pair_index_ba] = num_contacts_b
         return
+
+
+
+
+
+
     elif actual_type_a == GeoType.CAPSULE or actual_type_b == GeoType.CAPSULE:        
         num_contacts = 2
     elif isCase(actual_type_a, actual_type_b, GeoType.BOX, GeoType.BOX):
@@ -1167,6 +1192,10 @@ def broadphase_collision_pairs(
             contact_shape1[index + 12 + i] = shape_a
             contact_point_id[index + 12 + i] = i
         return
+
+
+
+
     elif isCase(actual_type_a, actual_type_b, GeoType.BOX, GeoType.MESH):        
         num_contacts_a = 8
         mesh_b = wp.mesh_get(shape_source_ptr[actual_shape_b])
@@ -1194,15 +1223,57 @@ def broadphase_collision_pairs(
             num_contacts_b = wp.min(mesh_contact_max, num_contacts_b)
             contact_point_limit[pair_index_ba] = num_contacts_b
         return
+
+
+   
+
+
+
     elif isCase(actual_type_a, actual_type_b, GeoType.BOX, GeoType.PLANE):
         #elif actual_type_b == GeoType.PLANE:
         if shape_scale[actual_shape_a][0] == 0.0 and shape_scale[actual_shape_a][1] == 0.0:
             num_contacts = 8  # vertex-based collision
         else:
             num_contacts = 8 + 4  # vertex-based collision + plane edges
+
+        allocate_contact_points(
+                num_contacts,
+                write_shape_a,
+                write_shape_b,
+                pair_index_ab,
+                pair_index_ba,
+                rigid_contact_max,
+                contact_count,
+                contact_shape0,
+                contact_shape1,
+                contact_point_id,
+                contact_point_limit,
+            )
+        return
+
     elif actual_type_a == GeoType.BOX or actual_type_b == GeoType.BOX:
         num_contacts = 8
-    elif actual_type_b == GeoType.MESH and actual_type_a != GeoType.PLANE:
+
+        allocate_contact_points(
+                num_contacts,
+                write_shape_a,
+                write_shape_b,
+                pair_index_ab,
+                pair_index_ba,
+                rigid_contact_max,
+                contact_count,
+                contact_shape0,
+                contact_shape1,
+                contact_point_id,
+                contact_point_limit,
+            )
+        return
+
+
+
+
+
+    if actual_type_b == GeoType.MESH and actual_type_a != GeoType.PLANE:
         if wp.static(wp.config.verbose):
             print("broadphase_collision_pairs: unsupported geometry type for mesh collision")
         return
@@ -1239,8 +1310,17 @@ def broadphase_collision_pairs(
                 if pair_index_ba < contact_point_limit.shape[0]:
                     contact_point_limit[pair_index_ba] = num_contacts_b
         return
+
+
+  
+
     elif actual_type_a == GeoType.MESH or actual_type_b == GeoType.MESH:
-        mesh_a = wp.mesh_get(shape_source_ptr[actual_shape_a])
+
+
+        if actual_type_a == GeoType.MESH:   
+            mesh_a = wp.mesh_get(shape_source_ptr[actual_shape_a])            
+        else:
+            mesh_a = wp.mesh_get(shape_source_ptr[actual_shape_b])
         num_contacts_a = mesh_a.points.shape[0]
         num_contacts_b = 0        
         
@@ -1269,7 +1349,27 @@ def broadphase_collision_pairs(
                 if pair_index_ba < contact_point_limit.shape[0]:
                     contact_point_limit[pair_index_ba] = num_contacts_b
         return   
-    elif actual_type_a == GeoType.PLANE and actual_type_b == GeoType.PLANE:
+
+
+
+    # if geo_new_to_old_map(type_a) < geo_new_to_old_map(type_b):
+    #     actual_shape_a = shape_a
+    #     actual_shape_b = shape_b
+    #     actual_type_a = type_a
+    #     actual_type_b = type_b
+    #     actual_X_ws_a = X_ws_a
+    #     actual_X_ws_b = X_ws_b
+    # else:
+    #     actual_shape_a = shape_b
+    #     actual_shape_b = shape_a
+    #     actual_type_a = type_b
+    #     actual_type_b = type_a
+    #     actual_X_ws_a = X_ws_b
+    #     actual_X_ws_b = X_ws_a
+
+
+
+    if actual_type_a == GeoType.PLANE and actual_type_b == GeoType.PLANE:
         return  # no plane-plane contacts
     else:
         if wp.static(wp.config.verbose):
