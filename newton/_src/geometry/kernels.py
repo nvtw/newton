@@ -889,51 +889,6 @@ def count_contact_points(
     wp.atomic_add(contact_count, 0, num_contacts)
 
 
-# TODO: Remove this function - requires adjustments in the two kernels below
-# This function reorders contact pairs based on their geometry type indices to simplify collision detection.
-# It ensures that pairs like sphere-plane and plane-sphere are handled by the same code branch.
-# However, this requires careful handling since the if/elif tree makes assumptions about type ordering
-# (e.g., that SPHERE has the lowest index), which does not hold anymore for the new MuJoCo-compatible ordering.
-# Adjusting the if/elif tree is more tricky than one might expect, so it is postponed for now.
-
-# For reference: The original type constants before adapting to MuJoCo-compatible ordering
-# GEO_SPHERE = wp.constant(0)
-# GEO_BOX = wp.constant(1)
-# GEO_CAPSULE = wp.constant(2)
-# GEO_CYLINDER = wp.constant(3)
-# GEO_CONE = wp.constant(4)
-# GEO_MESH = wp.constant(5)
-# GEO_SDF = wp.constant(6)
-# GEO_PLANE = wp.constant(7)
-# GEO_NONE = wp.constant(8)
-
-
-@wp.func
-def geo_new_to_old_map(new_geo_type: int) -> int:
-    """Python version: Convert new MuJoCo-compatible geometry type to old collision detection ordering."""
-    if new_geo_type == 0:  # GeoType.PLANE
-        return 7
-    elif new_geo_type == 1:  # GeoType.HFIELD
-        return 8  # treat as GeoType.NONE equivalent
-    elif new_geo_type == 2:  # GeoType.SPHERE
-        return 0
-    elif new_geo_type == 3:  # GeoType.CAPSULE
-        return 2
-    elif new_geo_type == 4:  # GeoType.ELLIPSOID
-        return 8  # treat as GeoType.NONE equivalent
-    elif new_geo_type == 5:  # GeoType.CYLINDER
-        return 3
-    elif new_geo_type == 6:  # GeoType.BOX
-        return 1
-    elif new_geo_type == 7:  # GeoType.MESH
-        return 5
-    elif new_geo_type == 8:  # GeoType.SDF
-        return 6
-    elif new_geo_type == 9:  # GeoType.CONE
-        return 4
-    else:  # GeoType.NONE (10) or any other value
-        return 8
-
 
 @wp.func
 def isCase(actual_type_a: int, actual_type_b: int, target_a: int, target_b: int) -> bool:
@@ -1072,12 +1027,15 @@ def broadphase_collision_pairs(
         if d > r_a + r_b + rigid_contact_margin:
             return
 
-    if geo_new_to_old_map(type_a) < geo_new_to_old_map(type_b):
-        write_shape_a = shape_a
-        write_shape_b = shape_b
-    else:
-        write_shape_a = shape_b
-        write_shape_b = shape_a
+    # if geo_new_to_old_map(type_a) < geo_new_to_old_map(type_b):
+    #     write_shape_a = shape_a
+    #     write_shape_b = shape_b
+    # else:
+    #     write_shape_a = shape_b
+    #     write_shape_b = shape_a
+
+    write_shape_a = actual_shape_a
+    write_shape_b = actual_shape_b
 
     pair_index_ab = actual_shape_a * num_shapes + actual_shape_b
     pair_index_ba = actual_shape_b * num_shapes + actual_shape_a
@@ -2008,6 +1966,111 @@ def sphere_plane_collision(
     return p_a_world, p_b_world, normal, distance
 
 
+@wp.func
+def plane_sphere_collision(
+    geo_a: GeoData,
+    geo_b: GeoData,
+):
+    """
+    Handle collision between a plane (geo_a) and a sphere (geo_b).
+    This is a flipped version of sphere_plane_collision.
+
+    Returns:
+        tuple: (p_a_world, p_b_world, normal, distance)
+    """
+    # Call sphere_plane_collision with flipped arguments
+    p_b_world, p_a_world, neg_normal, distance = sphere_plane_collision(geo_b, geo_a)
+    # Flip the normal since we flipped the arguments
+    normal = -neg_normal
+    return p_a_world, p_b_world, normal, distance
+
+
+@wp.func
+def plane_box_collision(
+    geo_a: GeoData,
+    geo_b: GeoData,
+    point_id: int,
+    edge_sdf_iter: int,
+):
+    """
+    Handle collision between a plane (geo_a) and a box (geo_b).
+    This is a flipped version of box_plane_collision.
+
+    Returns:
+        tuple: (p_a_world, p_b_world, normal, distance, valid)
+    """
+    # Call box_plane_collision with flipped arguments
+    p_b_world, p_a_world, neg_normal, distance, valid = box_plane_collision(geo_b, geo_a, point_id, edge_sdf_iter)
+    # Flip the normal since we flipped the arguments
+    normal = -neg_normal
+    return p_a_world, p_b_world, normal, distance, valid
+
+
+@wp.func
+def plane_capsule_collision(
+    geo_a: GeoData,
+    geo_b: GeoData,
+    point_id: int,
+    edge_sdf_iter: int,
+):
+    """
+    Handle collision between a plane (geo_a) and a capsule (geo_b).
+    This is a flipped version of capsule_plane_collision.
+
+    Returns:
+        tuple: (p_a_world, p_b_world, normal, distance)
+    """
+    # Call capsule_plane_collision with flipped arguments
+    p_b_world, p_a_world, neg_normal, distance = capsule_plane_collision(geo_b, geo_a, point_id, edge_sdf_iter)
+    # Flip the normal since we flipped the arguments
+    normal = -neg_normal
+    return p_a_world, p_b_world, normal, distance
+
+
+@wp.func
+def plane_mesh_collision(
+    geo_a: GeoData,
+    geo_b: GeoData,
+    point_id: int,
+    shape_source_ptr: wp.array(dtype=wp.uint64),
+    shape_b: int,
+    rigid_contact_margin: float,
+):
+    """
+    Handle collision between a plane (geo_a) and a mesh (geo_b).
+    This is a flipped version of mesh_plane_collision.
+
+    Returns:
+        tuple: (p_a_world, p_b_world, normal, distance, valid)
+    """
+    # Call mesh_plane_collision with flipped arguments
+    p_b_world, p_a_world, neg_normal, distance, valid = mesh_plane_collision(geo_b, geo_a, point_id, shape_source_ptr, shape_b, rigid_contact_margin)
+    # Flip the normal since we flipped the arguments
+    normal = -neg_normal
+    return p_a_world, p_b_world, normal, distance, valid
+
+
+@wp.func
+def capsule_box_collision(
+    geo_a: GeoData,
+    geo_b: GeoData,
+    point_id: int,
+    edge_sdf_iter: int,
+):
+    """
+    Handle collision between a capsule (geo_a) and a box (geo_b).
+    This is a flipped version of box_capsule_collision.
+
+    Returns:
+        tuple: (p_a_world, p_b_world, normal, distance)
+    """
+    # Call box_capsule_collision with flipped arguments
+    p_b_world, p_a_world, neg_normal, distance = box_capsule_collision(geo_b, geo_a, point_id, edge_sdf_iter)
+    # Flip the normal since we flipped the arguments
+    normal = -neg_normal
+    return p_a_world, p_b_world, normal, distance
+
+
 @wp.kernel
 def handle_contact_pairs(
     body_q: wp.array(dtype=wp.transform),
@@ -2060,14 +2123,35 @@ def handle_contact_pairs(
     distance = 1.0e6
     thickness = geo_a.thickness + geo_b.thickness
 
-    if geo_a.geo_type == GeoType.SPHERE and geo_b.geo_type == GeoType.SPHERE:
-        p_a_world, p_b_world, normal, distance = sphere_sphere_collision(geo_a, geo_b)
+    # Collision checks sorted by GeoType enum values (geo_a.geo_type <= geo_b.geo_type)
+    # PLANE = 0, HFIELD = 1, SPHERE = 2, CAPSULE = 3, ELLIPSOID = 4, CYLINDER = 5, BOX = 6, MESH = 7, SDF = 8, CONE = 9, NONE = 10
 
-    elif geo_a.geo_type == GeoType.SPHERE and geo_b.geo_type == GeoType.BOX:
-        p_a_world, p_b_world, normal, distance = sphere_box_collision(geo_a, geo_b)
+    if geo_a.geo_type == GeoType.PLANE and geo_b.geo_type == GeoType.SPHERE:
+        p_a_world, p_b_world, normal, distance = plane_sphere_collision(geo_a, geo_b)
+
+    elif geo_a.geo_type == GeoType.PLANE and geo_b.geo_type == GeoType.CAPSULE:
+        p_a_world, p_b_world, normal, distance = plane_capsule_collision(geo_a, geo_b, point_id, edge_sdf_iter)
+
+    elif geo_a.geo_type == GeoType.PLANE and geo_b.geo_type == GeoType.BOX:
+        p_a_world, p_b_world, normal, distance, valid = plane_box_collision(geo_a, geo_b, point_id, edge_sdf_iter)
+        if not valid:
+            return
+
+    elif geo_a.geo_type == GeoType.PLANE and geo_b.geo_type == GeoType.MESH:
+        p_a_world, p_b_world, normal, distance, valid = plane_mesh_collision(
+            geo_a, geo_b, point_id, shape_source_ptr, shape_b, rigid_contact_margin
+        )
+        if not valid:
+            return
+
+    elif geo_a.geo_type == GeoType.SPHERE and geo_b.geo_type == GeoType.SPHERE:
+        p_a_world, p_b_world, normal, distance = sphere_sphere_collision(geo_a, geo_b)
 
     elif geo_a.geo_type == GeoType.SPHERE and geo_b.geo_type == GeoType.CAPSULE:
         p_a_world, p_b_world, normal, distance = sphere_capsule_collision(geo_a, geo_b)
+
+    elif geo_a.geo_type == GeoType.SPHERE and geo_b.geo_type == GeoType.BOX:
+        p_a_world, p_b_world, normal, distance = sphere_box_collision(geo_a, geo_b)
 
     elif geo_a.geo_type == GeoType.SPHERE and geo_b.geo_type == GeoType.MESH:
         p_a_world, p_b_world, normal, distance, valid = sphere_mesh_collision(
@@ -2076,22 +2160,11 @@ def handle_contact_pairs(
         if not valid:
             return
 
-    elif geo_a.geo_type == GeoType.SPHERE and geo_b.geo_type == GeoType.PLANE:
-        p_a_world, p_b_world, normal, distance = sphere_plane_collision(geo_a, geo_b)
-
-    elif geo_a.geo_type == GeoType.BOX and geo_b.geo_type == GeoType.BOX:
-        p_a_world, p_b_world, normal, distance = box_box_collision(geo_a, geo_b, point_id, edge_sdf_iter)
-
-    elif geo_a.geo_type == GeoType.BOX and geo_b.geo_type == GeoType.CAPSULE:
-        p_a_world, p_b_world, normal, distance = box_capsule_collision(geo_a, geo_b, point_id, edge_sdf_iter)
-
-    elif geo_a.geo_type == GeoType.BOX and geo_b.geo_type == GeoType.PLANE:
-        p_a_world, p_b_world, normal, distance, valid = box_plane_collision(geo_a, geo_b, point_id, edge_sdf_iter)
-        if not valid:
-            return
-
     elif geo_a.geo_type == GeoType.CAPSULE and geo_b.geo_type == GeoType.CAPSULE:
         p_a_world, p_b_world, normal, distance = capsule_capsule_collision(geo_a, geo_b, point_id, edge_sdf_iter)
+
+    elif geo_a.geo_type == GeoType.CAPSULE and geo_b.geo_type == GeoType.BOX:
+        p_a_world, p_b_world, normal, distance = capsule_box_collision(geo_a, geo_b, point_id, edge_sdf_iter)
 
     elif geo_a.geo_type == GeoType.CAPSULE and geo_b.geo_type == GeoType.MESH:
         p_a_world, p_b_world, normal, distance, valid = capsule_mesh_collision(
@@ -2100,14 +2173,8 @@ def handle_contact_pairs(
         if not valid:
             return
 
-    elif geo_a.geo_type == GeoType.MESH and geo_b.geo_type == GeoType.CAPSULE:
-        p_a_world, p_b_world, normal, distance = mesh_capsule_collision(geo_a, geo_b, point_id, shape_source_ptr, shape_a)
-
-    elif geo_a.geo_type == GeoType.CAPSULE and geo_b.geo_type == GeoType.PLANE:
-        p_a_world, p_b_world, normal, distance = capsule_plane_collision(geo_a, geo_b, point_id, edge_sdf_iter)
-
-    elif geo_a.geo_type == GeoType.MESH and geo_b.geo_type == GeoType.BOX:
-        p_a_world, p_b_world, normal, distance = mesh_box_collision(geo_a, geo_b, point_id, shape_source_ptr, shape_a)
+    elif geo_a.geo_type == GeoType.BOX and geo_b.geo_type == GeoType.BOX:
+        p_a_world, p_b_world, normal, distance = box_box_collision(geo_a, geo_b, point_id, edge_sdf_iter)
 
     elif geo_a.geo_type == GeoType.BOX and geo_b.geo_type == GeoType.MESH:
         p_a_world, p_b_world, normal, distance, valid = box_mesh_collision(
@@ -2119,13 +2186,6 @@ def handle_contact_pairs(
     elif geo_a.geo_type == GeoType.MESH and geo_b.geo_type == GeoType.MESH:
         p_a_world, p_b_world, normal, distance, valid = mesh_mesh_collision(
             geo_a, geo_b, point_id, shape_source_ptr, shape_a, shape_b, rigid_contact_margin, thickness
-        )
-        if not valid:
-            return
-
-    elif geo_a.geo_type == GeoType.MESH and geo_b.geo_type == GeoType.PLANE:
-        p_a_world, p_b_world, normal, distance, valid = mesh_plane_collision(
-            geo_a, geo_b, point_id, shape_source_ptr, shape_a, rigid_contact_margin
         )
         if not valid:
             return
