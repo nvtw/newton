@@ -889,52 +889,6 @@ def count_contact_points(
     wp.atomic_add(contact_count, 0, num_contacts)
 
 
-# TODO: Remove this function - requires adjustments in the two kernels below
-# This function reorders contact pairs based on their geometry type indices to simplify collision detection.
-# It ensures that pairs like sphere-plane and plane-sphere are handled by the same code branch.
-# However, this requires careful handling since the if/elif tree makes assumptions about type ordering
-# (e.g., that SPHERE has the lowest index), which does not hold anymore for the new MuJoCo-compatible ordering.
-# Adjusting the if/elif tree is more tricky than one might expect, so it is postponed for now.
-
-# For reference: The original type constants before adapting to MuJoCo-compatible ordering
-# GEO_SPHERE = wp.constant(0)
-# GEO_BOX = wp.constant(1)
-# GEO_CAPSULE = wp.constant(2)
-# GEO_CYLINDER = wp.constant(3)
-# GEO_CONE = wp.constant(4)
-# GEO_MESH = wp.constant(5)
-# GEO_SDF = wp.constant(6)
-# GEO_PLANE = wp.constant(7)
-# GEO_NONE = wp.constant(8)
-
-
-@wp.func
-def geo_new_to_old_map(new_geo_type: int) -> int:
-    """Python version: Convert new MuJoCo-compatible geometry type to old collision detection ordering."""
-    if new_geo_type == 0:  # GeoType.PLANE
-        return 7
-    elif new_geo_type == 1:  # GeoType.HFIELD
-        return 8  # treat as GeoType.NONE equivalent
-    elif new_geo_type == 2:  # GeoType.SPHERE
-        return 0
-    elif new_geo_type == 3:  # GeoType.CAPSULE
-        return 2
-    elif new_geo_type == 4:  # GeoType.ELLIPSOID
-        return 8  # treat as GeoType.NONE equivalent
-    elif new_geo_type == 5:  # GeoType.CYLINDER
-        return 3
-    elif new_geo_type == 6:  # GeoType.BOX
-        return 1
-    elif new_geo_type == 7:  # GeoType.MESH
-        return 5
-    elif new_geo_type == 8:  # GeoType.SDF
-        return 6
-    elif new_geo_type == 9:  # GeoType.CONE
-        return 4
-    else:  # GeoType.NONE (10) or any other value
-        return 8
-
-
 @wp.func
 def isCase(actual_type_a: int, actual_type_b: int, target_a: int, target_b: int) -> bool:
     return (actual_type_a == target_a and actual_type_b == target_b) or (
@@ -945,8 +899,8 @@ def isCase(actual_type_a: int, actual_type_b: int, target_a: int, target_b: int)
 @wp.func
 def allocate_contact_points(
     num_contacts: int,
-    write_shape_a: int,
-    write_shape_b: int,
+    actual_shape_a: int,
+    actual_shape_b: int,
     pair_index_ab: int,
     pair_index_ba: int,
     rigid_contact_max: int,
@@ -961,8 +915,8 @@ def allocate_contact_points(
 
     Args:
         num_contacts: Number of contacts to allocate
-        write_shape_a: First shape index
-        write_shape_b: Second shape index
+        actual_shape_a: First shape index
+        actual_shape_b: Second shape index
         pair_index_ab: Pair index for shape A to B
         pair_index_ba: Pair index for shape B to A
         rigid_contact_max: Maximum number of rigid contacts allowed
@@ -984,8 +938,8 @@ def allocate_contact_points(
         # allocate contact points
         for i in range(num_contacts):
             cp_index = index + i
-            contact_shape0[cp_index] = write_shape_a
-            contact_shape1[cp_index] = write_shape_b
+            contact_shape0[cp_index] = actual_shape_a
+            contact_shape1[cp_index] = actual_shape_b
             contact_point_id[cp_index] = i
 
         if contact_point_limit:
@@ -1072,16 +1026,6 @@ def broadphase_collision_pairs(
         if d > r_a + r_b + rigid_contact_margin:
             return
 
-    # if geo_new_to_old_map(type_a) < geo_new_to_old_map(type_b):
-    #     write_shape_a = shape_a
-    #     write_shape_b = shape_b
-    # else:
-    #     write_shape_a = shape_b
-    #     write_shape_b = shape_a
-
-    write_shape_a = actual_shape_a
-    write_shape_b = actual_shape_b
-
     pair_index_ab = actual_shape_a * num_shapes + actual_shape_b
     pair_index_ba = actual_shape_b * num_shapes + actual_shape_a
 
@@ -1111,13 +1055,13 @@ def broadphase_collision_pairs(
             return
         # allocate contact points from capsule A against mesh B
         for i in range(num_contacts_a):
-            contact_shape0[index + i] = write_shape_a
-            contact_shape1[index + i] = write_shape_b
+            contact_shape0[index + i] = actual_shape_a
+            contact_shape1[index + i] = actual_shape_b
             contact_point_id[index + i] = i
         # allocate contact points from mesh B against capsule A
         for i in range(num_contacts_b):
-            contact_shape0[index + num_contacts_a + i] = write_shape_b
-            contact_shape1[index + num_contacts_a + i] = write_shape_a
+            contact_shape0[index + num_contacts_a + i] = actual_shape_b
+            contact_shape1[index + num_contacts_a + i] = actual_shape_a
             contact_point_id[index + num_contacts_a + i] = i
         if mesh_contact_max > 0 and contact_point_limit and pair_index_ba < contact_point_limit.shape[0]:
             num_contacts_b = wp.min(mesh_contact_max, num_contacts_b)
@@ -1157,13 +1101,13 @@ def broadphase_collision_pairs(
             return
         # allocate contact points from box A against mesh B
         for i in range(num_contacts_a):
-            contact_shape0[index + i] = write_shape_a
-            contact_shape1[index + i] = write_shape_b
+            contact_shape0[index + i] = actual_shape_a
+            contact_shape1[index + i] = actual_shape_b
             contact_point_id[index + i] = i
         # allocate contact points from mesh B against box A
         for i in range(num_contacts_b):
-            contact_shape0[index + num_contacts_a + i] = write_shape_b
-            contact_shape1[index + num_contacts_a + i] = write_shape_a
+            contact_shape0[index + num_contacts_a + i] = actual_shape_b
+            contact_shape1[index + num_contacts_a + i] = actual_shape_a
             contact_point_id[index + num_contacts_a + i] = i
 
         if mesh_contact_max > 0 and contact_point_limit and pair_index_ba < contact_point_limit.shape[0]:
@@ -1201,13 +1145,13 @@ def broadphase_collision_pairs(
                 return
             # allocate contact points from mesh A against B
             for i in range(num_contacts_a):
-                contact_shape0[index + i] = write_shape_a
-                contact_shape1[index + i] = write_shape_b
+                contact_shape0[index + i] = actual_shape_a
+                contact_shape1[index + i] = actual_shape_b
                 contact_point_id[index + i] = i
             # allocate contact points from mesh B against A
             for i in range(num_contacts_b):
-                contact_shape0[index + num_contacts_a + i] = write_shape_b
-                contact_shape1[index + num_contacts_a + i] = write_shape_a
+                contact_shape0[index + num_contacts_a + i] = actual_shape_b
+                contact_shape1[index + num_contacts_a + i] = actual_shape_a
                 contact_point_id[index + num_contacts_a + i] = i
 
             if mesh_contact_max > 0 and contact_point_limit:
@@ -1235,13 +1179,13 @@ def broadphase_collision_pairs(
                 return
             # allocate contact points from mesh A against B
             for i in range(num_contacts_a):
-                contact_shape0[index + i] = write_shape_a
-                contact_shape1[index + i] = write_shape_b
+                contact_shape0[index + i] = actual_shape_a
+                contact_shape1[index + i] = actual_shape_b
                 contact_point_id[index + i] = i
             # allocate contact points from mesh B against A
             for i in range(num_contacts_b):
-                contact_shape0[index + num_contacts_a + i] = write_shape_b
-                contact_shape1[index + num_contacts_a + i] = write_shape_a
+                contact_shape0[index + num_contacts_a + i] = actual_shape_b
+                contact_shape1[index + num_contacts_a + i] = actual_shape_a
                 contact_point_id[index + num_contacts_a + i] = i
 
             if mesh_contact_max > 0 and contact_point_limit:
@@ -1262,8 +1206,8 @@ def broadphase_collision_pairs(
     # Allocate contact points using reusable method
     success = allocate_contact_points(
         num_contacts,
-        write_shape_a,
-        write_shape_b,
+        actual_shape_a,
+        actual_shape_b,
         pair_index_ab,
         pair_index_ba,
         rigid_contact_max,
@@ -2000,9 +1944,7 @@ def sphere_plane_collision(
         tuple: (p_a_world, p_b_world, normal, distance)
     """
     p_a_world = wp.transform_get_translation(geo_a.X_ws)
-    p_b_body = closest_point_plane(
-        geo_b.geo_scale[0], geo_b.geo_scale[1], wp.transform_point(geo_b.X_sw, p_a_world)
-    )
+    p_b_body = closest_point_plane(geo_b.geo_scale[0], geo_b.geo_scale[1], wp.transform_point(geo_b.X_sw, p_a_world))
     p_b_world = wp.transform_point(geo_b.X_ws, p_b_body)
     diff = p_a_world - p_b_world
     normal = wp.transform_vector(geo_b.X_ws, wp.vec3(0.0, 0.0, 1.0))
@@ -2104,7 +2046,9 @@ def handle_contact_pairs(
             return
 
     elif geo_a.geo_type == GeoType.MESH and geo_b.geo_type == GeoType.CAPSULE:
-        p_a_world, p_b_world, normal, distance = mesh_capsule_collision(geo_a, geo_b, point_id, shape_source_ptr, shape_a)
+        p_a_world, p_b_world, normal, distance = mesh_capsule_collision(
+            geo_a, geo_b, point_id, shape_source_ptr, shape_a
+        )
 
     elif geo_a.geo_type == GeoType.PLANE and geo_b.geo_type == GeoType.CAPSULE:
         p_a_world, p_b_world, normal, distance = capsule_plane_collision(geo_b, geo_a, point_id, edge_sdf_iter)
