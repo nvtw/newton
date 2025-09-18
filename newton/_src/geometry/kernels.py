@@ -1247,7 +1247,6 @@ def create_geo_data(
     shape_scale: wp.array(dtype=wp.vec3),
     shape_thickness: wp.array(dtype=float),
 ) -> GeoData:
-
     geo_data = GeoData()
 
     geo_data.shape_index = shape_index
