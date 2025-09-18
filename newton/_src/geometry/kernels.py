@@ -2022,16 +2022,22 @@ def handle_contact_pairs(
             return
 
     elif geo_a.geo_type == GeoType.PLANE and geo_b.geo_type == GeoType.SPHERE:
-        p_a_world, p_b_world, normal, distance = sphere_plane_collision(geo_b, geo_a)
+        p_b_world, p_a_world, neg_normal, distance = sphere_plane_collision(geo_b, geo_a)
+        # Flip the normal since we flipped the arguments
+        normal = -neg_normal
 
     elif geo_a.geo_type == GeoType.BOX and geo_b.geo_type == GeoType.BOX:
         p_a_world, p_b_world, normal, distance = box_box_collision(geo_a, geo_b, point_id, edge_sdf_iter)
 
     elif geo_a.geo_type == GeoType.CAPSULE and geo_b.geo_type == GeoType.BOX:
-        p_a_world, p_b_world, normal, distance = box_capsule_collision(geo_b, geo_a, point_id, edge_sdf_iter)
+        p_b_world, p_a_world, neg_normal, distance = box_capsule_collision(geo_b, geo_a, point_id, edge_sdf_iter)
+        # Flip the normal since we flipped the arguments
+        normal = -neg_normal
 
     elif geo_a.geo_type == GeoType.PLANE and geo_b.geo_type == GeoType.BOX:
-        p_a_world, p_b_world, normal, distance, valid = box_plane_collision(geo_b, geo_a, point_id, edge_sdf_iter)
+        p_b_world, p_a_world, neg_normal, distance, valid = box_plane_collision(geo_b, geo_a, point_id, edge_sdf_iter)
+        # Flip the normal since we flipped the arguments
+        normal = -neg_normal
         if not valid:
             return
 
@@ -2051,7 +2057,9 @@ def handle_contact_pairs(
         )
 
     elif geo_a.geo_type == GeoType.PLANE and geo_b.geo_type == GeoType.CAPSULE:
-        p_a_world, p_b_world, normal, distance = capsule_plane_collision(geo_b, geo_a, point_id, edge_sdf_iter)
+        p_b_world, p_a_world, neg_normal, distance = capsule_plane_collision(geo_b, geo_a, point_id, edge_sdf_iter)
+        # Flip the normal since we flipped the arguments
+        normal = -neg_normal
 
     elif geo_a.geo_type == GeoType.MESH and geo_b.geo_type == GeoType.BOX:
         p_a_world, p_b_world, normal, distance = mesh_box_collision(geo_a, geo_b, point_id, shape_source_ptr, shape_a)
@@ -2071,9 +2079,11 @@ def handle_contact_pairs(
             return
 
     elif geo_a.geo_type == GeoType.PLANE and geo_b.geo_type == GeoType.MESH:
-        p_a_world, p_b_world, normal, distance, valid = mesh_plane_collision(
+        p_b_world, p_a_world, neg_normal, distance, valid = mesh_plane_collision(
             geo_b, geo_a, point_id, shape_source_ptr, shape_b, rigid_contact_margin
         )
+        # Flip the normal since we flipped the arguments
+        normal = -neg_normal
         if not valid:
             return
 
