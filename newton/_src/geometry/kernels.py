@@ -1247,21 +1247,7 @@ def create_geo_data(
     shape_scale: wp.array(dtype=wp.vec3),
     shape_thickness: wp.array(dtype=float),
 ) -> GeoData:
-    """
-    Create a GeoData struct from shape arrays.
 
-    Args:
-        shape_index: Index of the shape
-        body_q: Array of body transforms
-        shape_transform: Array of shape transforms
-        shape_body: Array mapping shapes to bodies
-        shape_type: Array of shape types
-        shape_scale: Array of shape scales
-        shape_thickness: Array of shape thicknesses
-
-    Returns:
-        GeoData: Initialized geometry data struct
-    """
     geo_data = GeoData()
 
     geo_data.shape_index = shape_index
@@ -1303,12 +1289,6 @@ def capsule_plane_collision(
     point_id: int,
     edge_sdf_iter: int,
 ):
-    """
-    Handle collision between a capsule (geo_a) and a plane (geo_b).
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance)
-    """
     plane_width = geo_b.geo_scale[0]
     plane_length = geo_b.geo_scale[1]
 
@@ -1358,12 +1338,6 @@ def mesh_box_collision(
     shape_source_ptr: wp.array(dtype=wp.uint64),
     shape_a: int,
 ):
-    """
-    Handle collision between a mesh (geo_a) and a box (geo_b).
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance)
-    """
     # vertex-based contact
     mesh = wp.mesh_get(shape_source_ptr[shape_a])
     body_a_pos = wp.cw_mul(mesh.points[point_id], geo_a.geo_scale)
@@ -1393,13 +1367,6 @@ def mesh_mesh_collision(
     rigid_contact_margin: float,
     thickness: float,
 ):
-    """
-    Handle collision between two meshes (geo_a and geo_b).
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance, valid)
-        where valid indicates if a valid collision was found
-    """
     # vertex-based contact
     mesh = wp.mesh_get(shape_source_ptr[shape_a])
     mesh_b = shape_source_ptr[shape_b]
@@ -1447,13 +1414,6 @@ def mesh_plane_collision(
     shape_a: int,
     rigid_contact_margin: float,
 ):
-    """
-    Handle collision between a mesh (geo_a) and a plane (geo_b).
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance, valid)
-        where valid indicates if a valid collision was found
-    """
     # vertex-based contact
     mesh = wp.mesh_get(shape_source_ptr[shape_a])
     body_a_pos = wp.cw_mul(mesh.points[point_id], geo_a.geo_scale)
@@ -1490,12 +1450,6 @@ def mesh_capsule_collision(
     shape_source_ptr: wp.array(dtype=wp.uint64),
     shape_a: int,
 ):
-    """
-    Handle collision between a mesh (geo_a) and a capsule (geo_b).
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance)
-    """
     # vertex-based contact
     mesh = wp.mesh_get(shape_source_ptr[shape_a])
     body_a_pos = wp.cw_mul(mesh.points[point_id], geo_a.geo_scale)
@@ -1524,13 +1478,6 @@ def capsule_mesh_collision(
     thickness: float,
     edge_sdf_iter: int,
 ):
-    """
-    Handle collision between a capsule (geo_a) and a mesh (geo_b).
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance, valid)
-        where valid indicates if a valid collision was found
-    """
     # find closest edge coordinate to mesh SDF B
     half_height_a = geo_a.geo_scale[1]
     # edge from capsule A
@@ -1585,12 +1532,6 @@ def capsule_capsule_collision(
     point_id: int,
     edge_sdf_iter: int,
 ):
-    """
-    Handle collision between two capsules (geo_a and geo_b).
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance)
-    """
     # find closest edge coordinate to capsule SDF B
     half_height_a = geo_a.geo_scale[1]
     half_height_b = geo_b.geo_scale[1]
@@ -1622,12 +1563,6 @@ def box_box_collision(
     point_id: int,
     edge_sdf_iter: int,
 ):
-    """
-    Handle collision between two boxes (geo_a and geo_b).
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance)
-    """
     # edge-based box contact
     edge = get_box_edge(point_id, geo_a.geo_scale)
     edge0_world = wp.transform_point(geo_a.X_ws, wp.spatial_top(edge))
@@ -1657,12 +1592,6 @@ def box_capsule_collision(
     point_id: int,
     edge_sdf_iter: int,
 ):
-    """
-    Handle collision between a box (geo_a) and a capsule (geo_b).
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance)
-    """
     half_height_b = geo_b.geo_scale[1]
     # capsule B
     # depending on point id, we query an edge from 0 to 0.5 or 0.5 to 1
@@ -1694,13 +1623,6 @@ def box_plane_collision(
     point_id: int,
     edge_sdf_iter: int,
 ):
-    """
-    Handle collision between a box (geo_a) and a plane (geo_b).
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance, valid)
-        where valid indicates if a valid collision was found
-    """
     plane_width = geo_b.geo_scale[0]
     plane_length = geo_b.geo_scale[1]
 
@@ -1773,13 +1695,6 @@ def box_mesh_collision(
     rigid_contact_margin: float,
     thickness: float,
 ):
-    """
-    Handle collision between a box (geo_a) and a mesh (geo_b).
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance, valid)
-        where valid indicates if a valid collision was found
-    """
     # vertex-based contact
     query_a = get_box_vertex(point_id, geo_a.geo_scale)
     p_a_world = wp.transform_point(geo_a.X_ws, query_a)
@@ -1818,12 +1733,6 @@ def sphere_sphere_collision(
     geo_a: GeoData,
     geo_b: GeoData,
 ):
-    """
-    Handle collision between two spheres.
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance)
-    """
     p_a_world = wp.transform_get_translation(geo_a.X_ws)
     p_b_world = wp.transform_get_translation(geo_b.X_ws)
     diff = p_a_world - p_b_world
@@ -1838,12 +1747,6 @@ def sphere_box_collision(
     geo_a: GeoData,
     geo_b: GeoData,
 ):
-    """
-    Handle collision between a sphere (geo_a) and a box (geo_b).
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance)
-    """
     p_a_world = wp.transform_get_translation(geo_a.X_ws)
     # contact point in frame of body B
     p_a_body = wp.transform_point(geo_b.X_sw, p_a_world)
@@ -1861,12 +1764,6 @@ def sphere_capsule_collision(
     geo_a: GeoData,
     geo_b: GeoData,
 ):
-    """
-    Handle collision between a sphere (geo_a) and a capsule (geo_b).
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance)
-    """
     p_a_world = wp.transform_get_translation(geo_a.X_ws)
     half_height_b = geo_b.geo_scale[1]
     # capsule B
@@ -1889,13 +1786,6 @@ def sphere_mesh_collision(
     rigid_contact_margin: float,
     thickness: float,
 ):
-    """
-    Handle collision between a sphere (geo_a) and a mesh (geo_b).
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance, valid)
-        where valid indicates if a valid collision was found
-    """
     p_a_world = wp.transform_get_translation(geo_a.X_ws)
     mesh_b = shape_source_ptr[shape_b]
     query_b_local = wp.transform_point(geo_b.X_sw, p_a_world)
@@ -1930,12 +1820,6 @@ def sphere_plane_collision(
     geo_a: GeoData,
     geo_b: GeoData,
 ):
-    """
-    Handle collision between a sphere (geo_a) and a plane (geo_b).
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance)
-    """
     p_a_world = wp.transform_get_translation(geo_a.X_ws)
     p_b_body = closest_point_plane(geo_b.geo_scale[0], geo_b.geo_scale[1], wp.transform_point(geo_b.X_sw, p_a_world))
     p_b_world = wp.transform_point(geo_b.X_ws, p_b_body)
@@ -1951,13 +1835,6 @@ def plane_sphere_collision(
     geo_a: GeoData,
     geo_b: GeoData,
 ):
-    """
-    Handle collision between a plane (geo_a) and a sphere (geo_b).
-    This is a flipped version of sphere_plane_collision.
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance)
-    """
     # Call sphere_plane_collision with flipped arguments
     p_b_world, p_a_world, neg_normal, distance = sphere_plane_collision(geo_b, geo_a)
     # Flip the normal since we flipped the arguments
@@ -1972,13 +1849,6 @@ def plane_box_collision(
     point_id: int,
     edge_sdf_iter: int,
 ):
-    """
-    Handle collision between a plane (geo_a) and a box (geo_b).
-    This is a flipped version of box_plane_collision.
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance, valid)
-    """
     # Call box_plane_collision with flipped arguments
     p_b_world, p_a_world, neg_normal, distance, valid = box_plane_collision(geo_b, geo_a, point_id, edge_sdf_iter)
     # Flip the normal since we flipped the arguments
@@ -1993,13 +1863,6 @@ def plane_capsule_collision(
     point_id: int,
     edge_sdf_iter: int,
 ):
-    """
-    Handle collision between a plane (geo_a) and a capsule (geo_b).
-    This is a flipped version of capsule_plane_collision.
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance)
-    """
     # Call capsule_plane_collision with flipped arguments
     p_b_world, p_a_world, neg_normal, distance = capsule_plane_collision(geo_b, geo_a, point_id, edge_sdf_iter)
     # Flip the normal since we flipped the arguments
@@ -2016,13 +1879,6 @@ def plane_mesh_collision(
     shape_b: int,
     rigid_contact_margin: float,
 ):
-    """
-    Handle collision between a plane (geo_a) and a mesh (geo_b).
-    This is a flipped version of mesh_plane_collision.
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance, valid)
-    """
     # Call mesh_plane_collision with flipped arguments
     p_b_world, p_a_world, neg_normal, distance, valid = mesh_plane_collision(
         geo_b, geo_a, point_id, shape_source_ptr, shape_b, rigid_contact_margin
@@ -2039,13 +1895,6 @@ def capsule_box_collision(
     point_id: int,
     edge_sdf_iter: int,
 ):
-    """
-    Handle collision between a capsule (geo_a) and a box (geo_b).
-    This is a flipped version of box_capsule_collision.
-
-    Returns:
-        tuple: (p_a_world, p_b_world, normal, distance)
-    """
     # Call box_capsule_collision with flipped arguments
     p_b_world, p_a_world, neg_normal, distance = box_capsule_collision(geo_b, geo_a, point_id, edge_sdf_iter)
     # Flip the normal since we flipped the arguments
