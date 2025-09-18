@@ -836,10 +836,13 @@ def count_contact_points(
 
     # CAPSULE against all other types
     elif actual_type_a == GeoType.PLANE and actual_type_b == GeoType.CAPSULE:
-        if shape_scale[actual_shape_a][0] == 0.0 and shape_scale[actual_shape_a][1] == 0.0:
+        if actual_shape_a < 0:  # infinite plane
             num_contacts = 2  # vertex-based collision for infinite plane
         else:
-            num_contacts = 2 + 4  # vertex-based collision + plane edges
+            if shape_scale[actual_shape_a][0] == 0.0 and shape_scale[actual_shape_a][1] == 0.0:
+                num_contacts = 2  # vertex-based collision for infinite plane
+            else:
+                num_contacts = 2 + 4  # vertex-based collision + plane edges
     elif actual_type_a == GeoType.CAPSULE and actual_type_b == GeoType.MESH:
         num_contacts_a = 2
         mesh_b = wp.mesh_get(shape_source_ptr[actual_shape_b])
@@ -857,15 +860,18 @@ def count_contact_points(
         num_contacts_b = mesh_b.points.shape[0]
         num_contacts = num_contacts_a + num_contacts_b
     elif actual_type_a == GeoType.PLANE and actual_type_b == GeoType.BOX:
-        if shape_scale[actual_shape_a][0] == 0.0 and shape_scale[actual_shape_a][1] == 0.0:
+        if actual_shape_a < 0:  # infinite plane
             num_contacts = 8  # vertex-based collision
         else:
-            num_contacts = 8 + 4  # vertex-based collision + plane edges
+            if shape_scale[actual_shape_a][0] == 0.0 and shape_scale[actual_shape_a][1] == 0.0:
+                num_contacts = 8  # vertex-based collision
+            else:
+                num_contacts = 8 + 4  # vertex-based collision + plane edges
 
     elif actual_type_a == GeoType.BOX or actual_type_b == GeoType.BOX:
         num_contacts = 8
 
-    elif (actual_type_a == GeoType.PLANE or actual_shape_a == GeoType.ELLIPSOID) and actual_type_b == GeoType.MESH:
+    elif (actual_type_a == GeoType.PLANE or actual_type_a == GeoType.ELLIPSOID) and actual_type_b == GeoType.MESH:
         mesh_b = wp.mesh_get(shape_source_ptr[actual_shape_b])
         num_contacts_a = mesh_b.points.shape[0]
         num_contacts = num_contacts_a
@@ -1287,7 +1293,7 @@ def create_geo_data(
     # Set geometry properties
     geo_data.geo_type = shape_type[shape_index]
     geo_data.geo_scale = shape_scale[shape_index]
-    geo_data.min_scale = min(geo_data.geo_scale)
+    geo_data.min_scale = wp.min(geo_data.geo_scale)
     geo_data.thickness = shape_thickness[shape_index]
 
     # Determine effective radius
@@ -1509,8 +1515,8 @@ def mesh_capsule_collision(
     p_a_world = wp.transform_point(geo_a.X_ws, body_a_pos)
     # find closest point + contact normal on capsule B
     half_height_b = geo_b.geo_scale[1]
-    A_b = wp.transform_point(geo_b.X_ws, wp.vec3(0.0, half_height_b, 0.0))
-    B_b = wp.transform_point(geo_b.X_ws, wp.vec3(0.0, -half_height_b, 0.0))
+    A_b = wp.transform_point(geo_b.X_ws, wp.vec3(0.0, 0.0, half_height_b))
+    B_b = wp.transform_point(geo_b.X_ws, wp.vec3(0.0, 0.0, -half_height_b))
     p_b_world = closest_point_line_segment(A_b, B_b, p_a_world)
     diff = p_a_world - p_b_world
     # this is more reliable in practice than using the SDF gradient
@@ -1542,8 +1548,8 @@ def capsule_mesh_collision(
     half_height_a = geo_a.geo_scale[1]
     # edge from capsule A
     # depending on point id, we query an edge from -h to 0 or 0 to h
-    e0 = wp.vec3(0.0, -half_height_a * float(point_id % 2), 0.0)
-    e1 = wp.vec3(0.0, half_height_a * float((point_id + 1) % 2), 0.0)
+    e0 = wp.vec3(0.0, 0.0, -half_height_a * float(point_id % 2))
+    e1 = wp.vec3(0.0, 0.0, half_height_a * float((point_id + 1) % 2))
     edge0_world = wp.transform_point(geo_a.X_ws, e0)
     edge1_world = wp.transform_point(geo_a.X_ws, e1)
     edge0_b = wp.transform_point(geo_b.X_sw, edge0_world)
@@ -1603,8 +1609,8 @@ def capsule_capsule_collision(
     half_height_b = geo_b.geo_scale[1]
     # edge from capsule A
     # depending on point id, we query an edge from 0 to 0.5 or 0.5 to 1
-    e0 = wp.vec3(0.0, half_height_a * float(point_id % 2), 0.0)
-    e1 = wp.vec3(0.0, -half_height_a * float((point_id + 1) % 2), 0.0)
+    e0 = wp.vec3(0.0, 0.0, half_height_a * float(point_id % 2))
+    e1 = wp.vec3(0.0, 0.0, -half_height_a * float((point_id + 1) % 2))
     edge0_world = wp.transform_point(geo_a.X_ws, e0)
     edge1_world = wp.transform_point(geo_a.X_ws, e1)
     edge0_b = wp.transform_point(geo_b.X_sw, edge0_world)
@@ -1612,8 +1618,8 @@ def capsule_capsule_collision(
     max_iter = edge_sdf_iter
     u = closest_edge_coordinate_capsule(geo_b.geo_scale[0], geo_b.geo_scale[1], edge0_b, edge1_b, max_iter)
     p_a_world = (1.0 - u) * edge0_world + u * edge1_world
-    p0_b_world = wp.transform_point(geo_b.X_ws, wp.vec3(0.0, half_height_b, 0.0))
-    p1_b_world = wp.transform_point(geo_b.X_ws, wp.vec3(0.0, -half_height_b, 0.0))
+    p0_b_world = wp.transform_point(geo_b.X_ws, wp.vec3(0.0, 0.0, half_height_b))
+    p1_b_world = wp.transform_point(geo_b.X_ws, wp.vec3(0.0, 0.0, -half_height_b))
     p_b_world = closest_point_line_segment(p0_b_world, p1_b_world, p_a_world)
     diff = p_a_world - p_b_world
     normal = wp.normalize(diff)
@@ -1673,8 +1679,8 @@ def box_capsule_collision(
     half_height_b = geo_b.geo_scale[1]
     # capsule B
     # depending on point id, we query an edge from 0 to 0.5 or 0.5 to 1
-    e0 = wp.vec3(0.0, -half_height_b * float(point_id % 2), 0.0)
-    e1 = wp.vec3(0.0, half_height_b * float((point_id + 1) % 2), 0.0)
+    e0 = wp.vec3(0.0, 0.0, -half_height_b * float(point_id % 2))
+    e1 = wp.vec3(0.0, 0.0, half_height_b * float((point_id + 1) % 2))
     edge0_world = wp.transform_point(geo_b.X_ws, e0)
     edge1_world = wp.transform_point(geo_b.X_ws, e1)
     edge0_a = wp.transform_point(geo_a.X_sw, edge0_world)
@@ -1721,7 +1727,7 @@ def box_plane_collision(
         diff = p_a_world - p_b_world
         normal = wp.transform_vector(geo_b.X_ws, wp.vec3(0.0, 0.0, 1.0))
         if plane_width > 0.0 and plane_length > 0.0:
-            if wp.abs(query_b[0]) > plane_width or wp.abs(query_b[2]) > plane_length:
+            if wp.abs(query_b[0]) > plane_width or wp.abs(query_b[1]) > plane_length:
                 # skip, we will evaluate the plane edge contact with the box later
                 valid = False
                 distance = 1.0e6
@@ -1750,7 +1756,7 @@ def box_plane_collision(
         p_a_body = closest_point_box(geo_a.geo_scale, query_a)
         p_a_world = wp.transform_point(geo_a.X_ws, p_a_body)
         query_b = wp.transform_point(geo_b.X_sw, p_a_world)
-        if wp.abs(query_b[0]) > plane_width or wp.abs(query_b[2]) > plane_length:
+        if wp.abs(query_b[0]) > plane_width or wp.abs(query_b[1]) > plane_length:
             # ensure that the closest point is actually inside the plane
             valid = False
             normal = wp.vec3(0.0, 0.0, 1.0)
@@ -1759,7 +1765,7 @@ def box_plane_collision(
         diff = p_a_world - p_b_world
         com_a = wp.transform_get_translation(geo_a.X_ws)
         query_b = wp.transform_point(geo_b.X_sw, com_a)
-        if wp.abs(query_b[0]) > plane_width or wp.abs(query_b[2]) > plane_length:
+        if wp.abs(query_b[0]) > plane_width or wp.abs(query_b[1]) > plane_length:
             # the COM is outside the plane
             normal = wp.normalize(com_a - p_b_world)
         else:
@@ -1877,8 +1883,8 @@ def sphere_capsule_collision(
     p_a_world = wp.transform_get_translation(geo_a.X_ws)
     half_height_b = geo_b.geo_scale[1]
     # capsule B
-    A_b = wp.transform_point(geo_b.X_ws, wp.vec3(0.0, half_height_b, 0.0))
-    B_b = wp.transform_point(geo_b.X_ws, wp.vec3(0.0, -half_height_b, 0.0))
+    A_b = wp.transform_point(geo_b.X_ws, wp.vec3(0.0, 0.0, half_height_b))
+    B_b = wp.transform_point(geo_b.X_ws, wp.vec3(0.0, 0.0, -half_height_b))
     p_b_world = closest_point_line_segment(A_b, B_b, p_a_world)
     diff = p_a_world - p_b_world
     normal = wp.normalize(diff)
