@@ -1356,6 +1356,192 @@ def create_geo_data(
     return geo_data
 
 
+@wp.func
+def capsule_plane_collision(
+    geo_a: GeoData,
+    geo_b: GeoData,
+    point_id: int,
+    edge_sdf_iter: int,
+):
+    """
+    Handle collision between a capsule (geo_a) and a plane (geo_b).
+
+    Returns:
+        tuple: (p_a_world, p_b_world, normal, distance)
+    """
+    plane_width = geo_b.geo_scale[0]
+    plane_length = geo_b.geo_scale[1]
+
+    if point_id < 2:
+        # vertex-based collision
+        half_height_a = geo_a.geo_scale[1]
+        side = float(point_id) * 2.0 - 1.0
+        p_a_world = wp.transform_point(geo_a.X_ws, wp.vec3(0.0, 0.0, side * half_height_a))
+        query_b = wp.transform_point(geo_b.X_sw, p_a_world)
+        p_b_body = closest_point_plane(geo_b.geo_scale[0], geo_b.geo_scale[1], query_b)
+        p_b_world = wp.transform_point(geo_b.X_ws, p_b_body)
+        diff = p_a_world - p_b_world
+        if geo_b.geo_scale[0] > 0.0 and geo_b.geo_scale[1] > 0.0:
+            normal = wp.normalize(diff)
+        else:
+            normal = wp.transform_vector(geo_b.X_ws, wp.vec3(0.0, 0.0, 1.0))
+        distance = wp.dot(diff, normal)
+    else:
+        # contact between capsule A and edges of finite plane B
+        edge = get_plane_edge(point_id - 2, plane_width, plane_length)
+        edge0_world = wp.transform_point(geo_b.X_ws, wp.spatial_top(edge))
+        edge1_world = wp.transform_point(geo_b.X_ws, wp.spatial_bottom(edge))
+        edge0_a = wp.transform_point(geo_a.X_sw, edge0_world)
+        edge1_a = wp.transform_point(geo_a.X_sw, edge1_world)
+        max_iter = edge_sdf_iter
+        u = closest_edge_coordinate_capsule(geo_a.geo_scale[0], geo_a.geo_scale[1], edge0_a, edge1_a, max_iter)
+        p_b_world = (1.0 - u) * edge0_world + u * edge1_world
+
+        # find closest point + contact normal on capsule A
+        half_height_a = geo_a.geo_scale[1]
+        p0_a_world = wp.transform_point(geo_a.X_ws, wp.vec3(0.0, 0.0, half_height_a))
+        p1_a_world = wp.transform_point(geo_a.X_ws, wp.vec3(0.0, 0.0, -half_height_a))
+        p_a_world = closest_point_line_segment(p0_a_world, p1_a_world, p_b_world)
+        diff = p_a_world - p_b_world
+        normal = wp.transform_vector(geo_b.X_ws, wp.vec3(0.0, 0.0, 1.0))
+        # normal = wp.normalize(diff)
+        distance = wp.dot(diff, normal)
+
+    return p_a_world, p_b_world, normal, distance
+
+
+@wp.func
+def mesh_box_collision(
+    geo_a: GeoData,
+    geo_b: GeoData,
+    point_id: int,
+    shape_source_ptr: wp.array(dtype=wp.uint64),
+    shape_a: int,
+):
+    """
+    Handle collision between a mesh (geo_a) and a box (geo_b).
+
+    Returns:
+        tuple: (p_a_world, p_b_world, normal, distance)
+    """
+    # vertex-based contact
+    mesh = wp.mesh_get(shape_source_ptr[shape_a])
+    body_a_pos = wp.cw_mul(mesh.points[point_id], geo_a.geo_scale)
+    p_a_world = wp.transform_point(geo_a.X_ws, body_a_pos)
+    # find closest point + contact normal on box B
+    query_b = wp.transform_point(geo_b.X_sw, p_a_world)
+    p_b_body = closest_point_box(geo_b.geo_scale, query_b)
+    p_b_world = wp.transform_point(geo_b.X_ws, p_b_body)
+    diff = p_a_world - p_b_world
+    # this is more reliable in practice than using the SDF gradient
+    normal = wp.normalize(diff)
+    if box_sdf(geo_b.geo_scale, query_b) < 0.0:
+        normal = -normal
+    distance = wp.dot(diff, normal)
+
+    return p_a_world, p_b_world, normal, distance
+
+
+@wp.func
+def mesh_mesh_collision(
+    geo_a: GeoData,
+    geo_b: GeoData,
+    point_id: int,
+    shape_source_ptr: wp.array(dtype=wp.uint64),
+    shape_a: int,
+    shape_b: int,
+    rigid_contact_margin: float,
+    thickness: float,
+):
+    """
+    Handle collision between two meshes (geo_a and geo_b).
+
+    Returns:
+        tuple: (p_a_world, p_b_world, normal, distance, valid)
+        where valid indicates if a valid collision was found
+    """
+    # vertex-based contact
+    mesh = wp.mesh_get(shape_source_ptr[shape_a])
+    mesh_b = shape_source_ptr[shape_b]
+
+    body_a_pos = wp.cw_mul(mesh.points[point_id], geo_a.geo_scale)
+    p_a_world = wp.transform_point(geo_a.X_ws, body_a_pos)
+    query_b_local = wp.transform_point(geo_b.X_sw, p_a_world)
+
+    face_index = int(0)
+    face_u = float(0.0)
+    face_v = float(0.0)
+    sign = float(0.0)
+    min_scale = min(geo_a.min_scale, geo_b.min_scale)
+    max_dist = (rigid_contact_margin + thickness) / min_scale
+
+    res = wp.mesh_query_point_sign_normal(
+        mesh_b, wp.cw_div(query_b_local, geo_b.geo_scale), max_dist, sign, face_index, face_u, face_v
+    )
+
+    if res:
+        shape_p = wp.mesh_eval_position(mesh_b, face_index, face_u, face_v)
+        shape_p = wp.cw_mul(shape_p, geo_b.geo_scale)
+        p_b_world = wp.transform_point(geo_b.X_ws, shape_p)
+        # contact direction vector in world frame
+        diff_b = p_a_world - p_b_world
+        normal = wp.normalize(diff_b) * sign
+        distance = wp.dot(diff_b, normal)
+        valid = True
+    else:
+        # Return dummy values when no collision found
+        p_b_world = wp.vec3(0.0, 0.0, 0.0)
+        normal = wp.vec3(0.0, 0.0, 1.0)
+        distance = 1.0e6
+        valid = False
+
+    return p_a_world, p_b_world, normal, distance, valid
+
+
+@wp.func
+def mesh_plane_collision(
+    geo_a: GeoData,
+    geo_b: GeoData,
+    point_id: int,
+    shape_source_ptr: wp.array(dtype=wp.uint64),
+    shape_a: int,
+    rigid_contact_margin: float,
+):
+    """
+    Handle collision between a mesh (geo_a) and a plane (geo_b).
+
+    Returns:
+        tuple: (p_a_world, p_b_world, normal, distance, valid)
+        where valid indicates if a valid collision was found
+    """
+    # vertex-based contact
+    mesh = wp.mesh_get(shape_source_ptr[shape_a])
+    body_a_pos = wp.cw_mul(mesh.points[point_id], geo_a.geo_scale)
+    p_a_world = wp.transform_point(geo_a.X_ws, body_a_pos)
+    query_b = wp.transform_point(geo_b.X_sw, p_a_world)
+    p_b_body = closest_point_plane(geo_b.geo_scale[0], geo_b.geo_scale[1], query_b)
+    p_b_world = wp.transform_point(geo_b.X_ws, p_b_body)
+    diff = p_a_world - p_b_world
+
+    # if the plane is infinite or the point is within the plane we fix the normal to prevent intersections
+    if (geo_b.geo_scale[0] == 0.0 and geo_b.geo_scale[1] == 0.0) or (
+        wp.abs(query_b[0]) < geo_b.geo_scale[0] and wp.abs(query_b[1]) < geo_b.geo_scale[1]
+    ):
+        normal = wp.transform_vector(geo_b.X_ws, wp.vec3(0.0, 0.0, 1.0))
+        distance = wp.dot(diff, normal)
+        valid = True
+    else:
+        normal = wp.normalize(diff)
+        distance = wp.dot(diff, normal)
+        # ignore extreme penetrations (e.g. when mesh is below the plane)
+        if distance < -rigid_contact_margin:
+            valid = False
+        else:
+            valid = True
+
+    return p_a_world, p_b_world, normal, distance, valid
+
+
 @wp.kernel
 def handle_contact_pairs(
     body_q: wp.array(dtype=wp.transform),
@@ -1629,60 +1815,10 @@ def handle_contact_pairs(
         distance = wp.dot(diff, normal)
 
     elif geo_a.geo_type == GeoType.CAPSULE and geo_b.geo_type == GeoType.PLANE:
-        plane_width = geo_b.geo_scale[0]
-        plane_length = geo_b.geo_scale[1]
-        if point_id < 2:
-            # vertex-based collision
-            half_height_a = geo_a.geo_scale[1]
-            side = float(point_id) * 2.0 - 1.0
-            p_a_world = wp.transform_point(geo_a.X_ws, wp.vec3(0.0, 0.0, side * half_height_a))
-            query_b = wp.transform_point(geo_b.X_sw, p_a_world)
-            p_b_body = closest_point_plane(geo_b.geo_scale[0], geo_b.geo_scale[1], query_b)
-            p_b_world = wp.transform_point(geo_b.X_ws, p_b_body)
-            diff = p_a_world - p_b_world
-            if geo_b.geo_scale[0] > 0.0 and geo_b.geo_scale[1] > 0.0:
-                normal = wp.normalize(diff)
-            else:
-                normal = wp.transform_vector(geo_b.X_ws, wp.vec3(0.0, 0.0, 1.0))
-            distance = wp.dot(diff, normal)
-        else:
-            # contact between capsule A and edges of finite plane B
-            plane_width = geo_b.geo_scale[0]
-            plane_length = geo_b.geo_scale[1]
-            edge = get_plane_edge(point_id - 2, plane_width, plane_length)
-            edge0_world = wp.transform_point(geo_b.X_ws, wp.spatial_top(edge))
-            edge1_world = wp.transform_point(geo_b.X_ws, wp.spatial_bottom(edge))
-            edge0_a = wp.transform_point(geo_a.X_sw, edge0_world)
-            edge1_a = wp.transform_point(geo_a.X_sw, edge1_world)
-            max_iter = edge_sdf_iter
-            u = closest_edge_coordinate_capsule(geo_a.geo_scale[0], geo_a.geo_scale[1], edge0_a, edge1_a, max_iter)
-            p_b_world = (1.0 - u) * edge0_world + u * edge1_world
-
-            # find closest point + contact normal on capsule A
-            half_height_a = geo_a.geo_scale[1]
-            p0_a_world = wp.transform_point(geo_a.X_ws, wp.vec3(0.0, 0.0, half_height_a))
-            p1_a_world = wp.transform_point(geo_a.X_ws, wp.vec3(0.0, 0.0, -half_height_a))
-            p_a_world = closest_point_line_segment(p0_a_world, p1_a_world, p_b_world)
-            diff = p_a_world - p_b_world
-            normal = wp.transform_vector(geo_b.X_ws, wp.vec3(0.0, 0.0, 1.0))
-            # normal = wp.normalize(diff)
-            distance = wp.dot(diff, normal)
+        p_a_world, p_b_world, normal, distance = capsule_plane_collision(geo_a, geo_b, point_id, edge_sdf_iter)
 
     elif geo_a.geo_type == GeoType.MESH and geo_b.geo_type == GeoType.BOX:
-        # vertex-based contact
-        mesh = wp.mesh_get(shape_source_ptr[shape_a])
-        body_a_pos = wp.cw_mul(mesh.points[point_id], geo_a.geo_scale)
-        p_a_world = wp.transform_point(geo_a.X_ws, body_a_pos)
-        # find closest point + contact normal on box B
-        query_b = wp.transform_point(geo_b.X_sw, p_a_world)
-        p_b_body = closest_point_box(geo_b.geo_scale, query_b)
-        p_b_world = wp.transform_point(geo_b.X_ws, p_b_body)
-        diff = p_a_world - p_b_world
-        # this is more reliable in practice than using the SDF gradient
-        normal = wp.normalize(diff)
-        if box_sdf(geo_b.geo_scale, query_b) < 0.0:
-            normal = -normal
-        distance = wp.dot(diff, normal)
+        p_a_world, p_b_world, normal, distance = mesh_box_collision(geo_a, geo_b, point_id, shape_source_ptr, shape_a)
 
     elif geo_a.geo_type == GeoType.BOX and geo_b.geo_type == GeoType.MESH:
         # vertex-based contact
@@ -1711,58 +1847,18 @@ def handle_contact_pairs(
             return
 
     elif geo_a.geo_type == GeoType.MESH and geo_b.geo_type == GeoType.MESH:
-        # vertex-based contact
-        mesh = wp.mesh_get(shape_source_ptr[shape_a])
-        mesh_b = shape_source_ptr[shape_b]
-
-        body_a_pos = wp.cw_mul(mesh.points[point_id], geo_a.geo_scale)
-        p_a_world = wp.transform_point(geo_a.X_ws, body_a_pos)
-        query_b_local = wp.transform_point(geo_b.X_sw, p_a_world)
-
-        face_index = int(0)
-        face_u = float(0.0)
-        face_v = float(0.0)
-        sign = float(0.0)
-        min_scale = min(geo_a.min_scale, geo_b.min_scale)
-        max_dist = (rigid_contact_margin + thickness) / min_scale
-
-        res = wp.mesh_query_point_sign_normal(
-            mesh_b, wp.cw_div(query_b_local, geo_b.geo_scale), max_dist, sign, face_index, face_u, face_v
+        p_a_world, p_b_world, normal, distance, valid = mesh_mesh_collision(
+            geo_a, geo_b, point_id, shape_source_ptr, shape_a, shape_b, rigid_contact_margin, thickness
         )
-
-        if res:
-            shape_p = wp.mesh_eval_position(mesh_b, face_index, face_u, face_v)
-            shape_p = wp.cw_mul(shape_p, geo_b.geo_scale)
-            p_b_world = wp.transform_point(geo_b.X_ws, shape_p)
-            # contact direction vector in world frame
-            diff_b = p_a_world - p_b_world
-            normal = wp.normalize(diff_b) * sign
-            distance = wp.dot(diff_b, normal)
-        else:
+        if not valid:
             return
 
     elif geo_a.geo_type == GeoType.MESH and geo_b.geo_type == GeoType.PLANE:
-        # vertex-based contact
-        mesh = wp.mesh_get(shape_source_ptr[shape_a])
-        body_a_pos = wp.cw_mul(mesh.points[point_id], geo_a.geo_scale)
-        p_a_world = wp.transform_point(geo_a.X_ws, body_a_pos)
-        query_b = wp.transform_point(geo_b.X_sw, p_a_world)
-        p_b_body = closest_point_plane(geo_b.geo_scale[0], geo_b.geo_scale[1], query_b)
-        p_b_world = wp.transform_point(geo_b.X_ws, p_b_body)
-        diff = p_a_world - p_b_world
-
-        # if the plane is infinite or the point is within the plane we fix the normal to prevent intersections
-        if (geo_b.geo_scale[0] == 0.0 and geo_b.geo_scale[1] == 0.0) or (
-            wp.abs(query_b[0]) < geo_b.geo_scale[0] and wp.abs(query_b[1]) < geo_b.geo_scale[1]
-        ):
-            normal = wp.transform_vector(geo_b.X_ws, wp.vec3(0.0, 0.0, 1.0))
-            distance = wp.dot(diff, normal)
-        else:
-            normal = wp.normalize(diff)
-            distance = wp.dot(diff, normal)
-            # ignore extreme penetrations (e.g. when mesh is below the plane)
-            if distance < -rigid_contact_margin:
-                return
+        p_a_world, p_b_world, normal, distance, valid = mesh_plane_collision(
+            geo_a, geo_b, point_id, shape_source_ptr, shape_a, rigid_contact_margin
+        )
+        if not valid:
+            return
 
     else:
         # print("Unsupported geometry pair in collision handling")
