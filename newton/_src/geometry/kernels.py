@@ -942,13 +942,6 @@ def count_contact_points(
 
 
 @wp.func
-def isCase(actual_type_a: int, actual_type_b: int, target_a: int, target_b: int) -> bool:
-    return (actual_type_a == target_a and actual_type_b == target_b) or (
-        actual_type_a == target_b and actual_type_b == target_a
-    )
-
-
-@wp.func
 def allocate_contact_points(
     num_contacts: int,
     actual_shape_a: int,
@@ -1087,16 +1080,16 @@ def broadphase_collision_pairs(
         num_contacts = 1
     # elif actual_type_a == GeoType.CAPSULE:
     #    if actual_type_b == GeoType.PLANE:
-    elif isCase(actual_type_a, actual_type_b, GeoType.CAPSULE, GeoType.PLANE):
+    elif actual_type_a == GeoType.PLANE and actual_type_b == GeoType.CAPSULE:
         if shape_scale[actual_shape_a][0] == 0.0 and shape_scale[actual_shape_a][1] == 0.0:
             num_contacts = 2  # vertex-based collision for infinite plane
         else:
             num_contacts = 2 + 4  # vertex-based collision + plane edges
-    elif isCase(actual_type_a, actual_type_b, GeoType.CYLINDER, GeoType.PLANE):
+    elif actual_type_a == GeoType.PLANE and actual_type_b == GeoType.CYLINDER:
         # infinite plane: support max primitive contacts (2 caps + 2 side) = 4
         num_contacts = 4
 
-    elif isCase(actual_type_a, actual_type_b, GeoType.MESH, GeoType.CAPSULE):
+    elif actual_type_a == GeoType.CAPSULE and actual_type_b == GeoType.MESH:
         num_contacts_a = 2
         mesh_b = wp.mesh_get(shape_source_ptr[actual_shape_b])
         if iterate_mesh_vertices:
@@ -1125,24 +1118,24 @@ def broadphase_collision_pairs(
 
     elif actual_type_a == GeoType.CAPSULE or actual_type_b == GeoType.CAPSULE:
         num_contacts = 2
-    elif isCase(actual_type_a, actual_type_b, GeoType.BOX, GeoType.BOX):
+    elif actual_type_a == GeoType.BOX and actual_type_b == GeoType.BOX:
         index = wp.atomic_add(contact_count, 0, 24)
         if index + 23 >= rigid_contact_max:
             print("Number of rigid contacts exceeded limit. Increase Model.rigid_contact_max.")
             return
         # allocate contact points from box A against B
         for i in range(12):  # 12 edges
-            contact_shape0[index + i] = shape_a
-            contact_shape1[index + i] = shape_b
+            contact_shape0[index + i] = actual_shape_a
+            contact_shape1[index + i] = actual_shape_b
             contact_point_id[index + i] = i
         # allocate contact points from box B against A
         for i in range(12):
-            contact_shape0[index + 12 + i] = shape_b
-            contact_shape1[index + 12 + i] = shape_a
+            contact_shape0[index + 12 + i] = actual_shape_b
+            contact_shape1[index + 12 + i] = actual_shape_a
             contact_point_id[index + 12 + i] = i
         return
 
-    elif isCase(actual_type_a, actual_type_b, GeoType.BOX, GeoType.MESH):
+    elif actual_type_a == GeoType.BOX and actual_type_b == GeoType.MESH:
         num_contacts_a = 8
         mesh_b = wp.mesh_get(shape_source_ptr[actual_shape_b])
         if iterate_mesh_vertices:
@@ -1170,7 +1163,7 @@ def broadphase_collision_pairs(
             contact_point_limit[pair_index_ba] = num_contacts_b
         return
 
-    elif isCase(actual_type_a, actual_type_b, GeoType.BOX, GeoType.PLANE):
+    elif actual_type_a == GeoType.PLANE and actual_type_b == GeoType.BOX:
         # elif actual_type_b == GeoType.PLANE:
         if shape_scale[actual_shape_a][0] == 0.0 and shape_scale[actual_shape_a][1] == 0.0:
             num_contacts = 8  # vertex-based collision
