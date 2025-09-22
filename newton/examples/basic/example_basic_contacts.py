@@ -28,6 +28,43 @@ from newton._src.geometry.support_function import (
 )
 
 
+# Centralized color table for all shapes
+SHAPE_COLORS = {
+    GeoType.BOX: {
+        "primary": wp.vec3(0.8, 0.2, 0.0),  # Red-orange
+        "secondary": wp.vec3(0.6, 0.15, 0.0),  # Dark red-orange
+        "name": "Red-orange",
+    },
+    GeoType.SPHERE: {
+        "primary": wp.vec3(1.0, 0.5, 0.0),  # Orange
+        "secondary": wp.vec3(0.7, 0.35, 0.0),  # Dark orange
+        "name": "Orange",
+    },
+    GeoType.CAPSULE: {
+        "primary": wp.vec3(1.0, 1.0, 0.0),  # Yellow
+        "secondary": wp.vec3(0.7, 0.7, 0.0),  # Dark yellow
+        "name": "Yellow",
+    },
+    GeoType.CYLINDER: {
+        "primary": wp.vec3(0.0, 0.7, 0.0),  # Green
+        "secondary": wp.vec3(0.0, 0.5, 0.0),  # Dark green
+        "name": "Green",
+    },
+    GeoType.CONE: {
+        "primary": wp.vec3(0.0, 0.0, 1.0),  # Blue
+        "secondary": wp.vec3(0.0, 0.0, 0.7),  # Dark blue
+        "name": "Blue",
+    },
+}
+
+# Contact visualization colors
+CONTACT_COLORS = {
+    "active_contact": wp.vec3(1.0, 0.2, 0.2),  # Red for actual contacts
+    "closest_point": wp.vec3(0.2, 1.0, 0.2),  # Green for closest points
+    "line_default": (0.5, 0.8, 0.5),  # Default line color
+}
+
+
 class ShapePair:
     """Represents a pair of shapes for contact testing"""
 
@@ -46,7 +83,7 @@ class ShapePair:
         self.name_b = name_b
         self.color_a = color_a
         self.color_b = color_b
-        
+
         # Contact results
         self.contact_valid = False
         self.point_a = wp.vec3(0.0, 0.0, 0.0)
@@ -76,7 +113,7 @@ class Example:
 
         # Create all shape types and their combinations (only viewer-supported types)
         self.shape_types = [GeoType.BOX, GeoType.SPHERE, GeoType.CAPSULE, GeoType.CYLINDER, GeoType.CONE]
-        self.shape_names = ["Box", "Sphere", "Capsule", "Cylinder", "Cone"]
+        self.shape_names = [SHAPE_COLORS[shape_type]["name"] for shape_type in self.shape_types]
 
         # Create shape pairs matrix
         self.shape_pairs: list[list[ShapePair]] = []
@@ -84,17 +121,31 @@ class Example:
 
         # Grid layout parameters
         self.grid_spacing = 4.0
-        self.pair_spacing = 1.2  # Distance between shapes in each pair
+        self.base_pair_spacing = 0.8  # Base distance between shapes in each pair (reduced for more contacts)
 
         # Contact buffers for batch processing
-        num_pairs = len(self.shape_types) * len(self.shape_types)
-        self.contact_valid = wp.array([False] * num_pairs, dtype=wp.bool)
-        self.point_a = wp.array([wp.vec3()] * num_pairs, dtype=wp.vec3)
-        self.point_b = wp.array([wp.vec3()] * num_pairs, dtype=wp.vec3)
-        self.normal = wp.array([wp.vec3()] * num_pairs, dtype=wp.vec3)
-        self.penetration = wp.array([0.0] * num_pairs, dtype=float)
-        self.feature_a = wp.array([0] * num_pairs, dtype=int)
-        self.feature_b = wp.array([0] * num_pairs, dtype=int)
+        self.num_pairs = len(self.shape_types) * len(self.shape_types)
+        self.contact_valid = wp.array([False] * self.num_pairs, dtype=wp.bool)
+        self.point_a = wp.array([wp.vec3()] * self.num_pairs, dtype=wp.vec3)
+        self.point_b = wp.array([wp.vec3()] * self.num_pairs, dtype=wp.vec3)
+        self.normal = wp.array([wp.vec3()] * self.num_pairs, dtype=wp.vec3)
+        self.penetration = wp.array([0.0] * self.num_pairs, dtype=float)
+        self.feature_a = wp.array([0] * self.num_pairs, dtype=int)
+        self.feature_b = wp.array([0] * self.num_pairs, dtype=int)
+
+        # Pre-allocate arrays for geometry and transforms (reused each frame)
+        # Initialize geometry arrays once since geometry doesn't change
+        geom_a_list = []
+        geom_b_list = []
+        for row in self.shape_pairs:
+            for pair in row:
+                geom_a_list.append(pair.shape_a)
+                geom_b_list.append(pair.shape_b)
+
+        self.geom_a_array = wp.array(geom_a_list, dtype=GenericShapeData)
+        self.geom_b_array = wp.array(geom_b_list, dtype=GenericShapeData)
+        self.xform_a_array = wp.array([wp.transform_identity()] * self.num_pairs, dtype=wp.transform)
+        self.xform_b_array = wp.array([wp.transform_identity()] * self.num_pairs, dtype=wp.transform)
 
         # Render once to set up viewer
         self.render()
@@ -121,15 +172,11 @@ class Example:
         return shape
 
     def _get_shape_color(self, shape_type: GeoType, is_first: bool) -> wp.vec3:
-        """Get distinct colors for each shape type"""
-        colors = {
-            GeoType.BOX: (wp.vec3(0.2, 0.6, 0.9), wp.vec3(0.1, 0.4, 0.7)),
-            GeoType.SPHERE: (wp.vec3(0.9, 0.2, 0.2), wp.vec3(0.7, 0.1, 0.1)),
-            GeoType.CAPSULE: (wp.vec3(0.2, 0.9, 0.2), wp.vec3(0.1, 0.7, 0.1)),
-            GeoType.CYLINDER: (wp.vec3(0.9, 0.2, 0.9), wp.vec3(0.7, 0.1, 0.7)),
-            GeoType.CONE: (wp.vec3(0.2, 0.9, 0.9), wp.vec3(0.1, 0.7, 0.7)),
-        }
-        return colors.get(shape_type, (wp.vec3(0.5, 0.5, 0.5), wp.vec3(0.3, 0.3, 0.3)))[0 if is_first else 1]
+        """Get distinct colors for each shape type from centralized color table"""
+        color_info = SHAPE_COLORS.get(
+            shape_type, {"primary": wp.vec3(0.5, 0.5, 0.5), "secondary": wp.vec3(0.3, 0.3, 0.3)}
+        )
+        return color_info["primary"] if is_first else color_info["secondary"]
 
     def _create_shape_matrix(self):
         """Create a matrix of all shape pair combinations"""
@@ -154,53 +201,150 @@ class Example:
         center_x = col * self.grid_spacing - offset_x
         center_y = row * self.grid_spacing - offset_y
 
-        # Position shapes slightly apart
-        pos_a = wp.vec3(center_x - self.pair_spacing * 0.5, center_y, 0.0)
-        pos_b = wp.vec3(center_x + self.pair_spacing * 0.5, center_y, 0.0)
+        # Position shapes slightly apart (base positions)
+        pos_a = wp.vec3(center_x - self.base_pair_spacing * 0.5, center_y, 0.0)
+        pos_b = wp.vec3(center_x + self.base_pair_spacing * 0.5, center_y, 0.0)
 
         return pos_a, pos_b
 
     def _animate_pair(self, pair: ShapePair, row: int, col: int, t: float):
-        """Animate a specific shape pair with unique motion"""
+        """Animate a specific shape pair with unique motion and slowly changing rotation axes"""
         pos_a, pos_b = self._get_grid_position(row, col)
 
         # Different animation patterns for variety
         pattern = (row + col) % 4
 
+        # Slowly evolving rotation axes - change over ~20 second cycles
+        axis_evolution_speed = 0.1
+        axis_phase_a = axis_evolution_speed * t + row * 1.5
+        axis_phase_b = axis_evolution_speed * t + col * 2.0
+
         if pattern == 0:
-            # Rotation around Z axis
+            # Evolving between Z and XY plane rotations
+            base_axis_a = wp.vec3(0.0, 0.0, 1.0)
+            evolve_axis_a = wp.vec3(np.sin(axis_phase_a), np.cos(axis_phase_a), 0.5)
+            axis_a = wp.normalize(base_axis_a + 0.3 * evolve_axis_a)
+
+            base_axis_b = wp.vec3(0.0, 0.0, 1.0)
+            evolve_axis_b = wp.vec3(np.cos(axis_phase_b), np.sin(axis_phase_b), 0.3)
+            axis_b = wp.normalize(base_axis_b + 0.4 * evolve_axis_b)
+
             angle_a = 0.8 * t + row * 0.5
             angle_b = -0.6 * t + col * 0.3
-            q_a = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), angle_a)
-            q_b = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), angle_b)
 
         elif pattern == 1:
-            # Rotation around X axis
+            # Evolving between X and YZ plane rotations
+            base_axis_a = wp.vec3(1.0, 0.0, 0.0)
+            evolve_axis_a = wp.vec3(0.2, np.sin(axis_phase_a), np.cos(axis_phase_a))
+            axis_a = wp.normalize(base_axis_a + 0.5 * evolve_axis_a)
+
+            base_axis_b = wp.vec3(1.0, 0.0, 0.0)
+            evolve_axis_b = wp.vec3(0.3, np.cos(axis_phase_b), np.sin(axis_phase_b))
+            axis_b = wp.normalize(base_axis_b + 0.4 * evolve_axis_b)
+
             angle_a = 0.7 * t + row * 0.4
             angle_b = -0.9 * t + col * 0.2
-            q_a = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), angle_a)
-            q_b = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), angle_b)
 
         elif pattern == 2:
-            # Rotation around Y axis
+            # Evolving between Y and XZ plane rotations
+            base_axis_a = wp.vec3(0.0, 1.0, 0.0)
+            evolve_axis_a = wp.vec3(np.sin(axis_phase_a), 0.3, np.cos(axis_phase_a))
+            axis_a = wp.normalize(base_axis_a + 0.6 * evolve_axis_a)
+
+            base_axis_b = wp.vec3(0.0, 1.0, 0.0)
+            evolve_axis_b = wp.vec3(np.cos(axis_phase_b), 0.2, np.sin(axis_phase_b))
+            axis_b = wp.normalize(base_axis_b + 0.5 * evolve_axis_b)
+
             angle_a = 0.6 * t + row * 0.3
             angle_b = -0.8 * t + col * 0.4
-            q_a = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), angle_a)
-            q_b = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), angle_b)
 
         else:
-            # Mixed rotation
+            # Complex evolving axes with all three components changing
+            axis_a = wp.normalize(
+                wp.vec3(
+                    1.0 + 0.5 * np.sin(axis_phase_a),
+                    1.0 + 0.4 * np.cos(axis_phase_a * 1.3),
+                    0.3 * np.sin(axis_phase_a * 0.7),
+                )
+            )
+            axis_b = wp.normalize(
+                wp.vec3(
+                    0.2 * np.cos(axis_phase_b * 1.1),
+                    1.0 + 0.6 * np.sin(axis_phase_b),
+                    1.0 + 0.3 * np.cos(axis_phase_b * 0.9),
+                )
+            )
+
             angle_a = 0.5 * t + row * 0.2
             angle_b = -0.7 * t + col * 0.5
-            axis_a = wp.normalize(wp.vec3(1.0, 1.0, 0.0))
-            axis_b = wp.normalize(wp.vec3(0.0, 1.0, 1.0))
-            q_a = wp.quat_from_axis_angle(axis_a, angle_a)
-            q_b = wp.quat_from_axis_angle(axis_b, angle_b)
 
-        # Add breathing motion to vary distance
-        breath = 0.15 * np.sin(1.2 * t + row + col)
-        pos_a_final = pos_a + wp.vec3(-breath, 0.0, 0.0)
-        pos_b_final = pos_b + wp.vec3(breath, 0.0, 0.0)
+        # Create rotations with the evolving axes
+        q_a = wp.quat_from_axis_angle(axis_a, angle_a)
+        q_b = wp.quat_from_axis_angle(axis_b, angle_b)
+
+        # Enhanced motion for more intersections
+        # 1. Aggressive breathing motion that brings shapes together
+        breath_freq = 0.8 + 0.1 * (row + col)  # Slower frequency for more sustained contact
+        breath_amplitude = 0.25  # Increased amplitude
+        breath = breath_amplitude * np.sin(breath_freq * t + row + col)
+
+        # 2. Periodic approach cycles - shapes get very close every few seconds
+        approach_cycle_freq = 0.3 + 0.05 * (row + col)  # ~3-4 second cycles
+        approach_phase = approach_cycle_freq * t + (row * 2.1 + col * 1.7)
+        # Use a sharper function to create periods of close approach
+        approach_factor = 0.4 * (1.0 + np.cos(approach_phase)) * np.exp(-0.5 * (np.sin(approach_phase * 0.5)) ** 2)
+
+        # 3. Orbital motion - shapes orbit around their center point
+        orbital_freq = 0.5 + 0.1 * (row - col)
+        orbital_phase_a = orbital_freq * t + row * 0.8
+        orbital_phase_b = -orbital_freq * t + col * 1.2
+        orbital_radius = 0.15 * (1.0 - approach_factor)  # Smaller orbits during approach
+
+        orbital_offset_a = wp.vec3(
+            orbital_radius * np.cos(orbital_phase_a),
+            orbital_radius * np.sin(orbital_phase_a) * 0.7,  # Elliptical orbit
+            0.0,
+        )
+        orbital_offset_b = wp.vec3(
+            orbital_radius * np.cos(orbital_phase_b), orbital_radius * np.sin(orbital_phase_b) * 0.7, 0.0
+        )
+
+        # 4. Vertical oscillation for 3D contact scenarios
+        vertical_freq = 1.1 + 0.2 * (row + col)
+        vertical_motion_a = 0.08 * np.sin(vertical_freq * t + row * 0.7 + col * 1.1)
+        vertical_motion_b = 0.08 * np.sin(vertical_freq * t + row * 1.3 + col * 0.9 + np.pi * 0.3)
+
+        # Combine all motions with distance constraints
+        motion_a = wp.vec3(-breath - approach_factor + orbital_offset_a[0], orbital_offset_a[1], vertical_motion_a)
+        motion_b = wp.vec3(breath + approach_factor + orbital_offset_b[0], orbital_offset_b[1], vertical_motion_b)
+
+        # Apply distance constraints to keep shapes reasonably close
+        max_separation = 1.2  # Maximum allowed distance between shape centers
+        min_separation = 0.05  # Minimum allowed distance to prevent excessive overlap
+
+        pos_a_temp = pos_a + motion_a
+        pos_b_temp = pos_b + motion_b
+
+        # Calculate current separation
+        separation_vec = pos_b_temp - pos_a_temp
+        separation_dist = wp.length(separation_vec)
+
+        # Constrain separation distance
+        if separation_dist > max_separation:
+            # Pull shapes closer together
+            correction = (separation_dist - max_separation) * 0.5
+            correction_vec = wp.normalize(separation_vec) * correction
+            pos_a_temp = pos_a_temp + correction_vec
+            pos_b_temp = pos_b_temp - correction_vec
+        elif separation_dist < min_separation and separation_dist > 1e-6:
+            # Push shapes slightly apart to prevent excessive overlap
+            correction = (min_separation - separation_dist) * 0.5
+            correction_vec = wp.normalize(separation_vec) * correction
+            pos_a_temp = pos_a_temp - correction_vec
+            pos_b_temp = pos_b_temp + correction_vec
+
+        pos_a_final = pos_a_temp
+        pos_b_final = pos_b_temp
 
         pair.transform_a = wp.transform(pos_a_final, q_a)
         pair.transform_b = wp.transform(pos_b_final, q_b)
@@ -258,36 +402,28 @@ class Example:
         self.time += self.frame_dt
         self._anim_transforms(self.time)
 
-        # Prepare arrays for batch contact computation
-        num_pairs = len(self.shape_types) * len(self.shape_types)
-        geom_a_list = []
-        geom_b_list = []
+        # Update only transform arrays (geometry is static)
         xform_a_list = []
         xform_b_list = []
 
-        # Flatten the matrix into arrays for the kernel
         for row in self.shape_pairs:
             for pair in row:
-                geom_a_list.append(pair.shape_a)
-                geom_b_list.append(pair.shape_b)
                 xform_a_list.append(pair.transform_a)
                 xform_b_list.append(pair.transform_b)
 
-        # Convert to warp arrays
-        geom_a_array = wp.array(geom_a_list, dtype=GenericShapeData)
-        geom_b_array = wp.array(geom_b_list, dtype=GenericShapeData)
-        xform_a_array = wp.array(xform_a_list, dtype=wp.transform)
-        xform_b_array = wp.array(xform_b_list, dtype=wp.transform)
+        # Update transform arrays only (geometry arrays are static)
+        self.xform_a_array.assign(wp.array(xform_a_list, dtype=wp.transform))
+        self.xform_b_array.assign(wp.array(xform_b_list, dtype=wp.transform))
 
         # Run kernel to compute all contacts in one batch
         wp.launch(
             kernel=self._compute_contact_matrix_kernel,
-            dim=num_pairs,
+            dim=self.num_pairs,
             inputs=[
-                geom_a_array,
-                geom_b_array,
-                xform_a_array,
-                xform_b_array,
+                self.geom_a_array,
+                self.geom_b_array,
+                self.xform_a_array,
+                self.xform_b_array,
                 0.0,  # no contact offset
                 self.data_provider,
                 self.contact_valid,
@@ -301,7 +437,7 @@ class Example:
             device=wp.get_device(),
         )
 
-        # Update shape pairs with contact results
+        # Update shape pairs with contact results (only read from GPU once)
         contact_valid_np = self.contact_valid.numpy()
         point_a_np = self.point_a.numpy()
         point_b_np = self.point_b.numpy()
@@ -328,41 +464,102 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.time)
 
-        # Render all shape pairs in the matrix
-        for i, row in enumerate(self.shape_pairs):
-            for j, pair in enumerate(row):
-                # Create unique names for each shape pair
-                name_a = f"/shapes/row{i}_col{j}_a_{pair.name_a}"
-                name_b = f"/shapes/row{i}_col{j}_b_{pair.name_b}"
+        # Batch render shapes by type for better performance
+        self._render_shapes_batched()
 
-                # Get shape parameters for rendering
-                params_a = self._get_shape_render_params(pair.shape_a)
-                params_b = self._get_shape_render_params(pair.shape_b)
-
-                # Render shape A
-                self.viewer.log_shapes(
-                    name_a,
-                    newton.GeoType(pair.shape_a.shape_type),
-                    params_a,
-                    wp.array([pair.transform_a], dtype=wp.transform),
-                    wp.array([pair.color_a], dtype=wp.vec3),
-                    None,
-                )
-
-                # Render shape B
-                self.viewer.log_shapes(
-                    name_b,
-                    newton.GeoType(pair.shape_b.shape_type),
-                    params_b,
-                    wp.array([pair.transform_b], dtype=wp.transform),
-                    wp.array([pair.color_b], dtype=wp.vec3),
-                    None,
-                )
-
-                # Render contact points and lines
-                self._render_contact_visualization(pair, i, j)
+        # Render all contact visualizations
+        self._render_all_contacts()
 
         self.viewer.end_frame()
+
+    def _render_shapes_batched(self):
+        """Render shapes batched by type for better performance"""
+        # Group shapes by type
+        shape_batches = {}
+
+        for i, row in enumerate(self.shape_pairs):
+            for j, pair in enumerate(row):
+                # Process shape A
+                type_a = pair.shape_a.shape_type
+                if type_a not in shape_batches:
+                    shape_batches[type_a] = {"transforms": [], "colors": [], "params": None, "geo_type": None}
+
+                shape_batches[type_a]["transforms"].append(pair.transform_a)
+                shape_batches[type_a]["colors"].append(pair.color_a)
+                if shape_batches[type_a]["params"] is None:
+                    shape_batches[type_a]["params"] = self._get_shape_render_params(pair.shape_a)
+                    shape_batches[type_a]["geo_type"] = newton.GeoType(pair.shape_a.shape_type)
+
+                # Process shape B
+                type_b = pair.shape_b.shape_type
+                if type_b not in shape_batches:
+                    shape_batches[type_b] = {"transforms": [], "colors": [], "params": None, "geo_type": None}
+
+                shape_batches[type_b]["transforms"].append(pair.transform_b)
+                shape_batches[type_b]["colors"].append(pair.color_b)
+                if shape_batches[type_b]["params"] is None:
+                    shape_batches[type_b]["params"] = self._get_shape_render_params(pair.shape_b)
+                    shape_batches[type_b]["geo_type"] = newton.GeoType(pair.shape_b.shape_type)
+
+        # Render each batch
+        for shape_type, batch in shape_batches.items():
+            if batch["transforms"]:
+                name = f"/shapes/{GeoType(shape_type).name.lower()}_batch"
+                self.viewer.log_shapes(
+                    name,
+                    batch["geo_type"],
+                    batch["params"],
+                    wp.array(batch["transforms"], dtype=wp.transform),
+                    wp.array(batch["colors"], dtype=wp.vec3),
+                    None,
+                )
+
+    def _render_all_contacts(self):
+        """Render all contact points and lines efficiently"""
+        contact_points = []
+        contact_radii = []
+        contact_colors = []
+        line_starts = []
+        line_ends = []
+
+        for i, row in enumerate(self.shape_pairs):
+            for j, pair in enumerate(row):
+                pa = pair.point_a
+                pb = pair.point_b
+
+                # Add contact points
+                contact_points.extend([pa, pb])
+                contact_radii.extend([0.03, 0.03])
+
+                # Use different colors for actual contacts vs closest points
+                if pair.contact_valid:
+                    # Red for actual contacts
+                    contact_colors.extend([CONTACT_COLORS["active_contact"], CONTACT_COLORS["active_contact"]])
+                else:
+                    # Green for closest points when not touching
+                    contact_colors.extend([CONTACT_COLORS["closest_point"], CONTACT_COLORS["closest_point"]])
+
+                # Add line
+                line_starts.append(pa)
+                line_ends.append(pb)
+
+        # Render all contact points in one call
+        if contact_points:
+            self.viewer.log_points(
+                "/contacts/all_points",
+                wp.array(contact_points, dtype=wp.vec3),
+                wp.array(contact_radii, dtype=float),
+                wp.array(contact_colors, dtype=wp.vec3),
+            )
+
+        # Render all lines in one call
+        if line_starts and line_ends:
+            self.viewer.log_lines(
+                "/contacts/all_lines",
+                wp.array(line_starts, dtype=wp.vec3),
+                wp.array(line_ends, dtype=wp.vec3),
+                CONTACT_COLORS["line_default"],
+            )
 
     def _get_shape_render_params(self, shape: GenericShapeData) -> tuple:
         """Get rendering parameters for a shape"""
@@ -380,33 +577,6 @@ class Example:
             return (shape.scale[0], shape.scale[1])
         else:
             return (shape.scale[0], shape.scale[1], shape.scale[2])
-
-    def _render_contact_visualization(self, pair: ShapePair, row: int, col: int):
-        """Render contact points and lines for a shape pair"""
-        pa = pair.point_a
-        pb = pair.point_b
-
-        # Create contact points
-        pts = wp.array([pa, pb], dtype=wp.vec3)
-        radii = wp.array([0.03, 0.03], dtype=float)
-
-        # Use different colors for actual contacts vs closest points
-        if pair.contact_valid:
-            # Red for actual contacts
-            colors = wp.array([wp.vec3(1.0, 0.2, 0.2), wp.vec3(1.0, 0.2, 0.2)], dtype=wp.vec3)
-            line_color = (1.0, 0.2, 0.2)
-        else:
-            # Green for closest points when not touching
-            colors = wp.array([wp.vec3(0.2, 1.0, 0.2), wp.vec3(0.2, 1.0, 0.2)], dtype=wp.vec3)
-            line_color = (0.2, 1.0, 0.2)
-
-        # Render contact points
-        contact_name = f"/contacts/row{row}_col{col}_pts"
-        self.viewer.log_points(contact_name, pts, radii, colors)
-
-        # Render connecting line
-        line_name = f"/contacts/row{row}_col{col}_line"
-        self.viewer.log_lines(line_name, wp.array([pa], dtype=wp.vec3), wp.array([pb], dtype=wp.vec3), line_color)
 
 
 if __name__ == "__main__":
