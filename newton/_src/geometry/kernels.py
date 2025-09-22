@@ -15,6 +15,7 @@
 
 import warp as wp
 
+from . import collision_primitive as primitive
 from .flags import ParticleFlags, ShapeFlags
 from .types import (
     GeoType,
@@ -886,13 +887,8 @@ def count_contact_points(
             else:
                 num_contacts = 2 + 4  # vertex-based collision + plane edges
     elif actual_type_a == GeoType.PLANE and actual_type_b == GeoType.CYLINDER:
-        if actual_shape_a < 0:  # infinite plane (ground)
-            num_contacts = 2  # vertex-based collision for infinite plane
-        else:
-            if shape_scale[actual_shape_a][0] == 0.0 and shape_scale[actual_shape_a][1] == 0.0:
-                num_contacts = 2  # vertex-based collision for infinite plane
-            else:
-                num_contacts = 2 + 4  # vertex-based collision + plane edges
+        # infinite plane: support max primitive contacts (2 caps + 2 side) = 4
+        num_contacts = 4
     elif actual_type_a == GeoType.CAPSULE and actual_type_b == GeoType.MESH:
         num_contacts_a = 2
         mesh_b = wp.mesh_get(shape_source_ptr[actual_shape_b])
@@ -1097,10 +1093,8 @@ def broadphase_collision_pairs(
         else:
             num_contacts = 2 + 4  # vertex-based collision + plane edges
     elif isCase(actual_type_a, actual_type_b, GeoType.CYLINDER, GeoType.PLANE):
-        if shape_scale[actual_shape_a][0] == 0.0 and shape_scale[actual_shape_a][1] == 0.0:
-            num_contacts = 2  # vertex-based collision for infinite plane
-        else:
-            num_contacts = 2 + 4  # vertex-based collision + plane edges
+        # infinite plane: support max primitive contacts (2 caps + 2 side) = 4
+        num_contacts = 4
 
     elif isCase(actual_type_a, actual_type_b, GeoType.MESH, GeoType.CAPSULE):
         num_contacts_a = 2
@@ -1426,47 +1420,40 @@ def cylinder_plane_collision(
     edge_sdf_iter: int,
 ):
     """
-    Handle collision between a cylinder (geo_a) and a plane (geo_b).
+    Handle collision between a cylinder (geo_a) and an infinite plane (geo_b).
 
     Returns:
         tuple: (p_a_world, p_b_world, normal, distance)
     """
-    plane_width = geo_b.geo_scale[0]
-    plane_length = geo_b.geo_scale[1]
+    # World-space plane
+    plane_normal_world = wp.transform_vector(geo_b.X_ws, wp.vec3(0.0, 0.0, 1.0))
+    plane_pos_world = wp.transform_point(geo_b.X_ws, wp.vec3(0.0, 0.0, 0.0))
 
-    if point_id < 2:
-        # vertex-based collision at cylinder caps' centers
-        half_height_a = geo_a.geo_scale[1]
-        side = float(point_id) * 2.0 - 1.0
-        p_a_world = wp.transform_point(geo_a.X_ws, wp.vec3(0.0, 0.0, side * half_height_a))
-        query_b = wp.transform_point(geo_b.X_sw, p_a_world)
-        p_b_body = closest_point_plane(geo_b.geo_scale[0], geo_b.geo_scale[1], query_b)
-        p_b_world = wp.transform_point(geo_b.X_ws, p_b_body)
-        diff = p_a_world - p_b_world
-        if geo_b.geo_scale[0] > 0.0 and geo_b.geo_scale[1] > 0.0:
-            normal = wp.normalize(diff)
-        else:
-            normal = wp.transform_vector(geo_b.X_ws, wp.vec3(0.0, 0.0, 1.0))
-        distance = wp.dot(diff, normal)
-    else:
-        # contact between cylinder A and edges of finite plane B
-        edge = get_plane_edge(point_id - 2, plane_width, plane_length)
-        edge0_world = wp.transform_point(geo_b.X_ws, wp.spatial_top(edge))
-        edge1_world = wp.transform_point(geo_b.X_ws, wp.spatial_bottom(edge))
-        edge0_a = wp.transform_point(geo_a.X_sw, edge0_world)
-        edge1_a = wp.transform_point(geo_a.X_sw, edge1_world)
-        max_iter = edge_sdf_iter
-        u = closest_edge_coordinate_cylinder(geo_a.geo_scale[0], geo_a.geo_scale[1], edge0_a, edge1_a, max_iter)
-        p_b_world = (1.0 - u) * edge0_world + u * edge1_world
+    # World-space cylinder params
+    cylinder_center_world = wp.transform_point(geo_a.X_ws, wp.vec3(0.0, 0.0, 0.0))
+    cylinder_axis_world = wp.normalize(wp.transform_vector(geo_a.X_ws, wp.vec3(0.0, 0.0, 1.0)))
+    cylinder_radius = geo_a.geo_scale[0]
+    cylinder_half_height = geo_a.geo_scale[1]
 
-        # find closest point + contact normal on cylinder A (use center axis segment)
-        half_height_a = geo_a.geo_scale[1]
-        p0_a_world = wp.transform_point(geo_a.X_ws, wp.vec3(0.0, 0.0, half_height_a))
-        p1_a_world = wp.transform_point(geo_a.X_ws, wp.vec3(0.0, 0.0, -half_height_a))
-        p_a_world = closest_point_line_segment(p0_a_world, p1_a_world, p_b_world)
-        diff = p_a_world - p_b_world
-        normal = wp.transform_vector(geo_b.X_ws, wp.vec3(0.0, 0.0, 1.0))
-        distance = wp.dot(diff, normal)
+    # Use primitive helper (in world space)
+    dist_vec, pos_mat, n_world = primitive.collide_plane_cylinder(
+        plane_normal_world,
+        plane_pos_world,
+        cylinder_center_world,
+        cylinder_axis_world,
+        cylinder_radius,
+        cylinder_half_height,
+    )
+
+    # Support up to the primitive's 4 contacts (2 caps + 2 side points)
+    idx = wp.min(int(point_id), 3)
+    distance = dist_vec[idx]
+    mid_pos = pos_mat[idx]
+    normal = n_world
+
+    # Split midpoint into shape-plane endpoints
+    p_a_world = mid_pos + 0.5 * normal * distance
+    p_b_world = mid_pos - 0.5 * normal * distance
 
     return p_a_world, p_b_world, normal, distance
 
