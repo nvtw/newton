@@ -113,12 +113,15 @@ def create_solve_mpr(support_func: Any, center_func: Any):
         v = Vert()
 
         # Support point on A in positive direction
-        tmp_a, feature_a_id = support_func(geom_a, direction, data_provider)
-        v.A = tmp_a
+        tmp_result_a = support_func(geom_a, direction, data_provider)
+        v.A = tmp_result_a[0]
+        feature_a_id = tmp_result_a[1]
 
         # Support point on B in negative direction
         tmp_direction = -direction
-        v.B, feature_b_id = support_map_b(geom_b, tmp_direction, orientation_b, position_b, data_provider)
+        tmp_result_b = support_map_b(geom_b, tmp_direction, orientation_b, position_b, data_provider)
+        v.B = tmp_result_b[0]
+        feature_b_id = tmp_result_b[1]
 
         # Apply contact offset extension
         d = wp.normalize(direction) * extend * 0.5
@@ -202,9 +205,9 @@ def create_solve_mpr(support_func: Any, center_func: Any):
         COLLIDE_EPSILON = NUMERIC_EPSILON
 
         # Initialize variables
-        penetration = 0.0
-        feature_a_id = 0
-        feature_b_id = 0
+        penetration = float(0.0)
+        feature_a_id = int(0)
+        feature_b_id = int(0)
         point_a = wp.vec3(0.0, 0.0, 0.0)
         point_b = wp.vec3(0.0, 0.0, 0.0)
         normal = wp.vec3(0.0, 0.0, 0.0)
@@ -271,9 +274,9 @@ def create_solve_mpr(support_func: Any, center_func: Any):
             v2.B = tmp_b
             normal = -normal
 
-        phase1 = 0
-        phase2 = 0
-        hit = False
+        phase1 = int(0)
+        phase2 = int(0)
+        hit = bool(False)
 
         # Phase One: Identify a portal
         v3 = Vert()
@@ -411,7 +414,7 @@ def create_solve_mpr(support_func: Any, center_func: Any):
             Tuple of (collision detected, point A, point B, normal, penetration, feature A ID, feature B ID)
         """
         # Transform shape B to local space of shape A
-        relative_orientation_b = wp.quat_multiply(wp.quat_inverse(orientation_a), orientation_b)
+        relative_orientation_b = wp.quat_inverse(orientation_a) * orientation_b
         relative_position_b = wp.quat_rotate_inv(orientation_a, position_b - position_a)
 
         # Call the core MPR algorithm

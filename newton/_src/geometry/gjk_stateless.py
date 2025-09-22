@@ -28,234 +28,6 @@ from .mpr import Vert, vert_v
 from .support_function import GenericShapeData, SupportMapDataProvider
 
 
-@wp.struct
-class SupportPoint:
-    """
-    A support point in the Minkowski difference with feature tracking.
-
-    This struct stores a 3D point along with feature information from both shapes
-    used for contact manifold generation and feature tracking.
-    """
-
-    point: wp.vec3
-    feature_a_id: int
-    feature_b_id: int
-
-
-# Constants
-MAX_SIMPLEX_POINTS = 4
-
-
-@wp.struct
-class GJKSimplex:
-    """
-    A simplex for the GJK algorithm.
-
-    This struct stores up to 4 support points and provides methods for
-    simplex operations during GJK collision detection.
-    """
-
-    point0: SupportPoint
-    point1: SupportPoint
-    point2: SupportPoint
-    point3: SupportPoint
-    count: int
-
-
-@wp.func
-def gjk_simplex_clear(simplex: GJKSimplex) -> GJKSimplex:
-    """Clear the simplex."""
-    result = simplex
-    result.count = 0
-    return result
-
-
-@wp.func
-def gjk_simplex_add_support_point(simplex: GJKSimplex, support_point: SupportPoint) -> GJKSimplex:
-    """
-    Add a support point to the simplex.
-
-    Insert at beginning (like the reference implementation) and shift existing points.
-    """
-    result = simplex
-
-    # Limit count to avoid overflow
-    if result.count >= MAX_SIMPLEX_POINTS:
-        result.count = MAX_SIMPLEX_POINTS - 1
-
-    # Shift existing points
-    result.point3 = result.point2
-    result.point2 = result.point1
-    result.point1 = result.point0
-    result.point0 = support_point
-    result.count += 1
-
-    return result
-
-
-@wp.func
-def gjk_simplex_get_point(simplex: GJKSimplex, index: int) -> SupportPoint:
-    """Get a point from the simplex by index."""
-    if index == 0:
-        return simplex.point0
-    elif index == 1:
-        return simplex.point1
-    elif index == 2:
-        return simplex.point2
-    elif index == 3:
-        return simplex.point3
-    else:
-        # Return default SupportPoint
-        result = SupportPoint()
-        result.point = wp.vec3(0.0, 0.0, 0.0)
-        result.feature_a_id = -1
-        result.feature_b_id = -1
-        return result
-
-
-@wp.func
-def gjk_simplex_set_points_2(simplex: GJKSimplex, a: SupportPoint, b: SupportPoint) -> GJKSimplex:
-    """Set simplex to contain two points."""
-    result = simplex
-    result.count = 2
-    result.point0 = a
-    result.point1 = b
-    return result
-
-
-@wp.func
-def gjk_simplex_set_points_3(simplex: GJKSimplex, a: SupportPoint, b: SupportPoint, c: SupportPoint) -> GJKSimplex:
-    """Set simplex to contain three points."""
-    result = simplex
-    result.count = 3
-    result.point0 = a
-    result.point1 = b
-    result.point2 = c
-    return result
-
-
-@wp.func
-def gjk_simplex_contains_origin_line(simplex: GJKSimplex, direction: wp.vec3) -> tuple[bool, GJKSimplex, wp.vec3]:
-    """Check if line simplex contains origin and update direction."""
-    a = simplex.point0
-    b = simplex.point1
-
-    ab = b.point - a.point
-    ao = -a.point
-
-    new_direction = direction
-    new_simplex = simplex
-
-    if wp.dot(ab, ao) > 0.0:
-        # Triple product: (ab x ao) x ab
-        ab_cross_ao = wp.cross(ab, ao)
-        new_direction = wp.cross(ab_cross_ao, ab)
-    else:
-        new_simplex.count = 1
-        new_simplex.point0 = a
-        new_direction = ao
-
-    return False, new_simplex, new_direction
-
-
-@wp.func
-def gjk_simplex_contains_origin_triangle(simplex: GJKSimplex, direction: wp.vec3) -> tuple[bool, GJKSimplex, wp.vec3]:
-    """Check if triangle simplex contains origin and update direction."""
-    a = simplex.point0
-    b = simplex.point1
-    c = simplex.point2
-
-    ab = b.point - a.point
-    ac = c.point - a.point
-    ao = -a.point
-
-    abc = wp.cross(ab, ac)
-    new_direction = direction
-    new_simplex = simplex
-
-    abc_cross_ac = wp.cross(abc, ac)
-    if wp.dot(abc_cross_ac, ao) > 0.0:
-        if wp.dot(ac, ao) > 0.0:
-            new_simplex = gjk_simplex_set_points_2(simplex, a, c)
-            # Triple product: (ac x ao) x ac
-            ac_cross_ao = wp.cross(ac, ao)
-            new_direction = wp.cross(ac_cross_ao, ac)
-        else:
-            new_simplex = gjk_simplex_set_points_2(simplex, a, b)
-            contains_origin, new_simplex, new_direction = gjk_simplex_contains_origin_line(new_simplex, direction)
-            return contains_origin, new_simplex, new_direction
-    else:
-        ab_cross_abc = wp.cross(ab, abc)
-        if wp.dot(ab_cross_abc, ao) > 0.0:
-            new_simplex = gjk_simplex_set_points_2(simplex, a, b)
-            contains_origin, new_simplex, new_direction = gjk_simplex_contains_origin_line(new_simplex, direction)
-            return contains_origin, new_simplex, new_direction
-        else:
-            if wp.dot(abc, ao) > 0.0:
-                new_direction = abc
-            else:
-                new_simplex = gjk_simplex_set_points_3(simplex, a, c, b)
-                new_direction = -abc
-
-    return False, new_simplex, new_direction
-
-
-@wp.func
-def gjk_simplex_contains_origin_tetrahedron(
-    simplex: GJKSimplex, direction: wp.vec3
-) -> tuple[bool, GJKSimplex, wp.vec3]:
-    """Check if tetrahedron simplex contains origin and update direction."""
-    a = simplex.point0
-    b = simplex.point1
-    c = simplex.point2
-    d = simplex.point3
-
-    ab = b.point - a.point
-    ac = c.point - a.point
-    ad = d.point - a.point
-    ao = -a.point
-
-    abc = wp.cross(ab, ac)
-    acd = wp.cross(ac, ad)
-    adb = wp.cross(ad, ab)
-
-    new_direction = direction
-    new_simplex = simplex
-
-    if wp.dot(abc, ao) > 0.0:
-        new_simplex = gjk_simplex_set_points_3(simplex, a, b, c)
-        contains_origin, new_simplex, new_direction = gjk_simplex_contains_origin_triangle(new_simplex, direction)
-        return contains_origin, new_simplex, new_direction
-
-    if wp.dot(acd, ao) > 0.0:
-        new_simplex = gjk_simplex_set_points_3(simplex, a, c, d)
-        contains_origin, new_simplex, new_direction = gjk_simplex_contains_origin_triangle(new_simplex, direction)
-        return contains_origin, new_simplex, new_direction
-
-    if wp.dot(adb, ao) > 0.0:
-        new_simplex = gjk_simplex_set_points_3(simplex, a, d, b)
-        contains_origin, new_simplex, new_direction = gjk_simplex_contains_origin_triangle(new_simplex, direction)
-        return contains_origin, new_simplex, new_direction
-
-    return True, new_simplex, new_direction
-
-
-@wp.func
-def gjk_simplex_contains_origin(simplex: GJKSimplex, direction: wp.vec3) -> tuple[bool, GJKSimplex, wp.vec3]:
-    """Check if simplex contains origin and update direction."""
-    if simplex.count == 4:
-        return gjk_simplex_contains_origin_tetrahedron(simplex, direction)
-    elif simplex.count == 3:
-        return gjk_simplex_contains_origin_triangle(simplex, direction)
-    elif simplex.count == 2:
-        return gjk_simplex_contains_origin_line(simplex, direction)
-
-    return False, simplex, direction
-
-
-# Constants for GJK algorithm
-MAX_GJK_ITERATIONS = 32
-GJK_EPSILON = 1e-6
 
 
 def create_solve_gjk(support_func: Any, center_func: Any):
@@ -272,7 +44,295 @@ def create_solve_gjk(support_func: Any, center_func: Any):
         GJK solver function
     """
 
-    # Support mapping functions (replacing MinkowskiDiff struct methods)
+
+    # -----------------
+    # Helper constants
+    # -----------------
+    FLOAT_MAX = 1.0e30
+    MINVAL = 1.0e-15
+    mat43 = wp.types.matrix(shape=(4, 3), dtype=float)
+
+    # --------------
+    # Helper math
+    # --------------
+    @wp.func
+    def _linear_combine(n: int, coefs: wp.vec4, mat: mat43) -> wp.vec3:
+        v = wp.vec3(0.0)
+        if n == 1:
+            v = coefs[0] * mat[0]
+        elif n == 2:
+            v = coefs[0] * mat[0] + coefs[1] * mat[1]
+        elif n == 3:
+            v = coefs[0] * mat[0] + coefs[1] * mat[1] + coefs[2] * mat[2]
+        else:
+            v = coefs[0] * mat[0] + coefs[1] * mat[1] + coefs[2] * mat[2] + coefs[3] * mat[3]
+        return v
+
+    @wp.func
+    def _almost_equal(v1: wp.vec3, v2: wp.vec3) -> bool:
+        return (
+            wp.abs(v1[0] - v2[0]) < MINVAL and wp.abs(v1[1] - v2[1]) < MINVAL and wp.abs(v1[2] - v2[2]) < MINVAL
+        )
+
+    @wp.func
+    def _det3(v1: wp.vec3, v2: wp.vec3, v3: wp.vec3) -> float:
+        return wp.dot(v1, wp.cross(v2, v3))
+
+    @wp.func
+    def _same_sign(a: float, b: float) -> int:
+        if a > 0 and b > 0:
+            return 1
+        if a < 0 and b < 0:
+            return -1
+        return 0
+
+    @wp.func
+    def _project_origin_line(v1: wp.vec3, v2: wp.vec3) -> wp.vec3:
+        diff = v2 - v1
+        scl = -(wp.dot(v2, diff) / wp.dot(diff, diff))
+        return v2 + scl * diff
+
+    @wp.func
+    def _project_origin_plane(v1: wp.vec3, v2: wp.vec3, v3: wp.vec3) -> tuple[wp.vec3, int]:
+        z = wp.vec3(0.0)
+        diff21 = v2 - v1
+        diff31 = v3 - v1
+        diff32 = v3 - v2
+
+        n = wp.cross(diff32, diff21)
+        nv = wp.dot(n, v2)
+        nn = wp.dot(n, n)
+        if nn == 0:
+            return z, 1
+        if nv != 0 and nn > MINVAL:
+            v = (nv / nn) * n
+            return v, 0
+
+        n = wp.cross(diff21, diff31)
+        nv = wp.dot(n, v1)
+        nn = wp.dot(n, n)
+        if nn == 0:
+            return z, 1
+        if nv != 0 and nn > MINVAL:
+            v = (nv / nn) * n
+            return v, 0
+
+        n = wp.cross(diff31, diff32)
+        nv = wp.dot(n, v3)
+        nn = wp.dot(n, n)
+        v = (nv / nn) * n
+        return v, 0
+
+    @wp.func
+    def _S1D(s1: wp.vec3, s2: wp.vec3) -> wp.vec2:
+        p_o = _project_origin_line(s1, s2)
+        mu_max = 0.0
+        index = 0
+        for i in range(3):
+            mu = s1[i] - s2[i]
+            if wp.abs(mu) >= wp.abs(mu_max):
+                mu_max = mu
+                index = i
+        C1 = p_o[index] - s2[index]
+        C2 = s1[index] - p_o[index]
+        if _same_sign(mu_max, C1) and _same_sign(mu_max, C2):
+            return wp.vec2(C1 / mu_max, C2 / mu_max)
+        return wp.vec2(0.0, 1.0)
+
+    @wp.func
+    def _S2D(s1: wp.vec3, s2: wp.vec3, s3: wp.vec3) -> wp.vec3:
+        p_o, ret = _project_origin_plane(s1, s2, s3)
+        if ret:
+            v = _S1D(s1, s2)
+            return wp.vec3(v[0], v[1], 0.0)
+
+        M_14 = s2[1] * s3[2] - s2[2] * s3[1] - s1[1] * s3[2] + s1[2] * s3[1] + s1[1] * s2[2] - s1[2] * s2[1]
+        M_24 = s2[0] * s3[2] - s2[2] * s3[0] - s1[0] * s3[2] + s1[2] * s3[0] + s1[0] * s2[2] - s1[2] * s2[0]
+        M_34 = s2[0] * s3[1] - s2[1] * s3[0] - s1[0] * s3[1] + s1[1] * s3[0] + s1[0] * s2[1] - s1[1] * s2[0]
+
+        M_max = 0.0
+        s1_2D = wp.vec2(0.0)
+        s2_2D = wp.vec2(0.0)
+        s3_2D = wp.vec2(0.0)
+        p_o_2D = wp.vec2(0.0)
+
+        mu1 = wp.abs(M_14)
+        mu2 = wp.abs(M_24)
+        mu3 = wp.abs(M_34)
+
+        if mu1 >= mu2 and mu1 >= mu3:
+            M_max = M_14
+            s1_2D[0] = s1[1]
+            s1_2D[1] = s1[2]
+            s2_2D[0] = s2[1]
+            s2_2D[1] = s2[2]
+            s3_2D[0] = s3[1]
+            s3_2D[1] = s3[2]
+            p_o_2D[0] = p_o[1]
+            p_o_2D[1] = p_o[2]
+        elif mu2 >= mu3:
+            M_max = M_24
+            s1_2D[0] = s1[0]
+            s1_2D[1] = s1[2]
+            s2_2D[0] = s2[0]
+            s2_2D[1] = s2[2]
+            s3_2D[0] = s3[0]
+            s3_2D[1] = s3[2]
+            p_o_2D[0] = p_o[0]
+            p_o_2D[1] = p_o[2]
+        else:
+            M_max = M_34
+            s1_2D[0] = s1[0]
+            s1_2D[1] = s1[1]
+            s2_2D[0] = s2[0]
+            s2_2D[1] = s2[1]
+            s3_2D[0] = s3[0]
+            s3_2D[1] = s3[1]
+            p_o_2D[0] = p_o[0]
+            p_o_2D[1] = p_o[1]
+
+        C31 = (
+            p_o_2D[0] * s2_2D[1]
+            + p_o_2D[1] * s3_2D[0]
+            + s2_2D[0] * s3_2D[1]
+            - p_o_2D[0] * s3_2D[1]
+            - p_o_2D[1] * s2_2D[0]
+            - s3_2D[0] * s2_2D[1]
+        )
+        C32 = (
+            p_o_2D[0] * s3_2D[1]
+            + p_o_2D[1] * s1_2D[0]
+            + s3_2D[0] * s1_2D[1]
+            - p_o_2D[0] * s1_2D[1]
+            - p_o_2D[1] * s3_2D[0]
+            - s1_2D[0] * s3_2D[1]
+        )
+        C33 = (
+            p_o_2D[0] * s1_2D[1]
+            + p_o_2D[1] * s2_2D[0]
+            + s1_2D[0] * s2_2D[1]
+            - p_o_2D[0] * s2_2D[1]
+            - p_o_2D[1] * s1_2D[0]
+            - s2_2D[0] * s1_2D[1]
+        )
+
+        comp1 = _same_sign(M_max, C31)
+        comp2 = _same_sign(M_max, C32)
+        comp3 = _same_sign(M_max, C33)
+
+        if comp1 and comp2 and comp3:
+            return wp.vec3(C31 / M_max, C32 / M_max, C33 / M_max)
+
+        dmin = FLOAT_MAX
+        coordinates = wp.vec3(0.0, 0.0, 0.0)
+
+        if not comp1:
+            subcoord = _S1D(s2, s3)
+            x = subcoord[0] * s2 + subcoord[1] * s3
+            d = wp.dot(x, x)
+            coordinates[0] = 0.0
+            coordinates[1] = subcoord[0]
+            coordinates[2] = subcoord[1]
+            dmin = d
+
+        if not comp2:
+            subcoord = _S1D(s1, s3)
+            x = subcoord[0] * s1 + subcoord[1] * s3
+            d = wp.dot(x, x)
+            if d < dmin:
+                coordinates[0] = subcoord[0]
+                coordinates[1] = 0.0
+                coordinates[2] = subcoord[1]
+                dmin = d
+
+        if not comp3:
+            subcoord = _S1D(s1, s2)
+            x = subcoord[0] * s1 + subcoord[1] * s2
+            d = wp.dot(x, x)
+            if d < dmin:
+                coordinates[0] = subcoord[0]
+                coordinates[1] = subcoord[1]
+                coordinates[2] = 0.0
+        return coordinates
+
+    @wp.func
+    def _S3D(s1: wp.vec3, s2: wp.vec3, s3: wp.vec3, s4: wp.vec3) -> wp.vec4:
+        C41 = -_det3(s2, s3, s4)
+        C42 = _det3(s1, s3, s4)
+        C43 = -_det3(s1, s2, s4)
+        C44 = _det3(s1, s2, s3)
+
+        m_det = C41 + C42 + C43 + C44
+
+        comp1 = _same_sign(m_det, C41)
+        comp2 = _same_sign(m_det, C42)
+        comp3 = _same_sign(m_det, C43)
+        comp4 = _same_sign(m_det, C44)
+
+        if comp1 and comp2 and comp3 and comp4:
+            return wp.vec4(C41 / m_det, C42 / m_det, C43 / m_det, C44 / m_det)
+
+        coordinates = wp.vec4(0.0, 0.0, 0.0, 0.0)
+        dmin = FLOAT_MAX
+
+        if not comp1:
+            subcoord = _S2D(s2, s3, s4)
+            x = subcoord[0] * s2 + subcoord[1] * s3 + subcoord[2] * s4
+            d = wp.dot(x, x)
+            coordinates[0] = 0.0
+            coordinates[1] = subcoord[0]
+            coordinates[2] = subcoord[1]
+            coordinates[3] = subcoord[2]
+            dmin = d
+
+        if not comp2:
+            subcoord = _S2D(s1, s3, s4)
+            x = subcoord[0] * s1 + subcoord[1] * s3 + subcoord[2] * s4
+            d = wp.dot(x, x)
+            if d < dmin:
+                coordinates[0] = subcoord[0]
+                coordinates[1] = 0.0
+                coordinates[2] = subcoord[1]
+                coordinates[3] = subcoord[2]
+                dmin = d
+
+        if not comp3:
+            subcoord = _S2D(s1, s2, s4)
+            x = subcoord[0] * s1 + subcoord[1] * s2 + subcoord[2] * s4
+            d = wp.dot(x, x)
+            if d < dmin:
+                coordinates[0] = subcoord[0]
+                coordinates[1] = subcoord[1]
+                coordinates[2] = 0.0
+                coordinates[3] = subcoord[2]
+                dmin = d
+
+        if not comp4:
+            subcoord = _S2D(s1, s2, s3)
+            x = subcoord[0] * s1 + subcoord[1] * s2 + subcoord[2] * s3
+            d = wp.dot(x, x)
+            if d < dmin:
+                coordinates[0] = subcoord[0]
+                coordinates[1] = subcoord[1]
+                coordinates[2] = subcoord[2]
+                coordinates[3] = 0.0
+        return coordinates
+
+    @wp.func
+    def _subdistance(n: int, simplex: mat43) -> wp.vec4:
+        if n == 4:
+            return _S3D(simplex[0], simplex[1], simplex[2], simplex[3])
+        if n == 3:
+            coordinates3 = _S2D(simplex[0], simplex[1], simplex[2])
+            return wp.vec4(coordinates3[0], coordinates3[1], coordinates3[2], 0.0)
+        if n == 2:
+            coordinates2 = _S1D(simplex[0], simplex[1])
+            return wp.vec4(coordinates2[0], coordinates2[1], 0.0, 0.0)
+        return wp.vec4(1.0, 0.0, 0.0, 0.0)
+
+    # -------------------------
+    # Support mapping utilities
+    # -------------------------
     @wp.func
     def support_map_b(
         geom_b: GenericShapeData,
@@ -281,29 +341,10 @@ def create_solve_gjk(support_func: Any, center_func: Any):
         position_b: wp.vec3,
         data_provider: SupportMapDataProvider,
     ) -> tuple[wp.vec3, int]:
-        """
-        Support mapping for shape B with transformation.
-
-        Args:
-            geom_b: Shape B geometry data
-            direction: Support direction in world space
-            orientation_b: Orientation of shape B
-            position_b: Position of shape B
-            data_provider: Support mapping data provider
-
-        Returns:
-            Tuple of (support point in world space, feature ID)
-        """
-        # Transform direction to local space of shape B
         tmp = wp.quat_rotate_inv(orientation_b, direction)
-
-        # Get support point in local space
         result, feature_id = support_func(geom_b, tmp, data_provider)
-
-        # Transform result to world space
         result = wp.quat_rotate(orientation_b, result)
         result = result + position_b
-
         return result, feature_id
 
     @wp.func
@@ -316,32 +357,16 @@ def create_solve_gjk(support_func: Any, center_func: Any):
         extend: float,
         data_provider: SupportMapDataProvider,
     ) -> tuple[Vert, int, int]:
-        """
-        Compute support point on Minkowski difference A - B.
-
-        Args:
-            geom_a: Shape A geometry data
-            geom_b: Shape B geometry data
-            direction: Support direction
-            orientation_b: Orientation of shape B
-            position_b: Position of shape B
-            extend: Contact offset extension
-            data_provider: Support mapping data provider
-
-        Returns:
-            Tuple of (Vert containing support points, feature ID A, feature ID B)
-        """
         v = Vert()
+        tmp_result_a = support_func(geom_a, direction, data_provider)
+        v.A = tmp_result_a[0]
+        feature_a_id = tmp_result_a[1]
 
-        # Support point on A in positive direction
-        tmp_a, feature_a_id = support_func(geom_a, direction, data_provider)
-        v.A = tmp_a
-
-        # Support point on B in negative direction
         tmp_direction = -direction
-        v.B, feature_b_id = support_map_b(geom_b, tmp_direction, orientation_b, position_b, data_provider)
+        tmp_result_b = support_map_b(geom_b, tmp_direction, orientation_b, position_b, data_provider)
+        v.B = tmp_result_b[0]
+        feature_b_id = tmp_result_b[1]
 
-        # Apply contact offset extension
         d = wp.normalize(direction) * extend * 0.5
         v.A = v.A + d
         v.B = v.B - d
@@ -356,155 +381,16 @@ def create_solve_gjk(support_func: Any, center_func: Any):
         position_b: wp.vec3,
         data_provider: SupportMapDataProvider,
     ) -> Vert:
-        """
-        Compute geometric center of Minkowski difference A - B.
-
-        Args:
-            geom_a: Shape A geometry data
-            geom_b: Shape B geometry data
-            orientation_b: Orientation of shape B
-            position_b: Position of shape B
-            data_provider: Support mapping data provider
-
-        Returns:
-            Vert containing center points
-        """
         center = Vert()
         center.A = center_func(geom_a, data_provider)
         center.B = center_func(geom_b, data_provider)
-
-        # Transform center B to world space
         center.B = wp.quat_rotate(orientation_b, center.B)
         center.B = position_b + center.B
-
         return center
 
-    @wp.func
-    def calculate_support_point(
-        geom_a: GenericShapeData,
-        geom_b: GenericShapeData,
-        direction: wp.vec3,
-        orientation_b: wp.quat,
-        position_b: wp.vec3,
-        extend: float,
-        data_provider: SupportMapDataProvider,
-    ) -> SupportPoint:
-        """
-        Calculate a support point for the GJK algorithm.
-
-        Args:
-            geom_a: Shape A geometry data
-            geom_b: Shape B geometry data
-            direction: Support direction
-            orientation_b: Orientation of shape B
-            position_b: Position of shape B
-            extend: Contact offset extension
-            data_provider: Support mapping data provider
-
-        Returns:
-            SupportPoint containing the Minkowski difference point and feature IDs
-        """
-        support_vert, feature_a_id, feature_b_id = minkowski_support(
-            geom_a, geom_b, direction, orientation_b, position_b, extend, data_provider
-        )
-
-        result = SupportPoint()
-        result.point = vert_v(support_vert)  # A - B
-        result.feature_a_id = feature_a_id
-        result.feature_b_id = feature_b_id
-
-        return result
-
-    @wp.func
-    def solve_gjk_internal(
-        geom_a: GenericShapeData,
-        geom_b: GenericShapeData,
-        orientation_b: wp.quat,
-        position_b: wp.vec3,
-        sum_of_contact_offsets: float,
-        data_provider: SupportMapDataProvider,
-    ) -> tuple[bool, wp.vec3, wp.vec3, wp.vec3, float, int, int]:
-        """
-        Internal GJK solver function.
-
-        Args:
-            geom_a: Shape A geometry data
-            geom_b: Shape B geometry data
-            orientation_b: Relative orientation of shape B to shape A
-            position_b: Relative position of shape B to shape A
-            sum_of_contact_offsets: Sum of contact offsets for both shapes
-            data_provider: Support mapping data provider
-
-        Returns:
-            Tuple of (intersection found, point A, point B, normal, penetration, feature A ID, feature B ID)
-        """
-        # Initialize output values
-        point_a = wp.vec3(0.0, 0.0, 0.0)
-        point_b = wp.vec3(0.0, 0.0, 0.0)
-        normal = wp.vec3(0.0, 0.0, 0.0)
-        penetration = 0.0
-        feature_a_id = -1
-        feature_b_id = -1
-
-        # GJK initialization
-        simplex = GJKSimplex()
-        simplex = gjk_simplex_clear(simplex)
-
-        # Initial direction - from center of shape B to center of shape A
-        center_a = geometric_center(geom_a, geom_b, orientation_b, position_b, data_provider)
-        direction = -vert_v(center_a)
-
-        # Ensure direction is not zero
-        if wp.length_sq(direction) < GJK_EPSILON * GJK_EPSILON:
-            direction = wp.vec3(1.0, 0.0, 0.0)
-
-        # First support point
-        support = calculate_support_point(
-            geom_a, geom_b, direction, orientation_b, position_b, sum_of_contact_offsets, data_provider
-        )
-        simplex = gjk_simplex_add_support_point(simplex, support)
-
-        direction = -support.point
-
-        iterations = 0
-
-        while iterations < MAX_GJK_ITERATIONS:
-            support = calculate_support_point(
-                geom_a, geom_b, direction, orientation_b, position_b, sum_of_contact_offsets, data_provider
-            )
-
-            # Check if we're making progress towards the origin
-            if wp.dot(support.point, direction) <= 0.0:
-                return False, point_a, point_b, normal, penetration, feature_a_id, feature_b_id
-
-            simplex = gjk_simplex_add_support_point(simplex, support)
-
-            contains_origin, simplex, direction = gjk_simplex_contains_origin(simplex, direction)
-
-            if contains_origin:
-                # Intersection detected - for GJK only, we just return true
-                # In a full implementation, EPA would be called here for penetration info
-
-                # Set the last support point's feature IDs as output
-                feature_a_id = support.feature_a_id
-                feature_b_id = support.feature_b_id
-
-                # For GJK-only implementation, we can't provide exact contact points
-                # Set approximate values based on the last support point
-                last_vert, feature_a_id, feature_b_id = minkowski_support(
-                    geom_a, geom_b, direction, orientation_b, position_b, sum_of_contact_offsets, data_provider
-                )
-                point_a = last_vert.A
-                point_b = last_vert.B
-                normal = wp.normalize(direction)
-                penetration = 0.001  # Small positive value indicating intersection
-
-                return True, point_a, point_b, normal, penetration, feature_a_id, feature_b_id
-
-            iterations += 1
-
-        return False, point_a, point_b, normal, penetration, feature_a_id, feature_b_id
-
+    # --------------
+    # GJK iteration
+    # --------------
     @wp.func
     def solve_gjk(
         geom_a: GenericShapeData,
@@ -516,36 +402,108 @@ def create_solve_gjk(support_func: Any, center_func: Any):
         sum_of_contact_offsets: float,
         data_provider: SupportMapDataProvider,
     ) -> tuple[bool, wp.vec3, wp.vec3, wp.vec3, float, int, int]:
-        """
-        Main GJK solver function.
+        MAX_ITER = 30
+        TOLERANCE = 1.0e-6
 
-        Args:
-            geom_a: Shape A geometry data
-            geom_b: Shape B geometry data
-            orientation_a: Orientation of shape A
-            orientation_b: Orientation of shape B
-            position_a: Position of shape A
-            position_b: Position of shape B
-            sum_of_contact_offsets: Sum of contact offsets for both shapes
-            data_provider: Support mapping data provider
+        # Transform shape B into A's local space
+        rel_orientation_b = wp.quat_inverse(orientation_a) * orientation_b
+        rel_position_b = wp.quat_rotate_inv(orientation_a, position_b - position_a)
 
-        Returns:
-            Tuple of (intersection found, point A, point B, normal, penetration, feature A ID, feature B ID)
-        """
-        # Transform to shape A's local coordinate system
-        relative_orientation_b = wp.quat_multiply(wp.quat_inverse(orientation_a), orientation_b)
-        relative_position_b = wp.quat_rotate_inv(orientation_a, position_b - position_a)
+        # Initial guess from geometric centers in A-space
+        v0 = geometric_center(geom_a, geom_b, rel_orientation_b, rel_position_b, data_provider)
+        x_k = v0.A - v0.B
 
-        result, point_a, point_b, normal, penetration, feature_a_id, feature_b_id = solve_gjk_internal(
-            geom_a, geom_b, relative_orientation_b, relative_position_b, sum_of_contact_offsets, data_provider
-        )
+        simplex = mat43()
+        simplex1 = mat43()
+        simplex2 = mat43()
+        simplex_index1 = wp.vec4i()
+        simplex_index2 = wp.vec4i()
+        coordinates = wp.vec4()
+        n = int(0)
 
-        if result:
-            # Transform results back to world space
-            point_a = wp.quat_rotate(orientation_a, point_a) + position_a
-            point_b = wp.quat_rotate(orientation_a, point_b) + position_a
-            normal = wp.quat_rotate(orientation_a, normal)
+        epsilon = 0.5 * TOLERANCE * TOLERANCE
 
-        return result, point_a, point_b, normal, penetration, feature_a_id, feature_b_id
+        feature_a_id = int(0)
+        feature_b_id = int(0)
+
+        for _ in range(MAX_ITER):
+            xnorm = wp.dot(x_k, x_k)
+            if xnorm < 1.0e-12:
+                break
+            dir_neg = x_k / wp.sqrt(xnorm)
+
+            # Support on Minkowski difference in A-space
+            v, feature_a_id, feature_b_id = minkowski_support(
+                geom_a, geom_b, -dir_neg, rel_orientation_b, rel_position_b, sum_of_contact_offsets, data_provider
+            )
+
+            simplex1[n] = v.A
+            simplex2[n] = v.B
+            simplex[n] = vert_v(v)
+            simplex_index1[n] = feature_a_id
+            simplex_index2[n] = feature_b_id
+
+            # Frank-Wolfe duality gap stopping
+            if wp.dot(x_k, x_k - simplex[n]) < epsilon:
+                break
+
+            # Barycentric on current simplex
+            coordinates = _subdistance(n + 1, simplex)
+
+            # Compress simplex
+            n = int(0)
+            for i in range(4):
+                if coordinates[i] == 0.0:
+                    continue
+                simplex[n] = simplex[i]
+                simplex1[n] = simplex1[i]
+                simplex2[n] = simplex2[i]
+                simplex_index1[n] = simplex_index1[i]
+                simplex_index2[n] = simplex_index2[i]
+                coordinates[n] = coordinates[i]
+                n += int(1)
+
+            if n < 1:
+                break
+
+            x_next = _linear_combine(n, coordinates, simplex)
+            if _almost_equal(x_next, x_k):
+                break
+            x_k = x_next
+
+            if n == 4:
+                break
+
+        # Compute witness points in A-space
+        point_a_local = _linear_combine(n, coordinates, simplex1)
+        point_b_local = _linear_combine(n, coordinates, simplex2)
+        diff_local = point_a_local - point_b_local
+        dist = wp.norm_l2(diff_local)
+
+        # Choose feature ids from dominant barycentric weight
+        max_w = float(-1.0)
+        feature_a_pick = int(0)
+        feature_b_pick = int(0)
+        for i in range(n):
+            if coordinates[i] > max_w:
+                max_w = coordinates[i]
+                feature_a_pick = simplex_index1[i]
+                feature_b_pick = simplex_index2[i]
+
+        # Transform results back to world space
+        point_a = wp.quat_rotate(orientation_a, point_a_local) + position_a
+        point_b = wp.quat_rotate(orientation_a, point_b_local) + position_a
+
+        # Separation normal (A - B). If overlapping, normal is zero and penetration is 0.
+        collision = bool(n == 4)
+        normal = wp.vec3(0.0, 0.0, 0.0)
+        penetration = float(0.0)
+        if not collision:
+            if dist > 0.0:
+                normal_local = diff_local / dist
+                normal = wp.quat_rotate(orientation_a, normal_local)
+            penetration = dist
+
+        return collision, point_a, point_b, normal, penetration, feature_a_pick, feature_b_pick
 
     return solve_gjk

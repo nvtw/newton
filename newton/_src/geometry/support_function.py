@@ -23,6 +23,7 @@ class SupportMapDataProvider:
     Placeholder for data access needed by support mapping (e.g., mesh buffers).
     Extend with fields as required by your shapes.
     """
+
     pass
 
 
@@ -38,8 +39,17 @@ class GenericShapeData:
       - SPHERE: radius in x
       - CAPSULE: radius in x, half-height in y (axis +Z)
     """
+
     shape_type: int
     scale: wp.vec3
+
+
+@wp.func
+def center_func(geom: GenericShapeData, data_provider: SupportMapDataProvider) -> wp.vec3:
+    """
+    Return the center of a primitive in its local frame.
+    """
+    return wp.vec3(0.0, 0.0, 0.0)
 
 
 @wp.func

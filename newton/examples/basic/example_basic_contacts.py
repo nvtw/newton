@@ -24,6 +24,7 @@ from newton._src.geometry.support_function import (
     GeoType,  # re-exported through newton too
     SupportMapDataProvider,
     support_map as support_map_func,
+    center_func as center_map,
 )
 
 
@@ -57,7 +58,7 @@ class Example:
         self.geom_capsule.scale = self.capsule_scale
 
         # Contact buffers
-        self.contact_valid = wp.array([False], dtype=wp.bool_)
+        self.contact_valid = wp.array([False], dtype=wp.bool)
         self.point_a = wp.array([wp.vec3()], dtype=wp.vec3)
         self.point_b = wp.array([wp.vec3()], dtype=wp.vec3)
         self.normal = wp.array([wp.vec3()], dtype=wp.vec3)
@@ -80,8 +81,12 @@ class Example:
         self.data_provider = SupportMapDataProvider()
 
         # Offsets to keep shapes very close but not overlapping initially
-        self.base_pos_box = wp.vec3(-0.6, 0.0, 0.0)
-        self.base_pos_capsule = wp.vec3(0.6, 0.0, 0.0)
+        self.base_pos_box = wp.vec3(-0.5, 0.0, 0.0)
+        self.base_pos_capsule = wp.vec3(0.5, 0.0, 0.0)
+
+        # Initialize current transforms
+        self.current_x_box = wp.transform_identity()
+        self.current_x_capsule = wp.transform_identity()
 
         # Render once to set up viewer
         self.render()
@@ -92,15 +97,22 @@ class Example:
         angle_capsule = -0.9 * t
 
         q_box = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), angle_box)
-        q_capsule = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), angle_capsule)
+        q_capsule = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), angle_capsule)
 
         # Slight breathing along X to vary distance but keep it near-touching
-        dx = 0.05 * np.sin(1.5 * t)
+        dx = 0.15 * np.sin(1.5 * t)
         p_box = self.base_pos_box + wp.vec3(dx, 0.0, 0.0)
         p_capsule = self.base_pos_capsule - wp.vec3(dx, 0.0, 0.0)
 
-        self.x_box[0] = wp.transform(p_box, q_box)
-        self.x_capsule[0] = wp.transform(p_capsule, q_capsule)
+        # Store transforms directly for kernel use
+        self.current_x_box = wp.transform(p_box, q_box)
+        self.current_x_capsule = wp.transform(p_capsule, q_capsule)
+
+        # Update transforms using assign method for rendering
+        new_x_box = wp.array([self.current_x_box], dtype=wp.transform)
+        new_x_capsule = wp.array([self.current_x_capsule], dtype=wp.transform)
+        self.x_box.assign(new_x_box)
+        self.x_capsule.assign(new_x_capsule)
 
     @wp.kernel
     def _compute_contact_kernel(
@@ -110,7 +122,7 @@ class Example:
         xform_b: wp.transform,
         sum_of_contact_offsets: float,
         data_provider: SupportMapDataProvider,
-        valid_out: wp.array(dtype=wp.bool_),
+        valid_out: wp.array(dtype=wp.bool),
         point_a_out: wp.array(dtype=wp.vec3),
         point_b_out: wp.array(dtype=wp.vec3),
         normal_out: wp.array(dtype=wp.vec3),
@@ -118,9 +130,7 @@ class Example:
         feature_a_out: wp.array(dtype=int),
         feature_b_out: wp.array(dtype=int),
     ):
-        collide = create_solve_convex_contact(support_map_func, lambda g, dp: wp.vec3(0.0, 0.0, 0.0))
-
-        result, pa, pb, n, pen, fa, fb = collide(
+        result, pa, pb, n, pen, fa, fb = wp.static(create_solve_convex_contact(support_map_func, center_map))(
             geom_a,
             geom_b,
             wp.transform_get_rotation(xform_a),
@@ -151,8 +161,8 @@ class Example:
             inputs=[
                 self.geom_box,
                 self.geom_capsule,
-                self.x_box[0],
-                self.x_capsule[0],
+                self.current_x_box,
+                self.current_x_capsule,
                 0.0,  # no contact offset
                 self.data_provider,
                 self.contact_valid,
@@ -165,6 +175,21 @@ class Example:
             ],
             device=wp.get_device(),
         )
+
+        # Compute proper surface contact points
+        pa_raw = self.point_a.numpy()[0]
+        pb_raw = self.point_b.numpy()[0]
+        normal = self.normal.numpy()[0]
+        penetration = self.penetration.numpy()[0]
+
+        pa_surface = pa_raw
+        pb_surface = pb_raw
+        distance = np.linalg.norm(pa_raw - pb_raw)
+        print(f"Closest points - Distance: {distance:.4f}")
+
+        # Store the computed surface points for rendering
+        self.pa_surface = pa_surface
+        self.pb_surface = pb_surface
 
         # Render
         self.render()
@@ -190,18 +215,30 @@ class Example:
             None,
         )
 
-        # Draw contact points and connecting line when valid
-        if self.contact_valid.numpy()[0]:
+        # Always draw contact/closest points and connecting line using computed surface points
+        if hasattr(self, "pa_surface") and hasattr(self, "pb_surface"):
+            pa = self.pa_surface
+            pb = self.pb_surface
+        else:
+            # Fallback to raw points if surface points not computed yet
             pa = self.point_a.numpy()[0]
             pb = self.point_b.numpy()[0]
-            pts = wp.array([pa, pb], dtype=wp.vec3)
-            radii = wp.array([0.04, 0.04], dtype=float)
-            self.viewer.log_points("/contact_pts", pts, radii, self.col_points)
-            self.viewer.log_lines("/contact_line", wp.array([pa], dtype=wp.vec3), wp.array([pb], dtype=wp.vec3), (1.0, 0.0, 0.0))
+
+        pts = wp.array([pa, pb], dtype=wp.vec3)
+        radii = wp.array([0.04, 0.04], dtype=float)
+
+        # Use different colors for actual contacts vs closest points
+        if self.contact_valid.numpy()[0]:
+            # Red for actual contacts
+            colors = wp.array([wp.vec3(1.0, 0.2, 0.2), wp.vec3(1.0, 0.2, 0.2)], dtype=wp.vec3)
+            line_color = (1.0, 0.2, 0.2)
         else:
-            # Clear by logging empty arrays
-            self.viewer.log_points("/contact_pts", wp.array([], dtype=wp.vec3), wp.array([], dtype=float), wp.array([], dtype=wp.vec3))
-            self.viewer.log_lines("/contact_line", wp.array([], dtype=wp.vec3), wp.array([], dtype=wp.vec3), (1.0, 0.0, 0.0))
+            # Green for closest points when not touching
+            colors = wp.array([wp.vec3(0.2, 1.0, 0.2), wp.vec3(0.2, 1.0, 0.2)], dtype=wp.vec3)
+            line_color = (0.2, 1.0, 0.2)
+
+        self.viewer.log_points("/contact_pts", pts, radii, colors)
+        self.viewer.log_lines("/contact_line", wp.array([pa], dtype=wp.vec3), wp.array([pb], dtype=wp.vec3), line_color)
 
         self.viewer.end_frame()
 
