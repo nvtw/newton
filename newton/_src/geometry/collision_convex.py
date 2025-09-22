@@ -32,16 +32,8 @@ def create_solve_convex_contact(support_func: Any, center_func: Any):
         sum_of_contact_offsets: float,
         data_provider: Any,
     ) -> tuple[bool, wp.vec3, wp.vec3, wp.vec3, float, int, int]:
-        # First run GJK to test overlap quickly
-        (
-            gjk_collision,
-            gjk_point_a,
-            gjk_point_b,
-            gjk_normal,
-            gjk_penetration,
-            gjk_feature_a,
-            gjk_feature_b,
-        ) = wp.static(create_solve_gjk(support_func, center_func))(
+        # First run GJK to test overlap quickly while keeping only the tuple live
+        gjk_res = wp.static(create_solve_gjk(support_func, center_func))(
             geom_a,
             geom_b,
             orientation_a,
@@ -51,59 +43,28 @@ def create_solve_convex_contact(support_func: Any, center_func: Any):
             sum_of_contact_offsets,
             data_provider,
         )
-
-        if gjk_collision:
-            # Use MPR to get accurate contact points and penetration info
-            (
-                mpr_collision,
-                mpr_point_a,
-                mpr_point_b,
-                mpr_normal,
-                mpr_penetration,
-                mpr_feature_a,
-                mpr_feature_b,
-            ) = wp.static(create_solve_mpr(support_func, center_func))(
-                geom_a,
-                geom_b,
-                orientation_a,
-                orientation_b,
-                position_a,
-                position_b,
-                sum_of_contact_offsets,
-                data_provider,
+        gjk_collision = gjk_res[0]
+        if not gjk_collision:
+            return (
+                gjk_res[0],
+                gjk_res[1],
+                gjk_res[2],
+                gjk_res[3],
+                gjk_res[4],
+                gjk_res[5],
+                gjk_res[6],
             )
 
-            if mpr_collision:
-                return (
-                    True,
-                    mpr_point_a,
-                    mpr_point_b,
-                    mpr_normal,
-                    mpr_penetration,
-                    mpr_feature_a,
-                    mpr_feature_b,
-                )
-            else:
-                # Fallback to GJK result if MPR fails for any reason
-                return (
-                    True,
-                    gjk_point_a,
-                    gjk_point_b,
-                    gjk_normal,
-                    gjk_penetration,
-                    gjk_feature_a,
-                    gjk_feature_b,
-                )
-
-        # No overlap, return the GJK result (likely gjk_collision == False)
-        return (
-            gjk_collision,
-            gjk_point_a,
-            gjk_point_b,
-            gjk_normal,
-            gjk_penetration,
-            gjk_feature_a,
-            gjk_feature_b,
+        # Use MPR to get accurate contact points and penetration info and return its result directly
+        return wp.static(create_solve_mpr(support_func, center_func))(
+            geom_a,
+            geom_b,
+            orientation_a,
+            orientation_b,
+            position_a,
+            position_b,
+            sum_of_contact_offsets,
+            data_provider,
         )
 
     return solve_convex_contact
