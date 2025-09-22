@@ -33,7 +33,7 @@ def create_solve_convex_contact(support_func: Any, center_func: Any):
         data_provider: Any,
     ) -> tuple[bool, wp.vec3, wp.vec3, wp.vec3, float, int, int]:
         # First run GJK to test overlap quickly while keeping only the tuple live
-        gjk_res = wp.static(create_solve_gjk(support_func, center_func))(
+        collision, point_a, point_b, normal, penetration, feature_a_id, feature_b_id = wp.static(create_solve_gjk(support_func, center_func))(
             geom_a,
             geom_b,
             orientation_a,
@@ -43,20 +43,19 @@ def create_solve_convex_contact(support_func: Any, center_func: Any):
             sum_of_contact_offsets,
             data_provider,
         )
-        gjk_collision = gjk_res[0]
-        if not gjk_collision:
+        if not collision:
             return (
-                gjk_res[0],
-                gjk_res[1],
-                gjk_res[2],
-                gjk_res[3],
-                gjk_res[4],
-                gjk_res[5],
-                gjk_res[6],
+                collision,
+                point_a,
+                point_b,
+                normal,
+                penetration,
+                feature_a_id,
+                feature_b_id,
             )
 
         # Use MPR to get accurate contact points and penetration info and return its result directly
-        return wp.static(create_solve_mpr(support_func, center_func))(
+        collision, point_a, point_b, normal, penetration, feature_a_id, feature_b_id = wp.static(create_solve_mpr(support_func, center_func))(
             geom_a,
             geom_b,
             orientation_a,
@@ -66,5 +65,14 @@ def create_solve_convex_contact(support_func: Any, center_func: Any):
             sum_of_contact_offsets,
             data_provider,
         )
+        return (
+                collision,
+                point_a,
+                point_b,
+                normal,
+                penetration,
+                feature_a_id,
+                feature_b_id,
+            )
 
     return solve_convex_contact
