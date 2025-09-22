@@ -18,7 +18,7 @@ import unittest
 import warp as wp
 
 from newton import GeoType
-from newton._src.geometry.gjk import build_ccd_generic
+from newton._src.geometry.gjk import build_ccd_generic, SupportPoint
 
 MAX_ITERATIONS = 10
 
@@ -53,14 +53,16 @@ class Geom:
 
 
 @wp.func
-def _support(geom: Geom, geomtype: int, dir: wp.vec3):
-    index = -1
+def _support(geom: Geom, geomtype: int, dir: wp.vec3) -> SupportPoint:
+    index = 0
     local_dir = wp.transpose(geom.rot) @ dir
     if geomtype == GeoType.SPHERE:
         support_pt = geom.pos + geom.size[0] * dir
     elif geomtype == GeoType.BOX:
-        res = wp.cw_mul(wp.sign(local_dir), geom.size)
+        s = wp.sign(local_dir)
+        res = wp.cw_mul(s, geom.size)
         support_pt = geom.rot @ res + geom.pos
+        index = res[0] * 4 + res[1] * 2 + res[2]
     elif geomtype == GeoType.CAPSULE:
         res = local_dir * geom.size[0]
         # add cylinder contribution
@@ -84,7 +86,10 @@ def _support(geom: Geom, geomtype: int, dir: wp.vec3):
         res[2] = wp.sign(local_dir[2]) * geom.size[1]
         support_pt = geom.rot @ res + geom.pos
 
-    return index, support_pt
+    result = SupportPoint()
+    result.point = support_pt
+    result.vertex_index = index
+    return result
 
 
 def _geom_dist(m: Model, d: Data, gid1: int, gid2: int, iterations: int):

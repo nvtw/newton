@@ -28,42 +28,54 @@ mat43 = wp.types.matrix(shape=(4, 3), dtype=float)
 
 @wp.struct
 class GJKResult:
-    dist: float
-    x1: wp.vec3
-    x2: wp.vec3
-    dim: int
-    simplex: mat43
-    simplex1: mat43
-    simplex2: mat43
+  dist: float
+  x1: wp.vec3
+  x2: wp.vec3
+  dim: int
+  simplex: mat43
+  simplex1: mat43
+  simplex2: mat43
+  simplex_index1: wp.vec4i
+  simplex_index2: wp.vec4i
 
 
 @wp.struct
 class Polytope:
-    status: int
+  status: int
 
-    # vertices in polytope
-    verts: wp.array(dtype=wp.vec3)
-    verts1: wp.array(dtype=wp.vec3)
-    verts2: wp.array(dtype=wp.vec3)
-    nverts: int
+  # vertices in polytope
+  vert: wp.array(dtype=wp.vec3)
+  vert1: wp.array(dtype=wp.vec3)
+  vert2: wp.array(dtype=wp.vec3)
+  vert_index1: wp.array(dtype=int)
+  vert_index2: wp.array(dtype=int)
+  nvert: int
 
-    # faces in polytope
-    face_verts: wp.array(dtype=wp.vec3i)
-    face_v: wp.array(dtype=wp.vec3)
-    face_dist2: wp.array(dtype=float)
-    face_index: wp.array(dtype=int)
-    nfaces: int
+  # faces in polytope
+  face: wp.array(dtype=wp.vec3i)
+  face_pr: wp.array(dtype=wp.vec3)
+  face_norm2: wp.array(dtype=float)
+  face_index: wp.array(dtype=int)
+  nface: int
 
-    # TODO(kbayes): look into if a linear map actually improves performance
-    map: wp.array(dtype=int)
-    nmap: int
+  # TODO(kbayes): look into if a linear map actually improves performance
+  face_map: wp.array(dtype=int)
+  nmap: int
 
-    # edges that make up the horizon when adding new vertices to polytope
-    nedges: int
-    edges: wp.array(dtype=int)
+  # edges that make up the horizon when adding new vertices to polytope
+  horizon: wp.array(dtype=int)
+  nhorizon: int
 
 
-def build_ccd_generic(support_func: Any):
+@wp.struct
+class SupportPoint:
+  point: wp.vec3
+  # cached_index: int
+  vertex_index: int
+
+
+
+def build_ccd_generic(_support: Any):
     """Build a continuous collision detection (CCD) system using a generic support function.
 
     This function takes a support function as input and returns a collection of helper functions
@@ -107,33 +119,73 @@ def build_ccd_generic(support_func: Any):
         And other internal functions used by GJK/EPA algorithms.
     """
 
+
     @wp.func
-    def _attach_face(pt: Polytope, idx: int, v1: int, v2: int, v3: int):
+    def _attach_face(pt: Polytope, idx: int, v1: int, v2: int, v3: int) -> float:
+        # out of memory, returning 0 will force EPA to return early without contact
+        if pt.nface == pt.face.shape[0]:
+            return 0.0
+
         # compute witness point v
-        r, ret = _project_origin_plane(pt.verts[v3], pt.verts[v2], pt.verts[v1])
+        r, ret = _project_origin_plane(pt.vert[v3], pt.vert[v2], pt.vert[v1])
         if ret:
             return 0.0
 
-        face_verts = wp.vec3i(v1, v2, v3)
-        pt.face_verts[idx] = face_verts
-        pt.face_v[idx] = r
+        face = wp.vec3i(v1, v2, v3)
+        pt.face[idx] = face
+        pt.face_pr[idx] = r
 
-        pt.face_dist2[idx] = wp.dot(r, r)
+        pt.face_norm2[idx] = wp.dot(r, r)
         pt.face_index[idx] = -1
-        return pt.face_dist2[idx]
+        return pt.face_norm2[idx]
 
     @wp.func
-    def _epa_support(pt: Polytope, idx: int, geom1: Any, geom2: Any, geom1_type: int, geom2_type: int, dir: wp.vec3):
-        index1, s1 = wp.static(support_func)(geom1, geom1_type, dir)
-        index2, s2 = wp.static(support_func)(geom2, geom2_type, -dir)
+    def _epa_support(
+        pt: Polytope,
+        idx: int,
+        geom1: Any,
+        geom2: Any,
+        geom1_type: int,
+        geom2_type: int,
+        dir: wp.vec3
+    ) :
+        sp = _support(geom1, geom1_type, dir)
+        pt.vert1[idx] = sp.point
+        pt.vert_index1[idx] = sp.vertex_index
+        # index1 = sp.cached_index
 
-        pt.verts[idx] = s1 - s2
-        pt.verts1[idx] = s1
-        pt.verts2[idx] = s2
-        return index1, index2
+        sp = _support(geom2, geom2_type, -dir)
+        pt.vert2[idx] = sp.point
+        pt.vert_index2[idx] = sp.vertex_index
+        # index2 = sp.cached_index
+
+        pt.vert[idx] = pt.vert1[idx] - pt.vert2[idx]
+
+        #return index1, index2
 
     @wp.func
-    def _linear_combine(n: int, coefs: wp.vec4, mat: mat43):
+    def _epa_support_2(
+        pt: Polytope,
+        idx: int,
+        geom1: Any,
+        geom2: Any,
+        geom1_type: int,
+        geom2_type: int,
+        dir: wp.vec3
+    ) -> tuple[int, int]:
+        sp = _support(geom1, geom1_type, dir)
+        id1 = sp.vertex_index
+
+        sp = _support(geom2, geom2_type, -dir)
+        id2 = sp.vertex_index
+
+        pt.vert[idx] = pt.vert1[idx] - pt.vert2[idx]
+
+        return id1, id2
+
+
+    @wp.func
+    def _linear_combine(n: int, coefs: wp.vec4, mat: mat43) -> wp.vec3:
         v = wp.vec3(0.0)
         if n == 1:
             v = coefs[0] * mat[0]
@@ -144,6 +196,7 @@ def build_ccd_generic(support_func: Any):
         else:
             v = coefs[0] * mat[0] + coefs[1] * mat[1] + coefs[2] * mat[2] + coefs[3] * mat[3]
         return v
+
 
     @wp.func
     def _almost_equal(v1: wp.vec3, v2: wp.vec3):
@@ -162,11 +215,11 @@ def build_ccd_generic(support_func: Any):
         return wp.vec4(1.0, 0.0, 0.0, 0.0)
 
     @wp.func
-    def _det3(v1: wp.vec3, v2: wp.vec3, v3: wp.vec3):
+    def _det3(v1: wp.vec3, v2: wp.vec3, v3: wp.vec3) -> float:
         return wp.dot(v1, wp.cross(v2, v3))
 
     @wp.func
-    def _same_sign(a: float, b: float):
+    def _same_sign(a: float, b: float) -> int:
         if a > 0 and b > 0:
             return 1
         if a < 0 and b < 0:
@@ -212,15 +265,14 @@ def build_ccd_generic(support_func: Any):
         nn = wp.dot(n, n)
         v = (nv / nn) * n
         return v, 0
-
     @wp.func
-    def _S3D(s1: wp.vec3, s2: wp.vec3, s3: wp.vec3, s4: wp.vec3):
+    def _S3D(s1: wp.vec3, s2: wp.vec3, s3: wp.vec3, s4: wp.vec3) -> wp.vec4:
         #  [[ s1_x, s2_x, s3_x, s4_x ],
         #   [ s1_y, s2_y, s3_y, s4_y ],
         #   [ s1_z, s2_z, s3_z, s4_z ],
         #   [ 1,    1,    1,    1    ]]
-        # we want to solve M*lambda = P, where P = [p_x, p_y, p_z, 1] with [p_x, p_y, p_z] is
-        # the origin projected onto the simplex
+        # we want to solve M*lambda = P, where P = [p_x, p_y, p_z, 1] with [p_x, p_y, p_z] is the
+        # origin projected onto the simplex
 
         # compute cofactors to find det(M)
         C41 = -_det3(s2, s3, s4)
@@ -286,10 +338,11 @@ def build_ccd_generic(support_func: Any):
                 coordinates[1] = subcoord[1]
                 coordinates[2] = subcoord[2]
                 coordinates[3] = 0.0
+
         return coordinates
 
     @wp.func
-    def _S2D(s1: wp.vec3, s2: wp.vec3, s3: wp.vec3):
+    def _S2D(s1: wp.vec3, s2: wp.vec3, s3: wp.vec3) -> wp.vec3:
         # project origin onto affine hull of the simplex
         p_o, ret = _project_origin_plane(s1, s2, s3)
         if ret:
@@ -432,8 +485,9 @@ def build_ccd_generic(support_func: Any):
                 coordinates[2] = 0.0
         return coordinates
 
+
     @wp.func
-    def _S1D(s1: wp.vec3, s2: wp.vec3):
+    def _S1D(s1: wp.vec3, s2: wp.vec3) -> wp.vec2:
         # find projection of origin onto the 1-simplex:
         p_o = _project_origin_line(s1, s2)
 
@@ -464,36 +518,62 @@ def build_ccd_generic(support_func: Any):
         x2_0: wp.vec3,
         geomtype1: int,
         geomtype2: int,
-    ):
+        cutoff: float,
+        is_discrete: bool,
+    ) -> GJKResult:
         """Find distance within a tolerance between two geoms."""
+        cutoff2 = cutoff * cutoff
         simplex = mat43()
         simplex1 = mat43()
         simplex2 = mat43()
+        simplex_index1 = wp.vec4i()
+        simplex_index2 = wp.vec4i()
         n = int(0)
         coordinates = wp.vec4()  # barycentric coordinates
-        epsilon = 0.5 * tolerance * tolerance
+        epsilon = wp.where(is_discrete, 0.0, 0.5 * tolerance * tolerance)
 
         # set initial guess
         x_k = x1_0 - x2_0
 
-        for _k in range(gjk_iterations):
+        for k in range(gjk_iterations):
             xnorm = wp.dot(x_k, x_k)
             # TODO(kbayes): determine new constant here
             if xnorm < 1e-12:
                 break
             dir_neg = x_k / wp.sqrt(xnorm)
 
+            # compute kth support point in geom1
+            sp = _support(geom1, geomtype1, -dir_neg)
+            simplex1[n] = sp.point
+            # geom1.index = sp.cached_index
+            simplex_index1[n] = sp.vertex_index
+
+            # compute kth support point in geom2
+            sp = _support(geom2, geomtype2, dir_neg)
+            simplex2[n] = sp.point
+            # geom2.index = sp.cached_index
+            simplex_index2[n] = sp.vertex_index
+
             # compute the kth support point
-            i1, s1_k = wp.static(support_func)(geom1, geomtype1, -dir_neg)
-            i2, s2_k = wp.static(support_func)(geom2, geomtype2, dir_neg)
-            geom1.index = i1
-            geom2.index = i2
-            simplex1[n] = s1_k
-            simplex2[n] = s2_k
-            simplex[n] = s1_k - s2_k
+            simplex[n] = simplex1[n] - simplex2[n]
+
+            if cutoff == 0.0:
+                if wp.dot(x_k, simplex[n]) > 0:
+                    result = GJKResult()
+                    result.dim = 0
+                    result.dist = FLOAT_MAX
+                    return result
+            elif cutoff < FLOAT_MAX:
+                vs = wp.dot(x_k, simplex[n])
+                vv = wp.dot(x_k, x_k)
+                if wp.dot(x_k, simplex[n]) > 0 and (vs * vs / vv) >= cutoff2:
+                    result = GJKResult()
+                    result.dim = 0
+                    result.dist = FLOAT_MAX
+                    return result
 
             # stopping criteria using the Frank-Wolfe duality gap given by
-            #  |f(x_k) - f(x_min)|^2 <= < grad f(x_k), (x_k - s_k) >
+            #  |f(x_k) - f(x_min)|^2 <= < grad f(x_k), (x_k - simplex[n]) >
             if wp.dot(x_k, x_k - simplex[n]) < epsilon:
                 break
 
@@ -510,6 +590,8 @@ def build_ccd_generic(support_func: Any):
                 simplex[n] = simplex[i]
                 simplex1[n] = simplex1[i]
                 simplex2[n] = simplex2[i]
+                simplex_index1[n] = simplex_index1[i]
+                simplex_index2[n] = simplex_index2[i]
                 coordinates[n] = coordinates[i]
                 n += int(1)
 
@@ -541,31 +623,26 @@ def build_ccd_generic(support_func: Any):
         result.dim = n
         result.simplex1 = simplex1
         result.simplex2 = simplex2
+        result.simplex_index1 = simplex_index1
+        result.simplex_index2 = simplex_index2
         result.simplex = simplex
         return result
 
     @wp.func
-    def _same_side(p0: wp.vec3, p1: wp.vec3, p2: wp.vec3, p3: wp.vec3):
+    def _same_side(p0: wp.vec3, p1: wp.vec3, p2: wp.vec3, p3: wp.vec3) -> bool:
         n = wp.cross(p1 - p0, p2 - p0)
         dot1 = wp.dot(n, p3 - p0)
         dot2 = wp.dot(n, -p0)
-        if dot1 > 0 and dot2 > 0:
-            return 1
-        if dot1 < 0 and dot2 < 0:
-            return 1
-        return 0
+        return (dot1 > 0 and dot2 > 0) or (dot1 < 0 and dot2 < 0)
+
 
     @wp.func
-    def _test_tetra(p0: wp.vec3, p1: wp.vec3, p2: wp.vec3, p3: wp.vec3):
-        return (
-            _same_side(p0, p1, p2, p3)
-            and _same_side(p1, p2, p3, p0)
-            and _same_side(p2, p3, p0, p1)
-            and _same_side(p3, p0, p1, p2)
-        )
+    def _test_tetra(p0: wp.vec3, p1: wp.vec3, p2: wp.vec3, p3: wp.vec3) -> bool:
+        return _same_side(p0, p1, p2, p3) and _same_side(p1, p2, p3, p0) and _same_side(p2, p3, p0, p1) and _same_side(p3, p0, p1, p2)
+
 
     @wp.func
-    def _tri_affine_coord(v1: wp.vec3, v2: wp.vec3, v3: wp.vec3, p: wp.vec3):
+    def _tri_affine_coord(v1: wp.vec3, v2: wp.vec3, v3: wp.vec3, p: wp.vec3) -> wp.vec3:
         # compute minors as in S2D
         M_14 = v2[1] * v3[2] - v2[2] * v3[1] - v1[1] * v3[2] + v1[2] * v3[1] + v1[1] * v2[2] - v1[2] * v2[1]
         M_24 = v2[0] * v3[2] - v2[2] * v3[0] - v1[0] * v3[2] + v1[2] * v3[0] + v1[0] * v2[2] - v1[2] * v2[0]
@@ -605,12 +682,13 @@ def build_ccd_generic(support_func: Any):
 
         # compute affine coordinates
         return wp.vec3(C31 / M_max, C32 / M_max, C33 / M_max)
-
+   
+   
     @wp.func
-    def _tri_point_intersect(v1: wp.vec3, v2: wp.vec3, v3: wp.vec3, p: wp.vec3):
+    def _tri_point_intersect(v1: wp.vec3, v2: wp.vec3, v3: wp.vec3, p: wp.vec3) -> bool:
         coordinates = _tri_affine_coord(v1, v2, v3, p)
         l1 = coordinates[0]
-        l2 = coordinates[1]
+        l2 = coordinates[1] 
         l3 = coordinates[2]
 
         if l1 < 0 or l2 < 0 or l3 < 0:
@@ -620,30 +698,50 @@ def build_ccd_generic(support_func: Any):
         pr[0] = v1[0] * l1 + v2[0] * l2 + v3[0] * l3
         pr[1] = v1[1] * l1 + v2[1] * l2 + v3[1] * l3
         pr[2] = v1[2] * l1 + v2[2] * l2 + v3[2] * l3
-        return wp.norm_l2(pr - p) < MINVAL
+        return wp.norm_l2(pr - p) < MJ_MINVAL
+
 
     @wp.func
-    def _replace_simplex3(pt: Polytope, v1: int, v2: int, v3: int):
+    def _replace_simplex3(pt: Polytope, v1: int, v2: int, v3: int) -> GJKResult:
+        result = GJKResult()
+
         # reset GJK simplex
         simplex = mat43()
-        simplex[0] = pt.verts[v1]
-        simplex[1] = pt.verts[v2]
-        simplex[2] = pt.verts[v3]
+        simplex[0] = pt.vert[v1]
+        simplex[1] = pt.vert[v2]
+        simplex[2] = pt.vert[v3]
 
         simplex1 = mat43()
-        simplex1[0] = pt.verts1[v1]
-        simplex1[1] = pt.verts1[v2]
-        simplex1[2] = pt.verts1[v3]
+        simplex1[0] = pt.vert1[v1]
+        simplex1[1] = pt.vert1[v2]
+        simplex1[2] = pt.vert1[v3]
 
         simplex2 = mat43()
-        simplex2[0] = pt.verts2[v1]
-        simplex2[1] = pt.verts2[v2]
-        simplex2[2] = pt.verts2[v3]
+        simplex2[0] = pt.vert2[v1]
+        simplex2[1] = pt.vert2[v2]
+        simplex2[2] = pt.vert2[v3]
 
-        return simplex, simplex1, simplex2
+        simplex_index1 = wp.vec4i()
+        simplex_index1[0] = pt.vert_index1[v1]
+        simplex_index1[1] = pt.vert_index1[v2]
+        simplex_index1[2] = pt.vert_index1[v3]
+
+        simplex_index2 = wp.vec4i()
+        simplex_index2[0] = pt.vert_index2[v1]
+        simplex_index2[1] = pt.vert_index2[v2]
+        simplex_index2[2] = pt.vert_index2[v3]
+
+        result.simplex = simplex
+        result.simplex1 = simplex1
+        result.simplex2 = simplex2
+        result.simplex_index1 = simplex_index1
+        result.simplex_index2 = simplex_index2
+
+        return result
+
 
     @wp.func
-    def _rotmat(axis: wp.vec3):
+    def _rotmat(axis: wp.vec3) -> wp.mat33:
         n = wp.norm_l2(axis)
         u1 = axis[0] / n
         u2 = axis[1] / n
@@ -664,7 +762,7 @@ def build_ccd_generic(support_func: Any):
         return R
 
     @wp.func
-    def _ray_triangle(v1: wp.vec3, v2: wp.vec3, v3: wp.vec3, v4: wp.vec3, v5: wp.vec3):
+    def _ray_triangle(v1: wp.vec3, v2: wp.vec3, v3: wp.vec3, v4: wp.vec3, v5: wp.vec3) -> int:
         vol1 = _det3(v3 - v1, v4 - v1, v2 - v1)
         vol2 = _det3(v4 - v1, v5 - v1, v2 - v1)
         vol3 = _det3(v5 - v1, v3 - v1, v2 - v1)
@@ -675,59 +773,70 @@ def build_ccd_generic(support_func: Any):
             return -1
         return 0
 
+
     @wp.func
-    def _add_edge(pt: Polytope, e1: int, e2: int):
-        n = pt.nedges
+    def _add_edge(pt: Polytope, e1: int, e2: int) -> int:
+        n = pt.nhorizon
+
+        if n < 0:
+            return -1
+
         for i in range(n):
-            old_e1 = pt.edges[2 * i + 0]
-            old_e2 = pt.edges[2 * i + 1]
+            old_e1 = pt.horizon[2 * i + 0]
+            old_e2 = pt.horizon[2 * i + 1]
             if (old_e1 == e1 and old_e2 == e2) or (old_e1 == e2 and old_e2 == e1):
-                pt.edges[2 * i + 0] = pt.edges[2 * (n - 1) + 0]
-                pt.edges[2 * i + 1] = pt.edges[2 * (n - 1) + 1]
+                pt.horizon[2 * i + 0] = pt.horizon[2 * (n - 1) + 0]
+                pt.horizon[2 * i + 1] = pt.horizon[2 * (n - 1) + 1]
                 return n - 1
 
-        pt.edges[2 * n + 0] = e1
-        pt.edges[2 * n + 1] = e2
+        # out of memory, force EPA to return early without contact
+        if n > pt.horizon.shape[0] - 2:
+            return -1
+
+        pt.horizon[2 * n + 0] = e1
+        pt.horizon[2 * n + 1] = e2
         return n + 1
 
+
     @wp.func
-    def _delete_face(pt: Polytope, face_id: int):
+    def _delete_face(pt: Polytope, face_id: int) -> int:
         index = pt.face_index[face_id]
         # delete from map
         if index >= 0:
-            last_face = pt.map[pt.nmap - 1]
-            pt.map[index] = last_face
+            last_face = pt.face_map[pt.nmap - 1]
+            pt.face_map[index] = last_face
             pt.face_index[last_face] = index
             pt.nmap -= 1
         # mark face as deleted from polytope
         pt.face_index[face_id] = -2
         return pt.nmap
 
-    @wp.func
-    def _epa_witness(pt: Polytope, face_idx: int):
-        # compute affine coordinates for witness points on plane defined by face
-        v1 = pt.verts[pt.face_verts[face_idx][0]]
-        v2 = pt.verts[pt.face_verts[face_idx][1]]
-        v3 = pt.verts[pt.face_verts[face_idx][2]]
 
-        coordinates = _tri_affine_coord(v1, v2, v3, pt.face_v[face_idx])
+    @wp.func
+    def _epa_witness(pt: Polytope, face_idx: int) -> tuple[wp.vec3, wp.vec3]:
+        # compute affine coordinates for witness points on plane defined by face
+        v1 = pt.vert[pt.face[face_idx][0]]
+        v2 = pt.vert[pt.face[face_idx][1]]
+        v3 = pt.vert[pt.face[face_idx][2]]
+
+        coordinates = _tri_affine_coord(v1, v2, v3, pt.face_pr[face_idx])
         l1 = coordinates[0]
         l2 = coordinates[1]
         l3 = coordinates[2]
 
         # face on geom 1
-        v1 = pt.verts1[pt.face_verts[face_idx][0]]
-        v2 = pt.verts1[pt.face_verts[face_idx][1]]
-        v3 = pt.verts1[pt.face_verts[face_idx][2]]
+        v1 = pt.vert1[pt.face[face_idx][0]]
+        v2 = pt.vert1[pt.face[face_idx][1]]
+        v3 = pt.vert1[pt.face[face_idx][2]]
         x1 = wp.vec3()
         x1[0] = v1[0] * l1 + v2[0] * l2 + v3[0] * l3
         x1[1] = v1[1] * l1 + v2[1] * l2 + v3[1] * l3
         x1[2] = v1[2] * l1 + v2[2] * l2 + v3[2] * l3
 
         # face on geom 2
-        v1 = pt.verts2[pt.face_verts[face_idx][0]]
-        v2 = pt.verts2[pt.face_verts[face_idx][1]]
-        v3 = pt.verts2[pt.face_verts[face_idx][2]]
+        v1 = pt.vert2[pt.face[face_idx][0]]
+        v2 = pt.vert2[pt.face[face_idx][1]]
+        v3 = pt.vert2[pt.face[face_idx][2]]
         x2 = wp.vec3()
         x2[0] = v1[0] * l1 + v2[0] * l2 + v3[0] * l3
         x2[1] = v1[1] * l1 + v2[1] * l2 + v3[1] * l3
@@ -743,11 +852,13 @@ def build_ccd_generic(support_func: Any):
         simplex: mat43,
         simplex1: mat43,
         simplex2: mat43,
+        simplex_index1: wp.vec4i,
+        simplex_index2: wp.vec4i,
         geom1: Any,
         geom2: Any,
         geomtype1: int,
         geomtype2: int,
-    ):
+    ) -> tuple[Polytope, GJKResult]:
         """Create polytope for EPA given a 1-simplex from GJK"""
         diff = simplex[1] - simplex[0]
 
@@ -770,60 +881,67 @@ def build_ccd_generic(support_func: Any):
         d3 = R @ d2
 
         # save vertices and get indices for each one
-        pt.verts[0] = simplex[0]
-        pt.verts[1] = simplex[1]
+        pt.vert[0] = simplex[0]
+        pt.vert[1] = simplex[1]
 
-        pt.verts1[0] = simplex1[0]
-        pt.verts1[1] = simplex1[1]
+        pt.vert1[0] = simplex1[0]
+        pt.vert1[1] = simplex1[1]
 
-        pt.verts2[0] = simplex2[0]
-        pt.verts2[1] = simplex2[1]
+        pt.vert_index1[0] = simplex_index1[0]
+        pt.vert_index1[1] = simplex_index1[1]
+
+        pt.vert2[0] = simplex2[0]
+        pt.vert2[1] = simplex2[1]
+
+        pt.vert_index2[0] = simplex_index2[0]
+        pt.vert_index2[1] = simplex_index2[1]
 
         _epa_support(pt, 2, geom1, geom2, geomtype1, geomtype2, d1 / wp.norm_l2(d1))
         _epa_support(pt, 3, geom1, geom2, geomtype1, geomtype2, d2 / wp.norm_l2(d2))
         _epa_support(pt, 4, geom1, geom2, geomtype1, geomtype2, d3 / wp.norm_l2(d3))
 
         # build hexahedron
-        if _attach_face(pt, 0, 0, 2, 3) < MINVAL:
-            simplex, simplex1, simplex2 = _replace_simplex3(pt, 0, 2, 3)
-            return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
+        if _attach_face(pt, 0, 0, 2, 3) < MJ_MINVAL:
+            pt.status = -1
+            return pt, _replace_simplex3(pt, 0, 2, 3)
 
-        if _attach_face(pt, 1, 0, 4, 2) < MINVAL2:
-            simplex, simplex1, simplex2 = _replace_simplex3(pt, 0, 4, 2)
-            return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
+        if _attach_face(pt, 1, 0, 4, 2) < MJ_MINVAL2:
+            pt.status = -1
+            return pt, _replace_simplex3(pt, 0, 4, 2)
 
-        if _attach_face(pt, 2, 0, 3, 4) < MINVAL2:
-            simplex, simplex1, simplex2 = _replace_simplex3(pt, 0, 3, 4)
-            return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
+        if _attach_face(pt, 2, 0, 3, 4) < MJ_MINVAL2:
+            pt.status = -1
+            return pt, _replace_simplex3(pt, 0, 3, 4)
 
-        if _attach_face(pt, 3, 1, 3, 2) < MINVAL2:
-            simplex, simplex1, simplex2 = _replace_simplex3(pt, 1, 3, 2)
-            return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
+        if _attach_face(pt, 3, 1, 3, 2) < MJ_MINVAL2:
+            pt.status = -1
+            return pt, _replace_simplex3(pt, 1, 3, 2)
 
-        if _attach_face(pt, 4, 1, 2, 4) < MINVAL2:
-            simplex, simplex1, simplex2 = _replace_simplex3(pt, 1, 2, 4)
-            return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
+        if _attach_face(pt, 4, 1, 2, 4) < MJ_MINVAL2:
+            pt.status = -1
+            return pt, _replace_simplex3(pt, 1, 2, 4)
 
-        if _attach_face(pt, 5, 1, 4, 3) < MINVAL2:
-            simplex, simplex1, simplex2 = _replace_simplex3(pt, 1, 4, 3)
-            return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
+        if _attach_face(pt, 5, 1, 4, 3) < MJ_MINVAL2:
+            pt.status = -1
+            return pt, _replace_simplex3(pt, 1, 4, 3)
 
         # check hexahedron is convex
-        if not _ray_triangle(simplex[0], simplex[1], pt.verts[2], pt.verts[3], pt.verts[4]):
+        if not _ray_triangle(simplex[0], simplex[1], pt.vert[2], pt.vert[3], pt.vert[4]):
             pt.status = 1
-            return pt
+            return pt, GJKResult()
 
         # populate face map
         for i in range(6):
-            pt.map[i] = i
+            pt.face_map[i] = i
             pt.face_index[i] = i
 
         # set polytope counts
-        pt.nverts = 5
-        pt.nfaces = 6
+        pt.nvert = 5
+        pt.nface = 6
         pt.nmap = 6
         pt.status = 0
-        return pt
+        return pt, GJKResult()
+
 
     @wp.func
     def _polytope3(
@@ -833,29 +951,39 @@ def build_ccd_generic(support_func: Any):
         simplex: mat43,
         simplex1: mat43,
         simplex2: mat43,
+        simplex_index1: wp.vec4i,
+        simplex_index2: wp.vec4i,
         geom1: Any,
         geom2: Any,
         geomtype1: int,
         geomtype2: int,
-    ):
+    ) -> Polytope:
         """Create polytope for EPA given a 2-simplex from GJK"""
         # get normals in both directions
         n = wp.cross(simplex[1] - simplex[0], simplex[2] - simplex[0])
-        if wp.norm_l2(n) < MINVAL:
+        if wp.norm_l2(n) < MJ_MINVAL:
             pt.status = 2
             return pt
 
-        pt.verts[0] = simplex[0]
-        pt.verts[1] = simplex[1]
-        pt.verts[2] = simplex[2]
+        pt.vert[0] = simplex[0]
+        pt.vert[1] = simplex[1]
+        pt.vert[2] = simplex[2]
 
-        pt.verts1[0] = simplex1[0]
-        pt.verts1[1] = simplex1[1]
-        pt.verts1[2] = simplex1[2]
+        pt.vert1[0] = simplex1[0]
+        pt.vert1[1] = simplex1[1]
+        pt.vert1[2] = simplex1[2]
 
-        pt.verts2[0] = simplex2[0]
-        pt.verts2[1] = simplex2[1]
-        pt.verts2[2] = simplex2[2]
+        pt.vert_index1[0] = simplex_index1[0]
+        pt.vert_index1[1] = simplex_index1[1]
+        pt.vert_index1[2] = simplex_index1[2]
+
+        pt.vert2[0] = simplex2[0]
+        pt.vert2[1] = simplex2[1]
+        pt.vert2[2] = simplex2[2]
+
+        pt.vert_index2[0] = simplex_index2[0]
+        pt.vert_index2[1] = simplex_index2[1]
+        pt.vert_index2[2] = simplex_index2[2]
 
         _epa_support(pt, 3, geom1, geom2, geomtype1, geomtype2, -n)
         _epa_support(pt, 4, geom1, geom2, geomtype1, geomtype2, n)
@@ -863,8 +991,8 @@ def build_ccd_generic(support_func: Any):
         v1 = simplex[0]
         v2 = simplex[1]
         v3 = simplex[2]
-        v4 = pt.verts[3]
-        v5 = pt.verts[4]
+        v4 = pt.vert[3]
+        v5 = pt.vert[4]
 
         # check that v4 is not contained in the 2-simplex
         if _tri_point_intersect(v1, v2, v3, v4):
@@ -876,44 +1004,44 @@ def build_ccd_generic(support_func: Any):
             pt.status = 4
             return pt
 
-        # if origin does not lie on simplex then we need to check that the hexahedron contains
-        # the origin
+        # if origin does not lie on simplex then we need to check that the hexahedron contains the
+        # origin
         if dist > 1e-5 and not _test_tetra(v1, v2, v3, v4) and not _test_tetra(v1, v2, v3, v5):
             pt.status = 5
             return pt
 
         # create hexahedron for EPA
-        if _attach_face(pt, 0, 4, 0, 1) < MINVAL2:
+        if _attach_face(pt, 0, 4, 0, 1) < MJ_MINVAL2:
             pt.status = 6
             return pt
-        if _attach_face(pt, 1, 4, 2, 0) < MINVAL2:
+        if _attach_face(pt, 1, 4, 2, 0) < MJ_MINVAL2:
             pt.status = 7
             return pt
-        if _attach_face(pt, 2, 4, 1, 2) < MINVAL2:
+        if _attach_face(pt, 2, 4, 1, 2) < MJ_MINVAL2:
             pt.status = 8
             return pt
-        if _attach_face(pt, 3, 3, 1, 0) < MINVAL2:
+        if _attach_face(pt, 3, 3, 1, 0) < MJ_MINVAL2:
             pt.status = 9
             return pt
-        if _attach_face(pt, 4, 3, 0, 2) < MINVAL2:
+        if _attach_face(pt, 4, 3, 0, 2) < MJ_MINVAL2:
             pt.status = 10
             return pt
-        if _attach_face(pt, 5, 3, 2, 1) < MINVAL2:
+        if _attach_face(pt, 5, 3, 2, 1) < MJ_MINVAL2:
             pt.status = 11
             return pt
 
         # populate face map
         for i in range(6):
-            pt.map[i] = i
+            pt.face_map[i] = i
             pt.face_index[i] = i
 
         # set polytope counts
-        pt.nverts = 5
-        pt.nfaces = 6
+        pt.nvert = 5
+        pt.nface = 6
         pt.nmap = 6
         pt.status = 0
         return pt
-
+    
     @wp.func
     def _polytope4(
         # In:
@@ -922,81 +1050,102 @@ def build_ccd_generic(support_func: Any):
         simplex: mat43,
         simplex1: mat43,
         simplex2: mat43,
+        simplex_index1: wp.vec4i,
+        simplex_index2: wp.vec4i,
         geom1: Any,
         geom2: Any,
         geomtype1: int,
         geomtype2: int,
-    ):
+    ) -> tuple[Polytope, GJKResult]:
         """Create polytope for EPA given a 3-simplex from GJK"""
-        pt.verts[0] = simplex[0]
-        pt.verts[1] = simplex[1]
-        pt.verts[2] = simplex[2]
-        pt.verts[3] = simplex[3]
+        pt.vert[0] = simplex[0]
+        pt.vert[1] = simplex[1] 
+        pt.vert[2] = simplex[2]
+        pt.vert[3] = simplex[3]
 
-        pt.verts1[0] = simplex1[0]
-        pt.verts1[1] = simplex1[1]
-        pt.verts1[2] = simplex1[2]
-        pt.verts1[3] = simplex1[3]
+        pt.vert1[0] = simplex1[0]
+        pt.vert1[1] = simplex1[1]
+        pt.vert1[2] = simplex1[2]
+        pt.vert1[3] = simplex1[3]
 
-        pt.verts2[0] = simplex2[0]
-        pt.verts2[1] = simplex2[1]
-        pt.verts2[2] = simplex2[2]
-        pt.verts2[3] = simplex2[3]
+        pt.vert_index1[0] = simplex_index1[0]
+        pt.vert_index1[1] = simplex_index1[1]
+        pt.vert_index1[2] = simplex_index1[2]
+        pt.vert_index1[3] = simplex_index1[3]
+
+        pt.vert2[0] = simplex2[0]
+        pt.vert2[1] = simplex2[1]
+        pt.vert2[2] = simplex2[2]
+        pt.vert2[3] = simplex2[3]
+
+        pt.vert_index2[0] = simplex_index2[0]
+        pt.vert_index2[1] = simplex_index2[1]
+        pt.vert_index2[2] = simplex_index2[2]
+        pt.vert_index2[3] = simplex_index2[3]
 
         # if the origin is on a face, replace the 3-simplex with a 2-simplex
-        if _attach_face(pt, 0, 0, 1, 2) < MINVAL2:
-            simplex, simplex1, simplex2 = _replace_simplex3(pt, 0, 1, 2)
-            return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
+        if _attach_face(pt, 0, 0, 1, 2) < MJ_MINVAL2:
+            pt.status = -1
+            return pt, _replace_simplex3(pt, 0, 1, 2)
 
-        if _attach_face(pt, 1, 0, 3, 1) < MINVAL2:
-            simplex, simplex1, simplex2 = _replace_simplex3(pt, 0, 3, 1)
-            return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
+        if _attach_face(pt, 1, 0, 3, 1) < MJ_MINVAL2:
+            pt.status = -1
+            return pt, _replace_simplex3(pt, 0, 3, 1)
 
-        if _attach_face(pt, 2, 0, 2, 3) < MINVAL2:
-            simplex, simplex1, simplex2 = _replace_simplex3(pt, 0, 2, 3)
-            return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
+        if _attach_face(pt, 2, 0, 2, 3) < MJ_MINVAL2:
+            pt.status = -1
+            return pt, _replace_simplex3(pt, 0, 2, 3)
 
-        if _attach_face(pt, 3, 3, 2, 1) < MINVAL2:
-            simplex, simplex1, simplex2 = _replace_simplex3(pt, 3, 2, 1)
-            return _polytope3(pt, dist, simplex, simplex1, simplex2, geom1, geom2, geomtype1, geomtype2)
+        if _attach_face(pt, 3, 3, 2, 1) < MJ_MINVAL2:
+            pt.status = -1
+            return pt, _replace_simplex3(pt, 3, 2, 1)
 
-        if not _test_tetra(pt.verts[0], pt.verts[1], pt.verts[2], pt.verts[3]):
+        if not _test_tetra(pt.vert[0], pt.vert[1], pt.vert[2], pt.vert[3]):
             pt.status = 12
-            return pt
+            return pt, GJKResult()
 
         # populate face map
         for i in range(4):
-            pt.map[i] = i
+            pt.face_map[i] = i
             pt.face_index[i] = i
 
         # set polytope counts
-        pt.nverts = 4
-        pt.nfaces = 4
+        pt.nvert = 4
+        pt.nface = 4
         pt.nmap = 4
         pt.status = 0
-        return pt
+        return pt, GJKResult()
 
     @wp.func
     def _epa(
-        tolerance2: float, epa_iterations: int, pt: Polytope, geom1: Any, geom2: Any, geomtype1: int, geomtype2: int
-    ):
-        """Recover pentration data from two geoms in contact given an initial polytope."""
+        # In:
+        tolerance: float,
+        epa_iterations: int,
+        pt: Polytope,
+        geom1: Any,
+        geom2: Any,
+        geomtype1: int,
+        geomtype2: int,
+        is_discrete: bool,
+    ) -> tuple[float, wp.vec3, wp.vec3, int]:
+        """Recover penetration data from two geoms in contact given an initial polytope."""
         upper = FLOAT_MAX
         upper2 = FLOAT_MAX
         idx = int(-1)
         pidx = int(-1)
+        epsilon = wp.where(is_discrete, 1e-15, tolerance)
 
-        for _k in range(epa_iterations):
+        for k in range(epa_iterations):
             pidx = int(idx)
             idx = int(-1)
 
             # find the face closest to the origin (lower bound for penetration depth)
             lower2 = float(FLOAT_MAX)
             for i in range(pt.nmap):
-                face_idx = pt.map[i]
-                if pt.face_dist2[face_idx] < lower2:
+                face_idx = pt.face_map[i]
+                if pt.face_norm2[face_idx] < lower2:
                     idx = int(face_idx)
-                    lower2 = float(pt.face_dist2[face_idx])
+                    lower2 = float(pt.face_norm2[face_idx])
 
             # face not valid, return previous face
             if lower2 > upper2 or idx < 0:
@@ -1009,50 +1158,67 @@ def build_ccd_generic(support_func: Any):
 
             # compute support point w from the closest face's normal
             lower = wp.sqrt(lower2)
-            wi = pt.nverts
-            i1, i2 = _epa_support(pt, wi, geom1, geom2, geomtype1, geomtype2, pt.face_v[idx] / lower)
-            geom1.index = i1
-            geom2.index = i2
-            pt.nverts += 1
+            wi = pt.nvert
+            _epa_support(pt, wi, geom1, geom2, geomtype1, geomtype2, pt.face_pr[idx] / lower)
+            #i1, i2 = _epa_support(pt, wi, geom1, geom2, geomtype1, geomtype2, pt.face_pr[idx] / lower)
+            #geom1.index = i1
+            #geom2.index = i2
+            pt.nvert += 1
 
             # upper bound for kth iteration
-            upper_k = wp.dot(pt.face_v[idx], pt.verts[wi]) / lower
+            upper_k = wp.dot(pt.face_pr[idx], pt.vert[wi]) / lower
             if upper_k < upper:
                 upper = upper_k
                 upper2 = upper * upper
 
-            if upper - lower < tolerance2:
+            if upper - lower < epsilon:
                 break
 
+            # check if vertex wi is a repeated support point
+            if is_discrete:
+                found_repeated = bool(False)
+                for i in range(pt.nvert - 1):
+                    if pt.vert_index1[i] == pt.vert_index1[wi] and pt.vert_index2[i] == pt.vert_index2[wi]:
+                        found_repeated = True
+                        break
+                if found_repeated:
+                    break
+
             pt.nmap = _delete_face(pt, idx)
-            pt.nedges = _add_edge(pt, pt.face_verts[idx][0], pt.face_verts[idx][1])
-            pt.nedges = _add_edge(pt, pt.face_verts[idx][1], pt.face_verts[idx][2])
-            pt.nedges = _add_edge(pt, pt.face_verts[idx][2], pt.face_verts[idx][0])
+            pt.nhorizon = _add_edge(pt, pt.face[idx][0], pt.face[idx][1])
+            pt.nhorizon = _add_edge(pt, pt.face[idx][1], pt.face[idx][2])
+            pt.nhorizon = _add_edge(pt, pt.face[idx][2], pt.face[idx][0])
+            if pt.nhorizon == -1:
+                idx = -1
+                break
 
             # compute horizon for w
-            for i in range(pt.nfaces):
+            for i in range(pt.nface):
                 if pt.face_index[i] == -2:
                     continue
 
-                if wp.dot(pt.face_v[i], pt.verts[wi]) - pt.face_dist2[i] > MINVAL:
+                if wp.dot(pt.face_pr[i], pt.vert[wi]) - pt.face_norm2[i] > 1e-10:
                     pt.nmap = _delete_face(pt, i)
-                    pt.nedges = _add_edge(pt, pt.face_verts[i][0], pt.face_verts[i][1])
-                    pt.nedges = _add_edge(pt, pt.face_verts[i][1], pt.face_verts[i][2])
-                    pt.nedges = _add_edge(pt, pt.face_verts[i][2], pt.face_verts[i][0])
+                    pt.nhorizon = _add_edge(pt, pt.face[i][0], pt.face[i][1])
+                    pt.nhorizon = _add_edge(pt, pt.face[i][1], pt.face[i][2])
+                    pt.nhorizon = _add_edge(pt, pt.face[i][2], pt.face[i][0])
+                    if pt.nhorizon == -1:
+                        idx = -1
+                        break
 
             # insert w as new vertex and attach faces along the horizon
-            for i in range(pt.nedges):
-                dist2 = _attach_face(pt, pt.nfaces, wi, pt.edges[2 * i + 0], pt.edges[2 * i + 1])
+            for i in range(pt.nhorizon):
+                dist2 = _attach_face(pt, pt.nface, wi, pt.horizon[2 * i + 0], pt.horizon[2 * i + 1])
                 if dist2 == 0:
                     idx = -1
                     break
 
-                pt.nfaces += 1
+                pt.nface += 1
 
                 # store face in map
                 if dist2 >= lower2 and dist2 <= upper2:
-                    pt.map[pt.nmap] = pt.nfaces - 1
-                    pt.face_index[pt.nfaces - 1] = pt.nmap
+                    pt.face_map[pt.nmap] = pt.nface - 1
+                    pt.face_index[pt.nface - 1] = pt.nmap
                     pt.nmap += 1
 
             # no face candidates left
@@ -1060,13 +1226,17 @@ def build_ccd_generic(support_func: Any):
                 break
 
             # clear horizon
-            pt.nedges = 0
+            pt.nhorizon = 0
+
+
+        pt_id1, pt_id2 = _epa_support_2(pt, wi, geom1, geom2, geomtype1, geomtype2, pt.face_pr[idx] / lower)
+
 
         # return from valid face
         if idx > -1:
             x1, x2 = _epa_witness(pt, idx)
-            return -wp.sqrt(pt.face_dist2[idx]), x1, x2
-        return 0.0, wp.vec3(), wp.vec3()
+            return -wp.sqrt(pt.face_norm2[idx]), x1, x2, idx, pt_id1, pt_id2
+        return 0.0, wp.vec3(), wp.vec3(), -1, -1, -1
 
     @wp.func
     def ccd(
@@ -1089,28 +1259,28 @@ def build_ccd_generic(support_func: Any):
         face_index: wp.array(dtype=int),
         map: wp.array(dtype=int),
         edges: wp.array(dtype=int),
-    ):
+    ) -> tuple[float, wp.vec3, wp.vec3]:
         """General convex collision detection via GJK/EPA."""
-        result = _gjk(tolerance, gjk_iterations, geom1, geom2, x_1, x_2, geomtype1, geomtype2)
+        result = _gjk(tolerance, gjk_iterations, geom1, geom2, x_1, x_2, geomtype1, geomtype2, tolerance, False)
 
         # no pentration depth to recover
         if result.dist > tolerance or result.dim < 2:
             return result.dist, result.x1, result.x2
 
         pt = Polytope()
-        pt.nfaces = 0
+        pt.nface = 0
         pt.nmap = 0
-        pt.nverts = 0
-        pt.nedges = 0
-        pt.verts = verts
-        pt.verts1 = verts1
-        pt.verts2 = verts2
-        pt.face_verts = face_verts
-        pt.face_v = face_v
-        pt.face_dist2 = face_dist2
+        pt.nvert = 0
+        pt.nhorizon = 0
+        pt.vert = verts
+        pt.vert1 = verts1
+        pt.vert2 = verts2
+        pt.face = face_verts
+        pt.face_pr = face_v
+        pt.face_norm2 = face_dist2
         pt.face_index = face_index
-        pt.map = map
-        pt.edges = edges
+        pt.face_map = map
+        pt.horizon = edges
 
         if result.dim == 2:
             pt = _polytope2(
@@ -1129,6 +1299,7 @@ def build_ccd_generic(support_func: Any):
         if pt.status:
             return result.dist, result.x1, result.x2
 
-        return _epa(tolerance * tolerance, epa_iterations, pt, geom1, geom2, geomtype1, geomtype2)
+        dist, x1, x2, _, _, _ = _epa(tolerance * tolerance, epa_iterations, pt, geom1, geom2, geomtype1, geomtype2, False)
+        return dist, x1, x2
 
     return ccd
