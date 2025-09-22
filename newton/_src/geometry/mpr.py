@@ -34,9 +34,6 @@ def vert_v(vert: Vert) -> wp.vec3:
     return vert.A - vert.B
 
 
-
-
-
 def create_solve_mpr(support_func: Any, center_func: Any):
     """
     Factory function to create MPR solver with specific support and center functions.
@@ -48,7 +45,6 @@ def create_solve_mpr(support_func: Any, center_func: Any):
     Returns:
         MPR solver function
     """
-
 
     # Support mapping functions (these replace the MinkowskiDiff struct methods)
     @wp.func
@@ -83,7 +79,6 @@ def create_solve_mpr(support_func: Any, center_func: Any):
         result = result + position_b
 
         return result, feature_id
-
 
     @wp.func
     def minkowski_support(
@@ -130,7 +125,6 @@ def create_solve_mpr(support_func: Any, center_func: Any):
 
         return v, feature_a_id, feature_b_id
 
-
     @wp.func
     def geometric_center(
         geom_a: GenericShapeData,
@@ -163,7 +157,6 @@ def create_solve_mpr(support_func: Any, center_func: Any):
         center.B = position_b + center.B
 
         return center
-
 
     @wp.func
     def solve_mpr_core(
@@ -385,7 +378,6 @@ def create_solve_mpr(support_func: Any, center_func: Any):
                 else:
                     v1 = v4
 
-
     @wp.func
     def solve_mpr(
         geom_a: GenericShapeData,
@@ -436,6 +428,5 @@ def create_solve_mpr(support_func: Any, center_func: Any):
             normal = wp.quat_rotate(orientation_a, normal)
 
         return collision, point_a, point_b, normal, penetration, feature_a_id, feature_b_id
-
 
     return solve_mpr

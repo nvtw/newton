@@ -38,6 +38,9 @@ class GenericShapeData:
       - BOX: half-extents (x, y, z)
       - SPHERE: radius in x
       - CAPSULE: radius in x, half-height in y (axis +Z)
+      - ELLIPSOID: semi-axes (x, y, z)
+      - CYLINDER: radius in x, half-height in y (axis +Z)
+      - CONE: radius in x, half-height in y (axis +Z, apex at +Z)
     """
 
     shape_type: int
@@ -48,8 +51,18 @@ class GenericShapeData:
 def center_func(geom: GenericShapeData, data_provider: SupportMapDataProvider) -> wp.vec3:
     """
     Return the center of a primitive in its local frame.
+
+    For most primitives, this is the origin (0,0,0), but for some shapes
+    like cones, the geometric center differs from the coordinate origin.
     """
-    return wp.vec3(0.0, 0.0, 0.0)
+    if geom.shape_type == int(GeoType.CONE):
+        # Cone centroid is at 1/4 of the total height above the base plane.
+        # With base at z=-half_height and apex at z=+half_height, this is z = -half_height/2.
+        half_height = geom.scale[1]
+        return wp.vec3(0.0, 0.0, -0.5 * half_height)
+    else:
+        # For box, sphere, capsule, ellipsoid, cylinder: center is at origin
+        return wp.vec3(0.0, 0.0, 0.0)
 
 
 @wp.func
@@ -63,6 +76,9 @@ def support_map(
     - BOX: half-extents in x/y/z
     - SPHERE: radius in x component
     - CAPSULE: radius in x, half-height in y (axis along +Z)
+    - ELLIPSOID: semi-axes in x/y/z
+    - CYLINDER: radius in x, half-height in y (axis along +Z)
+    - CONE: radius in x, half-height in y (axis along +Z, apex at +Z)
     """
 
     # handle zero direction robustly
@@ -120,6 +136,80 @@ def support_map(
         else:
             n = wp.vec3(1.0, 0.0, 0.0)
         result = base + n * radius
+
+    elif geom.shape_type == int(GeoType.ELLIPSOID):
+        # Ellipsoid support for semi-axes a, b, c in direction d:
+        # p* = (a^2 dx, b^2 dy, c^2 dz) / sqrt((a dx)^2 + (b dy)^2 + (c dz)^2)
+        a = geom.scale[0]
+        b = geom.scale[1]
+        c = geom.scale[2]
+        if dir_len_sq > eps:
+            adx = a * dir_safe[0]
+            bdy = b * dir_safe[1]
+            cdz = c * dir_safe[2]
+            denom_sq = adx * adx + bdy * bdy + cdz * cdz
+            if denom_sq > eps:
+                denom = wp.sqrt(denom_sq)
+                result = wp.vec3((a * a) * dir_safe[0] / denom, (b * b) * dir_safe[1] / denom, (c * c) * dir_safe[2] / denom)
+            else:
+                result = wp.vec3(a, 0.0, 0.0)
+        else:
+            result = wp.vec3(a, 0.0, 0.0)
+        feature_id = 0
+
+    elif geom.shape_type == int(GeoType.CYLINDER):
+        radius = geom.scale[0]
+        half_height = geom.scale[1]
+
+        # Cylinder support: project direction to XY plane for lateral surface
+        dir_xy = wp.vec3(dir_safe[0], dir_safe[1], 0.0)
+        dir_xy_len_sq = wp.length_sq(dir_xy)
+
+        if dir_xy_len_sq > eps:
+            n_xy = wp.normalize(dir_xy)
+            lateral_point = wp.vec3(n_xy[0] * radius, n_xy[1] * radius, 0.0)
+        else:
+            lateral_point = wp.vec3(radius, 0.0, 0.0)
+
+        # Choose between top cap, bottom cap, or lateral surface
+        if dir_safe[2] > 0.0:
+            result = wp.vec3(lateral_point[0], lateral_point[1], half_height)
+            feature_id = 1  # top cap
+        elif dir_safe[2] < 0.0:
+            result = wp.vec3(lateral_point[0], lateral_point[1], -half_height)
+            feature_id = 2  # bottom cap
+        else:
+            result = lateral_point
+            feature_id = 0  # lateral surface
+
+    elif geom.shape_type == int(GeoType.CONE):
+        radius = geom.scale[0]
+        half_height = geom.scale[1]
+
+        # Cone support: apex at +Z, base disk at z=-half_height.
+        # Using slope k = radius / (2*half_height), the optimal support is:
+        #   apex if dz >= k * ||d_xy||, otherwise base rim in d_xy direction.
+        apex = wp.vec3(0.0, 0.0, half_height)
+        dir_xy = wp.vec3(dir_safe[0], dir_safe[1], 0.0)
+        dir_xy_len = wp.length(dir_xy)
+        k = radius / (2.0 * half_height) if half_height > eps else 0.0
+
+        if dir_xy_len <= eps:
+            # Purely vertical direction
+            if dir_safe[2] >= 0.0:
+                result = apex
+                feature_id = 1  # apex
+            else:
+                result = wp.vec3(radius, 0.0, -half_height)
+                feature_id = 2  # base edge
+        else:
+            if dir_safe[2] >= k * dir_xy_len:
+                result = apex
+                feature_id = 1  # apex
+            else:
+                n_xy = dir_xy / dir_xy_len
+                result = wp.vec3(n_xy[0] * radius, n_xy[1] * radius, -half_height)
+                feature_id = 2  # base edge
 
     else:
         # Unhandled type: return origin and feature 0
