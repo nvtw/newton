@@ -706,30 +706,7 @@ def add_avoid_duplicates_vec4(arr: wp.array(dtype=wp.vec4), arr_count: int, vec:
     return arr_count + 1
 
 
-# Support mapping interface - these would need to be implemented based on the actual shape support functions
-@wp.struct
-class GenericShapeData:
-    """
-    Generic shape data structure for support mapping.
-    This is a placeholder - the actual implementation would depend on
-    the specific shape representation used in the system.
-    """
-
-    shape_type: int
-    scale: wp.vec3
-    # Additional fields would be added based on actual requirements
-
-
-@wp.struct
-class SupportMapDataProvider:
-    """
-    Data provider for support mapping operations.
-    This is a placeholder - the actual implementation would depend on
-    the specific data structures used in the system.
-    """
-
-    # This would contain mesh data, convex hull data, etc.
-    pass
+# Support mapping interface - now imported from support_function module
 
 
 def create_build_manifold(support_func: Any):
@@ -749,7 +726,7 @@ def create_build_manifold(support_func: Any):
         b_buffer: wp.array(dtype=Fvec3),
         feature_anchor_a: wp.uint32,
         feature_anchor_b: wp.uint32,
-        data_provider: SupportMapDataProvider,
+        data_provider: Any,
     ) -> int:
         """
         Build a contact manifold between two shapes.

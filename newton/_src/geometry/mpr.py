@@ -17,8 +17,6 @@ from typing import Any
 
 import warp as wp
 
-from .support_function import GenericShapeData, SupportMapDataProvider
-
 
 @wp.struct
 class Vert:
@@ -49,11 +47,11 @@ def create_solve_mpr(support_func: Any, center_func: Any):
     # Support mapping functions (these replace the MinkowskiDiff struct methods)
     @wp.func
     def support_map_b(
-        geom_b: GenericShapeData,
+        geom_b: Any,
         direction: wp.vec3,
         orientation_b: wp.quat,
         position_b: wp.vec3,
-        data_provider: SupportMapDataProvider,
+        data_provider: Any,
     ) -> tuple[wp.vec3, int]:
         """
         Support mapping for shape B with transformation.
@@ -82,13 +80,13 @@ def create_solve_mpr(support_func: Any, center_func: Any):
 
     @wp.func
     def minkowski_support(
-        geom_a: GenericShapeData,
-        geom_b: GenericShapeData,
+        geom_a: Any,
+        geom_b: Any,
         direction: wp.vec3,
         orientation_b: wp.quat,
         position_b: wp.vec3,
         extend: float,
-        data_provider: SupportMapDataProvider,
+        data_provider: Any,
     ) -> tuple[Vert, int, int]:
         """
         Compute support point on Minkowski difference A - B.
@@ -127,11 +125,11 @@ def create_solve_mpr(support_func: Any, center_func: Any):
 
     @wp.func
     def geometric_center(
-        geom_a: GenericShapeData,
-        geom_b: GenericShapeData,
+        geom_a: Any,
+        geom_b: Any,
         orientation_b: wp.quat,
         position_b: wp.vec3,
-        data_provider: SupportMapDataProvider,
+        data_provider: Any,
     ) -> Vert:
         """
         Compute geometric center of Minkowski difference.
@@ -160,12 +158,12 @@ def create_solve_mpr(support_func: Any, center_func: Any):
 
     @wp.func
     def solve_mpr_core(
-        geom_a: GenericShapeData,
-        geom_b: GenericShapeData,
+        geom_a: Any,
+        geom_b: Any,
         orientation_b: wp.quat,
         position_b: wp.vec3,
         extend: float,
-        data_provider: SupportMapDataProvider,
+        data_provider: Any,
     ) -> tuple[bool, wp.vec3, wp.vec3, wp.vec3, float, int, int]:
         """
         Core MPR algorithm implementation.
@@ -380,14 +378,14 @@ def create_solve_mpr(support_func: Any, center_func: Any):
 
     @wp.func
     def solve_mpr(
-        geom_a: GenericShapeData,
-        geom_b: GenericShapeData,
+        geom_a: Any,
+        geom_b: Any,
         orientation_a: wp.quat,
         orientation_b: wp.quat,
         position_a: wp.vec3,
         position_b: wp.vec3,
         sum_of_contact_offsets: float,
-        data_provider: SupportMapDataProvider,
+        data_provider: Any,
     ) -> tuple[bool, wp.vec3, wp.vec3, wp.vec3, float, int, int]:
         """
         Solve MPR (Minkowski Portal Refinement) for collision detection.

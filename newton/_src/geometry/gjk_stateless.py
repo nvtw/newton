@@ -25,9 +25,6 @@ from typing import Any
 import warp as wp
 
 from .mpr import Vert, vert_v
-from .support_function import GenericShapeData, SupportMapDataProvider
-
-
 
 
 def create_solve_gjk(support_func: Any, center_func: Any):
@@ -43,7 +40,6 @@ def create_solve_gjk(support_func: Any, center_func: Any):
     Returns:
         GJK solver function
     """
-
 
     # -----------------
     # Helper constants
@@ -70,9 +66,7 @@ def create_solve_gjk(support_func: Any, center_func: Any):
 
     @wp.func
     def _almost_equal(v1: wp.vec3, v2: wp.vec3) -> bool:
-        return (
-            wp.abs(v1[0] - v2[0]) < MINVAL and wp.abs(v1[1] - v2[1]) < MINVAL and wp.abs(v1[2] - v2[2]) < MINVAL
-        )
+        return wp.abs(v1[0] - v2[0]) < MINVAL and wp.abs(v1[1] - v2[1]) < MINVAL and wp.abs(v1[2] - v2[2]) < MINVAL
 
     @wp.func
     def _det3(v1: wp.vec3, v2: wp.vec3, v3: wp.vec3) -> float:
@@ -335,11 +329,11 @@ def create_solve_gjk(support_func: Any, center_func: Any):
     # -------------------------
     @wp.func
     def support_map_b(
-        geom_b: GenericShapeData,
+        geom_b: Any,
         direction: wp.vec3,
         orientation_b: wp.quat,
         position_b: wp.vec3,
-        data_provider: SupportMapDataProvider,
+        data_provider: Any,
     ) -> tuple[wp.vec3, int]:
         tmp = wp.quat_rotate_inv(orientation_b, direction)
         result, feature_id = support_func(geom_b, tmp, data_provider)
@@ -349,13 +343,13 @@ def create_solve_gjk(support_func: Any, center_func: Any):
 
     @wp.func
     def minkowski_support(
-        geom_a: GenericShapeData,
-        geom_b: GenericShapeData,
+        geom_a: Any,
+        geom_b: Any,
         direction: wp.vec3,
         orientation_b: wp.quat,
         position_b: wp.vec3,
         extend: float,
-        data_provider: SupportMapDataProvider,
+        data_provider: Any,
     ) -> tuple[Vert, int, int]:
         v = Vert()
         tmp_result_a = support_func(geom_a, direction, data_provider)
@@ -375,11 +369,11 @@ def create_solve_gjk(support_func: Any, center_func: Any):
 
     @wp.func
     def geometric_center(
-        geom_a: GenericShapeData,
-        geom_b: GenericShapeData,
+        geom_a: Any,
+        geom_b: Any,
         orientation_b: wp.quat,
         position_b: wp.vec3,
-        data_provider: SupportMapDataProvider,
+        data_provider: Any,
     ) -> Vert:
         center = Vert()
         center.A = center_func(geom_a, data_provider)
@@ -393,14 +387,14 @@ def create_solve_gjk(support_func: Any, center_func: Any):
     # --------------
     @wp.func
     def solve_gjk(
-        geom_a: GenericShapeData,
-        geom_b: GenericShapeData,
+        geom_a: Any,
+        geom_b: Any,
         orientation_a: wp.quat,
         orientation_b: wp.quat,
         position_a: wp.vec3,
         position_b: wp.vec3,
         sum_of_contact_offsets: float,
-        data_provider: SupportMapDataProvider,
+        data_provider: Any,
     ) -> tuple[bool, wp.vec3, wp.vec3, wp.vec3, float, int, int]:
         MAX_ITER = 30
         TOLERANCE = 1.0e-6

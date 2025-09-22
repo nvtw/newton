@@ -355,7 +355,7 @@ class Example:
             for j, pair in enumerate(row):
                 self._animate_pair(pair, i, j, t)
 
-    @wp.kernel
+    @wp.kernel(enable_backward=False)
     def _compute_contact_matrix_kernel(
         geom_a_array: wp.array(dtype=GenericShapeData),
         geom_b_array: wp.array(dtype=GenericShapeData),

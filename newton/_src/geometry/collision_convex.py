@@ -18,20 +18,19 @@ import warp as wp
 
 from .gjk_stateless import create_solve_gjk
 from .mpr import create_solve_mpr
-from .support_function import GenericShapeData, SupportMapDataProvider
 
 
 def create_solve_convex_contact(support_func: Any, center_func: Any):
     @wp.func
     def solve_convex_contact(
-        geom_a: GenericShapeData,
-        geom_b: GenericShapeData,
+        geom_a: Any,
+        geom_b: Any,
         orientation_a: wp.quat,
         orientation_b: wp.quat,
         position_a: wp.vec3,
         position_b: wp.vec3,
         sum_of_contact_offsets: float,
-        data_provider: SupportMapDataProvider,
+        data_provider: Any,
     ) -> tuple[bool, wp.vec3, wp.vec3, wp.vec3, float, int, int]:
         # First run GJK to test overlap quickly
         (
