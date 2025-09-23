@@ -18,7 +18,8 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton._src.geometry.collision_convex import create_solve_convex_contact
+from newton._src.geometry.collision_convex import create_solve_convex_multi_contact, create_solve_convex_contact
+from newton._src.geometry.gjk_stateless import create_solve_gjk
 from newton._src.geometry.support_function import (
     GenericShapeData,
     GeoType,  # re-exported through newton too
@@ -107,8 +108,9 @@ class Example:
 
         self.viewer = viewer
 
-        # Initialize solver factory for convex contact (gjk then mpr)
-        self.solve_convex = create_solve_convex_contact(support_map_func, center_map)
+        # Initialize solver factories
+        self.solve_convex_multi = create_solve_convex_multi_contact(support_map_func, center_map)
+        self.solve_gjk = create_solve_gjk(support_map_func, center_map)
         self.data_provider = SupportMapDataProvider()
 
         # Create all shape types and their combinations (only viewer-supported types)
@@ -378,7 +380,8 @@ class Example:
         xform_a = xform_a_array[tid]
         xform_b = xform_b_array[tid]
 
-        result, pa, pb, n, pen, fa, fb = wp.static(create_solve_convex_contact(support_map_func, center_map))(
+        # Build multi-contact manifold and take the first contact
+        count, pts_a, pts_b, features = wp.static(create_solve_convex_multi_contact(support_map_func, center_map))(
             geom_a,
             geom_b,
             wp.transform_get_rotation(xform_a),
@@ -389,7 +392,31 @@ class Example:
             data_provider,
         )
 
+        # Use GJK to get collision boolean, normal, and penetration (keeps visualization unchanged)
+        result, _pa_gjk, _pb_gjk, n, pen, _fa_gjk, _fb_gjk = wp.static(create_solve_convex_contact(support_map_func, center_map))(
+            geom_a,
+            geom_b,
+            wp.transform_get_rotation(xform_a),
+            wp.transform_get_rotation(xform_b),
+            wp.transform_get_translation(xform_a),
+            wp.transform_get_translation(xform_b),
+            sum_of_contact_offsets,
+            data_provider,
+        )
+
+        # Write outputs: first manifold point when available
+        # valid_out[tid] = count > 0 and result
+        # pa = pts_a[0]
+        # pb = pts_b[0]
+        # fa = int(features[0])
+        # fb = int(features[0])
+
         valid_out[tid] = result
+        pa = _pa_gjk
+        pb = _pb_gjk
+        fa = _fa_gjk
+        fb = _fb_gjk
+
         point_a_out[tid] = pa
         point_b_out[tid] = pb
         normal_out[tid] = n
