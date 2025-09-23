@@ -123,7 +123,6 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
                 data_provider,
             )
 
-        # Build multi-contact manifold using anchors; manifold expects normal A->B
         count, points_a, points_b, features = wp.static(create_build_manifold(support_func))(
             geom_a,
             geom_b,

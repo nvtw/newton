@@ -25,6 +25,8 @@ from typing import Any
 
 import warp as wp
 
+from .kernels import build_orthonormal_basis
+
 # Constants
 EPS = 0.00001
 ROT_DELTA_ANGLE = 60.0 * wp.pi / 180.0
@@ -864,10 +866,7 @@ def create_build_manifold(support_func: Any):
         b_count = 0
 
         # Create an orthonormal basis from the collision normal.
-        tangent_a = wp.normalize(wp.cross(normal, wp.vec3(1.0, 0.0, 0.0)))
-        if wp.length_sq(tangent_a) < 1e-6:
-            tangent_a = wp.normalize(wp.cross(normal, wp.vec3(0.0, 1.0, 0.0)))
-        tangent_b = wp.cross(normal, tangent_a)
+        tangent_a, tangent_b = build_orthonormal_basis(normal)
 
         features_a = vec6_uint8(wp.uint8(0))
         features_b = vec6_uint8(wp.uint8(0))
