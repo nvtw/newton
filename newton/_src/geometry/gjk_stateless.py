@@ -408,7 +408,6 @@ def create_solve_gjk(support_func: Any, center_func: Any):
         x_k = v0.A - v0.B
 
         simplex = mat43()
-        simplex1 = mat43()
         simplex2 = mat43()
         simplex_index1 = wp.vec4i()
         simplex_index2 = wp.vec4i()
@@ -428,13 +427,19 @@ def create_solve_gjk(support_func: Any, center_func: Any):
                 dir_neg = x_k / wp.sqrt(xnorm)
             else:
                 used_fallback = True
+                # wp.printf("Used fallback\n")
+                # wp.printf("v0.A: %f %f %f\n", v0.A[0], v0.A[1], v0.A[2])
+                # wp.printf("v0.B: %f %f %f\n", v0.B[0], v0.B[1], v0.B[2]) 
+                # wp.printf("iter: %d\n", iter)
+                # delta = position_b - position_a
+                # wp.printf("delta: %f %f %f\n", delta[0], delta[1], delta[2])
+                # wp.printf("x_k: %f %f %f\n", x_k[0], x_k[1], x_k[2])
 
             # Support on Minkowski difference in A-space
             v, feature_a_id, feature_b_id = minkowski_support(
                 geom_a, geom_b, -dir_neg, rel_orientation_b, rel_position_b, sum_of_contact_offsets, data_provider
             )
 
-            simplex1[n] = v.A
             simplex2[n] = v.B
             simplex[n] = vert_v(v)
             simplex_index1[n] = feature_a_id
@@ -454,7 +459,6 @@ def create_solve_gjk(support_func: Any, center_func: Any):
                 if coordinates[i] == 0.0:
                     continue
                 simplex[n] = simplex[i]
-                simplex1[n] = simplex1[i]
                 simplex2[n] = simplex2[i]
                 simplex_index1[n] = simplex_index1[i]
                 simplex_index2[n] = simplex_index2[i]
@@ -472,10 +476,10 @@ def create_solve_gjk(support_func: Any, center_func: Any):
             if n == 4:
                 break
 
-        # Compute witness points in A-space
-        point_a_local = _linear_combine(n, coordinates, simplex1)
+        # Compute witness points in A-space (no simplex1 needed)
         point_b_local = _linear_combine(n, coordinates, simplex2)
         diff_local = _linear_combine(n, coordinates, simplex)
+        point_a_local = point_b_local + diff_local
         dist = wp.norm_l2(diff_local)
 
         # Choose feature ids from dominant barycentric weight
