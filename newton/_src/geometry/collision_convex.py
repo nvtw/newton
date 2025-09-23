@@ -46,6 +46,7 @@ def create_solve_convex_contact(support_func: Any, center_func: Any):
             sum_of_contact_offsets,
             data_provider,
         )
+        normal = -normal # TODO: Unify the normal convention
         if not collision:
             return (
                 collision,
@@ -108,7 +109,7 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
             sum_of_contact_offsets,
             data_provider,
         )
-
+        normal = -normal # TODO: Unify the normal convention
         if collision:
             collision, point_a, point_b, normal, _penetration, feature_a_id, feature_b_id = wp.static(
                 create_solve_mpr(support_func, center_func)
