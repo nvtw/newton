@@ -408,6 +408,7 @@ def create_solve_gjk(support_func: Any, center_func: Any):
         x_k = v0.A - v0.B
 
         simplex = mat43()
+        simplex1 = mat43()
         simplex2 = mat43()
         simplex_index1 = wp.vec4i()
         simplex_index2 = wp.vec4i()
@@ -421,23 +422,28 @@ def create_solve_gjk(support_func: Any, center_func: Any):
 
         for _ in range(MAX_ITER):
             xnorm = wp.dot(x_k, x_k)
-            if xnorm < 1.0e-12:
-                break
-            dir_neg = x_k / wp.sqrt(xnorm)
+            used_fallback = bool(False)
+            dir_neg = wp.vec3(1.0, 0.0, 0.0)
+            if xnorm >= 1.0e-12:
+                dir_neg = x_k / wp.sqrt(xnorm)
+            else:
+                used_fallback = True
 
             # Support on Minkowski difference in A-space
             v, feature_a_id, feature_b_id = minkowski_support(
                 geom_a, geom_b, -dir_neg, rel_orientation_b, rel_position_b, sum_of_contact_offsets, data_provider
             )
 
+            simplex1[n] = v.A
             simplex2[n] = v.B
             simplex[n] = vert_v(v)
             simplex_index1[n] = feature_a_id
             simplex_index2[n] = feature_b_id
 
-            # Frank-Wolfe duality gap stopping
-            if wp.dot(x_k, x_k - simplex[n]) < epsilon:
-                break
+            # Frank-Wolfe duality gap stopping (skip on fallback to avoid premature exit)
+            if not used_fallback:
+                if wp.dot(x_k, x_k - simplex[n]) < epsilon:
+                    break
 
             # Barycentric on current simplex
             coordinates = _subdistance(n + 1, simplex)
@@ -448,6 +454,7 @@ def create_solve_gjk(support_func: Any, center_func: Any):
                 if coordinates[i] == 0.0:
                     continue
                 simplex[n] = simplex[i]
+                simplex1[n] = simplex1[i]
                 simplex2[n] = simplex2[i]
                 simplex_index1[n] = simplex_index1[i]
                 simplex_index2[n] = simplex_index2[i]
@@ -466,9 +473,9 @@ def create_solve_gjk(support_func: Any, center_func: Any):
                 break
 
         # Compute witness points in A-space
+        point_a_local = _linear_combine(n, coordinates, simplex1)
         point_b_local = _linear_combine(n, coordinates, simplex2)
         diff_local = _linear_combine(n, coordinates, simplex)
-        point_a_local = point_b_local + diff_local
         dist = wp.norm_l2(diff_local)
 
         # Choose feature ids from dominant barycentric weight
@@ -485,15 +492,25 @@ def create_solve_gjk(support_func: Any, center_func: Any):
         point_a = wp.quat_rotate(orientation_a, point_a_local) + position_a
         point_b = wp.quat_rotate(orientation_a, point_b_local) + position_a
 
-        # Separation normal (A - B). If overlapping, normal is zero and penetration is 0.
+        # Determine collision and compute normal/penetration
         collision = bool(n == 4)
         normal = wp.vec3(0.0, 0.0, 0.0)
         penetration = float(0.0)
-        if not collision:
+
+        if collision:
+            # Objects are overlapping - return negative penetration depth
+            # For overlapping objects, the distance represents penetration depth
+            penetration = -dist
+            if dist > 0.0:
+                # Normal points from B to A (separation direction)
+                normal_local = diff_local / dist
+                normal = wp.quat_rotate(orientation_a, normal_local)
+        else:
+            # Objects are separated - return positive distance
+            penetration = dist
             if dist > 0.0:
                 normal_local = diff_local / dist
                 normal = wp.quat_rotate(orientation_a, normal_local)
-            penetration = dist
 
         return collision, point_a, point_b, normal, penetration, feature_a_pick, feature_b_pick
 
