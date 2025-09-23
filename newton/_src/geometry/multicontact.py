@@ -167,12 +167,8 @@ def insert_vec4(arr: wp.array(dtype=wp.vec4), arr_count: int, index: int, elemen
     arr[index] = element
 
 
-
-
-vec12_uint8 = wp.types.vector(12, wp.uint8)
-
 @wp.func
-def insert_byte(arr: vec12_uint8, arr_count: int, index: int, element: wp.uint8):
+def insert_byte(arr: wp.array(dtype=wp.uint8), arr_count: int, index: int, element: wp.uint8):
     """
     Insert a byte element into an array at the specified index, shifting elements to the right.
 
@@ -210,7 +206,7 @@ def trim_in_place(
     trim_seg_end: wp.vec3,
     trim_seg_id: wp.uint8,
     loop: wp.array(dtype=wp.vec4),
-    loop_seg_ids: vec12_uint8,
+    loop_seg_ids: wp.array(dtype=wp.uint8),
     loop_count: int,
     max_loop_capacity: int,
 ) -> int:
@@ -362,7 +358,7 @@ def trim_all_in_place(
     trim_poly: wp.array(dtype=wp.vec3),
     trim_poly_count: int,
     loop: wp.array(dtype=wp.vec4),
-    loop_segments: vec12_uint8,
+    loop_segments: wp.array(dtype=wp.uint8),
     loop_count: int,
     max_loop_capacity: int,
 ) -> int:
@@ -487,7 +483,7 @@ def approx_max_quadrilateral_area_with_calipers(hull: wp.array(dtype=wp.vec4), h
 
 @wp.func
 def remove_zero_length_edges(
-    loop: wp.array(dtype=wp.vec4), loop_seg_ids: vec12_uint8, loop_count: int, eps: float
+    loop: wp.array(dtype=wp.vec4), loop_seg_ids: wp.array(dtype=wp.uint8), loop_count: int, eps: float
 ) -> int:
     """
     Remove zero-length edges from a polygon loop.
@@ -573,7 +569,7 @@ def edge_key(per_vertex_features: wp.types.vector(6, wp.uint8), count: int, edge
 
 @wp.func
 def feature_id(
-    loop_seg_ids: wp.types.vector(12, wp.uint8),
+    loop_seg_ids: wp.array(dtype=wp.uint8),
     loop_id: int,
     loop_count: int,
     features_a: wp.types.vector(6, wp.uint8),
@@ -762,7 +758,7 @@ def extract_4_point_contact_manifolds(
     max_points = 12
     loop = wp.array(ptr=get_Fvec3_array_ptr(m_b), shape=(12,), dtype=wp.vec4)  # stackalloc vec4[maxPoints];
     f_loop = m_b  # (Fvec3*)loop;
-    loop_seg_ids = vec12_uint8(wp.uint8(0))  # stackalloc byte[maxPoints];
+    loop_seg_ids = wp.zeros(shape=(12,), dtype=wp.uint8)  # stackalloc byte[maxPoints];
 
     for i in range(m_b_count):
         bb_xyz = fvec3_get_xyz(m_b[i])
