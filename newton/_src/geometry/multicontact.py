@@ -21,6 +21,8 @@ multiple contact points between colliding shapes. It includes polygon clipping,
 feature tracking, and contact point selection algorithms.
 """
 
+from typing import Any
+
 import warp as wp
 
 # Constants
@@ -165,8 +167,12 @@ def insert_vec4(arr: wp.array(dtype=wp.vec4), arr_count: int, index: int, elemen
     arr[index] = element
 
 
+
+
+vec12_uint8 = wp.types.vector(12, wp.uint8)
+
 @wp.func
-def insert_byte(arr: wp.array(dtype=wp.uint8), arr_count: int, index: int, element: wp.uint8):
+def insert_byte(arr: vec12_uint8, arr_count: int, index: int, element: wp.uint8):
     """
     Insert a byte element into an array at the specified index, shifting elements to the right.
 
@@ -204,7 +210,7 @@ def trim_in_place(
     trim_seg_end: wp.vec3,
     trim_seg_id: wp.uint8,
     loop: wp.array(dtype=wp.vec4),
-    loop_seg_ids: wp.array(dtype=wp.uint8),
+    loop_seg_ids: vec12_uint8,
     loop_count: int,
     max_loop_capacity: int,
 ) -> int:
@@ -238,13 +244,13 @@ def trim_in_place(
         return loop_count
 
     intersection_a = wp.vec4(0.0, 0.0, 0.0, 0.0)
-    change_a = -1
+    change_a = int(-1)
     change_a_seg_id = wp.uint8(255)
     intersection_b = wp.vec4(0.0, 0.0, 0.0, 0.0)
-    change_b = -1
+    change_b = int(-1)
     change_b_seg_id = wp.uint8(255)
 
-    keep = False
+    keep = bool(False)
 
     # Get 2D projections for the trim segment
     trim_start_xy = wp.vec2(trim_seg_start[0], trim_seg_start[1])
@@ -252,7 +258,7 @@ def trim_in_place(
 
     # Check first vertex
     loop0_xy = wp.vec2(loop[0][0], loop[0][1])
-    prev_outside = signed_area(trim_start_xy, trim_end_xy, loop0_xy) <= 0.0
+    prev_outside = bool(signed_area(trim_start_xy, trim_end_xy, loop0_xy) <= 0.0)
 
     for i in range(loop_count):
         next_idx = (i + 1) % loop_count
@@ -274,10 +280,10 @@ def trim_in_place(
         prev_outside = outside
 
     if change_a >= 0 and change_b >= 0:
-        loop_indexer = -1
-        new_loop_count = loop_count
+        loop_indexer = int(-1)
+        new_loop_count = int(loop_count)
 
-        i = 0
+        i = int(0)
         while i < loop_count:
             # If the current vertex is on the side to be kept, copy it and its segment ID.
             if keep:
@@ -356,7 +362,7 @@ def trim_all_in_place(
     trim_poly: wp.array(dtype=wp.vec3),
     trim_poly_count: int,
     loop: wp.array(dtype=wp.vec4),
-    loop_segments: wp.array(dtype=wp.uint8),
+    loop_segments: vec12_uint8,
     loop_count: int,
     max_loop_capacity: int,
 ) -> int:
@@ -391,7 +397,7 @@ def trim_all_in_place(
 
 
 @wp.func
-def approx_max_quadrilateral_area_with_calipers(hull: wp.array(dtype=wp.vec4), hull_count: int) -> wp.vec5:
+def approx_max_quadrilateral_area_with_calipers(hull: wp.array(dtype=wp.vec4), hull_count: int) -> wp.vec4i:
     """
     Finds an approximate maximum area quadrilateral inside a convex hull in O(n) time
     using the Rotating Calipers algorithm to find the hull's diameter.
@@ -401,14 +407,14 @@ def approx_max_quadrilateral_area_with_calipers(hull: wp.array(dtype=wp.vec4), h
         hull_count: Number of vertices in the hull.
 
     Returns:
-        vec5 containing (area, p1, p2, p3, p4) where area is the total area
-        and p1, p2, p3, p4 are the indices of the quadrilateral vertices.
+        vec4i containing (p1, p2, p3, p4) where p1, p2, p3, p4 are the indices
+        of the quadrilateral vertices that form the maximum area quadrilateral.
     """
     n = hull_count
 
     # --- Step 1: Find the hull's diameter using Rotating Calipers in O(n) ---
-    p1 = 0
-    p3 = 1
+    p1 = int(0)
+    p3 = int(1)
     # Use vec4 distance (matches C# vec4 length squared behavior)
     hp1 = hull[p1]
     hp3 = hull[p3]
@@ -416,7 +422,7 @@ def approx_max_quadrilateral_area_with_calipers(hull: wp.array(dtype=wp.vec4), h
     max_dist_sq = diff[0] * diff[0] + diff[1] * diff[1] + diff[2] * diff[2] + diff[3] * diff[3]
 
     # Start with point j opposite point i=0
-    j = 1
+    j = int(1)
     for i in range(n):
         # For the current point i, find its antipodal point j by advancing j
         # while the area of the triangle formed by the edge (i, i+1) and point j increases.
@@ -456,10 +462,10 @@ def approx_max_quadrilateral_area_with_calipers(hull: wp.array(dtype=wp.vec4), h
             p3 = j
 
     # --- Step 2: Find points p2 and p4 furthest from the diameter (p1, p3) ---
-    p2 = 0
-    p4 = 0
-    max_area_1 = 0.0
-    max_area_2 = 0.0
+    p2 = int(0)
+    p4 = int(0)
+    max_area_1 = float(0.0)
+    max_area_2 = float(0.0)
 
     hull_p1_xy = wp.vec2(hull[p1][0], hull[p1][1])
     hull_p3_xy = wp.vec2(hull[p3][0], hull[p3][1])
@@ -476,13 +482,12 @@ def approx_max_quadrilateral_area_with_calipers(hull: wp.array(dtype=wp.vec4), h
             max_area_2 = -area
             p4 = i
 
-    total_area = max_area_1 + max_area_2
-    return wp.vec5(total_area, float(p1), float(p2), float(p3), float(p4))
+    return wp.vec4i(p1, p2, p3, p4)
 
 
 @wp.func
 def remove_zero_length_edges(
-    loop: wp.array(dtype=wp.vec4), loop_seg_ids: wp.array(dtype=wp.uint8), loop_count: int, eps: float
+    loop: wp.array(dtype=wp.vec4), loop_seg_ids: vec12_uint8, loop_count: int, eps: float
 ) -> int:
     """
     Remove zero-length edges from a polygon loop.
@@ -502,7 +507,7 @@ def remove_zero_length_edges(
 
     # 'write_idx' is the index for the new, compacted loop.
     # It always points to the last valid point found so far.
-    write_idx = 0
+    write_idx = int(0)
 
     # Iterate through the original loop, starting from the second point.
     # 'read_idx' is the index of the point we are currently considering.
@@ -547,7 +552,7 @@ def remove_zero_length_edges(
 
 
 @wp.func
-def edge_key(per_vertex_features: wp.array(dtype=wp.uint8), count: int, edge_id: int) -> wp.uint32:
+def edge_key(per_vertex_features: wp.types.vector(6, wp.uint8), count: int, edge_id: int) -> wp.uint32:
     """
     Creates a packed edge key from two consecutive feature IDs.
     Used to create compact identifiers for edges defined by vertex pairs.
@@ -563,16 +568,16 @@ def edge_key(per_vertex_features: wp.array(dtype=wp.uint8), count: int, edge_id:
     # An edge always goes from one vertex to the next, wrapping around at the end.
     first = per_vertex_features[edge_id]
     second = per_vertex_features[(edge_id + 1) % count]
-    return (wp.uint32(first) << 8) | wp.uint32(second)
+    return wp.uint32(wp.uint32(first) << wp.uint32(8)) | wp.uint32(second)
 
 
 @wp.func
 def feature_id(
-    loop_seg_ids: wp.array(dtype=wp.uint8),
+    loop_seg_ids: wp.types.vector(12, wp.uint8),
     loop_id: int,
     loop_count: int,
-    features_a: wp.array(dtype=wp.uint8),
-    features_b: wp.array(dtype=wp.uint8),
+    features_a: wp.types.vector(6, wp.uint8),
+    features_b: wp.types.vector(6, wp.uint8),
     m_a_count: int,
     m_b_count: int,
 ) -> wp.uint32:
@@ -622,7 +627,7 @@ def feature_id(
         else:
             y = edge_key(features_b, m_b_count, int(outgoing) - 6)
 
-        feature = (x << 16) | y
+        feature = (x << wp.uint32(16)) | y
     else:
         if incoming_belongs_to_trim_poly:
             next_seg = (int(incoming) + 1) % m_a_count
@@ -633,18 +638,18 @@ def feature_id(
                 # Should not happen because input poly A would have self intersections
                 x = edge_key(features_a, m_a_count, int(incoming))
                 y = edge_key(features_a, m_a_count, int(outgoing))
-                feature = (x << 16) | y
+                feature = (x << wp.uint32(16)) | y
         else:
             next_seg = (int(incoming) - 6 + 1) % m_b_count + 6
             is_original_poly_point = next_seg == int(outgoing)
             if is_original_poly_point:
                 # Shifted such that not the same id can get generated as produced by features_a
-                feature = wp.uint32(features_b[int(outgoing) - 6]) << 8
+                feature = wp.uint32(features_b[int(outgoing) - 6]) << wp.uint32(8)
             else:
                 # Should not happen because input poly B would have self intersections
                 x = edge_key(features_b, m_b_count, int(incoming) - 6)
                 y = edge_key(features_b, m_b_count, int(outgoing) - 6)
-                feature = (x << 16) | y
+                feature = (x << wp.uint32(16)) | y
 
     return feature
 
@@ -708,11 +713,129 @@ def add_avoid_duplicates_vec4(arr: wp.array(dtype=wp.vec4), arr_count: int, vec:
 
 # Support mapping interface - now imported from support_function module
 
+get_array_ptr_cpp = """
+    return (uint64_t)arr.data;
+"""
+
+
+@wp.func_native(get_array_ptr_cpp)
+def get_Fvec3_array_ptr(arr: wp.array(dtype=Fvec3)) -> wp.uint64: ...
+
+
+@wp.func
+def extract_4_point_contact_manifolds(
+    m_a: wp.array(dtype=wp.vec3),
+    features_a: wp.types.vector(6, wp.uint8),
+    m_a_count: int,
+    m_b: wp.array(dtype=Fvec3),
+    features_b: wp.types.vector(6, wp.uint8),
+    m_b_count: int,
+    normal: wp.vec3,
+    cross_vector_1: wp.vec3,
+    cross_vector_2: wp.vec3,
+    anchor_point_a: wp.vec3,
+    anchor_point_b: wp.vec3,
+    feature_anchor_a: wp.int32,
+    feature_anchor_b: wp.int32,
+) -> int:
+    """
+    Extract 4-point contact manifolds from two convex polygons.
+
+    m_A and m_B can have up to 6 points but m_B must provide space for 12 points.
+    """
+    # The trim poly (poly A) should be the polygon with the most points
+    # This should ensure that zero area loops with only two points get trimmed correctly (they are considered valid)
+    # Note: Commented out swap logic from C# - caller should ensure stable shape ordering for features
+    center = 0.5 * (anchor_point_a + anchor_point_b)
+
+    # Transform into contact plane space
+    for i in range(m_a_count):
+        projected = m_a[i] - center
+        m_a[i] = wp.vec3(
+            wp.dot(cross_vector_1, projected),
+            wp.dot(cross_vector_2, projected),
+            wp.dot(normal, projected),
+        )
+
+    depth_of_plane_a = wp.dot(normal, anchor_point_a - center)
+
+    max_points = 12
+    loop = wp.array(ptr=get_Fvec3_array_ptr(m_b), shape=(12,), dtype=wp.vec4)  # stackalloc vec4[maxPoints];
+    f_loop = m_b  # (Fvec3*)loop;
+    loop_seg_ids = vec12_uint8(wp.uint8(0))  # stackalloc byte[maxPoints];
+
+    for i in range(m_b_count):
+        bb_xyz = fvec3_get_xyz(m_b[i])
+        projected = bb_xyz - center
+        loop[i] = wp.vec4(
+            wp.dot(cross_vector_1, projected),
+            wp.dot(cross_vector_2, projected),
+            wp.dot(normal, projected),
+            depth_of_plane_a,
+        )
+        loop_seg_ids[i] = wp.uint8(i + 6)
+
+    loop_count = trim_all_in_place(m_a, m_a_count, loop, loop_seg_ids, m_b_count, max_points)
+
+    loop_count = remove_zero_length_edges(loop, loop_seg_ids, loop_count, EPS)
+
+    if loop_count > 4:
+        result = approx_max_quadrilateral_area_with_calipers(loop, loop_count)
+        ia = int(result[0])
+        ib = int(result[1])
+        ic = int(result[2])
+        id = int(result[3])
+
+        a = loop[ia]
+        feature_a = feature_id(loop_seg_ids, ia, loop_count, features_a, features_b, m_a_count, m_b_count)
+        f_loop[ia].feature = feature_a
+        b = loop[ib]
+        feature_b = feature_id(loop_seg_ids, ib, loop_count, features_a, features_b, m_a_count, m_b_count)
+        f_loop[ib].feature = feature_b
+        c = loop[ic]
+        feature_c = feature_id(loop_seg_ids, ic, loop_count, features_a, features_b, m_a_count, m_b_count)
+        f_loop[ic].feature = feature_c
+        d = loop[id]
+        feature_d = feature_id(loop_seg_ids, id, loop_count, features_a, features_b, m_a_count, m_b_count)
+        f_loop[id].feature = feature_d
+
+        # Transform back to world space
+        m_a[0] = a[0] * cross_vector_1 + a[1] * cross_vector_2 + a[3] * normal + center
+        m_a[1] = b[0] * cross_vector_1 + b[1] * cross_vector_2 + b[3] * normal + center
+        m_a[2] = c[0] * cross_vector_1 + c[1] * cross_vector_2 + c[3] * normal + center
+        m_a[3] = d[0] * cross_vector_1 + d[1] * cross_vector_2 + d[3] * normal + center
+
+        m_b[0] = fvec3_set_xyz(m_b[0], a[0] * cross_vector_1 + a[1] * cross_vector_2 + a[2] * normal + center)
+        m_b[1] = fvec3_set_xyz(m_b[1], b[0] * cross_vector_1 + b[1] * cross_vector_2 + b[2] * normal + center)
+        m_b[2] = fvec3_set_xyz(m_b[2], c[0] * cross_vector_1 + c[1] * cross_vector_2 + c[2] * normal + center)
+        m_b[3] = fvec3_set_xyz(m_b[3], d[0] * cross_vector_1 + d[1] * cross_vector_2 + d[2] * normal + center)
+
+        loop_count = 4
+    else:
+        # Transform back to world space
+        for i in range(loop_count):
+            l = loop[i]
+            feature = feature_id(loop_seg_ids, i, loop_count, features_a, features_b, m_a_count, m_b_count)
+            m_a[i] = l[0] * cross_vector_1 + l[1] * cross_vector_2 + l[3] * normal + center
+            m_b[i] = fvec3_set_xyz(m_b[i], l[0] * cross_vector_1 + l[1] * cross_vector_2 + l[2] * normal + center)
+            f_loop[i].feature = feature
+        if loop_count == 0:
+            feature = wp.uint32(0)  # (feature_anchor_a << 16) | feature_anchor_b;
+            m_a[loop_count] = anchor_point_a
+            m_b[loop_count] = fvec3_set_xyz(m_b[loop_count], anchor_point_b)
+            loop_count += 1
+            f_loop[loop_count].feature = feature
+
+    return loop_count
+
+
+vec6_uint8 = wp.types.vector(6, wp.uint8)
+
 
 def create_build_manifold(support_func: Any):
     # Main contact manifold generation function
     @wp.func
-    def build_manifold(
+    def build_manifold_core(
         geom_a: Any,
         geom_b: Any,
         quaternion_a: wp.quat,
@@ -724,166 +847,173 @@ def create_build_manifold(support_func: Any):
         normal: wp.vec3,
         a_buffer: wp.array(dtype=wp.vec3),
         b_buffer: wp.array(dtype=Fvec3),
-        feature_anchor_a: wp.uint32,
-        feature_anchor_b: wp.uint32,
+        feature_anchor_a: wp.int32,
+        feature_anchor_b: wp.int32,
         data_provider: Any,
     ) -> int:
         """
-        Build a contact manifold between two shapes.
-
-        This is the main function that generates contact points between two colliding shapes
-        using perturbed support mapping and polygon clipping algorithms.
-
-        Args:
-            shape_a: First shape data.
-            shape_b: Second shape data.
-            quaternion_a: Orientation of first shape.
-            quaternion_b: Orientation of second shape.
-            position_a: Position of first shape.
-            position_b: Position of second shape.
-            p_a: Anchor point on first shape.
-            p_b: Anchor point on second shape.
-            normal: Contact normal.
-            a_buffer: Buffer for contact points on shape A (must have space for 6 elements).
-            b_buffer: Buffer for contact points on shape B (must have space for 12 elements).
-            feature_anchor_a: Feature ID for anchor point on shape A.
-            feature_anchor_b: Feature ID for anchor point on shape B.
-            data_provider: Support mapping data provider.
-
-        Returns:
-            Number of contact points generated.
+        The result will be stored in a_buffer and b_buffer. They also serve as scratch memory during the calculation, therefore the exotic typing.
+        a_buffer must have space for 6 elements, b_buffer space for 12 elements
+        The return value of the methods tells the user how many elements in the buffers are valid. Both buffers have the same number of entries.
+        The two shapes must always be queried in the same order to get stable feature ids.
         """
-        # Reset all counters for a new calculation
+        # Reset all counters for a new calculation.
         a_count = 0
         b_count = 0
 
-        # Create an orthonormal basis from the collision normal
+        # Create an orthonormal basis from the collision normal.
         tangent_a = wp.normalize(wp.cross(normal, wp.vec3(1.0, 0.0, 0.0)))
         if wp.length_sq(tangent_a) < 1e-6:
             tangent_a = wp.normalize(wp.cross(normal, wp.vec3(0.0, 1.0, 0.0)))
         tangent_b = wp.cross(normal, tangent_a)
 
-        # Create feature arrays (these would be populated by actual support mapping)
-        features_a = wp.array(dtype=wp.uint8, shape=(6,))
-        features_b = wp.array(dtype=wp.uint8, shape=(6,))
+        features_a = vec6_uint8(wp.uint8(0))
+        features_b = vec6_uint8(wp.uint8(0))
 
-        # Cast b_buffer to vec4 array for processing
-        bb_buffer = wp.array(dtype=wp.vec4, shape=(12,))
+        bb_buffer = wp.array(ptr=get_Fvec3_array_ptr(b_buffer), shape=(12,), dtype=wp.vec4)
 
         # --- Step 1: Find Contact Polygons using Perturbed Support Mapping ---
-        # Loop 6 times to find up to 6 vertices for each shape's contact polygon
+        # Loop 6 times to find up to 6 vertices for each shape's contact polygon.
         for e in range(6):
-            # Create a perturbed normal direction
+            # Create a perturbed normal direction. This is the main collision normal slightly
+            # altered by a vector on the contact plane, defined by the hexagonal vertices.
             angle = float(e) * ROT_DELTA_ANGLE
             s = wp.sin(angle)
             c = wp.cos(angle)
             offset_normal = normal * COS_OFFSET + (c * SIN_OFFSET) * tangent_a + (s * SIN_OFFSET) * tangent_b
 
-            # Find the support point on shape A in the perturbed direction
-            # Note: This would call the actual support mapping function
-            # For now, we'll use placeholder logic
+            # Find the support point on shape A in the perturbed direction.
+            # 1. Transform the world-space direction into shape A's local space.
             tmp = wp.quat_rotate_inv(quaternion_a, offset_normal)
+            # 2. Find the furthest point on shape A in that local direction.
             (pt_a, feature_a) = support_func(geom_a, tmp, data_provider)
-            # Preserve support-map feature ids (one-based like C#)
             features_a[e] = wp.uint8(int(feature_a) + 1)
-
-            # Local-to-world: R * local + position
+            # 3. Transform the local-space support point back to world space.
             pt_a = wp.quat_rotate(quaternion_a, pt_a) + position_a
+            # 4. Add the world-space point to the 'left' polygon, checking for duplicates.
             a_count = add_avoid_duplicates_vec3(a_buffer, a_count, pt_a, EPS)
 
-            # Invert the direction for the other shape
+            # Invert the direction for the other shape.
             offset_normal = -offset_normal
 
-            # Find the support point on shape B in the opposite perturbed direction
+            # Find the support point on shape B in the opposite perturbed direction.
+            # (Process is identical to the one for shape A).
             tmp = wp.quat_rotate_inv(quaternion_b, offset_normal)
             (pt_b, feature_b) = support_func(geom_b, tmp, data_provider)
             features_b[e] = wp.uint8(int(feature_b) + 1)
-
-            # Local-to-world: R * local + position
             pt_b = wp.quat_rotate(quaternion_b, pt_b) + position_b
             b_count = add_avoid_duplicates_vec4(bb_buffer, b_count, pt_b, EPS)
 
         # All feature ids are one based such that it is clearly visible in a uint which of the 4 slots (8 bits each) are in use
-        # Extract 4-point contact manifolds
-        center = 0.5 * (p_a + p_b)
+        return extract_4_point_contact_manifolds(
+            a_buffer,
+            features_a,
+            a_count,
+            b_buffer,
+            features_b,
+            b_count,
+            normal,
+            tangent_a,
+            tangent_b,
+            p_a,
+            p_b,
+            feature_anchor_a + 1,
+            feature_anchor_b + 1,
+        )
 
-        # Transform into contact plane space
-        for i in range(a_count):
-            projected = a_buffer[i] - center
-            a_buffer[i] = wp.vec3(wp.dot(tangent_a, projected), wp.dot(tangent_b, projected), wp.dot(normal, projected))
+    @wp.func
+    def build_manifold(
+        geom_a: Any,
+        geom_b: Any,
+        quaternion_a: wp.quat,
+        quaternion_b: wp.quat,
+        position_a: wp.vec3,
+        position_b: wp.vec3,
+        p_a: wp.vec3,
+        p_b: wp.vec3,
+        normal: wp.vec3,
+        feature_anchor_a: wp.int32,
+        feature_anchor_b: wp.int32,
+        data_provider: Any,
+    ) -> tuple[int, wp.types.matrix((4, 3), wp.float32), wp.types.matrix((4, 3), wp.float32), wp.vec4i]:
+        """
+        Build a contact manifold between two convex shapes using perturbed support mapping and polygon clipping.
 
-        depth_of_plane_a = wp.dot(normal, p_a - center)
+        This function generates up to 4 contact points between two colliding convex shapes by:
+        1. Finding contact polygons using perturbed support mapping in 6 directions
+        2. Clipping the polygons against each other in contact plane space
+        3. Selecting the best 4 points using rotating calipers algorithm if more than 4 exist
+        4. Transforming results back to world space with feature tracking
 
-        # Set up loop arrays
-        max_points = 12
-        loop = wp.array(dtype=wp.vec4, shape=(max_points,))
-        loop_seg_ids = wp.array(dtype=wp.uint8, shape=(max_points,))
+        The contact normal is the same for all contact points in the manifold. The two shapes
+        must always be queried in the same order to get stable feature IDs for contact tracking.
 
-        for i in range(b_count):
-            bb_xyz = wp.vec3(bb_buffer[i][0], bb_buffer[i][1], bb_buffer[i][2])
-            projected = bb_xyz - center
-            loop[i] = wp.vec4(
-                wp.dot(tangent_a, projected), wp.dot(tangent_b, projected), wp.dot(normal, projected), depth_of_plane_a
-            )
-            loop_seg_ids[i] = wp.uint8(i + 6)
+        Args:
+            geom_a: Geometry data for the first shape.
+            geom_b: Geometry data for the second shape.
+            quaternion_a: Orientation quaternion of the first shape.
+            quaternion_b: Orientation quaternion of the second shape.
+            position_a: World position of the first shape.
+            position_b: World position of the second shape.
+            p_a: Anchor contact point on the first shape (from GJK/EPA).
+            p_b: Anchor contact point on the second shape (from GJK/EPA).
+            normal: Contact normal vector pointing from shape A to shape B.
+            feature_anchor_a: Feature ID of the anchor point on shape A. Can pass in 0 if anchor tracking is not needed.
+            feature_anchor_b: Feature ID of the anchor point on shape B. Can pass in 0 if anchor tracking is not needed.
+            data_provider: Support mapping data provider for shape queries.
 
-        loop_count = trim_all_in_place(a_buffer, a_count, loop, loop_seg_ids, b_count, max_points)
-        loop_count = remove_zero_length_edges(loop, loop_seg_ids, loop_count, EPS)
+        Returns:
+            A tuple containing:
+            - int: Number of valid contact points in the manifold (0-4).
+            - wp.types.matrix((4, 3), wp.float32): Contact points on shape A in world space.
+            - wp.types.matrix((4, 3), wp.float32): Contact points on shape B in world space.
+            - wp.vec4i: Feature IDs for each contact point, enabling contact tracking across
+              multiple frames for warm starting and contact persistence.
 
-        if loop_count > 4:
-            # Use rotating calipers to find best 4 points
-            result = approx_max_quadrilateral_area_with_calipers(loop, loop_count)
-            # Extract indices from result
-            ia = int(result[1])
-            ib = int(result[2])
-            ic = int(result[3])
-            id = int(result[4])
+        Note:
+            The feature IDs encode geometric information about which features (vertices, edges,
+            or edge-edge intersections) each contact point represents, allowing the physics
+            solver to maintain contact consistency over time.
+        """
+        left = wp.zeros(shape=(6,), dtype=wp.vec3)  # Array for shape A contact points
+        right = wp.zeros(
+            shape=(12,), dtype=Fvec3
+        )  # Array for shape B contact points - also provides storage for intermediate results
 
-            # Get the 4 points and their features
-            a_pt = loop[ia]
-            b_pt = loop[ib]
-            c_pt = loop[ic]
-            d_pt = loop[id]
+        num_manifold_points = build_manifold_core(
+            geom_a,
+            geom_b,
+            quaternion_a,
+            quaternion_b,
+            position_a,
+            position_b,
+            p_a,
+            p_b,
+            normal,
+            left,
+            right,
+            feature_anchor_a,
+            feature_anchor_b,
+            data_provider,
+        )
 
-            feature_a = feature_id(loop_seg_ids, ia, loop_count, features_a, features_b, a_count, b_count)
-            feature_b = feature_id(loop_seg_ids, ib, loop_count, features_a, features_b, a_count, b_count)
-            feature_c = feature_id(loop_seg_ids, ic, loop_count, features_a, features_b, a_count, b_count)
-            feature_d = feature_id(loop_seg_ids, id, loop_count, features_a, features_b, a_count, b_count)
+        # Extract results into fixed-size matrices
+        contact_points_a = wp.types.matrix(shape=(4, 3), dtype=wp.float32)
+        contact_points_b = wp.types.matrix(shape=(4, 3), dtype=wp.float32)
+        feature_ids = wp.vec4i(0, 0, 0, 0)
 
-            # Transform back to world space
-            a_buffer[0] = a_pt[0] * tangent_a + a_pt[1] * tangent_b + a_pt[3] * normal + center
-            a_buffer[1] = b_pt[0] * tangent_a + b_pt[1] * tangent_b + b_pt[3] * normal + center
-            a_buffer[2] = c_pt[0] * tangent_a + c_pt[1] * tangent_b + c_pt[3] * normal + center
-            a_buffer[3] = d_pt[0] * tangent_a + d_pt[1] * tangent_b + d_pt[3] * normal + center
+        # Copy contact points and extract feature IDs
+        for i in range(min(num_manifold_points, 4)):
+            contact_points_a[i] = left[i]
+            contact_points_b[i] = fvec3_get_xyz(right[i])
+            feature_ids[i] = int(right[i].feature)
 
-            # Set up b_buffer with features
-            b_buffer[0] = fvec3_set_xyz(b_buffer[0], a_pt[0] * tangent_a + a_pt[1] * tangent_b + a_pt[2] * normal + center)
-            b_buffer[0].feature = feature_a
-            b_buffer[1] = fvec3_set_xyz(b_buffer[1], b_pt[0] * tangent_a + b_pt[1] * tangent_b + b_pt[2] * normal + center)
-            b_buffer[1].feature = feature_b
-            b_buffer[2] = fvec3_set_xyz(b_buffer[2], c_pt[0] * tangent_a + c_pt[1] * tangent_b + c_pt[2] * normal + center)
-            b_buffer[2].feature = feature_c
-            b_buffer[3] = fvec3_set_xyz(b_buffer[3], d_pt[0] * tangent_a + d_pt[1] * tangent_b + d_pt[2] * normal + center)
-            b_buffer[3].feature = feature_d
+        # Copy contact points and extract feature IDs
+        for i in range(min(num_manifold_points, 4)):
+            contact_points_a[i] = left[i]
+            contact_points_b[i] = fvec3_get_xyz(right[i])
+            feature_ids[i] = int(right[i].feature)
 
-            loop_count = 4
-        else:
-            # Transform back to world space
-            for i in range(loop_count):
-                l = loop[i]
-                feature = feature_id(loop_seg_ids, i, loop_count, features_a, features_b, a_count, b_count)
-                a_buffer[i] = l[0] * tangent_a + l[1] * tangent_b + l[3] * normal + center
-                b_buffer[i] = fvec3_set_xyz(b_buffer[i], l[0] * tangent_a + l[1] * tangent_b + l[2] * normal + center)
-                b_buffer[i].feature = feature
-
-            if loop_count == 0:
-                # Fallback to anchor points
-                feature = wp.uint32(0)  # (feature_anchor_a << 16) | feature_anchor_b
-                a_buffer[0] = p_a
-                b_buffer[0] = fvec3_set_xyz(b_buffer[0], p_b)
-                b_buffer[0].feature = feature
-                loop_count = 1
-
-        return loop_count
+        return num_manifold_points, contact_points_a, contact_points_b, feature_ids
 
     return build_manifold

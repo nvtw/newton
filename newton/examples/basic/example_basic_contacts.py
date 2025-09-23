@@ -435,6 +435,7 @@ class Example:
                 self.feature_b,
             ],
             device=wp.get_device(),
+            block_dim=128,
         )
 
         # Update shape pairs with contact results (only read from GPU once)
