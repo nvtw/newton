@@ -806,6 +806,12 @@ def extract_4_point_contact_manifolds(
         m_b[2] = fvec3_set_xyz(m_b[2], c[0] * cross_vector_1 + c[1] * cross_vector_2 + c[2] * normal + center)
         m_b[3] = fvec3_set_xyz(m_b[3], d[0] * cross_vector_1 + d[1] * cross_vector_2 + d[2] * normal + center)
 
+        # Ensure features are propagated to the first four outputs to match positions 0..3
+        f_loop[0].feature = feature_a
+        f_loop[1].feature = feature_b
+        f_loop[2].feature = feature_c
+        f_loop[3].feature = feature_d
+
         loop_count = 4
     else:
         # Transform back to world space
@@ -820,7 +826,7 @@ def extract_4_point_contact_manifolds(
             m_a[loop_count] = anchor_point_a
             m_b[loop_count] = fvec3_set_xyz(m_b[loop_count], anchor_point_b)
             loop_count += 1
-            f_loop[loop_count].feature = feature
+            f_loop[loop_count - 1].feature = feature
 
     return loop_count
 
@@ -997,12 +1003,6 @@ def create_build_manifold(support_func: Any):
         contact_points_a = wp.types.matrix(shape=(4, 3), dtype=wp.float32)
         contact_points_b = wp.types.matrix(shape=(4, 3), dtype=wp.float32)
         feature_ids = wp.vec4i(0, 0, 0, 0)
-
-        # Copy contact points and extract feature IDs
-        for i in range(min(num_manifold_points, 4)):
-            contact_points_a[i] = left[i]
-            contact_points_b[i] = fvec3_get_xyz(right[i])
-            feature_ids[i] = int(right[i].feature)
 
         # Copy contact points and extract feature IDs
         for i in range(min(num_manifold_points, 4)):
