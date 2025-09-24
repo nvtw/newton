@@ -46,7 +46,6 @@ def create_solve_convex_contact(support_func: Any, center_func: Any):
             sum_of_contact_offsets,
             data_provider,
         )
-        normal = -normal # TODO: Unify the normal convention
         if not collision:
             return (
                 collision,
@@ -97,10 +96,10 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
         data_provider: Any,
     ) -> tuple[
         int,
+        wp.vec4,
         wp.types.matrix((4, 3), wp.float32),
         wp.types.matrix((4, 3), wp.float32),
         wp.vec4i,
-        wp.vec4,
     ]:
         # Broad check with GJK; refine with MPR on overlap for better anchors/normal
         collision, point_a, point_b, normal, _penetration, feature_a_id, feature_b_id = wp.static(
@@ -115,7 +114,7 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
             sum_of_contact_offsets,
             data_provider,
         )
-        normal = -normal # TODO: Unify the normal convention
+
         if collision:
             collision, point_a, point_b, normal, _penetration, feature_a_id, feature_b_id = wp.static(
                 create_solve_mpr(support_func, center_func)
@@ -130,7 +129,7 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
                 data_provider,
             )
 
-        count, points_a, points_b, features = wp.static(create_build_manifold(support_func))(
+        count, penetrations, points_a, points_b, features = wp.static(create_build_manifold(support_func))(
             geom_a,
             geom_b,
             orientation_a,
@@ -145,22 +144,6 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
             data_provider,
         )
 
-        # Compute per-contact penetration depths with MPR convention (positive for overlap)
-        # depth_i = dot(points_a[i] - points_b[i], normal)
-        penetrations = wp.vec4(0.0, 0.0, 0.0, 0.0)
-        if count > 0:
-            d0 = wp.dot(points_a[0] - points_b[0], normal)
-            penetrations[0] = d0
-        if count > 1:
-            d1 = wp.dot(points_a[1] - points_b[1], normal)
-            penetrations[1] = d1
-        if count > 2:
-            d2 = wp.dot(points_a[2] - points_b[2], normal)
-            penetrations[2] = d2
-        if count > 3:
-            d3 = wp.dot(points_a[3] - points_b[3], normal)
-            penetrations[3] = d3
-
-        return count, points_a, points_b, features, penetrations
+        return count, penetrations, points_a, points_b, features
 
     return solve_convex_multi_contact

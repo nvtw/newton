@@ -425,6 +425,10 @@ def create_solve_mpr(support_func: Any, center_func: Any):
             point_b = wp.quat_rotate(orientation_a, point_b) + position_a
             normal = wp.quat_rotate(orientation_a, normal)
 
+        # Convert to Newton normal and penetration convention
+        normal = -normal
+        penetration = -penetration
+
         return collision, point_a, point_b, normal, penetration, feature_a_id, feature_b_id
 
     return solve_mpr

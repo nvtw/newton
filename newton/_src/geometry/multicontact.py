@@ -313,7 +313,7 @@ def trim_in_place(
                     insert_byte(loop_seg_ids, new_loop_count, loop_indexer, new_seg_id)
 
                     new_loop_count += 1
-                    # Match C# behavior: advance i and adjust change_b to account for insertion
+                    # Advance i and adjust change_b to account for insertion
                     i += 1
                     change_b += 1
                     # Keep iteration bound consistent with source mutation
@@ -413,7 +413,7 @@ def approx_max_quadrilateral_area_with_calipers(hull: wp.array(dtype=wp.vec4), h
     # --- Step 1: Find the hull's diameter using Rotating Calipers in O(n) ---
     p1 = int(0)
     p3 = int(1)
-    # Use vec4 distance (matches C# vec4 length squared behavior)
+    # Use vec4 distance
     hp1 = hull[p1]
     hp3 = hull[p3]
     diff = wp.vec4(hp1[0] - hp3[0], hp1[1] - hp3[1], hp1[2] - hp3[2], hp1[3] - hp3[3])
@@ -743,7 +743,6 @@ def extract_4_point_contact_manifolds(
     """
     # The trim poly (poly A) should be the polygon with the most points
     # This should ensure that zero area loops with only two points get trimmed correctly (they are considered valid)
-    # Note: Commented out swap logic from C# - caller should ensure stable shape ordering for features
     center = 0.5 * (anchor_point_a + anchor_point_b)
 
     # Transform into contact plane space
@@ -861,6 +860,9 @@ def create_build_manifold(support_func: Any):
         The return value of the methods tells the user how many elements in the buffers are valid. Both buffers have the same number of entries.
         The two shapes must always be queried in the same order to get stable feature ids.
         """
+
+        normal = -normal # The code below uses a different normal convention
+
         # Reset all counters for a new calculation.
         a_count = 0
         b_count = 0
@@ -936,7 +938,13 @@ def create_build_manifold(support_func: Any):
         feature_anchor_a: wp.int32,
         feature_anchor_b: wp.int32,
         data_provider: Any,
-    ) -> tuple[int, wp.types.matrix((4, 3), wp.float32), wp.types.matrix((4, 3), wp.float32), wp.vec4i]:
+    ) -> tuple[
+        int,
+        wp.vec4,
+        wp.types.matrix((4, 3), wp.float32),
+        wp.types.matrix((4, 3), wp.float32),
+        wp.vec4i,
+    ]:
         """
         Build a contact manifold between two convex shapes using perturbed support mapping and polygon clipping.
 
@@ -966,6 +974,7 @@ def create_build_manifold(support_func: Any):
         Returns:
             A tuple containing:
             - int: Number of valid contact points in the manifold (0-4).
+            - wp.vec4: Penetration depths for each contact point (negative when shapes overlap).
             - wp.types.matrix((4, 3), wp.float32): Contact points on shape A in world space.
             - wp.types.matrix((4, 3), wp.float32): Contact points on shape B in world space.
             - wp.vec4i: Feature IDs for each contact point, enabling contact tracking across
@@ -1002,13 +1011,17 @@ def create_build_manifold(support_func: Any):
         contact_points_a = wp.types.matrix(shape=(4, 3), dtype=wp.float32)
         contact_points_b = wp.types.matrix(shape=(4, 3), dtype=wp.float32)
         feature_ids = wp.vec4i(0, 0, 0, 0)
+        penetrations = wp.vec4(0.0, 0.0, 0.0, 0.0)
 
         # Copy contact points and extract feature IDs
-        for i in range(min(num_manifold_points, 4)):
+        count_out = min(num_manifold_points, 4)
+        for i in range(count_out):
             contact_points_a[i] = left[i]
             contact_points_b[i] = fvec3_get_xyz(right[i])
             feature_ids[i] = int(right[i].feature)
+            # Newton convention: penetration is negative on overlap
+            penetrations[i] = wp.dot(contact_points_a[i] - contact_points_b[i], normal)
 
-        return num_manifold_points, contact_points_a, contact_points_b, feature_ids
+        return num_manifold_points, penetrations, contact_points_a, contact_points_b, feature_ids
 
     return build_manifold
