@@ -21,9 +21,169 @@ import numpy as np
 import warp as wp
 
 from ..core.types import Devicelike
+from ..geometry.collision_convex import create_solve_convex_multi_contact
+from ..geometry.support_function import (
+    GenericShapeData,
+    SupportMapDataProvider,
+    center_func as center_map,
+    support_map as support_map_func,
+)
+from ..geometry.types import GeoType
 from .contacts import Contacts
 from .control import Control
 from .state import State
+
+
+# Pre-create the convex multi-contact solver (usable inside kernels)
+solve_convex_multi_contact = create_solve_convex_multi_contact(support_map_func, center_map)
+
+
+@wp.kernel(enable_backward=False)
+def build_contacts_kernel_gjk_mpr(
+    body_q: wp.array(dtype=wp.transform),
+    shape_transform: wp.array(dtype=wp.transform),
+    shape_body: wp.array(dtype=int),
+    shape_type: wp.array(dtype=int),
+    shape_scale: wp.array(dtype=wp.vec3),
+    shape_thickness: wp.array(dtype=float),
+    shape_pairs: wp.array(dtype=wp.vec2i),
+    sum_of_contact_offsets: float,
+    rigid_contact_margin: float,
+    contact_max: int,
+    # outputs
+    contact_count: wp.array(dtype=int),
+    out_shape0: wp.array(dtype=int),
+    out_shape1: wp.array(dtype=int),
+    out_point0: wp.array(dtype=wp.vec3),
+    out_point1: wp.array(dtype=wp.vec3),
+    out_offset0: wp.array(dtype=wp.vec3),
+    out_offset1: wp.array(dtype=wp.vec3),
+    out_normal: wp.array(dtype=wp.vec3),
+    out_thickness0: wp.array(dtype=float),
+    out_thickness1: wp.array(dtype=float),
+):
+    tid = wp.tid()
+    pair = shape_pairs[tid]
+    shape_a = pair[0]
+    shape_b = pair[1]
+
+    # world transforms
+    rigid_a = shape_body[shape_a]
+    X_ws_a = shape_transform[shape_a] if rigid_a == -1 else wp.transform_multiply(body_q[rigid_a], shape_transform[shape_a])
+    rigid_b = shape_body[shape_b]
+    X_ws_b = shape_transform[shape_b] if rigid_b == -1 else wp.transform_multiply(body_q[rigid_b], shape_transform[shape_b])
+
+    pos_a = wp.transform_get_translation(X_ws_a)
+    pos_b = wp.transform_get_translation(X_ws_b)
+    rot_a = wp.transform_get_rotation(X_ws_a)
+    rot_b = wp.transform_get_rotation(X_ws_b)
+
+    # Only handle supported convex primitives
+    type_a = shape_type[shape_a]
+    type_b = shape_type[shape_b]
+    if not (
+        type_a == int(GeoType.BOX)
+        or type_a == int(GeoType.SPHERE)
+        or type_a == int(GeoType.CAPSULE)
+        or type_a == int(GeoType.ELLIPSOID)
+        or type_a == int(GeoType.CYLINDER)
+        or type_a == int(GeoType.CONE)
+    ):
+        return
+    if not (
+        type_b == int(GeoType.BOX)
+        or type_b == int(GeoType.SPHERE)
+        or type_b == int(GeoType.CAPSULE)
+        or type_b == int(GeoType.ELLIPSOID)
+        or type_b == int(GeoType.CYLINDER)
+        or type_b == int(GeoType.CONE)
+    ):
+        return
+
+    # Build shape data
+    geom_a = GenericShapeData()
+    geom_a.shape_type = type_a
+    geom_a.scale = shape_scale[shape_a]
+    geom_b = GenericShapeData()
+    geom_b.shape_type = type_b
+    geom_b.scale = shape_scale[shape_b]
+
+    data_provider = SupportMapDataProvider()
+
+    # Effective shape thickness (contact offsets sum) used by manifold solver
+    thickness_a = shape_thickness[shape_a]
+    thickness_b = shape_thickness[shape_b]
+
+    count, penetrations, pts_a, pts_b, features = wp.static(solve_convex_multi_contact)(
+        geom_a,
+        geom_b,
+        rot_a,
+        rot_b,
+        pos_a,
+        pos_b,
+        0.0, # Must be 0.0, contacts should not happen before the objects touch
+        data_provider,
+    )
+
+    n = 0
+    if count > 0:
+        n = 1
+    if count > 1:
+        n = 2
+    if count > 2:
+        n = 3
+    if count > 3:
+        n = 4
+    if n == 0:
+        return
+
+    # body-only transforms (world <-> body)
+    X_wb_a = body_q[rigid_a] if rigid_a != -1 else wp.transform_identity()
+    X_wb_b = body_q[rigid_b] if rigid_b != -1 else wp.transform_identity()
+    X_bw_a = wp.transform_inverse(X_wb_a)
+    X_bw_b = wp.transform_inverse(X_wb_b)
+
+
+    # Thicknesses already loaded above for manifold; reuse here
+    # Our manifold points (p_a, p_b) are on the actual shape surfaces already.
+    # So offsets should only account for additional per-shape thickness, not radii.
+    offset_mag_a = thickness_a
+    offset_mag_b = thickness_b
+
+    for i in range(4):
+        if i >= n:
+            break
+        p_a = wp.vec3(pts_a[i, 0], pts_a[i, 1], pts_a[i, 2])
+        p_b = wp.vec3(pts_b[i, 0], pts_b[i, 1], pts_b[i, 2])
+        diff = p_a - p_b
+        # Per-contact normal: choose so that dot(diff, normal) ≈ penetration (negative on overlap)
+        dist_sq = wp.length_sq(diff)
+        if dist_sq > 1.0e-30:
+            normal = -diff / wp.sqrt(dist_sq)
+        else:
+            normal = wp.vec3(1.0, 0.0, 0.0)
+
+        # Gate contacts by manifold penetration (Newton convention: negative on overlap)
+        if penetrations[i] > 0.0:
+            wp.printf("rej shA=%d shB=%d i=%d pen=%f\n", shape_a, shape_b, i, penetrations[i])
+            continue
+
+        idx = wp.atomic_add(contact_count, 0, 1)
+        if idx >= contact_max:
+            return
+        out_shape0[idx] = shape_a
+        out_shape1[idx] = shape_b
+        # points stored in body frame (world -> body)
+        out_point0[idx] = wp.transform_point(X_bw_a, p_a)
+        out_point1[idx] = wp.transform_point(X_bw_b, p_b)
+        out_offset0[idx] = wp.transform_vector(X_bw_a, offset_mag_a * normal)
+        out_offset1[idx] = wp.transform_vector(X_bw_b, -offset_mag_b * normal)
+        # XPBD expects normal from B->A like kernels.py
+        out_normal[idx] = normal
+        out_thickness0[idx] = offset_mag_a
+        out_thickness1[idx] = offset_mag_b
+        distance = wp.dot(diff, normal)
+        wp.printf("acc shA=%d shB=%d i=%d idx=%d pen=%f dist=%f\n", shape_a, shape_b, i, idx, penetrations[i], distance)
 
 
 class Model:
@@ -508,6 +668,51 @@ class Model:
             c.muscle_activations = self.muscle_activations
         return c
 
+    def collide_pure_gjk_mpr_multicontact(
+        self: Model,
+        state: State):
+
+        print("collide_pure_gjk_mpr_multicontact")
+
+        # Allocate a Contacts buffer compatible with the default pipeline
+        rigid_contact_max = self.rigid_contact_max if self.rigid_contact_max > 0 else max(1, self.shape_contact_pair_count * 4)
+        contacts = Contacts(rigid_contact_max=rigid_contact_max, soft_contact_max=0, requires_grad=self.requires_grad, device=self.device)
+        contacts.clear()
+
+        # Launch kernel across all shape pairs
+        if self.shape_contact_pair_count and self.shape_contact_pairs is not None:
+            wp.launch(
+                kernel=build_contacts_kernel_gjk_mpr,
+                dim=self.shape_contact_pair_count,
+                inputs=[
+                    state.body_q,
+                    self.shape_transform,
+                    self.shape_body,
+                    self.shape_type,
+                    self.shape_scale,
+                    self.shape_thickness,
+                    self.shape_contact_pairs,
+                    0.0,  # sum_of_contact_offsets
+                    self._collision_pipeline.rigid_contact_margin if hasattr(self, "_collision_pipeline") and self._collision_pipeline is not None else 0.01,
+                    contacts.rigid_contact_max,
+                ],
+                outputs=[
+                    contacts.rigid_contact_count,
+                    contacts.rigid_contact_shape0,
+                    contacts.rigid_contact_shape1,
+                    contacts.rigid_contact_point0,
+                    contacts.rigid_contact_point1,
+                    contacts.rigid_contact_offset0,
+                    contacts.rigid_contact_offset1,
+                    contacts.rigid_contact_normal,
+                    contacts.rigid_contact_thickness0,
+                    contacts.rigid_contact_thickness1,
+                ],
+                device=contacts.device,
+            )
+
+        return contacts
+
     def collide(
         self: Model,
         state: State,
@@ -520,6 +725,8 @@ class Model:
         iterate_mesh_vertices: bool = True,
         requires_grad: bool | None = None,
     ) -> Contacts:
+
+        return self.collide_pure_gjk_mpr_multicontact(state)
         """
         Generate contact points for the particles and rigid bodies in the model.
 

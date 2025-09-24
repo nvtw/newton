@@ -42,10 +42,19 @@ class Example:
 
         self.viewer = viewer
 
+        print("Example Basic Shapes")
+
         builder = newton.ModelBuilder()
 
-        # add ground plane
-        builder.add_ground_plane()
+        # replace ground plane with a large static box whose top face lies at z=0
+        # attach directly to world (body = -1) so it is truly static
+        builder.add_shape_box(
+            -1,
+            xform=wp.transform(p=wp.vec3(0.0, 0.0, -50.0), q=wp.quat_identity()),
+            hx=50.0,
+            hy=50.0,
+            hz=50.0,
+        )
 
         # z height to drop shapes from
         drop_z = 2.0
@@ -69,6 +78,23 @@ class Example:
         # CONE (no collision support)
         # body_cone = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 6.0, drop_z), q=wp.quat_identity()))
         # builder.add_shape_cone(body_cone, radius=0.45, half_height=0.6)
+
+        # Three stacked cubes (small initial gaps), positioned at y = 6.0
+        cube_h = 0.4
+        gap = 0.02
+        y_stack = 6.0
+        z1 = cube_h + gap
+        z2 = z1 + 2.0 * cube_h + gap
+        z3 = z2 + 2.0 * cube_h + gap
+
+        body_cube1 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z1), q=wp.quat_identity()))
+        builder.add_shape_box(body_cube1, hx=cube_h, hy=cube_h, hz=cube_h)
+
+        body_cube2 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z2), q=wp.quat_identity()))
+        builder.add_shape_box(body_cube2, hx=cube_h, hy=cube_h, hz=cube_h)
+
+        body_cube3 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z3), q=wp.quat_identity()))
+        builder.add_shape_box(body_cube3, hx=cube_h, hy=cube_h, hz=cube_h)
 
         # MESH (bunny)
         usd_stage = Usd.Stage.Open(newton.examples.get_asset("bunny.usd"))
@@ -102,12 +128,8 @@ class Example:
         self.capture()
 
     def capture(self):
-        if wp.get_device().is_cuda:
-            with wp.ScopedCapture() as capture:
-                self.simulate()
-            self.graph = capture.graph
-        else:
-            self.graph = None
+        # Disable graph capture: run simulation directly each step
+        self.graph = None
 
     def simulate(self):
         for _ in range(self.sim_substeps):
@@ -116,6 +138,7 @@ class Example:
             # apply forces to the model
             self.viewer.apply_forces(self.state_0)
 
+            print("collide")
             self.contacts = self.model.collide(self.state_0)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
@@ -123,10 +146,7 @@ class Example:
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
-        if self.graph:
-            wp.capture_launch(self.graph)
-        else:
-            self.simulate()
+        self.simulate()
 
         self.sim_time += self.frame_dt
 
