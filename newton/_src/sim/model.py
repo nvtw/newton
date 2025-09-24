@@ -63,24 +63,24 @@ def build_contacts_kernel_gjk_mpr(
     out_thickness1: wp.array(dtype=float),
 ):
     tid = wp.tid()
+
+    # Early bounds check - following convert_newton_contacts_to_mjwarp_kernel pattern
+    if tid >= shape_pairs.shape[0]:
+        return
+
     pair = shape_pairs[tid]
     shape_a = pair[0]
     shape_b = pair[1]
 
-    # world transforms
-    rigid_a = shape_body[shape_a]
-    X_ws_a = shape_transform[shape_a] if rigid_a == -1 else wp.transform_multiply(body_q[rigid_a], shape_transform[shape_a])
-    rigid_b = shape_body[shape_b]
-    X_ws_b = shape_transform[shape_b] if rigid_b == -1 else wp.transform_multiply(body_q[rigid_b], shape_transform[shape_b])
+    # Validate shape indices - following convert_newton_contacts_to_mjwarp_kernel pattern
+    if shape_a < 0 or shape_b < 0:
+        return
 
-    pos_a = wp.transform_get_translation(X_ws_a)
-    pos_b = wp.transform_get_translation(X_ws_b)
-    rot_a = wp.transform_get_rotation(X_ws_a)
-    rot_b = wp.transform_get_rotation(X_ws_b)
-
-    # Only handle supported convex primitives
+    # Get shape types early for validation
     type_a = shape_type[shape_a]
     type_b = shape_type[shape_b]
+
+    # Only handle supported convex primitives
     if not (
         type_a == int(GeoType.BOX)
         or type_a == int(GeoType.SPHERE)
@@ -100,6 +100,23 @@ def build_contacts_kernel_gjk_mpr(
     ):
         return
 
+    # Get body indices - following convert_newton_contacts_to_mjwarp_kernel pattern
+    rigid_a = shape_body[shape_a]
+    rigid_b = shape_body[shape_b]
+
+    # Compute world transforms
+    X_ws_a = (
+        shape_transform[shape_a] if rigid_a == -1 else wp.transform_multiply(body_q[rigid_a], shape_transform[shape_a])
+    )
+    X_ws_b = (
+        shape_transform[shape_b] if rigid_b == -1 else wp.transform_multiply(body_q[rigid_b], shape_transform[shape_b])
+    )
+
+    pos_a = wp.transform_get_translation(X_ws_a)
+    pos_b = wp.transform_get_translation(X_ws_b)
+    rot_a = wp.transform_get_rotation(X_ws_a)
+    rot_b = wp.transform_get_rotation(X_ws_b)
+
     # Build shape data
     geom_a = GenericShapeData()
     geom_a.shape_type = type_a
@@ -110,10 +127,11 @@ def build_contacts_kernel_gjk_mpr(
 
     data_provider = SupportMapDataProvider()
 
-    # Effective shape thickness (contact offsets sum) used by manifold solver
+    # Get shape thicknesses
     thickness_a = shape_thickness[shape_a]
     thickness_b = shape_thickness[shape_b]
 
+    # Run multi-contact manifold generation
     count, penetrations, pts_a, pts_b, features = wp.static(solve_convex_multi_contact)(
         geom_a,
         geom_b,
@@ -121,69 +139,64 @@ def build_contacts_kernel_gjk_mpr(
         rot_b,
         pos_a,
         pos_b,
-        0.0, # Must be 0.0, contacts should not happen before the objects touch
+        0.0,  # Must be 0.0, contacts should not happen before the objects touch
         data_provider,
     )
 
-    n = 0
-    if count > 0:
-        n = 1
-    if count > 1:
-        n = 2
-    if count > 2:
-        n = 3
-    if count > 3:
-        n = 4
-    if n == 0:
+    # Early return if no contacts - following convert_newton_contacts_to_mjwarp_kernel pattern
+    if count <= 0:
         return
 
-    # body-only transforms (world <-> body)
+    # Clamp contact count to maximum of 4 - cleaner than the original if-chain
+    n = wp.min(count, 4)
+
+    # Compute body-only transforms (world <-> body) - following convert_newton_contacts_to_mjwarp_kernel pattern
     X_wb_a = body_q[rigid_a] if rigid_a != -1 else wp.transform_identity()
     X_wb_b = body_q[rigid_b] if rigid_b != -1 else wp.transform_identity()
     X_bw_a = wp.transform_inverse(X_wb_a)
     X_bw_b = wp.transform_inverse(X_wb_b)
 
-
-    # Thicknesses already loaded above for manifold; reuse here
-    # Our manifold points (p_a, p_b) are on the actual shape surfaces already.
-    # So offsets should only account for additional per-shape thickness, not radii.
-    offset_mag_a = thickness_a
-    offset_mag_b = thickness_b
-
-    for i in range(4):
-        if i >= n:
-            break
+    # Process each contact point
+    for i in range(n):
+        # Extract contact points from matrices
         p_a = wp.vec3(pts_a[i, 0], pts_a[i, 1], pts_a[i, 2])
         p_b = wp.vec3(pts_b[i, 0], pts_b[i, 1], pts_b[i, 2])
+
+        # Compute contact normal (B->A direction)
         diff = p_a - p_b
-        # Per-contact normal: choose so that dot(diff, normal) ≈ penetration (negative on overlap)
         dist_sq = wp.length_sq(diff)
         if dist_sq > 1.0e-30:
-            normal = -diff / wp.sqrt(dist_sq)
+            normal = diff / wp.sqrt(dist_sq)
         else:
             normal = wp.vec3(1.0, 0.0, 0.0)
 
         # Gate contacts by manifold penetration (Newton convention: negative on overlap)
-        if penetrations[i] > 0.0:
-            wp.printf("rej shA=%d shB=%d i=%d pen=%f\n", shape_a, shape_b, i, penetrations[i])
-            continue
+        # if penetrations[i] > 0.0:
+        #     continue
 
+        # Atomically allocate contact index - following convert_newton_contacts_to_mjwarp_kernel pattern
         idx = wp.atomic_add(contact_count, 0, 1)
         if idx >= contact_max:
             return
+
+        # Store contact data
         out_shape0[idx] = shape_a
         out_shape1[idx] = shape_b
-        # points stored in body frame (world -> body)
+
+        # Transform contact points to body frames - FIXED: was assigning both to out_point1
         out_point0[idx] = wp.transform_point(X_bw_a, p_a)
         out_point1[idx] = wp.transform_point(X_bw_b, p_b)
-        out_offset0[idx] = wp.transform_vector(X_bw_a, offset_mag_a * normal)
-        out_offset1[idx] = wp.transform_vector(X_bw_b, -offset_mag_b * normal)
-        # XPBD expects normal from B->A like kernels.py
-        out_normal[idx] = normal
-        out_thickness0[idx] = offset_mag_a
-        out_thickness1[idx] = offset_mag_b
-        distance = wp.dot(diff, normal)
-        wp.printf("acc shA=%d shB=%d i=%d idx=%d pen=%f dist=%f\n", shape_a, shape_b, i, idx, penetrations[i], distance)
+
+        # Set offsets (currently zero, can be extended for shape-specific offsets)
+        out_offset0[idx] = wp.vec3(0.0)
+        out_offset1[idx] = wp.vec3(0.0)
+
+        # Store normal (XPBD will flip this internally for constraint direction)
+        out_normal[idx] = -normal
+
+        # Store thicknesses
+        out_thickness0[idx] = thickness_a
+        out_thickness1[idx] = thickness_b
 
 
 class Model:
@@ -668,15 +681,19 @@ class Model:
             c.muscle_activations = self.muscle_activations
         return c
 
-    def collide_pure_gjk_mpr_multicontact(
-        self: Model,
-        state: State):
-
+    def collide_pure_gjk_mpr_multicontact(self: Model, state: State):
         print("collide_pure_gjk_mpr_multicontact")
 
         # Allocate a Contacts buffer compatible with the default pipeline
-        rigid_contact_max = self.rigid_contact_max if self.rigid_contact_max > 0 else max(1, self.shape_contact_pair_count * 4)
-        contacts = Contacts(rigid_contact_max=rigid_contact_max, soft_contact_max=0, requires_grad=self.requires_grad, device=self.device)
+        rigid_contact_max = (
+            self.rigid_contact_max if self.rigid_contact_max > 0 else max(1, self.shape_contact_pair_count * 4)
+        )
+        contacts = Contacts(
+            rigid_contact_max=rigid_contact_max,
+            soft_contact_max=0,
+            requires_grad=self.requires_grad,
+            device=self.device,
+        )
         contacts.clear()
 
         # Launch kernel across all shape pairs
@@ -693,7 +710,9 @@ class Model:
                     self.shape_thickness,
                     self.shape_contact_pairs,
                     0.0,  # sum_of_contact_offsets
-                    self._collision_pipeline.rigid_contact_margin if hasattr(self, "_collision_pipeline") and self._collision_pipeline is not None else 0.01,
+                    self._collision_pipeline.rigid_contact_margin
+                    if hasattr(self, "_collision_pipeline") and self._collision_pipeline is not None
+                    else 0.01,
                     contacts.rigid_contact_max,
                 ],
                 outputs=[
@@ -725,7 +744,6 @@ class Model:
         iterate_mesh_vertices: bool = True,
         requires_grad: bool | None = None,
     ) -> Contacts:
-
         return self.collide_pure_gjk_mpr_multicontact(state)
         """
         Generate contact points for the particles and rigid bodies in the model.

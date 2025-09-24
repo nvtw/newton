@@ -50,10 +50,10 @@ class Example:
         # attach directly to world (body = -1) so it is truly static
         builder.add_shape_box(
             -1,
-            xform=wp.transform(p=wp.vec3(0.0, 0.0, -50.0), q=wp.quat_identity()),
-            hx=50.0,
-            hy=50.0,
-            hz=50.0,
+            xform=wp.transform(p=wp.vec3(0.0, 0.0, -5.0), q=wp.quat_identity()),
+            hx=5.0,
+            hy=5.0,
+            hz=5.0,
         )
 
         # z height to drop shapes from
