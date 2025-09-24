@@ -152,6 +152,62 @@ def intersection_point(trim_seg_start: wp.vec3, trim_seg_end: wp.vec3, a: wp.vec
 
 
 @wp.func
+def trim_by_line_segment_in_place(
+    trim_seg_start: wp.vec3,
+    trim_seg_end: wp.vec3,
+    loop: wp.array(dtype=wp.vec4),
+    loop_segments: wp.array(dtype=wp.uint8),
+    loop_count: int,
+    max_loop_capacity: int,
+) -> int:
+    """
+    Intersect the input loop with a single finite line segment in the contact plane.
+
+    Stores up to two intersection points (degenerate segment manifold).
+    Segment IDs are set to 0 (first trim edge) for generated points.
+    """
+    if loop_count < 1:
+        return 0
+
+    trim_start_xy = wp.vec2(trim_seg_start[0], trim_seg_start[1])
+    trim_end_xy = wp.vec2(trim_seg_end[0], trim_seg_end[1])
+    seg_dir = trim_end_xy - trim_start_xy
+    seg_len = wp.sqrt(wp.max(1e-12, seg_dir[0] * seg_dir[0] + seg_dir[1] * seg_dir[1]))
+    seg_dir = seg_dir / seg_len
+
+    write_idx = int(0)
+    num_found = int(0)
+
+    for i in range(loop_count):
+        if num_found >= 2:
+            break
+        j = (i + 1) % loop_count
+
+        ai_xy = wp.vec2(loop[i][0], loop[i][1])
+        aj_xy = wp.vec2(loop[j][0], loop[j][1])
+
+        side_i = signed_area(trim_start_xy, trim_end_xy, ai_xy)
+        side_j = signed_area(trim_start_xy, trim_end_xy, aj_xy)
+
+        crosses = (side_i > 0.0 and side_j < 0.0) or (side_i < 0.0 and side_j > 0.0)
+        touches = (side_i == 0.0) or (side_j == 0.0)
+
+        if crosses or touches:
+            inter = intersection_point(trim_seg_start, trim_seg_end, loop[i], loop[j])
+            inter_xy = wp.vec2(inter[0], inter[1])
+            t_along = wp.dot(seg_dir, inter_xy - trim_start_xy)
+            if t_along < -1e-6 or t_along > seg_len + 1e-6:
+                continue
+
+            loop[write_idx] = inter
+            loop_segments[write_idx] = wp.uint8(0)
+            write_idx += 1
+            num_found += 1
+
+    return num_found
+
+
+@wp.func
 def insert_vec4(arr: wp.array(dtype=wp.vec4), arr_count: int, index: int, element: wp.vec4):
     """
     Insert an element into an array at the specified index, shifting elements to the right.
@@ -380,6 +436,15 @@ def trim_all_in_place(
     Returns:
         New number of vertices in the trimmed loop.
     """
+
+    if trim_poly_count <= 1:
+        return loop_count  # There is no trim polygon
+
+    if trim_poly_count == 2:
+        return trim_by_line_segment_in_place(
+            trim_poly[0], trim_poly[1], loop, loop_segments, loop_count, max_loop_capacity
+        )
+
     current_loop_count = loop_count
 
     for i in range(trim_poly_count):
@@ -861,7 +926,7 @@ def create_build_manifold(support_func: Any):
         The two shapes must always be queried in the same order to get stable feature ids.
         """
 
-        normal = -normal # The code below uses a different normal convention
+        normal = -normal  # The code below uses a different normal convention
 
         # Reset all counters for a new calculation.
         a_count = 0
