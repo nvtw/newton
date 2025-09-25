@@ -329,10 +329,6 @@ def serialize_ndarray(arr: np.ndarray, format_type: str = "json", cache: ArrayCa
                 }
             else:
                 # Reference only
-                try:
-                    print(f"ArrayCache dedup numpy buffer {hex(key)} -> index {idx}")
-                except Exception:
-                    print(f"ArrayCache dedup numpy buffer -> index {idx}")
                 return {
                     "__type__": "numpy.ndarray_ref",
                     "cache_index": int(idx),
@@ -501,10 +497,6 @@ def pointer_as_key(obj, format_type: str = "json", cache: ArrayCache | None = No
                 key = _warp_key(x)
                 idx = cache.try_register_pointer_and_value(key, x)
                 if idx > 0:
-                    try:
-                        print(f"ArrayCache dedup warp.array {hex(key)} -> index {idx}")
-                    except Exception:
-                        print(f"ArrayCache dedup warp.array -> index {idx}")
                     return {
                         "__type__": "warp.array_ref",
                         "__dtype__": str(x.dtype),
@@ -548,10 +540,6 @@ def pointer_as_key(obj, format_type: str = "json", cache: ArrayCache | None = No
                 mesh_key = _mesh_key_from_vertices(x.vertices, fallback_obj=x)
                 idx = cache.try_register_pointer_and_value(mesh_key, x)
                 if idx > 0:
-                    try:
-                        print(f"ArrayCache dedup Mesh {hex(mesh_key)} -> index {idx}")
-                    except Exception:
-                        print(f"ArrayCache dedup Mesh -> index {idx}")
                     return {"__type__": "newton.geometry.Mesh_ref", "cache_index": int(idx)}
                 assigned = cache.get_index_for_key(mesh_key)
                 return {"__type__": "newton.geometry.Mesh", "cache_index": int(assigned), "data": mesh_data}
