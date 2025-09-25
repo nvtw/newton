@@ -19,19 +19,22 @@
 # Shows how to set up a simulation of a G1 robot articulation
 # from a USD stage using newton.ModelBuilder.add_usd().
 #
-# Command: python -m newton.examples robot_g1 --num-envs 16
+# Command: python -m newton.examples robot_g1 --num-envs 8192 --num-frames 200
 #
 ###########################################################################
+
+import os
 
 import warp as wp
 
 import newton
 import newton.examples
 import newton.utils
+from newton._src.utils.recorder import RecorderModelAndState
 
 
 class Example:
-    def __init__(self, viewer, num_envs=4):
+    def __init__(self, viewer, num_envs=8192):
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
@@ -92,6 +95,10 @@ class Example:
 
         self.viewer.set_model(self.model)
 
+        # Initialize recorder with ring buffer for 50 states
+        self.recorder = RecorderModelAndState(max_history_size=5)
+        self.recorder.record_model(self.model)
+
         self.capture()
 
     def capture(self):
@@ -120,6 +127,9 @@ class Example:
         else:
             self.simulate()
 
+        # Record state for debugging
+        self.recorder.record(self.state_0)
+
         self.sim_time += self.frame_dt
 
     def render(self):
@@ -131,13 +141,36 @@ class Example:
     def test(self):
         pass
 
+    def save_recording(self):
+        """Save the recording to a binary file in the specified directory."""
+        output_dir = "C:/tmp/recording_tests"
+
+        # Create directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Generate filename
+        filename = "robot_g1_recording.bin"
+        filepath = os.path.join(output_dir, filename)
+
+        # Save recording as binary file
+        print(f"Saving recording to: {filepath}")
+        self.recorder.save_to_file(filepath)
+        print(f"Recording saved to: {filepath}")
+        print(f"Recorded {len(self.recorder.history)} states (ring buffer capacity: 50)")
+
 
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
-    parser.add_argument("--num-envs", type=int, default=4, help="Total number of simulated environments.")
+    parser.add_argument("--num-envs", type=int, default=8192, help="Total number of simulated environments (default: 8192).")
 
     viewer, args = newton.examples.init(parser)
 
     example = Example(viewer, args.num_envs)
 
+    # Run simulation (default 100 frames from base parser)
+    print(f"Running simulation with {example.num_envs} robots for {args.num_frames} frames...")
+
     newton.examples.run(example)
+
+    # Save recording before exit
+    example.save_recording()
