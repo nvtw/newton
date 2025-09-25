@@ -1038,9 +1038,12 @@ class RecorderModelAndState:
                 encoder.encode(header)
                 f.flush()
 
+                # Shared cache across model and all states to enable deduplication
+                array_cache = ArrayCache()
+
                 # Model (optional)
                 if self.raw_model is not None:
-                    model_serialized = pointer_as_key(self.raw_model, "cbor2")
+                    model_serialized = pointer_as_key(self.raw_model, "cbor2", cache=array_cache)
                     encoder.encode(
                         {
                             "__type__": "newton.recording.model",
@@ -1052,7 +1055,7 @@ class RecorderModelAndState:
                 # States
                 for i, st in enumerate(states_to_save):
                     # st is a dict of name -> wp.array (cloned at record time)
-                    state_serialized = pointer_as_key(st, "cbor2")
+                    state_serialized = pointer_as_key(st, "cbor2", cache=array_cache)
                     encoder.encode(
                         {
                             "__type__": "newton.recording.state",
