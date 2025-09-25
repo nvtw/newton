@@ -816,7 +816,7 @@ def depointer_as_key(data: dict, format_type: str = "json", cache: ArrayCache | 
         if isinstance(obj, tuple):
             return tuple(_resolve_cache_refs(v) for v in obj)
         if isinstance(obj, set):
-            return set(_resolve_cache_refs(v) for v in obj)
+            return {_resolve_cache_refs(v) for v in obj}
         return obj
 
     # Resolve any forward references now that all definitive objects have populated the cache
