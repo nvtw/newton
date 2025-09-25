@@ -38,10 +38,6 @@ except ImportError:
 T = TypeVar("T")
 
 
-class ArrayCache:
-    pass
-
-
 class RingBuffer(Generic[T]):
     """
     A ring buffer that behaves like a list but only keeps the last N items.
@@ -260,6 +256,31 @@ def _ptr_key_from_numpy(arr: np.ndarray) -> int:
     return int(arr.__array_interface__["data"][0])
 
 
+_NP_TAG = 1 << 60
+_WARP_TAG = 2 << 60
+_MESH_TAG = 3 << 60
+
+
+def _np_key(arr: np.ndarray) -> int:
+    return _NP_TAG + _ptr_key_from_numpy(arr)
+
+
+def _warp_key(x) -> int:
+    try:
+        base = int(x.ptr)
+    except Exception:
+        base = int(id(x))
+    return _WARP_TAG + base
+
+
+def _mesh_key_from_vertices(vertices: np.ndarray, fallback_obj=None) -> int:
+    try:
+        base = _ptr_key_from_numpy(vertices)
+    except Exception:
+        base = int(id(fallback_obj)) if fallback_obj is not None else int(id(vertices))
+    return _MESH_TAG + base
+
+
 def serialize_ndarray(arr: np.ndarray, format_type: str = "json", cache: ArrayCache | None = None) -> dict:
     """
     Serialize a numpy ndarray to a dictionary representation.
@@ -293,7 +314,7 @@ def serialize_ndarray(arr: np.ndarray, format_type: str = "json", cache: ArrayCa
                     "binary_data": arr_c.tobytes(order="C"),
                 }
             # Cache-aware: assign or reuse an index
-            key = _ptr_key_from_numpy(arr_c)
+            key = _np_key(arr_c)
             idx = cache.try_register_pointer_and_value(key, arr_c)
             if idx == 0:
                 # First occurrence: write full payload with index
@@ -347,8 +368,11 @@ def deserialize_ndarray(data: dict, format_type: str = "json", cache: ArrayCache
         if cache is None:
             raise ValueError("ArrayCache is required to resolve numpy.ndarray_ref")
         ref_index = int(data["cache_index"])
-        # Return cached object directly; assume identical dtype/shape/order
-        return cache.try_get_value(ref_index)
+        # Try to resolve immediately; if not yet registered (forward ref), defer
+        try:
+            return cache.try_get_value(ref_index)
+        except KeyError:
+            return {"__cache_ref__": {"index": ref_index, "kind": "numpy"}}
 
     if data.get("__type__") != "numpy.ndarray":
         raise ValueError("Invalid data format for numpy array deserialization")
@@ -369,7 +393,7 @@ def deserialize_ndarray(data: dict, format_type: str = "json", cache: ArrayCache
             if cache is not None and "cache_index" in data:
                 # We cannot recover a stable pointer from bytes; use id(arr.data) as key surrogate
                 # Since no aliasing is guaranteed, each full array is unique in the stream
-                key = int(arr.__array_interface__["data"][0])
+                key = _np_key(arr)
                 cache.try_register_pointer_and_value_and_index(key, arr, int(data["cache_index"]))
             return arr
         else:
@@ -474,10 +498,7 @@ def pointer_as_key(obj, format_type: str = "json", cache: ArrayCache | None = No
         if isinstance(x, wp.array):
             # Use device pointer as cache key
             if cache is not None:
-                try:
-                    key = int(x.ptr)
-                except Exception:
-                    key = int(id(x))
+                key = _warp_key(x)
                 idx = cache.try_register_pointer_and_value(key, x)
                 if idx > 0:
                     try:
@@ -524,10 +545,7 @@ def pointer_as_key(obj, format_type: str = "json", cache: ArrayCache | None = No
                 "I": serialize_ndarray(np.array(x.I), format_type, cache),
             }
             if cache is not None:
-                try:
-                    mesh_key = _ptr_key_from_numpy(x.vertices)
-                except Exception:
-                    mesh_key = int(id(x))
+                mesh_key = _mesh_key_from_vertices(x.vertices, fallback_obj=x)
                 idx = cache.try_register_pointer_and_value(mesh_key, x)
                 if idx > 0:
                     try:
@@ -733,7 +751,10 @@ def depointer_as_key(data: dict, format_type: str = "json", cache: ArrayCache | 
             if cache is None:
                 raise ValueError("ArrayCache required to resolve warp.array_ref")
             ref_index = int(x["cache_index"])
-            return cache.try_get_value(ref_index)
+            try:
+                return cache.try_get_value(ref_index)
+            except KeyError:
+                return {"__cache_ref__": {"index": ref_index, "kind": "warp.array"}}
 
         if isinstance(x, dict) and x.get("__type__") == "warp.array":
             dtype_str = extract_last_type_name(x["__dtype__"])
@@ -742,10 +763,7 @@ def depointer_as_key(data: dict, format_type: str = "json", cache: ArrayCache | 
             result = wp.array(np_arr, dtype=a)
             # Register in cache if provided index present
             if cache is not None and "cache_index" in x:
-                try:
-                    key = int(result.ptr)
-                except Exception:
-                    key = int(id(result))
+                key = _warp_key(result)
                 cache.try_register_pointer_and_value_and_index(key, result, int(x["cache_index"]))
             return result
 
@@ -761,7 +779,10 @@ def depointer_as_key(data: dict, format_type: str = "json", cache: ArrayCache | 
             if cache is None:
                 raise ValueError("ArrayCache required to resolve Mesh_ref")
             ref_index = int(x["cache_index"])
-            return cache.try_get_value(ref_index)
+            try:
+                return cache.try_get_value(ref_index)
+            except KeyError:
+                return {"__cache_ref__": {"index": ref_index, "kind": "mesh"}}
 
         if isinstance(x, dict) and x.get("__type__") == "newton.geometry.Mesh":
             mesh_data = x["data"]
@@ -782,10 +803,7 @@ def depointer_as_key(data: dict, format_type: str = "json", cache: ArrayCache | 
             mesh.com = wp.vec3(*mesh_data["com"])
             mesh.I = wp.mat33(deserialize_ndarray(mesh_data["I"], format_type, cache))
             if cache is not None and "cache_index" in x:
-                try:
-                    mesh_key = _ptr_key_from_numpy(vertices)
-                except Exception:
-                    mesh_key = int(id(mesh))
+                mesh_key = _mesh_key_from_vertices(vertices, fallback_obj=mesh)
                 cache.try_register_pointer_and_value_and_index(mesh_key, mesh, int(x["cache_index"]))
             return mesh
 
@@ -797,9 +815,24 @@ def depointer_as_key(data: dict, format_type: str = "json", cache: ArrayCache | 
 
     result = deserialize(data, callback, format_type=format_type, cache=cache)
 
-    # Just return the deserialized result as-is
-    # Don't create any Model instances here
-    return result
+    def _resolve_cache_refs(obj):
+        if isinstance(obj, dict):
+            if "__cache_ref__" in obj:
+                idx = int(obj["__cache_ref__"]["index"])
+                # Will raise KeyError with clear message if still missing
+                return cache.try_get_value(idx) if cache is not None else obj
+            # Recurse into dict
+            return {k: _resolve_cache_refs(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_resolve_cache_refs(v) for v in obj]
+        if isinstance(obj, tuple):
+            return tuple(_resolve_cache_refs(v) for v in obj)
+        if isinstance(obj, set):
+            return set(_resolve_cache_refs(v) for v in obj)
+        return obj
+
+    # Resolve any forward references now that all definitive objects have populated the cache
+    return _resolve_cache_refs(result)
 
 
 class RecorderBasic:
@@ -1021,7 +1054,7 @@ class RecorderModelAndState:
         # Convert history to list for serialization if needed
         states_to_save = self.history.to_list() if isinstance(self.history, RingBuffer) else self.history
         data_to_save = {"model": self.raw_model, "states": states_to_save}
-        # Thread an ArrayCache instance through serialization (not used yet)
+        # Use a single ArrayCache to deduplicate arrays across the whole payload
         array_cache = ArrayCache()
         serialized_data = pointer_as_key(data_to_save, format_type, cache=array_cache)
 
@@ -1029,38 +1062,10 @@ class RecorderModelAndState:
             with open(file_path, "w") as f:
                 json.dump(serialized_data, f, indent=2)
         elif format_type == "cbor2":
-            # Stream out CBOR with a header, model, and per-state records
+            # Save as uncompressed CBOR2 binary format
+            cbor_data = cbor2.dumps(serialized_data)
             with open(file_path, "wb") as f:
-                encoder = cbor2.CBOREncoder(f)
-
-                # Header
-                header = {"__type__": "newton.recording.header", "version": 1, "format": "cbor-stream"}
-                encoder.encode(header)
-                f.flush()
-
-                # Model (optional)
-                if self.raw_model is not None:
-                    model_serialized = pointer_as_key(self.raw_model, "cbor2")
-                    encoder.encode(
-                        {
-                            "__type__": "newton.recording.model",
-                            "data": model_serialized,
-                        }
-                    )
-                    f.flush()
-
-                # States
-                for i, st in enumerate(states_to_save):
-                    # st is a dict of name -> wp.array (cloned at record time)
-                    state_serialized = pointer_as_key(st, "cbor2")
-                    encoder.encode(
-                        {
-                            "__type__": "newton.recording.state",
-                            "frame": int(i),
-                            "data": state_serialized,
-                        }
-                    )
-                    f.flush()
+                f.write(cbor_data)
 
     def load_from_file(self, file_path: str):
         """
@@ -1090,62 +1095,22 @@ class RecorderModelAndState:
         if format_type == "json":
             with open(file_path) as f:
                 serialized_data = json.load(f)
-            array_cache = ArrayCache()
-            raw = depointer_as_key(serialized_data, format_type, cache=array_cache)
-            self.deserialized_model = raw["model"]
-
-            loaded_states = raw["states"]
-            if isinstance(self.history, RingBuffer):
-                self.history.from_list(loaded_states)
-            else:
-                self.history = loaded_states
         elif format_type == "cbor2":
-            # Read streamed format (header first); no backward-compat with monolithic CBOR
+            # Load uncompressed CBOR2 binary format
             with open(file_path, "rb") as f:
-                # Peek first item
-                decoder = cbor2.CBORDecoder(f)
-                try:
-                    first_item = decoder.decode()
-                except EOFError:
-                    first_item = None
+                file_data = f.read()
+            serialized_data = cbor2.loads(file_data)
 
-                if not (isinstance(first_item, dict) and first_item.get("__type__") == "newton.recording.header"):
-                    raise ValueError("Invalid CBOR stream: missing or malformed header")
+        # Reconstruct using the same cache model (single cache per document)
+        array_cache = ArrayCache()
+        raw = depointer_as_key(serialized_data, format_type, cache=array_cache)
+        self.deserialized_model = raw["model"]
 
-                # Streamed format: next is optional model, then states
-                # Reset history
-                if isinstance(self.history, RingBuffer):
-                    self.history.clear()
-                else:
-                    self.history = []
-
-                # Optional model
-                try:
-                    next_item = decoder.decode()
-                except EOFError:
-                    next_item = None
-                array_cache = ArrayCache()
-                if isinstance(next_item, dict) and next_item.get("__type__") == "newton.recording.model":
-                    self.deserialized_model = depointer_as_key(next_item.get("data"), "cbor2", cache=array_cache)
-                    try:
-                        next_item = decoder.decode()
-                    except EOFError:
-                        next_item = None
-
-                # If next_item is present, it must be a state (or None if empty)
-                if next_item is not None:
-                    if not isinstance(next_item, dict) or next_item.get("__type__") != "newton.recording.state":
-                        raise ValueError("Invalid CBOR stream: unexpected item after header/model")
-                    state_dict = depointer_as_key(next_item.get("data"), "cbor2", cache=array_cache)
-                    self.history.append(state_dict)
-
-                # Consume remaining states
-                while True:
-                    try:
-                        item = decoder.decode()
-                    except EOFError:
-                        break
-                    if not isinstance(item, dict) or item.get("__type__") != "newton.recording.state":
-                        raise ValueError("Invalid CBOR stream: unexpected item encountered")
-                    state_dict = depointer_as_key(item.get("data"), "cbor2", cache=array_cache)
-                    self.history.append(state_dict)
+        # Handle loading states into the appropriate container type
+        loaded_states = raw["states"]
+        if isinstance(self.history, RingBuffer):
+            # If we're using a ring buffer, load states into it
+            self.history.from_list(loaded_states)
+        else:
+            # If we're using a regular list, assign directly
+            self.history = loaded_states
