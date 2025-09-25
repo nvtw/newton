@@ -156,47 +156,51 @@ def build_contacts_kernel_gjk_mpr(
     X_bw_a = wp.transform_inverse(X_wb_a)
     X_bw_b = wp.transform_inverse(X_wb_b)
 
-    # Process each contact point
+    # Process each contact point, mirroring handle_contact_pairs semantics
     for i in range(n):
-        # Extract contact points from matrices
+        # Contact points on A and B in world space
         p_a = wp.vec3(pts_a[i, 0], pts_a[i, 1], pts_a[i, 2])
         p_b = wp.vec3(pts_b[i, 0], pts_b[i, 1], pts_b[i, 2])
 
-        # Compute contact normal (B->A direction)
-        diff = p_a - p_b
+        # Normal points from A to B
+        diff = p_b - p_a
         dist_sq = wp.length_sq(diff)
-        if dist_sq > 1.0e-30:
-            normal = diff / wp.sqrt(dist_sq)
-        else:
-            normal = wp.vec3(1.0, 0.0, 0.0)
+        normal = diff / wp.sqrt(dist_sq) if dist_sq > 1.0e-30 else wp.vec3(1.0, 0.0, 0.0)
 
-        # Gate contacts by manifold penetration (Newton convention: negative on overlap)
-        # if penetrations[i] > 0.0:
-        #     continue
+        # Distance along normal (handle_contact_pairs style)
+        distance = wp.dot(diff, normal)
 
-        # Atomically allocate contact index - following convert_newton_contacts_to_mjwarp_kernel pattern
+        # Total separation = radius_eff(a)+radius_eff(b)+thickness(a)+thickness(b)
+        # Enforce radius_eff == 0.0 for all shapes in this kernel
+        total_separation_needed = thickness_a + thickness_b
+        d = distance - total_separation_needed
+        if d >= rigid_contact_margin:
+            continue
+
+        # Allocate contact
         idx = wp.atomic_add(contact_count, 0, 1)
         if idx >= contact_max:
             return
 
-        # Store contact data
         out_shape0[idx] = shape_a
         out_shape1[idx] = shape_b
 
-        # Transform contact points to body frames - FIXED: was assigning both to out_point1
+        # Transform contact points to body frames
         out_point0[idx] = wp.transform_point(X_bw_a, p_a)
         out_point1[idx] = wp.transform_point(X_bw_b, p_b)
 
-        # Set offsets (currently zero, can be extended for shape-specific offsets)
-        out_offset0[idx] = wp.vec3(0.0)
-        out_offset1[idx] = wp.vec3(0.0)
+        # Offsets are along normal in body frames with magnitude = thickness (radius_eff=0)
+        offset_mag_a = thickness_a
+        offset_mag_b = thickness_b
+        out_offset0[idx] = wp.transform_vector(X_bw_a, -offset_mag_a * normal)
+        out_offset1[idx] = wp.transform_vector(X_bw_b, offset_mag_b * normal)
 
-        # Store normal (XPBD will flip this internally for constraint direction)
-        out_normal[idx] = -normal
+        # Store normal aligned with handle_contact_pairs
+        out_normal[idx] = normal
 
-        # Store thicknesses
-        out_thickness0[idx] = thickness_a
-        out_thickness1[idx] = thickness_b
+        # Store thicknesses equal to offset magnitudes
+        out_thickness0[idx] = offset_mag_a
+        out_thickness1[idx] = offset_mag_b
 
 
 class Model:
@@ -682,7 +686,7 @@ class Model:
         return c
 
     def collide_pure_gjk_mpr_multicontact(self: Model, state: State):
-        print("collide_pure_gjk_mpr_multicontact")
+        # print("collide_pure_gjk_mpr_multicontact")
 
         # Allocate a Contacts buffer compatible with the default pipeline
         rigid_contact_max = (
@@ -768,7 +772,7 @@ class Model:
         Returns:
             Contacts: The contact object containing collision information.
         """
-        from .collide import CollisionPipeline  # noqa: PLC0415
+        from .collide import CollisionPipeline
 
         if requires_grad is None:
             requires_grad = self.requires_grad

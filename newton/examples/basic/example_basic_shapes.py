@@ -50,10 +50,10 @@ class Example:
         # attach directly to world (body = -1) so it is truly static
         builder.add_shape_box(
             -1,
-            xform=wp.transform(p=wp.vec3(0.0, 0.0, -5.0), q=wp.quat_identity()),
-            hx=5.0,
-            hy=5.0,
-            hz=5.0,
+            xform=wp.transform(p=wp.vec3(0.0, 0.0, -50.0), q=wp.quat_identity()),
+            hx=50.0,
+            hy=50.0,
+            hz=50.0,
         )
 
         # z height to drop shapes from
@@ -68,16 +68,16 @@ class Example:
         builder.add_shape_capsule(body_capsule, radius=0.3, half_height=0.7)
 
         # CYLINDER (no collision support)
-        # body_cylinder = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -4.0, drop_z), q=wp.quat_identity()))
-        # builder.add_shape_cylinder(body_cylinder, radius=0.4, half_height=0.6)
+        body_cylinder = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -4.0, drop_z), q=wp.quat_identity()))
+        builder.add_shape_cylinder(body_cylinder, radius=0.4, half_height=0.6)
 
         # BOX
         body_box = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 2.0, drop_z), q=wp.quat_identity()))
         builder.add_shape_box(body_box, hx=0.5, hy=0.35, hz=0.25)
 
         # CONE (no collision support)
-        # body_cone = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 6.0, drop_z), q=wp.quat_identity()))
-        # builder.add_shape_cone(body_cone, radius=0.45, half_height=0.6)
+        body_cone = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 6.0, drop_z), q=wp.quat_identity()))
+        builder.add_shape_cone(body_cone, radius=0.45, half_height=0.6)
 
         # Three stacked cubes (small initial gaps), positioned at y = 6.0
         cube_h = 0.4
@@ -87,28 +87,28 @@ class Example:
         z2 = z1 + 2.0 * cube_h + gap
         z3 = z2 + 2.0 * cube_h + gap
 
-        body_cube1 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z1), q=wp.quat_identity()))
-        builder.add_shape_box(body_cube1, hx=cube_h, hy=cube_h, hz=cube_h)
+        # body_cube1 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z1), q=wp.quat_identity()))
+        # builder.add_shape_box(body_cube1, hx=cube_h, hy=cube_h, hz=cube_h)
 
-        body_cube2 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z2), q=wp.quat_identity()))
-        builder.add_shape_box(body_cube2, hx=cube_h, hy=cube_h, hz=cube_h)
+        # body_cube2 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z2), q=wp.quat_identity()))
+        # builder.add_shape_box(body_cube2, hx=cube_h, hy=cube_h, hz=cube_h)
 
-        body_cube3 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z3), q=wp.quat_identity()))
-        builder.add_shape_box(body_cube3, hx=cube_h, hy=cube_h, hz=cube_h)
+        # body_cube3 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z3), q=wp.quat_identity()))
+        # builder.add_shape_box(body_cube3, hx=cube_h, hy=cube_h, hz=cube_h)
 
-        # MESH (bunny)
-        usd_stage = Usd.Stage.Open(newton.examples.get_asset("bunny.usd"))
-        usd_geom = UsdGeom.Mesh(usd_stage.GetPrimAtPath("/root/bunny"))
+        # # MESH (bunny)
+        # usd_stage = Usd.Stage.Open(newton.examples.get_asset("bunny.usd"))
+        # usd_geom = UsdGeom.Mesh(usd_stage.GetPrimAtPath("/root/bunny"))
 
-        mesh_vertices = np.array(usd_geom.GetPointsAttr().Get())
-        mesh_indices = np.array(usd_geom.GetFaceVertexIndicesAttr().Get())
+        # mesh_vertices = np.array(usd_geom.GetPointsAttr().Get())
+        # mesh_indices = np.array(usd_geom.GetFaceVertexIndicesAttr().Get())
 
-        demo_mesh = newton.Mesh(mesh_vertices, mesh_indices)
+        # demo_mesh = newton.Mesh(mesh_vertices, mesh_indices)
 
-        body_mesh = builder.add_body(
-            xform=wp.transform(p=wp.vec3(0.0, 4.0, drop_z - 0.5), q=wp.quat(0.5, 0.5, 0.5, 0.5))
-        )
-        builder.add_shape_mesh(body_mesh, mesh=demo_mesh)
+        # body_mesh = builder.add_body(
+        #     xform=wp.transform(p=wp.vec3(0.0, 4.0, drop_z - 0.5), q=wp.quat(0.5, 0.5, 0.5, 0.5))
+        # )
+        # builder.add_shape_mesh(body_mesh, mesh=demo_mesh)
 
         # finalize model
         self.model = builder.finalize()
@@ -138,7 +138,7 @@ class Example:
             # apply forces to the model
             self.viewer.apply_forces(self.state_0)
 
-            print("collide")
+            # print("collide")
             self.contacts = self.model.collide(self.state_0)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
