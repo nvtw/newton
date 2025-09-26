@@ -59,25 +59,25 @@ class Example:
         # z height to drop shapes from
         drop_z = 2.0
 
-        # SPHERE
-        body_sphere = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -2.0, drop_z), q=wp.quat_identity()))
-        builder.add_shape_sphere(body_sphere, radius=0.5)
+        # # SPHERE
+        # body_sphere = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -2.0, drop_z), q=wp.quat_identity()))
+        # builder.add_shape_sphere(body_sphere, radius=0.5)
 
         # CAPSULE
         body_capsule = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, drop_z), q=wp.quat_identity()))
         builder.add_shape_capsule(body_capsule, radius=0.3, half_height=0.7)
 
-        # CYLINDER (no collision support)
-        body_cylinder = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -4.0, drop_z), q=wp.quat_identity()))
-        builder.add_shape_cylinder(body_cylinder, radius=0.4, half_height=0.6)
+        # # CYLINDER (no collision support)
+        # body_cylinder = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -4.0, drop_z), q=wp.quat_identity()))
+        # builder.add_shape_cylinder(body_cylinder, radius=0.4, half_height=0.6)
 
-        # BOX
-        body_box = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 2.0, drop_z), q=wp.quat_identity()))
-        builder.add_shape_box(body_box, hx=0.5, hy=0.35, hz=0.25)
+        # # BOX
+        # body_box = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 2.0, drop_z), q=wp.quat_identity()))
+        # builder.add_shape_box(body_box, hx=0.5, hy=0.35, hz=0.25)
 
-        # CONE (no collision support)
-        body_cone = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 6.0, drop_z), q=wp.quat_identity()))
-        builder.add_shape_cone(body_cone, radius=0.45, half_height=0.6)
+        # # CONE (no collision support)
+        # body_cone = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 6.0, drop_z), q=wp.quat_identity()))
+        # builder.add_shape_cone(body_cone, radius=0.45, half_height=0.6)
 
         # Three stacked cubes (small initial gaps), positioned at y = 6.0
         cube_h = 0.4

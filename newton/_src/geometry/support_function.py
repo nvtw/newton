@@ -120,22 +120,22 @@ def support_map(
         radius = geom.scale[0]
         half_height = geom.scale[1]
 
-        # axis is +Z; segment support combined with spherical offset
-        if dir_safe[2] > 0.0:
-            base = wp.vec3(0.0, 0.0, half_height)
-            feature_id = 1  # top cap
-        elif dir_safe[2] < 0.0:
-            base = wp.vec3(0.0, 0.0, -half_height)
-            feature_id = 2  # bottom cap
-        else:
-            base = wp.vec3(0.0, 0.0, 0.0)
-            feature_id = 0  # lateral band
-
+        # Capsule = segment + sphere (adapted from C# code to Z-axis convention)
+        # Sphere part: support in normalized direction
         if dir_len_sq > eps:
             n = wp.normalize(dir_safe)
         else:
             n = wp.vec3(1.0, 0.0, 0.0)
-        result = base + n * radius
+        result = n * radius
+
+        # Segment endpoints are at (0, 0, +half_height) and (0, 0, -half_height)
+        # Use sign of Z-component to pick the correct endpoint
+        if dir_safe[2] >= 0.0:
+            result = result + wp.vec3(0.0, 0.0, half_height)
+            feature_id = 1  # top cap
+        else:
+            result = result + wp.vec3(0.0, 0.0, -half_height)
+            feature_id = 2  # bottom cap
 
     elif geom.shape_type == int(GeoType.ELLIPSOID):
         # Ellipsoid support for semi-axes a, b, c in direction d:

@@ -80,6 +80,12 @@ def build_contacts_kernel_gjk_mpr(
     type_a = shape_type[shape_a]
     type_b = shape_type[shape_b]
 
+    # # Sort shapes by type to ensure consistent collision handling order
+    # if type_a > type_b:
+    #     # Swap shapes to maintain consistent ordering
+    #     shape_a, shape_b = shape_b, shape_a
+    #     type_a, type_b = type_b, type_a
+
     # Only handle supported convex primitives
     if not (
         type_a == int(GeoType.BOX)
@@ -145,6 +151,7 @@ def build_contacts_kernel_gjk_mpr(
 
     # Early return if no contacts - following convert_newton_contacts_to_mjwarp_kernel pattern
     if count <= 0:
+        wp.printf("Exit 0 contacts\n")
         return
 
     # Clamp contact count to maximum of 4 - cleaner than the original if-chain
@@ -175,6 +182,7 @@ def build_contacts_kernel_gjk_mpr(
         total_separation_needed = thickness_a + thickness_b
         d = distance - total_separation_needed
         if d >= rigid_contact_margin:
+            wp.printf("Continue margin check\n")
             continue
 
         # Allocate contact
@@ -201,6 +209,23 @@ def build_contacts_kernel_gjk_mpr(
         # Store thicknesses equal to offset magnitudes
         out_thickness0[idx] = offset_mag_a
         out_thickness1[idx] = offset_mag_b
+
+        wp.printf(
+            "Contact %d: shapes %d-%d, points (%f, %f, %f)-(%f, %f, %f), normal (%f, %f, %f), distance %f\n",
+            idx,
+            shape_a,
+            shape_b,
+            p_a[0],
+            p_a[1],
+            p_a[2],
+            p_b[0],
+            p_b[1],
+            p_b[2],
+            normal[0],
+            normal[1],
+            normal[2],
+            distance,
+        )
 
 
 class Model:
@@ -699,6 +724,7 @@ class Model:
             device=self.device,
         )
         contacts.clear()
+        contacts.rigid_contact_count.zero_()
 
         # Launch kernel across all shape pairs
         if self.shape_contact_pair_count and self.shape_contact_pairs is not None:
