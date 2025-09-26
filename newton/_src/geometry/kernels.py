@@ -1410,8 +1410,7 @@ def cylinder_plane_collision(
     Handle collision between a cylinder (geo_a) and an infinite plane (geo_b).
 
     Returns:
-        tuple: (p_a_world, p_b_world, normal, distance, valid)
-        where valid indicates if a valid collision was found
+        tuple: (p_a_world, p_b_world, normal, distance)
     """
     # World-space plane
     plane_normal_world = wp.transform_vector(geo_b.X_ws, wp.vec3(0.0, 0.0, 1.0))
@@ -1439,20 +1438,11 @@ def cylinder_plane_collision(
     mid_pos = pos_mat[idx]
     normal = n_world
 
-    # Check if this contact point is valid (primitive function returns wp.inf for invalid contacts)
-    valid = distance < 1.0e5  # Use a reasonable threshold instead of exact wp.inf comparison
-    if valid:
-        # Split midpoint into shape-plane endpoints
-        p_a_world = mid_pos + 0.5 * normal * distance
-        p_b_world = mid_pos - 0.5 * normal * distance
-    else:
-        # Return dummy values when no collision found
-        p_a_world = wp.vec3(0.0, 0.0, 0.0)
-        p_b_world = wp.vec3(0.0, 0.0, 0.0)
-        normal = wp.vec3(0.0, 0.0, 1.0)
-        distance = 1.0e6
+    # Split midpoint into shape-plane endpoints
+    p_a_world = mid_pos + 0.5 * normal * distance
+    p_b_world = mid_pos - 0.5 * normal * distance
 
-    return p_a_world, p_b_world, normal, distance, valid
+    return p_a_world, p_b_world, normal, distance
 
 
 @wp.func
@@ -2160,12 +2150,11 @@ def handle_contact_pairs(
         normal = -neg_normal
 
     elif geo_a.geo_type == GeoType.PLANE and geo_b.geo_type == GeoType.CYLINDER:
-        p_b_world, p_a_world, neg_normal, distance, valid = cylinder_plane_collision(
-            geo_b, geo_a, point_id, edge_sdf_iter
-        )
+        p_b_world, p_a_world, neg_normal, distance = cylinder_plane_collision(geo_b, geo_a, point_id, edge_sdf_iter)
         # Flip the normal since we flipped the arguments
         normal = -neg_normal
-        if not valid:
+        # Check if this contact point is valid (primitive function returns wp.inf for invalid contacts)
+        if distance >= 1.0e5:  # Use a reasonable threshold instead of exact wp.inf comparison
             return
 
     elif geo_a.geo_type == GeoType.MESH and geo_b.geo_type == GeoType.BOX:
