@@ -30,8 +30,8 @@ from .kernels import build_orthonormal_basis
 # Constants
 EPS = 0.00001
 ROT_DELTA_ANGLE = 60.0 * wp.pi / 180.0
-SIN_OFFSET = 0.017452406437283512  # sin(1 degree)
-COS_OFFSET = 0.9998476951563912391  # cos(1 degree)
+SIN_OFFSET = wp.static(wp.sin(10.0 * wp.pi / 180.0))  # sin(1 degree)
+COS_OFFSET = wp.static(wp.cos(10.0 * wp.pi / 180.0))  # cos(1 degree)
 
 
 @wp.struct
@@ -1085,7 +1085,7 @@ def create_build_manifold(support_func: Any):
             contact_points_b[i] = fvec3_get_xyz(right[i])
             feature_ids[i] = int(right[i].feature)
             # Newton convention: penetration is negative on overlap
-            penetrations[i] = wp.dot(contact_points_a[i] - contact_points_b[i], normal)
+            penetrations[i] = wp.dot(contact_points_b[i] - contact_points_a[i], normal)
 
         return num_manifold_points, penetrations, contact_points_a, contact_points_b, feature_ids
 

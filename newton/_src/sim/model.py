@@ -38,6 +38,8 @@ from .state import State
 solve_convex_multi_contact = create_solve_convex_multi_contact(support_map_func, center_map)
 
 
+
+
 @wp.kernel(enable_backward=False)
 def build_contacts_kernel_gjk_mpr(
     body_q: wp.array(dtype=wp.transform),
@@ -46,6 +48,7 @@ def build_contacts_kernel_gjk_mpr(
     shape_type: wp.array(dtype=int),
     shape_scale: wp.array(dtype=wp.vec3),
     shape_thickness: wp.array(dtype=float),
+    shape_collision_radius: wp.array(dtype=float),
     shape_pairs: wp.array(dtype=wp.vec2i),
     sum_of_contact_offsets: float,
     rigid_contact_margin: float,
@@ -119,7 +122,17 @@ def build_contacts_kernel_gjk_mpr(
     )
 
     pos_a = wp.transform_get_translation(X_ws_a)
-    pos_b = wp.transform_get_translation(X_ws_b)
+    pos_b = wp.transform_get_translation(X_ws_b) 
+
+    # Early bounding sphere check using precomputed collision radii - inflate by rigid_contact_margin
+    radius_a = shape_collision_radius[shape_a] + rigid_contact_margin
+    radius_b = shape_collision_radius[shape_b] + rigid_contact_margin
+    center_distance = wp.length(pos_b - pos_a)
+
+    # Early out if bounding spheres don't overlap
+    if center_distance > (radius_a + radius_b):
+        return
+
     rot_a = wp.transform_get_rotation(X_ws_a)
     rot_b = wp.transform_get_rotation(X_ws_b)
 
@@ -138,7 +151,7 @@ def build_contacts_kernel_gjk_mpr(
     thickness_b = shape_thickness[shape_b]
 
     # Run multi-contact manifold generation
-    count, penetrations, pts_a, pts_b, features = wp.static(solve_convex_multi_contact)(
+    count, normal, penetrations, pts_a, pts_b, features = wp.static(solve_convex_multi_contact)(
         geom_a,
         geom_b,
         rot_a,
@@ -171,17 +184,21 @@ def build_contacts_kernel_gjk_mpr(
 
         # Normal points from A to B
         diff = p_b - p_a
-        dist_sq = wp.length_sq(diff)
-        normal = diff / wp.sqrt(dist_sq) if dist_sq > 1.0e-30 else wp.vec3(1.0, 0.0, 0.0)
+        # dist_sq = wp.length_sq(diff)
+        # normal = diff / wp.sqrt(dist_sq) if dist_sq > 1.0e-30 else wp.vec3(1.0, 0.0, 0.0)
 
-        # Distance along normal (handle_contact_pairs style)
-        distance = wp.dot(diff, normal)
+        # Distance along normal (handle_contact_pairs style)        
+        distance = wp.dot(diff, normal) #penetrations[i] # wp.dot(diff, normal)
+        wp.printf("Contact %d penetration: %f\n", i, penetrations[i])
 
         # Total separation = radius_eff(a)+radius_eff(b)+thickness(a)+thickness(b)
         # Enforce radius_eff == 0.0 for all shapes in this kernel
         total_separation_needed = thickness_a + thickness_b
         d = distance - total_separation_needed
         if d >= rigid_contact_margin:
+
+
+
             wp.printf("Continue margin check\n")
             continue
 
@@ -738,11 +755,12 @@ class Model:
                     self.shape_type,
                     self.shape_scale,
                     self.shape_thickness,
+                    self.shape_collision_radius,
                     self.shape_contact_pairs,
                     0.0,  # sum_of_contact_offsets
                     self._collision_pipeline.rigid_contact_margin
                     if hasattr(self, "_collision_pipeline") and self._collision_pipeline is not None
-                    else 0.01,
+                    else 0.1,
                     contacts.rigid_contact_max,
                 ],
                 outputs=[

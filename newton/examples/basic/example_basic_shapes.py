@@ -30,6 +30,16 @@ from pxr import Usd, UsdGeom
 import newton
 import newton.examples
 
+# Solver Selection
+# =================
+# Set USE_MUJOCO_SOLVER to switch between solvers:
+# - True:  MuJoCo Warp solver with Newton contacts (use_mujoco_contacts=False)
+# - False: XPBD solver (Newton's native solver)
+#
+# MuJoCo Warp with Newton contacts combines MuJoCo's constraint solver with
+# Newton's collision detection and contact generation for best of both worlds.
+USE_MUJOCO_SOLVER = True
+
 
 class Example:
     def __init__(self, viewer):
@@ -59,25 +69,34 @@ class Example:
         # z height to drop shapes from
         drop_z = 2.0
 
-        # # SPHERE
-        # body_sphere = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -2.0, drop_z), q=wp.quat_identity()))
-        # builder.add_shape_sphere(body_sphere, radius=0.5)
+        # Note: Free joints are added to all bodies for MuJoCo compatibility.
+        # MuJoCo requires explicit joints for all free-floating bodies.
+        # XPBD solver doesn't require joints but ignores them if present.
+
+        # SPHERE
+        body_sphere = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -2.0, drop_z), q=wp.quat_identity()))
+        builder.add_shape_sphere(body_sphere, radius=0.5)
+        builder.add_joint_free(body_sphere)  # Add free joint for MuJoCo
 
         # CAPSULE
         body_capsule = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, drop_z), q=wp.quat_identity()))
         builder.add_shape_capsule(body_capsule, radius=0.3, half_height=0.7)
+        builder.add_joint_free(body_capsule)  # Add free joint for MuJoCo
 
-        # # CYLINDER (no collision support)
-        # body_cylinder = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -4.0, drop_z), q=wp.quat_identity()))
-        # builder.add_shape_cylinder(body_cylinder, radius=0.4, half_height=0.6)
+        # CYLINDER (no collision support)
+        body_cylinder = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -4.0, drop_z), q=wp.quat_identity()))
+        builder.add_shape_cylinder(body_cylinder, radius=0.4, half_height=0.6)
+        builder.add_joint_free(body_cylinder)  # Add free joint for MuJoCo
 
-        # # BOX
-        # body_box = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 2.0, drop_z), q=wp.quat_identity()))
-        # builder.add_shape_box(body_box, hx=0.5, hy=0.35, hz=0.25)
+        # BOX
+        body_box = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 2.0, drop_z), q=wp.quat_identity()))
+        builder.add_shape_box(body_box, hx=0.5, hy=0.35, hz=0.25)
+        builder.add_joint_free(body_box)  # Add free joint for MuJoCo
 
         # # CONE (no collision support)
         # body_cone = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 6.0, drop_z), q=wp.quat_identity()))
         # builder.add_shape_cone(body_cone, radius=0.45, half_height=0.6)
+        # builder.add_joint_free(body_cone)  # Add free joint for MuJoCo
 
         # Three stacked cubes (small initial gaps), positioned at y = 6.0
         cube_h = 0.4
@@ -89,12 +108,15 @@ class Example:
 
         # body_cube1 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z1), q=wp.quat_identity()))
         # builder.add_shape_box(body_cube1, hx=cube_h, hy=cube_h, hz=cube_h)
+        # builder.add_joint_free(body_cube1)  # Add free joint for MuJoCo
 
         # body_cube2 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z2), q=wp.quat_identity()))
         # builder.add_shape_box(body_cube2, hx=cube_h, hy=cube_h, hz=cube_h)
+        # builder.add_joint_free(body_cube2)  # Add free joint for MuJoCo
 
         # body_cube3 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z3), q=wp.quat_identity()))
         # builder.add_shape_box(body_cube3, hx=cube_h, hy=cube_h, hz=cube_h)
+        # builder.add_joint_free(body_cube3)  # Add free joint for MuJoCo
 
         # # MESH (bunny)
         # usd_stage = Usd.Stage.Open(newton.examples.get_asset("bunny.usd"))
@@ -109,11 +131,25 @@ class Example:
         #     xform=wp.transform(p=wp.vec3(0.0, 4.0, drop_z - 0.5), q=wp.quat(0.5, 0.5, 0.5, 0.5))
         # )
         # builder.add_shape_mesh(body_mesh, mesh=demo_mesh)
+        # builder.add_joint_free(body_mesh)  # Add free joint for MuJoCo
 
         # finalize model
         self.model = builder.finalize()
 
-        self.solver = newton.solvers.SolverXPBD(self.model)
+        # Initialize solver based on the boolean flag
+        if USE_MUJOCO_SOLVER:
+            print("Using MuJoCo Warp solver with Newton contacts")
+            self.solver = newton.solvers.SolverMuJoCo(
+                self.model,
+                use_mujoco_contacts=False,  # Use Newton contacts instead of MuJoCo contacts
+                iterations=20,
+                ls_iterations=10,
+                integrator="euler",
+                solver="cg"
+            )
+        else:
+            print("Using XPBD solver")
+            self.solver = newton.solvers.SolverXPBD(self.model)
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -138,8 +174,10 @@ class Example:
             # apply forces to the model
             self.viewer.apply_forces(self.state_0)
 
-            # print("collide")
+            # Compute contacts - always needed for Newton contact solvers
             self.contacts = self.model.collide(self.state_0)
+            
+            # Step solver - both solvers use the same interface
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
             # swap states

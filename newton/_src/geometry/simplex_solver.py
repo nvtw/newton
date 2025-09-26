@@ -411,7 +411,7 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
         # Count used vertices and find free slot
         use_count = 0
         free_slot = 0
-        indices = wp.static(wp.zeros(4, dtype=int))
+        indices = wp.vec4i(0) # wp.static(wp.zeros(4, dtype=int))
 
         for i in range(4):
             if (solver.usage_mask & (wp.uint32(1) << wp.uint32(i))) != wp.uint32(0):
@@ -474,9 +474,9 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
         MAX_ITER = 30
 
         # Initialize variables
-        distance = 0.0
-        feature_a_id = 0
-        feature_b_id = 0
+        distance = float(0.0)
+        feature_a_id = int(0)
+        feature_b_id = int(0)
         point_a = wp.vec3(0.0, 0.0, 0.0)
         point_b = wp.vec3(0.0, 0.0, 0.0)
         normal = wp.vec3(0.0, 0.0, 0.0)
@@ -485,7 +485,7 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
         simplex_solver = SimplexSolverAB()
         simplex_solver = simplex_reset(simplex_solver)
 
-        iter_count = MAX_ITER
+        iter_count = int(MAX_ITER)
 
         # Get geometric center
         center = geometric_center(geom_a, geom_b, orientation_b, position_b, data_provider)
