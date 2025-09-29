@@ -39,8 +39,6 @@ from .state import State
 solve_convex_multi_contact = create_solve_convex_multi_contact(support_map_func, center_map)
 
 
-
-
 @wp.kernel(enable_backward=False)
 def build_contacts_kernel_gjk_mpr(
     body_q: wp.array(dtype=wp.transform),
@@ -173,7 +171,7 @@ def build_contacts_kernel_gjk_mpr(
             capsule_axis = wp.quat_rotate(rot_b, wp.vec3(0.0, 0.0, 1.0))
             capsule_radius = geom_b.scale[0]
             capsule_half_length = geom_b.scale[1]
-            flipped = False
+            # flipped = False  # unused variable
         else:
             # Box is B
             box_pos = pos_b
@@ -310,8 +308,8 @@ def build_contacts_kernel_gjk_mpr(
         # normal = diff / wp.sqrt(dist_sq) if dist_sq > 1.0e-30 else wp.vec3(1.0, 0.0, 0.0)
 
         # Distance along normal (handle_contact_pairs style)
-        distance = penetrations[i] # wp.dot(diff, normal)
-        #wp.printf("Contact %d penetration: %f\n", i, penetrations[i])
+        distance = penetrations[i]  # wp.dot(diff, normal)
+        # wp.printf("Contact %d penetration: %f\n", i, penetrations[i])
 
         # Total separation = radius_eff(a)+radius_eff(b)+thickness(a)+thickness(b)
         # Enforce radius_eff == 0.0 for all shapes in this kernel
@@ -656,8 +654,8 @@ class Model:
         """Up vector of the world, shape [3], float."""
         self.up_axis = 2
         """Up axis: 0 for x, 1 for y, 2 for z."""
-        self.gravity = np.array((0.0, 0.0, -9.81))
-        """Gravity vector, shape [3], float."""
+        self.gravity = None
+        """Gravity vector, shape [1], dtype vec3."""
 
         self.equality_constraint_type = None
         """Type of equality constraint, shape [equality_constraint_count], int."""
@@ -905,6 +903,28 @@ class Model:
 
         return contacts
 
+    def set_gravity(self, gravity: tuple[float, float, float] | list[float] | wp.vec3) -> None:
+        """
+        Set gravity for runtime modification.
+
+        Args:
+            gravity: Gravity vector as a tuple, list, or wp.vec3.
+                    Common values: (0, 0, -9.81) for Z-up, (0, -9.81, 0) for Y-up.
+
+        Note:
+            After calling this method, you should notify solvers via
+            `solver.notify_model_changed(SolverNotifyFlags.MODEL_PROPERTIES)`.
+        """
+        if self.gravity is None:
+            raise RuntimeError(
+                "Model gravity not initialized. Ensure the model was created via ModelBuilder.finalize()"
+            )
+
+        if isinstance(gravity, tuple | list):
+            self.gravity.assign([wp.vec3(gravity[0], gravity[1], gravity[2])])
+        else:
+            self.gravity.assign([gravity])
+
     def collide(
         self: Model,
         state: State,
@@ -917,7 +937,6 @@ class Model:
         iterate_mesh_vertices: bool = True,
         requires_grad: bool | None = None,
     ) -> Contacts:
-        return self.collide_pure_gjk_mpr_multicontact(state)
         """
         Generate contact points for the particles and rigid bodies in the model.
 
