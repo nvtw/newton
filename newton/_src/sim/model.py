@@ -22,10 +22,11 @@ import warp as wp
 
 from ..core.types import Devicelike
 from ..geometry.collision_convex import create_solve_convex_multi_contact
+from ..geometry.collision_primitive import collide_capsule_box
 from ..geometry.support_function import (
+    center_func as center_map,
     GenericShapeData,
     SupportMapDataProvider,
-    center_func as center_map,
     support_map as support_map_func,
 )
 from ..geometry.types import GeoType
@@ -64,6 +65,7 @@ def build_contacts_kernel_gjk_mpr(
     out_normal: wp.array(dtype=wp.vec3),
     out_thickness0: wp.array(dtype=float),
     out_thickness1: wp.array(dtype=float),
+    out_tids: wp.array(dtype=int),
 ):
     tid = wp.tid()
 
@@ -74,6 +76,10 @@ def build_contacts_kernel_gjk_mpr(
     pair = shape_pairs[tid]
     shape_a = pair[0]
     shape_b = pair[1]
+
+    # Safety: ignore self-collision pairs
+    if shape_a == shape_b:
+        return
 
     # Validate shape indices - following convert_newton_contacts_to_mjwarp_kernel pattern
     if shape_a < 0 or shape_b < 0:
@@ -122,7 +128,7 @@ def build_contacts_kernel_gjk_mpr(
     )
 
     pos_a = wp.transform_get_translation(X_ws_a)
-    pos_b = wp.transform_get_translation(X_ws_b) 
+    pos_b = wp.transform_get_translation(X_ws_b)
 
     # Early bounding sphere check using precomputed collision radii - inflate by rigid_contact_margin
     radius_a = shape_collision_radius[shape_a] + rigid_contact_margin
@@ -150,7 +156,116 @@ def build_contacts_kernel_gjk_mpr(
     thickness_a = shape_thickness[shape_a]
     thickness_b = shape_thickness[shape_b]
 
-    # Run multi-contact manifold generation
+    # Special-case: capsule vs box using collide_capsule_box
+    is_capsule_box = (type_a == int(GeoType.CAPSULE) and type_b == int(GeoType.BOX)) or (
+        type_a == int(GeoType.BOX) and type_b == int(GeoType.CAPSULE)
+    )
+
+    if is_capsule_box:
+        # Prepare parameters
+        # Box parameters
+        if type_a == int(GeoType.BOX):
+            box_pos = pos_a
+            box_rot = wp.quat_to_matrix(rot_a)
+            box_size = geom_a.scale
+            # Capsule parameters from B (axis is +Z in local frame)
+            capsule_pos = pos_b
+            capsule_axis = wp.quat_rotate(rot_b, wp.vec3(0.0, 0.0, 1.0))
+            capsule_radius = geom_b.scale[0]
+            capsule_half_length = geom_b.scale[1]
+            flipped = False
+        else:
+            # Box is B
+            box_pos = pos_b
+            box_rot = wp.quat_to_matrix(rot_b)
+            box_size = geom_b.scale
+            # Capsule is A
+            capsule_pos = pos_a
+            capsule_axis = wp.quat_rotate(rot_a, wp.vec3(0.0, 0.0, 1.0))
+            capsule_radius = geom_a.scale[0]
+            capsule_half_length = geom_a.scale[1]
+            flipped = True
+
+        dists, pos_mat, normal_mat = wp.static(collide_capsule_box)(
+            capsule_pos,
+            capsule_axis,
+            capsule_radius,
+            capsule_half_length,
+            box_pos,
+            box_rot,
+            box_size,
+        )
+
+        # Compute transforms for outputs (world<->body)
+        X_wb_a = body_q[rigid_a] if rigid_a != -1 else wp.transform_identity()
+        X_wb_b = body_q[rigid_b] if rigid_b != -1 else wp.transform_identity()
+        X_bw_a = wp.transform_inverse(X_wb_a)
+        X_bw_b = wp.transform_inverse(X_wb_b)
+
+        # Emit up to 2 contacts
+        for i in range(2):
+            raw_dist = dists[i]
+            if not (raw_dist < wp.inf):
+                continue
+
+            # pos_mat is contact positions in world; normal_mat are world normals
+            p_world = wp.vec3(pos_mat[i, 0], pos_mat[i, 1], pos_mat[i, 2])
+            n_cap_to_box = wp.vec3(normal_mat[i, 0], normal_mat[i, 1], normal_mat[i, 2])
+            n_len = wp.length(n_cap_to_box)
+            n_cap_to_box = n_cap_to_box / wp.where(n_len > 1.0e-9, n_len, 1.0)
+
+            # Build surface points on A and B from midpoint using magnitude only
+            s = wp.abs(raw_dist)
+            if type_a == int(GeoType.CAPSULE):
+                # A is capsule (cap->box normal), B is box
+                p_a = p_world + n_cap_to_box * 0.5 * s
+                p_b = p_world - n_cap_to_box * 0.5 * s
+            else:
+                # A is box, B is capsule
+                p_a = p_world - n_cap_to_box * 0.5 * s
+                p_b = p_world + n_cap_to_box * 0.5 * s
+
+            # Oriented normal from A to B
+            diff_ab = p_b - p_a
+            diff_len = wp.length(diff_ab)
+            n_ab = diff_ab / wp.where(diff_len > 1.0e-9, diff_len, 1.0)
+
+            # Signed distance uses source sign (negative on overlap)
+            distance = -s if raw_dist < 0.0 else s
+
+            # Thicknesses
+            thickness_a = shape_thickness[shape_a]
+            thickness_b = shape_thickness[shape_b]
+
+            # Margin check consistent with manifold path
+            total_separation_needed = thickness_a + thickness_b
+            d = distance - total_separation_needed
+            if d >= rigid_contact_margin:
+                continue
+
+            # Allocate contact index
+            idx = wp.atomic_add(contact_count, 0, 1)
+            if idx >= contact_max:
+                wp.atomic_add(contact_count, 0, -1)
+                return
+
+            out_shape0[idx] = shape_a
+            out_shape1[idx] = shape_b
+
+            out_point0[idx] = wp.transform_point(X_bw_a, p_a)
+            out_point1[idx] = wp.transform_point(X_bw_b, p_b)
+
+            out_offset0[idx] = wp.transform_vector(X_bw_a, -thickness_a * n_ab)
+            out_offset1[idx] = wp.transform_vector(X_bw_b, thickness_b * n_ab)
+
+            out_normal[idx] = n_ab
+            out_thickness0[idx] = thickness_a
+            out_thickness1[idx] = thickness_b
+            out_tids[idx] = tid
+
+        return
+
+    # Run multi-contact manifold generation (default path)
     count, normal, penetrations, pts_a, pts_b, features = wp.static(solve_convex_multi_contact)(
         geom_a,
         geom_b,
@@ -170,6 +285,13 @@ def build_contacts_kernel_gjk_mpr(
     # Clamp contact count to maximum of 4 - cleaner than the original if-chain
     n = wp.min(count, 4)
 
+    # Defensively normalize the contact normal
+    len_n = wp.length(normal)
+    if len_n > 1.0e-9:
+        normal = normal / len_n
+    else:
+        normal = wp.vec3(1.0, 0.0, 0.0)
+
     # Compute body-only transforms (world <-> body) - following convert_newton_contacts_to_mjwarp_kernel pattern
     X_wb_a = body_q[rigid_a] if rigid_a != -1 else wp.transform_identity()
     X_wb_b = body_q[rigid_b] if rigid_b != -1 else wp.transform_identity()
@@ -187,24 +309,23 @@ def build_contacts_kernel_gjk_mpr(
         # dist_sq = wp.length_sq(diff)
         # normal = diff / wp.sqrt(dist_sq) if dist_sq > 1.0e-30 else wp.vec3(1.0, 0.0, 0.0)
 
-        # Distance along normal (handle_contact_pairs style)        
-        distance = wp.dot(diff, normal) #penetrations[i] # wp.dot(diff, normal)
-        wp.printf("Contact %d penetration: %f\n", i, penetrations[i])
+        # Distance along normal (handle_contact_pairs style)
+        distance = penetrations[i] # wp.dot(diff, normal)
+        #wp.printf("Contact %d penetration: %f\n", i, penetrations[i])
 
         # Total separation = radius_eff(a)+radius_eff(b)+thickness(a)+thickness(b)
         # Enforce radius_eff == 0.0 for all shapes in this kernel
         total_separation_needed = thickness_a + thickness_b
         d = distance - total_separation_needed
         if d >= rigid_contact_margin:
-
-
-
             wp.printf("Continue margin check\n")
             continue
 
-        # Allocate contact
+        # Allocate contact (bounded increment to avoid inflating count)
         idx = wp.atomic_add(contact_count, 0, 1)
         if idx >= contact_max:
+            # roll back increment and exit
+            wp.atomic_add(contact_count, 0, -1)
             return
 
         out_shape0[idx] = shape_a
@@ -227,8 +348,11 @@ def build_contacts_kernel_gjk_mpr(
         out_thickness0[idx] = offset_mag_a
         out_thickness1[idx] = offset_mag_b
 
+        # Track producing thread id for parity with default pipeline
+        out_tids[idx] = tid
+
         wp.printf(
-            "Contact %d: shapes %d-%d, points (%f, %f, %f)-(%f, %f, %f), normal (%f, %f, %f), distance %f\n",
+            "Contact %d: shapes %d-%d, point_a (%f, %f, %f), point_b: (%f, %f, %f), normal (%f, %f, %f), distance %f\n",
             idx,
             shape_a,
             shape_b,
@@ -774,6 +898,7 @@ class Model:
                     contacts.rigid_contact_normal,
                     contacts.rigid_contact_thickness0,
                     contacts.rigid_contact_thickness1,
+                    contacts.rigid_contact_tids,
                 ],
                 device=contacts.device,
             )

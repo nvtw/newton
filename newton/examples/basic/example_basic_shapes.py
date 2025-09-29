@@ -32,13 +32,14 @@ import newton.examples
 
 # Solver Selection
 # =================
-# Set USE_MUJOCO_SOLVER to switch between solvers:
-# - True:  MuJoCo Warp solver with Newton contacts (use_mujoco_contacts=False)
-# - False: XPBD solver (Newton's native solver)
-#
-# MuJoCo Warp with Newton contacts combines MuJoCo's constraint solver with
-# Newton's collision detection and contact generation for best of both worlds.
-USE_MUJOCO_SOLVER = True
+# Choose which solver to use for rigid body contact simulation:
+SOLVER_TYPE = "XPBD"  # Options: "XPBD", "MUJOCO_NEWTON", "MUJOCO_NATIVE", "FEATHERSTONE"
+
+# Solver descriptions:
+# - "XPBD": Newton's native XPBD solver (fast, stable, good for general use)
+# - "MUJOCO_NEWTON": MuJoCo Warp solver using Newton contacts (best of both worlds)
+# - "MUJOCO_NATIVE": MuJoCo Warp solver using MuJoCo contacts (MuJoCo's native contact handling)
+# - "FEATHERSTONE": Featherstone reduced-coordinate solver (good for articulated systems)
 
 
 class Example:
@@ -73,25 +74,25 @@ class Example:
         # MuJoCo requires explicit joints for all free-floating bodies.
         # XPBD solver doesn't require joints but ignores them if present.
 
-        # SPHERE
-        body_sphere = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -2.0, drop_z), q=wp.quat_identity()))
-        builder.add_shape_sphere(body_sphere, radius=0.5)
-        builder.add_joint_free(body_sphere)  # Add free joint for MuJoCo
+        # # SPHERE
+        # body_sphere = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -2.0, drop_z), q=wp.quat_identity()))
+        # builder.add_shape_sphere(body_sphere, radius=0.5)
+        # builder.add_joint_free(body_sphere)  # Add free joint for MuJoCo
 
         # CAPSULE
         body_capsule = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, drop_z), q=wp.quat_identity()))
         builder.add_shape_capsule(body_capsule, radius=0.3, half_height=0.7)
         builder.add_joint_free(body_capsule)  # Add free joint for MuJoCo
 
-        # CYLINDER (no collision support)
-        body_cylinder = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -4.0, drop_z), q=wp.quat_identity()))
-        builder.add_shape_cylinder(body_cylinder, radius=0.4, half_height=0.6)
-        builder.add_joint_free(body_cylinder)  # Add free joint for MuJoCo
+        # # CYLINDER (no collision support)
+        # body_cylinder = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -4.0, drop_z), q=wp.quat_identity()))
+        # builder.add_shape_cylinder(body_cylinder, radius=0.4, half_height=0.6)
+        # builder.add_joint_free(body_cylinder)  # Add free joint for MuJoCo
 
-        # BOX
-        body_box = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 2.0, drop_z), q=wp.quat_identity()))
-        builder.add_shape_box(body_box, hx=0.5, hy=0.35, hz=0.25)
-        builder.add_joint_free(body_box)  # Add free joint for MuJoCo
+        # # BOX
+        # body_box = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 2.0, drop_z), q=wp.quat_identity()))
+        # builder.add_shape_box(body_box, hx=0.5, hy=0.35, hz=0.25)
+        # builder.add_joint_free(body_box)  # Add free joint for MuJoCo
 
         # # CONE (no collision support)
         # body_cone = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 6.0, drop_z), q=wp.quat_identity()))
@@ -136,8 +137,15 @@ class Example:
         # finalize model
         self.model = builder.finalize()
 
-        # Initialize solver based on the boolean flag
-        if USE_MUJOCO_SOLVER:
+        # Initialize solver based on the selected type
+        if SOLVER_TYPE == "XPBD":
+            print("Using XPBD solver")
+            self.solver = newton.solvers.SolverXPBD(
+                self.model,
+                iterations=2,
+                rigid_contact_relaxation=0.8
+            )
+        elif SOLVER_TYPE == "MUJOCO_NEWTON":
             print("Using MuJoCo Warp solver with Newton contacts")
             self.solver = newton.solvers.SolverMuJoCo(
                 self.model,
@@ -147,9 +155,25 @@ class Example:
                 integrator="euler",
                 solver="cg"
             )
+        elif SOLVER_TYPE == "MUJOCO_NATIVE":
+            print("Using MuJoCo Warp solver with MuJoCo contacts")
+            self.solver = newton.solvers.SolverMuJoCo(
+                self.model,
+                use_mujoco_contacts=True,  # Use MuJoCo's native contact handling
+                iterations=20,
+                ls_iterations=10,
+                integrator="euler",
+                solver="cg"
+            )
+        elif SOLVER_TYPE == "FEATHERSTONE":
+            print("Using Featherstone reduced-coordinate solver")
+            self.solver = newton.solvers.SolverFeatherstone(
+                self.model,
+                angular_damping=0.05,
+                friction_smoothing=1.0
+            )
         else:
-            print("Using XPBD solver")
-            self.solver = newton.solvers.SolverXPBD(self.model)
+            raise ValueError(f"Unknown solver type: {SOLVER_TYPE}. Choose from: XPBD, MUJOCO_NEWTON, MUJOCO_NATIVE, FEATHERSTONE")
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -174,10 +198,14 @@ class Example:
             # apply forces to the model
             self.viewer.apply_forces(self.state_0)
 
-            # Compute contacts - always needed for Newton contact solvers
-            self.contacts = self.model.collide(self.state_0)
-            
-            # Step solver - both solvers use the same interface
+            # Compute contacts - needed for Newton contact solvers and XPBD
+            # MuJoCo with native contacts computes its own contacts internally
+            if SOLVER_TYPE in ["XPBD", "MUJOCO_NEWTON", "FEATHERSTONE"]:
+                self.contacts = self.model.collide(self.state_0)
+            else:
+                self.contacts = None  # MuJoCo native contacts don't need Newton contacts
+
+            # Step solver - all solvers use the same interface
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
             # swap states

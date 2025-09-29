@@ -119,7 +119,6 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
             data_provider,
         )
 
-        wp.printf("MPR normal: (%f,%f,%f,   %f)\n", normal[0], normal[1], normal[2], penetration)
 
         if not collision:
             collision, point_a, point_b, normal, penetration, feature_a_id, feature_b_id = wp.static(
@@ -135,7 +134,7 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
                 data_provider,
             )
 
-            wp.printf("GJK normal: (%f,%f,%f,   %f)\n", normal[0], normal[1], normal[2], penetration)
+            wp.printf("GJK point_a: (%f,%f,%f), point_b: (%f,%f,%f), normal: (%f,%f,%f), dist: %f\n", point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2], normal[0], normal[1], normal[2], penetration)
 
             # wp.printf("MPR result: collision=%d, penetration=%f, point_a=(%f,%f,%f), point_b=(%f,%f,%f), normal=(%f,%f,%f), feature_ids=(%d,%d)\n",
             #          int(collision), penetration,
@@ -143,6 +142,9 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
             #          point_b[0], point_b[1], point_b[2],
             #          normal[0], normal[1], normal[2],
             #          feature_a_id, feature_b_id)
+
+        else:
+            wp.printf("MPR point_a: (%f,%f,%f), point_b: (%f,%f,%f), normal: (%f,%f,%f), dist: %f\n", point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2], normal[0], normal[1], normal[2], penetration)
 
         # # Always return single contact
         # count = 1
