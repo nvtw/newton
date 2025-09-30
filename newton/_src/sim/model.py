@@ -35,13 +35,8 @@ from .state import State
 solve_convex_multi_contact = create_solve_convex_multi_contact(support_map_func, center_map)
 
 
-
 @wp.func
-def project_point_onto_ray(
-    point_world: wp.vec3,
-    ray_origin: wp.vec3,
-    ray_direction: wp.vec3
-) -> wp.vec3:
+def project_point_onto_ray(point_world: wp.vec3, ray_origin: wp.vec3, ray_direction: wp.vec3) -> wp.vec3:
     """
     Project a world space point onto a ray.
 
@@ -72,9 +67,10 @@ def write_contact(
     contact_point_center: wp.vec3,
     contact_normal_a_to_b: wp.vec3,
     contact_distance: float,
-    total_separation_needed: float,
-    offset_mag_a: float,
-    offset_mag_b: float,
+    radius_eff_a: float,
+    radius_eff_b: float,
+    thickness_a: float,
+    thickness_b: float,
     shape_a: int,
     shape_b: int,
     X_bw_a: wp.transform,
@@ -99,12 +95,13 @@ def write_contact(
     Write a contact to the output arrays.
 
     Args:
-        a_contact_world: Contact point on shape A in world space
-        b_contact_world: Contact point on shape B in world space
-        contact_normal_b_to_a: Contact normal pointing from B to A
-        total_separation_needed: Total separation distance needed
-        offset_mag_a: Offset magnitude for shape A (radius_eff + thickness)
-        offset_mag_b: Offset magnitude for shape B (radius_eff + thickness)
+        contact_point_center: Center point of contact in world space
+        contact_normal_a_to_b: Contact normal pointing from shape A to B
+        contact_distance: Distance between contact points
+        radius_eff_a: Effective radius of shape A (only use nonzero values for shapes that are a minkowski sum of a sphere and another object, eg sphere or capsule)
+        radius_eff_b: Effective radius of shape B (only use nonzero values for shapes that are a minkowski sum of a sphere and another object, eg sphere or capsule)
+        thickness_a: Contact thickness for shape A (similar to contact offset)
+        thickness_b: Contact thickness for shape B (similar to contact offset)
         shape_a: Shape A index
         shape_b: Shape B index
         X_bw_a: Transform from world to body A
@@ -124,11 +121,17 @@ def write_contact(
         out_thickness1: Output array for thickness values for shape B
         out_tids: Output array for thread IDs
     """
+
+    total_separation_needed = radius_eff_a + radius_eff_b + thickness_a + thickness_b
+
+    offset_mag_a = radius_eff_a + thickness_a
+    offset_mag_b = radius_eff_b + thickness_b
+
     # Distance calculation matching box_plane_collision
     contact_normal_a_to_b = wp.normalize(contact_normal_a_to_b)
 
-    a_contact_world = contact_point_center - contact_normal_a_to_b * (0.5*contact_distance)
-    b_contact_world = contact_point_center + contact_normal_a_to_b * (0.5*contact_distance)
+    a_contact_world = contact_point_center - contact_normal_a_to_b * (0.5 * contact_distance + radius_eff_a)
+    b_contact_world = contact_point_center + contact_normal_a_to_b * (0.5 * contact_distance + radius_eff_b)
 
     diff = b_contact_world - a_contact_world
     distance = wp.dot(diff, contact_normal_a_to_b)
@@ -186,7 +189,7 @@ def build_contacts_kernel_gjk_mpr(
     out_tids: wp.array(dtype=int),
 ):
     tid = wp.tid()
-    if(tid == 0):
+    if tid == 0:
         wp.printf("build_contacts_kernel_gjk_mpr\n")
 
     # Early bounds check - following convert_newton_contacts_to_mjwarp_kernel pattern
@@ -242,37 +245,21 @@ def build_contacts_kernel_gjk_mpr(
     rot_a = wp.transform_get_rotation(X_ws_a)  # noqa: F841
     rot_b = wp.transform_get_rotation(X_ws_b)  # noqa: F841
 
-
+    # World->body transforms for writing contact points
+    X_bw_a = wp.transform_identity() if rigid_a == -1 else wp.transform_inverse(body_q[rigid_a])
+    X_bw_b = wp.transform_identity() if rigid_b == -1 else wp.transform_inverse(body_q[rigid_b])
 
     if type_a == int(GeoType.PLANE) and type_b == int(GeoType.BOX):
-        # World->body transforms for writing contact points
-        X_bw_a = wp.transform_identity() if rigid_a == -1 else wp.transform_inverse(body_q[rigid_a])
-        X_bw_b = wp.transform_identity() if rigid_b == -1 else wp.transform_inverse(body_q[rigid_b])
-
-        # Plane frame helpers
         plane_normal_world = wp.transform_vector(X_ws_a, wp.vec3(0.0, 0.0, 1.0))
-
-        # Separation requirements and offsets (for plane and box, effective radii are zero)
-        radius_eff_a = 0.0
-        radius_eff_b = 0.0
-        thickness_a = shape_thickness[shape_a]
-        thickness_b = shape_thickness[shape_b]
-        total_separation_needed = radius_eff_a + radius_eff_b + thickness_a + thickness_b
-
-        offset_mag_a = radius_eff_a + thickness_a
-        offset_mag_b = radius_eff_b + thickness_b
-
-        # Get box rotation matrix from quaternion
-        box_rot_quat = wp.transform_get_rotation(X_ws_b)
-        box_rot_mat = wp.quat_to_matrix(box_rot_quat)
+        box_rot_mat = wp.quat_to_matrix(wp.transform_get_rotation(X_ws_b))
 
         # Call collide_plane_box to get contact information
         contact_distances, contact_positions, contact_normal = collide_plane_box(
             plane_normal_world,  # plane_normal
-            pos_a,              # plane_pos (plane position in world space)
-            pos_b,              # box_pos (box position in world space)
-            box_rot_mat,        # box_rot (box rotation matrix)
-            shape_scale[shape_b],           # box_size (box half-extents)
+            pos_a,  # plane_pos (plane position in world space)
+            pos_b,  # box_pos (box position in world space)
+            box_rot_mat,  # box_rot (box rotation matrix)
+            shape_scale[shape_b],  # box_size (box half-extents)
         )
 
         for id in range(4):
@@ -282,9 +269,10 @@ def build_contacts_kernel_gjk_mpr(
                     contact_positions[id],
                     contact_normal,
                     contact_distances[id],
-                    total_separation_needed,
-                    offset_mag_a,
-                    offset_mag_b,
+                    0.0,
+                    0.0,
+                    shape_thickness[shape_a],
+                    shape_thickness[shape_b],
                     shape_a,
                     shape_b,
                     X_bw_a,
@@ -307,42 +295,29 @@ def build_contacts_kernel_gjk_mpr(
 
     # Implement Plane vs Sphere contacts (type order enforced above)
     elif type_a == int(GeoType.PLANE) and type_b == int(GeoType.SPHERE):
-        # World->body transforms for writing contact points
-        X_bw_a = wp.transform_identity() if rigid_a == -1 else wp.transform_inverse(body_q[rigid_a])
-        X_bw_b = wp.transform_identity() if rigid_b == -1 else wp.transform_inverse(body_q[rigid_b])
-
         # Plane frame helpers
         plane_normal_world = wp.transform_vector(X_ws_a, wp.vec3(0.0, 0.0, 1.0))
 
         # Sphere radius
         sphere_radius = shape_scale[shape_b][0]  # Sphere radius is stored in x component
 
-        # Separation requirements and offsets
-        radius_eff_a = 0.0 
-        radius_eff_b = 0.0 
-        thickness_a = shape_thickness[shape_a]
-        thickness_b = shape_thickness[shape_b]
-        total_separation_needed = radius_eff_a + radius_eff_b + thickness_a + thickness_b
-
-        offset_mag_a = radius_eff_a + thickness_a
-        offset_mag_b = radius_eff_b + thickness_b
-
         # Call collide_plane_sphere to get contact information
         contact_distance, contact_position = collide_plane_sphere(
             plane_normal_world,  # plane_normal
-            pos_a,              # plane_pos (plane position in world space)
-            pos_b,              # sphere_pos (sphere position in world space)
-            sphere_radius,      # sphere_radius
+            pos_a,  # plane_pos (plane position in world space)
+            pos_b,  # sphere_pos (sphere position in world space)
+            sphere_radius,  # sphere_radius
         )
 
         # Use the write_contact function to write the contact
         write_contact(
-            contact_position,            
+            contact_position,
             plane_normal_world,  # contact normal from plane to sphere
             contact_distance,
-            total_separation_needed,
-            offset_mag_a,
-            offset_mag_b,
+            0.0,
+            sphere_radius,
+            shape_thickness[shape_a],
+            shape_thickness[shape_b],
             shape_a,
             shape_b,
             X_bw_a,
