@@ -40,32 +40,6 @@ from .state import State
 solve_convex_multi_contact = create_solve_convex_multi_contact(support_map_func, center_map)
 
 
-@wp.func
-def project_point_onto_ray(point_world: wp.vec3, ray_origin: wp.vec3, ray_direction: wp.vec3) -> wp.vec3:
-    """
-    Project a world space point onto a ray.
-
-    Args:
-        point_world: Point in world space to project
-        ray_origin: Origin point of the ray in world space
-        ray_direction: Direction vector of the ray (not necessarily normalized)
-    Returns:
-        Projected point on the ray in world space
-    """
-    # Get vector from ray origin to point
-    to_point = point_world - ray_origin
-
-    # Project onto ray direction
-    # t = (p-o)·d / (d·d)
-    t = wp.dot(to_point, ray_direction) / wp.dot(ray_direction, ray_direction)
-
-    # Clamp t to be >= 0 since we can only project onto the positive ray direction
-    t = wp.max(t, 0.0)
-
-    # Get projected point
-    projected = ray_origin + t * ray_direction
-    return projected
-
 
 @wp.func
 def write_contact(
@@ -254,59 +228,59 @@ def build_contacts_kernel_gjk_mpr(
     X_bw_a = wp.transform_identity() if rigid_a == -1 else wp.transform_inverse(body_q[rigid_a])
     X_bw_b = wp.transform_identity() if rigid_b == -1 else wp.transform_inverse(body_q[rigid_b])
 
-    # # Create geometry data structures for convex collision detection
-    # geom_a = GenericShapeData()
-    # geom_a.shape_type = type_a
-    # geom_a.scale = shape_scale[shape_a]
+    # Create geometry data structures for convex collision detection
+    geom_a = GenericShapeData()
+    geom_a.shape_type = type_a
+    geom_a.scale = shape_scale[shape_a]
 
-    # geom_b = GenericShapeData()
-    # geom_b.shape_type = type_b
-    # geom_b.scale = shape_scale[shape_b]
+    geom_b = GenericShapeData()
+    geom_b.shape_type = type_b
+    geom_b.scale = shape_scale[shape_b]
 
-    # data_provider = SupportMapDataProvider()
+    data_provider = SupportMapDataProvider()
 
-    # count, normal, penetrations, points_a, points_b, features = wp.static(solve_convex_multi_contact)(
-    #     geom_a,
-    #     geom_b,
-    #     rot_a,
-    #     rot_b,
-    #     pos_a,
-    #     pos_b,
-    #     0.0,  # sum_of_contact_offsets
-    #     data_provider,
-    # )
+    count, normal, penetrations, points_a, points_b, features = wp.static(solve_convex_multi_contact)(
+        geom_a,
+        geom_b,
+        rot_a,
+        rot_b,
+        pos_a,
+        pos_b,
+        0.0,  # sum_of_contact_offsets
+        data_provider,
+    )
 
-    # for id in range(4):
-    #     write_contact(
-    #         0.5 * (points_a[id] + points_b[id]),
-    #         normal,
-    #         # wp.dot(normal, points_b[id] - points_a[id]),
-    #         penetrations[id],
-    #         0.0,
-    #         0.0,
-    #         shape_thickness[shape_a],
-    #         shape_thickness[shape_b],
-    #         shape_a,
-    #         shape_b,
-    #         X_bw_a,
-    #         X_bw_b,
-    #         tid,
-    #         rigid_contact_margin,
-    #         contact_max,
-    #         contact_count,
-    #         out_shape0,
-    #         out_shape1,
-    #         out_point0,
-    #         out_point1,
-    #         out_offset0,
-    #         out_offset1,
-    #         out_normal,
-    #         out_thickness0,
-    #         out_thickness1,
-    #         out_tids,
-    #     )
+    for id in range(4):
+        write_contact(
+            0.5 * (points_a[id] + points_b[id]),
+            normal,
+            # wp.dot(normal, points_b[id] - points_a[id]),
+            penetrations[id],
+            0.0,
+            0.0,
+            shape_thickness[shape_a],
+            shape_thickness[shape_b],
+            shape_a,
+            shape_b,
+            X_bw_a,
+            X_bw_b,
+            tid,
+            rigid_contact_margin,
+            contact_max,
+            contact_count,
+            out_shape0,
+            out_shape1,
+            out_point0,
+            out_point1,
+            out_offset0,
+            out_offset1,
+            out_normal,
+            out_thickness0,
+            out_thickness1,
+            out_tids,
+        )
 
-    # return
+    return
 
     if type_a == int(GeoType.PLANE) and type_b == int(GeoType.BOX):
         plane_normal_world = wp.transform_vector(X_ws_a, wp.vec3(0.0, 0.0, 1.0))
@@ -416,6 +390,22 @@ def build_contacts_kernel_gjk_mpr(
             box_rot_mat,  # box_rot (box rotation matrix)
             box_half_extents,  # box_size (box half-extents)
         )
+
+        # Print contact information in the requested format
+        wp.printf(
+            "point_a: (%f,%f,%f), point_b: (%f,%f,%f), normal: (%f,%f,%f), dist: %f\n",
+            contact_position[0] + contact_normal[0] * sphere_radius,  # point_a
+            contact_position[1] + contact_normal[1] * sphere_radius,
+            contact_position[2] + contact_normal[2] * sphere_radius,
+            contact_position[0],  # point_b 
+            contact_position[1],
+            contact_position[2],
+            contact_normal[0],    # normal
+            contact_normal[1], 
+            contact_normal[2],
+            contact_distance      # distance
+        )
+
 
         # Use the write_contact function to write the contact
         write_contact(

@@ -579,7 +579,7 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
 
         # Align semantics with MPR: return collision flag and Newton normal convention
         collision = not separated
-        normal = -normal
+        # normal = -normal
 
         return collision, point_a, point_b, normal, distance, feature_a_id, feature_b_id
 

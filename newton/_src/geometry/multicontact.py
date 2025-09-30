@@ -30,8 +30,8 @@ from .kernels import build_orthonormal_basis
 # Constants
 EPS = 0.00001
 ROT_DELTA_ANGLE = 60.0 * wp.pi / 180.0
-SIN_OFFSET = wp.static(wp.sin(10.0 * wp.pi / 180.0))  # sin(1 degree)
-COS_OFFSET = wp.static(wp.cos(10.0 * wp.pi / 180.0))  # cos(1 degree)
+SIN_OFFSET = wp.static(wp.sin(1.0 * wp.pi / 180.0))  # sin(1 degree)
+COS_OFFSET = wp.static(wp.cos(1.0 * wp.pi / 180.0))  # cos(1 degree)
 
 
 @wp.struct
@@ -900,6 +900,33 @@ def extract_4_point_contact_manifolds(
 vec6_uint8 = wp.types.vector(6, wp.uint8)
 
 
+@wp.func
+def project_point_onto_ray(point_world: wp.vec3, ray_origin: wp.vec3, ray_direction: wp.vec3) -> wp.vec3:
+    """
+    Project a world space point onto a ray.
+
+    Args:
+        point_world: Point in world space to project
+        ray_origin: Origin point of the ray in world space
+        ray_direction: Direction vector of the ray (not necessarily normalized)
+    Returns:
+        Projected point on the ray in world space
+    """
+    # Get vector from ray origin to point
+    to_point = point_world - ray_origin
+
+    # Project onto ray direction
+    # t = (p-o)·d / (d·d)
+    t = wp.dot(to_point, ray_direction) / wp.dot(ray_direction, ray_direction)
+
+    # Clamp t to be >= 0 since we can only project onto the positive ray direction
+    t = wp.max(t, 0.0)
+
+    # Get projected point
+    projected = ray_origin + t * ray_direction
+    return projected
+
+
 def create_build_manifold(support_func: Any):
     # Main contact manifold generation function
     @wp.func
@@ -926,7 +953,7 @@ def create_build_manifold(support_func: Any):
         The two shapes must always be queried in the same order to get stable feature ids.
         """
 
-        normal = -normal  # The code below uses a different normal convention
+        # normal = -normal  # The code below uses a different normal convention
 
         # Reset all counters for a new calculation.
         a_count = 0
@@ -1083,6 +1110,11 @@ def create_build_manifold(support_func: Any):
         for i in range(count_out):
             contact_points_a[i] = left[i]
             contact_points_b[i] = fvec3_get_xyz(right[i])
+
+            # center = 0.5 * (contact_points_a[i] + contact_points_b[i])
+            # contact_points_a[i] = project_point_onto_ray(contact_points_a[i], center, normal)
+            # contact_points_b[i] = project_point_onto_ray(contact_points_b[i], center, normal)
+
             feature_ids[i] = int(right[i].feature)
             # Newton convention: penetration is negative on overlap
             penetrations[i] = wp.dot(contact_points_b[i] - contact_points_a[i], normal)
