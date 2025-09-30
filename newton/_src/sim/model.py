@@ -23,7 +23,7 @@ import warp as wp
 
 from ..core.types import Devicelike
 from ..geometry.collision_convex import create_solve_convex_multi_contact
-from ..geometry.collision_primitive import collide_plane_box, collide_plane_sphere
+from ..geometry.collision_primitive import collide_plane_box, collide_plane_sphere, collide_sphere_box
 from ..geometry.support_function import center_func as center_map, support_map as support_map_func
 from ..geometry.types import GeoType
 from .contacts import Contacts
@@ -316,6 +316,55 @@ def build_contacts_kernel_gjk_mpr(
             contact_distance,
             0.0,
             sphere_radius,
+            shape_thickness[shape_a],
+            shape_thickness[shape_b],
+            shape_a,
+            shape_b,
+            X_bw_a,
+            X_bw_b,
+            tid,
+            rigid_contact_margin,
+            contact_max,
+            contact_count,
+            out_shape0,
+            out_shape1,
+            out_point0,
+            out_point1,
+            out_offset0,
+            out_offset1,
+            out_normal,
+            out_thickness0,
+            out_thickness1,
+            out_tids,
+        )
+
+    # Implement Sphere vs Box contacts (type order enforced above)
+    elif type_a == int(GeoType.SPHERE) and type_b == int(GeoType.BOX):
+        # Sphere radius
+        sphere_radius = shape_scale[shape_a][0]  # Sphere radius is stored in x component
+
+        # Box half extents
+        box_half_extents = shape_scale[shape_b]  # Box half-extents (hx, hy, hz)
+
+        # Get box rotation matrix from quaternion
+        box_rot_mat = wp.quat_to_matrix(wp.transform_get_rotation(X_ws_b))
+
+        # Call collide_sphere_box to get contact information
+        contact_distance, contact_position, contact_normal = collide_sphere_box(
+            pos_a,  # sphere_pos (sphere position in world space)
+            sphere_radius,  # sphere_radius
+            pos_b,  # box_pos (box position in world space)
+            box_rot_mat,  # box_rot (box rotation matrix)
+            box_half_extents,  # box_size (box half-extents)
+        )
+
+        # Use the write_contact function to write the contact
+        write_contact(
+            contact_position,
+            contact_normal,  # contact normal from sphere to box
+            contact_distance,
+            sphere_radius,  # sphere's effective radius
+            0.0,  # box has no effective radius
             shape_thickness[shape_a],
             shape_thickness[shape_b],
             shape_a,
