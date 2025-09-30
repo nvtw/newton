@@ -86,10 +86,10 @@ class Example:
         builder.add_shape_capsule(body_capsule, radius=0.3, half_height=0.7)
         builder.add_joint_free(body_capsule)  # Add free joint for MuJoCo
 
-        # # CYLINDER (no collision support)
-        # body_cylinder = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -4.0, drop_z), q=wp.quat_identity()))
-        # builder.add_shape_cylinder(body_cylinder, radius=0.4, half_height=0.6)
-        # builder.add_joint_free(body_cylinder)  # Add free joint for MuJoCo
+        # CYLINDER (no collision support)
+        body_cylinder = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -4.0, drop_z), q=wp.quat_identity()))
+        builder.add_shape_cylinder(body_cylinder, radius=0.4, half_height=0.6)
+        builder.add_joint_free(body_cylinder)  # Add free joint for MuJoCo
 
         # # BOX
         # body_box = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 2.0, drop_z), q=wp.quat_identity()))
@@ -109,17 +109,21 @@ class Example:
         z2 = z1 + 2.0 * cube_h + gap
         z3 = z2 + 2.0 * cube_h + gap
 
-        body_cube1 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z1), q=wp.quat_identity()))
-        builder.add_shape_box(body_cube1, hx=cube_h, hy=cube_h, hz=cube_h)
-        builder.add_joint_free(body_cube1)  # Add free joint for MuJoCo
+        # Build a pyramid of cubes
+        pyramid_size = 10  # Number of cubes at the base
+        cube_spacing = 2.1 * cube_h  # Space between cube centers
 
-        body_cube2 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z2), q=wp.quat_identity()))
-        builder.add_shape_box(body_cube2, hx=cube_h, hy=cube_h, hz=cube_h)
-        builder.add_joint_free(body_cube2)  # Add free joint for MuJoCo
+        # for level in range(pyramid_size):
+        #     num_cubes_in_row = pyramid_size - level
+        #     row_width = (num_cubes_in_row - 1) * cube_spacing
 
-        body_cube3 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z3), q=wp.quat_identity()))
-        builder.add_shape_box(body_cube3, hx=cube_h, hy=cube_h, hz=cube_h)
-        builder.add_joint_free(body_cube3)  # Add free joint for MuJoCo
+        #     for i in range(num_cubes_in_row):
+        #         x_pos = -row_width / 2 + i * cube_spacing
+        #         z_pos = level * cube_spacing + cube_h
+
+        #         body = builder.add_body(xform=wp.transform(p=wp.vec3(x_pos, y_stack, z_pos), q=wp.quat_identity()))
+        #         builder.add_shape_box(body, hx=cube_h, hy=cube_h, hz=cube_h)
+        #         builder.add_joint_free(body)  # Add free joint for MuJoCo
 
         # # MESH (bunny)
         # usd_stage = Usd.Stage.Open(newton.examples.get_asset("bunny.usd"))
@@ -142,11 +146,7 @@ class Example:
         # Initialize solver based on the selected type
         if SOLVER_TYPE == "XPBD":
             print("Using XPBD solver")
-            self.solver = newton.solvers.SolverXPBD(
-                self.model,
-                iterations=2,
-                rigid_contact_relaxation=0.8
-            )
+            self.solver = newton.solvers.SolverXPBD(self.model, iterations=2, rigid_contact_relaxation=0.8)
         elif SOLVER_TYPE == "MUJOCO_NEWTON":
             print("Using MuJoCo Warp solver with Newton contacts")
             self.solver = newton.solvers.SolverMuJoCo(
@@ -155,7 +155,7 @@ class Example:
                 iterations=20,
                 ls_iterations=10,
                 integrator="euler",
-                solver="cg"
+                solver="cg",
             )
         elif SOLVER_TYPE == "MUJOCO_NATIVE":
             print("Using MuJoCo Warp solver with MuJoCo contacts")
@@ -165,17 +165,15 @@ class Example:
                 iterations=20,
                 ls_iterations=10,
                 integrator="euler",
-                solver="cg"
+                solver="cg",
             )
         elif SOLVER_TYPE == "FEATHERSTONE":
             print("Using Featherstone reduced-coordinate solver")
-            self.solver = newton.solvers.SolverFeatherstone(
-                self.model,
-                angular_damping=0.05,
-                friction_smoothing=1.0
-            )
+            self.solver = newton.solvers.SolverFeatherstone(self.model, angular_damping=0.05, friction_smoothing=1.0)
         else:
-            raise ValueError(f"Unknown solver type: {SOLVER_TYPE}. Choose from: XPBD, MUJOCO_NEWTON, MUJOCO_NATIVE, FEATHERSTONE")
+            raise ValueError(
+                f"Unknown solver type: {SOLVER_TYPE}. Choose from: XPBD, MUJOCO_NEWTON, MUJOCO_NATIVE, FEATHERSTONE"
+            )
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()

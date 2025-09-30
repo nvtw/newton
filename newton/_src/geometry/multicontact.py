@@ -29,8 +29,8 @@ from .kernels import build_orthonormal_basis
 # Constants
 EPS = 0.00001
 ROT_DELTA_ANGLE = 60.0 * wp.pi / 180.0
-SIN_OFFSET = wp.static(wp.sin(1.0 * wp.pi / 180.0))  # sin(1 degree)
-COS_OFFSET = wp.static(wp.cos(1.0 * wp.pi / 180.0))  # cos(1 degree)
+SIN_OFFSET = wp.static(wp.sin(3.0 * wp.pi / 180.0))  # sin(1 degree)
+COS_OFFSET = wp.static(wp.cos(3.0 * wp.pi / 180.0))  # cos(1 degree)
 
 
 @wp.func
@@ -57,6 +57,7 @@ def signed_area(a: wp.vec2, b: wp.vec2, query_point: wp.vec2) -> float:
     # It returns twice the signed area of the triangle
     return (b[0] - a[0]) * (query_point[1] - a[1]) - (b[1] - a[1]) * (query_point[0] - a[0])
 
+
 @wp.func
 def ray_plane_intersection(
     ray_origin: wp.vec3, ray_direction: wp.vec3, point_on_plane: wp.vec3, plane_normal: wp.vec3
@@ -77,7 +78,6 @@ def project_point_onto_line_segment(point: wp.vec3, seg_start: wp.vec3, seg_end:
     if seg_len_sq < EPS:
         return 0.5 * (seg_start + seg_end)
 
-
     # If degenerate segment, return start
     t = wp.dot(point - seg_start, seg_dir) / seg_len_sq
     # Clamp to [0, 1]
@@ -93,7 +93,9 @@ class BodyProjector:
 
 
 @wp.func
-def make_body_projector_from_vec3(poly: wp.array(dtype=wp.vec3), poly_count: int, anchor_point: wp.vec3) -> BodyProjector:
+def make_body_projector_from_vec3(
+    poly: wp.array(dtype=wp.vec3), poly_count: int, anchor_point: wp.vec3
+) -> BodyProjector:
     proj = BodyProjector(wp.vec3(0.0, 0.0, 0.0), wp.vec3(0.0, 0.0, 0.0), 0)
     if poly_count == 1:
         proj.first = anchor_point
@@ -125,16 +127,6 @@ def make_body_projector_from_vec3(poly: wp.array(dtype=wp.vec3), poly_count: int
         proj.second = best_normal / len_n
         proj.ptype = 0  # Plane
     return proj
-
-
-@wp.func
-def body_projector_project(proj: BodyProjector, input: wp.vec3, contact_normal: wp.vec3) -> wp.vec3:
-    if proj.ptype == 0:  # Plane
-        return ray_plane_intersection(input, contact_normal, proj.first, proj.second)
-    elif proj.ptype == 1:  # LineSegment
-        return project_point_onto_line_segment(input, proj.first, proj.second)
-    else:  # Point
-        return proj.first
 
 
 @wp.func
@@ -785,132 +777,6 @@ def add_avoid_duplicates_vec3_to_vec3(arr: wp.array(dtype=wp.vec3), arr_count: i
     return arr_count + 1
 
 
-# Support mapping interface - now imported from support_function module
-
-
-@wp.func
-def extract_4_point_contact_manifolds(
-    m_a: wp.array(dtype=wp.vec3),
-    features_a: wp.types.vector(6, wp.uint8),
-    m_a_count: int,
-    m_b: wp.array(dtype=wp.vec3),
-    features_b: wp.types.vector(6, wp.uint8),
-    m_b_count: int,
-    normal: wp.vec3,
-    cross_vector_1: wp.vec3,
-    cross_vector_2: wp.vec3,
-    anchor_point_a: wp.vec3,
-    anchor_point_b: wp.vec3,
-    result_features: wp.array(dtype=wp.uint32),
-    feature_anchor_a: wp.int32,
-    feature_anchor_b: wp.int32,
-) -> int:
-    """
-    Extract 4-point contact manifolds from two convex polygons.
-
-    m_A and m_B can have up to 6 points but m_B must provide space for 12 points.
-    """
-    # Early-out for simple cases: if both have <=2 or either is empty, return single anchor pair
-    if (m_a_count <= 2 and m_b_count <= 2) or (m_a_count == 0) or (m_b_count == 0):
-        m_a[0] = anchor_point_a
-        m_b[0] = anchor_point_b
-        if result_features.shape[0] > 0:
-            result_features[0] = wp.uint32(0)
-        return 1
-
-    # Projectors for back-projection
-    projector_a = make_body_projector_from_vec3(m_a, m_a_count, anchor_point_a)
-    projector_b = make_body_projector_from_vec3(m_b, m_b_count, anchor_point_b)
-
-    # The trim poly (poly A) should be the polygon with the most points
-    # This should ensure that zero area loops with only two points get trimmed correctly (they are considered valid)
-    center = 0.5 * (anchor_point_a + anchor_point_b)
-
-    # Transform into contact plane space
-    for i in range(m_a_count):
-        projected = m_a[i] - center
-        m_a[i] = wp.vec3(
-            wp.dot(cross_vector_1, projected),
-            wp.dot(cross_vector_2, projected),
-            wp.dot(normal, projected),
-        )
-
-    max_points = 12
-    loop_seg_ids = wp.zeros(shape=(12,), dtype=wp.uint8)  # stackalloc byte[maxPoints];
-
-    for i in range(m_b_count):
-        projected = m_b[i] - center
-        m_b[i] = wp.vec3(
-            wp.dot(cross_vector_1, projected),
-            wp.dot(cross_vector_2, projected),
-            wp.dot(normal, projected),
-        )
-        loop_seg_ids[i] = wp.uint8(i + 6)
-
-    loop_count = trim_all_in_place(m_a, m_a_count, m_b, loop_seg_ids, m_b_count, max_points)
-
-    loop_count = remove_zero_length_edges(m_b, loop_seg_ids, loop_count, EPS)
-
-    if loop_count > 4:
-        result = approx_max_quadrilateral_area_with_calipers(m_b, loop_count)
-        ia = int(result[0])
-        ib = int(result[1])
-        ic = int(result[2])
-        id = int(result[3])
-
-        a = m_b[ia]
-        feat_a = feature_id(loop_seg_ids, ia, loop_count, features_a, features_b, m_a_count, m_b_count)
-        b = m_b[ib]
-        feat_b = feature_id(loop_seg_ids, ib, loop_count, features_a, features_b, m_a_count, m_b_count)
-        c = m_b[ic]
-        feat_c = feature_id(loop_seg_ids, ic, loop_count, features_a, features_b, m_a_count, m_b_count)
-        d = m_b[id]
-        feat_d = feature_id(loop_seg_ids, id, loop_count, features_a, features_b, m_a_count, m_b_count)
-
-        # Transform back to world space using projectors
-        a_world = a[0] * cross_vector_1 + a[1] * cross_vector_2 + center
-        b_world = b[0] * cross_vector_1 + b[1] * cross_vector_2 + center
-        c_world = c[0] * cross_vector_1 + c[1] * cross_vector_2 + center
-        d_world = d[0] * cross_vector_1 + d[1] * cross_vector_2 + center
-
-        m_a[0] = body_projector_project(projector_a, a_world, normal)
-        m_a[1] = body_projector_project(projector_a, b_world, normal)
-        m_a[2] = body_projector_project(projector_a, c_world, normal)
-        m_a[3] = body_projector_project(projector_a, d_world, normal)
-
-        m_b[0] = body_projector_project(projector_b, a_world, normal)
-        m_b[1] = body_projector_project(projector_b, b_world, normal)
-        m_b[2] = body_projector_project(projector_b, c_world, normal)
-        m_b[3] = body_projector_project(projector_b, d_world, normal)
-
-        # Features via external result buffer
-        result_features[0] = feat_a
-        result_features[1] = feat_b
-        result_features[2] = feat_c
-        result_features[3] = feat_d
-
-        loop_count = 4
-    else:
-        if loop_count <= 1:
-            # Degenerate; return single anchor pair
-            m_a[0] = anchor_point_a
-            m_b[0] = anchor_point_b
-            if result_features.shape[0] > 0:
-                result_features[0] = wp.uint32(0)
-            loop_count = 1
-        else:
-            # Transform back to world space using projectors
-            for i in range(loop_count):
-                l = m_b[i]
-                feat = feature_id(loop_seg_ids, i, loop_count, features_a, features_b, m_a_count, m_b_count)
-                world = l[0] * cross_vector_1 + l[1] * cross_vector_2 + center
-                m_a[i] = body_projector_project(projector_a, world, normal)
-                m_b[i] = body_projector_project(projector_b, world, normal)
-                result_features[i] = feat
-
-    return loop_count
-
-
 vec6_uint8 = wp.types.vector(6, wp.uint8)
 
 
@@ -941,7 +807,171 @@ def project_point_onto_ray(point_world: wp.vec3, ray_origin: wp.vec3, ray_direct
     return projected
 
 
-def create_build_manifold(support_func: Any):
+def create_build_manifold(support_func: Any, ray_surface_intersection_func: Any):
+    @wp.func
+    def body_projector_project(
+        proj: BodyProjector, input: wp.vec3, contact_normal: wp.vec3, geom: Any, data_provider: Any, position: wp.vec3, quaternion: wp.quat
+    ) -> wp.vec3:
+
+
+        local_ray_origin = wp.quat_rotate_inv(quaternion, input - position)
+        local_ray_direction = wp.normalize(wp.quat_rotate_inv(quaternion, contact_normal))
+
+        # Print local ray properties
+        #wp.printf("Local ray origin: (%f, %f, %f)\n", local_ray_origin[0], local_ray_origin[1], local_ray_origin[2])
+        #wp.printf("Local ray direction: (%f, %f, %f)\n", local_ray_direction[0], local_ray_direction[1], local_ray_direction[2])
+
+        (result, projected) = ray_surface_intersection_func(geom, local_ray_origin, local_ray_direction, data_provider)
+        if result == 1:
+            projected = wp.quat_rotate(quaternion, projected) + position        
+            wp.printf("Projected point: (%f, %f, %f)\n", projected[0], projected[1], projected[2])
+            return projected
+
+
+        wp.printf("Normal: (%f, %f, %f)\n", contact_normal[0], contact_normal[1], contact_normal[2])
+
+        if result == 0:
+            pass
+
+        if proj.ptype == 0:  # Plane
+            return ray_plane_intersection(input, contact_normal, proj.first, proj.second)
+        elif proj.ptype == 1:  # LineSegment
+            wp.printf("LineSegment\n")
+            return project_point_onto_line_segment(input, proj.first, proj.second)
+        else:  # Point
+            wp.printf("Point\n")
+            return proj.first
+
+    @wp.func
+    def extract_4_point_contact_manifolds(
+        m_a: wp.array(dtype=wp.vec3),
+        features_a: wp.types.vector(6, wp.uint8),
+        m_a_count: int,
+        m_b: wp.array(dtype=wp.vec3),
+        features_b: wp.types.vector(6, wp.uint8),
+        m_b_count: int,
+        normal: wp.vec3,
+        cross_vector_1: wp.vec3,
+        cross_vector_2: wp.vec3,
+        anchor_point_a: wp.vec3,
+        anchor_point_b: wp.vec3,
+        result_features: wp.array(dtype=wp.uint32),
+        feature_anchor_a: wp.int32,
+        feature_anchor_b: wp.int32,
+        geom_a: Any,
+        geom_b: Any,
+        data_provider: Any,
+        quaternion_a: wp.quat,
+        quaternion_b: wp.quat,
+        position_a: wp.vec3,
+        position_b: wp.vec3,
+    ) -> int:
+        """
+        Extract 4-point contact manifolds from two convex polygons.
+
+        m_A and m_B can have up to 6 points but m_B must provide space for 12 points.
+        """
+        # Early-out for simple cases: if both have <=2 or either is empty, return single anchor pair
+        if (m_a_count <= 3 or m_b_count <= 3):
+            m_a[0] = anchor_point_a
+            m_b[0] = anchor_point_b
+            if result_features.shape[0] > 0:
+                result_features[0] = wp.uint32(0)
+            return 1
+
+        # Projectors for back-projection
+        projector_a = make_body_projector_from_vec3(m_a, m_a_count, anchor_point_a)
+        projector_b = make_body_projector_from_vec3(m_b, m_b_count, anchor_point_b)
+
+        # The trim poly (poly A) should be the polygon with the most points
+        # This should ensure that zero area loops with only two points get trimmed correctly (they are considered valid)
+        center = 0.5 * (anchor_point_a + anchor_point_b)
+
+        # Transform into contact plane space
+        for i in range(m_a_count):
+            projected = m_a[i] - center
+            m_a[i] = wp.vec3(
+                wp.dot(cross_vector_1, projected),
+                wp.dot(cross_vector_2, projected),
+                wp.dot(normal, projected),
+            )
+
+        max_points = 12
+        loop_seg_ids = wp.zeros(shape=(12,), dtype=wp.uint8)  # stackalloc byte[maxPoints];
+
+        for i in range(m_b_count):
+            projected = m_b[i] - center
+            m_b[i] = wp.vec3(
+                wp.dot(cross_vector_1, projected),
+                wp.dot(cross_vector_2, projected),
+                wp.dot(normal, projected),
+            )
+            loop_seg_ids[i] = wp.uint8(i + 6)
+
+        loop_count = trim_all_in_place(m_a, m_a_count, m_b, loop_seg_ids, m_b_count, max_points)
+
+        loop_count = remove_zero_length_edges(m_b, loop_seg_ids, loop_count, EPS)
+
+        if loop_count > 4:
+            result = approx_max_quadrilateral_area_with_calipers(m_b, loop_count)
+            ia = int(result[0])
+            ib = int(result[1])
+            ic = int(result[2])
+            id = int(result[3])
+
+            a = m_b[ia]
+            feat_a = feature_id(loop_seg_ids, ia, loop_count, features_a, features_b, m_a_count, m_b_count)
+            b = m_b[ib]
+            feat_b = feature_id(loop_seg_ids, ib, loop_count, features_a, features_b, m_a_count, m_b_count)
+            c = m_b[ic]
+            feat_c = feature_id(loop_seg_ids, ic, loop_count, features_a, features_b, m_a_count, m_b_count)
+            d = m_b[id]
+            feat_d = feature_id(loop_seg_ids, id, loop_count, features_a, features_b, m_a_count, m_b_count)
+
+            # Transform back to world space using projectors
+            a_world = a[0] * cross_vector_1 + a[1] * cross_vector_2 + center
+            b_world = b[0] * cross_vector_1 + b[1] * cross_vector_2 + center
+            c_world = c[0] * cross_vector_1 + c[1] * cross_vector_2 + center
+            d_world = d[0] * cross_vector_1 + d[1] * cross_vector_2 + center
+
+            # normal vector points from A to B
+            m_a[0] = body_projector_project(projector_a, a_world, -normal, geom_a, data_provider, position_a, quaternion_a)
+            m_a[1] = body_projector_project(projector_a, b_world, -normal, geom_a, data_provider, position_a, quaternion_a)
+            m_a[2] = body_projector_project(projector_a, c_world, -normal, geom_a, data_provider, position_a, quaternion_a)
+            m_a[3] = body_projector_project(projector_a, d_world, -normal, geom_a, data_provider, position_a, quaternion_a)
+
+            m_b[0] = body_projector_project(projector_b, a_world, normal, geom_b, data_provider, position_b, quaternion_b)
+            m_b[1] = body_projector_project(projector_b, b_world, normal, geom_b, data_provider, position_b, quaternion_b)
+            m_b[2] = body_projector_project(projector_b, c_world, normal, geom_b, data_provider, position_b, quaternion_b)
+            m_b[3] = body_projector_project(projector_b, d_world, normal, geom_b, data_provider, position_b, quaternion_b)
+
+            # Features via external result buffer
+            result_features[0] = feat_a
+            result_features[1] = feat_b
+            result_features[2] = feat_c
+            result_features[3] = feat_d
+
+            loop_count = 4
+        else:
+            if loop_count <= 1:
+                # Degenerate; return single anchor pair
+                m_a[0] = anchor_point_a
+                m_b[0] = anchor_point_b
+                if result_features.shape[0] > 0:
+                    result_features[0] = wp.uint32(0)
+                loop_count = 1
+            else:
+                # Transform back to world space using projectors
+                for i in range(loop_count):
+                    l = m_b[i]
+                    feat = feature_id(loop_seg_ids, i, loop_count, features_a, features_b, m_a_count, m_b_count)
+                    world = l[0] * cross_vector_1 + l[1] * cross_vector_2 + center
+                    m_a[i] = body_projector_project(projector_a, world, -normal, geom_a, data_provider, position_a, quaternion_a)
+                    m_b[i] = body_projector_project(projector_b, world, normal, geom_b, data_provider, position_b, quaternion_b)
+                    result_features[i] = feat
+
+        return loop_count
+
     # Main contact manifold generation function
     @wp.func
     def build_manifold_core(
@@ -967,8 +997,6 @@ def create_build_manifold(support_func: Any):
         The return value of the methods tells the user how many elements in the buffers are valid. Both buffers have the same number of entries.
         The two shapes must always be queried in the same order to get stable feature ids.
         """
-
-        # normal = -normal  # The code below uses a different normal convention
 
         # Reset all counters for a new calculation.
         a_count = 0
@@ -1028,6 +1056,13 @@ def create_build_manifold(support_func: Any):
             result_features,
             feature_anchor_a + 1,
             feature_anchor_b + 1,
+            geom_a,
+            geom_b,
+            data_provider,
+            quaternion_a,
+            quaternion_b,
+            position_a,
+            position_b,
         )
 
     @wp.func

@@ -29,6 +29,7 @@ from ..geometry.support_function import (
     support_map as support_map_func,
     SupportMapDataProvider,
     GenericShapeData,
+    ray_surface_intersection_func,
 )
 from ..geometry.types import GeoType
 from .contacts import Contacts
@@ -37,7 +38,9 @@ from .state import State
 
 
 # Pre-create the convex multi-contact solver (usable inside kernels)
-solve_convex_multi_contact = create_solve_convex_multi_contact(support_map_func, center_map)
+solve_convex_multi_contact = create_solve_convex_multi_contact(
+    support_map_func, center_map, ray_surface_intersection_func
+)
 
 
 @wp.func
@@ -247,8 +250,7 @@ def build_contacts_kernel_gjk_mpr(
         pos_b,
         0.0,  # sum_of_contact_offsets
         data_provider,
-        type_a == int(GeoType.SPHERE)
-        or type_b == int(GeoType.SPHERE)
+        type_a == int(GeoType.SPHERE) or type_b == int(GeoType.SPHERE),
     )
 
     for id in range(count):

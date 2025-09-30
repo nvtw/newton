@@ -86,7 +86,7 @@ def create_solve_convex_contact(support_func: Any, center_func: Any):
 _mat43f = wp.types.matrix((4, 3), wp.float32)
 
 
-def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
+def create_solve_convex_multi_contact(support_func: Any, center_func: Any, ray_surface_intersection_func: Any):
     @wp.func
     def solve_convex_multi_contact(
         geom_a: Any,
@@ -157,7 +157,7 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
             features = wp.vec4i(0)
             return count, normal, penetrations, points_a, points_b, features
 
-        count, penetrations, points_a, points_b, features = wp.static(create_build_manifold(support_func))(
+        count, penetrations, points_a, points_b, features = wp.static(create_build_manifold(support_func, ray_surface_intersection_func))(
             geom_a,
             geom_b,
             orientation_a,
