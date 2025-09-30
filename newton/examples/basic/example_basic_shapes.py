@@ -59,13 +59,15 @@ class Example:
 
         # replace ground plane with a large static box whose top face lies at z=0
         # attach directly to world (body = -1) so it is truly static
-        builder.add_shape_box(
-            -1,
-            xform=wp.transform(p=wp.vec3(0.0, 0.0, -50.0), q=wp.quat_identity()),
-            hx=50.0,
-            hy=50.0,
-            hz=50.0,
-        )
+        # builder.add_shape_box(
+        #     -1,
+        #     xform=wp.transform(p=wp.vec3(0.0, 0.0, -50.0), q=wp.quat_identity()),
+        #     hx=50.0,
+        #     hy=50.0,
+        #     hz=50.0,
+        # )
+        # Add a ground plane at z=0
+        builder.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
 
         # z height to drop shapes from
         drop_z = 2.0
@@ -79,20 +81,20 @@ class Example:
         # builder.add_shape_sphere(body_sphere, radius=0.5)
         # builder.add_joint_free(body_sphere)  # Add free joint for MuJoCo
 
-        # CAPSULE
-        body_capsule = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, drop_z), q=wp.quat_identity()))
-        builder.add_shape_capsule(body_capsule, radius=0.3, half_height=0.7)
-        builder.add_joint_free(body_capsule)  # Add free joint for MuJoCo
+        # # CAPSULE
+        # body_capsule = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, drop_z), q=wp.quat_identity()))
+        # builder.add_shape_capsule(body_capsule, radius=0.3, half_height=0.7)
+        # builder.add_joint_free(body_capsule)  # Add free joint for MuJoCo
 
         # # CYLINDER (no collision support)
         # body_cylinder = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -4.0, drop_z), q=wp.quat_identity()))
         # builder.add_shape_cylinder(body_cylinder, radius=0.4, half_height=0.6)
         # builder.add_joint_free(body_cylinder)  # Add free joint for MuJoCo
 
-        # # BOX
-        # body_box = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 2.0, drop_z), q=wp.quat_identity()))
-        # builder.add_shape_box(body_box, hx=0.5, hy=0.35, hz=0.25)
-        # builder.add_joint_free(body_box)  # Add free joint for MuJoCo
+        # BOX
+        body_box = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 2.0, drop_z), q=wp.quat_identity()))
+        builder.add_shape_box(body_box, hx=0.5, hy=0.35, hz=0.25)
+        builder.add_joint_free(body_box)  # Add free joint for MuJoCo
 
         # # CONE (no collision support)
         # body_cone = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 6.0, drop_z), q=wp.quat_identity()))

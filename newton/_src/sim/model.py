@@ -14,6 +14,7 @@
 # limitations under the License.
 
 """Implementation of the Newton model class."""
+# isort: skip_file
 
 from __future__ import annotations
 
@@ -22,13 +23,8 @@ import warp as wp
 
 from ..core.types import Devicelike
 from ..geometry.collision_convex import create_solve_convex_multi_contact
-from ..geometry.collision_primitive import collide_capsule_box
-from ..geometry.support_function import (
-    center_func as center_map,
-    GenericShapeData,
-    SupportMapDataProvider,
-    support_map as support_map_func,
-)
+from ..geometry.collision_primitive import collide_plane_box
+from ..geometry.support_function import center_func as center_map, support_map as support_map_func
 from ..geometry.types import GeoType
 from .contacts import Contacts
 from .control import Control
@@ -37,6 +33,151 @@ from .state import State
 
 # Pre-create the convex multi-contact solver (usable inside kernels)
 solve_convex_multi_contact = create_solve_convex_multi_contact(support_map_func, center_map)
+
+
+
+@wp.func
+def project_point_onto_plane(
+    point_world: wp.vec3,
+    plane_transform_world_to_local: wp.transform,
+    plane_transform_local_to_world: wp.transform
+) -> wp.vec3:
+    """
+    Project a world space point onto a plane.
+
+    Args:
+        point_world: Point in world space to project
+        plane_transform_world_to_local: Transform from world to plane local space
+        plane_transform_local_to_world: Transform from plane local to world space
+    Returns:
+        Projected point on the plane in world space
+    """
+    # Transform point to plane local space
+    point_in_plane_local = wp.transform_point(plane_transform_world_to_local, point_world)
+    # Project to Z=0 in plane frame (plane lies in XY plane)
+    projected_plane_local = wp.vec3(point_in_plane_local[0], point_in_plane_local[1], 0.0)
+    # Transform back to world space
+    projected_world = wp.transform_point(plane_transform_local_to_world, projected_plane_local)
+    return projected_world
+
+@wp.func
+def project_point_onto_ray(
+    point_world: wp.vec3,
+    ray_origin: wp.vec3,
+    ray_direction: wp.vec3
+) -> wp.vec3:
+    """
+    Project a world space point onto a ray.
+
+    Args:
+        point_world: Point in world space to project
+        ray_origin: Origin point of the ray in world space
+        ray_direction: Direction vector of the ray (not necessarily normalized)
+    Returns:
+        Projected point on the ray in world space
+    """
+    # Get vector from ray origin to point
+    to_point = point_world - ray_origin
+
+    # Project onto ray direction
+    # t = (p-o)·d / (d·d)
+    t = wp.dot(to_point, ray_direction) / wp.dot(ray_direction, ray_direction)
+
+    # Clamp t to be >= 0 since we can only project onto the positive ray direction
+    t = wp.max(t, 0.0)
+
+    # Get projected point
+    projected = ray_origin + t * ray_direction
+    return projected
+
+
+@wp.func
+def write_contact(
+    a_contact_world: wp.vec3,
+    b_contact_world: wp.vec3,
+    contact_normal_a_to_b: wp.vec3,
+    total_separation_needed: float,
+    offset_mag_a: float,
+    offset_mag_b: float,
+    shape_a: int,
+    shape_b: int,
+    X_bw_a: wp.transform,
+    X_bw_b: wp.transform,
+    tid: int,
+    rigid_contact_margin: float,
+    contact_max: int,
+    # outputs
+    contact_count: wp.array(dtype=int),
+    out_shape0: wp.array(dtype=int),
+    out_shape1: wp.array(dtype=int),
+    out_point0: wp.array(dtype=wp.vec3),
+    out_point1: wp.array(dtype=wp.vec3),
+    out_offset0: wp.array(dtype=wp.vec3),
+    out_offset1: wp.array(dtype=wp.vec3),
+    out_normal: wp.array(dtype=wp.vec3),
+    out_thickness0: wp.array(dtype=float),
+    out_thickness1: wp.array(dtype=float),
+    out_tids: wp.array(dtype=int),
+):
+    """
+    Write a contact to the output arrays.
+
+    Args:
+        a_contact_world: Contact point on shape A in world space
+        b_contact_world: Contact point on shape B in world space
+        contact_normal_b_to_a: Contact normal pointing from B to A
+        total_separation_needed: Total separation distance needed
+        offset_mag_a: Offset magnitude for shape A (radius_eff + thickness)
+        offset_mag_b: Offset magnitude for shape B (radius_eff + thickness)
+        shape_a: Shape A index
+        shape_b: Shape B index
+        X_bw_a: Transform from world to body A
+        X_bw_b: Transform from world to body B
+        tid: Thread ID
+        rigid_contact_margin: Contact margin for rigid bodies
+        contact_max: Maximum number of contacts
+        contact_count: Array to track contact count
+        out_shape0: Output array for shape A indices
+        out_shape1: Output array for shape B indices
+        out_point0: Output array for contact points on shape A
+        out_point1: Output array for contact points on shape B
+        out_offset0: Output array for offsets on shape A
+        out_offset1: Output array for offsets on shape B
+        out_normal: Output array for contact normals
+        out_thickness0: Output array for thickness values for shape A
+        out_thickness1: Output array for thickness values for shape B
+        out_tids: Output array for thread IDs
+    """
+    # Distance calculation matching box_plane_collision
+    contact_normal_a_to_b = wp.normalize(contact_normal_a_to_b)
+
+    diff = b_contact_world - a_contact_world
+    distance = wp.dot(diff, contact_normal_a_to_b)
+    d = distance - total_separation_needed
+    if d < rigid_contact_margin:
+        index = wp.atomic_add(contact_count, 0, 1)
+        if index >= contact_max:
+            # Reached buffer limit
+            return
+
+        out_shape0[index] = shape_a
+        out_shape1[index] = shape_b
+
+        # Contact points are stored in body frames
+        out_point0[index] = wp.transform_point(X_bw_a, a_contact_world)
+        out_point1[index] = wp.transform_point(X_bw_b, b_contact_world)
+
+        # Match kernels.py convention: normal should point from box to plane (downward)
+        contact_normal = -contact_normal_a_to_b
+
+        # Offsets in body frames
+        out_offset0[index] = wp.transform_vector(X_bw_a, -offset_mag_a * contact_normal)
+        out_offset1[index] = wp.transform_vector(X_bw_b, offset_mag_b * contact_normal)
+
+        out_normal[index] = contact_normal
+        out_thickness0[index] = offset_mag_a
+        out_thickness1[index] = offset_mag_b
+        out_tids[index] = tid
 
 
 @wp.kernel(enable_backward=False)
@@ -66,6 +207,8 @@ def build_contacts_kernel_gjk_mpr(
     out_tids: wp.array(dtype=int),
 ):
     tid = wp.tid()
+    if(tid == 0):
+        wp.printf("build_contacts_kernel_gjk_mpr\n")
 
     # Early bounds check - following convert_newton_contacts_to_mjwarp_kernel pattern
     if tid >= shape_pairs.shape[0]:
@@ -87,31 +230,11 @@ def build_contacts_kernel_gjk_mpr(
     type_a = shape_type[shape_a]
     type_b = shape_type[shape_b]
 
-    # # Sort shapes by type to ensure consistent collision handling order
-    # if type_a > type_b:
-    #     # Swap shapes to maintain consistent ordering
-    #     shape_a, shape_b = shape_b, shape_a
-    #     type_a, type_b = type_b, type_a
-
-    # Only handle supported convex primitives
-    if not (
-        type_a == int(GeoType.BOX)
-        or type_a == int(GeoType.SPHERE)
-        or type_a == int(GeoType.CAPSULE)
-        or type_a == int(GeoType.ELLIPSOID)
-        or type_a == int(GeoType.CYLINDER)
-        or type_a == int(GeoType.CONE)
-    ):
-        return
-    if not (
-        type_b == int(GeoType.BOX)
-        or type_b == int(GeoType.SPHERE)
-        or type_b == int(GeoType.CAPSULE)
-        or type_b == int(GeoType.ELLIPSOID)
-        or type_b == int(GeoType.CYLINDER)
-        or type_b == int(GeoType.CONE)
-    ):
-        return
+    # Sort shapes by type to ensure consistent collision handling order
+    if type_a > type_b:
+        # Swap shapes to maintain consistent ordering
+        shape_a, shape_b = shape_b, shape_a
+        type_a, type_b = type_b, type_a
 
     # Get body indices - following convert_newton_contacts_to_mjwarp_kernel pattern
     rigid_a = shape_body[shape_a]
@@ -137,234 +260,138 @@ def build_contacts_kernel_gjk_mpr(
     if center_distance > (radius_a + radius_b):
         return
 
-    rot_a = wp.transform_get_rotation(X_ws_a)
-    rot_b = wp.transform_get_rotation(X_ws_b)
+    rot_a = wp.transform_get_rotation(X_ws_a)  # noqa: F841
+    rot_b = wp.transform_get_rotation(X_ws_b)  # noqa: F841
 
-    # Build shape data
-    geom_a = GenericShapeData()
-    geom_a.shape_type = type_a
-    geom_a.scale = shape_scale[shape_a]
-    geom_b = GenericShapeData()
-    geom_b.shape_type = type_b
-    geom_b.scale = shape_scale[shape_b]
 
-    data_provider = SupportMapDataProvider()
 
-    # Get shape thicknesses
-    thickness_a = shape_thickness[shape_a]
-    thickness_b = shape_thickness[shape_b]
+    # Implement Plane vs Box contacts (type order enforced above)
+    if type_a == int(GeoType.PLANE) and type_b == int(GeoType.BOX):
+        # World->body transforms for writing contact points
+        X_bw_a = wp.transform_identity() if rigid_a == -1 else wp.transform_inverse(body_q[rigid_a])
+        X_bw_b = wp.transform_identity() if rigid_b == -1 else wp.transform_inverse(body_q[rigid_b])
 
-    # Special-case: capsule vs box using collide_capsule_box
-    is_capsule_box = (type_a == int(GeoType.CAPSULE) and type_b == int(GeoType.BOX)) or (
-        type_a == int(GeoType.BOX) and type_b == int(GeoType.CAPSULE)
-    )
+        # Plane frame helpers
+        X_sw_a = wp.transform_inverse(X_ws_a)
+        plane_normal_world = wp.transform_vector(X_ws_a, wp.vec3(0.0, 0.0, 1.0))
 
-    if is_capsule_box:
-        # Prepare parameters
-        # Box parameters
-        if type_a == int(GeoType.BOX):
-            box_pos = pos_a
-            box_rot = wp.quat_to_matrix(rot_a)
-            box_size = geom_a.scale
-            # Capsule parameters from B (axis is +Z in local frame)
-            capsule_pos = pos_b
-            capsule_axis = wp.quat_rotate(rot_b, wp.vec3(0.0, 0.0, 1.0))
-            capsule_radius = geom_b.scale[0]
-            capsule_half_length = geom_b.scale[1]
-            # flipped = False  # unused variable
-        else:
-            # Box is B
-            box_pos = pos_b
-            box_rot = wp.quat_to_matrix(rot_b)
-            box_size = geom_b.scale
-            # Capsule is A
-            capsule_pos = pos_a
-            capsule_axis = wp.quat_rotate(rot_a, wp.vec3(0.0, 0.0, 1.0))
-            capsule_radius = geom_a.scale[0]
-            capsule_half_length = geom_a.scale[1]
-            flipped = True
+        plane_width = shape_scale[shape_a][0]
+        plane_length = shape_scale[shape_a][1]
+        plane_infinite = (plane_width == 0.0 and plane_length == 0.0)
 
-        dists, pos_mat, normal_mat = wp.static(collide_capsule_box)(
-            capsule_pos,
-            capsule_axis,
-            capsule_radius,
-            capsule_half_length,
-            box_pos,
-            box_rot,
-            box_size,
+        # Box half extents in its local frame
+        hx = shape_scale[shape_b][0]
+        hy = shape_scale[shape_b][1]
+        hz = shape_scale[shape_b][2]
+
+        # Separation requirements and offsets (for plane and box, effective radii are zero)
+        radius_eff_a = 0.0
+        radius_eff_b = 0.0
+        thickness_a = shape_thickness[shape_a]
+        thickness_b = shape_thickness[shape_b]
+        total_separation_needed = radius_eff_a + radius_eff_b + thickness_a + thickness_b
+
+        offset_mag_a = radius_eff_a + thickness_a
+        offset_mag_b = radius_eff_b + thickness_b
+
+
+        # Get box rotation matrix from quaternion
+        box_rot_quat = wp.transform_get_rotation(X_ws_b)
+        box_rot_mat = wp.quat_to_matrix(box_rot_quat)
+        
+        # Box size (half-extents)
+        box_size = wp.vec3(hx, hy, hz)
+        
+        # Call collide_plane_box to get contact information
+        contact_distances, contact_positions, contact_normal = collide_plane_box(
+            plane_normal_world,  # plane_normal
+            pos_a,              # plane_pos (plane position in world space)
+            pos_b,              # box_pos (box position in world space)  
+            box_rot_mat,        # box_rot (box rotation matrix)
+            box_size,           # box_size (box half-extents)
         )
 
-        # Compute transforms for outputs (world<->body)
-        X_wb_a = body_q[rigid_a] if rigid_a != -1 else wp.transform_identity()
-        X_wb_b = body_q[rigid_b] if rigid_b != -1 else wp.transform_identity()
-        X_bw_a = wp.transform_inverse(X_wb_a)
-        X_bw_b = wp.transform_inverse(X_wb_b)
+        for id in range(4):
+            dist = contact_distances[id]
+            if dist < wp.inf:
+                a_contact_world = contact_positions[id] - plane_normal_world * 0.5*dist
+                b_contact_world = contact_positions[id] + plane_normal_world * 0.5*dist
+                write_contact(
+                    a_contact_world,
+                    b_contact_world,
+                    contact_normal,
+                    total_separation_needed,
+                    offset_mag_a,
+                    offset_mag_b,
+                    shape_a,
+                    shape_b,
+                    X_bw_a,
+                    X_bw_b,
+                    tid,
+                    rigid_contact_margin,
+                    contact_max,
+                    contact_count,
+                    out_shape0,
+                    out_shape1,
+                    out_point0,
+                    out_point1,
+                    out_offset0,
+                    out_offset1,
+                    out_normal,
+                    out_thickness0,
+                    out_thickness1,
+                    out_tids,
+                )
 
-        # Emit up to 2 contacts
-        for i in range(2):
-            raw_dist = dists[i]
-            if not (raw_dist < wp.inf):
-                continue
+        # # Enumerate the 8 box vertices (local) and test them against the plane
+        # for vi in range(8):
+        #     sx = -1.0 if (vi & 1) == 0 else 1.0
+        #     sy = -1.0 if (vi & 2) == 0 else 1.0
+        #     sz = -1.0 if (vi & 4) == 0 else 1.0
 
-            # pos_mat is contact positions in world; normal_mat are world normals
-            p_world = wp.vec3(pos_mat[i, 0], pos_mat[i, 1], pos_mat[i, 2])
-            n_cap_to_box = wp.vec3(normal_mat[i, 0], normal_mat[i, 1], normal_mat[i, 2])
-            n_len = wp.length(n_cap_to_box)
-            n_cap_to_box = n_cap_to_box / wp.where(n_len > 1.0e-9, n_len, 1.0)
+        #     v_local = wp.vec3(sx * hx, sy * hy, sz * hz)
+        #     v_world = wp.transform_point(X_ws_b, v_local)
 
-            # Build surface points on A and B from midpoint using magnitude only
-            s = wp.abs(raw_dist)
-            if type_a == int(GeoType.CAPSULE):
-                # A is capsule (cap->box normal), B is box
-                p_a = p_world + n_cap_to_box * 0.5 * s
-                p_b = p_world - n_cap_to_box * 0.5 * s
-            else:
-                # A is box, B is capsule
-                p_a = p_world - n_cap_to_box * 0.5 * s
-                p_b = p_world + n_cap_to_box * 0.5 * s
+        #     # If finite plane, ensure vertex projects within bounds
+        #     if not plane_infinite:
+        #         v_in_plane = wp.transform_point(X_sw_a, v_world)
+        #         if wp.abs(v_in_plane[0]) > plane_width or wp.abs(v_in_plane[1]) > plane_length:
+        #             continue
 
-            # Oriented normal from A to B
-            diff_ab = p_b - p_a
-            diff_len = wp.length(diff_ab)
-            n_ab = diff_ab / wp.where(diff_len > 1.0e-9, diff_len, 1.0)
+        #     # Closest point on plane (project box vertex onto plane)
+        #     a_contact_world = project_point_onto_plane(v_world, X_sw_a, X_ws_a)
+        #     b_contact_world = v_world
 
-            # Signed distance uses source sign (negative on overlap)
-            distance = -s if raw_dist < 0.0 else s
+        #     # Use the write_contact function to write the contact
+        #     write_contact(
+        #         a_contact_world,
+        #         b_contact_world,
+        #         plane_normal_world,
+        #         total_separation_needed,
+        #         offset_mag_a,
+        #         offset_mag_b,
+        #         shape_a,
+        #         shape_b,
+        #         X_bw_a,
+        #         X_bw_b,
+        #         tid,
+        #         rigid_contact_margin,
+        #         contact_max,
+        #         contact_count,
+        #         out_shape0,
+        #         out_shape1,
+        #         out_point0,
+        #         out_point1,
+        #         out_offset0,
+        #         out_offset1,
+        #         out_normal,
+        #         out_thickness0,
+        #         out_thickness1,
+        #         out_tids,
+        #     )
 
-            # Thicknesses
-            thickness_a = shape_thickness[shape_a]
-            thickness_b = shape_thickness[shape_b]
+        # return
 
-            # Margin check consistent with manifold path
-            total_separation_needed = thickness_a + thickness_b
-            d = distance - total_separation_needed
-            if d >= rigid_contact_margin:
-                continue
-
-            # Allocate contact index
-            idx = wp.atomic_add(contact_count, 0, 1)
-            if idx >= contact_max:
-                wp.atomic_add(contact_count, 0, -1)
-                return
-
-            out_shape0[idx] = shape_a
-            out_shape1[idx] = shape_b
-
-            out_point0[idx] = wp.transform_point(X_bw_a, p_a)
-            out_point1[idx] = wp.transform_point(X_bw_b, p_b)
-
-            out_offset0[idx] = wp.transform_vector(X_bw_a, -thickness_a * n_ab)
-            out_offset1[idx] = wp.transform_vector(X_bw_b, thickness_b * n_ab)
-
-            out_normal[idx] = n_ab
-            out_thickness0[idx] = thickness_a
-            out_thickness1[idx] = thickness_b
-            out_tids[idx] = tid
-
-        return
-
-    # Run multi-contact manifold generation (default path)
-    count, normal, penetrations, pts_a, pts_b, features = wp.static(solve_convex_multi_contact)(
-        geom_a,
-        geom_b,
-        rot_a,
-        rot_b,
-        pos_a,
-        pos_b,
-        0.0,  # Must be 0.0, contacts should not happen before the objects touch
-        data_provider,
-    )
-
-    # Early return if no contacts - following convert_newton_contacts_to_mjwarp_kernel pattern
-    if count <= 0:
-        wp.printf("Exit 0 contacts\n")
-        return
-
-    # Clamp contact count to maximum of 4 - cleaner than the original if-chain
-    n = wp.min(count, 4)
-
-    # Defensively normalize the contact normal
-    len_n = wp.length(normal)
-    if len_n > 1.0e-9:
-        normal = normal / len_n
-    else:
-        normal = wp.vec3(1.0, 0.0, 0.0)
-
-    # Compute body-only transforms (world <-> body) - following convert_newton_contacts_to_mjwarp_kernel pattern
-    X_wb_a = body_q[rigid_a] if rigid_a != -1 else wp.transform_identity()
-    X_wb_b = body_q[rigid_b] if rigid_b != -1 else wp.transform_identity()
-    X_bw_a = wp.transform_inverse(X_wb_a)
-    X_bw_b = wp.transform_inverse(X_wb_b)
-
-    # Process each contact point, mirroring handle_contact_pairs semantics
-    for i in range(n):
-        # Contact points on A and B in world space
-        p_a = wp.vec3(pts_a[i, 0], pts_a[i, 1], pts_a[i, 2])
-        p_b = wp.vec3(pts_b[i, 0], pts_b[i, 1], pts_b[i, 2])
-
-        # Normal points from A to B
-        diff = p_b - p_a
-        # dist_sq = wp.length_sq(diff)
-        # normal = diff / wp.sqrt(dist_sq) if dist_sq > 1.0e-30 else wp.vec3(1.0, 0.0, 0.0)
-
-        # Distance along normal (handle_contact_pairs style)
-        distance = penetrations[i]  # wp.dot(diff, normal)
-        # wp.printf("Contact %d penetration: %f\n", i, penetrations[i])
-
-        # Total separation = radius_eff(a)+radius_eff(b)+thickness(a)+thickness(b)
-        # Enforce radius_eff == 0.0 for all shapes in this kernel
-        total_separation_needed = thickness_a + thickness_b
-        d = distance - total_separation_needed
-        if d >= rigid_contact_margin:
-            wp.printf("Continue margin check\n")
-            continue
-
-        # Allocate contact (bounded increment to avoid inflating count)
-        idx = wp.atomic_add(contact_count, 0, 1)
-        if idx >= contact_max:
-            # roll back increment and exit
-            wp.atomic_add(contact_count, 0, -1)
-            return
-
-        out_shape0[idx] = shape_a
-        out_shape1[idx] = shape_b
-
-        # Transform contact points to body frames
-        out_point0[idx] = wp.transform_point(X_bw_a, p_a)
-        out_point1[idx] = wp.transform_point(X_bw_b, p_b)
-
-        # Offsets are along normal in body frames with magnitude = thickness (radius_eff=0)
-        offset_mag_a = thickness_a
-        offset_mag_b = thickness_b
-        out_offset0[idx] = wp.transform_vector(X_bw_a, -offset_mag_a * normal)
-        out_offset1[idx] = wp.transform_vector(X_bw_b, offset_mag_b * normal)
-
-        # Store normal aligned with handle_contact_pairs
-        out_normal[idx] = normal
-
-        # Store thicknesses equal to offset magnitudes
-        out_thickness0[idx] = offset_mag_a
-        out_thickness1[idx] = offset_mag_b
-
-        # Track producing thread id for parity with default pipeline
-        out_tids[idx] = tid
-
-        wp.printf(
-            "Contact %d: shapes %d-%d, point_a (%f, %f, %f), point_b: (%f, %f, %f), normal (%f, %f, %f), distance %f\n",
-            idx,
-            shape_a,
-            shape_b,
-            p_a[0],
-            p_a[1],
-            p_a[2],
-            p_b[0],
-            p_b[1],
-            p_b[2],
-            normal[0],
-            normal[1],
-            normal[2],
-            distance,
-        )
 
 
 class Model:
@@ -960,6 +987,8 @@ class Model:
         Returns:
             Contacts: The contact object containing collision information.
         """
+        return self.collide_pure_gjk_mpr_multicontact(state)
+
         from .collide import CollisionPipeline
 
         if requires_grad is None:
