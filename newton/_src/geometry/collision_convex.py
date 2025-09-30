@@ -134,7 +134,7 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
                 data_provider,
             )
 
-            wp.printf("GJK point_a: (%f,%f,%f), point_b: (%f,%f,%f), normal: (%f,%f,%f), dist: %f\n", point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2], normal[0], normal[1], normal[2], penetration)
+            # wp.printf("GJK point_a: (%f,%f,%f), point_b: (%f,%f,%f), normal: (%f,%f,%f), dist: %f\n", point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2], normal[0], normal[1], normal[2], penetration)
 
             # wp.printf("MPR result: collision=%d, penetration=%f, point_a=(%f,%f,%f), point_b=(%f,%f,%f), normal=(%f,%f,%f), feature_ids=(%d,%d)\n",
             #          int(collision), penetration,
@@ -143,11 +143,11 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
             #          normal[0], normal[1], normal[2],
             #          feature_a_id, feature_b_id)
 
-        else:
-            wp.printf("MPR point_a: (%f,%f,%f), point_b: (%f,%f,%f), normal: (%f,%f,%f), dist: %f\n", point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2], normal[0], normal[1], normal[2], penetration)
+        #else:
+        #    wp.printf("MPR point_a: (%f,%f,%f), point_b: (%f,%f,%f), normal: (%f,%f,%f), dist: %f\n", point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2], normal[0], normal[1], normal[2], penetration)
 
         # # Always return single contact
-        # count = 1
+        # count = 1 if collision else 0
         # penetrations = wp.vec4(penetration, 0.0, 0.0, 0.0)
         # points_a = _mat43f()
         # points_a[0] = point_a
@@ -174,7 +174,7 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
         if count == 0:
             print("create_build_manifold removed all contacts")
 
-        penetrations = wp.vec4(penetration)
+        # penetrations = wp.vec4(penetration)
 
         return count, normal, penetrations, points_a, points_b, features
 

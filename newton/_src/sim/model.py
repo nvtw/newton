@@ -250,7 +250,7 @@ def build_contacts_kernel_gjk_mpr(
         data_provider,
     )
 
-    for id in range(4):
+    for id in range(count):
         write_contact(
             0.5 * (points_a[id] + points_b[id]),
             normal,
