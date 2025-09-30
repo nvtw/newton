@@ -23,8 +23,13 @@ import warp as wp
 
 from ..core.types import Devicelike
 from ..geometry.collision_convex import create_solve_convex_multi_contact
-from ..geometry.collision_primitive import collide_plane_box, collide_plane_sphere, collide_sphere_box
-from ..geometry.support_function import center_func as center_map, support_map as support_map_func
+from ..geometry.collision_primitive import collide_plane_box, collide_plane_sphere, collide_sphere_box, collide_box_box
+from ..geometry.support_function import (
+    center_func as center_map,
+    support_map as support_map_func,
+    SupportMapDataProvider,
+    GenericShapeData,
+)
 from ..geometry.types import GeoType
 from .contacts import Contacts
 from .control import Control
@@ -161,7 +166,7 @@ def write_contact(
         out_thickness1[index] = offset_mag_b
         out_tids[index] = tid
 
-
+        
 @wp.kernel(enable_backward=False)
 def build_contacts_kernel_gjk_mpr(
     body_q: wp.array(dtype=wp.transform),
@@ -242,12 +247,66 @@ def build_contacts_kernel_gjk_mpr(
     if center_distance > (radius_a + radius_b):
         return
 
-    rot_a = wp.transform_get_rotation(X_ws_a)  # noqa: F841
-    rot_b = wp.transform_get_rotation(X_ws_b)  # noqa: F841
+    rot_a = wp.transform_get_rotation(X_ws_a)
+    rot_b = wp.transform_get_rotation(X_ws_b)
 
     # World->body transforms for writing contact points
     X_bw_a = wp.transform_identity() if rigid_a == -1 else wp.transform_inverse(body_q[rigid_a])
     X_bw_b = wp.transform_identity() if rigid_b == -1 else wp.transform_inverse(body_q[rigid_b])
+
+    # # Create geometry data structures for convex collision detection
+    # geom_a = GenericShapeData()
+    # geom_a.shape_type = type_a
+    # geom_a.scale = shape_scale[shape_a]
+
+    # geom_b = GenericShapeData()
+    # geom_b.shape_type = type_b
+    # geom_b.scale = shape_scale[shape_b]
+
+    # data_provider = SupportMapDataProvider()
+
+    # count, normal, penetrations, points_a, points_b, features = wp.static(solve_convex_multi_contact)(
+    #     geom_a,
+    #     geom_b,
+    #     rot_a,
+    #     rot_b,
+    #     pos_a,
+    #     pos_b,
+    #     0.0,  # sum_of_contact_offsets
+    #     data_provider,
+    # )
+
+    # for id in range(4):
+    #     write_contact(
+    #         0.5 * (points_a[id] + points_b[id]),
+    #         normal,
+    #         # wp.dot(normal, points_b[id] - points_a[id]),
+    #         penetrations[id],
+    #         0.0,
+    #         0.0,
+    #         shape_thickness[shape_a],
+    #         shape_thickness[shape_b],
+    #         shape_a,
+    #         shape_b,
+    #         X_bw_a,
+    #         X_bw_b,
+    #         tid,
+    #         rigid_contact_margin,
+    #         contact_max,
+    #         contact_count,
+    #         out_shape0,
+    #         out_shape1,
+    #         out_point0,
+    #         out_point1,
+    #         out_offset0,
+    #         out_offset1,
+    #         out_normal,
+    #         out_thickness0,
+    #         out_thickness1,
+    #         out_tids,
+    #     )
+
+    # return
 
     if type_a == int(GeoType.PLANE) and type_b == int(GeoType.BOX):
         plane_normal_world = wp.transform_vector(X_ws_a, wp.vec3(0.0, 0.0, 1.0))
@@ -386,6 +445,59 @@ def build_contacts_kernel_gjk_mpr(
             out_thickness1,
             out_tids,
         )
+
+    # Implement Box vs Box contacts (type order enforced above)
+    elif type_a == int(GeoType.BOX) and type_b == int(GeoType.BOX):
+        # Box half extents for both boxes
+        box1_half_extents = shape_scale[shape_a]  # Box A half-extents (hx, hy, hz)
+        box2_half_extents = shape_scale[shape_b]  # Box B half-extents (hx, hy, hz)
+
+        # Get box rotation matrices from quaternions
+        box1_rot_mat = wp.quat_to_matrix(wp.transform_get_rotation(X_ws_a))
+        box2_rot_mat = wp.quat_to_matrix(wp.transform_get_rotation(X_ws_b))
+
+        # Call collide_box_box to get contact information
+        contact_distances8, contact_positions8, contact_normals8 = collide_box_box(
+            pos_a,              # box1_pos (first box position in world space)
+            box1_rot_mat,       # box1_rot (first box rotation matrix)
+            box1_half_extents,  # box1_size (first box half-extents)
+            pos_b,              # box2_pos (second box position in world space)
+            box2_rot_mat,       # box2_rot (second box rotation matrix)
+            box2_half_extents,  # box2_size (second box half-extents)
+        )
+
+        # Process up to 8 contact points (box-box can generate multiple contacts)
+        for id in range(8):
+            dist = contact_distances8[id]
+            if dist < wp.inf:
+                # Use the write_contact function to write the contact
+                write_contact(
+                    contact_positions8[id],
+                    contact_normals8[id],  # contact normal for this specific contact
+                    dist,
+                    0.0,                  # box A has no effective radius
+                    0.0,                  # box B has no effective radius
+                    shape_thickness[shape_a],
+                    shape_thickness[shape_b],
+                    shape_a,
+                    shape_b,
+                    X_bw_a,
+                    X_bw_b,
+                    tid,
+                    rigid_contact_margin,
+                    contact_max,
+                    contact_count,
+                    out_shape0,
+                    out_shape1,
+                    out_point0,
+                    out_point1,
+                    out_offset0,
+                    out_offset1,
+                    out_normal,
+                    out_thickness0,
+                    out_thickness1,
+                    out_tids,
+                )
 
 
 class Model:
