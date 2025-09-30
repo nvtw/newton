@@ -429,7 +429,7 @@ def create_solve_gjk(support_func: Any, center_func: Any):
                 used_fallback = True
                 # wp.printf("Used fallback\n")
                 # wp.printf("v0.A: %f %f %f\n", v0.A[0], v0.A[1], v0.A[2])
-                # wp.printf("v0.B: %f %f %f\n", v0.B[0], v0.B[1], v0.B[2]) 
+                # wp.printf("v0.B: %f %f %f\n", v0.B[0], v0.B[1], v0.B[2])
                 # wp.printf("iter: %d\n", iter)
                 # delta = position_b - position_a
                 # wp.printf("delta: %f %f %f\n", delta[0], delta[1], delta[2])

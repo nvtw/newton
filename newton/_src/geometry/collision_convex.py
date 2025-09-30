@@ -86,7 +86,7 @@ def create_solve_convex_contact(support_func: Any, center_func: Any):
 _mat43f = wp.types.matrix((4, 3), wp.float32)
 
 
-def create_solve_convex_multi_contact(support_func: Any, center_func: Any, ray_surface_intersection_func: Any):
+def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
     @wp.func
     def solve_convex_multi_contact(
         geom_a: Any,
@@ -120,7 +120,6 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any, ray_s
             data_provider,
         )
 
-
         if not collision:
             collision, point_a, point_b, normal, penetration, feature_a_id, feature_b_id = wp.static(
                 create_solve_closest_distance(support_func, center_func)
@@ -144,7 +143,7 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any, ray_s
             #          normal[0], normal[1], normal[2],
             #          feature_a_id, feature_b_id)
 
-        #else:
+        # else:
         #    wp.printf("MPR point_a: (%f,%f,%f), point_b: (%f,%f,%f), normal: (%f,%f,%f), dist: %f\n", point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2], normal[0], normal[1], normal[2], penetration)
 
         if skip_multi_contact:
@@ -157,7 +156,7 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any, ray_s
             features = wp.vec4i(0)
             return count, normal, penetrations, points_a, points_b, features
 
-        count, penetrations, points_a, points_b, features = wp.static(create_build_manifold(support_func, ray_surface_intersection_func))(
+        count, penetrations, points_a, points_b, features = wp.static(create_build_manifold(support_func))(
             geom_a,
             geom_b,
             orientation_a,

@@ -381,7 +381,9 @@ class Example:
         xform_b = xform_b_array[tid]
 
         # Build multi-contact manifold and take the first contact
-        count, _penetrations, pts_a, pts_b, features = wp.static(create_solve_convex_multi_contact(support_map_func, center_map))(
+        count, _penetrations, pts_a, pts_b, features = wp.static(
+            create_solve_convex_multi_contact(support_map_func, center_map)
+        )(
             geom_a,
             geom_b,
             wp.transform_get_rotation(xform_a),
@@ -393,7 +395,9 @@ class Example:
         )
 
         # Use GJK to get collision boolean, normal, and penetration (keeps visualization unchanged)
-        result, _pa_gjk, _pb_gjk, n, pen, _fa_gjk, _fb_gjk = wp.static(create_solve_convex_contact(support_map_func, center_map))(
+        result, _pa_gjk, _pb_gjk, n, pen, _fa_gjk, _fb_gjk = wp.static(
+            create_solve_convex_contact(support_map_func, center_map)
+        )(
             geom_a,
             geom_b,
             wp.transform_get_rotation(xform_a),

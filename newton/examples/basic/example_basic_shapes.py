@@ -76,10 +76,10 @@ class Example:
         # MuJoCo requires explicit joints for all free-floating bodies.
         # XPBD solver doesn't require joints but ignores them if present.
 
-        # # SPHERE
-        # body_sphere = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -2.0, drop_z), q=wp.quat_identity()))
-        # builder.add_shape_sphere(body_sphere, radius=0.5)
-        # builder.add_joint_free(body_sphere)  # Add free joint for MuJoCo
+        # SPHERE
+        body_sphere = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -2.0, drop_z), q=wp.quat_identity()))
+        builder.add_shape_sphere(body_sphere, radius=0.5)
+        builder.add_joint_free(body_sphere)  # Add free joint for MuJoCo
 
         # CAPSULE
         body_capsule = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, drop_z), q=wp.quat_identity()))
@@ -91,15 +91,15 @@ class Example:
         builder.add_shape_cylinder(body_cylinder, radius=0.4, half_height=0.6)
         builder.add_joint_free(body_cylinder)  # Add free joint for MuJoCo
 
-        # # BOX
-        # body_box = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 2.0, drop_z), q=wp.quat_identity()))
-        # builder.add_shape_box(body_box, hx=0.5, hy=0.35, hz=0.25)
-        # builder.add_joint_free(body_box)  # Add free joint for MuJoCo
+        # BOX
+        body_box = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 2.0, drop_z), q=wp.quat_identity()))
+        builder.add_shape_box(body_box, hx=0.5, hy=0.35, hz=0.25)
+        builder.add_joint_free(body_box)  # Add free joint for MuJoCo
 
-        # # CONE (no collision support)
-        # body_cone = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 6.0, drop_z), q=wp.quat_identity()))
-        # builder.add_shape_cone(body_cone, radius=0.45, half_height=0.6)
-        # builder.add_joint_free(body_cone)  # Add free joint for MuJoCo
+        # CONE (no collision support)
+        body_cone = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -6.0, drop_z), q=wp.quat_identity()))
+        builder.add_shape_cone(body_cone, radius=0.45, half_height=0.6)
+        builder.add_joint_free(body_cone)  # Add free joint for MuJoCo
 
         # Three stacked cubes (small initial gaps), positioned at y = 6.0
         cube_h = 0.4
@@ -113,17 +113,17 @@ class Example:
         pyramid_size = 10  # Number of cubes at the base
         cube_spacing = 2.1 * cube_h  # Space between cube centers
 
-        # for level in range(pyramid_size):
-        #     num_cubes_in_row = pyramid_size - level
-        #     row_width = (num_cubes_in_row - 1) * cube_spacing
+        for level in range(pyramid_size):
+            num_cubes_in_row = pyramid_size - level
+            row_width = (num_cubes_in_row - 1) * cube_spacing
 
-        #     for i in range(num_cubes_in_row):
-        #         x_pos = -row_width / 2 + i * cube_spacing
-        #         z_pos = level * cube_spacing + cube_h
+            for i in range(num_cubes_in_row):
+                x_pos = -row_width / 2 + i * cube_spacing
+                z_pos = level * cube_spacing + cube_h
 
-        #         body = builder.add_body(xform=wp.transform(p=wp.vec3(x_pos, y_stack, z_pos), q=wp.quat_identity()))
-        #         builder.add_shape_box(body, hx=cube_h, hy=cube_h, hz=cube_h)
-        #         builder.add_joint_free(body)  # Add free joint for MuJoCo
+                body = builder.add_body(xform=wp.transform(p=wp.vec3(x_pos, y_stack, z_pos), q=wp.quat_identity()))
+                builder.add_shape_box(body, hx=cube_h, hy=cube_h, hz=cube_h)
+                builder.add_joint_free(body)  # Add free joint for MuJoCo
 
         # # MESH (bunny)
         # usd_stage = Usd.Stage.Open(newton.examples.get_asset("bunny.usd"))

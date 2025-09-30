@@ -164,6 +164,8 @@ def create_solve_mpr(support_func: Any, center_func: Any):
         position_b: wp.vec3,
         extend: float,
         data_provider: Any,
+        MAX_ITER: int = 30,
+        NUMERIC_EPSILON: float = 1e-16,
     ) -> tuple[bool, wp.vec3, wp.vec3, wp.vec3, float, int, int]:
         """
         Core MPR algorithm implementation.
@@ -191,8 +193,6 @@ def create_solve_mpr(support_func: Any, center_func: Any):
             The XenoCollide implementation below is altered and not identical to the
             original. The license is kept untouched.
         """
-        MAX_ITER = 30
-        NUMERIC_EPSILON = 1e-16
         COLLIDE_EPSILON = NUMERIC_EPSILON
 
         # Initialize variables
@@ -425,8 +425,7 @@ def create_solve_mpr(support_func: Any, center_func: Any):
             point_b = wp.quat_rotate(orientation_a, point_b) + position_a
             normal = wp.quat_rotate(orientation_a, normal)
 
-        # Convert to Newton normal and penetration convention
-        # normal = -normal
+        # Convert to Newton penetration convention
         penetration = -penetration
 
         return collision, point_a, point_b, normal, penetration, feature_a_id, feature_b_id

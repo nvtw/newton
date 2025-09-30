@@ -23,6 +23,8 @@ import warp as wp
 
 from .mpr import Vert, vert_v
 
+EPSILON = 1e-8
+
 
 @wp.struct
 class Barycentric:
@@ -191,7 +193,6 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
         i1: int,
     ) -> tuple[wp.vec3, Barycentric, wp.uint32]:
         """Find closest point on line segment."""
-        EPSILON = 1e-8
 
         a = vert_v(simplex_get_vertex(solver, i0))
         b = vert_v(simplex_get_vertex(solver, i1))
@@ -201,7 +202,11 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
 
         degenerate = vsq < EPSILON
 
-        t = -wp.dot(a, v) / vsq
+        # Guard division by zero in degenerate cases
+        denom = vsq
+        if degenerate:
+            denom = EPSILON
+        t = -wp.dot(a, v) / denom
         lambda0 = 1.0 - t
         lambda1 = t
 
@@ -231,7 +236,6 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
         i2: int,
     ) -> tuple[wp.vec3, Barycentric, wp.uint32]:
         """Find closest point on triangle."""
-        EPSILON = 1e-8
 
         a = vert_v(simplex_get_vertex(solver, i0))
         b = vert_v(simplex_get_vertex(solver, i1))
@@ -243,9 +247,12 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
         normal = wp.cross(u, v)
 
         t = wp.length_sq(normal)
-        it = 1.0 / t
-
         degenerate = t < EPSILON
+        # Guard division by zero in degenerate cases
+        denom = t
+        if degenerate:
+            denom = EPSILON
+        it = 1.0 / denom
 
         c1 = wp.cross(u, a)
         c2 = wp.cross(a, v)
@@ -306,7 +313,6 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
         solver: SimplexSolverAB,
     ) -> tuple[wp.vec3, Barycentric, wp.uint32]:
         """Find closest point on tetrahedron."""
-        EPSILON = 1e-8
 
         v0 = vert_v(solver.v0)
         v1 = vert_v(solver.v1)
@@ -314,9 +320,12 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
         v3 = vert_v(solver.v3)
 
         det_t = determinant(v0, v1, v2, v3)
-        inverse_det_t = 1.0 / det_t
-
-        degenerate = det_t * det_t < EPSILON
+        degenerate = wp.abs(det_t) < EPSILON
+        # Guard division by zero in degenerate cases
+        denom = det_t
+        if degenerate:
+            denom = EPSILON
+        inverse_det_t = 1.0 / denom
 
         zero = wp.vec3(0.0, 0.0, 0.0)
         lambda0 = determinant(zero, v1, v2, v3) * inverse_det_t
@@ -373,7 +382,7 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
         bc.lambda2 = lambda2
         bc.lambda3 = lambda3
 
-        mask = wp.uint32(15) # 0b1111
+        mask = wp.uint32(15)  # 0b1111
         return zero, bc, mask
 
     @wp.func
@@ -411,7 +420,7 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
         # Count used vertices and find free slot
         use_count = 0
         free_slot = 0
-        indices = wp.vec4i(0) # wp.static(wp.zeros(4, dtype=int))
+        indices = wp.vec4i(0)  # wp.static(wp.zeros(4, dtype=int))
 
         for i in range(4):
             if (solver.usage_mask & (wp.uint32(1) << wp.uint32(i))) != wp.uint32(0):
@@ -451,7 +460,10 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
             closest, bc, mask = closest_tetrahedron(result_solver)
             result_solver.barycentric = bc
             result_solver.usage_mask = mask
-            return mask != wp.uint32(0b1111), closest, result_solver
+            # If mask == 15 (0b1111), origin is inside tetrahedron (overlap)
+            # Return False to indicate overlap detection
+            inside_tetrahedron = mask == wp.uint32(15)
+            return not inside_tetrahedron, closest, result_solver
 
         return False, closest, result_solver
 
@@ -463,6 +475,8 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
         position_b: wp.vec3,
         extend: float,
         data_provider: Any,
+        MAX_ITER: int = 30,
+        COLLIDE_EPSILON: float = 1e-4,
     ) -> tuple[bool, wp.vec3, wp.vec3, wp.vec3, float, int, int]:
         """
         Core GJK distance algorithm implementation.
@@ -470,9 +484,6 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
         Provides the distance and closest points for non-overlapping shapes.
         Assumes that shape A is located at position zero and not rotated.
         """
-        COLLIDE_EPSILON = 1e-4
-        MAX_ITER = 30
-
         # Initialize variables
         distance = float(0.0)
         feature_a_id = int(0)
@@ -493,6 +504,8 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
         v = vert_v(center)
         dist_sq = wp.length_sq(v)
 
+        last_search_dir = wp.vec3(1.0, 0.0, 0.0)
+
         while iter_count > 0:
             iter_count -= 1
 
@@ -503,13 +516,38 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
                 point_a, point_b = simplex_get_closest(simplex_solver)
                 return False, point_a, point_b, normal, distance, feature_a_id, feature_b_id
 
-            # Get support point in direction -v
+            # Determine search direction with fallback for near-zero cases
+            used_fallback = bool(False)
+            search_dir = -v
+            if dist_sq < 1.0e-12:
+                # Near-zero direction: use fallback to avoid numerical issues
+                search_dir = wp.vec3(1.0, 0.0, 0.0)
+                used_fallback = bool(True)
+            # Track last search direction for robust normal fallback
+            last_search_dir = search_dir
+
+            # Get support point in search direction
             w, feature_a_id, feature_b_id = minkowski_support(
-                geom_a, geom_b, -v, orientation_b, position_b, extend, data_provider
+                geom_a, geom_b, search_dir, orientation_b, position_b, extend, data_provider
             )
 
-            delta_dist = wp.dot(v - vert_v(w), v)
-            if delta_dist * delta_dist < COLLIDE_EPSILON * COLLIDE_EPSILON * dist_sq:
+            # Check for convergence using Frank-Wolfe duality gap
+            # Skip check when using fallback direction to avoid premature exit
+            w_v = vert_v(w)
+            if not used_fallback:
+                delta_dist = wp.dot(v, v - w_v)
+                if delta_dist < COLLIDE_EPSILON * wp.sqrt(dist_sq):
+                    break
+
+            # Check for duplicate vertex (numerical stalling)
+            is_duplicate = bool(False)
+            for i in range(4):
+                if (simplex_solver.usage_mask & (wp.uint32(1) << wp.uint32(i))) != wp.uint32(0):
+                    existing = simplex_get_vertex(simplex_solver, i)
+                    if wp.length_sq(vert_v(existing) - w_v) < COLLIDE_EPSILON * COLLIDE_EPSILON:
+                        is_duplicate = bool(True)
+                        break
+            if is_duplicate:
                 break
 
             success, new_v, simplex_solver = simplex_add_vertex(simplex_solver, w)
@@ -524,8 +562,24 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
             dist_sq = wp.length_sq(v)
 
         distance = wp.sqrt(dist_sq)
-        normal = v * (-1.0 / distance)
+        # Compute closest points first
         point_a, point_b = simplex_get_closest(simplex_solver)
+
+        # Prefer A->B vector if reliable; otherwise fall back to -v or last search dir
+        delta = point_b - point_a
+        delta_len_sq = wp.length_sq(delta)
+        if delta_len_sq > EPSILON * EPSILON:
+            normal = delta * (1.0 / wp.sqrt(delta_len_sq))
+        elif distance > COLLIDE_EPSILON:
+            # Separated but delta is tiny: use -v
+            normal = v * (-1.0 / distance)
+        else:
+            # Overlap/near-contact: use last_search_dir, then stable axis
+            nsq = wp.length_sq(last_search_dir)
+            if nsq > 0.0:
+                normal = last_search_dir * (1.0 / wp.sqrt(nsq))
+            else:
+                normal = wp.vec3(1.0, 0.0, 0.0)
 
         return True, point_a, point_b, normal, distance, feature_a_id, feature_b_id
 
@@ -579,7 +633,6 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
 
         # Align semantics with MPR: return collision flag and Newton normal convention
         collision = not separated
-        # normal = -normal
 
         return collision, point_a, point_b, normal, distance, feature_a_id, feature_b_id
 

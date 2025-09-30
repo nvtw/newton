@@ -29,7 +29,6 @@ from ..geometry.support_function import (
     support_map as support_map_func,
     SupportMapDataProvider,
     GenericShapeData,
-    ray_surface_intersection_func,
 )
 from ..geometry.types import GeoType
 from .contacts import Contacts
@@ -38,9 +37,7 @@ from .state import State
 
 
 # Pre-create the convex multi-contact solver (usable inside kernels)
-solve_convex_multi_contact = create_solve_convex_multi_contact(
-    support_map_func, center_map, ray_surface_intersection_func
-)
+solve_convex_multi_contact = create_solve_convex_multi_contact(support_map_func, center_map)
 
 
 @wp.func

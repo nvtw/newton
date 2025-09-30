@@ -69,63 +69,37 @@ def ray_plane_intersection(
     return ray_origin + ray_direction * t
 
 
-@wp.func
-def project_point_onto_line_segment(point: wp.vec3, seg_start: wp.vec3, seg_end: wp.vec3) -> wp.vec3:
-    """Project a point onto a finite line segment, clamped to the segment endpoints."""
-    seg_dir = seg_end - seg_start
-    seg_len_sq = wp.dot(seg_dir, seg_dir)
-
-    if seg_len_sq < EPS:
-        return 0.5 * (seg_start + seg_end)
-
-    # If degenerate segment, return start
-    t = wp.dot(point - seg_start, seg_dir) / seg_len_sq
-    # Clamp to [0, 1]
-    t = wp.max(0.0, wp.min(1.0, t))
-    return seg_start + seg_dir * t
-
-
 @wp.struct
 class BodyProjector:
     first: wp.vec3
     second: wp.vec3
-    ptype: int
 
 
 @wp.func
 def make_body_projector_from_vec3(
     poly: wp.array(dtype=wp.vec3), poly_count: int, anchor_point: wp.vec3
 ) -> BodyProjector:
-    proj = BodyProjector(wp.vec3(0.0, 0.0, 0.0), wp.vec3(0.0, 0.0, 0.0), 0)
-    if poly_count == 1:
-        proj.first = anchor_point
-        proj.ptype = 2  # Point
-    elif poly_count == 2:
-        proj.first = poly[0]
-        proj.second = poly[1]
-        proj.ptype = 1  # LineSegment
-    else:
-        proj.first = anchor_point
-        # Find the triangle with the largest area for numerical stability
-        # This avoids issues with nearly collinear points
-        best_normal = wp.vec3(0.0, 0.0, 0.0)
-        max_area_sq = float(0.0)
+    proj = BodyProjector()
+    proj.first = anchor_point
+    # Find the triangle with the largest area for numerical stability
+    # This avoids issues with nearly collinear points
+    best_normal = wp.vec3(0.0, 0.0, 0.0)
+    max_area_sq = float(0.0)
 
-        for i in range(1, poly_count - 1):
-            # Compute cross product for triangle (poly[0], poly[i], poly[i+1])
-            edge1 = poly[i] - poly[0]
-            edge2 = poly[i + 1] - poly[0]
-            cross = wp.cross(edge1, edge2)
-            area_sq = wp.dot(cross, cross)
+    for i in range(1, poly_count - 1):
+        # Compute cross product for triangle (poly[0], poly[i], poly[i+1])
+        edge1 = poly[i] - poly[0]
+        edge2 = poly[i + 1] - poly[0]
+        cross = wp.cross(edge1, edge2)
+        area_sq = wp.dot(cross, cross)
 
-            if area_sq > max_area_sq:
-                max_area_sq = area_sq
-                best_normal = cross
+        if area_sq > max_area_sq:
+            max_area_sq = area_sq
+            best_normal = cross
 
-        # Normalize, avoid zero
-        len_n = wp.sqrt(wp.max(1.0e-12, max_area_sq))
-        proj.second = best_normal / len_n
-        proj.ptype = 0  # Plane
+    # Normalize, avoid zero
+    len_n = wp.sqrt(wp.max(1.0e-12, max_area_sq))
+    proj.second = best_normal / len_n
     return proj
 
 
@@ -164,66 +138,6 @@ def intersection_point(trim_seg_start: wp.vec3, trim_seg_end: wp.vec3, a: wp.vec
     # interpolated point computed above; offset not required in vec3 version
     # Note: projection parameter not needed in vec3 version
     return interpolated_ab
-
-
-@wp.func
-def trim_by_line_segment_in_place(
-    trim_seg_start: wp.vec3,
-    trim_seg_end: wp.vec3,
-    loop: wp.array(dtype=wp.vec3),
-    loop_segments: wp.array(dtype=wp.uint8),
-    loop_count: int,
-    max_loop_capacity: int,
-) -> int:
-    """
-    Intersect the input loop with a single finite line segment in the contact plane.
-
-    Stores up to two intersection points (degenerate segment manifold).
-    Segment IDs are set to 0 (first trim edge) for generated points.
-    """
-    if loop_count < 1:
-        return 0
-
-    trim_start_xy = wp.vec2(trim_seg_start[0], trim_seg_start[1])
-    trim_end_xy = wp.vec2(trim_seg_end[0], trim_seg_end[1])
-    seg_dir = trim_end_xy - trim_start_xy
-    seg_len = wp.sqrt(seg_dir[0] * seg_dir[0] + seg_dir[1] * seg_dir[1])
-
-    if seg_len <= 1e-12:
-        return 0
-
-    seg_dir = seg_dir / seg_len
-
-    write_idx = int(0)
-    num_found = int(0)
-
-    for i in range(loop_count):
-        if num_found >= 2:
-            break
-        j = (i + 1) % loop_count
-
-        ai_xy = wp.vec2(loop[i][0], loop[i][1])
-        aj_xy = wp.vec2(loop[j][0], loop[j][1])
-
-        side_i = signed_area(trim_start_xy, trim_end_xy, ai_xy)
-        side_j = signed_area(trim_start_xy, trim_end_xy, aj_xy)
-
-        crosses = (side_i > 0.0 and side_j < 0.0) or (side_i < 0.0 and side_j > 0.0)
-        touches = (side_i == 0.0) or (side_j == 0.0)
-
-        if crosses or touches:
-            inter = intersection_point(trim_seg_start, trim_seg_end, loop[i], loop[j])
-            inter_xy = wp.vec2(inter[0], inter[1])
-            t_along = wp.dot(seg_dir, inter_xy - trim_start_xy)
-            if t_along < -EPS or t_along > seg_len + EPS:
-                continue
-
-            loop[write_idx] = inter
-            loop_segments[write_idx] = wp.uint8(0)
-            write_idx += 1
-            num_found += 1
-
-    return num_found
 
 
 @wp.func
@@ -444,9 +358,7 @@ def trim_all_in_place(
         return loop_count  # There is no trim polygon
 
     if trim_poly_count == 2:
-        return trim_by_line_segment_in_place(
-            trim_poly[0], trim_poly[1], loop, loop_segments, loop_count, max_loop_capacity
-        )
+        return loop_count  # Does not need to be handled since every poly has at least 3 vertices in the current implementation
 
     current_loop_count = loop_count
 
@@ -807,40 +719,15 @@ def project_point_onto_ray(point_world: wp.vec3, ray_origin: wp.vec3, ray_direct
     return projected
 
 
-def create_build_manifold(support_func: Any, ray_surface_intersection_func: Any):
+def create_build_manifold(support_func: Any):
     @wp.func
     def body_projector_project(
-        proj: BodyProjector, input: wp.vec3, contact_normal: wp.vec3, geom: Any, data_provider: Any, position: wp.vec3, quaternion: wp.quat
+        proj: BodyProjector,
+        input: wp.vec3,
+        contact_normal: wp.vec3,
     ) -> wp.vec3:
-
-
-        local_ray_origin = wp.quat_rotate_inv(quaternion, input - position)
-        local_ray_direction = wp.normalize(wp.quat_rotate_inv(quaternion, contact_normal))
-
-        # Print local ray properties
-        #wp.printf("Local ray origin: (%f, %f, %f)\n", local_ray_origin[0], local_ray_origin[1], local_ray_origin[2])
-        #wp.printf("Local ray direction: (%f, %f, %f)\n", local_ray_direction[0], local_ray_direction[1], local_ray_direction[2])
-
-        (result, projected) = ray_surface_intersection_func(geom, local_ray_origin, local_ray_direction, data_provider)
-        if result == 1:
-            projected = wp.quat_rotate(quaternion, projected) + position        
-            wp.printf("Projected point: (%f, %f, %f)\n", projected[0], projected[1], projected[2])
-            return projected
-
-
-        wp.printf("Normal: (%f, %f, %f)\n", contact_normal[0], contact_normal[1], contact_normal[2])
-
-        if result == 0:
-            pass
-
-        if proj.ptype == 0:  # Plane
-            return ray_plane_intersection(input, contact_normal, proj.first, proj.second)
-        elif proj.ptype == 1:  # LineSegment
-            wp.printf("LineSegment\n")
-            return project_point_onto_line_segment(input, proj.first, proj.second)
-        else:  # Point
-            wp.printf("Point\n")
-            return proj.first
+        # Only plane projection is supported
+        return ray_plane_intersection(input, contact_normal, proj.first, proj.second)
 
     @wp.func
     def extract_4_point_contact_manifolds(
@@ -856,15 +743,6 @@ def create_build_manifold(support_func: Any, ray_surface_intersection_func: Any)
         anchor_point_a: wp.vec3,
         anchor_point_b: wp.vec3,
         result_features: wp.array(dtype=wp.uint32),
-        feature_anchor_a: wp.int32,
-        feature_anchor_b: wp.int32,
-        geom_a: Any,
-        geom_b: Any,
-        data_provider: Any,
-        quaternion_a: wp.quat,
-        quaternion_b: wp.quat,
-        position_a: wp.vec3,
-        position_b: wp.vec3,
     ) -> int:
         """
         Extract 4-point contact manifolds from two convex polygons.
@@ -872,11 +750,10 @@ def create_build_manifold(support_func: Any, ray_surface_intersection_func: Any)
         m_A and m_B can have up to 6 points but m_B must provide space for 12 points.
         """
         # Early-out for simple cases: if both have <=2 or either is empty, return single anchor pair
-        if (m_a_count <= 3 or m_b_count <= 3):
+        if m_a_count < 3 or m_b_count < 3:
             m_a[0] = anchor_point_a
             m_b[0] = anchor_point_b
-            if result_features.shape[0] > 0:
-                result_features[0] = wp.uint32(0)
+            result_features[0] = wp.uint32(0)
             return 1
 
         # Projectors for back-projection
@@ -935,15 +812,15 @@ def create_build_manifold(support_func: Any, ray_surface_intersection_func: Any)
             d_world = d[0] * cross_vector_1 + d[1] * cross_vector_2 + center
 
             # normal vector points from A to B
-            m_a[0] = body_projector_project(projector_a, a_world, -normal, geom_a, data_provider, position_a, quaternion_a)
-            m_a[1] = body_projector_project(projector_a, b_world, -normal, geom_a, data_provider, position_a, quaternion_a)
-            m_a[2] = body_projector_project(projector_a, c_world, -normal, geom_a, data_provider, position_a, quaternion_a)
-            m_a[3] = body_projector_project(projector_a, d_world, -normal, geom_a, data_provider, position_a, quaternion_a)
+            m_a[0] = body_projector_project(projector_a, a_world, -normal)
+            m_a[1] = body_projector_project(projector_a, b_world, -normal)
+            m_a[2] = body_projector_project(projector_a, c_world, -normal)
+            m_a[3] = body_projector_project(projector_a, d_world, -normal)
 
-            m_b[0] = body_projector_project(projector_b, a_world, normal, geom_b, data_provider, position_b, quaternion_b)
-            m_b[1] = body_projector_project(projector_b, b_world, normal, geom_b, data_provider, position_b, quaternion_b)
-            m_b[2] = body_projector_project(projector_b, c_world, normal, geom_b, data_provider, position_b, quaternion_b)
-            m_b[3] = body_projector_project(projector_b, d_world, normal, geom_b, data_provider, position_b, quaternion_b)
+            m_b[0] = body_projector_project(projector_b, a_world, normal)
+            m_b[1] = body_projector_project(projector_b, b_world, normal)
+            m_b[2] = body_projector_project(projector_b, c_world, normal)
+            m_b[3] = body_projector_project(projector_b, d_world, normal)
 
             # Features via external result buffer
             result_features[0] = feat_a
@@ -966,8 +843,8 @@ def create_build_manifold(support_func: Any, ray_surface_intersection_func: Any)
                     l = m_b[i]
                     feat = feature_id(loop_seg_ids, i, loop_count, features_a, features_b, m_a_count, m_b_count)
                     world = l[0] * cross_vector_1 + l[1] * cross_vector_2 + center
-                    m_a[i] = body_projector_project(projector_a, world, -normal, geom_a, data_provider, position_a, quaternion_a)
-                    m_b[i] = body_projector_project(projector_b, world, normal, geom_b, data_provider, position_b, quaternion_b)
+                    m_a[i] = body_projector_project(projector_a, world, -normal)
+                    m_b[i] = body_projector_project(projector_b, world, normal)
                     result_features[i] = feat
 
         return loop_count
@@ -1054,15 +931,6 @@ def create_build_manifold(support_func: Any, ray_surface_intersection_func: Any)
             p_a,
             p_b,
             result_features,
-            feature_anchor_a + 1,
-            feature_anchor_b + 1,
-            geom_a,
-            geom_b,
-            data_provider,
-            quaternion_a,
-            quaternion_b,
-            position_a,
-            position_b,
         )
 
     @wp.func
