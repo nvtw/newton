@@ -69,9 +69,9 @@ def project_point_onto_ray(
 
 @wp.func
 def write_contact(
-    a_contact_world: wp.vec3,
-    b_contact_world: wp.vec3,
+    contact_point_center: wp.vec3,
     contact_normal_a_to_b: wp.vec3,
+    contact_distance: float,
     total_separation_needed: float,
     offset_mag_a: float,
     offset_mag_b: float,
@@ -126,6 +126,9 @@ def write_contact(
     """
     # Distance calculation matching box_plane_collision
     contact_normal_a_to_b = wp.normalize(contact_normal_a_to_b)
+
+    a_contact_world = contact_point_center - contact_normal_a_to_b * (0.5*contact_distance)
+    b_contact_world = contact_point_center + contact_normal_a_to_b * (0.5*contact_distance)
 
     diff = b_contact_world - a_contact_world
     distance = wp.dot(diff, contact_normal_a_to_b)
@@ -275,12 +278,10 @@ def build_contacts_kernel_gjk_mpr(
         for id in range(4):
             dist = contact_distances[id]
             if dist < wp.inf:
-                a_contact_world = contact_positions[id] - plane_normal_world * 0.5*dist
-                b_contact_world = contact_positions[id] + plane_normal_world * 0.5*dist
                 write_contact(
-                    a_contact_world,
-                    b_contact_world,
+                    contact_positions[id],
                     contact_normal,
+                    contact_distances[id],
                     total_separation_needed,
                     offset_mag_a,
                     offset_mag_b,
@@ -334,14 +335,11 @@ def build_contacts_kernel_gjk_mpr(
             sphere_radius,      # sphere_radius
         )
 
-        a_contact_world = contact_position - plane_normal_world * 0.5*contact_distance
-        b_contact_world = contact_position + plane_normal_world * 0.5*contact_distance
-
         # Use the write_contact function to write the contact
         write_contact(
-            a_contact_world,
-            b_contact_world,
+            contact_position,            
             plane_normal_world,  # contact normal from plane to sphere
+            contact_distance,
             total_separation_needed,
             offset_mag_a,
             offset_mag_b,
