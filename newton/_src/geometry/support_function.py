@@ -150,7 +150,9 @@ def support_map(
             denom_sq = adx * adx + bdy * bdy + cdz * cdz
             if denom_sq > eps:
                 denom = wp.sqrt(denom_sq)
-                result = wp.vec3((a * a) * dir_safe[0] / denom, (b * b) * dir_safe[1] / denom, (c * c) * dir_safe[2] / denom)
+                result = wp.vec3(
+                    (a * a) * dir_safe[0] / denom, (b * b) * dir_safe[1] / denom, (c * c) * dir_safe[2] / denom
+                )
             else:
                 result = wp.vec3(a, 0.0, 0.0)
         else:

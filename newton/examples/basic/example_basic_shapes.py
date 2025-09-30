@@ -76,25 +76,25 @@ class Example:
         # MuJoCo requires explicit joints for all free-floating bodies.
         # XPBD solver doesn't require joints but ignores them if present.
 
-        # SPHERE
-        body_sphere = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -2.0, drop_z), q=wp.quat_identity()))
-        builder.add_shape_sphere(body_sphere, radius=0.5)
-        builder.add_joint_free(body_sphere)  # Add free joint for MuJoCo
+        # # SPHERE
+        # body_sphere = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -2.0, drop_z), q=wp.quat_identity()))
+        # builder.add_shape_sphere(body_sphere, radius=0.5)
+        # builder.add_joint_free(body_sphere)  # Add free joint for MuJoCo
 
-        # # CAPSULE
-        # body_capsule = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, drop_z), q=wp.quat_identity()))
-        # builder.add_shape_capsule(body_capsule, radius=0.3, half_height=0.7)
-        # builder.add_joint_free(body_capsule)  # Add free joint for MuJoCo
+        # CAPSULE
+        body_capsule = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, drop_z), q=wp.quat_identity()))
+        builder.add_shape_capsule(body_capsule, radius=0.3, half_height=0.7)
+        builder.add_joint_free(body_capsule)  # Add free joint for MuJoCo
 
         # # CYLINDER (no collision support)
         # body_cylinder = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -4.0, drop_z), q=wp.quat_identity()))
         # builder.add_shape_cylinder(body_cylinder, radius=0.4, half_height=0.6)
         # builder.add_joint_free(body_cylinder)  # Add free joint for MuJoCo
 
-        # BOX
-        body_box = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 2.0, drop_z), q=wp.quat_identity()))
-        builder.add_shape_box(body_box, hx=0.5, hy=0.35, hz=0.25)
-        builder.add_joint_free(body_box)  # Add free joint for MuJoCo
+        # # BOX
+        # body_box = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 2.0, drop_z), q=wp.quat_identity()))
+        # builder.add_shape_box(body_box, hx=0.5, hy=0.35, hz=0.25)
+        # builder.add_joint_free(body_box)  # Add free joint for MuJoCo
 
         # # CONE (no collision support)
         # body_cone = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 6.0, drop_z), q=wp.quat_identity()))
@@ -109,17 +109,17 @@ class Example:
         z2 = z1 + 2.0 * cube_h + gap
         z3 = z2 + 2.0 * cube_h + gap
 
-        # body_cube1 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z1), q=wp.quat_identity()))
-        # builder.add_shape_box(body_cube1, hx=cube_h, hy=cube_h, hz=cube_h)
-        # builder.add_joint_free(body_cube1)  # Add free joint for MuJoCo
+        body_cube1 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z1), q=wp.quat_identity()))
+        builder.add_shape_box(body_cube1, hx=cube_h, hy=cube_h, hz=cube_h)
+        builder.add_joint_free(body_cube1)  # Add free joint for MuJoCo
 
-        # body_cube2 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z2), q=wp.quat_identity()))
-        # builder.add_shape_box(body_cube2, hx=cube_h, hy=cube_h, hz=cube_h)
-        # builder.add_joint_free(body_cube2)  # Add free joint for MuJoCo
+        body_cube2 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z2), q=wp.quat_identity()))
+        builder.add_shape_box(body_cube2, hx=cube_h, hy=cube_h, hz=cube_h)
+        builder.add_joint_free(body_cube2)  # Add free joint for MuJoCo
 
-        # body_cube3 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z3), q=wp.quat_identity()))
-        # builder.add_shape_box(body_cube3, hx=cube_h, hy=cube_h, hz=cube_h)
-        # builder.add_joint_free(body_cube3)  # Add free joint for MuJoCo
+        body_cube3 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, y_stack, z3), q=wp.quat_identity()))
+        builder.add_shape_box(body_cube3, hx=cube_h, hy=cube_h, hz=cube_h)
+        builder.add_joint_free(body_cube3)  # Add free joint for MuJoCo
 
         # # MESH (bunny)
         # usd_stage = Usd.Stage.Open(newton.examples.get_asset("bunny.usd"))

@@ -73,6 +73,11 @@ def project_point_onto_line_segment(point: wp.vec3, seg_start: wp.vec3, seg_end:
     """Project a point onto a finite line segment, clamped to the segment endpoints."""
     seg_dir = seg_end - seg_start
     seg_len_sq = wp.dot(seg_dir, seg_dir)
+
+    if seg_len_sq < EPS:
+        return 0.5 * (seg_start + seg_end)
+
+
     # If degenerate segment, return start
     t = wp.dot(point - seg_start, seg_dir) / seg_len_sq
     # Clamp to [0, 1]
@@ -88,21 +93,36 @@ class BodyProjector:
 
 
 @wp.func
-def make_body_projector_from_vec3(poly: wp.array(dtype=wp.vec3), poly_count: int) -> BodyProjector:
+def make_body_projector_from_vec3(poly: wp.array(dtype=wp.vec3), poly_count: int, anchor_point: wp.vec3) -> BodyProjector:
     proj = BodyProjector(wp.vec3(0.0, 0.0, 0.0), wp.vec3(0.0, 0.0, 0.0), 0)
     if poly_count == 1:
-        proj.first = poly[0]
+        proj.first = anchor_point
         proj.ptype = 2  # Point
     elif poly_count == 2:
         proj.first = poly[0]
         proj.second = poly[1]
         proj.ptype = 1  # LineSegment
     else:
-        proj.first = poly[0]
-        n = wp.cross(poly[1] - poly[0], poly[2] - poly[0])
+        proj.first = anchor_point
+        # Find the triangle with the largest area for numerical stability
+        # This avoids issues with nearly collinear points
+        best_normal = wp.vec3(0.0, 0.0, 0.0)
+        max_area_sq = float(0.0)
+
+        for i in range(1, poly_count - 1):
+            # Compute cross product for triangle (poly[0], poly[i], poly[i+1])
+            edge1 = poly[i] - poly[0]
+            edge2 = poly[i + 1] - poly[0]
+            cross = wp.cross(edge1, edge2)
+            area_sq = wp.dot(cross, cross)
+
+            if area_sq > max_area_sq:
+                max_area_sq = area_sq
+                best_normal = cross
+
         # Normalize, avoid zero
-        len_n = wp.sqrt(wp.max(1.0e-35, wp.dot(n, n)))
-        proj.second = n / len_n
+        len_n = wp.sqrt(wp.max(1.0e-12, max_area_sq))
+        proj.second = best_normal / len_n
         proj.ptype = 0  # Plane
     return proj
 
@@ -799,8 +819,8 @@ def extract_4_point_contact_manifolds(
         return 1
 
     # Projectors for back-projection
-    projector_a = make_body_projector_from_vec3(m_a, m_a_count)
-    projector_b = make_body_projector_from_vec3(m_b, m_b_count)
+    projector_a = make_body_projector_from_vec3(m_a, m_a_count, anchor_point_a)
+    projector_b = make_body_projector_from_vec3(m_b, m_b_count, anchor_point_b)
 
     # The trim poly (poly A) should be the polygon with the most points
     # This should ensure that zero area loops with only two points get trimmed correctly (they are considered valid)
@@ -1107,9 +1127,9 @@ def create_build_manifold(support_func: Any):
             contact_points_a[i] = left[i]
             contact_points_b[i] = right[i]
 
-            # center = 0.5 * (contact_points_a[i] + contact_points_b[i])
-            # contact_points_a[i] = project_point_onto_ray(contact_points_a[i], center, normal)
-            # contact_points_b[i] = project_point_onto_ray(contact_points_b[i], center, normal)
+            center = 0.5 * (contact_points_a[i] + contact_points_b[i])
+            contact_points_a[i] = project_point_onto_ray(contact_points_a[i], center, normal)
+            contact_points_b[i] = project_point_onto_ray(contact_points_b[i], center, normal)
 
             feature_ids[i] = int(result_features[i])
             # Newton convention: penetration is negative on overlap

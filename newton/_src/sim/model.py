@@ -40,7 +40,6 @@ from .state import State
 solve_convex_multi_contact = create_solve_convex_multi_contact(support_map_func, center_map)
 
 
-
 @wp.func
 def write_contact(
     contact_point_center: wp.vec3,
@@ -140,7 +139,7 @@ def write_contact(
         out_thickness1[index] = offset_mag_b
         out_tids[index] = tid
 
-        
+
 @wp.kernel(enable_backward=False)
 def build_contacts_kernel_gjk_mpr(
     body_q: wp.array(dtype=wp.transform),
@@ -168,8 +167,8 @@ def build_contacts_kernel_gjk_mpr(
     out_tids: wp.array(dtype=int),
 ):
     tid = wp.tid()
-    if tid == 0:
-        wp.printf("build_contacts_kernel_gjk_mpr\n")
+    # if tid == 0:
+    #     wp.printf("build_contacts_kernel_gjk_mpr\n")
 
     # Early bounds check - following convert_newton_contacts_to_mjwarp_kernel pattern
     if tid >= shape_pairs.shape[0]:
@@ -248,6 +247,8 @@ def build_contacts_kernel_gjk_mpr(
         pos_b,
         0.0,  # sum_of_contact_offsets
         data_provider,
+        type_a == int(GeoType.SPHERE)
+        or type_b == int(GeoType.SPHERE)
     )
 
     for id in range(count):
@@ -397,15 +398,14 @@ def build_contacts_kernel_gjk_mpr(
             contact_position[0] + contact_normal[0] * sphere_radius,  # point_a
             contact_position[1] + contact_normal[1] * sphere_radius,
             contact_position[2] + contact_normal[2] * sphere_radius,
-            contact_position[0],  # point_b 
+            contact_position[0],  # point_b
             contact_position[1],
             contact_position[2],
-            contact_normal[0],    # normal
-            contact_normal[1], 
+            contact_normal[0],  # normal
+            contact_normal[1],
             contact_normal[2],
-            contact_distance      # distance
+            contact_distance,  # distance
         )
-
 
         # Use the write_contact function to write the contact
         write_contact(
@@ -448,11 +448,11 @@ def build_contacts_kernel_gjk_mpr(
 
         # Call collide_box_box to get contact information
         contact_distances8, contact_positions8, contact_normals8 = collide_box_box(
-            pos_a,              # box1_pos (first box position in world space)
-            box1_rot_mat,       # box1_rot (first box rotation matrix)
+            pos_a,  # box1_pos (first box position in world space)
+            box1_rot_mat,  # box1_rot (first box rotation matrix)
             box1_half_extents,  # box1_size (first box half-extents)
-            pos_b,              # box2_pos (second box position in world space)
-            box2_rot_mat,       # box2_rot (second box rotation matrix)
+            pos_b,  # box2_pos (second box position in world space)
+            box2_rot_mat,  # box2_rot (second box rotation matrix)
             box2_half_extents,  # box2_size (second box half-extents)
         )
 
@@ -465,8 +465,8 @@ def build_contacts_kernel_gjk_mpr(
                     contact_positions8[id],
                     contact_normals8[id],  # contact normal for this specific contact
                     dist,
-                    0.0,                  # box A has no effective radius
-                    0.0,                  # box B has no effective radius
+                    0.0,  # box A has no effective radius
+                    0.0,  # box B has no effective radius
                     shape_thickness[shape_a],
                     shape_thickness[shape_b],
                     shape_a,
