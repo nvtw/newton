@@ -23,7 +23,7 @@ import warp as wp
 
 from ..core.types import Devicelike
 from ..geometry.collision_convex import create_solve_convex_multi_contact
-from ..geometry.collision_primitive import collide_plane_box
+from ..geometry.collision_primitive import collide_plane_box, collide_plane_sphere
 from ..geometry.support_function import center_func as center_map, support_map as support_map_func
 from ..geometry.types import GeoType
 from .contacts import Contacts
@@ -35,30 +35,6 @@ from .state import State
 solve_convex_multi_contact = create_solve_convex_multi_contact(support_map_func, center_map)
 
 
-
-@wp.func
-def project_point_onto_plane(
-    point_world: wp.vec3,
-    plane_transform_world_to_local: wp.transform,
-    plane_transform_local_to_world: wp.transform
-) -> wp.vec3:
-    """
-    Project a world space point onto a plane.
-
-    Args:
-        point_world: Point in world space to project
-        plane_transform_world_to_local: Transform from world to plane local space
-        plane_transform_local_to_world: Transform from plane local to world space
-    Returns:
-        Projected point on the plane in world space
-    """
-    # Transform point to plane local space
-    point_in_plane_local = wp.transform_point(plane_transform_world_to_local, point_world)
-    # Project to Z=0 in plane frame (plane lies in XY plane)
-    projected_plane_local = wp.vec3(point_in_plane_local[0], point_in_plane_local[1], 0.0)
-    # Transform back to world space
-    projected_world = wp.transform_point(plane_transform_local_to_world, projected_plane_local)
-    return projected_world
 
 @wp.func
 def project_point_onto_ray(
@@ -265,24 +241,13 @@ def build_contacts_kernel_gjk_mpr(
 
 
 
-    # Implement Plane vs Box contacts (type order enforced above)
     if type_a == int(GeoType.PLANE) and type_b == int(GeoType.BOX):
         # World->body transforms for writing contact points
         X_bw_a = wp.transform_identity() if rigid_a == -1 else wp.transform_inverse(body_q[rigid_a])
         X_bw_b = wp.transform_identity() if rigid_b == -1 else wp.transform_inverse(body_q[rigid_b])
 
         # Plane frame helpers
-        X_sw_a = wp.transform_inverse(X_ws_a)
         plane_normal_world = wp.transform_vector(X_ws_a, wp.vec3(0.0, 0.0, 1.0))
-
-        plane_width = shape_scale[shape_a][0]
-        plane_length = shape_scale[shape_a][1]
-        plane_infinite = (plane_width == 0.0 and plane_length == 0.0)
-
-        # Box half extents in its local frame
-        hx = shape_scale[shape_b][0]
-        hy = shape_scale[shape_b][1]
-        hz = shape_scale[shape_b][2]
 
         # Separation requirements and offsets (for plane and box, effective radii are zero)
         radius_eff_a = 0.0
@@ -294,21 +259,17 @@ def build_contacts_kernel_gjk_mpr(
         offset_mag_a = radius_eff_a + thickness_a
         offset_mag_b = radius_eff_b + thickness_b
 
-
         # Get box rotation matrix from quaternion
         box_rot_quat = wp.transform_get_rotation(X_ws_b)
         box_rot_mat = wp.quat_to_matrix(box_rot_quat)
-        
-        # Box size (half-extents)
-        box_size = wp.vec3(hx, hy, hz)
-        
+
         # Call collide_plane_box to get contact information
         contact_distances, contact_positions, contact_normal = collide_plane_box(
             plane_normal_world,  # plane_normal
             pos_a,              # plane_pos (plane position in world space)
-            pos_b,              # box_pos (box position in world space)  
+            pos_b,              # box_pos (box position in world space)
             box_rot_mat,        # box_rot (box rotation matrix)
-            box_size,           # box_size (box half-extents)
+            shape_scale[shape_b],           # box_size (box half-extents)
         )
 
         for id in range(4):
@@ -343,55 +304,66 @@ def build_contacts_kernel_gjk_mpr(
                     out_tids,
                 )
 
-        # # Enumerate the 8 box vertices (local) and test them against the plane
-        # for vi in range(8):
-        #     sx = -1.0 if (vi & 1) == 0 else 1.0
-        #     sy = -1.0 if (vi & 2) == 0 else 1.0
-        #     sz = -1.0 if (vi & 4) == 0 else 1.0
+    # Implement Plane vs Sphere contacts (type order enforced above)
+    elif type_a == int(GeoType.PLANE) and type_b == int(GeoType.SPHERE):
+        # World->body transforms for writing contact points
+        X_bw_a = wp.transform_identity() if rigid_a == -1 else wp.transform_inverse(body_q[rigid_a])
+        X_bw_b = wp.transform_identity() if rigid_b == -1 else wp.transform_inverse(body_q[rigid_b])
 
-        #     v_local = wp.vec3(sx * hx, sy * hy, sz * hz)
-        #     v_world = wp.transform_point(X_ws_b, v_local)
+        # Plane frame helpers
+        plane_normal_world = wp.transform_vector(X_ws_a, wp.vec3(0.0, 0.0, 1.0))
 
-        #     # If finite plane, ensure vertex projects within bounds
-        #     if not plane_infinite:
-        #         v_in_plane = wp.transform_point(X_sw_a, v_world)
-        #         if wp.abs(v_in_plane[0]) > plane_width or wp.abs(v_in_plane[1]) > plane_length:
-        #             continue
+        # Sphere radius
+        sphere_radius = shape_scale[shape_b][0]  # Sphere radius is stored in x component
 
-        #     # Closest point on plane (project box vertex onto plane)
-        #     a_contact_world = project_point_onto_plane(v_world, X_sw_a, X_ws_a)
-        #     b_contact_world = v_world
+        # Separation requirements and offsets
+        radius_eff_a = 0.0 
+        radius_eff_b = 0.0 
+        thickness_a = shape_thickness[shape_a]
+        thickness_b = shape_thickness[shape_b]
+        total_separation_needed = radius_eff_a + radius_eff_b + thickness_a + thickness_b
 
-        #     # Use the write_contact function to write the contact
-        #     write_contact(
-        #         a_contact_world,
-        #         b_contact_world,
-        #         plane_normal_world,
-        #         total_separation_needed,
-        #         offset_mag_a,
-        #         offset_mag_b,
-        #         shape_a,
-        #         shape_b,
-        #         X_bw_a,
-        #         X_bw_b,
-        #         tid,
-        #         rigid_contact_margin,
-        #         contact_max,
-        #         contact_count,
-        #         out_shape0,
-        #         out_shape1,
-        #         out_point0,
-        #         out_point1,
-        #         out_offset0,
-        #         out_offset1,
-        #         out_normal,
-        #         out_thickness0,
-        #         out_thickness1,
-        #         out_tids,
-        #     )
+        offset_mag_a = radius_eff_a + thickness_a
+        offset_mag_b = radius_eff_b + thickness_b
 
-        # return
+        # Call collide_plane_sphere to get contact information
+        contact_distance, contact_position = collide_plane_sphere(
+            plane_normal_world,  # plane_normal
+            pos_a,              # plane_pos (plane position in world space)
+            pos_b,              # sphere_pos (sphere position in world space)
+            sphere_radius,      # sphere_radius
+        )
 
+        a_contact_world = contact_position - plane_normal_world * 0.5*contact_distance
+        b_contact_world = contact_position + plane_normal_world * 0.5*contact_distance
+
+        # Use the write_contact function to write the contact
+        write_contact(
+            a_contact_world,
+            b_contact_world,
+            plane_normal_world,  # contact normal from plane to sphere
+            total_separation_needed,
+            offset_mag_a,
+            offset_mag_b,
+            shape_a,
+            shape_b,
+            X_bw_a,
+            X_bw_b,
+            tid,
+            rigid_contact_margin,
+            contact_max,
+            contact_count,
+            out_shape0,
+            out_shape1,
+            out_point0,
+            out_point1,
+            out_offset0,
+            out_offset1,
+            out_normal,
+            out_thickness0,
+            out_thickness1,
+            out_tids,
+        )
 
 
 class Model:

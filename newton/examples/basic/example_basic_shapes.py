@@ -76,10 +76,10 @@ class Example:
         # MuJoCo requires explicit joints for all free-floating bodies.
         # XPBD solver doesn't require joints but ignores them if present.
 
-        # # SPHERE
-        # body_sphere = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -2.0, drop_z), q=wp.quat_identity()))
-        # builder.add_shape_sphere(body_sphere, radius=0.5)
-        # builder.add_joint_free(body_sphere)  # Add free joint for MuJoCo
+        # SPHERE
+        body_sphere = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, -2.0, drop_z), q=wp.quat_identity()))
+        builder.add_shape_sphere(body_sphere, radius=0.5)
+        builder.add_joint_free(body_sphere)  # Add free joint for MuJoCo
 
         # # CAPSULE
         # body_capsule = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, drop_z), q=wp.quat_identity()))
