@@ -593,7 +593,7 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
         position_b: wp.vec3,
         sum_of_contact_offsets: float,
         data_provider: Any,
-    ) -> tuple[bool, wp.vec3, wp.vec3, float, int, int]:
+    ) -> tuple[bool, float, wp.vec3, wp.vec3, int, int]:
         """
         Solve GJK distance computation between two shapes.
 
@@ -608,7 +608,7 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
             data_provider: Support mapping data provider
 
         Returns:
-            Tuple of (collision, contact point center, normal, distance, feature A ID, feature B ID)
+            Tuple of (collision, distance, contact point center, normal, feature A ID, feature B ID)
         """
         # Transform into reference frame of body A
         relative_orientation_b = wp.quat_inverse(orientation_a) * orientation_b
@@ -635,6 +635,6 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
         # Align semantics with MPR: return collision flag
         collision = not separated
 
-        return collision, point, normal, distance, feature_a_id, feature_b_id
+        return collision, distance, point, normal, feature_a_id, feature_b_id
 
     return solve_closest_distance

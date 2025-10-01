@@ -107,7 +107,7 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
         wp.vec4i,
     ]:
         # Broad check with closest distance solver; refine with MPR on overlap for better anchors/normal
-        collision, point, normal, penetration, feature_a_id, feature_b_id = wp.static(
+        collision, penetration, point, normal, feature_a_id, feature_b_id = wp.static(
             create_solve_mpr(support_func, center_func)
         )(
             geom_a,
@@ -121,7 +121,7 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
         )
 
         if not collision:
-            collision, point, normal, penetration, feature_a_id, feature_b_id = wp.static(
+            collision, penetration, point, normal, feature_a_id, feature_b_id = wp.static(
                 create_solve_closest_distance(support_func, center_func)
             )(
                 geom_a,

@@ -386,7 +386,7 @@ def create_solve_mpr(support_func: Any, center_func: Any):
         position_b: wp.vec3,
         sum_of_contact_offsets: float,
         data_provider: Any,
-    ) -> tuple[bool, wp.vec3, wp.vec3, float, int, int]:
+    ) -> tuple[bool, float, wp.vec3, wp.vec3, int, int]:
         """
         Solve MPR (Minkowski Portal Refinement) for collision detection.
 
@@ -401,7 +401,7 @@ def create_solve_mpr(support_func: Any, center_func: Any):
             data_provider: Support mapping data provider
 
         Returns:
-            Tuple of (collision detected, contact point center, normal, penetration, feature A ID, feature B ID)
+            Tuple of (collision detected, penetration, contact point center, normal, feature A ID, feature B ID)
         """
         # Transform shape B to local space of shape A
         relative_orientation_b = wp.quat_inverse(orientation_a) * orientation_b
@@ -428,6 +428,6 @@ def create_solve_mpr(support_func: Any, center_func: Any):
         # Convert to Newton penetration convention
         penetration = -penetration
 
-        return collision, point, normal, penetration, feature_a_id, feature_b_id
+        return collision, penetration, point, normal, feature_a_id, feature_b_id
 
     return solve_mpr
