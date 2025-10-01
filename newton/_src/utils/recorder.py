@@ -591,21 +591,23 @@ def transfer_to_model(source_dict, target_obj, post_load_init_callback=None, _pa
         if callable(target_value):
             continue
 
-        # Check if source_dict has this attribute
-        if attr_name not in source_dict:
+        # Check if source_dict has this attribute (optimization: single dict lookup)
+        source_value = source_dict.get(attr_name, _MISSING := object())
+        if source_value is _MISSING:
             continue
-
-        source_value = source_dict[attr_name]
-        current_path = f"{_path}.{attr_name}" if _path else attr_name
 
         # Handle different types of values
         if hasattr(target_value, "__dict__") and isinstance(source_value, dict):
             # Recursively transfer for custom objects
+            # Build path only when needed (optimization: lazy string formatting)
+            current_path = f"{_path}.{attr_name}" if _path else attr_name
             transfer_to_model(source_value, target_value, post_load_init_callback, current_path)
         elif isinstance(source_value, list | tuple) and hasattr(target_value, "__len__"):
             # Handle sequences - try to transfer if lengths match or target is empty
             try:
-                if len(target_value) == 0 or len(target_value) == len(source_value):
+                # Optimization: cache len() call to avoid redundant computation
+                target_len = len(target_value)
+                if target_len == 0 or target_len == len(source_value):
                     # For now, just assign the value directly
                     # In a more sophisticated implementation, you might want to handle
                     # element-wise transfer for lists of objects
@@ -735,7 +737,10 @@ def depointer_as_key(data: dict, format_type: str = "json", cache: ArrayCache | 
     """
 
     def callback(x, path):
-        if isinstance(x, dict) and x.get("__type__") == "warp.array_ref":
+        # Optimization: extract type once to avoid repeated isinstance and dict lookups
+        x_type = x.get("__type__") if isinstance(x, dict) else None
+
+        if x_type == "warp.array_ref":
             if cache is None:
                 raise ValueError("ArrayCache required to resolve warp.array_ref")
             ref_index = int(x["cache_index"])
@@ -744,26 +749,27 @@ def depointer_as_key(data: dict, format_type: str = "json", cache: ArrayCache | 
             except KeyError:
                 return {"__cache_ref__": {"index": ref_index, "kind": "warp.array"}}
 
-        if isinstance(x, dict) and x.get("__type__") == "warp.array":
+        elif x_type == "warp.array":
             dtype_str = extract_last_type_name(x["__dtype__"])
             a = getattr(wp.types, dtype_str)
             np_arr = deserialize_ndarray(x["data"], format_type, cache)
             result = wp.array(np_arr, dtype=a)
-            # Register in cache if provided index present
-            if cache is not None and "cache_index" in x:
+            # Register in cache if provided index present (optimization: single dict lookup)
+            cache_index = x.get("cache_index")
+            if cache is not None and cache_index is not None:
                 key = _warp_key(result)
-                cache.try_register_pointer_and_value_and_index(key, result, int(x["cache_index"]))
+                cache.try_register_pointer_and_value_and_index(key, result, int(cache_index))
             return result
 
-        if isinstance(x, dict) and x.get("__type__") == "warp.HashGrid":
+        elif x_type == "warp.HashGrid":
             # Return None or create empty HashGrid as appropriate
             return None
 
-        if isinstance(x, dict) and x.get("__type__") == "warp.Mesh":
+        elif x_type == "warp.Mesh":
             # Return None or create empty Mesh as appropriate
             return None
 
-        if isinstance(x, dict) and x.get("__type__") == "newton.geometry.Mesh_ref":
+        elif x_type == "newton.geometry.Mesh_ref":
             if cache is None:
                 raise ValueError("ArrayCache required to resolve Mesh_ref")
             ref_index = int(x["cache_index"])
@@ -772,7 +778,7 @@ def depointer_as_key(data: dict, format_type: str = "json", cache: ArrayCache | 
             except KeyError:
                 return {"__cache_ref__": {"index": ref_index, "kind": "mesh"}}
 
-        if isinstance(x, dict) and x.get("__type__") == "newton.geometry.Mesh":
+        elif x_type == "newton.geometry.Mesh":
             mesh_data = x["data"]
             vertices = deserialize_ndarray(mesh_data["vertices"], format_type, cache)
             indices = deserialize_ndarray(mesh_data["indices"], format_type, cache)
@@ -790,12 +796,14 @@ def depointer_as_key(data: dict, format_type: str = "json", cache: ArrayCache | 
             mesh.mass = mesh_data["mass"]
             mesh.com = wp.vec3(*mesh_data["com"])
             mesh.I = wp.mat33(deserialize_ndarray(mesh_data["I"], format_type, cache))
-            if cache is not None and "cache_index" in x:
+            # Optimization: single dict lookup
+            cache_index = x.get("cache_index")
+            if cache is not None and cache_index is not None:
                 mesh_key = _mesh_key_from_vertices(vertices, fallback_obj=mesh)
-                cache.try_register_pointer_and_value_and_index(mesh_key, mesh, int(x["cache_index"]))
+                cache.try_register_pointer_and_value_and_index(mesh_key, mesh, int(cache_index))
             return mesh
 
-        if isinstance(x, dict) and x.get("__type__") == "callable":
+        elif x_type == "callable":
             # Return None for callables as they can't be serialized/deserialized
             return None
 
@@ -805,8 +813,10 @@ def depointer_as_key(data: dict, format_type: str = "json", cache: ArrayCache | 
 
     def _resolve_cache_refs(obj):
         if isinstance(obj, dict):
-            if "__cache_ref__" in obj:
-                idx = int(obj["__cache_ref__"]["index"])
+            # Optimization: single dict lookup instead of checking membership then accessing
+            cache_ref = obj.get("__cache_ref__")
+            if cache_ref is not None:
+                idx = int(cache_ref["index"])
                 # Will raise KeyError with clear message if still missing
                 return cache.try_get_value(idx) if cache is not None else obj
             # Recurse into dict
