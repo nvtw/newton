@@ -752,6 +752,11 @@ class CollisionPipeline2:
                 self.broad_phase_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
                 self.shape_aabb_lower = wp.zeros(shape_count, dtype=wp.vec3, device=device)
                 self.shape_aabb_upper = wp.zeros(shape_count, dtype=wp.vec3, device=device)
+                # Allocate dummy collision/shape group arrays once (reused every frame)
+                # Collision group: 1 (positive) = all shapes in same group, collide with each other
+                # Environment group: -1 (global) = collides with all environments
+                self.dummy_collision_group = wp.full(shape_count, 1, dtype=wp.int32, device=device)
+                self.dummy_shape_group = wp.full(shape_count, -1, dtype=wp.int32, device=device)
 
         if soft_contact_max is None:
             soft_contact_max = shape_count * particle_count
@@ -865,18 +870,15 @@ class CollisionPipeline2:
                 device=model.device,
             )
 
-            # Create dummy arrays for collision groups (all zeros/all can collide)
-            dummy_collision_group = wp.full(model.shape_count, 1, dtype=wp.int32, device=model.device)
-            dummy_shape_group = wp.full(model.shape_count, -1, dtype=wp.int32, device=model.device)
-
             # Use NxN broad phase to find potentially colliding pairs based on AABB overlaps
+            # Reuse preallocated dummy arrays for collision filtering
             self.broad_phase_pair_count.zero_()
             self.nxn_broadphase.launch(
                 self.shape_aabb_lower,
                 self.shape_aabb_upper,
                 model.shape_thickness,  # Use thickness as cutoff
-                dummy_collision_group,
-                dummy_shape_group,
+                self.dummy_collision_group,  # Preallocated, all 1 (same group = collide)
+                self.dummy_shape_group,      # Preallocated, all -1 (global entities)
                 model.shape_count,
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,

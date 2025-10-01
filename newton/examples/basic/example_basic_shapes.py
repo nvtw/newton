@@ -30,8 +30,8 @@ from pxr import Usd, UsdGeom
 import newton
 import newton.examples
 
-wp.config.mode = "debug"
-wp.config.verify_cuda = True
+# wp.config.mode = "debug"
+# wp.config.verify_cuda = True
 
 # Solver Selection
 # =================
@@ -43,6 +43,11 @@ SOLVER_TYPE = "XPBD"  # Options: "XPBD", "MUJOCO_NEWTON", "MUJOCO_NATIVE", "FEAT
 # - "MUJOCO_NEWTON": MuJoCo Warp solver using Newton contacts (best of both worlds)
 # - "MUJOCO_NATIVE": MuJoCo Warp solver using MuJoCo contacts (MuJoCo's native contact handling)
 # - "FEATHERSTONE": Featherstone reduced-coordinate solver (good for articulated systems)
+
+# CUDA Graph Capture
+# ==================
+# Enable CUDA graph capture for better performance (CUDA devices only)
+USE_CUDA_GRAPH = True  # Set to True to enable CUDA graph capture
 
 
 class Example:
@@ -198,14 +203,12 @@ class Example:
         self.capture()
 
     def capture(self):
-        # Disable CUDA graph capture for debugging
-        self.graph = None
-        # if wp.get_device().is_cuda:
-        #     with wp.ScopedCapture() as capture:
-        #         self.simulate()
-        #     self.graph = capture.graph
-        # else:
-        #     self.graph = None
+        if USE_CUDA_GRAPH and wp.get_device().is_cuda:
+            with wp.ScopedCapture() as capture:
+                self.simulate()
+            self.graph = capture.graph
+        else:
+            self.graph = None
 
     def simulate(self):
         for _ in range(self.sim_substeps):
