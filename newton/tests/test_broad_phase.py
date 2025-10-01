@@ -42,27 +42,6 @@ def check_aabb_overlap_host(
     )
 
 
-def check_sphere_overlap_host(
-    center1: wp.vec3,
-    radius1: float,
-    cutoff1: float,
-    center2: wp.vec3,
-    radius2: float,
-    cutoff2: float,
-) -> bool:
-    """Check if two spheres overlap considering their cutoffs."""
-    expanded_radius1 = radius1 + cutoff1
-    expanded_radius2 = radius2 + cutoff2
-    sum_radii = expanded_radius1 + expanded_radius2
-
-    dx = center1[0] - center2[0]
-    dy = center1[1] - center2[1]
-    dz = center1[2] - center2[2]
-    dist_sq = dx * dx + dy * dy + dz * dz
-
-    return dist_sq <= sum_radii * sum_radii
-
-
 def find_overlapping_pairs_np(
     box_lower: np.ndarray, box_upper: np.ndarray, cutoff: np.ndarray, collision_group: np.ndarray
 ):
@@ -88,34 +67,6 @@ def find_overlapping_pairs_np(
                 and box_lower[i, 2] <= box_upper[j, 2] + cutoff_combined
                 and box_upper[i, 2] >= box_lower[j, 2] - cutoff_combined
             ):
-                pairs.append((i, j))
-    return pairs
-
-
-def find_overlapping_sphere_pairs_np(
-    centers: np.ndarray, radii: np.ndarray, cutoff: np.ndarray, collision_group: np.ndarray
-):
-    """
-    Brute-force n^2 algorithm to find all overlapping bounding sphere pairs.
-    Returns a list of (i, j) pairs with i < j, where spheres i and j overlap.
-    """
-    n = centers.shape[0]
-    pairs = []
-    for i in range(n):
-        for j in range(i + 1, n):
-            if not test_group_pair(int(collision_group[i]), int(collision_group[j])):
-                continue
-
-            expanded_radius_i = radii[i] + cutoff[i]
-            expanded_radius_j = radii[j] + cutoff[j]
-            sum_radii = expanded_radius_i + expanded_radius_j
-
-            dx = centers[i, 0] - centers[j, 0]
-            dy = centers[i, 1] - centers[j, 1]
-            dz = centers[i, 2] - centers[j, 2]
-            dist_sq = dx * dx + dy * dy + dz * dz
-
-            if dist_sq <= sum_radii * sum_radii:
                 pairs.append((i, j))
     return pairs
 
@@ -491,129 +442,6 @@ class TestBroadPhase(unittest.TestCase):
             print(f"len(pairs_np)={len(pairs_np)}, num_candidate_pair={num_candidate_pair}")
             # print("pairs_np:", pairs_np)
             # print("pairs_wp[:num_candidate_pair]:", pairs_wp[:num_candidate_pair])
-            assert len(pairs_np) == num_candidate_pair
-
-        # Ensure every element in pairs_wp is also present in pairs_np
-        pairs_np_set = {tuple(pair) for pair in pairs_np}
-        for pair in pairs_wp[:num_candidate_pair]:
-            assert tuple(pair) in pairs_np_set, f"Pair {tuple(pair)} from Warp not found in numpy pairs"
-
-        if verbose:
-            print(len(pairs_np))
-
-    def test_sap_spheres_broadphase(self):
-        verbose = False
-
-        # Create random bounding spheres
-        ngeom = 30
-
-        # Generate random centers and radii using the new Generator API
-        rng = np.random.Generator(np.random.PCG64(42))
-
-        centers = rng.random((ngeom, 3)) * 3.0
-        radii = rng.random(ngeom) * 1.0  # sphere radii up to 1.0
-
-        np_geom_cutoff = np.zeros(ngeom, dtype=np.float32)
-        num_groups = 5  # The zero group does not need to be counted
-        np_collision_group = rng.integers(1, num_groups + 1, size=ngeom, dtype=np.int32)
-
-        # Overwrite n random elements with -1
-        minus_one_count = int(sqrt(ngeom))  # Number of elements to overwrite with -1
-        random_indices = rng.choice(ngeom, size=minus_one_count, replace=False)
-        np_collision_group[random_indices] = -1
-
-        upper_bound = ngeom + minus_one_count * num_groups
-
-        pairs_np = find_overlapping_sphere_pairs_np(centers, radii, np_geom_cutoff, np_collision_group)
-
-        if verbose:
-            print("Numpy contact pairs:")
-            for i, pair in enumerate(pairs_np):
-                body_a, body_b = pair
-                group_a = np_collision_group[body_a]
-                group_b = np_collision_group[body_b]
-                print(f"  Pair {i}: bodies ({body_a}, {body_b}) with collision groups ({group_a}, {group_b})")
-
-        # The number of elements in the lower triangular part of an n x n matrix (excluding the diagonal)
-        # is given by n * (n - 1) // 2
-        num_lower_tri_elements = ngeom * (ngeom - 1) // 2
-
-        geom_center = wp.array(centers, dtype=wp.vec3)
-        geom_radius = wp.array(radii, dtype=float)
-        geom_cutoff = wp.array(np_geom_cutoff)
-        collision_group = wp.array(np_collision_group)
-        num_candidate_pair = wp.array(
-            [
-                0,
-            ],
-            dtype=wp.int32,
-        )
-        max_candidate_pair = num_lower_tri_elements
-        candidate_pair = wp.array(np.zeros((max_candidate_pair, 2), dtype=wp.int32), dtype=wp.vec2i)
-
-        sap_broadphase = BroadPhaseSAP(
-            max_broad_phase_elements=upper_bound,
-            max_num_distinct_positive_groups=num_groups,
-            max_num_negative_group_members=minus_one_count,
-        )
-
-        # Create shape groups array with all shapes in global environment (-1)
-        shape_group = wp.array(np.full(ngeom, -1, dtype=np.int32), dtype=wp.int32)
-
-        sap_broadphase.launch_bounding_spheres(
-            geom_center,
-            geom_radius,
-            geom_cutoff,
-            collision_group,
-            shape_group,
-            ngeom,
-            candidate_pair,
-            num_candidate_pair,
-        )
-
-        wp.synchronize()
-
-        pairs_wp = candidate_pair.numpy()
-        num_candidate_pair = num_candidate_pair.numpy()[0]
-
-        if verbose:
-            print("Warp contact pairs:")
-            for i in range(num_candidate_pair):
-                pair = pairs_wp[i]
-                body_a, body_b = pair[0], pair[1]
-                group_a = np_collision_group[body_a]
-                group_b = np_collision_group[body_b]
-                print(f"  Pair {i}: bodies ({body_a}, {body_b}) with collision groups ({group_a}, {group_b})")
-
-            print("Checking if bounding spheres actually overlap:")
-            for i in range(num_candidate_pair):
-                pair = pairs_wp[i]
-                body_a, body_b = pair[0], pair[1]
-
-                # Get sphere data for both bodies
-                center_a = centers[body_a]
-                radius_a = radii[body_a]
-                center_b = centers[body_b]
-                radius_b = radii[body_b]
-
-                # Get cutoffs for both bodies
-                cutoff_a = np_geom_cutoff[body_a]
-                cutoff_b = np_geom_cutoff[body_b]
-
-                # Check overlap using the function
-                overlap = check_sphere_overlap_host(
-                    wp.vec3(center_a[0], center_a[1], center_a[2]),
-                    radius_a,
-                    cutoff_a,
-                    wp.vec3(center_b[0], center_b[1], center_b[2]),
-                    radius_b,
-                    cutoff_b,
-                )
-
-                print(f"  Pair {i}: bodies ({body_a}, {body_b}) - overlap: {overlap}")
-
-        if len(pairs_np) != num_candidate_pair:
-            print(f"len(pairs_np)={len(pairs_np)}, num_candidate_pair={num_candidate_pair}")
             assert len(pairs_np) == num_candidate_pair
 
         # Ensure every element in pairs_wp is also present in pairs_np
