@@ -1050,9 +1050,9 @@ def create_build_manifold(support_func: Any):
             contact_points_a[i] = left[i]
             contact_points_b[i] = right[i]
 
-            center = 0.5 * (contact_points_a[i] + contact_points_b[i])
-            contact_points_a[i] = project_point_onto_ray(contact_points_a[i], center, normal)
-            contact_points_b[i] = project_point_onto_ray(contact_points_b[i], center, normal)
+            # center = 0.5 * (contact_points_a[i] + contact_points_b[i])
+            # contact_points_a[i] = project_point_onto_ray(contact_points_a[i], center, normal)
+            # contact_points_b[i] = project_point_onto_ray(contact_points_b[i], center, normal)
 
             feature_ids[i] = int(result_features[i])
             # Newton convention: penetration is negative on overlap

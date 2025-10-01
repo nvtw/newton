@@ -381,7 +381,7 @@ class Example:
         xform_b = xform_b_array[tid]
 
         # Build multi-contact manifold and take the first contact
-        count, _penetrations, pts_a, pts_b, features = wp.static(
+        count, _normal_multi, _penetrations, pts_a, pts_b, features = wp.static(
             create_solve_convex_multi_contact(support_map_func, center_map)
         )(
             geom_a,

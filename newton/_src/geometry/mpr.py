@@ -419,11 +419,10 @@ def create_solve_mpr(support_func: Any, center_func: Any):
 
         collision, point_a, point_b, normal, penetration, feature_a_id, feature_b_id = result
 
-        if collision:
-            # Transform results back to world space
-            point_a = wp.quat_rotate(orientation_a, point_a) + position_a
-            point_b = wp.quat_rotate(orientation_a, point_b) + position_a
-            normal = wp.quat_rotate(orientation_a, normal)
+        # Transform results back to world space
+        point_a = wp.quat_rotate(orientation_a, point_a) + position_a
+        point_b = wp.quat_rotate(orientation_a, point_b) + position_a
+        normal = wp.quat_rotate(orientation_a, normal)
 
         # Convert to Newton penetration convention
         penetration = -penetration

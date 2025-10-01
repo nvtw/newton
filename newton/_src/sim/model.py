@@ -340,6 +340,22 @@ def build_contacts_kernel_gjk_mpr(
 
     data_provider = SupportMapDataProvider()
 
+
+    radius_eff_a = float(0.0)
+    radius_eff_b = float(0.0)
+
+    small_radius = 0.001
+
+    # Special treatment for minkowski objects
+    if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
+        radius_eff_a = geom_a.scale[0]
+        geom_a.scale[0] = small_radius
+
+    if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
+        radius_eff_b = geom_b.scale[0]
+        geom_b.scale[0] = small_radius
+
+
     count, normal, penetrations, points_a, points_b, features = wp.static(solve_convex_multi_contact)(
         geom_a,
         geom_b,
@@ -349,22 +365,23 @@ def build_contacts_kernel_gjk_mpr(
         pos_b_adjusted,
         0.0,  # sum_of_contact_offsets
         data_provider,
-        type_a == int(GeoType.SPHERE) or type_b == int(GeoType.SPHERE),
+        type_a == int(GeoType.SPHERE) or type_b == int(GeoType.SPHERE) #or type_a == int(GeoType.CAPSULE) or type_b == int(GeoType.CAPSULE),
     )
 
-    radius_eff_a = float(0.0)
     if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
-        radius_eff_a = geom_a.scale[0]
-
-    radius_eff_b = float(0.0)
+        for i in range(count):
+            points_a[i] = points_a[i] + normal * radius_eff_a
+            penetrations[i] -= (radius_eff_a - small_radius)
     if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
-        radius_eff_b = geom_b.scale[0]
+        for i in range(count):
+            points_b[i] = points_b[i] - normal * radius_eff_b
+            penetrations[i] -= (radius_eff_b - small_radius)
 
+  
     for id in range(count):
         write_contact(
             0.5 * (points_a[id] + points_b[id]),
             normal,
-            # wp.dot(normal, points_b[id] - points_a[id]),
             penetrations[id],
             radius_eff_a,
             radius_eff_b,

@@ -59,15 +59,15 @@ class Example:
 
         # replace ground plane with a large static box whose top face lies at z=0
         # attach directly to world (body = -1) so it is truly static
-        # builder.add_shape_box(
-        #     -1,
-        #     xform=wp.transform(p=wp.vec3(0.0, 0.0, -50.0), q=wp.quat_identity()),
-        #     hx=50.0,
-        #     hy=50.0,
-        #     hz=50.0,
-        # )
+        builder.add_shape_box(
+            -1,
+            xform=wp.transform(p=wp.vec3(0.0, 0.0, -50.0), q=wp.quat_identity()),
+            hx=50.0,
+            hy=50.0,
+            hz=50.0,
+        )
         # Add a ground plane at z=0
-        builder.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
+        # builder.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
 
         # z height to drop shapes from
         drop_z = 2.0
