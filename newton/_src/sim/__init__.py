@@ -17,6 +17,7 @@ from . import ik
 from .articulation import eval_fk, eval_ik
 from .builder import ModelBuilder
 from .collide import CollisionPipeline, count_rigid_contact_points
+from .collide2 import BroadPhaseMode
 from .contacts import Contacts
 from .control import Control
 from .graph_coloring import color_graph, plot_graph
@@ -31,6 +32,7 @@ from .state import State
 from .style3d import Style3DModel, Style3DModelBuilder
 
 __all__ = [
+    "BroadPhaseMode",
     "CollisionPipeline",
     "Contacts",
     "Control",

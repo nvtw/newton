@@ -49,6 +49,14 @@ SOLVER_TYPE = "XPBD"  # Options: "XPBD", "MUJOCO_NEWTON", "MUJOCO_NATIVE", "FEAT
 # Enable CUDA graph capture for better performance (CUDA devices only)
 USE_CUDA_GRAPH = True  # Set to True to enable CUDA graph capture
 
+# Broad Phase Mode
+# ================
+# Choose broad phase collision detection mode:
+# - newton.BroadPhaseMode.NONE: Use explicit shape pairs (fastest if pairs are known)
+# - newton.BroadPhaseMode.NXN: All-pairs AABB (O(N²), good for small scenes)
+# - newton.BroadPhaseMode.SAP: Sweep-and-prune AABB (O(N log N), better for larger scenes)
+BROAD_PHASE_MODE = newton.BroadPhaseMode.SAP
+
 
 class Example:
     def __init__(self, viewer):
@@ -120,7 +128,7 @@ class Example:
         # Build multiple pyramids of cubes
         pyramid_size = 20  # Number of cubes at the base
         cube_spacing = 2.1 * cube_h  # Space between cube centers
-        num_pyramids = 1  # Number of pyramids to build
+        num_pyramids = 5  # Number of pyramids to build
         pyramid_spacing = 2 * cube_spacing  # Space between pyramids
 
         for pyramid in range(num_pyramids):
@@ -193,7 +201,7 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.state_0)
+        self.contacts = self.model.collide(self.state_0, broad_phase_mode=BROAD_PHASE_MODE)
 
         self.viewer.set_model(self.model)
 

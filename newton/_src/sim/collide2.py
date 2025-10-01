@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from enum import IntEnum
+
 import warp as wp
 
 from ..core.types import Devicelike
 from ..geometry.broad_phase_nxn import BroadPhaseAllPairs
+from ..geometry.broad_phase_sap import BroadPhaseSAP
 from ..geometry.collision_convex import create_solve_convex_multi_contact
 from ..geometry.collision_primitive import collide_plane_box, collide_plane_sphere, collide_sphere_box, collide_box_box
 from ..geometry.support_function import (
@@ -15,6 +18,19 @@ from ..geometry.types import GeoType
 from .contacts import Contacts
 from .model import Model
 from .state import State
+
+
+class BroadPhaseMode(IntEnum):
+    """Broad phase collision detection mode.
+    
+    Attributes:
+        NONE: No broad phase, use explicitly provided shape pairs (fastest if pairs are known)
+        NXN: All-pairs broad phase with AABB checks (simple, O(N²) but good for small scenes)
+        SAP: Sweep and Prune broad phase with AABB sorting (faster for larger scenes, O(N log N))
+    """
+    NONE = 0
+    NXN = 1
+    SAP = 2
 
 
 # Pre-create the convex multi-contact solver (usable inside kernels)
@@ -610,11 +626,15 @@ def compute_shape_aabbs(
     shape_body: wp.array(dtype=int),
     shape_type: wp.array(dtype=int),
     shape_scale: wp.array(dtype=wp.vec3),
+    rigid_contact_margin: float,
     # outputs
     aabb_lower: wp.array(dtype=wp.vec3),
     aabb_upper: wp.array(dtype=wp.vec3),
 ):
-    """Compute axis-aligned bounding boxes for each shape in world space."""
+    """Compute axis-aligned bounding boxes for each shape in world space.
+
+    AABBs are enlarged by rigid_contact_margin to account for contact detection margin.
+    """
     shape_id = wp.tid()
 
     rigid_id = shape_body[shape_id]
@@ -662,8 +682,10 @@ def compute_shape_aabbs(
         # Default: use scale as conservative estimate
         half_extents = scale
 
-    aabb_lower[shape_id] = pos - half_extents
-    aabb_upper[shape_id] = pos + half_extents
+    # Enlarge AABB by rigid_contact_margin for contact detection
+    margin_vec = wp.vec3(rigid_contact_margin, rigid_contact_margin, rigid_contact_margin)
+    aabb_lower[shape_id] = pos - half_extents - margin_vec
+    aabb_upper[shape_id] = pos + half_extents + margin_vec
 
 
 class CollisionPipeline2:
@@ -689,7 +711,7 @@ class CollisionPipeline2:
         iterate_mesh_vertices: bool = True,
         requires_grad: bool = False,
         device: Devicelike = None,
-        use_sap_broadphase: bool = True,
+        broad_phase_mode: BroadPhaseMode = BroadPhaseMode.NXN,
     ):
         """
         Initialize the CollisionPipeline.
@@ -698,7 +720,7 @@ class CollisionPipeline2:
             shape_count (int): Number of shapes in the simulation.
             particle_count (int): Number of particles in the simulation.
             shape_pairs_filtered (wp.array | None, optional): Array of filtered shape pairs to consider for collision.
-                If None and use_sap_broadphase is True, pairs will be computed dynamically using SAP broad phase.
+                Only used when broad_phase_mode is BroadPhaseMode.NONE.
             rigid_contact_max (int | None, optional): Maximum number of rigid contacts to allocate.
                 If None, computed as shape_pairs_max * rigid_contact_max_per_pair.
             rigid_contact_max_per_pair (int, optional): Maximum number of contact points per shape pair. Defaults to 10.
@@ -710,15 +732,18 @@ class CollisionPipeline2:
             iterate_mesh_vertices (bool, optional): Whether to iterate mesh vertices for collision. Defaults to True.
             requires_grad (bool, optional): Whether to enable gradient computation. Defaults to False.
             device (Devicelike, optional): The device on which to allocate arrays and perform computation.
-            use_sap_broadphase (bool, optional): If True and shape_pairs_filtered is None, use SAP broad phase
-                to dynamically compute potentially colliding pairs. Defaults to True.
+            broad_phase_mode (BroadPhaseMode, optional): Broad phase mode for collision detection.
+                - BroadPhaseMode.NONE: Use explicitly provided shape_pairs_filtered
+                - BroadPhaseMode.NXN: Use all-pairs AABB broad phase (O(N²), good for small scenes)
+                - BroadPhaseMode.SAP: Use sweep-and-prune AABB broad phase (O(N log N), better for larger scenes)
+                Defaults to BroadPhaseMode.NXN.
         """
         # will be allocated during collide
         self.contacts = None
 
         self.shape_count = shape_count
         self.shape_pairs_filtered = shape_pairs_filtered
-        self.use_sap_broadphase = use_sap_broadphase and shape_pairs_filtered is None
+        self.broad_phase_mode = broad_phase_mode
 
         if self.shape_pairs_filtered is not None:
             self.shape_pairs_max = len(self.shape_pairs_filtered)
@@ -732,11 +757,23 @@ class CollisionPipeline2:
         else:
             self.rigid_contact_max = self.shape_pairs_max * rigid_contact_max_per_pair
 
-        # Initialize NxN broad phase if needed
-        if self.use_sap_broadphase:
+        # Initialize broad phase based on mode
+        if self.broad_phase_mode == BroadPhaseMode.NXN:
             self.nxn_broadphase = BroadPhaseAllPairs()
-        else:
+            self.sap_broadphase = None
+        elif self.broad_phase_mode == BroadPhaseMode.SAP:
+            # Estimate max groups for SAP - use reasonable defaults
+            max_num_negative_group_members = max(int(shape_count ** 0.5), 10)
+            max_num_distinct_positive_groups = max(int(shape_count ** 0.5), 10)
+            self.sap_broadphase = BroadPhaseSAP(
+                max_broad_phase_elements=shape_count,
+                max_num_distinct_positive_groups=max_num_distinct_positive_groups,
+                max_num_negative_group_members=max_num_negative_group_members,
+            )
             self.nxn_broadphase = None
+        else:  # BroadPhaseMode.NONE
+            self.nxn_broadphase = None
+            self.sap_broadphase = None
 
         # Allocate buffers for broadphase collision handling
         with wp.ScopedDevice(device):
@@ -747,7 +784,7 @@ class CollisionPipeline2:
             self.rigid_pair_point_id = wp.empty(self.rigid_contact_max, dtype=wp.int32)
 
             # Allocate buffers for dynamically computed pairs and AABBs if using broad phase
-            if self.use_sap_broadphase:
+            if self.broad_phase_mode != BroadPhaseMode.NONE:
                 self.broad_phase_shape_pairs = wp.zeros(self.shape_pairs_max, dtype=wp.vec2i, device=device)
                 self.broad_phase_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
                 self.shape_aabb_lower = wp.zeros(shape_count, dtype=wp.vec3, device=device)
@@ -780,6 +817,7 @@ class CollisionPipeline2:
         edge_sdf_iter: int = 10,
         iterate_mesh_vertices: bool = True,
         requires_grad: bool | None = None,
+        broad_phase_mode: BroadPhaseMode = BroadPhaseMode.NXN,
     ) -> CollisionPipeline:
         """
         Create a CollisionPipeline instance from a Model.
@@ -794,6 +832,7 @@ class CollisionPipeline2:
             edge_sdf_iter (int, optional): Number of iterations for edge SDF collision. Defaults to 10.
             iterate_mesh_vertices (bool, optional): Whether to iterate mesh vertices for collision. Defaults to True.
             requires_grad (bool | None, optional): Whether to enable gradient computation. If None, uses model.requires_grad.
+            broad_phase_mode (BroadPhaseMode, optional): Broad phase collision detection mode. Defaults to BroadPhaseMode.NXN.
 
         Returns:
             CollisionPipeline: The constructed collision pipeline.
@@ -818,6 +857,7 @@ class CollisionPipeline2:
             iterate_mesh_vertices,
             requires_grad,
             model.device,
+            broad_phase_mode,
         )
 
 
@@ -850,9 +890,14 @@ class CollisionPipeline2:
         # output contacts buffer
         contacts = self.contacts
 
-        # Determine which shape pairs to check
-        if self.use_sap_broadphase:
-            # Compute AABBs for all shapes in world space
+        # Determine which shape pairs to check based on broad phase mode
+        if self.broad_phase_mode == BroadPhaseMode.NONE:
+            # Use explicitly provided shape pairs
+            shape_pairs = self.shape_pairs_filtered
+            num_pairs = len(self.shape_pairs_filtered) if self.shape_pairs_filtered is not None else 0
+        else:
+            # Compute AABBs for all shapes in world space (needed for both NXN and SAP)
+            # AABBs are enlarged by rigid_contact_margin to ensure contact detection
             wp.launch(
                 kernel=compute_shape_aabbs,
                 dim=model.shape_count,
@@ -862,6 +907,7 @@ class CollisionPipeline2:
                     model.shape_body,
                     model.shape_type,
                     model.shape_scale,
+                    self.rigid_contact_margin,
                 ],
                 outputs=[
                     self.shape_aabb_lower,
@@ -870,27 +916,36 @@ class CollisionPipeline2:
                 device=model.device,
             )
 
-            # Use NxN broad phase to find potentially colliding pairs based on AABB overlaps
-            # Reuse preallocated dummy arrays for collision filtering
+            # Run appropriate broad phase
             self.broad_phase_pair_count.zero_()
-            self.nxn_broadphase.launch(
-                self.shape_aabb_lower,
-                self.shape_aabb_upper,
-                model.shape_thickness,  # Use thickness as cutoff
-                self.dummy_collision_group,  # Preallocated, all 1 (same group = collide)
-                self.dummy_shape_group,      # Preallocated, all -1 (global entities)
-                model.shape_count,
-                self.broad_phase_shape_pairs,
-                self.broad_phase_pair_count,
-            )
+
+            if self.broad_phase_mode == BroadPhaseMode.NXN:
+                # Use NxN all-pairs broad phase with AABB overlaps
+                self.nxn_broadphase.launch(
+                    self.shape_aabb_lower,
+                    self.shape_aabb_upper,
+                    model.shape_thickness,  # Use thickness as cutoff
+                    self.dummy_collision_group,  # Preallocated, all 1 (same group = collide)
+                    self.dummy_shape_group,      # Preallocated, all -1 (global entities)
+                    model.shape_count,
+                    self.broad_phase_shape_pairs,
+                    self.broad_phase_pair_count,
+                )
+            else:  # BroadPhaseMode.SAP
+                # Use sweep-and-prune broad phase with AABB sorting
+                self.sap_broadphase.launch(
+                    self.shape_aabb_lower,
+                    self.shape_aabb_upper,
+                    model.shape_thickness,  # Use thickness as cutoff
+                    self.dummy_collision_group,  # Preallocated, all 1 (same group = collide)
+                    self.dummy_shape_group,      # Preallocated, all -1 (global entities)
+                    model.shape_count,
+                    self.broad_phase_shape_pairs,
+                    self.broad_phase_pair_count,
+                )
 
             shape_pairs = self.broad_phase_shape_pairs
-            # debug = self.broad_phase_pair_count.numpy()[0]
-            # print(f"debug: {debug}")
             num_pairs = -1  # Use dynamic count from kernel
-        else:
-            shape_pairs = self.shape_pairs_filtered
-            num_pairs = len(self.shape_pairs_filtered) if self.shape_pairs_filtered is not None else 0
 
         # Launch kernel across all shape pairs
         block_dim = 128
