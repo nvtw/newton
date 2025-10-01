@@ -155,8 +155,9 @@ class ArrayCache(Generic[T]):
         Returns:
             Existing index if the key already exists; otherwise 0 after inserting a new entry.
         """
-        if key in self._key_to_entry:
-            existing_index, _ = self._key_to_entry[key]
+        existing_entry = self._key_to_entry.get(key, None)
+        if existing_entry is not None:
+            existing_index, _ = existing_entry
             return existing_index
 
         assigned_index = self._next_index
@@ -170,17 +171,13 @@ class ArrayCache(Generic[T]):
         Resolve an object by its index.
 
         Args:
-            index: Previously assigned index
+            index: Previously assigned index from try_register_pointer_and_value() or
+                  try_register_pointer_and_value_and_index()
 
         Returns:
             The object associated with the given index.
-
-        Raises:
-            KeyError if the index cannot be found.
         """
-        if index in self._index_to_entry:
-            return self._index_to_entry[index]
-        raise KeyError(f"ArrayCache: index {index} not found")
+        return self._index_to_entry[index]
 
     def try_register_pointer_and_value_and_index(self, key: int, value: T, index: int) -> int:
         """
@@ -192,15 +189,17 @@ class ArrayCache(Generic[T]):
           Adds the mapping and returns the index.
         - Advances the internal next-index counter if necessary.
         """
-        if key in self._key_to_entry:
-            existing_index, existing_value = self._key_to_entry[key]
+        existing_entry = self._key_to_entry.get(key, None)
+        if existing_entry is not None:
+            existing_index, existing_value = existing_entry
             if existing_index != index:
                 raise ValueError(
                     f"ArrayCache: key already registered with a different index (have {existing_index}, got {index})"
                 )
             return existing_index
 
-        if index in self._index_to_entry:
+        existing_value = self._index_to_entry.get(index, None)
+        if existing_value is not None:
             raise ValueError(f"ArrayCache: index {index} already in use for another entry")
 
         self._key_to_entry[key] = (index, value)
@@ -211,9 +210,10 @@ class ArrayCache(Generic[T]):
 
     def get_index_for_key(self, key: int) -> int:
         """Return the assigned index for an existing key, else raise KeyError."""
-        if key not in self._key_to_entry:
+        existing_entry = self._key_to_entry.get(key, None)
+        if existing_entry is None:
             raise KeyError(f"ArrayCache: key {key} not found")
-        return self._key_to_entry[key][0]
+        return existing_entry[0]
 
     def clear(self) -> None:
         """Remove all entries and reset the index counter."""
