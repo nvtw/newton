@@ -812,37 +812,31 @@ def extract_4_point_contact_manifolds(
         ic = int(result[2])
         id = int(result[3])
 
-        a = m_b[ia]
-        feat_a = feature_id(loop_seg_ids, ia, loop_count, features_a, features_b, m_a_count, m_b_count)
-        b = m_b[ib]
-        feat_b = feature_id(loop_seg_ids, ib, loop_count, features_a, features_b, m_a_count, m_b_count)
-        c = m_b[ic]
-        feat_c = feature_id(loop_seg_ids, ic, loop_count, features_a, features_b, m_a_count, m_b_count)
-        d = m_b[id]
-        feat_d = feature_id(loop_seg_ids, id, loop_count, features_a, features_b, m_a_count, m_b_count)
+        result_features[0] = feature_id(loop_seg_ids, ia, loop_count, features_a, features_b, m_a_count, m_b_count)
+        result_features[1] = feature_id(loop_seg_ids, ib, loop_count, features_a, features_b, m_a_count, m_b_count)
+        result_features[2] = feature_id(loop_seg_ids, ic, loop_count, features_a, features_b, m_a_count, m_b_count)
+        result_features[3] = feature_id(loop_seg_ids, id, loop_count, features_a, features_b, m_a_count, m_b_count)
 
         # Transform back to world space using projectors
+        a = m_b[ia]
         a_world = a[0] * cross_vector_1 + a[1] * cross_vector_2 + center
+        b = m_b[ib]
         b_world = b[0] * cross_vector_1 + b[1] * cross_vector_2 + center
+        c = m_b[ic]
         c_world = c[0] * cross_vector_1 + c[1] * cross_vector_2 + center
+        d = m_b[id]
         d_world = d[0] * cross_vector_1 + d[1] * cross_vector_2 + center
 
         # normal vector points from A to B
-        m_a[0] = body_projector_project(projector_a, a_world, -normal)
-        m_a[1] = body_projector_project(projector_a, b_world, -normal)
-        m_a[2] = body_projector_project(projector_a, c_world, -normal)
-        m_a[3] = body_projector_project(projector_a, d_world, -normal)
+        m_a[0] = body_projector_project(projector_a, a_world, normal)
+        m_a[1] = body_projector_project(projector_a, b_world, normal)
+        m_a[2] = body_projector_project(projector_a, c_world, normal)
+        m_a[3] = body_projector_project(projector_a, d_world, normal)
 
         m_b[0] = body_projector_project(projector_b, a_world, normal)
         m_b[1] = body_projector_project(projector_b, b_world, normal)
         m_b[2] = body_projector_project(projector_b, c_world, normal)
         m_b[3] = body_projector_project(projector_b, d_world, normal)
-
-        # Features via external result buffer
-        result_features[0] = feat_a
-        result_features[1] = feat_b
-        result_features[2] = feat_c
-        result_features[3] = feat_d
 
         loop_count = 4
     else:

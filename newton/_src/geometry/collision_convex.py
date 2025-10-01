@@ -97,6 +97,7 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
         position_b: wp.vec3,
         sum_of_contact_offsets: float,
         data_provider: Any,
+        contact_threshold: float = 0.0,
         skip_multi_contact: bool = False,
     ) -> tuple[
         int,
@@ -149,7 +150,7 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
 
         #    wp.printf("MPR point_a: (%f,%f,%f), point_b: (%f,%f,%f), normal: (%f,%f,%f), dist: %f\n", point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2], normal[0], normal[1], normal[2], penetration)
 
-        if skip_multi_contact:
+        if skip_multi_contact or penetration > contact_threshold:
             count = 1
             penetrations = wp.vec4(penetration, 0.0, 0.0, 0.0)
             points_a = _mat43f()

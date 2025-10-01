@@ -59,15 +59,15 @@ class Example:
 
         # replace ground plane with a large static box whose top face lies at z=0
         # attach directly to world (body = -1) so it is truly static
-        builder.add_shape_box(
-            -1,
-            xform=wp.transform(p=wp.vec3(0.0, 0.0, -50.0), q=wp.quat_identity()),
-            hx=50.0,
-            hy=50.0,
-            hz=50.0,
-        )
+        # builder.add_shape_box(
+        #     -1,
+        #     xform=wp.transform(p=wp.vec3(0.0, 0.0, -50.0), q=wp.quat_identity()),
+        #     hx=50.0,
+        #     hy=50.0,
+        #     hz=50.0,
+        # )
         # Add a ground plane at z=0
-        # builder.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
+        builder.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
 
         # z height to drop shapes from
         drop_z = 2.0
@@ -109,21 +109,28 @@ class Example:
         z2 = z1 + 2.0 * cube_h + gap
         z3 = z2 + 2.0 * cube_h + gap
 
-        # Build a pyramid of cubes
+        # Build multiple pyramids of cubes
         pyramid_size = 20  # Number of cubes at the base
         cube_spacing = 2.1 * cube_h  # Space between cube centers
+        num_pyramids = 1  # Number of pyramids to build
+        pyramid_spacing = 2 * cube_spacing  # Space between pyramids
 
-        for level in range(pyramid_size):
-            num_cubes_in_row = pyramid_size - level
-            row_width = (num_cubes_in_row - 1) * cube_spacing
+        for pyramid in range(num_pyramids):
+            # Offset each pyramid along y-axis (back/forward)
+            y_offset = pyramid * pyramid_spacing
 
-            for i in range(num_cubes_in_row):
-                x_pos = -row_width / 2 + i * cube_spacing
-                z_pos = level * cube_spacing + cube_h
+            for level in range(pyramid_size):
+                num_cubes_in_row = pyramid_size - level
+                row_width = (num_cubes_in_row - 1) * cube_spacing
 
-                body = builder.add_body(xform=wp.transform(p=wp.vec3(x_pos, y_stack, z_pos), q=wp.quat_identity()))
-                builder.add_shape_box(body, hx=cube_h, hy=cube_h, hz=cube_h)
-                builder.add_joint_free(body)  # Add free joint for MuJoCo
+                for i in range(num_cubes_in_row):
+                    x_pos = -row_width/2 + i * cube_spacing
+                    z_pos = level * cube_spacing + cube_h
+                    y_pos = y_stack + y_offset
+
+                    body = builder.add_body(xform=wp.transform(p=wp.vec3(x_pos, y_pos, z_pos), q=wp.quat_identity()))
+                    builder.add_shape_box(body, hx=cube_h, hy=cube_h, hz=cube_h)
+                    builder.add_joint_free(body)  # Add free joint for MuJoCo
 
         # # MESH (bunny)
         # usd_stage = Usd.Stage.Open(newton.examples.get_asset("bunny.usd"))
