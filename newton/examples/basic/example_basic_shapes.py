@@ -124,7 +124,7 @@ class Example:
                 row_width = (num_cubes_in_row - 1) * cube_spacing
 
                 for i in range(num_cubes_in_row):
-                    x_pos = -row_width/2 + i * cube_spacing
+                    x_pos = -row_width / 2 + i * cube_spacing
                     z_pos = level * cube_spacing + cube_h
                     y_pos = y_stack + y_offset
 
