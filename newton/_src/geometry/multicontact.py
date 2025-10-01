@@ -965,7 +965,6 @@ def create_build_manifold(support_func: Any):
         int,
         wp.vec4,
         wp.types.matrix((4, 3), wp.float32),
-        wp.types.matrix((4, 3), wp.float32),
         wp.vec4i,
     ]:
         """
@@ -998,8 +997,8 @@ def create_build_manifold(support_func: Any):
             A tuple containing:
             - int: Number of valid contact points in the manifold (0-4).
             - wp.vec4: Penetration depths for each contact point (negative when shapes overlap).
-            - wp.types.matrix((4, 3), wp.float32): Contact points on shape A in world space.
-            - wp.types.matrix((4, 3), wp.float32): Contact points on shape B in world space.
+            - wp.types.matrix((4, 3), wp.float32): Contact points at the center of the manifold contact
+              (midpoint between points on shape A and shape B) in world space.
             - wp.vec4i: Feature IDs for each contact point, enabling contact tracking across
               multiple frames for warm starting and contact persistence.
 

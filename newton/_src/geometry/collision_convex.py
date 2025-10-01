@@ -104,11 +104,10 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
         wp.vec3,
         wp.vec4,
         wp.types.matrix((4, 3), wp.float32),
-        wp.types.matrix((4, 3), wp.float32),
         wp.vec4i,
     ]:
         # Broad check with closest distance solver; refine with MPR on overlap for better anchors/normal
-        collision, point_a, point_b, normal, penetration, feature_a_id, feature_b_id = wp.static(
+        collision, point, normal, penetration, feature_a_id, feature_b_id = wp.static(
             create_solve_mpr(support_func, center_func)
         )(
             geom_a,
@@ -122,7 +121,7 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
         )
 
         if not collision:
-            collision, point_a, point_b, normal, penetration, feature_a_id, feature_b_id = wp.static(
+            collision, point, normal, penetration, feature_a_id, feature_b_id = wp.static(
                 create_solve_closest_distance(support_func, center_func)
             )(
                 geom_a,
@@ -154,7 +153,7 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
             count = 1
             penetrations = wp.vec4(penetration, 0.0, 0.0, 0.0)
             points = _mat43f()
-            points[0] = 0.5 * (point_a + point_b)
+            points[0] = point
             features = wp.vec4i(0)
             return count, normal, penetrations, points, features
 
@@ -165,8 +164,8 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
             orientation_b,
             position_a,
             position_b,
-            point_a,
-            point_b,
+            point - normal * (penetration * 0.5),
+            point + normal * (penetration * 0.5),
             normal,
             feature_a_id,
             feature_b_id,
@@ -177,12 +176,12 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
         #          count,
         #          normal[0], normal[1], normal[2],
         #          points_a[0][0], points_a[0][1], points_a[0][2],
-        #          points_a[1][0], points_a[1][1], points_a[1][2], 
+        #          points_a[1][0], points_a[1][1], points_a[1][2],
         #          points_a[2][0], points_a[2][1], points_a[2][2],
         #          points_a[3][0], points_a[3][1], points_a[3][2],
         #          points_b[0][0], points_b[0][1], points_b[0][2],
         #          points_b[1][0], points_b[1][1], points_b[1][2],
-        #          points_b[2][0], points_b[2][1], points_b[2][2], 
+        #          points_b[2][0], points_b[2][1], points_b[2][2],
         #          points_b[3][0], points_b[3][1], points_b[3][2],
         #          penetrations[0], penetrations[1], penetrations[2], penetrations[3])
 

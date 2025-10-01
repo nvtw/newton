@@ -593,7 +593,7 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
         position_b: wp.vec3,
         sum_of_contact_offsets: float,
         data_provider: Any,
-    ) -> tuple[bool, wp.vec3, wp.vec3, wp.vec3, float, int, int]:
+    ) -> tuple[bool, wp.vec3, wp.vec3, float, int, int]:
         """
         Solve GJK distance computation between two shapes.
 
@@ -608,7 +608,7 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
             data_provider: Support mapping data provider
 
         Returns:
-            Tuple of (collision, point A, point B, normal, distance, feature A ID, feature B ID)
+            Tuple of (collision, contact point center, normal, distance, feature A ID, feature B ID)
         """
         # Transform into reference frame of body A
         relative_orientation_b = wp.quat_inverse(orientation_a) * orientation_b
@@ -626,14 +626,15 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
 
         separated, point_a, point_b, normal, distance, feature_a_id, feature_b_id = result
 
+        point = 0.5 * (point_a + point_b)
+
         # Transform results back to world space
-        point_a = wp.quat_rotate(orientation_a, point_a) + position_a
-        point_b = wp.quat_rotate(orientation_a, point_b) + position_a
+        point = wp.quat_rotate(orientation_a, point) + position_a
         normal = wp.quat_rotate(orientation_a, normal)
 
         # Align semantics with MPR: return collision flag
         collision = not separated
 
-        return collision, point_a, point_b, normal, distance, feature_a_id, feature_b_id
+        return collision, point, normal, distance, feature_a_id, feature_b_id
 
     return solve_closest_distance
