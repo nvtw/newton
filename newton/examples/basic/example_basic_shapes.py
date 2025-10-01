@@ -55,7 +55,7 @@ USE_CUDA_GRAPH = True  # Set to True to enable CUDA graph capture
 # - newton.BroadPhaseMode.NONE: Use explicit shape pairs (fastest if pairs are known)
 # - newton.BroadPhaseMode.NXN: All-pairs AABB (O(N²), good for small scenes)
 # - newton.BroadPhaseMode.SAP: Sweep-and-prune AABB (O(N log N), better for larger scenes)
-BROAD_PHASE_MODE = newton.BroadPhaseMode.NONE
+BROAD_PHASE_MODE = newton.BroadPhaseMode.SAP
 
 
 class Example:
@@ -229,7 +229,8 @@ class Example:
             # Compute contacts - needed for Newton contact solvers and XPBD
             # MuJoCo with native contacts computes its own contacts internally
             if SOLVER_TYPE in ["XPBD", "MUJOCO_NEWTON", "FEATHERSTONE"]:
-                self.contacts = self.model.collide(self.state_0)
+                # Pass dt for speculative AABB expansion based on velocity
+                self.contacts = self.model.collide(self.state_0, dt=self.sim_dt)
             else:
                 self.contacts = None  # MuJoCo native contacts don't need Newton contacts
 

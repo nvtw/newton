@@ -543,6 +543,7 @@ class Model:
         iterate_mesh_vertices: bool = True,
         requires_grad: bool | None = None,
         broad_phase_mode = None,
+        dt: float = 0.0,
     ) -> Contacts:
         """
         Generate contact points for the particles and rigid bodies in the model.
@@ -565,6 +566,7 @@ class Model:
             requires_grad (bool, optional): Whether to duplicate contact arrays for gradient computation. If None, uses :attr:`Model.requires_grad`.
             broad_phase_mode (BroadPhaseMode, optional): Broad phase collision detection mode. Only used when creating a new collision pipeline.
                 If None, defaults to BroadPhaseMode.NXN.
+            dt (float, optional): Timestep for speculative AABB expansion based on velocity (for continuous collision detection). Default is 0.0.
 
         Returns:
             Contacts: The contact object containing collision information.
@@ -598,7 +600,7 @@ class Model:
         self._collision_pipeline.edge_sdf_iter = edge_sdf_iter
         self._collision_pipeline.iterate_mesh_vertices = iterate_mesh_vertices
 
-        return self._collision_pipeline.collide(self, state)
+        return self._collision_pipeline.collide(self, state, dt)
 
     def add_attribute(self, name: str, attrib: wp.array, frequency: str):
         """

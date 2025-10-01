@@ -203,6 +203,7 @@ def convert_infinite_plane_to_cube(
 @wp.kernel(enable_backward=False)
 def build_contacts_kernel_gjk_mpr(
     body_q: wp.array(dtype=wp.transform),
+    body_qd: wp.array(dtype=wp.spatial_vector),
     shape_transform: wp.array(dtype=wp.transform),
     shape_body: wp.array(dtype=int),
     shape_type: wp.array(dtype=int),
@@ -212,6 +213,7 @@ def build_contacts_kernel_gjk_mpr(
     shape_pairs: wp.array(dtype=wp.vec2i),
     sum_of_contact_offsets: float,
     rigid_contact_margin: float,
+    dt: float,
     contact_max: int,
     num_pairs: int,
     sap_shape_pair_count: wp.array(dtype=int),
@@ -282,9 +284,30 @@ def build_contacts_kernel_gjk_mpr(
     is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
     is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (scale_b[0] == 0.0 and scale_b[1] == 0.0)
 
-    # Early bounding sphere check using precomputed collision radii - inflate by rigid_contact_margin
-    radius_a = shape_collision_radius[shape_a] + rigid_contact_margin
-    radius_b = shape_collision_radius[shape_b] + rigid_contact_margin
+    # Compute speculative margin based on relative velocity
+    speculative_margin = 0.0
+    if dt > 0.0:
+        # Get velocities of both bodies
+        vel_a = wp.vec3(0.0, 0.0, 0.0)
+        vel_b = wp.vec3(0.0, 0.0, 0.0)
+
+        if rigid_a != -1:
+            vel_a = wp.spatial_bottom(body_qd[rigid_a])
+        if rigid_b != -1:
+            vel_b = wp.spatial_bottom(body_qd[rigid_b])
+
+        # Compute relative velocity magnitude
+        relative_vel = vel_b - vel_a
+        relative_speed = wp.length(relative_vel)
+
+        # Speculative margin is the distance objects could move toward each other in one timestep
+        speculative_margin = relative_speed * dt
+
+    # Early bounding sphere check using precomputed collision radii
+    # Inflate by rigid_contact_margin + speculative_margin
+    effective_margin = rigid_contact_margin + speculative_margin
+    radius_a = shape_collision_radius[shape_a] + effective_margin
+    radius_b = shape_collision_radius[shape_b] + effective_margin
     center_distance = wp.length(pos_b - pos_a)
 
     # Early out if bounding spheres don't overlap
@@ -366,7 +389,7 @@ def build_contacts_kernel_gjk_mpr(
         pos_b_adjusted,
         0.0,  # sum_of_contact_offsets - gap
         data_provider,
-        rigid_contact_margin + radius_eff_a + radius_eff_b,
+        effective_margin + radius_eff_a + radius_eff_b,
         type_a == int(GeoType.SPHERE) or type_b == int(GeoType.SPHERE),
     )
 
@@ -394,7 +417,7 @@ def build_contacts_kernel_gjk_mpr(
             X_bw_a,
             X_bw_b,
             tid,
-            rigid_contact_margin,
+            effective_margin,
             contact_max,
             contact_count,
             out_shape0,
@@ -440,7 +463,7 @@ def build_contacts_kernel_gjk_mpr(
                     X_bw_a,
                     X_bw_b,
                     tid,
-                    rigid_contact_margin,
+                    effective_margin,
                     contact_max,
                     contact_count,
                     out_shape0,
@@ -485,7 +508,7 @@ def build_contacts_kernel_gjk_mpr(
             X_bw_a,
             X_bw_b,
             tid,
-            rigid_contact_margin,
+            effective_margin,
             contact_max,
             contact_count,
             out_shape0,
@@ -621,18 +644,22 @@ def build_contacts_kernel_gjk_mpr(
 @wp.kernel
 def compute_shape_aabbs(
     body_q: wp.array(dtype=wp.transform),
+    body_qd: wp.array(dtype=wp.spatial_vector),
     shape_transform: wp.array(dtype=wp.transform),
     shape_body: wp.array(dtype=int),
     shape_type: wp.array(dtype=int),
     shape_scale: wp.array(dtype=wp.vec3),
     rigid_contact_margin: float,
+    dt: float,
     # outputs
     aabb_lower: wp.array(dtype=wp.vec3),
     aabb_upper: wp.array(dtype=wp.vec3),
 ):
     """Compute axis-aligned bounding boxes for each shape in world space.
 
-    AABBs are enlarged by rigid_contact_margin to account for contact detection margin.
+    AABBs are enlarged by:
+    1. rigid_contact_margin for contact detection margin
+    2. Speculative bounds based on linear velocity * dt (for continuous collision detection)
     """
     shape_id = wp.tid()
 
@@ -689,8 +716,28 @@ def compute_shape_aabbs(
 
     # Enlarge AABB by rigid_contact_margin for contact detection
     margin_vec = wp.vec3(rigid_contact_margin, rigid_contact_margin, rigid_contact_margin)
-    aabb_lower[shape_id] = pos - half_extents - margin_vec
-    aabb_upper[shape_id] = pos + half_extents + margin_vec
+
+    # Add speculative bounds based on velocity
+    # Get linear velocity (first 3 components of spatial velocity)
+    speculative_expansion = wp.vec3(0.0, 0.0, 0.0)
+    if rigid_id != -1 and dt > 0.0:
+        # Extract linear velocity from spatial velocity (w, v) -> we want v
+        spatial_vel = body_qd[rigid_id]
+        linear_vel = wp.spatial_bottom(spatial_vel)  # Get linear velocity component
+
+        # Compute displacement over timestep
+        displacement = linear_vel * dt
+
+        # Expand AABB in the direction of motion
+        # For each axis, expand in the direction the object is moving
+        speculative_expansion = wp.vec3(
+            wp.abs(displacement[0]),
+            wp.abs(displacement[1]),
+            wp.abs(displacement[2])
+        )
+
+    aabb_lower[shape_id] = pos - half_extents - margin_vec - speculative_expansion
+    aabb_upper[shape_id] = pos + half_extents + margin_vec + speculative_expansion
 
 
 class CollisionPipeline2:
@@ -865,7 +912,7 @@ class CollisionPipeline2:
             broad_phase_mode,
         )
 
-    def collide(self, model: Model, state: State) -> Contacts:
+    def collide(self, model: Model, state: State, dt: float = 0.0) -> Contacts:
         """
         Run the collision pipeline for the given model and state, generating contacts.
 
@@ -876,6 +923,7 @@ class CollisionPipeline2:
         Args:
             model (Model): The simulation model.
             state (State): The current simulation state.
+            dt (float): Timestep for speculative AABB expansion based on velocity. Default is 0.0 (no expansion).
 
         Returns:
             Contacts: The generated contacts for the current state.
@@ -901,17 +949,19 @@ class CollisionPipeline2:
             num_pairs = len(self.shape_pairs_filtered) if self.shape_pairs_filtered is not None else 0
         else:
             # Compute AABBs for all shapes in world space (needed for both NXN and SAP)
-            # AABBs are enlarged by rigid_contact_margin to ensure contact detection
+            # AABBs are enlarged by rigid_contact_margin and speculative velocity expansion
             wp.launch(
                 kernel=compute_shape_aabbs,
                 dim=model.shape_count,
                 inputs=[
                     state.body_q,
+                    state.body_qd,
                     model.shape_transform,
                     model.shape_body,
                     model.shape_type,
                     model.shape_scale,
                     self.rigid_contact_margin,
+                    dt,
                 ],
                 outputs=[
                     self.shape_aabb_lower,
@@ -959,6 +1009,7 @@ class CollisionPipeline2:
                 dim=num_pairs if num_pairs != -1 else block_dim * 256,
                 inputs=[
                     state.body_q,
+                    state.body_qd,
                     model.shape_transform,
                     model.shape_body,
                     model.shape_type,
@@ -968,6 +1019,7 @@ class CollisionPipeline2:
                     shape_pairs,
                     0.0,  # sum_of_contact_offsets
                     self.rigid_contact_margin,
+                    dt,
                     contacts.rigid_contact_max,
                     num_pairs,
                     self.broad_phase_pair_count,
