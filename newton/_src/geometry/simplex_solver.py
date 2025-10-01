@@ -631,7 +631,7 @@ def create_solve_closest_distance(support_func: Any, center_func: Any):
         point_b = wp.quat_rotate(orientation_a, point_b) + position_a
         normal = wp.quat_rotate(orientation_a, normal)
 
-        # Align semantics with MPR: return collision flag and Newton normal convention
+        # Align semantics with MPR: return collision flag
         collision = not separated
 
         return collision, point_a, point_b, normal, distance, feature_a_id, feature_b_id

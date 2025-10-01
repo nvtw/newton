@@ -12,8 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from enum import IntEnum
-
 import warp as wp
 
 from .types import GeoType
@@ -43,6 +41,7 @@ class GenericShapeData:
       - ELLIPSOID: semi-axes (x, y, z)
       - CYLINDER: radius in x, half-height in y (axis +Z)
       - CONE: radius in x, half-height in y (axis +Z, apex at +Z)
+      - PLANE: half-width in x, half-length in y (lies in XY plane at z=0, normal along +Z)
     """
 
     shape_type: int
@@ -62,6 +61,9 @@ def center_func(geom: GenericShapeData, data_provider: SupportMapDataProvider) -
         # With base at z=-half_height and apex at z=+half_height, this is z = -half_height/2.
         half_height = geom.scale[1]
         return wp.vec3(0.0, 0.0, -0.5 * half_height)
+    elif geom.shape_type == int(GeoType.PLANE):
+        # Plane center is at the origin (plane is in XY plane, normal along +Z)
+        return wp.vec3(0.0, 0.0, 0.0)
     else:
         # For box, sphere, capsule, ellipsoid, cylinder: center is at origin
         return wp.vec3(0.0, 0.0, 0.0)
@@ -81,6 +83,7 @@ def support_map(
     - ELLIPSOID: semi-axes in x/y/z
     - CYLINDER: radius in x, half-height in y (axis along +Z)
     - CONE: radius in x, half-height in y (axis along +Z, apex at +Z)
+    - PLANE: half-width in x, half-length in y (lies in XY plane at z=0, normal along +Z)
     """
 
     # handle zero direction robustly
@@ -214,6 +217,26 @@ def support_map(
                 n_xy = dir_xy / dir_xy_len
                 result = wp.vec3(n_xy[0] * radius, n_xy[1] * radius, -half_height)
                 feature_id = 2  # base edge
+
+    elif geom.shape_type == int(GeoType.PLANE):
+        # Finite plane support: rectangular plane in XY, extents in scale[0] (half-width X) and scale[1] (half-length Y)
+        # The plane lies at z=0 with normal along +Z
+        half_width = geom.scale[0]
+        half_length = geom.scale[1]
+
+        # Clamp the direction to the plane boundaries
+        sx = 1.0 if dir_safe[0] >= 0.0 else -1.0
+        sy = 1.0 if dir_safe[1] >= 0.0 else -1.0
+
+        # The support point is at the corner in the XY plane (z=0)
+        result = wp.vec3(sx * half_width, sy * half_length, 0.0)
+
+        # Feature ID based on which corner
+        feature_id = 0
+        if sx >= 0.0:
+            feature_id |= 1
+        if sy >= 0.0:
+            feature_id |= 2
 
     else:
         # Unhandled type: return origin and feature 0

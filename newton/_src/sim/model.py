@@ -140,6 +140,68 @@ def write_contact(
         out_tids[index] = tid
 
 
+@wp.func
+def convert_infinite_plane_to_cube(
+    shape_data: GenericShapeData,
+    plane_rotation: wp.quat,
+    plane_position: wp.vec3,
+    other_position: wp.vec3,
+    other_radius: float,
+) -> tuple[GenericShapeData, wp.vec3]:
+    """
+    Convert an infinite plane into a cube proxy for GJK/MPR collision detection.
+
+    Since GJK/MPR cannot handle infinite planes, we create a finite cube where:
+    - The cube is positioned at the plane surface, directly under/over the other object
+    - The cube's lateral dimensions are sized based on the other object's bounding sphere
+    - The cube extends 'downward' from the plane (in -Z direction in plane's local frame)
+
+    Args:
+        shape_data: The plane's shape data (should have shape_type == GeoType.PLANE)
+        plane_rotation: The plane's orientation (plane normal is along local +Z)
+        plane_position: The plane's position in world space
+        other_position: The other object's position in world space
+        other_radius: Bounding sphere radius of the colliding object
+
+    Returns:
+        Tuple of (modified_shape_data, adjusted_position):
+        - modified_shape_data: GenericShapeData configured as a BOX
+        - adjusted_position: The cube's center position (centered on other object projected to plane)
+    """
+    result = GenericShapeData()
+    result.shape_type = int(GeoType.BOX)
+
+    # Size the cube based on the other object's bounding sphere radius
+    # Make it large enough to always contain potential contact points
+    # The lateral dimensions (x, y) should be at least 2x the radius to ensure coverage
+    lateral_size = other_radius * 2.0
+
+    # The depth (z) should be large enough to encompass the potential collision region
+    # Make it extend from above the plane surface to well below
+    depth = other_radius * 2.0
+
+    # Set the box half-extents
+    # x, y: lateral coverage (parallel to plane)
+    # z: depth perpendicular to plane
+    result.scale = wp.vec3(lateral_size, lateral_size, depth)
+
+    # Position the cube center at the plane surface, directly under/over the other object
+    # Project the other object's position onto the plane
+    plane_normal = wp.quat_rotate(plane_rotation, wp.vec3(0.0, 0.0, 1.0))
+    to_other = other_position - plane_position
+    distance_along_normal = wp.dot(to_other, plane_normal)
+
+    # Point on plane surface closest to the other object
+    plane_surface_point = other_position - plane_normal * distance_along_normal
+
+    # Position cube center slightly below the plane surface so the top face is at the surface
+    # Since the cube has half-extent 'depth', its top face is at center + depth*normal
+    # We want: center + depth*normal = plane_surface, so center = plane_surface - depth*normal
+    adjusted_position = plane_surface_point - plane_normal * depth
+
+    return result, adjusted_position
+
+
 @wp.kernel(enable_backward=False)
 def build_contacts_kernel_gjk_mpr(
     body_q: wp.array(dtype=wp.transform),
@@ -211,14 +273,41 @@ def build_contacts_kernel_gjk_mpr(
     pos_a = wp.transform_get_translation(X_ws_a)
     pos_b = wp.transform_get_translation(X_ws_b)
 
+    # Check if shapes are infinite planes (scale.x == 0 and scale.y == 0)
+    scale_a = shape_scale[shape_a]
+    scale_b = shape_scale[shape_b]
+    is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
+    is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (scale_b[0] == 0.0 and scale_b[1] == 0.0)
+
     # Early bounding sphere check using precomputed collision radii - inflate by rigid_contact_margin
     radius_a = shape_collision_radius[shape_a] + rigid_contact_margin
     radius_b = shape_collision_radius[shape_b] + rigid_contact_margin
     center_distance = wp.length(pos_b - pos_a)
 
     # Early out if bounding spheres don't overlap
-    if center_distance > (radius_a + radius_b):
+    # Skip this check if either shape is an infinite plane
+    if not (is_infinite_plane_a or is_infinite_plane_b):
+        if center_distance > (radius_a + radius_b):
+            return
+    elif is_infinite_plane_a and is_infinite_plane_b:
+        # Plane-plane collisions are not supported
         return
+    elif is_infinite_plane_a:
+        # Check if shape B is close enough to the infinite plane A
+        rot_a_temp = wp.transform_get_rotation(X_ws_a)
+        plane_normal = wp.quat_rotate(rot_a_temp, wp.vec3(0.0, 0.0, 1.0))
+        # Distance from shape B center to plane A
+        dist_to_plane = wp.abs(wp.dot(pos_b - pos_a, plane_normal))
+        if dist_to_plane > radius_b:
+            return
+    elif is_infinite_plane_b:
+        # Check if shape A is close enough to the infinite plane B
+        rot_b_temp = wp.transform_get_rotation(X_ws_b)
+        plane_normal = wp.quat_rotate(rot_b_temp, wp.vec3(0.0, 0.0, 1.0))
+        # Distance from shape A center to plane B
+        dist_to_plane = wp.abs(wp.dot(pos_a - pos_b, plane_normal))
+        if dist_to_plane > radius_a:
+            return
 
     rot_a = wp.transform_get_rotation(X_ws_a)
     rot_b = wp.transform_get_rotation(X_ws_b)
@@ -230,11 +319,24 @@ def build_contacts_kernel_gjk_mpr(
     # Create geometry data structures for convex collision detection
     geom_a = GenericShapeData()
     geom_a.shape_type = type_a
-    geom_a.scale = shape_scale[shape_a]
+    geom_a.scale = scale_a
+
+    # Convert infinite planes to cube proxies for GJK/MPR compatibility
+    # Use the OTHER object's radius to properly size the cube
+    # Only convert if it's an infinite plane (finite planes can be handled normally)
+    pos_a_adjusted = pos_a
+    if is_infinite_plane_a:
+        # Position the cube based on the OTHER object's position (pos_b)
+        geom_a, pos_a_adjusted = convert_infinite_plane_to_cube(geom_a, rot_a, pos_a, pos_b, radius_b)
 
     geom_b = GenericShapeData()
     geom_b.shape_type = type_b
-    geom_b.scale = shape_scale[shape_b]
+    geom_b.scale = scale_b
+
+    pos_b_adjusted = pos_b
+    if is_infinite_plane_b:
+        # Position the cube based on the OTHER object's position (pos_a)
+        geom_b, pos_b_adjusted = convert_infinite_plane_to_cube(geom_b, rot_b, pos_b, pos_a, radius_a)
 
     data_provider = SupportMapDataProvider()
 
@@ -243,12 +345,20 @@ def build_contacts_kernel_gjk_mpr(
         geom_b,
         rot_a,
         rot_b,
-        pos_a,
-        pos_b,
+        pos_a_adjusted,
+        pos_b_adjusted,
         0.0,  # sum_of_contact_offsets
         data_provider,
         type_a == int(GeoType.SPHERE) or type_b == int(GeoType.SPHERE),
     )
+
+    radius_eff_a = float(0.0)
+    if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
+        radius_eff_a = geom_a.scale[0]
+
+    radius_eff_b = float(0.0)
+    if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
+        radius_eff_b = geom_b.scale[0]
 
     for id in range(count):
         write_contact(
@@ -256,8 +366,8 @@ def build_contacts_kernel_gjk_mpr(
             normal,
             # wp.dot(normal, points_b[id] - points_a[id]),
             penetrations[id],
-            0.0,
-            0.0,
+            radius_eff_a,
+            radius_eff_b,
             shape_thickness[shape_a],
             shape_thickness[shape_b],
             shape_a,

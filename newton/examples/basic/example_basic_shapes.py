@@ -59,15 +59,15 @@ class Example:
 
         # replace ground plane with a large static box whose top face lies at z=0
         # attach directly to world (body = -1) so it is truly static
-        builder.add_shape_box(
-            -1,
-            xform=wp.transform(p=wp.vec3(0.0, 0.0, -50.0), q=wp.quat_identity()),
-            hx=50.0,
-            hy=50.0,
-            hz=50.0,
-        )
+        # builder.add_shape_box(
+        #     -1,
+        #     xform=wp.transform(p=wp.vec3(0.0, 0.0, -50.0), q=wp.quat_identity()),
+        #     hx=50.0,
+        #     hy=50.0,
+        #     hz=50.0,
+        # )
         # Add a ground plane at z=0
-        # builder.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
+        builder.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
 
         # z height to drop shapes from
         drop_z = 2.0
@@ -110,7 +110,7 @@ class Example:
         z3 = z2 + 2.0 * cube_h + gap
 
         # Build a pyramid of cubes
-        pyramid_size = 10  # Number of cubes at the base
+        pyramid_size = 20  # Number of cubes at the base
         cube_spacing = 2.1 * cube_h  # Space between cube centers
 
         for level in range(pyramid_size):
@@ -188,8 +188,12 @@ class Example:
         self.capture()
 
     def capture(self):
-        # Disable graph capture: run simulation directly each step
-        self.graph = None
+        if wp.get_device().is_cuda:
+            with wp.ScopedCapture() as capture:
+                self.simulate()
+            self.graph = capture.graph
+        else:
+            self.graph = None
 
     def simulate(self):
         for _ in range(self.sim_substeps):
@@ -212,7 +216,10 @@ class Example:
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
-        self.simulate()
+        if self.graph:
+            wp.capture_launch(self.graph)
+        else:
+            self.simulate()
 
         self.sim_time += self.frame_dt
 
