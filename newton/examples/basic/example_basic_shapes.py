@@ -30,6 +30,9 @@ from pxr import Usd, UsdGeom
 import newton
 import newton.examples
 
+wp.config.mode = "debug"
+wp.config.verify_cuda = True
+
 # Solver Selection
 # =================
 # Choose which solver to use for rigid body contact simulation:
@@ -195,12 +198,14 @@ class Example:
         self.capture()
 
     def capture(self):
-        if wp.get_device().is_cuda:
-            with wp.ScopedCapture() as capture:
-                self.simulate()
-            self.graph = capture.graph
-        else:
-            self.graph = None
+        # Disable CUDA graph capture for debugging
+        self.graph = None
+        # if wp.get_device().is_cuda:
+        #     with wp.ScopedCapture() as capture:
+        #         self.simulate()
+        #     self.graph = capture.graph
+        # else:
+        #     self.graph = None
 
     def simulate(self):
         for _ in range(self.sim_substeps):

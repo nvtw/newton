@@ -3,6 +3,7 @@ from __future__ import annotations
 import warp as wp
 
 from ..core.types import Devicelike
+from ..geometry.broad_phase_nxn import BroadPhaseAllPairs
 from ..geometry.collision_convex import create_solve_convex_multi_contact
 from ..geometry.collision_primitive import collide_plane_box, collide_plane_sphere, collide_sphere_box, collide_box_box
 from ..geometry.support_function import (
@@ -195,6 +196,8 @@ def build_contacts_kernel_gjk_mpr(
     sum_of_contact_offsets: float,
     rigid_contact_margin: float,
     contact_max: int,
+    num_pairs: int,
+    sap_shape_pair_count: wp.array(dtype=int),
     # outputs
     contact_count: wp.array(dtype=int),
     out_shape0: wp.array(dtype=int),
@@ -214,6 +217,9 @@ def build_contacts_kernel_gjk_mpr(
 
     # Early bounds check - following convert_newton_contacts_to_mjwarp_kernel pattern
     if tid >= shape_pairs.shape[0]:
+        return
+
+    if num_pairs == -1 and tid >= sap_shape_pair_count[0]:
         return
 
     pair = shape_pairs[tid]
@@ -597,6 +603,69 @@ def build_contacts_kernel_gjk_mpr(
 
 
 
+@wp.kernel
+def compute_shape_aabbs(
+    body_q: wp.array(dtype=wp.transform),
+    shape_transform: wp.array(dtype=wp.transform),
+    shape_body: wp.array(dtype=int),
+    shape_type: wp.array(dtype=int),
+    shape_scale: wp.array(dtype=wp.vec3),
+    # outputs
+    aabb_lower: wp.array(dtype=wp.vec3),
+    aabb_upper: wp.array(dtype=wp.vec3),
+):
+    """Compute axis-aligned bounding boxes for each shape in world space."""
+    shape_id = wp.tid()
+
+    rigid_id = shape_body[shape_id]
+
+    # Compute world transform
+    if rigid_id == -1:
+        X_ws = shape_transform[shape_id]
+    else:
+        X_ws = wp.transform_multiply(body_q[rigid_id], shape_transform[shape_id])
+
+    pos = wp.transform_get_translation(X_ws)
+    rot = wp.transform_get_rotation(X_ws)
+    scale = shape_scale[shape_id]
+    geo_type = shape_type[shape_id]
+
+    # Compute conservative AABB based on shape type
+    # For simplicity, we use bounding sphere approach for now
+    if geo_type == int(GeoType.SPHERE):
+        radius = scale[0]
+        half_extents = wp.vec3(radius, radius, radius)
+    elif geo_type == int(GeoType.BOX):
+        # Transform box corners to get tight AABB
+        rot_mat = wp.quat_to_matrix(rot)
+        abs_rot = wp.mat33(
+            wp.abs(rot_mat[0, 0]), wp.abs(rot_mat[0, 1]), wp.abs(rot_mat[0, 2]),
+            wp.abs(rot_mat[1, 0]), wp.abs(rot_mat[1, 1]), wp.abs(rot_mat[1, 2]),
+            wp.abs(rot_mat[2, 0]), wp.abs(rot_mat[2, 1]), wp.abs(rot_mat[2, 2])
+        )
+        half_extents = abs_rot * scale
+    elif geo_type == int(GeoType.CAPSULE):
+        radius = scale[0]
+        half_height = scale[1]
+        # Conservative: sphere of radius (radius + half_height)
+        r = radius + half_height
+        half_extents = wp.vec3(r, r, r)
+    elif geo_type == int(GeoType.PLANE):
+        # Infinite plane gets huge AABB
+        if scale[0] > 0.0 and scale[1] > 0.0:
+            # Finite plane
+            half_extents = wp.vec3(scale[0], scale[1], 0.1)
+        else:
+            # Infinite plane
+            half_extents = wp.vec3(1.0e6, 1.0e6, 1.0e6)
+    else:
+        # Default: use scale as conservative estimate
+        half_extents = scale
+
+    aabb_lower[shape_id] = pos - half_extents
+    aabb_upper[shape_id] = pos + half_extents
+
+
 class CollisionPipeline2:
     """
     CollisionPipeline manages collision detection and contact generation for a simulation.
@@ -610,7 +679,7 @@ class CollisionPipeline2:
         self,
         shape_count: int,
         particle_count: int,
-        shape_pairs_filtered: wp.array(dtype=wp.vec2i),
+        shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
         rigid_contact_max: int | None = None,
         rigid_contact_max_per_pair: int = 10,
         rigid_contact_margin: float = 0.01,
@@ -620,6 +689,7 @@ class CollisionPipeline2:
         iterate_mesh_vertices: bool = True,
         requires_grad: bool = False,
         device: Devicelike = None,
+        use_sap_broadphase: bool = True,
     ):
         """
         Initialize the CollisionPipeline.
@@ -627,7 +697,8 @@ class CollisionPipeline2:
         Args:
             shape_count (int): Number of shapes in the simulation.
             particle_count (int): Number of particles in the simulation.
-            shape_pairs_filtered (wp.array): Array of filtered shape pairs to consider for collision.
+            shape_pairs_filtered (wp.array | None, optional): Array of filtered shape pairs to consider for collision.
+                If None and use_sap_broadphase is True, pairs will be computed dynamically using SAP broad phase.
             rigid_contact_max (int | None, optional): Maximum number of rigid contacts to allocate.
                 If None, computed as shape_pairs_max * rigid_contact_max_per_pair.
             rigid_contact_max_per_pair (int, optional): Maximum number of contact points per shape pair. Defaults to 10.
@@ -639,19 +710,33 @@ class CollisionPipeline2:
             iterate_mesh_vertices (bool, optional): Whether to iterate mesh vertices for collision. Defaults to True.
             requires_grad (bool, optional): Whether to enable gradient computation. Defaults to False.
             device (Devicelike, optional): The device on which to allocate arrays and perform computation.
+            use_sap_broadphase (bool, optional): If True and shape_pairs_filtered is None, use SAP broad phase
+                to dynamically compute potentially colliding pairs. Defaults to True.
         """
         # will be allocated during collide
         self.contacts = None
 
         self.shape_count = shape_count
         self.shape_pairs_filtered = shape_pairs_filtered
-        self.shape_pairs_max = len(self.shape_pairs_filtered)
+        self.use_sap_broadphase = use_sap_broadphase and shape_pairs_filtered is None
+
+        if self.shape_pairs_filtered is not None:
+            self.shape_pairs_max = len(self.shape_pairs_filtered)
+        else:
+            # When using SAP, estimate based on worst case (all pairs)
+            self.shape_pairs_max = (shape_count * (shape_count - 1)) // 2
 
         self.rigid_contact_margin = rigid_contact_margin
         if rigid_contact_max is not None:
             self.rigid_contact_max = rigid_contact_max
         else:
             self.rigid_contact_max = self.shape_pairs_max * rigid_contact_max_per_pair
+
+        # Initialize NxN broad phase if needed
+        if self.use_sap_broadphase:
+            self.nxn_broadphase = BroadPhaseAllPairs()
+        else:
+            self.nxn_broadphase = None
 
         # Allocate buffers for broadphase collision handling
         with wp.ScopedDevice(device):
@@ -660,6 +745,13 @@ class CollisionPipeline2:
             self.rigid_pair_point_limit = None  # wp.empty(self.shape_count ** 2, dtype=wp.int32)
             self.rigid_pair_point_count = None  # wp.empty(self.shape_count ** 2, dtype=wp.int32)
             self.rigid_pair_point_id = wp.empty(self.rigid_contact_max, dtype=wp.int32)
+
+            # Allocate buffers for dynamically computed pairs and AABBs if using broad phase
+            if self.use_sap_broadphase:
+                self.broad_phase_shape_pairs = wp.zeros(self.shape_pairs_max, dtype=wp.vec2i, device=device)
+                self.broad_phase_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
+                self.shape_aabb_lower = wp.zeros(shape_count, dtype=wp.vec3, device=device)
+                self.shape_aabb_upper = wp.zeros(shape_count, dtype=wp.vec3, device=device)
 
         if soft_contact_max is None:
             soft_contact_max = shape_count * particle_count
@@ -710,7 +802,8 @@ class CollisionPipeline2:
         return CollisionPipeline2(
             model.shape_count,
             model.particle_count,
-            model.shape_contact_pairs,
+            # model.shape_contact_pairs,
+            None,
             rigid_contact_max,
             rigid_contact_max_per_pair,
             rigid_contact_margin,
@@ -728,7 +821,8 @@ class CollisionPipeline2:
         Run the collision pipeline for the given model and state, generating contacts.
 
         This method allocates or clears the contact buffer as needed, then generates
-        soft and rigid contacts using the current simulation state.
+        soft and rigid contacts using the current simulation state. If using SAP broad phase,
+        potentially colliding pairs are computed dynamically based on bounding sphere overlaps.
 
         Args:
             model (Model): The simulation model.
@@ -751,11 +845,57 @@ class CollisionPipeline2:
         # output contacts buffer
         contacts = self.contacts
 
+        # Determine which shape pairs to check
+        if self.use_sap_broadphase:
+            # Compute AABBs for all shapes in world space
+            wp.launch(
+                kernel=compute_shape_aabbs,
+                dim=model.shape_count,
+                inputs=[
+                    state.body_q,
+                    model.shape_transform,
+                    model.shape_body,
+                    model.shape_type,
+                    model.shape_scale,
+                ],
+                outputs=[
+                    self.shape_aabb_lower,
+                    self.shape_aabb_upper,
+                ],
+                device=model.device,
+            )
+
+            # Create dummy arrays for collision groups (all zeros/all can collide)
+            dummy_collision_group = wp.full(model.shape_count, 1, dtype=wp.int32, device=model.device)
+            dummy_shape_group = wp.full(model.shape_count, -1, dtype=wp.int32, device=model.device)
+
+            # Use NxN broad phase to find potentially colliding pairs based on AABB overlaps
+            self.broad_phase_pair_count.zero_()
+            self.nxn_broadphase.launch(
+                self.shape_aabb_lower,
+                self.shape_aabb_upper,
+                model.shape_thickness,  # Use thickness as cutoff
+                dummy_collision_group,
+                dummy_shape_group,
+                model.shape_count,
+                self.broad_phase_shape_pairs,
+                self.broad_phase_pair_count,
+            )
+
+            shape_pairs = self.broad_phase_shape_pairs
+            # debug = self.broad_phase_pair_count.numpy()[0]
+            # print(f"debug: {debug}")
+            num_pairs = -1  # Use dynamic count from kernel
+        else:
+            shape_pairs = self.shape_pairs_filtered
+            num_pairs = len(self.shape_pairs_filtered) if self.shape_pairs_filtered is not None else 0
+
         # Launch kernel across all shape pairs
-        if self.shape_pairs_filtered is not None and len(self.shape_pairs_filtered) > 0:
+        block_dim = 128
+        if num_pairs > 0 or num_pairs == -1:
             wp.launch(
                 kernel=build_contacts_kernel_gjk_mpr,
-                dim=len(self.shape_pairs_filtered),
+                dim=num_pairs if num_pairs != -1 else block_dim * 256,
                 inputs=[
                     state.body_q,
                     model.shape_transform,
@@ -764,10 +904,12 @@ class CollisionPipeline2:
                     model.shape_scale,
                     model.shape_thickness,
                     model.shape_collision_radius,
-                    self.shape_pairs_filtered,
+                    shape_pairs,
                     0.0,  # sum_of_contact_offsets
                     self.rigid_contact_margin,
                     contacts.rigid_contact_max,
+                    num_pairs,
+                    self.broad_phase_pair_count
                 ],
                 outputs=[
                     contacts.rigid_contact_count,
@@ -783,7 +925,7 @@ class CollisionPipeline2:
                     contacts.rigid_contact_tids,
                 ],
                 device=contacts.device,
-                block_dim=128,
+                block_dim=block_dim,
             )
 
         return contacts
