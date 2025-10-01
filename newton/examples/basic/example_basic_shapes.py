@@ -55,7 +55,7 @@ USE_CUDA_GRAPH = True  # Set to True to enable CUDA graph capture
 # - newton.BroadPhaseMode.NONE: Use explicit shape pairs (fastest if pairs are known)
 # - newton.BroadPhaseMode.NXN: All-pairs AABB (O(N²), good for small scenes)
 # - newton.BroadPhaseMode.SAP: Sweep-and-prune AABB (O(N log N), better for larger scenes)
-BROAD_PHASE_MODE = newton.BroadPhaseMode.SAP
+BROAD_PHASE_MODE = newton.BroadPhaseMode.NONE
 
 
 class Example:
@@ -128,7 +128,7 @@ class Example:
         # Build multiple pyramids of cubes
         pyramid_size = 20  # Number of cubes at the base
         cube_spacing = 2.1 * cube_h  # Space between cube centers
-        num_pyramids = 5  # Number of pyramids to build
+        num_pyramids = 1  # Number of pyramids to build
         pyramid_spacing = 2 * cube_spacing  # Space between pyramids
 
         for pyramid in range(num_pyramids):
@@ -164,7 +164,8 @@ class Example:
         # builder.add_joint_free(body_mesh)  # Add free joint for MuJoCo
 
         # finalize model
-        self.model = builder.finalize()
+        # Skip building static shape_contact_pairs since we're using dynamic broad phase
+        self.model = builder.finalize(build_shape_contact_pairs=(BROAD_PHASE_MODE == newton.BroadPhaseMode.NONE))
 
         # Initialize solver based on the selected type
         if SOLVER_TYPE == "XPBD":

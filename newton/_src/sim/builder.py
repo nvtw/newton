@@ -4055,7 +4055,7 @@ class ModelBuilder:
             target_max_min_color_ratio=target_max_min_color_ratio,
         )
 
-    def finalize(self, device: Devicelike | None = None, requires_grad: bool = False) -> Model:
+    def finalize(self, device: Devicelike | None = None, requires_grad: bool = False, build_shape_contact_pairs: bool = True) -> Model:
         """
         Finalize the builder and create a concrete Model for simulation.
 
@@ -4066,6 +4066,8 @@ class ModelBuilder:
         Args:
             device: The simulation device to use (e.g., 'cpu', 'cuda'). If None, uses the current Warp device.
             requires_grad: If True, enables gradient computation for the model (for differentiable simulation).
+            build_shape_contact_pairs: If True, builds static shape contact pairs for collision detection.
+                Set to False when using dynamic broad phase (BroadPhaseMode.NXN or SAP) to skip this expensive computation.
 
         Returns:
             Model: A fully constructed Model object containing all simulation data on the specified device.
@@ -4395,8 +4397,16 @@ class ModelBuilder:
             m.articulation_count = len(self.articulation_start)
             m.equality_constraint_count = len(self.equality_constraint_type)
 
-            self.find_shape_contact_pairs(m)
-            m.rigid_contact_max = count_rigid_contact_points(m)
+            # Build shape contact pairs if requested (can skip for dynamic broad phase)
+            if build_shape_contact_pairs:
+                self.find_shape_contact_pairs(m)
+                m.rigid_contact_max = count_rigid_contact_points(m)
+            else:
+                # Skip expensive pair computation - will use dynamic broad phase
+                m.shape_contact_pairs = None
+                m.shape_contact_pair_count = 0
+                # Use conservative estimate for rigid_contact_max
+                m.rigid_contact_max = m.shape_count * m.shape_count * 10
 
             m.rigid_contact_torsional_friction = self.rigid_contact_torsional_friction
             m.rigid_contact_rolling_friction = self.rigid_contact_rolling_friction

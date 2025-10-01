@@ -22,12 +22,13 @@ from .state import State
 
 class BroadPhaseMode(IntEnum):
     """Broad phase collision detection mode.
-    
+
     Attributes:
         NONE: No broad phase, use explicitly provided shape pairs (fastest if pairs are known)
         NXN: All-pairs broad phase with AABB checks (simple, O(N²) but good for small scenes)
         SAP: Sweep and Prune broad phase with AABB sorting (faster for larger scenes, O(N log N))
     """
+
     NONE = 0
     NXN = 1
     SAP = 2
@@ -617,8 +618,6 @@ def build_contacts_kernel_gjk_mpr(
                 )
 
 
-
-
 @wp.kernel
 def compute_shape_aabbs(
     body_q: wp.array(dtype=wp.transform),
@@ -659,9 +658,15 @@ def compute_shape_aabbs(
         # Transform box corners to get tight AABB
         rot_mat = wp.quat_to_matrix(rot)
         abs_rot = wp.mat33(
-            wp.abs(rot_mat[0, 0]), wp.abs(rot_mat[0, 1]), wp.abs(rot_mat[0, 2]),
-            wp.abs(rot_mat[1, 0]), wp.abs(rot_mat[1, 1]), wp.abs(rot_mat[1, 2]),
-            wp.abs(rot_mat[2, 0]), wp.abs(rot_mat[2, 1]), wp.abs(rot_mat[2, 2])
+            wp.abs(rot_mat[0, 0]),
+            wp.abs(rot_mat[0, 1]),
+            wp.abs(rot_mat[0, 2]),
+            wp.abs(rot_mat[1, 0]),
+            wp.abs(rot_mat[1, 1]),
+            wp.abs(rot_mat[1, 2]),
+            wp.abs(rot_mat[2, 0]),
+            wp.abs(rot_mat[2, 1]),
+            wp.abs(rot_mat[2, 2]),
         )
         half_extents = abs_rot * scale
     elif geo_type == int(GeoType.CAPSULE):
@@ -763,8 +768,8 @@ class CollisionPipeline2:
             self.sap_broadphase = None
         elif self.broad_phase_mode == BroadPhaseMode.SAP:
             # Estimate max groups for SAP - use reasonable defaults
-            max_num_negative_group_members = max(int(shape_count ** 0.5), 10)
-            max_num_distinct_positive_groups = max(int(shape_count ** 0.5), 10)
+            max_num_negative_group_members = max(int(shape_count**0.5), 10)
+            max_num_distinct_positive_groups = max(int(shape_count**0.5), 10)
             self.sap_broadphase = BroadPhaseSAP(
                 max_broad_phase_elements=shape_count,
                 max_num_distinct_positive_groups=max_num_distinct_positive_groups,
@@ -784,9 +789,9 @@ class CollisionPipeline2:
             self.rigid_pair_point_id = wp.empty(self.rigid_contact_max, dtype=wp.int32)
 
             # Allocate buffers for dynamically computed pairs and AABBs if using broad phase
+            self.broad_phase_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
             if self.broad_phase_mode != BroadPhaseMode.NONE:
                 self.broad_phase_shape_pairs = wp.zeros(self.shape_pairs_max, dtype=wp.vec2i, device=device)
-                self.broad_phase_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
                 self.shape_aabb_lower = wp.zeros(shape_count, dtype=wp.vec3, device=device)
                 self.shape_aabb_upper = wp.zeros(shape_count, dtype=wp.vec3, device=device)
                 # Allocate dummy collision/shape group arrays once (reused every frame)
@@ -803,8 +808,6 @@ class CollisionPipeline2:
         self.iterate_mesh_vertices = iterate_mesh_vertices
         self.requires_grad = requires_grad
         self.edge_sdf_iter = edge_sdf_iter
-
-
 
     @classmethod
     def from_model(
@@ -843,11 +846,13 @@ class CollisionPipeline2:
             rigid_contact_max_per_pair = 0
         if requires_grad is None:
             requires_grad = model.requires_grad
+        # Use model.shape_contact_pairs if BroadPhaseMode.NONE, otherwise None (dynamic broad phase)
+        shape_pairs_filtered = model.shape_contact_pairs if broad_phase_mode == BroadPhaseMode.NONE else None
+
         return CollisionPipeline2(
             model.shape_count,
             model.particle_count,
-            # model.shape_contact_pairs,
-            None,
+            shape_pairs_filtered,
             rigid_contact_max,
             rigid_contact_max_per_pair,
             rigid_contact_margin,
@@ -859,7 +864,6 @@ class CollisionPipeline2:
             model.device,
             broad_phase_mode,
         )
-
 
     def collide(self, model: Model, state: State) -> Contacts:
         """
@@ -926,7 +930,7 @@ class CollisionPipeline2:
                     self.shape_aabb_upper,
                     model.shape_thickness,  # Use thickness as cutoff
                     self.dummy_collision_group,  # Preallocated, all 1 (same group = collide)
-                    self.dummy_shape_group,      # Preallocated, all -1 (global entities)
+                    self.dummy_shape_group,  # Preallocated, all -1 (global entities)
                     model.shape_count,
                     self.broad_phase_shape_pairs,
                     self.broad_phase_pair_count,
@@ -938,7 +942,7 @@ class CollisionPipeline2:
                     self.shape_aabb_upper,
                     model.shape_thickness,  # Use thickness as cutoff
                     self.dummy_collision_group,  # Preallocated, all 1 (same group = collide)
-                    self.dummy_shape_group,      # Preallocated, all -1 (global entities)
+                    self.dummy_shape_group,  # Preallocated, all -1 (global entities)
                     model.shape_count,
                     self.broad_phase_shape_pairs,
                     self.broad_phase_pair_count,
@@ -966,7 +970,7 @@ class CollisionPipeline2:
                     self.rigid_contact_margin,
                     contacts.rigid_contact_max,
                     num_pairs,
-                    self.broad_phase_pair_count
+                    self.broad_phase_pair_count,
                 ],
                 outputs=[
                     contacts.rigid_contact_count,
