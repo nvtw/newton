@@ -153,14 +153,12 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
         if skip_multi_contact or penetration > contact_threshold:
             count = 1
             penetrations = wp.vec4(penetration, 0.0, 0.0, 0.0)
-            points_a = _mat43f()
-            points_a[0] = point_a
-            points_b = _mat43f()
-            points_b[0] = point_b
+            points = _mat43f()
+            points[0] = 0.5 * (point_a + point_b)
             features = wp.vec4i(0)
-            return count, normal, penetrations, points_a, points_b, features
+            return count, normal, penetrations, points, features
 
-        count, penetrations, points_a, points_b, features = wp.static(create_build_manifold(support_func))(
+        count, penetrations, points, features = wp.static(create_build_manifold(support_func))(
             geom_a,
             geom_b,
             orientation_a,
@@ -194,6 +192,6 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
 
         # penetrations = wp.vec4(penetration)
 
-        return count, normal, penetrations, points_a, points_b, features
+        return count, normal, penetrations, points, features
 
     return solve_convex_multi_contact

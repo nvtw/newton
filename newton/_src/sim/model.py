@@ -22,15 +22,6 @@ import numpy as np
 import warp as wp
 
 from ..core.types import Devicelike
-from ..geometry.collision_convex import create_solve_convex_multi_contact
-from ..geometry.collision_primitive import collide_plane_box, collide_plane_sphere, collide_sphere_box, collide_box_box
-from ..geometry.support_function import (
-    center_func as center_map,
-    support_map as support_map_func,
-    SupportMapDataProvider,
-    GenericShapeData,
-)
-from ..geometry.types import GeoType
 from .contacts import Contacts
 from .control import Control
 from .state import State

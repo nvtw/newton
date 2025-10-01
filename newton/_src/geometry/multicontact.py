@@ -1033,16 +1033,17 @@ def create_build_manifold(support_func: Any):
         )
 
         # Extract results into fixed-size matrices
-        contact_points_a = wp.types.matrix(shape=(4, 3), dtype=wp.float32)
-        contact_points_b = wp.types.matrix(shape=(4, 3), dtype=wp.float32)
+        contact_points = wp.types.matrix(shape=(4, 3), dtype=wp.float32)
         feature_ids = wp.vec4i(0, 0, 0, 0)
         penetrations = wp.vec4(0.0, 0.0, 0.0, 0.0)
 
         # Copy contact points and extract feature IDs
         count_out = min(num_manifold_points, 4)
         for i in range(count_out):
-            contact_points_a[i] = left[i]
-            contact_points_b[i] = right[i]
+            contact_point_a = left[i]
+            contact_point_b = right[i]
+
+            contact_points[i] = 0.5 * (contact_point_a + contact_point_b)
 
             # center = 0.5 * (contact_points_a[i] + contact_points_b[i])
             # contact_points_a[i] = project_point_onto_ray(contact_points_a[i], center, normal)
@@ -1050,8 +1051,8 @@ def create_build_manifold(support_func: Any):
 
             feature_ids[i] = int(result_features[i])
             # Newton convention: penetration is negative on overlap
-            penetrations[i] = wp.dot(contact_points_b[i] - contact_points_a[i], normal)
+            penetrations[i] = wp.dot(contact_point_b - contact_point_a, normal)
 
-        return num_manifold_points, penetrations, contact_points_a, contact_points_b, feature_ids
+        return num_manifold_points, penetrations, contact_points, feature_ids
 
     return build_manifold
