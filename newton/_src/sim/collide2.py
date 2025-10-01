@@ -8,7 +8,6 @@ from ..geometry.collision_primitive import collide_plane_box, collide_plane_sphe
 from ..geometry.support_function import (
     GenericShapeData,
     SupportMapDataProvider,
-    center_func as center_map,
     support_map as support_map_func,
 )
 from ..geometry.types import GeoType
@@ -18,7 +17,7 @@ from .state import State
 
 
 # Pre-create the convex multi-contact solver (usable inside kernels)
-solve_convex_multi_contact = create_solve_convex_multi_contact(support_map_func, center_map)
+solve_convex_multi_contact = create_solve_convex_multi_contact(support_map_func)
 
 
 @wp.func

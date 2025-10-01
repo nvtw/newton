@@ -21,7 +21,7 @@ from typing import Any
 
 import warp as wp
 
-from .mpr import Vert, vert_v
+from .mpr import Vert, vert_v, create_support_map_function
 
 EPSILON = 1e-8
 
@@ -48,91 +48,18 @@ class SimplexSolverAB:
     usage_mask: wp.uint32
 
 
-def create_solve_closest_distance(support_func: Any, center_func: Any):
+def create_solve_closest_distance(support_func: Any):
     """
     Factory function to create GJK distance solver with specific support and center functions.
 
     Args:
         support_func: Support mapping function for shapes
-        center_func: Geometric center function for shapes
 
     Returns:
         GJK distance solver function
     """
 
-    # Support mapping functions (reuse from MPR)
-    @wp.func
-    def support_map_b(
-        geom_b: Any,
-        direction: wp.vec3,
-        orientation_b: wp.quat,
-        position_b: wp.vec3,
-        data_provider: Any,
-    ) -> tuple[wp.vec3, int]:
-        """Support mapping for shape B with transformation."""
-        # Transform direction to local space of shape B
-        tmp = wp.quat_rotate_inv(orientation_b, direction)
-
-        # Get support point in local space
-        result, feature_id = support_func(geom_b, tmp, data_provider)
-
-        # Transform result to world space
-        result = wp.quat_rotate(orientation_b, result)
-        result = result + position_b
-
-        return result, feature_id
-
-    @wp.func
-    def minkowski_support(
-        geom_a: Any,
-        geom_b: Any,
-        direction: wp.vec3,
-        orientation_b: wp.quat,
-        position_b: wp.vec3,
-        extend: float,
-        data_provider: Any,
-    ) -> tuple[Vert, int, int]:
-        """Compute support point on Minkowski difference A - B."""
-        v = Vert()
-
-        # Support point on A in positive direction
-        tmp_result_a = support_func(geom_a, direction, data_provider)
-        v.A = tmp_result_a[0]
-        feature_a_id = tmp_result_a[1]
-
-        # Support point on B in negative direction
-        tmp_direction = -direction
-        tmp_result_b = support_map_b(geom_b, tmp_direction, orientation_b, position_b, data_provider)
-        v.B = tmp_result_b[0]
-        feature_b_id = tmp_result_b[1]
-
-        # Apply contact offset extension (match MPR behavior)
-        d = wp.normalize(direction) * extend * 0.5
-        v.A = v.A + d
-        v.B = v.B - d
-
-        return v, feature_a_id, feature_b_id
-
-    @wp.func
-    def geometric_center(
-        geom_a: Any,
-        geom_b: Any,
-        orientation_b: wp.quat,
-        position_b: wp.vec3,
-        data_provider: Any,
-    ) -> Vert:
-        """Compute geometric center of Minkowski difference."""
-        center = Vert()
-
-        # Get geometric center of shape A
-        center.A = center_func(geom_a, data_provider)
-
-        # Get geometric center of shape B and transform to world space
-        center.B = center_func(geom_b, data_provider)
-        center.B = wp.quat_rotate(orientation_b, center.B)
-        center.B = position_b + center.B
-
-        return center
+    support_map_b, minkowski_support, geometric_center = create_support_map_function(support_func)
 
     @wp.func
     def barycentric_get(bc: Barycentric, i: int) -> float:

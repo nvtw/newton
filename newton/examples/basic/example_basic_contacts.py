@@ -109,7 +109,7 @@ class Example:
         self.viewer = viewer
 
         # Initialize solver factories
-        self.solve_convex_multi = create_solve_convex_multi_contact(support_map_func, center_map)
+        self.solve_convex_multi = create_solve_convex_multi_contact(support_map_func)
         self.solve_gjk = create_solve_gjk(support_map_func, center_map)
         self.data_provider = SupportMapDataProvider()
 
@@ -382,7 +382,7 @@ class Example:
 
         # Build multi-contact manifold and take the first contact
         count, _normal_multi, _penetrations, pts_a, pts_b, features = wp.static(
-            create_solve_convex_multi_contact(support_map_func, center_map)
+            create_solve_convex_multi_contact(support_map_func)
         )(
             geom_a,
             geom_b,

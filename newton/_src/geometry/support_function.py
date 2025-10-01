@@ -48,26 +48,6 @@ class GenericShapeData:
     scale: wp.vec3
 
 
-@wp.func
-def center_func(geom: GenericShapeData, data_provider: SupportMapDataProvider) -> wp.vec3:
-    """
-    Return the center of a primitive in its local frame.
-
-    For most primitives, this is the origin (0,0,0), but for some shapes
-    like cones, the geometric center differs from the coordinate origin.
-    """
-    if geom.shape_type == int(GeoType.CONE):
-        # Cone centroid is at 1/4 of the total height above the base plane.
-        # With base at z=-half_height and apex at z=+half_height, this is z = -half_height/2.
-        half_height = geom.scale[1]
-        return wp.vec3(0.0, 0.0, -0.5 * half_height)
-    elif geom.shape_type == int(GeoType.PLANE):
-        # Plane center is at the origin (plane is in XY plane, normal along +Z)
-        return wp.vec3(0.0, 0.0, 0.0)
-    else:
-        # For box, sphere, capsule, ellipsoid, cylinder: center is at origin
-        return wp.vec3(0.0, 0.0, 0.0)
-
 
 @wp.func
 def support_map(

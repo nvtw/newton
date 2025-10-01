@@ -21,7 +21,7 @@ from .mpr import create_solve_mpr
 from .multicontact import create_build_manifold
 
 
-def create_solve_convex_contact(support_func: Any, center_func: Any):
+def create_solve_convex_contact(support_func: Any):
     @wp.func
     def solve_convex_contact(
         geom_a: Any,
@@ -35,7 +35,7 @@ def create_solve_convex_contact(support_func: Any, center_func: Any):
     ) -> tuple[bool, wp.vec3, wp.vec3, wp.vec3, float, int, int]:
         # First run closest distance solver to test overlap quickly while keeping only the tuple live
         collision, point_a, point_b, normal, penetration, feature_a_id, feature_b_id = wp.static(
-            create_solve_closest_distance(support_func, center_func)
+            create_solve_closest_distance(support_func)
         )(
             geom_a,
             geom_b,
@@ -59,7 +59,7 @@ def create_solve_convex_contact(support_func: Any, center_func: Any):
 
         # Use MPR to get accurate contact points and penetration info and return its result directly
         collision, point_a, point_b, normal, penetration, feature_a_id, feature_b_id = wp.static(
-            create_solve_mpr(support_func, center_func)
+            create_solve_mpr(support_func)
         )(
             geom_a,
             geom_b,
@@ -86,7 +86,7 @@ def create_solve_convex_contact(support_func: Any, center_func: Any):
 _mat43f = wp.types.matrix((4, 3), wp.float32)
 
 
-def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
+def create_solve_convex_multi_contact(support_func: Any):
     @wp.func
     def solve_convex_multi_contact(
         geom_a: Any,
@@ -108,7 +108,7 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
     ]:
         # Broad check with closest distance solver; refine with MPR on overlap for better anchors/normal
         collision, penetration, point, normal, feature_a_id, feature_b_id = wp.static(
-            create_solve_mpr(support_func, center_func)
+            create_solve_mpr(support_func)
         )(
             geom_a,
             geom_b,
@@ -122,7 +122,7 @@ def create_solve_convex_multi_contact(support_func: Any, center_func: Any):
 
         if not collision:
             collision, penetration, point, normal, feature_a_id, feature_b_id = wp.static(
-                create_solve_closest_distance(support_func, center_func)
+                create_solve_closest_distance(support_func)
             )(
                 geom_a,
                 geom_b,

@@ -32,18 +32,7 @@ def vert_v(vert: Vert) -> wp.vec3:
     return vert.A - vert.B
 
 
-def create_solve_mpr(support_func: Any, center_func: Any):
-    """
-    Factory function to create MPR solver with specific support and center functions.
-
-    Args:
-        support_func: Support mapping function for shapes
-        center_func: Geometric center function for shapes
-
-    Returns:
-        MPR solver function
-    """
-
+def create_support_map_function(support_func: Any):
     # Support mapping functions (these replace the MinkowskiDiff struct methods)
     @wp.func
     def support_map_b(
@@ -147,14 +136,30 @@ def create_solve_mpr(support_func: Any, center_func: Any):
         center = Vert()
 
         # Get geometric center of shape A
-        center.A = center_func(geom_a, data_provider)
+        center.A = wp.vec3(0.0)  # center_func(geom_a, data_provider)
 
         # Get geometric center of shape B and transform to world space
-        center.B = center_func(geom_b, data_provider)
+        center.B = wp.vec3(0.0)  # center_func(geom_b, data_provider)
         center.B = wp.quat_rotate(orientation_b, center.B)
         center.B = position_b + center.B
 
         return center
+
+    return support_map_b, minkowski_support, geometric_center
+
+
+def create_solve_mpr(support_func: Any):
+    """
+    Factory function to create MPR solver with specific support and center functions.
+
+    Args:
+        support_func: Support mapping function for shapes
+
+    Returns:
+        MPR solver function
+    """
+
+    support_map_b, minkowski_support, geometric_center = create_support_map_function(support_func)
 
     @wp.func
     def solve_mpr_core(
