@@ -248,6 +248,10 @@ def build_contacts_kernel_mesh_midphase(
     shape_pairs_mesh_count: wp.array(dtype=int),  # Output
     shape_source_ptr: wp.array(dtype=wp.uint64),
     shape_type: wp.array(dtype=int),
+    body_q: wp.array(dtype=wp.transform),
+    shape_transform: wp.array(dtype=wp.transform),
+    shape_body: wp.array(dtype=int),
+    shape_scale: wp.array(dtype=wp.vec3),
 ):
     """Mesh midphase collision detection kernel.
 
@@ -290,10 +294,78 @@ def build_contacts_kernel_mesh_midphase(
 
     mesh_ptr = shape_source_ptr[shape_a]
 
-    shape_b_lower = aabb_lower[shape_b]
-    shape_b_upper = aabb_upper[shape_b]
+    # Get world-space AABB for shape_b
+    shape_b_lower_world = aabb_lower[shape_b]
+    shape_b_upper_world = aabb_upper[shape_b]
 
-    mesh_query_walker = wp.mesh_query_aabb(mesh_ptr, shape_b_lower, shape_b_upper)
+    # Compute mesh world transform (shape_a is the mesh)
+    rigid_id_a = shape_body[shape_a]
+    if rigid_id_a == -1:
+        X_ws_a = shape_transform[shape_a]
+    else:
+        X_ws_a = wp.transform_multiply(body_q[rigid_id_a], shape_transform[shape_a])
+
+    # Compute inverse transform (world to mesh local space)
+    X_sw_a = wp.transform_inverse(X_ws_a)
+
+    # Get mesh scale
+    mesh_scale = shape_scale[shape_a]
+
+    # Transform AABB corners to mesh local space and account for scale
+    # We need to transform all 8 corners and recompute the AABB in local space
+    # because rotation can change which corners are min/max
+
+    # Transform first corner to initialize min/max
+    corner_world = wp.vec3(shape_b_lower_world[0], shape_b_lower_world[1], shape_b_lower_world[2])
+    corner_local = wp.transform_point(X_sw_a, corner_world)
+    corner_scaled = wp.cw_div(corner_local, mesh_scale)
+    aabb_min_local = corner_scaled
+    aabb_max_local = corner_scaled
+
+    # Transform remaining 7 corners and expand AABB
+    corner_world = wp.vec3(shape_b_upper_world[0], shape_b_lower_world[1], shape_b_lower_world[2])
+    corner_local = wp.transform_point(X_sw_a, corner_world)
+    corner_scaled = wp.cw_div(corner_local, mesh_scale)
+    aabb_min_local = wp.min(aabb_min_local, corner_scaled)
+    aabb_max_local = wp.max(aabb_max_local, corner_scaled)
+
+    corner_world = wp.vec3(shape_b_lower_world[0], shape_b_upper_world[1], shape_b_lower_world[2])
+    corner_local = wp.transform_point(X_sw_a, corner_world)
+    corner_scaled = wp.cw_div(corner_local, mesh_scale)
+    aabb_min_local = wp.min(aabb_min_local, corner_scaled)
+    aabb_max_local = wp.max(aabb_max_local, corner_scaled)
+
+    corner_world = wp.vec3(shape_b_upper_world[0], shape_b_upper_world[1], shape_b_lower_world[2])
+    corner_local = wp.transform_point(X_sw_a, corner_world)
+    corner_scaled = wp.cw_div(corner_local, mesh_scale)
+    aabb_min_local = wp.min(aabb_min_local, corner_scaled)
+    aabb_max_local = wp.max(aabb_max_local, corner_scaled)
+
+    corner_world = wp.vec3(shape_b_lower_world[0], shape_b_lower_world[1], shape_b_upper_world[2])
+    corner_local = wp.transform_point(X_sw_a, corner_world)
+    corner_scaled = wp.cw_div(corner_local, mesh_scale)
+    aabb_min_local = wp.min(aabb_min_local, corner_scaled)
+    aabb_max_local = wp.max(aabb_max_local, corner_scaled)
+
+    corner_world = wp.vec3(shape_b_upper_world[0], shape_b_lower_world[1], shape_b_upper_world[2])
+    corner_local = wp.transform_point(X_sw_a, corner_world)
+    corner_scaled = wp.cw_div(corner_local, mesh_scale)
+    aabb_min_local = wp.min(aabb_min_local, corner_scaled)
+    aabb_max_local = wp.max(aabb_max_local, corner_scaled)
+
+    corner_world = wp.vec3(shape_b_lower_world[0], shape_b_upper_world[1], shape_b_upper_world[2])
+    corner_local = wp.transform_point(X_sw_a, corner_world)
+    corner_scaled = wp.cw_div(corner_local, mesh_scale)
+    aabb_min_local = wp.min(aabb_min_local, corner_scaled)
+    aabb_max_local = wp.max(aabb_max_local, corner_scaled)
+
+    corner_world = wp.vec3(shape_b_upper_world[0], shape_b_upper_world[1], shape_b_upper_world[2])
+    corner_local = wp.transform_point(X_sw_a, corner_world)
+    corner_scaled = wp.cw_div(corner_local, mesh_scale)
+    aabb_min_local = wp.min(aabb_min_local, corner_scaled)
+    aabb_max_local = wp.max(aabb_max_local, corner_scaled)
+
+    mesh_query_walker = wp.mesh_query_aabb(mesh_ptr, aabb_min_local, aabb_max_local)
 
     # Use a fixed-size buffer to batch triangle indices
     buffer = vec8i()
@@ -1013,7 +1085,7 @@ class CollisionPipeline2:
         block_dim = 128
         wp.launch(
             kernel=build_contacts_kernel_mesh_midphase,
-            dim=block_dim * 256,
+            dim=block_dim * 32,
             inputs=[
                 self.shape_aabb_lower,
                 self.shape_aabb_upper,
@@ -1023,6 +1095,10 @@ class CollisionPipeline2:
                 self.mesh_pair_count,
                 model.shape_source_ptr,
                 model.shape_type,
+                state.body_q,
+                model.shape_transform,
+                model.shape_body,
+                model.shape_scale,
             ],
             device=model.device,
             block_dim=block_dim,
@@ -1032,7 +1108,7 @@ class CollisionPipeline2:
         # Use fixed dimension as we don't know total count (pairs + mesh triangles) ahead of time
         wp.launch(
             kernel=build_contacts_kernel_gjk_mpr,
-            dim=block_dim * 256,
+            dim=block_dim * 32,
             inputs=[
                 state.body_q,
                 state.body_qd,

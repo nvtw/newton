@@ -18,9 +18,10 @@ import warp as wp
 
 from .types import GeoType
 
+
 # Is not allowed to share values with GeoType
 class GeoTypeEx(enum.IntEnum):
-    TRIANGLE = 1000
+    TRIANGLE = (1000,)
 
 
 @wp.struct
@@ -31,6 +32,28 @@ class SupportMapDataProvider:
     """
 
     pass
+
+
+@wp.func
+def pack_mesh_ptr(ptr: wp.uint64) -> wp.vec3:
+    """Pack a 64-bit pointer into 3 floats using 22 bits per component"""
+    # Extract 22-bit chunks from the pointer
+    chunk1 = float(ptr & 0x3FFFFF)  # bits 0-21
+    chunk2 = float((ptr >> 22) & 0x3FFFFF)  # bits 22-43
+    chunk3 = float((ptr >> 44) & 0xFFFFF)  # bits 44-63 (20 bits)
+
+    return wp.vec3(chunk1, chunk2, chunk3)
+
+
+@wp.func
+def unpack_mesh_ptr(arr: wp.vec3) -> wp.uint64:
+    """Unpack 3 floats back into a 64-bit pointer"""
+    # Convert floats back to integers and combine
+    chunk1 = wp.uint64(arr[0]) & wp.uint64(0x3FFFFF)
+    chunk2 = (wp.uint64(arr[1]) & wp.uint64(0x3FFFFF)) << wp.uint64(22)
+    chunk3 = (wp.uint64(arr[2]) & wp.uint64(0xFFFFF)) << wp.uint64(44)
+
+    return chunk1 | chunk2 | chunk3
 
 
 @wp.struct
@@ -48,12 +71,12 @@ class GenericShapeData:
       - CYLINDER: radius in x, half-height in y (axis +Z)
       - CONE: radius in x, half-height in y (axis +Z, apex at +Z)
       - PLANE: half-width in x, half-length in y (lies in XY plane at z=0, normal along +Z)
+      - TRIANGLE: vertex B-A stored in scale, vertex C-A stored in auxillary
     """
 
     shape_type: int
     scale: wp.vec3
     auxillary: wp.vec3
-
 
 
 @wp.func
@@ -82,6 +105,36 @@ def support_map(
 
     result = wp.vec3(0.0, 0.0, 0.0)
     feature_id = int(0)
+
+    if geom.shape_type == int(GeoType.CONVEX_HULL):
+        # Convex hull support: find the furthest point in the direction
+        mesh_ptr = unpack_mesh_ptr(geom.auxillary)
+        mesh = wp.mesh_get(mesh_ptr)
+
+        # The mesh scale is stored in the auxillary field
+        mesh_scale = geom.scale
+
+        # Find the vertex with the maximum dot product with the direction
+        max_dot = float(-1.0e10)
+        best_vertex = wp.vec3(0.0, 0.0, 0.0)
+        best_idx = int(0)
+
+        num_verts = mesh.points.shape[0]
+        for i in range(num_verts):
+            # Get vertex position (applying scale)
+            vertex = wp.cw_mul(mesh.points[i], mesh_scale)
+
+            # Compute dot product with direction
+            dot_val = wp.dot(vertex, dir_safe)
+
+            # Track the maximum
+            if dot_val > max_dot:
+                max_dot = dot_val
+                best_vertex = vertex
+                best_idx = i
+
+        result = best_vertex
+        feature_id = best_idx
 
     if geom.shape_type == int(GeoTypeEx.TRIANGLE):
         # Triangle vertices: a at origin, b at scale, c at auxillary
