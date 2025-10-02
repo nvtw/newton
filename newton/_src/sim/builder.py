@@ -1972,6 +1972,8 @@ class ModelBuilder:
                 return "sdf"
             if type == GeoType.PLANE:
                 return "plane"
+            if type == GeoType.CONVEX_HULL:
+                return "convex_hull"
             if type == GeoType.NONE:
                 return "none"
             return "unknown"
@@ -2781,6 +2783,41 @@ class ModelBuilder:
             xform=xform,
             cfg=cfg,
             src=sdf,
+            key=key,
+        )
+
+    def add_shape_convex_hull(
+        self,
+        body: int,
+        xform: Transform | None = None,
+        mesh: Mesh | None = None,
+        scale: Vec3 | None = None,
+        cfg: ShapeConfig | None = None,
+        key: str | None = None,
+    ) -> int:
+        """Adds a convex hull collision shape to a body.
+
+        Args:
+            body (int): The index of the parent body this shape belongs to. Use -1 for shapes not attached to any specific body.
+            xform (Transform | None): The transform of the convex hull in the parent body's local frame. If `None`, the identity transform `wp.transform()` is used. Defaults to `None`.
+            mesh (Mesh | None): The :class:`Mesh` object containing the vertex data for the convex hull. Defaults to `None`.
+            scale (Vec3 | None): The scale of the convex hull. Defaults to `None`, in which case the scale is `(1.0, 1.0, 1.0)`.
+            cfg (ShapeConfig | None): The configuration for the shape's physical and collision properties. If `None`, :attr:`default_shape_cfg` is used. Defaults to `None`.
+            key (str | None): An optional unique key for identifying the shape. If `None`, a default key is automatically generated. Defaults to `None`.
+
+        Returns:
+            int: The index of the newly added shape.
+        """
+
+        if cfg is None:
+            cfg = self.default_shape_cfg
+        return self.add_shape(
+            body=body,
+            type=GeoType.CONVEX_HULL,
+            xform=xform,
+            cfg=cfg,
+            scale=scale,
+            src=mesh,
             key=key,
         )
 
@@ -4055,7 +4092,9 @@ class ModelBuilder:
             target_max_min_color_ratio=target_max_min_color_ratio,
         )
 
-    def finalize(self, device: Devicelike | None = None, requires_grad: bool = False, build_shape_contact_pairs: bool = True) -> Model:
+    def finalize(
+        self, device: Devicelike | None = None, requires_grad: bool = False, build_shape_contact_pairs: bool = True
+    ) -> Model:
         """
         Finalize the builder and create a concrete Model for simulation.
 

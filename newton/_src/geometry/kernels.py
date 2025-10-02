@@ -1341,6 +1341,7 @@ def create_geo_data(
         or geo_data.geo_type == GeoType.CONE
     ):
         geo_data.radius_eff = geo_data.geo_scale[0]
+    # Note: CONVEX_HULL and MESH have radius_eff = 0 (they don't use Minkowski sums)
 
     return geo_data
 

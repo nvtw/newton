@@ -13,6 +13,7 @@ from ..geometry.support_function import (
     GenericShapeData,
     GeoTypeEx,
     SupportMapDataProvider,
+    pack_mesh_ptr,
     support_map as support_map_func,
 )
 from ..geometry.types import GeoType
@@ -281,6 +282,7 @@ def build_contacts_kernel_mesh_midphase(
     type_b = shape_type[shape_b]
 
     # Mesh-mesh collisions are currently not supported
+    # CONVEX_HULL uses GJK/EPA so it's treated as a primitive, not a mesh
     if type_a == int(GeoType.MESH) and type_b == int(GeoType.MESH):
         return
 
@@ -395,6 +397,7 @@ def extract_shape_data(
     shape_type: wp.array(dtype=int),
     shape_scale: wp.array(dtype=wp.vec3),
     shape_collision_radius: wp.array(dtype=float),
+    shape_source_ptr: wp.array(dtype=wp.uint64),
 ):
     """
     Extract shape data for any primitive shape type.
@@ -407,6 +410,7 @@ def extract_shape_data(
         shape_type: Shape types
         shape_scale: Shape scales
         shape_collision_radius: Precomputed collision radius
+        shape_source_ptr: Array of mesh/SDF source pointers
 
     Returns:
         tuple: (position, orientation, shape_data, bounding_sphere_center, bounding_sphere_radius)
@@ -425,6 +429,11 @@ def extract_shape_data(
     result.shape_type = shape_type[shape_idx]
     result.scale = shape_scale[shape_idx]
     result.auxillary = wp.vec3(0.0, 0.0, 0.0)
+
+    # For CONVEX_HULL, pack the mesh pointer into auxillary
+    if shape_type[shape_idx] == int(GeoType.CONVEX_HULL):
+        # result.scale = wp.vec3(1.0, 1.0, 1.0)
+        result.auxillary = pack_mesh_ptr(shape_source_ptr[shape_idx])
 
     # For primitive shapes, bounding sphere center is the shape center
     bounding_sphere_center = position
@@ -562,6 +571,7 @@ def build_contacts_kernel_gjk_mpr(
     type_b = shape_type[shape_b]
 
     # Mesh-mesh collisions are currently not supported
+    # CONVEX_HULL uses GJK/EPA so it's treated as a primitive, not a mesh
     if type_a == int(GeoType.MESH) and type_b == int(GeoType.MESH):
         return
 
@@ -599,19 +609,22 @@ def build_contacts_kernel_gjk_mpr(
         pos_a, quat_a, shape_data_a, bsphere_center_a, bsphere_radius_a = extract_mesh_triangle(
             mesh_ptr, triangle_idx, X_ws_a, shape_scale[shape_a]
         )
-
-        # Extract primitive shape data for shape B
-        pos_b, quat_b, shape_data_b, bsphere_center_b, bsphere_radius_b = extract_shape_data(
-            shape_b, body_q, shape_transform, shape_body, shape_type, shape_scale, shape_collision_radius
-        )
     else:
         # Both are regular shapes
         pos_a, quat_a, shape_data_a, bsphere_center_a, bsphere_radius_a = extract_shape_data(
-            shape_a, body_q, shape_transform, shape_body, shape_type, shape_scale, shape_collision_radius
+            shape_a,
+            body_q,
+            shape_transform,
+            shape_body,
+            shape_type,
+            shape_scale,
+            shape_collision_radius,
+            shape_source_ptr,
         )
-        pos_b, quat_b, shape_data_b, bsphere_center_b, bsphere_radius_b = extract_shape_data(
-            shape_b, body_q, shape_transform, shape_body, shape_type, shape_scale, shape_collision_radius
-        )
+
+    pos_b, quat_b, shape_data_b, bsphere_center_b, bsphere_radius_b = extract_shape_data(
+        shape_b, body_q, shape_transform, shape_body, shape_type, shape_scale, shape_collision_radius, shape_source_ptr
+    )
 
     # Get body indices
     rigid_a = shape_body[shape_a]

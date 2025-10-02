@@ -542,7 +542,7 @@ class Model:
         edge_sdf_iter: int = 10,
         iterate_mesh_vertices: bool = True,
         requires_grad: bool | None = None,
-        broad_phase_mode = None,
+        broad_phase_mode=None,
         dt: float = 0.0,
     ) -> Contacts:
         """

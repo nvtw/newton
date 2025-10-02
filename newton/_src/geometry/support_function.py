@@ -38,9 +38,9 @@ class SupportMapDataProvider:
 def pack_mesh_ptr(ptr: wp.uint64) -> wp.vec3:
     """Pack a 64-bit pointer into 3 floats using 22 bits per component"""
     # Extract 22-bit chunks from the pointer
-    chunk1 = float(ptr & 0x3FFFFF)  # bits 0-21
-    chunk2 = float((ptr >> 22) & 0x3FFFFF)  # bits 22-43
-    chunk3 = float((ptr >> 44) & 0xFFFFF)  # bits 44-63 (20 bits)
+    chunk1 = float(ptr & wp.uint64(0x3FFFFF))  # bits 0-21
+    chunk2 = float((ptr >> wp.uint64(22)) & wp.uint64(0x3FFFFF))  # bits 22-43
+    chunk3 = float((ptr >> wp.uint64(44)) & wp.uint64(0xFFFFF))  # bits 44-63 (20 bits)
 
     return wp.vec3(chunk1, chunk2, chunk3)
 
@@ -111,7 +111,7 @@ def support_map(
         mesh_ptr = unpack_mesh_ptr(geom.auxillary)
         mesh = wp.mesh_get(mesh_ptr)
 
-        # The mesh scale is stored in the auxillary field
+        # The shape scale is stored in geom.scale
         mesh_scale = geom.scale
 
         # Find the vertex with the maximum dot product with the direction
@@ -120,6 +120,7 @@ def support_map(
         best_idx = int(0)
 
         num_verts = mesh.points.shape[0]
+
         for i in range(num_verts):
             # Get vertex position (applying scale)
             vertex = wp.cw_mul(mesh.points[i], mesh_scale)
@@ -132,11 +133,10 @@ def support_map(
                 max_dot = dot_val
                 best_vertex = vertex
                 best_idx = i
-
         result = best_vertex
         feature_id = best_idx
 
-    if geom.shape_type == int(GeoTypeEx.TRIANGLE):
+    elif geom.shape_type == int(GeoTypeEx.TRIANGLE):
         # Triangle vertices: a at origin, b at scale, c at auxillary
         tri_a = wp.vec3(0.0, 0.0, 0.0)
         tri_b = geom.scale

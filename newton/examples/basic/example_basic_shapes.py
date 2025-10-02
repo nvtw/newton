@@ -116,6 +116,109 @@ class Example:
         builder.add_shape_cone(body_cone, radius=0.45, half_height=0.6)
         builder.add_joint_free(body_cone)  # Add free joint for MuJoCo
 
+        # ICOSAHEDRON (convex hull)
+        # Create an icosahedron using the golden ratio
+        phi = (1.0 + np.sqrt(5.0)) / 2.0  # Golden ratio
+        scale_ico = 0.5  # Scale down to match other shapes
+
+        # Icosahedron vertices (12 vertices)
+        ico_vertices = (
+            np.array(
+                [
+                    [-1, phi, 0],
+                    [1, phi, 0],
+                    [-1, -phi, 0],
+                    [1, -phi, 0],
+                    [0, -1, phi],
+                    [0, 1, phi],
+                    [0, -1, -phi],
+                    [0, 1, -phi],
+                    [phi, 0, -1],
+                    [phi, 0, 1],
+                    [-phi, 0, -1],
+                    [-phi, 0, 1],
+                ],
+                dtype=np.float32,
+            )
+            * scale_ico
+        )
+
+        # Normalize to make it roughly unit radius
+        ico_vertices /= np.linalg.norm(ico_vertices[0])
+        ico_vertices *= 0.5  # Adjust size
+
+        # Icosahedron faces (20 triangular faces)
+        ico_indices = np.array(
+            [
+                0,
+                11,
+                5,
+                0,
+                5,
+                1,
+                0,
+                1,
+                7,
+                0,
+                7,
+                10,
+                0,
+                10,
+                11,
+                1,
+                5,
+                9,
+                5,
+                11,
+                4,
+                11,
+                10,
+                2,
+                10,
+                7,
+                6,
+                7,
+                1,
+                8,
+                3,
+                9,
+                4,
+                3,
+                4,
+                2,
+                3,
+                2,
+                6,
+                3,
+                6,
+                8,
+                3,
+                8,
+                9,
+                4,
+                9,
+                5,
+                2,
+                4,
+                11,
+                6,
+                2,
+                10,
+                8,
+                6,
+                7,
+                9,
+                8,
+                1,
+            ],
+            dtype=np.int32,
+        )
+
+        ico_mesh = newton.Mesh(ico_vertices, ico_indices)
+        body_ico = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 4.0, drop_z), q=wp.quat_identity()))
+        builder.add_shape_convex_hull(body_ico, mesh=ico_mesh, scale=(1.0, 1.0, 1.0))
+        builder.add_joint_free(body_ico)  # Add free joint for MuJoCo
+
         # Three stacked cubes (small initial gaps), positioned at y = 6.0
         cube_h = 0.4
         gap = 0.02
@@ -125,10 +228,14 @@ class Example:
         z3 = z2 + 2.0 * cube_h + gap
 
         # Build multiple pyramids of cubes
-        pyramid_size = 20  # Number of cubes at the base
+        pyramid_size = 30  # Number of cubes at the base
         cube_spacing = 2.1 * cube_h  # Space between cube centers
         num_pyramids = 1  # Number of pyramids to build
         pyramid_spacing = 2 * cube_spacing  # Space between pyramids
+
+        # Calculate pyramid dimensions for wrecking ball positioning
+        pyramid_height = pyramid_size * cube_spacing
+        base_row_width = (pyramid_size - 1) * cube_spacing
 
         for pyramid in range(num_pyramids):
             # Offset each pyramid along y-axis (back/forward)
@@ -146,6 +253,43 @@ class Example:
                     body = builder.add_body(xform=wp.transform(p=wp.vec3(x_pos, y_pos, z_pos), q=wp.quat_identity()))
                     builder.add_shape_box(body, hx=cube_h, hy=cube_h, hz=cube_h)
                     builder.add_joint_free(body)  # Add free joint for MuJoCo
+
+        # WRECKING BALL - Heavy sphere that rolls down a ramp towards the pyramid
+        wrecking_ball_radius = 2.0
+        wrecking_ball_mass_multiplier = 10.0  # Make it very heavy
+
+        # Position: start on top of a tilted ramp, behind the pyramid
+        ramp_length = 20.0
+        ramp_height = pyramid_height / 2
+        ramp_angle = float(np.arctan2(ramp_height, ramp_length))  # Tilt angle (convert to Python float)
+
+        ball_x = 0.0  # Centered with the pyramid
+        ball_y = y_stack + ramp_length * 0.9  # Start at the high end of the ramp
+        ball_z = ramp_height + wrecking_ball_radius + 0.1  # Just above the ramp
+
+        # Create the wrecking ball
+        body_ball = builder.add_body(xform=wp.transform(p=wp.vec3(ball_x, ball_y, ball_z), q=wp.quat_identity()))
+        ball_shape_cfg = newton.ModelBuilder.ShapeConfig()
+        ball_shape_cfg.density = builder.default_shape_cfg.density * wrecking_ball_mass_multiplier
+        builder.add_shape_sphere(body_ball, radius=wrecking_ball_radius, cfg=ball_shape_cfg)
+        builder.add_joint_free(body_ball)  # Add free joint for MuJoCo
+
+        # Create a tilted ramp (static) - rotated around X axis to tilt downward in -y direction
+        ramp_width = 5.0
+        ramp_thickness = 0.5
+        ramp_center_y = y_stack + ramp_length / 2  # Center of ramp
+        ramp_center_z = ramp_height / 2  # Center height
+
+        # Rotation: tilt the ramp so it slopes down from +y to -y
+        ramp_quat = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), float(ramp_angle))
+
+        builder.add_shape_box(
+            body=-1,  # Static body (attached to world)
+            xform=wp.transform(p=wp.vec3(ball_x, ramp_center_y, ramp_center_z), q=ramp_quat),
+            hx=ramp_width / 2,
+            hy=ramp_length / 2,
+            hz=ramp_thickness / 2,
+        )
 
         # # MESH (bunny)
         # usd_stage = Usd.Stage.Open(newton.examples.get_asset("bunny.usd"))
