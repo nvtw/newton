@@ -25,14 +25,12 @@ class BroadPhaseMode(IntEnum):
     """Broad phase collision detection mode.
 
     Attributes:
-        NONE: No broad phase, use explicitly provided shape pairs (fastest if pairs are known)
         NXN: All-pairs broad phase with AABB checks (simple, O(N²) but good for small scenes)
         SAP: Sweep and Prune broad phase with AABB sorting (faster for larger scenes, O(N log N))
     """
 
-    NONE = 0
-    NXN = 1
-    SAP = 2
+    NXN = 0
+    SAP = 1
 
 
 # Pre-create the convex multi-contact solver (usable inside kernels)
@@ -210,7 +208,7 @@ def export_to_array(
     shape_b: int,
     buffer: vec8i,
     buffer_count: int,
-    shape_pairs_mesh: wp.array(dtype=wp.vec4i),
+    shape_pairs_mesh: wp.array(dtype=wp.vec3i),
     shape_pairs_mesh_count: wp.array(dtype=int),
 ):
     """Export triangle indices from buffer to the shape_pairs_mesh array.
@@ -237,7 +235,7 @@ def export_to_array(
     for i in range(entries_to_write):
         triangle_idx = buffer[i]
         slot = start_slot + i
-        shape_pairs_mesh[slot] = wp.vec4i(shape_a, shape_b, triangle_idx, 0)
+        shape_pairs_mesh[slot] = wp.vec3i(shape_a, shape_b, triangle_idx)
 
 
 @wp.kernel(enable_backward=False)
@@ -246,7 +244,7 @@ def build_contacts_kernel_mesh_midphase(
     aabb_upper: wp.array(dtype=wp.vec3),
     shape_pairs: wp.array(dtype=wp.vec2i),
     shape_pairs_count: wp.array(dtype=int),
-    shape_pairs_mesh: wp.array(dtype=wp.vec4i),  # Output
+    shape_pairs_mesh: wp.array(dtype=wp.vec3i),  # Output
     shape_pairs_mesh_count: wp.array(dtype=int),  # Output
     shape_source_ptr: wp.array(dtype=wp.uint64),
     shape_type: wp.array(dtype=int),
@@ -317,38 +315,87 @@ def build_contacts_kernel_mesh_midphase(
 
 
 @wp.func
+def extract_shape_data(
+    shape_idx: int,
+    body_q: wp.array(dtype=wp.transform),
+    shape_transform: wp.array(dtype=wp.transform),
+    shape_body: wp.array(dtype=int),
+    shape_type: wp.array(dtype=int),
+    shape_scale: wp.array(dtype=wp.vec3),
+    shape_collision_radius: wp.array(dtype=float),
+):
+    """
+    Extract shape data for any primitive shape type.
+
+    Args:
+        shape_idx: Index of the shape
+        body_q: Body transforms
+        shape_transform: Shape local transforms
+        shape_body: Shape to body mapping
+        shape_type: Shape types
+        shape_scale: Shape scales
+        shape_collision_radius: Precomputed collision radius
+
+    Returns:
+        tuple: (position, orientation, shape_data, bounding_sphere_center, bounding_sphere_radius)
+    """
+    # Get shape's world transform
+    body_idx = shape_body[shape_idx]
+    X_ws = shape_transform[shape_idx]
+    if body_idx >= 0:
+        X_ws = wp.transform_multiply(body_q[body_idx], shape_transform[shape_idx])
+
+    position = wp.transform_get_translation(X_ws)
+    orientation = wp.transform_get_rotation(X_ws)
+
+    # Create generic shape data
+    result = GenericShapeData()
+    result.shape_type = shape_type[shape_idx]
+    result.scale = shape_scale[shape_idx]
+    result.auxillary = wp.vec3(0.0, 0.0, 0.0)
+
+    # For primitive shapes, bounding sphere center is the shape center
+    bounding_sphere_center = position
+    bounding_sphere_radius = shape_collision_radius[shape_idx]
+
+    return position, orientation, result, bounding_sphere_center, bounding_sphere_radius
+
+
+@wp.func
 def extract_mesh_triangle(
     mesh_ptr: wp.uint64,
     triangle_idx: int,
-    mesh_transform: wp.transform,
+    X_ws: wp.transform,
     mesh_scale: wp.vec3,
-) -> (wp.vec3, wp.quat, GenericShapeData):
+):
     """
     Returns geom position, orientation and shape data for a triangle from a mesh
 
     Args:
         mesh_ptr: Pointer to the mesh
         triangle_idx: Index of the triangle in the mesh
-        mesh_transform: Transform of the mesh shape
+        X_ws: World transform of the mesh (body_transform * shape_transform)
         mesh_scale: Scale of the mesh shape
 
     Returns:
-        tuple: (position, orientation, triangle_shape_data)
+        tuple: (position, orientation, triangle_shape_data, bounding_sphere_center, bounding_sphere_radius)
             - position: World position of triangle vertex A
             - orientation: Identity quaternion (triangles don't have orientation)
             - triangle_shape_data: GenericShapeData for the triangle
+            - bounding_sphere_center: Center of the triangle's bounding sphere (centroid)
+            - bounding_sphere_radius: Radius of the triangle's bounding sphere
     """
     mesh = wp.mesh_get(mesh_ptr)
 
     # Get vertex positions in mesh local space
-    tri_a_local = wp.cw_mul(mesh.points[mesh.indices[triangle_idx + 0]], mesh_scale)
-    tri_b_local = wp.cw_mul(mesh.points[mesh.indices[triangle_idx + 1]], mesh_scale)
-    tri_c_local = wp.cw_mul(mesh.points[mesh.indices[triangle_idx + 2]], mesh_scale)
+    tri_a_local = wp.cw_mul(mesh.points[mesh.indices[triangle_idx * 3 + 0]], mesh_scale)
+    tri_b_local = wp.cw_mul(mesh.points[mesh.indices[triangle_idx * 3 + 1]], mesh_scale)
+    tri_c_local = wp.cw_mul(mesh.points[mesh.indices[triangle_idx * 3 + 2]], mesh_scale)
 
-    # Transform to world space
-    tri_a_world = wp.transform_point(mesh_transform, tri_a_local)
-    tri_b_world = wp.transform_point(mesh_transform, tri_b_local)
-    tri_c_world = wp.transform_point(mesh_transform, tri_c_local)
+    # Transform to world space (X_ws already includes body and shape transforms)
+    tri_a_world = wp.transform_point(X_ws, tri_a_local)
+    tri_b_world = wp.transform_point(X_ws, tri_b_local)
+    tri_c_world = wp.transform_point(X_ws, tri_c_local)
 
     # Create triangle shape data (relative to vertex A as origin)
     result = GenericShapeData()
@@ -356,7 +403,16 @@ def extract_mesh_triangle(
     result.scale = tri_b_world - tri_a_world  # Vector from A to B
     result.auxillary = tri_c_world - tri_a_world  # Vector from A to C
 
-    return tri_a_world, wp.quat_identity(), result
+    # Calculate bounding sphere center (centroid of triangle)
+    bounding_sphere_center = (tri_a_world + tri_b_world + tri_c_world) / 3.0
+
+    # Calculate bounding sphere radius (max distance from center to any vertex)
+    dist_a = wp.length(tri_a_world - bounding_sphere_center)
+    dist_b = wp.length(tri_b_world - bounding_sphere_center)
+    dist_c = wp.length(tri_c_world - bounding_sphere_center)
+    bounding_sphere_radius = wp.max(wp.max(dist_a, dist_b), dist_c)
+
+    return tri_a_world, wp.quat_identity(), result, bounding_sphere_center, bounding_sphere_radius
 
 
 @wp.kernel(enable_backward=False)
@@ -376,6 +432,9 @@ def build_contacts_kernel_gjk_mpr(
     contact_max: int,
     num_pairs: int,
     sap_shape_pair_count: wp.array(dtype=int),
+    shape_source_ptr: wp.array(dtype=wp.uint64),
+    shape_pairs_mesh: wp.array(dtype=wp.vec3i),
+    shape_pairs_mesh_count: wp.array(dtype=int),
     # outputs
     contact_count: wp.array(dtype=int),
     out_shape0: wp.array(dtype=int),
@@ -394,13 +453,27 @@ def build_contacts_kernel_gjk_mpr(
     #     wp.printf("build_contacts_kernel_gjk_mpr\n")
 
     # Early bounds check - following convert_newton_contacts_to_mjwarp_kernel pattern
+    if tid >= shape_pairs.shape[0] + shape_pairs_mesh.shape[0]:
+        return
+
+    if num_pairs == -1 and tid >= sap_shape_pair_count[0] + shape_pairs_mesh_count[0]:
+        return
+
+    # Determine if this is a mesh-triangle pair or regular shape pair
+    pair = wp.vec3i()
+    is_mesh_pair = False
+    triangle_idx = int(-1)
+
     if tid >= shape_pairs.shape[0]:
-        return
+        # This is a mesh-triangle pair
+        pair = shape_pairs_mesh[tid - shape_pairs.shape[0]]
+        is_mesh_pair = True
+        triangle_idx = pair[2]
+    else:
+        # This is a regular shape pair
+        p = shape_pairs[tid]
+        pair = wp.vec3i(p[0], p[1], -1)
 
-    if num_pairs == -1 and tid >= sap_shape_pair_count[0]:
-        return
-
-    pair = shape_pairs[tid]
     shape_a = pair[0]
     shape_b = pair[1]
 
@@ -408,11 +481,11 @@ def build_contacts_kernel_gjk_mpr(
     if shape_a == shape_b:
         return
 
-    # Validate shape indices - following convert_newton_contacts_to_mjwarp_kernel pattern
+    # Validate shape indices
     if shape_a < 0 or shape_b < 0:
         return
 
-    # Get shape types early for validation
+    # Get shape types
     type_a = shape_type[shape_a]
     type_b = shape_type[shape_b]
 
@@ -421,29 +494,64 @@ def build_contacts_kernel_gjk_mpr(
         return
 
     # Sort shapes by type to ensure consistent collision handling order
-    if type_a > type_b:
+    if is_mesh_pair and type_a > type_b:
         # Swap shapes to maintain consistent ordering
         shape_a, shape_b = shape_b, shape_a
         type_a, type_b = type_b, type_a
+        tmp = pair[0]
+        pair[0] = pair[1]
+        pair[1] = tmp
 
-    # Get body indices - following convert_newton_contacts_to_mjwarp_kernel pattern
+    # If this is a mesh pair, we need to extract triangle data
+    # The mesh is always shape_a (guaranteed by midphase)
+    pos_a = wp.vec3()
+    quat_a = wp.quat()
+    shape_data_a = GenericShapeData()
+    bsphere_center_a = wp.vec3()
+    bsphere_radius_a = float(0.0)
+
+    pos_b = wp.vec3()
+    quat_b = wp.quat()
+    shape_data_b = GenericShapeData()
+    bsphere_center_b = wp.vec3()
+    bsphere_radius_b = float(0.0)
+
+    if is_mesh_pair and type_a == int(GeoType.MESH):
+        # Extract mesh triangle data for shape A
+        mesh_ptr = shape_source_ptr[shape_a]
+        rigid_a = shape_body[shape_a]
+        X_ws_a = shape_transform[shape_a]
+        if rigid_a >= 0:
+            X_ws_a = wp.transform_multiply(body_q[rigid_a], shape_transform[shape_a])
+
+        pos_a, quat_a, shape_data_a, bsphere_center_a, bsphere_radius_a = extract_mesh_triangle(
+            mesh_ptr, triangle_idx, X_ws_a, shape_scale[shape_a]
+        )
+
+        # Extract primitive shape data for shape B
+        pos_b, quat_b, shape_data_b, bsphere_center_b, bsphere_radius_b = extract_shape_data(
+            shape_b, body_q, shape_transform, shape_body, shape_type, shape_scale, shape_collision_radius
+        )
+    else:
+        # Both are regular shapes
+        pos_a, quat_a, shape_data_a, bsphere_center_a, bsphere_radius_a = extract_shape_data(
+            shape_a, body_q, shape_transform, shape_body, shape_type, shape_scale, shape_collision_radius
+        )
+        pos_b, quat_b, shape_data_b, bsphere_center_b, bsphere_radius_b = extract_shape_data(
+            shape_b, body_q, shape_transform, shape_body, shape_type, shape_scale, shape_collision_radius
+        )
+
+    # Get body indices
     rigid_a = shape_body[shape_a]
     rigid_b = shape_body[shape_b]
 
-    # Compute world transforms
-    X_ws_a = (
-        shape_transform[shape_a] if rigid_a == -1 else wp.transform_multiply(body_q[rigid_a], shape_transform[shape_a])
-    )
-    X_ws_b = (
-        shape_transform[shape_b] if rigid_b == -1 else wp.transform_multiply(body_q[rigid_b], shape_transform[shape_b])
-    )
-
-    pos_a = wp.transform_get_translation(X_ws_a)
-    pos_b = wp.transform_get_translation(X_ws_b)
+    # Get shape types from the extracted data
+    type_a = shape_data_a.shape_type
+    type_b = shape_data_b.shape_type
 
     # Check if shapes are infinite planes (scale.x == 0 and scale.y == 0)
-    scale_a = shape_scale[shape_a]
-    scale_b = shape_scale[shape_b]
+    scale_a = shape_data_a.scale
+    scale_b = shape_data_b.scale
     is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
     is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (scale_b[0] == 0.0 and scale_b[1] == 0.0)
 
@@ -466,12 +574,12 @@ def build_contacts_kernel_gjk_mpr(
         # Speculative margin is the distance objects could move toward each other in one timestep
         speculative_margin = relative_speed * dt
 
-    # Early bounding sphere check using precomputed collision radii
+    # Early bounding sphere check using extracted bounding spheres
     # Inflate by rigid_contact_margin + speculative_margin
     effective_margin = rigid_contact_margin + speculative_margin
-    radius_a = shape_collision_radius[shape_a] + effective_margin
-    radius_b = shape_collision_radius[shape_b] + effective_margin
-    center_distance = wp.length(pos_b - pos_a)
+    radius_a = bsphere_radius_a + effective_margin
+    radius_b = bsphere_radius_b + effective_margin
+    center_distance = wp.length(bsphere_center_b - bsphere_center_a)
 
     # Early out if bounding spheres don't overlap
     # Skip this check if either shape is an infinite plane
@@ -483,32 +591,30 @@ def build_contacts_kernel_gjk_mpr(
         return
     elif is_infinite_plane_a:
         # Check if shape B is close enough to the infinite plane A
-        rot_a_temp = wp.transform_get_rotation(X_ws_a)
-        plane_normal = wp.quat_rotate(rot_a_temp, wp.vec3(0.0, 0.0, 1.0))
+        plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
         # Distance from shape B center to plane A
         dist_to_plane = wp.abs(wp.dot(pos_b - pos_a, plane_normal))
         if dist_to_plane > radius_b:
             return
     elif is_infinite_plane_b:
         # Check if shape A is close enough to the infinite plane B
-        rot_b_temp = wp.transform_get_rotation(X_ws_b)
-        plane_normal = wp.quat_rotate(rot_b_temp, wp.vec3(0.0, 0.0, 1.0))
+        plane_normal = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
         # Distance from shape A center to plane B
         dist_to_plane = wp.abs(wp.dot(pos_a - pos_b, plane_normal))
         if dist_to_plane > radius_a:
             return
 
-    rot_a = wp.transform_get_rotation(X_ws_a)
-    rot_b = wp.transform_get_rotation(X_ws_b)
+    # Use the extracted orientations
+    rot_a = quat_a
+    rot_b = quat_b
 
     # World->body transforms for writing contact points
     X_bw_a = wp.transform_identity() if rigid_a == -1 else wp.transform_inverse(body_q[rigid_a])
     X_bw_b = wp.transform_identity() if rigid_b == -1 else wp.transform_inverse(body_q[rigid_b])
 
-    # Create geometry data structures for convex collision detection
-    geom_a = GenericShapeData()
-    geom_a.shape_type = type_a
-    geom_a.scale = scale_a
+    # Use the extracted geometry data structures for convex collision detection
+    geom_a = shape_data_a
+    geom_b = shape_data_b
 
     # Convert infinite planes to cube proxies for GJK/MPR compatibility
     # Use the OTHER object's radius to properly size the cube
@@ -517,10 +623,6 @@ def build_contacts_kernel_gjk_mpr(
     if is_infinite_plane_a:
         # Position the cube based on the OTHER object's position (pos_b)
         geom_a, pos_a_adjusted = convert_infinite_plane_to_cube(geom_a, rot_a, pos_a, pos_b, radius_b)
-
-    geom_b = GenericShapeData()
-    geom_b.shape_type = type_b
-    geom_b.scale = scale_b
 
     pos_b_adjusted = pos_b
     if is_infinite_plane_b:
@@ -594,214 +696,6 @@ def build_contacts_kernel_gjk_mpr(
             out_thickness1,
             out_tids,
         )
-
-    return
-
-    if type_a == int(GeoType.PLANE) and type_b == int(GeoType.BOX):
-        plane_normal_world = wp.transform_vector(X_ws_a, wp.vec3(0.0, 0.0, 1.0))
-        box_rot_mat = wp.quat_to_matrix(wp.transform_get_rotation(X_ws_b))
-
-        # Call collide_plane_box to get contact information
-        contact_distances, contact_positions, contact_normal = collide_plane_box(
-            plane_normal_world,  # plane_normal
-            pos_a,  # plane_pos (plane position in world space)
-            pos_b,  # box_pos (box position in world space)
-            box_rot_mat,  # box_rot (box rotation matrix)
-            shape_scale[shape_b],  # box_size (box half-extents)
-        )
-
-        for id in range(4):
-            dist = contact_distances[id]
-            if dist < wp.inf:
-                write_contact(
-                    contact_positions[id],
-                    contact_normal,
-                    contact_distances[id],
-                    0.0,
-                    0.0,
-                    shape_thickness[shape_a],
-                    shape_thickness[shape_b],
-                    shape_a,
-                    shape_b,
-                    X_bw_a,
-                    X_bw_b,
-                    tid,
-                    effective_margin,
-                    contact_max,
-                    contact_count,
-                    out_shape0,
-                    out_shape1,
-                    out_point0,
-                    out_point1,
-                    out_offset0,
-                    out_offset1,
-                    out_normal,
-                    out_thickness0,
-                    out_thickness1,
-                    out_tids,
-                )
-
-    # Implement Plane vs Sphere contacts (type order enforced above)
-    elif type_a == int(GeoType.PLANE) and type_b == int(GeoType.SPHERE):
-        # Plane frame helpers
-        plane_normal_world = wp.transform_vector(X_ws_a, wp.vec3(0.0, 0.0, 1.0))
-
-        # Sphere radius
-        sphere_radius = shape_scale[shape_b][0]  # Sphere radius is stored in x component
-
-        # Call collide_plane_sphere to get contact information
-        contact_distance, contact_position = collide_plane_sphere(
-            plane_normal_world,  # plane_normal
-            pos_a,  # plane_pos (plane position in world space)
-            pos_b,  # sphere_pos (sphere position in world space)
-            sphere_radius,  # sphere_radius
-        )
-
-        # Use the write_contact function to write the contact
-        write_contact(
-            contact_position,
-            plane_normal_world,  # contact normal from plane to sphere
-            contact_distance,
-            0.0,
-            sphere_radius,
-            shape_thickness[shape_a],
-            shape_thickness[shape_b],
-            shape_a,
-            shape_b,
-            X_bw_a,
-            X_bw_b,
-            tid,
-            effective_margin,
-            contact_max,
-            contact_count,
-            out_shape0,
-            out_shape1,
-            out_point0,
-            out_point1,
-            out_offset0,
-            out_offset1,
-            out_normal,
-            out_thickness0,
-            out_thickness1,
-            out_tids,
-        )
-
-    # Implement Sphere vs Box contacts (type order enforced above)
-    elif type_a == int(GeoType.SPHERE) and type_b == int(GeoType.BOX):
-        # Sphere radius
-        sphere_radius = shape_scale[shape_a][0]  # Sphere radius is stored in x component
-
-        # Box half extents
-        box_half_extents = shape_scale[shape_b]  # Box half-extents (hx, hy, hz)
-
-        # Get box rotation matrix from quaternion
-        box_rot_mat = wp.quat_to_matrix(wp.transform_get_rotation(X_ws_b))
-
-        # Call collide_sphere_box to get contact information
-        contact_distance, contact_position, contact_normal = collide_sphere_box(
-            pos_a,  # sphere_pos (sphere position in world space)
-            sphere_radius,  # sphere_radius
-            pos_b,  # box_pos (box position in world space)
-            box_rot_mat,  # box_rot (box rotation matrix)
-            box_half_extents,  # box_size (box half-extents)
-        )
-
-        # Print contact information in the requested format
-        wp.printf(
-            "point_a: (%f,%f,%f), point_b: (%f,%f,%f), normal: (%f,%f,%f), dist: %f\n",
-            contact_position[0] + contact_normal[0] * sphere_radius,  # point_a
-            contact_position[1] + contact_normal[1] * sphere_radius,
-            contact_position[2] + contact_normal[2] * sphere_radius,
-            contact_position[0],  # point_b
-            contact_position[1],
-            contact_position[2],
-            contact_normal[0],  # normal
-            contact_normal[1],
-            contact_normal[2],
-            contact_distance,  # distance
-        )
-
-        # Use the write_contact function to write the contact
-        write_contact(
-            contact_position,
-            contact_normal,  # contact normal from sphere to box
-            contact_distance,
-            sphere_radius,  # sphere's effective radius
-            0.0,  # box has no effective radius
-            shape_thickness[shape_a],
-            shape_thickness[shape_b],
-            shape_a,
-            shape_b,
-            X_bw_a,
-            X_bw_b,
-            tid,
-            rigid_contact_margin,
-            contact_max,
-            contact_count,
-            out_shape0,
-            out_shape1,
-            out_point0,
-            out_point1,
-            out_offset0,
-            out_offset1,
-            out_normal,
-            out_thickness0,
-            out_thickness1,
-            out_tids,
-        )
-
-    # Implement Box vs Box contacts (type order enforced above)
-    elif type_a == int(GeoType.BOX) and type_b == int(GeoType.BOX):
-        # Box half extents for both boxes
-        box1_half_extents = shape_scale[shape_a]  # Box A half-extents (hx, hy, hz)
-        box2_half_extents = shape_scale[shape_b]  # Box B half-extents (hx, hy, hz)
-
-        # Get box rotation matrices from quaternions
-        box1_rot_mat = wp.quat_to_matrix(wp.transform_get_rotation(X_ws_a))
-        box2_rot_mat = wp.quat_to_matrix(wp.transform_get_rotation(X_ws_b))
-
-        # Call collide_box_box to get contact information
-        contact_distances8, contact_positions8, contact_normals8 = collide_box_box(
-            pos_a,  # box1_pos (first box position in world space)
-            box1_rot_mat,  # box1_rot (first box rotation matrix)
-            box1_half_extents,  # box1_size (first box half-extents)
-            pos_b,  # box2_pos (second box position in world space)
-            box2_rot_mat,  # box2_rot (second box rotation matrix)
-            box2_half_extents,  # box2_size (second box half-extents)
-        )
-
-        # Process up to 8 contact points (box-box can generate multiple contacts)
-        for id in range(8):
-            dist = contact_distances8[id]
-            if dist < wp.inf:
-                # Use the write_contact function to write the contact
-                write_contact(
-                    contact_positions8[id],
-                    contact_normals8[id],  # contact normal for this specific contact
-                    dist,
-                    0.0,  # box A has no effective radius
-                    0.0,  # box B has no effective radius
-                    shape_thickness[shape_a],
-                    shape_thickness[shape_b],
-                    shape_a,
-                    shape_b,
-                    X_bw_a,
-                    X_bw_b,
-                    tid,
-                    rigid_contact_margin,
-                    contact_max,
-                    contact_count,
-                    out_shape0,
-                    out_shape1,
-                    out_point0,
-                    out_point1,
-                    out_offset0,
-                    out_offset1,
-                    out_normal,
-                    out_thickness0,
-                    out_thickness1,
-                    out_tids,
-                )
 
 
 @wp.kernel
@@ -892,8 +786,7 @@ class CollisionPipeline2:
         Args:
             shape_count (int): Number of shapes in the simulation.
             particle_count (int): Number of particles in the simulation.
-            shape_pairs_filtered (wp.array | None, optional): Array of filtered shape pairs to consider for collision.
-                Only used when broad_phase_mode is BroadPhaseMode.NONE.
+            shape_pairs_filtered (wp.array | None, optional): Deprecated, no longer used.
             rigid_contact_max (int | None, optional): Maximum number of rigid contacts to allocate.
                 If None, computed as shape_pairs_max * rigid_contact_max_per_pair.
             rigid_contact_max_per_pair (int, optional): Maximum number of contact points per shape pair. Defaults to 10.
@@ -906,7 +799,6 @@ class CollisionPipeline2:
             requires_grad (bool, optional): Whether to enable gradient computation. Defaults to False.
             device (Devicelike, optional): The device on which to allocate arrays and perform computation.
             broad_phase_mode (BroadPhaseMode, optional): Broad phase mode for collision detection.
-                - BroadPhaseMode.NONE: Use explicitly provided shape_pairs_filtered
                 - BroadPhaseMode.NXN: Use all-pairs AABB broad phase (O(N²), good for small scenes)
                 - BroadPhaseMode.SAP: Use sweep-and-prune AABB broad phase (O(N log N), better for larger scenes)
                 Defaults to BroadPhaseMode.NXN.
@@ -915,14 +807,10 @@ class CollisionPipeline2:
         self.contacts = None
 
         self.shape_count = shape_count
-        self.shape_pairs_filtered = shape_pairs_filtered
         self.broad_phase_mode = broad_phase_mode
 
-        if self.shape_pairs_filtered is not None:
-            self.shape_pairs_max = len(self.shape_pairs_filtered)
-        else:
-            # When using SAP, estimate based on worst case (all pairs)
-            self.shape_pairs_max = (shape_count * (shape_count - 1)) // 2
+        # Estimate based on worst case (all pairs)
+        self.shape_pairs_max = (shape_count * (shape_count - 1)) // 2
 
         self.rigid_contact_margin = rigid_contact_margin
         if rigid_contact_max is not None:
@@ -934,7 +822,7 @@ class CollisionPipeline2:
         if self.broad_phase_mode == BroadPhaseMode.NXN:
             self.nxn_broadphase = BroadPhaseAllPairs()
             self.sap_broadphase = None
-        elif self.broad_phase_mode == BroadPhaseMode.SAP:
+        else:  # BroadPhaseMode.SAP
             # Estimate max groups for SAP - use reasonable defaults
             max_num_negative_group_members = max(int(shape_count**0.5), 10)
             max_num_distinct_positive_groups = max(int(shape_count**0.5), 10)
@@ -944,9 +832,6 @@ class CollisionPipeline2:
                 max_num_negative_group_members=max_num_negative_group_members,
             )
             self.nxn_broadphase = None
-        else:  # BroadPhaseMode.NONE
-            self.nxn_broadphase = None
-            self.sap_broadphase = None
 
         # Allocate buffers for broadphase collision handling
         with wp.ScopedDevice(device):
@@ -956,17 +841,23 @@ class CollisionPipeline2:
             self.rigid_pair_point_count = None  # wp.empty(self.shape_count ** 2, dtype=wp.int32)
             self.rigid_pair_point_id = wp.empty(self.rigid_contact_max, dtype=wp.int32)
 
-            # Allocate buffers for dynamically computed pairs and AABBs if using broad phase
+            # Allocate buffers for dynamically computed pairs and AABBs
             self.broad_phase_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
-            if self.broad_phase_mode != BroadPhaseMode.NONE:
-                self.broad_phase_shape_pairs = wp.zeros(self.shape_pairs_max, dtype=wp.vec2i, device=device)
-                self.shape_aabb_lower = wp.zeros(shape_count, dtype=wp.vec3, device=device)
-                self.shape_aabb_upper = wp.zeros(shape_count, dtype=wp.vec3, device=device)
-                # Allocate dummy collision/shape group arrays once (reused every frame)
-                # Collision group: 1 (positive) = all shapes in same group, collide with each other
-                # Environment group: -1 (global) = collides with all environments
-                self.dummy_collision_group = wp.full(shape_count, 1, dtype=wp.int32, device=device)
-                self.dummy_shape_group = wp.full(shape_count, -1, dtype=wp.int32, device=device)
+            self.broad_phase_shape_pairs = wp.zeros(self.shape_pairs_max, dtype=wp.vec2i, device=device)
+            self.shape_aabb_lower = wp.zeros(shape_count, dtype=wp.vec3, device=device)
+            self.shape_aabb_upper = wp.zeros(shape_count, dtype=wp.vec3, device=device)
+            # Allocate dummy collision/shape group arrays once (reused every frame)
+            # Collision group: 1 (positive) = all shapes in same group, collide with each other
+            # Environment group: -1 (global) = collides with all environments
+            self.dummy_collision_group = wp.full(shape_count, 1, dtype=wp.int32, device=device)
+            self.dummy_shape_group = wp.full(shape_count, -1, dtype=wp.int32, device=device)
+
+            # Allocate buffers for mesh midphase (triangle-level pairs)
+            # Estimate: assume each mesh-primitive pair might have ~10 triangles on average
+            mesh_pair_max = max(self.shape_pairs_max * 10, 10000)
+            self.mesh_pair_max = mesh_pair_max
+            self.mesh_shape_pairs = wp.zeros(mesh_pair_max, dtype=wp.vec3i, device=device)
+            self.mesh_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
 
         if soft_contact_max is None:
             soft_contact_max = shape_count * particle_count
@@ -1014,8 +905,8 @@ class CollisionPipeline2:
             rigid_contact_max_per_pair = 0
         if requires_grad is None:
             requires_grad = model.requires_grad
-        # Use model.shape_contact_pairs if BroadPhaseMode.NONE, otherwise None (dynamic broad phase)
-        shape_pairs_filtered = model.shape_contact_pairs if broad_phase_mode == BroadPhaseMode.NONE else None
+        # shape_pairs_filtered is deprecated (no longer used)
+        shape_pairs_filtered = None
 
         return CollisionPipeline2(
             model.shape_count,
@@ -1063,105 +954,120 @@ class CollisionPipeline2:
         # output contacts buffer
         contacts = self.contacts
 
-        # Determine which shape pairs to check based on broad phase mode
-        if self.broad_phase_mode == BroadPhaseMode.NONE:
-            # Use explicitly provided shape pairs
-            shape_pairs = self.shape_pairs_filtered
-            num_pairs = len(self.shape_pairs_filtered) if self.shape_pairs_filtered is not None else 0
-        else:
-            # Compute AABBs for all shapes in world space (needed for both NXN and SAP)
-            # AABBs are enlarged by rigid_contact_margin and speculative velocity expansion
-            wp.launch(
-                kernel=compute_shape_aabbs,
-                dim=model.shape_count,
-                inputs=[
-                    state.body_q,
-                    state.body_qd,
-                    model.shape_transform,
-                    model.shape_body,
-                    model.shape_collision_radius,
-                    self.rigid_contact_margin,
-                    dt,
-                ],
-                outputs=[
-                    self.shape_aabb_lower,
-                    self.shape_aabb_upper,
-                ],
-                device=model.device,
+        # Clear counters at start of frame
+        self.mesh_pair_count.zero_()
+        self.broad_phase_pair_count.zero_()
+
+        # Compute AABBs for all shapes in world space (needed for both NXN and SAP)
+        # AABBs are enlarged by rigid_contact_margin and speculative velocity expansion
+        wp.launch(
+            kernel=compute_shape_aabbs,
+            dim=model.shape_count,
+            inputs=[
+                state.body_q,
+                state.body_qd,
+                model.shape_transform,
+                model.shape_body,
+                model.shape_collision_radius,
+                self.rigid_contact_margin,
+                dt,
+            ],
+            outputs=[
+                self.shape_aabb_lower,
+                self.shape_aabb_upper,
+            ],
+            device=model.device,
+        )
+
+        # Run appropriate broad phase
+        if self.broad_phase_mode == BroadPhaseMode.NXN:
+            # Use NxN all-pairs broad phase with AABB overlaps
+            self.nxn_broadphase.launch(
+                self.shape_aabb_lower,
+                self.shape_aabb_upper,
+                model.shape_thickness,  # Use thickness as cutoff
+                self.dummy_collision_group,  # Preallocated, all 1 (same group = collide)
+                self.dummy_shape_group,  # Preallocated, all -1 (global entities)
+                model.shape_count,
+                self.broad_phase_shape_pairs,
+                self.broad_phase_pair_count,
+            )
+        else:  # BroadPhaseMode.SAP
+            # Use sweep-and-prune broad phase with AABB sorting
+            self.sap_broadphase.launch(
+                self.shape_aabb_lower,
+                self.shape_aabb_upper,
+                model.shape_thickness,  # Use thickness as cutoff
+                self.dummy_collision_group,  # Preallocated, all 1 (same group = collide)
+                self.dummy_shape_group,  # Preallocated, all -1 (global entities)
+                model.shape_count,
+                self.broad_phase_shape_pairs,
+                self.broad_phase_pair_count,
             )
 
-            # Run appropriate broad phase
-            self.broad_phase_pair_count.zero_()
+        # debug = self.broad_phase_pair_count.numpy()[0]
+        # print(f"Broad phase pair count: {debug}")
 
-            if self.broad_phase_mode == BroadPhaseMode.NXN:
-                # Use NxN all-pairs broad phase with AABB overlaps
-                self.nxn_broadphase.launch(
-                    self.shape_aabb_lower,
-                    self.shape_aabb_upper,
-                    model.shape_thickness,  # Use thickness as cutoff
-                    self.dummy_collision_group,  # Preallocated, all 1 (same group = collide)
-                    self.dummy_shape_group,  # Preallocated, all -1 (global entities)
-                    model.shape_count,
-                    self.broad_phase_shape_pairs,
-                    self.broad_phase_pair_count,
-                )
-            else:  # BroadPhaseMode.SAP
-                # Use sweep-and-prune broad phase with AABB sorting
-                self.sap_broadphase.launch(
-                    self.shape_aabb_lower,
-                    self.shape_aabb_upper,
-                    model.shape_thickness,  # Use thickness as cutoff
-                    self.dummy_collision_group,  # Preallocated, all 1 (same group = collide)
-                    self.dummy_shape_group,  # Preallocated, all -1 (global entities)
-                    model.shape_count,
-                    self.broad_phase_shape_pairs,
-                    self.broad_phase_pair_count,
-                )
-
-            shape_pairs = self.broad_phase_shape_pairs
-            num_pairs = -1  # Use dynamic count from kernel
-
-            # debug = self.broad_phase_pair_count.numpy()[0]
-            # print(f"Broad phase pair count: {debug}")
-
-        # Launch kernel across all shape pairs
+        # Run mesh midphase to find mesh-primitive triangle pairs
+        # Use fixed dimension as we don't know pair count ahead of time
         block_dim = 128
-        if num_pairs > 0 or num_pairs == -1:
-            wp.launch(
-                kernel=build_contacts_kernel_gjk_mpr,
-                dim=num_pairs if num_pairs != -1 else block_dim * 256,
-                inputs=[
-                    state.body_q,
-                    state.body_qd,
-                    model.shape_transform,
-                    model.shape_body,
-                    model.shape_type,
-                    model.shape_scale,
-                    model.shape_thickness,
-                    model.shape_collision_radius,
-                    shape_pairs,
-                    0.0,  # sum_of_contact_offsets
-                    self.rigid_contact_margin,
-                    dt,
-                    contacts.rigid_contact_max,
-                    num_pairs,
-                    self.broad_phase_pair_count,
-                ],
-                outputs=[
-                    contacts.rigid_contact_count,
-                    contacts.rigid_contact_shape0,
-                    contacts.rigid_contact_shape1,
-                    contacts.rigid_contact_point0,
-                    contacts.rigid_contact_point1,
-                    contacts.rigid_contact_offset0,
-                    contacts.rigid_contact_offset1,
-                    contacts.rigid_contact_normal,
-                    contacts.rigid_contact_thickness0,
-                    contacts.rigid_contact_thickness1,
-                    contacts.rigid_contact_tids,
-                ],
-                device=contacts.device,
-                block_dim=block_dim,
-            )
+        wp.launch(
+            kernel=build_contacts_kernel_mesh_midphase,
+            dim=block_dim * 256,
+            inputs=[
+                self.shape_aabb_lower,
+                self.shape_aabb_upper,
+                self.broad_phase_shape_pairs,
+                self.broad_phase_pair_count,
+                self.mesh_shape_pairs,
+                self.mesh_pair_count,
+                model.shape_source_ptr,
+                model.shape_type,
+            ],
+            device=model.device,
+            block_dim=block_dim,
+        )
+
+        # Launch kernel across all shape pairs (including mesh triangle pairs)
+        # Use fixed dimension as we don't know total count (pairs + mesh triangles) ahead of time
+        wp.launch(
+            kernel=build_contacts_kernel_gjk_mpr,
+            dim=block_dim * 256,
+            inputs=[
+                state.body_q,
+                state.body_qd,
+                model.shape_transform,
+                model.shape_body,
+                model.shape_type,
+                model.shape_scale,
+                model.shape_thickness,
+                model.shape_collision_radius,
+                self.broad_phase_shape_pairs,
+                0.0,  # sum_of_contact_offsets
+                self.rigid_contact_margin,
+                dt,
+                contacts.rigid_contact_max,
+                -1,  # num_pairs: use dynamic count from broad_phase_pair_count
+                self.broad_phase_pair_count,
+                model.shape_source_ptr,
+                self.mesh_shape_pairs,
+                self.mesh_pair_count,
+            ],
+            outputs=[
+                contacts.rigid_contact_count,
+                contacts.rigid_contact_shape0,
+                contacts.rigid_contact_shape1,
+                contacts.rigid_contact_point0,
+                contacts.rigid_contact_point1,
+                contacts.rigid_contact_offset0,
+                contacts.rigid_contact_offset1,
+                contacts.rigid_contact_normal,
+                contacts.rigid_contact_thickness0,
+                contacts.rigid_contact_thickness1,
+                contacts.rigid_contact_tids,
+            ],
+            device=contacts.device,
+            block_dim=block_dim,
+        )
 
         return contacts

@@ -52,7 +52,6 @@ USE_CUDA_GRAPH = True  # Set to True to enable CUDA graph capture
 # Broad Phase Mode
 # ================
 # Choose broad phase collision detection mode:
-# - newton.BroadPhaseMode.NONE: Use explicit shape pairs (fastest if pairs are known)
 # - newton.BroadPhaseMode.NXN: All-pairs AABB (O(N²), good for small scenes)
 # - newton.BroadPhaseMode.SAP: Sweep-and-prune AABB (O(N log N), better for larger scenes)
 BROAD_PHASE_MODE = newton.BroadPhaseMode.SAP
@@ -164,8 +163,8 @@ class Example:
         # builder.add_joint_free(body_mesh)  # Add free joint for MuJoCo
 
         # finalize model
-        # Skip building static shape_contact_pairs since we're using dynamic broad phase
-        self.model = builder.finalize(build_shape_contact_pairs=(BROAD_PHASE_MODE == newton.BroadPhaseMode.NONE))
+        # No need to build static shape_contact_pairs (always use dynamic broad phase)
+        self.model = builder.finalize(build_shape_contact_pairs=False)
 
         # Initialize solver based on the selected type
         if SOLVER_TYPE == "XPBD":
