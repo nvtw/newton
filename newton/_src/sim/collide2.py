@@ -11,6 +11,7 @@ from ..geometry.collision_convex import create_solve_convex_multi_contact
 from ..geometry.collision_primitive import collide_plane_box, collide_plane_sphere, collide_sphere_box, collide_box_box
 from ..geometry.support_function import (
     GenericShapeData,
+    GeoTypeEx,
     SupportMapDataProvider,
     support_map as support_map_func,
 )
@@ -200,6 +201,164 @@ def convert_infinite_plane_to_cube(
     return result, adjusted_position
 
 
+vec8i = wp.types.vector(8, wp.int32)
+
+
+@wp.func
+def export_to_array(
+    shape_a: int,
+    shape_b: int,
+    buffer: vec8i,
+    buffer_count: int,
+    shape_pairs_mesh: wp.array(dtype=wp.vec4i),
+    shape_pairs_mesh_count: wp.array(dtype=int),
+):
+    """Export triangle indices from buffer to the shape_pairs_mesh array.
+
+    Args:
+        shape_a: First shape index (should be the mesh)
+        shape_b: Second shape index (primitive shape)
+        buffer: Buffer containing triangle indices
+        buffer_count: Number of valid entries in buffer
+        shape_pairs_mesh: Output array for mesh collision pairs (shape_a, shape_b, triangle_idx, 0)
+        shape_pairs_mesh_count: Counter for total mesh pairs written
+    """
+    if buffer_count <= 0:
+        return
+
+    # Atomically reserve a contiguous block of slots for all entries
+    start_slot = wp.atomic_add(shape_pairs_mesh_count, 0, buffer_count)
+
+    # Calculate how many entries we can actually write (handle overflow)
+    max_array_size = shape_pairs_mesh.shape[0]
+    entries_to_write = wp.min(buffer_count, wp.max(0, max_array_size - start_slot))
+
+    # Write all valid entries in one loop
+    for i in range(entries_to_write):
+        triangle_idx = buffer[i]
+        slot = start_slot + i
+        shape_pairs_mesh[slot] = wp.vec4i(shape_a, shape_b, triangle_idx, 0)
+
+
+@wp.kernel(enable_backward=False)
+def build_contacts_kernel_mesh_midphase(
+    aabb_lower: wp.array(dtype=wp.vec3),
+    aabb_upper: wp.array(dtype=wp.vec3),
+    shape_pairs: wp.array(dtype=wp.vec2i),
+    shape_pairs_count: wp.array(dtype=int),
+    shape_pairs_mesh: wp.array(dtype=wp.vec4i),  # Output
+    shape_pairs_mesh_count: wp.array(dtype=int),  # Output
+    shape_source_ptr: wp.array(dtype=wp.uint64),
+    shape_type: wp.array(dtype=int),
+):
+    """Mesh midphase collision detection kernel.
+
+    For each shape pair involving a mesh, queries the mesh BVH to find
+    triangles that overlap with the primitive shape's AABB.
+    """
+    tid = wp.tid()
+
+    # Check bounds
+    if tid >= shape_pairs_count[0]:
+        return
+
+    pair = shape_pairs[tid]
+    shape_a = pair[0]
+    shape_b = pair[1]
+
+    # Safety: ignore self-collision pairs
+    if shape_a == shape_b:
+        return
+
+    # Validate shape indices - following convert_newton_contacts_to_mjwarp_kernel pattern
+    if shape_a < 0 or shape_b < 0:
+        return
+
+    # Get shape types early for validation
+    type_a = shape_type[shape_a]
+    type_b = shape_type[shape_b]
+
+    # Mesh-mesh collisions are currently not supported
+    if type_a == int(GeoType.MESH) and type_b == int(GeoType.MESH):
+        return
+
+    if type_a != int(GeoType.MESH) and type_b != int(GeoType.MESH):
+        return
+
+    if type_a != int(GeoType.MESH):
+        # Swap shapes such that the mesh is shape_a
+        shape_a, shape_b = shape_b, shape_a
+        type_a, type_b = type_b, type_a
+
+    mesh_ptr = shape_source_ptr[shape_a]
+
+    shape_b_lower = aabb_lower[shape_b]
+    shape_b_upper = aabb_upper[shape_b]
+
+    mesh_query_walker = wp.mesh_query_aabb(mesh_ptr, shape_b_lower, shape_b_upper)
+
+    # Use a fixed-size buffer to batch triangle indices
+    buffer = vec8i()
+    buffer_count = int(0)
+    triangle_idx = int(0)
+
+    while wp.mesh_query_aabb_next(mesh_query_walker, triangle_idx):
+        buffer[buffer_count] = triangle_idx
+        buffer_count += 1
+
+        # Flush buffer when full
+        if buffer_count >= 8:  # vec8i has 8 elements
+            export_to_array(shape_a, shape_b, buffer, buffer_count, shape_pairs_mesh, shape_pairs_mesh_count)
+            buffer_count = 0
+
+    # Flush remaining entries in buffer
+    if buffer_count > 0:
+        export_to_array(shape_a, shape_b, buffer, buffer_count, shape_pairs_mesh, shape_pairs_mesh_count)
+
+
+@wp.func
+def extract_mesh_triangle(
+    mesh_ptr: wp.uint64,
+    triangle_idx: int,
+    mesh_transform: wp.transform,
+    mesh_scale: wp.vec3,
+) -> (wp.vec3, wp.quat, GenericShapeData):
+    """
+    Returns geom position, orientation and shape data for a triangle from a mesh
+
+    Args:
+        mesh_ptr: Pointer to the mesh
+        triangle_idx: Index of the triangle in the mesh
+        mesh_transform: Transform of the mesh shape
+        mesh_scale: Scale of the mesh shape
+
+    Returns:
+        tuple: (position, orientation, triangle_shape_data)
+            - position: World position of triangle vertex A
+            - orientation: Identity quaternion (triangles don't have orientation)
+            - triangle_shape_data: GenericShapeData for the triangle
+    """
+    mesh = wp.mesh_get(mesh_ptr)
+
+    # Get vertex positions in mesh local space
+    tri_a_local = wp.cw_mul(mesh.points[mesh.indices[triangle_idx + 0]], mesh_scale)
+    tri_b_local = wp.cw_mul(mesh.points[mesh.indices[triangle_idx + 1]], mesh_scale)
+    tri_c_local = wp.cw_mul(mesh.points[mesh.indices[triangle_idx + 2]], mesh_scale)
+
+    # Transform to world space
+    tri_a_world = wp.transform_point(mesh_transform, tri_a_local)
+    tri_b_world = wp.transform_point(mesh_transform, tri_b_local)
+    tri_c_world = wp.transform_point(mesh_transform, tri_c_local)
+
+    # Create triangle shape data (relative to vertex A as origin)
+    result = GenericShapeData()
+    result.shape_type = int(GeoTypeEx.TRIANGLE)
+    result.scale = tri_b_world - tri_a_world  # Vector from A to B
+    result.auxillary = tri_c_world - tri_a_world  # Vector from A to C
+
+    return tri_a_world, wp.quat_identity(), result
+
+
 @wp.kernel(enable_backward=False)
 def build_contacts_kernel_gjk_mpr(
     body_q: wp.array(dtype=wp.transform),
@@ -256,6 +415,10 @@ def build_contacts_kernel_gjk_mpr(
     # Get shape types early for validation
     type_a = shape_type[shape_a]
     type_b = shape_type[shape_b]
+
+    # Mesh-mesh collisions are currently not supported
+    if type_a == int(GeoType.MESH) and type_b == int(GeoType.MESH):
+        return
 
     # Sort shapes by type to ensure consistent collision handling order
     if type_a > type_b:
@@ -692,11 +855,7 @@ def compute_shape_aabbs(
 
         # Expand AABB in the direction of motion
         # For each axis, expand in the direction the object is moving
-        speculative_expansion = wp.vec3(
-            wp.abs(displacement[0]),
-            wp.abs(displacement[1]),
-            wp.abs(displacement[2])
-        )
+        speculative_expansion = wp.vec3(wp.abs(displacement[0]), wp.abs(displacement[1]), wp.abs(displacement[2]))
 
     aabb_lower[shape_id] = pos - half_extents - margin_vec - speculative_expansion
     aabb_upper[shape_id] = pos + half_extents + margin_vec + speculative_expansion

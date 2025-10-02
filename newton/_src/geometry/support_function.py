@@ -12,9 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import enum
+
 import warp as wp
 
 from .types import GeoType
+
+# Is not allowed to share values with GeoType
+class GeoTypeEx(enum.IntEnum):
+    TRIANGLE = 1000
 
 
 @wp.struct
@@ -46,6 +52,7 @@ class GenericShapeData:
 
     shape_type: int
     scale: wp.vec3
+    auxillary: wp.vec3
 
 
 
@@ -76,7 +83,28 @@ def support_map(
     result = wp.vec3(0.0, 0.0, 0.0)
     feature_id = int(0)
 
-    if geom.shape_type == int(GeoType.BOX):
+    if geom.shape_type == int(GeoTypeEx.TRIANGLE):
+        # Triangle vertices: a at origin, b at scale, c at auxillary
+        tri_a = wp.vec3(0.0, 0.0, 0.0)
+        tri_b = geom.scale
+        tri_c = geom.auxillary
+
+        # Compute dot products with direction for each vertex
+        dot_a = wp.dot(tri_a, dir_safe)
+        dot_b = wp.dot(tri_b, dir_safe)
+        dot_c = wp.dot(tri_c, dir_safe)
+
+        # Find the vertex with maximum dot product (furthest in the direction)
+        if dot_a >= dot_b and dot_a >= dot_c:
+            result = tri_a
+            feature_id = 0  # vertex A
+        elif dot_b >= dot_c:
+            result = tri_b
+            feature_id = 1  # vertex B
+        else:
+            result = tri_c
+            feature_id = 2  # vertex C
+    elif geom.shape_type == int(GeoType.BOX):
         sx = 1.0 if dir_safe[0] >= 0.0 else -1.0
         sy = 1.0 if dir_safe[1] >= 0.0 else -1.0
         sz = 1.0 if dir_safe[2] >= 0.0 else -1.0
