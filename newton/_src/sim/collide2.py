@@ -647,8 +647,7 @@ def compute_shape_aabbs(
     body_qd: wp.array(dtype=wp.spatial_vector),
     shape_transform: wp.array(dtype=wp.transform),
     shape_body: wp.array(dtype=int),
-    shape_type: wp.array(dtype=int),
-    shape_scale: wp.array(dtype=wp.vec3),
+    shape_collision_radius: wp.array(dtype=float),
     rigid_contact_margin: float,
     dt: float,
     # outputs
@@ -657,6 +656,7 @@ def compute_shape_aabbs(
 ):
     """Compute axis-aligned bounding boxes for each shape in world space.
 
+    Uses a conservative bounding sphere approach based on precomputed shape_collision_radius.
     AABBs are enlarged by:
     1. rigid_contact_margin for contact detection margin
     2. Speculative bounds based on linear velocity * dt (for continuous collision detection)
@@ -672,53 +672,15 @@ def compute_shape_aabbs(
         X_ws = wp.transform_multiply(body_q[rigid_id], shape_transform[shape_id])
 
     pos = wp.transform_get_translation(X_ws)
-    rot = wp.transform_get_rotation(X_ws)
-    scale = shape_scale[shape_id]
-    geo_type = shape_type[shape_id]
 
-    # Compute conservative AABB based on shape type
-    # For simplicity, we use bounding sphere approach for now
-    if geo_type == int(GeoType.SPHERE):
-        radius = scale[0]
-        half_extents = wp.vec3(radius, radius, radius)
-    elif geo_type == int(GeoType.BOX):
-        # Transform box corners to get tight AABB
-        rot_mat = wp.quat_to_matrix(rot)
-        abs_rot = wp.mat33(
-            wp.abs(rot_mat[0, 0]),
-            wp.abs(rot_mat[0, 1]),
-            wp.abs(rot_mat[0, 2]),
-            wp.abs(rot_mat[1, 0]),
-            wp.abs(rot_mat[1, 1]),
-            wp.abs(rot_mat[1, 2]),
-            wp.abs(rot_mat[2, 0]),
-            wp.abs(rot_mat[2, 1]),
-            wp.abs(rot_mat[2, 2]),
-        )
-        half_extents = abs_rot * scale
-    elif geo_type == int(GeoType.CAPSULE):
-        radius = scale[0]
-        half_height = scale[1]
-        # Conservative: sphere of radius (radius + half_height)
-        r = radius + half_height
-        half_extents = wp.vec3(r, r, r)
-    elif geo_type == int(GeoType.PLANE):
-        # Infinite plane gets huge AABB
-        if scale[0] > 0.0 and scale[1] > 0.0:
-            # Finite plane
-            half_extents = wp.vec3(scale[0], scale[1], 0.1)
-        else:
-            # Infinite plane
-            half_extents = wp.vec3(1.0e6, 1.0e6, 1.0e6)
-    else:
-        # Default: use scale as conservative estimate
-        half_extents = scale
+    # Use precomputed bounding radius for a conservative AABB
+    radius = shape_collision_radius[shape_id]
+    half_extents = wp.vec3(radius, radius, radius)
 
     # Enlarge AABB by rigid_contact_margin for contact detection
     margin_vec = wp.vec3(rigid_contact_margin, rigid_contact_margin, rigid_contact_margin)
 
     # Add speculative bounds based on velocity
-    # Get linear velocity (first 3 components of spatial velocity)
     speculative_expansion = wp.vec3(0.0, 0.0, 0.0)
     if rigid_id != -1 and dt > 0.0:
         # Extract linear velocity from spatial velocity (w, v) -> we want v
@@ -958,8 +920,7 @@ class CollisionPipeline2:
                     state.body_qd,
                     model.shape_transform,
                     model.shape_body,
-                    model.shape_type,
-                    model.shape_scale,
+                    model.shape_collision_radius,
                     self.rigid_contact_margin,
                     dt,
                 ],
@@ -1000,6 +961,9 @@ class CollisionPipeline2:
 
             shape_pairs = self.broad_phase_shape_pairs
             num_pairs = -1  # Use dynamic count from kernel
+
+            # debug = self.broad_phase_pair_count.numpy()[0]
+            # print(f"Broad phase pair count: {debug}")
 
         # Launch kernel across all shape pairs
         block_dim = 128
