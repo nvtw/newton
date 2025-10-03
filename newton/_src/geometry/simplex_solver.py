@@ -13,15 +13,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# This code is based on the GJK/simplex solver implementation from Jitter Physics 2
+# Original: https://github.com/notgiven688/jitterphysics2
+# Copyright (c) Thorben Linneweber (MIT License)
+# The code has been translated from C# to Python and modified for use in Newton.
+
 """
-Simplex solver for GJK distance computation.
+Gilbert-Johnson-Keerthi (GJK) algorithm with simplex solver for collision detection.
+
+This module implements the GJK distance algorithm, which computes the minimum distance
+between two convex shapes. GJK operates on the Minkowski difference of the shapes and
+iteratively builds a simplex (1-4 vertices) that either contains the origin (indicating
+collision) or gets progressively closer to it (for distance computation).
+
+The algorithm works by:
+1. Building a simplex in Minkowski space using support mapping
+2. Finding the point on the simplex closest to the origin
+3. Computing a new search direction toward the origin
+4. Iterating until convergence or collision detection
+
+Key features:
+- Distance computation between separated shapes
+- Collision detection when shapes overlap (returns penetration = 0)
+- Feature ID tracking for contact persistence
+- Barycentric coordinate computation for witness points
+- Numerically stable simplex reduction using Johnson's distance subalgorithm
+
+The implementation uses support mapping to query shape geometry, making it applicable
+to any convex shape that provides a support function.
 """
 
 from typing import Any
 
 import warp as wp
 
-from .mpr import Vert, vert_v, create_support_map_function
+from .mpr import Vert, create_support_map_function, vert_v
 
 EPSILON = 1e-8
 
@@ -408,8 +434,32 @@ def create_solve_closest_distance(support_func: Any):
         """
         Core GJK distance algorithm implementation.
 
-        Provides the distance and closest points for non-overlapping shapes.
-        Assumes that shape A is located at position zero and not rotated.
+        This function computes the minimum distance between two convex shapes using the
+        GJK algorithm. It builds a simplex iteratively using support mapping and finds
+        the point on the simplex closest to the origin in Minkowski space.
+
+        Assumes that shape A is located at the origin (position zero) and not rotated.
+        Shape B is transformed relative to shape A using the provided orientation and position.
+
+        Args:
+            geom_a: Shape A geometry data (in local frame at origin)
+            geom_b: Shape B geometry data
+            orientation_b: Orientation of shape B relative to shape A
+            position_b: Position of shape B relative to shape A
+            extend: Contact offset extension (sum of contact offsets)
+            data_provider: Support mapping data provider
+            MAX_ITER: Maximum number of GJK iterations (default: 30)
+            COLLIDE_EPSILON: Convergence threshold for distance computation (default: 1e-4)
+
+        Returns:
+            Tuple of:
+                separated (bool): True if shapes are separated, False if overlapping
+                point_a (wp.vec3): Witness point on shape A (in A's local frame)
+                point_b (wp.vec3): Witness point on shape B (in A's local frame)
+                normal (wp.vec3): Contact normal from A to B (in A's local frame)
+                distance (float): Minimum distance between shapes (0 if overlapping)
+                feature_a_id (int): Feature ID for shape A at witness point
+                feature_b_id (int): Feature ID for shape B at witness point
         """
         # Initialize variables
         distance = float(0.0)
@@ -520,6 +570,8 @@ def create_solve_closest_distance(support_func: Any):
         position_b: wp.vec3,
         sum_of_contact_offsets: float,
         data_provider: Any,
+        MAX_ITER: int = 30,
+        COLLIDE_EPSILON: float = 1e-4,
     ) -> tuple[bool, float, wp.vec3, wp.vec3, int, int]:
         """
         Solve GJK distance computation between two shapes.
@@ -533,7 +585,8 @@ def create_solve_closest_distance(support_func: Any):
             position_b: Position of shape B
             sum_of_contact_offsets: Sum of contact offsets for both shapes
             data_provider: Support mapping data provider
-
+            MAX_ITER: Maximum number of iterations for GJK algorithm
+            COLLIDE_EPSILON: Small number for numerical comparisons
         Returns:
             Tuple of (collision, distance, contact point center, normal, feature A ID, feature B ID)
         """
@@ -549,6 +602,8 @@ def create_solve_closest_distance(support_func: Any):
             relative_position_b,
             sum_of_contact_offsets,
             data_provider,
+            MAX_ITER,
+            COLLIDE_EPSILON,
         )
 
         separated, point_a, point_b, normal, distance, feature_a_id, feature_b_id = result

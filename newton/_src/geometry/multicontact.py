@@ -12,6 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+# This code is based on the multi-contact manifold generation from Jitter Physics 2
+# Original: https://github.com/notgiven688/jitterphysics2
+# Copyright (c) Thorben Linneweber (MIT License)
+# The code has been translated from C# to Python and modified for use in Newton.
+
 """
 Multi-contact manifold generation for collision detection.
 
@@ -29,6 +35,8 @@ from .kernels import build_orthonormal_basis
 # Constants
 EPS = 0.00001
 ROT_DELTA_ANGLE = 60.0 * wp.pi / 180.0
+# The tilt angle defines how much the search direction gets tilted while searching for
+# points on the contact manifold.
 TILT_ANGLE_RAD = 2.0 * wp.pi / 180.0
 SIN_TILT_ANGLE = wp.static(wp.sin(TILT_ANGLE_RAD))
 COS_TILT_ANGLE = wp.static(wp.cos(TILT_ANGLE_RAD))
@@ -36,6 +44,19 @@ COS_TILT_ANGLE = wp.static(wp.cos(TILT_ANGLE_RAD))
 
 @wp.func
 def excess_normal_deviation(dir_a: wp.vec3, dir_b: wp.vec3) -> bool:
+    """
+    Check if the angle between two direction vectors exceeds the tilt angle threshold.
+
+    This is used to detect when contact polygon normals deviate too much from the
+    collision normal, indicating that the contact manifold may be unreliable.
+
+    Args:
+        dir_a: First direction vector.
+        dir_b: Second direction vector.
+
+    Returns:
+        True if the angle between the vectors exceeds TILT_ANGLE_RAD (2 degrees).
+    """
     dot = wp.dot(dir_a, dir_b)
     if dot < 0.0:
         dot = -dot
@@ -89,6 +110,21 @@ class BodyProjector:
 def make_body_projector_from_vec3(
     poly: wp.array(dtype=wp.vec3), poly_count: int, anchor_point: wp.vec3
 ) -> BodyProjector:
+    """
+    Create a body projector (plane definition) from a polygon.
+
+    This function computes a best-fit plane for back-projecting contact points
+    onto the original shape surfaces. It uses the triangle with the largest area
+    to compute a robust normal vector, avoiding numerical issues with collinear points.
+
+    Args:
+        poly: Array of polygon vertices in world space.
+        poly_count: Number of vertices in the polygon.
+        anchor_point: Reference point on the plane (typically the contact anchor point).
+
+    Returns:
+        BodyProjector with the plane normal and anchor point.
+    """
     proj = BodyProjector()
     proj.point_on_plane = anchor_point
     # Find the triangle with the largest area for numerical stability
@@ -119,6 +155,20 @@ def body_projector_project(
     input: wp.vec3,
     contact_normal: wp.vec3,
 ) -> wp.vec3:
+    """
+    Project a point back onto the original shape surface using a plane projector.
+
+    This function casts a ray from the input point along the contact normal and
+    finds where it intersects the projector's plane.
+
+    Args:
+        proj: Body projector defining the projection plane.
+        input: Point to project (typically in contact plane space).
+        contact_normal: Direction to cast the ray (typically the collision normal).
+
+    Returns:
+        Projected point on the shape's surface in world space.
+    """
     # Only plane projection is supported
     return ray_plane_intersection(input, contact_normal, proj.point_on_plane, proj.normal)
 
@@ -683,7 +733,7 @@ def add_avoid_duplicates_vec3(arr: wp.array(dtype=wp.vec3), arr_count: int, vec:
 @wp.func
 def add_avoid_duplicates_vec3_to_vec3(arr: wp.array(dtype=wp.vec3), arr_count: int, vec: wp.vec3, eps: float) -> int:
     """
-    Add a vec3 to a vec4 array (storing in XYZ components), avoiding duplicates.
+    Add a vec3 to a vec3 array, avoiding duplicates.
 
     Args:
         arr: Array to add to.
@@ -713,33 +763,6 @@ vec6_uint8 = wp.types.vector(6, wp.uint8)
 
 
 @wp.func
-def project_point_onto_ray(point_world: wp.vec3, ray_origin: wp.vec3, ray_direction: wp.vec3) -> wp.vec3:
-    """
-    Project a world space point onto a ray.
-
-    Args:
-        point_world: Point in world space to project
-        ray_origin: Origin point of the ray in world space
-        ray_direction: Direction vector of the ray (not necessarily normalized)
-    Returns:
-        Projected point on the ray in world space
-    """
-    # Get vector from ray origin to point
-    to_point = point_world - ray_origin
-
-    # Project onto ray direction
-    # t = (p-o)·d / (d·d)
-    t = wp.dot(to_point, ray_direction) / wp.dot(ray_direction, ray_direction)
-
-    # Clamp t to be >= 0 since we can only project onto the positive ray direction
-    t = wp.max(t, 0.0)
-
-    # Get projected point
-    projected = ray_origin + t * ray_direction
-    return projected
-
-
-@wp.func
 def extract_4_point_contact_manifolds(
     m_a: wp.array(dtype=wp.vec3),
     features_a: wp.types.vector(6, wp.uint8),
@@ -755,9 +778,36 @@ def extract_4_point_contact_manifolds(
     result_features: wp.array(dtype=wp.uint32),
 ) -> int:
     """
-    Extract 4-point contact manifolds from two convex polygons.
+    Extract up to 4 contact points from two convex contact polygons using polygon clipping.
 
-    m_A and m_B can have up to 6 points but m_B must provide space for 12 points.
+    This function performs the core manifold generation algorithm:
+    1. Validates input polygons and checks for normal deviation from collision normal
+    2. Projects both polygons into 2D contact plane space (XY = tangent plane, Z = depth)
+    3. Clips polygon B against all edges of polygon A (Sutherland-Hodgman style clipping)
+    4. Removes zero-length edges from the clipped result
+    5. If more than 4 points remain, selects the best 4 using rotating calipers algorithm
+    6. Projects all contact points back onto the original shape surfaces in world space
+    7. Computes and tracks feature IDs for contact persistence
+
+    Args:
+        m_a: Contact polygon vertices for shape A (input: world space, up to 6 points).
+             Modified in place and used as output buffer.
+        features_a: Feature IDs for each vertex of polygon A.
+        m_a_count: Number of vertices in polygon A.
+        m_b: Contact polygon vertices for shape B (input: world space, up to 6 points).
+             Modified in place and used as output buffer. Must have space for 12 points.
+        features_b: Feature IDs for each vertex of polygon B.
+        m_b_count: Number of vertices in polygon B.
+        normal: Collision normal vector pointing from A to B.
+        cross_vector_1: First tangent vector (forms contact plane basis with cross_vector_2).
+        cross_vector_2: Second tangent vector (forms contact plane basis with cross_vector_1).
+        anchor_point_a: Anchor contact point on shape A (from GJK/MPR).
+        anchor_point_b: Anchor contact point on shape B (from GJK/MPR).
+        result_features: Output array for feature IDs of final contact points.
+
+    Returns:
+        Number of valid contact points generated (0-4). Contact points are stored in
+        m_a (shape A side) and m_b (shape B side) arrays, with feature IDs in result_features.
     """
     # Early-out for simple cases: if both have <=2 or either is empty, return single anchor pair
     if m_a_count < 3 or m_b_count < 3:
@@ -861,6 +911,21 @@ def extract_4_point_contact_manifolds(
 
 
 def create_build_manifold(support_func: Any):
+    """
+    Factory function to create manifold generation functions with a specific support mapping function.
+
+    This factory creates two related functions for multi-contact manifold generation:
+    - build_manifold_core: The core implementation that uses preallocated buffers
+    - build_manifold: The main entry point that handles buffer allocation and result extraction
+
+    Args:
+        support_func: Support mapping function for shapes that takes
+                     (geometry, direction, data_provider) and returns (point, feature_id)
+
+    Returns:
+        build_manifold function that generates up to 4 contact points between two shapes
+        using perturbed support mapping and polygon clipping.
+    """
     # Main contact manifold generation function
     @wp.func
     def build_manifold_core(
@@ -881,10 +946,39 @@ def create_build_manifold(support_func: Any):
         data_provider: Any,
     ) -> int:
         """
-        The result will be stored in a_buffer and b_buffer. They also serve as scratch memory during the calculation, therefore the exotic typing.
-        a_buffer must have space for 6 elements, b_buffer space for 12 elements
-        The return value of the methods tells the user how many elements in the buffers are valid. Both buffers have the same number of entries.
-        The two shapes must always be queried in the same order to get stable feature ids.
+        Core implementation of multi-contact manifold generation using perturbed support mapping.
+
+        This function discovers contact polygons on both shapes by querying the support function
+        in 6 perturbed directions around the collision normal. The perturbed directions form
+        a hexagonal pattern tilted 2 degrees from the contact plane. The resulting contact
+        polygons are then clipped and reduced to up to 4 contact points.
+
+        The result is stored in a_buffer and b_buffer, which also serve as scratch memory
+        during the calculation. a_buffer must have space for 6 elements, b_buffer for 12 elements.
+        Both buffers will have the same number of valid entries on return.
+
+        The two shapes must always be queried in the same order to get stable feature IDs
+        for contact tracking across frames.
+
+        Args:
+            geom_a: Geometry data for shape A.
+            geom_b: Geometry data for shape B.
+            quaternion_a: Orientation quaternion of shape A.
+            quaternion_b: Orientation quaternion of shape B.
+            position_a: World position of shape A.
+            position_b: World position of shape B.
+            p_a: Anchor contact point on shape A (from GJK/MPR).
+            p_b: Anchor contact point on shape B (from GJK/MPR).
+            normal: Collision normal pointing from A to B.
+            a_buffer: Output buffer for shape A contact points (preallocated, size 6).
+            b_buffer: Output buffer for shape B contact points (preallocated, size 12).
+            result_features: Output buffer for feature IDs (preallocated, size 6).
+            feature_anchor_a: Feature ID of anchor point on shape A.
+            feature_anchor_b: Feature ID of anchor point on shape B.
+            data_provider: Support mapping data provider.
+
+        Returns:
+            Number of valid contact points generated (0-4).
         """
 
         # Reset all counters for a new calculation.
@@ -1044,12 +1138,7 @@ def create_build_manifold(support_func: Any):
 
             contact_points[i] = 0.5 * (contact_point_a + contact_point_b)
 
-            # center = 0.5 * (contact_points_a[i] + contact_points_b[i])
-            # contact_points_a[i] = project_point_onto_ray(contact_points_a[i], center, normal)
-            # contact_points_b[i] = project_point_onto_ray(contact_points_b[i], center, normal)
-
             feature_ids[i] = int(result_features[i])
-            # Newton convention: penetration is negative on overlap
             penetrations[i] = wp.dot(contact_point_b - contact_point_a, normal)
 
         return num_manifold_points, penetrations, contact_points, feature_ids

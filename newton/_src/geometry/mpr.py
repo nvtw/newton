@@ -13,6 +13,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# This code is based on the MPR implementation from Jitter Physics 2
+# Original: https://github.com/notgiven688/jitterphysics2
+# Copyright (c) Thorben Linneweber (MIT License)
+# The code has been translated from C# to Python and modified for use in Newton.
+#
+# Jitter Physics 2's MPR implementation is itself based on XenoCollide.
+# The XenoCollide license (zlib) is preserved in the function docstrings below
+# as required by the zlib license terms.
+
+"""
+Minkowski Portal Refinement (MPR) collision detection algorithm.
+
+This module implements the MPR algorithm for detecting collisions between convex shapes
+and computing penetration depth and contact information. MPR is an alternative to the
+GJK+EPA approach that can be more efficient for penetrating contacts.
+
+The algorithm works by:
+1. Constructing an initial portal (triangle) in Minkowski space that contains the origin
+2. Iteratively refining the portal by moving it closer to the origin
+3. Computing penetration depth and contact points once the origin is enclosed
+
+Key features:
+- Works directly with penetrating contacts (no need for EPA as a separate step)
+- More numerically stable than EPA for deep penetrations
+- Returns collision normal, penetration depth, and witness points
+- Supports feature ID tracking for contact persistence
+
+The implementation uses support mapping to query shape geometry, making it applicable
+to any convex shape that provides a support function.
+"""
+
 from typing import Any
 
 import warp as wp
@@ -33,6 +64,22 @@ def vert_v(vert: Vert) -> wp.vec3:
 
 
 def create_support_map_function(support_func: Any):
+    """
+    Factory function to create support mapping functions for MPR algorithm.
+
+    This function creates specialized support mapping functions that work in Minkowski
+    space (A - B) and handle coordinate transformations between local and world space.
+
+    Args:
+        support_func: Support mapping function for individual shapes that takes
+                     (geometry, direction, data_provider) and returns (point, feature_id)
+
+    Returns:
+        Tuple of three functions:
+        - support_map_b: Support mapping for shape B with world space transformation
+        - minkowski_support: Support mapping for Minkowski difference A - B
+        - geometric_center: Computes geometric center of Minkowski difference
+    """
     # Support mapping functions (these replace the MinkowskiDiff struct methods)
     @wp.func
     def support_map_b(
@@ -391,6 +438,8 @@ def create_solve_mpr(support_func: Any):
         position_b: wp.vec3,
         sum_of_contact_offsets: float,
         data_provider: Any,
+        MAX_ITER: int = 30,
+        NUMERIC_EPSILON: float = 1e-16,
     ) -> tuple[bool, float, wp.vec3, wp.vec3, int, int]:
         """
         Solve MPR (Minkowski Portal Refinement) for collision detection.
@@ -404,9 +453,17 @@ def create_solve_mpr(support_func: Any):
             position_b: Position of shape B
             sum_of_contact_offsets: Sum of contact offsets for both shapes
             data_provider: Support mapping data provider
+            MAX_ITER: Maximum number of iterations for MPR algorithm
+            NUMERIC_EPSILON: Small number for numerical comparisons
 
         Returns:
-            Tuple of (collision detected, penetration, contact point center, normal, feature A ID, feature B ID)
+            Tuple of:
+                collision detected (bool): True if shapes are colliding
+                penetration (float): Penetration depth (negative indicates separation)
+                contact point center (wp.vec3): Midpoint between witness points in world space
+                normal (wp.vec3): Contact normal from A to B in world space
+                feature A ID (int): Feature ID for shape A at contact point
+                feature B ID (int): Feature ID for shape B at contact point
         """
         # Transform shape B to local space of shape A
         relative_orientation_b = wp.quat_inverse(orientation_a) * orientation_b
@@ -420,6 +477,8 @@ def create_solve_mpr(support_func: Any):
             relative_position_b,
             sum_of_contact_offsets,
             data_provider,
+            MAX_ITER,
+            NUMERIC_EPSILON,
         )
 
         collision, point_a, point_b, normal, penetration, feature_a_id, feature_b_id = result

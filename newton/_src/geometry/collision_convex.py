@@ -12,81 +12,56 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+"""
+High-level collision detection functions for convex shapes.
+
+This module provides the main entry points for collision detection between convex shapes,
+combining GJK, MPR, and multi-contact manifold generation into easy-to-use functions.
+
+Two main collision modes are provided:
+1. Single contact: Returns one contact point with penetration depth and normal
+2. Multi-contact: Returns up to 4 contact points for stable physics simulation
+
+The implementation uses a hybrid approach:
+- GJK for fast separation tests (when shapes don't overlap)
+- MPR for accurate penetration depth and contact points (when shapes overlap)
+- Perturbed support mapping + polygon clipping for multi-contact manifolds
+
+All functions are created via factory pattern to bind a specific support mapping function,
+allowing the same collision pipeline to work with any convex shape type.
+"""
+
 from typing import Any
 
 import warp as wp
 
-from .simplex_solver import create_solve_closest_distance
 from .mpr import create_solve_mpr
 from .multicontact import create_build_manifold
-
-
-def create_solve_convex_contact(support_func: Any):
-    @wp.func
-    def solve_convex_contact(
-        geom_a: Any,
-        geom_b: Any,
-        orientation_a: wp.quat,
-        orientation_b: wp.quat,
-        position_a: wp.vec3,
-        position_b: wp.vec3,
-        sum_of_contact_offsets: float,
-        data_provider: Any,
-    ) -> tuple[bool, wp.vec3, wp.vec3, wp.vec3, float, int, int]:
-        # First run closest distance solver to test overlap quickly while keeping only the tuple live
-        collision, point_a, point_b, normal, penetration, feature_a_id, feature_b_id = wp.static(
-            create_solve_closest_distance(support_func)
-        )(
-            geom_a,
-            geom_b,
-            orientation_a,
-            orientation_b,
-            position_a,
-            position_b,
-            sum_of_contact_offsets,
-            data_provider,
-        )
-        if not collision:
-            return (
-                collision,
-                point_a,
-                point_b,
-                normal,
-                penetration,
-                feature_a_id,
-                feature_b_id,
-            )
-
-        # Use MPR to get accurate contact points and penetration info and return its result directly
-        collision, point_a, point_b, normal, penetration, feature_a_id, feature_b_id = wp.static(
-            create_solve_mpr(support_func)
-        )(
-            geom_a,
-            geom_b,
-            orientation_a,
-            orientation_b,
-            position_a,
-            position_b,
-            sum_of_contact_offsets,
-            data_provider,
-        )
-        return (
-            collision,
-            point_a,
-            point_b,
-            normal,
-            penetration,
-            feature_a_id,
-            feature_b_id,
-        )
-
-    return solve_convex_contact
+from .simplex_solver import create_solve_closest_distance
 
 
 _mat43f = wp.types.matrix((4, 3), wp.float32)
 
 
 def create_solve_convex_multi_contact(support_func: Any):
+    """
+    Factory function to create a multi-contact collision solver for convex shapes.
+
+    This function creates a collision detector that generates up to 4 contact points
+    for stable physics simulation. It combines GJK, MPR, and manifold generation:
+    1. MPR for initial collision detection and penetration (fast for overlapping shapes)
+    2. GJK as fallback for separated shapes
+    3. Multi-contact manifold generation for stable contact resolution
+
+    Args:
+        support_func: Support mapping function for shapes that takes
+                     (geometry, direction, data_provider) and returns (point, feature_id)
+
+    Returns:
+        solve_convex_multi_contact function that computes up to 4 contact points.
+    """
+
     @wp.func
     def solve_convex_multi_contact(
         geom_a: Any,
@@ -106,7 +81,35 @@ def create_solve_convex_multi_contact(support_func: Any):
         wp.types.matrix((4, 3), wp.float32),
         wp.vec4i,
     ]:
-        # Broad check with closest distance solver; refine with MPR on overlap for better anchors/normal
+        """
+        Compute up to 4 contact points between two convex shapes.
+
+        This function generates a multi-contact manifold for stable contact resolution:
+        1. Runs MPR first (fast for overlapping shapes, which is the common case)
+        2. Falls back to GJK if MPR detects no collision
+        3. Generates multi-contact manifold via perturbed support mapping + polygon clipping
+
+        Args:
+            geom_a: Shape A geometry data
+            geom_b: Shape B geometry data
+            orientation_a: Orientation quaternion of shape A
+            orientation_b: Orientation quaternion of shape B
+            position_a: World position of shape A
+            position_b: World position of shape B
+            sum_of_contact_offsets: Sum of contact offsets for both shapes
+            data_provider: Support mapping data provider
+            contact_threshold: Penetration threshold; skip manifold if penetration > threshold (default: 0.0)
+            skip_multi_contact: If True, return only single contact point (default: False)
+
+        Returns:
+            Tuple of:
+                count (int): Number of valid contact points (0-4)
+                normal (wp.vec3): Contact normal from A to B (same for all contacts)
+                penetrations (wp.vec4): Penetration depths for each contact (negative when overlapping)
+                points (matrix(4,3)): Contact points in world space (midpoint between shapes)
+                features (wp.vec4i): Feature IDs for contact tracking
+        """
+        # Try MPR first (optimized for overlapping shapes, which is the common case)
         collision, penetration, point, normal, feature_a_id, feature_b_id = wp.static(create_solve_mpr(support_func))(
             geom_a,
             geom_b,
@@ -119,6 +122,7 @@ def create_solve_convex_multi_contact(support_func: Any):
         )
 
         if not collision:
+            # MPR reported no collision, fall back to GJK for separated shapes
             collision, penetration, point, normal, feature_a_id, feature_b_id = wp.static(
                 create_solve_closest_distance(support_func)
             )(
@@ -132,21 +136,7 @@ def create_solve_convex_multi_contact(support_func: Any):
                 data_provider,
             )
 
-            # if not collision:
-            #     wp.printf("GJK point_a: (%f,%f,%f), point_b: (%f,%f,%f), normal: (%f,%f,%f), dist: %f\n", point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2], normal[0], normal[1], normal[2], penetration)
-
-            # wp.printf("MPR result: collision=%d, penetration=%f, point_a=(%f,%f,%f), point_b=(%f,%f,%f), normal=(%f,%f,%f), feature_ids=(%d,%d)\n",
-            #          int(collision), penetration,
-            #          point_a[0], point_a[1], point_a[2],
-            #          point_b[0], point_b[1], point_b[2],
-            #          normal[0], normal[1], normal[2],
-            #          feature_a_id, feature_b_id)
-
-        # if collision:
-        #     wp.printf("MPR point_a: (%f,%f,%f), point_b: (%f,%f,%f), normal: (%f,%f,%f), dist: %f\n", point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2], normal[0], normal[1], normal[2], penetration)
-
-        #    wp.printf("MPR point_a: (%f,%f,%f), point_b: (%f,%f,%f), normal: (%f,%f,%f), dist: %f\n", point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2], normal[0], normal[1], normal[2], penetration)
-
+        # Skip multi-contact manifold generation if requested or penetration exceeds threshold
         if skip_multi_contact or penetration > contact_threshold:
             count = 1
             penetrations = wp.vec4(penetration, 0.0, 0.0, 0.0)
@@ -155,6 +145,7 @@ def create_solve_convex_multi_contact(support_func: Any):
             features = wp.vec4i(0)
             return count, normal, penetrations, points, features
 
+        # Generate multi-contact manifold using perturbed support mapping and polygon clipping
         count, penetrations, points, features = wp.static(create_build_manifold(support_func))(
             geom_a,
             geom_b,
@@ -162,31 +153,13 @@ def create_solve_convex_multi_contact(support_func: Any):
             orientation_b,
             position_a,
             position_b,
-            point - normal * (penetration * 0.5),
-            point + normal * (penetration * 0.5),
+            point - normal * (penetration * 0.5),  # Anchor point on shape A
+            point + normal * (penetration * 0.5),  # Anchor point on shape B
             normal,
             feature_a_id,
             feature_b_id,
             data_provider,
         )
-
-        # wp.printf("Manifold result: count=%d, normal=(%f,%f,%f), points_a=(%f,%f,%f),(%f,%f,%f),(%f,%f,%f),(%f,%f,%f), points_b=(%f,%f,%f),(%f,%f,%f),(%f,%f,%f),(%f,%f,%f), penetrations=(%f,%f,%f,%f)\n",
-        #          count,
-        #          normal[0], normal[1], normal[2],
-        #          points_a[0][0], points_a[0][1], points_a[0][2],
-        #          points_a[1][0], points_a[1][1], points_a[1][2],
-        #          points_a[2][0], points_a[2][1], points_a[2][2],
-        #          points_a[3][0], points_a[3][1], points_a[3][2],
-        #          points_b[0][0], points_b[0][1], points_b[0][2],
-        #          points_b[1][0], points_b[1][1], points_b[1][2],
-        #          points_b[2][0], points_b[2][1], points_b[2][2],
-        #          points_b[3][0], points_b[3][1], points_b[3][2],
-        #          penetrations[0], penetrations[1], penetrations[2], penetrations[3])
-
-        # if count == 0:
-        #     print("create_build_manifold removed all contacts")
-
-        # penetrations = wp.vec4(penetration)
 
         return count, normal, penetrations, points, features
 

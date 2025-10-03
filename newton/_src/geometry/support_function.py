@@ -12,6 +12,34 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+"""
+Support mapping functions for collision detection primitives.
+
+This module implements support mapping (also called support functions) for various
+geometric primitives. A support mapping finds the furthest point of a shape in a
+given direction, which is a fundamental operation for collision detection algorithms
+like GJK, MPR, and EPA.
+
+The support mapping operates in the shape's local coordinate frame and returns:
+- The support point (furthest point in the given direction)
+- A feature ID that identifies which geometric feature (vertex, edge, face) the point lies on
+
+Supported primitives:
+- Box (axis-aligned rectangular prism)
+- Sphere
+- Capsule (cylinder with hemispherical caps)
+- Ellipsoid
+- Cylinder
+- Cone
+- Plane (finite rectangular plane)
+- Convex hull (arbitrary convex mesh)
+- Triangle
+
+The module also provides utilities for packing mesh pointers into vectors and
+defining generic shape data structures that work across all primitive types.
+"""
+
 import enum
 
 import warp as wp
@@ -29,6 +57,8 @@ class SupportMapDataProvider:
     """
     Placeholder for data access needed by support mapping (e.g., mesh buffers).
     Extend with fields as required by your shapes.
+    Not needed for Newton but can be helpful for projects like MuJoCo Warp where
+    the convex hull data is stored in warp arrays that would bloat the GenericShapeData struct.
     """
 
     pass
@@ -86,7 +116,7 @@ def support_map(
     """
     Return the support point of a primitive in its local frame, with a feature id.
 
-    Conventions for `geom.scale`:
+    Conventions for `geom.scale` and `geom.auxillary`:
     - BOX: half-extents in x/y/z
     - SPHERE: radius in x component
     - CAPSULE: radius in x, half-height in y (axis along +Z)
@@ -94,6 +124,8 @@ def support_map(
     - CYLINDER: radius in x, half-height in y (axis along +Z)
     - CONE: radius in x, half-height in y (axis along +Z, apex at +Z)
     - PLANE: half-width in x, half-length in y (lies in XY plane at z=0, normal along +Z)
+    - CONVEX_HULL: scale contains mesh scale, auxillary contains packed mesh pointer
+    - TRIANGLE: scale contains vector B-A, auxillary contains vector C-A (relative to vertex A at origin)
     """
 
     # handle zero direction robustly
