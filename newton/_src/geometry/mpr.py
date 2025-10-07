@@ -80,6 +80,7 @@ def create_support_map_function(support_func: Any):
         - minkowski_support: Support mapping for Minkowski difference A - B
         - geometric_center: Computes geometric center of Minkowski difference
     """
+
     # Support mapping functions (these replace the MinkowskiDiff struct methods)
     @wp.func
     def support_map_b(

@@ -40,7 +40,6 @@ from .mpr import create_solve_mpr
 from .multicontact import create_build_manifold
 from .simplex_solver import create_solve_closest_distance
 
-
 _mat43f = wp.types.matrix((4, 3), wp.float32)
 
 

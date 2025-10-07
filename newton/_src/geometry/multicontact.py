@@ -926,6 +926,7 @@ def create_build_manifold(support_func: Any):
         build_manifold function that generates up to 4 contact points between two shapes
         using perturbed support mapping and polygon clipping.
     """
+
     # Main contact manifold generation function
     @wp.func
     def build_manifold_core(

@@ -32,14 +32,23 @@ class DataProvider:
     pass
 
 
-def _geom_dist(geom_type1: int, size1: wp.vec3, pos1: wp.vec3, quat1: wp.quat,
-               geom_type2: int, size2: wp.vec3, pos2: wp.vec3, quat2: wp.quat):
+def _geom_dist(
+    geom_type1: int,
+    size1: wp.vec3,
+    pos1: wp.vec3,
+    quat1: wp.quat,
+    geom_type2: int,
+    size2: wp.vec3,
+    pos2: wp.vec3,
+    quat2: wp.quat,
+):
     """
     Compute distance between two geometries using GJK algorithm.
 
     Returns:
         Tuple of (distance, witness_point_a, witness_point_b, normal)
     """
+
     @wp.kernel
     def gjk_kernel(
         # Outputs:
@@ -110,8 +119,14 @@ class TestGJK(unittest.TestCase):
         # Two spheres of radius 1.0, separated by distance 3.0
         # Expected distance: 3.0 - 1.0 - 1.0 = 1.0
         dist, point, normal, collision = _geom_dist(
-            GeoType.SPHERE, wp.vec3(1.0, 0.0, 0.0), wp.vec3(-1.5, 0.0, 0.0), wp.quat_identity(),
-            GeoType.SPHERE, wp.vec3(1.0, 0.0, 0.0), wp.vec3(1.5, 0.0, 0.0), wp.quat_identity(),
+            GeoType.SPHERE,
+            wp.vec3(1.0, 0.0, 0.0),
+            wp.vec3(-1.5, 0.0, 0.0),
+            wp.quat_identity(),
+            GeoType.SPHERE,
+            wp.vec3(1.0, 0.0, 0.0),
+            wp.vec3(1.5, 0.0, 0.0),
+            wp.quat_identity(),
         )
         self.assertAlmostEqual(1.0, dist, places=5)
         self.assertEqual(0, collision)  # No collision
@@ -121,8 +136,14 @@ class TestGJK(unittest.TestCase):
         # Two spheres of radius 1.0, centers at distance 2.0
         # Expected distance: 0.0 (just touching)
         dist, point, normal, collision = _geom_dist(
-            GeoType.SPHERE, wp.vec3(1.0, 0.0, 0.0), wp.vec3(-1.0, 0.0, 0.0), wp.quat_identity(),
-            GeoType.SPHERE, wp.vec3(1.0, 0.0, 0.0), wp.vec3(1.0, 0.0, 0.0), wp.quat_identity(),
+            GeoType.SPHERE,
+            wp.vec3(1.0, 0.0, 0.0),
+            wp.vec3(-1.0, 0.0, 0.0),
+            wp.quat_identity(),
+            GeoType.SPHERE,
+            wp.vec3(1.0, 0.0, 0.0),
+            wp.vec3(1.0, 0.0, 0.0),
+            wp.quat_identity(),
         )
         self.assertAlmostEqual(0.0, dist, places=5)
 
@@ -132,8 +153,14 @@ class TestGJK(unittest.TestCase):
         # Expected overlap: 3.0 + 3.0 - 4.0 = 2.0
         # Note: GJK returns distance=0 for overlapping shapes (MPR would give penetration depth)
         dist, point, normal, collision = _geom_dist(
-            GeoType.SPHERE, wp.vec3(3.0, 0.0, 0.0), wp.vec3(-1.0, 0.0, 0.0), wp.quat_identity(),
-            GeoType.SPHERE, wp.vec3(3.0, 0.0, 0.0), wp.vec3(3.0, 0.0, 0.0), wp.quat_identity(),
+            GeoType.SPHERE,
+            wp.vec3(3.0, 0.0, 0.0),
+            wp.vec3(-1.0, 0.0, 0.0),
+            wp.quat_identity(),
+            GeoType.SPHERE,
+            wp.vec3(3.0, 0.0, 0.0),
+            wp.vec3(3.0, 0.0, 0.0),
+            wp.quat_identity(),
         )
         self.assertAlmostEqual(0.0, dist, places=5)
         self.assertEqual(0, collision)  # GJK reports collision=False, distance=0 for overlap
@@ -146,8 +173,14 @@ class TestGJK(unittest.TestCase):
         # Expected separation: 2.5 - 2.5 - 1.0 = -1.0 (overlapping)
         # But let's test a separated case
         dist, point, normal, collision = _geom_dist(
-            GeoType.BOX, wp.vec3(1.0, 1.0, 1.0), wp.vec3(-2.0, 0.0, 0.0), wp.quat_identity(),
-            GeoType.BOX, wp.vec3(1.0, 1.0, 1.0), wp.vec3(2.5, 0.0, 0.0), wp.quat_identity(),
+            GeoType.BOX,
+            wp.vec3(1.0, 1.0, 1.0),
+            wp.vec3(-2.0, 0.0, 0.0),
+            wp.quat_identity(),
+            GeoType.BOX,
+            wp.vec3(1.0, 1.0, 1.0),
+            wp.vec3(2.5, 0.0, 0.0),
+            wp.quat_identity(),
         )
         # Centers at distance 4.5, half-extents sum: 2.0
         # Expected distance: 4.5 - 1.0 - 1.0 = 2.5

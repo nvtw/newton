@@ -13,6 +13,8 @@ from ..geometry.support_function import (
     SupportMapDataProvider,
     pack_mesh_ptr,
     support_map,
+)
+from ..geometry.support_function import (
     support_map as support_map_func,
 )
 from ..geometry.types import GeoType

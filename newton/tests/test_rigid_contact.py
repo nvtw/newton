@@ -20,8 +20,8 @@ import warp as wp
 
 import newton
 from newton._src.core import quat_between_axes
+from newton._src.sim.collide2 import BroadPhaseMode, CollisionPipeline2
 from newton.tests.unittest_utils import add_function_test, assert_np_equal, get_test_devices
-from newton._src.sim.collide2 import CollisionPipeline2, BroadPhaseMode
 
 wp.config.quiet = True
 
@@ -471,7 +471,7 @@ def test_shape_collisions_gjk_mpr_multicontact(test: TestRigidContact, device, v
     sim_dt = 1.0 / 60.0
     max_frames = 100
 
-    for frame in range(max_frames):
+    for _frame in range(max_frames):
         for _ in range(substeps):
             state_0.clear_forces()
             # Use collide2 pipeline (CollisionPipeline2)
