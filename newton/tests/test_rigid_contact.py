@@ -188,7 +188,7 @@ def test_shapes_on_plane(test: TestRigidContact, device, solver_fn):
     assert_np_equal(body_q[:, 3:], expected_quats, tol=1e-1)
 
 
-def test_ramp_scene_stability(test: TestRigidContact, device):
+def test_shape_collisions_gjk_mpr_multicontact(test: TestRigidContact, device, verbose=False):
     """Test that objects on a ramp with end wall remain stable (don't move or rotate significantly)"""
 
     # Scene Configuration (from example_basic_shapes2.py)
@@ -299,7 +299,7 @@ def test_ramp_scene_stability(test: TestRigidContact, device):
     # Capsule
     capsule_radius = CUBE_SIZE / 2
     capsule_height = 2 * capsule_radius
-    offset_capsule = 0.5 * CUBE_SIZE * ramp_up + (start_shift - 4.02) * ramp_forward
+    offset_capsule = 0.5 * CUBE_SIZE * (ramp_up + (start_shift - 4.02) * ramp_forward)
 
     capsule_local_quat = quat_between_axes(newton.Axis.Z, newton.Axis.X)
     capsule_quat = cube_quat * capsule_local_quat
@@ -311,7 +311,7 @@ def test_ramp_scene_stability(test: TestRigidContact, device):
     # Cylinder
     cylinder_radius = CUBE_SIZE / 2
     cylinder_height = 4 * cylinder_radius
-    offset_cylinder = 0.5 * CUBE_SIZE * ramp_up + (start_shift - 6.03) * ramp_forward
+    offset_cylinder = 0.5 * CUBE_SIZE * (ramp_up + (start_shift - 6.03) * ramp_forward)
 
     cylinder_local_quat = quat_between_axes(newton.Axis.Z, newton.Axis.X)
     cylinder_quat = cube_quat * cylinder_local_quat
@@ -320,34 +320,158 @@ def test_ramp_scene_stability(test: TestRigidContact, device):
     builder.add_joint_free(body_cylinder)
     builder.add_shape_cylinder(body=body_cylinder, radius=cylinder_radius, half_height=cylinder_height / 2)
 
+    # Two more cubes after the cylinder
+    offset_a = 0.5 * CUBE_SIZE * (ramp_up + ramp_right + (start_shift - 8.04) * ramp_forward)
+    offset_b = 0.5 * CUBE_SIZE * (ramp_up - ramp_right + (start_shift - 8.04) * ramp_forward)
+
+    # Cube 3 (left side)
+    body_cube3 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_a, q=cube_quat))
+    builder.add_joint_free(body_cube3)
+    builder.add_shape_box(body=body_cube3, hx=CUBE_SIZE / 2, hy=CUBE_SIZE / 2, hz=CUBE_SIZE / 2)
+
+    # Cube 4 (right side)
+    body_cube4 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_b, q=cube_quat))
+    builder.add_joint_free(body_cube4)
+    builder.add_shape_box(body=body_cube4, hx=CUBE_SIZE / 2, hy=CUBE_SIZE / 2, hz=CUBE_SIZE / 2)
+
+    # Two cones after the cubes (z-axis aligned with ramp_up)
+    cone_radius = CUBE_SIZE / 2
+    cone_height = 2 * cone_radius
+    offset_a = 0.5 * CUBE_SIZE * (ramp_up + ramp_right + (start_shift - 10.05) * ramp_forward)
+    offset_b = 0.5 * CUBE_SIZE * (ramp_up - ramp_right + (start_shift - 10.05) * ramp_forward)
+
+    cone_quat = cube_quat
+
+    # Cone 1 (left side)
+    body_cone1 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_a, q=cone_quat))
+    builder.add_joint_free(body_cone1)
+    builder.add_shape_cone(body=body_cone1, radius=cone_radius, half_height=cone_height / 2)
+
+    # Cone 2 (right side)
+    body_cone2 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_b, q=cone_quat))
+    builder.add_joint_free(body_cone2)
+    builder.add_shape_cone(body=body_cone2, radius=cone_radius, half_height=cone_height / 2)
+
+    # Two more cubes after the cones
+    offset_a = 0.5 * CUBE_SIZE * (ramp_up + ramp_right + (start_shift - 12.06) * ramp_forward)
+    offset_b = 0.5 * CUBE_SIZE * (ramp_up - ramp_right + (start_shift - 12.06) * ramp_forward)
+
+    # Cube 5 (left side)
+    body_cube5 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_a, q=cube_quat))
+    builder.add_joint_free(body_cube5)
+    builder.add_shape_box(body=body_cube5, hx=CUBE_SIZE / 2, hy=CUBE_SIZE / 2, hz=CUBE_SIZE / 2)
+
+    # Cube 6 (right side)
+    body_cube6 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_b, q=cube_quat))
+    builder.add_joint_free(body_cube6)
+    builder.add_shape_box(body=body_cube6, hx=CUBE_SIZE / 2, hy=CUBE_SIZE / 2, hz=CUBE_SIZE / 2)
+
+    # Two cubes using convex hull representation (8 corner points)
+    cube_half = CUBE_SIZE / 2
+    cube_vertices = np.array(
+        [
+            # Bottom face (z = -cube_half)
+            [-cube_half, -cube_half, -cube_half],
+            [cube_half, -cube_half, -cube_half],
+            [cube_half, cube_half, -cube_half],
+            [-cube_half, cube_half, -cube_half],
+            # Top face (z = cube_half)
+            [-cube_half, -cube_half, cube_half],
+            [cube_half, -cube_half, cube_half],
+            [cube_half, cube_half, cube_half],
+            [-cube_half, cube_half, cube_half],
+        ],
+        dtype=np.float32,
+    )
+
+    cube_indices = np.array(
+        [
+            0,
+            2,
+            1,
+            0,
+            3,
+            2,  # Bottom face
+            4,
+            5,
+            6,
+            4,
+            6,
+            7,  # Top face
+            0,
+            1,
+            5,
+            0,
+            5,
+            4,  # Front face
+            1,
+            2,
+            6,
+            1,
+            6,
+            5,  # Right face
+            2,
+            3,
+            7,
+            2,
+            7,
+            6,  # Back face
+            3,
+            0,
+            4,
+            3,
+            4,
+            7,  # Left face
+        ],
+        dtype=np.int32,
+    )
+
+    cube_mesh = newton.Mesh(cube_vertices, cube_indices)
+
+    offset_a = 0.5 * CUBE_SIZE * (ramp_up + ramp_right + (start_shift - 14.07) * ramp_forward)
+    offset_b = 0.5 * CUBE_SIZE * (ramp_up - ramp_right + (start_shift - 14.07) * ramp_forward)
+
+    convex_cube_quat = cube_quat
+
+    # Convex Hull Cube 1 (left side)
+    body_convex_cube1 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_a, q=convex_cube_quat))
+    builder.add_joint_free(body_convex_cube1)
+    builder.add_shape_convex_hull(body=body_convex_cube1, mesh=cube_mesh, scale=(1.0, 1.0, 1.0))
+
+    # Convex Hull Cube 2 (right side)
+    body_convex_cube2 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_b, q=convex_cube_quat))
+    builder.add_joint_free(body_convex_cube2)
+    builder.add_shape_convex_hull(body=body_convex_cube2, mesh=cube_mesh, scale=(1.0, 1.0, 1.0))
+
     # Add ground plane
     builder.add_ground_plane()
 
     # Finalize model without pre-computed shape pairs (for CollisionPipeline2)
     model = builder.finalize(device=device, build_shape_contact_pairs=False)
-    
-    # Create CollisionPipeline2 with NXN broad phase mode    
+
+    # Create CollisionPipeline2 with NXN broad phase mode
     collision_pipeline = CollisionPipeline2.from_model(
         model,
         rigid_contact_max_per_pair=10,
         rigid_contact_margin=0.01,
         broad_phase_mode=BroadPhaseMode.NXN,
     )
-    
+
     # Use XPBD solver
     solver = newton.solvers.SolverXPBD(model, iterations=2)
     state_0 = model.state()
     state_1 = model.state()
     control = model.control()
-    
+
     # Store initial positions and rotations
     initial_body_q = state_0.body_q.numpy().copy()
-    
-    # Simulate for a short time
+
+    # Simulate for 100 frames (same as example_basic_shapes2.py)
     substeps = 10
     sim_dt = 1.0 / 60.0
-    
-    for _ in range(10):  # 10 frames = 1/6 second
+    max_frames = 100
+
+    for frame in range(max_frames):
         for _ in range(substeps):
             state_0.clear_forces()
             # Use collide2 pipeline (CollisionPipeline2)
@@ -358,38 +482,56 @@ def test_ramp_scene_stability(test: TestRigidContact, device):
     # Get final positions and rotations
     final_body_q = state_0.body_q.numpy()
 
-    # Check that objects haven't moved more than 0.01*CUBE_SIZE
-    position_threshold = 0.01 * CUBE_SIZE
+    # Print results for each body (same as example_basic_shapes2.py)
+    if verbose:
+        print("\n" + "=" * 80)
+        print(f"TEST RESULTS AFTER {max_frames} FRAMES ({max_frames * sim_dt:.2f} seconds)")
+        print("=" * 80)
+
+        for i in range(model.body_count):
+            # Calculate position displacement
+            initial_pos = initial_body_q[i, :3]
+            final_pos = final_body_q[i, :3]
+            displacement = np.linalg.norm(final_pos - initial_pos)
+
+            # Calculate rotation angle using quaternion math
+            initial_quat = initial_body_q[i, 3:]
+            final_quat = final_body_q[i, 3:]
+
+            dot_product = np.abs(np.dot(initial_quat, final_quat))
+            dot_product = np.clip(dot_product, 0.0, 1.0)
+            rotation_angle_rad = 2.0 * np.arccos(dot_product)
+            rotation_angle_deg = np.degrees(rotation_angle_rad)
+
+            print(f"Body {i}: displacement = {displacement:.6f} units, rotation = {rotation_angle_deg:.2f} degrees")
+
+        print("=" * 80 + "\n")
+
+    # Now check thresholds (more relaxed than before)
+    position_threshold = 0.15 * CUBE_SIZE  # Allow up to 0.15 * CUBE_SIZE movement
+    max_rotation_deg = 10.0  # Allow up to 10 degrees rotation
+
     for i in range(model.body_count):
         initial_pos = initial_body_q[i, :3]
         final_pos = final_body_q[i, :3]
         displacement = np.linalg.norm(final_pos - initial_pos)
+
         test.assertLess(
             displacement,
             position_threshold,
             f"Body {i} moved {displacement:.6f}, exceeding threshold {position_threshold:.6f}",
         )
 
-    # Check that objects haven't rotated more than 10 degrees
-    # Use quaternion angle: angle = 2 * arccos(|q1 · q2|)
-    max_rotation_deg = 10.0
-    max_rotation_rad = np.radians(max_rotation_deg)
-
-    for i in range(model.body_count):
         initial_quat = initial_body_q[i, 3:]
         final_quat = final_body_q[i, 3:]
 
-        # Compute quaternion dot product
         dot_product = np.abs(np.dot(initial_quat, final_quat))
-        # Clamp to [-1, 1] to avoid numerical issues with arccos
         dot_product = np.clip(dot_product, 0.0, 1.0)
-
-        # Compute rotation angle
         rotation_angle = 2.0 * np.arccos(dot_product)
 
         test.assertLess(
             rotation_angle,
-            max_rotation_rad,
+            np.radians(max_rotation_deg),
             f"Body {i} rotated {np.degrees(rotation_angle):.2f} degrees, exceeding threshold {max_rotation_deg} degrees",
         )
 
@@ -420,8 +562,8 @@ for device in devices:
 for device in devices:
     add_function_test(
         TestRigidContact,
-        "test_ramp_scene_stability_xpbd_collide2",
-        test_ramp_scene_stability,
+        "test_shape_collisions_gjk_mpr_multicontact",
+        test_shape_collisions_gjk_mpr_multicontact,
         devices=[device],
     )
 

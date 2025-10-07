@@ -46,8 +46,9 @@ RAMP_LENGTH = 10.0  # Length of the ramp
 RAMP_THICKNESS = 0.5  # Thickness of the ramp
 RAMP_ANGLE = np.radians(30.0)  # Tilt angle (30 degrees)
 WALL_HEIGHT = 2.0  # Height of the end wall
-CUBE_SIZE = 1.0*0.99  # Size of the sliding cubes
-RAMP_WIDTH = CUBE_SIZE*2.01  # Width of the ramp and wall
+CUBE_SIZE = 1.0 * 0.99  # Size of the sliding cubes
+RAMP_WIDTH = CUBE_SIZE * 2.01  # Width of the ramp and wall
+
 
 class Example:
     def __init__(self, viewer):
@@ -61,7 +62,7 @@ class Example:
         self.viewer = viewer
 
         # Start in paused mode
-        viewer._paused = True
+        viewer._paused = False
 
         print("Example Basic Shapes 2 - Sliding Cubes on Ramp")
         print("Starting in PAUSED mode - Press SPACE to start simulation")
@@ -102,7 +103,7 @@ class Example:
         # Add side guide walls along the ramp
         guide_height = 0.3  # Height of the side walls
         guide_thickness = 0.1  # Thickness of the side walls
-        
+
         # Left side guide wall
         left_guide_offset = (RAMP_WIDTH / 2 + guide_thickness / 2) * ramp_right
         left_guide_center = ramp_center + left_guide_offset + (guide_height / 2) * ramp_up
@@ -113,7 +114,7 @@ class Example:
             hy=RAMP_LENGTH / 2,
             hz=guide_height / 2,
         )
-        
+
         # Right side guide wall
         right_guide_offset = -(RAMP_WIDTH / 2 + guide_thickness / 2) * ramp_right
         right_guide_center = ramp_center + right_guide_offset + (guide_height / 2) * ramp_up
@@ -125,14 +126,13 @@ class Example:
             hz=guide_height / 2,
         )
 
-
-        start_shift = 0.6*RAMP_LENGTH
+        start_shift = 0.6 * RAMP_LENGTH
 
         # Create end wall at the bottom of the ramp (static)
         # Position it at Y=0 (the lowest point where the ramp ends)
-        tmp = ramp_center_surface + 0.5*CUBE_SIZE*(ramp_up+start_shift*ramp_forward)
-        wall_y = tmp.y - CUBE_SIZE/2*1.4 - RAMP_THICKNESS / 2
-        wall_z = tmp.z   # Center the wall vertically
+        tmp = ramp_center_surface + 0.5 * CUBE_SIZE * (ramp_up + start_shift * ramp_forward)
+        wall_y = tmp.y - CUBE_SIZE / 2 * 1.4 - RAMP_THICKNESS / 2
+        wall_z = tmp.z  # Center the wall vertically
 
         builder.add_shape_box(
             body=-1,  # Static body (attached to world)
@@ -145,15 +145,11 @@ class Example:
         # Rotate cubes to match ramp orientation (same rotation as ramp)
         cube_quat = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), float(RAMP_ANGLE))
 
+        offset_a = 0.5 * CUBE_SIZE * (ramp_up + ramp_right + start_shift * ramp_forward)
+        offset_b = 0.5 * CUBE_SIZE * (ramp_up - ramp_right + start_shift * ramp_forward)
 
-        offset_a = 0.5*CUBE_SIZE*(ramp_up+ramp_right+start_shift*ramp_forward)
-        offset_b = 0.5*CUBE_SIZE*(ramp_up-ramp_right+start_shift*ramp_forward)      
-
-       
         # Cube 1 (left side)
-        body_cube1 = builder.add_body(
-            xform=wp.transform(p=ramp_center_surface + offset_a, q=cube_quat)
-        )
+        body_cube1 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_a, q=cube_quat))
         builder.add_joint_free(body_cube1)
         builder.add_shape_box(
             body=body_cube1,
@@ -163,9 +159,7 @@ class Example:
         )
 
         # Cube 2 (right side)
-        body_cube2 = builder.add_body(
-            xform=wp.transform(p=ramp_center_surface + offset_b, q=cube_quat)
-        )
+        body_cube2 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_b, q=cube_quat))
         builder.add_joint_free(body_cube2)
         builder.add_shape_box(
             body=body_cube2,
@@ -174,16 +168,13 @@ class Example:
             hz=CUBE_SIZE / 2,
         )
 
-
         # MORE SHAPES HERE
-        offset_a = 0.5*CUBE_SIZE*(ramp_up+ramp_right+(start_shift - 2.01)*ramp_forward)
-        offset_b = 0.5*CUBE_SIZE*(ramp_up-ramp_right+(start_shift - 2.01)*ramp_forward)
+        offset_a = 0.5 * CUBE_SIZE * (ramp_up + ramp_right + (start_shift - 2.01) * ramp_forward)
+        offset_b = 0.5 * CUBE_SIZE * (ramp_up - ramp_right + (start_shift - 2.01) * ramp_forward)
 
         # Sphere 1 (left side)
         sphere_radius = CUBE_SIZE / 2
-        body_sphere1 = builder.add_body(
-            xform=wp.transform(p=ramp_center_surface + offset_a, q=cube_quat)
-        )
+        body_sphere1 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_a, q=cube_quat))
         builder.add_joint_free(body_sphere1)
         builder.add_shape_sphere(
             body=body_sphere1,
@@ -191,9 +182,7 @@ class Example:
         )
 
         # Sphere 2 (right side)
-        body_sphere2 = builder.add_body(
-            xform=wp.transform(p=ramp_center_surface + offset_b, q=cube_quat)
-        )
+        body_sphere2 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_b, q=cube_quat))
         builder.add_joint_free(body_sphere2)
         builder.add_shape_sphere(
             body=body_sphere2,
@@ -203,15 +192,13 @@ class Example:
         # Capsule behind the spheres (centered on the ramp)
         capsule_radius = CUBE_SIZE / 2
         capsule_height = 2 * capsule_radius
-        offset_capsule = 0.5*CUBE_SIZE*(ramp_up + (start_shift - 4.02)*ramp_forward)
+        offset_capsule = 0.5 * CUBE_SIZE * (ramp_up + (start_shift - 4.02) * ramp_forward)
 
         # Capsule axis is Z (using quat_between_axes), then apply ramp rotation
         capsule_local_quat = quat_between_axes(newton.Axis.Z, newton.Axis.X)
         capsule_quat = cube_quat * capsule_local_quat
 
-        body_capsule = builder.add_body(
-            xform=wp.transform(p=ramp_center_surface + offset_capsule, q=capsule_quat)
-        )
+        body_capsule = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_capsule, q=capsule_quat))
         builder.add_joint_free(body_capsule)
         builder.add_shape_capsule(
             body=body_capsule,
@@ -222,15 +209,13 @@ class Example:
         # Cylinder behind the capsule (centered on the ramp)
         cylinder_radius = CUBE_SIZE / 2
         cylinder_height = 4 * cylinder_radius
-        offset_cylinder = 0.5*CUBE_SIZE*(ramp_up + (start_shift - 6.03)*ramp_forward)
+        offset_cylinder = 0.5 * CUBE_SIZE * (ramp_up + (start_shift - 6.03) * ramp_forward)
 
         # Cylinder axis is Z (using quat_between_axes), then apply ramp rotation
         cylinder_local_quat = quat_between_axes(newton.Axis.Z, newton.Axis.X)
         cylinder_quat = cube_quat * cylinder_local_quat
 
-        body_cylinder = builder.add_body(
-            xform=wp.transform(p=ramp_center_surface + offset_cylinder, q=cylinder_quat)
-        )
+        body_cylinder = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_cylinder, q=cylinder_quat))
         builder.add_joint_free(body_cylinder)
         builder.add_shape_cylinder(
             body=body_cylinder,
@@ -239,13 +224,11 @@ class Example:
         )
 
         # Two more cubes after the cylinder
-        offset_a = 0.5*CUBE_SIZE*(ramp_up+ramp_right+(start_shift - 8.04)*ramp_forward)
-        offset_b = 0.5*CUBE_SIZE*(ramp_up-ramp_right+(start_shift - 8.04)*ramp_forward)
+        offset_a = 0.5 * CUBE_SIZE * (ramp_up + ramp_right + (start_shift - 8.04) * ramp_forward)
+        offset_b = 0.5 * CUBE_SIZE * (ramp_up - ramp_right + (start_shift - 8.04) * ramp_forward)
 
         # Cube 3 (left side)
-        body_cube3 = builder.add_body(
-            xform=wp.transform(p=ramp_center_surface + offset_a, q=cube_quat)
-        )
+        body_cube3 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_a, q=cube_quat))
         builder.add_joint_free(body_cube3)
         builder.add_shape_box(
             body=body_cube3,
@@ -255,9 +238,7 @@ class Example:
         )
 
         # Cube 4 (right side)
-        body_cube4 = builder.add_body(
-            xform=wp.transform(p=ramp_center_surface + offset_b, q=cube_quat)
-        )
+        body_cube4 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_b, q=cube_quat))
         builder.add_joint_free(body_cube4)
         builder.add_shape_box(
             body=body_cube4,
@@ -269,8 +250,8 @@ class Example:
         # Two cones after the cubes (z-axis aligned with ramp_up)
         cone_radius = CUBE_SIZE / 2
         cone_height = 2 * cone_radius
-        offset_a = 0.5*CUBE_SIZE*(ramp_up+ramp_right+(start_shift - 10.05)*ramp_forward)
-        offset_b = 0.5*CUBE_SIZE*(ramp_up-ramp_right+(start_shift - 10.05)*ramp_forward)
+        offset_a = 0.5 * CUBE_SIZE * (ramp_up + ramp_right + (start_shift - 10.05) * ramp_forward)
+        offset_b = 0.5 * CUBE_SIZE * (ramp_up - ramp_right + (start_shift - 10.05) * ramp_forward)
 
         # Cone z-axis should align with ramp_up (which is the local Z of the ramp)
         # The cone's default axis is Z, and we want it to point along ramp_up
@@ -278,9 +259,7 @@ class Example:
         cone_quat = cube_quat
 
         # Cone 1 (left side)
-        body_cone1 = builder.add_body(
-            xform=wp.transform(p=ramp_center_surface + offset_a, q=cone_quat)
-        )
+        body_cone1 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_a, q=cone_quat))
         builder.add_joint_free(body_cone1)
         builder.add_shape_cone(
             body=body_cone1,
@@ -289,9 +268,7 @@ class Example:
         )
 
         # Cone 2 (right side)
-        body_cone2 = builder.add_body(
-            xform=wp.transform(p=ramp_center_surface + offset_b, q=cone_quat)
-        )
+        body_cone2 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_b, q=cone_quat))
         builder.add_joint_free(body_cone2)
         builder.add_shape_cone(
             body=body_cone2,
@@ -300,13 +277,11 @@ class Example:
         )
 
         # Two more cubes after the cones
-        offset_a = 0.5*CUBE_SIZE*(ramp_up+ramp_right+(start_shift - 12.06)*ramp_forward)
-        offset_b = 0.5*CUBE_SIZE*(ramp_up-ramp_right+(start_shift - 12.06)*ramp_forward)
+        offset_a = 0.5 * CUBE_SIZE * (ramp_up + ramp_right + (start_shift - 12.06) * ramp_forward)
+        offset_b = 0.5 * CUBE_SIZE * (ramp_up - ramp_right + (start_shift - 12.06) * ramp_forward)
 
         # Cube 5 (left side)
-        body_cube5 = builder.add_body(
-            xform=wp.transform(p=ramp_center_surface + offset_a, q=cube_quat)
-        )
+        body_cube5 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_a, q=cube_quat))
         builder.add_joint_free(body_cube5)
         builder.add_shape_box(
             body=body_cube5,
@@ -316,9 +291,7 @@ class Example:
         )
 
         # Cube 6 (right side)
-        body_cube6 = builder.add_body(
-            xform=wp.transform(p=ramp_center_surface + offset_b, q=cube_quat)
-        )
+        body_cube6 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_b, q=cube_quat))
         builder.add_joint_free(body_cube6)
         builder.add_shape_box(
             body=body_cube6,
@@ -351,40 +324,62 @@ class Example:
         cube_indices = np.array(
             [
                 # Bottom face (z = -cube_half, looking from below)
-                0, 2, 1,
-                0, 3, 2,
+                0,
+                2,
+                1,
+                0,
+                3,
+                2,
                 # Top face (z = cube_half, looking from above)
-                4, 5, 6,
-                4, 6, 7,
+                4,
+                5,
+                6,
+                4,
+                6,
+                7,
                 # Front face (y = -cube_half)
-                0, 1, 5,
-                0, 5, 4,
+                0,
+                1,
+                5,
+                0,
+                5,
+                4,
                 # Right face (x = cube_half)
-                1, 2, 6,
-                1, 6, 5,
+                1,
+                2,
+                6,
+                1,
+                6,
+                5,
                 # Back face (y = cube_half)
-                2, 3, 7,
-                2, 7, 6,
+                2,
+                3,
+                7,
+                2,
+                7,
+                6,
                 # Left face (x = -cube_half)
-                3, 0, 4,
-                3, 4, 7,
+                3,
+                0,
+                4,
+                3,
+                4,
+                7,
             ],
             dtype=np.int32,
         )
 
         cube_mesh = newton.Mesh(cube_vertices, cube_indices)
-        
+
         # Position cubes using body transform (same as normal cubes)
-        offset_a = 0.5*CUBE_SIZE*(ramp_up+ramp_right+(start_shift - 14.07)*ramp_forward)
-        offset_b = 0.5*CUBE_SIZE*(ramp_up-ramp_right+(start_shift - 14.07)*ramp_forward)
+        offset_a = 0.5 * CUBE_SIZE * (ramp_up + ramp_right + (start_shift - 14.07) * ramp_forward)
+        offset_b = 0.5 * CUBE_SIZE * (ramp_up - ramp_right + (start_shift - 14.07) * ramp_forward)
 
         # Cube z-axis should align with ramp_up (same as other shapes)
         convex_cube_quat = cube_quat
 
         # Convex Hull Cube 1 (left side)
-        body_convex_cube1 = builder.add_body(
-            xform=wp.transform(p=ramp_center_surface + offset_a, q=convex_cube_quat)
-        )
+        body_convex_cube1 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_a, q=convex_cube_quat))
         builder.add_joint_free(body_convex_cube1)
         builder.add_shape_convex_hull(
             body=body_convex_cube1,
@@ -393,9 +388,7 @@ class Example:
         )
 
         # Convex Hull Cube 2 (right side)
-        body_convex_cube2 = builder.add_body(
-            xform=wp.transform(p=ramp_center_surface + offset_b, q=convex_cube_quat)
-        )
+        body_convex_cube2 = builder.add_body(xform=wp.transform(p=ramp_center_surface + offset_b, q=convex_cube_quat))
         builder.add_joint_free(body_convex_cube2)
         builder.add_shape_convex_hull(
             body=body_convex_cube2,
@@ -438,6 +431,11 @@ class Example:
         # Evaluate forward kinematics
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
+        # Store initial body transforms for testing
+        self.initial_body_q = self.state_0.body_q.numpy().copy()
+        self.frame_count = 0
+        self.max_frames = 100
+
         self.capture()
 
     def capture(self):
@@ -472,6 +470,40 @@ class Example:
                 self.simulate()
 
             self.sim_time += self.frame_dt
+            self.frame_count += 1
+
+            # Check if we've reached the max frames and print test results
+            if self.frame_count == self.max_frames:
+                self.print_test_results()
+                self.viewer._paused = True
+
+    def print_test_results(self):
+        """Print the distance and rotation angle for each body since simulation start"""
+        print("\n" + "=" * 80)
+        print(f"TEST RESULTS AFTER {self.max_frames} FRAMES ({self.sim_time:.2f} seconds)")
+        print("=" * 80)
+
+        final_body_q = self.state_0.body_q.numpy()
+
+        for i in range(self.model.body_count):
+            # Calculate position displacement
+            initial_pos = self.initial_body_q[i, :3]
+            final_pos = final_body_q[i, :3]
+            displacement = np.linalg.norm(final_pos - initial_pos)
+
+            # Calculate rotation angle using quaternion math
+            # angle = 2 * arccos(|q1 · q2|)
+            initial_quat = self.initial_body_q[i, 3:]
+            final_quat = final_body_q[i, 3:]
+
+            dot_product = np.abs(np.dot(initial_quat, final_quat))
+            dot_product = np.clip(dot_product, 0.0, 1.0)  # Clamp for numerical stability
+            rotation_angle_rad = 2.0 * np.arccos(dot_product)
+            rotation_angle_deg = np.degrees(rotation_angle_rad)
+
+            print(f"Body {i}: displacement = {displacement:.6f} units, rotation = {rotation_angle_deg:.2f} degrees")
+
+        print("=" * 80 + "\n")
 
     def test(self):
         pass
