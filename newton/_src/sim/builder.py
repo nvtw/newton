@@ -4451,7 +4451,9 @@ class ModelBuilder:
                 m.shape_contact_pairs = None
                 m.shape_contact_pair_count = 0
                 # Use conservative estimate for rigid_contact_max
-                m.rigid_contact_max = m.shape_count * m.shape_count * 10
+                # Assumption is that each shape can collide with up to 30 other shapes
+                # and each contact can have up to 5 contact points
+                m.rigid_contact_max = m.shape_count * 30 * 5
 
             m.rigid_contact_torsional_friction = self.rigid_contact_torsional_friction
             m.rigid_contact_rolling_friction = self.rigid_contact_rolling_friction

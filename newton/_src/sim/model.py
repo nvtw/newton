@@ -14,7 +14,6 @@
 # limitations under the License.
 
 """Implementation of the Newton model class."""
-# isort: skip_file
 
 from __future__ import annotations
 
@@ -566,7 +565,7 @@ class Model:
         Returns:
             Contacts: The contact object containing collision information.
         """
-        from .collide import CollisionPipeline
+        from .collide import CollisionPipeline  # noqa: PLC0415
 
         if requires_grad is None:
             requires_grad = self.requires_grad
