@@ -542,7 +542,6 @@ class Model:
         edge_sdf_iter: int = 10,
         iterate_mesh_vertices: bool = True,
         requires_grad: bool | None = None,
-        broad_phase_mode=None,
     ) -> Contacts:
         """
         Generate contact points for the particles and rigid bodies in the model.
@@ -563,24 +562,19 @@ class Model:
             edge_sdf_iter (int, optional): Number of search iterations for finding closest contact points between edges and SDF. Default is 10.
             iterate_mesh_vertices (bool, optional): Whether to iterate over all vertices of a mesh for contact generation (used for capsule/box <> mesh collision). Default is True.
             requires_grad (bool, optional): Whether to duplicate contact arrays for gradient computation. If None, uses :attr:`Model.requires_grad`.
-            broad_phase_mode (BroadPhaseMode, optional): Broad phase collision detection mode. Only used when creating a new collision pipeline.
-                If None, defaults to BroadPhaseMode.NXN.
 
         Returns:
             Contacts: The contact object containing collision information.
         """
-        from .collide2 import BroadPhaseMode, CollisionPipeline2
+        from .collide import CollisionPipeline
 
         if requires_grad is None:
             requires_grad = self.requires_grad
 
-        if broad_phase_mode is None:
-            broad_phase_mode = BroadPhaseMode.NXN
-
         if collision_pipeline is not None:
             self._collision_pipeline = collision_pipeline
         elif not hasattr(self, "_collision_pipeline"):
-            self._collision_pipeline = CollisionPipeline2.from_model(
+            self._collision_pipeline = CollisionPipeline.from_model(
                 self,
                 rigid_contact_max_per_pair,
                 rigid_contact_margin,
@@ -589,7 +583,6 @@ class Model:
                 edge_sdf_iter,
                 iterate_mesh_vertices,
                 requires_grad,
-                broad_phase_mode,
             )
 
         # update any additional parameters

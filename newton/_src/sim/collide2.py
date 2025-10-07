@@ -243,7 +243,6 @@ def extract_shape_data(
 
     # For CONVEX_HULL, pack the mesh pointer into auxillary
     if shape_type[shape_idx] == int(GeoType.CONVEX_HULL):
-        # result.scale = wp.vec3(1.0, 1.0, 1.0)
         result.auxillary = pack_mesh_ptr(shape_source_ptr[shape_idx])
 
     # For primitive shapes, bounding sphere center is the shape center
@@ -800,6 +799,7 @@ class CollisionPipeline2:
                 model.shape_count,
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
+                device=model.device,
             )
         else:  # BroadPhaseMode.SAP
             # Use sweep-and-prune broad phase with AABB sorting
@@ -812,6 +812,7 @@ class CollisionPipeline2:
                 model.shape_count,
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
+                device=model.device,
             )
 
         # Launch kernel across all shape pairs

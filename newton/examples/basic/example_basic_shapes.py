@@ -29,6 +29,7 @@ from pxr import Usd, UsdGeom
 
 import newton
 import newton.examples
+from newton._src.sim.collide2 import CollisionPipeline2, BroadPhaseMode
 
 # wp.config.mode = "debug"
 # wp.config.verify_cuda = True
@@ -52,9 +53,9 @@ USE_CUDA_GRAPH = True  # Set to True to enable CUDA graph capture
 # Broad Phase Mode
 # ================
 # Choose broad phase collision detection mode:
-# - newton.BroadPhaseMode.NXN: All-pairs AABB (O(N²), good for small scenes)
-# - newton.BroadPhaseMode.SAP: Sweep-and-prune AABB (O(N log N), better for larger scenes)
-BROAD_PHASE_MODE = newton.BroadPhaseMode.SAP
+# - BroadPhaseMode.NXN: All-pairs AABB (O(N²), good for small scenes)
+# - BroadPhaseMode.SAP: Sweep-and-prune AABB (O(N log N), better for larger scenes)
+BROAD_PHASE_MODE = BroadPhaseMode.SAP
 
 
 class Example:
@@ -310,6 +311,15 @@ class Example:
         # No need to build static shape_contact_pairs (always use dynamic broad phase)
         self.model = builder.finalize(build_shape_contact_pairs=False)
 
+        # Create CollisionPipeline2 explicitly with the selected broad phase mode
+        print(f"Using CollisionPipeline2 with broad phase mode: {BROAD_PHASE_MODE.name}")
+        self.collision_pipeline = CollisionPipeline2.from_model(
+            self.model,
+            rigid_contact_max_per_pair=10,
+            rigid_contact_margin=0.01,
+            broad_phase_mode=BROAD_PHASE_MODE,
+        )
+
         # Initialize solver based on the selected type
         if SOLVER_TYPE == "XPBD":
             print("Using XPBD solver")
@@ -345,7 +355,7 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.state_0, broad_phase_mode=BROAD_PHASE_MODE)
+        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
 
         self.viewer.set_model(self.model)
 
@@ -372,7 +382,7 @@ class Example:
             # Compute contacts - needed for Newton contact solvers and XPBD
             # MuJoCo with native contacts computes its own contacts internally
             if SOLVER_TYPE in ["XPBD", "MUJOCO_NEWTON", "FEATHERSTONE"]:
-                self.contacts = self.model.collide(self.state_0)
+                self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
             else:
                 self.contacts = None  # MuJoCo native contacts don't need Newton contacts
 
