@@ -21,15 +21,9 @@ import warp as wp
 
 from newton import GeoType
 from newton._src.geometry.simplex_solver import create_solve_closest_distance
-from newton._src.geometry.support_function import GenericShapeData, support_map
+from newton._src.geometry.support_function import GenericShapeData, SupportMapDataProvider, support_map
 
 MAX_ITERATIONS = 30
-
-
-# Placeholder for data provider (not used in these tests)
-@wp.struct
-class DataProvider:
-    pass
 
 
 def _geom_dist(
@@ -48,9 +42,14 @@ def _geom_dist(
     Returns:
         Tuple of (distance, witness_point_a, witness_point_b, normal)
     """
+    # Convert GeoType enums to int if needed
+    type1 = int(geom_type1)
+    type2 = int(geom_type2)
 
     @wp.kernel
     def gjk_kernel(
+        type_a: int,
+        type_b: int,
         # Outputs:
         collision_out: wp.array(dtype=int),
         dist_out: wp.array(dtype=float),
@@ -59,16 +58,16 @@ def _geom_dist(
     ):
         # Create shape data for both geometries
         shape_a = GenericShapeData()
-        shape_a.type = geom_type1
+        shape_a.shape_type = type_a
         shape_a.scale = size1
         shape_a.auxillary = wp.vec3(0.0)
 
         shape_b = GenericShapeData()
-        shape_b.type = geom_type2
+        shape_b.shape_type = type_b
         shape_b.scale = size2
         shape_b.auxillary = wp.vec3(0.0)
 
-        data_provider = DataProvider()
+        data_provider = SupportMapDataProvider()
 
         # Call GJK solver
         collision, distance, point, normal, feature_a, feature_b = wp.static(
@@ -99,7 +98,7 @@ def _geom_dist(
     wp.launch(
         gjk_kernel,
         dim=1,
-        inputs=[],
+        inputs=[type1, type2],
         outputs=[collision_out, dist_out, point_out, normal_out],
     )
 
@@ -148,10 +147,10 @@ class TestGJK(unittest.TestCase):
         self.assertAlmostEqual(0.0, dist, places=5)
 
     def test_sphere_sphere_overlapping(self):
-        """Test overlapping spheres return distance 0 (GJK only, no MPR)."""
+        """Test overlapping spheres return collision=True and distance=0."""
         # Two spheres of radius 3.0, centers at distance 4.0
         # Expected overlap: 3.0 + 3.0 - 4.0 = 2.0
-        # Note: GJK returns distance=0 for overlapping shapes (MPR would give penetration depth)
+        # Note: GJK returns collision=True and distance=0 for overlapping shapes (MPR would give penetration depth)
         dist, point, normal, collision = _geom_dist(
             GeoType.SPHERE,
             wp.vec3(3.0, 0.0, 0.0),
@@ -163,7 +162,7 @@ class TestGJK(unittest.TestCase):
             wp.quat_identity(),
         )
         self.assertAlmostEqual(0.0, dist, places=5)
-        self.assertEqual(0, collision)  # GJK reports collision=False, distance=0 for overlap
+        self.assertEqual(1, collision)  # GJK reports collision=True for overlapping shapes
 
     def test_box_box_separated(self):
         """Test distance between two separated boxes."""
