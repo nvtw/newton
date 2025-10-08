@@ -246,7 +246,7 @@ def create_solve_mpr(support_func: Any):
             The XenoCollide implementation below is altered and not identical to the
             original. The license is kept untouched.
         """
-        COLLIDE_EPSILON = NUMERIC_EPSILON
+        COLLIDE_EPSILON = 1e-5
 
         # Initialize variables
         penetration = float(0.0)

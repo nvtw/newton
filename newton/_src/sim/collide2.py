@@ -286,6 +286,7 @@ def build_contacts_kernel_gjk_mpr(
     contact_max: int,
     sap_shape_pair_count: wp.array(dtype=int),
     shape_source_ptr: wp.array(dtype=wp.uint64),
+    total_num_threads: int,
     # outputs
     contact_count: wp.array(dtype=int),
     out_shape0: wp.array(dtype=int),
@@ -301,184 +302,197 @@ def build_contacts_kernel_gjk_mpr(
 ):
     tid = wp.tid()
 
-    # Early bounds check - only process valid pairs from broad phase
-    if tid >= shape_pairs.shape[0] or tid >= sap_shape_pair_count[0]:
-        return
+    num_work_items = wp.min(shape_pairs.shape[0], sap_shape_pair_count[0])
 
-    # Get shape pair
-    pair = shape_pairs[tid]
-    shape_a = pair[0]
-    shape_b = pair[1]
+    for t in range(tid, num_work_items, total_num_threads):
+        # Get shape pair
+        pair = shape_pairs[t]
+        shape_a = pair[0]
+        shape_b = pair[1]
 
-    # Safety: ignore self-collision pairs
-    if shape_a == shape_b:
-        return
+        # Safety: ignore self-collision pairs
+        if shape_a == shape_b:
+            continue
 
-    # Validate shape indices
-    if shape_a < 0 or shape_b < 0:
-        return
+        # Validate shape indices
+        if shape_a < 0 or shape_b < 0:
+            continue
 
-    # Get shape types
-    type_a = shape_type[shape_a]
-    type_b = shape_type[shape_b]
+        # Get shape types
+        type_a = shape_type[shape_a]
+        type_b = shape_type[shape_b]
 
-    # Skip mesh collisions (not supported in this simplified version)
-    if type_a == int(GeoType.MESH) or type_b == int(GeoType.MESH):
-        return
+        # Skip mesh collisions (not supported in this simplified version)
+        if type_a == int(GeoType.MESH) or type_b == int(GeoType.MESH):
+            continue
 
-    # Sort shapes by type to ensure consistent collision handling order
-    if type_a > type_b:
-        # Swap shapes to maintain consistent ordering
-        shape_a, shape_b = shape_b, shape_a
-        type_a, type_b = type_b, type_a
-        tmp = pair[0]
-        pair[0] = pair[1]
-        pair[1] = tmp
+        # Sort shapes by type to ensure consistent collision handling order
+        if type_a > type_b:
+            # Swap shapes to maintain consistent ordering
+            shape_a, shape_b = shape_b, shape_a
+            type_a, type_b = type_b, type_a
+            tmp = pair[0]
+            pair[0] = pair[1]
+            pair[1] = tmp
 
-    # Extract shape data for both shapes
-    pos_a, quat_a, shape_data_a, bsphere_center_a, bsphere_radius_a = extract_shape_data(
-        shape_a, body_q, shape_transform, shape_body, shape_type, shape_scale, shape_collision_radius, shape_source_ptr
-    )
-
-    pos_b, quat_b, shape_data_b, bsphere_center_b, bsphere_radius_b = extract_shape_data(
-        shape_b, body_q, shape_transform, shape_body, shape_type, shape_scale, shape_collision_radius, shape_source_ptr
-    )
-
-    # Get body indices
-    rigid_a = shape_body[shape_a]
-    rigid_b = shape_body[shape_b]
-
-    # Get shape types from the extracted data
-    type_a = shape_data_a.shape_type
-    type_b = shape_data_b.shape_type
-
-    # Check if shapes are infinite planes (scale.x == 0 and scale.y == 0)
-    scale_a = shape_data_a.scale
-    scale_b = shape_data_b.scale
-    is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
-    is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (scale_b[0] == 0.0 and scale_b[1] == 0.0)
-
-    # Early bounding sphere check using extracted bounding spheres
-    # Inflate by rigid_contact_margin only (no speculative expansion)
-    radius_a = bsphere_radius_a + rigid_contact_margin
-    radius_b = bsphere_radius_b + rigid_contact_margin
-    center_distance = wp.length(bsphere_center_b - bsphere_center_a)
-
-    # Early out if bounding spheres don't overlap
-    # Skip this check if either shape is an infinite plane
-    if not (is_infinite_plane_a or is_infinite_plane_b):
-        if center_distance > (radius_a + radius_b):
-            return
-    elif is_infinite_plane_a and is_infinite_plane_b:
-        # Plane-plane collisions are not supported
-        return
-    elif is_infinite_plane_a:
-        # Check if shape B is close enough to the infinite plane A
-        plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
-        # Distance from shape B center to plane A
-        dist_to_plane = wp.abs(wp.dot(pos_b - pos_a, plane_normal))
-        if dist_to_plane > radius_b:
-            return
-    elif is_infinite_plane_b:
-        # Check if shape A is close enough to the infinite plane B
-        plane_normal = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
-        # Distance from shape A center to plane B
-        dist_to_plane = wp.abs(wp.dot(pos_a - pos_b, plane_normal))
-        if dist_to_plane > radius_a:
-            return
-
-    # Use the extracted orientations
-    rot_a = quat_a
-    rot_b = quat_b
-
-    # World->body transforms for writing contact points
-    X_bw_a = wp.transform_identity() if rigid_a == -1 else wp.transform_inverse(body_q[rigid_a])
-    X_bw_b = wp.transform_identity() if rigid_b == -1 else wp.transform_inverse(body_q[rigid_b])
-
-    # Use the extracted geometry data structures for convex collision detection
-    geom_a = shape_data_a
-    geom_b = shape_data_b
-
-    # Convert infinite planes to cube proxies for GJK/MPR compatibility
-    # Use the OTHER object's radius to properly size the cube
-    # Only convert if it's an infinite plane (finite planes can be handled normally)
-    pos_a_adjusted = pos_a
-    if is_infinite_plane_a:
-        # Position the cube based on the OTHER object's position (pos_b)
-        geom_a, pos_a_adjusted = convert_infinite_plane_to_cube(geom_a, rot_a, pos_a, pos_b, radius_b)
-
-    pos_b_adjusted = pos_b
-    if is_infinite_plane_b:
-        # Position the cube based on the OTHER object's position (pos_a)
-        geom_b, pos_b_adjusted = convert_infinite_plane_to_cube(geom_b, rot_b, pos_b, pos_a, radius_a)
-
-    data_provider = SupportMapDataProvider()
-
-    radius_eff_a = float(0.0)
-    radius_eff_b = float(0.0)
-
-    small_radius = 0.0001
-
-    # Special treatment for minkowski objects
-    if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
-        radius_eff_a = geom_a.scale[0]
-        geom_a.scale[0] = small_radius
-
-    if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
-        radius_eff_b = geom_b.scale[0]
-        geom_b.scale[0] = small_radius
-
-    count, normal, penetrations, points, features = wp.static(solve_convex_multi_contact)(
-        geom_a,
-        geom_b,
-        rot_a,
-        rot_b,
-        pos_a_adjusted,
-        pos_b_adjusted,
-        0.0,  # sum_of_contact_offsets - gap
-        data_provider,
-        rigid_contact_margin + radius_eff_a + radius_eff_b,
-        type_a == int(GeoType.SPHERE) or type_b == int(GeoType.SPHERE),
-    )
-
-    # Special post processing for minkowski objects
-    if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
-        for i in range(count):
-            points[i] = points[i] + normal * (radius_eff_a * 0.5)
-            penetrations[i] -= radius_eff_a - small_radius
-    if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
-        for i in range(count):
-            points[i] = points[i] - normal * (radius_eff_b * 0.5)
-            penetrations[i] -= radius_eff_b - small_radius
-
-    for id in range(count):
-        write_contact(
-            points[id],
-            normal,
-            penetrations[id],
-            radius_eff_a,
-            radius_eff_b,
-            shape_thickness[shape_a],
-            shape_thickness[shape_b],
+        # Extract shape data for both shapes
+        pos_a, quat_a, shape_data_a, bsphere_center_a, bsphere_radius_a = extract_shape_data(
             shape_a,
-            shape_b,
-            X_bw_a,
-            X_bw_b,
-            tid,
-            rigid_contact_margin,
-            contact_max,
-            contact_count,
-            out_shape0,
-            out_shape1,
-            out_point0,
-            out_point1,
-            out_offset0,
-            out_offset1,
-            out_normal,
-            out_thickness0,
-            out_thickness1,
-            out_tids,
+            body_q,
+            shape_transform,
+            shape_body,
+            shape_type,
+            shape_scale,
+            shape_collision_radius,
+            shape_source_ptr,
         )
+
+        pos_b, quat_b, shape_data_b, bsphere_center_b, bsphere_radius_b = extract_shape_data(
+            shape_b,
+            body_q,
+            shape_transform,
+            shape_body,
+            shape_type,
+            shape_scale,
+            shape_collision_radius,
+            shape_source_ptr,
+        )
+
+        # Get body indices
+        rigid_a = shape_body[shape_a]
+        rigid_b = shape_body[shape_b]
+
+        # Get shape types from the extracted data
+        type_a = shape_data_a.shape_type
+        type_b = shape_data_b.shape_type
+
+        # Check if shapes are infinite planes (scale.x == 0 and scale.y == 0)
+        scale_a = shape_data_a.scale
+        scale_b = shape_data_b.scale
+        is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
+        is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (scale_b[0] == 0.0 and scale_b[1] == 0.0)
+
+        # Early bounding sphere check using extracted bounding spheres
+        # Inflate by rigid_contact_margin only (no speculative expansion)
+        radius_a = bsphere_radius_a + rigid_contact_margin
+        radius_b = bsphere_radius_b + rigid_contact_margin
+        center_distance = wp.length(bsphere_center_b - bsphere_center_a)
+
+        # Early out if bounding spheres don't overlap
+        # Skip this check if either shape is an infinite plane
+        if not (is_infinite_plane_a or is_infinite_plane_b):
+            if center_distance > (radius_a + radius_b):
+                continue
+        elif is_infinite_plane_a and is_infinite_plane_b:
+            # Plane-plane collisions are not supported
+            continue
+        elif is_infinite_plane_a:
+            # Check if shape B is close enough to the infinite plane A
+            plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
+            # Distance from shape B center to plane A
+            dist_to_plane = wp.abs(wp.dot(pos_b - pos_a, plane_normal))
+            if dist_to_plane > radius_b:
+                continue
+        elif is_infinite_plane_b:
+            # Check if shape A is close enough to the infinite plane B
+            plane_normal = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
+            # Distance from shape A center to plane B
+            dist_to_plane = wp.abs(wp.dot(pos_a - pos_b, plane_normal))
+            if dist_to_plane > radius_a:
+                continue
+
+        # Use the extracted orientations
+        rot_a = quat_a
+        rot_b = quat_b
+
+        # World->body transforms for writing contact points
+        X_bw_a = wp.transform_identity() if rigid_a == -1 else wp.transform_inverse(body_q[rigid_a])
+        X_bw_b = wp.transform_identity() if rigid_b == -1 else wp.transform_inverse(body_q[rigid_b])
+
+        # Use the extracted geometry data structures for convex collision detection
+        geom_a = shape_data_a
+        geom_b = shape_data_b
+
+        # Convert infinite planes to cube proxies for GJK/MPR compatibility
+        # Use the OTHER object's radius to properly size the cube
+        # Only convert if it's an infinite plane (finite planes can be handled normally)
+        pos_a_adjusted = pos_a
+        if is_infinite_plane_a:
+            # Position the cube based on the OTHER object's position (pos_b)
+            geom_a, pos_a_adjusted = convert_infinite_plane_to_cube(geom_a, rot_a, pos_a, pos_b, radius_b)
+
+        pos_b_adjusted = pos_b
+        if is_infinite_plane_b:
+            # Position the cube based on the OTHER object's position (pos_a)
+            geom_b, pos_b_adjusted = convert_infinite_plane_to_cube(geom_b, rot_b, pos_b, pos_a, radius_a)
+
+        data_provider = SupportMapDataProvider()
+
+        radius_eff_a = float(0.0)
+        radius_eff_b = float(0.0)
+
+        small_radius = 0.0001
+
+        # Special treatment for minkowski objects
+        if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
+            radius_eff_a = geom_a.scale[0]
+            geom_a.scale[0] = small_radius
+
+        if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
+            radius_eff_b = geom_b.scale[0]
+            geom_b.scale[0] = small_radius
+
+        count, normal, penetrations, points, features = wp.static(solve_convex_multi_contact)(
+            geom_a,
+            geom_b,
+            rot_a,
+            rot_b,
+            pos_a_adjusted,
+            pos_b_adjusted,
+            0.0,  # sum_of_contact_offsets - gap
+            data_provider,
+            rigid_contact_margin + radius_eff_a + radius_eff_b,
+            type_a == int(GeoType.SPHERE) or type_b == int(GeoType.SPHERE),
+        )
+
+        # Special post processing for minkowski objects
+        if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
+            for i in range(count):
+                points[i] = points[i] + normal * (radius_eff_a * 0.5)
+                penetrations[i] -= radius_eff_a - small_radius
+        if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
+            for i in range(count):
+                points[i] = points[i] - normal * (radius_eff_b * 0.5)
+                penetrations[i] -= radius_eff_b - small_radius
+
+        for id in range(count):
+            write_contact(
+                points[id],
+                normal,
+                penetrations[id],
+                radius_eff_a,
+                radius_eff_b,
+                shape_thickness[shape_a],
+                shape_thickness[shape_b],
+                shape_a,
+                shape_b,
+                X_bw_a,
+                X_bw_b,
+                t,
+                rigid_contact_margin,
+                contact_max,
+                contact_count,
+                out_shape0,
+                out_shape1,
+                out_point0,
+                out_point1,
+                out_offset0,
+                out_offset1,
+                out_normal,
+                out_thickness0,
+                out_thickness1,
+                out_tids,
+            )
 
 
 @wp.kernel
@@ -707,7 +721,7 @@ class CollisionPipeline2:
         iterate_mesh_vertices: bool = True,
         requires_grad: bool | None = None,
         broad_phase_mode: BroadPhaseMode = BroadPhaseMode.NXN,
-    ) -> CollisionPipeline:
+    ) -> CollisionPipeline2:
         """
         Create a CollisionPipeline instance from a Model.
 

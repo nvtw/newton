@@ -49,7 +49,7 @@ from .types import GeoType
 
 # Is not allowed to share values with GeoType
 class GeoTypeEx(enum.IntEnum):
-    TRIANGLE = (1000,)
+    TRIANGLE = 1000
 
 
 @wp.struct

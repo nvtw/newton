@@ -40,7 +40,7 @@ def _geom_dist(
     Compute distance between two geometries using GJK algorithm.
 
     Returns:
-        Tuple of (distance, witness_point_a, witness_point_b, normal)
+        Tuple of (distance, point, normal, collision)
     """
     # Convert GeoType enums to int if needed
     type1 = int(geom_type1)
@@ -49,7 +49,13 @@ def _geom_dist(
     @wp.kernel
     def gjk_kernel(
         type_a: int,
+        size_a: wp.vec3,
+        pos_a: wp.vec3,
+        quat_a: wp.quat,
         type_b: int,
+        size_b: wp.vec3,
+        pos_b: wp.vec3,
+        quat_b: wp.quat,
         # Outputs:
         collision_out: wp.array(dtype=int),
         dist_out: wp.array(dtype=float),
@@ -59,26 +65,26 @@ def _geom_dist(
         # Create shape data for both geometries
         shape_a = GenericShapeData()
         shape_a.shape_type = type_a
-        shape_a.scale = size1
+        shape_a.scale = size_a
         shape_a.auxillary = wp.vec3(0.0)
 
         shape_b = GenericShapeData()
         shape_b.shape_type = type_b
-        shape_b.scale = size2
+        shape_b.scale = size_b
         shape_b.auxillary = wp.vec3(0.0)
 
         data_provider = SupportMapDataProvider()
 
         # Call GJK solver
-        collision, distance, point, normal, feature_a, feature_b = wp.static(
+        collision, distance, point, normal, _feature_a, _feature_b = wp.static(
             create_solve_closest_distance(support_map)
         )(
             shape_a,
             shape_b,
-            quat1,
-            quat2,
-            pos1,
-            pos2,
+            quat_a,
+            quat_b,
+            pos_a,
+            pos_b,
             0.0,  # sum_of_contact_offsets
             data_provider,
             MAX_ITERATIONS,
@@ -98,7 +104,7 @@ def _geom_dist(
     wp.launch(
         gjk_kernel,
         dim=1,
-        inputs=[type1, type2],
+        inputs=[type1, size1, pos1, quat1, type2, size2, pos2, quat2],
         outputs=[collision_out, dist_out, point_out, normal_out],
     )
 

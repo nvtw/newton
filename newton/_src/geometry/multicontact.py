@@ -1042,6 +1042,8 @@ def create_build_manifold(support_func: Any):
             result_features,
         )
 
+    Mat43f = wp.types.matrix(shape=(4, 3), dtype=wp.float32)
+
     @wp.func
     def build_manifold(
         geom_a: Any,
@@ -1127,7 +1129,7 @@ def create_build_manifold(support_func: Any):
         )
 
         # Extract results into fixed-size matrices
-        contact_points = wp.types.matrix(shape=(4, 3), dtype=wp.float32)
+        contact_points = Mat43f()
         feature_ids = wp.vec4i(0, 0, 0, 0)
         penetrations = wp.vec4(0.0, 0.0, 0.0, 0.0)
 
