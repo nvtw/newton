@@ -1678,13 +1678,16 @@ class SolverMuJoCo(SolverBase):
         # find graph coloring of collision filter pairs
         num_shapes = len(selected_shapes)
         shape_a, shape_b = np.triu_indices(num_shapes, k=1)
-        cgroup = [model.shape_collision_group[i] for i in selected_shapes]
+        # Convert to numpy array if needed before indexing
+        selected_shapes_np = selected_shapes.numpy() if hasattr(selected_shapes, 'numpy') else selected_shapes
+        shape_collision_group_np = model.shape_collision_group.numpy() if hasattr(model.shape_collision_group, 'numpy') else model.shape_collision_group
+        cgroup = [shape_collision_group_np[i] for i in selected_shapes_np]
         # edges representing colliding shape pairs
         graph_edges = [
             (i, j)
             for i, j in zip(shape_a, shape_b, strict=True)
             if (
-                (selected_shapes[i], selected_shapes[j]) not in model.shape_collision_filter_pairs
+                (selected_shapes_np[i], selected_shapes_np[j]) not in model.shape_collision_filter_pairs
                 and (cgroup[i] == cgroup[j] or cgroup[i] == -1 or cgroup[j] == -1)
             )
         ]
@@ -1698,13 +1701,13 @@ class SolverMuJoCo(SolverBase):
             num_colors = 0
             for group in color_groups:
                 num_colors += 1
-                shape_color[selected_shapes[group]] = num_colors
+                shape_color[selected_shapes_np[group]] = num_colors
             if visualize_graph:
                 plot_graph(
                     vertices=np.arange(num_shapes),
                     edges=graph_edges,
-                    node_labels=[shape_keys[i] for i in selected_shapes] if shape_keys is not None else None,
-                    node_colors=[shape_color[i] for i in selected_shapes],
+                    node_labels=[shape_keys[i] for i in selected_shapes_np] if shape_keys is not None else None,
+                    node_colors=[shape_color[i] for i in selected_shapes_np],
                 )
 
         return shape_color

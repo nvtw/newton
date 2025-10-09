@@ -29,6 +29,11 @@ import newton
 import newton.examples
 import newton.utils
 
+# CUDA Graph Capture
+# ==================
+# Enable CUDA graph capture for better performance (CUDA devices only)
+USE_CUDA_GRAPH = True  # Set to False to disable CUDA graph capture
+
 
 class Example:
     def __init__(self, viewer, num_envs=4):
@@ -96,11 +101,12 @@ class Example:
         self.capture()
 
     def capture(self):
-        self.graph = None
-        if wp.get_device().is_cuda:
+        if USE_CUDA_GRAPH and wp.get_device().is_cuda:
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph
+        else:
+            self.graph = None
 
     def simulate(self):
         self.contacts = self.model.collide(self.state_0)
