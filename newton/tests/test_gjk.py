@@ -123,7 +123,7 @@ class TestGJK(unittest.TestCase):
         """Test distance between two separated spheres."""
         # Two spheres of radius 1.0, separated by distance 3.0
         # Expected distance: 3.0 - 1.0 - 1.0 = 1.0
-        dist, point, normal, collision = _geom_dist(
+        dist, _point, _normal, collision = _geom_dist(
             GeoType.SPHERE,
             wp.vec3(1.0, 0.0, 0.0),
             wp.vec3(-1.5, 0.0, 0.0),
@@ -140,7 +140,7 @@ class TestGJK(unittest.TestCase):
         """Test two touching spheres have zero distance."""
         # Two spheres of radius 1.0, centers at distance 2.0
         # Expected distance: 0.0 (just touching)
-        dist, point, normal, collision = _geom_dist(
+        dist, _point, _normal, _collision = _geom_dist(
             GeoType.SPHERE,
             wp.vec3(1.0, 0.0, 0.0),
             wp.vec3(-1.0, 0.0, 0.0),
@@ -157,7 +157,7 @@ class TestGJK(unittest.TestCase):
         # Two spheres of radius 3.0, centers at distance 4.0
         # Expected overlap: 3.0 + 3.0 - 4.0 = 2.0
         # Note: GJK returns collision=True and distance=0 for overlapping shapes (MPR would give penetration depth)
-        dist, point, normal, collision = _geom_dist(
+        dist, _point, _normal, collision = _geom_dist(
             GeoType.SPHERE,
             wp.vec3(3.0, 0.0, 0.0),
             wp.vec3(-1.0, 0.0, 0.0),
@@ -177,7 +177,7 @@ class TestGJK(unittest.TestCase):
         # Distance between centers: 2.5, half-extents sum: 3.5
         # Expected separation: 2.5 - 2.5 - 1.0 = -1.0 (overlapping)
         # But let's test a separated case
-        dist, point, normal, collision = _geom_dist(
+        dist, _point, _normal, collision = _geom_dist(
             GeoType.BOX,
             wp.vec3(1.0, 1.0, 1.0),
             wp.vec3(-2.0, 0.0, 0.0),

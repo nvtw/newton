@@ -207,7 +207,7 @@ def create_solve_mpr(support_func: Any):
         MPR solver function
     """
 
-    support_map_b, minkowski_support, geometric_center = create_support_map_function(support_func)
+    _support_map_b, minkowski_support, geometric_center = create_support_map_function(support_func)
 
     @wp.func
     def solve_mpr_core(

@@ -85,7 +85,7 @@ def create_solve_closest_distance(support_func: Any):
         GJK distance solver function
     """
 
-    support_map_b, minkowski_support, geometric_center = create_support_map_function(support_func)
+    _support_map_b, minkowski_support, geometric_center = create_support_map_function(support_func)
 
     @wp.func
     def barycentric_get(bc: Barycentric, i: int) -> float:
