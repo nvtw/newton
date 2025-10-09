@@ -34,10 +34,10 @@ from .kernels import build_orthonormal_basis
 
 # Constants
 EPS = 0.00001
-ROT_DELTA_ANGLE = 60.0 * wp.pi / 180.0
+ROT_DELTA_ANGLE = wp.static(60.0 * wp.pi / 180.0)
 # The tilt angle defines how much the search direction gets tilted while searching for
 # points on the contact manifold.
-TILT_ANGLE_RAD = 2.0 * wp.pi / 180.0
+TILT_ANGLE_RAD = wp.static(2.0 * wp.pi / 180.0)
 SIN_TILT_ANGLE = wp.static(wp.sin(TILT_ANGLE_RAD))
 COS_TILT_ANGLE = wp.static(wp.cos(TILT_ANGLE_RAD))
 
@@ -705,7 +705,9 @@ def feature_id(
 
 
 @wp.func
-def add_avoid_duplicates_vec3(arr: wp.array(dtype=wp.vec3), arr_count: int, vec: wp.vec3, eps: float) -> int:
+def add_avoid_duplicates_vec3(
+    arr: wp.array(dtype=wp.vec3), arr_count: int, vec: wp.vec3, eps: float
+) -> tuple[int, bool]:
     """
     Add a vector to an array, avoiding duplicates.
 
@@ -716,49 +718,20 @@ def add_avoid_duplicates_vec3(arr: wp.array(dtype=wp.vec3), arr_count: int, vec:
         eps: Epsilon threshold for duplicate detection.
 
     Returns:
-        New array count.
+        Tuple of (new_count, was_added) where was_added is True if point was added
     """
     # Check for duplicates. If the new vertex 'vec' is too close to the first or last existing vertex, ignore it.
     # This is a simple reduction step to avoid redundant points.
     if arr_count > 0:
         if wp.length_sq(arr[0] - vec) < eps:
-            return arr_count
+            return arr_count, False
 
     if arr_count > 1:
         if wp.length_sq(arr[arr_count - 1] - vec) < eps:
-            return arr_count
+            return arr_count, False
 
     arr[arr_count] = vec
-    return arr_count + 1
-
-
-@wp.func
-def add_avoid_duplicates_vec3_to_vec3(arr: wp.array(dtype=wp.vec3), arr_count: int, vec: wp.vec3, eps: float) -> int:
-    """
-    Add a vec3 to a vec3 array, avoiding duplicates.
-
-    Args:
-        arr: Array to add to.
-        arr_count: Current number of elements in the array.
-        vec: Vector to add.
-        eps: Epsilon threshold for duplicate detection.
-
-    Returns:
-        New array count.
-    """
-    # Check for duplicates. If the new vertex 'vec' is too close to the first or last existing vertex, ignore it.
-    if arr_count > 0:
-        arr_0_xyz = wp.vec3(arr[0][0], arr[0][1], arr[0][2])
-        if wp.length_sq(arr_0_xyz - vec) < eps:
-            return arr_count
-
-    if arr_count > 1:
-        arr_last_xyz = wp.vec3(arr[arr_count - 1][0], arr[arr_count - 1][1], arr[arr_count - 1][2])
-        if wp.length_sq(arr_last_xyz - vec) < eps:
-            return arr_count
-
-    arr[arr_count] = vec
-    return arr_count + 1
+    return arr_count + 1, True
 
 
 vec6_uint8 = wp.types.vector(6, wp.uint8)
@@ -1011,11 +984,13 @@ def create_build_manifold(support_func: Any):
             tmp = wp.quat_rotate_inv(quaternion_a, offset_normal)
             # 2. Find the furthest point on shape A in that local direction.
             (pt_a, feature_a) = support_func(geom_a, tmp, data_provider)
-            features_a[e] = wp.uint8(int(feature_a) + 1)
             # 3. Transform the local-space support point back to world space.
             pt_a = wp.quat_rotate(quaternion_a, pt_a) + position_a
             # 4. Add the world-space point to the 'left' polygon, checking for duplicates.
-            a_count = add_avoid_duplicates_vec3(a_buffer, a_count, pt_a, EPS)
+            a_count, was_added_a = add_avoid_duplicates_vec3(a_buffer, a_count, pt_a, EPS)
+            # Only store feature ID if the point was actually added (not a duplicate)
+            if was_added_a:
+                features_a[a_count - 1] = wp.uint8(int(feature_a) + 1)
 
             # Invert the direction for the other shape.
             offset_normal = -offset_normal
@@ -1024,9 +999,11 @@ def create_build_manifold(support_func: Any):
             # (Process is identical to the one for shape A).
             tmp = wp.quat_rotate_inv(quaternion_b, offset_normal)
             (pt_b, feature_b) = support_func(geom_b, tmp, data_provider)
-            features_b[e] = wp.uint8(int(feature_b) + 1)
             pt_b = wp.quat_rotate(quaternion_b, pt_b) + position_b
-            b_count = add_avoid_duplicates_vec3_to_vec3(b_buffer, b_count, pt_b, EPS)
+            b_count, was_added_b = add_avoid_duplicates_vec3(b_buffer, b_count, pt_b, EPS)
+            # Only store feature ID if the point was actually added (not a duplicate)
+            if was_added_b:
+                features_b[b_count - 1] = wp.uint8(int(feature_b) + 1)
 
         # All feature ids are one based such that it is clearly visible in a uint which of the 4 slots (8 bits each) are in use
         return extract_4_point_contact_manifolds(
