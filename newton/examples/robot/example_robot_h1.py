@@ -81,6 +81,15 @@ class Example:
         builder.add_ground_plane()
 
         self.model = builder.finalize()
+
+        # Create unified collision pipeline with SAP broad phase for better performance
+        self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
+            self.model,
+            rigid_contact_max_per_pair=10,
+            rigid_contact_margin=0.01,
+            broad_phase_mode=newton.BroadPhaseMode.NXN,
+        )
+
         self.solver = newton.solvers.SolverMuJoCo(
             self.model,
             use_mujoco_contacts=False,  # Use Newton's collision pipeline instead of MuJoCo's
@@ -93,8 +102,8 @@ class Example:
         self.state_1 = self.model.state()
         self.control = self.model.control()
 
-        # Use Newton's default collision pipeline
-        self.contacts = self.model.collide(self.state_0)
+        # Initialize contacts using unified collision pipeline
+        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
 
         self.viewer.set_model(self.model)
 
@@ -115,8 +124,8 @@ class Example:
             # apply forces to the model for picking, wind, etc
             self.viewer.apply_forces(self.state_0)
 
-            # Compute contacts using Newton's default collision pipeline
-            self.contacts = self.model.collide(self.state_0)
+            # Compute contacts using unified collision pipeline
+            self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
 
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
