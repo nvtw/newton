@@ -616,7 +616,7 @@ class ViewerBase:
 
             material = wp.vec4(0.5, 0.0, 0.0, 0.0)  # roughness, metallic, checker, unused
 
-            if geo_type == newton.GeoType.MESH:
+            if geo_type in (newton.GeoType.MESH, newton.GeoType.CONVEX_HULL):
                 scale = np.asarray(geo_scale, dtype=np.float32)
 
                 if geo_src._color is not None:

@@ -850,9 +850,10 @@ class CollisionPipeline2:
         # Launch kernel across all shape pairs
         # Use fixed dimension as we don't know pair count ahead of time
         block_dim = 128
+        total_num_threads = block_dim * 32
         wp.launch(
             kernel=build_contacts_kernel_gjk_mpr,
-            dim=block_dim * 32,
+            dim=total_num_threads,
             inputs=[
                 state.body_q,
                 state.body_qd,
@@ -868,6 +869,7 @@ class CollisionPipeline2:
                 contacts.rigid_contact_max,
                 self.broad_phase_pair_count,
                 model.shape_source_ptr,
+                total_num_threads,
             ],
             outputs=[
                 contacts.rigid_contact_count,

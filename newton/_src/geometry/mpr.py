@@ -460,7 +460,7 @@ def create_solve_mpr(support_func: Any):
         Returns:
             Tuple of:
                 collision detected (bool): True if shapes are colliding
-                penetration (float): Penetration depth (negative indicates separation)
+                penetration (float): Penetration depth (negative indicates overlap)
                 contact point center (wp.vec3): Midpoint between witness points in world space
                 normal (wp.vec3): Contact normal from A to B in world space
                 feature A ID (int): Feature ID for shape A at contact point
@@ -490,7 +490,7 @@ def create_solve_mpr(support_func: Any):
         point = wp.quat_rotate(orientation_a, point) + position_a
         normal = wp.quat_rotate(orientation_a, normal)
 
-        # Convert to Newton penetration convention
+        # Convert to Newton penetration convention (negative = overlap, positive = separation)
         penetration = -penetration
 
         return collision, penetration, point, normal, feature_a_id, feature_b_id

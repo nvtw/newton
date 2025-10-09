@@ -26,6 +26,56 @@ from newton._src.geometry.support_function import GenericShapeData, SupportMapDa
 MAX_ITERATIONS = 30
 
 
+@wp.kernel
+def _gjk_kernel(
+    type_a: int,
+    size_a: wp.vec3,
+    pos_a: wp.vec3,
+    quat_a: wp.quat,
+    type_b: int,
+    size_b: wp.vec3,
+    pos_b: wp.vec3,
+    quat_b: wp.quat,
+    # Outputs:
+    collision_out: wp.array(dtype=int),
+    dist_out: wp.array(dtype=float),
+    point_out: wp.array(dtype=wp.vec3),
+    normal_out: wp.array(dtype=wp.vec3),
+):
+    """Kernel to compute GJK distance between two shapes."""
+    # Create shape data for both geometries
+    shape_a = GenericShapeData()
+    shape_a.shape_type = type_a
+    shape_a.scale = size_a
+    shape_a.auxillary = wp.vec3(0.0)
+
+    shape_b = GenericShapeData()
+    shape_b.shape_type = type_b
+    shape_b.scale = size_b
+    shape_b.auxillary = wp.vec3(0.0)
+
+    data_provider = SupportMapDataProvider()
+
+    # Call GJK solver
+    collision, distance, point, normal, _feature_a, _feature_b = wp.static(create_solve_closest_distance(support_map))(
+        shape_a,
+        shape_b,
+        quat_a,
+        quat_b,
+        pos_a,
+        pos_b,
+        0.0,  # sum_of_contact_offsets
+        data_provider,
+        MAX_ITERATIONS,
+        1e-6,  # COLLIDE_EPSILON
+    )
+
+    collision_out[0] = int(collision)
+    dist_out[0] = distance
+    point_out[0] = point
+    normal_out[0] = normal
+
+
 def _geom_dist(
     geom_type1: int,
     size1: wp.vec3,
@@ -40,61 +90,11 @@ def _geom_dist(
     Compute distance between two geometries using GJK algorithm.
 
     Returns:
-        Tuple of (distance, point, normal, collision)
+        Tuple of (distance, midpoint_contact_point, normal, collision_flag)
     """
     # Convert GeoType enums to int if needed
     type1 = int(geom_type1)
     type2 = int(geom_type2)
-
-    @wp.kernel
-    def gjk_kernel(
-        type_a: int,
-        size_a: wp.vec3,
-        pos_a: wp.vec3,
-        quat_a: wp.quat,
-        type_b: int,
-        size_b: wp.vec3,
-        pos_b: wp.vec3,
-        quat_b: wp.quat,
-        # Outputs:
-        collision_out: wp.array(dtype=int),
-        dist_out: wp.array(dtype=float),
-        point_out: wp.array(dtype=wp.vec3),
-        normal_out: wp.array(dtype=wp.vec3),
-    ):
-        # Create shape data for both geometries
-        shape_a = GenericShapeData()
-        shape_a.shape_type = type_a
-        shape_a.scale = size_a
-        shape_a.auxillary = wp.vec3(0.0)
-
-        shape_b = GenericShapeData()
-        shape_b.shape_type = type_b
-        shape_b.scale = size_b
-        shape_b.auxillary = wp.vec3(0.0)
-
-        data_provider = SupportMapDataProvider()
-
-        # Call GJK solver
-        collision, distance, point, normal, _feature_a, _feature_b = wp.static(
-            create_solve_closest_distance(support_map)
-        )(
-            shape_a,
-            shape_b,
-            quat_a,
-            quat_b,
-            pos_a,
-            pos_b,
-            0.0,  # sum_of_contact_offsets
-            data_provider,
-            MAX_ITERATIONS,
-            1e-6,  # COLLIDE_EPSILON
-        )
-
-        collision_out[0] = int(collision)
-        dist_out[0] = distance
-        point_out[0] = point
-        normal_out[0] = normal
 
     collision_out = wp.zeros(1, dtype=int)
     dist_out = wp.zeros(1, dtype=float)
@@ -102,7 +102,7 @@ def _geom_dist(
     normal_out = wp.zeros(1, dtype=wp.vec3)
 
     wp.launch(
-        gjk_kernel,
+        _gjk_kernel,
         dim=1,
         inputs=[type1, size1, pos1, quat1, type2, size2, pos2, quat2],
         outputs=[collision_out, dist_out, point_out, normal_out],

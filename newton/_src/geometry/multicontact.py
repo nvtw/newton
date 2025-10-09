@@ -95,7 +95,9 @@ def ray_plane_intersection(
 ) -> wp.vec3:
     """Compute intersection of a ray with a plane."""
     denom = wp.dot(ray_direction, plane_normal)
-    # Avoid division by zero; if denom is near zero, return origin
+    # Avoid division by zero; if denom is near zero, return origin unchanged
+    if wp.abs(denom) < 1.0e-12:
+        return ray_origin
     t = wp.dot(point_on_plane - ray_origin, plane_normal) / denom
     return ray_origin + ray_direction * t
 
@@ -903,7 +905,7 @@ def extract_4_point_contact_manifolds(
                 l = m_b[i]
                 feat = feature_id(loop_seg_ids, i, loop_count, features_a, features_b, m_a_count, m_b_count)
                 world = l[0] * cross_vector_1 + l[1] * cross_vector_2 + center
-                m_a[i] = body_projector_project(projector_a, world, -normal)
+                m_a[i] = body_projector_project(projector_a, world, normal)
                 m_b[i] = body_projector_project(projector_b, world, normal)
                 result_features[i] = feat
 
@@ -1061,7 +1063,7 @@ def create_build_manifold(support_func: Any):
     ) -> tuple[
         int,
         wp.vec4,
-        wp.types.matrix((4, 3), wp.float32),
+        Mat43f,
         wp.vec4i,
     ]:
         """
