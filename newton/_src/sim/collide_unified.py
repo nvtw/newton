@@ -189,11 +189,11 @@ def convert_infinite_plane_to_cube(
     # Size the cube based on the other object's bounding sphere radius
     # Make it large enough to always contain potential contact points
     # The lateral dimensions (x, y) should be at least 2x the radius to ensure coverage
-    lateral_size = other_radius * 2.0
+    lateral_size = other_radius * 10.0
 
     # The depth (z) should be large enough to encompass the potential collision region
     # Make it extend from above the plane surface to well below
-    depth = other_radius * 2.0
+    depth = other_radius * 10.0
 
     # Set the box half-extents
     # x, y: lateral coverage (parallel to plane)

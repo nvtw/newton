@@ -785,6 +785,7 @@ def extract_4_point_contact_manifolds(
         m_a (shape A side) and m_b (shape B side) arrays, with feature IDs in result_features.
     """
     # Early-out for simple cases: if both have <=2 or either is empty, return single anchor pair
+    # if True or m_a_count < 3 or m_b_count < 3:
     if m_a_count < 3 or m_b_count < 3:
         m_a[0] = anchor_point_a
         m_b[0] = anchor_point_b

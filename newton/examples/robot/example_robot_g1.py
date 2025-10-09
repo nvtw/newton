@@ -80,6 +80,12 @@ class Example:
         self.model = builder.finalize()
 
         # Create unified collision pipeline with SAP broad phase for better performance
+        # self.collision_pipeline = newton.CollisionPipeline.from_model(
+        #     self.model,
+        #     rigid_contact_max_per_pair=10,
+        #     rigid_contact_margin=0.01,
+        #     #broad_phase_mode=newton.BroadPhaseMode.NXN,
+        # )
         self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
             self.model,
             rigid_contact_max_per_pair=10,
@@ -99,6 +105,7 @@ class Example:
             impratio=100,
             iterations=100,
             ls_iterations=50,
+            contact_stiffness_time_const=self.sim_dt,  # Match timestep for stiff contacts
         )
 
         self.state_0 = self.model.state()

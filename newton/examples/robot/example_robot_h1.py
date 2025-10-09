@@ -47,6 +47,7 @@ class Example:
         self.num_envs = num_envs
 
         self.viewer = viewer
+        viewer._paused = True
 
         self.device = wp.get_device()
 
@@ -96,6 +97,7 @@ class Example:
             iterations=100,
             ls_iterations=50,
             njmax=100,
+            contact_stiffness_time_const=self.sim_dt,  # Match timestep for stiff contacts
         )
 
         self.state_0 = self.model.state()

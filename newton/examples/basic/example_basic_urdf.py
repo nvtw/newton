@@ -101,6 +101,7 @@ class Example:
             iterations=100,
             ls_iterations=50,
             njmax=300,
+            contact_stiffness_time_const=self.sim_dt,  # Match timestep for stiff contacts
         )
 
         self.state_0 = self.model.state()
