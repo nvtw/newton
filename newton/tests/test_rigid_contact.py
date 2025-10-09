@@ -20,7 +20,6 @@ import warp as wp
 
 import newton
 from newton._src.core import quat_between_axes
-from newton._src.sim.collide_unified import BroadPhaseMode, CollisionPipelineUnified
 from newton.tests.unittest_utils import add_function_test, assert_np_equal, get_test_devices
 
 wp.config.quiet = True
@@ -450,11 +449,11 @@ def test_shape_collisions_gjk_mpr_multicontact(test: TestRigidContact, device, v
     model = builder.finalize(device=device, build_shape_contact_pairs=False)
 
     # Create CollisionPipelineUnified with NXN broad phase mode
-    collision_pipeline = CollisionPipelineUnified.from_model(
+    collision_pipeline = newton.CollisionPipelineUnified.from_model(
         model,
         rigid_contact_max_per_pair=10,
         rigid_contact_margin=0.01,
-        broad_phase_mode=BroadPhaseMode.NXN,
+        broad_phase_mode=newton.BroadPhaseMode.NXN,
     )
 
     # Use XPBD solver

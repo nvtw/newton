@@ -161,8 +161,11 @@ class ModelBuilder:
         """The thickness of the shape."""
         is_solid: bool = True
         """Indicates whether the shape is solid or hollow. Defaults to True."""
-        collision_group: int = -1
-        """The collision group ID for the shape. Defaults to -1."""
+        collision_group: int = 1
+        """The collision group ID for the shape. Defaults to 1.
+        Positive values indicate groups that only collide with themselves (and with negative groups).
+        Negative values indicate groups that collide with everything except their negative counterpart.
+        Zero indicates no collisions."""
         collision_filter_parent: bool = True
         """Whether to inherit collision filtering from the parent. Defaults to True."""
         has_shape_collision: bool = True
@@ -4196,6 +4199,7 @@ class ModelBuilder:
                 self.shape_collision_radius, dtype=wp.float32, requires_grad=requires_grad
             )
             m.shape_group = wp.array(self.shape_group, dtype=wp.int32)
+            m.shape_collision_group = wp.array(self.shape_collision_group, dtype=wp.int32)
 
             m.shape_source = self.shape_source  # used for rendering
 
@@ -4209,7 +4213,6 @@ class ModelBuilder:
             )
 
             m.shape_collision_filter_pairs = set(self.shape_collision_filter_pairs)
-            m.shape_collision_group = self.shape_collision_group
 
             # ---------------------
             # springs

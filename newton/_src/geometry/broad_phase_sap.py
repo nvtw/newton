@@ -361,10 +361,10 @@ class BroadPhaseSAP:
             geom_lower: Array of lower bounds for each geometry's AABB
             geom_upper: Array of upper bounds for each geometry's AABB
             geom_cutoffs: Array of cutoff distances for each geometry
-            geom_collision_groups: Array of collision group IDs for each geometry. Positive values indicate
+            geom_collision_group: Array of collision group IDs for each geometry. Positive values indicate
                 groups that only collide with themselves (and with negative groups). Negative values indicate
                 groups that collide with everything except their negative counterpart. Zero indicates no collisions.
-            geom_shape_groups: Array of environment group IDs for each geometry. Group -1 indicates global entities
+            geom_shape_group: Array of environment group IDs for each geometry. Group -1 indicates global entities
                 that collide with all environments. Groups 0, 1, 2, ... indicate environment-specific entities.
                 Can be None if environment groups are not used.
             geom_count: Number of active bounding boxes to check
@@ -396,7 +396,7 @@ class BroadPhaseSAP:
             kernel=_flag_group_id_kernel,
             dim=geom_count,
             inputs=[
-                geom_collision_group,
+                geom_shape_group,
                 self.sap_cumulative_sum,
                 self.negative_group_counter,
                 self.negative_group_indices,
@@ -423,7 +423,7 @@ class BroadPhaseSAP:
                 geom_lower,
                 geom_upper,
                 geom_cutoffs,
-                geom_collision_group,
+                geom_shape_group,
                 self.unique_group_id_counter,
                 self.unique_group_ids,
                 self.negative_group_counter,
