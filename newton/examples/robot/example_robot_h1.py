@@ -81,11 +81,19 @@ class Example:
         builder.add_ground_plane()
 
         self.model = builder.finalize()
-        self.solver = newton.solvers.SolverMuJoCo(self.model, iterations=100, ls_iterations=50, njmax=100)
+        self.solver = newton.solvers.SolverMuJoCo(
+            self.model,
+            use_mujoco_contacts=False,  # Use Newton's collision pipeline instead of MuJoCo's
+            iterations=100,
+            ls_iterations=50,
+            njmax=100,
+        )
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
+
+        # Use Newton's default collision pipeline
         self.contacts = self.model.collide(self.state_0)
 
         self.viewer.set_model(self.model)
@@ -101,12 +109,14 @@ class Example:
             self.graph = None
 
     def simulate(self):
-        self.contacts = self.model.collide(self.state_0)
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
 
             # apply forces to the model for picking, wind, etc
             self.viewer.apply_forces(self.state_0)
+
+            # Compute contacts using Newton's default collision pipeline
+            self.contacts = self.model.collide(self.state_0)
 
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
