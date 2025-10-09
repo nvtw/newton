@@ -17,7 +17,7 @@ from . import ik
 from .articulation import eval_fk, eval_ik
 from .builder import ModelBuilder
 from .collide import CollisionPipeline, count_rigid_contact_points
-from .collide2 import BroadPhaseMode
+from .collide_unified import BroadPhaseMode
 from .contacts import Contacts
 from .control import Control
 from .graph_coloring import color_graph, plot_graph

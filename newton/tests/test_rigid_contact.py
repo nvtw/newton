@@ -20,7 +20,7 @@ import warp as wp
 
 import newton
 from newton._src.core import quat_between_axes
-from newton._src.sim.collide2 import BroadPhaseMode, CollisionPipeline2
+from newton._src.sim.collide_unified import BroadPhaseMode, CollisionPipelineUnified
 from newton.tests.unittest_utils import add_function_test, assert_np_equal, get_test_devices
 
 wp.config.quiet = True
@@ -446,11 +446,11 @@ def test_shape_collisions_gjk_mpr_multicontact(test: TestRigidContact, device, v
     # Add ground plane
     builder.add_ground_plane()
 
-    # Finalize model without pre-computed shape pairs (for CollisionPipeline2)
+    # Finalize model without pre-computed shape pairs (for CollisionPipelineUnified)
     model = builder.finalize(device=device, build_shape_contact_pairs=False)
 
-    # Create CollisionPipeline2 with NXN broad phase mode
-    collision_pipeline = CollisionPipeline2.from_model(
+    # Create CollisionPipelineUnified with NXN broad phase mode
+    collision_pipeline = CollisionPipelineUnified.from_model(
         model,
         rigid_contact_max_per_pair=10,
         rigid_contact_margin=0.01,
@@ -474,7 +474,7 @@ def test_shape_collisions_gjk_mpr_multicontact(test: TestRigidContact, device, v
     for _frame in range(max_frames):
         for _ in range(substeps):
             state_0.clear_forces()
-            # Use collide2 pipeline (CollisionPipeline2)
+            # Use unified collision pipeline (CollisionPipelineUnified)
             contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
             solver.step(state_0, state_1, control, contacts, sim_dt / substeps)
             state_0, state_1 = state_1, state_0
