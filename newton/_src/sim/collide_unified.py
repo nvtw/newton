@@ -489,24 +489,35 @@ def postprocess_axial_shape_discrete_contacts(
     projection_plane_normal = wp.normalize(wp.cross(shape_axis, normal))
     point_on_projection_plane = shape_pos
 
-    # Create new output arrays
-    new_points = _mat53f()
-    new_signed_distances = _vec5()
+    # Project points onto the projection plane and remove duplicates in one pass
+    # This avoids creating intermediate arrays and saves registers
+    tolerance = shape_radius * 0.01  # 1% of radius for duplicate detection
+    output_count = int(0)
+    first_point = wp.vec3(0.0, 0.0, 0.0)
 
-    # Simply project all contact points onto the projection plane
     for i in range(count):
         # Project contact point onto projection plane
-        new_points[i] = project_point_onto_plane(points[i], point_on_projection_plane, projection_plane_normal)
-        # Keep original signed distances
-        new_signed_distances[i] = signed_distances[i]
+        projected_point = project_point_onto_plane(points[i], point_on_projection_plane, projection_plane_normal)
+        is_duplicate = False
 
-    # Remove duplicate contacts (check neighbors cyclically)
-    tolerance = shape_radius * 0.01  # 1% of radius for duplicate detection
-    final_count, final_signed_distances, final_points = remove_duplicate_contacts(
-        new_points, new_signed_distances, count, tolerance
-    )
+        if output_count > 0:
+            # Check against previous output point
+            if wp.length(projected_point - points[output_count - 1]) < tolerance:
+                is_duplicate = True
 
-    return final_count, final_signed_distances, final_points
+        if not is_duplicate and i > 0 and i == count - 1 and output_count > 0:
+            # Last point: check against first point (cyclic)
+            if wp.length(projected_point - first_point) < tolerance:
+                is_duplicate = True
+
+        if not is_duplicate:
+            points[output_count] = projected_point
+            signed_distances[output_count] = signed_distances[i]
+            if output_count == 0:
+                first_point = projected_point
+            output_count += 1
+
+    return output_count, signed_distances, points
 
 
 @wp.kernel(enable_backward=False)
