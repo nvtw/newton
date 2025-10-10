@@ -26,18 +26,18 @@
 Minkowski Portal Refinement (MPR) collision detection algorithm.
 
 This module implements the MPR algorithm for detecting collisions between convex shapes
-and computing penetration depth and contact information. MPR is an alternative to the
+and computing signed distance and contact information. MPR is an alternative to the
 GJK+EPA approach that can be more efficient for penetrating contacts.
 
 The algorithm works by:
 1. Constructing an initial portal (triangle) in Minkowski space that contains the origin
 2. Iteratively refining the portal by moving it closer to the origin
-3. Computing penetration depth and contact points once the origin is enclosed
+3. Computing signed distance and contact points once the origin is enclosed
 
 Key features:
 - Works directly with penetrating contacts (no need for EPA as a separate step)
 - More numerically stable than EPA for deep penetrations
-- Returns collision normal, penetration depth, and witness points
+- Returns collision normal, signed distance, and witness points
 - Supports feature ID tracking for contact persistence
 
 The implementation uses support mapping to query shape geometry, making it applicable
@@ -460,7 +460,7 @@ def create_solve_mpr(support_func: Any):
         Returns:
             Tuple of:
                 collision detected (bool): True if shapes are colliding
-                penetration (float): Penetration depth (negative indicates overlap)
+                signed_distance (float): Signed distance (negative indicates overlap)
                 contact point center (wp.vec3): Midpoint between witness points in world space
                 normal (wp.vec3): Contact normal from A to B in world space
                 feature A ID (int): Feature ID for shape A at contact point
@@ -490,9 +490,9 @@ def create_solve_mpr(support_func: Any):
         point = wp.quat_rotate(orientation_a, point) + position_a
         normal = wp.quat_rotate(orientation_a, normal)
 
-        # Convert to Newton penetration convention (negative = overlap, positive = separation)
-        penetration = -penetration
+        # Convert to Newton signed distance convention (negative = overlap, positive = separation)
+        signed_distance = -penetration
 
-        return collision, penetration, point, normal, feature_a_id, feature_b_id
+        return collision, signed_distance, point, normal, feature_a_id, feature_b_id
 
     return solve_mpr

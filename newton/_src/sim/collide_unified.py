@@ -431,17 +431,6 @@ def build_contacts_kernel_gjk_mpr(
         radius_eff_a = float(0.0)
         radius_eff_b = float(0.0)
 
-        num_scan_directions = 6
-        if (
-            type_a == int(GeoType.CAPSULE)
-            or type_b == int(GeoType.CAPSULE)
-            or type_a == int(GeoType.CYLINDER)
-            or type_b == int(GeoType.CYLINDER)
-            or type_a == int(GeoType.CONE)
-            or type_b == int(GeoType.CONE)
-        ):
-            num_scan_directions = 4
-
         small_radius = 0.0001
 
         # Special treatment for minkowski objects
@@ -453,7 +442,7 @@ def build_contacts_kernel_gjk_mpr(
             radius_eff_b = geom_b.scale[0]
             geom_b.scale[0] = small_radius
 
-        count, normal, penetrations, points, _features = wp.static(solve_convex_multi_contact)(
+        count, normal, signed_distances, points, _features = wp.static(solve_convex_multi_contact)(
             geom_a,
             geom_b,
             rot_a,
@@ -464,24 +453,23 @@ def build_contacts_kernel_gjk_mpr(
             data_provider,
             rigid_contact_margin + radius_eff_a + radius_eff_b,
             type_a == int(GeoType.SPHERE) or type_b == int(GeoType.SPHERE),
-            num_scan_directions,
         )
 
         # Special post processing for minkowski objects
         if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
             for i in range(count):
                 points[i] = points[i] + normal * (radius_eff_a * 0.5)
-                penetrations[i] -= radius_eff_a - small_radius
+                signed_distances[i] -= radius_eff_a - small_radius
         if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
             for i in range(count):
                 points[i] = points[i] - normal * (radius_eff_b * 0.5)
-                penetrations[i] -= radius_eff_b - small_radius
+                signed_distances[i] -= radius_eff_b - small_radius
 
         for id in range(count):
             write_contact(
                 points[id],
                 normal,
-                penetrations[id],
+                signed_distances[id],
                 radius_eff_a,
                 radius_eff_b,
                 shape_thickness[shape_a],

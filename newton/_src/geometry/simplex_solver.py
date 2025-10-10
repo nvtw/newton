@@ -34,7 +34,7 @@ The algorithm works by:
 
 Key features:
 - Distance computation between separated shapes
-- Collision detection when shapes overlap (returns penetration = 0)
+- Collision detection when shapes overlap (returns signed_distance = 0)
 - Feature ID tracking for contact persistence
 - Barycentric coordinate computation for witness points
 - Numerically stable simplex reduction using Johnson's distance subalgorithm

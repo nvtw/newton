@@ -474,6 +474,11 @@ def approx_max_quadrilateral_area_with_calipers(hull: wp.array(dtype=wp.vec3), h
     diff = wp.vec3(hp1[0] - hp3[0], hp1[1] - hp3[1], hp1[2] - hp3[2])
     max_dist_sq = diff[0] * diff[0] + diff[1] * diff[1] + diff[2] * diff[2]
 
+    # Relative epsilon for tie-breaking: only update if new value is at least (1 + epsilon) times better
+    # This is scale-invariant and avoids catastrophic cancellation in floating-point comparisons
+    # Important for objects with circular geometry to ensure consistent point selection
+    tie_epsilon_rel = 1.0e-5
+
     # Start with point j opposite point i=0
     j = int(1)
     for i in range(n):
@@ -500,7 +505,8 @@ def approx_max_quadrilateral_area_with_calipers(hull: wp.array(dtype=wp.vec3), h
         hj = hull[j]
         d1 = wp.vec3(hi[0] - hj[0], hi[1] - hj[1], hi[2] - hj[2])
         dist_sq_1 = d1[0] * d1[0] + d1[1] * d1[1] + d1[2] * d1[2]
-        if dist_sq_1 > max_dist_sq:
+        # Use relative tie-breaking: only update if new distance is meaningfully larger
+        if dist_sq_1 > max_dist_sq * (1.0 + tie_epsilon_rel):
             max_dist_sq = dist_sq_1
             p1 = i
             p3 = j
@@ -509,7 +515,8 @@ def approx_max_quadrilateral_area_with_calipers(hull: wp.array(dtype=wp.vec3), h
         hip1 = hull[(i + 1) % n]
         d2 = wp.vec3(hip1[0] - hj[0], hip1[1] - hj[1], hip1[2] - hj[2])
         dist_sq_2 = d2[0] * d2[0] + d2[1] * d2[1] + d2[2] * d2[2]
-        if dist_sq_2 > max_dist_sq:
+        # Use relative tie-breaking: only update if new distance is meaningfully larger
+        if dist_sq_2 > max_dist_sq * (1.0 + tie_epsilon_rel):
             max_dist_sq = dist_sq_2
             p1 = (i + 1) % n
             p3 = j
@@ -528,10 +535,11 @@ def approx_max_quadrilateral_area_with_calipers(hull: wp.array(dtype=wp.vec3), h
         hull_i_xy = wp.vec2(hull[i][0], hull[i][1])
         area = signed_area(hull_p1_xy, hull_p3_xy, hull_i_xy)
 
-        if area > max_area_1:
+        # Use relative tie-breaking: only update if new area is meaningfully larger
+        if area > max_area_1 * (1.0 + tie_epsilon_rel):
             max_area_1 = area
             p2 = i
-        elif -area > max_area_2:  # Check the other side
+        elif -area > max_area_2 * (1.0 + tie_epsilon_rel):  # Check the other side
             max_area_2 = -area
             p4 = i
 
@@ -794,7 +802,7 @@ def extract_4_point_contact_manifolds(
         m_a[0] = anchor_point_a
         m_b[0] = anchor_point_b
         result_features[0] = wp.uint32(0)
-        return 1, 0.0
+        return 1, 1.0
 
     # Projectors for back-projection
     projector_a = make_body_projector_from_vec3(m_a, m_a_count, anchor_point_a)
@@ -927,7 +935,6 @@ def create_build_manifold(support_func: Any):
         feature_anchor_a: wp.int32,
         feature_anchor_b: wp.int32,
         data_provider: Any,
-        num_scan_directions: int = 6,
     ) -> tuple[int, float]:
         """
         Core implementation of multi-contact manifold generation using perturbed support mapping.
@@ -960,15 +967,13 @@ def create_build_manifold(support_func: Any):
             feature_anchor_a: Feature ID of anchor point on shape A.
             feature_anchor_b: Feature ID of anchor point on shape B.
             data_provider: Support mapping data provider.
-            num_scan_directions: Number of scan directions for perturbed support mapping (default: 6).
 
         Returns:
             Tuple of (num_contacts, normal_dot) where num_contacts is the number of valid contact
             points generated (0-4) and normal_dot is the absolute dot product of polygon normals.
         """
 
-        num_scan_directions = wp.min(num_scan_directions, 6)
-        ROT_DELTA_ANGLE = 2.0 * wp.pi / float(num_scan_directions)
+        ROT_DELTA_ANGLE = wp.static(2.0 * wp.pi / float(6))
 
         # Reset all counters for a new calculation.
         a_count = int(0)
@@ -982,7 +987,7 @@ def create_build_manifold(support_func: Any):
 
         # --- Step 1: Find Contact Polygons using Perturbed Support Mapping ---
         # Loop 6 times to find up to 6 vertices for each shape's contact polygon.
-        for e in range(num_scan_directions):
+        for e in range(6):
             # Create a perturbed normal direction. This is the main collision normal slightly
             # altered by a vector on the contact plane, defined by the hexagonal vertices.
             angle = float(e) * ROT_DELTA_ANGLE
@@ -1053,7 +1058,6 @@ def create_build_manifold(support_func: Any):
         feature_anchor_a: wp.int32,
         feature_anchor_b: wp.int32,
         data_provider: Any,
-        num_scan_directions: int = 6,
     ) -> tuple[
         int,
         vec5,
@@ -1086,11 +1090,10 @@ def create_build_manifold(support_func: Any):
             feature_anchor_a: Feature ID of the anchor point on shape A. Can pass in 0 if anchor tracking is not needed.
             feature_anchor_b: Feature ID of the anchor point on shape B. Can pass in 0 if anchor tracking is not needed.
             data_provider: Support mapping data provider for shape queries.
-            num_scan_directions: Number of scan directions for perturbed support mapping (default: 6).
         Returns:
             A tuple containing:
             - int: Number of valid contact points in the manifold (0-5).
-            - vec5: Penetration depths for each contact point (negative when shapes overlap).
+            - vec5: Signed distances for each contact point (negative when shapes overlap).
             - Mat53f: Contact points at the center of the manifold contact
               (midpoint between points on shape A and shape B) in world space.
             - vec5i: Feature IDs for each contact point, enabling contact tracking across
@@ -1123,13 +1126,12 @@ def create_build_manifold(support_func: Any):
             feature_anchor_a,
             feature_anchor_b,
             data_provider,
-            num_scan_directions,
         )
 
         # Extract results into fixed-size matrices
         contact_points = Mat53f()
         feature_ids = vec5i(0, 0, 0, 0, 0)
-        penetrations = vec5(0.0, 0.0, 0.0, 0.0, 0.0)
+        signed_distances = vec5(0.0, 0.0, 0.0, 0.0, 0.0)
 
         # Copy contact points and extract feature IDs
         count_out = min(num_manifold_points, 4)
@@ -1140,7 +1142,7 @@ def create_build_manifold(support_func: Any):
             contact_points[i] = 0.5 * (contact_point_a + contact_point_b)
 
             feature_ids[i] = int(result_features[i])
-            penetrations[i] = wp.dot(contact_point_b - contact_point_a, normal)
+            signed_distances[i] = wp.dot(contact_point_b - contact_point_a, normal)
 
         # Check if we should include the deepest contact point
         if count_out < 5 and count_out > 1:
@@ -1149,10 +1151,10 @@ def create_build_manifold(support_func: Any):
             if should_include_deepest_contact(normal_dot):
                 deepest_contact_center = 0.5 * (p_a + p_b)
                 contact_points[count_out] = deepest_contact_center
-                penetrations[count_out] = wp.dot(p_b - p_a, normal)
+                signed_distances[count_out] = wp.dot(p_b - p_a, normal)
                 feature_ids[count_out] = 0  # Use 0 for the deepest contact feature ID
                 count_out += 1
 
-        return count_out, penetrations, contact_points, feature_ids
+        return count_out, signed_distances, contact_points, feature_ids
 
     return build_manifold
