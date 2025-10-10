@@ -73,6 +73,7 @@ def create_solve_convex_multi_contact(support_func: Any):
         data_provider: Any,
         contact_threshold: float = 0.0,
         skip_multi_contact: bool = False,
+        num_scan_directions: int = 6,
     ) -> tuple[
         int,
         wp.vec3,
@@ -99,7 +100,7 @@ def create_solve_convex_multi_contact(support_func: Any):
             data_provider: Support mapping data provider
             contact_threshold: Penetration threshold; skip manifold if penetration > threshold (default: 0.0)
             skip_multi_contact: If True, return only single contact point (default: False)
-
+            num_scan_directions: Number of scan directions for perturbed support mapping (default: 6)
         Returns:
             Tuple of:
                 count (int): Number of valid contact points (0-4)
@@ -161,6 +162,7 @@ def create_solve_convex_multi_contact(support_func: Any):
             feature_a_id,
             feature_b_id,
             data_provider,
+            num_scan_directions,
         )
 
         return count, normal, penetrations, points, features

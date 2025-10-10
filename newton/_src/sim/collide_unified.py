@@ -431,6 +431,17 @@ def build_contacts_kernel_gjk_mpr(
         radius_eff_a = float(0.0)
         radius_eff_b = float(0.0)
 
+        num_scan_directions = 6
+        if (
+            type_a == int(GeoType.CAPSULE)
+            or type_b == int(GeoType.CAPSULE)
+            or type_a == int(GeoType.CYLINDER)
+            or type_b == int(GeoType.CYLINDER)
+            or type_a == int(GeoType.CONE)
+            or type_b == int(GeoType.CONE)
+        ):
+            num_scan_directions = 4
+
         small_radius = 0.0001
 
         # Special treatment for minkowski objects
@@ -453,6 +464,7 @@ def build_contacts_kernel_gjk_mpr(
             data_provider,
             rigid_contact_margin + radius_eff_a + radius_eff_b,
             type_a == int(GeoType.SPHERE) or type_b == int(GeoType.SPHERE),
+            num_scan_directions,
         )
 
         # Special post processing for minkowski objects
@@ -819,8 +831,8 @@ class CollisionPipelineUnified:
             device=model.device,
         )
 
-        #debug_a = model.shape_collision_group.numpy()
-        #debug_b = model.shape_group.numpy()
+        # debug_a = model.shape_collision_group.numpy()
+        # debug_b = model.shape_group.numpy()
 
         # Run appropriate broad phase
         if self.broad_phase_mode == BroadPhaseMode.NXN:
@@ -850,16 +862,16 @@ class CollisionPipelineUnified:
                 device=model.device,
             )
 
-        #debug_c = self.broad_phase_shape_pairs.numpy()
-        #debug_d = self.broad_phase_pair_count.numpy()
+        # debug_c = self.broad_phase_shape_pairs.numpy()
+        # debug_d = self.broad_phase_pair_count.numpy()
 
         # # Get the number of pairs
         # num_pairs = debug_d[0]
-        
+
         # # Create array to store pairs containing last shape
         # last_shape_idx = model.shape_count - 1
         # last_shape_pairs = []
-        
+
         # # Go through all pairs looking for last shape index
         # for i in range(num_pairs):
         #     pair = debug_c[i]

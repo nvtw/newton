@@ -34,13 +34,21 @@ from .kernels import build_orthonormal_basis
 
 # Constants
 EPS = 0.00001
-ROT_DELTA_ANGLE = wp.static(60.0 * wp.pi / 180.0)
 # The tilt angle defines how much the search direction gets tilted while searching for
 # points on the contact manifold.
 TILT_ANGLE_RAD = wp.static(2.0 * wp.pi / 180.0)
 SIN_TILT_ANGLE = wp.static(wp.sin(TILT_ANGLE_RAD))
 COS_TILT_ANGLE = wp.static(wp.cos(TILT_ANGLE_RAD))
 
+COS_DEEPEST_CONTACT_THRESHOLD_ANGLE = wp.static(wp.cos(0.1 * wp.pi / 180.0))
+
+@wp.func
+def should_include_deepest_contact(dir_a: wp.vec3, dir_b: wp.vec3) -> bool:
+    dot = wp.dot(dir_a, dir_b)
+    if dot < 0.0:
+        dot = -dot
+
+    return dot > COS_DEEPEST_CONTACT_THRESHOLD_ANGLE
 
 @wp.func
 def excess_normal_deviation(dir_a: wp.vec3, dir_b: wp.vec3) -> bool:
@@ -921,6 +929,7 @@ def create_build_manifold(support_func: Any):
         feature_anchor_a: wp.int32,
         feature_anchor_b: wp.int32,
         data_provider: Any,
+        num_scan_directions: int = 6,
     ) -> int:
         """
         Core implementation of multi-contact manifold generation using perturbed support mapping.
@@ -953,14 +962,18 @@ def create_build_manifold(support_func: Any):
             feature_anchor_a: Feature ID of anchor point on shape A.
             feature_anchor_b: Feature ID of anchor point on shape B.
             data_provider: Support mapping data provider.
+            num_scan_directions: Number of scan directions for perturbed support mapping (default: 6).
 
         Returns:
             Number of valid contact points generated (0-4).
         """
 
+        num_scan_directions = wp.min(num_scan_directions, 6)
+        ROT_DELTA_ANGLE = 2.0 * wp.pi / float(num_scan_directions)
+
         # Reset all counters for a new calculation.
-        a_count = 0
-        b_count = 0
+        a_count = int(0)
+        b_count = int(0)
 
         # Create an orthonormal basis from the collision normal.
         tangent_a, tangent_b = build_orthonormal_basis(normal)
@@ -970,7 +983,7 @@ def create_build_manifold(support_func: Any):
 
         # --- Step 1: Find Contact Polygons using Perturbed Support Mapping ---
         # Loop 6 times to find up to 6 vertices for each shape's contact polygon.
-        for e in range(6):
+        for e in range(num_scan_directions):
             # Create a perturbed normal direction. This is the main collision normal slightly
             # altered by a vector on the contact plane, defined by the hexagonal vertices.
             angle = float(e) * ROT_DELTA_ANGLE
@@ -1023,6 +1036,8 @@ def create_build_manifold(support_func: Any):
         )
 
     Mat43f = wp.types.matrix(shape=(4, 3), dtype=wp.float32)
+    Mat53f = wp.types.matrix(shape=(5, 3), dtype=wp.float32)
+    vec5i = wp.types.vector(5, wp.int32)
 
     @wp.func
     def build_manifold(
@@ -1038,6 +1053,7 @@ def create_build_manifold(support_func: Any):
         feature_anchor_a: wp.int32,
         feature_anchor_b: wp.int32,
         data_provider: Any,
+        num_scan_directions: int = 6,
     ) -> tuple[
         int,
         wp.vec4,
@@ -1069,7 +1085,7 @@ def create_build_manifold(support_func: Any):
             feature_anchor_a: Feature ID of the anchor point on shape A. Can pass in 0 if anchor tracking is not needed.
             feature_anchor_b: Feature ID of the anchor point on shape B. Can pass in 0 if anchor tracking is not needed.
             data_provider: Support mapping data provider for shape queries.
-
+            num_scan_directions: Number of scan directions for perturbed support mapping (default: 6).
         Returns:
             A tuple containing:
             - int: Number of valid contact points in the manifold (0-4).
@@ -1106,6 +1122,7 @@ def create_build_manifold(support_func: Any):
             feature_anchor_a,
             feature_anchor_b,
             data_provider,
+            num_scan_directions
         )
 
         # Extract results into fixed-size matrices

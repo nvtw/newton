@@ -396,7 +396,7 @@ class BroadPhaseSAP:
             kernel=_flag_group_id_kernel,
             dim=geom_count,
             inputs=[
-                geom_shape_group,
+                geom_collision_group,
                 self.sap_cumulative_sum,
                 self.negative_group_counter,
                 self.negative_group_indices,
@@ -423,7 +423,7 @@ class BroadPhaseSAP:
                 geom_lower,
                 geom_upper,
                 geom_cutoffs,
-                geom_shape_group,
+                geom_collision_group,
                 self.unique_group_id_counter,
                 self.unique_group_ids,
                 self.negative_group_counter,

@@ -33,7 +33,8 @@ import newton.utils
 # ==================
 # Enable CUDA graph capture for better performance (CUDA devices only)
 USE_CUDA_GRAPH = True  # Set to False to disable CUDA graph capture
-
+# wp.config.mode = "debug"
+# wp.config.verify_cuda = True
 
 class Example:
     def __init__(self, viewer, num_envs=4):
@@ -84,13 +85,12 @@ class Example:
         #     self.model,
         #     rigid_contact_max_per_pair=10,
         #     rigid_contact_margin=0.01,
-        #     #broad_phase_mode=newton.BroadPhaseMode.NXN,
         # )
         self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
             self.model,
             rigid_contact_max_per_pair=10,
             rigid_contact_margin=0.01,
-            broad_phase_mode=newton.BroadPhaseMode.NXN,
+            broad_phase_mode=newton.BroadPhaseMode.SAP,
         )
 
         self.solver = newton.solvers.SolverMuJoCo(
