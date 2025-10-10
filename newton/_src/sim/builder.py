@@ -4121,7 +4121,7 @@ class ModelBuilder:
             device: The simulation device to use (e.g., 'cpu', 'cuda'). If None, uses the current Warp device.
             requires_grad: If True, enables gradient computation for the model (for differentiable simulation).
             build_shape_contact_pairs: If True, builds static shape contact pairs for collision detection.
-                Set to False when using dynamic broad phase (BroadPhaseMode.NXN or SAP) to skip this expensive computation.
+                Set to False when using dynamic broad phase (BroadPhaseMode.NXN, SAP, or EXPLICIT with custom pairs) to skip this expensive computation.
 
         Returns:
             Model: A fully constructed Model object containing all simulation data on the specified device.

@@ -231,6 +231,7 @@ class BroadPhaseExplicit:
         # Outputs
         candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),  # Array to store overlapping geometry pairs
         num_candidate_pair: wp.array(dtype=int, ndim=1),
+        device=None,  # Device to launch on
     ):
         """Launch the explicit pairs broad phase collision detection.
 
@@ -246,6 +247,7 @@ class BroadPhaseExplicit:
             geom_pair_count: Number of geometry pairs to check
             candidate_pair: Output array to store overlapping geometry pairs
             num_candidate_pair: Output array to store number of overlapping pairs found
+            device: Device to launch on. If None, uses the device of the input arrays.
 
         The method will populate candidate_pair with the indices of geometry pairs whose AABBs overlap
         when expanded by their cutoff distances, but only checking the explicitly provided pairs.
@@ -267,4 +269,5 @@ class BroadPhaseExplicit:
                 num_candidate_pair,
                 max_candidate_pair,
             ],
+            device=device,
         )

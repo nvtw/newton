@@ -21,7 +21,7 @@ from enum import IntEnum
 import warp as wp
 
 from ..core.types import Devicelike
-from ..geometry.broad_phase_nxn import BroadPhaseAllPairs
+from ..geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from ..geometry.broad_phase_sap import BroadPhaseSAP
 from ..geometry.collision_convex import create_solve_convex_multi_contact
 from ..geometry.support_function import (
@@ -45,10 +45,12 @@ class BroadPhaseMode(IntEnum):
     Attributes:
         NXN: All-pairs broad phase with AABB checks (simple, O(N²) but good for small scenes)
         SAP: Sweep and Prune broad phase with AABB sorting (faster for larger scenes, O(N log N))
+        EXPLICIT: Use precomputed shape pairs (most efficient when pairs are known ahead of time)
     """
 
     NXN = 0
     SAP = 1
+    EXPLICIT = 2
 
 
 # Pre-create the convex multi-contact solver (usable inside kernels)
@@ -633,7 +635,8 @@ class CollisionPipelineUnified:
         Args:
             shape_count (int): Number of shapes in the simulation.
             particle_count (int): Number of particles in the simulation.
-            shape_pairs_filtered (wp.array | None, optional): Deprecated, no longer used.
+            shape_pairs_filtered (wp.array | None, optional): Precomputed shape pairs for EXPLICIT broad phase mode.
+                Required when broad_phase_mode is BroadPhaseMode.EXPLICIT, ignored otherwise.
             rigid_contact_max (int | None, optional): Maximum number of rigid contacts to allocate.
                 If None, computed as shape_pairs_max * rigid_contact_max_per_pair.
             rigid_contact_max_per_pair (int, optional): Maximum number of contact points per shape pair. Defaults to 10.
@@ -648,6 +651,7 @@ class CollisionPipelineUnified:
             broad_phase_mode (BroadPhaseMode, optional): Broad phase mode for collision detection.
                 - BroadPhaseMode.NXN: Use all-pairs AABB broad phase (O(N²), good for small scenes)
                 - BroadPhaseMode.SAP: Use sweep-and-prune AABB broad phase (O(N log N), better for larger scenes)
+                - BroadPhaseMode.EXPLICIT: Use precomputed shape pairs (most efficient when pairs known)
                 Defaults to BroadPhaseMode.NXN.
         """
         # will be allocated during collide
@@ -669,7 +673,9 @@ class CollisionPipelineUnified:
         if self.broad_phase_mode == BroadPhaseMode.NXN:
             self.nxn_broadphase = BroadPhaseAllPairs()
             self.sap_broadphase = None
-        else:  # BroadPhaseMode.SAP
+            self.explicit_broadphase = None
+            self.shape_pairs_filtered = None
+        elif self.broad_phase_mode == BroadPhaseMode.SAP:
             # Estimate max groups for SAP - use reasonable defaults
             max_num_negative_group_members = max(int(shape_count**0.5), 10)
             max_num_distinct_positive_groups = max(int(shape_count**0.5), 10)
@@ -679,6 +685,17 @@ class CollisionPipelineUnified:
                 max_num_negative_group_members=max_num_negative_group_members,
             )
             self.nxn_broadphase = None
+            self.explicit_broadphase = None
+            self.shape_pairs_filtered = None
+        else:  # BroadPhaseMode.EXPLICIT
+            if shape_pairs_filtered is None:
+                raise ValueError("shape_pairs_filtered must be provided when using BroadPhaseMode.EXPLICIT")
+            self.explicit_broadphase = BroadPhaseExplicit()
+            self.nxn_broadphase = None
+            self.sap_broadphase = None
+            self.shape_pairs_filtered = shape_pairs_filtered
+            # Update shape_pairs_max to reflect actual precomputed pairs
+            self.shape_pairs_max = len(shape_pairs_filtered)
 
         # Allocate buffers for broadphase collision handling
         with wp.ScopedDevice(device):
@@ -720,6 +737,7 @@ class CollisionPipelineUnified:
         iterate_mesh_vertices: bool = True,
         requires_grad: bool | None = None,
         broad_phase_mode: BroadPhaseMode = BroadPhaseMode.NXN,
+        shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
     ) -> CollisionPipelineUnified:
         """
         Create a CollisionPipelineUnified instance from a Model.
@@ -735,6 +753,8 @@ class CollisionPipelineUnified:
             iterate_mesh_vertices (bool, optional): Whether to iterate mesh vertices for collision. Defaults to True.
             requires_grad (bool | None, optional): Whether to enable gradient computation. If None, uses model.requires_grad.
             broad_phase_mode (BroadPhaseMode, optional): Broad phase collision detection mode. Defaults to BroadPhaseMode.NXN.
+            shape_pairs_filtered (wp.array | None, optional): Precomputed shape pairs for EXPLICIT mode.
+                Required when broad_phase_mode is BroadPhaseMode.EXPLICIT. For NXN/SAP modes, can use model.shape_contact_pairs if available.
 
         Returns:
             CollisionPipeline: The constructed collision pipeline.
@@ -745,8 +765,16 @@ class CollisionPipelineUnified:
             rigid_contact_max_per_pair = 0
         if requires_grad is None:
             requires_grad = model.requires_grad
-        # shape_pairs_filtered is deprecated (no longer used)
-        shape_pairs_filtered = None
+
+        # For EXPLICIT mode, use provided shape_pairs_filtered or fall back to model pairs
+        # For NXN/SAP modes, shape_pairs_filtered is not used (but can be provided for EXPLICIT)
+        if shape_pairs_filtered is None and broad_phase_mode == BroadPhaseMode.EXPLICIT:
+            # Try to use model.shape_contact_pairs if available
+            if hasattr(model, "shape_contact_pairs") and model.shape_contact_pairs is not None:
+                shape_pairs_filtered = model.shape_contact_pairs
+            else:
+                # Will raise error in __init__ if EXPLICIT mode requires it
+                shape_pairs_filtered = None
 
         return CollisionPipelineUnified(
             model.shape_count,
@@ -835,7 +863,7 @@ class CollisionPipelineUnified:
                 self.broad_phase_pair_count,
                 device=model.device,
             )
-        else:  # BroadPhaseMode.SAP
+        elif self.broad_phase_mode == BroadPhaseMode.SAP:
             # Use sweep-and-prune broad phase with AABB sorting
             self.sap_broadphase.launch(
                 self.shape_aabb_lower,
@@ -844,6 +872,18 @@ class CollisionPipelineUnified:
                 model.shape_collision_group,  # Collision groups for filtering
                 model.shape_group,  # Environment groups for filtering
                 model.shape_count,
+                self.broad_phase_shape_pairs,
+                self.broad_phase_pair_count,
+                device=model.device,
+            )
+        else:  # BroadPhaseMode.EXPLICIT
+            # Use explicit precomputed pairs broad phase with AABB filtering
+            self.explicit_broadphase.launch(
+                self.shape_aabb_lower,
+                self.shape_aabb_upper,
+                model.shape_thickness,  # Use thickness as cutoff
+                self.shape_pairs_filtered,
+                len(self.shape_pairs_filtered),
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
                 device=model.device,
