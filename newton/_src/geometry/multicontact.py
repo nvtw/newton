@@ -902,10 +902,7 @@ def extract_4_point_contact_manifolds(
         result_features[0] = wp.uint32(0)
         return 1, 1.0
 
-    # Projectors for back-projection
-    # projector_a = make_body_projector_from_polygon(m_a, m_a_count, anchor_point_a)
-    # projector_b = make_body_projector_from_polygon(m_b, m_b_count, anchor_point_b)
-
+    # Projectors for back-projection onto the shape surfaces
     projector_a, projector_b = create_body_projectors(m_a, m_a_count, anchor_point_a, m_b, m_b_count, anchor_point_b)
 
     if excess_normal_deviation(normal, projector_a.normal) or excess_normal_deviation(normal, projector_b.normal):

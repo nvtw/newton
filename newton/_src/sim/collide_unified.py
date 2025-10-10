@@ -56,6 +56,10 @@ class BroadPhaseMode(IntEnum):
 # Pre-create the convex multi-contact solver (usable inside kernels)
 solve_convex_multi_contact = create_solve_convex_multi_contact(support_map_func)
 
+# Type definitions for multi-contact manifolds
+_mat53f = wp.types.matrix((5, 3), wp.float32)
+_vec5 = wp.types.vector(5, wp.float32)
+
 
 @wp.func
 def write_contact(
@@ -272,6 +276,215 @@ def extract_shape_data(
     return position, orientation, result, bounding_sphere_center, bounding_sphere_radius
 
 
+@wp.func
+def is_discrete_shape(shape_type: int) -> bool:
+    return shape_type == int(GeoType.BOX) or shape_type == int(GeoType.CONVEX_HULL)
+
+
+@wp.func
+def project_point_onto_plane(point: wp.vec3, plane_point: wp.vec3, plane_normal: wp.vec3) -> wp.vec3:
+    """
+    Project a point onto a plane defined by a point and normal.
+
+    Args:
+        point: The point to project
+        plane_point: A point on the plane
+        plane_normal: Normal vector of the plane (should be normalized)
+
+    Returns:
+        The projected point on the plane
+    """
+    to_point = point - plane_point
+    distance_to_plane = wp.dot(to_point, plane_normal)
+    projected_point = point - plane_normal * distance_to_plane
+    return projected_point
+
+
+@wp.func
+def compute_plane_normal_from_contacts(
+    points: _mat53f,
+    normal: wp.vec3,
+    signed_distances: _vec5,
+    count: int,
+) -> wp.vec3:
+    """
+    Compute plane normal from reconstructed plane points.
+
+    Reconstructs the plane points from contact data and computes the plane normal
+    using fan triangulation to find the largest area triangle for numerical stability.
+
+    Args:
+        points: Contact points matrix (5x3)
+        normal: Initial contact normal (used for reconstruction)
+        signed_distances: Signed distances vector (5 elements)
+        count: Number of contact points
+
+    Returns:
+        Normalized plane normal from the contact points
+    """
+    if count < 3:
+        # Not enough points to form a triangle, return original normal
+        return normal
+
+    # Reconstruct plane points from contact data
+    # Use first point as anchor for fan triangulation
+    # Contact points are at midpoint, move to discrete surface (plane)
+    p0 = points[0] + normal * (signed_distances[0] * 0.5)
+
+    # Find the triangle with the largest area for numerical stability
+    # This avoids issues with nearly collinear points
+    best_normal = wp.vec3(0.0, 0.0, 0.0)
+    max_area_sq = float(0.0)
+
+    for i in range(1, count - 1):
+        # Reconstruct plane points for this triangle
+        pi = points[i] + normal * (signed_distances[i] * 0.5)
+        pi_next = points[i + 1] + normal * (signed_distances[i + 1] * 0.5)
+
+        # Compute cross product for triangle (p0, pi, pi_next)
+        edge1 = pi - p0
+        edge2 = pi_next - p0
+        cross = wp.cross(edge1, edge2)
+        area_sq = wp.dot(cross, cross)
+
+        if area_sq > max_area_sq:
+            max_area_sq = area_sq
+            best_normal = cross
+
+    # Normalize, avoid zero
+    len_n = wp.sqrt(wp.max(1.0e-12, max_area_sq))
+    plane_normal = best_normal / len_n
+
+    # Ensure normal points in same direction as original normal
+    if wp.dot(plane_normal, normal) < 0.0:
+        plane_normal = -plane_normal
+
+    return plane_normal
+
+
+@wp.func
+def remove_duplicate_contacts(
+    points: _mat53f,
+    signed_distances: _vec5,
+    count: int,
+    tolerance: float,
+) -> tuple[int, _vec5, _mat53f]:
+    """
+    Remove duplicate contacts by checking neighboring points in cyclic order.
+
+    Only checks the previous point and point 0 (for cyclic wrap), assuming
+    duplicates would be adjacent in the contact manifold.
+
+    Args:
+        points: Contact points matrix (5x3)
+        signed_distances: Signed distances vector (5 elements)
+        count: Number of input contact points
+        tolerance: Distance threshold for duplicate detection
+
+    Returns:
+        Tuple of (new_count, new_signed_distances, new_points)
+    """
+    if count <= 1:
+        return count, signed_distances, points
+
+    new_points = _mat53f()
+    new_signed_distances = _vec5()
+    new_count = int(0)
+
+    for i in range(count):
+        is_duplicate = False
+
+        if i > 0:
+            # Check against previous point
+            if wp.length(points[i] - points[i - 1]) < tolerance:
+                is_duplicate = True
+
+        if not is_duplicate and i > 0 and i == count - 1:
+            # Last point: check against first point (cyclic)
+            if wp.length(points[i] - points[0]) < tolerance:
+                is_duplicate = True
+
+        if not is_duplicate:
+            new_points[new_count] = points[i]
+            new_signed_distances[new_count] = signed_distances[i]
+            new_count += 1
+
+    return new_count, new_signed_distances, new_points
+
+
+@wp.func
+def postprocess_cylinder_discrete_contacts(
+    points: _mat53f,
+    normal: wp.vec3,
+    signed_distances: _vec5,
+    count: int,
+    cylinder_rot: wp.quat,
+    cylinder_radius: float,
+    cylinder_pos: wp.vec3,
+) -> tuple[int, _vec5, _mat53f]:
+    """
+    Post-process contact points for cylinder vs discrete surface collisions.
+
+    When a cylinder is rolling on a discrete surface (plane, box, convex hull),
+    we need to adjust contact points to be on the cylinder rim rather than
+    at arbitrary points along the contact patch.
+
+    Args:
+        points: Contact points matrix (5x3)
+        normal: Contact normal (from discrete to cylinder)
+        signed_distances: Signed distances vector (5 elements)
+        count: Number of input contact points
+        cylinder_rot: Cylinder orientation
+        cylinder_radius: Cylinder radius
+        cylinder_pos: Cylinder position
+
+    Returns:
+        Tuple of (new_count, new_signed_distances, new_points)
+    """
+    # Get cylinder axis in world space (local Y axis)
+    cylinder_axis = wp.quat_rotate(cylinder_rot, wp.vec3(0.0, 0.0, 1.0))
+
+    # Check if cylinder axis is almost perpendicular to contact normal (rolling case)
+    # If dot product is close to 0, the vectors are perpendicular
+    axis_normal_dot = wp.abs(wp.dot(cylinder_axis, normal))
+    perpendicular_threshold = wp.static(wp.sin(2.0 * wp.pi / 180.0))
+
+    if axis_normal_dot > perpendicular_threshold:
+        # Not rolling, return original contacts
+        return count, signed_distances, points
+
+    # Estimate plane from contact points using the contact normal
+    # Use first contact point as plane reference
+    if count == 0:
+        return 0, signed_distances, points
+
+    # Compute plane normal from the largest area triangle formed by contact points
+    # shape_plane_normal = compute_plane_normal_from_contacts(points, normal, signed_distances, count)
+    # projection_plane_normal = wp.normalize(wp.cross(cylinder_axis, shape_plane_normal))
+
+    projection_plane_normal = wp.normalize(wp.cross(cylinder_axis, normal))
+    point_on_projection_plane = cylinder_pos
+
+    # Create new output arrays
+    new_points = _mat53f()
+    new_signed_distances = _vec5()
+
+    # Simply project all contact points onto the projection plane
+    for i in range(count):
+        # Project contact point onto projection plane
+        new_points[i] = project_point_onto_plane(points[i], point_on_projection_plane, projection_plane_normal)
+        # Keep original signed distances
+        new_signed_distances[i] = signed_distances[i]
+
+    # Remove duplicate contacts (check neighbors cyclically)
+    tolerance = cylinder_radius * 0.01  # 1% of radius for duplicate detection
+    final_count, final_signed_distances, final_points = remove_duplicate_contacts(
+        new_points, new_signed_distances, count, tolerance
+    )
+
+    return final_count, final_signed_distances, final_points
+
+
 @wp.kernel(enable_backward=False)
 def build_contacts_kernel_gjk_mpr(
     body_q: wp.array(dtype=wp.transform),
@@ -422,11 +635,13 @@ def build_contacts_kernel_gjk_mpr(
         if is_infinite_plane_a:
             # Position the cube based on the OTHER object's position (pos_b)
             geom_a, pos_a_adjusted = convert_infinite_plane_to_cube(geom_a, rot_a, pos_a, pos_b, radius_b)
+            type_a = int(GeoType.BOX)
 
         pos_b_adjusted = pos_b
         if is_infinite_plane_b:
             # Position the cube based on the OTHER object's position (pos_a)
             geom_b, pos_b_adjusted = convert_infinite_plane_to_cube(geom_b, rot_b, pos_b, pos_a, radius_a)
+            type_b = int(GeoType.BOX)
 
         data_provider = SupportMapDataProvider()
 
@@ -466,6 +681,35 @@ def build_contacts_kernel_gjk_mpr(
             for i in range(count):
                 points[i] = points[i] - normal * (radius_eff_b * 0.5)
                 signed_distances[i] -= radius_eff_b - small_radius
+
+        is_discrete_a = is_discrete_shape(geom_a.shape_type)
+        is_discrete_b = is_discrete_shape(geom_b.shape_type)
+        if is_discrete_a and type_b == int(GeoType.CYLINDER) and count >= 3:
+            # Post-process cylinder (B) rolling on discrete surface (A)
+            cylinder_radius = geom_b.scale[0]
+            count, signed_distances, points = postprocess_cylinder_discrete_contacts(
+                points,
+                normal,
+                signed_distances,
+                count,
+                rot_b,
+                cylinder_radius,
+                pos_b_adjusted,
+            )
+
+        if is_discrete_b and type_a == int(GeoType.CYLINDER) and count >= 3:
+            # Post-process cylinder (A) rolling on discrete surface (B)
+            # Note: normal points from A to B, so we need to negate it for the cylinder processing
+            cylinder_radius = geom_a.scale[0]
+            count, signed_distances, points = postprocess_cylinder_discrete_contacts(
+                points,
+                -normal,
+                signed_distances,
+                count,
+                rot_a,
+                cylinder_radius,
+                pos_a_adjusted,
+            )
 
         for id in range(count):
             write_contact(
