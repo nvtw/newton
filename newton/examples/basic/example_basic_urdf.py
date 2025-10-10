@@ -32,11 +32,6 @@ import warp as wp
 import newton
 import newton.examples
 
-# CUDA Graph Capture
-# ==================
-# Enable CUDA graph capture for better performance (CUDA devices only)
-USE_CUDA_GRAPH = True  # Set to False to disable CUDA graph capture
-
 
 class Example:
     def __init__(self, viewer, num_envs):
@@ -86,38 +81,23 @@ class Example:
         # finalize model
         self.model = scene.finalize()
 
-        # Create unified collision pipeline with NxN broad phase
-        self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
-            self.model,
-            rigid_contact_max_per_pair=10,
-            rigid_contact_margin=0.01,
-            broad_phase_mode=newton.BroadPhaseMode.NXN,
-        )
-
-        # Use MuJoCo Warp solver with Newton contacts
-        self.solver = newton.solvers.SolverMuJoCo(
-            self.model,
-            use_mujoco_contacts=False,  # Use Newton's collision pipeline instead of MuJoCo's
-            iterations=100,
-            ls_iterations=50,
-            njmax=300,
-            contact_stiffness_time_const=self.sim_dt,  # Match timestep for stiff contacts
-        )
+        self.solver = newton.solvers.SolverXPBD(self.model)
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-
-        # Initialize contacts using unified collision pipeline
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+        self.contacts = self.model.collide(self.state_0)
 
         self.viewer.set_model(self.model)
+
+        # not required for MuJoCo, but required for other solvers
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
         # put graph capture into it's own function
         self.capture()
 
     def capture(self):
-        if USE_CUDA_GRAPH and wp.get_device().is_cuda:
+        if wp.get_device().is_cuda:
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph
@@ -131,8 +111,7 @@ class Example:
             # apply forces to the model
             self.viewer.apply_forces(self.state_0)
 
-            # Compute contacts using unified collision pipeline
-            self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+            self.contacts = self.model.collide(self.state_0)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
             # swap states
@@ -174,7 +153,7 @@ class Example:
 if __name__ == "__main__":
     # Create parser that inherits common arguments and adds example-specific ones
     parser = newton.examples.create_parser()
-    parser.add_argument("--num-envs", type=int, default=4, help="Total number of simulated environments.")
+    parser.add_argument("--num-envs", type=int, default=100, help="Total number of simulated environments.")
 
     # Parse arguments and initialize viewer
     viewer, args = newton.examples.init(parser)

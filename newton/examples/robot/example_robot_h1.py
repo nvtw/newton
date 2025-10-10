@@ -29,11 +29,6 @@ import newton
 import newton.examples
 import newton.utils
 
-# CUDA Graph Capture
-# ==================
-# Enable CUDA graph capture for better performance (CUDA devices only)
-USE_CUDA_GRAPH = True  # Set to False to disable CUDA graph capture
-
 
 class Example:
     def __init__(self, viewer, num_envs=4):
@@ -47,7 +42,6 @@ class Example:
         self.num_envs = num_envs
 
         self.viewer = viewer
-        viewer._paused = True
 
         self.device = wp.get_device()
 
@@ -82,52 +76,31 @@ class Example:
         builder.add_ground_plane()
 
         self.model = builder.finalize()
-
-        # Create unified collision pipeline with SAP broad phase for better performance
-        self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
-            self.model,
-            rigid_contact_max_per_pair=10,
-            rigid_contact_margin=0.01,
-            broad_phase_mode=newton.BroadPhaseMode.NXN,
-        )
-
-        self.solver = newton.solvers.SolverMuJoCo(
-            self.model,
-            use_mujoco_contacts=False,  # Use Newton's collision pipeline instead of MuJoCo's
-            iterations=100,
-            ls_iterations=50,
-            njmax=100,
-            contact_stiffness_time_const=self.sim_dt,  # Match timestep for stiff contacts
-        )
+        self.solver = newton.solvers.SolverMuJoCo(self.model, iterations=100, ls_iterations=50, njmax=100)
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-
-        # Initialize contacts using unified collision pipeline
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+        self.contacts = self.model.collide(self.state_0)
 
         self.viewer.set_model(self.model)
 
         self.capture()
 
     def capture(self):
-        if USE_CUDA_GRAPH and wp.get_device().is_cuda:
+        self.graph = None
+        if wp.get_device().is_cuda:
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph
-        else:
-            self.graph = None
 
     def simulate(self):
+        self.contacts = self.model.collide(self.state_0)
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
 
             # apply forces to the model for picking, wind, etc
             self.viewer.apply_forces(self.state_0)
-
-            # Compute contacts using unified collision pipeline
-            self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
 
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 

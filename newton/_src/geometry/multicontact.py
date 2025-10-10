@@ -812,7 +812,7 @@ def extract_4_point_contact_manifolds(
         m_a[0] = anchor_point_a
         m_b[0] = anchor_point_b
         result_features[0] = wp.uint32(0)
-        return 1, 0.0
+        return 1, 1.0
 
     normal_dot = wp.abs(wp.dot(projector_a.normal, projector_b.normal))
 
