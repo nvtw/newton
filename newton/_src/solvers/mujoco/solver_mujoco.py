@@ -2565,7 +2565,7 @@ class SolverMuJoCo(SolverBase):
         if nworld == 1:
             return
 
-        model_fields_to_expand = [
+        model_fields_to_expand = {
             # "qpos0",
             # "qpos_spring",
             "body_pos",
@@ -2638,7 +2638,7 @@ class SolverMuJoCo(SolverBase):
             # "tendon_length0",
             # "tendon_invweight0",
             # "mat_rgba",
-        ]
+        }
 
         def tile(x: wp.array):
             # Create new array with same shape but first dim multiplied by nworld
