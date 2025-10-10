@@ -112,7 +112,7 @@ class BodyProjector:
 
 
 @wp.func
-def make_body_projector_from_vec3(
+def make_body_projector_from_polygon(
     poly: wp.array(dtype=wp.vec3), poly_count: int, anchor_point: wp.vec3
 ) -> BodyProjector:
     """
@@ -152,6 +152,42 @@ def make_body_projector_from_vec3(
     len_n = wp.sqrt(wp.max(1.0e-12, max_area_sq))
     proj.normal = best_normal / len_n
     return proj
+
+
+@wp.func
+def create_body_projectors(
+    poly_a: wp.array(dtype=wp.vec3),
+    poly_count_a: int,
+    anchor_point_a: wp.vec3,
+    poly_b: wp.array(dtype=wp.vec3),
+    poly_count_b: int,
+    anchor_point_b: wp.vec3,
+) -> tuple[BodyProjector, BodyProjector]:
+    projector_a = BodyProjector()
+    projector_b = BodyProjector()
+
+    if poly_count_a >= 3:
+        projector_a = make_body_projector_from_polygon(poly_a, poly_count_a, anchor_point_a)
+    if poly_count_b >= 3:
+        projector_b = make_body_projector_from_polygon(poly_b, poly_count_b, anchor_point_b)
+
+    if poly_count_a < 3:
+        dir = poly_a[1] - poly_a[0]
+        right = wp.cross(dir, projector_b.normal)
+        normal = wp.cross(right, dir)
+        length = wp.length(normal)
+        projector_a.normal = normal / length if length > 1.0e-12 else projector_b.normal
+        projector_a.point_on_plane = 0.5 * (poly_a[0] + poly_a[1])
+
+    if poly_count_b < 3:
+        dir = poly_b[1] - poly_b[0]
+        right = wp.cross(dir, projector_a.normal)
+        normal = wp.cross(right, dir)
+        length = wp.length(normal)
+        projector_b.normal = normal / length if length > 1.0e-12 else projector_a.normal
+        projector_b.point_on_plane = 0.5 * (poly_b[0] + poly_b[1])
+
+    return projector_a, projector_b
 
 
 @wp.func
@@ -213,6 +249,66 @@ def intersection_point(trim_seg_start: wp.vec3, trim_seg_end: wp.vec3, a: wp.vec
     # interpolated point computed above; offset not required in vec3 version
     # Note: projection parameter not needed in vec3 version
     return interpolated_ab
+
+
+@wp.func
+def trim_by_line_segment_in_place(
+    trim_seg_start: wp.vec3,
+    trim_seg_end: wp.vec3,
+    loop: wp.array(dtype=wp.vec3),
+    loop_segments: wp.array(dtype=wp.uint8),
+    loop_count: int,
+    max_loop_capacity: int,
+) -> int:
+    """
+    Intersect the input loop with a single finite line segment in the contact plane.
+
+    Stores up to two intersection points (degenerate segment manifold).
+    Segment IDs are set to 0 (first trim edge) for generated points.
+    """
+    if loop_count < 1:
+        return 0
+
+    trim_start_xy = wp.vec2(trim_seg_start[0], trim_seg_start[1])
+    trim_end_xy = wp.vec2(trim_seg_end[0], trim_seg_end[1])
+    seg_dir = trim_end_xy - trim_start_xy
+    seg_len = wp.sqrt(seg_dir[0] * seg_dir[0] + seg_dir[1] * seg_dir[1])
+
+    if seg_len <= 1e-12:
+        return 0
+
+    seg_dir = seg_dir / seg_len
+
+    write_idx = int(0)
+    num_found = int(0)
+
+    for i in range(loop_count):
+        if num_found >= 2:
+            break
+        j = (i + 1) % loop_count
+
+        ai_xy = wp.vec2(loop[i][0], loop[i][1])
+        aj_xy = wp.vec2(loop[j][0], loop[j][1])
+
+        side_i = signed_area(trim_start_xy, trim_end_xy, ai_xy)
+        side_j = signed_area(trim_start_xy, trim_end_xy, aj_xy)
+
+        crosses = (side_i > 0.0 and side_j < 0.0) or (side_i < 0.0 and side_j > 0.0)
+        touches = (side_i == 0.0) or (side_j == 0.0)
+
+        if crosses or touches:
+            inter = intersection_point(trim_seg_start, trim_seg_end, loop[i], loop[j])
+            inter_xy = wp.vec2(inter[0], inter[1])
+            t_along = wp.dot(seg_dir, inter_xy - trim_start_xy)
+            if t_along < -EPS or t_along > seg_len + EPS:
+                continue
+
+            loop[write_idx] = inter
+            loop_segments[write_idx] = wp.uint8(0)
+            write_idx += 1
+            num_found += 1
+
+    return num_found
 
 
 @wp.func
@@ -433,7 +529,9 @@ def trim_all_in_place(
         return loop_count  # There is no trim polygon
 
     if trim_poly_count == 2:
-        return loop_count  # Does not need to be handled since every poly has at least 3 vertices in the current implementation
+        return trim_by_line_segment_in_place(
+            trim_poly[0], trim_poly[1], loop, loop_segments, loop_count, max_loop_capacity
+        )
 
     current_loop_count = loop_count
 
@@ -477,7 +575,7 @@ def approx_max_quadrilateral_area_with_calipers(hull: wp.array(dtype=wp.vec3), h
     # Relative epsilon for tie-breaking: only update if new value is at least (1 + epsilon) times better
     # This is scale-invariant and avoids catastrophic cancellation in floating-point comparisons
     # Important for objects with circular geometry to ensure consistent point selection
-    tie_epsilon_rel = 1.0e-5
+    tie_epsilon_rel = 1.0e-4
 
     # Start with point j opposite point i=0
     j = int(1)
@@ -798,15 +896,17 @@ def extract_4_point_contact_manifolds(
     """
     # Early-out for simple cases: if both have <=2 or either is empty, return single anchor pair
     # if True or m_a_count < 3 or m_b_count < 3:
-    if m_a_count < 3 or m_b_count < 3:
+    if (m_a_count < 2 or m_b_count < 2) or (m_a_count < 3 and m_b_count < 3):
         m_a[0] = anchor_point_a
         m_b[0] = anchor_point_b
         result_features[0] = wp.uint32(0)
         return 1, 1.0
 
     # Projectors for back-projection
-    projector_a = make_body_projector_from_vec3(m_a, m_a_count, anchor_point_a)
-    projector_b = make_body_projector_from_vec3(m_b, m_b_count, anchor_point_b)
+    # projector_a = make_body_projector_from_polygon(m_a, m_a_count, anchor_point_a)
+    # projector_b = make_body_projector_from_polygon(m_b, m_b_count, anchor_point_b)
+
+    projector_a, projector_b = create_body_projectors(m_a, m_a_count, anchor_point_a, m_b, m_b_count, anchor_point_b)
 
     if excess_normal_deviation(normal, projector_a.normal) or excess_normal_deviation(normal, projector_b.normal):
         m_a[0] = anchor_point_a
@@ -1022,6 +1122,8 @@ def create_build_manifold(support_func: Any):
             # Only store feature ID if the point was actually added (not a duplicate)
             if was_added_b:
                 features_b[b_count - 1] = wp.uint8(int(feature_b) + 1)
+
+        # wp.printf("a_count: %d, b_count: %d\n", a_count, b_count)
 
         # All feature ids are one based such that it is clearly visible in a uint which of the 4 slots (8 bits each) are in use
         num_contacts, normal_dot = extract_4_point_contact_manifolds(
