@@ -413,45 +413,69 @@ def remove_duplicate_contacts(
 
 
 @wp.func
-def postprocess_cylinder_discrete_contacts(
+def postprocess_axial_shape_discrete_contacts(
     points: _mat53f,
     normal: wp.vec3,
     signed_distances: _vec5,
     count: int,
-    cylinder_rot: wp.quat,
-    cylinder_radius: float,
-    cylinder_pos: wp.vec3,
+    shape_rot: wp.quat,
+    shape_radius: float,
+    shape_half_height: float,
+    shape_pos: wp.vec3,
+    is_cone: bool,
 ) -> tuple[int, _vec5, _mat53f]:
     """
-    Post-process contact points for cylinder vs discrete surface collisions.
+    Post-process contact points for axial shape (cylinder/cone) vs discrete surface collisions.
 
-    When a cylinder is rolling on a discrete surface (plane, box, convex hull),
-    we need to adjust contact points to be on the cylinder rim rather than
-    at arbitrary points along the contact patch.
+    When an axial shape is rolling on a discrete surface (plane, box, convex hull),
+    we project contact points onto a plane perpendicular to both the shape axis and
+    contact normal to stabilize rolling contacts.
+
+    Works for:
+    - Cylinders: Axis perpendicular to surface normal when rolling
+    - Cones: Axis at an angle = cone half-angle when rolling on base
 
     Args:
         points: Contact points matrix (5x3)
-        normal: Contact normal (from discrete to cylinder)
+        normal: Contact normal (from discrete to shape)
         signed_distances: Signed distances vector (5 elements)
         count: Number of input contact points
-        cylinder_rot: Cylinder orientation
-        cylinder_radius: Cylinder radius
-        cylinder_pos: Cylinder position
+        shape_rot: Shape orientation
+        shape_radius: Shape radius (constant for cylinder, base radius for cone)
+        shape_half_height: Shape half height
+        shape_pos: Shape position
+        is_cone: True if shape is a cone, False if cylinder
 
     Returns:
         Tuple of (new_count, new_signed_distances, new_points)
     """
-    # Get cylinder axis in world space (local Y axis)
-    cylinder_axis = wp.quat_rotate(cylinder_rot, wp.vec3(0.0, 0.0, 1.0))
+    # Get shape axis in world space (Z-axis for both cylinders and cones)
+    shape_axis = wp.quat_rotate(shape_rot, wp.vec3(0.0, 0.0, 1.0))
 
-    # Check if cylinder axis is almost perpendicular to contact normal (rolling case)
-    # If dot product is close to 0, the vectors are perpendicular
-    axis_normal_dot = wp.abs(wp.dot(cylinder_axis, normal))
-    perpendicular_threshold = wp.static(wp.sin(2.0 * wp.pi / 180.0))
+    # Check if shape is in rolling configuration
+    axis_normal_dot = wp.abs(wp.dot(shape_axis, normal))
 
-    if axis_normal_dot > perpendicular_threshold:
-        # Not rolling, return original contacts
-        return count, signed_distances, points
+    # Compute threshold based on shape type
+    if is_cone:
+        # For a cone rolling on its base, the axis makes an angle with the normal
+        # equal to the cone's half-angle: angle = atan(radius / (2 * half_height))
+        # When rolling: dot(axis, normal) = cos(90 - angle) = sin(angle)
+        # Add tolerance of +/-2 degrees
+        cone_half_angle = wp.atan2(shape_radius, 2.0 * shape_half_height)
+        tolerance_angle = wp.static(2.0 * wp.pi / 180.0)  # 2 degrees
+        lower_threshold = wp.sin(cone_half_angle - tolerance_angle)
+        upper_threshold = wp.sin(cone_half_angle + tolerance_angle)
+
+        # Check if axis_normal_dot is in the expected range for rolling
+        if axis_normal_dot < lower_threshold or axis_normal_dot > upper_threshold:
+            # Not in rolling configuration
+            return count, signed_distances, points
+    else:
+        # For cylinder: axis should be perpendicular to normal (dot product ≈ 0)
+        perpendicular_threshold = wp.static(wp.sin(2.0 * wp.pi / 180.0))
+        if axis_normal_dot > perpendicular_threshold:
+            # Not rolling, return original contacts
+            return count, signed_distances, points
 
     # Estimate plane from contact points using the contact normal
     # Use first contact point as plane reference
@@ -460,10 +484,10 @@ def postprocess_cylinder_discrete_contacts(
 
     # Compute plane normal from the largest area triangle formed by contact points
     # shape_plane_normal = compute_plane_normal_from_contacts(points, normal, signed_distances, count)
-    # projection_plane_normal = wp.normalize(wp.cross(cylinder_axis, shape_plane_normal))
+    # projection_plane_normal = wp.normalize(wp.cross(shape_axis, shape_plane_normal))
 
-    projection_plane_normal = wp.normalize(wp.cross(cylinder_axis, normal))
-    point_on_projection_plane = cylinder_pos
+    projection_plane_normal = wp.normalize(wp.cross(shape_axis, normal))
+    point_on_projection_plane = shape_pos
 
     # Create new output arrays
     new_points = _mat53f()
@@ -477,7 +501,7 @@ def postprocess_cylinder_discrete_contacts(
         new_signed_distances[i] = signed_distances[i]
 
     # Remove duplicate contacts (check neighbors cyclically)
-    tolerance = cylinder_radius * 0.01  # 1% of radius for duplicate detection
+    tolerance = shape_radius * 0.01  # 1% of radius for duplicate detection
     final_count, final_signed_distances, final_points = remove_duplicate_contacts(
         new_points, new_signed_distances, count, tolerance
     )
@@ -682,33 +706,45 @@ def build_contacts_kernel_gjk_mpr(
                 points[i] = points[i] - normal * (radius_eff_b * 0.5)
                 signed_distances[i] -= radius_eff_b - small_radius
 
+        # Post-process for axial shapes (cylinder/cone) rolling on discrete surfaces
         is_discrete_a = is_discrete_shape(geom_a.shape_type)
         is_discrete_b = is_discrete_shape(geom_b.shape_type)
-        if is_discrete_a and type_b == int(GeoType.CYLINDER) and count >= 3:
-            # Post-process cylinder (B) rolling on discrete surface (A)
-            cylinder_radius = geom_b.scale[0]
-            count, signed_distances, points = postprocess_cylinder_discrete_contacts(
+        is_axial_b = type_b == int(GeoType.CYLINDER) or type_b == int(GeoType.CONE)
+        is_axial_a = type_a == int(GeoType.CYLINDER) or type_a == int(GeoType.CONE)
+
+        if is_discrete_a and is_axial_b and count >= 3:
+            # Post-process axial shape (B) rolling on discrete surface (A)
+            shape_radius = geom_b.scale[0]  # radius for cylinder, base radius for cone
+            shape_half_height = geom_b.scale[1]
+            is_cone_b = type_b == int(GeoType.CONE)
+            count, signed_distances, points = postprocess_axial_shape_discrete_contacts(
                 points,
                 normal,
                 signed_distances,
                 count,
                 rot_b,
-                cylinder_radius,
+                shape_radius,
+                shape_half_height,
                 pos_b_adjusted,
+                is_cone_b,
             )
 
-        if is_discrete_b and type_a == int(GeoType.CYLINDER) and count >= 3:
-            # Post-process cylinder (A) rolling on discrete surface (B)
-            # Note: normal points from A to B, so we need to negate it for the cylinder processing
-            cylinder_radius = geom_a.scale[0]
-            count, signed_distances, points = postprocess_cylinder_discrete_contacts(
+        if is_discrete_b and is_axial_a and count >= 3:
+            # Post-process axial shape (A) rolling on discrete surface (B)
+            # Note: normal points from A to B, so we need to negate it for the shape processing
+            shape_radius = geom_a.scale[0]  # radius for cylinder, base radius for cone
+            shape_half_height = geom_a.scale[1]
+            is_cone_a = type_a == int(GeoType.CONE)
+            count, signed_distances, points = postprocess_axial_shape_discrete_contacts(
                 points,
                 -normal,
                 signed_distances,
                 count,
                 rot_a,
-                cylinder_radius,
+                shape_radius,
+                shape_half_height,
                 pos_a_adjusted,
+                is_cone_a,
             )
 
         for id in range(count):
