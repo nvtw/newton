@@ -2048,6 +2048,8 @@ class SolverMuJoCo(SolverBase):
             selected_joints = np.where((joint_group == first_group) | (joint_group < 0))[0]
         else:
             # if we are not separating environments to worlds, we use all shapes, bodies, joints
+            first_group = 0
+            shape_range_len = model.shape_count
             selected_shapes = np.arange(model.shape_count, dtype=np.int32)
             selected_bodies = np.arange(model.body_count, dtype=np.int32)
             selected_joints = np.arange(model.joint_count, dtype=np.int32)

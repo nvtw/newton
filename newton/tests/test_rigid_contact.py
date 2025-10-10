@@ -566,6 +566,123 @@ for device in devices:
         devices=[device],
     )
 
+
+def test_mujoco_warp_newton_contacts(test: TestRigidContact, device):
+    """Test that MuJoCo Warp solver correctly handles contact transfer from Newton's unified collision pipeline.
+
+    This test creates 4 environments, each with a single cube on the ground, and verifies that the cubes
+    remain stable (don't fall through the ground) when using Newton's collision detection with MuJoCo Warp solver.
+    """
+    # Create a simple cube model
+    cube_builder = newton.ModelBuilder()
+    cube_builder.default_shape_cfg.ke = 5.0e4
+    cube_builder.default_shape_cfg.kd = 5.0e2
+    cube_builder.default_shape_cfg.kf = 1.0e3
+    cube_builder.default_shape_cfg.mu = 0.75
+
+    # Add a single cube body
+    cube_size = 0.5
+    body = cube_builder.add_body(xform=wp.transform(wp.vec3(0, 0, cube_size), wp.quat_identity()))
+    cube_builder.add_joint_free(body)
+    cube_builder.add_shape_box(body=body, hx=cube_size / 2, hy=cube_size / 2, hz=cube_size / 2)
+
+    # Replicate the cube across 4 environments
+    builder = newton.ModelBuilder()
+    num_envs = 4
+    builder.replicate(cube_builder, num_envs, spacing=(3, 3, 0))
+
+    # Add ground plane
+    builder.add_ground_plane()
+
+    # Finalize model
+    model = builder.finalize(device=device)
+
+    # Create unified collision pipeline (critical for this test)
+    collision_pipeline = newton.CollisionPipelineUnified.from_model(
+        model,
+        rigid_contact_max_per_pair=10,
+        rigid_contact_margin=0.01,
+        broad_phase_mode=newton.BroadPhaseMode.SAP,
+    )
+
+    # Create MuJoCo Warp solver with Newton contacts
+    solver = newton.solvers.SolverMuJoCo(
+        model,
+        use_mujoco_cpu=False,
+        use_mujoco_contacts=False,  # Use Newton's collision pipeline instead of MuJoCo's
+        solver="newton",
+        integrator="euler",
+        njmax=100,
+        ncon_per_env=50,
+        cone="elliptic",
+        impratio=100,
+        iterations=100,
+        ls_iterations=50,
+    )
+
+    state_0 = model.state()
+    state_1 = model.state()
+    control = model.control()
+
+    # Store initial positions (cubes should be at z = cube_size)
+    initial_body_q = state_0.body_q.numpy().copy()
+
+    # Simulate for enough frames to ensure cubes settle
+    substeps = 6
+    sim_dt = 1.0 / 60.0
+    max_frames = 100
+
+    for _ in range(max_frames):
+        for _ in range(substeps):
+            state_0.clear_forces()
+
+            # Use unified collision pipeline - this is the key part being tested
+            contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
+
+            solver.step(state_0, state_1, control, contacts, sim_dt / substeps)
+            state_0, state_1 = state_1, state_0
+
+    # Get final positions
+    final_body_q = state_0.body_q.numpy()
+
+    # Test that cubes are resting on the ground (not fallen through)
+    # Each cube should be at approximately z = cube_size/2 (half the cube size)
+    for i in range(num_envs):
+        initial_z = initial_body_q[i, 2]
+        final_z = final_body_q[i, 2]
+
+        # The cube should have settled down from z=cube_size to approximately z=cube_size/2
+        test.assertGreater(
+            final_z,
+            cube_size * 0.3,  # Should be well above ground (at least 30% of cube size)
+            f"Cube {i} fell through the ground (z={final_z:.6f}, expected > {cube_size * 0.3:.6f})",
+        )
+
+        test.assertLess(
+            final_z,
+            initial_z + 0.1,  # Should not have jumped up significantly
+            f"Cube {i} jumped up unexpectedly (z={final_z:.6f}, initial={initial_z:.6f})",
+        )
+
+        # Check that the cube is approximately at rest (small velocity)
+        final_vel_z = state_0.body_qd.numpy()[i, 2]
+        test.assertLess(
+            abs(final_vel_z),
+            0.01,
+            f"Cube {i} has too much vertical velocity ({final_vel_z:.6f}), not at rest",
+        )
+
+
+# Add test for MuJoCo Warp with Newton contacts (only for CUDA devices)
+for device in devices:
+    if device.is_cuda:
+        add_function_test(
+            TestRigidContact,
+            "test_mujoco_warp_newton_contacts",
+            test_mujoco_warp_newton_contacts,
+            devices=[device],
+        )
+
 if __name__ == "__main__":
     # wp.clear_kernel_cache()
     unittest.main(verbosity=2)
