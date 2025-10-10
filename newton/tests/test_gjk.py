@@ -177,7 +177,7 @@ class TestGJK(unittest.TestCase):
         # Distance between centers: 2.5, half-extents sum: 3.5
         # Expected separation: 2.5 - 2.5 - 1.0 = -1.0 (overlapping)
         # But let's test a separated case
-        dist, _point, _normal, collision = _geom_dist(
+        dist, _point, normal, collision = _geom_dist(
             GeoType.BOX,
             wp.vec3(1.0, 1.0, 1.0),
             wp.vec3(-2.0, 0.0, 0.0),

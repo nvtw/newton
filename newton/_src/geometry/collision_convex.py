@@ -108,6 +108,8 @@ def create_solve_convex_multi_contact(support_func: Any):
                 points (matrix(4,3)): Contact points in world space (midpoint between shapes)
                 features (wp.vec4i): Feature IDs for contact tracking
         """
+        # Enlarge a little bit to avoid contact flickering when the penetration is close to 0
+        enlarge = 1e-4
         # Try MPR first (optimized for overlapping shapes, which is the common case)
         collision, penetration, point, normal, feature_a_id, feature_b_id = wp.static(create_solve_mpr(support_func))(
             geom_a,
@@ -116,9 +118,10 @@ def create_solve_convex_multi_contact(support_func: Any):
             orientation_b,
             position_a,
             position_b,
-            sum_of_contact_offsets,
+            sum_of_contact_offsets + enlarge,
             data_provider,
         )
+        penetration += enlarge
 
         if not collision:
             # MPR reported no collision, fall back to GJK for separated shapes
