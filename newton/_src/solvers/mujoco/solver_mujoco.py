@@ -1705,8 +1705,12 @@ class SolverMuJoCo(SolverBase):
         num_shapes = len(selected_shapes)
         shape_a, shape_b = np.triu_indices(num_shapes, k=1)
         # Convert to numpy array if needed before indexing
-        selected_shapes_np = selected_shapes.numpy() if hasattr(selected_shapes, 'numpy') else selected_shapes
-        shape_collision_group_np = model.shape_collision_group.numpy() if hasattr(model.shape_collision_group, 'numpy') else model.shape_collision_group
+        selected_shapes_np = selected_shapes.numpy() if hasattr(selected_shapes, "numpy") else selected_shapes
+        shape_collision_group_np = (
+            model.shape_collision_group.numpy()
+            if hasattr(model.shape_collision_group, "numpy")
+            else model.shape_collision_group
+        )
         cgroup = [shape_collision_group_np[i] for i in selected_shapes_np]
         # edges representing colliding shape pairs
         graph_edges = [

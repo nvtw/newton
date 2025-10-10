@@ -42,13 +42,11 @@ COS_TILT_ANGLE = wp.static(wp.cos(TILT_ANGLE_RAD))
 
 COS_DEEPEST_CONTACT_THRESHOLD_ANGLE = wp.static(wp.cos(0.1 * wp.pi / 180.0))
 
-@wp.func
-def should_include_deepest_contact(dir_a: wp.vec3, dir_b: wp.vec3) -> bool:
-    dot = wp.dot(dir_a, dir_b)
-    if dot < 0.0:
-        dot = -dot
 
-    return dot > COS_DEEPEST_CONTACT_THRESHOLD_ANGLE
+@wp.func
+def should_include_deepest_contact(normal_dot: float) -> bool:
+    return normal_dot < COS_DEEPEST_CONTACT_THRESHOLD_ANGLE
+
 
 @wp.func
 def excess_normal_deviation(dir_a: wp.vec3, dir_b: wp.vec3) -> bool:
@@ -65,10 +63,7 @@ def excess_normal_deviation(dir_a: wp.vec3, dir_b: wp.vec3) -> bool:
     Returns:
         True if the angle between the vectors exceeds TILT_ANGLE_RAD (2 degrees).
     """
-    dot = wp.dot(dir_a, dir_b)
-    if dot < 0.0:
-        dot = -dot
-
+    dot = wp.abs(wp.dot(dir_a, dir_b))
     return dot < COS_TILT_ANGLE
 
 
@@ -759,18 +754,19 @@ def extract_4_point_contact_manifolds(
     anchor_point_a: wp.vec3,
     anchor_point_b: wp.vec3,
     result_features: wp.array(dtype=wp.uint32),
-) -> int:
+) -> tuple[int, float]:
     """
-    Extract up to 4 contact points from two convex contact polygons using polygon clipping.
+    Extract up to 4 contact points from two convex contact polygons using polygon clipping (before optional deepest point addition).
 
-    This function performs the core manifold generation algorithm:
-    1. Validates input polygons and checks for normal deviation from collision normal
-    2. Projects both polygons into 2D contact plane space (XY = tangent plane, Z = depth)
-    3. Clips polygon B against all edges of polygon A (Sutherland-Hodgman style clipping)
-    4. Removes zero-length edges from the clipped result
-    5. If more than 4 points remain, selects the best 4 using rotating calipers algorithm
-    6. Projects all contact points back onto the original shape surfaces in world space
-    7. Computes and tracks feature IDs for contact persistence
+        This function performs the core manifold generation algorithm:
+        1. Validates input polygons and checks for normal deviation from collision normal
+        2. Projects both polygons into 2D contact plane space (XY = tangent plane, Z = depth)
+        3. Clips polygon B against all edges of polygon A (Sutherland-Hodgman style clipping)
+        4. Removes zero-length edges from the clipped result
+        5. If more than 4 points remain, selects the best 4 using rotating calipers algorithm
+        6. Projects all contact points back onto the original shape surfaces in world space
+        7. Computes and tracks feature IDs for contact persistence
+        Note: Returns up to 4 contacts; the 5th can be added later via should_include_deepest_contact check
 
     Args:
         m_a: Contact polygon vertices for shape A (input: world space, up to 6 points).
@@ -798,7 +794,7 @@ def extract_4_point_contact_manifolds(
         m_a[0] = anchor_point_a
         m_b[0] = anchor_point_b
         result_features[0] = wp.uint32(0)
-        return 1
+        return 1, 0.0
 
     # Projectors for back-projection
     projector_a = make_body_projector_from_vec3(m_a, m_a_count, anchor_point_a)
@@ -808,7 +804,9 @@ def extract_4_point_contact_manifolds(
         m_a[0] = anchor_point_a
         m_b[0] = anchor_point_b
         result_features[0] = wp.uint32(0)
-        return 1
+        return 1, 0.0
+
+    normal_dot = wp.abs(wp.dot(projector_a.normal, projector_b.normal))
 
     # The trim poly (poly A) should be the polygon with the most points
     # This should ensure that zero area loops with only two points get trimmed correctly (they are considered valid)
@@ -891,7 +889,7 @@ def extract_4_point_contact_manifolds(
                 m_b[i] = body_projector_project(projector_b, world, normal)
                 result_features[i] = feat
 
-    return loop_count
+    return loop_count, normal_dot
 
 
 def create_build_manifold(support_func: Any):
@@ -907,7 +905,7 @@ def create_build_manifold(support_func: Any):
                      (geometry, direction, data_provider) and returns (point, feature_id)
 
     Returns:
-        build_manifold function that generates up to 4 contact points between two shapes
+        build_manifold function that generates up to 5 contact points between two shapes
         using perturbed support mapping and polygon clipping.
     """
 
@@ -930,7 +928,7 @@ def create_build_manifold(support_func: Any):
         feature_anchor_b: wp.int32,
         data_provider: Any,
         num_scan_directions: int = 6,
-    ) -> int:
+    ) -> tuple[int, float]:
         """
         Core implementation of multi-contact manifold generation using perturbed support mapping.
 
@@ -965,7 +963,8 @@ def create_build_manifold(support_func: Any):
             num_scan_directions: Number of scan directions for perturbed support mapping (default: 6).
 
         Returns:
-            Number of valid contact points generated (0-4).
+            Tuple of (num_contacts, normal_dot) where num_contacts is the number of valid contact
+            points generated (0-4) and normal_dot is the absolute dot product of polygon normals.
         """
 
         num_scan_directions = wp.min(num_scan_directions, 6)
@@ -1020,7 +1019,7 @@ def create_build_manifold(support_func: Any):
                 features_b[b_count - 1] = wp.uint8(int(feature_b) + 1)
 
         # All feature ids are one based such that it is clearly visible in a uint which of the 4 slots (8 bits each) are in use
-        return extract_4_point_contact_manifolds(
+        num_contacts, normal_dot = extract_4_point_contact_manifolds(
             a_buffer,
             features_a,
             a_count,
@@ -1034,9 +1033,10 @@ def create_build_manifold(support_func: Any):
             p_b,
             result_features,
         )
+        return num_contacts, normal_dot
 
-    Mat43f = wp.types.matrix(shape=(4, 3), dtype=wp.float32)
     Mat53f = wp.types.matrix(shape=(5, 3), dtype=wp.float32)
+    vec5 = wp.types.vector(5, wp.float32)
     vec5i = wp.types.vector(5, wp.int32)
 
     @wp.func
@@ -1056,18 +1056,19 @@ def create_build_manifold(support_func: Any):
         num_scan_directions: int = 6,
     ) -> tuple[
         int,
-        wp.vec4,
-        Mat43f,
-        wp.vec4i,
+        vec5,
+        Mat53f,
+        vec5i,
     ]:
         """
         Build a contact manifold between two convex shapes using perturbed support mapping and polygon clipping.
 
-        This function generates up to 4 contact points between two colliding convex shapes by:
+        This function generates up to 5 contact points between two colliding convex shapes by:
         1. Finding contact polygons using perturbed support mapping in 6 directions
         2. Clipping the polygons against each other in contact plane space
         3. Selecting the best 4 points using rotating calipers algorithm if more than 4 exist
         4. Transforming results back to world space with feature tracking
+        5. Optionally appending the deepest contact point if should_include_deepest_contact returns true
 
         The contact normal is the same for all contact points in the manifold. The two shapes
         must always be queried in the same order to get stable feature IDs for contact tracking.
@@ -1088,11 +1089,11 @@ def create_build_manifold(support_func: Any):
             num_scan_directions: Number of scan directions for perturbed support mapping (default: 6).
         Returns:
             A tuple containing:
-            - int: Number of valid contact points in the manifold (0-4).
-            - wp.vec4: Penetration depths for each contact point (negative when shapes overlap).
-            - wp.types.matrix((4, 3), wp.float32): Contact points at the center of the manifold contact
+            - int: Number of valid contact points in the manifold (0-5).
+            - vec5: Penetration depths for each contact point (negative when shapes overlap).
+            - Mat53f: Contact points at the center of the manifold contact
               (midpoint between points on shape A and shape B) in world space.
-            - wp.vec4i: Feature IDs for each contact point, enabling contact tracking across
+            - vec5i: Feature IDs for each contact point, enabling contact tracking across
               multiple frames for warm starting and contact persistence.
 
         Note:
@@ -1106,7 +1107,7 @@ def create_build_manifold(support_func: Any):
         )  # Array for shape B contact points - also provides storage for intermediate results
         result_features = wp.zeros(shape=(6,), dtype=wp.uint32)
 
-        num_manifold_points = build_manifold_core(
+        num_manifold_points, normal_dot = build_manifold_core(
             geom_a,
             geom_b,
             quaternion_a,
@@ -1122,13 +1123,13 @@ def create_build_manifold(support_func: Any):
             feature_anchor_a,
             feature_anchor_b,
             data_provider,
-            num_scan_directions
+            num_scan_directions,
         )
 
         # Extract results into fixed-size matrices
-        contact_points = Mat43f()
-        feature_ids = wp.vec4i(0, 0, 0, 0)
-        penetrations = wp.vec4(0.0, 0.0, 0.0, 0.0)
+        contact_points = Mat53f()
+        feature_ids = vec5i(0, 0, 0, 0, 0)
+        penetrations = vec5(0.0, 0.0, 0.0, 0.0, 0.0)
 
         # Copy contact points and extract feature IDs
         count_out = min(num_manifold_points, 4)
@@ -1141,6 +1142,17 @@ def create_build_manifold(support_func: Any):
             feature_ids[i] = int(result_features[i])
             penetrations[i] = wp.dot(contact_point_b - contact_point_a, normal)
 
-        return num_manifold_points, penetrations, contact_points, feature_ids
+        # Check if we should include the deepest contact point
+        if count_out < 5 and count_out > 1:
+            # Check if we should include the deepest contact point using the normal_dot
+            # computed from the polygon normals in extract_4_point_contact_manifolds
+            if should_include_deepest_contact(normal_dot):
+                deepest_contact_center = 0.5 * (p_a + p_b)
+                contact_points[count_out] = deepest_contact_center
+                penetrations[count_out] = wp.dot(p_b - p_a, normal)
+                feature_ids[count_out] = 0  # Use 0 for the deepest contact feature ID
+                count_out += 1
+
+        return count_out, penetrations, contact_points, feature_ids
 
     return build_manifold

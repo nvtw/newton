@@ -21,7 +21,7 @@ combining GJK, MPR, and multi-contact manifold generation into easy-to-use funct
 
 Two main collision modes are provided:
 1. Single contact: Returns one contact point with penetration depth and normal
-2. Multi-contact: Returns up to 4 contact points for stable physics simulation
+2. Multi-contact: Returns up to 5 contact points for stable physics simulation
 
 The implementation uses a hybrid approach:
 - GJK for fast separation tests (when shapes don't overlap)
@@ -41,13 +41,16 @@ from .multicontact import create_build_manifold
 from .simplex_solver import create_solve_closest_distance
 
 _mat43f = wp.types.matrix((4, 3), wp.float32)
+_mat53f = wp.types.matrix((5, 3), wp.float32)
+_vec5 = wp.types.vector(5, wp.float32)
+_vec5i = wp.types.vector(5, wp.int32)
 
 
 def create_solve_convex_multi_contact(support_func: Any):
     """
     Factory function to create a multi-contact collision solver for convex shapes.
 
-    This function creates a collision detector that generates up to 4 contact points
+    This function creates a collision detector that generates up to 5 contact points
     for stable physics simulation. It combines GJK, MPR, and manifold generation:
     1. MPR for initial collision detection and penetration (fast for overlapping shapes)
     2. GJK as fallback for separated shapes
@@ -58,7 +61,7 @@ def create_solve_convex_multi_contact(support_func: Any):
                      (geometry, direction, data_provider) and returns (point, feature_id)
 
     Returns:
-        solve_convex_multi_contact function that computes up to 4 contact points.
+        solve_convex_multi_contact function that computes up to 5 contact points.
     """
 
     @wp.func
@@ -77,12 +80,12 @@ def create_solve_convex_multi_contact(support_func: Any):
     ) -> tuple[
         int,
         wp.vec3,
-        wp.vec4,
-        wp.types.matrix((4, 3), wp.float32),
-        wp.vec4i,
+        _vec5,
+        _mat53f,
+        _vec5i,
     ]:
         """
-        Compute up to 4 contact points between two convex shapes.
+        Compute up to 5 contact points between two convex shapes.
 
         This function generates a multi-contact manifold for stable contact resolution:
         1. Runs MPR first (fast for overlapping shapes, which is the common case)
@@ -103,11 +106,11 @@ def create_solve_convex_multi_contact(support_func: Any):
             num_scan_directions: Number of scan directions for perturbed support mapping (default: 6)
         Returns:
             Tuple of:
-                count (int): Number of valid contact points (0-4)
+                count (int): Number of valid contact points (0-5)
                 normal (wp.vec3): Contact normal from A to B (same for all contacts)
-                penetrations (wp.vec4): Penetration depths for each contact (negative when overlapping)
-                points (matrix(4,3)): Contact points in world space (midpoint between shapes)
-                features (wp.vec4i): Feature IDs for contact tracking
+                penetrations (_vec5): Penetration depths for each contact (negative when overlapping)
+                points (_mat53f): Contact points in world space (midpoint between shapes)
+                features (_vec5i): Feature IDs for contact tracking
         """
         # Enlarge a little bit to avoid contact flickering when the penetration is close to 0
         enlarge = 1e-4
@@ -142,10 +145,10 @@ def create_solve_convex_multi_contact(support_func: Any):
         # Skip multi-contact manifold generation if requested or penetration exceeds threshold
         if skip_multi_contact or penetration > contact_threshold:
             count = 1
-            penetrations = wp.vec4(penetration, 0.0, 0.0, 0.0)
-            points = _mat43f()
+            penetrations = _vec5(penetration, 0.0, 0.0, 0.0, 0.0)
+            points = _mat53f()
             points[0] = point
-            features = wp.vec4i(0)
+            features = _vec5i(0, 0, 0, 0, 0)
             return count, normal, penetrations, points, features
 
         # Generate multi-contact manifold using perturbed support mapping and polygon clipping

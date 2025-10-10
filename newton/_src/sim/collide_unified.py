@@ -453,7 +453,7 @@ def build_contacts_kernel_gjk_mpr(
             radius_eff_b = geom_b.scale[0]
             geom_b.scale[0] = small_radius
 
-        count, normal, penetrations, points, features = wp.static(solve_convex_multi_contact)(
+        count, normal, penetrations, points, _features = wp.static(solve_convex_multi_contact)(
             geom_a,
             geom_b,
             rot_a,
@@ -581,30 +581,29 @@ def compute_shape_aabbs(
         # Compute AABB extents by evaluating support function in local space
         # Dot products are done in local space to avoid expensive rotations
         support_point = wp.vec3()
-        feature_id = int(0)
 
         # Max X: support along +local_x, dot in local space
-        support_point, feature_id = support_map(shape_data, local_x, data_provider)
+        support_point, _feature_id = support_map(shape_data, local_x, data_provider)
         max_x = wp.dot(local_x, support_point)
 
         # Max Y: support along +local_y, dot in local space
-        support_point, feature_id = support_map(shape_data, local_y, data_provider)
+        support_point, _feature_id = support_map(shape_data, local_y, data_provider)
         max_y = wp.dot(local_y, support_point)
 
         # Max Z: support along +local_z, dot in local space
-        support_point, feature_id = support_map(shape_data, local_z, data_provider)
+        support_point, _feature_id = support_map(shape_data, local_z, data_provider)
         max_z = wp.dot(local_z, support_point)
 
         # Min X: support along -local_x, dot in local space
-        support_point, feature_id = support_map(shape_data, -local_x, data_provider)
+        support_point, _feature_id = support_map(shape_data, -local_x, data_provider)
         min_x = wp.dot(local_x, support_point)
 
         # Min Y: support along -local_y, dot in local space
-        support_point, feature_id = support_map(shape_data, -local_y, data_provider)
+        support_point, _feature_id = support_map(shape_data, -local_y, data_provider)
         min_y = wp.dot(local_y, support_point)
 
         # Min Z: support along -local_z, dot in local space
-        support_point, feature_id = support_map(shape_data, -local_z, data_provider)
+        support_point, _feature_id = support_map(shape_data, -local_z, data_provider)
         min_z = wp.dot(local_z, support_point)
 
         # AABB in world space (add world position to extents)

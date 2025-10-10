@@ -36,6 +36,7 @@ USE_CUDA_GRAPH = True  # Set to False to disable CUDA graph capture
 # wp.config.mode = "debug"
 # wp.config.verify_cuda = True
 
+
 class Example:
     def __init__(self, viewer, num_envs=4):
         self.fps = 60
