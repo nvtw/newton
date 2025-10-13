@@ -601,6 +601,8 @@ def collide_box_box(
       box2_pos: Center position of the second box
       box2_rot: Rotation matrix of the second box
       box2_size: Half-extents of the second box along each axis
+      margin: Distance threshold for early contact generation (default: 0.0).
+              When positive, contacts are generated before boxes overlap.
 
     Returns:
       Tuple containing:
