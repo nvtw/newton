@@ -1233,7 +1233,7 @@ def create_build_manifold(support_func: Any):
         signed_distances = vec5(0.0, 0.0, 0.0, 0.0, 0.0)
 
         # Copy contact points and extract feature IDs
-        count_out = min(num_manifold_points, 4)
+        count_out = wp.min(num_manifold_points, 4)
         for i in range(count_out):
             contact_point_a = left[i]
             contact_point_b = right[i]

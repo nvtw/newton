@@ -442,7 +442,6 @@ class BroadPhaseSAP:
             self.sap_projection_lower,
             self.sap_sort_index,
             num_threads,
-            device=device,
         )
 
         wp.launch(
@@ -460,7 +459,7 @@ class BroadPhaseSAP:
             device=device,
         )
 
-        wp.utils.array_scan(self.sap_range.reshape(-1), self.sap_cumulative_sum, True, device=device)
+        wp.utils.array_scan(self.sap_range.reshape(-1), self.sap_cumulative_sum, True)
 
         # estimate number of overlap checks
         nsweep_in = self.sweep_thread_count_multiplier * num_threads

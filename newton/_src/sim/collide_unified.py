@@ -278,7 +278,13 @@ def extract_shape_data(
 
 @wp.func
 def is_discrete_shape(shape_type: int) -> bool:
-    return shape_type == int(GeoType.BOX) or shape_type == int(GeoType.CONVEX_HULL)
+    """A discrete shape can be represented with a finite amount of flat polygon faces."""
+    return (
+        shape_type == int(GeoType.BOX)
+        or shape_type == int(GeoType.CONVEX_HULL)
+        or shape_type == int(GeoTypeEx.TRIANGLE)
+        or shape_type == int(GeoType.PLANE)
+    )
 
 
 @wp.func
@@ -360,56 +366,6 @@ def compute_plane_normal_from_contacts(
         plane_normal = -plane_normal
 
     return plane_normal
-
-
-@wp.func
-def remove_duplicate_contacts(
-    points: _mat53f,
-    signed_distances: _vec5,
-    count: int,
-    tolerance: float,
-) -> tuple[int, _vec5, _mat53f]:
-    """
-    Remove duplicate contacts by checking neighboring points in cyclic order.
-
-    Only checks the previous point and point 0 (for cyclic wrap), assuming
-    duplicates would be adjacent in the contact manifold.
-
-    Args:
-        points: Contact points matrix (5x3)
-        signed_distances: Signed distances vector (5 elements)
-        count: Number of input contact points
-        tolerance: Distance threshold for duplicate detection
-
-    Returns:
-        Tuple of (new_count, new_signed_distances, new_points)
-    """
-    if count <= 1:
-        return count, signed_distances, points
-
-    new_points = _mat53f()
-    new_signed_distances = _vec5()
-    new_count = int(0)
-
-    for i in range(count):
-        is_duplicate = False
-
-        if i > 0:
-            # Check against previous point
-            if wp.length(points[i] - points[i - 1]) < tolerance:
-                is_duplicate = True
-
-        if not is_duplicate and i > 0 and i == count - 1:
-            # Last point: check against first point (cyclic)
-            if wp.length(points[i] - points[0]) < tolerance:
-                is_duplicate = True
-
-        if not is_duplicate:
-            new_points[new_count] = points[i]
-            new_signed_distances[new_count] = signed_distances[i]
-            new_count += 1
-
-    return new_count, new_signed_distances, new_points
 
 
 @wp.func
@@ -720,8 +676,8 @@ def build_contacts_kernel_gjk_mpr(
         # Post-process for axial shapes (cylinder/cone) rolling on discrete surfaces
         is_discrete_a = is_discrete_shape(geom_a.shape_type)
         is_discrete_b = is_discrete_shape(geom_b.shape_type)
-        is_axial_b = type_b == int(GeoType.CYLINDER) or type_b == int(GeoType.CONE)
         is_axial_a = type_a == int(GeoType.CYLINDER) or type_a == int(GeoType.CONE)
+        is_axial_b = type_b == int(GeoType.CYLINDER) or type_b == int(GeoType.CONE)
 
         if is_discrete_a and is_axial_b and count >= 3:
             # Post-process axial shape (B) rolling on discrete surface (A)
