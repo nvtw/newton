@@ -161,7 +161,7 @@ class ModelBuilder:
         """The thickness of the shape."""
         is_solid: bool = True
         """Indicates whether the shape is solid or hollow. Defaults to True."""
-        collision_group: int = 1
+        collision_group: int = -1
         """The collision group ID for the shape. Defaults to 1.
         Positive values indicate groups that only collide with themselves (and with negative groups).
         Negative values indicate groups that collide with everything except their negative counterpart.

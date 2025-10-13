@@ -26,6 +26,7 @@ from ..geometry.broad_phase_sap import BroadPhaseSAP
 from ..geometry.collision_convex import create_solve_convex_multi_contact
 from ..geometry.support_function import (
     GenericShapeData,
+    GeoTypeEx,
     SupportMapDataProvider,
     pack_mesh_ptr,
     support_map,

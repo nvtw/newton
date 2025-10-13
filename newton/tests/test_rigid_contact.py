@@ -445,15 +445,15 @@ def test_shape_collisions_gjk_mpr_multicontact(test: TestRigidContact, device, v
     # Add ground plane
     builder.add_ground_plane()
 
-    # Finalize model without pre-computed shape pairs (for CollisionPipelineUnified)
-    model = builder.finalize(device=device, build_shape_contact_pairs=False)
+    # Finalize model with pre-computed shape pairs (for CollisionPipelineUnified with EXPLICIT mode)
+    model = builder.finalize(device=device, build_shape_contact_pairs=True)
 
-    # Create CollisionPipelineUnified with NXN broad phase mode
+    # Create CollisionPipelineUnified with EXPLICIT broad phase mode
     collision_pipeline = newton.CollisionPipelineUnified.from_model(
         model,
         rigid_contact_max_per_pair=10,
         rigid_contact_margin=0.01,
-        broad_phase_mode=newton.BroadPhaseMode.NXN,
+        broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
     )
 
     # Use XPBD solver
@@ -594,15 +594,15 @@ def test_mujoco_warp_newton_contacts(test: TestRigidContact, device):
     # Add ground plane
     builder.add_ground_plane()
 
-    # Finalize model
-    model = builder.finalize(device=device)
+    # Finalize model with pre-computed shape pairs (required for EXPLICIT broad phase mode)
+    model = builder.finalize(device=device, build_shape_contact_pairs=True)
 
     # Create unified collision pipeline (critical for this test)
     collision_pipeline = newton.CollisionPipelineUnified.from_model(
         model,
         rigid_contact_max_per_pair=10,
         rigid_contact_margin=0.01,
-        broad_phase_mode=newton.BroadPhaseMode.SAP,
+        broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
     )
 
     # Create MuJoCo Warp solver with Newton contacts
