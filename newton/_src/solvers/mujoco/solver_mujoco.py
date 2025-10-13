@@ -283,22 +283,12 @@ def convert_newton_contacts_to_mjwarp_kernel(
     world_geom_b = to_mjc_geom_index[shape_b]
     geoms = wp.vec2i(world_geom_a[1], world_geom_b[1])
 
-    # Determine world ID from the shapes
-    # Static shapes have world_id = -1 (sentinel), so we need to get it from the non-static shape
-    # If both are non-static, they should have the same world ID (contacts don't cross environments)
+    # See kernel update_body_mass_ipos_kernel, line below:
+    #     worldid = wp.tid() // bodies_per_env
+    # which uses the same strategy to determine the world id
     worldid = world_geom_a[0]
     if worldid < 0:
         worldid = world_geom_b[0]
-
-    # If we still have -1, both shapes are static (shouldn't happen in practice, but handle it)
-    if worldid < 0:
-        # Fall back to inferring from body index
-        if body_a >= 0:
-            worldid = body_a // bodies_per_env
-        elif body_b >= 0:
-            worldid = body_b // bodies_per_env
-        else:
-            worldid = 0  # Last resort - use world 0
 
     margin, gap, condim, friction, solref, solreffriction, solimp = contact_params(
         geom_condim,
@@ -1055,18 +1045,17 @@ def update_incoming_shape_xform_kernel(
     is_static = shape_group[template_or_static_idx] < 0
 
     if is_static:
-        # Static shape - same Newton shape index but exists in all MuJoCo worlds
-        # Since geom fields are replicated across worlds, we can't store a single mapping
-        # The world ID needs to be determined from the non-static shape in the contact pair
-        # So we store -1 as a sentinel to indicate "world ID unknown, infer from partner"
+        # Static shape - use absolute index
+        # Store world ID as -1 (sentinel) since static shapes exist in all worlds
+        # The actual world ID will be determined from the non-static shape in the contact pair
         global_shape_idx = template_or_static_idx
         if env_idx == 0:
-            # Use -1 as world ID sentinel for static shapes
+            # Only store the mapping once for static shapes (use env 0's geom index)
             full_shape_mapping[global_shape_idx] = wp.vec2i(-1, geom_idx)
+        reverse_shape_mapping[env_idx, geom_idx] = global_shape_idx
     else:
         # Non-static shape - compute the absolute Newton shape index for this environment
         # template_or_static_idx is 0-based offset within first_group shapes
-        # global_shape_idx = first_env_shape_base + template_idx + env_idx * shape_range_len
         global_shape_idx = first_env_shape_base + template_or_static_idx + env_idx * shape_range_len
         full_shape_mapping[global_shape_idx] = wp.vec2i(env_idx, geom_idx)
         reverse_shape_mapping[env_idx, geom_idx] = global_shape_idx
@@ -1704,20 +1693,13 @@ class SolverMuJoCo(SolverBase):
         # find graph coloring of collision filter pairs
         num_shapes = len(selected_shapes)
         shape_a, shape_b = np.triu_indices(num_shapes, k=1)
-        # Convert to numpy array if needed before indexing
-        selected_shapes_np = selected_shapes.numpy() if hasattr(selected_shapes, "numpy") else selected_shapes
-        shape_collision_group_np = (
-            model.shape_collision_group.numpy()
-            if hasattr(model.shape_collision_group, "numpy")
-            else model.shape_collision_group
-        )
-        cgroup = [shape_collision_group_np[i] for i in selected_shapes_np]
+        cgroup = [model.shape_collision_group[i] for i in selected_shapes]
         # edges representing colliding shape pairs
         graph_edges = [
             (i, j)
             for i, j in zip(shape_a, shape_b, strict=True)
             if (
-                (selected_shapes_np[i], selected_shapes_np[j]) not in model.shape_collision_filter_pairs
+                (selected_shapes[i], selected_shapes[j]) not in model.shape_collision_filter_pairs
                 and (cgroup[i] == cgroup[j] or cgroup[i] == -1 or cgroup[j] == -1)
             )
         ]
@@ -1731,13 +1713,13 @@ class SolverMuJoCo(SolverBase):
             num_colors = 0
             for group in color_groups:
                 num_colors += 1
-                shape_color[selected_shapes_np[group]] = num_colors
+                shape_color[selected_shapes[group]] = num_colors
             if visualize_graph:
                 plot_graph(
                     vertices=np.arange(num_shapes),
                     edges=graph_edges,
-                    node_labels=[shape_keys[i] for i in selected_shapes_np] if shape_keys is not None else None,
-                    node_colors=[shape_color[i] for i in selected_shapes_np],
+                    node_labels=[shape_keys[i] for i in selected_shapes] if shape_keys is not None else None,
+                    node_colors=[shape_color[i] for i in selected_shapes],
                 )
 
         return shape_color
