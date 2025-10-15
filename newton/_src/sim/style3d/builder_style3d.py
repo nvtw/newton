@@ -112,22 +112,22 @@ class Style3DModelBuilder(ModelBuilder):
         builder: Style3DModelBuilder,
         xform: Transform | None = None,
         update_num_env_count: bool = True,
-        environment: int | None = None,
+        world: int | None = None,
     ):
         """Copies the data from another `Style3DModelBuilder` to this `Style3DModelBuilder`.
 
         Args:
             builder (ModelBuilder): a model builder to add model data from.
             xform (Transform): offset transform applied to root bodies.
-            update_num_env_count (bool): if True, the number of environments is incremented by 1.
-            environment (int | None): environment group index to assign to ALL entities from this builder.
+            update_num_env_count (bool): if True, the number of worlds is incremented by 1.
+            world (int | None): world index to assign to ALL entities from this builder.
         """
 
         super().add_builder(
             builder=builder,
             xform=xform,
             update_num_env_count=update_num_env_count,
-            environment=environment,
+            world=world,
         )
 
         style3d_builder_attrs = [

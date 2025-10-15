@@ -1519,8 +1519,8 @@ class TestMuJoCoConversion(unittest.TestCase):
 
         # Main builder adds the robot to env 0 and env 1
         builder = newton.ModelBuilder()
-        builder.add_builder(robot, environment=0)  # Creates bodies 0,1 and joint 0 (revolute)
-        builder.add_builder(robot, environment=1)  # Creates bodies 2,3 and joint 1 (revolute)
+        builder.add_builder(robot, world=0)  # Creates bodies 0,1 and joint 0 (revolute)
+        builder.add_builder(robot, world=1)  # Creates bodies 2,3 and joint 1 (revolute)
 
         # Now add free joints to the parent bodies of each robot
         builder.current_env_group = 0

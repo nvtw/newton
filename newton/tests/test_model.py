@@ -322,23 +322,23 @@ class TestModel(unittest.TestCase):
 
             return env_builder
 
-        # Add environment 0
+        # Add world 0
         env0_builder = create_env_builder()
         main_builder.add_builder(
-            env0_builder, xform=wp.transform(wp.vec3(1.0, 0.0, 0.0), wp.quat_identity()), environment=0
+            env0_builder, xform=wp.transform(wp.vec3(1.0, 0.0, 0.0), wp.quat_identity()), world=0
         )
 
-        # Add environment 1
+        # Add world 1
         env1_builder = create_env_builder()
         main_builder.add_builder(
-            env1_builder, xform=wp.transform(wp.vec3(2.0, 0.0, 0.0), wp.quat_identity()), environment=1
+            env1_builder, xform=wp.transform(wp.vec3(2.0, 0.0, 0.0), wp.quat_identity()), world=1
         )
 
-        # Add environment 2 (testing auto-assignment)
+        # Add world 2 (testing auto-assignment)
         env2_builder = create_env_builder()
         main_builder.add_builder(
             env2_builder, xform=wp.transform(wp.vec3(3.0, 0.0, 0.0), wp.quat_identity())
-        )  # should get group 2
+        )  # should get world 2
 
         # Finalize the model
         model = main_builder.finalize()
@@ -403,34 +403,34 @@ class TestModel(unittest.TestCase):
 
         # Test 1: Global entities should not increment num_envs
         self.assertEqual(main_builder.num_envs, 0)
-        main_builder.add_builder(sub_builder, environment=-1, update_num_env_count=True)
+        main_builder.add_builder(sub_builder, world=-1, update_num_env_count=True)
         self.assertEqual(main_builder.num_envs, 0)  # Should still be 0
 
-        # Test 2: Auto-increment with environment=None
-        main_builder.add_builder(sub_builder, environment=None, update_num_env_count=True)
+        # Test 2: Auto-increment with world=None
+        main_builder.add_builder(sub_builder, world=None, update_num_env_count=True)
         self.assertEqual(main_builder.num_envs, 1)
 
-        main_builder.add_builder(sub_builder, environment=None, update_num_env_count=True)
+        main_builder.add_builder(sub_builder, world=None, update_num_env_count=True)
         self.assertEqual(main_builder.num_envs, 2)
 
-        # Test 3: Explicit environment indices
+        # Test 3: Explicit world indices
         main_builder2 = ModelBuilder()
 
-        # Add environment 3 directly (skipping 0, 1, 2)
-        main_builder2.add_builder(sub_builder, environment=3, update_num_env_count=True)
+        # Add world 3 directly (skipping 0, 1, 2)
+        main_builder2.add_builder(sub_builder, world=3, update_num_env_count=True)
         self.assertEqual(main_builder2.num_envs, 4)  # Should be 3+1
 
-        # Add environment 1 (should not change num_envs since 4 > 1+1)
-        main_builder2.add_builder(sub_builder, environment=1, update_num_env_count=True)
+        # Add world 1 (should not change num_envs since 4 > 1+1)
+        main_builder2.add_builder(sub_builder, world=1, update_num_env_count=True)
         self.assertEqual(main_builder2.num_envs, 4)  # Should still be 4
 
-        # Add environment 5 (should increase to 6)
-        main_builder2.add_builder(sub_builder, environment=5, update_num_env_count=True)
+        # Add world 5 (should increase to 6)
+        main_builder2.add_builder(sub_builder, world=5, update_num_env_count=True)
         self.assertEqual(main_builder2.num_envs, 6)  # Should be 5+1
 
         # Test 4: update_num_env_count=False should not change num_envs
         main_builder3 = ModelBuilder()
-        main_builder3.add_builder(sub_builder, environment=2, update_num_env_count=False)
+        main_builder3.add_builder(sub_builder, world=2, update_num_env_count=False)
         self.assertEqual(main_builder3.num_envs, 0)  # Should remain 0
 
     def test_collapse_fixed_joints_with_groups(self):

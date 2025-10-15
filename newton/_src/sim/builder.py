@@ -103,33 +103,33 @@ class ModelBuilder:
             solver.step(state_0, state_1, control, contacts, dt=1.0 / 60.0)
             state_0, state_1 = state_1, state_0
 
-    Environment Grouping
+    World Grouping
     --------------------
 
-    ModelBuilder supports environment grouping to organize entities for multi-environment simulations.
-    Each entity (particle, body, shape, joint, articulation) has an associated group index:
+    ModelBuilder supports world grouping to organize entities for multi-world simulations.
+    Each entity (particle, body, shape, joint, articulation) has an associated world index:
 
-    - Group -1: Global entities shared across all environments (e.g., ground plane)
-    - Group 0, 1, 2, ...: Environment-specific entities
+    - Index -1: Global entities shared across all worlds (e.g., ground plane)
+    - Index 0, 1, 2, ...: World-specific entities
 
-    There are two ways to assign environment groups:
+    There are two ways to assign world indices:
 
     1. **Direct entity creation**: Entities inherit the builder's `current_env_group` value::
 
            builder = ModelBuilder()
            builder.current_env_group = -1  # Following entities will be global
            builder.add_ground_plane()
-           builder.current_env_group = 0  # Following entities will be in environment 0
+           builder.current_env_group = 0  # Following entities will be in world 0
            builder.add_body(...)
 
-    2. **Using add_builder()**: ALL entities from the sub-builder are assigned to the specified group::
+    2. **Using add_builder()**: ALL entities from the sub-builder are assigned to the specified world::
 
            robot = ModelBuilder()
-           robot.add_body(...)  # Group assignments here will be overridden
+           robot.add_body(...)  # World assignments here will be overridden
 
            main = ModelBuilder()
-           main.add_builder(robot, environment=0)  # All robot entities -> group 0
-           main.add_builder(robot, environment=1)  # All robot entities -> group 1
+           main.add_builder(robot, world=0)  # All robot entities -> world 0
+           main.add_builder(robot, world=1)  # All robot entities -> world 1
 
     Note:
         It is strongly recommended to use the ModelBuilder to construct a simulation rather
@@ -914,21 +914,21 @@ class ModelBuilder:
         builder: ModelBuilder,
         xform: Transform | None = None,
         update_num_env_count: bool = True,
-        environment: int | None = None,
+        world: int | None = None,
     ):
         """Copies the data from `builder`, another `ModelBuilder` to this `ModelBuilder`.
 
-        **Environment Group Behavior:**
+        **World Grouping Behavior:**
         When adding a builder, ALL entities from the source builder will be assigned to the same
-        environment group, overriding any group assignments that existed in the source builder.
-        This ensures that all entities from a sub-builder are grouped together as a single environment.
+        world, overriding any world assignments that existed in the source builder.
+        This ensures that all entities from a sub-builder are grouped together as a single world.
 
-        Environment groups automatically handle collision filtering between different environments:
-        - Entities from different environments (except -1) do not collide with each other
-        - Global entities (group -1) collide with all environments
-        - Collision groups from the source builder are preserved as-is for fine-grained collision control within each environment
+        Worlds automatically handle collision filtering between different worlds:
+        - Entities from different worlds (except -1) do not collide with each other
+        - Global entities (index -1) collide with all worlds
+        - Collision groups from the source builder are preserved as-is for fine-grained collision control within each world
 
-        To create global entities that are shared across all environments, set the main builder's
+        To create global entities that are shared across all worlds, set the main builder's
         `current_env_group` to -1 before adding entities directly (not via add_builder).
 
         Example::
@@ -940,34 +940,34 @@ class ModelBuilder:
 
             # Create robot builder
             robot_builder = ModelBuilder()
-            robot_builder.add_body(...)  # These group assignments will be overridden
+            robot_builder.add_body(...)  # These world assignments will be overridden
 
             # Add multiple robot instances
-            main_builder.add_builder(robot_builder, environment=0)  # All entities -> group 0
-            main_builder.add_builder(robot_builder, environment=1)  # All entities -> group 1
+            main_builder.add_builder(robot_builder, world=0)  # All entities -> world 0
+            main_builder.add_builder(robot_builder, world=1)  # All entities -> world 1
 
         Args:
             builder (ModelBuilder): a model builder to add model data from.
             xform (Transform): offset transform applied to root bodies.
-            update_num_env_count (bool): if True, the number of environments is updated appropriately.
-                For non-global entities (environment >= 0), this either increments num_envs (when environment is None)
-                or ensures num_envs is at least environment+1. Global entities (environment=-1) do not affect num_envs.
-            environment (int | None): environment group index to assign to ALL entities from this builder.
-                If None, uses the current environment count as the group index. Use -1 for global entities.
-                Note: environment=-1 does not increase num_envs even when update_num_env_count=True.
+            update_num_env_count (bool): if True, the number of worlds is updated appropriately.
+                For non-global entities (world >= 0), this either increments num_envs (when world is None)
+                or ensures num_envs is at least world+1. Global entities (world=-1) do not affect num_envs.
+            world (int | None): world index to assign to ALL entities from this builder.
+                If None, uses the current world count as the index. Use -1 for global entities.
+                Note: world=-1 does not increase num_envs even when update_num_env_count=True.
         """
 
         if builder.up_axis != self.up_axis:
             raise ValueError("Cannot add a builder with a different up axis.")
 
-        # Set the environment group for entities being added
-        if environment is None:
-            # Use the current environment count as the group index if not specified
+        # Set the world index for entities being added
+        if world is None:
+            # Use the current world count as the index if not specified
             group_idx = self.num_envs if update_num_env_count else self.current_env_group
         else:
-            group_idx = environment
+            group_idx = world
 
-        # Save the previous environment group
+        # Save the previous world
         prev_env_group = self.current_env_group
         self.current_env_group = group_idx
 
@@ -1176,16 +1176,16 @@ class ModelBuilder:
         self.joint_coord_count += builder.joint_coord_count
 
         if update_num_env_count:
-            # Globals do not contribute to the environment count
+            # Globals do not contribute to the world count
             if group_idx >= 0:
-                # If an explicit environment is provided, ensure num_envs >= group_idx+1.
-                # Otherwise, auto-increment for the next environment.
-                if environment is None:
+                # If an explicit world is provided, ensure num_envs >= group_idx+1.
+                # Otherwise, auto-increment for the next world.
+                if world is None:
                     self.num_envs += 1
                 else:
                     self.num_envs = max(self.num_envs, group_idx + 1)
 
-        # Restore the previous environment group
+        # Restore the previous world
         self.current_env_group = prev_env_group
 
     def add_body(

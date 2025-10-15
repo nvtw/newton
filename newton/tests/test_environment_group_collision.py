@@ -142,8 +142,8 @@ class TestEnvironmentGroupCollision(unittest.TestCase):
         )
 
         # Add two robot instances in different environments
-        main_builder.add_builder(robot_builder, environment=0)
-        main_builder.add_builder(robot_builder, environment=1)
+        main_builder.add_builder(robot_builder, world=0)
+        main_builder.add_builder(robot_builder, world=1)
 
         model = main_builder.finalize(device=self.device)
 
