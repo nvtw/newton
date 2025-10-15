@@ -88,9 +88,7 @@ def test_group_pair(group_a: int, group_b: int) -> bool:
 
 
 @wp.func
-def test_environment_and_group_pair(
-    env_group_a: int, env_group_b: int, collision_group_a: int, collision_group_b: int
-) -> bool:
+def test_environment_and_group_pair(world_a: int, world_b: int, collision_group_a: int, collision_group_b: int) -> bool:
     """Test if two entities should collide based on world and collision groups.
 
     World indices define which simulation world an entity belongs to:
@@ -103,8 +101,8 @@ def test_environment_and_group_pair(
     3. Within the same world, collision groups determine interactions
 
     Args:
-        env_group_a: World index of first entity
-        env_group_b: World index of second entity
+        world_a: World index of first entity
+        world_b: World index of second entity
         collision_group_a: Collision group of first entity
         collision_group_b: Collision group of second entity
 
@@ -112,7 +110,7 @@ def test_environment_and_group_pair(
         bool: True if the entities should collide, False otherwise
     """
     # Check world indices first
-    if env_group_a != -1 and env_group_b != -1 and env_group_a != env_group_b:
+    if world_a != -1 and world_b != -1 and world_a != world_b:
         return False
 
     # If same world or at least one is global (-1), check collision groups

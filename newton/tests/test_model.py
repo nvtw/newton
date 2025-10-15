@@ -390,7 +390,7 @@ class TestModel(unittest.TestCase):
             self.assertEqual(articulation_groups[2], 2)
 
     def test_num_envs_tracking(self):
-        """Test that num_envs is properly tracked when using add_builder with environment groups."""
+        """Test that num_envs is properly tracked when using add_builder with worlds."""
         main_builder = ModelBuilder()
 
         # Create a simple sub-builder
@@ -430,7 +430,7 @@ class TestModel(unittest.TestCase):
         self.assertEqual(main_builder3.num_envs, 0)  # Should remain 0
 
     def test_collapse_fixed_joints_with_groups(self):
-        """Test that collapse_fixed_joints correctly preserves environment groups."""
+        """Test that collapse_fixed_joints correctly preserves world groups."""
         builder = ModelBuilder()
 
         # Environment 0: Chain with fixed joints
