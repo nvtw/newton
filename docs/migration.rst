@@ -148,6 +148,22 @@ The :meth:`newton.ModelBuilder.add_joint_free()` method now initializes the posi
 
 The universal and compound joints have been removed in favor of the more general D6 joint.
 
+**Terminology Change: Environment → World**
+
+Newton now uses "world" terminology instead of "environment" for entity grouping in multi-world simulations:
+
++--------------------------------------------------------+------------------------------------------------------------------------+
+| **Previous**                                           | **Current**                                                            |
++--------------------------------------------------------+------------------------------------------------------------------------+
+| ``ModelBuilder.current_env_group``                     | :attr:`newton.ModelBuilder.current_world`                              |
++--------------------------------------------------------+------------------------------------------------------------------------+
+| ``ModelBuilder.add_builder(..., environment=0)``       | ``ModelBuilder.add_builder(..., world=0)``                             |
++--------------------------------------------------------+------------------------------------------------------------------------+
+| ``Model.shape_group``                                  | :attr:`newton.Model.shape_world`                                       |
++--------------------------------------------------------+------------------------------------------------------------------------+
+
+This change improves terminology consistency throughout the codebase. All documentation and docstrings now use "world" to refer to separate simulation worlds that don't interact with each other (except for global entities with index -1).
+
 
 Renderers
 ---------
