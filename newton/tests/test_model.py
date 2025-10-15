@@ -354,7 +354,7 @@ class TestModel(unittest.TestCase):
         # Verify group assignments
         particle_groups = model.particle_group.numpy() if model.particle_group is not None else []
         body_groups = model.body_group.numpy() if model.body_group is not None else []
-        shape_groups = model.shape_group.numpy() if model.shape_group is not None else []
+        shape_worlds = model.shape_world.numpy() if model.shape_world is not None else []
         joint_groups = model.joint_group.numpy() if model.joint_group is not None else []
         articulation_groups = model.articulation_group.numpy() if model.articulation_group is not None else []
 
@@ -377,11 +377,11 @@ class TestModel(unittest.TestCase):
             self.assertTrue(np.all(body_groups[3:5] == 1))
             self.assertTrue(np.all(body_groups[5:7] == 2))
 
-        if len(shape_groups) > 0:
-            self.assertEqual(shape_groups[0], -1)  # ground shape
-            self.assertTrue(np.all(shape_groups[1:3] == 0))
-            self.assertTrue(np.all(shape_groups[3:5] == 1))
-            self.assertTrue(np.all(shape_groups[5:7] == 2))
+        if len(shape_worlds) > 0:
+            self.assertEqual(shape_worlds[0], -1)  # ground shape
+            self.assertTrue(np.all(shape_worlds[1:3] == 0))
+            self.assertTrue(np.all(shape_worlds[3:5] == 1))
+            self.assertTrue(np.all(shape_worlds[5:7] == 2))
 
         if len(joint_groups) > 0:
             self.assertEqual(joint_groups[0], 0)
@@ -564,7 +564,7 @@ class TestModel(unittest.TestCase):
         self.assertEqual(builder.joint_child, [0, 1])
         self.assertEqual(builder.joint_q_start, [0, 1])
         self.assertEqual(builder.joint_qd_start, [0, 1])
-        self.assertEqual(builder.shape_group, [0, 1, 2])
+        self.assertEqual(builder.shape_world, [0, 1, 2])
         self.assertEqual(builder.shape_body, [0, 1, -1])
         self.assertEqual(builder.body_shapes, {0: [0], 1: [1], -1: [2]})
         self.assertEqual(builder.body_q[0], offset_xform * orig_xform)

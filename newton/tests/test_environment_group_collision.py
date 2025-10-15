@@ -147,20 +147,20 @@ class TestEnvironmentGroupCollision(unittest.TestCase):
 
         model = main_builder.finalize(device=self.device)
 
-        # Verify environment groups
-        shape_groups = model.shape_group.numpy()
+        # Verify world indices
+        shape_worlds = model.shape_world.numpy()
         body_groups = model.body_group.numpy()
 
         # Ground plane should be global
-        self.assertEqual(shape_groups[0], -1)
+        self.assertEqual(shape_worlds[0], -1)
 
-        # First robot shapes should be in env 0
-        self.assertEqual(shape_groups[1], 0)
-        self.assertEqual(shape_groups[2], 0)
+        # First robot shapes should be in world 0
+        self.assertEqual(shape_worlds[1], 0)
+        self.assertEqual(shape_worlds[2], 0)
 
-        # Second robot shapes should be in env 1
-        self.assertEqual(shape_groups[3], 1)
-        self.assertEqual(shape_groups[4], 1)
+        # Second robot shapes should be in world 1
+        self.assertEqual(shape_worlds[3], 1)
+        self.assertEqual(shape_worlds[4], 1)
 
         # Bodies should also be correctly assigned
         self.assertEqual(body_groups[0], 0)  # First robot base

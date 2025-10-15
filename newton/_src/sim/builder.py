@@ -333,7 +333,7 @@ class ModelBuilder:
         self.particle_flags = []
         self.particle_max_velocity = 1e5
         self.particle_color_groups: list[nparray] = []
-        self.particle_group = []  # environment group index for each particle
+        self.particle_group = []  # world index for each particle
 
         # shapes (each shape has an entry in these arrays)
         self.shape_key = []  # shape keys
@@ -357,8 +357,8 @@ class ModelBuilder:
         self.shape_collision_group = []
         # radius to use for broadphase collision checking
         self.shape_collision_radius = []
-        # environment group index for each shape
-        self.shape_group = []
+        # world index for each shape
+        self.shape_world = []
 
         # filtering to ignore certain collision pairs
         self.shape_collision_filter_pairs: list[tuple[int, int]] = []
@@ -406,7 +406,7 @@ class ModelBuilder:
         self.body_qd = []
         self.body_key = []
         self.body_shapes = {-1: []}  # mapping from body to shapes
-        self.body_group = []  # environment group index for each body
+        self.body_group = []  # world index for each body
 
         # rigid joints
         self.joint_parent = []  # index of the parent body                      (constant)
@@ -442,11 +442,11 @@ class ModelBuilder:
         self.joint_q_start = []
         self.joint_qd_start = []
         self.joint_dof_dim = []
-        self.joint_group = []  # environment group index for each joint
+        self.joint_group = []  # world index for each joint
 
         self.articulation_start = []
         self.articulation_key = []
-        self.articulation_group = []  # environment group index for each articulation
+        self.articulation_group = []  # world index for each articulation
 
         self.joint_dof_count = 0
         self.joint_coord_count = 0
@@ -624,9 +624,9 @@ class ModelBuilder:
         """
         Replicates the given builder multiple times, offsetting each copy according to the supplied spacing.
 
-        This method is useful for creating multiple instances of a sub-model (e.g., robots, environments)
+        This method is useful for creating multiple instances of a sub-model (e.g., robots, scenes)
         arranged in a regular grid or along a line. Each copy is offset in space by a multiple of the
-        specified spacing vector, and all entities from each copy are assigned to a new environment group.
+        specified spacing vector, and all entities from each copy are assigned to a new environment.
 
         Args:
             builder (ModelBuilder): The builder to replicate. All entities from this builder will be copied.
@@ -1068,10 +1068,10 @@ class ModelBuilder:
             [(i + start_shape_idx, j + start_shape_idx) for i, j in builder.shape_collision_filter_pairs]
         )
 
-        # Handle environment group assignments
+        # Handle world assignments
         # For particles
         if builder.particle_count > 0:
-            # Override all group indices with current environment group
+            # Override all world indices with current world
             particle_groups = [self.current_env_group] * builder.particle_count
             self.particle_group.extend(particle_groups)
 
@@ -1082,8 +1082,8 @@ class ModelBuilder:
 
         # For shapes
         if builder.shape_count > 0:
-            shape_groups = [self.current_env_group] * builder.shape_count
-            self.shape_group.extend(shape_groups)
+            shape_worlds = [self.current_env_group] * builder.shape_count
+            self.shape_world.extend(shape_worlds)
 
         # For joints
         if builder.joint_count > 0:
@@ -2443,7 +2443,7 @@ class ModelBuilder:
         self.shape_material_restitution.append(cfg.restitution)
         self.shape_collision_group.append(cfg.collision_group)
         self.shape_collision_radius.append(compute_shape_radius(type, scale, src))
-        self.shape_group.append(self.current_env_group)
+        self.shape_world.append(self.current_env_group)
         if cfg.has_shape_collision and cfg.collision_filter_parent and body > -1 and body in self.joint_parents:
             for parent_body in self.joint_parents[body]:
                 if parent_body > -1:
@@ -4160,7 +4160,7 @@ class ModelBuilder:
             m.shape_collision_radius = wp.array(
                 self.shape_collision_radius, dtype=wp.float32, requires_grad=requires_grad
             )
-            m.shape_group = wp.array(self.shape_group, dtype=wp.int32)
+            m.shape_world = wp.array(self.shape_world, dtype=wp.int32)
 
             m.shape_source = self.shape_source  # used for rendering
 
@@ -4448,20 +4448,20 @@ class ModelBuilder:
         filters = model.shape_collision_filter_pairs
         contact_pairs = []
 
-        # Sort shapes by env group in case they are not sorted, keep only colliding shapes
+        # Sort shapes by world in case they are not sorted, keep only colliding shapes
         colliding_indices = [i for i, flag in enumerate(self.shape_flags) if flag & ShapeFlags.COLLIDE_SHAPES]
-        sorted_indices = sorted(colliding_indices, key=lambda i: self.shape_group[i])
+        sorted_indices = sorted(colliding_indices, key=lambda i: self.shape_world[i])
 
         # Iterate over all shapes candidates
         for i1 in range(len(sorted_indices)):
             s1 = sorted_indices[i1]
-            env1 = self.shape_group[s1]
+            env1 = self.shape_world[s1]
             collision_group1 = self.shape_collision_group[s1]
             for i2 in range(i1 + 1, len(sorted_indices)):
                 s2 = sorted_indices[i2]
-                env2 = self.shape_group[s2]
-                # Skip shapes from different environments (unless one is global). As the shapes are sorted,
-                # this means the shapes in this environment group have all been processed.
+                env2 = self.shape_world[s2]
+                # Skip shapes from different worlds (unless one is global). As the shapes are sorted,
+                # this means the shapes in this world have all been processed.
                 if env1 != -1 and env1 != env2:
                     break
 

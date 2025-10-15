@@ -36,13 +36,13 @@ class Model:
 
     Key Features:
         - Stores all static data for simulation: particles, rigid bodies, joints, shapes, soft/rigid elements, etc.
-        - Supports grouping of entities by environment using group indices (e.g., `particle_group`, `body_group`, etc.).
-          - Group index -1: global entities shared across all environments.
-          - Group indices 0, 1, 2, ...: environment-specific entities.
+        - Supports grouping of entities by world using group indices (e.g., `particle_group`, `body_group`, etc.).
+          - Index -1: global entities shared across all worlds.
+          - Indices 0, 1, 2, ...: world-specific entities.
         - Grouping enables:
-          - Collision detection optimization (e.g., separating environments)
-          - Visualization (e.g., spatially separating environments)
-          - Parallel processing of independent environments
+          - Collision detection optimization (e.g., separating worlds)
+          - Visualization (e.g., spatially separating worlds)
+          - Parallel processing of independent worlds
 
     Note:
         It is strongly recommended to use the :class:`ModelBuilder` to construct a Model.
@@ -92,7 +92,7 @@ class Model:
         self.particle_max_velocity = 1e5
         """Maximum particle velocity (to prevent instability)."""
         self.particle_group = None
-        """Environment group index for each particle, shape [particle_count], int. -1 for global."""
+        """World index for each particle, shape [particle_count], int. -1 for global."""
 
         self.shape_key = []
         """List of keys for each shape."""
@@ -145,8 +145,8 @@ class Model:
         """Pairs of shape indices that may collide, shape [contact_pair_count, 2], int."""
         self.shape_contact_pair_count = 0
         """Number of shape contact pairs."""
-        self.shape_group = None
-        """Environment group index for each shape, shape [shape_count], int. -1 for global."""
+        self.shape_world = None
+        """World index for each shape, shape [shape_count], int. -1 for global."""
 
         self.spring_indices = None
         """Particle spring indices, shape [spring_count*2], int."""
@@ -220,7 +220,7 @@ class Model:
         self.body_key = []
         """Rigid body keys, shape [body_count], str."""
         self.body_group = None
-        """Environment group index for each body, shape [body_count], int. Global entities have group index -1."""
+        """World index for each body, shape [body_count], int. Global entities have index -1."""
 
         self.joint_q = None
         """Generalized joint positions for state initialization, shape [joint_coord_count], float."""
@@ -281,13 +281,13 @@ class Model:
         self.joint_key = []
         """Joint keys, shape [joint_count], str."""
         self.joint_group = None
-        """Environment group index for each joint, shape [joint_count], int. -1 for global."""
+        """World index for each joint, shape [joint_count], int. -1 for global."""
         self.articulation_start = None
         """Articulation start index, shape [articulation_count], int."""
         self.articulation_key = []
         """Articulation keys, shape [articulation_count], str."""
         self.articulation_group = None
-        """Environment group index for each articulation, shape [articulation_count], int. -1 for global."""
+        """World index for each articulation, shape [articulation_count], int. -1 for global."""
         self.max_joints_per_articulation = 0
         """Maximum number of joints in any articulation (used for IK kernel dimensioning)."""
 

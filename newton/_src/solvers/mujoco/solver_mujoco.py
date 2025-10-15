@@ -1023,7 +1023,7 @@ def update_joint_transforms_kernel(
 @wp.kernel(enable_backward=False)
 def update_incoming_shape_xform_kernel(
     geom_to_shape_idx: wp.array(dtype=wp.int32),
-    shape_group: wp.array(dtype=wp.int32),
+    shape_world: wp.array(dtype=wp.int32),
     shape_transform: wp.array(dtype=wp.transform),
     shape_range_len: int,
     geom_pos: wp.array(dtype=wp.vec3),
@@ -1037,7 +1037,7 @@ def update_incoming_shape_xform_kernel(
     template_shape_idx = geom_to_shape_idx[geom_idx]
     if template_shape_idx < 0:
         return
-    if shape_group[template_shape_idx] < 0:
+    if shape_world[template_shape_idx] < 0:
         # this is a static shape that is used in all environments
         global_shape_idx = template_shape_idx
     else:
@@ -1954,7 +1954,7 @@ class SolverMuJoCo(SolverBase):
         shape_type = model.shape_type.numpy()
         shape_size = model.shape_scale.numpy()
         shape_flags = model.shape_flags.numpy()
-        shape_group = model.shape_group.numpy()
+        shape_world = model.shape_world.numpy()
         shape_mu = model.shape_material_mu.numpy()
 
         eq_constraint_type = model.equality_constraint_type.numpy()
@@ -2008,15 +2008,15 @@ class SolverMuJoCo(SolverBase):
 
         if separate_envs_to_worlds:
             # determine which shapes, bodies and joints belong to the first environment
-            # based on the shape group: we pick objects from the first group and negative groups
-            non_negatives = shape_group[shape_group >= 0]
+            # based on the shape world: we pick objects from the first world and global shapes
+            non_negatives = shape_world[shape_world >= 0]
             if len(non_negatives) > 0:
                 first_group = np.min(non_negatives)
-                shape_range_len = len(np.where(shape_group == first_group)[0])
+                shape_range_len = len(np.where(shape_world == first_group)[0])
             else:
                 first_group = -1
                 shape_range_len = model.shape_count
-            selected_shapes = np.where((shape_group == first_group) | (shape_group < 0))[0]
+            selected_shapes = np.where((shape_world == first_group) | (shape_world < 0))[0]
             selected_bodies = np.where((body_group == first_group) | (body_group < 0))[0]
             selected_joints = np.where((joint_group == first_group) | (joint_group < 0))[0]
         else:
@@ -2433,7 +2433,7 @@ class SolverMuJoCo(SolverBase):
                     dim=(self.model.num_envs, self.mj_model.ngeom),
                     inputs=[
                         geom_to_shape_idx_wp,
-                        self.model.shape_group,
+                        self.model.shape_world,
                         self.model.shape_transform,
                         shape_range_len,
                         self.mjw_model.geom_pos[0],

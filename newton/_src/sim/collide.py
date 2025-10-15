@@ -234,7 +234,7 @@ class CollisionPipeline:
                     model.shape_type,
                     model.shape_scale,
                     model.shape_source_ptr,
-                    model.shape_group,
+                    model.shape_world,
                     self.soft_contact_margin,
                     self.soft_contact_max,
                     shape_count,
