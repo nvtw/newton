@@ -324,15 +324,11 @@ class TestModel(unittest.TestCase):
 
         # Add world 0
         env0_builder = create_env_builder()
-        main_builder.add_builder(
-            env0_builder, xform=wp.transform(wp.vec3(1.0, 0.0, 0.0), wp.quat_identity()), world=0
-        )
+        main_builder.add_builder(env0_builder, xform=wp.transform(wp.vec3(1.0, 0.0, 0.0), wp.quat_identity()), world=0)
 
         # Add world 1
         env1_builder = create_env_builder()
-        main_builder.add_builder(
-            env1_builder, xform=wp.transform(wp.vec3(2.0, 0.0, 0.0), wp.quat_identity()), world=1
-        )
+        main_builder.add_builder(env1_builder, xform=wp.transform(wp.vec3(2.0, 0.0, 0.0), wp.quat_identity()), world=1)
 
         # Add world 2 (testing auto-assignment)
         env2_builder = create_env_builder()
