@@ -38,21 +38,21 @@ class TestEnvironmentGroupCollision(unittest.TestCase):
         body2 = builder.add_body(xform=wp.transform_identity())
 
         # Environment 0: Box at origin
-        builder.current_env_group = 0
+        builder.current_world = 0
         cfg0 = ModelBuilder.ShapeConfig(collision_group=1)
         builder.add_shape_box(
             body=body0, xform=wp.transform(wp.vec3(0, 0, 0), wp.quat_identity()), hx=0.5, hy=0.5, hz=0.5, cfg=cfg0
         )
 
         # Environment 1: Box slightly overlapping (would collide without env groups)
-        builder.current_env_group = 1
+        builder.current_world = 1
         cfg1 = ModelBuilder.ShapeConfig(collision_group=1)
         builder.add_shape_box(
             body=body1, xform=wp.transform(wp.vec3(0.8, 0, 0), wp.quat_identity()), hx=0.5, hy=0.5, hz=0.5, cfg=cfg1
         )
 
         # Global box that should collide with both
-        builder.current_env_group = -1
+        builder.current_world = -1
         cfg_global = ModelBuilder.ShapeConfig(collision_group=-1)  # Use -1 to collide with everything
         builder.add_shape_box(
             body=body2,
@@ -89,15 +89,15 @@ class TestEnvironmentGroupCollision(unittest.TestCase):
         builder = ModelBuilder()
 
         # Environment 0: Particle
-        builder.current_env_group = 0
+        builder.current_world = 0
         builder.add_particle(pos=(0, 0, 0), vel=(0, 0, 0), mass=1.0, radius=0.1)
 
         # Environment 1: Shape that overlaps with particle
-        builder.current_env_group = 1
+        builder.current_world = 1
         builder.add_shape_sphere(body=-1, xform=wp.transform(wp.vec3(0, 0, 0), wp.quat_identity()), radius=0.2)
 
         # Global shape that should collide with particle
-        builder.current_env_group = -1
+        builder.current_world = -1
         builder.add_shape_box(
             body=-1, xform=wp.transform(wp.vec3(0, 0.2, 0), wp.quat_identity()), hx=0.5, hy=0.1, hz=0.5
         )
@@ -135,7 +135,7 @@ class TestEnvironmentGroupCollision(unittest.TestCase):
         main_builder = ModelBuilder()
 
         # Add global ground plane
-        main_builder.current_env_group = -1
+        main_builder.current_world = -1
         cfg_ground = ModelBuilder.ShapeConfig(collision_group=-1)  # Collides with everything
         main_builder.add_shape_box(
             body=-1, xform=wp.transform(wp.vec3(0, -1, 0), wp.quat_identity()), hx=10, hy=0.1, hz=10, cfg=cfg_ground
@@ -190,7 +190,7 @@ class TestEnvironmentGroupCollision(unittest.TestCase):
         body_g = builder.add_body(xform=wp.transform_identity())
 
         # Environment 0
-        builder.current_env_group = 0
+        builder.current_world = 0
         # Shape A: collision group 1 (only collides with group 1)
         cfg_a = ModelBuilder.ShapeConfig(collision_group=1)
         builder.add_shape_sphere(
@@ -208,7 +208,7 @@ class TestEnvironmentGroupCollision(unittest.TestCase):
         )
 
         # Environment 1
-        builder.current_env_group = 1
+        builder.current_world = 1
         # Shape D: collision group 1
         cfg_d = ModelBuilder.ShapeConfig(collision_group=1)
         builder.add_shape_sphere(
@@ -221,7 +221,7 @@ class TestEnvironmentGroupCollision(unittest.TestCase):
         )
 
         # Global environment
-        builder.current_env_group = -1
+        builder.current_world = -1
         # Shape F: collision group 2, not a colliding shape
         cfg_f = ModelBuilder.ShapeConfig(collision_group=2, has_shape_collision=False)
         builder.add_shape_sphere(

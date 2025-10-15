@@ -1523,10 +1523,10 @@ class TestMuJoCoConversion(unittest.TestCase):
         builder.add_builder(robot, world=1)  # Creates bodies 2,3 and joint 1 (revolute)
 
         # Now add free joints to the parent bodies of each robot
-        builder.current_env_group = 0
+        builder.current_world = 0
         builder.add_joint_free(child=0)  # Free joint for body 0 (env 0) - joint 2
 
-        builder.current_env_group = 1
+        builder.current_world = 1
         builder.add_joint_free(child=2)  # Free joint for body 2 (env 1) - joint 3
 
         model = builder.finalize()

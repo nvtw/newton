@@ -114,12 +114,12 @@ class ModelBuilder:
 
     There are two ways to assign world indices:
 
-    1. **Direct entity creation**: Entities inherit the builder's `current_env_group` value::
+    1. **Direct entity creation**: Entities inherit the builder's `current_world` value::
 
            builder = ModelBuilder()
-           builder.current_env_group = -1  # Following entities will be global
+           builder.current_world = -1  # Following entities will be global
            builder.add_ground_plane()
-           builder.current_env_group = 0  # Following entities will be in world 0
+           builder.current_world = 0  # Following entities will be in world 0
            builder.add_body(...)
 
     2. **Using add_builder()**: ALL entities from the sub-builder are assigned to the specified world::
@@ -451,10 +451,10 @@ class ModelBuilder:
         self.joint_dof_count = 0
         self.joint_coord_count = 0
 
-        # current environment group index for entities being added directly to this builder.
-        # set to -1 to create global entities shared across all environments.
+        # current world index for entities being added directly to this builder.
+        # set to -1 to create global entities shared across all worlds.
         # note: this value is temporarily overridden when using add_builder().
-        self.current_env_group = -1
+        self.current_world = -1
 
         self.up_axis: Axis = Axis.from_any(up_axis)
         self.gravity: float = gravity
@@ -653,7 +653,7 @@ class ModelBuilder:
         """
         self.articulation_start.append(self.joint_count)
         self.articulation_key.append(key or f"articulation_{self.articulation_count}")
-        self.articulation_group.append(self.current_env_group)
+        self.articulation_group.append(self.current_world)
 
     # region importers
     def add_urdf(
@@ -929,13 +929,13 @@ class ModelBuilder:
         - Collision groups from the source builder are preserved as-is for fine-grained collision control within each world
 
         To create global entities that are shared across all worlds, set the main builder's
-        `current_env_group` to -1 before adding entities directly (not via add_builder).
+        `current_world` to -1 before adding entities directly (not via add_builder).
 
         Example::
 
             main_builder = ModelBuilder()
             # Create global ground plane
-            main_builder.current_env_group = -1
+            main_builder.current_world = -1
             main_builder.add_ground_plane()
 
             # Create robot builder
@@ -963,13 +963,13 @@ class ModelBuilder:
         # Set the world index for entities being added
         if world is None:
             # Use the current world count as the index if not specified
-            group_idx = self.num_envs if update_num_env_count else self.current_env_group
+            group_idx = self.num_envs if update_num_env_count else self.current_world
         else:
             group_idx = world
 
         # Save the previous world
-        prev_env_group = self.current_env_group
-        self.current_env_group = group_idx
+        prev_world = self.current_world
+        self.current_world = group_idx
 
         # explicitly resolve the transform multiplication function to avoid
         # repeatedly resolving builtin overloads during shape transformation
@@ -1072,27 +1072,27 @@ class ModelBuilder:
         # For particles
         if builder.particle_count > 0:
             # Override all world indices with current world
-            particle_groups = [self.current_env_group] * builder.particle_count
+            particle_groups = [self.current_world] * builder.particle_count
             self.particle_group.extend(particle_groups)
 
         # For bodies
         if builder.body_count > 0:
-            body_groups = [self.current_env_group] * builder.body_count
+            body_groups = [self.current_world] * builder.body_count
             self.body_group.extend(body_groups)
 
         # For shapes
         if builder.shape_count > 0:
-            shape_worlds = [self.current_env_group] * builder.shape_count
+            shape_worlds = [self.current_world] * builder.shape_count
             self.shape_world.extend(shape_worlds)
 
         # For joints
         if builder.joint_count > 0:
-            joint_groups = [self.current_env_group] * builder.joint_count
+            joint_groups = [self.current_world] * builder.joint_count
             self.joint_group.extend(joint_groups)
 
         # For articulations
         if builder.articulation_count > 0:
-            articulation_groups = [self.current_env_group] * builder.articulation_count
+            articulation_groups = [self.current_world] * builder.articulation_count
             self.articulation_group.extend(articulation_groups)
 
         more_builder_attrs = [
@@ -1186,7 +1186,7 @@ class ModelBuilder:
                     self.num_envs = max(self.num_envs, group_idx + 1)
 
         # Restore the previous world
-        self.current_env_group = prev_env_group
+        self.current_world = prev_world
 
     def add_body(
         self,
@@ -1249,7 +1249,7 @@ class ModelBuilder:
 
         self.body_key.append(key or f"body_{body_id}")
         self.body_shapes[body_id] = []
-        self.body_group.append(self.current_env_group)
+        self.body_group.append(self.current_world)
         return body_id
 
     # region joints
@@ -1314,7 +1314,7 @@ class ModelBuilder:
         self.joint_key.append(key or f"joint_{self.joint_count}")
         self.joint_dof_dim.append((len(linear_axes), len(angular_axes)))
         self.joint_enabled.append(enabled)
-        self.joint_group.append(self.current_env_group)
+        self.joint_group.append(self.current_world)
 
         def add_axis_dim(dim: ModelBuilder.JointDofConfig):
             self.joint_axis.append(dim.axis)
@@ -2443,7 +2443,7 @@ class ModelBuilder:
         self.shape_material_restitution.append(cfg.restitution)
         self.shape_collision_group.append(cfg.collision_group)
         self.shape_collision_radius.append(compute_shape_radius(type, scale, src))
-        self.shape_world.append(self.current_env_group)
+        self.shape_world.append(self.current_world)
         if cfg.has_shape_collision and cfg.collision_filter_parent and body > -1 and body in self.joint_parents:
             for parent_body in self.joint_parents[body]:
                 if parent_body > -1:
@@ -3033,7 +3033,7 @@ class ModelBuilder:
             radius = self.default_particle_radius
         self.particle_radius.append(radius)
         self.particle_flags.append(flags)
-        self.particle_group.append(self.current_env_group)
+        self.particle_group.append(self.current_world)
 
         particle_id = self.particle_count - 1
 
@@ -3068,8 +3068,8 @@ class ModelBuilder:
             flags = [ParticleFlags.ACTIVE] * len(pos)
         self.particle_radius.extend(radius)
         self.particle_flags.extend(flags)
-        # Maintain environment grouping for bulk particle creation
-        self.particle_group.extend([self.current_env_group] * len(pos))
+        # Maintain world assignment for bulk particle creation
+        self.particle_group.extend([self.current_world] * len(pos))
 
     def add_spring(self, i: int, j, ke: float, kd: float, control: float):
         """Adds a spring between two particles in the system

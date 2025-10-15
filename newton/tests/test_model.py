@@ -276,7 +276,7 @@ class TestModel(unittest.TestCase):
         )
 
         # Change to group 0 and add more particles
-        builder.current_env_group = 0
+        builder.current_world = 0
         builder.add_particles(pos=[(3.0, 0.0, 0.0), (4.0, 0.0, 0.0)], vel=[(0.0, 0.0, 0.0)] * 2, mass=[1.0] * 2)
 
         # Finalize and check groups
@@ -293,7 +293,7 @@ class TestModel(unittest.TestCase):
         main_builder = ModelBuilder()
 
         # Create global entities (group -1)
-        main_builder.current_env_group = -1
+        main_builder.current_world = -1
         ground_body = main_builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, -1.0), wp.quat_identity()), mass=0.0)
         main_builder.add_shape_box(
             body=ground_body, xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()), hx=5.0, hy=5.0, hz=0.1
@@ -434,7 +434,7 @@ class TestModel(unittest.TestCase):
         builder = ModelBuilder()
 
         # Environment 0: Chain with fixed joints
-        builder.current_env_group = 0
+        builder.current_world = 0
         b0_0 = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()), mass=1.0)
         b0_1 = builder.add_body(xform=wp.transform(wp.vec3(1.0, 0.0, 0.0), wp.quat_identity()), mass=1.0)
         b0_2 = builder.add_body(xform=wp.transform(wp.vec3(2.0, 0.0, 0.0), wp.quat_identity()), mass=1.0)
@@ -463,7 +463,7 @@ class TestModel(unittest.TestCase):
         )
 
         # Environment 1: Another chain
-        builder.current_env_group = 1
+        builder.current_world = 1
         b1_0 = builder.add_body(xform=wp.transform(wp.vec3(0.0, 2.0, 0.0), wp.quat_identity()), mass=1.0)
         b1_1 = builder.add_body(xform=wp.transform(wp.vec3(1.0, 2.0, 0.0), wp.quat_identity()), mass=1.0)
 
@@ -486,7 +486,7 @@ class TestModel(unittest.TestCase):
         )
 
         # Global body (not connected to world via joints, will be ignored by collapse)
-        builder.current_env_group = -1
+        builder.current_world = -1
         builder.add_body(xform=wp.transform(wp.vec3(0.0, -5.0, 0.0), wp.quat_identity()), mass=0.0)
 
         # Check groups before collapse
