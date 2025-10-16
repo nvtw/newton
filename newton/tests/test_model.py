@@ -495,7 +495,7 @@ class TestModel(unittest.TestCase):
 
         # Check groups before collapse
         self.assertEqual(builder.body_world, [0, 0, 0, 1, 1, -1])
-        self.assertEqual(builder.joint_group, [0, 0, 0, 1, 1])  # 5 joints now
+        self.assertEqual(builder.joint_world, [0, 0, 0, 1, 1])  # 5 joints now
 
         # Collapse fixed joints
         builder.collapse_fixed_joints(verbose=False)
@@ -512,7 +512,7 @@ class TestModel(unittest.TestCase):
 
         # Check that groups are preserved correctly
         self.assertEqual(builder.body_world, [0, 0, 1, 1])  # Groups preserved for retained bodies
-        self.assertEqual(builder.joint_group, [0, 0, 1, 1])  # Groups preserved for retained joints
+        self.assertEqual(builder.joint_world, [0, 0, 1, 1])  # Groups preserved for retained joints
 
         # Finalize and verify
         model = builder.finalize()
@@ -558,7 +558,7 @@ class TestModel(unittest.TestCase):
         self.assertEqual(builder.articulation_count, 2)
         self.assertEqual(builder.shape_count, 3)
         self.assertEqual(builder.body_world, [0, 1])
-        self.assertEqual(builder.joint_group, [0, 1])
+        self.assertEqual(builder.joint_world, [0, 1])
         self.assertEqual(builder.joint_type, [newton.JointType.REVOLUTE, newton.JointType.FREE])
         self.assertEqual(builder.joint_parent, [-1, -1])
         self.assertEqual(builder.joint_child, [0, 1])
