@@ -52,7 +52,6 @@ class _FastBenchmark:
             randomize=self.random_init,
             headless=True,
             actuation="None",
-            num_worlds=self.num_worlds,
             use_cuda_graph=True,
             builder=self.builder,
         )
@@ -110,7 +109,6 @@ class _KpiBenchmark:
                 randomize=self.random_init,
                 headless=True,
                 actuation="random",
-                num_worlds=num_worlds,
                 use_cuda_graph=True,
                 builder=self.builder[num_worlds],
                 ls_iteration=self.ls_iteration,
