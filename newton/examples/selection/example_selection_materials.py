@@ -89,7 +89,7 @@ class Example:
         scene = newton.ModelBuilder()
 
         scene.add_ground_plane()
-        scene.replicate(world_template, num_copies=self.num_worlds, spacing=(4.0, 4.0, 0.0))
+        scene.replicate(world_template, num_worlds=self.num_worlds, spacing=(4.0, 4.0, 0.0))
 
         # finalize model
         self.model = scene.finalize()
