@@ -91,7 +91,7 @@ class TestJointDrive(unittest.TestCase):
         joint_drive_stiffnesses = [100.0, 200.0]
         joint_drive_dampings = [10.0, 20.0]
 
-        world_builder = newton.ModelBuilder(gravity=g, up_axis=world_up_axis)
+        main_builder = newton.ModelBuilder(gravity=g, up_axis=world_up_axis)
         for i in range(0, nb_worlds):
             body_mass = body_masses[i]
             body_com = body_coms[i]
@@ -138,14 +138,14 @@ class TestJointDrive(unittest.TestCase):
                     friction=0.0,
                 )
 
-            world_builder.add_builder(world_builder)
+            main_builder.add_builder(world_builder, world=i)
 
             # Set the start pos and vel of the dof.
-            world_builder.joint_q[i] = joint_start_position
-            world_builder.joint_qd[i] = joint_start_velocity
+            main_builder.joint_q[i] = joint_start_position
+            main_builder.joint_qd[i] = joint_start_velocity
 
         # Create the MujocoSolver instance
-        model = world_builder.finalize()
+        model = main_builder.finalize()
         state_in = model.state()
         state_out = model.state()
         control = model.control()
