@@ -1817,6 +1817,13 @@ class SolverMuJoCo(SolverBase):
         if not model.joint_count:
             raise ValueError("The model must have at least one joint to be able to convert it to MuJoCo.")
 
+        # Validate that separate_envs_to_worlds=False is only used with single environment
+        if not separate_envs_to_worlds and model.num_envs > 1:
+            raise ValueError(
+                f"separate_envs_to_worlds=False is only supported for single-environment models. "
+                f"Got num_envs={model.num_envs}. Use separate_envs_to_worlds=True for multi-environment models."
+            )
+
         mujoco, mujoco_warp = self.import_mujoco()
 
         actuator_args = {
