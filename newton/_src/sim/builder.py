@@ -1087,8 +1087,8 @@ class ModelBuilder:
 
         # For joints
         if builder.joint_count > 0:
-            joint_groups = [self.current_world] * builder.joint_count
-            self.joint_world.extend(joint_groups)
+            s = [self.current_world] * builder.joint_count
+            self.joint_world.extend(s)
 
         # For articulations
         if builder.articulation_count > 0:
@@ -2281,7 +2281,7 @@ class ModelBuilder:
         self.articulation_start = list(set(self.articulation_start))
 
         # save original joint groups before clearing
-        original_joint_group = self.joint_world[:] if self.joint_world else []
+        original_ = self.joint_world[:] if self.joint_world else []
 
         self.joint_key.clear()
         self.joint_type.clear()
@@ -2322,8 +2322,8 @@ class ModelBuilder:
             self.joint_X_c.append(joint["child_xform"])
             self.joint_dof_dim.append(joint["axis_dim"])
             # Rebuild joint group - use original group if it exists
-            if original_joint_group and joint["original_id"] < len(original_joint_group):
-                self.joint_world.append(original_joint_group[joint["original_id"]])
+            if original_ and joint["original_id"] < len(original_):
+                self.joint_world.append(original_[joint["original_id"]])
             else:
                 # If no group was assigned, use default -1
                 self.joint_world.append(-1)
@@ -4327,7 +4327,7 @@ class ModelBuilder:
             m.joint_q = wp.array(self.joint_q, dtype=wp.float32, requires_grad=requires_grad)
             m.joint_qd = wp.array(self.joint_qd, dtype=wp.float32, requires_grad=requires_grad)
             m.joint_key = self.joint_key
-            m.joint_group = wp.array(self.joint_world, dtype=wp.int32)
+            m.joint_world = wp.array(self.joint_world, dtype=wp.int32)
             # compute joint ancestors
             child_to_joint = {}
             for i, child in enumerate(self.joint_child):
@@ -4374,7 +4374,7 @@ class ModelBuilder:
             m.joint_qd_start = wp.array(joint_qd_start, dtype=wp.int32)
             m.articulation_start = wp.array(articulation_start, dtype=wp.int32)
             m.articulation_key = self.articulation_key
-            m.articulation_group = wp.array(self.articulation_world, dtype=wp.int32)
+            m.articulation_world = wp.array(self.articulation_world, dtype=wp.int32)
             m.max_joints_per_articulation = max_joints_per_articulation
 
             # equality constraints

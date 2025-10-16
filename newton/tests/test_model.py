@@ -355,8 +355,8 @@ class TestModel(unittest.TestCase):
         particle_groups = model.particle_world.numpy() if model.particle_world is not None else []
         body_groups = model.body_world.numpy() if model.body_world is not None else []
         shape_worlds = model.shape_world.numpy() if model.shape_world is not None else []
-        joint_groups = model.joint_group.numpy() if model.joint_group is not None else []
-        articulation_groups = model.articulation_group.numpy() if model.articulation_group is not None else []
+        joint_worlds = model.joint_world.numpy() if model.joint_world is not None else []
+        articulation_groups = model.articulation_world.numpy() if model.articulation_world is not None else []
 
         if len(particle_groups) > 0:
             # Check global entities
@@ -383,10 +383,10 @@ class TestModel(unittest.TestCase):
             self.assertTrue(np.all(shape_worlds[3:5] == 1))
             self.assertTrue(np.all(shape_worlds[5:7] == 2))
 
-        if len(joint_groups) > 0:
-            self.assertEqual(joint_groups[0], 0)
-            self.assertEqual(joint_groups[1], 1)
-            self.assertEqual(joint_groups[2], 2)
+        if len(joint_worlds) > 0:
+            self.assertEqual(joint_worlds[0], 0)
+            self.assertEqual(joint_worlds[1], 1)
+            self.assertEqual(joint_worlds[2], 2)
 
         if len(articulation_groups) > 0:
             self.assertEqual(articulation_groups[0], 0)
@@ -517,7 +517,7 @@ class TestModel(unittest.TestCase):
         # Finalize and verify
         model = builder.finalize()
         body_groups = model.body_world.numpy()
-        joint_groups = model.joint_group.numpy()
+        joint_worlds = model.joint_world.numpy()
 
         # Verify body groups
         self.assertEqual(body_groups[0], 0)  # Merged b0_0
@@ -526,10 +526,10 @@ class TestModel(unittest.TestCase):
         self.assertEqual(body_groups[3], 1)  # b1_1
 
         # Verify joint groups (world connections and body-to-body joints)
-        self.assertEqual(joint_groups[0], 0)  # world->b0_0 from world 0
-        self.assertEqual(joint_groups[1], 0)  # b0_0->b0_2 from world 0
-        self.assertEqual(joint_groups[2], 1)  # world->b1_0 from world 1
-        self.assertEqual(joint_groups[3], 1)  # b1_0->b1_1 from world 1
+        self.assertEqual(joint_worlds[0], 0)  # world->b0_0 from world 0
+        self.assertEqual(joint_worlds[1], 0)  # b0_0->b0_2 from world 0
+        self.assertEqual(joint_worlds[2], 1)  # world->b1_0 from world 1
+        self.assertEqual(joint_worlds[3], 1)  # b1_0->b1_1 from world 1
 
     def test_add_builder(self):
         orig_xform = wp.transform(wp.vec3(1.0, 2.0, 3.0), wp.quat_rpy(0.5, 0.6, 0.7))

@@ -1945,7 +1945,7 @@ class SolverMuJoCo(SolverBase):
         # MoJoCo doesn't have velocity limit
         # joint_velocity_limit = model.joint_velocity_limit.numpy()
         joint_friction = model.joint_friction.numpy()
-        joint_group = model.joint_group.numpy()
+        joint_world = model.joint_world.numpy()
         body_mass = model.body_mass.numpy()
         body_inertia = model.body_inertia.numpy()
         body_com = model.body_com.numpy()
@@ -2018,7 +2018,7 @@ class SolverMuJoCo(SolverBase):
                 shape_range_len = model.shape_count
             selected_shapes = np.where((shape_world == first_group) | (shape_world < 0))[0]
             selected_bodies = np.where((body_world == first_group) | (body_world < 0))[0]
-            selected_joints = np.where((joint_group == first_group) | (joint_group < 0))[0]
+            selected_joints = np.where((joint_world == first_group) | (joint_world < 0))[0]
         else:
             # if we are not separating worlds, we use all shapes, bodies, joints
             selected_shapes = np.arange(model.shape_count, dtype=np.int32)

@@ -1536,12 +1536,12 @@ class TestMuJoCoConversion(unittest.TestCase):
         model = builder.finalize()
 
         # Verify setup - we should have 4 joints total
-        joint_groups = model.joint_group.numpy()
+        joint_worlds = model.joint_world.numpy()
         joint_types = model.joint_type.numpy()
 
         # Expected groups: [0, 1, 0, 1] - revolute from world0, revolute from world1, free from world0, free from world1
         expected_groups = [0, 1, 0, 1]
-        self.assertEqual(list(joint_groups), expected_groups)
+        self.assertEqual(list(joint_worlds), expected_groups)
 
         # Expected types: [revolute, revolute, free, free]
         self.assertEqual(joint_types[0], JointType.REVOLUTE, "Joint 0 should be revolute")
