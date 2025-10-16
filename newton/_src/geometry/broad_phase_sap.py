@@ -18,7 +18,7 @@ import warp as wp
 from .broad_phase_common import (
     binary_search,
     check_aabb_overlap,
-    test_environment_and_group_pair,
+    test_world_and_group_pair,
     write_pair,
 )
 
@@ -273,7 +273,7 @@ def _sap_broadphase_kernel(
         world2 = shape_world[geom2]
 
         # Check both world and collision groups
-        if not test_environment_and_group_pair(world1, world2, col_group1, col_group2):
+        if not test_world_and_group_pair(world1, world2, col_group1, col_group2):
             geomid += nsweep_in
             continue
 

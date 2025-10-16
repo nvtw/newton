@@ -15,7 +15,7 @@
 
 import warp as wp
 
-from .broad_phase_common import check_aabb_overlap, test_environment_and_group_pair, write_pair
+from .broad_phase_common import check_aabb_overlap, test_world_and_group_pair, write_pair
 
 
 @wp.kernel
@@ -102,7 +102,7 @@ def _nxn_broadphase_kernel(
     collision_group2 = collision_group[geom2]
 
     # Check both world and collision groups
-    if not test_environment_and_group_pair(world1, world2, collision_group1, collision_group2):
+    if not test_world_and_group_pair(world1, world2, collision_group1, collision_group2):
         return
 
     # wp.printf("geom1=%d, geom2=%d\n", geom1, geom2)
@@ -174,7 +174,7 @@ class BroadPhaseAllPairs:
             num_candidate_pair: Output array to store number of overlapping pairs found
 
         The method will populate candidate_pair with the indices of geometry pairs (i,j) where i < j whose AABBs overlap
-        when expanded by their cutoff distances, whose collision groups allow interaction, and whose worlds
+        when expanded by their cutoff distances, whose collision groups allow interaction, and whose world indices
         are compatible (same world or at least one is global). The number of pairs found will be written to
         num_candidate_pair[0].
         """

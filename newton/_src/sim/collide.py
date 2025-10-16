@@ -229,7 +229,7 @@ class CollisionPipeline:
                     state.particle_q,
                     model.particle_radius,
                     model.particle_flags,
-                    model.particle_group,
+                    model.particle_world,
                     state.body_q,
                     model.shape_transform,
                     model.shape_body,

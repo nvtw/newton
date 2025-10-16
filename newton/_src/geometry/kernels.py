@@ -686,7 +686,7 @@ def create_soft_contacts(
     particle_q: wp.array(dtype=wp.vec3),
     particle_radius: wp.array(dtype=float),
     particle_flags: wp.array(dtype=wp.int32),
-    particle_group: wp.array(dtype=int),  # World indices for particles
+    particle_world: wp.array(dtype=int),  # World indices for particles
     body_q: wp.array(dtype=wp.transform),
     shape_transform: wp.array(dtype=wp.transform),
     shape_body: wp.array(dtype=int),
@@ -715,11 +715,11 @@ def create_soft_contacts(
         return
 
     # Check world indices
-    particle_world = particle_group[particle_index]
-    shape_world_idx = shape_world[shape_index]
+    particle_world_id = particle_world[particle_index]
+    shape_world_id = shape_world[shape_index]
 
     # Skip collision between different worlds (unless one is global)
-    if particle_world != -1 and shape_world_idx != -1 and particle_world != shape_world_idx:
+    if particle_world_id != -1 and shape_world_id != -1 and particle_world_id != shape_world_id:
         return
 
     rigid_index = shape_body[shape_index]
