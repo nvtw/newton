@@ -1023,7 +1023,7 @@ def update_joint_transforms_kernel(
 @wp.kernel(enable_backward=False)
 def update_incoming_shape_xform_kernel(
     geom_to_shape_idx: wp.array(dtype=wp.int32),
-    shape_group: wp.array(dtype=wp.int32),
+    geom_is_static: wp.array(dtype=wp.int8),
     shape_transform: wp.array(dtype=wp.transform),
     shape_range_len: int,
     first_env_shape_base: int,
@@ -1039,10 +1039,10 @@ def update_incoming_shape_xform_kernel(
     if template_or_static_idx < 0:
         return
 
-    # Check if this is a static shape by looking up its group
+    # Check if this is a static shape using the precomputed mask
     # For static shapes, template_or_static_idx is the absolute Newton shape index
     # For non-static shapes, template_or_static_idx is 0-based offset from first env's first shape
-    is_static = shape_group[template_or_static_idx] < 0
+    is_static = geom_is_static[geom_idx] != 0
 
     if is_static:
         # Static shape - use absolute index
@@ -2427,29 +2427,28 @@ class SolverMuJoCo(SolverBase):
             self.mjw_model = mujoco_warp.put_model(self.mj_model)
 
             # build the geom index mappings now that we have the actual indices
-            # geom_to_shape_idx maps from MuJoCo geom index to absolute Newton shape index
-            # We need to convert to template-relative indices for the kernel to work correctly
-            # Template-relative index = position within non-static shapes of first_group
+            # geom_to_shape_idx maps from MuJoCo geom index to absolute Newton shape index.
+            # Convert non-static shapes to template-relative indices for the kernel.
             geom_to_shape_idx_np = np.full((self.mj_model.ngeom,), -1, dtype=np.int32)
 
             # Find the minimum shape index for the first non-static group to use as the base
             first_env_shapes = np.where(shape_group == first_group)[0]
-            if len(first_env_shapes) > 0:
-                first_env_shape_base = np.min(first_env_shapes)
-            else:
-                first_env_shape_base = 0
+            first_env_shape_base = int(np.min(first_env_shapes)) if len(first_env_shapes) > 0 else 0
+
+            # Per-geom static mask (1 if static, 0 otherwise)
+            geom_is_static_np = np.zeros((self.mj_model.ngeom,), dtype=np.int8)
 
             for geom_idx, abs_shape_idx in geom_to_shape_idx.items():
                 if shape_group[abs_shape_idx] < 0:
-                    # Static shape - use absolute index
+                    # Static shape - use absolute index and mark mask
                     geom_to_shape_idx_np[geom_idx] = abs_shape_idx
+                    geom_is_static_np[geom_idx] = 1
                 else:
-                    # Non-static shape - convert to template-relative index
-                    # This is the offset from the first shape of the first environment
-                    template_idx = abs_shape_idx - first_env_shape_base
-                    geom_to_shape_idx_np[geom_idx] = template_idx
+                    # Non-static shape - convert to template-relative offset from first env base
+                    geom_to_shape_idx_np[geom_idx] = abs_shape_idx - first_env_shape_base
 
             geom_to_shape_idx_wp = wp.array(geom_to_shape_idx_np, dtype=wp.int32)
+            geom_is_static_wp = wp.array(geom_is_static_np, dtype=wp.int8)
 
             # use the actual number of geoms from the MuJoCo model
             self.to_newton_shape_index = wp.full((model.num_envs, self.mj_model.ngeom), -1, dtype=wp.int32)
@@ -2470,7 +2469,7 @@ class SolverMuJoCo(SolverBase):
                     dim=(self.model.num_envs, self.mj_model.ngeom),
                     inputs=[
                         geom_to_shape_idx_wp,
-                        self.model.shape_group,
+                        geom_is_static_wp,
                         self.model.shape_transform,
                         shape_range_len,
                         first_env_shape_base,
