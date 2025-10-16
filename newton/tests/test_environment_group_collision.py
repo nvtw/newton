@@ -149,7 +149,7 @@ class TestEnvironmentGroupCollision(unittest.TestCase):
 
         # Verify world indices
         shape_worlds = model.shape_world.numpy()
-        body_groups = model.body_group.numpy()
+        body_groups = model.body_world.numpy()
 
         # Ground plane should be global
         self.assertEqual(shape_worlds[0], -1)

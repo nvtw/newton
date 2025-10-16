@@ -4117,7 +4117,7 @@ class ModelBuilder:
             m.particle_inv_mass = wp.array(particle_inv_mass, dtype=wp.float32, requires_grad=requires_grad)
             m.particle_radius = wp.array(self.particle_radius, dtype=wp.float32, requires_grad=requires_grad)
             m.particle_flags = wp.array([flag_to_int(f) for f in self.particle_flags], dtype=wp.int32)
-            m.particle_group = wp.array(self.particle_world, dtype=wp.int32)
+            m.particle_world = wp.array(self.particle_world, dtype=wp.int32)
             m.particle_max_radius = np.max(self.particle_radius) if len(self.particle_radius) > 0 else 0.0
             m.particle_max_velocity = self.particle_max_velocity
 
@@ -4314,7 +4314,7 @@ class ModelBuilder:
             m.body_qd = wp.array(self.body_qd, dtype=wp.spatial_vector, requires_grad=requires_grad)
             m.body_com = wp.array(self.body_com, dtype=wp.vec3, requires_grad=requires_grad)
             m.body_key = self.body_key
-            m.body_group = wp.array(self.body_world, dtype=wp.int32)
+            m.body_world = wp.array(self.body_world, dtype=wp.int32)
 
             # joints
             m.joint_type = wp.array(self.joint_type, dtype=wp.int32)

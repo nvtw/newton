@@ -1949,7 +1949,7 @@ class SolverMuJoCo(SolverBase):
         body_mass = model.body_mass.numpy()
         body_inertia = model.body_inertia.numpy()
         body_com = model.body_com.numpy()
-        body_group = model.body_group.numpy()
+        body_world = model.body_world.numpy()
         shape_transform = model.shape_transform.numpy()
         shape_type = model.shape_type.numpy()
         shape_size = model.shape_scale.numpy()
@@ -2017,7 +2017,7 @@ class SolverMuJoCo(SolverBase):
                 first_group = -1
                 shape_range_len = model.shape_count
             selected_shapes = np.where((shape_world == first_group) | (shape_world < 0))[0]
-            selected_bodies = np.where((body_group == first_group) | (body_group < 0))[0]
+            selected_bodies = np.where((body_world == first_group) | (body_world < 0))[0]
             selected_joints = np.where((joint_group == first_group) | (joint_group < 0))[0]
         else:
             # if we are not separating worlds, we use all shapes, bodies, joints

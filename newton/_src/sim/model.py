@@ -36,7 +36,7 @@ class Model:
 
     Key Features:
         - Stores all static data for simulation: particles, rigid bodies, joints, shapes, soft/rigid elements, etc.
-        - Supports grouping of entities by world using group indices (e.g., `particle_world`, `body_world`, etc.).
+        - Supports grouping of entities by world using world indices (e.g., `particle_world`, `body_world`, etc.).
           - Index -1: global entities shared across all worlds.
           - Indices 0, 1, 2, ...: world-specific entities.
         - Grouping enables:

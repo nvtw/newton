@@ -281,7 +281,7 @@ class TestModel(unittest.TestCase):
 
         # Finalize and check groups
         model = builder.finalize()
-        particle_groups = model.particle_group.numpy()
+        particle_groups = model.particle_world.numpy()
 
         # First 3 particles should be in group -1
         self.assertTrue(np.all(particle_groups[0:3] == -1))
@@ -352,8 +352,8 @@ class TestModel(unittest.TestCase):
         self.assertEqual(model.articulation_count, 3)  # 0 global + 1*3 = 3
 
         # Verify group assignments
-        particle_groups = model.particle_group.numpy() if model.particle_group is not None else []
-        body_groups = model.body_group.numpy() if model.body_group is not None else []
+        particle_groups = model.particle_world.numpy() if model.particle_world is not None else []
+        body_groups = model.body_world.numpy() if model.body_world is not None else []
         shape_worlds = model.shape_world.numpy() if model.shape_world is not None else []
         joint_groups = model.joint_group.numpy() if model.joint_group is not None else []
         articulation_groups = model.articulation_group.numpy() if model.articulation_group is not None else []
@@ -494,7 +494,7 @@ class TestModel(unittest.TestCase):
         builder.add_body(xform=wp.transform(wp.vec3(0.0, -5.0, 0.0), wp.quat_identity()), mass=0.0)
 
         # Check groups before collapse
-        self.assertEqual(builder.body_group, [0, 0, 0, 1, 1, -1])
+        self.assertEqual(builder.body_world, [0, 0, 0, 1, 1, -1])
         self.assertEqual(builder.joint_group, [0, 0, 0, 1, 1])  # 5 joints now
 
         # Collapse fixed joints
@@ -511,12 +511,12 @@ class TestModel(unittest.TestCase):
         self.assertEqual(builder.joint_count, 4)  # One joint removed (fixed joint)
 
         # Check that groups are preserved correctly
-        self.assertEqual(builder.body_group, [0, 0, 1, 1])  # Groups preserved for retained bodies
+        self.assertEqual(builder.body_world, [0, 0, 1, 1])  # Groups preserved for retained bodies
         self.assertEqual(builder.joint_group, [0, 0, 1, 1])  # Groups preserved for retained joints
 
         # Finalize and verify
         model = builder.finalize()
-        body_groups = model.body_group.numpy()
+        body_groups = model.body_world.numpy()
         joint_groups = model.joint_group.numpy()
 
         # Verify body groups
@@ -557,7 +557,7 @@ class TestModel(unittest.TestCase):
         self.assertEqual(builder.joint_count, 2)
         self.assertEqual(builder.articulation_count, 2)
         self.assertEqual(builder.shape_count, 3)
-        self.assertEqual(builder.body_group, [0, 1])
+        self.assertEqual(builder.body_world, [0, 1])
         self.assertEqual(builder.joint_group, [0, 1])
         self.assertEqual(builder.joint_type, [newton.JointType.REVOLUTE, newton.JointType.FREE])
         self.assertEqual(builder.joint_parent, [-1, -1])
