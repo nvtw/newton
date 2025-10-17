@@ -20,6 +20,7 @@ import warp as wp
 
 import newton
 from newton._src.core import quat_between_axes
+from newton._src.geometry.utils import create_box_mesh
 from newton.tests.unittest_utils import add_function_test, assert_np_equal, get_test_devices
 
 wp.config.quiet = True
@@ -372,63 +373,7 @@ def test_shape_collisions_gjk_mpr_multicontact(test: TestRigidContact, device, v
 
     # Two cubes using convex hull representation (8 corner points)
     cube_half = CUBE_SIZE / 2
-    cube_vertices = np.array(
-        [
-            # Bottom face (z = -cube_half)
-            [-cube_half, -cube_half, -cube_half],
-            [cube_half, -cube_half, -cube_half],
-            [cube_half, cube_half, -cube_half],
-            [-cube_half, cube_half, -cube_half],
-            # Top face (z = cube_half)
-            [-cube_half, -cube_half, cube_half],
-            [cube_half, -cube_half, cube_half],
-            [cube_half, cube_half, cube_half],
-            [-cube_half, cube_half, cube_half],
-        ],
-        dtype=np.float32,
-    )
-
-    cube_indices = np.array(
-        [
-            0,
-            2,
-            1,
-            0,
-            3,
-            2,  # Bottom face
-            4,
-            5,
-            6,
-            4,
-            6,
-            7,  # Top face
-            0,
-            1,
-            5,
-            0,
-            5,
-            4,  # Front face
-            1,
-            2,
-            6,
-            1,
-            6,
-            5,  # Right face
-            2,
-            3,
-            7,
-            2,
-            7,
-            6,  # Back face
-            3,
-            0,
-            4,
-            3,
-            4,
-            7,  # Left face
-        ],
-        dtype=np.int32,
-    )
+    cube_vertices, cube_indices = create_box_mesh((cube_half, cube_half, cube_half))
 
     cube_mesh = newton.Mesh(cube_vertices, cube_indices)
 
