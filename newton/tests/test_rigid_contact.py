@@ -618,7 +618,7 @@ def test_mujoco_warp_newton_contacts(test: TestRigidContact, device):
         solver="newton",
         integrator="euler",
         njmax=100,
-        ncon_per_env=50,
+        ncon_per_world=50,
         cone="elliptic",
         impratio=100,
         iterations=100,
