@@ -3005,9 +3005,6 @@ class ModelBuilder:
                             continue
                 # note we need to copy the mesh to avoid modifying the original mesh
                 self.shape_source[shape] = self.shape_source[shape].copy(vertices=rmesh.vertices, indices=rmesh.indices)
-                # mark as convex mesh if using convex hull method
-                if method == "convex_hull":
-                    self.shape_type[shape] = GeoType.CONVEX_MESH
                 remeshed_shapes.add(shape)
 
         if method == "bounding_box":
