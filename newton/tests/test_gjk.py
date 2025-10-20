@@ -47,12 +47,12 @@ def _gjk_kernel(
     shape_a = GenericShapeData()
     shape_a.shape_type = type_a
     shape_a.scale = size_a
-    shape_a.auxillary = wp.vec3(0.0)
+    shape_a.auxiliary = wp.vec3(0.0)
 
     shape_b = GenericShapeData()
     shape_b.shape_type = type_b
     shape_b.scale = size_b
-    shape_b.auxillary = wp.vec3(0.0)
+    shape_b.auxiliary = wp.vec3(0.0)
 
     data_provider = SupportMapDataProvider()
 

@@ -101,12 +101,12 @@ class GenericShapeData:
       - CYLINDER: radius in x, half-height in y (axis +Z)
       - CONE: radius in x, half-height in y (axis +Z, apex at +Z)
       - PLANE: half-width in x, half-length in y (lies in XY plane at z=0, normal along +Z)
-      - TRIANGLE: vertex B-A stored in scale, vertex C-A stored in auxillary
+      - TRIANGLE: vertex B-A stored in scale, vertex C-A stored in auxiliary
     """
 
     shape_type: int
     scale: wp.vec3
-    auxillary: wp.vec3
+    auxiliary: wp.vec3
 
 
 @wp.func
@@ -116,7 +116,7 @@ def support_map(
     """
     Return the support point of a primitive in its local frame, with a feature id.
 
-    Conventions for `geom.scale` and `geom.auxillary`:
+    Conventions for `geom.scale` and `geom.auxiliary`:
     - BOX: half-extents in x/y/z
     - SPHERE: radius in x component
     - CAPSULE: radius in x, half-height in y (axis along +Z)
@@ -124,8 +124,8 @@ def support_map(
     - CYLINDER: radius in x, half-height in y (axis along +Z)
     - CONE: radius in x, half-height in y (axis along +Z, apex at +Z)
     - PLANE: half-width in x, half-length in y (lies in XY plane at z=0, normal along +Z)
-    - CONVEX_MESH: scale contains mesh scale, auxillary contains packed mesh pointer
-    - TRIANGLE: scale contains vector B-A, auxillary contains vector C-A (relative to vertex A at origin)
+    - CONVEX_MESH: scale contains mesh scale, auxiliary contains packed mesh pointer
+    - TRIANGLE: scale contains vector B-A, auxiliary contains vector C-A (relative to vertex A at origin)
     """
 
     # handle zero direction robustly
@@ -140,7 +140,7 @@ def support_map(
 
     if geom.shape_type == int(GeoType.CONVEX_MESH):
         # Convex hull support: find the furthest point in the direction
-        mesh_ptr = unpack_mesh_ptr(geom.auxillary)
+        mesh_ptr = unpack_mesh_ptr(geom.auxiliary)
         mesh = wp.mesh_get(mesh_ptr)
 
         # The shape scale is stored in geom.scale
@@ -169,10 +169,10 @@ def support_map(
         feature_id = best_idx
 
     elif geom.shape_type == int(GeoTypeEx.TRIANGLE):
-        # Triangle vertices: a at origin, b at scale, c at auxillary
+        # Triangle vertices: a at origin, b at scale, c at auxiliary
         tri_a = wp.vec3(0.0, 0.0, 0.0)
         tri_b = geom.scale
-        tri_c = geom.auxillary
+        tri_c = geom.auxiliary
 
         # Compute dot products with direction for each vertex
         dot_a = wp.dot(tri_a, dir_safe)

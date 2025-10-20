@@ -264,11 +264,11 @@ def extract_shape_data(
     result = GenericShapeData()
     result.shape_type = shape_type[shape_idx]
     result.scale = shape_scale[shape_idx]
-    result.auxillary = wp.vec3(0.0, 0.0, 0.0)
+    result.auxiliary = wp.vec3(0.0, 0.0, 0.0)
 
-    # For CONVEX_MESH, pack the mesh pointer into auxillary
+    # For CONVEX_MESH, pack the mesh pointer into auxiliary
     if shape_type[shape_idx] == int(GeoType.CONVEX_MESH):
-        result.auxillary = pack_mesh_ptr(shape_source_ptr[shape_idx])
+        result.auxiliary = pack_mesh_ptr(shape_source_ptr[shape_idx])
 
     # For primitive shapes, bounding sphere center is the shape center
     bounding_sphere_center = position
@@ -798,11 +798,11 @@ def compute_shape_aabbs(
         shape_data = GenericShapeData()
         shape_data.shape_type = geo_type
         shape_data.scale = scale
-        shape_data.auxillary = wp.vec3(0.0, 0.0, 0.0)
+        shape_data.auxiliary = wp.vec3(0.0, 0.0, 0.0)
 
         # For CONVEX_MESH, pack the mesh pointer
         if geo_type == int(GeoType.CONVEX_MESH):
-            shape_data.auxillary = pack_mesh_ptr(shape_source_ptr[shape_id])
+            shape_data.auxiliary = pack_mesh_ptr(shape_source_ptr[shape_id])
 
         data_provider = SupportMapDataProvider()
 
@@ -903,7 +903,7 @@ class CollisionPipelineUnified:
                 Defaults to BroadPhaseMode.NXN.
         """
         # will be allocated during collide
-        self.contacts = None
+        self.contacts = None  # type: Contacts | None
 
         self.shape_count = shape_count
         self.broad_phase_mode = broad_phase_mode
@@ -919,11 +919,17 @@ class CollisionPipelineUnified:
 
         # Initialize broad phase based on mode
         if self.broad_phase_mode == BroadPhaseMode.NXN:
+            raise NotImplementedError(
+                "NxN broad phase mode is currently not supported due to open collision filtering issues"
+            )
             self.nxn_broadphase = BroadPhaseAllPairs()
             self.sap_broadphase = None
             self.explicit_broadphase = None
             self.shape_pairs_filtered = None
         elif self.broad_phase_mode == BroadPhaseMode.SAP:
+            raise NotImplementedError(
+                "SAP broad phase mode is currently not supported due to open collision filtering issues"
+            )
             # Estimate max groups for SAP - use reasonable defaults
             max_num_negative_group_members = max(int(shape_count**0.5), 10)
             max_num_distinct_positive_groups = max(int(shape_count**0.5), 10)
