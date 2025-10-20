@@ -266,8 +266,8 @@ def extract_shape_data(
     result.scale = shape_scale[shape_idx]
     result.auxillary = wp.vec3(0.0, 0.0, 0.0)
 
-    # For CONVEX_HULL, pack the mesh pointer into auxillary
-    if shape_type[shape_idx] == int(GeoType.CONVEX_HULL):
+    # For CONVEX_MESH, pack the mesh pointer into auxillary
+    if shape_type[shape_idx] == int(GeoType.CONVEX_MESH):
         result.auxillary = pack_mesh_ptr(shape_source_ptr[shape_idx])
 
     # For primitive shapes, bounding sphere center is the shape center
@@ -282,7 +282,7 @@ def is_discrete_shape(shape_type: int) -> bool:
     """A discrete shape can be represented with a finite amount of flat polygon faces."""
     return (
         shape_type == int(GeoType.BOX)
-        or shape_type == int(GeoType.CONVEX_HULL)
+        or shape_type == int(GeoType.CONVEX_MESH)
         or shape_type == int(GeoTypeEx.TRIANGLE)
         or shape_type == int(GeoType.PLANE)
     )
@@ -800,8 +800,8 @@ def compute_shape_aabbs(
         shape_data.scale = scale
         shape_data.auxillary = wp.vec3(0.0, 0.0, 0.0)
 
-        # For CONVEX_HULL, pack the mesh pointer
-        if geo_type == int(GeoType.CONVEX_HULL):
+        # For CONVEX_MESH, pack the mesh pointer
+        if geo_type == int(GeoType.CONVEX_MESH):
             shape_data.auxillary = pack_mesh_ptr(shape_source_ptr[shape_id])
 
         data_provider = SupportMapDataProvider()

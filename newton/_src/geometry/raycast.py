@@ -480,7 +480,7 @@ def ray_intersect_geom(
         h = size[1]
         t_hit = ray_intersect_cone(geom_to_world, ray_origin, ray_direction, r, h)
 
-    elif geomtype == GeoType.MESH or geomtype == GeoType.CONVEX_HULL:
+    elif geomtype == GeoType.MESH or geomtype == GeoType.CONVEX_MESH:
         t_hit = ray_intersect_mesh(geom_to_world, ray_origin, ray_direction, size, mesh_id)
 
     return t_hit
@@ -538,7 +538,7 @@ def raycast_kernel(
     geomtype = geom_type[shape_idx]
 
     # Get mesh ID for mesh-like geometries
-    if geomtype == GeoType.MESH or geomtype == GeoType.CONVEX_HULL:
+    if geomtype == GeoType.MESH or geomtype == GeoType.CONVEX_MESH:
         mesh_id = shape_source_ptr[shape_idx]
     else:
         mesh_id = wp.uint64(0)
@@ -682,7 +682,7 @@ def raycast_sensor_kernel(
     geomtype = geom_type[shape_idx]
 
     # Get mesh ID for mesh-like geometries
-    if geomtype == GeoType.MESH or geomtype == GeoType.CONVEX_HULL:
+    if geomtype == GeoType.MESH or geomtype == GeoType.CONVEX_MESH:
         mesh_id = shape_source_ptr[shape_idx]
     else:
         mesh_id = wp.uint64(0)

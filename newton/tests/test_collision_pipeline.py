@@ -44,7 +44,7 @@ def type_to_str(shape_type: GeoType):
         return "cylinder"
     elif shape_type == GeoType.MESH:
         return "mesh"
-    elif shape_type == GeoType.CONVEX_HULL:
+    elif shape_type == GeoType.CONVEX_MESH:
         return "convex_hull"
     else:
         return "unknown"
@@ -125,7 +125,7 @@ class CollisionSetup:
         elif shape_type == GeoType.MESH:
             vertices, indices = newton.utils.create_sphere_mesh(radius=0.5)
             self.builder.add_shape_mesh(body, mesh=newton.Mesh(vertices[:, :3], indices), key=type_to_str(shape_type))
-        elif shape_type == GeoType.CONVEX_HULL:
+        elif shape_type == GeoType.CONVEX_MESH:
             # Use a sphere mesh as it's already convex
             vertices, indices = newton.utils.create_sphere_mesh(radius=0.5)
             mesh = newton.Mesh(vertices[:, :3], indices)
@@ -263,18 +263,18 @@ class TestUnifiedCollisionPipeline(unittest.TestCase):
     pass
 
 
-# Unified collision pipeline tests - replace MESH with CONVEX_HULL
+# Unified collision pipeline tests - replace MESH with CONVEX_MESH
 # MESH is not supported yet in the unified pipeline
 unified_contact_tests = [
     (GeoType.SPHERE, GeoType.SPHERE, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
     (GeoType.SPHERE, GeoType.BOX, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
     (GeoType.SPHERE, GeoType.CAPSULE, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
-    (GeoType.SPHERE, GeoType.CONVEX_HULL, TestLevel.VELOCITY_YZ, TestLevel.STRICT),  # MESH -> CONVEX_HULL
+    (GeoType.SPHERE, GeoType.CONVEX_MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),  # MESH -> CONVEX_MESH
     (GeoType.BOX, GeoType.BOX, TestLevel.VELOCITY_YZ, TestLevel.VELOCITY_LINEAR),
-    (GeoType.BOX, GeoType.CONVEX_HULL, TestLevel.VELOCITY_YZ, TestLevel.STRICT),  # MESH -> CONVEX_HULL
+    (GeoType.BOX, GeoType.CONVEX_MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),  # MESH -> CONVEX_MESH
     (GeoType.CAPSULE, GeoType.CAPSULE, TestLevel.VELOCITY_YZ, TestLevel.VELOCITY_LINEAR),
-    (GeoType.CAPSULE, GeoType.CONVEX_HULL, TestLevel.VELOCITY_YZ, TestLevel.STRICT),  # MESH -> CONVEX_HULL
-    (GeoType.CONVEX_HULL, GeoType.CONVEX_HULL, TestLevel.VELOCITY_YZ, TestLevel.STRICT),  # MESH -> CONVEX_HULL
+    (GeoType.CAPSULE, GeoType.CONVEX_MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),  # MESH -> CONVEX_MESH
+    (GeoType.CONVEX_MESH, GeoType.CONVEX_MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),  # MESH -> CONVEX_MESH
 ]
 
 

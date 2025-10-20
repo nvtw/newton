@@ -477,7 +477,7 @@ def test_convex_hull_ray_intersect_via_geom(test: TestRaycast, device: str):
     wp.launch(
         kernel_test_geom,
         dim=1,
-        inputs=[out_t, geom_to_world, size, GeoType.CONVEX_HULL, ray_origin, ray_direction, mesh_id],
+        inputs=[out_t, geom_to_world, size, GeoType.CONVEX_MESH, ray_origin, ray_direction, mesh_id],
         device=device,
     )
     test.assertAlmostEqual(out_t.numpy()[0], 2.0, delta=1e-3)  # Should hit triangle at z=0

@@ -1984,7 +1984,7 @@ class ModelBuilder:
                 return "sdf"
             if type == GeoType.PLANE:
                 return "plane"
-            if type == GeoType.CONVEX_HULL:
+            if type == GeoType.CONVEX_MESH:
                 return "convex_hull"
             if type == GeoType.NONE:
                 return "none"
@@ -2825,7 +2825,7 @@ class ModelBuilder:
             cfg = self.default_shape_cfg
         return self.add_shape(
             body=body,
-            type=GeoType.CONVEX_HULL,
+            type=GeoType.CONVEX_MESH,
             xform=xform,
             cfg=cfg,
             scale=scale,

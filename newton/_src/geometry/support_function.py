@@ -124,7 +124,7 @@ def support_map(
     - CYLINDER: radius in x, half-height in y (axis along +Z)
     - CONE: radius in x, half-height in y (axis along +Z, apex at +Z)
     - PLANE: half-width in x, half-length in y (lies in XY plane at z=0, normal along +Z)
-    - CONVEX_HULL: scale contains mesh scale, auxillary contains packed mesh pointer
+    - CONVEX_MESH: scale contains mesh scale, auxillary contains packed mesh pointer
     - TRIANGLE: scale contains vector B-A, auxillary contains vector C-A (relative to vertex A at origin)
     """
 
@@ -138,7 +138,7 @@ def support_map(
     result = wp.vec3(0.0, 0.0, 0.0)
     feature_id = int(0)
 
-    if geom.shape_type == int(GeoType.CONVEX_HULL):
+    if geom.shape_type == int(GeoType.CONVEX_MESH):
         # Convex hull support: find the furthest point in the direction
         mesh_ptr = unpack_mesh_ptr(geom.auxillary)
         mesh = wp.mesh_get(mesh_ptr)

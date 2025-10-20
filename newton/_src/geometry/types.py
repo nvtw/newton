@@ -60,7 +60,7 @@ class GeoType(enum.IntEnum):
     CONE = 9
     """Cone."""
 
-    CONVEX_HULL = 10
+    CONVEX_MESH = 10
     """Convex hull."""
 
     NONE = 11
