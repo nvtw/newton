@@ -497,6 +497,12 @@ for device in devices:
     add_function_test(
         TestRaycast, f"test_mesh_ray_intersect_via_geom_{device}", test_mesh_ray_intersect_via_geom, devices=[device]
     )
+    add_function_test(
+        TestRaycast,
+        f"test_convex_hull_ray_intersect_via_geom_{device}",
+        test_convex_hull_ray_intersect_via_geom,
+        devices=[device],
+    )
 
 
 if __name__ == "__main__":

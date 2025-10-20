@@ -633,6 +633,90 @@ for device in devices:
             devices=[device],
         )
 
+
+def test_mujoco_convex_on_convex(test: TestRigidContact, device, solver_fn):
+    """Test that MuJoCo can handle CONVEX_MESH geometry type by simulating a simple drop."""
+    builder = newton.ModelBuilder()
+    builder.default_shape_cfg.ke = 1.0e5
+    builder.default_shape_cfg.kd = 1.0e3
+    builder.default_shape_cfg.kf = 1.0e3
+    builder.default_shape_cfg.mu = 0.5
+
+    # Create a small cube convex mesh (half extents = 0.2)
+    cube_half = 0.2
+    vertices, indices = create_box_mesh((cube_half, cube_half, cube_half))
+    cube_mesh = newton.Mesh(vertices, indices)
+
+    # Static ground plane
+    builder.add_shape_plane(
+        body=-1,
+        xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()),
+        width=10.0,
+        length=10.0,
+    )
+
+    # Dynamic convex cube, start slightly above ground
+    top_body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.5), wp.quat_identity()))
+    builder.add_joint_free(top_body)
+    builder.add_shape_convex_hull(
+        body=top_body,
+        xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()),
+        mesh=cube_mesh,
+        scale=(1.0, 1.0, 1.0),
+    )
+
+    # Finalize and simulate
+    model = builder.finalize(device=device)
+    state_0 = model.state()
+    state_1 = model.state()
+    control = model.control()
+
+    # Initialize kinematics
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+
+    solver = solver_fn(model)
+
+    # Use MuJoCo contacts internally (contacts=None) and simulate
+    sim_dt = 1.0 / 60.0
+    steps = 120  # 2 seconds to settle
+    for _ in range(steps):
+        state_0.clear_forces()
+        solver.step(state_0, state_1, control, None, sim_dt)
+        state_0, state_1 = state_1, state_0
+
+    # Fetch final Z position of the dynamic cube's body
+    final_pos = state_0.body_q.numpy()[top_body, :3]
+    final_z = float(final_pos[2])
+
+    # Expected center height when resting on ground: cube_half (0.2)
+    expected_center_z = cube_half
+
+    # Check that cube settled near ground (within reasonable tolerance)
+    test.assertGreater(final_z, expected_center_z - 0.05)
+    test.assertLess(final_z, expected_center_z + 0.15)
+
+    # Check that cube is not falling through or bouncing wildly
+    final_vel_z = float(state_0.body_qd.numpy()[top_body, 2])
+    test.assertLess(abs(final_vel_z), 0.5)
+
+
+# Register MuJoCo convex<>convex tests for appropriate backends
+for device in devices:
+    for solver_name, solver_fn in solvers.items():
+        if not solver_name.startswith("mujoco_"):
+            continue
+        if device.is_cpu and solver_name == "mujoco_warp":
+            continue
+        if device.is_cuda and solver_name == "mujoco_cpu":
+            continue
+        add_function_test(
+            TestRigidContact,
+            f"test_mujoco_convex_on_convex_{solver_name}",
+            test_mujoco_convex_on_convex,
+            devices=[device],
+            solver_fn=solver_fn,
+        )
+
 if __name__ == "__main__":
     # wp.clear_kernel_cache()
     unittest.main(verbosity=2, failfast=True)
