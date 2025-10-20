@@ -2941,6 +2941,8 @@ class ModelBuilder:
                     self.shape_source[shape] = self.shape_source[shape].copy(
                         vertices=decomposition[0][0], indices=decomposition[0][1]
                     )
+                    # mark as convex mesh type
+                    self.shape_type[shape] = GeoType.CONVEX_MESH
                     if len(decomposition) > 1:
                         body = self.shape_body[shape]
                         xform = self.shape_transform[shape]
@@ -2959,13 +2961,14 @@ class ModelBuilder:
                         )
                         cfg.flags = self.shape_flags[shape]
                         for i in range(1, len(decomposition)):
-                            self.add_shape_mesh(
+                            # add additional convex parts as convex meshes
+                            self.add_shape_convex_hull(
                                 body=body,
                                 xform=xform,
-                                cfg=cfg,
                                 mesh=Mesh(decomposition[i][0], decomposition[i][1]),
-                                key=f"{self.shape_key[shape]}_convex_{i}",
                                 scale=scale,
+                                cfg=cfg,
+                                key=f"{self.shape_key[shape]}_convex_{i}",
                             )
                     remeshed_shapes.add(shape)
             except Exception as e:
@@ -3002,6 +3005,9 @@ class ModelBuilder:
                             continue
                 # note we need to copy the mesh to avoid modifying the original mesh
                 self.shape_source[shape] = self.shape_source[shape].copy(vertices=rmesh.vertices, indices=rmesh.indices)
+                # mark as convex mesh if using convex hull method
+                if method == "convex_hull":
+                    self.shape_type[shape] = GeoType.CONVEX_MESH
                 remeshed_shapes.add(shape)
 
         if method == "bounding_box":
