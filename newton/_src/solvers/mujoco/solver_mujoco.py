@@ -2013,6 +2013,7 @@ class SolverMuJoCo(SolverBase):
             GeoType.CYLINDER: mujoco.mjtGeom.mjGEOM_CYLINDER,
             GeoType.BOX: mujoco.mjtGeom.mjGEOM_BOX,
             GeoType.MESH: mujoco.mjtGeom.mjGEOM_MESH,
+            GeoType.CONVEX_HULL: mujoco.mjtGeom.mjGEOM_MESH,
         }
 
         mj_bodies = [spec.worldbody]
@@ -2105,7 +2106,7 @@ class SolverMuJoCo(SolverBase):
                     "name": name,
                 }
                 tf = wp.transform(*shape_transform[shape])
-                if stype == GeoType.MESH:
+                if stype == GeoType.MESH or stype == GeoType.CONVEX_HULL:
                     mesh_src = model.shape_source[shape]
                     # use mesh-specific maxhullvert or fall back to the default
                     maxhullvert = getattr(mesh_src, "maxhullvert", mesh_maxhullvert)
