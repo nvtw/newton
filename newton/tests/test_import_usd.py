@@ -450,7 +450,8 @@ class TestImportUsd(unittest.TestCase):
         self.assertEqual(builder.body_count, 0)
         self.assertEqual(builder.shape_count, 4)
         self.assertEqual(
-            builder.shape_type, [newton.GeoType.MESH, newton.GeoType.MESH, newton.GeoType.SPHERE, newton.GeoType.BOX]
+            builder.shape_type,
+            [newton.GeoType.MESH, newton.GeoType.CONVEX_MESH, newton.GeoType.SPHERE, newton.GeoType.BOX],
         )
 
         # original mesh
@@ -905,6 +906,7 @@ class TestImportSampleAssets(unittest.TestCase):
             newton.GeoType.CYLINDER: UsdPhysics.ObjectType.CylinderShape,
             newton.GeoType.CONE: UsdPhysics.ObjectType.ConeShape,
             newton.GeoType.MESH: UsdPhysics.ObjectType.MeshShape,
+            newton.GeoType.CONVEX_MESH: UsdPhysics.ObjectType.MeshShape,  # Convex meshes map to USD MeshShape
             newton.GeoType.PLANE: UsdPhysics.ObjectType.PlaneShape,
         }
 
