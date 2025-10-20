@@ -1023,7 +1023,7 @@ def update_joint_transforms_kernel(
 @wp.kernel(enable_backward=False)
 def update_incoming_shape_xform_kernel(
     geom_to_shape_idx: wp.array(dtype=wp.int32),
-    geom_is_static: wp.array(dtype=wp.int8),
+    geom_is_static: wp.array(dtype=bool),
     shape_transform: wp.array(dtype=wp.transform),
     shape_range_len: int,
     first_env_shape_base: int,
@@ -1042,7 +1042,7 @@ def update_incoming_shape_xform_kernel(
     # Check if this is a static shape using the precomputed mask
     # For static shapes, template_or_static_idx is the absolute Newton shape index
     # For non-static shapes, template_or_static_idx is 0-based offset from first env's first shape
-    is_static = geom_is_static[geom_idx] != 0
+    is_static = geom_is_static[geom_idx]
 
     if is_static:
         # Static shape - use absolute index
@@ -2444,20 +2444,20 @@ class SolverMuJoCo(SolverBase):
             first_env_shapes = np.where(shape_world == first_group)[0]
             first_env_shape_base = int(np.min(first_env_shapes)) if len(first_env_shapes) > 0 else 0
 
-            # Per-geom static mask (1 if static, 0 otherwise)
-            geom_is_static_np = np.zeros((self.mj_model.ngeom,), dtype=np.int8)
+            # Per-geom static mask (True if static, False otherwise)
+            geom_is_static_np = np.zeros((self.mj_model.ngeom,), dtype=bool)
 
             for geom_idx, abs_shape_idx in geom_to_shape_idx.items():
                 if shape_world[abs_shape_idx] < 0:
                     # Static shape - use absolute index and mark mask
                     geom_to_shape_idx_np[geom_idx] = abs_shape_idx
-                    geom_is_static_np[geom_idx] = 1
+                    geom_is_static_np[geom_idx] = True
                 else:
                     # Non-static shape - convert to template-relative offset from first env base
                     geom_to_shape_idx_np[geom_idx] = abs_shape_idx - first_env_shape_base
 
             geom_to_shape_idx_wp = wp.array(geom_to_shape_idx_np, dtype=wp.int32)
-            geom_is_static_wp = wp.array(geom_is_static_np, dtype=wp.int8)
+            geom_is_static_wp = wp.array(geom_is_static_np, dtype=bool)
 
             # use the actual number of geoms from the MuJoCo model
             self.to_newton_shape_index = wp.full((model.num_worlds, self.mj_model.ngeom), -1, dtype=wp.int32)

@@ -155,6 +155,28 @@ def make_body_projector_from_polygon(
 
 
 @wp.func
+def compute_line_segment_projector_normal(
+    segment_dir: wp.vec3,
+    reference_normal: wp.vec3,
+) -> wp.vec3:
+    """
+    Compute a normal for a line segment projector that is perpendicular to the segment
+    and lies in the plane defined by the segment and the reference normal.
+
+    Args:
+        segment_dir: Direction vector of the line segment.
+        reference_normal: Normal from the other body to use as reference.
+
+    Returns:
+        Normalized normal vector for the line segment projector.
+    """
+    right = wp.cross(segment_dir, reference_normal)
+    normal = wp.cross(right, segment_dir)
+    length = wp.length(normal)
+    return normal / length if length > 1.0e-12 else reference_normal
+
+
+@wp.func
 def create_body_projectors(
     poly_a: wp.array(dtype=wp.vec3),
     poly_count_a: int,
@@ -162,9 +184,23 @@ def create_body_projectors(
     poly_b: wp.array(dtype=wp.vec3),
     poly_count_b: int,
     anchor_point_b: wp.vec3,
+    contact_normal: wp.vec3,
 ) -> tuple[BodyProjector, BodyProjector]:
     projector_a = BodyProjector()
     projector_b = BodyProjector()
+
+    if poly_count_a < 3 and poly_count_b < 3:
+        # Both are line segments - compute normals using contact_normal as reference
+        dir_a = poly_a[1] - poly_a[0]
+        dir_b = poly_b[1] - poly_b[0]
+
+        projector_a.normal = compute_line_segment_projector_normal(dir_a, contact_normal)
+        projector_a.point_on_plane = 0.5 * (poly_a[0] + poly_a[1])
+
+        projector_b.normal = compute_line_segment_projector_normal(dir_b, contact_normal)
+        projector_b.point_on_plane = 0.5 * (poly_b[0] + poly_b[1])
+
+        return projector_a, projector_b
 
     if poly_count_a >= 3:
         projector_a = make_body_projector_from_polygon(poly_a, poly_count_a, anchor_point_a)
@@ -173,18 +209,12 @@ def create_body_projectors(
 
     if poly_count_a < 3:
         dir = poly_a[1] - poly_a[0]
-        right = wp.cross(dir, projector_b.normal)
-        normal = wp.cross(right, dir)
-        length = wp.length(normal)
-        projector_a.normal = normal / length if length > 1.0e-12 else projector_b.normal
+        projector_a.normal = compute_line_segment_projector_normal(dir, projector_b.normal)
         projector_a.point_on_plane = 0.5 * (poly_a[0] + poly_a[1])
 
     if poly_count_b < 3:
         dir = poly_b[1] - poly_b[0]
-        right = wp.cross(dir, projector_a.normal)
-        normal = wp.cross(right, dir)
-        length = wp.length(normal)
-        projector_b.normal = normal / length if length > 1.0e-12 else projector_a.normal
+        projector_b.normal = compute_line_segment_projector_normal(dir, projector_a.normal)
         projector_b.point_on_plane = 0.5 * (poly_b[0] + poly_b[1])
 
     return projector_a, projector_b
@@ -252,66 +282,6 @@ def intersection_point(trim_seg_start: wp.vec3, trim_seg_end: wp.vec3, a: wp.vec
 
 
 @wp.func
-def trim_by_line_segment_in_place(
-    trim_seg_start: wp.vec3,
-    trim_seg_end: wp.vec3,
-    loop: wp.array(dtype=wp.vec3),
-    loop_segments: wp.array(dtype=wp.uint8),
-    loop_count: int,
-    max_loop_capacity: int,
-) -> int:
-    """
-    Intersect the input loop with a single finite line segment in the contact plane.
-
-    Stores up to two intersection points (degenerate segment manifold).
-    Segment IDs are set to 0 (first trim edge) for generated points.
-    """
-    if loop_count < 1:
-        return 0
-
-    trim_start_xy = wp.vec2(trim_seg_start[0], trim_seg_start[1])
-    trim_end_xy = wp.vec2(trim_seg_end[0], trim_seg_end[1])
-    seg_dir = trim_end_xy - trim_start_xy
-    seg_len = wp.sqrt(seg_dir[0] * seg_dir[0] + seg_dir[1] * seg_dir[1])
-
-    if seg_len <= 1e-12:
-        return 0
-
-    seg_dir = seg_dir / seg_len
-
-    write_idx = int(0)
-    num_found = int(0)
-
-    for i in range(loop_count):
-        if num_found >= 2:
-            break
-        j = (i + 1) % loop_count
-
-        ai_xy = wp.vec2(loop[i][0], loop[i][1])
-        aj_xy = wp.vec2(loop[j][0], loop[j][1])
-
-        side_i = signed_area(trim_start_xy, trim_end_xy, ai_xy)
-        side_j = signed_area(trim_start_xy, trim_end_xy, aj_xy)
-
-        crosses = (side_i > 0.0 and side_j < 0.0) or (side_i < 0.0 and side_j > 0.0)
-        touches = (side_i == 0.0) or (side_j == 0.0)
-
-        if crosses or touches:
-            inter = intersection_point(trim_seg_start, trim_seg_end, loop[i], loop[j])
-            inter_xy = wp.vec2(inter[0], inter[1])
-            t_along = wp.dot(seg_dir, inter_xy - trim_start_xy)
-            if t_along < -EPS or t_along > seg_len + EPS:
-                continue
-
-            loop[write_idx] = inter
-            loop_segments[write_idx] = wp.uint8(0)
-            write_idx += 1
-            num_found += 1
-
-    return num_found
-
-
-@wp.func
 def insert_vec3(arr: wp.array(dtype=wp.vec3), arr_count: int, index: int, element: wp.vec3):
     """
     Insert an element into an array at the specified index, shifting elements to the right.
@@ -348,21 +318,6 @@ def insert_byte(arr: wp.array(dtype=wp.uint8), arr_count: int, index: int, eleme
 
 
 @wp.func
-def size_check(loop_indexer: int, max_loop_capacity: int):
-    """
-    Check if we have enough capacity in the loop array.
-
-    Args:
-        loop_indexer: Current loop index.
-        max_loop_capacity: Maximum capacity of the loop array.
-    """
-    if loop_indexer + 1 >= max_loop_capacity:
-        # In Warp, we can't use assertions, so we'll just return
-        # The calling code should handle this gracefully
-        pass
-
-
-@wp.func
 def trim_in_place(
     trim_seg_start: wp.vec3,
     trim_seg_end: wp.vec3,
@@ -370,7 +325,6 @@ def trim_in_place(
     loop: wp.array(dtype=wp.vec3),
     loop_seg_ids: wp.array(dtype=wp.uint8),
     loop_count: int,
-    max_loop_capacity: int,
 ) -> int:
     """
     Trim a polygon in place using a line segment.
@@ -392,7 +346,6 @@ def trim_in_place(
         loop: Array of loop vertices.
         loop_seg_ids: Array of segment IDs for the loop.
         loop_count: Number of vertices in the loop.
-        max_loop_capacity: Maximum capacity of the loop arrays.
 
     Returns:
         New number of vertices in the trimmed loop.
@@ -444,7 +397,6 @@ def trim_in_place(
         while i < loop_count:
             # If the current vertex is on the side to be kept, copy it and its segment ID.
             if keep:
-                size_check(loop_indexer, max_loop_capacity)
                 loop_indexer += 1
                 loop[loop_indexer] = loop[i]
                 loop_seg_ids[loop_indexer] = loop_seg_ids[i]
@@ -466,7 +418,6 @@ def trim_in_place(
 
                 # This block handles a special case for inserting the new point.
                 if loop_indexer == i and not keep:
-                    size_check(loop_indexer, max_loop_capacity)
                     loop_indexer += 1
                     insert_vec3(loop, new_loop_count, loop_indexer, pt)
                     insert_byte(loop_seg_ids, new_loop_count, loop_indexer, new_seg_id)
@@ -478,7 +429,6 @@ def trim_in_place(
                     # Keep iteration bound consistent with source mutation
                     loop_count += 1
                 else:
-                    size_check(loop_indexer, max_loop_capacity)
                     loop_indexer += 1
                     loop[loop_indexer] = pt
                     loop_seg_ids[loop_indexer] = new_seg_id
@@ -506,7 +456,6 @@ def trim_all_in_place(
     loop: wp.array(dtype=wp.vec3),
     loop_segments: wp.array(dtype=wp.uint8),
     loop_count: int,
-    max_loop_capacity: int,
 ) -> int:
     """
     Trim a polygon using all edges of another polygon.
@@ -519,19 +468,81 @@ def trim_all_in_place(
         loop: Array of vertices in the loop to be trimmed.
         loop_segments: Array of segment IDs for the loop.
         loop_count: Number of vertices in the loop.
-        max_loop_capacity: Maximum capacity of the loop arrays.
 
     Returns:
         New number of vertices in the trimmed loop.
     """
 
     if trim_poly_count <= 1:
-        return loop_count  # There is no trim polygon
+        return wp.min(1, loop_count)  # There is no trim polygon
+
+    move_distance = float(1e-5)
 
     if trim_poly_count == 2:
-        return trim_by_line_segment_in_place(
-            trim_poly[0], trim_poly[1], loop, loop_segments, loop_count, max_loop_capacity
-        )
+        # Convert line segment to thin rectangle
+        # Line segment: trim_poly[0] to trim_poly[1]
+        p0 = trim_poly[0]
+        p1 = trim_poly[1]
+
+        # Direction vector (only x, y matter for 2D operations)
+        dir_x = p1[0] - p0[0]
+        dir_y = p1[1] - p0[1]
+        dir_len = wp.sqrt(dir_x * dir_x + dir_y * dir_y)
+
+        if dir_len > 1e-10:
+            # Perpendicular vector (rotate 90 degrees: (x,y) -> (-y,x))
+            perp_x = -dir_y / dir_len
+            perp_y = dir_x / dir_len
+
+            # Create 4 corners of rectangle (counterclockwise order)
+            # Start from p0, go along one side, then back along the other
+            offset_x = perp_x * move_distance
+            offset_y = perp_y * move_distance
+
+            trim_poly[0] = wp.vec3(p0[0] - offset_x, p0[1] - offset_y, p0[2])
+            trim_poly[1] = wp.vec3(p1[0] - offset_x, p1[1] - offset_y, p1[2])
+            trim_poly[2] = wp.vec3(p1[0] + offset_x, p1[1] + offset_y, p1[2])
+            trim_poly[3] = wp.vec3(p0[0] + offset_x, p0[1] + offset_y, p0[2])
+            trim_poly_count = 4
+        else:
+            return wp.min(1, loop_count)
+
+    if loop_count == 2:
+        # Convert line segment to thin rectangle
+        p0 = loop[0]
+        p1 = loop[1]
+        seg0 = loop_segments[0]
+        seg1 = loop_segments[1]
+
+        # Direction vector (only x, y matter for 2D operations)
+        dir_x = p1[0] - p0[0]
+        dir_y = p1[1] - p0[1]
+        dir_len = wp.sqrt(dir_x * dir_x + dir_y * dir_y)
+
+        if dir_len > 1e-10:
+            # Perpendicular vector (rotate 90 degrees: (x,y) -> (-y,x))
+            perp_x = -dir_y / dir_len
+            perp_y = dir_x / dir_len
+
+            # Create 4 corners of rectangle (counterclockwise order)
+            offset_x = perp_x * move_distance
+            offset_y = perp_y * move_distance
+
+            loop[0] = wp.vec3(p0[0] - offset_x, p0[1] - offset_y, p0[2])
+            loop[1] = wp.vec3(p1[0] - offset_x, p1[1] - offset_y, p1[2])
+            loop[2] = wp.vec3(p1[0] + offset_x, p1[1] + offset_y, p1[2])
+            loop[3] = wp.vec3(p0[0] + offset_x, p0[1] + offset_y, p0[2])
+
+            # Segment IDs: edges 0-1 and 1-2 inherit from original edge 0-1
+            # edges 2-3 and 3-0 form the "caps"
+            loop_segments[0] = seg0
+            loop_segments[1] = seg1
+            loop_segments[2] = seg1
+            loop_segments[3] = seg0
+
+            loop_count = 4
+        else:
+            return wp.min(1, loop_count)
 
     current_loop_count = loop_count
 
@@ -541,7 +552,7 @@ def trim_all_in_place(
         trim_seg_end = trim_poly[(i + 1) % trim_poly_count]
         # Perform the in-place trimming for this segment.
         current_loop_count = trim_in_place(
-            trim_seg_start, trim_seg_end, wp.uint8(i), loop, loop_segments, current_loop_count, max_loop_capacity
+            trim_seg_start, trim_seg_end, wp.uint8(i), loop, loop_segments, current_loop_count
         )
 
     return current_loop_count
@@ -896,14 +907,16 @@ def extract_4_point_contact_manifolds(
     """
     # Early-out for simple cases: if both have <=2 or either is empty, return single anchor pair
     # if True or m_a_count < 3 or m_b_count < 3:
-    if (m_a_count < 2 or m_b_count < 2) or (m_a_count < 3 and m_b_count < 3):
+    if m_a_count < 2 or m_b_count < 2:  # or (m_a_count < 3 and m_b_count < 3):
         m_a[0] = anchor_point_a
         m_b[0] = anchor_point_b
         result_features[0] = wp.uint32(0)
         return 1, 1.0
 
     # Projectors for back-projection onto the shape surfaces
-    projector_a, projector_b = create_body_projectors(m_a, m_a_count, anchor_point_a, m_b, m_b_count, anchor_point_b)
+    projector_a, projector_b = create_body_projectors(
+        m_a, m_a_count, anchor_point_a, m_b, m_b_count, anchor_point_b, normal
+    )
 
     if excess_normal_deviation(normal, projector_a.normal) or excess_normal_deviation(normal, projector_b.normal):
         m_a[0] = anchor_point_a
@@ -926,7 +939,6 @@ def extract_4_point_contact_manifolds(
             wp.dot(normal, projected),
         )
 
-    max_points = 12
     loop_seg_ids = wp.zeros(shape=(12,), dtype=wp.uint8)  # stackalloc byte[maxPoints];
 
     for i in range(m_b_count):
@@ -938,7 +950,7 @@ def extract_4_point_contact_manifolds(
         )
         loop_seg_ids[i] = wp.uint8(i + 6)
 
-    loop_count = trim_all_in_place(m_a, m_a_count, m_b, loop_seg_ids, m_b_count, max_points)
+    loop_count = trim_all_in_place(m_a, m_a_count, m_b, loop_seg_ids, m_b_count)
 
     loop_count = remove_zero_length_edges(m_b, loop_seg_ids, loop_count, EPS)
 

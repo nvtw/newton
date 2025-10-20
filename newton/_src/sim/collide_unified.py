@@ -1095,7 +1095,7 @@ class CollisionPipelineUnified:
         )
 
         # debug_a = model.shape_collision_group.numpy()
-        # debug_b = model.shape_group.numpy()
+        # debug_b = model.shape_world.numpy()
 
         # Run appropriate broad phase
         if self.broad_phase_mode == BroadPhaseMode.NXN:
@@ -1105,7 +1105,7 @@ class CollisionPipelineUnified:
                 self.shape_aabb_upper,
                 model.shape_thickness,  # Use thickness as cutoff
                 model.shape_collision_group,  # Collision groups for filtering
-                model.shape_group,  # Environment groups for filtering
+                model.shape_world,  # Environment groups for filtering
                 model.shape_count,
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
@@ -1118,7 +1118,7 @@ class CollisionPipelineUnified:
                 self.shape_aabb_upper,
                 model.shape_thickness,  # Use thickness as cutoff
                 model.shape_collision_group,  # Collision groups for filtering
-                model.shape_group,  # Environment groups for filtering
+                model.shape_world,  # Environment groups for filtering
                 model.shape_count,
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
