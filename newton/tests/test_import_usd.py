@@ -906,6 +906,7 @@ class TestImportSampleAssets(unittest.TestCase):
             newton.GeoType.CONE: UsdPhysics.ObjectType.ConeShape,
             newton.GeoType.MESH: UsdPhysics.ObjectType.MeshShape,
             newton.GeoType.PLANE: UsdPhysics.ObjectType.PlaneShape,
+            newton.GeoType.CONVEX_MESH: UsdPhysics.ObjectType.MeshShape,
         }
 
         for _shape_type, shape_objtype in shape_type_mapping.items():
