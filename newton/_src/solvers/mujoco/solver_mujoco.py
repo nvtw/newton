@@ -2108,12 +2108,8 @@ class SolverMuJoCo(SolverBase):
                 tf = wp.transform(*shape_transform[shape])
                 if stype == GeoType.MESH or stype == GeoType.CONVEX_MESH:
                     mesh_src = model.shape_source[shape]
-                    # For CONVEX_MESH, use mesh-specific maxhullvert or fall back to the default
-                    # For regular MESH, use 0 (no convex hull) unless explicitly set on the mesh
-                    if stype == GeoType.CONVEX_MESH:
-                        maxhullvert = getattr(mesh_src, "maxhullvert", mesh_maxhullvert)
-                    else:
-                        maxhullvert = getattr(mesh_src, "maxhullvert", 0)
+                    # use mesh-specific maxhullvert or fall back to the default
+                    maxhullvert = getattr(mesh_src, "maxhullvert", mesh_maxhullvert)
                     # apply scaling
                     size = shape_size[shape]
                     vertices = mesh_src.vertices * size
