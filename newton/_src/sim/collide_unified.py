@@ -278,6 +278,107 @@ def extract_shape_data(
 
 
 @wp.func
+def compute_gjk_mpr_contacts(
+    geom_a: GenericShapeData,
+    geom_b: GenericShapeData,
+    type_a: int,
+    type_b: int,
+    rot_a: wp.quat,
+    rot_b: wp.quat,
+    pos_a_adjusted: wp.vec3,
+    pos_b_adjusted: wp.vec3,
+    rigid_contact_margin: float,
+):
+    """
+    Compute contacts between two shapes using GJK/MPR algorithm.
+
+    Returns:
+        Tuple of (count, normal, signed_distances, points, radius_eff_a, radius_eff_b)
+    """
+    data_provider = SupportMapDataProvider()
+
+    radius_eff_a = float(0.0)
+    radius_eff_b = float(0.0)
+
+    small_radius = 0.0001
+
+    # Special treatment for minkowski objects
+    if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
+        radius_eff_a = geom_a.scale[0]
+        geom_a.scale[0] = small_radius
+
+    if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
+        radius_eff_b = geom_b.scale[0]
+        geom_b.scale[0] = small_radius
+
+    count, normal, signed_distances, points, _features = wp.static(solve_convex_multi_contact)(
+        geom_a,
+        geom_b,
+        rot_a,
+        rot_b,
+        pos_a_adjusted,
+        pos_b_adjusted,
+        0.0,  # sum_of_contact_offsets - gap
+        data_provider,
+        rigid_contact_margin + radius_eff_a + radius_eff_b,
+        type_a == int(GeoType.SPHERE) or type_b == int(GeoType.SPHERE),
+    )
+
+    # Special post processing for minkowski objects
+    if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
+        for i in range(count):
+            points[i] = points[i] + normal * (radius_eff_a * 0.5)
+            signed_distances[i] -= radius_eff_a - small_radius
+    if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
+        for i in range(count):
+            points[i] = points[i] - normal * (radius_eff_b * 0.5)
+            signed_distances[i] -= radius_eff_b - small_radius
+
+    # Post-process for axial shapes (cylinder/cone) rolling on discrete surfaces
+    is_discrete_a = is_discrete_shape(geom_a.shape_type)
+    is_discrete_b = is_discrete_shape(geom_b.shape_type)
+    is_axial_a = type_a == int(GeoType.CYLINDER) or type_a == int(GeoType.CONE)
+    is_axial_b = type_b == int(GeoType.CYLINDER) or type_b == int(GeoType.CONE)
+
+    if is_discrete_a and is_axial_b and count >= 3:
+        # Post-process axial shape (B) rolling on discrete surface (A)
+        shape_radius = geom_b.scale[0]  # radius for cylinder, base radius for cone
+        shape_half_height = geom_b.scale[1]
+        is_cone_b = type_b == int(GeoType.CONE)
+        count, signed_distances, points = postprocess_axial_shape_discrete_contacts(
+            points,
+            normal,
+            signed_distances,
+            count,
+            rot_b,
+            shape_radius,
+            shape_half_height,
+            pos_b_adjusted,
+            is_cone_b,
+        )
+
+    if is_discrete_b and is_axial_a and count >= 3:
+        # Post-process axial shape (A) rolling on discrete surface (B)
+        # Note: normal points from A to B, so we need to negate it for the shape processing
+        shape_radius = geom_a.scale[0]  # radius for cylinder, base radius for cone
+        shape_half_height = geom_a.scale[1]
+        is_cone_a = type_a == int(GeoType.CONE)
+        count, signed_distances, points = postprocess_axial_shape_discrete_contacts(
+            points,
+            -normal,
+            signed_distances,
+            count,
+            rot_a,
+            shape_radius,
+            shape_half_height,
+            pos_a_adjusted,
+            is_cone_a,
+        )
+
+    return count, normal, signed_distances, points, radius_eff_a, radius_eff_b
+
+
+@wp.func
 def is_discrete_shape(shape_type: int) -> bool:
     """A discrete shape can be represented with a finite amount of flat polygon faces."""
     return (
@@ -785,30 +886,30 @@ def build_contacts_kernel_gjk_mpr(
         # Inflate by rigid_contact_margin only (no speculative expansion)
         radius_a = bsphere_radius_a + rigid_contact_margin
         radius_b = bsphere_radius_b + rigid_contact_margin
-        center_distance = wp.length(bsphere_center_b - bsphere_center_a)
+        # center_distance = wp.length(bsphere_center_b - bsphere_center_a)
 
-        # Early out if bounding spheres don't overlap
-        # Skip this check if either shape is an infinite plane
-        if not (is_infinite_plane_a or is_infinite_plane_b):
-            if center_distance > (radius_a + radius_b):
-                continue
-        elif is_infinite_plane_a and is_infinite_plane_b:
-            # Plane-plane collisions are not supported
-            continue
-        elif is_infinite_plane_a:
-            # Check if shape B is close enough to the infinite plane A
-            plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
-            # Distance from shape B center to plane A
-            dist_to_plane = wp.abs(wp.dot(pos_b - pos_a, plane_normal))
-            if dist_to_plane > radius_b:
-                continue
-        elif is_infinite_plane_b:
-            # Check if shape A is close enough to the infinite plane B
-            plane_normal = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
-            # Distance from shape A center to plane B
-            dist_to_plane = wp.abs(wp.dot(pos_a - pos_b, plane_normal))
-            if dist_to_plane > radius_a:
-                continue
+        # # Early out if bounding spheres don't overlap
+        # # Skip this check if either shape is an infinite plane
+        # if not (is_infinite_plane_a or is_infinite_plane_b):
+        #     if center_distance > (radius_a + radius_b):
+        #         continue
+        # elif is_infinite_plane_a and is_infinite_plane_b:
+        #     # Plane-plane collisions are not supported
+        #     continue
+        # elif is_infinite_plane_a:
+        #     # Check if shape B is close enough to the infinite plane A
+        #     plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
+        #     # Distance from shape B center to plane A
+        #     dist_to_plane = wp.abs(wp.dot(pos_b - pos_a, plane_normal))
+        #     if dist_to_plane > radius_b:
+        #         continue
+        # elif is_infinite_plane_b:
+        #     # Check if shape A is close enough to the infinite plane B
+        #     plane_normal = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
+        #     # Distance from shape A center to plane B
+        #     dist_to_plane = wp.abs(wp.dot(pos_a - pos_b, plane_normal))
+        #     if dist_to_plane > radius_a:
+        #         continue
 
         # Use the extracted orientations
         rot_a = quat_a
@@ -837,85 +938,18 @@ def build_contacts_kernel_gjk_mpr(
             geom_b, pos_b_adjusted = convert_infinite_plane_to_cube(geom_b, rot_b, pos_b, pos_a, radius_a)
             type_b = int(GeoType.BOX)
 
-        data_provider = SupportMapDataProvider()
-
-        radius_eff_a = float(0.0)
-        radius_eff_b = float(0.0)
-
-        small_radius = 0.0001
-
-        # Special treatment for minkowski objects
-        if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
-            radius_eff_a = geom_a.scale[0]
-            geom_a.scale[0] = small_radius
-
-        if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
-            radius_eff_b = geom_b.scale[0]
-            geom_b.scale[0] = small_radius
-
-        count, normal, signed_distances, points, _features = wp.static(solve_convex_multi_contact)(
+        # Compute contacts using GJK/MPR
+        count, normal, signed_distances, points, radius_eff_a, radius_eff_b = compute_gjk_mpr_contacts(
             geom_a,
             geom_b,
+            type_a,
+            type_b,
             rot_a,
             rot_b,
             pos_a_adjusted,
             pos_b_adjusted,
-            0.0,  # sum_of_contact_offsets - gap
-            data_provider,
-            rigid_contact_margin + radius_eff_a + radius_eff_b,
-            type_a == int(GeoType.SPHERE) or type_b == int(GeoType.SPHERE),
+            rigid_contact_margin,
         )
-
-        # Special post processing for minkowski objects
-        if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
-            for i in range(count):
-                points[i] = points[i] + normal * (radius_eff_a * 0.5)
-                signed_distances[i] -= radius_eff_a - small_radius
-        if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
-            for i in range(count):
-                points[i] = points[i] - normal * (radius_eff_b * 0.5)
-                signed_distances[i] -= radius_eff_b - small_radius
-
-        # Post-process for axial shapes (cylinder/cone) rolling on discrete surfaces
-        is_discrete_a = is_discrete_shape(geom_a.shape_type)
-        is_discrete_b = is_discrete_shape(geom_b.shape_type)
-        is_axial_a = type_a == int(GeoType.CYLINDER) or type_a == int(GeoType.CONE)
-        is_axial_b = type_b == int(GeoType.CYLINDER) or type_b == int(GeoType.CONE)
-
-        if is_discrete_a and is_axial_b and count >= 3:
-            # Post-process axial shape (B) rolling on discrete surface (A)
-            shape_radius = geom_b.scale[0]  # radius for cylinder, base radius for cone
-            shape_half_height = geom_b.scale[1]
-            is_cone_b = type_b == int(GeoType.CONE)
-            count, signed_distances, points = postprocess_axial_shape_discrete_contacts(
-                points,
-                normal,
-                signed_distances,
-                count,
-                rot_b,
-                shape_radius,
-                shape_half_height,
-                pos_b_adjusted,
-                is_cone_b,
-            )
-
-        if is_discrete_b and is_axial_a and count >= 3:
-            # Post-process axial shape (A) rolling on discrete surface (B)
-            # Note: normal points from A to B, so we need to negate it for the shape processing
-            shape_radius = geom_a.scale[0]  # radius for cylinder, base radius for cone
-            shape_half_height = geom_a.scale[1]
-            is_cone_a = type_a == int(GeoType.CONE)
-            count, signed_distances, points = postprocess_axial_shape_discrete_contacts(
-                points,
-                -normal,
-                signed_distances,
-                count,
-                rot_a,
-                shape_radius,
-                shape_half_height,
-                pos_a_adjusted,
-                is_cone_a,
-            )
 
         for id in range(count):
             write_contact(
@@ -974,7 +1008,9 @@ def find_mesh_triangle_overlaps_kernel(
     # wp.printf("Number of mesh pairs: %d\n", num_mesh_pairs)
 
     # Strided loop over mesh pairs
-    for i in range(tid, num_mesh_pairs, total_num_threads):
+    # for i in range(tid, num_mesh_pairs, total_num_threads):
+    if tid < num_mesh_pairs:
+        i = tid
         pair = shape_pairs_mesh[i]
         shape_a = pair[0]
         shape_b = pair[1]
@@ -994,12 +1030,12 @@ def find_mesh_triangle_overlaps_kernel(
             non_mesh_shape = shape_a
         else:
             # Mesh-mesh collision not supported yet
-            continue
+            return
 
         # Get mesh BVH ID and mesh transform
         mesh_id = shape_source_ptr[mesh_shape]
         if mesh_id == wp.uint64(0):
-            continue
+            return
 
         # Get mesh world transform
         mesh_body_idx = shape_body[mesh_shape]
@@ -1042,20 +1078,19 @@ def find_mesh_triangle_overlaps_kernel(
             shape_data, orientation_in_mesh, pos_in_mesh, data_provider
         )
 
-        # # Add small margin for contact detection
-        # margin_vec = wp.vec3(rigid_contact_margin, rigid_contact_margin, rigid_contact_margin)
-        # aabb_lower = aabb_lower - margin_vec
-        # aabb_upper = aabb_upper + margin_vec
+        # Add small margin for contact detection
+        margin_vec = wp.vec3(rigid_contact_margin, rigid_contact_margin, rigid_contact_margin)
+        aabb_lower = aabb_lower - margin_vec
+        aabb_upper = aabb_upper + margin_vec
 
-        # # Query mesh BVH for overlapping triangles in mesh local space
-        # tri_index = wp.int32(0)
-        # query = wp.bvh_query_aabb(mesh_id, aabb_lower, aabb_upper)
+        # Query mesh BVH for overlapping triangles in mesh local space
+        query = wp.mesh_query_aabb(mesh_id, aabb_lower, aabb_upper)
 
-        # while wp.bvh_query_next(query, tri_index):
-        #     # Add this triangle pair to the output buffer
-        #     out_idx = wp.atomic_add(triangle_pairs_count, 0, 1)
-        #     if out_idx < triangle_pairs.shape[0]:
-        #         triangle_pairs[out_idx] = wp.vec3i(shape_a, shape_b, tri_index)
+        for tri_index in query:
+            # Add this triangle pair to the output buffer
+            out_idx = wp.atomic_add(triangle_pairs_count, 0, 1)
+            if out_idx < triangle_pairs.shape[0]:
+                triangle_pairs[out_idx] = wp.vec3i(shape_a, shape_b, tri_index)
 
 
 @wp.func
@@ -1115,6 +1150,7 @@ def process_mesh_triangle_contacts_kernel(
     shape_body: wp.array(dtype=int),
     shape_type: wp.array(dtype=int),
     shape_scale: wp.array(dtype=wp.vec3),
+    shape_collision_radius: wp.array(dtype=float),
     shape_source_ptr: wp.array(dtype=wp.uint64),
     triangle_pairs: wp.array(dtype=wp.vec3i),
     triangle_pairs_count: wp.array(dtype=int),
@@ -1133,11 +1169,65 @@ def process_mesh_triangle_contacts_kernel(
             break
 
         triple = triangle_pairs[i]
-        _shape_a = triple[0]
-        _shape_b = triple[1]
-        _tri_idx = triple[2]
+        shape_a = triple[0]
+        shape_b = triple[1]
+        tri_idx = triple[2]
 
-        # TODO: Implement contact generation for mesh triangles
+        # Get mesh data for shape A
+        mesh_id_a = shape_source_ptr[shape_a]
+        if mesh_id_a == wp.uint64(0):
+            continue
+
+        mesh_a = wp.mesh_get(mesh_id_a)
+        mesh_scale_a = shape_scale[shape_a]
+
+        # Get mesh world transform for shape A
+        mesh_body_idx_a = shape_body[shape_a]
+        X_mesh_ws_a = shape_transform[shape_a]
+        if mesh_body_idx_a >= 0:
+            X_mesh_ws_a = wp.transform_multiply(body_q[mesh_body_idx_a], shape_transform[shape_a])
+
+        # Extract triangle vertices from mesh (indices are stored as flat array: i0, i1, i2, i0, i1, i2, ...)
+        idx0 = mesh_a.indices[tri_idx * 3 + 0]
+        idx1 = mesh_a.indices[tri_idx * 3 + 1]
+        idx2 = mesh_a.indices[tri_idx * 3 + 2]
+
+        # Get vertex positions in mesh local space (with scale applied)
+        v0_local = wp.cw_mul(mesh_a.points[idx0], mesh_scale_a)
+        v1_local = wp.cw_mul(mesh_a.points[idx1], mesh_scale_a)
+        v2_local = wp.cw_mul(mesh_a.points[idx2], mesh_scale_a)
+
+        # Transform vertices to world space
+        v0_world = wp.transform_point(X_mesh_ws_a, v0_local)
+        v1_world = wp.transform_point(X_mesh_ws_a, v1_local)
+        v2_world = wp.transform_point(X_mesh_ws_a, v2_local)
+
+        # Compute triangle centroid as position for shape A
+        pos_a = (v0_world + v1_world + v2_world) / 3.0
+        quat_a = wp.quat_identity()  # Triangle has no orientation, use identity
+
+        # Create triangle shape data: vertex A at origin, B-A in scale, C-A in auxiliary
+        shape_data_a = GenericShapeData()
+        shape_data_a.shape_type = int(GeoTypeEx.TRIANGLE)
+        shape_data_a.scale = v1_world - v0_world  # B - A
+        shape_data_a.auxiliary = v2_world - v0_world  # C - A
+
+        # Override pos_a to be vertex A (origin of triangle in local frame)
+        pos_a = v0_world
+
+        # Extract shape B data
+        pos_b, quat_b, shape_data_b, bsphere_center_b, bsphere_radius_b = extract_shape_data(
+            shape_b,
+            body_q,
+            shape_transform,
+            shape_body,
+            shape_type,
+            shape_scale,
+            shape_collision_radius,
+            shape_source_ptr,
+        )
+
+        # TODO: Implement contact generation for mesh triangles using GJK/MPR
         # For now, this kernel does nothing as requested
         pass
 
@@ -1190,9 +1280,7 @@ def process_mesh_plane_contacts_kernel(
             break
 
         # Use binary search helper to find which mesh-plane pair this vertex belongs to
-        pair_idx, vertex_idx = find_pair_from_cumulative_index(
-            task_id, shape_pairs_mesh_plane_cumsum, num_pairs
-        )
+        pair_idx, vertex_idx = find_pair_from_cumulative_index(task_id, shape_pairs_mesh_plane_cumsum, num_pairs)
 
         # Get the mesh-plane pair
         pair = shape_pairs_mesh_plane[pair_idx]
@@ -1246,10 +1334,11 @@ def process_mesh_plane_contacts_kernel(
         # Only generate contact if distance is less than margin (including negative for penetration)
         # Ignore extreme penetrations (mesh far below plane)
         if distance < rigid_contact_margin + total_thickness and distance > -rigid_contact_margin:
-
             # Get inverse transforms for body-local contact points
             X_mesh_bw = wp.transform_identity() if mesh_body_idx == -1 else wp.transform_inverse(body_q[mesh_body_idx])
-            X_plane_bw = wp.transform_identity() if plane_body_idx == -1 else wp.transform_inverse(body_q[plane_body_idx])
+            X_plane_bw = (
+                wp.transform_identity() if plane_body_idx == -1 else wp.transform_inverse(body_q[plane_body_idx])
+            )
 
             # Write contact
             # Note: write_contact expects contact_normal_a_to_b pointing FROM mesh TO plane (downward)
@@ -1345,9 +1434,7 @@ def compute_shape_aabbs(
         data_provider = SupportMapDataProvider()
 
         # Compute tight AABB using helper function
-        aabb_min_world, aabb_max_world = compute_tight_aabb_from_support(
-            shape_data, orientation, pos, data_provider
-        )
+        aabb_min_world, aabb_max_world = compute_tight_aabb_from_support(shape_data, orientation, pos, data_provider)
 
         aabb_lower[shape_id] = aabb_min_world - margin_vec
         aabb_upper[shape_id] = aabb_max_world + margin_vec
@@ -1800,6 +1887,7 @@ class CollisionPipelineUnified:
                 model.shape_body,
                 model.shape_type,
                 model.shape_scale,
+                model.shape_collision_radius,
                 model.shape_source_ptr,
                 self.triangle_pairs,
                 self.triangle_pairs_count,
