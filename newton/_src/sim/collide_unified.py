@@ -289,6 +289,70 @@ def is_discrete_shape(shape_type: int) -> bool:
 
 
 @wp.func
+def compute_tight_aabb_from_support(
+    shape_data: GenericShapeData,
+    orientation: wp.quat,
+    center_pos: wp.vec3,
+    data_provider: SupportMapDataProvider,
+) -> tuple[wp.vec3, wp.vec3]:
+    """
+    Compute tight AABB for a shape using support function.
+
+    Args:
+        shape_data: Generic shape data
+        orientation: Shape orientation (quaternion)
+        center_pos: Center position of the shape
+        data_provider: Support map data provider
+
+    Returns:
+        Tuple of (aabb_min, aabb_max) in world space
+    """
+    # Transpose orientation matrix to transform world axes to local space
+    # Convert quaternion to 3x3 rotation matrix and transpose (inverse rotation)
+    rot_mat = wp.quat_to_matrix(orientation)
+    rot_mat_t = wp.transpose(rot_mat)
+
+    # Transform world axes to local space (multiply by transposed rotation = inverse rotation)
+    local_x = wp.vec3(rot_mat_t[0, 0], rot_mat_t[1, 0], rot_mat_t[2, 0])
+    local_y = wp.vec3(rot_mat_t[0, 1], rot_mat_t[1, 1], rot_mat_t[2, 1])
+    local_z = wp.vec3(rot_mat_t[0, 2], rot_mat_t[1, 2], rot_mat_t[2, 2])
+
+    # Compute AABB extents by evaluating support function in local space
+    # Dot products are done in local space to avoid expensive rotations
+    support_point = wp.vec3()
+
+    # Max X: support along +local_x, dot in local space
+    support_point, _feature_id = support_map(shape_data, local_x, data_provider)
+    max_x = wp.dot(local_x, support_point)
+
+    # Max Y: support along +local_y, dot in local space
+    support_point, _feature_id = support_map(shape_data, local_y, data_provider)
+    max_y = wp.dot(local_y, support_point)
+
+    # Max Z: support along +local_z, dot in local space
+    support_point, _feature_id = support_map(shape_data, local_z, data_provider)
+    max_z = wp.dot(local_z, support_point)
+
+    # Min X: support along -local_x, dot in local space
+    support_point, _feature_id = support_map(shape_data, -local_x, data_provider)
+    min_x = wp.dot(local_x, support_point)
+
+    # Min Y: support along -local_y, dot in local space
+    support_point, _feature_id = support_map(shape_data, -local_y, data_provider)
+    min_y = wp.dot(local_y, support_point)
+
+    # Min Z: support along -local_z, dot in local space
+    support_point, _feature_id = support_map(shape_data, -local_z, data_provider)
+    min_z = wp.dot(local_z, support_point)
+
+    # AABB in world space (add world position to extents)
+    aabb_min = wp.vec3(min_x, min_y, min_z) + center_pos
+    aabb_max = wp.vec3(max_x, max_y, max_z) + center_pos
+
+    return aabb_min, aabb_max
+
+
+@wp.func
 def project_point_onto_plane(point: wp.vec3, plane_point: wp.vec3, plane_normal: wp.vec3) -> wp.vec3:
     """
     Project a point onto a plane defined by a point and normal.
@@ -477,6 +541,87 @@ def postprocess_axial_shape_discrete_contacts(
     return output_count, signed_distances, points
 
 
+@wp.func
+def check_aabb_overlap(
+    shape_a: int,
+    shape_b: int,
+    aabb_lower: wp.array(dtype=wp.vec3),
+    aabb_upper: wp.array(dtype=wp.vec3),
+) -> bool:
+    """
+    Check if two shapes' precomputed AABBs overlap.
+    Returns True if they overlap, False otherwise.
+    """
+    # Get precomputed AABBs (already include margin)
+    aabb_a_lower = aabb_lower[shape_a]
+    aabb_a_upper = aabb_upper[shape_a]
+    aabb_b_lower = aabb_lower[shape_b]
+    aabb_b_upper = aabb_upper[shape_b]
+
+    # Check AABB overlap (separating axis test)
+    if aabb_a_upper[0] < aabb_b_lower[0] or aabb_b_upper[0] < aabb_a_lower[0]:
+        return False
+    if aabb_a_upper[1] < aabb_b_lower[1] or aabb_b_upper[1] < aabb_a_lower[1]:
+        return False
+    if aabb_a_upper[2] < aabb_b_lower[2] or aabb_b_upper[2] < aabb_a_lower[2]:
+        return False
+
+    return True
+
+
+@wp.func
+def check_infinite_plane_bsphere_overlap(
+    shape_data_a: GenericShapeData,
+    shape_data_b: GenericShapeData,
+    pos_a: wp.vec3,
+    pos_b: wp.vec3,
+    quat_a: wp.quat,
+    quat_b: wp.quat,
+    bsphere_center_a: wp.vec3,
+    bsphere_center_b: wp.vec3,
+    bsphere_radius_a: float,
+    bsphere_radius_b: float,
+) -> bool:
+    """
+    Check if an infinite plane overlaps with another shape's bounding sphere.
+    Returns True if they overlap, False otherwise.
+    Uses data already extracted by extract_shape_data.
+    """
+    type_a = shape_data_a.shape_type
+    type_b = shape_data_b.shape_type
+    scale_a = shape_data_a.scale
+    scale_b = shape_data_b.scale
+
+    # Check if either shape is an infinite plane
+    is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
+    is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (scale_b[0] == 0.0 and scale_b[1] == 0.0)
+
+    # If neither is an infinite plane, return True (no culling)
+    if not (is_infinite_plane_a or is_infinite_plane_b):
+        return True
+
+    # Determine which is the plane and which is the other shape
+    if is_infinite_plane_a:
+        plane_pos = pos_a
+        plane_quat = quat_a
+        other_center = bsphere_center_b
+        other_radius = bsphere_radius_b
+    else:
+        plane_pos = pos_b
+        plane_quat = quat_b
+        other_center = bsphere_center_a
+        other_radius = bsphere_radius_a
+
+    # Compute plane normal (plane's local +Z axis in world space)
+    plane_normal = wp.quat_rotate(plane_quat, wp.vec3(0.0, 0.0, 1.0))
+
+    # Distance from sphere center to plane
+    center_dist = wp.dot(other_center - plane_pos, plane_normal)
+
+    # Sphere intersects plane if center distance is within radius
+    return wp.abs(center_dist) <= other_radius
+
+
 @wp.kernel(enable_backward=False)
 def build_contacts_kernel_gjk_mpr(
     body_q: wp.array(dtype=wp.transform),
@@ -493,6 +638,8 @@ def build_contacts_kernel_gjk_mpr(
     contact_max: int,
     sap_shape_pair_count: wp.array(dtype=int),
     shape_source_ptr: wp.array(dtype=wp.uint64),
+    shape_aabb_lower: wp.array(dtype=wp.vec3),
+    shape_aabb_upper: wp.array(dtype=wp.vec3),
     total_num_threads: int,
     # outputs
     contact_count: wp.array(dtype=int),
@@ -506,6 +653,14 @@ def build_contacts_kernel_gjk_mpr(
     out_thickness0: wp.array(dtype=float),
     out_thickness1: wp.array(dtype=float),
     out_tids: wp.array(dtype=int),
+    # mesh collision outputs
+    shape_pairs_mesh: wp.array(dtype=wp.vec2i),
+    shape_pairs_mesh_count: wp.array(dtype=int),
+    # mesh-plane collision outputs
+    shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
+    shape_pairs_mesh_plane_cumsum: wp.array(dtype=int),
+    shape_pairs_mesh_plane_count: wp.array(dtype=int),
+    mesh_plane_vertex_total_count: wp.array(dtype=int),
 ):
     tid = wp.tid()
 
@@ -525,13 +680,14 @@ def build_contacts_kernel_gjk_mpr(
         if shape_a < 0 or shape_b < 0:
             continue
 
+        # Early AABB overlap check - skip pairs that don't overlap
+        # Especially useful for the EXPLICIT broad phase mode
+        if not check_aabb_overlap(shape_a, shape_b, shape_aabb_lower, shape_aabb_upper):
+            continue
+
         # Get shape types
         type_a = shape_type[shape_a]
         type_b = shape_type[shape_b]
-
-        # Skip mesh collisions (not supported in this simplified version)
-        if type_a == int(GeoType.MESH) or type_b == int(GeoType.MESH):
-            continue
 
         # Sort shapes by type to ensure consistent collision handling order
         if type_a > type_b:
@@ -564,6 +720,52 @@ def build_contacts_kernel_gjk_mpr(
             shape_collision_radius,
             shape_source_ptr,
         )
+
+        # Check if infinite plane vs bounding sphere overlap - early rejection
+        if not check_infinite_plane_bsphere_overlap(
+            shape_data_a,
+            shape_data_b,
+            pos_a,
+            pos_b,
+            quat_a,
+            quat_b,
+            bsphere_center_a,
+            bsphere_center_b,
+            bsphere_radius_a,
+            bsphere_radius_b,
+        ):
+            continue
+
+        # Check for mesh vs infinite plane collision - special handling
+        # After sorting, type_a <= type_b, so we only need to check one direction
+        if type_a == int(GeoType.PLANE) and type_b == int(GeoType.MESH):
+            # Check if plane is infinite (scale x and y are zero)
+            scale_a = shape_scale[shape_a]
+            if scale_a[0] == 0.0 and scale_a[1] == 0.0:
+                # Get mesh vertex count
+                mesh_id = shape_source_ptr[shape_b]
+                if mesh_id != wp.uint64(0):
+                    mesh_obj = wp.mesh_get(mesh_id)
+                    vertex_count = mesh_obj.points.shape[0]
+
+                    # Add to mesh-plane collision buffer with cumulative vertex count
+                    mesh_plane_idx = wp.atomic_add(shape_pairs_mesh_plane_count, 0, 1)
+                    if mesh_plane_idx < shape_pairs_mesh_plane.shape[0]:
+                        # Store shape indices (mesh, plane)
+                        shape_pairs_mesh_plane[mesh_plane_idx] = wp.vec2i(shape_b, shape_a)
+                        # Store inclusive cumulative vertex count in separate array for better cache locality
+                        cumulative_count_before = wp.atomic_add(mesh_plane_vertex_total_count, 0, vertex_count)
+                        cumulative_count_inclusive = cumulative_count_before + vertex_count
+                        shape_pairs_mesh_plane_cumsum[mesh_plane_idx] = cumulative_count_inclusive
+                continue
+
+        # Check for other mesh collisions - add to separate buffer for specialized handling
+        if type_a == int(GeoType.MESH) or type_b == int(GeoType.MESH):
+            # Add to mesh collision buffer using atomic counter
+            mesh_pair_idx = wp.atomic_add(shape_pairs_mesh_count, 0, 1)
+            if mesh_pair_idx < shape_pairs_mesh.shape[0]:
+                shape_pairs_mesh[mesh_pair_idx] = pair
+            continue
 
         # Get body indices
         rigid_a = shape_body[shape_a]
@@ -745,6 +947,342 @@ def build_contacts_kernel_gjk_mpr(
             )
 
 
+@wp.kernel(enable_backward=False)
+def find_mesh_triangle_overlaps_kernel(
+    body_q: wp.array(dtype=wp.transform),
+    shape_transform: wp.array(dtype=wp.transform),
+    shape_body: wp.array(dtype=int),
+    shape_type: wp.array(dtype=int),
+    shape_scale: wp.array(dtype=wp.vec3),
+    shape_collision_radius: wp.array(dtype=float),
+    shape_source_ptr: wp.array(dtype=wp.uint64),
+    shape_pairs_mesh: wp.array(dtype=wp.vec2i),
+    shape_pairs_mesh_count: wp.array(dtype=int),
+    rigid_contact_margin: float,
+    total_num_threads: int,
+    # outputs
+    triangle_pairs: wp.array(dtype=wp.vec3i),  # (shape_a, shape_b, triangle_idx)
+    triangle_pairs_count: wp.array(dtype=int),
+):
+    """
+    For each mesh collision pair, find all triangles that overlap with the non-mesh shape's AABB.
+    Outputs triples of (shape_a, shape_b, triangle_idx) for further processing.
+    """
+    tid = wp.tid()
+
+    num_mesh_pairs = shape_pairs_mesh_count[0]
+    # wp.printf("Number of mesh pairs: %d\n", num_mesh_pairs)
+
+    # Strided loop over mesh pairs
+    for i in range(tid, num_mesh_pairs, total_num_threads):
+        pair = shape_pairs_mesh[i]
+        shape_a = pair[0]
+        shape_b = pair[1]
+
+        # Determine which shape is the mesh
+        type_a = shape_type[shape_a]
+        type_b = shape_type[shape_b]
+
+        mesh_shape = -1
+        non_mesh_shape = -1
+
+        if type_a == int(GeoType.MESH) and type_b != int(GeoType.MESH):
+            mesh_shape = shape_a
+            non_mesh_shape = shape_b
+        elif type_b == int(GeoType.MESH) and type_a != int(GeoType.MESH):
+            mesh_shape = shape_b
+            non_mesh_shape = shape_a
+        else:
+            # Mesh-mesh collision not supported yet
+            continue
+
+        # Get mesh BVH ID and mesh transform
+        mesh_id = shape_source_ptr[mesh_shape]
+        if mesh_id == wp.uint64(0):
+            continue
+
+        # Get mesh world transform
+        mesh_body_idx = shape_body[mesh_shape]
+        X_mesh_ws = shape_transform[mesh_shape]
+        if mesh_body_idx >= 0:
+            X_mesh_ws = wp.transform_multiply(body_q[mesh_body_idx], shape_transform[mesh_shape])
+
+        # Get inverse mesh transform (world to mesh local space)
+        X_mesh_sw = wp.transform_inverse(X_mesh_ws)
+
+        # Get non-mesh shape world transform
+        body_idx = shape_body[non_mesh_shape]
+        X_ws = shape_transform[non_mesh_shape]
+        if body_idx >= 0:
+            X_ws = wp.transform_multiply(body_q[body_idx], shape_transform[non_mesh_shape])
+
+        # Compute transform from non-mesh shape local space to mesh local space
+        # X_mesh_shape = X_mesh_sw * X_ws
+        X_mesh_shape = wp.transform_multiply(X_mesh_sw, X_ws)
+        pos_in_mesh = wp.transform_get_translation(X_mesh_shape)
+        orientation_in_mesh = wp.transform_get_rotation(X_mesh_shape)
+
+        # Create generic shape data for non-mesh shape
+        geo_type = shape_type[non_mesh_shape]
+        scale = shape_scale[non_mesh_shape]
+
+        shape_data = GenericShapeData()
+        shape_data.shape_type = geo_type
+        shape_data.scale = scale
+        shape_data.auxiliary = wp.vec3(0.0, 0.0, 0.0)
+
+        # For CONVEX_MESH, pack the mesh pointer
+        if geo_type == int(GeoType.CONVEX_MESH):
+            shape_data.auxiliary = pack_mesh_ptr(shape_source_ptr[non_mesh_shape])
+
+        data_provider = SupportMapDataProvider()
+
+        # Compute tight AABB directly in mesh local space for optimal fit
+        aabb_lower, aabb_upper = compute_tight_aabb_from_support(
+            shape_data, orientation_in_mesh, pos_in_mesh, data_provider
+        )
+
+        # # Add small margin for contact detection
+        # margin_vec = wp.vec3(rigid_contact_margin, rigid_contact_margin, rigid_contact_margin)
+        # aabb_lower = aabb_lower - margin_vec
+        # aabb_upper = aabb_upper + margin_vec
+
+        # # Query mesh BVH for overlapping triangles in mesh local space
+        # tri_index = wp.int32(0)
+        # query = wp.bvh_query_aabb(mesh_id, aabb_lower, aabb_upper)
+
+        # while wp.bvh_query_next(query, tri_index):
+        #     # Add this triangle pair to the output buffer
+        #     out_idx = wp.atomic_add(triangle_pairs_count, 0, 1)
+        #     if out_idx < triangle_pairs.shape[0]:
+        #         triangle_pairs[out_idx] = wp.vec3i(shape_a, shape_b, tri_index)
+
+
+@wp.func
+def find_pair_from_cumulative_index(
+    global_idx: int,
+    cumulative_sums: wp.array(dtype=int),
+    num_pairs: int,
+) -> tuple[int, int]:
+    """
+    Binary search to find which pair a global index belongs to.
+
+    Args:
+        global_idx: Global index to search for
+        cumulative_sums: Array of inclusive cumulative sums (end indices)
+        num_pairs: Number of pairs
+
+    Returns:
+        Tuple of (pair_index, local_index_within_pair)
+    """
+    # Binary search to find which pair this global index belongs to
+    # cumulative_sums[i] stores the inclusive end (cumulative sum after adding this pair's count)
+    left = int(0)
+    right = int(num_pairs - 1)
+    pair_idx = int(0)
+
+    while left <= right:
+        mid = int((left + right) // 2)
+        cumulative_end = int(cumulative_sums[mid])
+
+        # Get cumulative start (exclusive end of previous pair, or 0 for first pair)
+        cumulative_start = int(0)
+        if mid > 0:
+            cumulative_start = int(cumulative_sums[mid - 1])
+
+        if global_idx >= cumulative_start and global_idx < cumulative_end:
+            pair_idx = mid
+            break
+        elif global_idx < cumulative_start:
+            right = mid - 1
+        else:
+            left = mid + 1
+
+    # Get cumulative start for this pair to calculate local index
+    cumulative_start = int(0)
+    if pair_idx > 0:
+        cumulative_start = int(cumulative_sums[pair_idx - 1])
+
+    local_idx = global_idx - cumulative_start
+
+    return pair_idx, local_idx
+
+
+@wp.kernel(enable_backward=False)
+def process_mesh_triangle_contacts_kernel(
+    body_q: wp.array(dtype=wp.transform),
+    shape_transform: wp.array(dtype=wp.transform),
+    shape_body: wp.array(dtype=int),
+    shape_type: wp.array(dtype=int),
+    shape_scale: wp.array(dtype=wp.vec3),
+    shape_source_ptr: wp.array(dtype=wp.uint64),
+    triangle_pairs: wp.array(dtype=wp.vec3i),
+    triangle_pairs_count: wp.array(dtype=int),
+    total_num_threads: int,
+):
+    """
+    Process triangle pairs to generate contacts.
+    Currently does nothing - to be implemented in a later step.
+    """
+    tid = wp.tid()
+
+    num_triangle_pairs = triangle_pairs_count[0]
+
+    for i in range(tid, num_triangle_pairs, total_num_threads):
+        if i >= triangle_pairs.shape[0]:
+            break
+
+        triple = triangle_pairs[i]
+        _shape_a = triple[0]
+        _shape_b = triple[1]
+        _tri_idx = triple[2]
+
+        # TODO: Implement contact generation for mesh triangles
+        # For now, this kernel does nothing as requested
+        pass
+
+
+@wp.kernel(enable_backward=False)
+def process_mesh_plane_contacts_kernel(
+    body_q: wp.array(dtype=wp.transform),
+    shape_transform: wp.array(dtype=wp.transform),
+    shape_body: wp.array(dtype=int),
+    shape_type: wp.array(dtype=int),
+    shape_scale: wp.array(dtype=wp.vec3),
+    shape_thickness: wp.array(dtype=float),
+    shape_source_ptr: wp.array(dtype=wp.uint64),
+    shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
+    shape_pairs_mesh_plane_cumsum: wp.array(dtype=int),
+    shape_pairs_mesh_plane_count: wp.array(dtype=int),
+    mesh_plane_vertex_total_count: wp.array(dtype=int),
+    rigid_contact_margin: float,
+    contact_max: int,
+    total_num_threads: int,
+    # outputs
+    contact_count: wp.array(dtype=int),
+    out_shape0: wp.array(dtype=int),
+    out_shape1: wp.array(dtype=int),
+    out_point0: wp.array(dtype=wp.vec3),
+    out_point1: wp.array(dtype=wp.vec3),
+    out_offset0: wp.array(dtype=wp.vec3),
+    out_offset1: wp.array(dtype=wp.vec3),
+    out_normal: wp.array(dtype=wp.vec3),
+    out_thickness0: wp.array(dtype=float),
+    out_thickness1: wp.array(dtype=float),
+    out_tids: wp.array(dtype=int),
+):
+    """
+    Process mesh-plane collisions by checking each mesh vertex against the infinite plane.
+    Uses binary search to map thread index to (mesh-plane pair, vertex index).
+    Fixed thread count with strided loop over vertices.
+    """
+    tid = wp.tid()
+
+    total_vertices = mesh_plane_vertex_total_count[0]
+    num_pairs = shape_pairs_mesh_plane_count[0]
+
+    if num_pairs == 0:
+        return
+
+    # Process vertices in a strided loop
+    for task_id in range(tid, total_vertices, total_num_threads):
+        if task_id >= total_vertices:
+            break
+
+        # Use binary search helper to find which mesh-plane pair this vertex belongs to
+        pair_idx, vertex_idx = find_pair_from_cumulative_index(
+            task_id, shape_pairs_mesh_plane_cumsum, num_pairs
+        )
+
+        # Get the mesh-plane pair
+        pair = shape_pairs_mesh_plane[pair_idx]
+        mesh_shape = pair[0]
+        plane_shape = pair[1]
+
+        # Get mesh
+        mesh_id = shape_source_ptr[mesh_shape]
+        if mesh_id == wp.uint64(0):
+            continue
+
+        mesh_obj = wp.mesh_get(mesh_id)
+        if vertex_idx >= mesh_obj.points.shape[0]:
+            continue
+
+        # Get mesh world transform
+        mesh_body_idx = shape_body[mesh_shape]
+        X_mesh_ws = shape_transform[mesh_shape]
+        if mesh_body_idx >= 0:
+            X_mesh_ws = wp.transform_multiply(body_q[mesh_body_idx], shape_transform[mesh_shape])
+
+        # Get plane world transform
+        plane_body_idx = shape_body[plane_shape]
+        X_plane_ws = shape_transform[plane_shape]
+        if plane_body_idx >= 0:
+            X_plane_ws = wp.transform_multiply(body_q[plane_body_idx], shape_transform[plane_shape])
+
+        # Get vertex position in mesh local space and transform to world space
+        mesh_scale = shape_scale[mesh_shape]
+        vertex_local = wp.cw_mul(mesh_obj.points[vertex_idx], mesh_scale)
+        vertex_world = wp.transform_point(X_mesh_ws, vertex_local)
+
+        # Get plane normal in world space (plane normal is along local +Z, pointing upward)
+        plane_normal = wp.transform_vector(X_plane_ws, wp.vec3(0.0, 0.0, 1.0))
+
+        # Project vertex onto plane to get closest point
+        X_plane_sw = wp.transform_inverse(X_plane_ws)
+        vertex_in_plane_space = wp.transform_point(X_plane_sw, vertex_world)
+        point_on_plane_local = wp.vec3(vertex_in_plane_space[0], vertex_in_plane_space[1], 0.0)
+        point_on_plane = wp.transform_point(X_plane_ws, point_on_plane_local)
+
+        # Compute distance and normal
+        diff = vertex_world - point_on_plane
+        distance = wp.dot(diff, plane_normal)
+
+        # Check if vertex is within collision margin
+        thickness_mesh = shape_thickness[mesh_shape]
+        thickness_plane = shape_thickness[plane_shape]
+        total_thickness = thickness_mesh + thickness_plane
+
+        # Only generate contact if distance is less than margin (including negative for penetration)
+        # Ignore extreme penetrations (mesh far below plane)
+        if distance < rigid_contact_margin + total_thickness and distance > -rigid_contact_margin:
+
+            # Get inverse transforms for body-local contact points
+            X_mesh_bw = wp.transform_identity() if mesh_body_idx == -1 else wp.transform_inverse(body_q[mesh_body_idx])
+            X_plane_bw = wp.transform_identity() if plane_body_idx == -1 else wp.transform_inverse(body_q[plane_body_idx])
+
+            # Write contact
+            # Note: write_contact expects contact_normal_a_to_b pointing FROM mesh TO plane (downward)
+            # plane_normal points upward, so we need to negate it
+            write_contact(
+                (vertex_world + point_on_plane) * 0.5,  # contact_point_center
+                -plane_normal,  # contact_normal_a_to_b (from mesh to plane, pointing downward)
+                distance,  # contact_distance
+                0.0,  # radius_eff_a (mesh has no effective radius)
+                0.0,  # radius_eff_b (plane has no effective radius)
+                thickness_mesh,  # thickness_a
+                thickness_plane,  # thickness_b
+                mesh_shape,  # shape_a
+                plane_shape,  # shape_b
+                X_mesh_bw,  # X_bw_a
+                X_plane_bw,  # X_bw_b
+                task_id,  # tid
+                rigid_contact_margin,
+                contact_max,
+                contact_count,
+                out_shape0,
+                out_shape1,
+                out_point0,
+                out_point1,
+                out_offset0,
+                out_offset1,
+                out_normal,
+                out_thickness0,
+                out_thickness1,
+                out_tids,
+            )
+
+
 @wp.kernel
 def compute_shape_aabbs(
     body_q: wp.array(dtype=wp.transform),
@@ -806,47 +1344,10 @@ def compute_shape_aabbs(
 
         data_provider = SupportMapDataProvider()
 
-        # Transpose orientation matrix to transform world axes to local space
-        # Convert quaternion to 3x3 rotation matrix and transpose (inverse rotation)
-        rot_mat = wp.quat_to_matrix(orientation)
-        rot_mat_t = wp.transpose(rot_mat)
-
-        # Transform world axes to local space (multiply by transposed rotation = inverse rotation)
-        local_x = wp.vec3(rot_mat_t[0, 0], rot_mat_t[1, 0], rot_mat_t[2, 0])
-        local_y = wp.vec3(rot_mat_t[0, 1], rot_mat_t[1, 1], rot_mat_t[2, 1])
-        local_z = wp.vec3(rot_mat_t[0, 2], rot_mat_t[1, 2], rot_mat_t[2, 2])
-
-        # Compute AABB extents by evaluating support function in local space
-        # Dot products are done in local space to avoid expensive rotations
-        support_point = wp.vec3()
-
-        # Max X: support along +local_x, dot in local space
-        support_point, _feature_id = support_map(shape_data, local_x, data_provider)
-        max_x = wp.dot(local_x, support_point)
-
-        # Max Y: support along +local_y, dot in local space
-        support_point, _feature_id = support_map(shape_data, local_y, data_provider)
-        max_y = wp.dot(local_y, support_point)
-
-        # Max Z: support along +local_z, dot in local space
-        support_point, _feature_id = support_map(shape_data, local_z, data_provider)
-        max_z = wp.dot(local_z, support_point)
-
-        # Min X: support along -local_x, dot in local space
-        support_point, _feature_id = support_map(shape_data, -local_x, data_provider)
-        min_x = wp.dot(local_x, support_point)
-
-        # Min Y: support along -local_y, dot in local space
-        support_point, _feature_id = support_map(shape_data, -local_y, data_provider)
-        min_y = wp.dot(local_y, support_point)
-
-        # Min Z: support along -local_z, dot in local space
-        support_point, _feature_id = support_map(shape_data, -local_z, data_provider)
-        min_z = wp.dot(local_z, support_point)
-
-        # AABB in world space (add world position to extents)
-        aabb_min_world = wp.vec3(min_x, min_y, min_z) + pos
-        aabb_max_world = wp.vec3(max_x, max_y, max_z) + pos
+        # Compute tight AABB using helper function
+        aabb_min_world, aabb_max_world = compute_tight_aabb_from_support(
+            shape_data, orientation, pos, data_provider
+        )
 
         aabb_lower[shape_id] = aabb_min_world - margin_vec
         aabb_upper[shape_id] = aabb_max_world + margin_vec
@@ -970,6 +1471,21 @@ class CollisionPipelineUnified:
             # self.dummy_collision_group = wp.full(shape_count, 1, dtype=wp.int32, device=device)
             # self.dummy_shape_group = wp.full(shape_count, -1, dtype=wp.int32, device=device)
 
+            # Allocate buffers for mesh collision handling
+            self.shape_pairs_mesh = wp.zeros(self.shape_pairs_max, dtype=wp.vec2i, device=device)
+            self.shape_pairs_mesh_count = wp.zeros(1, dtype=wp.int32, device=device)
+            # Conservative estimate: each mesh pair could have many triangle overlaps
+            # Use a generous multiplier for the triangle pairs buffer
+            max_triangle_pairs = 1000000  # Conservative estimate
+            self.triangle_pairs = wp.zeros(max_triangle_pairs, dtype=wp.vec3i, device=device)
+            self.triangle_pairs_count = wp.zeros(1, dtype=wp.int32, device=device)
+
+            # Allocate buffers for mesh-plane collision handling
+            self.shape_pairs_mesh_plane = wp.zeros(self.shape_pairs_max, dtype=wp.vec2i, device=device)
+            self.shape_pairs_mesh_plane_count = wp.zeros(1, dtype=wp.int32, device=device)
+            self.shape_pairs_mesh_plane_cumsum = wp.zeros(self.shape_pairs_max, dtype=wp.int32, device=device)
+            self.mesh_plane_vertex_total_count = wp.zeros(1, dtype=wp.int32, device=device)
+
         if soft_contact_max is None:
             soft_contact_max = shape_count * particle_count
         self.soft_contact_margin = soft_contact_margin
@@ -1077,6 +1593,10 @@ class CollisionPipelineUnified:
 
         # Clear counters at start of frame
         self.broad_phase_pair_count.zero_()
+        self.shape_pairs_mesh_count.zero_()
+        self.triangle_pairs_count.zero_()
+        self.shape_pairs_mesh_plane_count.zero_()
+        self.mesh_plane_vertex_total_count.zero_()
 
         # Compute AABBs for all shapes in world space (needed for both NXN and SAP)
         # AABBs are computed using support function for most shapes
@@ -1181,6 +1701,51 @@ class CollisionPipelineUnified:
                 contacts.rigid_contact_max,
                 self.broad_phase_pair_count,
                 model.shape_source_ptr,
+                self.shape_aabb_lower,
+                self.shape_aabb_upper,
+                total_num_threads,
+            ],
+            outputs=[
+                contacts.rigid_contact_count,
+                contacts.rigid_contact_shape0,
+                contacts.rigid_contact_shape1,
+                contacts.rigid_contact_point0,
+                contacts.rigid_contact_point1,
+                contacts.rigid_contact_offset0,
+                contacts.rigid_contact_offset1,
+                contacts.rigid_contact_normal,
+                contacts.rigid_contact_thickness0,
+                contacts.rigid_contact_thickness1,
+                contacts.rigid_contact_tids,
+                self.shape_pairs_mesh,
+                self.shape_pairs_mesh_count,
+                self.shape_pairs_mesh_plane,
+                self.shape_pairs_mesh_plane_cumsum,
+                self.shape_pairs_mesh_plane_count,
+                self.mesh_plane_vertex_total_count,
+            ],
+            device=contacts.device,
+            block_dim=block_dim,
+        )
+
+        # Launch mesh-plane contact processing kernel with fixed thread count
+        wp.launch(
+            kernel=process_mesh_plane_contacts_kernel,
+            dim=total_num_threads,
+            inputs=[
+                state.body_q,
+                model.shape_transform,
+                model.shape_body,
+                model.shape_type,
+                model.shape_scale,
+                model.shape_thickness,
+                model.shape_source_ptr,
+                self.shape_pairs_mesh_plane,
+                self.shape_pairs_mesh_plane_cumsum,
+                self.shape_pairs_mesh_plane_count,
+                self.mesh_plane_vertex_total_count,
+                self.rigid_contact_margin,
+                contacts.rigid_contact_max,
                 total_num_threads,
             ],
             outputs=[
@@ -1197,6 +1762,50 @@ class CollisionPipelineUnified:
                 contacts.rigid_contact_tids,
             ],
             device=contacts.device,
+            block_dim=block_dim,
+        )
+
+        # Launch mesh triangle overlap detection kernel
+        wp.launch(
+            kernel=find_mesh_triangle_overlaps_kernel,
+            dim=total_num_threads,
+            inputs=[
+                state.body_q,
+                model.shape_transform,
+                model.shape_body,
+                model.shape_type,
+                model.shape_scale,
+                model.shape_collision_radius,
+                model.shape_source_ptr,
+                self.shape_pairs_mesh,
+                self.shape_pairs_mesh_count,
+                self.rigid_contact_margin,
+                total_num_threads,
+            ],
+            outputs=[
+                self.triangle_pairs,
+                self.triangle_pairs_count,
+            ],
+            device=model.device,
+            block_dim=block_dim,
+        )
+
+        # Launch mesh triangle contact processing kernel
+        wp.launch(
+            kernel=process_mesh_triangle_contacts_kernel,
+            dim=total_num_threads,
+            inputs=[
+                state.body_q,
+                model.shape_transform,
+                model.shape_body,
+                model.shape_type,
+                model.shape_scale,
+                model.shape_source_ptr,
+                self.triangle_pairs,
+                self.triangle_pairs_count,
+                total_num_threads,
+            ],
+            device=model.device,
             block_dim=block_dim,
         )
 
