@@ -1151,14 +1151,28 @@ def process_mesh_triangle_contacts_kernel(
     shape_type: wp.array(dtype=int),
     shape_scale: wp.array(dtype=wp.vec3),
     shape_collision_radius: wp.array(dtype=float),
+    shape_thickness: wp.array(dtype=float),
     shape_source_ptr: wp.array(dtype=wp.uint64),
     triangle_pairs: wp.array(dtype=wp.vec3i),
     triangle_pairs_count: wp.array(dtype=int),
+    rigid_contact_margin: float,
+    contact_max: int,
     total_num_threads: int,
+    # outputs
+    contact_count: wp.array(dtype=int),
+    out_shape0: wp.array(dtype=int),
+    out_shape1: wp.array(dtype=int),
+    out_point0: wp.array(dtype=wp.vec3),
+    out_point1: wp.array(dtype=wp.vec3),
+    out_offset0: wp.array(dtype=wp.vec3),
+    out_offset1: wp.array(dtype=wp.vec3),
+    out_normal: wp.array(dtype=wp.vec3),
+    out_thickness0: wp.array(dtype=float),
+    out_thickness1: wp.array(dtype=float),
+    out_tids: wp.array(dtype=int),
 ):
     """
-    Process triangle pairs to generate contacts.
-    Currently does nothing - to be implemented in a later step.
+    Process triangle pairs to generate contacts using GJK/MPR.
     """
     tid = wp.tid()
 
@@ -1227,9 +1241,62 @@ def process_mesh_triangle_contacts_kernel(
             shape_source_ptr,
         )
 
-        # TODO: Implement contact generation for mesh triangles using GJK/MPR
-        # For now, this kernel does nothing as requested
-        pass
+        # Get body inverse transforms for contact point conversion
+        mesh_body_idx_a = shape_body[shape_a]
+        X_bw_a = wp.transform_identity()
+        if mesh_body_idx_a >= 0:
+            X_bw_a = wp.transform_inverse(body_q[mesh_body_idx_a])
+
+        body_idx_b = shape_body[shape_b]
+        X_bw_b = wp.transform_identity()
+        if body_idx_b >= 0:
+            X_bw_b = wp.transform_inverse(body_q[body_idx_b])
+
+        # Compute contacts using GJK/MPR
+        type_a = int(GeoTypeEx.TRIANGLE)
+        type_b = shape_type[shape_b]
+        
+        count, normal, signed_distances, points, radius_eff_a, radius_eff_b = compute_gjk_mpr_contacts(
+            shape_data_a,
+            shape_data_b,
+            type_a,
+            type_b,
+            quat_a,
+            quat_b,
+            pos_a,
+            pos_b,
+            rigid_contact_margin,
+        )
+
+        # Write contacts
+        for contact_id in range(count):
+            write_contact(
+                points[contact_id],
+                normal,
+                signed_distances[contact_id],
+                radius_eff_a,
+                radius_eff_b,
+                shape_thickness[shape_a],
+                shape_thickness[shape_b],
+                shape_a,
+                shape_b,
+                X_bw_a,
+                X_bw_b,
+                tid,
+                rigid_contact_margin,
+                contact_max,
+                contact_count,
+                out_shape0,
+                out_shape1,
+                out_point0,
+                out_point1,
+                out_offset0,
+                out_offset1,
+                out_normal,
+                out_thickness0,
+                out_thickness1,
+                out_tids,
+            )
 
 
 @wp.kernel(enable_backward=False)
@@ -1888,10 +1955,26 @@ class CollisionPipelineUnified:
                 model.shape_type,
                 model.shape_scale,
                 model.shape_collision_radius,
+                model.shape_thickness,
                 model.shape_source_ptr,
                 self.triangle_pairs,
                 self.triangle_pairs_count,
+                self.rigid_contact_margin,
+                contacts.rigid_contact_max,
                 total_num_threads,
+            ],
+            outputs=[
+                contacts.rigid_contact_count,
+                contacts.rigid_contact_shape0,
+                contacts.rigid_contact_shape1,
+                contacts.rigid_contact_point0,
+                contacts.rigid_contact_point1,
+                contacts.rigid_contact_offset0,
+                contacts.rigid_contact_offset1,
+                contacts.rigid_contact_normal,
+                contacts.rigid_contact_thickness0,
+                contacts.rigid_contact_thickness1,
+                contacts.rigid_contact_tids,
             ],
             device=model.device,
             block_dim=block_dim,
