@@ -1086,11 +1086,14 @@ def find_mesh_triangle_overlaps_kernel(
         # Query mesh BVH for overlapping triangles in mesh local space
         query = wp.mesh_query_aabb(mesh_id, aabb_lower, aabb_upper)
 
+        wp.printf("Starting query")
         for tri_index in query:
+            wp.printf("Triangle index: %d\n", tri_index)
             # Add this triangle pair to the output buffer
+            # Store (mesh_shape, non_mesh_shape, tri_index) to guarantee mesh is always first
             out_idx = wp.atomic_add(triangle_pairs_count, 0, 1)
             if out_idx < triangle_pairs.shape[0]:
-                triangle_pairs[out_idx] = wp.vec3i(shape_a, shape_b, tri_index)
+                triangle_pairs[out_idx] = wp.vec3i(mesh_shape, non_mesh_shape, tri_index)
 
 
 @wp.func
@@ -1241,6 +1244,13 @@ def process_mesh_triangle_contacts_kernel(
             shape_source_ptr,
         )
 
+        # Debug: print triangle and shape B info
+        wp.printf("Processing tri_idx=%d: v0=(%f,%f,%f) v1=(%f,%f,%f) v2=(%f,%f,%f)\n",
+                 tri_idx, v0_world[0], v0_world[1], v0_world[2],
+                 v1_world[0], v1_world[1], v1_world[2],
+                 v2_world[0], v2_world[1], v2_world[2])
+        wp.printf("Shape B type=%d pos=(%f,%f,%f)\n", shape_type[shape_b], pos_b[0], pos_b[1], pos_b[2])
+
         # Get body inverse transforms for contact point conversion
         mesh_body_idx_a = shape_body[shape_a]
         X_bw_a = wp.transform_identity()
@@ -1255,7 +1265,7 @@ def process_mesh_triangle_contacts_kernel(
         # Compute contacts using GJK/MPR
         type_a = int(GeoTypeEx.TRIANGLE)
         type_b = shape_type[shape_b]
-        
+
         count, normal, signed_distances, points, radius_eff_a, radius_eff_b = compute_gjk_mpr_contacts(
             shape_data_a,
             shape_data_b,
@@ -1269,6 +1279,8 @@ def process_mesh_triangle_contacts_kernel(
         )
 
         # Write contacts
+        if count > 0:
+            wp.printf("Writing %d contacts for triangle %d with shape %d\n", count, shape_a, shape_b)
         for contact_id in range(count):
             write_contact(
                 points[contact_id],
