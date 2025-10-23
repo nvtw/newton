@@ -42,6 +42,7 @@ from .state import State
 
 ENABLE_MULTI_CONTACT = True
 
+
 class BroadPhaseMode(IntEnum):
     """Broad phase collision detection mode.
 
@@ -235,7 +236,6 @@ def extract_shape_data(
     shape_body: wp.array(dtype=int),
     shape_type: wp.array(dtype=int),
     shape_scale: wp.array(dtype=wp.vec3),
-    shape_collision_radius: wp.array(dtype=float),
     shape_source_ptr: wp.array(dtype=wp.uint64),
 ):
     """
@@ -248,11 +248,10 @@ def extract_shape_data(
         shape_body: Shape to body mapping
         shape_type: Shape types
         shape_scale: Shape scales
-        shape_collision_radius: Precomputed collision radius
         shape_source_ptr: Array of mesh/SDF source pointers
 
     Returns:
-        tuple: (position, orientation, shape_data, bounding_sphere_center, bounding_sphere_radius)
+        tuple: (position, orientation, shape_data)
     """
     # Get shape's world transform
     body_idx = shape_body[shape_idx]
@@ -273,11 +272,7 @@ def extract_shape_data(
     if shape_type[shape_idx] == int(GeoType.CONVEX_MESH):
         result.auxiliary = pack_mesh_ptr(shape_source_ptr[shape_idx])
 
-    # For primitive shapes, bounding sphere center is the shape center
-    bounding_sphere_center = position
-    bounding_sphere_radius = shape_collision_radius[shape_idx]
-
-    return position, orientation, result, bounding_sphere_center, bounding_sphere_radius
+    return position, orientation, result
 
 
 @wp.func
@@ -351,13 +346,13 @@ def compute_gjk_mpr_contacts(
             points[i] = points[i] - normal * (radius_eff_b * 0.5)
             signed_distances[i] -= radius_eff_b - small_radius
 
-    # Post-process for axial shapes (cylinder/cone) rolling on discrete surfaces
-    is_discrete_a = is_discrete_shape(geom_a.shape_type)
-    is_discrete_b = is_discrete_shape(geom_b.shape_type)
-    is_axial_a = type_a == int(GeoType.CYLINDER) or type_a == int(GeoType.CONE)
-    is_axial_b = type_b == int(GeoType.CYLINDER) or type_b == int(GeoType.CONE)
-
     if wp.static(ENABLE_MULTI_CONTACT):
+        # Post-process for axial shapes (cylinder/cone) rolling on discrete surfaces
+        is_discrete_a = is_discrete_shape(geom_a.shape_type)
+        is_discrete_b = is_discrete_shape(geom_b.shape_type)
+        is_axial_a = type_a == int(GeoType.CYLINDER) or type_a == int(GeoType.CONE)
+        is_axial_b = type_b == int(GeoType.CYLINDER) or type_b == int(GeoType.CONE)
+
         if is_discrete_a and is_axial_b and count >= 3:
             # Post-process axial shape (B) rolling on discrete surface (A)
             shape_radius = geom_b.scale[0]  # radius for cylinder, base radius for cone
@@ -661,31 +656,17 @@ def postprocess_axial_shape_discrete_contacts(
 
 
 @wp.func
-def check_aabb_overlap(
-    shape_a: int,
-    shape_b: int,
-    aabb_lower: wp.array(dtype=wp.vec3),
-    aabb_upper: wp.array(dtype=wp.vec3),
-) -> bool:
+def compute_bounding_sphere_from_aabb(aabb_lower: wp.vec3, aabb_upper: wp.vec3) -> tuple[wp.vec3, float]:
     """
-    Check if two shapes' precomputed AABBs overlap.
-    Returns True if they overlap, False otherwise.
+    Compute a bounding sphere from an AABB.
+
+    Returns:
+        Tuple of (center, radius) where center is the AABB center and radius is half the diagonal.
     """
-    # Get precomputed AABBs (already include margin)
-    aabb_a_lower = aabb_lower[shape_a]
-    aabb_a_upper = aabb_upper[shape_a]
-    aabb_b_lower = aabb_lower[shape_b]
-    aabb_b_upper = aabb_upper[shape_b]
-
-    # Check AABB overlap (separating axis test)
-    if aabb_a_upper[0] < aabb_b_lower[0] or aabb_b_upper[0] < aabb_a_lower[0]:
-        return False
-    if aabb_a_upper[1] < aabb_b_lower[1] or aabb_b_upper[1] < aabb_a_lower[1]:
-        return False
-    if aabb_a_upper[2] < aabb_b_lower[2] or aabb_b_upper[2] < aabb_a_lower[2]:
-        return False
-
-    return True
+    center = 0.5 * (aabb_lower + aabb_upper)
+    half_extents = 0.5 * (aabb_upper - aabb_lower)
+    radius = wp.length(half_extents)
+    return center, radius
 
 
 @wp.func
@@ -799,9 +780,19 @@ def build_contacts_kernel_gjk_mpr(
         if shape_a < 0 or shape_b < 0:
             continue
 
-        # Early AABB overlap check - skip pairs that don't overlap
+        # Load AABBs once for both shapes
+        aabb_a_lower = shape_aabb_lower[shape_a]
+        aabb_a_upper = shape_aabb_upper[shape_a]
+        aabb_b_lower = shape_aabb_lower[shape_b]
+        aabb_b_upper = shape_aabb_upper[shape_b]
+
+        # Inline AABB overlap check - skip pairs that don't overlap
         # Especially useful for the EXPLICIT broad phase mode
-        if not check_aabb_overlap(shape_a, shape_b, shape_aabb_lower, shape_aabb_upper):
+        if aabb_a_upper[0] < aabb_b_lower[0] or aabb_b_upper[0] < aabb_a_lower[0]:
+            continue
+        if aabb_a_upper[1] < aabb_b_lower[1] or aabb_b_upper[1] < aabb_a_lower[1]:
+            continue
+        if aabb_a_upper[2] < aabb_b_lower[2] or aabb_b_upper[2] < aabb_a_lower[2]:
             continue
 
         # Get shape types
@@ -813,32 +804,37 @@ def build_contacts_kernel_gjk_mpr(
             # Swap shapes to maintain consistent ordering
             shape_a, shape_b = shape_b, shape_a
             type_a, type_b = type_b, type_a
+            # Swap AABBs as well
+            aabb_a_lower, aabb_b_lower = aabb_b_lower, aabb_a_lower
+            aabb_a_upper, aabb_b_upper = aabb_b_upper, aabb_a_upper
             tmp = pair[0]
             pair[0] = pair[1]
             pair[1] = tmp
 
         # Extract shape data for both shapes
-        pos_a, quat_a, shape_data_a, bsphere_center_a, bsphere_radius_a = extract_shape_data(
+        pos_a, quat_a, shape_data_a = extract_shape_data(
             shape_a,
             body_q,
             shape_transform,
             shape_body,
             shape_type,
             shape_scale,
-            shape_collision_radius,
             shape_source_ptr,
         )
 
-        pos_b, quat_b, shape_data_b, bsphere_center_b, bsphere_radius_b = extract_shape_data(
+        pos_b, quat_b, shape_data_b = extract_shape_data(
             shape_b,
             body_q,
             shape_transform,
             shape_body,
             shape_type,
             shape_scale,
-            shape_collision_radius,
             shape_source_ptr,
         )
+
+        # Compute bounding spheres from AABBs instead of using mesh bounding spheres
+        bsphere_center_a, bsphere_radius_a = compute_bounding_sphere_from_aabb(aabb_a_lower, aabb_a_upper)
+        bsphere_center_b, bsphere_radius_b = compute_bounding_sphere_from_aabb(aabb_b_lower, aabb_b_upper)
 
         # Check if infinite plane vs bounding sphere overlap - early rejection
         if not check_infinite_plane_bsphere_overlap(
@@ -890,32 +886,17 @@ def build_contacts_kernel_gjk_mpr(
         rigid_a = shape_body[shape_a]
         rigid_b = shape_body[shape_b]
 
-        # Get shape types from the extracted data
-        type_a = shape_data_a.shape_type
-        type_b = shape_data_b.shape_type
-
         # Check if shapes are infinite planes (scale.x == 0 and scale.y == 0)
-        scale_a = shape_data_a.scale
-        scale_b = shape_data_b.scale
-        is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
-        is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (scale_b[0] == 0.0 and scale_b[1] == 0.0)
-
-        # Early bounding sphere check using extracted bounding spheres
-        # Inflate by rigid_contact_margin only (no speculative expansion)
-        radius_a = bsphere_radius_a + rigid_contact_margin
-        radius_b = bsphere_radius_b + rigid_contact_margin
-
-        # Use the extracted orientations
-        rot_a = quat_a
-        rot_b = quat_b
+        is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (
+            shape_data_a.scale[0] == 0.0 and shape_data_a.scale[1] == 0.0
+        )
+        is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (
+            shape_data_b.scale[0] == 0.0 and shape_data_b.scale[1] == 0.0
+        )
 
         # World->body transforms for writing contact points
         X_bw_a = wp.transform_identity() if rigid_a == -1 else wp.transform_inverse(body_q[rigid_a])
         X_bw_b = wp.transform_identity() if rigid_b == -1 else wp.transform_inverse(body_q[rigid_b])
-
-        # Use the extracted geometry data structures for convex collision detection
-        geom_a = shape_data_a
-        geom_b = shape_data_b
 
         # Convert infinite planes to cube proxies for GJK/MPR compatibility
         # Use the OTHER object's radius to properly size the cube
@@ -923,23 +904,27 @@ def build_contacts_kernel_gjk_mpr(
         pos_a_adjusted = pos_a
         if is_infinite_plane_a:
             # Position the cube based on the OTHER object's position (pos_b)
-            geom_a, pos_a_adjusted = convert_infinite_plane_to_cube(geom_a, rot_a, pos_a, pos_b, radius_b)
+            shape_data_a, pos_a_adjusted = convert_infinite_plane_to_cube(
+                shape_data_a, quat_a, pos_a, pos_b, bsphere_radius_b + rigid_contact_margin
+            )
             type_a = int(GeoType.BOX)
 
         pos_b_adjusted = pos_b
         if is_infinite_plane_b:
             # Position the cube based on the OTHER object's position (pos_a)
-            geom_b, pos_b_adjusted = convert_infinite_plane_to_cube(geom_b, rot_b, pos_b, pos_a, radius_a)
+            shape_data_b, pos_b_adjusted = convert_infinite_plane_to_cube(
+                shape_data_b, quat_b, pos_b, pos_a, bsphere_radius_a + rigid_contact_margin
+            )
             type_b = int(GeoType.BOX)
 
         # Compute contacts using GJK/MPR
         count, normal, signed_distances, points, radius_eff_a, radius_eff_b = compute_gjk_mpr_contacts(
-            geom_a,
-            geom_b,
+            shape_data_a,
+            shape_data_b,
             type_a,
             type_b,
-            rot_a,
-            rot_b,
+            quat_a,
+            quat_b,
             pos_a_adjusted,
             pos_b_adjusted,
             rigid_contact_margin,
@@ -1233,14 +1218,13 @@ def process_mesh_triangle_contacts_kernel(
         pos_a = v0_world
 
         # Extract shape B data
-        pos_b, quat_b, shape_data_b, bsphere_center_b, bsphere_radius_b = extract_shape_data(
+        pos_b, quat_b, shape_data_b = extract_shape_data(
             shape_b,
             body_q,
             shape_transform,
             shape_body,
             shape_type,
             shape_scale,
-            shape_collision_radius,
             shape_source_ptr,
         )
 
