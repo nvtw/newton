@@ -23,7 +23,7 @@ import warp as wp
 from ..core.types import Devicelike
 from ..geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from ..geometry.broad_phase_sap import BroadPhaseSAP
-from ..geometry.collision_convex import create_solve_convex_multi_contact
+from ..geometry.collision_convex import create_solve_convex_multi_contact, create_solve_convex_single_contact
 from ..geometry.support_function import (
     GenericShapeData,
     GeoTypeEx,
@@ -39,6 +39,8 @@ from .contacts import Contacts
 from .model import Model
 from .state import State
 
+
+ENABLE_MULTI_CONTACT = True
 
 class BroadPhaseMode(IntEnum):
     """Broad phase collision detection mode.
@@ -56,6 +58,7 @@ class BroadPhaseMode(IntEnum):
 
 # Pre-create the convex multi-contact solver (usable inside kernels)
 solve_convex_multi_contact = create_solve_convex_multi_contact(support_map_func)
+solve_convex_single_contact = create_solve_convex_single_contact(support_map_func)
 
 # Type definitions for multi-contact manifolds
 _mat53f = wp.types.matrix((5, 3), wp.float32)
@@ -311,18 +314,32 @@ def compute_gjk_mpr_contacts(
         radius_eff_b = geom_b.scale[0]
         geom_b.scale[0] = small_radius
 
-    count, normal, signed_distances, points, _features = wp.static(solve_convex_multi_contact)(
-        geom_a,
-        geom_b,
-        rot_a,
-        rot_b,
-        pos_a_adjusted,
-        pos_b_adjusted,
-        0.0,  # sum_of_contact_offsets - gap
-        data_provider,
-        rigid_contact_margin + radius_eff_a + radius_eff_b,
-        type_a == int(GeoType.SPHERE) or type_b == int(GeoType.SPHERE),
-    )
+    if wp.static(ENABLE_MULTI_CONTACT):
+        count, normal, signed_distances, points, _features = wp.static(solve_convex_multi_contact)(
+            geom_a,
+            geom_b,
+            rot_a,
+            rot_b,
+            pos_a_adjusted,
+            pos_b_adjusted,
+            0.0,  # sum_of_contact_offsets - gap
+            data_provider,
+            rigid_contact_margin + radius_eff_a + radius_eff_b,
+            type_a == int(GeoType.SPHERE) or type_b == int(GeoType.SPHERE),
+        )
+    else:
+        count, normal, signed_distances, points, _features = wp.static(solve_convex_single_contact)(
+            geom_a,
+            geom_b,
+            rot_a,
+            rot_b,
+            pos_a_adjusted,
+            pos_b_adjusted,
+            0.0,  # sum_of_contact_offsets - gap
+            data_provider,
+            rigid_contact_margin + radius_eff_a + radius_eff_b,
+            type_a == int(GeoType.SPHERE) or type_b == int(GeoType.SPHERE),
+        )
 
     # Special post processing for minkowski objects
     if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
@@ -340,40 +357,41 @@ def compute_gjk_mpr_contacts(
     is_axial_a = type_a == int(GeoType.CYLINDER) or type_a == int(GeoType.CONE)
     is_axial_b = type_b == int(GeoType.CYLINDER) or type_b == int(GeoType.CONE)
 
-    if is_discrete_a and is_axial_b and count >= 3:
-        # Post-process axial shape (B) rolling on discrete surface (A)
-        shape_radius = geom_b.scale[0]  # radius for cylinder, base radius for cone
-        shape_half_height = geom_b.scale[1]
-        is_cone_b = type_b == int(GeoType.CONE)
-        count, signed_distances, points = postprocess_axial_shape_discrete_contacts(
-            points,
-            normal,
-            signed_distances,
-            count,
-            rot_b,
-            shape_radius,
-            shape_half_height,
-            pos_b_adjusted,
-            is_cone_b,
-        )
+    if wp.static(ENABLE_MULTI_CONTACT):
+        if is_discrete_a and is_axial_b and count >= 3:
+            # Post-process axial shape (B) rolling on discrete surface (A)
+            shape_radius = geom_b.scale[0]  # radius for cylinder, base radius for cone
+            shape_half_height = geom_b.scale[1]
+            is_cone_b = type_b == int(GeoType.CONE)
+            count, signed_distances, points = postprocess_axial_shape_discrete_contacts(
+                points,
+                normal,
+                signed_distances,
+                count,
+                rot_b,
+                shape_radius,
+                shape_half_height,
+                pos_b_adjusted,
+                is_cone_b,
+            )
 
-    if is_discrete_b and is_axial_a and count >= 3:
-        # Post-process axial shape (A) rolling on discrete surface (B)
-        # Note: normal points from A to B, so we need to negate it for the shape processing
-        shape_radius = geom_a.scale[0]  # radius for cylinder, base radius for cone
-        shape_half_height = geom_a.scale[1]
-        is_cone_a = type_a == int(GeoType.CONE)
-        count, signed_distances, points = postprocess_axial_shape_discrete_contacts(
-            points,
-            -normal,
-            signed_distances,
-            count,
-            rot_a,
-            shape_radius,
-            shape_half_height,
-            pos_a_adjusted,
-            is_cone_a,
-        )
+        if is_discrete_b and is_axial_a and count >= 3:
+            # Post-process axial shape (A) rolling on discrete surface (B)
+            # Note: normal points from A to B, so we need to negate it for the shape processing
+            shape_radius = geom_a.scale[0]  # radius for cylinder, base radius for cone
+            shape_half_height = geom_a.scale[1]
+            is_cone_a = type_a == int(GeoType.CONE)
+            count, signed_distances, points = postprocess_axial_shape_discrete_contacts(
+                points,
+                -normal,
+                signed_distances,
+                count,
+                rot_a,
+                shape_radius,
+                shape_half_height,
+                pos_a_adjusted,
+                is_cone_a,
+            )
 
     return count, normal, signed_distances, points, radius_eff_a, radius_eff_b
 
@@ -886,30 +904,6 @@ def build_contacts_kernel_gjk_mpr(
         # Inflate by rigid_contact_margin only (no speculative expansion)
         radius_a = bsphere_radius_a + rigid_contact_margin
         radius_b = bsphere_radius_b + rigid_contact_margin
-        # center_distance = wp.length(bsphere_center_b - bsphere_center_a)
-
-        # # Early out if bounding spheres don't overlap
-        # # Skip this check if either shape is an infinite plane
-        # if not (is_infinite_plane_a or is_infinite_plane_b):
-        #     if center_distance > (radius_a + radius_b):
-        #         continue
-        # elif is_infinite_plane_a and is_infinite_plane_b:
-        #     # Plane-plane collisions are not supported
-        #     continue
-        # elif is_infinite_plane_a:
-        #     # Check if shape B is close enough to the infinite plane A
-        #     plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
-        #     # Distance from shape B center to plane A
-        #     dist_to_plane = wp.abs(wp.dot(pos_b - pos_a, plane_normal))
-        #     if dist_to_plane > radius_b:
-        #         continue
-        # elif is_infinite_plane_b:
-        #     # Check if shape A is close enough to the infinite plane B
-        #     plane_normal = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
-        #     # Distance from shape A center to plane B
-        #     dist_to_plane = wp.abs(wp.dot(pos_a - pos_b, plane_normal))
-        #     if dist_to_plane > radius_a:
-        #         continue
 
         # Use the extracted orientations
         rot_a = quat_a
@@ -1001,16 +995,14 @@ def find_mesh_triangle_overlaps_kernel(
     """
     For each mesh collision pair, find all triangles that overlap with the non-mesh shape's AABB.
     Outputs triples of (shape_a, shape_b, triangle_idx) for further processing.
+    Uses tiled mesh query for improved performance.
     """
-    tid = wp.tid()
+    tid, _j = wp.tid()
 
     num_mesh_pairs = shape_pairs_mesh_count[0]
-    # wp.printf("Number of mesh pairs: %d\n", num_mesh_pairs)
 
     # Strided loop over mesh pairs
-    # for i in range(tid, num_mesh_pairs, total_num_threads):
-    if tid < num_mesh_pairs:
-        i = tid
+    for i in range(tid, num_mesh_pairs, total_num_threads):
         pair = shape_pairs_mesh[i]
         shape_a = pair[0]
         shape_b = pair[1]
@@ -1083,17 +1075,25 @@ def find_mesh_triangle_overlaps_kernel(
         aabb_lower = aabb_lower - margin_vec
         aabb_upper = aabb_upper + margin_vec
 
-        # Query mesh BVH for overlapping triangles in mesh local space
-        query = wp.mesh_query_aabb(mesh_id, aabb_lower, aabb_upper)
+        # Query mesh BVH for overlapping triangles in mesh local space using tiled version
+        query = wp.tile_mesh_query_aabb(mesh_id, aabb_lower, aabb_upper)
 
-        wp.printf("Starting query")
-        for tri_index in query:
-            wp.printf("Triangle index: %d\n", tri_index)
-            # Add this triangle pair to the output buffer
+        result_tile = wp.tile_mesh_query_aabb_next(query)
+
+        # Continue querying while we have results
+        # Each iteration, each thread in the block gets one result (or -1)
+        while wp.tile_max(result_tile)[0] >= 0:
+            # Each thread processes its result from the tile
+            tri_index = wp.untile(result_tile)
+
+            # Add this triangle pair to the output buffer if valid
             # Store (mesh_shape, non_mesh_shape, tri_index) to guarantee mesh is always first
-            out_idx = wp.atomic_add(triangle_pairs_count, 0, 1)
-            if out_idx < triangle_pairs.shape[0]:
-                triangle_pairs[out_idx] = wp.vec3i(mesh_shape, non_mesh_shape, tri_index)
+            if tri_index >= 0:
+                out_idx = wp.atomic_add(triangle_pairs_count, 0, 1)
+                if out_idx < triangle_pairs.shape[0]:
+                    triangle_pairs[out_idx] = wp.vec3i(mesh_shape, non_mesh_shape, tri_index)
+
+            result_tile = wp.tile_mesh_query_aabb_next(query)
 
 
 @wp.func
@@ -1244,13 +1244,6 @@ def process_mesh_triangle_contacts_kernel(
             shape_source_ptr,
         )
 
-        # Debug: print triangle and shape B info
-        wp.printf("Processing tri_idx=%d: v0=(%f,%f,%f) v1=(%f,%f,%f) v2=(%f,%f,%f)\n",
-                 tri_idx, v0_world[0], v0_world[1], v0_world[2],
-                 v1_world[0], v1_world[1], v1_world[2],
-                 v2_world[0], v2_world[1], v2_world[2])
-        wp.printf("Shape B type=%d pos=(%f,%f,%f)\n", shape_type[shape_b], pos_b[0], pos_b[1], pos_b[2])
-
         # Get body inverse transforms for contact point conversion
         mesh_body_idx_a = shape_body[shape_a]
         X_bw_a = wp.transform_identity()
@@ -1279,8 +1272,6 @@ def process_mesh_triangle_contacts_kernel(
         )
 
         # Write contacts
-        if count > 0:
-            wp.printf("Writing %d contacts for triangle %d with shape %d\n", count, shape_a, shape_b)
         for contact_id in range(count):
             write_contact(
                 points[contact_id],
@@ -1848,7 +1839,7 @@ class CollisionPipelineUnified:
         # Launch kernel across all shape pairs
         # Use fixed dimension as we don't know pair count ahead of time
         block_dim = 128
-        total_num_threads = block_dim * 32
+        total_num_threads = block_dim * 1024
         wp.launch(
             kernel=build_contacts_kernel_gjk_mpr,
             dim=total_num_threads,
@@ -1932,9 +1923,10 @@ class CollisionPipelineUnified:
         )
 
         # Launch mesh triangle overlap detection kernel
-        wp.launch(
+        num_tile_blocks = 1024
+        wp.launch_tiled(
             kernel=find_mesh_triangle_overlaps_kernel,
-            dim=total_num_threads,
+            dim=num_tile_blocks,
             inputs=[
                 state.body_q,
                 model.shape_transform,
@@ -1946,14 +1938,14 @@ class CollisionPipelineUnified:
                 self.shape_pairs_mesh,
                 self.shape_pairs_mesh_count,
                 self.rigid_contact_margin,
-                total_num_threads,
+                num_tile_blocks,
             ],
             outputs=[
                 self.triangle_pairs,
                 self.triangle_pairs_count,
             ],
             device=model.device,
-            block_dim=block_dim,
+            block_dim=128,
         )
 
         # Launch mesh triangle contact processing kernel

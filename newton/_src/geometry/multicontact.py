@@ -577,7 +577,6 @@ def approx_max_quadrilateral_area_with_calipers(hull: wp.array(dtype=wp.vec3), h
     # --- Step 1: Find the hull's diameter using Rotating Calipers in O(n) ---
     p1 = int(0)
     p3 = int(1)
-    # Use XYZ distance (match C# vec3 distance)
     hp1 = hull[p1]
     hp3 = hull[p3]
     diff = wp.vec3(hp1[0] - hp3[0], hp1[1] - hp3[1], hp1[2] - hp3[2])
