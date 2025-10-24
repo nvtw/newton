@@ -215,8 +215,15 @@ def precompute_world_map(geom_collision_group: np.ndarray, geom_flags: np.ndarra
     # Import here to avoid circular dependency
     from .flags import ShapeFlags
 
+    # Ensure geom_collision_group is a numpy array (might be a list from builder)
+    if not isinstance(geom_collision_group, np.ndarray):
+        geom_collision_group = np.array(geom_collision_group)
+
     # Filter out non-colliding shapes if flags are provided
     if geom_flags is not None:
+        # Ensure geom_flags is also a numpy array
+        if not isinstance(geom_flags, np.ndarray):
+            geom_flags = np.array(geom_flags)
         colliding_mask = (geom_flags & ShapeFlags.COLLIDE_SHAPES) != 0
     else:
         colliding_mask = np.ones(len(geom_collision_group), dtype=bool)
