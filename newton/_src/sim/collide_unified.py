@@ -41,6 +41,7 @@ from .state import State
 
 
 ENABLE_MULTI_CONTACT = True
+ENABLE_TILE_BVH_QUERY = True
 
 
 class BroadPhaseMode(IntEnum):
@@ -1060,25 +1061,36 @@ def find_mesh_triangle_overlaps_kernel(
         aabb_lower = aabb_lower - margin_vec
         aabb_upper = aabb_upper + margin_vec
 
-        # Query mesh BVH for overlapping triangles in mesh local space using tiled version
-        query = wp.tile_mesh_query_aabb(mesh_id, aabb_lower, aabb_upper)
-
-        result_tile = wp.tile_mesh_query_aabb_next(query)
-
-        # Continue querying while we have results
-        # Each iteration, each thread in the block gets one result (or -1)
-        while wp.tile_max(result_tile)[0] >= 0:
-            # Each thread processes its result from the tile
-            tri_index = wp.untile(result_tile)
-
-            # Add this triangle pair to the output buffer if valid
-            # Store (mesh_shape, non_mesh_shape, tri_index) to guarantee mesh is always first
-            if tri_index >= 0:
-                out_idx = wp.atomic_add(triangle_pairs_count, 0, 1)
-                if out_idx < triangle_pairs.shape[0]:
-                    triangle_pairs[out_idx] = wp.vec3i(mesh_shape, non_mesh_shape, tri_index)
+        if wp.static(ENABLE_TILE_BVH_QUERY):
+            # Query mesh BVH for overlapping triangles in mesh local space using tiled version
+            query = wp.tile_mesh_query_aabb(mesh_id, aabb_lower, aabb_upper)
 
             result_tile = wp.tile_mesh_query_aabb_next(query)
+
+            # Continue querying while we have results
+            # Each iteration, each thread in the block gets one result (or -1)
+            while wp.tile_max(result_tile)[0] >= 0:
+                # Each thread processes its result from the tile
+                tri_index = wp.untile(result_tile)
+
+                # Add this triangle pair to the output buffer if valid
+                # Store (mesh_shape, non_mesh_shape, tri_index) to guarantee mesh is always first
+                if tri_index >= 0:
+                    out_idx = wp.atomic_add(triangle_pairs_count, 0, 1)
+                    if out_idx < triangle_pairs.shape[0]:
+                        triangle_pairs[out_idx] = wp.vec3i(mesh_shape, non_mesh_shape, tri_index)
+
+                result_tile = wp.tile_mesh_query_aabb_next(query)
+        else:
+            query = wp.mesh_query_aabb(mesh_id, aabb_lower, aabb_upper)
+            tri_index = wp.int32(0)
+            while wp.mesh_query_aabb_next(query, tri_index):
+                # Add this triangle pair to the output buffer if valid
+                # Store (mesh_shape, non_mesh_shape, tri_index) to guarantee mesh is always first
+                if tri_index >= 0:
+                    out_idx = wp.atomic_add(triangle_pairs_count, 0, 1)
+                    if out_idx < triangle_pairs.shape[0]:
+                        triangle_pairs[out_idx] = wp.vec3i(mesh_shape, non_mesh_shape, tri_index)
 
 
 @wp.func
@@ -1908,9 +1920,11 @@ class CollisionPipelineUnified:
 
         # Launch mesh triangle overlap detection kernel
         num_tile_blocks = 1024
-        wp.launch_tiled(
+        tile_size = 128
+        second_dim = tile_size if ENABLE_TILE_BVH_QUERY else 1
+        wp.launch(
             kernel=find_mesh_triangle_overlaps_kernel,
-            dim=num_tile_blocks,
+            dim=[num_tile_blocks, second_dim],
             inputs=[
                 state.body_q,
                 model.shape_transform,
@@ -1929,7 +1943,7 @@ class CollisionPipelineUnified:
                 self.triangle_pairs_count,
             ],
             device=model.device,
-            block_dim=128,
+            block_dim=tile_size,
         )
 
         # Launch mesh triangle contact processing kernel
