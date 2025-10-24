@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from enum import IntEnum
+
 import numpy as np
 import warp as wp
 
@@ -25,6 +27,12 @@ from .broad_phase_common import (
 from .broad_phase_nxn import precompute_world_map
 
 wp.set_module_options({"enable_backward": False})
+
+
+class SAPSortType(IntEnum):
+    """Sort algorithm to use for SAP broad phase."""
+    SEGMENTED = 0  # Use wp.utils.segmented_sort_pairs (default)
+    TILE = 1       # Use wp.tile_sort with shared memory (faster for certain sizes)
 
 
 @wp.func
@@ -55,28 +63,69 @@ def binary_search_segment(
     end: int,
 ) -> int:
     """Binary search in a segment of a 1D array.
-
+    
     Args:
         arr: The array to search in
         base_idx: Base index offset for this segment
         value: Value to search for
         start: Start index (relative to base_idx)
         end: End index (relative to base_idx)
-
+    
     Returns:
         Index (relative to base_idx) where value should be inserted
     """
     low = int(start)
     high = int(end)
-
+    
     while low < high:
         mid = (low + high) // 2
         if arr[base_idx + mid] < value:
             low = mid + 1
         else:
             high = mid
-
+    
     return low
+
+
+def _create_tile_sort_kernel(tile_size: int):
+    """Create a tile-based sort kernel for a specific tile size.
+    
+    This uses Warp's tile operations for efficient shared-memory sorting.
+    The tile size must match max_geoms_per_world and be a power of 2.
+    
+    Args:
+        tile_size: Size of each tile (must be power of 2)
+    
+    Returns:
+        A Warp kernel that performs segmented tile-based sorting
+    """
+    @wp.kernel
+    def tile_sort_kernel(
+        sap_projection_lower: wp.array(dtype=float, ndim=1),
+        sap_sort_index: wp.array(dtype=int, ndim=1),
+        max_geoms_per_world: int,
+    ):
+        """Tile-based segmented sort kernel.
+        
+        Each thread block processes one world's data using shared memory.
+        """
+        world_id = wp.tid()
+        
+        # Calculate base index for this world
+        base_idx = world_id * max_geoms_per_world
+        
+        # Load data into tiles (shared memory)
+        keys = wp.tile_load(sap_projection_lower, base_idx, shape=tile_size, storage="shared")
+        values = wp.tile_load(sap_sort_index, base_idx, shape=tile_size, storage="shared")
+        
+        # Perform in-place sorting on shared memory
+        wp.tile_sort(keys, values)
+        
+        # Store sorted data back to global memory
+        wp.tile_store(sap_projection_lower, base_idx, keys)
+        wp.tile_store(sap_sort_index, base_idx, values)
+    
+    return tile_sort_kernel
 
 
 @wp.kernel
@@ -275,6 +324,12 @@ def _sap_broadphase_kernel(
         col_group2 = collision_group[geom2]
         world1 = shape_world[geom1]
         world2 = shape_world[geom2]
+        
+        # Avoid duplicate pairs: if both geometries are shared (world -1),
+        # only process them in the first world segment (world_id == 0)
+        if world1 == -1 and world2 == -1 and world_id > 0:
+            workid += nsweep_in
+            continue
 
         # Check both world and collision groups
         if test_world_and_group_pair(world1, world2, col_group1, col_group2):
@@ -303,6 +358,8 @@ class BroadPhaseSAP:
         self,
         geom_shape_world,
         sweep_thread_count_multiplier: int = 5,
+        sort_type: SAPSortType = SAPSortType.SEGMENTED,
+        tile_block_dim: int = 256,
         device=None,
     ):
         """Initialize arrays for sweep and prune broad phase collision detection.
@@ -311,10 +368,14 @@ class BroadPhaseSAP:
             geom_shape_world: Array of world indices for each geometry (numpy or warp array).
                 Represents which world each geometry belongs to for world-aware collision detection.
             sweep_thread_count_multiplier: Multiplier for number of threads used in sweep phase
+            sort_type: Type of sorting algorithm to use (SEGMENTED or TILE)
+            tile_block_dim: Block dimension for tile-based sorting (only used if sort_type==TILE)
             device: Device to store the precomputed arrays on. If None, uses CPU for numpy
                 arrays or the device of the input warp array.
         """
         self.sweep_thread_count_multiplier = sweep_thread_count_multiplier
+        self.sort_type = sort_type
+        self.tile_block_dim = tile_block_dim
 
         # Convert to numpy if it's a warp array
         if isinstance(geom_shape_world, wp.array):
@@ -358,6 +419,25 @@ class BroadPhaseSAP:
             dtype=np.int32
         )
         self.segment_indices = wp.array(segment_indices_np, dtype=wp.int32, device=device)
+        
+        # Create tile sort kernel if using tile-based sorting
+        self.tile_sort_kernel = None
+        if self.sort_type == SAPSortType.TILE:
+            # Tile size must be a power of 2 and match max_geoms_per_world
+            # Round up to nearest power of 2
+            tile_size = 1
+            while tile_size < self.max_geoms_per_world:
+                tile_size *= 2
+            
+            if tile_size != self.max_geoms_per_world:
+                import warnings
+                warnings.warn(
+                    f"max_geoms_per_world ({self.max_geoms_per_world}) is not a power of 2. "
+                    f"Rounding up to {tile_size} for tile sort. This may waste memory."
+                )
+            
+            self.tile_size = tile_size
+            self.tile_sort_kernel = _create_tile_sort_kernel(tile_size)
 
     def launch(
         self,
@@ -428,13 +508,29 @@ class BroadPhaseSAP:
         )
 
         # Perform segmented sort - each world is sorted independently
-        # The count is the number of actual elements to sort (not including scratch space)
-        wp.utils.segmented_sort_pairs(
-            keys=self.sap_projection_lower,
-            values=self.sap_sort_index,
-            count=self.num_worlds * self.max_geoms_per_world,
-            segment_start_indices=self.segment_indices,
-        )
+        # Two strategies: tile-based (faster for certain sizes) or segmented (more flexible)
+        if self.sort_type == SAPSortType.TILE and self.tile_sort_kernel is not None:
+            # Use tile-based sort with shared memory
+            wp.launch_tiled(
+                kernel=self.tile_sort_kernel,
+                dim=self.num_worlds,
+                inputs=[
+                    self.sap_projection_lower,
+                    self.sap_sort_index,
+                    self.max_geoms_per_world,
+                ],
+                block_dim=self.tile_block_dim,
+                device=device,
+            )
+        else:
+            # Use segmented sort (default)
+            # The count is the number of actual elements to sort (not including scratch space)
+            wp.utils.segmented_sort_pairs(
+                keys=self.sap_projection_lower,
+                values=self.sap_sort_index,
+                count=self.num_worlds * self.max_geoms_per_world,
+                segment_start_indices=self.segment_indices,
+            )
 
         # Compute range of overlapping geometries for each geometry in each world
         wp.launch(

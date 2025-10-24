@@ -670,6 +670,148 @@ class TestBroadPhase(unittest.TestCase):
         if verbose:
             print(len(pairs_np))
 
+    def test_sap_broadphase_multiple_worlds(self):
+        """Test SAP broad phase with objects in different worlds and mixed collision groups."""
+        verbose = False
+
+        # Create a scenario with multiple worlds
+        ngeom = 40
+        rng = np.random.Generator(np.random.PCG64(123))
+
+        # Generate random centers and sizes
+        centers = rng.random((ngeom, 3)) * 5.0
+        sizes = rng.random((ngeom, 3)) * 1.5
+        geom_bounding_box_lower = centers - sizes
+        geom_bounding_box_upper = centers + sizes
+
+        np_geom_cutoff = np.zeros(ngeom, dtype=np.float32)
+
+        # Create a mix of world IDs: some in world 0, some in world 1, some in world 2, some shared (-1)
+        np_shape_world = np.zeros(ngeom, dtype=np.int32)
+
+        # Distribute geometries across worlds
+        world_0_count = ngeom // 3
+        world_1_count = ngeom // 3
+        shared_count = ngeom - world_0_count - world_1_count
+
+        np_shape_world[:world_0_count] = 0
+        np_shape_world[world_0_count : world_0_count + world_1_count] = 1
+        np_shape_world[world_0_count + world_1_count :] = -1  # Shared entities
+
+        # Shuffle to make it more realistic
+        rng.shuffle(np_shape_world)
+
+        # Create collision groups (positive values for filtering within worlds)
+        num_groups = 4
+        np_collision_group = rng.integers(1, num_groups + 1, size=ngeom, dtype=np.int32)
+
+        # Make some collision groups negative (shared across all worlds)
+        minus_one_count = int(sqrt(ngeom))
+        random_indices = rng.choice(ngeom, size=minus_one_count, replace=False)
+        np_collision_group[random_indices] = -1
+
+        if verbose:
+            print("\nGeometry world assignments:")
+            for i in range(ngeom):
+                print(f"  Geom {i}: world={np_shape_world[i]}, collision_group={np_collision_group[i]}")
+
+        # Find expected pairs using numpy
+        pairs_np = find_overlapping_pairs_np(
+            geom_bounding_box_lower, geom_bounding_box_upper, np_geom_cutoff, np_collision_group, np_shape_world
+        )
+
+        if verbose:
+            print(f"\nNumpy found {len(pairs_np)} pairs:")
+            for i, pair in enumerate(pairs_np):
+                body_a, body_b = pair
+                world_a = np_shape_world[body_a]
+                world_b = np_shape_world[body_b]
+                group_a = np_collision_group[body_a]
+                group_b = np_collision_group[body_b]
+                print(
+                    f"  Pair {i}: bodies ({body_a}, {body_b}) worlds ({world_a}, {world_b}) groups ({group_a}, {group_b})"
+                )
+
+        # Setup Warp arrays
+        num_lower_tri_elements = ngeom * (ngeom - 1) // 2
+        geom_lower = wp.array(geom_bounding_box_lower, dtype=wp.vec3)
+        geom_upper = wp.array(geom_bounding_box_upper, dtype=wp.vec3)
+        geom_cutoff = wp.array(np_geom_cutoff)
+        collision_group = wp.array(np_collision_group)
+        shape_world = wp.array(np_shape_world, dtype=wp.int32)
+        num_candidate_pair = wp.array([0], dtype=wp.int32)
+        max_candidate_pair = num_lower_tri_elements
+        candidate_pair = wp.array(np.zeros((max_candidate_pair, 2), dtype=wp.int32), dtype=wp.vec2i)
+
+        # Initialize and launch SAP broad phase
+        sap_broadphase = BroadPhaseSAP(shape_world)
+        sap_broadphase.launch(
+            geom_lower,
+            geom_upper,
+            geom_cutoff,
+            collision_group,
+            shape_world,
+            ngeom,
+            candidate_pair,
+            num_candidate_pair,
+        )
+
+        wp.synchronize()
+
+        pairs_wp = candidate_pair.numpy()
+        num_candidate_pair_val = num_candidate_pair.numpy()[0]
+
+        if verbose:
+            print(f"\nWarp found {num_candidate_pair_val} pairs:")
+            for i in range(num_candidate_pair_val):
+                pair = pairs_wp[i]
+                body_a, body_b = pair[0], pair[1]
+                world_a = np_shape_world[body_a]
+                world_b = np_shape_world[body_b]
+                group_a = np_collision_group[body_a]
+                group_b = np_collision_group[body_b]
+                print(
+                    f"  Pair {i}: bodies ({body_a}, {body_b}) worlds ({world_a}, {world_b}) groups ({group_a}, {group_b})"
+                )
+
+        # Verify results
+        if len(pairs_np) != num_candidate_pair_val:
+            print(f"\nMismatch: numpy found {len(pairs_np)} pairs, Warp found {num_candidate_pair_val} pairs")
+
+            # Show missing pairs
+            pairs_np_set = {tuple(pair) for pair in pairs_np}
+            pairs_wp_set = {tuple(pairs_wp[i]) for i in range(num_candidate_pair_val)}
+
+            missing_in_warp = pairs_np_set - pairs_wp_set
+            extra_in_warp = pairs_wp_set - pairs_np_set
+
+            if missing_in_warp:
+                print(f"\nPairs in numpy but not in Warp ({len(missing_in_warp)}):")
+                for pair in list(missing_in_warp)[:10]:  # Show first 10
+                    a, b = pair
+                    print(
+                        f"  ({a}, {b}): worlds ({np_shape_world[a]}, {np_shape_world[b]}) groups ({np_collision_group[a]}, {np_collision_group[b]})"
+                    )
+
+            if extra_in_warp:
+                print(f"\nPairs in Warp but not in numpy ({len(extra_in_warp)}):")
+                for pair in list(extra_in_warp)[:10]:  # Show first 10
+                    a, b = pair
+                    print(
+                        f"  ({a}, {b}): worlds ({np_shape_world[a]}, {np_shape_world[b]}) groups ({np_collision_group[a]}, {np_collision_group[b]})"
+                    )
+
+            assert len(pairs_np) == num_candidate_pair_val
+
+        # Ensure every element in pairs_wp is also present in pairs_np
+        pairs_np_set = {tuple(pair) for pair in pairs_np}
+        for pair in pairs_wp[:num_candidate_pair_val]:
+            pair_tuple = tuple(pair)
+            assert pair_tuple in pairs_np_set, f"Pair {pair_tuple} from Warp not found in numpy pairs"
+
+        if verbose:
+            print(f"\nTest passed! Found {len(pairs_np)} valid collision pairs across multiple worlds.")
+
 
 if __name__ == "__main__":
     wp.clear_kernel_cache()
