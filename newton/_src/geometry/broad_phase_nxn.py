@@ -161,6 +161,11 @@ def _nxn_broadphase_kernel(
     collision_group1 = collision_group[geom1]
     collision_group2 = collision_group[geom2]
 
+    # Avoid duplicate pairs: if both geometries are global (world -1),
+    # only process them in the first world segment (world_id == 0)
+    if world1 == -1 and world2 == -1 and world_id > 0:
+        return
+
     # Check both world and collision groups
     if not test_world_and_group_pair(world1, world2, collision_group1, collision_group2):
         return

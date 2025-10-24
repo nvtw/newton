@@ -692,7 +692,6 @@ class TestBroadPhase(unittest.TestCase):
         # Distribute geometries across worlds
         world_0_count = ngeom // 3
         world_1_count = ngeom // 3
-        shared_count = ngeom - world_0_count - world_1_count
 
         np_shape_world[:world_0_count] = 0
         np_shape_world[world_0_count : world_0_count + world_1_count] = 1
@@ -821,11 +820,17 @@ class TestBroadPhase(unittest.TestCase):
         - Complex world/group interactions
         - Duplicate pair prevention
         - Mixed global (-1) and world-specific entities
+        - Large number of geometries to stress-test GPU code
         """
         verbose = False
 
         # Create a carefully crafted scenario with edge cases
-        ngeom = 24
+        # Use larger number to really stress test the GPU code
+        base_cases = 24  # Base edge cases
+        num_clusters = 10  # Number of overlapping clusters
+        cluster_size = 8  # Geometries per cluster
+        num_isolated = 20  # Isolated geometries
+        ngeom = base_cases + (num_clusters * cluster_size) + num_isolated  # Total: 124 geometries
 
         # Case 1: Two boxes exactly touching (boundary case) - should overlap with cutoff=0
         box1_lower = np.array([0.0, 0.0, 0.0])
@@ -895,156 +900,120 @@ class TestBroadPhase(unittest.TestCase):
         box24_lower = np.array([45.2, 0.2, 0.2])
         box24_upper = np.array([45.8, 0.8, 0.8])
 
-        geom_bounding_box_lower = np.array(
-            [
-                box1_lower,
-                box2_lower,
-                box3_lower,
-                box4_lower,
-                box5_lower,
-                box6_lower,
-                box7_lower,
-                box8_lower,
-                box9_lower,
-                box10_lower,
-                box11_lower,
-                box12_lower,
-                box13_lower,
-                box14_lower,
-                box15_lower,
-                box16_lower,
-                box17_lower,
-                box18_lower,
-                box19_lower,
-                box20_lower,
-                box21_lower,
-                box22_lower,
-                box23_lower,
-                box24_lower,
-            ]
-        )
+        # Build the base cases list
+        base_lowers = [
+            box1_lower, box2_lower, box3_lower, box4_lower,
+            box5_lower, box6_lower, box7_lower, box8_lower,
+            box9_lower, box10_lower, box11_lower, box12_lower,
+            box13_lower, box14_lower, box15_lower, box16_lower,
+            box17_lower, box18_lower, box19_lower, box20_lower,
+            box21_lower, box22_lower, box23_lower, box24_lower,
+        ]
+        base_uppers = [
+            box1_upper, box2_upper, box3_upper, box4_upper,
+            box5_upper, box6_upper, box7_upper, box8_upper,
+            box9_upper, box10_upper, box11_upper, box12_upper,
+            box13_upper, box14_upper, box15_upper, box16_upper,
+            box17_upper, box18_upper, box19_upper, box20_upper,
+            box21_upper, box22_upper, box23_upper, box24_upper,
+        ]
 
-        geom_bounding_box_upper = np.array(
-            [
-                box1_upper,
-                box2_upper,
-                box3_upper,
-                box4_upper,
-                box5_upper,
-                box6_upper,
-                box7_upper,
-                box8_upper,
-                box9_upper,
-                box10_upper,
-                box11_upper,
-                box12_upper,
-                box13_upper,
-                box14_upper,
-                box15_upper,
-                box16_upper,
-                box17_upper,
-                box18_upper,
-                box19_upper,
-                box20_upper,
-                box21_upper,
-                box22_upper,
-                box23_upper,
-                box24_upper,
-            ]
-        )
+        # Case 10+: Add overlapping clusters (stress test for many-to-many collisions)
+        # Each cluster has multiple overlapping geometries in the same location
+        rng = np.random.Generator(np.random.PCG64(999))
+        cluster_lowers = []
+        cluster_uppers = []
+        cluster_cutoffs = []
+        cluster_groups = []
+        cluster_worlds = []
 
-        # Cutoff distances
-        np_geom_cutoff = np.array(
-            [
-                0.0,
-                0.0,  # box1, box2: exactly touching
-                0.0,
-                0.15,  # box3, box4: gap of 0.2, cutoff 0.15 makes them overlap
-                0.0,
-                0.0,
-                0.0,  # box5-7: overlapping chain
-                0.0,
-                0.0,
-                0.0,
-                0.0,  # box8-11: nested boxes
-                0.0,
-                0.0,  # box12-13: global entities
-                0.0,
-                0.0,
-                0.0,
-                0.0,  # box14-17: group filtering
-                0.0,
-                0.0,  # box18-19: different worlds
-                0.0,
-                0.0,
-                0.0,  # box20-22: isolated
-                0.0,
-                0.0,  # box23-24: zero group
-            ],
-            dtype=np.float32,
-        )
+        for cluster_id in range(num_clusters):
+            # Random center for this cluster
+            cluster_center = np.array([50.0 + cluster_id * 10.0, rng.random() * 5.0, rng.random() * 5.0])
+            # Randomly assign world (mix of specific worlds and global)
+            if cluster_id < 3:
+                cluster_world = -1  # First 3 clusters are global
+            else:
+                cluster_world = cluster_id % 4  # Distribute across 4 worlds
 
-        # Collision groups (carefully designed for edge cases)
-        np_collision_group = np.array(
-            [
-                1,
-                1,  # box1-2: same group, should collide
-                2,
-                2,  # box3-4: same group, should collide (with cutoff)
-                1,
-                1,
-                1,  # box5-7: same group, chain collision
-                1,
-                1,
-                1,
-                1,  # box8-11: same group, all collide
-                -1,
-                -1,  # box12-13: negative group, collide with each other
-                1,
-                2,
-                -1,
-                -2,  # box14-17: mixed groups (1 w/ -1, 2 w/ -1, not 1 w/ 2, not -1 w/ -2)
-                1,
-                1,  # box18-19: same group but different worlds
-                1,
-                2,
-                3,  # box20-22: different groups, no collision
-                0,
-                0,  # box23-24: zero group, never collide
-            ],
-            dtype=np.int32,
-        )
+            # Random collision group for this cluster
+            cluster_group = (cluster_id % 3) + 1  # Groups 1, 2, 3
 
-        # World indices
-        np_shape_world = np.array(
-            [
-                0,
-                0,  # box1-2: world 0
-                0,
-                0,  # box3-4: world 0
-                0,
-                0,
-                0,  # box5-7: world 0
-                0,
-                0,
-                0,
-                0,  # box8-11: world 0
-                -1,
-                -1,  # box12-13: global, collide with all worlds
-                0,
-                0,
-                0,
-                0,  # box14-17: world 0
-                0,
-                1,  # box18-19: different worlds (should NOT collide)
-                0,
-                0,
-                0,  # box20-22: world 0 (but different groups)
-                0,
-                0,  # box23-24: world 0 (but zero group)
-            ],
-            dtype=np.int32,
-        )
+            for _ in range(cluster_size):
+                # Create slightly offset overlapping boxes
+                offset = rng.random(3) * 0.5
+                lower = cluster_center - 0.5 + offset
+                upper = cluster_center + 0.5 + offset
+                cluster_lowers.append(lower)
+                cluster_uppers.append(upper)
+                cluster_cutoffs.append(0.0)
+                cluster_groups.append(cluster_group)
+                cluster_worlds.append(cluster_world)
+
+        # Case 11+: Add isolated geometries (should have no collisions)
+        isolated_lowers = []
+        isolated_uppers = []
+        isolated_cutoffs = []
+        isolated_groups = []
+        isolated_worlds = []
+
+        for i in range(num_isolated):
+            # Place far apart
+            center = np.array([200.0 + i * 5.0, 0.0, 0.0])
+            isolated_lowers.append(center - 0.3)
+            isolated_uppers.append(center + 0.3)
+            isolated_cutoffs.append(0.0)
+            isolated_groups.append((i % 5) + 1)  # Varied groups
+            isolated_worlds.append(i % 3)  # Distribute across worlds
+
+        # Combine all geometries
+        all_lowers = base_lowers + cluster_lowers + isolated_lowers
+        all_uppers = base_uppers + cluster_uppers + isolated_uppers
+
+        geom_bounding_box_lower = np.array(all_lowers)
+        geom_bounding_box_upper = np.array(all_uppers)
+
+        # Combine cutoffs
+        base_cutoffs = [
+            0.0, 0.0,  # box1, box2: exactly touching
+            0.0, 0.15,  # box3, box4: gap of 0.2, cutoff 0.15 makes them overlap
+            0.0, 0.0, 0.0,  # box5-7: overlapping chain
+            0.0, 0.0, 0.0, 0.0,  # box8-11: nested boxes
+            0.0, 0.0,  # box12-13: global entities
+            0.0, 0.0, 0.0, 0.0,  # box14-17: group filtering
+            0.0, 0.0,  # box18-19: different worlds
+            0.0, 0.0, 0.0,  # box20-22: isolated
+            0.0, 0.0,  # box23-24: zero group
+        ]
+        np_geom_cutoff = np.array(base_cutoffs + cluster_cutoffs + isolated_cutoffs, dtype=np.float32)
+
+        # Combine collision groups
+        base_groups = [
+            1, 1,  # box1-2: same group, should collide
+            2, 2,  # box3-4: same group, should collide (with cutoff)
+            1, 1, 1,  # box5-7: same group, chain collision
+            1, 1, 1, 1,  # box8-11: same group, all collide
+            -1, -1,  # box12-13: negative group, collide with each other
+            1, 2, -1, -2,  # box14-17: mixed groups (1 w/ -1, 2 w/ -1, not 1 w/ 2, not -1 w/ -2)
+            1, 1,  # box18-19: same group but different worlds
+            1, 2, 3,  # box20-22: different groups, no collision
+            0, 0,  # box23-24: zero group, never collide
+        ]
+        np_collision_group = np.array(base_groups + cluster_groups + isolated_groups, dtype=np.int32)
+
+        # Combine worlds
+        base_worlds = [
+            0, 0,  # box1-2: world 0
+            0, 0,  # box3-4: world 0
+            0, 0, 0,  # box5-7: world 0
+            0, 0, 0, 0,  # box8-11: world 0
+            -1, -1,  # box12-13: global, collide with all worlds
+            0, 0, 0, 0,  # box14-17: world 0
+            0, 1,  # box18-19: different worlds (should NOT collide)
+            0, 0, 0,  # box20-22: world 0 (but different groups)
+            0, 0,  # box23-24: world 0 (but zero group)
+        ]
+        np_shape_world = np.array(base_worlds + cluster_worlds + isolated_worlds, dtype=np.int32)
 
         if verbose:
             print("\n=== NxN Edge Case Test Setup ===")
@@ -1160,11 +1129,17 @@ class TestBroadPhase(unittest.TestCase):
         - Complex world/group interactions
         - Duplicate pair prevention (especially for shared geometries)
         - Mixed global (-1) and world-specific entities
+        - Large number of geometries to stress-test GPU sorting and sweep
         """
         verbose = False
 
         # Create a carefully crafted scenario with edge cases
-        ngeom = 26
+        # Use larger number to really stress test the SAP algorithm
+        base_cases = 26  # Base edge cases
+        num_clusters = 12  # Number of overlapping clusters (SAP stress test)
+        cluster_size = 10  # Geometries per cluster (larger for SAP)
+        num_isolated = 25  # Isolated geometries
+        ngeom = base_cases + (num_clusters * cluster_size) + num_isolated  # Total: 171 geometries
 
         # Case 1: Two boxes exactly touching along sweep axis (x-axis) - should overlap
         box1_lower = np.array([0.0, 0.0, 0.0])
@@ -1239,166 +1214,129 @@ class TestBroadPhase(unittest.TestCase):
         box26_lower = np.array([33.2, 0.2, 0.2])
         box26_upper = np.array([33.8, 0.8, 0.8])
 
-        geom_bounding_box_lower = np.array(
-            [
-                box1_lower,
-                box2_lower,
-                box3_lower,
-                box4_lower,
-                box5_lower,
-                box6_lower,
-                box7_lower,
-                box8_lower,
-                box9_lower,
-                box10_lower,
-                box11_lower,
-                box12_lower,
-                box13_lower,
-                box14_lower,
-                box15_lower,
-                box16_lower,
-                box17_lower,
-                box18_lower,
-                box19_lower,
-                box20_lower,
-                box21_lower,
-                box22_lower,
-                box23_lower,
-                box24_lower,
-                box25_lower,
-                box26_lower,
-            ]
-        )
+        # Build the base cases list
+        base_lowers = [
+            box1_lower, box2_lower, box3_lower, box4_lower,
+            box5_lower, box6_lower, box7_lower, box8_lower,
+            box9_lower, box10_lower, box11_lower, box12_lower,
+            box13_lower, box14_lower, box15_lower, box16_lower,
+            box17_lower, box18_lower, box19_lower, box20_lower,
+            box21_lower, box22_lower, box23_lower, box24_lower,
+            box25_lower, box26_lower,
+        ]
+        base_uppers = [
+            box1_upper, box2_upper, box3_upper, box4_upper,
+            box5_upper, box6_upper, box7_upper, box8_upper,
+            box9_upper, box10_upper, box11_upper, box12_upper,
+            box13_upper, box14_upper, box15_upper, box16_upper,
+            box17_upper, box18_upper, box19_upper, box20_upper,
+            box21_upper, box22_upper, box23_upper, box24_upper,
+            box25_upper, box26_upper,
+        ]
 
-        geom_bounding_box_upper = np.array(
-            [
-                box1_upper,
-                box2_upper,
-                box3_upper,
-                box4_upper,
-                box5_upper,
-                box6_upper,
-                box7_upper,
-                box8_upper,
-                box9_upper,
-                box10_upper,
-                box11_upper,
-                box12_upper,
-                box13_upper,
-                box14_upper,
-                box15_upper,
-                box16_upper,
-                box17_upper,
-                box18_upper,
-                box19_upper,
-                box20_upper,
-                box21_upper,
-                box22_upper,
-                box23_upper,
-                box24_upper,
-                box25_upper,
-                box26_upper,
-            ]
-        )
+        # Case 11+: Add overlapping clusters along the sweep axis (SAP stress test)
+        # These will all have similar projections on the sweep axis, stressing the sorting
+        rng = np.random.Generator(np.random.PCG64(888))
+        cluster_lowers = []
+        cluster_uppers = []
+        cluster_cutoffs = []
+        cluster_groups = []
+        cluster_worlds = []
 
-        # Cutoff distances
-        np_geom_cutoff = np.array(
-            [
-                0.0,
-                0.0,  # box1-2: exactly touching
-                0.0,
-                0.15,  # box3-4: gap of 0.25, cutoff 0.15 makes them overlap (combined 0.3)
-                0.0,
-                0.0,
-                0.0,
-                0.0,  # box5-8: overlapping chain
-                0.0,
-                0.0,
-                0.0,  # box9-11: nested boxes
-                0.0,
-                0.0,  # box12-13: global entities (duplicate prevention critical)
-                0.0,
-                0.0,
-                0.0,  # box14-16: mixed global/world
-                0.0,
-                0.0,
-                0.0,
-                0.0,  # box17-20: group filtering
-                0.0,
-                0.0,  # box21-22: different worlds
-                0.0,
-                0.0,  # box23-24: reverse order
-                0.0,
-                0.0,  # box25-26: zero group
-            ],
-            dtype=np.float32,
-        )
+        for cluster_id in range(num_clusters):
+            # Random center for this cluster, but align them along x-axis for SAP stress
+            # This creates a challenging scenario where many boxes overlap in the sweep direction
+            x_base = 100.0 + cluster_id * 8.0
+            cluster_center = np.array([x_base, rng.random() * 10.0, rng.random() * 10.0])
 
-        # Collision groups
-        np_collision_group = np.array(
-            [
-                1,
-                1,  # box1-2: same group
-                2,
-                2,  # box3-4: same group
-                1,
-                1,
-                1,
-                1,  # box5-8: same group, chain
-                1,
-                1,
-                1,  # box9-11: same group, nested
-                -1,
-                -2,  # box12-13: both negative (SHOULD collide, different negative values)
-                -1,
-                1,
-                2,  # box14-16: global collides with both groups
-                1,
-                2,
-                -1,
-                -2,  # box17-20: 1 w/ -1, 2 w/ -1, not 1 w/ 2, not -1 w/ -2
-                1,
-                1,  # box21-22: same group but different worlds
-                1,
-                1,  # box23-24: reverse order
-                0,
-                0,  # box25-26: zero group
-            ],
-            dtype=np.int32,
-        )
+            # Randomly assign world (mix of specific worlds and global)
+            if cluster_id < 4:
+                cluster_world = -1  # First 4 clusters are global (tests duplicate prevention)
+            else:
+                cluster_world = cluster_id % 5  # Distribute across 5 worlds
 
-        # World indices
-        np_shape_world = np.array(
-            [
-                0,
-                0,  # box1-2
-                0,
-                0,  # box3-4
-                0,
-                0,
-                0,
-                0,  # box5-8
-                0,
-                0,
-                0,  # box9-11
-                -1,
-                -1,  # box12-13: BOTH global (critical for duplicate prevention)
-                -1,
-                1,
-                2,  # box14-16: global with world-specific
-                0,
-                0,
-                0,
-                0,  # box17-20
-                0,
-                1,  # box21-22: different worlds
-                0,
-                0,  # box23-24
-                0,
-                0,  # box25-26
-            ],
-            dtype=np.int32,
-        )
+            # Random collision group for this cluster
+            cluster_group = (cluster_id % 4) + 1  # Groups 1, 2, 3, 4
+
+            for i in range(cluster_size):
+                # Create overlapping boxes with variation along sweep axis
+                offset = rng.random(3) * 0.6
+                # Extend along x-axis to create overlaps in sweep direction
+                lower = cluster_center - 0.6 + offset
+                upper = cluster_center + 0.6 + offset
+                cluster_lowers.append(lower)
+                cluster_uppers.append(upper)
+                cluster_cutoffs.append(0.0 if i % 3 != 0 else 0.1)  # Mix of cutoffs
+                cluster_groups.append(cluster_group if i % 5 != 0 else -1)  # Some shared
+                cluster_worlds.append(cluster_world)
+
+        # Case 12+: Add isolated geometries along x-axis (tests SAP correctly skips far objects)
+        isolated_lowers = []
+        isolated_uppers = []
+        isolated_cutoffs = []
+        isolated_groups = []
+        isolated_worlds = []
+
+        for i in range(num_isolated):
+            # Place far apart along x-axis
+            center = np.array([300.0 + i * 6.0, rng.random() * 5.0, rng.random() * 5.0])
+            isolated_lowers.append(center - 0.25)
+            isolated_uppers.append(center + 0.25)
+            isolated_cutoffs.append(0.0)
+            isolated_groups.append((i % 6) + 1)  # Varied groups
+            isolated_worlds.append(i % 4)  # Distribute across worlds
+
+        # Combine all geometries
+        all_lowers = base_lowers + cluster_lowers + isolated_lowers
+        all_uppers = base_uppers + cluster_uppers + isolated_uppers
+
+        geom_bounding_box_lower = np.array(all_lowers)
+        geom_bounding_box_upper = np.array(all_uppers)
+
+        # Combine cutoffs
+        base_cutoffs = [
+            0.0, 0.0,  # box1-2: exactly touching
+            0.0, 0.15,  # box3-4: gap of 0.25, cutoff 0.15 makes them overlap (combined 0.3)
+            0.0, 0.0, 0.0, 0.0,  # box5-8: overlapping chain
+            0.0, 0.0, 0.0,  # box9-11: nested boxes
+            0.0, 0.0,  # box12-13: global entities (duplicate prevention critical)
+            0.0, 0.0, 0.0,  # box14-16: mixed global/world
+            0.0, 0.0, 0.0, 0.0,  # box17-20: group filtering
+            0.0, 0.0,  # box21-22: different worlds
+            0.0, 0.0,  # box23-24: reverse order
+            0.0, 0.0,  # box25-26: zero group
+        ]
+        np_geom_cutoff = np.array(base_cutoffs + cluster_cutoffs + isolated_cutoffs, dtype=np.float32)
+
+        # Combine collision groups
+        base_groups = [
+            1, 1,  # box1-2: same group
+            2, 2,  # box3-4: same group
+            1, 1, 1, 1,  # box5-8: same group, chain
+            1, 1, 1,  # box9-11: same group, nested
+            -1, -2,  # box12-13: both negative (SHOULD collide, different negative values)
+            -1, 1, 2,  # box14-16: global collides with both groups
+            1, 2, -1, -2,  # box17-20: 1 w/ -1, 2 w/ -1, not 1 w/ 2, not -1 w/ -2
+            1, 1,  # box21-22: same group but different worlds
+            1, 1,  # box23-24: reverse order
+            0, 0,  # box25-26: zero group
+        ]
+        np_collision_group = np.array(base_groups + cluster_groups + isolated_groups, dtype=np.int32)
+
+        # Combine worlds
+        base_worlds = [
+            0, 0,  # box1-2
+            0, 0,  # box3-4
+            0, 0, 0, 0,  # box5-8
+            0, 0, 0,  # box9-11
+            -1, -1,  # box12-13: BOTH global (critical for duplicate prevention)
+            -1, 1, 2,  # box14-16: global with world-specific
+            0, 0, 0, 0,  # box17-20
+            0, 1,  # box21-22: different worlds
+            0, 0,  # box23-24
+            0, 0,  # box25-26
+        ]
+        np_shape_world = np.array(base_worlds + cluster_worlds + isolated_worlds, dtype=np.int32)
 
         if verbose:
             print("\n=== SAP Edge Case Test Setup ===")
