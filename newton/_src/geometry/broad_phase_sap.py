@@ -363,6 +363,7 @@ class BroadPhaseSAP:
     def __init__(
         self,
         geom_shape_world,
+        geom_flags=None,
         sweep_thread_count_multiplier: int = 5,
         sort_type: SAPSortType = SAPSortType.SEGMENTED,
         tile_block_dim: int = None,
@@ -373,6 +374,9 @@ class BroadPhaseSAP:
         Args:
             geom_shape_world: Array of world indices for each geometry (numpy or warp array).
                 Represents which world each geometry belongs to for world-aware collision detection.
+            geom_flags: Optional array of shape flags (numpy or warp array). If provided,
+                only shapes with the COLLIDE_SHAPES flag will be included in collision checks.
+                This efficiently filters out visual-only shapes.
             sweep_thread_count_multiplier: Multiplier for number of threads used in sweep phase
             sort_type: Type of sorting algorithm to use (SEGMENTED or TILE)
             tile_block_dim: Block dimension for tile-based sorting (optional, auto-calculated if None).
@@ -394,8 +398,16 @@ class BroadPhaseSAP:
             if device is None:
                 device = "cpu"
 
-        # Precompute the world map
-        index_map_np, slice_ends_np = precompute_world_map(geom_shape_world_np)
+        # Convert geom_flags to numpy if provided
+        geom_flags_np = None
+        if geom_flags is not None:
+            if isinstance(geom_flags, wp.array):
+                geom_flags_np = geom_flags.numpy()
+            else:
+                geom_flags_np = geom_flags
+
+        # Precompute the world map (filters out non-colliding shapes if flags provided)
+        index_map_np, slice_ends_np = precompute_world_map(geom_shape_world_np, geom_flags_np)
 
         # Store as warp arrays
         self.world_index_map = wp.array(index_map_np, dtype=wp.int32, device=device)
