@@ -147,8 +147,13 @@ def _nxn_broadphase_kernel(
     local_geom1, local_geom2 = _get_lower_triangular_indices(local_id, num_geoms_in_world)
 
     # Map to actual geometry indices using the world_index_map
-    geom1 = world_index_map[world_slice_start + local_geom1]
-    geom2 = world_index_map[world_slice_start + local_geom2]
+    geom1_tmp = world_index_map[world_slice_start + local_geom1]
+    geom2_tmp = world_index_map[world_slice_start + local_geom2]
+
+    # Ensure canonical ordering (smaller index first)
+    # After mapping, the indices might not preserve local_geom1 < local_geom2 ordering
+    geom1 = wp.min(geom1_tmp, geom2_tmp)
+    geom2 = wp.max(geom1_tmp, geom2_tmp)
 
     # Get world and collision groups
     world1 = shape_world[geom1]
