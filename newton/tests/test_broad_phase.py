@@ -124,10 +124,11 @@ class TestBroadPhase(unittest.TestCase):
         max_candidate_pair = num_lower_tri_elements
         candidate_pair = wp.array(np.zeros((max_candidate_pair, 2), dtype=wp.int32), dtype=wp.vec2i)
 
-        nxn_broadphase = BroadPhaseAllPairs()
-
         # Create shape world array with all shapes in global world (-1)
-        shape_world = wp.array(np.full(ngeom, -1, dtype=np.int32), dtype=wp.int32)
+        shape_world = wp.array(np.full(ngeom, 0, dtype=np.int32), dtype=wp.int32)
+
+        # Initialize BroadPhaseAllPairs with shape_world (which represents world grouping)
+        nxn_broadphase = BroadPhaseAllPairs(shape_world)
 
         nxn_broadphase.launch(
             geom_lower,
