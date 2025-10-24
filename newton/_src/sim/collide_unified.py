@@ -40,7 +40,7 @@ from .model import Model
 from .state import State
 
 ENABLE_MULTI_CONTACT = True
-ENABLE_TILE_BVH_QUERY = True
+ENABLE_TILE_BVH_QUERY = False
 
 
 class BroadPhaseMode(IntEnum):
