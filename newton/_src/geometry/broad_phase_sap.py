@@ -366,7 +366,7 @@ class BroadPhaseSAP:
         geom_flags=None,
         sweep_thread_count_multiplier: int = 5,
         sort_type: SAPSortType = SAPSortType.SEGMENTED,
-        tile_block_dim: int = None,
+        tile_block_dim: int | None = None,
         device=None,
     ):
         """Initialize arrays for sweep and prune broad phase collision detection.

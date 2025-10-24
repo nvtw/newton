@@ -879,7 +879,7 @@ class CollisionPipelineUnified:
         shape_collision_group: wp.array(dtype=int) | None = None,
         shape_world: wp.array(dtype=int) | None = None,
         shape_flags: wp.array(dtype=int) | None = None,
-        sap_sort_type = None,
+        sap_sort_type=None,
     ):
         """
         Initialize the CollisionPipeline.
@@ -1001,7 +1001,7 @@ class CollisionPipelineUnified:
         requires_grad: bool | None = None,
         broad_phase_mode: BroadPhaseMode = BroadPhaseMode.NXN,
         shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
-        sap_sort_type = None,
+        sap_sort_type=None,
     ) -> CollisionPipelineUnified:
         """
         Create a CollisionPipelineUnified instance from a Model.

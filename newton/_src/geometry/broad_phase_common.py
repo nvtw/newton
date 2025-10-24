@@ -18,6 +18,8 @@ from typing import Any
 import numpy as np
 import warp as wp
 
+from .flags import ShapeFlags
+
 
 @wp.func
 def check_aabb_overlap(
@@ -143,9 +145,6 @@ def precompute_world_map(geom_world: np.ndarray, geom_flags: np.ndarray | None =
             - slice_ends: 1D array containing the end index (exclusive) of each world's slice
                 in the index_map
     """
-    # Import here to avoid circular dependency
-    from .flags import ShapeFlags
-
     # Ensure geom_world is a numpy array (might be a list from builder)
     if not isinstance(geom_world, np.ndarray):
         geom_world = np.array(geom_world)
