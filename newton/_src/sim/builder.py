@@ -161,8 +161,8 @@ class ModelBuilder:
         """The thickness of the shape."""
         is_solid: bool = True
         """Indicates whether the shape is solid or hollow. Defaults to True."""
-        collision_group: int = -1
-        """The collision group ID for the shape. Defaults to -1."""
+        collision_group: int = 1
+        """The collision group ID for the shape. Defaults to 1 (default group). Set to 0 to disable collisions for this shape."""
         collision_filter_parent: bool = True
         """Whether to inherit collision filtering from the parent. Defaults to True."""
         has_shape_collision: bool = True
@@ -452,9 +452,9 @@ class ModelBuilder:
         self.joint_coord_count = 0
 
         # current world index for entities being added directly to this builder.
-        # set to -1 to create global entities shared across all worlds.
+        # set to 0 by default (first world), or set to -1 to create global entities shared across all worlds.
         # note: this value is temporarily overridden when using add_builder().
-        self.current_world = -1
+        self.current_world = 0
 
         self.up_axis: Axis = Axis.from_any(up_axis)
         self.gravity: float = gravity
@@ -4219,7 +4219,7 @@ class ModelBuilder:
             )
 
             m.shape_collision_filter_pairs = set(self.shape_collision_filter_pairs)
-            m.shape_collision_group = self.shape_collision_group
+            m.shape_collision_group = wp.array(self.shape_collision_group, dtype=wp.int32)
 
             # ---------------------
             # springs

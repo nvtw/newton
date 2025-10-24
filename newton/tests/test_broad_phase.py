@@ -919,20 +919,56 @@ class TestBroadPhase(unittest.TestCase):
 
         # Build the base cases list
         base_lowers = [
-            box1_lower, box2_lower, box3_lower, box4_lower,
-            box5_lower, box6_lower, box7_lower, box8_lower,
-            box9_lower, box10_lower, box11_lower, box12_lower,
-            box13_lower, box14_lower, box15_lower, box16_lower,
-            box17_lower, box18_lower, box19_lower, box20_lower,
-            box21_lower, box22_lower, box23_lower, box24_lower,
+            box1_lower,
+            box2_lower,
+            box3_lower,
+            box4_lower,
+            box5_lower,
+            box6_lower,
+            box7_lower,
+            box8_lower,
+            box9_lower,
+            box10_lower,
+            box11_lower,
+            box12_lower,
+            box13_lower,
+            box14_lower,
+            box15_lower,
+            box16_lower,
+            box17_lower,
+            box18_lower,
+            box19_lower,
+            box20_lower,
+            box21_lower,
+            box22_lower,
+            box23_lower,
+            box24_lower,
         ]
         base_uppers = [
-            box1_upper, box2_upper, box3_upper, box4_upper,
-            box5_upper, box6_upper, box7_upper, box8_upper,
-            box9_upper, box10_upper, box11_upper, box12_upper,
-            box13_upper, box14_upper, box15_upper, box16_upper,
-            box17_upper, box18_upper, box19_upper, box20_upper,
-            box21_upper, box22_upper, box23_upper, box24_upper,
+            box1_upper,
+            box2_upper,
+            box3_upper,
+            box4_upper,
+            box5_upper,
+            box6_upper,
+            box7_upper,
+            box8_upper,
+            box9_upper,
+            box10_upper,
+            box11_upper,
+            box12_upper,
+            box13_upper,
+            box14_upper,
+            box15_upper,
+            box16_upper,
+            box17_upper,
+            box18_upper,
+            box19_upper,
+            box20_upper,
+            box21_upper,
+            box22_upper,
+            box23_upper,
+            box24_upper,
         ]
 
         # Case 10+: Add overlapping clusters (stress test for many-to-many collisions)
@@ -992,43 +1028,88 @@ class TestBroadPhase(unittest.TestCase):
 
         # Combine cutoffs
         base_cutoffs = [
-            0.0, 0.0,  # box1, box2: exactly touching
-            0.0, 0.15,  # box3, box4: gap of 0.2, cutoff 0.15 makes them overlap
-            0.0, 0.0, 0.0,  # box5-7: overlapping chain
-            0.0, 0.0, 0.0, 0.0,  # box8-11: nested boxes
-            0.0, 0.0,  # box12-13: global entities
-            0.0, 0.0, 0.0, 0.0,  # box14-17: group filtering
-            0.0, 0.0,  # box18-19: different worlds
-            0.0, 0.0, 0.0,  # box20-22: isolated
-            0.0, 0.0,  # box23-24: zero group
+            0.0,
+            0.0,  # box1, box2: exactly touching
+            0.0,
+            0.15,  # box3, box4: gap of 0.2, cutoff 0.15 makes them overlap
+            0.0,
+            0.0,
+            0.0,  # box5-7: overlapping chain
+            0.0,
+            0.0,
+            0.0,
+            0.0,  # box8-11: nested boxes
+            0.0,
+            0.0,  # box12-13: global entities
+            0.0,
+            0.0,
+            0.0,
+            0.0,  # box14-17: group filtering
+            0.0,
+            0.0,  # box18-19: different worlds
+            0.0,
+            0.0,
+            0.0,  # box20-22: isolated
+            0.0,
+            0.0,  # box23-24: zero group
         ]
         np_geom_cutoff = np.array(base_cutoffs + cluster_cutoffs + isolated_cutoffs, dtype=np.float32)
 
         # Combine collision groups
         base_groups = [
-            1, 1,  # box1-2: same group, should collide
-            2, 2,  # box3-4: same group, should collide (with cutoff)
-            1, 1, 1,  # box5-7: same group, chain collision
-            1, 1, 1, 1,  # box8-11: same group, all collide
-            -1, -1,  # box12-13: negative group, collide with each other
-            1, 2, -1, -2,  # box14-17: mixed groups (1 w/ -1, 2 w/ -1, not 1 w/ 2, not -1 w/ -2)
-            1, 1,  # box18-19: same group but different worlds
-            1, 2, 3,  # box20-22: different groups, no collision
-            0, 0,  # box23-24: zero group, never collide
+            1,
+            1,  # box1-2: same group, should collide
+            2,
+            2,  # box3-4: same group, should collide (with cutoff)
+            1,
+            1,
+            1,  # box5-7: same group, chain collision
+            1,
+            1,
+            1,
+            1,  # box8-11: same group, all collide
+            -1,
+            -1,  # box12-13: negative group, collide with each other
+            1,
+            2,
+            -1,
+            -2,  # box14-17: mixed groups (1 w/ -1, 2 w/ -1, not 1 w/ 2, not -1 w/ -2)
+            1,
+            1,  # box18-19: same group but different worlds
+            1,
+            2,
+            3,  # box20-22: different groups, no collision
+            0,
+            0,  # box23-24: zero group, never collide
         ]
         np_collision_group = np.array(base_groups + cluster_groups + isolated_groups, dtype=np.int32)
 
         # Combine worlds
         base_worlds = [
-            0, 0,  # box1-2: world 0
-            0, 0,  # box3-4: world 0
-            0, 0, 0,  # box5-7: world 0
-            0, 0, 0, 0,  # box8-11: world 0
-            -1, -1,  # box12-13: global, collide with all worlds
-            0, 0, 0, 0,  # box14-17: world 0
-            0, 1,  # box18-19: different worlds (should NOT collide)
-            0, 0, 0,  # box20-22: world 0 (but different groups)
-            0, 0,  # box23-24: world 0 (but zero group)
+            0,
+            0,  # box1-2: world 0
+            0,
+            0,  # box3-4: world 0
+            0,
+            0,
+            0,  # box5-7: world 0
+            0,
+            0,
+            0,
+            0,  # box8-11: world 0
+            -1,
+            -1,  # box12-13: global, collide with all worlds
+            0,
+            0,
+            0,
+            0,  # box14-17: world 0
+            0,
+            1,  # box18-19: different worlds (should NOT collide)
+            0,
+            0,
+            0,  # box20-22: world 0 (but different groups)
+            0,
+            0,  # box23-24: world 0 (but zero group)
         ]
         np_shape_world = np.array(base_worlds + cluster_worlds + isolated_worlds, dtype=np.int32)
 
@@ -1233,22 +1314,60 @@ class TestBroadPhase(unittest.TestCase):
 
         # Build the base cases list
         base_lowers = [
-            box1_lower, box2_lower, box3_lower, box4_lower,
-            box5_lower, box6_lower, box7_lower, box8_lower,
-            box9_lower, box10_lower, box11_lower, box12_lower,
-            box13_lower, box14_lower, box15_lower, box16_lower,
-            box17_lower, box18_lower, box19_lower, box20_lower,
-            box21_lower, box22_lower, box23_lower, box24_lower,
-            box25_lower, box26_lower,
+            box1_lower,
+            box2_lower,
+            box3_lower,
+            box4_lower,
+            box5_lower,
+            box6_lower,
+            box7_lower,
+            box8_lower,
+            box9_lower,
+            box10_lower,
+            box11_lower,
+            box12_lower,
+            box13_lower,
+            box14_lower,
+            box15_lower,
+            box16_lower,
+            box17_lower,
+            box18_lower,
+            box19_lower,
+            box20_lower,
+            box21_lower,
+            box22_lower,
+            box23_lower,
+            box24_lower,
+            box25_lower,
+            box26_lower,
         ]
         base_uppers = [
-            box1_upper, box2_upper, box3_upper, box4_upper,
-            box5_upper, box6_upper, box7_upper, box8_upper,
-            box9_upper, box10_upper, box11_upper, box12_upper,
-            box13_upper, box14_upper, box15_upper, box16_upper,
-            box17_upper, box18_upper, box19_upper, box20_upper,
-            box21_upper, box22_upper, box23_upper, box24_upper,
-            box25_upper, box26_upper,
+            box1_upper,
+            box2_upper,
+            box3_upper,
+            box4_upper,
+            box5_upper,
+            box6_upper,
+            box7_upper,
+            box8_upper,
+            box9_upper,
+            box10_upper,
+            box11_upper,
+            box12_upper,
+            box13_upper,
+            box14_upper,
+            box15_upper,
+            box16_upper,
+            box17_upper,
+            box18_upper,
+            box19_upper,
+            box20_upper,
+            box21_upper,
+            box22_upper,
+            box23_upper,
+            box24_upper,
+            box25_upper,
+            box26_upper,
         ]
 
         # Case 11+: Add overlapping clusters along the sweep axis (SAP stress test)
@@ -1312,46 +1431,94 @@ class TestBroadPhase(unittest.TestCase):
 
         # Combine cutoffs
         base_cutoffs = [
-            0.0, 0.0,  # box1-2: exactly touching
-            0.0, 0.15,  # box3-4: gap of 0.25, cutoff 0.15 makes them overlap (combined 0.3)
-            0.0, 0.0, 0.0, 0.0,  # box5-8: overlapping chain
-            0.0, 0.0, 0.0,  # box9-11: nested boxes
-            0.0, 0.0,  # box12-13: global entities (duplicate prevention critical)
-            0.0, 0.0, 0.0,  # box14-16: mixed global/world
-            0.0, 0.0, 0.0, 0.0,  # box17-20: group filtering
-            0.0, 0.0,  # box21-22: different worlds
-            0.0, 0.0,  # box23-24: reverse order
-            0.0, 0.0,  # box25-26: zero group
+            0.0,
+            0.0,  # box1-2: exactly touching
+            0.0,
+            0.15,  # box3-4: gap of 0.25, cutoff 0.15 makes them overlap (combined 0.3)
+            0.0,
+            0.0,
+            0.0,
+            0.0,  # box5-8: overlapping chain
+            0.0,
+            0.0,
+            0.0,  # box9-11: nested boxes
+            0.0,
+            0.0,  # box12-13: global entities (duplicate prevention critical)
+            0.0,
+            0.0,
+            0.0,  # box14-16: mixed global/world
+            0.0,
+            0.0,
+            0.0,
+            0.0,  # box17-20: group filtering
+            0.0,
+            0.0,  # box21-22: different worlds
+            0.0,
+            0.0,  # box23-24: reverse order
+            0.0,
+            0.0,  # box25-26: zero group
         ]
         np_geom_cutoff = np.array(base_cutoffs + cluster_cutoffs + isolated_cutoffs, dtype=np.float32)
 
         # Combine collision groups
         base_groups = [
-            1, 1,  # box1-2: same group
-            2, 2,  # box3-4: same group
-            1, 1, 1, 1,  # box5-8: same group, chain
-            1, 1, 1,  # box9-11: same group, nested
-            -1, -2,  # box12-13: both negative (SHOULD collide, different negative values)
-            -1, 1, 2,  # box14-16: global collides with both groups
-            1, 2, -1, -2,  # box17-20: 1 w/ -1, 2 w/ -1, not 1 w/ 2, not -1 w/ -2
-            1, 1,  # box21-22: same group but different worlds
-            1, 1,  # box23-24: reverse order
-            0, 0,  # box25-26: zero group
+            1,
+            1,  # box1-2: same group
+            2,
+            2,  # box3-4: same group
+            1,
+            1,
+            1,
+            1,  # box5-8: same group, chain
+            1,
+            1,
+            1,  # box9-11: same group, nested
+            -1,
+            -2,  # box12-13: both negative (SHOULD collide, different negative values)
+            -1,
+            1,
+            2,  # box14-16: global collides with both groups
+            1,
+            2,
+            -1,
+            -2,  # box17-20: 1 w/ -1, 2 w/ -1, not 1 w/ 2, not -1 w/ -2
+            1,
+            1,  # box21-22: same group but different worlds
+            1,
+            1,  # box23-24: reverse order
+            0,
+            0,  # box25-26: zero group
         ]
         np_collision_group = np.array(base_groups + cluster_groups + isolated_groups, dtype=np.int32)
 
         # Combine worlds
         base_worlds = [
-            0, 0,  # box1-2
-            0, 0,  # box3-4
-            0, 0, 0, 0,  # box5-8
-            0, 0, 0,  # box9-11
-            -1, -1,  # box12-13: BOTH global (critical for duplicate prevention)
-            -1, 1, 2,  # box14-16: global with world-specific
-            0, 0, 0, 0,  # box17-20
-            0, 1,  # box21-22: different worlds
-            0, 0,  # box23-24
-            0, 0,  # box25-26
+            0,
+            0,  # box1-2
+            0,
+            0,  # box3-4
+            0,
+            0,
+            0,
+            0,  # box5-8
+            0,
+            0,
+            0,  # box9-11
+            -1,
+            -1,  # box12-13: BOTH global (critical for duplicate prevention)
+            -1,
+            1,
+            2,  # box14-16: global with world-specific
+            0,
+            0,
+            0,
+            0,  # box17-20
+            0,
+            1,  # box21-22: different worlds
+            0,
+            0,  # box23-24
+            0,
+            0,  # box25-26
         ]
         np_shape_world = np.array(base_worlds + cluster_worlds + isolated_worlds, dtype=np.int32)
 

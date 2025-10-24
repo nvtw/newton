@@ -21,10 +21,10 @@ import warp as wp
 from .broad_phase_common import (
     binary_search,
     check_aabb_overlap,
+    precompute_world_map,
     test_world_and_group_pair,
     write_pair,
 )
-from .broad_phase_nxn import precompute_world_map
 
 wp.set_module_options({"enable_backward": False})
 
@@ -428,7 +428,7 @@ class BroadPhaseSAP:
             # tile_size is the actual data size (max_geoms_per_world)
             # Convert to plain Python int (not numpy.int32) for Warp closure
             self.tile_size = int(self.max_geoms_per_world)
-            
+
             # Calculate block_dim: next power of 2 >= max_geoms_per_world, capped at 512
             if self.tile_block_dim_override is not None:
                 self.tile_block_dim = self.tile_block_dim_override
@@ -437,7 +437,7 @@ class BroadPhaseSAP:
                 while block_dim < self.max_geoms_per_world:
                     block_dim *= 2
                 self.tile_block_dim = min(block_dim, 512)
-            
+
             self.tile_sort_kernel = _create_tile_sort_kernel(self.tile_size)
 
         # Allocate 1D arrays for per-world SAP data
