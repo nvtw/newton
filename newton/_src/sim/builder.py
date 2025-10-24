@@ -4513,9 +4513,11 @@ class ModelBuilder:
             for i2 in range(i1 + 1, len(sorted_indices)):
                 s2 = sorted_indices[i2]
                 world2 = self.shape_world[s2]
-                # Skip shapes from different worlds (unless one is global). As the shapes are sorted,
-                # this means the shapes in this world have all been processed.
-                if world1 != -1 and world1 != world2:
+                # Skip shapes from different worlds (unless one is global)
+                # Match logic from test_world_and_group_pair: both must be non-global to reject
+                if world1 != -1 and world2 != -1 and world1 != world2:
+                    # Shapes are sorted by world, so once we encounter a different non-global world,
+                    # all subsequent shapes will also be from different worlds (optimization: break vs continue)
                     break
 
                 # Skip shapes from different collision group (unless one is global).
