@@ -19,6 +19,7 @@ from math import sqrt
 import numpy as np
 import warp as wp
 
+from newton._src.geometry.broad_phase_sap import SAPSortType
 from newton.geometry import BroadPhaseAllPairs, BroadPhaseExplicit, BroadPhaseSAP
 
 
@@ -546,7 +547,7 @@ class TestBroadPhase(unittest.TestCase):
         if verbose:
             print(len(pairs_np))
 
-    def test_sap_broadphase(self):
+    def _test_sap_broadphase_impl(self, sort_type):
         verbose = False
 
         # Create random bounding boxes in min-max format
@@ -602,7 +603,7 @@ class TestBroadPhase(unittest.TestCase):
         shape_world = wp.array(np.full(ngeom, 0, dtype=np.int32), dtype=wp.int32)
 
         # Initialize BroadPhaseSAP with shape_world for precomputation
-        sap_broadphase = BroadPhaseSAP(shape_world)
+        sap_broadphase = BroadPhaseSAP(shape_world, sort_type=sort_type)
 
         sap_broadphase.launch(
             geom_lower,
@@ -670,7 +671,15 @@ class TestBroadPhase(unittest.TestCase):
         if verbose:
             print(len(pairs_np))
 
-    def test_sap_broadphase_multiple_worlds(self):
+    def test_sap_broadphase_segmented(self):
+        """Test SAP broad phase with segmented sort."""
+        self._test_sap_broadphase_impl(SAPSortType.SEGMENTED)
+
+    def test_sap_broadphase_tile(self):
+        """Test SAP broad phase with tile sort."""
+        self._test_sap_broadphase_impl(SAPSortType.TILE)
+
+    def _test_sap_broadphase_multiple_worlds_impl(self, sort_type):
         """Test SAP broad phase with objects in different worlds and mixed collision groups."""
         verbose = False
 
@@ -743,7 +752,7 @@ class TestBroadPhase(unittest.TestCase):
         candidate_pair = wp.array(np.zeros((max_candidate_pair, 2), dtype=wp.int32), dtype=wp.vec2i)
 
         # Initialize and launch SAP broad phase
-        sap_broadphase = BroadPhaseSAP(shape_world)
+        sap_broadphase = BroadPhaseSAP(shape_world, sort_type=sort_type)
         sap_broadphase.launch(
             geom_lower,
             geom_upper,
@@ -810,6 +819,14 @@ class TestBroadPhase(unittest.TestCase):
 
         if verbose:
             print(f"\nTest passed! Found {len(pairs_np)} valid collision pairs across multiple worlds.")
+
+    def test_sap_broadphase_multiple_worlds_segmented(self):
+        """Test SAP broad phase with multiple worlds using segmented sort."""
+        self._test_sap_broadphase_multiple_worlds_impl(SAPSortType.SEGMENTED)
+
+    def test_sap_broadphase_multiple_worlds_tile(self):
+        """Test SAP broad phase with multiple worlds using tile sort."""
+        self._test_sap_broadphase_multiple_worlds_impl(SAPSortType.TILE)
 
     def test_nxn_edge_cases(self):
         """Test NxN broad phase with tricky edge cases to verify GPU code correctness.
@@ -1120,7 +1137,7 @@ class TestBroadPhase(unittest.TestCase):
         if verbose:
             print(f"\n✓ Test passed! All {len(pairs_np)} pairs matched, no duplicates.")
 
-    def test_sap_edge_cases(self):
+    def _test_sap_edge_cases_impl(self, sort_type):
         """Test SAP broad phase with tricky edge cases to verify GPU code correctness.
 
         This test includes:
@@ -1372,7 +1389,7 @@ class TestBroadPhase(unittest.TestCase):
         candidate_pair = wp.array(np.zeros((num_lower_tri_elements, 2), dtype=wp.int32), dtype=wp.vec2i)
 
         # Initialize and launch SAP broad phase
-        sap_broadphase = BroadPhaseSAP(shape_world)
+        sap_broadphase = BroadPhaseSAP(shape_world, sort_type=sort_type)
         sap_broadphase.launch(
             geom_lower,
             geom_upper,
@@ -1442,6 +1459,14 @@ class TestBroadPhase(unittest.TestCase):
 
         if verbose:
             print(f"\n✓ Test passed! All {len(pairs_np)} pairs matched, no duplicates.")
+
+    def test_sap_edge_cases_segmented(self):
+        """Test SAP edge cases with segmented sort."""
+        self._test_sap_edge_cases_impl(SAPSortType.SEGMENTED)
+
+    def test_sap_edge_cases_tile(self):
+        """Test SAP edge cases with tile sort."""
+        self._test_sap_edge_cases_impl(SAPSortType.TILE)
 
 
 if __name__ == "__main__":
