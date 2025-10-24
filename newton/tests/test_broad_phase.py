@@ -569,10 +569,6 @@ class TestBroadPhase(unittest.TestCase):
         random_indices = rng.choice(ngeom, size=minus_one_count, replace=False)
         np_collision_group[random_indices] = -1
 
-        upper_bound = ngeom + minus_one_count * num_groups
-
-        # print(np_collision_group)
-
         pairs_np = find_overlapping_pairs_np(
             geom_bounding_box_lower, geom_bounding_box_upper, np_geom_cutoff, np_collision_group
         )
@@ -602,14 +598,11 @@ class TestBroadPhase(unittest.TestCase):
         max_candidate_pair = num_lower_tri_elements
         candidate_pair = wp.array(np.zeros((max_candidate_pair, 2), dtype=wp.int32), dtype=wp.vec2i)
 
-        sap_broadphase = BroadPhaseSAP(
-            max_broad_phase_elements=upper_bound,
-            max_num_distinct_positive_groups=num_groups,
-            max_num_negative_group_members=minus_one_count,
-        )
+        # Create shape world array with all shapes in world 0
+        shape_world = wp.array(np.full(ngeom, 0, dtype=np.int32), dtype=wp.int32)
 
-        # Create shape world array with all shapes in global world (-1)
-        shape_world = wp.array(np.full(ngeom, -1, dtype=np.int32), dtype=wp.int32)
+        # Initialize BroadPhaseSAP with shape_world for precomputation
+        sap_broadphase = BroadPhaseSAP(shape_world)
 
         sap_broadphase.launch(
             geom_lower,

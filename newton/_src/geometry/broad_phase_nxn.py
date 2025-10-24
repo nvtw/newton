@@ -423,6 +423,9 @@ class BroadPhaseExplicit:
 
         num_candidate_pair.zero_()
 
+        if device is None:
+            device = geom_lower.device
+
         wp.launch(
             kernel=_nxn_broadphase_precomputed_pairs,
             dim=geom_pair_count,
