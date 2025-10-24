@@ -812,6 +812,699 @@ class TestBroadPhase(unittest.TestCase):
         if verbose:
             print(f"\nTest passed! Found {len(pairs_np)} valid collision pairs across multiple worlds.")
 
+    def test_nxn_edge_cases(self):
+        """Test NxN broad phase with tricky edge cases to verify GPU code correctness.
+
+        This test includes:
+        - Boundary conditions (AABBs exactly touching)
+        - Various cutoff distances that create/prevent overlaps
+        - Complex world/group interactions
+        - Duplicate pair prevention
+        - Mixed global (-1) and world-specific entities
+        """
+        verbose = False
+
+        # Create a carefully crafted scenario with edge cases
+        ngeom = 24
+
+        # Case 1: Two boxes exactly touching (boundary case) - should overlap with cutoff=0
+        box1_lower = np.array([0.0, 0.0, 0.0])
+        box1_upper = np.array([1.0, 1.0, 1.0])
+        box2_lower = np.array([1.0, 0.0, 0.0])  # Exactly touching box1 on x-axis
+        box2_upper = np.array([2.0, 1.0, 1.0])
+
+        # Case 2: Two boxes very close but not touching - should overlap with cutoff > 0
+        box3_lower = np.array([2.1, 0.0, 0.0])
+        box3_upper = np.array([3.0, 1.0, 1.0])
+        box4_lower = np.array([3.2, 0.0, 0.0])  # Gap of 0.2
+        box4_upper = np.array([4.0, 1.0, 1.0])
+
+        # Case 3: Three boxes in a row, all overlapping
+        box5_lower = np.array([5.0, 0.0, 0.0])
+        box5_upper = np.array([6.5, 1.0, 1.0])
+        box6_lower = np.array([6.0, 0.0, 0.0])
+        box6_upper = np.array([7.5, 1.0, 1.0])
+        box7_lower = np.array([7.0, 0.0, 0.0])
+        box7_upper = np.array([8.5, 1.0, 1.0])
+
+        # Case 4: Multiple boxes in same location (stress test for duplicates)
+        # All these boxes should collide with each other
+        box8_lower = np.array([10.0, 0.0, 0.0])
+        box8_upper = np.array([11.0, 1.0, 1.0])
+        box9_lower = np.array([10.1, 0.1, 0.1])
+        box9_upper = np.array([10.9, 0.9, 0.9])
+        box10_lower = np.array([10.2, 0.2, 0.2])
+        box10_upper = np.array([10.8, 0.8, 0.8])
+        box11_lower = np.array([10.3, 0.3, 0.3])
+        box11_upper = np.array([10.7, 0.7, 0.7])
+
+        # Case 5: Global entities (-1 world) that should collide with multiple worlds
+        box12_lower = np.array([15.0, 0.0, 0.0])
+        box12_upper = np.array([16.0, 1.0, 1.0])
+        box13_lower = np.array([15.2, 0.2, 0.2])
+        box13_upper = np.array([15.8, 0.8, 0.8])
+
+        # Case 6: Collision group filtering edge cases
+        # Same location but different groups (some should collide, some shouldn't)
+        box14_lower = np.array([20.0, 0.0, 0.0])
+        box14_upper = np.array([21.0, 1.0, 1.0])
+        box15_lower = np.array([20.1, 0.1, 0.1])
+        box15_upper = np.array([20.9, 0.9, 0.9])
+        box16_lower = np.array([20.2, 0.2, 0.2])
+        box16_upper = np.array([20.8, 0.8, 0.8])
+        box17_lower = np.array([20.3, 0.3, 0.3])
+        box17_upper = np.array([20.7, 0.7, 0.7])
+
+        # Case 7: Different worlds (should NOT collide even if overlapping)
+        box18_lower = np.array([25.0, 0.0, 0.0])
+        box18_upper = np.array([26.0, 1.0, 1.0])
+        box19_lower = np.array([25.2, 0.2, 0.2])
+        box19_upper = np.array([25.8, 0.8, 0.8])
+
+        # Case 8: Isolated boxes (no collisions)
+        box20_lower = np.array([30.0, 0.0, 0.0])
+        box20_upper = np.array([31.0, 1.0, 1.0])
+        box21_lower = np.array([35.0, 0.0, 0.0])
+        box21_upper = np.array([36.0, 1.0, 1.0])
+        box22_lower = np.array([40.0, 0.0, 0.0])
+        box22_upper = np.array([41.0, 1.0, 1.0])
+
+        # Case 9: Zero collision group (should never collide)
+        box23_lower = np.array([45.0, 0.0, 0.0])
+        box23_upper = np.array([46.0, 1.0, 1.0])
+        box24_lower = np.array([45.2, 0.2, 0.2])
+        box24_upper = np.array([45.8, 0.8, 0.8])
+
+        geom_bounding_box_lower = np.array(
+            [
+                box1_lower,
+                box2_lower,
+                box3_lower,
+                box4_lower,
+                box5_lower,
+                box6_lower,
+                box7_lower,
+                box8_lower,
+                box9_lower,
+                box10_lower,
+                box11_lower,
+                box12_lower,
+                box13_lower,
+                box14_lower,
+                box15_lower,
+                box16_lower,
+                box17_lower,
+                box18_lower,
+                box19_lower,
+                box20_lower,
+                box21_lower,
+                box22_lower,
+                box23_lower,
+                box24_lower,
+            ]
+        )
+
+        geom_bounding_box_upper = np.array(
+            [
+                box1_upper,
+                box2_upper,
+                box3_upper,
+                box4_upper,
+                box5_upper,
+                box6_upper,
+                box7_upper,
+                box8_upper,
+                box9_upper,
+                box10_upper,
+                box11_upper,
+                box12_upper,
+                box13_upper,
+                box14_upper,
+                box15_upper,
+                box16_upper,
+                box17_upper,
+                box18_upper,
+                box19_upper,
+                box20_upper,
+                box21_upper,
+                box22_upper,
+                box23_upper,
+                box24_upper,
+            ]
+        )
+
+        # Cutoff distances
+        np_geom_cutoff = np.array(
+            [
+                0.0,
+                0.0,  # box1, box2: exactly touching
+                0.0,
+                0.15,  # box3, box4: gap of 0.2, cutoff 0.15 makes them overlap
+                0.0,
+                0.0,
+                0.0,  # box5-7: overlapping chain
+                0.0,
+                0.0,
+                0.0,
+                0.0,  # box8-11: nested boxes
+                0.0,
+                0.0,  # box12-13: global entities
+                0.0,
+                0.0,
+                0.0,
+                0.0,  # box14-17: group filtering
+                0.0,
+                0.0,  # box18-19: different worlds
+                0.0,
+                0.0,
+                0.0,  # box20-22: isolated
+                0.0,
+                0.0,  # box23-24: zero group
+            ],
+            dtype=np.float32,
+        )
+
+        # Collision groups (carefully designed for edge cases)
+        np_collision_group = np.array(
+            [
+                1,
+                1,  # box1-2: same group, should collide
+                2,
+                2,  # box3-4: same group, should collide (with cutoff)
+                1,
+                1,
+                1,  # box5-7: same group, chain collision
+                1,
+                1,
+                1,
+                1,  # box8-11: same group, all collide
+                -1,
+                -1,  # box12-13: negative group, collide with each other
+                1,
+                2,
+                -1,
+                -2,  # box14-17: mixed groups (1 w/ -1, 2 w/ -1, not 1 w/ 2, not -1 w/ -2)
+                1,
+                1,  # box18-19: same group but different worlds
+                1,
+                2,
+                3,  # box20-22: different groups, no collision
+                0,
+                0,  # box23-24: zero group, never collide
+            ],
+            dtype=np.int32,
+        )
+
+        # World indices
+        np_shape_world = np.array(
+            [
+                0,
+                0,  # box1-2: world 0
+                0,
+                0,  # box3-4: world 0
+                0,
+                0,
+                0,  # box5-7: world 0
+                0,
+                0,
+                0,
+                0,  # box8-11: world 0
+                -1,
+                -1,  # box12-13: global, collide with all worlds
+                0,
+                0,
+                0,
+                0,  # box14-17: world 0
+                0,
+                1,  # box18-19: different worlds (should NOT collide)
+                0,
+                0,
+                0,  # box20-22: world 0 (but different groups)
+                0,
+                0,  # box23-24: world 0 (but zero group)
+            ],
+            dtype=np.int32,
+        )
+
+        if verbose:
+            print("\n=== NxN Edge Case Test Setup ===")
+            print(f"Total geometries: {ngeom}")
+            for i in range(ngeom):
+                print(
+                    f"  Geom {i}: world={np_shape_world[i]}, group={np_collision_group[i]}, "
+                    f"cutoff={np_geom_cutoff[i]:.2f}"
+                )
+
+        # Compute expected pairs using numpy
+        pairs_np = find_overlapping_pairs_np(
+            geom_bounding_box_lower, geom_bounding_box_upper, np_geom_cutoff, np_collision_group, np_shape_world
+        )
+
+        if verbose:
+            print(f"\nExpected {len(pairs_np)} pairs from numpy verification")
+            for pair in pairs_np:
+                a, b = pair
+                print(
+                    f"  Pair ({a}, {b}): worlds ({np_shape_world[a]}, {np_shape_world[b]}) "
+                    f"groups ({np_collision_group[a]}, {np_collision_group[b]})"
+                )
+
+        # Setup Warp arrays
+        num_lower_tri_elements = ngeom * (ngeom - 1) // 2
+        geom_lower = wp.array(geom_bounding_box_lower, dtype=wp.vec3)
+        geom_upper = wp.array(geom_bounding_box_upper, dtype=wp.vec3)
+        geom_cutoff = wp.array(np_geom_cutoff)
+        collision_group = wp.array(np_collision_group)
+        shape_world = wp.array(np_shape_world, dtype=wp.int32)
+        num_candidate_pair = wp.array([0], dtype=wp.int32)
+        candidate_pair = wp.array(np.zeros((num_lower_tri_elements, 2), dtype=wp.int32), dtype=wp.vec2i)
+
+        # Initialize and launch NxN broad phase
+        nxn_broadphase = BroadPhaseAllPairs(shape_world)
+        nxn_broadphase.launch(
+            geom_lower,
+            geom_upper,
+            geom_cutoff,
+            collision_group,
+            shape_world,
+            ngeom,
+            candidate_pair,
+            num_candidate_pair,
+        )
+
+        wp.synchronize()
+
+        # Get results
+        pairs_wp = candidate_pair.numpy()
+        num_candidate_pair_result = num_candidate_pair.numpy()[0]
+
+        if verbose:
+            print(f"\nWarp found {num_candidate_pair_result} pairs")
+            for i in range(num_candidate_pair_result):
+                pair = pairs_wp[i]
+                a, b = pair[0], pair[1]
+                print(
+                    f"  Pair ({a}, {b}): worlds ({np_shape_world[a]}, {np_shape_world[b]}) "
+                    f"groups ({np_collision_group[a]}, {np_collision_group[b]})"
+                )
+
+        # Verify: check for duplicate pairs
+        pairs_wp_set = {tuple(pairs_wp[i]) for i in range(num_candidate_pair_result)}
+        self.assertEqual(
+            len(pairs_wp_set), num_candidate_pair_result, "Duplicate pairs detected in NxN broad phase results"
+        )
+
+        # Verify: check count matches
+        if len(pairs_np) != num_candidate_pair_result:
+            pairs_np_set = {tuple(pair) for pair in pairs_np}
+            missing = pairs_np_set - pairs_wp_set
+            extra = pairs_wp_set - pairs_np_set
+
+            if missing:
+                print(f"\nMissing pairs ({len(missing)}):")
+                for pair in list(missing):
+                    a, b = pair
+                    print(
+                        f"  ({a}, {b}): worlds ({np_shape_world[a]}, {np_shape_world[b]}) "
+                        f"groups ({np_collision_group[a]}, {np_collision_group[b]})"
+                    )
+
+            if extra:
+                print(f"\nExtra pairs ({len(extra)}):")
+                for pair in list(extra):
+                    a, b = pair
+                    print(
+                        f"  ({a}, {b}): worlds ({np_shape_world[a]}, {np_shape_world[b]}) "
+                        f"groups ({np_collision_group[a]}, {np_collision_group[b]})"
+                    )
+
+        self.assertEqual(
+            len(pairs_np), num_candidate_pair_result, f"Expected {len(pairs_np)} pairs, got {num_candidate_pair_result}"
+        )
+
+        # Verify: all Warp pairs are in numpy pairs
+        pairs_np_set = {tuple(pair) for pair in pairs_np}
+        for pair in pairs_wp[:num_candidate_pair_result]:
+            pair_tuple = tuple(pair)
+            self.assertIn(pair_tuple, pairs_np_set, f"Pair {pair_tuple} from Warp not found in numpy pairs")
+
+        if verbose:
+            print(f"\n✓ Test passed! All {len(pairs_np)} pairs matched, no duplicates.")
+
+    def test_sap_edge_cases(self):
+        """Test SAP broad phase with tricky edge cases to verify GPU code correctness.
+
+        This test includes:
+        - Boundary conditions (AABBs exactly touching)
+        - Various cutoff distances that create/prevent overlaps
+        - Complex world/group interactions
+        - Duplicate pair prevention (especially for shared geometries)
+        - Mixed global (-1) and world-specific entities
+        """
+        verbose = False
+
+        # Create a carefully crafted scenario with edge cases
+        ngeom = 26
+
+        # Case 1: Two boxes exactly touching along sweep axis (x-axis) - should overlap
+        box1_lower = np.array([0.0, 0.0, 0.0])
+        box1_upper = np.array([1.0, 1.0, 1.0])
+        box2_lower = np.array([1.0, 0.0, 0.0])  # Exactly touching box1 on x-axis
+        box2_upper = np.array([2.0, 1.0, 1.0])
+
+        # Case 2: Boxes with gap, but cutoff makes them overlap
+        box3_lower = np.array([2.15, 0.0, 0.0])
+        box3_upper = np.array([3.0, 1.0, 1.0])
+        box4_lower = np.array([3.25, 0.0, 0.0])  # Gap of 0.25
+        box4_upper = np.array([4.0, 1.0, 1.0])
+
+        # Case 3: Overlapping chain (stress test for SAP sorting)
+        box5_lower = np.array([5.0, 0.0, 0.0])
+        box5_upper = np.array([6.5, 1.0, 1.0])
+        box6_lower = np.array([6.0, 0.0, 0.0])
+        box6_upper = np.array([7.5, 1.0, 1.0])
+        box7_lower = np.array([7.0, 0.0, 0.0])
+        box7_upper = np.array([8.5, 1.0, 1.0])
+        box8_lower = np.array([8.0, 0.0, 0.0])
+        box8_upper = np.array([9.5, 1.0, 1.0])
+
+        # Case 4: Multiple boxes in same location (duplicate prevention test)
+        box9_lower = np.array([10.0, 0.0, 0.0])
+        box9_upper = np.array([11.0, 1.0, 1.0])
+        box10_lower = np.array([10.1, 0.1, 0.1])
+        box10_upper = np.array([10.9, 0.9, 0.9])
+        box11_lower = np.array([10.2, 0.2, 0.2])
+        box11_upper = np.array([10.8, 0.8, 0.8])
+
+        # Case 5: Global entities that should appear in multiple worlds
+        # Critical: these should only generate ONE pair total, not one per world
+        box12_lower = np.array([15.0, 0.0, 0.0])
+        box12_upper = np.array([16.0, 1.0, 1.0])
+        box13_lower = np.array([15.2, 0.2, 0.2])
+        box13_upper = np.array([15.8, 0.8, 0.8])
+
+        # Case 6: Mixed global and world-specific entities
+        box14_lower = np.array([18.0, 0.0, 0.0])
+        box14_upper = np.array([19.0, 1.0, 1.0])
+        box15_lower = np.array([18.2, 0.2, 0.2])
+        box15_upper = np.array([18.8, 0.8, 0.8])
+        box16_lower = np.array([18.4, 0.4, 0.4])
+        box16_upper = np.array([18.6, 0.6, 0.6])
+
+        # Case 7: Collision group edge cases at same location
+        box17_lower = np.array([22.0, 0.0, 0.0])
+        box17_upper = np.array([23.0, 1.0, 1.0])
+        box18_lower = np.array([22.1, 0.1, 0.1])
+        box18_upper = np.array([22.9, 0.9, 0.9])
+        box19_lower = np.array([22.2, 0.2, 0.2])
+        box19_upper = np.array([22.8, 0.8, 0.8])
+        box20_lower = np.array([22.3, 0.3, 0.3])
+        box20_upper = np.array([22.7, 0.7, 0.7])
+
+        # Case 8: Different worlds, overlapping (should NOT collide)
+        box21_lower = np.array([26.0, 0.0, 0.0])
+        box21_upper = np.array([27.0, 1.0, 1.0])
+        box22_lower = np.array([26.2, 0.2, 0.2])
+        box22_upper = np.array([26.8, 0.8, 0.8])
+
+        # Case 9: Reverse order in space (tests SAP sorting correctness)
+        box23_lower = np.array([30.0, 0.0, 0.0])
+        box23_upper = np.array([31.0, 1.0, 1.0])
+        box24_lower = np.array([29.0, 0.0, 0.0])  # Lower x than box23
+        box24_upper = np.array([30.5, 1.0, 1.0])
+
+        # Case 10: Zero collision group (never collides)
+        box25_lower = np.array([33.0, 0.0, 0.0])
+        box25_upper = np.array([34.0, 1.0, 1.0])
+        box26_lower = np.array([33.2, 0.2, 0.2])
+        box26_upper = np.array([33.8, 0.8, 0.8])
+
+        geom_bounding_box_lower = np.array(
+            [
+                box1_lower,
+                box2_lower,
+                box3_lower,
+                box4_lower,
+                box5_lower,
+                box6_lower,
+                box7_lower,
+                box8_lower,
+                box9_lower,
+                box10_lower,
+                box11_lower,
+                box12_lower,
+                box13_lower,
+                box14_lower,
+                box15_lower,
+                box16_lower,
+                box17_lower,
+                box18_lower,
+                box19_lower,
+                box20_lower,
+                box21_lower,
+                box22_lower,
+                box23_lower,
+                box24_lower,
+                box25_lower,
+                box26_lower,
+            ]
+        )
+
+        geom_bounding_box_upper = np.array(
+            [
+                box1_upper,
+                box2_upper,
+                box3_upper,
+                box4_upper,
+                box5_upper,
+                box6_upper,
+                box7_upper,
+                box8_upper,
+                box9_upper,
+                box10_upper,
+                box11_upper,
+                box12_upper,
+                box13_upper,
+                box14_upper,
+                box15_upper,
+                box16_upper,
+                box17_upper,
+                box18_upper,
+                box19_upper,
+                box20_upper,
+                box21_upper,
+                box22_upper,
+                box23_upper,
+                box24_upper,
+                box25_upper,
+                box26_upper,
+            ]
+        )
+
+        # Cutoff distances
+        np_geom_cutoff = np.array(
+            [
+                0.0,
+                0.0,  # box1-2: exactly touching
+                0.0,
+                0.15,  # box3-4: gap of 0.25, cutoff 0.15 makes them overlap (combined 0.3)
+                0.0,
+                0.0,
+                0.0,
+                0.0,  # box5-8: overlapping chain
+                0.0,
+                0.0,
+                0.0,  # box9-11: nested boxes
+                0.0,
+                0.0,  # box12-13: global entities (duplicate prevention critical)
+                0.0,
+                0.0,
+                0.0,  # box14-16: mixed global/world
+                0.0,
+                0.0,
+                0.0,
+                0.0,  # box17-20: group filtering
+                0.0,
+                0.0,  # box21-22: different worlds
+                0.0,
+                0.0,  # box23-24: reverse order
+                0.0,
+                0.0,  # box25-26: zero group
+            ],
+            dtype=np.float32,
+        )
+
+        # Collision groups
+        np_collision_group = np.array(
+            [
+                1,
+                1,  # box1-2: same group
+                2,
+                2,  # box3-4: same group
+                1,
+                1,
+                1,
+                1,  # box5-8: same group, chain
+                1,
+                1,
+                1,  # box9-11: same group, nested
+                -1,
+                -2,  # box12-13: both negative (SHOULD collide, different negative values)
+                -1,
+                1,
+                2,  # box14-16: global collides with both groups
+                1,
+                2,
+                -1,
+                -2,  # box17-20: 1 w/ -1, 2 w/ -1, not 1 w/ 2, not -1 w/ -2
+                1,
+                1,  # box21-22: same group but different worlds
+                1,
+                1,  # box23-24: reverse order
+                0,
+                0,  # box25-26: zero group
+            ],
+            dtype=np.int32,
+        )
+
+        # World indices
+        np_shape_world = np.array(
+            [
+                0,
+                0,  # box1-2
+                0,
+                0,  # box3-4
+                0,
+                0,
+                0,
+                0,  # box5-8
+                0,
+                0,
+                0,  # box9-11
+                -1,
+                -1,  # box12-13: BOTH global (critical for duplicate prevention)
+                -1,
+                1,
+                2,  # box14-16: global with world-specific
+                0,
+                0,
+                0,
+                0,  # box17-20
+                0,
+                1,  # box21-22: different worlds
+                0,
+                0,  # box23-24
+                0,
+                0,  # box25-26
+            ],
+            dtype=np.int32,
+        )
+
+        if verbose:
+            print("\n=== SAP Edge Case Test Setup ===")
+            print(f"Total geometries: {ngeom}")
+            for i in range(ngeom):
+                print(
+                    f"  Geom {i}: world={np_shape_world[i]}, group={np_collision_group[i]}, "
+                    f"cutoff={np_geom_cutoff[i]:.2f}"
+                )
+
+        # Compute expected pairs using numpy
+        pairs_np = find_overlapping_pairs_np(
+            geom_bounding_box_lower, geom_bounding_box_upper, np_geom_cutoff, np_collision_group, np_shape_world
+        )
+
+        if verbose:
+            print(f"\nExpected {len(pairs_np)} pairs from numpy verification")
+            for pair in pairs_np:
+                a, b = pair
+                print(
+                    f"  Pair ({a}, {b}): worlds ({np_shape_world[a]}, {np_shape_world[b]}) "
+                    f"groups ({np_collision_group[a]}, {np_collision_group[b]})"
+                )
+
+        # Setup Warp arrays
+        num_lower_tri_elements = ngeom * (ngeom - 1) // 2
+        geom_lower = wp.array(geom_bounding_box_lower, dtype=wp.vec3)
+        geom_upper = wp.array(geom_bounding_box_upper, dtype=wp.vec3)
+        geom_cutoff = wp.array(np_geom_cutoff)
+        collision_group = wp.array(np_collision_group)
+        shape_world = wp.array(np_shape_world, dtype=wp.int32)
+        num_candidate_pair = wp.array([0], dtype=wp.int32)
+        candidate_pair = wp.array(np.zeros((num_lower_tri_elements, 2), dtype=wp.int32), dtype=wp.vec2i)
+
+        # Initialize and launch SAP broad phase
+        sap_broadphase = BroadPhaseSAP(shape_world)
+        sap_broadphase.launch(
+            geom_lower,
+            geom_upper,
+            geom_cutoff,
+            collision_group,
+            shape_world,
+            ngeom,
+            candidate_pair,
+            num_candidate_pair,
+        )
+
+        wp.synchronize()
+
+        # Get results
+        pairs_wp = candidate_pair.numpy()
+        num_candidate_pair_result = num_candidate_pair.numpy()[0]
+
+        if verbose:
+            print(f"\nWarp found {num_candidate_pair_result} pairs")
+            for i in range(num_candidate_pair_result):
+                pair = pairs_wp[i]
+                a, b = pair[0], pair[1]
+                print(
+                    f"  Pair ({a}, {b}): worlds ({np_shape_world[a]}, {np_shape_world[b]}) "
+                    f"groups ({np_collision_group[a]}, {np_collision_group[b]})"
+                )
+
+        # Verify: check for duplicate pairs
+        pairs_wp_set = {tuple(pairs_wp[i]) for i in range(num_candidate_pair_result)}
+        self.assertEqual(
+            len(pairs_wp_set), num_candidate_pair_result, "Duplicate pairs detected in SAP broad phase results"
+        )
+
+        # Verify: check count matches
+        if len(pairs_np) != num_candidate_pair_result:
+            pairs_np_set = {tuple(pair) for pair in pairs_np}
+            missing = pairs_np_set - pairs_wp_set
+            extra = pairs_wp_set - pairs_np_set
+
+            if missing:
+                print(f"\nMissing pairs ({len(missing)}):")
+                for pair in list(missing):
+                    a, b = pair
+                    print(
+                        f"  ({a}, {b}): worlds ({np_shape_world[a]}, {np_shape_world[b]}) "
+                        f"groups ({np_collision_group[a]}, {np_collision_group[b]})"
+                    )
+
+            if extra:
+                print(f"\nExtra pairs ({len(extra)}):")
+                for pair in list(extra):
+                    a, b = pair
+                    print(
+                        f"  ({a}, {b}): worlds ({np_shape_world[a]}, {np_shape_world[b]}) "
+                        f"groups ({np_collision_group[a]}, {np_collision_group[b]})"
+                    )
+
+        self.assertEqual(
+            len(pairs_np), num_candidate_pair_result, f"Expected {len(pairs_np)} pairs, got {num_candidate_pair_result}"
+        )
+
+        # Verify: all Warp pairs are in numpy pairs
+        pairs_np_set = {tuple(pair) for pair in pairs_np}
+        for pair in pairs_wp[:num_candidate_pair_result]:
+            pair_tuple = tuple(pair)
+            self.assertIn(pair_tuple, pairs_np_set, f"Pair {pair_tuple} from Warp not found in numpy pairs")
+
+        if verbose:
+            print(f"\n✓ Test passed! All {len(pairs_np)} pairs matched, no duplicates.")
+
 
 if __name__ == "__main__":
     wp.clear_kernel_cache()
