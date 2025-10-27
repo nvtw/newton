@@ -1093,7 +1093,8 @@ def parse_usd(
                 if len(shape_spec.collisionGroups) > 0:
                     cgroup_name = str(shape_spec.collisionGroups[0])
                     if cgroup_name not in collision_group_ids:
-                        collision_group_ids[cgroup_name] = len(collision_group_ids)
+                        # Start from 1 to avoid collision_group = 0 (which means "no collisions")
+                        collision_group_ids[cgroup_name] = len(collision_group_ids) + 1
                     collision_group = collision_group_ids[cgroup_name]
                 material = material_specs[""]
                 if len(shape_spec.materials) >= 1:
