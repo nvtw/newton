@@ -102,6 +102,8 @@ class Example:
             ignore_inertial_definitions=False,
         )
 
+        # Add global ground plane
+        builder.current_world = -1
         builder.add_ground_plane()
 
         self.sim_time = 0.0

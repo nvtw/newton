@@ -37,6 +37,8 @@ class Example:
         builder = newton.ModelBuilder()
         sand_particles, snow_particles, mud_particles = Example.emit_particles(builder, voxel_size=options.voxel_size)
 
+        # Add global ground plane
+        builder.current_world = -1
         builder.add_ground_plane()
         self.model = builder.finalize()
 

@@ -47,6 +47,8 @@ class Example:
                 )
                 colliders.append(collider)
 
+        # Add global ground plane
+        builder.current_world = -1
         builder.add_ground_plane()
 
         # builder's gravity isn't a vec3. use model.set_gravity()

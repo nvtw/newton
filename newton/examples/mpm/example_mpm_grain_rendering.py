@@ -36,6 +36,9 @@ class Example:
         self.viewer = viewer
         builder = newton.ModelBuilder()
         Example.emit_particles(builder, options)
+
+        # Add global ground plane
+        builder.current_world = -1
         builder.add_ground_plane()
 
         self.model = builder.finalize()
