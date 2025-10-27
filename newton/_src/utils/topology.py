@@ -30,11 +30,15 @@ def topological_sort(joints: list[tuple[int | str, int | str]], use_dfs: bool = 
     Returns:
         list[int]: A list of joint indices in topological order.
     """
+    # Handle empty joint list
+    if len(joints) == 0:
+        return []
+
     incoming = defaultdict(set)
     outgoing = defaultdict(set)
     nodes = set()
     for joint_id, (parent, child) in enumerate(joints):
-        if len(incoming[child]) == 1:
+        if len(incoming[child]) > 0:
             raise ValueError(f"Multiple joints lead to body {child}")
         incoming[child].add((joint_id, parent))
         outgoing[parent].add((joint_id, child))
