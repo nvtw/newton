@@ -114,9 +114,14 @@ class Example:
         )
 
         builder = newton.ModelBuilder()
-        builder.replicate(world_builder, self.num_worlds)
 
+        # Add global ground plane that collides with all worlds
+        builder.current_world = -1
         builder.add_ground_plane()
+
+        # Replicate worlds with ants and humanoids
+        builder.current_world = 0
+        builder.replicate(world_builder, self.num_worlds)
         # stores contact info required by contact sensors
         self.contacts = Contacts(0, 0)
 

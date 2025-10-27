@@ -110,7 +110,12 @@ class Example:
 
         scene = newton.ModelBuilder()
 
+        # Add global ground plane that collides with all worlds
+        scene.current_world = -1
         scene.add_ground_plane()
+
+        # Replicate worlds with ants and humanoids
+        scene.current_world = 0
         scene.replicate(world, num_worlds=self.num_worlds)
 
         # finalize model

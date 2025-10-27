@@ -62,9 +62,14 @@ class Example:
             humanoid.joint_target_kd[i] = 5
 
         builder = newton.ModelBuilder()
-        builder.replicate(humanoid, self.num_worlds)
 
+        # Add global ground plane that collides with all worlds
+        builder.current_world = -1
         builder.add_ground_plane()
+
+        # Replicate humanoids across multiple worlds
+        builder.current_world = 0
+        builder.replicate(humanoid, self.num_worlds)
 
         self.model = builder.finalize()
         self.solver = newton.solvers.SolverMuJoCo(self.model, njmax=100, ncon_per_world=50)

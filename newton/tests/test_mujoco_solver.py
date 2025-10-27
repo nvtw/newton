@@ -225,8 +225,13 @@ class TestMuJoCoSolverPropertiesBase(TestMuJoCoSolver):
         )
 
         self.builder = newton.ModelBuilder()
+
+        # Add global ground plane that collides with all worlds
+        self.builder.current_world = -1
         self.builder.add_shape_plane()
 
+        # Add templates across multiple worlds
+        self.builder.current_world = 0
         for i in range(num_worlds):
             world_transform = wp.transform((i * 2.0, 0.0, 0.0), wp.quat_identity())
             self.builder.add_builder(template_builder, xform=world_transform, update_num_world_count=True)

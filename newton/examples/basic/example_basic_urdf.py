@@ -74,9 +74,13 @@ class Example:
         # use "scene" for the entire set of worlds
         scene = newton.ModelBuilder()
 
-        # use the builder.replicate() function to create N copies of the world
-        scene.replicate(quadruped, self.num_worlds)
+        # Add global ground plane that collides with all worlds
+        scene.current_world = -1
         scene.add_ground_plane()
+
+        # use the builder.replicate() function to create N copies of the world
+        scene.current_world = 0
+        scene.replicate(quadruped, self.num_worlds)
 
         # finalize model
         self.model = scene.finalize()

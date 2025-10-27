@@ -114,9 +114,14 @@ class Example:
             allegro_hand.joint_target[i] = 0.0
 
         builder = newton.ModelBuilder()
-        builder.replicate(allegro_hand, self.num_worlds)
 
+        # Add global ground plane that collides with all worlds
+        builder.current_world = -1
         builder.add_ground_plane()
+
+        # Replicate Allegro hands across multiple worlds
+        builder.current_world = 0
+        builder.replicate(allegro_hand, self.num_worlds)
 
         self.model = builder.finalize()
 
