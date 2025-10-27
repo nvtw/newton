@@ -71,14 +71,9 @@ class Example:
             h1.joint_target_kd[i] = 5
 
         builder = newton.ModelBuilder()
-
-        # Add global ground plane that collides with all worlds
-        builder.current_world = -1
-        builder.add_ground_plane()
-
-        # Replicate H1 robots across multiple worlds
-        builder.current_world = 0
         builder.replicate(h1, self.num_worlds)
+
+        builder.add_ground_plane()
 
         self.model = builder.finalize()
         self.solver = newton.solvers.SolverMuJoCo(

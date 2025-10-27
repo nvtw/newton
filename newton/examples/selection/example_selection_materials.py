@@ -88,18 +88,13 @@ class Example:
 
         scene = newton.ModelBuilder()
 
-        # Add global ground plane that collides with all worlds
-        scene.current_world = -1
         scene.add_ground_plane()
-
-        # Replicate ants across multiple worlds
-        scene.current_world = 0
         scene.replicate(world_template, num_worlds=self.num_worlds)
 
         # finalize model
         self.model = scene.finalize()
 
-        self.solver = newton.solvers.SolverMuJoCo(self.model, njmax=100, ncon_per_world=100)
+        self.solver = newton.solvers.SolverMuJoCo(self.model, njmax=50, ncon_per_world=50)
 
         self.viewer = viewer
 

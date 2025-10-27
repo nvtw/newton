@@ -68,14 +68,9 @@ class Example:
         g1.approximate_meshes("bounding_box")
 
         builder = newton.ModelBuilder()
-
-        # Add global ground plane that collides with all worlds
-        builder.current_world = -1
-        builder.add_ground_plane()
-
-        # Replicate G1 robots across multiple worlds
-        builder.current_world = 0
         builder.replicate(g1, self.num_worlds)
+
+        builder.add_ground_plane()
 
         self.model = builder.finalize()
         self.solver = newton.solvers.SolverMuJoCo(

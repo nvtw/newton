@@ -539,14 +539,10 @@ def test_mujoco_warp_newton_contacts(test: TestRigidContact, device):
     # Replicate the cube across 4 environments
     builder = newton.ModelBuilder()
     num_envs = 4
-
-    # Add global ground plane that collides with all worlds
-    builder.current_world = -1
-    builder.add_ground_plane()
-
-    # Replicate cubes across multiple worlds
-    builder.current_world = 0
     builder.replicate(cube_builder, num_envs, spacing=(3, 3, 0))
+
+    # Add ground plane
+    builder.add_ground_plane()
 
     # Finalize model (shape pairs are built automatically)
     model = builder.finalize(device=device)

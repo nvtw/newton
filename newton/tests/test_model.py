@@ -270,8 +270,7 @@ class TestModel(unittest.TestCase):
         """Test that add_particles correctly assigns world groups."""
         builder = ModelBuilder()
 
-        # Test with global group (-1)
-        builder.current_world = -1
+        # Test with default group (-1)
         builder.add_particles(
             pos=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.0, 0.0, 0.0)], vel=[(0.0, 0.0, 0.0)] * 3, mass=[1.0] * 3
         )

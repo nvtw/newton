@@ -407,13 +407,6 @@ class Example:
             custom_setup_fn(articulation_builder)
 
         builder = newton.ModelBuilder()
-
-        # Add global ground plane that collides with all worlds
-        builder.current_world = -1
-        builder.add_ground_plane()
-
-        # Replicate robots across multiple worlds
-        builder.current_world = 0
         builder.replicate(articulation_builder, num_worlds)
         if randomize:
             njoint = len(articulation_builder.joint_q)
@@ -422,6 +415,7 @@ class Example:
                 builder.joint_q[istart + root_dofs : istart + njoint] = rng.uniform(
                     -1.0, 1.0, size=(njoint - root_dofs)
                 ).tolist()
+        builder.add_ground_plane()
         return builder
 
     @staticmethod

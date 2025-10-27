@@ -73,15 +73,10 @@ class Example:
             articulation_builder.joint_target_kd[i] = 5
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
-
-        # Add global ground plane that collides with all worlds
-        builder.current_world = -1
-        builder.add_ground_plane()
-
-        # Add robots across multiple worlds
-        builder.current_world = 0
         for _ in range(self.num_worlds):
             builder.add_builder(articulation_builder)
+
+        builder.add_ground_plane()
 
         self.model = builder.finalize()
         self.solver = newton.solvers.SolverMuJoCo(

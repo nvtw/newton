@@ -95,19 +95,14 @@ class Example:
             ur10.joint_target_kd[i] = 50
 
         builder = newton.ModelBuilder()
-
-        # Add global ground plane that collides with all worlds
-        builder.current_world = -1
-        builder.add_ground_plane()
-
-        # Replicate UR10 robots across multiple worlds
-        builder.current_world = 0
         builder.replicate(ur10, self.num_worlds, spacing=(2, 2, 0))
 
         # set random joint configurations
         rng = np.random.default_rng(42)
         joint_q = rng.uniform(-wp.pi, wp.pi, builder.joint_dof_count)
         builder.joint_q = joint_q.tolist()
+
+        builder.add_ground_plane()
 
         self.model = builder.finalize()
 

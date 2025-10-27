@@ -46,7 +46,6 @@ class TestMuJoCoSolver(unittest.TestCase):
         """Test that ls_parallel option is properly set on the MuJoCo Warp model."""
         # Create minimal model with proper inertia
         builder = newton.ModelBuilder()
-        builder.current_world = -1  # Create global body
         body = builder.add_body(mass=1.0, com=wp.vec3(0.0, 0.0, 0.0), I_m=wp.mat33(np.eye(3)))
         builder.add_joint_revolute(-1, body)
         model = builder.finalize()
@@ -226,13 +225,8 @@ class TestMuJoCoSolverPropertiesBase(TestMuJoCoSolver):
         )
 
         self.builder = newton.ModelBuilder()
-
-        # Add global ground plane that collides with all worlds
-        self.builder.current_world = -1
         self.builder.add_shape_plane()
 
-        # Add templates across multiple worlds
-        self.builder.current_world = 0
         for i in range(num_worlds):
             world_transform = wp.transform((i * 2.0, 0.0, 0.0), wp.quat_identity())
             self.builder.add_builder(template_builder, xform=world_transform, update_num_world_count=True)
@@ -1178,7 +1172,6 @@ class TestMuJoCoSolverNewtonContacts(unittest.TestCase):
 class TestMuJoCoConversion(unittest.TestCase):
     def test_no_shapes(self):
         builder = newton.ModelBuilder()
-        builder.current_world = -1  # Create global body
         b = builder.add_body(mass=1.0, com=wp.vec3(1.0, 2.0, 3.0), I_m=wp.mat33(np.eye(3)))
         builder.add_joint_prismatic(-1, b)
         model = builder.finalize()
@@ -1353,7 +1346,6 @@ class TestMuJoCoConversion(unittest.TestCase):
         """Test that global joint solver parameters affect joint limit behavior."""
         # Create a simple pendulum model
         builder = newton.ModelBuilder()
-        builder.current_world = -1  # Create global body
 
         # Add pendulum body
         mass = 1.0
@@ -1441,7 +1433,6 @@ class TestMuJoCoConversion(unittest.TestCase):
         """Test joint frame updates with specific expected values to verify correctness."""
         # Create a simple model with one revolute joint
         builder = newton.ModelBuilder()
-        builder.current_world = -1  # Create global body
 
         body = builder.add_body(mass=1.0, I_m=wp.diag(wp.vec3(1.0, 1.0, 1.0)))
 
