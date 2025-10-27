@@ -4074,9 +4074,7 @@ class ModelBuilder:
             target_max_min_color_ratio=target_max_min_color_ratio,
         )
 
-    def finalize(
-        self, device: Devicelike | None = None, requires_grad: bool = False, build_shape_contact_pairs: bool = True
-    ) -> Model:
+    def finalize(self, device: Devicelike | None = None, requires_grad: bool = False) -> Model:
         """
         Finalize the builder and create a concrete Model for simulation.
 
@@ -4087,9 +4085,6 @@ class ModelBuilder:
         Args:
             device: The simulation device to use (e.g., 'cpu', 'cuda'). If None, uses the current Warp device.
             requires_grad: If True, enables gradient computation for the model (for differentiable simulation).
-            build_shape_contact_pairs: If True, builds static shape contact pairs for collision detection.
-                Set to False when using dynamic broad phase (BroadPhaseMode.NXN or SAP) to skip this expensive O(N²) computation.
-                When False, you can also use EXPLICIT mode with custom pairs via shape_pairs_filtered parameter.
 
         Returns:
             Model: A fully constructed Model object containing all simulation data on the specified device.
@@ -4186,7 +4181,7 @@ class ModelBuilder:
             )
 
             m.shape_collision_filter_pairs = set(self.shape_collision_filter_pairs)
-            m.shape_collision_group = wp.array(self.shape_collision_group, dtype=wp.int32)
+            m.shape_collision_group = self.shape_collision_group
 
             # ---------------------
             # springs
@@ -4419,19 +4414,8 @@ class ModelBuilder:
             m.articulation_count = len(self.articulation_start)
             m.equality_constraint_count = len(self.equality_constraint_type)
 
-            # Build shape contact pairs if requested (can skip for dynamic broad phase)
-            if build_shape_contact_pairs:
-                self.find_shape_contact_pairs(m)
-                m.rigid_contact_max = count_rigid_contact_points(m)
-            else:
-                # Skip expensive O(N²) pair computation - will use dynamic broad phase (NXN/SAP)
-                # or explicit mode with custom pairs
-                m.shape_contact_pairs = None
-                m.shape_contact_pair_count = 0
-                # Use conservative estimate for rigid_contact_max
-                # Assumption: each shape can collide with up to 30 other shapes,
-                # and each shape pair can generate up to 5 contact points
-                m.rigid_contact_max = m.shape_count * 30 * 5
+            self.find_shape_contact_pairs(m)
+            m.rigid_contact_max = count_rigid_contact_points(m)
 
             m.rigid_contact_torsional_friction = self.rigid_contact_torsional_friction
             m.rigid_contact_rolling_friction = self.rigid_contact_rolling_friction
@@ -4516,19 +4500,26 @@ class ModelBuilder:
         filters: set[tuple[int, int]] = model.shape_collision_filter_pairs
         contact_pairs: list[tuple[int, int]] = []
 
-        # Keep only colliding shapes (those with COLLIDE_SHAPES flag)
+        # Keep only colliding shapes (those with COLLIDE_SHAPES flag) and sort by world for optimization
         colliding_indices = [i for i, flag in enumerate(self.shape_flags) if flag & ShapeFlags.COLLIDE_SHAPES]
+        sorted_indices = sorted(colliding_indices, key=lambda i: self.shape_world[i])
 
         # Iterate over all pairs of colliding shapes
-        for i1 in range(len(colliding_indices)):
-            s1 = colliding_indices[i1]
+        for i1 in range(len(sorted_indices)):
+            s1 = sorted_indices[i1]
             world1 = self.shape_world[s1]
             collision_group1 = self.shape_collision_group[s1]
 
-            for i2 in range(i1 + 1, len(colliding_indices)):
-                s2 = colliding_indices[i2]
+            for i2 in range(i1 + 1, len(sorted_indices)):
+                s2 = sorted_indices[i2]
                 world2 = self.shape_world[s2]
                 collision_group2 = self.shape_collision_group[s2]
+
+                # Early break optimization: if both shapes are in non-global worlds and different worlds,
+                # they can never collide. Since shapes are sorted by world, all remaining shapes will also
+                # be in different worlds, so we can break early.
+                if world1 != -1 and world2 != -1 and world1 != world2:
+                    break
 
                 # Apply the exact same filtering logic as test_world_and_group_pair kernel
                 if not self._test_world_and_group_pair(world1, world2, collision_group1, collision_group2):
