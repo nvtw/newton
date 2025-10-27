@@ -453,9 +453,9 @@ class ModelBuilder:
         self.joint_coord_count = 0
 
         # current world index for entities being added directly to this builder.
-        # set to 0 by default (first world), or set to -1 to create global entities shared across all worlds.
+        # set to -1 to create global entities shared across all worlds.
         # note: this value is temporarily overridden when using add_builder().
-        self.current_world = 0
+        self.current_world = -1
 
         self.up_axis: Axis = Axis.from_any(up_axis)
         self.gravity: float = gravity
