@@ -124,6 +124,7 @@ def _nxn_broadphase_kernel(
     world_cumsum_lower_tri: wp.array(dtype=int, ndim=1),  # Cumulative sum of lower tri elements per world
     world_slice_ends: wp.array(dtype=int, ndim=1),  # End indices of each world slice
     world_index_map: wp.array(dtype=int, ndim=1),  # Index map into source geometry
+    num_regular_worlds: int,  # Number of regular world segments (excluding dedicated -1 segment)
     # Output arrays
     candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),
     num_candidate_pair: wp.array(dtype=int, ndim=1),  # Size one array
@@ -161,9 +162,10 @@ def _nxn_broadphase_kernel(
     collision_group1 = collision_group[geom1]
     collision_group2 = collision_group[geom2]
 
-    # Avoid duplicate pairs: if both geometries are global (world -1),
-    # only process them in the first world segment (world_id == 0)
-    if world1 == -1 and world2 == -1 and world_id > 0:
+    # Skip pairs where both geometries are global (world -1), unless we're in the dedicated -1 segment
+    # The dedicated -1 segment is the last segment (world_id >= num_regular_worlds)
+    is_dedicated_minus_one_segment = world_id >= num_regular_worlds
+    if world1 == -1 and world2 == -1 and not is_dedicated_minus_one_segment:
         return
 
     # Check both world and collision groups
@@ -237,6 +239,9 @@ class BroadPhaseAllPairs:
         # Precompute the world map (filters out non-colliding shapes if flags provided)
         index_map_np, slice_ends_np = precompute_world_map(geom_world_np, geom_flags_np)
 
+        # Calculate number of regular worlds (excluding dedicated -1 segment at end)
+        num_regular_worlds = len(np.unique(geom_world_np[geom_world_np >= 0]))
+
         # Calculate cumulative sum of lower triangular elements per world
         # For each world, compute n*(n-1)/2 where n is the number of geometries in that world
         num_worlds = len(slice_ends_np)
@@ -261,6 +266,9 @@ class BroadPhaseAllPairs:
 
         # Store total number of kernel threads needed (last element of cumsum)
         self.num_kernel_threads = int(world_cumsum_lower_tri_np[-1]) if num_worlds > 0 else 0
+
+        # Store number of regular worlds (for distinguishing dedicated -1 segment)
+        self.num_regular_worlds = int(num_regular_worlds)
 
     def launch(
         self,
@@ -321,6 +329,7 @@ class BroadPhaseAllPairs:
                     self.world_cumsum_lower_tri,
                     self.world_slice_ends,
                     self.world_index_map,
+                    self.num_regular_worlds,
                 ],
                 outputs=[candidate_pair, num_candidate_pair, max_candidate_pair],
                 device=device,

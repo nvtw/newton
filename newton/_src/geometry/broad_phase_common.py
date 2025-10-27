@@ -127,6 +127,9 @@ def precompute_world_map(geom_world: np.ndarray, geom_flags: np.ndarray | None =
     (positive or zero world ID) are grouped together, and shared geometries
     (negative world ID) are appended to each world's slice.
 
+    A dedicated segment at the end contains only world -1 objects for handling
+    -1 vs -1 collisions without duplication.
+
     Optionally filters out geometries that should not participate in collision detection
     based on their flags (e.g., visual-only shapes without COLLIDE_SHAPES flag).
 
@@ -139,11 +142,12 @@ def precompute_world_map(geom_world: np.ndarray, geom_flags: np.ndarray | None =
 
     Returns:
         tuple: (index_map, slice_ends)
-            - index_map: 1D array of indices into geom_world, arranged such that
-                each world's indices are followed by all shared (negative) indices.
+            - index_map: 1D array of indices into geom_world, arranged such that:
+                * Each regular world's indices are followed by all shared (negative) indices
+                * A final segment contains only shared (negative) indices
                 Only includes geometries that pass the collision flag filter.
             - slice_ends: 1D array containing the end index (exclusive) of each world's slice
-                in the index_map
+                in the index_map (including the dedicated -1 segment at the end)
     """
     # Ensure geom_world is a numpy array (might be a list from builder)
     if not isinstance(geom_world, np.ndarray):
@@ -182,12 +186,13 @@ def precompute_world_map(geom_world: np.ndarray, geom_flags: np.ndarray | None =
 
     # Calculate total size of result
     # Each world gets its own indices + all shared indices
+    # Plus one additional segment at the end with only shared indices
     num_positive = np.sum(positive_mask)
-    total_size = num_positive + (num_shared * num_worlds)
+    total_size = num_positive + (num_shared * num_worlds) + num_shared
 
-    # Allocate output arrays
+    # Allocate output arrays (num_worlds + 1 to include dedicated -1 segment)
     index_map = np.empty(total_size, dtype=np.int32)
-    slice_ends = np.empty(num_worlds, dtype=np.int32)
+    slice_ends = np.empty(num_worlds + 1, dtype=np.int32)
 
     # Build the index map
     current_pos = 0
@@ -208,5 +213,10 @@ def precompute_world_map(geom_world: np.ndarray, geom_flags: np.ndarray | None =
 
         # Store the end position of this slice
         slice_ends[world_idx] = current_pos
+
+    # Add dedicated segment at the end with only world -1 objects
+    index_map[current_pos : current_pos + num_shared] = shared_indices
+    current_pos += num_shared
+    slice_ends[num_worlds] = current_pos
 
     return index_map, slice_ends

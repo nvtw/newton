@@ -270,6 +270,7 @@ def _sap_broadphase_kernel(
     num_worlds: int,
     max_geoms_per_world: int,
     nsweep_in: int,
+    num_regular_worlds: int,  # Number of regular world segments (excluding dedicated -1 segment)
     # Output arrays
     candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),
     num_candidate_pair: wp.array(dtype=int, ndim=1),  # Size one array
@@ -331,9 +332,10 @@ def _sap_broadphase_kernel(
         world1 = shape_world[geom1]
         world2 = shape_world[geom2]
 
-        # Avoid duplicate pairs: if both geometries are shared (world -1),
-        # only process them in the first world segment (world_id == 0)
-        if world1 == -1 and world2 == -1 and world_id > 0:
+        # Skip pairs where both geometries are global (world -1), unless we're in the dedicated -1 segment
+        # The dedicated -1 segment is the last segment (world_id >= num_regular_worlds)
+        is_dedicated_minus_one_segment = world_id >= num_regular_worlds
+        if world1 == -1 and world2 == -1 and not is_dedicated_minus_one_segment:
             workid += nsweep_in
             continue
 
@@ -409,12 +411,16 @@ class BroadPhaseSAP:
         # Precompute the world map (filters out non-colliding shapes if flags provided)
         index_map_np, slice_ends_np = precompute_world_map(geom_shape_world_np, geom_flags_np)
 
+        # Calculate number of regular worlds (excluding dedicated -1 segment at end)
+        num_regular_worlds = len(np.unique(geom_shape_world_np[geom_shape_world_np >= 0]))
+
         # Store as warp arrays
         self.world_index_map = wp.array(index_map_np, dtype=wp.int32, device=device)
         self.world_slice_ends = wp.array(slice_ends_np, dtype=wp.int32, device=device)
 
         # Calculate world information
         self.num_worlds = len(slice_ends_np)
+        self.num_regular_worlds = int(num_regular_worlds)
         self.max_geoms_per_world = 0
         start_idx = 0
         for end_idx in slice_ends_np:
@@ -588,6 +594,7 @@ class BroadPhaseSAP:
                 self.num_worlds,
                 self.max_geoms_per_world,
                 nsweep_in,
+                self.num_regular_worlds,
             ],
             outputs=[
                 candidate_pair,
