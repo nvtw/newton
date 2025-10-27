@@ -4500,19 +4500,26 @@ class ModelBuilder:
         filters: set[tuple[int, int]] = model.shape_collision_filter_pairs
         contact_pairs: list[tuple[int, int]] = []
 
-        # Keep only colliding shapes (those with COLLIDE_SHAPES flag)
+        # Keep only colliding shapes (those with COLLIDE_SHAPES flag) and sort by world for optimization
         colliding_indices = [i for i, flag in enumerate(self.shape_flags) if flag & ShapeFlags.COLLIDE_SHAPES]
+        sorted_indices = sorted(colliding_indices, key=lambda i: self.shape_world[i])
 
         # Iterate over all pairs of colliding shapes
-        for i1 in range(len(colliding_indices)):
-            s1 = colliding_indices[i1]
+        for i1 in range(len(sorted_indices)):
+            s1 = sorted_indices[i1]
             world1 = self.shape_world[s1]
             collision_group1 = self.shape_collision_group[s1]
 
-            for i2 in range(i1 + 1, len(colliding_indices)):
-                s2 = colliding_indices[i2]
+            for i2 in range(i1 + 1, len(sorted_indices)):
+                s2 = sorted_indices[i2]
                 world2 = self.shape_world[s2]
                 collision_group2 = self.shape_collision_group[s2]
+
+                # Early break optimization: if both shapes are in non-global worlds and different worlds,
+                # they can never collide. Since shapes are sorted by world, all remaining shapes will also
+                # be in different worlds, so we can break early.
+                if world1 != -1 and world2 != -1 and world1 != world2:
+                    break
 
                 # Apply the exact same filtering logic as test_world_and_group_pair kernel
                 if not self._test_world_and_group_pair(world1, world2, collision_group1, collision_group2):
