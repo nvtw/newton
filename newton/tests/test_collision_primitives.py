@@ -866,7 +866,7 @@ class TestCollisionPrimitives(unittest.TestCase):
             ([0.0, 0.0, 1.5], sphere_radius, [0.0, 0.0, 0.0], identity, box_size, 0.0),  # Just touching
             ([0.0, 0.0, 1.3], sphere_radius, [0.0, 0.0, 0.0], identity, box_size, -0.2),  # Penetration = 0.2
             # Sphere center inside box
-            ([0.0, 0.0, 0.0], 0.3, [0.0, 0.0, 0.0], identity, box_size, -0.7),  # Inside: -(1.0 - 0.3) = -0.7
+            ([0.0, 0.0, 0.4], 0.3, [0.0, 0.0, 0.0], identity, box_size, -0.9),  # Sphere center inside
         ]
 
         sphere_positions = wp.array([wp.vec3(tc[0][0], tc[0][1], tc[0][2]) for tc in test_cases], dtype=wp.vec3)
