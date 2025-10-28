@@ -21,6 +21,107 @@ import warp as wp
 from newton import geometry
 
 
+def check_normal_direction_sphere_sphere(pos1, pos2, normal, tolerance=1e-5):
+    """Check that normal points from sphere 1 toward sphere 2."""
+    expected_direction = pos2 - pos1
+    expected_direction_norm = np.linalg.norm(expected_direction)
+    if expected_direction_norm > tolerance:
+        expected_direction = expected_direction / expected_direction_norm
+        dot_product = np.dot(normal, expected_direction)
+        return dot_product > (1.0 - tolerance)
+    return True  # Can't determine direction if centers coincide
+
+
+def check_contact_position_midpoint(
+    contact_pos, normal, penetration_depth, pos1, radius1, pos2, radius2, tolerance=0.05
+):
+    """Check that contact position is at the midpoint between the two surfaces.
+
+    For sphere-sphere collision:
+    - Moving from contact_pos by -penetration_depth/2 along normal should reach surface of sphere 1
+    - Moving from contact_pos by +penetration_depth/2 along normal should reach surface of sphere 2
+    """
+    if penetration_depth >= 0:
+        # For separated or just touching cases, position is still at midpoint
+        # but we can't validate surface points the same way
+        return True
+
+    # Point on surface of geom 0 (sphere 1)
+    surface_point_0 = contact_pos - normal * (penetration_depth / 2.0)
+    # Distance from this point to sphere 1 center should equal radius1
+    dist_to_sphere1 = np.linalg.norm(surface_point_0 - pos1)
+
+    # Point on surface of geom 1 (sphere 2)
+    surface_point_1 = contact_pos + normal * (penetration_depth / 2.0)
+    # Distance from this point to sphere 2 center should equal radius2
+    dist_to_sphere2 = np.linalg.norm(surface_point_1 - pos2)
+
+    return abs(dist_to_sphere1 - radius1) < tolerance and abs(dist_to_sphere2 - radius2) < tolerance
+
+
+def distance_point_to_capsule(point, capsule_pos, capsule_axis, capsule_radius, capsule_half_length):
+    """Calculate distance from a point to a capsule surface."""
+    segment = capsule_axis * capsule_half_length
+    start = capsule_pos - segment
+    end = capsule_pos + segment
+
+    # Find closest point on capsule centerline
+    ab = end - start
+    t = np.dot(point - start, ab) / (np.dot(ab, ab) + 1e-6)
+    t = np.clip(t, 0.0, 1.0)
+    closest_on_line = start + t * ab
+
+    # Distance to capsule surface
+    dist_to_centerline = np.linalg.norm(point - closest_on_line)
+    return abs(dist_to_centerline - capsule_radius)
+
+
+def distance_point_to_box(point, box_pos, box_rot, box_size):
+    """Calculate distance from a point to a box surface."""
+    # Transform point to box local coordinates
+    local_point = np.dot(box_rot.T, point - box_pos)
+
+    # Clamp to box bounds
+    clamped = np.clip(local_point, -box_size, box_size)
+
+    # Distance from point to closest point on/in box
+    return np.linalg.norm(local_point - clamped)
+
+
+def distance_point_to_cylinder(point, cylinder_pos, cylinder_axis, cylinder_radius, cylinder_half_height):
+    """Calculate distance from a point to a cylinder surface."""
+    vec = point - cylinder_pos
+    x = np.dot(vec, cylinder_axis)
+
+    # Project onto axis and perpendicular component
+    a_proj = cylinder_axis * x
+    p_proj = vec - a_proj
+    p_proj_dist = np.linalg.norm(p_proj)
+
+    # Check if within cylinder height
+    if abs(x) <= cylinder_half_height:
+        # Side of cylinder
+        if p_proj_dist <= cylinder_radius:
+            # Inside cylinder - distance to nearest surface
+            dist_to_side = abs(cylinder_radius - p_proj_dist)
+            dist_to_cap = cylinder_half_height - abs(x)
+            return min(dist_to_side, dist_to_cap)
+        else:
+            # Outside cylinder radially
+            return p_proj_dist - cylinder_radius
+    else:
+        # Beyond cylinder caps
+        if p_proj_dist <= cylinder_radius:
+            # Above/below cap center
+            return abs(x) - cylinder_half_height
+        else:
+            # Corner region
+            cap_offset = cylinder_axis * (np.sign(x) * cylinder_half_height)
+            p_proj_normalized = (p_proj / p_proj_dist) * cylinder_radius if p_proj_dist > 1e-6 else np.zeros(3)
+            corner_pos = cylinder_pos + cap_offset + p_proj_normalized
+            return np.linalg.norm(point - corner_pos)
+
+
 @wp.kernel
 def test_plane_sphere_kernel(
     plane_normals: wp.array(dtype=wp.vec3),
@@ -371,6 +472,7 @@ class TestCollisionPrimitives(unittest.TestCase):
         wp.synchronize()
 
         distances_np = distances.numpy()
+        positions_np = contact_positions.numpy()
 
         # Verify expected distances with analytical validation
         for i, expected_dist in enumerate([tc[4] for tc in test_cases]):
@@ -379,6 +481,37 @@ class TestCollisionPrimitives(unittest.TestCase):
                 expected_dist,
                 places=5,
                 msg=f"Test case {i}: Expected distance {expected_dist:.4f}, got {distances_np[i]:.4f}",
+            )
+
+        # Check that contact position lies between sphere and plane
+        for i in range(len(test_cases)):
+            if distances_np[i] >= 0:
+                # Skip separated cases
+                continue
+
+            plane_normal = np.array(test_cases[i][0])
+            plane_pos = np.array(test_cases[i][1])
+            sphere_pos = np.array(test_cases[i][2])
+            sphere_radius = test_cases[i][3]
+            contact_pos = positions_np[i]
+
+            # Contact position should be between sphere surface and plane
+            # Distance from contact to sphere center should be less than sphere radius
+            dist_to_sphere_center = np.linalg.norm(contact_pos - sphere_pos)
+            self.assertLess(
+                dist_to_sphere_center,
+                sphere_radius + 0.01,
+                msg=f"Test case {i}: Contact position too far from sphere (dist: {dist_to_sphere_center:.4f})",
+            )
+
+            # Contact position should be on the plane side of the sphere center
+            # (or at most slightly past the plane)
+            dist_contact_to_plane = np.dot(contact_pos - plane_pos, plane_normal)
+            dist_sphere_to_plane = np.dot(sphere_pos - plane_pos, plane_normal)
+            self.assertLessEqual(
+                dist_contact_to_plane,
+                dist_sphere_to_plane + 0.01,
+                msg=f"Test case {i}: Contact position on wrong side of sphere center",
             )
 
     def test_sphere_sphere(self):
@@ -420,6 +553,7 @@ class TestCollisionPrimitives(unittest.TestCase):
 
         distances_np = distances.numpy()
         normals_np = contact_normals.numpy()
+        positions_np = contact_positions.numpy()
 
         # Verify expected distances with analytical validation
         for i, expected_dist in enumerate([tc[4] for tc in test_cases]):
@@ -437,6 +571,31 @@ class TestCollisionPrimitives(unittest.TestCase):
                 self.assertAlmostEqual(
                     normal_length, 1.0, places=5, msg=f"Test case {i}: Normal not unit length: {normal_length:.4f}"
                 )
+
+        # Check that normal points from geom 0 (sphere 1) into geom 1 (sphere 2)
+        for i in range(len(test_cases)):
+            pos1 = np.array(test_cases[i][0])
+            pos2 = np.array(test_cases[i][2])
+            normal = normals_np[i]
+            self.assertTrue(
+                check_normal_direction_sphere_sphere(pos1, pos2, normal),
+                msg=f"Test case {i}: Normal does not point from sphere 1 toward sphere 2",
+            )
+
+        # Check that contact position is at midpoint between surfaces
+        for i in range(len(test_cases)):
+            pos1 = np.array(test_cases[i][0])
+            radius1 = test_cases[i][1]
+            pos2 = np.array(test_cases[i][2])
+            radius2 = test_cases[i][3]
+            contact_pos = positions_np[i]
+            normal = normals_np[i]
+            penetration_depth = distances_np[i]
+
+            self.assertTrue(
+                check_contact_position_midpoint(contact_pos, normal, penetration_depth, pos1, radius1, pos2, radius2),
+                msg=f"Test case {i}: Contact position is not at midpoint between surfaces",
+            )
 
     def test_sphere_capsule(self):
         """Test sphere-capsule collision with analytical penetration depth validation.
@@ -494,6 +653,8 @@ class TestCollisionPrimitives(unittest.TestCase):
         wp.synchronize()
 
         distances_np = distances.numpy()
+        normals_np = contact_normals.numpy()
+        positions_np = contact_positions.numpy()
 
         # Verify expected distances with analytical validation
         tolerance = 0.01  # Small tolerance for numerical precision
@@ -503,6 +664,47 @@ class TestCollisionPrimitives(unittest.TestCase):
                 expected_dist,
                 delta=tolerance,
                 msg=f"Test case {i}: Expected distance {expected_dist:.4f}, got {distances_np[i]:.4f}",
+            )
+
+        # Check that normal points from geom 0 (sphere) into geom 1 (capsule)
+        # and contact position is at midpoint between surfaces
+        for i in range(len(test_cases)):
+            if distances_np[i] >= 0:
+                # Skip separated cases for now
+                continue
+
+            sphere_pos = np.array(test_cases[i][0])
+            sphere_radius = test_cases[i][1]
+            capsule_pos = np.array(test_cases[i][2])
+            capsule_axis = np.array(test_cases[i][3])
+            capsule_radius = test_cases[i][4]
+            capsule_half_length = test_cases[i][5]
+
+            contact_pos = positions_np[i]
+            normal = normals_np[i]
+            penetration_depth = distances_np[i]
+
+            # Check midpoint property: going half penetration depth in each direction should land on surfaces
+            surface_point_0 = contact_pos - normal * (penetration_depth / 2.0)
+            surface_point_1 = contact_pos + normal * (penetration_depth / 2.0)
+
+            # Distance from surface_point_0 to sphere surface should be small
+            dist_to_sphere = abs(np.linalg.norm(surface_point_0 - sphere_pos) - sphere_radius)
+
+            # Distance from surface_point_1 to capsule surface should be small
+            dist_to_capsule = distance_point_to_capsule(
+                surface_point_1, capsule_pos, capsule_axis, capsule_radius, capsule_half_length
+            )
+
+            self.assertLess(
+                dist_to_sphere,
+                0.05,
+                msg=f"Test case {i}: Point at -penetration_depth/2 not on sphere surface (error: {dist_to_sphere:.4f})",
+            )
+            self.assertLess(
+                dist_to_capsule,
+                0.05,
+                msg=f"Test case {i}: Point at +penetration_depth/2 not on capsule surface (error: {dist_to_capsule:.4f})",
             )
 
     def test_capsule_capsule(self):
@@ -636,6 +838,8 @@ class TestCollisionPrimitives(unittest.TestCase):
         wp.synchronize()
 
         distances_np = distances.numpy()
+        normals_np = contact_normals.numpy()
+        positions_np = contact_positions.numpy()
 
         # Verify expected distances with analytical validation
         tolerance = 0.01  # Small tolerance for numerical precision
@@ -645,6 +849,55 @@ class TestCollisionPrimitives(unittest.TestCase):
                 expected_dist,
                 delta=tolerance,
                 msg=f"Test case {i}: Expected distance {expected_dist:.4f}, got {distances_np[i]:.4f}",
+            )
+
+        # Check that contact position is at midpoint between surfaces
+        for i in range(len(test_cases)):
+            if distances_np[i] >= 0:
+                # Skip separated cases for now
+                continue
+
+            cap1_pos = np.array(test_cases[i][0])
+            cap1_axis = np.array(test_cases[i][1])
+            cap1_radius = test_cases[i][2]
+            cap1_half_length = test_cases[i][3]
+            cap2_pos = np.array(test_cases[i][4])
+            cap2_axis = np.array(test_cases[i][5])
+            cap2_radius = test_cases[i][6]
+            cap2_half_length = test_cases[i][7]
+
+            # Skip perpendicular/complex cases where simple midpoint validation doesn't apply
+            axis_alignment = abs(np.dot(cap1_axis, cap2_axis))
+            if axis_alignment < 0.9:  # Not parallel enough
+                continue
+
+            contact_pos = positions_np[i]
+            normal = normals_np[i]
+            penetration_depth = distances_np[i]
+
+            # Check midpoint property: going half penetration depth in each direction should land on surfaces
+            surface_point_0 = contact_pos - normal * (penetration_depth / 2.0)
+            surface_point_1 = contact_pos + normal * (penetration_depth / 2.0)
+
+            # Distance from surface_point_0 to capsule 1 surface should be small
+            dist_to_cap1 = distance_point_to_capsule(
+                surface_point_0, cap1_pos, cap1_axis, cap1_radius, cap1_half_length
+            )
+
+            # Distance from surface_point_1 to capsule 2 surface should be small
+            dist_to_cap2 = distance_point_to_capsule(
+                surface_point_1, cap2_pos, cap2_axis, cap2_radius, cap2_half_length
+            )
+
+            self.assertLess(
+                dist_to_cap1,
+                0.05,
+                msg=f"Test case {i}: Point at -penetration_depth/2 not on capsule 1 surface (error: {dist_to_cap1:.4f})",
+            )
+            self.assertLess(
+                dist_to_cap2,
+                0.05,
+                msg=f"Test case {i}: Point at +penetration_depth/2 not on capsule 2 surface (error: {dist_to_cap2:.4f})",
             )
 
     def test_plane_ellipsoid(self):
@@ -698,6 +951,7 @@ class TestCollisionPrimitives(unittest.TestCase):
         wp.synchronize()
 
         distances_np = distances.numpy()
+        normals_np = contact_normals.numpy()
 
         # Verify expected distances with analytical validation
         tolerance = 0.01
@@ -707,6 +961,18 @@ class TestCollisionPrimitives(unittest.TestCase):
                 expected_dist,
                 delta=tolerance,
                 msg=f"Test case {i}: Expected distance {expected_dist:.4f}, got {distances_np[i]:.4f}",
+            )
+
+        # Check that normal points in correct direction (plane normal direction)
+        for i in range(len(test_cases)):
+            plane_normal = np.array(test_cases[i][0])
+            contact_normal = normals_np[i]
+            # Normal should match plane normal (pointing from plane into ellipsoid)
+            dot_product = np.dot(plane_normal, contact_normal)
+            self.assertGreater(
+                dot_product,
+                0.99,
+                msg=f"Test case {i}: Contact normal doesn't match plane normal (dot product: {dot_product:.4f})",
             )
 
     def test_sphere_cylinder(self):
@@ -828,6 +1094,8 @@ class TestCollisionPrimitives(unittest.TestCase):
         wp.synchronize()
 
         distances_np = distances.numpy()
+        normals_np = contact_normals.numpy()
+        positions_np = contact_positions.numpy()
 
         # Verify expected distances with analytical validation
         tolerance = 0.01  # Small tolerance for numerical precision
@@ -837,6 +1105,46 @@ class TestCollisionPrimitives(unittest.TestCase):
                 expected_dist,
                 delta=tolerance,
                 msg=f"Test case {i}: Expected distance {expected_dist:.4f}, got {distances_np[i]:.4f}",
+            )
+
+        # Check that contact position is at midpoint between surfaces
+        for i in range(len(test_cases)):
+            if distances_np[i] >= 0:
+                # Skip separated cases for now
+                continue
+
+            sphere_pos = np.array(test_cases[i][0])
+            sphere_radius = test_cases[i][1]
+            cylinder_pos = np.array(test_cases[i][2])
+            cylinder_axis = np.array(test_cases[i][3])
+            cylinder_radius = test_cases[i][4]
+            cylinder_half_height = test_cases[i][5]
+
+            contact_pos = positions_np[i]
+            normal = normals_np[i]
+            penetration_depth = distances_np[i]
+
+            # Check midpoint property: going half penetration depth in each direction should land on surfaces
+            surface_point_0 = contact_pos - normal * (penetration_depth / 2.0)
+            surface_point_1 = contact_pos + normal * (penetration_depth / 2.0)
+
+            # Distance from surface_point_0 to sphere surface should be small
+            dist_to_sphere = abs(np.linalg.norm(surface_point_0 - sphere_pos) - sphere_radius)
+
+            # Distance from surface_point_1 to cylinder surface should be small
+            dist_to_cylinder = distance_point_to_cylinder(
+                surface_point_1, cylinder_pos, cylinder_axis, cylinder_radius, cylinder_half_height
+            )
+
+            self.assertLess(
+                dist_to_sphere,
+                0.05,
+                msg=f"Test case {i}: Point at -penetration_depth/2 not on sphere surface (error: {dist_to_sphere:.4f})",
+            )
+            self.assertLess(
+                dist_to_cylinder,
+                0.05,
+                msg=f"Test case {i}: Point at +penetration_depth/2 not on cylinder surface (error: {dist_to_cylinder:.4f})",
             )
 
     def test_sphere_box(self):
@@ -896,6 +1204,8 @@ class TestCollisionPrimitives(unittest.TestCase):
         wp.synchronize()
 
         distances_np = distances.numpy()
+        normals_np = contact_normals.numpy()
+        positions_np = contact_positions.numpy()
 
         # Verify expected distances with analytical validation
         tolerance = 0.01  # Small tolerance for numerical precision
@@ -905,6 +1215,52 @@ class TestCollisionPrimitives(unittest.TestCase):
                 expected_dist,
                 delta=tolerance,
                 msg=f"Test case {i}: Expected distance {expected_dist:.4f}, got {distances_np[i]:.4f}",
+            )
+
+        # Check that normal points from geom 0 (sphere) into geom 1 (box)
+        # and contact position is at midpoint between surfaces
+        for i in range(len(test_cases)):
+            if distances_np[i] >= 0:
+                # Skip separated cases for now
+                continue
+
+            sphere_pos = np.array(test_cases[i][0])
+            sphere_radius = test_cases[i][1]
+            box_pos = np.array(test_cases[i][2])
+            # Convert wp.mat33 to numpy array
+            box_rot_mat = test_cases[i][3]
+            box_rot = np.array(
+                [
+                    [box_rot_mat[0, 0], box_rot_mat[0, 1], box_rot_mat[0, 2]],
+                    [box_rot_mat[1, 0], box_rot_mat[1, 1], box_rot_mat[1, 2]],
+                    [box_rot_mat[2, 0], box_rot_mat[2, 1], box_rot_mat[2, 2]],
+                ]
+            )
+            box_size = np.array(test_cases[i][4])
+
+            contact_pos = positions_np[i]
+            normal = normals_np[i]
+            penetration_depth = distances_np[i]
+
+            # Check midpoint property: going half penetration depth in each direction should land on surfaces
+            surface_point_0 = contact_pos - normal * (penetration_depth / 2.0)
+            surface_point_1 = contact_pos + normal * (penetration_depth / 2.0)
+
+            # Distance from surface_point_0 to sphere surface should be small
+            dist_to_sphere = abs(np.linalg.norm(surface_point_0 - sphere_pos) - sphere_radius)
+
+            # Distance from surface_point_1 to box surface should be small
+            dist_to_box = distance_point_to_box(surface_point_1, box_pos, box_rot, box_size)
+
+            self.assertLess(
+                dist_to_sphere,
+                0.05,
+                msg=f"Test case {i}: Point at -penetration_depth/2 not on sphere surface (error: {dist_to_sphere:.4f})",
+            )
+            self.assertLess(
+                dist_to_box,
+                0.05,
+                msg=f"Test case {i}: Point at +penetration_depth/2 not on box surface (error: {dist_to_box:.4f})",
             )
 
     def test_plane_capsule(self):
@@ -963,6 +1319,7 @@ class TestCollisionPrimitives(unittest.TestCase):
         wp.synchronize()
 
         distances_np = distances.numpy()
+        frames_np = contact_frames.numpy()
 
         # Verify expected distances with analytical validation
         # Capsule generates 2 contacts (one at each end)
@@ -977,6 +1334,19 @@ class TestCollisionPrimitives(unittest.TestCase):
                         delta=tolerance,
                         msg=f"Test case {i}, contact {j}: Expected distance {expected_dist:.4f}, got {distances_np[i][j]:.4f}",
                     )
+
+        # Check that contact frame normal (first row) matches plane normal
+        for i in range(len(test_cases)):
+            plane_normal = np.array(test_cases[i][0])
+            frame = frames_np[i]
+            # Extract first row of contact frame (the normal)
+            contact_normal = np.array([frame[0, 0], frame[0, 1], frame[0, 2]])
+            dot_product = np.dot(plane_normal, contact_normal)
+            self.assertGreater(
+                dot_product,
+                0.99,
+                msg=f"Test case {i}: Contact frame normal doesn't match plane normal (dot product: {dot_product:.4f})",
+            )
 
     def test_plane_box(self):
         """Test plane-box collision with analytical penetration depth validation.
@@ -1034,6 +1404,7 @@ class TestCollisionPrimitives(unittest.TestCase):
         wp.synchronize()
 
         distances_np = distances.numpy()
+        normals_np = contact_normals.numpy()
 
         # Verify contact counts and distances
         tolerance = 0.01
@@ -1058,6 +1429,20 @@ class TestCollisionPrimitives(unittest.TestCase):
                             delta=tolerance,
                             msg=f"Test case {i}, contact {j}: Expected distance {expected_dist:.4f}, got {distances_np[i][j]:.4f}",
                         )
+
+        # Check that contact normal matches plane normal for cases with contacts
+        for i in range(len(test_cases)):
+            if expected_contact_counts[i] == 0:
+                continue
+
+            plane_normal = np.array(test_cases[i][0])
+            contact_normal = normals_np[i]
+            dot_product = np.dot(plane_normal, contact_normal)
+            self.assertGreater(
+                dot_product,
+                0.99,
+                msg=f"Test case {i}: Contact normal doesn't match plane normal (dot product: {dot_product:.4f})",
+            )
 
     def test_plane_cylinder(self):
         """Test plane-cylinder collision with analytical penetration depth validation.
@@ -1116,6 +1501,7 @@ class TestCollisionPrimitives(unittest.TestCase):
         wp.synchronize()
 
         distances_np = distances.numpy()
+        normals_np = contact_normals.numpy()
 
         # Verify minimum distances (closest point between cylinder and plane)
         tolerance = 0.01
@@ -1142,6 +1528,21 @@ class TestCollisionPrimitives(unittest.TestCase):
                     delta=tolerance,
                     msg=f"Test case {i}: Expected min distance {expected_dist:.4f}, got {min_dist:.4f}",
                 )
+
+        # Check that contact normal matches plane normal for cases with contacts
+        for i in range(len(test_cases)):
+            expected_dist = expected_distances[i]
+            if expected_dist > 0.0:  # Skip separated cases
+                continue
+
+            plane_normal = np.array(test_cases[i][0])
+            contact_normal = normals_np[i]
+            dot_product = np.dot(plane_normal, contact_normal)
+            self.assertGreater(
+                dot_product,
+                0.99,
+                msg=f"Test case {i}: Contact normal doesn't match plane normal (dot product: {dot_product:.4f})",
+            )
 
     def test_box_box(self):
         """Test box-box collision."""
@@ -1187,6 +1588,7 @@ class TestCollisionPrimitives(unittest.TestCase):
         wp.synchronize()
 
         distances_np = distances.numpy()
+        normals_np = contact_normals.numpy()
 
         # Count valid contacts for each test case
         for i in range(len(test_cases)):
@@ -1196,6 +1598,36 @@ class TestCollisionPrimitives(unittest.TestCase):
                 self.assertEqual(valid_contacts, 0, msg="Separated boxes should have no contacts")
             elif i == 1:  # Overlapping boxes
                 self.assertGreater(valid_contacts, 0, msg="Overlapping boxes should have contacts")
+
+        # Check that contact normals are unit length and point from box1 into box2
+        for i in range(len(test_cases)):
+            for j in range(8):
+                if distances_np[i][j] == float("inf"):
+                    continue
+
+                # Check normal is unit length
+                normal = normals_np[i][j]
+                normal_length = np.linalg.norm(normal)
+                self.assertAlmostEqual(
+                    normal_length,
+                    1.0,
+                    delta=0.01,
+                    msg=f"Test case {i}, contact {j}: Normal not unit length: {normal_length:.4f}",
+                )
+
+                # For overlapping boxes, normal should point from box1 toward box2
+                if i == 1:
+                    box1_pos = np.array(test_cases[i][0])
+                    box2_pos = np.array(test_cases[i][3])
+                    direction = box2_pos - box1_pos
+                    direction = direction / np.linalg.norm(direction)
+                    # Normal should have positive component in direction from box1 to box2
+                    dot_product = np.dot(normal, direction)
+                    self.assertGreater(
+                        dot_product,
+                        -0.1,  # Allow some tolerance for edge cases
+                        msg=f"Test case {i}, contact {j}: Normal points away from box2 (dot: {dot_product:.4f})",
+                    )
 
     def test_box_box_margin(self):
         """Test box-box collision with margin parameter.
@@ -1294,6 +1726,7 @@ class TestCollisionPrimitives(unittest.TestCase):
         wp.synchronize()
 
         distances_np = distances.numpy()
+        normals_np = contact_normals.numpy()
 
         # Verify expected contact behavior for each test case
         for i in range(len(test_cases)):
@@ -1312,6 +1745,25 @@ class TestCollisionPrimitives(unittest.TestCase):
                     valid_contacts,
                     0,
                     msg=f"Test case {i}: Expected no contacts with margin={margin}, but found {valid_contacts}",
+                )
+
+        # Check that contact normals are unit length for cases with contacts
+        for i in range(len(test_cases)):
+            expect_contacts = test_cases[i][7]
+            if not expect_contacts:
+                continue
+
+            for j in range(8):
+                if distances_np[i][j] == float("inf"):
+                    continue
+
+                normal = normals_np[i][j]
+                normal_length = np.linalg.norm(normal)
+                self.assertAlmostEqual(
+                    normal_length,
+                    1.0,
+                    delta=0.01,
+                    msg=f"Test case {i}, contact {j}: Normal not unit length: {normal_length:.4f}",
                 )
 
     def test_capsule_box(self):
@@ -1379,6 +1831,8 @@ class TestCollisionPrimitives(unittest.TestCase):
         wp.synchronize()
 
         distances_np = distances.numpy()
+        normals_np = contact_normals.numpy()
+        positions_np = contact_positions.numpy()
 
         # Verify expected distances with analytical validation
         tolerance = 0.05  # Slightly larger tolerance for capsule-box collision
@@ -1399,6 +1853,51 @@ class TestCollisionPrimitives(unittest.TestCase):
             else:
                 # Should have contacts for penetrating/touching cases
                 self.fail(f"Test case {i}: Expected contacts but found none")
+
+        # Check midpoint property for penetrating contacts
+        for i in range(len(test_cases)):
+            capsule_pos = np.array(test_cases[i][0])
+            capsule_axis = np.array(test_cases[i][1])
+            capsule_radius = test_cases[i][2]
+            capsule_half_length = test_cases[i][3]
+            box_pos = np.array(test_cases[i][4])
+            box_rot_mat = test_cases[i][5]
+            box_rot = np.array(
+                [
+                    [box_rot_mat[0, 0], box_rot_mat[0, 1], box_rot_mat[0, 2]],
+                    [box_rot_mat[1, 0], box_rot_mat[1, 1], box_rot_mat[1, 2]],
+                    [box_rot_mat[2, 0], box_rot_mat[2, 1], box_rot_mat[2, 2]],
+                ]
+            )
+            box_size = np.array(test_cases[i][6])
+
+            for j in range(2):  # Check up to 2 contacts
+                if distances_np[i][j] == float("inf") or distances_np[i][j] >= 0:
+                    continue
+
+                contact_pos = positions_np[i][j]
+                normal = normals_np[i][j]
+                penetration_depth = distances_np[i][j]
+
+                # Check midpoint property
+                surface_point_0 = contact_pos - normal * (penetration_depth / 2.0)
+                surface_point_1 = contact_pos + normal * (penetration_depth / 2.0)
+
+                dist_to_capsule = distance_point_to_capsule(
+                    surface_point_0, capsule_pos, capsule_axis, capsule_radius, capsule_half_length
+                )
+                dist_to_box = distance_point_to_box(surface_point_1, box_pos, box_rot, box_size)
+
+                self.assertLess(
+                    dist_to_capsule,
+                    0.08,
+                    msg=f"Test case {i}, contact {j}: Point at -penetration_depth/2 not on capsule surface (error: {dist_to_capsule:.4f})",
+                )
+                self.assertLess(
+                    dist_to_box,
+                    0.08,
+                    msg=f"Test case {i}, contact {j}: Point at +penetration_depth/2 not on box surface (error: {dist_to_box:.4f})",
+                )
 
     def test_box_box_penetration_depths(self):
         """Test box-box collision with analytical validation of penetration depths.
@@ -1600,6 +2099,7 @@ class TestCollisionPrimitives(unittest.TestCase):
         wp.synchronize()
 
         distances_np = distances.numpy()
+        normals_np = contact_normals.numpy()
 
         # Validate results
         for i, tc in enumerate(all_test_cases):
@@ -1652,6 +2152,25 @@ class TestCollisionPrimitives(unittest.TestCase):
                     len(valid_contacts),
                     0,
                     msg=f"Test case {i}: Expected no contacts but found {len(valid_contacts)}",
+                )
+
+        # Check that contact normals are unit length for penetrating cases
+        for i, tc in enumerate(all_test_cases):
+            expected_penetration = tc[6]
+            if expected_penetration >= 0:
+                continue
+
+            for j in range(8):
+                if distances_np[i][j] == float("inf"):
+                    continue
+
+                normal = normals_np[i][j]
+                normal_length = np.linalg.norm(normal)
+                self.assertAlmostEqual(
+                    normal_length,
+                    1.0,
+                    delta=0.01,
+                    msg=f"Test case {i}, contact {j}: Normal not unit length: {normal_length:.4f}",
                 )
 
 
