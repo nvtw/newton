@@ -821,7 +821,7 @@ def collide_box_box(
                 points[n] = points[i]
 
             points[n, 2] *= 0.5
-            depth[n] = points[n, 2]
+            depth[n] = points[n, 2] * 2.0
             n += 1
 
         # Set up contact frame
