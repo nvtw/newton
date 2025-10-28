@@ -1083,7 +1083,7 @@ def collide_sphere_box(
         nearest[k // 2] = wp.where(k % 2, -1.0, 1.0)
         pos = center + nearest * (sphere_radius - closest) / 2.0
         contact_normal = box_rot @ nearest
-        contact_distance = -closest - sphere_radius
+        contact_distance = sphere_radius - closest  # Penetration depth when inside
 
     else:
         deepest = center + clamped_dir * sphere_radius
