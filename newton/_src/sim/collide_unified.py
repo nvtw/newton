@@ -21,6 +21,7 @@ from enum import IntEnum
 import warp as wp
 
 from ..core.types import Devicelike
+from ..geometry.broad_phase_common import binary_search
 from ..geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from ..geometry.broad_phase_sap import BroadPhaseSAP
 from ..geometry.collision_convex import create_solve_convex_multi_contact, create_solve_convex_single_contact
@@ -178,9 +179,9 @@ def convert_infinite_plane_to_cube(
     Convert an infinite plane into a cube proxy for GJK/MPR collision detection.
 
     Since GJK/MPR cannot handle infinite planes, we create a finite cube where:
-    - The cube is positioned at the plane surface, directly under/over the other object
+    - The cube is positioned with its top face at the plane surface
     - The cube's lateral dimensions are sized based on the other object's bounding sphere
-    - The cube extends 'downward' from the plane (in -Z direction in plane's local frame)
+    - The cube extends only 'downward' from the plane (half-space in -Z direction in plane's local frame)
 
     Args:
         shape_data: The plane's shape data (should have shape_type == GeoType.PLANE)
@@ -203,7 +204,7 @@ def convert_infinite_plane_to_cube(
     lateral_size = other_radius * 10.0
 
     # The depth (z) should be large enough to encompass the potential collision region
-    # Make it extend from above the plane surface to well below
+    # Half-space behavior: cube extends only below the plane surface (negative Z)
     depth = other_radius * 10.0
 
     # Set the box half-extents
@@ -684,6 +685,8 @@ def check_infinite_plane_bsphere_overlap(
 ) -> bool:
     """
     Check if an infinite plane overlaps with another shape's bounding sphere.
+    Treats the plane as a half-space: objects on or below the plane (negative side of the normal)
+    are considered to overlap and will generate contacts.
     Returns True if they overlap, False otherwise.
     Uses data already extracted by extract_shape_data.
     """
@@ -715,11 +718,12 @@ def check_infinite_plane_bsphere_overlap(
     # Compute plane normal (plane's local +Z axis in world space)
     plane_normal = wp.quat_rotate(plane_quat, wp.vec3(0.0, 0.0, 1.0))
 
-    # Distance from sphere center to plane
+    # Distance from sphere center to plane (positive = above plane, negative = below plane)
     center_dist = wp.dot(other_center - plane_pos, plane_normal)
 
-    # Sphere intersects plane if center distance is within radius
-    return wp.abs(center_dist) <= other_radius
+    # Treat plane as a half-space: objects on or below the plane (negative side) generate contacts
+    # Remove absolute value to only check penetration side
+    return center_dist <= other_radius
 
 
 @wp.kernel(enable_backward=False)
@@ -832,6 +836,17 @@ def build_contacts_kernel_gjk_mpr(
             shape_source_ptr,
         )
 
+        # Check if shapes are infinite planes (scale.x == 0 and scale.y == 0)
+        is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (
+            shape_data_a.scale[0] == 0.0 and shape_data_a.scale[1] == 0.0
+        )
+        is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (
+            shape_data_b.scale[0] == 0.0 and shape_data_b.scale[1] == 0.0
+        )
+
+        if is_infinite_plane_a and is_infinite_plane_b:
+            continue
+
         # Compute bounding spheres from AABBs instead of using mesh bounding spheres
         bsphere_center_a, bsphere_radius_a = compute_bounding_sphere_from_aabb(aabb_a_lower, aabb_a_upper)
         bsphere_center_b, bsphere_radius_b = compute_bounding_sphere_from_aabb(aabb_b_lower, aabb_b_upper)
@@ -885,14 +900,6 @@ def build_contacts_kernel_gjk_mpr(
         # Get body indices
         rigid_a = shape_body[shape_a]
         rigid_b = shape_body[shape_b]
-
-        # Check if shapes are infinite planes (scale.x == 0 and scale.y == 0)
-        is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (
-            shape_data_a.scale[0] == 0.0 and shape_data_a.scale[1] == 0.0
-        )
-        is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (
-            shape_data_b.scale[0] == 0.0 and shape_data_b.scale[1] == 0.0
-        )
 
         # World->body transforms for writing contact points
         X_bw_a = wp.transform_identity() if rigid_a == -1 else wp.transform_inverse(body_q[rigid_a])
@@ -1109,28 +1116,9 @@ def find_pair_from_cumulative_index(
     Returns:
         Tuple of (pair_index, local_index_within_pair)
     """
-    # Binary search to find which pair this global index belongs to
-    # cumulative_sums[i] stores the inclusive end (cumulative sum after adding this pair's count)
-    left = int(0)
-    right = int(num_pairs - 1)
-    pair_idx = int(0)
-
-    while left <= right:
-        mid = int((left + right) // 2)
-        cumulative_end = int(cumulative_sums[mid])
-
-        # Get cumulative start (exclusive end of previous pair, or 0 for first pair)
-        cumulative_start = int(0)
-        if mid > 0:
-            cumulative_start = int(cumulative_sums[mid - 1])
-
-        if global_idx >= cumulative_start and global_idx < cumulative_end:
-            pair_idx = mid
-            break
-        elif global_idx < cumulative_start:
-            right = mid - 1
-        else:
-            left = mid + 1
+    # Use binary_search to find first index where cumulative_sums[i] > global_idx
+    # This gives us the bucket that contains global_idx
+    pair_idx = binary_search(cumulative_sums, global_idx, 0, num_pairs)
 
     # Get cumulative start for this pair to calculate local index
     cumulative_start = int(0)
@@ -1396,9 +1384,9 @@ def process_mesh_plane_contacts_kernel(
         thickness_plane = shape_thickness[plane_shape]
         total_thickness = thickness_mesh + thickness_plane
 
-        # Only generate contact if distance is less than margin (including negative for penetration)
-        # Ignore extreme penetrations (mesh far below plane)
-        if distance < rigid_contact_margin + total_thickness and distance > -rigid_contact_margin:
+        # Treat plane as a half-space: generate contact for all vertices on or below the plane
+        # (distance < margin means vertex is close to or penetrating the plane)
+        if distance < rigid_contact_margin + total_thickness:
             # Get inverse transforms for body-local contact points
             X_mesh_bw = wp.transform_identity() if mesh_body_idx == -1 else wp.transform_inverse(body_q[mesh_body_idx])
             X_plane_bw = (
