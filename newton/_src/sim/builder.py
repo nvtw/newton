@@ -53,7 +53,6 @@ from ..geometry import (
     compute_shape_radius,
     transform_inertia,
 )
-from ..geometry.broad_phase_common import test_world_and_group_pair
 from ..geometry.inertia import validate_and_correct_inertia_kernel, verify_and_correct_inertia
 from ..geometry.utils import RemeshingMethod, compute_inertia_obb, remesh_mesh
 from ..utils import compute_world_offsets
@@ -4841,6 +4840,49 @@ class ModelBuilder:
 
             return m
 
+    def _test_group_pair(self, group_a: int, group_b: int) -> bool:
+        """Test if two collision groups should interact.
+
+        This matches the exact logic from broad_phase_common.test_group_pair kernel function.
+
+        Args:
+            group_a: First collision group ID
+            group_b: Second collision group ID
+
+        Returns:
+            bool: True if the groups should collide, False otherwise
+        """
+        if group_a == 0 or group_b == 0:
+            return False
+        if group_a > 0:
+            return group_a == group_b or group_b < 0
+        if group_a < 0:
+            return group_a != group_b
+        return False
+
+    def _test_world_and_group_pair(
+        self, world_a: int, world_b: int, collision_group_a: int, collision_group_b: int
+    ) -> bool:
+        """Test if two entities should collide based on world indices and collision groups.
+
+        This matches the exact logic from broad_phase_common.test_world_and_group_pair kernel function.
+
+        Args:
+            world_a: World index of first entity
+            world_b: World index of second entity
+            collision_group_a: Collision group of first entity
+            collision_group_b: Collision group of second entity
+
+        Returns:
+            bool: True if the entities should collide, False otherwise
+        """
+        # Check world indices first
+        if world_a != -1 and world_b != -1 and world_a != world_b:
+            return False
+
+        # If same world or at least one is global (-1), check collision groups
+        return self._test_group_pair(collision_group_a, collision_group_b)
+
     def find_shape_contact_pairs(self, model: Model):
         """
         Identifies and stores all potential shape contact pairs for collision detection.
@@ -4886,7 +4928,7 @@ class ModelBuilder:
                     break
 
                 # Apply the exact same filtering logic as test_world_and_group_pair kernel
-                if not test_world_and_group_pair(world1, world2, collision_group1, collision_group2):
+                if not self._test_world_and_group_pair(world1, world2, collision_group1, collision_group2):
                     continue
 
                 # Ensure canonical order (smaller_element, larger_element)
