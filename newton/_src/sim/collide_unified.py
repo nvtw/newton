@@ -334,7 +334,6 @@ def compute_gjk_mpr_contacts(
             0.0,  # sum_of_contact_offsets - gap
             data_provider,
             rigid_contact_margin + radius_eff_a + radius_eff_b,
-            type_a == int(GeoType.SPHERE) or type_b == int(GeoType.SPHERE),
         )
 
     # Special post processing for minkowski objects

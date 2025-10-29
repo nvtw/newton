@@ -205,7 +205,6 @@ def create_solve_convex_single_contact(support_func: Any):
         sum_of_contact_offsets: float,
         data_provider: Any,
         contact_threshold: float = 0.0,
-        skip_multi_contact: bool = False,
     ) -> tuple[
         int,
         wp.vec3,
