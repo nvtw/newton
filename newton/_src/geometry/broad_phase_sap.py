@@ -412,7 +412,9 @@ class BroadPhaseSAP:
         index_map_np, slice_ends_np = precompute_world_map(geom_shape_world_np, geom_flags_np)
 
         # Calculate number of regular worlds (excluding dedicated -1 segment at end)
-        num_regular_worlds = len(np.unique(geom_shape_world_np[geom_shape_world_np >= 0]))
+        # Must be derived from filtered slices since precompute_world_map applies flags
+        # slice_ends_np has length (num_filtered_worlds + 1), where +1 is the dedicated -1 segment
+        num_regular_worlds = max(0, len(slice_ends_np) - 1)
 
         # Store as warp arrays
         self.world_index_map = wp.array(index_map_np, dtype=wp.int32, device=device)

@@ -240,7 +240,9 @@ class BroadPhaseAllPairs:
         index_map_np, slice_ends_np = precompute_world_map(geom_world_np, geom_flags_np)
 
         # Calculate number of regular worlds (excluding dedicated -1 segment at end)
-        num_regular_worlds = len(np.unique(geom_world_np[geom_world_np >= 0]))
+        # Must be derived from filtered slices since precompute_world_map applies flags
+        # slice_ends_np has length (num_filtered_worlds + 1), where +1 is the dedicated -1 segment
+        num_regular_worlds = max(0, len(slice_ends_np) - 1)
 
         # Calculate cumulative sum of lower triangular elements per world
         # For each world, compute n*(n-1)/2 where n is the number of geometries in that world
