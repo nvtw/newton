@@ -114,8 +114,8 @@ def write_contact_simple(
         # Contact position is the center point
         contact_position[index] = contact_point_center
 
-        # Normal pointing from shape A to shape B (negated to match convention)
-        contact_normal[index] = -contact_normal_a_to_b
+        # Normal pointing from shape A to shape B
+        contact_normal[index] = contact_normal_a_to_b
 
         # Penetration depth (negative if penetrating)
         contact_penetration[index] = d
@@ -123,7 +123,7 @@ def write_contact_simple(
         # Compute tangent vector (x-axis of local contact frame)
         # Use perpendicular to normal, defaulting to world x-axis if normal is parallel
         world_x = wp.vec3(1.0, 0.0, 0.0)
-        normal = contact_normal[index]
+        normal = contact_normal_a_to_b
         if wp.abs(wp.dot(normal, world_x)) > 0.99:
             world_x = wp.vec3(0.0, 1.0, 0.0)
         contact_tangent[index] = wp.normalize(world_x - wp.dot(world_x, normal) * normal)
@@ -693,16 +693,16 @@ class NarrowPhase:
         geom_transform: wp.array(dtype=wp.transform, ndim=1),  # In world space
         geom_source: wp.array(dtype=wp.uint64, ndim=1),  # The index into the source array, type define by geom_types
         geom_cutoff: wp.array(dtype=wp.float32, ndim=1),  # per-geom (take the max)
-    # Outputs
+        # Outputs
         contact_pair: wp.array(dtype=wp.vec2i),
-    contact_position: wp.array(dtype=wp.vec3),
+        contact_position: wp.array(dtype=wp.vec3),
         contact_normal: wp.array(
             dtype=wp.vec3
         ),  # Pointing from pairId.x to pairId.y, represents z axis of local contact frame
         contact_penetration: wp.array(dtype=float),  # negative if bodies overlap
         contact_tangent: wp.array(dtype=wp.vec3),  # Represents x axis of local contact frame
         contact_count: wp.array(dtype=int),  # Number of active contacts after narrow
-    device=None,  # Device to launch on
+        device=None,  # Device to launch on
         rigid_contact_margin: float = 0.01,  # Contact margin for rigid bodies
     ):
         """
