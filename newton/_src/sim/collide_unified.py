@@ -21,7 +21,6 @@ from enum import IntEnum
 import warp as wp
 
 from ..core.types import Devicelike
-from ..geometry.broad_phase_common import binary_search
 from ..geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from ..geometry.broad_phase_sap import BroadPhaseSAP
 from ..geometry.collision_core import (
@@ -29,12 +28,13 @@ from ..geometry.collision_core import (
     compute_gjk_mpr_contacts,
     compute_tight_aabb_from_support,
     find_contacts,
+    find_pair_from_cumulative_index,
+    get_triangle_shape_from_mesh,
     mesh_vs_convex_midphase,
     pre_contact_check,
 )
 from ..geometry.support_function import (
     GenericShapeData,
-    GeoTypeEx,
     SupportMapDataProvider,
     pack_mesh_ptr,
 )
@@ -474,37 +474,6 @@ def find_mesh_triangle_overlaps_kernel(
         )
 
 
-@wp.func
-def find_pair_from_cumulative_index(
-    global_idx: int,
-    cumulative_sums: wp.array(dtype=int),
-    num_pairs: int,
-) -> tuple[int, int]:
-    """
-    Binary search to find which pair a global index belongs to.
-
-    Args:
-        global_idx: Global index to search for
-        cumulative_sums: Array of inclusive cumulative sums (end indices)
-        num_pairs: Number of pairs
-
-    Returns:
-        Tuple of (pair_index, local_index_within_pair)
-    """
-    # Use binary_search to find first index where cumulative_sums[i] > global_idx
-    # This gives us the bucket that contains global_idx
-    pair_idx = binary_search(cumulative_sums, global_idx, 0, num_pairs)
-
-    # Get cumulative start for this pair to calculate local index
-    cumulative_start = int(0)
-    if pair_idx > 0:
-        cumulative_start = int(cumulative_sums[pair_idx - 1])
-
-    local_idx = global_idx - cumulative_start
-
-    return pair_idx, local_idx
-
-
 @wp.kernel(enable_backward=False)
 def process_mesh_triangle_contacts_kernel(
     body_q: wp.array(dtype=wp.transform),
@@ -554,7 +523,6 @@ def process_mesh_triangle_contacts_kernel(
         if mesh_id_a == wp.uint64(0):
             continue
 
-        mesh_a = wp.mesh_get(mesh_id_a)
         mesh_scale_a = shape_scale[shape_a]
 
         # Get mesh world transform for shape A
@@ -563,33 +531,8 @@ def process_mesh_triangle_contacts_kernel(
         if mesh_body_idx_a >= 0:
             X_mesh_ws_a = wp.transform_multiply(body_q[mesh_body_idx_a], shape_transform[shape_a])
 
-        # Extract triangle vertices from mesh (indices are stored as flat array: i0, i1, i2, i0, i1, i2, ...)
-        idx0 = mesh_a.indices[tri_idx * 3 + 0]
-        idx1 = mesh_a.indices[tri_idx * 3 + 1]
-        idx2 = mesh_a.indices[tri_idx * 3 + 2]
-
-        # Get vertex positions in mesh local space (with scale applied)
-        v0_local = wp.cw_mul(mesh_a.points[idx0], mesh_scale_a)
-        v1_local = wp.cw_mul(mesh_a.points[idx1], mesh_scale_a)
-        v2_local = wp.cw_mul(mesh_a.points[idx2], mesh_scale_a)
-
-        # Transform vertices to world space
-        v0_world = wp.transform_point(X_mesh_ws_a, v0_local)
-        v1_world = wp.transform_point(X_mesh_ws_a, v1_local)
-        v2_world = wp.transform_point(X_mesh_ws_a, v2_local)
-
-        # Compute triangle centroid as position for shape A
-        pos_a = (v0_world + v1_world + v2_world) / 3.0
-        quat_a = wp.quat_identity()  # Triangle has no orientation, use identity
-
-        # Create triangle shape data: vertex A at origin, B-A in scale, C-A in auxiliary
-        shape_data_a = GenericShapeData()
-        shape_data_a.shape_type = int(GeoTypeEx.TRIANGLE)
-        shape_data_a.scale = v1_world - v0_world  # B - A
-        shape_data_a.auxiliary = v2_world - v0_world  # C - A
-
-        # Override pos_a to be vertex A (origin of triangle in local frame)
-        pos_a = v0_world
+        # Extract triangle shape data from mesh
+        shape_data_a, v0_world = get_triangle_shape_from_mesh(mesh_id_a, mesh_scale_a, X_mesh_ws_a, tri_idx)
 
         # Extract shape B data
         pos_b, quat_b, shape_data_b = extract_shape_data(
@@ -602,6 +545,21 @@ def process_mesh_triangle_contacts_kernel(
             shape_source_ptr,
         )
 
+        # Set pos_a to be vertex A (origin of triangle in local frame)
+        pos_a = v0_world
+        quat_a = wp.quat_identity()  # Triangle has no orientation, use identity
+
+        # Compute contacts using GJK/MPR
+        count, normal, signed_distances, points, radius_eff_a, radius_eff_b = compute_gjk_mpr_contacts(
+            shape_data_a,
+            shape_data_b,
+            quat_a,
+            quat_b,
+            pos_a,
+            pos_b,
+            rigid_contact_margin,
+        )
+
         # Get body inverse transforms for contact point conversion
         mesh_body_idx_a = shape_body[shape_a]
         X_bw_a = wp.transform_identity()
@@ -612,19 +570,6 @@ def process_mesh_triangle_contacts_kernel(
         X_bw_b = wp.transform_identity()
         if body_idx_b >= 0:
             X_bw_b = wp.transform_inverse(body_q[body_idx_b])
-
-        # Compute contacts using GJK/MPR
-        # Note: shape_data_a already has shape_type set to TRIANGLE
-        # Note: shape_data_b already has shape_type from extract_shape_data
-        count, normal, signed_distances, points, radius_eff_a, radius_eff_b = compute_gjk_mpr_contacts(
-            shape_data_a,
-            shape_data_b,
-            quat_a,
-            quat_b,
-            pos_a,
-            pos_b,
-            rigid_contact_margin,
-        )
 
         # Write contacts
         for contact_id in range(count):

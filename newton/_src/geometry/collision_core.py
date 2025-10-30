@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import warp as wp
 
+from .broad_phase_common import binary_search
 from .collision_convex import create_solve_convex_multi_contact, create_solve_convex_single_contact
 from .support_function import GenericShapeData, GeoTypeEx, SupportMapDataProvider, pack_mesh_ptr, support_map
 from .types import GeoType
@@ -844,3 +845,89 @@ def mesh_vs_convex_midphase(
                 out_idx = wp.atomic_add(triangle_pairs_count, 0, 1)
                 if out_idx < triangle_pairs.shape[0]:
                     triangle_pairs[out_idx] = wp.vec3i(mesh_shape, non_mesh_shape, tri_index)
+
+
+@wp.func
+def find_pair_from_cumulative_index(
+    global_idx: int,
+    cumulative_sums: wp.array(dtype=int),
+    num_pairs: int,
+) -> tuple[int, int]:
+    """
+    Binary search to find which pair a global index belongs to.
+
+    This function is useful for mapping a flat global index to a (pair_index, local_index)
+    tuple when work is distributed across multiple pairs with varying sizes.
+
+    Args:
+        global_idx: Global index to search for
+        cumulative_sums: Array of inclusive cumulative sums (end indices for each pair)
+        num_pairs: Number of pairs
+
+    Returns:
+        Tuple of (pair_index, local_index_within_pair)
+    """
+    # Use binary_search to find first index where cumulative_sums[i] > global_idx
+    # This gives us the bucket that contains global_idx
+    pair_idx = binary_search(cumulative_sums, global_idx, 0, num_pairs)
+
+    # Get cumulative start for this pair to calculate local index
+    cumulative_start = int(0)
+    if pair_idx > 0:
+        cumulative_start = int(cumulative_sums[pair_idx - 1])
+
+    local_idx = global_idx - cumulative_start
+
+    return pair_idx, local_idx
+
+
+@wp.func
+def get_triangle_shape_from_mesh(
+    mesh_id: wp.uint64,
+    mesh_scale: wp.vec3,
+    X_mesh_ws: wp.transform,
+    tri_idx: int,
+) -> tuple[GenericShapeData, wp.vec3]:
+    """
+    Extract triangle shape data from a mesh.
+
+    This function retrieves a specific triangle from a mesh and creates a GenericShapeData
+    structure for collision detection. The triangle is represented in world space with
+    vertex A as the origin.
+
+    Args:
+        mesh_id: The mesh ID (use wp.mesh_get to retrieve the mesh object)
+        mesh_scale: Scale to apply to mesh vertices
+        X_mesh_ws: Mesh world-space transform
+        tri_idx: Triangle index in the mesh
+
+    Returns:
+        Tuple of (shape_data, v0_world) where:
+        - shape_data: GenericShapeData with triangle geometry (type=TRIANGLE, scale=B-A, auxiliary=C-A)
+        - v0_world: First vertex position in world space (used as triangle origin)
+    """
+    # Get the mesh object from the ID
+    mesh = wp.mesh_get(mesh_id)
+
+    # Extract triangle vertices from mesh (indices are stored as flat array: i0, i1, i2, i0, i1, i2, ...)
+    idx0 = mesh.indices[tri_idx * 3 + 0]
+    idx1 = mesh.indices[tri_idx * 3 + 1]
+    idx2 = mesh.indices[tri_idx * 3 + 2]
+
+    # Get vertex positions in mesh local space (with scale applied)
+    v0_local = wp.cw_mul(mesh.points[idx0], mesh_scale)
+    v1_local = wp.cw_mul(mesh.points[idx1], mesh_scale)
+    v2_local = wp.cw_mul(mesh.points[idx2], mesh_scale)
+
+    # Transform vertices to world space
+    v0_world = wp.transform_point(X_mesh_ws, v0_local)
+    v1_world = wp.transform_point(X_mesh_ws, v1_local)
+    v2_world = wp.transform_point(X_mesh_ws, v2_local)
+
+    # Create triangle shape data: vertex A at origin, B-A in scale, C-A in auxiliary
+    shape_data = GenericShapeData()
+    shape_data.shape_type = int(GeoTypeEx.TRIANGLE)
+    shape_data.scale = v1_world - v0_world  # B - A
+    shape_data.auxiliary = v2_world - v0_world  # C - A
+
+    return shape_data, v0_world
