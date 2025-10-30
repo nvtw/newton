@@ -23,7 +23,6 @@ Supports creating grids of terrain blocks with different procedural patterns.
 import numpy as np
 import trimesh
 
-
 # ============================================================================
 # Primitive Terrain Functions
 # ============================================================================
@@ -105,10 +104,10 @@ def random_grid_terrain(size, grid_width=0.5, grid_height_range=(-0.15, 0.15), p
     vertex_count = 0
 
     for ix in range(num_boxes_x):
-        for iy in range(num_boxes_y):
+        for it in range(num_boxes_y):
             # Position grid cells starting from (0, 0) with proper alignment
             x = ix * grid_width + grid_width / 2
-            y = iy * grid_width + grid_width / 2
+            y = it * grid_width + grid_width / 2
             h_noise = rng.uniform(*grid_height_range)
 
             # Offset vertices (trimesh box is centered at origin)
