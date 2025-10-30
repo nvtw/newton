@@ -18,11 +18,14 @@ from __future__ import annotations
 import warp as wp
 
 from .collision_convex import create_solve_convex_multi_contact, create_solve_convex_single_contact
-from .support_function import GenericShapeData, GeoTypeEx, SupportMapDataProvider, support_map
+from .support_function import GenericShapeData, GeoTypeEx, SupportMapDataProvider, pack_mesh_ptr, support_map
 from .types import GeoType
 
 # Configuration flag for multi-contact generation
 ENABLE_MULTI_CONTACT = True
+
+# Configuration flag for tiled BVH queries (experimental)
+ENABLE_TILE_BVH_QUERY = False
 
 # Pre-create the convex contact solvers (usable inside kernels)
 solve_convex_multi_contact = create_solve_convex_multi_contact(support_map)
@@ -734,3 +737,103 @@ def pre_contact_check(
         return True, is_infinite_plane_a, is_infinite_plane_b, bsphere_radius_a, bsphere_radius_b
 
     return False, is_infinite_plane_a, is_infinite_plane_b, bsphere_radius_a, bsphere_radius_b
+
+
+@wp.func
+def mesh_vs_convex_midphase(
+    mesh_shape: int,
+    non_mesh_shape: int,
+    X_mesh_ws: wp.transform,
+    X_ws: wp.transform,
+    mesh_id: wp.uint64,
+    shape_type: wp.array(dtype=int),
+    shape_scale: wp.array(dtype=wp.vec3),
+    shape_source_ptr: wp.array(dtype=wp.uint64),
+    rigid_contact_margin: float,
+    triangle_pairs: wp.array(dtype=wp.vec3i),
+    triangle_pairs_count: wp.array(dtype=int),
+):
+    """
+    Perform mesh vs convex shape midphase collision detection.
+
+    This function finds all mesh triangles that overlap with the convex shape's AABB
+    by querying the mesh BVH. The results are output as triangle pairs for further
+    narrow-phase collision detection.
+
+    Args:
+        mesh_shape: Index of the mesh shape
+        non_mesh_shape: Index of the non-mesh (convex) shape
+        X_mesh_ws: Mesh world-space transform
+        X_ws: Non-mesh shape world-space transform
+        mesh_id: Mesh BVH ID
+        shape_type: Array of shape types
+        shape_scale: Array of shape scales
+        shape_source_ptr: Array of mesh/SDF source pointers
+        rigid_contact_margin: Contact margin for rigid bodies
+        triangle_pairs: Output array for triangle pairs (mesh_shape, non_mesh_shape, tri_index)
+        triangle_pairs_count: Counter for triangle pairs
+    """
+    # Get inverse mesh transform (world to mesh local space)
+    X_mesh_sw = wp.transform_inverse(X_mesh_ws)
+
+    # Compute transform from non-mesh shape local space to mesh local space
+    # X_mesh_shape = X_mesh_sw * X_ws
+    X_mesh_shape = wp.transform_multiply(X_mesh_sw, X_ws)
+    pos_in_mesh = wp.transform_get_translation(X_mesh_shape)
+    orientation_in_mesh = wp.transform_get_rotation(X_mesh_shape)
+
+    # Create generic shape data for non-mesh shape
+    geo_type = shape_type[non_mesh_shape]
+    scale = shape_scale[non_mesh_shape]
+
+    shape_data = GenericShapeData()
+    shape_data.shape_type = geo_type
+    shape_data.scale = scale
+    shape_data.auxiliary = wp.vec3(0.0, 0.0, 0.0)
+
+    # For CONVEX_MESH, pack the mesh pointer
+    if geo_type == int(GeoType.CONVEX_MESH):
+        shape_data.auxiliary = pack_mesh_ptr(shape_source_ptr[non_mesh_shape])
+
+    data_provider = SupportMapDataProvider()
+
+    # Compute tight AABB directly in mesh local space for optimal fit
+    aabb_lower, aabb_upper = compute_tight_aabb_from_support(
+        shape_data, orientation_in_mesh, pos_in_mesh, data_provider
+    )
+
+    # Add small margin for contact detection
+    margin_vec = wp.vec3(rigid_contact_margin, rigid_contact_margin, rigid_contact_margin)
+    aabb_lower = aabb_lower - margin_vec
+    aabb_upper = aabb_upper + margin_vec
+
+    if wp.static(ENABLE_TILE_BVH_QUERY):
+        # Query mesh BVH for overlapping triangles in mesh local space using tiled version
+        query = wp.tile_mesh_query_aabb(mesh_id, aabb_lower, aabb_upper)
+
+        result_tile = wp.tile_mesh_query_aabb_next(query)
+
+        # Continue querying while we have results
+        # Each iteration, each thread in the block gets one result (or -1)
+        while wp.tile_max(result_tile)[0] >= 0:
+            # Each thread processes its result from the tile
+            tri_index = wp.untile(result_tile)
+
+            # Add this triangle pair to the output buffer if valid
+            # Store (mesh_shape, non_mesh_shape, tri_index) to guarantee mesh is always first
+            if tri_index >= 0:
+                out_idx = wp.atomic_add(triangle_pairs_count, 0, 1)
+                if out_idx < triangle_pairs.shape[0]:
+                    triangle_pairs[out_idx] = wp.vec3i(mesh_shape, non_mesh_shape, tri_index)
+
+            result_tile = wp.tile_mesh_query_aabb_next(query)
+    else:
+        query = wp.mesh_query_aabb(mesh_id, aabb_lower, aabb_upper)
+        tri_index = wp.int32(0)
+        while wp.mesh_query_aabb_next(query, tri_index):
+            # Add this triangle pair to the output buffer if valid
+            # Store (mesh_shape, non_mesh_shape, tri_index) to guarantee mesh is always first
+            if tri_index >= 0:
+                out_idx = wp.atomic_add(triangle_pairs_count, 0, 1)
+                if out_idx < triangle_pairs.shape[0]:
+                    triangle_pairs[out_idx] = wp.vec3i(mesh_shape, non_mesh_shape, tri_index)
