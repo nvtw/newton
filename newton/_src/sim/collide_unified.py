@@ -206,6 +206,197 @@ def extract_shape_data(
     return position, orientation, result
 
 
+@wp.func
+def find_contacts(
+    pos_a: wp.vec3,
+    pos_b: wp.vec3,
+    quat_a: wp.quat,
+    quat_b: wp.quat,
+    shape_data_a: GenericShapeData,
+    shape_data_b: GenericShapeData,
+    is_infinite_plane_a: bool,
+    is_infinite_plane_b: bool,
+    bsphere_radius_a: float,
+    bsphere_radius_b: float,
+    rigid_contact_margin: float,
+):
+    """
+    Find contacts between two shapes using GJK/MPR algorithm.
+
+    Args:
+        pos_a: Position of shape A in world space
+        pos_b: Position of shape B in world space
+        quat_a: Orientation of shape A
+        quat_b: Orientation of shape B
+        shape_data_a: Generic shape data for shape A (contains shape_type)
+        shape_data_b: Generic shape data for shape B (contains shape_type)
+        is_infinite_plane_a: Whether shape A is an infinite plane
+        is_infinite_plane_b: Whether shape B is an infinite plane
+        bsphere_radius_a: Bounding sphere radius of shape A
+        bsphere_radius_b: Bounding sphere radius of shape B
+        rigid_contact_margin: Contact margin for rigid bodies
+
+    Returns:
+        Tuple of (count, normal, signed_distances, points, radius_eff_a, radius_eff_b)
+    """
+    # Convert infinite planes to cube proxies for GJK/MPR compatibility
+    # Use the OTHER object's radius to properly size the cube
+    # Only convert if it's an infinite plane (finite planes can be handled normally)
+    pos_a_adjusted = pos_a
+    type_a = shape_data_a.shape_type
+    if is_infinite_plane_a:
+        # Position the cube based on the OTHER object's position (pos_b)
+        shape_data_a, pos_a_adjusted = convert_infinite_plane_to_cube(
+            shape_data_a, quat_a, pos_a, pos_b, bsphere_radius_b + rigid_contact_margin
+        )
+        type_a = int(GeoType.BOX)
+
+    pos_b_adjusted = pos_b
+    type_b = shape_data_b.shape_type
+    if is_infinite_plane_b:
+        # Position the cube based on the OTHER object's position (pos_a)
+        shape_data_b, pos_b_adjusted = convert_infinite_plane_to_cube(
+            shape_data_b, quat_b, pos_b, pos_a, bsphere_radius_a + rigid_contact_margin
+        )
+        type_b = int(GeoType.BOX)
+
+    # Compute contacts using GJK/MPR
+    count, normal, signed_distances, points, radius_eff_a, radius_eff_b = compute_gjk_mpr_contacts(
+        shape_data_a,
+        shape_data_b,
+        type_a,
+        type_b,
+        quat_a,
+        quat_b,
+        pos_a_adjusted,
+        pos_b_adjusted,
+        rigid_contact_margin,
+    )
+
+    return count, normal, signed_distances, points, radius_eff_a, radius_eff_b
+
+
+@wp.func
+def pre_contact_check(
+    shape_a: int,
+    shape_b: int,
+    pos_a: wp.vec3,
+    pos_b: wp.vec3,
+    quat_a: wp.quat,
+    quat_b: wp.quat,
+    shape_data_a: GenericShapeData,
+    shape_data_b: GenericShapeData,
+    aabb_a_lower: wp.vec3,
+    aabb_a_upper: wp.vec3,
+    aabb_b_lower: wp.vec3,
+    aabb_b_upper: wp.vec3,
+    pair: wp.vec2i,
+    shape_scale: wp.array(dtype=wp.vec3),
+    shape_source_ptr: wp.array(dtype=wp.uint64),
+    shape_pairs_mesh: wp.array(dtype=wp.vec2i),
+    shape_pairs_mesh_count: wp.array(dtype=int),
+    shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
+    shape_pairs_mesh_plane_cumsum: wp.array(dtype=int),
+    shape_pairs_mesh_plane_count: wp.array(dtype=int),
+    mesh_plane_vertex_total_count: wp.array(dtype=int),
+):
+    """
+    Perform pre-contact checks for early rejection and special case handling.
+
+    Args:
+        shape_a: Index of shape A
+        shape_b: Index of shape B
+        pos_a: Position of shape A in world space
+        pos_b: Position of shape B in world space
+        quat_a: Orientation of shape A
+        quat_b: Orientation of shape B
+        shape_data_a: Generic shape data for shape A (contains shape_type)
+        shape_data_b: Generic shape data for shape B (contains shape_type)
+        aabb_a_lower: Lower bound of AABB for shape A
+        aabb_a_upper: Upper bound of AABB for shape A
+        aabb_b_lower: Lower bound of AABB for shape B
+        aabb_b_upper: Upper bound of AABB for shape B
+        pair: Shape pair indices
+        shape_scale: Array of shape scales
+        shape_source_ptr: Array of mesh/SDF source pointers
+        shape_pairs_mesh: Output array for mesh collision pairs
+        shape_pairs_mesh_count: Counter for mesh collision pairs
+        shape_pairs_mesh_plane: Output array for mesh-plane collision pairs
+        shape_pairs_mesh_plane_cumsum: Cumulative sum array for mesh-plane vertices
+        shape_pairs_mesh_plane_count: Counter for mesh-plane collision pairs
+        mesh_plane_vertex_total_count: Total vertex count for mesh-plane collisions
+
+    Returns:
+        Tuple of (skip_pair, is_infinite_plane_a, is_infinite_plane_b, bsphere_radius_a, bsphere_radius_b)
+    """
+    # Get shape types from shape data
+    type_a = shape_data_a.shape_type
+    type_b = shape_data_b.shape_type
+
+    # Check if shapes are infinite planes (scale.x == 0 and scale.y == 0)
+    is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (
+        shape_data_a.scale[0] == 0.0 and shape_data_a.scale[1] == 0.0
+    )
+    is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (
+        shape_data_b.scale[0] == 0.0 and shape_data_b.scale[1] == 0.0
+    )
+
+    # Early return: both shapes are infinite planes
+    if is_infinite_plane_a and is_infinite_plane_b:
+        return True, is_infinite_plane_a, is_infinite_plane_b, float(0.0), float(0.0)
+
+    # Compute bounding spheres from AABBs instead of using mesh bounding spheres
+    bsphere_center_a, bsphere_radius_a = compute_bounding_sphere_from_aabb(aabb_a_lower, aabb_a_upper)
+    bsphere_center_b, bsphere_radius_b = compute_bounding_sphere_from_aabb(aabb_b_lower, aabb_b_upper)
+
+    # Check if infinite plane vs bounding sphere overlap - early rejection
+    if not check_infinite_plane_bsphere_overlap(
+        shape_data_a,
+        shape_data_b,
+        pos_a,
+        pos_b,
+        quat_a,
+        quat_b,
+        bsphere_center_a,
+        bsphere_center_b,
+        bsphere_radius_a,
+        bsphere_radius_b,
+    ):
+        return True, is_infinite_plane_a, is_infinite_plane_b, bsphere_radius_a, bsphere_radius_b
+
+    # Check for mesh vs infinite plane collision - special handling
+    # After sorting, type_a <= type_b, so we only need to check one direction
+    if type_a == int(GeoType.PLANE) and type_b == int(GeoType.MESH):
+        # Check if plane is infinite (scale x and y are zero)
+        scale_a = shape_scale[shape_a]
+        if scale_a[0] == 0.0 and scale_a[1] == 0.0:
+            # Get mesh vertex count
+            mesh_id = shape_source_ptr[shape_b]
+            if mesh_id != wp.uint64(0):
+                mesh_obj = wp.mesh_get(mesh_id)
+                vertex_count = mesh_obj.points.shape[0]
+
+                # Add to mesh-plane collision buffer with cumulative vertex count
+                mesh_plane_idx = wp.atomic_add(shape_pairs_mesh_plane_count, 0, 1)
+                if mesh_plane_idx < shape_pairs_mesh_plane.shape[0]:
+                    # Store shape indices (mesh, plane)
+                    shape_pairs_mesh_plane[mesh_plane_idx] = wp.vec2i(shape_b, shape_a)
+                    # Store inclusive cumulative vertex count in separate array for better cache locality
+                    cumulative_count_before = wp.atomic_add(mesh_plane_vertex_total_count, 0, vertex_count)
+                    cumulative_count_inclusive = cumulative_count_before + vertex_count
+                    shape_pairs_mesh_plane_cumsum[mesh_plane_idx] = cumulative_count_inclusive
+            return True, is_infinite_plane_a, is_infinite_plane_b, bsphere_radius_a, bsphere_radius_b
+
+    # Check for other mesh collisions - add to separate buffer for specialized handling
+    if type_a == int(GeoType.MESH) or type_b == int(GeoType.MESH):
+        # Add to mesh collision buffer using atomic counter
+        mesh_pair_idx = wp.atomic_add(shape_pairs_mesh_count, 0, 1)
+        if mesh_pair_idx < shape_pairs_mesh.shape[0]:
+            shape_pairs_mesh[mesh_pair_idx] = pair
+        return True, is_infinite_plane_a, is_infinite_plane_b, bsphere_radius_a, bsphere_radius_b
+
+    return False, is_infinite_plane_a, is_infinite_plane_b, bsphere_radius_a, bsphere_radius_b
+
 @wp.kernel(enable_backward=False)
 def build_contacts_kernel_gjk_mpr(
     body_q: wp.array(dtype=wp.transform),
@@ -316,66 +507,45 @@ def build_contacts_kernel_gjk_mpr(
             shape_source_ptr,
         )
 
-        # Check if shapes are infinite planes (scale.x == 0 and scale.y == 0)
-        is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (
-            shape_data_a.scale[0] == 0.0 and shape_data_a.scale[1] == 0.0
-        )
-        is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (
-            shape_data_b.scale[0] == 0.0 and shape_data_b.scale[1] == 0.0
-        )
-
-        if is_infinite_plane_a and is_infinite_plane_b:
-            continue
-
-        # Compute bounding spheres from AABBs instead of using mesh bounding spheres
-        bsphere_center_a, bsphere_radius_a = compute_bounding_sphere_from_aabb(aabb_a_lower, aabb_a_upper)
-        bsphere_center_b, bsphere_radius_b = compute_bounding_sphere_from_aabb(aabb_b_lower, aabb_b_upper)
-
-        # Check if infinite plane vs bounding sphere overlap - early rejection
-        if not check_infinite_plane_bsphere_overlap(
-            shape_data_a,
-            shape_data_b,
+        skip_pair, is_infinite_plane_a, is_infinite_plane_b, bsphere_radius_a, bsphere_radius_b = pre_contact_check(
+            shape_a,
+            shape_b,
             pos_a,
             pos_b,
             quat_a,
             quat_b,
-            bsphere_center_a,
-            bsphere_center_b,
+            shape_data_a,
+            shape_data_b,
+            aabb_a_lower,
+            aabb_a_upper,
+            aabb_b_lower,
+            aabb_b_upper,
+            pair,
+            shape_scale,
+            shape_source_ptr,
+            shape_pairs_mesh,
+            shape_pairs_mesh_count,
+            shape_pairs_mesh_plane,
+            shape_pairs_mesh_plane_cumsum,
+            shape_pairs_mesh_plane_count,
+            mesh_plane_vertex_total_count,
+        )
+        if skip_pair:
+            continue
+
+        count, normal, signed_distances, points, radius_eff_a, radius_eff_b = find_contacts(
+            pos_a,
+            pos_b,
+            quat_a,
+            quat_b,
+            shape_data_a,
+            shape_data_b,
+            is_infinite_plane_a,
+            is_infinite_plane_b,
             bsphere_radius_a,
             bsphere_radius_b,
-        ):
-            continue
-
-        # Check for mesh vs infinite plane collision - special handling
-        # After sorting, type_a <= type_b, so we only need to check one direction
-        if type_a == int(GeoType.PLANE) and type_b == int(GeoType.MESH):
-            # Check if plane is infinite (scale x and y are zero)
-            scale_a = shape_scale[shape_a]
-            if scale_a[0] == 0.0 and scale_a[1] == 0.0:
-                # Get mesh vertex count
-                mesh_id = shape_source_ptr[shape_b]
-                if mesh_id != wp.uint64(0):
-                    mesh_obj = wp.mesh_get(mesh_id)
-                    vertex_count = mesh_obj.points.shape[0]
-
-                    # Add to mesh-plane collision buffer with cumulative vertex count
-                    mesh_plane_idx = wp.atomic_add(shape_pairs_mesh_plane_count, 0, 1)
-                    if mesh_plane_idx < shape_pairs_mesh_plane.shape[0]:
-                        # Store shape indices (mesh, plane)
-                        shape_pairs_mesh_plane[mesh_plane_idx] = wp.vec2i(shape_b, shape_a)
-                        # Store inclusive cumulative vertex count in separate array for better cache locality
-                        cumulative_count_before = wp.atomic_add(mesh_plane_vertex_total_count, 0, vertex_count)
-                        cumulative_count_inclusive = cumulative_count_before + vertex_count
-                        shape_pairs_mesh_plane_cumsum[mesh_plane_idx] = cumulative_count_inclusive
-                continue
-
-        # Check for other mesh collisions - add to separate buffer for specialized handling
-        if type_a == int(GeoType.MESH) or type_b == int(GeoType.MESH):
-            # Add to mesh collision buffer using atomic counter
-            mesh_pair_idx = wp.atomic_add(shape_pairs_mesh_count, 0, 1)
-            if mesh_pair_idx < shape_pairs_mesh.shape[0]:
-                shape_pairs_mesh[mesh_pair_idx] = pair
-            continue
+            rigid_contact_margin,
+        )
 
         # Get body indices
         rigid_a = shape_body[shape_a]
@@ -384,38 +554,6 @@ def build_contacts_kernel_gjk_mpr(
         # World->body transforms for writing contact points
         X_bw_a = wp.transform_identity() if rigid_a == -1 else wp.transform_inverse(body_q[rigid_a])
         X_bw_b = wp.transform_identity() if rigid_b == -1 else wp.transform_inverse(body_q[rigid_b])
-
-        # Convert infinite planes to cube proxies for GJK/MPR compatibility
-        # Use the OTHER object's radius to properly size the cube
-        # Only convert if it's an infinite plane (finite planes can be handled normally)
-        pos_a_adjusted = pos_a
-        if is_infinite_plane_a:
-            # Position the cube based on the OTHER object's position (pos_b)
-            shape_data_a, pos_a_adjusted = convert_infinite_plane_to_cube(
-                shape_data_a, quat_a, pos_a, pos_b, bsphere_radius_b + rigid_contact_margin
-            )
-            type_a = int(GeoType.BOX)
-
-        pos_b_adjusted = pos_b
-        if is_infinite_plane_b:
-            # Position the cube based on the OTHER object's position (pos_a)
-            shape_data_b, pos_b_adjusted = convert_infinite_plane_to_cube(
-                shape_data_b, quat_b, pos_b, pos_a, bsphere_radius_a + rigid_contact_margin
-            )
-            type_b = int(GeoType.BOX)
-
-        # Compute contacts using GJK/MPR
-        count, normal, signed_distances, points, radius_eff_a, radius_eff_b = compute_gjk_mpr_contacts(
-            shape_data_a,
-            shape_data_b,
-            type_a,
-            type_b,
-            quat_a,
-            quat_b,
-            pos_a_adjusted,
-            pos_b_adjusted,
-            rigid_contact_margin,
-        )
 
         for id in range(count):
             write_contact(
