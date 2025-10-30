@@ -640,8 +640,8 @@ def pre_contact_check(
     aabb_b_lower: wp.vec3,
     aabb_b_upper: wp.vec3,
     pair: wp.vec2i,
-    shape_scale: wp.array(dtype=wp.vec3),
-    shape_source_ptr: wp.array(dtype=wp.uint64),
+    mesh_id_a: wp.uint64,
+    mesh_id_b: wp.uint64,
     shape_pairs_mesh: wp.array(dtype=wp.vec2i),
     shape_pairs_mesh_count: wp.array(dtype=int),
     shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
@@ -659,15 +659,15 @@ def pre_contact_check(
         pos_b: Position of shape B in world space
         quat_a: Orientation of shape A
         quat_b: Orientation of shape B
-        shape_data_a: Generic shape data for shape A (contains shape_type)
-        shape_data_b: Generic shape data for shape B (contains shape_type)
+        shape_data_a: Generic shape data for shape A (contains shape_type and scale)
+        shape_data_b: Generic shape data for shape B (contains shape_type and scale)
         aabb_a_lower: Lower bound of AABB for shape A
         aabb_a_upper: Upper bound of AABB for shape A
         aabb_b_lower: Lower bound of AABB for shape B
         aabb_b_upper: Upper bound of AABB for shape B
         pair: Shape pair indices
-        shape_scale: Array of shape scales
-        shape_source_ptr: Array of mesh/SDF source pointers
+        mesh_id_a: Mesh ID pointer for shape A (wp.uint64(0) if not a mesh)
+        mesh_id_b: Mesh ID pointer for shape B (wp.uint64(0) if not a mesh)
         shape_pairs_mesh: Output array for mesh collision pairs
         shape_pairs_mesh_count: Counter for mesh collision pairs
         shape_pairs_mesh_plane: Output array for mesh-plane collision pairs
@@ -683,6 +683,7 @@ def pre_contact_check(
     type_b = shape_data_b.shape_type
 
     # Check if shapes are infinite planes (scale.x == 0 and scale.y == 0)
+    # Scale is already in shape_data, no need for array lookup
     is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (
         shape_data_a.scale[0] == 0.0 and shape_data_a.scale[1] == 0.0
     )
@@ -716,13 +717,11 @@ def pre_contact_check(
     # Check for mesh vs infinite plane collision - special handling
     # After sorting, type_a <= type_b, so we only need to check one direction
     if type_a == int(GeoType.PLANE) and type_b == int(GeoType.MESH):
-        # Check if plane is infinite (scale x and y are zero)
-        scale_a = shape_scale[shape_a]
-        if scale_a[0] == 0.0 and scale_a[1] == 0.0:
-            # Get mesh vertex count
-            mesh_id = shape_source_ptr[shape_b]
-            if mesh_id != wp.uint64(0):
-                mesh_obj = wp.mesh_get(mesh_id)
+        # Check if plane is infinite (scale x and y are zero) - use scale from shape_data
+        if shape_data_a.scale[0] == 0.0 and shape_data_a.scale[1] == 0.0:
+            # Get mesh vertex count using the provided mesh_id
+            if mesh_id_b != wp.uint64(0):
+                mesh_obj = wp.mesh_get(mesh_id_b)
                 vertex_count = mesh_obj.points.shape[0]
 
                 # Add to mesh-plane collision buffer with cumulative vertex count

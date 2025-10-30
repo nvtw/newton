@@ -26,6 +26,7 @@ from ..geometry.collision_core import (
     find_pair_from_cumulative_index,
     get_triangle_shape_from_mesh,
     mesh_vs_convex_midphase,
+    pre_contact_check,
 )
 from ..geometry.support_function import (
     GenericShapeData,
@@ -268,71 +269,33 @@ def narrow_phase_kernel_gjk_mpr(
         aabb_b_lower = aabb_b_lower - margin_vec_b
         aabb_b_upper = aabb_b_upper + margin_vec_b
 
-        # Pre-contact check handles mesh and plane special cases
-        # Note: We pass geom_data/geom_source directly - pre_contact_check will extract scale as needed
-        # For now, we'll skip the mesh handling in pre_contact_check and handle it separately
-        # since populating scale arrays inside the kernel is inefficient
-        # Instead, we'll detect mesh pairs here and handle them in separate kernels
-        type_a = shape_data_a.shape_type
-        type_b = shape_data_b.shape_type
-
-        # Check for mesh collisions - skip regular contact generation for now
-        # Mesh collisions will be handled in separate kernels
-        if type_a == int(GeoType.MESH) or type_b == int(GeoType.MESH):
-            # Check if this is a mesh-plane collision
-            if type_a == int(GeoType.PLANE) and type_b == int(GeoType.MESH) and scale_a[0] == 0.0 and scale_a[1] == 0.0:
-                # Mesh-plane collision - handle in separate kernel
-                mesh_id = geom_source[shape_b]
-                if mesh_id != wp.uint64(0):
-                    mesh_obj = wp.mesh_get(mesh_id)
-                    vertex_count = mesh_obj.points.shape[0]
-                    mesh_plane_idx = wp.atomic_add(shape_pairs_mesh_plane_count, 0, 1)
-                    if mesh_plane_idx < shape_pairs_mesh_plane.shape[0]:
-                        shape_pairs_mesh_plane[mesh_plane_idx] = wp.vec2i(shape_b, shape_a)
-                        cumulative_count_before = wp.atomic_add(mesh_plane_vertex_total_count, 0, vertex_count)
-                        cumulative_count_inclusive = cumulative_count_before + vertex_count
-                        shape_pairs_mesh_plane_cumsum[mesh_plane_idx] = cumulative_count_inclusive
-            else:
-                # Regular mesh collision - add to mesh collision buffer
-                mesh_pair_idx = wp.atomic_add(shape_pairs_mesh_count, 0, 1)
-                if mesh_pair_idx < shape_pairs_mesh.shape[0]:
-                    shape_pairs_mesh[mesh_pair_idx] = pair
+        # Use pre_contact_check to handle mesh and plane special cases
+        # This avoids code duplication with collide_unified.py
+        skip_pair, is_infinite_plane_a, is_infinite_plane_b, bsphere_radius_a, bsphere_radius_b = pre_contact_check(
+            shape_a,
+            shape_b,
+            pos_a,
+            pos_b,
+            quat_a,
+            quat_b,
+            shape_data_a,
+            shape_data_b,
+            aabb_a_lower,
+            aabb_a_upper,
+            aabb_b_lower,
+            aabb_b_upper,
+            pair,
+            geom_source[shape_a],
+            geom_source[shape_b],
+            shape_pairs_mesh,
+            shape_pairs_mesh_count,
+            shape_pairs_mesh_plane,
+            shape_pairs_mesh_plane_cumsum,
+            shape_pairs_mesh_plane_count,
+            mesh_plane_vertex_total_count,
+        )
+        if skip_pair:
             continue
-
-        # Check for infinite planes
-        is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
-        is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (scale_b[0] == 0.0 and scale_b[1] == 0.0)
-
-        # Early return: both shapes are infinite planes
-        if is_infinite_plane_a and is_infinite_plane_b:
-            continue
-
-        # Compute bounding spheres from AABBs
-        bsphere_center_a = 0.5 * (aabb_a_lower + aabb_a_upper)
-        bsphere_center_b = 0.5 * (aabb_b_lower + aabb_b_upper)
-        bsphere_half_extents_a = 0.5 * (aabb_a_upper - aabb_a_lower)
-        bsphere_half_extents_b = 0.5 * (aabb_b_upper - aabb_b_lower)
-        bsphere_radius_a = wp.length(bsphere_half_extents_a)
-        bsphere_radius_b = wp.length(bsphere_half_extents_b)
-
-        # Check if infinite plane vs bounding sphere overlap - early rejection
-        if is_infinite_plane_a or is_infinite_plane_b:
-            # Check plane vs sphere overlap
-            if is_infinite_plane_a:
-                plane_pos = pos_a
-                plane_quat = quat_a
-                other_center = bsphere_center_b
-                other_radius = bsphere_radius_b
-            else:
-                plane_pos = pos_b
-                plane_quat = quat_b
-                other_center = bsphere_center_a
-                other_radius = bsphere_radius_a
-
-            plane_normal = wp.quat_rotate(plane_quat, wp.vec3(0.0, 0.0, 1.0))
-            center_dist = wp.dot(other_center - plane_pos, plane_normal)
-            if center_dist > other_radius:
-                continue
 
         # Use per-geometry cutoff for contact detection
         # find_contacts expects a scalar margin, so we use max of the two cutoffs
