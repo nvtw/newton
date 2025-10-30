@@ -92,10 +92,10 @@ def _create_tile_sort_kernel(tile_size: int):
     """Create a tile-based sort kernel for a specific tile size.
 
     This uses Warp's tile operations for efficient shared-memory sorting.
-    The tile size must match max_geoms_per_world and be a power of 2.
+    Note: tile_size should match max_geoms_per_world and can be any value.
 
     Args:
-        tile_size: Size of each tile (must be power of 2)
+        tile_size: Size of each tile (should match max_geoms_per_world)
 
     Returns:
         A Warp kernel that performs segmented tile-based sorting
@@ -110,7 +110,7 @@ def _create_tile_sort_kernel(tile_size: int):
         """Tile-based segmented sort kernel.
 
         Each thread block processes one world's data using shared memory.
-        Note: Loads full tile_size even if world has fewer geometries.
+        Loads tile_size elements (equal to max_geoms_per_world).
         Padding values (1e30) will sort to the end automatically.
         """
         world_id = wp.tid()
@@ -120,7 +120,6 @@ def _create_tile_sort_kernel(tile_size: int):
 
         # Load data into tiles (shared memory)
         # tile_size is a closure variable, treated as compile-time constant by Warp
-        # offset must be a tuple for 1D array indexing
         keys = wp.tile_load(sap_projection_lower, shape=(tile_size,), offset=(base_idx,), storage="shared")
         values = wp.tile_load(sap_sort_index, shape=(tile_size,), offset=(base_idx,), storage="shared")
 
@@ -204,7 +203,9 @@ def _sap_range_kernel(
         sap_range_out[idx] = 0
         return
 
-    # Current bounding geom (after sort, this is just local_geom_id)
+    # Current bounding geom (after sort, this is the original local geometry index)
+    # Note: sap_sort_index_in[idx] contains the original local geometry index of the
+    # geometry that's now at position local_geom_id in the sorted array
     sort_idx = sap_sort_index_in[idx]
 
     # Invalid geom (padding)
@@ -213,6 +214,8 @@ def _sap_range_kernel(
         return
 
     # Get upper bound for this geom
+    # sort_idx is the original local geometry index, so we use it to index into
+    # sap_projection_upper_in (which is NOT sorted, only sap_projection_lower_in is sorted)
     upper_idx = world_id * max_geoms_per_world + sort_idx
     upper = sap_projection_upper_in[upper_idx]
 
@@ -302,8 +305,13 @@ def _sap_broadphase_kernel(
         world_slice_end = world_slice_ends[world_id]
         num_geoms_in_world = world_slice_end - world_slice_start
 
-        # Check validity
+        # Check validity: ensure indices are within bounds
         if i >= num_geoms_in_world or j >= num_geoms_in_world:
+            workid += nsweep_in
+            continue
+
+        # Skip self-pairs (i == j) and invalid pairs (i > j) - pairs must have distinct geometries with i < j
+        if i >= j:
             workid += nsweep_in
             continue
 
@@ -321,6 +329,11 @@ def _sap_broadphase_kernel(
         # Map to actual geometry indices
         geom1_tmp = world_index_map[world_slice_start + local_geom1]
         geom2_tmp = world_index_map[world_slice_start + local_geom2]
+
+        # Skip if mapped to the same geometry (shouldn't happen, but defensive check)
+        if geom1_tmp == geom2_tmp:
+            workid += nsweep_in
+            continue
 
         # Ensure canonical ordering
         geom1 = wp.min(geom1_tmp, geom2_tmp)
@@ -383,6 +396,7 @@ class BroadPhaseSAP:
             sort_type: Type of sorting algorithm to use (SEGMENTED or TILE)
             tile_block_dim: Block dimension for tile-based sorting (optional, auto-calculated if None).
                 If None, will be set to next power of 2 >= max_geoms_per_world, capped at 512.
+                Minimum value is 32 (required by wp.tile_sort). If provided, will be clamped to [32, 1024].
             device: Device to store the precomputed arrays on. If None, uses CPU for numpy
                 arrays or the device of the input warp array.
         """
@@ -433,18 +447,18 @@ class BroadPhaseSAP:
         # Create tile sort kernel if using tile-based sorting
         self.tile_sort_kernel = None
         if self.sort_type == SAPSortType.TILE:
-            # tile_size is the actual data size (max_geoms_per_world)
-            # Convert to plain Python int (not numpy.int32) for Warp closure
-            self.tile_size = int(self.max_geoms_per_world)
-
             # Calculate block_dim: next power of 2 >= max_geoms_per_world, capped at 512
             if self.tile_block_dim_override is not None:
-                self.tile_block_dim = self.tile_block_dim_override
+                self.tile_block_dim = max(32, min(self.tile_block_dim_override, 1024))
             else:
                 block_dim = 1
                 while block_dim < self.max_geoms_per_world:
                     block_dim *= 2
-                self.tile_block_dim = min(block_dim, 512)
+                self.tile_block_dim = max(32, min(block_dim, 512))
+
+            # tile_size should match max_geoms_per_world (actual data size)
+            # tile_block_dim is for thread block configuration and can be larger
+            self.tile_size = int(self.max_geoms_per_world)
 
             self.tile_sort_kernel = _create_tile_sort_kernel(self.tile_size)
 

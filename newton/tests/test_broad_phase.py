@@ -20,6 +20,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.geometry.broad_phase_sap import SAPSortType
+from newton._src.geometry.flags import ShapeFlags
 from newton.geometry import BroadPhaseAllPairs, BroadPhaseExplicit, BroadPhaseSAP
 
 
@@ -98,16 +99,31 @@ def find_overlapping_pairs_np(
     cutoff: np.ndarray,
     collision_group: np.ndarray,
     shape_world: np.ndarray | None = None,
+    shape_flags: np.ndarray | None = None,
 ):
     """
     Brute-force n^2 algorithm to find all overlapping bounding box pairs.
     Each box is axis-aligned, defined by min (lower) and max (upper) corners.
     Returns a list of (i, j) pairs with i < j, where boxes i and j overlap.
+
+    Args:
+        shape_flags: Optional array of shape flags. If provided, only geometries with
+            COLLIDE_SHAPES flag set will participate in collision detection.
     """
     n = box_lower.shape[0]
     pairs = []
     for i in range(n):
+        # Skip if shape_flags is provided and this geometry doesn't have COLLIDE_SHAPES flag
+        if shape_flags is not None:
+            if (shape_flags[i] & ShapeFlags.COLLIDE_SHAPES) == 0:
+                continue
+
         for j in range(i + 1, n):
+            # Skip if shape_flags is provided and this geometry doesn't have COLLIDE_SHAPES flag
+            if shape_flags is not None:
+                if (shape_flags[j] & ShapeFlags.COLLIDE_SHAPES) == 0:
+                    continue
+
             # Check world and collision group compatibility
             if shape_world is not None:
                 world_i = int(shape_world[i])
@@ -418,6 +434,236 @@ class TestBroadPhase(unittest.TestCase):
 
         if verbose:
             print(f"\nTest passed! All {len(pairs_np)} pairs matched.")
+
+    def test_nxn_broadphase_with_shape_flags(self):
+        """Test NxN broad phase with ShapeFlags filtering.
+
+        This test verifies that:
+        - Shapes without COLLIDE_SHAPES flag are correctly filtered out
+        - Filtering works correctly with multiple worlds
+        - num_regular_worlds is correctly computed after filtering (tests bug fix)
+        - Edge case: filtering out all positive-world geometries but keeping -1 (tests critical bug)
+        """
+        verbose = False
+
+        # Create random bounding boxes in min-max format
+        ngeom = 50
+        num_worlds = 4  # We'll distribute objects across 4 different worlds
+
+        # Generate random centers and sizes using the new Generator API
+        rng = np.random.Generator(np.random.PCG64(456))
+
+        centers = rng.random((ngeom, 3)) * 5.0
+        sizes = rng.random((ngeom, 3)) * 1.5  # box half-extent up to 1.5 in each direction
+        geom_bounding_box_lower = centers - sizes
+        geom_bounding_box_upper = centers + sizes
+
+        np_geom_cutoff = np.zeros(ngeom, dtype=np.float32)
+
+        # Randomly assign collision groups
+        num_groups = 5
+        np_collision_group = rng.integers(1, num_groups + 1, size=ngeom, dtype=np.int32)
+
+        # Make some entities shared (negative collision group)
+        num_shared = int(sqrt(ngeom))
+        shared_indices = rng.choice(ngeom, size=num_shared, replace=False)
+        np_collision_group[shared_indices] = -1
+
+        # Randomly distribute objects across worlds
+        # Some objects in specific worlds (0, 1, 2, 3), some global (-1)
+        np_shape_world = rng.integers(0, num_worlds, size=ngeom, dtype=np.int32)
+
+        # Make some entities global (world -1) - they should collide with all worlds
+        num_global = max(3, ngeom // 10)
+        global_indices = rng.choice(ngeom, size=num_global, replace=False)
+        np_shape_world[global_indices] = -1
+
+        # Create shape flags: some geometries will be visual-only (no COLLIDE_SHAPES flag)
+        # Critical test case: filter out all positive-world geometries, keep only -1
+        np_shape_flags = np.zeros(ngeom, dtype=np.int32)
+
+        # Assign flags: ~70% will have COLLIDE_SHAPES flag, 30% will be visual-only
+        colliding_indices = rng.choice(ngeom, size=int(0.7 * ngeom), replace=False)
+        np_shape_flags[colliding_indices] = ShapeFlags.COLLIDE_SHAPES
+
+        # Also set VISIBLE flag on some for completeness
+        visible_indices = rng.choice(ngeom, size=int(0.8 * ngeom), replace=False)
+        np_shape_flags[visible_indices] |= ShapeFlags.VISIBLE
+
+        # CRITICAL TEST CASE: Filter out all geometries from world 0 (but keep world -1)
+        # This tests the bug where num_regular_worlds was computed incorrectly after filtering
+        world_0_mask = np_shape_world == 0
+        np_shape_flags[world_0_mask] = 0  # Remove COLLIDE_SHAPES from all world 0 geometries
+
+        # Count how many colliding geometries remain after filtering
+        colliding_mask = (np_shape_flags & ShapeFlags.COLLIDE_SHAPES) != 0
+        num_colliding = np.sum(colliding_mask)
+
+        if verbose:
+            print("\nTest setup with ShapeFlags:")
+            print(f"  Total geometries: {ngeom}")
+            print(f"  Geometries with COLLIDE_SHAPES flag: {num_colliding}")
+            print(f"  Geometries filtered out: {ngeom - num_colliding}")
+            print(f"  Number of worlds: {num_worlds}")
+            print(f"  Global entities (world=-1): {num_global}")
+            print(f"  World 0 geometries filtered: {np.sum(world_0_mask)}")
+            print("\nWorld distribution (after filtering):")
+            for world_id in range(-1, num_worlds):
+                count_total = np.sum(np_shape_world == world_id)
+                count_colliding = np.sum((np_shape_world == world_id) & colliding_mask)
+                print(f"  World {world_id}: {count_total} total, {count_colliding} colliding")
+
+        # Compute expected pairs using numpy (with shape flags filtering)
+        pairs_np = find_overlapping_pairs_np(
+            geom_bounding_box_lower,
+            geom_bounding_box_upper,
+            np_geom_cutoff,
+            np_collision_group,
+            np_shape_world,
+            np_shape_flags,
+        )
+
+        if verbose:
+            print(f"\nExpected number of pairs (after flag filtering): {len(pairs_np)}")
+            if len(pairs_np) <= 20:
+                print("Numpy contact pairs:")
+                for i, pair in enumerate(pairs_np):
+                    body_a, body_b = pair
+                    world_a, world_b = np_shape_world[body_a], np_shape_world[body_b]
+                    group_a, group_b = np_collision_group[body_a], np_collision_group[body_b]
+                    flag_a, flag_b = np_shape_flags[body_a], np_shape_flags[body_b]
+                    print(
+                        f"  Pair {i}: bodies ({body_a}, {body_b}) "
+                        f"worlds ({world_a}, {world_b}) groups ({group_a}, {group_b}) "
+                        f"flags ({flag_a}, {flag_b})"
+                    )
+
+        # Setup Warp arrays
+        num_lower_tri_elements = ngeom * (ngeom - 1) // 2
+        max_candidate_pair = num_lower_tri_elements
+
+        geom_lower = wp.array(geom_bounding_box_lower, dtype=wp.vec3)
+        geom_upper = wp.array(geom_bounding_box_upper, dtype=wp.vec3)
+        geom_cutoff = wp.array(np_geom_cutoff)
+        collision_group = wp.array(np_collision_group)
+        shape_world = wp.array(np_shape_world, dtype=wp.int32)
+        shape_flags = wp.array(np_shape_flags, dtype=wp.int32)
+        num_candidate_pair = wp.array([0], dtype=wp.int32)
+        candidate_pair = wp.array(np.zeros((max_candidate_pair, 2), dtype=wp.int32), dtype=wp.vec2i)
+
+        # Initialize BroadPhaseAllPairs with shape_world AND shape_flags
+        nxn_broadphase = BroadPhaseAllPairs(shape_world, geom_flags=shape_flags)
+
+        if verbose:
+            print("\nPrecomputed world map info (with flags):")
+            print(f"  Number of kernel threads: {nxn_broadphase.num_kernel_threads}")
+            print(f"  Number of regular worlds: {nxn_broadphase.num_regular_worlds}")
+            print(f"  World slice ends: {nxn_broadphase.world_slice_ends.numpy()}")
+            print(f"  World cumsum lower tri: {nxn_broadphase.world_cumsum_lower_tri.numpy()}")
+
+        # Verify num_regular_worlds is correct after filtering
+        # It should be the number of worlds that have at least one colliding geometry
+        colliding_worlds = np.unique(np_shape_world[colliding_mask])
+        colliding_worlds = colliding_worlds[colliding_worlds >= 0]  # Exclude -1
+        expected_num_regular_worlds = len(colliding_worlds)
+
+        self.assertEqual(
+            nxn_broadphase.num_regular_worlds,
+            expected_num_regular_worlds,
+            f"num_regular_worlds mismatch: expected {expected_num_regular_worlds} "
+            f"(after filtering), got {nxn_broadphase.num_regular_worlds}",
+        )
+
+        # Launch broad phase
+        nxn_broadphase.launch(
+            geom_lower,
+            geom_upper,
+            geom_cutoff,
+            collision_group,
+            shape_world,
+            ngeom,
+            candidate_pair,
+            num_candidate_pair,
+        )
+
+        wp.synchronize()
+
+        # Get results
+        pairs_wp = candidate_pair.numpy()
+        num_candidate_pair_result = num_candidate_pair.numpy()[0]
+
+        if verbose:
+            print(f"\nWarp found {num_candidate_pair_result} pairs")
+            if num_candidate_pair_result <= 20:
+                print("Warp contact pairs:")
+                for i in range(num_candidate_pair_result):
+                    pair = pairs_wp[i]
+                    body_a, body_b = pair[0], pair[1]
+                    world_a, world_b = np_shape_world[body_a], np_shape_world[body_b]
+                    group_a, group_b = np_collision_group[body_a], np_collision_group[body_b]
+                    flag_a, flag_b = np_shape_flags[body_a], np_shape_flags[body_b]
+                    print(
+                        f"  Pair {i}: bodies ({body_a}, {body_b}) "
+                        f"worlds ({world_a}, {world_b}) groups ({group_a}, {group_b}) "
+                        f"flags ({flag_a}, {flag_b})"
+                    )
+
+        # Verify results
+        if len(pairs_np) != num_candidate_pair_result:
+            print(f"\nMismatch: Expected {len(pairs_np)} pairs, got {num_candidate_pair_result}")
+
+            # Show missing or extra pairs for debugging
+            pairs_np_set = {tuple(pair) for pair in pairs_np}
+            pairs_wp_set = {tuple(pairs_wp[i]) for i in range(num_candidate_pair_result)}
+
+            missing = pairs_np_set - pairs_wp_set
+            extra = pairs_wp_set - pairs_np_set
+
+            if missing:
+                print(f"Missing pairs ({len(missing)}):")
+                for pair in list(missing)[:10]:
+                    body_a, body_b = pair
+                    world_a, world_b = np_shape_world[body_a], np_shape_world[body_b]
+                    group_a, group_b = np_collision_group[body_a], np_collision_group[body_b]
+                    flag_a, flag_b = np_shape_flags[body_a], np_shape_flags[body_b]
+                    print(
+                        f"  {pair}: worlds ({world_a}, {world_b}) groups ({group_a}, {group_b}) "
+                        f"flags ({flag_a}, {flag_b})"
+                    )
+
+            if extra:
+                print(f"Extra pairs ({len(extra)}):")
+                for pair in list(extra)[:10]:
+                    body_a, body_b = pair
+                    world_a, world_b = np_shape_world[body_a], np_shape_world[body_b]
+                    group_a, group_b = np_collision_group[body_a], np_collision_group[body_b]
+                    flag_a, flag_b = np_shape_flags[body_a], np_shape_flags[body_b]
+                    print(
+                        f"  {pair}: worlds ({world_a}, {world_b}) groups ({group_a}, {group_b}) "
+                        f"flags ({flag_a}, {flag_b})"
+                    )
+
+            assert len(pairs_np) == num_candidate_pair_result
+
+        # Ensure every element in pairs_wp is also present in pairs_np
+        pairs_np_set = {tuple(pair) for pair in pairs_np}
+        for pair in pairs_wp[:num_candidate_pair_result]:
+            assert tuple(pair) in pairs_np_set, f"Pair {tuple(pair)} from Warp not found in numpy pairs"
+
+        # Verify that no pairs contain filtered-out geometries
+        for pair in pairs_wp[:num_candidate_pair_result]:
+            body_a, body_b = pair[0], pair[1]
+            flag_a = np_shape_flags[body_a]
+            flag_b = np_shape_flags[body_b]
+            assert (flag_a & ShapeFlags.COLLIDE_SHAPES) != 0, (
+                f"Pair contains filtered geometry {body_a} with flag {flag_a}"
+            )
+            assert (flag_b & ShapeFlags.COLLIDE_SHAPES) != 0, (
+                f"Pair contains filtered geometry {body_b} with flag {flag_b}"
+            )
+
+        if verbose:
+            print(f"\nTest passed! All {len(pairs_np)} pairs matched, no filtered geometries included.")
 
     def test_explicit_pairs_broadphase(self):
         verbose = False
@@ -827,6 +1073,169 @@ class TestBroadPhase(unittest.TestCase):
     def test_sap_broadphase_multiple_worlds_tile(self):
         """Test SAP broad phase with multiple worlds using tile sort."""
         self._test_sap_broadphase_multiple_worlds_impl(SAPSortType.TILE)
+
+    def _test_sap_broadphase_with_shape_flags_impl(self, sort_type):
+        """Test SAP broad phase with ShapeFlags filtering.
+
+        This test verifies that:
+        - Shapes without COLLIDE_SHAPES flag are correctly filtered out
+        - Filtering works correctly with multiple worlds
+        - num_regular_worlds is correctly computed after filtering (tests bug fix)
+        """
+        verbose = False
+
+        # Create random bounding boxes in min-max format
+        ngeom = 40
+        num_worlds = 4
+
+        # Generate random centers and sizes
+        rng = np.random.Generator(np.random.PCG64(789))
+
+        centers = rng.random((ngeom, 3)) * 5.0
+        sizes = rng.random((ngeom, 3)) * 1.5
+        geom_bounding_box_lower = centers - sizes
+        geom_bounding_box_upper = centers + sizes
+
+        np_geom_cutoff = np.zeros(ngeom, dtype=np.float32)
+
+        # Randomly assign collision groups
+        num_groups = 5
+        np_collision_group = rng.integers(1, num_groups + 1, size=ngeom, dtype=np.int32)
+
+        # Make some entities shared (negative collision group)
+        num_shared = int(sqrt(ngeom))
+        shared_indices = rng.choice(ngeom, size=num_shared, replace=False)
+        np_collision_group[shared_indices] = -1
+
+        # Randomly distribute objects across worlds
+        np_shape_world = rng.integers(0, num_worlds, size=ngeom, dtype=np.int32)
+
+        # Make some entities global (world -1)
+        num_global = max(3, ngeom // 10)
+        global_indices = rng.choice(ngeom, size=num_global, replace=False)
+        np_shape_world[global_indices] = -1
+
+        # Create shape flags: some geometries will be visual-only
+        np_shape_flags = np.zeros(ngeom, dtype=np.int32)
+
+        # Assign flags: ~60% will have COLLIDE_SHAPES flag
+        colliding_indices = rng.choice(ngeom, size=int(0.6 * ngeom), replace=False)
+        np_shape_flags[colliding_indices] = ShapeFlags.COLLIDE_SHAPES
+
+        # CRITICAL TEST CASE: Filter out all geometries from world 1
+        world_1_mask = np_shape_world == 1
+        np_shape_flags[world_1_mask] = 0  # Remove COLLIDE_SHAPES from all world 1 geometries
+
+        # Count how many colliding geometries remain after filtering
+        colliding_mask = (np_shape_flags & ShapeFlags.COLLIDE_SHAPES) != 0
+        num_colliding = np.sum(colliding_mask)
+
+        if verbose:
+            print("\nSAP test setup with ShapeFlags:")
+            print(f"  Total geometries: {ngeom}")
+            print(f"  Geometries with COLLIDE_SHAPES flag: {num_colliding}")
+            print(f"  Geometries filtered out: {ngeom - num_colliding}")
+
+        # Compute expected pairs using numpy (with shape flags filtering)
+        pairs_np = find_overlapping_pairs_np(
+            geom_bounding_box_lower,
+            geom_bounding_box_upper,
+            np_geom_cutoff,
+            np_collision_group,
+            np_shape_world,
+            np_shape_flags,
+        )
+
+        # Setup Warp arrays
+        num_lower_tri_elements = ngeom * (ngeom - 1) // 2
+        geom_lower = wp.array(geom_bounding_box_lower, dtype=wp.vec3)
+        geom_upper = wp.array(geom_bounding_box_upper, dtype=wp.vec3)
+        geom_cutoff = wp.array(np_geom_cutoff)
+        collision_group = wp.array(np_collision_group)
+        shape_world = wp.array(np_shape_world, dtype=wp.int32)
+        shape_flags = wp.array(np_shape_flags, dtype=wp.int32)
+        num_candidate_pair = wp.array([0], dtype=wp.int32)
+        candidate_pair = wp.array(np.zeros((num_lower_tri_elements, 2), dtype=wp.int32), dtype=wp.vec2i)
+
+        # Initialize SAP broad phase with shape_flags
+        sap_broadphase = BroadPhaseSAP(shape_world, geom_flags=shape_flags, sort_type=sort_type)
+
+        # Verify num_regular_worlds is correct after filtering
+        colliding_worlds = np.unique(np_shape_world[colliding_mask])
+        colliding_worlds = colliding_worlds[colliding_worlds >= 0]  # Exclude -1
+        expected_num_regular_worlds = len(colliding_worlds)
+
+        self.assertEqual(
+            sap_broadphase.num_regular_worlds,
+            expected_num_regular_worlds,
+            f"num_regular_worlds mismatch: expected {expected_num_regular_worlds} "
+            f"(after filtering), got {sap_broadphase.num_regular_worlds}",
+        )
+
+        # Launch SAP broad phase
+        sap_broadphase.launch(
+            geom_lower,
+            geom_upper,
+            geom_cutoff,
+            collision_group,
+            shape_world,
+            ngeom,
+            candidate_pair,
+            num_candidate_pair,
+        )
+
+        wp.synchronize()
+
+        # Get results
+        pairs_wp = candidate_pair.numpy()
+        num_candidate_pair_result = num_candidate_pair.numpy()[0]
+
+        # Verify results
+        if len(pairs_np) != num_candidate_pair_result:
+            pairs_np_set = {tuple(pair) for pair in pairs_np}
+            pairs_wp_set = {tuple(pairs_wp[i]) for i in range(num_candidate_pair_result)}
+
+            missing = pairs_np_set - pairs_wp_set
+            extra = pairs_wp_set - pairs_np_set
+
+            if missing:
+                print(f"\nMissing pairs ({len(missing)}):")
+                for pair in list(missing)[:10]:
+                    body_a, body_b = pair
+                    print(f"  {pair}: worlds ({np_shape_world[body_a]}, {np_shape_world[body_b]})")
+
+            if extra:
+                print(f"\nExtra pairs ({len(extra)}):")
+                for pair in list(extra)[:10]:
+                    body_a, body_b = pair
+                    print(f"  {pair}: worlds ({np_shape_world[body_a]}, {np_shape_world[body_b]})")
+
+            assert len(pairs_np) == num_candidate_pair_result
+
+        # Ensure every element in pairs_wp is also present in pairs_np
+        pairs_np_set = {tuple(pair) for pair in pairs_np}
+        for pair in pairs_wp[:num_candidate_pair_result]:
+            assert tuple(pair) in pairs_np_set, f"Pair {tuple(pair)} from Warp not found in numpy pairs"
+
+        # Verify that no pairs contain filtered-out geometries
+        for pair in pairs_wp[:num_candidate_pair_result]:
+            body_a, body_b = pair[0], pair[1]
+            flag_a = np_shape_flags[body_a]
+            flag_b = np_shape_flags[body_b]
+            assert (flag_a & ShapeFlags.COLLIDE_SHAPES) != 0, (
+                f"Pair contains filtered geometry {body_a} with flag {flag_a}"
+            )
+            assert (flag_b & ShapeFlags.COLLIDE_SHAPES) != 0, (
+                f"Pair contains filtered geometry {body_b} with flag {flag_b}"
+            )
+
+    def test_sap_broadphase_with_shape_flags_segmented(self):
+        """Test SAP broad phase with ShapeFlags using segmented sort."""
+        self._test_sap_broadphase_with_shape_flags_impl(SAPSortType.SEGMENTED)
+
+    def test_sap_broadphase_with_shape_flags_tile(self):
+        """Test SAP broad phase with ShapeFlags using tile sort."""
+        self._test_sap_broadphase_with_shape_flags_impl(SAPSortType.TILE)
 
     def test_nxn_edge_cases(self):
         """Test NxN broad phase with tricky edge cases to verify GPU code correctness.
