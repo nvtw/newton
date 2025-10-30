@@ -614,14 +614,11 @@ def process_mesh_triangle_contacts_kernel(
             X_bw_b = wp.transform_inverse(body_q[body_idx_b])
 
         # Compute contacts using GJK/MPR
-        type_a = int(GeoTypeEx.TRIANGLE)
-        type_b = shape_type[shape_b]
-
+        # Note: shape_data_a already has shape_type set to TRIANGLE
+        # Note: shape_data_b already has shape_type from extract_shape_data
         count, normal, signed_distances, points, radius_eff_a, radius_eff_b = compute_gjk_mpr_contacts(
             shape_data_a,
             shape_data_b,
-            type_a,
-            type_b,
             quat_a,
             quat_b,
             pos_a,

@@ -240,8 +240,6 @@ def postprocess_axial_shape_discrete_contacts(
 def compute_gjk_mpr_contacts(
     geom_a: GenericShapeData,
     geom_b: GenericShapeData,
-    type_a: int,
-    type_b: int,
     rot_a: wp.quat,
     rot_b: wp.quat,
     pos_a_adjusted: wp.vec3,
@@ -250,6 +248,15 @@ def compute_gjk_mpr_contacts(
 ):
     """
     Compute contacts between two shapes using GJK/MPR algorithm.
+
+    Args:
+        geom_a: Generic shape data for shape A (contains shape_type)
+        geom_b: Generic shape data for shape B (contains shape_type)
+        rot_a: Orientation of shape A
+        rot_b: Orientation of shape B
+        pos_a_adjusted: Adjusted position of shape A
+        pos_b_adjusted: Adjusted position of shape B
+        rigid_contact_margin: Contact margin for rigid bodies
 
     Returns:
         Tuple of (count, normal, signed_distances, points, radius_eff_a, radius_eff_b)
@@ -260,6 +267,10 @@ def compute_gjk_mpr_contacts(
     radius_eff_b = float(0.0)
 
     small_radius = 0.0001
+
+    # Get shape types from shape data
+    type_a = geom_a.shape_type
+    type_b = geom_b.shape_type
 
     # Special treatment for minkowski objects
     if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
@@ -584,29 +595,25 @@ def find_contacts(
     # Use the OTHER object's radius to properly size the cube
     # Only convert if it's an infinite plane (finite planes can be handled normally)
     pos_a_adjusted = pos_a
-    type_a = shape_data_a.shape_type
     if is_infinite_plane_a:
         # Position the cube based on the OTHER object's position (pos_b)
+        # Note: convert_infinite_plane_to_cube modifies shape_data_a.shape_type to BOX
         shape_data_a, pos_a_adjusted = convert_infinite_plane_to_cube(
             shape_data_a, quat_a, pos_a, pos_b, bsphere_radius_b + rigid_contact_margin
         )
-        type_a = int(GeoType.BOX)
 
     pos_b_adjusted = pos_b
-    type_b = shape_data_b.shape_type
     if is_infinite_plane_b:
         # Position the cube based on the OTHER object's position (pos_a)
+        # Note: convert_infinite_plane_to_cube modifies shape_data_b.shape_type to BOX
         shape_data_b, pos_b_adjusted = convert_infinite_plane_to_cube(
             shape_data_b, quat_b, pos_b, pos_a, bsphere_radius_a + rigid_contact_margin
         )
-        type_b = int(GeoType.BOX)
 
     # Compute contacts using GJK/MPR
     count, normal, signed_distances, points, radius_eff_a, radius_eff_b = compute_gjk_mpr_contacts(
         shape_data_a,
         shape_data_b,
-        type_a,
-        type_b,
         quat_a,
         quat_b,
         pos_a_adjusted,
