@@ -24,7 +24,7 @@ from ..core.types import Devicelike
 from ..geometry.broad_phase_common import binary_search
 from ..geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from ..geometry.broad_phase_sap import BroadPhaseSAP
-from ..geometry.collision_convex import create_solve_convex_multi_contact, create_solve_convex_single_contact
+from ..geometry.collision_core import compute_gjk_mpr_contacts
 from ..geometry.support_function import (
     GenericShapeData,
     GeoTypeEx,
@@ -32,15 +32,11 @@ from ..geometry.support_function import (
     pack_mesh_ptr,
     support_map,
 )
-from ..geometry.support_function import (
-    support_map as support_map_func,
-)
 from ..geometry.types import GeoType
 from .contacts import Contacts
 from .model import Model
 from .state import State
 
-ENABLE_MULTI_CONTACT = True
 ENABLE_TILE_BVH_QUERY = False
 
 
@@ -56,15 +52,6 @@ class BroadPhaseMode(IntEnum):
     NXN = 0
     SAP = 1
     EXPLICIT = 2
-
-
-# Pre-create the convex multi-contact solver (usable inside kernels)
-solve_convex_multi_contact = create_solve_convex_multi_contact(support_map_func)
-solve_convex_single_contact = create_solve_convex_single_contact(support_map_func)
-
-# Type definitions for multi-contact manifolds
-_mat53f = wp.types.matrix((5, 3), wp.float32)
-_vec5 = wp.types.vector(5, wp.float32)
 
 
 @wp.func
@@ -277,132 +264,6 @@ def extract_shape_data(
 
 
 @wp.func
-def compute_gjk_mpr_contacts(
-    geom_a: GenericShapeData,
-    geom_b: GenericShapeData,
-    type_a: int,
-    type_b: int,
-    rot_a: wp.quat,
-    rot_b: wp.quat,
-    pos_a_adjusted: wp.vec3,
-    pos_b_adjusted: wp.vec3,
-    rigid_contact_margin: float,
-):
-    """
-    Compute contacts between two shapes using GJK/MPR algorithm.
-
-    Returns:
-        Tuple of (count, normal, signed_distances, points, radius_eff_a, radius_eff_b)
-    """
-    data_provider = SupportMapDataProvider()
-
-    radius_eff_a = float(0.0)
-    radius_eff_b = float(0.0)
-
-    small_radius = 0.0001
-
-    # Special treatment for minkowski objects
-    if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
-        radius_eff_a = geom_a.scale[0]
-        geom_a.scale[0] = small_radius
-
-    if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
-        radius_eff_b = geom_b.scale[0]
-        geom_b.scale[0] = small_radius
-
-    if wp.static(ENABLE_MULTI_CONTACT):
-        count, normal, signed_distances, points, _features = wp.static(solve_convex_multi_contact)(
-            geom_a,
-            geom_b,
-            rot_a,
-            rot_b,
-            pos_a_adjusted,
-            pos_b_adjusted,
-            0.0,  # sum_of_contact_offsets - gap
-            data_provider,
-            rigid_contact_margin + radius_eff_a + radius_eff_b,
-            type_a == int(GeoType.SPHERE) or type_b == int(GeoType.SPHERE),
-        )
-    else:
-        count, normal, signed_distances, points, _features = wp.static(solve_convex_single_contact)(
-            geom_a,
-            geom_b,
-            rot_a,
-            rot_b,
-            pos_a_adjusted,
-            pos_b_adjusted,
-            0.0,  # sum_of_contact_offsets - gap
-            data_provider,
-            rigid_contact_margin + radius_eff_a + radius_eff_b,
-        )
-
-    # Special post processing for minkowski objects
-    if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
-        for i in range(count):
-            points[i] = points[i] + normal * (radius_eff_a * 0.5)
-            signed_distances[i] -= radius_eff_a - small_radius
-    if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
-        for i in range(count):
-            points[i] = points[i] - normal * (radius_eff_b * 0.5)
-            signed_distances[i] -= radius_eff_b - small_radius
-
-    if wp.static(ENABLE_MULTI_CONTACT):
-        # Post-process for axial shapes (cylinder/cone) rolling on discrete surfaces
-        is_discrete_a = is_discrete_shape(geom_a.shape_type)
-        is_discrete_b = is_discrete_shape(geom_b.shape_type)
-        is_axial_a = type_a == int(GeoType.CYLINDER) or type_a == int(GeoType.CONE)
-        is_axial_b = type_b == int(GeoType.CYLINDER) or type_b == int(GeoType.CONE)
-
-        if is_discrete_a and is_axial_b and count >= 3:
-            # Post-process axial shape (B) rolling on discrete surface (A)
-            shape_radius = geom_b.scale[0]  # radius for cylinder, base radius for cone
-            shape_half_height = geom_b.scale[1]
-            is_cone_b = type_b == int(GeoType.CONE)
-            count, signed_distances, points = postprocess_axial_shape_discrete_contacts(
-                points,
-                normal,
-                signed_distances,
-                count,
-                rot_b,
-                shape_radius,
-                shape_half_height,
-                pos_b_adjusted,
-                is_cone_b,
-            )
-
-        if is_discrete_b and is_axial_a and count >= 3:
-            # Post-process axial shape (A) rolling on discrete surface (B)
-            # Note: normal points from A to B, so we need to negate it for the shape processing
-            shape_radius = geom_a.scale[0]  # radius for cylinder, base radius for cone
-            shape_half_height = geom_a.scale[1]
-            is_cone_a = type_a == int(GeoType.CONE)
-            count, signed_distances, points = postprocess_axial_shape_discrete_contacts(
-                points,
-                -normal,
-                signed_distances,
-                count,
-                rot_a,
-                shape_radius,
-                shape_half_height,
-                pos_a_adjusted,
-                is_cone_a,
-            )
-
-    return count, normal, signed_distances, points, radius_eff_a, radius_eff_b
-
-
-@wp.func
-def is_discrete_shape(shape_type: int) -> bool:
-    """A discrete shape can be represented with a finite amount of flat polygon faces."""
-    return (
-        shape_type == int(GeoType.BOX)
-        or shape_type == int(GeoType.CONVEX_MESH)
-        or shape_type == int(GeoTypeEx.TRIANGLE)
-        or shape_type == int(GeoType.PLANE)
-    )
-
-
-@wp.func
 def compute_tight_aabb_from_support(
     shape_data: GenericShapeData,
     orientation: wp.quat,
@@ -464,195 +325,6 @@ def compute_tight_aabb_from_support(
     aabb_max = wp.vec3(max_x, max_y, max_z) + center_pos
 
     return aabb_min, aabb_max
-
-
-@wp.func
-def project_point_onto_plane(point: wp.vec3, plane_point: wp.vec3, plane_normal: wp.vec3) -> wp.vec3:
-    """
-    Project a point onto a plane defined by a point and normal.
-
-    Args:
-        point: The point to project
-        plane_point: A point on the plane
-        plane_normal: Normal vector of the plane (should be normalized)
-
-    Returns:
-        The projected point on the plane
-    """
-    to_point = point - plane_point
-    distance_to_plane = wp.dot(to_point, plane_normal)
-    projected_point = point - plane_normal * distance_to_plane
-    return projected_point
-
-
-@wp.func
-def compute_plane_normal_from_contacts(
-    points: _mat53f,
-    normal: wp.vec3,
-    signed_distances: _vec5,
-    count: int,
-) -> wp.vec3:
-    """
-    Compute plane normal from reconstructed plane points.
-
-    Reconstructs the plane points from contact data and computes the plane normal
-    using fan triangulation to find the largest area triangle for numerical stability.
-
-    Args:
-        points: Contact points matrix (5x3)
-        normal: Initial contact normal (used for reconstruction)
-        signed_distances: Signed distances vector (5 elements)
-        count: Number of contact points
-
-    Returns:
-        Normalized plane normal from the contact points
-    """
-    if count < 3:
-        # Not enough points to form a triangle, return original normal
-        return normal
-
-    # Reconstruct plane points from contact data
-    # Use first point as anchor for fan triangulation
-    # Contact points are at midpoint, move to discrete surface (plane)
-    p0 = points[0] + normal * (signed_distances[0] * 0.5)
-
-    # Find the triangle with the largest area for numerical stability
-    # This avoids issues with nearly collinear points
-    best_normal = wp.vec3(0.0, 0.0, 0.0)
-    max_area_sq = float(0.0)
-
-    for i in range(1, count - 1):
-        # Reconstruct plane points for this triangle
-        pi = points[i] + normal * (signed_distances[i] * 0.5)
-        pi_next = points[i + 1] + normal * (signed_distances[i + 1] * 0.5)
-
-        # Compute cross product for triangle (p0, pi, pi_next)
-        edge1 = pi - p0
-        edge2 = pi_next - p0
-        cross = wp.cross(edge1, edge2)
-        area_sq = wp.dot(cross, cross)
-
-        if area_sq > max_area_sq:
-            max_area_sq = area_sq
-            best_normal = cross
-
-    # Normalize, avoid zero
-    len_n = wp.sqrt(wp.max(1.0e-12, max_area_sq))
-    plane_normal = best_normal / len_n
-
-    # Ensure normal points in same direction as original normal
-    if wp.dot(plane_normal, normal) < 0.0:
-        plane_normal = -plane_normal
-
-    return plane_normal
-
-
-@wp.func
-def postprocess_axial_shape_discrete_contacts(
-    points: _mat53f,
-    normal: wp.vec3,
-    signed_distances: _vec5,
-    count: int,
-    shape_rot: wp.quat,
-    shape_radius: float,
-    shape_half_height: float,
-    shape_pos: wp.vec3,
-    is_cone: bool,
-) -> tuple[int, _vec5, _mat53f]:
-    """
-    Post-process contact points for axial shape (cylinder/cone) vs discrete surface collisions.
-
-    When an axial shape is rolling on a discrete surface (plane, box, convex hull),
-    we project contact points onto a plane perpendicular to both the shape axis and
-    contact normal to stabilize rolling contacts.
-
-    Works for:
-    - Cylinders: Axis perpendicular to surface normal when rolling
-    - Cones: Axis at an angle = cone half-angle when rolling on base
-
-    Args:
-        points: Contact points matrix (5x3)
-        normal: Contact normal (from discrete to shape)
-        signed_distances: Signed distances vector (5 elements)
-        count: Number of input contact points
-        shape_rot: Shape orientation
-        shape_radius: Shape radius (constant for cylinder, base radius for cone)
-        shape_half_height: Shape half height
-        shape_pos: Shape position
-        is_cone: True if shape is a cone, False if cylinder
-
-    Returns:
-        Tuple of (new_count, new_signed_distances, new_points)
-    """
-    # Get shape axis in world space (Z-axis for both cylinders and cones)
-    shape_axis = wp.quat_rotate(shape_rot, wp.vec3(0.0, 0.0, 1.0))
-
-    # Check if shape is in rolling configuration
-    axis_normal_dot = wp.abs(wp.dot(shape_axis, normal))
-
-    # Compute threshold based on shape type
-    if is_cone:
-        # For a cone rolling on its base, the axis makes an angle with the normal
-        # equal to the cone's half-angle: angle = atan(radius / (2 * half_height))
-        # When rolling: dot(axis, normal) = cos(90 - angle) = sin(angle)
-        # Add tolerance of +/-2 degrees
-        cone_half_angle = wp.atan2(shape_radius, 2.0 * shape_half_height)
-        tolerance_angle = wp.static(2.0 * wp.pi / 180.0)  # 2 degrees
-        lower_threshold = wp.sin(cone_half_angle - tolerance_angle)
-        upper_threshold = wp.sin(cone_half_angle + tolerance_angle)
-
-        # Check if axis_normal_dot is in the expected range for rolling
-        if axis_normal_dot < lower_threshold or axis_normal_dot > upper_threshold:
-            # Not in rolling configuration
-            return count, signed_distances, points
-    else:
-        # For cylinder: axis should be perpendicular to normal (dot product ≈ 0)
-        perpendicular_threshold = wp.static(wp.sin(2.0 * wp.pi / 180.0))
-        if axis_normal_dot > perpendicular_threshold:
-            # Not rolling, return original contacts
-            return count, signed_distances, points
-
-    # Estimate plane from contact points using the contact normal
-    # Use first contact point as plane reference
-    if count == 0:
-        return 0, signed_distances, points
-
-    # Compute plane normal from the largest area triangle formed by contact points
-    # shape_plane_normal = compute_plane_normal_from_contacts(points, normal, signed_distances, count)
-    # projection_plane_normal = wp.normalize(wp.cross(shape_axis, shape_plane_normal))
-
-    projection_plane_normal = wp.normalize(wp.cross(shape_axis, normal))
-    point_on_projection_plane = shape_pos
-
-    # Project points onto the projection plane and remove duplicates in one pass
-    # This avoids creating intermediate arrays and saves registers
-    tolerance = shape_radius * 0.01  # 1% of radius for duplicate detection
-    output_count = int(0)
-    first_point = wp.vec3(0.0, 0.0, 0.0)
-
-    for i in range(count):
-        # Project contact point onto projection plane
-        projected_point = project_point_onto_plane(points[i], point_on_projection_plane, projection_plane_normal)
-        is_duplicate = False
-
-        if output_count > 0:
-            # Check against previous output point
-            if wp.length(projected_point - points[output_count - 1]) < tolerance:
-                is_duplicate = True
-
-        if not is_duplicate and i > 0 and i == count - 1 and output_count > 0:
-            # Last point: check against first point (cyclic)
-            if wp.length(projected_point - first_point) < tolerance:
-                is_duplicate = True
-
-        if not is_duplicate:
-            points[output_count] = projected_point
-            signed_distances[output_count] = signed_distances[i]
-            if output_count == 0:
-                first_point = projected_point
-            output_count += 1
-
-    return output_count, signed_distances, points
 
 
 @wp.func
