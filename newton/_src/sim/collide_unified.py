@@ -24,13 +24,18 @@ from ..core.types import Devicelike
 from ..geometry.broad_phase_common import binary_search
 from ..geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from ..geometry.broad_phase_sap import BroadPhaseSAP
-from ..geometry.collision_core import compute_gjk_mpr_contacts
+from ..geometry.collision_core import (
+    check_infinite_plane_bsphere_overlap,
+    compute_bounding_sphere_from_aabb,
+    compute_gjk_mpr_contacts,
+    compute_tight_aabb_from_support,
+    convert_infinite_plane_to_cube,
+)
 from ..geometry.support_function import (
     GenericShapeData,
     GeoTypeEx,
     SupportMapDataProvider,
     pack_mesh_ptr,
-    support_map,
 )
 from ..geometry.types import GeoType
 from .contacts import Contacts
@@ -155,68 +160,6 @@ def write_contact(
 
 
 @wp.func
-def convert_infinite_plane_to_cube(
-    shape_data: GenericShapeData,
-    plane_rotation: wp.quat,
-    plane_position: wp.vec3,
-    other_position: wp.vec3,
-    other_radius: float,
-) -> tuple[GenericShapeData, wp.vec3]:
-    """
-    Convert an infinite plane into a cube proxy for GJK/MPR collision detection.
-
-    Since GJK/MPR cannot handle infinite planes, we create a finite cube where:
-    - The cube is positioned with its top face at the plane surface
-    - The cube's lateral dimensions are sized based on the other object's bounding sphere
-    - The cube extends only 'downward' from the plane (half-space in -Z direction in plane's local frame)
-
-    Args:
-        shape_data: The plane's shape data (should have shape_type == GeoType.PLANE)
-        plane_rotation: The plane's orientation (plane normal is along local +Z)
-        plane_position: The plane's position in world space
-        other_position: The other object's position in world space
-        other_radius: Bounding sphere radius of the colliding object
-
-    Returns:
-        Tuple of (modified_shape_data, adjusted_position):
-        - modified_shape_data: GenericShapeData configured as a BOX
-        - adjusted_position: The cube's center position (centered on other object projected to plane)
-    """
-    result = GenericShapeData()
-    result.shape_type = int(GeoType.BOX)
-
-    # Size the cube based on the other object's bounding sphere radius
-    # Make it large enough to always contain potential contact points
-    # The lateral dimensions (x, y) should be at least 2x the radius to ensure coverage
-    lateral_size = other_radius * 10.0
-
-    # The depth (z) should be large enough to encompass the potential collision region
-    # Half-space behavior: cube extends only below the plane surface (negative Z)
-    depth = other_radius * 10.0
-
-    # Set the box half-extents
-    # x, y: lateral coverage (parallel to plane)
-    # z: depth perpendicular to plane
-    result.scale = wp.vec3(lateral_size, lateral_size, depth)
-
-    # Position the cube center at the plane surface, directly under/over the other object
-    # Project the other object's position onto the plane
-    plane_normal = wp.quat_rotate(plane_rotation, wp.vec3(0.0, 0.0, 1.0))
-    to_other = other_position - plane_position
-    distance_along_normal = wp.dot(to_other, plane_normal)
-
-    # Point on plane surface closest to the other object
-    plane_surface_point = other_position - plane_normal * distance_along_normal
-
-    # Position cube center slightly below the plane surface so the top face is at the surface
-    # Since the cube has half-extent 'depth', its top face is at center + depth*normal
-    # We want: center + depth*normal = plane_surface, so center = plane_surface - depth*normal
-    adjusted_position = plane_surface_point - plane_normal * depth
-
-    return result, adjusted_position
-
-
-@wp.func
 def extract_shape_data(
     shape_idx: int,
     body_q: wp.array(dtype=wp.transform),
@@ -261,140 +204,6 @@ def extract_shape_data(
         result.auxiliary = pack_mesh_ptr(shape_source_ptr[shape_idx])
 
     return position, orientation, result
-
-
-@wp.func
-def compute_tight_aabb_from_support(
-    shape_data: GenericShapeData,
-    orientation: wp.quat,
-    center_pos: wp.vec3,
-    data_provider: SupportMapDataProvider,
-) -> tuple[wp.vec3, wp.vec3]:
-    """
-    Compute tight AABB for a shape using support function.
-
-    Args:
-        shape_data: Generic shape data
-        orientation: Shape orientation (quaternion)
-        center_pos: Center position of the shape
-        data_provider: Support map data provider
-
-    Returns:
-        Tuple of (aabb_min, aabb_max) in world space
-    """
-    # Transpose orientation matrix to transform world axes to local space
-    # Convert quaternion to 3x3 rotation matrix and transpose (inverse rotation)
-    rot_mat = wp.quat_to_matrix(orientation)
-    rot_mat_t = wp.transpose(rot_mat)
-
-    # Transform world axes to local space (multiply by transposed rotation = inverse rotation)
-    local_x = wp.vec3(rot_mat_t[0, 0], rot_mat_t[1, 0], rot_mat_t[2, 0])
-    local_y = wp.vec3(rot_mat_t[0, 1], rot_mat_t[1, 1], rot_mat_t[2, 1])
-    local_z = wp.vec3(rot_mat_t[0, 2], rot_mat_t[1, 2], rot_mat_t[2, 2])
-
-    # Compute AABB extents by evaluating support function in local space
-    # Dot products are done in local space to avoid expensive rotations
-    support_point = wp.vec3()
-
-    # Max X: support along +local_x, dot in local space
-    support_point, _feature_id = support_map(shape_data, local_x, data_provider)
-    max_x = wp.dot(local_x, support_point)
-
-    # Max Y: support along +local_y, dot in local space
-    support_point, _feature_id = support_map(shape_data, local_y, data_provider)
-    max_y = wp.dot(local_y, support_point)
-
-    # Max Z: support along +local_z, dot in local space
-    support_point, _feature_id = support_map(shape_data, local_z, data_provider)
-    max_z = wp.dot(local_z, support_point)
-
-    # Min X: support along -local_x, dot in local space
-    support_point, _feature_id = support_map(shape_data, -local_x, data_provider)
-    min_x = wp.dot(local_x, support_point)
-
-    # Min Y: support along -local_y, dot in local space
-    support_point, _feature_id = support_map(shape_data, -local_y, data_provider)
-    min_y = wp.dot(local_y, support_point)
-
-    # Min Z: support along -local_z, dot in local space
-    support_point, _feature_id = support_map(shape_data, -local_z, data_provider)
-    min_z = wp.dot(local_z, support_point)
-
-    # AABB in world space (add world position to extents)
-    aabb_min = wp.vec3(min_x, min_y, min_z) + center_pos
-    aabb_max = wp.vec3(max_x, max_y, max_z) + center_pos
-
-    return aabb_min, aabb_max
-
-
-@wp.func
-def compute_bounding_sphere_from_aabb(aabb_lower: wp.vec3, aabb_upper: wp.vec3) -> tuple[wp.vec3, float]:
-    """
-    Compute a bounding sphere from an AABB.
-
-    Returns:
-        Tuple of (center, radius) where center is the AABB center and radius is half the diagonal.
-    """
-    center = 0.5 * (aabb_lower + aabb_upper)
-    half_extents = 0.5 * (aabb_upper - aabb_lower)
-    radius = wp.length(half_extents)
-    return center, radius
-
-
-@wp.func
-def check_infinite_plane_bsphere_overlap(
-    shape_data_a: GenericShapeData,
-    shape_data_b: GenericShapeData,
-    pos_a: wp.vec3,
-    pos_b: wp.vec3,
-    quat_a: wp.quat,
-    quat_b: wp.quat,
-    bsphere_center_a: wp.vec3,
-    bsphere_center_b: wp.vec3,
-    bsphere_radius_a: float,
-    bsphere_radius_b: float,
-) -> bool:
-    """
-    Check if an infinite plane overlaps with another shape's bounding sphere.
-    Treats the plane as a half-space: objects on or below the plane (negative side of the normal)
-    are considered to overlap and will generate contacts.
-    Returns True if they overlap, False otherwise.
-    Uses data already extracted by extract_shape_data.
-    """
-    type_a = shape_data_a.shape_type
-    type_b = shape_data_b.shape_type
-    scale_a = shape_data_a.scale
-    scale_b = shape_data_b.scale
-
-    # Check if either shape is an infinite plane
-    is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
-    is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (scale_b[0] == 0.0 and scale_b[1] == 0.0)
-
-    # If neither is an infinite plane, return True (no culling)
-    if not (is_infinite_plane_a or is_infinite_plane_b):
-        return True
-
-    # Determine which is the plane and which is the other shape
-    if is_infinite_plane_a:
-        plane_pos = pos_a
-        plane_quat = quat_a
-        other_center = bsphere_center_b
-        other_radius = bsphere_radius_b
-    else:
-        plane_pos = pos_b
-        plane_quat = quat_b
-        other_center = bsphere_center_a
-        other_radius = bsphere_radius_a
-
-    # Compute plane normal (plane's local +Z axis in world space)
-    plane_normal = wp.quat_rotate(plane_quat, wp.vec3(0.0, 0.0, 1.0))
-
-    # Distance from sphere center to plane (positive = above plane, negative = below plane)
-    center_dist = wp.dot(other_center - plane_pos, plane_normal)
-
-    # Treat plane as a half-space: objects on or below the plane (negative side) generate contacts
-    # Remove absolute value to only check penetration side
-    return center_dist <= other_radius
 
 
 @wp.kernel(enable_backward=False)
