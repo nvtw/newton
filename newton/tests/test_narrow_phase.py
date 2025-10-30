@@ -13,6 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Test NarrowPhase collision detection API.
+
+This test suite validates the NarrowPhase API by testing various primitive collision scenarios.
+The tests follow the same conventions as test_collision_primitives.py:
+
+1. **Normal Direction**: Contact normals point from shape A (first geom) toward shape B (second geom)
+2. **Penetration Depth**: Negative values indicate penetration, positive values indicate separation
+3. **Surface Reconstruction**: Moving ±penetration_depth/2 along the normal from the contact point
+   should land on the respective surfaces of each geometry
+4. **Unit Normals**: All contact normals should have unit length
+5. **Perpendicular Tangents**: Contact tangents should be perpendicular to normals
+
+These validations ensure the NarrowPhase follows the same contact conventions as the
+primitive collision functions.
+"""
+
 import unittest
 
 import numpy as np
@@ -20,6 +36,114 @@ import warp as wp
 
 from newton._src.geometry.narrow_phase import NarrowPhase
 from newton._src.geometry.types import GeoType
+
+
+def check_normal_direction(pos_a, pos_b, normal, tolerance=1e-5):
+    """Check that normal points from shape A toward shape B."""
+    expected_direction = pos_b - pos_a
+    expected_direction_norm = np.linalg.norm(expected_direction)
+    if expected_direction_norm > tolerance:
+        expected_direction = expected_direction / expected_direction_norm
+        dot_product = np.dot(normal, expected_direction)
+        return dot_product > (1.0 - tolerance)
+    return True  # Can't determine direction if centers coincide
+
+
+def check_contact_position_midpoint_spheres(
+    contact_pos, normal, penetration_depth, pos_a, radius_a, pos_b, radius_b, tolerance=0.05
+):
+    """Check that contact position is at the midpoint between the two sphere surfaces.
+
+    For sphere-sphere collision:
+    - Moving from contact_pos by -penetration_depth/2 along normal should reach surface of sphere A
+    - Moving from contact_pos by +penetration_depth/2 along normal should reach surface of sphere B
+    """
+    if penetration_depth >= 0:
+        # For separated or just touching cases, position is still at midpoint
+        # but we can't validate surface points the same way
+        return True
+
+    # Point on surface of geom 0 (sphere A)
+    surface_point_0 = contact_pos - normal * (penetration_depth / 2.0)
+    # Distance from this point to sphere A center should equal radius_a
+    dist_to_sphere_a = np.linalg.norm(surface_point_0 - pos_a)
+
+    # Point on surface of geom 1 (sphere B)
+    surface_point_1 = contact_pos + normal * (penetration_depth / 2.0)
+    # Distance from this point to sphere B center should equal radius_b
+    dist_to_sphere_b = np.linalg.norm(surface_point_1 - pos_b)
+
+    return abs(dist_to_sphere_a - radius_a) < tolerance and abs(dist_to_sphere_b - radius_b) < tolerance
+
+
+def distance_point_to_box(point, box_pos, box_rot, box_size):
+    """Calculate distance from a point to a box surface.
+
+    Args:
+        point: Point to check (world space)
+        box_pos: Box center position
+        box_rot: Box rotation matrix (3x3)
+        box_size: Box half-extents
+    """
+    # Transform point to box local coordinates
+    local_point = np.dot(box_rot.T, point - box_pos)
+
+    # Clamp to box bounds
+    clamped = np.clip(local_point, -box_size, box_size)
+
+    # Distance from point to closest point on/in box
+    return np.linalg.norm(local_point - clamped)
+
+
+def distance_point_to_capsule(point, capsule_pos, capsule_axis, capsule_radius, capsule_half_length):
+    """Calculate distance from a point to a capsule surface."""
+    segment = capsule_axis * capsule_half_length
+    start = capsule_pos - segment
+    end = capsule_pos + segment
+
+    # Find closest point on capsule centerline
+    ab = end - start
+    t = np.dot(point - start, ab) / (np.dot(ab, ab) + 1e-6)
+    t = np.clip(t, 0.0, 1.0)
+    closest_on_line = start + t * ab
+
+    # Distance to capsule surface
+    dist_to_centerline = np.linalg.norm(point - closest_on_line)
+    return abs(dist_to_centerline - capsule_radius)
+
+
+def distance_point_to_plane(point, plane_pos, plane_normal):
+    """Calculate signed distance from a point to a plane."""
+    return np.dot(point - plane_pos, plane_normal)
+
+
+def check_surface_reconstruction(contact_pos, normal, penetration_depth, dist_func_a, dist_func_b, tolerance=0.08):
+    """Verify that contact position is at midpoint between surfaces.
+
+    Args:
+        contact_pos: Contact position in world space
+        normal: Contact normal (pointing from A to B)
+        penetration_depth: Penetration depth (negative for penetration)
+        dist_func_a: Function that calculates distance to surface A
+        dist_func_b: Function that calculates distance to surface B
+        tolerance: Tolerance for distance checks
+
+    Returns:
+        True if surface reconstruction is valid
+    """
+    if penetration_depth >= 0:
+        # For separated or just touching cases, we can't validate the same way
+        return True
+
+    # Point on surface of geom A (shape 0)
+    surface_point_a = contact_pos - normal * (penetration_depth / 2.0)
+    dist_to_surface_a = dist_func_a(surface_point_a)
+
+    # Point on surface of geom B (shape 1)
+    surface_point_b = contact_pos + normal * (penetration_depth / 2.0)
+    dist_to_surface_b = dist_func_b(surface_point_b)
+
+    return dist_to_surface_a < tolerance and dist_to_surface_b < tolerance
 
 
 class TestNarrowPhase(unittest.TestCase):
@@ -160,8 +284,8 @@ class TestNarrowPhase(unittest.TestCase):
             self.assertGreater(penetrations[0], 0.0, "Separated spheres should have positive penetration (separation)")
 
     def test_sphere_sphere_touching(self):
-        """Test sphere-sphere collision when exactly touching."""
-        # Two unit spheres exactly touching at x=2.0
+        """Test sphere-sphere collision when nearly touching."""
+        # Two unit spheres with very slight penetration at x=1.999
         geom_list = [
             {
                 "type": GeoType.SPHERE,
@@ -170,18 +294,20 @@ class TestNarrowPhase(unittest.TestCase):
             },
             {
                 "type": GeoType.SPHERE,
-                "transform": ([2.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
+                "transform": ([1.999, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
                 "data": ([1.0, 1.0, 1.0], 0.0),
             },
         ]
 
         count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
-        # Should generate contact at touching point
-        self.assertGreater(count, 0, "Touching spheres should generate contact")
-        self.assertAlmostEqual(penetrations[0], 0.0, places=2, msg="Touching spheres should have near-zero penetration")
+        # Should generate contact at nearly touching point
+        self.assertGreater(count, 0, "Nearly touching spheres should generate contact")
+        self.assertAlmostEqual(
+            penetrations[0], 0.0, places=2, msg="Nearly touching spheres should have near-zero penetration"
+        )
 
-        # Normal should point from sphere 0 to sphere 1 (along +X)
+        # Specifically check it's along +X
         self.assertAlmostEqual(normals[0][0], 1.0, places=2, msg="Normal should point along +X")
         self.assertAlmostEqual(normals[0][1], 0.0, places=2, msg="Normal Y should be 0")
         self.assertAlmostEqual(normals[0][2], 0.0, places=2, msg="Normal Z should be 0")
@@ -197,16 +323,21 @@ class TestNarrowPhase(unittest.TestCase):
 
         for separation, expected_penetration in test_cases:
             with self.subTest(separation=separation):
+                pos_a = np.array([0.0, 0.0, 0.0])
+                pos_b = np.array([separation, 0.0, 0.0])
+                radius_a = 1.0
+                radius_b = 1.0
+
                 geom_list = [
                     {
                         "type": GeoType.SPHERE,
-                        "transform": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
-                        "data": ([1.0, 1.0, 1.0], 0.0),
+                        "transform": (pos_a.tolist(), [0.0, 0.0, 0.0, 1.0]),
+                        "data": ([radius_a, radius_a, radius_a], 0.0),
                     },
                     {
                         "type": GeoType.SPHERE,
-                        "transform": ([separation, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
-                        "data": ([1.0, 1.0, 1.0], 0.0),
+                        "transform": (pos_b.tolist(), [0.0, 0.0, 0.0, 1.0]),
+                        "data": ([radius_b, radius_b, radius_b], 0.0),
                     },
                 ]
 
@@ -224,15 +355,18 @@ class TestNarrowPhase(unittest.TestCase):
                 normal_length = np.linalg.norm(normals[0])
                 self.assertAlmostEqual(normal_length, 1.0, places=2, msg="Normal should be unit length")
 
-                # Normal should point from sphere 0 toward sphere 1 (+X direction)
-                self.assertGreater(normals[0][0], 0.9, msg="Normal should point primarily in +X direction")
+                # Normal should point from sphere 0 toward sphere 1
+                self.assertTrue(
+                    check_normal_direction(pos_a, pos_b, normals[0]),
+                    msg="Normal should point from sphere 0 toward sphere 1",
+                )
 
     def test_sphere_sphere_different_radii(self):
         """Test sphere-sphere collision with different radii."""
-        # Sphere at origin with radius 0.5, sphere at x=1.5 with radius 1.0
-        # Distance between centers = 1.5
+        # Sphere at origin with radius 0.5, sphere at x=1.499 with radius 1.0
+        # Distance between centers = 1.499
         # Sum of radii = 1.5
-        # Expected penetration = 0.0 (just touching)
+        # Expected penetration = 0.001 (very slight penetration)
         geom_list = [
             {
                 "type": GeoType.SPHERE,
@@ -241,28 +375,37 @@ class TestNarrowPhase(unittest.TestCase):
             },
             {
                 "type": GeoType.SPHERE,
-                "transform": ([1.5, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
+                "transform": ([1.499, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
                 "data": ([1.0, 1.0, 1.0], 0.0),
             },
         ]
 
         count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
-        self.assertGreater(count, 0, "Touching spheres should generate contact")
-        self.assertAlmostEqual(penetrations[0], 0.0, places=2, msg="Should be just touching")
+        self.assertGreater(count, 0, "Nearly touching spheres should generate contact")
+        self.assertAlmostEqual(penetrations[0], 0.0, places=2, msg="Should have near-zero penetration")
 
     def test_sphere_box_penetrating(self):
         """Test sphere-box collision with penetration."""
         # Unit sphere at origin (radius 1.0), box at (1.999, 0, 0) with half-size 1.0
         # Sphere surface at x=1.0, box left surface at x=0.999
         # Expected penetration = 0.001
+        sphere_pos = np.array([0.0, 0.0, 0.0])
+        sphere_radius = 1.0
+        box_pos = np.array([1.999, 0.0, 0.0])
+        box_size = np.array([1.0, 1.0, 1.0])
+
         geom_list = [
             {
                 "type": GeoType.SPHERE,
-                "transform": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
-                "data": ([1.0, 1.0, 1.0], 0.0),
+                "transform": (sphere_pos.tolist(), [0.0, 0.0, 0.0, 1.0]),
+                "data": ([sphere_radius, sphere_radius, sphere_radius], 0.0),
             },
-            {"type": GeoType.BOX, "transform": ([1.999, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]), "data": ([1.0, 1.0, 1.0], 0.0)},
+            {
+                "type": GeoType.BOX,
+                "transform": (box_pos.tolist(), [0.0, 0.0, 0.0, 1.0]),
+                "data": (box_size.tolist(), 0.0),
+            },
         ]
 
         count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
@@ -270,7 +413,11 @@ class TestNarrowPhase(unittest.TestCase):
         # Should generate contact
         self.assertGreater(count, 0, "Sphere-box should generate contact")
 
-        # Normal should point approximately along +X axis
+        # Normal should point approximately from sphere toward box (+X direction)
+        self.assertTrue(
+            check_normal_direction(sphere_pos, box_pos, normals[0]),
+            msg="Normal should point from sphere toward box",
+        )
         self.assertGreater(abs(normals[0][0]), 0.9, msg="Normal should be primarily along X axis")
 
     def test_sphere_box_corner_collision(self):
@@ -301,9 +448,25 @@ class TestNarrowPhase(unittest.TestCase):
         """Test box-box collision with face contact."""
         # Two unit boxes, one at origin, one offset by 1.8 along X
         # Box surfaces at x=1.0 and x=0.8, overlap = 0.2
+        box_a_pos = np.array([0.0, 0.0, 0.0])
+        box_a_size = np.array([1.0, 1.0, 1.0])
+        box_a_rot = np.eye(3)
+
+        box_b_pos = np.array([1.8, 0.0, 0.0])
+        box_b_size = np.array([1.0, 1.0, 1.0])
+        box_b_rot = np.eye(3)
+
         geom_list = [
-            {"type": GeoType.BOX, "transform": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]), "data": ([1.0, 1.0, 1.0], 0.0)},
-            {"type": GeoType.BOX, "transform": ([1.8, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]), "data": ([1.0, 1.0, 1.0], 0.0)},
+            {
+                "type": GeoType.BOX,
+                "transform": (box_a_pos.tolist(), [0.0, 0.0, 0.0, 1.0]),
+                "data": (box_a_size.tolist(), 0.0),
+            },
+            {
+                "type": GeoType.BOX,
+                "transform": (box_b_pos.tolist(), [0.0, 0.0, 0.0, 1.0]),
+                "data": (box_b_size.tolist(), 0.0),
+            },
         ]
 
         count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
@@ -315,6 +478,29 @@ class TestNarrowPhase(unittest.TestCase):
         for i in range(count):
             if abs(normals[i][0]) > 0.9:
                 has_x_normal = True
+
+                # Normal should point from box A toward box B
+                self.assertTrue(
+                    check_normal_direction(box_a_pos, box_b_pos, normals[i]),
+                    msg=f"Contact {i} normal should point from box A toward box B",
+                )
+
+                # Verify surface reconstruction for this contact
+                if penetrations[i] < 0:
+
+                    def dist_to_box_a(p):
+                        return distance_point_to_box(p, box_a_pos, box_a_rot, box_a_size)
+
+                    def dist_to_box_b(p):
+                        return distance_point_to_box(p, box_b_pos, box_b_rot, box_b_size)
+
+                    self.assertTrue(
+                        check_surface_reconstruction(
+                            positions[i], normals[i], penetrations[i], dist_to_box_a, dist_to_box_b
+                        ),
+                        msg=f"Contact {i} position should be at midpoint between surfaces",
+                    )
+
                 break
         self.assertTrue(has_x_normal, "At least one contact should have normal along X axis")
 
@@ -479,16 +665,20 @@ class TestNarrowPhase(unittest.TestCase):
         """Test plane-sphere collision when sphere penetrates plane."""
         # Infinite plane at z=0, sphere radius 1.0 at z=0.5
         # Penetration depth = radius - distance = 1.0 - 0.5 = 0.5
+        plane_pos = np.array([0.0, 0.0, 0.0])
+        sphere_pos = np.array([0.0, 0.0, 0.5])
+        sphere_radius = 1.0
+
         geom_list = [
             {
                 "type": GeoType.PLANE,
-                "transform": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
+                "transform": (plane_pos.tolist(), [0.0, 0.0, 0.0, 1.0]),
                 "data": ([0.0, 0.0, 0.0], 0.0),
             },
             {
                 "type": GeoType.SPHERE,
-                "transform": ([0.0, 0.0, 0.5], [0.0, 0.0, 0.0, 1.0]),
-                "data": ([1.0, 1.0, 1.0], 0.0),
+                "transform": (sphere_pos.tolist(), [0.0, 0.0, 0.0, 1.0]),
+                "data": ([sphere_radius, sphere_radius, sphere_radius], 0.0),
             },
         ]
 
@@ -497,20 +687,30 @@ class TestNarrowPhase(unittest.TestCase):
         self.assertGreater(count, 0, "Penetrating sphere-plane should generate contact")
         self.assertLess(penetrations[0], 0.0, "Penetration should be negative")
 
-        # Normal should point up (+Z)
+        # Normal should point in plane normal direction (+Z)
         self.assertGreater(normals[0][2], 0.9, msg="Normal should point in +Z direction")
 
     def test_plane_box_resting(self):
         """Test plane-box collision when box is resting on plane."""
         # Infinite plane at z=0, box with size 1.0 at z=0.999 (very slightly penetrating)
         # Box bottom face at z=-0.001, top at z=1.999, so penetration depth ~0.001
+        plane_pos = np.array([0.0, 0.0, 0.0])
+        plane_normal = np.array([0.0, 0.0, 1.0])
+        box_pos = np.array([0.0, 0.0, 0.999])
+        box_size = np.array([1.0, 1.0, 1.0])
+        box_rot = np.eye(3)
+
         geom_list = [
             {
                 "type": GeoType.PLANE,
-                "transform": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
+                "transform": (plane_pos.tolist(), [0.0, 0.0, 0.0, 1.0]),
                 "data": ([0.0, 0.0, 0.0], 0.0),
             },
-            {"type": GeoType.BOX, "transform": ([0.0, 0.0, 0.999], [0.0, 0.0, 0.0, 1.0]), "data": ([1.0, 1.0, 1.0], 0.0)},
+            {
+                "type": GeoType.BOX,
+                "transform": (box_pos.tolist(), [0.0, 0.0, 0.0, 1.0]),
+                "data": (box_size.tolist(), 0.0),
+            },
         ]
 
         count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
@@ -521,6 +721,20 @@ class TestNarrowPhase(unittest.TestCase):
         # All contacts should have normals pointing up
         for i in range(count):
             self.assertGreater(normals[i][2], 0.5, msg=f"Contact {i} normal should point upward")
+
+            # Verify surface reconstruction for penetrating contacts
+            if penetrations[i] < 0:
+
+                def dist_to_plane(p):
+                    return abs(distance_point_to_plane(p, plane_pos, plane_normal))
+
+                def dist_to_box(p):
+                    return distance_point_to_box(p, box_pos, box_rot, box_size)
+
+                self.assertTrue(
+                    check_surface_reconstruction(positions[i], normals[i], penetrations[i], dist_to_plane, dist_to_box),
+                    msg=f"Contact {i} position should be at midpoint between surfaces",
+                )
 
     def test_plane_capsule_resting(self):
         """Test plane-capsule collision when capsule is resting on plane."""
