@@ -269,7 +269,6 @@ class TestNarrowPhase(unittest.TestCase):
             contact_penetration=contact_penetration,
             contact_tangent=contact_tangent,
             contact_count=contact_count,
-            rigid_contact_margin=self.contact_margin,
         )
 
         wp.synchronize()

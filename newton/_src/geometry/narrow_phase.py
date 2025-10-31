@@ -59,7 +59,7 @@ def write_contact_simple(
     shape_a: int,
     shape_b: int,
     tid: int,
-    rigid_contact_margin: float,
+    margin: float,
     contact_max: int,
     # outputs
     contact_count: wp.array(dtype=int),
@@ -83,7 +83,7 @@ def write_contact_simple(
         shape_a: Shape A index
         shape_b: Shape B index
         tid: Thread ID
-        rigid_contact_margin: Contact margin for rigid bodies
+        margin: Contact margin threshold
         contact_max: Maximum number of contacts
         contact_count: Array to track contact count
         contact_pair: Output array for shape pairs
@@ -104,7 +104,7 @@ def write_contact_simple(
     distance = wp.dot(diff, contact_normal_a_to_b)
     d = distance - total_separation_needed
 
-    if d < rigid_contact_margin:
+    if d < margin:
         index = wp.atomic_add(contact_count, 0, 1)
         if index >= contact_max:
             # Reached buffer limit
@@ -186,7 +186,6 @@ def narrow_phase_kernel_gjk_mpr(
     geom_source: wp.array(dtype=wp.uint64),
     geom_cutoff: wp.array(dtype=float),
     geom_collision_radius: wp.array(dtype=float),
-    rigid_contact_margin: float,
     contact_max: int,
     total_num_threads: int,
     # outputs
@@ -341,7 +340,7 @@ def narrow_phase_kernel_gjk_mpr(
             is_infinite_plane_b,
             bsphere_radius_a,
             bsphere_radius_b,
-            margin,  # Use per-geometry cutoff instead of rigid_contact_margin
+            margin,
         )
 
         # Write contacts
@@ -357,7 +356,7 @@ def narrow_phase_kernel_gjk_mpr(
                 shape_a,
                 shape_b,
                 t,
-                margin,  # Use per-geometry cutoff instead of rigid_contact_margin
+                margin,
                 contact_max,
                 contact_count,
                 contact_pair,
@@ -426,8 +425,7 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
         X_ws = geom_transform[non_mesh_shape]
 
         # Use per-geometry cutoff for the non-mesh shape
-        # mesh_vs_convex_midphase uses rigid_contact_margin for the margin, but we'll use geom_cutoff
-        # Note: mesh_vs_convex_midphase still expects a scalar margin, so we use max of the two cutoffs
+        # Note: mesh_vs_convex_midphase expects a scalar margin, so we use max of the two cutoffs
         cutoff_non_mesh = geom_cutoff[non_mesh_shape]
         cutoff_mesh = geom_cutoff[mesh_shape]
         margin = wp.max(cutoff_non_mesh, cutoff_mesh)
@@ -526,7 +524,7 @@ def narrow_phase_process_mesh_triangle_contacts_kernel(
             quat_b,
             pos_a,
             pos_b,
-            margin,  # Use per-geometry cutoff instead of rigid_contact_margin
+            margin,
         )
 
         # Write contacts
@@ -542,7 +540,7 @@ def narrow_phase_process_mesh_triangle_contacts_kernel(
                 shape_a,
                 shape_b,
                 tid,
-                margin,  # Use per-geometry cutoff instead of rigid_contact_margin
+                margin,
                 contact_max,
                 contact_count,
                 contact_pair,
@@ -639,7 +637,7 @@ def narrow_phase_process_mesh_plane_contacts_kernel(
         thickness_plane = geom_data[plane_shape][3]
         total_thickness = thickness_mesh + thickness_plane
 
-        # Use per-geometry cutoff instead of rigid_contact_margin
+        # Use per-geometry cutoff for contact detection
         cutoff_mesh = geom_cutoff[mesh_shape]
         cutoff_plane = geom_cutoff[plane_shape]
         margin = wp.max(cutoff_mesh, cutoff_plane)
@@ -661,7 +659,7 @@ def narrow_phase_process_mesh_plane_contacts_kernel(
                 mesh_shape,  # shape_a
                 plane_shape,  # shape_b
                 task_id,  # tid
-                margin,  # Use per-geometry cutoff instead of rigid_contact_margin
+                margin,
                 contact_max,
                 contact_count,
                 contact_pair,
@@ -693,7 +691,6 @@ class NarrowPhase:
         contact_tangent: wp.array(dtype=wp.vec3),  # Represents x axis of local contact frame
         contact_count: wp.array(dtype=int),  # Number of active contacts after narrow
         device=None,  # Device to launch on
-        rigid_contact_margin: float = 0.01,  # Contact margin for rigid bodies
     ):
         """
         Launch narrow phase collision detection on candidate pairs from broad phase.
@@ -714,7 +711,6 @@ class NarrowPhase:
             contact_tangent: Output array for contact tangents
             contact_count: Output array (single element) for contact count
             device: Device to launch on
-            rigid_contact_margin: Contact margin for rigid bodies (default 0.01)
         """
         if device is None:
             device = candidate_pair.device
@@ -774,7 +770,6 @@ class NarrowPhase:
                 geom_source,
                 geom_cutoff,
                 geom_collision_radius,
-                rigid_contact_margin,
                 contact_max,
                 total_num_threads,
             ],
