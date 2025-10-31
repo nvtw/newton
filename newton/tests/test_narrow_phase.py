@@ -165,7 +165,7 @@ class TestNarrowPhase(unittest.TestCase):
             - cutoff: cutoff distance (default 0.0)
 
         Returns:
-            Tuple of (geom_types, geom_data, geom_transform, geom_source, geom_cutoff)
+            Tuple of (geom_types, geom_data, geom_transform, geom_source, geom_cutoff, geom_collision_radius)
         """
         n = len(geom_list)
 
@@ -174,6 +174,7 @@ class TestNarrowPhase(unittest.TestCase):
         geom_transforms = []
         geom_source = np.zeros(n, dtype=np.uint64)
         geom_cutoff = np.zeros(n, dtype=np.float32)
+        geom_collision_radius = np.zeros(n, dtype=np.float32)
 
         for i, geom in enumerate(geom_list):
             geom_types[i] = int(geom["type"])
@@ -196,12 +197,33 @@ class TestNarrowPhase(unittest.TestCase):
             geom_source[i] = geom.get("source", 0)
             geom_cutoff[i] = geom.get("cutoff", 0.0)
 
+            # Compute collision radius for AABB fallback (used for planes/meshes)
+            geo_type = geom_types[i]
+            scale_array = np.array(scale)
+            if geo_type == int(GeoType.SPHERE):
+                geom_collision_radius[i] = scale_array[0]
+            elif geo_type == int(GeoType.BOX):
+                geom_collision_radius[i] = np.linalg.norm(scale_array)
+            elif geo_type == int(GeoType.CAPSULE) or geo_type == int(GeoType.CYLINDER) or geo_type == int(GeoType.CONE):
+                geom_collision_radius[i] = scale_array[0] + scale_array[1]
+            elif geo_type == int(GeoType.PLANE):
+                if scale_array[0] > 0.0 and scale_array[1] > 0.0:
+                    # finite plane
+                    geom_collision_radius[i] = np.linalg.norm(scale_array)
+                else:
+                    # infinite plane
+                    geom_collision_radius[i] = 1.0e6
+            else:
+                # Default for other types (mesh, etc.)
+                geom_collision_radius[i] = np.linalg.norm(scale_array) if len(scale_array) >= 3 else 10.0
+
         return (
             wp.array(geom_types, dtype=wp.int32),
             wp.array(geom_data, dtype=wp.vec4),
             wp.array(geom_transforms, dtype=wp.transform),
             wp.array(geom_source, dtype=wp.uint64),
             wp.array(geom_cutoff, dtype=wp.float32),
+            wp.array(geom_collision_radius, dtype=wp.float32),
         )
 
     def _run_narrow_phase(self, geom_list, pairs):
@@ -214,7 +236,9 @@ class TestNarrowPhase(unittest.TestCase):
         Returns:
             Tuple of (contact_count, contact_pairs, positions, normals, penetrations, tangents)
         """
-        geom_types, geom_data, geom_transform, geom_source, geom_cutoff = self._create_geometry_arrays(geom_list)
+        geom_types, geom_data, geom_transform, geom_source, geom_cutoff, geom_collision_radius = (
+            self._create_geometry_arrays(geom_list)
+        )
 
         # Create candidate pairs
         candidate_pair = wp.array(np.array(pairs, dtype=np.int32).reshape(-1, 2), dtype=wp.vec2i)
@@ -238,6 +262,7 @@ class TestNarrowPhase(unittest.TestCase):
             geom_transform=geom_transform,
             geom_source=geom_source,
             geom_cutoff=geom_cutoff,
+            geom_collision_radius=geom_collision_radius,
             contact_pair=contact_pair,
             contact_position=contact_position,
             contact_normal=contact_normal,
@@ -276,7 +301,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, _normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         # Separated spheres should produce no contacts (or contacts with positive separation)
         if count > 0:
@@ -299,7 +324,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         # Should generate contact at nearly touching point
         self.assertGreater(count, 0, "Nearly touching spheres should generate contact")
@@ -341,7 +366,9 @@ class TestNarrowPhase(unittest.TestCase):
                     },
                 ]
 
-                count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+                count, _pairs, _positions, normals, penetrations, _tangents = self._run_narrow_phase(
+                    geom_list, [(0, 1)]
+                )
 
                 self.assertGreater(count, 0, "Penetrating spheres should generate contact")
                 self.assertAlmostEqual(
@@ -380,7 +407,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, _normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         self.assertGreater(count, 0, "Nearly touching spheres should generate contact")
         self.assertAlmostEqual(penetrations[0], 0.0, places=2, msg="Should have near-zero penetration")
@@ -408,7 +435,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, normals, _penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         # Should generate contact
         self.assertGreater(count, 0, "Sphere-box should generate contact")
@@ -436,7 +463,7 @@ class TestNarrowPhase(unittest.TestCase):
             {"type": GeoType.BOX, "transform": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]), "data": ([1.0, 1.0, 1.0], 0.0)},
         ]
 
-        count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, normals, _penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         # May or may not have contact depending on exact distance
         if count > 0:
@@ -469,7 +496,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         self.assertGreater(count, 0, "Penetrating boxes should generate contact(s)")
 
@@ -516,7 +543,7 @@ class TestNarrowPhase(unittest.TestCase):
             {"type": GeoType.BOX, "transform": ([1.2, 0.0, 0.0], quat), "data": ([0.5, 0.5, 0.5], 0.0)},
         ]
 
-        count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, _normals, _penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         # Edge-edge collision should generate contact
         self.assertGreater(count, 0, "Edge-edge collision should generate contact")
@@ -540,7 +567,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, normals, _penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         # May not generate contact if separated beyond margin
         if count > 0:
@@ -567,7 +594,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, normals, _penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         if count > 0:
             # Normal should point primarily along Z axis
@@ -589,7 +616,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, _normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         # Capsules with combined radius 1.0 and separation 1.5 should be separated
         if count > 0:
@@ -611,7 +638,7 @@ class TestNarrowPhase(unittest.TestCase):
             {"type": GeoType.CAPSULE, "transform": ([0.0, 0.0, 0.0], quat), "data": ([0.5, 1.0, 0.0], 0.0)},
         ]
 
-        count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, _normals, _penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         # Crossed capsules with radius 0.5 each should be penetrating (distance = 0, combined radii = 1.0)
         self.assertGreater(count, 0, "Crossed capsules should generate contact")
@@ -634,7 +661,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, _normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         # Separated - may not generate contact
         if count > 0:
@@ -656,7 +683,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, _normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         self.assertGreater(count, 0, "Nearly touching sphere-plane should generate contact")
         self.assertAlmostEqual(penetrations[0], 0.0, places=2, msg="Nearly touching should have near-zero penetration")
@@ -682,7 +709,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         self.assertGreater(count, 0, "Penetrating sphere-plane should generate contact")
         self.assertLess(penetrations[0], 0.0, "Penetration should be negative")
@@ -713,7 +740,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         # Box resting on plane should generate contact(s)
         self.assertGreater(count, 0, "Box on plane should generate contact")
@@ -752,7 +779,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, normals, _penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         self.assertGreater(count, 0, "Capsule on plane should generate contact")
 
@@ -782,7 +809,7 @@ class TestNarrowPhase(unittest.TestCase):
 
         # Test pairs (0,1), (1,2), and (0,2)
         pairs = [(0, 1), (1, 2), (0, 2)]
-        count, contact_pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, pairs)
+        count, contact_pairs, _positions, _normals, _penetrations, _tangents = self._run_narrow_phase(geom_list, pairs)
 
         # Should get contacts for (0,1) and (1,2) which are penetrating
         # Pair (0,2) is separated so may not generate contact
@@ -809,7 +836,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, _normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         # Cylinder radius 0.5 + sphere radius 0.5 = 1.0, distance = 1.5, so separation = 0.5
         if count > 0:
@@ -827,7 +854,7 @@ class TestNarrowPhase(unittest.TestCase):
         ]
 
         # Try to test sphere against itself
-        count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 0)])
+        count, _pairs, _positions, _normals, _penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 0)])
 
         # Should not generate any contacts for self-collision
         self.assertEqual(count, 0, "Self-collision should not generate contacts")
@@ -855,7 +882,7 @@ class TestNarrowPhase(unittest.TestCase):
         ]
 
         pairs = [(0, 1), (0, 2), (1, 3)]
-        count, contact_pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, pairs)
+        count, _contact_pairs, _positions, normals, _penetrations, _tangents = self._run_narrow_phase(geom_list, pairs)
 
         # Check all normals are unit length
         for i in range(count):
@@ -879,7 +906,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, pairs, positions, normals, penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, normals, _penetrations, tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         for i in range(count):
             # Tangent should be perpendicular to normal (dot product ~ 0)

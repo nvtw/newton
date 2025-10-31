@@ -131,7 +131,7 @@ def write_contact_simple(
 
 
 @wp.func
-def extract_shape_data_from_api(
+def extract_shape_data(
     shape_idx: int,
     geom_transform: wp.array(dtype=wp.transform),
     geom_types: wp.array(dtype=int),
@@ -238,7 +238,7 @@ def narrow_phase_kernel_gjk_mpr(
             type_a, type_b = type_b, type_a
 
         # Extract shape data for both shapes
-        pos_a, quat_a, shape_data_a, scale_a, thickness_a = extract_shape_data_from_api(
+        pos_a, quat_a, shape_data_a, scale_a, thickness_a = extract_shape_data(
             shape_a,
             geom_transform,
             geom_types,
@@ -246,7 +246,7 @@ def narrow_phase_kernel_gjk_mpr(
             geom_source,
         )
 
-        pos_b, quat_b, shape_data_b, scale_b, thickness_b = extract_shape_data_from_api(
+        pos_b, quat_b, shape_data_b, scale_b, thickness_b = extract_shape_data(
             shape_b,
             geom_transform,
             geom_types,
@@ -498,7 +498,7 @@ def narrow_phase_process_mesh_triangle_contacts_kernel(
         shape_data_a, v0_world = get_triangle_shape_from_mesh(mesh_id_a, mesh_scale_a, X_mesh_ws_a, tri_idx)
 
         # Extract shape B data
-        pos_b, quat_b, shape_data_b, scale_b, thickness_b = extract_shape_data_from_api(
+        pos_b, quat_b, shape_data_b, _scale_b, thickness_b = extract_shape_data(
             shape_b,
             geom_transform,
             geom_types,
