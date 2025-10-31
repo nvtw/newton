@@ -301,7 +301,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, _pairs, _positions, _normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         # Separated spheres should produce no contacts (or contacts with positive separation)
         if count > 0:
@@ -311,6 +311,10 @@ class TestNarrowPhase(unittest.TestCase):
             self.assertAlmostEqual(
                 penetrations[0], 1.5, places=1, msg=f"Expected separation ~1.5, got {penetrations[0]}"
             )
+
+            # Normal should be unit length
+            normal_length = np.linalg.norm(normals[0])
+            self.assertAlmostEqual(normal_length, 1.0, places=5, msg="Normal should be unit length")
 
     def test_sphere_sphere_touching(self):
         """Test sphere-sphere collision with small overlap."""
@@ -329,7 +333,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, _pairs, _positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, pairs, positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         # Should generate contact with small overlap
         self.assertGreater(count, 0, "Spheres with small overlap should generate contact")
@@ -338,10 +342,33 @@ class TestNarrowPhase(unittest.TestCase):
             penetrations[0], -0.002, delta=0.001, msg=f"Expected penetration ~-0.002, got {penetrations[0]}"
         )
 
+        # Normal should be unit length
+        normal_length = np.linalg.norm(normals[0])
+        self.assertAlmostEqual(normal_length, 1.0, places=5, msg="Normal should be unit length")
+
         # Specifically check it's along +X
         self.assertAlmostEqual(normals[0][0], 1.0, places=2, msg="Normal should point along +X")
         self.assertAlmostEqual(normals[0][1], 0.0, places=2, msg="Normal Y should be 0")
         self.assertAlmostEqual(normals[0][2], 0.0, places=2, msg="Normal Z should be 0")
+
+        # Verify surface reconstruction
+        if penetrations[0] < 0:
+            # Get actual pair indices from narrow phase result
+            pair = pairs[0]
+            shape_a_idx = pair[0]
+            shape_b_idx = pair[1]
+
+            pos_a = np.array([0.0, 0.0, 0.0]) if shape_a_idx == 0 else np.array([1.998, 0.0, 0.0])
+            pos_b = np.array([1.998, 0.0, 0.0]) if shape_b_idx == 1 else np.array([0.0, 0.0, 0.0])
+            radius_a = 1.0
+            radius_b = 1.0
+
+            self.assertTrue(
+                check_contact_position_midpoint_spheres(
+                    positions[0], normals[0], penetrations[0], pos_a, radius_a, pos_b, radius_b
+                ),
+                msg="Contact position should be at midpoint between sphere surfaces",
+            )
 
     def test_sphere_sphere_penetrating(self):
         """Test sphere-sphere collision with penetration."""
@@ -425,6 +452,10 @@ class TestNarrowPhase(unittest.TestCase):
         self.assertGreater(count, 0, "Nearly touching spheres should generate contact")
         self.assertAlmostEqual(penetrations[0], 0.0, places=2, msg="Should have near-zero penetration")
 
+        # Normal should be unit length
+        normal_length = np.linalg.norm(normals[0])
+        self.assertAlmostEqual(normal_length, 1.0, places=5, msg="Normal should be unit length")
+
         # Verify surface reconstruction if penetrating
         if penetrations[0] < 0:
             pos_a = np.array([0.0, 0.0, 0.0])
@@ -465,6 +496,10 @@ class TestNarrowPhase(unittest.TestCase):
 
         # Should generate contact
         self.assertGreater(count, 0, "Sphere-box should generate contact")
+
+        # Normal should be unit length
+        normal_length = np.linalg.norm(normals[0])
+        self.assertAlmostEqual(normal_length, 1.0, places=5, msg="Normal should be unit length")
 
         # Check penetration depth: sphere surface at x=1.0, box left surface at x=0.999, overlap = 0.001
         self.assertLess(penetrations[0], 0.0, "Sphere-box should be penetrating")
@@ -570,6 +605,10 @@ class TestNarrowPhase(unittest.TestCase):
         # Check that at least one contact has normal along X axis and correct penetration
         has_x_normal = False
         for i in range(count):
+            # Normal should be unit length
+            normal_length = np.linalg.norm(normals[i])
+            self.assertAlmostEqual(normal_length, 1.0, places=5, msg=f"Contact {i} normal should be unit length")
+
             if abs(normals[i][0]) > 0.9:
                 has_x_normal = True
 
@@ -619,10 +658,14 @@ class TestNarrowPhase(unittest.TestCase):
             {"type": GeoType.BOX, "transform": ([1.2, 0.0, 0.0], quat), "data": ([0.5, 0.5, 0.5], 0.0)},
         ]
 
-        count, _pairs, _positions, _normals, _penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, normals, _penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         # Edge-edge collision should generate contact
         self.assertGreater(count, 0, "Edge-edge collision should generate contact")
+
+        # Normal should be unit length
+        normal_length = np.linalg.norm(normals[0])
+        self.assertAlmostEqual(normal_length, 1.0, places=5, msg="Normal should be unit length")
 
     def test_sphere_capsule_cylinder_side(self):
         """Test sphere collision with capsule cylinder side."""
@@ -643,12 +686,22 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, _pairs, _positions, normals, _penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         # May not generate contact if separated beyond margin
         if count > 0:
+            # Normal should be unit length
+            normal_length = np.linalg.norm(normals[0])
+            self.assertAlmostEqual(normal_length, 1.0, places=5, msg="Normal should be unit length")
+
             # Normal should point primarily along Y axis
             self.assertGreater(abs(normals[0][1]), 0.9, msg="Normal should be along Y axis for cylinder side collision")
+
+            # Check separation: distance = 1.5 - (0.5 + 0.5) = 0.5
+            self.assertGreater(penetrations[0], 0.0, "Separated shapes should have positive penetration")
+            self.assertAlmostEqual(
+                penetrations[0], 0.5, delta=0.1, msg=f"Expected separation ~0.5, got {penetrations[0]}"
+            )
 
     def test_sphere_capsule_cap(self):
         """Test sphere collision with capsule hemispherical cap."""
@@ -670,11 +723,21 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, _pairs, _positions, normals, _penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         if count > 0:
+            # Normal should be unit length
+            normal_length = np.linalg.norm(normals[0])
+            self.assertAlmostEqual(normal_length, 1.0, places=5, msg="Normal should be unit length")
+
             # Normal should point primarily along Z axis
             self.assertGreater(abs(normals[0][2]), 0.9, msg="Normal should be along Z axis for cap collision")
+
+            # Check separation: distance = 2.2 - 1.0 = 1.2, combined radii = 1.0, separation = 0.2
+            self.assertGreater(penetrations[0], 0.0, "Separated shapes should have positive penetration")
+            self.assertAlmostEqual(
+                penetrations[0], 0.2, delta=0.05, msg=f"Expected separation ~0.2, got {penetrations[0]}"
+            )
 
     def test_capsule_capsule_parallel(self):
         """Test capsule-capsule collision when parallel."""
@@ -717,10 +780,14 @@ class TestNarrowPhase(unittest.TestCase):
             {"type": GeoType.CAPSULE, "transform": ([0.0, 0.8, 0.0], quat), "data": ([0.5, 1.0, 0.0], 0.0)},
         ]
 
-        count, _pairs, _positions, _normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, pairs, positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         # Crossed capsules with radius 0.5 each should be penetrating
         self.assertGreater(count, 0, "Crossed capsules should generate contact")
+
+        # Normal should be unit length
+        normal_length = np.linalg.norm(normals[0])
+        self.assertAlmostEqual(normal_length, 1.0, places=5, msg="Normal should be unit length")
 
         # Check penetration depth: distance between centerlines = 0.8, combined radii = 1.0
         # Expected penetration = 0.8 - 1.0 = -0.2
@@ -728,6 +795,44 @@ class TestNarrowPhase(unittest.TestCase):
         self.assertAlmostEqual(
             penetrations[0], -0.2, places=1, msg=f"Expected penetration ~-0.2, got {penetrations[0]}"
         )
+
+        # Verify surface reconstruction
+        if penetrations[0] < 0:
+            # Get actual pair indices from narrow phase result
+            pair = pairs[0]
+            shape_a_idx = pair[0]
+            shape_b_idx = pair[1]
+
+            # Capsule 0: along Z at (0,0,0), Capsule 1: along X at (0,0.8,0)
+            if shape_a_idx == 0:
+                capsule_a_pos = np.array([0.0, 0.0, 0.0])
+                capsule_a_axis = np.array([0.0, 0.0, 1.0])
+            else:
+                capsule_a_pos = np.array([0.0, 0.8, 0.0])
+                capsule_a_axis = np.array([1.0, 0.0, 0.0])
+
+            if shape_b_idx == 1:
+                capsule_b_pos = np.array([0.0, 0.8, 0.0])
+                capsule_b_axis = np.array([1.0, 0.0, 0.0])
+            else:
+                capsule_b_pos = np.array([0.0, 0.0, 0.0])
+                capsule_b_axis = np.array([0.0, 0.0, 1.0])
+
+            capsule_radius = 0.5
+            capsule_half_length = 1.0
+
+            def dist_to_capsule_a(p):
+                return distance_point_to_capsule(p, capsule_a_pos, capsule_a_axis, capsule_radius, capsule_half_length)
+
+            def dist_to_capsule_b(p):
+                return distance_point_to_capsule(p, capsule_b_pos, capsule_b_axis, capsule_radius, capsule_half_length)
+
+            self.assertTrue(
+                check_surface_reconstruction(
+                    positions[0], normals[0], penetrations[0], dist_to_capsule_a, dist_to_capsule_b
+                ),
+                msg="Contact position should be at midpoint between capsule surfaces",
+            )
 
     def test_plane_sphere_above(self):
         """Test plane-sphere collision when sphere is above plane."""
@@ -770,13 +875,49 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, _pairs, _positions, _normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, pairs, positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         self.assertGreater(count, 0, "Sphere-plane with small overlap should generate contact")
         self.assertLess(penetrations[0], 0.0, "Should have negative penetration (overlap)")
         self.assertAlmostEqual(
             penetrations[0], -0.001, delta=0.001, msg=f"Expected penetration ~-0.001, got {penetrations[0]}"
         )
+
+        # Normal should be unit length
+        normal_length = np.linalg.norm(normals[0])
+        self.assertAlmostEqual(normal_length, 1.0, places=5, msg="Normal should be unit length")
+
+        # Verify surface reconstruction
+        if penetrations[0] < 0:
+            # Get actual pair indices from narrow phase result
+            pair = pairs[0]
+            shape_a_idx = pair[0]
+
+            plane_pos = np.array([0.0, 0.0, 0.0])
+            plane_normal = np.array([0.0, 0.0, 1.0])
+            sphere_pos = np.array([0.0, 0.0, 0.999])
+            sphere_radius = 1.0
+
+            # Determine which is plane and which is sphere based on pair indices
+            if shape_a_idx == 0:
+                # Shape A is plane, Shape B is sphere
+                def dist_to_a(p):
+                    return abs(distance_point_to_plane(p, plane_pos, plane_normal))
+
+                def dist_to_b(p):
+                    return abs(np.linalg.norm(p - sphere_pos) - sphere_radius)
+            else:
+                # Shape A is sphere, Shape B is plane
+                def dist_to_a(p):
+                    return abs(np.linalg.norm(p - sphere_pos) - sphere_radius)
+
+                def dist_to_b(p):
+                    return abs(distance_point_to_plane(p, plane_pos, plane_normal))
+
+            self.assertTrue(
+                check_surface_reconstruction(positions[0], normals[0], penetrations[0], dist_to_a, dist_to_b),
+                msg="Contact position should be at midpoint between surfaces",
+            )
 
     def test_plane_sphere_penetrating(self):
         """Test plane-sphere collision when sphere penetrates plane."""
@@ -803,6 +944,10 @@ class TestNarrowPhase(unittest.TestCase):
 
         self.assertGreater(count, 0, "Penetrating sphere-plane should generate contact")
         self.assertLess(penetrations[0], 0.0, "Penetration should be negative")
+
+        # Normal should be unit length
+        normal_length = np.linalg.norm(normals[0])
+        self.assertAlmostEqual(normal_length, 1.0, places=5, msg="Normal should be unit length")
 
         # Normal should point in plane normal direction (+Z)
         self.assertGreater(normals[0][2], 0.9, msg="Normal should point in +Z direction")
@@ -851,6 +996,10 @@ class TestNarrowPhase(unittest.TestCase):
 
         # All contacts should have normals pointing up and near-zero penetration
         for i in range(count):
+            # Normal should be unit length
+            normal_length = np.linalg.norm(normals[i])
+            self.assertAlmostEqual(normal_length, 1.0, places=5, msg=f"Contact {i} normal should be unit length")
+
             self.assertGreater(normals[i][2], 0.5, msg=f"Contact {i} normal should point upward")
 
             # Check penetration depth: box bottom at z=-0.001, plane at z=0, penetration ~-0.001
@@ -894,6 +1043,10 @@ class TestNarrowPhase(unittest.TestCase):
         count, _pairs, positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         self.assertGreater(count, 0, "Capsule on plane should generate contact")
+
+        # Normal should be unit length
+        normal_length = np.linalg.norm(normals[0])
+        self.assertAlmostEqual(normal_length, 1.0, places=5, msg="Normal should be unit length")
 
         # Normal should point up
         self.assertGreater(normals[0][2], 0.9, msg="Normal should point in +Z direction")
