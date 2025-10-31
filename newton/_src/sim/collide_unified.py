@@ -379,25 +379,50 @@ class CollisionPipelineUnified:
         rigid_contact_margin: float = 0.01,
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
+        edge_sdf_iter: int = 10,
+        iterate_mesh_vertices: bool = True,
         requires_grad: bool = False,
         device: Devicelike = None,
-        broad_phase_mode: int = BroadPhaseMode.NXN,
+        broad_phase_mode: BroadPhaseMode = BroadPhaseMode.NXN,
+        shape_collision_group: wp.array(dtype=int) | None = None,
+        shape_world: wp.array(dtype=int) | None = None,
+        shape_flags: wp.array(dtype=int) | None = None,
+        sap_sort_type=None,
     ):
         """
         Initialize the CollisionPipelineUnified.
 
         Args:
-            shape_count: Number of shapes in the simulation
-            particle_count: Number of particles in the simulation
-            shape_pairs_filtered: Precomputed shape pairs for EXPLICIT broad phase mode
-            rigid_contact_max: Maximum number of rigid contacts to allocate
-            rigid_contact_max_per_pair: Maximum number of contact points per shape pair
-            rigid_contact_margin: Margin for rigid contact generation (not used directly, but for cutoff)
-            soft_contact_max: Maximum number of soft contacts to allocate
-            soft_contact_margin: Margin for soft contact generation
-            requires_grad: Whether to enable gradient computation
-            device: The device on which to allocate arrays
-            broad_phase_mode: Broad phase mode (NXN, SAP, or EXPLICIT)
+            shape_count (int): Number of shapes in the simulation.
+            particle_count (int): Number of particles in the simulation.
+            shape_pairs_filtered (wp.array | None, optional): Precomputed shape pairs for EXPLICIT broad phase mode.
+                Required when broad_phase_mode is BroadPhaseMode.EXPLICIT, ignored otherwise.
+            rigid_contact_max (int | None, optional): Maximum number of rigid contacts to allocate.
+                If None, computed as shape_pairs_max * rigid_contact_max_per_pair.
+            rigid_contact_max_per_pair (int, optional): Maximum number of contact points per shape pair. Defaults to 10.
+            rigid_contact_margin (float, optional): Margin for rigid contact generation. Defaults to 0.01.
+            soft_contact_max (int | None, optional): Maximum number of soft contacts to allocate.
+                If None, computed as shape_count * particle_count.
+            soft_contact_margin (float, optional): Margin for soft contact generation. Defaults to 0.01.
+            edge_sdf_iter (int, optional): Number of iterations for edge SDF collision. Defaults to 10.
+            iterate_mesh_vertices (bool, optional): Whether to iterate mesh vertices for collision. Defaults to True.
+            requires_grad (bool, optional): Whether to enable gradient computation. Defaults to False.
+            device (Devicelike, optional): The device on which to allocate arrays and perform computation.
+            broad_phase_mode (BroadPhaseMode, optional): Broad phase mode for collision detection.
+                - BroadPhaseMode.NXN: Use all-pairs AABB broad phase (O(N²), good for small scenes)
+                - BroadPhaseMode.SAP: Use sweep-and-prune AABB broad phase (O(N log N), better for larger scenes)
+                - BroadPhaseMode.EXPLICIT: Use precomputed shape pairs (most efficient when pairs known)
+                Defaults to BroadPhaseMode.NXN.
+            shape_collision_group (wp.array | None, optional): Array of collision group IDs for each shape.
+                Used during broad phase kernel execution to filter pairs based on collision group rules.
+            shape_world (wp.array | None, optional): Array of world indices for each shape.
+                Required by NXN and SAP broad phases to organize geometries by world. If None, will be set during collide().
+            shape_flags (wp.array | None, optional): Array of shape flags (ShapeFlags) for each shape.
+                Used by NXN and SAP broad phases to filter out non-colliding shapes (e.g., visual-only).
+                If provided, only shapes with COLLIDE_SHAPES flag will participate in broad phase.
+            sap_sort_type (SAPSortType | None, optional): Sorting algorithm for SAP broad phase.
+                Only used when broad_phase_mode is BroadPhaseMode.SAP. Options: SEGMENTED or TILE.
+                If None, uses default (SEGMENTED).
         """
         self.contacts = None
         self.shape_count = shape_count
@@ -413,7 +438,9 @@ class CollisionPipelineUnified:
 
         # Initialize broad phase
         if self.broad_phase_mode == BroadPhaseMode.NXN:
-            self.nxn_broadphase = BroadPhaseAllPairs()
+            if shape_world is None:
+                raise ValueError("shape_world must be provided when using BroadPhaseMode.NXN")
+            self.nxn_broadphase = BroadPhaseAllPairs(shape_world, geom_flags=shape_flags, device=device)
             self.sap_broadphase = None
             self.explicit_broadphase = None
             self.shape_pairs_filtered = None
@@ -465,6 +492,81 @@ class CollisionPipelineUnified:
         self.soft_contact_margin = soft_contact_margin
         self.soft_contact_max = soft_contact_max
         self.requires_grad = requires_grad
+        self.edge_sdf_iter = edge_sdf_iter
+
+    @classmethod
+    def from_model(
+        cls,
+        model: Model,
+        rigid_contact_max_per_pair: int | None = None,
+        rigid_contact_margin: float = 0.01,
+        soft_contact_max: int | None = None,
+        soft_contact_margin: float = 0.01,
+        edge_sdf_iter: int = 10,
+        iterate_mesh_vertices: bool = True,
+        requires_grad: bool | None = None,
+        broad_phase_mode: BroadPhaseMode = BroadPhaseMode.NXN,
+        shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
+        sap_sort_type=None,
+    ) -> CollisionPipelineUnified:
+        """
+        Create a CollisionPipelineUnified instance from a Model.
+
+        Args:
+            model (Model): The simulation model.
+            rigid_contact_max_per_pair (int | None, optional): Maximum number of contact points per shape pair.
+                If None, uses model.rigid_contact_max and sets per-pair to 0.
+            rigid_contact_margin (float, optional): Margin for rigid contact generation. Defaults to 0.01.
+            soft_contact_max (int | None, optional): Maximum number of soft contacts to allocate.
+            soft_contact_margin (float, optional): Margin for soft contact generation. Defaults to 0.01.
+            edge_sdf_iter (int, optional): Number of iterations for edge SDF collision. Defaults to 10.
+            iterate_mesh_vertices (bool, optional): Whether to iterate mesh vertices for collision. Defaults to True.
+            requires_grad (bool | None, optional): Whether to enable gradient computation. If None, uses model.requires_grad.
+            broad_phase_mode (BroadPhaseMode, optional): Broad phase collision detection mode. Defaults to BroadPhaseMode.NXN.
+            shape_pairs_filtered (wp.array | None, optional): Precomputed shape pairs for EXPLICIT mode.
+                Required when broad_phase_mode is BroadPhaseMode.EXPLICIT. For NXN/SAP modes, can use model.shape_contact_pairs if available.
+            sap_sort_type (SAPSortType | None, optional): Sorting algorithm for SAP broad phase.
+                Only used when broad_phase_mode is BroadPhaseMode.SAP. If None, uses default (SEGMENTED).
+
+        Returns:
+            CollisionPipeline: The constructed collision pipeline.
+        """
+        rigid_contact_max = None
+        if rigid_contact_max_per_pair is None:
+            rigid_contact_max = model.rigid_contact_max
+            rigid_contact_max_per_pair = 0
+        if requires_grad is None:
+            requires_grad = model.requires_grad
+
+        # For EXPLICIT mode, use provided shape_pairs_filtered or fall back to model pairs
+        # For NXN/SAP modes, shape_pairs_filtered is not used (but can be provided for EXPLICIT)
+        if shape_pairs_filtered is None and broad_phase_mode == BroadPhaseMode.EXPLICIT:
+            # Try to use model.shape_contact_pairs if available
+            if hasattr(model, "shape_contact_pairs") and model.shape_contact_pairs is not None:
+                shape_pairs_filtered = model.shape_contact_pairs
+            else:
+                # Will raise error in __init__ if EXPLICIT mode requires it
+                shape_pairs_filtered = None
+
+        return CollisionPipelineUnified(
+            model.shape_count,
+            model.particle_count,
+            shape_pairs_filtered,
+            rigid_contact_max,
+            rigid_contact_max_per_pair,
+            rigid_contact_margin,
+            soft_contact_max,
+            soft_contact_margin,
+            edge_sdf_iter,
+            iterate_mesh_vertices,
+            requires_grad,
+            model.device,
+            broad_phase_mode,
+            shape_collision_group=model.shape_collision_group if hasattr(model, "shape_collision_group") else None,
+            shape_world=model.shape_world if hasattr(model, "shape_world") else None,
+            shape_flags=model.shape_flags if hasattr(model, "shape_flags") else None,
+            sap_sort_type=sap_sort_type,
+        )
 
     def collide(self, model: Model, state: State) -> Contacts:
         """
@@ -589,7 +691,6 @@ class CollisionPipelineUnified:
             contact_tangent=self.narrow_contact_tangent,
             contact_count=self.narrow_contact_count,
             device=model.device,
-            rigid_contact_margin=self.rigid_contact_margin,
         )
 
         # Convert NarrowPhase output to Contacts format using write_contact
@@ -680,4 +781,7 @@ class CollisionPipelineUnified:
             requires_grad,
             model.device,
             broad_phase_mode,
+            shape_collision_group=model.shape_collision_group if hasattr(model, "shape_collision_group") else None,
+            shape_world=model.shape_world if hasattr(model, "shape_world") else None,
+            shape_flags=model.shape_flags if hasattr(model, "shape_flags") else None,
         )
