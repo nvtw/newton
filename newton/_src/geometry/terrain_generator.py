@@ -20,17 +20,153 @@ Provides various terrain generation functions that output Newton-compatible tria
 Supports creating grids of terrain blocks with different procedural patterns.
 """
 
-from collections.abc import Callable
-
 import numpy as np
-import trimesh
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+
+def _create_box(
+    size: tuple[float, float, float], position: tuple[float, float, float] | None = None
+) -> tuple[np.ndarray, np.ndarray]:
+    """Create a box mesh as (vertices, faces) from dimensions and position.
+
+    Each face has its own vertices to ensure sharp edges with per-face normals.
+
+    Args:
+        size: (width, depth, height) dimensions of the box
+        position: (x, y, z) center position of the box. If None, centered at origin.
+
+    Returns:
+        Tuple of (vertices, faces) where vertices is (24, 3) float32 array
+        and faces is (12, 3) int32 array (will be flattened in caller)
+    """
+    w, d, h = size
+    half_w, half_d, half_h = w / 2, d / 2, h / 2
+
+    # Create separate vertices for each face to get sharp edges
+    # Each face gets 4 vertices (one per corner)
+    # Order: bottom, top, front, back, left, right faces
+
+    # Bottom face (z = -half_h, normal pointing down)
+    bottom_vertices = np.array(
+        [
+            [-half_w, -half_d, -half_h],  # 0: front-left
+            [half_w, -half_d, -half_h],  # 1: front-right
+            [half_w, half_d, -half_h],  # 2: back-right
+            [-half_w, half_d, -half_h],  # 3: back-left
+        ],
+        dtype=np.float32,
+    )
+
+    # Top face (z = half_h, normal pointing up)
+    top_vertices = np.array(
+        [
+            [-half_w, -half_d, half_h],  # 4: front-left
+            [half_w, -half_d, half_h],  # 5: front-right
+            [half_w, half_d, half_h],  # 6: back-right
+            [-half_w, half_d, half_h],  # 7: back-left
+        ],
+        dtype=np.float32,
+    )
+
+    # Front face (y = -half_d, normal pointing forward)
+    front_vertices = np.array(
+        [
+            [-half_w, -half_d, -half_h],  # 8: bottom-left
+            [half_w, -half_d, -half_h],  # 9: bottom-right
+            [half_w, -half_d, half_h],  # 10: top-right
+            [-half_w, -half_d, half_h],  # 11: top-left
+        ],
+        dtype=np.float32,
+    )
+
+    # Back face (y = half_d, normal pointing backward)
+    back_vertices = np.array(
+        [
+            [half_w, half_d, -half_h],  # 12: bottom-right
+            [-half_w, half_d, -half_h],  # 13: bottom-left
+            [-half_w, half_d, half_h],  # 14: top-left
+            [half_w, half_d, half_h],  # 15: top-right
+        ],
+        dtype=np.float32,
+    )
+
+    # Left face (x = -half_w, normal pointing left)
+    left_vertices = np.array(
+        [
+            [-half_w, half_d, -half_h],  # 16: back-bottom
+            [-half_w, -half_d, -half_h],  # 17: front-bottom
+            [-half_w, -half_d, half_h],  # 18: front-top
+            [-half_w, half_d, half_h],  # 19: back-top
+        ],
+        dtype=np.float32,
+    )
+
+    # Right face (x = half_w, normal pointing right)
+    right_vertices = np.array(
+        [
+            [half_w, -half_d, -half_h],  # 20: front-bottom
+            [half_w, half_d, -half_h],  # 21: back-bottom
+            [half_w, half_d, half_h],  # 22: back-top
+            [half_w, -half_d, half_h],  # 23: front-top
+        ],
+        dtype=np.float32,
+    )
+
+    # Combine all vertices
+    vertices = np.vstack(
+        [
+            bottom_vertices,
+            top_vertices,
+            front_vertices,
+            back_vertices,
+            left_vertices,
+            right_vertices,
+        ]
+    )
+
+    # Translate to position if provided
+    if position is not None:
+        vertices += np.array(position, dtype=np.float32)
+
+    # Define faces (12 triangles for a box)
+    # Each face is two triangles, counter-clockwise when viewed from outside
+    # Vertex indices: bottom (0-3), top (4-7), front (8-11), back (12-15), left (16-19), right (20-23)
+    faces = np.array(
+        [
+            # Bottom face (z = -half_h)
+            [0, 2, 1],
+            [0, 3, 2],
+            # Top face (z = half_h)
+            [4, 5, 6],
+            [4, 6, 7],
+            # Front face (y = -half_d)
+            [8, 9, 10],
+            [8, 10, 11],
+            # Back face (y = half_d)
+            [12, 13, 14],
+            [12, 14, 15],
+            # Left face (x = -half_w)
+            [16, 17, 18],
+            [16, 18, 19],
+            # Right face (x = half_w)
+            [20, 21, 22],
+            [20, 22, 23],
+        ],
+        dtype=np.int32,
+    )
+
+    return vertices, faces
+
 
 # ============================================================================
 # Primitive Terrain Functions
 # ============================================================================
 
 
-def flat_terrain(size: tuple[float, float], height: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
+def _flat_terrain(size: tuple[float, float], height: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
     """Generate a flat plane terrain.
 
     Args:
@@ -50,7 +186,7 @@ def flat_terrain(size: tuple[float, float], height: float = 0.0) -> tuple[np.nda
     return vertices, faces.flatten()
 
 
-def pyramid_stairs_terrain(
+def _pyramid_stairs_terrain(
     size: tuple[float, float], step_width: float = 0.5, step_height: float = 0.1, platform_width: float = 1.0
 ) -> tuple[np.ndarray, np.ndarray]:
     """Generate pyramid stairs terrain with steps converging to center platform.
@@ -73,11 +209,8 @@ def pyramid_stairs_terrain(
     num_steps = min(num_steps_x, num_steps_y)
 
     # Add ground plane
-    ground = trimesh.creation.box(
-        (size[0], size[1], step_height),
-        trimesh.transformations.translation_matrix([center[0], center[1], -step_height / 2]),
-    )
-    meshes.append(ground)
+    ground_pos = (center[0], center[1], -step_height / 2)
+    meshes.append(_create_box((size[0], size[1], step_height), ground_pos))
 
     # Create concentric rectangular steps (including final ring around platform)
     for k in range(num_steps + 1):
@@ -98,19 +231,18 @@ def pyramid_stairs_terrain(
             (-size[0] / 2 + box_offset, 0, step_width, box_size[1] - 2 * step_width),  # left
         ]:
             pos = (center[0] + dx, center[1] + dy, box_z)
-            mesh = trimesh.creation.box((sx, sy, box_height), trimesh.transformations.translation_matrix(pos))
-            meshes.append(mesh)
+            meshes.append(_create_box((sx, sy, box_height), pos))
 
     # Center platform (two steps higher than the last step ring)
     platform_height = (num_steps + 2) * step_height
     box_dims = (platform_width, platform_width, platform_height)
     box_pos = (center[0], center[1], center[2] + platform_height / 2)
-    meshes.append(trimesh.creation.box(box_dims, trimesh.transformations.translation_matrix(box_pos)))
+    meshes.append(_create_box(box_dims, box_pos))
 
     return _combine_meshes(meshes)
 
 
-def random_grid_terrain(
+def _random_grid_terrain(
     size: tuple[float, float],
     grid_width: float = 0.5,
     grid_height_range: tuple[float, float] = (-0.15, 0.15),
@@ -136,9 +268,7 @@ def random_grid_terrain(
     num_boxes_y = int(size[1] / grid_width)
 
     # Template box for a grid cell
-    template = trimesh.creation.box((grid_width, grid_width, 1.0))
-    vertices = template.vertices
-    faces = template.faces
+    template_vertices, template_faces = _create_box((grid_width, grid_width, 1.0))
 
     # Create grid with random heights
     all_vertices = []
@@ -152,16 +282,18 @@ def random_grid_terrain(
             y = it * grid_width + grid_width / 2
             h_noise = rng.uniform(*grid_height_range)
 
-            # Offset vertices (trimesh box is centered at origin)
-            v = vertices.copy()
+            # Offset vertices (box is centered at origin)
+            v = template_vertices.copy()
             v[:, 0] += x
             v[:, 1] += y
             v[:, 2] -= 0.5
-            v[v[:, 2] > -0.5, 2] += h_noise  # Only raise top vertices
+
+            # Raise top face vertices (indices 4-7) by random height
+            v[4:8, 2] += h_noise
 
             all_vertices.append(v)
-            all_faces.append(faces + vertex_count)
-            vertex_count += 8  # Each box has 8 vertices
+            all_faces.append(template_faces + vertex_count)
+            vertex_count += 24  # Each box has 24 vertices (4 per face, 6 faces)
 
     vertices = np.vstack(all_vertices).astype(np.float32)
     faces = np.vstack(all_faces).astype(np.int32)
@@ -169,7 +301,7 @@ def random_grid_terrain(
     return vertices, faces.flatten()
 
 
-def wave_terrain(
+def _wave_terrain(
     size: tuple[float, float], wave_amplitude: float = 0.3, wave_frequency: float = 2.0, resolution: int = 50
 ) -> tuple[np.ndarray, np.ndarray]:
     """Generate 2D sine wave terrain with zero boundaries.
@@ -209,7 +341,7 @@ def wave_terrain(
     return vertices, np.array(faces, dtype=np.int32).flatten()
 
 
-def box_terrain(
+def _box_terrain(
     size: tuple[float, float], box_height: float = 0.5, platform_width: float = 1.5
 ) -> tuple[np.ndarray, np.ndarray]:
     """Generate terrain with a raised box platform in center.
@@ -226,22 +358,17 @@ def box_terrain(
     meshes = []
 
     # Ground plane
-    ground = trimesh.creation.box(
-        (size[0], size[1], 1.0), trimesh.transformations.translation_matrix([size[0] / 2, size[1] / 2, -0.5])
-    )
-    meshes.append(ground)
+    ground_pos = (size[0] / 2, size[1] / 2, -0.5)
+    meshes.append(_create_box((size[0], size[1], 1.0), ground_pos))
 
     # Raised platform
-    platform = trimesh.creation.box(
-        (platform_width, platform_width, 1.0 + box_height),
-        trimesh.transformations.translation_matrix([size[0] / 2, size[1] / 2, box_height / 2 - 0.5]),
-    )
-    meshes.append(platform)
+    platform_pos = (size[0] / 2, size[1] / 2, box_height / 2 - 0.5)
+    meshes.append(_create_box((platform_width, platform_width, 1.0 + box_height), platform_pos))
 
     return _combine_meshes(meshes)
 
 
-def gap_terrain(
+def _gap_terrain(
     size: tuple[float, float], gap_width: float = 0.8, platform_width: float = 1.2
 ) -> tuple[np.ndarray, np.ndarray]:
     """Generate terrain with a gap around the center platform.
@@ -269,12 +396,10 @@ def gap_terrain(
         (-(size[0] - thickness_x) / 2, 0, thickness_x, platform_width + 2 * gap_width),  # left
     ]:
         pos = (center[0] + dx, center[1] + dy, center[2])
-        meshes.append(trimesh.creation.box((sx, sy, 1.0), trimesh.transformations.translation_matrix(pos)))
+        meshes.append(_create_box((sx, sy, 1.0), pos))
 
     # Center platform
-    meshes.append(
-        trimesh.creation.box((platform_width, platform_width, 1.0), trimesh.transformations.translation_matrix(center))
-    )
+    meshes.append(_create_box((platform_width, platform_width, 1.0), center))
 
     return _combine_meshes(meshes)
 
@@ -287,7 +412,7 @@ def gap_terrain(
 def generate_terrain_grid(
     grid_size: tuple[int, int] = (4, 4),
     block_size: tuple[float, float] = (5.0, 5.0),
-    terrain_types: list[str] | str | Callable[..., tuple[np.ndarray, np.ndarray]] | None = None,
+    terrain_types: list[str] | str | object | None = None,
     terrain_params: dict[str, dict[str, float]] | None = None,
     seed: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -299,7 +424,7 @@ def generate_terrain_grid(
         grid_size: (rows, cols) number of terrain blocks
         block_size: (width, height) size of each terrain block in meters
         terrain_types: List of terrain type names, single terrain type string,
-                      or callable function. If None, uses all types.
+                      or callable function (any object with __call__). If None, uses all types.
                       Available types: 'flat', 'pyramid_stairs', 'random_grid', 'wave', 'box', 'gap'
         terrain_params: Dictionary mapping terrain types to their parameter dicts
         seed: Random seed for reproducibility
@@ -315,12 +440,12 @@ def generate_terrain_grid(
         terrain_types = ["flat", "pyramid_stairs", "random_grid", "wave", "box", "gap"]
 
     terrain_funcs = {
-        "flat": flat_terrain,
-        "pyramid_stairs": pyramid_stairs_terrain,
-        "random_grid": random_grid_terrain,
-        "wave": wave_terrain,
-        "box": box_terrain,
-        "gap": gap_terrain,
+        "flat": _flat_terrain,
+        "pyramid_stairs": _pyramid_stairs_terrain,
+        "random_grid": _random_grid_terrain,
+        "wave": _wave_terrain,
+        "box": _box_terrain,
+        "gap": _gap_terrain,
     }
 
     if terrain_params is None:
@@ -376,25 +501,36 @@ def generate_terrain_grid(
 # ============================================================================
 
 
-def _combine_meshes(meshes: list[trimesh.Trimesh]) -> tuple[np.ndarray, np.ndarray]:
-    """Combine multiple trimesh objects into a single (vertices, indices) tuple.
+def _combine_meshes(meshes: list[tuple[np.ndarray, np.ndarray]]) -> tuple[np.ndarray, np.ndarray]:
+    """Combine multiple (vertices, faces) tuples into a single mesh.
 
     Args:
-        meshes: List of trimesh objects to combine
+        meshes: List of (vertices, faces) tuples to combine
 
     Returns:
         tuple of (vertices, indices) where vertices is (N, 3) float32 array
-        and indices is (M,) int32 array of triangle indices
+        and indices is (M,) int32 array of triangle indices (flattened)
     """
     if len(meshes) == 1:
-        mesh = meshes[0]
-        return mesh.vertices.astype(np.float32), mesh.faces.flatten().astype(np.int32)
+        vertices, faces = meshes[0]
+        return vertices.astype(np.float32), faces.flatten().astype(np.int32)
 
-    combined = trimesh.util.concatenate(meshes)
-    return combined.vertices.astype(np.float32), combined.faces.flatten().astype(np.int32)
+    all_vertices = []
+    all_faces = []
+    vertex_offset = 0
+
+    for vertices, faces in meshes:
+        all_vertices.append(vertices)
+        all_faces.append(faces + vertex_offset)
+        vertex_offset += len(vertices)
+
+    combined_vertices = np.vstack(all_vertices).astype(np.float32)
+    combined_faces = np.vstack(all_faces).astype(np.int32)
+
+    return combined_vertices, combined_faces.flatten()
 
 
-def to_newton_mesh(vertices: np.ndarray, indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _to_newton_mesh(vertices: np.ndarray, indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Convert terrain geometry to Newton mesh format.
 
     This is a convenience function that ensures proper dtypes.
@@ -407,4 +543,3 @@ def to_newton_mesh(vertices: np.ndarray, indices: np.ndarray) -> tuple[np.ndarra
         tuple of (vertices, indices) with proper dtypes for Newton (float32 and int32)
     """
     return vertices.astype(np.float32), indices.astype(np.int32)
-
