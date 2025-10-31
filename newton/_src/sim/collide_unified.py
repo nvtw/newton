@@ -23,25 +23,17 @@ import warp as wp
 from ..core.types import Devicelike
 from ..geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from ..geometry.broad_phase_sap import BroadPhaseSAP
-from ..geometry.collision_core import (
-    ENABLE_TILE_BVH_QUERY,
-    compute_gjk_mpr_contacts,
-    compute_tight_aabb_from_support,
-    find_contacts,
-    find_pair_from_cumulative_index,
-    get_triangle_shape_from_mesh,
-    mesh_vs_convex_midphase,
-    pre_contact_check,
-)
+from ..geometry.collision_core import compute_tight_aabb_from_support
+from ..geometry.narrow_phase import NarrowPhase
 from ..geometry.support_function import (
     GenericShapeData,
     SupportMapDataProvider,
     pack_mesh_ptr,
 )
 from ..geometry.types import GeoType
-from .contacts import Contacts
-from .model import Model
-from .state import State
+from ..sim.contacts import Contacts
+from ..sim.model import Model
+from ..sim.state import State
 
 
 class BroadPhaseMode(IntEnum):
@@ -158,590 +150,6 @@ def write_contact(
         out_tids[index] = tid
 
 
-@wp.func
-def extract_shape_data(
-    shape_idx: int,
-    body_q: wp.array(dtype=wp.transform),
-    shape_transform: wp.array(dtype=wp.transform),
-    shape_body: wp.array(dtype=int),
-    shape_type: wp.array(dtype=int),
-    shape_scale: wp.array(dtype=wp.vec3),
-    shape_source_ptr: wp.array(dtype=wp.uint64),
-):
-    """
-    Extract shape data for any primitive shape type.
-
-    Args:
-        shape_idx: Index of the shape
-        body_q: Body transforms
-        shape_transform: Shape local transforms
-        shape_body: Shape to body mapping
-        shape_type: Shape types
-        shape_scale: Shape scales
-        shape_source_ptr: Array of mesh/SDF source pointers
-
-    Returns:
-        tuple: (position, orientation, shape_data)
-    """
-    # Get shape's world transform
-    body_idx = shape_body[shape_idx]
-    X_ws = shape_transform[shape_idx]
-    if body_idx >= 0:
-        X_ws = wp.transform_multiply(body_q[body_idx], shape_transform[shape_idx])
-
-    position = wp.transform_get_translation(X_ws)
-    orientation = wp.transform_get_rotation(X_ws)
-
-    # Create generic shape data
-    result = GenericShapeData()
-    result.shape_type = shape_type[shape_idx]
-    result.scale = shape_scale[shape_idx]
-    result.auxiliary = wp.vec3(0.0, 0.0, 0.0)
-
-    # For CONVEX_MESH, pack the mesh pointer into auxiliary
-    if shape_type[shape_idx] == int(GeoType.CONVEX_MESH):
-        result.auxiliary = pack_mesh_ptr(shape_source_ptr[shape_idx])
-
-    return position, orientation, result
-
-
-@wp.kernel(enable_backward=False)
-def build_contacts_kernel_gjk_mpr(
-    body_q: wp.array(dtype=wp.transform),
-    body_qd: wp.array(dtype=wp.spatial_vector),
-    shape_transform: wp.array(dtype=wp.transform),
-    shape_body: wp.array(dtype=int),
-    shape_type: wp.array(dtype=int),
-    shape_scale: wp.array(dtype=wp.vec3),
-    shape_thickness: wp.array(dtype=float),
-    shape_collision_radius: wp.array(dtype=float),
-    shape_pairs: wp.array(dtype=wp.vec2i),
-    sum_of_contact_offsets: float,
-    rigid_contact_margin: float,
-    contact_max: int,
-    sap_shape_pair_count: wp.array(dtype=int),
-    shape_source_ptr: wp.array(dtype=wp.uint64),
-    shape_aabb_lower: wp.array(dtype=wp.vec3),
-    shape_aabb_upper: wp.array(dtype=wp.vec3),
-    total_num_threads: int,
-    # outputs
-    contact_count: wp.array(dtype=int),
-    out_shape0: wp.array(dtype=int),
-    out_shape1: wp.array(dtype=int),
-    out_point0: wp.array(dtype=wp.vec3),
-    out_point1: wp.array(dtype=wp.vec3),
-    out_offset0: wp.array(dtype=wp.vec3),
-    out_offset1: wp.array(dtype=wp.vec3),
-    out_normal: wp.array(dtype=wp.vec3),
-    out_thickness0: wp.array(dtype=float),
-    out_thickness1: wp.array(dtype=float),
-    out_tids: wp.array(dtype=int),
-    # mesh collision outputs
-    shape_pairs_mesh: wp.array(dtype=wp.vec2i),
-    shape_pairs_mesh_count: wp.array(dtype=int),
-    # mesh-plane collision outputs
-    shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
-    shape_pairs_mesh_plane_cumsum: wp.array(dtype=int),
-    shape_pairs_mesh_plane_count: wp.array(dtype=int),
-    mesh_plane_vertex_total_count: wp.array(dtype=int),
-):
-    tid = wp.tid()
-
-    num_work_items = wp.min(shape_pairs.shape[0], sap_shape_pair_count[0])
-
-    for t in range(tid, num_work_items, total_num_threads):
-        # Get shape pair
-        pair = shape_pairs[t]
-        shape_a = pair[0]
-        shape_b = pair[1]
-
-        # Safety: ignore self-collision pairs
-        if shape_a == shape_b:
-            continue
-
-        # Validate shape indices
-        if shape_a < 0 or shape_b < 0:
-            continue
-
-        # Load AABBs once for both shapes
-        aabb_a_lower = shape_aabb_lower[shape_a]
-        aabb_a_upper = shape_aabb_upper[shape_a]
-        aabb_b_lower = shape_aabb_lower[shape_b]
-        aabb_b_upper = shape_aabb_upper[shape_b]
-
-        # Inline AABB overlap check - skip pairs that don't overlap
-        # Especially useful for the EXPLICIT broad phase mode
-        if aabb_a_upper[0] < aabb_b_lower[0] or aabb_b_upper[0] < aabb_a_lower[0]:
-            continue
-        if aabb_a_upper[1] < aabb_b_lower[1] or aabb_b_upper[1] < aabb_a_lower[1]:
-            continue
-        if aabb_a_upper[2] < aabb_b_lower[2] or aabb_b_upper[2] < aabb_a_lower[2]:
-            continue
-
-        # Get shape types
-        type_a = shape_type[shape_a]
-        type_b = shape_type[shape_b]
-
-        # Sort shapes by type to ensure consistent collision handling order
-        if type_a > type_b:
-            # Swap shapes to maintain consistent ordering
-            shape_a, shape_b = shape_b, shape_a
-            type_a, type_b = type_b, type_a
-            # Swap AABBs as well
-            aabb_a_lower, aabb_b_lower = aabb_b_lower, aabb_a_lower
-            aabb_a_upper, aabb_b_upper = aabb_b_upper, aabb_a_upper
-            tmp = pair[0]
-            pair[0] = pair[1]
-            pair[1] = tmp
-
-        # Extract shape data for both shapes
-        pos_a, quat_a, shape_data_a = extract_shape_data(
-            shape_a,
-            body_q,
-            shape_transform,
-            shape_body,
-            shape_type,
-            shape_scale,
-            shape_source_ptr,
-        )
-
-        pos_b, quat_b, shape_data_b = extract_shape_data(
-            shape_b,
-            body_q,
-            shape_transform,
-            shape_body,
-            shape_type,
-            shape_scale,
-            shape_source_ptr,
-        )
-
-        skip_pair, is_infinite_plane_a, is_infinite_plane_b, bsphere_radius_a, bsphere_radius_b = pre_contact_check(
-            shape_a,
-            shape_b,
-            pos_a,
-            pos_b,
-            quat_a,
-            quat_b,
-            shape_data_a,
-            shape_data_b,
-            aabb_a_lower,
-            aabb_a_upper,
-            aabb_b_lower,
-            aabb_b_upper,
-            pair,
-            shape_source_ptr[shape_a],
-            shape_source_ptr[shape_b],
-            shape_pairs_mesh,
-            shape_pairs_mesh_count,
-            shape_pairs_mesh_plane,
-            shape_pairs_mesh_plane_cumsum,
-            shape_pairs_mesh_plane_count,
-            mesh_plane_vertex_total_count,
-        )
-        if skip_pair:
-            continue
-
-        count, normal, signed_distances, points, radius_eff_a, radius_eff_b = find_contacts(
-            pos_a,
-            pos_b,
-            quat_a,
-            quat_b,
-            shape_data_a,
-            shape_data_b,
-            is_infinite_plane_a,
-            is_infinite_plane_b,
-            bsphere_radius_a,
-            bsphere_radius_b,
-            rigid_contact_margin,
-        )
-
-        # Get body indices
-        rigid_a = shape_body[shape_a]
-        rigid_b = shape_body[shape_b]
-
-        # World->body transforms for writing contact points
-        X_bw_a = wp.transform_identity() if rigid_a == -1 else wp.transform_inverse(body_q[rigid_a])
-        X_bw_b = wp.transform_identity() if rigid_b == -1 else wp.transform_inverse(body_q[rigid_b])
-
-        for id in range(count):
-            write_contact(
-                points[id],
-                normal,
-                signed_distances[id],
-                radius_eff_a,
-                radius_eff_b,
-                shape_thickness[shape_a],
-                shape_thickness[shape_b],
-                shape_a,
-                shape_b,
-                X_bw_a,
-                X_bw_b,
-                t,
-                rigid_contact_margin,
-                contact_max,
-                contact_count,
-                out_shape0,
-                out_shape1,
-                out_point0,
-                out_point1,
-                out_offset0,
-                out_offset1,
-                out_normal,
-                out_thickness0,
-                out_thickness1,
-                out_tids,
-            )
-
-
-@wp.kernel(enable_backward=False)
-def find_mesh_triangle_overlaps_kernel(
-    body_q: wp.array(dtype=wp.transform),
-    shape_transform: wp.array(dtype=wp.transform),
-    shape_body: wp.array(dtype=int),
-    shape_type: wp.array(dtype=int),
-    shape_scale: wp.array(dtype=wp.vec3),
-    shape_collision_radius: wp.array(dtype=float),
-    shape_source_ptr: wp.array(dtype=wp.uint64),
-    shape_pairs_mesh: wp.array(dtype=wp.vec2i),
-    shape_pairs_mesh_count: wp.array(dtype=int),
-    rigid_contact_margin: float,
-    total_num_threads: int,
-    # outputs
-    triangle_pairs: wp.array(dtype=wp.vec3i),  # (shape_a, shape_b, triangle_idx)
-    triangle_pairs_count: wp.array(dtype=int),
-):
-    """
-    For each mesh collision pair, find all triangles that overlap with the non-mesh shape's AABB.
-    Outputs triples of (shape_a, shape_b, triangle_idx) for further processing.
-    Uses tiled mesh query for improved performance.
-    """
-    tid, _j = wp.tid()
-
-    num_mesh_pairs = shape_pairs_mesh_count[0]
-
-    # Strided loop over mesh pairs
-    for i in range(tid, num_mesh_pairs, total_num_threads):
-        pair = shape_pairs_mesh[i]
-        shape_a = pair[0]
-        shape_b = pair[1]
-
-        # Determine which shape is the mesh
-        type_a = shape_type[shape_a]
-        type_b = shape_type[shape_b]
-
-        mesh_shape = -1
-        non_mesh_shape = -1
-
-        if type_a == int(GeoType.MESH) and type_b != int(GeoType.MESH):
-            mesh_shape = shape_a
-            non_mesh_shape = shape_b
-        elif type_b == int(GeoType.MESH) and type_a != int(GeoType.MESH):
-            mesh_shape = shape_b
-            non_mesh_shape = shape_a
-        else:
-            # Mesh-mesh collision not supported yet
-            return
-
-        # Get mesh BVH ID and mesh transform
-        mesh_id = shape_source_ptr[mesh_shape]
-        if mesh_id == wp.uint64(0):
-            return
-
-        # Get mesh world transform
-        mesh_body_idx = shape_body[mesh_shape]
-        X_mesh_ws = shape_transform[mesh_shape]
-        if mesh_body_idx >= 0:
-            X_mesh_ws = wp.transform_multiply(body_q[mesh_body_idx], shape_transform[mesh_shape])
-
-        # Get non-mesh shape world transform
-        body_idx = shape_body[non_mesh_shape]
-        X_ws = shape_transform[non_mesh_shape]
-        if body_idx >= 0:
-            X_ws = wp.transform_multiply(body_q[body_idx], shape_transform[non_mesh_shape])
-
-        mesh_vs_convex_midphase(
-            mesh_shape,
-            non_mesh_shape,
-            X_mesh_ws,
-            X_ws,
-            mesh_id,
-            shape_type,
-            shape_scale,
-            shape_source_ptr,
-            rigid_contact_margin,
-            triangle_pairs,
-            triangle_pairs_count,
-        )
-
-
-@wp.kernel(enable_backward=False)
-def process_mesh_triangle_contacts_kernel(
-    body_q: wp.array(dtype=wp.transform),
-    shape_transform: wp.array(dtype=wp.transform),
-    shape_body: wp.array(dtype=int),
-    shape_type: wp.array(dtype=int),
-    shape_scale: wp.array(dtype=wp.vec3),
-    shape_collision_radius: wp.array(dtype=float),
-    shape_thickness: wp.array(dtype=float),
-    shape_source_ptr: wp.array(dtype=wp.uint64),
-    triangle_pairs: wp.array(dtype=wp.vec3i),
-    triangle_pairs_count: wp.array(dtype=int),
-    rigid_contact_margin: float,
-    contact_max: int,
-    total_num_threads: int,
-    # outputs
-    contact_count: wp.array(dtype=int),
-    out_shape0: wp.array(dtype=int),
-    out_shape1: wp.array(dtype=int),
-    out_point0: wp.array(dtype=wp.vec3),
-    out_point1: wp.array(dtype=wp.vec3),
-    out_offset0: wp.array(dtype=wp.vec3),
-    out_offset1: wp.array(dtype=wp.vec3),
-    out_normal: wp.array(dtype=wp.vec3),
-    out_thickness0: wp.array(dtype=float),
-    out_thickness1: wp.array(dtype=float),
-    out_tids: wp.array(dtype=int),
-):
-    """
-    Process triangle pairs to generate contacts using GJK/MPR.
-    """
-    tid = wp.tid()
-
-    num_triangle_pairs = triangle_pairs_count[0]
-
-    for i in range(tid, num_triangle_pairs, total_num_threads):
-        if i >= triangle_pairs.shape[0]:
-            break
-
-        triple = triangle_pairs[i]
-        shape_a = triple[0]
-        shape_b = triple[1]
-        tri_idx = triple[2]
-
-        # Get mesh data for shape A
-        mesh_id_a = shape_source_ptr[shape_a]
-        if mesh_id_a == wp.uint64(0):
-            continue
-
-        mesh_scale_a = shape_scale[shape_a]
-
-        # Get mesh world transform for shape A
-        mesh_body_idx_a = shape_body[shape_a]
-        X_mesh_ws_a = shape_transform[shape_a]
-        if mesh_body_idx_a >= 0:
-            X_mesh_ws_a = wp.transform_multiply(body_q[mesh_body_idx_a], shape_transform[shape_a])
-
-        # Extract triangle shape data from mesh
-        shape_data_a, v0_world = get_triangle_shape_from_mesh(mesh_id_a, mesh_scale_a, X_mesh_ws_a, tri_idx)
-
-        # Extract shape B data
-        pos_b, quat_b, shape_data_b = extract_shape_data(
-            shape_b,
-            body_q,
-            shape_transform,
-            shape_body,
-            shape_type,
-            shape_scale,
-            shape_source_ptr,
-        )
-
-        # Set pos_a to be vertex A (origin of triangle in local frame)
-        pos_a = v0_world
-        quat_a = wp.quat_identity()  # Triangle has no orientation, use identity
-
-        # Compute contacts using GJK/MPR
-        count, normal, signed_distances, points, radius_eff_a, radius_eff_b = compute_gjk_mpr_contacts(
-            shape_data_a,
-            shape_data_b,
-            quat_a,
-            quat_b,
-            pos_a,
-            pos_b,
-            rigid_contact_margin,
-        )
-
-        # Get body inverse transforms for contact point conversion
-        mesh_body_idx_a = shape_body[shape_a]
-        X_bw_a = wp.transform_identity()
-        if mesh_body_idx_a >= 0:
-            X_bw_a = wp.transform_inverse(body_q[mesh_body_idx_a])
-
-        body_idx_b = shape_body[shape_b]
-        X_bw_b = wp.transform_identity()
-        if body_idx_b >= 0:
-            X_bw_b = wp.transform_inverse(body_q[body_idx_b])
-
-        # Write contacts
-        for contact_id in range(count):
-            write_contact(
-                points[contact_id],
-                normal,
-                signed_distances[contact_id],
-                radius_eff_a,
-                radius_eff_b,
-                shape_thickness[shape_a],
-                shape_thickness[shape_b],
-                shape_a,
-                shape_b,
-                X_bw_a,
-                X_bw_b,
-                tid,
-                rigid_contact_margin,
-                contact_max,
-                contact_count,
-                out_shape0,
-                out_shape1,
-                out_point0,
-                out_point1,
-                out_offset0,
-                out_offset1,
-                out_normal,
-                out_thickness0,
-                out_thickness1,
-                out_tids,
-            )
-
-
-@wp.kernel(enable_backward=False)
-def process_mesh_plane_contacts_kernel(
-    body_q: wp.array(dtype=wp.transform),
-    shape_transform: wp.array(dtype=wp.transform),
-    shape_body: wp.array(dtype=int),
-    shape_type: wp.array(dtype=int),
-    shape_scale: wp.array(dtype=wp.vec3),
-    shape_thickness: wp.array(dtype=float),
-    shape_source_ptr: wp.array(dtype=wp.uint64),
-    shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
-    shape_pairs_mesh_plane_cumsum: wp.array(dtype=int),
-    shape_pairs_mesh_plane_count: wp.array(dtype=int),
-    mesh_plane_vertex_total_count: wp.array(dtype=int),
-    rigid_contact_margin: float,
-    contact_max: int,
-    total_num_threads: int,
-    # outputs
-    contact_count: wp.array(dtype=int),
-    out_shape0: wp.array(dtype=int),
-    out_shape1: wp.array(dtype=int),
-    out_point0: wp.array(dtype=wp.vec3),
-    out_point1: wp.array(dtype=wp.vec3),
-    out_offset0: wp.array(dtype=wp.vec3),
-    out_offset1: wp.array(dtype=wp.vec3),
-    out_normal: wp.array(dtype=wp.vec3),
-    out_thickness0: wp.array(dtype=float),
-    out_thickness1: wp.array(dtype=float),
-    out_tids: wp.array(dtype=int),
-):
-    """
-    Process mesh-plane collisions by checking each mesh vertex against the infinite plane.
-    Uses binary search to map thread index to (mesh-plane pair, vertex index).
-    Fixed thread count with strided loop over vertices.
-    """
-    tid = wp.tid()
-
-    total_vertices = mesh_plane_vertex_total_count[0]
-    num_pairs = shape_pairs_mesh_plane_count[0]
-
-    if num_pairs == 0:
-        return
-
-    # Process vertices in a strided loop
-    for task_id in range(tid, total_vertices, total_num_threads):
-        if task_id >= total_vertices:
-            break
-
-        # Use binary search helper to find which mesh-plane pair this vertex belongs to
-        pair_idx, vertex_idx = find_pair_from_cumulative_index(task_id, shape_pairs_mesh_plane_cumsum, num_pairs)
-
-        # Get the mesh-plane pair
-        pair = shape_pairs_mesh_plane[pair_idx]
-        mesh_shape = pair[0]
-        plane_shape = pair[1]
-
-        # Get mesh
-        mesh_id = shape_source_ptr[mesh_shape]
-        if mesh_id == wp.uint64(0):
-            continue
-
-        mesh_obj = wp.mesh_get(mesh_id)
-        if vertex_idx >= mesh_obj.points.shape[0]:
-            continue
-
-        # Get mesh world transform
-        mesh_body_idx = shape_body[mesh_shape]
-        X_mesh_ws = shape_transform[mesh_shape]
-        if mesh_body_idx >= 0:
-            X_mesh_ws = wp.transform_multiply(body_q[mesh_body_idx], shape_transform[mesh_shape])
-
-        # Get plane world transform
-        plane_body_idx = shape_body[plane_shape]
-        X_plane_ws = shape_transform[plane_shape]
-        if plane_body_idx >= 0:
-            X_plane_ws = wp.transform_multiply(body_q[plane_body_idx], shape_transform[plane_shape])
-
-        # Get vertex position in mesh local space and transform to world space
-        mesh_scale = shape_scale[mesh_shape]
-        vertex_local = wp.cw_mul(mesh_obj.points[vertex_idx], mesh_scale)
-        vertex_world = wp.transform_point(X_mesh_ws, vertex_local)
-
-        # Get plane normal in world space (plane normal is along local +Z, pointing upward)
-        plane_normal = wp.transform_vector(X_plane_ws, wp.vec3(0.0, 0.0, 1.0))
-
-        # Project vertex onto plane to get closest point
-        X_plane_sw = wp.transform_inverse(X_plane_ws)
-        vertex_in_plane_space = wp.transform_point(X_plane_sw, vertex_world)
-        point_on_plane_local = wp.vec3(vertex_in_plane_space[0], vertex_in_plane_space[1], 0.0)
-        point_on_plane = wp.transform_point(X_plane_ws, point_on_plane_local)
-
-        # Compute distance and normal
-        diff = vertex_world - point_on_plane
-        distance = wp.dot(diff, plane_normal)
-
-        # Check if vertex is within collision margin
-        thickness_mesh = shape_thickness[mesh_shape]
-        thickness_plane = shape_thickness[plane_shape]
-        total_thickness = thickness_mesh + thickness_plane
-
-        # Treat plane as a half-space: generate contact for all vertices on or below the plane
-        # (distance < margin means vertex is close to or penetrating the plane)
-        if distance < rigid_contact_margin + total_thickness:
-            # Get inverse transforms for body-local contact points
-            X_mesh_bw = wp.transform_identity() if mesh_body_idx == -1 else wp.transform_inverse(body_q[mesh_body_idx])
-            X_plane_bw = (
-                wp.transform_identity() if plane_body_idx == -1 else wp.transform_inverse(body_q[plane_body_idx])
-            )
-
-            # Write contact
-            # Note: write_contact expects contact_normal_a_to_b pointing FROM mesh TO plane (downward)
-            # plane_normal points upward, so we need to negate it
-            write_contact(
-                (vertex_world + point_on_plane) * 0.5,  # contact_point_center
-                -plane_normal,  # contact_normal_a_to_b (from mesh to plane, pointing downward)
-                distance,  # contact_distance
-                0.0,  # radius_eff_a (mesh has no effective radius)
-                0.0,  # radius_eff_b (plane has no effective radius)
-                thickness_mesh,  # thickness_a
-                thickness_plane,  # thickness_b
-                mesh_shape,  # shape_a
-                plane_shape,  # shape_b
-                X_mesh_bw,  # X_bw_a
-                X_plane_bw,  # X_bw_b
-                task_id,  # tid
-                rigid_contact_margin,
-                contact_max,
-                contact_count,
-                out_shape0,
-                out_shape1,
-                out_point0,
-                out_point1,
-                out_offset0,
-                out_offset1,
-                out_normal,
-                out_thickness0,
-                out_thickness1,
-                out_tids,
-            )
-
-
 @wp.kernel
 def compute_shape_aabbs(
     body_q: wp.array(dtype=wp.transform),
@@ -810,13 +218,141 @@ def compute_shape_aabbs(
         aabb_upper[shape_id] = aabb_max_world + margin_vec
 
 
+@wp.kernel
+def convert_narrow_phase_to_contacts_kernel(
+    contact_pair: wp.array(dtype=wp.vec2i),
+    contact_position: wp.array(dtype=wp.vec3),
+    contact_normal: wp.array(dtype=wp.vec3),
+    contact_penetration: wp.array(dtype=float),
+    narrow_contact_count: wp.array(dtype=int),
+    geom_data: wp.array(dtype=wp.vec4),  # Contains thickness in w component
+    body_q: wp.array(dtype=wp.transform),
+    shape_body: wp.array(dtype=int),
+    rigid_contact_margin: float,
+    contact_max: int,
+    # Outputs (Contacts format)
+    out_count: wp.array(dtype=int),
+    out_shape0: wp.array(dtype=int),
+    out_shape1: wp.array(dtype=int),
+    out_point0: wp.array(dtype=wp.vec3),
+    out_point1: wp.array(dtype=wp.vec3),
+    out_offset0: wp.array(dtype=wp.vec3),
+    out_offset1: wp.array(dtype=wp.vec3),
+    out_normal: wp.array(dtype=wp.vec3),
+    out_thickness0: wp.array(dtype=float),
+    out_thickness1: wp.array(dtype=float),
+    out_tids: wp.array(dtype=int),
+):
+    """
+    Convert NarrowPhase output format to Contacts format using write_contact.
+
+    NarrowPhase outputs:
+    - contact_position: center point of contact
+    - contact_normal: NEGATED normal (pointing from shape1 to shape0)
+    - contact_penetration: d = distance - total_separation, negative if penetrating
+
+    write_contact expects:
+    - contact_normal_a_to_b: normal pointing from shape0 to shape1
+    - contact_distance: distance such that d = contact_distance - (thickness_a + thickness_b)
+
+    This kernel handles the conversion between these two formats.
+    """
+    idx = wp.tid()
+    num_contacts = narrow_contact_count[0]
+
+    if idx >= num_contacts:
+        return
+
+    # Get contact pair
+    pair = contact_pair[idx]
+    shape0 = pair[0]
+    shape1 = pair[1]
+
+    # Extract thickness values
+    thickness_a = geom_data[shape0][3]
+    thickness_b = geom_data[shape1][3]
+
+    # Get contact data from narrow phase
+    contact_point_center = contact_position[idx]
+    # Narrow phase outputs negated normal (pointing B to A), but write_contact expects A to B
+    contact_normal_a_to_b = contact_normal[idx]  # Undo the negation from narrow_phase
+    # Narrow phase outputs penetration (negative when overlapping)
+    # write_contact expects contact_distance such that when recomputed gives same d
+    # Since d = distance - (radii + thickness), and we have d directly, we need to add back thickness
+    contact_distance = contact_penetration[idx] + thickness_a + thickness_b
+
+    # Get body inverse transforms
+    body0 = shape_body[shape0]
+    body1 = shape_body[shape1]
+
+    X_bw_a = wp.transform_identity() if body0 == -1 else wp.transform_inverse(body_q[body0])
+    X_bw_b = wp.transform_identity() if body1 == -1 else wp.transform_inverse(body_q[body1])
+
+    # Use write_contact to format the contact
+    # radius_eff_a and radius_eff_b are 0 for most shapes (non-sphere-based)
+    write_contact(
+        contact_point_center,
+        contact_normal_a_to_b,
+        contact_distance,
+        0.0,  # radius_eff_a
+        0.0,  # radius_eff_b
+        thickness_a,
+        thickness_b,
+        shape0,
+        shape1,
+        X_bw_a,
+        X_bw_b,
+        idx,
+        rigid_contact_margin,
+        contact_max,
+        out_count,
+        out_shape0,
+        out_shape1,
+        out_point0,
+        out_point1,
+        out_offset0,
+        out_offset1,
+        out_normal,
+        out_thickness0,
+        out_thickness1,
+        out_tids,
+    )
+
+
+@wp.kernel
+def prepare_geom_data_kernel(
+    shape_transform: wp.array(dtype=wp.transform),
+    shape_body: wp.array(dtype=int),
+    shape_type: wp.array(dtype=int),
+    shape_scale: wp.array(dtype=wp.vec3),
+    shape_thickness: wp.array(dtype=float),
+    body_q: wp.array(dtype=wp.transform),
+    # Outputs
+    geom_data: wp.array(dtype=wp.vec4),  # scale xyz, thickness w
+    geom_transform: wp.array(dtype=wp.transform),  # world space transform
+):
+    """Prepare geometry data arrays for NarrowPhase API."""
+    idx = wp.tid()
+
+    # Pack scale and thickness into geom_data
+    scale = shape_scale[idx]
+    thickness = shape_thickness[idx]
+    geom_data[idx] = wp.vec4(scale[0], scale[1], scale[2], thickness)
+
+    # Compute world space transform
+    body_idx = shape_body[idx]
+    if body_idx >= 0:
+        geom_transform[idx] = wp.transform_multiply(body_q[body_idx], shape_transform[idx])
+    else:
+        geom_transform[idx] = shape_transform[idx]
+
+
 class CollisionPipelineUnified:
     """
-    CollisionPipelineUnified manages collision detection and contact generation for a simulation.
+    Collision pipeline using NarrowPhase class for narrow phase collision detection.
 
-    This class is responsible for allocating and managing buffers for collision detection,
-    generating rigid and soft contacts between shapes and particles, and providing an interface
-    for running the collision pipeline on a given simulation state.
+    This is similar to CollisionPipelineUnified but uses the NarrowPhase API,
+    mainly for testing purposes.
     """
 
     def __init__(
@@ -829,66 +365,45 @@ class CollisionPipelineUnified:
         rigid_contact_margin: float = 0.01,
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
-        edge_sdf_iter: int = 10,
-        iterate_mesh_vertices: bool = True,
         requires_grad: bool = False,
         device: Devicelike = None,
-        broad_phase_mode: BroadPhaseMode = BroadPhaseMode.NXN,
+        broad_phase_mode: int = BroadPhaseMode.NXN,
     ):
         """
-        Initialize the CollisionPipeline.
+        Initialize the CollisionPipelineUnified.
 
         Args:
-            shape_count (int): Number of shapes in the simulation.
-            particle_count (int): Number of particles in the simulation.
-            shape_pairs_filtered (wp.array | None, optional): Precomputed shape pairs for EXPLICIT broad phase mode.
-                Required when broad_phase_mode is BroadPhaseMode.EXPLICIT, ignored otherwise.
-            rigid_contact_max (int | None, optional): Maximum number of rigid contacts to allocate.
-                If None, computed as shape_pairs_max * rigid_contact_max_per_pair.
-            rigid_contact_max_per_pair (int, optional): Maximum number of contact points per shape pair. Defaults to 10.
-            rigid_contact_margin (float, optional): Margin for rigid contact generation. Defaults to 0.01.
-            soft_contact_max (int | None, optional): Maximum number of soft contacts to allocate.
-                If None, computed as shape_count * particle_count.
-            soft_contact_margin (float, optional): Margin for soft contact generation. Defaults to 0.01.
-            edge_sdf_iter (int, optional): Number of iterations for edge SDF collision. Defaults to 10.
-            iterate_mesh_vertices (bool, optional): Whether to iterate mesh vertices for collision. Defaults to True.
-            requires_grad (bool, optional): Whether to enable gradient computation. Defaults to False.
-            device (Devicelike, optional): The device on which to allocate arrays and perform computation.
-            broad_phase_mode (BroadPhaseMode, optional): Broad phase mode for collision detection.
-                - BroadPhaseMode.NXN: Use all-pairs AABB broad phase (O(N²), good for small scenes)
-                - BroadPhaseMode.SAP: Use sweep-and-prune AABB broad phase (O(N log N), better for larger scenes)
-                - BroadPhaseMode.EXPLICIT: Use precomputed shape pairs (most efficient when pairs known)
-                Defaults to BroadPhaseMode.NXN.
+            shape_count: Number of shapes in the simulation
+            particle_count: Number of particles in the simulation
+            shape_pairs_filtered: Precomputed shape pairs for EXPLICIT broad phase mode
+            rigid_contact_max: Maximum number of rigid contacts to allocate
+            rigid_contact_max_per_pair: Maximum number of contact points per shape pair
+            rigid_contact_margin: Margin for rigid contact generation (not used directly, but for cutoff)
+            soft_contact_max: Maximum number of soft contacts to allocate
+            soft_contact_margin: Margin for soft contact generation
+            requires_grad: Whether to enable gradient computation
+            device: The device on which to allocate arrays
+            broad_phase_mode: Broad phase mode (NXN, SAP, or EXPLICIT)
         """
-        # will be allocated during collide
-        self.contacts = None  # type: Contacts | None
-
+        self.contacts = None
         self.shape_count = shape_count
         self.broad_phase_mode = broad_phase_mode
 
-        # Estimate based on worst case (all pairs)
         self.shape_pairs_max = (shape_count * (shape_count - 1)) // 2
-
         self.rigid_contact_margin = rigid_contact_margin
+
         if rigid_contact_max is not None:
             self.rigid_contact_max = rigid_contact_max
         else:
             self.rigid_contact_max = self.shape_pairs_max * rigid_contact_max_per_pair
 
-        # Initialize broad phase based on mode
+        # Initialize broad phase
         if self.broad_phase_mode == BroadPhaseMode.NXN:
-            raise NotImplementedError(
-                "NxN broad phase mode is currently not supported due to open collision filtering issues"
-            )
             self.nxn_broadphase = BroadPhaseAllPairs()
             self.sap_broadphase = None
             self.explicit_broadphase = None
             self.shape_pairs_filtered = None
         elif self.broad_phase_mode == BroadPhaseMode.SAP:
-            raise NotImplementedError(
-                "SAP broad phase mode is currently not supported due to open collision filtering issues"
-            )
-            # Estimate max groups for SAP - use reasonable defaults
             max_num_negative_group_members = max(int(shape_count**0.5), 10)
             max_num_distinct_positive_groups = max(int(shape_count**0.5), 10)
             self.sap_broadphase = BroadPhaseSAP(
@@ -901,140 +416,54 @@ class CollisionPipelineUnified:
             self.shape_pairs_filtered = None
         else:  # BroadPhaseMode.EXPLICIT
             if shape_pairs_filtered is None:
-                raise ValueError("shape_pairs_filtered must be provided when using BroadPhaseMode.EXPLICIT")
+                raise ValueError("shape_pairs_filtered must be provided when using EXPLICIT mode")
             self.explicit_broadphase = BroadPhaseExplicit()
             self.nxn_broadphase = None
             self.sap_broadphase = None
             self.shape_pairs_filtered = shape_pairs_filtered
-            # Update shape_pairs_max to reflect actual precomputed pairs
             self.shape_pairs_max = len(shape_pairs_filtered)
 
-        # Allocate buffers for broadphase collision handling
-        with wp.ScopedDevice(device):
-            self.rigid_pair_shape0 = wp.empty(self.rigid_contact_max, dtype=wp.int32)
-            self.rigid_pair_shape1 = wp.empty(self.rigid_contact_max, dtype=wp.int32)
-            self.rigid_pair_point_limit = None  # wp.empty(self.shape_count ** 2, dtype=wp.int32)
-            self.rigid_pair_point_count = None  # wp.empty(self.shape_count ** 2, dtype=wp.int32)
-            self.rigid_pair_point_id = wp.empty(self.rigid_contact_max, dtype=wp.int32)
+        # Initialize narrow phase
+        self.narrow_phase = NarrowPhase()
 
-            # Allocate buffers for dynamically computed pairs and AABBs
+        # Allocate buffers
+        with wp.ScopedDevice(device):
             self.broad_phase_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
             self.broad_phase_shape_pairs = wp.zeros(self.shape_pairs_max, dtype=wp.vec2i, device=device)
             self.shape_aabb_lower = wp.zeros(shape_count, dtype=wp.vec3, device=device)
             self.shape_aabb_upper = wp.zeros(shape_count, dtype=wp.vec3, device=device)
-            # Allocate dummy collision/shape group arrays once (reused every frame)
-            # Collision group: 1 (positive) = all shapes in same group, collide with each other
-            # Environment group: -1 (global) = collides with all environments
-            # self.dummy_collision_group = wp.full(shape_count, 1, dtype=wp.int32, device=device)
-            # self.dummy_shape_group = wp.full(shape_count, -1, dtype=wp.int32, device=device)
 
-            # Allocate buffers for mesh collision handling
-            self.shape_pairs_mesh = wp.zeros(self.shape_pairs_max, dtype=wp.vec2i, device=device)
-            self.shape_pairs_mesh_count = wp.zeros(1, dtype=wp.int32, device=device)
-            # Conservative estimate: each mesh pair could have many triangle overlaps
-            # Use a generous multiplier for the triangle pairs buffer
-            max_triangle_pairs = 1000000  # Conservative estimate
-            self.triangle_pairs = wp.zeros(max_triangle_pairs, dtype=wp.vec3i, device=device)
-            self.triangle_pairs_count = wp.zeros(1, dtype=wp.int32, device=device)
+            # Narrow phase input/output arrays
+            self.geom_data = wp.zeros(shape_count, dtype=wp.vec4, device=device)
+            self.geom_transform = wp.zeros(shape_count, dtype=wp.transform, device=device)
+            self.geom_cutoff = wp.full(shape_count, rigid_contact_margin, dtype=wp.float32, device=device)
 
-            # Allocate buffers for mesh-plane collision handling
-            self.shape_pairs_mesh_plane = wp.zeros(self.shape_pairs_max, dtype=wp.vec2i, device=device)
-            self.shape_pairs_mesh_plane_count = wp.zeros(1, dtype=wp.int32, device=device)
-            self.shape_pairs_mesh_plane_cumsum = wp.zeros(self.shape_pairs_max, dtype=wp.int32, device=device)
-            self.mesh_plane_vertex_total_count = wp.zeros(1, dtype=wp.int32, device=device)
+            # Narrow phase output arrays
+            self.narrow_contact_pair = wp.zeros(self.rigid_contact_max, dtype=wp.vec2i, device=device)
+            self.narrow_contact_position = wp.zeros(self.rigid_contact_max, dtype=wp.vec3, device=device)
+            self.narrow_contact_normal = wp.zeros(self.rigid_contact_max, dtype=wp.vec3, device=device)
+            self.narrow_contact_penetration = wp.zeros(self.rigid_contact_max, dtype=wp.float32, device=device)
+            self.narrow_contact_tangent = wp.zeros(self.rigid_contact_max, dtype=wp.vec3, device=device)
+            self.narrow_contact_count = wp.zeros(1, dtype=wp.int32, device=device)
 
         if soft_contact_max is None:
             soft_contact_max = shape_count * particle_count
         self.soft_contact_margin = soft_contact_margin
         self.soft_contact_max = soft_contact_max
-
-        self.iterate_mesh_vertices = iterate_mesh_vertices
         self.requires_grad = requires_grad
-        self.edge_sdf_iter = edge_sdf_iter
-
-    @classmethod
-    def from_model(
-        cls,
-        model: Model,
-        rigid_contact_max_per_pair: int | None = None,
-        rigid_contact_margin: float = 0.01,
-        soft_contact_max: int | None = None,
-        soft_contact_margin: float = 0.01,
-        edge_sdf_iter: int = 10,
-        iterate_mesh_vertices: bool = True,
-        requires_grad: bool | None = None,
-        broad_phase_mode: BroadPhaseMode = BroadPhaseMode.NXN,
-        shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
-    ) -> CollisionPipelineUnified:
-        """
-        Create a CollisionPipelineUnified instance from a Model.
-
-        Args:
-            model (Model): The simulation model.
-            rigid_contact_max_per_pair (int | None, optional): Maximum number of contact points per shape pair.
-                If None, uses model.rigid_contact_max and sets per-pair to 0.
-            rigid_contact_margin (float, optional): Margin for rigid contact generation. Defaults to 0.01.
-            soft_contact_max (int | None, optional): Maximum number of soft contacts to allocate.
-            soft_contact_margin (float, optional): Margin for soft contact generation. Defaults to 0.01.
-            edge_sdf_iter (int, optional): Number of iterations for edge SDF collision. Defaults to 10.
-            iterate_mesh_vertices (bool, optional): Whether to iterate mesh vertices for collision. Defaults to True.
-            requires_grad (bool | None, optional): Whether to enable gradient computation. If None, uses model.requires_grad.
-            broad_phase_mode (BroadPhaseMode, optional): Broad phase collision detection mode. Defaults to BroadPhaseMode.NXN.
-            shape_pairs_filtered (wp.array | None, optional): Precomputed shape pairs for EXPLICIT mode.
-                Required when broad_phase_mode is BroadPhaseMode.EXPLICIT. For NXN/SAP modes, can use model.shape_contact_pairs if available.
-
-        Returns:
-            CollisionPipeline: The constructed collision pipeline.
-        """
-        rigid_contact_max = None
-        if rigid_contact_max_per_pair is None:
-            rigid_contact_max = model.rigid_contact_max
-            rigid_contact_max_per_pair = 0
-        if requires_grad is None:
-            requires_grad = model.requires_grad
-
-        # For EXPLICIT mode, use provided shape_pairs_filtered or fall back to model pairs
-        # For NXN/SAP modes, shape_pairs_filtered is not used (but can be provided for EXPLICIT)
-        if shape_pairs_filtered is None and broad_phase_mode == BroadPhaseMode.EXPLICIT:
-            # Try to use model.shape_contact_pairs if available
-            if hasattr(model, "shape_contact_pairs") and model.shape_contact_pairs is not None:
-                shape_pairs_filtered = model.shape_contact_pairs
-            else:
-                # Will raise error in __init__ if EXPLICIT mode requires it
-                shape_pairs_filtered = None
-
-        return CollisionPipelineUnified(
-            model.shape_count,
-            model.particle_count,
-            shape_pairs_filtered,
-            rigid_contact_max,
-            rigid_contact_max_per_pair,
-            rigid_contact_margin,
-            soft_contact_max,
-            soft_contact_margin,
-            edge_sdf_iter,
-            iterate_mesh_vertices,
-            requires_grad,
-            model.device,
-            broad_phase_mode,
-        )
 
     def collide(self, model: Model, state: State) -> Contacts:
         """
-        Run the collision pipeline for the given model and state, generating contacts.
-
-        This method allocates or clears the contact buffer as needed, then generates
-        soft and rigid contacts using the current simulation state. If using SAP broad phase,
-        potentially colliding pairs are computed dynamically based on bounding sphere overlaps.
+        Run the collision pipeline using NarrowPhase.
 
         Args:
-            model (Model): The simulation model.
-            state (State): The current simulation state.
+            model: The simulation model
+            state: The current simulation state
 
         Returns:
-            Contacts: The generated contacts for the current state.
+            Contacts: The generated contacts
         """
-        # Allocate new contact memory for contacts if needed (e.g., for gradients)
+        # Allocate or clear contacts
         if self.contacts is None or self.requires_grad:
             self.contacts = Contacts(
                 self.rigid_contact_max,
@@ -1045,18 +474,14 @@ class CollisionPipelineUnified:
         else:
             self.contacts.clear()
 
-        # output contacts buffer
         contacts = self.contacts
 
-        # Clear counters at start of frame
+        # Clear counters
         self.broad_phase_pair_count.zero_()
-        self.shape_pairs_mesh_count.zero_()
-        self.triangle_pairs_count.zero_()
-        self.shape_pairs_mesh_plane_count.zero_()
-        self.mesh_plane_vertex_total_count.zero_()
+        self.narrow_contact_count.zero_()
+        contacts.rigid_contact_count.zero_()  # Clear since write_contact uses atomic_add
 
-        # Compute AABBs for all shapes in world space (needed for both NXN and SAP)
-        # AABBs are computed using support function for most shapes
+        # Compute AABBs for all shapes
         wp.launch(
             kernel=compute_shape_aabbs,
             dim=model.shape_count,
@@ -1077,38 +502,32 @@ class CollisionPipelineUnified:
             device=model.device,
         )
 
-        # debug_a = model.shape_collision_group.numpy()
-        # debug_b = model.shape_world.numpy()
-
-        # Run appropriate broad phase
+        # Run broad phase
         if self.broad_phase_mode == BroadPhaseMode.NXN:
-            # Use NxN all-pairs broad phase with AABB overlaps
             self.nxn_broadphase.launch(
                 self.shape_aabb_lower,
                 self.shape_aabb_upper,
-                model.shape_thickness,  # Use thickness as cutoff
-                model.shape_collision_group,  # Collision groups for filtering
-                model.shape_world,  # Environment groups for filtering
+                model.shape_thickness,
+                model.shape_collision_group,
+                model.shape_world,
                 model.shape_count,
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
                 device=model.device,
             )
         elif self.broad_phase_mode == BroadPhaseMode.SAP:
-            # Use sweep-and-prune broad phase with AABB sorting
             self.sap_broadphase.launch(
                 self.shape_aabb_lower,
                 self.shape_aabb_upper,
-                model.shape_thickness,  # Use thickness as cutoff
-                model.shape_collision_group,  # Collision groups for filtering
-                model.shape_world,  # Environment groups for filtering
+                model.shape_thickness,
+                model.shape_collision_group,
+                model.shape_world,
                 model.shape_count,
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
                 device=model.device,
             )
         else:  # BroadPhaseMode.EXPLICIT
-            # Use explicit precomputed pairs broad phase with AABB filtering
             self.explicit_broadphase.launch(
                 self.shape_aabb_lower,
                 self.shape_aabb_upper,
@@ -1120,154 +539,60 @@ class CollisionPipelineUnified:
                 device=model.device,
             )
 
-        # debug_c = self.broad_phase_shape_pairs.numpy()
-        # debug_d = self.broad_phase_pair_count.numpy()
-
-        # # Get the number of pairs
-        # num_pairs = debug_d[0]
-
-        # # Create array to store pairs containing last shape
-        # last_shape_idx = model.shape_count - 1
-        # last_shape_pairs = []
-
-        # # Go through all pairs looking for last shape index
-        # for i in range(num_pairs):
-        #     pair = debug_c[i]
-        #     if pair[0] == last_shape_idx or pair[1] == last_shape_idx:
-        #         last_shape_pairs.append(pair)
-
-        # Launch kernel across all shape pairs
-        # Use fixed dimension as we don't know pair count ahead of time
-        block_dim = 128
-        total_num_threads = block_dim * 1024
+        # Prepare geometry data arrays for NarrowPhase API
         wp.launch(
-            kernel=build_contacts_kernel_gjk_mpr,
-            dim=total_num_threads,
+            kernel=prepare_geom_data_kernel,
+            dim=model.shape_count,
             inputs=[
-                state.body_q,
-                state.body_qd,
                 model.shape_transform,
                 model.shape_body,
                 model.shape_type,
                 model.shape_scale,
                 model.shape_thickness,
-                model.shape_collision_radius,
-                self.broad_phase_shape_pairs,
-                0.0,  # sum_of_contact_offsets
-                self.rigid_contact_margin,
-                contacts.rigid_contact_max,
-                self.broad_phase_pair_count,
-                model.shape_source_ptr,
-                self.shape_aabb_lower,
-                self.shape_aabb_upper,
-                total_num_threads,
-            ],
-            outputs=[
-                contacts.rigid_contact_count,
-                contacts.rigid_contact_shape0,
-                contacts.rigid_contact_shape1,
-                contacts.rigid_contact_point0,
-                contacts.rigid_contact_point1,
-                contacts.rigid_contact_offset0,
-                contacts.rigid_contact_offset1,
-                contacts.rigid_contact_normal,
-                contacts.rigid_contact_thickness0,
-                contacts.rigid_contact_thickness1,
-                contacts.rigid_contact_tids,
-                self.shape_pairs_mesh,
-                self.shape_pairs_mesh_count,
-                self.shape_pairs_mesh_plane,
-                self.shape_pairs_mesh_plane_cumsum,
-                self.shape_pairs_mesh_plane_count,
-                self.mesh_plane_vertex_total_count,
-            ],
-            device=contacts.device,
-            block_dim=block_dim,
-        )
-
-        # Launch mesh-plane contact processing kernel with fixed thread count
-        wp.launch(
-            kernel=process_mesh_plane_contacts_kernel,
-            dim=total_num_threads,
-            inputs=[
                 state.body_q,
-                model.shape_transform,
-                model.shape_body,
-                model.shape_type,
-                model.shape_scale,
-                model.shape_thickness,
-                model.shape_source_ptr,
-                self.shape_pairs_mesh_plane,
-                self.shape_pairs_mesh_plane_cumsum,
-                self.shape_pairs_mesh_plane_count,
-                self.mesh_plane_vertex_total_count,
-                self.rigid_contact_margin,
-                contacts.rigid_contact_max,
-                total_num_threads,
             ],
             outputs=[
-                contacts.rigid_contact_count,
-                contacts.rigid_contact_shape0,
-                contacts.rigid_contact_shape1,
-                contacts.rigid_contact_point0,
-                contacts.rigid_contact_point1,
-                contacts.rigid_contact_offset0,
-                contacts.rigid_contact_offset1,
-                contacts.rigid_contact_normal,
-                contacts.rigid_contact_thickness0,
-                contacts.rigid_contact_thickness1,
-                contacts.rigid_contact_tids,
-            ],
-            device=contacts.device,
-            block_dim=block_dim,
-        )
-
-        # Launch mesh triangle overlap detection kernel
-        num_tile_blocks = 1024
-        tile_size = 128
-        second_dim = tile_size if ENABLE_TILE_BVH_QUERY else 1
-        wp.launch(
-            kernel=find_mesh_triangle_overlaps_kernel,
-            dim=[num_tile_blocks, second_dim],
-            inputs=[
-                state.body_q,
-                model.shape_transform,
-                model.shape_body,
-                model.shape_type,
-                model.shape_scale,
-                model.shape_collision_radius,
-                model.shape_source_ptr,
-                self.shape_pairs_mesh,
-                self.shape_pairs_mesh_count,
-                self.rigid_contact_margin,
-                num_tile_blocks,
-            ],
-            outputs=[
-                self.triangle_pairs,
-                self.triangle_pairs_count,
+                self.geom_data,
+                self.geom_transform,
             ],
             device=model.device,
-            block_dim=tile_size,
         )
 
-        # Launch mesh triangle contact processing kernel
+        # Run narrow phase
+        self.narrow_phase.launch(
+            candidate_pair=self.broad_phase_shape_pairs,
+            num_candidate_pair=self.broad_phase_pair_count,
+            geom_types=model.shape_type,
+            geom_data=self.geom_data,
+            geom_transform=self.geom_transform,
+            geom_source=model.shape_source_ptr,
+            geom_cutoff=self.geom_cutoff,
+            geom_collision_radius=model.shape_collision_radius,
+            contact_pair=self.narrow_contact_pair,
+            contact_position=self.narrow_contact_position,
+            contact_normal=self.narrow_contact_normal,
+            contact_penetration=self.narrow_contact_penetration,
+            contact_tangent=self.narrow_contact_tangent,
+            contact_count=self.narrow_contact_count,
+            device=model.device,
+            rigid_contact_margin=self.rigid_contact_margin,
+        )
+
+        # Convert NarrowPhase output to Contacts format using write_contact
         wp.launch(
-            kernel=process_mesh_triangle_contacts_kernel,
-            dim=total_num_threads,
+            kernel=convert_narrow_phase_to_contacts_kernel,
+            dim=self.rigid_contact_max,
             inputs=[
+                self.narrow_contact_pair,
+                self.narrow_contact_position,
+                self.narrow_contact_normal,
+                self.narrow_contact_penetration,
+                self.narrow_contact_count,
+                self.geom_data,
                 state.body_q,
-                model.shape_transform,
                 model.shape_body,
-                model.shape_type,
-                model.shape_scale,
-                model.shape_collision_radius,
-                model.shape_thickness,
-                model.shape_source_ptr,
-                self.triangle_pairs,
-                self.triangle_pairs_count,
                 self.rigid_contact_margin,
                 contacts.rigid_contact_max,
-                total_num_threads,
             ],
             outputs=[
                 contacts.rigid_contact_count,
@@ -1283,7 +608,61 @@ class CollisionPipelineUnified:
                 contacts.rigid_contact_tids,
             ],
             device=model.device,
-            block_dim=block_dim,
         )
 
         return contacts
+
+    @classmethod
+    def from_model(
+        cls,
+        model: Model,
+        rigid_contact_max_per_pair: int | None = None,
+        rigid_contact_margin: float = 0.01,
+        soft_contact_max: int | None = None,
+        soft_contact_margin: float = 0.01,
+        requires_grad: bool | None = None,
+        broad_phase_mode: int = BroadPhaseMode.NXN,
+        shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
+    ) -> CollisionPipelineUnified:
+        """
+        Create a CollisionPipelineUnified instance from a Model.
+
+        Args:
+            model: The simulation model
+            rigid_contact_max_per_pair: Maximum number of contact points per shape pair
+            rigid_contact_margin: Margin for rigid contact generation
+            soft_contact_max: Maximum number of soft contacts to allocate
+            soft_contact_margin: Margin for soft contact generation
+            requires_grad: Whether to enable gradient computation
+            broad_phase_mode: Broad phase mode
+            shape_pairs_filtered: Precomputed shape pairs for EXPLICIT mode
+
+        Returns:
+            CollisionPipelineUnified: The constructed collision pipeline
+        """
+        rigid_contact_max = None
+        if rigid_contact_max_per_pair is None:
+            rigid_contact_max = model.rigid_contact_max
+            rigid_contact_max_per_pair = 0
+        if requires_grad is None:
+            requires_grad = model.requires_grad
+
+        if shape_pairs_filtered is None and broad_phase_mode == BroadPhaseMode.EXPLICIT:
+            if hasattr(model, "shape_contact_pairs") and model.shape_contact_pairs is not None:
+                shape_pairs_filtered = model.shape_contact_pairs
+            else:
+                shape_pairs_filtered = None
+
+        return CollisionPipelineUnified(
+            model.shape_count,
+            model.particle_count,
+            shape_pairs_filtered,
+            rigid_contact_max,
+            rigid_contact_max_per_pair,
+            rigid_contact_margin,
+            soft_contact_max,
+            soft_contact_margin,
+            requires_grad,
+            model.device,
+            broad_phase_mode,
+        )

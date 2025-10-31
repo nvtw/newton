@@ -53,7 +53,6 @@ __all__ += [
 from ._src.sim import (  # noqa: E402
     BroadPhaseMode,
     CollisionPipeline,
-    CollisionPipelineAPI,
     CollisionPipelineUnified,
     Contacts,
     Control,
@@ -76,7 +75,6 @@ from ._src.sim.model import (  # noqa: E402
 __all__ += [
     "BroadPhaseMode",
     "CollisionPipeline",
-    "CollisionPipelineAPI",
     "CollisionPipelineUnified",
     "Contacts",
     "Control",

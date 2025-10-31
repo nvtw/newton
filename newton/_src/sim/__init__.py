@@ -17,7 +17,6 @@ from . import ik
 from .articulation import eval_fk, eval_ik
 from .builder import ModelBuilder
 from .collide import CollisionPipeline, count_rigid_contact_points
-from .collide_api import CollisionPipelineAPI
 from .collide_unified import BroadPhaseMode, CollisionPipelineUnified
 from .contacts import Contacts
 from .control import Control
@@ -35,7 +34,6 @@ from .style3d import Style3DModel, Style3DModelBuilder
 __all__ = [
     "BroadPhaseMode",
     "CollisionPipeline",
-    "CollisionPipelineAPI",
     "CollisionPipelineUnified",
     "Contacts",
     "Control",
