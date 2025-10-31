@@ -427,6 +427,7 @@ class CollisionPipelineUnified:
         self.contacts = None
         self.shape_count = shape_count
         self.broad_phase_mode = broad_phase_mode
+        self.device = device
 
         self.shape_pairs_max = (shape_count * (shape_count - 1)) // 2
         self.rigid_contact_margin = rigid_contact_margin
@@ -585,7 +586,7 @@ class CollisionPipelineUnified:
                 self.rigid_contact_max,
                 self.soft_contact_max,
                 requires_grad=self.requires_grad,
-                device=model.device,
+                device=self.device,
             )
         else:
             self.contacts.clear()
@@ -615,7 +616,7 @@ class CollisionPipelineUnified:
                 self.shape_aabb_lower,
                 self.shape_aabb_upper,
             ],
-            device=model.device,
+            device=self.device,
         )
 
         # Run broad phase
@@ -629,7 +630,7 @@ class CollisionPipelineUnified:
                 model.shape_count,
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
-                device=model.device,
+                device=self.device,
             )
         elif self.broad_phase_mode == BroadPhaseMode.SAP:
             self.sap_broadphase.launch(
@@ -641,7 +642,7 @@ class CollisionPipelineUnified:
                 model.shape_count,
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
-                device=model.device,
+                device=self.device,
             )
         else:  # BroadPhaseMode.EXPLICIT
             self.explicit_broadphase.launch(
@@ -652,7 +653,7 @@ class CollisionPipelineUnified:
                 len(self.shape_pairs_filtered),
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
-                device=model.device,
+                device=self.device,
             )
 
         # Prepare geometry data arrays for NarrowPhase API
@@ -671,7 +672,7 @@ class CollisionPipelineUnified:
                 self.geom_data,
                 self.geom_transform,
             ],
-            device=model.device,
+            device=self.device,
         )
 
         # Run narrow phase
@@ -690,7 +691,7 @@ class CollisionPipelineUnified:
             contact_penetration=self.narrow_contact_penetration,
             contact_tangent=self.narrow_contact_tangent,
             contact_count=self.narrow_contact_count,
-            device=model.device,
+            device=self.device,
         )
 
         # Convert NarrowPhase output to Contacts format using write_contact
@@ -723,65 +724,7 @@ class CollisionPipelineUnified:
                 contacts.rigid_contact_thickness1,
                 contacts.rigid_contact_tids,
             ],
-            device=model.device,
+            device=self.device,
         )
 
         return contacts
-
-    @classmethod
-    def from_model(
-        cls,
-        model: Model,
-        rigid_contact_max_per_pair: int | None = None,
-        rigid_contact_margin: float = 0.01,
-        soft_contact_max: int | None = None,
-        soft_contact_margin: float = 0.01,
-        requires_grad: bool | None = None,
-        broad_phase_mode: int = BroadPhaseMode.NXN,
-        shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
-    ) -> CollisionPipelineUnified:
-        """
-        Create a CollisionPipelineUnified instance from a Model.
-
-        Args:
-            model: The simulation model
-            rigid_contact_max_per_pair: Maximum number of contact points per shape pair
-            rigid_contact_margin: Margin for rigid contact generation
-            soft_contact_max: Maximum number of soft contacts to allocate
-            soft_contact_margin: Margin for soft contact generation
-            requires_grad: Whether to enable gradient computation
-            broad_phase_mode: Broad phase mode
-            shape_pairs_filtered: Precomputed shape pairs for EXPLICIT mode
-
-        Returns:
-            CollisionPipelineUnified: The constructed collision pipeline
-        """
-        rigid_contact_max = None
-        if rigid_contact_max_per_pair is None:
-            rigid_contact_max = model.rigid_contact_max
-            rigid_contact_max_per_pair = 0
-        if requires_grad is None:
-            requires_grad = model.requires_grad
-
-        if shape_pairs_filtered is None and broad_phase_mode == BroadPhaseMode.EXPLICIT:
-            if hasattr(model, "shape_contact_pairs") and model.shape_contact_pairs is not None:
-                shape_pairs_filtered = model.shape_contact_pairs
-            else:
-                shape_pairs_filtered = None
-
-        return CollisionPipelineUnified(
-            model.shape_count,
-            model.particle_count,
-            shape_pairs_filtered,
-            rigid_contact_max,
-            rigid_contact_max_per_pair,
-            rigid_contact_margin,
-            soft_contact_max,
-            soft_contact_margin,
-            requires_grad,
-            model.device,
-            broad_phase_mode,
-            shape_collision_group=model.shape_collision_group if hasattr(model, "shape_collision_group") else None,
-            shape_world=model.shape_world if hasattr(model, "shape_world") else None,
-            shape_flags=model.shape_flags if hasattr(model, "shape_flags") else None,
-        )
