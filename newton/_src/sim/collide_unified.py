@@ -137,7 +137,7 @@ def write_contact(
         out_point0[index] = wp.transform_point(X_bw_a, a_contact_world)
         out_point1[index] = wp.transform_point(X_bw_b, b_contact_world)
 
-        # Match kernels.py convention: normal should point from box to plane (downward)
+        # Match kernels.py convention
         contact_normal = -contact_normal_a_to_b
 
         # Offsets in body frames
@@ -226,6 +226,7 @@ def convert_narrow_phase_to_contacts_kernel(
     contact_penetration: wp.array(dtype=float),
     narrow_contact_count: wp.array(dtype=int),
     geom_data: wp.array(dtype=wp.vec4),  # Contains thickness in w component
+    shape_type: wp.array(dtype=int),
     body_q: wp.array(dtype=wp.transform),
     shape_body: wp.array(dtype=int),
     rigid_contact_margin: float,
@@ -272,6 +273,20 @@ def convert_narrow_phase_to_contacts_kernel(
     thickness_a = geom_data[shape0][3]
     thickness_b = geom_data[shape1][3]
 
+    # Extract effective radius for sphere and capsule shapes
+    type_a = shape_type[shape0]
+    type_b = shape_type[shape1]
+
+    radius_eff_a = 0.0
+    radius_eff_b = 0.0
+
+    # For spheres and capsules, extract the radius from scale[0]
+    if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
+        radius_eff_a = geom_data[shape0][0]
+
+    if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
+        radius_eff_b = geom_data[shape1][0]
+
     # Get contact data from narrow phase
     contact_point_center = contact_position[idx]
     # Narrow phase outputs negated normal (pointing B to A), but write_contact expects A to B
@@ -289,13 +304,12 @@ def convert_narrow_phase_to_contacts_kernel(
     X_bw_b = wp.transform_identity() if body1 == -1 else wp.transform_inverse(body_q[body1])
 
     # Use write_contact to format the contact
-    # radius_eff_a and radius_eff_b are 0 for most shapes (non-sphere-based)
     write_contact(
         contact_point_center,
         contact_normal_a_to_b,
         contact_distance,
-        0.0,  # radius_eff_a
-        0.0,  # radius_eff_b
+        radius_eff_a,
+        radius_eff_b,
         thickness_a,
         thickness_b,
         shape0,
@@ -589,6 +603,7 @@ class CollisionPipelineUnified:
                 self.narrow_contact_penetration,
                 self.narrow_contact_count,
                 self.geom_data,
+                model.shape_type,
                 state.body_q,
                 model.shape_body,
                 self.rigid_contact_margin,
