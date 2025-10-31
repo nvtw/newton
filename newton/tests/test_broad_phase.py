@@ -23,6 +23,14 @@ from newton._src.geometry.broad_phase_sap import SAPSortType
 from newton._src.geometry.flags import ShapeFlags
 from newton.geometry import BroadPhaseAllPairs, BroadPhaseExplicit, BroadPhaseSAP
 
+# NOTE: The test_group_pair and test_world_and_group_pair functions below are copied
+# from newton._src.geometry.broad_phase_common because they need to be available as
+# host-side Python functions for testing/verification. The original functions are
+# decorated with @wp.func for use in GPU kernels and can be called from host code,
+# but the overhead is huge. This duplication allows us to verify that the GPU collision
+# filtering logic matches the expected behavior efficiently without the overhead of
+# calling @wp.func decorated functions from the host.
+
 
 def test_group_pair(group_a: int, group_b: int) -> bool:
     """Test if two collision groups should interact.

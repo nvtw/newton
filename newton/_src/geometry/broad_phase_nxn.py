@@ -54,7 +54,7 @@ def _nxn_broadphase_precomputed_pairs(
 
 
 @wp.func
-def _get_lower_triangular_indices(index: int, matrix_size: int):
+def _get_lower_triangular_indices(index: int, matrix_size: int) -> tuple[int, int]:
     total = (matrix_size * (matrix_size - 1)) >> 1
     if index >= total:
         # In Warp, we can't throw, so return an invalid pair
@@ -318,24 +318,23 @@ class BroadPhaseAllPairs:
             device = geom_lower.device
 
         # Launch with the precomputed number of kernel threads
-        if self.num_kernel_threads > 0:
-            wp.launch(
-                _nxn_broadphase_kernel,
-                dim=self.num_kernel_threads,
-                inputs=[
-                    geom_lower,
-                    geom_upper,
-                    geom_cutoffs,
-                    geom_collision_group,
-                    geom_shape_world,
-                    self.world_cumsum_lower_tri,
-                    self.world_slice_ends,
-                    self.world_index_map,
-                    self.num_regular_worlds,
-                ],
-                outputs=[candidate_pair, num_candidate_pair, max_candidate_pair],
-                device=device,
-            )
+        wp.launch(
+            _nxn_broadphase_kernel,
+            dim=self.num_kernel_threads,
+            inputs=[
+                geom_lower,
+                geom_upper,
+                geom_cutoffs,
+                geom_collision_group,
+                geom_shape_world,
+                self.world_cumsum_lower_tri,
+                self.world_slice_ends,
+                self.world_index_map,
+                self.num_regular_worlds,
+            ],
+            outputs=[candidate_pair, num_candidate_pair, max_candidate_pair],
+            device=device,
+        )
 
 
 class BroadPhaseExplicit:
