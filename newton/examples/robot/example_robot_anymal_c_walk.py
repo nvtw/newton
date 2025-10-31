@@ -76,10 +76,11 @@ def compute_obs(actions, state: State, joint_pos_initial, device, indices, gravi
 
 
 class Example:
-    def __init__(self, viewer):
+    def __init__(self, viewer, args=None):
         self.viewer = viewer
         self.device = wp.get_device()
         self.torch_device = device_to_torch(self.device)
+        self.is_test = args is not None and args.test
 
         builder = newton.ModelBuilder()
         builder.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
@@ -103,21 +104,22 @@ class Example:
             ignore_inertial_definitions=False,
         )
 
-        # Generate procedural terrain instead of flat ground plane
-        vertices, indices = generate_terrain_grid(
-            grid_size=(8, 3),  # 3x8 grid for forward walking
-            block_size=(3.0, 3.0),
-            terrain_types=["random_grid", "flat", "wave", "gap", "pyramid_stairs"],
-            terrain_params={
-                "pyramid_stairs": {"step_width": 0.3, "step_height": 0.02, "platform_width": 0.6},
-                "random_grid": {"grid_width": 0.3, "grid_height_range": (0, 0.02)},
-                "wave": {"wave_amplitude": 0.15, "wave_frequency": 2.0},
-            },
-            seed=42,
-        )
-        terrain_mesh = newton.Mesh(vertices, indices)
-        terrain_offset = wp.transform(p=wp.vec3(-5, -2.0, 0.01), q=wp.quat_identity())
-        builder.add_shape_mesh(body=-1, mesh=terrain_mesh, xform=terrain_offset)
+        # Generate procedural terrain for visual demonstration (but not during unit tests)
+        if not self.is_test:
+            vertices, indices = generate_terrain_grid(
+                grid_size=(8, 3),  # 3x8 grid for forward walking
+                block_size=(3.0, 3.0),
+                terrain_types=["random_grid", "flat", "wave", "gap", "pyramid_stairs"],
+                terrain_params={
+                    "pyramid_stairs": {"step_width": 0.3, "step_height": 0.02, "platform_width": 0.6},
+                    "random_grid": {"grid_width": 0.3, "grid_height_range": (0, 0.02)},
+                    "wave": {"wave_amplitude": 0.15, "wave_frequency": 2.0},
+                },
+                seed=42,
+            )
+            terrain_mesh = newton.Mesh(vertices, indices)
+            terrain_offset = wp.transform(p=wp.vec3(-5, -2.0, 0.01), q=wp.quat_identity())
+            builder.add_shape_mesh(body=-1, mesh=terrain_mesh, xform=terrain_offset)
         builder.add_ground_plane()
 
         self.sim_time = 0.0
@@ -334,6 +336,6 @@ if __name__ == "__main__":
     # Parse arguments and initialize viewer
     viewer, args = newton.examples.init()
 
-    example = Example(viewer)
+    example = Example(viewer, args)
 
     newton.examples.run(example, args)
