@@ -451,6 +451,9 @@ def generate_terrain_grid(
     if terrain_params is None:
         terrain_params = {}
 
+    # Create RNG for deterministic terrain generation
+    rng = np.random.default_rng(seed) if seed is not None else None
+
     all_vertices = []
     all_indices = []
     vertex_offset = 0
@@ -474,6 +477,11 @@ def generate_terrain_grid(
 
             # Get parameters for this terrain type
             params = terrain_params.get(terrain_name, {})
+
+            # Forward seed to stochastic terrain functions if not already provided
+            if rng is not None and terrain_func is _random_grid_terrain and "seed" not in params:
+                params = dict(params)
+                params["seed"] = int(rng.integers(0, 2**32))
 
             # Generate terrain block
             vertices, indices = terrain_func(block_size, **params)
