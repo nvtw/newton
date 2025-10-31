@@ -377,6 +377,7 @@ class CollisionPipelineAPI:
             geom_transform=self.geom_transform,
             geom_source=model.shape_source_ptr,
             geom_cutoff=self.geom_cutoff,
+            geom_collision_radius=model.shape_collision_radius,
             contact_pair=self.narrow_contact_pair,
             contact_position=self.narrow_contact_position,
             contact_normal=self.narrow_contact_normal,

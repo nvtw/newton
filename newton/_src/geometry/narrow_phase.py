@@ -185,6 +185,7 @@ def narrow_phase_kernel_gjk_mpr(
     geom_transform: wp.array(dtype=wp.transform),
     geom_source: wp.array(dtype=wp.uint64),
     geom_cutoff: wp.array(dtype=float),
+    geom_collision_radius: wp.array(dtype=float),
     rigid_contact_margin: float,
     contact_max: int,
     total_num_threads: int,
@@ -253,21 +254,46 @@ def narrow_phase_kernel_gjk_mpr(
             geom_source,
         )
 
-        # Compute AABBs using support function for tight bounds
-        # Since we don't have precomputed AABBs, we compute them on the fly
-        data_provider = SupportMapDataProvider()
-        aabb_a_lower, aabb_a_upper = compute_tight_aabb_from_support(shape_data_a, quat_a, pos_a, data_provider)
-        aabb_b_lower, aabb_b_upper = compute_tight_aabb_from_support(shape_data_b, quat_b, pos_b, data_provider)
-
-        # Add margin to AABBs using per-geometry cutoff
+        # Compute AABBs - use special handling for infinite planes and meshes
+        # This matches the approach in collide_unified.py compute_shape_aabbs
         cutoff_a = geom_cutoff[shape_a]
         cutoff_b = geom_cutoff[shape_b]
         margin_vec_a = wp.vec3(cutoff_a, cutoff_a, cutoff_a)
         margin_vec_b = wp.vec3(cutoff_b, cutoff_b, cutoff_b)
-        aabb_a_lower = aabb_a_lower - margin_vec_a
-        aabb_a_upper = aabb_a_upper + margin_vec_a
-        aabb_b_lower = aabb_b_lower - margin_vec_b
-        aabb_b_upper = aabb_b_upper + margin_vec_b
+
+        # Check if shape A is an infinite plane or mesh
+        is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
+        is_mesh_a = type_a == int(GeoType.MESH)
+
+        if is_infinite_plane_a or is_mesh_a:
+            # Use conservative bounding sphere approach for infinite planes and meshes
+            radius_a = geom_collision_radius[shape_a]
+            half_extents_a = wp.vec3(radius_a, radius_a, radius_a)
+            aabb_a_lower = pos_a - half_extents_a - margin_vec_a
+            aabb_a_upper = pos_a + half_extents_a + margin_vec_a
+        else:
+            # Use support function to compute tight AABB
+            data_provider = SupportMapDataProvider()
+            aabb_a_lower, aabb_a_upper = compute_tight_aabb_from_support(shape_data_a, quat_a, pos_a, data_provider)
+            aabb_a_lower = aabb_a_lower - margin_vec_a
+            aabb_a_upper = aabb_a_upper + margin_vec_a
+
+        # Check if shape B is an infinite plane or mesh
+        is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (scale_b[0] == 0.0 and scale_b[1] == 0.0)
+        is_mesh_b = type_b == int(GeoType.MESH)
+
+        if is_infinite_plane_b or is_mesh_b:
+            # Use conservative bounding sphere approach for infinite planes and meshes
+            radius_b = geom_collision_radius[shape_b]
+            half_extents_b = wp.vec3(radius_b, radius_b, radius_b)
+            aabb_b_lower = pos_b - half_extents_b - margin_vec_b
+            aabb_b_upper = pos_b + half_extents_b + margin_vec_b
+        else:
+            # Use support function to compute tight AABB
+            data_provider = SupportMapDataProvider()
+            aabb_b_lower, aabb_b_upper = compute_tight_aabb_from_support(shape_data_b, quat_b, pos_b, data_provider)
+            aabb_b_lower = aabb_b_lower - margin_vec_b
+            aabb_b_upper = aabb_b_upper + margin_vec_b
 
         # Use pre_contact_check to handle mesh and plane special cases
         # This avoids code duplication with collide_unified.py
@@ -656,6 +682,7 @@ class NarrowPhase:
         geom_transform: wp.array(dtype=wp.transform, ndim=1),  # In world space
         geom_source: wp.array(dtype=wp.uint64, ndim=1),  # The index into the source array, type define by geom_types
         geom_cutoff: wp.array(dtype=wp.float32, ndim=1),  # per-geom (take the max)
+        geom_collision_radius: wp.array(dtype=wp.float32, ndim=1),  # per-geom collision radius for AABB fallback
         # Outputs
         contact_pair: wp.array(dtype=wp.vec2i),
         contact_position: wp.array(dtype=wp.vec3),
@@ -679,6 +706,7 @@ class NarrowPhase:
             geom_transform: Array of world-space transforms for each shape
             geom_source: Array of source pointers (mesh IDs, etc.) for each shape
             geom_cutoff: Array of cutoff distances for each shape
+            geom_collision_radius: Array of collision radii for each shape (for AABB fallback for planes/meshes)
             contact_pair: Output array for contact shape pairs
             contact_position: Output array for contact positions (center point)
             contact_normal: Output array for contact normals
@@ -745,6 +773,7 @@ class NarrowPhase:
                 geom_transform,
                 geom_source,
                 geom_cutoff,
+                geom_collision_radius,
                 rigid_contact_margin,
                 contact_max,
                 total_num_threads,
