@@ -446,12 +446,13 @@ class CollisionPipelineUnified:
             self.explicit_broadphase = None
             self.shape_pairs_filtered = None
         elif self.broad_phase_mode == BroadPhaseMode.SAP:
-            max_num_negative_group_members = max(int(shape_count**0.5), 10)
-            max_num_distinct_positive_groups = max(int(shape_count**0.5), 10)
+            if shape_world is None:
+                raise ValueError("shape_world must be provided when using BroadPhaseMode.SAP")
             self.sap_broadphase = BroadPhaseSAP(
-                max_broad_phase_elements=shape_count,
-                max_num_distinct_positive_groups=max_num_distinct_positive_groups,
-                max_num_negative_group_members=max_num_negative_group_members,
+                shape_world,
+                geom_flags=shape_flags,
+                sort_type=sap_sort_type,
+                device=device,
             )
             self.nxn_broadphase = None
             self.explicit_broadphase = None
