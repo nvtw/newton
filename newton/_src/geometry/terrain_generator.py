@@ -20,6 +20,8 @@ Provides various terrain generation functions that output Newton-compatible tria
 Supports creating grids of terrain blocks with different procedural patterns.
 """
 
+from collections.abc import Callable
+
 import numpy as np
 import trimesh
 
@@ -28,8 +30,17 @@ import trimesh
 # ============================================================================
 
 
-def flat_terrain(size, height=0.0):
-    """Generate a flat plane terrain."""
+def flat_terrain(size: tuple[float, float], height: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
+    """Generate a flat plane terrain.
+
+    Args:
+        size: (width, height) size of the terrain plane in meters
+        height: Z-coordinate height of the terrain plane
+
+    Returns:
+        tuple of (vertices, indices) where vertices is (N, 3) float32 array
+        and indices is (M,) int32 array of triangle indices
+    """
     x0 = [size[0], size[1], height]
     x1 = [size[0], 0.0, height]
     x2 = [0.0, size[1], height]
@@ -39,8 +50,21 @@ def flat_terrain(size, height=0.0):
     return vertices, faces.flatten()
 
 
-def pyramid_stairs_terrain(size, step_width=0.5, step_height=0.1, platform_width=1.0):
-    """Generate pyramid stairs terrain with steps converging to center platform."""
+def pyramid_stairs_terrain(
+    size: tuple[float, float], step_width: float = 0.5, step_height: float = 0.1, platform_width: float = 1.0
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate pyramid stairs terrain with steps converging to center platform.
+
+    Args:
+        size: (width, height) size of the terrain in meters
+        step_width: Width of each step ring
+        step_height: Height increment for each step
+        platform_width: Width of the center platform
+
+    Returns:
+        tuple of (vertices, indices) where vertices is (N, 3) float32 array
+        and indices is (M,) int32 array of triangle indices
+    """
     meshes = []
     center = [size[0] / 2, size[1] / 2, 0.0]
 
@@ -86,8 +110,26 @@ def pyramid_stairs_terrain(size, step_width=0.5, step_height=0.1, platform_width
     return _combine_meshes(meshes)
 
 
-def random_grid_terrain(size, grid_width=0.5, grid_height_range=(-0.15, 0.15), platform_width=None, seed=None):
-    """Generate terrain with randomized height grid cells."""
+def random_grid_terrain(
+    size: tuple[float, float],
+    grid_width: float = 0.5,
+    grid_height_range: tuple[float, float] = (-0.15, 0.15),
+    platform_width: float | None = None,
+    seed: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate terrain with randomized height grid cells.
+
+    Args:
+        size: (width, height) size of the terrain in meters
+        grid_width: Width of each grid cell
+        grid_height_range: (min_height, max_height) range for random height variation
+        platform_width: Unused parameter (kept for API compatibility)
+        seed: Random seed for reproducibility
+
+    Returns:
+        tuple of (vertices, indices) where vertices is (N, 3) float32 array
+        and indices is (M,) int32 array of triangle indices
+    """
     rng = np.random.default_rng(seed)
 
     num_boxes_x = int(size[0] / grid_width)
@@ -127,8 +169,21 @@ def random_grid_terrain(size, grid_width=0.5, grid_height_range=(-0.15, 0.15), p
     return vertices, faces.flatten()
 
 
-def wave_terrain(size, wave_amplitude=0.3, wave_frequency=2.0, resolution=50):
-    """Generate 2D sine wave terrain with zero boundaries."""
+def wave_terrain(
+    size: tuple[float, float], wave_amplitude: float = 0.3, wave_frequency: float = 2.0, resolution: int = 50
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate 2D sine wave terrain with zero boundaries.
+
+    Args:
+        size: (width, height) size of the terrain in meters
+        wave_amplitude: Amplitude of the sine wave
+        wave_frequency: Frequency of the sine wave
+        resolution: Number of grid points per dimension
+
+    Returns:
+        tuple of (vertices, indices) where vertices is (N, 3) float32 array
+        and indices is (M,) int32 array of triangle indices
+    """
     x = np.linspace(0, size[0], resolution)
     y = np.linspace(0, size[1], resolution)
     X, Y = np.meshgrid(x, y)
@@ -154,8 +209,20 @@ def wave_terrain(size, wave_amplitude=0.3, wave_frequency=2.0, resolution=50):
     return vertices, np.array(faces, dtype=np.int32).flatten()
 
 
-def box_terrain(size, box_height=0.5, platform_width=1.5):
-    """Generate terrain with a raised box platform in center."""
+def box_terrain(
+    size: tuple[float, float], box_height: float = 0.5, platform_width: float = 1.5
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate terrain with a raised box platform in center.
+
+    Args:
+        size: (width, height) size of the terrain in meters
+        box_height: Height of the raised platform
+        platform_width: Width of the raised platform
+
+    Returns:
+        tuple of (vertices, indices) where vertices is (N, 3) float32 array
+        and indices is (M,) int32 array of triangle indices
+    """
     meshes = []
 
     # Ground plane
@@ -174,8 +241,20 @@ def box_terrain(size, box_height=0.5, platform_width=1.5):
     return _combine_meshes(meshes)
 
 
-def gap_terrain(size, gap_width=0.8, platform_width=1.2):
-    """Generate terrain with a gap around the center platform."""
+def gap_terrain(
+    size: tuple[float, float], gap_width: float = 0.8, platform_width: float = 1.2
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate terrain with a gap around the center platform.
+
+    Args:
+        size: (width, height) size of the terrain in meters
+        gap_width: Width of the gap around the platform
+        platform_width: Width of the center platform
+
+    Returns:
+        tuple of (vertices, indices) where vertices is (N, 3) float32 array
+        and indices is (M,) int32 array of triangle indices
+    """
     meshes = []
     center = (size[0] / 2, size[1] / 2, -0.5)
 
@@ -205,20 +284,30 @@ def gap_terrain(size, gap_width=0.8, platform_width=1.2):
 # ============================================================================
 
 
-def generate_terrain_grid(grid_size=(4, 4), block_size=(5.0, 5.0), terrain_types=None, terrain_params=None, seed=None):
+def generate_terrain_grid(
+    grid_size: tuple[int, int] = (4, 4),
+    block_size: tuple[float, float] = (5.0, 5.0),
+    terrain_types: list[str] | str | Callable[..., tuple[np.ndarray, np.ndarray]] | None = None,
+    terrain_params: dict[str, dict[str, float]] | None = None,
+    seed: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """Generate a grid of procedural terrain blocks.
+
+    This is the main public API function for generating terrain grids.
 
     Args:
         grid_size: (rows, cols) number of terrain blocks
         block_size: (width, height) size of each terrain block in meters
-        terrain_types: List of terrain type names or callable functions. If None, uses all types.
+        terrain_types: List of terrain type names, single terrain type string,
+                      or callable function. If None, uses all types.
                       Available types: 'flat', 'pyramid_stairs', 'random_grid', 'wave', 'box', 'gap'
         terrain_params: Dictionary mapping terrain types to their parameter dicts
         seed: Random seed for reproducibility
 
     Returns:
-        vertices: (N, 3) float32 array of vertex positions
-        indices: (M,) int32 array of triangle indices
+        tuple of (vertices, indices) where:
+        - vertices: (N, 3) float32 array of vertex positions
+        - indices: (M,) int32 array of triangle indices (flattened)
     """
 
     # Default terrain types
@@ -287,8 +376,16 @@ def generate_terrain_grid(grid_size=(4, 4), block_size=(5.0, 5.0), terrain_types
 # ============================================================================
 
 
-def _combine_meshes(meshes):
-    """Combine multiple trimesh objects into a single (vertices, indices) tuple."""
+def _combine_meshes(meshes: list[trimesh.Trimesh]) -> tuple[np.ndarray, np.ndarray]:
+    """Combine multiple trimesh objects into a single (vertices, indices) tuple.
+
+    Args:
+        meshes: List of trimesh objects to combine
+
+    Returns:
+        tuple of (vertices, indices) where vertices is (N, 3) float32 array
+        and indices is (M,) int32 array of triangle indices
+    """
     if len(meshes) == 1:
         mesh = meshes[0]
         return mesh.vertices.astype(np.float32), mesh.faces.flatten().astype(np.int32)
@@ -297,7 +394,7 @@ def _combine_meshes(meshes):
     return combined.vertices.astype(np.float32), combined.faces.flatten().astype(np.int32)
 
 
-def to_newton_mesh(vertices, indices):
+def to_newton_mesh(vertices: np.ndarray, indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Convert terrain geometry to Newton mesh format.
 
     This is a convenience function that ensures proper dtypes.
@@ -307,6 +404,7 @@ def to_newton_mesh(vertices, indices):
         indices: (M,) array of triangle indices (flattened)
 
     Returns:
-        Tuple of (vertices, indices) with proper dtypes for Newton
+        tuple of (vertices, indices) with proper dtypes for Newton (float32 and int32)
     """
     return vertices.astype(np.float32), indices.astype(np.int32)
+
