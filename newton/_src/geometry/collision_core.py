@@ -931,7 +931,6 @@ def get_triangle_shape_from_mesh(
 
     return shape_data, v0_world
 
-
 @wp.func
 def postprocess_triangle_contacts(
     triangle_shape_data: GenericShapeData,
@@ -944,7 +943,7 @@ def postprocess_triangle_contacts(
     Post-process contacts for triangle vs convex shape collisions.
 
     This function checks if the contact normal is pushing an object into the triangle
-    (opposite to the triangle's face normal) and flips the penetration depth if needed.
+    (opposite to the triangle's face normal) and zeros the penetration depth if needed.
     This prevents incorrect contact forces that would push objects through triangles.
 
     The correction is only applied when the contact normal is nearly parallel to the
@@ -981,11 +980,10 @@ def postprocess_triangle_contacts(
     # Check if nearly parallel (within 10 degrees of 0° or 180°)
     if abs_dot > cos_threshold:
         # If dot product is negative, contact normal is pointing opposite to triangle normal
-        # (pushing object into the triangle), so we need to flip the penetration depth sign
-        # to push the object out in the correct direction
+        # (pushing object into the triangle), so we zero the penetration depth
+        # to prevent the object from being pushed through the triangle
         if dot_product < 0.0:
-            # Flip penetration depths to reverse the contact force direction
             for i in range(count):
-                signed_distances[i] = -signed_distances[i]
+                signed_distances[i] = 0.0
 
     return signed_distances, count
