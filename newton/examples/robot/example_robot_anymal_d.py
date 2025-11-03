@@ -31,7 +31,7 @@ import newton.utils
 
 
 class Example:
-    def __init__(self, viewer, num_worlds=8):
+    def __init__(self, viewer, num_worlds=8, args=None):
         self.fps = 50
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
@@ -86,12 +86,20 @@ class Example:
             iterations=100,
             ls_iterations=50,
             nconmax=20,
+            contact_stiffness_time_const=self.sim_dt,
+            use_mujoco_contacts=args.use_mujoco_contacts if args else False,
         )
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.state_0)
+
+        # Evaluate forward kinematics for collision detection
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
+
+        # Create collision pipeline from command-line args (default: CollisionPipelineUnified with NxN)
+        self.collision_pipeline = newton.examples.create_collision_pipeline(self.model)
+        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
 
         # ensure this is called at the end of the Example constructor
         self.viewer.set_model(self.model)
@@ -108,7 +116,7 @@ class Example:
 
     # simulate() performs one frame's worth of updates
     def simulate(self):
-        self.contacts = self.model.collide(self.state_0)
+        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
 
@@ -155,6 +163,6 @@ if __name__ == "__main__":
 
     viewer, args = newton.examples.init(parser)
 
-    example = Example(viewer, args.num_worlds)
+    example = Example(viewer, args.num_worlds, args)
 
     newton.examples.run(example, args)

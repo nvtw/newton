@@ -70,10 +70,10 @@ class Example:
         body_box = builder.add_body(xform=wp.transform(p=self.box_pos, q=wp.quat_identity()), key="box")
         builder.add_shape_box(body_box, hx=0.5, hy=0.35, hz=0.25)
 
-        # CONE (no collision support)
-        # self.cone_pos = wp.vec3(0.0, 6.0, drop_z)
-        # body_cone = builder.add_body(xform=wp.transform(p=self.cone_pos, q=wp.quat_identity()), key="cone")
-        # builder.add_shape_cone(body_cone, radius=0.45, half_height=0.6)
+        # CONE (no collision support in the standard collision pipeline)
+        self.cone_pos = wp.vec3(0.0, 6.0, drop_z)
+        body_cone = builder.add_body(xform=wp.transform(p=self.cone_pos, q=wp.quat_identity()), key="cone")
+        builder.add_shape_cone(body_cone, radius=0.45, half_height=0.6)
 
         # MESH (bunny)
         usd_stage = Usd.Stage.Open(newton.examples.get_asset("bunny.usd"))
@@ -96,12 +96,15 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.state_0)
-
-        self.viewer.set_model(self.model)
 
         # not required for MuJoCo, but required for maximal-coordinate solvers like XPBD
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
+
+        # Create collision pipeline from command-line args (default: CollisionPipelineUnified with NxN)
+        self.collision_pipeline = newton.examples.create_collision_pipeline(self.model)
+        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+
+        self.viewer.set_model(self.model)
 
         self.capture()
 
@@ -120,7 +123,7 @@ class Example:
             # apply forces to the model
             self.viewer.apply_forces(self.state_0)
 
-            self.contacts = self.model.collide(self.state_0)
+            self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
             # swap states
