@@ -541,7 +541,7 @@ def narrow_phase_process_mesh_triangle_contacts_kernel(
 
         # Post-process triangle contacts to fix normal direction if needed
         # This ensures contact normals don't push objects INTO triangles
-        signed_distances, count = postprocess_triangle_contacts(
+        signed_distances, normal = postprocess_triangle_contacts(
             shape_data_a,
             pos_a,
             normal,

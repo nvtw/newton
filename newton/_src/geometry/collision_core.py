@@ -940,7 +940,7 @@ def postprocess_triangle_contacts(
     normal: wp.vec3,
     signed_distances: _vec5,
     count: int,
-) -> tuple[_vec5, int]:
+) -> tuple[_vec5, wp.vec3]:
     """
     Post-process contacts for triangle vs convex shape collisions.
 
@@ -959,7 +959,7 @@ def postprocess_triangle_contacts(
         count: Number of contact points
 
     Returns:
-        Tuple of (corrected_signed_distances, count)
+        Tuple of (corrected_signed_distances, corrected_normal)
     """
     # Reconstruct triangle vertices from shape data
     # Triangle is stored as: vertex A at origin (triangle_pos), B-A in scale, C-A in auxiliary
@@ -985,7 +985,8 @@ def postprocess_triangle_contacts(
         # (pushing object into the triangle), so we zero the penetration depth
         # to prevent the object from being pushed through the triangle
         if dot_product < 0.0:
+            normal = -normal
             for i in range(count):
-                signed_distances[i] = 0.0
+                signed_distances[i] = 0.0 # This prevents energetic reactions
 
-    return signed_distances, count
+    return signed_distances, normal
