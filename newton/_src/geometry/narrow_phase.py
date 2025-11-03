@@ -26,6 +26,7 @@ from ..geometry.collision_core import (
     find_pair_from_cumulative_index,
     get_triangle_shape_from_mesh,
     mesh_vs_convex_midphase,
+    postprocess_triangle_contacts,
     pre_contact_check,
 )
 from ..geometry.support_function import (
@@ -525,6 +526,16 @@ def narrow_phase_process_mesh_triangle_contacts_kernel(
             pos_a,
             pos_b,
             margin,
+        )
+
+        # Post-process triangle contacts to fix normal direction if needed
+        # This ensures contact normals don't push objects INTO triangles
+        signed_distances, count = postprocess_triangle_contacts(
+            shape_data_a,
+            pos_a,
+            normal,
+            signed_distances,
+            count,
         )
 
         # Write contacts

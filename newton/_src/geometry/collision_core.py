@@ -930,3 +930,62 @@ def get_triangle_shape_from_mesh(
     shape_data.auxiliary = v2_world - v0_world  # C - A
 
     return shape_data, v0_world
+
+
+@wp.func
+def postprocess_triangle_contacts(
+    triangle_shape_data: GenericShapeData,
+    triangle_pos: wp.vec3,
+    normal: wp.vec3,
+    signed_distances: _vec5,
+    count: int,
+) -> tuple[_vec5, int]:
+    """
+    Post-process contacts for triangle vs convex shape collisions.
+
+    This function checks if the contact normal is pushing an object into the triangle
+    (opposite to the triangle's face normal) and flips the penetration depth if needed.
+    This prevents incorrect contact forces that would push objects through triangles.
+
+    The correction is only applied when the contact normal is nearly parallel to the
+    triangle normal (within 10 degrees), indicating a face-to-face contact scenario.
+
+    Args:
+        triangle_shape_data: Triangle shape data (type=TRIANGLE, scale=B-A, auxiliary=C-A)
+        triangle_pos: Position of triangle vertex A in world space
+        normal: Contact normal from GJK/MPR (points from shape A to shape B)
+        signed_distances: Signed distances for each contact point
+        count: Number of contact points
+
+    Returns:
+        Tuple of (corrected_signed_distances, count)
+    """
+    # Reconstruct triangle vertices from shape data
+    # Triangle is stored as: vertex A at origin (triangle_pos), B-A in scale, C-A in auxiliary
+    v0_world = triangle_pos
+    v1_world = triangle_pos + triangle_shape_data.scale  # A + (B - A) = B
+    v2_world = triangle_pos + triangle_shape_data.auxiliary  # A + (C - A) = C
+
+    # Compute triangle normal (cross product of edges)
+    edge1 = v1_world - v0_world  # B - A
+    edge2 = v2_world - v0_world  # C - A
+    triangle_normal = wp.normalize(wp.cross(edge1, edge2))
+
+    # Post-process contacts: check if contact normal is pushing object into the triangle
+    # Only apply correction if the contact normal is nearly parallel to the triangle normal
+    # (within 10 degrees, meaning cos(angle) > cos(10°) ≈ 0.985)
+    cos_threshold = wp.static(wp.cos(wp.radians(10.0)))
+    dot_product = wp.dot(normal, triangle_normal)
+    abs_dot = wp.abs(dot_product)
+
+    # Check if nearly parallel (within 10 degrees of 0° or 180°)
+    if abs_dot > cos_threshold:
+        # If dot product is negative, contact normal is pointing opposite to triangle normal
+        # (pushing object into the triangle), so we need to flip the penetration depth sign
+        # to push the object out in the correct direction
+        if dot_product < 0.0:
+            # Flip penetration depths to reverse the contact force direction
+            for i in range(count):
+                signed_distances[i] = -signed_distances[i]
+
+    return signed_distances, count
