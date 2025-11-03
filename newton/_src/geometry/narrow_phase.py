@@ -37,17 +37,6 @@ from ..geometry.support_function import (
 from ..geometry.types import GeoType
 
 
-@wp.kernel
-def _extract_scale_kernel(
-    geom_data: wp.array(dtype=wp.vec4),
-    scale_array: wp.array(dtype=wp.vec3),
-):
-    """Extract scale (xyz) from geom_data (vec4) into scale_array (vec3)."""
-    idx = wp.tid()
-    data = geom_data[idx]
-    scale_array[idx] = wp.vec3(data[0], data[1], data[2])
-
-
 @wp.func
 def write_contact_simple(
     contact_point_center: wp.vec3,
@@ -261,12 +250,13 @@ def narrow_phase_kernel_gjk_mpr(
         margin_vec_a = wp.vec3(cutoff_a, cutoff_a, cutoff_a)
         margin_vec_b = wp.vec3(cutoff_b, cutoff_b, cutoff_b)
 
-        # Check if shape A is an infinite plane or mesh
+        # Check if shape A is an infinite plane, mesh, or SDF
         is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
         is_mesh_a = type_a == int(GeoType.MESH)
+        is_sdf_a = type_a == int(GeoType.SDF)
 
-        if is_infinite_plane_a or is_mesh_a:
-            # Use conservative bounding sphere approach for infinite planes and meshes
+        if is_infinite_plane_a or is_mesh_a or is_sdf_a:
+            # Use conservative bounding sphere approach for infinite planes, meshes, and SDFs
             radius_a = geom_collision_radius[shape_a]
             half_extents_a = wp.vec3(radius_a, radius_a, radius_a)
             aabb_a_lower = pos_a - half_extents_a - margin_vec_a
@@ -278,12 +268,13 @@ def narrow_phase_kernel_gjk_mpr(
             aabb_a_lower = aabb_a_lower - margin_vec_a
             aabb_a_upper = aabb_a_upper + margin_vec_a
 
-        # Check if shape B is an infinite plane or mesh
+        # Check if shape B is an infinite plane, mesh, or SDF
         is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (scale_b[0] == 0.0 and scale_b[1] == 0.0)
         is_mesh_b = type_b == int(GeoType.MESH)
+        is_sdf_b = type_b == int(GeoType.SDF)
 
-        if is_infinite_plane_b or is_mesh_b:
-            # Use conservative bounding sphere approach for infinite planes and meshes
+        if is_infinite_plane_b or is_mesh_b or is_sdf_b:
+            # Use conservative bounding sphere approach for infinite planes, meshes, and SDFs
             radius_b = geom_collision_radius[shape_b]
             half_extents_b = wp.vec3(radius_b, radius_b, radius_b)
             aabb_b_lower = pos_b - half_extents_b - margin_vec_b
@@ -374,7 +365,7 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
     geom_transform: wp.array(dtype=wp.transform),
     geom_source: wp.array(dtype=wp.uint64),
     geom_cutoff: wp.array(dtype=float),  # Per-geometry cutoff distances
-    scale_array: wp.array(dtype=wp.vec3),  # Scale array extracted from geom_data
+    geom_data: wp.array(dtype=wp.vec4),  # Geom data (scale xyz, thickness w)
     shape_pairs_mesh: wp.array(dtype=wp.vec2i),
     shape_pairs_mesh_count: wp.array(dtype=int),
     total_num_threads: int,
@@ -431,7 +422,7 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
         cutoff_mesh = geom_cutoff[mesh_shape]
         margin = wp.max(cutoff_non_mesh, cutoff_mesh)
 
-        # Call mesh_vs_convex_midphase with the scale array and cutoff
+        # Call mesh_vs_convex_midphase with the geom_data and cutoff
         mesh_vs_convex_midphase(
             mesh_shape,
             non_mesh_shape,
@@ -439,7 +430,7 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
             X_ws,
             mesh_id,
             geom_types,
-            scale_array,
+            geom_data,
             geom_source,
             margin,
             triangle_pairs,
@@ -682,6 +673,46 @@ def narrow_phase_process_mesh_plane_contacts_kernel(
 
 
 class NarrowPhase:
+    def __init__(
+        self,
+        max_candidate_pairs: int,
+        max_triangle_pairs: int = 1000000,
+        device=None,
+    ):
+        """
+        Initialize NarrowPhase with pre-allocated buffers.
+
+        Args:
+            max_candidate_pairs: Maximum number of candidate pairs from broad phase
+            max_triangle_pairs: Maximum number of mesh triangle pairs (conservative estimate)
+            device: Device to allocate buffers on
+        """
+        self.max_candidate_pairs = max_candidate_pairs
+        self.max_triangle_pairs = max_triangle_pairs
+        self.device = device
+
+        # Pre-allocate all intermediate buffers
+        with wp.ScopedDevice(device):
+            # Buffers for mesh collision handling
+            self.shape_pairs_mesh = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
+            self.shape_pairs_mesh_count = wp.zeros(1, dtype=wp.int32, device=device)
+
+            # Buffers for triangle pairs
+            self.triangle_pairs = wp.zeros(max_triangle_pairs, dtype=wp.vec3i, device=device)
+            self.triangle_pairs_count = wp.zeros(1, dtype=wp.int32, device=device)
+
+            # Buffers for mesh-plane collision handling
+            self.shape_pairs_mesh_plane = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
+            self.shape_pairs_mesh_plane_count = wp.zeros(1, dtype=wp.int32, device=device)
+            self.shape_pairs_mesh_plane_cumsum = wp.zeros(max_candidate_pairs, dtype=wp.int32, device=device)
+            self.mesh_plane_vertex_total_count = wp.zeros(1, dtype=wp.int32, device=device)
+
+        # Fixed thread count for kernel launches
+        self.block_dim = 128
+        self.total_num_threads = self.block_dim * 1024
+        self.num_tile_blocks = 1024
+        self.tile_size = 128
+
     def launch(
         self,
         candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),  # Maybe colliding pairs
@@ -724,54 +755,21 @@ class NarrowPhase:
             device: Device to launch on
         """
         if device is None:
-            device = candidate_pair.device
+            device = self.device if self.device is not None else candidate_pair.device
 
         contact_max = contact_pair.shape[0]
 
-        # Clear contact count
+        # Clear all counters and contact count
         contact_count.zero_()
-
-        # Extract scale array from geom_data for mesh processing
-        # mesh_vs_convex_midphase requires a vec3 scale array
-        num_shapes = geom_types.shape[0]
-        scale_array = wp.zeros(num_shapes, dtype=wp.vec3, device=device)
-        # Extract scale from geom_data (xyz) into scale_array
-        wp.launch(
-            kernel=_extract_scale_kernel,
-            dim=num_shapes,
-            inputs=[geom_data],
-            outputs=[scale_array],
-            device=device,
-        )
-
-        # Allocate temporary buffers for mesh processing
-        # These would ideally be pre-allocated, but for now we allocate them here
-        max_pairs = candidate_pair.shape[0]
-
-        with wp.ScopedDevice(device):
-            # Buffers for mesh collision handling
-            shape_pairs_mesh = wp.zeros(max_pairs, dtype=wp.vec2i, device=device)
-            shape_pairs_mesh_count = wp.zeros(1, dtype=wp.int32, device=device)
-
-            # Conservative estimate for triangle pairs
-            max_triangle_pairs = 1000000
-            triangle_pairs = wp.zeros(max_triangle_pairs, dtype=wp.vec3i, device=device)
-            triangle_pairs_count = wp.zeros(1, dtype=wp.int32, device=device)
-
-            # Buffers for mesh-plane collision handling
-            shape_pairs_mesh_plane = wp.zeros(max_pairs, dtype=wp.vec2i, device=device)
-            shape_pairs_mesh_plane_count = wp.zeros(1, dtype=wp.int32, device=device)
-            shape_pairs_mesh_plane_cumsum = wp.zeros(max_pairs, dtype=wp.int32, device=device)
-            mesh_plane_vertex_total_count = wp.zeros(1, dtype=wp.int32, device=device)
-
-        # Use fixed thread count for kernel launches
-        block_dim = 128
-        total_num_threads = block_dim * 1024
+        self.shape_pairs_mesh_count.zero_()
+        self.triangle_pairs_count.zero_()
+        self.shape_pairs_mesh_plane_count.zero_()
+        self.mesh_plane_vertex_total_count.zero_()
 
         # Launch main narrow phase kernel
         wp.launch(
             kernel=narrow_phase_kernel_gjk_mpr,
-            dim=total_num_threads,
+            dim=self.total_num_threads,
             inputs=[
                 candidate_pair,
                 num_candidate_pair,
@@ -782,7 +780,7 @@ class NarrowPhase:
                 geom_cutoff,
                 geom_collision_radius,
                 contact_max,
-                total_num_threads,
+                self.total_num_threads,
             ],
             outputs=[
                 contact_count,
@@ -791,33 +789,33 @@ class NarrowPhase:
                 contact_normal,
                 contact_penetration,
                 contact_tangent,
-                shape_pairs_mesh,
-                shape_pairs_mesh_count,
-                shape_pairs_mesh_plane,
-                shape_pairs_mesh_plane_cumsum,
-                shape_pairs_mesh_plane_count,
-                mesh_plane_vertex_total_count,
+                self.shape_pairs_mesh,
+                self.shape_pairs_mesh_count,
+                self.shape_pairs_mesh_plane,
+                self.shape_pairs_mesh_plane_cumsum,
+                self.shape_pairs_mesh_plane_count,
+                self.mesh_plane_vertex_total_count,
             ],
             device=device,
-            block_dim=block_dim,
+            block_dim=self.block_dim,
         )
 
         # Launch mesh-plane contact processing kernel
         wp.launch(
             kernel=narrow_phase_process_mesh_plane_contacts_kernel,
-            dim=total_num_threads,
+            dim=self.total_num_threads,
             inputs=[
                 geom_types,
                 geom_data,
                 geom_transform,
                 geom_source,
                 geom_cutoff,
-                shape_pairs_mesh_plane,
-                shape_pairs_mesh_plane_cumsum,
-                shape_pairs_mesh_plane_count,
-                mesh_plane_vertex_total_count,
+                self.shape_pairs_mesh_plane,
+                self.shape_pairs_mesh_plane_cumsum,
+                self.shape_pairs_mesh_plane_count,
+                self.mesh_plane_vertex_total_count,
                 contact_max,
-                total_num_threads,
+                self.total_num_threads,
             ],
             outputs=[
                 contact_count,
@@ -828,48 +826,46 @@ class NarrowPhase:
                 contact_tangent,
             ],
             device=device,
-            block_dim=block_dim,
+            block_dim=self.block_dim,
         )
 
         # Launch mesh triangle overlap detection kernel
-        num_tile_blocks = 1024
-        tile_size = 128
-        second_dim = tile_size if ENABLE_TILE_BVH_QUERY else 1
+        second_dim = self.tile_size if ENABLE_TILE_BVH_QUERY else 1
         wp.launch(
             kernel=narrow_phase_find_mesh_triangle_overlaps_kernel,
-            dim=[num_tile_blocks, second_dim],
+            dim=[self.num_tile_blocks, second_dim],
             inputs=[
                 geom_types,
                 geom_transform,
                 geom_source,
                 geom_cutoff,
-                scale_array,
-                shape_pairs_mesh,
-                shape_pairs_mesh_count,
-                num_tile_blocks,  # Use num_tile_blocks as total_num_threads for tiled kernel
+                geom_data,
+                self.shape_pairs_mesh,
+                self.shape_pairs_mesh_count,
+                self.num_tile_blocks,  # Use num_tile_blocks as total_num_threads for tiled kernel
             ],
             outputs=[
-                triangle_pairs,
-                triangle_pairs_count,
+                self.triangle_pairs,
+                self.triangle_pairs_count,
             ],
             device=device,
-            block_dim=tile_size,
+            block_dim=self.tile_size,
         )
 
         # Launch mesh triangle contact processing kernel
         wp.launch(
             kernel=narrow_phase_process_mesh_triangle_contacts_kernel,
-            dim=total_num_threads,
+            dim=self.total_num_threads,
             inputs=[
                 geom_types,
                 geom_data,
                 geom_transform,
                 geom_source,
                 geom_cutoff,
-                triangle_pairs,
-                triangle_pairs_count,
+                self.triangle_pairs,
+                self.triangle_pairs_count,
                 contact_max,
-                total_num_threads,
+                self.total_num_threads,
             ],
             outputs=[
                 contact_count,
@@ -880,5 +876,5 @@ class NarrowPhase:
                 contact_tangent,
             ],
             device=device,
-            block_dim=block_dim,
+            block_dim=self.block_dim,
         )

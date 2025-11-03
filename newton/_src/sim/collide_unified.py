@@ -186,13 +186,14 @@ def compute_shape_aabbs(
     # Enlarge AABB by rigid_contact_margin for contact detection
     margin_vec = wp.vec3(rigid_contact_margin, rigid_contact_margin, rigid_contact_margin)
 
-    # Check if this is an infinite plane or mesh - use bounding sphere fallback
+    # Check if this is an infinite plane, mesh, or SDF - use bounding sphere fallback
     scale = shape_scale[shape_id]
     is_infinite_plane = (geo_type == int(GeoType.PLANE)) and (scale[0] == 0.0 and scale[1] == 0.0)
     is_mesh = geo_type == int(GeoType.MESH)
+    is_sdf = geo_type == int(GeoType.SDF)
 
-    if is_infinite_plane or is_mesh:
-        # Use conservative bounding sphere approach for infinite planes and meshes
+    if is_infinite_plane or is_mesh or is_sdf:
+        # Use conservative bounding sphere approach for infinite planes, meshes, and SDFs
         radius = shape_collision_radius[shape_id]
         half_extents = wp.vec3(radius, radius, radius)
         aabb_lower[shape_id] = pos - half_extents - margin_vec
@@ -466,8 +467,13 @@ class CollisionPipelineUnified:
             self.shape_pairs_filtered = shape_pairs_filtered
             self.shape_pairs_max = len(shape_pairs_filtered)
 
-        # Initialize narrow phase
-        self.narrow_phase = NarrowPhase()
+        # Initialize narrow phase with pre-allocated buffers
+        # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs
+        self.narrow_phase = NarrowPhase(
+            max_candidate_pairs=self.shape_pairs_max,
+            max_triangle_pairs=1000000,
+            device=device,
+        )
 
         # Allocate buffers
         with wp.ScopedDevice(device):

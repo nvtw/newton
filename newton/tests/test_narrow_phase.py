@@ -151,7 +151,14 @@ class TestNarrowPhase(unittest.TestCase):
 
     def setUp(self):
         """Set up narrow phase instance for tests."""
-        self.narrow_phase = NarrowPhase()
+        # Use reasonable buffer sizes for tests
+        # Tests typically use small numbers of shapes (< 100)
+        max_pairs = 10000  # Conservative estimate for test scenarios
+        self.narrow_phase = NarrowPhase(
+            max_candidate_pairs=max_pairs,
+            max_triangle_pairs=100000,
+            device=None,
+        )
         self.contact_margin = 0.01
 
     def _create_geometry_arrays(self, geom_list):

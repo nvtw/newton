@@ -754,7 +754,7 @@ def mesh_vs_convex_midphase(
     X_ws: wp.transform,
     mesh_id: wp.uint64,
     shape_type: wp.array(dtype=int),
-    shape_scale: wp.array(dtype=wp.vec3),
+    shape_data: wp.array(dtype=wp.vec4),
     shape_source_ptr: wp.array(dtype=wp.uint64),
     rigid_contact_margin: float,
     triangle_pairs: wp.array(dtype=wp.vec3i),
@@ -774,7 +774,7 @@ def mesh_vs_convex_midphase(
         X_ws: Non-mesh shape world-space transform
         mesh_id: Mesh BVH ID
         shape_type: Array of shape types
-        shape_scale: Array of shape scales
+        shape_data: Array of shape data (vec4: scale.xyz, thickness.w)
         shape_source_ptr: Array of mesh/SDF source pointers
         rigid_contact_margin: Contact margin for rigid bodies
         triangle_pairs: Output array for triangle pairs (mesh_shape, non_mesh_shape, tri_index)
@@ -791,22 +791,23 @@ def mesh_vs_convex_midphase(
 
     # Create generic shape data for non-mesh shape
     geo_type = shape_type[non_mesh_shape]
-    scale = shape_scale[non_mesh_shape]
+    data_vec4 = shape_data[non_mesh_shape]
+    scale = wp.vec3(data_vec4[0], data_vec4[1], data_vec4[2])
 
-    shape_data = GenericShapeData()
-    shape_data.shape_type = geo_type
-    shape_data.scale = scale
-    shape_data.auxiliary = wp.vec3(0.0, 0.0, 0.0)
+    generic_shape_data = GenericShapeData()
+    generic_shape_data.shape_type = geo_type
+    generic_shape_data.scale = scale
+    generic_shape_data.auxiliary = wp.vec3(0.0, 0.0, 0.0)
 
     # For CONVEX_MESH, pack the mesh pointer
     if geo_type == int(GeoType.CONVEX_MESH):
-        shape_data.auxiliary = pack_mesh_ptr(shape_source_ptr[non_mesh_shape])
+        generic_shape_data.auxiliary = pack_mesh_ptr(shape_source_ptr[non_mesh_shape])
 
     data_provider = SupportMapDataProvider()
 
     # Compute tight AABB directly in mesh local space for optimal fit
     aabb_lower, aabb_upper = compute_tight_aabb_from_support(
-        shape_data, orientation_in_mesh, pos_in_mesh, data_provider
+        generic_shape_data, orientation_in_mesh, pos_in_mesh, data_provider
     )
 
     # Add small margin for contact detection
