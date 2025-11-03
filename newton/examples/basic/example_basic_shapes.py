@@ -100,8 +100,15 @@ class Example:
         # not required for MuJoCo, but required for maximal-coordinate solvers like XPBD
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
-        # Create collision pipeline from command-line args (default: CollisionPipelineUnified with NxN)
-        self.collision_pipeline = newton.examples.create_collision_pipeline(self.model)
+        # Create collision pipeline with increased max contacts per pair
+        # rigid_contact_max_per_pair controls how many contact points can be generated between any two shapes
+        # Default is 10, increase if you need more contacts (e.g., for complex meshes)
+        self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
+            self.model,
+            rigid_contact_max_per_pair=100,  # Mesh vs plane creates a lot of contacts
+            rigid_contact_margin=0.05,
+            broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
+        )
         self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
 
         self.viewer.set_model(self.model)
