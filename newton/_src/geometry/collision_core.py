@@ -932,6 +932,7 @@ def get_triangle_shape_from_mesh(
 
     return shape_data, v0_world
 
+
 @wp.func
 def postprocess_triangle_contacts(
     triangle_shape_data: GenericShapeData,

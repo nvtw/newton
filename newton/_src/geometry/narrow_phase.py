@@ -278,7 +278,9 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool):
                 else:
                     # Use support function to compute tight AABB
                     data_provider = SupportMapDataProvider()
-                    aabb_a_lower, aabb_a_upper = compute_tight_aabb_from_support(shape_data_a, quat_a, pos_a, data_provider)
+                    aabb_a_lower, aabb_a_upper = compute_tight_aabb_from_support(
+                        shape_data_a, quat_a, pos_a, data_provider
+                    )
                     aabb_a_lower = aabb_a_lower - margin_vec_a
                     aabb_a_upper = aabb_a_upper + margin_vec_a
 
@@ -296,7 +298,9 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool):
                 else:
                     # Use support function to compute tight AABB
                     data_provider = SupportMapDataProvider()
-                    aabb_b_lower, aabb_b_upper = compute_tight_aabb_from_support(shape_data_b, quat_b, pos_b, data_provider)
+                    aabb_b_lower, aabb_b_upper = compute_tight_aabb_from_support(
+                        shape_data_b, quat_b, pos_b, data_provider
+                    )
                     aabb_b_lower = aabb_b_lower - margin_vec_b
                     aabb_b_upper = aabb_b_upper + margin_vec_b
 
