@@ -987,6 +987,6 @@ def postprocess_triangle_contacts(
         if dot_product < 0.0:
             normal = -normal
             for i in range(count):
-                signed_distances[i] = 0.0 # This prevents energetic reactions
+                signed_distances[i] = 0.0  # This prevents energetic reactions
 
     return signed_distances, normal
