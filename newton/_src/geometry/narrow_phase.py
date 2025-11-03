@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from functools import cache
+
 import warp as wp
 
 from ..geometry.collision_core import (
@@ -111,13 +113,15 @@ def write_contact_simple(
         # Penetration depth (negative if penetrating)
         contact_penetration[index] = d
 
-        # Compute tangent vector (x-axis of local contact frame)
-        # Use perpendicular to normal, defaulting to world x-axis if normal is parallel
-        world_x = wp.vec3(1.0, 0.0, 0.0)
-        normal = contact_normal_a_to_b
-        if wp.abs(wp.dot(normal, world_x)) > 0.99:
-            world_x = wp.vec3(0.0, 1.0, 0.0)
-        contact_tangent[index] = wp.normalize(world_x - wp.dot(world_x, normal) * normal)
+        # Compute tangent vector only if tangent array is non-empty
+        if contact_tangent.shape[0] > 0:
+            # Compute tangent vector (x-axis of local contact frame)
+            # Use perpendicular to normal, defaulting to world x-axis if normal is parallel
+            world_x = wp.vec3(1.0, 0.0, 0.0)
+            normal = contact_normal_a_to_b
+            if wp.abs(wp.dot(normal, world_x)) > 0.99:
+                world_x = wp.vec3(0.0, 1.0, 0.0)
+            contact_tangent[index] = wp.normalize(world_x - wp.dot(world_x, normal) * normal)
 
 
 @wp.func
@@ -166,197 +170,209 @@ def extract_shape_data(
     return position, orientation, result, scale, thickness
 
 
-@wp.kernel(enable_backward=False)
-def narrow_phase_kernel_gjk_mpr(
-    candidate_pair: wp.array(dtype=wp.vec2i),
-    num_candidate_pair: wp.array(dtype=int),
-    geom_types: wp.array(dtype=int),
-    geom_data: wp.array(dtype=wp.vec4),
-    geom_transform: wp.array(dtype=wp.transform),
-    geom_source: wp.array(dtype=wp.uint64),
-    geom_cutoff: wp.array(dtype=float),
-    geom_collision_radius: wp.array(dtype=float),
-    contact_max: int,
-    total_num_threads: int,
-    # outputs
-    contact_count: wp.array(dtype=int),
-    contact_pair: wp.array(dtype=wp.vec2i),
-    contact_position: wp.array(dtype=wp.vec3),
-    contact_normal: wp.array(dtype=wp.vec3),
-    contact_penetration: wp.array(dtype=float),
-    contact_tangent: wp.array(dtype=wp.vec3),
-    # mesh collision outputs (for mesh processing)
-    shape_pairs_mesh: wp.array(dtype=wp.vec2i),
-    shape_pairs_mesh_count: wp.array(dtype=int),
-    # mesh-plane collision outputs
-    shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
-    shape_pairs_mesh_plane_cumsum: wp.array(dtype=int),
-    shape_pairs_mesh_plane_count: wp.array(dtype=int),
-    mesh_plane_vertex_total_count: wp.array(dtype=int),
-):
-    """
-    Narrow phase collision detection kernel using GJK/MPR.
-    Processes candidate pairs from broad phase and generates contacts.
-    """
-    tid = wp.tid()
+@cache
+def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool):
+    @wp.kernel(enable_backward=False)
+    def narrow_phase_kernel_gjk_mpr(
+        candidate_pair: wp.array(dtype=wp.vec2i),
+        num_candidate_pair: wp.array(dtype=int),
+        geom_types: wp.array(dtype=int),
+        geom_data: wp.array(dtype=wp.vec4),
+        geom_transform: wp.array(dtype=wp.transform),
+        geom_source: wp.array(dtype=wp.uint64),
+        geom_cutoff: wp.array(dtype=float),
+        geom_collision_radius: wp.array(dtype=float),
+        geom_aabb_lower: wp.array(dtype=wp.vec3),
+        geom_aabb_upper: wp.array(dtype=wp.vec3),
+        contact_max: int,
+        total_num_threads: int,
+        # outputs
+        contact_count: wp.array(dtype=int),
+        contact_pair: wp.array(dtype=wp.vec2i),
+        contact_position: wp.array(dtype=wp.vec3),
+        contact_normal: wp.array(dtype=wp.vec3),
+        contact_penetration: wp.array(dtype=float),
+        contact_tangent: wp.array(dtype=wp.vec3),
+        # mesh collision outputs (for mesh processing)
+        shape_pairs_mesh: wp.array(dtype=wp.vec2i),
+        shape_pairs_mesh_count: wp.array(dtype=int),
+        # mesh-plane collision outputs
+        shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
+        shape_pairs_mesh_plane_cumsum: wp.array(dtype=int),
+        shape_pairs_mesh_plane_count: wp.array(dtype=int),
+        mesh_plane_vertex_total_count: wp.array(dtype=int),
+    ):
+        """
+        Narrow phase collision detection kernel using GJK/MPR.
+        Processes candidate pairs from broad phase and generates contacts.
+        """
+        tid = wp.tid()
 
-    num_work_items = wp.min(candidate_pair.shape[0], num_candidate_pair[0])
+        num_work_items = wp.min(candidate_pair.shape[0], num_candidate_pair[0])
 
-    for t in range(tid, num_work_items, total_num_threads):
-        # Get shape pair
-        pair = candidate_pair[t]
-        shape_a = pair[0]
-        shape_b = pair[1]
+        for t in range(tid, num_work_items, total_num_threads):
+            # Get shape pair
+            pair = candidate_pair[t]
+            shape_a = pair[0]
+            shape_b = pair[1]
 
-        # Safety: ignore self-collision pairs
-        if shape_a == shape_b:
-            continue
+            # Safety: ignore self-collision pairs
+            if shape_a == shape_b:
+                continue
 
-        # Validate shape indices
-        if shape_a < 0 or shape_b < 0:
-            continue
+            # Validate shape indices
+            if shape_a < 0 or shape_b < 0:
+                continue
 
-        # Get shape types
-        type_a = geom_types[shape_a]
-        type_b = geom_types[shape_b]
+            # Get shape types
+            type_a = geom_types[shape_a]
+            type_b = geom_types[shape_b]
 
-        # Sort shapes by type to ensure consistent collision handling order
-        if type_a > type_b:
-            # Swap shapes to maintain consistent ordering
-            shape_a, shape_b = shape_b, shape_a
-            type_a, type_b = type_b, type_a
+            # Sort shapes by type to ensure consistent collision handling order
+            if type_a > type_b:
+                # Swap shapes to maintain consistent ordering
+                shape_a, shape_b = shape_b, shape_a
+                type_a, type_b = type_b, type_a
 
-        # Extract shape data for both shapes
-        pos_a, quat_a, shape_data_a, scale_a, thickness_a = extract_shape_data(
-            shape_a,
-            geom_transform,
-            geom_types,
-            geom_data,
-            geom_source,
-        )
+            # Extract shape data for both shapes
+            pos_a, quat_a, shape_data_a, scale_a, thickness_a = extract_shape_data(
+                shape_a,
+                geom_transform,
+                geom_types,
+                geom_data,
+                geom_source,
+            )
 
-        pos_b, quat_b, shape_data_b, scale_b, thickness_b = extract_shape_data(
-            shape_b,
-            geom_transform,
-            geom_types,
-            geom_data,
-            geom_source,
-        )
+            pos_b, quat_b, shape_data_b, scale_b, thickness_b = extract_shape_data(
+                shape_b,
+                geom_transform,
+                geom_types,
+                geom_data,
+                geom_source,
+            )
 
-        # Compute AABBs - use special handling for infinite planes and meshes
-        # This matches the approach in collide_unified.py compute_shape_aabbs
-        cutoff_a = geom_cutoff[shape_a]
-        cutoff_b = geom_cutoff[shape_b]
-        margin_vec_a = wp.vec3(cutoff_a, cutoff_a, cutoff_a)
-        margin_vec_b = wp.vec3(cutoff_b, cutoff_b, cutoff_b)
+            if wp.static(external_aabb):
+                aabb_a_lower = geom_aabb_lower[shape_a]
+                aabb_a_upper = geom_aabb_upper[shape_a]
+                aabb_b_lower = geom_aabb_lower[shape_b]
+                aabb_b_upper = geom_aabb_upper[shape_b]
+            if wp.static(not external_aabb):
+                # Compute AABBs - use special handling for infinite planes and meshes
+                # This matches the approach in collide_unified.py compute_shape_aabbs
+                cutoff_a = geom_cutoff[shape_a]
+                cutoff_b = geom_cutoff[shape_b]
+                margin_vec_a = wp.vec3(cutoff_a, cutoff_a, cutoff_a)
+                margin_vec_b = wp.vec3(cutoff_b, cutoff_b, cutoff_b)
 
-        # Check if shape A is an infinite plane, mesh, or SDF
-        is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
-        is_mesh_a = type_a == int(GeoType.MESH)
-        is_sdf_a = type_a == int(GeoType.SDF)
+                # Check if shape A is an infinite plane, mesh, or SDF
+                is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
+                is_mesh_a = type_a == int(GeoType.MESH)
+                is_sdf_a = type_a == int(GeoType.SDF)
 
-        if is_infinite_plane_a or is_mesh_a or is_sdf_a:
-            # Use conservative bounding sphere approach for infinite planes, meshes, and SDFs
-            radius_a = geom_collision_radius[shape_a]
-            half_extents_a = wp.vec3(radius_a, radius_a, radius_a)
-            aabb_a_lower = pos_a - half_extents_a - margin_vec_a
-            aabb_a_upper = pos_a + half_extents_a + margin_vec_a
-        else:
-            # Use support function to compute tight AABB
-            data_provider = SupportMapDataProvider()
-            aabb_a_lower, aabb_a_upper = compute_tight_aabb_from_support(shape_data_a, quat_a, pos_a, data_provider)
-            aabb_a_lower = aabb_a_lower - margin_vec_a
-            aabb_a_upper = aabb_a_upper + margin_vec_a
+                if is_infinite_plane_a or is_mesh_a or is_sdf_a:
+                    # Use conservative bounding sphere approach for infinite planes, meshes, and SDFs
+                    radius_a = geom_collision_radius[shape_a]
+                    half_extents_a = wp.vec3(radius_a, radius_a, radius_a)
+                    aabb_a_lower = pos_a - half_extents_a - margin_vec_a
+                    aabb_a_upper = pos_a + half_extents_a + margin_vec_a
+                else:
+                    # Use support function to compute tight AABB
+                    data_provider = SupportMapDataProvider()
+                    aabb_a_lower, aabb_a_upper = compute_tight_aabb_from_support(shape_data_a, quat_a, pos_a, data_provider)
+                    aabb_a_lower = aabb_a_lower - margin_vec_a
+                    aabb_a_upper = aabb_a_upper + margin_vec_a
 
-        # Check if shape B is an infinite plane, mesh, or SDF
-        is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (scale_b[0] == 0.0 and scale_b[1] == 0.0)
-        is_mesh_b = type_b == int(GeoType.MESH)
-        is_sdf_b = type_b == int(GeoType.SDF)
+                # Check if shape B is an infinite plane, mesh, or SDF
+                is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (scale_b[0] == 0.0 and scale_b[1] == 0.0)
+                is_mesh_b = type_b == int(GeoType.MESH)
+                is_sdf_b = type_b == int(GeoType.SDF)
 
-        if is_infinite_plane_b or is_mesh_b or is_sdf_b:
-            # Use conservative bounding sphere approach for infinite planes, meshes, and SDFs
-            radius_b = geom_collision_radius[shape_b]
-            half_extents_b = wp.vec3(radius_b, radius_b, radius_b)
-            aabb_b_lower = pos_b - half_extents_b - margin_vec_b
-            aabb_b_upper = pos_b + half_extents_b + margin_vec_b
-        else:
-            # Use support function to compute tight AABB
-            data_provider = SupportMapDataProvider()
-            aabb_b_lower, aabb_b_upper = compute_tight_aabb_from_support(shape_data_b, quat_b, pos_b, data_provider)
-            aabb_b_lower = aabb_b_lower - margin_vec_b
-            aabb_b_upper = aabb_b_upper + margin_vec_b
+                if is_infinite_plane_b or is_mesh_b or is_sdf_b:
+                    # Use conservative bounding sphere approach for infinite planes, meshes, and SDFs
+                    radius_b = geom_collision_radius[shape_b]
+                    half_extents_b = wp.vec3(radius_b, radius_b, radius_b)
+                    aabb_b_lower = pos_b - half_extents_b - margin_vec_b
+                    aabb_b_upper = pos_b + half_extents_b + margin_vec_b
+                else:
+                    # Use support function to compute tight AABB
+                    data_provider = SupportMapDataProvider()
+                    aabb_b_lower, aabb_b_upper = compute_tight_aabb_from_support(shape_data_b, quat_b, pos_b, data_provider)
+                    aabb_b_lower = aabb_b_lower - margin_vec_b
+                    aabb_b_upper = aabb_b_upper + margin_vec_b
 
-        # Use pre_contact_check to handle mesh and plane special cases
-        # This avoids code duplication with collide_unified.py
-        skip_pair, is_infinite_plane_a, is_infinite_plane_b, bsphere_radius_a, bsphere_radius_b = pre_contact_check(
-            shape_a,
-            shape_b,
-            pos_a,
-            pos_b,
-            quat_a,
-            quat_b,
-            shape_data_a,
-            shape_data_b,
-            aabb_a_lower,
-            aabb_a_upper,
-            aabb_b_lower,
-            aabb_b_upper,
-            pair,
-            geom_source[shape_a],
-            geom_source[shape_b],
-            shape_pairs_mesh,
-            shape_pairs_mesh_count,
-            shape_pairs_mesh_plane,
-            shape_pairs_mesh_plane_cumsum,
-            shape_pairs_mesh_plane_count,
-            mesh_plane_vertex_total_count,
-        )
-        if skip_pair:
-            continue
-
-        # Use per-geometry cutoff for contact detection
-        # find_contacts expects a scalar margin, so we use max of the two cutoffs
-        cutoff_a = geom_cutoff[shape_a]
-        cutoff_b = geom_cutoff[shape_b]
-        margin = wp.max(cutoff_a, cutoff_b)
-
-        # Compute contacts using GJK/MPR
-        count, normal, signed_distances, points, radius_eff_a, radius_eff_b = find_contacts(
-            pos_a,
-            pos_b,
-            quat_a,
-            quat_b,
-            shape_data_a,
-            shape_data_b,
-            is_infinite_plane_a,
-            is_infinite_plane_b,
-            bsphere_radius_a,
-            bsphere_radius_b,
-            margin,
-        )
-
-        # Write contacts
-        for id in range(count):
-            write_contact_simple(
-                points[id],
-                normal,
-                signed_distances[id],
-                radius_eff_a,
-                radius_eff_b,
-                thickness_a,
-                thickness_b,
+            # Use pre_contact_check to handle mesh and plane special cases
+            # This avoids code duplication with collide_unified.py
+            skip_pair, is_infinite_plane_a, is_infinite_plane_b, bsphere_radius_a, bsphere_radius_b = pre_contact_check(
                 shape_a,
                 shape_b,
-                t,
-                margin,
-                contact_max,
-                contact_count,
-                contact_pair,
-                contact_position,
-                contact_normal,
-                contact_penetration,
-                contact_tangent,
+                pos_a,
+                pos_b,
+                quat_a,
+                quat_b,
+                shape_data_a,
+                shape_data_b,
+                aabb_a_lower,
+                aabb_a_upper,
+                aabb_b_lower,
+                aabb_b_upper,
+                pair,
+                geom_source[shape_a],
+                geom_source[shape_b],
+                shape_pairs_mesh,
+                shape_pairs_mesh_count,
+                shape_pairs_mesh_plane,
+                shape_pairs_mesh_plane_cumsum,
+                shape_pairs_mesh_plane_count,
+                mesh_plane_vertex_total_count,
             )
+            if skip_pair:
+                continue
+
+            # Use per-geometry cutoff for contact detection
+            # find_contacts expects a scalar margin, so we use max of the two cutoffs
+            cutoff_a = geom_cutoff[shape_a]
+            cutoff_b = geom_cutoff[shape_b]
+            margin = wp.max(cutoff_a, cutoff_b)
+
+            # Compute contacts using GJK/MPR
+            count, normal, signed_distances, points, radius_eff_a, radius_eff_b = find_contacts(
+                pos_a,
+                pos_b,
+                quat_a,
+                quat_b,
+                shape_data_a,
+                shape_data_b,
+                is_infinite_plane_a,
+                is_infinite_plane_b,
+                bsphere_radius_a,
+                bsphere_radius_b,
+                margin,
+            )
+
+            # Write contacts
+            for id in range(count):
+                write_contact_simple(
+                    points[id],
+                    normal,
+                    signed_distances[id],
+                    radius_eff_a,
+                    radius_eff_b,
+                    thickness_a,
+                    thickness_b,
+                    shape_a,
+                    shape_b,
+                    t,
+                    margin,
+                    contact_max,
+                    contact_count,
+                    contact_pair,
+                    contact_position,
+                    contact_normal,
+                    contact_penetration,
+                    contact_tangent,
+                )
+
+    return narrow_phase_kernel_gjk_mpr
 
 
 @wp.kernel(enable_backward=False)
@@ -678,6 +694,8 @@ class NarrowPhase:
         max_candidate_pairs: int,
         max_triangle_pairs: int = 1000000,
         device=None,
+        geom_aabb_lower: wp.array(dtype=wp.vec3) | None = None,
+        geom_aabb_upper: wp.array(dtype=wp.vec3) | None = None,
     ):
         """
         Initialize NarrowPhase with pre-allocated buffers.
@@ -686,10 +704,28 @@ class NarrowPhase:
             max_candidate_pairs: Maximum number of candidate pairs from broad phase
             max_triangle_pairs: Maximum number of mesh triangle pairs (conservative estimate)
             device: Device to allocate buffers on
+            geom_aabb_lower: Optional external AABB lower bounds array (if provided, AABBs won't be computed internally)
+            geom_aabb_upper: Optional external AABB upper bounds array (if provided, AABBs won't be computed internally)
         """
         self.max_candidate_pairs = max_candidate_pairs
         self.max_triangle_pairs = max_triangle_pairs
         self.device = device
+
+        # Determine if we're using external AABBs
+        self.external_aabb = geom_aabb_lower is not None and geom_aabb_upper is not None
+
+        if self.external_aabb:
+            # Use provided AABB arrays
+            self.geom_aabb_lower = geom_aabb_lower
+            self.geom_aabb_upper = geom_aabb_upper
+        else:
+            # Create empty AABB arrays (won't be used)
+            with wp.ScopedDevice(device):
+                self.geom_aabb_lower = wp.zeros(0, dtype=wp.vec3, device=device)
+                self.geom_aabb_upper = wp.zeros(0, dtype=wp.vec3, device=device)
+
+        # Create the appropriate kernel variant
+        self.narrow_phase_kernel = create_narrow_phase_kernel_gjk_mpr(self.external_aabb)
 
         # Pre-allocate all intermediate buffers
         with wp.ScopedDevice(device):
@@ -706,6 +742,9 @@ class NarrowPhase:
             self.shape_pairs_mesh_plane_count = wp.zeros(1, dtype=wp.int32, device=device)
             self.shape_pairs_mesh_plane_cumsum = wp.zeros(max_candidate_pairs, dtype=wp.int32, device=device)
             self.mesh_plane_vertex_total_count = wp.zeros(1, dtype=wp.int32, device=device)
+
+            # Empty tangent array for when tangent computation is disabled
+            self.empty_tangent = wp.zeros(0, dtype=wp.vec3, device=device)
 
         # Fixed thread count for kernel launches
         self.block_dim = 128
@@ -730,7 +769,7 @@ class NarrowPhase:
             dtype=wp.vec3
         ),  # Pointing from pairId.x to pairId.y, represents z axis of local contact frame
         contact_penetration: wp.array(dtype=float),  # negative if bodies overlap
-        contact_tangent: wp.array(dtype=wp.vec3),  # Represents x axis of local contact frame
+        contact_tangent: wp.array(dtype=wp.vec3) | None,  # Represents x axis of local contact frame (None to disable)
         contact_count: wp.array(dtype=int),  # Number of active contacts after narrow
         device=None,  # Device to launch on
     ):
@@ -750,7 +789,7 @@ class NarrowPhase:
             contact_position: Output array for contact positions (center point)
             contact_normal: Output array for contact normals
             contact_penetration: Output array for penetration depths
-            contact_tangent: Output array for contact tangents
+            contact_tangent: Output array for contact tangents, or None to disable tangent computation
             contact_count: Output array (single element) for contact count
             device: Device to launch on
         """
@@ -759,6 +798,10 @@ class NarrowPhase:
 
         contact_max = contact_pair.shape[0]
 
+        # Handle optional tangent array - use empty array if None
+        if contact_tangent is None:
+            contact_tangent = self.empty_tangent
+
         # Clear all counters and contact count
         contact_count.zero_()
         self.shape_pairs_mesh_count.zero_()
@@ -766,9 +809,9 @@ class NarrowPhase:
         self.shape_pairs_mesh_plane_count.zero_()
         self.mesh_plane_vertex_total_count.zero_()
 
-        # Launch main narrow phase kernel
+        # Launch main narrow phase kernel (using the appropriate kernel variant)
         wp.launch(
-            kernel=narrow_phase_kernel_gjk_mpr,
+            kernel=self.narrow_phase_kernel,
             dim=self.total_num_threads,
             inputs=[
                 candidate_pair,
@@ -779,6 +822,8 @@ class NarrowPhase:
                 geom_source,
                 geom_cutoff,
                 geom_collision_radius,
+                self.geom_aabb_lower,
+                self.geom_aabb_upper,
                 contact_max,
                 self.total_num_threads,
             ],

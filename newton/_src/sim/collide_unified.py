@@ -467,14 +467,6 @@ class CollisionPipelineUnified:
             self.shape_pairs_filtered = shape_pairs_filtered
             self.shape_pairs_max = len(shape_pairs_filtered)
 
-        # Initialize narrow phase with pre-allocated buffers
-        # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs
-        self.narrow_phase = NarrowPhase(
-            max_candidate_pairs=self.shape_pairs_max,
-            max_triangle_pairs=1000000,
-            device=device,
-        )
-
         # Allocate buffers
         with wp.ScopedDevice(device):
             self.broad_phase_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
@@ -482,6 +474,18 @@ class CollisionPipelineUnified:
             self.shape_aabb_lower = wp.zeros(shape_count, dtype=wp.vec3, device=device)
             self.shape_aabb_upper = wp.zeros(shape_count, dtype=wp.vec3, device=device)
 
+        # Initialize narrow phase with pre-allocated buffers
+        # Pass AABB arrays so narrow phase can use them instead of computing AABBs internally
+        # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs
+        self.narrow_phase = NarrowPhase(
+            max_candidate_pairs=self.shape_pairs_max,
+            max_triangle_pairs=1000000,
+            device=device,
+            geom_aabb_lower=self.shape_aabb_lower,
+            geom_aabb_upper=self.shape_aabb_upper,
+        )
+
+        with wp.ScopedDevice(device):
             # Narrow phase input/output arrays
             self.geom_data = wp.zeros(shape_count, dtype=wp.vec4, device=device)
             self.geom_transform = wp.zeros(shape_count, dtype=wp.transform, device=device)
@@ -492,7 +496,6 @@ class CollisionPipelineUnified:
             self.narrow_contact_position = wp.zeros(self.rigid_contact_max, dtype=wp.vec3, device=device)
             self.narrow_contact_normal = wp.zeros(self.rigid_contact_max, dtype=wp.vec3, device=device)
             self.narrow_contact_penetration = wp.zeros(self.rigid_contact_max, dtype=wp.float32, device=device)
-            self.narrow_contact_tangent = wp.zeros(self.rigid_contact_max, dtype=wp.vec3, device=device)
             self.narrow_contact_count = wp.zeros(1, dtype=wp.int32, device=device)
 
         if soft_contact_max is None:
@@ -696,7 +699,7 @@ class CollisionPipelineUnified:
             contact_position=self.narrow_contact_position,
             contact_normal=self.narrow_contact_normal,
             contact_penetration=self.narrow_contact_penetration,
-            contact_tangent=self.narrow_contact_tangent,
+            contact_tangent=None,
             contact_count=self.narrow_contact_count,
             device=self.device,
         )
