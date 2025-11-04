@@ -31,7 +31,7 @@ class Picking:
     see how well a RL policy is coping with disturbances.
     """
 
-    def __init__(self, model: newton.Model, pick_stiffness: float = 500.0, pick_damping: float = 50.0) -> None:
+    def __init__(self, model: newton.Model, pick_stiffness: float = 500.0, pick_damping: float = 50.0, viewer=None) -> None:
         """
         Initializes the picking system.
 
@@ -39,10 +39,12 @@ class Picking:
             model (newton.Model): The model to pick from.
             pick_stiffness (float): The stiffness that will be used to compute the force applied to the picked body.
             pick_damping (float): The damping that will be used to compute the force applied to the picked body.
+            viewer: Optional reference to the viewer (for accessing world_offsets).
         """
         self.model = model
         self.pick_stiffness = pick_stiffness
         self.pick_damping = pick_damping
+        self.viewer = viewer
 
         self.min_dist = None
         self.min_index = None
@@ -169,6 +171,13 @@ class Picking:
             self.min_body_index.fill_(-1)
             self.lock.zero_()
 
+        # Get world offsets from viewer if available
+        shape_world = self.model.shape_world if self.model.shape_world is not None else wp.array([], dtype=int, device=self.model.device)
+        if self.viewer is not None and hasattr(self.viewer, 'world_offsets') and self.viewer.world_offsets is not None:
+            world_offsets = self.viewer.world_offsets
+        else:
+            world_offsets = wp.array([], dtype=wp.vec3, device=self.model.device)
+
         wp.launch(
             kernel=raycast.raycast_kernel,
             dim=num_geoms,
@@ -183,7 +192,7 @@ class Picking:
                 d,
                 self.lock,
             ],
-            outputs=[self.min_dist, self.min_index, self.min_body_index],
+            outputs=[self.min_dist, self.min_index, self.min_body_index, shape_world, world_offsets],
             device=self.model.device,
         )
         wp.synchronize()

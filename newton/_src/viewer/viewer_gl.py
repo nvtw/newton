@@ -193,7 +193,7 @@ class ViewerGL(ViewerBase):
         """
         super().set_model(model)
 
-        self.picking = Picking(model, pick_stiffness=10000.0, pick_damping=1000.0)
+        self.picking = Picking(model, pick_stiffness=10000.0, pick_damping=1000.0, viewer=self)
         self.wind = Wind(model)
 
         fb_w, fb_h = self.renderer.window.get_framebuffer_size()
