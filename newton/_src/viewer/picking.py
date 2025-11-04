@@ -129,12 +129,26 @@ class Picking:
         if not self.is_picking():
             return
 
+        # Get the world offset for the picked body
+        world_offset = wp.vec3(0.0, 0.0, 0.0)
+        if self.viewer is not None and hasattr(self.viewer, 'world_offsets') and self.viewer.world_offsets is not None:
+            if self.viewer.world_offsets.shape[0] > 0:
+                # Get the picked body index
+                picked_body_idx = self.pick_body.numpy()[0]
+                if picked_body_idx >= 0 and self.model.body_world is not None:
+                    # Find which world this body belongs to
+                    body_world_idx = self.model.body_world.numpy()[picked_body_idx]
+                    if body_world_idx >= 0 and body_world_idx < self.viewer.world_offsets.shape[0]:
+                        offset_np = self.viewer.world_offsets.numpy()[body_world_idx]
+                        world_offset = wp.vec3(float(offset_np[0]), float(offset_np[1]), float(offset_np[2]))
+
         wp.launch(
             kernel=update_pick_target_kernel,
             dim=1,
             inputs=[
                 ray_start,
                 ray_dir,
+                world_offset,
                 self.pick_state,
             ],
             device=self.model.device,
@@ -207,8 +221,20 @@ class Picking:
             # Ensures that the ray direction and start point are vec3f objects
             d = wp.vec3f(d[0], d[1], d[2])
             p = wp.vec3f(p[0], p[1], p[2])
-            # world space hit point
+            # world space hit point (in offset coordinate system from raycast)
             hit_point_world = p + d * float(dist)
+
+            # Convert hit point from offset space to physics space
+            # The raycast was done with world offsets applied, so we need to remove them
+            if world_offsets.shape[0] > 0 and shape_world.shape[0] > 0 and index >= 0:
+                world_idx_np = shape_world.numpy()[index] if hasattr(shape_world, 'numpy') else shape_world[index]
+                if world_idx_np >= 0 and world_idx_np < world_offsets.shape[0]:
+                    offset_np = world_offsets.numpy()[world_idx_np]
+                    hit_point_world = wp.vec3f(
+                        hit_point_world[0] - offset_np[0],
+                        hit_point_world[1] - offset_np[1],
+                        hit_point_world[2] - offset_np[2]
+                    )
 
             wp.launch(
                 kernel=compute_pick_state_kernel,
