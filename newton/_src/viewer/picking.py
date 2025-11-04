@@ -31,7 +31,9 @@ class Picking:
     see how well a RL policy is coping with disturbances.
     """
 
-    def __init__(self, model: newton.Model, pick_stiffness: float = 500.0, pick_damping: float = 50.0, viewer=None) -> None:
+    def __init__(
+        self, model: newton.Model, pick_stiffness: float = 500.0, pick_damping: float = 50.0, viewer=None
+    ) -> None:
         """
         Initializes the picking system.
 
@@ -131,7 +133,7 @@ class Picking:
 
         # Get the world offset for the picked body
         world_offset = wp.vec3(0.0, 0.0, 0.0)
-        if self.viewer is not None and hasattr(self.viewer, 'world_offsets') and self.viewer.world_offsets is not None:
+        if self.viewer is not None and hasattr(self.viewer, "world_offsets") and self.viewer.world_offsets is not None:
             if self.viewer.world_offsets.shape[0] > 0:
                 # Get the picked body index
                 picked_body_idx = self.pick_body.numpy()[0]
@@ -186,8 +188,12 @@ class Picking:
             self.lock.zero_()
 
         # Get world offsets from viewer if available
-        shape_world = self.model.shape_world if self.model.shape_world is not None else wp.array([], dtype=int, device=self.model.device)
-        if self.viewer is not None and hasattr(self.viewer, 'world_offsets') and self.viewer.world_offsets is not None:
+        shape_world = (
+            self.model.shape_world
+            if self.model.shape_world is not None
+            else wp.array([], dtype=int, device=self.model.device)
+        )
+        if self.viewer is not None and hasattr(self.viewer, "world_offsets") and self.viewer.world_offsets is not None:
             world_offsets = self.viewer.world_offsets
         else:
             world_offsets = wp.array([], dtype=wp.vec3, device=self.model.device)
@@ -227,13 +233,13 @@ class Picking:
             # Convert hit point from offset space to physics space
             # The raycast was done with world offsets applied, so we need to remove them
             if world_offsets.shape[0] > 0 and shape_world.shape[0] > 0 and index >= 0:
-                world_idx_np = shape_world.numpy()[index] if hasattr(shape_world, 'numpy') else shape_world[index]
+                world_idx_np = shape_world.numpy()[index] if hasattr(shape_world, "numpy") else shape_world[index]
                 if world_idx_np >= 0 and world_idx_np < world_offsets.shape[0]:
                     offset_np = world_offsets.numpy()[world_idx_np]
                     hit_point_world = wp.vec3f(
                         hit_point_world[0] - offset_np[0],
                         hit_point_world[1] - offset_np[1],
-                        hit_point_world[2] - offset_np[2]
+                        hit_point_world[2] - offset_np[2],
                     )
 
             wp.launch(

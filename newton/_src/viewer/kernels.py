@@ -187,7 +187,7 @@ def update_pick_target_kernel(
 ):
     # get original mouse cursor target (in physics space)
     original_target = wp.vec3(pick_state[8], pick_state[9], pick_state[10])
-    
+
     # Add world offset to convert to offset space for distance calculation
     original_target_offset = original_target + world_offset
 
@@ -196,7 +196,7 @@ def update_pick_target_kernel(
 
     # Project new mouse cursor target at the same depth (in offset space)
     new_mouse_target_offset = p + d * dist
-    
+
     # Convert back to physics space by subtracting world offset
     new_mouse_target = new_mouse_target_offset - world_offset
 
