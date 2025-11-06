@@ -75,7 +75,8 @@ def write_contact_simple(
     contact_point_center: wp.vec3,
     contact_normal_a_to_b: wp.vec3,
     contact_distance: float,
-    feature: int,
+    feature: wp.uint32,
+    feature_pair_key: wp.uint64,
     radius_eff_a: float,
     radius_eff_b: float,
     thickness_a: float,
@@ -92,7 +93,8 @@ def write_contact_simple(
     contact_normal: wp.array(dtype=wp.vec3),
     contact_penetration: wp.array(dtype=float),
     contact_tangent: wp.array(dtype=wp.vec3),
-    contact_key: wp.array(dtype=int),
+    contact_pair_key: wp.array(dtype=wp.uint64),
+    contact_key: wp.array(dtype=wp.uint32),
 ):
     """
     Write a contact to the output arrays using the simplified API format.
@@ -159,8 +161,9 @@ def write_contact_simple(
             contact_tangent[index] = wp.normalize(world_x - wp.dot(world_x, normal) * normal)
 
         # Write contact key only if contact_key array is non-empty
-        if contact_key.shape[0] > 0:
+        if contact_key.shape[0] > 0 and contact_pair_key.shape[0] > 0:
             contact_key[index] = feature
+            contact_pair_key[index] = feature_pair_key
 
 
 @wp.func
@@ -232,7 +235,8 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool):
         contact_normal: wp.array(dtype=wp.vec3),
         contact_penetration: wp.array(dtype=float),
         contact_tangent: wp.array(dtype=wp.vec3),
-        contact_key: wp.array(dtype=int),
+        contact_pair_key: wp.array(dtype=wp.uint64),
+        contact_key: wp.array(dtype=wp.uint32),
         # mesh collision outputs (for mesh processing)
         shape_pairs_mesh: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_count: wp.array(dtype=int),
@@ -395,11 +399,13 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool):
 
             # Write contacts
             for id in range(count):
+                pair_key = build_pair_key2(wp.uint32(shape_a), wp.uint32(shape_b))
                 write_contact_simple(
                     points[id],
                     normal,
                     signed_distances[id],
                     features[id],
+                    pair_key,
                     radius_eff_a,
                     radius_eff_b,
                     thickness_a,
@@ -415,6 +421,7 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool):
                     contact_normal,
                     contact_penetration,
                     contact_tangent,
+                    contact_pair_key,
                     contact_key,
                 )
 
@@ -518,7 +525,8 @@ def narrow_phase_process_mesh_triangle_contacts_kernel(
     contact_normal: wp.array(dtype=wp.vec3),
     contact_penetration: wp.array(dtype=float),
     contact_tangent: wp.array(dtype=wp.vec3),
-    contact_key: wp.array(dtype=int),
+    contact_pair_key: wp.array(dtype=wp.uint64),
+    contact_key: wp.array(dtype=wp.uint32),
 ):
     """
     Process triangle pairs to generate contacts using GJK/MPR.
@@ -594,11 +602,13 @@ def narrow_phase_process_mesh_triangle_contacts_kernel(
 
         # Write contacts
         for contact_id in range(count):
+            pair_key = build_pair_key3(wp.uint32(shape_a), wp.uint32(shape_b), wp.uint32(tri_idx))
             write_contact_simple(
                 points[contact_id],
                 normal,
                 signed_distances[contact_id],
                 features[contact_id],
+                pair_key,
                 radius_eff_a,
                 radius_eff_b,
                 thickness_a,
@@ -614,6 +624,7 @@ def narrow_phase_process_mesh_triangle_contacts_kernel(
                 contact_normal,
                 contact_penetration,
                 contact_tangent,
+                contact_pair_key,
                 contact_key,
             )
 
@@ -638,7 +649,8 @@ def narrow_phase_process_mesh_plane_contacts_kernel(
     contact_normal: wp.array(dtype=wp.vec3),
     contact_penetration: wp.array(dtype=float),
     contact_tangent: wp.array(dtype=wp.vec3),
-    contact_key: wp.array(dtype=int),
+    contact_pair_key: wp.array(dtype=wp.uint64),
+    contact_key: wp.array(dtype=wp.uint32),
 ):
     """
     Process mesh-plane collisions by checking each mesh vertex against the infinite plane.
@@ -716,11 +728,13 @@ def narrow_phase_process_mesh_plane_contacts_kernel(
             # Write contact
             # Note: write_contact_simple expects contact_normal_a_to_b pointing FROM mesh TO plane (downward)
             # plane_normal points upward, so we need to negate it
+            pair_key = build_pair_key2(wp.uint32(mesh_shape), wp.uint32(plane_shape))
             write_contact_simple(
                 (vertex_world + point_on_plane) * 0.5,  # contact_point_center
                 -plane_normal,  # contact_normal_a_to_b (from mesh to plane, pointing downward)
                 distance,  # contact_distance
-                vertex_idx + 1,  # vertex_idx can serve as feature marker
+                wp.uint32(vertex_idx + 1),  # vertex_idx can serve as feature marker
+                pair_key,
                 0.0,  # radius_eff_a (mesh has no effective radius)
                 0.0,  # radius_eff_b (plane has no effective radius)
                 thickness_mesh,  # thickness_a
@@ -736,6 +750,7 @@ def narrow_phase_process_mesh_plane_contacts_kernel(
                 contact_normal,
                 contact_penetration,
                 contact_tangent,
+                contact_pair_key,
                 contact_key,
             )
 
@@ -798,8 +813,11 @@ class NarrowPhase:
             # Empty tangent array for when tangent computation is disabled
             self.empty_tangent = wp.zeros(0, dtype=wp.vec3, device=device)
 
+            # Empty contact_pair_key array for when contact pair key collection is disabled
+            self.empty_contact_pair_key = wp.zeros(0, dtype=wp.uint64, device=device)
+
             # Empty contact_key array for when contact key collection is disabled
-            self.empty_contact_key = wp.zeros(0, dtype=wp.int32, device=device)
+            self.empty_contact_key = wp.zeros(0, dtype=wp.uint32, device=device)
 
         # Fixed thread count for kernel launches
         self.block_dim = 128
@@ -824,9 +842,10 @@ class NarrowPhase:
             dtype=wp.vec3
         ),  # Pointing from pairId.x to pairId.y, represents z axis of local contact frame
         contact_penetration: wp.array(dtype=float),  # negative if bodies overlap
-        contact_tangent: wp.array(dtype=wp.vec3) | None,  # Represents x axis of local contact frame (None to disable)
-        contact_key: wp.array(dtype=int) | None,  # Contact feature keys (None to disable)
         contact_count: wp.array(dtype=int),  # Number of active contacts after narrow
+        contact_tangent: wp.array(dtype=wp.vec3) | None = None,  # Represents x axis of local contact frame (None to disable)
+        contact_pair_key: wp.array(dtype=wp.uint64) | None = None,  # Contact pair keys (None to disable)
+        contact_key: wp.array(dtype=wp.uint32) | None = None,  # Contact feature keys (None to disable)
         device=None,  # Device to launch on
     ):
         """
@@ -858,6 +877,10 @@ class NarrowPhase:
         # Handle optional tangent array - use empty array if None
         if contact_tangent is None:
             contact_tangent = self.empty_tangent
+
+        # Handle optional contact_pair_key array - use empty array if None
+        if contact_pair_key is None:
+            contact_pair_key = self.empty_contact_pair_key
 
         # Handle optional contact_key array - use empty array if None
         if contact_key is None:
@@ -895,6 +918,7 @@ class NarrowPhase:
                 contact_normal,
                 contact_penetration,
                 contact_tangent,
+                contact_pair_key,
                 contact_key,
                 self.shape_pairs_mesh,
                 self.shape_pairs_mesh_count,
@@ -931,6 +955,7 @@ class NarrowPhase:
                 contact_normal,
                 contact_penetration,
                 contact_tangent,
+                contact_pair_key,
                 contact_key,
             ],
             device=device,
@@ -982,6 +1007,7 @@ class NarrowPhase:
                 contact_normal,
                 contact_penetration,
                 contact_tangent,
+                contact_pair_key,
                 contact_key,
             ],
             device=device,
