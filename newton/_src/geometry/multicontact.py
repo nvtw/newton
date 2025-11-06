@@ -617,7 +617,7 @@ def approx_max_quadrilateral_area_with_calipers(hull: wp.array(dtype=wp.vec3), h
     # Relative epsilon for tie-breaking: only update if new value is at least (1 + epsilon) times better
     # This is scale-invariant and avoids catastrophic cancellation in floating-point comparisons
     # Important for objects with circular geometry to ensure consistent point selection
-    tie_epsilon_rel = 1.0e-4
+    tie_epsilon_rel = 1.0e-3
 
     # Start with point j opposite point i=0
     j = int(1)
