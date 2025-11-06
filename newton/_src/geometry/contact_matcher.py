@@ -126,7 +126,9 @@ def prepare_sort(
         keys[tid] = key_source[tid]
         sorted_to_unsorted_map[tid] = tid
     else:
-        keys[tid] = uint64_sentinel_value()  # Fill unused slots with sentinel value (sorts to end when treated as signed int64)
+        keys[tid] = (
+            uint64_sentinel_value()
+        )  # Fill unused slots with sentinel value (sorts to end when treated as signed int64)
 
 
 @wp.kernel(enable_backward=False)

@@ -844,7 +844,8 @@ class NarrowPhase:
         ),  # Pointing from pairId.x to pairId.y, represents z axis of local contact frame
         contact_penetration: wp.array(dtype=float),  # negative if bodies overlap
         contact_count: wp.array(dtype=int),  # Number of active contacts after narrow
-        contact_tangent: wp.array(dtype=wp.vec3) | None = None,  # Represents x axis of local contact frame (None to disable)
+        contact_tangent: wp.array(dtype=wp.vec3)
+        | None = None,  # Represents x axis of local contact frame (None to disable)
         contact_pair_key: wp.array(dtype=wp.uint64) | None = None,  # Contact pair keys (None to disable)
         contact_key: wp.array(dtype=wp.uint32) | None = None,  # Contact feature keys (None to disable)
         device=None,  # Device to launch on

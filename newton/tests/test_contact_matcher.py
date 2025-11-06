@@ -106,12 +106,12 @@ def test_contact_matcher_duplicate_keys(test: TestContactMatcher, device):
 
 def test_contact_matcher_stacked_cubes(test: TestContactMatcher, device):
     """Test contact matcher with realistic scenario: rotated stacked cubes in static equilibrium.
-    
+
     This test verifies that:
     1. Frame 0: Initial contacts are detected, but none can be matched (no previous frame)
     2. Frame 1+: ALL contacts should be matched (100%) in a static configuration
        using (shape_pair_key, feature_id) pairs.
-    
+
     The cubes are at rest, so geometry and contact features should be identical
     frame-to-frame. If contacts are not matched, the test prints detailed debug info
     showing positions, pair keys, and feature keys for analysis.
