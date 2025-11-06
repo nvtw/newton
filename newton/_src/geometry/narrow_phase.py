@@ -55,18 +55,19 @@ def build_pair_key2(shape_a: wp.uint32, shape_b: wp.uint32) -> wp.uint64:
 @wp.func
 def build_pair_key3(shape_a: wp.uint32, shape_b: wp.uint32, triangle_idx: wp.uint32) -> wp.uint64:
     """
-    Build a 64-bit key from two shape indices and a triangle index.
-    Upper 21 bits: shape_a (bits 63-43)
-    Next 21 bits: shape_b (bits 42-22)
-    Lower 22 bits: triangle_idx (bits 21-0)
+    Build a 63-bit key from two shape indices and a triangle index (MSB is 0 for signed int64 compatibility).
+    Bit 63: 0 (reserved for sign bit)
+    Bits 62-42: shape_a (21 bits)
+    Bits 41-21: shape_b (21 bits)
+    Bits 20-0: triangle_idx (21 bits)
 
-    Max values: shape_a < 2^21 (2,097,152), shape_b < 2^21 (2,097,152), triangle_idx < 2^22 (4,194,304)
+    Max values: shape_a < 2^21 (2,097,152), shape_b < 2^21 (2,097,152), triangle_idx < 2^21 (2,097,152)
     """
     key = wp.uint64(shape_a & wp.uint32(0x1FFFFF))  # Mask to 21 bits
     key = key << wp.uint64(21)
     key = key | wp.uint64(shape_b & wp.uint32(0x1FFFFF))  # Mask to 21 bits
-    key = key << wp.uint64(22)
-    key = key | wp.uint64(triangle_idx & wp.uint32(0x3FFFFF))  # Mask to 22 bits
+    key = key << wp.uint64(21)
+    key = key | wp.uint64(triangle_idx & wp.uint32(0x1FFFFF))  # Mask to 21 bits
     return key
 
 
