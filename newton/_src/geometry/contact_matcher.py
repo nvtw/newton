@@ -108,9 +108,9 @@ def find_keys_in_buffer_and_update_map(
 
 
 @wp.func_native("""
-    return 0xFFFFFFFFFFFFFFFFull;
+    return 0x7FFFFFFFFFFFFFFFull;
 """)
-def uint64_max_value() -> wp.uint64: ...
+def uint64_sentinel_value() -> wp.uint64: ...
 
 
 @wp.kernel(enable_backward=False)
@@ -126,7 +126,7 @@ def prepare_sort(
         keys[tid] = key_source[tid]
         sorted_to_unsorted_map[tid] = tid
     else:
-        keys[tid] = uint64_max_value()  # Fill unused slots with max value (sorts to end)
+        keys[tid] = uint64_sentinel_value()  # Fill unused slots with sentinel value (sorts to end when treated as signed int64)
 
 
 @wp.kernel(enable_backward=False)
