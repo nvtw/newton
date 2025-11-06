@@ -169,7 +169,7 @@ def _subdivide_icosahedron(vertices: np.ndarray, faces: np.ndarray) -> tuple[np.
 
 def get_binning_kernels(n_bin_dirs: int, num_normal_bins: int, num_betas: int, sticky_contacts: float = 1e-6):
     """
-    Factory method for creating binning kernels that output contact indices.
+    Factory method for creating binning kernels.
     """
 
     @wp.kernel
@@ -184,13 +184,13 @@ def get_binning_kernels(n_bin_dirs: int, num_normal_bins: int, num_betas: int, s
         shape_pair_to_bin: wp.array(dtype=wp.int32),
         bin_normals: wp.array(dtype=wp.vec3),
         penetration_betas: wp.array(dtype=wp.float32),
-        binned_contact_id_prev: wp.array(dtype=wp.uint32, ndim=3),
+        binned_id_prev: wp.array(dtype=wp.uint32, ndim=3),
         shape_pair_to_bin_prev: wp.array(dtype=wp.int32),
         # outputs
         binned_dot_product: wp.array(dtype=wp.float32, ndim=3),
         bin_occupied: wp.array(dtype=wp.bool, ndim=2),
         contact_normal_bin_idx: wp.array(dtype=wp.int32),
-        bin_to_shape_pair_idx: wp.array(dtype=wp.int32),
+        bin_to_shape_pair_hash: wp.array(dtype=wp.int32),
         contact_to_bin_idx: wp.array(dtype=wp.int32),
     ):
         offset = wp.tid()
@@ -217,7 +217,7 @@ def get_binning_kernels(n_bin_dirs: int, num_normal_bins: int, num_betas: int, s
 
             bin_normal_dir = bin_normals[bin_normal_idx]
 
-            bin_to_shape_pair_idx[bin_idx] = pair_hash
+            bin_to_shape_pair_hash[bin_idx] = pair_hash
             bin_occupied[bin_idx, bin_normal_idx] = True
             contact_normal_bin_idx[tid] = bin_normal_idx
             contact_to_bin_idx[tid] = bin_idx
@@ -247,7 +247,7 @@ def get_binning_kernels(n_bin_dirs: int, num_normal_bins: int, num_betas: int, s
                     idx_last = dir_idx + offset
                     dp = spatial_dot_product + depth * penetration_betas[i]
                     if wp.static(sticky_contacts > 0.0):
-                        id_prev = binned_contact_id_prev[bin_idx_prev, bin_normal_idx, idx_last]
+                        id_prev = binned_id_prev[bin_idx_prev, bin_normal_idx, idx_last]
                         if id_prev == id:
                             dp += wp.static(sticky_contacts)
 
@@ -268,11 +268,14 @@ def get_binning_kernels(n_bin_dirs: int, num_normal_bins: int, num_betas: int, s
         bin_normals: wp.array(dtype=wp.vec3),
         penetration_betas: wp.array(dtype=wp.float32),
         binned_dot_product: wp.array(dtype=wp.float32, ndim=3),
-        binned_contact_id_prev: wp.array(dtype=wp.uint32, ndim=3),
+        binned_id_prev: wp.array(dtype=wp.uint32, ndim=3),
         shape_pair_to_bin_prev: wp.array(dtype=wp.int32),
         # outputs
+        binned_normals: wp.array(dtype=wp.vec3, ndim=3),
+        binned_pos: wp.array(dtype=wp.vec3, ndim=3),
+        binned_depth: wp.array(dtype=wp.float32, ndim=3),
+        binned_id: wp.array(dtype=wp.uint32, ndim=3),
         binned_contact_idx: wp.array(dtype=wp.int32, ndim=3),
-        binned_contact_id: wp.array(dtype=wp.uint32, ndim=3),
     ):
         offset = wp.tid()
         for tid in range(offset, contact_count[0], grid_size):
@@ -284,6 +287,7 @@ def get_binning_kernels(n_bin_dirs: int, num_normal_bins: int, num_betas: int, s
             bin_normal_dir = bin_normals[bin_normal_idx]
             position = contact_position[tid]
             depth = -contact_penetration[tid]
+            normal = contact_normal[tid]
             id = contact_id[tid]
 
             # Project position to the plane corresponding to the bin normal
@@ -310,15 +314,20 @@ def get_binning_kernels(n_bin_dirs: int, num_normal_bins: int, num_betas: int, s
                     idx_last = dir_idx + offset
                     dp = spatial_dot_product + depth * penetration_betas[i]
                     if wp.static(sticky_contacts > 0.0):
-                        contact_idx_prev = binned_contact_idx_prev[bin_idx_prev, bin_normal_idx, idx_last]
-                        if contact_idx_prev >= 0 and contact_id[contact_idx_prev] == id:
+                        id_prev = binned_id_prev[bin_idx_prev, bin_normal_idx, idx_last]
+                        if id_prev == id:
                             dp += wp.static(sticky_contacts)
                     max_dp = binned_dot_product[bin_idx, bin_normal_idx, idx_last]
                     if dp >= max_dp:
+                        binned_normals[bin_idx, bin_normal_idx, idx_last] = normal
+                        binned_pos[bin_idx, bin_normal_idx, idx_last] = position
+                        binned_depth[bin_idx, bin_normal_idx, idx_last] = depth
+                        binned_id[bin_idx, bin_normal_idx, idx_last] = id
                         binned_contact_idx[bin_idx, bin_normal_idx, idx_last] = tid
 
     @wp.kernel(enable_backward=False)
-    def extract_contacts_from_bins(
+    def extract_contact_indices_from_bins(
+        binned_id: wp.array(dtype=wp.uint32, ndim=3),
         binned_contact_idx: wp.array(dtype=wp.int32, ndim=3),
         bin_occupied: wp.array(dtype=wp.bool, ndim=2),
         # outputs
@@ -329,37 +338,47 @@ def get_binning_kernels(n_bin_dirs: int, num_normal_bins: int, num_betas: int, s
         if not bin_occupied[bin_idx, normal_bin_idx]:
             return
 
-        # Deduplicate contacts based on contact index
+        # Deduplicate contacts based on contact ID
         n_bins = wp.static(num_betas * n_bin_dirs)
 
         unique_indices = wp.zeros(shape=(n_bins,), dtype=wp.int32)
-        num_unique_contacts = wp.int32(1)
-        unique_indices[0] = binned_contact_idx[bin_idx, normal_bin_idx, 0]
+        num_unique_contacts = wp.int32(0)
 
-        for i in range(1, n_bins):
+        # Collect unique contact indices (deduplicating by contact ID)
+        for i in range(n_bins):
             contact_idx_i = binned_contact_idx[bin_idx, normal_bin_idx, i]
             if contact_idx_i < 0:
                 continue
+            id_i = binned_id[bin_idx, normal_bin_idx, i]
+
+            # Check if this ID is already in the unique list
             found_duplicate = wp.bool(False)
             for j in range(num_unique_contacts):
-                if unique_indices[j] == contact_idx_i:
-                    found_duplicate = True
-                    break
+                idx_j = unique_indices[j]
+                if idx_j >= 0:
+                    id_j = binned_id[bin_idx, normal_bin_idx, idx_j]
+                    if id_i == id_j:
+                        found_duplicate = True
+                        break
+
             if not found_duplicate:
-                unique_indices[num_unique_contacts] = contact_idx_i
+                unique_indices[num_unique_contacts] = i
                 num_unique_contacts += 1
+
+        # Early exit if no valid contacts
+        if num_unique_contacts == 0:
+            return
 
         # Atomic add to get output position and write unique contact indices
         output_idx = wp.atomic_add(kept_contact_count, 0, num_unique_contacts)
 
-        for i in range(n_bins):
-            if i >= num_unique_contacts:
-                return
-            contact_idx = unique_indices[i]
+        for i in range(num_unique_contacts):
+            bin_slot = unique_indices[i]
+            contact_idx = binned_contact_idx[bin_idx, normal_bin_idx, bin_slot]
             if contact_idx >= 0:
                 kept_contact_indices[output_idx + i] = contact_idx
 
-    return compute_bin_scores, assign_contacts_to_bins, extract_contacts_from_bins
+    return compute_bin_scores, assign_contacts_to_bins, extract_contact_indices_from_bins
 
 
 @wp.kernel
@@ -417,16 +436,28 @@ class ContactReduction:
             self.shape_pair_mask = wp.zeros(max_shape_pairs, dtype=wp.int32)
             self.shape_pair_to_bin = wp.zeros(max_shape_pairs, dtype=wp.int32)
             self.shape_pair_to_bin_prev = wp.clone(self.shape_pair_to_bin)
-            self.bin_to_shape_pair_idx = wp.zeros(max_shape_pairs, dtype=wp.int32)
+            self.bin_to_shape_pair_hash = wp.zeros(max_shape_pairs, dtype=wp.int32)
 
-            # Binned data (stores contact indices instead of contact data)
+            # Binned data (stores contact data AND contact index)
+            self.binned_normals = wp.zeros(
+                (max_shape_pairs, num_normal_bins, self.num_betas * bin_directions), dtype=wp.vec3
+            )
+            self.binned_pos = wp.zeros(
+                (max_shape_pairs, num_normal_bins, self.num_betas * bin_directions), dtype=wp.vec3
+            )
+            self.binned_depth = wp.zeros(
+                (max_shape_pairs, num_normal_bins, self.num_betas * bin_directions), dtype=wp.float32
+            )
             self.binned_dot_product = wp.zeros(
                 (max_shape_pairs, num_normal_bins, self.num_betas * bin_directions), dtype=wp.float32
             )
+            self.binned_id = wp.full(
+                (max_shape_pairs, num_normal_bins, self.num_betas * bin_directions), dtype=wp.uint32, value=0
+            )
+            self.binned_id_prev = wp.clone(self.binned_id)
             self.binned_contact_idx = wp.full(
                 (max_shape_pairs, num_normal_bins, self.num_betas * bin_directions), dtype=wp.int32, value=-1
             )
-            self.binned_contact_idx_prev = wp.clone(self.binned_contact_idx)
 
             self.bin_occupied = wp.zeros((max_shape_pairs, num_normal_bins), dtype=wp.bool)
 
@@ -434,7 +465,11 @@ class ContactReduction:
             self.contact_normal_bin_idx = wp.empty(max_contacts, dtype=wp.int32)
             self.contact_to_bin_idx = wp.empty(max_contacts, dtype=wp.int32)
 
-        self.compute_bin_scores, self.assign_contacts_to_bins, self.extract_contacts_from_bins = get_binning_kernels(
+        (
+            self.compute_bin_scores,
+            self.assign_contacts_to_bins,
+            self.extract_contact_indices_from_bins,
+        ) = get_binning_kernels(
             bin_directions,
             num_normal_bins,
             self.num_betas,
@@ -470,7 +505,7 @@ class ContactReduction:
         device = contact_count.device
 
         # Save previous state for temporal coherence
-        wp.copy(self.binned_contact_idx_prev, self.binned_contact_idx)
+        wp.copy(self.binned_id_prev, self.binned_id)
         wp.copy(self.shape_pair_to_bin_prev, self.shape_pair_to_bin)
 
         # Reset arrays
@@ -478,7 +513,7 @@ class ContactReduction:
         self.binned_contact_idx.fill_(-1)
         self.bin_occupied.zero_()
         self.shape_pair_mask.zero_()
-        self.bin_to_shape_pair_idx.fill_(-1)
+        self.bin_to_shape_pair_hash.fill_(-1)
         kept_contact_count.zero_()
 
         # Build shape pair mask and compute bin indices
@@ -507,14 +542,14 @@ class ContactReduction:
                 self.shape_pair_to_bin,
                 self.bin_normals,
                 self.penetration_betas,
-                self.binned_contact_idx_prev,
+                self.binned_id_prev,
                 self.shape_pair_to_bin_prev,
             ],
             outputs=[
                 self.binned_dot_product,
                 self.bin_occupied,
                 self.contact_normal_bin_idx,
-                self.bin_to_shape_pair_idx,
+                self.bin_to_shape_pair_hash,
                 self.contact_to_bin_idx,
             ],
             device=device,
@@ -538,10 +573,14 @@ class ContactReduction:
                 self.bin_normals,
                 self.penetration_betas,
                 self.binned_dot_product,
-                self.binned_contact_idx_prev,
+                self.binned_id_prev,
                 self.shape_pair_to_bin_prev,
             ],
             outputs=[
+                self.binned_normals,
+                self.binned_pos,
+                self.binned_depth,
+                self.binned_id,
                 self.binned_contact_idx,
             ],
             device=device,
@@ -549,9 +588,10 @@ class ContactReduction:
 
         # Extract unique contact indices from bins
         wp.launch(
-            kernel=self.extract_contacts_from_bins,
+            kernel=self.extract_contact_indices_from_bins,
             dim=[self.binned_contact_idx.shape[0], self.binned_contact_idx.shape[1]],
             inputs=[
+                self.binned_id,
                 self.binned_contact_idx,
                 self.bin_occupied,
             ],
