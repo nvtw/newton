@@ -105,7 +105,7 @@ def test_contact_matcher_duplicate_keys(test: TestContactMatcher, device):
 
 
 def test_contact_matcher_stacked_cubes(test: TestContactMatcher, device):
-    """Test contact matcher with realistic scenario: rotated stacked cubes in static equilibrium.
+    """Test contact matcher with realistic scenario: 2D grid of rotated stacked cubes in static equilibrium.
 
     This test verifies that:
     1. Frame 0: Initial contacts are detected, but none can be matched (no previous frame)
@@ -115,8 +115,11 @@ def test_contact_matcher_stacked_cubes(test: TestContactMatcher, device):
     The cubes are at rest, so geometry and contact features should be identical
     frame-to-frame. If contacts are not matched, the test prints detailed debug info
     showing positions, pair keys, and feature keys for analysis.
+
+    Scene: 5x5 grid where each position has 5 stacked cubes, each rotated 30 degrees
+    more than the one below it (125 total cubes).
     """
-    # Build model with ground plane and two stacked cubes
+    # Build model with ground plane and 2D grid of stacked cubes
     # Use very high stiffness and damping to minimize motion
     builder = newton.ModelBuilder()
     builder.default_shape_cfg.ke = 1e6  # Very stiff contacts
@@ -125,25 +128,38 @@ def test_contact_matcher_stacked_cubes(test: TestContactMatcher, device):
     # Ground plane
     builder.add_ground_plane()
 
-    # Bottom cube (resting on ground, no rotation)
+    # Parameters for 2D grid of stacked cubes
     cube_size = 0.5
-    bottom_cube = builder.add_body(xform=wp.transform([0.0, 0.0, cube_size / 2], wp.quat_identity()))
-    builder.add_shape_box(
-        body=bottom_cube,
-        hx=cube_size / 2,
-        hy=cube_size / 2,
-        hz=cube_size / 2,
-    )
+    n_cubes_per_stack = 4  # Number of cubes in each stack
+    s = 3  # Grid dimension in x
+    t = 3  # Grid dimension in y
+    spacing = 2.0  # Spacing between stacks
+    rotation_increment = np.pi / 6.0  # 30 degrees in radians
 
-    # Top cube (stacked on bottom cube, rotated 30 degrees around Z axis)
-    rotation = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), np.pi / 6.0)
-    top_cube = builder.add_body(xform=wp.transform([0.0, 0.0, cube_size * 1.5], rotation))
-    builder.add_shape_box(
-        body=top_cube,
-        hx=cube_size / 2,
-        hy=cube_size / 2,
-        hz=cube_size / 2,
-    )
+    # Create 2D grid of stacks
+    for i in range(s):
+        for j in range(t):
+            # Calculate base position for this stack
+            x_base = (i - (s - 1) / 2.0) * spacing
+            y_base = (j - (t - 1) / 2.0) * spacing
+
+            # Create stack of n cubes at this grid position
+            for k in range(n_cubes_per_stack):
+                # Z position (stacked vertically)
+                z_pos = cube_size / 2 + k * cube_size
+
+                # Rotation increases by 30 degrees for each level
+                rotation_angle = k * rotation_increment
+                rotation = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), rotation_angle)
+
+                # Create cube
+                cube = builder.add_body(xform=wp.transform([x_base, y_base, z_pos], rotation))
+                builder.add_shape_box(
+                    body=cube,
+                    hx=cube_size / 2,
+                    hy=cube_size / 2,
+                    hz=cube_size / 2,
+                )
 
     model = builder.finalize(device=device)
     model.ground = True
@@ -153,7 +169,7 @@ def test_contact_matcher_stacked_cubes(test: TestContactMatcher, device):
     state_1 = model.state()
 
     # Initialize contact matcher
-    max_contacts = 100
+    max_contacts = 1000
     matcher = ContactMatcher(max_contacts, device=device)
 
     # Create collision pipeline with contact matching enabled
