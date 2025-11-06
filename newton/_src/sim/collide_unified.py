@@ -231,6 +231,8 @@ def convert_narrow_phase_to_contacts_kernel(
     shape_body: wp.array(dtype=int),
     rigid_contact_margin: float,
     contact_max: int,
+    reduced_contact_indices: wp.array(dtype=wp.int32),
+    reduced_contact_count: wp.array(dtype=int),
     # Outputs (Contacts format)
     out_count: wp.array(dtype=int),
     out_shape0: wp.array(dtype=int),
@@ -257,12 +259,31 @@ def convert_narrow_phase_to_contacts_kernel(
     - contact_distance: distance such that d = contact_distance - (thickness_a + thickness_b)
 
     This kernel handles the conversion between these two formats.
-    """
-    idx = wp.tid()
-    num_contacts = narrow_contact_count[0]
 
-    if idx >= num_contacts:
-        return
+    If reduced_contact_indices array has size > 0, only processes contacts from that index list.
+    Otherwise, processes all contacts.
+    """
+    tid = wp.tid()
+
+    # Determine if contact reduction is active
+    use_reduction = reduced_contact_indices.shape[0] > 0
+
+    # Determine which contact index to process
+    idx = wp.int32(-1)
+    num_contacts = wp.int32(0)
+
+    if use_reduction:
+        # Contact reduction is active - use reduced contact list
+        num_contacts = reduced_contact_count[0]
+        if tid >= num_contacts:
+            return
+        idx = reduced_contact_indices[tid]
+    else:
+        # No contact reduction - process all contacts
+        num_contacts = narrow_contact_count[0]
+        if tid >= num_contacts:
+            return
+        idx = tid
 
     # Get contact pair
     pair = contact_pair[idx]
@@ -304,6 +325,7 @@ def convert_narrow_phase_to_contacts_kernel(
     X_bw_b = wp.transform_identity() if body1 == -1 else wp.transform_inverse(body_q[body1])
 
     # Use write_contact to format the contact
+    # Use tid as output index (not idx) so output is compact when using reduction
     write_contact(
         contact_point_center,
         contact_normal_a_to_b,
@@ -316,7 +338,7 @@ def convert_narrow_phase_to_contacts_kernel(
         shape1,
         X_bw_a,
         X_bw_b,
-        idx,
+        tid,
         rigid_contact_margin,
         contact_max,
         out_count,
@@ -389,6 +411,7 @@ class CollisionPipelineUnified:
         shape_flags: wp.array(dtype=int) | None = None,
         sap_sort_type=None,
         enable_contact_matching: bool = False,
+        contact_reduction=None,
     ):
         """
         Initialize the CollisionPipelineUnified.
@@ -487,6 +510,7 @@ class CollisionPipelineUnified:
             device=device,
             geom_aabb_lower=self.shape_aabb_lower,
             geom_aabb_upper=self.shape_aabb_upper,
+            contact_reduction=contact_reduction,
         )
 
         with wp.ScopedDevice(device):
@@ -510,6 +534,15 @@ class CollisionPipelineUnified:
                 self.narrow_contact_pair_key = None
                 self.narrow_contact_key = None
 
+            # Contact reduction arrays (always allocate, use empty array when disabled)
+            if contact_reduction is not None:
+                self.reduced_contact_indices = wp.zeros(self.rigid_contact_max, dtype=wp.int32, device=device)
+                self.reduced_contact_count = wp.zeros(1, dtype=wp.int32, device=device)
+            else:
+                # Empty arrays when contact reduction is disabled (kernel checks size > 0)
+                self.reduced_contact_indices = wp.zeros(0, dtype=wp.int32, device=device)
+                self.reduced_contact_count = wp.zeros(1, dtype=wp.int32, device=device)
+
         if soft_contact_max is None:
             soft_contact_max = shape_count * particle_count
         self.soft_contact_margin = soft_contact_margin
@@ -532,6 +565,7 @@ class CollisionPipelineUnified:
         shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
         sap_sort_type=None,
         enable_contact_matching: bool = False,
+        contact_reduction=None,
     ) -> CollisionPipelineUnified:
         """
         Create a CollisionPipelineUnified instance from a Model.
@@ -593,6 +627,7 @@ class CollisionPipelineUnified:
             shape_flags=model.shape_flags if hasattr(model, "shape_flags") else None,
             sap_sort_type=sap_sort_type,
             enable_contact_matching=enable_contact_matching,
+            contact_reduction=contact_reduction,
         )
 
     def collide(self, model: Model, state: State) -> Contacts:
@@ -719,6 +754,8 @@ class CollisionPipelineUnified:
             contact_pair_key=self.narrow_contact_pair_key,
             contact_key=self.narrow_contact_key,
             contact_count=self.narrow_contact_count,
+            reduced_contact_indices=self.reduced_contact_indices,
+            reduced_contact_count=self.reduced_contact_count,
             device=self.device,
         )
 
@@ -738,6 +775,8 @@ class CollisionPipelineUnified:
                 model.shape_body,
                 self.rigid_contact_margin,
                 contacts.rigid_contact_max,
+                self.reduced_contact_indices,
+                self.reduced_contact_count,
             ],
             outputs=[
                 contacts.rigid_contact_count,

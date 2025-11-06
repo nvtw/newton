@@ -31,6 +31,7 @@ from ..geometry.collision_core import (
     postprocess_triangle_contacts,
     pre_contact_check,
 )
+from ..geometry.contact_reduction import ContactReduction
 from ..geometry.support_function import (
     GenericShapeData,
     SupportMapDataProvider,
@@ -764,6 +765,7 @@ class NarrowPhase:
         device=None,
         geom_aabb_lower: wp.array(dtype=wp.vec3) | None = None,
         geom_aabb_upper: wp.array(dtype=wp.vec3) | None = None,
+        contact_reduction: ContactReduction | None = None,
     ):
         """
         Initialize NarrowPhase with pre-allocated buffers.
@@ -774,10 +776,12 @@ class NarrowPhase:
             device: Device to allocate buffers on
             geom_aabb_lower: Optional external AABB lower bounds array (if provided, AABBs won't be computed internally)
             geom_aabb_upper: Optional external AABB upper bounds array (if provided, AABBs won't be computed internally)
+            contact_reduction: Optional ContactReduction instance for reducing contacts
         """
         self.max_candidate_pairs = max_candidate_pairs
         self.max_triangle_pairs = max_triangle_pairs
         self.device = device
+        self.contact_reduction = contact_reduction
 
         # Determine if we're using external AABBs
         self.external_aabb = geom_aabb_lower is not None and geom_aabb_upper is not None
@@ -848,6 +852,8 @@ class NarrowPhase:
         | None = None,  # Represents x axis of local contact frame (None to disable)
         contact_pair_key: wp.array(dtype=wp.uint64) | None = None,  # Contact pair keys (None to disable)
         contact_key: wp.array(dtype=wp.uint32) | None = None,  # Contact feature keys (None to disable)
+        reduced_contact_indices: wp.array(dtype=wp.int32) | None = None,  # Reduced contact indices (None to disable)
+        reduced_contact_count: wp.array(dtype=int) | None = None,  # Reduced contact count (None to disable)
         device=None,  # Device to launch on
     ):
         """
@@ -867,7 +873,10 @@ class NarrowPhase:
             contact_normal: Output array for contact normals
             contact_penetration: Output array for penetration depths
             contact_tangent: Output array for contact tangents, or None to disable tangent computation
-            contact_key: Output array for contact feature keys, or None to disable key collection
+            contact_pair_key: Output array for contact pair keys, or None to disable key collection
+            contact_key: Output array for contact feature keys, or None to disable key collection (required for contact reduction)
+            reduced_contact_indices: Output array for reduced contact indices (None to disable reduction, requires contact_key)
+            reduced_contact_count: Output array for reduced contact count (None to disable reduction, requires contact_key)
             contact_count: Output array (single element) for contact count
             device: Device to launch on
         """
@@ -1015,3 +1024,23 @@ class NarrowPhase:
             device=device,
             block_dim=self.block_dim,
         )
+
+        # Apply contact reduction if enabled
+        if (
+            self.contact_reduction is not None
+            and reduced_contact_indices is not None
+            and reduced_contact_count is not None
+            and contact_key is not None
+            and contact_key.shape[0] > 0
+        ):
+            # Contact reduction requires contact_key for temporal coherence
+            self.contact_reduction.launch(
+                contact_pair=contact_pair,
+                contact_position=contact_position,
+                contact_normal=contact_normal,
+                contact_penetration=contact_penetration,
+                contact_id=contact_key,
+                contact_count=contact_count,
+                kept_contact_indices=reduced_contact_indices,
+                kept_contact_count=reduced_contact_count,
+            )
