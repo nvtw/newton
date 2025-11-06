@@ -699,6 +699,7 @@ class CollisionPipelineUnified:
             contact_normal=self.narrow_contact_normal,
             contact_penetration=self.narrow_contact_penetration,
             contact_tangent=None,
+            contact_key=None,
             contact_count=self.narrow_contact_count,
             device=self.device,
         )

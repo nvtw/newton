@@ -40,10 +40,42 @@ from ..geometry.types import GeoType
 
 
 @wp.func
+def build_pair_key2(shape_a: wp.uint32, shape_b: wp.uint32) -> wp.uint64:
+    """
+    Build a 64-bit key from two shape indices.
+    Upper 32 bits: shape_a
+    Lower 32 bits: shape_b
+    """
+    key = wp.uint64(shape_a)
+    key = key << wp.uint64(32)
+    key = key | wp.uint64(shape_b)
+    return key
+
+
+@wp.func
+def build_pair_key3(shape_a: wp.uint32, shape_b: wp.uint32, triangle_idx: wp.uint32) -> wp.uint64:
+    """
+    Build a 64-bit key from two shape indices and a triangle index.
+    Upper 21 bits: shape_a (bits 63-43)
+    Next 21 bits: shape_b (bits 42-22)
+    Lower 22 bits: triangle_idx (bits 21-0)
+
+    Max values: shape_a < 2^21 (2,097,152), shape_b < 2^21 (2,097,152), triangle_idx < 2^22 (4,194,304)
+    """
+    key = wp.uint64(shape_a & wp.uint32(0x1FFFFF))  # Mask to 21 bits
+    key = key << wp.uint64(21)
+    key = key | wp.uint64(shape_b & wp.uint32(0x1FFFFF))  # Mask to 21 bits
+    key = key << wp.uint64(22)
+    key = key | wp.uint64(triangle_idx & wp.uint32(0x3FFFFF))  # Mask to 22 bits
+    return key
+
+
+@wp.func
 def write_contact_simple(
     contact_point_center: wp.vec3,
     contact_normal_a_to_b: wp.vec3,
     contact_distance: float,
+    feature: int,
     radius_eff_a: float,
     radius_eff_b: float,
     thickness_a: float,
@@ -60,6 +92,7 @@ def write_contact_simple(
     contact_normal: wp.array(dtype=wp.vec3),
     contact_penetration: wp.array(dtype=float),
     contact_tangent: wp.array(dtype=wp.vec3),
+    contact_key: wp.array(dtype=int),
 ):
     """
     Write a contact to the output arrays using the simplified API format.
@@ -68,6 +101,7 @@ def write_contact_simple(
         contact_point_center: Center point of contact in world space
         contact_normal_a_to_b: Contact normal pointing from shape A to B
         contact_distance: Distance between contact points
+        feature: Contact feature ID from GJK/MPR
         radius_eff_a: Effective radius of shape A
         radius_eff_b: Effective radius of shape B
         thickness_a: Contact thickness for shape A
@@ -83,6 +117,7 @@ def write_contact_simple(
         contact_normal: Output array for contact normals
         contact_penetration: Output array for penetration depths
         contact_tangent: Output array for contact tangents
+        contact_key: Output array for contact keys (optional, can be empty)
     """
     total_separation_needed = radius_eff_a + radius_eff_b + thickness_a + thickness_b
 
@@ -122,6 +157,10 @@ def write_contact_simple(
             if wp.abs(wp.dot(normal, world_x)) > 0.99:
                 world_x = wp.vec3(0.0, 1.0, 0.0)
             contact_tangent[index] = wp.normalize(world_x - wp.dot(world_x, normal) * normal)
+
+        # Write contact key only if contact_key array is non-empty
+        if contact_key.shape[0] > 0:
+            contact_key[index] = feature
 
 
 @wp.func
@@ -193,6 +232,7 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool):
         contact_normal: wp.array(dtype=wp.vec3),
         contact_penetration: wp.array(dtype=float),
         contact_tangent: wp.array(dtype=wp.vec3),
+        contact_key: wp.array(dtype=int),
         # mesh collision outputs (for mesh processing)
         shape_pairs_mesh: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_count: wp.array(dtype=int),
@@ -339,7 +379,7 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool):
             margin = wp.max(cutoff_a, cutoff_b)
 
             # Compute contacts using GJK/MPR
-            count, normal, signed_distances, points, radius_eff_a, radius_eff_b = find_contacts(
+            count, normal, signed_distances, points, radius_eff_a, radius_eff_b, features = find_contacts(
                 pos_a,
                 pos_b,
                 quat_a,
@@ -359,6 +399,7 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool):
                     points[id],
                     normal,
                     signed_distances[id],
+                    features[id],
                     radius_eff_a,
                     radius_eff_b,
                     thickness_a,
@@ -374,6 +415,7 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool):
                     contact_normal,
                     contact_penetration,
                     contact_tangent,
+                    contact_key,
                 )
 
     return narrow_phase_kernel_gjk_mpr
@@ -476,6 +518,7 @@ def narrow_phase_process_mesh_triangle_contacts_kernel(
     contact_normal: wp.array(dtype=wp.vec3),
     contact_penetration: wp.array(dtype=float),
     contact_tangent: wp.array(dtype=wp.vec3),
+    contact_key: wp.array(dtype=int),
 ):
     """
     Process triangle pairs to generate contacts using GJK/MPR.
@@ -529,7 +572,7 @@ def narrow_phase_process_mesh_triangle_contacts_kernel(
         margin = wp.max(cutoff_a, cutoff_b)
 
         # Compute contacts using GJK/MPR
-        count, normal, signed_distances, points, radius_eff_a, radius_eff_b = compute_gjk_mpr_contacts(
+        count, normal, signed_distances, points, radius_eff_a, radius_eff_b, features = compute_gjk_mpr_contacts(
             shape_data_a,
             shape_data_b,
             quat_a,
@@ -555,6 +598,7 @@ def narrow_phase_process_mesh_triangle_contacts_kernel(
                 points[contact_id],
                 normal,
                 signed_distances[contact_id],
+                features[contact_id],
                 radius_eff_a,
                 radius_eff_b,
                 thickness_a,
@@ -570,6 +614,7 @@ def narrow_phase_process_mesh_triangle_contacts_kernel(
                 contact_normal,
                 contact_penetration,
                 contact_tangent,
+                contact_key,
             )
 
 
@@ -593,6 +638,7 @@ def narrow_phase_process_mesh_plane_contacts_kernel(
     contact_normal: wp.array(dtype=wp.vec3),
     contact_penetration: wp.array(dtype=float),
     contact_tangent: wp.array(dtype=wp.vec3),
+    contact_key: wp.array(dtype=int),
 ):
     """
     Process mesh-plane collisions by checking each mesh vertex against the infinite plane.
@@ -674,6 +720,7 @@ def narrow_phase_process_mesh_plane_contacts_kernel(
                 (vertex_world + point_on_plane) * 0.5,  # contact_point_center
                 -plane_normal,  # contact_normal_a_to_b (from mesh to plane, pointing downward)
                 distance,  # contact_distance
+                vertex_idx + 1,  # vertex_idx can serve as feature marker
                 0.0,  # radius_eff_a (mesh has no effective radius)
                 0.0,  # radius_eff_b (plane has no effective radius)
                 thickness_mesh,  # thickness_a
@@ -689,6 +736,7 @@ def narrow_phase_process_mesh_plane_contacts_kernel(
                 contact_normal,
                 contact_penetration,
                 contact_tangent,
+                contact_key,
             )
 
 
@@ -750,6 +798,9 @@ class NarrowPhase:
             # Empty tangent array for when tangent computation is disabled
             self.empty_tangent = wp.zeros(0, dtype=wp.vec3, device=device)
 
+            # Empty contact_key array for when contact key collection is disabled
+            self.empty_contact_key = wp.zeros(0, dtype=wp.int32, device=device)
+
         # Fixed thread count for kernel launches
         self.block_dim = 128
         self.total_num_threads = self.block_dim * 1024
@@ -774,6 +825,7 @@ class NarrowPhase:
         ),  # Pointing from pairId.x to pairId.y, represents z axis of local contact frame
         contact_penetration: wp.array(dtype=float),  # negative if bodies overlap
         contact_tangent: wp.array(dtype=wp.vec3) | None,  # Represents x axis of local contact frame (None to disable)
+        contact_key: wp.array(dtype=int) | None,  # Contact feature keys (None to disable)
         contact_count: wp.array(dtype=int),  # Number of active contacts after narrow
         device=None,  # Device to launch on
     ):
@@ -794,6 +846,7 @@ class NarrowPhase:
             contact_normal: Output array for contact normals
             contact_penetration: Output array for penetration depths
             contact_tangent: Output array for contact tangents, or None to disable tangent computation
+            contact_key: Output array for contact feature keys, or None to disable key collection
             contact_count: Output array (single element) for contact count
             device: Device to launch on
         """
@@ -805,6 +858,10 @@ class NarrowPhase:
         # Handle optional tangent array - use empty array if None
         if contact_tangent is None:
             contact_tangent = self.empty_tangent
+
+        # Handle optional contact_key array - use empty array if None
+        if contact_key is None:
+            contact_key = self.empty_contact_key
 
         # Clear all counters and contact count
         contact_count.zero_()
@@ -838,6 +895,7 @@ class NarrowPhase:
                 contact_normal,
                 contact_penetration,
                 contact_tangent,
+                contact_key,
                 self.shape_pairs_mesh,
                 self.shape_pairs_mesh_count,
                 self.shape_pairs_mesh_plane,
@@ -873,6 +931,7 @@ class NarrowPhase:
                 contact_normal,
                 contact_penetration,
                 contact_tangent,
+                contact_key,
             ],
             device=device,
             block_dim=self.block_dim,
@@ -923,6 +982,7 @@ class NarrowPhase:
                 contact_normal,
                 contact_penetration,
                 contact_tangent,
+                contact_key,
             ],
             device=device,
             block_dim=self.block_dim,
