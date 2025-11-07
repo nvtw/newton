@@ -327,7 +327,6 @@ def get_binning_kernels(n_bin_dirs: int, num_normal_bins: int, num_betas: int, s
 
     @wp.kernel(enable_backward=False)
     def extract_contact_indices_from_bins(
-        binned_id: wp.array(dtype=wp.uint32, ndim=3),
         binned_contact_idx: wp.array(dtype=wp.int32, ndim=3),
         bin_occupied: wp.array(dtype=wp.bool, ndim=2),
         # outputs
@@ -338,45 +337,33 @@ def get_binning_kernels(n_bin_dirs: int, num_normal_bins: int, num_betas: int, s
         if not bin_occupied[bin_idx, normal_bin_idx]:
             return
 
-        # Deduplicate contacts based on contact ID
+        # Deduplicate contacts based on contact array index
+        # This ensures that if the same contact appears in multiple bins,
+        # we only keep it once
         n_bins = wp.static(num_betas * n_bin_dirs)
 
-        unique_indices = wp.zeros(shape=(n_bins,), dtype=wp.int32)
+        unique_contact_indices = wp.zeros(shape=(n_bins,), dtype=wp.int32)
         num_unique_contacts = wp.int32(0)
 
-        # Collect unique contact indices (deduplicating by contact ID)
         for i in range(n_bins):
             contact_idx_i = binned_contact_idx[bin_idx, normal_bin_idx, i]
-            if contact_idx_i < 0:
-                continue
-            id_i = binned_id[bin_idx, normal_bin_idx, i]
 
-            # Check if this ID is already in the unique list
+            # Check if this contact_idx is already in the unique list
             found_duplicate = wp.bool(False)
             for j in range(num_unique_contacts):
-                idx_j = unique_indices[j]
-                if idx_j >= 0:
-                    id_j = binned_id[bin_idx, normal_bin_idx, idx_j]
-                    if id_i == id_j:
-                        found_duplicate = True
-                        break
+                if unique_contact_indices[j] == contact_idx_i:
+                    found_duplicate = True
+                    break
 
             if not found_duplicate:
-                unique_indices[num_unique_contacts] = i
+                unique_contact_indices[num_unique_contacts] = contact_idx_i
                 num_unique_contacts += 1
 
-        # Early exit if no valid contacts
-        if num_unique_contacts == 0:
-            return
-
-        # Atomic add to get output position and write unique contact indices
         output_idx = wp.atomic_add(kept_contact_count, 0, num_unique_contacts)
 
         for i in range(num_unique_contacts):
-            bin_slot = unique_indices[i]
-            contact_idx = binned_contact_idx[bin_idx, normal_bin_idx, bin_slot]
-            if contact_idx >= 0:
-                kept_contact_indices[output_idx + i] = contact_idx
+            contact_idx = unique_contact_indices[i]
+            kept_contact_indices[output_idx + i] = contact_idx
 
     return compute_bin_scores, assign_contacts_to_bins, extract_contact_indices_from_bins
 
@@ -510,7 +497,6 @@ class ContactReduction:
 
         # Reset arrays
         self.binned_dot_product.fill_(-1e10)
-        self.binned_contact_idx.fill_(-1)
         self.bin_occupied.zero_()
         self.shape_pair_mask.zero_()
         self.bin_to_shape_pair_hash.fill_(-1)
@@ -591,7 +577,6 @@ class ContactReduction:
             kernel=self.extract_contact_indices_from_bins,
             dim=[self.binned_contact_idx.shape[0], self.binned_contact_idx.shape[1]],
             inputs=[
-                self.binned_id,
                 self.binned_contact_idx,
                 self.bin_occupied,
             ],
