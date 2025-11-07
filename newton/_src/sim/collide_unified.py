@@ -299,11 +299,6 @@ class CollisionPipelineUnified:
         self.shape_pairs_max = (shape_count * (shape_count - 1)) // 2
         self.rigid_contact_margin = rigid_contact_margin
 
-        if rigid_contact_max is not None:
-            self.rigid_contact_max = rigid_contact_max
-        else:
-            self.rigid_contact_max = self.shape_pairs_max * rigid_contact_max_per_pair
-
         # Initialize broad phase
         if self.broad_phase_mode == BroadPhaseMode.NXN:
             if shape_world is None:
@@ -332,6 +327,14 @@ class CollisionPipelineUnified:
             self.sap_broadphase = None
             self.shape_pairs_filtered = shape_pairs_filtered
             self.shape_pairs_max = len(shape_pairs_filtered)
+
+        # Calculate rigid_contact_max after shape_pairs_max is finalized
+        # For EXPLICIT mode, shape_pairs_max is updated to len(shape_pairs_filtered)
+        # For NXN/SAP modes, shape_pairs_max remains as all possible pairs
+        if rigid_contact_max is not None:
+            self.rigid_contact_max = rigid_contact_max
+        else:
+            self.rigid_contact_max = self.shape_pairs_max * rigid_contact_max_per_pair
 
         # Allocate buffers
         with wp.ScopedDevice(device):
