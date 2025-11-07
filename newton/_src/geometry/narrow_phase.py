@@ -757,11 +757,71 @@ def narrow_phase_process_mesh_plane_contacts_kernel(
             )
 
 
+@wp.kernel(enable_backward=False)
+def copy_reduced_contacts_kernel(
+    reduced_contact_indices: wp.array(dtype=wp.int32),
+    reduced_contact_count: wp.array(dtype=int),
+    # Source (internal buffer)
+    src_contact_pair: wp.array(dtype=wp.vec2i),
+    src_contact_position: wp.array(dtype=wp.vec3),
+    src_contact_normal: wp.array(dtype=wp.vec3),
+    src_contact_penetration: wp.array(dtype=float),
+    src_contact_pair_key: wp.array(dtype=wp.uint64),
+    src_contact_key: wp.array(dtype=wp.uint32),
+    # Destination (final buffer)
+    dst_contact_count: wp.array(dtype=int),
+    dst_contact_pair: wp.array(dtype=wp.vec2i),
+    dst_contact_position: wp.array(dtype=wp.vec3),
+    dst_contact_normal: wp.array(dtype=wp.vec3),
+    dst_contact_penetration: wp.array(dtype=float),
+    dst_contact_tangent: wp.array(dtype=wp.vec3),
+    dst_contact_pair_key: wp.array(dtype=wp.uint64),
+    dst_contact_key: wp.array(dtype=wp.uint32),
+):
+    """
+    Copy contacts from internal buffer to final buffer based on reduced contact indices.
+    This kernel is used after contact reduction to copy only the selected contacts.
+    """
+    tid = wp.tid()
+
+    num_reduced = reduced_contact_count[0]
+    if tid >= num_reduced:
+        return
+
+    # Get source index from reduced contact indices
+    src_idx = reduced_contact_indices[tid]
+
+    # Atomically get destination index
+    dst_idx = wp.atomic_add(dst_contact_count, 0, 1)
+
+    # Copy contact data
+    dst_contact_pair[dst_idx] = src_contact_pair[src_idx]
+    dst_contact_position[dst_idx] = src_contact_position[src_idx]
+    dst_contact_normal[dst_idx] = src_contact_normal[src_idx]
+    dst_contact_penetration[dst_idx] = src_contact_penetration[src_idx]
+
+    # Copy contact keys if arrays are non-empty
+    if dst_contact_pair_key.shape[0] > 0 and src_contact_pair_key.shape[0] > 0:
+        dst_contact_pair_key[dst_idx] = src_contact_pair_key[src_idx]
+
+    if dst_contact_key.shape[0] > 0 and src_contact_key.shape[0] > 0:
+        dst_contact_key[dst_idx] = src_contact_key[src_idx]
+
+    # Compute tangent if tangent array is non-empty
+    if dst_contact_tangent.shape[0] > 0:
+        normal = src_contact_normal[src_idx]
+        world_x = wp.vec3(1.0, 0.0, 0.0)
+        if wp.abs(wp.dot(normal, world_x)) > 0.99:
+            world_x = wp.vec3(0.0, 1.0, 0.0)
+        dst_contact_tangent[dst_idx] = wp.normalize(world_x - wp.dot(world_x, normal) * normal)
+
+
 class NarrowPhase:
     def __init__(
         self,
         max_candidate_pairs: int,
         max_triangle_pairs: int = 1000000,
+        max_mesh_contacts: int = 10000000,
         device=None,
         geom_aabb_lower: wp.array(dtype=wp.vec3) | None = None,
         geom_aabb_upper: wp.array(dtype=wp.vec3) | None = None,
@@ -773,6 +833,7 @@ class NarrowPhase:
         Args:
             max_candidate_pairs: Maximum number of candidate pairs from broad phase
             max_triangle_pairs: Maximum number of mesh triangle pairs (conservative estimate)
+            max_mesh_contacts: Maximum number of mesh triangle and mesh plane contacts (for internal buffer)
             device: Device to allocate buffers on
             geom_aabb_lower: Optional external AABB lower bounds array (if provided, AABBs won't be computed internally)
             geom_aabb_upper: Optional external AABB upper bounds array (if provided, AABBs won't be computed internally)
@@ -780,6 +841,7 @@ class NarrowPhase:
         """
         self.max_candidate_pairs = max_candidate_pairs
         self.max_triangle_pairs = max_triangle_pairs
+        self.max_mesh_contacts = max_mesh_contacts
         self.device = device
         self.contact_reduction = contact_reduction
 
@@ -814,6 +876,15 @@ class NarrowPhase:
             self.shape_pairs_mesh_plane_count = wp.zeros(1, dtype=wp.int32, device=device)
             self.shape_pairs_mesh_plane_cumsum = wp.zeros(max_candidate_pairs, dtype=wp.int32, device=device)
             self.mesh_plane_vertex_total_count = wp.zeros(1, dtype=wp.int32, device=device)
+
+            # Internal contact buffer for mesh triangle and mesh plane contacts (used when contact reduction is enabled)
+            self.internal_contact_pair = wp.zeros(max_mesh_contacts, dtype=wp.vec2i, device=device)
+            self.internal_contact_position = wp.zeros(max_mesh_contacts, dtype=wp.vec3, device=device)
+            self.internal_contact_normal = wp.zeros(max_mesh_contacts, dtype=wp.vec3, device=device)
+            self.internal_contact_penetration = wp.zeros(max_mesh_contacts, dtype=wp.float32, device=device)
+            self.internal_contact_pair_key = wp.zeros(max_mesh_contacts, dtype=wp.uint64, device=device)
+            self.internal_contact_key = wp.zeros(max_mesh_contacts, dtype=wp.uint32, device=device)
+            self.internal_contact_count = wp.zeros(1, dtype=wp.int32, device=device)
 
             # Empty tangent array for when tangent computation is disabled
             self.empty_tangent = wp.zeros(0, dtype=wp.vec3, device=device)
@@ -852,8 +923,6 @@ class NarrowPhase:
         | None = None,  # Represents x axis of local contact frame (None to disable)
         contact_pair_key: wp.array(dtype=wp.uint64) | None = None,  # Contact pair keys (None to disable)
         contact_key: wp.array(dtype=wp.uint32) | None = None,  # Contact feature keys (None to disable)
-        reduced_contact_indices: wp.array(dtype=wp.int32) | None = None,  # Reduced contact indices (None to disable)
-        reduced_contact_count: wp.array(dtype=int) | None = None,  # Reduced contact count (None to disable)
         device=None,  # Device to launch on
     ):
         """
@@ -875,8 +944,6 @@ class NarrowPhase:
             contact_tangent: Output array for contact tangents, or None to disable tangent computation
             contact_pair_key: Output array for contact pair keys, or None to disable key collection
             contact_key: Output array for contact feature keys, or None to disable key collection (required for contact reduction)
-            reduced_contact_indices: Output array for reduced contact indices (None to disable reduction, requires contact_key)
-            reduced_contact_count: Output array for reduced contact count (None to disable reduction, requires contact_key)
             contact_count: Output array (single element) for contact count
             device: Device to launch on
         """
@@ -897,12 +964,20 @@ class NarrowPhase:
         if contact_key is None:
             contact_key = self.empty_contact_key
 
+        # Determine if we need to use internal buffer for mesh contacts (when contact reduction is enabled)
+        use_internal_buffer = (
+            self.contact_reduction is not None and contact_key is not None and contact_key.shape[0] > 0
+        )
+
         # Clear all counters and contact count
         contact_count.zero_()
         self.shape_pairs_mesh_count.zero_()
         self.triangle_pairs_count.zero_()
         self.shape_pairs_mesh_plane_count.zero_()
         self.mesh_plane_vertex_total_count.zero_()
+
+        if use_internal_buffer:
+            self.internal_contact_count.zero_()
 
         # Launch main narrow phase kernel (using the appropriate kernel variant)
         wp.launch(
@@ -942,6 +1017,28 @@ class NarrowPhase:
             block_dim=self.block_dim,
         )
 
+        # Determine which buffers to use for mesh triangle and mesh plane contacts
+        if use_internal_buffer:
+            # Use internal buffer - mesh contacts will go here and be reduced later
+            mesh_contact_count = self.internal_contact_count
+            mesh_contact_pair = self.internal_contact_pair
+            mesh_contact_position = self.internal_contact_position
+            mesh_contact_normal = self.internal_contact_normal
+            mesh_contact_penetration = self.internal_contact_penetration
+            mesh_contact_pair_key = self.internal_contact_pair_key
+            mesh_contact_key = self.internal_contact_key
+            mesh_contact_max = self.max_mesh_contacts
+        else:
+            # Use final buffer directly - no reduction needed
+            mesh_contact_count = contact_count
+            mesh_contact_pair = contact_pair
+            mesh_contact_position = contact_position
+            mesh_contact_normal = contact_normal
+            mesh_contact_penetration = contact_penetration
+            mesh_contact_pair_key = contact_pair_key
+            mesh_contact_key = contact_key
+            mesh_contact_max = contact_max
+
         # Launch mesh-plane contact processing kernel
         wp.launch(
             kernel=narrow_phase_process_mesh_plane_contacts_kernel,
@@ -956,18 +1053,18 @@ class NarrowPhase:
                 self.shape_pairs_mesh_plane_cumsum,
                 self.shape_pairs_mesh_plane_count,
                 self.mesh_plane_vertex_total_count,
-                contact_max,
+                mesh_contact_max,
                 self.total_num_threads,
             ],
             outputs=[
-                contact_count,
-                contact_pair,
-                contact_position,
-                contact_normal,
-                contact_penetration,
-                contact_tangent,
-                contact_pair_key,
-                contact_key,
+                mesh_contact_count,
+                mesh_contact_pair,
+                mesh_contact_position,
+                mesh_contact_normal,
+                mesh_contact_penetration,
+                self.empty_tangent,  # Tangent not needed in internal buffer
+                mesh_contact_pair_key,
+                mesh_contact_key,
             ],
             device=device,
             block_dim=self.block_dim,
@@ -1008,39 +1105,65 @@ class NarrowPhase:
                 geom_cutoff,
                 self.triangle_pairs,
                 self.triangle_pairs_count,
-                contact_max,
+                mesh_contact_max,
                 self.total_num_threads,
             ],
             outputs=[
-                contact_count,
-                contact_pair,
-                contact_position,
-                contact_normal,
-                contact_penetration,
-                contact_tangent,
-                contact_pair_key,
-                contact_key,
+                mesh_contact_count,
+                mesh_contact_pair,
+                mesh_contact_position,
+                mesh_contact_normal,
+                mesh_contact_penetration,
+                self.empty_tangent,  # Tangent not needed in internal buffer
+                mesh_contact_pair_key,
+                mesh_contact_key,
             ],
             device=device,
             block_dim=self.block_dim,
         )
 
-        # Apply contact reduction if enabled
-        if (
-            self.contact_reduction is not None
-            and reduced_contact_indices is not None
-            and reduced_contact_count is not None
-            and contact_key is not None
-            and contact_key.shape[0] > 0
-        ):
-            # Contact reduction requires contact_key for temporal coherence
+        # Apply contact reduction if using internal buffer
+        if use_internal_buffer:
+            # Allocate temporary arrays for contact reduction output
+            with wp.ScopedDevice(device):
+                reduced_contact_indices = wp.zeros(self.max_mesh_contacts, dtype=wp.int32, device=device)
+                reduced_contact_count = wp.zeros(1, dtype=wp.int32, device=device)
+
+            # Run contact reduction on internal buffer
             self.contact_reduction.launch(
-                contact_pair=contact_pair,
-                contact_position=contact_position,
-                contact_normal=contact_normal,
-                contact_penetration=contact_penetration,
-                contact_id=contact_key,
-                contact_count=contact_count,
+                contact_pair=self.internal_contact_pair,
+                contact_position=self.internal_contact_position,
+                contact_normal=self.internal_contact_normal,
+                contact_penetration=self.internal_contact_penetration,
+                contact_id=self.internal_contact_key,
+                contact_count=self.internal_contact_count,
                 kept_contact_indices=reduced_contact_indices,
                 kept_contact_count=reduced_contact_count,
+            )
+
+            # Copy reduced contacts from internal buffer to final buffer
+            wp.launch(
+                kernel=copy_reduced_contacts_kernel,
+                dim=self.max_mesh_contacts,
+                inputs=[
+                    reduced_contact_indices,
+                    reduced_contact_count,
+                    self.internal_contact_pair,
+                    self.internal_contact_position,
+                    self.internal_contact_normal,
+                    self.internal_contact_penetration,
+                    self.internal_contact_pair_key,
+                    self.internal_contact_key,
+                ],
+                outputs=[
+                    contact_count,
+                    contact_pair,
+                    contact_position,
+                    contact_normal,
+                    contact_penetration,
+                    contact_tangent,
+                    contact_pair_key,
+                    contact_key,
+                ],
+                device=device,
             )

@@ -231,8 +231,6 @@ def convert_narrow_phase_to_contacts_kernel(
     shape_body: wp.array(dtype=int),
     rigid_contact_margin: float,
     contact_max: int,
-    reduced_contact_indices: wp.array(dtype=wp.int32),
-    reduced_contact_count: wp.array(dtype=int),
     # Outputs (Contacts format)
     out_count: wp.array(dtype=int),
     out_shape0: wp.array(dtype=int),
@@ -259,34 +257,16 @@ def convert_narrow_phase_to_contacts_kernel(
     - contact_distance: distance such that d = contact_distance - (thickness_a + thickness_b)
 
     This kernel handles the conversion between these two formats.
-
-    If reduced_contact_indices array has size > 0, only processes contacts from that index list.
-    Otherwise, processes all contacts.
     """
     tid = wp.tid()
 
-    # Determine if contact reduction is active
-    use_reduction = reduced_contact_indices.shape[0] > 0
-
-    # Determine which contact index to process
-    idx = wp.int32(-1)
-    num_contacts = wp.int32(0)
-
-    if use_reduction:
-        # Contact reduction is active - use reduced contact list
-        num_contacts = reduced_contact_count[0]
-        if tid >= num_contacts:
-            return
-        idx = reduced_contact_indices[tid]
-    else:
-        # No contact reduction - process all contacts
-        num_contacts = narrow_contact_count[0]
-        if tid >= num_contacts:
-            return
-        idx = tid
+    # Process all contacts from narrow phase
+    num_contacts = narrow_contact_count[0]
+    if tid >= num_contacts:
+        return
 
     # Get contact pair
-    pair = contact_pair[idx]
+    pair = contact_pair[tid]
     shape0 = pair[0]
     shape1 = pair[1]
 
@@ -309,13 +289,13 @@ def convert_narrow_phase_to_contacts_kernel(
         radius_eff_b = geom_data[shape1][0]
 
     # Get contact data from narrow phase
-    contact_point_center = contact_position[idx]
+    contact_point_center = contact_position[tid]
     # Narrow phase outputs negated normal (pointing B to A), but write_contact expects A to B
-    contact_normal_a_to_b = contact_normal[idx]  # Undo the negation from narrow_phase
+    contact_normal_a_to_b = contact_normal[tid]  # Undo the negation from narrow_phase
     # Narrow phase outputs penetration (negative when overlapping)
     # write_contact expects contact_distance such that when recomputed gives same d
     # Since d = distance - (radii + thickness), and we have d directly, we need to add back thickness
-    contact_distance = contact_penetration[idx] + thickness_a + thickness_b
+    contact_distance = contact_penetration[tid] + thickness_a + thickness_b
 
     # Get body inverse transforms
     body0 = shape_body[shape0]
@@ -325,7 +305,6 @@ def convert_narrow_phase_to_contacts_kernel(
     X_bw_b = wp.transform_identity() if body1 == -1 else wp.transform_inverse(body_q[body1])
 
     # Use write_contact to format the contact
-    # Use tid as output index (not idx) so output is compact when using reduction
     write_contact(
         contact_point_center,
         contact_normal_a_to_b,
@@ -533,15 +512,6 @@ class CollisionPipelineUnified:
             else:
                 self.narrow_contact_pair_key = None
                 self.narrow_contact_key = None
-
-            # Contact reduction arrays (always allocate, use empty array when disabled)
-            if contact_reduction is not None:
-                self.reduced_contact_indices = wp.zeros(self.rigid_contact_max, dtype=wp.int32, device=device)
-                self.reduced_contact_count = wp.zeros(1, dtype=wp.int32, device=device)
-            else:
-                # Empty arrays when contact reduction is disabled (kernel checks size > 0)
-                self.reduced_contact_indices = wp.zeros(0, dtype=wp.int32, device=device)
-                self.reduced_contact_count = wp.zeros(1, dtype=wp.int32, device=device)
 
         if soft_contact_max is None:
             soft_contact_max = shape_count * particle_count
@@ -754,8 +724,6 @@ class CollisionPipelineUnified:
             contact_pair_key=self.narrow_contact_pair_key,
             contact_key=self.narrow_contact_key,
             contact_count=self.narrow_contact_count,
-            reduced_contact_indices=self.reduced_contact_indices,
-            reduced_contact_count=self.reduced_contact_count,
             device=self.device,
         )
 
@@ -775,8 +743,6 @@ class CollisionPipelineUnified:
                 model.shape_body,
                 self.rigid_contact_margin,
                 contacts.rigid_contact_max,
-                self.reduced_contact_indices,
-                self.reduced_contact_count,
             ],
             outputs=[
                 contacts.rigid_contact_count,
