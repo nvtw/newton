@@ -32,7 +32,7 @@ import newton.examples
 
 
 class Example:
-    def __init__(self, viewer):
+    def __init__(self, viewer, args):
         # setup simulation parameters first
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
@@ -100,14 +100,13 @@ class Example:
         # not required for MuJoCo, but required for maximal-coordinate solvers like XPBD
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
-        # Create collision pipeline with increased max contacts per pair
-        # rigid_contact_max_per_pair controls how many contact points can be generated between any two shapes
-        # Default is 10, increase if you need more contacts (e.g., for complex meshes)
-        self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
+        # Create collision pipeline from command-line args (default: CollisionPipelineUnified with EXPLICIT)
+        # Override rigid_contact_max_per_pair because mesh vs plane creates a lot of contacts
+        self.collision_pipeline = newton.examples.create_collision_pipeline(
             self.model,
-            rigid_contact_max_per_pair=100,  # Mesh vs plane creates a lot of contacts
+            args,
+            rigid_contact_max_per_pair=100,
             rigid_contact_margin=0.05,
-            broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
         )
         self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
 
@@ -202,6 +201,6 @@ if __name__ == "__main__":
     viewer, args = newton.examples.init()
 
     # Create viewer and run
-    example = Example(viewer)
+    example = Example(viewer, args)
 
     newton.examples.run(example, args)
