@@ -156,7 +156,7 @@ class Example:
 
         self.model = builder.finalize()
 
-        # Create collision pipeline from command-line args (default: CollisionPipelineUnified with NxN)
+        # Create collision pipeline from command-line args (default: CollisionPipelineUnified with EXPLICIT)
         # Can override with: --collision-pipeline unified --broad-phase-mode nxn|sap|explicit
         self.collision_pipeline = newton.examples.create_collision_pipeline(self.model, args)
 

@@ -96,8 +96,8 @@ class Example:
         # Evaluate forward kinematics for collision detection
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
-        # Create collision pipeline from command-line args (default: CollisionPipelineUnified with NxN)
-        self.collision_pipeline = newton.examples.create_collision_pipeline(self.model)
+        # Create collision pipeline from command-line args (default: CollisionPipelineUnified with EXPLICIT)
+        self.collision_pipeline = newton.examples.create_collision_pipeline(self.model, args)
         self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
 
         self.viewer.set_model(self.model)
