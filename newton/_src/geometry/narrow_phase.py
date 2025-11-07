@@ -821,7 +821,7 @@ class NarrowPhase:
         self,
         max_candidate_pairs: int,
         max_triangle_pairs: int = 1000000,
-        max_mesh_contacts: int = 10000000,
+        max_mesh_contacts: int = 1000000,
         device=None,
         geom_aabb_lower: wp.array(dtype=wp.vec3) | None = None,
         geom_aabb_upper: wp.array(dtype=wp.vec3) | None = None,
@@ -965,9 +965,8 @@ class NarrowPhase:
             contact_key = self.empty_contact_key
 
         # Determine if we need to use internal buffer for mesh contacts (when contact reduction is enabled)
-        use_internal_buffer = (
-            self.contact_reduction is not None and contact_key is not None and contact_key.shape[0] > 0
-        )
+        # Contact reduction can work without contact keys (no temporal coherence in that case)
+        use_internal_buffer = self.contact_reduction is not None
 
         # Clear all counters and contact count
         contact_count.zero_()
