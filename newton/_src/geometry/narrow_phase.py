@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from functools import cache
+from typing import Any
 
 import warp as wp
 
@@ -169,7 +170,7 @@ def extract_shape_data(
 
 
 @cache
-def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool):
+def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
     @wp.kernel(enable_backward=False)
     def narrow_phase_kernel_gjk_mpr(
         candidate_pair: wp.array(dtype=wp.vec2i),
@@ -182,7 +183,7 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool):
         geom_collision_radius: wp.array(dtype=float),
         geom_aabb_lower: wp.array(dtype=wp.vec3),
         geom_aabb_upper: wp.array(dtype=wp.vec3),
-        writer_data: ContactWriterData,
+        writer_data: Any,
         total_num_threads: int,
         # mesh collision outputs (for mesh processing)
         shape_pairs_mesh: wp.array(dtype=wp.vec2i),
@@ -358,7 +359,7 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool):
                 contact_data.shape_b = shape_b
                 contact_data.margin = margin
 
-                write_contact_simple(contact_data, writer_data)
+                writer_func(contact_data, writer_data)
 
     return narrow_phase_kernel_gjk_mpr
 
@@ -442,210 +443,218 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
         )
 
 
-@wp.kernel(enable_backward=False)
-def narrow_phase_process_mesh_triangle_contacts_kernel(
-    geom_types: wp.array(dtype=int),
-    geom_data: wp.array(dtype=wp.vec4),
-    geom_transform: wp.array(dtype=wp.transform),
-    geom_source: wp.array(dtype=wp.uint64),
-    geom_cutoff: wp.array(dtype=float),  # Per-geometry cutoff distances
-    triangle_pairs: wp.array(dtype=wp.vec3i),
-    triangle_pairs_count: wp.array(dtype=int),
-    writer_data: ContactWriterData,
-    total_num_threads: int,
-):
-    """
-    Process triangle pairs to generate contacts using GJK/MPR.
-    """
-    tid = wp.tid()
+@cache
+def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
+    @wp.kernel(enable_backward=False)
+    def narrow_phase_process_mesh_triangle_contacts_kernel(
+        geom_types: wp.array(dtype=int),
+        geom_data: wp.array(dtype=wp.vec4),
+        geom_transform: wp.array(dtype=wp.transform),
+        geom_source: wp.array(dtype=wp.uint64),
+        geom_cutoff: wp.array(dtype=float),  # Per-geometry cutoff distances
+        triangle_pairs: wp.array(dtype=wp.vec3i),
+        triangle_pairs_count: wp.array(dtype=int),
+        writer_data: Any,
+        total_num_threads: int,
+    ):
+        """
+        Process triangle pairs to generate contacts using GJK/MPR.
+        """
+        tid = wp.tid()
 
-    num_triangle_pairs = triangle_pairs_count[0]
+        num_triangle_pairs = triangle_pairs_count[0]
 
-    for i in range(tid, num_triangle_pairs, total_num_threads):
-        if i >= triangle_pairs.shape[0]:
-            break
+        for i in range(tid, num_triangle_pairs, total_num_threads):
+            if i >= triangle_pairs.shape[0]:
+                break
 
-        triple = triangle_pairs[i]
-        shape_a = triple[0]
-        shape_b = triple[1]
-        tri_idx = triple[2]
+            triple = triangle_pairs[i]
+            shape_a = triple[0]
+            shape_b = triple[1]
+            tri_idx = triple[2]
 
-        # Get mesh data for shape A
-        mesh_id_a = geom_source[shape_a]
-        if mesh_id_a == wp.uint64(0):
-            continue
+            # Get mesh data for shape A
+            mesh_id_a = geom_source[shape_a]
+            if mesh_id_a == wp.uint64(0):
+                continue
 
-        scale_data_a = geom_data[shape_a]
-        mesh_scale_a = wp.vec3(scale_data_a[0], scale_data_a[1], scale_data_a[2])
+            scale_data_a = geom_data[shape_a]
+            mesh_scale_a = wp.vec3(scale_data_a[0], scale_data_a[1], scale_data_a[2])
 
-        # Get mesh world transform for shape A
-        X_mesh_ws_a = geom_transform[shape_a]
+            # Get mesh world transform for shape A
+            X_mesh_ws_a = geom_transform[shape_a]
 
-        # Extract triangle shape data from mesh
-        shape_data_a, v0_world = get_triangle_shape_from_mesh(mesh_id_a, mesh_scale_a, X_mesh_ws_a, tri_idx)
+            # Extract triangle shape data from mesh
+            shape_data_a, v0_world = get_triangle_shape_from_mesh(mesh_id_a, mesh_scale_a, X_mesh_ws_a, tri_idx)
 
-        # Extract shape B data
-        pos_b, quat_b, shape_data_b, _scale_b, thickness_b = extract_shape_data(
-            shape_b,
-            geom_transform,
-            geom_types,
-            geom_data,
-            geom_source,
-        )
+            # Extract shape B data
+            pos_b, quat_b, shape_data_b, _scale_b, thickness_b = extract_shape_data(
+                shape_b,
+                geom_transform,
+                geom_types,
+                geom_data,
+                geom_source,
+            )
 
-        # Set pos_a to be vertex A (origin of triangle in local frame)
-        pos_a = v0_world
-        quat_a = wp.quat_identity()  # Triangle has no orientation, use identity
+            # Set pos_a to be vertex A (origin of triangle in local frame)
+            pos_a = v0_world
+            quat_a = wp.quat_identity()  # Triangle has no orientation, use identity
 
-        # Extract thickness for shape A
-        thickness_a = geom_data[shape_a][3]
+            # Extract thickness for shape A
+            thickness_a = geom_data[shape_a][3]
 
-        # Use per-geometry cutoff for contact detection
-        cutoff_a = geom_cutoff[shape_a]
-        cutoff_b = geom_cutoff[shape_b]
-        margin = wp.max(cutoff_a, cutoff_b)
+            # Use per-geometry cutoff for contact detection
+            cutoff_a = geom_cutoff[shape_a]
+            cutoff_b = geom_cutoff[shape_b]
+            margin = wp.max(cutoff_a, cutoff_b)
 
-        # Compute contacts using GJK/MPR
-        count, normal, signed_distances, points, radius_eff_a, radius_eff_b = compute_gjk_mpr_contacts(
-            shape_data_a,
-            shape_data_b,
-            quat_a,
-            quat_b,
-            pos_a,
-            pos_b,
-            margin,
-        )
+            # Compute contacts using GJK/MPR
+            count, normal, signed_distances, points, radius_eff_a, radius_eff_b = compute_gjk_mpr_contacts(
+                shape_data_a,
+                shape_data_b,
+                quat_a,
+                quat_b,
+                pos_a,
+                pos_b,
+                margin,
+            )
 
-        # Post-process triangle contacts to fix normal direction if needed
-        # This ensures contact normals don't push objects INTO triangles
-        signed_distances, normal = postprocess_triangle_contacts(
-            shape_data_a,
-            pos_a,
-            normal,
-            signed_distances,
-            count,
-        )
+            # Post-process triangle contacts to fix normal direction if needed
+            # This ensures contact normals don't push objects INTO triangles
+            signed_distances, normal = postprocess_triangle_contacts(
+                shape_data_a,
+                pos_a,
+                normal,
+                signed_distances,
+                count,
+            )
 
-        # Write contacts
-        for contact_id in range(count):
-            contact_data = ContactData()
-            contact_data.contact_point_center = points[contact_id]
-            contact_data.contact_normal_a_to_b = normal
-            contact_data.contact_distance = signed_distances[contact_id]
-            contact_data.radius_eff_a = radius_eff_a
-            contact_data.radius_eff_b = radius_eff_b
-            contact_data.thickness_a = thickness_a
-            contact_data.thickness_b = thickness_b
-            contact_data.shape_a = shape_a
-            contact_data.shape_b = shape_b
-            contact_data.margin = margin
+            # Write contacts
+            for contact_id in range(count):
+                contact_data = ContactData()
+                contact_data.contact_point_center = points[contact_id]
+                contact_data.contact_normal_a_to_b = normal
+                contact_data.contact_distance = signed_distances[contact_id]
+                contact_data.radius_eff_a = radius_eff_a
+                contact_data.radius_eff_b = radius_eff_b
+                contact_data.thickness_a = thickness_a
+                contact_data.thickness_b = thickness_b
+                contact_data.shape_a = shape_a
+                contact_data.shape_b = shape_b
+                contact_data.margin = margin
 
-            write_contact_simple(contact_data, writer_data)
+                writer_func(contact_data, writer_data)
+
+    return narrow_phase_process_mesh_triangle_contacts_kernel
 
 
-@wp.kernel(enable_backward=False)
-def narrow_phase_process_mesh_plane_contacts_kernel(
-    geom_types: wp.array(dtype=int),
-    geom_data: wp.array(dtype=wp.vec4),
-    geom_transform: wp.array(dtype=wp.transform),
-    geom_source: wp.array(dtype=wp.uint64),
-    geom_cutoff: wp.array(dtype=float),  # Per-geometry cutoff distances
-    shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
-    shape_pairs_mesh_plane_cumsum: wp.array(dtype=int),
-    shape_pairs_mesh_plane_count: wp.array(dtype=int),
-    mesh_plane_vertex_total_count: wp.array(dtype=int),
-    writer_data: ContactWriterData,
-    total_num_threads: int,
-):
-    """
-    Process mesh-plane collisions by checking each mesh vertex against the infinite plane.
-    Uses binary search to map thread index to (mesh-plane pair, vertex index).
-    Fixed thread count with strided loop over vertices.
-    """
-    tid = wp.tid()
+@cache
+def create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func: Any):
+    @wp.kernel(enable_backward=False)
+    def narrow_phase_process_mesh_plane_contacts_kernel(
+        geom_types: wp.array(dtype=int),
+        geom_data: wp.array(dtype=wp.vec4),
+        geom_transform: wp.array(dtype=wp.transform),
+        geom_source: wp.array(dtype=wp.uint64),
+        geom_cutoff: wp.array(dtype=float),  # Per-geometry cutoff distances
+        shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
+        shape_pairs_mesh_plane_cumsum: wp.array(dtype=int),
+        shape_pairs_mesh_plane_count: wp.array(dtype=int),
+        mesh_plane_vertex_total_count: wp.array(dtype=int),
+        writer_data: Any,
+        total_num_threads: int,
+    ):
+        """
+        Process mesh-plane collisions by checking each mesh vertex against the infinite plane.
+        Uses binary search to map thread index to (mesh-plane pair, vertex index).
+        Fixed thread count with strided loop over vertices.
+        """
+        tid = wp.tid()
 
-    total_vertices = mesh_plane_vertex_total_count[0]
-    num_pairs = shape_pairs_mesh_plane_count[0]
+        total_vertices = mesh_plane_vertex_total_count[0]
+        num_pairs = shape_pairs_mesh_plane_count[0]
 
-    if num_pairs == 0:
-        return
+        if num_pairs == 0:
+            return
 
-    # Process vertices in a strided loop
-    for task_id in range(tid, total_vertices, total_num_threads):
-        if task_id >= total_vertices:
-            break
+        # Process vertices in a strided loop
+        for task_id in range(tid, total_vertices, total_num_threads):
+            if task_id >= total_vertices:
+                break
 
-        # Use binary search helper to find which mesh-plane pair this vertex belongs to
-        pair_idx, vertex_idx = find_pair_from_cumulative_index(task_id, shape_pairs_mesh_plane_cumsum, num_pairs)
+            # Use binary search helper to find which mesh-plane pair this vertex belongs to
+            pair_idx, vertex_idx = find_pair_from_cumulative_index(task_id, shape_pairs_mesh_plane_cumsum, num_pairs)
 
-        # Get the mesh-plane pair
-        pair = shape_pairs_mesh_plane[pair_idx]
-        mesh_shape = pair[0]
-        plane_shape = pair[1]
+            # Get the mesh-plane pair
+            pair = shape_pairs_mesh_plane[pair_idx]
+            mesh_shape = pair[0]
+            plane_shape = pair[1]
 
-        # Get mesh
-        mesh_id = geom_source[mesh_shape]
-        if mesh_id == wp.uint64(0):
-            continue
+            # Get mesh
+            mesh_id = geom_source[mesh_shape]
+            if mesh_id == wp.uint64(0):
+                continue
 
-        mesh_obj = wp.mesh_get(mesh_id)
-        if vertex_idx >= mesh_obj.points.shape[0]:
-            continue
+            mesh_obj = wp.mesh_get(mesh_id)
+            if vertex_idx >= mesh_obj.points.shape[0]:
+                continue
 
-        # Get mesh world transform
-        X_mesh_ws = geom_transform[mesh_shape]
+            # Get mesh world transform
+            X_mesh_ws = geom_transform[mesh_shape]
 
-        # Get plane world transform
-        X_plane_ws = geom_transform[plane_shape]
+            # Get plane world transform
+            X_plane_ws = geom_transform[plane_shape]
 
-        # Get vertex position in mesh local space and transform to world space
-        scale_data = geom_data[mesh_shape]
-        mesh_scale = wp.vec3(scale_data[0], scale_data[1], scale_data[2])
-        vertex_local = wp.cw_mul(mesh_obj.points[vertex_idx], mesh_scale)
-        vertex_world = wp.transform_point(X_mesh_ws, vertex_local)
+            # Get vertex position in mesh local space and transform to world space
+            scale_data = geom_data[mesh_shape]
+            mesh_scale = wp.vec3(scale_data[0], scale_data[1], scale_data[2])
+            vertex_local = wp.cw_mul(mesh_obj.points[vertex_idx], mesh_scale)
+            vertex_world = wp.transform_point(X_mesh_ws, vertex_local)
 
-        # Get plane normal in world space (plane normal is along local +Z, pointing upward)
-        plane_normal = wp.transform_vector(X_plane_ws, wp.vec3(0.0, 0.0, 1.0))
+            # Get plane normal in world space (plane normal is along local +Z, pointing upward)
+            plane_normal = wp.transform_vector(X_plane_ws, wp.vec3(0.0, 0.0, 1.0))
 
-        # Project vertex onto plane to get closest point
-        X_plane_sw = wp.transform_inverse(X_plane_ws)
-        vertex_in_plane_space = wp.transform_point(X_plane_sw, vertex_world)
-        point_on_plane_local = wp.vec3(vertex_in_plane_space[0], vertex_in_plane_space[1], 0.0)
-        point_on_plane = wp.transform_point(X_plane_ws, point_on_plane_local)
+            # Project vertex onto plane to get closest point
+            X_plane_sw = wp.transform_inverse(X_plane_ws)
+            vertex_in_plane_space = wp.transform_point(X_plane_sw, vertex_world)
+            point_on_plane_local = wp.vec3(vertex_in_plane_space[0], vertex_in_plane_space[1], 0.0)
+            point_on_plane = wp.transform_point(X_plane_ws, point_on_plane_local)
 
-        # Compute distance and normal
-        diff = vertex_world - point_on_plane
-        distance = wp.dot(diff, plane_normal)
+            # Compute distance and normal
+            diff = vertex_world - point_on_plane
+            distance = wp.dot(diff, plane_normal)
 
-        # Extract thickness values
-        thickness_mesh = geom_data[mesh_shape][3]
-        thickness_plane = geom_data[plane_shape][3]
-        total_thickness = thickness_mesh + thickness_plane
+            # Extract thickness values
+            thickness_mesh = geom_data[mesh_shape][3]
+            thickness_plane = geom_data[plane_shape][3]
+            total_thickness = thickness_mesh + thickness_plane
 
-        # Use per-geometry cutoff for contact detection
-        cutoff_mesh = geom_cutoff[mesh_shape]
-        cutoff_plane = geom_cutoff[plane_shape]
-        margin = wp.max(cutoff_mesh, cutoff_plane)
+            # Use per-geometry cutoff for contact detection
+            cutoff_mesh = geom_cutoff[mesh_shape]
+            cutoff_plane = geom_cutoff[plane_shape]
+            margin = wp.max(cutoff_mesh, cutoff_plane)
 
-        # Treat plane as a half-space: generate contact for all vertices on or below the plane
-        # (distance < margin means vertex is close to or penetrating the plane)
-        if distance < margin + total_thickness:
-            # Write contact
-            # Note: write_contact_simple expects contact_normal_a_to_b pointing FROM mesh TO plane (downward)
-            # plane_normal points upward, so we need to negate it
-            contact_data = ContactData()
-            contact_data.contact_point_center = (vertex_world + point_on_plane) * 0.5
-            contact_data.contact_normal_a_to_b = -plane_normal
-            contact_data.contact_distance = distance
-            contact_data.radius_eff_a = 0.0  # mesh has no effective radius
-            contact_data.radius_eff_b = 0.0  # plane has no effective radius
-            contact_data.thickness_a = thickness_mesh
-            contact_data.thickness_b = thickness_plane
-            contact_data.shape_a = mesh_shape
-            contact_data.shape_b = plane_shape
-            contact_data.margin = margin
+            # Treat plane as a half-space: generate contact for all vertices on or below the plane
+            # (distance < margin means vertex is close to or penetrating the plane)
+            if distance < margin + total_thickness:
+                # Write contact
+                # Note: write_contact_simple expects contact_normal_a_to_b pointing FROM mesh TO plane (downward)
+                # plane_normal points upward, so we need to negate it
+                contact_data = ContactData()
+                contact_data.contact_point_center = (vertex_world + point_on_plane) * 0.5
+                contact_data.contact_normal_a_to_b = -plane_normal
+                contact_data.contact_distance = distance
+                contact_data.radius_eff_a = 0.0  # mesh has no effective radius
+                contact_data.radius_eff_b = 0.0  # plane has no effective radius
+                contact_data.thickness_a = thickness_mesh
+                contact_data.thickness_b = thickness_plane
+                contact_data.shape_a = mesh_shape
+                contact_data.shape_b = plane_shape
+                contact_data.margin = margin
 
-            write_contact_simple(contact_data, writer_data)
+                writer_func(contact_data, writer_data)
+
+    return narrow_phase_process_mesh_plane_contacts_kernel
 
 
 class NarrowPhase:
@@ -656,6 +665,7 @@ class NarrowPhase:
         device=None,
         geom_aabb_lower: wp.array(dtype=wp.vec3) | None = None,
         geom_aabb_upper: wp.array(dtype=wp.vec3) | None = None,
+        contact_writer_warp_func: Any | None = None,
     ):
         """
         Initialize NarrowPhase with pre-allocated buffers.
@@ -666,6 +676,7 @@ class NarrowPhase:
             device: Device to allocate buffers on
             geom_aabb_lower: Optional external AABB lower bounds array (if provided, AABBs won't be computed internally)
             geom_aabb_upper: Optional external AABB upper bounds array (if provided, AABBs won't be computed internally)
+            contact_writer_warp_func: Optional custom contact writer function (first arg: ContactData, second arg: custom struct type)
         """
         self.max_candidate_pairs = max_candidate_pairs
         self.max_triangle_pairs = max_triangle_pairs
@@ -684,8 +695,16 @@ class NarrowPhase:
                 self.geom_aabb_lower = wp.zeros(0, dtype=wp.vec3, device=device)
                 self.geom_aabb_upper = wp.zeros(0, dtype=wp.vec3, device=device)
 
-        # Create the appropriate kernel variant
-        self.narrow_phase_kernel = create_narrow_phase_kernel_gjk_mpr(self.external_aabb)
+        # Determine the writer function
+        if contact_writer_warp_func is None:
+            writer_func = write_contact_simple
+        else:
+            writer_func = contact_writer_warp_func
+
+        # Create the appropriate kernel variants
+        self.narrow_phase_kernel = create_narrow_phase_kernel_gjk_mpr(self.external_aabb, writer_func)
+        self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func)
+        self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func)
 
         # Pre-allocate all intermediate buffers
         with wp.ScopedDevice(device):
@@ -714,7 +733,7 @@ class NarrowPhase:
         self.num_tile_blocks = num_blocks
         self.tile_size = 128
 
-    def launch(
+    def launch_custom_write(
         self,
         candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),  # Maybe colliding pairs
         num_candidate_pair: wp.array(dtype=wp.int32, ndim=1),  # Size one array
@@ -725,11 +744,125 @@ class NarrowPhase:
         geom_cutoff: wp.array(dtype=wp.float32, ndim=1),  # per-geom (take the max)
         geom_collision_radius: wp.array(dtype=wp.float32, ndim=1),  # per-geom collision radius for AABB fallback
         # Outputs
-        contact_writer_warp_func: Any,
         contact_writer_last_arg_warp_struct: Any,
         device=None,  # Device to launch on
     ):
-        pass
+        """
+        Launch narrow phase collision detection with a custom contact writer struct.
+
+        Args:
+            candidate_pair: Array of potentially colliding shape pairs from broad phase
+            num_candidate_pair: Single-element array containing the number of candidate pairs
+            geom_types: Array of geometry types for all shapes
+            geom_data: Array of vec4 containing scale (xyz) and thickness (w) for each shape
+            geom_transform: Array of world-space transforms for each shape
+            geom_source: Array of source pointers (mesh IDs, etc.) for each shape
+            geom_cutoff: Array of cutoff distances for each shape
+            geom_collision_radius: Array of collision radii for each shape (for AABB fallback for planes/meshes)
+            contact_writer_last_arg_warp_struct: Custom struct instance for contact writing (type must match contact_writer_last_arg_type from __init__)
+            device: Device to launch on
+        """
+        if device is None:
+            device = self.device if self.device is not None else candidate_pair.device
+
+        # Clear all counters
+        self.shape_pairs_mesh_count.zero_()
+        self.triangle_pairs_count.zero_()
+        self.shape_pairs_mesh_plane_count.zero_()
+        self.mesh_plane_vertex_total_count.zero_()
+
+        # Launch main narrow phase kernel (using the appropriate kernel variant)
+        wp.launch(
+            kernel=self.narrow_phase_kernel,
+            dim=self.total_num_threads,
+            inputs=[
+                candidate_pair,
+                num_candidate_pair,
+                geom_types,
+                geom_data,
+                geom_transform,
+                geom_source,
+                geom_cutoff,
+                geom_collision_radius,
+                self.geom_aabb_lower,
+                self.geom_aabb_upper,
+                contact_writer_last_arg_warp_struct,
+                self.total_num_threads,
+            ],
+            outputs=[
+                self.shape_pairs_mesh,
+                self.shape_pairs_mesh_count,
+                self.shape_pairs_mesh_plane,
+                self.shape_pairs_mesh_plane_cumsum,
+                self.shape_pairs_mesh_plane_count,
+                self.mesh_plane_vertex_total_count,
+            ],
+            device=device,
+            block_dim=self.block_dim,
+        )
+
+        # Launch mesh-plane contact processing kernel
+        wp.launch(
+            kernel=self.mesh_plane_contacts_kernel,
+            dim=self.total_num_threads,
+            inputs=[
+                geom_types,
+                geom_data,
+                geom_transform,
+                geom_source,
+                geom_cutoff,
+                self.shape_pairs_mesh_plane,
+                self.shape_pairs_mesh_plane_cumsum,
+                self.shape_pairs_mesh_plane_count,
+                self.mesh_plane_vertex_total_count,
+                contact_writer_last_arg_warp_struct,
+                self.total_num_threads,
+            ],
+            device=device,
+            block_dim=self.block_dim,
+        )
+
+        # Launch mesh triangle overlap detection kernel
+        second_dim = self.tile_size if ENABLE_TILE_BVH_QUERY else 1
+        wp.launch(
+            kernel=narrow_phase_find_mesh_triangle_overlaps_kernel,
+            dim=[self.num_tile_blocks, second_dim],
+            inputs=[
+                geom_types,
+                geom_transform,
+                geom_source,
+                geom_cutoff,
+                geom_data,
+                self.shape_pairs_mesh,
+                self.shape_pairs_mesh_count,
+                self.num_tile_blocks,  # Use num_tile_blocks as total_num_threads for tiled kernel
+            ],
+            outputs=[
+                self.triangle_pairs,
+                self.triangle_pairs_count,
+            ],
+            device=device,
+            block_dim=self.tile_size,
+        )
+
+        # Launch mesh triangle contact processing kernel
+        wp.launch(
+            kernel=self.mesh_triangle_contacts_kernel,
+            dim=self.total_num_threads,
+            inputs=[
+                geom_types,
+                geom_data,
+                geom_transform,
+                geom_source,
+                geom_cutoff,
+                self.triangle_pairs,
+                self.triangle_pairs_count,
+                contact_writer_last_arg_warp_struct,
+                self.total_num_threads,
+            ],
+            device=device,
+            block_dim=self.block_dim,
+        )
 
     def launch(
         self,
@@ -798,95 +931,16 @@ class NarrowPhase:
         writer_data.contact_penetration = contact_penetration
         writer_data.contact_tangent = contact_tangent
 
-        # Launch main narrow phase kernel (using the appropriate kernel variant)
-        wp.launch(
-            kernel=self.narrow_phase_kernel,
-            dim=self.total_num_threads,
-            inputs=[
-                candidate_pair,
-                num_candidate_pair,
-                geom_types,
-                geom_data,
-                geom_transform,
-                geom_source,
-                geom_cutoff,
-                geom_collision_radius,
-                self.geom_aabb_lower,
-                self.geom_aabb_upper,
-                writer_data,
-                self.total_num_threads,
-            ],
-            outputs=[
-                self.shape_pairs_mesh,
-                self.shape_pairs_mesh_count,
-                self.shape_pairs_mesh_plane,
-                self.shape_pairs_mesh_plane_cumsum,
-                self.shape_pairs_mesh_plane_count,
-                self.mesh_plane_vertex_total_count,
-            ],
-            device=device,
-            block_dim=self.block_dim,
-        )
-
-        # Launch mesh-plane contact processing kernel
-        wp.launch(
-            kernel=narrow_phase_process_mesh_plane_contacts_kernel,
-            dim=self.total_num_threads,
-            inputs=[
-                geom_types,
-                geom_data,
-                geom_transform,
-                geom_source,
-                geom_cutoff,
-                self.shape_pairs_mesh_plane,
-                self.shape_pairs_mesh_plane_cumsum,
-                self.shape_pairs_mesh_plane_count,
-                self.mesh_plane_vertex_total_count,
-                writer_data,
-                self.total_num_threads,
-            ],
-            device=device,
-            block_dim=self.block_dim,
-        )
-
-        # Launch mesh triangle overlap detection kernel
-        second_dim = self.tile_size if ENABLE_TILE_BVH_QUERY else 1
-        wp.launch(
-            kernel=narrow_phase_find_mesh_triangle_overlaps_kernel,
-            dim=[self.num_tile_blocks, second_dim],
-            inputs=[
-                geom_types,
-                geom_transform,
-                geom_source,
-                geom_cutoff,
-                geom_data,
-                self.shape_pairs_mesh,
-                self.shape_pairs_mesh_count,
-                self.num_tile_blocks,  # Use num_tile_blocks as total_num_threads for tiled kernel
-            ],
-            outputs=[
-                self.triangle_pairs,
-                self.triangle_pairs_count,
-            ],
-            device=device,
-            block_dim=self.tile_size,
-        )
-
-        # Launch mesh triangle contact processing kernel
-        wp.launch(
-            kernel=narrow_phase_process_mesh_triangle_contacts_kernel,
-            dim=self.total_num_threads,
-            inputs=[
-                geom_types,
-                geom_data,
-                geom_transform,
-                geom_source,
-                geom_cutoff,
-                self.triangle_pairs,
-                self.triangle_pairs_count,
-                writer_data,
-                self.total_num_threads,
-            ],
-            device=device,
-            block_dim=self.block_dim,
+        # Delegate to launch_custom_write
+        self.launch_custom_write(
+            candidate_pair,
+            num_candidate_pair,
+            geom_types,
+            geom_data,
+            geom_transform,
+            geom_source,
+            geom_cutoff,
+            geom_collision_radius,
+            writer_data,
+            device,
         )
