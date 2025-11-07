@@ -76,7 +76,8 @@ def test_body_state(
     ):
         world_id = wp.tid()
         index = indices[world_id]
-        failures[world_id] = not warp_test_fn(body_q[index], body_qd[index])
+        result = warp_test_fn(body_q[index], body_qd[index])
+        failures[world_id] = not wp.bool(result)
 
     body_q = state.body_q
     body_qd = state.body_qd
@@ -147,7 +148,8 @@ def test_particle_state(
     ):
         world_id = wp.tid()
         index = indices[world_id]
-        failures[world_id] = not warp_test_fn(particle_q[index], particle_qd[index])
+        result = warp_test_fn(particle_q[index], particle_qd[index])
+        failures[world_id] = not wp.bool(result)
 
     particle_q = state.particle_q
     particle_qd = state.particle_qd
