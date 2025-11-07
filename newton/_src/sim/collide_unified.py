@@ -39,10 +39,11 @@ from ..sim.state import State
 @wp.struct
 class UnifiedContactWriterData:
     """Contact writer data for collide_unified write_contact function."""
-    X_bw_a: wp.transform
-    X_bw_b: wp.transform
     rigid_contact_margin: float
     contact_max: int
+    # Body information arrays (for transforming to body-local coordinates)
+    body_q: wp.array(dtype=wp.transform)
+    shape_body: wp.array(dtype=int)
     # Output arrays
     contact_count: wp.array(dtype=int)
     out_shape0: wp.array(dtype=int)
@@ -80,7 +81,7 @@ def write_contact(
 
     Args:
         contact_data: ContactData struct containing contact information
-        writer_data: UnifiedContactWriterData struct containing transforms and output arrays
+        writer_data: UnifiedContactWriterData struct containing body info and output arrays
     """
     total_separation_needed = contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.thickness_a + contact_data.thickness_b
 
@@ -105,16 +106,24 @@ def write_contact(
         writer_data.out_shape0[index] = contact_data.shape_a
         writer_data.out_shape1[index] = contact_data.shape_b
 
+        # Get body indices for the shapes
+        body0 = writer_data.shape_body[contact_data.shape_a]
+        body1 = writer_data.shape_body[contact_data.shape_b]
+
+        # Compute body inverse transforms
+        X_bw_a = wp.transform_identity() if body0 == -1 else wp.transform_inverse(writer_data.body_q[body0])
+        X_bw_b = wp.transform_identity() if body1 == -1 else wp.transform_inverse(writer_data.body_q[body1])
+
         # Contact points are stored in body frames
-        writer_data.out_point0[index] = wp.transform_point(writer_data.X_bw_a, a_contact_world)
-        writer_data.out_point1[index] = wp.transform_point(writer_data.X_bw_b, b_contact_world)
+        writer_data.out_point0[index] = wp.transform_point(X_bw_a, a_contact_world)
+        writer_data.out_point1[index] = wp.transform_point(X_bw_b, b_contact_world)
 
         # Match kernels.py convention
         contact_normal = -contact_normal_a_to_b
 
         # Offsets in body frames
-        writer_data.out_offset0[index] = wp.transform_vector(writer_data.X_bw_a, -offset_mag_a * contact_normal)
-        writer_data.out_offset1[index] = wp.transform_vector(writer_data.X_bw_b, offset_mag_b * contact_normal)
+        writer_data.out_offset0[index] = wp.transform_vector(X_bw_a, -offset_mag_a * contact_normal)
+        writer_data.out_offset1[index] = wp.transform_vector(X_bw_b, offset_mag_b * contact_normal)
 
         writer_data.out_normal[index] = contact_normal
         writer_data.out_thickness0[index] = offset_mag_a
@@ -189,126 +198,6 @@ def compute_shape_aabbs(
 
         aabb_lower[shape_id] = aabb_min_world - margin_vec
         aabb_upper[shape_id] = aabb_max_world + margin_vec
-
-
-@wp.kernel
-def convert_narrow_phase_to_contacts_kernel(
-    contact_pair: wp.array(dtype=wp.vec2i),
-    contact_position: wp.array(dtype=wp.vec3),
-    contact_normal: wp.array(dtype=wp.vec3),
-    contact_penetration: wp.array(dtype=float),
-    narrow_contact_count: wp.array(dtype=int),
-    geom_data: wp.array(dtype=wp.vec4),  # Contains thickness in w component
-    shape_type: wp.array(dtype=int),
-    body_q: wp.array(dtype=wp.transform),
-    shape_body: wp.array(dtype=int),
-    rigid_contact_margin: float,
-    contact_max: int,
-    # Outputs (Contacts format)
-    out_count: wp.array(dtype=int),
-    out_shape0: wp.array(dtype=int),
-    out_shape1: wp.array(dtype=int),
-    out_point0: wp.array(dtype=wp.vec3),
-    out_point1: wp.array(dtype=wp.vec3),
-    out_offset0: wp.array(dtype=wp.vec3),
-    out_offset1: wp.array(dtype=wp.vec3),
-    out_normal: wp.array(dtype=wp.vec3),
-    out_thickness0: wp.array(dtype=float),
-    out_thickness1: wp.array(dtype=float),
-    out_tids: wp.array(dtype=int),
-):
-    """
-    Convert NarrowPhase output format to Contacts format using write_contact.
-
-    NarrowPhase outputs:
-    - contact_position: center point of contact
-    - contact_normal: NEGATED normal (pointing from shape1 to shape0)
-    - contact_penetration: d = distance - total_separation, negative if penetrating
-
-    write_contact expects:
-    - contact_normal_a_to_b: normal pointing from shape0 to shape1
-    - contact_distance: distance such that d = contact_distance - (thickness_a + thickness_b)
-
-    This kernel handles the conversion between these two formats.
-    """
-    idx = wp.tid()
-    num_contacts = narrow_contact_count[0]
-
-    if idx >= num_contacts:
-        return
-
-    # Get contact pair
-    pair = contact_pair[idx]
-    shape0 = pair[0]
-    shape1 = pair[1]
-
-    # Extract thickness values
-    thickness_a = geom_data[shape0][3]
-    thickness_b = geom_data[shape1][3]
-
-    # Extract effective radius for sphere and capsule shapes
-    type_a = shape_type[shape0]
-    type_b = shape_type[shape1]
-
-    radius_eff_a = 0.0
-    radius_eff_b = 0.0
-
-    # For spheres and capsules, extract the radius from scale[0]
-    if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
-        radius_eff_a = geom_data[shape0][0]
-
-    if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
-        radius_eff_b = geom_data[shape1][0]
-
-    # Get contact data from narrow phase
-    contact_point_center = contact_position[idx]
-    # Narrow phase outputs negated normal (pointing B to A), but write_contact expects A to B
-    contact_normal_a_to_b = contact_normal[idx]  # Undo the negation from narrow_phase
-    # Narrow phase outputs penetration (negative when overlapping)
-    # write_contact expects contact_distance such that when recomputed gives same d
-    # Since d = distance - (radii + thickness), and we have d directly, we need to add back thickness
-    contact_distance = contact_penetration[idx] + thickness_a + thickness_b
-
-    # Get body inverse transforms
-    body0 = shape_body[shape0]
-    body1 = shape_body[shape1]
-
-    X_bw_a = wp.transform_identity() if body0 == -1 else wp.transform_inverse(body_q[body0])
-    X_bw_b = wp.transform_identity() if body1 == -1 else wp.transform_inverse(body_q[body1])
-
-    # Create ContactData struct
-    contact_data = ContactData()
-    contact_data.contact_point_center = contact_point_center
-    contact_data.contact_normal_a_to_b = contact_normal_a_to_b
-    contact_data.contact_distance = contact_distance
-    contact_data.radius_eff_a = radius_eff_a
-    contact_data.radius_eff_b = radius_eff_b
-    contact_data.thickness_a = thickness_a
-    contact_data.thickness_b = thickness_b
-    contact_data.shape_a = shape0
-    contact_data.shape_b = shape1
-    contact_data.margin = rigid_contact_margin
-
-    # Create UnifiedContactWriterData struct
-    writer_data = UnifiedContactWriterData()
-    writer_data.X_bw_a = X_bw_a
-    writer_data.X_bw_b = X_bw_b
-    writer_data.rigid_contact_margin = rigid_contact_margin
-    writer_data.contact_max = contact_max
-    writer_data.contact_count = out_count
-    writer_data.out_shape0 = out_shape0
-    writer_data.out_shape1 = out_shape1
-    writer_data.out_point0 = out_point0
-    writer_data.out_point1 = out_point1
-    writer_data.out_offset0 = out_offset0
-    writer_data.out_offset1 = out_offset1
-    writer_data.out_normal = out_normal
-    writer_data.out_thickness0 = out_thickness0
-    writer_data.out_thickness1 = out_thickness1
-    writer_data.out_tids = out_tids
-
-    # Use write_contact to format the contact
-    write_contact(contact_data, writer_data)
 
 
 @wp.kernel
@@ -454,27 +343,21 @@ class CollisionPipelineUnified:
         # Initialize narrow phase with pre-allocated buffers
         # Pass AABB arrays so narrow phase can use them instead of computing AABBs internally
         # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs
-        # Note: We use the default write_contact_simple in narrow phase, then convert to final format
+        # Pass write_contact as custom writer to write directly to final Contacts format
         self.narrow_phase = NarrowPhase(
             max_candidate_pairs=self.shape_pairs_max,
             max_triangle_pairs=1000000,
             device=device,
             geom_aabb_lower=self.shape_aabb_lower,
             geom_aabb_upper=self.shape_aabb_upper,
+            contact_writer_warp_func=write_contact,
         )
 
         with wp.ScopedDevice(device):
-            # Narrow phase input/output arrays
+            # Narrow phase input arrays
             self.geom_data = wp.zeros(shape_count, dtype=wp.vec4, device=device)
             self.geom_transform = wp.zeros(shape_count, dtype=wp.transform, device=device)
             self.geom_cutoff = wp.full(shape_count, rigid_contact_margin, dtype=wp.float32, device=device)
-
-            # Narrow phase output arrays
-            self.narrow_contact_pair = wp.zeros(self.rigid_contact_max, dtype=wp.vec2i, device=device)
-            self.narrow_contact_position = wp.zeros(self.rigid_contact_max, dtype=wp.vec3, device=device)
-            self.narrow_contact_normal = wp.zeros(self.rigid_contact_max, dtype=wp.vec3, device=device)
-            self.narrow_contact_penetration = wp.zeros(self.rigid_contact_max, dtype=wp.float32, device=device)
-            self.narrow_contact_count = wp.zeros(1, dtype=wp.int32, device=device)
 
         if soft_contact_max is None:
             soft_contact_max = shape_count * particle_count
@@ -583,7 +466,6 @@ class CollisionPipelineUnified:
 
         # Clear counters
         self.broad_phase_pair_count.zero_()
-        self.narrow_contact_count.zero_()
         contacts.rigid_contact_count.zero_()  # Clear since write_contact uses atomic_add
 
         # Compute AABBs for all shapes
@@ -663,8 +545,26 @@ class CollisionPipelineUnified:
             device=self.device,
         )
 
-        # Run narrow phase
-        self.narrow_phase.launch(
+        # Create UnifiedContactWriterData struct for custom contact writing
+        writer_data = UnifiedContactWriterData()
+        writer_data.rigid_contact_margin = self.rigid_contact_margin
+        writer_data.contact_max = contacts.rigid_contact_max
+        writer_data.body_q = state.body_q
+        writer_data.shape_body = model.shape_body
+        writer_data.contact_count = contacts.rigid_contact_count
+        writer_data.out_shape0 = contacts.rigid_contact_shape0
+        writer_data.out_shape1 = contacts.rigid_contact_shape1
+        writer_data.out_point0 = contacts.rigid_contact_point0
+        writer_data.out_point1 = contacts.rigid_contact_point1
+        writer_data.out_offset0 = contacts.rigid_contact_offset0
+        writer_data.out_offset1 = contacts.rigid_contact_offset1
+        writer_data.out_normal = contacts.rigid_contact_normal
+        writer_data.out_thickness0 = contacts.rigid_contact_thickness0
+        writer_data.out_thickness1 = contacts.rigid_contact_thickness1
+        writer_data.out_tids = contacts.rigid_contact_tids
+
+        # Run narrow phase with custom contact writer (writes directly to Contacts format)
+        self.narrow_phase.launch_custom_write(
             candidate_pair=self.broad_phase_shape_pairs,
             num_candidate_pair=self.broad_phase_pair_count,
             geom_types=model.shape_type,
@@ -673,45 +573,7 @@ class CollisionPipelineUnified:
             geom_source=model.shape_source_ptr,
             geom_cutoff=self.geom_cutoff,
             geom_collision_radius=model.shape_collision_radius,
-            contact_pair=self.narrow_contact_pair,
-            contact_position=self.narrow_contact_position,
-            contact_normal=self.narrow_contact_normal,
-            contact_penetration=self.narrow_contact_penetration,
-            contact_tangent=None,
-            contact_count=self.narrow_contact_count,
-            device=self.device,
-        )
-
-        # Convert NarrowPhase output to Contacts format using write_contact
-        wp.launch(
-            kernel=convert_narrow_phase_to_contacts_kernel,
-            dim=self.rigid_contact_max,
-            inputs=[
-                self.narrow_contact_pair,
-                self.narrow_contact_position,
-                self.narrow_contact_normal,
-                self.narrow_contact_penetration,
-                self.narrow_contact_count,
-                self.geom_data,
-                model.shape_type,
-                state.body_q,
-                model.shape_body,
-                self.rigid_contact_margin,
-                contacts.rigid_contact_max,
-            ],
-            outputs=[
-                contacts.rigid_contact_count,
-                contacts.rigid_contact_shape0,
-                contacts.rigid_contact_shape1,
-                contacts.rigid_contact_point0,
-                contacts.rigid_contact_point1,
-                contacts.rigid_contact_offset0,
-                contacts.rigid_contact_offset1,
-                contacts.rigid_contact_normal,
-                contacts.rigid_contact_thickness0,
-                contacts.rigid_contact_thickness1,
-                contacts.rigid_contact_tids,
-            ],
+            contact_writer_last_arg_warp_struct=writer_data,
             device=self.device,
         )
 
