@@ -39,89 +39,87 @@ from ..geometry.support_function import (
 from ..geometry.types import GeoType
 
 
+@wp.struct
+class ContactWriterData:
+    contact_max: int
+    contact_count: wp.array(dtype=int)
+    contact_pair: wp.array(dtype=wp.vec2i)
+    contact_position: wp.array(dtype=wp.vec3)
+    contact_normal: wp.array(dtype=wp.vec3)
+    contact_penetration: wp.array(dtype=float)
+    contact_tangent: wp.array(dtype=wp.vec3)
+
+
+@wp.struct
+class ContactData:
+    contact_point_center: wp.vec3
+    contact_normal_a_to_b: wp.vec3
+    contact_distance: float
+    radius_eff_a: float
+    radius_eff_b: float
+    thickness_a: float
+    thickness_b: float
+    shape_a: int
+    shape_b: int
+    margin: float
+
+
 @wp.func
 def write_contact_simple(
-    contact_point_center: wp.vec3,
-    contact_normal_a_to_b: wp.vec3,
-    contact_distance: float,
-    radius_eff_a: float,
-    radius_eff_b: float,
-    thickness_a: float,
-    thickness_b: float,
-    shape_a: int,
-    shape_b: int,
-    tid: int,
-    margin: float,
-    contact_max: int,
-    # outputs
-    contact_count: wp.array(dtype=int),
-    contact_pair: wp.array(dtype=wp.vec2i),
-    contact_position: wp.array(dtype=wp.vec3),
-    contact_normal: wp.array(dtype=wp.vec3),
-    contact_penetration: wp.array(dtype=float),
-    contact_tangent: wp.array(dtype=wp.vec3),
+    contact_data: ContactData,
+    writer_data: ContactWriterData,
 ):
     """
     Write a contact to the output arrays using the simplified API format.
 
     Args:
-        contact_point_center: Center point of contact in world space
-        contact_normal_a_to_b: Contact normal pointing from shape A to B
-        contact_distance: Distance between contact points
-        radius_eff_a: Effective radius of shape A
-        radius_eff_b: Effective radius of shape B
-        thickness_a: Contact thickness for shape A
-        thickness_b: Contact thickness for shape B
-        shape_a: Shape A index
-        shape_b: Shape B index
-        tid: Thread ID
-        margin: Contact margin threshold
-        contact_max: Maximum number of contacts
-        contact_count: Array to track contact count
-        contact_pair: Output array for shape pairs
-        contact_position: Output array for contact positions (center point)
-        contact_normal: Output array for contact normals
-        contact_penetration: Output array for penetration depths
-        contact_tangent: Output array for contact tangents
+        contact_data: ContactData struct containing contact information
+        writer_data: ContactWriterData struct containing output arrays
     """
-    total_separation_needed = radius_eff_a + radius_eff_b + thickness_a + thickness_b
+    total_separation_needed = (
+        contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.thickness_a + contact_data.thickness_b
+    )
 
     # Distance calculation matching box_plane_collision
-    contact_normal_a_to_b = wp.normalize(contact_normal_a_to_b)
+    contact_normal_a_to_b = wp.normalize(contact_data.contact_normal_a_to_b)
 
-    a_contact_world = contact_point_center - contact_normal_a_to_b * (0.5 * contact_distance + radius_eff_a)
-    b_contact_world = contact_point_center + contact_normal_a_to_b * (0.5 * contact_distance + radius_eff_b)
+    a_contact_world = contact_data.contact_point_center - contact_normal_a_to_b * (
+        0.5 * contact_data.contact_distance + contact_data.radius_eff_a
+    )
+    b_contact_world = contact_data.contact_point_center + contact_normal_a_to_b * (
+        0.5 * contact_data.contact_distance + contact_data.radius_eff_b
+    )
 
     diff = b_contact_world - a_contact_world
     distance = wp.dot(diff, contact_normal_a_to_b)
     d = distance - total_separation_needed
 
-    if d < margin:
-        index = wp.atomic_add(contact_count, 0, 1)
-        if index >= contact_max:
+    if d < contact_data.margin:
+        index = wp.atomic_add(writer_data.contact_count, 0, 1)
+        if index >= writer_data.contact_max:
             # Reached buffer limit
             return
 
-        contact_pair[index] = wp.vec2i(shape_a, shape_b)
+        writer_data.contact_pair[index] = wp.vec2i(contact_data.shape_a, contact_data.shape_b)
 
         # Contact position is the center point
-        contact_position[index] = contact_point_center
+        writer_data.contact_position[index] = contact_data.contact_point_center
 
         # Normal pointing from shape A to shape B
-        contact_normal[index] = contact_normal_a_to_b
+        writer_data.contact_normal[index] = contact_normal_a_to_b
 
         # Penetration depth (negative if penetrating)
-        contact_penetration[index] = d
+        writer_data.contact_penetration[index] = d
 
         # Compute tangent vector only if tangent array is non-empty
-        if contact_tangent.shape[0] > 0:
+        if writer_data.contact_tangent.shape[0] > 0:
             # Compute tangent vector (x-axis of local contact frame)
             # Use perpendicular to normal, defaulting to world x-axis if normal is parallel
             world_x = wp.vec3(1.0, 0.0, 0.0)
             normal = contact_normal_a_to_b
             if wp.abs(wp.dot(normal, world_x)) > 0.99:
                 world_x = wp.vec3(0.0, 1.0, 0.0)
-            contact_tangent[index] = wp.normalize(world_x - wp.dot(world_x, normal) * normal)
+            writer_data.contact_tangent[index] = wp.normalize(world_x - wp.dot(world_x, normal) * normal)
 
 
 @wp.func
@@ -184,15 +182,8 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool):
         geom_collision_radius: wp.array(dtype=float),
         geom_aabb_lower: wp.array(dtype=wp.vec3),
         geom_aabb_upper: wp.array(dtype=wp.vec3),
-        contact_max: int,
+        writer_data: ContactWriterData,
         total_num_threads: int,
-        # outputs
-        contact_count: wp.array(dtype=int),
-        contact_pair: wp.array(dtype=wp.vec2i),
-        contact_position: wp.array(dtype=wp.vec3),
-        contact_normal: wp.array(dtype=wp.vec3),
-        contact_penetration: wp.array(dtype=float),
-        contact_tangent: wp.array(dtype=wp.vec3),
         # mesh collision outputs (for mesh processing)
         shape_pairs_mesh: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_count: wp.array(dtype=int),
@@ -355,26 +346,19 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool):
 
             # Write contacts
             for id in range(count):
-                write_contact_simple(
-                    points[id],
-                    normal,
-                    signed_distances[id],
-                    radius_eff_a,
-                    radius_eff_b,
-                    thickness_a,
-                    thickness_b,
-                    shape_a,
-                    shape_b,
-                    t,
-                    margin,
-                    contact_max,
-                    contact_count,
-                    contact_pair,
-                    contact_position,
-                    contact_normal,
-                    contact_penetration,
-                    contact_tangent,
-                )
+                contact_data = ContactData()
+                contact_data.contact_point_center = points[id]
+                contact_data.contact_normal_a_to_b = normal
+                contact_data.contact_distance = signed_distances[id]
+                contact_data.radius_eff_a = radius_eff_a
+                contact_data.radius_eff_b = radius_eff_b
+                contact_data.thickness_a = thickness_a
+                contact_data.thickness_b = thickness_b
+                contact_data.shape_a = shape_a
+                contact_data.shape_b = shape_b
+                contact_data.margin = margin
+
+                write_contact_simple(contact_data, writer_data)
 
     return narrow_phase_kernel_gjk_mpr
 
@@ -467,15 +451,8 @@ def narrow_phase_process_mesh_triangle_contacts_kernel(
     geom_cutoff: wp.array(dtype=float),  # Per-geometry cutoff distances
     triangle_pairs: wp.array(dtype=wp.vec3i),
     triangle_pairs_count: wp.array(dtype=int),
-    contact_max: int,
+    writer_data: ContactWriterData,
     total_num_threads: int,
-    # outputs
-    contact_count: wp.array(dtype=int),
-    contact_pair: wp.array(dtype=wp.vec2i),
-    contact_position: wp.array(dtype=wp.vec3),
-    contact_normal: wp.array(dtype=wp.vec3),
-    contact_penetration: wp.array(dtype=float),
-    contact_tangent: wp.array(dtype=wp.vec3),
 ):
     """
     Process triangle pairs to generate contacts using GJK/MPR.
@@ -551,26 +528,19 @@ def narrow_phase_process_mesh_triangle_contacts_kernel(
 
         # Write contacts
         for contact_id in range(count):
-            write_contact_simple(
-                points[contact_id],
-                normal,
-                signed_distances[contact_id],
-                radius_eff_a,
-                radius_eff_b,
-                thickness_a,
-                thickness_b,
-                shape_a,
-                shape_b,
-                tid,
-                margin,
-                contact_max,
-                contact_count,
-                contact_pair,
-                contact_position,
-                contact_normal,
-                contact_penetration,
-                contact_tangent,
-            )
+            contact_data = ContactData()
+            contact_data.contact_point_center = points[contact_id]
+            contact_data.contact_normal_a_to_b = normal
+            contact_data.contact_distance = signed_distances[contact_id]
+            contact_data.radius_eff_a = radius_eff_a
+            contact_data.radius_eff_b = radius_eff_b
+            contact_data.thickness_a = thickness_a
+            contact_data.thickness_b = thickness_b
+            contact_data.shape_a = shape_a
+            contact_data.shape_b = shape_b
+            contact_data.margin = margin
+
+            write_contact_simple(contact_data, writer_data)
 
 
 @wp.kernel(enable_backward=False)
@@ -584,15 +554,8 @@ def narrow_phase_process_mesh_plane_contacts_kernel(
     shape_pairs_mesh_plane_cumsum: wp.array(dtype=int),
     shape_pairs_mesh_plane_count: wp.array(dtype=int),
     mesh_plane_vertex_total_count: wp.array(dtype=int),
-    contact_max: int,
+    writer_data: ContactWriterData,
     total_num_threads: int,
-    # outputs
-    contact_count: wp.array(dtype=int),
-    contact_pair: wp.array(dtype=wp.vec2i),
-    contact_position: wp.array(dtype=wp.vec3),
-    contact_normal: wp.array(dtype=wp.vec3),
-    contact_penetration: wp.array(dtype=float),
-    contact_tangent: wp.array(dtype=wp.vec3),
 ):
     """
     Process mesh-plane collisions by checking each mesh vertex against the infinite plane.
@@ -670,26 +633,19 @@ def narrow_phase_process_mesh_plane_contacts_kernel(
             # Write contact
             # Note: write_contact_simple expects contact_normal_a_to_b pointing FROM mesh TO plane (downward)
             # plane_normal points upward, so we need to negate it
-            write_contact_simple(
-                (vertex_world + point_on_plane) * 0.5,  # contact_point_center
-                -plane_normal,  # contact_normal_a_to_b (from mesh to plane, pointing downward)
-                distance,  # contact_distance
-                0.0,  # radius_eff_a (mesh has no effective radius)
-                0.0,  # radius_eff_b (plane has no effective radius)
-                thickness_mesh,  # thickness_a
-                thickness_plane,  # thickness_b
-                mesh_shape,  # shape_a
-                plane_shape,  # shape_b
-                task_id,  # tid
-                margin,
-                contact_max,
-                contact_count,
-                contact_pair,
-                contact_position,
-                contact_normal,
-                contact_penetration,
-                contact_tangent,
-            )
+            contact_data = ContactData()
+            contact_data.contact_point_center = (vertex_world + point_on_plane) * 0.5
+            contact_data.contact_normal_a_to_b = -plane_normal
+            contact_data.contact_distance = distance
+            contact_data.radius_eff_a = 0.0  # mesh has no effective radius
+            contact_data.radius_eff_b = 0.0  # plane has no effective radius
+            contact_data.thickness_a = thickness_mesh
+            contact_data.thickness_b = thickness_plane
+            contact_data.shape_a = mesh_shape
+            contact_data.shape_b = plane_shape
+            contact_data.margin = margin
+
+            write_contact_simple(contact_data, writer_data)
 
 
 class NarrowPhase:
@@ -752,9 +708,28 @@ class NarrowPhase:
 
         # Fixed thread count for kernel launches
         self.block_dim = 128
-        self.total_num_threads = self.block_dim * 1024
-        self.num_tile_blocks = 1024
+        gpu_thread_limit = 1024 * 1024 * 4
+        num_blocks = max(1024, min(max_candidate_pairs / self.block_dim, gpu_thread_limit / self.block_dim))
+        self.total_num_threads = self.block_dim * num_blocks
+        self.num_tile_blocks = num_blocks
         self.tile_size = 128
+
+    def launch(
+        self,
+        candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),  # Maybe colliding pairs
+        num_candidate_pair: wp.array(dtype=wp.int32, ndim=1),  # Size one array
+        geom_types: wp.array(dtype=wp.int32, ndim=1),  # All geom types, pairs index into it
+        geom_data: wp.array(dtype=wp.vec4, ndim=1),  # Geom data (scale xyz, thickness w)
+        geom_transform: wp.array(dtype=wp.transform, ndim=1),  # In world space
+        geom_source: wp.array(dtype=wp.uint64, ndim=1),  # The index into the source array, type define by geom_types
+        geom_cutoff: wp.array(dtype=wp.float32, ndim=1),  # per-geom (take the max)
+        geom_collision_radius: wp.array(dtype=wp.float32, ndim=1),  # per-geom collision radius for AABB fallback
+        # Outputs
+        contact_writer_warp_func: Any,
+        contact_writer_last_arg_warp_struct: Any,
+        device=None,  # Device to launch on
+    ):
+        pass
 
     def launch(
         self,
@@ -813,6 +788,16 @@ class NarrowPhase:
         self.shape_pairs_mesh_plane_count.zero_()
         self.mesh_plane_vertex_total_count.zero_()
 
+        # Create ContactWriterData struct
+        writer_data = ContactWriterData()
+        writer_data.contact_max = contact_max
+        writer_data.contact_count = contact_count
+        writer_data.contact_pair = contact_pair
+        writer_data.contact_position = contact_position
+        writer_data.contact_normal = contact_normal
+        writer_data.contact_penetration = contact_penetration
+        writer_data.contact_tangent = contact_tangent
+
         # Launch main narrow phase kernel (using the appropriate kernel variant)
         wp.launch(
             kernel=self.narrow_phase_kernel,
@@ -828,16 +813,10 @@ class NarrowPhase:
                 geom_collision_radius,
                 self.geom_aabb_lower,
                 self.geom_aabb_upper,
-                contact_max,
+                writer_data,
                 self.total_num_threads,
             ],
             outputs=[
-                contact_count,
-                contact_pair,
-                contact_position,
-                contact_normal,
-                contact_penetration,
-                contact_tangent,
                 self.shape_pairs_mesh,
                 self.shape_pairs_mesh_count,
                 self.shape_pairs_mesh_plane,
@@ -863,16 +842,8 @@ class NarrowPhase:
                 self.shape_pairs_mesh_plane_cumsum,
                 self.shape_pairs_mesh_plane_count,
                 self.mesh_plane_vertex_total_count,
-                contact_max,
+                writer_data,
                 self.total_num_threads,
-            ],
-            outputs=[
-                contact_count,
-                contact_pair,
-                contact_position,
-                contact_normal,
-                contact_penetration,
-                contact_tangent,
             ],
             device=device,
             block_dim=self.block_dim,
@@ -913,16 +884,8 @@ class NarrowPhase:
                 geom_cutoff,
                 self.triangle_pairs,
                 self.triangle_pairs_count,
-                contact_max,
+                writer_data,
                 self.total_num_threads,
-            ],
-            outputs=[
-                contact_count,
-                contact_pair,
-                contact_position,
-                contact_normal,
-                contact_penetration,
-                contact_tangent,
             ],
             device=device,
             block_dim=self.block_dim,
