@@ -399,10 +399,18 @@ class ContactReduction:
         Args:
             max_shape_pairs: Maximum number of unique shape pairs
             max_contacts: Maximum number of contacts
-            normal_subdivisions: Icosahedron subdivision level for normal binning
-            betas: Tuple of penetration weighting factors
-            bin_directions: Number of spatial directions per normal bin
-            sticky_contacts: Bonus score for previously selected contacts (temporal coherence)
+            normal_subdivisions: Icosahedron subdivision level for discretizing contact normal directions. Higher values provide finer angular resolution.
+            betas: Tuple of penetration weighting factors used in the contact scoring function:
+                score = spatial_position_dot_product + penetration_depth * beta.
+                Each beta value creates an independent set of bins that selects contacts with
+                different tradeoffs between spatial distribution and penetration depth.
+                - Low beta values favor spatially distributed contacts
+                - High beta values favor deeper penetrations
+                Multiple betas allow the algorithm to simultaneously capture both shallow
+                contacts at the manifold edges and deep contacts at collision centers.
+            bin_directions: Number of evenly-spaced angular directions for spatial binning within
+                each normal bin.
+            sticky_contacts: Bonus score for previously selected contacts (temporal coherence). Set to 0.0 to disable temporal coherence.
             device: Warp device to use
         """
         self.max_shape_pairs = max_shape_pairs
