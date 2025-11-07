@@ -434,6 +434,11 @@ class CollisionPipelineUnified:
         self.shape_count = shape_count
         self.broad_phase_mode = broad_phase_mode
         self.device = device
+
+        # Contact reduction requires contact keys for temporal coherence
+        if contact_reduction is not None:
+            enable_contact_matching = True
+
         self.enable_contact_matching = enable_contact_matching
 
         self.shape_pairs_max = (shape_count * (shape_count - 1)) // 2
