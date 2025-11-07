@@ -39,6 +39,7 @@ from ..sim.state import State
 @wp.struct
 class UnifiedContactWriterData:
     """Contact writer data for collide_unified write_contact function."""
+
     rigid_contact_margin: float
     contact_max: int
     # Body information arrays (for transforming to body-local coordinates)
@@ -83,7 +84,9 @@ def write_contact(
         contact_data: ContactData struct containing contact information
         writer_data: UnifiedContactWriterData struct containing body info and output arrays
     """
-    total_separation_needed = contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.thickness_a + contact_data.thickness_b
+    total_separation_needed = (
+        contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.thickness_a + contact_data.thickness_b
+    )
 
     offset_mag_a = contact_data.radius_eff_a + contact_data.thickness_a
     offset_mag_b = contact_data.radius_eff_b + contact_data.thickness_b
@@ -91,8 +94,12 @@ def write_contact(
     # Distance calculation matching box_plane_collision
     contact_normal_a_to_b = wp.normalize(contact_data.contact_normal_a_to_b)
 
-    a_contact_world = contact_data.contact_point_center - contact_normal_a_to_b * (0.5 * contact_data.contact_distance + contact_data.radius_eff_a)
-    b_contact_world = contact_data.contact_point_center + contact_normal_a_to_b * (0.5 * contact_data.contact_distance + contact_data.radius_eff_b)
+    a_contact_world = contact_data.contact_point_center - contact_normal_a_to_b * (
+        0.5 * contact_data.contact_distance + contact_data.radius_eff_a
+    )
+    b_contact_world = contact_data.contact_point_center + contact_normal_a_to_b * (
+        0.5 * contact_data.contact_distance + contact_data.radius_eff_b
+    )
 
     diff = b_contact_world - a_contact_world
     distance = wp.dot(diff, contact_normal_a_to_b)
