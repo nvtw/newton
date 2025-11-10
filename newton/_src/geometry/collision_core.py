@@ -733,6 +733,9 @@ def pre_contact_check(
                     cumulative_count_before = wp.atomic_add(mesh_plane_vertex_total_count, 0, vertex_count)
                     cumulative_count_inclusive = cumulative_count_before + vertex_count
                     shape_pairs_mesh_plane_cumsum[mesh_plane_idx] = cumulative_count_inclusive
+                else:
+                    # Reached buffer limit, undo the increment
+                    wp.atomic_add(shape_pairs_mesh_plane_count, 0, -1)
             return True, is_infinite_plane_a, is_infinite_plane_b, bsphere_radius_a, bsphere_radius_b
 
     # Check for other mesh collisions - add to separate buffer for specialized handling
@@ -741,6 +744,9 @@ def pre_contact_check(
         mesh_pair_idx = wp.atomic_add(shape_pairs_mesh_count, 0, 1)
         if mesh_pair_idx < shape_pairs_mesh.shape[0]:
             shape_pairs_mesh[mesh_pair_idx] = pair
+        else:
+            # Reached buffer limit, undo the increment
+            wp.atomic_add(shape_pairs_mesh_count, 0, -1)
         return True, is_infinite_plane_a, is_infinite_plane_b, bsphere_radius_a, bsphere_radius_b
 
     return False, is_infinite_plane_a, is_infinite_plane_b, bsphere_radius_a, bsphere_radius_b

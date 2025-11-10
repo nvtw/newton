@@ -63,6 +63,7 @@ def write_pair(
     pairid = wp.atomic_add(num_candidate_pair, 0, 1)
 
     if pairid >= max_candidate_pair:
+        wp.atomic_add(num_candidate_pair, 0, -1)
         return
 
     candidate_pair[pairid] = pair
