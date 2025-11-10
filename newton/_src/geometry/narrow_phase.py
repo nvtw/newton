@@ -49,6 +49,9 @@ class ContactWriterData:
     contact_normal: wp.array(dtype=wp.vec3)
     contact_penetration: wp.array(dtype=float)
     contact_tangent: wp.array(dtype=wp.vec3)
+    # Contact matching arrays (optional)
+    contact_pair_key: wp.array(dtype=wp.uint64)
+    contact_key: wp.array(dtype=wp.uint32)
 
 
 @wp.struct
@@ -63,6 +66,41 @@ class ContactData:
     shape_a: int
     shape_b: int
     margin: float
+    # Contact matching data
+    feature: wp.uint32
+    feature_pair_key: wp.uint64
+
+
+@wp.func
+def build_pair_key2(shape_a: wp.uint32, shape_b: wp.uint32) -> wp.uint64:
+    """
+    Build a 64-bit key from two shape indices.
+    Upper 32 bits: shape_a
+    Lower 32 bits: shape_b
+    """
+    key = wp.uint64(shape_a)
+    key = key << wp.uint64(32)
+    key = key | wp.uint64(shape_b)
+    return key
+
+
+@wp.func
+def build_pair_key3(shape_a: wp.uint32, shape_b: wp.uint32, triangle_idx: wp.uint32) -> wp.uint64:
+    """
+    Build a 63-bit key from two shape indices and a triangle index (MSB is 0 for signed int64 compatibility).
+    Bit 63: 0 (reserved for sign bit)
+    Bits 62-43: shape_a (20 bits)
+    Bits 42-23: shape_b (20 bits)
+    Bits 22-0: triangle_idx (23 bits)
+
+    Max values: shape_a < 2^20 (1,048,576), shape_b < 2^20 (1,048,576), triangle_idx < 2^23 (8,388,608)
+    """
+    key = wp.uint64(shape_a & wp.uint32(0xFFFFF))  # Mask to 20 bits
+    key = key << wp.uint64(20)
+    key = key | wp.uint64(shape_b & wp.uint32(0xFFFFF))  # Mask to 20 bits
+    key = key << wp.uint64(23)
+    key = key | wp.uint64(triangle_idx & wp.uint32(0x7FFFFF))  # Mask to 23 bits
+    return key
 
 
 @wp.func
@@ -74,8 +112,8 @@ def write_contact_simple(
     Write a contact to the output arrays using the simplified API format.
 
     Args:
-        contact_data: ContactData struct containing contact information
-        writer_data: ContactWriterData struct containing output arrays
+        contact_data: ContactData struct containing contact information (includes feature and feature_pair_key)
+        writer_data: ContactWriterData struct containing output arrays (includes contact_pair_key and contact_key)
     """
     total_separation_needed = (
         contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.thickness_a + contact_data.thickness_b
@@ -121,6 +159,11 @@ def write_contact_simple(
             if wp.abs(wp.dot(normal, world_x)) > 0.99:
                 world_x = wp.vec3(0.0, 1.0, 0.0)
             writer_data.contact_tangent[index] = wp.normalize(world_x - wp.dot(world_x, normal) * normal)
+
+        # Write contact key only if contact_key array is non-empty
+        if writer_data.contact_key.shape[0] > 0 and writer_data.contact_pair_key.shape[0] > 0:
+            writer_data.contact_key[index] = contact_data.feature
+            writer_data.contact_pair_key[index] = contact_data.feature_pair_key
 
 
 @wp.func
@@ -331,7 +374,7 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
             margin = wp.max(cutoff_a, cutoff_b)
 
             # Compute contacts using GJK/MPR
-            count, normal, signed_distances, points, radius_eff_a, radius_eff_b = find_contacts(
+            count, normal, signed_distances, points, radius_eff_a, radius_eff_b, features = find_contacts(
                 pos_a,
                 pos_b,
                 quat_a,
@@ -347,6 +390,8 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
 
             # Write contacts
             for id in range(count):
+                pair_key = build_pair_key2(wp.uint32(shape_a), wp.uint32(shape_b))
+
                 contact_data = ContactData()
                 contact_data.contact_point_center = points[id]
                 contact_data.contact_normal_a_to_b = normal
@@ -358,6 +403,8 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
                 contact_data.shape_a = shape_a
                 contact_data.shape_b = shape_b
                 contact_data.margin = margin
+                contact_data.feature = features[id]
+                contact_data.feature_pair_key = pair_key
 
                 writer_func(contact_data, writer_data)
 
@@ -509,7 +556,7 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
             margin = wp.max(cutoff_a, cutoff_b)
 
             # Compute contacts using GJK/MPR
-            count, normal, signed_distances, points, radius_eff_a, radius_eff_b = compute_gjk_mpr_contacts(
+            count, normal, signed_distances, points, radius_eff_a, radius_eff_b, features = compute_gjk_mpr_contacts(
                 shape_data_a,
                 shape_data_b,
                 quat_a,
@@ -531,6 +578,8 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
 
             # Write contacts
             for contact_id in range(count):
+                pair_key = build_pair_key3(wp.uint32(shape_a), wp.uint32(shape_b), wp.uint32(tri_idx))
+
                 contact_data = ContactData()
                 contact_data.contact_point_center = points[contact_id]
                 contact_data.contact_normal_a_to_b = normal
@@ -542,6 +591,8 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
                 contact_data.shape_a = shape_a
                 contact_data.shape_b = shape_b
                 contact_data.margin = margin
+                contact_data.feature = features[contact_id]
+                contact_data.feature_pair_key = pair_key
 
                 writer_func(contact_data, writer_data)
 
@@ -640,6 +691,8 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func: Any):
                 # Write contact
                 # Note: write_contact_simple expects contact_normal_a_to_b pointing FROM mesh TO plane (downward)
                 # plane_normal points upward, so we need to negate it
+                pair_key = build_pair_key2(wp.uint32(mesh_shape), wp.uint32(plane_shape))
+
                 contact_data = ContactData()
                 contact_data.contact_point_center = (vertex_world + point_on_plane) * 0.5
                 contact_data.contact_normal_a_to_b = -plane_normal
@@ -651,6 +704,8 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func: Any):
                 contact_data.shape_a = mesh_shape
                 contact_data.shape_b = plane_shape
                 contact_data.margin = margin
+                contact_data.feature = wp.uint32(vertex_idx + 1)
+                contact_data.feature_pair_key = pair_key
 
                 writer_func(contact_data, writer_data)
 
@@ -724,6 +779,12 @@ class NarrowPhase:
 
             # Empty tangent array for when tangent computation is disabled
             self.empty_tangent = wp.zeros(0, dtype=wp.vec3, device=device)
+
+            # Empty contact_pair_key array for when contact pair key collection is disabled
+            self.empty_contact_pair_key = wp.zeros(0, dtype=wp.uint64, device=device)
+
+            # Empty contact_key array for when contact key collection is disabled
+            self.empty_contact_key = wp.zeros(0, dtype=wp.uint32, device=device)
 
         # Fixed thread count for kernel launches
         self.block_dim = 128
@@ -881,8 +942,11 @@ class NarrowPhase:
             dtype=wp.vec3
         ),  # Pointing from pairId.x to pairId.y, represents z axis of local contact frame
         contact_penetration: wp.array(dtype=float),  # negative if bodies overlap
-        contact_tangent: wp.array(dtype=wp.vec3) | None,  # Represents x axis of local contact frame (None to disable)
         contact_count: wp.array(dtype=int),  # Number of active contacts after narrow
+        contact_tangent: wp.array(dtype=wp.vec3)
+        | None = None,  # Represents x axis of local contact frame (None to disable)
+        contact_pair_key: wp.array(dtype=wp.uint64) | None = None,  # Contact pair keys (None to disable)
+        contact_key: wp.array(dtype=wp.uint32) | None = None,  # Contact feature keys (None to disable)
         device=None,  # Device to launch on
     ):
         """
@@ -902,6 +966,7 @@ class NarrowPhase:
             contact_normal: Output array for contact normals
             contact_penetration: Output array for penetration depths
             contact_tangent: Output array for contact tangents, or None to disable tangent computation
+            contact_key: Output array for contact feature keys, or None to disable key collection
             contact_count: Output array (single element) for contact count
             device: Device to launch on
         """
@@ -913,6 +978,14 @@ class NarrowPhase:
         # Handle optional tangent array - use empty array if None
         if contact_tangent is None:
             contact_tangent = self.empty_tangent
+
+        # Handle optional contact_pair_key array - use empty array if None
+        if contact_pair_key is None:
+            contact_pair_key = self.empty_contact_pair_key
+
+        # Handle optional contact_key array - use empty array if None
+        if contact_key is None:
+            contact_key = self.empty_contact_key
 
         # Clear all counters and contact count
         contact_count.zero_()
@@ -930,6 +1003,8 @@ class NarrowPhase:
         writer_data.contact_normal = contact_normal
         writer_data.contact_penetration = contact_penetration
         writer_data.contact_tangent = contact_tangent
+        writer_data.contact_pair_key = contact_pair_key
+        writer_data.contact_key = contact_key
 
         # Delegate to launch_custom_write
         self.launch_custom_write(
