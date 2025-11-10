@@ -789,7 +789,9 @@ class NarrowPhase:
         # Fixed thread count for kernel launches
         self.block_dim = 128
         gpu_thread_limit = 1024 * 1024 * 4
-        num_blocks = max(1024, min(max_candidate_pairs / self.block_dim, gpu_thread_limit / self.block_dim))
+        max_blocks_limit = gpu_thread_limit // self.block_dim
+        candidate_blocks = (max_candidate_pairs + self.block_dim - 1) // self.block_dim
+        num_blocks = max(1024, min(candidate_blocks, max_blocks_limit))
         self.total_num_threads = self.block_dim * num_blocks
         self.num_tile_blocks = num_blocks
         self.tile_size = 128
