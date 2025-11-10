@@ -34,7 +34,7 @@ import newton.examples
 
 
 class Example:
-    def __init__(self, viewer, num_worlds):
+    def __init__(self, viewer, num_worlds, args=None):
         # setup simulation parameters first
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
@@ -90,8 +90,16 @@ class Example:
         # not required for MuJoCo, but required for other solvers
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
-        # Create collision pipeline from command-line args (default: CollisionPipelineUnified with EXPLICIT)
-        self.collision_pipeline = newton.examples.create_collision_pipeline(self.model)
+        # Create collision pipeline from command-line args
+        # This example uses the standard pipeline by default (unlike other examples that default to unified)
+        # Users can override with --collision-pipeline unified if desired
+        # If no args provided or no collision_pipeline arg, defaults to "standard" for this example
+        if args is None or not hasattr(args, "collision_pipeline"):
+            self.collision_pipeline = newton.examples.create_collision_pipeline(
+                self.model, collision_pipeline_type="standard"
+            )
+        else:
+            self.collision_pipeline = newton.examples.create_collision_pipeline(self.model, args)
         self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
 
         self.viewer.set_model(self.model)
@@ -162,6 +170,6 @@ if __name__ == "__main__":
     viewer, args = newton.examples.init(parser)
 
     # Create viewer and run
-    example = Example(viewer, args.num_worlds)
+    example = Example(viewer, args.num_worlds, args)
 
     newton.examples.run(example, args)
