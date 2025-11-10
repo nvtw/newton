@@ -127,7 +127,6 @@ def write_contact(
         index = wp.atomic_add(contact_count, 0, 1)
         if index >= contact_max:
             # Reached buffer limit
-            wp.atomic_add(contact_count, 0, -1)
             return
 
         out_shape0[index] = shape_a
