@@ -137,6 +137,7 @@ def write_contact_simple(
         index = wp.atomic_add(writer_data.contact_count, 0, 1)
         if index >= writer_data.contact_max:
             # Reached buffer limit
+            wp.atomic_add(writer_data.contact_count, 0, -1)
             return
 
         writer_data.contact_pair[index] = wp.vec2i(contact_data.shape_a, contact_data.shape_b)
