@@ -25,13 +25,13 @@ from ..geometry.collision_core import (
     ENABLE_TILE_BVH_QUERY,
     ContactData,
     build_pair_key2,
+    build_pair_key3,
     compute_tight_aabb_from_support,
     create_compute_gjk_mpr_contacts,
     create_find_contacts,
     find_pair_from_cumulative_index,
     get_triangle_shape_from_mesh,
     mesh_vs_convex_midphase,
-    post_process_triangle_contact,
     pre_contact_check,
 )
 from ..geometry.support_function import (
@@ -494,9 +494,11 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
             cutoff_b = geom_cutoff[shape_b]
             margin = wp.max(cutoff_a, cutoff_b)
 
-            # Compute and write contacts using GJK/MPR with triangle post-processing
-            # The post-processing fixes normal direction if needed to prevent objects from being pushed INTO triangles
-            wp.static(create_compute_gjk_mpr_contacts(writer_func, post_process_triangle_contact))(
+            # Build pair key including triangle index for unique contact tracking
+            pair_key = build_pair_key3(wp.uint32(shape_a), wp.uint32(shape_b), wp.uint32(tri_idx))
+
+            # Compute and write contacts using GJK/MPR with standard post-processing
+            wp.static(create_compute_gjk_mpr_contacts(writer_func))(
                 shape_data_a,
                 shape_data_b,
                 quat_a,
@@ -509,6 +511,7 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
                 thickness_a,
                 thickness_b,
                 writer_data,
+                pair_key,
             )
 
     return narrow_phase_process_mesh_triangle_contacts_kernel
