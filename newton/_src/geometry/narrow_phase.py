@@ -23,7 +23,6 @@ import warp as wp
 
 from ..geometry.collision_core import (
     ENABLE_TILE_BVH_QUERY,
-    ContactData,
     build_pair_key2,
     build_pair_key3,
     compute_tight_aabb_from_support,
@@ -34,6 +33,7 @@ from ..geometry.collision_core import (
     mesh_vs_convex_midphase,
     pre_contact_check,
 )
+from ..geometry.contact_data import ContactData
 from ..geometry.support_function import (
     GenericShapeData,
     SupportMapDataProvider,

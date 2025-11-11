@@ -23,7 +23,8 @@ import warp as wp
 from ..core.types import Devicelike
 from ..geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from ..geometry.broad_phase_sap import BroadPhaseSAP
-from ..geometry.collision_core import ContactData, compute_tight_aabb_from_support
+from ..geometry.collision_core import compute_tight_aabb_from_support
+from ..geometry.contact_data import ContactData
 from ..geometry.narrow_phase import NarrowPhase
 from ..geometry.support_function import (
     GenericShapeData,

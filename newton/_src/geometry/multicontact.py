@@ -30,6 +30,7 @@ from typing import Any
 
 import warp as wp
 
+from .contact_data import ContactData
 from .kernels import build_orthonormal_basis
 
 # Constants
@@ -957,7 +958,7 @@ def extract_4_point_contact_manifolds(
     return loop_count, normal_dot, contact_points, signed_distances, feature_ids
 
 
-def create_build_manifold(support_func: Any):
+def create_build_manifold(support_func: Any, writer_func: Any, post_process_contact: Any):
     """
     Factory function to create manifold generation functions with a specific support mapping function.
 
@@ -968,6 +969,8 @@ def create_build_manifold(support_func: Any):
     Args:
         support_func: Support mapping function for shapes that takes
                      (geometry, direction, data_provider) and returns (point, feature_id)
+        writer_func: Function to write contact data (signature: (ContactData, writer_data) -> None)
+        post_process_contact: Function to post-process contact data
 
     Returns:
         build_manifold function that generates up to 5 contact points between two shapes
@@ -986,20 +989,18 @@ def create_build_manifold(support_func: Any):
         p_b: wp.vec3,
         normal: wp.vec3,
         data_provider: Any,
-    ) -> tuple[
-        int,
-        vec5,
-        Mat53f,
-        vec5u,
-    ]:
+        writer_data: Any,
+        contact_template: ContactData,
+    ) -> int:
         """
-        Build a contact manifold between two convex shapes using perturbed support mapping and polygon clipping.
+        Build a contact manifold between two convex shapes and write contacts directly.
 
         This function generates up to 4 contact points between two colliding convex shapes by:
         1. Finding contact polygons using perturbed support mapping in 6 directions
         2. Clipping the polygons against each other in contact plane space
         3. Selecting the best 4 points using rotating calipers algorithm if more than 4 exist
         4. Transforming results back to world space with feature tracking
+        5. Post-processing each contact and writing it via the writer function
 
         The contact normal is the same for all contact points in the manifold. The two shapes
         must always be queried in the same order to get stable feature IDs for contact tracking.
@@ -1015,14 +1016,11 @@ def create_build_manifold(support_func: Any):
             p_b: Anchor contact point on the second shape (from GJK/MPR).
             normal: Contact normal vector pointing from shape A to shape B.
             data_provider: Support mapping data provider for shape queries.
+            writer_data: Data structure for contact writer.
+            contact_template: Pre-packed ContactData with static fields.
+
         Returns:
-            A tuple containing:
-            - int: Number of valid contact points in the manifold (0-4).
-            - vec5: Signed distances for each contact point (negative when shapes overlap).
-            - Mat53f: Contact points at the center of the manifold contact
-              (midpoint between points on shape A and shape B) in world space.
-            - vec5u: Feature IDs for each contact point, enabling contact tracking across
-              multiple frames for warm starting and contact persistence.
+            Number of valid contact points written (0-5).
 
         Note:
             The feature IDs encode geometric information about which features (vertices, edges,
@@ -1147,6 +1145,18 @@ def create_build_manifold(support_func: Any):
             feature_ids[count_out] = wp.uint32(0)  # Use 0 for the deepest contact feature ID
             count_out += 1
 
-        return count_out, signed_distances, contact_points, feature_ids
+        # Write contacts using the writer function after post-processing
+        for id in range(count_out):
+            contact_data = contact_template
+            contact_data.contact_point_center = contact_points[id]
+            contact_data.contact_normal_a_to_b = normal
+            contact_data.contact_distance = signed_distances[id]
+            contact_data.feature = feature_ids[id]
+
+            contact_data = post_process_contact(contact_data, geom_a, position_a, quaternion_a, geom_b, position_b, quaternion_b)
+
+            writer_func(contact_data, writer_data)
+
+        return count_out
 
     return build_manifold

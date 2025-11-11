@@ -21,6 +21,7 @@ import warp as wp
 
 from .broad_phase_common import binary_search
 from .collision_convex import create_solve_convex_multi_contact, create_solve_convex_single_contact
+from .contact_data import ContactData
 from .support_function import GenericShapeData, GeoTypeEx, SupportMapDataProvider, pack_mesh_ptr, support_map
 from .types import GeoType
 
@@ -30,33 +31,12 @@ ENABLE_MULTI_CONTACT = True
 # Configuration flag for tiled BVH queries (experimental)
 ENABLE_TILE_BVH_QUERY = True
 
-# Pre-create the convex contact solvers (usable inside kernels)
-solve_convex_multi_contact = create_solve_convex_multi_contact(support_map)
-solve_convex_single_contact = create_solve_convex_single_contact(support_map)
-
 # Type definitions for multi-contact manifolds
 _mat53f = wp.types.matrix((5, 3), wp.float32)
 _vec5 = wp.types.vector(5, wp.float32)
 
 # Type definitions for single-contact mode
 _vec1 = wp.types.vector(1, wp.float32)
-
-
-@wp.struct
-class ContactData:
-    contact_point_center: wp.vec3
-    contact_normal_a_to_b: wp.vec3
-    contact_distance: float
-    radius_eff_a: float
-    radius_eff_b: float
-    thickness_a: float
-    thickness_b: float
-    shape_a: int
-    shape_b: int
-    margin: float
-    # Contact matching data
-    feature: wp.uint32
-    feature_pair_key: wp.uint64
 
 
 @wp.func
@@ -461,8 +441,19 @@ def create_compute_gjk_mpr_contacts(writer_func: Any, post_process_contact: Any 
             radius_eff_b = geom_b.scale[0]
             geom_b.scale[0] = small_radius
 
+        # Pre-pack ContactData template with static information
+        contact_template = ContactData()
+        contact_template.radius_eff_a = radius_eff_a
+        contact_template.radius_eff_b = radius_eff_b
+        contact_template.thickness_a = thickness_a
+        contact_template.thickness_b = thickness_b
+        contact_template.shape_a = shape_a
+        contact_template.shape_b = shape_b
+        contact_template.margin = rigid_contact_margin
+        contact_template.feature_pair_key = pair_key
+
         if wp.static(ENABLE_MULTI_CONTACT):
-            count, normal, signed_distances, points, features = wp.static(solve_convex_multi_contact)(
+            wp.static(create_solve_convex_multi_contact(support_map, writer_func, post_process_contact))(
                 geom_a,
                 geom_b,
                 rot_a,
@@ -473,9 +464,11 @@ def create_compute_gjk_mpr_contacts(writer_func: Any, post_process_contact: Any 
                 data_provider,
                 rigid_contact_margin + radius_eff_a + radius_eff_b,
                 type_a == int(GeoType.SPHERE) or type_b == int(GeoType.SPHERE),
+                writer_data,
+                contact_template,
             )
         else:
-            count, normal, signed_distances, points, features = wp.static(solve_convex_single_contact)(
+            wp.static(create_solve_convex_single_contact(support_map, writer_func, post_process_contact))(
                 geom_a,
                 geom_b,
                 rot_a,
@@ -485,28 +478,9 @@ def create_compute_gjk_mpr_contacts(writer_func: Any, post_process_contact: Any 
                 0.0,  # sum_of_contact_offsets - gap
                 data_provider,
                 rigid_contact_margin + radius_eff_a + radius_eff_b,
+                writer_data,
+                contact_template,
             )
-
-        # Write contacts using the writer function (post-processing is done in post_process_axial_on_discrete_contact)
-
-        for id in range(count):
-            contact_data = ContactData()
-            contact_data.contact_point_center = points[id]
-            contact_data.contact_normal_a_to_b = normal
-            contact_data.contact_distance = signed_distances[id]
-            contact_data.radius_eff_a = radius_eff_a
-            contact_data.radius_eff_b = radius_eff_b
-            contact_data.thickness_a = thickness_a
-            contact_data.thickness_b = thickness_b
-            contact_data.shape_a = shape_a
-            contact_data.shape_b = shape_b
-            contact_data.margin = rigid_contact_margin
-            contact_data.feature = features[id]
-            contact_data.feature_pair_key = pair_key
-
-            contact_data = post_process_contact(contact_data, geom_a, pos_a_adjusted, rot_a, geom_b, pos_b_adjusted, rot_b)
-
-            writer_func(contact_data, writer_data)
 
     return compute_gjk_mpr_contacts
 
