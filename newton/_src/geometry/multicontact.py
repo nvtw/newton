@@ -973,7 +973,7 @@ def extract_4_point_contact_manifolds(
             wp.dot(normal, projected),
         )
 
-    loop_seg_ids = wp.zeros(shape=(12,), dtype=wp.uint8)  # stackalloc byte[maxPoints];
+    loop_seg_ids = wp.zeros(shape=(12,), dtype=wp.uint8)
 
     for i in range(m_b_count):
         projected = m_b[i] - center
@@ -1223,10 +1223,12 @@ def create_build_manifold(support_func: Any):
             or edge-edge intersections) each contact point represents, allowing the physics
             solver to maintain contact consistency over time.
         """
-        left = wp.zeros(shape=(6,), dtype=wp.vec3)  # Array for shape A contact points
+        # left = wp.zeros(shape=(6,), dtype=wp.vec3)  # Array for shape A contact points
         right = wp.zeros(
             shape=(12,), dtype=wp.vec3
         )  # Array for shape B contact points - also provides storage for intermediate results
+        left = wp.array(ptr=right.ptr + wp.uint64(6 * 12), shape=(6,), dtype=wp.vec3)  # right[6:]
+
         # result_features = wp.zeros(shape=(6,), dtype=wp.uint32)
 
         num_manifold_points, normal_dot, contact_points, signed_distances, feature_ids = build_manifold_core(
