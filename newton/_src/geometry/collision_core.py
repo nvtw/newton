@@ -26,7 +26,7 @@ from .types import GeoType
 ENABLE_MULTI_CONTACT = True
 
 # Configuration flag for tiled BVH queries (experimental)
-ENABLE_TILE_BVH_QUERY = False
+ENABLE_TILE_BVH_QUERY = True
 
 # Pre-create the convex contact solvers (usable inside kernels)
 solve_convex_multi_contact = create_solve_convex_multi_contact(support_map)

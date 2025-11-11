@@ -578,10 +578,12 @@ def trim_all_in_place(
 
     current_loop_count = loop_count
 
+    trim_poly_0 = trim_poly[0] # This allows to do more memory aliasing
     for i in range(trim_poly_count):
         # For each trim segment, we will call the efficient trim function.
         trim_seg_start = trim_poly[i]
-        trim_seg_end = trim_poly[(i + 1) % trim_poly_count]
+        # trim_seg_end = trim_poly[(i + 1) % trim_poly_count]
+        trim_seg_end = trim_poly_0 if i == trim_poly_count - 1 else trim_poly[i + 1]
         # Perform the in-place trimming for this segment.
         current_loop_count = trim_in_place(
             trim_seg_start, trim_seg_end, wp.uint8(i), loop, loop_segments, current_loop_count
@@ -939,10 +941,10 @@ def extract_4_point_contact_manifolds(
     # Early-out for simple cases: if both have <=2 or either is empty, return single anchor pair
     # if True or m_a_count < 3 or m_b_count < 3:
     if m_a_count < 2 or m_b_count < 2:  # or (m_a_count < 3 and m_b_count < 3):
-        m_a[0] = anchor_point_a
-        m_b[0] = anchor_point_b
-        result_features[0] = wp.uint32(0)
-        return 1, 1.0
+        # m_a[0] = anchor_point_a
+        # m_b[0] = anchor_point_b
+        # result_features[0] = wp.uint32(0)
+        return 0, 0.0
 
     # Projectors for back-projection onto the shape surfaces
     projector_a, projector_b = create_body_projectors(
@@ -950,10 +952,10 @@ def extract_4_point_contact_manifolds(
     )
 
     if excess_normal_deviation(normal, projector_a.normal) or excess_normal_deviation(normal, projector_b.normal):
-        m_a[0] = anchor_point_a
-        m_b[0] = anchor_point_b
-        result_features[0] = wp.uint32(0)
-        return 1, 1.0
+        # m_a[0] = anchor_point_a
+        # m_b[0] = anchor_point_b
+        # result_features[0] = wp.uint32(0)
+        return 0, 0.0
 
     normal_dot = wp.abs(wp.dot(projector_a.normal, projector_b.normal))
 
@@ -1021,12 +1023,13 @@ def extract_4_point_contact_manifolds(
         loop_count = 4
     else:
         if loop_count <= 1:
-            # Degenerate; return single anchor pair
-            m_a[0] = anchor_point_a
-            m_b[0] = anchor_point_b
-            if result_features.shape[0] > 0:
-                result_features[0] = wp.uint32(0)
-            loop_count = 1
+            # # Degenerate; return single anchor pair
+            # m_a[0] = anchor_point_a
+            # m_b[0] = anchor_point_b
+            # if result_features.shape[0] > 0:
+            #     result_features[0] = wp.uint32(0)
+            normal_dot = 0.0
+            loop_count = 0
         else:
             # Transform back to world space using projectors
             for i in range(loop_count):
@@ -1287,10 +1290,10 @@ def create_build_manifold(support_func: Any):
             signed_distances[i] = wp.dot(contact_point_b - contact_point_a, normal)
 
         # Check if we should include the deepest contact point
-        if count_out < 5 and count_out > 1:
+        if count_out < 5:
             # Check if we should include the deepest contact point using the normal_dot
             # computed from the polygon normals in extract_4_point_contact_manifolds
-            if should_include_deepest_contact(normal_dot):
+            if should_include_deepest_contact(normal_dot) or count_out == 0:
                 deepest_contact_center = 0.5 * (p_a + p_b)
                 contact_points[count_out] = deepest_contact_center
                 signed_distances[count_out] = wp.dot(p_b - p_a, normal)
