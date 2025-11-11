@@ -142,24 +142,26 @@ class BodyProjector:
     plane_d: float
     normal: wp.vec3
 
+
 @wp.struct
 class IncrementalPlaneTracker:
     reference_point: wp.vec3
-    previous_point : wp.vec3
-    normal : wp.vec3
+    previous_point: wp.vec3
+    normal: wp.vec3
     largest_area_sq: float
+
 
 @wp.func
 def update_incremental_plane_tracker(
     tracker: IncrementalPlaneTracker,
     current_point: wp.vec3,
-    current_point_id : int,
+    current_point_id: int,
 ) -> IncrementalPlaneTracker:
     """
     Update the incremental plane tracker with a new point.
     """
     if current_point_id == 0:
-        tracker.reference_point = current_point        
+        tracker.reference_point = current_point
         tracker.largest_area_sq = 0.0
     elif current_point_id == 1:
         tracker.previous_point = current_point
@@ -337,7 +339,6 @@ def create_body_projectors2(
         projector_b.plane_d = -wp.dot(point_on_plane_b, projector_b.normal)
 
     return projector_a, projector_b
-
 
 
 @wp.func
@@ -1120,8 +1121,6 @@ def create_build_manifold(support_func: Any):
         p_a: wp.vec3,
         p_b: wp.vec3,
         normal: wp.vec3,
-        a_buffer: wp.array(dtype=wp.vec3),
-        b_buffer: wp.array(dtype=wp.vec3),
         feature_anchor_a: wp.int32,
         feature_anchor_b: wp.int32,
         data_provider: Any,
@@ -1134,9 +1133,7 @@ def create_build_manifold(support_func: Any):
         a hexagonal pattern tilted 2 degrees from the contact plane. The resulting contact
         polygons are then clipped and reduced to up to 4 contact points.
 
-        The result is stored in a_buffer and b_buffer, which also serve as scratch memory
-        during the calculation. a_buffer must have space for 6 elements, b_buffer for 12 elements.
-        Both buffers will have the same number of valid entries on return.
+        Internal buffers are allocated for storing the contact polygons during processing.
 
         The two shapes must always be queried in the same order to get stable feature IDs
         for contact tracking across frames.
@@ -1151,8 +1148,6 @@ def create_build_manifold(support_func: Any):
             p_a: Anchor contact point on shape A (from GJK/MPR).
             p_b: Anchor contact point on shape B (from GJK/MPR).
             normal: Collision normal pointing from A to B.
-            a_buffer: Output buffer for shape A contact points (preallocated, size 6).
-            b_buffer: Output buffer for shape B contact points (preallocated, size 12).
             feature_anchor_a: Feature ID of anchor point on shape A.
             feature_anchor_b: Feature ID of anchor point on shape B.
             data_provider: Support mapping data provider.
@@ -1178,6 +1173,10 @@ def create_build_manifold(support_func: Any):
 
         plane_tracker_a = IncrementalPlaneTracker()
         plane_tracker_b = IncrementalPlaneTracker()
+
+        # Allocate buffers for contact polygons
+        b_buffer = wp.zeros(shape=(12,), dtype=wp.vec3)
+        a_buffer = wp.array(ptr=b_buffer.ptr + wp.uint64(6 * 12), shape=(6,), dtype=wp.vec3)
 
         # --- Step 1: Find Contact Polygons using Perturbed Support Mapping ---
         # Loop 6 times to find up to 6 vertices for each shape's contact polygon.
@@ -1225,9 +1224,7 @@ def create_build_manifold(support_func: Any):
             return 0, 0.0, Mat53f(), vec5(), vec5u()
 
         # Projectors for back-projection onto the shape surfaces
-        projector_a, projector_b = create_body_projectors2(
-            plane_tracker_a, p_a, plane_tracker_b, p_b, normal
-        )
+        projector_a, projector_b = create_body_projectors2(plane_tracker_a, p_a, plane_tracker_b, p_b, normal)
 
         if excess_normal_deviation(normal, projector_a.normal) or excess_normal_deviation(normal, projector_b.normal):
             return 0, 0.0, Mat53f(), vec5(), vec5u()
@@ -1308,13 +1305,6 @@ def create_build_manifold(support_func: Any):
             or edge-edge intersections) each contact point represents, allowing the physics
             solver to maintain contact consistency over time.
         """
-        # left = wp.zeros(shape=(6,), dtype=wp.vec3)  # Array for shape A contact points
-        right = wp.zeros(
-            shape=(12,), dtype=wp.vec3
-        )  # Array for shape B contact points - also provides storage for intermediate results
-        left = wp.array(ptr=right.ptr + wp.uint64(6 * 12), shape=(6,), dtype=wp.vec3)  # right[6:]
-
-        # result_features = wp.zeros(shape=(6,), dtype=wp.uint32)
 
         num_manifold_points, normal_dot, contact_points, signed_distances, feature_ids = build_manifold_core(
             geom_a,
@@ -1326,8 +1316,6 @@ def create_build_manifold(support_func: Any):
             p_a,
             p_b,
             normal,
-            left,
-            right,
             feature_anchor_a,
             feature_anchor_b,
             data_provider,
