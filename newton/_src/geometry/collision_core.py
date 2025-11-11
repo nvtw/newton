@@ -291,7 +291,12 @@ def postprocess_axial_shape_discrete_contacts(
     return output_count, signed_distances, points
 
 
-def create_compute_gjk_mpr_contacts(writer_func: Any):
+@wp.func
+def no_post_process_contact(contact_data: ContactData, geom_a: GenericShapeData, pos_a_adjusted: wp.vec3, rot_a: wp.quat, geom_b: GenericShapeData, pos_b_adjusted: wp.vec3, rot_b: wp.quat) -> ContactData:
+    return contact_data
+
+
+def create_compute_gjk_mpr_contacts(writer_func: Any, post_process_contact: Any = no_post_process_contact):
     """
     Factory function to create a compute_gjk_mpr_contacts function with a specific writer function.
 
@@ -448,6 +453,8 @@ def create_compute_gjk_mpr_contacts(writer_func: Any):
             contact_data.margin = rigid_contact_margin
             contact_data.feature = features[id]
             contact_data.feature_pair_key = pair_key
+
+            contact_data = post_process_contact(contact_data, geom_a, pos_a_adjusted, rot_a, geom_b, pos_b_adjusted, rot_b)
 
             writer_func(contact_data, writer_data)
 
