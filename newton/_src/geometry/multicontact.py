@@ -142,6 +142,38 @@ class BodyProjector:
     plane_d: float
     normal: wp.vec3
 
+@wp.struct
+class IncrementalPlaneTracker:
+    reference_point: wp.vec3
+    previous_point : wp.vec3
+    normal : wp.vec3
+    largest_area_sq: float
+
+@wp.func
+def update_incremental_plane_tracker(
+    tracker: IncrementalPlaneTracker,
+    current_point: wp.vec3,
+    current_point_id : int,
+) -> IncrementalPlaneTracker:
+    """
+    Update the incremental plane tracker with a new point.
+    """
+    if current_point_id == 0:
+        tracker.reference_point = current_point        
+        tracker.largest_area_sq = 0.0
+    elif current_point_id == 1:
+        tracker.previous_point = current_point
+    else:
+        edge1 = tracker.previous_point - tracker.reference_point
+        edge2 = current_point - tracker.reference_point
+        cross = wp.cross(edge1, edge2)
+        area_sq = wp.dot(cross, cross)
+        if area_sq > tracker.largest_area_sq:
+            tracker.largest_area_sq = area_sq
+            tracker.normal = cross
+        tracker.previous_point = current_point
+    return tracker
+
 
 @wp.func
 def make_body_projector_from_polygon(
@@ -255,6 +287,57 @@ def create_body_projectors(
         projector_b.plane_d = -wp.dot(point_on_plane_b, projector_b.normal)
 
     return projector_a, projector_b
+
+
+@wp.func
+def create_body_projectors2(
+    plane_tracker_a: IncrementalPlaneTracker,
+    anchor_point_a: wp.vec3,
+    plane_tracker_b: IncrementalPlaneTracker,
+    anchor_point_b: wp.vec3,
+    contact_normal: wp.vec3,
+) -> tuple[BodyProjector, BodyProjector]:
+    projector_a = BodyProjector()
+    projector_b = BodyProjector()
+
+    if plane_tracker_a.largest_area_sq == 0.0 and plane_tracker_b.largest_area_sq == 0.0:
+        # Both are line segments - compute normals using contact_normal as reference
+        dir_a = plane_tracker_a.previous_point - plane_tracker_a.reference_point
+        dir_b = plane_tracker_b.previous_point - plane_tracker_b.reference_point
+
+        point_on_plane_a = 0.5 * (plane_tracker_a.reference_point + plane_tracker_a.previous_point)
+        projector_a.normal = compute_line_segment_projector_normal(dir_a, contact_normal)
+        projector_a.plane_d = -wp.dot(point_on_plane_a, projector_a.normal)
+
+        point_on_plane_b = 0.5 * (plane_tracker_b.reference_point + plane_tracker_b.previous_point)
+        projector_b.normal = compute_line_segment_projector_normal(dir_b, contact_normal)
+        projector_b.plane_d = -wp.dot(point_on_plane_b, projector_b.normal)
+
+        return projector_a, projector_b
+
+    if plane_tracker_a.largest_area_sq > 0.0:
+        len_n = wp.sqrt(wp.max(1.0e-12, plane_tracker_a.largest_area_sq))
+        projector_a.normal = plane_tracker_a.normal / len_n
+        projector_a.plane_d = -wp.dot(anchor_point_a, projector_a.normal)
+    if plane_tracker_b.largest_area_sq > 0.0:
+        len_n = wp.sqrt(wp.max(1.0e-12, plane_tracker_b.largest_area_sq))
+        projector_b.normal = plane_tracker_b.normal / len_n
+        projector_b.plane_d = -wp.dot(anchor_point_b, projector_b.normal)
+
+    if plane_tracker_a.largest_area_sq == 0.0:
+        dir = plane_tracker_a.previous_point - plane_tracker_a.reference_point
+        point_on_plane_a = 0.5 * (plane_tracker_a.reference_point + plane_tracker_a.previous_point)
+        projector_a.normal = compute_line_segment_projector_normal(dir, projector_b.normal)
+        projector_a.plane_d = -wp.dot(point_on_plane_a, projector_a.normal)
+
+    if plane_tracker_b.largest_area_sq == 0.0:
+        dir = plane_tracker_b.previous_point - plane_tracker_b.reference_point
+        point_on_plane_b = 0.5 * (plane_tracker_b.reference_point + plane_tracker_b.previous_point)
+        projector_b.normal = compute_line_segment_projector_normal(dir, projector_a.normal)
+        projector_b.plane_d = -wp.dot(point_on_plane_b, projector_b.normal)
+
+    return projector_a, projector_b
+
 
 
 @wp.func
@@ -906,8 +989,9 @@ def extract_4_point_contact_manifolds(
     normal: wp.vec3,
     cross_vector_1: wp.vec3,
     cross_vector_2: wp.vec3,
-    anchor_point_a: wp.vec3,
-    anchor_point_b: wp.vec3,
+    center: wp.vec3,
+    projector_a: BodyProjector,
+    projector_b: BodyProjector,
 ) -> tuple[int, float, Mat53f, vec5, vec5u]:
     """
     Extract up to 4 contact points from two convex contact polygons using polygon clipping (before optional deepest point addition).
@@ -945,24 +1029,8 @@ def extract_4_point_contact_manifolds(
         - signed_distances: vec5 containing signed distances for each contact
         - feature_ids: vec5u containing feature IDs for contact tracking
     """
-    # Early-out for simple cases: if both have <=2 or either is empty, return single anchor pair
-    # if True or m_a_count < 3 or m_b_count < 3:
-    if m_a_count < 2 or m_b_count < 2:  # or (m_a_count < 3 and m_b_count < 3):
-        return 0, 0.0, Mat53f(), vec5(), vec5u()
-
-    # Projectors for back-projection onto the shape surfaces
-    projector_a, projector_b = create_body_projectors(
-        m_a, m_a_count, anchor_point_a, m_b, m_b_count, anchor_point_b, normal
-    )
-
-    if excess_normal_deviation(normal, projector_a.normal) or excess_normal_deviation(normal, projector_b.normal):
-        return 0, 0.0, Mat53f(), vec5(), vec5u()
 
     normal_dot = wp.abs(wp.dot(projector_a.normal, projector_b.normal))
-
-    # The trim poly (poly A) should be the polygon with the most points
-    # This should ensure that zero area loops with only two points get trimmed correctly (they are considered valid)
-    center = 0.5 * (anchor_point_a + anchor_point_b)
 
     # Transform into contact plane space
     for i in range(m_a_count):
@@ -1108,6 +1176,9 @@ def create_build_manifold(support_func: Any):
         features_a = vec6_uint8(wp.uint8(0))
         features_b = vec6_uint8(wp.uint8(0))
 
+        plane_tracker_a = IncrementalPlaneTracker()
+        plane_tracker_b = IncrementalPlaneTracker()
+
         # --- Step 1: Find Contact Polygons using Perturbed Support Mapping ---
         # Loop 6 times to find up to 6 vertices for each shape's contact polygon.
         for e in range(6):
@@ -1132,6 +1203,7 @@ def create_build_manifold(support_func: Any):
             # Only store feature ID if the point was actually added (not a duplicate)
             if was_added_a:
                 features_a[a_count - 1] = wp.uint8(int(feature_a) + 1)
+                plane_tracker_a = update_incremental_plane_tracker(plane_tracker_a, pt_a, a_count - 1)
 
             # Invert the direction for the other shape.
             offset_normal = -offset_normal
@@ -1145,8 +1217,20 @@ def create_build_manifold(support_func: Any):
             # Only store feature ID if the point was actually added (not a duplicate)
             if was_added_b:
                 features_b[b_count - 1] = wp.uint8(int(feature_b) + 1)
+                plane_tracker_b = update_incremental_plane_tracker(plane_tracker_b, pt_b, b_count - 1)
 
-        # wp.printf("a_count: %d, b_count: %d\n", a_count, b_count)
+        # Early-out for simple cases: if both have <=2 or either is empty, return single anchor pair
+        # if True or a_count < 3 or b_count < 3:
+        if a_count < 2 or b_count < 2:  # or (a_count < 3 and b_count < 3):
+            return 0, 0.0, Mat53f(), vec5(), vec5u()
+
+        # Projectors for back-projection onto the shape surfaces
+        projector_a, projector_b = create_body_projectors2(
+            plane_tracker_a, p_a, plane_tracker_b, p_b, normal
+        )
+
+        if excess_normal_deviation(normal, projector_a.normal) or excess_normal_deviation(normal, projector_b.normal):
+            return 0, 0.0, Mat53f(), vec5(), vec5u()
 
         # All feature ids are one based such that it is clearly visible in a uint which of the 4 slots (8 bits each) are in use
         return extract_4_point_contact_manifolds(
@@ -1159,8 +1243,9 @@ def create_build_manifold(support_func: Any):
             normal,
             tangent_a,
             tangent_b,
-            p_a,
-            p_b,
+            0.5 * (p_a + p_b),
+            projector_a,
+            projector_b,
         )
 
     @wp.func
