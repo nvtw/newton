@@ -191,7 +191,7 @@ def test_contact_matcher_stacked_cubes(test: TestContactMatcher, device):
     for frame in range(5):
         # Get contacts using unified pipeline
         contacts = collision_pipeline.collide(model, state_0)
-        num_contacts = contacts.rigid_contact_count.numpy()[0]
+        num_contacts = collision_pipeline.narrow_contact_count.numpy()[0]
         contact_counts.append(num_contacts)
 
         frame_data = {
@@ -204,20 +204,16 @@ def test_contact_matcher_stacked_cubes(test: TestContactMatcher, device):
         }
 
         if num_contacts > 0:
-            # Use contact_pair_key and contact_key directly from collision pipeline
+            # Use contact_pair_key and contact_key directly from narrow phase
             keys_wp = collision_pipeline.narrow_contact_pair_key
             payloads_wp = collision_pipeline.narrow_contact_key
-            num_keys_wp = contacts.rigid_contact_count
+            num_keys_wp = collision_pipeline.narrow_contact_count
             result_map = wp.zeros(max_contacts, dtype=wp.int32, device=device)
 
             # Collect data for debugging
-            # Note: In the refactored architecture, contact positions are stored in body-local frames
-            # We need to transform them back to world space for debugging
-            # For simplicity, we'll use the contact pair keys and feature keys directly
+            positions_np = collision_pipeline.narrow_contact_position.numpy()[:num_contacts]
             pair_keys_np = keys_wp.numpy()[:num_contacts]
             feature_keys_np = payloads_wp.numpy()[:num_contacts]
-            # Create dummy positions for debugging (actual positions would require transformation)
-            positions_np = pair_keys_np.astype(float).reshape(-1, 1) * [1.0, 0.0, 0.0]
 
             # Match contacts
             matcher.launch(keys_wp, num_keys_wp, payloads_wp, result_map, device=device)
