@@ -42,6 +42,36 @@ _vec5 = wp.types.vector(5, wp.float32)
 _vec1 = wp.types.vector(1, wp.float32)
 
 
+@wp.struct
+class ContactData:
+    contact_point_center: wp.vec3
+    contact_normal_a_to_b: wp.vec3
+    contact_distance: float
+    radius_eff_a: float
+    radius_eff_b: float
+    thickness_a: float
+    thickness_b: float
+    shape_a: int
+    shape_b: int
+    margin: float
+    # Contact matching data
+    feature: wp.uint32
+    feature_pair_key: wp.uint64
+
+
+@wp.func
+def build_pair_key2(shape_a: wp.uint32, shape_b: wp.uint32) -> wp.uint64:
+    """
+    Build a 64-bit key from two shape indices.
+    Upper 32 bits: shape_a
+    Lower 32 bits: shape_b
+    """
+    key = wp.uint64(shape_a)
+    key = key << wp.uint64(32)
+    key = key | wp.uint64(shape_b)
+    return key
+
+
 @wp.func
 def is_discrete_shape(shape_type: int) -> bool:
     """A discrete shape can be represented with a finite amount of flat polygon faces."""
@@ -564,70 +594,107 @@ def check_infinite_plane_bsphere_overlap(
     return center_dist <= other_radius
 
 
-@wp.func
-def find_contacts(
-    pos_a: wp.vec3,
-    pos_b: wp.vec3,
-    quat_a: wp.quat,
-    quat_b: wp.quat,
-    shape_data_a: GenericShapeData,
-    shape_data_b: GenericShapeData,
-    is_infinite_plane_a: bool,
-    is_infinite_plane_b: bool,
-    bsphere_radius_a: float,
-    bsphere_radius_b: float,
-    rigid_contact_margin: float,
-):
+def create_find_contacts(writer_func: Any):
     """
-    Find contacts between two shapes using GJK/MPR algorithm.
+    Factory function to create a find_contacts function with a specific writer function.
 
     Args:
-        pos_a: Position of shape A in world space
-        pos_b: Position of shape B in world space
-        quat_a: Orientation of shape A
-        quat_b: Orientation of shape B
-        shape_data_a: Generic shape data for shape A (contains shape_type)
-        shape_data_b: Generic shape data for shape B (contains shape_type)
-        is_infinite_plane_a: Whether shape A is an infinite plane
-        is_infinite_plane_b: Whether shape B is an infinite plane
-        bsphere_radius_a: Bounding sphere radius of shape A
-        bsphere_radius_b: Bounding sphere radius of shape B
-        rigid_contact_margin: Contact margin for rigid bodies
+        writer_func: Function to write contact data (signature: (ContactData, writer_data) -> None)
 
     Returns:
-        Tuple of (count, normal, signed_distances, points, radius_eff_a, radius_eff_b, features)
+        A find_contacts function with the writer function baked in
     """
-    # Convert infinite planes to cube proxies for GJK/MPR compatibility
-    # Use the OTHER object's radius to properly size the cube
-    # Only convert if it's an infinite plane (finite planes can be handled normally)
-    pos_a_adjusted = pos_a
-    if is_infinite_plane_a:
-        # Position the cube based on the OTHER object's position (pos_b)
-        # Note: convert_infinite_plane_to_cube modifies shape_data_a.shape_type to BOX
-        shape_data_a, pos_a_adjusted = convert_infinite_plane_to_cube(
-            shape_data_a, quat_a, pos_a, pos_b, bsphere_radius_b + rigid_contact_margin
+    @wp.func
+    def find_contacts(
+        pos_a: wp.vec3,
+        pos_b: wp.vec3,
+        quat_a: wp.quat,
+        quat_b: wp.quat,
+        shape_data_a: GenericShapeData,
+        shape_data_b: GenericShapeData,
+        is_infinite_plane_a: bool,
+        is_infinite_plane_b: bool,
+        bsphere_radius_a: float,
+        bsphere_radius_b: float,
+        rigid_contact_margin: float,
+        shape_a: int,
+        shape_b: int,
+        thickness_a: float,
+        thickness_b: float,
+        writer_data: Any,
+    ):
+        """
+        Find contacts between two shapes using GJK/MPR algorithm and write them using the writer function.
+
+        Args:
+            pos_a: Position of shape A in world space
+            pos_b: Position of shape B in world space
+            quat_a: Orientation of shape A
+            quat_b: Orientation of shape B
+            shape_data_a: Generic shape data for shape A (contains shape_type)
+            shape_data_b: Generic shape data for shape B (contains shape_type)
+            is_infinite_plane_a: Whether shape A is an infinite plane
+            is_infinite_plane_b: Whether shape B is an infinite plane
+            bsphere_radius_a: Bounding sphere radius of shape A
+            bsphere_radius_b: Bounding sphere radius of shape B
+            rigid_contact_margin: Contact margin for rigid bodies
+            shape_a: Index of shape A
+            shape_b: Index of shape B
+            thickness_a: Thickness of shape A
+            thickness_b: Thickness of shape B
+            writer_data: Data structure for contact writer
+        """
+        # Convert infinite planes to cube proxies for GJK/MPR compatibility
+        # Use the OTHER object's radius to properly size the cube
+        # Only convert if it's an infinite plane (finite planes can be handled normally)
+        pos_a_adjusted = pos_a
+        if is_infinite_plane_a:
+            # Position the cube based on the OTHER object's position (pos_b)
+            # Note: convert_infinite_plane_to_cube modifies shape_data_a.shape_type to BOX
+            shape_data_a, pos_a_adjusted = convert_infinite_plane_to_cube(
+                shape_data_a, quat_a, pos_a, pos_b, bsphere_radius_b + rigid_contact_margin
+            )
+
+        pos_b_adjusted = pos_b
+        if is_infinite_plane_b:
+            # Position the cube based on the OTHER object's position (pos_a)
+            # Note: convert_infinite_plane_to_cube modifies shape_data_b.shape_type to BOX
+            shape_data_b, pos_b_adjusted = convert_infinite_plane_to_cube(
+                shape_data_b, quat_b, pos_b, pos_a, bsphere_radius_a + rigid_contact_margin
+            )
+
+        # Compute contacts using GJK/MPR
+        count, normal, signed_distances, points, radius_eff_a, radius_eff_b, features = compute_gjk_mpr_contacts(
+            shape_data_a,
+            shape_data_b,
+            quat_a,
+            quat_b,
+            pos_a_adjusted,
+            pos_b_adjusted,
+            rigid_contact_margin,
         )
 
-    pos_b_adjusted = pos_b
-    if is_infinite_plane_b:
-        # Position the cube based on the OTHER object's position (pos_a)
-        # Note: convert_infinite_plane_to_cube modifies shape_data_b.shape_type to BOX
-        shape_data_b, pos_b_adjusted = convert_infinite_plane_to_cube(
-            shape_data_b, quat_b, pos_b, pos_a, bsphere_radius_a + rigid_contact_margin
-        )
+        # Write contacts using the writer function
+        pair_key = build_pair_key2(wp.uint32(shape_a), wp.uint32(shape_b))
 
-    # Compute contacts using GJK/MPR
-    count, normal, signed_distances, points, radius_eff_a, radius_eff_b, features = compute_gjk_mpr_contacts(
-        shape_data_a,
-        shape_data_b,
-        quat_a,
-        quat_b,
-        pos_a_adjusted,
-        pos_b_adjusted,
-        rigid_contact_margin,
-    )
+        for id in range(count):
+            contact_data = ContactData()
+            contact_data.contact_point_center = points[id]
+            contact_data.contact_normal_a_to_b = normal
+            contact_data.contact_distance = signed_distances[id]
+            contact_data.radius_eff_a = radius_eff_a
+            contact_data.radius_eff_b = radius_eff_b
+            contact_data.thickness_a = thickness_a
+            contact_data.thickness_b = thickness_b
+            contact_data.shape_a = shape_a
+            contact_data.shape_b = shape_b
+            contact_data.margin = rigid_contact_margin
+            contact_data.feature = features[id]
+            contact_data.feature_pair_key = pair_key
 
-    return count, normal, signed_distances, points, radius_eff_a, radius_eff_b, features
+            writer_func(contact_data, writer_data)
+
+    return find_contacts
 
 
 @wp.func

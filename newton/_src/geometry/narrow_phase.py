@@ -23,9 +23,11 @@ import warp as wp
 
 from ..geometry.collision_core import (
     ENABLE_TILE_BVH_QUERY,
+    ContactData,
+    build_pair_key2,
     compute_gjk_mpr_contacts,
     compute_tight_aabb_from_support,
-    find_contacts,
+    create_find_contacts,
     find_pair_from_cumulative_index,
     get_triangle_shape_from_mesh,
     mesh_vs_convex_midphase,
@@ -52,36 +54,6 @@ class ContactWriterData:
     # Contact matching arrays (optional)
     contact_pair_key: wp.array(dtype=wp.uint64)
     contact_key: wp.array(dtype=wp.uint32)
-
-
-@wp.struct
-class ContactData:
-    contact_point_center: wp.vec3
-    contact_normal_a_to_b: wp.vec3
-    contact_distance: float
-    radius_eff_a: float
-    radius_eff_b: float
-    thickness_a: float
-    thickness_b: float
-    shape_a: int
-    shape_b: int
-    margin: float
-    # Contact matching data
-    feature: wp.uint32
-    feature_pair_key: wp.uint64
-
-
-@wp.func
-def build_pair_key2(shape_a: wp.uint32, shape_b: wp.uint32) -> wp.uint64:
-    """
-    Build a 64-bit key from two shape indices.
-    Upper 32 bits: shape_a
-    Lower 32 bits: shape_b
-    """
-    key = wp.uint64(shape_a)
-    key = key << wp.uint64(32)
-    key = key | wp.uint64(shape_b)
-    return key
 
 
 @wp.func
@@ -214,7 +186,7 @@ def extract_shape_data(
 
 
 @cache
-def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
+def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):    
     @wp.kernel(enable_backward=False)
     def narrow_phase_kernel_gjk_mpr(
         candidate_pair: wp.array(dtype=wp.vec2i),
@@ -374,8 +346,8 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
             cutoff_b = geom_cutoff[shape_b]
             margin = wp.max(cutoff_a, cutoff_b)
 
-            # Compute contacts using GJK/MPR
-            count, normal, signed_distances, points, radius_eff_a, radius_eff_b, features = find_contacts(
+            # Find and write contacts using GJK/MPR
+            wp.static(create_find_contacts(writer_func))(
                 pos_a,
                 pos_b,
                 quat_a,
@@ -387,27 +359,12 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
                 bsphere_radius_a,
                 bsphere_radius_b,
                 margin,
+                shape_a,
+                shape_b,
+                thickness_a,
+                thickness_b,
+                writer_data,
             )
-
-            # Write contacts
-            for id in range(count):
-                pair_key = build_pair_key2(wp.uint32(shape_a), wp.uint32(shape_b))
-
-                contact_data = ContactData()
-                contact_data.contact_point_center = points[id]
-                contact_data.contact_normal_a_to_b = normal
-                contact_data.contact_distance = signed_distances[id]
-                contact_data.radius_eff_a = radius_eff_a
-                contact_data.radius_eff_b = radius_eff_b
-                contact_data.thickness_a = thickness_a
-                contact_data.thickness_b = thickness_b
-                contact_data.shape_a = shape_a
-                contact_data.shape_b = shape_b
-                contact_data.margin = margin
-                contact_data.feature = features[id]
-                contact_data.feature_pair_key = pair_key
-
-                writer_func(contact_data, writer_data)
 
     return narrow_phase_kernel_gjk_mpr
 
