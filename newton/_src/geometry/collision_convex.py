@@ -154,7 +154,9 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
             contact_data.contact_distance = signed_distance
             contact_data.feature = wp.uint32(0)
 
-            contact_data = post_process_contact(contact_data, geom_a, position_a, orientation_a, geom_b, position_b, orientation_b)
+            contact_data = post_process_contact(
+                contact_data, geom_a, position_a, orientation_a, geom_b, position_b, orientation_b
+            )
             writer_func(contact_data, writer_data)
 
             return 1
@@ -277,7 +279,9 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
             contact_data.contact_distance = signed_distance
             contact_data.feature = wp.uint32(0)
 
-            contact_data = post_process_contact(contact_data, geom_a, position_a, orientation_a, geom_b, position_b, orientation_b)
+            contact_data = post_process_contact(
+                contact_data, geom_a, position_a, orientation_a, geom_b, position_b, orientation_b
+            )
             writer_func(contact_data, writer_data)
 
             return 1

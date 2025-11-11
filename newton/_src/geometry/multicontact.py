@@ -855,8 +855,6 @@ def add_avoid_duplicates_vec2(
 vec6_uint8 = wp.types.vector(6, wp.uint8)
 
 
-
-
 def create_build_manifold(support_func: Any, writer_func: Any, post_process_contact: Any):
     """
     Factory function to create manifold generation functions with a specific support mapping function.
@@ -983,7 +981,9 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
                 contact_data.contact_distance = signed_distance
                 contact_data.feature = feature
 
-                contact_data = post_process_contact(contact_data, geom_a, position_a, quaternion_a, geom_b, position_b, quaternion_b)
+                contact_data = post_process_contact(
+                    contact_data, geom_a, position_a, quaternion_a, geom_b, position_b, quaternion_b
+                )
                 writer_func(contact_data, writer_data)
         else:
             normal_dot = 0.0
@@ -1162,7 +1162,9 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
             contact_data.contact_distance = deepest_signed_distance
             contact_data.feature = wp.uint32(0)  # Use 0 for the deepest contact feature ID
 
-            contact_data = post_process_contact(contact_data, geom_a, position_a, quaternion_a, geom_b, position_b, quaternion_b)
+            contact_data = post_process_contact(
+                contact_data, geom_a, position_a, quaternion_a, geom_b, position_b, quaternion_b
+            )
             writer_func(contact_data, writer_data)
 
             count_out += 1

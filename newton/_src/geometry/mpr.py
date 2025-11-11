@@ -218,7 +218,7 @@ def create_solve_mpr(support_func: Any):
         extend: float,
         data_provider: Any,
         MAX_ITER: int = 30,
-        NUMERIC_EPSILON: float = 1e-16,
+        COLLIDE_EPSILON: float = 1e-5,
     ) -> tuple[bool, wp.vec3, wp.vec3, wp.vec3, float, int, int]:
         """
         Core MPR algorithm implementation.
@@ -246,7 +246,7 @@ def create_solve_mpr(support_func: Any):
             The XenoCollide implementation below is altered and not identical to the
             original. The license is kept untouched.
         """
-        COLLIDE_EPSILON = 1e-5
+        NUMERIC_EPSILON = 1e-16
 
         # Initialize variables
         penetration = float(0.0)
@@ -440,7 +440,7 @@ def create_solve_mpr(support_func: Any):
         sum_of_contact_offsets: float,
         data_provider: Any,
         MAX_ITER: int = 30,
-        NUMERIC_EPSILON: float = 1e-16,
+        COLLIDE_EPSILON: float = 1e-5,
     ) -> tuple[bool, float, wp.vec3, wp.vec3, int, int]:
         """
         Solve MPR (Minkowski Portal Refinement) for collision detection.
@@ -479,7 +479,7 @@ def create_solve_mpr(support_func: Any):
             sum_of_contact_offsets,
             data_provider,
             MAX_ITER,
-            NUMERIC_EPSILON,
+            COLLIDE_EPSILON,
         )
 
         collision, point_a, point_b, normal, penetration, feature_a_id, feature_b_id = result

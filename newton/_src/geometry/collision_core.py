@@ -272,12 +272,28 @@ def postprocess_axial_shape_discrete_contacts(
 
 
 @wp.func
-def no_post_process_contact(contact_data: ContactData, geom_a: GenericShapeData, pos_a_adjusted: wp.vec3, rot_a: wp.quat, geom_b: GenericShapeData, pos_b_adjusted: wp.vec3, rot_b: wp.quat) -> ContactData:
+def no_post_process_contact(
+    contact_data: ContactData,
+    geom_a: GenericShapeData,
+    pos_a_adjusted: wp.vec3,
+    rot_a: wp.quat,
+    geom_b: GenericShapeData,
+    pos_b_adjusted: wp.vec3,
+    rot_b: wp.quat,
+) -> ContactData:
     return contact_data
 
 
 @wp.func
-def post_process_axial_on_discrete_contact(contact_data: ContactData, geom_a: GenericShapeData, pos_a_adjusted: wp.vec3, rot_a: wp.quat, geom_b: GenericShapeData, pos_b_adjusted: wp.vec3, rot_b: wp.quat) -> ContactData:
+def post_process_axial_on_discrete_contact(
+    contact_data: ContactData,
+    geom_a: GenericShapeData,
+    pos_a_adjusted: wp.vec3,
+    rot_a: wp.quat,
+    geom_b: GenericShapeData,
+    pos_b_adjusted: wp.vec3,
+    rot_b: wp.quat,
+) -> ContactData:
     """
     Post-process a single contact for minkowski objects and axial shape rolling.
 
@@ -365,9 +381,7 @@ def post_process_axial_on_discrete_contact(contact_data: ContactData, geom_a: Ge
 
             # Project the contact point
             projected_point = project_point_onto_plane(
-                contact_data.contact_point_center,
-                point_on_projection_plane,
-                projection_plane_normal
+                contact_data.contact_point_center, point_on_projection_plane, projection_plane_normal
             )
 
             # Update the contact with the projected point
@@ -376,9 +390,9 @@ def post_process_axial_on_discrete_contact(contact_data: ContactData, geom_a: Ge
     return contact_data
 
 
-
-
-def create_compute_gjk_mpr_contacts(writer_func: Any, post_process_contact: Any = post_process_axial_on_discrete_contact):
+def create_compute_gjk_mpr_contacts(
+    writer_func: Any, post_process_contact: Any = post_process_axial_on_discrete_contact
+):
     """
     Factory function to create a compute_gjk_mpr_contacts function with a specific writer function.
 
@@ -388,6 +402,7 @@ def create_compute_gjk_mpr_contacts(writer_func: Any, post_process_contact: Any 
     Returns:
         A compute_gjk_mpr_contacts function with the writer function baked in
     """
+
     @wp.func
     def compute_gjk_mpr_contacts(
         geom_a: GenericShapeData,
@@ -691,6 +706,7 @@ def create_find_contacts(writer_func: Any):
     Returns:
         A find_contacts function with the writer function baked in
     """
+
     @wp.func
     def find_contacts(
         pos_a: wp.vec3,
