@@ -583,7 +583,7 @@ def trim_all_in_place(
 
     current_loop_count = loop_count
 
-    trim_poly_0 = trim_poly[0] # This allows to do more memory aliasing
+    trim_poly_0 = trim_poly[0]  # This allows to do more memory aliasing
     for i in range(trim_poly_count):
         # For each trim segment, we will call the efficient trim function.
         trim_seg_start = trim_poly[i]
@@ -1000,12 +1000,21 @@ def extract_4_point_contact_manifolds(
     contact_points = Mat53f()
     signed_distances = vec5()
 
-    if loop_count > 4:
-        result = approx_max_quadrilateral_area_with_calipers(m_b, loop_count)
-        for i in range(4):
+    if loop_count > 1:
+        original_loop_count = loop_count
+        result = wp.vec4i()
+        if loop_count > 4:
+            result = approx_max_quadrilateral_area_with_calipers(m_b, loop_count)
+            loop_count = 4
+        else:
+            result = wp.vec4i(0, 1, 2, 3)
+
+        for i in range(loop_count):
             ia = int(result[i])
 
-            result_features[i] = feature_id(loop_seg_ids, ia, loop_count, features_a, features_b, m_a_count, m_b_count)
+            result_features[i] = feature_id(
+                loop_seg_ids, ia, original_loop_count, features_a, features_b, m_a_count, m_b_count
+            )
 
             # Transform back to world space using projectors
             p_world = m_b[ia].x * cross_vector_1 + m_b[ia].y * cross_vector_2 + center
@@ -1015,30 +1024,9 @@ def extract_4_point_contact_manifolds(
             b = body_projector_project(projector_b, p_world, normal)
             contact_points[i] = 0.5 * (a + b)
             signed_distances[i] = wp.dot(b - a, normal)
-
-        loop_count = 4
     else:
-        if loop_count <= 1:
-            # # Degenerate; return single anchor pair
-            # m_a[0] = anchor_point_a
-            # m_b[0] = anchor_point_b
-            # if result_features.shape[0] > 0:
-            #     result_features[0] = wp.uint32(0)
-            normal_dot = 0.0
-            loop_count = 0
-        else:
-            # Transform back to world space using projectors
-            for i in range(loop_count):
-                l = m_b[i]
-                feat = feature_id(loop_seg_ids, i, loop_count, features_a, features_b, m_a_count, m_b_count)
-                world = l[0] * cross_vector_1 + l[1] * cross_vector_2 + center
-                a = body_projector_project(projector_a, world, normal)
-                b = body_projector_project(projector_b, world, normal)
-                # m_a[i] = a
-                # m_b[i] = b
-                result_features[i] = feat
-                contact_points[i] = 0.5 * (a + b)
-                signed_distances[i] = wp.dot(b - a, normal)
+        normal_dot = 0.0
+        loop_count = 0
 
     return loop_count, normal_dot, contact_points, signed_distances
 
@@ -1185,8 +1173,6 @@ def create_build_manifold(support_func: Any):
             p_b,
             result_features,
         )
-
-
 
     @wp.func
     def build_manifold(
