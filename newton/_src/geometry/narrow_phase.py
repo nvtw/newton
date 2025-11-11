@@ -25,7 +25,8 @@ from ..geometry.collision_core import (
     ENABLE_TILE_BVH_QUERY,
     ContactData,
     build_pair_key2,
-    compute_gjk_mpr_contacts,
+    build_pair_key3,
+    compute_gjk_mpr_contacts_no_write,
     compute_tight_aabb_from_support,
     create_find_contacts,
     find_pair_from_cumulative_index,
@@ -54,25 +55,6 @@ class ContactWriterData:
     # Contact matching arrays (optional)
     contact_pair_key: wp.array(dtype=wp.uint64)
     contact_key: wp.array(dtype=wp.uint32)
-
-
-@wp.func
-def build_pair_key3(shape_a: wp.uint32, shape_b: wp.uint32, triangle_idx: wp.uint32) -> wp.uint64:
-    """
-    Build a 63-bit key from two shape indices and a triangle index (MSB is 0 for signed int64 compatibility).
-    Bit 63: 0 (reserved for sign bit)
-    Bits 62-43: shape_a (20 bits)
-    Bits 42-23: shape_b (20 bits)
-    Bits 22-0: triangle_idx (23 bits)
-
-    Max values: shape_a < 2^20 (1,048,576), shape_b < 2^20 (1,048,576), triangle_idx < 2^23 (8,388,608)
-    """
-    key = wp.uint64(shape_a & wp.uint32(0xFFFFF))  # Mask to 20 bits
-    key = key << wp.uint64(20)
-    key = key | wp.uint64(shape_b & wp.uint32(0xFFFFF))  # Mask to 20 bits
-    key = key << wp.uint64(23)
-    key = key | wp.uint64(triangle_idx & wp.uint32(0x7FFFFF))  # Mask to 23 bits
-    return key
 
 
 @wp.func
@@ -186,7 +168,7 @@ def extract_shape_data(
 
 
 @cache
-def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):    
+def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
     @wp.kernel(enable_backward=False)
     def narrow_phase_kernel_gjk_mpr(
         candidate_pair: wp.array(dtype=wp.vec2i),
@@ -514,7 +496,7 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
             margin = wp.max(cutoff_a, cutoff_b)
 
             # Compute contacts using GJK/MPR
-            count, normal, signed_distances, points, radius_eff_a, radius_eff_b, features = compute_gjk_mpr_contacts(
+            count, normal, signed_distances, points, radius_eff_a, radius_eff_b, features = compute_gjk_mpr_contacts_no_write(
                 shape_data_a,
                 shape_data_b,
                 quat_a,

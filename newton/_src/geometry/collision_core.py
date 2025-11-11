@@ -73,6 +73,25 @@ def build_pair_key2(shape_a: wp.uint32, shape_b: wp.uint32) -> wp.uint64:
 
 
 @wp.func
+def build_pair_key3(shape_a: wp.uint32, shape_b: wp.uint32, triangle_idx: wp.uint32) -> wp.uint64:
+    """
+    Build a 63-bit key from two shape indices and a triangle index (MSB is 0 for signed int64 compatibility).
+    Bit 63: 0 (reserved for sign bit)
+    Bits 62-43: shape_a (20 bits)
+    Bits 42-23: shape_b (20 bits)
+    Bits 22-0: triangle_idx (23 bits)
+
+    Max values: shape_a < 2^20 (1,048,576), shape_b < 2^20 (1,048,576), triangle_idx < 2^23 (8,388,608)
+    """
+    key = wp.uint64(shape_a & wp.uint32(0xFFFFF))  # Mask to 20 bits
+    key = key << wp.uint64(20)
+    key = key | wp.uint64(shape_b & wp.uint32(0xFFFFF))  # Mask to 20 bits
+    key = key << wp.uint64(23)
+    key = key | wp.uint64(triangle_idx & wp.uint32(0x7FFFFF))  # Mask to 23 bits
+    return key
+
+
+@wp.func
 def is_discrete_shape(shape_type: int) -> bool:
     """A discrete shape can be represented with a finite amount of flat polygon faces."""
     return (
@@ -272,8 +291,172 @@ def postprocess_axial_shape_discrete_contacts(
     return output_count, signed_distances, points
 
 
+def create_compute_gjk_mpr_contacts(writer_func: Any):
+    """
+    Factory function to create a compute_gjk_mpr_contacts function with a specific writer function.
+
+    Args:
+        writer_func: Function to write contact data (signature: (ContactData, writer_data) -> None)
+
+    Returns:
+        A compute_gjk_mpr_contacts function with the writer function baked in
+    """
+    @wp.func
+    def compute_gjk_mpr_contacts(
+        geom_a: GenericShapeData,
+        geom_b: GenericShapeData,
+        rot_a: wp.quat,
+        rot_b: wp.quat,
+        pos_a_adjusted: wp.vec3,
+        pos_b_adjusted: wp.vec3,
+        rigid_contact_margin: float,
+        shape_a: int,
+        shape_b: int,
+        thickness_a: float,
+        thickness_b: float,
+        writer_data: Any,
+    ):
+        """
+        Compute contacts between two shapes using GJK/MPR algorithm and write them.
+
+        Args:
+            geom_a: Generic shape data for shape A (contains shape_type)
+            geom_b: Generic shape data for shape B (contains shape_type)
+            rot_a: Orientation of shape A
+            rot_b: Orientation of shape B
+            pos_a_adjusted: Adjusted position of shape A
+            pos_b_adjusted: Adjusted position of shape B
+            rigid_contact_margin: Contact margin for rigid bodies
+            shape_a: Index of shape A
+            shape_b: Index of shape B
+            thickness_a: Thickness of shape A
+            thickness_b: Thickness of shape B
+            writer_data: Data structure for contact writer
+        """
+        data_provider = SupportMapDataProvider()
+
+        radius_eff_a = float(0.0)
+        radius_eff_b = float(0.0)
+
+        small_radius = 0.0001
+
+        # Get shape types from shape data
+        type_a = geom_a.shape_type
+        type_b = geom_b.shape_type
+
+        # Special treatment for minkowski objects
+        if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
+            radius_eff_a = geom_a.scale[0]
+            geom_a.scale[0] = small_radius
+
+        if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
+            radius_eff_b = geom_b.scale[0]
+            geom_b.scale[0] = small_radius
+
+        if wp.static(ENABLE_MULTI_CONTACT):
+            count, normal, signed_distances, points, features = wp.static(solve_convex_multi_contact)(
+                geom_a,
+                geom_b,
+                rot_a,
+                rot_b,
+                pos_a_adjusted,
+                pos_b_adjusted,
+                0.0,  # sum_of_contact_offsets - gap
+                data_provider,
+                rigid_contact_margin + radius_eff_a + radius_eff_b,
+                type_a == int(GeoType.SPHERE) or type_b == int(GeoType.SPHERE),
+            )
+        else:
+            count, normal, signed_distances, points, features = wp.static(solve_convex_single_contact)(
+                geom_a,
+                geom_b,
+                rot_a,
+                rot_b,
+                pos_a_adjusted,
+                pos_b_adjusted,
+                0.0,  # sum_of_contact_offsets - gap
+                data_provider,
+                rigid_contact_margin + radius_eff_a + radius_eff_b,
+            )
+
+        # Special post processing for minkowski objects
+        if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
+            for i in range(count):
+                points[i] = points[i] + normal * (radius_eff_a * 0.5)
+                signed_distances[i] -= radius_eff_a - small_radius
+        if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
+            for i in range(count):
+                points[i] = points[i] - normal * (radius_eff_b * 0.5)
+                signed_distances[i] -= radius_eff_b - small_radius
+
+        if wp.static(ENABLE_MULTI_CONTACT):
+            # Post-process for axial shapes (cylinder/cone) rolling on discrete surfaces
+            is_discrete_a = is_discrete_shape(geom_a.shape_type)
+            is_discrete_b = is_discrete_shape(geom_b.shape_type)
+            is_axial_a = type_a == int(GeoType.CYLINDER) or type_a == int(GeoType.CONE)
+            is_axial_b = type_b == int(GeoType.CYLINDER) or type_b == int(GeoType.CONE)
+
+            if is_discrete_a and is_axial_b and count >= 3:
+                # Post-process axial shape (B) rolling on discrete surface (A)
+                shape_radius = geom_b.scale[0]  # radius for cylinder, base radius for cone
+                shape_half_height = geom_b.scale[1]
+                is_cone_b = type_b == int(GeoType.CONE)
+                count, signed_distances, points = postprocess_axial_shape_discrete_contacts(
+                    points,
+                    normal,
+                    signed_distances,
+                    count,
+                    rot_b,
+                    shape_radius,
+                    shape_half_height,
+                    pos_b_adjusted,
+                    is_cone_b,
+                )
+
+            if is_discrete_b and is_axial_a and count >= 3:
+                # Post-process axial shape (A) rolling on discrete surface (B)
+                # Note: normal points from A to B, so we need to negate it for the shape processing
+                shape_radius = geom_a.scale[0]  # radius for cylinder, base radius for cone
+                shape_half_height = geom_a.scale[1]
+                is_cone_a = type_a == int(GeoType.CONE)
+                count, signed_distances, points = postprocess_axial_shape_discrete_contacts(
+                    points,
+                    -normal,
+                    signed_distances,
+                    count,
+                    rot_a,
+                    shape_radius,
+                    shape_half_height,
+                    pos_a_adjusted,
+                    is_cone_a,
+                )
+
+        # Write contacts using the writer function
+        pair_key = build_pair_key2(wp.uint32(shape_a), wp.uint32(shape_b))
+
+        for id in range(count):
+            contact_data = ContactData()
+            contact_data.contact_point_center = points[id]
+            contact_data.contact_normal_a_to_b = normal
+            contact_data.contact_distance = signed_distances[id]
+            contact_data.radius_eff_a = radius_eff_a
+            contact_data.radius_eff_b = radius_eff_b
+            contact_data.thickness_a = thickness_a
+            contact_data.thickness_b = thickness_b
+            contact_data.shape_a = shape_a
+            contact_data.shape_b = shape_b
+            contact_data.margin = rigid_contact_margin
+            contact_data.feature = features[id]
+            contact_data.feature_pair_key = pair_key
+
+            writer_func(contact_data, writer_data)
+
+    return compute_gjk_mpr_contacts
+
+
+# Also export a standalone version that returns contacts without writing (for cases that need post-processing)
 @wp.func
-def compute_gjk_mpr_contacts(
+def compute_gjk_mpr_contacts_no_write(
     geom_a: GenericShapeData,
     geom_b: GenericShapeData,
     rot_a: wp.quat,
@@ -283,7 +466,7 @@ def compute_gjk_mpr_contacts(
     rigid_contact_margin: float,
 ):
     """
-    Compute contacts between two shapes using GJK/MPR algorithm.
+    Compute contacts between two shapes using GJK/MPR algorithm (without writing).
 
     Args:
         geom_a: Generic shape data for shape A (contains shape_type)
@@ -663,8 +846,8 @@ def create_find_contacts(writer_func: Any):
                 shape_data_b, quat_b, pos_b, pos_a, bsphere_radius_a + rigid_contact_margin
             )
 
-        # Compute contacts using GJK/MPR
-        count, normal, signed_distances, points, radius_eff_a, radius_eff_b, features = compute_gjk_mpr_contacts(
+        # Compute and write contacts using GJK/MPR
+        wp.static(create_compute_gjk_mpr_contacts(writer_func))(
             shape_data_a,
             shape_data_b,
             quat_a,
@@ -672,27 +855,12 @@ def create_find_contacts(writer_func: Any):
             pos_a_adjusted,
             pos_b_adjusted,
             rigid_contact_margin,
+            shape_a,
+            shape_b,
+            thickness_a,
+            thickness_b,
+            writer_data,
         )
-
-        # Write contacts using the writer function
-        pair_key = build_pair_key2(wp.uint32(shape_a), wp.uint32(shape_b))
-
-        for id in range(count):
-            contact_data = ContactData()
-            contact_data.contact_point_center = points[id]
-            contact_data.contact_normal_a_to_b = normal
-            contact_data.contact_distance = signed_distances[id]
-            contact_data.radius_eff_a = radius_eff_a
-            contact_data.radius_eff_b = radius_eff_b
-            contact_data.thickness_a = thickness_a
-            contact_data.thickness_b = thickness_b
-            contact_data.shape_a = shape_a
-            contact_data.shape_b = shape_b
-            contact_data.margin = rigid_contact_margin
-            contact_data.feature = features[id]
-            contact_data.feature_pair_key = pair_key
-
-            writer_func(contact_data, writer_data)
 
     return find_contacts
 
