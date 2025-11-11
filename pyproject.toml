@@ -25,7 +25,9 @@ classifiers = [
 description = "A GPU-accelerated physics engine for robotics simulation"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["warp-lang>=1.7.0.dev20250823"]
+dependencies = [
+    "warp-lang>=1.7.0.dev20250823",
+]
 
 [project.optional-dependencies]
 # Core simulation dependencies
@@ -102,9 +104,9 @@ explicit = true
 
 [tool.uv.sources]
 mujoco-warp = { git = "https://github.com/google-deepmind/mujoco_warp" }
-warp-lang = { index = "nvidia" }
 mujoco = { index = "mujoco" }
 torch = [{ index = "pytorch-cu129", extra = "torch-cu12" }]
+warp-lang = { path = "../warp", editable = true }
 
 [dependency-groups]
 dev = ["asv>=0.6.4"]
