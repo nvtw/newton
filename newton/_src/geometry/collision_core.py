@@ -296,6 +296,57 @@ def no_post_process_contact(contact_data: ContactData, geom_a: GenericShapeData,
     return contact_data
 
 
+@wp.func
+def post_process_triangle_contact(contact_data: ContactData, geom_a: GenericShapeData, pos_a_adjusted: wp.vec3, rot_a: wp.quat, geom_b: GenericShapeData, pos_b_adjusted: wp.vec3, rot_b: wp.quat) -> ContactData:
+    """
+    Post-process a single contact for triangle vs convex shape collisions.
+
+    This function checks if the contact normal is pushing an object into the triangle
+    (opposite to the triangle's face normal) and zeros the penetration depth if needed.
+    This prevents incorrect contact forces that would push objects through triangles.
+
+    Args:
+        contact_data: Contact data to post-process
+        geom_a: Triangle shape data (type=TRIANGLE, scale=B-A, auxiliary=C-A)
+        pos_a_adjusted: Position of triangle vertex A in world space
+        rot_a: Orientation of shape A (unused for triangles)
+        geom_b: Convex shape data
+        pos_b_adjusted: Position of shape B
+        rot_b: Orientation of shape B
+
+    Returns:
+        Post-processed contact data
+    """
+    # Reconstruct triangle vertices from shape data
+    # Triangle is stored as: vertex A at origin (pos_a_adjusted), B-A in scale, C-A in auxiliary
+    v0_world = pos_a_adjusted
+    v1_world = pos_a_adjusted + geom_a.scale  # A + (B - A) = B
+    v2_world = pos_a_adjusted + geom_a.auxiliary  # A + (C - A) = C
+
+    # Compute triangle normal (cross product of edges)
+    edge1 = v1_world - v0_world  # B - A
+    edge2 = v2_world - v0_world  # C - A
+    triangle_normal = wp.normalize(wp.cross(edge1, edge2))
+
+    # Post-process contacts: check if contact normal is pushing object into the triangle
+    # Only apply correction if the contact normal is nearly parallel to the triangle normal
+    # (within 10 degrees, meaning cos(angle) > cos(10°) ≈ 0.985)
+    cos_threshold = wp.static(wp.cos(wp.radians(10.0)))
+    normal = contact_data.contact_normal_a_to_b
+    dot_product = wp.dot(normal, triangle_normal)
+    abs_dot = wp.abs(dot_product)
+
+    # Check if nearly parallel (within 10 degrees of 0° or 180°)
+    if abs_dot > cos_threshold:
+        # If dot product is negative, contact normal is pointing opposite to triangle normal
+        # (pushing object into the triangle), so we flip the normal and zero the penetration
+        if dot_product < 0.0:
+            contact_data.contact_normal_a_to_b = -normal
+            contact_data.contact_distance = 0.0  # This prevents energetic reactions
+
+    return contact_data
+
+
 def create_compute_gjk_mpr_contacts(writer_func: Any, post_process_contact: Any = no_post_process_contact):
     """
     Factory function to create a compute_gjk_mpr_contacts function with a specific writer function.
@@ -459,133 +510,6 @@ def create_compute_gjk_mpr_contacts(writer_func: Any, post_process_contact: Any 
             writer_func(contact_data, writer_data)
 
     return compute_gjk_mpr_contacts
-
-
-# Also export a standalone version that returns contacts without writing (for cases that need post-processing)
-@wp.func
-def compute_gjk_mpr_contacts_no_write(
-    geom_a: GenericShapeData,
-    geom_b: GenericShapeData,
-    rot_a: wp.quat,
-    rot_b: wp.quat,
-    pos_a_adjusted: wp.vec3,
-    pos_b_adjusted: wp.vec3,
-    rigid_contact_margin: float,
-):
-    """
-    Compute contacts between two shapes using GJK/MPR algorithm (without writing).
-
-    Args:
-        geom_a: Generic shape data for shape A (contains shape_type)
-        geom_b: Generic shape data for shape B (contains shape_type)
-        rot_a: Orientation of shape A
-        rot_b: Orientation of shape B
-        pos_a_adjusted: Adjusted position of shape A
-        pos_b_adjusted: Adjusted position of shape B
-        rigid_contact_margin: Contact margin for rigid bodies
-
-    Returns:
-        Tuple of (count, normal, signed_distances, points, radius_eff_a, radius_eff_b, features)
-    """
-    data_provider = SupportMapDataProvider()
-
-    radius_eff_a = float(0.0)
-    radius_eff_b = float(0.0)
-
-    small_radius = 0.0001
-
-    # Get shape types from shape data
-    type_a = geom_a.shape_type
-    type_b = geom_b.shape_type
-
-    # Special treatment for minkowski objects
-    if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
-        radius_eff_a = geom_a.scale[0]
-        geom_a.scale[0] = small_radius
-
-    if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
-        radius_eff_b = geom_b.scale[0]
-        geom_b.scale[0] = small_radius
-
-    if wp.static(ENABLE_MULTI_CONTACT):
-        count, normal, signed_distances, points, features = wp.static(solve_convex_multi_contact)(
-            geom_a,
-            geom_b,
-            rot_a,
-            rot_b,
-            pos_a_adjusted,
-            pos_b_adjusted,
-            0.0,  # sum_of_contact_offsets - gap
-            data_provider,
-            rigid_contact_margin + radius_eff_a + radius_eff_b,
-            type_a == int(GeoType.SPHERE) or type_b == int(GeoType.SPHERE),
-        )
-    else:
-        count, normal, signed_distances, points, features = wp.static(solve_convex_single_contact)(
-            geom_a,
-            geom_b,
-            rot_a,
-            rot_b,
-            pos_a_adjusted,
-            pos_b_adjusted,
-            0.0,  # sum_of_contact_offsets - gap
-            data_provider,
-            rigid_contact_margin + radius_eff_a + radius_eff_b,
-        )
-
-    # Special post processing for minkowski objects
-    if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
-        for i in range(count):
-            points[i] = points[i] + normal * (radius_eff_a * 0.5)
-            signed_distances[i] -= radius_eff_a - small_radius
-    if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
-        for i in range(count):
-            points[i] = points[i] - normal * (radius_eff_b * 0.5)
-            signed_distances[i] -= radius_eff_b - small_radius
-
-    if wp.static(ENABLE_MULTI_CONTACT):
-        # Post-process for axial shapes (cylinder/cone) rolling on discrete surfaces
-        is_discrete_a = is_discrete_shape(geom_a.shape_type)
-        is_discrete_b = is_discrete_shape(geom_b.shape_type)
-        is_axial_a = type_a == int(GeoType.CYLINDER) or type_a == int(GeoType.CONE)
-        is_axial_b = type_b == int(GeoType.CYLINDER) or type_b == int(GeoType.CONE)
-
-        if is_discrete_a and is_axial_b and count >= 3:
-            # Post-process axial shape (B) rolling on discrete surface (A)
-            shape_radius = geom_b.scale[0]  # radius for cylinder, base radius for cone
-            shape_half_height = geom_b.scale[1]
-            is_cone_b = type_b == int(GeoType.CONE)
-            count, signed_distances, points = postprocess_axial_shape_discrete_contacts(
-                points,
-                normal,
-                signed_distances,
-                count,
-                rot_b,
-                shape_radius,
-                shape_half_height,
-                pos_b_adjusted,
-                is_cone_b,
-            )
-
-        if is_discrete_b and is_axial_a and count >= 3:
-            # Post-process axial shape (A) rolling on discrete surface (B)
-            # Note: normal points from A to B, so we need to negate it for the shape processing
-            shape_radius = geom_a.scale[0]  # radius for cylinder, base radius for cone
-            shape_half_height = geom_a.scale[1]
-            is_cone_a = type_a == int(GeoType.CONE)
-            count, signed_distances, points = postprocess_axial_shape_discrete_contacts(
-                points,
-                -normal,
-                signed_distances,
-                count,
-                rot_a,
-                shape_radius,
-                shape_half_height,
-                pos_a_adjusted,
-                is_cone_a,
-            )
-
-    return count, normal, signed_distances, points, radius_eff_a, radius_eff_b, features
 
 
 @wp.func

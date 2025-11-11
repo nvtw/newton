@@ -25,14 +25,13 @@ from ..geometry.collision_core import (
     ENABLE_TILE_BVH_QUERY,
     ContactData,
     build_pair_key2,
-    build_pair_key3,
-    compute_gjk_mpr_contacts_no_write,
     compute_tight_aabb_from_support,
+    create_compute_gjk_mpr_contacts,
     create_find_contacts,
     find_pair_from_cumulative_index,
     get_triangle_shape_from_mesh,
     mesh_vs_convex_midphase,
-    postprocess_triangle_contacts,
+    post_process_triangle_contact,
     pre_contact_check,
 )
 from ..geometry.support_function import (
@@ -495,8 +494,9 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
             cutoff_b = geom_cutoff[shape_b]
             margin = wp.max(cutoff_a, cutoff_b)
 
-            # Compute contacts using GJK/MPR
-            count, normal, signed_distances, points, radius_eff_a, radius_eff_b, features = compute_gjk_mpr_contacts_no_write(
+            # Compute and write contacts using GJK/MPR with triangle post-processing
+            # The post-processing fixes normal direction if needed to prevent objects from being pushed INTO triangles
+            wp.static(create_compute_gjk_mpr_contacts(writer_func, post_process_triangle_contact))(
                 shape_data_a,
                 shape_data_b,
                 quat_a,
@@ -504,37 +504,12 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
                 pos_a,
                 pos_b,
                 margin,
+                shape_a,
+                shape_b,
+                thickness_a,
+                thickness_b,
+                writer_data,
             )
-
-            # Post-process triangle contacts to fix normal direction if needed
-            # This ensures contact normals don't push objects INTO triangles
-            signed_distances, normal = postprocess_triangle_contacts(
-                shape_data_a,
-                pos_a,
-                normal,
-                signed_distances,
-                count,
-            )
-
-            # Write contacts
-            for contact_id in range(count):
-                pair_key = build_pair_key3(wp.uint32(shape_a), wp.uint32(shape_b), wp.uint32(tri_idx))
-
-                contact_data = ContactData()
-                contact_data.contact_point_center = points[contact_id]
-                contact_data.contact_normal_a_to_b = normal
-                contact_data.contact_distance = signed_distances[contact_id]
-                contact_data.radius_eff_a = radius_eff_a
-                contact_data.radius_eff_b = radius_eff_b
-                contact_data.thickness_a = thickness_a
-                contact_data.thickness_b = thickness_b
-                contact_data.shape_a = shape_a
-                contact_data.shape_b = shape_b
-                contact_data.margin = margin
-                contact_data.feature = features[contact_id]
-                contact_data.feature_pair_key = pair_key
-
-                writer_func(contact_data, writer_data)
 
     return narrow_phase_process_mesh_triangle_contacts_kernel
 
