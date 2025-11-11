@@ -44,11 +44,6 @@ COS_TILT_ANGLE = wp.static(wp.cos(TILT_ANGLE_RAD))
 COS_DEEPEST_CONTACT_THRESHOLD_ANGLE = wp.static(wp.cos(0.1 * wp.pi / 180.0))
 
 
-Mat53f = wp.types.matrix(shape=(5, 3), dtype=wp.float32)
-vec5 = wp.types.vector(5, wp.float32)
-vec5u = wp.types.vector(5, wp.uint32)
-
-
 @wp.func
 def should_include_deepest_contact(normal_dot: float) -> bool:
     return normal_dot < COS_DEEPEST_CONTACT_THRESHOLD_ANGLE
@@ -860,102 +855,6 @@ def add_avoid_duplicates_vec2(
 vec6_uint8 = wp.types.vector(6, wp.uint8)
 
 
-@wp.func
-def extract_4_point_contact_manifolds(
-    m_a: wp.array(dtype=wp.vec2),
-    features_a: wp.types.vector(6, wp.uint8),
-    m_a_count: int,
-    m_b: wp.array(dtype=wp.vec2),
-    features_b: wp.types.vector(6, wp.uint8),
-    m_b_count: int,
-    normal: wp.vec3,
-    cross_vector_1: wp.vec3,
-    cross_vector_2: wp.vec3,
-    center: wp.vec3,
-    projector_a: BodyProjector,
-    projector_b: BodyProjector,
-) -> tuple[int, float, Mat53f, vec5, vec5u]:
-    """
-    Extract up to 4 contact points from two convex contact polygons using polygon clipping (before optional deepest point addition).
-
-        This function performs the core manifold generation algorithm:
-        1. Validates input polygons (already in 2D contact plane space)
-        2. Clips polygon B against all edges of polygon A (Sutherland-Hodgman style clipping)
-        3. Removes zero-length edges from the clipped result
-        4. If more than 4 points remain, selects the best 4 using rotating calipers algorithm
-        5. Projects all contact points back onto the original shape surfaces in world space
-        6. Computes and tracks feature IDs for contact persistence
-        Note: Returns up to 4 contacts; the 5th can be added later via should_include_deepest_contact check
-
-    Args:
-        m_a: Contact polygon vertices for shape A (already in 2D contact plane space, up to 6 points).
-             Modified in place and used as output buffer.
-        features_a: Feature IDs for each vertex of polygon A.
-        m_a_count: Number of vertices in polygon A.
-        m_b: Contact polygon vertices for shape B (already in 2D contact plane space, up to 6 points).
-             Modified in place and used as output buffer. Must have space for 12 points.
-        features_b: Feature IDs for each vertex of polygon B.
-        m_b_count: Number of vertices in polygon B.
-        normal: Collision normal vector pointing from A to B.
-        cross_vector_1: First tangent vector (forms contact plane basis with cross_vector_2).
-        cross_vector_2: Second tangent vector (forms contact plane basis with cross_vector_1).
-        center: Center point for back-projection to world space.
-        projector_a: Body projector for shape A.
-        projector_b: Body projector for shape B.
-
-    Returns:
-        Tuple of (loop_count, normal_dot, contact_points, signed_distances, feature_ids) where:
-        - loop_count: Number of valid contact points generated (0-4)
-        - normal_dot: Absolute dot product of polygon normals
-        - contact_points: Mat53f matrix containing contact point positions
-        - signed_distances: vec5 containing signed distances for each contact
-        - feature_ids: vec5u containing feature IDs for contact tracking
-    """
-
-    normal_dot = wp.abs(wp.dot(projector_a.normal, projector_b.normal))
-
-    # Initialize loop segment IDs for polygon B
-    loop_seg_ids = wp.zeros(shape=(12,), dtype=wp.uint8)
-    for i in range(m_b_count):
-        loop_seg_ids[i] = wp.uint8(i + 6)
-
-    loop_count = trim_all_in_place(m_a, m_a_count, m_b, loop_seg_ids, m_b_count)
-
-    loop_count = remove_zero_length_edges(m_b, loop_seg_ids, loop_count, EPS)
-
-    contact_points = Mat53f()
-    signed_distances = vec5()
-    feature_ids = vec5u()
-
-    if loop_count > 1:
-        original_loop_count = loop_count
-        result = wp.vec4i()
-        if loop_count > 4:
-            result = approx_max_quadrilateral_area_with_calipers(m_b, loop_count)
-            loop_count = 4
-        else:
-            result = wp.vec4i(0, 1, 2, 3)
-
-        for i in range(loop_count):
-            ia = int(result[i])
-
-            feature_ids[i] = feature_id(
-                loop_seg_ids, ia, original_loop_count, features_a, features_b, m_a_count, m_b_count
-            )
-
-            # Transform back to world space using projectors
-            p_world = m_b[ia].x * cross_vector_1 + m_b[ia].y * cross_vector_2 + center
-
-            # normal vector points from A to B
-            a = body_projector_project(projector_a, p_world, normal)
-            b = body_projector_project(projector_b, p_world, normal)
-            contact_points[i] = 0.5 * (a + b)
-            signed_distances[i] = wp.dot(b - a, normal)
-    else:
-        normal_dot = 0.0
-        loop_count = 0
-
-    return loop_count, normal_dot, contact_points, signed_distances, feature_ids
 
 
 def create_build_manifold(support_func: Any, writer_func: Any, post_process_contact: Any):
@@ -976,6 +875,121 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
         build_manifold function that generates up to 5 contact points between two shapes
         using perturbed support mapping and polygon clipping.
     """
+
+    @wp.func
+    def extract_4_point_contact_manifolds(
+        m_a: wp.array(dtype=wp.vec2),
+        features_a: wp.types.vector(6, wp.uint8),
+        m_a_count: int,
+        m_b: wp.array(dtype=wp.vec2),
+        features_b: wp.types.vector(6, wp.uint8),
+        m_b_count: int,
+        normal: wp.vec3,
+        cross_vector_1: wp.vec3,
+        cross_vector_2: wp.vec3,
+        center: wp.vec3,
+        projector_a: BodyProjector,
+        projector_b: BodyProjector,
+        writer_data: Any,
+        contact_template: Any,
+        geom_a: Any,
+        geom_b: Any,
+        position_a: wp.vec3,
+        position_b: wp.vec3,
+        quaternion_a: wp.quat,
+        quaternion_b: wp.quat,
+    ) -> tuple[int, float]:
+        """
+        Extract up to 4 contact points from two convex contact polygons and write them immediately.
+
+        This function performs the core manifold generation algorithm:
+        1. Validates input polygons (already in 2D contact plane space)
+        2. Clips polygon B against all edges of polygon A (Sutherland-Hodgman style clipping)
+        3. Removes zero-length edges from the clipped result
+        4. If more than 4 points remain, selects the best 4 using rotating calipers algorithm
+        5. Projects all contact points back onto the original shape surfaces in world space
+        6. Post-processes and writes each contact immediately
+
+        Uses writer_func and post_process_contact from the factory closure.
+
+        Args:
+            m_a: Contact polygon vertices for shape A (2D contact plane space, up to 6 points).
+            features_a: Feature IDs for each vertex of polygon A.
+            m_a_count: Number of vertices in polygon A.
+            m_b: Contact polygon vertices for shape B (2D contact plane space, up to 6 points, space for 12).
+            features_b: Feature IDs for each vertex of polygon B.
+            m_b_count: Number of vertices in polygon B.
+            normal: Collision normal vector pointing from A to B.
+            cross_vector_1: First tangent vector (forms contact plane basis).
+            cross_vector_2: Second tangent vector (forms contact plane basis).
+            center: Center point for back-projection to world space.
+            projector_a: Body projector for shape A.
+            projector_b: Body projector for shape B.
+            writer_data: Data structure for contact writer.
+            contact_template: Pre-packed ContactData with static fields.
+            geom_a: Geometry data for shape A.
+            geom_b: Geometry data for shape B.
+            position_a: World position of shape A.
+            position_b: World position of shape B.
+            quaternion_a: Orientation of shape A.
+            quaternion_b: Orientation of shape B.
+
+        Returns:
+            Tuple of (loop_count, normal_dot) where:
+            - loop_count: Number of valid contact points written (0-4)
+            - normal_dot: Absolute dot product of polygon normals
+        """
+
+        normal_dot = wp.abs(wp.dot(projector_a.normal, projector_b.normal))
+
+        # Initialize loop segment IDs for polygon B
+        loop_seg_ids = wp.zeros(shape=(12,), dtype=wp.uint8)
+        for i in range(m_b_count):
+            loop_seg_ids[i] = wp.uint8(i + 6)
+
+        loop_count = trim_all_in_place(m_a, m_a_count, m_b, loop_seg_ids, m_b_count)
+
+        loop_count = remove_zero_length_edges(m_b, loop_seg_ids, loop_count, EPS)
+
+        if loop_count > 1:
+            original_loop_count = loop_count
+            result = wp.vec4i()
+            if loop_count > 4:
+                result = approx_max_quadrilateral_area_with_calipers(m_b, loop_count)
+                loop_count = 4
+            else:
+                result = wp.vec4i(0, 1, 2, 3)
+
+            for i in range(loop_count):
+                ia = int(result[i])
+
+                feature = feature_id(
+                    loop_seg_ids, ia, original_loop_count, features_a, features_b, m_a_count, m_b_count
+                )
+
+                # Transform back to world space using projectors
+                p_world = m_b[ia].x * cross_vector_1 + m_b[ia].y * cross_vector_2 + center
+
+                # normal vector points from A to B
+                a = body_projector_project(projector_a, p_world, normal)
+                b = body_projector_project(projector_b, p_world, normal)
+                contact_point = 0.5 * (a + b)
+                signed_distance = wp.dot(b - a, normal)
+
+                # Write contact immediately
+                contact_data = contact_template
+                contact_data.contact_point_center = contact_point
+                contact_data.contact_normal_a_to_b = normal
+                contact_data.contact_distance = signed_distance
+                contact_data.feature = feature
+
+                contact_data = post_process_contact(contact_data, geom_a, position_a, quaternion_a, geom_b, position_b, quaternion_b)
+                writer_func(contact_data, writer_data)
+        else:
+            normal_dot = 0.0
+            loop_count = 0
+
+        return loop_count, normal_dot
 
     @wp.func
     def build_manifold(
@@ -1096,14 +1110,10 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
                 features_b[b_count - 1] = wp.uint8(int(feature_b) + 1)
                 plane_tracker_b = update_incremental_plane_tracker(plane_tracker_b, pt_b_3d, b_count - 1)
 
-        # Early-out for simple cases: if both have <=2 or either is empty, return single anchor pair
-        # if True or a_count < 3 or b_count < 3:
-        if a_count < 2 or b_count < 2:  # or (a_count < 3 and b_count < 3):
+        # Early-out for simple cases: if both have <=2 or either is empty
+        if a_count < 2 or b_count < 2:
             count_out = 0
             normal_dot = 0.0
-            contact_points = Mat53f()
-            signed_distances = vec5()
-            feature_ids = vec5u()
         else:
             # Projectors for back-projection onto the shape surfaces
             projector_a, projector_b = create_body_projectors(plane_tracker_a, p_a, plane_tracker_b, p_b, normal)
@@ -1113,49 +1123,49 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
             ):
                 count_out = 0
                 normal_dot = 0.0
-                contact_points = Mat53f()
-                signed_distances = vec5()
-                feature_ids = vec5u()
             else:
-                # All feature ids are one based such that it is clearly visible in a uint which of the 4 slots (8 bits each) are in use
-                num_manifold_points, normal_dot, contact_points, signed_distances, feature_ids = (
-                    extract_4_point_contact_manifolds(
-                        a_buffer,
-                        features_a,
-                        a_count,
-                        b_buffer,
-                        features_b,
-                        b_count,
-                        normal,
-                        tangent_a,
-                        tangent_b,
-                        0.5 * (p_a + p_b),
-                        projector_a,
-                        projector_b,
-                    )
+                # Extract and write up to 4 contact points
+                num_manifold_points, normal_dot = extract_4_point_contact_manifolds(
+                    a_buffer,
+                    features_a,
+                    a_count,
+                    b_buffer,
+                    features_b,
+                    b_count,
+                    normal,
+                    tangent_a,
+                    tangent_b,
+                    0.5 * (p_a + p_b),
+                    projector_a,
+                    projector_b,
+                    writer_data,
+                    contact_template,
+                    geom_a,
+                    geom_b,
+                    position_a,
+                    position_b,
+                    quaternion_a,
+                    quaternion_b,
                 )
                 count_out = wp.min(num_manifold_points, 4)
 
         # Check if we should include the deepest contact point using the normal_dot
         # computed from the polygon normals in extract_4_point_contact_manifolds
         if should_include_deepest_contact(normal_dot) or count_out == 0:
+            # Write the deepest contact immediately
             deepest_contact_center = 0.5 * (p_a + p_b)
-            contact_points[count_out] = deepest_contact_center
-            signed_distances[count_out] = wp.dot(p_b - p_a, normal)
-            feature_ids[count_out] = wp.uint32(0)  # Use 0 for the deepest contact feature ID
-            count_out += 1
+            deepest_signed_distance = wp.dot(p_b - p_a, normal)
 
-        # Write contacts using the writer function after post-processing
-        for id in range(count_out):
             contact_data = contact_template
-            contact_data.contact_point_center = contact_points[id]
+            contact_data.contact_point_center = deepest_contact_center
             contact_data.contact_normal_a_to_b = normal
-            contact_data.contact_distance = signed_distances[id]
-            contact_data.feature = feature_ids[id]
+            contact_data.contact_distance = deepest_signed_distance
+            contact_data.feature = wp.uint32(0)  # Use 0 for the deepest contact feature ID
 
             contact_data = post_process_contact(contact_data, geom_a, position_a, quaternion_a, geom_b, position_b, quaternion_b)
-
             writer_func(contact_data, writer_data)
+
+            count_out += 1
 
         return count_out
 
