@@ -908,8 +908,7 @@ def extract_4_point_contact_manifolds(
     cross_vector_2: wp.vec3,
     anchor_point_a: wp.vec3,
     anchor_point_b: wp.vec3,
-    result_features: wp.array(dtype=wp.uint32),
-) -> tuple[int, float, Mat53f, vec5]:
+) -> tuple[int, float, Mat53f, vec5, vec5u]:
     """
     Extract up to 4 contact points from two convex contact polygons using polygon clipping (before optional deepest point addition).
 
@@ -937,24 +936,19 @@ def extract_4_point_contact_manifolds(
         cross_vector_2: Second tangent vector (forms contact plane basis with cross_vector_1).
         anchor_point_a: Anchor contact point on shape A (from GJK/MPR).
         anchor_point_b: Anchor contact point on shape B (from GJK/MPR).
-        result_features: Output array for feature IDs of final contact points.
 
     Returns:
-        Tuple of (loop_count, normal_dot, contact_points, signed_distances) where:
+        Tuple of (loop_count, normal_dot, contact_points, signed_distances, feature_ids) where:
         - loop_count: Number of valid contact points generated (0-4)
         - normal_dot: Absolute dot product of polygon normals
         - contact_points: Mat53f matrix containing contact point positions
         - signed_distances: vec5 containing signed distances for each contact
-        Note: Contact points are also stored in m_a (shape A side) and m_b (shape B side)
-        arrays, with feature IDs in result_features.
+        - feature_ids: vec5u containing feature IDs for contact tracking
     """
     # Early-out for simple cases: if both have <=2 or either is empty, return single anchor pair
     # if True or m_a_count < 3 or m_b_count < 3:
     if m_a_count < 2 or m_b_count < 2:  # or (m_a_count < 3 and m_b_count < 3):
-        # m_a[0] = anchor_point_a
-        # m_b[0] = anchor_point_b
-        # result_features[0] = wp.uint32(0)
-        return 0, 0.0, Mat53f(), vec5()
+        return 0, 0.0, Mat53f(), vec5(), vec5u()
 
     # Projectors for back-projection onto the shape surfaces
     projector_a, projector_b = create_body_projectors(
@@ -962,10 +956,7 @@ def extract_4_point_contact_manifolds(
     )
 
     if excess_normal_deviation(normal, projector_a.normal) or excess_normal_deviation(normal, projector_b.normal):
-        # m_a[0] = anchor_point_a
-        # m_b[0] = anchor_point_b
-        # result_features[0] = wp.uint32(0)
-        return 0, 0.0, Mat53f(), vec5()
+        return 0, 0.0, Mat53f(), vec5(), vec5u()
 
     normal_dot = wp.abs(wp.dot(projector_a.normal, projector_b.normal))
 
@@ -999,6 +990,7 @@ def extract_4_point_contact_manifolds(
 
     contact_points = Mat53f()
     signed_distances = vec5()
+    feature_ids = vec5u()
 
     if loop_count > 1:
         original_loop_count = loop_count
@@ -1012,7 +1004,7 @@ def extract_4_point_contact_manifolds(
         for i in range(loop_count):
             ia = int(result[i])
 
-            result_features[i] = feature_id(
+            feature_ids[i] = feature_id(
                 loop_seg_ids, ia, original_loop_count, features_a, features_b, m_a_count, m_b_count
             )
 
@@ -1028,7 +1020,7 @@ def extract_4_point_contact_manifolds(
         normal_dot = 0.0
         loop_count = 0
 
-    return loop_count, normal_dot, contact_points, signed_distances
+    return loop_count, normal_dot, contact_points, signed_distances, feature_ids
 
 
 def create_build_manifold(support_func: Any):
@@ -1062,7 +1054,6 @@ def create_build_manifold(support_func: Any):
         normal: wp.vec3,
         a_buffer: wp.array(dtype=wp.vec3),
         b_buffer: wp.array(dtype=wp.vec3),
-        result_features: wp.array(dtype=wp.uint32),
         feature_anchor_a: wp.int32,
         feature_anchor_b: wp.int32,
         data_provider: Any,
@@ -1094,7 +1085,6 @@ def create_build_manifold(support_func: Any):
             normal: Collision normal pointing from A to B.
             a_buffer: Output buffer for shape A contact points (preallocated, size 6).
             b_buffer: Output buffer for shape B contact points (preallocated, size 12).
-            result_features: Output buffer for feature IDs (preallocated, size 6).
             feature_anchor_a: Feature ID of anchor point on shape A.
             feature_anchor_b: Feature ID of anchor point on shape B.
             data_provider: Support mapping data provider.
@@ -1171,7 +1161,6 @@ def create_build_manifold(support_func: Any):
             tangent_b,
             p_a,
             p_b,
-            result_features,
         )
 
     @wp.func
@@ -1238,9 +1227,9 @@ def create_build_manifold(support_func: Any):
         right = wp.zeros(
             shape=(12,), dtype=wp.vec3
         )  # Array for shape B contact points - also provides storage for intermediate results
-        result_features = wp.zeros(shape=(6,), dtype=wp.uint32)
+        # result_features = wp.zeros(shape=(6,), dtype=wp.uint32)
 
-        num_manifold_points, normal_dot, contact_points, signed_distances = build_manifold_core(
+        num_manifold_points, normal_dot, contact_points, signed_distances, feature_ids = build_manifold_core(
             geom_a,
             geom_b,
             quaternion_a,
@@ -1252,30 +1241,22 @@ def create_build_manifold(support_func: Any):
             normal,
             left,
             right,
-            result_features,
             feature_anchor_a,
             feature_anchor_b,
             data_provider,
         )
 
-        # Extract results into fixed-size matrices
-        feature_ids = vec5u(wp.uint32(0), wp.uint32(0), wp.uint32(0), wp.uint32(0), wp.uint32(0))
-
         # Copy contact points and extract feature IDs
         count_out = wp.min(num_manifold_points, 4)
-        for i in range(count_out):
-            feature_ids[i] = result_features[i]
 
-        # Check if we should include the deepest contact point
-        if count_out < 5:
-            # Check if we should include the deepest contact point using the normal_dot
-            # computed from the polygon normals in extract_4_point_contact_manifolds
-            if should_include_deepest_contact(normal_dot) or count_out == 0:
-                deepest_contact_center = 0.5 * (p_a + p_b)
-                contact_points[count_out] = deepest_contact_center
-                signed_distances[count_out] = wp.dot(p_b - p_a, normal)
-                feature_ids[count_out] = wp.uint32(0)  # Use 0 for the deepest contact feature ID
-                count_out += 1
+        # Check if we should include the deepest contact point using the normal_dot
+        # computed from the polygon normals in extract_4_point_contact_manifolds
+        if should_include_deepest_contact(normal_dot) or count_out == 0:
+            deepest_contact_center = 0.5 * (p_a + p_b)
+            contact_points[count_out] = deepest_contact_center
+            signed_distances[count_out] = wp.dot(p_b - p_a, normal)
+            feature_ids[count_out] = wp.uint32(0)  # Use 0 for the deepest contact feature ID
+            count_out += 1
 
         return count_out, signed_distances, contact_points, feature_ids
 
