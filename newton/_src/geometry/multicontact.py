@@ -178,50 +178,6 @@ def update_incremental_plane_tracker(
 
 
 @wp.func
-def make_body_projector_from_polygon(
-    poly: wp.array(dtype=wp.vec3), poly_count: int, anchor_point: wp.vec3
-) -> BodyProjector:
-    """
-    Create a body projector (plane definition) from a polygon.
-
-    This function computes a best-fit plane for back-projecting contact points
-    onto the original shape surfaces. It uses the triangle with the largest area
-    to compute a robust normal vector, avoiding numerical issues with collinear points.
-
-    Args:
-        poly: Array of polygon vertices in world space.
-        poly_count: Number of vertices in the polygon.
-        anchor_point: Reference point on the plane (typically the contact anchor point).
-
-    Returns:
-        BodyProjector with the plane normal and plane_d parameter.
-    """
-    proj = BodyProjector()
-    # Find the triangle with the largest area for numerical stability
-    # This avoids issues with nearly collinear points
-    best_normal = wp.vec3(0.0, 0.0, 0.0)
-    max_area_sq = float(0.0)
-
-    for i in range(1, poly_count - 1):
-        # Compute cross product for triangle (poly[0], poly[i], poly[i+1])
-        edge1 = poly[i] - poly[0]
-        edge2 = poly[i + 1] - poly[0]
-        cross = wp.cross(edge1, edge2)
-        area_sq = wp.dot(cross, cross)
-
-        if area_sq > max_area_sq:
-            max_area_sq = area_sq
-            best_normal = cross
-
-    # Normalize, avoid zero
-    len_n = wp.sqrt(wp.max(1.0e-12, max_area_sq))
-    proj.normal = best_normal / len_n
-    # Compute plane_d from the plane equation: dot(point, normal) + plane_d = 0
-    proj.plane_d = -wp.dot(anchor_point, proj.normal)
-    return proj
-
-
-@wp.func
 def compute_line_segment_projector_normal(
     segment_dir: wp.vec3,
     reference_normal: wp.vec3,
@@ -245,54 +201,6 @@ def compute_line_segment_projector_normal(
 
 @wp.func
 def create_body_projectors(
-    poly_a: wp.array(dtype=wp.vec3),
-    poly_count_a: int,
-    anchor_point_a: wp.vec3,
-    poly_b: wp.array(dtype=wp.vec3),
-    poly_count_b: int,
-    anchor_point_b: wp.vec3,
-    contact_normal: wp.vec3,
-) -> tuple[BodyProjector, BodyProjector]:
-    projector_a = BodyProjector()
-    projector_b = BodyProjector()
-
-    if poly_count_a < 3 and poly_count_b < 3:
-        # Both are line segments - compute normals using contact_normal as reference
-        dir_a = poly_a[1] - poly_a[0]
-        dir_b = poly_b[1] - poly_b[0]
-
-        point_on_plane_a = 0.5 * (poly_a[0] + poly_a[1])
-        projector_a.normal = compute_line_segment_projector_normal(dir_a, contact_normal)
-        projector_a.plane_d = -wp.dot(point_on_plane_a, projector_a.normal)
-
-        point_on_plane_b = 0.5 * (poly_b[0] + poly_b[1])
-        projector_b.normal = compute_line_segment_projector_normal(dir_b, contact_normal)
-        projector_b.plane_d = -wp.dot(point_on_plane_b, projector_b.normal)
-
-        return projector_a, projector_b
-
-    if poly_count_a >= 3:
-        projector_a = make_body_projector_from_polygon(poly_a, poly_count_a, anchor_point_a)
-    if poly_count_b >= 3:
-        projector_b = make_body_projector_from_polygon(poly_b, poly_count_b, anchor_point_b)
-
-    if poly_count_a < 3:
-        dir = poly_a[1] - poly_a[0]
-        point_on_plane_a = 0.5 * (poly_a[0] + poly_a[1])
-        projector_a.normal = compute_line_segment_projector_normal(dir, projector_b.normal)
-        projector_a.plane_d = -wp.dot(point_on_plane_a, projector_a.normal)
-
-    if poly_count_b < 3:
-        dir = poly_b[1] - poly_b[0]
-        point_on_plane_b = 0.5 * (poly_b[0] + poly_b[1])
-        projector_b.normal = compute_line_segment_projector_normal(dir, projector_a.normal)
-        projector_b.plane_d = -wp.dot(point_on_plane_b, projector_b.normal)
-
-    return projector_a, projector_b
-
-
-@wp.func
-def create_body_projectors2(
     plane_tracker_a: IncrementalPlaneTracker,
     anchor_point_a: wp.vec3,
     plane_tracker_b: IncrementalPlaneTracker,
@@ -381,36 +289,18 @@ def intersection_point(trim_seg_start: wp.vec2, trim_seg_end: wp.vec2, a: wp.vec
     Returns:
         The intersection point as a vec2.
     """
-    dist_a = wp.abs(signed_area(trim_seg_start, trim_seg_end, a))
-    dist_b = wp.abs(signed_area(trim_seg_start, trim_seg_end, b))
-    interp_ab = dist_a / (dist_a + dist_b)
+    # Since a and b are on opposite sides, their signed areas have opposite signs
+    # We can optimize: abs(signed_a) + abs(signed_b) = abs(signed_a - signed_b)
+    signed_a = signed_area(trim_seg_start, trim_seg_end, a)
+    signed_b = signed_area(trim_seg_start, trim_seg_end, b)
+    interp_ab = wp.abs(signed_a) / wp.abs(signed_a - signed_b)
 
     # Interpolate between a and b
-    interpolated_ab = (1.0 - interp_ab) * a + interp_ab * b
-
-    return interpolated_ab
+    return (1.0 - interp_ab) * a + interp_ab * b
 
 
 @wp.func
 def insert_vec2(arr: wp.array(dtype=wp.vec2), arr_count: int, index: int, element: wp.vec2):
-    """
-    Insert an element into an array at the specified index, shifting elements to the right.
-
-    Args:
-        arr: Array to insert into.
-        arr_count: Current number of elements in the array.
-        index: Index at which to insert the element.
-        element: Element to insert.
-    """
-    i = arr_count
-    while i > index:
-        arr[i] = arr[i - 1]
-        i -= 1
-    arr[index] = element
-
-
-@wp.func
-def insert_vec3(arr: wp.array(dtype=wp.vec3), arr_count: int, index: int, element: wp.vec3):
     """
     Insert an element into an array at the specified index, shifting elements to the right.
 
@@ -966,36 +856,6 @@ def add_avoid_duplicates_vec2(
     return arr_count + 1, True
 
 
-@wp.func
-def add_avoid_duplicates_vec3(
-    arr: wp.array(dtype=wp.vec3), arr_count: int, vec: wp.vec3, eps: float
-) -> tuple[int, bool]:
-    """
-    Add a vector to an array, avoiding duplicates.
-
-    Args:
-        arr: Array to add to.
-        arr_count: Current number of elements in the array.
-        vec: Vector to add.
-        eps: Epsilon threshold for duplicate detection.
-
-    Returns:
-        Tuple of (new_count, was_added) where was_added is True if point was added
-    """
-    # Check for duplicates. If the new vertex 'vec' is too close to the first or last existing vertex, ignore it.
-    # This is a simple reduction step to avoid redundant points.
-    if arr_count > 0:
-        if wp.length_sq(arr[0] - vec) < eps:
-            return arr_count, False
-
-    if arr_count > 1:
-        if wp.length_sq(arr[arr_count - 1] - vec) < eps:
-            return arr_count, False
-
-    arr[arr_count] = vec
-    return arr_count + 1, True
-
-
 vec6_uint8 = wp.types.vector(6, wp.uint8)
 
 
@@ -1114,9 +974,8 @@ def create_build_manifold(support_func: Any):
         using perturbed support mapping and polygon clipping.
     """
 
-    # Main contact manifold generation function
     @wp.func
-    def build_manifold_core(
+    def build_manifold(
         geom_a: Any,
         geom_b: Any,
         quaternion_a: wp.quat,
@@ -1126,42 +985,49 @@ def create_build_manifold(support_func: Any):
         p_a: wp.vec3,
         p_b: wp.vec3,
         normal: wp.vec3,
-        feature_anchor_a: wp.int32,
-        feature_anchor_b: wp.int32,
         data_provider: Any,
-    ) -> tuple[int, float, Mat53f, vec5]:
+    ) -> tuple[
+        int,
+        vec5,
+        Mat53f,
+        vec5u,
+    ]:
         """
-        Core implementation of multi-contact manifold generation using perturbed support mapping.
+        Build a contact manifold between two convex shapes using perturbed support mapping and polygon clipping.
 
-        This function discovers contact polygons on both shapes by querying the support function
-        in 6 perturbed directions around the collision normal. The perturbed directions form
-        a hexagonal pattern tilted 2 degrees from the contact plane. The resulting contact
-        polygons are then clipped and reduced to up to 4 contact points.
+        This function generates up to 4 contact points between two colliding convex shapes by:
+        1. Finding contact polygons using perturbed support mapping in 6 directions
+        2. Clipping the polygons against each other in contact plane space
+        3. Selecting the best 4 points using rotating calipers algorithm if more than 4 exist
+        4. Transforming results back to world space with feature tracking
 
-        Internal buffers are allocated for storing the contact polygons during processing.
-
-        The two shapes must always be queried in the same order to get stable feature IDs
-        for contact tracking across frames.
+        The contact normal is the same for all contact points in the manifold. The two shapes
+        must always be queried in the same order to get stable feature IDs for contact tracking.
 
         Args:
-            geom_a: Geometry data for shape A.
-            geom_b: Geometry data for shape B.
-            quaternion_a: Orientation quaternion of shape A.
-            quaternion_b: Orientation quaternion of shape B.
-            position_a: World position of shape A.
-            position_b: World position of shape B.
-            p_a: Anchor contact point on shape A (from GJK/MPR).
-            p_b: Anchor contact point on shape B (from GJK/MPR).
-            normal: Collision normal pointing from A to B.
-            feature_anchor_a: Feature ID of anchor point on shape A.
-            feature_anchor_b: Feature ID of anchor point on shape B.
-            data_provider: Support mapping data provider.
-
+            geom_a: Geometry data for the first shape.
+            geom_b: Geometry data for the second shape.
+            quaternion_a: Orientation quaternion of the first shape.
+            quaternion_b: Orientation quaternion of the second shape.
+            position_a: World position of the first shape.
+            position_b: World position of the second shape.
+            p_a: Anchor contact point on the first shape (from GJK/MPR).
+            p_b: Anchor contact point on the second shape (from GJK/MPR).
+            normal: Contact normal vector pointing from shape A to shape B.
+            data_provider: Support mapping data provider for shape queries.
         Returns:
-            Tuple of (num_contacts, normal_dot, contact_points, signed_distances) where num_contacts
-            is the number of valid contact points generated (0-4), normal_dot is the absolute dot
-            product of polygon normals, contact_points is a Mat53f matrix of contact positions, and
-            signed_distances is a vec5 of signed distances.
+            A tuple containing:
+            - int: Number of valid contact points in the manifold (0-4).
+            - vec5: Signed distances for each contact point (negative when shapes overlap).
+            - Mat53f: Contact points at the center of the manifold contact
+              (midpoint between points on shape A and shape B) in world space.
+            - vec5u: Feature IDs for each contact point, enabling contact tracking across
+              multiple frames for warm starting and contact persistence.
+
+        Note:
+            The feature IDs encode geometric information about which features (vertices, edges,
+            or edge-edge intersections) each contact point represents, allowing the physics
+            solver to maintain contact consistency over time.
         """
 
         ROT_DELTA_ANGLE = wp.static(2.0 * wp.pi / float(6))
@@ -1235,108 +1101,42 @@ def create_build_manifold(support_func: Any):
         # Early-out for simple cases: if both have <=2 or either is empty, return single anchor pair
         # if True or a_count < 3 or b_count < 3:
         if a_count < 2 or b_count < 2:  # or (a_count < 3 and b_count < 3):
-            return 0, 0.0, Mat53f(), vec5(), vec5u()
+            count_out = 0
+            normal_dot = 0.0
+            contact_points = Mat53f()
+            signed_distances = vec5()
+            feature_ids = vec5u()
+        else:
+            # Projectors for back-projection onto the shape surfaces
+            projector_a, projector_b = create_body_projectors(plane_tracker_a, p_a, plane_tracker_b, p_b, normal)
 
-        # Projectors for back-projection onto the shape surfaces
-        projector_a, projector_b = create_body_projectors2(plane_tracker_a, p_a, plane_tracker_b, p_b, normal)
-
-        if excess_normal_deviation(normal, projector_a.normal) or excess_normal_deviation(normal, projector_b.normal):
-            return 0, 0.0, Mat53f(), vec5(), vec5u()
-
-        # All feature ids are one based such that it is clearly visible in a uint which of the 4 slots (8 bits each) are in use
-        return extract_4_point_contact_manifolds(
-            a_buffer,
-            features_a,
-            a_count,
-            b_buffer,
-            features_b,
-            b_count,
-            normal,
-            tangent_a,
-            tangent_b,
-            0.5 * (p_a + p_b),
-            projector_a,
-            projector_b,
-        )
-
-    @wp.func
-    def build_manifold(
-        geom_a: Any,
-        geom_b: Any,
-        quaternion_a: wp.quat,
-        quaternion_b: wp.quat,
-        position_a: wp.vec3,
-        position_b: wp.vec3,
-        p_a: wp.vec3,
-        p_b: wp.vec3,
-        normal: wp.vec3,
-        feature_anchor_a: wp.int32,
-        feature_anchor_b: wp.int32,
-        data_provider: Any,
-    ) -> tuple[
-        int,
-        vec5,
-        Mat53f,
-        vec5u,
-    ]:
-        """
-        Build a contact manifold between two convex shapes using perturbed support mapping and polygon clipping.
-
-        This function generates up to 5 contact points between two colliding convex shapes by:
-        1. Finding contact polygons using perturbed support mapping in 6 directions
-        2. Clipping the polygons against each other in contact plane space
-        3. Selecting the best 4 points using rotating calipers algorithm if more than 4 exist
-        4. Transforming results back to world space with feature tracking
-        5. Optionally appending the deepest contact point if should_include_deepest_contact returns true
-
-        The contact normal is the same for all contact points in the manifold. The two shapes
-        must always be queried in the same order to get stable feature IDs for contact tracking.
-
-        Args:
-            geom_a: Geometry data for the first shape.
-            geom_b: Geometry data for the second shape.
-            quaternion_a: Orientation quaternion of the first shape.
-            quaternion_b: Orientation quaternion of the second shape.
-            position_a: World position of the first shape.
-            position_b: World position of the second shape.
-            p_a: Anchor contact point on the first shape (from GJK/EPA).
-            p_b: Anchor contact point on the second shape (from GJK/EPA).
-            normal: Contact normal vector pointing from shape A to shape B.
-            feature_anchor_a: Feature ID of the anchor point on shape A. Can pass in 0 if anchor tracking is not needed.
-            feature_anchor_b: Feature ID of the anchor point on shape B. Can pass in 0 if anchor tracking is not needed.
-            data_provider: Support mapping data provider for shape queries.
-        Returns:
-            A tuple containing:
-            - int: Number of valid contact points in the manifold (0-5).
-            - vec5: Signed distances for each contact point (negative when shapes overlap).
-            - Mat53f: Contact points at the center of the manifold contact
-              (midpoint between points on shape A and shape B) in world space.
-            - vec5u: Feature IDs for each contact point, enabling contact tracking across
-              multiple frames for warm starting and contact persistence.
-
-        Note:
-            The feature IDs encode geometric information about which features (vertices, edges,
-            or edge-edge intersections) each contact point represents, allowing the physics
-            solver to maintain contact consistency over time.
-        """
-
-        num_manifold_points, normal_dot, contact_points, signed_distances, feature_ids = build_manifold_core(
-            geom_a,
-            geom_b,
-            quaternion_a,
-            quaternion_b,
-            position_a,
-            position_b,
-            p_a,
-            p_b,
-            normal,
-            feature_anchor_a,
-            feature_anchor_b,
-            data_provider,
-        )
-
-        # Copy contact points and extract feature IDs
-        count_out = wp.min(num_manifold_points, 4)
+            if excess_normal_deviation(normal, projector_a.normal) or excess_normal_deviation(
+                normal, projector_b.normal
+            ):
+                count_out = 0
+                normal_dot = 0.0
+                contact_points = Mat53f()
+                signed_distances = vec5()
+                feature_ids = vec5u()
+            else:
+                # All feature ids are one based such that it is clearly visible in a uint which of the 4 slots (8 bits each) are in use
+                num_manifold_points, normal_dot, contact_points, signed_distances, feature_ids = (
+                    extract_4_point_contact_manifolds(
+                        a_buffer,
+                        features_a,
+                        a_count,
+                        b_buffer,
+                        features_b,
+                        b_count,
+                        normal,
+                        tangent_a,
+                        tangent_b,
+                        0.5 * (p_a + p_b),
+                        projector_a,
+                        projector_b,
+                    )
+                )
+                count_out = wp.min(num_manifold_points, 4)
 
         # Check if we should include the deepest contact point using the normal_dot
         # computed from the polygon normals in extract_4_point_contact_manifolds

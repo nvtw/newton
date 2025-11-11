@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import warp as wp
 
 from .broad_phase_common import binary_search
@@ -23,7 +25,7 @@ from .support_function import GenericShapeData, GeoTypeEx, SupportMapDataProvide
 from .types import GeoType
 
 # Configuration flag for multi-contact generation
-ENABLE_MULTI_CONTACT = True
+ENABLE_MULTI_CONTACT = False
 
 # Configuration flag for tiled BVH queries (experimental)
 ENABLE_TILE_BVH_QUERY = True
@@ -35,6 +37,9 @@ solve_convex_single_contact = create_solve_convex_single_contact(support_map)
 # Type definitions for multi-contact manifolds
 _mat53f = wp.types.matrix((5, 3), wp.float32)
 _vec5 = wp.types.vector(5, wp.float32)
+
+# Type definitions for single-contact mode
+_vec1 = wp.types.vector(1, wp.float32)
 
 
 @wp.func
@@ -938,9 +943,9 @@ def postprocess_triangle_contacts(
     triangle_shape_data: GenericShapeData,
     triangle_pos: wp.vec3,
     normal: wp.vec3,
-    signed_distances: _vec5,
+    signed_distances: Any,
     count: int,
-) -> tuple[_vec5, wp.vec3]:
+):
     """
     Post-process contacts for triangle vs convex shape collisions.
 
@@ -955,7 +960,7 @@ def postprocess_triangle_contacts(
         triangle_shape_data: Triangle shape data (type=TRIANGLE, scale=B-A, auxiliary=C-A)
         triangle_pos: Position of triangle vertex A in world space
         normal: Contact normal from GJK/MPR (points from shape A to shape B)
-        signed_distances: Signed distances for each contact point
+        signed_distances: Signed distances for each contact point (can be _vec1 or _vec5)
         count: Number of contact points
 
     Returns:

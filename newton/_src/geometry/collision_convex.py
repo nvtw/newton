@@ -48,7 +48,7 @@ _vec5u = wp.types.vector(5, wp.uint32)
 # Single-contact types (saves registers)
 _mat13f = wp.types.matrix((1, 3), wp.float32)
 _vec1 = wp.types.vector(1, wp.float32)
-_vec1i = wp.types.vector(1, wp.int32)
+_vec1u = wp.types.vector(1, wp.uint32)
 
 
 def create_solve_convex_multi_contact(support_func: Any):
@@ -167,8 +167,6 @@ def create_solve_convex_multi_contact(support_func: Any):
             point - normal * (signed_distance * 0.5),  # Anchor point on shape A
             point + normal * (signed_distance * 0.5),  # Anchor point on shape B
             normal,
-            feature_a_id,
-            feature_b_id,
             data_provider,
         )
 
@@ -205,12 +203,13 @@ def create_solve_convex_single_contact(support_func: Any):
         sum_of_contact_offsets: float,
         data_provider: Any,
         contact_threshold: float = 0.0,
+        skip_multi_contact: bool = False,
     ) -> tuple[
         int,
         wp.vec3,
         _vec1,
         _mat13f,
-        _vec1i,
+        _vec1u,
     ]:
         """
         Compute a single contact point between two convex shapes.
@@ -229,14 +228,14 @@ def create_solve_convex_single_contact(support_func: Any):
             sum_of_contact_offsets: Sum of contact offsets for both shapes
             data_provider: Support mapping data provider
             contact_threshold: Signed distance threshold; skip contact if signed_distance > threshold (default: 0.0)
-            skip_multi_contact: Unused parameter for API compatibility
+            skip_multi_contact: Unused parameter for API compatibility (default: False)
         Returns:
             Tuple of:
                 count (int): Number of valid contact points (0 or 1)
                 normal (wp.vec3): Contact normal from A to B
                 signed_distances (_vec1): Signed distance (negative when overlapping)
                 points (_mat13f): Contact point in world space (midpoint between shapes)
-                features (_vec1i): Feature ID for contact tracking (always 0 for single contacts)
+                features (_vec1u): Feature ID for contact tracking (always 0 for single contacts)
         """
         # Enlarge a little bit to avoid contact flickering when the signed distance is close to 0
         enlarge = 1e-4
@@ -276,14 +275,14 @@ def create_solve_convex_single_contact(support_func: Any):
             signed_distances = _vec1(signed_distance)
             points = _mat13f()
             points[0] = point
-            features = _vec1i(0)
+            features = _vec1u(wp.uint32(0))
             return count, normal, signed_distances, points, features
 
         count = 1
         signed_distances = _vec1(signed_distance)
         points = _mat13f()
         points[0] = point
-        features = _vec1i(0)
+        features = _vec1u(wp.uint32(0))
         return count, normal, signed_distances, points, features
 
     return solve_convex_single_contact
