@@ -124,17 +124,24 @@ class UnifiedCollisionPipelineBenchmark:
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
+        # Capture one frame of simulation into a graph
+        wp.capture_begin()
+
+        # Compute contacts once per timestep
+        contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+
+        for _ in range(self.sim_substeps):
+            self.state_0.clear_forces()
+            self.solver.step(self.state_0, self.state_1, self.control, contacts, self.sim_dt)
+            self.state_0, self.state_1 = self.state_1, self.state_0
+
+        self.graph = wp.capture_end()
+
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
     def time_simulate(self, grid_resolution):
-        """Benchmark simulation with collision detection."""
+        """Benchmark simulation with collision detection using graph capture."""
         for _ in range(self.num_frames):
-            # Compute contacts once per timestep
-            contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
-
-            for _ in range(self.sim_substeps):
-                self.state_0.clear_forces()
-                self.solver.step(self.state_0, self.state_1, self.control, contacts, self.sim_dt)
-                self.state_0, self.state_1 = self.state_1, self.state_0
+            wp.capture_launch(self.graph)
 
         wp.synchronize_device()
 
