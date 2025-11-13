@@ -116,7 +116,7 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
         # Enlarge a little bit to avoid contact flickering when the signed distance is close to 0
         enlarge = 1e-4
         # Try MPR first (optimized for overlapping shapes, which is the common case)
-        collision, signed_distance, point, normal, feature_a_id, feature_b_id = wp.static(
+        collision, signed_distance, point, normal, _feature_a_id, _feature_b_id = wp.static(
             create_solve_mpr(support_func)
         )(
             geom_a,
@@ -132,7 +132,7 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
 
         if not collision:
             # MPR reported no collision, fall back to GJK for separated shapes
-            collision, signed_distance, point, normal, feature_a_id, feature_b_id = wp.static(
+            collision, signed_distance, point, normal, _feature_a_id, _feature_b_id = wp.static(
                 create_solve_closest_distance(support_func)
             )(
                 geom_a,

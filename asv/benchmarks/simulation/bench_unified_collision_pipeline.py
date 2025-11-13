@@ -88,10 +88,10 @@ class UnifiedCollisionPipelineBenchmark:
             offset_y = -layer_size * spacing / 2.0 + spacing / 2.0
 
             for ix in range(layer_size):
-                for iy in range(layer_size):
+                for it in range(layer_size):
                     pos = wp.vec3(
                         offset_x + ix * spacing,
-                        offset_y + iy * spacing,
+                        offset_y + it * spacing,
                         layer_height + box_size / 2.0,
                     )
 
