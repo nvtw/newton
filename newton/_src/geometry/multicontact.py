@@ -855,6 +855,12 @@ def add_avoid_duplicates_vec2(
 vec6_uint8 = wp.types.vector(6, wp.uint8)
 
 
+@wp.func_native("""
+    return (uint64_t)a.data;
+""")
+def get_ptr(a: wp.array(dtype=wp.vec2)) -> wp.uint64: ...
+
+
 def create_build_manifold(support_func: Any, writer_func: Any, post_process_contact: Any):
     """
     Factory function to create manifold generation functions with a specific support mapping function.
@@ -1062,7 +1068,8 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
 
         # Allocate buffers for contact polygons (2D projected)
         b_buffer = wp.zeros(shape=(12,), dtype=wp.vec2)
-        a_buffer = wp.array(ptr=b_buffer.ptr + wp.uint64(6 * 8), shape=(6,), dtype=wp.vec2)
+        # a_buffer = wp.array(ptr=b_buffer.ptr + wp.uint64(6 * 8), shape=(6,), dtype=wp.vec2)
+        a_buffer = wp.array(ptr=get_ptr(b_buffer) + wp.uint64(6 * 8), shape=(6,), dtype=wp.vec2)
 
         # --- Step 1: Find Contact Polygons using Perturbed Support Mapping ---
         # Loop 6 times to find up to 6 vertices for each shape's contact polygon.
