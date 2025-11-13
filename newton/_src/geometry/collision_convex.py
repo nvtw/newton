@@ -228,7 +228,7 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
             position_b: World position of shape B
             sum_of_contact_offsets: Sum of contact offsets for both shapes
             data_provider: Support mapping data provider
-            contact_threshold: Signed distance threshold; skip contact if signed_distance > threshold
+            contact_threshold: Signed distance threshold; skip manifold if signed_distance > threshold
             writer_data: Data structure for contact writer
             contact_template: Pre-packed ContactData with static fields
 
@@ -267,21 +267,18 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
                 data_provider,
             )
 
-        # Write single contact if within threshold
-        if signed_distance <= contact_threshold:
-            contact_data = contact_template
-            contact_data.contact_point_center = point
-            contact_data.contact_normal_a_to_b = normal
-            contact_data.contact_distance = signed_distance
-            contact_data.feature = wp.uint32(0)
+        # Write single contact
+        contact_data = contact_template
+        contact_data.contact_point_center = point
+        contact_data.contact_normal_a_to_b = normal
+        contact_data.contact_distance = signed_distance
+        contact_data.feature = wp.uint32(0)
 
-            contact_data = post_process_contact(
-                contact_data, geom_a, position_a, orientation_a, geom_b, position_b, orientation_b
-            )
-            writer_func(contact_data, writer_data)
+        contact_data = post_process_contact(
+            contact_data, geom_a, position_a, orientation_a, geom_b, position_b, orientation_b
+        )
+        writer_func(contact_data, writer_data)
 
-            return 1
-
-        return 0
+        return 1
 
     return solve_convex_single_contact
