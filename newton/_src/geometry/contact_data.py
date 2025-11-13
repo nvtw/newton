@@ -36,4 +36,3 @@ class ContactData:
     margin: float
     feature: wp.uint32
     feature_pair_key: wp.uint64
-
