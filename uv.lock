@@ -1000,7 +1000,7 @@ requires-dist = [
     { name = "usd-exchange", marker = "platform_machine == 'aarch64' and extra == 'examples'", specifier = ">=2.1.0a3" },
     { name = "usd-exchange", marker = "platform_machine == 'aarch64' and extra == 'importers'", specifier = ">=2.1.0a3" },
     { name = "usd-exchange", marker = "platform_machine == 'aarch64' and extra == 'torch-cu12'", specifier = ">=2.1.0a3" },
-    { name = "warp-lang", editable = "../warp" },
+    { name = "warp-lang", specifier = ">=1.7.0.dev20250823", index = "https://pypi.nvidia.com/" },
 ]
 provides-extras = ["dev", "docs", "examples", "importers", "sim", "torch-cu12"]
 
@@ -2333,36 +2333,18 @@ wheels = [
 
 [[package]]
 name = "warp-lang"
-source = { editable = "../warp" }
+version = "1.10.0.dev20251012"
+source = { registry = "https://pypi.nvidia.com/" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "blosc", marker = "extra == 'examples'", specifier = ">=1.11.1" },
-    { name = "coverage", extras = ["toml"], marker = "extra == 'dev'" },
-    { name = "matplotlib", marker = "extra == 'examples'", specifier = ">=3.7.5" },
-    { name = "myst-parser", marker = "extra == 'docs'" },
-    { name = "numpy" },
-    { name = "nvidia-sphinx-theme", marker = "python_full_version >= '3.9' and extra == 'docs'" },
-    { name = "nvtx", marker = "extra == 'dev'" },
-    { name = "pillow", marker = "extra == 'examples'", specifier = ">=10.4.0" },
-    { name = "pre-commit", marker = "extra == 'docs'" },
-    { name = "psutil", marker = "extra == 'examples'", specifier = ">=7.1.0" },
-    { name = "pyglet", marker = "extra == 'examples'", specifier = ">=2.1.9" },
-    { name = "sphinx-copybutton", marker = "extra == 'docs'" },
-    { name = "torch", marker = "python_full_version >= '3.9' and extra == 'torch-cu12'", specifier = ">=2.7.0", index = "https://download.pytorch.org/whl/cu129", conflict = { package = "warp-lang", extra = "torch-cu12" } },
-    { name = "usd-core", marker = "python_full_version < '3.14' and platform_machine != 'aarch64' and extra == 'benchmark'", specifier = ">=25.5" },
-    { name = "usd-core", marker = "python_full_version < '3.14' and platform_machine != 'aarch64' and extra == 'examples'", specifier = ">=25.5" },
-    { name = "usd-exchange", marker = "python_full_version >= '3.10' and platform_machine == 'aarch64' and extra == 'benchmark'", specifier = ">=2.1.0a3" },
-    { name = "usd-exchange", marker = "python_full_version >= '3.10' and platform_machine == 'aarch64' and extra == 'examples'", specifier = ">=2.1.0a3" },
-    { name = "warp-lang", extras = ["docs"], marker = "extra == 'dev'" },
-    { name = "warp-lang", extras = ["examples"], marker = "extra == 'dev'" },
-    { name = "warp-lang", extras = ["examples"], marker = "extra == 'torch-cu12'" },
+wheels = [
+    { url = "https://pypi.nvidia.com/warp-lang/warp_lang-1.10.0.dev20251012-py3-none-macosx_11_0_arm64.whl", hash = "sha256:05ea943ae8849020b65918b337955bfe850113139f46e30d85ea8f8ff337be87" },
+    { url = "https://pypi.nvidia.com/warp-lang/warp_lang-1.10.0.dev20251012-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:4e92f6868127afcc53abfe91dd584b222c60fcb4c74a77541935e2d9864d8f46" },
+    { url = "https://pypi.nvidia.com/warp-lang/warp_lang-1.10.0.dev20251012-py3-none-manylinux_2_34_aarch64.whl", hash = "sha256:dac47e89372b5fe824b373ceea724e047284dad238661ab470d49955b9079a65" },
+    { url = "https://pypi.nvidia.com/warp-lang/warp_lang-1.10.0.dev20251012-py3-none-win_amd64.whl", hash = "sha256:f4cac2470a159388e89fa26cc6866a6cfdd5c302e8a16751a51a7836bcb4e7d4" },
 ]
-provides-extras = ["docs", "benchmark", "examples", "torch-cu12", "dev"]
 
 [[package]]
 name = "zipp"
