@@ -63,6 +63,10 @@ def build_pair_key3(shape_a: wp.uint32, shape_b: wp.uint32, triangle_idx: wp.uin
 
     Max values: shape_a < 2^20 (1,048,576), shape_b < 2^20 (1,048,576), triangle_idx < 2^23 (8,388,608)
     """
+    assert shape_a < wp.uint32(1048576), "shape_a must be < 2^20 (1,048,576)"
+    assert shape_b < wp.uint32(1048576), "shape_b must be < 2^20 (1,048,576)"
+    assert triangle_idx < wp.uint32(8388608), "triangle_idx must be < 2^23 (8,388,608)"
+
     key = wp.uint64(shape_a & wp.uint32(0xFFFFF))  # Mask to 20 bits
     key = key << wp.uint64(20)
     key = key | wp.uint64(shape_b & wp.uint32(0xFFFFF))  # Mask to 20 bits
