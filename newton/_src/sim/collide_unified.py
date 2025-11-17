@@ -24,6 +24,7 @@ from ..core.types import Devicelike
 from ..geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from ..geometry.broad_phase_sap import BroadPhaseSAP
 from ..geometry.collision_core import compute_tight_aabb_from_support
+from ..geometry.contact_reduction import ContactReduction, ContactReductionConfig
 from ..geometry.narrow_phase import NarrowPhase
 from ..geometry.support_function import (
     GenericShapeData,
@@ -390,7 +391,8 @@ class CollisionPipelineUnified:
         shape_flags: wp.array(dtype=int) | None = None,
         sap_sort_type=None,
         enable_contact_matching: bool = False,
-        contact_reduction=None,
+        enable_contact_reduction: bool = False,
+        contact_reduction_config: ContactReductionConfig | None = None,
     ):
         """
         Initialize the CollisionPipelineUnified.
@@ -429,6 +431,10 @@ class CollisionPipelineUnified:
             enable_contact_matching (bool, optional): Whether to enable contact matching data generation.
                 If True, allocates buffers for contact_pair_key and contact_key arrays that can be used
                 with ContactMatcher for warm-starting physics solvers. Defaults to False.
+            enable_contact_reduction (bool, optional): Whether to enable contact reduction. Defaults to False.
+            contact_reduction_config (ContactReductionConfig | None, optional): Configuration for contact reduction.
+                If None and enable_contact_reduction is True, uses default ContactReductionConfig values.
+                If enable_contact_reduction is False, this parameter is ignored. Defaults to None.
         """
         self.contacts = None
         self.shape_count = shape_count
@@ -479,6 +485,18 @@ class CollisionPipelineUnified:
             self.broad_phase_shape_pairs = wp.zeros(self.shape_pairs_max, dtype=wp.vec2i, device=device)
             self.shape_aabb_lower = wp.zeros(shape_count, dtype=wp.vec3, device=device)
             self.shape_aabb_upper = wp.zeros(shape_count, dtype=wp.vec3, device=device)
+
+        # Initialize contact reduction if enabled
+        contact_reduction = None
+        if enable_contact_reduction:
+            if contact_reduction_config is None:
+                contact_reduction_config = ContactReductionConfig()
+            contact_reduction = ContactReduction(
+                max_shape_pairs=min(shape_count * 8, self.shape_pairs_max),
+                max_contacts=self.rigid_contact_max,
+                config=contact_reduction_config,
+                device=device,
+            )
 
         # Initialize narrow phase with pre-allocated buffers
         # Pass AABB arrays so narrow phase can use them instead of computing AABBs internally
@@ -535,7 +553,8 @@ class CollisionPipelineUnified:
         shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
         sap_sort_type=None,
         enable_contact_matching: bool = False,
-        contact_reduction=None,
+        enable_contact_reduction: bool = False,
+        contact_reduction_config: ContactReductionConfig | None = None,
     ) -> CollisionPipelineUnified:
         """
         Create a CollisionPipelineUnified instance from a Model.
@@ -557,6 +576,10 @@ class CollisionPipelineUnified:
                 Only used when broad_phase_mode is BroadPhaseMode.SAP. If None, uses default (SEGMENTED).
             enable_contact_matching (bool, optional): Whether to enable contact matching data generation.
                 If True, allocates and populates contact_pair_key and contact_key arrays. Defaults to False.
+            enable_contact_reduction (bool, optional): Whether to enable contact reduction. Defaults to False.
+            contact_reduction_config (ContactReductionConfig | None, optional): Configuration for contact reduction.
+                If None and enable_contact_reduction is True, uses default ContactReductionConfig values.
+                If enable_contact_reduction is False, this parameter is ignored. Defaults to None.
 
         Returns:
             CollisionPipeline: The constructed collision pipeline.
@@ -597,7 +620,8 @@ class CollisionPipelineUnified:
             shape_flags=model.shape_flags if hasattr(model, "shape_flags") else None,
             sap_sort_type=sap_sort_type,
             enable_contact_matching=enable_contact_matching,
-            contact_reduction=contact_reduction,
+            enable_contact_reduction=enable_contact_reduction,
+            contact_reduction_config=contact_reduction_config,
         )
 
     def collide(self, model: Model, state: State) -> Contacts:

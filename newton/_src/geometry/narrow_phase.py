@@ -885,6 +885,8 @@ class NarrowPhase:
             self.internal_contact_pair_key = wp.zeros(max_mesh_contacts, dtype=wp.uint64, device=device)
             self.internal_contact_key = wp.zeros(max_mesh_contacts, dtype=wp.uint32, device=device)
             self.internal_contact_count = wp.zeros(1, dtype=wp.int32, device=device)
+            self.internal_reduced_contact_indices = wp.zeros(max_mesh_contacts, dtype=wp.int32, device=device)
+            self.internal_reduced_contact_count = wp.zeros(1, dtype=wp.int32, device=device)
 
             # Empty tangent array for when tangent computation is disabled
             self.empty_tangent = wp.zeros(0, dtype=wp.vec3, device=device)
@@ -977,6 +979,8 @@ class NarrowPhase:
 
         if use_internal_buffer:
             self.internal_contact_count.zero_()
+            self.internal_reduced_contact_indices.zero_()
+            self.internal_reduced_contact_count.zero_()
 
         # Launch main narrow phase kernel (using the appropriate kernel variant)
         wp.launch(
@@ -1123,11 +1127,6 @@ class NarrowPhase:
 
         # Apply contact reduction if using internal buffer
         if use_internal_buffer:
-            # Allocate temporary arrays for contact reduction output
-            with wp.ScopedDevice(device):
-                reduced_contact_indices = wp.zeros(self.max_mesh_contacts, dtype=wp.int32, device=device)
-                reduced_contact_count = wp.zeros(1, dtype=wp.int32, device=device)
-
             # Run contact reduction on internal buffer
             self.contact_reduction.launch(
                 contact_pair=self.internal_contact_pair,
@@ -1136,8 +1135,8 @@ class NarrowPhase:
                 contact_penetration=self.internal_contact_penetration,
                 contact_id=self.internal_contact_key,
                 contact_count=self.internal_contact_count,
-                kept_contact_indices=reduced_contact_indices,
-                kept_contact_count=reduced_contact_count,
+                kept_contact_indices=self.internal_reduced_contact_indices,
+                kept_contact_count=self.internal_reduced_contact_count,
             )
 
             # Copy reduced contacts from internal buffer to final buffer
@@ -1145,8 +1144,8 @@ class NarrowPhase:
                 kernel=copy_reduced_contacts_kernel,
                 dim=self.max_mesh_contacts,
                 inputs=[
-                    reduced_contact_indices,
-                    reduced_contact_count,
+                    self.internal_reduced_contact_indices,
+                    self.internal_reduced_contact_count,
                     self.internal_contact_pair,
                     self.internal_contact_position,
                     self.internal_contact_normal,

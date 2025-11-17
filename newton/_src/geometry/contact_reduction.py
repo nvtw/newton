@@ -15,6 +15,7 @@
 
 
 import math
+from dataclasses import dataclass
 
 import numpy as np
 import warp as wp
@@ -382,15 +383,41 @@ def build_shape_pair_mask(
     shape_pair_mask[pair_hash] = 1
 
 
+@dataclass
+class ContactReductionConfig:
+    """
+    Configuration for contact reduction.
+
+    Attributes:
+        normal_subdivisions: Icosahedron subdivision level for discretizing contact normal directions.
+            Higher values provide finer angular resolution.
+        betas: Tuple of penetration weighting factors used in the contact scoring function:
+            score = spatial_position_dot_product + penetration_depth * beta.
+            Each beta value creates an independent set of bins that selects contacts with
+            different tradeoffs between spatial distribution and penetration depth.
+            - Low beta values favor spatially distributed contacts
+            - High beta values favor deeper penetrations
+            Multiple betas allow the algorithm to simultaneously capture both shallow
+            contacts at the manifold edges and deep contacts at collision centers.
+        bin_directions: Number of evenly-spaced angular directions for spatial binning within
+            each normal bin.
+        sticky_contacts: Bonus score for previously selected contacts (temporal coherence).
+            Set to 0.0 to disable temporal coherence.
+    """
+
+    normal_subdivisions: int = 0
+    betas: tuple = (10.0, 20.0, 1000.0)
+    bin_directions: int = 7
+    sticky_contacts: float = 1e-6
+    grid_size: int = 256 * 8 * 128
+
+
 class ContactReduction:
     def __init__(
         self,
-        max_shape_pairs: int = 100000,
-        max_contacts: int = 1000000,
-        normal_subdivisions: int = 0,
-        betas: tuple = (10.0, 20.0, 1000.0),
-        bin_directions: int = 7,
-        sticky_contacts: float = 1e-6,
+        max_shape_pairs: int,
+        max_contacts: int,
+        config: ContactReductionConfig,
         device=None,
     ):
         """
@@ -399,32 +426,21 @@ class ContactReduction:
         Args:
             max_shape_pairs: Maximum number of unique shape pairs
             max_contacts: Maximum number of contacts
-            normal_subdivisions: Icosahedron subdivision level for discretizing contact normal directions. Higher values provide finer angular resolution.
-            betas: Tuple of penetration weighting factors used in the contact scoring function:
-                score = spatial_position_dot_product + penetration_depth * beta.
-                Each beta value creates an independent set of bins that selects contacts with
-                different tradeoffs between spatial distribution and penetration depth.
-                - Low beta values favor spatially distributed contacts
-                - High beta values favor deeper penetrations
-                Multiple betas allow the algorithm to simultaneously capture both shallow
-                contacts at the manifold edges and deep contacts at collision centers.
-            bin_directions: Number of evenly-spaced angular directions for spatial binning within
-                each normal bin.
-            sticky_contacts: Bonus score for previously selected contacts (temporal coherence). Set to 0.0 to disable temporal coherence.
+            config: ContactReductionConfig dataclass instance containing algorithm configuration parameters
             device: Warp device to use
         """
         self.max_shape_pairs = max_shape_pairs
         self.max_contacts = max_contacts
-        self.grid_size = 256 * 8 * 128
+        self.grid_size = config.grid_size
 
         with wp.ScopedDevice(device):
             self.bin_normals = wp.array(
-                get_icosahedron_face_normals(subdivisions=normal_subdivisions),
+                get_icosahedron_face_normals(subdivisions=config.normal_subdivisions),
                 dtype=wp.vec3,
             )
-            self.penetration_betas = wp.array(betas, dtype=wp.float32)
-            self.num_betas = len(betas)
-            self.bin_directions = bin_directions
+            self.penetration_betas = wp.array(config.betas, dtype=wp.float32)
+            self.num_betas = len(config.betas)
+            self.bin_directions = config.bin_directions
             num_normal_bins = self.bin_normals.shape[0]
 
             # Shape pair tracking
@@ -435,23 +451,23 @@ class ContactReduction:
 
             # Binned data (stores contact data AND contact index)
             self.binned_normals = wp.zeros(
-                (max_shape_pairs, num_normal_bins, self.num_betas * bin_directions), dtype=wp.vec3
+                (max_shape_pairs, num_normal_bins, self.num_betas * config.bin_directions), dtype=wp.vec3
             )
             self.binned_pos = wp.zeros(
-                (max_shape_pairs, num_normal_bins, self.num_betas * bin_directions), dtype=wp.vec3
+                (max_shape_pairs, num_normal_bins, self.num_betas * config.bin_directions), dtype=wp.vec3
             )
             self.binned_depth = wp.zeros(
-                (max_shape_pairs, num_normal_bins, self.num_betas * bin_directions), dtype=wp.float32
+                (max_shape_pairs, num_normal_bins, self.num_betas * config.bin_directions), dtype=wp.float32
             )
             self.binned_dot_product = wp.zeros(
-                (max_shape_pairs, num_normal_bins, self.num_betas * bin_directions), dtype=wp.float32
+                (max_shape_pairs, num_normal_bins, self.num_betas * config.bin_directions), dtype=wp.float32
             )
             self.binned_id = wp.full(
-                (max_shape_pairs, num_normal_bins, self.num_betas * bin_directions), dtype=wp.uint32, value=0
+                (max_shape_pairs, num_normal_bins, self.num_betas * config.bin_directions), dtype=wp.uint32, value=0
             )
             self.binned_id_prev = wp.clone(self.binned_id)
             self.binned_contact_idx = wp.full(
-                (max_shape_pairs, num_normal_bins, self.num_betas * bin_directions), dtype=wp.int32, value=-1
+                (max_shape_pairs, num_normal_bins, self.num_betas * config.bin_directions), dtype=wp.int32, value=-1
             )
 
             self.bin_occupied = wp.zeros((max_shape_pairs, num_normal_bins), dtype=wp.bool)
@@ -465,10 +481,10 @@ class ContactReduction:
             self.assign_contacts_to_bins,
             self.extract_contact_indices_from_bins,
         ) = get_binning_kernels(
-            bin_directions,
+            config.bin_directions,
             num_normal_bins,
             self.num_betas,
-            sticky_contacts,
+            config.sticky_contacts,
         )
 
     def launch(
@@ -500,8 +516,8 @@ class ContactReduction:
         device = contact_count.device
 
         # Save previous state for temporal coherence
-        wp.copy(self.binned_id_prev, self.binned_id)
-        wp.copy(self.shape_pair_to_bin_prev, self.shape_pair_to_bin)
+        self.binned_id_prev, self.binned_id = self.binned_id, self.binned_id_prev
+        self.shape_pair_to_bin_prev, self.shape_pair_to_bin = self.shape_pair_to_bin, self.shape_pair_to_bin_prev
 
         # Reset arrays
         self.binned_dot_product.fill_(-1e10)
