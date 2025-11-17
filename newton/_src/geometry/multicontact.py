@@ -1067,9 +1067,9 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
         center = 0.5 * (p_a + p_b)
 
         # Allocate buffers for contact polygons (2D projected)
-        b_buffer = wp.zeros(shape=(12,), dtype=wp.vec2)
-        # a_buffer = wp.array(ptr=b_buffer.ptr + wp.uint64(6 * 8), shape=(6,), dtype=wp.vec2)
-        a_buffer = wp.array(ptr=get_ptr(b_buffer) + wp.uint64(6 * 8), shape=(6,), dtype=wp.vec2)
+        b_buffer = wp.zeros(shape=(12,), dtype=wp.vec2f)
+        # a_buffer = wp.array(ptr=b_buffer.ptr + wp.uint64(6 * 8), shape=(6,), dtype=wp.vec2f)
+        a_buffer = wp.array(ptr=get_ptr(b_buffer) + wp.uint64(6 * 8), shape=(6,), dtype=wp.vec2f)
 
         # --- Step 1: Find Contact Polygons using Perturbed Support Mapping ---
         # Loop 6 times to find up to 6 vertices for each shape's contact polygon.

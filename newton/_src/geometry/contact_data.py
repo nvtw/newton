@@ -24,6 +24,28 @@ import warp as wp
 
 @wp.struct
 class ContactData:
+    """
+    Internal contact representation for collision detection.
+
+    This struct stores contact information between two colliding shapes before conversion
+    to solver-specific formats. It serves as an intermediate representation passed between
+    collision detection algorithms and contact writer functions.
+
+    Attributes:
+        contact_point_center: Center point of the contact region in world space
+        contact_normal_a_to_b: Unit normal vector pointing from shape A to shape B
+        contact_distance: Signed distance between shapes (negative indicates penetration)
+        radius_eff_a: Effective radius of shape A (for rounded shapes like spheres/capsules)
+        radius_eff_b: Effective radius of shape B (for rounded shapes like spheres/capsules)
+        thickness_a: Collision thickness offset for shape A
+        thickness_b: Collision thickness offset for shape B
+        shape_a: Index of the first shape in the collision pair
+        shape_b: Index of the second shape in the collision pair
+        margin: Contact detection margin/threshold
+        feature: Shape-specific feature identifier (e.g., vertex, edge, or face ID)
+        feature_pair_key: Unique key for contact pair matching across timesteps
+    """
+
     contact_point_center: wp.vec3
     contact_normal_a_to_b: wp.vec3
     contact_distance: float

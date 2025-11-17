@@ -724,8 +724,7 @@ class NarrowPhase:
         geom_source: wp.array(dtype=wp.uint64, ndim=1),  # The index into the source array, type define by geom_types
         geom_cutoff: wp.array(dtype=wp.float32, ndim=1),  # per-geom (take the max)
         geom_collision_radius: wp.array(dtype=wp.float32, ndim=1),  # per-geom collision radius for AABB fallback
-        # Outputs
-        contact_writer_last_arg_warp_struct: Any,
+        writer_data: Any,
         device=None,  # Device to launch on
     ):
         """
@@ -740,7 +739,7 @@ class NarrowPhase:
             geom_source: Array of source pointers (mesh IDs, etc.) for each shape
             geom_cutoff: Array of cutoff distances for each shape
             geom_collision_radius: Array of collision radii for each shape (for AABB fallback for planes/meshes)
-            contact_writer_last_arg_warp_struct: Custom struct instance for contact writing (type must match contact_writer_last_arg_type from __init__)
+            writer_data: Custom struct instance for contact writing (type must match the custom writer function)
             device: Device to launch on
         """
         if device is None:
@@ -767,7 +766,7 @@ class NarrowPhase:
                 geom_collision_radius,
                 self.geom_aabb_lower,
                 self.geom_aabb_upper,
-                contact_writer_last_arg_warp_struct,
+                writer_data,
                 self.total_num_threads,
             ],
             outputs=[
@@ -796,7 +795,7 @@ class NarrowPhase:
                 self.shape_pairs_mesh_plane_cumsum,
                 self.shape_pairs_mesh_plane_count,
                 self.mesh_plane_vertex_total_count,
-                contact_writer_last_arg_warp_struct,
+                writer_data,
                 self.total_num_threads,
             ],
             device=device,

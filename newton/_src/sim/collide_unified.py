@@ -617,7 +617,7 @@ class CollisionPipelineUnified:
             geom_source=model.shape_source_ptr,
             geom_cutoff=self.geom_cutoff,
             geom_collision_radius=model.shape_collision_radius,
-            contact_writer_last_arg_warp_struct=writer_data,
+            writer_data=writer_data,
             device=self.device,
         )
 
