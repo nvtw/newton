@@ -837,7 +837,7 @@ class NarrowPhase:
                 geom_cutoff,
                 self.triangle_pairs,
                 self.triangle_pairs_count,
-                contact_writer_last_arg_warp_struct,
+                writer_data,
                 self.total_num_threads,
             ],
             device=device,
