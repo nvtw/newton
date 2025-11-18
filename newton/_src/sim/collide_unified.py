@@ -382,7 +382,8 @@ class CollisionPipelineUnified:
             # Narrow phase input arrays
             self.geom_data = wp.zeros(shape_count, dtype=wp.vec4, device=device)
             self.geom_transform = wp.zeros(shape_count, dtype=wp.transform, device=device)
-            self.geom_cutoff = wp.full(shape_count, rigid_contact_margin, dtype=wp.float32, device=device)
+            # Initialize geom_cutoff with zeros; will be populated from model.shape_contact_margin
+            self.geom_cutoff = wp.zeros(shape_count, dtype=wp.float32, device=device)
 
             # Contact matching arrays (optional)
             if enable_contact_matching:
@@ -456,7 +457,7 @@ class CollisionPipelineUnified:
                 # Will raise error in __init__ if EXPLICIT mode requires it
                 shape_pairs_filtered = None
 
-        return CollisionPipelineUnified(
+        pipeline = CollisionPipelineUnified(
             model.shape_count,
             model.particle_count,
             shape_pairs_filtered,
@@ -477,6 +478,15 @@ class CollisionPipelineUnified:
             enable_contact_matching=enable_contact_matching,
         )
 
+        # Copy per-shape contact margins from model
+        if hasattr(model, "shape_contact_margin") and model.shape_contact_margin is not None:
+            pipeline.geom_cutoff.assign(model.shape_contact_margin)
+        else:
+            # Fallback for older models without per-shape margins
+            pipeline.geom_cutoff.fill_(rigid_contact_margin)
+
+        return pipeline
+
     def collide(self, model: Model, state: State) -> Contacts:
         """
         Run the collision pipeline using NarrowPhase.
@@ -488,6 +498,10 @@ class CollisionPipelineUnified:
         Returns:
             Contacts: The generated contacts
         """
+        # Sync per-shape contact margins from model
+        if hasattr(model, "shape_contact_margin") and model.shape_contact_margin is not None:
+            self.geom_cutoff.assign(model.shape_contact_margin)
+
         # Allocate or clear contacts
         if self.contacts is None or self.requires_grad:
             self.contacts = Contacts(

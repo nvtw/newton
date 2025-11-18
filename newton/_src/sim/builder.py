@@ -162,6 +162,8 @@ class ModelBuilder:
         """The coefficient of restitution."""
         thickness: float = 1e-5
         """The thickness of the shape."""
+        contact_margin: float | None = None
+        """The contact margin for collision detection. If None, uses builder.rigid_contact_margin as default."""
         is_solid: bool = True
         """Indicates whether the shape is solid or hollow. Defaults to True."""
         collision_group: int = 1
@@ -480,6 +482,7 @@ class ModelBuilder:
         self.shape_material_ka = []
         self.shape_material_mu = []
         self.shape_material_restitution = []
+        self.shape_contact_margin = []
         # collision groups within collisions are handled
         self.shape_collision_group = []
         # radius to use for broadphase collision checking
@@ -2953,6 +2956,7 @@ class ModelBuilder:
         self.shape_material_ka.append(cfg.ka)
         self.shape_material_mu.append(cfg.mu)
         self.shape_material_restitution.append(cfg.restitution)
+        self.shape_contact_margin.append(cfg.contact_margin)
         self.shape_collision_group.append(cfg.collision_group)
         self.shape_collision_radius.append(compute_shape_radius(type, scale, src))
         self.shape_world.append(self.current_world)
@@ -4882,6 +4886,13 @@ class ModelBuilder:
             m.shape_material_restitution = wp.array(
                 self.shape_material_restitution, dtype=wp.float32, requires_grad=requires_grad
             )
+
+            # Resolve per-shape contact margins (use shape-specific or fall back to builder default)
+            shape_contact_margins = [
+                margin if margin is not None else self.rigid_contact_margin
+                for margin in self.shape_contact_margin
+            ]
+            m.shape_contact_margin = wp.array(shape_contact_margins, dtype=wp.float32, requires_grad=requires_grad)
 
             m.shape_collision_filter_pairs = set(self.shape_collision_filter_pairs)
             m.shape_collision_group = wp.array(self.shape_collision_group, dtype=wp.int32)
