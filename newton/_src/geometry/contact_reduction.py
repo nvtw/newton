@@ -523,7 +523,6 @@ def create_contact_reduction_func(tile_size: int):
 
     return StoreContactLinearArray
 
-
 def create_shared_memory_pointer_func(
     array_size: int,
 ):
@@ -531,7 +530,6 @@ def create_shared_memory_pointer_func(
 
     Args:
         array_size: Number of int elements in the shared memory array.
-                   For ContactStruct arrays, multiply by 9 (sizeof(ContactStruct) / sizeof(int)).
 
     Returns:
         A Warp function that returns a pointer to shared memory
@@ -553,3 +551,30 @@ def create_shared_memory_pointer_func(
 # Create the specific functions used in the codebase
 get_shared_memory_pointer_121_ints = create_shared_memory_pointer_func(121)
 get_shared_memory_pointer_120_contacts = create_shared_memory_pointer_func(120 * 9)
+
+
+def create_shared_memory_pointer_block_dim_func(
+    add: int,
+):
+    """Create a shared memory pointer function for a block-dimension-dependent array size.
+
+    Args:
+        add: Number of additional int elements beyond WP_TILE_BLOCK_DIM.
+
+    Returns:
+        A Warp function that returns a pointer to shared memory
+    """
+
+    snippet = f"""
+    constexpr int array_size = WP_TILE_BLOCK_DIM +{add};
+    __shared__ int s[array_size];
+    auto ptr = &s[0];
+    return (uint64_t)ptr;
+    """
+
+    @wp.func_native(snippet)
+    def get_shared_memory_pointer() -> wp.uint64: ...
+
+    return get_shared_memory_pointer
+
+get_shared_memory_pointer_block_dim_plus_2_ints = create_shared_memory_pointer_block_dim_func(2)
