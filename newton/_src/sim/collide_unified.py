@@ -329,7 +329,7 @@ class CollisionPipelineUnified:
         if self.broad_phase_mode == BroadPhaseMode.NXN:
             if shape_world is None:
                 raise ValueError("shape_world must be provided when using BroadPhaseMode.NXN")
-            self.nxn_broadphase = BroadPhaseAllPairs(shape_world, geom_flags=shape_flags, device=device)
+            self.nxn_broadphase = BroadPhaseAllPairs(shape_world, shape_flags=shape_flags, device=device)
             self.sap_broadphase = None
             self.explicit_broadphase = None
             self.shape_pairs_filtered = None
@@ -338,7 +338,7 @@ class CollisionPipelineUnified:
                 raise ValueError("shape_world must be provided when using BroadPhaseMode.SAP")
             self.sap_broadphase = BroadPhaseSAP(
                 shape_world,
-                geom_flags=shape_flags,
+                shape_flags=shape_flags,
                 sort_type=sap_sort_type,
                 device=device,
             )
@@ -377,8 +377,8 @@ class CollisionPipelineUnified:
             max_candidate_pairs=self.shape_pairs_max,
             max_triangle_pairs=1000000,
             device=device,
-            geom_aabb_lower=self.shape_aabb_lower,
-            geom_aabb_upper=self.shape_aabb_upper,
+            shape_aabb_lower=self.shape_aabb_lower,
+            shape_aabb_upper=self.shape_aabb_upper,
             contact_writer_warp_func=write_contact,
         )
 
@@ -629,12 +629,12 @@ class CollisionPipelineUnified:
         self.narrow_phase.launch_custom_write(
             candidate_pair=self.broad_phase_shape_pairs,
             num_candidate_pair=self.broad_phase_pair_count,
-            geom_types=model.shape_type,
-            geom_data=self.geom_data,
-            geom_transform=self.geom_transform,
-            geom_source=model.shape_source_ptr,
+            shape_types=model.shape_type,
+            shape_data=self.geom_data,
+            shape_transform=self.geom_transform,
+            shape_source=model.shape_source_ptr,
             shape_contact_margin=self.shape_contact_margin,
-            geom_collision_radius=model.shape_collision_radius,
+            shape_collision_radius=model.shape_collision_radius,
             writer_data=writer_data,
             device=self.device,
         )

@@ -560,7 +560,7 @@ class TestBroadPhase(unittest.TestCase):
         candidate_pair = wp.array(np.zeros((max_candidate_pair, 2), dtype=wp.int32), dtype=wp.vec2i)
 
         # Initialize BroadPhaseAllPairs with shape_world AND shape_flags
-        nxn_broadphase = BroadPhaseAllPairs(shape_world, geom_flags=shape_flags)
+        nxn_broadphase = BroadPhaseAllPairs(shape_world, shape_flags=shape_flags)
 
         if verbose:
             print("\nPrecomputed world map info (with flags):")
@@ -1166,7 +1166,7 @@ class TestBroadPhase(unittest.TestCase):
         candidate_pair = wp.array(np.zeros((num_lower_tri_elements, 2), dtype=wp.int32), dtype=wp.vec2i)
 
         # Initialize SAP broad phase with shape_flags
-        sap_broadphase = BroadPhaseSAP(shape_world, geom_flags=shape_flags, sort_type=sort_type)
+        sap_broadphase = BroadPhaseSAP(shape_world, shape_flags=shape_flags, sort_type=sort_type)
 
         # Verify num_regular_worlds is correct after filtering
         colliding_worlds = np.unique(np_shape_world[colliding_mask])
