@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import numpy as np
 import warp as wp
 
@@ -24,7 +26,7 @@ def _nxn_broadphase_precomputed_pairs(
     # Input arrays
     geom_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
     geom_bounding_box_upper: wp.array(dtype=wp.vec3, ndim=1),
-    geom_cutoff: wp.array(dtype=float, ndim=1),  # per-geom (take the max)
+    shape_contact_margin: wp.array(dtype=float, ndim=1),  # Optional per-shape contact margins (can be empty if AABBs pre-expanded)
     nxn_geom_pair: wp.array(dtype=wp.vec2i, ndim=1),
     # Output arrays
     candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),
@@ -37,13 +39,20 @@ def _nxn_broadphase_precomputed_pairs(
     geom1 = pair[0]
     geom2 = pair[1]
 
+    # Check if margins are provided (empty array means AABBs are pre-expanded)
+    margin1 = 0.0
+    margin2 = 0.0
+    if shape_contact_margin.shape[0] > 0:
+        margin1 = shape_contact_margin[geom1]
+        margin2 = shape_contact_margin[geom2]
+
     if check_aabb_overlap(
         geom_bounding_box_lower[geom1],
         geom_bounding_box_upper[geom1],
-        geom_cutoff[geom1],
+        margin1,
         geom_bounding_box_lower[geom2],
         geom_bounding_box_upper[geom2],
-        geom_cutoff[geom2],
+        margin2,
     ):
         write_pair(
             pair,
@@ -118,7 +127,7 @@ def _nxn_broadphase_kernel(
     # Input arrays
     geom_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
     geom_bounding_box_upper: wp.array(dtype=wp.vec3, ndim=1),
-    geom_cutoff: wp.array(dtype=float, ndim=1),  # per-geom (take the max)
+    shape_contact_margin: wp.array(dtype=float, ndim=1),  # Optional per-shape contact margins (can be empty if AABBs pre-expanded)
     collision_group: wp.array(dtype=int, ndim=1),  # per-geom
     shape_world: wp.array(dtype=int, ndim=1),  # per-geom world indices
     world_cumsum_lower_tri: wp.array(dtype=int, ndim=1),  # Cumulative sum of lower tri elements per world
@@ -172,14 +181,21 @@ def _nxn_broadphase_kernel(
     if not test_world_and_group_pair(world1, world2, collision_group1, collision_group2):
         return
 
+    # Check if margins are provided (empty array means AABBs are pre-expanded)
+    margin1 = 0.0
+    margin2 = 0.0
+    if shape_contact_margin.shape[0] > 0:
+        margin1 = shape_contact_margin[geom1]
+        margin2 = shape_contact_margin[geom2]
+
     # Check AABB overlap
     if check_aabb_overlap(
         geom_bounding_box_lower[geom1],
         geom_bounding_box_upper[geom1],
-        geom_cutoff[geom1],
+        margin1,
         geom_bounding_box_lower[geom2],
         geom_bounding_box_upper[geom2],
-        geom_cutoff[geom2],
+        margin2,
     ):
         write_pair(
             wp.vec2i(geom1, geom2),
@@ -276,7 +292,7 @@ class BroadPhaseAllPairs:
         self,
         geom_lower: wp.array(dtype=wp.vec3, ndim=1),  # Lower bounds of geometry bounding boxes
         geom_upper: wp.array(dtype=wp.vec3, ndim=1),  # Upper bounds of geometry bounding boxes
-        geom_cutoffs: wp.array(dtype=float, ndim=1),  # Cutoff distance per geometry box
+        shape_contact_margin: wp.array(dtype=float, ndim=1) | None,  # Optional per-shape contact margins
         geom_collision_group: wp.array(dtype=int, ndim=1),  # Collision group ID per box
         geom_shape_world: wp.array(dtype=int, ndim=1),  # World index per box
         geom_count: int,  # Number of active bounding boxes
@@ -294,7 +310,8 @@ class BroadPhaseAllPairs:
         Args:
             geom_lower: Array of lower bounds for each geometry's AABB
             geom_upper: Array of upper bounds for each geometry's AABB
-            geom_cutoffs: Array of cutoff distances for each geometry
+            shape_contact_margin: Optional array of per-shape contact margins. If None or empty array,
+                assumes AABBs are pre-expanded (margins = 0). If provided, margins are added during overlap checks.
             geom_collision_group: Array of collision group IDs for each geometry. Positive values indicate
                 groups that only collide with themselves (and with negative groups). Negative values indicate
                 groups that collide with everything except their negative counterpart. Zero indicates no collisions.
@@ -306,9 +323,8 @@ class BroadPhaseAllPairs:
             device: Device to launch on. If None, uses the device of the input arrays.
 
         The method will populate candidate_pair with the indices of geometry pairs (i,j) where i < j whose AABBs overlap
-        when expanded by their cutoff distances, whose collision groups allow interaction, and whose world indices
-        are compatible (same world or at least one is global). The number of pairs found will be written to
-        num_candidate_pair[0].
+        (with optional margin expansion), whose collision groups allow interaction, and whose world indices are
+        compatible (same world or at least one is global). The number of pairs found will be written to num_candidate_pair[0].
         """
         max_candidate_pair = candidate_pair.shape[0]
 
@@ -317,6 +333,10 @@ class BroadPhaseAllPairs:
         if device is None:
             device = geom_lower.device
 
+        # If no margins provided, pass empty array (kernel will use 0.0 margins)
+        if shape_contact_margin is None:
+            shape_contact_margin = wp.empty(0, dtype=wp.float32, device=device)
+
         # Launch with the precomputed number of kernel threads
         wp.launch(
             _nxn_broadphase_kernel,
@@ -324,7 +344,7 @@ class BroadPhaseAllPairs:
             inputs=[
                 geom_lower,
                 geom_upper,
-                geom_cutoffs,
+                shape_contact_margin,
                 geom_collision_group,
                 geom_shape_world,
                 self.world_cumsum_lower_tri,
@@ -355,7 +375,7 @@ class BroadPhaseExplicit:
         self,
         geom_lower: wp.array(dtype=wp.vec3, ndim=1),  # Lower bounds of geometry bounding boxes
         geom_upper: wp.array(dtype=wp.vec3, ndim=1),  # Upper bounds of geometry bounding boxes
-        geom_cutoffs: wp.array(dtype=float, ndim=1),  # Cutoff distance per geometry box
+        shape_contact_margin: wp.array(dtype=float, ndim=1) | None,  # Optional per-shape contact margins
         geom_pairs: wp.array(dtype=wp.vec2i, ndim=1),  # Precomputed pairs to check
         geom_pair_count: int,
         # Outputs
@@ -367,12 +387,13 @@ class BroadPhaseExplicit:
 
         This method checks for AABB overlaps only between explicitly specified geometry pairs,
         rather than checking all possible pairs. It populates the candidate_pair array with
-        indices of geometry pairs whose AABBs overlap when expanded by their cutoff distances.
+        indices of geometry pairs whose AABBs overlap.
 
         Args:
             geom_lower: Array of lower bounds for geometry bounding boxes
             geom_upper: Array of upper bounds for geometry bounding boxes
-            geom_cutoffs: Array of cutoff distances per geometry box
+            shape_contact_margin: Optional array of per-shape contact margins. If None or empty array,
+                assumes AABBs are pre-expanded (margins = 0). If provided, margins are added during overlap checks.
             geom_pairs: Array of precomputed geometry pairs to check
             geom_pair_count: Number of geometry pairs to check
             candidate_pair: Output array to store overlapping geometry pairs
@@ -380,7 +401,7 @@ class BroadPhaseExplicit:
             device: Device to launch on. If None, uses the device of the input arrays.
 
         The method will populate candidate_pair with the indices of geometry pairs whose AABBs overlap
-        when expanded by their cutoff distances, but only checking the explicitly provided pairs.
+        (with optional margin expansion), but only checking the explicitly provided pairs.
         """
 
         max_candidate_pair = candidate_pair.shape[0]
@@ -390,13 +411,17 @@ class BroadPhaseExplicit:
         if device is None:
             device = geom_lower.device
 
+        # If no margins provided, pass empty array (kernel will use 0.0 margins)
+        if shape_contact_margin is None:
+            shape_contact_margin = wp.empty(0, dtype=wp.float32, device=device)
+
         wp.launch(
             kernel=_nxn_broadphase_precomputed_pairs,
             dim=geom_pair_count,
             inputs=[
                 geom_lower,
                 geom_upper,
-                geom_cutoffs,
+                shape_contact_margin,
                 geom_pairs,
                 candidate_pair,
                 num_candidate_pair,

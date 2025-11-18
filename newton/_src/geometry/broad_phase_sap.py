@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 from enum import IntEnum
 
 import numpy as np
@@ -42,14 +44,18 @@ def _sap_project_aabb(
     direction: wp.vec3,  # Must be normalized
     geom_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
     geom_bounding_box_upper: wp.array(dtype=wp.vec3, ndim=1),
-    geom_cutoff: wp.array(dtype=float, ndim=1),  # per-geom (take the max)
+    shape_contact_margin: wp.array(dtype=float, ndim=1),  # Optional per-shape contact margins (can be empty if AABBs pre-expanded)
 ) -> wp.vec2:
     lower = geom_bounding_box_lower[elementid]
     upper = geom_bounding_box_upper[elementid]
-    cutoff = geom_cutoff[elementid]
+
+    # Check if margins are provided (empty array means AABBs are pre-expanded)
+    margin = 0.0
+    if shape_contact_margin.shape[0] > 0:
+        margin = shape_contact_margin[elementid]
 
     half_size = 0.5 * (upper - lower)
-    half_size = wp.vec3(half_size[0] + cutoff, half_size[1] + cutoff, half_size[2] + cutoff)
+    half_size = wp.vec3(half_size[0] + margin, half_size[1] + margin, half_size[2] + margin)
     radius = wp.dot(direction, half_size)
     center = wp.dot(direction, 0.5 * (lower + upper))
     return wp.vec2(center - radius, center + radius)
@@ -138,7 +144,7 @@ def _sap_project_kernel(
     direction: wp.vec3,  # Must be normalized
     geom_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
     geom_bounding_box_upper: wp.array(dtype=wp.vec3, ndim=1),
-    geom_cutoff: wp.array(dtype=float, ndim=1),
+    shape_contact_margin: wp.array(dtype=float, ndim=1),  # Optional per-shape contact margins (can be empty if AABBs pre-expanded)
     world_index_map: wp.array(dtype=int, ndim=1),
     world_slice_ends: wp.array(dtype=int, ndim=1),
     max_geoms_per_world: int,
@@ -171,7 +177,7 @@ def _sap_project_kernel(
     geom_id = world_index_map[world_slice_start + local_geom_id]
 
     # Project AABB onto direction
-    range = _sap_project_aabb(geom_id, direction, geom_bounding_box_lower, geom_bounding_box_upper, geom_cutoff)
+    range = _sap_project_aabb(geom_id, direction, geom_bounding_box_lower, geom_bounding_box_upper, shape_contact_margin)
 
     sap_projection_lower_out[idx] = range[0]
     sap_projection_upper_out[idx] = range[1]
@@ -234,7 +240,7 @@ def _process_single_sap_pair(
     pair: wp.vec2i,
     geom_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
     geom_bounding_box_upper: wp.array(dtype=wp.vec3, ndim=1),
-    geom_cutoff: wp.array(dtype=float, ndim=1),
+    shape_contact_margin: wp.array(dtype=float, ndim=1),  # Optional per-shape contact margins (can be empty if AABBs pre-expanded)
     candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),
     num_candidate_pair: wp.array(dtype=int, ndim=1),  # Size one array
     max_candidate_pair: int,
@@ -242,13 +248,20 @@ def _process_single_sap_pair(
     geom1 = pair[0]
     geom2 = pair[1]
 
+    # Check if margins are provided (empty array means AABBs are pre-expanded)
+    margin1 = 0.0
+    margin2 = 0.0
+    if shape_contact_margin.shape[0] > 0:
+        margin1 = shape_contact_margin[geom1]
+        margin2 = shape_contact_margin[geom2]
+
     if check_aabb_overlap(
         geom_bounding_box_lower[geom1],
         geom_bounding_box_upper[geom1],
-        geom_cutoff[geom1],
+        margin1,
         geom_bounding_box_lower[geom2],
         geom_bounding_box_upper[geom2],
-        geom_cutoff[geom2],
+        margin2,
     ):
         write_pair(
             pair,
@@ -263,7 +276,7 @@ def _sap_broadphase_kernel(
     # Input arrays
     geom_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
     geom_bounding_box_upper: wp.array(dtype=wp.vec3, ndim=1),
-    geom_cutoff: wp.array(dtype=float, ndim=1),
+    shape_contact_margin: wp.array(dtype=float, ndim=1),  # Optional per-shape contact margins (can be empty if AABBs pre-expanded)
     collision_group: wp.array(dtype=int, ndim=1),
     shape_world: wp.array(dtype=int, ndim=1),  # World indices
     world_index_map: wp.array(dtype=int, ndim=1),
@@ -358,7 +371,7 @@ def _sap_broadphase_kernel(
                 wp.vec2i(geom1, geom2),
                 geom_bounding_box_lower,
                 geom_bounding_box_upper,
-                geom_cutoff,
+                shape_contact_margin,
                 candidate_pair,
                 num_candidate_pair,
                 max_candidate_pair,
@@ -482,7 +495,7 @@ class BroadPhaseSAP:
         self,
         geom_lower: wp.array(dtype=wp.vec3, ndim=1),  # Lower bounds of geometry bounding boxes
         geom_upper: wp.array(dtype=wp.vec3, ndim=1),  # Upper bounds of geometry bounding boxes
-        geom_cutoffs: wp.array(dtype=float, ndim=1),  # Cutoff distance per geometry box
+        shape_contact_margin: Optional[wp.array(dtype=float, ndim=1)],  # Optional per-shape contact margins
         geom_collision_group: wp.array(dtype=int, ndim=1),  # Collision group ID per box
         geom_shape_world: wp.array(dtype=int, ndim=1),  # World index per box
         geom_count: int,  # Number of active bounding boxes
@@ -500,7 +513,8 @@ class BroadPhaseSAP:
         Args:
             geom_lower: Array of lower bounds for each geometry's AABB
             geom_upper: Array of upper bounds for each geometry's AABB
-            geom_cutoffs: Array of cutoff distances for each geometry
+            shape_contact_margin: Optional array of per-shape contact margins. If None or empty array,
+                assumes AABBs are pre-expanded (margins = 0). If provided, margins are added during overlap checks.
             geom_collision_group: Array of collision group IDs for each geometry. Positive values indicate
                 groups that only collide with themselves (and with negative groups). Negative values indicate
                 groups that collide with everything except their negative counterpart. Zero indicates no collisions.
@@ -512,9 +526,8 @@ class BroadPhaseSAP:
             device: Device to launch on. If None, uses the device of the input arrays.
 
         The method will populate candidate_pair with the indices of geometry pairs whose AABBs overlap
-        when expanded by their cutoff distances, whose collision groups allow interaction, and whose worlds
-        are compatible (same world or at least one is global). The number of pairs found will be written to
-        num_candidate_pair[0].
+        (with optional margin expansion), whose collision groups allow interaction, and whose worlds are
+        compatible (same world or at least one is global). The number of pairs found will be written to num_candidate_pair[0].
         """
         # TODO: Choose an optimal direction
         # random fixed direction
@@ -527,6 +540,10 @@ class BroadPhaseSAP:
         if device is None:
             device = geom_lower.device
 
+        # If no margins provided, pass empty array (kernel will use 0.0 margins)
+        if shape_contact_margin is None:
+            shape_contact_margin = wp.empty(0, dtype=wp.float32, device=device)
+
         # Project AABBs onto the sweep axis for each world
         wp.launch(
             kernel=_sap_project_kernel,
@@ -535,7 +552,7 @@ class BroadPhaseSAP:
                 direction,
                 geom_lower,
                 geom_upper,
-                geom_cutoffs,
+                shape_contact_margin,
                 self.world_index_map,
                 self.world_slice_ends,
                 self.max_geoms_per_world,
@@ -600,7 +617,7 @@ class BroadPhaseSAP:
             inputs=[
                 geom_lower,
                 geom_upper,
-                geom_cutoffs,
+                shape_contact_margin,
                 geom_collision_group,
                 geom_shape_world,
                 self.world_index_map,

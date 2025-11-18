@@ -157,7 +157,7 @@ def compute_shape_aabbs(
     shape_scale: wp.array(dtype=wp.vec3),
     shape_collision_radius: wp.array(dtype=float),
     shape_source_ptr: wp.array(dtype=wp.uint64),
-    rigid_contact_margin: float,
+    shape_contact_margin: wp.array(dtype=float),
     # outputs
     aabb_lower: wp.array(dtype=wp.vec3),
     aabb_upper: wp.array(dtype=wp.vec3),
@@ -165,7 +165,10 @@ def compute_shape_aabbs(
     """Compute axis-aligned bounding boxes for each shape in world space.
 
     Uses support function for most shapes. Infinite planes and meshes use bounding sphere fallback.
-    AABBs are enlarged by rigid_contact_margin for contact detection margin.
+    AABBs are enlarged by per-shape contact margin for contact detection.
+
+    Note: Shape thickness is NOT included in AABB expansion - it is applied during narrow phase.
+    Therefore, shape_contact_margin should be >= shape_thickness to ensure proper broad phase detection.
     """
     shape_id = wp.tid()
 
@@ -181,8 +184,9 @@ def compute_shape_aabbs(
     pos = wp.transform_get_translation(X_ws)
     orientation = wp.transform_get_rotation(X_ws)
 
-    # Enlarge AABB by rigid_contact_margin for contact detection
-    margin_vec = wp.vec3(rigid_contact_margin, rigid_contact_margin, rigid_contact_margin)
+    # Enlarge AABB by per-shape contact margin for contact detection
+    contact_margin = shape_contact_margin[shape_id]
+    margin_vec = wp.vec3(contact_margin, contact_margin, contact_margin)
 
     # Check if this is an infinite plane, mesh, or SDF - use bounding sphere fallback
     scale = shape_scale[shape_id]
@@ -382,8 +386,8 @@ class CollisionPipelineUnified:
             # Narrow phase input arrays
             self.geom_data = wp.zeros(shape_count, dtype=wp.vec4, device=device)
             self.geom_transform = wp.zeros(shape_count, dtype=wp.transform, device=device)
-            # Initialize geom_cutoff with zeros; will be populated from model.shape_contact_margin
-            self.geom_cutoff = wp.zeros(shape_count, dtype=wp.float32, device=device)
+            # Initialize shape_contact_margin with zeros; will be populated from model.shape_contact_margin
+            self.shape_contact_margin = wp.zeros(shape_count, dtype=wp.float32, device=device)
 
             # Contact matching arrays (optional)
             if enable_contact_matching:
@@ -480,10 +484,10 @@ class CollisionPipelineUnified:
 
         # Copy per-shape contact margins from model
         if hasattr(model, "shape_contact_margin") and model.shape_contact_margin is not None:
-            pipeline.geom_cutoff.assign(model.shape_contact_margin)
+            pipeline.shape_contact_margin.assign(model.shape_contact_margin)
         else:
             # Fallback for older models without per-shape margins
-            pipeline.geom_cutoff.fill_(rigid_contact_margin)
+            pipeline.shape_contact_margin.fill_(rigid_contact_margin)
 
         return pipeline
 
@@ -500,7 +504,7 @@ class CollisionPipelineUnified:
         """
         # Sync per-shape contact margins from model
         if hasattr(model, "shape_contact_margin") and model.shape_contact_margin is not None:
-            self.geom_cutoff.assign(model.shape_contact_margin)
+            self.shape_contact_margin.assign(model.shape_contact_margin)
 
         # Allocate or clear contacts
         if self.contacts is None or self.requires_grad:
@@ -519,7 +523,7 @@ class CollisionPipelineUnified:
         self.broad_phase_pair_count.zero_()
         contacts.rigid_contact_count.zero_()  # Clear since write_contact uses atomic_add
 
-        # Compute AABBs for all shapes
+        # Compute AABBs for all shapes (already expanded by per-shape contact margins)
         wp.launch(
             kernel=compute_shape_aabbs,
             dim=model.shape_count,
@@ -531,7 +535,7 @@ class CollisionPipelineUnified:
                 model.shape_scale,
                 model.shape_collision_radius,
                 model.shape_source_ptr,
-                self.rigid_contact_margin,
+                self.shape_contact_margin,
             ],
             outputs=[
                 self.shape_aabb_lower,
@@ -540,12 +544,12 @@ class CollisionPipelineUnified:
             device=self.device,
         )
 
-        # Run broad phase
+        # Run broad phase (AABBs are already expanded by contact margins, so pass None)
         if self.broad_phase_mode == BroadPhaseMode.NXN:
             self.nxn_broadphase.launch(
                 self.shape_aabb_lower,
                 self.shape_aabb_upper,
-                model.shape_thickness,
+                None,  # AABBs are pre-expanded, no additional margin needed
                 model.shape_collision_group,
                 model.shape_world,
                 model.shape_count,
@@ -557,7 +561,7 @@ class CollisionPipelineUnified:
             self.sap_broadphase.launch(
                 self.shape_aabb_lower,
                 self.shape_aabb_upper,
-                model.shape_thickness,
+                None,  # AABBs are pre-expanded, no additional margin needed
                 model.shape_collision_group,
                 model.shape_world,
                 model.shape_count,
@@ -569,7 +573,7 @@ class CollisionPipelineUnified:
             self.explicit_broadphase.launch(
                 self.shape_aabb_lower,
                 self.shape_aabb_upper,
-                model.shape_thickness,  # Use thickness as cutoff
+                None,  # AABBs are pre-expanded, no additional margin needed
                 self.shape_pairs_filtered,
                 len(self.shape_pairs_filtered),
                 self.broad_phase_shape_pairs,
@@ -629,7 +633,7 @@ class CollisionPipelineUnified:
             geom_data=self.geom_data,
             geom_transform=self.geom_transform,
             geom_source=model.shape_source_ptr,
-            geom_cutoff=self.geom_cutoff,
+            shape_contact_margin=self.shape_contact_margin,
             geom_collision_radius=model.shape_collision_radius,
             writer_data=writer_data,
             device=self.device,

@@ -163,7 +163,8 @@ class ModelBuilder:
         thickness: float = 1e-5
         """The thickness of the shape."""
         contact_margin: float | None = None
-        """The contact margin for collision detection. If None, uses builder.rigid_contact_margin as default."""
+        """The contact margin for collision detection. If None, uses builder.rigid_contact_margin as default.
+        Note: contact_margin should be >= thickness for proper collision detection."""
         is_solid: bool = True
         """Indicates whether the shape is solid or hollow. Defaults to True."""
         collision_group: int = 1
