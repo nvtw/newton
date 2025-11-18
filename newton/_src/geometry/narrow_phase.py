@@ -168,7 +168,7 @@ def extract_shape_data(
 
 @cache
 def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
-    @wp.kernel(enable_backward=False)
+    @wp.kernel(enable_backward=False, module="unique")
     def narrow_phase_kernel_gjk_mpr(
         candidate_pair: wp.array(dtype=wp.vec2i),
         num_candidate_pair: wp.array(dtype=int),
@@ -350,7 +350,7 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
     return narrow_phase_kernel_gjk_mpr
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def narrow_phase_find_mesh_triangle_overlaps_kernel(
     geom_types: wp.array(dtype=int),
     geom_transform: wp.array(dtype=wp.transform),
@@ -431,7 +431,7 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
 
 @cache
 def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
-    @wp.kernel(enable_backward=False)
+    @wp.kernel(enable_backward=False, module="unique")
     def narrow_phase_process_mesh_triangle_contacts_kernel(
         geom_types: wp.array(dtype=int),
         geom_data: wp.array(dtype=wp.vec4),
@@ -519,7 +519,7 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
 
 @cache
 def create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func: Any):
-    @wp.kernel(enable_backward=False)
+    @wp.kernel(enable_backward=False, module="unique")
     def narrow_phase_process_mesh_plane_contacts_kernel(
         geom_types: wp.array(dtype=int),
         geom_data: wp.array(dtype=wp.vec4),
