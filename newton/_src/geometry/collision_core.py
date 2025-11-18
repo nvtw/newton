@@ -808,6 +808,7 @@ def pre_contact_check(
 
 @wp.func
 def mesh_vs_convex_midphase(
+    idx_in_thread_block: int,
     mesh_shape: int,
     non_mesh_shape: int,
     X_mesh_ws: wp.transform,
@@ -889,8 +890,20 @@ def mesh_vs_convex_midphase(
 
             # Add this triangle pair to the output buffer if valid
             # Store (mesh_shape, non_mesh_shape, tri_index) to guarantee mesh is always first
+            has_tri = 0
             if tri_index >= 0:
-                out_idx = wp.atomic_add(triangle_pairs_count, 0, 1)
+                has_tri = 1
+            count_tile = wp.tile(has_tri)
+            inclusive_scan = wp.tile_scan_inclusive(count_tile)
+            offset = 0
+            if idx_in_thread_block == wp.block_dim() - 1:
+                offset = wp.atomic_add(triangle_pairs_count, 0, inclusive_scan[wp.block_dim() - 1])
+            offset_broadcast_tile = wp.tile(offset)
+            offset_broadcast = offset_broadcast_tile[wp.block_dim() - 1]
+
+            if tri_index >= 0:
+                # out_idx = wp.atomic_add(triangle_pairs_count, 0, 1)
+                out_idx = offset_broadcast + inclusive_scan[idx_in_thread_block] - has_tri
                 if out_idx < triangle_pairs.shape[0]:
                     triangle_pairs[out_idx] = wp.vec3i(mesh_shape, non_mesh_shape, tri_index)
 

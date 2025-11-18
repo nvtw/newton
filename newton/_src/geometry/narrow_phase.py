@@ -369,7 +369,7 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
     Outputs triples of (shape_a, shape_b, triangle_idx) for further processing.
     Uses tiled mesh query for improved performance.
     """
-    tid, _j = wp.tid()
+    tid, j = wp.tid()
 
     num_mesh_pairs = shape_pairs_mesh_count[0]
 
@@ -415,6 +415,7 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
 
         # Call mesh_vs_convex_midphase with the geom_data and cutoff
         mesh_vs_convex_midphase(
+            j,
             mesh_shape,
             non_mesh_shape,
             X_mesh_ws,
