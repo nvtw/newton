@@ -375,5 +375,262 @@ for shape_type_a, shape_type_b, test_level_a, test_level_b in unified_contact_te
         test_level_b=test_level_b,
     )
 
+
+class TestPerShapeContactMargin(unittest.TestCase):
+    pass
+
+
+def test_per_shape_contact_margin(test, device):
+    """
+    Test that per-shape contact margins work correctly by testing two spheres
+    with different margins approaching a plane.
+    """
+    from newton._src.geometry.narrow_phase import NarrowPhase
+    from newton._src.geometry.types import GeoType
+
+    narrow_phase = NarrowPhase(max_candidate_pairs=100, max_triangle_pairs=1000, device=device)
+
+    # Create geometries: plane + 2 spheres with different margins
+    geom_types = wp.array([int(GeoType.PLANE), int(GeoType.SPHERE), int(GeoType.SPHERE)], dtype=wp.int32, device=device)
+    geom_data = wp.array(
+        [
+            wp.vec4(0.0, 0.0, 1.0, 0.0),  # Plane (infinite)
+            wp.vec4(0.2, 0.2, 0.2, 0.0),  # Sphere A radius=0.2
+            wp.vec4(0.2, 0.2, 0.2, 0.0),  # Sphere B radius=0.2
+        ],
+        dtype=wp.vec4,
+        device=device,
+    )
+    geom_source = wp.zeros(3, dtype=wp.uint64, device=device)
+    geom_collision_radius = wp.array([1e6, 0.2, 0.2], dtype=wp.float32, device=device)
+
+    # Contact margins: plane=0.01, sphereA=0.02, sphereB=0.06
+    shape_contact_margin = wp.array([0.01, 0.02, 0.06], dtype=wp.float32, device=device)
+
+    # Allocate output arrays
+    max_contacts = 10
+    contact_pair = wp.zeros(max_contacts, dtype=wp.vec2i, device=device)
+    contact_position = wp.zeros(max_contacts, dtype=wp.vec3, device=device)
+    contact_normal = wp.zeros(max_contacts, dtype=wp.vec3, device=device)
+    contact_penetration = wp.zeros(max_contacts, dtype=float, device=device)
+    contact_tangent = wp.zeros(max_contacts, dtype=wp.vec3, device=device)
+    contact_count = wp.zeros(1, dtype=int, device=device)
+
+    # Test 1: Sphere A at z=0.25 (outside combined margin 0.03) - no contact
+    geom_transform = wp.array(
+        [
+            wp.transform((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+            wp.transform((0.0, 0.0, 0.25), (0.0, 0.0, 0.0, 1.0)),
+            wp.transform((10.0, 0.0, 1.0), (0.0, 0.0, 0.0, 1.0)),
+        ],
+        dtype=wp.transform,
+        device=device,
+    )
+    pairs = wp.array([wp.vec2i(0, 1)], dtype=wp.vec2i, device=device)
+    num_pairs = wp.array([1], dtype=wp.int32, device=device)
+
+    contact_count.zero_()
+    narrow_phase.launch(
+        pairs,
+        num_pairs,
+        geom_types,
+        geom_data,
+        geom_transform,
+        geom_source,
+        shape_contact_margin,
+        geom_collision_radius,
+        contact_pair,
+        contact_position,
+        contact_normal,
+        contact_penetration,
+        contact_count,  # contact_count comes BEFORE contact_tangent
+        contact_tangent,
+    )
+    wp.synchronize()
+    test.assertEqual(contact_count.numpy()[0], 0, "Sphere A outside margin should have no contact")
+
+    # Test 2: Sphere A at z=0.15 (inside margin) - contact!
+    geom_transform = wp.array(
+        [
+            wp.transform((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+            wp.transform((0.0, 0.0, 0.15), (0.0, 0.0, 0.0, 1.0)),
+            wp.transform((10.0, 0.0, 1.0), (0.0, 0.0, 0.0, 1.0)),
+        ],
+        dtype=wp.transform,
+        device=device,
+    )
+
+    contact_count.zero_()
+    narrow_phase.launch(
+        pairs,
+        num_pairs,
+        geom_types,
+        geom_data,
+        geom_transform,
+        geom_source,
+        shape_contact_margin,
+        geom_collision_radius,
+        contact_pair,
+        contact_position,
+        contact_normal,
+        contact_penetration,
+        contact_count,
+        contact_tangent,
+    )
+    wp.synchronize()
+    test.assertGreater(contact_count.numpy()[0], 0, "Sphere A inside margin should have contact")
+
+    # Test 3: Sphere B at z=0.23 (inside its larger margin 0.07) - contact!
+    geom_transform = wp.array(
+        [
+            wp.transform((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+            wp.transform((10.0, 0.0, 1.0), (0.0, 0.0, 0.0, 1.0)),
+            wp.transform((0.0, 0.0, 0.23), (0.0, 0.0, 0.0, 1.0)),
+        ],
+        dtype=wp.transform,
+        device=device,
+    )
+    pairs = wp.array([wp.vec2i(0, 2)], dtype=wp.vec2i, device=device)
+
+    contact_count.zero_()
+    narrow_phase.launch(
+        pairs,
+        num_pairs,
+        geom_types,
+        geom_data,
+        geom_transform,
+        geom_source,
+        shape_contact_margin,
+        geom_collision_radius,
+        contact_pair,
+        contact_position,
+        contact_normal,
+        contact_penetration,
+        contact_count,
+        contact_tangent,
+    )
+    wp.synchronize()
+    test.assertGreater(contact_count.numpy()[0], 0, "Sphere B with larger margin should have contact")
+
+
+def test_per_shape_contact_margin_broad_phase(test, device):
+    """
+    Test that all broad phase modes correctly handle per-shape contact margins
+    by applying them during AABB overlap checks (not pre-expanded).
+
+    Setup two spheres (A and B) at different separations from a ground plane:
+    - Sphere A: small margin, should NOT be detected by broad phase when far
+    - Sphere B: large margin, SHOULD be detected by broad phase when at same distance
+
+    This tests that the broad phase kernels correctly expand AABBs by the provided
+    margins during overlap testing, not requiring pre-expanded AABBs.
+    """
+    from newton._src.geometry.broad_phase_nxn import BroadPhaseAllPairs
+    from newton._src.geometry.broad_phase_sap import BroadPhaseSAP
+    from newton._src.geometry.types import GeoType
+
+    # Create UNEXPANDED AABBs for: ground plane + 2 spheres
+    # The margins will be passed separately to test that broad phase applies them correctly
+
+    # Ground plane AABB (infinite in XY, at z=0) WITHOUT margin
+    ground_aabb_lower = wp.vec3(-1000.0, -1000.0, 0.0)
+    ground_aabb_upper = wp.vec3(1000.0, 1000.0, 0.0)
+
+    # Sphere A (radius=0.2, center at z=0.24) WITHOUT margin
+    # AABB: z range = [0.24-0.2, 0.24+0.2] = [0.04, 0.44]
+    sphere_a_aabb_lower = wp.vec3(-0.2, -0.2, 0.04)
+    sphere_a_aabb_upper = wp.vec3(0.2, 0.2, 0.44)
+
+    # Sphere B (radius=0.2, center at z=0.24) WITHOUT margin
+    # AABB: z range = [0.04, 0.44]
+    sphere_b_aabb_lower = wp.vec3(10.0 - 0.2, -0.2, 0.04)
+    sphere_b_aabb_upper = wp.vec3(10.0 + 0.2, 0.2, 0.44)
+
+    aabb_lower = wp.array([ground_aabb_lower, sphere_a_aabb_lower, sphere_b_aabb_lower], dtype=wp.vec3, device=device)
+    aabb_upper = wp.array([ground_aabb_upper, sphere_a_aabb_upper, sphere_b_aabb_upper], dtype=wp.vec3, device=device)
+
+    # Pass per-shape margins to broad phase - it will apply them during overlap checks
+    # ground=0.01, sphereA=0.02, sphereB=0.06
+    # With margins applied:
+    # - Ground AABB becomes [-0.01, 0.01] in z
+    # - Sphere A AABB becomes [0.04-0.02, 0.44+0.02] = [0.02, 0.46] - does NOT overlap ground
+    # - Sphere B AABB becomes [0.04-0.06, 0.44+0.06] = [-0.02, 0.50] - DOES overlap ground
+    shape_contact_margin = wp.array([0.01, 0.02, 0.06], dtype=wp.float32, device=device)
+
+    # Use collision group 1 for all shapes (group -1 collides with everything, group 0 means no collision)
+    collision_group = wp.array([1, 1, 1], dtype=wp.int32, device=device)
+    shape_world = wp.array([0, 0, 0], dtype=wp.int32, device=device)
+
+    # Test NXN broad phase
+    nxn_bp = BroadPhaseAllPairs(shape_world, device=device)
+    pairs_nxn = wp.zeros(100, dtype=wp.vec2i, device=device)
+    pair_count_nxn = wp.zeros(1, dtype=wp.int32, device=device)
+
+    nxn_bp.launch(
+        aabb_lower,
+        aabb_upper,
+        shape_contact_margin,
+        collision_group,
+        shape_world,
+        3,
+        pairs_nxn,
+        pair_count_nxn,
+        device=device,
+    )
+    wp.synchronize()
+
+    pairs_np = pairs_nxn.numpy()
+    count_nxn = pair_count_nxn.numpy()[0]
+
+    # Check that sphere B-ground pair is detected, but sphere A-ground is not
+    has_sphere_b_ground = any((p[0] == 0 and p[1] == 2) or (p[0] == 2 and p[1] == 0) for p in pairs_np[:count_nxn])
+    has_sphere_a_ground = any((p[0] == 0 and p[1] == 1) or (p[0] == 1 and p[1] == 0) for p in pairs_np[:count_nxn])
+
+    test.assertTrue(has_sphere_b_ground, "NXN: Sphere B (large margin) should overlap ground")
+    test.assertFalse(has_sphere_a_ground, "NXN: Sphere A (small margin) should NOT overlap ground")
+
+    # Test SAP broad phase
+    sap_bp = BroadPhaseSAP(shape_world, device=device)
+    pairs_sap = wp.zeros(100, dtype=wp.vec2i, device=device)
+    pair_count_sap = wp.zeros(1, dtype=wp.int32, device=device)
+
+    sap_bp.launch(
+        aabb_lower,
+        aabb_upper,
+        shape_contact_margin,
+        collision_group,
+        shape_world,
+        3,
+        pairs_sap,
+        pair_count_sap,
+        device=device,
+    )
+    wp.synchronize()
+
+    pairs_np = pairs_sap.numpy()
+    count_sap = pair_count_sap.numpy()[0]
+
+    has_sphere_b_ground = any((p[0] == 0 and p[1] == 2) or (p[0] == 2 and p[1] == 0) for p in pairs_np[:count_sap])
+    has_sphere_a_ground = any((p[0] == 0 and p[1] == 1) or (p[0] == 1 and p[1] == 0) for p in pairs_np[:count_sap])
+
+    test.assertTrue(has_sphere_b_ground, "SAP: Sphere B (large margin) should overlap ground")
+    test.assertFalse(has_sphere_a_ground, "SAP: Sphere A (small margin) should NOT overlap ground")
+
+
+# Register per-shape contact margin tests
+add_function_test(
+    TestPerShapeContactMargin,
+    "test_per_shape_contact_margin",
+    test_per_shape_contact_margin,
+    devices=devices,
+)
+add_function_test(
+    TestPerShapeContactMargin,
+    "test_per_shape_contact_margin_broad_phase",
+    test_per_shape_contact_margin_broad_phase,
+    devices=devices,
+)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=False)
