@@ -169,10 +169,10 @@ class TestNarrowPhase(unittest.TestCase):
             - transform: (position, quaternion) tuple
             - data: scale/size as vec3, thickness as float
             - source: mesh pointer (default 0)
-            - cutoff: cutoff distance (default 0.0)
+            - cutoff: contact margin (default 0.0)
 
         Returns:
-            Tuple of (geom_types, geom_data, geom_transform, geom_source, geom_cutoff, geom_collision_radius)
+            Tuple of (geom_types, geom_data, geom_transform, geom_source, shape_contact_margin, geom_collision_radius)
         """
         n = len(geom_list)
 
@@ -180,7 +180,7 @@ class TestNarrowPhase(unittest.TestCase):
         geom_data = np.zeros(n, dtype=wp.vec4)
         geom_transforms = []
         geom_source = np.zeros(n, dtype=np.uint64)
-        geom_cutoff = np.zeros(n, dtype=np.float32)
+        shape_contact_margin = np.zeros(n, dtype=np.float32)
         geom_collision_radius = np.zeros(n, dtype=np.float32)
 
         for i, geom in enumerate(geom_list):
@@ -202,7 +202,7 @@ class TestNarrowPhase(unittest.TestCase):
             )
 
             geom_source[i] = geom.get("source", 0)
-            geom_cutoff[i] = geom.get("cutoff", 0.0)
+            shape_contact_margin[i] = geom.get("cutoff", 0.0)
 
             # Compute collision radius for AABB fallback (used for planes/meshes)
             geo_type = geom_types[i]
@@ -229,7 +229,7 @@ class TestNarrowPhase(unittest.TestCase):
             wp.array(geom_data, dtype=wp.vec4),
             wp.array(geom_transforms, dtype=wp.transform),
             wp.array(geom_source, dtype=wp.uint64),
-            wp.array(geom_cutoff, dtype=wp.float32),
+            wp.array(shape_contact_margin, dtype=wp.float32),
             wp.array(geom_collision_radius, dtype=wp.float32),
         )
 
@@ -243,7 +243,7 @@ class TestNarrowPhase(unittest.TestCase):
         Returns:
             Tuple of (contact_count, contact_pairs, positions, normals, penetrations, tangents)
         """
-        geom_types, geom_data, geom_transform, geom_source, geom_cutoff, geom_collision_radius = (
+        geom_types, geom_data, geom_transform, geom_source, shape_contact_margin, geom_collision_radius = (
             self._create_geometry_arrays(geom_list)
         )
 
@@ -268,7 +268,7 @@ class TestNarrowPhase(unittest.TestCase):
             geom_data=geom_data,
             geom_transform=geom_transform,
             geom_source=geom_source,
-            geom_cutoff=geom_cutoff,
+            shape_contact_margin=shape_contact_margin,
             geom_collision_radius=geom_collision_radius,
             contact_pair=contact_pair,
             contact_position=contact_position,
