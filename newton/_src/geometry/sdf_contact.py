@@ -39,6 +39,7 @@ except ImportError:
 @wp.struct
 class VolumeData:
     """Encapsulates all data needed to query an SDF volume."""
+
     volume_id: wp.uint64
     aabb_lower: wp.vec3
     aabb_upper: wp.vec3
@@ -503,7 +504,7 @@ def get_bounding_sphere(v0: wp.vec3, v1: wp.vec3, v2: wp.vec3) -> tuple[wp.vec3,
 
 
 @wp.func
-def add_to_shared_buffer(
+def add_to_shared_buffer_and_update_progress(
     idx_in_thread_block: int,
     add_triangle: bool,
     tri_idx: int,
@@ -533,6 +534,15 @@ def add_to_shared_buffer(
         - The last thread (block_dim-1) updates the global count
         - All threads must call this together (implicit synchronization via tile ops)
     """
+
+    capacity = wp.block_dim() - selected_triangle_index_buffer_shared_mem[wp.block_dim()]
+
+    # Assert that capacity > 0 (guaranteed by while loop condition in findInterestingTriangles)
+    # This ensures thread 0 can never overflow, so idx_in_thread_block > 0 check is valid
+    wp.expect(capacity > 0)
+
+    synchronize()
+
     val = 1 if add_triangle else 0
     add_tile = wp.tile(val)
     inclusive_scan = wp.tile_scan_inclusive(add_tile)
@@ -553,7 +563,26 @@ def add_to_shared_buffer(
     if add_triangle and write_index < wp.block_dim():
         selected_triangle_index_buffer_shared_mem[write_index] = tri_idx
 
-    synchronize()
+    synchronize()  # Syncronize because of all the shared memory logic
+
+    # Update the triangle progress counter
+
+    if idx_in_thread_block == 0:
+        selected_triangle_index_buffer_shared_mem[wp.block_dim() + 1] += (
+            wp.block_dim()
+        )  # Increment not accounting for possible overflow on thread 0
+
+    synchronize()  # Syncronize because of all the shared memory logic
+
+    if (
+        idx_in_thread_block > 0
+        and offset_broadcast + inclusive_scan[idx_in_thread_block - 1] <= capacity
+        and offset_broadcast + inclusive_scan[idx_in_thread_block] > capacity
+    ):
+        # Correct for possible overflow on the first thread that could not emit its triangle index
+        selected_triangle_index_buffer_shared_mem[wp.block_dim() + 1] = tri_idx
+
+    synchronize()  # Syncronize because of all the shared memory logic
 
 
 @wp.func
@@ -583,12 +612,11 @@ def findInterestingTriangles(
     # Get the mesh object from the mesh ID
     mesh = wp.mesh_get(mesh0)
 
-    base_tri_idx = selected_triangle_index_buffer_shared_mem[wp.block_dim() + 1]
-
     while (
-        base_tri_idx < mesh.num_tris
+        selected_triangle_index_buffer_shared_mem[wp.block_dim() + 1] < mesh.num_tris
         and selected_triangle_index_buffer_shared_mem[wp.block_dim()] < wp.block_dim()
     ):
+        base_tri_idx = selected_triangle_index_buffer_shared_mem[wp.block_dim() + 1]
         tri_idx = base_tri_idx + thread_id
         add_triangle = False
         if tri_idx < mesh.num_tris:
@@ -601,12 +629,9 @@ def findInterestingTriangles(
             sdf_dist = PxSdfDistance(sdf_volume, sdf_box_lower, sdf_box_upper, inv_sdf_dx, bounding_sphere_center)
             add_triangle = sdf_dist <= (bounding_sphere_radius + contact_distance)
 
-        add_to_shared_buffer(thread_id, add_triangle, tri_idx, selected_triangle_index_buffer_shared_mem)
-
-        base_tri_idx += wp.block_dim()
-
-    if thread_id == 0:
-        selected_triangle_index_buffer_shared_mem[wp.block_dim() + 1] = wp.min(base_tri_idx, mesh.num_tris)
+        add_to_shared_buffer_and_update_progress(
+            thread_id, add_triangle, tri_idx, selected_triangle_index_buffer_shared_mem
+        )
 
 
 def create_doTriangleTriangleCollision(tile_size: int):
@@ -619,6 +644,7 @@ def create_doTriangleTriangleCollision(tile_size: int):
     Returns:
         A warp kernel that processes mesh-SDF collision pairs in parallel.
     """
+
     @wp.kernel
     def doTriangleTriangleCollision(
         mesh_source: wp.array(dtype=wp.uint64),
