@@ -1328,14 +1328,6 @@ def parse_usd(
                 # Extract custom attributes for this shape
                 shape_custom_attrs = usd.get_custom_attribute_values(prim, builder_custom_attr_shape)
 
-                # Read per-shape contact margin (PhysX contactOffset)
-                shape_contact_margin = R.get_value(
-                    prim, prim_type=PrimType.SHAPE, key="rigid_contact_margin", default=None, verbose=verbose
-                )
-                # Handle PhysX special value (-inf means use scene default)
-                if shape_contact_margin is not None and shape_contact_margin == float("-inf"):
-                    shape_contact_margin = None
-
                 shape_params = {
                     "body": body_id,
                     "xform": shape_xform,
@@ -1359,7 +1351,6 @@ def parse_usd(
                         restitution=material.restitution,
                         density=body_density.get(body_path, default_shape_density),
                         collision_group=collision_group,
-                        contact_margin=shape_contact_margin,
                         is_visible=not hide_collision_shapes,
                     ),
                     "key": path,
