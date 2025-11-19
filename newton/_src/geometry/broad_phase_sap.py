@@ -44,7 +44,9 @@ def _sap_project_aabb(
     direction: wp.vec3,  # Must be normalized
     shape_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
     shape_bounding_box_upper: wp.array(dtype=wp.vec3, ndim=1),
-    shape_contact_margin: wp.array(dtype=float, ndim=1),  # Optional per-shape contact margins (can be empty if AABBs pre-expanded)
+    shape_contact_margin: wp.array(
+        dtype=float, ndim=1
+    ),  # Optional per-shape contact margins (can be empty if AABBs pre-expanded)
 ) -> wp.vec2:
     lower = shape_bounding_box_lower[elementid]
     upper = shape_bounding_box_upper[elementid]
@@ -144,7 +146,9 @@ def _sap_project_kernel(
     direction: wp.vec3,  # Must be normalized
     shape_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
     shape_bounding_box_upper: wp.array(dtype=wp.vec3, ndim=1),
-    shape_contact_margin: wp.array(dtype=float, ndim=1),  # Optional per-shape contact margins (can be empty if AABBs pre-expanded)
+    shape_contact_margin: wp.array(
+        dtype=float, ndim=1
+    ),  # Optional per-shape contact margins (can be empty if AABBs pre-expanded)
     world_index_map: wp.array(dtype=int, ndim=1),
     world_slice_ends: wp.array(dtype=int, ndim=1),
     max_shapes_per_world: int,
@@ -177,7 +181,9 @@ def _sap_project_kernel(
     shape_id = world_index_map[world_slice_start + local_shape_id]
 
     # Project AABB onto direction
-    range = _sap_project_aabb(shape_id, direction, shape_bounding_box_lower, shape_bounding_box_upper, shape_contact_margin)
+    range = _sap_project_aabb(
+        shape_id, direction, shape_bounding_box_lower, shape_bounding_box_upper, shape_contact_margin
+    )
 
     sap_projection_lower_out[idx] = range[0]
     sap_projection_upper_out[idx] = range[1]
@@ -228,7 +234,9 @@ def _sap_range_kernel(
     # Binary search for the limit in this world's segment
     # We need to search in the range [local_shape_id + 1, num_shapes_in_world)
     world_base_idx = world_id * max_shapes_per_world
-    limit = binary_search_segment(sap_projection_lower_in, world_base_idx, upper, local_shape_id + 1, num_shapes_in_world)
+    limit = binary_search_segment(
+        sap_projection_lower_in, world_base_idx, upper, local_shape_id + 1, num_shapes_in_world
+    )
     limit = wp.min(num_shapes_in_world, limit)
 
     # Range of shapes for the sweep and prune process
@@ -240,7 +248,9 @@ def _process_single_sap_pair(
     pair: wp.vec2i,
     shape_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
     shape_bounding_box_upper: wp.array(dtype=wp.vec3, ndim=1),
-    shape_contact_margin: wp.array(dtype=float, ndim=1),  # Optional per-shape contact margins (can be empty if AABBs pre-expanded)
+    shape_contact_margin: wp.array(
+        dtype=float, ndim=1
+    ),  # Optional per-shape contact margins (can be empty if AABBs pre-expanded)
     candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),
     num_candidate_pair: wp.array(dtype=int, ndim=1),  # Size one array
     max_candidate_pair: int,
@@ -276,7 +286,9 @@ def _sap_broadphase_kernel(
     # Input arrays
     shape_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
     shape_bounding_box_upper: wp.array(dtype=wp.vec3, ndim=1),
-    shape_contact_margin: wp.array(dtype=float, ndim=1),  # Optional per-shape contact margins (can be empty if AABBs pre-expanded)
+    shape_contact_margin: wp.array(
+        dtype=float, ndim=1
+    ),  # Optional per-shape contact margins (can be empty if AABBs pre-expanded)
     collision_group: wp.array(dtype=int, ndim=1),
     shape_world: wp.array(dtype=int, ndim=1),  # World indices
     world_index_map: wp.array(dtype=int, ndim=1),

@@ -4890,8 +4890,7 @@ class ModelBuilder:
 
             # Resolve per-shape contact margins (use shape-specific or fall back to builder default)
             shape_contact_margins = [
-                margin if margin is not None else self.rigid_contact_margin
-                for margin in self.shape_contact_margin
+                margin if margin is not None else self.rigid_contact_margin for margin in self.shape_contact_margin
             ]
             m.shape_contact_margin = wp.array(shape_contact_margins, dtype=wp.float32, requires_grad=requires_grad)
 

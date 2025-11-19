@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-from functools import cache
 from typing import Any
 
 import warp as wp
@@ -164,7 +163,6 @@ def extract_shape_data(
         result.auxiliary = pack_mesh_ptr(shape_source[shape_idx])
 
     return position, orientation, result, scale, thickness
-
 
 
 def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
@@ -429,7 +427,6 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
         )
 
 
-
 def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
     @wp.kernel(enable_backward=False, module="unique")
     def narrow_phase_process_mesh_triangle_contacts_kernel(
@@ -515,7 +512,6 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
             )
 
     return narrow_phase_process_mesh_triangle_contacts_kernel
-
 
 
 def create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func: Any):

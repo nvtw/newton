@@ -21,6 +21,10 @@ import warp.examples
 
 import newton
 from newton import GeoType
+from newton._src.geometry.broad_phase_nxn import BroadPhaseAllPairs
+from newton._src.geometry.broad_phase_sap import BroadPhaseSAP
+from newton._src.geometry.narrow_phase import NarrowPhase
+from newton._src.geometry.types import GeoType as GeoTypeInternal
 from newton.examples import test_body_state
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
 
@@ -385,13 +389,14 @@ def test_per_shape_contact_margin(test, device):
     Test that per-shape contact margins work correctly by testing two spheres
     with different margins approaching a plane.
     """
-    from newton._src.geometry.narrow_phase import NarrowPhase
-    from newton._src.geometry.types import GeoType
-
     narrow_phase = NarrowPhase(max_candidate_pairs=100, max_triangle_pairs=1000, device=device)
 
     # Create geometries: plane + 2 spheres with different margins
-    geom_types = wp.array([int(GeoType.PLANE), int(GeoType.SPHERE), int(GeoType.SPHERE)], dtype=wp.int32, device=device)
+    geom_types = wp.array(
+        [int(GeoTypeInternal.PLANE), int(GeoTypeInternal.SPHERE), int(GeoTypeInternal.SPHERE)],
+        dtype=wp.int32,
+        device=device,
+    )
     geom_data = wp.array(
         [
             wp.vec4(0.0, 0.0, 1.0, 0.0),  # Plane (infinite)
@@ -525,10 +530,6 @@ def test_per_shape_contact_margin_broad_phase(test, device):
     This tests that the broad phase kernels correctly expand AABBs by the provided
     margins during overlap testing, not requiring pre-expanded AABBs.
     """
-    from newton._src.geometry.broad_phase_nxn import BroadPhaseAllPairs
-    from newton._src.geometry.broad_phase_sap import BroadPhaseSAP
-    from newton._src.geometry.types import GeoType
-
     # Create UNEXPANDED AABBs for: ground plane + 2 spheres
     # The margins will be passed separately to test that broad phase applies them correctly
 
