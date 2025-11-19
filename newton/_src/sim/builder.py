@@ -1516,6 +1516,7 @@ class ModelBuilder:
             "shape_material_mu",
             "shape_material_restitution",
             "shape_collision_radius",
+            "shape_contact_margin",
             "particle_qd",
             "particle_mass",
             "particle_radius",

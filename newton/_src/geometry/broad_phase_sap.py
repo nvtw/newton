@@ -507,7 +507,7 @@ class BroadPhaseSAP:
         self,
         shape_lower: wp.array(dtype=wp.vec3, ndim=1),  # Lower bounds of shape bounding boxes
         shape_upper: wp.array(dtype=wp.vec3, ndim=1),  # Upper bounds of shape bounding boxes
-        shape_contact_margin: Optional[wp.array(dtype=float, ndim=1)],  # Optional per-shape contact margins
+        shape_contact_margin: wp.array(dtype=float, ndim=1) | None,  # Optional per-shape contact margins
         shape_collision_group: wp.array(dtype=int, ndim=1),  # Collision group ID per box
         shape_shape_world: wp.array(dtype=int, ndim=1),  # World index per box
         shape_count: int,  # Number of active bounding boxes
