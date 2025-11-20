@@ -483,11 +483,7 @@ class CollisionPipelineUnified:
         )
 
         # Copy per-shape contact margins from model
-        if hasattr(model, "shape_contact_margin") and model.shape_contact_margin is not None:
-            pipeline.shape_contact_margin.assign(model.shape_contact_margin)
-        else:
-            # Fallback for older models without per-shape margins
-            pipeline.shape_contact_margin.fill_(rigid_contact_margin)
+        pipeline.shape_contact_margin.assign(model.shape_contact_margin)
 
         return pipeline
 
@@ -503,11 +499,7 @@ class CollisionPipelineUnified:
             Contacts: The generated contacts
         """
         # Sync per-shape contact margins from model
-        if hasattr(model, "shape_contact_margin") and model.shape_contact_margin is not None:
-            self.shape_contact_margin.assign(model.shape_contact_margin)
-        else:
-            # Fallback for older models without per-shape margins
-            self.shape_contact_margin.fill_(self.rigid_contact_margin)
+        self.shape_contact_margin.assign(model.shape_contact_margin)
 
         # Allocate or clear contacts
         if self.contacts is None or self.requires_grad:
