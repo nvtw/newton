@@ -448,8 +448,6 @@ def create_collision_pipeline(
     # Use provided values or defaults
     if rigid_contact_max_per_pair is None:
         rigid_contact_max_per_pair = 10
-    if rigid_contact_margin is None:
-        rigid_contact_margin = 0.01
 
     # Create and return CollisionPipelineUnified
     return newton.CollisionPipelineUnified.from_model(
