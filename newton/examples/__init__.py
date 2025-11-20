@@ -380,7 +380,6 @@ def create_collision_pipeline(
     collision_pipeline_type=None,
     broad_phase_mode=None,
     rigid_contact_max_per_pair=None,
-    rigid_contact_margin=None,
 ):
     """Create a collision pipeline based on command-line arguments or explicit parameters.
 
@@ -416,9 +415,7 @@ def create_collision_pipeline(
         pipeline = newton.examples.create_collision_pipeline(
             model,
             args,
-            rigid_contact_max_per_pair=100,
-            rigid_contact_margin=0.05
-        )
+            rigid_contact_max_per_pair=100,        )
     """
     import newton  # noqa: PLC0415
 
@@ -458,7 +455,6 @@ def create_collision_pipeline(
     return newton.CollisionPipelineUnified.from_model(
         model,
         rigid_contact_max_per_pair=rigid_contact_max_per_pair,
-        rigid_contact_margin=rigid_contact_margin,
         broad_phase_mode=broad_phase_enum,
     )
 
