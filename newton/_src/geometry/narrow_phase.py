@@ -190,6 +190,9 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
         shape_pairs_mesh_plane_cumsum: wp.array(dtype=int),
         shape_pairs_mesh_plane_count: wp.array(dtype=int),
         mesh_plane_vertex_total_count: wp.array(dtype=int),
+        # mesh-mesh collision outputs
+        shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
+        shape_pairs_mesh_mesh_count: wp.array(dtype=int),
     ):
         """
         Narrow phase collision detection kernel using GJK/MPR.
@@ -317,6 +320,8 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
                 shape_pairs_mesh_plane_cumsum,
                 shape_pairs_mesh_plane_count,
                 mesh_plane_vertex_total_count,
+                shape_pairs_mesh_mesh,
+                shape_pairs_mesh_mesh_count,
             )
             if skip_pair:
                 continue
@@ -519,6 +524,63 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
 
 
 @cache
+def create_narrow_phase_process_mesh_mesh_contacts_kernel(writer_func: Any):
+    @wp.kernel(enable_backward=False)
+    def narrow_phase_process_mesh_mesh_contacts_kernel(
+        geom_types: wp.array(dtype=int),
+        geom_data: wp.array(dtype=wp.vec4),
+        geom_transform: wp.array(dtype=wp.transform),
+        geom_source: wp.array(dtype=wp.uint64),
+        geom_sdf: wp.array(dtype=wp.uint64),
+        geom_cutoff: wp.array(dtype=float),
+        shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
+        shape_pairs_mesh_mesh_count: wp.array(dtype=int),
+        writer_data: Any,
+        total_num_threads: int,
+    ):
+        """
+        Process mesh-mesh collisions using SDF-mesh collision detection.
+
+        This kernel is called for each mesh-mesh pair detected during broad phase.
+        It uses the SDF from one mesh and queries vertices from the other mesh.
+
+        Args:
+            geom_types: Array of geometry types for all shapes
+            geom_data: Array of vec4 containing scale (xyz) and thickness (w) for each shape
+            geom_transform: Array of world-space transforms for each shape
+            geom_source: Array of source pointers (mesh IDs) for each shape
+            geom_sdf: Array of SDF volume IDs for mesh shapes
+            geom_cutoff: Array of cutoff distances for each shape
+            shape_pairs_mesh_mesh: Array of mesh-mesh pairs to process
+            shape_pairs_mesh_mesh_count: Number of mesh-mesh pairs
+            writer_data: Contact writer data structure
+            total_num_threads: Total number of threads for strided loop
+        """
+        tid = wp.tid()
+
+        num_pairs = shape_pairs_mesh_mesh_count[0]
+
+        # Strided loop over mesh-mesh pairs
+        for i in range(tid, num_pairs, total_num_threads):
+            if i >= shape_pairs_mesh_mesh.shape[0]:
+                break
+
+            # pair = shape_pairs_mesh_mesh[i]
+            # mesh_shape_a = pair[0]
+            # mesh_shape_b = pair[1]
+
+            # mesh_id_a = geom_source[mesh_shape_a]
+            # mesh_id_b = geom_source[mesh_shape_b]
+
+            # sdf_ptr_a = geom_sdf[mesh_shape_a]
+            # sdf_ptr_b = geom_sdf[mesh_shape_b]
+
+            # TODO: Implement mesh-mesh collision detection using SDF
+
+    return narrow_phase_process_mesh_mesh_contacts_kernel
+
+
+@cache
 def create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func: Any):
     @wp.kernel(enable_backward=False)
     def narrow_phase_process_mesh_plane_contacts_kernel(
@@ -679,6 +741,7 @@ class NarrowPhase:
         self.narrow_phase_kernel = create_narrow_phase_kernel_gjk_mpr(self.external_aabb, writer_func)
         self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func)
         self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func)
+        self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(writer_func)
 
         # Pre-allocate all intermediate buffers
         with wp.ScopedDevice(device):
@@ -695,6 +758,10 @@ class NarrowPhase:
             self.shape_pairs_mesh_plane_count = wp.zeros(1, dtype=wp.int32, device=device)
             self.shape_pairs_mesh_plane_cumsum = wp.zeros(max_candidate_pairs, dtype=wp.int32, device=device)
             self.mesh_plane_vertex_total_count = wp.zeros(1, dtype=wp.int32, device=device)
+
+            # Buffers for mesh-mesh collision handling
+            self.shape_pairs_mesh_mesh = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
+            self.shape_pairs_mesh_mesh_count = wp.zeros(1, dtype=wp.int32, device=device)
 
             # Empty tangent array for when tangent computation is disabled
             self.empty_tangent = wp.zeros(0, dtype=wp.vec3, device=device)
@@ -723,6 +790,7 @@ class NarrowPhase:
         geom_data: wp.array(dtype=wp.vec4, ndim=1),  # Geom data (scale xyz, thickness w)
         geom_transform: wp.array(dtype=wp.transform, ndim=1),  # In world space
         geom_source: wp.array(dtype=wp.uint64, ndim=1),  # The index into the source array, type define by geom_types
+        geom_sdf: wp.array(dtype=wp.uint64, ndim=1),  # SDF volume pointers for mesh shapes
         geom_cutoff: wp.array(dtype=wp.float32, ndim=1),  # per-geom (take the max)
         geom_collision_radius: wp.array(dtype=wp.float32, ndim=1),  # per-geom collision radius for AABB fallback
         writer_data: Any,
@@ -738,6 +806,7 @@ class NarrowPhase:
             geom_data: Array of vec4 containing scale (xyz) and thickness (w) for each shape
             geom_transform: Array of world-space transforms for each shape
             geom_source: Array of source pointers (mesh IDs, etc.) for each shape
+            geom_sdf: Array of SDF volume pointers for mesh shapes (0 for non-mesh shapes)
             geom_cutoff: Array of cutoff distances for each shape
             geom_collision_radius: Array of collision radii for each shape (for AABB fallback for planes/meshes)
             writer_data: Custom struct instance for contact writing (type must match the custom writer function)
@@ -751,6 +820,7 @@ class NarrowPhase:
         self.triangle_pairs_count.zero_()
         self.shape_pairs_mesh_plane_count.zero_()
         self.mesh_plane_vertex_total_count.zero_()
+        self.shape_pairs_mesh_mesh_count.zero_()
 
         # Launch main narrow phase kernel (using the appropriate kernel variant)
         wp.launch(
@@ -777,6 +847,8 @@ class NarrowPhase:
                 self.shape_pairs_mesh_plane_cumsum,
                 self.shape_pairs_mesh_plane_count,
                 self.mesh_plane_vertex_total_count,
+                self.shape_pairs_mesh_mesh,
+                self.shape_pairs_mesh_mesh_count,
             ],
             device=device,
             block_dim=self.block_dim,
@@ -838,6 +910,26 @@ class NarrowPhase:
                 geom_cutoff,
                 self.triangle_pairs,
                 self.triangle_pairs_count,
+                writer_data,
+                self.total_num_threads,
+            ],
+            device=device,
+            block_dim=self.block_dim,
+        )
+
+        # Launch mesh-mesh contact processing kernel
+        wp.launch(
+            kernel=self.mesh_mesh_contacts_kernel,
+            dim=self.total_num_threads,
+            inputs=[
+                geom_types,
+                geom_data,
+                geom_transform,
+                geom_source,
+                geom_sdf,
+                geom_cutoff,
+                self.shape_pairs_mesh_mesh,
+                self.shape_pairs_mesh_mesh_count,
                 writer_data,
                 self.total_num_threads,
             ],
@@ -913,6 +1005,7 @@ class NarrowPhase:
         self.triangle_pairs_count.zero_()
         self.shape_pairs_mesh_plane_count.zero_()
         self.mesh_plane_vertex_total_count.zero_()
+        self.shape_pairs_mesh_mesh_count.zero_()
 
         # Create ContactWriterData struct
         writer_data = ContactWriterData()

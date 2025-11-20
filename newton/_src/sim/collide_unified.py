@@ -615,6 +615,7 @@ class CollisionPipelineUnified:
             geom_data=self.geom_data,
             geom_transform=self.geom_transform,
             geom_source=model.shape_source_ptr,
+            geom_sdf=model.shape_sdf_ptr,
             geom_cutoff=self.geom_cutoff,
             geom_collision_radius=model.shape_collision_radius,
             writer_data=writer_data,

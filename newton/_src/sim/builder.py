@@ -487,6 +487,13 @@ class ModelBuilder:
         # world index for each shape
         self.shape_world = []
 
+        # Mesh SDF storage
+        self.shape_sdf_ptr = []
+        self.shape_sdf_volume = []
+        self.shape_sdf_voxel_size = []
+        self.shape_sdf_center = []
+        self.shape_sdf_half_extents = []
+
         # filtering to ignore certain collision pairs
         self.shape_collision_filter_pairs: list[tuple[int, int]] = []
 
@@ -4885,6 +4892,56 @@ class ModelBuilder:
 
             m.shape_collision_filter_pairs = set(self.shape_collision_filter_pairs)
             m.shape_collision_group = wp.array(self.shape_collision_group, dtype=wp.int32)
+
+            # ---------------------
+            # Compute SDFs for mesh shapes
+            from ..geometry.sdf_utils import compute_sdf  # noqa: PLC0415
+            from ..geometry.types import GeoType  # noqa: PLC0415
+
+            sdf_ptrs = []
+            sdf_volumes = []
+            sdf_voxel_sizes = []
+            sdf_centers = []
+            sdf_half_extents = []
+
+            for _, (shape_type, shape_src, shape_flags, shape_scale, shape_thickness) in enumerate(
+                zip(
+                    self.shape_type,
+                    self.shape_source,
+                    self.shape_flags,
+                    self.shape_scale,
+                    self.shape_thickness,
+                    strict=False,
+                )
+            ):
+                if shape_type == GeoType.MESH and shape_src is not None:
+                    # Compute SDF for this mesh shape
+                    volume, volume_id, voxel_size, extents, _ = compute_sdf(
+                        shape_flags=shape_flags,
+                        shape_scale=shape_scale,
+                        shape_thickness=shape_thickness,
+                        mesh_src=shape_src,
+                        device=device,
+                    )
+                    sdf_ptrs.append(volume_id)
+                    sdf_volumes.append(volume)
+                    sdf_voxel_sizes.append(voxel_size)
+                    # extents is a list [center, half_extents]
+                    sdf_centers.append(extents[0])
+                    sdf_half_extents.append(extents[1])
+                else:
+                    # Non-mesh shapes get placeholder values
+                    sdf_ptrs.append(0)
+                    sdf_volumes.append(None)
+                    sdf_voxel_sizes.append(wp.vec3(0.0, 0.0, 0.0))
+                    sdf_centers.append(wp.vec3(0.0, 0.0, 0.0))
+                    sdf_half_extents.append(wp.vec3(0.0, 0.0, 0.0))
+
+            m.shape_sdf_ptr = wp.array(sdf_ptrs, dtype=wp.uint64)
+            m.shape_sdf_volume = sdf_volumes
+            m.shape_sdf_voxel_size = wp.array(sdf_voxel_sizes, dtype=wp.vec3)
+            m.shape_sdf_center = wp.array(sdf_centers, dtype=wp.vec3)
+            m.shape_sdf_half_extents = wp.array(sdf_half_extents, dtype=wp.vec3)
 
             # ---------------------
             # springs
