@@ -162,8 +162,8 @@ class ModelBuilder:
         """The coefficient of restitution."""
         thickness: float = 1e-5
         """The thickness of the shape."""
-        contact_margin: float | None = None
-        """The contact margin for collision detection. If None, uses builder.rigid_contact_margin as default.
+        contact_margin: float = 0.01
+        """The contact margin for collision detection. Defaults to 0.01.
         Note: contact_margin should be >= thickness for proper collision detection."""
         is_solid: bool = True
         """Indicates whether the shape is solid or hollow. Defaults to True."""
@@ -590,9 +590,6 @@ class ModelBuilder:
         self.up_axis: Axis = Axis.from_any(up_axis)
         self.gravity: float = gravity
 
-        # contacts to be generated within the given distance margin to be generated at
-        # every simulation substep (can be 0 if only one PBD solver iteration is used)
-        self.rigid_contact_margin = 0.1
         # torsional friction coefficient (only considered by XPBD so far)
         self.rigid_contact_torsional_friction = 0.5
         # rolling friction coefficient (only considered by XPBD so far)
@@ -2958,7 +2955,7 @@ class ModelBuilder:
         self.shape_material_ka.append(cfg.ka)
         self.shape_material_mu.append(cfg.mu)
         self.shape_material_restitution.append(cfg.restitution)
-        self.shape_contact_margin.append(cfg.contact_margin if cfg.contact_margin is not None else self.rigid_contact_margin)
+        self.shape_contact_margin.append(cfg.contact_margin)
         self.shape_collision_group.append(cfg.collision_group)
         self.shape_collision_radius.append(compute_shape_radius(type, scale, src))
         self.shape_world.append(self.current_world)

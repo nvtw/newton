@@ -41,7 +41,7 @@ from ..sim.state import State
 class UnifiedContactWriterData:
     """Contact writer data for collide_unified write_contact function."""
 
-    rigid_contact_margin: float
+    shape_contact_margin: wp.array(dtype=float)
     contact_max: int
     # Body information arrays (for transforming to body-local coordinates)
     body_q: wp.array(dtype=wp.transform)
@@ -108,7 +108,13 @@ def write_contact(
     diff = b_contact_world - a_contact_world
     distance = wp.dot(diff, contact_normal_a_to_b)
     d = distance - total_separation_needed
-    if d < writer_data.rigid_contact_margin:
+
+    # Use maximum of the two shape contact margins for filtering
+    margin_a = writer_data.shape_contact_margin[contact_data.shape_a]
+    margin_b = writer_data.shape_contact_margin[contact_data.shape_b]
+    contact_margin = wp.max(margin_a, margin_b)
+
+    if d < contact_margin:
         index = wp.atomic_add(writer_data.contact_count, 0, 1)
         if index >= writer_data.contact_max:
             # Reached buffer limit
@@ -264,7 +270,6 @@ class CollisionPipelineUnified:
         shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
         rigid_contact_max: int | None = None,
         rigid_contact_max_per_pair: int = 10,
-        rigid_contact_margin: float = 0.01,
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
         edge_sdf_iter: int = 10,
@@ -289,7 +294,6 @@ class CollisionPipelineUnified:
             rigid_contact_max (int | None, optional): Maximum number of rigid contacts to allocate.
                 If None, computed as shape_pairs_max * rigid_contact_max_per_pair.
             rigid_contact_max_per_pair (int, optional): Maximum number of contact points per shape pair. Defaults to 10.
-            rigid_contact_margin (float, optional): Margin for rigid contact generation. Defaults to 0.01.
             soft_contact_max (int | None, optional): Maximum number of soft contacts to allocate.
                 If None, computed as shape_count * particle_count.
             soft_contact_margin (float, optional): Margin for soft contact generation. Defaults to 0.01.
@@ -323,7 +327,6 @@ class CollisionPipelineUnified:
         self.enable_contact_matching = enable_contact_matching
 
         self.shape_pairs_max = (shape_count * (shape_count - 1)) // 2
-        self.rigid_contact_margin = rigid_contact_margin
 
         # Initialize broad phase
         if self.broad_phase_mode == BroadPhaseMode.NXN:
@@ -409,7 +412,6 @@ class CollisionPipelineUnified:
         cls,
         model: Model,
         rigid_contact_max_per_pair: int | None = None,
-        rigid_contact_margin: float = 0.01,
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
         edge_sdf_iter: int = 10,
@@ -427,7 +429,6 @@ class CollisionPipelineUnified:
             model (Model): The simulation model.
             rigid_contact_max_per_pair (int | None, optional): Maximum number of contact points per shape pair.
                 If None, uses model.rigid_contact_max and sets per-pair to 0.
-            rigid_contact_margin (float, optional): Margin for rigid contact generation. Defaults to 0.01.
             soft_contact_max (int | None, optional): Maximum number of soft contacts to allocate.
             soft_contact_margin (float, optional): Margin for soft contact generation. Defaults to 0.01.
             edge_sdf_iter (int, optional): Number of iterations for edge SDF collision. Defaults to 10.
@@ -467,7 +468,6 @@ class CollisionPipelineUnified:
             shape_pairs_filtered,
             rigid_contact_max,
             rigid_contact_max_per_pair,
-            rigid_contact_margin,
             soft_contact_max,
             soft_contact_margin,
             edge_sdf_iter,
@@ -597,7 +597,7 @@ class CollisionPipelineUnified:
 
         # Create UnifiedContactWriterData struct for custom contact writing
         writer_data = UnifiedContactWriterData()
-        writer_data.rigid_contact_margin = self.rigid_contact_margin
+        writer_data.shape_contact_margin = self.shape_contact_margin
         writer_data.contact_max = contacts.rigid_contact_max
         writer_data.body_q = state.body_q
         writer_data.shape_body = model.shape_body

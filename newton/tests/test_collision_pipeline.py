@@ -95,7 +95,6 @@ class CollisionSetup:
             self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
                 self.model,
                 rigid_contact_max_per_pair=20,
-                rigid_contact_margin=0.01,
                 broad_phase_mode=broad_phase_mode,
             )
             self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
