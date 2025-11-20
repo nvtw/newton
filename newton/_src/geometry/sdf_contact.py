@@ -563,7 +563,7 @@ def add_to_shared_buffer_and_update_progress(
     if add_triangle and write_index < wp.block_dim():
         selected_triangle_index_buffer_shared_mem[write_index] = tri_idx
 
-    synchronize()  # Syncronize because of all the shared memory logic
+    synchronize()  # Synchronize because of all the shared memory logic
 
     # Update the triangle progress counter
 
@@ -572,7 +572,7 @@ def add_to_shared_buffer_and_update_progress(
             wp.block_dim()
         )  # Increment not accounting for possible overflow on thread 0
 
-    synchronize()  # Syncronize because of all the shared memory logic
+    synchronize()  # Synchronize because of all the shared memory logic
 
     if (
         idx_in_thread_block > 0
@@ -582,7 +582,7 @@ def add_to_shared_buffer_and_update_progress(
         # Correct for possible overflow on the first thread that could not emit its triangle index
         selected_triangle_index_buffer_shared_mem[wp.block_dim() + 1] = tri_idx
 
-    synchronize()  # Syncronize because of all the shared memory logic
+    synchronize()  # Synchronize because of all the shared memory logic
 
 
 @wp.func

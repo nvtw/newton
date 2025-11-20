@@ -61,7 +61,7 @@ def generate_arbitrary_contact_data(t: int) -> ContactStruct:
 
 @wp.kernel(enable_backward=False)
 def contact_reduction_test_kernel(out_contacts: wp.array(dtype=ContactStruct), out_count: wp.array(dtype=int)):
-    block_id, t = wp.tid()
+    _block_id, t = wp.tid()
     empty_marker = -1000000000.0
 
     active_contacts_shared_mem = wp.array(ptr=get_shared_memory_pointer_121_ints(), shape=(121,), dtype=wp.int32)
@@ -191,13 +191,13 @@ def validate_contact_reduction(gpu_contacts, gpu_count):
     gpu_count_val = gpu_count.numpy()[0]
     gpu_contacts_np = gpu_contacts.numpy()
 
-    print(f"\nValidation:")
+    print("\nValidation:")
     print(f"  CPU reference: {len(cpu_keys)} contacts")
     print(f"  GPU result: {gpu_count_val} contacts")
 
     # Check if counts match
     if gpu_count_val != len(cpu_keys):
-        print(f"  FAILED: Contact count mismatch!")
+        print("  FAILED: Contact count mismatch!")
         return False
 
     # Build sets of contacts for comparison (order-independent)
@@ -261,7 +261,7 @@ def validate_contact_reduction(gpu_contacts, gpu_count):
         success = False
 
     if success:
-        print(f"  PASSED: Contact sets are identical (order-independent)!")
+        print("  PASSED: Contact sets are identical (order-independent)!")
 
     return success
 
@@ -288,7 +288,7 @@ def test_contact_reduction():
     count = out_count.numpy()[0]
     contacts = out_contacts.numpy()
 
-    print(f"Contact reduction test kernel completed successfully!")
+    print("Contact reduction test kernel completed successfully!")
     print(f"Number of contacts kept: {count}")
 
     # Print first few contacts for debugging
@@ -313,7 +313,7 @@ def test_argmax_per_slot_kernel(
     result: wp.array(dtype=int),
 ):
     """Test kernel for segmented argmax."""
-    block_id, thread_id = wp.tid()
+    _block_id, thread_id = wp.tid()
 
     slot = slots[thread_id]
     value = values[thread_id]
@@ -325,8 +325,6 @@ def test_argmax_per_slot_kernel(
 
 def test_argmax():
     """Test the segmented argmax function."""
-    import numpy as np
-
     wp.init()
 
     # Allocate arrays
@@ -335,8 +333,8 @@ def test_argmax():
     slots = wp.zeros(128, dtype=int)
 
     # Create test data: multiple slots with different values
-    np.random.seed(42)
-    values_np = np.random.rand(128).astype(np.float32) * 100.0
+    rng = np.random.default_rng(42)
+    values_np = rng.random(128).astype(np.float32) * 100.0
     slots_np = np.arange(128, dtype=np.int32) % 8  # 8 different slots, each with 16 threads
 
     values.assign(values_np)

@@ -100,7 +100,7 @@ def create_segmented_argmax_func(tile_size: int):
         sort_buffer[thread_id] = packed
 
         # Create payload with thread indices
-        sort_payload = wp.tile_arange(tile_size, dtype=wp.int32)
+        sort_payload = wp.tile_arrange(tile_size, dtype=wp.int32)
 
         # Perform bitonic sort on the tiles
         wp.tile_sort(sort_buffer, sort_payload)
@@ -523,6 +523,7 @@ def create_contact_reduction_func(tile_size: int):
 
     return StoreContactLinearArray
 
+
 def create_shared_memory_pointer_func(
     array_size: int,
 ):
@@ -576,5 +577,6 @@ def create_shared_memory_pointer_block_dim_func(
     def get_shared_memory_pointer() -> wp.uint64: ...
 
     return get_shared_memory_pointer
+
 
 get_shared_memory_pointer_block_dim_plus_2_ints = create_shared_memory_pointer_block_dim_func(2)
