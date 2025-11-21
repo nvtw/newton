@@ -386,8 +386,6 @@ class CollisionPipelineUnified:
             # Narrow phase input arrays
             self.geom_data = wp.zeros(shape_count, dtype=wp.vec4, device=device)
             self.geom_transform = wp.zeros(shape_count, dtype=wp.transform, device=device)
-            # Initialize shape_contact_margin with zeros; will be populated from model.shape_contact_margin
-            self.shape_contact_margin = wp.zeros(shape_count, dtype=wp.float32, device=device)
 
             # Contact matching arrays (optional)
             if enable_contact_matching:
@@ -482,9 +480,6 @@ class CollisionPipelineUnified:
             enable_contact_matching=enable_contact_matching,
         )
 
-        # Copy per-shape contact margins from model
-        pipeline.shape_contact_margin.assign(model.shape_contact_margin)
-
         return pipeline
 
     def collide(self, model: Model, state: State) -> Contacts:
@@ -498,8 +493,6 @@ class CollisionPipelineUnified:
         Returns:
             Contacts: The generated contacts
         """
-        # Sync per-shape contact margins from model
-        self.shape_contact_margin.assign(model.shape_contact_margin)
 
         # Allocate or clear contacts
         if self.contacts is None or self.requires_grad:
@@ -530,7 +523,7 @@ class CollisionPipelineUnified:
                 model.shape_scale,
                 model.shape_collision_radius,
                 model.shape_source_ptr,
-                self.shape_contact_margin,
+                model.shape_contact_margin,
             ],
             outputs=[
                 self.shape_aabb_lower,
@@ -628,7 +621,7 @@ class CollisionPipelineUnified:
             shape_data=self.geom_data,
             shape_transform=self.geom_transform,
             shape_source=model.shape_source_ptr,
-            shape_contact_margin=self.shape_contact_margin,
+            shape_contact_margin=model.shape_contact_margin,
             shape_collision_radius=model.shape_collision_radius,
             writer_data=writer_data,
             device=self.device,
