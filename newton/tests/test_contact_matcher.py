@@ -120,7 +120,6 @@ def test_contact_matcher_stacked_cubes(test: TestContactMatcher, device):
     # Build model with ground plane and 2D grid of stacked cubes
     # Use very high stiffness and damping to minimize motion
     builder = newton.ModelBuilder()
-    builder.rigid_contact_margin = 0.1  # Use larger margin for contact matching test
     builder.default_shape_cfg.ke = 1e6  # Very stiff contacts
     builder.default_shape_cfg.kd = 1e4  # High damping to prevent oscillation
 
@@ -174,6 +173,7 @@ def test_contact_matcher_stacked_cubes(test: TestContactMatcher, device):
     # Create collision pipeline with contact matching enabled
     collision_pipeline = CollisionPipelineUnified.from_model(
         model,
+        rigid_contact_margin=0.1,
         broad_phase_mode=BroadPhaseMode.NXN,
         enable_contact_matching=True,
     )

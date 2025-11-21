@@ -31,7 +31,7 @@ from newton.tests.unittest_utils import (
 
 def simulate(solver, model, state_0, state_1, control, sim_dt, substeps):
     if not isinstance(solver, newton.solvers.SolverMuJoCo):
-        contacts = model.collide(state_0)
+        contacts = model.collide(state_0, rigid_contact_margin=100.0)
     else:
         contacts = None
     for _ in range(substeps):
@@ -97,7 +97,6 @@ def test_shapes_on_plane(test, device, solver_fn):
     # fmt: on
 
     builder = newton.ModelBuilder()
-    builder.rigid_contact_margin = 100.0  # Use large margin to ensure contact generation
     builder.default_shape_cfg.ke = 2e4
     builder.default_shape_cfg.kd = 500.0
     # !!! disable friction for SemiImplicit integrators
@@ -402,6 +401,7 @@ def test_shape_collisions_gjk_mpr_multicontact(test, device, verbose=False):
     collision_pipeline = newton.CollisionPipelineUnified.from_model(
         model,
         rigid_contact_max_per_pair=10,
+        rigid_contact_margin=0.01,
         broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
     )
 
@@ -515,6 +515,7 @@ def test_mesh_box_on_ground(test, device):
     collision_pipeline = newton.CollisionPipelineUnified.from_model(
         model,
         rigid_contact_max_per_pair=20,
+        rigid_contact_margin=0.01,
         broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
     )
 
@@ -609,6 +610,7 @@ def test_mujoco_warp_newton_contacts(test, device):
     collision_pipeline = newton.CollisionPipelineUnified.from_model(
         model,
         rigid_contact_max_per_pair=10,
+        rigid_contact_margin=0.01,
         broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
     )
 

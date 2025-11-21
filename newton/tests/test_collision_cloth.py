@@ -755,7 +755,6 @@ def test_mesh_ground_collision_index(test, device):
     )
     mesh = Mesh(vertices=vertices, indices=[0, 1, 2])
     builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
-    builder.rigid_contact_margin = 2.0  # Ensure all mesh vertices are within the contact margin
     # create body with nonzero mass to ensure it is not static
     # and contact points will be computed
     b = builder.add_body(mass=1.0)
@@ -774,7 +773,7 @@ def test_mesh_ground_collision_index(test, device):
     test.assertEqual(model.shape_contact_pair_count, 3)
     state = model.state()
     # ensure all the mesh vertices will be within the contact margin
-    contacts = model.collide(state)
+    contacts = model.collide(state, rigid_contact_margin=2.0)
     test.assertEqual(contacts.rigid_contact_max, 12)
     test.assertEqual(contacts.rigid_contact_count.numpy()[0], 3)
     tids = contacts.rigid_contact_tids.list()
