@@ -769,11 +769,14 @@ def test_mesh_ground_collision_index(test, device):
         mesh=mesh,
     )
     builder.add_ground_plane()
+
+    # Set large contact margin to ensure all mesh vertices will be within the contact margin
+    builder.rigid_contact_margin = 2.0
+
     model = builder.finalize(device=device)
     test.assertEqual(model.shape_contact_pair_count, 3)
     state = model.state()
-    # ensure all the mesh vertices will be within the contact margin
-    contacts = model.collide(state, rigid_contact_margin=2.0)
+    contacts = model.collide(state)
     test.assertEqual(contacts.rigid_contact_max, 12)
     test.assertEqual(contacts.rigid_contact_count.numpy()[0], 3)
     tids = contacts.rigid_contact_tids.list()

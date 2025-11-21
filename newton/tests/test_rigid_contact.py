@@ -31,7 +31,7 @@ from newton.tests.unittest_utils import (
 
 def simulate(solver, model, state_0, state_1, control, sim_dt, substeps):
     if not isinstance(solver, newton.solvers.SolverMuJoCo):
-        contacts = model.collide(state_0, rigid_contact_margin=100.0)
+        contacts = model.collide(state_0)
     else:
         contacts = None
     for _ in range(substeps):
@@ -161,6 +161,9 @@ def test_shapes_on_plane(test, device, solver_fn):
         expected_end_positions.append(wp.vec3(7.0, y_pos, 0.3 * scale))
 
     builder.add_ground_plane()
+
+    # Set large contact margin to ensure all contacts are detected
+    builder.rigid_contact_margin = 100.0
 
     model = builder.finalize(device=device)
 
