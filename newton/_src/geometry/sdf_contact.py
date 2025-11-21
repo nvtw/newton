@@ -302,12 +302,7 @@ def PxSdfSampleWithGrad(
 
 @wp.func
 def doTriangleSDFCollision(
-    texture: wp.uint64,
-    sdfBoxLower: wp.vec3,
-    sdfBoxHigher: wp.vec3,
-    invSdfDx: wp.vec3,
-    sdfDims: wp.vec3,
-    sdfDx: float,
+    sdf: wp.uint64,
     v0: wp.vec3,
     v1: wp.vec3,
     v2: wp.vec3,
@@ -332,12 +327,7 @@ def doTriangleSDFCollision(
     4. Return final distance, contact point, and contact direction
 
     Args:
-        texture: The SDF volume texture
-        sdfBoxLower: Lower bounds of SDF volume in world space
-        sdfBoxHigher: Upper bounds of SDF volume in world space
-        invSdfDx: Inverse voxel spacing
-        sdfDims: SDF volume dimensions in voxels
-        sdfDx: SDF voxel spacing
+        sdf: The SDF volume texture
         v0, v1, v2: Triangle vertices in world space
         tolerance: Contact distance threshold
 
@@ -351,11 +341,11 @@ def doTriangleSDFCollision(
     center = (v0 + v1 + v2) * third
     p = center
 
-    dist = PxSdfDistance(texture, sdfBoxLower, sdfBoxHigher, invSdfDx, p)
+    dist = wp.volume_sample_f(sdf, wp.volume_world_to_index(sdf, p), wp.Volume.LINEAR)
 
-    d0 = PxSdfDistance(texture, sdfBoxLower, sdfBoxHigher, invSdfDx, v0)
-    d1 = PxSdfDistance(texture, sdfBoxLower, sdfBoxHigher, invSdfDx, v1)
-    d2 = PxSdfDistance(texture, sdfBoxLower, sdfBoxHigher, invSdfDx, v2)
+    d0 = wp.volume_sample_f(sdf, wp.volume_world_to_index(sdf, v0), wp.Volume.LINEAR)
+    d1 = wp.volume_sample_f(sdf, wp.volume_world_to_index(sdf, v1), wp.Volume.LINEAR)
+    d2 = wp.volume_sample_f(sdf, wp.volume_world_to_index(sdf, v2), wp.Volume.LINEAR)
 
     # PxVec3 nor = (v1 - v0).cross(v2 - v0);
 
@@ -387,7 +377,7 @@ def doTriangleSDFCollision(
     step = 1.0 / (2.0 * difference)
 
     for _iter in range(16):
-        sdfGradient = PxVolumeGrad(texture, sdfBoxLower, sdfBoxHigher, invSdfDx, sdfDims, sdfDx, p)
+        wp.volume_sample_grad_f(sdf, wp.volume_world_to_index(sdf, p), wp.Volume.LINEAR, sdfGradient)
 
         grad_len = wp.length(sdfGradient)
         if grad_len == 0.0:
@@ -419,11 +409,10 @@ def doTriangleSDFCollision(
 
         uvw = newUVW
 
-    sdfGradient = PxVolumeGrad(texture, sdfBoxLower, sdfBoxHigher, invSdfDx, sdfDims, sdfDx, p)
+    dist = wp.volume_sample_grad_f(sdf, wp.volume_world_to_index(sdf, p), wp.Volume.LINEAR, sdfGradient)
 
     point = p
-
-    dist, dir = PxSdfSampleWithGrad(texture, sdfBoxLower, sdfBoxHigher, invSdfDx, p, sdfGradient, tolerance)
+    dir = sdfGradient
 
     return dist, point, dir
 
@@ -590,13 +579,8 @@ def findInterestingTriangles(
     thread_id: int,
     mesh_scale: wp.vec3,
     mesh_to_sdf_transform: wp.transform,
-    volume_aabb_lower: wp.vec3,
-    volume_aabb_upper: wp.vec3,
-    mesh0: wp.uint64,
-    sdf_volume: wp.uint64,
-    sdf_box_lower: wp.vec3,
-    sdf_box_upper: wp.vec3,
-    inv_sdf_dx: wp.vec3,
+    mesh: wp.uint64,
+    sdf: wp.uint64,
     selected_triangle_index_buffer_shared_mem: wp.array(dtype=wp.int32),
     contact_distance: float,
 ):
@@ -610,7 +594,7 @@ def findInterestingTriangles(
     Buffer layout: [0..block_dim-1] = indices, [block_dim] = count, [block_dim+1] = progress
     """
     # Get the mesh object from the mesh ID
-    mesh = wp.mesh_get(mesh0)
+    mesh = wp.mesh_get(mesh)
 
     while (
         selected_triangle_index_buffer_shared_mem[wp.block_dim() + 1] < mesh.num_tris
@@ -620,13 +604,14 @@ def findInterestingTriangles(
         tri_idx = base_tri_idx + thread_id
         add_triangle = False
         if tri_idx < mesh.num_tris:
-            v0, v1, v2 = get_triangle_from_mesh(mesh0, mesh_scale, mesh_to_sdf_transform, tri_idx)
+            v0, v1, v2 = get_triangle_from_mesh(mesh, mesh_scale, mesh_to_sdf_transform, tri_idx)
             bounding_sphere_center, bounding_sphere_radius = get_bounding_sphere(v0, v1, v2)
 
             # Use SDF distance query instead of AABB overlap for more accurate culling
             # If the distance from sphere center to SDF surface is greater than sphere radius + contact distance,
             # the triangle cannot generate contacts and can be safely culled
-            sdf_dist = PxSdfDistance(sdf_volume, sdf_box_lower, sdf_box_upper, inv_sdf_dx, bounding_sphere_center)
+            query_local = wp.volume_world_to_index(sdf, bounding_sphere_center)
+            sdf_dist = wp.volume_sample_f(sdf, query_local, wp.Volume.LINEAR)
             add_triangle = sdf_dist <= (bounding_sphere_radius + contact_distance)
 
         add_to_shared_buffer_and_update_progress(
@@ -634,7 +619,7 @@ def findInterestingTriangles(
         )
 
 
-def create_doTriangleTriangleCollision(tile_size: int):
+def create_SdfMeshCollision(tile_size: int):
     """
     Create a warp kernel for triangle-SDF collision detection between mesh pairs.
 
@@ -646,11 +631,11 @@ def create_doTriangleTriangleCollision(tile_size: int):
     """
 
     @wp.kernel
-    def doTriangleTriangleCollision(
+    def do_sdf_mesh_collision(
         mesh_source: wp.array(dtype=wp.uint64),
         mesh_scales: wp.array(dtype=wp.vec3),
         mesh_transforms: wp.array(dtype=wp.transform),
-        volume_data: wp.array(dtype=VolumeData),
+        sdf_source: wp.array(dtype=wp.uint64),
         pairs: wp.array(dtype=wp.vec2i),
         pair_count: wp.array(dtype=int),
         contact_distance: float,
@@ -669,7 +654,7 @@ def create_doTriangleTriangleCollision(tile_size: int):
             mesh_source: Array of mesh IDs
             mesh_scales: Per-mesh scale factors
             mesh_transforms: Per-mesh world transforms
-            volume_data: Array of VolumeData structs with SDF information
+            volume_source: Array of SDF volume IDs
             pairs: Array of (mesh0_idx, mesh1_idx) collision pairs
             pair_count: Number of pairs to process
             contact_distance: Maximum distance threshold for contacts
@@ -684,8 +669,8 @@ def create_doTriangleTriangleCollision(tile_size: int):
         pair = pairs[block_id]
         mesh0 = mesh_source[pair[0]]
         mesh1 = mesh_source[pair[1]]
-        volume0_data = volume_data[pair[0]]
-        volume1_data = volume_data[pair[1]]
+        sdf0 = sdf_source[pair[0]]
+        sdf1 = sdf_source[pair[1]]
 
         # Extract mesh parameters
         mesh0_scale = mesh_scales[pair[0]]
@@ -724,13 +709,13 @@ def create_doTriangleTriangleCollision(tile_size: int):
             if mode == 0:
                 mesh = mesh0
                 mesh_scale = mesh0_scale
-                mesh_transform = mesh0_transform
-                volume_data_current = volume1_data
+                mesh_sdf_transform = wp.transform_compose(wp.transform_inverse(mesh1_transform), mesh0_transform)
+                sdf_current = sdf1
             else:
                 mesh = mesh1
                 mesh_scale = mesh1_scale
-                mesh_transform = mesh1_transform
-                volume_data_current = volume0_data
+                mesh_sdf_transform = wp.transform_compose(wp.transform_inverse(mesh0_transform), mesh1_transform)
+                sdf_current = sdf0
 
             # Reset progress counter for this mesh
             if t == 0:
@@ -741,14 +726,9 @@ def create_doTriangleTriangleCollision(tile_size: int):
                 findInterestingTriangles(
                     t,
                     mesh_scale,
-                    mesh_transform,
-                    volume_data_current.aabb_lower,
-                    volume_data_current.aabb_upper,
+                    mesh_sdf_transform,
                     mesh,
-                    volume_data_current.volume_id,
-                    volume_data_current.aabb_lower,
-                    volume_data_current.aabb_upper,
-                    volume_data_current.inv_sdf_dx,
+                    sdf_current,
                     selected_triangles,
                     contact_distance,
                 )
@@ -757,14 +737,9 @@ def create_doTriangleTriangleCollision(tile_size: int):
                 c = ContactStruct()
 
                 if has_contact:
-                    v0, v1, v2 = get_triangle_from_mesh(mesh, mesh_scale, mesh_transform, selected_triangles[t])
+                    v0, v1, v2 = get_triangle_from_mesh(mesh, mesh_scale, mesh_sdf_transform, selected_triangles[t])
                     dist, point, dir = doTriangleSDFCollision(
-                        volume_data_current.volume_id,
-                        volume_data_current.aabb_lower,
-                        volume_data_current.aabb_upper,
-                        volume_data_current.inv_sdf_dx,
-                        volume_data_current.sdf_dims,
-                        volume_data_current.sdf_dx,
+                        sdf_current,
                         v0,
                         v1,
                         v2,
@@ -794,11 +769,11 @@ def create_doTriangleTriangleCollision(tile_size: int):
 
         # Thread 0 writes the count
         if t == 0:
-            out_count[0] = num_contacts_to_keep
+            out_count[0] = num_contacts_to_keep  # TODO: Atomic?
 
         # All threads cooperatively write the contacts
         for i in range(t, num_contacts_to_keep, wp.block_dim()):
             contact_id = active_contacts_shared_mem[i]
             out_contacts[i] = contacts_shared_mem[contact_id]
 
-    return doTriangleTriangleCollision
+    return do_sdf_mesh_collision
