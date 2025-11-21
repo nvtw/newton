@@ -101,6 +101,9 @@ def test_shapes_on_plane(test, device, solver_fn):
     builder.default_shape_cfg.kd = 500.0
     # !!! disable friction for SemiImplicit integrators
     builder.default_shape_cfg.kf = 0.0
+    # Set large contact margin to ensure all contacts are detected
+    # Must be set BEFORE adding shapes
+    builder.rigid_contact_margin = 100.0
 
     expected_end_positions = []
 
@@ -161,9 +164,6 @@ def test_shapes_on_plane(test, device, solver_fn):
         expected_end_positions.append(wp.vec3(7.0, y_pos, 0.3 * scale))
 
     builder.add_ground_plane()
-
-    # Set large contact margin to ensure all contacts are detected
-    builder.rigid_contact_margin = 100.0
 
     model = builder.finalize(device=device)
 
