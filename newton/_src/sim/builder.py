@@ -3010,7 +3010,9 @@ class ModelBuilder:
         self.shape_material_ka.append(cfg.ka)
         self.shape_material_mu.append(cfg.mu)
         self.shape_material_restitution.append(cfg.restitution)
-        self.shape_contact_margin.append(cfg.contact_margin if cfg.contact_margin is not None else self.rigid_contact_margin)
+        self.shape_contact_margin.append(
+            cfg.contact_margin if cfg.contact_margin is not None else self.rigid_contact_margin
+        )
         self.shape_collision_group.append(cfg.collision_group)
         self.shape_collision_radius.append(compute_shape_radius(type, scale, src))
         self.shape_world.append(self.current_world)
