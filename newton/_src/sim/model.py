@@ -617,6 +617,7 @@ class Model:
         state: State,
         collision_pipeline: CollisionPipeline | None = None,
         rigid_contact_max_per_pair: int | None = None,
+        rigid_contact_margin: float = 0.01,
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
         edge_sdf_iter: int = 10,
@@ -634,6 +635,10 @@ class Model:
                 If not provided, a new one will be created if it hasn't been constructed before for this model.
             rigid_contact_max_per_pair (int, optional): Maximum number of rigid contacts per shape pair.
                 If None, a kernel is launched to count the number of possible contacts.
+            rigid_contact_margin (float, optional): Default contact margin used during collision pipeline initialization.
+                Default is 0.01. Note: Per-shape contact margins are defined via ``ShapeConfig.contact_margin``
+                and take precedence. To control contact margins, set them per-shape in ``ShapeConfig`` or use
+                ``builder.rigid_contact_margin`` as the default for all shapes without explicit margins.
             soft_contact_max (int, optional): Maximum number of soft contacts.
                 If None, a kernel is launched to count the number of possible contacts.
             soft_contact_margin (float, optional): Margin for soft contact generation. Default is 0.01.
@@ -654,6 +659,7 @@ class Model:
             self._collision_pipeline = CollisionPipeline.from_model(
                 model=self,
                 rigid_contact_max_per_pair=rigid_contact_max_per_pair,
+                rigid_contact_margin=rigid_contact_margin,
                 soft_contact_max=soft_contact_max,
                 soft_contact_margin=soft_contact_margin,
                 edge_sdf_iter=edge_sdf_iter,
@@ -661,6 +667,7 @@ class Model:
             )
 
         # update any additional parameters
+        self._collision_pipeline.rigid_contact_margin = rigid_contact_margin
         self._collision_pipeline.soft_contact_margin = soft_contact_margin
         self._collision_pipeline.edge_sdf_iter = edge_sdf_iter
 

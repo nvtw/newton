@@ -904,8 +904,7 @@ def parse_usd(
             physics_scene_prim, prim_type=PrimType.SCENE, key="rigid_contact_margin", default=None, verbose=verbose
         )
         if contact_margin is not None:
-            # Apply contact margin to default shape config
-            builder.default_shape_cfg.contact_margin = contact_margin
+            builder.rigid_contact_margin = contact_margin
         max_solver_iters = R.get_value(
             physics_scene_prim, prim_type=PrimType.SCENE, key="max_solver_iterations", default=None, verbose=verbose
         )
