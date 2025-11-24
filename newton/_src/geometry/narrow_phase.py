@@ -166,7 +166,7 @@ def extract_shape_data(
 
 
 def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
-    @wp.kernel(enable_backward=False, module="unique")
+    @wp.kernel(enable_backward=False)
     def narrow_phase_kernel_gjk_mpr(
         candidate_pair: wp.array(dtype=wp.vec2i),
         num_candidate_pair: wp.array(dtype=int),
@@ -319,11 +319,11 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
             if skip_pair:
                 continue
 
-            # Use per-geometry cutoff for contact detection
-            # find_contacts expects a scalar margin, so we use max of the two cutoffs
-            cutoff_a = shape_contact_margin[shape_a]
-            cutoff_b = shape_contact_margin[shape_b]
-            margin = wp.max(cutoff_a, cutoff_b)
+            # Use per-shape contact margin for contact detection
+            # find_contacts expects a scalar margin, so we use max of the two margins
+            margin_a = shape_contact_margin[shape_a]
+            margin_b = shape_contact_margin[shape_b]
+            margin = wp.max(margin_a, margin_b)
 
             # Find and write contacts using GJK/MPR
             wp.static(create_find_contacts(writer_func))(
@@ -348,12 +348,12 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
     return narrow_phase_kernel_gjk_mpr
 
 
-@wp.kernel(enable_backward=False, module="unique")
+@wp.kernel(enable_backward=False)
 def narrow_phase_find_mesh_triangle_overlaps_kernel(
     shape_types: wp.array(dtype=int),
     shape_transform: wp.array(dtype=wp.transform),
     shape_source: wp.array(dtype=wp.uint64),
-    shape_cutoff: wp.array(dtype=float),  # Per-shape cutoff distances
+    shape_contact_margin: wp.array(dtype=float),  # Per-shape contact margins
     shape_data: wp.array(dtype=wp.vec4),  # Shape data (scale xyz, thickness w)
     shape_pairs_mesh: wp.array(dtype=wp.vec2i),
     shape_pairs_mesh_count: wp.array(dtype=int),
@@ -405,13 +405,13 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
         # Get non-mesh shape world transform
         X_ws = shape_transform[non_mesh_shape]
 
-        # Use per-shape cutoff for the non-mesh shape
-        # Note: mesh_vs_convex_midphase expects a scalar margin, so we use max of the two cutoffs
-        cutoff_non_mesh = shape_cutoff[non_mesh_shape]
-        cutoff_mesh = shape_cutoff[mesh_shape]
-        margin = wp.max(cutoff_non_mesh, cutoff_mesh)
+        # Use per-shape contact margin for the non-mesh shape
+        # Note: mesh_vs_convex_midphase expects a scalar margin, so we use max of the two margins
+        margin_non_mesh = shape_contact_margin[non_mesh_shape]
+        margin_mesh = shape_contact_margin[mesh_shape]
+        margin = wp.max(margin_non_mesh, margin_mesh)
 
-        # Call mesh_vs_convex_midphase with the shape_data and cutoff
+        # Call mesh_vs_convex_midphase with the shape_data and margin
         mesh_vs_convex_midphase(
             mesh_shape,
             non_mesh_shape,
@@ -428,7 +428,7 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
 
 
 def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
-    @wp.kernel(enable_backward=False, module="unique")
+    @wp.kernel(enable_backward=False)
     def narrow_phase_process_mesh_triangle_contacts_kernel(
         shape_types: wp.array(dtype=int),
         shape_data: wp.array(dtype=wp.vec4),
@@ -515,7 +515,7 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
 
 
 def create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func: Any):
-    @wp.kernel(enable_backward=False, module="unique")
+    @wp.kernel(enable_backward=False)
     def narrow_phase_process_mesh_plane_contacts_kernel(
         shape_types: wp.array(dtype=int),
         shape_data: wp.array(dtype=wp.vec4),
