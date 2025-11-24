@@ -306,7 +306,6 @@ def doTriangleSDFCollision(
     v0: wp.vec3,
     v1: wp.vec3,
     v2: wp.vec3,
-    tolerance: float,
 ) -> tuple[float, wp.vec3, wp.vec3]:
     """
     Compute the deepest contact between a triangle and an SDF volume.
@@ -346,8 +345,6 @@ def doTriangleSDFCollision(
     d0 = wp.volume_sample_f(sdf, wp.volume_world_to_index(sdf, v0), wp.Volume.LINEAR)
     d1 = wp.volume_sample_f(sdf, wp.volume_world_to_index(sdf, v1), wp.Volume.LINEAR)
     d2 = wp.volume_sample_f(sdf, wp.volume_world_to_index(sdf, v2), wp.Volume.LINEAR)
-
-    # PxVec3 nor = (v1 - v0).cross(v2 - v0);
 
     uvw = wp.vec3(0.0, 0.0, 0.0)
 
@@ -445,7 +442,7 @@ def get_triangle_from_mesh(
         The mesh indices array stores triangle vertex indices as a flat array:
         [tri0_v0, tri0_v1, tri0_v2, tri1_v0, tri1_v1, tri1_v2, ...]
     """
-    # Get the mesh object from the ID
+
     mesh = wp.mesh_get(mesh_id)
 
     # Extract triangle vertices from mesh (indices are stored as flat array: i0, i1, i2, i0, i1, i2, ...)
@@ -488,8 +485,8 @@ def get_bounding_sphere(v0: wp.vec3, v1: wp.vec3, v2: wp.vec3) -> tuple[wp.vec3,
         and adequate for broad-phase culling.
     """
     center = (v0 + v1 + v2) * (1.0 / 3.0)
-    radius = wp.max(wp.length(v0 - center), wp.length(v1 - center), wp.length(v2 - center))
-    return center, radius
+    radius = wp.max(wp.max(wp.length_sq(v0 - center), wp.length_sq(v1 - center)), wp.length_sq(v2 - center))
+    return center, wp.sqrt(radius)
 
 
 @wp.func
