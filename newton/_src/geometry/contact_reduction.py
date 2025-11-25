@@ -100,7 +100,7 @@ def create_segmented_argmax_func(tile_size: int):
         sort_buffer[thread_id] = packed
 
         # Create payload with thread indices
-        sort_payload = wp.tile_arrange(tile_size, dtype=wp.int32)
+        sort_payload = wp.tile_arange(tile_size, dtype=wp.int32)
 
         # Perform bitonic sort on the tiles
         wp.tile_sort(sort_buffer, sort_payload)
