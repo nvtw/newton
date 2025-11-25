@@ -494,6 +494,7 @@ def create_contact_reduction_func(tile_size: int):
         inactive_dot_value = empty_marker  # Ensure inactive threads never win
 
         for i in range(6):
+            synchronize()
             # for i in range(1):  # For debugging
             scan_direction = get_scan_dir(slot, i)
             dot = inactive_dot_value

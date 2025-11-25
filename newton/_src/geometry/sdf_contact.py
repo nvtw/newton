@@ -528,6 +528,8 @@ def add_to_shared_buffer_and_update_progress(
         - All threads must call this together (implicit synchronization via tile ops)
     """
 
+    synchronize()
+
     capacity = wp.block_dim() - selected_triangle_index_buffer_shared_mem[wp.block_dim()]
 
     # Assert that capacity > 0 (guaranteed by while loop condition in findInterestingTriangles)
@@ -600,6 +602,9 @@ def findInterestingTriangles(
 
     Buffer layout: [0..block_dim-1] = indices, [block_dim] = count, [block_dim+1] = progress
     """
+
+
+    synchronize()
     # Get the mesh object from the mesh ID
     num_tris = wp.mesh_get(mesh_id).indices.shape[0] // 3
 
@@ -624,7 +629,8 @@ def findInterestingTriangles(
         add_to_shared_buffer_and_update_progress(
             thread_id, add_triangle, tri_idx, selected_triangle_index_buffer_shared_mem
         )
-
+        synchronize()
+    synchronize()
 
 def create_SdfMeshCollision(tile_size: int):
     """
@@ -762,6 +768,7 @@ def create_SdfMeshCollision(tile_size: int):
 
                     has_contact = dist < margin
 
+                synchronize()
                 wp.static(create_contact_reduction_func(tile_size))(
                     t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, 120, empty_marker
                 )
