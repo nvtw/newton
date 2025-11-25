@@ -13,7 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any
+
 import warp as wp
+
+from ..geometry.collision_core import (
+    build_pair_key2,
+)
+from ..geometry.contact_data import ContactData
 
 # Handle both direct execution and module import
 try:
@@ -525,7 +532,10 @@ def add_to_shared_buffer_and_update_progress(
 
     # Assert that capacity > 0 (guaranteed by while loop condition in findInterestingTriangles)
     # This ensures thread 0 can never overflow, so idx_in_thread_block > 0 check is valid
-    wp.expect(capacity > 0)
+    # wp.expect(capacity > 0)
+    if capacity <= 0:
+        print("Capacity is 0")
+        return
 
     synchronize()
 
@@ -576,7 +586,7 @@ def findInterestingTriangles(
     thread_id: int,
     mesh_scale: wp.vec3,
     mesh_to_sdf_transform: wp.transform,
-    mesh: wp.uint64,
+    mesh_id: wp.uint64,
     sdf: wp.uint64,
     selected_triangle_index_buffer_shared_mem: wp.array(dtype=wp.int32),
     contact_distance: float,
@@ -591,17 +601,17 @@ def findInterestingTriangles(
     Buffer layout: [0..block_dim-1] = indices, [block_dim] = count, [block_dim+1] = progress
     """
     # Get the mesh object from the mesh ID
-    mesh = wp.mesh_get(mesh)
+    num_tris = wp.mesh_get(mesh_id).indices.shape[0] // 3
 
     while (
-        selected_triangle_index_buffer_shared_mem[wp.block_dim() + 1] < mesh.num_tris
+        selected_triangle_index_buffer_shared_mem[wp.block_dim() + 1] < num_tris
         and selected_triangle_index_buffer_shared_mem[wp.block_dim()] < wp.block_dim()
     ):
         base_tri_idx = selected_triangle_index_buffer_shared_mem[wp.block_dim() + 1]
         tri_idx = base_tri_idx + thread_id
         add_triangle = False
-        if tri_idx < mesh.num_tris:
-            v0, v1, v2 = get_triangle_from_mesh(mesh, mesh_scale, mesh_to_sdf_transform, tri_idx)
+        if tri_idx < num_tris:
+            v0, v1, v2 = get_triangle_from_mesh(mesh_id, mesh_scale, mesh_to_sdf_transform, tri_idx)
             bounding_sphere_center, bounding_sphere_radius = get_bounding_sphere(v0, v1, v2)
 
             # Use SDF distance query instead of AABB overlap for more accurate culling
@@ -635,7 +645,7 @@ def create_SdfMeshCollision(tile_size: int):
         sdf_source: wp.array(dtype=wp.uint64),
         pairs: wp.array(dtype=wp.vec2i),
         pair_count: wp.array(dtype=int),
-        contact_distance: float,
+        contact_margin: wp.array(dtype=float),
         # Outputs
         out_contacts: wp.array(dtype=ContactStruct),
         out_count: wp.array(dtype=int),
@@ -674,6 +684,8 @@ def create_SdfMeshCollision(tile_size: int):
         mesh1_scale = mesh_scales[pair[1]]
         mesh0_transform = mesh_transforms[pair[0]]
         mesh1_transform = mesh_transforms[pair[1]]
+
+        margin = wp.max(contact_margin[pair[0]], contact_margin[pair[1]])
 
         # Initialize (shared memory) buffers for contact reduction
         empty_marker = -1000000000.0
@@ -727,7 +739,7 @@ def create_SdfMeshCollision(tile_size: int):
                     mesh,
                     sdf_current,
                     selected_triangles,
-                    contact_distance,
+                    margin,
                 )
 
                 has_contact = t < selected_triangles[tri_capacity]
@@ -740,7 +752,6 @@ def create_SdfMeshCollision(tile_size: int):
                         v0,
                         v1,
                         v2,
-                        contact_distance,
                     )
 
                     c.position = point
@@ -749,7 +760,7 @@ def create_SdfMeshCollision(tile_size: int):
                     c.feature = 0
                     c.projection = empty_marker
 
-                    has_contact = dist < contact_distance
+                    has_contact = dist < margin
 
                 wp.static(create_contact_reduction_func(tile_size))(
                     t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, 120, empty_marker
@@ -762,7 +773,7 @@ def create_SdfMeshCollision(tile_size: int):
                 synchronize()
 
         # Now write the reduced contacts to the output array
-        num_contacts_to_keep = active_contacts_shared_mem[120]
+        num_contacts_to_keep = wp.min(active_contacts_shared_mem[120], 120)
 
         # Thread 0 writes the count
         if t == 0:
@@ -774,3 +785,361 @@ def create_SdfMeshCollision(tile_size: int):
             out_contacts[i] = contacts_shared_mem[contact_id]
 
     return do_sdf_mesh_collision
+
+
+def create_narrow_phase_process_mesh_mesh_contacts_kernel(
+    writer_func: Any, tile_size: int, reduce_contacts: bool = False
+):
+    @wp.kernel(enable_backward=False)
+    def mesh_sdf_collision_kernel(
+        shape_data: wp.array(dtype=wp.vec4),
+        shape_transform: wp.array(dtype=wp.transform),
+        shape_source: wp.array(dtype=wp.uint64),
+        shape_sdf: wp.array(dtype=wp.uint64),
+        shape_contact_margin: wp.array(dtype=float),
+        shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
+        shape_pairs_mesh_mesh_count: wp.array(dtype=int),
+        writer_data: Any,
+        total_num_blocks: int,
+    ):
+        """
+        Process mesh-mesh collisions using SDF-mesh collision detection.
+
+        Uses a strided loop to process mesh-mesh pairs, with threads within each block
+        parallelizing over triangles. This follows the pattern from do_sdf_mesh_collision.
+
+        Args:
+            geom_types: Array of geometry types for all shapes
+            geom_data: Array of vec4 containing scale (xyz) and thickness (w) for each shape
+            geom_transform: Array of world-space transforms for each shape
+            geom_source: Array of source pointers (mesh IDs) for each shape
+            geom_sdf: Array of SDF volume IDs for mesh shapes
+            geom_cutoff: Array of cutoff distances for each shape
+            shape_pairs_mesh_mesh: Array of mesh-mesh pairs to process
+            shape_pairs_mesh_mesh_count: Number of mesh-mesh pairs
+            writer_data: Contact writer data structure
+            total_num_blocks: Total number of blocks launched for strided loop
+        """
+        block_id, t = wp.tid()
+
+        num_pairs = shape_pairs_mesh_mesh_count[0]
+
+        # Strided loop over pairs
+        for pair_idx in range(block_id, num_pairs, total_num_blocks):
+            pair = shape_pairs_mesh_mesh[pair_idx]
+            mesh_shape_a = pair[0]
+            mesh_shape_b = pair[1]
+
+            # Get mesh and SDF IDs
+            mesh_id_a = shape_source[mesh_shape_a]
+            mesh_id_b = shape_source[mesh_shape_b]
+            sdf_ptr_a = shape_sdf[mesh_shape_a]
+            sdf_ptr_b = shape_sdf[mesh_shape_b]
+
+            # Skip if either mesh is invalid
+            if mesh_id_a == wp.uint64(0) or mesh_id_b == wp.uint64(0):
+                continue
+
+            # Get mesh objects
+            mesh_a = wp.mesh_get(mesh_id_a)
+            mesh_b = wp.mesh_get(mesh_id_b)
+
+            # Get mesh scales and transforms
+            scale_data_a = shape_data[mesh_shape_a]
+            scale_data_b = shape_data[mesh_shape_b]
+            mesh_scale_a = wp.vec3(scale_data_a[0], scale_data_a[1], scale_data_a[2])
+            mesh_scale_b = wp.vec3(scale_data_b[0], scale_data_b[1], scale_data_b[2])
+
+            X_mesh_a_ws = shape_transform[mesh_shape_a]
+            X_mesh_b_ws = shape_transform[mesh_shape_b]
+
+            # Get thickness values
+            thickness_a = shape_data[mesh_shape_a][3]
+            thickness_b = shape_data[mesh_shape_b][3]
+
+            # Use per-geometry cutoff for contact detection
+            cutoff_a = shape_contact_margin[mesh_shape_a]
+            cutoff_b = shape_contact_margin[mesh_shape_b]
+            margin = wp.max(cutoff_a, cutoff_b)
+
+            # Build pair key for this mesh-mesh pair
+            pair_key = build_pair_key2(wp.uint32(mesh_shape_a), wp.uint32(mesh_shape_b))
+
+            # Test both directions: mesh A against SDF B, and mesh B against SDF A
+            for mode in range(2):
+                if mode == 0:
+                    # Process mesh A triangles against SDF B (if SDF B exists)
+                    if sdf_ptr_b == wp.uint64(0):
+                        continue
+
+                    mesh_id = mesh_id_a
+                    mesh_scale = mesh_scale_a
+                    sdf_ptr = sdf_ptr_b
+                    # Transform from mesh A space to mesh B space
+                    X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_mesh_b_ws), X_mesh_a_ws)
+                    X_sdf_ws = X_mesh_b_ws
+                    mesh = mesh_a
+                    shape_a = mesh_shape_a
+                    shape_b = mesh_shape_b
+                    thickness_mesh = thickness_a
+                    thickness_sdf = thickness_b
+                else:
+                    # Process mesh B triangles against SDF A (if SDF A exists)
+                    if sdf_ptr_a == wp.uint64(0):
+                        continue
+
+                    mesh_id = mesh_id_b
+                    mesh_scale = mesh_scale_b
+                    sdf_ptr = sdf_ptr_a
+                    # Transform from mesh B space to mesh A space
+                    X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_mesh_a_ws), X_mesh_b_ws)
+                    X_sdf_ws = X_mesh_a_ws
+                    mesh = mesh_b
+                    shape_a = mesh_shape_b
+                    shape_b = mesh_shape_a
+                    thickness_mesh = thickness_b
+                    thickness_sdf = thickness_a
+
+                num_tris = mesh.indices.shape[0] // 3
+                # strided loop over triangles
+                for tri_idx in range(t, num_tris, wp.block_dim()):
+                    # Get triangle vertices in SDF's local space
+                    v0, v1, v2 = get_triangle_from_mesh(mesh_id, mesh_scale, X_mesh_to_sdf, tri_idx)
+
+                    # Early out: check bounding sphere distance to SDF surface
+                    bounding_sphere_center, bounding_sphere_radius = get_bounding_sphere(v0, v1, v2)
+                    query_local = wp.volume_world_to_index(sdf_ptr, bounding_sphere_center)
+                    sdf_dist = wp.volume_sample_f(sdf_ptr, query_local, wp.Volume.LINEAR)
+
+                    # Skip triangles that are too far from the SDF surface
+                    if sdf_dist > (bounding_sphere_radius + margin):
+                        continue
+
+                    dist, point, direction = doTriangleSDFCollision(sdf_ptr, v0, v1, v2)
+
+                    if dist < margin:
+                        point_world = wp.transform_point(X_sdf_ws, point)
+
+                        direction_world = wp.transform_vector(X_sdf_ws, direction)
+                        direction_len = wp.length(direction_world)
+                        if direction_len > 0.0:
+                            direction_world = direction_world / direction_len
+
+                        # Create contact data
+                        contact_data = ContactData()
+                        contact_data.contact_point_center = point_world
+                        contact_data.contact_normal_a_to_b = (
+                            -direction_world
+                        )  # Negate: gradient points B->A, we need A->B
+                        contact_data.contact_distance = dist
+                        contact_data.radius_eff_a = 0.0
+                        contact_data.radius_eff_b = 0.0
+                        contact_data.thickness_a = thickness_mesh
+                        contact_data.thickness_b = thickness_sdf
+                        contact_data.shape_a = shape_a
+                        contact_data.shape_b = shape_b
+                        contact_data.margin = margin
+                        contact_data.feature = wp.uint32(tri_idx + 1)
+                        contact_data.feature_pair_key = pair_key
+
+                        writer_func(contact_data, writer_data)
+
+    @wp.kernel
+    def mesh_sdf_collision_reduce_kernel(
+        shape_data: wp.array(dtype=wp.vec4),
+        shape_transform: wp.array(dtype=wp.transform),
+        shape_source: wp.array(dtype=wp.uint64),
+        shape_sdf: wp.array(dtype=wp.uint64),
+        shape_contact_margin: wp.array(dtype=float),
+        shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
+        shape_pairs_mesh_mesh_count: wp.array(dtype=int),
+        writer_data: Any,
+        total_num_blocks: int,
+    ):
+        block_id, t = wp.tid()
+        num_pairs = shape_pairs_mesh_mesh_count[0]
+        if block_id >= num_pairs:
+            return
+
+        pair = shape_pairs_mesh_mesh[block_id]
+        mesh0 = shape_source[pair[0]]
+        mesh1 = shape_source[pair[1]]
+        sdf0 = shape_sdf[pair[0]]
+        sdf1 = shape_sdf[pair[1]]
+
+        # Extract mesh parameters
+        mesh0_data = shape_data[pair[0]]
+        mesh1_data = shape_data[pair[1]]
+        mesh0_scale = wp.vec3(mesh0_data[0], mesh0_data[1], mesh0_data[2])
+        mesh1_scale = wp.vec3(mesh1_data[0], mesh1_data[1], mesh1_data[2])
+        mesh0_transform = shape_transform[pair[0]]
+        mesh1_transform = shape_transform[pair[1]]
+
+        thickness0 = mesh0_data[3]
+        thickness1 = mesh1_data[3]
+
+        margin = wp.max(shape_contact_margin[pair[0]], shape_contact_margin[pair[1]])
+
+        # Initialize (shared memory) buffers for contact reduction
+        empty_marker = -1000000000.0
+        has_contact = True
+
+        active_contacts_shared_mem = wp.array(ptr=get_shared_memory_pointer_121_ints(), shape=(121,), dtype=wp.int32)
+        contacts_shared_mem = wp.array(ptr=get_shared_memory_pointer_120_contacts(), shape=(120,), dtype=ContactStruct)
+
+        for i in range(t, 120, wp.block_dim()):
+            contacts_shared_mem[i].projection = empty_marker
+
+        if t == 0:
+            active_contacts_shared_mem[120] = 0
+
+        # Initialize (shared memory) buffers for triangle selection
+        tri_capacity = wp.block_dim()
+        selected_triangles = wp.array(
+            ptr=get_shared_memory_pointer_block_dim_plus_2_ints(), shape=(wp.block_dim() + 2,), dtype=wp.int32
+        )
+
+        if t == 0:
+            selected_triangles[tri_capacity] = 0  # Stores the number of indices inside selected_triangles
+            selected_triangles[tri_capacity + 1] = (
+                0  # Stores the number of triangles from the mesh that were already investigated
+            )
+
+        synchronize()
+
+        for mode in range(2):
+            if mode == 0:
+                mesh = mesh0
+                mesh_scale = mesh0_scale
+                mesh_sdf_transform = wp.transform_multiply(wp.transform_inverse(mesh1_transform), mesh0_transform)
+                sdf_current = sdf1
+                sdf_transform = mesh1_transform
+                shape_id_a = pair[0]
+                shape_id_b = pair[1]
+                thick_a = thickness0
+                thick_b = thickness1
+            else:
+                mesh = mesh1
+                mesh_scale = mesh1_scale
+                mesh_sdf_transform = wp.transform_multiply(wp.transform_inverse(mesh0_transform), mesh1_transform)
+                sdf_current = sdf0
+                sdf_transform = mesh0_transform
+                shape_id_a = pair[1]
+                shape_id_b = pair[0]
+                thick_a = thickness1
+                thick_b = thickness0
+
+            # Reset progress counter for this mesh
+            if t == 0:
+                selected_triangles[tri_capacity + 1] = 0
+            synchronize()
+
+            num_tris = wp.mesh_get(mesh).indices.shape[0] // 3
+
+            has_contact = wp.bool(False)
+
+            while selected_triangles[tri_capacity + 1] < num_tris:
+                findInterestingTriangles(
+                    t,
+                    mesh_scale,
+                    mesh_sdf_transform,
+                    mesh,
+                    sdf_current,
+                    selected_triangles,
+                    margin,
+                )
+
+                has_contact = t < selected_triangles[tri_capacity]
+                c = ContactStruct()
+
+                if has_contact:
+                    v0, v1, v2 = get_triangle_from_mesh(mesh, mesh_scale, mesh_sdf_transform, selected_triangles[t])
+                    dist, point, dir = doTriangleSDFCollision(
+                        sdf_current,
+                        v0,
+                        v1,
+                        v2,
+                    )
+                    c.position = point
+                    c.normal = dir
+                    c.depth = dist
+                    c.feature = 0
+                    c.projection = empty_marker
+
+                    has_contact = dist < margin
+                    if has_contact:
+                        point_world = wp.transform_point(sdf_transform, point)
+                        direction_world = wp.transform_vector(sdf_transform, dir)
+                        direction_len = wp.length(direction_world)
+                        if direction_len > 0.0:
+                            direction_world = direction_world / direction_len
+
+                        # Create contact data
+                        contact_data = ContactData()
+                        contact_data.contact_point_center = point_world
+                        contact_data.contact_normal_a_to_b = (
+                            -direction_world
+                        )  # Negate: gradient points B->A, we need A->B
+                        contact_data.contact_distance = dist
+                        contact_data.radius_eff_a = 0.0
+                        contact_data.radius_eff_b = 0.0
+                        contact_data.thickness_a = thick_a
+                        contact_data.thickness_b = thick_b
+                        contact_data.shape_a = shape_id_a
+                        contact_data.shape_b = shape_id_b
+                        contact_data.margin = margin
+                        contact_data.feature = wp.uint32(selected_triangles[t] + 1)
+                        contact_data.feature_pair_key = build_pair_key2(wp.uint32(pair[0]), wp.uint32(pair[1]))
+
+                        writer_func(contact_data, writer_data)
+
+                # dont reduce contacts for now
+                # wp.static(create_contact_reduction_func(tile_size))(
+                #     t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, 120, empty_marker
+                # )
+
+                # Reset buffer for next batch
+                synchronize()
+                if t == 0:
+                    selected_triangles[tri_capacity] = 0
+                synchronize()
+
+        # Now write the reduced contacts to the output array
+        # num_contacts_to_keep = wp.min(active_contacts_shared_mem[120], 120)
+
+        # for i in range(t, num_contacts_to_keep, wp.block_dim()):
+        #     contact_id = active_contacts_shared_mem[i]
+        #     contact = contacts_shared_mem[contact_id]
+        #     point = contact.position
+        #     direction = contact.normal
+
+        # point_world = wp.transform_point(sdf_transform, point)
+
+        # direction_world = wp.transform_vector(sdf_transform, dir)
+        # direction_len = wp.length(direction_world)
+        # if direction_len > 0.0:
+        #     direction_world = direction_world / direction_len
+
+        # # Create contact data
+        # contact_data = ContactData()
+        # contact_data.contact_point_center = point_world
+        # contact_data.contact_normal_a_to_b = (
+        #     -direction_world
+        # )  # Negate: gradient points B->A, we need A->B
+        # contact_data.contact_distance = dist
+        # contact_data.radius_eff_a = 0.0
+        # contact_data.radius_eff_b = 0.0
+        # contact_data.thickness_a = thick_a
+        # contact_data.thickness_b = thick_b
+        # contact_data.shape_a = shape_id_a
+        # contact_data.shape_b = shape_id_b
+        # contact_data.margin = margin
+        # contact_data.feature = wp.uint32(selected_triangles[t] + 1)
+        # contact_data.feature_pair_key = build_pair_key2(wp.uint32(pair[0]), wp.uint32(pair[1])) # TODO: Correct?
+
+        # writer_func(contact_data, writer_data)
+
+    if reduce_contacts:
+        return mesh_sdf_collision_reduce_kernel
+    else:
+        return mesh_sdf_collision_kernel

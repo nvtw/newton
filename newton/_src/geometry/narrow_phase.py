@@ -33,7 +33,7 @@ from ..geometry.collision_core import (
     pre_contact_check,
 )
 from ..geometry.contact_data import ContactData
-from ..geometry.sdf_contact import doTriangleSDFCollision, get_bounding_sphere, get_triangle_from_mesh
+from ..geometry.sdf_contact import create_narrow_phase_process_mesh_mesh_contacts_kernel
 from ..geometry.support_function import (
     GenericShapeData,
     SupportMapDataProvider,
@@ -521,164 +521,6 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
     return narrow_phase_process_mesh_triangle_contacts_kernel
 
 
-def create_narrow_phase_process_mesh_mesh_contacts_kernel(writer_func: Any):
-    @wp.kernel(enable_backward=False)
-    def narrow_phase_process_mesh_mesh_contacts_kernel(
-        shape_types: wp.array(dtype=int),
-        shape_data: wp.array(dtype=wp.vec4),
-        shape_transform: wp.array(dtype=wp.transform),
-        shape_source: wp.array(dtype=wp.uint64),
-        shape_sdf: wp.array(dtype=wp.uint64),
-        shape_contact_margin: wp.array(dtype=float),
-        shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
-        shape_pairs_mesh_mesh_count: wp.array(dtype=int),
-        writer_data: Any,
-        total_num_blocks: int,
-    ):
-        """
-        Process mesh-mesh collisions using SDF-mesh collision detection.
-
-        Uses a strided loop to process mesh-mesh pairs, with threads within each block
-        parallelizing over triangles. This follows the pattern from do_sdf_mesh_collision.
-
-        Args:
-            geom_types: Array of geometry types for all shapes
-            geom_data: Array of vec4 containing scale (xyz) and thickness (w) for each shape
-            geom_transform: Array of world-space transforms for each shape
-            geom_source: Array of source pointers (mesh IDs) for each shape
-            geom_sdf: Array of SDF volume IDs for mesh shapes
-            geom_cutoff: Array of cutoff distances for each shape
-            shape_pairs_mesh_mesh: Array of mesh-mesh pairs to process
-            shape_pairs_mesh_mesh_count: Number of mesh-mesh pairs
-            writer_data: Contact writer data structure
-            total_num_blocks: Total number of blocks launched for strided loop
-        """
-        block_id, t = wp.tid()
-
-        num_pairs = shape_pairs_mesh_mesh_count[0]
-
-        # Strided loop over pairs
-        for pair_idx in range(block_id, num_pairs, total_num_blocks):
-            pair = shape_pairs_mesh_mesh[pair_idx]
-            mesh_shape_a = pair[0]
-            mesh_shape_b = pair[1]
-
-            # Get mesh and SDF IDs
-            mesh_id_a = shape_source[mesh_shape_a]
-            mesh_id_b = shape_source[mesh_shape_b]
-            sdf_ptr_a = shape_sdf[mesh_shape_a]
-            sdf_ptr_b = shape_sdf[mesh_shape_b]
-
-            # Skip if either mesh is invalid
-            if mesh_id_a == wp.uint64(0) or mesh_id_b == wp.uint64(0):
-                continue
-
-            # Get mesh objects
-            mesh_a = wp.mesh_get(mesh_id_a)
-            mesh_b = wp.mesh_get(mesh_id_b)
-
-            # Get mesh scales and transforms
-            scale_data_a = shape_data[mesh_shape_a]
-            scale_data_b = shape_data[mesh_shape_b]
-            mesh_scale_a = wp.vec3(scale_data_a[0], scale_data_a[1], scale_data_a[2])
-            mesh_scale_b = wp.vec3(scale_data_b[0], scale_data_b[1], scale_data_b[2])
-
-            X_mesh_a_ws = shape_transform[mesh_shape_a]
-            X_mesh_b_ws = shape_transform[mesh_shape_b]
-
-            # Get thickness values
-            thickness_a = shape_data[mesh_shape_a][3]
-            thickness_b = shape_data[mesh_shape_b][3]
-
-            # Use per-geometry cutoff for contact detection
-            cutoff_a = shape_contact_margin[mesh_shape_a]
-            cutoff_b = shape_contact_margin[mesh_shape_b]
-            margin = wp.max(cutoff_a, cutoff_b)
-
-            # Build pair key for this mesh-mesh pair
-            pair_key = build_pair_key2(wp.uint32(mesh_shape_a), wp.uint32(mesh_shape_b))
-
-            # Test both directions: mesh A against SDF B, and mesh B against SDF A
-            for mode in range(2):
-                if mode == 0:
-                    # Process mesh A triangles against SDF B (if SDF B exists)
-                    if sdf_ptr_b == wp.uint64(0):
-                        continue
-
-                    mesh_id = mesh_id_a
-                    mesh_scale = mesh_scale_a
-                    sdf_ptr = sdf_ptr_b
-                    # Transform from mesh A space to mesh B space
-                    X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_mesh_b_ws), X_mesh_a_ws)
-                    X_sdf_ws = X_mesh_b_ws
-                    mesh = mesh_a
-                    shape_a = mesh_shape_a
-                    shape_b = mesh_shape_b
-                    thickness_mesh = thickness_a
-                    thickness_sdf = thickness_b
-                else:
-                    # Process mesh B triangles against SDF A (if SDF A exists)
-                    if sdf_ptr_a == wp.uint64(0):
-                        continue
-
-                    mesh_id = mesh_id_b
-                    mesh_scale = mesh_scale_b
-                    sdf_ptr = sdf_ptr_a
-                    # Transform from mesh B space to mesh A space
-                    X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_mesh_a_ws), X_mesh_b_ws)
-                    X_sdf_ws = X_mesh_a_ws
-                    mesh = mesh_b
-                    shape_a = mesh_shape_b
-                    shape_b = mesh_shape_a
-                    thickness_mesh = thickness_b
-                    thickness_sdf = thickness_a
-
-                num_tris = mesh.indices.shape[0] // 3
-                for tri_idx in range(t, num_tris, wp.block_dim()):
-                    # Get triangle vertices in SDF's local space
-                    v0, v1, v2 = get_triangle_from_mesh(mesh_id, mesh_scale, X_mesh_to_sdf, tri_idx)
-
-                    # Early out: check bounding sphere distance to SDF surface
-                    bounding_sphere_center, bounding_sphere_radius = get_bounding_sphere(v0, v1, v2)
-                    query_local = wp.volume_world_to_index(sdf_ptr, bounding_sphere_center)
-                    sdf_dist = wp.volume_sample_f(sdf_ptr, query_local, wp.Volume.LINEAR)
-
-                    # Skip triangles that are too far from the SDF surface
-                    if sdf_dist > (bounding_sphere_radius + margin):
-                        continue
-
-                    dist, point, direction = doTriangleSDFCollision(sdf_ptr, v0, v1, v2)
-
-                    if dist < margin:
-                        point_world = wp.transform_point(X_sdf_ws, point)
-
-                        direction_world = wp.transform_vector(X_sdf_ws, direction)
-                        direction_len = wp.length(direction_world)
-                        if direction_len > 0.0:
-                            direction_world = direction_world / direction_len
-
-                        # Create contact data
-                        contact_data = ContactData()
-                        contact_data.contact_point_center = point_world
-                        contact_data.contact_normal_a_to_b = (
-                            -direction_world
-                        )  # Negate: gradient points B->A, we need A->B
-                        contact_data.contact_distance = dist
-                        contact_data.radius_eff_a = 0.0
-                        contact_data.radius_eff_b = 0.0
-                        contact_data.thickness_a = thickness_mesh
-                        contact_data.thickness_b = thickness_sdf
-                        contact_data.shape_a = shape_a
-                        contact_data.shape_b = shape_b
-                        contact_data.margin = margin
-                        contact_data.feature = wp.uint32(tri_idx + 1)
-                        contact_data.feature_pair_key = pair_key
-
-                        writer_func(contact_data, writer_data)
-
-    return narrow_phase_process_mesh_mesh_contacts_kernel
-
-
 def create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func: Any):
     @wp.kernel(enable_backward=False)
     def narrow_phase_process_mesh_plane_contacts_kernel(
@@ -835,11 +677,16 @@ class NarrowPhase:
         else:
             writer_func = contact_writer_warp_func
 
+        self.tile_size = 128
+        self.block_dim = 128
+
         # Create the appropriate kernel variants
         self.narrow_phase_kernel = create_narrow_phase_kernel_gjk_mpr(self.external_aabb, writer_func)
         self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func)
         self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func)
-        self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(writer_func)
+        self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
+            writer_func, tile_size=self.tile_size, reduce_contacts=True
+        )
 
         # Pre-allocate all intermediate buffers
         with wp.ScopedDevice(device):
@@ -871,14 +718,12 @@ class NarrowPhase:
             self.empty_contact_key = wp.zeros(0, dtype=wp.uint32, device=device)
 
         # Fixed thread count for kernel launches
-        self.block_dim = 128
         gpu_thread_limit = 1024 * 1024 * 4
         max_blocks_limit = gpu_thread_limit // self.block_dim
         candidate_blocks = (max_candidate_pairs + self.block_dim - 1) // self.block_dim
         num_blocks = max(1024, min(candidate_blocks, max_blocks_limit))
         self.total_num_threads = self.block_dim * num_blocks
         self.num_tile_blocks = num_blocks
-        self.tile_size = 128
 
     def launch_custom_write(
         self,
@@ -1016,13 +861,10 @@ class NarrowPhase:
         )
 
         # Launch mesh-mesh contact processing kernel
-        # Use a reasonable number of blocks with strided loop to process all pairs
-        num_blocks_mesh_mesh = min(1024, self.max_candidate_pairs)
         wp.launch_tiled(
             kernel=self.mesh_mesh_contacts_kernel,
-            dim=(num_blocks_mesh_mesh,),
+            dim=(self.num_tile_blocks,),
             inputs=[
-                shape_types,
                 shape_data,
                 shape_transform,
                 shape_source,
@@ -1031,10 +873,10 @@ class NarrowPhase:
                 self.shape_pairs_mesh_mesh,
                 self.shape_pairs_mesh_mesh_count,
                 writer_data,
-                num_blocks_mesh_mesh,
+                self.num_tile_blocks,
             ],
             device=device,
-            block_dim=256,
+            block_dim=self.block_dim,
         )
 
     def launch(

@@ -123,7 +123,7 @@ def create_segmented_argmax_func(tile_size: int):
         )
 
         # Perform max scan to find the maximum index per segment
-        max_scan_result = wp.tile_max_scan_inclusive(scan_input)
+        max_scan_result = wp.tile_scan_max_inclusive(scan_input)
 
         # Extract the winner ID for this thread's position
         max_scan = wp.int32(max_scan_result[thread_id])
@@ -512,7 +512,8 @@ def create_contact_reduction_func(tile_size: int):
                     id = wp.atomic_add(
                         active_ids, buffer_capacity, 1
                     )  # active_ids has one additional element to store the number of active elements
-                    active_ids[id] = key
+                    if id < buffer_capacity:
+                        active_ids[id] = key
 
                 if dot > p:
                     # Store contact data in buffer
