@@ -661,14 +661,11 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func: Any, til
                         c.projection = empty_marker
 
                 # Apply contact reduction
-                synchronize()
                 store_reduced_contact(
                     t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, 140, empty_marker
                 )
-                synchronize()
 
-            # Write reduced contacts to output
-            synchronize()
+            # Write reduced contacts to output (store_reduced_contact ends with sync)
             num_contacts_to_keep = wp.min(active_contacts_shared_mem[140], 140)
 
             for i in range(t, num_contacts_to_keep, wp.block_dim()):
