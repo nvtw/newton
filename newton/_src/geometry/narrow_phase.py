@@ -638,6 +638,7 @@ class NarrowPhase:
         self,
         max_candidate_pairs: int,
         max_triangle_pairs: int = 1000000,
+        reduce_contacts: bool = True,
         device=None,
         shape_aabb_lower: wp.array(dtype=wp.vec3) | None = None,
         shape_aabb_upper: wp.array(dtype=wp.vec3) | None = None,
@@ -649,6 +650,7 @@ class NarrowPhase:
         Args:
             max_candidate_pairs: Maximum number of candidate pairs from broad phase
             max_triangle_pairs: Maximum number of mesh triangle pairs (conservative estimate)
+            reduce_contacts: Whether to reduce contacts for mesh-mesh collisions. Defaults to True.
             device: Device to allocate buffers on
             shape_aabb_lower: Optional external AABB lower bounds array (if provided, AABBs won't be computed internally)
             shape_aabb_upper: Optional external AABB upper bounds array (if provided, AABBs won't be computed internally)
@@ -685,7 +687,7 @@ class NarrowPhase:
         self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func)
         self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func)
         self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
-            writer_func, tile_size=self.tile_size, reduce_contacts=True
+            writer_func, tile_size=self.tile_size, reduce_contacts=reduce_contacts
         )
 
         # Pre-allocate all intermediate buffers
