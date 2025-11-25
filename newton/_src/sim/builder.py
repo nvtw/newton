@@ -3195,7 +3195,7 @@ class ModelBuilder:
                     body=body,
                     a=1.0,  # X semi-axis
                     b=0.5,  # Y semi-axis
-                    c=0.25, # Z semi-axis
+                    c=0.25,  # Z semi-axis
                 )
 
                 # A sphere is a special case where a = b = c

@@ -1426,7 +1426,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, _pairs, positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         self.assertGreater(count, 0, "Penetrating ellipsoids should generate contact")
         self.assertLess(penetrations[0], 0.0, "Should have negative penetration (overlap)")
@@ -1463,7 +1463,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, pairs, positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, pairs, _positions, normals, _penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         self.assertGreater(count, 0, "Ellipsoid-sphere should generate contact")
 
@@ -1507,7 +1507,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, _pairs, positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, normals, _penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         self.assertGreater(count, 0, "Ellipsoid-box should generate contact")
 
@@ -1541,7 +1541,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, _pairs, positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         self.assertGreater(count, 0, "Ellipsoid-plane should generate contact")
         self.assertLess(penetrations[0], 0.0, "Should have negative penetration (overlap)")
@@ -1572,7 +1572,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, _pairs, positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, normals, _penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         self.assertGreater(count, 0, "Ellipsoid-capsule should generate contact")
 
@@ -1602,7 +1602,7 @@ class TestNarrowPhase(unittest.TestCase):
             },
         ]
 
-        count, _pairs, _positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        count, _pairs, _positions, normals, _penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
 
         # Ellipsoid A extends to x=1.0, ellipsoid B after rotation has semi-axis 0.3 along X
         # Starting at x=1.3, B extends from x=1.0 to x=1.6, so they just touch
