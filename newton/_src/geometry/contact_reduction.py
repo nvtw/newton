@@ -493,20 +493,23 @@ def create_contact_reduction_func(tile_size: int):
 
         inactive_dot_value = empty_marker  # Ensure inactive threads never win
 
-        for i in range(6):
+        for i in range(7):
             synchronize()
             # for i in range(1):  # For debugging
             scan_direction = get_scan_dir(slot, i)
             dot = inactive_dot_value
             if active:
-                dot = wp.dot(scan_direction, c.position)
+                if i == 6:
+                    dot = -c.depth # We want to maximize the minimum depth (therefore the minus sign)
+                else:
+                    dot = wp.dot(scan_direction, c.position)
 
             winner = wp.static(create_segmented_argmax_func(tile_size))(thread_id, warp_slot, dot)
             if not active:
                 winner = -1
 
             if active and winner == thread_id:
-                key = slot * 6 + i
+                key = slot * 7 + i
 
                 p = buffer[key].projection
                 if p == empty_marker:
@@ -552,8 +555,8 @@ def create_shared_memory_pointer_func(
 
 
 # Create the specific functions used in the codebase
-get_shared_memory_pointer_121_ints = create_shared_memory_pointer_func(121)
-get_shared_memory_pointer_120_contacts = create_shared_memory_pointer_func(120 * 9)
+get_shared_memory_pointer_141_ints = create_shared_memory_pointer_func(141)
+get_shared_memory_pointer_140_contacts = create_shared_memory_pointer_func(140 * 9)
 
 
 def create_shared_memory_pointer_block_dim_func(
