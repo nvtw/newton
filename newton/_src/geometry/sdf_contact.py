@@ -536,10 +536,10 @@ def add_to_shared_buffer_and_update_progress(
     # This ensures thread 0 can never overflow, so idx_in_thread_block > 0 check is valid
     # wp.expect(capacity > 0)
     if capacity <= 0:
-        print("Capacity is 0")
+        # print("Capacity is 0")
         return
 
-    synchronize()
+    synchronize() # Shared memory read above and last thread writes below - syncthreads required
 
     val = 1 if add_triangle else 0
     add_tile = wp.tile(val)
@@ -602,8 +602,6 @@ def findInterestingTriangles(
 
     Buffer layout: [0..block_dim-1] = indices, [block_dim] = count, [block_dim+1] = progress
     """
-
-
     synchronize()
     # Get the mesh object from the mesh ID
     num_tris = wp.mesh_get(mesh_id).indices.shape[0] // 3
@@ -629,8 +627,7 @@ def findInterestingTriangles(
         add_to_shared_buffer_and_update_progress(
             thread_id, add_triangle, tri_idx, selected_triangle_index_buffer_shared_mem
         )
-        synchronize()
-    synchronize()
+    synchronize() # The while condition still reads shared memory, therefore we need a synchronize here - the synchronize inside add_to_shared_buffer_and_update_progress happens before the while condition is evaluated
 
 def create_SdfMeshCollision(tile_size: int):
     """
