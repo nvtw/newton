@@ -497,92 +497,52 @@ def get_bounding_sphere(v0: wp.vec3, v1: wp.vec3, v2: wp.vec3) -> tuple[wp.vec3,
 
 
 @wp.func
-def add_to_shared_buffer_and_update_progress(
-    idx_in_thread_block: int,
+def add_to_shared_buffer_atomic(
+    thread_id: int,
     add_triangle: bool,
     tri_idx: int,
-    selected_triangle_index_buffer_shared_mem: wp.array(dtype=wp.int32),
+    buffer: wp.array(dtype=wp.int32),
 ):
     """
-    Add a triangle index to a shared memory buffer using parallel scan.
+    Add a triangle index to a shared memory buffer using atomic operations.
 
-    This function uses warp-level primitives (tile operations) to efficiently
-    add triangle indices to a shared buffer in parallel. Multiple threads can
-    call this simultaneously, and the scan operation ensures each triangle is
-    added to a unique position without conflicts.
+    This is a faster alternative to scan-based compaction, reducing from 6 syncs to 2.
 
-    The buffer layout is:
+    Buffer layout:
     - [0 .. block_dim-1]: Triangle indices
     - [block_dim]: Current count of triangles in buffer
+    - [block_dim+1]: Progress counter (triangles processed so far)
 
     Args:
-        idx_in_thread_block: The calling thread's index within the thread block
+        thread_id: The calling thread's index within the thread block
         add_triangle: Whether this thread wants to add a triangle
         tri_idx: The triangle index to add (only used if add_triangle is True)
-        selected_triangle_index_buffer_shared_mem: Shared memory buffer for triangle indices
-
-    Note:
-        - Uses inclusive scan to compute write positions
-        - Automatically handles buffer overflow by capping at block_dim
-        - The last thread (block_dim-1) updates the global count
-        - All threads must call this together (implicit synchronization via tile ops)
+        buffer: Shared memory buffer for triangle indices
     """
+    capacity = wp.block_dim()
+    idx = -1
 
-    synchronize()
+    # Atomic add to get write position
+    if add_triangle:
+        idx = wp.atomic_add(buffer, capacity, 1)
+        if idx < capacity:
+            buffer[idx] = tri_idx
 
-    capacity = wp.block_dim() - selected_triangle_index_buffer_shared_mem[wp.block_dim()]
+    # Thread 0 optimistically advances progress by block_dim
+    if thread_id == 0:
+        buffer[capacity + 1] += capacity
 
-    # Assert that capacity > 0 (guaranteed by while loop condition in findInterestingTriangles)
-    # This ensures thread 0 can never overflow, so idx_in_thread_block > 0 check is valid
-    # wp.expect(capacity > 0)
-    if capacity <= 0:
-        # print("Capacity is 0")
-        return
+    synchronize()  # SYNC 1: All atomic writes and progress update complete
 
-    synchronize() # Shared memory read above and last thread writes below - syncthreads required
+    # Cap count at capacity (in case of overflow)
+    if thread_id == 0 and buffer[capacity] > capacity:
+        buffer[capacity] = capacity
 
-    val = 1 if add_triangle else 0
-    add_tile = wp.tile(val)
-    inclusive_scan = wp.tile_scan_inclusive(add_tile)
-    offset = 0
-    if idx_in_thread_block == wp.block_dim() - 1:
-        offset = selected_triangle_index_buffer_shared_mem[wp.block_dim()]
-        num_added = inclusive_scan[wp.block_dim() - 1]
-        selected_triangle_index_buffer_shared_mem[wp.block_dim()] += num_added
-        overflow = selected_triangle_index_buffer_shared_mem[wp.block_dim()] - wp.block_dim()
-        if overflow > 0:
-            num_added -= overflow
-            selected_triangle_index_buffer_shared_mem[wp.block_dim()] = wp.block_dim()
+    # Overflow threads correct progress to their tri_idx (minimum wins)
+    if add_triangle and idx >= capacity:
+        wp.atomic_min(buffer, capacity + 1, tri_idx)
 
-    synchronize()
-
-    offset_broadcast_tile = wp.tile(offset)
-    offset_broadcast = offset_broadcast_tile[wp.block_dim() - 1]
-
-    write_index = offset_broadcast + inclusive_scan[idx_in_thread_block] - val
-    if add_triangle and write_index < wp.block_dim():
-        selected_triangle_index_buffer_shared_mem[write_index] = tri_idx
-
-    synchronize()  # Synchronize because of all the shared memory logic
-
-    # Update the triangle progress counter
-
-    if idx_in_thread_block == 0:
-        selected_triangle_index_buffer_shared_mem[wp.block_dim() + 1] += (
-            wp.block_dim()
-        )  # Increment not accounting for possible overflow on thread 0
-
-    synchronize()  # Synchronize because of all the shared memory logic
-
-    if (
-        idx_in_thread_block > 0
-        and offset_broadcast + inclusive_scan[idx_in_thread_block - 1] <= capacity
-        and offset_broadcast + inclusive_scan[idx_in_thread_block] > capacity
-    ):
-        # Correct for possible overflow on the first thread that could not emit its triangle index
-        selected_triangle_index_buffer_shared_mem[wp.block_dim() + 1] = tri_idx
-
-    synchronize()  # Synchronize because of all the shared memory logic
+    synchronize()  # SYNC 2: All corrections complete, buffer consistent
 
 
 @wp.func
@@ -592,7 +552,7 @@ def findInterestingTriangles(
     mesh_to_sdf_transform: wp.transform,
     mesh_id: wp.uint64,
     sdf: wp.uint64,
-    selected_triangle_index_buffer_shared_mem: wp.array(dtype=wp.int32),
+    buffer: wp.array(dtype=wp.int32),
     contact_distance: float,
 ):
     """
@@ -602,35 +562,35 @@ def findInterestingTriangles(
     SDF_distance(sphere_center) <= sphere_radius + contact_distance. Results are stored
     in shared memory buffer for narrow-phase processing.
 
+    Uses atomic compaction (2 syncs per iteration) instead of scan-based (6 syncs).
+
     Buffer layout: [0..block_dim-1] = indices, [block_dim] = count, [block_dim+1] = progress
     """
-    synchronize()
-    # Get the mesh object from the mesh ID
     num_tris = wp.mesh_get(mesh_id).indices.shape[0] // 3
+    capacity = wp.block_dim()
 
-    while (
-        selected_triangle_index_buffer_shared_mem[wp.block_dim() + 1] < num_tris
-        and selected_triangle_index_buffer_shared_mem[wp.block_dim()] < wp.block_dim()
-    ):
-        base_tri_idx = selected_triangle_index_buffer_shared_mem[wp.block_dim() + 1]
-        synchronize()
+    synchronize()  # Ensure buffer state is consistent before starting
+
+    while buffer[capacity + 1] < num_tris and buffer[capacity] < capacity:
+        # All threads read the same base index (buffer consistent from previous sync)
+        base_tri_idx = buffer[capacity + 1]
         tri_idx = base_tri_idx + thread_id
         add_triangle = False
+
         if tri_idx < num_tris:
             v0, v1, v2 = get_triangle_from_mesh(mesh_id, mesh_scale, mesh_to_sdf_transform, tri_idx)
             bounding_sphere_center, bounding_sphere_radius = get_bounding_sphere(v0, v1, v2)
 
-            # Use SDF distance query instead of AABB overlap for more accurate culling
-            # If the distance from sphere center to SDF surface is greater than sphere radius + contact distance,
-            # the triangle cannot generate contacts and can be safely culled
+            # Use SDF distance query for culling
             query_local = wp.volume_world_to_index(sdf, bounding_sphere_center)
             sdf_dist = wp.volume_sample_f(sdf, query_local, wp.Volume.LINEAR)
             add_triangle = sdf_dist <= (bounding_sphere_radius + contact_distance)
 
-        add_to_shared_buffer_and_update_progress(
-            thread_id, add_triangle, tri_idx, selected_triangle_index_buffer_shared_mem
-        )
-    synchronize() # The while condition still reads shared memory, therefore we need a synchronize here - the synchronize inside add_to_shared_buffer_and_update_progress happens before the while condition is evaluated
+        synchronize()  # Ensure all threads have read base_tri_idx before any writes
+        add_to_shared_buffer_atomic(thread_id, add_triangle, tri_idx, buffer)
+        # add_to_shared_buffer_atomic ends with sync, buffer is consistent for next while check
+
+    synchronize()  # Final sync before returning
 
 def create_SdfMeshCollision(tile_size: int):
     """
