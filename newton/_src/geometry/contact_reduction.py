@@ -470,6 +470,9 @@ def get_slot(normal: wp.vec3) -> int:
     return best_slot
 
 
+NUM_REDUCTION_SLOTS = 140  # 20 icosahedron faces x 7 directions
+
+
 def create_contact_reduction_func(tile_size: int):
     @wp.func
     def StoreContactLinearArray(
@@ -481,7 +484,10 @@ def create_contact_reduction_func(tile_size: int):
         buffer_capacity: int,
         empty_marker: float,
     ):
-        """Store contact in linear array using segmented argmax for reduction.
+        """Store contact in linear array using direct atomic reduction.
+
+        OPTIMIZED VERSION: Uses 140 atomic slots (20 slots x 7 directions) with
+        minimal synchronization. Only 3 sync barriers instead of 22+.
 
         Args:
             thread_id: Thread index within the block
@@ -490,50 +496,73 @@ def create_contact_reduction_func(tile_size: int):
             buffer: Output buffer for reduced contacts
             active_ids: Array to store active slot IDs
             empty_marker: Marker value for empty slots
-            segmented_argmax: Segmented argmax function
-            get_slot: Function to get slot ID from contact normal
-            get_scan_dir: Function to get scan direction
         """
+        # Get shared memory for atomic winner tracking (140 uint64 slots)
+        winner_slots = wp.array(
+            ptr=get_shared_memory_pointer_140_uint64(),
+            shape=(wp.static(NUM_REDUCTION_SLOTS),),
+            dtype=wp.uint64,
+        )
+
+        # Initialize shared memory - all threads participate for speed
+        for i in range(thread_id, wp.static(NUM_REDUCTION_SLOTS), wp.block_dim()):
+            winner_slots[i] = wp.uint64(0)
+
+        synchronize()  # SYNC 1: Ensure initialization complete
+
+        # Compute slot and base key for this contact
         slot = 0
-        warp_slot = 0
         if active:
             slot = get_slot(c.normal)
-            warp_slot = slot + 1
 
-        inactive_dot_value = empty_marker  # Ensure inactive threads never win
+        # Compute all 7 dot products and do atomic updates in ONE pass
+        # No sync needed between atomic operations!
+        if active:
+            base_key = slot * 7
 
-        for i in range(7):
-            synchronize()
-            # for i in range(1):  # For debugging
-            scan_direction = get_scan_dir(slot, i)
-            dot = inactive_dot_value
-            if active:
-                if i == 6:
-                    dot = -c.depth  # We want to maximize the minimum depth (therefore the minus sign)
-                else:
-                    dot = wp.dot(scan_direction, c.position)
+            # Direction 0-5: spatial extremes
+            for i in range(6):
+                scan_direction = get_scan_dir(slot, i)
+                dot = wp.dot(scan_direction, c.position)
+                packed = pack_value_thread_id(dot, thread_id)
+                atomic_max_uint64(winner_slots.ptr, base_key + i, packed)
 
-            winner = wp.static(create_segmented_argmax_func_21_segments(tile_size))(thread_id, warp_slot, dot)
-            if not active:
-                winner = -1
+            # Direction 6: depth (minimize depth = maximize -depth)
+            dot6 = -c.depth
+            packed6 = pack_value_thread_id(dot6, thread_id)
+            atomic_max_uint64(winner_slots.ptr, base_key + 6, packed6)
 
-            if active and winner == thread_id:
-                key = slot * 7 + i
+        synchronize()  # SYNC 2: Ensure all atomics complete
 
-                p = buffer[key].projection
-                if p == empty_marker:
-                    id = wp.atomic_add(
-                        active_ids, buffer_capacity, 1
-                    )  # active_ids has one additional element to store the number of active elements
-                    if id < buffer_capacity:
-                        active_ids[id] = key
+        # Check if this thread won any slots and write results
+        if active:
+            base_key = slot * 7
 
-                if dot > p:
-                    # Store contact data in buffer
-                    c.projection = dot
-                    buffer[key] = c
+            for i in range(7):
+                key = base_key + i
+                winner_packed = winner_slots[key]
+                winner_id = unpack_thread_id(winner_packed)
 
-        synchronize()
+                if winner_id == thread_id:
+                    # This thread won this slot
+                    p = buffer[key].projection
+                    if p == empty_marker:
+                        id = wp.atomic_add(active_ids, buffer_capacity, 1)
+                        if id < buffer_capacity:
+                            active_ids[id] = key
+
+                    # Compute the dot product again for storage
+                    if i == 6:
+                        dot = -c.depth
+                    else:
+                        scan_direction = get_scan_dir(slot, i)
+                        dot = wp.dot(scan_direction, c.position)
+
+                    if dot > p:
+                        c.projection = dot
+                        buffer[key] = c
+
+        synchronize()  # SYNC 3: Ensure writes complete before next batch
 
     return StoreContactLinearArray
 
@@ -589,8 +618,10 @@ def create_shared_memory_pointer_func_8_byte_aligned(
 # Create the specific functions used in the codebase
 get_shared_memory_pointer_141_ints = create_shared_memory_pointer_func_4_byte_aligned(141)
 get_shared_memory_pointer_140_contacts = create_shared_memory_pointer_func_4_byte_aligned(140 * 9)
-# Shared memory for 21 segments (0=inactive, 1-20=slots) - 21 uint64 = 42 int32
+# Shared memory for 21 segments (0=inactive, 1-20=slots) - 21 uint64
 get_shared_memory_pointer_21_uint64 = create_shared_memory_pointer_func_8_byte_aligned(21)
+# Shared memory for 140 reduction slots (20 faces x 7 directions) - 140 uint64
+get_shared_memory_pointer_140_uint64 = create_shared_memory_pointer_func_8_byte_aligned(NUM_REDUCTION_SLOTS)
 
 
 def create_shared_memory_pointer_block_dim_func(
