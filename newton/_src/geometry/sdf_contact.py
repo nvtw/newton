@@ -26,19 +26,19 @@ from ..geometry.contact_data import ContactData
 try:
     from .contact_reduction import (
         ContactStruct,
-        create_contact_reduction_func,
         get_shared_memory_pointer_140_contacts,
         get_shared_memory_pointer_141_ints,
         get_shared_memory_pointer_block_dim_plus_2_ints,
+        store_reduced_contact,
         synchronize,
     )
 except ImportError:
     from contact_reduction import (
         ContactStruct,
-        create_contact_reduction_func,
         get_shared_memory_pointer_140_contacts,
         get_shared_memory_pointer_141_ints,
         get_shared_memory_pointer_block_dim_plus_2_ints,
+        store_reduced_contact,
         synchronize,
     )
 
@@ -768,7 +768,7 @@ def create_SdfMeshCollision(tile_size: int):
                     has_contact = dist < margin
 
                 synchronize()
-                wp.static(create_contact_reduction_func(tile_size))(
+                store_reduced_contact(
                     t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, 140, empty_marker
                 )
 
@@ -1084,7 +1084,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         c.feature = selected_triangles[t]
                         c.projection = empty_marker
 
-                wp.static(create_contact_reduction_func(tile_size))(
+                store_reduced_contact(
                     t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, 140, empty_marker
                 )
 

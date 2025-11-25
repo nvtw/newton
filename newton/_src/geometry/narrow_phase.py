@@ -34,9 +34,9 @@ from ..geometry.collision_core import (
 from ..geometry.contact_data import ContactData
 from ..geometry.contact_reduction import (
     ContactStruct,
-    create_contact_reduction_func,
     get_shared_memory_pointer_140_contacts,
     get_shared_memory_pointer_141_ints,
+    store_reduced_contact,
     synchronize,
 )
 from ..geometry.sdf_contact import create_narrow_phase_process_mesh_mesh_contacts_kernel
@@ -662,7 +662,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func: Any, til
 
                 # Apply contact reduction
                 synchronize()
-                wp.static(create_contact_reduction_func(tile_size))(
+                store_reduced_contact(
                     t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, 140, empty_marker
                 )
                 synchronize()

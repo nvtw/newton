@@ -25,15 +25,6 @@ return i ^ mask;
 def float_flip(f: float) -> wp.uint32: ...
 
 
-# http://stereopsis.com/radix.html
-@wp.func_native("""
-uint32_t mask = ((i >> 31) - 1) | 0x80000000;
-uint32_t res = i ^ mask;
-return reinterpret_cast<float&>(res);
-""")
-def ifloat_flip(i: wp.uint32) -> float: ...
-
-
 @wp.func_native("""
 #if defined(__CUDA_ARCH__)
 __syncthreads();
@@ -48,24 +39,6 @@ atomicMax(reinterpret_cast<unsigned long long*>(ptr) + idx, static_cast<unsigned
 #endif
 """)
 def atomic_max_uint64(ptr: wp.uint64, idx: int, val: wp.uint64): ...
-
-
-@wp.func
-def pack_slot_value(slot_id: int, value: float) -> wp.uint64:
-    """Pack slot ID and float value into a single 64-bit unsigned integer."""
-    return (wp.uint64(slot_id) << wp.uint64(32)) | wp.uint64(float_flip(value))
-
-
-@wp.func
-def get_slot_from_packed(packed: wp.uint64) -> int:
-    """Extract slot ID from packed value."""
-    return wp.int32(packed >> wp.uint64(32))
-
-
-@wp.func
-def get_value(packed: wp.uint64) -> float:
-    """Extract float value from packed value."""
-    return ifloat_flip(wp.uint32(packed))
 
 
 @wp.func
@@ -86,69 +59,6 @@ def pack_value_thread_id(value: float, thread_id: int) -> wp.uint64:
 def unpack_thread_id(packed: wp.uint64) -> int:
     """Extract thread_id from packed value."""
     return wp.int32(packed & wp.uint64(0xFFFFFFFF))
-
-
-def create_segmented_argmax_func_21_segments(tile_size: int):
-    """Create a segmented argmax function using atomic operations.
-
-    This is O(n) instead of O(n log² n) compared to the sorting-based approach.
-    Uses atomic_max on packed (value, thread_id) for efficient winner selection.
-
-    Args:
-        tile_size: Size of the tile (for API compatibility, not used internally)
-
-    Returns:
-        A Warp function that performs segmented argmax using atomics
-    """
-
-    NUM_SEGMENTS = 21  # 0 for inactive, 1-20 for the 20 icosahedron face slots
-    @wp.func
-    def segmented_argmax(
-        thread_id: int,
-        segment_id: int,
-        value: float,
-    ) -> int:
-        """Find the thread with maximum value within each segment using atomics.
-
-        All threads in the block must call this function together.
-
-        Args:
-            thread_id: Thread index within the block
-            segment_id: Segment ID for this thread (0 to NUM_SEGMENTS-1)
-            value: Value for this thread
-
-        Returns:
-            Thread ID of the winner for this thread's segment
-        """
-        # Get shared memory for atomic operations
-        # Use wp.static() to make NUM_SEGMENTS a compile-time constant
-        shared_mem = wp.array(
-            ptr=get_shared_memory_pointer_21_uint64(), shape=(wp.static(NUM_SEGMENTS),), dtype=wp.uint64
-        )
-
-        # Initialize shared memory to 0 (represents -infinity, any real value beats it)
-        # Only threads < NUM_SEGMENTS participate in initialization
-        if thread_id < wp.static(NUM_SEGMENTS):
-            shared_mem[thread_id] = wp.uint64(0)
-
-        synchronize()
-
-        # Pack value and thread_id: higher value wins, then higher thread_id for ties
-        packed = pack_value_thread_id(value, thread_id)
-
-        # Atomically update the segment's slot - highest packed value wins
-        # Use native CUDA atomicMax for uint64 support
-        atomic_max_uint64(shared_mem.ptr, segment_id, packed)
-
-        synchronize()
-
-        # Read back the winner for this thread's segment
-        winner_packed = shared_mem[segment_id]
-        winner_id = unpack_thread_id(winner_packed)
-
-        return winner_id
-
-    return segmented_argmax
 
 
 @wp.struct
@@ -473,98 +383,95 @@ def get_slot(normal: wp.vec3) -> int:
 NUM_REDUCTION_SLOTS = 140  # 20 icosahedron faces x 7 directions
 
 
-def create_contact_reduction_func(tile_size: int):
-    @wp.func
-    def StoreContactLinearArray(
-        thread_id: int,
-        active: bool,
-        c: ContactStruct,  # Contact data
-        buffer: wp.array(dtype=ContactStruct),  # Contact buffer
-        active_ids: wp.array(dtype=int),
-        buffer_capacity: int,
-        empty_marker: float,
-    ):
-        """Store contact in linear array using direct atomic reduction.
+@wp.func
+def store_reduced_contact(
+    thread_id: int,
+    active: bool,
+    c: ContactStruct,  # Contact data
+    buffer: wp.array(dtype=ContactStruct),  # Contact buffer
+    active_ids: wp.array(dtype=int),
+    buffer_capacity: int,
+    empty_marker: float,
+):
+    """Store contact in linear array using direct atomic reduction.
 
-        OPTIMIZED VERSION: Uses 140 atomic slots (20 slots x 7 directions) with
-        minimal synchronization. Only 3 sync barriers instead of 22+.
+    OPTIMIZED VERSION: Uses 140 atomic slots (20 slots x 7 directions) with
+    minimal synchronization. Only 3 sync barriers instead of 22+.
 
-        Args:
-            thread_id: Thread index within the block
-            active: Whether this thread has an active contact
-            c: Contact data for this thread
-            buffer: Output buffer for reduced contacts
-            active_ids: Array to store active slot IDs
-            empty_marker: Marker value for empty slots
-        """
-        # Get shared memory for atomic winner tracking (140 uint64 slots)
-        winner_slots = wp.array(
-            ptr=get_shared_memory_pointer_140_uint64(),
-            shape=(wp.static(NUM_REDUCTION_SLOTS),),
-            dtype=wp.uint64,
-        )
+    Args:
+        thread_id: Thread index within the block
+        active: Whether this thread has an active contact
+        c: Contact data for this thread
+        buffer: Output buffer for reduced contacts
+        active_ids: Array to store active slot IDs
+        empty_marker: Marker value for empty slots
+    """
+    # Get shared memory for atomic winner tracking (140 uint64 slots)
+    winner_slots = wp.array(
+        ptr=get_shared_memory_pointer_140_uint64(),
+        shape=(NUM_REDUCTION_SLOTS,),
+        dtype=wp.uint64,
+    )
 
-        # Initialize shared memory - all threads participate for speed
-        for i in range(thread_id, wp.static(NUM_REDUCTION_SLOTS), wp.block_dim()):
-            winner_slots[i] = wp.uint64(0)
+    # Initialize shared memory - all threads participate for speed
+    for i in range(thread_id, NUM_REDUCTION_SLOTS, wp.block_dim()):
+        winner_slots[i] = wp.uint64(0)
 
-        synchronize()  # SYNC 1: Ensure initialization complete
+    synchronize()  # SYNC 1: Ensure initialization complete
 
-        # Compute slot and base key for this contact
-        slot = 0
-        if active:
-            slot = get_slot(c.normal)
+    # Compute slot and base key for this contact
+    slot = 0
+    if active:
+        slot = get_slot(c.normal)
 
-        # Compute all 7 dot products and do atomic updates in ONE pass
-        # No sync needed between atomic operations!
-        if active:
-            base_key = slot * 7
+    # Compute all 7 dot products and do atomic updates in ONE pass
+    # No sync needed between atomic operations!
+    if active:
+        base_key = slot * 7
 
-            # Direction 0-5: spatial extremes
-            for i in range(6):
-                scan_direction = get_scan_dir(slot, i)
-                dot = wp.dot(scan_direction, c.position)
-                packed = pack_value_thread_id(dot, thread_id)
-                atomic_max_uint64(winner_slots.ptr, base_key + i, packed)
+        # Direction 0-5: spatial extremes
+        for i in range(6):
+            scan_direction = get_scan_dir(slot, i)
+            dot = wp.dot(scan_direction, c.position)
+            packed = pack_value_thread_id(dot, thread_id)
+            atomic_max_uint64(winner_slots.ptr, base_key + i, packed)
 
-            # Direction 6: depth (minimize depth = maximize -depth)
-            dot6 = -c.depth
-            packed6 = pack_value_thread_id(dot6, thread_id)
-            atomic_max_uint64(winner_slots.ptr, base_key + 6, packed6)
+        # Direction 6: depth (minimize depth = maximize -depth)
+        dot6 = -c.depth
+        packed6 = pack_value_thread_id(dot6, thread_id)
+        atomic_max_uint64(winner_slots.ptr, base_key + 6, packed6)
 
-        synchronize()  # SYNC 2: Ensure all atomics complete
+    synchronize()  # SYNC 2: Ensure all atomics complete
 
-        # Check if this thread won any slots and write results
-        if active:
-            base_key = slot * 7
+    # Check if this thread won any slots and write results
+    if active:
+        base_key = slot * 7
 
-            for i in range(7):
-                key = base_key + i
-                winner_packed = winner_slots[key]
-                winner_id = unpack_thread_id(winner_packed)
+        for i in range(7):
+            key = base_key + i
+            winner_packed = winner_slots[key]
+            winner_id = unpack_thread_id(winner_packed)
 
-                if winner_id == thread_id:
-                    # This thread won this slot
-                    p = buffer[key].projection
-                    if p == empty_marker:
-                        id = wp.atomic_add(active_ids, buffer_capacity, 1)
-                        if id < buffer_capacity:
-                            active_ids[id] = key
+            if winner_id == thread_id:
+                # This thread won this slot
+                p = buffer[key].projection
+                if p == empty_marker:
+                    id = wp.atomic_add(active_ids, buffer_capacity, 1)
+                    if id < buffer_capacity:
+                        active_ids[id] = key
 
-                    # Compute the dot product again for storage
-                    if i == 6:
-                        dot = -c.depth
-                    else:
-                        scan_direction = get_scan_dir(slot, i)
-                        dot = wp.dot(scan_direction, c.position)
+                # Compute the dot product again for storage
+                if i == 6:
+                    dot = -c.depth
+                else:
+                    scan_direction = get_scan_dir(slot, i)
+                    dot = wp.dot(scan_direction, c.position)
 
-                    if dot > p:
-                        c.projection = dot
-                        buffer[key] = c
+                if dot > p:
+                    c.projection = dot
+                    buffer[key] = c
 
-        synchronize()  # SYNC 3: Ensure writes complete before next batch
-
-    return StoreContactLinearArray
+    synchronize()  # SYNC 3: Ensure writes complete before next batch
 
 
 def create_shared_memory_pointer_func_4_byte_aligned(
@@ -618,8 +525,6 @@ def create_shared_memory_pointer_func_8_byte_aligned(
 # Create the specific functions used in the codebase
 get_shared_memory_pointer_141_ints = create_shared_memory_pointer_func_4_byte_aligned(141)
 get_shared_memory_pointer_140_contacts = create_shared_memory_pointer_func_4_byte_aligned(140 * 9)
-# Shared memory for 21 segments (0=inactive, 1-20=slots) - 21 uint64
-get_shared_memory_pointer_21_uint64 = create_shared_memory_pointer_func_8_byte_aligned(21)
 # Shared memory for 140 reduction slots (20 faces x 7 directions) - 140 uint64
 get_shared_memory_pointer_140_uint64 = create_shared_memory_pointer_func_8_byte_aligned(NUM_REDUCTION_SLOTS)
 
