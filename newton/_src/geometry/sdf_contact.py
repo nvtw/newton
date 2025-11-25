@@ -1020,20 +1020,12 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 mesh_sdf_transform = wp.transform_multiply(wp.transform_inverse(mesh1_transform), mesh0_transform)
                 sdf_current = sdf1
                 sdf_transform = mesh1_transform
-                shape_id_a = pair[0]
-                shape_id_b = pair[1]
-                thick_a = thickness0
-                thick_b = thickness1
             else:
                 mesh = mesh1
                 mesh_scale = mesh1_scale
                 mesh_sdf_transform = wp.transform_multiply(wp.transform_inverse(mesh0_transform), mesh1_transform)
                 sdf_current = sdf0
                 sdf_transform = mesh0_transform
-                shape_id_a = pair[1]
-                shape_id_b = pair[0]
-                thick_a = thickness1
-                thick_b = thickness0
 
             # Reset progress counter for this mesh
             if t == 0:
@@ -1067,40 +1059,31 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         v1,
                         v2,
                     )
-                    c.position = point
-                    c.normal = dir
-                    c.depth = dist
-                    c.feature = 0
-                    c.projection = empty_marker
 
-                    # has_contact = dist < margin
-                    # if has_contact:
-                    #     point_world = wp.transform_point(sdf_transform, point)
-                    #     direction_world = wp.transform_vector(sdf_transform, dir)
-                    #     direction_len = wp.length(direction_world)
-                    #     if direction_len > 0.0:
-                    #         direction_world = direction_world / direction_len
+                    has_contact = dist < margin
 
-                    #     # Create contact data
-                    #     contact_data = ContactData()
-                    #     contact_data.contact_point_center = point_world
-                    #     contact_data.contact_normal_a_to_b = (
-                    #         -direction_world
-                    #     )  # Negate: gradient points B->A, we need A->B
-                    #     contact_data.contact_distance = dist
-                    #     contact_data.radius_eff_a = 0.0
-                    #     contact_data.radius_eff_b = 0.0
-                    #     contact_data.thickness_a = thick_a
-                    #     contact_data.thickness_b = thick_b
-                    #     contact_data.shape_a = shape_id_a
-                    #     contact_data.shape_b = shape_id_b
-                    #     contact_data.margin = margin
-                    #     contact_data.feature = wp.uint32(selected_triangles[t] + 1)
-                    #     contact_data.feature_pair_key = build_pair_key2(wp.uint32(pair[0]), wp.uint32(pair[1]))
+                    if has_contact:
+                        # Transform to world space BEFORE storing in reduction buffer
+                        # This is critical because contacts from mode 0 and mode 1 are in
+                        # different local coordinate systems (SDF B space vs SDF A space)
+                        point_world = wp.transform_point(sdf_transform, point)
+                        dir_world = wp.transform_vector(sdf_transform, dir)
+                        dir_len = wp.length(dir_world)
+                        if dir_len > 0.0:
+                            dir_world = dir_world / dir_len
 
-                    #     writer_func(contact_data, writer_data)
+                        # Normalize normal direction so it always points from pair[0] to pair[1]
+                        # Mode 0: gradient points B->A (pair[1]->pair[0]), negate to get pair[0]->pair[1]
+                        # Mode 1: gradient points A->B (pair[0]->pair[1]), already correct
+                        if mode == 0:
+                            dir_world = -dir_world
 
-                # dont reduce contacts for now
+                        c.position = point_world
+                        c.normal = dir_world  # Store normalized world-space normal pointing pair[0]->pair[1]
+                        c.depth = dist
+                        c.feature = selected_triangles[t]
+                        c.projection = empty_marker
+
                 wp.static(create_contact_reduction_func(tile_size))(
                     t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, 140, empty_marker
                 )
@@ -1112,6 +1095,9 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 synchronize()
 
         # Now write the reduced contacts to the output array
+        # Contacts are already in world space (transformed before storing in reduction buffer)
+        # All contacts use consistent convention: shape_a = pair[0], shape_b = pair[1],
+        # normal points from pair[0] to pair[1]
         synchronize()
         num_contacts_to_keep = wp.min(active_contacts_shared_mem[140], 140)
         synchronize()
@@ -1120,26 +1106,18 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
             contact_id = active_contacts_shared_mem[i]
             contact = contacts_shared_mem[contact_id]
 
-            # Transform contact point and normal from SDF space to world space
-            point_world = wp.transform_point(sdf_transform, contact.position)
-            direction_world = wp.transform_vector(sdf_transform, contact.normal)
-            direction_len = wp.length(direction_world)
-            if direction_len > 0.0:
-                direction_world = direction_world / direction_len
-
-            # Create contact data
+            # Create contact data - contacts are already in world space
             contact_data = ContactData()
-            contact_data.contact_point_center = point_world
-            contact_data.contact_normal_a_to_b = (
-                -direction_world
-            )  # Negate: gradient points B->A, we need A->B
+            contact_data.contact_point_center = contact.position
+            contact_data.contact_normal_a_to_b = contact.normal  # Already normalized and pointing pair[0]->pair[1]
             contact_data.contact_distance = contact.depth
             contact_data.radius_eff_a = 0.0
             contact_data.radius_eff_b = 0.0
-            contact_data.thickness_a = thick_a
-            contact_data.thickness_b = thick_b
-            contact_data.shape_a = shape_id_a
-            contact_data.shape_b = shape_id_b
+            # Use consistent shape IDs for all contacts (both modes contribute to same buffer)
+            contact_data.thickness_a = thickness0
+            contact_data.thickness_b = thickness1
+            contact_data.shape_a = pair[0]
+            contact_data.shape_b = pair[1]
             contact_data.margin = margin
             contact_data.feature = wp.uint32(contact.feature + 1)
             contact_data.feature_pair_key = build_pair_key2(wp.uint32(pair[0]), wp.uint32(pair[1]))
