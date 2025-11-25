@@ -745,6 +745,7 @@ class NarrowPhase:
 
         self.tile_size = 128
         self.tile_size_large = 256
+        self.tile_size_max = 1024
         self.block_dim = 128
         self.reduce_contacts = reduce_contacts
 
@@ -752,7 +753,7 @@ class NarrowPhase:
         self.narrow_phase_kernel = create_narrow_phase_kernel_gjk_mpr(self.external_aabb, writer_func)
         self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func)
         self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(
-            writer_func, tile_size=self.tile_size_large
+            writer_func, tile_size=self.tile_size_max
         )
         self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
             writer_func, tile_size=self.tile_size_large, reduce_contacts=reduce_contacts
@@ -883,7 +884,7 @@ class NarrowPhase:
                 self.num_tile_blocks,
             ],
             device=device,
-            block_dim=self.tile_size_large,
+            block_dim=self.tile_size_max,
         )
 
         # Launch mesh triangle overlap detection kernel
