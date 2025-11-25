@@ -42,6 +42,14 @@ __syncthreads();
 def synchronize(): ...
 
 
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+atomicMax(reinterpret_cast<unsigned long long*>(ptr) + idx, static_cast<unsigned long long>(val));
+#endif
+""")
+def atomic_max_uint64(ptr: wp.uint64, idx: int, val: wp.uint64): ...
+
+
 @wp.func
 def pack_slot_value(slot_id: int, value: float) -> wp.uint64:
     """Pack slot ID and float value into a single 64-bit unsigned integer."""
@@ -60,84 +68,85 @@ def get_value(packed: wp.uint64) -> float:
     return ifloat_flip(wp.uint32(packed))
 
 
-def create_segmented_argmax_func(tile_size: int):
-    """Create a segmented argmax function for a specific tile size.
+@wp.func
+def pack_value_thread_id(value: float, thread_id: int) -> wp.uint64:
+    """Pack float value and thread_id into uint64 for atomic argmax.
 
-    This uses Warp's tile operations for efficient cooperative argmax computation
-    across segments within a thread block.
+    High 32 bits: float_flip(value) - makes floats comparable as unsigned ints
+    Low 32 bits: thread_id - for deterministic tie-breaking
+
+    atomicMax on this packed value will select:
+    1. The thread with the highest value
+    2. For equal values, the thread with the highest thread_id (deterministic)
+    """
+    return (wp.uint64(float_flip(value)) << wp.uint64(32)) | wp.uint64(thread_id)
+
+
+@wp.func
+def unpack_thread_id(packed: wp.uint64) -> int:
+    """Extract thread_id from packed value."""
+    return wp.int32(packed & wp.uint64(0xFFFFFFFF))
+
+
+def create_segmented_argmax_func_21_segments(tile_size: int):
+    """Create a segmented argmax function using atomic operations.
+
+    This is O(n) instead of O(n log² n) compared to the sorting-based approach.
+    Uses atomic_max on packed (value, thread_id) for efficient winner selection.
 
     Args:
-        tile_size: Size of the tile (MUST match block size, e.g., 256)
+        tile_size: Size of the tile (for API compatibility, not used internally)
 
     Returns:
-        A Warp function that performs segmented argmax using tile operations
+        A Warp function that performs segmented argmax using atomics
     """
 
+    NUM_SEGMENTS = 21  # 0 for inactive, 1-20 for the 20 icosahedron face slots
     @wp.func
     def segmented_argmax(
         thread_id: int,
         segment_id: int,
         value: float,
     ) -> int:
-        """Find the thread with maximum value within each segment cooperatively.
+        """Find the thread with maximum value within each segment using atomics.
 
         All threads in the block must call this function together.
 
         Args:
-            thread_id: Thread index within the block (0 to tile_size-1)
-            segment_id: Segment ID for this thread
+            thread_id: Thread index within the block
+            segment_id: Segment ID for this thread (0 to NUM_SEGMENTS-1)
             value: Value for this thread
 
         Returns:
             Thread ID of the winner for this thread's segment
         """
-        # Allocate temporary tile memory
-        sort_buffer = wp.tile_zeros(shape=(tile_size,), dtype=wp.uint64)
-
-        # Each thread writes its packed value to tile
-        # Trick: reverse sort order of floats (negative) for easier max scan later
-        packed = pack_slot_value(segment_id, -value)
-        sort_buffer[thread_id] = packed
-
-        # Create payload with thread indices
-        sort_payload = wp.tile_arange(tile_size, dtype=wp.int32)
-
-        # Perform bitonic sort on the tiles
-        wp.tile_sort(sort_buffer, sort_payload)
-
-        # Detect segment boundaries (thread_id is now sorted position)
-        slot_boundary = True
-        if thread_id > 0:
-            current_slot = get_slot_from_packed(sort_buffer[thread_id])
-            prev_slot = get_slot_from_packed(sort_buffer[thread_id - 1])
-            if current_slot == prev_slot:
-                slot_boundary = False
-
-        # Build scan input tile
-        scan_input = wp.tile_zeros(shape=(tile_size,), dtype=wp.int32)
-        write = 0
-        if slot_boundary:
-            write = thread_id
-        scan_input[thread_id] = (
-            write  # Keep this helper variable since writing into a tile emits a __syncthreads() under the hood
+        # Get shared memory for atomic operations
+        # Use wp.static() to make NUM_SEGMENTS a compile-time constant
+        shared_mem = wp.array(
+            ptr=get_shared_memory_pointer_21_uint64(), shape=(wp.static(NUM_SEGMENTS),), dtype=wp.uint64
         )
 
-        # Perform max scan to find the maximum index per segment
-        max_scan_result = wp.tile_scan_max_inclusive(scan_input)
-
-        # Extract the winner ID for this thread's position
-        max_scan = wp.int32(max_scan_result[thread_id])
-        winner_id = wp.int32(sort_payload[max_scan])
-
-        # Reorder: prepare mapping from original thread_id to winner_id
-        sort_buffer[sort_payload[thread_id]] = wp.uint64(winner_id)
-
-        # Apply reordering to get final result for this thread
-        result = wp.int32(sort_buffer[thread_id])
+        # Initialize shared memory to 0 (represents -infinity, any real value beats it)
+        # Only threads < NUM_SEGMENTS participate in initialization
+        if thread_id < wp.static(NUM_SEGMENTS):
+            shared_mem[thread_id] = wp.uint64(0)
 
         synchronize()
 
-        return result
+        # Pack value and thread_id: higher value wins, then higher thread_id for ties
+        packed = pack_value_thread_id(value, thread_id)
+
+        # Atomically update the segment's slot - highest packed value wins
+        # Use native CUDA atomicMax for uint64 support
+        atomic_max_uint64(shared_mem.ptr, segment_id, packed)
+
+        synchronize()
+
+        # Read back the winner for this thread's segment
+        winner_packed = shared_mem[segment_id]
+        winner_id = unpack_thread_id(winner_packed)
+
+        return winner_id
 
     return segmented_argmax
 
@@ -500,11 +509,11 @@ def create_contact_reduction_func(tile_size: int):
             dot = inactive_dot_value
             if active:
                 if i == 6:
-                    dot = -c.depth # We want to maximize the minimum depth (therefore the minus sign)
+                    dot = -c.depth  # We want to maximize the minimum depth (therefore the minus sign)
                 else:
                     dot = wp.dot(scan_direction, c.position)
 
-            winner = wp.static(create_segmented_argmax_func(tile_size))(thread_id, warp_slot, dot)
+            winner = wp.static(create_segmented_argmax_func_21_segments(tile_size))(thread_id, warp_slot, dot)
             if not active:
                 winner = -1
 
@@ -529,7 +538,7 @@ def create_contact_reduction_func(tile_size: int):
     return StoreContactLinearArray
 
 
-def create_shared_memory_pointer_func(
+def create_shared_memory_pointer_func_4_byte_aligned(
     array_size: int,
 ):
     """Create a shared memory pointer function for a specific array size.
@@ -553,10 +562,35 @@ def create_shared_memory_pointer_func(
 
     return get_shared_memory_pointer
 
+def create_shared_memory_pointer_func_8_byte_aligned(
+    array_size: int,
+):
+    """Create a shared memory pointer function for a specific array size.
+
+    Args:
+        array_size: Number of int elements in the shared memory array.
+
+    Returns:
+        A Warp function that returns a pointer to shared memory
+    """
+
+    snippet = f"""
+    constexpr int array_size = {array_size};
+    __shared__ uint64_t s[array_size];
+    auto ptr = &s[0];
+    return (uint64_t)ptr;
+    """
+
+    @wp.func_native(snippet)
+    def get_shared_memory_pointer() -> wp.uint64: ...
+
+    return get_shared_memory_pointer
 
 # Create the specific functions used in the codebase
-get_shared_memory_pointer_141_ints = create_shared_memory_pointer_func(141)
-get_shared_memory_pointer_140_contacts = create_shared_memory_pointer_func(140 * 9)
+get_shared_memory_pointer_141_ints = create_shared_memory_pointer_func_4_byte_aligned(141)
+get_shared_memory_pointer_140_contacts = create_shared_memory_pointer_func_4_byte_aligned(140 * 9)
+# Shared memory for 21 segments (0=inactive, 1-20=slots) - 21 uint64 = 42 int32
+get_shared_memory_pointer_21_uint64 = create_shared_memory_pointer_func_8_byte_aligned(21)
 
 
 def create_shared_memory_pointer_block_dim_func(
