@@ -18,6 +18,28 @@ Contact warm starting for physics solvers.
 
 Stores contact impulses from previous timestep and applies them to matching
 contacts in the current timestep, improving solver convergence and stability.
+
+LEAST SQUARES WRENCH DISTRIBUTION:
+
+When multiple contacts exist between a body pair, we store their combined wrench
+(total force F_total and torque T_total). To reconstruct individual contact
+impulses, we solve: minimize Σ||f_i||² subject to Σf_i = F_total and Σ(r_i x f_i) = T_total.
+
+Rather than solving a 3Nx3N system for N contacts, we exploit the problem structure.
+The optimal solution has the form f_i = λ_f - r_i x λ_t, where λ_f ∈ ℝ³ is a force
+scaling and λ_t ∈ ℝ³ is a torque multiplier (Lagrange multipliers).
+
+We precompute two 3x3 matrices by accumulating over all contacts:
+  F_T = Σ[r_i]x        (sum of skew-symmetric matrices)
+  T_T = Σ[r_i]x[r_i]xᵀ (sum of cross-product squared matrices)
+
+Then solve the 3x3 Schur complement system S·λ_t = rhs, where:
+  S = T_T - (1/N)·F_Tᵀ·F_T
+  rhs = T_total - (1/N)·F_Tᵀ·F_total
+
+Finally, λ_f = (F_total - F_T·λ_t)/N and each impulse is f_i = λ_f - r_i x λ_t.
+
+This reduces arbitrary N contacts to a constant-size 3x3 linear system.
 """
 
 import warp as wp
@@ -288,7 +310,7 @@ def solve_wrench_distribution(
     # Compute modified RHS: rhs = totalTorque - (1/n) * F_T^T * totalForce
     rhs = totalTorque - wp.transpose(F_T) * totalForce * invN
 
-    # Solve 3×3 system or use fallback
+    # Solve 3x3 system or use fallback
     impulse = wp.vec3(0.0, 0.0, 0.0)
     det = wp.determinant(S)
     if wp.abs(det) < 1e-12:
@@ -299,7 +321,7 @@ def solve_wrench_distribution(
         S_inv = wp.inverse(S)
         lambda_t = S_inv * rhs
         lambda_f = (totalForce - F_T * lambda_t) * invN
-        # Reconstruct impulse: impulse[i] = lambda_f - r[i] × lambda_t
+        # Reconstruct impulse: impulse[i] = lambda_f - r[i] x lambda_t
         impulse = lambda_f - wp.cross(r_i, lambda_t)
 
     return impulse
@@ -349,7 +371,7 @@ def accumulate_F_and_T(
     base_offset = compact_id * 9
 
     # Accumulate for body A
-    # [r]×^T = -[r]× has rows: [0, rz, -ry], [-rz, 0, rx], [ry, -rx, 0]
+    # [r]x^T = -[r]x has rows: [0, rz, -ry], [-rz, 0, rx], [ry, -rx, 0]
     wp.atomic_add(F_accumulator_a, base_offset + 0, 0.0)  # F[0,0]
     wp.atomic_add(F_accumulator_a, base_offset + 1, r_a[2])  # F[0,1]
     wp.atomic_add(F_accumulator_a, base_offset + 2, -r_a[1])  # F[0,2]
@@ -360,7 +382,7 @@ def accumulate_F_and_T(
     wp.atomic_add(F_accumulator_a, base_offset + 7, -r_a[0])  # F[2,1]
     wp.atomic_add(F_accumulator_a, base_offset + 8, 0.0)  # F[2,2]
 
-    # [r]× * [r]×^T = |r|² I - r ⊗ r
+    # [r]x * [r]x^T = |r|² I - r ⊗ r
     rSq_a = wp.dot(r_a, r_a)
     wp.atomic_add(T_accumulator_a, base_offset + 0, rSq_a - r_a[0] * r_a[0])  # T[0,0]
     wp.atomic_add(T_accumulator_a, base_offset + 1, -r_a[0] * r_a[1])  # T[0,1]
@@ -594,12 +616,21 @@ class ContactWarmStarting:
         """
         Capture wrenches from solved contacts for warm starting next timestep.
 
+        Process:
+        1. Groups contacts by body pair (sorts and deduplicates)
+        2. For each contact: transforms impulse to both body frames (A and B)
+        3. Computes torques: τ = (contact_point - COM) x impulse
+        4. Accumulates total wrench per body pair: (ΣF, Στ) in local frames
+
+        The stored wrenches are frame-invariant (stored in body frames), allowing
+        accurate reconstruction even when bodies rotate between timesteps.
+
         Args:
             contact_points: Contact points in world space
-            contact_body_pairs: Body pair indices for each contact
+            contact_body_pairs: Body pair indices for each contact (body A, body B)
             contact_impulses: Solved impulses from this timestep
             num_contacts: Number of active contacts
-            all_body_COM_transforms: Current body transforms
+            all_body_COM_transforms: Current body transforms (positions + orientations)
             device: Device to launch on (None for default)
         """
         if device is None:
@@ -697,14 +728,30 @@ class ContactWarmStarting:
         """
         Apply warm starting to new contacts using stored wrench data.
 
+        Process:
+        1. Looks up stored wrench (F_total, τ_total) for each body pair
+        2. Builds geometry matrices from new contact points:
+           - F_T = Σ[r_i]x (sum of skew-symmetric matrices)
+           - T_T = Σ[r_i]x[r_i]xᵀ (sum of cross-product squared)
+        3. Solves constrained least squares: find forces {f_i} that minimize
+           Σ||f_i||² (smallest forces = minimum energy) subject to matching
+           the stored wrench: Σf_i = F_total and Σ(r_i x f_i) = τ_total.
+           Solution via Lagrange multipliers reduces to a 3x3 Schur complement
+           system for the torque multiplier λ_t, then back-solves for λ_f.
+        4. Reconstructs impulse at each contact: f_i = λ_f - r_i x λ_t
+        5. Solves from both body perspectives and averages for robustness
+
+        Handles variable contact counts gracefully: contact number can differ
+        between capture and reconstruction with minimal force error.
+
         Args:
             new_contact_points: Contact points in world space
             new_contact_normals: Contact normals (pointing from A to B)
             new_contact_body_pairs: Body pair indices for each contact
             num_new_contact_points: Number of active contacts
-            all_body_COM_transforms: Current body transforms
+            all_body_COM_transforms: Current body transforms (positions + orientations)
             contact_impulses: Output array for reconstructed impulses
-            device: Device to launch on
+            device: Device to launch on (None for default)
         """
         if device is None:
             device = self.device
