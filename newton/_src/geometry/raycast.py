@@ -138,6 +138,11 @@ def ray_intersect_ellipsoid(
     ro = wp.transform_point(world_to_geom, ray_origin)
     rd = wp.transform_vector(world_to_geom, ray_direction)
 
+    # Reject degenerate rays (matching sphere/capsule pattern)
+    d_len_sq = wp.dot(rd, rd)
+    if d_len_sq < MINVAL:
+        return -1.0
+
     ra = semi_axes
 
     # Ensure semi-axes are valid

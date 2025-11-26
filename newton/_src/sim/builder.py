@@ -3183,9 +3183,7 @@ class ModelBuilder:
         Example:
             Create an ellipsoid with different semi-axes:
 
-            .. code-block:: python
-
-                import newton
+            .. doctest::
 
                 builder = newton.ModelBuilder()
                 body = builder.add_body()
