@@ -194,13 +194,14 @@ def compute_shape_aabbs(
     contact_margin = shape_contact_margin[shape_id]
     margin_vec = wp.vec3(contact_margin, contact_margin, contact_margin)
 
-    # Check if this is an infinite plane, mesh, or SDF - use bounding sphere fallback
+    # Check if this is an infinite plane, mesh, SDF, or heightfield - use bounding sphere fallback
     scale = shape_scale[shape_id]
     is_infinite_plane = (geo_type == int(GeoType.PLANE)) and (scale[0] == 0.0 and scale[1] == 0.0)
     is_mesh = geo_type == int(GeoType.MESH)
     is_sdf = geo_type == int(GeoType.SDF)
+    is_hfield = geo_type == int(GeoType.HFIELD)
 
-    if is_infinite_plane or is_mesh or is_sdf:
+    if is_infinite_plane or is_mesh or is_sdf or is_hfield:
         # Use conservative bounding sphere approach for infinite planes, meshes, and SDFs
         radius = shape_collision_radius[shape_id]
         half_extents = wp.vec3(radius, radius, radius)

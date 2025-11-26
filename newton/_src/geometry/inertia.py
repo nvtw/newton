@@ -444,7 +444,7 @@ def compute_shape_inertia(
     Returns:
         The mass, center of mass and 3x3 inertia tensor of the shape
     """
-    if density == 0.0 or type == GeoType.PLANE:  # zero density means fixed
+    if density == 0.0 or type == GeoType.PLANE or type == GeoType.HFIELD:  # zero density or static shapes
         return 0.0, wp.vec3(), wp.mat33()
 
     if type == GeoType.SPHERE:

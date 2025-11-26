@@ -3409,6 +3409,153 @@ class ModelBuilder:
             custom_attributes=custom_attributes,
         )
 
+    def add_shape_heightfield(
+        self,
+        heights: nparray,
+        extent_x: float,
+        extent_y: float,
+        xform: Transform | None = None,
+        cfg: ShapeConfig | None = None,
+        key: str | None = None,
+        custom_attributes: dict[str, Any] | None = None,
+    ) -> int:
+        """Adds a heightfield (terrain) collision shape to the model.
+
+        Heightfields are always static and attached to body -1 (world).
+        The heightfield is stored internally as a mesh, but uses O(1) grid
+        lookup for efficient collision detection.
+
+        The grid info is encoded in shape_data:
+        - shape_data.x = half_extent_x
+        - shape_data.y = half_extent_y
+        - shape_data.z = cols (number of grid columns)
+        - shape_data.w = thickness
+
+        Args:
+            heights (nparray): 2D array of height values, shape (rows, cols).
+                The grid is indexed as heights[j, i] where j is along Y and i is along X.
+            extent_x (float): Physical size of the heightfield in the X direction (meters).
+            extent_y (float): Physical size of the heightfield in the Y direction (meters).
+            xform (Transform | None): The transform of the heightfield in world space.
+                If `None`, the identity transform is used. Defaults to `None`.
+            cfg (ShapeConfig | None): The configuration for the shape's physical and collision properties.
+                If `None`, :attr:`default_shape_cfg` is used. Defaults to `None`.
+            key (str | None): An optional unique key for identifying the shape.
+                If `None`, a default key is automatically generated. Defaults to `None`.
+            custom_attributes: Dictionary of custom attribute values for SHAPE frequency attributes.
+
+        Returns:
+            int: The index of the newly added shape.
+
+        Raises:
+            ValueError: If heights is not a 2D array or dimensions are smaller than 2x2.
+            ValueError: If extent_x or extent_y are not positive.
+        """
+        heights = np.asarray(heights, dtype=np.float32)
+
+        # Validate dimensions
+        if heights.ndim != 2:
+            raise ValueError(f"heights must be 2D array, got shape {heights.shape}")
+
+        rows, cols = heights.shape
+
+        if rows < 2 or cols < 2:
+            raise ValueError(f"heights must be at least 2x2, got shape ({rows}, {cols})")
+
+        if extent_x <= 0:
+            raise ValueError(f"extent_x must be positive, got {extent_x}")
+        if extent_y <= 0:
+            raise ValueError(f"extent_y must be positive, got {extent_y}")
+
+        if cfg is None:
+            cfg = self.default_shape_cfg
+
+        # Create mesh from heights
+        mesh = self._create_heightfield_mesh(heights, extent_x, extent_y)
+
+        # Encode grid info in scale: (half_extent_x, half_extent_y, cols)
+        # This will be stored in shape_data.xyz
+        half_extent_x = extent_x / 2.0
+        half_extent_y = extent_y / 2.0
+        scale = wp.vec3(half_extent_x, half_extent_y, float(cols))
+
+        # Heightfields are always static (attached to world body -1)
+        return self.add_shape(
+            body=-1,
+            type=GeoType.HFIELD,
+            xform=xform,
+            cfg=cfg,
+            scale=scale,
+            src=mesh,
+            is_static=True,
+            key=key,
+            custom_attributes=custom_attributes,
+        )
+
+    def _create_heightfield_mesh(
+        self,
+        heights: nparray,
+        extent_x: float,
+        extent_y: float,
+    ) -> Mesh:
+        """Create a Mesh from heightfield data.
+
+        Args:
+            heights: 2D array of height values, shape (rows, cols).
+            extent_x: Physical size in X direction.
+            extent_y: Physical size in Y direction.
+
+        Returns:
+            Mesh object containing the heightfield geometry.
+        """
+        rows, cols = heights.shape
+        half_extent_x = extent_x / 2.0
+        half_extent_y = extent_y / 2.0
+        cell_size_x = extent_x / (cols - 1)
+        cell_size_y = extent_y / (rows - 1)
+
+        # Generate vertices: one per grid point
+        # Stored in row-major order: vertex[j * cols + i] = grid position (i, j)
+        num_vertices = rows * cols
+        vertices = np.zeros((num_vertices, 3), dtype=np.float32)
+
+        for j in range(rows):
+            for i in range(cols):
+                idx = j * cols + i
+                x = -half_extent_x + i * cell_size_x
+                y = -half_extent_y + j * cell_size_y
+                z = heights[j, i]
+                vertices[idx] = [x, y, z]
+
+        # Generate triangles: 2 per cell
+        num_cells_x = cols - 1
+        num_cells_y = rows - 1
+        num_triangles = num_cells_x * num_cells_y * 2
+        indices = np.zeros(num_triangles * 3, dtype=np.int32)
+
+        tri_idx = 0
+        for j in range(num_cells_y):
+            for i in range(num_cells_x):
+                # Vertex indices for this cell
+                v00 = j * cols + i
+                v10 = j * cols + (i + 1)
+                v01 = (j + 1) * cols + i
+                v11 = (j + 1) * cols + (i + 1)
+
+                # Triangle 1: (v00, v10, v01)
+                indices[tri_idx * 3 + 0] = v00
+                indices[tri_idx * 3 + 1] = v10
+                indices[tri_idx * 3 + 2] = v01
+                tri_idx += 1
+
+                # Triangle 2: (v01, v10, v11)
+                indices[tri_idx * 3 + 0] = v01
+                indices[tri_idx * 3 + 1] = v10
+                indices[tri_idx * 3 + 2] = v11
+                tri_idx += 1
+
+        return Mesh(vertices=vertices, indices=indices, compute_inertia=False)
+
     def add_shape_convex_hull(
         self,
         body: int,
@@ -4898,7 +5045,8 @@ class ModelBuilder:
             m.shape_flags = wp.array(self.shape_flags, dtype=wp.int32)
             m.body_shapes = self.body_shapes
 
-            # build list of ids for geometry sources (meshes, sdfs)
+            # build list of ids for geometry sources (meshes, sdfs, heightfields)
+            # Heightfields are converted to meshes internally, so they use the same path
             geo_sources = []
             finalized_meshes = {}  # do not duplicate meshes
             for geo in self.shape_source:

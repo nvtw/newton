@@ -39,6 +39,7 @@ from ..geometry.support_function import (
     pack_mesh_ptr,
 )
 from ..geometry.types import GeoType
+from .heightfield_collision import create_heightfield_process_cell_contacts_kernel
 
 
 @wp.struct
@@ -188,6 +189,11 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
         shape_pairs_mesh_plane_cumsum: wp.array(dtype=int),
         shape_pairs_mesh_plane_count: wp.array(dtype=int),
         mesh_plane_vertex_total_count: wp.array(dtype=int),
+        # heightfield collision outputs
+        shape_pairs_hfield: wp.array(dtype=wp.vec2i),
+        shape_pairs_hfield_count: wp.array(dtype=int),
+        shape_pairs_hfield_cumsum: wp.array(dtype=wp.int32),
+        hfield_cell_total_count: wp.array(dtype=wp.int32),
     ):
         """
         Narrow phase collision detection kernel using GJK/MPR.
@@ -220,6 +226,108 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
                 # Swap shapes to maintain consistent ordering
                 shape_a, shape_b = shape_b, shape_a
                 type_a, type_b = type_b, type_a
+
+            # Check for heightfield collision - route to specialized handler
+            # After sorting: type_a <= type_b, so HFIELD (=1) will be in type_a if present
+            is_hfield_a = type_a == int(GeoType.HFIELD)
+            is_hfield_b = type_b == int(GeoType.HFIELD)
+
+            if is_hfield_a or is_hfield_b:
+                # Skip HFIELD vs HFIELD (not supported)
+                if is_hfield_a and is_hfield_b:
+                    continue
+
+                # Determine which shape is the heightfield
+                if is_hfield_a:
+                    hfield_shape = shape_a
+                    convex_shape = shape_b
+                else:
+                    hfield_shape = shape_b
+                    convex_shape = shape_a
+
+                # Get heightfield mesh and grid info from shape_data
+                # shape_data for HFIELD: (half_extent_x, half_extent_y, cols, thickness)
+                hfield_mesh_id = shape_source[hfield_shape]
+                hfield_mesh = wp.mesh_get(hfield_mesh_id)
+                hfield_data = shape_data[hfield_shape]
+
+                half_extent_x = hfield_data[0]
+                half_extent_y = hfield_data[1]
+                cols = int(hfield_data[2])
+                num_vertices = hfield_mesh.points.shape[0]
+                rows = num_vertices // cols
+
+                # Compute cell sizes
+                cell_size_x = (2.0 * half_extent_x) / float(cols - 1)
+                cell_size_y = (2.0 * half_extent_y) / float(rows - 1)
+
+                # Get transforms
+                X_hfield_ws = shape_transform[hfield_shape]
+                X_convex_ws = shape_transform[convex_shape]
+
+                # Transform convex to heightfield local space
+                X_hfield_sw = wp.transform_inverse(X_hfield_ws)
+                X_hfield_convex = wp.transform_multiply(X_hfield_sw, X_convex_ws)
+
+                pos_in_hfield = wp.transform_get_translation(X_hfield_convex)
+                quat_in_hfield = wp.transform_get_rotation(X_hfield_convex)
+
+                # Build GenericShapeData for the convex shape
+                convex_type = shape_types[convex_shape]
+                convex_data_vec4 = shape_data[convex_shape]
+                convex_scale = wp.vec3(convex_data_vec4[0], convex_data_vec4[1], convex_data_vec4[2])
+
+                generic_convex = GenericShapeData()
+                generic_convex.shape_type = convex_type
+                generic_convex.scale = convex_scale
+                generic_convex.auxiliary = wp.vec3(0.0, 0.0, 0.0)
+
+                if convex_type == int(GeoType.CONVEX_MESH):
+                    generic_convex.auxiliary = pack_mesh_ptr(shape_source[convex_shape])
+
+                data_provider = SupportMapDataProvider()
+
+                # Compute tight AABB of convex in heightfield local space
+                aabb_lower, aabb_upper = compute_tight_aabb_from_support(
+                    generic_convex, quat_in_hfield, pos_in_hfield, data_provider
+                )
+
+                # Expand by contact margin
+                margin = shape_contact_margin[convex_shape]
+                margin_vec = wp.vec3(margin, margin, margin)
+                aabb_lower = aabb_lower - margin_vec
+                aabb_upper = aabb_upper + margin_vec
+
+                # Compute cell range using O(1) grid lookup
+                min_i = int(wp.floor((aabb_lower[0] + half_extent_x) / cell_size_x))
+                max_i = int(wp.floor((aabb_upper[0] + half_extent_x) / cell_size_x))
+                min_j = int(wp.floor((aabb_lower[1] + half_extent_y) / cell_size_y))
+                max_j = int(wp.floor((aabb_upper[1] + half_extent_y) / cell_size_y))
+
+                # Clamp to valid cell range
+                num_cells_x = cols - 1
+                num_cells_y = rows - 1
+
+                min_i = wp.max(0, min_i)
+                max_i = wp.min(num_cells_x - 1, max_i)
+                min_j = wp.max(0, min_j)
+                max_j = wp.min(num_cells_y - 1, max_j)
+
+                # Check if any cells overlap
+                if min_i <= max_i and min_j <= max_j:
+                    # Count cells
+                    num_cells = (max_i - min_i + 1) * (max_j - min_j + 1)
+
+                    # Store pair with cumsum (like mesh-plane pattern)
+                    hfield_pair_idx = wp.atomic_add(shape_pairs_hfield_count, 0, 1)
+                    if hfield_pair_idx < shape_pairs_hfield.shape[0]:
+                        shape_pairs_hfield[hfield_pair_idx] = wp.vec2i(hfield_shape, convex_shape)
+                        # Build cumsum atomically
+                        cumsum_before = wp.atomic_add(hfield_cell_total_count, 0, num_cells)
+                        cumsum_inclusive = cumsum_before + num_cells
+                        shape_pairs_hfield_cumsum[hfield_pair_idx] = cumsum_inclusive
+
+                continue
 
             # Extract shape data for both shapes
             pos_a, quat_a, shape_data_a, scale_a, thickness_a = extract_shape_data(
@@ -674,6 +782,7 @@ class NarrowPhase:
         self.narrow_phase_kernel = create_narrow_phase_kernel_gjk_mpr(self.external_aabb, writer_func)
         self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func)
         self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func)
+        self.heightfield_contacts_kernel = create_heightfield_process_cell_contacts_kernel(writer_func)
 
         # Pre-allocate all intermediate buffers
         with wp.ScopedDevice(device):
@@ -690,6 +799,12 @@ class NarrowPhase:
             self.shape_pairs_mesh_plane_count = wp.zeros(1, dtype=wp.int32, device=device)
             self.shape_pairs_mesh_plane_cumsum = wp.zeros(max_candidate_pairs, dtype=wp.int32, device=device)
             self.mesh_plane_vertex_total_count = wp.zeros(1, dtype=wp.int32, device=device)
+
+            # Buffers for heightfield collision handling
+            self.shape_pairs_hfield = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
+            self.shape_pairs_hfield_count = wp.zeros(1, dtype=wp.int32, device=device)
+            self.shape_pairs_hfield_cumsum = wp.zeros(max_candidate_pairs, dtype=wp.int32, device=device)
+            self.hfield_cell_total_count = wp.zeros(1, dtype=wp.int32, device=device)
 
             # Empty tangent array for when tangent computation is disabled
             self.empty_tangent = wp.zeros(0, dtype=wp.vec3, device=device)
@@ -746,6 +861,8 @@ class NarrowPhase:
         self.triangle_pairs_count.zero_()
         self.shape_pairs_mesh_plane_count.zero_()
         self.mesh_plane_vertex_total_count.zero_()
+        self.shape_pairs_hfield_count.zero_()
+        self.hfield_cell_total_count.zero_()
 
         # Launch main narrow phase kernel (using the appropriate kernel variant)
         wp.launch(
@@ -772,6 +889,10 @@ class NarrowPhase:
                 self.shape_pairs_mesh_plane_cumsum,
                 self.shape_pairs_mesh_plane_count,
                 self.mesh_plane_vertex_total_count,
+                self.shape_pairs_hfield,
+                self.shape_pairs_hfield_count,
+                self.shape_pairs_hfield_cumsum,
+                self.hfield_cell_total_count,
             ],
             device=device,
             block_dim=self.block_dim,
@@ -791,6 +912,27 @@ class NarrowPhase:
                 self.shape_pairs_mesh_plane_cumsum,
                 self.shape_pairs_mesh_plane_count,
                 self.mesh_plane_vertex_total_count,
+                writer_data,
+                self.total_num_threads,
+            ],
+            device=device,
+            block_dim=self.block_dim,
+        )
+
+        # Launch heightfield contact processing kernel
+        wp.launch(
+            kernel=self.heightfield_contacts_kernel,
+            dim=self.total_num_threads,
+            inputs=[
+                shape_types,
+                shape_transform,
+                shape_data,
+                shape_source,
+                shape_contact_margin,
+                self.shape_pairs_hfield,
+                self.shape_pairs_hfield_count,
+                self.shape_pairs_hfield_cumsum,
+                self.hfield_cell_total_count,
                 writer_data,
                 self.total_num_threads,
             ],
@@ -908,6 +1050,7 @@ class NarrowPhase:
         self.triangle_pairs_count.zero_()
         self.shape_pairs_mesh_plane_count.zero_()
         self.mesh_plane_vertex_total_count.zero_()
+        self.shape_pairs_hfield_count.zero_()
 
         # Create ContactWriterData struct
         writer_data = ContactWriterData()

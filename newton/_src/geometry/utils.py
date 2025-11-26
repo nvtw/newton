@@ -82,9 +82,17 @@ def compute_obb_candidates(
     transforms[angle_idx, axis_idx] = wp.transform(world_center, wp.quat_inverse(quat))
 
 
-def compute_shape_radius(geo_type: int, scale: Vec3, src: Mesh | SDF | None) -> float:
+def compute_shape_radius(geo_type: int, scale: Vec3, src) -> float:
     """
     Calculates the radius of a sphere that encloses the shape, used for broadphase collision detection.
+
+    Args:
+        geo_type: The geometry type (from GeoType enum)
+        scale: The scale/size parameters for the shape
+        src: The source object (Mesh, SDF, or None)
+
+    Returns:
+        The radius of the bounding sphere
     """
     if geo_type == GeoType.SPHERE:
         return scale[0]
@@ -95,6 +103,15 @@ def compute_shape_radius(geo_type: int, scale: Vec3, src: Mesh | SDF | None) -> 
     elif geo_type == GeoType.MESH or geo_type == GeoType.CONVEX_MESH:
         vmax = np.max(np.abs(src.vertices), axis=0) * np.max(scale)
         return np.linalg.norm(vmax)
+    elif geo_type == GeoType.HFIELD:
+        # Heightfield: scale = (half_extent_x, half_extent_y, cols)
+        # src is a Mesh containing the heightfield vertices
+        half_extent_x = scale[0]
+        half_extent_y = scale[1]
+        # Get height range from mesh vertices (z component)
+        z_values = src.vertices[:, 2]
+        half_height = (np.max(z_values) - np.min(z_values)) / 2.0
+        return np.sqrt(half_extent_x**2 + half_extent_y**2 + half_height**2)
     elif geo_type == GeoType.PLANE:
         if scale[0] > 0.0 and scale[1] > 0.0:
             # finite plane
