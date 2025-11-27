@@ -21,16 +21,18 @@ Heightfields are stored internally as meshes, but we exploit the regular grid
 structure for O(1) cell lookup during the midphase.
 
 Collision flow:
-1. In narrow phase kernel, heightfield-convex pairs are detected and cell counts
+1. In narrow phase kernel, heightfield-convex pairs are detected and triangle counts
    are computed using O(1) grid lookup. A cumulative sum is built atomically.
-2. A processing kernel uses binary search on the cumsum to find which pair each
-   thread should process, achieving perfect load balancing across all cells.
+2. A midphase kernel uses binary search on the cumsum to find which pair each
+   thread should process, emitting triangle pairs to the SAME buffer as mesh collision.
+3. The shared triangle narrow phase kernel processes all triangle-convex pairs.
 
 Each heightfield cell is split into two triangles for collision:
-- Triangle 1: (v00, v10, v01)
-- Triangle 2: (v01, v10, v11)
+- Triangle 0 (per cell): (v00, v10, v01)
+- Triangle 1 (per cell): (v01, v10, v11)
 
 Where v_ij = mesh vertex at grid position (i, j).
+Triangle index in mesh = 2 * (cell_j * (cols-1) + cell_i) + [0 or 1]
 
 Grid info is stored in shape_data:
 - shape_data.x = half_extent_x
@@ -41,14 +43,11 @@ Grid info is stored in shape_data:
 
 from __future__ import annotations
 
-from typing import Any
-
 import warp as wp
 
-from .collision_core import compute_tight_aabb_from_support, create_find_contacts
+from .collision_core import compute_tight_aabb_from_support, find_pair_from_cumulative_index
 from .support_function import (
     GenericShapeData,
-    GeoTypeEx,
     SupportMapDataProvider,
     pack_mesh_ptr,
 )
@@ -58,7 +57,7 @@ from .types import GeoType
 @wp.func
 def build_generic_convex_data(
     convex_shape: int,
-    shape_types: wp.array(dtype=wp.int32),
+    shape_types: wp.array(dtype=int),
     shape_data: wp.array(dtype=wp.vec4),
     shape_source: wp.array(dtype=wp.uint64),
 ) -> GenericShapeData:
@@ -89,57 +88,14 @@ def build_generic_convex_data(
 
 
 @wp.func
-def find_hfield_pair_from_cumsum(
-    global_cell_idx: int,
-    shape_pairs_hfield_cumsum: wp.array(dtype=wp.int32),
-    num_pairs: int,
-) -> tuple[int, int]:
-    """Binary search to find which heightfield pair a global cell index belongs to.
-
-    Args:
-        global_cell_idx: Global cell index (0-based)
-        shape_pairs_hfield_cumsum: Cumulative sum of cell counts (inclusive)
-        num_pairs: Number of heightfield pairs
-
-    Returns:
-        Tuple of (pair_idx, local_cell_idx) where:
-        - pair_idx: Index of the pair in shape_pairs_hfield
-        - local_cell_idx: Cell index within that pair
-    """
-    # Binary search for the pair that contains this global cell index
-    # cumsum[i] contains the inclusive sum, so we search for the first
-    # pair where cumsum[i] > global_cell_idx
-
-    lo = int(0)
-    hi = int(num_pairs)
-
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if shape_pairs_hfield_cumsum[mid] <= global_cell_idx:
-            lo = mid + 1
-        else:
-            hi = mid
-
-    pair_idx = lo
-
-    # Compute local cell index within this pair
-    if pair_idx > 0:
-        local_cell_idx = global_cell_idx - shape_pairs_hfield_cumsum[pair_idx - 1]
-    else:
-        local_cell_idx = global_cell_idx
-
-    return pair_idx, local_cell_idx
-
-
-@wp.func
 def compute_hfield_cell_range(
     hfield_shape: int,
     convex_shape: int,
-    shape_types: wp.array(dtype=wp.int32),
+    shape_types: wp.array(dtype=int),
     shape_data: wp.array(dtype=wp.vec4),
     shape_transform: wp.array(dtype=wp.transform),
     shape_source: wp.array(dtype=wp.uint64),
-    shape_contact_margin: wp.array(dtype=wp.float32),
+    shape_contact_margin: wp.array(dtype=float),
 ) -> tuple[int, int, int, int, int, GenericShapeData, float]:
     """Compute the cell range for a heightfield-convex pair.
 
@@ -217,204 +173,129 @@ def compute_hfield_cell_range(
     return min_i, min_j, num_cells_i, num_cells_j, cols, generic_convex, aabb_lower[2]
 
 
-@wp.func
-def build_triangle_shape_data(
-    v0: wp.vec3,
-    v1: wp.vec3,
-    v2: wp.vec3,
-) -> tuple[GenericShapeData, wp.vec3, wp.quat]:
-    """Build GenericShapeData for a triangle.
+@wp.kernel(enable_backward=False)
+def heightfield_midphase_kernel(
+    # Shape data
+    shape_types: wp.array(dtype=int),
+    shape_transform: wp.array(dtype=wp.transform),
+    shape_data: wp.array(dtype=wp.vec4),
+    shape_source: wp.array(dtype=wp.uint64),
+    shape_contact_margin: wp.array(dtype=float),
+    # Heightfield pairs from narrow phase
+    shape_pairs_hfield: wp.array(dtype=wp.vec2i),
+    shape_pairs_hfield_count: wp.array(dtype=int),
+    shape_pairs_hfield_cumsum: wp.array(dtype=int),
+    hfield_triangle_total_count: wp.array(dtype=int),
+    # Precomputed per-pair data (avoids expensive recomputation per triangle)
+    shape_pairs_hfield_cell_range: wp.array(dtype=wp.vec4i),  # (min_i, min_j, num_cells_j, cols)
+    shape_pairs_hfield_aabb_z: wp.array(dtype=float),  # convex AABB lower Z for early-out
+    # Output: triangle pairs (shared with mesh collision)
+    triangle_pairs: wp.array(dtype=wp.vec3i),  # (hfield_shape, convex_shape, triangle_idx)
+    triangle_pairs_count: wp.array(dtype=int),
+    # Thread configuration
+    total_num_threads: int,
+):
+    """Heightfield midphase kernel - emits triangle pairs for narrow phase processing.
 
-    The triangle is encoded with v0 at the origin, and edges to v1 and v2
-    stored in scale and auxiliary respectively.
+    Uses binary search on cumsum for perfect load balancing across all triangles.
+    Each cell has 2 triangles, so cumsum tracks num_cells * 2 per pair.
 
-    Args:
-        v0, v1, v2: Triangle vertices in world space
-
-    Returns:
-        Tuple of (shape_data, position, orientation) where:
-        - shape_data: GenericShapeData for the triangle
-        - position: v0 (the reference vertex position)
-        - orientation: identity quaternion (triangle is in world space)
+    Emits to the SAME triangle_pairs buffer as mesh collision, enabling a unified
+    triangle narrow phase for both mesh and heightfield collisions.
     """
-    shape_data = GenericShapeData()
-    shape_data.shape_type = int(GeoTypeEx.TRIANGLE)
-    shape_data.scale = v1 - v0  # Edge from v0 to v1
-    shape_data.auxiliary = v2 - v0  # Edge from v0 to v2
+    tid = wp.tid()
 
-    return shape_data, v0, wp.quat_identity()
+    total_triangles = hfield_triangle_total_count[0]
+    num_pairs = shape_pairs_hfield_count[0]
 
+    if num_pairs == 0:
+        return
 
-def create_heightfield_process_cell_contacts_kernel(writer_func: Any):
-    """Create a kernel for processing heightfield cell contacts.
+    # Grid stride loop over all triangles
+    for global_tri_idx in range(tid, total_triangles, total_num_threads):
+        # Binary search to find which pair this triangle belongs to
+        pair_idx, local_tri_idx = find_pair_from_cumulative_index(
+            global_tri_idx, shape_pairs_hfield_cumsum, num_pairs
+        )
 
-    Uses binary search on the cumulative sum to find which pair each thread
-    should process, achieving perfect load balancing.
+        if pair_idx >= num_pairs:
+            continue
 
-    Each cell is split into two triangles, and collision is tested using
-    the existing GJK/MPR infrastructure with GeoTypeEx.TRIANGLE.
+        # Get the pair
+        pair = shape_pairs_hfield[pair_idx]
+        hfield_shape = pair[0]
+        convex_shape = pair[1]
 
-    OPTIMIZATION: Uses precomputed per-pair data (cell range, AABB Z) from the
-    narrow phase to avoid expensive redundant computation per cell. This eliminates
-    repeated calls to compute_tight_aabb_from_support (6 support evaluations per call).
+        # Read precomputed cell range data (computed once per pair in narrow phase)
+        cell_range = shape_pairs_hfield_cell_range[pair_idx]
+        min_i = cell_range[0]
+        min_j = cell_range[1]
+        num_cells_j = cell_range[2]
+        cols = cell_range[3]
+        convex_aabb_lower_z = shape_pairs_hfield_aabb_z[pair_idx]
 
-    Args:
-        writer_func: Contact writer function
+        # Convert local triangle index to cell and triangle-within-cell
+        local_cell_idx = local_tri_idx // 2
+        tri_in_cell = local_tri_idx % 2  # 0 or 1
 
-    Returns:
-        The kernel function
-    """
-    # Create the find_contacts function using the existing infrastructure
-    find_contacts_func = create_find_contacts(writer_func)
+        # Convert local cell index to (cell_i, cell_j)
+        local_i = local_cell_idx // num_cells_j
+        local_j = local_cell_idx % num_cells_j
+        cell_i = min_i + local_i
+        cell_j = min_j + local_j
 
-    @wp.kernel(enable_backward=False)
-    def heightfield_process_cell_contacts_kernel(
-        # Shape data
-        shape_types: wp.array(dtype=wp.int32),
-        shape_transform: wp.array(dtype=wp.transform),
-        shape_data: wp.array(dtype=wp.vec4),
-        shape_source: wp.array(dtype=wp.uint64),
-        shape_contact_margin: wp.array(dtype=wp.float32),
-        # Heightfield pairs from narrow phase
-        shape_pairs_hfield: wp.array(dtype=wp.vec2i),
-        shape_pairs_hfield_count: wp.array(dtype=wp.int32),
-        shape_pairs_hfield_cumsum: wp.array(dtype=wp.int32),
-        hfield_cell_total_count: wp.array(dtype=wp.int32),
-        # Precomputed per-pair data (avoids expensive recomputation per cell)
-        shape_pairs_hfield_cell_range: wp.array(dtype=wp.vec4i),  # (min_i, min_j, num_cells_j, cols)
-        shape_pairs_hfield_aabb_z: wp.array(dtype=wp.float32),  # convex AABB lower Z for early-out
-        # Contact writer data
-        writer_data: Any,
-        # Thread configuration
-        total_num_threads: int,
-    ):
-        """Process heightfield cell contacts with convex shapes.
-
-        Uses binary search on cumsum for perfect load balancing.
-        Each cell is split into two triangles for collision testing.
-        """
-        tid = wp.tid()
-
-        total_cells = hfield_cell_total_count[0]
-        num_pairs = shape_pairs_hfield_count[0]
-
-        if num_pairs == 0:
-            return
-
-        # Grid stride loop over all cells
-        for global_cell_idx in range(tid, total_cells, total_num_threads):
-            # Binary search to find which pair this cell belongs to
-            pair_idx, local_cell_idx = find_hfield_pair_from_cumsum(
-                global_cell_idx, shape_pairs_hfield_cumsum, num_pairs
-            )
-
-            if pair_idx >= num_pairs:
-                continue
-
-            # Get the pair
-            pair = shape_pairs_hfield[pair_idx]
-            hfield_shape = pair[0]
-            convex_shape = pair[1]
-
-            # Read precomputed cell range data (computed once per pair in narrow phase)
-            # This avoids calling compute_hfield_cell_range which does expensive AABB computation
-            cell_range = shape_pairs_hfield_cell_range[pair_idx]
-            min_i = cell_range[0]
-            min_j = cell_range[1]
-            num_cells_j = cell_range[2]
-            cols = cell_range[3]
-            convex_aabb_lower_z = shape_pairs_hfield_aabb_z[pair_idx]
-
-            # Convert local cell index to (cell_i, cell_j)
-            local_i = local_cell_idx // num_cells_j
-            local_j = local_cell_idx % num_cells_j
-            cell_i = min_i + local_i
-            cell_j = min_j + local_j
-
-            # Get heightfield mesh and transform
+        # Early-out Z culling: check if convex AABB is above cell max Z
+        # Only check once per cell (for the first triangle)
+        if tri_in_cell == 0:
+            # Get heightfield mesh
             hfield_mesh_id = shape_source[hfield_shape]
             hfield_mesh = wp.mesh_get(hfield_mesh_id)
-            X_hfield_ws = shape_transform[hfield_shape]
 
-            # Get cell vertex indices (vertices stored in row-major order)
+            # Get cell vertex indices (vertices stored in row-major order: vertex[j * cols + i])
             v00_idx = cell_j * cols + cell_i
             v10_idx = cell_j * cols + (cell_i + 1)
             v01_idx = (cell_j + 1) * cols + cell_i
             v11_idx = (cell_j + 1) * cols + (cell_i + 1)
 
-            # Get local vertices (in heightfield local space)
-            v00_local = hfield_mesh.points[v00_idx]
-            v10_local = hfield_mesh.points[v10_idx]
-            v01_local = hfield_mesh.points[v01_idx]
-            v11_local = hfield_mesh.points[v11_idx]
+            # Get local vertices Z values
+            v00_z = hfield_mesh.points[v00_idx][2]
+            v10_z = hfield_mesh.points[v10_idx][2]
+            v01_z = hfield_mesh.points[v01_idx][2]
+            v11_z = hfield_mesh.points[v11_idx][2]
 
-            # Early-out: if convex AABB lower Z is above cell max Z, no collision possible
-            # (convex_aabb_lower_z already includes margin expansion)
-            cell_max_z = wp.max(wp.max(v00_local[2], v10_local[2]), wp.max(v01_local[2], v11_local[2]))
+            cell_max_z = wp.max(wp.max(v00_z, v10_z), wp.max(v01_z, v11_z))
+
+            # Skip this cell (both triangles) if convex is above
+            if convex_aabb_lower_z > cell_max_z:
+                continue
+        else:
+            # For triangle 1, we need to check if the previous triangle was culled
+            # Since we can't easily share state, we do the check again
+            hfield_mesh_id = shape_source[hfield_shape]
+            hfield_mesh = wp.mesh_get(hfield_mesh_id)
+
+            v00_idx = cell_j * cols + cell_i
+            v10_idx = cell_j * cols + (cell_i + 1)
+            v01_idx = (cell_j + 1) * cols + cell_i
+            v11_idx = (cell_j + 1) * cols + (cell_i + 1)
+
+            v00_z = hfield_mesh.points[v00_idx][2]
+            v10_z = hfield_mesh.points[v10_idx][2]
+            v01_z = hfield_mesh.points[v01_idx][2]
+            v11_z = hfield_mesh.points[v11_idx][2]
+
+            cell_max_z = wp.max(wp.max(v00_z, v10_z), wp.max(v01_z, v11_z))
+
             if convex_aabb_lower_z > cell_max_z:
                 continue
 
-            # Transform vertices to world space
-            v00 = wp.transform_point(X_hfield_ws, v00_local)
-            v10 = wp.transform_point(X_hfield_ws, v10_local)
-            v01 = wp.transform_point(X_hfield_ws, v01_local)
-            v11 = wp.transform_point(X_hfield_ws, v11_local)
+        # Compute the actual mesh triangle index
+        # Mesh triangles are stored in order: for j in range(rows-1): for i in range(cols-1): 2 triangles
+        # So triangle index = 2 * (cell_j * (cols - 1) + cell_i) + tri_in_cell
+        num_cells_x = cols - 1
+        mesh_tri_idx = 2 * (cell_j * num_cells_x + cell_i) + tri_in_cell
 
-            # Build convex shape data (cheap: just array lookups, no AABB computation)
-            generic_convex = build_generic_convex_data(convex_shape, shape_types, shape_data, shape_source)
-
-            # Get convex shape transform and data
-            X_convex_ws = shape_transform[convex_shape]
-            convex_thickness = shape_data[convex_shape][3]
-
-            convex_pos = wp.transform_get_translation(X_convex_ws)
-            convex_quat = wp.transform_get_rotation(X_convex_ws)
-
-            margin = shape_contact_margin[convex_shape]
-            hfield_thickness = shape_data[hfield_shape][3]
-
-            # Triangle 1: (v00, v10, v01)
-            tri1_data, tri1_pos, tri1_quat = build_triangle_shape_data(v00, v10, v01)
-
-            wp.static(find_contacts_func)(
-                tri1_pos,
-                convex_pos,
-                tri1_quat,
-                convex_quat,
-                tri1_data,
-                generic_convex,
-                False,  # is_infinite_plane_a
-                False,  # is_infinite_plane_b
-                0.0,  # bsphere_radius_a (not used for triangles)
-                0.0,  # bsphere_radius_b (not used)
-                margin,
-                hfield_shape,
-                convex_shape,
-                hfield_thickness,
-                convex_thickness,
-                writer_data,
-            )
-
-            # Triangle 2: (v01, v10, v11)
-            tri2_data, tri2_pos, tri2_quat = build_triangle_shape_data(v01, v10, v11)
-
-            wp.static(find_contacts_func)(
-                tri2_pos,
-                convex_pos,
-                tri2_quat,
-                convex_quat,
-                tri2_data,
-                generic_convex,
-                False,  # is_infinite_plane_a
-                False,  # is_infinite_plane_b
-                0.0,  # bsphere_radius_a
-                0.0,  # bsphere_radius_b
-                margin,
-                hfield_shape,
-                convex_shape,
-                hfield_thickness,
-                convex_thickness,
-                writer_data,
-            )
-
-    return heightfield_process_cell_contacts_kernel
+        # Emit triangle pair to the shared buffer
+        out_idx = wp.atomic_add(triangle_pairs_count, 0, 1)
+        if out_idx < triangle_pairs.shape[0]:
+            triangle_pairs[out_idx] = wp.vec3i(hfield_shape, convex_shape, mesh_tri_idx)

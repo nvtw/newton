@@ -73,7 +73,7 @@ class Example:
 
         # Grid sizes for instancing primitives
         grid_size_x = 5
-        grid_size_z = 5
+        grid_size_z = 10
         spacing_x = 2.0
         spacing_z = 3.0
 

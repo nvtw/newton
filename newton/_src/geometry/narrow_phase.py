@@ -41,7 +41,7 @@ from ..geometry.support_function import (
 from ..geometry.types import GeoType
 from .heightfield_collision import (
     compute_hfield_cell_range,
-    create_heightfield_process_cell_contacts_kernel,
+    heightfield_midphase_kernel,
 )
 
 
@@ -195,11 +195,11 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
         # heightfield collision outputs
         shape_pairs_hfield: wp.array(dtype=wp.vec2i),
         shape_pairs_hfield_count: wp.array(dtype=int),
-        shape_pairs_hfield_cumsum: wp.array(dtype=wp.int32),
-        hfield_cell_total_count: wp.array(dtype=wp.int32),
-        # precomputed per-pair data for heightfield processing
+        shape_pairs_hfield_cumsum: wp.array(dtype=int),
+        hfield_triangle_total_count: wp.array(dtype=int),
+        # precomputed per-pair data for heightfield midphase
         shape_pairs_hfield_cell_range: wp.array(dtype=wp.vec4i),  # (min_i, min_j, num_cells_j, cols)
-        shape_pairs_hfield_aabb_z: wp.array(dtype=wp.float32),  # convex AABB lower Z for early-out
+        shape_pairs_hfield_aabb_z: wp.array(dtype=float),  # convex AABB lower Z for early-out
     ):
         """
         Narrow phase collision detection kernel using GJK/MPR.
@@ -269,18 +269,18 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
 
                 # Check if any cells overlap (num_cells_i/j > 0 means valid overlap)
                 if num_cells_i > 0 and num_cells_j > 0:
-                    # Count cells
-                    num_cells = num_cells_i * num_cells_j
+                    # Count triangles (2 per cell) for cumsum - matches mesh midphase pattern
+                    num_triangles = num_cells_i * num_cells_j * 2
 
                     # Store pair with cumsum (like mesh-plane pattern)
                     hfield_pair_idx = wp.atomic_add(shape_pairs_hfield_count, 0, 1)
                     if hfield_pair_idx < shape_pairs_hfield.shape[0]:
                         shape_pairs_hfield[hfield_pair_idx] = wp.vec2i(hfield_shape, convex_shape)
-                        # Build cumsum atomically
-                        cumsum_before = wp.atomic_add(hfield_cell_total_count, 0, num_cells)
-                        cumsum_inclusive = cumsum_before + num_cells
+                        # Build cumsum atomically - track triangles not cells
+                        cumsum_before = wp.atomic_add(hfield_triangle_total_count, 0, num_triangles)
+                        cumsum_inclusive = cumsum_before + num_triangles
                         shape_pairs_hfield_cumsum[hfield_pair_idx] = cumsum_inclusive
-                        # Store precomputed cell range data (avoids expensive recomputation per cell)
+                        # Store precomputed cell range data (avoids expensive recomputation per triangle)
                         shape_pairs_hfield_cell_range[hfield_pair_idx] = wp.vec4i(min_i, min_j, num_cells_j, cols)
                         shape_pairs_hfield_aabb_z[hfield_pair_idx] = aabb_z
 
@@ -507,6 +507,13 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
     ):
         """
         Process triangle pairs to generate contacts using GJK/MPR.
+
+        This kernel processes triangles from BOTH regular meshes and heightfields.
+        The triangle_pairs buffer is shared between mesh midphase and heightfield midphase.
+
+        For heightfields, shape_data contains (half_extent_x, half_extent_y, cols) instead
+        of geometric scale, so we use scale (1, 1, 1) for heightfield triangles since
+        the mesh vertices already have the correct coordinates.
         """
         tid = wp.tid()
 
@@ -526,8 +533,16 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
             if mesh_id_a == wp.uint64(0):
                 continue
 
-            scale_data_a = shape_data[shape_a]
-            mesh_scale_a = wp.vec3(scale_data_a[0], scale_data_a[1], scale_data_a[2])
+            # Check if shape A is a heightfield - use scale (1,1,1) since vertices are pre-scaled
+            # For regular meshes, use the scale from shape_data
+            type_a = shape_types[shape_a]
+            if type_a == int(GeoType.HFIELD):
+                # Heightfield: vertices already have correct coordinates, no scaling needed
+                mesh_scale_a = wp.vec3(1.0, 1.0, 1.0)
+            else:
+                # Regular mesh: apply geometric scale from shape_data
+                scale_data_a = shape_data[shape_a]
+                mesh_scale_a = wp.vec3(scale_data_a[0], scale_data_a[1], scale_data_a[2])
 
             # Get mesh world transform for shape A
             X_mesh_ws_a = shape_transform[shape_a]
@@ -739,7 +754,8 @@ class NarrowPhase:
         self.narrow_phase_kernel = create_narrow_phase_kernel_gjk_mpr(self.external_aabb, writer_func)
         self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func)
         self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func)
-        self.heightfield_contacts_kernel = create_heightfield_process_cell_contacts_kernel(writer_func)
+        # Note: heightfield_midphase_kernel is used directly (not created with writer_func)
+        # because it only emits triangle pairs, not contacts
 
         # Pre-allocate all intermediate buffers
         with wp.ScopedDevice(device):
@@ -759,14 +775,14 @@ class NarrowPhase:
 
             # Buffers for heightfield collision handling
             self.shape_pairs_hfield = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
-            self.shape_pairs_hfield_count = wp.zeros(1, dtype=wp.int32, device=device)
-            self.shape_pairs_hfield_cumsum = wp.zeros(max_candidate_pairs, dtype=wp.int32, device=device)
-            self.hfield_cell_total_count = wp.zeros(1, dtype=wp.int32, device=device)
-            # Precomputed per-pair data to avoid redundant computation in processing kernel
-            # cell_range: (min_i, min_j, num_cells_j, cols) - needed for cell index calculation
+            self.shape_pairs_hfield_count = wp.zeros(1, dtype=int, device=device)
+            self.shape_pairs_hfield_cumsum = wp.zeros(max_candidate_pairs, dtype=int, device=device)
+            self.hfield_triangle_total_count = wp.zeros(1, dtype=int, device=device)
+            # Precomputed per-pair data to avoid redundant computation in midphase kernel
+            # cell_range: (min_i, min_j, num_cells_j, cols) - needed for triangle index calculation
             self.shape_pairs_hfield_cell_range = wp.zeros(max_candidate_pairs, dtype=wp.vec4i, device=device)
             # convex AABB lower Z in heightfield local space - for early-out culling
-            self.shape_pairs_hfield_aabb_z = wp.zeros(max_candidate_pairs, dtype=wp.float32, device=device)
+            self.shape_pairs_hfield_aabb_z = wp.zeros(max_candidate_pairs, dtype=float, device=device)
 
             # Empty tangent array for when tangent computation is disabled
             self.empty_tangent = wp.zeros(0, dtype=wp.vec3, device=device)
@@ -824,7 +840,7 @@ class NarrowPhase:
         self.shape_pairs_mesh_plane_count.zero_()
         self.mesh_plane_vertex_total_count.zero_()
         self.shape_pairs_hfield_count.zero_()
-        self.hfield_cell_total_count.zero_()
+        self.hfield_triangle_total_count.zero_()
 
         # Launch main narrow phase kernel (using the appropriate kernel variant)
         wp.launch(
@@ -854,7 +870,7 @@ class NarrowPhase:
                 self.shape_pairs_hfield,
                 self.shape_pairs_hfield_count,
                 self.shape_pairs_hfield_cumsum,
-                self.hfield_cell_total_count,
+                self.hfield_triangle_total_count,
                 self.shape_pairs_hfield_cell_range,
                 self.shape_pairs_hfield_aabb_z,
             ],
@@ -883,30 +899,8 @@ class NarrowPhase:
             block_dim=self.block_dim,
         )
 
-        # Launch heightfield contact processing kernel
-        wp.launch(
-            kernel=self.heightfield_contacts_kernel,
-            dim=self.total_num_threads,
-            inputs=[
-                shape_types,
-                shape_transform,
-                shape_data,
-                shape_source,
-                shape_contact_margin,
-                self.shape_pairs_hfield,
-                self.shape_pairs_hfield_count,
-                self.shape_pairs_hfield_cumsum,
-                self.hfield_cell_total_count,
-                self.shape_pairs_hfield_cell_range,
-                self.shape_pairs_hfield_aabb_z,
-                writer_data,
-                self.total_num_threads,
-            ],
-            device=device,
-            block_dim=self.block_dim,
-        )
-
-        # Launch mesh triangle overlap detection kernel
+        # Launch mesh triangle overlap detection kernel (BVH midphase)
+        # This emits mesh triangles to the shared triangle_pairs buffer
         second_dim = self.tile_size if ENABLE_TILE_BVH_QUERY else 1
         wp.launch(
             kernel=narrow_phase_find_mesh_triangle_overlaps_kernel,
@@ -929,7 +923,33 @@ class NarrowPhase:
             block_dim=self.tile_size,
         )
 
-        # Launch mesh triangle contact processing kernel
+        # Launch heightfield midphase kernel
+        # This emits heightfield triangles to the SAME triangle_pairs buffer
+        wp.launch(
+            kernel=heightfield_midphase_kernel,
+            dim=self.total_num_threads,
+            inputs=[
+                shape_types,
+                shape_transform,
+                shape_data,
+                shape_source,
+                shape_contact_margin,
+                self.shape_pairs_hfield,
+                self.shape_pairs_hfield_count,
+                self.shape_pairs_hfield_cumsum,
+                self.hfield_triangle_total_count,
+                self.shape_pairs_hfield_cell_range,
+                self.shape_pairs_hfield_aabb_z,
+                self.triangle_pairs,
+                self.triangle_pairs_count,
+                self.total_num_threads,
+            ],
+            device=device,
+            block_dim=self.block_dim,
+        )
+
+        # Launch triangle contact processing kernel
+        # This processes ALL triangles from both mesh and heightfield midphases
         wp.launch(
             kernel=self.mesh_triangle_contacts_kernel,
             dim=self.total_num_threads,
@@ -1017,6 +1037,7 @@ class NarrowPhase:
         self.shape_pairs_mesh_plane_count.zero_()
         self.mesh_plane_vertex_total_count.zero_()
         self.shape_pairs_hfield_count.zero_()
+        self.hfield_triangle_total_count.zero_()
 
         # Create ContactWriterData struct
         writer_data = ContactWriterData()
