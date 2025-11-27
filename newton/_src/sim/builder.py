@@ -4976,6 +4976,7 @@ class ModelBuilder:
                     sdf_data.coarse_voxel_size = wp.vec3(0.0, 0.0, 0.0)
                     sdf_data.center = wp.vec3(0.0, 0.0, 0.0)
                     sdf_data.half_extents = wp.vec3(0.0, 0.0, 0.0)
+                    sdf_data.background_value = 1000.0
                     sdf_volumes.append(None)
                     sdf_coarse_volumes.append(None)
                 sdf_data_list.append(sdf_data)

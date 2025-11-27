@@ -26,6 +26,9 @@ class SDFData:
     center: wp.vec3
     half_extents: wp.vec3
 
+    # Background value used for unallocated voxels in the sparse SDF
+    background_value: wp.float32
+
 
 @wp.func
 def int_to_vec3f(x: wp.int32, y: wp.int32, z: wp.int32):
@@ -108,6 +111,9 @@ def compute_sdf(
         "narrow_band_distance[0] must be less than 0.0 and narrow_band_distance[1] must be greater than 0.0"
     )
 
+    # Background value for unallocated voxels in sparse SDF
+    background_value = 1000.0
+
     # Create empty SDFData for non-colliding shapes
     if not shape_flags & ShapeFlags.COLLIDE_SHAPES:
         sdf_data = SDFData()
@@ -117,6 +123,7 @@ def compute_sdf(
         sdf_data.coarse_voxel_size = wp.vec3(0.0, 0.0, 0.0)
         sdf_data.center = wp.vec3(0.0, 0.0, 0.0)
         sdf_data.half_extents = wp.vec3(0.0, 0.0, 0.0)
+        sdf_data.background_value = background_value
         return sdf_data, None, None
 
     pos = wp.array(mesh_src.vertices, dtype=wp.vec3)
@@ -187,7 +194,7 @@ def compute_sdf(
         tile_points=wp.array(tile_points, dtype=wp.vec3i),
         voxel_size=wp.vec3(actual_voxel_size),
         translation=wp.vec3(min_ext),
-        bg_value=1000.0,
+        bg_value=background_value,
     )
 
     # populate the sparse volume with the sdf values
@@ -206,7 +213,7 @@ def compute_sdf(
         tile_points=wp.array(coarse_tile_points, dtype=wp.vec3i),
         voxel_size=wp.vec3(coarse_voxel_size),
         translation=wp.vec3(min_ext),
-        bg_value=1000.0,
+        bg_value=background_value,
     )
 
     # Populate the coarse volume with SDF values
@@ -227,5 +234,6 @@ def compute_sdf(
     sdf_data.coarse_voxel_size = wp.vec3(coarse_voxel_size)
     sdf_data.center = wp.vec3(center)
     sdf_data.half_extents = wp.vec3(half_extents)
+    sdf_data.background_value = background_value
 
     return sdf_data, sparse_volume, coarse_volume
