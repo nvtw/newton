@@ -44,137 +44,142 @@ except ImportError:
     )
 
 
-@wp.struct
-class VolumeData:
-    """Encapsulates all data needed to query an SDF volume."""
-
-    volume_id: wp.uint64
-    aabb_lower: wp.vec3
-    aabb_upper: wp.vec3
-    inv_sdf_dx: wp.vec3
-    sdf_dx: float
-    sdf_dims: wp.vec3
-
-
 @wp.func
-def Sample(texture: wp.uint64, localPos: wp.vec3) -> float:
-    """
-    Sample the SDF texture at the given local position using trilinear interpolation.
-
-    Args:
-        texture: The SDF volume texture to sample from (GPU texture handle)
-        localPos: The local position in texture space to sample at
-
-    Returns:
-        The signed distance field value at the given position
-    """
-    # Sample the volume using trilinear interpolation
-    return wp.volume_sample_f(texture, localPos, wp.Volume.LINEAR)
-
-
-@wp.func
-def PxSdfDistance(
-    texture: wp.uint64,
-    sdfBoxLower: wp.vec3,
-    sdfBoxHigher: wp.vec3,
-    invSdfDx: wp.vec3,
-    localPos: wp.vec3,
+def sample_sdf_extrapolated(
+    sdf_data: SDFData,
+    world_pos: wp.vec3,
 ) -> float:
     """
-    Compute the signed distance from a point to the SDF surface.
+    Sample SDF with extrapolation for points outside the narrow band or extent.
 
-    This function handles points both inside and outside the SDF volume bounds.
-    For points outside the SDF volume, it adds the distance to the nearest point
-    on the volume boundary to the SDF value at that boundary point.
-
-    Args:
-        texture: The SDF volume texture to sample from
-        sdfBoxLower: Lower bounds of the SDF volume in world space
-        sdfBoxHigher: Upper bounds of the SDF volume in world space
-        invSdfDx: Inverse of the SDF voxel spacing (1.0 / voxel_size)
-        localPos: The query position in world space
-
-    Returns:
-        The signed distance to the SDF surface. Negative values indicate
-        penetration into the object.
-    """
-    # clamp to SDF support
-    clampedGridPt = wp.max(localPos, sdfBoxLower)
-    clampedGridPt = wp.min(clampedGridPt, sdfBoxHigher)
-
-    diffMag = wp.length(localPos - clampedGridPt)
-    f = (clampedGridPt - sdfBoxLower) * invSdfDx
-
-    return Sample(texture, f) + diffMag
-
-
-@wp.func
-def PxVolumeGrad(
-    texture: wp.uint64,
-    sdfBoxLower: wp.vec3,
-    sdfBoxHigher: wp.vec3,
-    invSdfDx: wp.vec3,
-    sdfDims: wp.vec3,
-    sdfDx: float,
-    localPos: wp.vec3,
-) -> wp.vec3:
-    """
-    Compute the gradient of the SDF volume at the given position.
-
-    The gradient computation uses central differences. For points well inside
-    the volume (at least 1 voxel from boundaries), it samples directly from the
-    texture. For points near boundaries or outside, it uses PxSdfDistance which
-    handles extrapolation.
+    This function handles three cases:
+    1. Point in narrow band: Returns sparse grid value directly
+    2. Point inside extent but outside narrow band: Returns coarse grid value
+    3. Point outside extent: Projects to boundary, returns value at boundary + distance to boundary
 
     Args:
-        texture: The SDF volume texture
-        sdfBoxLower: Lower bounds of the SDF volume in world space
-        sdfBoxHigher: Upper bounds of the SDF volume in world space
-        invSdfDx: Inverse of the SDF voxel spacing (1.0 / voxel_size)
-        sdfDims: Dimensions of the SDF volume in voxels
-        sdfDx: The SDF voxel spacing
-        localPos: The query position in world space
+        sdf_data: SDFData struct containing sparse/coarse volumes and extent info
+        world_pos: Query position in world space (SDF local coordinates)
 
     Returns:
-        The gradient vector (unnormalized). The direction points toward increasing
-        SDF values (i.e., away from the object surface for points outside).
+        The signed distance value, extrapolated if necessary
     """
-    grad = wp.vec3(0.0, 0.0, 0.0)
+    # Compute extent bounds
+    lower = sdf_data.center - sdf_data.half_extents
+    upper = sdf_data.center + sdf_data.half_extents
 
-    clampedGridPt = wp.max(localPos, sdfBoxLower)
-    clampedGridPt = wp.min(clampedGridPt, sdfBoxHigher)
-
-    f = (clampedGridPt - sdfBoxLower) * invSdfDx
-
-    if (
-        f[0] >= 1.0
-        and f[0] <= sdfDims[0] - 2.0
-        and f[1] >= 1.0
-        and f[1] <= sdfDims[1] - 2.0
-        and f[2] >= 1.0
-        and f[2] <= sdfDims[2] - 2.0
-    ):
-        grad = wp.vec3(
-            Sample(texture, wp.vec3(f[0] + 1.0, f[1], f[2])) - Sample(texture, wp.vec3(f[0] - 1.0, f[1], f[2])),
-            Sample(texture, wp.vec3(f[0], f[1] + 1.0, f[2])) - Sample(texture, wp.vec3(f[0], f[1] - 1.0, f[2])),
-            Sample(texture, wp.vec3(f[0], f[1], f[2] + 1.0)) - Sample(texture, wp.vec3(f[0], f[1], f[2] - 1.0)),
-        )
-        return grad
-
-    grad = wp.vec3(
-        PxSdfDistance(texture, sdfBoxLower, sdfBoxHigher, invSdfDx, localPos + wp.vec3(sdfDx, 0.0, 0.0))
-        - PxSdfDistance(texture, sdfBoxLower, sdfBoxHigher, invSdfDx, localPos - wp.vec3(sdfDx, 0.0, 0.0)),
-        PxSdfDistance(texture, sdfBoxLower, sdfBoxHigher, invSdfDx, localPos + wp.vec3(0.0, sdfDx, 0.0))
-        - PxSdfDistance(texture, sdfBoxLower, sdfBoxHigher, invSdfDx, localPos - wp.vec3(0.0, sdfDx, 0.0)),
-        PxSdfDistance(texture, sdfBoxLower, sdfBoxHigher, invSdfDx, localPos + wp.vec3(0.0, 0.0, sdfDx))
-        - PxSdfDistance(texture, sdfBoxLower, sdfBoxHigher, invSdfDx, localPos - wp.vec3(0.0, 0.0, sdfDx)),
+    # Check if point is inside extent
+    inside_extent = (
+        world_pos[0] >= lower[0]
+        and world_pos[0] <= upper[0]
+        and world_pos[1] >= lower[1]
+        and world_pos[1] <= upper[1]
+        and world_pos[2] >= lower[2]
+        and world_pos[2] <= upper[2]
     )
 
-    return grad
+    if inside_extent:
+        # Sample sparse grid
+        sparse_idx = wp.volume_world_to_index(sdf_data.sparse_sdf_ptr, world_pos)
+        sparse_dist = wp.volume_sample_f(sdf_data.sparse_sdf_ptr, sparse_idx, wp.Volume.LINEAR)
+
+        # Check if we got the background value (outside narrow band)
+        # Use a tolerance since we're comparing floats
+        background_threshold = sdf_data.background_value * 0.5
+        if sparse_dist >= background_threshold:
+            # Fallback to coarse grid
+            coarse_idx = wp.volume_world_to_index(sdf_data.coarse_sdf_ptr, world_pos)
+            return wp.volume_sample_f(sdf_data.coarse_sdf_ptr, coarse_idx, wp.Volume.LINEAR)
+        else:
+            return sparse_dist
+    else:
+        # Point is outside extent - project to boundary
+        clamped_pos = wp.min(wp.max(world_pos, lower), upper)
+        dist_to_boundary = wp.length(world_pos - clamped_pos)
+
+        # Sample at the boundary point using coarse grid (more reliable for extrapolation)
+        coarse_idx = wp.volume_world_to_index(sdf_data.coarse_sdf_ptr, clamped_pos)
+        boundary_dist = wp.volume_sample_f(sdf_data.coarse_sdf_ptr, coarse_idx, wp.Volume.LINEAR)
+
+        # Extrapolate: value at boundary + distance to boundary
+        return boundary_dist + dist_to_boundary
 
 
 @wp.func
-def closestPtPointBaryTriangle(c: wp.vec3) -> wp.vec3:
+def sample_sdf_grad_extrapolated(
+    sdf_data: SDFData,
+    world_pos: wp.vec3,
+) -> tuple[float, wp.vec3]:
+    """
+    Sample SDF with gradient, with extrapolation for points outside narrow band or extent.
+
+    This function handles three cases:
+    1. Point in narrow band: Returns sparse grid value and gradient directly
+    2. Point inside extent but outside narrow band: Returns coarse grid value and gradient
+    3. Point outside extent: Returns extrapolated distance and direction toward boundary
+
+    Args:
+        sdf_data: SDFData struct containing sparse/coarse volumes and extent info
+        world_pos: Query position in world space (SDF local coordinates)
+
+    Returns:
+        Tuple of (distance, gradient) where gradient points toward increasing distance
+    """
+    # Compute extent bounds
+    lower = sdf_data.center - sdf_data.half_extents
+    upper = sdf_data.center + sdf_data.half_extents
+
+    gradient = wp.vec3(0.0, 0.0, 0.0)
+
+    # Check if point is inside extent
+    inside_extent = (
+        world_pos[0] >= lower[0]
+        and world_pos[0] <= upper[0]
+        and world_pos[1] >= lower[1]
+        and world_pos[1] <= upper[1]
+        and world_pos[2] >= lower[2]
+        and world_pos[2] <= upper[2]
+    )
+
+    if inside_extent:
+        # Sample sparse grid
+        sparse_idx = wp.volume_world_to_index(sdf_data.sparse_sdf_ptr, world_pos)
+        sparse_dist = wp.volume_sample_grad_f(sdf_data.sparse_sdf_ptr, sparse_idx, wp.Volume.LINEAR, gradient)
+
+        # Check if we got the background value (outside narrow band)
+        background_threshold = sdf_data.background_value * 0.5
+        if sparse_dist >= background_threshold:
+            # Fallback to coarse grid
+            coarse_idx = wp.volume_world_to_index(sdf_data.coarse_sdf_ptr, world_pos)
+            coarse_dist = wp.volume_sample_grad_f(sdf_data.coarse_sdf_ptr, coarse_idx, wp.Volume.LINEAR, gradient)
+            return coarse_dist, gradient
+        else:
+            return sparse_dist, gradient
+    else:
+        # Point is outside extent - project to boundary
+        clamped_pos = wp.min(wp.max(world_pos, lower), upper)
+        diff = world_pos - clamped_pos
+        dist_to_boundary = wp.length(diff)
+
+        # Sample at the boundary point using coarse grid
+        coarse_idx = wp.volume_world_to_index(sdf_data.coarse_sdf_ptr, clamped_pos)
+        boundary_dist = wp.volume_sample_f(sdf_data.coarse_sdf_ptr, coarse_idx, wp.Volume.LINEAR)
+
+        # Extrapolate distance: value at boundary + distance to boundary
+        extrapolated_dist = boundary_dist + dist_to_boundary
+
+        # Gradient points from boundary toward the query point (direction of increasing distance)
+        if dist_to_boundary > 0.0:
+            gradient = diff / dist_to_boundary
+        else:
+            # Fallback: get gradient from coarse grid
+            wp.volume_sample_grad_f(sdf_data.coarse_sdf_ptr, coarse_idx, wp.Volume.LINEAR, gradient)
+
+        return extrapolated_dist, gradient
+
+
+@wp.func
+def closest_pt_point_bary_triangle(c: wp.vec3) -> wp.vec3:
     """
     Find the closest point to `c` on the standard barycentric triangle.
 
@@ -241,76 +246,8 @@ def closestPtPointBaryTriangle(c: wp.vec3) -> wp.vec3:
 
 
 @wp.func
-def PxSdfSampleWithGrad(
-    texture: wp.uint64,
-    sdfBoxLower: wp.vec3,
-    sdfBoxHigher: wp.vec3,
-    invSdfDx: wp.vec3,
-    localPos: wp.vec3,
-    sdfGradient: wp.vec3,
-    tolerance: float,
-) -> tuple[float, wp.vec3]:
-    """
-    Sample SDF with gradient information and compute contact distance and direction.
-
-    This function evaluates the SDF at a point and, if the distance is within tolerance,
-    computes the contact direction considering both the SDF gradient and any offset
-    from the SDF volume boundaries.
-
-    Args:
-        texture: The SDF volume texture
-        sdfBoxLower: Lower bounds of the SDF volume in world space
-        sdfBoxHigher: Upper bounds of the SDF volume in world space
-        invSdfDx: Inverse of the SDF voxel spacing
-        localPos: The query position in world space
-        sdfGradient: Pre-computed gradient at or near localPos (for efficiency)
-        tolerance: Distance threshold for considering contacts
-
-    Returns:
-        A tuple of (distance, direction) where:
-        - distance: Signed distance to surface (negative = penetration), or PX_MAX_F32 if > tolerance
-        - direction: Normalized contact direction (from surface toward query point)
-    """
-    PX_MAX_F32 = 3.4028235e38
-
-    clampedGridPt = wp.max(localPos, sdfBoxLower)
-    clampedGridPt = wp.min(clampedGridPt, sdfBoxHigher)
-
-    diff = localPos - clampedGridPt
-    # const PxReal diffMag = diff.magnitudeSquared();
-    # if (diffMag > tolerance*tolerance)
-    #     return PX_MAX_F32;
-
-    f = (clampedGridPt - sdfBoxLower) * invSdfDx
-
-    dist = Sample(texture, f)
-
-    dir = wp.vec3(0.0, 0.0, 0.0)
-
-    if dist < tolerance:
-        # estimate the contact direction based on the SDF
-        # if we are outside the SDF support, add in the distance to the point
-        grad_len = wp.length(sdfGradient)
-        if grad_len > 0.0:
-            sdfGradient_normalized = sdfGradient / grad_len
-        else:
-            sdfGradient_normalized = wp.vec3(0.0, 0.0, 1.0)
-
-        dir = sdfGradient_normalized * wp.abs(dist) + diff
-        dir_len = wp.length(dir)
-        if dir_len > 0.0:
-            dir = dir / dir_len
-        else:
-            dir = wp.vec3(0.0, 0.0, 1.0)
-
-        return dist + wp.dot(dir, diff), dir
-
-    return PX_MAX_F32, dir
-
-
-@wp.func
-def doTriangleSDFCollision(
-    sdf: wp.uint64,
+def do_triangle_sdf_collision(
+    sdf_data: SDFData,
     v0: wp.vec3,
     v1: wp.vec3,
     v2: wp.vec3,
@@ -323,6 +260,11 @@ def doTriangleSDFCollision(
     The optimization starts from either the triangle centroid or one of its vertices
     (whichever has the smallest initial distance).
 
+    Uses extrapolated SDF sampling that handles:
+    - Points in narrow band: sparse grid value
+    - Points inside extent but outside narrow band: coarse grid value
+    - Points outside extent: extrapolated from boundary
+
     Algorithm:
     1. Evaluate SDF distance at triangle vertices and centroid
     2. Start from the point with minimum distance
@@ -334,9 +276,8 @@ def doTriangleSDFCollision(
     4. Return final distance, contact point, and contact direction
 
     Args:
-        sdf: The SDF volume texture
-        v0, v1, v2: Triangle vertices in world space
-        tolerance: Contact distance threshold
+        sdf_data: SDFData struct containing sparse/coarse volumes and extent info
+        v0, v1, v2: Triangle vertices in world space (SDF local coordinates)
 
     Returns:
         Tuple of (distance, contact_point, contact_direction) where:
@@ -348,11 +289,12 @@ def doTriangleSDFCollision(
     center = (v0 + v1 + v2) * third
     p = center
 
-    dist = wp.volume_sample_f(sdf, wp.volume_world_to_index(sdf, p), wp.Volume.LINEAR)
+    # Use extrapolated sampling for initial distance estimates
+    dist = sample_sdf_extrapolated(sdf_data, p)
 
-    d0 = wp.volume_sample_f(sdf, wp.volume_world_to_index(sdf, v0), wp.Volume.LINEAR)
-    d1 = wp.volume_sample_f(sdf, wp.volume_world_to_index(sdf, v1), wp.Volume.LINEAR)
-    d2 = wp.volume_sample_f(sdf, wp.volume_world_to_index(sdf, v2), wp.Volume.LINEAR)
+    d0 = sample_sdf_extrapolated(sdf_data, v0)
+    d1 = sample_sdf_extrapolated(sdf_data, v1)
+    d2 = sample_sdf_extrapolated(sdf_data, v2)
 
     uvw = wp.vec3(0.0, 0.0, 0.0)
 
@@ -382,7 +324,8 @@ def doTriangleSDFCollision(
     step = 1.0 / (2.0 * difference)
 
     for _iter in range(16):
-        wp.volume_sample_grad_f(sdf, wp.volume_world_to_index(sdf, p), wp.Volume.LINEAR, sdfGradient)
+        # Use extrapolated gradient sampling
+        _, sdfGradient = sample_sdf_grad_extrapolated(sdf_data, p)
 
         grad_len = wp.length(sdfGradient)
         if grad_len == 0.0:
@@ -403,7 +346,7 @@ def doTriangleSDFCollision(
 
         step = step * 0.8
 
-        newUVW = closestPtPointBaryTriangle(newUVW)
+        newUVW = closest_pt_point_bary_triangle(newUVW)
 
         p = v0 * newUVW[0] + v1 * newUVW[1] + v2 * newUVW[2]
 
@@ -414,7 +357,8 @@ def doTriangleSDFCollision(
 
         uvw = newUVW
 
-    dist = wp.volume_sample_grad_f(sdf, wp.volume_world_to_index(sdf, p), wp.Volume.LINEAR, sdfGradient)
+    # Final extrapolated sampling for result
+    dist, sdfGradient = sample_sdf_grad_extrapolated(sdf_data, p)
 
     point = p
     dir = sdfGradient
@@ -547,12 +491,12 @@ def add_to_shared_buffer_atomic(
 
 
 @wp.func
-def findInterestingTriangles(
+def find_interesting_triangles(
     thread_id: int,
     mesh_scale: wp.vec3,
     mesh_to_sdf_transform: wp.transform,
     mesh_id: wp.uint64,
-    sdf: wp.uint64,
+    sdf_data: SDFData,
     buffer: wp.array(dtype=wp.int32),
     contact_distance: float,
 ):
@@ -562,6 +506,8 @@ def findInterestingTriangles(
     Tests each triangle's bounding sphere against the SDF. Triangles are selected if
     SDF_distance(sphere_center) <= sphere_radius + contact_distance. Results are stored
     in shared memory buffer for narrow-phase processing.
+
+    Uses extrapolated SDF sampling that handles points outside the narrow band or extent.
 
     Uses atomic compaction (2 syncs per iteration) instead of scan-based (6 syncs).
 
@@ -582,9 +528,8 @@ def findInterestingTriangles(
             v0, v1, v2 = get_triangle_from_mesh(mesh_id, mesh_scale, mesh_to_sdf_transform, tri_idx)
             bounding_sphere_center, bounding_sphere_radius = get_bounding_sphere(v0, v1, v2)
 
-            # Use SDF distance query for culling
-            query_local = wp.volume_world_to_index(sdf, bounding_sphere_center)
-            sdf_dist = wp.volume_sample_f(sdf, query_local, wp.Volume.LINEAR)
+            # Use extrapolated SDF distance query for culling
+            sdf_dist = sample_sdf_extrapolated(sdf_data, bounding_sphere_center)
             add_triangle = sdf_dist <= (bounding_sphere_radius + contact_distance)
 
         synchronize()  # Ensure all threads have read base_tri_idx before any writes
@@ -681,7 +626,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                     mesh_id = mesh_id_a
                     mesh_scale = mesh_scale_a
-                    sdf_ptr = sdf_ptr_b
+                    sdf_data = shape_sdf_data[mesh_shape_b]
                     # Transform from mesh A space to mesh B space
                     X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_mesh_b_ws), X_mesh_a_ws)
                     X_sdf_ws = X_mesh_b_ws
@@ -697,7 +642,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                     mesh_id = mesh_id_b
                     mesh_scale = mesh_scale_b
-                    sdf_ptr = sdf_ptr_a
+                    sdf_data = shape_sdf_data[mesh_shape_a]
                     # Transform from mesh B space to mesh A space
                     X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_mesh_a_ws), X_mesh_b_ws)
                     X_sdf_ws = X_mesh_a_ws
@@ -713,16 +658,15 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     # Get triangle vertices in SDF's local space
                     v0, v1, v2 = get_triangle_from_mesh(mesh_id, mesh_scale, X_mesh_to_sdf, tri_idx)
 
-                    # Early out: check bounding sphere distance to SDF surface
+                    # Early out: check bounding sphere distance to SDF surface using extrapolated sampling
                     bounding_sphere_center, bounding_sphere_radius = get_bounding_sphere(v0, v1, v2)
-                    query_local = wp.volume_world_to_index(sdf_ptr, bounding_sphere_center)
-                    sdf_dist = wp.volume_sample_f(sdf_ptr, query_local, wp.Volume.LINEAR)
+                    sdf_dist = sample_sdf_extrapolated(sdf_data, bounding_sphere_center)
 
                     # Skip triangles that are too far from the SDF surface
                     if sdf_dist > (bounding_sphere_radius + margin):
                         continue
 
-                    dist, point, direction = doTriangleSDFCollision(sdf_ptr, v0, v1, v2)
+                    dist, point, direction = do_triangle_sdf_collision(sdf_data, v0, v1, v2)
 
                     if dist < margin:
                         point_world = wp.transform_point(X_sdf_ws, point)
@@ -771,8 +715,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         pair = shape_pairs_mesh_mesh[block_id]
         mesh0 = shape_source[pair[0]]
         mesh1 = shape_source[pair[1]]
-        sdf0 = shape_sdf_data[pair[0]].sparse_sdf_ptr
-        sdf1 = shape_sdf_data[pair[1]].sparse_sdf_ptr
+        sdf_data0 = shape_sdf_data[pair[0]]
+        sdf_data1 = shape_sdf_data[pair[1]]
 
         # Extract mesh parameters
         mesh0_data = shape_data[pair[0]]
@@ -818,13 +762,13 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 mesh = mesh0
                 mesh_scale = mesh0_scale
                 mesh_sdf_transform = wp.transform_multiply(wp.transform_inverse(mesh1_transform), mesh0_transform)
-                sdf_current = sdf1
+                sdf_data_current = sdf_data1
                 sdf_transform = mesh1_transform
             else:
                 mesh = mesh1
                 mesh_scale = mesh1_scale
                 mesh_sdf_transform = wp.transform_multiply(wp.transform_inverse(mesh0_transform), mesh1_transform)
-                sdf_current = sdf0
+                sdf_data_current = sdf_data0
                 sdf_transform = mesh0_transform
 
             # Reset progress counter for this mesh
@@ -837,12 +781,12 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
             has_contact = wp.bool(False)
 
             while selected_triangles[tri_capacity + 1] < num_tris:
-                findInterestingTriangles(
+                find_interesting_triangles(
                     t,
                     mesh_scale,
                     mesh_sdf_transform,
                     mesh,
-                    sdf_current,
+                    sdf_data_current,
                     selected_triangles,
                     margin,
                 )
@@ -853,8 +797,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                 if has_contact:
                     v0, v1, v2 = get_triangle_from_mesh(mesh, mesh_scale, mesh_sdf_transform, selected_triangles[t])
-                    dist, point, dir = doTriangleSDFCollision(
-                        sdf_current,
+                    dist, point, dir = do_triangle_sdf_collision(
+                        sdf_data_current,
                         v0,
                         v1,
                         v2,
