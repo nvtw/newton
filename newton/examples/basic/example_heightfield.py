@@ -71,31 +71,58 @@ class Example:
         # z height to drop shapes from
         drop_z = 5.0
 
-        # SPHERE
-        body_sphere = builder.add_body(xform=wp.transform(p=(0.0, -6.0, drop_z), q=wp.quat_identity()), key="sphere")
-        builder.add_shape_sphere(body_sphere, radius=0.5)
+        # Grid sizes for instancing primitives
+        grid_size_x = 5
+        grid_size_z = 5
+        spacing_x = 2.0
+        spacing_z = 3.0
 
-        # ELLIPSOID (flat disk shape: a=b > c for stability when resting)
-        body_ellipsoid = builder.add_body(
-            xform=wp.transform(p=(0.0, -4.0, drop_z), q=wp.quat_identity()), key="ellipsoid"
-        )
-        builder.add_shape_ellipsoid(body_ellipsoid, a=0.5, b=0.5, c=0.25)
+        for ix in range(grid_size_x):
+            for iz in range(grid_size_z):
+                offset_x = (ix - (grid_size_x - 1) / 2.0) * spacing_x
+                offset_z = iz * spacing_z
 
-        # CAPSULE
-        body_capsule = builder.add_body(xform=wp.transform(p=(0.0, -2.0, drop_z), q=wp.quat_identity()), key="capsule")
-        builder.add_shape_capsule(body_capsule, radius=0.3, half_height=0.7)
+                # SPHERE
+                body_sphere = builder.add_body(
+                    xform=wp.transform(p=(offset_x, -6.0, drop_z + offset_z), q=wp.quat_identity()),
+                    key=f"sphere_{ix}_{iz}",
+                )
+                builder.add_shape_sphere(body_sphere, radius=0.5)
 
-        # CYLINDER
-        body_cylinder = builder.add_body(xform=wp.transform(p=(0.0, 0.0, drop_z), q=wp.quat_identity()), key="cylinder")
-        builder.add_shape_cylinder(body_cylinder, radius=0.4, half_height=0.6)
+                # ELLIPSOID (flat disk shape: a=b > c for stability when resting)
+                body_ellipsoid = builder.add_body(
+                    xform=wp.transform(p=(offset_x, -4.0, drop_z + offset_z), q=wp.quat_identity()),
+                    key=f"ellipsoid_{ix}_{iz}",
+                )
+                builder.add_shape_ellipsoid(body_ellipsoid, a=0.5, b=0.5, c=0.25)
 
-        # BOX
-        body_box = builder.add_body(xform=wp.transform(p=(0.0, 2.0, drop_z), q=wp.quat_identity()), key="box")
-        builder.add_shape_box(body_box, hx=0.5, hy=0.35, hz=0.25)
+                # CAPSULE
+                body_capsule = builder.add_body(
+                    xform=wp.transform(p=(offset_x, -2.0, drop_z + offset_z), q=wp.quat_identity()),
+                    key=f"capsule_{ix}_{iz}",
+                )
+                builder.add_shape_capsule(body_capsule, radius=0.3, half_height=0.7)
 
-        # CONE
-        body_cone = builder.add_body(xform=wp.transform(p=(0.0, 4.0, drop_z), q=wp.quat_identity()), key="cone")
-        builder.add_shape_cone(body_cone, radius=0.45, half_height=0.6)
+                # CYLINDER
+                body_cylinder = builder.add_body(
+                    xform=wp.transform(p=(offset_x, 0.0, drop_z + offset_z), q=wp.quat_identity()),
+                    key=f"cylinder_{ix}_{iz}",
+                )
+                builder.add_shape_cylinder(body_cylinder, radius=0.4, half_height=0.6)
+
+                # BOX
+                body_box = builder.add_body(
+                    xform=wp.transform(p=(offset_x, 2.0, drop_z + offset_z), q=wp.quat_identity()),
+                    key=f"box_{ix}_{iz}",
+                )
+                builder.add_shape_box(body_box, hx=0.5, hy=0.35, hz=0.25)
+
+                # CONE
+                body_cone = builder.add_body(
+                    xform=wp.transform(p=(offset_x, 4.0, drop_z + offset_z), q=wp.quat_identity()),
+                    key=f"cone_{ix}_{iz}",
+                )
+                builder.add_shape_cone(body_cone, radius=0.45, half_height=0.6)
 
         # finalize model
         self.model = builder.finalize()
