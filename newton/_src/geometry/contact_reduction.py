@@ -475,47 +475,24 @@ def store_reduced_contact(
 
 
 @wp.func
-def is_contact_duplicate(
-    contact_i: ContactStruct,
-    contact_j: ContactStruct,
-) -> bool:
-    """Check if two contacts are duplicates (same feature/triangle index)."""
-    return contact_i.feature == contact_j.feature
-
-
-@wp.func
-def count_earlier_duplicates(
-    i: int,
-    buffer: wp.array(dtype=ContactStruct),
-    active_ids: wp.array(dtype=int),
-) -> int:
-    """Count how many earlier contacts (index < i) are duplicates of contact i."""
-    slot_i = active_ids[i]
-    contact_i = buffer[slot_i]
-    count = int(0)
-    for j in range(i):
-        slot_j = active_ids[j]
-        contact_j = buffer[slot_j]
-        if is_contact_duplicate(contact_i, contact_j):
-            count = count + 1
-    return count
-
-
-@wp.func
 def filter_unique_contacts(
     thread_id: int,
     buffer: wp.array(dtype=ContactStruct),
     active_ids: wp.array(dtype=int),
     buffer_capacity: int,
+    empty_marker: float,
 ):
     """Filter out duplicate contacts after reduction, keeping only unique ones.
 
-    A contact is considered a duplicate if it has the same position, normal, depth,
-    and feature as another contact. For duplicates, we deterministically keep
-    the one with the LOWEST index in active_ids (which corresponds to the lowest slot ID).
+    A contact is considered a duplicate if it has the same feature (triangle index).
+    For duplicates, we deterministically keep the one with the LOWEST slot key.
+
+    OPTIMIZATION: Each of the 20 normal bins has exactly 7 directions (keys).
+    Thread t (where t < 20) handles normal bin t, checking all 7 keys at once.
+    This is O(20 * 7) = O(140) work total, parallelized across 20 threads.
 
     This function modifies active_ids in-place:
-    - Compacts unique contacts to the front of active_ids
+    - Rebuilds active_ids with only unique contacts
     - Updates the count at active_ids[buffer_capacity]
 
     Must be called after store_reduced_contact and a synchronize().
@@ -525,42 +502,60 @@ def filter_unique_contacts(
         buffer: Contact buffer (read-only in this function)
         active_ids: Array of active slot IDs, with count at index buffer_capacity
         buffer_capacity: Capacity of the buffer (140)
+        empty_marker: Value used to mark empty slots (same as passed to store_reduced_contact)
     """
-    # Get the number of contacts before filtering
-    num_contacts = wp.min(active_ids[buffer_capacity], buffer_capacity)
-
-    # Use shared memory to track which contacts to keep
-    # Flag is 1 if contact should be kept (not a duplicate of an earlier contact)
+    # Use shared memory for keep_flags[0..139]: 1 if key should be kept, 0 if duplicate
     keep_flags = wp.array(
         ptr=get_shared_memory_pointer_140_keep_flags(),
         shape=(NUM_REDUCTION_SLOTS,),
         dtype=wp.int32,
     )
 
-    # Initialize all flags to 1 (keep by default)
+    # Initialize: mark all as not-kept (0), we'll set to 1 for unique contacts
     for i in range(thread_id, NUM_REDUCTION_SLOTS, wp.block_dim()):
-        keep_flags[i] = 1
+        keep_flags[i] = 0
 
     synchronize()
 
-    # Each thread checks one contact to see if it's a duplicate of an earlier one
-    # A contact is a duplicate if there's an earlier contact (lower index in active_ids)
-    # with the same position, normal, depth, and feature
-    for i in range(thread_id, num_contacts, wp.block_dim()):
-        # Count duplicates that appear earlier - if any exist, this contact is a duplicate
-        if count_earlier_duplicates(i, buffer, active_ids) > 0:
-            keep_flags[i] = 0
+    # Each thread 0-19 handles one normal bin (20 bins total)
+    # Thread t checks keys [t*7, t*7+6] and deduplicates by feature
+    if thread_id < 20:
+        bin_id = thread_id
+        base_key = bin_id * 7
+
+        # For each direction in this bin, check if there's valid data
+        for dir_i in range(7):
+            key_i = base_key + dir_i
+            proj_i = buffer[key_i].projection
+
+            # Check if this key has valid contact data (not empty)
+            if proj_i > empty_marker:
+                feature_i = buffer[key_i].feature
+
+                # Check if an earlier direction in this bin has same feature
+                is_duplicate = int(0)
+                for dir_j in range(dir_i):
+                    key_j = base_key + dir_j
+                    proj_j = buffer[key_j].projection
+
+                    if proj_j > empty_marker:
+                        feature_j = buffer[key_j].feature
+                        if feature_i == feature_j:
+                            is_duplicate = 1
+
+                # Keep if not a duplicate (first occurrence of this feature in bin)
+                if is_duplicate == 0:
+                    keep_flags[key_i] = 1
 
     synchronize()
 
-    # Compute prefix sum to get new indices for kept contacts
-    # Thread 0 does the compaction (simple serial approach for correctness)
+    # Rebuild active_ids with only unique contacts
+    # Thread 0 does serial compaction for correctness and determinism
     if thread_id == 0:
         write_idx = int(0)
-        for i in range(num_contacts):
-            if keep_flags[i] == 1:
-                if write_idx != i:
-                    active_ids[write_idx] = active_ids[i]
+        for key in range(NUM_REDUCTION_SLOTS):
+            if keep_flags[key] == 1:
+                active_ids[write_idx] = key
                 write_idx = write_idx + 1
         active_ids[buffer_capacity] = write_idx
 

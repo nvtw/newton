@@ -850,7 +850,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         synchronize()
 
         # Filter out duplicate contacts (same contact may have won multiple directions)
-        filter_unique_contacts(t, contacts_shared_mem, active_contacts_shared_mem, 140)
+        filter_unique_contacts(t, contacts_shared_mem, active_contacts_shared_mem, 140, empty_marker)
 
         num_contacts_to_keep = wp.min(active_contacts_shared_mem[140], 140)
 
