@@ -33,10 +33,9 @@ from ..geometry.collision_core import (
 )
 from ..geometry.contact_data import ContactData
 from ..geometry.contact_reduction import (
+    ContactReductionFunctions,
     ContactStruct,
-    get_shared_memory_pointer_140_contacts,
-    get_shared_memory_pointer_141_ints,
-    store_reduced_contact,
+    create_betas_array,
     synchronize,
 )
 from ..geometry.sdf_contact import create_narrow_phase_process_mesh_mesh_contacts_kernel
@@ -528,7 +527,9 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
     return narrow_phase_process_mesh_triangle_contacts_kernel
 
 
-def create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func: Any, tile_size: int):
+def create_narrow_phase_process_mesh_plane_contacts_kernel(
+    writer_func: Any, tile_size: int, contact_reduction_funcs: ContactReductionFunctions
+):
     """
     Create a mesh-plane collision kernel with contact reduction.
 
@@ -538,10 +539,16 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func: Any, til
     Args:
         writer_func: Contact writer function (e.g., write_contact_simple)
         tile_size: Tile size for contact reduction (must match block_dim)
+        contact_reduction_funcs: ContactReductionFunctions instance
 
     Returns:
         A warp kernel that processes mesh-plane collisions with contact reduction
     """
+    # Extract functions and constants from the contact reduction configuration
+    num_reduction_slots = contact_reduction_funcs.num_reduction_slots
+    store_reduced_contact_func = contact_reduction_funcs.store_reduced_contact
+    get_smem_slots_plus_1 = contact_reduction_funcs.get_smem_slots_plus_1
+    get_smem_slots_contacts = contact_reduction_funcs.get_smem_slots_contacts
 
     @wp.kernel(enable_backward=False)
     def narrow_phase_process_mesh_plane_contacts_reduce_kernel(
@@ -552,6 +559,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func: Any, til
         shape_contact_margin: wp.array(dtype=float),
         shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_plane_count: wp.array(dtype=int),
+        betas: wp.array(dtype=wp.float32),
         writer_data: Any,
         total_num_blocks: int,
     ):
@@ -569,8 +577,16 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func: Any, til
 
         # Initialize shared memory buffers for contact reduction (reused across pairs)
         empty_marker = -1000000000.0
-        active_contacts_shared_mem = wp.array(ptr=get_shared_memory_pointer_141_ints(), shape=(141,), dtype=wp.int32)
-        contacts_shared_mem = wp.array(ptr=get_shared_memory_pointer_140_contacts(), shape=(140,), dtype=ContactStruct)
+        active_contacts_shared_mem = wp.array(
+            ptr=wp.static(get_smem_slots_plus_1)(),
+            shape=(wp.static(num_reduction_slots) + 1,),
+            dtype=wp.int32,
+        )
+        contacts_shared_mem = wp.array(
+            ptr=wp.static(get_smem_slots_contacts)(),
+            shape=(wp.static(num_reduction_slots),),
+            dtype=ContactStruct,
+        )
 
         # Grid stride loop over mesh-plane pairs
         for pair_idx in range(block_id, num_pairs, total_num_blocks):
@@ -615,11 +631,11 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func: Any, til
             pair_key = build_pair_key2(wp.uint32(mesh_shape), wp.uint32(plane_shape))
 
             # Reset contact buffer for this pair
-            for i in range(t, 140, wp.block_dim()):
+            for i in range(t, wp.static(num_reduction_slots), wp.block_dim()):
                 contacts_shared_mem[i].projection = empty_marker
 
             if t == 0:
-                active_contacts_shared_mem[140] = 0
+                active_contacts_shared_mem[wp.static(num_reduction_slots)] = 0
 
             synchronize()
 
@@ -662,12 +678,14 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func: Any, til
                         c.projection = empty_marker
 
                 # Apply contact reduction
-                store_reduced_contact(
-                    t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, 140, empty_marker
+                store_reduced_contact_func(
+                    t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, betas, empty_marker
                 )
 
             # Write reduced contacts to output (store_reduced_contact ends with sync)
-            num_contacts_to_keep = wp.min(active_contacts_shared_mem[140], 140)
+            num_contacts_to_keep = wp.min(
+                active_contacts_shared_mem[wp.static(num_reduction_slots)], wp.static(num_reduction_slots)
+            )
 
             for i in range(t, num_contacts_to_keep, wp.block_dim()):
                 contact_id = active_contacts_shared_mem[i]
@@ -706,6 +724,7 @@ class NarrowPhase:
         shape_aabb_lower: wp.array(dtype=wp.vec3) | None = None,
         shape_aabb_upper: wp.array(dtype=wp.vec3) | None = None,
         contact_writer_warp_func: Any | None = None,
+        betas: tuple = (10.0, 1000000.0),
     ):
         """
         Initialize NarrowPhase with pre-allocated buffers.
@@ -720,10 +739,18 @@ class NarrowPhase:
             shape_aabb_lower: Optional external AABB lower bounds array (if provided, AABBs won't be computed internally)
             shape_aabb_upper: Optional external AABB upper bounds array (if provided, AABBs won't be computed internally)
             contact_writer_warp_func: Optional custom contact writer function (first arg: ContactData, second arg: custom struct type)
+            betas: Tuple of beta values for contact reduction. The combined score is computed as
+                spatial_dp + beta * depth for each beta value. Default is (10.0, 1000000.0).
+                The number of reduction slots is automatically computed as 20 * 6 * len(betas).
         """
         self.max_candidate_pairs = max_candidate_pairs
         self.max_triangle_pairs = max_triangle_pairs
         self.device = device
+        self.betas_tuple = betas
+
+        # Create contact reduction functions for the specified betas
+        self.contact_reduction_funcs = ContactReductionFunctions(betas)
+        self.num_reduction_slots = self.contact_reduction_funcs.num_reduction_slots
 
         # Determine if we're using external AABBs
         self.external_aabb = shape_aabb_lower is not None and shape_aabb_upper is not None
@@ -746,7 +773,7 @@ class NarrowPhase:
 
         self.tile_size = 128
         self.tile_size_large = 256
-        self.tile_size_max = 1024
+        self.tile_size_max = 512
         self.block_dim = 128
         self.reduce_contacts = reduce_contacts
 
@@ -754,10 +781,13 @@ class NarrowPhase:
         self.narrow_phase_kernel = create_narrow_phase_kernel_gjk_mpr(self.external_aabb, writer_func)
         self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func)
         self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(
-            writer_func, tile_size=self.tile_size_max
+            writer_func, tile_size=self.tile_size_max, contact_reduction_funcs=self.contact_reduction_funcs
         )
         self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
-            writer_func, tile_size=self.tile_size_large, reduce_contacts=reduce_contacts
+            writer_func,
+            tile_size=self.tile_size_large,
+            reduce_contacts=reduce_contacts,
+            contact_reduction_funcs=self.contact_reduction_funcs,
         )
 
         # Pre-allocate all intermediate buffers
@@ -788,6 +818,9 @@ class NarrowPhase:
 
             # Empty contact_key array for when contact key collection is disabled
             self.empty_contact_key = wp.zeros(0, dtype=wp.uint32, device=device)
+
+            # Betas array for contact reduction (using the configured betas tuple)
+            self.betas = create_betas_array(betas=self.betas_tuple, device=device)
 
         # Fixed thread count for kernel launches
         gpu_thread_limit = 1024 * 1024 * 4
@@ -881,6 +914,7 @@ class NarrowPhase:
                 shape_contact_margin,
                 self.shape_pairs_mesh_plane,
                 self.shape_pairs_mesh_plane_count,
+                self.betas,
                 writer_data,
                 self.num_tile_blocks,
             ],
@@ -942,6 +976,7 @@ class NarrowPhase:
                 shape_contact_margin,
                 self.shape_pairs_mesh_mesh,
                 self.shape_pairs_mesh_mesh_count,
+                self.betas,
                 writer_data,
                 self.num_tile_blocks,
             ],

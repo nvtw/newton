@@ -26,22 +26,16 @@ from ..geometry.sdf_utils import SDFData
 # Handle both direct execution and module import
 try:
     from .contact_reduction import (
+        ContactReductionFunctions,
         ContactStruct,
-        filter_unique_contacts,
-        get_shared_memory_pointer_140_contacts,
-        get_shared_memory_pointer_141_ints,
         get_shared_memory_pointer_block_dim_plus_2_ints,
-        store_reduced_contact,
         synchronize,
     )
 except ImportError:
     from contact_reduction import (
+        ContactReductionFunctions,
         ContactStruct,
-        filter_unique_contacts,
-        get_shared_memory_pointer_140_contacts,
-        get_shared_memory_pointer_141_ints,
         get_shared_memory_pointer_block_dim_plus_2_ints,
-        store_reduced_contact,
         synchronize,
     )
 
@@ -542,8 +536,22 @@ def find_interesting_triangles(
 
 
 def create_narrow_phase_process_mesh_mesh_contacts_kernel(
-    writer_func: Any, tile_size: int, reduce_contacts: bool = False
+    writer_func: Any,
+    tile_size: int,
+    reduce_contacts: bool = False,
+    contact_reduction_funcs: ContactReductionFunctions | None = None,
 ):
+    # Get contact reduction functions (use defaults if not provided)
+    if contact_reduction_funcs is None:
+        contact_reduction_funcs = ContactReductionFunctions()
+
+    num_betas = contact_reduction_funcs.num_betas
+    num_reduction_slots = contact_reduction_funcs.num_reduction_slots
+    store_reduced_contact_func = contact_reduction_funcs.store_reduced_contact
+    filter_unique_contacts_func = contact_reduction_funcs.filter_unique_contacts
+    get_smem_slots_plus_1 = contact_reduction_funcs.get_smem_slots_plus_1
+    get_smem_slots_contacts = contact_reduction_funcs.get_smem_slots_contacts
+
     @wp.kernel(enable_backward=False)
     def mesh_sdf_collision_kernel(
         shape_data: wp.array(dtype=wp.vec4),
@@ -706,6 +714,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         shape_contact_margin: wp.array(dtype=float),
         shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_mesh_count: wp.array(dtype=int),
+        betas: wp.array(dtype=wp.float32),
         writer_data: Any,
         total_num_blocks: int,
     ):
@@ -737,14 +746,22 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         empty_marker = -1000000000.0
         has_contact = True
 
-        active_contacts_shared_mem = wp.array(ptr=get_shared_memory_pointer_141_ints(), shape=(141,), dtype=wp.int32)
-        contacts_shared_mem = wp.array(ptr=get_shared_memory_pointer_140_contacts(), shape=(140,), dtype=ContactStruct)
+        active_contacts_shared_mem = wp.array(
+            ptr=wp.static(get_smem_slots_plus_1)(),
+            shape=(wp.static(num_reduction_slots) + 1,),
+            dtype=wp.int32,
+        )
+        contacts_shared_mem = wp.array(
+            ptr=wp.static(get_smem_slots_contacts)(),
+            shape=(wp.static(num_reduction_slots),),
+            dtype=ContactStruct,
+        )
 
-        for i in range(t, 140, wp.block_dim()):
+        for i in range(t, wp.static(num_reduction_slots), wp.block_dim()):
             contacts_shared_mem[i].projection = empty_marker
 
         if t == 0:
-            active_contacts_shared_mem[140] = 0
+            active_contacts_shared_mem[wp.static(num_reduction_slots)] = 0
 
         # Initialize (shared memory) buffers for triangle selection
         tri_capacity = wp.block_dim()
@@ -758,6 +775,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 0  # Stores the number of triangles from the mesh that were already investigated
             )
 
+        # Compute transform from mesh B (SDF B) space to mesh A space for mode 0
+        # Mode 0: contact in SDF B space -> mesh A space
+        # Mode 1: contact already in SDF A space = mesh A space
+        X_sdf_b_to_mesh_a = wp.transform_multiply(wp.transform_inverse(mesh0_transform), mesh1_transform)
+
         for mode in range(2):
             synchronize()
             if mode == 0:
@@ -765,13 +787,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 mesh_scale = mesh0_scale
                 mesh_sdf_transform = wp.transform_multiply(wp.transform_inverse(mesh1_transform), mesh0_transform)
                 sdf_data_current = sdf_data1
-                sdf_transform = mesh1_transform
             else:
                 mesh = mesh1
                 mesh_scale = mesh1_scale
                 mesh_sdf_transform = wp.transform_multiply(wp.transform_inverse(mesh0_transform), mesh1_transform)
                 sdf_data_current = sdf_data0
-                sdf_transform = mesh0_transform
 
             # Reset progress counter for this mesh
             if t == 0:
@@ -809,23 +829,29 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     has_contact = dist < margin
 
                     if has_contact:
-                        # Transform to world space BEFORE storing in reduction buffer
-                        # This is critical because contacts from mode 0 and mode 1 are in
-                        # different local coordinate systems (SDF B space vs SDF A space)
-                        point_world = wp.transform_point(sdf_transform, point)
-                        dir_world = wp.transform_vector(sdf_transform, dir)
-                        dir_len = wp.length(dir_world)
+                        # Transform to mesh A's body frame for consistent reduction
+                        # This ensures spatial dot products have consistent scale regardless of world position
+                        # Mode 0: contact in SDF B space -> transform to mesh A space
+                        # Mode 1: contact already in SDF A space = mesh A space (no transform needed)
+                        if mode == 0:
+                            point_body = wp.transform_point(X_sdf_b_to_mesh_a, point)
+                            dir_body = wp.transform_vector(X_sdf_b_to_mesh_a, dir)
+                        else:
+                            point_body = point
+                            dir_body = dir
+
+                        dir_len = wp.length(dir_body)
                         if dir_len > 0.0:
-                            dir_world = dir_world / dir_len
+                            dir_body = dir_body / dir_len
 
                         # Normalize normal direction so it always points from pair[0] to pair[1]
                         # Mode 0: gradient points B->A (pair[1]->pair[0]), negate to get pair[0]->pair[1]
                         # Mode 1: gradient points A->B (pair[0]->pair[1]), already correct
                         if mode == 0:
-                            dir_world = -dir_world
+                            dir_body = -dir_body
 
-                        c.position = point_world
-                        c.normal = dir_world  # Store normalized world-space normal pointing pair[0]->pair[1]
+                        c.position = point_body
+                        c.normal = dir_body  # Store normalized body-space normal pointing pair[0]->pair[1]
                         c.depth = dist
                         # Encode mode into feature to distinguish triangles from mesh0 vs mesh1
                         # Mode 0: positive triangle index, Mode 1: negative (-(index+1))
@@ -833,8 +859,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         c.feature = tri_idx if mode == 0 else -(tri_idx + 1)
                         c.projection = empty_marker
 
-                store_reduced_contact(
-                    t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, 140, empty_marker
+                store_reduced_contact_func(
+                    t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, betas, empty_marker
                 )
 
                 # Reset buffer for next batch
@@ -844,24 +870,33 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 synchronize()
 
         # Now write the reduced contacts to the output array
-        # Contacts are already in world space (transformed before storing in reduction buffer)
+        # Contacts are in mesh A's body frame - transform back to world space
         # All contacts use consistent convention: shape_a = pair[0], shape_b = pair[1],
         # normal points from pair[0] to pair[1]
         synchronize()
 
         # Filter out duplicate contacts (same contact may have won multiple directions)
-        filter_unique_contacts(t, contacts_shared_mem, active_contacts_shared_mem, 140, empty_marker)
+        filter_unique_contacts_func(t, contacts_shared_mem, active_contacts_shared_mem, num_betas, empty_marker)
 
-        num_contacts_to_keep = wp.min(active_contacts_shared_mem[140], 140)
+        num_contacts_to_keep = wp.min(
+            active_contacts_shared_mem[wp.static(num_reduction_slots)], wp.static(num_reduction_slots)
+        )
 
         for i in range(t, num_contacts_to_keep, wp.block_dim()):
             contact_id = active_contacts_shared_mem[i]
             contact = contacts_shared_mem[contact_id]
 
-            # Create contact data - contacts are already in world space
+            # Transform from mesh A's body frame back to world space
+            point_world = wp.transform_point(mesh0_transform, contact.position)
+            normal_world = wp.transform_vector(mesh0_transform, contact.normal)
+            normal_len = wp.length(normal_world)
+            if normal_len > 0.0:
+                normal_world = normal_world / normal_len
+
+            # Create contact data
             contact_data = ContactData()
-            contact_data.contact_point_center = contact.position
-            contact_data.contact_normal_a_to_b = contact.normal  # Already normalized and pointing pair[0]->pair[1]
+            contact_data.contact_point_center = point_world
+            contact_data.contact_normal_a_to_b = normal_world  # Normalized and pointing pair[0]->pair[1]
             contact_data.contact_distance = contact.depth
             contact_data.radius_eff_a = 0.0
             contact_data.radius_eff_b = 0.0

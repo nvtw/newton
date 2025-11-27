@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import numpy as np
 import warp as wp
 
 
@@ -380,186 +381,34 @@ def get_slot(normal: wp.vec3) -> int:
     return best_slot
 
 
-NUM_REDUCTION_SLOTS = 140  # 20 icosahedron faces x 7 directions
+NUM_SPATIAL_DIRECTIONS = 6  # Triangle edge directions
+NUM_NORMAL_BINS = 20  # Icosahedron faces
 
 
-@wp.func
-def store_reduced_contact(
-    thread_id: int,
-    active: bool,
-    c: ContactStruct,  # Contact data
-    buffer: wp.array(dtype=ContactStruct),  # Contact buffer
-    active_ids: wp.array(dtype=int),
-    buffer_capacity: int,
-    empty_marker: float,
-):
-    """Store contact in linear array using direct atomic reduction.
-
-    OPTIMIZED VERSION: Uses 140 atomic slots (20 slots x 7 directions) with
-    minimal synchronization. Only 3 sync barriers instead of 22+.
+def compute_num_reduction_slots(num_betas: int) -> int:
+    """Compute the number of reduction slots for a given number of beta values.
 
     Args:
-        thread_id: Thread index within the block
-        active: Whether this thread has an active contact
-        c: Contact data for this thread
-        buffer: Output buffer for reduced contacts
-        active_ids: Array to store active slot IDs
-        empty_marker: Marker value for empty slots
+        num_betas: Number of beta values
+
+    Returns:
+        Total number of reduction slots (20 bins * 6 directions * num_betas)
     """
-    # Get shared memory for atomic winner tracking (140 uint64 slots)
-    winner_slots = wp.array(
-        ptr=get_shared_memory_pointer_140_uint64(),
-        shape=(NUM_REDUCTION_SLOTS,),
-        dtype=wp.uint64,
-    )
-
-    # Initialize shared memory - all threads participate for speed
-    for i in range(thread_id, NUM_REDUCTION_SLOTS, wp.block_dim()):
-        winner_slots[i] = wp.uint64(0)
-
-    synchronize()  # SYNC 1: Ensure initialization complete
-
-    # Compute slot and base key for this contact
-    slot = 0
-    if active:
-        slot = get_slot(c.normal)
-
-    # Compute all 7 dot products and do atomic updates in ONE pass
-    # No sync needed between atomic operations!
-    if active:
-        base_key = slot * 7
-
-        # Direction 0-5: spatial extremes
-        for i in range(6):
-            scan_direction = get_scan_dir(slot, i)
-            dot = wp.dot(scan_direction, c.position)
-            packed = pack_value_thread_id(dot, thread_id)
-            atomic_max_uint64(winner_slots.ptr, base_key + i, packed)
-
-        # Direction 6: depth (minimize depth = maximize -depth)
-        dot6 = -c.depth
-        packed6 = pack_value_thread_id(dot6, thread_id)
-        atomic_max_uint64(winner_slots.ptr, base_key + 6, packed6)
-
-    synchronize()  # SYNC 2: Ensure all atomics complete
-
-    # Check if this thread won any slots and write results
-    if active:
-        base_key = slot * 7
-
-        for i in range(7):
-            key = base_key + i
-            winner_packed = winner_slots[key]
-            winner_id = unpack_thread_id(winner_packed)
-
-            if winner_id == thread_id:
-                # This thread won this slot
-                p = buffer[key].projection
-                if p == empty_marker:
-                    id = wp.atomic_add(active_ids, buffer_capacity, 1)
-                    if id < buffer_capacity:
-                        active_ids[id] = key
-
-                # Compute the dot product again for storage
-                if i == 6:
-                    dot = -c.depth
-                else:
-                    scan_direction = get_scan_dir(slot, i)
-                    dot = wp.dot(scan_direction, c.position)
-
-                if dot > p:
-                    c.projection = dot
-                    buffer[key] = c
-
-    synchronize()  # SYNC 3: Ensure writes complete before next batch
+    return NUM_NORMAL_BINS * NUM_SPATIAL_DIRECTIONS * num_betas
 
 
-@wp.func
-def filter_unique_contacts(
-    thread_id: int,
-    buffer: wp.array(dtype=ContactStruct),
-    active_ids: wp.array(dtype=int),
-    buffer_capacity: int,
-    empty_marker: float,
-):
-    """Filter out duplicate contacts after reduction, keeping only unique ones.
-
-    A contact is considered a duplicate if it has the same feature (triangle index).
-    For duplicates, we deterministically keep the one with the LOWEST slot key.
-
-    OPTIMIZATION: Each of the 20 normal bins has exactly 7 directions (keys).
-    Thread t (where t < 20) handles normal bin t, checking all 7 keys at once.
-    This is O(20 * 7) = O(140) work total, parallelized across 20 threads.
-
-    This function modifies active_ids in-place:
-    - Rebuilds active_ids with only unique contacts
-    - Updates the count at active_ids[buffer_capacity]
-
-    Must be called after store_reduced_contact and a synchronize().
+def create_betas_array(betas: tuple = (10.0, 1000000.0), device=None) -> wp.array:
+    """Create a warp array with the beta values for contact reduction.
 
     Args:
-        thread_id: Thread index within the block
-        buffer: Contact buffer (read-only in this function)
-        active_ids: Array of active slot IDs, with count at index buffer_capacity
-        buffer_capacity: Capacity of the buffer (140)
-        empty_marker: Value used to mark empty slots (same as passed to store_reduced_contact)
+        betas: Tuple of beta values (default: (10.0, 1000000.0))
+        device: Device to create the array on (default: current device)
+
+    Returns:
+        wp.array of shape (num_betas,) with dtype float32
     """
-    # Use shared memory for keep_flags[0..139]: 1 if key should be kept, 0 if duplicate
-    keep_flags = wp.array(
-        ptr=get_shared_memory_pointer_140_keep_flags(),
-        shape=(NUM_REDUCTION_SLOTS,),
-        dtype=wp.int32,
-    )
-
-    # Initialize: mark all as not-kept (0), we'll set to 1 for unique contacts
-    for i in range(thread_id, NUM_REDUCTION_SLOTS, wp.block_dim()):
-        keep_flags[i] = 0
-
-    synchronize()
-
-    # Each thread 0-19 handles one normal bin (20 bins total)
-    # Thread t checks keys [t*7, t*7+6] and deduplicates by feature
-    if thread_id < 20:
-        bin_id = thread_id
-        base_key = bin_id * 7
-
-        # For each direction in this bin, check if there's valid data
-        for dir_i in range(7):
-            key_i = base_key + dir_i
-            proj_i = buffer[key_i].projection
-
-            # Check if this key has valid contact data (not empty)
-            if proj_i > empty_marker:
-                feature_i = buffer[key_i].feature
-
-                # Check if an earlier direction in this bin has same feature
-                is_duplicate = int(0)
-                for dir_j in range(dir_i):
-                    key_j = base_key + dir_j
-                    proj_j = buffer[key_j].projection
-
-                    if proj_j > empty_marker:
-                        feature_j = buffer[key_j].feature
-                        if feature_i == feature_j:
-                            is_duplicate = 1
-
-                # Keep if not a duplicate (first occurrence of this feature in bin)
-                if is_duplicate == 0:
-                    keep_flags[key_i] = 1
-
-    synchronize()
-
-    # Rebuild active_ids with only unique contacts
-    # Thread 0 does serial compaction for correctness and determinism
-    if thread_id == 0:
-        write_idx = int(0)
-        for key in range(NUM_REDUCTION_SLOTS):
-            if keep_flags[key] == 1:
-                active_ids[write_idx] = key
-                write_idx = write_idx + 1
-        active_ids[buffer_capacity] = write_idx
-
-    synchronize()
+    betas_np = np.array(betas, dtype=np.float32)
+    return wp.array(betas_np, dtype=wp.float32, device=device)
 
 
 def create_shared_memory_pointer_func_4_byte_aligned(
@@ -612,15 +461,6 @@ def create_shared_memory_pointer_func_8_byte_aligned(
     return get_shared_memory_pointer
 
 
-# Create the specific functions used in the codebase
-get_shared_memory_pointer_141_ints = create_shared_memory_pointer_func_4_byte_aligned(141)
-get_shared_memory_pointer_140_contacts = create_shared_memory_pointer_func_4_byte_aligned(140 * 9)
-# Shared memory for 140 reduction slots (20 faces x 7 directions) - 140 uint64
-get_shared_memory_pointer_140_uint64 = create_shared_memory_pointer_func_8_byte_aligned(NUM_REDUCTION_SLOTS)
-# Shared memory for keep flags used by filter_unique_contacts (140 ints)
-get_shared_memory_pointer_140_keep_flags = create_shared_memory_pointer_func_4_byte_aligned(NUM_REDUCTION_SLOTS)
-
-
 def create_shared_memory_pointer_block_dim_func(
     add: int,
 ):
@@ -644,6 +484,152 @@ def create_shared_memory_pointer_block_dim_func(
     def get_shared_memory_pointer() -> wp.uint64: ...
 
     return get_shared_memory_pointer
+
+
+class ContactReductionFunctions:
+    """Contact reduction functions for a specific beta configuration.
+
+    Args:
+        betas: Tuple of beta values for combined score = spatial_dp + beta * depth.
+    """
+
+    def __init__(self, betas: tuple = (10.0, 1000000.0)):
+        self.betas = betas
+        self.num_betas = len(betas)
+        self.num_reduction_slots = compute_num_reduction_slots(self.num_betas)
+
+        # Shared memory pointers
+        self.get_smem_slots_plus_1 = create_shared_memory_pointer_func_4_byte_aligned(self.num_reduction_slots + 1)
+        self.get_smem_slots_contacts = create_shared_memory_pointer_func_4_byte_aligned(self.num_reduction_slots * 9)
+        self.get_smem_reduction = create_shared_memory_pointer_func_8_byte_aligned(self.num_reduction_slots)
+
+        # Warp functions
+        self.store_reduced_contact = self._create_store_reduced_contact()
+        self.filter_unique_contacts = self._create_filter_unique_contacts()
+
+    def create_betas_array(self, device=None) -> wp.array:
+        """Create a warp array with the beta values."""
+        return create_betas_array(self.betas, device)
+
+    def _create_store_reduced_contact(self):
+        """Create store_reduced_contact @wp.func."""
+        num_reduction_slots = self.num_reduction_slots
+        get_smem = self.get_smem_reduction
+
+        @wp.func
+        def store_reduced_contact(
+            thread_id: int,
+            active: bool,
+            c: ContactStruct,
+            buffer: wp.array(dtype=ContactStruct),
+            active_ids: wp.array(dtype=int),
+            betas_arr: wp.array(dtype=wp.float32),
+            empty_marker: float,
+        ):
+            """Store contact using atomic reduction. Score = spatial_dp - beta * depth."""
+            num_betas_runtime = betas_arr.shape[0]
+            slots_per_bin = NUM_SPATIAL_DIRECTIONS * num_betas_runtime
+            num_slots = NUM_NORMAL_BINS * slots_per_bin
+
+            winner_slots = wp.array(
+                ptr=wp.static(get_smem)(),
+                shape=(wp.static(num_reduction_slots),),
+                dtype=wp.uint64,
+            )
+
+            for i in range(thread_id, num_slots, wp.block_dim()):
+                winner_slots[i] = wp.uint64(0)
+            synchronize()
+
+            bin_id = 0
+            if active:
+                bin_id = get_slot(c.normal)
+
+            if active:
+                base_key = bin_id * slots_per_bin
+                for dir_i in range(NUM_SPATIAL_DIRECTIONS):
+                    scan_dir = get_scan_dir(bin_id, dir_i)
+                    spatial_dp = wp.dot(scan_dir, c.position)
+                    for beta_i in range(num_betas_runtime):
+                        score = spatial_dp - betas_arr[beta_i] * c.depth
+                        key = base_key + dir_i * num_betas_runtime + beta_i
+                        atomic_max_uint64(winner_slots.ptr, key, pack_value_thread_id(score, thread_id))
+            synchronize()
+
+            if active:
+                base_key = bin_id * slots_per_bin
+                for dir_i in range(NUM_SPATIAL_DIRECTIONS):
+                    scan_dir = get_scan_dir(bin_id, dir_i)
+                    spatial_dp = wp.dot(scan_dir, c.position)
+                    for beta_i in range(num_betas_runtime):
+                        key = base_key + dir_i * num_betas_runtime + beta_i
+                        if unpack_thread_id(winner_slots[key]) == thread_id:
+                            p = buffer[key].projection
+                            if p == empty_marker:
+                                id = wp.atomic_add(active_ids, num_slots, 1)
+                                if id < num_slots:
+                                    active_ids[id] = key
+                            score = spatial_dp - betas_arr[beta_i] * c.depth
+                            if score > p:
+                                c.projection = score
+                                buffer[key] = c
+            synchronize()
+
+        return store_reduced_contact
+
+    def _create_filter_unique_contacts(self):
+        """Create filter_unique_contacts @wp.func."""
+        num_reduction_slots = self.num_reduction_slots
+        get_smem = self.get_smem_reduction
+
+        @wp.func
+        def filter_unique_contacts(
+            thread_id: int,
+            buffer: wp.array(dtype=ContactStruct),
+            active_ids: wp.array(dtype=int),
+            num_betas_param: int,
+            empty_marker: float,
+        ):
+            """Filter duplicate contacts, keeping first occurrence per feature."""
+            slots_per_bin = NUM_SPATIAL_DIRECTIONS * num_betas_param
+            num_slots = NUM_NORMAL_BINS * slots_per_bin
+
+            keep_flags = wp.array(
+                ptr=wp.static(get_smem)(),
+                shape=(wp.static(num_reduction_slots),),
+                dtype=wp.int32,
+            )
+
+            for i in range(thread_id, num_slots, wp.block_dim()):
+                keep_flags[i] = 0
+            synchronize()
+
+            if thread_id < NUM_NORMAL_BINS:
+                bin_id = thread_id
+                base_key = bin_id * slots_per_bin
+                for slot_i in range(slots_per_bin):
+                    key_i = base_key + slot_i
+                    if buffer[key_i].projection > empty_marker:
+                        feature_i = buffer[key_i].feature
+                        is_dup = int(0)
+                        for slot_j in range(slot_i):
+                            key_j = base_key + slot_j
+                            if buffer[key_j].projection > empty_marker and buffer[key_j].feature == feature_i:
+                                is_dup = 1
+                        if is_dup == 0:
+                            keep_flags[key_i] = 1
+            synchronize()
+
+            if thread_id == 0:
+                write_idx = int(0)
+                for key in range(num_slots):
+                    if keep_flags[key] == 1:
+                        active_ids[write_idx] = key
+                        write_idx += 1
+                active_ids[num_slots] = write_idx
+            synchronize()
+
+        return filter_unique_contacts
 
 
 get_shared_memory_pointer_block_dim_plus_2_ints = create_shared_memory_pointer_block_dim_func(2)
