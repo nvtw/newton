@@ -491,12 +491,7 @@ class ModelBuilder:
         # world index for each shape
         self.shape_world = []
 
-        # Mesh SDF storage
-        self.shape_sdf_ptr = []
-        self.shape_sdf_volume = []
-        self.shape_sdf_voxel_size = []
-        self.shape_sdf_center = []
-        self.shape_sdf_half_extents = []
+        # Mesh SDF storage (volumes kept for reference counting, SDFData array created at finalize)
 
         # filtering to ignore certain collision pairs
         self.shape_collision_filter_pairs: list[tuple[int, int]] = []
@@ -4945,53 +4940,51 @@ class ModelBuilder:
 
             # ---------------------
             # Compute SDFs for mesh shapes
-            from ..geometry.sdf_utils import compute_sdf  # noqa: PLC0415
+            from ..geometry.sdf_utils import SDFData, compute_sdf  # noqa: PLC0415
             from ..geometry.types import GeoType  # noqa: PLC0415
 
-            sdf_ptrs = []
+            sdf_data_list = []
+            # Keep volume objects alive for reference counting
             sdf_volumes = []
-            sdf_voxel_sizes = []
-            sdf_centers = []
-            sdf_half_extents = []
+            sdf_coarse_volumes = []
 
-            for _, (shape_type, shape_src, shape_flags, shape_scale, shape_thickness) in enumerate(
+            for _, (shape_type, shape_src, shape_flags, shape_thickness) in enumerate(
                 zip(
                     self.shape_type,
                     self.shape_source,
                     self.shape_flags,
-                    self.shape_scale,
                     self.shape_thickness,
                     strict=False,
                 )
             ):
                 if shape_type == GeoType.MESH and shape_src is not None:
-                    # Compute SDF for this mesh shape
-                    volume, volume_id, voxel_size, extents, _ = compute_sdf(
+                    # Compute SDF for this mesh shape (returns SDFData struct and volume objects)
+                    sdf_data, sparse_volume, coarse_volume = compute_sdf(
                         shape_flags=shape_flags,
-                        shape_scale=shape_scale,
                         shape_thickness=shape_thickness,
                         mesh_src=shape_src,
                         device=device,
                     )
-                    sdf_ptrs.append(volume_id)
-                    sdf_volumes.append(volume)
-                    sdf_voxel_sizes.append(voxel_size)
-                    # extents is a list [center, half_extents]
-                    sdf_centers.append(extents[0])
-                    sdf_half_extents.append(extents[1])
+                    sdf_volumes.append(sparse_volume)
+                    sdf_coarse_volumes.append(coarse_volume)
                 else:
-                    # Non-mesh shapes get placeholder values
-                    sdf_ptrs.append(0)
+                    # Non-mesh shapes get empty SDFData
+                    sdf_data = SDFData()
+                    sdf_data.sparse_sdf_ptr = wp.uint64(0)
+                    sdf_data.sparse_voxel_size = wp.vec3(0.0, 0.0, 0.0)
+                    sdf_data.coarse_sdf_ptr = wp.uint64(0)
+                    sdf_data.coarse_voxel_size = wp.vec3(0.0, 0.0, 0.0)
+                    sdf_data.center = wp.vec3(0.0, 0.0, 0.0)
+                    sdf_data.half_extents = wp.vec3(0.0, 0.0, 0.0)
                     sdf_volumes.append(None)
-                    sdf_voxel_sizes.append(wp.vec3(0.0, 0.0, 0.0))
-                    sdf_centers.append(wp.vec3(0.0, 0.0, 0.0))
-                    sdf_half_extents.append(wp.vec3(0.0, 0.0, 0.0))
+                    sdf_coarse_volumes.append(None)
+                sdf_data_list.append(sdf_data)
 
-            m.shape_sdf_ptr = wp.array(sdf_ptrs, dtype=wp.uint64)
+            # Create array of SDFData structs
+            m.shape_sdf_data = wp.array(sdf_data_list, dtype=SDFData, device=device)
+            # Keep volume objects alive for reference counting
             m.shape_sdf_volume = sdf_volumes
-            m.shape_sdf_voxel_size = wp.array(sdf_voxel_sizes, dtype=wp.vec3)
-            m.shape_sdf_center = wp.array(sdf_centers, dtype=wp.vec3)
-            m.shape_sdf_half_extents = wp.array(sdf_half_extents, dtype=wp.vec3)
+            m.shape_sdf_coarse_volume = sdf_coarse_volumes
 
             # ---------------------
             # springs

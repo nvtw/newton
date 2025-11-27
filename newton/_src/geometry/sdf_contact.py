@@ -21,6 +21,7 @@ from ..geometry.collision_core import (
     build_pair_key2,
 )
 from ..geometry.contact_data import ContactData
+from ..geometry.sdf_utils import SDFData
 
 # Handle both direct execution and module import
 try:
@@ -592,166 +593,6 @@ def findInterestingTriangles(
 
     synchronize()  # Final sync before returning
 
-def create_SdfMeshCollision(tile_size: int):
-    """
-    Create a warp kernel for triangle-SDF collision detection between mesh pairs.
-
-    Args:
-        tile_size: Tile size for contact reduction (must match contact reduction kernel)
-
-    Returns:
-        A warp kernel that processes mesh-SDF collision pairs in parallel.
-    """
-
-    @wp.kernel
-    def do_sdf_mesh_collision(
-        mesh_source: wp.array(dtype=wp.uint64),
-        mesh_scales: wp.array(dtype=wp.vec3),
-        mesh_transforms: wp.array(dtype=wp.transform),
-        sdf_source: wp.array(dtype=wp.uint64),
-        pairs: wp.array(dtype=wp.vec2i),
-        pair_count: wp.array(dtype=int),
-        contact_margin: wp.array(dtype=float),
-        # Outputs
-        out_contacts: wp.array(dtype=ContactStruct),
-        out_count: wp.array(dtype=int),
-    ):
-        """
-        Detect contacts between triangle meshes and SDF volumes for collision pairs.
-
-        Each thread block processes one collision pair. For each pair, triangles from
-        mesh0 are tested against volume1, then triangles from mesh1 are tested against
-        volume0. Contacts are reduced and written to the output array.
-
-        Args:
-            mesh_source: Array of mesh IDs
-            mesh_scales: Per-mesh scale factors
-            mesh_transforms: Per-mesh world transforms
-            volume_source: Array of SDF volume IDs
-            pairs: Array of (mesh0_idx, mesh1_idx) collision pairs
-            pair_count: Number of pairs to process
-            contact_distance: Maximum distance threshold for contacts
-            out_contacts: Output array for detected contacts (pre-allocated)
-            out_count: Single-element array to store total number of contacts found
-        """
-        block_id, t = wp.tid()
-        num_pairs = pair_count[0]
-        if block_id >= num_pairs:
-            return
-
-        pair = pairs[block_id]
-        mesh0 = mesh_source[pair[0]]
-        mesh1 = mesh_source[pair[1]]
-        sdf0 = sdf_source[pair[0]]
-        sdf1 = sdf_source[pair[1]]
-
-        # Extract mesh parameters
-        mesh0_scale = mesh_scales[pair[0]]
-        mesh1_scale = mesh_scales[pair[1]]
-        mesh0_transform = mesh_transforms[pair[0]]
-        mesh1_transform = mesh_transforms[pair[1]]
-
-        margin = wp.max(contact_margin[pair[0]], contact_margin[pair[1]])
-
-        # Initialize (shared memory) buffers for contact reduction
-        empty_marker = -1000000000.0
-        has_contact = True
-
-        active_contacts_shared_mem = wp.array(ptr=get_shared_memory_pointer_141_ints(), shape=(141,), dtype=wp.int32)
-        contacts_shared_mem = wp.array(ptr=get_shared_memory_pointer_140_contacts(), shape=(140,), dtype=ContactStruct)
-
-        for i in range(t, 140, wp.block_dim()):
-            contacts_shared_mem[i].projection = empty_marker
-
-        if t == 0:
-            active_contacts_shared_mem[140] = 0
-
-        # Initialize (shared memory) buffers for triangle selection
-        tri_capacity = wp.block_dim()
-        selected_triangles = wp.array(
-            ptr=get_shared_memory_pointer_block_dim_plus_2_ints(), shape=(wp.block_dim() + 2,), dtype=wp.int32
-        )
-
-        if t == 0:
-            selected_triangles[tri_capacity] = 0  # Stores the number of indices inside selected_triangles
-            selected_triangles[tri_capacity + 1] = (
-                0  # Stores the number of triangles from the mesh that were already investigated
-            )
-
-        for mode in range(2):
-            synchronize()
-            if mode == 0:
-                mesh = mesh0
-                mesh_scale = mesh0_scale
-                mesh_sdf_transform = wp.transform_compose(wp.transform_inverse(mesh1_transform), mesh0_transform)
-                sdf_current = sdf1
-            else:
-                mesh = mesh1
-                mesh_scale = mesh1_scale
-                mesh_sdf_transform = wp.transform_compose(wp.transform_inverse(mesh0_transform), mesh1_transform)
-                sdf_current = sdf0
-
-            # Reset progress counter for this mesh
-            if t == 0:
-                selected_triangles[tri_capacity + 1] = 0
-            synchronize()
-
-            while selected_triangles[tri_capacity + 1] < wp.mesh_get(mesh).num_tris:
-                findInterestingTriangles(
-                    t,
-                    mesh_scale,
-                    mesh_sdf_transform,
-                    mesh,
-                    sdf_current,
-                    selected_triangles,
-                    margin,
-                )
-
-                has_contact = t < selected_triangles[tri_capacity]
-                c = ContactStruct()
-
-                if has_contact:
-                    v0, v1, v2 = get_triangle_from_mesh(mesh, mesh_scale, mesh_sdf_transform, selected_triangles[t])
-                    dist, point, dir = doTriangleSDFCollision(
-                        sdf_current,
-                        v0,
-                        v1,
-                        v2,
-                    )
-
-                    c.position = point
-                    c.normal = dir
-                    c.depth = dist
-                    c.feature = 0
-                    c.projection = empty_marker
-
-                    has_contact = dist < margin
-
-                synchronize()
-                store_reduced_contact(
-                    t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, 140, empty_marker
-                )
-
-                # Reset buffer for next batch
-                synchronize()
-                if t == 0:
-                    selected_triangles[tri_capacity] = 0
-                synchronize()
-
-        # Now write the reduced contacts to the output array
-        num_contacts_to_keep = wp.min(active_contacts_shared_mem[140], 140)
-
-        # Thread 0 writes the count
-        if t == 0:
-            out_count[0] = num_contacts_to_keep  # TODO: Atomic?
-
-        # All threads cooperatively write the contacts
-        for i in range(t, num_contacts_to_keep, wp.block_dim()):
-            contact_id = active_contacts_shared_mem[i]
-            out_contacts[i] = contacts_shared_mem[contact_id]
-
-    return do_sdf_mesh_collision
-
 
 def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     writer_func: Any, tile_size: int, reduce_contacts: bool = False
@@ -761,7 +602,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         shape_data: wp.array(dtype=wp.vec4),
         shape_transform: wp.array(dtype=wp.transform),
         shape_source: wp.array(dtype=wp.uint64),
-        shape_sdf: wp.array(dtype=wp.uint64),
+        shape_sdf_data: wp.array(dtype=SDFData),
         shape_contact_margin: wp.array(dtype=float),
         shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_mesh_count: wp.array(dtype=int),
@@ -779,7 +620,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
             geom_data: Array of vec4 containing scale (xyz) and thickness (w) for each shape
             geom_transform: Array of world-space transforms for each shape
             geom_source: Array of source pointers (mesh IDs) for each shape
-            geom_sdf: Array of SDF volume IDs for mesh shapes
+            shape_sdf_data: Array of SDFData structs for mesh shapes
             geom_cutoff: Array of cutoff distances for each shape
             shape_pairs_mesh_mesh: Array of mesh-mesh pairs to process
             shape_pairs_mesh_mesh_count: Number of mesh-mesh pairs
@@ -799,8 +640,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
             # Get mesh and SDF IDs
             mesh_id_a = shape_source[mesh_shape_a]
             mesh_id_b = shape_source[mesh_shape_b]
-            sdf_ptr_a = shape_sdf[mesh_shape_a]
-            sdf_ptr_b = shape_sdf[mesh_shape_b]
+            sdf_ptr_a = shape_sdf_data[mesh_shape_a].sparse_sdf_ptr
+            sdf_ptr_b = shape_sdf_data[mesh_shape_b].sparse_sdf_ptr
 
             # Skip if either mesh is invalid
             if mesh_id_a == wp.uint64(0) or mesh_id_b == wp.uint64(0):
@@ -915,7 +756,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         shape_data: wp.array(dtype=wp.vec4),
         shape_transform: wp.array(dtype=wp.transform),
         shape_source: wp.array(dtype=wp.uint64),
-        shape_sdf: wp.array(dtype=wp.uint64),
+        shape_sdf_data: wp.array(dtype=SDFData),
         shape_contact_margin: wp.array(dtype=float),
         shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_mesh_count: wp.array(dtype=int),
@@ -930,8 +771,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         pair = shape_pairs_mesh_mesh[block_id]
         mesh0 = shape_source[pair[0]]
         mesh1 = shape_source[pair[1]]
-        sdf0 = shape_sdf[pair[0]]
-        sdf1 = shape_sdf[pair[1]]
+        sdf0 = shape_sdf_data[pair[0]].sparse_sdf_ptr
+        sdf1 = shape_sdf_data[pair[1]].sparse_sdf_ptr
 
         # Extract mesh parameters
         mesh0_data = shape_data[pair[0]]
@@ -970,7 +811,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
             selected_triangles[tri_capacity + 1] = (
                 0  # Stores the number of triangles from the mesh that were already investigated
             )
-
 
         for mode in range(2):
             synchronize()

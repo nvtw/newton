@@ -40,6 +40,7 @@ from ..geometry.contact_reduction import (
     synchronize,
 )
 from ..geometry.sdf_contact import create_narrow_phase_process_mesh_mesh_contacts_kernel
+from ..geometry.sdf_utils import SDFData
 from ..geometry.support_function import (
     GenericShapeData,
     SupportMapDataProvider,
@@ -804,7 +805,7 @@ class NarrowPhase:
         shape_data: wp.array(dtype=wp.vec4, ndim=1),  # Shape data (scale xyz, thickness w)
         shape_transform: wp.array(dtype=wp.transform, ndim=1),  # In world space
         shape_source: wp.array(dtype=wp.uint64, ndim=1),  # The index into the source array, type define by shape_types
-        shape_sdf: wp.array(dtype=wp.uint64, ndim=1),  # SDF volume pointers for mesh shapes
+        shape_sdf_data: wp.array(dtype=SDFData, ndim=1),  # SDF data structs for mesh shapes
         shape_contact_margin: wp.array(dtype=wp.float32, ndim=1),  # per-shape contact margin
         shape_collision_radius: wp.array(dtype=wp.float32, ndim=1),  # per-shape collision radius for AABB fallback
         writer_data: Any,
@@ -820,7 +821,7 @@ class NarrowPhase:
             shape_data: Array of vec4 containing scale (xyz) and thickness (w) for each shape
             shape_transform: Array of world-space transforms for each shape
             shape_source: Array of source pointers (mesh IDs, etc.) for each shape
-            shape_sdf: Array of SDF volume pointers for mesh shapes
+            shape_sdf_data: Array of SDFData structs for mesh shapes
             shape_contact_margin: Array of contact margins for each shape
             shape_collision_radius: Array of collision radii for each shape (for AABB fallback for planes/meshes)
             writer_data: Custom struct instance for contact writing (type must match the custom writer function)
@@ -937,7 +938,7 @@ class NarrowPhase:
                 shape_data,
                 shape_transform,
                 shape_source,
-                shape_sdf,
+                shape_sdf_data,
                 shape_contact_margin,
                 self.shape_pairs_mesh_mesh,
                 self.shape_pairs_mesh_mesh_count,
@@ -956,7 +957,7 @@ class NarrowPhase:
         shape_data: wp.array(dtype=wp.vec4, ndim=1),  # Shape data (scale xyz, thickness w)
         shape_transform: wp.array(dtype=wp.transform, ndim=1),  # In world space
         shape_source: wp.array(dtype=wp.uint64, ndim=1),  # The index into the source array, type define by shape_types
-        shape_sdf: wp.array(dtype=wp.uint64, ndim=1),  # SDF volume pointers for mesh shapes
+        shape_sdf_data: wp.array(dtype=SDFData, ndim=1),  # SDF data structs for mesh shapes
         shape_contact_margin: wp.array(dtype=wp.float32, ndim=1),  # per-shape contact margin
         shape_collision_radius: wp.array(dtype=wp.float32, ndim=1),  # per-shape collision radius for AABB fallback
         # Outputs
@@ -983,7 +984,7 @@ class NarrowPhase:
             shape_data: Array of vec4 containing scale (xyz) and thickness (w) for each shape
             shape_transform: Array of world-space transforms for each shape
             shape_source: Array of source pointers (mesh IDs, etc.) for each shape
-            shape_sdf: Array of SDF volume pointers for mesh shapes
+            shape_sdf_data: Array of SDFData structs for mesh shapes
             shape_contact_margin: Array of contact margins for each shape
             shape_collision_radius: Array of collision radii for each shape (for AABB fallback for planes/meshes)
             contact_pair: Output array for contact shape pairs
@@ -1040,7 +1041,7 @@ class NarrowPhase:
             shape_data,
             shape_transform,
             shape_source,
-            shape_sdf,
+            shape_sdf_data,
             shape_contact_margin,
             shape_collision_radius,
             writer_data,

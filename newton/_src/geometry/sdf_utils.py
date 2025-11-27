@@ -6,6 +6,27 @@ import warp as wp
 from .flags import ShapeFlags
 
 
+@wp.struct
+class SDFData:
+    """Encapsulates all data needed for SDF-based collision detection.
+
+    Contains both sparse (narrow band) and coarse (background) SDF volumes
+    with the same spatial extents but different resolutions.
+    """
+
+    # Sparse (narrow band) SDF - high resolution near surface
+    sparse_sdf_ptr: wp.uint64
+    sparse_voxel_size: wp.vec3
+
+    # Coarse (background) SDF - 8x8x8 covering entire volume
+    coarse_sdf_ptr: wp.uint64
+    coarse_voxel_size: wp.vec3
+
+    # Shared extents (same for both volumes)
+    center: wp.vec3
+    half_extents: wp.vec3
+
+
 @wp.func
 def int_to_vec3f(x: wp.int32, y: wp.int32, z: wp.int32):
     return wp.vec3f(float(x), float(y), float(z))
@@ -54,24 +75,49 @@ def check_tile_occupied_mesh_kernel(
 
 
 def compute_sdf(
-    shape_flags,
-    shape_scale,
-    shape_thickness,
+    shape_flags: int,
+    shape_thickness: float,
     mesh_src,
     narrow_band_distance: Sequence[float] = (-0.1, 0.1),
     margin: float = 0.05,
     max_dims: int = 64,
     verbose: bool = False,
     device=None,
-):
+) -> tuple[SDFData, wp.Volume | None, wp.Volume | None]:
+    """Compute sparse and coarse SDF volumes for a mesh.
+
+    Args:
+        shape_flags: Shape collision flags (ShapeFlags bitmask)
+        shape_thickness: Thickness offset to subtract from SDF values
+        mesh_src: Mesh source with vertices and indices
+        narrow_band_distance: Tuple of (inner, outer) distances for narrow band
+        margin: Margin to add to bounding box
+        max_dims: Maximum dimension for sparse SDF grid
+        verbose: Print debug info
+        device: Warp device
+
+    Returns:
+        Tuple of (sdf_data, sparse_volume, coarse_volume) where:
+        - sdf_data: SDFData struct with pointers and extents
+        - sparse_volume: wp.Volume object for sparse SDF (keep alive for reference counting)
+        - coarse_volume: wp.Volume object for coarse SDF (keep alive for reference counting)
+    """
     assert isinstance(narrow_band_distance, Sequence), "narrow_band_distance must be a tuple of two floats"
     assert len(narrow_band_distance) == 2, "narrow_band_distance must be a tuple of two floats"
     assert narrow_band_distance[0] < 0.0 < narrow_band_distance[1], (
         "narrow_band_distance[0] must be less than 0.0 and narrow_band_distance[1] must be greater than 0.0"
     )
 
+    # Create empty SDFData for non-colliding shapes
     if not shape_flags & ShapeFlags.COLLIDE_SHAPES:
-        return None, 0, wp.vec3(0.0, 0.0, 0.0), [wp.vec3(0.0, 0.0, 0.0), wp.vec3(0.0, 0.0, 0.0)], []
+        sdf_data = SDFData()
+        sdf_data.sparse_sdf_ptr = wp.uint64(0)
+        sdf_data.sparse_voxel_size = wp.vec3(0.0, 0.0, 0.0)
+        sdf_data.coarse_sdf_ptr = wp.uint64(0)
+        sdf_data.coarse_voxel_size = wp.vec3(0.0, 0.0, 0.0)
+        sdf_data.center = wp.vec3(0.0, 0.0, 0.0)
+        sdf_data.half_extents = wp.vec3(0.0, 0.0, 0.0)
+        return sdf_data, None, None
 
     pos = wp.array(mesh_src.vertices, dtype=wp.vec3)
     vel = wp.zeros_like(pos)
@@ -137,22 +183,49 @@ def compute_sdf(
 
     tile_points = tile_points[tile_occupied.numpy()]
 
-    volume = wp.Volume.allocate_by_tiles(
+    sparse_volume = wp.Volume.allocate_by_tiles(
         tile_points=wp.array(tile_points, dtype=wp.vec3i),
         voxel_size=wp.vec3(actual_voxel_size),
         translation=wp.vec3(min_ext),
         bg_value=1000.0,
     )
 
-    tiles = volume.get_tiles().numpy()
-    block_coords = [wp.vec3us(t_coords) for t_coords in tiles]
-    sdf_extents = [wp.vec3(center), wp.vec3(half_extents)]
-
-    # populate the volume with the sdf values
+    # populate the sparse volume with the sdf values
     wp.launch(
         sdf_from_mesh_kernel,
         dim=(grid_dims[0], grid_dims[1], grid_dims[2]),
-        inputs=[m_id, volume.id, shape_thickness],
+        inputs=[m_id, sparse_volume.id, shape_thickness],
     )
 
-    return volume, volume.id, wp.vec3(actual_voxel_size), sdf_extents, block_coords
+    # Create coarse background SDF (8x8x8 voxels = one tile) with same extents
+    coarse_dims = 8
+    coarse_voxel_size = ext / (coarse_dims - 1)
+    coarse_tile_points = np.array([[0, 0, 0]], dtype=np.int32)
+
+    coarse_volume = wp.Volume.allocate_by_tiles(
+        tile_points=wp.array(coarse_tile_points, dtype=wp.vec3i),
+        voxel_size=wp.vec3(coarse_voxel_size),
+        translation=wp.vec3(min_ext),
+        bg_value=1000.0,
+    )
+
+    # Populate the coarse volume with SDF values
+    wp.launch(
+        sdf_from_mesh_kernel,
+        dim=(coarse_dims, coarse_dims, coarse_dims),
+        inputs=[m_id, coarse_volume.id, shape_thickness],
+    )
+
+    if verbose:
+        print(f"Coarse SDF: dims={coarse_dims}x{coarse_dims}x{coarse_dims}, voxel size: {coarse_voxel_size}")
+
+    # Create and populate SDFData struct
+    sdf_data = SDFData()
+    sdf_data.sparse_sdf_ptr = sparse_volume.id
+    sdf_data.sparse_voxel_size = wp.vec3(actual_voxel_size)
+    sdf_data.coarse_sdf_ptr = coarse_volume.id
+    sdf_data.coarse_voxel_size = wp.vec3(coarse_voxel_size)
+    sdf_data.center = wp.vec3(center)
+    sdf_data.half_extents = wp.vec3(half_extents)
+
+    return sdf_data, sparse_volume, coarse_volume

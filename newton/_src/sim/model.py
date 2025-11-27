@@ -218,16 +218,12 @@ class Model:
         """World index for each shape, shape [shape_count], int. -1 for global."""
 
         # Mesh SDF storage
-        self.shape_sdf_ptr = None
-        """SDF volume pointers for mesh shapes, shape [shape_count], uint64. 0 for non-mesh shapes."""
+        self.shape_sdf_data = None
+        """Array of SDFData structs for mesh shapes, shape [shape_count]. Contains sparse and coarse SDF pointers, extents, and voxel sizes."""
         self.shape_sdf_volume = []
-        """List of SDF volume references for mesh shapes, shape [shape_count]. None for non-mesh shapes."""
-        self.shape_sdf_voxel_size = None
-        """SDF voxel sizes for mesh shapes, shape [shape_count], vec3. Zero vector for non-mesh shapes."""
-        self.shape_sdf_center = None
-        """SDF bounding box centers for mesh shapes, shape [shape_count], vec3. Zero vector for non-mesh shapes."""
-        self.shape_sdf_half_extents = None
-        """SDF bounding box half-extents for mesh shapes, shape [shape_count], vec3. Zero vector for non-mesh shapes."""
+        """List of sparse SDF volume references for mesh shapes, shape [shape_count]. None for non-mesh shapes. Kept for reference counting."""
+        self.shape_sdf_coarse_volume = []
+        """List of coarse SDF volume references for mesh shapes, shape [shape_count]. None for non-mesh shapes. Kept for reference counting."""
 
         self.spring_indices = None
         """Particle spring indices, shape [spring_count*2], int."""
