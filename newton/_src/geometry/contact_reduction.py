@@ -474,6 +474,99 @@ def store_reduced_contact(
     synchronize()  # SYNC 3: Ensure writes complete before next batch
 
 
+@wp.func
+def is_contact_duplicate(
+    contact_i: ContactStruct,
+    contact_j: ContactStruct,
+) -> bool:
+    """Check if two contacts are duplicates (same feature/triangle index)."""
+    return contact_i.feature == contact_j.feature
+
+
+@wp.func
+def count_earlier_duplicates(
+    i: int,
+    buffer: wp.array(dtype=ContactStruct),
+    active_ids: wp.array(dtype=int),
+) -> int:
+    """Count how many earlier contacts (index < i) are duplicates of contact i."""
+    slot_i = active_ids[i]
+    contact_i = buffer[slot_i]
+    count = int(0)
+    for j in range(i):
+        slot_j = active_ids[j]
+        contact_j = buffer[slot_j]
+        if is_contact_duplicate(contact_i, contact_j):
+            count = count + 1
+    return count
+
+
+@wp.func
+def filter_unique_contacts(
+    thread_id: int,
+    buffer: wp.array(dtype=ContactStruct),
+    active_ids: wp.array(dtype=int),
+    buffer_capacity: int,
+):
+    """Filter out duplicate contacts after reduction, keeping only unique ones.
+
+    A contact is considered a duplicate if it has the same position, normal, depth,
+    and feature as another contact. For duplicates, we deterministically keep
+    the one with the LOWEST index in active_ids (which corresponds to the lowest slot ID).
+
+    This function modifies active_ids in-place:
+    - Compacts unique contacts to the front of active_ids
+    - Updates the count at active_ids[buffer_capacity]
+
+    Must be called after store_reduced_contact and a synchronize().
+
+    Args:
+        thread_id: Thread index within the block
+        buffer: Contact buffer (read-only in this function)
+        active_ids: Array of active slot IDs, with count at index buffer_capacity
+        buffer_capacity: Capacity of the buffer (140)
+    """
+    # Get the number of contacts before filtering
+    num_contacts = wp.min(active_ids[buffer_capacity], buffer_capacity)
+
+    # Use shared memory to track which contacts to keep
+    # Flag is 1 if contact should be kept (not a duplicate of an earlier contact)
+    keep_flags = wp.array(
+        ptr=get_shared_memory_pointer_140_keep_flags(),
+        shape=(NUM_REDUCTION_SLOTS,),
+        dtype=wp.int32,
+    )
+
+    # Initialize all flags to 1 (keep by default)
+    for i in range(thread_id, NUM_REDUCTION_SLOTS, wp.block_dim()):
+        keep_flags[i] = 1
+
+    synchronize()
+
+    # Each thread checks one contact to see if it's a duplicate of an earlier one
+    # A contact is a duplicate if there's an earlier contact (lower index in active_ids)
+    # with the same position, normal, depth, and feature
+    for i in range(thread_id, num_contacts, wp.block_dim()):
+        # Count duplicates that appear earlier - if any exist, this contact is a duplicate
+        if count_earlier_duplicates(i, buffer, active_ids) > 0:
+            keep_flags[i] = 0
+
+    synchronize()
+
+    # Compute prefix sum to get new indices for kept contacts
+    # Thread 0 does the compaction (simple serial approach for correctness)
+    if thread_id == 0:
+        write_idx = int(0)
+        for i in range(num_contacts):
+            if keep_flags[i] == 1:
+                if write_idx != i:
+                    active_ids[write_idx] = active_ids[i]
+                write_idx = write_idx + 1
+        active_ids[buffer_capacity] = write_idx
+
+    synchronize()
+
+
 def create_shared_memory_pointer_func_4_byte_aligned(
     array_size: int,
 ):
@@ -497,6 +590,7 @@ def create_shared_memory_pointer_func_4_byte_aligned(
     def get_shared_memory_pointer() -> wp.uint64: ...
 
     return get_shared_memory_pointer
+
 
 def create_shared_memory_pointer_func_8_byte_aligned(
     array_size: int,
@@ -522,11 +616,14 @@ def create_shared_memory_pointer_func_8_byte_aligned(
 
     return get_shared_memory_pointer
 
+
 # Create the specific functions used in the codebase
 get_shared_memory_pointer_141_ints = create_shared_memory_pointer_func_4_byte_aligned(141)
 get_shared_memory_pointer_140_contacts = create_shared_memory_pointer_func_4_byte_aligned(140 * 9)
 # Shared memory for 140 reduction slots (20 faces x 7 directions) - 140 uint64
 get_shared_memory_pointer_140_uint64 = create_shared_memory_pointer_func_8_byte_aligned(NUM_REDUCTION_SLOTS)
+# Shared memory for keep flags used by filter_unique_contacts (140 ints)
+get_shared_memory_pointer_140_keep_flags = create_shared_memory_pointer_func_4_byte_aligned(NUM_REDUCTION_SLOTS)
 
 
 def create_shared_memory_pointer_block_dim_func(

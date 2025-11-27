@@ -27,6 +27,7 @@ from ..geometry.sdf_utils import SDFData
 try:
     from .contact_reduction import (
         ContactStruct,
+        filter_unique_contacts,
         get_shared_memory_pointer_140_contacts,
         get_shared_memory_pointer_141_ints,
         get_shared_memory_pointer_block_dim_plus_2_ints,
@@ -36,6 +37,7 @@ try:
 except ImportError:
     from contact_reduction import (
         ContactStruct,
+        filter_unique_contacts,
         get_shared_memory_pointer_140_contacts,
         get_shared_memory_pointer_141_ints,
         get_shared_memory_pointer_block_dim_plus_2_ints,
@@ -825,7 +827,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         c.position = point_world
                         c.normal = dir_world  # Store normalized world-space normal pointing pair[0]->pair[1]
                         c.depth = dist
-                        c.feature = selected_triangles[t]
+                        # Encode mode into feature to distinguish triangles from mesh0 vs mesh1
+                        # Mode 0: positive triangle index, Mode 1: negative (-(index+1))
+                        tri_idx = selected_triangles[t]
+                        c.feature = tri_idx if mode == 0 else -(tri_idx + 1)
                         c.projection = empty_marker
 
                 store_reduced_contact(
@@ -843,8 +848,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         # All contacts use consistent convention: shape_a = pair[0], shape_b = pair[1],
         # normal points from pair[0] to pair[1]
         synchronize()
+
+        # Filter out duplicate contacts (same contact may have won multiple directions)
+        filter_unique_contacts(t, contacts_shared_mem, active_contacts_shared_mem, 140)
+
         num_contacts_to_keep = wp.min(active_contacts_shared_mem[140], 140)
-        synchronize()
 
         for i in range(t, num_contacts_to_keep, wp.block_dim()):
             contact_id = active_contacts_shared_mem[i]
