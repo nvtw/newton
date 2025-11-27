@@ -56,39 +56,6 @@ from .types import GeoType
 
 
 @wp.func
-def build_generic_convex_data(
-    convex_shape: int,
-    shape_types: wp.array(dtype=wp.int32),
-    shape_data: wp.array(dtype=wp.vec4),
-    shape_source: wp.array(dtype=wp.uint64),
-) -> GenericShapeData:
-    """Build GenericShapeData for a convex shape from arrays.
-
-    Args:
-        convex_shape: Index of the convex shape
-        shape_types: Array of shape types
-        shape_data: Array of shape data (scale xyz, thickness w)
-        shape_source: Array of source pointers (mesh IDs, etc.)
-
-    Returns:
-        GenericShapeData struct for the convex shape
-    """
-    convex_type = shape_types[convex_shape]
-    convex_data_vec4 = shape_data[convex_shape]
-    convex_scale = wp.vec3(convex_data_vec4[0], convex_data_vec4[1], convex_data_vec4[2])
-
-    generic_convex = GenericShapeData()
-    generic_convex.shape_type = convex_type
-    generic_convex.scale = convex_scale
-    generic_convex.auxiliary = wp.vec3(0.0, 0.0, 0.0)
-
-    if convex_type == int(GeoType.CONVEX_MESH):
-        generic_convex.auxiliary = pack_mesh_ptr(shape_source[convex_shape])
-
-    return generic_convex
-
-
-@wp.func
 def find_hfield_pair_from_cumsum(
     global_cell_idx: int,
     shape_pairs_hfield_cumsum: wp.array(dtype=wp.int32),
@@ -140,7 +107,7 @@ def compute_hfield_cell_range(
     shape_transform: wp.array(dtype=wp.transform),
     shape_source: wp.array(dtype=wp.uint64),
     shape_contact_margin: wp.array(dtype=wp.float32),
-) -> tuple[int, int, int, int, int, GenericShapeData, float]:
+) -> tuple[int, int, int, int, int, int, float, float]:
     """Compute the cell range for a heightfield-convex pair.
 
     Args:
@@ -150,8 +117,7 @@ def compute_hfield_cell_range(
         shape_contact_margin: Contact margin array
 
     Returns:
-        Tuple of (min_i, min_j, num_cells_i, num_cells_j, cols, generic_convex, convex_aabb_lower_z)
-        where convex_aabb_lower_z is in heightfield local space (for early-out Z culling)
+        Tuple of (min_i, min_j, num_cells_i, num_cells_j, cols, rows, cell_size_x, cell_size_y)
     """
     # Get heightfield mesh and grid info from shape_data
     hfield_mesh_id = shape_source[hfield_shape]
@@ -180,7 +146,17 @@ def compute_hfield_cell_range(
     quat_in_hfield = wp.transform_get_rotation(X_hfield_convex)
 
     # Build GenericShapeData for the convex shape
-    generic_convex = build_generic_convex_data(convex_shape, shape_types, shape_data, shape_source)
+    convex_type = shape_types[convex_shape]
+    convex_data_vec4 = shape_data[convex_shape]
+    convex_scale = wp.vec3(convex_data_vec4[0], convex_data_vec4[1], convex_data_vec4[2])
+
+    generic_convex = GenericShapeData()
+    generic_convex.shape_type = convex_type
+    generic_convex.scale = convex_scale
+    generic_convex.auxiliary = wp.vec3(0.0, 0.0, 0.0)
+
+    if convex_type == int(GeoType.CONVEX_MESH):
+        generic_convex.auxiliary = pack_mesh_ptr(shape_source[convex_shape])
 
     data_provider = SupportMapDataProvider()
 
@@ -213,8 +189,7 @@ def compute_hfield_cell_range(
     num_cells_i = max_i - min_i + 1
     num_cells_j = max_j - min_j + 1
 
-    # Return convex_aabb_lower_z for early-out Z culling (already margin-expanded)
-    return min_i, min_j, num_cells_i, num_cells_j, cols, generic_convex, aabb_lower[2]
+    return min_i, min_j, num_cells_i, num_cells_j, cols, rows, cell_size_x, cell_size_y
 
 
 @wp.func
@@ -254,10 +229,6 @@ def create_heightfield_process_cell_contacts_kernel(writer_func: Any):
     Each cell is split into two triangles, and collision is tested using
     the existing GJK/MPR infrastructure with GeoTypeEx.TRIANGLE.
 
-    OPTIMIZATION: Uses precomputed per-pair data (cell range, AABB Z) from the
-    narrow phase to avoid expensive redundant computation per cell. This eliminates
-    repeated calls to compute_tight_aabb_from_support (6 support evaluations per call).
-
     Args:
         writer_func: Contact writer function
 
@@ -280,9 +251,6 @@ def create_heightfield_process_cell_contacts_kernel(writer_func: Any):
         shape_pairs_hfield_count: wp.array(dtype=wp.int32),
         shape_pairs_hfield_cumsum: wp.array(dtype=wp.int32),
         hfield_cell_total_count: wp.array(dtype=wp.int32),
-        # Precomputed per-pair data (avoids expensive recomputation per cell)
-        shape_pairs_hfield_cell_range: wp.array(dtype=wp.vec4i),  # (min_i, min_j, num_cells_j, cols)
-        shape_pairs_hfield_aabb_z: wp.array(dtype=wp.float32),  # convex AABB lower Z for early-out
         # Contact writer data
         writer_data: Any,
         # Thread configuration
@@ -316,14 +284,16 @@ def create_heightfield_process_cell_contacts_kernel(writer_func: Any):
             hfield_shape = pair[0]
             convex_shape = pair[1]
 
-            # Read precomputed cell range data (computed once per pair in narrow phase)
-            # This avoids calling compute_hfield_cell_range which does expensive AABB computation
-            cell_range = shape_pairs_hfield_cell_range[pair_idx]
-            min_i = cell_range[0]
-            min_j = cell_range[1]
-            num_cells_j = cell_range[2]
-            cols = cell_range[3]
-            convex_aabb_lower_z = shape_pairs_hfield_aabb_z[pair_idx]
+            # Recompute cell range for this pair
+            min_i, min_j, num_cells_i, num_cells_j, cols, rows, cell_size_x, cell_size_y = compute_hfield_cell_range(
+                hfield_shape,
+                convex_shape,
+                shape_types,
+                shape_data,
+                shape_transform,
+                shape_source,
+                shape_contact_margin,
+            )
 
             # Convert local cell index to (cell_i, cell_j)
             local_i = local_cell_idx // num_cells_j
@@ -336,39 +306,35 @@ def create_heightfield_process_cell_contacts_kernel(writer_func: Any):
             hfield_mesh = wp.mesh_get(hfield_mesh_id)
             X_hfield_ws = shape_transform[hfield_shape]
 
-            # Get cell vertex indices (vertices stored in row-major order)
+            # Get cell vertices from mesh (vertices stored in row-major order)
             v00_idx = cell_j * cols + cell_i
             v10_idx = cell_j * cols + (cell_i + 1)
             v01_idx = (cell_j + 1) * cols + cell_i
             v11_idx = (cell_j + 1) * cols + (cell_i + 1)
 
-            # Get local vertices (in heightfield local space)
-            v00_local = hfield_mesh.points[v00_idx]
-            v10_local = hfield_mesh.points[v10_idx]
-            v01_local = hfield_mesh.points[v01_idx]
-            v11_local = hfield_mesh.points[v11_idx]
+            # Get local vertices and transform to world space
+            v00 = wp.transform_point(X_hfield_ws, hfield_mesh.points[v00_idx])
+            v10 = wp.transform_point(X_hfield_ws, hfield_mesh.points[v10_idx])
+            v01 = wp.transform_point(X_hfield_ws, hfield_mesh.points[v01_idx])
+            v11 = wp.transform_point(X_hfield_ws, hfield_mesh.points[v11_idx])
 
-            # Early-out: if convex AABB lower Z is above cell max Z, no collision possible
-            # (convex_aabb_lower_z already includes margin expansion)
-            cell_max_z = wp.max(wp.max(v00_local[2], v10_local[2]), wp.max(v01_local[2], v11_local[2]))
-            if convex_aabb_lower_z > cell_max_z:
-                continue
-
-            # Transform vertices to world space
-            v00 = wp.transform_point(X_hfield_ws, v00_local)
-            v10 = wp.transform_point(X_hfield_ws, v10_local)
-            v01 = wp.transform_point(X_hfield_ws, v01_local)
-            v11 = wp.transform_point(X_hfield_ws, v11_local)
-
-            # Build convex shape data (cheap: just array lookups, no AABB computation)
-            generic_convex = build_generic_convex_data(convex_shape, shape_types, shape_data, shape_source)
-
-            # Get convex shape transform and data
+            # Build convex shape data
             X_convex_ws = shape_transform[convex_shape]
-            convex_thickness = shape_data[convex_shape][3]
+            convex_type = shape_types[convex_shape]
+            convex_data_vec4 = shape_data[convex_shape]
+            convex_scale = wp.vec3(convex_data_vec4[0], convex_data_vec4[1], convex_data_vec4[2])
+            convex_thickness = convex_data_vec4[3]
 
             convex_pos = wp.transform_get_translation(X_convex_ws)
             convex_quat = wp.transform_get_rotation(X_convex_ws)
+
+            generic_convex = GenericShapeData()
+            generic_convex.shape_type = convex_type
+            generic_convex.scale = convex_scale
+            generic_convex.auxiliary = wp.vec3(0.0, 0.0, 0.0)
+
+            if convex_type == int(GeoType.CONVEX_MESH):
+                generic_convex.auxiliary = pack_mesh_ptr(shape_source[convex_shape])
 
             margin = shape_contact_margin[convex_shape]
             hfield_thickness = shape_data[hfield_shape][3]
