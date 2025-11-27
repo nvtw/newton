@@ -29,7 +29,8 @@ import numpy as np
 import warp as wp
 
 from newton._src.geometry.flags import ShapeFlags
-from newton._src.geometry.sdf_utils import compute_sdf
+from newton._src.geometry.sdf_contact import sample_sdf_extrapolated, sample_sdf_grad_extrapolated
+from newton._src.geometry.sdf_utils import SDFData, compute_sdf
 from newton._src.geometry.types import Mesh
 
 
@@ -618,6 +619,306 @@ class TestComputeSDFGridSampling(unittest.TestCase):
                 value,
                 sdf_data.background_value,
                 f"Coarse SDF at grid point {i} = {point} should be < {sdf_data.background_value}, got {value}",
+            )
+
+
+@wp.kernel
+def sample_sdf_extrapolated_kernel(
+    sdf_data: SDFData,
+    points: wp.array(dtype=wp.vec3),
+    values: wp.array(dtype=wp.float32),
+):
+    """Kernel to test sample_sdf_extrapolated function."""
+    tid = wp.tid()
+    values[tid] = sample_sdf_extrapolated(sdf_data, points[tid])
+
+
+@wp.kernel
+def sample_sdf_grad_extrapolated_kernel(
+    sdf_data: SDFData,
+    points: wp.array(dtype=wp.vec3),
+    values: wp.array(dtype=wp.float32),
+    gradients: wp.array(dtype=wp.vec3),
+):
+    """Kernel to test sample_sdf_grad_extrapolated function."""
+    tid = wp.tid()
+    dist, grad = sample_sdf_grad_extrapolated(sdf_data, points[tid])
+    values[tid] = dist
+    gradients[tid] = grad
+
+
+def sample_extrapolated_at_points(sdf_data: SDFData, points_np: np.ndarray) -> np.ndarray:
+    """Sample extrapolated SDF values at given points."""
+    n_points = len(points_np)
+    points = wp.array(points_np, dtype=wp.vec3)
+    values = wp.zeros(n_points, dtype=wp.float32)
+
+    wp.launch(
+        sample_sdf_extrapolated_kernel,
+        dim=n_points,
+        inputs=[sdf_data, points, values],
+    )
+    wp.synchronize()
+
+    return values.numpy()
+
+
+def sample_extrapolated_with_gradient(sdf_data: SDFData, points_np: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Sample extrapolated SDF values and gradients at given points."""
+    n_points = len(points_np)
+    points = wp.array(points_np, dtype=wp.vec3)
+    values = wp.zeros(n_points, dtype=wp.float32)
+    gradients = wp.zeros(n_points, dtype=wp.vec3)
+
+    wp.launch(
+        sample_sdf_grad_extrapolated_kernel,
+        dim=n_points,
+        inputs=[sdf_data, points, values, gradients],
+    )
+    wp.synchronize()
+
+    return values.numpy(), gradients.numpy()
+
+
+class TestSDFExtrapolation(unittest.TestCase):
+    """Test the SDF extrapolation functions."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Set up test fixtures once for all tests."""
+        wp.init()
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.half_extents = (0.5, 0.5, 0.5)
+        self.mesh = create_box_mesh(self.half_extents)
+        # Create SDF with known parameters
+        self.sdf_data, self.sparse_volume, self.coarse_volume = compute_sdf(
+            shape_flags=ShapeFlags.COLLIDE_SHAPES,
+            shape_thickness=0.0,
+            mesh_src=self.mesh,
+            narrow_band_distance=(-0.1, 0.1),
+            margin=0.05,
+        )
+
+    def test_extrapolated_inside_narrow_band(self):
+        """Test that points inside narrow band return sparse grid values."""
+        # Points near surface (within narrow band of ±0.1 from surface at 0.5)
+        test_points = np.array(
+            [
+                [0.45, 0.0, 0.0],  # Just inside +X face
+                [0.55, 0.0, 0.0],  # Just outside +X face
+                [0.0, 0.45, 0.0],  # Just inside +Y face
+                [0.0, 0.0, 0.45],  # Just inside +Z face
+            ],
+            dtype=np.float32,
+        )
+
+        extrapolated_values = sample_extrapolated_at_points(self.sdf_data, test_points)
+        direct_values = sample_sdf_at_points(self.sparse_volume, test_points)
+
+        for i, (ext_val, direct_val) in enumerate(zip(extrapolated_values, direct_values, strict=False)):
+            # Within narrow band, extrapolated should match sparse grid
+            self.assertAlmostEqual(
+                ext_val,
+                direct_val,
+                places=4,
+                msg=f"Point {i}: extrapolated ({ext_val}) should match sparse ({direct_val})",
+            )
+
+    def test_extrapolated_inside_extent_outside_narrow_band(self):
+        """Test that points inside extent but outside narrow band return coarse grid values."""
+        # Center of the box - inside extent but outside narrow band
+        test_points = np.array(
+            [
+                [0.0, 0.0, 0.0],  # Center
+                [0.1, 0.1, 0.1],  # Near center
+                [0.2, 0.0, 0.0],  # Partway to surface but outside narrow band
+            ],
+            dtype=np.float32,
+        )
+
+        extrapolated_values = sample_extrapolated_at_points(self.sdf_data, test_points)
+        coarse_values = sample_sdf_at_points(self.coarse_volume, test_points)
+
+        for i, (ext_val, coarse_val) in enumerate(zip(extrapolated_values, coarse_values, strict=False)):
+            # Inside extent but outside narrow band, should use coarse grid
+            self.assertAlmostEqual(
+                ext_val,
+                coarse_val,
+                places=4,
+                msg=f"Point {i}: extrapolated ({ext_val}) should match coarse ({coarse_val})",
+            )
+
+    def test_extrapolated_outside_extent(self):
+        """Test that points outside extent return extrapolated values."""
+        center = np.array([self.sdf_data.center[0], self.sdf_data.center[1], self.sdf_data.center[2]])
+        half_ext = np.array(
+            [self.sdf_data.half_extents[0], self.sdf_data.half_extents[1], self.sdf_data.half_extents[2]]
+        )
+
+        # Points outside the extent (beyond center ± half_extents)
+        outside_distance = 0.5  # Distance beyond boundary
+        test_points = np.array(
+            [
+                center + np.array([half_ext[0] + outside_distance, 0.0, 0.0]),  # Outside +X
+                center + np.array([0.0, half_ext[1] + outside_distance, 0.0]),  # Outside +Y
+                center + np.array([0.0, 0.0, half_ext[2] + outside_distance]),  # Outside +Z
+            ],
+            dtype=np.float32,
+        )
+
+        # Get boundary points (clamped to extent)
+        boundary_points = np.array(
+            [
+                center + np.array([half_ext[0], 0.0, 0.0]),  # +X boundary
+                center + np.array([0.0, half_ext[1], 0.0]),  # +Y boundary
+                center + np.array([0.0, 0.0, half_ext[2]]),  # +Z boundary
+            ],
+            dtype=np.float32,
+        )
+
+        extrapolated_values = sample_extrapolated_at_points(self.sdf_data, test_points)
+        boundary_values = sample_sdf_at_points(self.coarse_volume, boundary_points)
+
+        for i in range(len(test_points)):
+            # Extrapolated value should be boundary_value + distance_to_boundary
+            expected = boundary_values[i] + outside_distance
+            self.assertAlmostEqual(
+                extrapolated_values[i],
+                expected,
+                places=2,
+                msg=f"Point {i}: extrapolated ({extrapolated_values[i]}) should be boundary ({boundary_values[i]}) + distance ({outside_distance}) = {expected}",
+            )
+
+    def test_extrapolated_values_are_continuous(self):
+        """Test that extrapolated values are continuous across the extent boundary."""
+        center = np.array([self.sdf_data.center[0], self.sdf_data.center[1], self.sdf_data.center[2]])
+        half_ext = np.array(
+            [self.sdf_data.half_extents[0], self.sdf_data.half_extents[1], self.sdf_data.half_extents[2]]
+        )
+
+        # Sample along a line crossing the extent boundary
+        epsilon = 0.01
+        test_points = np.array(
+            [
+                center + np.array([half_ext[0] - epsilon, 0.0, 0.0]),  # Just inside
+                center + np.array([half_ext[0], 0.0, 0.0]),  # At boundary
+                center + np.array([half_ext[0] + epsilon, 0.0, 0.0]),  # Just outside
+            ],
+            dtype=np.float32,
+        )
+
+        values = sample_extrapolated_at_points(self.sdf_data, test_points)
+
+        # Values should be monotonically increasing (moving away from mesh surface)
+        self.assertLess(
+            values[0],
+            values[1] + 0.02,  # Small tolerance for numerical precision
+            f"Value inside ({values[0]}) should be less than at boundary ({values[1]})",
+        )
+        self.assertLess(
+            values[1],
+            values[2] + 0.02,
+            f"Value at boundary ({values[1]}) should be less than outside ({values[2]})",
+        )
+
+    def test_extrapolated_gradient_inside_narrow_band(self):
+        """Test that gradients inside narrow band match sparse grid gradients."""
+        test_points = np.array(
+            [
+                [0.45, 0.0, 0.0],  # Just inside +X face
+                [0.0, 0.45, 0.0],  # Just inside +Y face
+            ],
+            dtype=np.float32,
+        )
+
+        ext_values, ext_gradients = sample_extrapolated_with_gradient(self.sdf_data, test_points)
+        direct_values, direct_gradients = sample_sdf_with_gradient(self.sparse_volume, test_points)
+
+        for i in range(len(test_points)):
+            # Values should match
+            self.assertAlmostEqual(
+                ext_values[i],
+                direct_values[i],
+                places=4,
+                msg=f"Point {i}: extrapolated value ({ext_values[i]}) should match sparse ({direct_values[i]})",
+            )
+            # Gradients should match
+            for j in range(3):
+                self.assertAlmostEqual(
+                    ext_gradients[i][j],
+                    direct_gradients[i][j],
+                    places=3,
+                    msg=f"Point {i}, component {j}: gradient mismatch",
+                )
+
+    def test_extrapolated_gradient_outside_extent(self):
+        """Test that gradients outside extent point toward the boundary."""
+        center = np.array([self.sdf_data.center[0], self.sdf_data.center[1], self.sdf_data.center[2]])
+        half_ext = np.array(
+            [self.sdf_data.half_extents[0], self.sdf_data.half_extents[1], self.sdf_data.half_extents[2]]
+        )
+
+        # Points outside extent along each axis
+        outside_distance = 0.5
+        test_points = np.array(
+            [
+                center + np.array([half_ext[0] + outside_distance, 0.0, 0.0]),  # Outside +X
+                center + np.array([-half_ext[0] - outside_distance, 0.0, 0.0]),  # Outside -X
+                center + np.array([0.0, half_ext[1] + outside_distance, 0.0]),  # Outside +Y
+            ],
+            dtype=np.float32,
+        )
+
+        _values, gradients = sample_extrapolated_with_gradient(self.sdf_data, test_points)
+
+        # Gradients should point outward (toward the query point from boundary)
+        # For point outside +X, gradient should point in +X direction
+        self.assertGreater(
+            gradients[0][0],
+            0.5,
+            f"Gradient outside +X should point in +X direction, got {gradients[0]}",
+        )
+        # For point outside -X, gradient should point in -X direction
+        self.assertLess(
+            gradients[1][0],
+            -0.5,
+            f"Gradient outside -X should point in -X direction, got {gradients[1]}",
+        )
+        # For point outside +Y, gradient should point in +Y direction
+        self.assertGreater(
+            gradients[2][1],
+            0.5,
+            f"Gradient outside +Y should point in +Y direction, got {gradients[2]}",
+        )
+
+    def test_extrapolated_always_less_than_background(self):
+        """Test that extrapolated values are always less than background value."""
+        center = np.array([self.sdf_data.center[0], self.sdf_data.center[1], self.sdf_data.center[2]])
+        half_ext = np.array(
+            [self.sdf_data.half_extents[0], self.sdf_data.half_extents[1], self.sdf_data.half_extents[2]]
+        )
+
+        # Sample at various points: inside, at boundary, and outside
+        test_points = np.array(
+            [
+                center,  # Center
+                center + half_ext * 0.5,  # Inside
+                center + half_ext * 0.99,  # Near boundary
+                center + half_ext * 1.5,  # Outside
+                center + half_ext * 2.0,  # Far outside
+            ],
+            dtype=np.float32,
+        )
+
+        values = sample_extrapolated_at_points(self.sdf_data, test_points)
+
+        for i, value in enumerate(values):
+            self.assertLess(
+                value,
+                self.sdf_data.background_value,
+                f"Point {i}: extrapolated value ({value}) should be less than background ({self.sdf_data.background_value})",
             )
 
 
