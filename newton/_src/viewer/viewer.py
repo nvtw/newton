@@ -439,10 +439,10 @@ class ViewerBase:
         and an index buffer. Slices them into separate arrays and forwards to log_mesh.
         """
 
-        # GEO_MESH handled by provided source geometry
-        if geo_type in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH):
+        # GEO_MESH and HFIELD handled by provided source geometry
+        if geo_type in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH, newton.GeoType.HFIELD):
             if geo_src is None:
-                raise ValueError(f"log_geo requires geo_src for MESH or CONVEX_MESH (name={name})")
+                raise ValueError(f"log_geo requires geo_src for MESH, CONVEX_MESH, or HFIELD (name={name})")
 
             # resolve points/indices from source, solidify if requested
             from warp.render.utils import solidify_mesh  # noqa: PLC0415
@@ -695,6 +695,7 @@ class ViewerBase:
 
         base_name = {
             newton.GeoType.PLANE: "plane",
+            newton.GeoType.HFIELD: "heightfield",
             newton.GeoType.SPHERE: "sphere",
             newton.GeoType.CAPSULE: "capsule",
             newton.GeoType.CYLINDER: "cylinder",
@@ -715,7 +716,7 @@ class ViewerBase:
             tuple(scale_list),
             float(thickness),
             bool(is_solid),
-            geo_src=geo_src if geo_type in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH) else None,
+            geo_src=geo_src if geo_type in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH, newton.GeoType.HFIELD) else None,
             hidden=True,
         )
         self._geometry_cache[geo_hash] = mesh_path
@@ -763,7 +764,7 @@ class ViewerBase:
                     tuple(geo_scale),
                     float(geo_thickness),
                     bool(geo_is_solid),
-                    geo_src=geo_src if geo_type in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH) else None,
+                    geo_src=geo_src if geo_type in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH, newton.GeoType.HFIELD) else None,
                 )
             else:
                 mesh_name = self._geometry_cache[geo_hash]
@@ -796,6 +797,8 @@ class ViewerBase:
             if geo_type in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH):
                 scale = np.asarray(geo_scale, dtype=np.float32)
 
+            # Handle source color for mesh-based geometry types
+            if geo_type in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH, newton.GeoType.HFIELD):
                 if geo_src._color is not None:
                     color = wp.vec3(geo_src._color[0:3])
 
