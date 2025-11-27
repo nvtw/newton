@@ -545,7 +545,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     if contact_reduction_funcs is None:
         contact_reduction_funcs = ContactReductionFunctions()
 
-    num_betas = contact_reduction_funcs.num_betas
     num_reduction_slots = contact_reduction_funcs.num_reduction_slots
     store_reduced_contact_func = contact_reduction_funcs.store_reduced_contact
     filter_unique_contacts_func = contact_reduction_funcs.filter_unique_contacts
@@ -876,7 +875,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         synchronize()
 
         # Filter out duplicate contacts (same contact may have won multiple directions)
-        filter_unique_contacts_func(t, contacts_shared_mem, active_contacts_shared_mem, num_betas, empty_marker)
+        filter_unique_contacts_func(t, contacts_shared_mem, active_contacts_shared_mem, empty_marker)
 
         num_contacts_to_keep = wp.min(
             active_contacts_shared_mem[wp.static(num_reduction_slots)], wp.static(num_reduction_slots)

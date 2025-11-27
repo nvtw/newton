@@ -514,6 +514,7 @@ class ContactReductionFunctions:
     def _create_store_reduced_contact(self):
         """Create store_reduced_contact @wp.func."""
         num_reduction_slots = self.num_reduction_slots
+        num_betas = self.num_betas
         get_smem = self.get_smem_reduction
 
         @wp.func
@@ -527,9 +528,8 @@ class ContactReductionFunctions:
             empty_marker: float,
         ):
             """Store contact using atomic reduction. Score = spatial_dp - beta * depth."""
-            num_betas_runtime = betas_arr.shape[0]
-            slots_per_bin = NUM_SPATIAL_DIRECTIONS * num_betas_runtime
-            num_slots = NUM_NORMAL_BINS * slots_per_bin
+            slots_per_bin = wp.static(NUM_SPATIAL_DIRECTIONS * num_betas)
+            num_slots = wp.static(NUM_NORMAL_BINS * slots_per_bin)
 
             winner_slots = wp.array(
                 ptr=wp.static(get_smem)(),
@@ -547,22 +547,22 @@ class ContactReductionFunctions:
 
             if active:
                 base_key = bin_id * slots_per_bin
-                for dir_i in range(NUM_SPATIAL_DIRECTIONS):
+                for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
                     scan_dir = get_scan_dir(bin_id, dir_i)
                     spatial_dp = wp.dot(scan_dir, c.position)
-                    for beta_i in range(num_betas_runtime):
+                    for beta_i in range(wp.static(num_betas)):
                         score = spatial_dp - betas_arr[beta_i] * c.depth
-                        key = base_key + dir_i * num_betas_runtime + beta_i
+                        key = base_key + dir_i * wp.static(num_betas) + beta_i
                         atomic_max_uint64(winner_slots.ptr, key, pack_value_thread_id(score, thread_id))
             synchronize()
 
             if active:
                 base_key = bin_id * slots_per_bin
-                for dir_i in range(NUM_SPATIAL_DIRECTIONS):
+                for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
                     scan_dir = get_scan_dir(bin_id, dir_i)
                     spatial_dp = wp.dot(scan_dir, c.position)
-                    for beta_i in range(num_betas_runtime):
-                        key = base_key + dir_i * num_betas_runtime + beta_i
+                    for beta_i in range(wp.static(num_betas)):
+                        key = base_key + dir_i * wp.static(num_betas) + beta_i
                         if unpack_thread_id(winner_slots[key]) == thread_id:
                             p = buffer[key].projection
                             if p == empty_marker:
@@ -580,6 +580,7 @@ class ContactReductionFunctions:
     def _create_filter_unique_contacts(self):
         """Create filter_unique_contacts @wp.func."""
         num_reduction_slots = self.num_reduction_slots
+        num_betas = self.num_betas
         get_smem = self.get_smem_reduction
 
         @wp.func
@@ -587,12 +588,11 @@ class ContactReductionFunctions:
             thread_id: int,
             buffer: wp.array(dtype=ContactStruct),
             active_ids: wp.array(dtype=int),
-            num_betas_param: int,
             empty_marker: float,
         ):
             """Filter duplicate contacts, keeping first occurrence per feature."""
-            slots_per_bin = NUM_SPATIAL_DIRECTIONS * num_betas_param
-            num_slots = NUM_NORMAL_BINS * slots_per_bin
+            slots_per_bin = wp.static(NUM_SPATIAL_DIRECTIONS * num_betas)
+            num_slots = wp.static(NUM_NORMAL_BINS * slots_per_bin)
 
             keep_flags = wp.array(
                 ptr=wp.static(get_smem)(),
@@ -604,7 +604,7 @@ class ContactReductionFunctions:
                 keep_flags[i] = 0
             synchronize()
 
-            if thread_id < NUM_NORMAL_BINS:
+            if thread_id < wp.static(NUM_NORMAL_BINS):
                 bin_id = thread_id
                 base_key = bin_id * slots_per_bin
                 for slot_i in range(slots_per_bin):
