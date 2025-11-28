@@ -219,11 +219,11 @@ class Model:
 
         # Mesh SDF storage
         self.shape_sdf_data = None
-        """Array of SDFData structs for mesh shapes, shape [shape_count]. Contains sparse and coarse SDF pointers, extents, and voxel sizes."""
+        """Array of SDFData structs for mesh shapes, shape [shape_count]. Contains sparse and coarse SDF pointers, extents, and voxel sizes. Empty array if there are no colliding meshes."""
         self.shape_sdf_volume = []
-        """List of sparse SDF volume references for mesh shapes, shape [shape_count]. None for non-mesh shapes. Kept for reference counting."""
+        """List of sparse SDF volume references for mesh shapes, shape [shape_count]. None for non-mesh shapes. Empty if there are no colliding meshes. Kept for reference counting."""
         self.shape_sdf_coarse_volume = []
-        """List of coarse SDF volume references for mesh shapes, shape [shape_count]. None for non-mesh shapes. Kept for reference counting."""
+        """List of coarse SDF volume references for mesh shapes, shape [shape_count]. None for non-mesh shapes. Empty if there are no colliding meshes. Kept for reference counting."""
 
         self.spring_indices = None
         """Particle spring indices, shape [spring_count*2], int."""
