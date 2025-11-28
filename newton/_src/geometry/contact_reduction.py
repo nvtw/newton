@@ -335,7 +335,10 @@ def get_scan_dir(icosahedron_face_id: int, i: int) -> wp.vec3:
         Edge of the triangle (not normalized).
         Indices 3, 4, 5 return the edges with negated direction.
     """
-    result = icosahedronTriangles[icosahedron_face_id + (i + 1) % 3] - icosahedronTriangles[icosahedron_face_id + i % 3]
+    face_base = 3 * icosahedron_face_id
+    v0 = icosahedronTriangles[face_base + (i + 1) % 3]
+    v1 = icosahedronTriangles[face_base + i % 3]
+    result = v0 - v1
     if i >= 3:
         result = -result
     return result

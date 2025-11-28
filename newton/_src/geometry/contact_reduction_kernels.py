@@ -267,7 +267,7 @@ def validate_contact_reduction(gpu_contacts, gpu_count):
 
 
 def test_contact_reduction():
-    """Launch the contact reduction test kernel with a single thread block of 256 threads."""
+    """Launch the contact reduction test kernel with a single thread block."""
     wp.init()
 
     # Allocate output arrays
