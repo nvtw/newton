@@ -5032,6 +5032,7 @@ class ModelBuilder:
                 # Keep volume objects alive for reference counting
                 sdf_volumes = []
                 sdf_coarse_volumes = []
+                sdf_cache = {}
 
                 for _, (shape_type, shape_src, shape_flags, shape_thickness) in enumerate(
                     zip(
@@ -5044,11 +5045,16 @@ class ModelBuilder:
                 ):
                     # Compute SDF only for mesh shapes with collision enabled
                     if shape_type == GeoType.MESH and shape_src is not None and shape_flags & ShapeFlags.COLLIDE_SHAPES:
-                        # Compute SDF for this mesh shape (returns SDFData struct and volume objects)
-                        sdf_data, sparse_volume, coarse_volume = compute_sdf(
-                            shape_thickness=shape_thickness,
-                            mesh_src=shape_src,
-                        )
+                        cache_key = (hash(shape_src), shape_thickness)
+                        if cache_key in sdf_cache:
+                            sdf_data, sparse_volume, coarse_volume = sdf_cache[cache_key]
+                        else:
+                            # Compute SDF for this mesh shape (returns SDFData struct and volume objects)
+                            sdf_data, sparse_volume, coarse_volume = compute_sdf(
+                                shape_thickness=shape_thickness,
+                                mesh_src=shape_src,
+                            )
+                            sdf_cache[cache_key] = (sdf_data, sparse_volume, coarse_volume)
                         sdf_volumes.append(sparse_volume)
                         sdf_coarse_volumes.append(coarse_volume)
                     else:
