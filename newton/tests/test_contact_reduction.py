@@ -82,11 +82,13 @@ class TestContactReduction(unittest.TestCase):
 def test_face_normals_are_unit_vectors(test, device):
     """Verify all 20 icosahedron face normals are unit vectors."""
     for i in range(NUM_NORMAL_BINS):
-        normal = np.array([
-            icosahedronFaceNormals[i, 0],
-            icosahedronFaceNormals[i, 1],
-            icosahedronFaceNormals[i, 2],
-        ])
+        normal = np.array(
+            [
+                icosahedronFaceNormals[i, 0],
+                icosahedronFaceNormals[i, 1],
+                icosahedronFaceNormals[i, 2],
+            ]
+        )
         length = np.linalg.norm(normal)
         test.assertAlmostEqual(length, 1.0, places=5, msg=f"Face normal {i} is not a unit vector")
 
@@ -94,11 +96,13 @@ def test_face_normals_are_unit_vectors(test, device):
 def test_triangle_vertices_are_unit_vectors(test, device):
     """Verify all 60 triangle vertices lie on the unit sphere."""
     for i in range(60):
-        vertex = np.array([
-            icosahedronTriangles[i, 0],
-            icosahedronTriangles[i, 1],
-            icosahedronTriangles[i, 2],
-        ])
+        vertex = np.array(
+            [
+                icosahedronTriangles[i, 0],
+                icosahedronTriangles[i, 1],
+                icosahedronTriangles[i, 2],
+            ]
+        )
         length = np.linalg.norm(vertex)
         test.assertAlmostEqual(length, 1.0, places=5, msg=f"Triangle vertex {i} is not on unit sphere")
 
@@ -107,11 +111,13 @@ def test_face_normals_cover_sphere(test, device):
     """Test that face normals roughly cover the sphere (no hemisphere is empty)."""
     normals = []
     for i in range(NUM_NORMAL_BINS):
-        normals.append([
-            icosahedronFaceNormals[i, 0],
-            icosahedronFaceNormals[i, 1],
-            icosahedronFaceNormals[i, 2],
-        ])
+        normals.append(
+            [
+                icosahedronFaceNormals[i, 0],
+                icosahedronFaceNormals[i, 1],
+                icosahedronFaceNormals[i, 2],
+            ]
+        )
     normals = np.array(normals)
 
     # Check there are normals with positive and negative components in each axis
@@ -183,11 +189,11 @@ def test_contact_struct_fields(test, device):
 def test_get_slot_axis_aligned_normals(test, device):
     """Test get_slot with axis-aligned normals."""
     test_normals = [
-        wp.vec3(0.0, 1.0, 0.0),   # +Y (top)
+        wp.vec3(0.0, 1.0, 0.0),  # +Y (top)
         wp.vec3(0.0, -1.0, 0.0),  # -Y (bottom)
-        wp.vec3(1.0, 0.0, 0.0),   # +X
+        wp.vec3(1.0, 0.0, 0.0),  # +X
         wp.vec3(-1.0, 0.0, 0.0),  # -X
-        wp.vec3(0.0, 0.0, 1.0),   # +Z
+        wp.vec3(0.0, 0.0, 1.0),  # +Z
         wp.vec3(0.0, 0.0, -1.0),  # -Z
     ]
 
@@ -221,10 +227,7 @@ def test_get_slot_matches_best_face_normal(test, device):
     slots_np = slots.numpy()
 
     # Build face normals array for CPU reference
-    face_normals = np.array([
-        [icosahedronFaceNormals[i, j] for j in range(3)]
-        for i in range(NUM_NORMAL_BINS)
-    ])
+    face_normals = np.array([[icosahedronFaceNormals[i, j] for j in range(3)] for i in range(NUM_NORMAL_BINS)])
 
     # Verify each slot
     for i in range(len(test_normals_np)):
@@ -236,8 +239,7 @@ def test_get_slot_matches_best_face_normal(test, device):
         cpu_best_slot = np.argmax(dots)
 
         test.assertEqual(
-            result_slot, cpu_best_slot,
-            f"Normal {i}: result slot {result_slot} != expected slot {cpu_best_slot}"
+            result_slot, cpu_best_slot, f"Normal {i}: result slot {result_slot} != expected slot {cpu_best_slot}"
         )
 
 
@@ -272,10 +274,7 @@ def test_get_scan_dir_all_faces(test, device):
     # Verify all scan directions are non-zero
     for i, scan_dir in enumerate(scan_dirs_np):
         length = np.linalg.norm(scan_dir)
-        test.assertGreater(
-            length, 0.01,
-            f"Scan direction for face {face_ids[i]}, dir {direction_indices[i]} is zero"
-        )
+        test.assertGreater(length, 0.01, f"Scan direction for face {face_ids[i]}, dir {direction_indices[i]} is zero")
 
 
 def test_get_scan_dir_indexing_correctness(test, device):
@@ -313,8 +312,7 @@ def test_get_scan_dir_indexing_correctness(test, device):
             expected = expected_edges[dir_idx]
 
             np.testing.assert_array_almost_equal(
-                result, expected, decimal=5,
-                err_msg=f"Face {face_id}, dir {dir_idx}: mismatch"
+                result, expected, decimal=5, err_msg=f"Face {face_id}, dir {dir_idx}: mismatch"
             )
 
         # Test direction indices 3, 4, 5 (negated edges)
@@ -334,8 +332,7 @@ def test_get_scan_dir_indexing_correctness(test, device):
             expected = -expected_edges[dir_idx - 3]
 
             np.testing.assert_array_almost_equal(
-                result, expected, decimal=5,
-                err_msg=f"Face {face_id}, dir {dir_idx}: mismatch (negated)"
+                result, expected, decimal=5, err_msg=f"Face {face_id}, dir {dir_idx}: mismatch (negated)"
             )
 
 
@@ -357,8 +354,10 @@ def test_get_scan_dir_opposite_directions_negated(test, device):
 
             result = scan_dirs.numpy()
             np.testing.assert_array_almost_equal(
-                result[0], -result[1], decimal=5,
-                err_msg=f"Face {face_id}: dir {base_dir} should be -dir {base_dir + 3}"
+                result[0],
+                -result[1],
+                decimal=5,
+                err_msg=f"Face {face_id}: dir {base_dir} should be -dir {base_dir + 3}",
             )
 
 
@@ -533,30 +532,85 @@ cuda_devices = get_cuda_test_devices()
 # Register tests that work on all devices (CPU and CUDA)
 for device in devices:
     # Icosahedron geometry tests (pure NumPy, but registered per device for consistency)
-    add_function_test(TestContactReduction, "test_face_normals_are_unit_vectors", test_face_normals_are_unit_vectors, devices=[device])
-    add_function_test(TestContactReduction, "test_triangle_vertices_are_unit_vectors", test_triangle_vertices_are_unit_vectors, devices=[device])
-    add_function_test(TestContactReduction, "test_face_normals_cover_sphere", test_face_normals_cover_sphere, devices=[device])
-    add_function_test(TestContactReduction, "test_triangle_faces_have_three_vertices_each", test_triangle_faces_have_three_vertices_each, devices=[device])
+    add_function_test(
+        TestContactReduction, "test_face_normals_are_unit_vectors", test_face_normals_are_unit_vectors, devices=[device]
+    )
+    add_function_test(
+        TestContactReduction,
+        "test_triangle_vertices_are_unit_vectors",
+        test_triangle_vertices_are_unit_vectors,
+        devices=[device],
+    )
+    add_function_test(
+        TestContactReduction, "test_face_normals_cover_sphere", test_face_normals_cover_sphere, devices=[device]
+    )
+    add_function_test(
+        TestContactReduction,
+        "test_triangle_faces_have_three_vertices_each",
+        test_triangle_faces_have_three_vertices_each,
+        devices=[device],
+    )
     add_function_test(TestContactReduction, "test_constants", test_constants, devices=[device])
-    add_function_test(TestContactReduction, "test_compute_num_reduction_slots", test_compute_num_reduction_slots, devices=[device])
+    add_function_test(
+        TestContactReduction, "test_compute_num_reduction_slots", test_compute_num_reduction_slots, devices=[device]
+    )
     add_function_test(TestContactReduction, "test_create_betas_array", test_create_betas_array, devices=[device])
     add_function_test(TestContactReduction, "test_contact_struct_fields", test_contact_struct_fields, devices=[device])
 
     # get_slot tests
-    add_function_test(TestContactReduction, "test_get_slot_axis_aligned_normals", test_get_slot_axis_aligned_normals, devices=[device])
-    add_function_test(TestContactReduction, "test_get_slot_matches_best_face_normal", test_get_slot_matches_best_face_normal, devices=[device])
+    add_function_test(
+        TestContactReduction, "test_get_slot_axis_aligned_normals", test_get_slot_axis_aligned_normals, devices=[device]
+    )
+    add_function_test(
+        TestContactReduction,
+        "test_get_slot_matches_best_face_normal",
+        test_get_slot_matches_best_face_normal,
+        devices=[device],
+    )
 
     # get_scan_dir tests
-    add_function_test(TestContactReduction, "test_get_scan_dir_all_faces", test_get_scan_dir_all_faces, devices=[device])
-    add_function_test(TestContactReduction, "test_get_scan_dir_indexing_correctness", test_get_scan_dir_indexing_correctness, devices=[device])
-    add_function_test(TestContactReduction, "test_get_scan_dir_opposite_directions_negated", test_get_scan_dir_opposite_directions_negated, devices=[device])
+    add_function_test(
+        TestContactReduction, "test_get_scan_dir_all_faces", test_get_scan_dir_all_faces, devices=[device]
+    )
+    add_function_test(
+        TestContactReduction,
+        "test_get_scan_dir_indexing_correctness",
+        test_get_scan_dir_indexing_correctness,
+        devices=[device],
+    )
+    add_function_test(
+        TestContactReduction,
+        "test_get_scan_dir_opposite_directions_negated",
+        test_get_scan_dir_opposite_directions_negated,
+        devices=[device],
+    )
 
 # ContactReductionFunctions tests (CUDA only - uses shared memory)
 for device in cuda_devices:
-    add_function_test(TestContactReduction, "test_reduction_functions_initialization", test_reduction_functions_initialization, devices=[device])
-    add_function_test(TestContactReduction, "test_reduction_functions_single_beta", test_reduction_functions_single_beta, devices=[device])
-    add_function_test(TestContactReduction, "test_contact_reduction_produces_valid_output", test_contact_reduction_produces_valid_output, devices=[device])
-    add_function_test(TestContactReduction, "test_contact_reduction_reduces_count", test_contact_reduction_reduces_count, devices=[device])
+    add_function_test(
+        TestContactReduction,
+        "test_reduction_functions_initialization",
+        test_reduction_functions_initialization,
+        devices=[device],
+    )
+    add_function_test(
+        TestContactReduction,
+        "test_reduction_functions_single_beta",
+        test_reduction_functions_single_beta,
+        devices=[device],
+    )
+    add_function_test(
+        TestContactReduction,
+        "test_contact_reduction_produces_valid_output",
+        test_contact_reduction_produces_valid_output,
+        devices=[device],
+    )
+    add_function_test(
+        TestContactReduction,
+        "test_contact_reduction_reduces_count",
+        test_contact_reduction_reduces_count,
+        devices=[device],
+    )
 
 
 if __name__ == "__main__":
