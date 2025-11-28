@@ -5103,8 +5103,8 @@ class ModelBuilder:
                         else:
                             # Compute SDF for this mesh shape (returns SDFData struct and volume objects)
                             sdf_data, sparse_volume, coarse_volume = compute_sdf(
-                                shape_thickness=shape_thickness,
                                 mesh_src=shape_src,
+                                shape_thickness=shape_thickness,
                                 narrow_band_distance=sdf_narrow_band_range,
                                 max_dims=sdf_max_dims,
                             )

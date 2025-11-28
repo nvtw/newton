@@ -80,11 +80,23 @@ def get_distance_to_mesh(mesh: wp.uint64, point: wp.vec3, max_dist: wp.float32):
 
 
 @wp.kernel
-def sdf_from_mesh_kernel(mesh: wp.uint64, sdf: wp.uint64, thickness: wp.float32):
+def sdf_from_mesh_kernel(
+    mesh: wp.uint64,
+    sdf: wp.uint64,
+    tile_points: wp.array(dtype=wp.vec3i),
+    thickness: wp.float32,
+):
     """
-    Populate sdf grid from triangle mesh.
+    Populate SDF grid from triangle mesh.
+    Only processes specified tiles. Launch with dim=(num_tiles, 8, 8, 8).
     """
-    x_id, y_id, z_id = wp.tid()
+    tile_idx, local_x, local_y, local_z = wp.tid()
+
+    # Get the tile origin and compute global voxel coordinates
+    tile_origin = tile_points[tile_idx]
+    x_id = tile_origin[0] + local_x
+    y_id = tile_origin[1] + local_y
+    z_id = tile_origin[2] + local_z
 
     sample_pos = wp.volume_index_to_world(sdf, int_to_vec3f(x_id, y_id, z_id))
     signed_distance = get_distance_to_mesh(mesh, sample_pos, 10000.0)
@@ -134,7 +146,13 @@ def compute_sdf(
         - sdf_data: SDFData struct with pointers and extents
         - sparse_volume: wp.Volume object for sparse SDF (keep alive for reference counting)
         - coarse_volume: wp.Volume object for coarse SDF (keep alive for reference counting)
+
+    Raises:
+        RuntimeError: If CUDA is not available.
     """
+    if not wp.is_cuda_available():
+        raise RuntimeError("compute_sdf requires CUDA but no CUDA device is available")
+
     assert isinstance(narrow_band_distance, Sequence), "narrow_band_distance must be a tuple of two floats"
     assert len(narrow_band_distance) == 2, "narrow_band_distance must be a tuple of two floats"
     assert narrow_band_distance[0] < 0.0 < narrow_band_distance[1], (
@@ -204,19 +222,22 @@ def compute_sdf(
         print("Occupancy: ", tile_occupied.numpy().sum() / len(tile_points))
 
     tile_points = tile_points[tile_occupied.numpy()]
+    tile_points_wp = wp.array(tile_points, dtype=wp.vec3i)
 
     sparse_volume = wp.Volume.allocate_by_tiles(
-        tile_points=wp.array(tile_points, dtype=wp.vec3i),
+        tile_points=tile_points_wp,
         voxel_size=wp.vec3(actual_voxel_size),
         translation=wp.vec3(min_ext),
         bg_value=SDF_BACKGROUND_VALUE,
     )
 
     # populate the sparse volume with the sdf values
+    # Only process allocated tiles (num_tiles x 8x8x8)
+    num_allocated_tiles = len(tile_points)
     wp.launch(
         sdf_from_mesh_kernel,
-        dim=(grid_dims[0], grid_dims[1], grid_dims[2]),
-        inputs=[m_id, sparse_volume.id, shape_thickness],
+        dim=(num_allocated_tiles, 8, 8, 8),
+        inputs=[m_id, sparse_volume.id, tile_points_wp, shape_thickness],
     )
 
     # Create coarse background SDF (8x8x8 voxels = one tile) with same extents
@@ -224,18 +245,19 @@ def compute_sdf(
     coarse_voxel_size = ext / (coarse_dims - 1)
     coarse_tile_points = np.array([[0, 0, 0]], dtype=np.int32)
 
+    coarse_tile_points_wp = wp.array(coarse_tile_points, dtype=wp.vec3i)
     coarse_volume = wp.Volume.allocate_by_tiles(
-        tile_points=wp.array(coarse_tile_points, dtype=wp.vec3i),
+        tile_points=coarse_tile_points_wp,
         voxel_size=wp.vec3(coarse_voxel_size),
         translation=wp.vec3(min_ext),
         bg_value=SDF_BACKGROUND_VALUE,
     )
 
-    # Populate the coarse volume with SDF values
+    # Populate the coarse volume with SDF values (single tile)
     wp.launch(
         sdf_from_mesh_kernel,
-        dim=(coarse_dims, coarse_dims, coarse_dims),
-        inputs=[m_id, coarse_volume.id, shape_thickness],
+        dim=(1, 8, 8, 8),
+        inputs=[m_id, coarse_volume.id, coarse_tile_points_wp, shape_thickness],
     )
 
     if verbose:
