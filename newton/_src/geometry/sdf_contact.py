@@ -537,20 +537,8 @@ def find_interesting_triangles(
 
 def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     writer_func: Any,
-    tile_size: int,
-    reduce_contacts: bool = False,
     contact_reduction_funcs: ContactReductionFunctions | None = None,
 ):
-    # Get contact reduction functions (use defaults if not provided)
-    if contact_reduction_funcs is None:
-        contact_reduction_funcs = ContactReductionFunctions()
-
-    num_reduction_slots = contact_reduction_funcs.num_reduction_slots
-    store_reduced_contact_func = contact_reduction_funcs.store_reduced_contact
-    filter_unique_contacts_func = contact_reduction_funcs.filter_unique_contacts
-    get_smem_slots_plus_1 = contact_reduction_funcs.get_smem_slots_plus_1
-    get_smem_slots_contacts = contact_reduction_funcs.get_smem_slots_contacts
-
     @wp.kernel(enable_backward=False)
     def mesh_sdf_collision_kernel(
         shape_data: wp.array(dtype=wp.vec4),
@@ -640,10 +628,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_mesh_b_ws), X_mesh_a_ws)
                     X_sdf_ws = X_mesh_b_ws
                     mesh = mesh_a
-                    shape_a = mesh_shape_a
-                    shape_b = mesh_shape_b
-                    thickness_mesh = thickness_a
-                    thickness_sdf = thickness_b
                 else:
                     # Process mesh B triangles against SDF A (if SDF A exists)
                     if sdf_ptr_a == wp.uint64(0):
@@ -656,10 +640,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_mesh_a_ws), X_mesh_b_ws)
                     X_sdf_ws = X_mesh_a_ws
                     mesh = mesh_b
-                    shape_a = mesh_shape_b
-                    shape_b = mesh_shape_a
-                    thickness_mesh = thickness_b
-                    thickness_sdf = thickness_a
 
                 num_tris = mesh.indices.shape[0] // 3
                 # strided loop over triangles
@@ -685,24 +665,39 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         if direction_len > 0.0:
                             direction_world = direction_world / direction_len
 
+                        if mode == 0:
+                            contact_normal = -direction_world
+                        else:
+                            contact_normal = direction_world
+
                         # Create contact data
+                        # Always use consistent pair ordering (mesh_shape_a, mesh_shape_b) regardless of mode
                         contact_data = ContactData()
                         contact_data.contact_point_center = point_world
-                        contact_data.contact_normal_a_to_b = (
-                            -direction_world
-                        )  # Negate: gradient points B->A, we need A->B
+                        contact_data.contact_normal_a_to_b = contact_normal
                         contact_data.contact_distance = dist
                         contact_data.radius_eff_a = 0.0
                         contact_data.radius_eff_b = 0.0
-                        contact_data.thickness_a = thickness_mesh
-                        contact_data.thickness_b = thickness_sdf
-                        contact_data.shape_a = shape_a
-                        contact_data.shape_b = shape_b
+                        contact_data.thickness_a = thickness_a
+                        contact_data.thickness_b = thickness_b
+                        contact_data.shape_a = mesh_shape_a
+                        contact_data.shape_b = mesh_shape_b
                         contact_data.margin = margin
                         contact_data.feature = wp.uint32(tri_idx + 1)
                         contact_data.feature_pair_key = pair_key
 
                         writer_func(contact_data, writer_data)
+
+    # Return early if contact reduction is disabled
+    if contact_reduction_funcs is None:
+        return mesh_sdf_collision_kernel
+
+    # Extract functions and constants from the contact reduction configuration
+    num_reduction_slots = contact_reduction_funcs.num_reduction_slots
+    store_reduced_contact_func = contact_reduction_funcs.store_reduced_contact
+    filter_unique_contacts_func = contact_reduction_funcs.filter_unique_contacts
+    get_smem_slots_plus_1 = contact_reduction_funcs.get_smem_slots_plus_1
+    get_smem_slots_contacts = contact_reduction_funcs.get_smem_slots_contacts
 
     @wp.kernel
     def mesh_sdf_collision_reduce_kernel(
@@ -910,7 +905,4 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
             writer_func(contact_data, writer_data)
 
-    if reduce_contacts:
-        return mesh_sdf_collision_reduce_kernel
-    else:
-        return mesh_sdf_collision_kernel
+    return mesh_sdf_collision_reduce_kernel
