@@ -314,6 +314,8 @@ def do_triangle_sdf_collision(
         )
     )
 
+    difference = wp.max(difference, 1e-8)
+
     toleranceSq = 1e-3 * 1e-3
 
     sdfGradient = wp.vec3(0.0, 0.0, 0.0)
