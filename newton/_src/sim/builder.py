@@ -1601,6 +1601,8 @@ class ModelBuilder:
             "shape_material_restitution",
             "shape_collision_radius",
             "shape_contact_margin",
+            "shape_sdf_narrow_band_range",
+            "shape_sdf_max_dims",
             "particle_qd",
             "particle_mass",
             "particle_radius",
