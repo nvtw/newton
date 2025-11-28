@@ -74,7 +74,10 @@ class ContactStruct:
 
 _mat20x3 = wp.types.matrix(shape=(20, 3), dtype=wp.float32)
 
+# Face normals ordered: top cap (0-4), equatorial (5-14), bottom cap (15-19)
+# This layout enables contiguous range searches for all cases.
 icosahedronFaceNormals = _mat20x3(
+    # Top cap (faces 0-4, Y ≈ +0.795)
     0.49112338,
     0.79465455,
     0.35682216,
@@ -90,21 +93,7 @@ icosahedronFaceNormals = _mat20x3(
     0.4911234,
     0.79465455,
     -0.3568221,
-    0.18759249,
-    -0.7946544,
-    0.57735026,
-    -0.49112338,
-    -0.7946545,
-    0.35682213,
-    -0.49112338,
-    -0.79465455,
-    -0.35682213,
-    0.18759243,
-    -0.7946544,
-    -0.57735026,
-    0.607062,
-    -0.7946544,
-    0.0,
+    # Equatorial band (faces 5-14, Y ≈ ±0.188)
     0.9822469,
     -0.18759257,
     0.0,
@@ -135,11 +124,30 @@ icosahedronFaceNormals = _mat20x3(
     -0.30353084,
     0.18759246,
     -0.9341724,
+    # Bottom cap (faces 15-19, Y ≈ -0.795)
+    0.18759249,
+    -0.7946544,
+    0.57735026,
+    -0.49112338,
+    -0.7946545,
+    0.35682213,
+    -0.49112338,
+    -0.79465455,
+    -0.35682213,
+    0.18759243,
+    -0.7946544,
+    -0.57735026,
+    0.607062,
+    -0.7946544,
+    0.0,
 )
 
 _mat60x3 = wp.types.matrix(shape=(60, 3), dtype=wp.float32)
 
+# Triangle vertices ordered: top cap (0-14), equatorial (15-44), bottom cap (45-59)
+# Each face has 3 consecutive vertices. Layout matches icosahedronFaceNormals.
 icosahedronTriangles = _mat60x3(
+    # Top cap faces 0-4 (rows 0-14)
     0.0,
     1.0,
     0.0,
@@ -185,51 +193,7 @@ icosahedronTriangles = _mat60x3(
     0.27639332,
     0.4472136,
     -0.8506508,
-    0.0,
-    -1.0,
-    0.0,
-    0.7236068,
-    -0.4472136,
-    0.5257311,
-    -0.27639323,
-    -0.4472136,
-    0.8506508,
-    0.0,
-    -1.0,
-    0.0,
-    -0.27639323,
-    -0.4472136,
-    0.8506508,
-    -0.8944273,
-    -0.44721365,
-    0.0,
-    0.0,
-    -1.0,
-    0.0,
-    -0.8944273,
-    -0.44721365,
-    0.0,
-    -0.2763933,
-    -0.4472136,
-    -0.8506508,
-    0.0,
-    -1.0,
-    0.0,
-    -0.2763933,
-    -0.4472136,
-    -0.8506508,
-    0.72360677,
-    -0.4472136,
-    -0.52573115,
-    0.0,
-    -1.0,
-    0.0,
-    0.72360677,
-    -0.4472136,
-    -0.52573115,
-    0.7236068,
-    -0.4472136,
-    0.5257311,
+    # Equatorial band faces 5-14 (rows 15-44)
     0.8944273,
     0.44721365,
     0.0,
@@ -320,6 +284,52 @@ icosahedronTriangles = _mat60x3(
     -0.72360677,
     0.4472136,
     -0.5257312,
+    # Bottom cap faces 15-19 (rows 45-59)
+    0.0,
+    -1.0,
+    0.0,
+    0.7236068,
+    -0.4472136,
+    0.5257311,
+    -0.27639323,
+    -0.4472136,
+    0.8506508,
+    0.0,
+    -1.0,
+    0.0,
+    -0.27639323,
+    -0.4472136,
+    0.8506508,
+    -0.8944273,
+    -0.44721365,
+    0.0,
+    0.0,
+    -1.0,
+    0.0,
+    -0.8944273,
+    -0.44721365,
+    0.0,
+    -0.2763933,
+    -0.4472136,
+    -0.8506508,
+    0.0,
+    -1.0,
+    0.0,
+    -0.2763933,
+    -0.4472136,
+    -0.8506508,
+    0.72360677,
+    -0.4472136,
+    -0.52573115,
+    0.0,
+    -1.0,
+    0.0,
+    0.72360677,
+    -0.4472136,
+    -0.52573115,
+    0.7236068,
+    -0.4472136,
+    0.5257311,
 )
 
 
@@ -348,29 +358,38 @@ def get_scan_dir(icosahedron_face_id: int, i: int) -> wp.vec3:
 def get_slot(normal: wp.vec3) -> int:
     """Returns the index of the icosahedron face that best matches the normal.
 
-    Optimized by checking only relevant faces based on vertical component.
+    Uses Y-component to select search region:
+    - Faces 0-4: top cap (Y ≈ +0.795)
+    - Faces 5-9: bottom cap (Y ≈ -0.795)
+    - Faces 10-19: equatorial band (Y ≈ ±0.188)
 
     Args:
         normal: Normal vector to match
 
     Returns:
-        Index of the best matching icosahedron face
+        Index of the best matching icosahedron face (0-19)
     """
-    # Check Y-axis dot product to determine region
-    up_dot = normal[1]  # Y component
+    up_dot = normal[1]
 
-    start_idx = 0
-    end_idx = 0
-
-    # Determine which faces to check based on vertical orientation
-    if up_dot > 0.44721365:
+    # Conservative thresholds: only skip regions when clearly in a polar cap.
+    # Top/bottom cap faces have Y ≈ ±0.795, equatorial faces have |Y| ≈ 0.188.
+    # Threshold 0.65 ensures we don't miss better matches in adjacent regions.
+    # Face layout: 0-4 = top cap, 5-14 = equatorial, 15-19 = bottom cap.
+    if up_dot > 0.65:
+        # Clearly pointing up - only check top cap (5 faces)
         start_idx = 0
         end_idx = 5
-    elif up_dot < -0.44721365:
-        start_idx = 5
-        end_idx = 10
+    elif up_dot < -0.65:
+        # Clearly pointing down - only check bottom cap (5 faces)
+        start_idx = 15
+        end_idx = 20
+    elif up_dot >= 0.0:
+        # Leaning up - check top cap + equatorial (15 faces)
+        start_idx = 0
+        end_idx = 15
     else:
-        start_idx = 10
+        # Leaning down - check equatorial + bottom cap (15 faces)
+        start_idx = 5
         end_idx = 20
 
     best_slot = start_idx
