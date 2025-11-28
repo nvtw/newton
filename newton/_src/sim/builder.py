@@ -4940,52 +4940,57 @@ class ModelBuilder:
 
             # ---------------------
             # Compute SDFs for mesh shapes
-            from ..geometry.sdf_utils import SDFData, compute_sdf  # noqa: PLC0415
+            from ..geometry.sdf_utils import SDFData, compute_sdf, create_empty_sdf_data  # noqa: PLC0415
             from ..geometry.types import GeoType  # noqa: PLC0415
 
-            sdf_data_list = []
-            # Keep volume objects alive for reference counting
-            sdf_volumes = []
-            sdf_coarse_volumes = []
+            # Check if there are any mesh shapes with collision enabled
+            has_colliding_meshes = any(
+                stype == GeoType.MESH and ssrc is not None and sflags & ShapeFlags.COLLIDE_SHAPES
+                for stype, ssrc, sflags in zip(self.shape_type, self.shape_source, self.shape_flags, strict=False)
+            )
 
-            for _, (shape_type, shape_src, shape_flags, shape_thickness) in enumerate(
-                zip(
-                    self.shape_type,
-                    self.shape_source,
-                    self.shape_flags,
-                    self.shape_thickness,
-                    strict=False,
-                )
-            ):
-                if shape_type == GeoType.MESH and shape_src is not None:
-                    # Compute SDF for this mesh shape (returns SDFData struct and volume objects)
-                    sdf_data, sparse_volume, coarse_volume = compute_sdf(
-                        shape_flags=shape_flags,
-                        shape_thickness=shape_thickness,
-                        mesh_src=shape_src,
-                        device=device,
+            if has_colliding_meshes:
+                sdf_data_list = []
+                # Keep volume objects alive for reference counting
+                sdf_volumes = []
+                sdf_coarse_volumes = []
+
+                for _, (shape_type, shape_src, shape_flags, shape_thickness) in enumerate(
+                    zip(
+                        self.shape_type,
+                        self.shape_source,
+                        self.shape_flags,
+                        self.shape_thickness,
+                        strict=False,
                     )
-                    sdf_volumes.append(sparse_volume)
-                    sdf_coarse_volumes.append(coarse_volume)
-                else:
-                    # Non-mesh shapes get empty SDFData
-                    sdf_data = SDFData()
-                    sdf_data.sparse_sdf_ptr = wp.uint64(0)
-                    sdf_data.sparse_voxel_size = wp.vec3(0.0, 0.0, 0.0)
-                    sdf_data.coarse_sdf_ptr = wp.uint64(0)
-                    sdf_data.coarse_voxel_size = wp.vec3(0.0, 0.0, 0.0)
-                    sdf_data.center = wp.vec3(0.0, 0.0, 0.0)
-                    sdf_data.half_extents = wp.vec3(0.0, 0.0, 0.0)
-                    sdf_data.background_value = 1000.0
-                    sdf_volumes.append(None)
-                    sdf_coarse_volumes.append(None)
-                sdf_data_list.append(sdf_data)
+                ):
+                    # Compute SDF only for mesh shapes with collision enabled
+                    if shape_type == GeoType.MESH and shape_src is not None and shape_flags & ShapeFlags.COLLIDE_SHAPES:
+                        # Compute SDF for this mesh shape (returns SDFData struct and volume objects)
+                        sdf_data, sparse_volume, coarse_volume = compute_sdf(
+                            shape_thickness=shape_thickness,
+                            mesh_src=shape_src,
+                            device=device,
+                        )
+                        sdf_volumes.append(sparse_volume)
+                        sdf_coarse_volumes.append(coarse_volume)
+                    else:
+                        # Non-mesh shapes or non-colliding shapes get empty SDFData
+                        sdf_data = create_empty_sdf_data()
+                        sdf_volumes.append(None)
+                        sdf_coarse_volumes.append(None)
+                    sdf_data_list.append(sdf_data)
 
-            # Create array of SDFData structs
-            m.shape_sdf_data = wp.array(sdf_data_list, dtype=SDFData, device=device)
-            # Keep volume objects alive for reference counting
-            m.shape_sdf_volume = sdf_volumes
-            m.shape_sdf_coarse_volume = sdf_coarse_volumes
+                # Create array of SDFData structs
+                m.shape_sdf_data = wp.array(sdf_data_list, dtype=SDFData, device=device)
+                # Keep volume objects alive for reference counting
+                m.shape_sdf_volume = sdf_volumes
+                m.shape_sdf_coarse_volume = sdf_coarse_volumes
+            else:
+                # No colliding meshes
+                m.shape_sdf_data = wp.empty(0, dtype=SDFData, device=device)
+                m.shape_sdf_volume = []
+                m.shape_sdf_coarse_volume = []
 
             # ---------------------
             # springs
