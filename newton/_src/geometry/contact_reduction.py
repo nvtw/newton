@@ -56,10 +56,11 @@ def pack_value_thread_id(value: float, thread_id: int) -> wp.uint64:
     return (wp.uint64(float_flip(value)) << wp.uint64(32)) | wp.uint64(thread_id)
 
 
-@wp.func
-def unpack_thread_id(packed: wp.uint64) -> int:
-    """Extract thread_id from packed value."""
-    return wp.int32(packed & wp.uint64(0xFFFFFFFF))
+# Use native func because warp tries to convert 0xFFFFFFFF to int32 which is not the intended behavior
+@wp.func_native("""
+return static_cast<int32_t>(packed & 0xFFFFFFFFull);
+""")
+def unpack_thread_id(packed: wp.uint64) -> int: ...
 
 
 @wp.struct
@@ -424,10 +425,14 @@ def create_shared_memory_pointer_func_4_byte_aligned(
     """
 
     snippet = f"""
+#if defined(__CUDA_ARCH__)
     constexpr int array_size = {array_size};
     __shared__ int s[array_size];
     auto ptr = &s[0];
     return (uint64_t)ptr;
+#else
+    return (uint64_t)0;
+#endif
     """
 
     @wp.func_native(snippet)
@@ -449,10 +454,14 @@ def create_shared_memory_pointer_func_8_byte_aligned(
     """
 
     snippet = f"""
+#if defined(__CUDA_ARCH__)
     constexpr int array_size = {array_size};
     __shared__ uint64_t s[array_size];
     auto ptr = &s[0];
     return (uint64_t)ptr;
+#else
+    return (uint64_t)0;
+#endif
     """
 
     @wp.func_native(snippet)
@@ -474,10 +483,14 @@ def create_shared_memory_pointer_block_dim_func(
     """
 
     snippet = f"""
+#if defined(__CUDA_ARCH__)
     constexpr int array_size = WP_TILE_BLOCK_DIM +{add};
     __shared__ int s[array_size];
     auto ptr = &s[0];
     return (uint64_t)ptr;
+#else
+    return (uint64_t)0;
+#endif
     """
 
     @wp.func_native(snippet)
