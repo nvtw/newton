@@ -179,6 +179,10 @@ class ModelBuilder:
         """Indicates whether the shape is visible in the simulation. Defaults to True."""
         is_site: bool = False
         """Indicates whether the shape is a site (non-colliding reference point). Directly setting this to True will NOT enforce site invariants. Use `mark_as_site()` or set via the `flags` property to ensure invariants. Defaults to False."""
+        sdf_narrow_band_range: tuple[float, float] = (-0.1, 0.1)
+        """The narrow band distance range (inner, outer) for SDF computation. Only used for mesh shapes."""
+        sdf_max_dims: int = 64
+        """The maximum dimension for sparse SDF grid. Must be divisible by 8. Only used for mesh shapes."""
 
         def mark_as_site(self) -> None:
             """Marks this shape as a site and enforces all site invariants.
@@ -497,6 +501,9 @@ class ModelBuilder:
         self.shape_collision_radius = []
         # world index for each shape
         self.shape_world = []
+        # SDF parameters per shape
+        self.shape_sdf_narrow_band_range = []
+        self.shape_sdf_max_dims = []
 
         # Mesh SDF storage (volumes kept for reference counting, SDFData array created at finalize)
 
@@ -3031,6 +3038,8 @@ class ModelBuilder:
         self.shape_collision_group.append(cfg.collision_group)
         self.shape_collision_radius.append(compute_shape_radius(type, scale, src))
         self.shape_world.append(self.current_world)
+        self.shape_sdf_narrow_band_range.append(cfg.sdf_narrow_band_range)
+        self.shape_sdf_max_dims.append(cfg.sdf_max_dims)
         if cfg.has_shape_collision and cfg.collision_filter_parent and body > -1 and body in self.joint_parents:
             for parent_body in self.joint_parents[body]:
                 if parent_body > -1:
@@ -5066,18 +5075,27 @@ class ModelBuilder:
                 sdf_coarse_volumes = []
                 sdf_cache = {}
 
-                for _, (shape_type, shape_src, shape_flags, shape_thickness) in enumerate(
+                for _, (
+                    shape_type,
+                    shape_src,
+                    shape_flags,
+                    shape_thickness,
+                    sdf_narrow_band_range,
+                    sdf_max_dims,
+                ) in enumerate(
                     zip(
                         self.shape_type,
                         self.shape_source,
                         self.shape_flags,
                         self.shape_thickness,
+                        self.shape_sdf_narrow_band_range,
+                        self.shape_sdf_max_dims,
                         strict=False,
                     )
                 ):
                     # Compute SDF only for mesh shapes with collision enabled
                     if shape_type == GeoType.MESH and shape_src is not None and shape_flags & ShapeFlags.COLLIDE_SHAPES:
-                        cache_key = (hash(shape_src), shape_thickness)
+                        cache_key = (hash(shape_src), shape_thickness, sdf_narrow_band_range, sdf_max_dims)
                         if cache_key in sdf_cache:
                             sdf_data, sparse_volume, coarse_volume = sdf_cache[cache_key]
                         else:
@@ -5085,6 +5103,8 @@ class ModelBuilder:
                             sdf_data, sparse_volume, coarse_volume = compute_sdf(
                                 shape_thickness=shape_thickness,
                                 mesh_src=shape_src,
+                                narrow_band_distance=sdf_narrow_band_range,
+                                max_dims=sdf_max_dims,
                             )
                             sdf_cache[cache_key] = (sdf_data, sparse_volume, coarse_volume)
                         sdf_volumes.append(sparse_volume)
