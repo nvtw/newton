@@ -453,6 +453,13 @@ class ModelBuilder:
         When True, uses a CPU implementation that reports specific issues for each body and updates
         the ModelBuilder's internal state.
         Default: False."""
+
+        self.enable_mesh_sdf_collision = False
+        """Whether to enable SDF-based mesh-mesh collision detection.
+        When enabled, signed distance fields (SDFs) are computed for mesh shapes to enable
+        mesh-mesh collision detection. Requires a CUDA-capable GPU device since wp.Volume only
+        supports CUDA. If enabled but the model is finalized on a CPU device, a ValueError is raised.
+        Default: False."""
         # endregion
 
         # particles
@@ -5017,9 +5024,21 @@ class ModelBuilder:
             m.shape_collision_group = wp.array(self.shape_collision_group, dtype=wp.int32)
 
             # ---------------------
-            # Compute SDFs for mesh shapes
+            # Compute SDFs for mesh shapes (opt-in feature via enable_mesh_sdf_collision)
             from ..geometry.sdf_utils import SDFData, compute_sdf, create_empty_sdf_data  # noqa: PLC0415
             from ..geometry.types import GeoType  # noqa: PLC0415
+
+            # Check if we're running on GPU - wp.Volume only supports CUDA
+            current_device = wp.get_device(device)
+            is_gpu = current_device.is_cuda
+
+            # Check if mesh SDF collision was requested but we're on CPU
+            if self.enable_mesh_sdf_collision and not is_gpu:
+                raise ValueError(
+                    "enable_mesh_sdf_collision requires a CUDA-capable GPU device. "
+                    "wp.Volume (used for SDF generation) only supports CUDA. "
+                    "Either set enable_mesh_sdf_collision=False or use a CUDA device."
+                )
 
             # Check if there are any mesh shapes with collision enabled
             has_colliding_meshes = any(
@@ -5027,7 +5046,10 @@ class ModelBuilder:
                 for stype, ssrc, sflags in zip(self.shape_type, self.shape_source, self.shape_flags, strict=False)
             )
 
-            if has_colliding_meshes:
+            # Enable mesh-mesh collision only if explicitly enabled, on GPU, and there are colliding meshes
+            m.mesh_mesh_collision_enabled = self.enable_mesh_sdf_collision and has_colliding_meshes and is_gpu
+
+            if self.enable_mesh_sdf_collision and has_colliding_meshes:
                 sdf_data_list = []
                 # Keep volume objects alive for reference counting
                 sdf_volumes = []
@@ -5070,7 +5092,7 @@ class ModelBuilder:
                 m.shape_sdf_volume = sdf_volumes
                 m.shape_sdf_coarse_volume = sdf_coarse_volumes
             else:
-                # No colliding meshes
+                # SDF mesh-mesh collision not enabled or no colliding meshes
                 m.shape_sdf_data = wp.empty(0, dtype=SDFData, device=device)
                 m.shape_sdf_volume = []
                 m.shape_sdf_coarse_volume = []

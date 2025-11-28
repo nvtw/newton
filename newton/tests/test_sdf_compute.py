@@ -21,6 +21,8 @@ This test suite validates:
 3. SDF gradients point away from the surface
 4. Points inside the mesh have negative SDF values
 5. Points outside the mesh have positive SDF values
+
+Note: These tests require GPU (CUDA) since wp.Volume only supports CUDA devices.
 """
 
 import unittest
@@ -28,9 +30,14 @@ import unittest
 import numpy as np
 import warp as wp
 
+import newton
 from newton._src.geometry.sdf_contact import sample_sdf_extrapolated, sample_sdf_grad_extrapolated
 from newton._src.geometry.sdf_utils import SDFData, compute_sdf
 from newton._src.geometry.types import Mesh
+
+# Skip all tests in this module if CUDA is not available
+# wp.Volume only supports CUDA devices
+_cuda_available = wp.is_cuda_available()
 
 
 def create_box_mesh(half_extents: tuple[float, float, float]) -> Mesh:
@@ -161,6 +168,7 @@ def sample_sdf_with_gradient(volume, points_np: np.ndarray) -> tuple[np.ndarray,
     return values.numpy(), gradients.numpy()
 
 
+@unittest.skipUnless(_cuda_available, "wp.Volume requires CUDA device")
 class TestComputeSDF(unittest.TestCase):
     """Test the compute_sdf function."""
 
@@ -515,6 +523,7 @@ class TestComputeSDF(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(_cuda_available, "wp.Volume requires CUDA device")
 class TestComputeSDFGridSampling(unittest.TestCase):
     """Test SDF by sampling on a grid of points."""
 
@@ -652,6 +661,7 @@ def sample_extrapolated_with_gradient(sdf_data: SDFData, points_np: np.ndarray) 
     return values.numpy(), gradients.numpy()
 
 
+@unittest.skipUnless(_cuda_available, "wp.Volume requires CUDA device")
 class TestSDFExtrapolation(unittest.TestCase):
     """Test the SDF extrapolation functions."""
 
@@ -891,6 +901,70 @@ class TestSDFExtrapolation(unittest.TestCase):
                 self.sdf_data.background_value,
                 f"Point {i}: extrapolated value ({value}) should be less than background ({self.sdf_data.background_value})",
             )
+
+
+class TestMeshSDFCollisionFlag(unittest.TestCase):
+    """Test the enable_mesh_sdf_collision flag behavior."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Set up test fixtures once for all tests."""
+        wp.init()
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.half_extents = (0.5, 0.5, 0.5)
+        self.mesh = create_box_mesh(self.half_extents)
+
+    def test_enable_mesh_sdf_collision_raises_on_cpu(self):
+        """Test that enable_mesh_sdf_collision=True raises ValueError on CPU."""
+        builder = newton.ModelBuilder()
+        builder.enable_mesh_sdf_collision = True
+
+        # Add a mesh shape to trigger SDF computation
+        builder.add_body()
+        builder.add_shape_mesh(body=-1, mesh=self.mesh)
+
+        # Should raise ValueError when finalizing on CPU
+        with self.assertRaises(ValueError) as context:
+            builder.finalize(device="cpu")
+
+        self.assertIn("CUDA", str(context.exception))
+        self.assertIn("enable_mesh_sdf_collision", str(context.exception))
+
+    def test_mesh_sdf_collision_disabled_works_on_cpu(self):
+        """Test that enable_mesh_sdf_collision=False (default) works on CPU."""
+        builder = newton.ModelBuilder()
+        # Default is False, but be explicit
+        builder.enable_mesh_sdf_collision = False
+
+        # Add a mesh shape
+        builder.add_body()
+        builder.add_shape_mesh(body=-1, mesh=self.mesh)
+
+        # Should NOT raise when finalizing on CPU
+        model = builder.finalize(device="cpu")
+
+        # mesh_mesh_collision_enabled should be False
+        self.assertFalse(model.mesh_mesh_collision_enabled)
+
+    @unittest.skipUnless(_cuda_available, "Requires CUDA device")
+    def test_mesh_sdf_collision_enabled_works_on_gpu(self):
+        """Test that enable_mesh_sdf_collision=True works on GPU."""
+        builder = newton.ModelBuilder()
+        builder.enable_mesh_sdf_collision = True
+
+        # Add a mesh shape
+        builder.add_body()
+        builder.add_shape_mesh(body=-1, mesh=self.mesh)
+
+        # Should work on GPU
+        model = builder.finalize(device="cuda:0")
+
+        # mesh_mesh_collision_enabled should be True
+        self.assertTrue(model.mesh_mesh_collision_enabled)
+        # SDF data should be populated
+        self.assertGreater(model.shape_sdf_data.shape[0], 0)
 
 
 if __name__ == "__main__":
