@@ -828,7 +828,7 @@ class NarrowPhase:
         shape_aabb_lower: wp.array(dtype=wp.vec3) | None = None,
         shape_aabb_upper: wp.array(dtype=wp.vec3) | None = None,
         contact_writer_warp_func: Any | None = None,
-        betas: tuple = (10.0, 1000000.0),
+        betas: tuple = (10.0,),
     ):
         """
         Initialize NarrowPhase with pre-allocated buffers.
@@ -844,8 +844,8 @@ class NarrowPhase:
             shape_aabb_upper: Optional external AABB upper bounds array (if provided, AABBs won't be computed internally)
             contact_writer_warp_func: Optional custom contact writer function (first arg: ContactData, second arg: custom struct type)
             betas: Tuple of beta values for contact reduction. The combined score is computed as
-                spatial_dp + beta * depth for each beta value. Default is (10.0, 1000000.0).
-                The number of reduction slots is automatically computed as 20 * 6 * len(betas).
+                spatial_dp + beta * depth for each beta value. Default is (10.0,).
+                The number of reduction slots is 20 * (6 * len(betas) + 1).
         """
         self.max_candidate_pairs = max_candidate_pairs
         self.max_triangle_pairs = max_triangle_pairs

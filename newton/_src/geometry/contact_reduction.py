@@ -415,16 +415,17 @@ def compute_num_reduction_slots(num_betas: int) -> int:
         num_betas: Number of beta values
 
     Returns:
-        Total number of reduction slots (20 bins * 6 directions * num_betas)
+        Total number of reduction slots (20 bins * (6 directions * num_betas + 1))
+        The +1 is for the max depth slot per bin.
     """
-    return NUM_NORMAL_BINS * NUM_SPATIAL_DIRECTIONS * num_betas
+    return NUM_NORMAL_BINS * (NUM_SPATIAL_DIRECTIONS * num_betas + 1)
 
 
-def create_betas_array(betas: tuple = (10.0, 1000000.0), device=None) -> wp.array:
+def create_betas_array(betas: tuple = (10.0,), device=None) -> wp.array:
     """Create a warp array with the beta values for contact reduction.
 
     Args:
-        betas: Tuple of beta values (default: (10.0, 1000000.0))
+        betas: Tuple of beta values (default: (10.0,))
         device: Device to create the array on (default: current device)
 
     Returns:
@@ -528,7 +529,7 @@ class ContactReductionFunctions:
         betas: Tuple of beta values for combined score = spatial_dp + beta * depth.
     """
 
-    def __init__(self, betas: tuple = (10.0, 1000000.0)):
+    def __init__(self, betas: tuple = (10.0,)):
         self.betas = betas
         self.num_betas = len(betas)
         self.num_reduction_slots = compute_num_reduction_slots(self.num_betas)
@@ -563,7 +564,7 @@ class ContactReductionFunctions:
             empty_marker: float,
         ):
             """Store contact using atomic reduction. Score = spatial_dp - beta * depth."""
-            slots_per_bin = wp.static(NUM_SPATIAL_DIRECTIONS * num_betas)
+            slots_per_bin = wp.static(NUM_SPATIAL_DIRECTIONS * num_betas + 1)
             num_slots = wp.static(NUM_NORMAL_BINS * slots_per_bin)
 
             winner_slots = wp.array(
@@ -582,6 +583,7 @@ class ContactReductionFunctions:
 
             if active:
                 base_key = bin_id * slots_per_bin
+                # Compete for spatial direction + beta slots
                 for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
                     scan_dir = get_scan_dir(bin_id, dir_i)
                     spatial_dp = wp.dot(scan_dir, c.position)
@@ -589,10 +591,15 @@ class ContactReductionFunctions:
                         score = spatial_dp - betas_arr[beta_i] * c.depth
                         key = base_key + dir_i * wp.static(num_betas) + beta_i
                         atomic_max_uint64(winner_slots.ptr, key, pack_value_thread_id(score, thread_id))
+                # Compete for max depth slot (last slot in bin)
+                max_depth_key = base_key + slots_per_bin - 1
+                # Use -depth as score so atomicMax selects the deepest (most negative depth)
+                atomic_max_uint64(winner_slots.ptr, max_depth_key, pack_value_thread_id(-c.depth, thread_id))
             synchronize()
 
             if active:
                 base_key = bin_id * slots_per_bin
+                # Check spatial direction + beta slots
                 for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
                     scan_dir = get_scan_dir(bin_id, dir_i)
                     spatial_dp = wp.dot(scan_dir, c.position)
@@ -608,6 +615,18 @@ class ContactReductionFunctions:
                             if score > p:
                                 c.projection = score
                                 buffer[key] = c
+                # Check max depth slot
+                max_depth_key = base_key + slots_per_bin - 1
+                if unpack_thread_id(winner_slots[max_depth_key]) == thread_id:
+                    p = buffer[max_depth_key].projection
+                    if p == empty_marker:
+                        id = wp.atomic_add(active_ids, num_slots, 1)
+                        if id < num_slots:
+                            active_ids[id] = max_depth_key
+                    score = -c.depth
+                    if score > p:
+                        c.projection = score
+                        buffer[max_depth_key] = c
             synchronize()
 
         return store_reduced_contact
@@ -626,7 +645,7 @@ class ContactReductionFunctions:
             empty_marker: float,
         ):
             """Filter duplicate contacts, keeping first occurrence per feature."""
-            slots_per_bin = wp.static(NUM_SPATIAL_DIRECTIONS * num_betas)
+            slots_per_bin = wp.static(NUM_SPATIAL_DIRECTIONS * num_betas + 1)
             num_slots = wp.static(NUM_NORMAL_BINS * slots_per_bin)
 
             keep_flags = wp.array(
