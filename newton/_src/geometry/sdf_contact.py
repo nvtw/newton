@@ -347,8 +347,6 @@ def do_triangle_sdf_collision(
         p = v0 * newUVW[0] + v1 * newUVW[1] + v2 * newUVW[2]
 
         if wp.length_sq(uvw - newUVW) < toleranceSq:
-            # if(iter != 0)
-            #     printf("Iter = %i\n", iter);
             break
 
         uvw = newUVW
@@ -447,8 +445,6 @@ def add_to_shared_buffer_atomic(
     """
     Add a triangle index to a shared memory buffer using atomic operations.
 
-    This is a faster alternative to scan-based compaction, reducing from 6 syncs to 2.
-
     Buffer layout:
     - [0 .. block_dim-1]: Triangle indices
     - [block_dim]: Current count of triangles in buffer
@@ -504,8 +500,6 @@ def find_interesting_triangles(
     in shared memory buffer for narrow-phase processing.
 
     Uses extrapolated SDF sampling that handles points outside the narrow band or extent.
-
-    Uses atomic compaction (2 syncs per iteration) instead of scan-based (6 syncs).
 
     Buffer layout: [0..block_dim-1] = indices, [block_dim] = count, [block_dim+1] = progress
     """
