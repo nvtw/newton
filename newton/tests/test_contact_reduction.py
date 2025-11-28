@@ -43,8 +43,7 @@ from newton._src.geometry.contact_reduction import (
     icosahedronTriangles,
     synchronize,
 )
-
-from .unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
+from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
 
 
 @wp.kernel
@@ -147,12 +146,13 @@ def test_constants(test, device):
 
 def test_compute_num_reduction_slots(test, device):
     """Test compute_num_reduction_slots calculation."""
-    # With default 2 betas: 20 bins * 6 directions * 2 = 240
-    test.assertEqual(compute_num_reduction_slots(2), 240)
-    # With 1 beta: 20 * 6 * 1 = 120
-    test.assertEqual(compute_num_reduction_slots(1), 120)
-    # With 3 betas: 20 * 6 * 3 = 360
-    test.assertEqual(compute_num_reduction_slots(3), 360)
+    # Formula: 20 + (20 bins * 6 directions * num_betas) = 20 + 120 * num_betas
+    # With 1 beta: 20 + 120 = 140
+    test.assertEqual(compute_num_reduction_slots(1), 140)
+    # With default 2 betas: 20 + 240 = 260
+    test.assertEqual(compute_num_reduction_slots(2), 260)
+    # With 3 betas: 20 + 360 = 380
+    test.assertEqual(compute_num_reduction_slots(3), 380)
 
 
 def test_create_betas_array(test, device):
@@ -440,8 +440,8 @@ def test_reduction_functions_initialization(test, device):
 
     test.assertEqual(funcs.num_betas, 2)
     test.assertEqual(funcs.betas, (10.0, 1000000.0))
-    # 20 bins * 6 directions * 2 betas = 240
-    test.assertEqual(funcs.num_reduction_slots, 240)
+    # 20 + (20 bins * 6 directions * 2 betas) = 260
+    test.assertEqual(funcs.num_reduction_slots, 260)
 
 
 def test_reduction_functions_single_beta(test, device):
@@ -449,8 +449,8 @@ def test_reduction_functions_single_beta(test, device):
     funcs = ContactReductionFunctions(betas=(100.0,))
 
     test.assertEqual(funcs.num_betas, 1)
-    # 20 bins * 6 directions * 1 beta = 120
-    test.assertEqual(funcs.num_reduction_slots, 120)
+    # 20 + (20 bins * 6 directions * 1 beta) = 140
+    test.assertEqual(funcs.num_reduction_slots, 140)
 
 
 def test_contact_reduction_produces_valid_output(test, device):
