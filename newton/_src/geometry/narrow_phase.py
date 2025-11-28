@@ -853,13 +853,16 @@ class NarrowPhase:
         self.betas_tuple = betas
         self.reduce_contacts = reduce_contacts
 
-        # Create contact reduction functions only when reduce_contacts is enabled
-        if reduce_contacts:
+        # Create contact reduction functions only when reduce_contacts is enabled and running on GPU
+        # Contact reduction requires GPU for shared memory operations
+        is_gpu_device = wp.get_device(device).is_cuda
+        if reduce_contacts and is_gpu_device:
             self.contact_reduction_funcs = ContactReductionFunctions(betas)
             self.num_reduction_slots = self.contact_reduction_funcs.num_reduction_slots
         else:
             self.contact_reduction_funcs = None
             self.num_reduction_slots = 0
+            self.reduce_contacts = False
 
         # Determine if we're using external AABBs
         self.external_aabb = shape_aabb_lower is not None and shape_aabb_upper is not None
@@ -1096,45 +1099,24 @@ class NarrowPhase:
         # Launch mesh-mesh contact processing kernel (only if SDF data is available)
         # SDF-based mesh-mesh collision requires GPU (wp.Volume only supports CUDA)
         if shape_sdf_data.shape[0] > 0:
-            if self.reduce_contacts:
-                # With contact reduction - use tiled launch with betas
-                wp.launch_tiled(
-                    kernel=self.mesh_mesh_contacts_kernel,
-                    dim=(self.num_tile_blocks,),
-                    inputs=[
-                        shape_data,
-                        shape_transform,
-                        shape_source,
-                        shape_sdf_data,
-                        shape_contact_margin,
-                        self.shape_pairs_mesh_mesh,
-                        self.shape_pairs_mesh_mesh_count,
-                        self.betas,
-                        writer_data,
-                        self.num_tile_blocks,
-                    ],
-                    device=device,
-                    block_dim=self.tile_size_mesh_mesh,
-                )
-            else:
-                # Without contact reduction - use tiled launch without betas
-                wp.launch_tiled(
-                    kernel=self.mesh_mesh_contacts_kernel,
-                    dim=(self.num_tile_blocks,),
-                    inputs=[
-                        shape_data,
-                        shape_transform,
-                        shape_source,
-                        shape_sdf_data,
-                        shape_contact_margin,
-                        self.shape_pairs_mesh_mesh,
-                        self.shape_pairs_mesh_mesh_count,
-                        writer_data,
-                        self.num_tile_blocks,
-                    ],
-                    device=device,
-                    block_dim=self.tile_size_mesh_mesh,
-                )
+            wp.launch_tiled(
+                kernel=self.mesh_mesh_contacts_kernel,
+                dim=(self.num_tile_blocks,),
+                inputs=[
+                    shape_data,
+                    shape_transform,
+                    shape_source,
+                    shape_sdf_data,
+                    shape_contact_margin,
+                    self.shape_pairs_mesh_mesh,
+                    self.shape_pairs_mesh_mesh_count,
+                    self.betas,
+                    writer_data,
+                    self.num_tile_blocks,
+                ],
+                device=device,
+                block_dim=self.tile_size_mesh_mesh,
+            )
 
     def launch(
         self,
