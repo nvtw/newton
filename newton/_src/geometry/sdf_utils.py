@@ -112,24 +112,22 @@ def check_tile_occupied_mesh_kernel(
 
 
 def compute_sdf(
-    shape_thickness: float,
     mesh_src,
+    shape_thickness: float = 0.0,
     narrow_band_distance: Sequence[float] = (-0.1, 0.1),
     margin: float = 0.05,
     max_dims: int = 64,
     verbose: bool = False,
-    device=None,
 ) -> tuple[SDFData, wp.Volume | None, wp.Volume | None]:
     """Compute sparse and coarse SDF volumes for a mesh.
 
     Args:
-        shape_thickness: Thickness offset to subtract from SDF values
-        mesh_src: Mesh source with vertices and indices
-        narrow_band_distance: Tuple of (inner, outer) distances for narrow band
-        margin: Margin to add to bounding box
-        max_dims: Maximum dimension for sparse SDF grid
-        verbose: Print debug info
-        device: Warp device
+        mesh_src: Mesh source with vertices and indices.
+        shape_thickness: Thickness offset to subtract from SDF values.
+        narrow_band_distance: Tuple of (inner, outer) distances for narrow band.
+        margin: Margin to add to bounding box.
+        max_dims: Maximum dimension for sparse SDF grid.
+        verbose: Print debug info.
 
     Returns:
         Tuple of (sdf_data, sparse_volume, coarse_volume) where:

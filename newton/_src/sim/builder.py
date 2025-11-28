@@ -5048,7 +5048,6 @@ class ModelBuilder:
                         sdf_data, sparse_volume, coarse_volume = compute_sdf(
                             shape_thickness=shape_thickness,
                             mesh_src=shape_src,
-                            device=device,
                         )
                         sdf_volumes.append(sparse_volume)
                         sdf_coarse_volumes.append(coarse_volume)
