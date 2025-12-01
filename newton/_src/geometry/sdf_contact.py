@@ -275,7 +275,6 @@ def sample_sdf_grad_using_mesh(
 def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     writer_func: Any,
     contact_reduction_funcs: ContactReductionFunctions | None = None,
-    use_bvh_for_sdf: bool = False,
 ):
     @wp.func
     def closest_pt_point_bary_triangle(c: wp.vec3) -> wp.vec3:
@@ -350,6 +349,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         v0: wp.vec3,
         v1: wp.vec3,
         v2: wp.vec3,
+        use_bvh_for_sdf: bool,
     ) -> tuple[float, wp.vec3, wp.vec3]:
         """
         Compute the deepest contact between a triangle and an SDF volume.
@@ -389,8 +389,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         p = center
 
         # Use extrapolated sampling for initial distance estimates
-        if wp.static(use_bvh_for_sdf):
-            max_dist = 1000.0
+        max_dist = 1000.0
+        if use_bvh_for_sdf:
             dist = sample_sdf_using_mesh(sdf_mesh_id, p, max_dist)
             d0 = sample_sdf_using_mesh(sdf_mesh_id, v0, max_dist)
             d1 = sample_sdf_using_mesh(sdf_mesh_id, v1, max_dist)
@@ -432,7 +432,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
         for _iter in range(16):
             # Use extrapolated gradient sampling
-            if wp.static(use_bvh_for_sdf):
+            if use_bvh_for_sdf:
                 _, sdfGradient = sample_sdf_grad_using_mesh(sdf_mesh_id, p, max_dist)
             else:
                 _, sdfGradient = sample_sdf_grad_extrapolated(sdf_data, p)
@@ -466,7 +466,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
             uvw = newUVW
 
         # Final extrapolated sampling for result
-        if wp.static(use_bvh_for_sdf):
+        if use_bvh_for_sdf:
             dist, sdfGradient = sample_sdf_grad_using_mesh(sdf_mesh_id, p, max_dist)
         else:
             dist, sdfGradient = sample_sdf_grad_extrapolated(sdf_data, p)
@@ -605,6 +605,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         sdf_mesh_id: wp.uint64,
         buffer: wp.array(dtype=wp.int32),
         contact_distance: float,
+        use_bvh_for_sdf: bool,
     ):
         """
         Broad-phase culling: fill shared buffer with triangle indices that may collide with SDF.
@@ -633,7 +634,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 bounding_sphere_center, bounding_sphere_radius = get_bounding_sphere(v0, v1, v2)
 
                 # Use extrapolated SDF distance query for culling
-                if wp.static(use_bvh_for_sdf):
+                if use_bvh_for_sdf:
                     sdf_dist = sample_sdf_using_mesh(sdf_mesh_id, bounding_sphere_center, 1.01 * (bounding_sphere_radius + contact_distance))
                 else:
                     sdf_dist = sample_sdf_extrapolated(sdf_data, bounding_sphere_center)
@@ -657,6 +658,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         betas: wp.array(dtype=wp.float32),  # Unused, kept for API compatibility
         writer_data: Any,
         total_num_blocks: int,
+        use_bvh_for_sdf: bool,
     ):
         """
         Process mesh-mesh collisions using SDF-mesh collision detection.
@@ -758,7 +760,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                     # Early out: check bounding sphere distance to SDF surface using extrapolated sampling
                     bounding_sphere_center, bounding_sphere_radius = get_bounding_sphere(v0, v1, v2)
-                    if wp.static(use_bvh_for_sdf):
+                    if use_bvh_for_sdf:
                         sdf_dist = sample_sdf_using_mesh(
                             sdf_mesh_id, bounding_sphere_center, 1.01 * (bounding_sphere_radius + margin)
                         )
@@ -769,7 +771,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     if sdf_dist > (bounding_sphere_radius + margin):
                         continue
 
-                    dist, point, direction = do_triangle_sdf_collision(sdf_data, sdf_mesh_id, v0, v1, v2)
+                    dist, point, direction = do_triangle_sdf_collision(sdf_data, sdf_mesh_id, v0, v1, v2, use_bvh_for_sdf)
 
                     if dist < margin:
                         point_world = wp.transform_point(X_sdf_ws, point)
@@ -825,6 +827,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         betas: wp.array(dtype=wp.float32),
         writer_data: Any,
         total_num_blocks: int,
+        use_bvh_for_sdf: bool,
     ):
         block_id, t = wp.tid()
         num_pairs = shape_pairs_mesh_mesh_count[0]
@@ -922,6 +925,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     sdf_mesh_id,
                     selected_triangles,
                     margin,
+                    use_bvh_for_sdf,
                 )
 
                 has_contact = t < selected_triangles[tri_capacity]
@@ -936,6 +940,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         v0,
                         v1,
                         v2,
+                        use_bvh_for_sdf,
                     )
 
                     has_contact = dist < margin

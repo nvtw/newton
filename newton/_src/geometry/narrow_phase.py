@@ -899,7 +899,7 @@ class NarrowPhase:
         )
         self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
             writer_func,
-            contact_reduction_funcs=self.contact_reduction_funcs,
+            contact_reduction_funcs=self.contact_reduction_funcs
         )
 
         # Pre-allocate all intermediate buffers
@@ -1113,6 +1113,7 @@ class NarrowPhase:
                     self.betas,
                     writer_data,
                     self.num_tile_blocks,
+                    False,
                 ],
                 device=device,
                 block_dim=self.tile_size_mesh_mesh,
