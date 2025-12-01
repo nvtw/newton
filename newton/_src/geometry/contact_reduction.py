@@ -76,7 +76,7 @@ _mat20x3 = wp.types.matrix(shape=(20, 3), dtype=wp.float32)
 
 # Face normals ordered: top cap (0-4), equatorial (5-14), bottom cap (15-19)
 # This layout enables contiguous range searches for all cases.
-icosahedronFaceNormals = _mat20x3(
+ICOSAHEDRON_FACE_NORMALS = _mat20x3(
     # Top cap (faces 0-4, Y ≈ +0.795)
     0.49112338,
     0.79465455,
@@ -145,8 +145,8 @@ icosahedronFaceNormals = _mat20x3(
 _mat60x3 = wp.types.matrix(shape=(60, 3), dtype=wp.float32)
 
 # Triangle vertices ordered: top cap (0-14), equatorial (15-44), bottom cap (45-59)
-# Each face has 3 consecutive vertices. Layout matches icosahedronFaceNormals.
-icosahedronTriangles = _mat60x3(
+# Each face has 3 consecutive vertices. Layout matches ICOSAHEDRON_FACE_NORMALS.
+ICOSAHEDRON_TRIANGLES = _mat60x3(
     # Top cap faces 0-4 (rows 0-14)
     0.0,
     1.0,
@@ -346,8 +346,8 @@ def get_scan_dir(icosahedron_face_id: int, i: int) -> wp.vec3:
         Indices 3, 4, 5 return the edges with negated direction.
     """
     face_base = 3 * icosahedron_face_id
-    v0 = icosahedronTriangles[face_base + (i + 1) % 3]
-    v1 = icosahedronTriangles[face_base + i % 3]
+    v0 = ICOSAHEDRON_TRIANGLES[face_base + (i + 1) % 3]
+    v1 = ICOSAHEDRON_TRIANGLES[face_base + i % 3]
     result = v0 - v1
     if i >= 3:
         result = -result
@@ -393,10 +393,10 @@ def get_slot(normal: wp.vec3) -> int:
         end_idx = 20
 
     best_slot = start_idx
-    max_dot = wp.dot(normal, icosahedronFaceNormals[start_idx])
+    max_dot = wp.dot(normal, ICOSAHEDRON_FACE_NORMALS[start_idx])
 
     for i in range(start_idx + 1, end_idx):
-        d = wp.dot(normal, icosahedronFaceNormals[i])
+        d = wp.dot(normal, ICOSAHEDRON_FACE_NORMALS[i])
         if d > max_dot:
             max_dot = d
             best_slot = i

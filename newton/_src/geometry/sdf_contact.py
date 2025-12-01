@@ -306,50 +306,50 @@ def do_triangle_sdf_collision(
 
     difference = wp.max(difference, 1e-8)
 
-    toleranceSq = 1e-3 * 1e-3
+    tolerance_sq = 1e-3 * 1e-3
 
-    sdfGradient = wp.vec3(0.0, 0.0, 0.0)
+    sdf_gradient = wp.vec3(0.0, 0.0, 0.0)
     step = 1.0 / (2.0 * difference)
 
     for _iter in range(16):
         # Use extrapolated gradient sampling
-        _, sdfGradient = sample_sdf_grad_extrapolated(sdf_data, p)
+        _, sdf_gradient = sample_sdf_grad_extrapolated(sdf_data, p)
 
-        grad_len = wp.length(sdfGradient)
+        grad_len = wp.length(sdf_gradient)
         if grad_len == 0.0:
             # We ran into a discontinuity e.g. the exact center of a cube
             # Just pick an arbitrary gradient of unit length to move out of the discontinuity
-            sdfGradient = wp.vec3(0.571846586, 0.705545099, 0.418566116)
+            sdf_gradient = wp.vec3(0.571846586, 0.705545099, 0.418566116)
             grad_len = 1.0
 
-        sdfGradient = sdfGradient / grad_len
+        sdf_gradient = sdf_gradient / grad_len
 
-        dfdu = wp.dot(sdfGradient, v0 - p)
-        dfdv = wp.dot(sdfGradient, v1 - p)
-        dfdw = wp.dot(sdfGradient, v2 - p)
+        dfdu = wp.dot(sdf_gradient, v0 - p)
+        dfdv = wp.dot(sdf_gradient, v1 - p)
+        dfdw = wp.dot(sdf_gradient, v2 - p)
 
-        newUVW = uvw
+        new_uvw = uvw
 
-        newUVW = wp.vec3(newUVW[0] - step * dfdu, newUVW[1] - step * dfdv, newUVW[2] - step * dfdw)
+        new_uvw = wp.vec3(new_uvw[0] - step * dfdu, new_uvw[1] - step * dfdv, new_uvw[2] - step * dfdw)
 
         step = step * 0.8
 
-        newUVW = closest_pt_point_bary_triangle(newUVW)
+        new_uvw = closest_pt_point_bary_triangle(new_uvw)
 
-        p = v0 * newUVW[0] + v1 * newUVW[1] + v2 * newUVW[2]
+        p = v0 * new_uvw[0] + v1 * new_uvw[1] + v2 * new_uvw[2]
 
-        if wp.length_sq(uvw - newUVW) < toleranceSq:
+        if wp.length_sq(uvw - new_uvw) < tolerance_sq:
             break
 
-        uvw = newUVW
+        uvw = new_uvw
 
     # Final extrapolated sampling for result
-    dist, sdfGradient = sample_sdf_grad_extrapolated(sdf_data, p)
+    dist, sdf_gradient = sample_sdf_grad_extrapolated(sdf_data, p)
 
     point = p
-    dir = sdfGradient
+    direction = sdf_gradient
 
-    return dist, point, dir
+    return dist, point, direction
 
 
 @wp.func
@@ -811,7 +811,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                 if has_contact:
                     v0, v1, v2 = get_triangle_from_mesh(mesh, mesh_scale, mesh_sdf_transform, selected_triangles[t])
-                    dist, point, dir = do_triangle_sdf_collision(
+                    dist, point, direction = do_triangle_sdf_collision(
                         sdf_data_current,
                         v0,
                         v1,
@@ -827,23 +827,23 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         # Mode 1: contact already in SDF A space = mesh A space (no transform needed)
                         if mode == 0:
                             point_body = wp.transform_point(X_sdf_b_to_mesh_a, point)
-                            dir_body = wp.transform_vector(X_sdf_b_to_mesh_a, dir)
+                            direction_body = wp.transform_vector(X_sdf_b_to_mesh_a, direction)
                         else:
                             point_body = point
-                            dir_body = dir
+                            direction_body = direction
 
-                        dir_len = wp.length(dir_body)
-                        if dir_len > 0.0:
-                            dir_body = dir_body / dir_len
+                        direction_len = wp.length(direction_body)
+                        if direction_len > 0.0:
+                            direction_body = direction_body / direction_len
 
                         # Normalize normal direction so it always points from pair[0] to pair[1]
                         # Mode 0: gradient points B->A (pair[1]->pair[0]), negate to get pair[0]->pair[1]
                         # Mode 1: gradient points A->B (pair[0]->pair[1]), already correct
                         if mode == 0:
-                            dir_body = -dir_body
+                            direction_body = -direction_body
 
                         c.position = point_body
-                        c.normal = dir_body  # Store normalized body-space normal pointing pair[0]->pair[1]
+                        c.normal = direction_body  # Store normalized body-space normal pointing pair[0]->pair[1]
                         c.depth = dist
                         # Encode mode into feature to distinguish triangles from mesh0 vs mesh1
                         # Mode 0: positive triangle index, Mode 1: negative (-(index+1))
