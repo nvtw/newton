@@ -175,366 +175,476 @@ def sample_sdf_grad_extrapolated(
 
 
 @wp.func
-def closest_pt_point_bary_triangle(c: wp.vec3) -> wp.vec3:
-    """
-    Find the closest point to `c` on the standard barycentric triangle.
-
-    This function projects a barycentric coordinate point onto the valid barycentric
-    triangle defined by vertices (1,0,0), (0,1,0), (0,0,1) in barycentric space.
-    The valid region is where all coordinates are non-negative and sum to 1.
-
-    This is a specialized version of the general closest-point-on-triangle algorithm
-    optimized for the barycentric simplex.
-
-    Args:
-        c: Input barycentric coordinates (may be outside valid triangle region)
-
-    Returns:
-        The closest valid barycentric coordinates. All components will be >= 0
-        and sum to 1.0.
-
-    Note:
-        This is used in optimization algorithms that work in barycentric space,
-        where gradient descent may produce invalid coordinates that need projection.
-    """
-    third = 1.0 / 3.0  # constexpr
-    c = c - wp.vec3(third * (c[0] + c[1] + c[2] - 1.0))
-
-    # two negative: return positive vertex
-    if c[1] < 0.0 and c[2] < 0.0:
-        return wp.vec3(1.0, 0.0, 0.0)
-
-    if c[0] < 0.0 and c[2] < 0.0:
-        return wp.vec3(0.0, 1.0, 0.0)
-
-    if c[0] < 0.0 and c[1] < 0.0:
-        return wp.vec3(0.0, 0.0, 1.0)
-
-    # one negative: return projection onto line if it is on the edge, or the largest vertex otherwise
-    if c[0] < 0.0:
-        d = c[0] * 0.5
-        y = c[1] + d
-        z = c[2] + d
-        if y > 1.0:
-            return wp.vec3(0.0, 1.0, 0.0)
-        if z > 1.0:
-            return wp.vec3(0.0, 0.0, 1.0)
-        return wp.vec3(0.0, y, z)
-    if c[1] < 0.0:
-        d = c[1] * 0.5
-        x = c[0] + d
-        z = c[2] + d
-        if x > 1.0:
-            return wp.vec3(1.0, 0.0, 0.0)
-        if z > 1.0:
-            return wp.vec3(0.0, 0.0, 1.0)
-        return wp.vec3(x, 0.0, z)
-    if c[2] < 0.0:
-        d = c[2] * 0.5
-        x = c[0] + d
-        y = c[1] + d
-        if x > 1.0:
-            return wp.vec3(1.0, 0.0, 0.0)
-        if y > 1.0:
-            return wp.vec3(0.0, 1.0, 0.0)
-        return wp.vec3(x, y, 0.0)
-    return c
-
-
-@wp.func
-def do_triangle_sdf_collision(
-    sdf_data: SDFData,
-    v0: wp.vec3,
-    v1: wp.vec3,
-    v2: wp.vec3,
-) -> tuple[float, wp.vec3, wp.vec3]:
-    """
-    Compute the deepest contact between a triangle and an SDF volume.
-
-    This function uses gradient descent in barycentric coordinates to find the point
-    on the triangle that has the minimum (most negative) signed distance to the SDF.
-    The optimization starts from either the triangle centroid or one of its vertices
-    (whichever has the smallest initial distance).
-
-    Uses extrapolated SDF sampling that handles:
-    - Points in narrow band: sparse grid value
-    - Points inside extent but outside narrow band: coarse grid value
-    - Points outside extent: extrapolated from boundary
-
-    Algorithm:
-    1. Evaluate SDF distance at triangle vertices and centroid
-    2. Start from the point with minimum distance
-    3. Iterate up to 16 times:
-       - Compute SDF gradient at current point
-       - Project gradient onto triangle edges (in barycentric space)
-       - Take a gradient descent step with decreasing step size
-       - Project result back onto valid barycentric triangle
-    4. Return final distance, contact point, and contact direction
-
-    Args:
-        sdf_data: SDFData struct containing sparse/coarse volumes and extent info
-        v0, v1, v2: Triangle vertices in world space (SDF local coordinates)
-
-    Returns:
-        Tuple of (distance, contact_point, contact_direction) where:
-        - distance: Signed distance to SDF surface (negative = penetration)
-        - contact_point: The point on the triangle closest to the SDF surface
-        - contact_direction: Normalized direction from surface to contact point
-    """
-    third = 1.0 / 3.0
-    center = (v0 + v1 + v2) * third
-    p = center
-
-    # Use extrapolated sampling for initial distance estimates
-    dist = sample_sdf_extrapolated(sdf_data, p)
-
-    d0 = sample_sdf_extrapolated(sdf_data, v0)
-    d1 = sample_sdf_extrapolated(sdf_data, v1)
-    d2 = sample_sdf_extrapolated(sdf_data, v2)
-
-    uvw = wp.vec3(0.0, 0.0, 0.0)
-
-    # choose starting iterate among centroid and triangle vertices
-    if d0 < d1 and d0 < d2 and d0 < dist:
-        p = v0
-        uvw = wp.vec3(1.0, 0.0, 0.0)
-    elif d1 < d2 and d1 < dist:
-        p = v1
-        uvw = wp.vec3(0.0, 1.0, 0.0)
-    elif d2 < dist:
-        p = v2
-        uvw = wp.vec3(0.0, 0.0, 1.0)
-    else:
-        uvw = wp.vec3(third, third, third)
-
-    difference = wp.sqrt(
-        wp.max(
-            wp.length_sq(v0 - p),
-            wp.max(wp.length_sq(v1 - p), wp.length_sq(v2 - p)),
-        )
-    )
-
-    difference = wp.max(difference, 1e-8)
-
-    toleranceSq = 1e-3 * 1e-3
-
-    sdfGradient = wp.vec3(0.0, 0.0, 0.0)
-    step = 1.0 / (2.0 * difference)
-
-    for _iter in range(16):
-        # Use extrapolated gradient sampling
-        _, sdfGradient = sample_sdf_grad_extrapolated(sdf_data, p)
-
-        grad_len = wp.length(sdfGradient)
-        if grad_len == 0.0:
-            # We ran into a discontinuity e.g. the exact center of a cube
-            # Just pick an arbitrary gradient of unit length to move out of the discontinuity
-            sdfGradient = wp.vec3(0.571846586, 0.705545099, 0.418566116)
-            grad_len = 1.0
-
-        sdfGradient = sdfGradient / grad_len
-
-        dfdu = wp.dot(sdfGradient, v0 - p)
-        dfdv = wp.dot(sdfGradient, v1 - p)
-        dfdw = wp.dot(sdfGradient, v2 - p)
-
-        newUVW = uvw
-
-        newUVW = wp.vec3(newUVW[0] - step * dfdu, newUVW[1] - step * dfdv, newUVW[2] - step * dfdw)
-
-        step = step * 0.8
-
-        newUVW = closest_pt_point_bary_triangle(newUVW)
-
-        p = v0 * newUVW[0] + v1 * newUVW[1] + v2 * newUVW[2]
-
-        if wp.length_sq(uvw - newUVW) < toleranceSq:
-            break
-
-        uvw = newUVW
-
-    # Final extrapolated sampling for result
-    dist, sdfGradient = sample_sdf_grad_extrapolated(sdf_data, p)
-
-    point = p
-    dir = sdfGradient
-
-    return dist, point, dir
-
-
-@wp.func
-def get_triangle_from_mesh(
+def sample_sdf_using_mesh(
     mesh_id: wp.uint64,
-    mesh_scale: wp.vec3,
-    X_mesh_ws: wp.transform,
-    tri_idx: int,
-) -> tuple[wp.vec3, wp.vec3, wp.vec3]:
+    world_pos: wp.vec3,
+    max_dist: float,
+) -> float:
     """
-    Extract a triangle from a mesh and transform it to world space.
+    Sample signed distance to mesh surface using mesh query.
 
-    This function retrieves a specific triangle from a mesh by its index,
-    applies scaling and transformation, and returns the three vertices
-    in world space coordinates.
+    Uses wp.mesh_query_point_sign_normal to find the closest point on the mesh
+    and compute the signed distance. This is compatible with the return type of
+    sample_sdf_extrapolated.
 
     Args:
-        mesh_id: The mesh ID (use wp.mesh_get to retrieve the mesh object)
-        mesh_scale: Scale to apply to mesh vertices (component-wise)
-        X_mesh_ws: Mesh world-space transform (position and rotation)
-        tri_idx: Triangle index in the mesh (0-based)
+        mesh_id: The mesh ID (from wp.Mesh.id)
+        world_pos: Query position in mesh local coordinates
+        max_dist: Maximum distance to search for closest point
 
     Returns:
-        Tuple of (v0_world, v1_world, v2_world) - the three triangle vertices
-        in world space after applying scale and transform.
-
-    Note:
-        The mesh indices array stores triangle vertex indices as a flat array:
-        [tri0_v0, tri0_v1, tri0_v2, tri1_v0, tri1_v1, tri1_v2, ...]
+        The signed distance value (negative inside, positive outside)
     """
+    face_index = int(0)
+    face_u = float(0.0)
+    face_v = float(0.0)
+    sign = float(0.0)
 
-    mesh = wp.mesh_get(mesh_id)
+    res = wp.mesh_query_point_sign_normal(mesh_id, world_pos, max_dist, sign, face_index, face_u, face_v)
 
-    # Extract triangle vertices from mesh (indices are stored as flat array: i0, i1, i2, i0, i1, i2, ...)
-    idx0 = mesh.indices[tri_idx * 3 + 0]
-    idx1 = mesh.indices[tri_idx * 3 + 1]
-    idx2 = mesh.indices[tri_idx * 3 + 2]
+    if res:
+        closest = wp.mesh_eval_position(mesh_id, face_index, face_u, face_v)
+        return wp.length(world_pos - closest) * sign
 
-    # Get vertex positions in mesh local space (with scale applied)
-    v0_local = wp.cw_mul(mesh.points[idx0], mesh_scale)
-    v1_local = wp.cw_mul(mesh.points[idx1], mesh_scale)
-    v2_local = wp.cw_mul(mesh.points[idx2], mesh_scale)
-
-    # Transform vertices to world space
-    v0_world = wp.transform_point(X_mesh_ws, v0_local)
-    v1_world = wp.transform_point(X_mesh_ws, v1_local)
-    v2_world = wp.transform_point(X_mesh_ws, v2_local)
-
-    return v0_world, v1_world, v2_world
+    return max_dist
 
 
 @wp.func
-def get_bounding_sphere(v0: wp.vec3, v1: wp.vec3, v2: wp.vec3) -> tuple[wp.vec3, float]:
-    """
-    Compute a conservative bounding sphere for a triangle.
-
-    This uses the triangle centroid as the sphere center and the maximum
-    distance from the centroid to any vertex as the radius. This is a
-    conservative (potentially larger than optimal) but fast bounding sphere.
-
-    Args:
-        v0, v1, v2: Triangle vertices in world space
-
-    Returns:
-        Tuple of (center, radius) where:
-        - center: The centroid of the triangle
-        - radius: The maximum distance from centroid to any vertex
-
-    Note:
-        This is not the minimal bounding sphere, but it's fast to compute
-        and adequate for broad-phase culling.
-    """
-    center = (v0 + v1 + v2) * (1.0 / 3.0)
-    radius = wp.max(wp.max(wp.length_sq(v0 - center), wp.length_sq(v1 - center)), wp.length_sq(v2 - center))
-    return center, wp.sqrt(radius)
-
-
-@wp.func
-def add_to_shared_buffer_atomic(
-    thread_id: int,
-    add_triangle: bool,
-    tri_idx: int,
-    buffer: wp.array(dtype=wp.int32),
-):
-    """
-    Add a triangle index to a shared memory buffer using atomic operations.
-
-    Buffer layout:
-    - [0 .. block_dim-1]: Triangle indices
-    - [block_dim]: Current count of triangles in buffer
-    - [block_dim+1]: Progress counter (triangles processed so far)
-
-    Args:
-        thread_id: The calling thread's index within the thread block
-        add_triangle: Whether this thread wants to add a triangle
-        tri_idx: The triangle index to add (only used if add_triangle is True)
-        buffer: Shared memory buffer for triangle indices
-    """
-    capacity = wp.block_dim()
-    idx = -1
-
-    # Atomic add to get write position
-    if add_triangle:
-        idx = wp.atomic_add(buffer, capacity, 1)
-        if idx < capacity:
-            buffer[idx] = tri_idx
-
-    # Thread 0 optimistically advances progress by block_dim
-    if thread_id == 0:
-        buffer[capacity + 1] += capacity
-
-    synchronize()  # SYNC 1: All atomic writes and progress update complete
-
-    # Cap count at capacity (in case of overflow)
-    if thread_id == 0 and buffer[capacity] > capacity:
-        buffer[capacity] = capacity
-
-    # Overflow threads correct progress to their tri_idx (minimum wins)
-    if add_triangle and idx >= capacity:
-        wp.atomic_min(buffer, capacity + 1, tri_idx)
-
-    synchronize()  # SYNC 2: All corrections complete, buffer consistent
-
-
-@wp.func
-def find_interesting_triangles(
-    thread_id: int,
-    mesh_scale: wp.vec3,
-    mesh_to_sdf_transform: wp.transform,
+def sample_sdf_grad_using_mesh(
     mesh_id: wp.uint64,
-    sdf_data: SDFData,
-    buffer: wp.array(dtype=wp.int32),
-    contact_distance: float,
-):
+    world_pos: wp.vec3,
+    max_dist: float,
+) -> tuple[float, wp.vec3]:
     """
-    Broad-phase culling: fill shared buffer with triangle indices that may collide with SDF.
+    Sample signed distance and gradient to mesh surface using mesh query.
 
-    Tests each triangle's bounding sphere against the SDF. Triangles are selected if
-    SDF_distance(sphere_center) <= sphere_radius + contact_distance. Results are stored
-    in shared memory buffer for narrow-phase processing.
+    Uses wp.mesh_query_point_sign_normal to find the closest point on the mesh
+    and compute both the signed distance and the gradient direction. This is
+    compatible with the return type of sample_sdf_grad_extrapolated.
 
-    Uses extrapolated SDF sampling that handles points outside the narrow band or extent.
+    The gradient points in the direction of increasing distance (away from the surface
+    when outside, toward the surface when inside).
 
-    Buffer layout: [0..block_dim-1] = indices, [block_dim] = count, [block_dim+1] = progress
+    Args:
+        mesh_id: The mesh ID (from wp.Mesh.id)
+        world_pos: Query position in mesh local coordinates
+        max_dist: Maximum distance to search for closest point
+
+    Returns:
+        Tuple of (distance, gradient) where:
+        - distance: Signed distance value (negative inside, positive outside)
+        - gradient: Normalized direction of increasing distance
     """
-    num_tris = wp.mesh_get(mesh_id).indices.shape[0] // 3
-    capacity = wp.block_dim()
+    face_index = int(0)
+    face_u = float(0.0)
+    face_v = float(0.0)
+    sign = float(0.0)
+    gradient = wp.vec3(0.0, 0.0, 0.0)
 
-    synchronize()  # Ensure buffer state is consistent before starting
+    res = wp.mesh_query_point_sign_normal(mesh_id, world_pos, max_dist, sign, face_index, face_u, face_v)
 
-    while buffer[capacity + 1] < num_tris and buffer[capacity] < capacity:
-        # All threads read the same base index (buffer consistent from previous sync)
-        base_tri_idx = buffer[capacity + 1]
-        tri_idx = base_tri_idx + thread_id
-        add_triangle = False
+    if res:
+        closest = wp.mesh_eval_position(mesh_id, face_index, face_u, face_v)
+        diff = world_pos - closest
+        dist = wp.length(diff)
 
-        if tri_idx < num_tris:
-            v0, v1, v2 = get_triangle_from_mesh(mesh_id, mesh_scale, mesh_to_sdf_transform, tri_idx)
-            bounding_sphere_center, bounding_sphere_radius = get_bounding_sphere(v0, v1, v2)
+        if dist > 0.0:
+            # Gradient points from surface toward query point, scaled by sign
+            # When outside (sign > 0): gradient points away from surface (correct for SDF)
+            # When inside (sign < 0): gradient points toward surface (correct for SDF)
+            gradient = (diff / dist) * sign
+        else:
+            # Point is exactly on surface - use face normal
+            # Get the face normal from the mesh
+            mesh = wp.mesh_get(mesh_id)
+            i0 = mesh.indices[face_index * 3 + 0]
+            i1 = mesh.indices[face_index * 3 + 1]
+            i2 = mesh.indices[face_index * 3 + 2]
+            v0 = mesh.points[i0]
+            v1 = mesh.points[i1]
+            v2 = mesh.points[i2]
+            face_normal = wp.normalize(wp.cross(v1 - v0, v2 - v0))
+            gradient = face_normal * sign
 
-            # Use extrapolated SDF distance query for culling
-            sdf_dist = sample_sdf_extrapolated(sdf_data, bounding_sphere_center)
-            add_triangle = sdf_dist <= (bounding_sphere_radius + contact_distance)
+        return dist * sign, gradient
 
-        synchronize()  # Ensure all threads have read base_tri_idx before any writes
-        add_to_shared_buffer_atomic(thread_id, add_triangle, tri_idx, buffer)
-        # add_to_shared_buffer_atomic ends with sync, buffer is consistent for next while check
-
-    synchronize()  # Final sync before returning
+    # No hit found - return max distance with arbitrary gradient
+    return max_dist, wp.vec3(0.0, 0.0, 1.0)
 
 
 def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     writer_func: Any,
     contact_reduction_funcs: ContactReductionFunctions | None = None,
+    use_bvh_for_sdf: bool = False,
 ):
+    @wp.func
+    def closest_pt_point_bary_triangle(c: wp.vec3) -> wp.vec3:
+        """
+        Find the closest point to `c` on the standard barycentric triangle.
+
+        This function projects a barycentric coordinate point onto the valid barycentric
+        triangle defined by vertices (1,0,0), (0,1,0), (0,0,1) in barycentric space.
+        The valid region is where all coordinates are non-negative and sum to 1.
+
+        This is a specialized version of the general closest-point-on-triangle algorithm
+        optimized for the barycentric simplex.
+
+        Args:
+            c: Input barycentric coordinates (may be outside valid triangle region)
+
+        Returns:
+            The closest valid barycentric coordinates. All components will be >= 0
+            and sum to 1.0.
+
+        Note:
+            This is used in optimization algorithms that work in barycentric space,
+            where gradient descent may produce invalid coordinates that need projection.
+        """
+        third = 1.0 / 3.0  # constexpr
+        c = c - wp.vec3(third * (c[0] + c[1] + c[2] - 1.0))
+
+        # two negative: return positive vertex
+        if c[1] < 0.0 and c[2] < 0.0:
+            return wp.vec3(1.0, 0.0, 0.0)
+
+        if c[0] < 0.0 and c[2] < 0.0:
+            return wp.vec3(0.0, 1.0, 0.0)
+
+        if c[0] < 0.0 and c[1] < 0.0:
+            return wp.vec3(0.0, 0.0, 1.0)
+
+        # one negative: return projection onto line if it is on the edge, or the largest vertex otherwise
+        if c[0] < 0.0:
+            d = c[0] * 0.5
+            y = c[1] + d
+            z = c[2] + d
+            if y > 1.0:
+                return wp.vec3(0.0, 1.0, 0.0)
+            if z > 1.0:
+                return wp.vec3(0.0, 0.0, 1.0)
+            return wp.vec3(0.0, y, z)
+        if c[1] < 0.0:
+            d = c[1] * 0.5
+            x = c[0] + d
+            z = c[2] + d
+            if x > 1.0:
+                return wp.vec3(1.0, 0.0, 0.0)
+            if z > 1.0:
+                return wp.vec3(0.0, 0.0, 1.0)
+            return wp.vec3(x, 0.0, z)
+        if c[2] < 0.0:
+            d = c[2] * 0.5
+            x = c[0] + d
+            y = c[1] + d
+            if x > 1.0:
+                return wp.vec3(1.0, 0.0, 0.0)
+            if y > 1.0:
+                return wp.vec3(0.0, 1.0, 0.0)
+            return wp.vec3(x, y, 0.0)
+        return c
+
+    @wp.func
+    def do_triangle_sdf_collision(
+        sdf_data: SDFData,
+        sdf_mesh_id: wp.uint64,
+        v0: wp.vec3,
+        v1: wp.vec3,
+        v2: wp.vec3,
+    ) -> tuple[float, wp.vec3, wp.vec3]:
+        """
+        Compute the deepest contact between a triangle and an SDF volume.
+
+        This function uses gradient descent in barycentric coordinates to find the point
+        on the triangle that has the minimum (most negative) signed distance to the SDF.
+        The optimization starts from either the triangle centroid or one of its vertices
+        (whichever has the smallest initial distance).
+
+        Uses extrapolated SDF sampling that handles:
+        - Points in narrow band: sparse grid value
+        - Points inside extent but outside narrow band: coarse grid value
+        - Points outside extent: extrapolated from boundary
+
+        Algorithm:
+        1. Evaluate SDF distance at triangle vertices and centroid
+        2. Start from the point with minimum distance
+        3. Iterate up to 16 times:
+        - Compute SDF gradient at current point
+        - Project gradient onto triangle edges (in barycentric space)
+        - Take a gradient descent step with decreasing step size
+        - Project result back onto valid barycentric triangle
+        4. Return final distance, contact point, and contact direction
+
+        Args:
+            sdf_data: SDFData struct containing sparse/coarse volumes and extent info
+            v0, v1, v2: Triangle vertices in world space (SDF local coordinates)
+
+        Returns:
+            Tuple of (distance, contact_point, contact_direction) where:
+            - distance: Signed distance to SDF surface (negative = penetration)
+            - contact_point: The point on the triangle closest to the SDF surface
+            - contact_direction: Normalized direction from surface to contact point
+        """
+        third = 1.0 / 3.0
+        center = (v0 + v1 + v2) * third
+        p = center
+
+        # Use extrapolated sampling for initial distance estimates
+        if wp.static(use_bvh_for_sdf):
+            max_dist = 1000.0
+            dist = sample_sdf_using_mesh(sdf_mesh_id, p, max_dist)
+            d0 = sample_sdf_using_mesh(sdf_mesh_id, v0, max_dist)
+            d1 = sample_sdf_using_mesh(sdf_mesh_id, v1, max_dist)
+            d2 = sample_sdf_using_mesh(sdf_mesh_id, v2, max_dist)
+        else:
+            dist = sample_sdf_extrapolated(sdf_data, p)
+            d0 = sample_sdf_extrapolated(sdf_data, v0)
+            d1 = sample_sdf_extrapolated(sdf_data, v1)
+            d2 = sample_sdf_extrapolated(sdf_data, v2)
+
+        uvw = wp.vec3(0.0, 0.0, 0.0)
+
+        # choose starting iterate among centroid and triangle vertices
+        if d0 < d1 and d0 < d2 and d0 < dist:
+            p = v0
+            uvw = wp.vec3(1.0, 0.0, 0.0)
+        elif d1 < d2 and d1 < dist:
+            p = v1
+            uvw = wp.vec3(0.0, 1.0, 0.0)
+        elif d2 < dist:
+            p = v2
+            uvw = wp.vec3(0.0, 0.0, 1.0)
+        else:
+            uvw = wp.vec3(third, third, third)
+
+        difference = wp.sqrt(
+            wp.max(
+                wp.length_sq(v0 - p),
+                wp.max(wp.length_sq(v1 - p), wp.length_sq(v2 - p)),
+            )
+        )
+
+        difference = wp.max(difference, 1e-8)
+
+        toleranceSq = 1e-3 * 1e-3
+
+        sdfGradient = wp.vec3(0.0, 0.0, 0.0)
+        step = 1.0 / (2.0 * difference)
+
+        for _iter in range(16):
+            # Use extrapolated gradient sampling
+            if wp.static(use_bvh_for_sdf):
+                _, sdfGradient = sample_sdf_grad_using_mesh(sdf_mesh_id, p, max_dist)
+            else:
+                _, sdfGradient = sample_sdf_grad_extrapolated(sdf_data, p)
+
+            grad_len = wp.length(sdfGradient)
+            if grad_len == 0.0:
+                # We ran into a discontinuity e.g. the exact center of a cube
+                # Just pick an arbitrary gradient of unit length to move out of the discontinuity
+                sdfGradient = wp.vec3(0.571846586, 0.705545099, 0.418566116)
+                grad_len = 1.0
+
+            sdfGradient = sdfGradient / grad_len
+
+            dfdu = wp.dot(sdfGradient, v0 - p)
+            dfdv = wp.dot(sdfGradient, v1 - p)
+            dfdw = wp.dot(sdfGradient, v2 - p)
+
+            newUVW = uvw
+
+            newUVW = wp.vec3(newUVW[0] - step * dfdu, newUVW[1] - step * dfdv, newUVW[2] - step * dfdw)
+
+            step = step * 0.8
+
+            newUVW = closest_pt_point_bary_triangle(newUVW)
+
+            p = v0 * newUVW[0] + v1 * newUVW[1] + v2 * newUVW[2]
+
+            if wp.length_sq(uvw - newUVW) < toleranceSq:
+                break
+
+            uvw = newUVW
+
+        # Final extrapolated sampling for result
+        if wp.static(use_bvh_for_sdf):
+            dist, sdfGradient = sample_sdf_grad_using_mesh(sdf_mesh_id, p, max_dist)
+        else:
+            dist, sdfGradient = sample_sdf_grad_extrapolated(sdf_data, p)
+
+        point = p
+        dir = sdfGradient
+
+        return dist, point, dir
+
+    @wp.func
+    def get_triangle_from_mesh(
+        mesh_id: wp.uint64,
+        mesh_scale: wp.vec3,
+        X_mesh_ws: wp.transform,
+        tri_idx: int,
+    ) -> tuple[wp.vec3, wp.vec3, wp.vec3]:
+        """
+        Extract a triangle from a mesh and transform it to world space.
+
+        This function retrieves a specific triangle from a mesh by its index,
+        applies scaling and transformation, and returns the three vertices
+        in world space coordinates.
+
+        Args:
+            mesh_id: The mesh ID (use wp.mesh_get to retrieve the mesh object)
+            mesh_scale: Scale to apply to mesh vertices (component-wise)
+            X_mesh_ws: Mesh world-space transform (position and rotation)
+            tri_idx: Triangle index in the mesh (0-based)
+
+        Returns:
+            Tuple of (v0_world, v1_world, v2_world) - the three triangle vertices
+            in world space after applying scale and transform.
+
+        Note:
+            The mesh indices array stores triangle vertex indices as a flat array:
+            [tri0_v0, tri0_v1, tri0_v2, tri1_v0, tri1_v1, tri1_v2, ...]
+        """
+
+        mesh = wp.mesh_get(mesh_id)
+
+        # Extract triangle vertices from mesh (indices are stored as flat array: i0, i1, i2, i0, i1, i2, ...)
+        idx0 = mesh.indices[tri_idx * 3 + 0]
+        idx1 = mesh.indices[tri_idx * 3 + 1]
+        idx2 = mesh.indices[tri_idx * 3 + 2]
+
+        # Get vertex positions in mesh local space (with scale applied)
+        v0_local = wp.cw_mul(mesh.points[idx0], mesh_scale)
+        v1_local = wp.cw_mul(mesh.points[idx1], mesh_scale)
+        v2_local = wp.cw_mul(mesh.points[idx2], mesh_scale)
+
+        # Transform vertices to world space
+        v0_world = wp.transform_point(X_mesh_ws, v0_local)
+        v1_world = wp.transform_point(X_mesh_ws, v1_local)
+        v2_world = wp.transform_point(X_mesh_ws, v2_local)
+
+        return v0_world, v1_world, v2_world
+
+    @wp.func
+    def get_bounding_sphere(v0: wp.vec3, v1: wp.vec3, v2: wp.vec3) -> tuple[wp.vec3, float]:
+        """
+        Compute a conservative bounding sphere for a triangle.
+
+        This uses the triangle centroid as the sphere center and the maximum
+        distance from the centroid to any vertex as the radius. This is a
+        conservative (potentially larger than optimal) but fast bounding sphere.
+
+        Args:
+            v0, v1, v2: Triangle vertices in world space
+
+        Returns:
+            Tuple of (center, radius) where:
+            - center: The centroid of the triangle
+            - radius: The maximum distance from centroid to any vertex
+
+        Note:
+            This is not the minimal bounding sphere, but it's fast to compute
+            and adequate for broad-phase culling.
+        """
+        center = (v0 + v1 + v2) * (1.0 / 3.0)
+        radius = wp.max(wp.max(wp.length_sq(v0 - center), wp.length_sq(v1 - center)), wp.length_sq(v2 - center))
+        return center, wp.sqrt(radius)
+
+    @wp.func
+    def add_to_shared_buffer_atomic(
+        thread_id: int,
+        add_triangle: bool,
+        tri_idx: int,
+        buffer: wp.array(dtype=wp.int32),
+    ):
+        """
+        Add a triangle index to a shared memory buffer using atomic operations.
+
+        Buffer layout:
+        - [0 .. block_dim-1]: Triangle indices
+        - [block_dim]: Current count of triangles in buffer
+        - [block_dim+1]: Progress counter (triangles processed so far)
+
+        Args:
+            thread_id: The calling thread's index within the thread block
+            add_triangle: Whether this thread wants to add a triangle
+            tri_idx: The triangle index to add (only used if add_triangle is True)
+            buffer: Shared memory buffer for triangle indices
+        """
+        capacity = wp.block_dim()
+        idx = -1
+
+        # Atomic add to get write position
+        if add_triangle:
+            idx = wp.atomic_add(buffer, capacity, 1)
+            if idx < capacity:
+                buffer[idx] = tri_idx
+
+        # Thread 0 optimistically advances progress by block_dim
+        if thread_id == 0:
+            buffer[capacity + 1] += capacity
+
+        synchronize()  # SYNC 1: All atomic writes and progress update complete
+
+        # Cap count at capacity (in case of overflow)
+        if thread_id == 0 and buffer[capacity] > capacity:
+            buffer[capacity] = capacity
+
+        # Overflow threads correct progress to their tri_idx (minimum wins)
+        if add_triangle and idx >= capacity:
+            wp.atomic_min(buffer, capacity + 1, tri_idx)
+
+        synchronize()  # SYNC 2: All corrections complete, buffer consistent
+
+    @wp.func
+    def find_interesting_triangles(
+        thread_id: int,
+        mesh_scale: wp.vec3,
+        mesh_to_sdf_transform: wp.transform,
+        mesh_id: wp.uint64,
+        sdf_data: SDFData,
+        sdf_mesh_id: wp.uint64,
+        buffer: wp.array(dtype=wp.int32),
+        contact_distance: float,
+    ):
+        """
+        Broad-phase culling: fill shared buffer with triangle indices that may collide with SDF.
+
+        Tests each triangle's bounding sphere against the SDF. Triangles are selected if
+        SDF_distance(sphere_center) <= sphere_radius + contact_distance. Results are stored
+        in shared memory buffer for narrow-phase processing.
+
+        Uses extrapolated SDF sampling that handles points outside the narrow band or extent.
+
+        Buffer layout: [0..block_dim-1] = indices, [block_dim] = count, [block_dim+1] = progress
+        """
+        num_tris = wp.mesh_get(mesh_id).indices.shape[0] // 3
+        capacity = wp.block_dim()
+
+        synchronize()  # Ensure buffer state is consistent before starting
+
+        while buffer[capacity + 1] < num_tris and buffer[capacity] < capacity:
+            # All threads read the same base index (buffer consistent from previous sync)
+            base_tri_idx = buffer[capacity + 1]
+            tri_idx = base_tri_idx + thread_id
+            add_triangle = False
+
+            if tri_idx < num_tris:
+                v0, v1, v2 = get_triangle_from_mesh(mesh_id, mesh_scale, mesh_to_sdf_transform, tri_idx)
+                bounding_sphere_center, bounding_sphere_radius = get_bounding_sphere(v0, v1, v2)
+
+                # Use extrapolated SDF distance query for culling
+                if wp.static(use_bvh_for_sdf):
+                    sdf_dist = sample_sdf_using_mesh(sdf_mesh_id, bounding_sphere_center, 1.01 * (bounding_sphere_radius + contact_distance))
+                else:
+                    sdf_dist = sample_sdf_extrapolated(sdf_data, bounding_sphere_center)
+                add_triangle = sdf_dist <= (bounding_sphere_radius + contact_distance)
+
+            synchronize()  # Ensure all threads have read base_tri_idx before any writes
+            add_to_shared_buffer_atomic(thread_id, add_triangle, tri_idx, buffer)
+            # add_to_shared_buffer_atomic ends with sync, buffer is consistent for next while check
+
+        synchronize()  # Final sync before returning
+
     @wp.kernel(enable_backward=False)
     def mesh_sdf_collision_kernel(
         shape_data: wp.array(dtype=wp.vec4),
@@ -621,6 +731,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     mesh_id = mesh_id_a
                     mesh_scale = mesh_scale_a
                     sdf_data = shape_sdf_data[mesh_shape_b]
+                    sdf_mesh_id = mesh_id_b  # SDF belongs to mesh B
                     # Transform from mesh A space to mesh B space
                     X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_mesh_b_ws), X_mesh_a_ws)
                     X_sdf_ws = X_mesh_b_ws
@@ -633,6 +744,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     mesh_id = mesh_id_b
                     mesh_scale = mesh_scale_b
                     sdf_data = shape_sdf_data[mesh_shape_a]
+                    sdf_mesh_id = mesh_id_a  # SDF belongs to mesh A
                     # Transform from mesh B space to mesh A space
                     X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_mesh_a_ws), X_mesh_b_ws)
                     X_sdf_ws = X_mesh_a_ws
@@ -646,13 +758,18 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                     # Early out: check bounding sphere distance to SDF surface using extrapolated sampling
                     bounding_sphere_center, bounding_sphere_radius = get_bounding_sphere(v0, v1, v2)
-                    sdf_dist = sample_sdf_extrapolated(sdf_data, bounding_sphere_center)
+                    if wp.static(use_bvh_for_sdf):
+                        sdf_dist = sample_sdf_using_mesh(
+                            sdf_mesh_id, bounding_sphere_center, 1.01 * (bounding_sphere_radius + margin)
+                        )
+                    else:
+                        sdf_dist = sample_sdf_extrapolated(sdf_data, bounding_sphere_center)
 
                     # Skip triangles that are too far from the SDF surface
                     if sdf_dist > (bounding_sphere_radius + margin):
                         continue
 
-                    dist, point, direction = do_triangle_sdf_collision(sdf_data, v0, v1, v2)
+                    dist, point, direction = do_triangle_sdf_collision(sdf_data, sdf_mesh_id, v0, v1, v2)
 
                     if dist < margin:
                         point_world = wp.transform_point(X_sdf_ws, point)
@@ -778,11 +895,13 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 mesh_scale = mesh0_scale
                 mesh_sdf_transform = wp.transform_multiply(wp.transform_inverse(mesh1_transform), mesh0_transform)
                 sdf_data_current = sdf_data1
+                sdf_mesh_id = mesh1  # SDF belongs to mesh1
             else:
                 mesh = mesh1
                 mesh_scale = mesh1_scale
                 mesh_sdf_transform = wp.transform_multiply(wp.transform_inverse(mesh0_transform), mesh1_transform)
                 sdf_data_current = sdf_data0
+                sdf_mesh_id = mesh0  # SDF belongs to mesh0
 
             # Reset progress counter for this mesh
             if t == 0:
@@ -800,6 +919,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     mesh_sdf_transform,
                     mesh,
                     sdf_data_current,
+                    sdf_mesh_id,
                     selected_triangles,
                     margin,
                 )
@@ -812,6 +932,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     v0, v1, v2 = get_triangle_from_mesh(mesh, mesh_scale, mesh_sdf_transform, selected_triangles[t])
                     dist, point, dir = do_triangle_sdf_collision(
                         sdf_data_current,
+                        sdf_mesh_id,
                         v0,
                         v1,
                         v2,
