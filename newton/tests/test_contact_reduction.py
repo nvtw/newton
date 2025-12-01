@@ -31,6 +31,8 @@ import numpy as np
 import warp as wp
 
 from newton._src.geometry.contact_reduction import (
+    ICOSAHEDRON_FACE_NORMALS,
+    ICOSAHEDRON_TRIANGLES,
     NUM_NORMAL_BINS,
     NUM_SPATIAL_DIRECTIONS,
     ContactReductionFunctions,
@@ -39,8 +41,6 @@ from newton._src.geometry.contact_reduction import (
     create_betas_array,
     get_scan_dir,
     get_slot,
-    icosahedronFaceNormals,
-    icosahedronTriangles,
     synchronize,
 )
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
@@ -83,9 +83,9 @@ def test_face_normals_are_unit_vectors(test, device):
     for i in range(NUM_NORMAL_BINS):
         normal = np.array(
             [
-                icosahedronFaceNormals[i, 0],
-                icosahedronFaceNormals[i, 1],
-                icosahedronFaceNormals[i, 2],
+                ICOSAHEDRON_FACE_NORMALS[i, 0],
+                ICOSAHEDRON_FACE_NORMALS[i, 1],
+                ICOSAHEDRON_FACE_NORMALS[i, 2],
             ]
         )
         length = np.linalg.norm(normal)
@@ -97,9 +97,9 @@ def test_triangle_vertices_are_unit_vectors(test, device):
     for i in range(60):
         vertex = np.array(
             [
-                icosahedronTriangles[i, 0],
-                icosahedronTriangles[i, 1],
-                icosahedronTriangles[i, 2],
+                ICOSAHEDRON_TRIANGLES[i, 0],
+                ICOSAHEDRON_TRIANGLES[i, 1],
+                ICOSAHEDRON_TRIANGLES[i, 2],
             ]
         )
         length = np.linalg.norm(vertex)
@@ -112,9 +112,9 @@ def test_face_normals_cover_sphere(test, device):
     for i in range(NUM_NORMAL_BINS):
         normals.append(
             [
-                icosahedronFaceNormals[i, 0],
-                icosahedronFaceNormals[i, 1],
-                icosahedronFaceNormals[i, 2],
+                ICOSAHEDRON_FACE_NORMALS[i, 0],
+                ICOSAHEDRON_FACE_NORMALS[i, 1],
+                ICOSAHEDRON_FACE_NORMALS[i, 2],
             ]
         )
     normals = np.array(normals)
@@ -130,11 +130,11 @@ def test_face_normals_cover_sphere(test, device):
 
 def test_triangle_faces_have_three_vertices_each(test, device):
     """Verify each of the 20 faces has exactly 3 vertices (60 total rows)."""
-    # icosahedronTriangles is a Warp matrix type (mat_t), verify structure via constants
+    # ICOSAHEDRON_TRIANGLES is a Warp matrix type (mat_t), verify structure via constants
     # 20 faces * 3 vertices per face = 60 rows, each with 3 components (x, y, z)
     test.assertEqual(NUM_NORMAL_BINS, 20)
     # Verify we can access the last valid element (row 59, column 2)
-    last_vertex_z = icosahedronTriangles[59, 2]
+    last_vertex_z = ICOSAHEDRON_TRIANGLES[59, 2]
     test.assertIsNotNone(last_vertex_z)
 
 
@@ -227,7 +227,7 @@ def test_get_slot_matches_best_face_normal(test, device):
     slots_np = slots.numpy()
 
     # Build face normals array for CPU reference
-    face_normals = np.array([[icosahedronFaceNormals[i, j] for j in range(3)] for i in range(NUM_NORMAL_BINS)])
+    face_normals = np.array([[ICOSAHEDRON_FACE_NORMALS[i, j] for j in range(3)] for i in range(NUM_NORMAL_BINS)])
 
     # Verify each slot
     for i in range(len(test_normals_np)):
@@ -284,9 +284,9 @@ def test_get_scan_dir_indexing_correctness(test, device):
         face_base = 3 * face_id
 
         # Get the 3 vertices of this face
-        v0 = np.array([icosahedronTriangles[face_base, j] for j in range(3)])
-        v1 = np.array([icosahedronTriangles[face_base + 1, j] for j in range(3)])
-        v2 = np.array([icosahedronTriangles[face_base + 2, j] for j in range(3)])
+        v0 = np.array([ICOSAHEDRON_TRIANGLES[face_base, j] for j in range(3)])
+        v1 = np.array([ICOSAHEDRON_TRIANGLES[face_base + 1, j] for j in range(3)])
+        v2 = np.array([ICOSAHEDRON_TRIANGLES[face_base + 2, j] for j in range(3)])
 
         # Expected edges for i=0,1,2: (v1-v0), (v2-v1), (v0-v2)
         expected_edges = [
