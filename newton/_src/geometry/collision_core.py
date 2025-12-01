@@ -79,10 +79,10 @@ def build_pair_key3(shape_a: wp.uint32, shape_b: wp.uint32, triangle_idx: wp.uin
 def is_discrete_shape(shape_type: int) -> bool:
     """A discrete shape can be represented with a finite amount of flat polygon faces."""
     return (
-        shape_type == int(GeoType.BOX)
-        or shape_type == int(GeoType.CONVEX_MESH)
-        or shape_type == int(GeoTypeEx.TRIANGLE)
-        or shape_type == int(GeoType.PLANE)
+        shape_type == GeoType.BOX
+        or shape_type == GeoType.CONVEX_MESH
+        or shape_type == GeoTypeEx.TRIANGLE
+        or shape_type == GeoType.PLANE
     )
 
 
@@ -217,20 +217,20 @@ def post_process_axial_on_discrete_contact(
 
     # 1. Minkowski object processing for spheres and capsules
     # Adjust contact point and distance for sphere/capsule A
-    if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
+    if type_a == GeoType.SPHERE or type_a == GeoType.CAPSULE:
         contact_data.contact_point_center = contact_data.contact_point_center + normal * (radius_eff_a * 0.5)
         contact_data.contact_distance = contact_data.contact_distance - radius_eff_a
 
     # Adjust contact point and distance for sphere/capsule B
-    if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
+    if type_b == GeoType.SPHERE or type_b == GeoType.CAPSULE:
         contact_data.contact_point_center = contact_data.contact_point_center - normal * (radius_eff_b * 0.5)
         contact_data.contact_distance = contact_data.contact_distance - radius_eff_b
 
     # 2. Axial shape rolling stabilization (cylinders and cones on discrete surfaces)
     is_discrete_a = is_discrete_shape(type_a)
     is_discrete_b = is_discrete_shape(type_b)
-    is_axial_a = type_a == int(GeoType.CYLINDER) or type_a == int(GeoType.CONE)
-    is_axial_b = type_b == int(GeoType.CYLINDER) or type_b == int(GeoType.CONE)
+    is_axial_a = type_a == GeoType.CYLINDER or type_a == GeoType.CONE
+    is_axial_b = type_b == GeoType.CYLINDER or type_b == GeoType.CONE
 
     # Only process if we have discrete vs axial configuration
     if (is_discrete_a and is_axial_b) or (is_discrete_b and is_axial_a):
@@ -239,14 +239,14 @@ def post_process_axial_on_discrete_contact(
             shape_axis = wp.quat_rotate(rot_b, wp.vec3(0.0, 0.0, 1.0))
             shape_radius = shape_b.scale[0]
             shape_half_height = shape_b.scale[1]
-            is_cone = type_b == int(GeoType.CONE)
+            is_cone = type_b == GeoType.CONE
             shape_pos = pos_b_adjusted
             axial_normal = normal
         else:  # is_discrete_b and is_axial_a
             shape_axis = wp.quat_rotate(rot_a, wp.vec3(0.0, 0.0, 1.0))
             shape_radius = shape_a.scale[0]
             shape_half_height = shape_a.scale[1]
-            is_cone = type_a == int(GeoType.CONE)
+            is_cone = type_a == GeoType.CONE
             shape_pos = pos_a_adjusted
             axial_normal = -normal  # Flip normal for shape A
 
@@ -344,11 +344,11 @@ def create_compute_gjk_mpr_contacts(
         type_b = shape_b_data.shape_type
 
         # Special treatment for minkowski objects
-        if type_a == int(GeoType.SPHERE) or type_a == int(GeoType.CAPSULE):
+        if type_a == GeoType.SPHERE or type_a == GeoType.CAPSULE:
             radius_eff_a = shape_a_data.scale[0]
             shape_a_data.scale[0] = small_radius
 
-        if type_b == int(GeoType.SPHERE) or type_b == int(GeoType.CAPSULE):
+        if type_b == GeoType.SPHERE or type_b == GeoType.CAPSULE:
             radius_eff_b = shape_b_data.scale[0]
             shape_b_data.scale[0] = small_radius
 
@@ -374,10 +374,10 @@ def create_compute_gjk_mpr_contacts(
                 0.0,  # sum_of_contact_offsets - gap
                 data_provider,
                 rigid_contact_margin + radius_eff_a + radius_eff_b,
-                type_a == int(GeoType.SPHERE)
-                or type_b == int(GeoType.SPHERE)
-                or type_a == int(GeoType.ELLIPSOID)
-                or type_b == int(GeoType.ELLIPSOID),
+                type_a == GeoType.SPHERE
+                or type_b == GeoType.SPHERE
+                or type_a == GeoType.ELLIPSOID
+                or type_b == GeoType.ELLIPSOID,
                 writer_data,
                 contact_template,
             )
@@ -506,7 +506,7 @@ def convert_infinite_plane_to_cube(
         - adjusted_position: The cube's center position (centered on other object projected to plane)
     """
     result = GenericShapeData()
-    result.shape_type = int(GeoType.BOX)
+    result.shape_type = GeoType.BOX
 
     # Size the cube based on the other object's bounding sphere radius
     # Make it large enough to always contain potential contact points
@@ -565,8 +565,8 @@ def check_infinite_plane_bsphere_overlap(
     scale_b = shape_data_b.scale
 
     # Check if either shape is an infinite plane
-    is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
-    is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (scale_b[0] == 0.0 and scale_b[1] == 0.0)
+    is_infinite_plane_a = (type_a == GeoType.PLANE) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
+    is_infinite_plane_b = (type_b == GeoType.PLANE) and (scale_b[0] == 0.0 and scale_b[1] == 0.0)
 
     # If neither is an infinite plane, return True (no culling)
     if not (is_infinite_plane_a or is_infinite_plane_b):
@@ -751,10 +751,10 @@ def pre_contact_check(
 
     # Check if shapes are infinite planes (scale.x == 0 and scale.y == 0)
     # Scale is already in shape_data, no need for array lookup
-    is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (
+    is_infinite_plane_a = (type_a == GeoType.PLANE) and (
         shape_data_a.scale[0] == 0.0 and shape_data_a.scale[1] == 0.0
     )
-    is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (
+    is_infinite_plane_b = (type_b == GeoType.PLANE) and (
         shape_data_b.scale[0] == 0.0 and shape_data_b.scale[1] == 0.0
     )
 
@@ -783,7 +783,7 @@ def pre_contact_check(
 
     # Check for mesh vs infinite plane collision - special handling
     # After sorting, type_a <= type_b, so we only need to check one direction
-    if type_a == int(GeoType.PLANE) and type_b == int(GeoType.MESH):
+    if type_a == GeoType.PLANE and type_b == GeoType.MESH:
         # Check if plane is infinite (scale x and y are zero) - use scale from shape_data
         if shape_data_a.scale[0] == 0.0 and shape_data_a.scale[1] == 0.0:
             # Get mesh vertex count using the provided mesh_id
@@ -803,7 +803,7 @@ def pre_contact_check(
             return True, is_infinite_plane_a, is_infinite_plane_b, bsphere_radius_a, bsphere_radius_b
 
     # Check for mesh-mesh collisions - add to separate buffer for specialized handling
-    if type_a == int(GeoType.MESH) and type_b == int(GeoType.MESH):
+    if type_a == GeoType.MESH and type_b == GeoType.MESH:
         # Add to mesh-mesh collision buffer using atomic counter
         mesh_mesh_pair_idx = wp.atomic_add(shape_pairs_mesh_mesh_count, 0, 1)
         if mesh_mesh_pair_idx < shape_pairs_mesh_mesh.shape[0]:
@@ -811,7 +811,7 @@ def pre_contact_check(
         return True, is_infinite_plane_a, is_infinite_plane_b, bsphere_radius_a, bsphere_radius_b
 
     # Check for other mesh collisions (mesh vs non-mesh) - add to separate buffer for specialized handling
-    if type_a == int(GeoType.MESH) or type_b == int(GeoType.MESH):
+    if type_a == GeoType.MESH or type_b == GeoType.MESH:
         # Add to mesh collision buffer using atomic counter
         mesh_pair_idx = wp.atomic_add(shape_pairs_mesh_count, 0, 1)
         if mesh_pair_idx < shape_pairs_mesh.shape[0]:
@@ -876,7 +876,7 @@ def mesh_vs_convex_midphase(
     generic_shape_data.auxiliary = wp.vec3(0.0, 0.0, 0.0)
 
     # For CONVEX_MESH, pack the mesh pointer
-    if geo_type == int(GeoType.CONVEX_MESH):
+    if geo_type == GeoType.CONVEX_MESH:
         generic_shape_data.auxiliary = pack_mesh_ptr(shape_source_ptr[non_mesh_shape])
 
     data_provider = SupportMapDataProvider()
