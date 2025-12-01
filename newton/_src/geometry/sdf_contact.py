@@ -675,7 +675,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         contact_data.shape_a = mesh_shape_a
                         contact_data.shape_b = mesh_shape_b
                         contact_data.margin = margin
-                        contact_data.feature = wp.uint32(tri_idx + 1)
+                        if mode == 0:
+                            contact_data.feature = wp.uint32(tri_idx + 1)
+                        else:
+                            contact_data.feature = wp.uint32(tri_idx + 1) | wp.uint32(0x80000000)
                         contact_data.feature_pair_key = pair_key
 
                         writer_func(contact_data, writer_data)
@@ -895,7 +898,12 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
             contact_data.shape_a = pair[0]
             contact_data.shape_b = pair[1]
             contact_data.margin = margin
-            contact_data.feature = wp.uint32(contact.feature + 1)
+            # The high bit distinguishes contacts from mesh B (mode 1) vs mesh A (mode 0)
+            if contact.feature >= 0:
+                feature_id = wp.uint32(contact.feature + 1)
+            else:
+                feature_id = wp.uint32(-contact.feature) | wp.uint32(0x80000000)
+            contact_data.feature = feature_id
             contact_data.feature_pair_key = build_pair_key2(wp.uint32(pair[0]), wp.uint32(pair[1]))
 
             writer_func(contact_data, writer_data)
