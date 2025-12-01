@@ -158,6 +158,7 @@ def compute_sdf(
     assert narrow_band_distance[0] < 0.0 < narrow_band_distance[1], (
         "narrow_band_distance[0] must be less than 0.0 and narrow_band_distance[1] must be greater than 0.0"
     )
+    assert margin > 0, "margin must be > 0"
 
     pos = wp.array(mesh_src.vertices, dtype=wp.vec3)
     vel = wp.zeros_like(pos)
