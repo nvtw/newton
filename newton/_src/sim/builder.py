@@ -5097,7 +5097,8 @@ class ModelBuilder:
                 ):
                     # Compute SDF only for mesh shapes with collision enabled
                     if shape_type == GeoType.MESH and shape_src is not None and shape_flags & ShapeFlags.COLLIDE_SHAPES:
-                        cache_key = (hash(shape_src), shape_thickness, sdf_narrow_band_range, sdf_max_dims)
+                        # Convert sdf_narrow_band_range to tuple for hashability (it may be a list/ndarray)
+                        cache_key = (hash(shape_src), shape_thickness, tuple(sdf_narrow_band_range), sdf_max_dims)
                         if cache_key in sdf_cache:
                             sdf_data, sparse_volume, coarse_volume = sdf_cache[cache_key]
                         else:
