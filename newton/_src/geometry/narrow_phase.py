@@ -1113,7 +1113,6 @@ class NarrowPhase:
                     self.betas,
                     writer_data,
                     self.num_tile_blocks,
-                    False,
                 ],
                 device=device,
                 block_dim=self.tile_size_mesh_mesh,

@@ -658,7 +658,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         betas: wp.array(dtype=wp.float32),  # Unused, kept for API compatibility
         writer_data: Any,
         total_num_blocks: int,
-        use_bvh_for_sdf: bool,
     ):
         """
         Process mesh-mesh collisions using SDF-mesh collision detection.
@@ -691,8 +690,15 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
             # Get mesh and SDF IDs
             mesh_id_a = shape_source[mesh_shape_a]
             mesh_id_b = shape_source[mesh_shape_b]
+
+            # Get SDF pointers - a value of 0 indicates no SDF is available for this shape
             sdf_ptr_a = shape_sdf_data[mesh_shape_a].sparse_sdf_ptr
             sdf_ptr_b = shape_sdf_data[mesh_shape_b].sparse_sdf_ptr
+
+            # Determine if we should use BVH (mesh queries) instead of SDF for each shape
+            # sparse_sdf_ptr == 0 means no SDF is initialized for this shape, use BVH instead
+            use_bvh_for_sdf_a = sdf_ptr_a == wp.uint64(0)
+            use_bvh_for_sdf_b = sdf_ptr_b == wp.uint64(0)
 
             # Skip if either mesh is invalid
             if mesh_id_a == wp.uint64(0) or mesh_id_b == wp.uint64(0):
@@ -725,27 +731,37 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
             # Test both directions: mesh A against SDF B, and mesh B against SDF A
             for mode in range(2):
+                # Initialize with dummy values (will be set in mode branches)
+                sdf_data = SDFData()
+                use_bvh_for_sdf = False
+
                 if mode == 0:
-                    # Process mesh A triangles against SDF B (if SDF B exists)
-                    if sdf_ptr_b == wp.uint64(0):
+                    # Process mesh A triangles against SDF B
+                    # Skip if no SDF available and no BVH fallback possible
+                    use_bvh_for_sdf = use_bvh_for_sdf_b
+                    if sdf_ptr_b == wp.uint64(0) and not use_bvh_for_sdf:
                         continue
 
                     mesh_id = mesh_id_a
                     mesh_scale = mesh_scale_a
-                    sdf_data = shape_sdf_data[mesh_shape_b]
+                    if not use_bvh_for_sdf:
+                        sdf_data = shape_sdf_data[mesh_shape_b]
                     sdf_mesh_id = mesh_id_b  # SDF belongs to mesh B
                     # Transform from mesh A space to mesh B space
                     X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_mesh_b_ws), X_mesh_a_ws)
                     X_sdf_ws = X_mesh_b_ws
                     mesh = mesh_a
                 else:
-                    # Process mesh B triangles against SDF A (if SDF A exists)
-                    if sdf_ptr_a == wp.uint64(0):
+                    # Process mesh B triangles against SDF A
+                    # Skip if no SDF available and no BVH fallback possible
+                    use_bvh_for_sdf = use_bvh_for_sdf_a
+                    if sdf_ptr_a == wp.uint64(0) and not use_bvh_for_sdf:
                         continue
 
                     mesh_id = mesh_id_b
                     mesh_scale = mesh_scale_b
-                    sdf_data = shape_sdf_data[mesh_shape_a]
+                    if not use_bvh_for_sdf:
+                        sdf_data = shape_sdf_data[mesh_shape_a]
                     sdf_mesh_id = mesh_id_a  # SDF belongs to mesh A
                     # Transform from mesh B space to mesh A space
                     X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_mesh_a_ws), X_mesh_b_ws)
@@ -827,7 +843,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         betas: wp.array(dtype=wp.float32),
         writer_data: Any,
         total_num_blocks: int,
-        use_bvh_for_sdf: bool,
     ):
         block_id, t = wp.tid()
         num_pairs = shape_pairs_mesh_mesh_count[0]
@@ -835,10 +850,18 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
             return
 
         pair = shape_pairs_mesh_mesh[block_id]
+
         mesh0 = shape_source[pair[0]]
         mesh1 = shape_source[pair[1]]
+
+        # Get SDF data for both shapes
         sdf_data0 = shape_sdf_data[pair[0]]
         sdf_data1 = shape_sdf_data[pair[1]]
+
+        # Determine if we should use BVH (mesh queries) instead of SDF for each shape
+        # sparse_sdf_ptr == 0 means no SDF is initialized for this shape, use BVH instead
+        use_bvh_for_sdf_0 = sdf_data0.sparse_sdf_ptr == wp.uint64(0)
+        use_bvh_for_sdf_1 = sdf_data1.sparse_sdf_ptr == wp.uint64(0)
 
         # Extract mesh parameters
         mesh0_data = shape_data[pair[0]]
@@ -893,18 +916,22 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
         for mode in range(2):
             synchronize()
+            # Determine use_bvh_for_sdf based on which mesh provides the SDF
+            use_bvh_for_sdf = False
             if mode == 0:
                 mesh = mesh0
                 mesh_scale = mesh0_scale
                 mesh_sdf_transform = wp.transform_multiply(wp.transform_inverse(mesh1_transform), mesh0_transform)
                 sdf_data_current = sdf_data1
                 sdf_mesh_id = mesh1  # SDF belongs to mesh1
+                use_bvh_for_sdf = use_bvh_for_sdf_1
             else:
                 mesh = mesh1
                 mesh_scale = mesh1_scale
                 mesh_sdf_transform = wp.transform_multiply(wp.transform_inverse(mesh0_transform), mesh1_transform)
                 sdf_data_current = sdf_data0
                 sdf_mesh_id = mesh0  # SDF belongs to mesh0
+                use_bvh_for_sdf = use_bvh_for_sdf_0
 
             # Reset progress counter for this mesh
             if t == 0:
