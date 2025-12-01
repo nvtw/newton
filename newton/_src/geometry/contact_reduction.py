@@ -587,7 +587,7 @@ class ContactReductionFunctions:
                 for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
                     scan_dir = get_scan_dir(bin_id, dir_i)
                     spatial_dp = wp.dot(scan_dir, c.position)
-                    for beta_i in range(wp.static(num_betas)):
+                    for beta_i in range(num_betas):
                         score = spatial_dp - betas_arr[beta_i] * c.depth
                         key = base_key + dir_i * wp.static(num_betas) + beta_i
                         atomic_max_uint64(winner_slots.ptr, key, pack_value_thread_id(score, thread_id))
@@ -603,7 +603,7 @@ class ContactReductionFunctions:
                 for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
                     scan_dir = get_scan_dir(bin_id, dir_i)
                     spatial_dp = wp.dot(scan_dir, c.position)
-                    for beta_i in range(wp.static(num_betas)):
+                    for beta_i in range(num_betas):
                         key = base_key + dir_i * wp.static(num_betas) + beta_i
                         if unpack_thread_id(winner_slots[key]) == thread_id:
                             p = buffer[key].projection

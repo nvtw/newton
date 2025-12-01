@@ -751,12 +751,8 @@ def pre_contact_check(
 
     # Check if shapes are infinite planes (scale.x == 0 and scale.y == 0)
     # Scale is already in shape_data, no need for array lookup
-    is_infinite_plane_a = (type_a == GeoType.PLANE) and (
-        shape_data_a.scale[0] == 0.0 and shape_data_a.scale[1] == 0.0
-    )
-    is_infinite_plane_b = (type_b == GeoType.PLANE) and (
-        shape_data_b.scale[0] == 0.0 and shape_data_b.scale[1] == 0.0
-    )
+    is_infinite_plane_a = (type_a == GeoType.PLANE) and (shape_data_a.scale[0] == 0.0 and shape_data_a.scale[1] == 0.0)
+    is_infinite_plane_b = (type_b == GeoType.PLANE) and (shape_data_b.scale[0] == 0.0 and shape_data_b.scale[1] == 0.0)
 
     # Early return: both shapes are infinite planes
     if is_infinite_plane_a and is_infinite_plane_b:

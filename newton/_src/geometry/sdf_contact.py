@@ -24,20 +24,12 @@ from ..geometry.contact_data import ContactData
 from ..geometry.sdf_utils import SDFData
 
 # Handle both direct execution and module import
-try:
-    from .contact_reduction import (
-        ContactReductionFunctions,
-        ContactStruct,
-        get_shared_memory_pointer_block_dim_plus_2_ints,
-        synchronize,
-    )
-except ImportError:
-    from contact_reduction import (
-        ContactReductionFunctions,
-        ContactStruct,
-        get_shared_memory_pointer_block_dim_plus_2_ints,
-        synchronize,
-    )
+from .contact_reduction import (
+    ContactReductionFunctions,
+    ContactStruct,
+    get_shared_memory_pointer_block_dim_plus_2_ints,
+    synchronize,
+)
 
 
 @wp.func

@@ -1015,22 +1015,23 @@ class NarrowPhase:
         )
 
         # Launch mesh-plane contact processing kernel
+        packaged_mesh_plane_inputs = [
+            shape_data,
+            shape_transform,
+            shape_source,
+            shape_contact_margin,
+            self.shape_pairs_mesh_plane,
+            self.shape_pairs_mesh_plane_count,
+            self.betas,
+            writer_data,
+            self.num_tile_blocks,
+        ]
         if self.reduce_contacts:
             # With contact reduction - use tiled launch
             wp.launch_tiled(
                 kernel=self.mesh_plane_contacts_kernel,
                 dim=(self.num_tile_blocks,),
-                inputs=[
-                    shape_data,
-                    shape_transform,
-                    shape_source,
-                    shape_contact_margin,
-                    self.shape_pairs_mesh_plane,
-                    self.shape_pairs_mesh_plane_count,
-                    self.betas,
-                    writer_data,
-                    self.num_tile_blocks,
-                ],
+                inputs=packaged_mesh_plane_inputs,
                 device=device,
                 block_dim=self.tile_size_mesh_plane,
             )
@@ -1039,17 +1040,7 @@ class NarrowPhase:
             wp.launch(
                 kernel=self.mesh_plane_contacts_kernel,
                 dim=self.total_num_threads,
-                inputs=[
-                    shape_data,
-                    shape_transform,
-                    shape_source,
-                    shape_contact_margin,
-                    self.shape_pairs_mesh_plane,
-                    self.shape_pairs_mesh_plane_count,
-                    self.betas,
-                    writer_data,
-                    self.total_num_threads,
-                ],
+                inputs=packaged_mesh_plane_inputs,
                 device=device,
                 block_dim=self.block_dim,
             )
