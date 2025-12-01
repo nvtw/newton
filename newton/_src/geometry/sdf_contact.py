@@ -284,8 +284,6 @@ def do_triangle_sdf_collision(
     d1 = sample_sdf_extrapolated(sdf_data, v1)
     d2 = sample_sdf_extrapolated(sdf_data, v2)
 
-    uvw = wp.vec3(0.0, 0.0, 0.0)
-
     # choose starting iterate among centroid and triangle vertices
     if d0 < d1 and d0 < d2 and d0 < dist:
         p = v0
@@ -487,15 +485,20 @@ def find_interesting_triangles(
     contact_distance: float,
 ):
     """
-    Broad-phase culling: fill shared buffer with triangle indices that may collide with SDF.
+    Midphase triangle culling for mesh-SDF collision.
 
-    Tests each triangle's bounding sphere against the SDF. Triangles are selected if
-    SDF_distance(sphere_center) <= sphere_radius + contact_distance. Results are stored
-    in shared memory buffer for narrow-phase processing.
+    Given a mesh-mesh pair (already identified by broad phase), this function determines
+    which triangles from one mesh are close enough to the other mesh's SDF to potentially
+    generate contacts. This is an intermediate step between broad phase (which identifies
+    colliding object pairs) and narrow phase (which computes exact contact points).
 
-    Uses extrapolated SDF sampling that handles points outside the narrow band or extent.
+    Each triangle's bounding sphere is tested against the SDF. A triangle is selected if:
+        SDF_distance(sphere_center) <= sphere_radius + contact_distance
 
-    Buffer layout: [0..block_dim-1] = indices, [block_dim] = count, [block_dim+1] = progress
+    Selected triangle indices are stored in a shared memory buffer for subsequent
+    narrow-phase contact computation.
+
+    Buffer layout: [0..block_dim-1] = triangle indices, [block_dim] = count, [block_dim+1] = progress
     """
     num_tris = wp.mesh_get(mesh_id).indices.shape[0] // 3
     capacity = wp.block_dim()
@@ -707,23 +710,26 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
             return
 
         pair = shape_pairs_mesh_mesh[block_id]
-        mesh0 = shape_source[pair[0]]
-        mesh1 = shape_source[pair[1]]
-        sdf_data0 = shape_sdf_data[pair[0]]
-        sdf_data1 = shape_sdf_data[pair[1]]
+        shape_idx_0 = pair[0]
+        shape_idx_1 = pair[1]
+
+        mesh0 = shape_source[shape_idx_0]
+        mesh1 = shape_source[shape_idx_1]
+        sdf_data0 = shape_sdf_data[shape_idx_0]
+        sdf_data1 = shape_sdf_data[shape_idx_1]
 
         # Extract mesh parameters
-        mesh0_data = shape_data[pair[0]]
-        mesh1_data = shape_data[pair[1]]
+        mesh0_data = shape_data[shape_idx_0]
+        mesh1_data = shape_data[shape_idx_1]
         mesh0_scale = wp.vec3(mesh0_data[0], mesh0_data[1], mesh0_data[2])
         mesh1_scale = wp.vec3(mesh1_data[0], mesh1_data[1], mesh1_data[2])
-        mesh0_transform = shape_transform[pair[0]]
-        mesh1_transform = shape_transform[pair[1]]
+        mesh0_transform = shape_transform[shape_idx_0]
+        mesh1_transform = shape_transform[shape_idx_1]
 
         thickness0 = mesh0_data[3]
         thickness1 = mesh1_data[3]
 
-        margin = wp.max(shape_contact_margin[pair[0]], shape_contact_margin[pair[1]])
+        margin = wp.max(shape_contact_margin[shape_idx_0], shape_contact_margin[shape_idx_1])
 
         # Initialize (shared memory) buffers for contact reduction
         empty_marker = -1000000000.0
