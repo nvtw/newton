@@ -98,7 +98,9 @@ class Example:
         world_builder = newton.ModelBuilder()
         world_builder.rigid_contact_margin = 0.001
 
-        shape_cfg = newton.ModelBuilder.ShapeConfig(thickness=0.0, mu=0.01, sdf_max_dims=512, density=8000.0)
+        shape_cfg = newton.ModelBuilder.ShapeConfig(
+            thickness=0.0, mu=0.01, sdf_max_dims=512, density=8000.0, torsional_friction=0.0, rolling_friction=0.0
+        )
 
         bolt_file = str(asset_path / f"factory_bolt_{ASSEMBLY_STR}.obj")
         bolt_xform = wp.transform(wp.vec3(0.0, 0.0, 0.05), wp.quat_identity())
