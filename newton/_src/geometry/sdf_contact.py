@@ -767,10 +767,9 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 0  # Stores the number of triangles from the mesh that were already investigated
             )
 
-        # Compute transform from mesh B (SDF B) space to mesh A space for mode 0
-        # Mode 0: contact in SDF B space -> mesh A space
-        # Mode 1: contact already in SDF A space = mesh A space
-        X_sdf_b_to_mesh_a = wp.transform_inverse(mesh0_transform) * mesh1_transform
+        # Compute midpoint of the two body positions for centering contacts during reduction
+        # Using centered world-space coordinates ensures consistent spatial dot products
+        midpoint = (wp.transform_get_translation(mesh0_transform) + wp.transform_get_translation(mesh1_transform)) * 0.5
 
         for mode in range(2):
             synchronize()
@@ -821,29 +820,32 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     has_contact = dist < margin
 
                     if has_contact:
-                        # Transform to mesh A's body frame for consistent reduction
-                        # This ensures spatial dot products have consistent scale regardless of world position
-                        # Mode 0: contact in SDF B space -> transform to mesh A space
-                        # Mode 1: contact already in SDF A space = mesh A space (no transform needed)
+                        # Transform contact to world space, then center by subtracting midpoint
+                        # This ensures consistent spatial dot products during reduction
+                        # Mode 0: contact in SDF B (mesh1) space -> transform to world
+                        # Mode 1: contact in SDF A (mesh0) space -> transform to world
                         if mode == 0:
-                            point_body = wp.transform_point(X_sdf_b_to_mesh_a, point)
-                            direction_body = wp.transform_vector(X_sdf_b_to_mesh_a, direction)
+                            point_world = wp.transform_point(mesh1_transform, point)
+                            normal_world = wp.transform_vector(mesh1_transform, direction)
                         else:
-                            point_body = point
-                            direction_body = direction
+                            point_world = wp.transform_point(mesh0_transform, point)
+                            normal_world = wp.transform_vector(mesh0_transform, direction)
 
-                        direction_len = wp.length(direction_body)
-                        if direction_len > 0.0:
-                            direction_body = direction_body / direction_len
+                        # Center the position by subtracting midpoint (translation only)
+                        point_centered = point_world - midpoint
+
+                        normal_len = wp.length(normal_world)
+                        if normal_len > 0.0:
+                            normal_world = normal_world / normal_len
 
                         # Normalize normal direction so it always points from pair[0] to pair[1]
                         # Mode 0: gradient points B->A (pair[1]->pair[0]), negate to get pair[0]->pair[1]
                         # Mode 1: gradient points A->B (pair[0]->pair[1]), already correct
                         if mode == 0:
-                            direction_body = -direction_body
+                            normal_world = -normal_world
 
-                        c.position = point_body
-                        c.normal = direction_body  # Store normalized body-space normal pointing pair[0]->pair[1]
+                        c.position = point_centered  # Centered world-space position
+                        c.normal = normal_world  # Normalized world-space normal pointing pair[0]->pair[1]
                         c.depth = dist
                         # Encode mode into feature to distinguish triangles from mesh0 vs mesh1
                         # Mode 0: positive triangle index, Mode 1: negative (-(index+1))
@@ -862,7 +864,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 synchronize()
 
         # Now write the reduced contacts to the output array
-        # Contacts are in mesh A's body frame - transform back to world space
+        # Contacts are in centered world space - add midpoint back to get true world position
         # All contacts use consistent convention: shape_a = pair[0], shape_b = pair[1],
         # normal points from pair[0] to pair[1]
         synchronize()
@@ -878,12 +880,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
             contact_id = active_contacts_shared_mem[i]
             contact = contacts_shared_mem[contact_id]
 
-            # Transform from mesh A's body frame back to world space
-            point_world = wp.transform_point(mesh0_transform, contact.position)
-            normal_world = wp.transform_vector(mesh0_transform, contact.normal)
-            normal_len = wp.length(normal_world)
-            if normal_len > 0.0:
-                normal_world = normal_world / normal_len
+            # Add midpoint back to get true world position (contact.position is centered)
+            point_world = contact.position + midpoint
+            # Normal is already in world space and normalized
+            normal_world = contact.normal
 
             # Create contact data
             contact_data = ContactData()
