@@ -5251,6 +5251,7 @@ class ModelBuilder:
                     shape_src,
                     shape_flags,
                     shape_thickness,
+                    shape_contact_margin,
                     sdf_narrow_band_range,
                     sdf_max_dims,
                 ) in enumerate(
@@ -5259,6 +5260,7 @@ class ModelBuilder:
                         self.shape_source,
                         self.shape_flags,
                         self.shape_thickness,
+                        self.shape_contact_margin,
                         self.shape_sdf_narrow_band_range,
                         self.shape_sdf_max_dims,
                         strict=False,
@@ -5276,6 +5278,7 @@ class ModelBuilder:
                                 mesh_src=shape_src,
                                 shape_thickness=shape_thickness,
                                 narrow_band_distance=sdf_narrow_band_range,
+                                margin=shape_contact_margin,
                                 max_dims=sdf_max_dims,
                             )
                             sdf_cache[cache_key] = (sdf_data, sparse_volume, coarse_volume)
