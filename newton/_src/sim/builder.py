@@ -185,8 +185,8 @@ class ModelBuilder:
         """Indicates whether the shape is a site (non-colliding reference point). Directly setting this to True will NOT enforce site invariants. Use `mark_as_site()` or set via the `flags` property to ensure invariants. Defaults to False."""
         sdf_narrow_band_range: tuple[float, float] = (-0.1, 0.1)
         """The narrow band distance range (inner, outer) for SDF computation. Only used for mesh shapes."""
-        sdf_max_dims: int = 64
-        """The maximum dimension for sparse SDF grid. Must be divisible by 8. Only used for mesh shapes."""
+        sdf_target_voxel_size: float | None = None
+        """Target voxel size for sparse SDF grid. If None, computed as max_extent/64. Only used for mesh shapes."""
 
         def mark_as_site(self) -> None:
             """Marks this shape as a site and enforces all site invariants.
@@ -509,7 +509,7 @@ class ModelBuilder:
         self.shape_world = []
         # SDF parameters per shape
         self.shape_sdf_narrow_band_range = []
-        self.shape_sdf_max_dims = []
+        self.shape_sdf_target_voxel_size = []
 
         # Mesh SDF storage (volumes kept for reference counting, SDFData array created at finalize)
 
@@ -1676,7 +1676,7 @@ class ModelBuilder:
             "shape_collision_radius",
             "shape_contact_margin",
             "shape_sdf_narrow_band_range",
-            "shape_sdf_max_dims",
+            "shape_sdf_target_voxel_size",
             "particle_qd",
             "particle_mass",
             "particle_radius",
@@ -3200,7 +3200,7 @@ class ModelBuilder:
         self.shape_collision_radius.append(compute_shape_radius(type, scale, src))
         self.shape_world.append(self.current_world)
         self.shape_sdf_narrow_band_range.append(cfg.sdf_narrow_band_range)
-        self.shape_sdf_max_dims.append(cfg.sdf_max_dims)
+        self.shape_sdf_target_voxel_size.append(cfg.sdf_target_voxel_size)
         if cfg.has_shape_collision and cfg.collision_filter_parent and body > -1 and body in self.joint_parents:
             for parent_body in self.joint_parents[body]:
                 if parent_body > -1:
@@ -5253,7 +5253,7 @@ class ModelBuilder:
                     shape_thickness,
                     shape_contact_margin,
                     sdf_narrow_band_range,
-                    sdf_max_dims,
+                    sdf_target_voxel_size,
                 ) in enumerate(
                     zip(
                         self.shape_type,
@@ -5262,14 +5262,19 @@ class ModelBuilder:
                         self.shape_thickness,
                         self.shape_contact_margin,
                         self.shape_sdf_narrow_band_range,
-                        self.shape_sdf_max_dims,
+                        self.shape_sdf_target_voxel_size,
                         strict=False,
                     )
                 ):
                     # Compute SDF only for mesh shapes with collision enabled
                     if shape_type == GeoType.MESH and shape_src is not None and shape_flags & ShapeFlags.COLLIDE_SHAPES:
                         # Convert sdf_narrow_band_range to tuple for hashability (it may be a list/ndarray)
-                        cache_key = (hash(shape_src), shape_thickness, tuple(sdf_narrow_band_range), sdf_max_dims)
+                        cache_key = (
+                            hash(shape_src),
+                            shape_thickness,
+                            tuple(sdf_narrow_band_range),
+                            sdf_target_voxel_size,
+                        )
                         if cache_key in sdf_cache:
                             sdf_data, sparse_volume, coarse_volume = sdf_cache[cache_key]
                         else:
@@ -5279,7 +5284,7 @@ class ModelBuilder:
                                 shape_thickness=shape_thickness,
                                 narrow_band_distance=sdf_narrow_band_range,
                                 margin=shape_contact_margin,
-                                max_dims=sdf_max_dims,
+                                target_voxel_size=sdf_target_voxel_size,
                             )
                             sdf_cache[cache_key] = (sdf_data, sparse_volume, coarse_volume)
                         sdf_volumes.append(sparse_volume)

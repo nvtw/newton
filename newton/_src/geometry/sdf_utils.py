@@ -130,8 +130,9 @@ def compute_sdf(
     shape_thickness: float = 0.0,
     narrow_band_distance: Sequence[float] = (-0.1, 0.1),
     margin: float = 0.05,
+    target_voxel_size: float | None = None,
     max_dims: int = 64,
-    verbose: bool = False,
+    verbose: bool = True,
 ) -> tuple[SDFData, wp.Volume | None, wp.Volume | None]:
     """Compute sparse and coarse SDF volumes for a mesh.
 
@@ -140,7 +141,8 @@ def compute_sdf(
         shape_thickness: Thickness offset to subtract from SDF values.
         narrow_band_distance: Tuple of (inner, outer) distances for narrow band.
         margin: Margin to add to bounding box.
-        max_dims: Maximum dimension for sparse SDF grid.
+        target_voxel_size: Target voxel size for sparse SDF grid. If None, computed as max_extent/max_dims.
+        max_dims: Maximum dimension for sparse SDF grid when target_voxel_size is None. Default 64.
         verbose: Print debug info.
 
     Returns:
@@ -182,13 +184,15 @@ def compute_sdf(
     half_extents = (max_ext - min_ext) * 0.5
 
     # Calculate uniform voxel size based on the longest dimension
-    # The longest dimension will have max_dims voxels
     max_extent = np.max(ext)
-    voxel_size_max_ext = max_extent / max_dims
-    # Warp volumes are allocated in tiles of 8 voxels
-    assert max_dims % 8 == 0, "max_dims must be divisible by 8 for SDF volume allocation"
-    # we store coords as uint16
-    assert max_dims < 1 << 16, f"max_dims must be less than {1 << 16}"
+    # If target_voxel_size not specified, compute from max_dims
+    if target_voxel_size is None:
+        # Warp volumes are allocated in tiles of 8 voxels
+        assert max_dims % 8 == 0, "max_dims must be divisible by 8 for SDF volume allocation"
+        # we store coords as uint16
+        assert max_dims < 1 << 16, f"max_dims must be less than {1 << 16}"
+        target_voxel_size = max_extent / max_dims
+    voxel_size_max_ext = target_voxel_size
     grid_tile_nums = (ext / voxel_size_max_ext).astype(int) // 8
     grid_tile_nums = np.maximum(grid_tile_nums, 1)
     grid_dims = grid_tile_nums * 8
@@ -196,7 +200,9 @@ def compute_sdf(
     actual_voxel_size = ext / (grid_dims - 1)
 
     if verbose:
-        print(f"Extent: {ext}, Grid dims: {grid_dims}, voxel size: {actual_voxel_size}")
+        print(
+            f"Extent: {ext}, Grid dims: {grid_dims}, voxel size: {actual_voxel_size} target_voxel_size: {target_voxel_size}"
+        )
 
     tile_max = np.around((max_ext - min_ext) / actual_voxel_size).astype(np.int32) // 8
     tiles = np.array(
