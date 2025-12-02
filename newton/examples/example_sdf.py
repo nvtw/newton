@@ -80,10 +80,10 @@ def add_mesh_object(
 
 class Example:
     def __init__(self, viewer, num_worlds=1):
-        self.fps = 60
+        self.fps = 120
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 10
+        self.sim_substeps = 4
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.num_worlds = num_worlds
@@ -151,12 +151,11 @@ class Example:
             self.graph = None
 
     def simulate(self):
+        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
 
             self.viewer.apply_forces(self.state_0)
-
-            self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
 
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
