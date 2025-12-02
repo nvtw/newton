@@ -352,8 +352,8 @@ def get_slot(normal: wp.vec3) -> int:
 
     Uses Y-component to select search region:
     - Faces 0-4: top cap (Y ≈ +0.795)
-    - Faces 5-9: bottom cap (Y ≈ -0.795)
-    - Faces 10-19: equatorial band (Y ≈ ±0.188)
+    - Faces 5-14: equatorial band (Y ≈ ±0.188)
+    - Faces 15-19: bottom cap (Y ≈ -0.795)
 
     Args:
         normal: Normal vector to match

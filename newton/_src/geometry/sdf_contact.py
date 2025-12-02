@@ -35,7 +35,7 @@ from .contact_reduction import (
 @wp.func
 def sample_sdf_extrapolated(
     sdf_data: SDFData,
-    world_pos: wp.vec3,
+    sdf_pos: wp.vec3,
 ) -> float:
     """
     Sample SDF with extrapolation for points outside the narrow band or extent.
@@ -47,7 +47,7 @@ def sample_sdf_extrapolated(
 
     Args:
         sdf_data: SDFData struct containing sparse/coarse volumes and extent info
-        world_pos: Query position in world space (SDF local coordinates)
+        sdf_pos: Query position in the SDF's local coordinate space
 
     Returns:
         The signed distance value, extrapolated if necessary
@@ -58,17 +58,17 @@ def sample_sdf_extrapolated(
 
     # Check if point is inside extent
     inside_extent = (
-        world_pos[0] >= lower[0]
-        and world_pos[0] <= upper[0]
-        and world_pos[1] >= lower[1]
-        and world_pos[1] <= upper[1]
-        and world_pos[2] >= lower[2]
-        and world_pos[2] <= upper[2]
+        sdf_pos[0] >= lower[0]
+        and sdf_pos[0] <= upper[0]
+        and sdf_pos[1] >= lower[1]
+        and sdf_pos[1] <= upper[1]
+        and sdf_pos[2] >= lower[2]
+        and sdf_pos[2] <= upper[2]
     )
 
     if inside_extent:
         # Sample sparse grid
-        sparse_idx = wp.volume_world_to_index(sdf_data.sparse_sdf_ptr, world_pos)
+        sparse_idx = wp.volume_world_to_index(sdf_data.sparse_sdf_ptr, sdf_pos)
         sparse_dist = wp.volume_sample_f(sdf_data.sparse_sdf_ptr, sparse_idx, wp.Volume.LINEAR)
 
         # Check if we got the background value (outside narrow band)
@@ -76,14 +76,14 @@ def sample_sdf_extrapolated(
         background_threshold = sdf_data.background_value * 0.5
         if sparse_dist >= background_threshold:
             # Fallback to coarse grid
-            coarse_idx = wp.volume_world_to_index(sdf_data.coarse_sdf_ptr, world_pos)
+            coarse_idx = wp.volume_world_to_index(sdf_data.coarse_sdf_ptr, sdf_pos)
             return wp.volume_sample_f(sdf_data.coarse_sdf_ptr, coarse_idx, wp.Volume.LINEAR)
         else:
             return sparse_dist
     else:
         # Point is outside extent - project to boundary
-        clamped_pos = wp.min(wp.max(world_pos, lower), upper)
-        dist_to_boundary = wp.length(world_pos - clamped_pos)
+        clamped_pos = wp.min(wp.max(sdf_pos, lower), upper)
+        dist_to_boundary = wp.length(sdf_pos - clamped_pos)
 
         # Sample at the boundary point using coarse grid (more reliable for extrapolation)
         coarse_idx = wp.volume_world_to_index(sdf_data.coarse_sdf_ptr, clamped_pos)
@@ -96,7 +96,7 @@ def sample_sdf_extrapolated(
 @wp.func
 def sample_sdf_grad_extrapolated(
     sdf_data: SDFData,
-    world_pos: wp.vec3,
+    sdf_pos: wp.vec3,
 ) -> tuple[float, wp.vec3]:
     """
     Sample SDF with gradient, with extrapolation for points outside narrow band or extent.
@@ -108,7 +108,7 @@ def sample_sdf_grad_extrapolated(
 
     Args:
         sdf_data: SDFData struct containing sparse/coarse volumes and extent info
-        world_pos: Query position in world space (SDF local coordinates)
+        sdf_pos: Query position in the SDF's local coordinate space
 
     Returns:
         Tuple of (distance, gradient) where gradient points toward increasing distance
@@ -121,32 +121,32 @@ def sample_sdf_grad_extrapolated(
 
     # Check if point is inside extent
     inside_extent = (
-        world_pos[0] >= lower[0]
-        and world_pos[0] <= upper[0]
-        and world_pos[1] >= lower[1]
-        and world_pos[1] <= upper[1]
-        and world_pos[2] >= lower[2]
-        and world_pos[2] <= upper[2]
+        sdf_pos[0] >= lower[0]
+        and sdf_pos[0] <= upper[0]
+        and sdf_pos[1] >= lower[1]
+        and sdf_pos[1] <= upper[1]
+        and sdf_pos[2] >= lower[2]
+        and sdf_pos[2] <= upper[2]
     )
 
     if inside_extent:
         # Sample sparse grid
-        sparse_idx = wp.volume_world_to_index(sdf_data.sparse_sdf_ptr, world_pos)
+        sparse_idx = wp.volume_world_to_index(sdf_data.sparse_sdf_ptr, sdf_pos)
         sparse_dist = wp.volume_sample_grad_f(sdf_data.sparse_sdf_ptr, sparse_idx, wp.Volume.LINEAR, gradient)
 
         # Check if we got the background value (outside narrow band)
         background_threshold = sdf_data.background_value * 0.5
         if sparse_dist >= background_threshold:
             # Fallback to coarse grid
-            coarse_idx = wp.volume_world_to_index(sdf_data.coarse_sdf_ptr, world_pos)
+            coarse_idx = wp.volume_world_to_index(sdf_data.coarse_sdf_ptr, sdf_pos)
             coarse_dist = wp.volume_sample_grad_f(sdf_data.coarse_sdf_ptr, coarse_idx, wp.Volume.LINEAR, gradient)
             return coarse_dist, gradient
         else:
             return sparse_dist, gradient
     else:
         # Point is outside extent - project to boundary
-        clamped_pos = wp.min(wp.max(world_pos, lower), upper)
-        diff = world_pos - clamped_pos
+        clamped_pos = wp.min(wp.max(sdf_pos, lower), upper)
+        diff = sdf_pos - clamped_pos
         dist_to_boundary = wp.length(diff)
 
         # Sample at the boundary point using coarse grid
@@ -265,7 +265,7 @@ def do_triangle_sdf_collision(
 
     Args:
         sdf_data: SDFData struct containing sparse/coarse volumes and extent info
-        v0, v1, v2: Triangle vertices in world space (SDF local coordinates)
+        v0, v1, v2: Triangle vertices in the SDF's local coordinate space
 
     Returns:
         Tuple of (distance, contact_point, contact_direction) where:

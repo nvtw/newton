@@ -550,7 +550,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
         shape_contact_margin: wp.array(dtype=float),
         shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_plane_count: wp.array(dtype=int),
-        betas: wp.array(dtype=wp.float32),  # Unused but kept for API compatibility
+        _betas: wp.array(dtype=wp.float32),  # Unused but kept for API compatibility
         writer_data: Any,
         total_num_blocks: int,
     ):
@@ -604,8 +604,9 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
             # Build pair key for this mesh-plane pair
             pair_key = build_pair_key2(wp.uint32(mesh_shape), wp.uint32(plane_shape))
 
-            # Strided loop over vertices
-            for vertex_idx in range(tid, num_vertices, total_num_blocks):
+            # Strided loop over vertices across all threads in the launch
+            total_num_threads = total_num_blocks * wp.block_dim()
+            for vertex_idx in range(tid, num_vertices, total_num_threads):
                 # Get vertex position in mesh local space and transform to world space
                 vertex_local = wp.cw_mul(mesh_obj.points[vertex_idx], mesh_scale)
                 vertex_world = wp.transform_point(X_mesh_ws, vertex_local)
@@ -843,8 +844,9 @@ class NarrowPhase:
             shape_aabb_lower: Optional external AABB lower bounds array (if provided, AABBs won't be computed internally)
             shape_aabb_upper: Optional external AABB upper bounds array (if provided, AABBs won't be computed internally)
             contact_writer_warp_func: Optional custom contact writer function (first arg: ContactData, second arg: custom struct type)
-            betas: Tuple of beta values for contact reduction. The combined score is computed as
-                spatial_dp + beta * depth for each beta value. Default is (10.0,).
+            betas: Tuple of depth thresholds for contact reduction. Contacts are filtered by
+                depth < beta, then compete with pure spatial score. Default is (1000000.0, 0.0)
+                which keeps both all spatial extremes and penetrating-only spatial extremes.
                 The number of reduction slots is 20 * (6 * len(betas) + 1).
         """
         self.max_candidate_pairs = max_candidate_pairs
