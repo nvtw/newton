@@ -828,7 +828,7 @@ class NarrowPhase:
         shape_aabb_lower: wp.array(dtype=wp.vec3) | None = None,
         shape_aabb_upper: wp.array(dtype=wp.vec3) | None = None,
         contact_writer_warp_func: Any | None = None,
-        betas: tuple = (10.0,),
+        betas: tuple = (1000000.0, 0.0),
     ):
         """
         Initialize NarrowPhase with pre-allocated buffers.

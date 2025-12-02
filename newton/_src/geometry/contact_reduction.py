@@ -530,31 +530,32 @@ class ContactReductionFunctions:
 
     **Scoring Function:**
 
-    Each contact competes with score::
+    Contacts are filtered by depth threshold, then compete with pure spatial score::
 
-        score = dot(position, scan_direction) - beta * contact_depth
+        if depth < beta:
+            score = dot(position, scan_direction)
 
     Where:
-        - ``position``: Contact point in body-local coordinates
+        - ``position``: Contact point in centered world coordinates
         - ``scan_direction``: One of 6 spatial probing directions (±X, ±Y, ±Z)
-        - ``contact_depth``: Signed penetration depth (negative = penetrating)
-        - ``beta``: Weight controlling position vs depth preference
+        - ``depth``: Signed penetration depth (negative = penetrating)
+        - ``beta``: Depth threshold controlling which contacts participate
 
-    **Beta Parameter:**
+    **Beta Parameter (Depth Threshold):**
 
-    - ``beta = 0``: Pure spatial extremes (contacts at geometric boundaries)
-    - ``beta > 0``: Prefer deeper penetrations (since depth is negative, ``-beta * depth`` is positive for penetrations)
-    - ``beta = 10`` (default): Balanced - keeps both boundary and deep contacts
+    - ``beta = inf`` (or large value like 1000000): All contacts participate
+    - ``beta = 0``: Only penetrating contacts (depth < 0) participate
+    - ``beta = -0.01``: Only contacts with at least 1cm penetration participate
 
-    Multiple betas can be specified to keep contacts across different trade-offs.
+    Multiple betas can be specified to keep contacts at different depth thresholds.
     Each beta adds 6 slots per normal bin (one per spatial direction).
 
     Args:
-        betas: Tuple of beta values. Default ``(10.0,)`` provides a good balance.
-               Use ``(0.0, 10.0)`` to keep both pure spatial extremes and depth-weighted contacts.
+        betas: Tuple of depth thresholds. Default ``(1000000.0, 0.0)`` keeps both
+               all spatial extremes and penetrating-only spatial extremes.
     """
 
-    def __init__(self, betas: tuple = (10.0,)):
+    def __init__(self, betas: tuple = (1000000.0, 0.0)):
         self.betas = betas
         self.num_betas = len(betas)
         self.num_reduction_slots = compute_num_reduction_slots(self.num_betas)
@@ -602,7 +603,7 @@ class ContactReductionFunctions:
                 c: Contact data (position, normal, depth, feature)
                 buffer: Shared memory buffer for winning contacts
                 active_ids: Tracks which slots contain valid contacts
-                betas_arr: Array of beta weights for scoring
+                betas_arr: Array of depth thresholds (contact participates if depth < beta)
                 empty_marker: Sentinel value indicating empty slots
             """
             slots_per_bin = wp.static(NUM_SPATIAL_DIRECTIONS * num_betas + 1)
@@ -629,9 +630,10 @@ class ContactReductionFunctions:
                     scan_dir = get_scan_dir(bin_id, dir_i)
                     spatial_dp = wp.dot(scan_dir, c.position)
                     for beta_i in range(num_betas):
-                        score = spatial_dp - betas_arr[beta_i] * c.depth
-                        key = base_key + dir_i * wp.static(num_betas) + beta_i
-                        wp.atomic_max(winner_slots, key, pack_value_thread_id(score, thread_id))
+                        if c.depth < betas_arr[beta_i]:
+                            score = spatial_dp  # - betas_arr[beta_i] * c.depth
+                            key = base_key + dir_i * wp.static(num_betas) + beta_i
+                            wp.atomic_max(winner_slots, key, pack_value_thread_id(score, thread_id))
                 # Compete for max depth slot (last slot in bin)
                 max_depth_key = base_key + slots_per_bin - 1
                 # Use -depth as score so atomicMax selects the deepest (most negative depth)
@@ -645,17 +647,18 @@ class ContactReductionFunctions:
                     scan_dir = get_scan_dir(bin_id, dir_i)
                     spatial_dp = wp.dot(scan_dir, c.position)
                     for beta_i in range(num_betas):
-                        key = base_key + dir_i * wp.static(num_betas) + beta_i
-                        if unpack_thread_id(winner_slots[key]) == thread_id:
-                            p = buffer[key].projection
-                            if p == empty_marker:
-                                id = wp.atomic_add(active_ids, num_slots, 1)
-                                if id < num_slots:
-                                    active_ids[id] = key
-                            score = spatial_dp - betas_arr[beta_i] * c.depth
-                            if score > p:
-                                c.projection = score
-                                buffer[key] = c
+                        if c.depth < betas_arr[beta_i]:
+                            key = base_key + dir_i * wp.static(num_betas) + beta_i
+                            if unpack_thread_id(winner_slots[key]) == thread_id:
+                                p = buffer[key].projection
+                                if p == empty_marker:
+                                    id = wp.atomic_add(active_ids, num_slots, 1)
+                                    if id < num_slots:
+                                        active_ids[id] = key
+                                score = spatial_dp  # - betas_arr[beta_i] * c.depth
+                                if score > p:
+                                    c.projection = score
+                                    buffer[key] = c
                 # Check max depth slot
                 max_depth_key = base_key + slots_per_bin - 1
                 if unpack_thread_id(winner_slots[max_depth_key]) == thread_id:
