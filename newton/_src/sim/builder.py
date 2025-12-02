@@ -5246,7 +5246,7 @@ class ModelBuilder:
                 # Create empty SDF data once for reuse by non-mesh shapes
                 empty_sdf_data = create_empty_sdf_data()
 
-                for _, (
+                for (
                     shape_type,
                     shape_src,
                     shape_flags,
@@ -5254,17 +5254,15 @@ class ModelBuilder:
                     shape_contact_margin,
                     sdf_narrow_band_range,
                     sdf_target_voxel_size,
-                ) in enumerate(
-                    zip(
-                        self.shape_type,
-                        self.shape_source,
-                        self.shape_flags,
-                        self.shape_thickness,
-                        self.shape_contact_margin,
-                        self.shape_sdf_narrow_band_range,
-                        self.shape_sdf_target_voxel_size,
-                        strict=False,
-                    )
+                ) in zip(
+                    self.shape_type,
+                    self.shape_source,
+                    self.shape_flags,
+                    self.shape_thickness,
+                    self.shape_contact_margin,
+                    self.shape_sdf_narrow_band_range,
+                    self.shape_sdf_target_voxel_size,
+                    strict=False,
                 ):
                     # Compute SDF only for mesh shapes with collision enabled
                     if shape_type == GeoType.MESH and shape_src is not None and shape_flags & ShapeFlags.COLLIDE_SHAPES:
@@ -5272,6 +5270,7 @@ class ModelBuilder:
                         cache_key = (
                             hash(shape_src),
                             shape_thickness,
+                            shape_contact_margin,
                             tuple(sdf_narrow_band_range),
                             sdf_target_voxel_size,
                         )
