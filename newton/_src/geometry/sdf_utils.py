@@ -132,7 +132,7 @@ def compute_sdf(
     margin: float = 0.05,
     target_voxel_size: float | None = None,
     max_dims: int = 64,
-    verbose: bool = True,
+    verbose: bool = False,
 ) -> tuple[SDFData, wp.Volume | None, wp.Volume | None]:
     """Compute sparse and coarse SDF volumes for a mesh.
 
