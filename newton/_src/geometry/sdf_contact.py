@@ -770,7 +770,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         # Compute transform from mesh B (SDF B) space to mesh A space for mode 0
         # Mode 0: contact in SDF B space -> mesh A space
         # Mode 1: contact already in SDF A space = mesh A space
-        X_sdf_b_to_mesh_a = wp.transform_multiply(wp.transform_inverse(mesh0_transform), mesh1_transform)
+        X_sdf_b_to_mesh_a = wp.transform_inverse(mesh0_transform) * mesh1_transform
 
         for mode in range(2):
             synchronize()

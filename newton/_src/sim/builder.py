@@ -5076,6 +5076,8 @@ class ModelBuilder:
                 sdf_volumes = []
                 sdf_coarse_volumes = []
                 sdf_cache = {}
+                # Create empty SDF data once for reuse by non-mesh shapes
+                empty_sdf_data = create_empty_sdf_data()
 
                 for _, (
                     shape_type,
@@ -5114,7 +5116,7 @@ class ModelBuilder:
                         sdf_coarse_volumes.append(coarse_volume)
                     else:
                         # Non-mesh shapes or non-colliding shapes get empty SDFData
-                        sdf_data = create_empty_sdf_data()
+                        sdf_data = empty_sdf_data
                         sdf_volumes.append(None)
                         sdf_coarse_volumes.append(None)
                     sdf_data_list.append(sdf_data)

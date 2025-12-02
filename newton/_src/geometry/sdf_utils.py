@@ -18,6 +18,8 @@ from collections.abc import Sequence
 import numpy as np
 import warp as wp
 
+from .types import Mesh
+
 
 @wp.struct
 class SDFData:
@@ -124,7 +126,7 @@ def check_tile_occupied_mesh_kernel(
 
 
 def compute_sdf(
-    mesh_src,
+    mesh_src: Mesh,
     shape_thickness: float = 0.0,
     narrow_band_distance: Sequence[float] = (-0.1, 0.1),
     margin: float = 0.05,

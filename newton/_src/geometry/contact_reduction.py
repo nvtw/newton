@@ -34,14 +34,6 @@ __syncthreads();
 def synchronize(): ...
 
 
-@wp.func_native("""
-#if defined(__CUDA_ARCH__)
-atomicMax(reinterpret_cast<unsigned long long*>(ptr) + idx, static_cast<unsigned long long>(val));
-#endif
-""")
-def atomic_max_uint64(ptr: wp.uint64, idx: int, val: wp.uint64): ...
-
-
 @wp.func
 def pack_value_thread_id(value: float, thread_id: int) -> wp.uint64:
     """Pack float value and thread_id into uint64 for atomic argmax.
@@ -523,10 +515,43 @@ def create_shared_memory_pointer_block_dim_func(
 
 
 class ContactReductionFunctions:
-    """Contact reduction functions for a specific beta configuration.
+    """Reduces many candidate contacts to a representative subset using GPU shared memory.
+
+    When colliding complex meshes, thousands of triangle pairs may generate contacts.
+    This class provides functions to efficiently reduce them to a manageable set while
+    preserving contacts that are important for stable simulation.
+
+    **Algorithm Overview:**
+
+    1. Contacts are binned by normal direction (20 bins based on icosahedron faces)
+    2. Within each bin, contacts compete for slots using a scoring function
+    3. Winners are determined via atomic operations in shared memory
+    4. Duplicates (same geometric feature) are filtered out
+
+    **Scoring Function:**
+
+    Each contact competes with score::
+
+        score = dot(position, scan_direction) - beta * contact_depth
+
+    Where:
+        - ``position``: Contact point in body-local coordinates
+        - ``scan_direction``: One of 6 spatial probing directions (±X, ±Y, ±Z)
+        - ``contact_depth``: Signed penetration depth (negative = penetrating)
+        - ``beta``: Weight controlling position vs depth preference
+
+    **Beta Parameter:**
+
+    - ``beta = 0``: Pure spatial extremes (contacts at geometric boundaries)
+    - ``beta > 0``: Prefer deeper penetrations (since depth is negative, ``-beta * depth`` is positive for penetrations)
+    - ``beta = 10`` (default): Balanced - keeps both boundary and deep contacts
+
+    Multiple betas can be specified to keep contacts across different trade-offs.
+    Each beta adds 6 slots per normal bin (one per spatial direction).
 
     Args:
-        betas: Tuple of beta values for combined score = spatial_dp + beta * depth.
+        betas: Tuple of beta values. Default ``(10.0,)`` provides a good balance.
+               Use ``(0.0, 10.0)`` to keep both pure spatial extremes and depth-weighted contacts.
     """
 
     def __init__(self, betas: tuple = (10.0,)):
@@ -548,7 +573,13 @@ class ContactReductionFunctions:
         return create_betas_array(self.betas, device)
 
     def _create_store_reduced_contact(self):
-        """Create store_reduced_contact @wp.func."""
+        """Create the store_reduced_contact warp function.
+
+        The returned function competes contacts for reduction slots using atomic max.
+        Each thread with a contact computes scores for all (direction, beta) combinations
+        and atomically competes for the corresponding slots. Winners write their contact
+        to the shared buffer.
+        """
         num_reduction_slots = self.num_reduction_slots
         num_betas = self.num_betas
         get_smem = self.get_smem_reduction
@@ -563,7 +594,17 @@ class ContactReductionFunctions:
             betas_arr: wp.array(dtype=wp.float32),
             empty_marker: float,
         ):
-            """Store contact using atomic reduction. Score = spatial_dp - beta * depth."""
+            """Compete this thread's contact for reduction slots via atomic max.
+
+            Args:
+                thread_id: Thread index within the block
+                active: Whether this thread has a valid contact to store
+                c: Contact data (position, normal, depth, feature)
+                buffer: Shared memory buffer for winning contacts
+                active_ids: Tracks which slots contain valid contacts
+                betas_arr: Array of beta weights for scoring
+                empty_marker: Sentinel value indicating empty slots
+            """
             slots_per_bin = wp.static(NUM_SPATIAL_DIRECTIONS * num_betas + 1)
             num_slots = wp.static(NUM_NORMAL_BINS * slots_per_bin)
 
@@ -590,11 +631,11 @@ class ContactReductionFunctions:
                     for beta_i in range(num_betas):
                         score = spatial_dp - betas_arr[beta_i] * c.depth
                         key = base_key + dir_i * wp.static(num_betas) + beta_i
-                        atomic_max_uint64(winner_slots.ptr, key, pack_value_thread_id(score, thread_id))
+                        wp.atomic_max(winner_slots, key, pack_value_thread_id(score, thread_id))
                 # Compete for max depth slot (last slot in bin)
                 max_depth_key = base_key + slots_per_bin - 1
                 # Use -depth as score so atomicMax selects the deepest (most negative depth)
-                atomic_max_uint64(winner_slots.ptr, max_depth_key, pack_value_thread_id(-c.depth, thread_id))
+                wp.atomic_max(winner_slots, max_depth_key, pack_value_thread_id(-c.depth, thread_id))
             synchronize()
 
             if active:
@@ -632,7 +673,12 @@ class ContactReductionFunctions:
         return store_reduced_contact
 
     def _create_filter_unique_contacts(self):
-        """Create filter_unique_contacts @wp.func."""
+        """Create the filter_unique_contacts warp function.
+
+        The returned function removes duplicate contacts that won multiple slots
+        but originate from the same geometric feature (e.g., same triangle).
+        Only the first occurrence per feature is kept.
+        """
         num_reduction_slots = self.num_reduction_slots
         num_betas = self.num_betas
         get_smem = self.get_smem_reduction
@@ -644,7 +690,14 @@ class ContactReductionFunctions:
             active_ids: wp.array(dtype=int),
             empty_marker: float,
         ):
-            """Filter duplicate contacts, keeping first occurrence per feature."""
+            """Remove duplicate contacts, keeping first occurrence per feature.
+
+            Args:
+                thread_id: Thread index within the block
+                buffer: Shared memory buffer containing reduced contacts
+                active_ids: Output array of unique contact slot indices
+                empty_marker: Sentinel value indicating empty slots
+            """
             slots_per_bin = wp.static(NUM_SPATIAL_DIRECTIONS * num_betas + 1)
             num_slots = wp.static(NUM_NORMAL_BINS * slots_per_bin)
 
