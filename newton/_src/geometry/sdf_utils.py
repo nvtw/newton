@@ -165,6 +165,7 @@ def compute_sdf(
     )
     assert margin > 0, "margin must be > 0"
 
+    offset = margin + shape_thickness
     # bake scale into SDF
     verts = mesh_src.vertices * np.array(shape_scale)[None, :]
     pos = wp.array(verts, dtype=wp.vec3)
@@ -176,8 +177,8 @@ def compute_sdf(
     min_ext = np.min(verts, axis=0).tolist()
     max_ext = np.max(verts, axis=0).tolist()
 
-    min_ext = np.array(min_ext) - margin
-    max_ext = np.array(max_ext) + margin
+    min_ext = np.array(min_ext) - offset
+    max_ext = np.array(max_ext) + offset
     ext = max_ext - min_ext
 
     # Compute center and half_extents for oriented bounding box collision detection

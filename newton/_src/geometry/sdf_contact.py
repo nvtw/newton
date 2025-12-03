@@ -620,6 +620,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_mesh_b_ws), X_mesh_a_ws)
                     X_sdf_ws = X_mesh_b_ws
                     mesh = mesh_a
+                    triangle_mesh_thickness = thickness_a
                 else:
                     # Process mesh B triangles against SDF A (if SDF A exists)
                     if sdf_ptr_a == wp.uint64(0):
@@ -632,6 +633,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_mesh_a_ws), X_mesh_b_ws)
                     X_sdf_ws = X_mesh_a_ws
                     mesh = mesh_b
+                    triangle_mesh_thickness = thickness_b
+
+                # (SDF mesh's thickness is already baked into the SDF)
+                contact_threshold = margin + triangle_mesh_thickness
 
                 num_tris = mesh.indices.shape[0] // 3
                 # strided loop over triangles
@@ -644,12 +649,12 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     sdf_dist = sample_sdf_extrapolated(sdf_data, bounding_sphere_center)
 
                     # Skip triangles that are too far from the SDF surface
-                    if sdf_dist > (bounding_sphere_radius + margin):
+                    if sdf_dist > (bounding_sphere_radius + contact_threshold):
                         continue
 
                     dist, point, direction = do_triangle_sdf_collision(sdf_data, v0, v1, v2)
 
-                    if dist < margin:
+                    if dist < contact_threshold:
                         point_world = wp.transform_point(X_sdf_ws, point)
 
                         direction_world = wp.transform_vector(X_sdf_ws, direction)
@@ -670,8 +675,15 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         contact_data.contact_distance = dist
                         contact_data.radius_eff_a = 0.0
                         contact_data.radius_eff_b = 0.0
-                        contact_data.thickness_a = thickness_a
-                        contact_data.thickness_b = thickness_b
+                        # SDF mesh's thickness is already baked into the SDF, so set it to 0
+                        # Mode 0: mesh_a triangles vs mesh_b's SDF -> thickness_b already in SDF
+                        # Mode 1: mesh_b triangles vs mesh_a's SDF -> thickness_a already in SDF
+                        if mode == 0:
+                            contact_data.thickness_a = thickness_a
+                            contact_data.thickness_b = 0.0
+                        else:
+                            contact_data.thickness_a = 0.0
+                            contact_data.thickness_b = thickness_b
                         contact_data.shape_a = mesh_shape_a
                         contact_data.shape_b = mesh_shape_b
                         contact_data.margin = margin
@@ -778,11 +790,17 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 mesh_scale = mesh0_scale
                 mesh_sdf_transform = wp.transform_multiply(wp.transform_inverse(mesh1_transform), mesh0_transform)
                 sdf_data_current = sdf_data1
+                triangle_mesh_thickness = thickness0
             else:
                 mesh = mesh1
                 mesh_scale = mesh1_scale
                 mesh_sdf_transform = wp.transform_multiply(wp.transform_inverse(mesh0_transform), mesh1_transform)
                 sdf_data_current = sdf_data0
+                triangle_mesh_thickness = thickness1
+
+            # Contact threshold: margin + triangle mesh's thickness
+            # (SDF mesh's thickness is already baked into the SDF)
+            contact_threshold = margin + triangle_mesh_thickness
 
             # Reset progress counter for this mesh
             if t == 0:
@@ -801,7 +819,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     mesh,
                     sdf_data_current,
                     selected_triangles,
-                    margin,
+                    contact_threshold,
                 )
 
                 has_contact = t < selected_triangles[tri_capacity]
@@ -817,7 +835,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         v2,
                     )
 
-                    has_contact = dist < margin
+                    has_contact = dist < contact_threshold
 
                     if has_contact:
                         # Transform contact to world space, then center by subtracting midpoint
@@ -892,9 +910,15 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
             contact_data.contact_distance = contact.depth
             contact_data.radius_eff_a = 0.0
             contact_data.radius_eff_b = 0.0
-            # Use consistent shape IDs for all contacts (both modes contribute to same buffer)
-            contact_data.thickness_a = thickness0
-            contact_data.thickness_b = thickness1
+            # SDF mesh's thickness is already baked into the SDF, so set it to 0
+            # contact.feature >= 0 means mode 0: mesh0 triangles vs mesh1's SDF -> thickness1 already in SDF
+            # contact.feature < 0 means mode 1: mesh1 triangles vs mesh0's SDF -> thickness0 already in SDF
+            if contact.feature >= 0:
+                contact_data.thickness_a = thickness0
+                contact_data.thickness_b = 0.0
+            else:
+                contact_data.thickness_a = 0.0
+                contact_data.thickness_b = thickness1
             contact_data.shape_a = pair[0]
             contact_data.shape_b = pair[1]
             contact_data.margin = margin
