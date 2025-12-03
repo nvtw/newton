@@ -127,6 +127,7 @@ def check_tile_occupied_mesh_kernel(
 
 def compute_sdf(
     mesh_src: Mesh,
+    shape_scale: Sequence[float],
     shape_thickness: float = 0.0,
     narrow_band_distance: Sequence[float] = (-0.1, 0.1),
     margin: float = 0.05,
@@ -164,14 +165,14 @@ def compute_sdf(
     )
     assert margin > 0, "margin must be > 0"
 
-    pos = wp.array(mesh_src.vertices, dtype=wp.vec3)
-    vel = wp.zeros_like(pos)
+    # bake scale into SDF
+    verts = mesh_src.vertices * np.array(shape_scale)[None, :]
+    pos = wp.array(verts, dtype=wp.vec3)
     indices = wp.array(mesh_src.indices, dtype=wp.int32)
 
-    mesh = wp.Mesh(points=pos, velocities=vel, indices=indices, support_winding_number=True)
+    mesh = wp.Mesh(points=pos, indices=indices, support_winding_number=True)
     m_id = mesh.id
 
-    verts = mesh_src.vertices
     min_ext = np.min(verts, axis=0).tolist()
     max_ext = np.max(verts, axis=0).tolist()
 

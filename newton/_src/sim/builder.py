@@ -5250,6 +5250,7 @@ class ModelBuilder:
                     shape_type,
                     shape_src,
                     shape_flags,
+                    shape_scale,
                     shape_thickness,
                     shape_contact_margin,
                     sdf_narrow_band_range,
@@ -5258,6 +5259,7 @@ class ModelBuilder:
                     self.shape_type,
                     self.shape_source,
                     self.shape_flags,
+                    self.shape_scale,
                     self.shape_thickness,
                     self.shape_contact_margin,
                     self.shape_sdf_narrow_band_range,
@@ -5266,10 +5268,10 @@ class ModelBuilder:
                 ):
                     # Compute SDF only for mesh shapes with collision enabled
                     if shape_type == GeoType.MESH and shape_src is not None and shape_flags & ShapeFlags.COLLIDE_SHAPES:
-                        # Convert sdf_narrow_band_range to tuple for hashability (it may be a list/ndarray)
                         cache_key = (
                             hash(shape_src),
                             shape_thickness,
+                            tuple(shape_scale),
                             shape_contact_margin,
                             tuple(sdf_narrow_band_range),
                             sdf_target_voxel_size,
@@ -5280,6 +5282,7 @@ class ModelBuilder:
                             # Compute SDF for this mesh shape (returns SDFData struct and volume objects)
                             sdf_data, sparse_volume, coarse_volume = compute_sdf(
                                 mesh_src=shape_src,
+                                shape_scale=shape_scale,
                                 shape_thickness=shape_thickness,
                                 narrow_band_distance=sdf_narrow_band_range,
                                 margin=shape_contact_margin,
