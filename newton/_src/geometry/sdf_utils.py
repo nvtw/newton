@@ -127,7 +127,7 @@ def check_tile_occupied_mesh_kernel(
 
 def compute_sdf(
     mesh_src: Mesh,
-    shape_scale: Sequence[float],
+    shape_scale: Sequence[float] = (1.0, 1.0, 1.0),
     shape_thickness: float = 0.0,
     narrow_band_distance: Sequence[float] = (-0.1, 0.1),
     margin: float = 0.05,
@@ -139,6 +139,7 @@ def compute_sdf(
 
     Args:
         mesh_src: Mesh source with vertices and indices.
+        shape_scale: Scale factors for the mesh. Default (1.0, 1.0, 1.0).
         shape_thickness: Thickness offset to subtract from SDF values.
         narrow_band_distance: Tuple of (inner, outer) distances for narrow band.
         margin: Margin to add to bounding box.
