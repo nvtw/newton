@@ -191,9 +191,7 @@ class Example:
                 y_offset = (j - (self.grid_y - 1) / 2.0) * spacing
 
                 # Add bolt at grid position
-                bolt_xform = wp.transform(
-                    wp.vec3(x_offset, y_offset, 0.01 * self.scene_scale), wp.quat_identity()
-                )
+                bolt_xform = wp.transform(wp.vec3(x_offset, y_offset, 0.01 * self.scene_scale), wp.quat_identity())
                 add_mesh_object(
                     world_builder,
                     bolt_file,
@@ -205,9 +203,7 @@ class Example:
                 )
 
                 # Add nut above bolt at grid position
-                nut_xform = wp.transform(
-                    wp.vec3(x_offset, y_offset, 0.05 * self.scene_scale), wp.quat_identity()
-                )
+                nut_xform = wp.transform(wp.vec3(x_offset, y_offset, 0.05 * self.scene_scale), wp.quat_identity())
                 add_mesh_object(
                     world_builder,
                     nut_file,
@@ -236,7 +232,15 @@ class Example:
         for _, (gear_filename, gear_key) in enumerate(GEAR_FILES):
             gear_file = str(asset_path / gear_filename)
             gear_xform = wp.transform(wp.vec3(0.0, 0.0, 0.01) * self.scene_scale, wp.quat_identity())
-            add_mesh_object(world_builder, gear_file, gear_xform, shape_cfg, key=gear_key, center_origin=True, scale=self.scene_scale)
+            add_mesh_object(
+                world_builder,
+                gear_file,
+                gear_xform,
+                shape_cfg,
+                key=gear_key,
+                center_origin=True,
+                scale=self.scene_scale,
+            )
 
         return world_builder
 

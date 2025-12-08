@@ -188,7 +188,7 @@ class ModelBuilder:
         sdf_target_voxel_size: float | None = None
         """Target voxel size for sparse SDF grid. If provided, takes precedence over sdf_max_dims. Only used for mesh shapes when SDF is enabled."""
         sdf_max_dims: int | None = None
-        """Maximum dimension for sparse SDF grid (must be divisible by 8). Used when sdf_target_voxel_size is None. 
+        """Maximum dimension for sparse SDF grid (must be divisible by 8). Used when sdf_target_voxel_size is None.
         Set to None (default) to disable SDF generation for this shape (uses BVH-based collision for mesh-mesh instead).
         Set to an integer (e.g., 64) to enable SDF-based mesh-mesh collision. Requires GPU since wp.Volume only supports CUDA.
         Only used for mesh shapes."""
@@ -5464,8 +5464,13 @@ class ModelBuilder:
 
             # Check if there are any mesh shapes with collision enabled that request SDF generation
             has_sdf_meshes = any(
-                stype == GeoType.MESH and ssrc is not None and sflags & ShapeFlags.COLLIDE_SHAPES and sdf_max_dims is not None
-                for stype, ssrc, sflags, sdf_max_dims in zip(self.shape_type, self.shape_source, self.shape_flags, self.shape_sdf_max_dims, strict=False)
+                stype == GeoType.MESH
+                and ssrc is not None
+                and sflags & ShapeFlags.COLLIDE_SHAPES
+                and sdf_max_dims is not None
+                for stype, ssrc, sflags, sdf_max_dims in zip(
+                    self.shape_type, self.shape_source, self.shape_flags, self.shape_sdf_max_dims, strict=False
+                )
             )
 
             # Check if SDF generation was requested but we're on CPU

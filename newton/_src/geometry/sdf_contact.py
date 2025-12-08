@@ -633,7 +633,9 @@ def find_interesting_triangles(
 
             # Use extrapolated SDF distance query for culling
             if use_bvh_for_sdf:
-                sdf_dist = sample_sdf_using_mesh(sdf_mesh_id, bounding_sphere_center, 1.01 * (bounding_sphere_radius + contact_distance))
+                sdf_dist = sample_sdf_using_mesh(
+                    sdf_mesh_id, bounding_sphere_center, 1.01 * (bounding_sphere_radius + contact_distance)
+                )
             else:
                 sdf_dist = sample_sdf_extrapolated(sdf_data, bounding_sphere_center)
             add_triangle = sdf_dist <= (bounding_sphere_radius + contact_distance)
@@ -795,7 +797,9 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     if sdf_dist > (bounding_sphere_radius + contact_threshold):
                         continue
 
-                    dist, point, direction = do_triangle_sdf_collision(sdf_data, sdf_mesh_id, v0, v1, v2, use_bvh_for_sdf)
+                    dist, point, direction = do_triangle_sdf_collision(
+                        sdf_data, sdf_mesh_id, v0, v1, v2, use_bvh_for_sdf
+                    )
 
                     if dist < contact_threshold:
                         point_world = wp.transform_point(X_sdf_ws, point)

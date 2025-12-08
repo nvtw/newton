@@ -50,7 +50,7 @@ def compute_pick_state_kernel(
     # Get body transform
     X_wb = body_q[body_index]
     X_bw = wp.transform_inverse(X_wb)
-    
+
     # Compute local space attachment point from the hit point
     pick_pos_local = wp.transform_point(X_bw, hit_point_world)
 
@@ -61,7 +61,7 @@ def compute_pick_state_kernel(
     # IMPORTANT: Initialize target to current attachment point position, not hit point
     # This prevents jumps if the body moved between raycast and first force application
     pick_pos_world = wp.transform_point(X_wb, pick_pos_local)
-    
+
     # store target world (current attachment point position)
     pick_state[3] = pick_pos_world[0]
     pick_state[4] = pick_pos_world[1]
