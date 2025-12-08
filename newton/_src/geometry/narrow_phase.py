@@ -829,7 +829,7 @@ class NarrowPhase:
         shape_aabb_lower: wp.array(dtype=wp.vec3) | None = None,
         shape_aabb_upper: wp.array(dtype=wp.vec3) | None = None,
         contact_writer_warp_func: Any | None = None,
-        contact_reduction_betas: tuple = (1000000.0, 0.0),
+        contact_reduction_betas: tuple = (1000000.0, 0.0001),
     ):
         """
         Initialize NarrowPhase with pre-allocated buffers.
@@ -860,8 +860,8 @@ class NarrowPhase:
 
                 Multiple betas can be specified to keep contacts at different depth thresholds.
                 Each beta adds 6 slots per normal bin (one per spatial direction).
-                Default is ``(1000000.0, 0.0)`` which keeps both all spatial extremes and
-                penetrating-only spatial extremes. The number of reduction slots is ``20 * (6 * len(betas) + 1)``.
+                Default is ``(1000000.0, 0.0001)`` which keeps both all spatial extremes and
+                near-penetrating spatial extremes. The number of reduction slots is ``20 * (6 * len(betas) + 1)``.
         """
         self.max_candidate_pairs = max_candidate_pairs
         self.max_triangle_pairs = max_triangle_pairs
