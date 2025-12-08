@@ -234,7 +234,12 @@ contact_tests = [
     (GeoType.BOX, GeoType.MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
     (GeoType.CAPSULE, GeoType.CAPSULE, TestLevel.VELOCITY_YZ, TestLevel.VELOCITY_LINEAR),
     (GeoType.CAPSULE, GeoType.MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
-    (GeoType.MESH, GeoType.MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
+    (
+        GeoType.MESH,
+        GeoType.MESH,
+        TestLevel.VELOCITY_YZ,
+        TestLevel.VELOCITY_LINEAR,
+    ),
 ]
 
 
@@ -287,7 +292,12 @@ unified_contact_tests = [
     (GeoType.CAPSULE, GeoType.CAPSULE, TestLevel.VELOCITY_YZ, TestLevel.VELOCITY_LINEAR),
     (GeoType.CAPSULE, GeoType.MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
     (GeoType.CAPSULE, GeoType.CONVEX_MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
-    (GeoType.MESH, GeoType.MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),  # Now supported with BVH fallback
+    (
+        GeoType.MESH,
+        GeoType.MESH,
+        TestLevel.VELOCITY_YZ,
+        TestLevel.VELOCITY_LINEAR,
+    ),
     (GeoType.MESH, GeoType.CONVEX_MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
     (GeoType.CONVEX_MESH, GeoType.CONVEX_MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
 ]
@@ -382,7 +392,7 @@ for shape_type_a, shape_type_b, test_level_a, test_level_b in unified_contact_te
 
 
 # Mesh-mesh collision with different SDF configurations
-# Test all three modes: SDF vs SDF, SDF vs BVH, and BVH vs BVH
+# Test all four modes: SDF vs SDF, SDF vs BVH, BVH vs SDF, and BVH vs BVH
 def test_mesh_mesh_sdf_modes(
     _test,
     device,
@@ -408,23 +418,23 @@ def test_mesh_mesh_sdf_modes(
         setup.step()
         setup.render()
     setup.test(TestLevel.VELOCITY_YZ, 0)
-    setup.test(TestLevel.STRICT, 1)
+    setup.test(TestLevel.VELOCITY_LINEAR, 1)  # Mesh-mesh contacts induce rotation with small margins
 
 
 # Wrapper functions for different SDF modes
 def test_mesh_mesh_sdf_vs_sdf(_test, device, broad_phase_mode: newton.BroadPhaseMode):
     """Test mesh-mesh collision where both meshes have SDFs."""
-    test_mesh_mesh_sdf_modes(_test, device, sdf_max_dims_a=64, sdf_max_dims_b=64, broad_phase_mode=broad_phase_mode)
+    test_mesh_mesh_sdf_modes(_test, device, sdf_max_dims_a=8, sdf_max_dims_b=8, broad_phase_mode=broad_phase_mode)
 
 
 def test_mesh_mesh_sdf_vs_bvh(_test, device, broad_phase_mode: newton.BroadPhaseMode):
     """Test mesh-mesh collision where first mesh has SDF, second uses BVH."""
-    test_mesh_mesh_sdf_modes(_test, device, sdf_max_dims_a=64, sdf_max_dims_b=None, broad_phase_mode=broad_phase_mode)
+    test_mesh_mesh_sdf_modes(_test, device, sdf_max_dims_a=8, sdf_max_dims_b=None, broad_phase_mode=broad_phase_mode)
 
 
 def test_mesh_mesh_bvh_vs_sdf(_test, device, broad_phase_mode: newton.BroadPhaseMode):
     """Test mesh-mesh collision where first mesh uses BVH, second has SDF."""
-    test_mesh_mesh_sdf_modes(_test, device, sdf_max_dims_a=None, sdf_max_dims_b=64, broad_phase_mode=broad_phase_mode)
+    test_mesh_mesh_sdf_modes(_test, device, sdf_max_dims_a=None, sdf_max_dims_b=8, broad_phase_mode=broad_phase_mode)
 
 
 def test_mesh_mesh_bvh_vs_bvh(_test, device, broad_phase_mode: newton.BroadPhaseMode):
