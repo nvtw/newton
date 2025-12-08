@@ -73,7 +73,7 @@ def add_mesh_object(
 
 
 class Example:
-    def __init__(self, viewer, num_worlds=1, scene="nut_bolt", solver="xpbd"):
+    def __init__(self, viewer, num_worlds=1, num_per_world=1, scene="nut_bolt", solver="xpbd"):
         self.fps = 120
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
@@ -95,8 +95,9 @@ class Example:
         self.ground_plane_offset = -0.01
 
         # Grid dimensions for nut/bolt scene (number of assemblies in X and Y)
-        self.grid_x = 10
-        self.grid_y = 10
+        self.num_per_world = num_per_world
+        self.grid_x = int(np.ceil(np.sqrt(num_per_world)))
+        self.grid_y = int(np.ceil(num_per_world / self.grid_x))
 
         # Maximum number of rigid contacts to allocate (limits memory usage)
         # None = auto-calculate (can be very large), or set explicit limit (e.g., 1_000_000)
@@ -139,7 +140,17 @@ class Example:
                 self.model, iterations=10, rigid_contact_relaxation=self.xpbd_contact_relaxation
             )
         elif self.solver_type == "mujoco":
-            self.solver = newton.solvers.SolverMuJoCo(self.model, iterations=10)
+            num_per_world = self.rigid_contact_max // self.num_worlds
+            self.solver = newton.solvers.SolverMuJoCo(
+                self.model,
+                ls_parallel=True,
+                solver="newton",
+                integrator="implicitfast",
+                njmax=num_per_world,
+                nconmax=num_per_world,
+                ls_iterations=100,
+                use_mujoco_contacts=False,
+            )
         else:
             raise ValueError(f"Unknown solver type: {self.solver_type}. Choose from 'xpbd' or 'mujoco'.")
 
@@ -184,14 +195,19 @@ class Example:
         spacing = 0.1 * self.scene_scale
 
         # Create grid of nut/bolt assemblies
+        count = 0
         for i in range(self.grid_x):
+            if count >= self.num_per_world:
+                break
             for j in range(self.grid_y):
+                if count >= self.num_per_world:
+                    break
                 # Center the grid around origin
                 x_offset = (i - (self.grid_x - 1) / 2.0) * spacing
                 y_offset = (j - (self.grid_y - 1) / 2.0) * spacing
 
                 # Add bolt at grid position
-                bolt_xform = wp.transform(wp.vec3(x_offset, y_offset, 0.01 * self.scene_scale), wp.quat_identity())
+                bolt_xform = wp.transform(wp.vec3(x_offset, y_offset, 0.0 * self.scene_scale), wp.quat_identity())
                 add_mesh_object(
                     world_builder,
                     bolt_file,
@@ -203,7 +219,10 @@ class Example:
                 )
 
                 # Add nut above bolt at grid position
-                nut_xform = wp.transform(wp.vec3(x_offset, y_offset, 0.05 * self.scene_scale), wp.quat_identity())
+                nut_xform = wp.transform(
+                    wp.vec3(x_offset, y_offset, 0.041 * self.scene_scale),
+                    wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), np.pi / 8),
+                )
                 add_mesh_object(
                     world_builder,
                     nut_file,
@@ -213,6 +232,7 @@ class Example:
                     center_origin=True,
                     scale=self.scene_scale,
                 )
+                count += 1
 
         return world_builder
 
@@ -300,9 +320,17 @@ if __name__ == "__main__":
         default="xpbd",
         help="Solver to use: 'xpbd' (Extended Position-Based Dynamics) or 'mujoco' (MuJoCo constraint solver).",
     )
+    parser.add_argument(
+        "--num-per-world",
+        type=int,
+        default=1,
+        help="Number of assemblies per world.",
+    )
 
     viewer, args = newton.examples.init(parser)
 
-    example = Example(viewer, num_worlds=args.num_worlds, scene=args.scene, solver=args.solver)
+    example = Example(
+        viewer, num_worlds=args.num_worlds, num_per_world=args.num_per_world, scene=args.scene, solver=args.solver
+    )
 
     newton.examples.run(example, args)
