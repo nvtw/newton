@@ -184,16 +184,14 @@ class ModelBuilder:
         is_site: bool = False
         """Indicates whether the shape is a site (non-colliding reference point). Directly setting this to True will NOT enforce site invariants. Use `mark_as_site()` or set via the `flags` property to ensure invariants. Defaults to False."""
         sdf_narrow_band_range: tuple[float, float] = (-0.1, 0.1)
-        """The narrow band distance range (inner, outer) for SDF computation. Only used for mesh shapes."""
+        """The narrow band distance range (inner, outer) for SDF computation. Only used for mesh shapes when SDF is enabled."""
         sdf_target_voxel_size: float | None = None
-        """Target voxel size for sparse SDF grid. If None, computed from sdf_max_dims. Only used for mesh shapes."""
-        sdf_max_dims: int = 64
-        """The maximum dimension for sparse SDF grid. Must be divisible by 8. Used when sdf_target_voxel_size is None. Only used for mesh shapes."""
-        enable_sdf: bool | None = None
-        """Whether to compute SDF for this mesh shape. Only applies to mesh shapes.
-        - None (default): Inherit from builder.enable_mesh_sdf_collision
-        - True: Force SDF for this shape (requires builder.enable_mesh_sdf_collision=True)
-        - False: Disable SDF for this shape, use BVH-based collision instead"""
+        """Target voxel size for sparse SDF grid. If provided, takes precedence over sdf_max_dims. Only used for mesh shapes when SDF is enabled."""
+        sdf_max_dims: int | None = None
+        """Maximum dimension for sparse SDF grid (must be divisible by 8). Used when sdf_target_voxel_size is None. 
+        Set to None (default) to disable SDF generation for this shape (uses BVH-based collision for mesh-mesh instead).
+        Set to an integer (e.g., 64) to enable SDF-based mesh-mesh collision. Requires GPU since wp.Volume only supports CUDA.
+        Only used for mesh shapes."""
 
         def mark_as_site(self) -> None:
             """Marks this shape as a site and enforces all site invariants.
@@ -468,13 +466,6 @@ class ModelBuilder:
         When True, uses a CPU implementation that reports specific issues for each body and updates
         the ModelBuilder's internal state.
         Default: False."""
-
-        self.enable_mesh_sdf_collision = False
-        """Whether to enable SDF-based mesh-mesh collision detection.
-        When enabled, signed distance fields (SDFs) are computed for mesh shapes to enable
-        mesh-mesh collision detection. Requires a CUDA-capable GPU device since wp.Volume only
-        supports CUDA. If enabled but the model is finalized on a CPU device, a ValueError is raised.
-        Default: False."""
         # endregion
 
         # particles
@@ -518,7 +509,6 @@ class ModelBuilder:
         self.shape_sdf_narrow_band_range = []
         self.shape_sdf_target_voxel_size = []
         self.shape_sdf_max_dims = []
-        self.shape_enable_sdf = []
 
         # Mesh SDF storage (volumes kept for reference counting, SDFData array created at finalize)
 
@@ -1783,6 +1773,7 @@ class ModelBuilder:
             "shape_collision_radius",
             "shape_contact_margin",
             "shape_sdf_narrow_band_range",
+            "shape_sdf_max_dims",
             "shape_sdf_target_voxel_size",
             "particle_qd",
             "particle_mass",
@@ -3332,7 +3323,6 @@ class ModelBuilder:
         self.shape_sdf_narrow_band_range.append(cfg.sdf_narrow_band_range)
         self.shape_sdf_target_voxel_size.append(cfg.sdf_target_voxel_size)
         self.shape_sdf_max_dims.append(cfg.sdf_max_dims)
-        self.shape_enable_sdf.append(cfg.enable_sdf)
         if cfg.has_shape_collision and cfg.collision_filter_parent and body > -1 and body in self.joint_parents:
             for parent_body in self.joint_parents[body]:
                 if parent_body > -1:
@@ -5464,7 +5454,7 @@ class ModelBuilder:
             m.shape_collision_group = wp.array(self.shape_collision_group, dtype=wp.int32)
 
             # ---------------------
-            # Compute SDFs for mesh shapes (opt-in feature via enable_mesh_sdf_collision)
+            # Compute SDFs for mesh shapes (per-shape opt-in via sdf_max_dims)
             from ..geometry.sdf_utils import SDFData, compute_sdf, create_empty_sdf_data  # noqa: PLC0415
             from ..geometry.types import GeoType  # noqa: PLC0415
 
@@ -5472,24 +5462,21 @@ class ModelBuilder:
             current_device = wp.get_device(device)
             is_gpu = current_device.is_cuda
 
-            # Check if mesh SDF collision was requested but we're on CPU
-            if self.enable_mesh_sdf_collision and not is_gpu:
-                raise ValueError(
-                    "enable_mesh_sdf_collision requires a CUDA-capable GPU device. "
-                    "wp.Volume (used for SDF generation) only supports CUDA. "
-                    "Either set enable_mesh_sdf_collision=False or use a CUDA device."
-                )
-
-            # Check if there are any mesh shapes with collision enabled
-            has_colliding_meshes = any(
-                stype == GeoType.MESH and ssrc is not None and sflags & ShapeFlags.COLLIDE_SHAPES
-                for stype, ssrc, sflags in zip(self.shape_type, self.shape_source, self.shape_flags, strict=False)
+            # Check if there are any mesh shapes with collision enabled that request SDF generation
+            has_sdf_meshes = any(
+                stype == GeoType.MESH and ssrc is not None and sflags & ShapeFlags.COLLIDE_SHAPES and sdf_max_dims is not None
+                for stype, ssrc, sflags, sdf_max_dims in zip(self.shape_type, self.shape_source, self.shape_flags, self.shape_sdf_max_dims, strict=False)
             )
 
-            # Enable mesh-mesh collision only if explicitly enabled, on GPU, and there are colliding meshes
-            m.mesh_mesh_collision_enabled = self.enable_mesh_sdf_collision and has_colliding_meshes and is_gpu
+            # Check if SDF generation was requested but we're on CPU
+            if has_sdf_meshes and not is_gpu:
+                raise ValueError(
+                    "SDF generation for mesh shapes (sdf_max_dims != None) requires a CUDA-capable GPU device. "
+                    "wp.Volume (used for SDF generation) only supports CUDA. "
+                    "Either set sdf_max_dims=None for all mesh shapes or use a CUDA device."
+                )
 
-            if self.enable_mesh_sdf_collision and has_colliding_meshes:
+            if has_sdf_meshes:
                 sdf_data_list = []
                 # Keep volume objects alive for reference counting
                 sdf_volumes = []
@@ -5508,7 +5495,6 @@ class ModelBuilder:
                     sdf_narrow_band_range,
                     sdf_target_voxel_size,
                     sdf_max_dims,
-                    shape_enable_sdf,
                 ) in zip(
                     self.shape_type,
                     self.shape_source,
@@ -5519,20 +5505,14 @@ class ModelBuilder:
                     self.shape_sdf_narrow_band_range,
                     self.shape_sdf_target_voxel_size,
                     self.shape_sdf_max_dims,
-                    self.shape_enable_sdf,
                     strict=False,
                 ):
-                    # Resolve per-shape enable_sdf: None means inherit from global setting
-                    effective_enable_sdf = (
-                        shape_enable_sdf if shape_enable_sdf is not None else self.enable_mesh_sdf_collision
-                    )
-
-                    # Compute SDF only for mesh shapes with collision enabled and SDF enabled
+                    # Compute SDF only for mesh shapes with collision enabled and sdf_max_dims is not None
                     if (
                         shape_type == GeoType.MESH
                         and shape_src is not None
                         and shape_flags & ShapeFlags.COLLIDE_SHAPES
-                        and effective_enable_sdf
+                        and sdf_max_dims is not None
                     ):
                         cache_key = (
                             hash(shape_src),
@@ -5574,9 +5554,11 @@ class ModelBuilder:
                 m.shape_sdf_coarse_volume = sdf_coarse_volumes
             else:
                 # SDF mesh-mesh collision not enabled or no colliding meshes
-                m.shape_sdf_data = wp.empty(0, dtype=SDFData, device=device)
-                m.shape_sdf_volume = []
-                m.shape_sdf_coarse_volume = []
+                # Still need one SDFData per shape (all empty) so narrow phase can safely access shape_sdf_data[shape_idx]
+                empty_sdf_data = create_empty_sdf_data()
+                m.shape_sdf_data = wp.array([empty_sdf_data] * len(self.shape_type), dtype=SDFData, device=device)
+                m.shape_sdf_volume = [None] * len(self.shape_type)
+                m.shape_sdf_coarse_volume = [None] * len(self.shape_type)
 
             # ---------------------
             # springs
