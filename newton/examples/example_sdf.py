@@ -303,7 +303,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-worlds",
         type=int,
-        default=1,
+        default=100,
         help="Total number of simulated worlds.",
     )
     parser.add_argument(
@@ -317,7 +317,7 @@ if __name__ == "__main__":
         "--solver",
         type=str,
         choices=["xpbd", "mujoco"],
-        default="xpbd",
+        default="mujoco",
         help="Solver to use: 'xpbd' (Extended Position-Based Dynamics) or 'mujoco' (MuJoCo constraint solver).",
     )
     parser.add_argument(

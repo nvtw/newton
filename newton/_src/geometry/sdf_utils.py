@@ -127,7 +127,6 @@ def check_tile_occupied_mesh_kernel(
 
 def compute_sdf(
     mesh_src: Mesh,
-    shape_scale: Sequence[float] = (1.0, 1.0, 1.0),
     shape_thickness: float = 0.0,
     narrow_band_distance: Sequence[float] = (-0.1, 0.1),
     margin: float = 0.05,
@@ -137,21 +136,22 @@ def compute_sdf(
 ) -> tuple[SDFData, wp.Volume | None, wp.Volume | None]:
     """Compute sparse and coarse SDF volumes for a mesh.
 
+    The SDF is computed in the mesh's unscaled local space. Scale is intentionally
+    NOT a parameter - the collision system handles scaling at runtime, ensuring
+    the SDF and mesh BVH stay consistent and allowing dynamic scale changes.
+
     Args:
-        mesh_src: Mesh source with vertices and indices.
-        shape_scale: Scale factors for the mesh. Applied before SDF generation. Default (1.0, 1.0, 1.0).
-        shape_thickness: Thickness offset to subtract from SDF values.
-        narrow_band_distance: Tuple of (inner, outer) distances for narrow band.
-        margin: Margin to add to bounding box.
-        target_voxel_size: Target voxel size for sparse SDF grid. If None, computed as max_extent/max_dims.
-        max_dims: Maximum dimension for sparse SDF grid when target_voxel_size is None. Default 64.
+        mesh_src: Mesh with vertices and indices (used unscaled).
+        shape_thickness: Thickness to subtract from SDF values (baked in).
+        narrow_band_distance: (inner, outer) distances for narrow band. Default (-0.1, 0.1).
+        margin: Padding added to bounding box. Must be > 0. Default 0.05.
+        target_voxel_size: Target voxel size, or None to compute from max_dims.
+        max_dims: Max grid dimension (must be divisible by 8). Default 64.
         verbose: Print debug info.
 
     Returns:
-        Tuple of (sdf_data, sparse_volume, coarse_volume) where:
-        - sdf_data: SDFData struct with pointers and extents
-        - sparse_volume: wp.Volume object for sparse SDF (keep alive for reference counting)
-        - coarse_volume: wp.Volume object for coarse SDF (keep alive for reference counting)
+        Tuple of (sdf_data, sparse_volume, coarse_volume). Keep volumes alive
+        for reference counting.
 
     Raises:
         RuntimeError: If CUDA is not available.
@@ -167,8 +167,8 @@ def compute_sdf(
     assert margin > 0, "margin must be > 0"
 
     offset = margin + shape_thickness
-    # Bake scale into SDF by scaling vertices
-    verts = mesh_src.vertices * np.array(shape_scale)[None, :]
+    # Use unscaled vertices - scale is handled at collision time
+    verts = mesh_src.vertices
     pos = wp.array(verts, dtype=wp.vec3)
     indices = wp.array(mesh_src.indices, dtype=wp.int32)
 

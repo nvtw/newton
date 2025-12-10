@@ -5494,7 +5494,6 @@ class ModelBuilder:
                     shape_type,
                     shape_src,
                     shape_flags,
-                    shape_scale,
                     shape_thickness,
                     shape_contact_margin,
                     sdf_narrow_band_range,
@@ -5504,7 +5503,6 @@ class ModelBuilder:
                     self.shape_type,
                     self.shape_source,
                     self.shape_flags,
-                    self.shape_scale,
                     self.shape_thickness,
                     self.shape_contact_margin,
                     self.shape_sdf_narrow_band_range,
@@ -5519,10 +5517,12 @@ class ModelBuilder:
                         and shape_flags & ShapeFlags.COLLIDE_SHAPES
                         and sdf_max_dims is not None
                     ):
+                        # Cache key does not include shape_scale because the SDF is always
+                        # computed in unscaled mesh local space. Scale is applied at collision
+                        # time, not during SDF generation, ensuring consistency.
                         cache_key = (
                             hash(shape_src),
                             shape_thickness,
-                            tuple(shape_scale),
                             shape_contact_margin,
                             tuple(sdf_narrow_band_range),
                             sdf_target_voxel_size,
@@ -5531,11 +5531,10 @@ class ModelBuilder:
                         if cache_key in sdf_cache:
                             sdf_data, sparse_volume, coarse_volume = sdf_cache[cache_key]
                         else:
-                            # Compute SDF for this mesh shape (returns SDFData struct and volume objects)
-                            # If sdf_target_voxel_size is provided, use it; otherwise compute from max_dims
+                            # Compute SDF for this mesh shape in unscaled local space.
+                            # Scale is handled at collision time to ensure SDF and mesh are consistent.
                             sdf_data, sparse_volume, coarse_volume = compute_sdf(
                                 mesh_src=shape_src,
-                                shape_scale=shape_scale,
                                 shape_thickness=shape_thickness,
                                 narrow_band_distance=sdf_narrow_band_range,
                                 margin=shape_contact_margin,
