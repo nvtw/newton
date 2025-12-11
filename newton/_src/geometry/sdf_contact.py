@@ -33,24 +33,6 @@ from .contact_reduction import (
 
 
 @wp.func
-def transform_point_to_unscaled_sdf_space(
-    point: wp.vec3,
-    inv_sdf_scale: wp.vec3,
-) -> wp.vec3:
-    """
-    Transform a point from scaled SDF local space to unscaled SDF local space.
-
-    Args:
-        point: Point in scaled SDF local space
-        inv_sdf_scale: Precomputed 1.0 / sdf_scale for efficiency
-
-    Returns:
-        Point in unscaled SDF local space, ready for SDF sampling
-    """
-    return wp.cw_mul(point, inv_sdf_scale)
-
-
-@wp.func
 def scale_sdf_result_to_world(
     distance: float,
     gradient: wp.vec3,
@@ -677,9 +659,10 @@ def find_interesting_triangles(
             v0_scaled, v1_scaled, v2_scaled = get_triangle_from_mesh(
                 mesh_id, mesh_scale, mesh_to_sdf_transform, tri_idx
             )
-            v0 = transform_point_to_unscaled_sdf_space(v0_scaled, inv_sdf_scale)
-            v1 = transform_point_to_unscaled_sdf_space(v1_scaled, inv_sdf_scale)
-            v2 = transform_point_to_unscaled_sdf_space(v2_scaled, inv_sdf_scale)
+            # Transform to unscaled SDF space for collision detection
+            v0 = wp.cw_mul(v0_scaled, inv_sdf_scale)
+            v1 = wp.cw_mul(v1_scaled, inv_sdf_scale)
+            v2 = wp.cw_mul(v2_scaled, inv_sdf_scale)
             bounding_sphere_center, bounding_sphere_radius = get_bounding_sphere(v0, v1, v2)
 
             # Use extrapolated SDF distance query for culling (in unscaled space)
@@ -845,9 +828,9 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         mesh_id, mesh_scale, X_mesh_to_sdf, tri_idx
                     )
                     # Transform to unscaled SDF space (SDF is computed from unscaled mesh vertices)
-                    v0 = transform_point_to_unscaled_sdf_space(v0_scaled, inv_sdf_scale)
-                    v1 = transform_point_to_unscaled_sdf_space(v1_scaled, inv_sdf_scale)
-                    v2 = transform_point_to_unscaled_sdf_space(v2_scaled, inv_sdf_scale)
+                    v0 = wp.cw_mul(v0_scaled, inv_sdf_scale)
+                    v1 = wp.cw_mul(v1_scaled, inv_sdf_scale)
+                    v2 = wp.cw_mul(v2_scaled, inv_sdf_scale)
 
                     # Early out: check bounding sphere distance to SDF surface using extrapolated sampling
                     # Bounding sphere is in unscaled SDF space
@@ -1079,9 +1062,9 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     v0_scaled, v1_scaled, v2_scaled = get_triangle_from_mesh(
                         mesh, mesh_scale, mesh_sdf_transform, selected_triangles[t]
                     )
-                    v0 = transform_point_to_unscaled_sdf_space(v0_scaled, inv_sdf_scale)
-                    v1 = transform_point_to_unscaled_sdf_space(v1_scaled, inv_sdf_scale)
-                    v2 = transform_point_to_unscaled_sdf_space(v2_scaled, inv_sdf_scale)
+                    v0 = wp.cw_mul(v0_scaled, inv_sdf_scale)
+                    v1 = wp.cw_mul(v1_scaled, inv_sdf_scale)
+                    v2 = wp.cw_mul(v2_scaled, inv_sdf_scale)
 
                     dist_unscaled, point_unscaled, direction_unscaled = do_triangle_sdf_collision(
                         sdf_data_current,

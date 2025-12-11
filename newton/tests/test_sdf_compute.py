@@ -916,11 +916,11 @@ class TestMeshSDFCollisionFlag(unittest.TestCase):
         self.half_extents = (0.5, 0.5, 0.5)
         self.mesh = create_box_mesh(self.half_extents)
 
-    def test_sdf_max_dims_raises_on_cpu(self):
-        """Test that sdf_max_dims != None raises ValueError on CPU."""
+    def test_sdf_max_resolution_raises_on_cpu(self):
+        """Test that sdf_max_resolution != None raises ValueError on CPU."""
         builder = newton.ModelBuilder()
         cfg = newton.ModelBuilder.ShapeConfig()
-        cfg.sdf_max_dims = 64  # Request SDF generation
+        cfg.sdf_max_resolution = 64  # Request SDF generation
 
         # Add a mesh shape to trigger SDF computation
         builder.add_body()
@@ -931,13 +931,13 @@ class TestMeshSDFCollisionFlag(unittest.TestCase):
             builder.finalize(device="cpu")
 
         self.assertIn("CUDA", str(context.exception))
-        self.assertIn("sdf_max_dims", str(context.exception))
+        self.assertIn("sdf_max_resolution", str(context.exception))
 
     def test_sdf_disabled_works_on_cpu(self):
-        """Test that sdf_max_dims=None (default) works on CPU."""
+        """Test that sdf_max_resolution=None (default) works on CPU."""
         builder = newton.ModelBuilder()
         cfg = newton.ModelBuilder.ShapeConfig()
-        cfg.sdf_max_dims = None  # No SDF generation (default)
+        cfg.sdf_max_resolution = None  # No SDF generation (default)
 
         # Add a mesh shape
         builder.add_body()
@@ -953,10 +953,10 @@ class TestMeshSDFCollisionFlag(unittest.TestCase):
 
     @unittest.skipUnless(_cuda_available, "Requires CUDA device")
     def test_sdf_enabled_works_on_gpu(self):
-        """Test that sdf_max_dims != None works on GPU."""
+        """Test that sdf_max_resolution != None works on GPU."""
         builder = newton.ModelBuilder()
         cfg = newton.ModelBuilder.ShapeConfig()
-        cfg.sdf_max_dims = 64  # Request SDF generation
+        cfg.sdf_max_resolution = 64  # Request SDF generation
 
         # Add a mesh shape
         builder.add_body()
@@ -998,7 +998,7 @@ class TestSDFNonUniformScaleBrickPyramid(unittest.TestCase):
 
         # Configure shape with SDF enabled
         mesh_cfg = newton.ModelBuilder.ShapeConfig()
-        mesh_cfg.sdf_max_dims = 32
+        mesh_cfg.sdf_max_resolution = 32
 
         # Brick dimensions via non-uniform scale
         brick_scale = (0.4, 0.2, 0.1)  # Wide, medium depth, thin

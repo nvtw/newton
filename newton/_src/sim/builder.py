@@ -186,12 +186,20 @@ class ModelBuilder:
         sdf_narrow_band_range: tuple[float, float] = (-0.1, 0.1)
         """The narrow band distance range (inner, outer) for SDF computation. Only used for mesh shapes when SDF is enabled."""
         sdf_target_voxel_size: float | None = None
-        """Target voxel size for sparse SDF grid. If provided, takes precedence over sdf_max_dims. Only used for mesh shapes when SDF is enabled."""
-        sdf_max_dims: int | None = None
+        """Target voxel size for sparse SDF grid. If provided, takes precedence over sdf_max_resolution. Only used for mesh shapes when SDF is enabled."""
+        sdf_max_resolution: int | None = None
         """Maximum dimension for sparse SDF grid (must be divisible by 8). Used when sdf_target_voxel_size is None.
         Set to None (default) to disable SDF generation for this shape (uses BVH-based collision for mesh-mesh instead).
         Set to an integer (e.g., 64) to enable SDF-based mesh-mesh collision. Requires GPU since wp.Volume only supports CUDA.
         Only used for mesh shapes."""
+
+        def __post_init__(self) -> None:
+            """Validate ShapeConfig parameters after initialization."""
+            if self.sdf_max_resolution is not None and self.sdf_max_resolution % 8 != 0:
+                raise ValueError(
+                    f"sdf_max_resolution must be divisible by 8 (got {self.sdf_max_resolution}). "
+                    "This is required because SDF volumes are allocated in 8x8x8 tiles."
+                )
 
         def mark_as_site(self) -> None:
             """Marks this shape as a site and enforces all site invariants.
@@ -508,7 +516,7 @@ class ModelBuilder:
         # SDF parameters per shape
         self.shape_sdf_narrow_band_range = []
         self.shape_sdf_target_voxel_size = []
-        self.shape_sdf_max_dims = []
+        self.shape_sdf_max_resolution = []
 
         # Mesh SDF storage (volumes kept for reference counting, SDFData array created at finalize)
 
@@ -1773,7 +1781,7 @@ class ModelBuilder:
             "shape_collision_radius",
             "shape_contact_margin",
             "shape_sdf_narrow_band_range",
-            "shape_sdf_max_dims",
+            "shape_sdf_max_resolution",
             "shape_sdf_target_voxel_size",
             "particle_qd",
             "particle_mass",
@@ -3322,7 +3330,7 @@ class ModelBuilder:
         self.shape_world.append(self.current_world)
         self.shape_sdf_narrow_band_range.append(cfg.sdf_narrow_band_range)
         self.shape_sdf_target_voxel_size.append(cfg.sdf_target_voxel_size)
-        self.shape_sdf_max_dims.append(cfg.sdf_max_dims)
+        self.shape_sdf_max_resolution.append(cfg.sdf_max_resolution)
         if cfg.has_shape_collision and cfg.collision_filter_parent and body > -1 and body in self.joint_parents:
             for parent_body in self.joint_parents[body]:
                 if parent_body > -1:
@@ -5454,9 +5462,8 @@ class ModelBuilder:
             m.shape_collision_group = wp.array(self.shape_collision_group, dtype=wp.int32)
 
             # ---------------------
-            # Compute SDFs for mesh shapes (per-shape opt-in via sdf_max_dims)
+            # Compute SDFs for mesh shapes (per-shape opt-in via sdf_max_resolution)
             from ..geometry.sdf_utils import SDFData, compute_sdf, create_empty_sdf_data  # noqa: PLC0415
-            from ..geometry.types import GeoType  # noqa: PLC0415
 
             # Check if we're running on GPU - wp.Volume only supports CUDA
             current_device = wp.get_device(device)
@@ -5467,18 +5474,18 @@ class ModelBuilder:
                 stype == GeoType.MESH
                 and ssrc is not None
                 and sflags & ShapeFlags.COLLIDE_SHAPES
-                and sdf_max_dims is not None
-                for stype, ssrc, sflags, sdf_max_dims in zip(
-                    self.shape_type, self.shape_source, self.shape_flags, self.shape_sdf_max_dims, strict=False
+                and sdf_max_resolution is not None
+                for stype, ssrc, sflags, sdf_max_resolution in zip(
+                    self.shape_type, self.shape_source, self.shape_flags, self.shape_sdf_max_resolution, strict=False
                 )
             )
 
             # Check if SDF generation was requested but we're on CPU
             if has_sdf_meshes and not is_gpu:
                 raise ValueError(
-                    "SDF generation for mesh shapes (sdf_max_dims != None) requires a CUDA-capable GPU device. "
+                    "SDF generation for mesh shapes (sdf_max_resolution != None) requires a CUDA-capable GPU device. "
                     "wp.Volume (used for SDF generation) only supports CUDA. "
-                    "Either set sdf_max_dims=None for all mesh shapes or use a CUDA device."
+                    "Either set sdf_max_resolution=None for all mesh shapes or use a CUDA device."
                 )
 
             if has_sdf_meshes:
@@ -5498,7 +5505,7 @@ class ModelBuilder:
                     shape_contact_margin,
                     sdf_narrow_band_range,
                     sdf_target_voxel_size,
-                    sdf_max_dims,
+                    sdf_max_resolution,
                 ) in zip(
                     self.shape_type,
                     self.shape_source,
@@ -5507,15 +5514,15 @@ class ModelBuilder:
                     self.shape_contact_margin,
                     self.shape_sdf_narrow_band_range,
                     self.shape_sdf_target_voxel_size,
-                    self.shape_sdf_max_dims,
+                    self.shape_sdf_max_resolution,
                     strict=False,
                 ):
-                    # Compute SDF only for mesh shapes with collision enabled and sdf_max_dims is not None
+                    # Compute SDF only for mesh shapes with collision enabled and sdf_max_resolution is not None
                     if (
                         shape_type == GeoType.MESH
                         and shape_src is not None
                         and shape_flags & ShapeFlags.COLLIDE_SHAPES
-                        and sdf_max_dims is not None
+                        and sdf_max_resolution is not None
                     ):
                         # Cache key does not include shape_scale because the SDF is always
                         # computed in unscaled mesh local space. Scale is applied at collision
@@ -5526,7 +5533,7 @@ class ModelBuilder:
                             shape_contact_margin,
                             tuple(sdf_narrow_band_range),
                             sdf_target_voxel_size,
-                            sdf_max_dims,
+                            sdf_max_resolution,
                         )
                         if cache_key in sdf_cache:
                             sdf_data, sparse_volume, coarse_volume = sdf_cache[cache_key]
@@ -5539,7 +5546,7 @@ class ModelBuilder:
                                 narrow_band_distance=sdf_narrow_band_range,
                                 margin=shape_contact_margin,
                                 target_voxel_size=sdf_target_voxel_size,
-                                max_dims=sdf_max_dims,
+                                max_resolution=sdf_max_resolution,
                             )
                             sdf_cache[cache_key] = (sdf_data, sparse_volume, coarse_volume)
                         sdf_volumes.append(sparse_volume)
