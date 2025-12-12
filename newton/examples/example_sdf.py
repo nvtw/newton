@@ -62,7 +62,9 @@ def add_mesh_object(
         max_extent = vertices.max(axis=0)
         center = (min_extent + max_extent) / 2
         vertices = vertices - center
-        transform = wp.transform(transform.p + wp.vec3(center) * scale, transform.q)
+        center_vec = wp.vec3(center) * float(scale)
+        center_world = wp.quat_rotate(transform.q, center_vec)
+        transform = wp.transform(transform.p + center_world, transform.q)
 
     mesh = newton.Mesh(vertices, indices)
 

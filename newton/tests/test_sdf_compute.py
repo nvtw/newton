@@ -32,8 +32,8 @@ import warp as wp
 
 import newton
 from newton._src.geometry.sdf_contact import sample_sdf_extrapolated, sample_sdf_grad_extrapolated
-from newton._src.geometry.sdf_utils import SDFData, compute_sdf
 from newton._src.geometry.types import Mesh
+from newton.geometry import SDFData, compute_sdf
 
 # Skip all tests in this module if CUDA is not available
 # wp.Volume only supports CUDA devices
