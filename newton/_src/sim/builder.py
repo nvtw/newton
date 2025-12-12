@@ -1590,6 +1590,7 @@ class ModelBuilder:
         start_joint_dof_idx = self.joint_dof_count
         start_joint_coord_idx = self.joint_coord_count
         start_articulation_idx = self.articulation_count
+        start_equality_constraint_idx = len(self.equality_constraint_type)
 
         if builder.particle_count:
             self.particle_max_velocity = builder.particle_max_velocity
@@ -1826,6 +1827,8 @@ class ModelBuilder:
                 offset = start_joint_coord_idx
             elif attr.frequency == ModelAttributeFrequency.ARTICULATION:
                 offset = start_articulation_idx
+            elif attr.frequency == ModelAttributeFrequency.EQUALITY_CONSTRAINT:
+                offset = start_equality_constraint_idx
             else:
                 continue
 
@@ -2625,6 +2628,7 @@ class ModelBuilder:
         polycoef: list[float] | None = None,
         key: str | None = None,
         enabled: bool = True,
+        custom_attributes: dict[str, Any] | None = None,
     ) -> int:
         """Generic method to add any type of equality constraint to this ModelBuilder.
 
@@ -2640,6 +2644,7 @@ class ModelBuilder:
             polycoef (list[float]): Polynomial coefficients for joint coupling
             key (str): Optional constraint name
             enabled (bool): Whether constraint is active
+            custom_attributes (dict): Custom attributes to set on the constraint
 
         Returns:
             Constraint index
@@ -2658,7 +2663,17 @@ class ModelBuilder:
         self.equality_constraint_enabled.append(enabled)
         self.equality_constraint_world.append(self.current_world)
 
-        return len(self.equality_constraint_type) - 1
+        constraint_idx = len(self.equality_constraint_type) - 1
+
+        # Process custom attributes
+        if custom_attributes:
+            self._process_custom_attributes(
+                entity_index=constraint_idx,
+                custom_attrs=custom_attributes,
+                expected_frequency=ModelAttributeFrequency.EQUALITY_CONSTRAINT,
+            )
+
+        return constraint_idx
 
     def add_equality_constraint_connect(
         self,
@@ -2667,6 +2682,7 @@ class ModelBuilder:
         anchor: Vec3 | None = None,
         key: str | None = None,
         enabled: bool = True,
+        custom_attributes: dict[str, Any] | None = None,
     ) -> int:
         """Adds a connect equality constraint to the model.
         This constraint connects two bodies at a point. It effectively defines a ball joint outside the kinematic tree.
@@ -2677,6 +2693,7 @@ class ModelBuilder:
             anchor: Anchor point on body1
             key: Optional constraint name
             enabled: Whether constraint is active
+            custom_attributes: Custom attributes to set on the constraint
 
         Returns:
             Constraint index
@@ -2689,6 +2706,7 @@ class ModelBuilder:
             anchor=anchor,
             key=key,
             enabled=enabled,
+            custom_attributes=custom_attributes,
         )
 
     def add_equality_constraint_joint(
@@ -2698,6 +2716,7 @@ class ModelBuilder:
         polycoef: list[float] | None = None,
         key: str | None = None,
         enabled: bool = True,
+        custom_attributes: dict[str, Any] | None = None,
     ) -> int:
         """Adds a joint equality constraint to the model.
         Constrains the position or angle of one joint to be a quartic polynomial of another joint. Only scalar joint types (prismatic and revolute) can be used.
@@ -2708,6 +2727,7 @@ class ModelBuilder:
             polycoef: Polynomial coefficients for joint coupling
             key: Optional constraint name
             enabled: Whether constraint is active
+            custom_attributes: Custom attributes to set on the constraint
 
         Returns:
             Constraint index
@@ -2720,6 +2740,7 @@ class ModelBuilder:
             polycoef=polycoef,
             key=key,
             enabled=enabled,
+            custom_attributes=custom_attributes,
         )
 
     def add_equality_constraint_weld(
@@ -2731,6 +2752,7 @@ class ModelBuilder:
         relpose: Transform | None = None,
         key: str | None = None,
         enabled: bool = True,
+        custom_attributes: dict[str, Any] | None = None,
     ) -> int:
         """Adds a weld equality constraint to the model.
         Attaches two bodies to each other, removing all relative degrees of freedom between them (softly).
@@ -2743,6 +2765,7 @@ class ModelBuilder:
             relpose (Transform): Relative pose of body2 relative to body1. If None, the identity transform is used
             key: Optional constraint name
             enabled: Whether constraint is active
+            custom_attributes: Custom attributes to set on the constraint
 
         Returns:
             Constraint index
@@ -2755,6 +2778,7 @@ class ModelBuilder:
             anchor=anchor,
             torquescale=torquescale,
             relpose=relpose,
+            custom_attributes=custom_attributes,
             key=key,
             enabled=enabled,
         )
@@ -5842,6 +5866,8 @@ class ModelBuilder:
                     count = m.joint_coord_count
                 elif frequency == ModelAttributeFrequency.ARTICULATION:
                     count = m.articulation_count
+                elif frequency == ModelAttributeFrequency.EQUALITY_CONSTRAINT:
+                    count = m.equality_constraint_count
                 else:
                     continue
 
