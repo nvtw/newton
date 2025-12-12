@@ -34,6 +34,7 @@ import newton
 from newton._src.geometry.sdf_contact import sample_sdf_extrapolated, sample_sdf_grad_extrapolated
 from newton._src.geometry.types import Mesh
 from newton.geometry import SDFData, compute_sdf
+from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
 
 # Skip all tests in this module if CUDA is not available
 # wp.Volume only supports CUDA devices
@@ -971,123 +972,130 @@ class TestMeshSDFCollisionFlag(unittest.TestCase):
         self.assertNotEqual(model.shape_sdf_data.numpy()[0]["sparse_sdf_ptr"], 0)
 
 
-@unittest.skipUnless(_cuda_available, "Requires CUDA device for SDF collision")
 class TestSDFNonUniformScaleBrickPyramid(unittest.TestCase):
     """Test SDF collision with non-uniform scaling using a brick pyramid."""
 
-    @classmethod
-    def setUpClass(cls):
-        """Set up test fixtures once for all tests."""
-        wp.init()
+    pass
 
-    def test_brick_pyramid_stability(self):
-        """Test that a pyramid of non-uniformly scaled mesh bricks remains stable.
 
-        Creates a small pyramid using a unit cube mesh with non-uniform scale
-        applied to make brick-shaped objects. Verifies that the top brick
-        stays in place after simulation.
-        """
-        builder = newton.ModelBuilder()
-        builder.rigid_contact_margin = 0.005
+def test_brick_pyramid_stability(test, device):
+    """Test that a pyramid of non-uniformly scaled mesh bricks remains stable.
 
-        # Add ground plane
-        builder.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
+    Creates a small pyramid using a unit cube mesh with non-uniform scale
+    applied to make brick-shaped objects. Verifies that the top brick
+    stays in place after simulation.
+    """
+    builder = newton.ModelBuilder()
+    builder.rigid_contact_margin = 0.005
 
-        # Create unit cube mesh (will be scaled non-uniformly)
-        cube_mesh = create_box_mesh((0.5, 0.5, 0.5))
+    # Add ground plane
+    builder.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
 
-        # Configure shape with SDF enabled
-        mesh_cfg = newton.ModelBuilder.ShapeConfig()
-        mesh_cfg.sdf_max_resolution = 32
+    # Create unit cube mesh (will be scaled non-uniformly)
+    cube_mesh = create_box_mesh((0.5, 0.5, 0.5))
 
-        # Brick dimensions via non-uniform scale
-        brick_scale = (0.4, 0.2, 0.1)  # Wide, medium depth, thin
-        brick_width = brick_scale[0]
-        brick_height = brick_scale[2]
-        gap = 0.005
+    # Configure shape with SDF enabled
+    mesh_cfg = newton.ModelBuilder.ShapeConfig()
+    mesh_cfg.sdf_max_resolution = 32
 
-        # Build a small 3-row pyramid
-        pyramid_rows = 3
-        for row in range(pyramid_rows):
-            bricks_in_row = pyramid_rows - row
-            z_pos = brick_height / 2 + row * (brick_height + gap)
+    # Brick dimensions via non-uniform scale
+    brick_scale = (0.4, 0.2, 0.1)  # Wide, medium depth, thin
+    brick_width = brick_scale[0]
+    brick_height = brick_scale[2]
+    gap = 0.005
 
-            row_width = bricks_in_row * brick_width + (bricks_in_row - 1) * gap
-            start_x = -row_width / 2 + brick_width / 2
+    # Build a small 3-row pyramid
+    pyramid_rows = 3
+    for row in range(pyramid_rows):
+        bricks_in_row = pyramid_rows - row
+        z_pos = brick_height / 2 + row * (brick_height + gap)
 
-            for i in range(bricks_in_row):
-                x_pos = start_x + i * (brick_width + gap)
+        row_width = bricks_in_row * brick_width + (bricks_in_row - 1) * gap
+        start_x = -row_width / 2 + brick_width / 2
 
-                body = builder.add_body(xform=wp.transform(wp.vec3(x_pos, 0.0, z_pos), wp.quat_identity()))
-                builder.add_shape_mesh(
-                    body,
-                    mesh=cube_mesh,
-                    scale=brick_scale,  # Non-uniform scale
-                    cfg=mesh_cfg,
-                )
-                joint = builder.add_joint_free(body)
-                builder.add_articulation([joint])
+        for i in range(bricks_in_row):
+            x_pos = start_x + i * (brick_width + gap)
 
-        # Finalize model
-        model = builder.finalize()
+            body = builder.add_body(xform=wp.transform(wp.vec3(x_pos, 0.0, z_pos), wp.quat_identity()))
+            builder.add_shape_mesh(
+                body,
+                mesh=cube_mesh,
+                scale=brick_scale,  # Non-uniform scale
+                cfg=mesh_cfg,
+            )
+            joint = builder.add_joint_free(body)
+            builder.add_articulation([joint])
 
-        # Get initial position of top brick (last body added)
-        top_brick_body = model.body_count - 1
-        initial_state = model.state()
-        newton.eval_fk(model, model.joint_q, model.joint_qd, initial_state)
-        initial_top_pos = initial_state.body_q.numpy()[top_brick_body][:3].copy()
+    # Finalize model on the specified CUDA device
+    model = builder.finalize(device=device)
 
-        # Create collision pipeline and solver
-        collision_pipeline = newton.CollisionPipelineUnified.from_model(
-            model,
-            rigid_contact_max_per_pair=10,
-            broad_phase_mode=newton.BroadPhaseMode.NXN,
-            reduce_contacts=True,
-        )
-        solver = newton.solvers.SolverXPBD(model, iterations=10, rigid_contact_relaxation=0.8)
+    # Get initial position of top brick (last body added)
+    top_brick_body = model.body_count - 1
+    initial_state = model.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, initial_state)
+    initial_top_pos = initial_state.body_q.numpy()[top_brick_body][:3].copy()
 
-        # Simulate for a short time
-        state_0 = model.state()
-        state_1 = model.state()
-        control = model.control()
-        newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+    # Create collision pipeline and solver
+    collision_pipeline = newton.CollisionPipelineUnified.from_model(
+        model,
+        rigid_contact_max_per_pair=10,
+        broad_phase_mode=newton.BroadPhaseMode.NXN,
+        reduce_contacts=True,
+    )
+    solver = newton.solvers.SolverXPBD(model, iterations=10, rigid_contact_relaxation=0.8)
 
-        dt = 1.0 / 60.0 / 4
-        num_steps = 120  # ~0.5 seconds
+    # Simulate for a short time
+    state_0 = model.state()
+    state_1 = model.state()
+    control = model.control()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
 
-        for _ in range(num_steps):
-            state_0.clear_forces()
-            contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
-            solver.step(state_0, state_1, control, contacts, dt)
-            state_0, state_1 = state_1, state_0
+    dt = 1.0 / 60.0 / 4
+    num_steps = 120  # ~0.5 seconds
 
-        # Get final position of top brick
-        final_top_pos = state_0.body_q.numpy()[top_brick_body][:3]
+    for _ in range(num_steps):
+        state_0.clear_forces()
+        contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
+        solver.step(state_0, state_1, control, contacts, dt)
+        state_0, state_1 = state_1, state_0
 
-        # Top brick should not have fallen significantly
-        # Allow small settling but it should stay roughly in place
-        z_drop = initial_top_pos[2] - final_top_pos[2]
-        xy_drift = np.sqrt((final_top_pos[0] - initial_top_pos[0]) ** 2 + (final_top_pos[1] - initial_top_pos[1]) ** 2)
+    # Get final position of top brick
+    final_top_pos = state_0.body_q.numpy()[top_brick_body][:3]
 
-        # The top brick should settle slightly but not fall through
-        self.assertLess(
-            z_drop,
-            brick_height,  # Should not drop more than its own height
-            f"Top brick dropped too much: {z_drop:.4f} (max allowed: {brick_height})",
-        )
-        self.assertLess(
-            xy_drift,
-            brick_width * 0.5,  # Should not drift too far horizontally
-            f"Top brick drifted too far: {xy_drift:.4f}",
-        )
+    # Top brick should not have fallen significantly
+    # Allow small settling but it should stay roughly in place
+    z_drop = initial_top_pos[2] - final_top_pos[2]
+    xy_drift = np.sqrt((final_top_pos[0] - initial_top_pos[0]) ** 2 + (final_top_pos[1] - initial_top_pos[1]) ** 2)
 
-        # Final Z should still be positive (above ground)
-        self.assertGreater(
-            final_top_pos[2],
-            0.0,
-            f"Top brick fell through ground: z = {final_top_pos[2]}",
-        )
+    # The top brick should settle slightly but not fall through
+    test.assertLess(
+        z_drop,
+        brick_height,  # Should not drop more than its own height
+        f"Top brick dropped too much: {z_drop:.4f} (max allowed: {brick_height})",
+    )
+    test.assertLess(
+        xy_drift,
+        brick_width * 0.5,  # Should not drift too far horizontally
+        f"Top brick drifted too far: {xy_drift:.4f}",
+    )
 
+    # Final Z should still be positive (above ground)
+    test.assertGreater(
+        final_top_pos[2],
+        0.0,
+        f"Top brick fell through ground: z = {final_top_pos[2]}",
+    )
+
+
+# Register CUDA-only tests using the standard pattern
+cuda_devices = get_cuda_test_devices()
+
+add_function_test(
+    TestSDFNonUniformScaleBrickPyramid,
+    "test_brick_pyramid_stability",
+    test_brick_pyramid_stability,
+    devices=cuda_devices,
+)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
