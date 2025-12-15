@@ -43,6 +43,7 @@ from ..geometry.contact_reduction_global import (
     GlobalContactReducer,
     create_export_reduced_contacts_kernel,
     create_mesh_triangle_contacts_to_reducer_kernel,
+    create_reduce_buffered_contacts_kernel,
 )
 from ..geometry.sdf_contact import create_narrow_phase_process_mesh_mesh_contacts_kernel
 from ..geometry.sdf_utils import SDFData
@@ -934,6 +935,9 @@ class NarrowPhase:
             self.mesh_triangle_to_reducer_kernel = create_mesh_triangle_contacts_to_reducer_kernel(
                 beta0=beta0, beta1=beta1
             )
+            self.reduce_buffered_contacts_kernel = create_reduce_buffered_contacts_kernel(
+                beta0=beta0, beta1=beta1
+            )
             self.export_reduced_contacts_kernel = create_export_reduced_contacts_kernel(
                 writer_func, values_per_key=NUM_SPATIAL_DIRECTIONS * num_betas + 1
             )
@@ -944,6 +948,7 @@ class NarrowPhase:
             )
         else:
             self.mesh_triangle_to_reducer_kernel = None
+            self.reduce_buffered_contacts_kernel = None
             self.export_reduced_contacts_kernel = None
             self.global_contact_reducer = None
 
@@ -1132,6 +1137,19 @@ class NarrowPhase:
                     shape_contact_margin,
                     self.triangle_pairs,
                     self.triangle_pairs_count,
+                    reducer_data,
+                    self.total_num_threads,
+                ],
+                device=device,
+                block_dim=self.block_dim,
+            )
+
+            # Register buffered contacts to hashtable
+            # This is a separate pass to reduce register pressure on the contact generation kernel
+            wp.launch(
+                kernel=self.reduce_buffered_contacts_kernel,
+                dim=self.total_num_threads,
+                inputs=[
                     reducer_data,
                     self.total_num_threads,
                 ],

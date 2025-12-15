@@ -36,7 +36,6 @@ import warp as wp
 from newton._src.geometry.hashtable_reduction import (
     ReductionHashTable,
     hashtable_find_or_insert,
-    hashtable_insert_slot,
     hashtable_update_slot_direct,
 )
 
@@ -266,7 +265,7 @@ class GlobalContactReducer:
 
 
 @wp.func
-def export_and_reduce_contact(
+def export_contact_to_buffer(
     shape_a: int,
     shape_b: int,
     position: wp.vec3,
@@ -274,23 +273,8 @@ def export_and_reduce_contact(
     depth: float,
     feature: int,
     reducer_data: GlobalContactReducerData,
-    beta0: float,
-    beta1: float,
 ) -> int:
-    """Store a contact and register it in the hashtable for reduction.
-
-    This function:
-    1. Allocates a slot in the contact buffer
-    2. Stores the contact data (packed into vec4)
-    3. Computes the icosahedron bin from the normal
-    4. Registers the contact for each (direction, beta) combination where depth < beta
-    5. Also registers for the max-depth slot (deepest contact per bin)
-
-    The hashtable key is (shape_a, shape_b, bin_id). Each key has values_per_key
-    value slots. The slot layout is:
-    - Slots 0..5: direction 0 beta 0, direction 0 beta 1, ..., direction 2 beta 1
-    - ...continues for all 6 directions × 2 betas...
-    - Slot 12: max depth slot (deepest contact per bin)
+    """Store a contact in the buffer without reduction.
 
     Args:
         shape_a: First shape index
@@ -300,8 +284,6 @@ def export_and_reduce_contact(
         depth: Penetration depth (negative = penetrating)
         feature: Feature identifier for deduplication
         reducer_data: GlobalContactReducerData with all arrays
-        beta0: First depth threshold (typically large, e.g., 1000000.0)
-        beta1: Second depth threshold (typically small, e.g., 0.0001)
 
     Returns:
         Contact ID if successfully stored, -1 if buffer full
@@ -318,6 +300,35 @@ def export_and_reduce_contact(
     )
     reducer_data.shape_pairs[contact_id] = wp.vec2i(shape_a, shape_b)
 
+    return contact_id
+
+
+@wp.func
+def reduce_contact_in_hashtable(
+    contact_id: int,
+    reducer_data: GlobalContactReducerData,
+    beta0: float,
+    beta1: float,
+):
+    """Register a buffered contact in the reduction hashtable.
+
+    Args:
+        contact_id: Index of contact in buffer
+        reducer_data: Reducer data
+        beta0: First depth threshold
+        beta1: Second depth threshold
+    """
+    # Read contact data from buffer
+    pd = reducer_data.position_depth[contact_id]
+    nf = reducer_data.normal_feature[contact_id]
+    pair = reducer_data.shape_pairs[contact_id]
+
+    position = wp.vec3(pd[0], pd[1], pd[2])
+    depth = pd[3]
+    normal = wp.vec3(nf[0], nf[1], nf[2])
+    shape_a = pair[0]
+    shape_b = pair[1]
+
     # Get icosahedron bin from normal
     bin_id = get_slot(normal)
 
@@ -327,8 +338,7 @@ def export_and_reduce_contact(
     # Find or create the hashtable entry ONCE, then write directly to slots
     entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
     if entry_idx < 0:
-        # Hashtable full - contact stored but not tracked for reduction
-        return contact_id
+        return
 
     values_per_key = reducer_data.ht_values_per_key
 
@@ -364,7 +374,59 @@ def export_and_reduce_contact(
         reducer_data.ht_values, values_per_key
     )
 
+
+@wp.func
+def export_and_reduce_contact(
+    shape_a: int,
+    shape_b: int,
+    position: wp.vec3,
+    normal: wp.vec3,
+    depth: float,
+    feature: int,
+    reducer_data: GlobalContactReducerData,
+    beta0: float,
+    beta1: float,
+) -> int:
+    """Legacy wrapper for backward compatibility.
+    """
+    contact_id = export_contact_to_buffer(
+        shape_a, shape_b, position, normal, depth, feature, reducer_data
+    )
+
+    if contact_id >= 0:
+        reduce_contact_in_hashtable(contact_id, reducer_data, beta0, beta1)
+
     return contact_id
+
+
+def create_reduce_buffered_contacts_kernel(beta0: float, beta1: float):
+    """Create a kernel that registers buffered contacts to the hashtable.
+    
+    This splits the contact reduction process into two steps:
+    1. Writing contacts to buffer (done by contact generation kernel)
+    2. Registering contacts to hashtable (done by this kernel)
+    
+    This reduces register pressure on the contact generation kernel.
+    """
+    @wp.kernel(enable_backward=False)
+    def reduce_buffered_contacts_kernel(
+        reducer_data: GlobalContactReducerData,
+        total_num_threads: int,
+    ):
+        """Iterate over buffered contacts and register them in the hashtable."""
+        tid = wp.tid()
+        
+        # Get total number of contacts written
+        num_contacts = reducer_data.contact_count[0]
+        
+        # Cap at capacity
+        num_contacts = wp.min(num_contacts, reducer_data.capacity)
+        
+        # Grid stride loop over contacts
+        for i in range(tid, num_contacts, total_num_threads):
+            reduce_contact_in_hashtable(i, reducer_data, beta0, beta1)
+            
+    return reduce_buffered_contacts_kernel
 
 
 @wp.func
@@ -421,8 +483,9 @@ def write_contact_to_reducer(
     shape_b = contact_data.shape_b
     feature = int(contact_data.feature)
 
-    # Store contact and register for reduction
-    export_and_reduce_contact(
+    # Store contact ONLY (registration to hashtable happens in a separate kernel)
+    # This reduces register pressure on the contact generation kernel
+    export_contact_to_buffer(
         shape_a=shape_a,
         shape_b=shape_b,
         position=position,
@@ -430,8 +493,6 @@ def write_contact_to_reducer(
         depth=depth,
         feature=feature,
         reducer_data=reducer_data,
-        beta0=beta0,
-        beta1=beta1,
     )
 
 
