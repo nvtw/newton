@@ -13,6 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .hashtable import (
+    HASHTABLE_EMPTY_KEY,
+    HashTable,
+    batch_insert,
+    hashtable_insert,
+    hashtable_lookup,
+)
 from .spatial import (
     quat_between_axes,
     quat_decompose,
@@ -33,6 +40,11 @@ from .types import (
 __all__ = [
     "Axis",
     "AxisType",
+    "HASHTABLE_EMPTY_KEY",
+    "HashTable",
+    "batch_insert",
+    "hashtable_insert",
+    "hashtable_lookup",
     "quat_between_axes",
     "quat_decompose",
     "quat_from_euler",
