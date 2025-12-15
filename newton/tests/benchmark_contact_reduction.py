@@ -268,19 +268,13 @@ def run_hashtable_benchmark(num_insertions: int, device: str = "cuda:0", num_ite
     return np.mean(times)
 
 
-def run_split_benchmark(
-    num_contacts: int,
-    device: str = "cuda:0",
-    num_iterations: int = 10,
-    per_slot: bool = True,
-) -> dict:
+def run_split_benchmark(num_contacts: int, device: str = "cuda:0", num_iterations: int = 10) -> dict:
     """Benchmark the split kernel approach: store + reduce separately.
 
     Args:
         num_contacts: Number of contacts to simulate
         device: Warp device to use
         num_iterations: Number of iterations to average over
-        per_slot: If True, use per-slot reduction kernel
 
     Returns:
         Dict with timing data for store, reduce, clear phases
@@ -303,7 +297,7 @@ def run_split_benchmark(
         device=device,
     )
     wp.synchronize()
-    reducer.reduce_contacts(beta0, beta1, per_slot=per_slot)
+    reducer.reduce_contacts(beta0, beta1)
     wp.synchronize()
     reducer.clear_active()
     wp.synchronize()
@@ -343,7 +337,7 @@ def run_split_benchmark(
 
         # Time reduction
         start = time.perf_counter()
-        reducer.reduce_contacts(beta0, beta1, per_slot=per_slot)
+        reducer.reduce_contacts(beta0, beta1)
         wp.synchronize()
         reduce_times.append((time.perf_counter() - start) * 1000)
 
@@ -359,7 +353,7 @@ def run_split_benchmark(
             device=device,
         )
         wp.synchronize()
-        reducer.reduce_contacts(beta0, beta1, per_slot=per_slot)
+        reducer.reduce_contacts(beta0, beta1)
         wp.synchronize()
 
         start = time.perf_counter()
@@ -407,13 +401,13 @@ def main():
             f"{results.contacts_per_second:>15,.0f}"
         )
 
-    print("\n2. SPLIT approach - PER-SLOT (one thread per contact×slot)")
+    print("\n2. SPLIT approach (store + reduce in separate kernels)")
     print("-" * 85)
     print(f"{'Contacts':>12} {'Store (ms)':>12} {'Reduce (ms)':>12} {'Clear (ms)':>12} {'Total (ms)':>12} {'Contacts/s':>15}")
     print("-" * 85)
 
     for num_contacts in contact_counts:
-        results = run_split_benchmark(num_contacts, device=device, per_slot=True)
+        results = run_split_benchmark(num_contacts, device=device)
         print(
             f"{num_contacts:>12} "
             f"{results['store_ms']:>12.3f} "
@@ -423,23 +417,7 @@ def main():
             f"{results['contacts_per_second']:>15,.0f}"
         )
 
-    print("\n3. SPLIT approach - PER-CONTACT (one thread per contact)")
-    print("-" * 85)
-    print(f"{'Contacts':>12} {'Store (ms)':>12} {'Reduce (ms)':>12} {'Clear (ms)':>12} {'Total (ms)':>12} {'Contacts/s':>15}")
-    print("-" * 85)
-
-    for num_contacts in contact_counts:
-        results = run_split_benchmark(num_contacts, device=device, per_slot=False)
-        print(
-            f"{num_contacts:>12} "
-            f"{results['store_ms']:>12.3f} "
-            f"{results['reduce_ms']:>12.3f} "
-            f"{results['clear_ms']:>12.3f} "
-            f"{results['total_ms']:>12.3f} "
-            f"{results['contacts_per_second']:>15,.0f}"
-        )
-
-    print("\n4. Raw hash table insertion benchmark")
+    print("\n3. Raw hash table insertion benchmark")
     print("-" * 85)
     print(f"{'Insertions':>12} {'Time (ms)':>12} {'Insertions/s':>15}")
     print("-" * 85)

@@ -298,13 +298,7 @@ class GlobalContactReducer:
         data.capacity = self.capacity
         return data
 
-    def reduce_contacts(
-        self,
-        beta0: float = 1000000.0,
-        beta1: float = 0.0001,
-        num_threads: int = 0,
-        per_slot: bool = False,
-    ):
+    def reduce_contacts(self, beta0: float = 1000000.0, beta1: float = 0.0001, num_threads: int = 0):
         """Launch the reduction kernel to process stored contacts.
 
         This reads all contacts from the buffer (0 to contact_count) and
@@ -314,57 +308,30 @@ class GlobalContactReducer:
         Args:
             beta0: First depth threshold (typically large)
             beta1: Second depth threshold (typically small)
-            num_threads: Number of threads to launch. 0 = auto
-            per_slot: If True, use one thread per (contact, slot) pair for better
-                      parallelism. If False, use one thread per contact.
+            num_threads: Number of threads to launch. 0 = auto (capacity, capped at 262144)
         """
-        if per_slot:
-            # Per-slot kernel: one thread per (contact, slot) pair
-            # This spreads work across values_per_key times more threads
-            if num_threads <= 0:
-                # Cap at 262144 threads but scale by values_per_key
-                num_threads = min(self.capacity * self.values_per_key, 262144)
-            wp.launch(
-                _reduce_stored_contacts_per_slot_kernel,
-                dim=num_threads,
-                inputs=[
-                    self.position_depth,
-                    self.normal_feature,
-                    self.shape_pairs,
-                    self.contact_count,
-                    self.hashtable.keys,
-                    self.hashtable.values,
-                    self.hashtable.active_slots,
-                    self.values_per_key,
-                    self.num_betas,
-                    beta0,
-                    beta1,
-                    num_threads,
-                ],
-                device=self.device,
-            )
-        else:
-            # Per-contact kernel: one thread per contact
-            if num_threads <= 0:
-                num_threads = min(self.capacity, 262144)
-            wp.launch(
-                _reduce_stored_contacts_kernel,
-                dim=num_threads,
-                inputs=[
-                    self.position_depth,
-                    self.normal_feature,
-                    self.shape_pairs,
-                    self.contact_count,
-                    self.hashtable.keys,
-                    self.hashtable.values,
-                    self.hashtable.active_slots,
-                    self.values_per_key,
-                    beta0,
-                    beta1,
-                    num_threads,
-                ],
-                device=self.device,
-            )
+        if num_threads <= 0:
+            # Use enough threads to process contacts efficiently
+            # Cap at 262144 (256K) for good GPU occupancy
+            num_threads = min(self.capacity, 262144)
+        wp.launch(
+            _reduce_stored_contacts_kernel,
+            dim=num_threads,
+            inputs=[
+                self.position_depth,
+                self.normal_feature,
+                self.shape_pairs,
+                self.contact_count,
+                self.hashtable.keys,
+                self.hashtable.values,
+                self.hashtable.active_slots,
+                self.values_per_key,
+                beta0,
+                beta1,
+                num_threads,
+            ],
+            device=self.device,
+        )
 
 
 @wp.func
@@ -412,66 +379,6 @@ def export_contact_only(
     return contact_id
 
 
-@wp.func
-def _reduce_single_contact(
-    contact_id: int,
-    position: wp.vec3,
-    depth: float,
-    normal: wp.vec3,
-    shape_a: int,
-    shape_b: int,
-    ht_keys: wp.array(dtype=wp.uint64),
-    ht_values: wp.array(dtype=wp.uint64),
-    ht_active_slots: wp.array(dtype=wp.int32),
-    values_per_key: int,
-    num_betas: int,
-    beta0: float,
-    beta1: float,
-):
-    """Reduce a single contact into the hashtable."""
-    # Get icosahedron bin from normal
-    bin_id = get_slot(normal)
-
-    # Key is (shape_a, shape_b, bin_id)
-    key = make_contact_key(shape_a, shape_b, bin_id)
-
-    # Find or create the hashtable entry ONCE
-    entry_idx = hashtable_find_or_insert(key, ht_keys, ht_active_slots)
-    if entry_idx < 0:
-        return
-
-    # Pre-compute all 6 scan direction scores
-    # This avoids repeated get_scan_dir calls in the loop
-    score0 = wp.dot(get_scan_dir(bin_id, 0), position)
-    score1 = wp.dot(get_scan_dir(bin_id, 1), position)
-    score2 = wp.dot(get_scan_dir(bin_id, 2), position)
-    score3 = wp.dot(get_scan_dir(bin_id, 3), position)
-    score4 = wp.dot(get_scan_dir(bin_id, 4), position)
-    score5 = wp.dot(get_scan_dir(bin_id, 5), position)
-
-    # Update slots for beta0 threshold (if depth qualifies)
-    if depth < beta0:
-        hashtable_update_slot_direct(entry_idx, 0, make_contact_value(score0, contact_id), ht_values, values_per_key)
-        hashtable_update_slot_direct(entry_idx, 2, make_contact_value(score1, contact_id), ht_values, values_per_key)
-        hashtable_update_slot_direct(entry_idx, 4, make_contact_value(score2, contact_id), ht_values, values_per_key)
-        hashtable_update_slot_direct(entry_idx, 6, make_contact_value(score3, contact_id), ht_values, values_per_key)
-        hashtable_update_slot_direct(entry_idx, 8, make_contact_value(score4, contact_id), ht_values, values_per_key)
-        hashtable_update_slot_direct(entry_idx, 10, make_contact_value(score5, contact_id), ht_values, values_per_key)
-
-    # Update slots for beta1 threshold (if depth qualifies)
-    if depth < beta1:
-        hashtable_update_slot_direct(entry_idx, 1, make_contact_value(score0, contact_id), ht_values, values_per_key)
-        hashtable_update_slot_direct(entry_idx, 3, make_contact_value(score1, contact_id), ht_values, values_per_key)
-        hashtable_update_slot_direct(entry_idx, 5, make_contact_value(score2, contact_id), ht_values, values_per_key)
-        hashtable_update_slot_direct(entry_idx, 7, make_contact_value(score3, contact_id), ht_values, values_per_key)
-        hashtable_update_slot_direct(entry_idx, 9, make_contact_value(score4, contact_id), ht_values, values_per_key)
-        hashtable_update_slot_direct(entry_idx, 11, make_contact_value(score5, contact_id), ht_values, values_per_key)
-
-    # Max-depth slot (last slot)
-    max_depth_slot_id = NUM_SPATIAL_DIRECTIONS * num_betas
-    hashtable_update_slot_direct(entry_idx, max_depth_slot_id, make_contact_value(-depth, contact_id), ht_values, values_per_key)
-
-
 @wp.kernel
 def _reduce_stored_contacts_kernel(
     position_depth: wp.array(dtype=wp.vec4),
@@ -488,8 +395,8 @@ def _reduce_stored_contacts_kernel(
 ):
     """Kernel to reduce stored contacts through the hashtable.
 
-    One thread per contact. Each thread handles all slots for one contact.
-    Uses grid-stride loop for efficiency.
+    Reads contacts from the buffer and registers them in the hashtable
+    for spatial reduction. Uses grid-stride loop for efficiency.
     """
     tid = wp.tid()
 
@@ -499,62 +406,6 @@ def _reduce_stored_contacts_kernel(
     # Grid-stride loop over all contacts
     contact_id = tid
     while contact_id < count:
-        # Read contact data (coalesced reads)
-        pd = position_depth[contact_id]
-        nf = normal_feature[contact_id]
-        pair = shape_pairs[contact_id]
-
-        position = wp.vec3(pd[0], pd[1], pd[2])
-        depth = pd[3]
-        normal = wp.vec3(nf[0], nf[1], nf[2])
-
-        # Reduce this contact
-        _reduce_single_contact(
-            contact_id, position, depth, normal,
-            pair[0], pair[1],
-            ht_keys, ht_values, ht_active_slots,
-            values_per_key, 2, beta0, beta1,
-        )
-
-        contact_id += num_threads
-
-
-@wp.kernel
-def _reduce_stored_contacts_per_slot_kernel(
-    position_depth: wp.array(dtype=wp.vec4),
-    normal_feature: wp.array(dtype=wp.vec4),
-    shape_pairs: wp.array(dtype=wp.vec2i),
-    contact_count: wp.array(dtype=wp.int32),
-    ht_keys: wp.array(dtype=wp.uint64),
-    ht_values: wp.array(dtype=wp.uint64),
-    ht_active_slots: wp.array(dtype=wp.int32),
-    values_per_key: int,
-    num_betas: int,
-    beta0: float,
-    beta1: float,
-    num_threads: int,
-):
-    """Kernel to reduce stored contacts - one thread per (contact, slot) pair.
-
-    This spreads work across more threads to reduce atomic contention.
-    Total work items = num_contacts × values_per_key
-    Each thread handles exactly one slot for one contact.
-    """
-    tid = wp.tid()
-
-    # Read contact count
-    count = contact_count[0]
-
-    # Total work items = contacts × slots_per_contact
-    total_work = count * values_per_key
-
-    # Grid-stride loop over all (contact, slot) pairs
-    work_id = tid
-    while work_id < total_work:
-        # Decode work_id into contact_id and slot_id
-        contact_id = work_id // values_per_key
-        slot_id = work_id % values_per_key
-
         # Read contact data
         pd = position_depth[contact_id]
         nf = normal_feature[contact_id]
@@ -566,51 +417,47 @@ def _reduce_stored_contacts_per_slot_kernel(
         shape_a = pair[0]
         shape_b = pair[1]
 
-        # Determine if this slot should be processed based on slot_id and depth
-        # Slot layout: [dir0_beta0, dir0_beta1, dir1_beta0, dir1_beta1, ..., max_depth]
-        max_depth_slot = NUM_SPATIAL_DIRECTIONS * num_betas
+        # Get icosahedron bin from normal
+        bin_id = get_slot(normal)
 
-        should_process = False
-        score = float(0.0)
+        # Key is (shape_a, shape_b, bin_id)
+        key = make_contact_key(shape_a, shape_b, bin_id)
 
-        if slot_id == max_depth_slot:
-            # Max depth slot - always process, use -depth as score
-            should_process = True
-            score = -depth
-        else:
-            # Direction/beta slot
-            dir_i = slot_id // num_betas
-            beta_i = slot_id % num_betas
-
-            # Check depth threshold
-            if beta_i == 0 and depth < beta0:
-                should_process = True
-            elif beta_i == 1 and depth < beta1:
-                should_process = True
-
-            if should_process:
-                # Get icosahedron bin and compute score
-                bin_id = get_slot(normal)
+        # Find or create the hashtable entry ONCE, then write directly to slots
+        entry_idx = hashtable_find_or_insert(key, ht_keys, ht_active_slots)
+        if entry_idx >= 0:
+            # Register in hashtable for all 6 scan directions × 2 betas
+            for dir_i in range(NUM_SPATIAL_DIRECTIONS):
                 scan_dir = get_scan_dir(bin_id, dir_i)
                 score = wp.dot(scan_dir, position)
-
-        if should_process:
-            # Get icosahedron bin from normal
-            bin_id = get_slot(normal)
-
-            # Key is (shape_a, shape_b, bin_id)
-            key = make_contact_key(shape_a, shape_b, bin_id)
-
-            # Find or create the hashtable entry
-            entry_idx = hashtable_find_or_insert(key, ht_keys, ht_active_slots)
-            if entry_idx >= 0:
                 value = make_contact_value(score, contact_id)
-                hashtable_update_slot_direct(
-                    entry_idx, slot_id, value,
-                    ht_values, values_per_key
-                )
 
-        work_id += num_threads
+                # Beta 0 slot (even indices: 0, 2, 4, 6, 8, 10)
+                if depth < beta0:
+                    slot_id = dir_i * 2
+                    hashtable_update_slot_direct(
+                        entry_idx, slot_id, value,
+                        ht_values, values_per_key
+                    )
+
+                # Beta 1 slot (odd indices: 1, 3, 5, 7, 9, 11)
+                if depth < beta1:
+                    slot_id = dir_i * 2 + 1
+                    hashtable_update_slot_direct(
+                        entry_idx, slot_id, value,
+                        ht_values, values_per_key
+                    )
+
+            # Also register for max-depth slot (last slot = 12)
+            # Use -depth as score so atomic_max selects the deepest
+            max_depth_slot_id = NUM_SPATIAL_DIRECTIONS * 2  # = 12
+            max_depth_value = make_contact_value(-depth, contact_id)
+            hashtable_update_slot_direct(
+                entry_idx, max_depth_slot_id, max_depth_value,
+                ht_values, values_per_key
+            )
+
+        contact_id += num_threads
 
 
 @wp.func
