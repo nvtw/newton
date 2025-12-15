@@ -150,6 +150,61 @@ def hashtable_insert(
 
 
 @wp.func
+def hashtable_insert_with_index(
+    key: wp.uint64,
+    value: wp.uint64,
+    keys: wp.array(dtype=wp.uint64),
+    values: wp.array(dtype=wp.uint64),
+    active_slots: wp.array(dtype=wp.int32),
+) -> bool:
+    """Insert or update a key-value pair, tracking active slot indices.
+
+    Same as hashtable_insert, but also maintains a compact list of active slot indices.
+    When a NEW key is inserted (not an update), the slot index is added to active_slots.
+    The last element of active_slots (at index = capacity) stores the count.
+
+    Args:
+        key: The uint64 key to insert
+        value: The uint64 value to insert or max with
+        keys: The hash table keys array (length must be power of two)
+        values: The hash table values array (same length as keys)
+        active_slots: Array of size (capacity + 1) tracking active slot indices.
+                      active_slots[capacity] is the count of active slots.
+
+    Returns:
+        True if insertion/update succeeded, False if the table is full
+    """
+    capacity = keys.shape[0]
+    capacity_mask = capacity - 1
+    idx = _hashtable_hash(key, capacity_mask)
+
+    # Linear probing with a maximum of 'capacity' attempts
+    for _i in range(capacity):
+        # Try to claim this slot with our key
+        old_key = wp.atomic_cas(keys, idx, HASHTABLE_EMPTY_KEY, key)
+
+        if old_key == HASHTABLE_EMPTY_KEY:
+            # We claimed an empty slot - this is a NEW entry
+            # Add to active slots list
+            active_idx = wp.atomic_add(active_slots, capacity, 1)
+            if active_idx < capacity:
+                active_slots[active_idx] = idx
+            # Write our value
+            wp.atomic_max(values, idx, value)
+            return True
+        elif old_key == key:
+            # Key already exists - just atomic max the value (no new entry)
+            wp.atomic_max(values, idx, value)
+            return True
+
+        # Collision with different key - linear probe to next slot
+        idx = (idx + 1) & capacity_mask
+
+    # Table is full
+    return False
+
+
+@wp.func
 def hashtable_lookup(
     key: wp.uint64,
     keys: wp.array(dtype=wp.uint64),
@@ -204,6 +259,9 @@ class HashTable:
         capacity_mask: The capacity mask (capacity - 1) for fast modulo
         keys: Warp array storing the keys
         values: Warp array storing the values
+        active_slots: Compact array tracking active slot indices. Size is (capacity + 1).
+                      active_slots[0:count] contains the indices of occupied slots.
+                      active_slots[capacity] is the count of active entries.
         device: The device where the table is allocated
     """
 
@@ -227,13 +285,54 @@ class HashTable:
         self.keys = wp.zeros(self.capacity, dtype=wp.uint64, device=device)
         self.values = wp.zeros(self.capacity, dtype=wp.uint64, device=device)
 
+        # Active slots array: indices of occupied slots + count at the end
+        # Size is capacity + 1, where active_slots[capacity] is the count
+        self.active_slots = wp.zeros(self.capacity + 1, dtype=wp.int32, device=device)
+
         # Fill keys with empty sentinel
         self.clear()
 
     def clear(self):
-        """Clear the hash table, removing all entries."""
+        """Clear the hash table, removing all entries.
+
+        This clears all slots. For sparse tables, use clear_active() instead
+        which only clears the slots that were actually used.
+        """
         self.keys.fill_(_HASHTABLE_EMPTY_KEY_VALUE)
         self.values.zero_()
+        self.active_slots.zero_()
+
+    def clear_active(self):
+        """Clear only the active entries in the hash table.
+
+        This is more efficient than clear() when the table is sparsely populated,
+        as it only resets the slots that were actually used.
+        """
+        count = self.get_active_count()
+        if count == 0:
+            return
+
+        if count > 0:
+            # Launch kernel to clear only active slots
+            wp.launch(
+                _hashtable_clear_active_kernel,
+                dim=count,
+                inputs=[self.keys, self.values, self.active_slots],
+                device=self.device,
+            )
+
+        # Reset the count
+        self.active_slots.zero_()
+
+    def get_active_count(self) -> int:
+        """Get the number of active entries in the hash table.
+
+        This is O(1) when using hashtable_insert_with_index.
+
+        Returns:
+            The number of active entries.
+        """
+        return int(self.active_slots.numpy()[self.capacity])
 
     def get_num_entries(self) -> int:
         """Count the number of entries in the hash table.
@@ -288,6 +387,19 @@ class HashTable:
             wp.array(compact_values, dtype=wp.uint64, device=self.device),
             len(compact_keys),
         )
+
+
+@wp.kernel
+def _hashtable_clear_active_kernel(
+    keys: wp.array(dtype=wp.uint64),
+    values: wp.array(dtype=wp.uint64),
+    active_slots: wp.array(dtype=wp.int32),
+):
+    """Kernel to clear only the active slots in the hash table."""
+    tid = wp.tid()
+    slot_idx = active_slots[tid]
+    keys[slot_idx] = HASHTABLE_EMPTY_KEY
+    values[slot_idx] = wp.uint64(0)
 
 
 # Kernel for batch insertion (useful for testing and simple use cases)

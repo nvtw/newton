@@ -29,21 +29,13 @@ Key Design:
 
 from __future__ import annotations
 
+from typing import Any
+
 import warp as wp
 
-from newton._src.core.hashtable import (
-    HashTable,
-    _HASHTABLE_EMPTY_KEY_VALUE,
-    hashtable_insert,
-)
+from newton._src.core.hashtable import HashTable, hashtable_insert_with_index
 
-from .contact_reduction import (
-    NUM_NORMAL_BINS,
-    NUM_SPATIAL_DIRECTIONS,
-    float_flip,
-    get_scan_dir,
-    get_slot,
-)
+from .contact_reduction import NUM_SPATIAL_DIRECTIONS, float_flip, get_scan_dir, get_slot
 
 # Bit layout for hashtable key (64 bits total):
 # - Bits 0-27:   shape_a (28 bits, up to ~268M shapes)
@@ -166,13 +158,22 @@ class GlobalContactReducer:
         self.hashtable = HashTable(hashtable_size, device=device)
 
     def clear(self):
-        """Clear all contacts and reset the reducer."""
+        """Clear all contacts and reset the reducer (full clear)."""
         self.contact_count.zero_()
         self.hashtable.clear()
+
+    def clear_active(self):
+        """Clear only the active entries (efficient for sparse usage)."""
+        self.contact_count.zero_()
+        self.hashtable.clear_active()
 
     def get_contact_count(self) -> int:
         """Get the current number of stored contacts."""
         return int(self.contact_count.numpy()[0])
+
+    def get_active_slot_count(self) -> int:
+        """Get the number of active hashtable slots."""
+        return self.hashtable.get_active_count()
 
     def get_winning_contacts(self) -> list[int]:
         """Extract the winning contact IDs from the hashtable.
@@ -203,6 +204,7 @@ def export_and_reduce_contact(
     contact_count: wp.array(dtype=wp.int32),
     ht_keys: wp.array(dtype=wp.uint64),
     ht_values: wp.array(dtype=wp.uint64),
+    ht_active_slots: wp.array(dtype=wp.int32),
     capacity: int,
 ) -> int:
     """Store a contact and register it in the hashtable for reduction.
@@ -229,6 +231,7 @@ def export_and_reduce_contact(
         contact_count: Atomic counter for allocation
         ht_keys: Hashtable keys array
         ht_values: Hashtable values array
+        ht_active_slots: Hashtable active slots array (size = ht_capacity + 1)
         capacity: Maximum contact capacity
 
     Returns:
@@ -256,7 +259,7 @@ def export_and_reduce_contact(
 
         key = make_contact_key(shape_a, shape_b, bin_id, dir_i)
         value = make_contact_value(score, contact_id)
-        hashtable_insert(key, value, ht_keys, ht_values)
+        hashtable_insert_with_index(key, value, ht_keys, ht_values, ht_active_slots)
 
     return contact_id
 
@@ -286,4 +289,90 @@ def unpack_contact(
     feature = float_as_int(nf[3])
 
     return position, normal, depth, feature
+
+
+def create_export_reduced_contacts_kernel(writer_func: Any):
+    """Create a kernel that exports reduced contacts using a custom writer function.
+
+    The kernel iterates over the active hashtable slots using grid stride loops,
+    extracts the winning contact ID from each slot, and calls the writer function.
+
+    Args:
+        writer_func: A warp function with signature (ContactData, writer_data) -> None
+                     This follows the same pattern as narrow_phase.py's write_contact_simple.
+
+    Returns:
+        A warp kernel that can be launched to export reduced contacts.
+    """
+    # Import here to avoid circular imports
+    from newton._src.geometry.contact_data import ContactData
+
+    @wp.kernel(enable_backward=False)
+    def export_reduced_contacts_kernel(
+        # Hashtable arrays
+        ht_keys: wp.array(dtype=wp.uint64),
+        ht_values: wp.array(dtype=wp.uint64),
+        ht_active_slots: wp.array(dtype=wp.int32),
+        # Contact buffer arrays
+        position_depth: wp.array(dtype=wp.vec4),
+        normal_feature: wp.array(dtype=wp.vec4),
+        shape_pairs: wp.array(dtype=wp.vec2i),
+        # Parameters
+        margin: float,
+        # Writer data (custom struct)
+        writer_data: Any,
+        # Grid stride parameters
+        total_num_threads: int,
+    ):
+        """Export reduced contacts to the writer.
+
+        Uses grid stride loop to iterate over active hashtable slots.
+        For each slot, extracts the winning contact and calls the writer function.
+        """
+        tid = wp.tid()
+
+        # Get number of active slots (stored at index = ht_capacity)
+        ht_capacity = ht_keys.shape[0]
+        num_active = ht_active_slots[ht_capacity]
+
+        # Grid stride loop over active slots
+        for i in range(tid, num_active, total_num_threads):
+            # Get the hashtable slot index
+            slot_idx = ht_active_slots[i]
+
+            # Get the value from this slot (contains score in high bits, contact_id in low bits)
+            value = ht_values[slot_idx]
+
+            # Extract contact ID from low 32 bits
+            contact_id = unpack_contact_id(value)
+
+            # Unpack contact data
+            position, normal, depth, feature = unpack_contact(
+                contact_id, position_depth, normal_feature
+            )
+
+            # Get shape pair
+            pair = shape_pairs[contact_id]
+            shape_a = pair[0]
+            shape_b = pair[1]
+
+            # Create ContactData struct
+            contact_data = ContactData()
+            contact_data.contact_point_center = position
+            contact_data.contact_normal_a_to_b = normal
+            contact_data.contact_distance = depth
+            contact_data.radius_eff_a = 0.0
+            contact_data.radius_eff_b = 0.0
+            contact_data.thickness_a = 0.0
+            contact_data.thickness_b = 0.0
+            contact_data.shape_a = shape_a
+            contact_data.shape_b = shape_b
+            contact_data.margin = margin
+            contact_data.feature = wp.uint32(feature)
+            contact_data.feature_pair_key = wp.uint64(0)
+
+            # Call the writer function
+            writer_func(contact_data, writer_data)
+
+    return export_reduced_contacts_kernel
 
