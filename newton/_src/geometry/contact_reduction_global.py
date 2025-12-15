@@ -39,7 +39,13 @@ from newton._src.geometry.hashtable_reduction import (
     hashtable_update_slot_direct,
 )
 
-from .contact_reduction import NUM_SPATIAL_DIRECTIONS, float_flip, get_scan_dir, get_slot
+from .contact_reduction import (
+    NUM_SPATIAL_DIRECTIONS,
+    float_flip,
+    get_slot,
+    get_spatial_direction_2d,
+    project_point_to_plane,
+)
 
 # Bit layout for hashtable key (64 bits total):
 # Key is (shape_a, shape_b, bin_id) - NO slot_id (slots are handled via values_per_key)
@@ -196,9 +202,7 @@ class GlobalContactReducer:
         # Keys are (shape_pair, bin), so max keys = num_contacts x 20 bins
         # Use 2x for load factor
         hashtable_size = capacity * 20 * 2
-        self.hashtable = ReductionHashTable(
-            hashtable_size, values_per_key=self.values_per_key, device=device
-        )
+        self.hashtable = ReductionHashTable(hashtable_size, values_per_key=self.values_per_key, device=device)
 
     def clear(self):
         """Clear all contacts and reset the reducer (full clear)."""
@@ -297,9 +301,7 @@ def export_contact_to_buffer(
 
     # Store contact data (packed into vec4)
     reducer_data.position_depth[contact_id] = wp.vec4(position[0], position[1], position[2], depth)
-    reducer_data.normal_feature[contact_id] = wp.vec4(
-        normal[0], normal[1], normal[2], int_as_float(wp.int32(feature))
-    )
+    reducer_data.normal_feature[contact_id] = wp.vec4(normal[0], normal[1], normal[2], int_as_float(wp.int32(feature)))
     reducer_data.shape_pairs[contact_id] = wp.vec2i(shape_a, shape_b)
 
     return contact_id
@@ -334,6 +336,9 @@ def reduce_contact_in_hashtable(
     # Get icosahedron bin from normal
     bin_id = get_slot(normal)
 
+    # Project position to 2D plane of the icosahedron face
+    pos_2d = project_point_to_plane(bin_id, position)
+
     # Key is (shape_a, shape_b, bin_id) - NO slot in key
     key = make_contact_key(shape_a, shape_b, bin_id)
 
@@ -344,38 +349,38 @@ def reduce_contact_in_hashtable(
 
     ht_capacity = reducer_data.ht_capacity
 
-    # Register in hashtable for all 6 scan directions x 2 betas
+    use_beta0 = depth < beta0
+    use_beta1 = depth < beta1
+
+    if beta0 < beta1 and use_beta0:
+        use_beta1 = False
+
+    if beta0 > beta1 and use_beta1:
+        use_beta0 = False
+
+    # Register in hashtable for all 6 spatial directions x 2 betas
     # Using direct slot access (no repeated hash lookups)
     # Memory layout is slot-major for coalesced access
     for dir_i in range(NUM_SPATIAL_DIRECTIONS):
-        scan_dir = get_scan_dir(bin_id, dir_i)
-        score = wp.dot(scan_dir, position)
+        dir_2d = get_spatial_direction_2d(dir_i)
+        score = wp.dot(pos_2d, dir_2d)
         value = make_contact_value(score, contact_id)
 
         # Beta 0 slot (even indices: 0, 2, 4, 6, 8, 10)
-        if depth < beta0:
+        if use_beta0:
             slot_id = dir_i * 2
-            hashtable_update_slot_direct(
-                entry_idx, slot_id, value,
-                reducer_data.ht_values, ht_capacity
-            )
+            hashtable_update_slot_direct(entry_idx, slot_id, value, reducer_data.ht_values, ht_capacity)
 
         # Beta 1 slot (odd indices: 1, 3, 5, 7, 9, 11)
-        if depth < beta1:
+        if use_beta1:
             slot_id = dir_i * 2 + 1
-            hashtable_update_slot_direct(
-                entry_idx, slot_id, value,
-                reducer_data.ht_values, ht_capacity
-            )
+            hashtable_update_slot_direct(entry_idx, slot_id, value, reducer_data.ht_values, ht_capacity)
 
     # Also register for max-depth slot (last slot = 12)
     # Use -depth as score so atomic_max selects the deepest (most negative depth)
     max_depth_slot_id = NUM_SPATIAL_DIRECTIONS * 2  # = 12
     max_depth_value = make_contact_value(-depth, contact_id)
-    hashtable_update_slot_direct(
-        entry_idx, max_depth_slot_id, max_depth_value,
-        reducer_data.ht_values, ht_capacity
-    )
+    hashtable_update_slot_direct(entry_idx, max_depth_slot_id, max_depth_value, reducer_data.ht_values, ht_capacity)
 
 
 @wp.func
@@ -390,11 +395,8 @@ def export_and_reduce_contact(
     beta0: float,
     beta1: float,
 ) -> int:
-    """Legacy wrapper for backward compatibility.
-    """
-    contact_id = export_contact_to_buffer(
-        shape_a, shape_b, position, normal, depth, feature, reducer_data
-    )
+    """Legacy wrapper for backward compatibility."""
+    contact_id = export_contact_to_buffer(shape_a, shape_b, position, normal, depth, feature, reducer_data)
 
     if contact_id >= 0:
         reduce_contact_in_hashtable(contact_id, reducer_data, beta0, beta1)
@@ -404,13 +406,14 @@ def export_and_reduce_contact(
 
 def create_reduce_buffered_contacts_kernel(beta0: float, beta1: float):
     """Create a kernel that registers buffered contacts to the hashtable.
-    
+
     This splits the contact reduction process into two steps:
     1. Writing contacts to buffer (done by contact generation kernel)
     2. Registering contacts to hashtable (done by this kernel)
-    
+
     This reduces register pressure on the contact generation kernel.
     """
+
     @wp.kernel(enable_backward=False)
     def reduce_buffered_contacts_kernel(
         reducer_data: GlobalContactReducerData,
@@ -418,17 +421,17 @@ def create_reduce_buffered_contacts_kernel(beta0: float, beta1: float):
     ):
         """Iterate over buffered contacts and register them in the hashtable."""
         tid = wp.tid()
-        
+
         # Get total number of contacts written
         num_contacts = reducer_data.contact_count[0]
-        
+
         # Cap at capacity
         num_contacts = wp.min(num_contacts, reducer_data.capacity)
-        
+
         # Grid stride loop over contacts
         for i in range(tid, num_contacts, total_num_threads):
             reduce_contact_in_hashtable(i, reducer_data, beta0, beta1)
-            
+
     return reduce_buffered_contacts_kernel
 
 
@@ -649,9 +652,7 @@ def create_export_reduced_contacts_kernel(writer_func: Any, values_per_key: int 
                 num_exported = num_exported + 1
 
                 # Unpack contact data
-                position, normal, depth, feature = unpack_contact(
-                    contact_id, position_depth, normal_feature
-                )
+                position, normal, depth, feature = unpack_contact(contact_id, position_depth, normal_feature)
 
                 # Get shape pair
                 pair = shape_pairs[contact_id]
@@ -754,9 +755,7 @@ def create_mesh_triangle_contacts_to_reducer_kernel(beta0: float, beta1: float):
             X_mesh_ws_a = shape_transform[shape_a]
 
             # Extract triangle shape data from mesh
-            shape_data_a, v0_world = get_triangle_shape_from_mesh(
-                mesh_id_a, mesh_scale_a, X_mesh_ws_a, tri_idx
-            )
+            shape_data_a, v0_world = get_triangle_shape_from_mesh(mesh_id_a, mesh_scale_a, X_mesh_ws_a, tri_idx)
 
             # Extract shape B data
             pos_b, quat_b, shape_data_b, _scale_b, thickness_b = extract_shape_data(
@@ -780,9 +779,7 @@ def create_mesh_triangle_contacts_to_reducer_kernel(beta0: float, beta1: float):
             margin = wp.max(margin_a, margin_b)
 
             # Build pair key including triangle index
-            pair_key = build_pair_key3(
-                wp.uint32(shape_a), wp.uint32(shape_b), wp.uint32(tri_idx)
-            )
+            pair_key = build_pair_key3(wp.uint32(shape_a), wp.uint32(shape_b), wp.uint32(tri_idx))
 
             # Compute and write contacts using GJK/MPR
             wp.static(create_compute_gjk_mpr_contacts(write_to_reducer_with_betas))(
@@ -802,4 +799,3 @@ def create_mesh_triangle_contacts_to_reducer_kernel(beta0: float, beta1: float):
             )
 
     return mesh_triangle_contacts_to_reducer_kernel
-
