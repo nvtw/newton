@@ -16,9 +16,11 @@ import warp as wp
 
 from newton._src.geometry.contact_reduction import NUM_SPATIAL_DIRECTIONS
 from newton._src.geometry.contact_reduction_global import (
+    ContactBufferData,
     GlobalContactReducer,
     GlobalContactReducerData,
     export_and_reduce_contact,
+    export_contact_only,
     make_contact_key,
     make_contact_value,
 )
@@ -70,6 +72,38 @@ def benchmark_insert_kernel(
     export_and_reduce_contact(
         shape_a, shape_b, position, normal, depth, feature,
         reducer_data, beta0, beta1
+    )
+
+
+@wp.kernel
+def benchmark_insert_only_kernel(
+    num_contacts: int,
+    buffer_data: ContactBufferData,
+):
+    """Kernel that stores contacts WITHOUT reduction (split approach)."""
+    tid = wp.tid()
+    if tid >= num_contacts:
+        return
+
+    # Simulate contact data with some distribution (same as benchmark_insert_kernel)
+    shape_a = tid % 100
+    shape_b = (tid // 100) % 100 + 100
+    x = float(tid % 50) * 0.1
+    y = float((tid // 50) % 50) * 0.1
+    z = float((tid // 2500) % 50) * 0.1
+    position = wp.vec3(x, y, z)
+
+    nx = wp.sin(float(tid) * 0.1)
+    ny = wp.cos(float(tid) * 0.1)
+    nz = wp.sqrt(1.0 - nx * nx - ny * ny)
+    normal = wp.vec3(nx, ny, nz)
+
+    depth = -0.01 + float(tid % 100) * 0.0001
+    feature = tid % 10
+
+    export_contact_only(
+        shape_a, shape_b, position, normal, depth, feature,
+        buffer_data
     )
 
 
@@ -234,21 +268,128 @@ def run_hashtable_benchmark(num_insertions: int, device: str = "cuda:0", num_ite
     return np.mean(times)
 
 
+def run_split_benchmark(num_contacts: int, device: str = "cuda:0", num_iterations: int = 10) -> dict:
+    """Benchmark the split kernel approach: store + reduce separately.
+
+    Args:
+        num_contacts: Number of contacts to simulate
+        device: Warp device to use
+        num_iterations: Number of iterations to average over
+
+    Returns:
+        Dict with timing data for store, reduce, clear phases
+    """
+    reducer = GlobalContactReducer(
+        capacity=num_contacts * 2,
+        device=device,
+        num_betas=2,
+    )
+
+    beta0 = 1000000.0
+    beta1 = 0.0001
+
+    # Warm up
+    buffer_data = reducer.get_buffer_struct()
+    wp.launch(
+        benchmark_insert_only_kernel,
+        dim=num_contacts,
+        inputs=[num_contacts, buffer_data],
+        device=device,
+    )
+    wp.synchronize()
+    reducer.reduce_contacts(beta0, beta1)
+    wp.synchronize()
+    reducer.clear_active()
+    wp.synchronize()
+
+    # Benchmark store only
+    store_times = []
+    for _ in range(num_iterations):
+        reducer.clear()
+        wp.synchronize()
+
+        buffer_data = reducer.get_buffer_struct()
+        start = time.perf_counter()
+        wp.launch(
+            benchmark_insert_only_kernel,
+            dim=num_contacts,
+            inputs=[num_contacts, buffer_data],
+            device=device,
+        )
+        wp.synchronize()
+        store_times.append((time.perf_counter() - start) * 1000)
+
+    # Benchmark reduce only (after store)
+    reduce_times = []
+    for _ in range(num_iterations):
+        reducer.clear()
+        wp.synchronize()
+
+        # Store first
+        buffer_data = reducer.get_buffer_struct()
+        wp.launch(
+            benchmark_insert_only_kernel,
+            dim=num_contacts,
+            inputs=[num_contacts, buffer_data],
+            device=device,
+        )
+        wp.synchronize()
+
+        # Time reduction
+        start = time.perf_counter()
+        reducer.reduce_contacts(beta0, beta1)
+        wp.synchronize()
+        reduce_times.append((time.perf_counter() - start) * 1000)
+
+    # Benchmark clear
+    clear_times = []
+    for _ in range(num_iterations):
+        # Store and reduce first
+        buffer_data = reducer.get_buffer_struct()
+        wp.launch(
+            benchmark_insert_only_kernel,
+            dim=num_contacts,
+            inputs=[num_contacts, buffer_data],
+            device=device,
+        )
+        wp.synchronize()
+        reducer.reduce_contacts(beta0, beta1)
+        wp.synchronize()
+
+        start = time.perf_counter()
+        reducer.clear_active()
+        wp.synchronize()
+        clear_times.append((time.perf_counter() - start) * 1000)
+
+    store_time = np.mean(store_times)
+    reduce_time = np.mean(reduce_times)
+    clear_time = np.mean(clear_times)
+    total_time = store_time + reduce_time + clear_time
+
+    return {
+        "store_ms": store_time,
+        "reduce_ms": reduce_time,
+        "clear_ms": clear_time,
+        "total_ms": total_time,
+        "contacts_per_second": num_contacts / (total_time / 1000) if total_time > 0 else 0,
+    }
+
+
 def main():
     """Run the benchmark suite."""
     wp.init()
 
     device = "cuda:0"
     print(f"Running benchmarks on {device}")
-    print("=" * 70)
+    print("=" * 85)
 
     # Test different contact counts
     contact_counts = [1000, 10000, 50000, 100000, 500000]
 
-    print("\n1. Full contact reduction benchmark (insert + clear_active)")
-    print("-" * 70)
+    print("\n1. COMBINED approach (insert+reduce in same kernel)")
+    print("-" * 85)
     print(f"{'Contacts':>12} {'Insert (ms)':>12} {'Clear (ms)':>12} {'Total (ms)':>12} {'Contacts/s':>15}")
-    print("-" * 70)
+    print("-" * 85)
 
     for num_contacts in contact_counts:
         results = run_benchmark(num_contacts, device=device)
@@ -260,10 +401,26 @@ def main():
             f"{results.contacts_per_second:>15,.0f}"
         )
 
-    print("\n2. Raw hash table insertion benchmark")
-    print("-" * 70)
+    print("\n2. SPLIT approach (store + reduce in separate kernels)")
+    print("-" * 85)
+    print(f"{'Contacts':>12} {'Store (ms)':>12} {'Reduce (ms)':>12} {'Clear (ms)':>12} {'Total (ms)':>12} {'Contacts/s':>15}")
+    print("-" * 85)
+
+    for num_contacts in contact_counts:
+        results = run_split_benchmark(num_contacts, device=device)
+        print(
+            f"{num_contacts:>12} "
+            f"{results['store_ms']:>12.3f} "
+            f"{results['reduce_ms']:>12.3f} "
+            f"{results['clear_ms']:>12.3f} "
+            f"{results['total_ms']:>12.3f} "
+            f"{results['contacts_per_second']:>15,.0f}"
+        )
+
+    print("\n3. Raw hash table insertion benchmark")
+    print("-" * 85)
     print(f"{'Insertions':>12} {'Time (ms)':>12} {'Insertions/s':>15}")
-    print("-" * 70)
+    print("-" * 85)
 
     insertion_counts = [10000, 100000, 500000, 1000000]
     for num_insertions in insertion_counts:
@@ -271,7 +428,7 @@ def main():
         insertions_per_second = num_insertions / (time_ms / 1000)
         print(f"{num_insertions:>12} {time_ms:>12.3f} {insertions_per_second:>15,.0f}")
 
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 85)
     print("Benchmark complete.")
 
 

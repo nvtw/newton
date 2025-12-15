@@ -244,6 +244,54 @@ class TestGlobalContactReducer(unittest.TestCase):
 
         print(f"Stress test: 5000 contacts reduced to {len(winners)} winners")
 
+    def test_split_kernel_approach(self):
+        """Test the split kernel approach: export_contact_only + reduce_contacts."""
+        from newton._src.geometry.contact_reduction_global import (
+            ContactBufferData,
+            export_contact_only,
+        )
+
+        reducer = GlobalContactReducer(capacity=100, device="cpu")
+
+        @wp.kernel
+        def store_contacts_only_kernel(
+            buffer_data: ContactBufferData,
+        ):
+            tid = wp.tid()
+            # Store contacts without reduction
+            x = float(tid) - 5.0
+            export_contact_only(
+                shape_a=0,
+                shape_b=1,
+                position=wp.vec3(x, 0.0, 0.0),
+                normal=wp.vec3(0.0, 1.0, 0.0),
+                depth=-0.01,
+                feature=tid,
+                buffer_data=buffer_data,
+            )
+
+        # Store contacts using buffer-only struct
+        buffer_data = reducer.get_buffer_struct()
+        wp.launch(
+            store_contacts_only_kernel,
+            dim=10,
+            inputs=[buffer_data],
+            device="cpu",
+        )
+
+        # Contacts should be stored but no reduction yet
+        self.assertEqual(reducer.get_contact_count(), 10)
+        self.assertEqual(reducer.get_active_slot_count(), 0)  # No hashtable entries yet
+
+        # Now run reduction
+        reducer.reduce_contacts(beta0=1000.0, beta1=0.001)
+
+        # Now we should have hashtable entries
+        winners = reducer.get_winning_contacts()
+        self.assertGreater(len(winners), 0)
+        self.assertLess(len(winners), 10)  # Reduction should happen
+        print(f"Split kernel test: 10 contacts reduced to {len(winners)} winners")
+
     def test_clear_active(self):
         """Test that clear_active only clears used slots."""
         reducer = GlobalContactReducer(capacity=100, device="cpu")

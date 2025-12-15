@@ -116,6 +116,22 @@ def float_as_int(f: float) -> wp.int32:
 
 
 @wp.struct
+class ContactBufferData:
+    """Struct for passing contact buffer arrays to kernels (no hashtable).
+
+    This is a lightweight struct for contact generation kernels that only
+    need to store contacts without doing reduction. Use this for lower
+    register pressure in collision kernels.
+    """
+
+    position_depth: wp.array(dtype=wp.vec4)
+    normal_feature: wp.array(dtype=wp.vec4)
+    shape_pairs: wp.array(dtype=wp.vec2i)
+    contact_count: wp.array(dtype=wp.int32)
+    capacity: int
+
+
+@wp.struct
 class GlobalContactReducerData:
     """Struct for passing GlobalContactReducer arrays to kernels.
 
@@ -264,6 +280,185 @@ class GlobalContactReducer:
         data.ht_values_per_key = self.values_per_key
         return data
 
+    def get_buffer_struct(self) -> ContactBufferData:
+        """Get a ContactBufferData struct for contact generation kernels.
+
+        This is a lightweight struct that only contains the contact buffer
+        arrays, without hashtable data. Use this for collision kernels that
+        should only store contacts without doing reduction (lower register pressure).
+
+        Returns:
+            A ContactBufferData struct for storing contacts.
+        """
+        data = ContactBufferData()
+        data.position_depth = self.position_depth
+        data.normal_feature = self.normal_feature
+        data.shape_pairs = self.shape_pairs
+        data.contact_count = self.contact_count
+        data.capacity = self.capacity
+        return data
+
+    def reduce_contacts(self, beta0: float = 1000000.0, beta1: float = 0.0001, num_threads: int = 0):
+        """Launch the reduction kernel to process stored contacts.
+
+        This reads all contacts from the buffer (0 to contact_count) and
+        registers them in the hashtable for reduction. Call this after
+        contact generation kernels that use export_contact_only().
+
+        Args:
+            beta0: First depth threshold (typically large)
+            beta1: Second depth threshold (typically small)
+            num_threads: Number of threads to launch. 0 = auto (capacity, capped at 262144)
+        """
+        if num_threads <= 0:
+            # Use enough threads to process contacts efficiently
+            # Cap at 262144 (256K) for good GPU occupancy
+            num_threads = min(self.capacity, 262144)
+        wp.launch(
+            _reduce_stored_contacts_kernel,
+            dim=num_threads,
+            inputs=[
+                self.position_depth,
+                self.normal_feature,
+                self.shape_pairs,
+                self.contact_count,
+                self.hashtable.keys,
+                self.hashtable.values,
+                self.hashtable.active_slots,
+                self.values_per_key,
+                beta0,
+                beta1,
+                num_threads,
+            ],
+            device=self.device,
+        )
+
+
+@wp.func
+def export_contact_only(
+    shape_a: int,
+    shape_b: int,
+    position: wp.vec3,
+    normal: wp.vec3,
+    depth: float,
+    feature: int,
+    buffer_data: ContactBufferData,
+) -> int:
+    """Store a contact in the buffer WITHOUT doing reduction.
+
+    This is a lightweight function for collision kernels that should only
+    store contacts. Call GlobalContactReducer.reduce_contacts() afterwards
+    to perform the hashtable-based reduction in a separate kernel.
+
+    This separation reduces register pressure in collision kernels (GJK/MPR).
+
+    Args:
+        shape_a: First shape index
+        shape_b: Second shape index
+        position: Contact position in world space
+        normal: Contact normal
+        depth: Penetration depth (negative = penetrating)
+        feature: Feature identifier for deduplication
+        buffer_data: ContactBufferData struct with buffer arrays
+
+    Returns:
+        Contact ID if successfully stored, -1 if buffer full
+    """
+    # Allocate contact slot
+    contact_id = wp.atomic_add(buffer_data.contact_count, 0, 1)
+    if contact_id >= buffer_data.capacity:
+        return -1
+
+    # Store contact data (packed into vec4)
+    buffer_data.position_depth[contact_id] = wp.vec4(position[0], position[1], position[2], depth)
+    buffer_data.normal_feature[contact_id] = wp.vec4(
+        normal[0], normal[1], normal[2], int_as_float(wp.int32(feature))
+    )
+    buffer_data.shape_pairs[contact_id] = wp.vec2i(shape_a, shape_b)
+
+    return contact_id
+
+
+@wp.kernel
+def _reduce_stored_contacts_kernel(
+    position_depth: wp.array(dtype=wp.vec4),
+    normal_feature: wp.array(dtype=wp.vec4),
+    shape_pairs: wp.array(dtype=wp.vec2i),
+    contact_count: wp.array(dtype=wp.int32),
+    ht_keys: wp.array(dtype=wp.uint64),
+    ht_values: wp.array(dtype=wp.uint64),
+    ht_active_slots: wp.array(dtype=wp.int32),
+    values_per_key: int,
+    beta0: float,
+    beta1: float,
+    num_threads: int,
+):
+    """Kernel to reduce stored contacts through the hashtable.
+
+    Reads contacts from the buffer and registers them in the hashtable
+    for spatial reduction. Uses grid-stride loop for efficiency.
+    """
+    tid = wp.tid()
+
+    # Read contact count
+    count = contact_count[0]
+
+    # Grid-stride loop over all contacts
+    contact_id = tid
+    while contact_id < count:
+        # Read contact data
+        pd = position_depth[contact_id]
+        nf = normal_feature[contact_id]
+        pair = shape_pairs[contact_id]
+
+        position = wp.vec3(pd[0], pd[1], pd[2])
+        depth = pd[3]
+        normal = wp.vec3(nf[0], nf[1], nf[2])
+        shape_a = pair[0]
+        shape_b = pair[1]
+
+        # Get icosahedron bin from normal
+        bin_id = get_slot(normal)
+
+        # Key is (shape_a, shape_b, bin_id)
+        key = make_contact_key(shape_a, shape_b, bin_id)
+
+        # Find or create the hashtable entry ONCE, then write directly to slots
+        entry_idx = hashtable_find_or_insert(key, ht_keys, ht_active_slots)
+        if entry_idx >= 0:
+            # Register in hashtable for all 6 scan directions × 2 betas
+            for dir_i in range(NUM_SPATIAL_DIRECTIONS):
+                scan_dir = get_scan_dir(bin_id, dir_i)
+                score = wp.dot(scan_dir, position)
+                value = make_contact_value(score, contact_id)
+
+                # Beta 0 slot (even indices: 0, 2, 4, 6, 8, 10)
+                if depth < beta0:
+                    slot_id = dir_i * 2
+                    hashtable_update_slot_direct(
+                        entry_idx, slot_id, value,
+                        ht_values, values_per_key
+                    )
+
+                # Beta 1 slot (odd indices: 1, 3, 5, 7, 9, 11)
+                if depth < beta1:
+                    slot_id = dir_i * 2 + 1
+                    hashtable_update_slot_direct(
+                        entry_idx, slot_id, value,
+                        ht_values, values_per_key
+                    )
+
+            # Also register for max-depth slot (last slot = 12)
+            # Use -depth as score so atomic_max selects the deepest
+            max_depth_slot_id = NUM_SPATIAL_DIRECTIONS * 2  # = 12
+            max_depth_value = make_contact_value(-depth, contact_id)
+            hashtable_update_slot_direct(
+                entry_idx, max_depth_slot_id, max_depth_value,
+                ht_values, values_per_key
+            )
+
+        contact_id += num_threads
+
 
 @wp.func
 def export_and_reduce_contact(
@@ -395,6 +590,33 @@ def unpack_contact(
 
 
 @wp.func
+def write_contact_to_buffer(
+    contact_data: Any,  # ContactData struct
+    buffer_data: ContactBufferData,
+):
+    """Writer function that stores contacts WITHOUT reduction.
+
+    This is a lightweight writer for collision kernels that should only
+    store contacts. Use with GlobalContactReducer.reduce_contacts() afterwards.
+
+    This separation reduces register pressure in collision kernels (GJK/MPR).
+
+    Args:
+        contact_data: ContactData struct from contact computation
+        buffer_data: ContactBufferData struct for storing contacts
+    """
+    export_contact_only(
+        shape_a=contact_data.shape_a,
+        shape_b=contact_data.shape_b,
+        position=contact_data.contact_point_center,
+        normal=contact_data.contact_normal_a_to_b,
+        depth=contact_data.contact_distance,
+        feature=int(contact_data.feature),
+        buffer_data=buffer_data,
+    )
+
+
+@wp.func
 def write_contact_to_reducer(
     contact_data: Any,  # ContactData struct
     reducer_data: GlobalContactReducerData,
@@ -406,6 +628,9 @@ def write_contact_to_reducer(
     This follows the same signature as write_contact_simple in narrow_phase.py,
     so it can be used with create_compute_gjk_mpr_contacts and other contact
     generation functions.
+
+    Note: For lower register pressure, consider using write_contact_to_buffer()
+    with a separate reduce_contacts() call instead.
 
     Args:
         contact_data: ContactData struct from contact computation
