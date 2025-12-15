@@ -33,7 +33,12 @@ from typing import Any
 
 import warp as wp
 
-from newton._src.geometry.hashtable_reduction import ReductionHashTable, hashtable_insert_slot
+from newton._src.geometry.hashtable_reduction import (
+    ReductionHashTable,
+    hashtable_find_or_insert,
+    hashtable_insert_slot,
+    hashtable_update_slot_direct,
+)
 
 from .contact_reduction import NUM_SPATIAL_DIRECTIONS, float_flip, get_scan_dir, get_slot
 
@@ -319,38 +324,44 @@ def export_and_reduce_contact(
     # Key is (shape_a, shape_b, bin_id) - NO slot in key
     key = make_contact_key(shape_a, shape_b, bin_id)
 
+    # Find or create the hashtable entry ONCE, then write directly to slots
+    entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
+    if entry_idx < 0:
+        # Hashtable full - contact stored but not tracked for reduction
+        return contact_id
+
+    values_per_key = reducer_data.ht_values_per_key
+
     # Register in hashtable for all 6 scan directions × 2 betas
+    # Using direct slot access (no repeated hash lookups)
     for dir_i in range(NUM_SPATIAL_DIRECTIONS):
         scan_dir = get_scan_dir(bin_id, dir_i)
         score = wp.dot(scan_dir, position)
         value = make_contact_value(score, contact_id)
 
-        # Beta 0 slot
+        # Beta 0 slot (even indices: 0, 2, 4, 6, 8, 10)
         if depth < beta0:
             slot_id = dir_i * 2
-            hashtable_insert_slot(
-                key, slot_id, value,
-                reducer_data.ht_keys, reducer_data.ht_values,
-                reducer_data.ht_active_slots, reducer_data.ht_values_per_key
+            hashtable_update_slot_direct(
+                entry_idx, slot_id, value,
+                reducer_data.ht_values, values_per_key
             )
 
-        # Beta 1 slot
+        # Beta 1 slot (odd indices: 1, 3, 5, 7, 9, 11)
         if depth < beta1:
             slot_id = dir_i * 2 + 1
-            hashtable_insert_slot(
-                key, slot_id, value,
-                reducer_data.ht_keys, reducer_data.ht_values,
-                reducer_data.ht_active_slots, reducer_data.ht_values_per_key
+            hashtable_update_slot_direct(
+                entry_idx, slot_id, value,
+                reducer_data.ht_values, values_per_key
             )
 
-    # Also register for max-depth slot (last slot)
+    # Also register for max-depth slot (last slot = 12)
     # Use -depth as score so atomic_max selects the deepest (most negative depth)
     max_depth_slot_id = NUM_SPATIAL_DIRECTIONS * 2  # = 12
     max_depth_value = make_contact_value(-depth, contact_id)
-    hashtable_insert_slot(
-        key, max_depth_slot_id, max_depth_value,
-        reducer_data.ht_keys, reducer_data.ht_values,
-        reducer_data.ht_active_slots, reducer_data.ht_values_per_key
+    hashtable_update_slot_direct(
+        entry_idx, max_depth_slot_id, max_depth_value,
+        reducer_data.ht_values, values_per_key
     )
 
     return contact_id

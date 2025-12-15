@@ -57,6 +57,89 @@ def _hashtable_hash(key: wp.uint64, capacity_mask: int) -> int:
 
 
 @wp.func
+def hashtable_find_or_insert(
+    key: wp.uint64,
+    keys: wp.array(dtype=wp.uint64),
+    active_slots: wp.array(dtype=wp.int32),
+) -> int:
+    """Find or insert a key and return the entry index.
+
+    This function locates an existing entry or creates a new one for the key.
+    Once you have the entry index, use hashtable_update_slot_direct() to
+    write values to specific slots without repeated hash lookups.
+
+    Args:
+        key: The uint64 key to find or insert
+        keys: The hash table keys array (length must be power of two)
+        active_slots: Array of size (capacity + 1) tracking active entry indices.
+                      active_slots[capacity] is the count of active entries.
+
+    Returns:
+        Entry index (>= 0) if successful, -1 if the table is full
+    """
+    capacity = keys.shape[0]
+    capacity_mask = capacity - 1
+    idx = _hashtable_hash(key, capacity_mask)
+
+    # Linear probing with a maximum of 'capacity' attempts
+    for _i in range(capacity):
+        # Read first to check if key exists (keys only transition EMPTY -> KEY)
+        stored_key = keys[idx]
+
+        if stored_key == key:
+            # Key already exists - return its index
+            return idx
+
+        if stored_key == HASHTABLE_EMPTY_KEY:
+            # Try to claim this slot
+            old_key = wp.atomic_cas(keys, idx, HASHTABLE_EMPTY_KEY, key)
+
+            if old_key == HASHTABLE_EMPTY_KEY:
+                # We claimed an empty slot - this is a NEW entry
+                # Add to active slots list
+                active_idx = wp.atomic_add(active_slots, capacity, 1)
+                if active_idx < capacity:
+                    active_slots[active_idx] = idx
+                return idx
+            elif old_key == key:
+                # Another thread just inserted the same key - use it
+                return idx
+            # else: Another thread claimed with different key - continue probing
+
+        # Collision with different key - linear probe to next slot
+        idx = (idx + 1) & capacity_mask
+
+    # Table is full
+    return -1
+
+
+@wp.func
+def hashtable_update_slot_direct(
+    entry_idx: int,
+    slot_id: int,
+    value: wp.uint64,
+    values: wp.array(dtype=wp.uint64),
+    values_per_key: int,
+):
+    """Update a value slot directly using the entry index.
+
+    Use this after hashtable_find_or_insert() to write multiple values
+    to the same entry without repeated hash lookups.
+
+    Args:
+        entry_idx: Entry index from hashtable_find_or_insert()
+        slot_id: Which value slot to write to (0 to values_per_key-1)
+        value: The uint64 value to max with existing value
+        values: The hash table values array
+        values_per_key: Number of value slots per key
+    """
+    value_idx = entry_idx * values_per_key + slot_id
+    # Check before atomic to reduce contention
+    if values[value_idx] < value:
+        wp.atomic_max(values, value_idx, value)
+
+
+@wp.func
 def hashtable_insert_slot(
     key: wp.uint64,
     slot_id: int,
@@ -72,6 +155,10 @@ def hashtable_insert_slot(
     specified slot_id within the entry. Different threads can write to different
     slots of the same key concurrently using atomic_max.
 
+    For inserting multiple values to the same key, prefer using
+    hashtable_find_or_insert() + hashtable_update_slot_direct() to avoid
+    repeated hash lookups.
+
     Args:
         key: The uint64 key to insert
         slot_id: Which value slot to write to (0 to values_per_key-1)
@@ -85,49 +172,11 @@ def hashtable_insert_slot(
     Returns:
         True if insertion/update succeeded, False if the table is full
     """
-    capacity = keys.shape[0]
-    capacity_mask = capacity - 1
-    idx = _hashtable_hash(key, capacity_mask)
-
-    # Linear probing with a maximum of 'capacity' attempts
-    for _i in range(capacity):
-        # Optimization: Read first to avoid atomic if key already exists
-        # This is safe because keys only transition from EMPTY -> KEY, never change afterwards
-        stored_key = keys[idx]
-
-        if stored_key == key:
-            # Key matches - write value
-            value_idx = idx * values_per_key + slot_id
-            if values[value_idx] < value:
-                wp.atomic_max(values, value_idx, value)
-            return True
-
-        if stored_key == HASHTABLE_EMPTY_KEY:
-            # Try to claim
-            old_key = wp.atomic_cas(keys, idx, HASHTABLE_EMPTY_KEY, key)
-
-            if old_key == HASHTABLE_EMPTY_KEY:
-                # We claimed an empty slot - this is a NEW entry
-                # Add to active slots list
-                active_idx = wp.atomic_add(active_slots, capacity, 1)
-                if active_idx < capacity:
-                    active_slots[active_idx] = idx
-                # Write to the specific value slot (no check needed - slot is fresh)
-                value_idx = idx * values_per_key + slot_id
-                wp.atomic_max(values, value_idx, value)
-                return True
-            elif old_key == key:
-                # Key already exists - check if our value is larger before atomic
-                value_idx = idx * values_per_key + slot_id
-                if values[value_idx] < value:
-                    wp.atomic_max(values, value_idx, value)
-                return True
-
-        # Collision with different key - linear probe to next slot
-        idx = (idx + 1) & capacity_mask
-
-    # Table is full
-    return False
+    entry_idx = hashtable_find_or_insert(key, keys, active_slots)
+    if entry_idx < 0:
+        return False
+    hashtable_update_slot_direct(entry_idx, slot_id, value, values, values_per_key)
+    return True
 
 
 @wp.kernel
@@ -137,20 +186,38 @@ def _hashtable_clear_active_kernel(
     active_slots: wp.array(dtype=wp.int32),
     capacity: int,
     values_per_key: int,
+    num_threads: int,
 ):
-    """Kernel to clear only the active slots in the hash table."""
+    """Kernel to clear only the active slots in the hash table.
+
+    Uses grid-stride loop for efficient thread utilization.
+    Reads count from GPU memory - works because all threads read before any writes.
+    """
     tid = wp.tid()
 
     # Read count from GPU - stored at active_slots[capacity]
+    # All threads read this value before any modifications happen
     count = active_slots[capacity]
 
-    if tid < count:
-        slot_idx = active_slots[tid]
+    # Grid-stride loop: each thread processes multiple entries if needed
+    i = tid
+    while i < count:
+        slot_idx = active_slots[i]
         keys[slot_idx] = HASHTABLE_EMPTY_KEY
         # Clear all value slots for this entry
         value_base = slot_idx * values_per_key
-        for i in range(values_per_key):
-            values[value_base + i] = wp.uint64(0)
+        for j in range(values_per_key):
+            values[value_base + j] = wp.uint64(0)
+        i += num_threads
+
+
+@wp.kernel
+def _zero_count_kernel(
+    active_slots: wp.array(dtype=wp.int32),
+    capacity: int,
+):
+    """Zero the count element after clearing."""
+    active_slots[capacity] = 0
 
 
 class ReductionHashTable:
@@ -195,12 +262,29 @@ class ReductionHashTable:
         self.active_slots.zero_()
 
     def clear_active(self):
-        """Clear only the active entries. CUDA graph capture compatible."""
+        """Clear only the active entries. CUDA graph capture compatible.
+
+        Uses two kernel launches:
+        1. Clear all active hashtable entries (keys + values) using grid-stride loop
+        2. Zero the count element
+
+        The two-kernel approach is needed to avoid race conditions on CPU where
+        threads execute sequentially.
+        """
+        # Use fixed thread count for efficient GPU utilization
+        # Grid-stride loop handles any number of active entries
+        num_threads = min(1024, self.capacity)
         wp.launch(
             _hashtable_clear_active_kernel,
-            dim=self.capacity,
-            inputs=[self.keys, self.values, self.active_slots, self.capacity, self.values_per_key],
+            dim=num_threads,
+            inputs=[self.keys, self.values, self.active_slots, self.capacity, self.values_per_key, num_threads],
             device=self.device,
         )
-        self.active_slots.zero_()
+        # Zero the count in a separate kernel to avoid CPU race condition
+        wp.launch(
+            _zero_count_kernel,
+            dim=1,
+            inputs=[self.active_slots, self.capacity],
+            device=self.device,
+        )
 
