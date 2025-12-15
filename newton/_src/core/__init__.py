@@ -18,6 +18,7 @@ from .hashtable import (
     HashTable,
     batch_insert,
     hashtable_insert,
+    hashtable_insert_slot,
     hashtable_insert_with_index,
     hashtable_lookup,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "HashTable",
     "batch_insert",
     "hashtable_insert",
+    "hashtable_insert_slot",
     "hashtable_insert_with_index",
     "hashtable_lookup",
     "quat_between_axes",

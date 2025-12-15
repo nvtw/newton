@@ -33,42 +33,39 @@ from typing import Any
 
 import warp as wp
 
-from newton._src.core.hashtable import HashTable, hashtable_insert_with_index
+from newton._src.core.hashtable import HashTable, hashtable_insert_slot
 
 from .contact_reduction import NUM_SPATIAL_DIRECTIONS, float_flip, get_scan_dir, get_slot
 
 # Bit layout for hashtable key (64 bits total):
-# - Bits 0-27:   shape_a (28 bits, up to ~268M shapes)
-# - Bits 28-55:  shape_b (28 bits, up to ~268M shapes)
-# - Bits 56-60:  icosahedron_bin (5 bits, 0-19)
-# - Bits 61-63:  scan_direction (3 bits, 0-5)
-# Total: 64 bits fully used
+# Key is (shape_a, shape_b, bin_id) - NO slot_id (slots are handled via values_per_key)
+# - Bits 0-28:   shape_a (29 bits, up to ~537M shapes)
+# - Bits 29-57:  shape_b (29 bits, up to ~537M shapes)
+# - Bits 58-62:  icosahedron_bin (5 bits, 0-19)
+# - Bit 63:      unused (could be used for flags)
+# Total: 63 bits used
 
-SHAPE_ID_BITS = wp.constant(wp.uint64(28))
-SHAPE_ID_MASK = wp.constant(wp.uint64((1 << 28) - 1))
+SHAPE_ID_BITS = wp.constant(wp.uint64(29))
+SHAPE_ID_MASK = wp.constant(wp.uint64((1 << 29) - 1))
 BIN_BITS = wp.constant(wp.uint64(5))
 BIN_MASK = wp.constant(wp.uint64((1 << 5) - 1))
-DIR_BITS = wp.constant(wp.uint64(3))
-DIR_MASK = wp.constant(wp.uint64((1 << 3) - 1))
 
 
 @wp.func
-def make_contact_key(shape_a: int, shape_b: int, bin_id: int, scan_dir: int) -> wp.uint64:
-    """Create a hashtable key from shape pair, normal bin, and scan direction.
+def make_contact_key(shape_a: int, shape_b: int, bin_id: int) -> wp.uint64:
+    """Create a hashtable key from shape pair and normal bin.
 
     Args:
         shape_a: First shape index
         shape_b: Second shape index
         bin_id: Icosahedron bin index (0-19)
-        scan_dir: Scan direction index (0-5)
 
     Returns:
         64-bit key for hashtable lookup
     """
     key = wp.uint64(shape_a) & SHAPE_ID_MASK
     key = key | ((wp.uint64(shape_b) & SHAPE_ID_MASK) << SHAPE_ID_BITS)
-    key = key | ((wp.uint64(bin_id) & BIN_MASK) << wp.uint64(56))
-    key = key | ((wp.uint64(scan_dir) & DIR_MASK) << wp.uint64(61))
+    key = key | ((wp.uint64(bin_id) & BIN_MASK) << wp.uint64(58))
     return key
 
 
@@ -132,6 +129,7 @@ class GlobalContactReducerData:
     ht_keys: wp.array(dtype=wp.uint64)
     ht_values: wp.array(dtype=wp.uint64)
     ht_active_slots: wp.array(dtype=wp.int32)
+    ht_values_per_key: int
 
 
 class GlobalContactReducer:
@@ -139,7 +137,11 @@ class GlobalContactReducer:
 
     This class manages:
     1. A global contact buffer storing contact data (struct of arrays)
-    2. A hashtable tracking the best contact per (shape_pair, bin, direction)
+    2. A hashtable tracking the best contact per (shape_pair, bin, slot)
+
+    The hashtable key is (shape_a, shape_b, bin_id). Each key has multiple
+    values (one per slot = direction × beta + deepest). This allows one thread
+    to process all slots for a bin and deduplicate locally.
 
     Contact data is packed into vec4 for efficient memory access:
     - position_depth: vec4(position.x, position.y, position.z, depth)
@@ -147,7 +149,7 @@ class GlobalContactReducer:
 
     Attributes:
         capacity: Maximum number of contacts that can be stored
-        hashtable_capacity: Capacity of the hashtable (auto-sized)
+        values_per_key: Number of value slots per hashtable entry (13 for 2 betas)
         position_depth: vec4 array storing position.xyz and depth
         normal_feature: vec4 array storing normal.xyz and feature
         shape_pairs: vec2i array storing (shape_a, shape_b) per contact
@@ -155,15 +157,27 @@ class GlobalContactReducer:
         hashtable: HashTable for tracking best contacts
     """
 
-    def __init__(self, capacity: int, device: str | None = None):
+    def __init__(
+        self,
+        capacity: int,
+        device: str | None = None,
+        num_betas: int = 2,
+    ):
         """Initialize the global contact reducer.
 
         Args:
             capacity: Maximum number of contacts to store
             device: Warp device (e.g., "cuda:0", "cpu")
+            num_betas: Number of depth thresholds for contact reduction.
+                       Total slots per bin = 6 directions * num_betas + 1 deepest.
+                       Default 2 gives 13 slots per bin.
         """
         self.capacity = capacity
         self.device = device
+        self.num_betas = num_betas
+
+        # Values per key: 6 directions × num_betas + 1 deepest
+        self.values_per_key = NUM_SPATIAL_DIRECTIONS * num_betas + 1
 
         # Contact buffer (struct of arrays with vec4 packing)
         self.position_depth = wp.zeros(capacity, dtype=wp.vec4, device=device)
@@ -173,10 +187,13 @@ class GlobalContactReducer:
         # Atomic counter for contact allocation
         self.contact_count = wp.zeros(1, dtype=wp.int32, device=device)
 
-        # Hashtable: sized for worst case of capacity contacts * 6 directions * some slack
-        # Each contact registers up to 6 entries (one per scan direction)
-        hashtable_size = capacity * NUM_SPATIAL_DIRECTIONS * 2  # 2x for load factor
-        self.hashtable = HashTable(hashtable_size, device=device)
+        # Hashtable: sized for worst case
+        # Keys are (shape_pair, bin), so max keys = num_contacts × 20 bins
+        # Use 2x for load factor
+        hashtable_size = capacity * 20 * 2
+        self.hashtable = HashTable(
+            hashtable_size, device=device, values_per_key=self.values_per_key
+        )
 
     def clear(self):
         """Clear all contacts and reset the reducer (full clear)."""
@@ -224,6 +241,7 @@ class GlobalContactReducer:
         data.ht_keys = self.hashtable.keys
         data.ht_values = self.hashtable.values
         data.ht_active_slots = self.hashtable.active_slots
+        data.ht_values_per_key = self.values_per_key
         return data
 
 
@@ -235,15 +253,9 @@ def export_and_reduce_contact(
     normal: wp.vec3,
     depth: float,
     feature: int,
-    # Reducer arrays
-    position_depth: wp.array(dtype=wp.vec4),
-    normal_feature: wp.array(dtype=wp.vec4),
-    shape_pairs: wp.array(dtype=wp.vec2i),
-    contact_count: wp.array(dtype=wp.int32),
-    ht_keys: wp.array(dtype=wp.uint64),
-    ht_values: wp.array(dtype=wp.uint64),
-    ht_active_slots: wp.array(dtype=wp.int32),
-    capacity: int,
+    reducer_data: GlobalContactReducerData,
+    beta0: float,
+    beta1: float,
 ) -> int:
     """Store a contact and register it in the hashtable for reduction.
 
@@ -251,10 +263,14 @@ def export_and_reduce_contact(
     1. Allocates a slot in the contact buffer
     2. Stores the contact data (packed into vec4)
     3. Computes the icosahedron bin from the normal
-    4. Registers the contact 6 times in the hashtable (once per scan direction)
+    4. Registers the contact for each (direction, beta) combination where depth < beta
+    5. Also registers for the max-depth slot (deepest contact per bin)
 
-    Each hashtable entry tracks the contact with the highest spatial projection
-    score for that (shape_pair, bin, direction) combination.
+    The hashtable key is (shape_a, shape_b, bin_id). Each key has values_per_key
+    value slots. The slot layout is:
+    - Slots 0..5: direction 0 beta 0, direction 0 beta 1, ..., direction 2 beta 1
+    - ...continues for all 6 directions × 2 betas...
+    - Slot 12: max depth slot (deepest contact per bin)
 
     Args:
         shape_a: First shape index
@@ -263,41 +279,64 @@ def export_and_reduce_contact(
         normal: Contact normal
         depth: Penetration depth (negative = penetrating)
         feature: Feature identifier for deduplication
-        position_depth: Contact buffer for position.xyz + depth
-        normal_feature: Contact buffer for normal.xyz + feature
-        shape_pairs: Contact buffer for shape pairs
-        contact_count: Atomic counter for allocation
-        ht_keys: Hashtable keys array
-        ht_values: Hashtable values array
-        ht_active_slots: Hashtable active slots array (size = ht_capacity + 1)
-        capacity: Maximum contact capacity
+        reducer_data: GlobalContactReducerData with all arrays
+        beta0: First depth threshold (typically large, e.g., 1000000.0)
+        beta1: Second depth threshold (typically small, e.g., 0.0001)
 
     Returns:
         Contact ID if successfully stored, -1 if buffer full
     """
     # Allocate contact slot
-    contact_id = wp.atomic_add(contact_count, 0, 1)
-    if contact_id >= capacity:
+    contact_id = wp.atomic_add(reducer_data.contact_count, 0, 1)
+    if contact_id >= reducer_data.capacity:
         return -1
 
     # Store contact data (packed into vec4)
-    position_depth[contact_id] = wp.vec4(position[0], position[1], position[2], depth)
-    normal_feature[contact_id] = wp.vec4(
+    reducer_data.position_depth[contact_id] = wp.vec4(position[0], position[1], position[2], depth)
+    reducer_data.normal_feature[contact_id] = wp.vec4(
         normal[0], normal[1], normal[2], int_as_float(wp.int32(feature))
     )
-    shape_pairs[contact_id] = wp.vec2i(shape_a, shape_b)
+    reducer_data.shape_pairs[contact_id] = wp.vec2i(shape_a, shape_b)
 
     # Get icosahedron bin from normal
     bin_id = get_slot(normal)
 
-    # Register in hashtable for all 6 scan directions
+    # Key is (shape_a, shape_b, bin_id) - NO slot in key
+    key = make_contact_key(shape_a, shape_b, bin_id)
+
+    # Register in hashtable for all 6 scan directions × 2 betas
     for dir_i in range(NUM_SPATIAL_DIRECTIONS):
         scan_dir = get_scan_dir(bin_id, dir_i)
         score = wp.dot(scan_dir, position)
-
-        key = make_contact_key(shape_a, shape_b, bin_id, dir_i)
         value = make_contact_value(score, contact_id)
-        hashtable_insert_with_index(key, value, ht_keys, ht_values, ht_active_slots)
+
+        # Beta 0 slot
+        if depth < beta0:
+            slot_id = dir_i * 2
+            hashtable_insert_slot(
+                key, slot_id, value,
+                reducer_data.ht_keys, reducer_data.ht_values,
+                reducer_data.ht_active_slots, reducer_data.ht_values_per_key
+            )
+
+        # Beta 1 slot
+        if depth < beta1:
+            slot_id = dir_i * 2 + 1
+            hashtable_insert_slot(
+                key, slot_id, value,
+                reducer_data.ht_keys, reducer_data.ht_values,
+                reducer_data.ht_active_slots, reducer_data.ht_values_per_key
+            )
+
+    # Also register for max-depth slot (last slot)
+    # Use -depth as score so atomic_max selects the deepest (most negative depth)
+    max_depth_slot_id = NUM_SPATIAL_DIRECTIONS * 2  # = 12
+    max_depth_value = make_contact_value(-depth, contact_id)
+    hashtable_insert_slot(
+        key, max_depth_slot_id, max_depth_value,
+        reducer_data.ht_keys, reducer_data.ht_values,
+        reducer_data.ht_active_slots, reducer_data.ht_values_per_key
+    )
 
     return contact_id
 
@@ -333,6 +372,8 @@ def unpack_contact(
 def write_contact_to_reducer(
     contact_data: Any,  # ContactData struct
     reducer_data: GlobalContactReducerData,
+    beta0: float,
+    beta1: float,
 ):
     """Writer function that stores contacts in GlobalContactReducer for reduction.
 
@@ -343,6 +384,8 @@ def write_contact_to_reducer(
     Args:
         contact_data: ContactData struct from contact computation
         reducer_data: GlobalContactReducerData struct with all reducer arrays
+        beta0: First depth threshold (typically large, e.g., 1000000.0)
+        beta1: Second depth threshold (typically small, e.g., 0.0001)
     """
     # Extract contact info from ContactData
     position = contact_data.contact_point_center
@@ -360,26 +403,26 @@ def write_contact_to_reducer(
         normal=normal,
         depth=depth,
         feature=feature,
-        position_depth=reducer_data.position_depth,
-        normal_feature=reducer_data.normal_feature,
-        shape_pairs=reducer_data.shape_pairs,
-        contact_count=reducer_data.contact_count,
-        ht_keys=reducer_data.ht_keys,
-        ht_values=reducer_data.ht_values,
-        ht_active_slots=reducer_data.ht_active_slots,
-        capacity=reducer_data.capacity,
+        reducer_data=reducer_data,
+        beta0=beta0,
+        beta1=beta1,
     )
 
 
-def create_export_reduced_contacts_kernel(writer_func: Any):
+def create_export_reduced_contacts_kernel(writer_func: Any, values_per_key: int = 13):
     """Create a kernel that exports reduced contacts using a custom writer function.
 
-    The kernel iterates over the active hashtable slots using grid stride loops,
-    extracts the winning contact ID from each slot, and calls the writer function.
+    The kernel processes one hashtable ENTRY per thread (not one value slot).
+    Each entry has values_per_key value slots. The thread reads all slots,
+    collects unique contact IDs, and exports each unique contact once.
+
+    This naturally deduplicates: one thread handles one (shape_pair, bin) entry
+    and can locally track which contact IDs it has already exported.
 
     Args:
         writer_func: A warp function with signature (ContactData, writer_data) -> None
                      This follows the same pattern as narrow_phase.py's write_contact_simple.
+        values_per_key: Number of value slots per hashtable entry (default 13 for 2 betas)
 
     Returns:
         A warp kernel that can be launched to export reduced contacts.
@@ -401,6 +444,7 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
         shape_data: wp.array(dtype=wp.vec4),
         # Parameters
         margin: float,
+        values_per_key_param: int,
         # Writer data (custom struct)
         writer_data: Any,
         # Grid stride parameters
@@ -408,69 +452,157 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
     ):
         """Export reduced contacts to the writer.
 
-        Uses grid stride loop to iterate over active hashtable slots.
-        For each slot, extracts the winning contact and calls the writer function.
+        Uses grid stride loop to iterate over active hashtable ENTRIES.
+        For each entry, reads all value slots, collects unique contact IDs,
+        and exports each unique contact once.
         """
         tid = wp.tid()
 
-        # Get number of active slots (stored at index = ht_capacity)
+        # Get number of active entries (stored at index = ht_capacity)
         ht_capacity = ht_keys.shape[0]
         num_active = ht_active_slots[ht_capacity]
 
-        # Grid stride loop over active slots
+        # Grid stride loop over active entries
         for i in range(tid, num_active, total_num_threads):
-            # Get the hashtable slot index
-            slot_idx = ht_active_slots[i]
+            # Get the hashtable entry index
+            entry_idx = ht_active_slots[i]
 
-            # Get the value from this slot (contains score in high bits, contact_id in low bits)
-            value = ht_values[slot_idx]
+            # Track exported contact IDs for this entry (up to 13 slots)
+            # Use a simple array to track seen IDs - most entries have few unique contacts
+            # Declare as dynamic variables using int() for Warp loop mutation
+            exported_ids_0 = int(-1)
+            exported_ids_1 = int(-1)
+            exported_ids_2 = int(-1)
+            exported_ids_3 = int(-1)
+            exported_ids_4 = int(-1)
+            exported_ids_5 = int(-1)
+            exported_ids_6 = int(-1)
+            exported_ids_7 = int(-1)
+            exported_ids_8 = int(-1)
+            exported_ids_9 = int(-1)
+            exported_ids_10 = int(-1)
+            exported_ids_11 = int(-1)
+            exported_ids_12 = int(-1)
+            num_exported = int(0)
 
-            # Extract contact ID from low 32 bits
-            contact_id = unpack_contact_id(value)
+            # Read all value slots for this entry
+            value_base = entry_idx * values_per_key_param
+            for slot in range(values_per_key_param):
+                value = ht_values[value_base + slot]
 
-            # Unpack contact data
-            position, normal, depth, feature = unpack_contact(
-                contact_id, position_depth, normal_feature
-            )
+                # Skip empty slots (value = 0)
+                if value == wp.uint64(0):
+                    continue
 
-            # Get shape pair
-            pair = shape_pairs[contact_id]
-            shape_a = pair[0]
-            shape_b = pair[1]
+                # Extract contact ID from low 32 bits
+                contact_id = unpack_contact_id(value)
 
-            # Extract thickness from shape_data (stored in w component)
-            thickness_a = shape_data[shape_a][3]
-            thickness_b = shape_data[shape_b][3]
+                # Check if we've already exported this contact ID
+                already_exported = False
+                if contact_id == exported_ids_0:
+                    already_exported = True
+                elif contact_id == exported_ids_1:
+                    already_exported = True
+                elif contact_id == exported_ids_2:
+                    already_exported = True
+                elif contact_id == exported_ids_3:
+                    already_exported = True
+                elif contact_id == exported_ids_4:
+                    already_exported = True
+                elif contact_id == exported_ids_5:
+                    already_exported = True
+                elif contact_id == exported_ids_6:
+                    already_exported = True
+                elif contact_id == exported_ids_7:
+                    already_exported = True
+                elif contact_id == exported_ids_8:
+                    already_exported = True
+                elif contact_id == exported_ids_9:
+                    already_exported = True
+                elif contact_id == exported_ids_10:
+                    already_exported = True
+                elif contact_id == exported_ids_11:
+                    already_exported = True
+                elif contact_id == exported_ids_12:
+                    already_exported = True
 
-            # Create ContactData struct
-            contact_data = ContactData()
-            contact_data.contact_point_center = position
-            contact_data.contact_normal_a_to_b = normal
-            contact_data.contact_distance = depth
-            # radius_eff is 0 for mesh-triangle contacts (triangles have no radius)
-            # For sphere/capsule contacts, this would need to be stored in the buffer
-            contact_data.radius_eff_a = 0.0
-            contact_data.radius_eff_b = 0.0
-            contact_data.thickness_a = thickness_a
-            contact_data.thickness_b = thickness_b
-            contact_data.shape_a = shape_a
-            contact_data.shape_b = shape_b
-            contact_data.margin = margin
-            contact_data.feature = wp.uint32(feature)
-            contact_data.feature_pair_key = wp.uint64(0)
+                if already_exported:
+                    continue
 
-            # Call the writer function
-            writer_func(contact_data, writer_data)
+                # Record this contact ID as exported
+                if num_exported == 0:
+                    exported_ids_0 = contact_id
+                elif num_exported == 1:
+                    exported_ids_1 = contact_id
+                elif num_exported == 2:
+                    exported_ids_2 = contact_id
+                elif num_exported == 3:
+                    exported_ids_3 = contact_id
+                elif num_exported == 4:
+                    exported_ids_4 = contact_id
+                elif num_exported == 5:
+                    exported_ids_5 = contact_id
+                elif num_exported == 6:
+                    exported_ids_6 = contact_id
+                elif num_exported == 7:
+                    exported_ids_7 = contact_id
+                elif num_exported == 8:
+                    exported_ids_8 = contact_id
+                elif num_exported == 9:
+                    exported_ids_9 = contact_id
+                elif num_exported == 10:
+                    exported_ids_10 = contact_id
+                elif num_exported == 11:
+                    exported_ids_11 = contact_id
+                elif num_exported == 12:
+                    exported_ids_12 = contact_id
+                num_exported = num_exported + 1
+
+                # Unpack contact data
+                position, normal, depth, feature = unpack_contact(
+                    contact_id, position_depth, normal_feature
+                )
+
+                # Get shape pair
+                pair = shape_pairs[contact_id]
+                shape_a = pair[0]
+                shape_b = pair[1]
+
+                # Extract thickness from shape_data (stored in w component)
+                thickness_a = shape_data[shape_a][3]
+                thickness_b = shape_data[shape_b][3]
+
+                # Create ContactData struct
+                contact_data = ContactData()
+                contact_data.contact_point_center = position
+                contact_data.contact_normal_a_to_b = normal
+                contact_data.contact_distance = depth
+                contact_data.radius_eff_a = 0.0
+                contact_data.radius_eff_b = 0.0
+                contact_data.thickness_a = thickness_a
+                contact_data.thickness_b = thickness_b
+                contact_data.shape_a = shape_a
+                contact_data.shape_b = shape_b
+                contact_data.margin = margin
+                contact_data.feature = wp.uint32(feature)
+                contact_data.feature_pair_key = wp.uint64(0)
+
+                # Call the writer function
+                writer_func(contact_data, writer_data)
 
     return export_reduced_contacts_kernel
 
 
-def create_mesh_triangle_contacts_to_reducer_kernel():
+def create_mesh_triangle_contacts_to_reducer_kernel(beta0: float, beta1: float):
     """Create a kernel that processes mesh-triangle contacts and stores them in GlobalContactReducer.
 
     This kernel processes triangle pairs (mesh-shape, convex-shape, triangle_index) and
     computes contacts using GJK/MPR, storing results in the GlobalContactReducer for
     subsequent reduction and export.
+
+    Args:
+        beta0: First depth threshold for contact reduction
+        beta1: Second depth threshold for contact reduction
 
     Returns:
         A warp kernel for processing mesh-triangle contacts with global reduction.
@@ -483,8 +615,13 @@ def create_mesh_triangle_contacts_to_reducer_kernel():
     )
     from newton._src.geometry.narrow_phase import extract_shape_data
 
-    # Create the contact computation function with our reducer writer
-    compute_contacts = create_compute_gjk_mpr_contacts(write_contact_to_reducer)
+    # Create a writer function that captures beta0 and beta1
+    @wp.func
+    def write_to_reducer_with_betas(
+        contact_data: Any,  # ContactData struct
+        reducer_data: GlobalContactReducerData,
+    ):
+        write_contact_to_reducer(contact_data, reducer_data, beta0, beta1)
 
     @wp.kernel(enable_backward=False)
     def mesh_triangle_contacts_to_reducer_kernel(
@@ -557,8 +694,8 @@ def create_mesh_triangle_contacts_to_reducer_kernel():
                 wp.uint32(shape_a), wp.uint32(shape_b), wp.uint32(tri_idx)
             )
 
-            # Compute contacts and store in reducer
-            compute_contacts(
+            # Compute and write contacts using GJK/MPR
+            wp.static(create_compute_gjk_mpr_contacts(write_to_reducer_with_betas))(
                 shape_data_a,
                 shape_data_b,
                 quat_a,

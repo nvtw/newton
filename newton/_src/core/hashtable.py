@@ -205,6 +205,67 @@ def hashtable_insert_with_index(
 
 
 @wp.func
+def hashtable_insert_slot(
+    key: wp.uint64,
+    slot_id: int,
+    value: wp.uint64,
+    keys: wp.array(dtype=wp.uint64),
+    values: wp.array(dtype=wp.uint64),
+    active_slots: wp.array(dtype=wp.int32),
+    values_per_key: int,
+) -> bool:
+    """Insert or update a value in a specific slot for a key.
+
+    Each key has `values_per_key` value slots. This function writes to the
+    specified slot_id within the entry. Different threads can write to different
+    slots of the same key concurrently.
+
+    Args:
+        key: The uint64 key to insert
+        slot_id: Which value slot to write to (0 to values_per_key-1)
+        value: The uint64 value to insert or max with
+        keys: The hash table keys array (length must be power of two)
+        values: The hash table values array (length = keys.length * values_per_key)
+        active_slots: Array of size (capacity + 1) tracking active entry indices.
+                      active_slots[capacity] is the count of active entries.
+        values_per_key: Number of value slots per key
+
+    Returns:
+        True if insertion/update succeeded, False if the table is full
+    """
+    capacity = keys.shape[0]
+    capacity_mask = capacity - 1
+    idx = _hashtable_hash(key, capacity_mask)
+
+    # Linear probing with a maximum of 'capacity' attempts
+    for _i in range(capacity):
+        # Try to claim this slot with our key
+        old_key = wp.atomic_cas(keys, idx, HASHTABLE_EMPTY_KEY, key)
+
+        if old_key == HASHTABLE_EMPTY_KEY:
+            # We claimed an empty slot - this is a NEW entry
+            # Add to active slots list
+            active_idx = wp.atomic_add(active_slots, capacity, 1)
+            if active_idx < capacity:
+                active_slots[active_idx] = idx
+            # Write to the specific value slot
+            value_idx = idx * values_per_key + slot_id
+            wp.atomic_max(values, value_idx, value)
+            return True
+        elif old_key == key:
+            # Key already exists - write to the specific value slot
+            value_idx = idx * values_per_key + slot_id
+            wp.atomic_max(values, value_idx, value)
+            return True
+
+        # Collision with different key - linear probe to next slot
+        idx = (idx + 1) & capacity_mask
+
+    # Table is full
+    return False
+
+
+@wp.func
 def hashtable_lookup(
     key: wp.uint64,
     keys: wp.array(dtype=wp.uint64),
@@ -248,6 +309,7 @@ def _hashtable_clear_active_kernel(
     values: wp.array(dtype=wp.uint64),
     active_slots: wp.array(dtype=wp.int32),
     capacity: int,
+    values_per_key: int,
 ):
     """Kernel to clear only the active slots in the hash table.
 
@@ -263,7 +325,10 @@ def _hashtable_clear_active_kernel(
     if tid < count:
         slot_idx = active_slots[tid]
         keys[slot_idx] = HASHTABLE_EMPTY_KEY
-        values[slot_idx] = wp.uint64(0)
+        # Clear all value slots for this entry
+        value_base = slot_idx * values_per_key
+        for i in range(values_per_key):
+            values[value_base + i] = wp.uint64(0)
 
 
 class HashTable:
@@ -278,18 +343,22 @@ class HashTable:
     The capacity is automatically rounded up to the next power of two for
     efficient modulo operations via bitwise AND.
 
+    Supports multiple values per key via the `values_per_key` parameter. When using
+    multiple values per key, use `hashtable_insert_slot()` to write to specific slots.
+
     Attributes:
         capacity: The maximum number of entries the table can hold (power of two)
         capacity_mask: The capacity mask (capacity - 1) for fast modulo
+        values_per_key: Number of value slots per key (default 1)
         keys: Warp array storing the keys
-        values: Warp array storing the values
+        values: Warp array storing the values (length = capacity * values_per_key)
         active_slots: Compact array tracking active slot indices. Size is (capacity + 1).
                       active_slots[0:count] contains the indices of occupied slots.
                       active_slots[capacity] is the count of active entries.
         device: The device where the table is allocated
     """
 
-    def __init__(self, capacity: int, device: str | None = None):
+    def __init__(self, capacity: int, device: str | None = None, values_per_key: int = 1):
         """Initialize an empty hash table.
 
         Args:
@@ -299,15 +368,19 @@ class HashTable:
                       (recommended: 2x expected entries for good performance).
             device: The Warp device to allocate on (e.g., "cuda:0", "cpu").
                     If None, uses the default device.
+            values_per_key: Number of value slots per key. Use with hashtable_insert_slot()
+                           for multi-value entries. Default is 1.
         """
         # Round up to next power of two for efficient modulo via bitwise AND
         self.capacity = _next_power_of_two(capacity)
         self.capacity_mask = self.capacity - 1
+        self.values_per_key = values_per_key
         self.device = device
 
         # Allocate arrays and initialize keys to empty sentinel
         self.keys = wp.zeros(self.capacity, dtype=wp.uint64, device=device)
-        self.values = wp.zeros(self.capacity, dtype=wp.uint64, device=device)
+        # Values array is capacity * values_per_key
+        self.values = wp.zeros(self.capacity * values_per_key, dtype=wp.uint64, device=device)
 
         # Active slots array: indices of occupied slots + count at the end
         # Size is capacity + 1, where active_slots[capacity] is the count
@@ -338,7 +411,7 @@ class HashTable:
         wp.launch(
             _hashtable_clear_active_kernel,
             dim=self.capacity,
-            inputs=[self.keys, self.values, self.active_slots, self.capacity],
+            inputs=[self.keys, self.values, self.active_slots, self.capacity, self.values_per_key],
             device=self.device,
         )
 

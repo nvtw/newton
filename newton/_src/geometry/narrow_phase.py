@@ -33,6 +33,7 @@ from ..geometry.collision_core import (
 )
 from ..geometry.contact_data import ContactData
 from ..geometry.contact_reduction import (
+    NUM_SPATIAL_DIRECTIONS,
     ContactReductionFunctions,
     ContactStruct,
     create_betas_array,
@@ -925,11 +926,22 @@ class NarrowPhase:
 
         # Create global contact reduction kernels for mesh-triangle contacts
         if self.reduce_contacts:
-            self.mesh_triangle_to_reducer_kernel = create_mesh_triangle_contacts_to_reducer_kernel()
-            self.export_reduced_contacts_kernel = create_export_reduced_contacts_kernel(writer_func)
+            # Use configured betas from contact_reduction_betas
+            beta0 = self.betas_tuple[0] if len(self.betas_tuple) > 0 else 1000000.0
+            beta1 = self.betas_tuple[1] if len(self.betas_tuple) > 1 else 0.0001
+            num_betas = len(self.betas_tuple)
+
+            self.mesh_triangle_to_reducer_kernel = create_mesh_triangle_contacts_to_reducer_kernel(
+                beta0=beta0, beta1=beta1
+            )
+            self.export_reduced_contacts_kernel = create_export_reduced_contacts_kernel(
+                writer_func, values_per_key=NUM_SPATIAL_DIRECTIONS * num_betas + 1
+            )
             # Global contact reducer for mesh-triangle contacts
             # Capacity is based on max_triangle_pairs since that's the max contacts we might generate
-            self.global_contact_reducer = GlobalContactReducer(max_triangle_pairs, device=device)
+            self.global_contact_reducer = GlobalContactReducer(
+                max_triangle_pairs, device=device, num_betas=num_betas
+            )
         else:
             self.mesh_triangle_to_reducer_kernel = None
             self.export_reduced_contacts_kernel = None
@@ -1142,6 +1154,7 @@ class NarrowPhase:
                     self.global_contact_reducer.shape_pairs,
                     shape_data,
                     default_margin,
+                    self.global_contact_reducer.values_per_key,
                     writer_data,
                     self.total_num_threads,
                 ],
