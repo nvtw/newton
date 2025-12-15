@@ -33,7 +33,7 @@ from typing import Any
 
 import warp as wp
 
-from newton._src.core.hashtable import HashTable, hashtable_insert_slot
+from newton._src.geometry.hashtable_reduction import ReductionHashTable, hashtable_insert_slot
 
 from .contact_reduction import NUM_SPATIAL_DIRECTIONS, float_flip, get_scan_dir, get_slot
 
@@ -154,7 +154,7 @@ class GlobalContactReducer:
         normal_feature: vec4 array storing normal.xyz and feature
         shape_pairs: vec2i array storing (shape_a, shape_b) per contact
         contact_count: Atomic counter for allocated contacts
-        hashtable: HashTable for tracking best contacts
+        hashtable: ReductionHashTable for tracking best contacts
     """
 
     def __init__(
@@ -176,7 +176,7 @@ class GlobalContactReducer:
         self.device = device
         self.num_betas = num_betas
 
-        # Values per key: 6 directions × num_betas + 1 deepest
+        # Values per key: 6 directions x num_betas + 1 deepest
         self.values_per_key = NUM_SPATIAL_DIRECTIONS * num_betas + 1
 
         # Contact buffer (struct of arrays with vec4 packing)
@@ -188,11 +188,11 @@ class GlobalContactReducer:
         self.contact_count = wp.zeros(1, dtype=wp.int32, device=device)
 
         # Hashtable: sized for worst case
-        # Keys are (shape_pair, bin), so max keys = num_contacts × 20 bins
+        # Keys are (shape_pair, bin), so max keys = num_contacts x 20 bins
         # Use 2x for load factor
         hashtable_size = capacity * 20 * 2
-        self.hashtable = HashTable(
-            hashtable_size, device=device, values_per_key=self.values_per_key
+        self.hashtable = ReductionHashTable(
+            hashtable_size, values_per_key=self.values_per_key, device=device
         )
 
     def clear(self):
@@ -204,27 +204,6 @@ class GlobalContactReducer:
         """Clear only the active entries (efficient for sparse usage)."""
         self.contact_count.zero_()
         self.hashtable.clear_active()
-
-    def get_contact_count(self) -> int:
-        """Get the current number of stored contacts."""
-        return int(self.contact_count.numpy()[0])
-
-    def get_active_slot_count(self) -> int:
-        """Get the number of active hashtable slots."""
-        return self.hashtable.get_active_count()
-
-    def get_winning_contacts(self) -> list[int]:
-        """Extract the winning contact IDs from the hashtable.
-
-        Returns:
-            List of unique contact IDs that won at least one hashtable slot
-        """
-        entries = self.hashtable.get_entries()
-        contact_ids = set()
-        for _key, value in entries:
-            contact_id = value & 0xFFFFFFFF
-            contact_ids.add(int(contact_id))
-        return sorted(contact_ids)
 
     def get_data_struct(self) -> GlobalContactReducerData:
         """Get a GlobalContactReducerData struct for passing to kernels.
