@@ -133,6 +133,7 @@ class GlobalContactReducerData:
     ht_keys: wp.array(dtype=wp.uint64)
     ht_values: wp.array(dtype=wp.uint64)
     ht_active_slots: wp.array(dtype=wp.int32)
+    ht_capacity: int
     ht_values_per_key: int
 
 
@@ -236,9 +237,9 @@ class GlobalContactReducer:
 
         for i in range(count):
             entry_idx = active_slots_np[i]
-            base = entry_idx * values_per_key
+            # Slot-major layout: slot * capacity + entry_idx
             for slot in range(values_per_key):
-                val = values[base + slot]
+                val = values[slot * capacity + entry_idx]
                 if val != 0:
                     contact_id = val & 0xFFFFFFFF
                     contact_ids.add(int(contact_id))
@@ -260,6 +261,7 @@ class GlobalContactReducer:
         data.ht_keys = self.hashtable.keys
         data.ht_values = self.hashtable.values
         data.ht_active_slots = self.hashtable.active_slots
+        data.ht_capacity = self.hashtable.capacity
         data.ht_values_per_key = self.values_per_key
         return data
 
@@ -340,10 +342,11 @@ def reduce_contact_in_hashtable(
     if entry_idx < 0:
         return
 
-    values_per_key = reducer_data.ht_values_per_key
+    ht_capacity = reducer_data.ht_capacity
 
-    # Register in hashtable for all 6 scan directions × 2 betas
+    # Register in hashtable for all 6 scan directions x 2 betas
     # Using direct slot access (no repeated hash lookups)
+    # Memory layout is slot-major for coalesced access
     for dir_i in range(NUM_SPATIAL_DIRECTIONS):
         scan_dir = get_scan_dir(bin_id, dir_i)
         score = wp.dot(scan_dir, position)
@@ -354,7 +357,7 @@ def reduce_contact_in_hashtable(
             slot_id = dir_i * 2
             hashtable_update_slot_direct(
                 entry_idx, slot_id, value,
-                reducer_data.ht_values, values_per_key
+                reducer_data.ht_values, ht_capacity
             )
 
         # Beta 1 slot (odd indices: 1, 3, 5, 7, 9, 11)
@@ -362,7 +365,7 @@ def reduce_contact_in_hashtable(
             slot_id = dir_i * 2 + 1
             hashtable_update_slot_direct(
                 entry_idx, slot_id, value,
-                reducer_data.ht_values, values_per_key
+                reducer_data.ht_values, ht_capacity
             )
 
     # Also register for max-depth slot (last slot = 12)
@@ -371,7 +374,7 @@ def reduce_contact_in_hashtable(
     max_depth_value = make_contact_value(-depth, contact_id)
     hashtable_update_slot_direct(
         entry_idx, max_depth_slot_id, max_depth_value,
-        reducer_data.ht_values, values_per_key
+        reducer_data.ht_values, ht_capacity
     )
 
 
@@ -572,10 +575,10 @@ def create_export_reduced_contacts_kernel(writer_func: Any, values_per_key: int 
             exported_ids_12 = int(-1)
             num_exported = int(0)
 
-            # Read all value slots for this entry
-            value_base = entry_idx * values_per_key_param
+            # Read all value slots for this entry (slot-major layout)
+            ht_capacity = ht_keys.shape[0]
             for slot in range(values_per_key_param):
-                value = ht_values[value_base + slot]
+                value = ht_values[slot * ht_capacity + entry_idx]
 
                 # Skip empty slots (value = 0)
                 if value == wp.uint64(0):

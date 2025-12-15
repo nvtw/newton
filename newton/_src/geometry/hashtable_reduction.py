@@ -119,21 +119,24 @@ def hashtable_update_slot_direct(
     slot_id: int,
     value: wp.uint64,
     values: wp.array(dtype=wp.uint64),
-    values_per_key: int,
+    capacity: int,
 ):
     """Update a value slot directly using the entry index.
 
     Use this after hashtable_find_or_insert() to write multiple values
     to the same entry without repeated hash lookups.
 
+    Memory layout is slot-major (SoA) for coalesced access:
+    [slot0_entry0, slot0_entry1, ..., slot0_entryN, slot1_entry0, ...]
+
     Args:
         entry_idx: Entry index from hashtable_find_or_insert()
         slot_id: Which value slot to write to (0 to values_per_key-1)
         value: The uint64 value to max with existing value
         values: The hash table values array
-        values_per_key: Number of value slots per key
+        capacity: Hashtable capacity (number of entries)
     """
-    value_idx = entry_idx * values_per_key + slot_id
+    value_idx = slot_id * capacity + entry_idx
     # Check before atomic to reduce contention
     if values[value_idx] < value:
         wp.atomic_max(values, value_idx, value)
@@ -147,7 +150,6 @@ def hashtable_insert_slot(
     keys: wp.array(dtype=wp.uint64),
     values: wp.array(dtype=wp.uint64),
     active_slots: wp.array(dtype=wp.int32),
-    values_per_key: int,
 ) -> bool:
     """Insert or update a value in a specific slot for a key.
 
@@ -167,15 +169,15 @@ def hashtable_insert_slot(
         values: The hash table values array (length = keys.length * values_per_key)
         active_slots: Array of size (capacity + 1) tracking active entry indices.
                       active_slots[capacity] is the count of active entries.
-        values_per_key: Number of value slots per key
 
     Returns:
         True if insertion/update succeeded, False if the table is full
     """
+    capacity = keys.shape[0]
     entry_idx = hashtable_find_or_insert(key, keys, active_slots)
     if entry_idx < 0:
         return False
-    hashtable_update_slot_direct(entry_idx, slot_id, value, values, values_per_key)
+    hashtable_update_slot_direct(entry_idx, slot_id, value, values, capacity)
     return True
 
 
@@ -192,6 +194,9 @@ def _hashtable_clear_active_kernel(
 
     Uses grid-stride loop for efficient thread utilization.
     Reads count from GPU memory - works because all threads read before any writes.
+
+    Memory layout is slot-major (SoA):
+    [slot0_entry0, slot0_entry1, ..., slot0_entryN, slot1_entry0, ...]
     """
     tid = wp.tid()
 
@@ -202,12 +207,12 @@ def _hashtable_clear_active_kernel(
     # Grid-stride loop: each thread processes multiple entries if needed
     i = tid
     while i < count:
-        slot_idx = active_slots[i]
-        keys[slot_idx] = HASHTABLE_EMPTY_KEY
-        # Clear all value slots for this entry
-        value_base = slot_idx * values_per_key
+        entry_idx = active_slots[i]
+        keys[entry_idx] = HASHTABLE_EMPTY_KEY
+        # Clear all value slots for this entry (slot-major layout)
         for j in range(values_per_key):
-            values[value_base + j] = wp.uint64(0)
+            value_idx = j * capacity + entry_idx
+            values[value_idx] = wp.uint64(0)
         i += num_threads
 
 
