@@ -38,6 +38,11 @@ from ..geometry.contact_reduction import (
     create_betas_array,
     synchronize,
 )
+from ..geometry.contact_reduction_global import (
+    GlobalContactReducer,
+    create_export_reduced_contacts_kernel,
+    create_mesh_triangle_contacts_to_reducer_kernel,
+)
 from ..geometry.sdf_contact import create_narrow_phase_process_mesh_mesh_contacts_kernel
 from ..geometry.sdf_utils import SDFData
 from ..geometry.support_function import (
@@ -918,6 +923,18 @@ class NarrowPhase:
             contact_reduction_funcs=self.contact_reduction_funcs,
         )
 
+        # Create global contact reduction kernels for mesh-triangle contacts
+        if self.reduce_contacts:
+            self.mesh_triangle_to_reducer_kernel = create_mesh_triangle_contacts_to_reducer_kernel()
+            self.export_reduced_contacts_kernel = create_export_reduced_contacts_kernel(writer_func)
+            # Global contact reducer for mesh-triangle contacts
+            # Capacity is based on max_triangle_pairs since that's the max contacts we might generate
+            self.global_contact_reducer = GlobalContactReducer(max_triangle_pairs, device=device)
+        else:
+            self.mesh_triangle_to_reducer_kernel = None
+            self.export_reduced_contacts_kernel = None
+            self.global_contact_reducer = None
+
         # Pre-allocate all intermediate buffers
         with wp.ScopedDevice(device):
             # Buffers for mesh collision handling
@@ -1085,23 +1102,71 @@ class NarrowPhase:
         )
 
         # Launch mesh triangle contact processing kernel
-        wp.launch(
-            kernel=self.mesh_triangle_contacts_kernel,
-            dim=self.total_num_threads,
-            inputs=[
-                shape_types,
-                shape_data,
-                shape_transform,
-                shape_source,
-                shape_contact_margin,
-                self.triangle_pairs,
-                self.triangle_pairs_count,
-                writer_data,
-                self.total_num_threads,
-            ],
-            device=device,
-            block_dim=self.block_dim,
-        )
+        if self.reduce_contacts and self.global_contact_reducer is not None:
+            # Use global contact reduction for mesh-triangle contacts
+            # First, clear the reducer
+            self.global_contact_reducer.clear_active()
+
+            # Collect contacts into the reducer
+            reducer_data = self.global_contact_reducer.get_data_struct()
+            wp.launch(
+                kernel=self.mesh_triangle_to_reducer_kernel,
+                dim=self.total_num_threads,
+                inputs=[
+                    shape_types,
+                    shape_data,
+                    shape_transform,
+                    shape_source,
+                    shape_contact_margin,
+                    self.triangle_pairs,
+                    self.triangle_pairs_count,
+                    reducer_data,
+                    self.total_num_threads,
+                ],
+                device=device,
+                block_dim=self.block_dim,
+            )
+
+            # Export reduced contacts to writer
+            # Use a default margin (could be made configurable)
+            default_margin = 0.01
+            wp.launch(
+                kernel=self.export_reduced_contacts_kernel,
+                dim=self.total_num_threads,
+                inputs=[
+                    self.global_contact_reducer.hashtable.keys,
+                    self.global_contact_reducer.hashtable.values,
+                    self.global_contact_reducer.hashtable.active_slots,
+                    self.global_contact_reducer.position_depth,
+                    self.global_contact_reducer.normal_feature,
+                    self.global_contact_reducer.shape_pairs,
+                    shape_data,
+                    default_margin,
+                    writer_data,
+                    self.total_num_threads,
+                ],
+                device=device,
+                block_dim=self.block_dim,
+            )
+        else:
+            # Direct contact processing without reduction
+            wp.launch(
+                kernel=self.mesh_triangle_contacts_kernel,
+                dim=self.total_num_threads,
+                inputs=[
+                    shape_types,
+                    shape_data,
+                    shape_transform,
+                    shape_source,
+                    shape_contact_margin,
+                    self.triangle_pairs,
+                    self.triangle_pairs_count,
+                    writer_data,
+                    self.total_num_threads,
+                ],
+                device=device,
+                block_dim=self.block_dim,
+            )
 
         # Launch mesh-mesh contact processing kernel (only if SDF data is available)
         # SDF-based mesh-mesh collision requires GPU (wp.Volume only supports CUDA)

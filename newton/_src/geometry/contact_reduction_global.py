@@ -113,6 +113,27 @@ def float_as_int(f: float) -> wp.int32:
     ...
 
 
+@wp.struct
+class GlobalContactReducerData:
+    """Struct for passing GlobalContactReducer arrays to kernels.
+
+    This struct bundles all the arrays needed for global contact reduction
+    so they can be passed as a single argument to warp kernels/functions.
+    """
+
+    # Contact buffer arrays
+    position_depth: wp.array(dtype=wp.vec4)
+    normal_feature: wp.array(dtype=wp.vec4)
+    shape_pairs: wp.array(dtype=wp.vec2i)
+    contact_count: wp.array(dtype=wp.int32)
+    capacity: int
+
+    # Hashtable arrays
+    ht_keys: wp.array(dtype=wp.uint64)
+    ht_values: wp.array(dtype=wp.uint64)
+    ht_active_slots: wp.array(dtype=wp.int32)
+
+
 class GlobalContactReducer:
     """Global contact reduction using hashtable-based tracking.
 
@@ -187,6 +208,23 @@ class GlobalContactReducer:
             contact_id = value & 0xFFFFFFFF
             contact_ids.add(int(contact_id))
         return sorted(contact_ids)
+
+    def get_data_struct(self) -> GlobalContactReducerData:
+        """Get a GlobalContactReducerData struct for passing to kernels.
+
+        Returns:
+            A GlobalContactReducerData struct containing all arrays.
+        """
+        data = GlobalContactReducerData()
+        data.position_depth = self.position_depth
+        data.normal_feature = self.normal_feature
+        data.shape_pairs = self.shape_pairs
+        data.contact_count = self.contact_count
+        data.capacity = self.capacity
+        data.ht_keys = self.hashtable.keys
+        data.ht_values = self.hashtable.values
+        data.ht_active_slots = self.hashtable.active_slots
+        return data
 
 
 @wp.func
@@ -291,6 +329,48 @@ def unpack_contact(
     return position, normal, depth, feature
 
 
+@wp.func
+def write_contact_to_reducer(
+    contact_data: Any,  # ContactData struct
+    reducer_data: GlobalContactReducerData,
+):
+    """Writer function that stores contacts in GlobalContactReducer for reduction.
+
+    This follows the same signature as write_contact_simple in narrow_phase.py,
+    so it can be used with create_compute_gjk_mpr_contacts and other contact
+    generation functions.
+
+    Args:
+        contact_data: ContactData struct from contact computation
+        reducer_data: GlobalContactReducerData struct with all reducer arrays
+    """
+    # Extract contact info from ContactData
+    position = contact_data.contact_point_center
+    normal = contact_data.contact_normal_a_to_b
+    depth = contact_data.contact_distance
+    shape_a = contact_data.shape_a
+    shape_b = contact_data.shape_b
+    feature = int(contact_data.feature)
+
+    # Store contact and register for reduction
+    export_and_reduce_contact(
+        shape_a=shape_a,
+        shape_b=shape_b,
+        position=position,
+        normal=normal,
+        depth=depth,
+        feature=feature,
+        position_depth=reducer_data.position_depth,
+        normal_feature=reducer_data.normal_feature,
+        shape_pairs=reducer_data.shape_pairs,
+        contact_count=reducer_data.contact_count,
+        ht_keys=reducer_data.ht_keys,
+        ht_values=reducer_data.ht_values,
+        ht_active_slots=reducer_data.ht_active_slots,
+        capacity=reducer_data.capacity,
+    )
+
+
 def create_export_reduced_contacts_kernel(writer_func: Any):
     """Create a kernel that exports reduced contacts using a custom writer function.
 
@@ -317,6 +397,8 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
         position_depth: wp.array(dtype=wp.vec4),
         normal_feature: wp.array(dtype=wp.vec4),
         shape_pairs: wp.array(dtype=wp.vec2i),
+        # Shape data for extracting thickness
+        shape_data: wp.array(dtype=wp.vec4),
         # Parameters
         margin: float,
         # Writer data (custom struct)
@@ -356,15 +438,21 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
             shape_a = pair[0]
             shape_b = pair[1]
 
+            # Extract thickness from shape_data (stored in w component)
+            thickness_a = shape_data[shape_a][3]
+            thickness_b = shape_data[shape_b][3]
+
             # Create ContactData struct
             contact_data = ContactData()
             contact_data.contact_point_center = position
             contact_data.contact_normal_a_to_b = normal
             contact_data.contact_distance = depth
+            # radius_eff is 0 for mesh-triangle contacts (triangles have no radius)
+            # For sphere/capsule contacts, this would need to be stored in the buffer
             contact_data.radius_eff_a = 0.0
             contact_data.radius_eff_b = 0.0
-            contact_data.thickness_a = 0.0
-            contact_data.thickness_b = 0.0
+            contact_data.thickness_a = thickness_a
+            contact_data.thickness_b = thickness_b
             contact_data.shape_a = shape_a
             contact_data.shape_b = shape_b
             contact_data.margin = margin
@@ -375,4 +463,116 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
             writer_func(contact_data, writer_data)
 
     return export_reduced_contacts_kernel
+
+
+def create_mesh_triangle_contacts_to_reducer_kernel():
+    """Create a kernel that processes mesh-triangle contacts and stores them in GlobalContactReducer.
+
+    This kernel processes triangle pairs (mesh-shape, convex-shape, triangle_index) and
+    computes contacts using GJK/MPR, storing results in the GlobalContactReducer for
+    subsequent reduction and export.
+
+    Returns:
+        A warp kernel for processing mesh-triangle contacts with global reduction.
+    """
+    # Import here to avoid circular imports
+    from newton._src.geometry.collision_core import (
+        build_pair_key3,
+        create_compute_gjk_mpr_contacts,
+        get_triangle_shape_from_mesh,
+    )
+    from newton._src.geometry.narrow_phase import extract_shape_data
+
+    # Create the contact computation function with our reducer writer
+    compute_contacts = create_compute_gjk_mpr_contacts(write_contact_to_reducer)
+
+    @wp.kernel(enable_backward=False)
+    def mesh_triangle_contacts_to_reducer_kernel(
+        shape_types: wp.array(dtype=int),
+        shape_data: wp.array(dtype=wp.vec4),
+        shape_transform: wp.array(dtype=wp.transform),
+        shape_source: wp.array(dtype=wp.uint64),
+        shape_contact_margin: wp.array(dtype=float),
+        triangle_pairs: wp.array(dtype=wp.vec3i),
+        triangle_pairs_count: wp.array(dtype=int),
+        reducer_data: GlobalContactReducerData,
+        total_num_threads: int,
+    ):
+        """Process triangle pairs and store contacts in GlobalContactReducer.
+
+        Uses grid stride loop over triangle pairs.
+        """
+        tid = wp.tid()
+
+        num_triangle_pairs = triangle_pairs_count[0]
+
+        for i in range(tid, num_triangle_pairs, total_num_threads):
+            if i >= triangle_pairs.shape[0]:
+                break
+
+            triple = triangle_pairs[i]
+            shape_a = triple[0]  # Mesh shape
+            shape_b = triple[1]  # Convex shape
+            tri_idx = triple[2]
+
+            # Get mesh data for shape A
+            mesh_id_a = shape_source[shape_a]
+            if mesh_id_a == wp.uint64(0):
+                continue
+
+            scale_data_a = shape_data[shape_a]
+            mesh_scale_a = wp.vec3(scale_data_a[0], scale_data_a[1], scale_data_a[2])
+
+            # Get mesh world transform
+            X_mesh_ws_a = shape_transform[shape_a]
+
+            # Extract triangle shape data from mesh
+            shape_data_a, v0_world = get_triangle_shape_from_mesh(
+                mesh_id_a, mesh_scale_a, X_mesh_ws_a, tri_idx
+            )
+
+            # Extract shape B data
+            pos_b, quat_b, shape_data_b, _scale_b, thickness_b = extract_shape_data(
+                shape_b,
+                shape_transform,
+                shape_types,
+                shape_data,
+                shape_source,
+            )
+
+            # Set pos_a to be vertex A (origin of triangle in local frame)
+            pos_a = v0_world
+            quat_a = wp.quat_identity()  # Triangle has no orientation
+
+            # Extract thickness for shape A
+            thickness_a = shape_data[shape_a][3]
+
+            # Use per-shape contact margin
+            margin_a = shape_contact_margin[shape_a]
+            margin_b = shape_contact_margin[shape_b]
+            margin = wp.max(margin_a, margin_b)
+
+            # Build pair key including triangle index
+            pair_key = build_pair_key3(
+                wp.uint32(shape_a), wp.uint32(shape_b), wp.uint32(tri_idx)
+            )
+
+            # Compute contacts and store in reducer
+            compute_contacts(
+                shape_data_a,
+                shape_data_b,
+                quat_a,
+                quat_b,
+                pos_a,
+                pos_b,
+                margin,
+                shape_a,
+                shape_b,
+                thickness_a,
+                thickness_b,
+                reducer_data,
+                pair_key,
+            )
+
+    return mesh_triangle_contacts_to_reducer_kernel
 

@@ -242,6 +242,30 @@ def hashtable_lookup(
     return HASHTABLE_EMPTY_KEY
 
 
+@wp.kernel
+def _hashtable_clear_active_kernel(
+    keys: wp.array(dtype=wp.uint64),
+    values: wp.array(dtype=wp.uint64),
+    active_slots: wp.array(dtype=wp.int32),
+    capacity: int,
+):
+    """Kernel to clear only the active slots in the hash table.
+
+    Reads count from GPU memory (active_slots[capacity]) to avoid CPU sync.
+    Each thread checks if its index is within the active count.
+    """
+    tid = wp.tid()
+
+    # Read count from GPU - stored at active_slots[capacity]
+    count = active_slots[capacity]
+
+    # Only clear if this thread is within the active range
+    if tid < count:
+        slot_idx = active_slots[tid]
+        keys[slot_idx] = HASHTABLE_EMPTY_KEY
+        values[slot_idx] = wp.uint64(0)
+
+
 class HashTable:
     """A GPU-friendly hash table with thread-safe insertion and atomic max value updates.
 
@@ -307,21 +331,18 @@ class HashTable:
 
         This is more efficient than clear() when the table is sparsely populated,
         as it only resets the slots that were actually used.
+
+        This method is CUDA graph capture compatible - no CPU synchronization.
         """
-        count = self.get_active_count()
-        if count == 0:
-            return
+        # Launch kernel with capacity threads - kernel reads count from GPU and checks bounds
+        wp.launch(
+            _hashtable_clear_active_kernel,
+            dim=self.capacity,
+            inputs=[self.keys, self.values, self.active_slots, self.capacity],
+            device=self.device,
+        )
 
-        if count > 0:
-            # Launch kernel to clear only active slots
-            wp.launch(
-                _hashtable_clear_active_kernel,
-                dim=count,
-                inputs=[self.keys, self.values, self.active_slots],
-                device=self.device,
-            )
-
-        # Reset the count
+        # Reset the active_slots array (including count at the end)
         self.active_slots.zero_()
 
     def get_active_count(self) -> int:
@@ -387,19 +408,6 @@ class HashTable:
             wp.array(compact_values, dtype=wp.uint64, device=self.device),
             len(compact_keys),
         )
-
-
-@wp.kernel
-def _hashtable_clear_active_kernel(
-    keys: wp.array(dtype=wp.uint64),
-    values: wp.array(dtype=wp.uint64),
-    active_slots: wp.array(dtype=wp.int32),
-):
-    """Kernel to clear only the active slots in the hash table."""
-    tid = wp.tid()
-    slot_idx = active_slots[tid]
-    keys[slot_idx] = HASHTABLE_EMPTY_KEY
-    values[slot_idx] = wp.uint64(0)
 
 
 # Kernel for batch insertion (useful for testing and simple use cases)

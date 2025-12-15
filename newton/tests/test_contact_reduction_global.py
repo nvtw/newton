@@ -499,6 +499,16 @@ class TestGlobalContactReducer(unittest.TestCase):
         contact_pair_key_out = wp.zeros(0, dtype=wp.uint64, device="cpu")
         contact_key_out = wp.zeros(0, dtype=wp.uint32, device="cpu")
 
+        # Create dummy shape_data for thickness lookup
+        # Shape IDs used: 0-4 and 100-104
+        num_shapes = 200
+        shape_data = wp.zeros(num_shapes, dtype=wp.vec4, device="cpu")
+        # Set some thickness values (stored in w component)
+        shape_data_np = shape_data.numpy()
+        for i in range(num_shapes):
+            shape_data_np[i] = [1.0, 1.0, 1.0, 0.01]  # scale xyz, thickness
+        shape_data = wp.array(shape_data_np, dtype=wp.vec4, device="cpu")
+
         writer_data = ContactWriterData()
         writer_data.contact_max = max_output
         writer_data.contact_count = contact_count_out
@@ -523,6 +533,7 @@ class TestGlobalContactReducer(unittest.TestCase):
                 reducer.position_depth,
                 reducer.normal_feature,
                 reducer.shape_pairs,
+                shape_data,
                 0.01,  # margin
                 writer_data,
                 total_threads,
