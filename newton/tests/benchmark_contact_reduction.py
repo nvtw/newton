@@ -200,7 +200,7 @@ def run_hashtable_benchmark(num_insertions: int, device: str = "cuda:0", num_ite
         Average time in milliseconds
     """
     values_per_key = 13
-    capacity = num_insertions * 40 * 2  # Lots of headroom
+    capacity = max(num_insertions * 4, 1024)  # Reduced headroom to avoid OOM
 
     from newton._src.geometry.hashtable_reduction import ReductionHashTable
     ht = ReductionHashTable(capacity, values_per_key=values_per_key, device=device)

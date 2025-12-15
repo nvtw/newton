@@ -205,6 +205,42 @@ class GlobalContactReducer:
         self.contact_count.zero_()
         self.hashtable.clear_active()
 
+    def get_contact_count(self) -> int:
+        """Get the current number of stored contacts."""
+        return int(self.contact_count.numpy()[0])
+
+    def get_active_slot_count(self) -> int:
+        """Get the number of active hashtable slots."""
+        # active_slots[capacity] stores the count
+        return int(self.hashtable.active_slots.numpy()[self.hashtable.capacity])
+
+    def get_winning_contacts(self) -> list[int]:
+        """Extract the winning contact IDs from the hashtable.
+
+        Returns:
+            List of unique contact IDs that won at least one hashtable slot
+        """
+        values = self.hashtable.values.numpy()
+        capacity = self.hashtable.capacity
+        values_per_key = self.hashtable.values_per_key
+
+        contact_ids = set()
+
+        # Iterate over active slots
+        active_slots_np = self.hashtable.active_slots.numpy()
+        count = active_slots_np[capacity]
+
+        for i in range(count):
+            entry_idx = active_slots_np[i]
+            base = entry_idx * values_per_key
+            for slot in range(values_per_key):
+                val = values[base + slot]
+                if val != 0:
+                    contact_id = val & 0xFFFFFFFF
+                    contact_ids.add(int(contact_id))
+
+        return sorted(contact_ids)
+
     def get_data_struct(self) -> GlobalContactReducerData:
         """Get a GlobalContactReducerData struct for passing to kernels.
 

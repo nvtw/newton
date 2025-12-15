@@ -48,12 +48,10 @@ def _next_power_of_two(n: int) -> int:
 
 @wp.func
 def _hashtable_hash(key: wp.uint64, capacity_mask: int) -> int:
-    """Compute hash index using FNV-1a style mixing."""
+    """Compute hash index using a simplified mixer."""
     h = key
     h = h ^ (h >> wp.uint64(33))
     h = h * wp.uint64(0xFF51AFD7ED558CCD)
-    h = h ^ (h >> wp.uint64(33))
-    h = h * wp.uint64(0xC4CEB9FE1A85EC53)
     h = h ^ (h >> wp.uint64(33))
     return int(h) & capacity_mask
 
@@ -93,27 +91,37 @@ def hashtable_insert_slot(
 
     # Linear probing with a maximum of 'capacity' attempts
     for _i in range(capacity):
-        # Try to claim this slot with our key
-        old_key = wp.atomic_cas(keys, idx, HASHTABLE_EMPTY_KEY, key)
+        # Optimization: Read first to avoid atomic if key already exists
+        # This is safe because keys only transition from EMPTY -> KEY, never change afterwards
+        stored_key = keys[idx]
 
-        if old_key == HASHTABLE_EMPTY_KEY:
-            # We claimed an empty slot - this is a NEW entry
-            # Add to active slots list
-            active_idx = wp.atomic_add(active_slots, capacity, 1)
-            if active_idx < capacity:
-                active_slots[active_idx] = idx
-            # Write to the specific value slot (no check needed - slot is fresh)
+        if stored_key == key:
+            # Key matches - write value
             value_idx = idx * values_per_key + slot_id
-            wp.atomic_max(values, value_idx, value)
-            return True
-        elif old_key == key:
-            # Key already exists - check if our value is larger before atomic
-            value_idx = idx * values_per_key + slot_id
-            # Early exit if current value is already >= our value
-            # This avoids expensive atomic operations when we can't win
             if values[value_idx] < value:
                 wp.atomic_max(values, value_idx, value)
             return True
+
+        if stored_key == HASHTABLE_EMPTY_KEY:
+            # Try to claim
+            old_key = wp.atomic_cas(keys, idx, HASHTABLE_EMPTY_KEY, key)
+
+            if old_key == HASHTABLE_EMPTY_KEY:
+                # We claimed an empty slot - this is a NEW entry
+                # Add to active slots list
+                active_idx = wp.atomic_add(active_slots, capacity, 1)
+                if active_idx < capacity:
+                    active_slots[active_idx] = idx
+                # Write to the specific value slot (no check needed - slot is fresh)
+                value_idx = idx * values_per_key + slot_id
+                wp.atomic_max(values, value_idx, value)
+                return True
+            elif old_key == key:
+                # Key already exists - check if our value is larger before atomic
+                value_idx = idx * values_per_key + slot_id
+                if values[value_idx] < value:
+                    wp.atomic_max(values, value_idx, value)
+                return True
 
         # Collision with different key - linear probe to next slot
         idx = (idx + 1) & capacity_mask

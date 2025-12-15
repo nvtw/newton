@@ -17,15 +17,14 @@
 
 import unittest
 
-import numpy as np
 import warp as wp
 
 from newton._src.geometry.contact_reduction_global import (
     GlobalContactReducer,
+    GlobalContactReducerData,
     create_export_reduced_contacts_kernel,
     export_and_reduce_contact,
     make_contact_key,
-    unpack_contact,
 )
 
 
@@ -43,14 +42,7 @@ class TestGlobalContactReducer(unittest.TestCase):
 
         @wp.kernel
         def store_contact_kernel(
-            position_depth: wp.array(dtype=wp.vec4),
-            normal_feature: wp.array(dtype=wp.vec4),
-            shape_pairs: wp.array(dtype=wp.vec2i),
-            contact_count: wp.array(dtype=wp.int32),
-            ht_keys: wp.array(dtype=wp.uint64),
-            ht_values: wp.array(dtype=wp.uint64),
-            ht_active_slots: wp.array(dtype=wp.int32),
-            capacity: int,
+            reducer_data: GlobalContactReducerData,
         ):
             contact_id = export_and_reduce_contact(
                 shape_a=0,
@@ -59,29 +51,16 @@ class TestGlobalContactReducer(unittest.TestCase):
                 normal=wp.vec3(0.0, 1.0, 0.0),
                 depth=-0.01,
                 feature=42,
-                position_depth=position_depth,
-                normal_feature=normal_feature,
-                shape_pairs=shape_pairs,
-                contact_count=contact_count,
-                ht_keys=ht_keys,
-                ht_values=ht_values,
-                ht_active_slots=ht_active_slots,
-                capacity=capacity,
+                reducer_data=reducer_data,
+                beta0=1000.0,
+                beta1=0.001,
             )
 
+        reducer_data = reducer.get_data_struct()
         wp.launch(
             store_contact_kernel,
             dim=1,
-            inputs=[
-                reducer.position_depth,
-                reducer.normal_feature,
-                reducer.shape_pairs,
-                reducer.contact_count,
-                reducer.hashtable.keys,
-                reducer.hashtable.values,
-                reducer.hashtable.active_slots,
-                reducer.capacity,
-            ],
+            inputs=[reducer_data],
             device="cpu",
         )
 
@@ -100,14 +79,7 @@ class TestGlobalContactReducer(unittest.TestCase):
 
         @wp.kernel
         def store_multiple_contacts_kernel(
-            position_depth: wp.array(dtype=wp.vec4),
-            normal_feature: wp.array(dtype=wp.vec4),
-            shape_pairs: wp.array(dtype=wp.vec2i),
-            contact_count: wp.array(dtype=wp.int32),
-            ht_keys: wp.array(dtype=wp.uint64),
-            ht_values: wp.array(dtype=wp.uint64),
-            ht_active_slots: wp.array(dtype=wp.int32),
-            capacity: int,
+            reducer_data: GlobalContactReducerData,
         ):
             tid = wp.tid()
             # All contacts have same shape pair and similar normal (pointing up)
@@ -120,33 +92,20 @@ class TestGlobalContactReducer(unittest.TestCase):
                 normal=wp.vec3(0.0, 1.0, 0.0),
                 depth=-0.01,
                 feature=tid,
-                position_depth=position_depth,
-                normal_feature=normal_feature,
-                shape_pairs=shape_pairs,
-                contact_count=contact_count,
-                ht_keys=ht_keys,
-                ht_values=ht_values,
-                ht_active_slots=ht_active_slots,
-                capacity=capacity,
+                reducer_data=reducer_data,
+                beta0=1000.0,
+                beta1=0.001,
             )
 
+        reducer_data = reducer.get_data_struct()
         wp.launch(
             store_multiple_contacts_kernel,
             dim=10,
-            inputs=[
-                reducer.position_depth,
-                reducer.normal_feature,
-                reducer.shape_pairs,
-                reducer.contact_count,
-                reducer.hashtable.keys,
-                reducer.hashtable.values,
-                reducer.hashtable.active_slots,
-                reducer.capacity,
-            ],
+            inputs=[reducer_data],
             device="cpu",
         )
 
-        # All 10 contacts should be stored
+        # All 10 contacts should be stored in buffer
         self.assertEqual(reducer.get_contact_count(), 10)
 
         # But only a few should win hashtable slots (spatial extremes)
@@ -161,14 +120,7 @@ class TestGlobalContactReducer(unittest.TestCase):
 
         @wp.kernel
         def store_different_pairs_kernel(
-            position_depth: wp.array(dtype=wp.vec4),
-            normal_feature: wp.array(dtype=wp.vec4),
-            shape_pairs: wp.array(dtype=wp.vec2i),
-            contact_count: wp.array(dtype=wp.int32),
-            ht_keys: wp.array(dtype=wp.uint64),
-            ht_values: wp.array(dtype=wp.uint64),
-            ht_active_slots: wp.array(dtype=wp.int32),
-            capacity: int,
+            reducer_data: GlobalContactReducerData,
         ):
             tid = wp.tid()
             # Each thread represents a different shape pair
@@ -179,29 +131,16 @@ class TestGlobalContactReducer(unittest.TestCase):
                 normal=wp.vec3(0.0, 1.0, 0.0),
                 depth=-0.01,
                 feature=tid,
-                position_depth=position_depth,
-                normal_feature=normal_feature,
-                shape_pairs=shape_pairs,
-                contact_count=contact_count,
-                ht_keys=ht_keys,
-                ht_values=ht_values,
-                ht_active_slots=ht_active_slots,
-                capacity=capacity,
+                reducer_data=reducer_data,
+                beta0=1000.0,
+                beta1=0.001,
             )
 
+        reducer_data = reducer.get_data_struct()
         wp.launch(
             store_different_pairs_kernel,
             dim=5,
-            inputs=[
-                reducer.position_depth,
-                reducer.normal_feature,
-                reducer.shape_pairs,
-                reducer.contact_count,
-                reducer.hashtable.keys,
-                reducer.hashtable.values,
-                reducer.hashtable.active_slots,
-                reducer.capacity,
-            ],
+            inputs=[reducer_data],
             device="cpu",
         )
 
@@ -219,14 +158,7 @@ class TestGlobalContactReducer(unittest.TestCase):
 
         @wp.kernel
         def store_one_contact_kernel(
-            position_depth: wp.array(dtype=wp.vec4),
-            normal_feature: wp.array(dtype=wp.vec4),
-            shape_pairs: wp.array(dtype=wp.vec2i),
-            contact_count: wp.array(dtype=wp.int32),
-            ht_keys: wp.array(dtype=wp.uint64),
-            ht_values: wp.array(dtype=wp.uint64),
-            ht_active_slots: wp.array(dtype=wp.int32),
-            capacity: int,
+            reducer_data: GlobalContactReducerData,
         ):
             export_and_reduce_contact(
                 shape_a=0,
@@ -235,29 +167,16 @@ class TestGlobalContactReducer(unittest.TestCase):
                 normal=wp.vec3(0.0, 1.0, 0.0),
                 depth=-0.01,
                 feature=0,
-                position_depth=position_depth,
-                normal_feature=normal_feature,
-                shape_pairs=shape_pairs,
-                contact_count=contact_count,
-                ht_keys=ht_keys,
-                ht_values=ht_values,
-                ht_active_slots=ht_active_slots,
-                capacity=capacity,
+                reducer_data=reducer_data,
+                beta0=1000.0,
+                beta1=0.001,
             )
 
+        reducer_data = reducer.get_data_struct()
         wp.launch(
             store_one_contact_kernel,
             dim=1,
-            inputs=[
-                reducer.position_depth,
-                reducer.normal_feature,
-                reducer.shape_pairs,
-                reducer.contact_count,
-                reducer.hashtable.keys,
-                reducer.hashtable.values,
-                reducer.hashtable.active_slots,
-                reducer.capacity,
-            ],
+            inputs=[reducer_data],
             device="cpu",
         )
 
@@ -275,14 +194,7 @@ class TestGlobalContactReducer(unittest.TestCase):
 
         @wp.kernel
         def stress_kernel(
-            position_depth: wp.array(dtype=wp.vec4),
-            normal_feature: wp.array(dtype=wp.vec4),
-            shape_pairs: wp.array(dtype=wp.vec2i),
-            contact_count: wp.array(dtype=wp.int32),
-            ht_keys: wp.array(dtype=wp.uint64),
-            ht_values: wp.array(dtype=wp.uint64),
-            ht_active_slots: wp.array(dtype=wp.int32),
-            capacity: int,
+            reducer_data: GlobalContactReducerData,
         ):
             tid = wp.tid()
             # 100 shape pairs, 50 contacts each = 5000 total
@@ -309,29 +221,16 @@ class TestGlobalContactReducer(unittest.TestCase):
                 normal=wp.vec3(nx / n_len, ny / n_len, nz / n_len),
                 depth=-0.01,
                 feature=tid,
-                position_depth=position_depth,
-                normal_feature=normal_feature,
-                shape_pairs=shape_pairs,
-                contact_count=contact_count,
-                ht_keys=ht_keys,
-                ht_values=ht_values,
-                ht_active_slots=ht_active_slots,
-                capacity=capacity,
+                reducer_data=reducer_data,
+                beta0=1000.0,
+                beta1=0.001,
             )
 
+        reducer_data = reducer.get_data_struct()
         wp.launch(
             stress_kernel,
             dim=5000,
-            inputs=[
-                reducer.position_depth,
-                reducer.normal_feature,
-                reducer.shape_pairs,
-                reducer.contact_count,
-                reducer.hashtable.keys,
-                reducer.hashtable.values,
-                reducer.hashtable.active_slots,
-                reducer.capacity,
-            ],
+            inputs=[reducer_data],
             device="cpu",
         )
 
@@ -351,14 +250,7 @@ class TestGlobalContactReducer(unittest.TestCase):
 
         @wp.kernel
         def store_contact_kernel(
-            position_depth: wp.array(dtype=wp.vec4),
-            normal_feature: wp.array(dtype=wp.vec4),
-            shape_pairs: wp.array(dtype=wp.vec2i),
-            contact_count: wp.array(dtype=wp.int32),
-            ht_keys: wp.array(dtype=wp.uint64),
-            ht_values: wp.array(dtype=wp.uint64),
-            ht_active_slots: wp.array(dtype=wp.int32),
-            capacity: int,
+            reducer_data: GlobalContactReducerData,
         ):
             export_and_reduce_contact(
                 shape_a=0,
@@ -367,30 +259,17 @@ class TestGlobalContactReducer(unittest.TestCase):
                 normal=wp.vec3(0.0, 1.0, 0.0),
                 depth=-0.01,
                 feature=42,
-                position_depth=position_depth,
-                normal_feature=normal_feature,
-                shape_pairs=shape_pairs,
-                contact_count=contact_count,
-                ht_keys=ht_keys,
-                ht_values=ht_values,
-                ht_active_slots=ht_active_slots,
-                capacity=capacity,
+                reducer_data=reducer_data,
+                beta0=1000.0,
+                beta1=0.001,
             )
 
+        reducer_data = reducer.get_data_struct()
         # Store one contact
         wp.launch(
             store_contact_kernel,
             dim=1,
-            inputs=[
-                reducer.position_depth,
-                reducer.normal_feature,
-                reducer.shape_pairs,
-                reducer.contact_count,
-                reducer.hashtable.keys,
-                reducer.hashtable.values,
-                reducer.hashtable.active_slots,
-                reducer.capacity,
-            ],
+            inputs=[reducer_data],
             device="cpu",
         )
 
@@ -406,16 +285,7 @@ class TestGlobalContactReducer(unittest.TestCase):
         wp.launch(
             store_contact_kernel,
             dim=1,
-            inputs=[
-                reducer.position_depth,
-                reducer.normal_feature,
-                reducer.shape_pairs,
-                reducer.contact_count,
-                reducer.hashtable.keys,
-                reducer.hashtable.values,
-                reducer.hashtable.active_slots,
-                reducer.capacity,
-            ],
+            inputs=[reducer_data],
             device="cpu",
         )
 
@@ -444,14 +314,7 @@ class TestGlobalContactReducer(unittest.TestCase):
         # Store some contacts
         @wp.kernel
         def store_contacts_kernel(
-            position_depth: wp.array(dtype=wp.vec4),
-            normal_feature: wp.array(dtype=wp.vec4),
-            shape_pairs: wp.array(dtype=wp.vec2i),
-            contact_count: wp.array(dtype=wp.int32),
-            ht_keys: wp.array(dtype=wp.uint64),
-            ht_values: wp.array(dtype=wp.uint64),
-            ht_active_slots: wp.array(dtype=wp.int32),
-            capacity: int,
+            reducer_data: GlobalContactReducerData,
         ):
             tid = wp.tid()
             # Different shape pairs so all contacts win
@@ -462,29 +325,16 @@ class TestGlobalContactReducer(unittest.TestCase):
                 normal=wp.vec3(0.0, 1.0, 0.0),
                 depth=-0.01,
                 feature=tid,
-                position_depth=position_depth,
-                normal_feature=normal_feature,
-                shape_pairs=shape_pairs,
-                contact_count=contact_count,
-                ht_keys=ht_keys,
-                ht_values=ht_values,
-                ht_active_slots=ht_active_slots,
-                capacity=capacity,
+                reducer_data=reducer_data,
+                beta0=1000.0,
+                beta1=0.001,
             )
 
+        reducer_data = reducer.get_data_struct()
         wp.launch(
             store_contacts_kernel,
             dim=5,
-            inputs=[
-                reducer.position_depth,
-                reducer.normal_feature,
-                reducer.shape_pairs,
-                reducer.contact_count,
-                reducer.hashtable.keys,
-                reducer.hashtable.values,
-                reducer.hashtable.active_slots,
-                reducer.capacity,
-            ],
+            inputs=[reducer_data],
             device="cpu",
         )
 
@@ -500,10 +350,8 @@ class TestGlobalContactReducer(unittest.TestCase):
         contact_key_out = wp.zeros(0, dtype=wp.uint32, device="cpu")
 
         # Create dummy shape_data for thickness lookup
-        # Shape IDs used: 0-4 and 100-104
         num_shapes = 200
         shape_data = wp.zeros(num_shapes, dtype=wp.vec4, device="cpu")
-        # Set some thickness values (stored in w component)
         shape_data_np = shape_data.numpy()
         for i in range(num_shapes):
             shape_data_np[i] = [1.0, 1.0, 1.0, 0.01]  # scale xyz, thickness
@@ -535,6 +383,7 @@ class TestGlobalContactReducer(unittest.TestCase):
                 reducer.shape_pairs,
                 shape_data,
                 0.01,  # margin
+                reducer.values_per_key,
                 writer_data,
                 total_threads,
             ],
@@ -545,8 +394,6 @@ class TestGlobalContactReducer(unittest.TestCase):
         num_exported = int(contact_count_out.numpy()[0])
         print(f"Exported {num_exported} contacts from {num_active} active hashtable slots")
 
-        # All 5 shape pairs should have at least some contacts exported
-        # The exact number depends on how many unique slots were created
         self.assertGreater(num_exported, 0)
 
 
@@ -565,20 +412,21 @@ class TestKeyConstruction(unittest.TestCase):
             keys_out: wp.array(dtype=wp.uint64),
         ):
             # Test various combinations
-            keys_out[0] = make_contact_key(0, 1, 0, 0)
-            keys_out[1] = make_contact_key(1, 0, 0, 0)  # Swapped shapes
-            keys_out[2] = make_contact_key(0, 1, 1, 0)  # Different bin
-            keys_out[3] = make_contact_key(0, 1, 0, 1)  # Different direction
-            keys_out[4] = make_contact_key(100, 200, 10, 3)  # Larger values
+            keys_out[0] = make_contact_key(0, 1, 0)
+            keys_out[1] = make_contact_key(1, 0, 0)  # Swapped shapes
+            keys_out[2] = make_contact_key(0, 1, 1)  # Different bin
+            keys_out[3] = make_contact_key(100, 200, 10)  # Larger values
+            keys_out[4] = make_contact_key(0, 1, 0)  # Duplicate
 
         keys = wp.zeros(5, dtype=wp.uint64, device="cpu")
         wp.launch(compute_keys_kernel, dim=1, inputs=[keys], device="cpu")
 
         keys_np = keys.numpy()
-        # All keys should be unique
-        self.assertEqual(len(set(keys_np)), 5)
+        # First 4 keys should be unique
+        self.assertEqual(len(set(keys_np[:4])), 4)
+        # 5th key is duplicate of 1st
+        self.assertEqual(keys_np[0], keys_np[4])
 
 
 if __name__ == "__main__":
     unittest.main()
-
