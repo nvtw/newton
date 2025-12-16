@@ -13,14 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GPU-friendly hash table optimized for contact reduction.
+"""GPU-friendly hash table for concurrent key-to-index mapping.
 
-This module provides a specialized hash table for tracking best contacts
-during global contact reduction. Key features:
-- Thread-safe insertion with atomic max for selecting best contacts
-- Multiple values per key (one per reduction slot)
-- Active slot tracking for efficient clearing
+This module provides a generic hash table that maps keys to entry indices.
+It is designed for GPU kernels where many threads insert concurrently.
+
+Key features:
+- Thread-safe insertion using atomic compare-and-swap
+- Active entry tracking for efficient clearing
 - Power-of-two capacity for fast modulo via bitwise AND
+
+The hash table does NOT store values - it only maps keys to entry indices.
+Callers can use these indices to access their own value storage.
 """
 
 from __future__ import annotations
@@ -65,8 +69,7 @@ def hashtable_find_or_insert(
     """Find or insert a key and return the entry index.
 
     This function locates an existing entry or creates a new one for the key.
-    Once you have the entry index, use hashtable_update_slot_direct() to
-    write values to specific slots without repeated hash lookups.
+    The returned entry index can be used to access caller-managed value storage.
 
     Args:
         key: The uint64 key to find or insert
@@ -113,90 +116,17 @@ def hashtable_find_or_insert(
     return -1
 
 
-@wp.func
-def hashtable_update_slot_direct(
-    entry_idx: int,
-    slot_id: int,
-    value: wp.uint64,
-    values: wp.array(dtype=wp.uint64),
-    capacity: int,
-):
-    """Update a value slot directly using the entry index.
-
-    Use this after hashtable_find_or_insert() to write multiple values
-    to the same entry without repeated hash lookups.
-
-    Memory layout is slot-major (SoA) for coalesced access:
-    [slot0_entry0, slot0_entry1, ..., slot0_entryN, slot1_entry0, ...]
-
-    Args:
-        entry_idx: Entry index from hashtable_find_or_insert()
-        slot_id: Which value slot to write to (0 to values_per_key-1)
-        value: The uint64 value to max with existing value
-        values: The hash table values array
-        capacity: Hashtable capacity (number of entries)
-    """
-    value_idx = slot_id * capacity + entry_idx
-    # Check before atomic to reduce contention
-    if values[value_idx] < value:
-        wp.atomic_max(values, value_idx, value)
-
-
-@wp.func
-def hashtable_insert_slot(
-    key: wp.uint64,
-    slot_id: int,
-    value: wp.uint64,
-    keys: wp.array(dtype=wp.uint64),
-    values: wp.array(dtype=wp.uint64),
-    active_slots: wp.array(dtype=wp.int32),
-) -> bool:
-    """Insert or update a value in a specific slot for a key.
-
-    Each key has `values_per_key` value slots. This function writes to the
-    specified slot_id within the entry. Different threads can write to different
-    slots of the same key concurrently using atomic_max.
-
-    For inserting multiple values to the same key, prefer using
-    hashtable_find_or_insert() + hashtable_update_slot_direct() to avoid
-    repeated hash lookups.
-
-    Args:
-        key: The uint64 key to insert
-        slot_id: Which value slot to write to (0 to values_per_key-1)
-        value: The uint64 value to insert or max with
-        keys: The hash table keys array (length must be power of two)
-        values: The hash table values array (length = keys.length * values_per_key)
-        active_slots: Array of size (capacity + 1) tracking active entry indices.
-                      active_slots[capacity] is the count of active entries.
-
-    Returns:
-        True if insertion/update succeeded, False if the table is full
-    """
-    capacity = keys.shape[0]
-    entry_idx = hashtable_find_or_insert(key, keys, active_slots)
-    if entry_idx < 0:
-        return False
-    hashtable_update_slot_direct(entry_idx, slot_id, value, values, capacity)
-    return True
-
-
 @wp.kernel
-def _hashtable_clear_active_kernel(
+def _hashtable_clear_keys_kernel(
     keys: wp.array(dtype=wp.uint64),
-    values: wp.array(dtype=wp.uint64),
     active_slots: wp.array(dtype=wp.int32),
     capacity: int,
-    values_per_key: int,
     num_threads: int,
 ):
-    """Kernel to clear only the active slots in the hash table.
+    """Kernel to clear only the active keys in the hash table.
 
     Uses grid-stride loop for efficient thread utilization.
     Reads count from GPU memory - works because all threads read before any writes.
-
-    Memory layout is slot-major (SoA):
-    [slot0_entry0, slot0_entry1, ..., slot0_entryN, slot1_entry0, ...]
     """
     tid = wp.tid()
 
@@ -209,10 +139,6 @@ def _hashtable_clear_active_kernel(
     while i < count:
         entry_idx = active_slots[i]
         keys[entry_idx] = HASHTABLE_EMPTY_KEY
-        # Clear all value slots for this entry (slot-major layout)
-        for j in range(values_per_key):
-            value_idx = j * capacity + entry_idx
-            values[value_idx] = wp.uint64(0)
         i += num_threads
 
 
@@ -225,37 +151,35 @@ def _zero_count_kernel(
     active_slots[capacity] = 0
 
 
-class ReductionHashTable:
-    """Hash table optimized for contact reduction.
+class HashTable:
+    """Generic hash table for concurrent key-to-index mapping.
 
     Uses open addressing with linear probing. Designed for GPU kernels
-    where many threads insert concurrently. Supports multiple values per key
-    for storing reduction slots (one per direction/beta combination).
+    where many threads insert concurrently.
+
+    This hash table does NOT store values - it only maps keys to entry indices.
+    Callers can use the entry indices to access their own value storage with
+    whatever layout they prefer.
 
     Attributes:
         capacity: Maximum number of unique keys (power of two)
-        values_per_key: Number of value slots per key
         keys: Warp array storing the keys
-        values: Warp array storing the values (length = capacity * values_per_key)
         active_slots: Array tracking active slot indices (size = capacity + 1)
         device: The device where the table is allocated
     """
 
-    def __init__(self, capacity: int, values_per_key: int, device: str | None = None):
+    def __init__(self, capacity: int, device: str | None = None):
         """Initialize an empty hash table.
 
         Args:
             capacity: Maximum number of unique keys. Rounded up to power of two.
-            values_per_key: Number of value slots per key.
             device: Warp device (e.g., "cuda:0", "cpu").
         """
         self.capacity = _next_power_of_two(capacity)
-        self.values_per_key = values_per_key
         self.device = device
 
         # Allocate arrays
         self.keys = wp.zeros(self.capacity, dtype=wp.uint64, device=device)
-        self.values = wp.zeros(self.capacity * values_per_key, dtype=wp.uint64, device=device)
         self.active_slots = wp.zeros(self.capacity + 1, dtype=wp.int32, device=device)
 
         self.clear()
@@ -263,14 +187,13 @@ class ReductionHashTable:
     def clear(self):
         """Clear all entries in the hash table."""
         self.keys.fill_(_HASHTABLE_EMPTY_KEY_VALUE)
-        self.values.zero_()
         self.active_slots.zero_()
 
     def clear_active(self):
         """Clear only the active entries. CUDA graph capture compatible.
 
         Uses two kernel launches:
-        1. Clear all active hashtable entries (keys + values) using grid-stride loop
+        1. Clear all active hashtable keys using grid-stride loop
         2. Zero the count element
 
         The two-kernel approach is needed to avoid race conditions on CPU where
@@ -280,9 +203,9 @@ class ReductionHashTable:
         # Grid-stride loop handles any number of active entries
         num_threads = min(1024, self.capacity)
         wp.launch(
-            _hashtable_clear_active_kernel,
+            _hashtable_clear_keys_kernel,
             dim=num_threads,
-            inputs=[self.keys, self.values, self.active_slots, self.capacity, self.values_per_key, num_threads],
+            inputs=[self.keys, self.active_slots, self.capacity, num_threads],
             device=self.device,
         )
         # Zero the count in a separate kernel to avoid CPU race condition
@@ -292,4 +215,3 @@ class ReductionHashTable:
             inputs=[self.active_slots, self.capacity],
             device=self.device,
         )
-

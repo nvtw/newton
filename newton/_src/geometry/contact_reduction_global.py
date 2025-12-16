@@ -33,10 +33,10 @@ from typing import Any
 
 import warp as wp
 
-from newton._src.geometry.hashtable_reduction import (
-    ReductionHashTable,
+from newton._src.geometry.hashtable import (
+    HASHTABLE_EMPTY_KEY,
+    HashTable,
     hashtable_find_or_insert,
-    hashtable_update_slot_direct,
 )
 
 from .contact_reduction import (
@@ -46,6 +46,78 @@ from .contact_reduction import (
     get_spatial_direction_2d,
     project_point_to_plane,
 )
+
+
+# =============================================================================
+# Reduction slot functions (specific to contact reduction)
+# =============================================================================
+# These functions handle the slot-major value storage used for contact reduction.
+# Memory layout is slot-major (SoA) for coalesced GPU access:
+# [slot0_entry0, slot0_entry1, ..., slot0_entryN, slot1_entry0, ...]
+
+@wp.func
+def reduction_update_slot(
+    entry_idx: int,
+    slot_id: int,
+    value: wp.uint64,
+    values: wp.array(dtype=wp.uint64),
+    capacity: int,
+):
+    """Update a reduction slot using atomic max.
+
+    Use this after hashtable_find_or_insert() to write multiple values
+    to the same entry without repeated hash lookups.
+
+    Args:
+        entry_idx: Entry index from hashtable_find_or_insert()
+        slot_id: Which value slot to write to (0 to values_per_key-1)
+        value: The uint64 value to max with existing value
+        values: Values array in slot-major layout
+        capacity: Hashtable capacity (number of entries)
+    """
+    value_idx = slot_id * capacity + entry_idx
+    # Check before atomic to reduce contention
+    if values[value_idx] < value:
+        wp.atomic_max(values, value_idx, value)
+
+
+@wp.func
+def reduction_insert_slot(
+    key: wp.uint64,
+    slot_id: int,
+    value: wp.uint64,
+    keys: wp.array(dtype=wp.uint64),
+    values: wp.array(dtype=wp.uint64),
+    active_slots: wp.array(dtype=wp.int32),
+) -> bool:
+    """Insert or update a value in a specific reduction slot.
+
+    Convenience function that combines hashtable_find_or_insert()
+    and reduction_update_slot(). For inserting multiple values to
+    the same key, prefer using those functions separately.
+
+    Args:
+        key: The uint64 key to insert
+        slot_id: Which value slot to write to (0 to values_per_key-1)
+        value: The uint64 value to insert or max with
+        keys: The hash table keys array (length must be power of two)
+        values: Values array in slot-major layout
+        active_slots: Array of size (capacity + 1) tracking active entry indices.
+
+    Returns:
+        True if insertion/update succeeded, False if the table is full
+    """
+    capacity = keys.shape[0]
+    entry_idx = hashtable_find_or_insert(key, keys, active_slots)
+    if entry_idx < 0:
+        return False
+    reduction_update_slot(entry_idx, slot_id, value, values, capacity)
+    return True
+
+
+# =============================================================================
+# Contact key/value packing
+# =============================================================================
 
 # Bit layout for hashtable key (64 bits total):
 # Key is (shape_a, shape_b, bin_id) - NO slot_id (slots are handled via values_per_key)
@@ -143,6 +215,52 @@ class GlobalContactReducerData:
     ht_values_per_key: int
 
 
+@wp.kernel
+def _clear_active_kernel(
+    # Hashtable arrays
+    ht_keys: wp.array(dtype=wp.uint64),
+    ht_values: wp.array(dtype=wp.uint64),
+    ht_active_slots: wp.array(dtype=wp.int32),
+    ht_capacity: int,
+    values_per_key: int,
+    num_threads: int,
+):
+    """Kernel to clear active hashtable entries (keys and values).
+
+    Uses grid-stride loop for efficient thread utilization.
+    Clears both keys (to EMPTY) and all value slots (to 0) for each active entry.
+
+    Memory layout for values is slot-major (SoA):
+    [slot0_entry0, slot0_entry1, ..., slot0_entryN, slot1_entry0, ...]
+    """
+    tid = wp.tid()
+
+    # Read count from GPU - stored at active_slots[capacity]
+    count = ht_active_slots[ht_capacity]
+
+    # Grid-stride loop: each thread processes multiple entries if needed
+    i = tid
+    while i < count:
+        entry_idx = ht_active_slots[i]
+        ht_keys[entry_idx] = HASHTABLE_EMPTY_KEY
+        # Clear all value slots for this entry (slot-major layout)
+        for j in range(values_per_key):
+            value_idx = j * ht_capacity + entry_idx
+            ht_values[value_idx] = wp.uint64(0)
+        i += num_threads
+
+
+@wp.kernel
+def _zero_count_and_contacts_kernel(
+    ht_active_slots: wp.array(dtype=wp.int32),
+    contact_count: wp.array(dtype=wp.int32),
+    ht_capacity: int,
+):
+    """Zero the active slots count and contact count."""
+    ht_active_slots[ht_capacity] = 0
+    contact_count[0] = 0
+
+
 class GlobalContactReducer:
     """Global contact reduction using hashtable-based tracking.
 
@@ -151,7 +269,7 @@ class GlobalContactReducer:
     2. A hashtable tracking the best contact per (shape_pair, bin, slot)
 
     The hashtable key is (shape_a, shape_b, bin_id). Each key has multiple
-    values (one per slot = direction × beta + deepest). This allows one thread
+    values (one per slot = direction x beta + deepest). This allows one thread
     to process all slots for a bin and deduplicate locally.
 
     Contact data is packed into vec4 for efficient memory access:
@@ -165,7 +283,8 @@ class GlobalContactReducer:
         normal_feature: vec4 array storing normal.xyz and feature
         shape_pairs: vec2i array storing (shape_a, shape_b) per contact
         contact_count: Atomic counter for allocated contacts
-        hashtable: ReductionHashTable for tracking best contacts
+        hashtable: HashTable for tracking best contacts (keys only)
+        ht_values: Values array for hashtable (managed here, not by HashTable)
     """
 
     def __init__(
@@ -202,17 +321,55 @@ class GlobalContactReducer:
         # Keys are (shape_pair, bin), so max keys = num_contacts x 20 bins
         # Use 2x for load factor
         hashtable_size = capacity * 20 * 2
-        self.hashtable = ReductionHashTable(hashtable_size, values_per_key=self.values_per_key, device=device)
+        self.hashtable = HashTable(hashtable_size, device=device)
+
+        # Values array for hashtable - managed here, not by HashTable
+        # This is contact-reduction-specific (slot-major layout with values_per_key slots)
+        self.ht_values = wp.zeros(
+            self.hashtable.capacity * self.values_per_key, dtype=wp.uint64, device=device
+        )
 
     def clear(self):
         """Clear all contacts and reset the reducer (full clear)."""
         self.contact_count.zero_()
         self.hashtable.clear()
+        self.ht_values.zero_()
 
     def clear_active(self):
-        """Clear only the active entries (efficient for sparse usage)."""
-        self.contact_count.zero_()
-        self.hashtable.clear_active()
+        """Clear only the active entries (efficient for sparse usage).
+
+        Uses a combined kernel that clears both hashtable keys and values,
+        followed by a small kernel to zero the counters.
+        """
+        # Use fixed thread count for efficient GPU utilization
+        num_threads = min(1024, self.hashtable.capacity)
+
+        # Single kernel clears both keys and values for active entries
+        wp.launch(
+            _clear_active_kernel,
+            dim=num_threads,
+            inputs=[
+                self.hashtable.keys,
+                self.ht_values,
+                self.hashtable.active_slots,
+                self.hashtable.capacity,
+                self.values_per_key,
+                num_threads,
+            ],
+            device=self.device,
+        )
+
+        # Zero the counts in a separate kernel
+        wp.launch(
+            _zero_count_and_contacts_kernel,
+            dim=1,
+            inputs=[
+                self.hashtable.active_slots,
+                self.contact_count,
+                self.hashtable.capacity,
+            ],
+            device=self.device,
+        )
 
     def get_contact_count(self) -> int:
         """Get the current number of stored contacts."""
@@ -229,9 +386,9 @@ class GlobalContactReducer:
         Returns:
             List of unique contact IDs that won at least one hashtable slot
         """
-        values = self.hashtable.values.numpy()
+        values = self.ht_values.numpy()
         capacity = self.hashtable.capacity
-        values_per_key = self.hashtable.values_per_key
+        values_per_key = self.values_per_key
 
         contact_ids = set()
 
@@ -263,7 +420,7 @@ class GlobalContactReducer:
         data.contact_count = self.contact_count
         data.capacity = self.capacity
         data.ht_keys = self.hashtable.keys
-        data.ht_values = self.hashtable.values
+        data.ht_values = self.ht_values
         data.ht_active_slots = self.hashtable.active_slots
         data.ht_capacity = self.hashtable.capacity
         data.ht_values_per_key = self.values_per_key
@@ -369,18 +526,18 @@ def reduce_contact_in_hashtable(
         # Beta 0 slot (even indices: 0, 2, 4, 6, 8, 10)
         if use_beta0:
             slot_id = dir_i * 2
-            hashtable_update_slot_direct(entry_idx, slot_id, value, reducer_data.ht_values, ht_capacity)
+            reduction_update_slot(entry_idx, slot_id, value, reducer_data.ht_values, ht_capacity)
 
         # Beta 1 slot (odd indices: 1, 3, 5, 7, 9, 11)
         if use_beta1:
             slot_id = dir_i * 2 + 1
-            hashtable_update_slot_direct(entry_idx, slot_id, value, reducer_data.ht_values, ht_capacity)
+            reduction_update_slot(entry_idx, slot_id, value, reducer_data.ht_values, ht_capacity)
 
     # Also register for max-depth slot (last slot = 12)
     # Use -depth as score so atomic_max selects the deepest (most negative depth)
     max_depth_slot_id = NUM_SPATIAL_DIRECTIONS * 2  # = 12
     max_depth_value = make_contact_value(-depth, contact_id)
-    hashtable_update_slot_direct(entry_idx, max_depth_slot_id, max_depth_value, reducer_data.ht_values, ht_capacity)
+    reduction_update_slot(entry_idx, max_depth_slot_id, max_depth_value, reducer_data.ht_values, ht_capacity)
 
 
 @wp.func
@@ -523,6 +680,9 @@ def create_export_reduced_contacts_kernel(writer_func: Any, values_per_key: int 
     # Import here to avoid circular imports
     from newton._src.geometry.contact_data import ContactData
 
+    # Define vector type for tracking exported contact IDs
+    exported_ids_vec = wp.types.vector(length=values_per_key, dtype=wp.int32)
+
     @wp.kernel(enable_backward=False)
     def export_reduced_contacts_kernel(
         # Hashtable arrays
@@ -537,7 +697,6 @@ def create_export_reduced_contacts_kernel(writer_func: Any, values_per_key: int 
         shape_data: wp.array(dtype=wp.vec4),
         # Parameters
         margin: float,
-        values_per_key_param: int,
         # Writer data (custom struct)
         writer_data: Any,
         # Grid stride parameters
@@ -560,27 +719,12 @@ def create_export_reduced_contacts_kernel(writer_func: Any, values_per_key: int 
             # Get the hashtable entry index
             entry_idx = ht_active_slots[i]
 
-            # Track exported contact IDs for this entry (up to 13 slots)
-            # Use a simple array to track seen IDs - most entries have few unique contacts
-            # Declare as dynamic variables using int() for Warp loop mutation
-            exported_ids_0 = int(-1)
-            exported_ids_1 = int(-1)
-            exported_ids_2 = int(-1)
-            exported_ids_3 = int(-1)
-            exported_ids_4 = int(-1)
-            exported_ids_5 = int(-1)
-            exported_ids_6 = int(-1)
-            exported_ids_7 = int(-1)
-            exported_ids_8 = int(-1)
-            exported_ids_9 = int(-1)
-            exported_ids_10 = int(-1)
-            exported_ids_11 = int(-1)
-            exported_ids_12 = int(-1)
+            # Track exported contact IDs for this entry
+            exported_ids = exported_ids_vec()
             num_exported = int(0)
 
             # Read all value slots for this entry (slot-major layout)
-            ht_capacity = ht_keys.shape[0]
-            for slot in range(values_per_key_param):
+            for slot in range(values_per_key):
                 value = ht_values[slot * ht_capacity + entry_idx]
 
                 # Skip empty slots (value = 0)
@@ -590,65 +734,16 @@ def create_export_reduced_contacts_kernel(writer_func: Any, values_per_key: int 
                 # Extract contact ID from low 32 bits
                 contact_id = unpack_contact_id(value)
 
-                # Check if we've already exported this contact ID
+                # Skip if already exported
                 already_exported = False
-                if contact_id == exported_ids_0:
-                    already_exported = True
-                elif contact_id == exported_ids_1:
-                    already_exported = True
-                elif contact_id == exported_ids_2:
-                    already_exported = True
-                elif contact_id == exported_ids_3:
-                    already_exported = True
-                elif contact_id == exported_ids_4:
-                    already_exported = True
-                elif contact_id == exported_ids_5:
-                    already_exported = True
-                elif contact_id == exported_ids_6:
-                    already_exported = True
-                elif contact_id == exported_ids_7:
-                    already_exported = True
-                elif contact_id == exported_ids_8:
-                    already_exported = True
-                elif contact_id == exported_ids_9:
-                    already_exported = True
-                elif contact_id == exported_ids_10:
-                    already_exported = True
-                elif contact_id == exported_ids_11:
-                    already_exported = True
-                elif contact_id == exported_ids_12:
-                    already_exported = True
-
+                for j in range(values_per_key):
+                    if j < num_exported and exported_ids[j] == contact_id:
+                        already_exported = True
                 if already_exported:
                     continue
 
                 # Record this contact ID as exported
-                if num_exported == 0:
-                    exported_ids_0 = contact_id
-                elif num_exported == 1:
-                    exported_ids_1 = contact_id
-                elif num_exported == 2:
-                    exported_ids_2 = contact_id
-                elif num_exported == 3:
-                    exported_ids_3 = contact_id
-                elif num_exported == 4:
-                    exported_ids_4 = contact_id
-                elif num_exported == 5:
-                    exported_ids_5 = contact_id
-                elif num_exported == 6:
-                    exported_ids_6 = contact_id
-                elif num_exported == 7:
-                    exported_ids_7 = contact_id
-                elif num_exported == 8:
-                    exported_ids_8 = contact_id
-                elif num_exported == 9:
-                    exported_ids_9 = contact_id
-                elif num_exported == 10:
-                    exported_ids_10 = contact_id
-                elif num_exported == 11:
-                    exported_ids_11 = contact_id
-                elif num_exported == 12:
-                    exported_ids_12 = contact_id
+                exported_ids[num_exported] = contact_id
                 num_exported = num_exported + 1
 
                 # Unpack contact data

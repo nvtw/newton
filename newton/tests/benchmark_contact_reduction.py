@@ -22,7 +22,7 @@ from newton._src.geometry.contact_reduction_global import (
     make_contact_key,
     make_contact_value,
 )
-from newton._src.geometry.hashtable_reduction import hashtable_insert_slot
+from newton._src.geometry.contact_reduction_global import reduction_insert_slot
 
 
 @dataclass
@@ -79,7 +79,6 @@ def benchmark_simple_insert_kernel(
     keys: wp.array(dtype=wp.uint64),
     values: wp.array(dtype=wp.uint64),
     active_slots: wp.array(dtype=wp.int32),
-    values_per_key: int,
 ):
     """Kernel that benchmarks raw hash table insertions."""
     tid = wp.tid()
@@ -99,7 +98,7 @@ def benchmark_simple_insert_kernel(
     contact_id = tid
     value = make_contact_value(score, contact_id)
 
-    hashtable_insert_slot(key, slot_id, value, keys, values, active_slots, values_per_key)
+    reduction_insert_slot(key, slot_id, value, keys, values, active_slots)
 
 
 def run_benchmark(num_contacts: int, device: str = "cuda:0", num_iterations: int = 10) -> BenchmarkResults:
@@ -202,30 +201,33 @@ def run_hashtable_benchmark(num_insertions: int, device: str = "cuda:0", num_ite
     values_per_key = 13
     capacity = max(num_insertions * 4, 1024)  # Reduced headroom to avoid OOM
 
-    from newton._src.geometry.hashtable_reduction import ReductionHashTable
-    ht = ReductionHashTable(capacity, values_per_key=values_per_key, device=device)
+    from newton._src.geometry.hashtable import HashTable
+    ht = HashTable(capacity, device=device)
+    values = wp.zeros(ht.capacity * values_per_key, dtype=wp.uint64, device=device)
 
     # Warm up
     wp.launch(
         benchmark_simple_insert_kernel,
         dim=num_insertions,
-        inputs=[num_insertions, ht.keys, ht.values, ht.active_slots, values_per_key],
+        inputs=[num_insertions, ht.keys, values, ht.active_slots],
         device=device,
     )
     wp.synchronize()
     ht.clear_active()
+    values.zero_()
     wp.synchronize()
 
     times = []
     for _ in range(num_iterations):
         ht.clear()
+        values.zero_()
         wp.synchronize()
 
         start = time.perf_counter()
         wp.launch(
             benchmark_simple_insert_kernel,
             dim=num_insertions,
-            inputs=[num_insertions, ht.keys, ht.values, ht.active_slots, values_per_key],
+            inputs=[num_insertions, ht.keys, values, ht.active_slots],
             device=device,
         )
         wp.synchronize()
@@ -277,4 +279,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

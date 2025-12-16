@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Benchmark for the reduction hash table performance.
+"""Benchmark for the hash table performance.
 
 This script measures hash table operations:
 1. Insert performance (with varying collision rates)
@@ -13,10 +13,8 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
-from newton._src.geometry.hashtable_reduction import (
-    ReductionHashTable,
-    hashtable_insert_slot,
-)
+from newton._src.geometry.contact_reduction_global import reduction_insert_slot
+from newton._src.geometry.hashtable import HashTable
 
 
 @dataclass
@@ -41,7 +39,7 @@ def make_key(shape_a: int, shape_b: int, bin_id: int) -> wp.uint64:
 @wp.func
 def make_value(score: float, contact_id: int) -> wp.uint64:
     """Pack score and contact_id into a uint64 value.
-    
+
     Uses a simple encoding where higher score = higher value.
     """
     # Simple encoding: score as high bits (scaled to int), contact_id as low bits
@@ -56,7 +54,6 @@ def insert_low_collision_kernel(
     keys: wp.array(dtype=wp.uint64),
     values: wp.array(dtype=wp.uint64),
     active_slots: wp.array(dtype=wp.int32),
-    values_per_key: int,
 ):
     """Insert with low collision rate - each thread inserts to unique key."""
     tid = wp.tid()
@@ -72,7 +69,7 @@ def insert_low_collision_kernel(
     slot_id = tid % 13
     value = make_value(float(tid), tid)
 
-    hashtable_insert_slot(key, slot_id, value, keys, values, active_slots, values_per_key)
+    reduction_insert_slot(key, slot_id, value, keys, values, active_slots)
 
 
 @wp.kernel
@@ -81,7 +78,6 @@ def insert_medium_collision_kernel(
     keys: wp.array(dtype=wp.uint64),
     values: wp.array(dtype=wp.uint64),
     active_slots: wp.array(dtype=wp.int32),
-    values_per_key: int,
 ):
     """Insert with medium collision rate - groups of threads share keys."""
     tid = wp.tid()
@@ -98,7 +94,7 @@ def insert_medium_collision_kernel(
     slot_id = tid % 13
     value = make_value(float(tid), tid)
 
-    hashtable_insert_slot(key, slot_id, value, keys, values, active_slots, values_per_key)
+    reduction_insert_slot(key, slot_id, value, keys, values, active_slots)
 
 
 @wp.kernel
@@ -107,7 +103,6 @@ def insert_high_collision_kernel(
     keys: wp.array(dtype=wp.uint64),
     values: wp.array(dtype=wp.uint64),
     active_slots: wp.array(dtype=wp.int32),
-    values_per_key: int,
 ):
     """Insert with high collision rate - many threads compete for same keys."""
     tid = wp.tid()
@@ -124,7 +119,7 @@ def insert_high_collision_kernel(
     slot_id = tid % 13
     value = make_value(float(tid), tid)
 
-    hashtable_insert_slot(key, slot_id, value, keys, values, active_slots, values_per_key)
+    reduction_insert_slot(key, slot_id, value, keys, values, active_slots)
 
 
 @wp.kernel
@@ -133,7 +128,6 @@ def insert_extreme_collision_kernel(
     keys: wp.array(dtype=wp.uint64),
     values: wp.array(dtype=wp.uint64),
     active_slots: wp.array(dtype=wp.int32),
-    values_per_key: int,
 ):
     """Insert with extreme collision - all threads write to same few keys."""
     tid = wp.tid()
@@ -149,7 +143,7 @@ def insert_extreme_collision_kernel(
     slot_id = tid % 13
     value = make_value(float(tid), tid)
 
-    hashtable_insert_slot(key, slot_id, value, keys, values, active_slots, values_per_key)
+    reduction_insert_slot(key, slot_id, value, keys, values, active_slots)
 
 
 def run_insert_benchmark(
@@ -164,30 +158,33 @@ def run_insert_benchmark(
     # Large capacity to minimize hash collisions
     capacity = max(num_insertions * 10, 1024)
 
-    ht = ReductionHashTable(capacity, values_per_key=values_per_key, device=device)
+    ht = HashTable(capacity, device=device)
+    values = wp.zeros(ht.capacity * values_per_key, dtype=wp.uint64, device=device)
 
     # Warm up
     wp.launch(
         kernel,
         dim=num_insertions,
-        inputs=[num_insertions, ht.keys, ht.values, ht.active_slots, values_per_key],
+        inputs=[num_insertions, ht.keys, values, ht.active_slots],
         device=device,
     )
     wp.synchronize()
     ht.clear()
+    values.zero_()
     wp.synchronize()
 
     # Benchmark
     times = []
     for _ in range(num_iterations):
         ht.clear()
+        values.zero_()
         wp.synchronize()
 
         start = time.perf_counter()
         wp.launch(
             kernel,
             dim=num_insertions,
-            inputs=[num_insertions, ht.keys, ht.values, ht.active_slots, values_per_key],
+            inputs=[num_insertions, ht.keys, values, ht.active_slots],
             device=device,
         )
         wp.synchronize()
@@ -214,17 +211,18 @@ def run_clear_active_benchmark(
     device: str = "cuda:0",
     num_iterations: int = 10,
 ) -> BenchmarkResult:
-    """Benchmark clear_active performance."""
+    """Benchmark clear_active performance (keys only, not values)."""
     values_per_key = 13
     capacity = num_active * 2
 
-    ht = ReductionHashTable(capacity, values_per_key=values_per_key, device=device)
+    ht = HashTable(capacity, device=device)
+    values = wp.zeros(ht.capacity * values_per_key, dtype=wp.uint64, device=device)
 
     # Fill with data using low collision kernel
     wp.launch(
         insert_low_collision_kernel,
         dim=num_active,
-        inputs=[num_active, ht.keys, ht.values, ht.active_slots, values_per_key],
+        inputs=[num_active, ht.keys, values, ht.active_slots],
         device=device,
     )
     wp.synchronize()
@@ -236,7 +234,7 @@ def run_clear_active_benchmark(
         wp.launch(
             insert_low_collision_kernel,
             dim=num_active,
-            inputs=[num_active, ht.keys, ht.values, ht.active_slots, values_per_key],
+            inputs=[num_active, ht.keys, values, ht.active_slots],
             device=device,
         )
         wp.synchronize()
@@ -249,8 +247,8 @@ def run_clear_active_benchmark(
     avg_time = np.mean(times)
     ops_per_second = num_active / (avg_time / 1000) if avg_time > 0 else 0
 
-    # Bandwidth: clearing key (8B) + values_per_key values (8B each)
-    bytes_per_entry = 8 + values_per_key * 8
+    # Bandwidth: clearing key (8B) only - values are caller's responsibility now
+    bytes_per_entry = 8
     bandwidth_gb_s = (num_active * bytes_per_entry) / (avg_time / 1000) / 1e9 if avg_time > 0 else 0
 
     return BenchmarkResult(
@@ -267,7 +265,7 @@ def main():
     wp.init()
 
     device = "cuda:0"
-    print(f"Reduction Hash Table Benchmark")
+    print(f"Hash Table Benchmark")
     print(f"Device: {device}")
     print("=" * 80)
 
@@ -310,7 +308,7 @@ def main():
         print(f"{result.num_ops:>12,} {result.time_ms:>12.3f} {result.ops_per_second:>15,.0f} {result.bandwidth_gb_s:>12.2f}")
 
     # 5. Clear active benchmark
-    print("\n5. CLEAR ACTIVE")
+    print("\n5. CLEAR ACTIVE (keys only)")
     print("-" * 80)
     print(f"{'Active entries':>14} {'Time (ms)':>12} {'Entries/sec':>15} {'BW (GB/s)':>12}")
     print("-" * 80)
@@ -324,4 +322,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

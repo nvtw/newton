@@ -376,14 +376,13 @@ class TestGlobalContactReducer(unittest.TestCase):
             dim=total_threads,
             inputs=[
                 reducer.hashtable.keys,
-                reducer.hashtable.values,
+                reducer.ht_values,  # Values are now managed by GlobalContactReducer
                 reducer.hashtable.active_slots,
                 reducer.position_depth,
                 reducer.normal_feature,
                 reducer.shape_pairs,
                 shape_data,
                 0.01,  # margin
-                reducer.values_per_key,
                 writer_data,
                 total_threads,
             ],
