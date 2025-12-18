@@ -39,6 +39,12 @@ from newton._src.geometry.hashtable import (
     hashtable_find_or_insert,
 )
 
+from .collision_core import (
+    build_pair_key3,
+    create_compute_gjk_mpr_contacts,
+    get_triangle_shape_from_mesh,
+)
+from .contact_data import ContactData
 from .contact_reduction import (
     NUM_SPATIAL_DIRECTIONS,
     float_flip,
@@ -46,7 +52,7 @@ from .contact_reduction import (
     get_spatial_direction_2d,
     project_point_to_plane,
 )
-
+from .support_function import extract_shape_data
 
 # =============================================================================
 # Reduction slot functions (specific to contact reduction)
@@ -54,6 +60,7 @@ from .contact_reduction import (
 # These functions handle the slot-major value storage used for contact reduction.
 # Memory layout is slot-major (SoA) for coalesced GPU access:
 # [slot0_entry0, slot0_entry1, ..., slot0_entryN, slot1_entry0, ...]
+
 
 @wp.func
 def reduction_update_slot(
@@ -325,9 +332,7 @@ class GlobalContactReducer:
 
         # Values array for hashtable - managed here, not by HashTable
         # This is contact-reduction-specific (slot-major layout with values_per_key slots)
-        self.ht_values = wp.zeros(
-            self.hashtable.capacity * self.values_per_key, dtype=wp.uint64, device=device
-        )
+        self.ht_values = wp.zeros(self.hashtable.capacity * self.values_per_key, dtype=wp.uint64, device=device)
 
     def clear(self):
         """Clear all contacts and reset the reducer (full clear)."""
@@ -677,9 +682,6 @@ def create_export_reduced_contacts_kernel(writer_func: Any, values_per_key: int 
     Returns:
         A warp kernel that can be launched to export reduced contacts.
     """
-    # Import here to avoid circular imports
-    from newton._src.geometry.contact_data import ContactData
-
     # Define vector type for tracking exported contact IDs
     exported_ids_vec = wp.types.vector(length=values_per_key, dtype=wp.int32)
 
@@ -793,13 +795,6 @@ def create_mesh_triangle_contacts_to_reducer_kernel(beta0: float, beta1: float):
     Returns:
         A warp kernel for processing mesh-triangle contacts with global reduction.
     """
-    # Import here to avoid circular imports
-    from newton._src.geometry.collision_core import (
-        build_pair_key3,
-        create_compute_gjk_mpr_contacts,
-        get_triangle_shape_from_mesh,
-    )
-    from newton._src.geometry.narrow_phase import extract_shape_data
 
     # Create a writer function that captures beta0 and beta1
     @wp.func

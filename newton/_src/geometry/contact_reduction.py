@@ -134,6 +134,7 @@ ICOSAHEDRON_FACE_NORMALS = _mat20x3(
     0.0,
 )
 
+
 @wp.func
 def get_slot(normal: wp.vec3) -> int:
     """Returns the index of the icosahedron face that best matches the normal.

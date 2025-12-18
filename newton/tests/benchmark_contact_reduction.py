@@ -1,4 +1,18 @@
-#!/usr/bin/env python
+# SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Benchmark for global contact reduction performance.
 
 This script measures the performance of the global contact reduction system
@@ -14,15 +28,14 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
-from newton._src.geometry.contact_reduction import NUM_SPATIAL_DIRECTIONS
 from newton._src.geometry.contact_reduction_global import (
     GlobalContactReducer,
     GlobalContactReducerData,
     export_and_reduce_contact,
     make_contact_key,
     make_contact_value,
+    reduction_insert_slot,
 )
-from newton._src.geometry.contact_reduction_global import reduction_insert_slot
 
 
 @dataclass
@@ -67,10 +80,7 @@ def benchmark_insert_kernel(
     depth = -0.01 + float(tid % 100) * 0.0001  # Varies from -0.01 to 0
     feature = tid % 10
 
-    export_and_reduce_contact(
-        shape_a, shape_b, position, normal, depth, feature,
-        reducer_data, beta0, beta1
-    )
+    export_and_reduce_contact(shape_a, shape_b, position, normal, depth, feature, reducer_data, beta0, beta1)
 
 
 @wp.kernel
@@ -201,7 +211,8 @@ def run_hashtable_benchmark(num_insertions: int, device: str = "cuda:0", num_ite
     values_per_key = 13
     capacity = max(num_insertions * 4, 1024)  # Reduced headroom to avoid OOM
 
-    from newton._src.geometry.hashtable import HashTable
+    from newton._src.geometry.hashtable import HashTable  # noqa: PLC0415
+
     ht = HashTable(capacity, device=device)
     values = wp.zeros(ht.capacity * values_per_key, dtype=wp.uint64, device=device)
 

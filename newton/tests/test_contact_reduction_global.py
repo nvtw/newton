@@ -44,7 +44,7 @@ class TestGlobalContactReducer(unittest.TestCase):
         def store_contact_kernel(
             reducer_data: GlobalContactReducerData,
         ):
-            contact_id = export_and_reduce_contact(
+            _ = export_and_reduce_contact(
                 shape_a=0,
                 shape_b=1,
                 position=wp.vec3(1.0, 2.0, 3.0),
@@ -293,8 +293,8 @@ class TestGlobalContactReducer(unittest.TestCase):
 
     def test_export_reduced_contacts_kernel(self):
         """Test the export_reduced_contacts_kernel with a custom writer."""
-        from newton._src.geometry.contact_data import ContactData
-        from newton._src.geometry.narrow_phase import ContactWriterData
+        from newton._src.geometry.contact_data import ContactData  # noqa: PLC0415
+        from newton._src.geometry.narrow_phase import ContactWriterData  # noqa: PLC0415
 
         reducer = GlobalContactReducer(capacity=100, device="cpu")
 

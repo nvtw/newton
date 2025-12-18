@@ -1,4 +1,18 @@
-#!/usr/bin/env python
+# SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Tests for the hash table."""
 
 import unittest
@@ -8,7 +22,6 @@ import warp as wp
 
 from newton._src.geometry.contact_reduction_global import reduction_insert_slot
 from newton._src.geometry.hashtable import (
-    HASHTABLE_EMPTY_KEY,
     HashTable,
 )
 
@@ -50,20 +63,11 @@ class TestHashTable(unittest.TestCase):
             active_slots: wp.array(dtype=wp.int32),
         ):
             # Insert into slot 0
-            reduction_insert_slot(
-                wp.uint64(123), 0, wp.uint64(100),
-                keys, values, active_slots
-            )
+            reduction_insert_slot(wp.uint64(123), 0, wp.uint64(100), keys, values, active_slots)
             # Insert into slot 5
-            reduction_insert_slot(
-                wp.uint64(123), 5, wp.uint64(200),
-                keys, values, active_slots
-            )
+            reduction_insert_slot(wp.uint64(123), 5, wp.uint64(200), keys, values, active_slots)
             # Insert into slot 12
-            reduction_insert_slot(
-                wp.uint64(123), 12, wp.uint64(300),
-                keys, values, active_slots
-            )
+            reduction_insert_slot(wp.uint64(123), 12, wp.uint64(300), keys, values, active_slots)
 
         ht = HashTable(capacity=64, device="cpu")
         # Allocate values array externally (caller-managed)
@@ -103,10 +107,7 @@ class TestHashTable(unittest.TestCase):
             tid = wp.tid()
             # All threads try to write to same key and slot
             # Values are 1, 2, 3, ..., 100
-            reduction_insert_slot(
-                wp.uint64(999), 0, wp.uint64(tid + 1),
-                keys, values, active_slots
-            )
+            reduction_insert_slot(wp.uint64(999), 0, wp.uint64(tid + 1), keys, values, active_slots)
 
         ht = HashTable(capacity=64, device="cpu")
         values = wp.zeros(ht.capacity * values_per_key, dtype=wp.uint64, device="cpu")
@@ -176,10 +177,7 @@ class TestHashTable(unittest.TestCase):
             active_slots: wp.array(dtype=wp.int32),
         ):
             tid = wp.tid()
-            reduction_insert_slot(
-                wp.uint64(tid + 1), 0, wp.uint64(tid * 10),
-                keys, values, active_slots
-            )
+            reduction_insert_slot(wp.uint64(tid + 1), 0, wp.uint64(tid * 10), keys, values, active_slots)
 
         ht = HashTable(capacity=64, device="cpu")
         values = wp.zeros(ht.capacity * values_per_key, dtype=wp.uint64, device="cpu")
@@ -219,10 +217,7 @@ class TestHashTable(unittest.TestCase):
             active_slots: wp.array(dtype=wp.int32),
         ):
             tid = wp.tid()
-            reduction_insert_slot(
-                wp.uint64(tid + 1), 0, wp.uint64(tid * 10),
-                keys, values, active_slots
-            )
+            reduction_insert_slot(wp.uint64(tid + 1), 0, wp.uint64(tid * 10), keys, values, active_slots)
 
         ht = HashTable(capacity=256, device="cpu")
         values = wp.zeros(ht.capacity * values_per_key, dtype=wp.uint64, device="cpu")
@@ -309,10 +304,7 @@ class TestHashTable(unittest.TestCase):
             tid = wp.tid()
             # Insert values in descending order: 999, 998, 997, ...
             value = wp.uint64(999 - tid)
-            reduction_insert_slot(
-                wp.uint64(1), 0, value,
-                keys, values, active_slots
-            )
+            reduction_insert_slot(wp.uint64(1), 0, value, keys, values, active_slots)
 
         ht = HashTable(capacity=64, device="cpu")
         values = wp.zeros(ht.capacity * values_per_key, dtype=wp.uint64, device="cpu")

@@ -1,4 +1,18 @@
-#!/usr/bin/env python
+# SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Benchmark for the hash table performance.
 
 This script measures hash table operations:
@@ -20,6 +34,7 @@ from newton._src.geometry.hashtable import HashTable
 @dataclass
 class BenchmarkResult:
     """Result from a single benchmark."""
+
     name: str
     num_ops: int
     time_ms: float
@@ -265,7 +280,7 @@ def main():
     wp.init()
 
     device = "cuda:0"
-    print(f"Hash Table Benchmark")
+    print("Hash Table Benchmark")
     print(f"Device: {device}")
     print("=" * 80)
 
@@ -278,7 +293,9 @@ def main():
     print("-" * 80)
     for n in insertion_counts:
         result = run_insert_benchmark(insert_low_collision_kernel, "low_collision", n, device)
-        print(f"{result.num_ops:>12,} {result.time_ms:>12.3f} {result.ops_per_second:>15,.0f} {result.bandwidth_gb_s:>12.2f}")
+        print(
+            f"{result.num_ops:>12,} {result.time_ms:>12.3f} {result.ops_per_second:>15,.0f} {result.bandwidth_gb_s:>12.2f}"
+        )
 
     # 2. Medium collision benchmark
     print("\n2. MEDIUM COLLISION (~10 threads per key)")
@@ -287,7 +304,9 @@ def main():
     print("-" * 80)
     for n in insertion_counts:
         result = run_insert_benchmark(insert_medium_collision_kernel, "medium_collision", n, device)
-        print(f"{result.num_ops:>12,} {result.time_ms:>12.3f} {result.ops_per_second:>15,.0f} {result.bandwidth_gb_s:>12.2f}")
+        print(
+            f"{result.num_ops:>12,} {result.time_ms:>12.3f} {result.ops_per_second:>15,.0f} {result.bandwidth_gb_s:>12.2f}"
+        )
 
     # 3. High collision benchmark
     print("\n3. HIGH COLLISION (~100 threads per key)")
@@ -296,7 +315,9 @@ def main():
     print("-" * 80)
     for n in insertion_counts:
         result = run_insert_benchmark(insert_high_collision_kernel, "high_collision", n, device)
-        print(f"{result.num_ops:>12,} {result.time_ms:>12.3f} {result.ops_per_second:>15,.0f} {result.bandwidth_gb_s:>12.2f}")
+        print(
+            f"{result.num_ops:>12,} {result.time_ms:>12.3f} {result.ops_per_second:>15,.0f} {result.bandwidth_gb_s:>12.2f}"
+        )
 
     # 4. Extreme collision benchmark
     print("\n4. EXTREME COLLISION (all threads -> 20 keys)")
@@ -305,7 +326,9 @@ def main():
     print("-" * 80)
     for n in insertion_counts:
         result = run_insert_benchmark(insert_extreme_collision_kernel, "extreme_collision", n, device)
-        print(f"{result.num_ops:>12,} {result.time_ms:>12.3f} {result.ops_per_second:>15,.0f} {result.bandwidth_gb_s:>12.2f}")
+        print(
+            f"{result.num_ops:>12,} {result.time_ms:>12.3f} {result.ops_per_second:>15,.0f} {result.bandwidth_gb_s:>12.2f}"
+        )
 
     # 5. Clear active benchmark
     print("\n5. CLEAR ACTIVE (keys only)")
@@ -314,7 +337,9 @@ def main():
     print("-" * 80)
     for n in insertion_counts:
         result = run_clear_active_benchmark(n, device)
-        print(f"{result.num_ops:>14,} {result.time_ms:>12.3f} {result.ops_per_second:>15,.0f} {result.bandwidth_gb_s:>12.2f}")
+        print(
+            f"{result.num_ops:>14,} {result.time_ms:>12.3f} {result.ops_per_second:>15,.0f} {result.bandwidth_gb_s:>12.2f}"
+        )
 
     print("\n" + "=" * 80)
     print("Benchmark complete.")
