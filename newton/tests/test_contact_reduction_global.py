@@ -300,7 +300,7 @@ class TestGlobalContactReducer(unittest.TestCase):
 
         # Define a simple writer function
         @wp.func
-        def test_writer(contact_data: ContactData, writer_data: ContactWriterData):
+        def test_writer(contact_data: ContactData, writer_data: ContactWriterData, output_index: int):
             idx = wp.atomic_add(writer_data.contact_count, 0, 1)
             if idx < writer_data.contact_max:
                 writer_data.contact_pair[idx] = wp.vec2i(contact_data.shape_a, contact_data.shape_b)
