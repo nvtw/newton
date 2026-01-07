@@ -245,6 +245,106 @@ Standard Pipeline
 - Does not support hydroelastic contacts
 - For advanced features, use :class:`~newton.CollisionPipelineUnified`
 
+Standard Pipeline Shape Compatibility
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 14 10 10 10 10 10 10 10 10
+
+   * - 
+     - Plane
+     - Sphere
+     - Capsule
+     - Box
+     - Cylinder
+     - Mesh
+     - SDF
+     - Particle
+   * - **Plane**
+     - 
+     - ✅
+     - ✅
+     - ✅
+     - 
+     - ✅
+     - 
+     - ✅
+   * - **Sphere**
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - 
+     - ✅
+     - 
+     - ✅
+   * - **Capsule**
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - 
+     - ✅
+     - 
+     - ✅
+   * - **Box**
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - 
+     - ✅
+     - 
+     - ✅
+   * - **Cylinder**
+     - 
+     - 
+     - 
+     - 
+     - 
+     - 
+     - 
+     - ✅
+   * - **Mesh**
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - 
+     - ✅
+     - 
+     - ✅
+   * - **SDF**
+     - 
+     - 
+     - 
+     - 
+     - 
+     - 
+     - 
+     - ✅
+   * - **Cone**
+     - 
+     - 
+     - 
+     - 
+     - 
+     - 
+     - 
+     - ✅
+   * - **Particle**
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+
+Empty cells indicate unsupported pairs. Use :class:`~newton.CollisionPipelineUnified` for full shape support.
+
 The pipeline is created automatically when calling :meth:`Model.collide` without arguments:
 
 .. code-block:: python
@@ -285,8 +385,8 @@ Unified Pipeline
 
 .. _Shape Compatibility:
 
-Shape Collision Compatibility
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Unified Pipeline Shape Compatibility
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The unified pipeline supports collision detection between all shape type combinations:
 
@@ -303,7 +403,7 @@ The unified pipeline supports collision detection between all shape type combina
      - Mesh
      - SDF
    * - **Plane**
-     - ✅
+     - 
      - ✅
      - ✅
      - ✅
