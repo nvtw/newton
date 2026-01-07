@@ -270,9 +270,7 @@ def create_solve_mpr(support_func: Any):
         normal = -v0.BtoA
 
         # First support point
-        v1 = minkowski_support(
-            geom_a, geom_b, normal, orientation_b, position_b, extend, data_provider
-        )
+        v1 = minkowski_support(geom_a, geom_b, normal, orientation_b, position_b, extend, data_provider)
 
         point_a = vert_a(v1)
         point_b = v1.B
@@ -292,9 +290,7 @@ def create_solve_mpr(support_func: Any):
             return True, point_a, point_b, normal, penetration
 
         # Second support point
-        v2 = minkowski_support(
-            geom_a, geom_b, normal, orientation_b, position_b, extend, data_provider
-        )
+        v2 = minkowski_support(geom_a, geom_b, normal, orientation_b, position_b, extend, data_provider)
 
         if wp.dot(v2.BtoA, normal) <= 0.0:
             return False, point_a, point_b, normal, penetration
@@ -329,9 +325,7 @@ def create_solve_mpr(support_func: Any):
 
             phase1 += 1
 
-            v3 = minkowski_support(
-                geom_a, geom_b, normal, orientation_b, position_b, extend, data_provider
-            )
+            v3 = minkowski_support(geom_a, geom_b, normal, orientation_b, position_b, extend, data_provider)
 
             if wp.dot(v3.BtoA, normal) <= 0.0:
                 return False, point_a, point_b, normal, penetration
@@ -378,9 +372,7 @@ def create_solve_mpr(support_func: Any):
                 # If the origin is inside the wedge, we have a hit
                 hit = d >= 0.0
 
-            v4 = minkowski_support(
-                geom_a, geom_b, normal, orientation_b, position_b, extend, data_provider
-            )
+            v4 = minkowski_support(geom_a, geom_b, normal, orientation_b, position_b, extend, data_provider)
 
             temp3 = v4.BtoA - v3.BtoA
             delta = wp.dot(temp3, normal)

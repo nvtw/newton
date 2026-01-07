@@ -109,9 +109,7 @@ class GenericShapeData:
 
 
 @wp.func
-def support_map(
-    geom: GenericShapeData, direction: wp.vec3, data_provider: SupportMapDataProvider
-) -> wp.vec3:
+def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: SupportMapDataProvider) -> wp.vec3:
     """
     Return the support point of a primitive in its local frame.
 
@@ -147,7 +145,6 @@ def support_map(
         # Find the vertex with the maximum dot product with the direction
         max_dot = float(-1.0e10)
         best_vertex = wp.vec3(0.0, 0.0, 0.0)
-        best_idx = int(0)
 
         num_verts = mesh.points.shape[0]
 
@@ -162,7 +159,6 @@ def support_map(
             if dot_val > max_dot:
                 max_dot = dot_val
                 best_vertex = vertex
-                best_idx = i
         result = best_vertex
 
     elif geom.shape_type == int(GeoTypeEx.TRIANGLE):
