@@ -474,16 +474,21 @@ Shape collision behavior is controlled via :class:`~newton.ModelBuilder.ShapeCon
 
 .. list-table::
    :header-rows: 1
-   :widths: 30 70
+   :widths: 25 75
 
    * - Parameter
      - Description
    * - ``thickness``
-     - Shape surface thickness added to contact depth. For rigid bodies, ``thickness > 0`` creates a visible gap when objects rest against each other. Essential for thin shells/cloth where zero thickness causes issues. Default: 1e-5.
+     - Surface thickness. Pairwise: summed (``t_a + t_b``). Creates visible gap at rest. Essential for thin shells/cloth. Default: 1e-5.
    * - ``contact_margin``
-     - Expands the shape's AABB to detect contacts before penetration occurs. Does **not** create visible gaps - only ensures contacts are found early enough, which is important for fast-moving objects. Must be >= ``thickness``. If None, uses ``builder.rigid_contact_margin`` (default: 0.1).
+     - AABB expansion for early contact detection. Pairwise: max. No visible gap - only affects when contacts are generated. Important for fast-moving objects. Must be >= ``thickness``. Default: 0.1.
    * - ``is_solid``
-     - Whether shape is solid or hollow. Affects inertia computation and SDF sign convention. Default: True.
+     - Whether shape is solid or hollow. Affects inertia and SDF sign. Default: True.
+
+.. note::
+   **Contact generation**: A contact is created when ``d < max(margin_a, margin_b)``, where 
+   ``d = surface_distance - (thickness_a + thickness_b)``. The solver enforces ``d >= 0``, 
+   so objects at rest settle with surfaces separated by ``thickness_a + thickness_b``.
 
 **SDF configuration (generates SDF from shape geometry):**
 
