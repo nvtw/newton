@@ -324,10 +324,10 @@ class GlobalContactReducer:
         # Atomic counter for contact allocation
         self.contact_count = wp.zeros(1, dtype=wp.int32, device=device)
 
-        # Hashtable: sized for worst case
-        # Keys are (shape_pair, bin), so max keys = num_contacts x 20 bins
-        # Use 2x for load factor
-        hashtable_size = capacity * 20 * 2
+        # Hashtable: sized for worst case where each contact is a unique (shape_pair, bin)
+        # Each contact goes into exactly ONE normal bin, so max unique keys = num_contacts
+        # Use 2x for load factor to reduce hash collisions
+        hashtable_size = capacity * 2
         self.hashtable = HashTable(hashtable_size, device=device)
 
         # Values array for hashtable - managed here, not by HashTable
