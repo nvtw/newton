@@ -628,6 +628,7 @@ def unpack_contact(
 def write_contact_to_reducer(
     contact_data: Any,  # ContactData struct
     reducer_data: GlobalContactReducerData,
+    output_index: int,  # Unused, kept for API compatibility with write_contact_simple
     beta0: float,
     beta1: float,
 ):
@@ -776,7 +777,7 @@ def create_export_reduced_contacts_kernel(writer_func: Any, values_per_key: int 
                 contact_data.feature_pair_key = wp.uint64(0)
 
                 # Call the writer function
-                writer_func(contact_data, writer_data)
+                writer_func(contact_data, writer_data, -1)
 
     return export_reduced_contacts_kernel
 
@@ -801,8 +802,9 @@ def create_mesh_triangle_contacts_to_reducer_kernel(beta0: float, beta1: float):
     def write_to_reducer_with_betas(
         contact_data: Any,  # ContactData struct
         reducer_data: GlobalContactReducerData,
+        output_index: int,  # Unused, kept for API compatibility with write_contact_simple
     ):
-        write_contact_to_reducer(contact_data, reducer_data, beta0, beta1)
+        write_contact_to_reducer(contact_data, reducer_data, output_index, beta0, beta1)
 
     @wp.kernel(enable_backward=False)
     def mesh_triangle_contacts_to_reducer_kernel(
