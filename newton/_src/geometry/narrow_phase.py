@@ -1132,8 +1132,6 @@ class NarrowPhase:
             )
 
             # Export reduced contacts to writer
-            # Use a default margin (could be made configurable)
-            default_margin = 0.01
             wp.launch(
                 kernel=self.export_reduced_contacts_kernel,
                 dim=self.total_num_threads,
@@ -1145,7 +1143,7 @@ class NarrowPhase:
                     self.global_contact_reducer.normal_feature,
                     self.global_contact_reducer.shape_pairs,
                     shape_data,
-                    default_margin,
+                    shape_contact_margin,
                     writer_data,
                     self.total_num_threads,
                 ],

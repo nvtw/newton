@@ -235,7 +235,7 @@ def _clear_active_kernel(
     """Kernel to clear active hashtable entries (keys and values).
 
     Uses grid-stride loop for efficient thread utilization.
-    Clears both keys (to EMPTY) and all value slots (to 0) for each active entry.
+    Each thread handles one value slot, with key clearing done once per entry.
 
     Memory layout for values is slot-major (SoA):
     [slot0_entry0, slot0_entry1, ..., slot0_entryN, slot1_entry0, ...]
@@ -245,15 +245,24 @@ def _clear_active_kernel(
     # Read count from GPU - stored at active_slots[capacity]
     count = ht_active_slots[ht_capacity]
 
-    # Grid-stride loop: each thread processes multiple entries if needed
+    # Total work items: count entries * values_per_key slots per entry
+    total_work = count * values_per_key
+
+    # Grid-stride loop: each thread processes one value slot
     i = tid
-    while i < count:
-        entry_idx = ht_active_slots[i]
-        ht_keys[entry_idx] = HASHTABLE_EMPTY_KEY
-        # Clear all value slots for this entry (slot-major layout)
-        for j in range(values_per_key):
-            value_idx = j * ht_capacity + entry_idx
-            ht_values[value_idx] = wp.uint64(0)
+    while i < total_work:
+        # Compute which entry and which slot within that entry
+        active_idx = i / values_per_key
+        local_idx = i % values_per_key
+        entry_idx = ht_active_slots[active_idx]
+
+        # Clear the key only once per entry (when processing slot 0)
+        if local_idx == 0:
+            ht_keys[entry_idx] = HASHTABLE_EMPTY_KEY
+
+        # Clear this value slot (slot-major layout)
+        value_idx = local_idx * ht_capacity + entry_idx
+        ht_values[value_idx] = wp.uint64(0)
         i += num_threads
 
 
@@ -698,8 +707,8 @@ def create_export_reduced_contacts_kernel(writer_func: Any, values_per_key: int 
         shape_pairs: wp.array(dtype=wp.vec2i),
         # Shape data for extracting thickness
         shape_data: wp.array(dtype=wp.vec4),
-        # Parameters
-        margin: float,
+        # Per-shape contact margins
+        shape_contact_margin: wp.array(dtype=float),
         # Writer data (custom struct)
         writer_data: Any,
         # Grid stride parameters
@@ -760,6 +769,11 @@ def create_export_reduced_contacts_kernel(writer_func: Any, values_per_key: int 
                 # Extract thickness from shape_data (stored in w component)
                 thickness_a = shape_data[shape_a][3]
                 thickness_b = shape_data[shape_b][3]
+
+                # Use per-shape contact margin (max of both shapes, matching other kernels)
+                margin_a = shape_contact_margin[shape_a]
+                margin_b = shape_contact_margin[shape_b]
+                margin = wp.max(margin_a, margin_b)
 
                 # Create ContactData struct
                 contact_data = ContactData()
