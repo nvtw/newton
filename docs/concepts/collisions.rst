@@ -698,9 +698,13 @@ Shape collision behavior is controlled via :class:`~newton.ModelBuilder.ShapeCon
    * - ``thickness``
      - Surface thickness. Pairwise: summed (``t_a + t_b``). Creates visible gap at rest. Essential for thin shells and cloth to improve simulation stability and reduce self-intersections. Default: 1e-5.
    * - ``contact_margin``
-     - AABB expansion for early contact detection. Pairwise: max. The margin only affects contact generation; effective rest distance is not affected and is only governed by ``thickness``. Increasing the margin can help avoid tunneling of fast-moving objects because contacts are detected at a greater distance between objects. Must be >= ``thickness``. Default: 0.1.
+     - AABB expansion for early contact detection. Pairwise: max. The margin only affects contact generation; effective rest distance is not affected and is only governed by ``thickness``. Increasing the margin can help avoid tunneling of fast-moving objects because contacts are detected at a greater distance between objects. Must be >= ``thickness``. Default: None (uses ``builder.rigid_contact_margin``, which defaults to 0.1).
    * - ``is_solid``
      - Whether shape is solid or hollow. Affects inertia and SDF sign. Default: True.
+   * - ``is_hydroelastic``
+     - Whether the shape uses SDF-based hydroelastic contacts. Both shapes in a pair must have this enabled. See :ref:`Hydroelastic Contacts`. Default: False.
+   * - ``k_hydro``
+     - Contact stiffness for hydroelastic collisions. Used by MuJoCo, Featherstone, SemiImplicit when ``is_hydroelastic=True``. Default: 1.0e10.
 
 .. note::
    **Contact generation**: A contact is created when ``d < max(margin_a, margin_b)``, where 
