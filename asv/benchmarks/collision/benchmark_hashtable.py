@@ -92,7 +92,7 @@ def insert_high_collision_kernel(
     reduction_insert_slot(key, slot_id, value, keys, values, active_slots)
 
 
-class HashTableInsertLowCollision:
+class FastHashTableInsertLowCollision:
     """Benchmark hash table insertion with low collision rate."""
 
     repeat = 3
@@ -117,12 +117,13 @@ class HashTableInsertLowCollision:
         )
         wp.synchronize()
 
-    @skip_benchmark_if(wp.get_cuda_device_count() == 0)
-    def time_insert(self, num_insertions):
+        # Clear for first iteration
         self.ht.clear()
         self.values.zero_()
         wp.synchronize()
 
+    @skip_benchmark_if(wp.get_cuda_device_count() == 0)
+    def time_insert(self, num_insertions):
         wp.launch(
             insert_low_collision_kernel,
             dim=num_insertions,
@@ -131,8 +132,14 @@ class HashTableInsertLowCollision:
         )
         wp.synchronize()
 
+    def teardown(self, num_insertions):
+        # Clear after each iteration
+        self.ht.clear()
+        self.values.zero_()
+        wp.synchronize()
 
-class HashTableInsertHighCollision:
+
+class FastHashTableInsertHighCollision:
     """Benchmark hash table insertion with high collision rate."""
 
     repeat = 3
@@ -157,12 +164,13 @@ class HashTableInsertHighCollision:
         )
         wp.synchronize()
 
-    @skip_benchmark_if(wp.get_cuda_device_count() == 0)
-    def time_insert(self, num_insertions):
+        # Clear for first iteration
         self.ht.clear()
         self.values.zero_()
         wp.synchronize()
 
+    @skip_benchmark_if(wp.get_cuda_device_count() == 0)
+    def time_insert(self, num_insertions):
         wp.launch(
             insert_high_collision_kernel,
             dim=num_insertions,
@@ -171,8 +179,14 @@ class HashTableInsertHighCollision:
         )
         wp.synchronize()
 
+    def teardown(self, num_insertions):
+        # Clear after each iteration
+        self.ht.clear()
+        self.values.zero_()
+        wp.synchronize()
 
-class HashTableClearActive:
+
+class FastHashTableClearActive:
     """Benchmark hash table clear_active operation."""
 
     repeat = 3
@@ -188,7 +202,7 @@ class HashTableClearActive:
         self.ht = HashTable(capacity, device="cuda:0")
         self.values = wp.zeros(self.ht.capacity * self.values_per_key, dtype=wp.uint64, device="cuda:0")
 
-        # Fill with data
+        # Fill with data before timing clear_active
         wp.launch(
             insert_low_collision_kernel,
             dim=num_active,
@@ -199,16 +213,17 @@ class HashTableClearActive:
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
     def time_clear_active(self, num_active):
-        # Re-fill before clear
+        self.ht.clear_active()
+        wp.synchronize()
+
+    def teardown(self, num_active):
+        # Re-fill for next iteration
         wp.launch(
             insert_low_collision_kernel,
             dim=num_active,
             inputs=[num_active, self.ht.keys, self.values, self.ht.active_slots],
             device="cuda:0",
         )
-        wp.synchronize()
-
-        self.ht.clear_active()
         wp.synchronize()
 
 
@@ -218,9 +233,9 @@ if __name__ == "__main__":
     from newton.utils import run_benchmark
 
     benchmark_list = {
-        "HashTableInsertLowCollision": HashTableInsertLowCollision,
-        "HashTableInsertHighCollision": HashTableInsertHighCollision,
-        "HashTableClearActive": HashTableClearActive,
+        "FastHashTableInsertLowCollision": FastHashTableInsertLowCollision,
+        "FastHashTableInsertHighCollision": FastHashTableInsertHighCollision,
+        "FastHashTableClearActive": FastHashTableClearActive,
     }
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)

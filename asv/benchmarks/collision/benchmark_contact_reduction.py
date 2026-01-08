@@ -64,7 +64,7 @@ def benchmark_insert_kernel(
     export_and_reduce_contact(shape_a, shape_b, position, normal, depth, feature, reducer_data, beta0, beta1)
 
 
-class GlobalContactReducerInsert:
+class FastGlobalContactReducerInsert:
     """Benchmark contact insertion into GlobalContactReducer."""
 
     repeat = 3
@@ -92,14 +92,13 @@ class GlobalContactReducerInsert:
             device="cuda:0",
         )
         wp.synchronize()
-        self.reducer.clear_active()
+
+        # Clear for first iteration (setup runs before each timing)
+        self.reducer.clear()
         wp.synchronize()
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
     def time_insert(self, num_contacts):
-        self.reducer.clear()
-        wp.synchronize()
-
         reducer_data = self.reducer.get_data_struct()
         wp.launch(
             benchmark_insert_kernel,
@@ -109,8 +108,13 @@ class GlobalContactReducerInsert:
         )
         wp.synchronize()
 
+    def teardown(self, num_contacts):
+        # Clear after each iteration so next setup starts fresh
+        self.reducer.clear()
+        wp.synchronize()
 
-class GlobalContactReducerClearActive:
+
+class FastGlobalContactReducerClearActive:
     """Benchmark clear_active operation on GlobalContactReducer."""
 
     repeat = 3
@@ -129,7 +133,7 @@ class GlobalContactReducerClearActive:
             num_betas=2,
         )
 
-        # Fill with data
+        # Fill with data before timing clear_active
         reducer_data = self.reducer.get_data_struct()
         wp.launch(
             benchmark_insert_kernel,
@@ -141,7 +145,11 @@ class GlobalContactReducerClearActive:
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
     def time_clear_active(self, num_contacts):
-        # Re-fill before clear
+        self.reducer.clear_active()
+        wp.synchronize()
+
+    def teardown(self, num_contacts):
+        # Re-fill for next iteration
         reducer_data = self.reducer.get_data_struct()
         wp.launch(
             benchmark_insert_kernel,
@@ -151,11 +159,8 @@ class GlobalContactReducerClearActive:
         )
         wp.synchronize()
 
-        self.reducer.clear_active()
-        wp.synchronize()
 
-
-class GlobalContactReducerFullCycle:
+class FastGlobalContactReducerFullCycle:
     """Benchmark full insert + clear_active cycle."""
 
     repeat = 3
@@ -190,7 +195,6 @@ class GlobalContactReducerFullCycle:
     def time_full_cycle(self, num_contacts):
         # Clear from previous iteration
         self.reducer.clear_active()
-        wp.synchronize()
 
         # Insert contacts
         reducer_data = self.reducer.get_data_struct()
@@ -209,9 +213,9 @@ if __name__ == "__main__":
     from newton.utils import run_benchmark
 
     benchmark_list = {
-        "GlobalContactReducerInsert": GlobalContactReducerInsert,
-        "GlobalContactReducerClearActive": GlobalContactReducerClearActive,
-        "GlobalContactReducerFullCycle": GlobalContactReducerFullCycle,
+        "FastGlobalContactReducerInsert": FastGlobalContactReducerInsert,
+        "FastGlobalContactReducerClearActive": FastGlobalContactReducerClearActive,
+        "FastGlobalContactReducerFullCycle": FastGlobalContactReducerFullCycle,
     }
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
