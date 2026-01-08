@@ -92,6 +92,8 @@ Collision shapes are attached to rigid bodies. Each shape has:
 - **Body index** (``shape_body``): The rigid body this shape is attached to. Use ``body=-1`` for static/world-fixed shapes.
 - **Local transform** (``shape_transform``): Position and orientation relative to the body frame.
 - **Scale** (``shape_scale``): 3D scale factors applied to the shape geometry.
+- **Thickness** (``shape_thickness``): Surface thickness used in contact generation (see :ref:`Shape Configuration`).
+- **Source geometry** (``shape_source``, ``shape_source_ptr``): Reference to the underlying geometry object (e.g., :class:`~newton.Mesh`, :class:`~newton.SDF`). The ``shape_source_ptr`` is used internally by Warp kernels after calling :meth:`~newton.Mesh.finalize`.
 
 During collision detection, shapes are transformed to world space using their parent body's pose:
 
@@ -225,6 +227,48 @@ Use ``has_shape_collision`` and ``has_particle_collision`` to control what a sha
     
     # Visual-only shape (no collisions at all)
     cfg = builder.ShapeConfig(collision_group=0)
+
+Shape Collision Filter Pairs
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For fine-grained control, you can explicitly exclude specific shape pairs from collision detection
+using :attr:`ModelBuilder.shape_collision_filter_pairs`:
+
+.. code-block:: python
+
+    builder = newton.ModelBuilder()
+    
+    # Add shapes
+    body = builder.add_body()
+    shape_a = builder.add_shape_sphere(body, radius=0.5)
+    shape_b = builder.add_shape_box(body, hx=0.5, hy=0.5, hz=0.5)
+    
+    # Exclude this specific pair from collision detection
+    builder.shape_collision_filter_pairs.append((shape_a, shape_b))
+
+Filter pairs are automatically populated in several cases:
+
+- **Adjacent bodies**: Parent-child body pairs connected by joints (when ``collision_filter_parent=True``)
+- **Same-body shapes**: Shapes attached to the same rigid body
+- **Disabled self-collision**: All shape pairs within an articulation when ``enable_self_collisions=False``
+
+**USD Integration (UsdPhysics)**
+
+When importing USD files, Newton respects the ``physics:filteredPairs`` relationship defined on collision shapes.
+This allows authoring collision filters directly in USD:
+
+.. code-block:: python
+
+    # In USD, define filtered pairs on a collision shape:
+    # shape_prim.CreateRelationship("physics:filteredPairs").SetTargets([other_shape_path])
+    
+    # Newton automatically converts these to shape_collision_filter_pairs during import
+    builder.add_usd("scene.usda")
+
+Shapes with ``physics:collisionEnabled=false`` are also handled by adding filter pairs against all other shapes.
+
+The resulting filter pairs are stored in :attr:`Model.shape_collision_filter_pairs` as a set of
+``(shape_index_a, shape_index_b)`` tuples (canonical order: ``a < b``).
 
 .. _Standard Pipeline:
 
@@ -392,7 +436,7 @@ The unified pipeline supports collision detection between all shape type combina
 
 .. list-table::
    :header-rows: 1
-   :widths: 16 12 12 12 12 12 12 12
+   :widths: 14 10 10 10 10 10 10 10 10
 
    * - 
      - Plane
@@ -402,6 +446,7 @@ The unified pipeline supports collision detection between all shape type combina
      - Cylinder
      - Mesh
      - SDF
+     - Particle
    * - **Plane**
      - 
      - ✅
@@ -410,6 +455,7 @@ The unified pipeline supports collision detection between all shape type combina
      - ✅
      - ✅
      - ✅
+     - 
    * - **Sphere**
      - ✅
      - ✅
@@ -418,6 +464,7 @@ The unified pipeline supports collision detection between all shape type combina
      - ✅
      - ✅
      - ✅
+     - 
    * - **Capsule**
      - ✅
      - ✅
@@ -426,6 +473,7 @@ The unified pipeline supports collision detection between all shape type combina
      - ✅
      - ✅
      - ✅
+     - 
    * - **Box**
      - ✅
      - ✅
@@ -434,6 +482,7 @@ The unified pipeline supports collision detection between all shape type combina
      - ✅
      - ✅
      - ✅
+     - 
    * - **Cylinder**
      - ✅
      - ✅
@@ -442,6 +491,7 @@ The unified pipeline supports collision detection between all shape type combina
      - ✅
      - ✅
      - ✅
+     - 
    * - **Mesh**
      - ✅
      - ✅
@@ -450,6 +500,7 @@ The unified pipeline supports collision detection between all shape type combina
      - ✅
      - ✅⚠️
      - ✅⚠️
+     - 
    * - **SDF**
      - ✅
      - ✅
@@ -458,6 +509,16 @@ The unified pipeline supports collision detection between all shape type combina
      - ✅
      - ✅⚠️
      - ✅
+     - 
+   * - **Particle**
+     - 
+     - 
+     - 
+     - 
+     - 
+     - 
+     - 
+     - 
 
 **Legend:** ⚠️ = Can be slow for meshes with high triangle counts
 
@@ -545,6 +606,62 @@ For mesh-heavy scenes, contact reduction improves performance and stability by s
 3. Representative contacts are selected using configurable depth thresholds (betas)
 
 This reduces thousands of mesh vertex contacts to a stable representative set.
+
+**Configuring contact reduction (SDFHydroelasticConfig):**
+
+For hydroelastic and SDF-based contacts, use :class:`~newton.SDFHydroelasticConfig` to tune reduction behavior:
+
+.. code-block:: python
+
+    from newton import SDFHydroelasticConfig
+
+    config = SDFHydroelasticConfig(
+        reduce_contacts=True,           # Enable contact reduction
+        betas=(10.0, -0.5),             # Scoring thresholds (default)
+        sticky_contacts=0.0,            # Temporal persistence (0 = disabled)
+        normal_matching=True,           # Align reduced normals with aggregate force
+        moment_matching=False,          # Match friction moments (experimental)
+    )
+
+    pipeline = CollisionPipelineUnified.from_model(model, sdf_hydro_config=config)
+
+**Understanding betas:**
+
+The ``betas`` tuple controls how contacts are scored for selection. Each beta value produces
+a separate set of representative contacts per normal bin:
+
+- **Positive beta** (e.g., ``10.0``): Score = ``spatial_position + depth * beta``. Higher values favor deeper contacts.
+- **Negative beta** (e.g., ``-0.5``): Score = ``spatial_position * depth^(-beta)`` for penetrating contacts.
+  This weights spatial distribution more heavily for shallow contacts.
+
+The default ``(10.0, -0.5)`` provides a balance: one set prioritizes penetration depth,
+another prioritizes spatial coverage. More betas = more contacts retained but better coverage.
+
+.. note::
+   The beta scoring behavior is subject to refinement. The unified collision pipeline 
+   is under active development and these parameters may change in future releases.
+
+**Other reduction options:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Parameter
+     - Description
+   * - ``sticky_contacts``
+     - Small positive value (e.g., ``1e-6``) adds temporal persistence to prevent jittering.
+   * - ``normal_matching``
+     - Rotates selected contact normals so their weighted sum aligns with the aggregate force direction 
+       from all unreduced contacts. Preserves net force direction after reduction. Default: True.
+   * - ``moment_matching``
+     - Preserves torsional friction by adding an anchor contact at the depth-weighted centroid and 
+       scaling friction coefficients. This ensures the reduced contact set produces similar resistance 
+       to rotational sliding as the original contacts. Experimental. Default: False.
+   * - ``margin_contact_area``
+     - Lower bound on contact area. Hydroelastic stiffness is ``area * k_eff``, but speculative 
+       contacts within the contact margin (not yet penetrating) have zero geometric area. This 
+       provides a floor value so they still generate repulsive force. Default: 0.01.
 
 .. _Shape Configuration:
 
@@ -699,7 +816,12 @@ Soft contacts are generated automatically when particles are present. They use a
 Contact Data
 ------------
 
-The :class:`~newton.Contacts` class stores collision results:
+The :class:`~newton.Contacts` class stores the results from the collision detection step
+and is consumed by the solver :meth:`~newton.solvers.SolverBase.step` method for contact handling.
+
+.. note::
+   Contact forces are not part of the :class:`~newton.Contacts` class - it only stores geometric 
+   contact information. See :class:`~newton.SensorContact` for computing contact forces.
 
 **Rigid contacts:**
 
@@ -836,13 +958,13 @@ When ``is_hydroelastic=True`` on **both** shapes in a pair, the system generates
    * - ``reduce_contacts``
      - Reduce contacts to representative set. Default: True.
    * - ``betas``
-     - Depth thresholds for contact selection scoring. Default: (10.0, -0.5).
+     - Depth thresholds for contact selection scoring (requires ``reduce_contacts``). Default: (10.0, -0.5).
    * - ``normal_matching``
-     - Adjust normals so net force matches unreduced contacts. Default: True.
+     - Rotate reduced contact normals to preserve aggregate force direction (requires ``reduce_contacts``). Default: True.
    * - ``moment_matching``
-     - Adjust friction for moment matching. Default: False.
+     - Add anchor contact and scale friction to preserve torsional resistance (requires ``reduce_contacts``). Default: False.
    * - ``margin_contact_area``
-     - Contact area for non-penetrating margin contacts. Default: 0.01.
+     - Lower bound on contact area for speculative contacts within the contact margin. Default: 0.01.
 
 The ``k_hydro`` parameter controls area-dependent contact stiffness and should be tuned for desired penetration behavior.
 
