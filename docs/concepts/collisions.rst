@@ -623,7 +623,7 @@ For hydroelastic and SDF-based contacts, use :class:`~newton.SDFHydroelasticConf
         moment_matching=False,          # Match friction moments (experimental)
     )
 
-    pipeline = CollisionPipelineUnified.from_model(model, sdf_hydro_config=config)
+    pipeline = CollisionPipelineUnified.from_model(model, sdf_hydroelastic_config=config)
 
 **Understanding betas:**
 
