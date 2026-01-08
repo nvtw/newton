@@ -758,9 +758,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
             thickness_b = shape_data[mesh_shape_b][3]
 
             # Use per-geometry cutoff for contact detection
+            # Sum margins for consistency with thickness summing
             cutoff_a = shape_contact_margin[mesh_shape_a]
             cutoff_b = shape_contact_margin[mesh_shape_b]
-            margin = wp.max(cutoff_a, cutoff_b)
+            margin = cutoff_a + cutoff_b
 
             # Build pair key for this mesh-mesh pair
             pair_key = build_pair_key2(wp.uint32(mesh_shape_a), wp.uint32(mesh_shape_b))
@@ -963,7 +964,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         thickness0 = mesh0_data[3]
         thickness1 = mesh1_data[3]
 
-        margin = wp.max(shape_contact_margin[shape_idx_0], shape_contact_margin[shape_idx_1])
+        # Sum margins for consistency with thickness summing
+        margin = shape_contact_margin[shape_idx_0] + shape_contact_margin[shape_idx_1]
 
         # Initialize (shared memory) buffers for contact reduction
         empty_marker = -1000000000.0
