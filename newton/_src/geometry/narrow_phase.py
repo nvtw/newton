@@ -892,9 +892,8 @@ class NarrowPhase:
 
         # Create global contact reduction kernels for mesh-triangle contacts
         if self.reduce_contacts:
-            # Use configured betas from contact_reduction_betas
-            beta0 = self.betas_tuple[0] if len(self.betas_tuple) > 0 else 1000000.0
-            beta1 = self.betas_tuple[1] if len(self.betas_tuple) > 1 else 0.0001
+            beta0 = self.betas_tuple[0]
+            beta1 = self.betas_tuple[1]
             num_betas = len(self.betas_tuple)
 
             self.mesh_triangle_to_reducer_kernel = create_mesh_triangle_contacts_to_reducer_kernel(
@@ -1093,7 +1092,8 @@ class NarrowPhase:
         )
 
         # Launch mesh triangle contact processing kernel
-        if self.reduce_contacts and self.global_contact_reducer is not None:
+        if self.reduce_contacts:
+            assert self.global_contact_reducer is not None
             # Use global contact reduction for mesh-triangle contacts
             # First, clear the reducer
             self.global_contact_reducer.clear_active()

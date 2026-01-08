@@ -199,9 +199,9 @@ class HashTable:
         The two-kernel approach is needed to avoid race conditions on CPU where
         threads execute sequentially.
         """
-        # Use fixed thread count for efficient GPU utilization
+        # Use fixed thread count to cover the GPU (65536 = 256 blocks x 256 threads)
         # Grid-stride loop handles any number of active entries
-        num_threads = min(1024, self.capacity)
+        num_threads = min(65536, self.capacity)
         wp.launch(
             _hashtable_clear_keys_kernel,
             dim=num_threads,
