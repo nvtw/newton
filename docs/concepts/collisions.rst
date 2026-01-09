@@ -5,6 +5,8 @@ Collisions
 
 Newton provides a flexible collision detection system for rigid-rigid and soft-rigid contacts. The pipeline handles broad phase culling, narrow phase contact generation, and filtering.
 
+Newton's collision system is also compatible with MuJoCo-imported models via MJWarp, enabling advanced contact models (SDF, hydroelastic) for MuJoCo scenes. See ``examples/mjwarp/`` for usage.
+
 .. _Collision Pipelines Overview:
 
 Collision Pipelines
@@ -13,10 +15,10 @@ Collision Pipelines
 Newton provides two collision pipeline implementations:
 
 **CollisionPipeline** (Standard)
-  Uses precomputed shape pairs determined during model finalization. Simple and efficient when the set of potentially colliding pairs is static.
+  Uses precomputed shape pairs determined during model finalization. Efficient when the number of potentially colliding pairs is limited (NxN minus filtering rules). For scenes with many shapes where most pairs are filtered out, this avoids runtime broad phase overhead.
 
 **CollisionPipelineUnified**
-  Supports multiple broad phase algorithms and is more flexible for dynamic scenes. See :ref:`Unified Pipeline` for details.
+  Supports multiple broad phase algorithms. Use this when the number of potential collision pairs would be large (e.g., hundreds of shapes that could all collide). Also required for advanced contact models like SDF-based and hydroelastic contacts. See :ref:`Unified Pipeline` for details.
 
 Basic usage:
 
@@ -65,22 +67,16 @@ Newton supports the following geometry types via :class:`~newton.GeoType`:
      - Triangle mesh (arbitrary, including non-convex)
    * - ``CONVEX_MESH``
      - Convex hull mesh
-   * - ``SDF``
-     - Signed distance field volume
-   * - ``HFIELD``
-     - Height field (**not implemented** - see note below)
 
 .. note::
-   **Heightfields** (``HFIELD``) are currently not implemented for collision detection. 
-   Convert heightfield terrain to a triangle mesh before adding to Newton.
+   **Heightfields** (``HFIELD``) are not implemented. Convert heightfield terrain to a triangle mesh.
 
 .. note::
-   **SDFs are auxiliary data**, not standalone shapes. When you enable SDF generation for a shape 
-   (via ``sdf_max_resolution`` or ``sdf_target_voxel_size``), the SDF is computed from the shape's 
-   primary geometry (mesh, box, sphere, etc.) and stored alongside it. The SDF provides O(1) distance 
-   queries that can accelerate collision detection. The collision pipeline decides when to use SDF 
-   data based on what's most efficient for each shape pair - having an SDF available doesn't force 
-   its use.
+   **SDF is a collision option**, not a standalone shape type. Enable SDF generation on any shape 
+   via ``sdf_max_resolution`` or ``sdf_target_voxel_size`` to precompute a signed distance field 
+   from the shape's geometry. The SDF provides O(1) distance queries that accelerate collision 
+   detection, especially for mesh-mesh pairs. The collision pipeline decides when to use SDF data 
+   based on efficiency.
 
 .. _Shapes and Bodies:
 
@@ -93,7 +89,7 @@ Collision shapes are attached to rigid bodies. Each shape has:
 - **Local transform** (``shape_transform``): Position and orientation relative to the body frame.
 - **Scale** (``shape_scale``): 3D scale factors applied to the shape geometry.
 - **Thickness** (``shape_thickness``): Surface thickness used in contact generation (see :ref:`Shape Configuration`).
-- **Source geometry** (``shape_source``, ``shape_source_ptr``): Reference to the underlying geometry object (e.g., :class:`~newton.Mesh`, :class:`~newton.SDF`). The ``shape_source_ptr`` is used internally by Warp kernels after calling :meth:`~newton.Mesh.finalize`.
+- **Source geometry** (``shape_source``): Reference to the underlying geometry object (e.g., :class:`~newton.Mesh`, :class:`~newton.SDF`).
 
 During collision detection, shapes are transformed to world space using their parent body's pose:
 
@@ -102,7 +98,7 @@ During collision detection, shapes are transformed to world space using their pa
     # Shape world transform = body_pose * shape_local_transform
     X_world_shape = body_q[shape_body] * shape_transform[shape_id]
 
-Contacts are generated between shapes, not bodies. The solver then applies contact forces to the bodies based on the shape attachments.
+Contacts are generated between shapes, not bodies. The solver applies contact forces to the bodies such that penetrations between their attached shapes are resolved.
 
 .. _Collision Filtering:
 
@@ -116,7 +112,7 @@ Both pipelines use the same filtering rules based on world indices and collision
 World Indices
 ^^^^^^^^^^^^^
 
-World indices enable multi-world simulations where independent instances coexist without interacting:
+World indices enable multi-world simulations, primarily for reinforcement learning, where objects belonging to different worlds coexist but do not interact through contacts:
 
 - **Index -1**: Global entities that collide with all worlds (e.g., ground plane)
 - **Index 0, 1, 2, ...**: World-specific entities that only interact within their world
@@ -125,7 +121,7 @@ World indices enable multi-world simulations where independent instances coexist
 
     builder = newton.ModelBuilder()
     
-    # Global ground (collides with all worlds)
+    # Global ground (default world -1, collides with all worlds)
     builder.add_ground_plane()
     
     # Robot template
@@ -143,6 +139,9 @@ World indices enable multi-world simulations where independent instances coexist
 
 For heterogeneous worlds, use :meth:`~newton.ModelBuilder.begin_world` and :meth:`~newton.ModelBuilder.end_world`.
 
+.. note::
+   MJWarp does not currently support heterogeneous environments (different models per world).
+
 World indices are stored in :attr:`Model.shape_world`, :attr:`Model.body_world`, etc.
 
 .. _Collision Groups:
@@ -153,8 +152,8 @@ Collision Groups
 Collision groups control which shapes collide within the same world:
 
 - **Group 0**: Collisions disabled
-- **Positive groups (1, 2, ...)**: Only collide with same group or negative groups
-- **Negative groups (-1, -2, ...)**: Collide with everything except their own negative counterpart
+- **Positive groups (1, 2, ...)**: Collide with same group or any negative group
+- **Negative groups (-1, -2, ...)**: Collide with shapes in any positive or negative group, except shapes in the same negative group
 
 .. list-table::
    :header-rows: 1
@@ -177,9 +176,9 @@ Collision groups control which shapes collide within the same world:
      - ❌
      - Different positive groups
    * - 1
-     - -1
+     - -2
      - ✅
-     - Positive with negative
+     - Positive with any negative
    * - -1
      - -1
      - ❌
@@ -205,28 +204,28 @@ Collision groups control which shapes collide within the same world:
 
 **Self-collision within articulations**
 
-By default, parent-child body collisions are disabled via ``collision_filter_parent=True``. To enable full self-collision:
+Self-collisions within an articulation can be enabled or disabled with ``enable_self_collisions`` when loading models. By default, adjacent body collisions (parent-child pairs connected by joints) are disabled via ``collision_filter_parent=True``.
 
 .. code-block:: python
 
-    # Per-shape
-    cfg = builder.ShapeConfig(collision_group=-1, collision_filter_parent=False)
-    
-    # When loading models
+    # Enable self-collisions when loading models
     builder.add_usd("robot.usda", enable_self_collisions=True)
     builder.add_mjcf("robot.xml", enable_self_collisions=True)
+    
+    # Or control per-shape (also applies to max-coordinate jointed bodies)
+    cfg = builder.ShapeConfig(collision_group=-1, collision_filter_parent=False)
 
-**Disabling collisions for specific shapes**
+**Controlling particle collisions**
 
-Use ``has_shape_collision`` and ``has_particle_collision`` to control what a shape can collide with:
+Use ``has_shape_collision`` and ``has_particle_collision`` for fine-grained control over what a shape collides with. Setting both to ``False`` is equivalent to ``collision_group=0``.
 
 .. code-block:: python
 
     # Shape that only collides with particles (not other shapes)
     cfg = builder.ShapeConfig(has_shape_collision=False, has_particle_collision=True)
     
-    # Visual-only shape (no collisions at all)
-    cfg = builder.ShapeConfig(collision_group=0)
+    # Shape that only collides with other shapes (not particles)
+    cfg = builder.ShapeConfig(has_shape_collision=True, has_particle_collision=False)
 
 Shape Collision Filter Pairs
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -248,27 +247,29 @@ using :attr:`ModelBuilder.shape_collision_filter_pairs`:
 
 Filter pairs are automatically populated in several cases:
 
-- **Adjacent bodies**: Parent-child body pairs connected by joints (when ``collision_filter_parent=True``)
+- **Adjacent bodies**: Parent-child body pairs connected by joints (when ``collision_filter_parent=True``). Also applies to max-coordinate jointed bodies.
 - **Same-body shapes**: Shapes attached to the same rigid body
 - **Disabled self-collision**: All shape pairs within an articulation when ``enable_self_collisions=False``
 
+The resulting filter pairs are stored in :attr:`Model.shape_collision_filter_pairs` as a set of
+``(shape_index_a, shape_index_b)`` tuples (canonical order: ``a < b``).
+
 **USD Integration (UsdPhysics)**
 
-When importing USD files, Newton respects the ``physics:filteredPairs`` relationship defined on collision shapes.
-This allows authoring collision filters directly in USD:
+When importing USD files, Newton respects the ``physics:filteredPairs`` relationship defined on collision shapes:
 
 .. code-block:: python
 
     # In USD, define filtered pairs on a collision shape:
-    # shape_prim.CreateRelationship("physics:filteredPairs").SetTargets([other_shape_path])
+    shape_prim.CreateRelationship("physics:filteredPairs").SetTargets([other_shape_path])
     
     # Newton automatically converts these to shape_collision_filter_pairs during import
     builder.add_usd("scene.usda")
 
-Shapes with ``physics:collisionEnabled=false`` are also handled by adding filter pairs against all other shapes.
+Shapes with ``physics:collisionEnabled=false`` are handled by setting ``collision_group=0``.
 
-The resulting filter pairs are stored in :attr:`Model.shape_collision_filter_pairs` as a set of
-``(shape_index_a, shape_index_b)`` tuples (canonical order: ``a < b``).
+.. note::
+   USD collision groups (``UsdPhysicsCollisionGroup``) are not yet supported. Use Newton's collision group system instead.
 
 .. _Standard Pipeline:
 
@@ -279,22 +280,24 @@ Standard Pipeline
 
 **When to use:**
 
+- Limited number of potential collision pairs (filtering rules eliminate most NxN combinations)
 - Static collision topology (pairs don't change at runtime)
-- Simple scenes with known collision relationships
-- Maximum compatibility with all contact types
+- Scenes with <100 potentially colliding shapes
 
 **Limitations:**
 
-- No dynamic broad phase (pairs fixed at finalization)
-- Does not support hydroelastic contacts
-- For advanced features, use :class:`~newton.CollisionPipelineUnified`
+- Does not support advanced contact models (SDF-based, hydroelastic, cylinder, cone primitives)
+- Pairs fixed at finalization - inefficient if NxN minus filtering is still large
+
+.. note::
+   New contact models (SDF, hydroelastic, cylinder/cone primitives) are only added to ``CollisionPipelineUnified``. Consider using ``CollisionPipelineUnified`` with ``BroadPhaseMode.EXPLICIT`` if you need static pairs with advanced contact models.
 
 Standard Pipeline Shape Compatibility
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. list-table::
    :header-rows: 1
-   :widths: 14 10 10 10 10 10 10 10 10
+   :widths: 12 9 9 9 9 9 9 9 9 9
 
    * - 
      - Plane
@@ -302,6 +305,7 @@ Standard Pipeline Shape Compatibility
      - Capsule
      - Box
      - Cylinder
+     - Cone
      - Mesh
      - SDF
      - Particle
@@ -310,6 +314,7 @@ Standard Pipeline Shape Compatibility
      - ✅
      - ✅
      - ✅
+     - 
      - 
      - ✅
      - 
@@ -320,6 +325,7 @@ Standard Pipeline Shape Compatibility
      - ✅
      - ✅
      - 
+     - 
      - ✅
      - 
      - ✅
@@ -328,6 +334,7 @@ Standard Pipeline Shape Compatibility
      - ✅
      - ✅
      - ✅
+     - 
      - 
      - ✅
      - 
@@ -338,10 +345,22 @@ Standard Pipeline Shape Compatibility
      - ✅
      - ✅
      - 
+     - 
      - ✅
      - 
      - ✅
    * - **Cylinder**
+     - 
+     - 
+     - 
+     - 
+     - 
+     - 
+     - 
+     - 
+     - ✅
+   * - **Cone**
+     - 
      - 
      - 
      - 
@@ -356,19 +375,12 @@ Standard Pipeline Shape Compatibility
      - ✅
      - ✅
      - 
+     - 
      - ✅
      - 
      - ✅
    * - **SDF**
      - 
-     - 
-     - 
-     - 
-     - 
-     - 
-     - 
-     - ✅
-   * - **Cone**
      - 
      - 
      - 
@@ -386,10 +398,11 @@ Standard Pipeline Shape Compatibility
      - ✅
      - ✅
      - ✅
+     - ✅
 
-Empty cells indicate unsupported pairs. Use :class:`~newton.CollisionPipelineUnified` for full shape support.
+Empty cells indicate unsupported pairs. Use :class:`~newton.CollisionPipelineUnified` for cylinder, cone, SDF, and hydroelastic contact generation.
 
-The pipeline is created automatically when calling :meth:`Model.collide` without arguments:
+The pipeline is created automatically when calling :meth:`Model.collide` without arguments. The static pair table is computed on first call, so run this before CUDA graph capture:
 
 .. code-block:: python
 
@@ -413,7 +426,7 @@ Unified Pipeline
    * - **SAP**
      - Sweep-and-prune AABB broad phase. O(N log N), better for larger scenes with spatial coherence.
    * - **EXPLICIT**
-     - Uses precomputed shape pairs. Most efficient when pairs are known in advance.
+     - Uses precomputed shape pairs like standard pipeline, but with unified pipeline's contact algorithms. Combines static pair efficiency with advanced contact models.
 
 .. code-block:: python
 
@@ -436,7 +449,7 @@ The unified pipeline supports collision detection between all shape type combina
 
 .. list-table::
    :header-rows: 1
-   :widths: 14 10 10 10 10 10 10 10 10
+   :widths: 12 9 9 9 9 9 9 9 9 9
 
    * - 
      - Plane
@@ -444,6 +457,7 @@ The unified pipeline supports collision detection between all shape type combina
      - Capsule
      - Box
      - Cylinder
+     - Cone
      - Mesh
      - SDF
      - Particle
@@ -455,8 +469,10 @@ The unified pipeline supports collision detection between all shape type combina
      - ✅
      - ✅
      - ✅
+     - ✅
      - 
    * - **Sphere**
+     - ✅
      - ✅
      - ✅
      - ✅
@@ -473,8 +489,10 @@ The unified pipeline supports collision detection between all shape type combina
      - ✅
      - ✅
      - ✅
+     - ✅
      - 
    * - **Box**
+     - ✅
      - ✅
      - ✅
      - ✅
@@ -491,8 +509,20 @@ The unified pipeline supports collision detection between all shape type combina
      - ✅
      - ✅
      - ✅
+     - ✅
+     - 
+   * - **Cone**
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - ✅
      - 
    * - **Mesh**
+     - ✅
      - ✅
      - ✅
      - ✅
@@ -502,6 +532,7 @@ The unified pipeline supports collision detection between all shape type combina
      - ✅⚠️
      - 
    * - **SDF**
+     - ✅
      - ✅
      - ✅
      - ✅
@@ -519,19 +550,17 @@ The unified pipeline supports collision detection between all shape type combina
      - 
      - 
      - 
+     - 
 
 **Legend:** ⚠️ = Can be slow for meshes with high triangle counts
 
-Cone, Ellipsoid, and ConvexMesh are also fully supported. The only unsupported type is ``HFIELD`` (heightfield) - convert to mesh instead.
+Ellipsoid and ConvexMesh are also fully supported. The only unsupported type is ``HFIELD`` (heightfield) - convert to mesh instead.
 
 .. note::
-   **SDF in this table** refers to shapes with precomputed SDF data. SDFs are not standalone shapes - 
-   they are generated from a shape's primary geometry and provide O(1) distance queries. The collision 
-   pipeline decides when to use SDF data based on efficiency; having an SDF doesn't force its use.
+   **SDF** in this table refers to shapes with precomputed SDF data (via ``sdf_max_resolution`` or ``sdf_target_voxel_size``). SDFs are generated from a shape's primary geometry and provide O(1) distance queries.
 
 .. note::
-   ``CollisionPipelineUnified`` is under active development and may not support all contact types 
-   (e.g., some soft-rigid scenarios). Use the standard pipeline if you encounter compatibility issues.
+   ``CollisionPipelineUnified`` does not currently support particle (soft body) collisions. Use the standard pipeline for particle-shape contacts. The unified pipeline is under active development.
 
 .. _Narrow Phase:
 
@@ -542,11 +571,11 @@ After broad phase identifies candidate pairs, the narrow phase generates contact
 
 **MPR (Minkowski Portal Refinement)**
 
-The primary algorithm for convex shape pairs. Uses support mapping functions to find the closest points between shapes via Minkowski difference sampling. Works with all convex primitives (sphere, box, capsule, cylinder, cone) and convex meshes.
+The primary algorithm for convex shape pairs. Uses support mapping functions to find the closest points between shapes via Minkowski difference sampling. Works with all convex primitives (sphere, box, capsule, cylinder, cone, ellipsoid) and convex meshes.
 
 **Multi-contact Generation**
 
-For primitive pairs, multiple contact points are generated for stable stacking and resting contacts. The maximum contacts per shape pair is controlled by ``rigid_contact_max_per_pair`` in the collision pipeline constructor.
+For shape pairs, multiple contact points are generated for stable stacking and resting contacts. The maximum contacts per shape pair is controlled by ``rigid_contact_max_per_pair`` in :meth:`Model.collide`.
 
 .. _Mesh Collisions:
 
@@ -555,7 +584,7 @@ Mesh Collision Handling
 
 Mesh collisions use different strategies depending on the pair type:
 
-**Mesh vs Primitive (Sphere, Capsule, Box)**
+**Mesh vs Primitive (e.g., Sphere, Box)**
 
 Uses BVH (Bounding Volume Hierarchy) queries to find nearby triangles, then generates contacts between primitive vertices and triangle surfaces, plus triangle vertices against the primitive.
 
@@ -574,9 +603,9 @@ Two approaches available:
    Enable by setting ``sdf_max_resolution`` or ``sdf_target_voxel_size`` on shapes.
 
 .. warning::
-   If SDF is not precomputed (no ``sdf_max_resolution`` set), mesh-mesh contacts fall back to 
-   on-the-fly BVH distance queries which are **significantly slower**, especially for meshes 
-   with many triangles. For production use with complex meshes, always configure SDF:
+   If SDF is not precomputed, mesh-mesh contacts fall back to on-the-fly BVH distance queries 
+   which are **significantly slower**. For production use with complex meshes, configure SDF 
+   via ``sdf_max_resolution`` or ``sdf_target_voxel_size``:
 
    .. code-block:: python
 
@@ -590,14 +619,7 @@ Two approaches available:
 Contact Reduction
 ^^^^^^^^^^^^^^^^^
 
-For mesh-heavy scenes, contact reduction improves performance and stability by selecting representative contacts:
-
-.. code-block:: python
-
-    pipeline = CollisionPipelineUnified.from_model(
-        model,
-        reduce_contacts=True,  # Enable contact reduction (default)
-    )
+Contact reduction is enabled by default. For scenes with many mesh-mesh interactions that generate thousands of contacts, reduction selects a significantly smaller representative set that maintains stable contact behavior while improving solver performance.
 
 **How it works:**
 
@@ -605,7 +627,7 @@ For mesh-heavy scenes, contact reduction improves performance and stability by s
 2. Within each bin, contacts are scored by spatial distribution and penetration depth
 3. Representative contacts are selected using configurable depth thresholds (betas)
 
-This reduces thousands of mesh vertex contacts to a stable representative set.
+To disable reduction, set ``reduce_contacts=False`` when creating the pipeline.
 
 **Configuring contact reduction (SDFHydroelasticConfig):**
 
@@ -627,12 +649,11 @@ For hydroelastic and SDF-based contacts, use :class:`~newton.SDFHydroelasticConf
 
 **Understanding betas:**
 
-The ``betas`` tuple controls how contacts are scored for selection. Each beta value produces
-a separate set of representative contacts per normal bin:
+The ``betas`` tuple controls how contacts are scored for selection. Each beta value (first element, second element, etc.) produces a separate set of representative contacts per normal bin:
 
 - **Positive beta** (e.g., ``10.0``): Score = ``spatial_position + depth * beta``. Higher values favor deeper contacts.
 - **Negative beta** (e.g., ``-0.5``): Score = ``spatial_position * depth^(-beta)`` for penetrating contacts.
-  This weights spatial distribution more heavily for shallow contacts.
+  This weighs spatial distribution more heavily for shallow contacts.
 
 The default ``(10.0, -0.5)`` provides a balance: one set prioritizes penetration depth,
 another prioritizes spatial coverage. More betas = more contacts retained but better coverage.
@@ -650,7 +671,7 @@ another prioritizes spatial coverage. More betas = more contacts retained but be
    * - Parameter
      - Description
    * - ``sticky_contacts``
-     - Small positive value (e.g., ``1e-6``) adds temporal persistence to prevent jittering.
+     - Temporal persistence threshold. When > 0, contacts from previous frames within this distance are preserved to prevent jittering. Default: 0.0 (disabled).
    * - ``normal_matching``
      - Rotates selected contact normals so their weighted sum aligns with the aggregate force direction 
        from all unreduced contacts. Preserves net force direction after reduction. Default: True.
@@ -659,9 +680,9 @@ another prioritizes spatial coverage. More betas = more contacts retained but be
        scaling friction coefficients. This ensures the reduced contact set produces similar resistance 
        to rotational sliding as the original contacts. Experimental. Default: False.
    * - ``margin_contact_area``
-     - Lower bound on contact area. Hydroelastic stiffness is ``area * k_eff``, but speculative 
-       contacts within the contact margin (not yet penetrating) have zero geometric area. This 
-       provides a floor value so they still generate repulsive force. Default: 0.01.
+     - Lower bound on contact area. Hydroelastic stiffness is ``area * k_eff``, but contacts 
+       within the contact margin that are not yet penetrating (speculative contacts) have zero 
+       geometric area. This provides a floor value so they still generate repulsive force. Default: 0.01.
 
 .. _Shape Configuration:
 
@@ -681,7 +702,7 @@ Shape collision behavior is controlled via :class:`~newton.ModelBuilder.ShapeCon
    * - ``collision_group``
      - Collision group ID. 0 disables collisions. Default: 1.
    * - ``collision_filter_parent``
-     - Filter collisions with parent body in articulation. Default: True.
+     - Filter collisions with adjacent body (parent in articulation or connected via joint). Default: True.
    * - ``has_shape_collision``
      - Whether shape collides with other shapes. Default: True.
    * - ``has_particle_collision``
@@ -720,7 +741,7 @@ Shape collision behavior is controlled via :class:`~newton.ModelBuilder.ShapeCon
    * - Parameter
      - Description
    * - ``sdf_max_resolution``
-     - Maximum SDF grid dimension (must be divisible by 8). Enables SDF-based mesh collision.
+     - Maximum SDF grid dimension (must be divisible by 8). Either this or ``sdf_target_voxel_size`` enables SDF.
    * - ``sdf_target_voxel_size``
      - Target voxel size for SDF. Takes precedence over ``sdf_max_resolution``.
    * - ``sdf_narrow_band_range``
@@ -740,12 +761,7 @@ Example:
 
 **Builder default margin:**
 
-The default value of ``builder.rigid_contact_margin`` is 0.1. To change it:
-
-.. code-block:: python
-
-    builder = newton.ModelBuilder()
-    builder.rigid_contact_margin = 0.05  # Override default (0.1) for all shapes
+The builder's ``rigid_contact_margin`` (default 0.1) applies to shapes without explicit ``contact_margin``. Alternatively, use ``builder.default_shape_cfg.contact_margin``.
 
 .. _Common Patterns:
 
@@ -915,7 +931,7 @@ The :meth:`Model.collide` method accepts the following parameters:
 Hydroelastic Contacts
 ---------------------
 
-Hydroelastic contacts are an **opt-in** feature that generates contact areas (not just points) using SDF-based collision detection. This provides more realistic force distribution for soft or compliant contacts.
+Hydroelastic contacts are an **opt-in** feature that generates contact areas (not just points) using SDF-based collision detection. This provides more realistic and continuous force distribution, particularly useful for robotic manipulation scenarios.
 
 **Default behavior (hydroelastic disabled):**
 
@@ -925,8 +941,8 @@ When ``is_hydroelastic=False`` (default), shapes use **hard SDF contacts** - poi
 
 When ``is_hydroelastic=True`` on **both** shapes in a pair, the system generates distributed contact areas instead of point contacts. This is useful for:
 
-- Simulating compliant/soft materials
-- More stable force distribution across large contact patches
+- More stable and continuous contact forces for non-convex shape interactions
+- Better force distribution across large contact patches
 - Realistic friction behavior for flat-on-flat contacts
 
 **Requirements:**
@@ -951,26 +967,11 @@ When ``is_hydroelastic=True`` on **both** shapes in a pair, the system generates
 3. Contact points are distributed across the surface area
 4. Optional contact reduction selects representative points
 
-**SDFHydroelasticConfig options** (for advanced users):
+**Hydroelastic stiffness (k_hydro):**
 
-.. list-table::
-   :header-rows: 1
-   :widths: 30 70
+The ``k_hydro`` parameter on each shape controls area-dependent contact stiffness. For a pair, the effective stiffness is computed as the harmonic mean: ``k_eff = 2 * k_a * k_b / (k_a + k_b)``. Tune this for desired penetration behavior.
 
-   * - Parameter
-     - Description
-   * - ``reduce_contacts``
-     - Reduce contacts to representative set. Default: True.
-   * - ``betas``
-     - Depth thresholds for contact selection scoring (requires ``reduce_contacts``). Default: (10.0, -0.5).
-   * - ``normal_matching``
-     - Rotate reduced contact normals to preserve aggregate force direction (requires ``reduce_contacts``). Default: True.
-   * - ``moment_matching``
-     - Add anchor contact and scale friction to preserve torsional resistance (requires ``reduce_contacts``). Default: False.
-   * - ``margin_contact_area``
-     - Lower bound on contact area for speculative contacts within the contact margin. Default: 0.01.
-
-The ``k_hydro`` parameter controls area-dependent contact stiffness and should be tuned for desired penetration behavior.
+Contact reduction options for hydroelastic contacts are configured via :class:`~newton.SDFHydroelasticConfig` (see :ref:`Contact Reduction`).
 
 .. _Contact Material Properties:
 
@@ -987,7 +988,7 @@ Shape material properties control contact resolution. Configure via :class:`~new
      - Description
      - Solvers
    * - ``mu``
-     - Friction coefficient
+     - Dynamic friction coefficient
      - All
    * - ``ke``
      - Contact elastic stiffness
@@ -1053,13 +1054,13 @@ See :doc:`custom_attributes` and :doc:`usd_parsing` for details.
 Performance
 -----------
 
-- Use **EXPLICIT** or standard pipeline when pairs are static
+- Use **EXPLICIT** or standard pipeline when collision pairs are limited (<100 shapes with most pairs filtered)
 - Use **SAP** for >100 shapes with spatial coherence
-- Use **NxN** for small scenes or uniform spatial distribution
+- Use **NxN** for small scenes (<100 shapes) or uniform spatial distribution
 - Minimize global entities (world=-1) as they interact with all worlds
 - Use positive collision groups to reduce candidate pairs
 - Use world indices for parallel simulations (essential for RL with many environments)
-- Set ``reduce_contacts=True`` (default) for mesh-heavy scenes to improve performance
+- Contact reduction is enabled by default for mesh-heavy scenes
 - Adjust ``rigid_contact_max_per_pair`` to limit memory usage in complex scenes
 
 See Also
@@ -1087,6 +1088,8 @@ See Also
 - :class:`~newton.Contacts` - Contact data container
 - :class:`~newton.GeoType` - Shape geometry types
 - :class:`~newton.ModelBuilder.ShapeConfig` - Shape configuration options
+- :meth:`~newton.Model.collide` - Collision detection method
+- :class:`~newton.SDFHydroelasticConfig` - Hydroelastic contact configuration
 
 **Model attributes:**
 
