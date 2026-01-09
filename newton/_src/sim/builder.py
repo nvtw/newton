@@ -5826,8 +5826,13 @@ class ModelBuilder:
         # For proper broad phase detection, each shape must have contact_margin >= thickness.
         # This ensures that when thickened surfaces are close (sum of thicknesses),
         # the AABBs overlap (sum of margins >= sum of thicknesses).
+        # Only check shapes that participate in collisions (have COLLIDE_SHAPES or COLLIDE_PARTICLES flag).
+        collision_flags_mask = ShapeFlags.COLLIDE_SHAPES | ShapeFlags.COLLIDE_PARTICLES
         shapes_with_bad_margin = []
         for i in range(self.shape_count):
+            # Skip shapes that don't participate in any collisions (e.g., sites, visual-only)
+            if not (self.shape_flags[i] & collision_flags_mask):
+                continue
             thickness = self.shape_thickness[i]
             margin = self.shape_contact_margin[i]
             if thickness > margin:
