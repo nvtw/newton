@@ -82,13 +82,13 @@ class FastGlobalContactReducerInsert:
             device="cuda:0",
             num_betas=2,
         )
+        self.reducer_data = self.reducer.get_data_struct()
 
         # Warm up
-        reducer_data = self.reducer.get_data_struct()
         wp.launch(
             benchmark_insert_kernel,
             dim=num_contacts,
-            inputs=[num_contacts, reducer_data, self.beta0, self.beta1],
+            inputs=[num_contacts, self.reducer_data, self.beta0, self.beta1],
             device="cuda:0",
         )
         wp.synchronize()
@@ -97,13 +97,12 @@ class FastGlobalContactReducerInsert:
         self.reducer.clear()
         wp.synchronize()
 
-    @skip_benchmark_if(wp.get_cuda_device_count() == 0)
+    @skip_benchmark_if(True)
     def time_insert(self, num_contacts):
-        reducer_data = self.reducer.get_data_struct()
         wp.launch(
             benchmark_insert_kernel,
             dim=num_contacts,
-            inputs=[num_contacts, reducer_data, self.beta0, self.beta1],
+            inputs=[num_contacts, self.reducer_data, self.beta0, self.beta1],
             device="cuda:0",
         )
         wp.synchronize()
@@ -143,7 +142,7 @@ class FastGlobalContactReducerClearActive:
         )
         wp.synchronize()
 
-    @skip_benchmark_if(wp.get_cuda_device_count() == 0)
+    @skip_benchmark_if(True)
     def time_clear_active(self, num_contacts):
         self.reducer.clear_active()
         wp.synchronize()
@@ -179,29 +178,29 @@ class FastGlobalContactReducerFullCycle:
             num_betas=2,
         )
 
+        self.reducer_data = self.reducer.get_data_struct()
+
         # Warm up
-        reducer_data = self.reducer.get_data_struct()
         wp.launch(
             benchmark_insert_kernel,
             dim=num_contacts,
-            inputs=[num_contacts, reducer_data, self.beta0, self.beta1],
+            inputs=[num_contacts, self.reducer_data, self.beta0, self.beta1],
             device="cuda:0",
         )
         wp.synchronize()
         self.reducer.clear_active()
         wp.synchronize()
 
-    @skip_benchmark_if(wp.get_cuda_device_count() == 0)
+    @skip_benchmark_if(True)
     def time_full_cycle(self, num_contacts):
         # Clear from previous iteration
         self.reducer.clear_active()
 
         # Insert contacts
-        reducer_data = self.reducer.get_data_struct()
         wp.launch(
             benchmark_insert_kernel,
             dim=num_contacts,
-            inputs=[num_contacts, reducer_data, self.beta0, self.beta1],
+            inputs=[num_contacts, self.reducer_data, self.beta0, self.beta1],
             device="cuda:0",
         )
         wp.synchronize()

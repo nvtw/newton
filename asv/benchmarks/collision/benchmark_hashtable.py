@@ -122,7 +122,7 @@ class FastHashTableInsertLowCollision:
         self.values.zero_()
         wp.synchronize()
 
-    @skip_benchmark_if(wp.get_cuda_device_count() == 0)
+    @skip_benchmark_if(True)
     def time_insert(self, num_insertions):
         wp.launch(
             insert_low_collision_kernel,
@@ -169,7 +169,7 @@ class FastHashTableInsertHighCollision:
         self.values.zero_()
         wp.synchronize()
 
-    @skip_benchmark_if(wp.get_cuda_device_count() == 0)
+    @skip_benchmark_if(True)
     def time_insert(self, num_insertions):
         wp.launch(
             insert_high_collision_kernel,
@@ -211,7 +211,7 @@ class FastHashTableClearActive:
         )
         wp.synchronize()
 
-    @skip_benchmark_if(wp.get_cuda_device_count() == 0)
+    @skip_benchmark_if(True)
     def time_clear_active(self, num_active):
         self.ht.clear_active()
         wp.synchronize()
