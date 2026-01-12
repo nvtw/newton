@@ -98,7 +98,7 @@ During collision detection, shapes are transformed to world space using their pa
     # Shape world transform = body_pose * shape_local_transform
     X_world_shape = body_q[shape_body] * shape_transform[shape_id]
 
-Contacts are generated between shapes, not bodies. The solver applies contact forces to the bodies such that penetrations between their attached shapes are resolved.
+Contacts are generated between shapes, not bodies. Depending on the type of solver, the motion of the bodies is affected by forces or constraints that resolve the penetrations between their attached shapes.
 
 .. _Collision Filtering:
 
