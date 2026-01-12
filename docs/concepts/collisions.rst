@@ -982,38 +982,58 @@ Shape material properties control contact resolution. Configure via :class:`~new
 
 .. list-table::
    :header-rows: 1
-   :widths: 25 45 30
+   :widths: 10 30 22 19 19
 
    * - Property
      - Description
      - Solvers
+     - ShapeConfig
+     - Model Array
    * - ``mu``
      - Dynamic friction coefficient
      - All
+     - :attr:`~newton.ModelBuilder.ShapeConfig.mu`
+     - :attr:`~newton.Model.shape_material_mu`
    * - ``ke``
      - Contact elastic stiffness
      - SemiImplicit, Featherstone, MuJoCo
+     - :attr:`~newton.ModelBuilder.ShapeConfig.ke`
+     - :attr:`~newton.Model.shape_material_ke`
    * - ``kd``
      - Contact damping
      - SemiImplicit, Featherstone, MuJoCo
+     - :attr:`~newton.ModelBuilder.ShapeConfig.kd`
+     - :attr:`~newton.Model.shape_material_kd`
    * - ``kf``
      - Friction damping coefficient
      - SemiImplicit, Featherstone
+     - :attr:`~newton.ModelBuilder.ShapeConfig.kf`
+     - :attr:`~newton.Model.shape_material_kf`
    * - ``ka``
      - Adhesion distance
      - SemiImplicit, Featherstone
+     - :attr:`~newton.ModelBuilder.ShapeConfig.ka`
+     - :attr:`~newton.Model.shape_material_ka`
    * - ``restitution``
      - Bounciness (requires ``enable_restitution=True`` in solver)
      - XPBD
+     - :attr:`~newton.ModelBuilder.ShapeConfig.restitution`
+     - :attr:`~newton.Model.shape_material_restitution`
    * - ``torsional_friction``
      - Resistance to spinning at contact
      - XPBD, MuJoCo
+     - :attr:`~newton.ModelBuilder.ShapeConfig.torsional_friction`
+     - :attr:`~newton.Model.shape_material_torsional_friction`
    * - ``rolling_friction``
      - Resistance to rolling motion
      - XPBD, MuJoCo
+     - :attr:`~newton.ModelBuilder.ShapeConfig.rolling_friction`
+     - :attr:`~newton.Model.shape_material_rolling_friction`
    * - ``k_hydro``
      - Hydroelastic stiffness
      - SemiImplicit, Featherstone, MuJoCo
+     - :attr:`~newton.ModelBuilder.ShapeConfig.k_hydro`
+     - :attr:`~newton.Model.shape_material_k_hydro`
 
 Example:
 
