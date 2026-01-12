@@ -290,7 +290,11 @@ Standard Pipeline
 - Pairs fixed at finalization - inefficient if NxN minus filtering is still large
 
 .. note::
-   New contact models (SDF, hydroelastic, cylinder/cone primitives) are only added to ``CollisionPipelineUnified``. Consider using ``CollisionPipelineUnified`` with ``BroadPhaseMode.EXPLICIT`` if you need static pairs with advanced contact models.
+   Development is focused on ``CollisionPipelineUnified``, which will replace the standard 
+   ``CollisionPipeline`` in the future once feature and performance parity is achieved. 
+   New contact models (SDF, hydroelastic, cylinder/cone primitives) are only being added to 
+   the unified pipeline. Consider using ``CollisionPipelineUnified`` with 
+   ``BroadPhaseMode.EXPLICIT`` if you need static pairs with advanced contact models.
 
 Standard Pipeline Shape Compatibility
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
