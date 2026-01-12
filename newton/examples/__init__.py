@@ -43,6 +43,8 @@ def test_body_state(
     indices: list[int] | None = None,
     show_body_q: bool = False,
     show_body_qd: bool = False,
+    prerequisite_test_name: str | None = None,
+    prerequisite_test_fn: wp.Function | Callable[[wp.transform, wp.spatial_vectorf], bool] | None = None,
 ):
     """
     Test the position and velocity coordinates of the given bodies by applying the given test function to each body.
@@ -56,6 +58,9 @@ def test_body_state(
         indices: The indices of the bodies to test. If None, all bodies will be tested.
         show_body_q: Whether to print the body pose in the error message.
         show_body_qd: Whether to print the body twist in the error message.
+        prerequisite_test_name: Optional name of a prerequisite test for better diagnostics.
+        prerequisite_test_fn: Optional prerequisite test function. If the primary test fails and this is provided,
+            the prerequisite test is also run to give more informative error messages.
     """
 
     # construct a Warp kernel to evaluate the test function for the given body indices
@@ -95,22 +100,62 @@ def test_body_state(
         failures_np = failures.numpy()
         if np.any(failures_np):
             body_key = np.array(model.body_key)[indices]
-            body_q = body_q.numpy()[indices]
-            body_qd = body_qd.numpy()[indices]
+            body_q_np = body_q.numpy()[indices]
+            body_qd_np = body_qd.numpy()[indices]
             failed_indices = np.where(failures_np)[0]
+
+            # Run prerequisite test if provided to give better diagnostics
+            prereq_failures_np = None
+            if prerequisite_test_fn is not None:
+                if isinstance(prerequisite_test_fn, wp.Function):
+                    warp_prereq_fn = prerequisite_test_fn
+                else:
+                    warp_prereq_fn, _ = wp.utils.create_warp_function(prerequisite_test_fn)
+
+                @wp.kernel
+                def prereq_test_kernel(
+                    body_q: wp.array(dtype=wp.transform),
+                    body_qd: wp.array(dtype=wp.spatial_vector),
+                    indices: wp.array(dtype=int),
+                    # output
+                    failures: wp.array(dtype=bool),
+                ):
+                    world_id = wp.tid()
+                    index = indices[world_id]
+                    result = warp_prereq_fn(body_q[index], body_qd[index])
+                    failures[world_id] = not wp.bool(result)
+
+                prereq_failures = wp.zeros(len(indices), dtype=bool)
+                wp.launch(
+                    prereq_test_kernel,
+                    dim=len(indices),
+                    inputs=[body_q, body_qd, indices_array],
+                    outputs=[prereq_failures],
+                )
+                prereq_failures_np = prereq_failures.numpy()
+
             failed_details = []
             for index in failed_indices:
                 detail = body_key[index]
                 extras = []
                 if show_body_q:
-                    extras.append(f"q={body_q[index]}")
+                    extras.append(f"q={body_q_np[index]}")
                 if show_body_qd:
-                    extras.append(f"qd={body_qd[index]}")
+                    extras.append(f"qd={body_qd_np[index]}")
                 if len(extras) > 0:
                     failed_details.append(f"{detail} ({', '.join(extras)})")
                 else:
                     failed_details.append(detail)
-            raise ValueError(f'Test "{test_name}" failed for the following bodies: [{", ".join(failed_details)}]')
+
+            # Build error message with prerequisite context
+            error_msg = f'Test "{test_name}" failed for the following bodies: [{", ".join(failed_details)}]'
+            if prereq_failures_np is not None and prerequisite_test_name is not None:
+                prereq_failed_count = np.sum(prereq_failures_np[failed_indices])
+                if prereq_failed_count > 0:
+                    error_msg += f' (prerequisite "{prerequisite_test_name}" also failed for {prereq_failed_count} of these bodies)'
+                else:
+                    error_msg += f' (prerequisite "{prerequisite_test_name}" passed for all failed bodies)'
+            raise ValueError(error_msg)
 
 
 def test_particle_state(

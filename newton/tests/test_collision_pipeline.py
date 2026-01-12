@@ -509,7 +509,7 @@ def test_particle_shape_contacts(test, device, use_unified_pipeline: bool, shape
         elif shape_type == GeoType.SPHERE:
             builder.add_shape_sphere(
                 body=-1,
-                pos=wp.vec3(0.0, 0.0, -1.0),
+                xform=wp.transform(wp.vec3(0.0, 0.0, -1.0), wp.quat_identity()),
                 radius=1.0,
             )
 
@@ -525,7 +525,7 @@ def test_particle_shape_contacts(test, device, use_unified_pipeline: bool, shape
             dim_y=5,
             cell_x=0.2,
             cell_y=0.2,
-            density=0.1,
+            mass=0.1,
         )
 
         model = builder.finalize(device=device)
