@@ -6058,9 +6058,29 @@ class ModelBuilder:
         # validate world ordering and contiguity
         self._validate_world_ordering()
 
-        # validate all joints belong to an articulation
+        # validate all joints belong to an articulation, except for "loop joints"
+        # Loop joints connect two bodies that are already reachable via articulated joints
+        # (used to create kinematic loops, converted to equality constraints by MuJoCo solver)
         if self.joint_count > 0:
-            orphan_joints = [i for i, art in enumerate(self.joint_articulation) if art < 0]
+            # First, find all bodies reachable via articulated joints
+            articulated_bodies = set()
+            articulated_bodies.add(-1)  # World is always reachable
+            for i, art in enumerate(self.joint_articulation):
+                if art >= 0:  # Joint is in an articulation
+                    child = self.joint_child[i]
+                    articulated_bodies.add(child)
+
+            # Now check for true orphan joints: non-articulated joints whose child
+            # is NOT reachable via other articulated joints
+            orphan_joints = []
+            for i, art in enumerate(self.joint_articulation):
+                if art < 0:  # Joint is not in an articulation
+                    child = self.joint_child[i]
+                    if child not in articulated_bodies:
+                        # This is a true orphan - the child body has no articulated path
+                        orphan_joints.append(i)
+                    # else: this is a loop joint - child is already reachable, so it's allowed
+
             if orphan_joints:
                 joint_keys = [self.joint_key[i] for i in orphan_joints[:5]]  # Show first 5
                 raise ValueError(
