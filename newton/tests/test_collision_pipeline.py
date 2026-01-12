@@ -76,8 +76,9 @@ class CollisionSetup:
         self.sdf_max_resolution_b = sdf_max_resolution_b
 
         self.builder = newton.ModelBuilder(gravity=0.0)
-        # Set contact margin to match previous test expectations (was previously passed to collision pipeline)
-        self.builder.rigid_contact_margin = 0.01
+        # Set contact margin to match previous test expectations
+        # Note: margins are now summed (margin_a + margin_b), so we use half the previous value
+        self.builder.rigid_contact_margin = 0.005
 
         body_a = self.builder.add_body(xform=wp.transform(wp.vec3(-1.0, 0.0, 0.0)))
         self.add_shape(shape_type_a, body_a, sdf_max_resolution=sdf_max_resolution_a)
