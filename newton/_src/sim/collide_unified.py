@@ -297,6 +297,7 @@ class CollisionPipelineUnified:
         shape_flags: wp.array(dtype=int) | None = None,
         sap_sort_type=None,
         sdf_hydroelastic: SDFHydroelastic | None = None,
+        has_meshes: bool = True,
     ):
         """
         Initialize the CollisionPipelineUnified.
@@ -334,8 +335,12 @@ class CollisionPipelineUnified:
                 If None, uses default (SEGMENTED).
             sdf_hydroelastic (SDFHydroelastic | None, optional): Pre-configured SDF hydroelastic collision handler.
                 If provided, enables hydroelastic contact computation for SDF-based shape pairs. Defaults to None.
+            has_meshes (bool, optional): Whether the scene contains mesh shapes. When False, mesh-related
+                kernels (mesh-plane, mesh-mesh, mesh-triangle) are skipped for better performance.
+                Defaults to True. Use from_model() for auto-detection.
         """
         self.contacts = None
+        self.has_meshes = has_meshes
         self.shape_count = shape_count
         self.broad_phase_mode = broad_phase_mode
         self.device = device
@@ -399,6 +404,7 @@ class CollisionPipelineUnified:
             shape_aabb_upper=self.shape_aabb_upper,
             contact_writer_warp_func=write_contact,
             sdf_hydroelastic=sdf_hydroelastic,
+            has_meshes=has_meshes,
         )
         self.sdf_hydroelastic = self.narrow_phase.sdf_hydroelastic
 
@@ -429,6 +435,7 @@ class CollisionPipelineUnified:
         shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
         sap_sort_type=None,
         sdf_hydroelastic_config: SDFHydroelasticConfig | None = None,
+        has_meshes: bool | None = None,
     ) -> CollisionPipelineUnified:
         """
         Create a CollisionPipelineUnified instance from a Model.
@@ -449,10 +456,18 @@ class CollisionPipelineUnified:
             sap_sort_type (SAPSortType | None, optional): Sorting algorithm for SAP broad phase.
                 Only used when broad_phase_mode is BroadPhaseMode.SAP. If None, uses default (SEGMENTED).
             sdf_hydroelastic_config (SDFHydroelasticConfig | None, optional): Configuration for SDF hydroelastic collision handling. Defaults to None.
+            has_meshes (bool | None, optional): Whether the scene contains mesh shapes. When False,
+                mesh-related kernels are skipped for better performance. If None (default), auto-detects
+                by scanning model.shape_type for MESH shapes.
 
         Returns:
             CollisionPipeline: The constructed collision pipeline.
         """
+        # Auto-detect has_meshes from model shape types if not specified
+        if has_meshes is None:
+            shape_types = model.shape_type.numpy()
+            has_meshes = any(t == int(GeoType.MESH) for t in shape_types)
+
         rigid_contact_max = None
         if rigid_contact_max_per_pair is None:
             rigid_contact_max = model.rigid_contact_max
@@ -493,6 +508,7 @@ class CollisionPipelineUnified:
             shape_flags=model.shape_flags if hasattr(model, "shape_flags") else None,
             sap_sort_type=sap_sort_type,
             sdf_hydroelastic=sdf_hydroelastic,
+            has_meshes=has_meshes,
         )
 
         return pipeline

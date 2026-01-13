@@ -219,7 +219,7 @@ class CollisionPipelineComparisonCollide:
         """
         samples = []
         for _ in range(self.timed_iterations):
-            with wp.ScopedTimer("collide", synchronize=True, print=False, cuda_filter=wp.TIMING_ALL) as timer:
+            with wp.ScopedTimer("collide", synchronize=True, print=False) as timer:
                 if self.graph is not None:
                     wp.capture_launch(self.graph)
                 else:
@@ -304,7 +304,7 @@ class CollisionPipelineComparisonStep:
         """
         samples = []
         for _ in range(self.timed_iterations):
-            with wp.ScopedTimer("step", synchronize=True, print=False, cuda_filter=wp.TIMING_ALL) as timer:
+            with wp.ScopedTimer("step", synchronize=True, print=False) as timer:
                 if self.graph is not None:
                     wp.capture_launch(self.graph)
                 else:
@@ -380,7 +380,7 @@ class CollisionPipelineComparisonFrame:
         """
         samples = []
         for _ in range(self.timed_iterations):
-            with wp.ScopedTimer("frame", synchronize=True, print=False, cuda_filter=wp.TIMING_ALL) as timer:
+            with wp.ScopedTimer("frame", synchronize=True, print=False) as timer:
                 if self.graph is not None:
                     wp.capture_launch(self.graph)
                 else:
