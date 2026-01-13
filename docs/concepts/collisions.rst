@@ -227,11 +227,69 @@ Use ``has_shape_collision`` and ``has_particle_collision`` for fine-grained cont
     # Shape that only collides with other shapes (not particles)
     cfg = builder.ShapeConfig(has_shape_collision=True, has_particle_collision=False)
 
+UsdPhysics Collision Filtering
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Newton follows the `UsdPhysics collision filtering specification <https://openusd.org/dev/api/usd_physics_page_front.html#usdPhysics_collision_filtering>`_,
+which provides two complementary mechanisms for controlling which shapes collide:
+
+1. **Collision Groups** - Group-based filtering using ``UsdPhysicsCollisionGroup``
+2. **Pairwise Filtering** - Explicit shape pair exclusions using ``physics:filteredPairs``
+
+**Collision Groups**
+
+In UsdPhysics, shapes can be assigned to collision groups defined by ``UsdPhysicsCollisionGroup`` prims.
+When importing USD files, Newton reads the ``collisionGroups`` attribute from each shape and maps
+each unique collision group name to a positive integer ID (starting from 1). Shapes in different
+collision groups will not collide with each other unless their groups are configured to interact.
+
+.. code-block:: usda
+
+    # Define a collision group in USD
+    def "CollisionGroup_Robot" (
+        prepend apiSchemas = ["PhysicsCollisionGroup"]
+    ) {
+    }
+
+    # Assign shape to a collision group
+    def Sphere "RobotPart" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    ) {
+        rel physics:collisionGroup = </CollisionGroup_Robot>
+    }
+
+When loading this USD, Newton automatically assigns each collision group a unique integer ID
+and sets the shape's ``collision_group`` accordingly.
+
+**Pairwise Filtering**
+
+For fine-grained control, UsdPhysics supports explicit pair filtering via the ``physics:filteredPairs``
+relationship. This allows excluding specific shape pairs from collision detection regardless of their
+collision groups.
+
+.. code-block:: usda
+
+    # Exclude specific shape pairs in USD
+    def Sphere "ShapeA" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    ) {
+        rel physics:filteredPairs = [</ShapeB>]
+    }
+
+Newton reads these relationships during USD import and converts them to
+:attr:`ModelBuilder.shape_collision_filter_pairs`.
+
+**Collision Enabled Flag**
+
+Shapes with ``physics:collisionEnabled=false`` are excluded from all collisions by adding filter
+pairs against all other shapes in the scene.
+
 Shape Collision Filter Pairs
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-For fine-grained control, you can explicitly exclude specific shape pairs from collision detection
-using :attr:`ModelBuilder.shape_collision_filter_pairs`:
+The :attr:`ModelBuilder.shape_collision_filter_pairs` list stores explicit shape pair exclusions.
+This is Newton's internal representation for pairwise filtering (including pairs imported from
+UsdPhysics ``physics:filteredPairs`` relationships).
 
 .. code-block:: python
 
@@ -250,26 +308,25 @@ Filter pairs are automatically populated in several cases:
 - **Adjacent bodies**: Parent-child body pairs connected by joints (when ``collision_filter_parent=True``). Also applies to max-coordinate jointed bodies.
 - **Same-body shapes**: Shapes attached to the same rigid body
 - **Disabled self-collision**: All shape pairs within an articulation when ``enable_self_collisions=False``
+- **USD filtered pairs**: Pairs defined by ``physics:filteredPairs`` relationships in USD files
+- **USD collision disabled**: Shapes with ``physics:collisionEnabled=false`` (filtered against all other shapes)
 
-The resulting filter pairs are stored in :attr:`Model.shape_collision_filter_pairs` as a set of
+The resulting filter pairs are stored in :attr:`~newton.Model.shape_collision_filter_pairs` as a set of
 ``(shape_index_a, shape_index_b)`` tuples (canonical order: ``a < b``).
 
-**USD Integration (UsdPhysics)**
-
-When importing USD files, Newton respects the ``physics:filteredPairs`` relationship defined on collision shapes:
+**USD Import Example**
 
 .. code-block:: python
 
-    # In USD, define filtered pairs on a collision shape:
-    shape_prim.CreateRelationship("physics:filteredPairs").SetTargets([other_shape_path])
-    
-    # Newton automatically converts these to shape_collision_filter_pairs during import
+    # Newton automatically imports UsdPhysics collision filtering
+    builder = newton.ModelBuilder()
     builder.add_usd("scene.usda")
-
-Shapes with ``physics:collisionEnabled=false`` are handled by setting ``collision_group=0``.
-
-.. note::
-   USD collision groups (``UsdPhysicsCollisionGroup``) are not yet supported. Use Newton's collision group system instead.
+    
+    # Collision groups and filter pairs are now populated:
+    # - shape_collision_group: integer IDs mapped from UsdPhysicsCollisionGroup
+    # - shape_collision_filter_pairs: pairs from physics:filteredPairs relationships
+    
+    model = builder.finalize()
 
 .. _Standard Pipeline:
 
@@ -406,7 +463,7 @@ Standard Pipeline Shape Compatibility
 
 Empty cells indicate unsupported pairs. Use :class:`~newton.CollisionPipelineUnified` for cylinder, cone, SDF, and hydroelastic contact generation.
 
-The pipeline is created automatically when calling :meth:`Model.collide` without arguments. The static pair table is computed on first call, so run this before CUDA graph capture:
+The pipeline is created automatically when calling :meth:`~newton.Model.collide` without arguments:
 
 .. code-block:: python
 
@@ -1113,7 +1170,7 @@ See Also
 - :class:`~newton.GeoType` - Shape geometry types
 - :class:`~newton.ModelBuilder.ShapeConfig` - Shape configuration options
 - :meth:`~newton.Model.collide` - Collision detection method
-- :class:`~newton.SDFHydroelasticConfig` - Hydroelastic contact configuration
+- :class:`~newton.geometry.SDFHydroelasticConfig` - Hydroelastic contact configuration
 
 **Model attributes:**
 
