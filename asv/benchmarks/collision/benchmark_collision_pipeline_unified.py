@@ -48,10 +48,10 @@ def create_flat_mesh_grid(grid_x: int, grid_y: int, cell_size: float = 1.0):
     num_verts_y = grid_y + 1
 
     vertices = []
-    for iy in range(num_verts_y):
-        for ix in range(num_verts_x):
-            x = ix * cell_size
-            y = iy * cell_size
+    for j in range(num_verts_y):
+        for i in range(num_verts_x):
+            x = i * cell_size
+            y = j * cell_size
             z = 0.0
             vertices.append([x, y, z])
 
@@ -59,13 +59,13 @@ def create_flat_mesh_grid(grid_x: int, grid_y: int, cell_size: float = 1.0):
 
     # Create triangle indices (2 triangles per quad)
     indices = []
-    for iy in range(grid_y):
-        for ix in range(grid_x):
+    for j in range(grid_y):
+        for i in range(grid_x):
             # Vertex indices for this quad
-            v00 = iy * num_verts_x + ix
-            v10 = iy * num_verts_x + (ix + 1)
-            v01 = (iy + 1) * num_verts_x + ix
-            v11 = (iy + 1) * num_verts_x + (ix + 1)
+            v00 = j * num_verts_x + i
+            v10 = j * num_verts_x + (i + 1)
+            v01 = (j + 1) * num_verts_x + i
+            v11 = (j + 1) * num_verts_x + (i + 1)
 
             # First triangle (lower-left)
             indices.extend([v00, v10, v01])
@@ -111,13 +111,13 @@ def build_collision_scene(grid_size: int, broad_phase_mode: newton.BroadPhaseMod
     rng = np.random.default_rng(42)
     position_randomness = 0.2
 
-    for ix in range(grid_size):
-        for iy in range(grid_size):
-            for iz in range(grid_size):
+    for i in range(grid_size):
+        for j in range(grid_size):
+            for k in range(grid_size):
                 # Calculate position with random offset
-                base_x = grid_offset[0] + ix * grid_spacing
-                base_y = grid_offset[1] + iy * grid_spacing
-                base_z = grid_offset[2] + iz * grid_spacing
+                base_x = grid_offset[0] + i * grid_spacing
+                base_y = grid_offset[1] + j * grid_spacing
+                base_z = grid_offset[2] + k * grid_spacing
 
                 random_offset_x = (rng.random() - 0.5) * 2 * position_randomness
                 random_offset_y = (rng.random() - 0.5) * 2 * position_randomness
