@@ -186,6 +186,10 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
 
         num_work_items = wp.min(candidate_pair.shape[0], num_candidate_pair[0])
 
+        # Early exit if no work
+        if num_work_items == 0:
+            return
+
         for t in range(tid, num_work_items, total_num_threads):
             # Get shape pair
             pair = candidate_pair[t]
@@ -477,6 +481,10 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
         tid = wp.tid()
 
         num_work_items = wp.min(candidate_pair.shape[0], num_candidate_pair[0])
+
+        # Early exit if no work (fast path for primitive-only scenes)
+        if num_work_items == 0:
+            return
 
         for t in range(tid, num_work_items, total_num_threads):
             # Get shape pair (already sorted by primitive kernel)
@@ -1216,10 +1224,14 @@ class NarrowPhase:
                 self.shape_pairs_sdf_sdf_count = wp.zeros(1, dtype=wp.int32, device=device)
 
         # Fixed thread count for kernel launches
+        # Use a reasonable minimum for GPU occupancy (256 blocks = 32K threads)
+        # but scale with expected workload to avoid massive overprovisioning.
+        # 256 blocks provides good occupancy on most GPUs (2-4 blocks per SM).
         gpu_thread_limit = 1024 * 1024 * 4
         max_blocks_limit = gpu_thread_limit // self.block_dim
         candidate_blocks = (max_candidate_pairs + self.block_dim - 1) // self.block_dim
-        num_blocks = max(1024, min(candidate_blocks, max_blocks_limit))
+        min_blocks = 256  # 32K threads minimum for reasonable GPU occupancy
+        num_blocks = max(min_blocks, min(candidate_blocks, max_blocks_limit))
         self.total_num_threads = self.block_dim * num_blocks
         self.num_tile_blocks = num_blocks
 
