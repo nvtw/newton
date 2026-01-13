@@ -319,7 +319,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
 
             # -----------------------------------------------------------------
             # Plane-Capsule collision (type_a=PLANE=0, type_b=CAPSULE=3)
-            # Produces 2 contacts
+            # Produces 2 contacts (both share same normal)
             # -----------------------------------------------------------------
             elif is_plane_a and is_capsule_b:
                 plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
@@ -353,6 +353,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
 
             # -----------------------------------------------------------------
             # Capsule-Capsule collision (type_a=CAPSULE=3, type_b=CAPSULE=3)
+            # Produces 1 contact (non-parallel) or 2 contacts (parallel axes)
             # -----------------------------------------------------------------
             elif is_capsule_a and is_capsule_b:
                 axis_a = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
@@ -361,10 +362,21 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 half_length_a = scale_a[1]
                 radius_b = scale_b[0]
                 half_length_b = scale_b[1]
-                contact_dist_0, contact_pos_0, contact_normal = collide_capsule_capsule(
+
+                dists, positions, contact_normal = collide_capsule_capsule(
                     pos_a, axis_a, radius_a, half_length_a, pos_b, axis_b, radius_b, half_length_b
                 )
-                num_contacts = 1
+
+                contact_dist_0 = dists[0]
+                contact_pos_0 = wp.vec3(positions[0, 0], positions[0, 1], positions[0, 2])
+
+                # Check if second contact is valid (parallel axes case)
+                if dists[1] < wp.inf:
+                    contact_dist_1 = dists[1]
+                    contact_pos_1 = wp.vec3(positions[1, 0], positions[1, 1], positions[1, 2])
+                    num_contacts = 2
+                else:
+                    num_contacts = 1
 
             # -----------------------------------------------------------------
             # Sphere-Cylinder collision (type_a=SPHERE=2, type_b=CYLINDER=5)
@@ -409,7 +421,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 contact_data.margin = margin
                 writer_func(contact_data, writer_data, -1)
 
-                # Second contact (if any)
+                # Second contact (if any) - uses same normal
                 if num_contacts > 1:
                     contact_data.contact_point_center = contact_pos_1
                     contact_data.contact_distance = contact_dist_1
