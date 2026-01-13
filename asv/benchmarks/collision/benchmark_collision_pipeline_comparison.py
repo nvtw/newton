@@ -28,6 +28,8 @@ Excluded shapes (only supported by CollisionPipelineUnified):
 - Cylinder, Cone (limited or no support in standard pipeline)
 """
 
+import statistics
+
 import numpy as np
 import warp as wp
 from asv_runner.benchmarks.mark import skip_benchmark_if
@@ -75,7 +77,6 @@ def build_wrecking_ball_scene(pipeline_type: str, pyramid_size: int = 10):
 
     # Build pyramid of cubes
     cube_h = 0.4
-    gap = 0.02
     y_stack = 6.0
     cube_spacing = 2.1 * cube_h
 
@@ -139,11 +140,23 @@ def build_wrecking_ball_scene(pipeline_type: str, pyramid_size: int = 10):
             model,
             rigid_contact_max_per_pair=10,
         )
-    else:
+    elif pipeline_type == "unified_nxn":
         collision_pipeline = newton.CollisionPipelineUnified.from_model(
             model,
             rigid_contact_max_per_pair=10,
             broad_phase_mode=newton.BroadPhaseMode.NXN,
+        )
+    elif pipeline_type == "unified_explicit":
+        collision_pipeline = newton.CollisionPipelineUnified.from_model(
+            model,
+            rigid_contact_max_per_pair=10,
+            broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
+        )
+    else:  # unified_sap
+        collision_pipeline = newton.CollisionPipelineUnified.from_model(
+            model,
+            rigid_contact_max_per_pair=10,
+            broad_phase_mode=newton.BroadPhaseMode.SAP,
         )
 
     # Create solver and state
@@ -155,14 +168,20 @@ def build_wrecking_ball_scene(pipeline_type: str, pyramid_size: int = 10):
 
 
 class CollisionPipelineComparisonCollide:
-    """Benchmark collision detection (model.collide) comparing Standard vs Unified pipelines."""
+    """Benchmark collision detection (model.collide) comparing Standard vs Unified pipelines.
+
+    Uses CUDA graph capture for reliable timing measurements.
+    Runs multiple iterations internally with warmup for stable results.
+    """
 
     repeat = 5
     number = 1
     timeout = 300
+    warmup_iterations = 5  # Warmup iterations after graph capture
+    timed_iterations = 20  # Timed iterations for median calculation
     params = [
         [10, 15, 20],  # pyramid_size (55, 120, 210 cubes in pyramid + extras)
-        ["standard", "unified"],  # pipeline_type
+        ["standard", "unified_nxn", "unified_explicit", "unified_sap"],  # pipeline_type
     ]
     param_names = ["pyramid_size", "pipeline_type"]
 
@@ -172,19 +191,48 @@ class CollisionPipelineComparisonCollide:
         )
         self.control = self.model.control()
 
-        # Warm up
+        # Warm up (required before graph capture)
         self.contacts = self.model.collide(self.state, collision_pipeline=self.collision_pipeline)
+        wp.synchronize()
+
+        # Capture CUDA graph for collision detection
+        self.graph = None
+        if wp.get_device().is_cuda:
+            with wp.ScopedCapture() as capture:
+                self.contacts = self.model.collide(self.state, collision_pipeline=self.collision_pipeline)
+            self.graph = capture.graph
+
+        # Warmup the captured graph
+        for _ in range(self.warmup_iterations):
+            if self.graph is not None:
+                wp.capture_launch(self.graph)
+            else:
+                self.contacts = self.model.collide(self.state, collision_pipeline=self.collision_pipeline)
         wp.synchronize()
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
     def time_collide(self, pyramid_size, pipeline_type):
-        """Time the collision detection phase only."""
-        self.contacts = self.model.collide(self.state, collision_pipeline=self.collision_pipeline)
-        wp.synchronize()
+        """Time the collision detection phase only (using CUDA graph).
+
+        Runs multiple iterations internally and returns the median time.
+        Uses wp.ScopedTimer for accurate GPU timing via CUDA events.
+        """
+        samples = []
+        for _ in range(self.timed_iterations):
+            with wp.ScopedTimer("collide", synchronize=True, print=False, cuda_filter=wp.TIMING_ALL) as timer:
+                if self.graph is not None:
+                    wp.capture_launch(self.graph)
+                else:
+                    self.contacts = self.model.collide(self.state, collision_pipeline=self.collision_pipeline)
+            samples.append(timer.elapsed)
+
+        # Return median for stable measurement
+        return statistics.median(samples)
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
     def track_contact_count(self, pyramid_size, pipeline_type):
         """Track the number of contacts generated."""
+        # Run without graph to get actual contact count
         self.contacts = self.model.collide(self.state, collision_pipeline=self.collision_pipeline)
         wp.synchronize()
         return self.contacts.rigid_contact_count.numpy()[0]
@@ -196,16 +244,29 @@ class CollisionPipelineComparisonCollide:
 
 
 class CollisionPipelineComparisonStep:
-    """Benchmark full simulation step comparing Standard vs Unified pipelines."""
+    """Benchmark full simulation step comparing Standard vs Unified pipelines.
+
+    Uses CUDA graph capture for reliable timing measurements.
+    Runs multiple iterations internally with warmup for stable results.
+    """
 
     repeat = 5
     number = 1
     timeout = 300
+    warmup_iterations = 5
+    timed_iterations = 20
     params = [
         [10, 15, 20],  # pyramid_size
-        ["standard", "unified"],  # pipeline_type
+        ["standard", "unified_nxn", "unified_explicit", "unified_sap"],  # pipeline_type
     ]
     param_names = ["pyramid_size", "pipeline_type"]
+
+    def _do_step(self):
+        """Perform one simulation step (collide + solve)."""
+        self.state_0.clear_forces()
+        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+        self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+        self.state_0, self.state_1 = self.state_1, self.state_0
 
     def setup(self, pyramid_size, pipeline_type):
         self.model, self.collision_pipeline, self.state_0, self.solver = build_wrecking_ball_scene(
@@ -215,33 +276,69 @@ class CollisionPipelineComparisonStep:
         self.control = self.model.control()
         self.sim_dt = 1.0 / 600.0  # 10 substeps at 60fps
 
-        # Warm up
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
-        self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
-        self.state_0, self.state_1 = self.state_1, self.state_0
+        # Warm up (required before graph capture)
+        self._do_step()
+        wp.synchronize()
+
+        # Capture CUDA graph for full step
+        self.graph = None
+        if wp.get_device().is_cuda:
+            with wp.ScopedCapture() as capture:
+                self._do_step()
+            self.graph = capture.graph
+
+        # Warmup the captured graph
+        for _ in range(self.warmup_iterations):
+            if self.graph is not None:
+                wp.capture_launch(self.graph)
+            else:
+                self._do_step()
         wp.synchronize()
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
     def time_step(self, pyramid_size, pipeline_type):
-        """Time a single simulation substep (collide + solve)."""
-        self.state_0.clear_forces()
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
-        self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
-        self.state_0, self.state_1 = self.state_1, self.state_0
-        wp.synchronize()
+        """Time a single simulation substep (collide + solve) using CUDA graph.
+
+        Runs multiple iterations internally and returns the median time.
+        Uses wp.ScopedTimer for accurate GPU timing via CUDA events.
+        """
+        samples = []
+        for _ in range(self.timed_iterations):
+            with wp.ScopedTimer("step", synchronize=True, print=False, cuda_filter=wp.TIMING_ALL) as timer:
+                if self.graph is not None:
+                    wp.capture_launch(self.graph)
+                else:
+                    self._do_step()
+            samples.append(timer.elapsed)
+
+        return statistics.median(samples)
 
 
 class CollisionPipelineComparisonFrame:
-    """Benchmark a full frame (multiple substeps) comparing Standard vs Unified pipelines."""
+    """Benchmark a full frame (multiple substeps) comparing Standard vs Unified pipelines.
+
+    Uses CUDA graph capture for reliable timing measurements.
+    Runs multiple iterations internally with warmup for stable results.
+    """
 
     repeat = 3
     number = 1
     timeout = 600
+    warmup_iterations = 3
+    timed_iterations = 10
     params = [
         [10, 15],  # pyramid_size - smaller for frame benchmark
-        ["standard", "unified"],  # pipeline_type
+        ["standard", "unified_nxn", "unified_explicit", "unified_sap"],  # pipeline_type
     ]
     param_names = ["pyramid_size", "pipeline_type"]
+
+    def _do_frame(self):
+        """Perform one full frame (multiple substeps)."""
+        for _ in range(self.substeps):
+            self.state_0.clear_forces()
+            self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+            self.state_0, self.state_1 = self.state_1, self.state_0
 
     def setup(self, pyramid_size, pipeline_type):
         self.model, self.collision_pipeline, self.state_0, self.solver = build_wrecking_ball_scene(
@@ -255,23 +352,42 @@ class CollisionPipelineComparisonFrame:
         self.frame_dt = 1.0 / self.fps
         self.sim_dt = self.frame_dt / self.substeps
 
-        # Warm up with one frame
-        for _ in range(self.substeps):
-            self.state_0.clear_forces()
-            self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
-            self.state_0, self.state_1 = self.state_1, self.state_0
+        # Warm up with one frame (required before graph capture)
+        self._do_frame()
+        wp.synchronize()
+
+        # Capture CUDA graph for full frame
+        self.graph = None
+        if wp.get_device().is_cuda:
+            with wp.ScopedCapture() as capture:
+                self._do_frame()
+            self.graph = capture.graph
+
+        # Warmup the captured graph
+        for _ in range(self.warmup_iterations):
+            if self.graph is not None:
+                wp.capture_launch(self.graph)
+            else:
+                self._do_frame()
         wp.synchronize()
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
     def time_frame(self, pyramid_size, pipeline_type):
-        """Time a full frame (10 substeps at 60fps)."""
-        for _ in range(self.substeps):
-            self.state_0.clear_forces()
-            self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
-            self.state_0, self.state_1 = self.state_1, self.state_0
-        wp.synchronize()
+        """Time a full frame (10 substeps at 60fps) using CUDA graph.
+
+        Runs multiple iterations internally and returns the median time.
+        Uses wp.ScopedTimer for accurate GPU timing via CUDA events.
+        """
+        samples = []
+        for _ in range(self.timed_iterations):
+            with wp.ScopedTimer("frame", synchronize=True, print=False, cuda_filter=wp.TIMING_ALL) as timer:
+                if self.graph is not None:
+                    wp.capture_launch(self.graph)
+                else:
+                    self._do_frame()
+            samples.append(timer.elapsed)
+
+        return statistics.median(samples)
 
 
 if __name__ == "__main__":
@@ -299,4 +415,3 @@ if __name__ == "__main__":
     for key in benchmarks:
         benchmark = benchmark_list[key]
         run_benchmark(benchmark)
-

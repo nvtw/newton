@@ -23,6 +23,8 @@ The benchmark scene consists of a 3D grid of mixed primitive shapes (spheres, bo
 capsules, cylinders, cones) falling onto a flat 100x100 triangle mesh ground plane.
 """
 
+import statistics
+
 import numpy as np
 import warp as wp
 from asv_runner.benchmarks.mark import skip_benchmark_if
@@ -171,11 +173,17 @@ def build_collision_scene(grid_size: int, broad_phase_mode: newton.BroadPhaseMod
 
 
 class FastCollisionPipelineUnifiedCollide:
-    """Benchmark collision detection (model.collide) with CollisionPipelineUnified."""
+    """Benchmark collision detection (model.collide) with CollisionPipelineUnified.
+
+    Uses CUDA graph capture for reliable timing measurements.
+    Runs multiple iterations internally with warmup for stable results.
+    """
 
     repeat = 5
     number = 1
     timeout = 300
+    warmup_iterations = 5
+    timed_iterations = 20
     params = [
         [4, 6, 8],  # grid_size (64, 216, 512 shapes)
         ["NXN", "SAP"],  # broad_phase_mode
@@ -194,35 +202,76 @@ class FastCollisionPipelineUnifiedCollide:
         )
         self.control = self.model.control()
 
-        # Warm up
+        # Warm up (required before graph capture)
         self.contacts = self.model.collide(self.state, collision_pipeline=self.collision_pipeline)
+        wp.synchronize()
+
+        # Capture CUDA graph for collision detection
+        self.graph = None
+        if wp.get_device().is_cuda:
+            with wp.ScopedCapture() as capture:
+                self.contacts = self.model.collide(self.state, collision_pipeline=self.collision_pipeline)
+            self.graph = capture.graph
+
+        # Warmup the captured graph
+        for _ in range(self.warmup_iterations):
+            if self.graph is not None:
+                wp.capture_launch(self.graph)
+            else:
+                self.contacts = self.model.collide(self.state, collision_pipeline=self.collision_pipeline)
         wp.synchronize()
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
     def time_collide(self, grid_size, broad_phase_mode_str):
-        """Time the collision detection phase only."""
-        self.contacts = self.model.collide(self.state, collision_pipeline=self.collision_pipeline)
-        wp.synchronize()
+        """Time the collision detection phase only (using CUDA graph).
+
+        Runs multiple iterations internally and returns the median time.
+        Uses wp.ScopedTimer for accurate GPU timing via CUDA events.
+        """
+        samples = []
+        for _ in range(self.timed_iterations):
+            with wp.ScopedTimer("collide", synchronize=True, print=False, cuda_filter=wp.TIMING_ALL) as timer:
+                if self.graph is not None:
+                    wp.capture_launch(self.graph)
+                else:
+                    self.contacts = self.model.collide(self.state, collision_pipeline=self.collision_pipeline)
+            samples.append(timer.elapsed)
+
+        return statistics.median(samples)
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
     def track_contact_count(self, grid_size, broad_phase_mode_str):
         """Track the number of contacts generated."""
+        # Run without graph to get actual contact count
         self.contacts = self.model.collide(self.state, collision_pipeline=self.collision_pipeline)
         wp.synchronize()
         return self.contacts.rigid_contact_count.numpy()[0]
 
 
 class FastCollisionPipelineUnifiedStep:
-    """Benchmark full simulation step including collision detection."""
+    """Benchmark full simulation step including collision detection.
+
+    Uses CUDA graph capture for reliable timing measurements.
+    Runs multiple iterations internally with warmup for stable results.
+    """
 
     repeat = 5
     number = 1
     timeout = 300
+    warmup_iterations = 5
+    timed_iterations = 20
     params = [
         [4, 6, 8],  # grid_size (64, 216, 512 shapes)
         ["NXN", "SAP"],  # broad_phase_mode
     ]
     param_names = ["grid_size", "broad_phase_mode"]
+
+    def _do_step(self):
+        """Perform one simulation step (collide + solve)."""
+        self.state_0.clear_forces()
+        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+        self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+        self.state_0, self.state_1 = self.state_1, self.state_0
 
     def setup(self, grid_size, broad_phase_mode_str):
         broad_phase_map = {
@@ -238,33 +287,69 @@ class FastCollisionPipelineUnifiedStep:
         self.control = self.model.control()
         self.sim_dt = 1.0 / 600.0  # 10 substeps at 60fps
 
-        # Warm up
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
-        self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
-        self.state_0, self.state_1 = self.state_1, self.state_0
+        # Warm up (required before graph capture)
+        self._do_step()
+        wp.synchronize()
+
+        # Capture CUDA graph for full step
+        self.graph = None
+        if wp.get_device().is_cuda:
+            with wp.ScopedCapture() as capture:
+                self._do_step()
+            self.graph = capture.graph
+
+        # Warmup the captured graph
+        for _ in range(self.warmup_iterations):
+            if self.graph is not None:
+                wp.capture_launch(self.graph)
+            else:
+                self._do_step()
         wp.synchronize()
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
     def time_step(self, grid_size, broad_phase_mode_str):
-        """Time a single simulation substep (collide + solve)."""
-        self.state_0.clear_forces()
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
-        self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
-        self.state_0, self.state_1 = self.state_1, self.state_0
-        wp.synchronize()
+        """Time a single simulation substep (collide + solve) using CUDA graph.
+
+        Runs multiple iterations internally and returns the median time.
+        Uses wp.ScopedTimer for accurate GPU timing via CUDA events.
+        """
+        samples = []
+        for _ in range(self.timed_iterations):
+            with wp.ScopedTimer("step", synchronize=True, print=False, cuda_filter=wp.TIMING_ALL) as timer:
+                if self.graph is not None:
+                    wp.capture_launch(self.graph)
+                else:
+                    self._do_step()
+            samples.append(timer.elapsed)
+
+        return statistics.median(samples)
 
 
 class FastCollisionPipelineUnifiedFrame:
-    """Benchmark a full frame (multiple substeps) of simulation."""
+    """Benchmark a full frame (multiple substeps) of simulation.
+
+    Uses CUDA graph capture for reliable timing measurements.
+    Runs multiple iterations internally with warmup for stable results.
+    """
 
     repeat = 3
     number = 1
     timeout = 600
+    warmup_iterations = 3
+    timed_iterations = 10
     params = [
         [4, 6],  # grid_size (64, 216 shapes) - smaller for frame benchmark
         ["NXN", "SAP"],  # broad_phase_mode
     ]
     param_names = ["grid_size", "broad_phase_mode"]
+
+    def _do_frame(self):
+        """Perform one full frame (multiple substeps)."""
+        for _ in range(self.substeps):
+            self.state_0.clear_forces()
+            self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+            self.state_0, self.state_1 = self.state_1, self.state_0
 
     def setup(self, grid_size, broad_phase_mode_str):
         broad_phase_map = {
@@ -284,23 +369,42 @@ class FastCollisionPipelineUnifiedFrame:
         self.frame_dt = 1.0 / self.fps
         self.sim_dt = self.frame_dt / self.substeps
 
-        # Warm up with one frame
-        for _ in range(self.substeps):
-            self.state_0.clear_forces()
-            self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
-            self.state_0, self.state_1 = self.state_1, self.state_0
+        # Warm up with one frame (required before graph capture)
+        self._do_frame()
+        wp.synchronize()
+
+        # Capture CUDA graph for full frame
+        self.graph = None
+        if wp.get_device().is_cuda:
+            with wp.ScopedCapture() as capture:
+                self._do_frame()
+            self.graph = capture.graph
+
+        # Warmup the captured graph
+        for _ in range(self.warmup_iterations):
+            if self.graph is not None:
+                wp.capture_launch(self.graph)
+            else:
+                self._do_frame()
         wp.synchronize()
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
     def time_frame(self, grid_size, broad_phase_mode_str):
-        """Time a full frame (10 substeps at 60fps)."""
-        for _ in range(self.substeps):
-            self.state_0.clear_forces()
-            self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
-            self.state_0, self.state_1 = self.state_1, self.state_0
-        wp.synchronize()
+        """Time a full frame (10 substeps at 60fps) using CUDA graph.
+
+        Runs multiple iterations internally and returns the median time.
+        Uses wp.ScopedTimer for accurate GPU timing via CUDA events.
+        """
+        samples = []
+        for _ in range(self.timed_iterations):
+            with wp.ScopedTimer("frame", synchronize=True, print=False, cuda_filter=wp.TIMING_ALL) as timer:
+                if self.graph is not None:
+                    wp.capture_launch(self.graph)
+                else:
+                    self._do_frame()
+            samples.append(timer.elapsed)
+
+        return statistics.median(samples)
 
 
 if __name__ == "__main__":
