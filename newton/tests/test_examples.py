@@ -402,13 +402,6 @@ add_example_test(
     test_options={"usd_required": True, "num-frames": 500},
     use_viewer=True,
 )
-add_example_test(
-    TestRobotExamples,
-    name="robot.example_robot_panda_hydro",
-    devices=cuda_test_devices,
-    test_options={"usd_required": True, "num-frames": 300},  # Smoke test only
-    use_viewer=True,
-)
 
 
 class TestRobotPolicyExamples(unittest.TestCase):
@@ -485,6 +478,14 @@ add_example_test(
     name="mpm.example_mpm_anymal",
     devices=cuda_test_devices,
     test_options={"num-frames": 100, "torch_required": True},
+    use_viewer=True,
+)
+
+add_example_test(
+    TestAdvancedRobotExamples,
+    name="robot.example_robot_panda_hydro",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 600},  # Full pick-and-place sequence
     use_viewer=True,
 )
 

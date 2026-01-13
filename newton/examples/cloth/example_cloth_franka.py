@@ -541,8 +541,13 @@ class Example:
                 self.model.gravity.assign(self.gravity_earth)
 
             # cloth sim
-            self.collision_pipeline.soft_contact_margin = self.cloth_body_contact_margin
-            self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+            if self.collision_pipeline is not None:
+                self.collision_pipeline.soft_contact_margin = self.cloth_body_contact_margin
+            self.contacts = self.model.collide(
+                self.state_0,
+                collision_pipeline=self.collision_pipeline,
+                soft_contact_margin=self.cloth_body_contact_margin,
+            )
 
             if self.add_cloth:
                 self.cloth_solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
