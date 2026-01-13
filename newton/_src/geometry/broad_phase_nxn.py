@@ -65,10 +65,13 @@ def _nxn_broadphase_precomputed_pairs(
 
 
 @wp.func
-def _get_lower_triangular_indices(index: int, matrix_size: int) -> tuple[int, int]:
+def _get_lower_triangular_indices_binary_search(index: int, matrix_size: int) -> tuple[int, int]:
+    """Convert linear index to (row, col) pair using binary search (O(log N)).
+
+    This is the original implementation kept for reference and testing.
+    """
     total = (matrix_size * (matrix_size - 1)) >> 1
     if index >= total:
-        # In Warp, we can't throw, so return an invalid pair
         return -1, -1
 
     low = int(0)
@@ -83,6 +86,37 @@ def _get_lower_triangular_indices(index: int, matrix_size: int) -> tuple[int, in
     r = low - 1
     f = (r * (2 * matrix_size - r - 1)) >> 1
     c = (index - f) + r + 1
+    return r, c
+
+
+@wp.func
+def _get_lower_triangular_indices_fast(index: int, matrix_size: int) -> tuple[int, int]:
+    """Convert linear index to (row, col) pair using O(1) closed-form formula.
+
+    For a matrix of size N, pairs are stored as:
+      index 0 -> (0, 1)
+      index 1 -> (0, 2)
+      index 2 -> (1, 2)
+      index 3 -> (0, 3)
+      ...
+
+    The starting index for column c is c*(c-1)/2.
+    Given index k, we solve: c*(c-1)/2 <= k < c*(c+1)/2
+    This gives: c = floor((1 + sqrt(1 + 8k)) / 2)
+    Then: r = k - c*(c-1)/2
+    """
+    # Closed-form solution using quadratic formula
+    # c = floor((1 + sqrt(1 + 8*index)) / 2)
+    discriminant = float(1 + 8 * index)
+    c = int((1.0 + wp.sqrt(discriminant)) * 0.5)
+
+    # Handle edge case where floating point gives us c+1
+    start_c = (c * (c - 1)) >> 1
+    if start_c > index:
+        c = c - 1
+        start_c = (c * (c - 1)) >> 1
+
+    r = index - start_c
     return r, c
 
 
@@ -125,6 +159,63 @@ def _find_world_and_local_id(
 
 
 @wp.kernel
+def _nxn_broadphase_kernel_single_world(
+    # Input arrays
+    shape_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
+    shape_bounding_box_upper: wp.array(dtype=wp.vec3, ndim=1),
+    shape_contact_margin: wp.array(dtype=float, ndim=1),
+    collision_group: wp.array(dtype=int, ndim=1),
+    num_shapes: int,
+    # Output arrays
+    candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),
+    num_candidate_pair: wp.array(dtype=int, ndim=1),
+    max_candidate_pair: int,
+):
+    """Optimized single-world NxN broad phase kernel.
+
+    This kernel is used when all shapes are in the same world, skipping
+    all world routing logic for maximum performance.
+    """
+    tid = wp.tid()
+
+    # Convert linear index to (i, j) pair using O(1) closed-form formula
+    shape1, shape2 = _get_lower_triangular_indices_fast(tid, num_shapes)
+
+    # Early exit for invalid indices (shouldn't happen with correct thread count)
+    if shape1 < 0 or shape2 < 0 or shape1 >= num_shapes or shape2 >= num_shapes:
+        return
+
+    # Check collision groups
+    collision_group1 = collision_group[shape1]
+    collision_group2 = collision_group[shape2]
+    if not test_world_and_group_pair(0, 0, collision_group1, collision_group2):
+        return
+
+    # Check if margins are provided (empty array means AABBs are pre-expanded)
+    margin1 = 0.0
+    margin2 = 0.0
+    if shape_contact_margin.shape[0] > 0:
+        margin1 = shape_contact_margin[shape1]
+        margin2 = shape_contact_margin[shape2]
+
+    # Check AABB overlap
+    if check_aabb_overlap(
+        shape_bounding_box_lower[shape1],
+        shape_bounding_box_upper[shape1],
+        margin1,
+        shape_bounding_box_lower[shape2],
+        shape_bounding_box_upper[shape2],
+        margin2,
+    ):
+        write_pair(
+            wp.vec2i(shape1, shape2),
+            candidate_pair,
+            num_candidate_pair,
+            max_candidate_pair,
+        )
+
+
+@wp.kernel
 def _nxn_broadphase_kernel(
     # Input arrays
     shape_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
@@ -157,8 +248,8 @@ def _nxn_broadphase_kernel(
     # Number of geometries in this world
     num_shapes_in_world = world_slice_end - world_slice_start
 
-    # Convert local_id to pair indices within the world
-    local_shape1, local_shape2 = _get_lower_triangular_indices(local_id, num_shapes_in_world)
+    # Convert local_id to pair indices within the world (O(1) closed-form)
+    local_shape1, local_shape2 = _get_lower_triangular_indices_fast(local_id, num_shapes_in_world)
 
     # Map to actual geometry indices using the world_index_map
     shape1_tmp = world_index_map[world_slice_start + local_shape1]
@@ -292,6 +383,15 @@ class BroadPhaseAllPairs:
         # Store number of regular worlds (for distinguishing dedicated -1 segment)
         self.num_regular_worlds = int(num_regular_worlds)
 
+        # Detect single-world scenario for fast path optimization
+        # Single-world: exactly 1 world segment with all shapes, no global (-1) shapes
+        self._is_single_world = False
+        self._single_world_shape_count = 0
+        if num_worlds == 1:
+            # Only one world segment - can use fast path
+            self._is_single_world = True
+            self._single_world_shape_count = int(slice_ends_np[0])
+
     def launch(
         self,
         shape_lower: wp.array(dtype=wp.vec3, ndim=1),  # Lower bounds of shape bounding boxes
@@ -341,24 +441,40 @@ class BroadPhaseAllPairs:
         if shape_contact_margin is None:
             shape_contact_margin = wp.empty(0, dtype=wp.float32, device=device)
 
-        # Launch with the precomputed number of kernel threads
-        wp.launch(
-            _nxn_broadphase_kernel,
-            dim=self.num_kernel_threads,
-            inputs=[
-                shape_lower,
-                shape_upper,
-                shape_contact_margin,
-                shape_collision_group,
-                shape_shape_world,
-                self.world_cumsum_lower_tri,
-                self.world_slice_ends,
-                self.world_index_map,
-                self.num_regular_worlds,
-            ],
-            outputs=[candidate_pair, num_candidate_pair, max_candidate_pair],
-            device=device,
-        )
+        # Use optimized single-world kernel when applicable
+        if self._is_single_world:
+            wp.launch(
+                _nxn_broadphase_kernel_single_world,
+                dim=self.num_kernel_threads,
+                inputs=[
+                    shape_lower,
+                    shape_upper,
+                    shape_contact_margin,
+                    shape_collision_group,
+                    self._single_world_shape_count,
+                ],
+                outputs=[candidate_pair, num_candidate_pair, max_candidate_pair],
+                device=device,
+            )
+        else:
+            # Launch with the precomputed number of kernel threads (multi-world path)
+            wp.launch(
+                _nxn_broadphase_kernel,
+                dim=self.num_kernel_threads,
+                inputs=[
+                    shape_lower,
+                    shape_upper,
+                    shape_contact_margin,
+                    shape_collision_group,
+                    shape_shape_world,
+                    self.world_cumsum_lower_tri,
+                    self.world_slice_ends,
+                    self.world_index_map,
+                    self.num_regular_worlds,
+                ],
+                outputs=[candidate_pair, num_candidate_pair, max_candidate_pair],
+                device=device,
+            )
 
 
 class BroadPhaseExplicit:
