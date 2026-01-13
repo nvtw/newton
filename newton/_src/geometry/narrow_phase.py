@@ -281,6 +281,15 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             is_cylinder_b = type_b == int(GeoType.CYLINDER)
             is_box_b = type_b == int(GeoType.BOX)
 
+            # Compute effective radii for spheres and capsules
+            # (radius that can be represented as Minkowski sum with a sphere)
+            radius_eff_a = float(0.0)
+            radius_eff_b = float(0.0)
+            if is_sphere_a or is_capsule_a:
+                radius_eff_a = scale_a[0]
+            if is_sphere_b or is_capsule_b:
+                radius_eff_b = scale_b[0]
+
             # Initialize contact result storage (supports up to 2 contacts)
             num_contacts = 0
             contact_dist_0 = float(0.0)
@@ -391,8 +400,8 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 contact_data.contact_point_center = contact_pos_0
                 contact_data.contact_normal_a_to_b = contact_normal
                 contact_data.contact_distance = contact_dist_0
-                contact_data.radius_eff_a = 0.0
-                contact_data.radius_eff_b = 0.0
+                contact_data.radius_eff_a = radius_eff_a
+                contact_data.radius_eff_b = radius_eff_b
                 contact_data.thickness_a = thickness_a
                 contact_data.thickness_b = thickness_b
                 contact_data.shape_a = shape_a
@@ -534,8 +543,16 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
             bsphere_center_b, bsphere_radius_b = compute_bounding_sphere_from_aabb(aabb_b_lower, aabb_b_upper)
 
             if not check_infinite_plane_bsphere_overlap(
-                shape_data_a, shape_data_b, pos_a, pos_b, quat_a, quat_b,
-                bsphere_center_a, bsphere_center_b, bsphere_radius_a, bsphere_radius_b
+                shape_data_a,
+                shape_data_b,
+                pos_a,
+                pos_b,
+                quat_a,
+                quat_b,
+                bsphere_center_a,
+                bsphere_center_b,
+                bsphere_radius_a,
+                bsphere_radius_b,
             ):
                 continue
 
@@ -546,12 +563,21 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
 
             # Find and write contacts using GJK/MPR
             wp.static(create_find_contacts(writer_func))(
-                pos_a, pos_b, quat_a, quat_b,
-                shape_data_a, shape_data_b,
-                is_infinite_plane_a, is_infinite_plane_b,
-                bsphere_radius_a, bsphere_radius_b,
-                margin, shape_a, shape_b,
-                thickness_a, thickness_b,
+                pos_a,
+                pos_b,
+                quat_a,
+                quat_b,
+                shape_data_a,
+                shape_data_b,
+                is_infinite_plane_a,
+                is_infinite_plane_b,
+                bsphere_radius_a,
+                bsphere_radius_b,
+                margin,
+                shape_a,
+                shape_b,
+                thickness_a,
+                thickness_b,
                 writer_data,
             )
 
