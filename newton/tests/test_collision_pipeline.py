@@ -47,6 +47,8 @@ def type_to_str(shape_type: GeoType):
         return "mesh"
     elif shape_type == GeoType.CONVEX_MESH:
         return "convex_hull"
+    elif shape_type == GeoType.PLANE:
+        return "plane"
     else:
         return "unknown"
 
