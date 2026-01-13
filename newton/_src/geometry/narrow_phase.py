@@ -1187,27 +1187,34 @@ class NarrowPhase:
 
         # Pre-allocate all intermediate buffers
         with wp.ScopedDevice(device):
+            # Consolidated counter array to minimize kernel launches for zeroing
+            # Layout: [gjk_count, mesh_count, triangle_count, mesh_plane_count,
+            #          mesh_plane_vertex_total, mesh_mesh_count, sdf_sdf_count]
+            self._counter_array = wp.zeros(7, dtype=wp.int32, device=device)
+            # Create sliced views for individual counters (no additional allocation)
+            self.gjk_candidate_pairs_count = self._counter_array[0:1]
+            self.shape_pairs_mesh_count = self._counter_array[1:2]
+            self.triangle_pairs_count = self._counter_array[2:3]
+            self.shape_pairs_mesh_plane_count = self._counter_array[3:4]
+            self.mesh_plane_vertex_total_count = self._counter_array[4:5]
+            self.shape_pairs_mesh_mesh_count = self._counter_array[5:6]
+            self.shape_pairs_sdf_sdf_count = self._counter_array[6:7]
+
             # Buffers for GJK/MPR candidate pairs (pairs that couldn't be handled analytically)
             self.gjk_candidate_pairs = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
-            self.gjk_candidate_pairs_count = wp.zeros(1, dtype=wp.int32, device=device)
 
             # Buffers for mesh collision handling
             self.shape_pairs_mesh = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
-            self.shape_pairs_mesh_count = wp.zeros(1, dtype=wp.int32, device=device)
 
             # Buffers for triangle pairs
             self.triangle_pairs = wp.zeros(max_triangle_pairs, dtype=wp.vec3i, device=device)
-            self.triangle_pairs_count = wp.zeros(1, dtype=wp.int32, device=device)
 
             # Buffers for mesh-plane collision handling
             self.shape_pairs_mesh_plane = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
-            self.shape_pairs_mesh_plane_count = wp.zeros(1, dtype=wp.int32, device=device)
             self.shape_pairs_mesh_plane_cumsum = wp.zeros(max_candidate_pairs, dtype=wp.int32, device=device)
-            self.mesh_plane_vertex_total_count = wp.zeros(1, dtype=wp.int32, device=device)
 
             # Buffers for mesh-mesh collision handling
             self.shape_pairs_mesh_mesh = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
-            self.shape_pairs_mesh_mesh_count = wp.zeros(1, dtype=wp.int32, device=device)
 
             # None values for when optional features are disabled
             self.empty_tangent = None
@@ -1217,11 +1224,9 @@ class NarrowPhase:
 
             if sdf_hydroelastic is not None:
                 self.shape_pairs_sdf_sdf = wp.zeros(sdf_hydroelastic.max_num_shape_pairs, dtype=wp.vec2i, device=device)
-                self.shape_pairs_sdf_sdf_count = wp.zeros(1, dtype=wp.int32, device=device)
             else:
                 # Empty arrays for when hydroelastic is disabled
                 self.shape_pairs_sdf_sdf = None
-                self.shape_pairs_sdf_sdf_count = wp.zeros(1, dtype=wp.int32, device=device)
 
         # Fixed thread count for kernel launches
         # Use a reasonable minimum for GPU occupancy (256 blocks = 32K threads)
@@ -1270,15 +1275,8 @@ class NarrowPhase:
         if device is None:
             device = self.device if self.device is not None else candidate_pair.device
 
-        # Clear all counters
-        self.gjk_candidate_pairs_count.zero_()
-        self.shape_pairs_mesh_count.zero_()
-        self.triangle_pairs_count.zero_()
-        self.shape_pairs_mesh_plane_count.zero_()
-        self.mesh_plane_vertex_total_count.zero_()
-        self.shape_pairs_mesh_mesh_count.zero_()
-        if self.sdf_hydroelastic is not None:
-            self.shape_pairs_sdf_sdf_count.zero_()
+        # Clear all counters with a single kernel launch (consolidated counter array)
+        self._counter_array.zero_()
 
         # Stage 1: Launch primitive kernel for fast analytical collisions
         # This handles sphere-sphere, sphere-capsule, capsule-capsule, plane-sphere, plane-capsule
@@ -1562,13 +1560,8 @@ class NarrowPhase:
         if contact_tangent is None:
             contact_tangent = self.empty_tangent
 
-        # Clear all counters and contact count
+        # Clear external contact count (internal counters are cleared in launch_custom_write)
         contact_count.zero_()
-        self.shape_pairs_mesh_count.zero_()
-        self.triangle_pairs_count.zero_()
-        self.shape_pairs_mesh_plane_count.zero_()
-        self.mesh_plane_vertex_total_count.zero_()
-        self.shape_pairs_mesh_mesh_count.zero_()
 
         # Create ContactWriterData struct
         writer_data = ContactWriterData()
