@@ -19,7 +19,6 @@ from __future__ import annotations
 import warp as wp
 from warp.context import Devicelike
 
-
 # No kernel needed - we just zero counts!
 
 

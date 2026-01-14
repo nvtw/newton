@@ -498,9 +498,9 @@ class CollisionPipelineUnified:
         # For NXN/SAP modes, prefer model.rigid_contact_max (intelligently computed)
         # over per-pair heuristics to avoid over-allocation
         # For EXPLICIT mode, per-pair allocation is appropriate since pairs are pre-filtered
-        use_model_allocation = (
-            rigid_contact_max_per_pair is None or
-            broad_phase_mode in (BroadPhaseMode.NXN, BroadPhaseMode.SAP)
+        use_model_allocation = rigid_contact_max_per_pair is None or broad_phase_mode in (
+            BroadPhaseMode.NXN,
+            BroadPhaseMode.SAP,
         )
 
         rigid_contact_max = None

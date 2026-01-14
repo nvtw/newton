@@ -38,6 +38,7 @@ wp.config.quiet = True
 import newton
 from newton._src.geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from newton._src.geometry.broad_phase_sap import BroadPhaseSAP, SAPSortType
+from newton._src.sim.collide_unified import compute_shape_aabbs
 
 
 def build_sphere_grid_scene(grid_size: int, spacing_factor: float = 2.5):
@@ -67,9 +68,7 @@ def build_sphere_grid_scene(grid_size: int, spacing_factor: float = 2.5):
                 y = j * spacing
                 z = k * spacing + sphere_radius  # Offset so spheres are above z=0
 
-                body = builder.add_body(
-                    xform=wp.transform(p=wp.vec3(x, y, z), q=wp.quat_identity())
-                )
+                body = builder.add_body(xform=wp.transform(p=wp.vec3(x, y, z), q=wp.quat_identity()))
                 builder.add_shape_sphere(body, radius=sphere_radius)
                 joint = builder.add_joint_free(body)
                 builder.add_articulation([joint])
@@ -87,8 +86,6 @@ def build_sphere_grid_scene(grid_size: int, spacing_factor: float = 2.5):
     shape_aabb_upper = wp.zeros(shape_count, dtype=wp.vec3, device=device)
 
     # Compute AABBs using the unified pipeline's kernel
-    from newton._src.sim.collide_unified import compute_shape_aabbs
-
     wp.launch(
         kernel=compute_shape_aabbs,
         dim=shape_count,
@@ -139,8 +136,8 @@ class BroadPhaseComparison:
             self.shape_count = grid_size**3
             return
 
-        self.model, self.state, self.shape_aabb_lower, self.shape_aabb_upper = (
-            build_sphere_grid_scene(grid_size, spacing_factor)
+        self.model, self.state, self.shape_aabb_lower, self.shape_aabb_upper = build_sphere_grid_scene(
+            grid_size, spacing_factor
         )
         self.device = self.model.device
         self.shape_count = self.model.shape_count

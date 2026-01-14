@@ -122,8 +122,6 @@ def write_pair_thread_block(
             candidate_pair[out_idx] = pair
 
 
-
-
 # Collision filtering
 @wp.func
 def test_group_pair(group_a: int, group_b: int) -> bool:

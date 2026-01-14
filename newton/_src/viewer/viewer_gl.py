@@ -78,7 +78,7 @@ class ViewerGL(ViewerBase):
         # State caching for selection panel
         self._last_state = None
         self._last_control = None
-        
+
         # Contact info for debug display
         self._contacts = None
 
@@ -166,10 +166,10 @@ class ViewerGL(ViewerBase):
     def set_contacts(self, contacts):
         """
         Set the contacts object for debug info display.
-        
+
         If contacts have debug_info enabled (enable_debug_info=True), contact counts
         will be displayed in the stats overlay.
-        
+
         Args:
             contacts: Contacts object from the collision pipeline.
         """
@@ -1295,9 +1295,9 @@ class ViewerGL(ViewerBase):
                 imgui.text(f"Triangles: {self.model.tri_count}")
                 imgui.text(f"Edges: {self.model.edge_count}")
                 imgui.text(f"Tetrahedra: {self.model.tet_count}")
-                
+
                 # Contact stats (if debug info is available)
-                if hasattr(self, '_contacts') and self._contacts is not None and self._contacts.debug_info is not None:
+                if hasattr(self, "_contacts") and self._contacts is not None and self._contacts.debug_info is not None:
                     rigid_count = self._contacts.debug_info.get_rigid_count()
                     soft_count = self._contacts.debug_info.get_soft_count()
                     imgui.separator()
