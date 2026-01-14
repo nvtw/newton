@@ -24,7 +24,7 @@ from ..core.types import Devicelike
 from ..geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from ..geometry.broad_phase_sap import BroadPhaseSAP
 from ..geometry.collision_core import compute_tight_aabb_from_support
-from ..geometry.contact_data import ContactData
+from ..geometry.contact_data import ContactData, contact_passes_margin_check
 from ..geometry.kernels import create_soft_contacts
 from ..geometry.narrow_phase import NarrowPhase
 from ..geometry.sdf_hydroelastic import SDFHydroelastic, SDFHydroelasticConfig
@@ -78,47 +78,6 @@ class BroadPhaseMode(IntEnum):
 
     EXPLICIT = 2
     """Use precomputed shape pairs (most efficient when pairs are known ahead of time)"""
-
-
-@wp.func
-def contact_passes_margin_check(
-    contact_data: ContactData,
-    writer_data: UnifiedContactWriterData,
-) -> bool:
-    """
-    Check if a contact passes the margin check and should be written.
-
-    Args:
-        contact_data: ContactData struct containing contact information
-        writer_data: UnifiedContactWriterData struct containing shape contact margins
-
-    Returns:
-        True if the contact distance is within the contact margin, False otherwise
-    """
-    total_separation_needed = (
-        contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.thickness_a + contact_data.thickness_b
-    )
-
-    # Distance calculation matching box_plane_collision
-    contact_normal_a_to_b = wp.normalize(contact_data.contact_normal_a_to_b)
-
-    a_contact_world = contact_data.contact_point_center - contact_normal_a_to_b * (
-        0.5 * contact_data.contact_distance + contact_data.radius_eff_a
-    )
-    b_contact_world = contact_data.contact_point_center + contact_normal_a_to_b * (
-        0.5 * contact_data.contact_distance + contact_data.radius_eff_b
-    )
-
-    diff = b_contact_world - a_contact_world
-    distance = wp.dot(diff, contact_normal_a_to_b)
-    d = distance - total_separation_needed
-
-    # Use per-shape contact margins (sum of both shapes, consistent with thickness)
-    margin_a = writer_data.shape_contact_margin[contact_data.shape_a]
-    margin_b = writer_data.shape_contact_margin[contact_data.shape_b]
-    contact_margin = margin_a + margin_b
-
-    return d <= contact_margin
 
 
 @wp.func
@@ -200,7 +159,7 @@ def write_contact(
         writer_data: UnifiedContactWriterData struct containing body info and output arrays
         output_index: If -1, use atomic_add to get the next available index if contact distance is less than margin. If >= 0, use this index directly and skip margin check.
     """
-    if not contact_passes_margin_check(contact_data, writer_data):
+    if not contact_passes_margin_check(contact_data):
         return
 
     write_contact_no_margin_check(contact_data, writer_data, output_index)

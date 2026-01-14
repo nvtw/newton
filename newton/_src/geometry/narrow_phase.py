@@ -39,7 +39,7 @@ from ..geometry.collision_primitive import (
     collide_sphere_cylinder,
     collide_sphere_sphere,
 )
-from ..geometry.contact_data import ContactData
+from ..geometry.contact_data import ContactData, contact_passes_margin_check
 from ..geometry.contact_reduction import (
     NUM_SPATIAL_DIRECTIONS,
     ContactReductionFunctions,
@@ -411,11 +411,9 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             # Write all contacts (unified write block for 0, 1, or 2 contacts)
             # =====================================================================
             if num_contacts > 0:
-                # First contact
+                # Prepare contact data (shared fields for both contacts)
                 contact_data = ContactData()
-                contact_data.contact_point_center = contact_pos_0
                 contact_data.contact_normal_a_to_b = contact_normal
-                contact_data.contact_distance = contact_dist_0
                 contact_data.radius_eff_a = radius_eff_a
                 contact_data.radius_eff_b = radius_eff_b
                 contact_data.thickness_a = thickness_a
@@ -423,13 +421,35 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 contact_data.shape_a = shape_a
                 contact_data.shape_b = shape_b
                 contact_data.margin = margin
-                writer_func(contact_data, writer_data, -1)
 
-                # Second contact (if any) - uses same normal
+                # Check margin for both contacts
+                contact_data.contact_point_center = contact_pos_0
+                contact_data.contact_distance = contact_dist_0
+                contact_0_valid = contact_passes_margin_check(contact_data)
+
+                contact_1_valid = False
                 if num_contacts > 1:
                     contact_data.contact_point_center = contact_pos_1
                     contact_data.contact_distance = contact_dist_1
-                    writer_func(contact_data, writer_data, -1)
+                    contact_1_valid = contact_passes_margin_check(contact_data)
+
+                # Count valid contacts and allocate consecutive indices
+                num_valid = int(contact_0_valid) + int(contact_1_valid)
+                if num_valid > 0:
+                    base_index = wp.atomic_add(writer_data.contact_count, 0, num_valid)
+
+                    # Write first contact if valid
+                    if contact_0_valid:
+                        contact_data.contact_point_center = contact_pos_0
+                        contact_data.contact_distance = contact_dist_0
+                        writer_func(contact_data, writer_data, base_index)
+                        base_index += 1
+
+                    # Write second contact if valid
+                    if contact_1_valid:
+                        contact_data.contact_point_center = contact_pos_1
+                        contact_data.contact_distance = contact_dist_1
+                        writer_func(contact_data, writer_data, base_index)
 
                 continue
 
