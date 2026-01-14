@@ -78,6 +78,9 @@ class ViewerGL(ViewerBase):
         # State caching for selection panel
         self._last_state = None
         self._last_control = None
+        
+        # Contact info for debug display
+        self._contacts = None
 
         # Selection panel state
         self._selection_ui_state = {
@@ -159,6 +162,18 @@ class ViewerGL(ViewerBase):
             raise ValueError(f"Invalid position '{position}'. Must be one of: {valid_positions}")
 
         self._ui_callbacks[position].append(callback)
+
+    def set_contacts(self, contacts):
+        """
+        Set the contacts object for debug info display.
+        
+        If contacts have debug_info enabled (enable_debug_info=True), contact counts
+        will be displayed in the stats overlay.
+        
+        Args:
+            contacts: Contacts object from the collision pipeline.
+        """
+        self._contacts = contacts
 
     # helper function to create a low resolution sphere mesh for point rendering
     def _create_point_mesh(self):
@@ -1280,6 +1295,14 @@ class ViewerGL(ViewerBase):
                 imgui.text(f"Triangles: {self.model.tri_count}")
                 imgui.text(f"Edges: {self.model.edge_count}")
                 imgui.text(f"Tetrahedra: {self.model.tet_count}")
+                
+                # Contact stats (if debug info is available)
+                if hasattr(self, '_contacts') and self._contacts is not None and self._contacts.debug_info is not None:
+                    rigid_count = self._contacts.debug_info.get_rigid_count()
+                    soft_count = self._contacts.debug_info.get_soft_count()
+                    imgui.separator()
+                    imgui.text(f"Rigid Contacts: {rigid_count}")
+                    imgui.text(f"Soft Contacts: {soft_count}")
 
             # Rendered objects count
             imgui.separator()

@@ -31,6 +31,9 @@ import warp as wp
 import newton
 import newton.examples
 
+# Toggle between unified (True) and standard (False) collision pipeline
+USE_UNIFIED_PIPELINE = True
+
 
 def create_cable_geometry(
     start_pos: wp.vec3,
@@ -145,7 +148,7 @@ class Example:
         layer_gap = cable_radius * 6.0
 
         builder = newton.ModelBuilder()
-        builder.rigid_contact_margin = 0.05  # Default for all shapes
+        builder.rigid_contact_margin = 0.005  # Default for all shapes
 
         rod_bodies_all: list[int] = []
 
@@ -247,8 +250,17 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.state_0)
+
+        # Create collision pipeline based on USE_UNIFIED_PIPELINE flag
+        pipeline_type = "unified" if USE_UNIFIED_PIPELINE else "standard"
+        self.collision_pipeline = newton.examples.create_collision_pipeline(
+            self.model, args, collision_pipeline_type=pipeline_type, enable_contact_debug_info=True
+        )
+
+        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+
         self.viewer.set_model(self.model)
+        self.viewer.set_contacts(self.contacts)
 
         # Optional capture for CUDA
         self.capture()
@@ -271,7 +283,10 @@ class Example:
             self.viewer.apply_forces(self.state_0)
 
             # Collide for contact detection
-            self.contacts = self.model.collide(self.state_0)
+            self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+
+            # Update viewer with latest contact counts (graph-compatible)
+            self.viewer.set_contacts(self.contacts)
 
             self.solver.step(
                 self.state_0,

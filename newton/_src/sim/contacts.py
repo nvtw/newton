@@ -20,6 +20,54 @@ import warp as wp
 from warp.context import Devicelike
 
 
+# No kernel needed - we just zero counts!
+
+
+class ContactDebugInfo:
+    """
+    Graph-capture-compatible debug information for contacts.
+
+    This class stores contact counts in pinned memory that can be asynchronously
+    copied from device memory without breaking CUDA graph capture.
+    """
+
+    def __init__(self, device: Devicelike = None):
+        """Initialize debug info with pinned memory for graph-compatible copies.
+
+        Args:
+            device: Device to allocate arrays on.
+        """
+        with wp.ScopedDevice(device):
+            # Device-side count (will be copied from contact arrays)
+            self.rigid_count_device = wp.zeros(1, dtype=int, device=device)
+            self.soft_count_device = wp.zeros(1, dtype=int, device=device)
+
+            # Pinned host memory for async copy (graph-compatible)
+            self.rigid_count_host = wp.zeros(1, dtype=int, pinned=True, device="cpu")
+            self.soft_count_host = wp.zeros(1, dtype=int, pinned=True, device="cpu")
+
+            self.device = device
+
+    def copy_counts(self, rigid_contact_count: wp.array, soft_contact_count: wp.array):
+        """Copy contact counts to pinned host memory (graph-compatible).
+
+        Args:
+            rigid_contact_count: Device array with rigid contact count.
+            soft_contact_count: Device array with soft contact count.
+        """
+        # Copy to pinned host memory (async, graph-compatible)
+        wp.copy(self.rigid_count_host, rigid_contact_count)
+        wp.copy(self.soft_count_host, soft_contact_count)
+
+    def get_rigid_count(self) -> int:
+        """Get the latest rigid contact count (non-blocking read from pinned memory)."""
+        return int(self.rigid_count_host.numpy()[0])
+
+    def get_soft_count(self) -> int:
+        """Get the latest soft contact count (non-blocking read from pinned memory)."""
+        return int(self.soft_count_host.numpy()[0])
+
+
 class Contacts:
     """
     Stores contact information for rigid and soft body collisions, to be consumed by a solver.
@@ -39,6 +87,7 @@ class Contacts:
         requires_grad: bool = False,
         device: Devicelike = None,
         per_contact_shape_properties: bool = False,
+        enable_debug_info: bool = False,
     ):
         self.per_contact_shape_properties = per_contact_shape_properties
         with wp.ScopedDevice(device):
@@ -84,27 +133,28 @@ class Contacts:
         self.rigid_contact_max = rigid_contact_max
         self.soft_contact_max = soft_contact_max
 
+        # Optional debug info for graph-compatible contact count tracking
+        if enable_debug_info:
+            self.debug_info = ContactDebugInfo(device=device)
+        else:
+            self.debug_info = None
+
+    def update_debug_info(self):
+        """Update debug info with current contact counts (graph-compatible)."""
+        if self.debug_info is not None:
+            self.debug_info.copy_counts(self.rigid_contact_count, self.soft_contact_count)
+
     def clear(self):
         """
-        Clear all contact data, resetting counts and filling indices with -1.
+        Clear contact data by resetting counts to zero.
+
+        Note: We only zero the counts, not the actual arrays. All code that reads
+        contact arrays checks the count first, so there's no need to clear/fill the
+        arrays themselves. This eliminates expensive memset operations.
         """
+        # Just zero the counts - that's all we need!
         self.rigid_contact_count.zero_()
-        self.rigid_contact_shape0.fill_(-1)
-        self.rigid_contact_shape1.fill_(-1)
-        self.rigid_contact_tids.fill_(-1)
-        self.rigid_contact_force.zero_()
-
-        # per-contact shape properties
-        # zero-values indicate that no per-contact shape properties are set for this contact
-        if self.per_contact_shape_properties:
-            self.rigid_contact_stiffness.zero_()
-            self.rigid_contact_damping.zero_()
-            self.rigid_contact_friction.zero_()
-
         self.soft_contact_count.zero_()
-        self.soft_contact_particle.fill_(-1)
-        self.soft_contact_shape.fill_(-1)
-        self.soft_contact_tids.fill_(-1)
 
     @property
     def device(self):

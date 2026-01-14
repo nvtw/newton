@@ -87,6 +87,7 @@ class CollisionPipeline:
         edge_sdf_iter: int = 10,
         requires_grad: bool = False,
         device: Devicelike = None,
+        enable_contact_debug_info: bool = False,
     ):
         """
         Initialize the CollisionPipeline.
@@ -105,6 +106,9 @@ class CollisionPipeline:
             edge_sdf_iter (int, optional): Number of iterations for edge SDF collision. Defaults to 10.
             requires_grad (bool, optional): Whether to enable gradient computation. Defaults to False.
             device (Devicelike, optional): The device on which to allocate arrays and perform computation.
+            enable_contact_debug_info (bool, optional): Enable graph-capture-compatible contact count tracking
+                using pinned host memory. This allows displaying contact counts in UI without breaking CUDA graphs.
+                Defaults to False.
 
         Note:
             Contact margins for rigid contacts are now controlled per-shape via ``model.shape_contact_margin``.
@@ -139,6 +143,7 @@ class CollisionPipeline:
 
         self.requires_grad = requires_grad
         self.edge_sdf_iter = edge_sdf_iter
+        self.enable_contact_debug_info = enable_contact_debug_info
 
         self.handle_contact_pairs_kernel = generate_handle_contact_pairs_kernel(requires_grad)
 
@@ -151,6 +156,7 @@ class CollisionPipeline:
         soft_contact_margin: float = 0.01,
         edge_sdf_iter: int = 10,
         requires_grad: bool | None = None,
+        enable_contact_debug_info: bool = False,
     ) -> CollisionPipeline:
         """
         Create a CollisionPipeline instance from a Model.
@@ -163,6 +169,8 @@ class CollisionPipeline:
             soft_contact_margin (float, optional): Margin for soft contact generation. Defaults to 0.01.
             edge_sdf_iter (int, optional): Number of iterations for edge SDF collision. Defaults to 10.
             requires_grad (bool | None, optional): Whether to enable gradient computation. If None, uses model.requires_grad.
+            enable_contact_debug_info (bool, optional): Enable graph-capture-compatible contact count tracking.
+                Defaults to False.
 
         Returns:
             CollisionPipeline: The constructed collision pipeline.
@@ -187,6 +195,7 @@ class CollisionPipeline:
             edge_sdf_iter,
             requires_grad,
             model.device,
+            enable_contact_debug_info,
         )
 
     def collide(self, model: Model, state: State) -> Contacts:
@@ -210,6 +219,7 @@ class CollisionPipeline:
                 self.soft_contact_max,
                 requires_grad=self.requires_grad,
                 device=model.device,
+                enable_debug_info=self.enable_contact_debug_info,
             )
         else:
             self.contacts.clear()
@@ -327,6 +337,10 @@ class CollisionPipeline:
                 ],
                 device=contacts.device,
             )
+
+        # Update debug info if enabled (graph-compatible copy to pinned memory)
+        if self.enable_contact_debug_info:
+            contacts.update_debug_info()
 
         return contacts
 

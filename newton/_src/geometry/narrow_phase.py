@@ -182,7 +182,8 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
         plane-capsule collisions analytically. Routes mesh pairs and complex convex
         pairs to specialized processing pipelines.
         """
-        tid = wp.tid()
+        block_id, idx_in_thread_block = wp.tid()
+        tid = block_id * wp.block_dim() + idx_in_thread_block
 
         num_work_items = wp.min(candidate_pair.shape[0], num_candidate_pair[0])
 
@@ -190,109 +191,19 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
         if num_work_items == 0:
             return
 
-        for t in range(tid, num_work_items, total_num_threads):
-            # Get shape pair
-            pair = candidate_pair[t]
-            shape_a = pair[0]
-            shape_b = pair[1]
+        # Round up to the nearest multiple of the block size
+        upper = (num_work_items + wp.block_dim() - 1) // wp.block_dim() * wp.block_dim()
 
-            # Safety: ignore self-collision and invalid pairs
-            if shape_a == shape_b or shape_a < 0 or shape_b < 0:
-                continue
+        for t in range(tid, upper, total_num_threads):
+            is_valid = t < num_work_items
+            shape_a = -1
+            shape_b = -1
 
-            # Get shape types
-            type_a = shape_types[shape_a]
-            type_b = shape_types[shape_b]
-
-            # Sort shapes by type to ensure consistent collision handling order
-            if type_a > type_b:
-                shape_a, shape_b = shape_b, shape_a
-                type_a, type_b = type_b, type_a
-
-            # Check if both shapes are hydroelastic - route to SDF-SDF pipeline
-            is_hydro_a = (shape_flags[shape_a] & int(ShapeFlags.HYDROELASTIC)) != 0
-            is_hydro_b = (shape_flags[shape_b] & int(ShapeFlags.HYDROELASTIC)) != 0
-            if is_hydro_a and is_hydro_b and shape_pairs_sdf_sdf:
-                idx = wp.atomic_add(shape_pairs_sdf_sdf_count, 0, 1)
-                if idx < shape_pairs_sdf_sdf.shape[0]:
-                    shape_pairs_sdf_sdf[idx] = wp.vec2i(shape_a, shape_b)
-                continue
-
-            # Get shape data
-            data_a = shape_data[shape_a]
-            data_b = shape_data[shape_b]
-            scale_a = wp.vec3(data_a[0], data_a[1], data_a[2])
-            scale_b = wp.vec3(data_b[0], data_b[1], data_b[2])
-            thickness_a = data_a[3]
-            thickness_b = data_b[3]
-
-            # Get transforms
-            X_a = shape_transform[shape_a]
-            X_b = shape_transform[shape_b]
-            pos_a = wp.transform_get_translation(X_a)
-            pos_b = wp.transform_get_translation(X_b)
-            quat_a = wp.transform_get_rotation(X_a)
-            quat_b = wp.transform_get_rotation(X_b)
-
-            # Calculate contact margin
-            margin_a = shape_contact_margin[shape_a]
-            margin_b = shape_contact_margin[shape_b]
-            margin = margin_a + margin_b
-
-            # =====================================================================
-            # Route mesh pairs to specialized buffers
-            # =====================================================================
-            is_mesh_a = type_a == int(GeoType.MESH)
-            is_mesh_b = type_b == int(GeoType.MESH)
-            is_plane_a = type_a == int(GeoType.PLANE)
-            is_infinite_plane_a = is_plane_a and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
-
-            # Mesh-mesh collision
-            if is_mesh_a and is_mesh_b:
-                idx = wp.atomic_add(shape_pairs_mesh_mesh_count, 0, 1)
-                if idx < shape_pairs_mesh_mesh.shape[0]:
-                    shape_pairs_mesh_mesh[idx] = wp.vec2i(shape_a, shape_b)
-                continue
-
-            # Mesh-plane collision (infinite plane only)
-            if is_infinite_plane_a and is_mesh_b:
-                mesh_id = shape_source[shape_b]
-                if mesh_id != wp.uint64(0):
-                    mesh_obj = wp.mesh_get(mesh_id)
-                    vertex_count = mesh_obj.points.shape[0]
-                    mesh_plane_idx = wp.atomic_add(shape_pairs_mesh_plane_count, 0, 1)
-                    if mesh_plane_idx < shape_pairs_mesh_plane.shape[0]:
-                        # Store (mesh, plane)
-                        shape_pairs_mesh_plane[mesh_plane_idx] = wp.vec2i(shape_b, shape_a)
-                        cumulative_count_before = wp.atomic_add(mesh_plane_vertex_total_count, 0, vertex_count)
-                        shape_pairs_mesh_plane_cumsum[mesh_plane_idx] = cumulative_count_before + vertex_count
-                continue
-
-            # Mesh-convex collision
-            if is_mesh_a or is_mesh_b:
-                idx = wp.atomic_add(shape_pairs_mesh_count, 0, 1)
-                if idx < shape_pairs_mesh.shape[0]:
-                    shape_pairs_mesh[idx] = wp.vec2i(shape_a, shape_b)
-                continue
-
-            # =====================================================================
-            # Handle lightweight primitives analytically
-            # =====================================================================
-            is_sphere_a = type_a == int(GeoType.SPHERE)
-            is_sphere_b = type_b == int(GeoType.SPHERE)
-            is_capsule_a = type_a == int(GeoType.CAPSULE)
-            is_capsule_b = type_b == int(GeoType.CAPSULE)
-            is_cylinder_b = type_b == int(GeoType.CYLINDER)
-            is_box_b = type_b == int(GeoType.BOX)
-
-            # Compute effective radii for spheres and capsules
-            # (radius that can be represented as Minkowski sum with a sphere)
-            radius_eff_a = float(0.0)
-            radius_eff_b = float(0.0)
-            if is_sphere_a or is_capsule_a:
-                radius_eff_a = scale_a[0]
-            if is_sphere_b or is_capsule_b:
-                radius_eff_b = scale_b[0]
+            # Compute number of valid contacts for this thread (0, 1, or 2)
+            num_valid = 0
+            contact_0_valid = False
+            contact_1_valid = False
+            contact_data = ContactData()
 
             # Initialize contact result storage (supports up to 2 contacts)
             num_contacts = 0
@@ -302,163 +213,290 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             contact_pos_1 = wp.vec3()
             contact_normal = wp.vec3()
 
-            # -----------------------------------------------------------------
-            # Plane-Sphere collision (type_a=PLANE=0, type_b=SPHERE=2)
-            # -----------------------------------------------------------------
-            if is_plane_a and is_sphere_b:
-                plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
-                sphere_radius = scale_b[0]
-                contact_dist_0, contact_pos_0 = collide_plane_sphere(plane_normal, pos_a, pos_b, sphere_radius)
-                contact_normal = plane_normal
-                num_contacts = 1
+            if is_valid:
+                # Get shape pair
+                pair = candidate_pair[t]
+                shape_a = pair[0]
+                shape_b = pair[1]
 
-            # -----------------------------------------------------------------
-            # Sphere-Sphere collision (type_a=SPHERE=2, type_b=SPHERE=2)
-            # -----------------------------------------------------------------
-            elif is_sphere_a and is_sphere_b:
-                radius_a = scale_a[0]
-                radius_b = scale_b[0]
-                contact_dist_0, contact_pos_0, contact_normal = collide_sphere_sphere(pos_a, radius_a, pos_b, radius_b)
-                num_contacts = 1
+                # Safety: ignore self-collision and invalid pairs
+                if shape_a == shape_b or shape_a < 0 or shape_b < 0:
+                    is_valid = False
 
-            # -----------------------------------------------------------------
-            # Plane-Capsule collision (type_a=PLANE=0, type_b=CAPSULE=3)
-            # Produces 2 contacts (both share same normal)
-            # -----------------------------------------------------------------
-            elif is_plane_a and is_capsule_b:
-                plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
-                capsule_axis = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
-                capsule_radius = scale_b[0]
-                capsule_half_length = scale_b[1]
+            if is_valid:
+                # Get shape types
+                type_a = shape_types[shape_a]
+                type_b = shape_types[shape_b]
 
-                dists, positions, _frame = collide_plane_capsule(
-                    plane_normal, pos_a, pos_b, capsule_axis, capsule_radius, capsule_half_length
-                )
+                # Sort shapes by type to ensure consistent collision handling order
+                if type_a > type_b:
+                    shape_a, shape_b = shape_b, shape_a
+                    type_a, type_b = type_b, type_a
 
-                contact_dist_0 = dists[0]
-                contact_dist_1 = dists[1]
-                contact_pos_0 = wp.vec3(positions[0, 0], positions[0, 1], positions[0, 2])
-                contact_pos_1 = wp.vec3(positions[1, 0], positions[1, 1], positions[1, 2])
-                contact_normal = plane_normal
-                num_contacts = 2
+                # Check if both shapes are hydroelastic - route to SDF-SDF pipeline
+                is_hydro_a = (shape_flags[shape_a] & int(ShapeFlags.HYDROELASTIC)) != 0
+                is_hydro_b = (shape_flags[shape_b] & int(ShapeFlags.HYDROELASTIC)) != 0
+                if is_hydro_a and is_hydro_b and shape_pairs_sdf_sdf:
+                    idx = wp.atomic_add(shape_pairs_sdf_sdf_count, 0, 1)
+                    if idx < shape_pairs_sdf_sdf.shape[0]:
+                        shape_pairs_sdf_sdf[idx] = wp.vec2i(shape_a, shape_b)
+                    is_valid = False
 
-            # -----------------------------------------------------------------
-            # Sphere-Capsule collision (type_a=SPHERE=2, type_b=CAPSULE=3)
-            # -----------------------------------------------------------------
-            elif is_sphere_a and is_capsule_b:
-                sphere_radius = scale_a[0]
-                capsule_axis = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
-                capsule_radius = scale_b[0]
-                capsule_half_length = scale_b[1]
-                contact_dist_0, contact_pos_0, contact_normal = collide_sphere_capsule(
-                    pos_a, sphere_radius, pos_b, capsule_axis, capsule_radius, capsule_half_length
-                )
-                num_contacts = 1
+                # Get shape data
+                data_a = shape_data[shape_a]
+                data_b = shape_data[shape_b]
+                scale_a = wp.vec3(data_a[0], data_a[1], data_a[2])
+                scale_b = wp.vec3(data_b[0], data_b[1], data_b[2])
+                thickness_a = data_a[3]
+                thickness_b = data_b[3]
 
-            # -----------------------------------------------------------------
-            # Capsule-Capsule collision (type_a=CAPSULE=3, type_b=CAPSULE=3)
-            # Produces 1 contact (non-parallel) or 2 contacts (parallel axes)
-            # -----------------------------------------------------------------
-            elif is_capsule_a and is_capsule_b:
-                axis_a = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
-                axis_b = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
-                radius_a = scale_a[0]
-                half_length_a = scale_a[1]
-                radius_b = scale_b[0]
-                half_length_b = scale_b[1]
+                # Get transforms
+                X_a = shape_transform[shape_a]
+                X_b = shape_transform[shape_b]
+                pos_a = wp.transform_get_translation(X_a)
+                pos_b = wp.transform_get_translation(X_b)
+                quat_a = wp.transform_get_rotation(X_a)
+                quat_b = wp.transform_get_rotation(X_b)
 
-                dists, positions, contact_normal = collide_capsule_capsule(
-                    pos_a, axis_a, radius_a, half_length_a, pos_b, axis_b, radius_b, half_length_b
-                )
+                # Calculate contact margin
+                margin_a = shape_contact_margin[shape_a]
+                margin_b = shape_contact_margin[shape_b]
+                margin = margin_a + margin_b
 
-                contact_dist_0 = dists[0]
-                contact_pos_0 = wp.vec3(positions[0, 0], positions[0, 1], positions[0, 2])
+                # =====================================================================
+                # Route mesh pairs to specialized buffers
+                # =====================================================================
+                is_mesh_a = type_a == int(GeoType.MESH)
+                is_mesh_b = type_b == int(GeoType.MESH)
+                is_plane_a = type_a == int(GeoType.PLANE)
+                is_infinite_plane_a = is_plane_a and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
 
-                # Check if second contact is valid (parallel axes case)
-                if dists[1] < wp.inf:
-                    contact_dist_1 = dists[1]
-                    contact_pos_1 = wp.vec3(positions[1, 0], positions[1, 1], positions[1, 2])
-                    num_contacts = 2
-                else:
+                # Mesh-mesh collision
+                if is_mesh_a and is_mesh_b:
+                    idx = wp.atomic_add(shape_pairs_mesh_mesh_count, 0, 1)
+                    if idx < shape_pairs_mesh_mesh.shape[0]:
+                        shape_pairs_mesh_mesh[idx] = wp.vec2i(shape_a, shape_b)
+                    is_valid = False
+
+                # Mesh-plane collision (infinite plane only)
+                if is_infinite_plane_a and is_mesh_b:
+                    mesh_id = shape_source[shape_b]
+                    if mesh_id != wp.uint64(0):
+                        mesh_obj = wp.mesh_get(mesh_id)
+                        vertex_count = mesh_obj.points.shape[0]
+                        mesh_plane_idx = wp.atomic_add(shape_pairs_mesh_plane_count, 0, 1)
+                        if mesh_plane_idx < shape_pairs_mesh_plane.shape[0]:
+                            # Store (mesh, plane)
+                            shape_pairs_mesh_plane[mesh_plane_idx] = wp.vec2i(shape_b, shape_a)
+                            cumulative_count_before = wp.atomic_add(mesh_plane_vertex_total_count, 0, vertex_count)
+                            shape_pairs_mesh_plane_cumsum[mesh_plane_idx] = cumulative_count_before + vertex_count
+                    is_valid = False
+
+                # Mesh-convex collision
+                if is_mesh_a or is_mesh_b:
+                    idx = wp.atomic_add(shape_pairs_mesh_count, 0, 1)
+                    if idx < shape_pairs_mesh.shape[0]:
+                        shape_pairs_mesh[idx] = wp.vec2i(shape_a, shape_b)
+                    is_valid = False
+
+            if is_valid:
+                # =====================================================================
+                # Handle lightweight primitives analytically
+                # =====================================================================
+                is_sphere_a = type_a == int(GeoType.SPHERE)
+                is_sphere_b = type_b == int(GeoType.SPHERE)
+                is_capsule_a = type_a == int(GeoType.CAPSULE)
+                is_capsule_b = type_b == int(GeoType.CAPSULE)
+                is_cylinder_b = type_b == int(GeoType.CYLINDER)
+                is_box_b = type_b == int(GeoType.BOX)
+
+                # Compute effective radii for spheres and capsules
+                # (radius that can be represented as Minkowski sum with a sphere)
+                radius_eff_a = float(0.0)
+                radius_eff_b = float(0.0)
+                if is_sphere_a or is_capsule_a:
+                    radius_eff_a = scale_a[0]
+                if is_sphere_b or is_capsule_b:
+                    radius_eff_b = scale_b[0]
+
+                # -----------------------------------------------------------------
+                # Plane-Sphere collision (type_a=PLANE=0, type_b=SPHERE=2)
+                # -----------------------------------------------------------------
+                if is_plane_a and is_sphere_b:
+                    plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
+                    sphere_radius = scale_b[0]
+                    contact_dist_0, contact_pos_0 = collide_plane_sphere(plane_normal, pos_a, pos_b, sphere_radius)
+                    contact_normal = plane_normal
                     num_contacts = 1
 
-            # -----------------------------------------------------------------
-            # Sphere-Cylinder collision (type_a=SPHERE=2, type_b=CYLINDER=5)
-            # -----------------------------------------------------------------
-            elif is_sphere_a and is_cylinder_b:
-                sphere_radius = scale_a[0]
-                cylinder_axis = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
-                cylinder_radius = scale_b[0]
-                cylinder_half_height = scale_b[1]
-                contact_dist_0, contact_pos_0, contact_normal = collide_sphere_cylinder(
-                    pos_a, sphere_radius, pos_b, cylinder_axis, cylinder_radius, cylinder_half_height
-                )
-                num_contacts = 1
+                # -----------------------------------------------------------------
+                # Sphere-Sphere collision (type_a=SPHERE=2, type_b=SPHERE=2)
+                # -----------------------------------------------------------------
+                elif is_sphere_a and is_sphere_b:
+                    radius_a = scale_a[0]
+                    radius_b = scale_b[0]
+                    contact_dist_0, contact_pos_0, contact_normal = collide_sphere_sphere(
+                        pos_a, radius_a, pos_b, radius_b
+                    )
+                    num_contacts = 1
 
-            # -----------------------------------------------------------------
-            # Sphere-Box collision (type_a=SPHERE=2, type_b=BOX=6)
-            # -----------------------------------------------------------------
-            elif is_sphere_a and is_box_b:
-                sphere_radius = scale_a[0]
-                box_rot = wp.quat_to_matrix(quat_b)
-                box_size = scale_b
-                contact_dist_0, contact_pos_0, contact_normal = collide_sphere_box(
-                    pos_a, sphere_radius, pos_b, box_rot, box_size
-                )
-                num_contacts = 1
+                # -----------------------------------------------------------------
+                # Plane-Capsule collision (type_a=PLANE=0, type_b=CAPSULE=3)
+                # Produces 2 contacts (both share same normal)
+                # -----------------------------------------------------------------
+                elif is_plane_a and is_capsule_b:
+                    plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
+                    capsule_axis = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
+                    capsule_radius = scale_b[0]
+                    capsule_half_length = scale_b[1]
 
-            # =====================================================================
-            # Write all contacts (unified write block for 0, 1, or 2 contacts)
-            # =====================================================================
-            if num_contacts > 0:
-                # Prepare contact data (shared fields for both contacts)
-                contact_data = ContactData()
-                contact_data.contact_normal_a_to_b = contact_normal
-                contact_data.radius_eff_a = radius_eff_a
-                contact_data.radius_eff_b = radius_eff_b
-                contact_data.thickness_a = thickness_a
-                contact_data.thickness_b = thickness_b
-                contact_data.shape_a = shape_a
-                contact_data.shape_b = shape_b
-                contact_data.margin = margin
+                    dists, positions, _frame = collide_plane_capsule(
+                        plane_normal, pos_a, pos_b, capsule_axis, capsule_radius, capsule_half_length
+                    )
 
-                # Check margin for both contacts
-                contact_data.contact_point_center = contact_pos_0
-                contact_data.contact_distance = contact_dist_0
-                contact_0_valid = contact_passes_margin_check(contact_data)
+                    contact_dist_0 = dists[0]
+                    contact_dist_1 = dists[1]
+                    contact_pos_0 = wp.vec3(positions[0, 0], positions[0, 1], positions[0, 2])
+                    contact_pos_1 = wp.vec3(positions[1, 0], positions[1, 1], positions[1, 2])
+                    contact_normal = plane_normal
+                    num_contacts = 2
 
-                contact_1_valid = False
-                if num_contacts > 1:
-                    contact_data.contact_point_center = contact_pos_1
-                    contact_data.contact_distance = contact_dist_1
-                    contact_1_valid = contact_passes_margin_check(contact_data)
+                # -----------------------------------------------------------------
+                # Sphere-Capsule collision (type_a=SPHERE=2, type_b=CAPSULE=3)
+                # -----------------------------------------------------------------
+                elif is_sphere_a and is_capsule_b:
+                    sphere_radius = scale_a[0]
+                    capsule_axis = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
+                    capsule_radius = scale_b[0]
+                    capsule_half_length = scale_b[1]
+                    contact_dist_0, contact_pos_0, contact_normal = collide_sphere_capsule(
+                        pos_a, sphere_radius, pos_b, capsule_axis, capsule_radius, capsule_half_length
+                    )
+                    num_contacts = 1
 
-                # Count valid contacts and allocate consecutive indices
-                num_valid = int(contact_0_valid) + int(contact_1_valid)
-                if num_valid > 0:
-                    base_index = wp.atomic_add(writer_data.contact_count, 0, num_valid)
+                # -----------------------------------------------------------------
+                # Capsule-Capsule collision (type_a=CAPSULE=3, type_b=CAPSULE=3)
+                # Produces 1 contact (non-parallel) or 2 contacts (parallel axes)
+                # -----------------------------------------------------------------
+                elif is_capsule_a and is_capsule_b:
+                    axis_a = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
+                    axis_b = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
+                    radius_a = scale_a[0]
+                    half_length_a = scale_a[1]
+                    radius_b = scale_b[0]
+                    half_length_b = scale_b[1]
 
-                    # Write first contact if valid
-                    if contact_0_valid:
-                        contact_data.contact_point_center = contact_pos_0
-                        contact_data.contact_distance = contact_dist_0
-                        writer_func(contact_data, writer_data, base_index)
-                        base_index += 1
+                    dists, positions, contact_normal = collide_capsule_capsule(
+                        pos_a, axis_a, radius_a, half_length_a, pos_b, axis_b, radius_b, half_length_b
+                    )
 
-                    # Write second contact if valid
-                    if contact_1_valid:
+                    contact_dist_0 = dists[0]
+                    contact_pos_0 = wp.vec3(positions[0, 0], positions[0, 1], positions[0, 2])
+
+                    # Check if second contact is valid (parallel axes case)
+                    if dists[1] < wp.inf:
+                        contact_dist_1 = dists[1]
+                        contact_pos_1 = wp.vec3(positions[1, 0], positions[1, 1], positions[1, 2])
+                        num_contacts = 2
+                    else:
+                        num_contacts = 1
+
+                # -----------------------------------------------------------------
+                # Sphere-Cylinder collision (type_a=SPHERE=2, type_b=CYLINDER=5)
+                # -----------------------------------------------------------------
+                elif is_sphere_a and is_cylinder_b:
+                    sphere_radius = scale_a[0]
+                    cylinder_axis = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
+                    cylinder_radius = scale_b[0]
+                    cylinder_half_height = scale_b[1]
+                    contact_dist_0, contact_pos_0, contact_normal = collide_sphere_cylinder(
+                        pos_a, sphere_radius, pos_b, cylinder_axis, cylinder_radius, cylinder_half_height
+                    )
+                    num_contacts = 1
+
+                # -----------------------------------------------------------------
+                # Sphere-Box collision (type_a=SPHERE=2, type_b=BOX=6)
+                # -----------------------------------------------------------------
+                elif is_sphere_a and is_box_b:
+                    sphere_radius = scale_a[0]
+                    box_rot = wp.quat_to_matrix(quat_b)
+                    box_size = scale_b
+                    contact_dist_0, contact_pos_0, contact_normal = collide_sphere_box(
+                        pos_a, sphere_radius, pos_b, box_rot, box_size
+                    )
+                    num_contacts = 1
+
+                # =====================================================================
+                # Write all contacts (unified write block for 0, 1, or 2 contacts)
+                # =====================================================================
+
+                if num_contacts > 0:
+                    # Prepare contact data (shared fields for both contacts)
+                    contact_data.contact_normal_a_to_b = contact_normal
+                    contact_data.radius_eff_a = radius_eff_a
+                    contact_data.radius_eff_b = radius_eff_b
+                    contact_data.thickness_a = thickness_a
+                    contact_data.thickness_b = thickness_b
+                    contact_data.shape_a = shape_a
+                    contact_data.shape_b = shape_b
+                    contact_data.margin = margin
+
+                    # Check margin for both contacts
+                    contact_data.contact_point_center = contact_pos_0
+                    contact_data.contact_distance = contact_dist_0
+                    contact_0_valid = contact_passes_margin_check(contact_data)
+
+                    if num_contacts > 1:
                         contact_data.contact_point_center = contact_pos_1
                         contact_data.contact_distance = contact_dist_1
-                        writer_func(contact_data, writer_data, base_index)
+                        contact_1_valid = contact_passes_margin_check(contact_data)
 
-                continue
+                    # Count valid contacts
+                    num_valid = int(contact_0_valid) + int(contact_1_valid)
+
+            # Thread block cooperative allocation using tile scan
+            # All threads participate in the scan, even if they have 0 contacts
+            count_tile = wp.tile(num_valid)
+            inclusive_scan = wp.tile_scan_inclusive(count_tile)
+
+            # Only the last thread in the block atomically reserves space for all valid contacts in this block
+            offset = 0
+            if idx_in_thread_block == wp.block_dim() - 1:
+                offset = wp.atomic_add(writer_data.contact_count, 0, inclusive_scan[wp.block_dim() - 1])
+
+            # Broadcast the offset to all threads in the block
+            offset_broadcast_tile = wp.tile(offset)
+            offset_broadcast = offset_broadcast_tile[wp.block_dim() - 1]
+
+            # Each thread writes its valid contacts to consecutive allocated indices
+            if num_valid > 0:
+                # Calculate base index for this thread's contacts
+                # inclusive_scan[i] is the cumulative sum including this thread
+                # So base_index = offset + (inclusive_scan[i] - num_valid)
+                base_index = offset_broadcast + inclusive_scan[idx_in_thread_block] - num_valid
+
+                # Write first contact if valid
+                if contact_0_valid:
+                    contact_data.contact_point_center = contact_pos_0
+                    contact_data.contact_distance = contact_dist_0
+                    writer_func(contact_data, writer_data, base_index)
+                    base_index += 1
+
+                # Write second contact if valid
+                if contact_1_valid:
+                    contact_data.contact_point_center = contact_pos_1
+                    contact_data.contact_distance = contact_dist_1
+                    writer_func(contact_data, writer_data, base_index)
+
+                is_valid = False
 
             # =====================================================================
             # Route remaining pairs to GJK/MPR kernel
             # =====================================================================
-            idx = wp.atomic_add(gjk_candidate_pairs_count, 0, 1)
-            if idx < gjk_candidate_pairs.shape[0]:
-                gjk_candidate_pairs[idx] = wp.vec2i(shape_a, shape_b)
+            if is_valid:
+                idx = wp.atomic_add(gjk_candidate_pairs_count, 0, 1)
+                if idx < gjk_candidate_pairs.shape[0]:
+                    gjk_candidate_pairs[idx] = wp.vec2i(shape_a, shape_b)
 
     return narrow_phase_primitive_kernel
 
@@ -1301,9 +1339,10 @@ class NarrowPhase:
         # Stage 1: Launch primitive kernel for fast analytical collisions
         # This handles sphere-sphere, sphere-capsule, capsule-capsule, plane-sphere, plane-capsule
         # and routes remaining pairs to gjk_candidate_pairs and mesh buffers
-        wp.launch(
+        # Uses launch_tiled for thread block cooperative contact allocation
+        wp.launch_tiled(
             kernel=self.primitive_kernel,
-            dim=self.total_num_threads,
+            dim=self.num_tile_blocks,
             inputs=[
                 candidate_pair,
                 num_candidate_pair,

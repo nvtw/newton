@@ -401,6 +401,7 @@ def create_collision_pipeline(
     collision_pipeline_type=None,
     broad_phase_mode=None,
     rigid_contact_max_per_pair=None,
+    enable_contact_debug_info=False,
 ):
     """Create a collision pipeline based on command-line arguments or explicit parameters.
 
@@ -413,6 +414,7 @@ def create_collision_pipeline(
         collision_pipeline_type: Explicit pipeline type ("unified" or "standard"), overrides args
         broad_phase_mode: Explicit broad phase mode ("nxn", "sap", "explicit"), overrides args
         rigid_contact_max_per_pair: Maximum number of contact points per shape pair (default: 10)
+        enable_contact_debug_info: Enable graph-compatible contact count tracking for UI display (default: False)
 
     Returns:
         CollisionPipelineUnified instance if unified pipeline is selected, None for standard pipeline
@@ -450,9 +452,13 @@ def create_collision_pipeline(
         else:
             collision_pipeline_type = "unified"  # Default
 
-    # If standard pipeline requested, return None (model.collide will create it implicitly)
+    # If standard pipeline requested, create it explicitly (to support debug info)
     if collision_pipeline_type == "standard":
-        return None
+        return newton.CollisionPipeline.from_model(
+            model,
+            rigid_contact_max_per_pair=rigid_contact_max_per_pair,
+            enable_contact_debug_info=enable_contact_debug_info,
+        )
 
     # Determine broad phase mode for unified pipeline
     if broad_phase_mode is None:
@@ -478,6 +484,7 @@ def create_collision_pipeline(
         model,
         rigid_contact_max_per_pair=rigid_contact_max_per_pair,
         broad_phase_mode=broad_phase_enum,
+        enable_contact_debug_info=enable_contact_debug_info,
     )
 
 

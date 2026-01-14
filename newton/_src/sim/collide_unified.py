@@ -295,6 +295,7 @@ class CollisionPipelineUnified:
         sap_sort_type=None,
         sdf_hydroelastic: SDFHydroelastic | None = None,
         has_meshes: bool = True,
+        enable_contact_debug_info: bool = False,
     ):
         """
         Initialize the CollisionPipelineUnified.
@@ -335,6 +336,9 @@ class CollisionPipelineUnified:
             has_meshes (bool, optional): Whether the scene contains mesh shapes. When False, mesh-related
                 kernels (mesh-plane, mesh-mesh, mesh-triangle) are skipped for better performance.
                 Defaults to True. Use from_model() for auto-detection.
+            enable_contact_debug_info (bool, optional): Enable graph-capture-compatible contact count tracking
+                using pinned host memory. This allows displaying contact counts in UI without breaking CUDA graphs.
+                Defaults to False.
         """
         self.contacts = None
         self.has_meshes = has_meshes
@@ -343,6 +347,7 @@ class CollisionPipelineUnified:
         self.device = device
         self.reduce_contacts = reduce_contacts
         self.shape_pairs_max = (shape_count * (shape_count - 1)) // 2
+        self.enable_contact_debug_info = enable_contact_debug_info
 
         # Initialize broad phase
         if self.broad_phase_mode == BroadPhaseMode.NXN:
@@ -378,8 +383,24 @@ class CollisionPipelineUnified:
         # For NXN/SAP modes, shape_pairs_max remains as all possible pairs
         if rigid_contact_max is not None:
             self.rigid_contact_max = rigid_contact_max
-        else:
+        elif self.broad_phase_mode == BroadPhaseMode.EXPLICIT:
+            # EXPLICIT mode: use per-pair allocation (pairs are pre-filtered)
             self.rigid_contact_max = self.shape_pairs_max * rigid_contact_max_per_pair
+        else:
+            # NXN/SAP mode: use neighbor-based heuristic to avoid O(N²) over-allocation
+            # In dense 3D packing, each body touches at most ~26 neighbors (Moore neighborhood)
+            # For cables/rods, use higher estimate (~50 neighbors along length)
+            # For general cases, use conservative estimate of 50 neighbors
+            max_neighbors_per_body = 50
+
+            # Estimate contacts per pair based on rigid_contact_max_per_pair hint
+            # Typical values: sphere-sphere=1, capsule-capsule=2, box-box=12
+            contacts_per_pair = max(rigid_contact_max_per_pair, 4)
+
+            # Each contact involves 2 bodies, so divide by 2 to avoid double-counting
+            # Add 50% safety margin for edge cases and dynamic scenarios
+            estimated_max = (shape_count * max_neighbors_per_body * contacts_per_pair) // 2
+            self.rigid_contact_max = int(estimated_max * 1.5)
 
         # Allocate buffers
         with wp.ScopedDevice(device):
@@ -433,6 +454,7 @@ class CollisionPipelineUnified:
         sap_sort_type=None,
         sdf_hydroelastic_config: SDFHydroelasticConfig | None = None,
         has_meshes: bool | None = None,
+        enable_contact_debug_info: bool = False,
     ) -> CollisionPipelineUnified:
         """
         Create a CollisionPipelineUnified instance from a Model.
@@ -456,6 +478,8 @@ class CollisionPipelineUnified:
             has_meshes (bool | None, optional): Whether the scene contains mesh shapes. When False,
                 mesh-related kernels are skipped for better performance. If None (default), auto-detects
                 by scanning model.shape_type for MESH shapes.
+            enable_contact_debug_info (bool, optional): Enable graph-capture-compatible contact count tracking.
+                Defaults to False.
 
         Returns:
             CollisionPipeline: The constructed collision pipeline.
@@ -506,6 +530,7 @@ class CollisionPipelineUnified:
             sap_sort_type=sap_sort_type,
             sdf_hydroelastic=sdf_hydroelastic,
             has_meshes=has_meshes,
+            enable_contact_debug_info=enable_contact_debug_info,
         )
 
         return pipeline
@@ -530,6 +555,7 @@ class CollisionPipelineUnified:
                 requires_grad=self.requires_grad,
                 device=self.device,
                 per_contact_shape_properties=self.narrow_phase.sdf_hydroelastic is not None,
+                enable_debug_info=self.enable_contact_debug_info,
             )
         else:
             self.contacts.clear()
@@ -688,6 +714,10 @@ class CollisionPipelineUnified:
                 ],
                 device=self.device,
             )
+
+        # Update debug info if enabled (graph-compatible copy to pinned memory)
+        if self.enable_contact_debug_info:
+            contacts.update_debug_info()
 
         return contacts
 
