@@ -68,6 +68,62 @@ def write_pair(
     candidate_pair[pairid] = pair
 
 
+@wp.func
+def write_pair_thread_block(
+    pair: wp.vec2i,
+    candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),
+    num_candidate_pair: wp.array(dtype=int, ndim=1),  # Size one array
+    max_candidate_pair: int,
+    idx_in_thread_block: int,
+    thread_has_pair: bool,
+):
+    """Write a pair to the candidate pair array using thread block cooperative writing.
+
+    This uses tile scan to reduce atomic contention by having only one thread per block
+    perform an atomic operation to reserve space for all valid pairs in the block.
+
+    Args:
+        pair: The pair of shape indices to write
+        candidate_pair: The array to write the pair to
+        num_candidate_pair: The number of candidate pairs written so far
+        max_candidate_pair: The maximum number of candidate pairs to write
+        idx_in_thread_block: Index of this thread within its thread block (0 to block_dim-1)
+        thread_has_pair: Boolean indicating if this thread has a valid pair to write
+    """
+
+    # Convert boolean to int (1 if has pair, 0 otherwise)
+    has_pair_int = 0
+    if thread_has_pair:
+        has_pair_int = 1
+
+    # Create a tile from the has_pair flag across all threads in the block
+    count_tile = wp.tile(has_pair_int)
+
+    # Perform inclusive scan to get cumulative count for each thread
+    # inclusive_scan[i] = sum of has_pair_int from threads 0 to i
+    inclusive_scan = wp.tile_scan_inclusive(count_tile)
+
+    # Only the last thread in the block atomically reserves space for all valid pairs
+    offset = 0
+    if idx_in_thread_block == wp.block_dim() - 1:
+        # Reserve space for inclusive_scan[block_dim-1] pairs (the total count in this block)
+        offset = wp.atomic_add(num_candidate_pair, 0, inclusive_scan[wp.block_dim() - 1])
+
+    # Broadcast the offset to all threads in the block
+    offset_broadcast_tile = wp.tile(offset)
+    offset_broadcast = offset_broadcast_tile[wp.block_dim() - 1]
+
+    # Each thread with a valid pair writes to its reserved location
+    if thread_has_pair:
+        # Calculate output index: base offset + (cumulative count - 1)
+        # The -1 converts from 1-based inclusive scan to 0-based index
+        out_idx = offset_broadcast + inclusive_scan[idx_in_thread_block] - 1
+        if out_idx < max_candidate_pair:
+            candidate_pair[out_idx] = pair
+
+
+
+
 # Collision filtering
 @wp.func
 def test_group_pair(group_a: int, group_b: int) -> bool:

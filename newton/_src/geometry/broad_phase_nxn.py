@@ -18,7 +18,13 @@ from __future__ import annotations
 import numpy as np
 import warp as wp
 
-from .broad_phase_common import check_aabb_overlap, precompute_world_map, test_world_and_group_pair, write_pair
+from .broad_phase_common import (
+    check_aabb_overlap,
+    precompute_world_map,
+    test_world_and_group_pair,
+    write_pair,
+    write_pair_thread_block,
+)
 
 
 @wp.kernel
@@ -159,63 +165,6 @@ def _find_world_and_local_id(
 
 
 @wp.kernel
-def _nxn_broadphase_kernel_single_world(
-    # Input arrays
-    shape_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
-    shape_bounding_box_upper: wp.array(dtype=wp.vec3, ndim=1),
-    shape_contact_margin: wp.array(dtype=float, ndim=1),
-    collision_group: wp.array(dtype=int, ndim=1),
-    num_shapes: int,
-    # Output arrays
-    candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),
-    num_candidate_pair: wp.array(dtype=int, ndim=1),
-    max_candidate_pair: int,
-):
-    """Optimized single-world NxN broad phase kernel.
-
-    This kernel is used when all shapes are in the same world, skipping
-    all world routing logic for maximum performance.
-    """
-    tid = wp.tid()
-
-    # Convert linear index to (i, j) pair using O(1) closed-form formula
-    shape1, shape2 = _get_lower_triangular_indices_fast(tid, num_shapes)
-
-    # Early exit for invalid indices (shouldn't happen with correct thread count)
-    if shape1 < 0 or shape2 < 0 or shape1 >= num_shapes or shape2 >= num_shapes:
-        return
-
-    # Check collision groups
-    collision_group1 = collision_group[shape1]
-    collision_group2 = collision_group[shape2]
-    if not test_world_and_group_pair(0, 0, collision_group1, collision_group2):
-        return
-
-    # Check if margins are provided (empty array means AABBs are pre-expanded)
-    margin1 = 0.0
-    margin2 = 0.0
-    if shape_contact_margin.shape[0] > 0:
-        margin1 = shape_contact_margin[shape1]
-        margin2 = shape_contact_margin[shape2]
-
-    # Check AABB overlap
-    if check_aabb_overlap(
-        shape_bounding_box_lower[shape1],
-        shape_bounding_box_upper[shape1],
-        margin1,
-        shape_bounding_box_lower[shape2],
-        shape_bounding_box_upper[shape2],
-        margin2,
-    ):
-        write_pair(
-            wp.vec2i(shape1, shape2),
-            candidate_pair,
-            num_candidate_pair,
-            max_candidate_pair,
-        )
-
-
-@wp.kernel
 def _nxn_broadphase_kernel(
     # Input arrays
     shape_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
@@ -234,70 +183,83 @@ def _nxn_broadphase_kernel(
     num_candidate_pair: wp.array(dtype=int, ndim=1),  # Size one array
     max_candidate_pair: int,
 ):
-    tid = wp.tid()
+    tid, idx_in_thread_block = wp.tid()
 
-    # Find which world this thread belongs to and the local index within that world
-    world_id, local_id = _find_world_and_local_id(tid, world_cumsum_lower_tri)
+    tid = tid * wp.block_dim() + idx_in_thread_block
 
-    # Get the slice boundaries for this world in the index map
-    world_slice_start = 0
-    if world_id > 0:
-        world_slice_start = world_slice_ends[world_id - 1]
-    world_slice_end = world_slice_ends[world_id]
+    # Infer total pairs to check from the last element of world_cumsum_lower_tri
+    # This is the cumulative sum across all worlds
+    total_pairs_to_check = world_cumsum_lower_tri[world_cumsum_lower_tri.shape[0] - 1]
 
-    # Number of geometries in this world
-    num_shapes_in_world = world_slice_end - world_slice_start
+    # Check if this thread has a valid pair to write
+    has_valid_pair = False
+    shape1 = -1
+    shape2 = -1
 
-    # Convert local_id to pair indices within the world (O(1) closed-form)
-    local_shape1, local_shape2 = _get_lower_triangular_indices_fast(local_id, num_shapes_in_world)
+    if tid < total_pairs_to_check:
+        # Find which world this thread belongs to and the local index within that world
+        world_id, local_id = _find_world_and_local_id(tid, world_cumsum_lower_tri)
 
-    # Map to actual geometry indices using the world_index_map
-    shape1_tmp = world_index_map[world_slice_start + local_shape1]
-    shape2_tmp = world_index_map[world_slice_start + local_shape2]
+        # Get the slice boundaries for this world in the index map
+        world_slice_start = 0
+        if world_id > 0:
+            world_slice_start = world_slice_ends[world_id - 1]
+        world_slice_end = world_slice_ends[world_id]
 
-    # Ensure canonical ordering (smaller index first)
-    # After mapping, the indices might not preserve local_shape1 < local_shape2 ordering
-    shape1 = wp.min(shape1_tmp, shape2_tmp)
-    shape2 = wp.max(shape1_tmp, shape2_tmp)
+        # Number of geometries in this world
+        num_shapes_in_world = world_slice_end - world_slice_start
 
-    # Get world and collision groups
-    world1 = shape_world[shape1]
-    world2 = shape_world[shape2]
-    collision_group1 = collision_group[shape1]
-    collision_group2 = collision_group[shape2]
+        # Convert local_id to pair indices within the world (O(1) closed-form)
+        local_shape1, local_shape2 = _get_lower_triangular_indices_fast(local_id, num_shapes_in_world)
 
-    # Skip pairs where both geometries are global (world -1), unless we're in the dedicated -1 segment
-    # The dedicated -1 segment is the last segment (world_id >= num_regular_worlds)
-    is_dedicated_minus_one_segment = world_id >= num_regular_worlds
-    if world1 == -1 and world2 == -1 and not is_dedicated_minus_one_segment:
-        return
+        # Map to actual geometry indices using the world_index_map
+        shape1_tmp = world_index_map[world_slice_start + local_shape1]
+        shape2_tmp = world_index_map[world_slice_start + local_shape2]
 
-    # Check both world and collision groups
-    if not test_world_and_group_pair(world1, world2, collision_group1, collision_group2):
-        return
+        # Ensure canonical ordering (smaller index first)
+        # After mapping, the indices might not preserve local_shape1 < local_shape2 ordering
+        shape1 = wp.min(shape1_tmp, shape2_tmp)
+        shape2 = wp.max(shape1_tmp, shape2_tmp)
 
-    # Check if margins are provided (empty array means AABBs are pre-expanded)
-    margin1 = 0.0
-    margin2 = 0.0
-    if shape_contact_margin.shape[0] > 0:
-        margin1 = shape_contact_margin[shape1]
-        margin2 = shape_contact_margin[shape2]
+        # Get world and collision groups
+        world1 = shape_world[shape1]
+        world2 = shape_world[shape2]
+        collision_group1 = collision_group[shape1]
+        collision_group2 = collision_group[shape2]
 
-    # Check AABB overlap
-    if check_aabb_overlap(
-        shape_bounding_box_lower[shape1],
-        shape_bounding_box_upper[shape1],
-        margin1,
-        shape_bounding_box_lower[shape2],
-        shape_bounding_box_upper[shape2],
-        margin2,
-    ):
-        write_pair(
-            wp.vec2i(shape1, shape2),
-            candidate_pair,
-            num_candidate_pair,
-            max_candidate_pair,
-        )
+        # Skip pairs where both geometries are global (world -1), unless we're in the dedicated -1 segment
+        # The dedicated -1 segment is the last segment (world_id >= num_regular_worlds)
+        is_dedicated_minus_one_segment = world_id >= num_regular_worlds
+        if not (world1 == -1 and world2 == -1 and not is_dedicated_minus_one_segment):
+            # Check both world and collision groups
+            if test_world_and_group_pair(world1, world2, collision_group1, collision_group2):
+                # Check if margins are provided (empty array means AABBs are pre-expanded)
+                margin1 = 0.0
+                margin2 = 0.0
+                if shape_contact_margin.shape[0] > 0:
+                    margin1 = shape_contact_margin[shape1]
+                    margin2 = shape_contact_margin[shape2]
+
+                # Check AABB overlap
+                if check_aabb_overlap(
+                    shape_bounding_box_lower[shape1],
+                    shape_bounding_box_upper[shape1],
+                    margin1,
+                    shape_bounding_box_lower[shape2],
+                    shape_bounding_box_upper[shape2],
+                    margin2,
+                ):
+                    has_valid_pair = True
+
+    # Use thread block cooperative writing to reduce atomic contention
+    write_pair_thread_block(
+        wp.vec2i(shape1, shape2),
+        candidate_pair,
+        num_candidate_pair,
+        max_candidate_pair,
+        idx_in_thread_block,
+        has_valid_pair,
+    )
 
 
 class BroadPhaseAllPairs:
@@ -383,15 +345,6 @@ class BroadPhaseAllPairs:
         # Store number of regular worlds (for distinguishing dedicated -1 segment)
         self.num_regular_worlds = int(num_regular_worlds)
 
-        # Detect single-world scenario for fast path optimization
-        # Single-world: exactly 1 world segment with all shapes, no global (-1) shapes
-        self._is_single_world = False
-        self._single_world_shape_count = 0
-        if num_worlds == 1:
-            # Only one world segment - can use fast path
-            self._is_single_world = True
-            self._single_world_shape_count = int(slice_ends_np[0])
-
     def launch(
         self,
         shape_lower: wp.array(dtype=wp.vec3, ndim=1),  # Lower bounds of shape bounding boxes
@@ -441,40 +394,29 @@ class BroadPhaseAllPairs:
         if shape_contact_margin is None:
             shape_contact_margin = wp.empty(0, dtype=wp.float32, device=device)
 
-        # Use optimized single-world kernel when applicable
-        if self._is_single_world:
-            wp.launch(
-                _nxn_broadphase_kernel_single_world,
-                dim=self.num_kernel_threads,
-                inputs=[
-                    shape_lower,
-                    shape_upper,
-                    shape_contact_margin,
-                    shape_collision_group,
-                    self._single_world_shape_count,
-                ],
-                outputs=[candidate_pair, num_candidate_pair, max_candidate_pair],
-                device=device,
-            )
-        else:
-            # Launch with the precomputed number of kernel threads (multi-world path)
-            wp.launch(
-                _nxn_broadphase_kernel,
-                dim=self.num_kernel_threads,
-                inputs=[
-                    shape_lower,
-                    shape_upper,
-                    shape_contact_margin,
-                    shape_collision_group,
-                    shape_shape_world,
-                    self.world_cumsum_lower_tri,
-                    self.world_slice_ends,
-                    self.world_index_map,
-                    self.num_regular_worlds,
-                ],
-                outputs=[candidate_pair, num_candidate_pair, max_candidate_pair],
-                device=device,
-            )
+        # Launch with the precomputed number of kernel threads using tiled launch
+        # Tiled launch is required for thread block cooperative writing using tile scan
+        block_dim = 128  # Typical block size for tile operations
+        num_blocks = (self.num_kernel_threads + block_dim - 1) // block_dim
+
+        wp.launch_tiled(
+            _nxn_broadphase_kernel,
+            dim=num_blocks,
+            inputs=[
+                shape_lower,
+                shape_upper,
+                shape_contact_margin,
+                shape_collision_group,
+                shape_shape_world,
+                self.world_cumsum_lower_tri,
+                self.world_slice_ends,
+                self.world_index_map,
+                self.num_regular_worlds,
+            ],
+            outputs=[candidate_pair, num_candidate_pair, max_candidate_pair],
+            block_dim=block_dim,
+            device=device,
+        )
 
 
 class BroadPhaseExplicit:

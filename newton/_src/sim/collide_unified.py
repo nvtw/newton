@@ -81,25 +81,23 @@ class BroadPhaseMode(IntEnum):
 
 
 @wp.func
-def write_contact(
+def contact_passes_margin_check(
     contact_data: ContactData,
     writer_data: UnifiedContactWriterData,
-    output_index: int,
-):
+) -> bool:
     """
-    Write a contact to the output arrays using ContactData and UnifiedContactWriterData.
+    Check if a contact passes the margin check and should be written.
 
     Args:
         contact_data: ContactData struct containing contact information
-        writer_data: UnifiedContactWriterData struct containing body info and output arrays
-        output_index: If -1, use atomic_add to get the next available index if contact distance is less than margin. If >= 0, use this index directly and skip margin check.
+        writer_data: UnifiedContactWriterData struct containing shape contact margins
+
+    Returns:
+        True if the contact distance is within the contact margin, False otherwise
     """
     total_separation_needed = (
         contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.thickness_a + contact_data.thickness_b
     )
-
-    offset_mag_a = contact_data.radius_eff_a + contact_data.thickness_a
-    offset_mag_b = contact_data.radius_eff_b + contact_data.thickness_b
 
     # Distance calculation matching box_plane_collision
     contact_normal_a_to_b = wp.normalize(contact_data.contact_normal_a_to_b)
@@ -120,12 +118,18 @@ def write_contact(
     margin_b = writer_data.shape_contact_margin[contact_data.shape_b]
     contact_margin = margin_a + margin_b
 
-    index = output_index
+    return d <= contact_margin
 
+
+@wp.func
+def write_contact_no_margin_check(
+    contact_data: ContactData,
+    writer_data: UnifiedContactWriterData,
+    output_index: int,
+):
+    index = output_index
     if index < 0:
         # compute index using atomic counter
-        if d > contact_margin:
-            return
         index = wp.atomic_add(writer_data.contact_count, 0, 1)
         if index >= writer_data.contact_max:
             # Reached buffer limit
@@ -134,6 +138,19 @@ def write_contact(
 
     if index >= writer_data.contact_max:
         return
+
+    # Recompute contact points and normal from contact_data
+    contact_normal_a_to_b = wp.normalize(contact_data.contact_normal_a_to_b)
+
+    a_contact_world = contact_data.contact_point_center - contact_normal_a_to_b * (
+        0.5 * contact_data.contact_distance + contact_data.radius_eff_a
+    )
+    b_contact_world = contact_data.contact_point_center + contact_normal_a_to_b * (
+        0.5 * contact_data.contact_distance + contact_data.radius_eff_b
+    )
+
+    offset_mag_a = contact_data.radius_eff_a + contact_data.thickness_a
+    offset_mag_b = contact_data.radius_eff_b + contact_data.thickness_b
 
     writer_data.out_shape0[index] = contact_data.shape_a
     writer_data.out_shape1[index] = contact_data.shape_b
@@ -167,6 +184,26 @@ def write_contact(
         writer_data.out_stiffness[index] = contact_data.contact_stiffness
         writer_data.out_damping[index] = contact_data.contact_damping
         writer_data.out_friction[index] = contact_data.contact_friction_scale
+
+
+@wp.func
+def write_contact(
+    contact_data: ContactData,
+    writer_data: UnifiedContactWriterData,
+    output_index: int,
+):
+    """
+    Write a contact to the output arrays using ContactData and UnifiedContactWriterData.
+
+    Args:
+        contact_data: ContactData struct containing contact information
+        writer_data: UnifiedContactWriterData struct containing body info and output arrays
+        output_index: If -1, use atomic_add to get the next available index if contact distance is less than margin. If >= 0, use this index directly and skip margin check.
+    """
+    if not contact_passes_margin_check(contact_data, writer_data):
+        return
+
+    write_contact_no_margin_check(contact_data, writer_data, output_index)
 
 
 @wp.kernel
