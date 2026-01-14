@@ -34,6 +34,18 @@ import newton.examples
 # Toggle between unified (True) and standard (False) collision pipeline
 USE_UNIFIED_PIPELINE = True
 
+# Broad phase mode for unified pipeline (ignored for standard pipeline)
+# Options: "nxn", "sap", "explicit"
+# - "nxn": All-pairs with AABB checks (simple, O(N²), good for small/medium scenes)
+# - "sap": Sweep-and-prune (O(N log N), better for large scenes)
+# - "explicit": Uses model.shape_contact_pairs (requires pre-filtered pairs)
+BROAD_PHASE_MODE = "explicit"
+
+# Explicit contact buffer size (None = auto-detect from model)
+# Model auto-detection gives 2.5M (too high due to O(N²) pairs)
+# Standard pipeline empirically uses ~10K, so override to that
+RIGID_CONTACT_MAX_OVERRIDE = None
+
 
 def create_cable_geometry(
     start_pos: wp.vec3,
@@ -252,10 +264,64 @@ class Example:
         self.control = self.model.control()
 
         # Create collision pipeline based on USE_UNIFIED_PIPELINE flag
-        pipeline_type = "unified" if USE_UNIFIED_PIPELINE else "standard"
-        self.collision_pipeline = newton.examples.create_collision_pipeline(
-            self.model, args, collision_pipeline_type=pipeline_type, enable_contact_debug_info=True
-        )
+        if USE_UNIFIED_PIPELINE:
+            # Use unified pipeline with explicit buffer size to match standard pipeline performance
+            # Standard pipeline uses model.rigid_contact_max (intelligently computed ~10K for cable pile)
+            print(f"Model rigid_contact_max: {self.model.rigid_contact_max:,}")
+
+            # Map string to BroadPhaseMode enum
+            broad_phase_map = {
+                "nxn": newton.BroadPhaseMode.NXN,
+                "sap": newton.BroadPhaseMode.SAP,
+                "explicit": newton.BroadPhaseMode.EXPLICIT,
+            }
+            broad_phase_enum = broad_phase_map.get(BROAD_PHASE_MODE.lower(), newton.BroadPhaseMode.NXN)
+            print(f"Broad phase mode: {BROAD_PHASE_MODE.upper()}")
+
+            # Create unified pipeline - use explicit override if specified
+            if RIGID_CONTACT_MAX_OVERRIDE is not None:
+                print(f"Using explicit rigid_contact_max override: {RIGID_CONTACT_MAX_OVERRIDE:,}")
+
+                # For EXPLICIT mode, need to provide shape_pairs_filtered
+                shape_pairs = None
+                if broad_phase_enum == newton.BroadPhaseMode.EXPLICIT:
+                    if hasattr(self.model, "shape_contact_pairs") and self.model.shape_contact_pairs is not None:
+                        shape_pairs = self.model.shape_contact_pairs
+                        print(f"Using model.shape_contact_pairs: {len(shape_pairs):,} pairs")
+                    else:
+                        print("WARNING: EXPLICIT mode requires shape_contact_pairs, falling back to NXN")
+                        broad_phase_enum = newton.BroadPhaseMode.NXN
+
+                self.collision_pipeline = newton.CollisionPipelineUnified(
+                    shape_count=self.model.shape_count,
+                    particle_count=self.model.particle_count,
+                    rigid_contact_max=RIGID_CONTACT_MAX_OVERRIDE,
+                    rigid_contact_max_per_pair=0,
+                    broad_phase_mode=broad_phase_enum,
+                    shape_pairs_filtered=shape_pairs,  # Only used for EXPLICIT mode
+                    shape_world=self.model.shape_world,
+                    shape_collision_group=self.model.shape_collision_group,
+                    shape_flags=self.model.shape_flags,
+                    device=self.model.device,
+                    enable_contact_debug_info=True,
+                )
+            else:
+                # Use model's intelligent allocation (recommended)
+                self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
+                    self.model,
+                    rigid_contact_max_per_pair=None,  # Use model.rigid_contact_max
+                    broad_phase_mode=broad_phase_enum,
+                    enable_contact_debug_info=True,
+                )
+            print(f"Unified pipeline rigid_contact_max: {self.collision_pipeline.rigid_contact_max:,}")
+        else:
+            # Standard pipeline
+            print(f"Model rigid_contact_max: {self.model.rigid_contact_max:,}")
+            self.collision_pipeline = newton.CollisionPipeline.from_model(
+                self.model,
+                enable_contact_debug_info=True,
+            )
+            print(f"Standard pipeline rigid_contact_max: {self.collision_pipeline.rigid_contact_max:,}")
 
         self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
 

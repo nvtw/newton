@@ -382,25 +382,31 @@ class CollisionPipelineUnified:
         # For EXPLICIT mode, shape_pairs_max is updated to len(shape_pairs_filtered)
         # For NXN/SAP modes, shape_pairs_max remains as all possible pairs
         if rigid_contact_max is not None:
+            # Explicit allocation provided - use it
             self.rigid_contact_max = rigid_contact_max
         elif self.broad_phase_mode == BroadPhaseMode.EXPLICIT:
             # EXPLICIT mode: use per-pair allocation (pairs are pre-filtered)
             self.rigid_contact_max = self.shape_pairs_max * rigid_contact_max_per_pair
         else:
-            # NXN/SAP mode: use neighbor-based heuristic to avoid O(N²) over-allocation
-            # In dense 3D packing, each body touches at most ~26 neighbors (Moore neighborhood)
-            # For cables/rods, use higher estimate (~50 neighbors along length)
-            # For general cases, use conservative estimate of 50 neighbors
-            max_neighbors_per_body = 50
+            # NXN/SAP mode: These modes generate pairs dynamically, so O(N²) allocation is wasteful
+            # Use neighbor-based heuristic as a reasonable upper bound
+            #
+            # Typical neighbor counts in dense 3D packing:
+            #   - Spheres in FCC: 12 neighbors
+            #   - Cubes/boxes: up to 26 neighbors (Moore neighborhood)
+            #   - Cables/rods: 8-15 neighbors on average
+            #
+            # Conservative default: 12 neighbors per body
+            max_neighbors_per_body = 12
 
-            # Estimate contacts per pair based on rigid_contact_max_per_pair hint
-            # Typical values: sphere-sphere=1, capsule-capsule=2, box-box=12
-            contacts_per_pair = max(rigid_contact_max_per_pair, 4)
+            # Estimate contacts per neighbor based on geometry complexity
+            # Most shape pairs generate 1-4 contacts (sphere=1, capsule=2, box=4-12)
+            contacts_per_neighbor = 2
 
             # Each contact involves 2 bodies, so divide by 2 to avoid double-counting
-            # Add 50% safety margin for edge cases and dynamic scenarios
-            estimated_max = (shape_count * max_neighbors_per_body * contacts_per_pair) // 2
-            self.rigid_contact_max = int(estimated_max * 1.5)
+            # Add 20% safety margin for dynamic scenarios
+            estimated_max = (shape_count * max_neighbors_per_body * contacts_per_neighbor) // 2
+            self.rigid_contact_max = int(estimated_max * 1.2)
 
         # Allocate buffers
         with wp.ScopedDevice(device):
@@ -489,10 +495,18 @@ class CollisionPipelineUnified:
             shape_types = model.shape_type.numpy()
             has_meshes = any(t == int(GeoType.MESH) for t in shape_types)
 
+        # For NXN/SAP modes, prefer model.rigid_contact_max (intelligently computed)
+        # over per-pair heuristics to avoid over-allocation
+        # For EXPLICIT mode, per-pair allocation is appropriate since pairs are pre-filtered
+        use_model_allocation = (
+            rigid_contact_max_per_pair is None or
+            broad_phase_mode in (BroadPhaseMode.NXN, BroadPhaseMode.SAP)
+        )
+
         rigid_contact_max = None
-        if rigid_contact_max_per_pair is None:
+        if use_model_allocation:
             rigid_contact_max = model.rigid_contact_max
-            rigid_contact_max_per_pair = 0
+            rigid_contact_max_per_pair = 0  # Signal to not use per-pair heuristic
         if requires_grad is None:
             requires_grad = model.requires_grad
 
