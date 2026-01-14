@@ -408,6 +408,20 @@ class CollisionPipelineUnified:
             estimated_max = (shape_count * max_neighbors_per_body * contacts_per_neighbor) // 2
             self.rigid_contact_max = int(estimated_max * 1.2)
 
+        # Sanity check for EXPLICIT mode: if rigid_contact_max is unreasonably large compared to
+        # shape count (indicating O(N²) explosion), clamp to neighbor-based heuristic.
+        # This happens when model.rigid_contact_max is computed from all theoretical pairs
+        # without accounting for spatial locality (e.g., cable piles with 1600 shapes but only
+        # ~10K actual contacts due to spatial proximity).
+        if self.broad_phase_mode == BroadPhaseMode.EXPLICIT and self.rigid_contact_max is not None:
+            max_neighbors_per_body = 12
+            contacts_per_neighbor = 2
+            neighbor_based_estimate = int((shape_count * max_neighbors_per_body * contacts_per_neighbor) // 2 * 1.2)
+            if self.rigid_contact_max > neighbor_based_estimate * 10:
+                # Allocation is 10x larger than neighbor heuristic - likely O(N²) explosion
+                # Use neighbor heuristic instead to avoid wasting memory
+                self.rigid_contact_max = neighbor_based_estimate
+
         # Allocate buffers
         with wp.ScopedDevice(device):
             self.broad_phase_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
