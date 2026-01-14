@@ -268,10 +268,14 @@ def prepare_geom_data_kernel(
 
 class CollisionPipelineUnified:
     """
-    Collision pipeline using NarrowPhase class for narrow phase collision detection.
+    Full-featured collision pipeline with GJK/MPR narrow phase and pluggable broad phase.
 
-    This is similar to CollisionPipelineUnified but uses the NarrowPhase API,
-    mainly for testing purposes.
+    Key features:
+        - GJK/MPR algorithms for convex-convex collision detection
+        - Multiple broad phase modes: NXN (all-pairs), SAP (sweep-and-prune), EXPLICIT (precomputed pairs)
+        - Mesh-mesh collision via SDF with contact reduction
+        - Optional hydroelastic contact model for compliant surfaces
+        - Contact matching support for warm-starting solvers
     """
 
     def __init__(
@@ -502,7 +506,7 @@ class CollisionPipelineUnified:
                 Defaults to False.
 
         Returns:
-            CollisionPipeline: The constructed collision pipeline.
+            CollisionPipelineUnified: The constructed collision pipeline.
         """
         # Auto-detect has_meshes from model shape types if not specified
         if has_meshes is None:
