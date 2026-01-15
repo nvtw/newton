@@ -1084,6 +1084,7 @@ class NarrowPhase:
         contact_writer_warp_func: Any | None = None,
         contact_reduction_betas: tuple = (1000000.0, 0.0001),
         sdf_hydroelastic: SDFHydroelastic | None = None,
+        has_meshes: bool = True,
     ):
         """
         Initialize NarrowPhase with pre-allocated buffers.
@@ -1117,12 +1118,16 @@ class NarrowPhase:
                 Default is ``(1000000.0, 0.0001)`` which keeps both all spatial extremes and
                 near-penetrating spatial extremes. The number of reduction slots is ``20 * (6 * len(betas) + 1)``.
             sdf_hydroelastic: Optional SDF hydroelastic instance. Set is_hydroelastic=True on shapes to enable hydroelastic collisions.
+            has_meshes: Whether the scene contains any mesh shapes (GeoType.MESH). When False, mesh-related
+                kernel launches are skipped, improving performance for scenes with only primitive shapes.
+                Defaults to True for safety. Set to False when constructing from a model with no meshes.
         """
         self.max_candidate_pairs = max_candidate_pairs
         self.max_triangle_pairs = max_triangle_pairs
         self.device = device
         self.betas_tuple = contact_reduction_betas
         self.reduce_contacts = reduce_contacts
+        self.has_meshes = has_meshes
 
         # Create contact reduction functions only when reduce_contacts is enabled and running on GPU
         # Contact reduction requires GPU for shared memory operations
@@ -1353,160 +1358,163 @@ class NarrowPhase:
             block_dim=self.block_dim,
         )
 
-        # Launch mesh-plane contact processing kernel
-        packaged_mesh_plane_inputs = [
-            shape_data,
-            shape_transform,
-            shape_source,
-            shape_contact_margin,
-            self.shape_pairs_mesh_plane,
-            self.shape_pairs_mesh_plane_count,
-            self.betas,
-            writer_data,
-            self.num_tile_blocks,
-        ]
-        if self.reduce_contacts:
-            # With contact reduction - use tiled launch
-            wp.launch_tiled(
-                kernel=self.mesh_plane_contacts_kernel,
-                dim=(self.num_tile_blocks,),
-                inputs=packaged_mesh_plane_inputs,
-                device=device,
-                block_dim=self.tile_size_mesh_plane,
-            )
-        else:
-            # Without contact reduction - use regular launch
-            wp.launch(
-                kernel=self.mesh_plane_contacts_kernel,
-                dim=self.total_num_threads,
-                inputs=packaged_mesh_plane_inputs,
-                device=device,
-                block_dim=self.block_dim,
-            )
-
-        # Launch mesh triangle overlap detection kernel
-        second_dim = self.tile_size_mesh_convex if ENABLE_TILE_BVH_QUERY else 1
-        wp.launch(
-            kernel=narrow_phase_find_mesh_triangle_overlaps_kernel,
-            dim=[self.num_tile_blocks, second_dim],
-            inputs=[
-                shape_types,
+        # Skip mesh-related kernels when no meshes are present in the scene
+        # This avoids kernel launch overhead for primitive-only scenes
+        if self.has_meshes:
+            # Launch mesh-plane contact processing kernel
+            packaged_mesh_plane_inputs = [
+                shape_data,
                 shape_transform,
                 shape_source,
                 shape_contact_margin,
-                shape_data,
-                self.shape_pairs_mesh,
-                self.shape_pairs_mesh_count,
-                self.num_tile_blocks,  # Use num_tile_blocks as total_num_threads for tiled kernel
-            ],
-            outputs=[
-                self.triangle_pairs,
-                self.triangle_pairs_count,
-            ],
-            device=device,
-            block_dim=self.tile_size_mesh_convex,
-        )
+                self.shape_pairs_mesh_plane,
+                self.shape_pairs_mesh_plane_count,
+                self.betas,
+                writer_data,
+                self.num_tile_blocks,
+            ]
+            if self.reduce_contacts:
+                # With contact reduction - use tiled launch
+                wp.launch_tiled(
+                    kernel=self.mesh_plane_contacts_kernel,
+                    dim=(self.num_tile_blocks,),
+                    inputs=packaged_mesh_plane_inputs,
+                    device=device,
+                    block_dim=self.tile_size_mesh_plane,
+                )
+            else:
+                # Without contact reduction - use regular launch
+                wp.launch(
+                    kernel=self.mesh_plane_contacts_kernel,
+                    dim=self.total_num_threads,
+                    inputs=packaged_mesh_plane_inputs,
+                    device=device,
+                    block_dim=self.block_dim,
+                )
 
-        # Launch mesh triangle contact processing kernel
-        if self.reduce_contacts:
-            assert self.global_contact_reducer is not None
-            # Use global contact reduction for mesh-triangle contacts
-            # First, clear the reducer
-            self.global_contact_reducer.clear_active()
-
-            # Collect contacts into the reducer
-            reducer_data = self.global_contact_reducer.get_data_struct()
+            # Launch mesh triangle overlap detection kernel
+            second_dim = self.tile_size_mesh_convex if ENABLE_TILE_BVH_QUERY else 1
             wp.launch(
-                kernel=self.mesh_triangle_to_reducer_kernel,
-                dim=self.total_num_threads,
+                kernel=narrow_phase_find_mesh_triangle_overlaps_kernel,
+                dim=[self.num_tile_blocks, second_dim],
                 inputs=[
                     shape_types,
-                    shape_data,
                     shape_transform,
                     shape_source,
                     shape_contact_margin,
+                    shape_data,
+                    self.shape_pairs_mesh,
+                    self.shape_pairs_mesh_count,
+                    self.num_tile_blocks,  # Use num_tile_blocks as total_num_threads for tiled kernel
+                ],
+                outputs=[
                     self.triangle_pairs,
                     self.triangle_pairs_count,
-                    reducer_data,
-                    self.total_num_threads,
                 ],
                 device=device,
-                block_dim=self.block_dim,
+                block_dim=self.tile_size_mesh_convex,
             )
 
-            # Register buffered contacts to hashtable
-            # This is a separate pass to reduce register pressure on the contact generation kernel
-            wp.launch(
-                kernel=self.reduce_buffered_contacts_kernel,
-                dim=self.total_num_threads,
-                inputs=[
-                    reducer_data,
-                    self.total_num_threads,
-                ],
-                device=device,
-                block_dim=self.block_dim,
-            )
+            # Launch mesh triangle contact processing kernel
+            if self.reduce_contacts:
+                assert self.global_contact_reducer is not None
+                # Use global contact reduction for mesh-triangle contacts
+                # First, clear the reducer
+                self.global_contact_reducer.clear_active()
 
-            # Export reduced contacts to writer
-            wp.launch(
-                kernel=self.export_reduced_contacts_kernel,
-                dim=self.total_num_threads,
-                inputs=[
-                    self.global_contact_reducer.hashtable.keys,
-                    self.global_contact_reducer.ht_values,
-                    self.global_contact_reducer.hashtable.active_slots,
-                    self.global_contact_reducer.position_depth,
-                    self.global_contact_reducer.normal,
-                    self.global_contact_reducer.shape_pairs,
-                    shape_data,
-                    shape_contact_margin,
-                    writer_data,
-                    self.total_num_threads,
-                ],
-                device=device,
-                block_dim=self.block_dim,
-            )
-        else:
-            # Direct contact processing without reduction
-            wp.launch(
-                kernel=self.mesh_triangle_contacts_kernel,
-                dim=self.total_num_threads,
-                inputs=[
-                    shape_types,
-                    shape_data,
-                    shape_transform,
-                    shape_source,
-                    shape_contact_margin,
-                    self.triangle_pairs,
-                    self.triangle_pairs_count,
-                    writer_data,
-                    self.total_num_threads,
-                ],
-                device=device,
-                block_dim=self.block_dim,
-            )
+                # Collect contacts into the reducer
+                reducer_data = self.global_contact_reducer.get_data_struct()
+                wp.launch(
+                    kernel=self.mesh_triangle_to_reducer_kernel,
+                    dim=self.total_num_threads,
+                    inputs=[
+                        shape_types,
+                        shape_data,
+                        shape_transform,
+                        shape_source,
+                        shape_contact_margin,
+                        self.triangle_pairs,
+                        self.triangle_pairs_count,
+                        reducer_data,
+                        self.total_num_threads,
+                    ],
+                    device=device,
+                    block_dim=self.block_dim,
+                )
 
-        # Launch mesh-mesh contact processing kernel (only if SDF data is available)
-        # SDF-based mesh-mesh collision requires GPU (wp.Volume only supports CUDA)
-        if shape_sdf_data.shape[0] > 0:
-            wp.launch_tiled(
-                kernel=self.mesh_mesh_contacts_kernel,
-                dim=(self.num_tile_blocks,),
-                inputs=[
-                    shape_data,
-                    shape_transform,
-                    shape_source,
-                    shape_sdf_data,
-                    shape_contact_margin,
-                    self.shape_pairs_mesh_mesh,
-                    self.shape_pairs_mesh_mesh_count,
-                    self.betas,
-                    writer_data,
-                    self.num_tile_blocks,
-                ],
-                device=device,
-                block_dim=self.tile_size_mesh_mesh,
-            )
+                # Register buffered contacts to hashtable
+                # This is a separate pass to reduce register pressure on the contact generation kernel
+                wp.launch(
+                    kernel=self.reduce_buffered_contacts_kernel,
+                    dim=self.total_num_threads,
+                    inputs=[
+                        reducer_data,
+                        self.total_num_threads,
+                    ],
+                    device=device,
+                    block_dim=self.block_dim,
+                )
+
+                # Export reduced contacts to writer
+                wp.launch(
+                    kernel=self.export_reduced_contacts_kernel,
+                    dim=self.total_num_threads,
+                    inputs=[
+                        self.global_contact_reducer.hashtable.keys,
+                        self.global_contact_reducer.ht_values,
+                        self.global_contact_reducer.hashtable.active_slots,
+                        self.global_contact_reducer.position_depth,
+                        self.global_contact_reducer.normal,
+                        self.global_contact_reducer.shape_pairs,
+                        shape_data,
+                        shape_contact_margin,
+                        writer_data,
+                        self.total_num_threads,
+                    ],
+                    device=device,
+                    block_dim=self.block_dim,
+                )
+            else:
+                # Direct contact processing without reduction
+                wp.launch(
+                    kernel=self.mesh_triangle_contacts_kernel,
+                    dim=self.total_num_threads,
+                    inputs=[
+                        shape_types,
+                        shape_data,
+                        shape_transform,
+                        shape_source,
+                        shape_contact_margin,
+                        self.triangle_pairs,
+                        self.triangle_pairs_count,
+                        writer_data,
+                        self.total_num_threads,
+                    ],
+                    device=device,
+                    block_dim=self.block_dim,
+                )
+
+            # Launch mesh-mesh contact processing kernel (only if SDF data is available)
+            # SDF-based mesh-mesh collision requires GPU (wp.Volume only supports CUDA)
+            if shape_sdf_data.shape[0] > 0:
+                wp.launch_tiled(
+                    kernel=self.mesh_mesh_contacts_kernel,
+                    dim=(self.num_tile_blocks,),
+                    inputs=[
+                        shape_data,
+                        shape_transform,
+                        shape_source,
+                        shape_sdf_data,
+                        shape_contact_margin,
+                        self.shape_pairs_mesh_mesh,
+                        self.shape_pairs_mesh_mesh_count,
+                        self.betas,
+                        writer_data,
+                        self.num_tile_blocks,
+                    ],
+                    device=device,
+                    block_dim=self.tile_size_mesh_mesh,
+                )
 
         if self.sdf_hydroelastic is not None:
             self.sdf_hydroelastic.launch(

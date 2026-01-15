@@ -301,6 +301,7 @@ class CollisionPipelineUnified:
         shape_flags: wp.array(dtype=int) | None = None,
         sap_sort_type=None,
         sdf_hydroelastic: SDFHydroelastic | None = None,
+        has_meshes: bool = True,
     ):
         """
         Initialize the CollisionPipelineUnified.
@@ -340,6 +341,9 @@ class CollisionPipelineUnified:
                 If None, uses default (SEGMENTED).
             sdf_hydroelastic (SDFHydroelastic | None, optional): Pre-configured SDF hydroelastic collision handler.
                 If provided, enables hydroelastic contact computation for SDF-based shape pairs. Defaults to None.
+            has_meshes (bool, optional): Whether the scene contains any mesh shapes (GeoType.MESH).
+                When False, mesh-related kernel launches in the narrow phase are skipped, improving performance
+                for scenes with only primitive shapes. Defaults to True for safety.
         """
         self.contacts = None
         self.shape_count = shape_count
@@ -415,6 +419,7 @@ class CollisionPipelineUnified:
             shape_aabb_upper=self.shape_aabb_upper,
             contact_writer_warp_func=write_contact,
             sdf_hydroelastic=sdf_hydroelastic,
+            has_meshes=has_meshes,
         )
         self.sdf_hydroelastic = self.narrow_phase.sdf_hydroelastic
 
@@ -489,6 +494,12 @@ class CollisionPipelineUnified:
         # returns None if no hydroelastic shape pairs in the model
         sdf_hydroelastic = SDFHydroelastic._from_model(model, config=sdf_hydroelastic_config, writer_func=write_contact)
 
+        # Detect if any mesh shapes are present to optimize kernel launches
+        has_meshes = False
+        if hasattr(model, "shape_type") and model.shape_type is not None:
+            shape_types = model.shape_type.numpy()
+            has_meshes = bool((shape_types == int(GeoType.MESH)).any())
+
         pipeline = CollisionPipelineUnified(
             model.shape_count,
             model.particle_count,
@@ -507,6 +518,7 @@ class CollisionPipelineUnified:
             shape_flags=model.shape_flags if hasattr(model, "shape_flags") else None,
             sap_sort_type=sap_sort_type,
             sdf_hydroelastic=sdf_hydroelastic,
+            has_meshes=has_meshes,
         )
 
         return pipeline
