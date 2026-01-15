@@ -278,6 +278,59 @@ class CollisionPipelineUnified:
         - Contact matching support for warm-starting solvers
     """
 
+    @staticmethod
+    def _compute_contact_buffer_size(
+        shape_count: int,
+        shape_pairs_max: int,
+        rigid_contact_max: int | None,
+        rigid_contact_max_per_pair: int,
+        broad_phase_mode: BroadPhaseMode,
+    ) -> int:
+        """Compute rigid contact buffer size using spatial heuristics.
+
+        For dynamic broad phases (NXN/SAP), uses neighbor-based estimation since pairs
+        are generated at runtime. For EXPLICIT mode with pre-filtered pairs, uses per-pair
+        allocation but clamps to neighbor heuristic if allocation explodes due to O(N²)
+        pair counts (e.g., cable pile: 1.28M theoretical pairs but only ~10K actual contacts).
+
+        Heuristic: 12 neighbors/shape x 2 contacts/pair ÷ 2 (no double-count) x 1.2 safety margin.
+
+        Args:
+            shape_count: Total number of collision shapes
+            shape_pairs_max: Number of pre-filtered pairs (EXPLICIT) or N*(N-1)/2 (NXN/SAP)
+            rigid_contact_max: Explicit override (None = use heuristic)
+            rigid_contact_max_per_pair: Contacts per pair for EXPLICIT mode
+            broad_phase_mode: Broad phase strategy (NXN, SAP, or EXPLICIT)
+
+        Returns:
+            Buffer size for rigid contact allocation
+        """
+        if rigid_contact_max is not None:
+            return rigid_contact_max
+
+        if broad_phase_mode == BroadPhaseMode.EXPLICIT:
+            # EXPLICIT: pre-filtered pairs, allocate contacts per pair
+            allocation = shape_pairs_max * rigid_contact_max_per_pair
+        else:
+            # NXN/SAP: dynamic pairs, use neighbor heuristic
+            # Typical 3D packing: 12 neighbors (FCC spheres, dense cables)
+            # Contact density: 2 contacts/pair (capsule-capsule, sphere-box)
+            max_neighbors_per_body = 12
+            contacts_per_neighbor = 2
+            allocation = (shape_count * max_neighbors_per_body * contacts_per_neighbor) // 2
+            allocation = int(allocation * 1.2)  # 20% safety margin
+
+        # Sanity check: clamp EXPLICIT allocations that exceed 10x neighbor heuristic
+        # (indicates O(N²) explosion without spatial locality filtering)
+        if broad_phase_mode == BroadPhaseMode.EXPLICIT:
+            max_neighbors_per_body = 12
+            contacts_per_neighbor = 2
+            neighbor_estimate = int((shape_count * max_neighbors_per_body * contacts_per_neighbor) // 2 * 1.2)
+            if allocation > neighbor_estimate * 10:
+                allocation = neighbor_estimate
+
+        return allocation
+
     def __init__(
         self,
         shape_count: int,
@@ -382,49 +435,14 @@ class CollisionPipelineUnified:
             self.shape_pairs_filtered = shape_pairs_filtered
             self.shape_pairs_max = len(shape_pairs_filtered)
 
-        # Calculate rigid_contact_max after shape_pairs_max is finalized
-        # For EXPLICIT mode, shape_pairs_max is updated to len(shape_pairs_filtered)
-        # For NXN/SAP modes, shape_pairs_max remains as all possible pairs
-        if rigid_contact_max is not None:
-            # Explicit allocation provided - use it
-            self.rigid_contact_max = rigid_contact_max
-        elif self.broad_phase_mode == BroadPhaseMode.EXPLICIT:
-            # EXPLICIT mode: use per-pair allocation (pairs are pre-filtered)
-            self.rigid_contact_max = self.shape_pairs_max * rigid_contact_max_per_pair
-        else:
-            # NXN/SAP mode: These modes generate pairs dynamically, so O(N²) allocation is wasteful
-            # Use neighbor-based heuristic as a reasonable upper bound
-            #
-            # Typical neighbor counts in dense 3D packing:
-            #   - Spheres in FCC: 12 neighbors
-            #   - Cubes/boxes: up to 26 neighbors (Moore neighborhood)
-            #   - Cables/rods: 8-15 neighbors on average
-            #
-            # Conservative default: 12 neighbors per body
-            max_neighbors_per_body = 12
-
-            # Estimate contacts per neighbor based on geometry complexity
-            # Most shape pairs generate 1-4 contacts (sphere=1, capsule=2, box=4-12)
-            contacts_per_neighbor = 2
-
-            # Each contact involves 2 bodies, so divide by 2 to avoid double-counting
-            # Add 20% safety margin for dynamic scenarios
-            estimated_max = (shape_count * max_neighbors_per_body * contacts_per_neighbor) // 2
-            self.rigid_contact_max = int(estimated_max * 1.2)
-
-        # Sanity check for EXPLICIT mode: if rigid_contact_max is unreasonably large compared to
-        # shape count (indicating O(N²) explosion), clamp to neighbor-based heuristic.
-        # This happens when model.rigid_contact_max is computed from all theoretical pairs
-        # without accounting for spatial locality (e.g., cable piles with 1600 shapes but only
-        # ~10K actual contacts due to spatial proximity).
-        if self.broad_phase_mode == BroadPhaseMode.EXPLICIT and self.rigid_contact_max is not None:
-            max_neighbors_per_body = 12
-            contacts_per_neighbor = 2
-            neighbor_based_estimate = int((shape_count * max_neighbors_per_body * contacts_per_neighbor) // 2 * 1.2)
-            if self.rigid_contact_max > neighbor_based_estimate * 10:
-                # Allocation is 10x larger than neighbor heuristic - likely O(N²) explosion
-                # Use neighbor heuristic instead to avoid wasting memory
-                self.rigid_contact_max = neighbor_based_estimate
+        # Compute contact buffer size using spatial heuristics
+        self.rigid_contact_max = self._compute_contact_buffer_size(
+            shape_count=shape_count,
+            shape_pairs_max=self.shape_pairs_max,
+            rigid_contact_max=rigid_contact_max,
+            rigid_contact_max_per_pair=rigid_contact_max_per_pair,
+            broad_phase_mode=self.broad_phase_mode,
+        )
 
         # Allocate buffers
         with wp.ScopedDevice(device):
