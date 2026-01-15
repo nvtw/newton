@@ -289,7 +289,6 @@ class CollisionPipelineUnified:
         reduce_contacts: bool = True,
         shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
         rigid_contact_max: int | None = None,
-        rigid_contact_max_per_pair: int = 10,
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
         edge_sdf_iter: int = 10,
@@ -313,8 +312,10 @@ class CollisionPipelineUnified:
             shape_pairs_filtered (wp.array | None, optional): Precomputed shape pairs for EXPLICIT broad phase mode.
                 Required when broad_phase_mode is BroadPhaseMode.EXPLICIT, ignored otherwise.
             rigid_contact_max (int | None, optional): Maximum number of rigid contacts to allocate.
-                If None, computed as shape_pairs_max * rigid_contact_max_per_pair.
-            rigid_contact_max_per_pair (int, optional): Maximum number of contact points per shape pair. Defaults to 10.
+                If None, estimated based on broad phase mode:
+                - EXPLICIT: len(shape_pairs_filtered) * 10 contacts
+                - NXN/SAP: shape_count * 20 contacts (assumes ~20 contacts per shape)
+                For better memory efficiency, use Model.rigid_contact_max computed from actual collision pairs.
             soft_contact_max (int | None, optional): Maximum number of soft contacts to allocate.
                 If None, computed as shape_count * particle_count.
             soft_contact_margin (float, optional): Margin for soft contact generation. Defaults to 0.01.
@@ -376,13 +377,23 @@ class CollisionPipelineUnified:
             self.shape_pairs_filtered = shape_pairs_filtered
             self.shape_pairs_max = len(shape_pairs_filtered)
 
-        # Calculate rigid_contact_max after shape_pairs_max is finalized
-        # For EXPLICIT mode, shape_pairs_max is updated to len(shape_pairs_filtered)
-        # For NXN/SAP modes, shape_pairs_max remains as all possible pairs
+        # Set rigid_contact_max
+        # For unified pipeline, we don't multiply by per-pair factors since broad phase
+        # discovers pairs dynamically. Users should provide rigid_contact_max explicitly,
+        # or use model.rigid_contact_max which is computed from actual collision pairs.
         if rigid_contact_max is not None:
             self.rigid_contact_max = rigid_contact_max
         else:
-            self.rigid_contact_max = self.shape_pairs_max * rigid_contact_max_per_pair
+            # Estimate based on broad phase mode and available information
+            if self.broad_phase_mode == BroadPhaseMode.EXPLICIT and self.shape_pairs_filtered is not None:
+                # For EXPLICIT mode, we know the maximum possible pairs
+                # Estimate ~10 contacts per shape pair (conservative for mesh-mesh contacts)
+                self.rigid_contact_max = max(1000, len(self.shape_pairs_filtered) * 10)
+            else:
+                # For NXN/SAP dynamic broad phase, estimate based on shape count
+                # Assume each shape contacts ~20 others on average (conservative estimate)
+                # This scales much better than O(N²) while still being safe
+                self.rigid_contact_max = max(1000, shape_count * 20)
 
         # Allocate buffers
         with wp.ScopedDevice(device):
@@ -423,7 +434,6 @@ class CollisionPipelineUnified:
     def from_model(
         cls,
         model: Model,
-        rigid_contact_max_per_pair: int | None = None,
         reduce_contacts: bool = True,
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
@@ -439,9 +449,7 @@ class CollisionPipelineUnified:
         Create a CollisionPipelineUnified instance from a Model.
 
         Args:
-            model (Model): The simulation model.
-            rigid_contact_max_per_pair (int | None, optional): Maximum number of contact points per shape pair.
-                If None, uses model.rigid_contact_max and sets per-pair to 0.
+            model (Model): The simulation model. Uses model.rigid_contact_max for buffer allocation.
             reduce_contacts (bool, optional): Whether to reduce contacts for mesh-mesh collisions. Defaults to True.
             soft_contact_max (int | None, optional): Maximum number of soft contacts to allocate.
             soft_contact_margin (float, optional): Margin for soft contact generation. Defaults to 0.01.
@@ -458,10 +466,8 @@ class CollisionPipelineUnified:
         Returns:
             CollisionPipelineUnified: The constructed collision pipeline.
         """
-        rigid_contact_max = None
-        if rigid_contact_max_per_pair is None:
-            rigid_contact_max = model.rigid_contact_max
-            rigid_contact_max_per_pair = 0
+        # Use model.rigid_contact_max which is computed from actual collision pairs
+        rigid_contact_max = model.rigid_contact_max
         if requires_grad is None:
             requires_grad = model.requires_grad
 
@@ -485,7 +491,6 @@ class CollisionPipelineUnified:
             reduce_contacts,
             shape_pairs_filtered,
             rigid_contact_max,
-            rigid_contact_max_per_pair,
             soft_contact_max,
             soft_contact_margin,
             edge_sdf_iter,

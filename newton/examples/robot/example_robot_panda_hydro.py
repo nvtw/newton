@@ -233,7 +233,6 @@ class Example:
         self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
             self.model,
             reduce_contacts=True,
-            rigid_contact_max_per_pair=100,
             broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
             sdf_hydroelastic_config=sdf_hydroelastic_config,
         )
