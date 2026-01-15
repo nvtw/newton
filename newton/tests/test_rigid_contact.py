@@ -488,8 +488,10 @@ def test_mesh_box_on_ground(test, device):
     model = builder.finalize(device=device)
 
     # Create collision pipeline (unified)
+    # Mesh boxes can generate many contacts, so we need a larger buffer
     collision_pipeline = newton.CollisionPipelineUnified.from_model(
         model,
+        rigid_contact_max=500,
         broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
     )
 

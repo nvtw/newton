@@ -129,8 +129,12 @@ def build_stacked_cubes_scene(
 
     sdf_hydroelastic_config = SDFHydroelasticConfig(output_contact_surface=True, reduce_contacts=reduce_contacts)
 
+    # Hydroelastic without contact reduction can generate many contacts
+    rigid_contact_max = 6000 if not reduce_contacts else 100
+
     collision_pipeline = newton.CollisionPipelineUnified.from_model(
         model,
+        rigid_contact_max=rigid_contact_max,
         broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
         sdf_hydroelastic_config=sdf_hydroelastic_config,
     )

@@ -435,6 +435,7 @@ class CollisionPipelineUnified:
         cls,
         model: Model,
         reduce_contacts: bool = True,
+        rigid_contact_max: int | None = None,
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
         edge_sdf_iter: int = 10,
@@ -449,8 +450,10 @@ class CollisionPipelineUnified:
         Create a CollisionPipelineUnified instance from a Model.
 
         Args:
-            model (Model): The simulation model. Uses model.rigid_contact_max for buffer allocation.
+            model (Model): The simulation model.
             reduce_contacts (bool, optional): Whether to reduce contacts for mesh-mesh collisions. Defaults to True.
+            rigid_contact_max (int | None, optional): Maximum number of rigid contacts to allocate.
+                If None, uses model.rigid_contact_max.
             soft_contact_max (int | None, optional): Maximum number of soft contacts to allocate.
             soft_contact_margin (float, optional): Margin for soft contact generation. Defaults to 0.01.
             edge_sdf_iter (int, optional): Number of iterations for edge SDF collision. Defaults to 10.
@@ -466,8 +469,9 @@ class CollisionPipelineUnified:
         Returns:
             CollisionPipelineUnified: The constructed collision pipeline.
         """
-        # Use model.rigid_contact_max which is computed from actual collision pairs
-        rigid_contact_max = model.rigid_contact_max
+        # Use provided rigid_contact_max or fall back to model.rigid_contact_max
+        if rigid_contact_max is None:
+            rigid_contact_max = model.rigid_contact_max
         if requires_grad is None:
             requires_grad = model.requires_grad
 
