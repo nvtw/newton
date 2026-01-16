@@ -46,6 +46,8 @@ GEAR_FILES = [
 SHAPE_CFG = newton.ModelBuilder.ShapeConfig(
     thickness=0.0,
     mu=0.01,
+    ke=1e7,  # Contact stiffness for MuJoCo solver
+    kd=1e4,  # Contact damping
     sdf_max_resolution=512,
     sdf_narrow_band_range=(-0.005, 0.005),
     contact_margin=0.005,
@@ -157,13 +159,16 @@ class Example:
             num_per_world = self.rigid_contact_max // self.num_worlds
             self.solver = newton.solvers.SolverMuJoCo(
                 self.model,
-                ls_parallel=True,
+                use_mujoco_contacts=False,
                 solver="newton",
                 integrator="implicitfast",
+                cone="elliptic",
                 njmax=num_per_world,
                 nconmax=num_per_world,
+                iterations=15,
                 ls_iterations=100,
-                use_mujoco_contacts=False,
+                ls_parallel=True,
+                impratio=1000.0,
             )
         else:
             raise ValueError(f"Unknown solver type: {self.solver_type}. Choose from 'xpbd' or 'mujoco'.")
