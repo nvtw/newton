@@ -1258,10 +1258,19 @@ class NarrowPhase:
         # Use a reasonable minimum for GPU occupancy (256 blocks = 32K threads)
         # but scale with expected workload to avoid massive overprovisioning.
         # 256 blocks provides good occupancy on most GPUs (2-4 blocks per SM).
-        gpu_thread_limit = 1024 * 1024 * 4
-        max_blocks_limit = gpu_thread_limit // self.block_dim
+
+        # Query GPU properties to compute appropriate thread limits
+        device_obj = wp.get_device(device)
+        if device_obj.is_cuda:
+            # Use 4 blocks per SM as a reasonable upper bound for occupancy
+            # This balances parallelism with resource utilization
+            max_blocks_limit = device_obj.sm_count * 4
+        else:
+            # CPU fallback: use a conservative limit
+            max_blocks_limit = 256
+
         candidate_blocks = (max_candidate_pairs + self.block_dim - 1) // self.block_dim
-        min_blocks = 256  # 32K threads minimum for reasonable GPU occupancy
+        min_blocks = 256  # 32K threads minimum for reasonable GPU occupancy on CUDA
         num_blocks = max(min_blocks, min(candidate_blocks, max_blocks_limit))
         self.total_num_threads = self.block_dim * num_blocks
         self.num_tile_blocks = num_blocks
