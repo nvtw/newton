@@ -146,7 +146,6 @@ class Example:
 
         self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
             self.model,
-            reduce_contacts=True,
             broad_phase_mode=self.broad_phase_mode,
         )
 

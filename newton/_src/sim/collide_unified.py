@@ -286,7 +286,6 @@ class CollisionPipelineUnified:
         self,
         shape_count: int,
         particle_count: int,
-        reduce_contacts: bool = True,
         shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
         rigid_contact_max: int | None = None,
         soft_contact_max: int | None = None,
@@ -309,7 +308,6 @@ class CollisionPipelineUnified:
         Args:
             shape_count (int): Number of shapes in the simulation.
             particle_count (int): Number of particles in the simulation.
-            reduce_contacts (bool, optional): Whether to reduce contacts for mesh-mesh collisions. Defaults to True.
             shape_pairs_filtered (wp.array | None, optional): Precomputed shape pairs for EXPLICIT broad phase mode.
                 Required when broad_phase_mode is BroadPhaseMode.EXPLICIT, ignored otherwise.
             rigid_contact_max (int | None, optional): Maximum number of rigid contacts to allocate.
@@ -349,7 +347,6 @@ class CollisionPipelineUnified:
         self.shape_count = shape_count
         self.broad_phase_mode = broad_phase_mode
         self.device = device
-        self.reduce_contacts = reduce_contacts
         self.shape_pairs_max = (shape_count * (shape_count - 1)) // 2
 
         # Initialize broad phase
@@ -413,7 +410,6 @@ class CollisionPipelineUnified:
         self.narrow_phase = NarrowPhase(
             max_candidate_pairs=self.shape_pairs_max,
             max_triangle_pairs=1000000,
-            reduce_contacts=self.reduce_contacts,
             device=device,
             shape_aabb_lower=self.shape_aabb_lower,
             shape_aabb_upper=self.shape_aabb_upper,
@@ -439,7 +435,6 @@ class CollisionPipelineUnified:
     def from_model(
         cls,
         model: Model,
-        reduce_contacts: bool = True,
         rigid_contact_max: int | None = None,
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
@@ -456,7 +451,6 @@ class CollisionPipelineUnified:
 
         Args:
             model (Model): The simulation model.
-            reduce_contacts (bool, optional): Whether to reduce contacts for mesh-mesh collisions. Defaults to True.
             rigid_contact_max (int | None, optional): Maximum number of rigid contacts to allocate.
                 If None, uses model.rigid_contact_max.
             soft_contact_max (int | None, optional): Maximum number of soft contacts to allocate.
@@ -503,7 +497,6 @@ class CollisionPipelineUnified:
         pipeline = CollisionPipelineUnified(
             model.shape_count,
             model.particle_count,
-            reduce_contacts,
             shape_pairs_filtered,
             rigid_contact_max,
             soft_contact_max,

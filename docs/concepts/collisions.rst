@@ -680,15 +680,13 @@ Two approaches available:
 Contact Reduction
 ^^^^^^^^^^^^^^^^^
 
-Contact reduction is enabled by default. For scenes with many mesh-mesh interactions that generate thousands of contacts, reduction selects a significantly smaller representative set that maintains stable contact behavior while improving solver performance.
+Contact reduction is always enabled. For scenes with many mesh-mesh interactions that generate thousands of contacts, reduction selects a significantly smaller representative set that maintains stable contact behavior while improving solver performance.
 
 **How it works:**
 
 1. Contacts are binned by normal direction (20 icosahedron face directions)
 2. Within each bin, contacts are scored by spatial distribution and penetration depth
 3. Representative contacts are selected using configurable depth thresholds (betas)
-
-To disable reduction, set ``reduce_contacts=False`` when creating the pipeline.
 
 **Configuring contact reduction (SDFHydroelasticConfig):**
 
