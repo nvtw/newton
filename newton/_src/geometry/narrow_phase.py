@@ -1088,7 +1088,7 @@ class NarrowPhase:
         shape_aabb_lower: wp.array(dtype=wp.vec3) | None = None,
         shape_aabb_upper: wp.array(dtype=wp.vec3) | None = None,
         contact_writer_warp_func: Any | None = None,
-        contact_reduction_betas: tuple = (1000000.0, 0.0001),
+        contact_reduction_betas: tuple = (0.05, 0.000001),
         sdf_hydroelastic: SDFHydroelastic | None = None,
         has_meshes: bool = True,
     ):

@@ -89,8 +89,17 @@ class SDFHydroelasticConfig:
     """Grid size for contact handling. Can be tuned for performance."""
     output_contact_surface: bool = False
     """Whether to output hydroelastic contact surface vertices for visualization."""
-    betas: tuple[float, float] = (10.0, -0.5)
-    """Penetration beta values for contact reduction heuristics. See :meth:`compute_score` for more details."""
+    betas: tuple[float, float] = (0.05, 0.000001)
+    """Depth thresholds for contact reduction. Each beta produces a separate set of
+    representative contacts per normal bin. Contacts participate if ``pen_depth > -beta``.
+
+    Examples:
+        - ``beta = 1000000``: All contacts participate
+        - ``beta = 0``: Only penetrating contacts (pen_depth > 0)
+        - ``beta = -0.01``: Only contacts with at least 1cm penetration
+
+    Default ``(0.05, 0.0)`` keeps near-contact spatial extremes (within 5cm)
+    and penetrating spatial extremes."""
     sticky_contacts: float = 0.0
     """Stickiness factor for temporal contact persistence. Setting it to a small positive value (e.g. 1e-6) can prevent jittering contacts in certain scenarios. Default is 0.0 (no stickiness)."""
     normal_matching: bool = True
@@ -1322,17 +1331,6 @@ def get_generate_contacts_kernel(output_vertices: bool):
     return count_faces_kernel, scatter_faces_kernel
 
 
-@wp.func
-def compute_score(spatial_dot_product: wp.float32, pen_depth: wp.float32, beta: wp.float32) -> wp.float32:
-    if beta < 0.0:
-        if pen_depth < 0.0:
-            return pen_depth
-        else:
-            return spatial_dot_product * wp.pow(pen_depth, -beta)
-    else:
-        return spatial_dot_product + pen_depth * beta
-
-
 def get_decode_contacts_kernel(margin_contact_area: float = 1e-4, writer_func: Any = None):
     @wp.kernel(enable_backward=False)
     def decode_contacts_kernel(
@@ -1540,15 +1538,17 @@ def get_binning_kernels(
                 direction_2d = get_spatial_direction_2d(dir_idx)
                 spatial_dot_product = wp.dot(face_center_2d, direction_2d)
                 for i in range(wp.static(num_betas)):
-                    offset_i = i * n_bin_dirs
-                    idx_dir = dir_idx + offset_i
-                    dp = compute_score(spatial_dot_product, pen_depth, penetration_betas[i])
-                    if wp.static(sticky_contacts > 0.0):
-                        bin_id_prev = binned_id_prev[bin_idx_prev, bin_normal_idx, idx_dir]
-                        if bin_id_prev == id:
-                            dp += wp.static(sticky_contacts)
+                    # Threshold check: contact participates if pen_depth > -beta
+                    if pen_depth > -penetration_betas[i]:
+                        offset_i = i * n_bin_dirs
+                        idx_dir = dir_idx + offset_i
+                        dp = spatial_dot_product
+                        if wp.static(sticky_contacts > 0.0):
+                            bin_id_prev = binned_id_prev[bin_idx_prev, bin_normal_idx, idx_dir]
+                            if bin_id_prev == id:
+                                dp += wp.static(sticky_contacts)
 
-                    wp.atomic_max(binned_dot_product, bin_idx_0, bin_normal_idx, idx_dir, dp)
+                        wp.atomic_max(binned_dot_product, bin_idx_0, bin_normal_idx, idx_dir, dp)
 
     @wp.kernel(enable_backward=False)
     def assign_contacts_to_bins(
@@ -1617,19 +1617,21 @@ def get_binning_kernels(
                 direction_2d = get_spatial_direction_2d(dir_idx)
                 spatial_dot_product = wp.dot(face_center_2d, direction_2d)
                 for i in range(wp.static(num_betas)):
-                    offset_i = i * n_bin_dirs
-                    idx_dir = dir_idx + offset_i
-                    dp = compute_score(spatial_dot_product, pen_depth, penetration_betas[i])
-                    if wp.static(sticky_contacts > 0.0):
-                        bin_id_prev = binned_id_prev[bin_idx_prev, bin_normal_idx, idx_dir]
-                        if bin_id_prev == id:
-                            dp += wp.static(sticky_contacts)
-                    max_dp = binned_dot_product[bin_idx_0, bin_normal_idx, idx_dir]
-                    if dp >= max_dp:
-                        binned_normals[bin_idx_0, bin_normal_idx, idx_dir] = normal
-                        binned_pos[bin_idx_0, bin_normal_idx, idx_dir] = face_center
-                        binned_depth[bin_idx_0, bin_normal_idx, idx_dir] = pen_depth
-                        binned_id[bin_idx_0, bin_normal_idx, idx_dir] = id
+                    # Threshold check: contact participates if pen_depth > -beta
+                    if pen_depth > -penetration_betas[i]:
+                        offset_i = i * n_bin_dirs
+                        idx_dir = dir_idx + offset_i
+                        dp = spatial_dot_product
+                        if wp.static(sticky_contacts > 0.0):
+                            bin_id_prev = binned_id_prev[bin_idx_prev, bin_normal_idx, idx_dir]
+                            if bin_id_prev == id:
+                                dp += wp.static(sticky_contacts)
+                        max_dp = binned_dot_product[bin_idx_0, bin_normal_idx, idx_dir]
+                        if dp >= max_dp:
+                            binned_normals[bin_idx_0, bin_normal_idx, idx_dir] = normal
+                            binned_pos[bin_idx_0, bin_normal_idx, idx_dir] = face_center
+                            binned_depth[bin_idx_0, bin_normal_idx, idx_dir] = pen_depth
+                            binned_id[bin_idx_0, bin_normal_idx, idx_dir] = id
 
     @wp.kernel(enable_backward=False)
     def generate_contacts_from_bins(
