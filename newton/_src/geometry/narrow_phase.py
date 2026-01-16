@@ -42,10 +42,7 @@ from ..geometry.collision_primitive import (
 from ..geometry.contact_data import ContactData, contact_passes_margin_check
 from ..geometry.contact_reduction import (
     NUM_SPATIAL_DIRECTIONS,
-    ContactReductionFunctions,
-    ContactStruct,
     create_betas_array,
-    synchronize,
 )
 from ..geometry.contact_reduction_global import (
     GlobalContactReducer,
@@ -801,14 +798,12 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
 
 def create_narrow_phase_process_mesh_plane_contacts_kernel(
     writer_func: Any,
-    contact_reduction_funcs: ContactReductionFunctions | None = None,
 ):
     """
     Create a mesh-plane collision kernel.
 
     Args:
         writer_func: Contact writer function (e.g., write_contact_simple)
-        contact_reduction_funcs: ContactReductionFunctions instance. If None, no contact reduction is used.
 
     Returns:
         A warp kernel that processes mesh-plane collisions
@@ -913,174 +908,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
 
                     writer_func(contact_data, writer_data, -1)
 
-    # Return early if contact reduction is disabled
-    if contact_reduction_funcs is None:
-        return narrow_phase_process_mesh_plane_contacts_kernel
-
-    # Extract functions and constants from the contact reduction configuration
-
-    num_reduction_slots = contact_reduction_funcs.num_reduction_slots
-    store_reduced_contact_func = contact_reduction_funcs.store_reduced_contact
-    get_smem_slots_plus_1 = contact_reduction_funcs.get_smem_slots_plus_1
-    get_smem_slots_contacts = contact_reduction_funcs.get_smem_slots_contacts
-
-    @wp.kernel(enable_backward=False)
-    def narrow_phase_process_mesh_plane_contacts_reduce_kernel(
-        shape_data: wp.array(dtype=wp.vec4),
-        shape_transform: wp.array(dtype=wp.transform),
-        shape_source: wp.array(dtype=wp.uint64),
-        shape_contact_margin: wp.array(dtype=float),
-        shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
-        shape_pairs_mesh_plane_count: wp.array(dtype=int),
-        betas: wp.array(dtype=wp.float32),
-        writer_data: Any,
-        total_num_blocks: int,
-    ):
-        """
-        Process mesh-plane collisions with contact reduction.
-
-        Each thread block handles one mesh-plane pair. Threads cooperatively iterate
-        over all vertices of the mesh, generate contacts, and reduce them using
-        shared memory contact reduction. Uses grid stride loop to handle more pairs
-        than available blocks.
-        """
-        block_id, t = wp.tid()
-
-        num_pairs = shape_pairs_mesh_plane_count[0]
-
-        # Initialize shared memory buffers for contact reduction (reused across pairs)
-        empty_marker = -1000000000.0
-        active_contacts_shared_mem = wp.array(
-            ptr=wp.static(get_smem_slots_plus_1)(),
-            shape=(wp.static(num_reduction_slots) + 1,),
-            dtype=wp.int32,
-        )
-        contacts_shared_mem = wp.array(
-            ptr=wp.static(get_smem_slots_contacts)(),
-            shape=(wp.static(num_reduction_slots),),
-            dtype=ContactStruct,
-        )
-
-        # Grid stride loop over mesh-plane pairs
-        for pair_idx in range(block_id, num_pairs, total_num_blocks):
-            # Get the mesh-plane pair
-            pair = shape_pairs_mesh_plane[pair_idx]
-            mesh_shape = pair[0]
-            plane_shape = pair[1]
-
-            # Get mesh
-            mesh_id = shape_source[mesh_shape]
-            if mesh_id == wp.uint64(0):
-                continue
-
-            mesh_obj = wp.mesh_get(mesh_id)
-            num_vertices = mesh_obj.points.shape[0]
-
-            # Get mesh world transform
-            X_mesh_ws = shape_transform[mesh_shape]
-
-            # Get plane world transform
-            X_plane_ws = shape_transform[plane_shape]
-            X_plane_sw = wp.transform_inverse(X_plane_ws)
-
-            # Get plane normal in world space (plane normal is along local +Z, pointing upward)
-            plane_normal = wp.transform_vector(X_plane_ws, wp.vec3(0.0, 0.0, 1.0))
-
-            # Get mesh scale
-            scale_data = shape_data[mesh_shape]
-            mesh_scale = wp.vec3(scale_data[0], scale_data[1], scale_data[2])
-
-            # Extract thickness values
-            thickness_mesh = shape_data[mesh_shape][3]
-            thickness_plane = shape_data[plane_shape][3]
-            total_thickness = thickness_mesh + thickness_plane
-
-            # Use per-shape contact margin for contact detection
-            # Sum margins for consistency with thickness summing
-            margin_mesh = shape_contact_margin[mesh_shape]
-            margin_plane = shape_contact_margin[plane_shape]
-            margin = margin_mesh + margin_plane
-
-            # Reset contact buffer for this pair
-            for i in range(t, wp.static(num_reduction_slots), wp.block_dim()):
-                contacts_shared_mem[i].projection = empty_marker
-
-            if t == 0:
-                active_contacts_shared_mem[wp.static(num_reduction_slots)] = 0
-
-            synchronize()
-
-            # Process vertices in batches using strided loop
-
-            num_iterations = (num_vertices + wp.block_dim() - 1) // wp.block_dim()
-            for i in range(num_iterations):
-                vertex_idx = i * wp.block_dim() + t
-                has_contact = wp.bool(False)
-                c = ContactStruct()
-
-                if vertex_idx < num_vertices:
-                    # Get vertex position in mesh local space and transform to world space
-                    vertex_local = wp.cw_mul(mesh_obj.points[vertex_idx], mesh_scale)
-                    vertex_world = wp.transform_point(X_mesh_ws, vertex_local)
-
-                    # Project vertex onto plane to get closest point
-                    vertex_in_plane_space = wp.transform_point(X_plane_sw, vertex_world)
-                    point_on_plane_local = wp.vec3(vertex_in_plane_space[0], vertex_in_plane_space[1], 0.0)
-                    point_on_plane = wp.transform_point(X_plane_ws, point_on_plane_local)
-
-                    # Compute distance
-                    diff = vertex_world - point_on_plane
-                    distance = wp.dot(diff, plane_normal)
-
-                    # Check if this vertex generates a contact
-                    if distance < margin + total_thickness:
-                        has_contact = True
-
-                        # Contact position is the midpoint
-                        contact_pos = (vertex_world + point_on_plane) * 0.5
-
-                        # Normal points from mesh to plane (negate plane normal since plane normal points up/away from plane)
-                        contact_normal = -plane_normal
-
-                        c.position = contact_pos
-                        c.normal = contact_normal
-                        c.depth = distance
-                        c.feature = vertex_idx
-                        c.projection = empty_marker
-
-                # Apply contact reduction
-                store_reduced_contact_func(
-                    t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, betas, empty_marker
-                )
-
-            # Write reduced contacts to output (store_reduced_contact ends with sync)
-            num_contacts_to_keep = wp.min(
-                active_contacts_shared_mem[wp.static(num_reduction_slots)], wp.static(num_reduction_slots)
-            )
-
-            for i in range(t, num_contacts_to_keep, wp.block_dim()):
-                contact_id = active_contacts_shared_mem[i]
-                contact = contacts_shared_mem[contact_id]
-
-                # Create contact data - contacts are already in world space
-                contact_data = ContactData()
-                contact_data.contact_point_center = contact.position
-                contact_data.contact_normal_a_to_b = contact.normal
-                contact_data.contact_distance = contact.depth
-                contact_data.radius_eff_a = 0.0
-                contact_data.radius_eff_b = 0.0
-                contact_data.thickness_a = thickness_mesh
-                contact_data.thickness_b = thickness_plane
-                contact_data.shape_a = mesh_shape
-                contact_data.shape_b = plane_shape
-                contact_data.margin = margin
-
-                writer_func(contact_data, writer_data, -1)
-
-            # Ensure all threads complete before processing next pair
-            synchronize()
-
-    return narrow_phase_process_mesh_plane_contacts_reduce_kernel
+    return narrow_phase_process_mesh_plane_contacts_kernel
 
 
 def create_mesh_plane_contacts_to_reducer_kernel():
@@ -1241,15 +1069,9 @@ class NarrowPhase:
         self.reduce_contacts = reduce_contacts
         self.has_meshes = has_meshes
 
-        # Create contact reduction functions only when reduce_contacts is enabled, running on GPU, and has meshes
-        # Contact reduction requires GPU for shared memory operations and is only used for mesh contacts
+        # Contact reduction requires GPU and meshes
         is_gpu_device = wp.get_device(device).is_cuda
-        if reduce_contacts and is_gpu_device and has_meshes:
-            self.contact_reduction_funcs = ContactReductionFunctions(contact_reduction_betas)
-            self.num_reduction_slots = self.contact_reduction_funcs.num_reduction_slots
-        else:
-            self.contact_reduction_funcs = None
-            self.num_reduction_slots = 0
+        if not (reduce_contacts and is_gpu_device and has_meshes):
             self.reduce_contacts = False
 
         # Determine if we're using external AABBs
@@ -1286,15 +1108,9 @@ class NarrowPhase:
         if has_meshes:
             self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func)
 
-            # Create non-reducing mesh-plane and mesh-mesh kernels for when reduce_contacts=False
-            self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(
-                writer_func,
-                contact_reduction_funcs=None,  # No shared memory reduction, use global reducer instead
-            )
-            self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
-                writer_func,
-                contact_reduction_funcs=None,  # No shared memory reduction, use global reducer instead
-            )
+            # Create non-reducing mesh-plane and mesh-mesh kernels
+            self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(writer_func)
+            self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(writer_func)
         else:
             self.mesh_triangle_contacts_kernel = None
             self.mesh_plane_contacts_kernel = None

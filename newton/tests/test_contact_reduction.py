@@ -19,8 +19,6 @@ This test suite validates:
 1. Icosahedron face normals are unit vectors
 2. get_slot returns correct face indices for different normals
 3. Contact reduction utility functions work correctly
-
-Note: Tests that use shared memory (ContactReductionFunctions) require CUDA.
 """
 
 import unittest
@@ -32,14 +30,11 @@ from newton._src.geometry.contact_reduction import (
     ICOSAHEDRON_FACE_NORMALS,
     NUM_NORMAL_BINS,
     NUM_SPATIAL_DIRECTIONS,
-    ContactReductionFunctions,
-    ContactStruct,
     compute_num_reduction_slots,
     create_betas_array,
     get_slot,
-    synchronize,
 )
-from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
+from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
 @wp.kernel
@@ -192,170 +187,10 @@ def test_get_slot_matches_best_face_normal(test, device):
 
 
 # =============================================================================
-# Tests for ContactReductionFunctions (requires CUDA for shared memory)
-# =============================================================================
-
-
-@wp.func
-def _generate_test_contact(t: int) -> ContactStruct:
-    """Generate deterministic test contact data."""
-    c = ContactStruct()
-    ft = float(t)
-    c.position = wp.vec3(wp.sin(ft * 0.1) * ft * 0.01, 0.0, wp.cos(ft * 0.1) * ft * 0.01)
-    c.normal = wp.vec3(0.0, 1.0, 0.0)
-    c.depth = 0.1
-    c.feature = t % 10  # Assign features 0-9 cyclically
-    c.projection = 0.0
-    return c
-
-
-def _create_reduction_test_kernel(reduction_funcs: ContactReductionFunctions):
-    """Create a test kernel for contact reduction with shared memory."""
-    num_slots = reduction_funcs.num_reduction_slots
-    store_reduced_contact = reduction_funcs.store_reduced_contact
-    filter_unique_contacts = reduction_funcs.filter_unique_contacts
-
-    @wp.kernel(enable_backward=False)
-    def reduction_test_kernel(
-        out_contacts: wp.array(dtype=ContactStruct),
-        out_count: wp.array(dtype=int),
-        betas_arr: wp.array(dtype=wp.float32),
-    ):
-        _block_id, t = wp.tid()
-        empty_marker = -1000000000.0
-
-        # Initialize shared memory buffer
-        buffer = wp.array(
-            ptr=reduction_funcs.get_smem_slots_contacts(),
-            shape=(wp.static(num_slots),),
-            dtype=ContactStruct,
-        )
-        active_ids = wp.array(
-            ptr=reduction_funcs.get_smem_slots_plus_1(),
-            shape=(wp.static(num_slots + 1),),
-            dtype=wp.int32,
-        )
-
-        # Initialize buffer
-        for i in range(t, wp.static(num_slots), wp.block_dim()):
-            buffer[i].projection = empty_marker
-        if t == 0:
-            active_ids[wp.static(num_slots)] = 0
-        synchronize()
-
-        # Generate and store contacts (every other thread has a contact)
-        has_contact = t % 2 == 0
-        c = _generate_test_contact(t)
-
-        store_reduced_contact(t, has_contact, c, buffer, active_ids, betas_arr, empty_marker)
-
-        # Filter duplicates
-        filter_unique_contacts(t, buffer, active_ids, empty_marker)
-
-        # Write output
-        num_contacts = active_ids[wp.static(num_slots)]
-        if t == 0:
-            out_count[0] = num_contacts
-
-        for i in range(t, num_contacts, wp.block_dim()):
-            contact_id = active_ids[i]
-            out_contacts[i] = buffer[contact_id]
-
-    return reduction_test_kernel
-
-
-def test_reduction_functions_initialization(test, device):
-    """Test that ContactReductionFunctions initializes correctly."""
-    funcs = ContactReductionFunctions(betas=(10.0, 1000000.0))
-
-    test.assertEqual(funcs.num_betas, 2)
-    test.assertEqual(funcs.betas, (10.0, 1000000.0))
-    # 20 + (20 bins * 6 directions * 2 betas) = 260
-    test.assertEqual(funcs.num_reduction_slots, 260)
-
-
-def test_reduction_functions_single_beta(test, device):
-    """Test ContactReductionFunctions with single beta value."""
-    funcs = ContactReductionFunctions(betas=(100.0,))
-
-    test.assertEqual(funcs.num_betas, 1)
-    # 20 + (20 bins * 6 directions * 1 beta) = 140
-    test.assertEqual(funcs.num_reduction_slots, 140)
-
-
-def test_contact_reduction_produces_valid_output(test, device):
-    """Test that contact reduction kernel produces valid output."""
-    reduction_funcs = ContactReductionFunctions(betas=(10.0, 1000000.0))
-    num_slots = reduction_funcs.num_reduction_slots
-
-    # Create test kernel
-    kernel = _create_reduction_test_kernel(reduction_funcs)
-
-    # Allocate arrays on GPU
-    out_contacts = wp.zeros(num_slots, dtype=ContactStruct, device=device)
-    out_count = wp.zeros(1, dtype=int, device=device)
-    betas_arr = reduction_funcs.create_betas_array(device=device)
-
-    # Launch kernel with tiled launch (for shared memory)
-    wp.launch_tiled(
-        kernel=kernel,
-        dim=1,
-        inputs=[out_contacts, out_count, betas_arr],
-        block_dim=128,
-        device=device,
-    )
-    wp.synchronize_device(device)
-
-    # Verify output
-    count = out_count.numpy()[0]
-    test.assertGreater(count, 0, "No contacts were reduced")
-    test.assertLessEqual(count, num_slots, "Too many contacts")
-
-    # Verify contact data is valid
-    contacts = out_contacts.numpy()
-    for i in range(count):
-        c = contacts[i]
-        # Projection should be set (not the empty marker)
-        test.assertGreater(c["projection"], -1e9, f"Contact {i} has invalid projection")
-        # Normal should be unit-ish (we set it to (0,1,0))
-        normal = c["normal"]
-        test.assertAlmostEqual(normal[1], 1.0, places=5)
-
-
-def test_contact_reduction_reduces_count(test, device):
-    """Test that contact reduction reduces the number of contacts."""
-    reduction_funcs = ContactReductionFunctions(betas=(10.0,))
-    num_slots = reduction_funcs.num_reduction_slots
-
-    kernel = _create_reduction_test_kernel(reduction_funcs)
-
-    out_contacts = wp.zeros(num_slots, dtype=ContactStruct, device=device)
-    out_count = wp.zeros(1, dtype=int, device=device)
-    betas_arr = reduction_funcs.create_betas_array(device=device)
-
-    wp.launch_tiled(
-        kernel=kernel,
-        dim=1,
-        inputs=[out_contacts, out_count, betas_arr],
-        block_dim=128,
-        device=device,
-    )
-    wp.synchronize_device(device)
-
-    count = out_count.numpy()[0]
-
-    # With 64 active contacts (128 threads, every other one active),
-    # reduction should produce fewer contacts due to keeping only best contact per (bin, direction) slot
-    test.assertGreater(count, 0, "Should have at least one contact")
-    test.assertLess(count, 64, "Reduction should reduce contact count")
-
-
-# =============================================================================
 # Test registration
 # =============================================================================
 
 devices = get_test_devices()
-cuda_devices = get_cuda_test_devices()
 
 # Register tests that work on all devices (CPU and CUDA)
 for device in devices:
@@ -380,33 +215,6 @@ for device in devices:
         TestContactReduction,
         "test_get_slot_matches_best_face_normal",
         test_get_slot_matches_best_face_normal,
-        devices=[device],
-    )
-
-# ContactReductionFunctions tests (CUDA only - uses shared memory)
-for device in cuda_devices:
-    add_function_test(
-        TestContactReduction,
-        "test_reduction_functions_initialization",
-        test_reduction_functions_initialization,
-        devices=[device],
-    )
-    add_function_test(
-        TestContactReduction,
-        "test_reduction_functions_single_beta",
-        test_reduction_functions_single_beta,
-        devices=[device],
-    )
-    add_function_test(
-        TestContactReduction,
-        "test_contact_reduction_produces_valid_output",
-        test_contact_reduction_produces_valid_output,
-        devices=[device],
-    )
-    add_function_test(
-        TestContactReduction,
-        "test_contact_reduction_reduces_count",
-        test_contact_reduction_reduces_count,
         devices=[device],
     )
 
