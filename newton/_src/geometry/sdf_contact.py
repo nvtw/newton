@@ -690,52 +690,14 @@ def mesh_sdf_contacts_to_reducer_kernel(
     """Process mesh-mesh pairs using SDF and store contacts in GlobalContactReducer.
 
     Uses shared memory to batch interesting triangles (midphase culling) before
-    processing them. Each block handles one mesh-mesh pair, with threads cooperatively
-    identifying and processing triangles. Contacts are written to the reducer buffer.
+    processing them. Each block handles mesh-mesh pairs via grid stride loop, with threads
+    cooperatively identifying and processing triangles. Contacts are written to the reducer buffer.
     """
     block_id, t = wp.tid()
 
     num_pairs = shape_pairs_mesh_mesh_count[0]
-    if block_id >= num_pairs:
-        return
 
-    pair = shape_pairs_mesh_mesh[block_id]
-    mesh_shape_a = pair[0]
-    mesh_shape_b = pair[1]
-
-    # Get mesh and SDF IDs
-    mesh_id_a = shape_source[mesh_shape_a]
-    mesh_id_b = shape_source[mesh_shape_b]
-
-    # Skip if either mesh is invalid
-    if mesh_id_a == wp.uint64(0) or mesh_id_b == wp.uint64(0):
-        return
-
-    # Get SDF data for both shapes
-    sdf_data_a = shape_sdf_data[mesh_shape_a]
-    sdf_data_b = shape_sdf_data[mesh_shape_b]
-
-    # Determine if we should use BVH (mesh queries) instead of SDF for each shape
-    use_bvh_for_sdf_a = sdf_data_a.sparse_sdf_ptr == wp.uint64(0)
-    use_bvh_for_sdf_b = sdf_data_b.sparse_sdf_ptr == wp.uint64(0)
-
-    # Get mesh scales and transforms
-    scale_data_a = shape_data[mesh_shape_a]
-    scale_data_b = shape_data[mesh_shape_b]
-    mesh_scale_a = wp.vec3(scale_data_a[0], scale_data_a[1], scale_data_a[2])
-    mesh_scale_b = wp.vec3(scale_data_b[0], scale_data_b[1], scale_data_b[2])
-
-    X_mesh_a_ws = shape_transform[mesh_shape_a]
-    X_mesh_b_ws = shape_transform[mesh_shape_b]
-
-    # Get thickness values
-    thickness_a = scale_data_a[3]
-    thickness_b = scale_data_b[3]
-
-    # Use per-geometry cutoff for contact detection
-    margin = shape_contact_margin[mesh_shape_a] + shape_contact_margin[mesh_shape_b]
-
-    # Initialize shared memory buffer for triangle selection
+    # Initialize shared memory buffer for triangle selection (reused across pairs)
     # Buffer layout: [0..block_dim-1] = triangle indices, [block_dim] = count, [block_dim+1] = progress
     tri_capacity = wp.block_dim()
     selected_triangles = wp.array(
@@ -744,130 +706,168 @@ def mesh_sdf_contacts_to_reducer_kernel(
         dtype=wp.int32,
     )
 
-    # Test both directions: mesh A against SDF B, and mesh B against SDF A
-    for mode in range(2):
-        # Initialize/reset triangle buffer for this mode
-        synchronize()
-        if t == 0:
-            selected_triangles[tri_capacity] = 0  # Count of triangles in buffer
-            selected_triangles[tri_capacity + 1] = 0  # Progress counter
-        synchronize()
+    # Grid stride loop to handle more pairs than available blocks
+    for pair_idx in range(block_id, num_pairs, total_num_blocks):
+        pair = shape_pairs_mesh_mesh[pair_idx]
+        mesh_shape_a = pair[0]
+        mesh_shape_b = pair[1]
 
-        # Set up mode-specific variables
-        sdf_data = SDFData()
-        use_bvh_for_sdf = False
-        sdf_scale = wp.vec3(1.0, 1.0, 1.0)
+        # Get mesh and SDF IDs
+        mesh_id_a = shape_source[mesh_shape_a]
+        mesh_id_b = shape_source[mesh_shape_b]
 
-        if mode == 0:
-            use_bvh_for_sdf = use_bvh_for_sdf_b
-            if sdf_data_b.sparse_sdf_ptr == wp.uint64(0) and not use_bvh_for_sdf:
-                continue
+        # Skip if either mesh is invalid
+        if mesh_id_a == wp.uint64(0) or mesh_id_b == wp.uint64(0):
+            continue
 
-            mesh_id = mesh_id_a
-            mesh_scale = mesh_scale_a
-            if not use_bvh_for_sdf:
-                sdf_data = sdf_data_b
-            if sdf_data.scale_baked:
-                sdf_scale = wp.vec3(1.0, 1.0, 1.0)
-            else:
-                sdf_scale = mesh_scale_b
-            sdf_mesh_id = mesh_id_b
-            X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_mesh_b_ws), X_mesh_a_ws)
-            X_sdf_ws = X_mesh_b_ws
-            triangle_mesh_thickness = thickness_a
-        else:
-            use_bvh_for_sdf = use_bvh_for_sdf_a
-            if sdf_data_a.sparse_sdf_ptr == wp.uint64(0) and not use_bvh_for_sdf:
-                continue
+        # Get SDF data for both shapes
+        sdf_data_a = shape_sdf_data[mesh_shape_a]
+        sdf_data_b = shape_sdf_data[mesh_shape_b]
 
-            mesh_id = mesh_id_b
-            mesh_scale = mesh_scale_b
-            if not use_bvh_for_sdf:
-                sdf_data = sdf_data_a
-            if sdf_data.scale_baked:
-                sdf_scale = wp.vec3(1.0, 1.0, 1.0)
-            else:
-                sdf_scale = mesh_scale_a
-            sdf_mesh_id = mesh_id_a
-            X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_mesh_a_ws), X_mesh_b_ws)
-            X_sdf_ws = X_mesh_a_ws
-            triangle_mesh_thickness = thickness_b
+        # Determine if we should use BVH (mesh queries) instead of SDF for each shape
+        use_bvh_for_sdf_a = sdf_data_a.sparse_sdf_ptr == wp.uint64(0)
+        use_bvh_for_sdf_b = sdf_data_b.sparse_sdf_ptr == wp.uint64(0)
 
-        # Precompute inverse scale
-        inv_sdf_scale = wp.cw_div(wp.vec3(1.0, 1.0, 1.0), sdf_scale)
-        min_sdf_scale = wp.min(wp.min(sdf_scale[0], sdf_scale[1]), sdf_scale[2])
+        # Get mesh scales and transforms
+        scale_data_a = shape_data[mesh_shape_a]
+        scale_data_b = shape_data[mesh_shape_b]
+        mesh_scale_a = wp.vec3(scale_data_a[0], scale_data_a[1], scale_data_a[2])
+        mesh_scale_b = wp.vec3(scale_data_b[0], scale_data_b[1], scale_data_b[2])
 
-        contact_threshold = margin + triangle_mesh_thickness
-        contact_threshold_unscaled = contact_threshold / min_sdf_scale
+        X_mesh_a_ws = shape_transform[mesh_shape_a]
+        X_mesh_b_ws = shape_transform[mesh_shape_b]
 
-        num_tris = wp.mesh_get(mesh_id).indices.shape[0] // 3
+        # Get thickness values
+        thickness_a = scale_data_a[3]
+        thickness_b = scale_data_b[3]
 
-        # Process triangles in batches using shared memory
-        while selected_triangles[tri_capacity + 1] < num_tris:
-            # Find interesting triangles (midphase culling)
-            find_interesting_triangles(
-                t,
-                mesh_scale,
-                X_mesh_to_sdf,
-                mesh_id,
-                sdf_data,
-                sdf_mesh_id,
-                selected_triangles,
-                contact_threshold_unscaled,
-                use_bvh_for_sdf,
-                inv_sdf_scale,
-            )
+        # Use per-geometry cutoff for contact detection
+        margin = shape_contact_margin[mesh_shape_a] + shape_contact_margin[mesh_shape_b]
 
-            # Check if this thread has a triangle to process
-            has_contact = t < selected_triangles[tri_capacity]
-            synchronize()
-
-            if has_contact:
-                tri_idx = selected_triangles[t]
-
-                # Get vertices in scaled SDF local space, then convert to unscaled
-                v0_scaled, v1_scaled, v2_scaled = get_triangle_from_mesh(
-                    mesh_id, mesh_scale, X_mesh_to_sdf, tri_idx
-                )
-                v0 = wp.cw_mul(v0_scaled, inv_sdf_scale)
-                v1 = wp.cw_mul(v1_scaled, inv_sdf_scale)
-                v2 = wp.cw_mul(v2_scaled, inv_sdf_scale)
-
-                # Collision detection
-                dist_unscaled, point_unscaled, direction_unscaled = do_triangle_sdf_collision(
-                    sdf_data, sdf_mesh_id, v0, v1, v2, use_bvh_for_sdf
-                )
-
-                # Scale back to world
-                dist, direction = scale_sdf_result_to_world(
-                    dist_unscaled, direction_unscaled, sdf_scale, inv_sdf_scale, min_sdf_scale
-                )
-                point = wp.cw_mul(point_unscaled, sdf_scale)
-
-                if dist < contact_threshold:
-                    point_world = wp.transform_point(X_sdf_ws, point)
-                    direction_world = wp.transform_vector(X_sdf_ws, direction)
-                    direction_len = wp.length(direction_world)
-                    if direction_len > 0.0:
-                        direction_world = direction_world / direction_len
-
-                    if mode == 0:
-                        contact_normal = -direction_world
-                    else:
-                        contact_normal = direction_world
-
-                    # Store contact in reducer buffer
-                    export_contact_to_buffer(
-                        shape_a=mesh_shape_a,
-                        shape_b=mesh_shape_b,
-                        position=point_world,
-                        normal=contact_normal,
-                        depth=dist,
-                        reducer_data=reducer_data,
-                    )
-
-            # Reset buffer for next batch
+        # Test both directions: mesh A against SDF B, and mesh B against SDF A
+        for mode in range(2):
+            # Initialize/reset triangle buffer for this mode
             synchronize()
             if t == 0:
-                selected_triangles[tri_capacity] = 0
+                selected_triangles[tri_capacity] = 0  # Count of triangles in buffer
+                selected_triangles[tri_capacity + 1] = 0  # Progress counter
             synchronize()
+
+            # Set up mode-specific variables
+            sdf_data = SDFData()
+            use_bvh_for_sdf = False
+            sdf_scale = wp.vec3(1.0, 1.0, 1.0)
+
+            if mode == 0:
+                use_bvh_for_sdf = use_bvh_for_sdf_b
+                if sdf_data_b.sparse_sdf_ptr == wp.uint64(0) and not use_bvh_for_sdf:
+                    continue
+
+                mesh_id = mesh_id_a
+                mesh_scale = mesh_scale_a
+                if not use_bvh_for_sdf:
+                    sdf_data = sdf_data_b
+                if sdf_data.scale_baked:
+                    sdf_scale = wp.vec3(1.0, 1.0, 1.0)
+                else:
+                    sdf_scale = mesh_scale_b
+                sdf_mesh_id = mesh_id_b
+                X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_mesh_b_ws), X_mesh_a_ws)
+                X_sdf_ws = X_mesh_b_ws
+                triangle_mesh_thickness = thickness_a
+            else:
+                use_bvh_for_sdf = use_bvh_for_sdf_a
+                if sdf_data_a.sparse_sdf_ptr == wp.uint64(0) and not use_bvh_for_sdf:
+                    continue
+
+                mesh_id = mesh_id_b
+                mesh_scale = mesh_scale_b
+                if not use_bvh_for_sdf:
+                    sdf_data = sdf_data_a
+                if sdf_data.scale_baked:
+                    sdf_scale = wp.vec3(1.0, 1.0, 1.0)
+                else:
+                    sdf_scale = mesh_scale_a
+                sdf_mesh_id = mesh_id_a
+                X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_mesh_a_ws), X_mesh_b_ws)
+                X_sdf_ws = X_mesh_a_ws
+                triangle_mesh_thickness = thickness_b
+
+            # Precompute inverse scale
+            inv_sdf_scale = wp.cw_div(wp.vec3(1.0, 1.0, 1.0), sdf_scale)
+            min_sdf_scale = wp.min(wp.min(sdf_scale[0], sdf_scale[1]), sdf_scale[2])
+
+            contact_threshold = margin + triangle_mesh_thickness
+            contact_threshold_unscaled = contact_threshold / min_sdf_scale
+
+            num_tris = wp.mesh_get(mesh_id).indices.shape[0] // 3
+
+            # Process triangles in batches using shared memory
+            while selected_triangles[tri_capacity + 1] < num_tris:
+                # Find interesting triangles (midphase culling)
+                find_interesting_triangles(
+                    t,
+                    mesh_scale,
+                    X_mesh_to_sdf,
+                    mesh_id,
+                    sdf_data,
+                    sdf_mesh_id,
+                    selected_triangles,
+                    contact_threshold_unscaled,
+                    use_bvh_for_sdf,
+                    inv_sdf_scale,
+                )
+
+                # Check if this thread has a triangle to process
+                has_contact = t < selected_triangles[tri_capacity]
+                synchronize()
+
+                if has_contact:
+                    tri_idx = selected_triangles[t]
+
+                    # Get vertices in scaled SDF local space, then convert to unscaled
+                    v0_scaled, v1_scaled, v2_scaled = get_triangle_from_mesh(
+                        mesh_id, mesh_scale, X_mesh_to_sdf, tri_idx
+                    )
+                    v0 = wp.cw_mul(v0_scaled, inv_sdf_scale)
+                    v1 = wp.cw_mul(v1_scaled, inv_sdf_scale)
+                    v2 = wp.cw_mul(v2_scaled, inv_sdf_scale)
+
+                    # Collision detection
+                    dist_unscaled, point_unscaled, direction_unscaled = do_triangle_sdf_collision(
+                        sdf_data, sdf_mesh_id, v0, v1, v2, use_bvh_for_sdf
+                    )
+
+                    # Scale back to world
+                    dist, direction = scale_sdf_result_to_world(
+                        dist_unscaled, direction_unscaled, sdf_scale, inv_sdf_scale, min_sdf_scale
+                    )
+                    point = wp.cw_mul(point_unscaled, sdf_scale)
+
+                    if dist < contact_threshold:
+                        point_world = wp.transform_point(X_sdf_ws, point)
+                        direction_world = wp.transform_vector(X_sdf_ws, direction)
+                        direction_len = wp.length(direction_world)
+                        if direction_len > 0.0:
+                            direction_world = direction_world / direction_len
+
+                        if mode == 0:
+                            contact_normal = -direction_world
+                        else:
+                            contact_normal = direction_world
+
+                        # Store contact in reducer buffer
+                        export_contact_to_buffer(
+                            shape_a=mesh_shape_a,
+                            shape_b=mesh_shape_b,
+                            position=point_world,
+                            normal=contact_normal,
+                            depth=dist,
+                            reducer_data=reducer_data,
+                        )
+
+                # Reset buffer for next batch
+                synchronize()
+                if t == 0:
+                    selected_triangles[tri_capacity] = 0
+                synchronize()
