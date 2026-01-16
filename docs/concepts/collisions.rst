@@ -700,7 +700,7 @@ For hydroelastic and SDF-based contacts, use :class:`~newton.SDFHydroelasticConf
 
     config = SDFHydroelasticConfig(
         reduce_contacts=True,           # Enable contact reduction
-        betas=(10.0, -0.5),             # Scoring thresholds (default)
+        betas=(0.05, 0.0),              # Depth thresholds (default)
         sticky_contacts=0.0,            # Temporal persistence (0 = disabled)
         normal_matching=True,           # Align reduced normals with aggregate force
         moment_matching=False,          # Match friction moments (experimental)
@@ -710,18 +710,24 @@ For hydroelastic and SDF-based contacts, use :class:`~newton.SDFHydroelasticConf
 
 **Understanding betas:**
 
-The ``betas`` tuple controls how contacts are scored for selection. Each beta value (first element, second element, etc.) produces a separate set of representative contacts per normal bin:
+The ``betas`` tuple defines depth thresholds for contact reduction. Each beta value
+produces a separate set of representative contacts per normal bin. A contact participates
+if its penetration depth exceeds the threshold: ``pen_depth > -beta``.
 
-- **Positive beta** (e.g., ``10.0``): Score = ``spatial_position + depth * beta``. Higher values favor deeper contacts.
-- **Negative beta** (e.g., ``-0.5``): Score = ``spatial_position * depth^(-beta)`` for penetrating contacts.
-  This weighs spatial distribution more heavily for shallow contacts.
+- **Large positive beta** (e.g., ``1000000``): All contacts participate (``pen_depth > -1000000`` is always true).
+- **Zero beta**: Only penetrating contacts participate (``pen_depth > 0``).
+- **Small negative beta** (e.g., ``-0.01``): Only deeply penetrating contacts (at least 1cm) participate.
 
-The default ``(10.0, -0.5)`` provides a balance: one set prioritizes penetration depth,
-another prioritizes spatial coverage. More betas = more contacts retained but better coverage.
+Within each threshold tier, contacts compete using pure spatial scores—the contact
+furthest along each of 6 scan directions (±X, ±Y, ±Z) wins. A dedicated max-depth
+slot also keeps the deepest contact per normal bin regardless of spatial position.
 
-.. note::
-   The beta scoring behavior is subject to refinement. The unified collision pipeline 
-   is under active development and these parameters may change in future releases.
+The default ``(0.05, 0.0)`` keeps:
+
+1. Near-contact spatial extremes (first beta: pen_depth > -0.05, within 5cm of contact)
+2. Penetrating spatial extremes (second beta: pen_depth > 0)
+
+This balances early contact detection with stable penetration handling.
 
 **Other reduction options:**
 
