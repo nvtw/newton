@@ -51,7 +51,7 @@ from ..geometry.contact_reduction_global import (
     export_contact_to_buffer,
 )
 from ..geometry.flags import ShapeFlags
-from ..geometry.sdf_contact import create_mesh_sdf_contacts_to_reducer_kernel
+from ..geometry.sdf_contact import mesh_sdf_contacts_to_reducer_kernel
 from ..geometry.sdf_hydroelastic import SDFHydroelastic
 from ..geometry.sdf_utils import SDFData
 from ..geometry.support_function import (
@@ -707,105 +707,93 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
         )
 
 
-def create_mesh_plane_contacts_to_reducer_kernel():
-    """Create a kernel that processes mesh-plane contacts and stores them in GlobalContactReducer.
+@wp.kernel(enable_backward=False)
+def mesh_plane_contacts_to_reducer_kernel(
+    shape_data: wp.array(dtype=wp.vec4),
+    shape_transform: wp.array(dtype=wp.transform),
+    shape_source: wp.array(dtype=wp.uint64),
+    shape_contact_margin: wp.array(dtype=float),
+    shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
+    shape_pairs_mesh_plane_count: wp.array(dtype=int),
+    reducer_data: GlobalContactReducerData,
+    total_num_threads: int,
+):
+    """Process mesh-plane collisions and store contacts in GlobalContactReducer.
 
-    This kernel processes mesh-plane pairs and stores results in the GlobalContactReducer
-    buffer for subsequent reduction and export.
-
-    Returns:
-        A warp kernel for processing mesh-plane contacts with global reduction.
+    Each thread processes vertices in a strided manner and writes contacts to the reducer buffer.
     """
+    tid = wp.tid()
 
-    @wp.kernel(enable_backward=False)
-    def mesh_plane_contacts_to_reducer_kernel(
-        shape_data: wp.array(dtype=wp.vec4),
-        shape_transform: wp.array(dtype=wp.transform),
-        shape_source: wp.array(dtype=wp.uint64),
-        shape_contact_margin: wp.array(dtype=float),
-        shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
-        shape_pairs_mesh_plane_count: wp.array(dtype=int),
-        reducer_data: GlobalContactReducerData,
-        total_num_threads: int,
-    ):
-        """Process mesh-plane collisions and store contacts in GlobalContactReducer.
+    num_pairs = shape_pairs_mesh_plane_count[0]
 
-        Each thread processes vertices in a strided manner and writes contacts to the reducer buffer.
-        """
-        tid = wp.tid()
+    # Iterate over all mesh-plane pairs
+    for pair_idx in range(num_pairs):
+        pair = shape_pairs_mesh_plane[pair_idx]
+        mesh_shape = pair[0]
+        plane_shape = pair[1]
 
-        num_pairs = shape_pairs_mesh_plane_count[0]
+        # Get mesh data
+        mesh_id = shape_source[mesh_shape]
+        if mesh_id == wp.uint64(0):
+            continue
 
-        # Iterate over all mesh-plane pairs
-        for pair_idx in range(num_pairs):
-            pair = shape_pairs_mesh_plane[pair_idx]
-            mesh_shape = pair[0]
-            plane_shape = pair[1]
+        mesh = wp.mesh_get(mesh_id)
+        num_vertices = mesh.points.shape[0]
 
-            # Get mesh data
-            mesh_id = shape_source[mesh_shape]
-            if mesh_id == wp.uint64(0):
-                continue
+        # Get transforms
+        X_mesh_ws = shape_transform[mesh_shape]
+        X_plane_ws = shape_transform[plane_shape]
+        X_plane_sw = wp.transform_inverse(X_plane_ws)
 
-            mesh = wp.mesh_get(mesh_id)
-            num_vertices = mesh.points.shape[0]
+        # Get plane normal in world space (plane normal is along local +Z)
+        plane_normal = wp.transform_vector(X_plane_ws, wp.vec3(0.0, 0.0, 1.0))
 
-            # Get transforms
-            X_mesh_ws = shape_transform[mesh_shape]
-            X_plane_ws = shape_transform[plane_shape]
-            X_plane_sw = wp.transform_inverse(X_plane_ws)
+        # Get mesh scale
+        scale_data = shape_data[mesh_shape]
+        mesh_scale = wp.vec3(scale_data[0], scale_data[1], scale_data[2])
 
-            # Get plane normal in world space (plane normal is along local +Z)
-            plane_normal = wp.transform_vector(X_plane_ws, wp.vec3(0.0, 0.0, 1.0))
+        # Get thickness values
+        thickness_mesh = shape_data[mesh_shape][3]
+        thickness_plane = shape_data[plane_shape][3]
+        total_thickness = thickness_mesh + thickness_plane
 
-            # Get mesh scale
-            scale_data = shape_data[mesh_shape]
-            mesh_scale = wp.vec3(scale_data[0], scale_data[1], scale_data[2])
+        # Sum margins for consistency
+        margin = shape_contact_margin[mesh_shape] + shape_contact_margin[plane_shape]
 
-            # Get thickness values
-            thickness_mesh = shape_data[mesh_shape][3]
-            thickness_plane = shape_data[plane_shape][3]
-            total_thickness = thickness_mesh + thickness_plane
+        # Contact threshold = margin + thicknesses
+        contact_threshold = margin + total_thickness
 
-            # Sum margins for consistency
-            margin = shape_contact_margin[mesh_shape] + shape_contact_margin[plane_shape]
+        # Strided iteration over mesh vertices
+        for v_idx in range(tid, num_vertices, total_num_threads):
+            # Get vertex position in mesh local space and transform to world space
+            vertex_local = wp.cw_mul(mesh.points[v_idx], mesh_scale)
+            vertex_world = wp.transform_point(X_mesh_ws, vertex_local)
 
-            # Contact threshold = margin + thicknesses
-            contact_threshold = margin + total_thickness
+            # Project vertex onto plane to get closest point
+            vertex_in_plane_space = wp.transform_point(X_plane_sw, vertex_world)
+            point_on_plane_local = wp.vec3(vertex_in_plane_space[0], vertex_in_plane_space[1], 0.0)
+            point_on_plane = wp.transform_point(X_plane_ws, point_on_plane_local)
 
-            # Strided iteration over mesh vertices
-            for v_idx in range(tid, num_vertices, total_num_threads):
-                # Get vertex position in mesh local space and transform to world space
-                vertex_local = wp.cw_mul(mesh.points[v_idx], mesh_scale)
-                vertex_world = wp.transform_point(X_mesh_ws, vertex_local)
+            # Compute distance
+            diff = vertex_world - point_on_plane
+            distance = wp.dot(diff, plane_normal)
 
-                # Project vertex onto plane to get closest point
-                vertex_in_plane_space = wp.transform_point(X_plane_sw, vertex_world)
-                point_on_plane_local = wp.vec3(vertex_in_plane_space[0], vertex_in_plane_space[1], 0.0)
-                point_on_plane = wp.transform_point(X_plane_ws, point_on_plane_local)
+            if distance < contact_threshold:
+                # Contact position is the midpoint between vertex and plane point
+                contact_pos = (vertex_world + point_on_plane) * 0.5
 
-                # Compute distance
-                diff = vertex_world - point_on_plane
-                distance = wp.dot(diff, plane_normal)
+                # Normal points from mesh to plane (negate plane normal since plane normal points up/away)
+                contact_normal = -plane_normal
 
-                if distance < contact_threshold:
-                    # Contact position is the midpoint between vertex and plane point
-                    contact_pos = (vertex_world + point_on_plane) * 0.5
-
-                    # Normal points from mesh to plane (negate plane normal since plane normal points up/away)
-                    contact_normal = -plane_normal
-
-                    # Store contact in reducer buffer
-                    export_contact_to_buffer(
-                        shape_a=mesh_shape,
-                        shape_b=plane_shape,
-                        position=contact_pos,
-                        normal=contact_normal,
-                        depth=distance,
-                        reducer_data=reducer_data,
-                    )
-
-    return mesh_plane_contacts_to_reducer_kernel
+                # Store contact in reducer buffer
+                export_contact_to_buffer(
+                    shape_a=mesh_shape,
+                    shape_b=plane_shape,
+                    position=contact_pos,
+                    normal=contact_normal,
+                    depth=distance,
+                    reducer_data=reducer_data,
+                )
 
 
 class NarrowPhase:
@@ -907,15 +895,13 @@ class NarrowPhase:
             # Global contact reducer for mesh-triangle contacts
             self.global_contact_reducer = GlobalContactReducer(max_triangle_pairs, device=device, num_betas=num_betas)
 
-            # Mesh-SDF contacts reducer and kernel
-            self.mesh_sdf_to_reducer_kernel = create_mesh_sdf_contacts_to_reducer_kernel()
+            # Mesh-SDF contacts reducer (kernel is module-level: mesh_sdf_contacts_to_reducer_kernel)
             # Capacity based on max_triangle_pairs as a conservative estimate for mesh-mesh contacts
             self.global_contact_reducer_mesh_sdf = GlobalContactReducer(
                 max_triangle_pairs, device=device, num_betas=num_betas
             )
 
-            # Mesh-plane contacts reducer and kernel
-            self.mesh_plane_to_reducer_kernel = create_mesh_plane_contacts_to_reducer_kernel()
+            # Mesh-plane contacts reducer (kernel is module-level: mesh_plane_contacts_to_reducer_kernel)
             # Capacity based on max_triangle_pairs since mesh-plane generates one contact per vertex
             # and meshes can have many vertices
             self.global_contact_reducer_mesh_plane = GlobalContactReducer(
@@ -926,9 +912,7 @@ class NarrowPhase:
             self.reduce_buffered_contacts_kernel = None
             self.export_reduced_contacts_kernel = None
             self.global_contact_reducer = None
-            self.mesh_sdf_to_reducer_kernel = None
             self.global_contact_reducer_mesh_sdf = None
-            self.mesh_plane_to_reducer_kernel = None
             self.global_contact_reducer_mesh_plane = None
 
         self.sdf_hydroelastic = sdf_hydroelastic
@@ -1117,7 +1101,7 @@ class NarrowPhase:
             # Collect contacts into the reducer
             reducer_data_mesh_plane = self.global_contact_reducer_mesh_plane.get_data_struct()
             wp.launch(
-                kernel=self.mesh_plane_to_reducer_kernel,
+                kernel=mesh_plane_contacts_to_reducer_kernel,
                 dim=self.total_num_threads,
                 inputs=[
                     shape_data,
@@ -1254,7 +1238,7 @@ class NarrowPhase:
                 # Collect contacts into the reducer
                 reducer_data_mesh_sdf = self.global_contact_reducer_mesh_sdf.get_data_struct()
                 wp.launch_tiled(
-                    kernel=self.mesh_sdf_to_reducer_kernel,
+                    kernel=mesh_sdf_contacts_to_reducer_kernel,
                     dim=(self.num_tile_blocks,),
                     inputs=[
                         shape_data,
