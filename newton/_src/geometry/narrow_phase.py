@@ -438,6 +438,12 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 if num_valid > 0:
                     base_index = wp.atomic_add(writer_data.contact_count, 0, num_valid)
 
+                    # Bounds check: ensure we don't overflow the contact buffer
+                    if base_index + num_valid > writer_data.contact_max:
+                        # Rollback the allocation
+                        wp.atomic_add(writer_data.contact_count, 0, -num_valid)
+                        continue
+
                     # Write first contact if valid
                     if contact_0_valid:
                         contact_data.contact_point_center = contact_pos_0
