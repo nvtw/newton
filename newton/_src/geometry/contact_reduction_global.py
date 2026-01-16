@@ -738,10 +738,10 @@ def create_export_reduced_contacts_kernel(writer_func: Any, values_per_key: int 
                 thickness_a = shape_data[shape_a][3]
                 thickness_b = shape_data[shape_b][3]
 
-                # Use per-shape contact margin (max of both shapes, matching other kernels)
+                # Use sum of per-shape contact margins (matching contact detection kernels)
                 margin_a = shape_contact_margin[shape_a]
                 margin_b = shape_contact_margin[shape_b]
-                margin = wp.max(margin_a, margin_b)
+                margin = margin_a + margin_b
 
                 # Create ContactData struct
                 contact_data = ContactData()
