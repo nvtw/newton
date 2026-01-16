@@ -167,7 +167,7 @@ class Example:
                 iterations=15,
                 ls_iterations=100,
                 ls_parallel=True,
-                impratio=1000.0,
+                impratio=10000.0,
             )
         else:
             raise ValueError(f"Unknown solver type: {self.solver_type}. Choose from 'xpbd' or 'mujoco'.")
@@ -327,7 +327,7 @@ if __name__ == "__main__":
         "--solver",
         type=str,
         choices=["xpbd", "mujoco"],
-        default="mujoco",
+        default="xpbd",
         help="Solver to use: 'xpbd' (Extended Position-Based Dynamics) or 'mujoco' (MuJoCo constraint solver).",
     )
     parser.add_argument(
