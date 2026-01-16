@@ -181,7 +181,7 @@ class Example:
             self.object_body_local = builder.add_body(xform=object_xform, key="object")
             builder.add_shape_capsule(body=self.object_body_local, radius=radius, half_height=length / 2, cfg=pen_cfg)
             self.grasping_offset = [-0.03, 0.0, 0.13]
-            self.place_offset = -0.03
+            self.place_offset = -0.015  # Gripper reaches 1.5cm further into cup
 
         elif self.scene == SceneType.CUBE:
             size = 0.04

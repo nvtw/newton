@@ -1135,10 +1135,10 @@ class NarrowPhase:
         self.reduce_contacts = reduce_contacts
         self.has_meshes = has_meshes
 
-        # Create contact reduction functions only when reduce_contacts is enabled and running on GPU
-        # Contact reduction requires GPU for shared memory operations
+        # Create contact reduction functions only when reduce_contacts is enabled, running on GPU, and has meshes
+        # Contact reduction requires GPU for shared memory operations and is only used for mesh contacts
         is_gpu_device = wp.get_device(device).is_cuda
-        if reduce_contacts and is_gpu_device:
+        if reduce_contacts and is_gpu_device and has_meshes:
             self.contact_reduction_funcs = ContactReductionFunctions(contact_reduction_betas)
             self.num_reduction_slots = self.contact_reduction_funcs.num_reduction_slots
         else:
@@ -1175,20 +1175,27 @@ class NarrowPhase:
         self.primitive_kernel = create_narrow_phase_primitive_kernel(writer_func)
         # GJK/MPR kernel handles remaining convex-convex pairs
         self.narrow_phase_kernel = create_narrow_phase_kernel_gjk_mpr(self.external_aabb, writer_func)
-        self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func)
 
-        # Create mesh-plane and mesh-mesh kernels (contact_reduction_funcs=None disables reduction)
-        self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(
-            writer_func,
-            contact_reduction_funcs=self.contact_reduction_funcs,
-        )
-        self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
-            writer_func,
-            contact_reduction_funcs=self.contact_reduction_funcs,
-        )
+        # Create mesh kernels only when has_meshes=True
+        if has_meshes:
+            self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func)
 
-        # Create global contact reduction kernels for mesh-triangle contacts
-        if self.reduce_contacts:
+            # Create mesh-plane and mesh-mesh kernels (contact_reduction_funcs=None disables reduction)
+            self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(
+                writer_func,
+                contact_reduction_funcs=self.contact_reduction_funcs,
+            )
+            self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
+                writer_func,
+                contact_reduction_funcs=self.contact_reduction_funcs,
+            )
+        else:
+            self.mesh_triangle_contacts_kernel = None
+            self.mesh_plane_contacts_kernel = None
+            self.mesh_mesh_contacts_kernel = None
+
+        # Create global contact reduction kernels for mesh-triangle contacts (only if has_meshes and reduce_contacts)
+        if self.reduce_contacts and has_meshes:
             beta0 = self.betas_tuple[0]
             beta1 = self.betas_tuple[1]
             num_betas = len(self.betas_tuple)
@@ -1214,39 +1221,52 @@ class NarrowPhase:
         # Pre-allocate all intermediate buffers
         with wp.ScopedDevice(device):
             # Consolidated counter array to minimize kernel launches for zeroing
-            # Layout: [gjk_count, mesh_count, triangle_count, mesh_plane_count,
-            #          mesh_plane_vertex_total, mesh_mesh_count, sdf_sdf_count]
-            self._counter_array = wp.zeros(7, dtype=wp.int32, device=device)
-            # Create sliced views for individual counters (no additional allocation)
-            self.gjk_candidate_pairs_count = self._counter_array[0:1]
-            self.shape_pairs_mesh_count = self._counter_array[1:2]
-            self.triangle_pairs_count = self._counter_array[2:3]
-            self.shape_pairs_mesh_plane_count = self._counter_array[3:4]
-            self.mesh_plane_vertex_total_count = self._counter_array[4:5]
-            self.shape_pairs_mesh_mesh_count = self._counter_array[5:6]
-            self.shape_pairs_sdf_sdf_count = self._counter_array[6:7]
+            # Layout depends on has_meshes flag to avoid allocating unused counters
+            if has_meshes:
+                # Full layout: [gjk_count, mesh_count, triangle_count, mesh_plane_count,
+                #               mesh_plane_vertex_total, mesh_mesh_count, sdf_sdf_count]
+                self._counter_array = wp.zeros(7, dtype=wp.int32, device=device)
+                self.gjk_candidate_pairs_count = self._counter_array[0:1]
+                self.shape_pairs_mesh_count = self._counter_array[1:2]
+                self.triangle_pairs_count = self._counter_array[2:3]
+                self.shape_pairs_mesh_plane_count = self._counter_array[3:4]
+                self.mesh_plane_vertex_total_count = self._counter_array[4:5]
+                self.shape_pairs_mesh_mesh_count = self._counter_array[5:6]
+                self.shape_pairs_sdf_sdf_count = self._counter_array[6:7]
+            else:
+                # Minimal layout: [gjk_count, sdf_sdf_count]
+                self._counter_array = wp.zeros(2, dtype=wp.int32, device=device)
+                self.gjk_candidate_pairs_count = self._counter_array[0:1]
+                self.shape_pairs_sdf_sdf_count = self._counter_array[1:2]
+                # Set mesh counters to None when not allocated
+                self.shape_pairs_mesh_count = None
+                self.triangle_pairs_count = None
+                self.shape_pairs_mesh_plane_count = None
+                self.mesh_plane_vertex_total_count = None
+                self.shape_pairs_mesh_mesh_count = None
 
             # Buffers for GJK/MPR candidate pairs (pairs that couldn't be handled analytically)
             self.gjk_candidate_pairs = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
 
-            # Buffers for mesh collision handling
-            self.shape_pairs_mesh = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
-
-            # Buffers for triangle pairs
-            self.triangle_pairs = wp.zeros(max_triangle_pairs, dtype=wp.vec3i, device=device)
-
-            # Buffers for mesh-plane collision handling
-            self.shape_pairs_mesh_plane = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
-            self.shape_pairs_mesh_plane_cumsum = wp.zeros(max_candidate_pairs, dtype=wp.int32, device=device)
-
-            # Buffers for mesh-mesh collision handling
-            self.shape_pairs_mesh_mesh = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
+            # Buffers for mesh collision handling (only allocate if has_meshes=True)
+            if has_meshes:
+                self.shape_pairs_mesh = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
+                self.triangle_pairs = wp.zeros(max_triangle_pairs, dtype=wp.vec3i, device=device)
+                self.shape_pairs_mesh_plane = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
+                self.shape_pairs_mesh_plane_cumsum = wp.zeros(max_candidate_pairs, dtype=wp.int32, device=device)
+                self.shape_pairs_mesh_mesh = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
+                # Betas array for contact reduction (using the configured contact_reduction_betas tuple)
+                self.betas = create_betas_array(betas=self.betas_tuple, device=device)
+            else:
+                self.shape_pairs_mesh = None
+                self.triangle_pairs = None
+                self.shape_pairs_mesh_plane = None
+                self.shape_pairs_mesh_plane_cumsum = None
+                self.shape_pairs_mesh_mesh = None
+                self.betas = None
 
             # None values for when optional features are disabled
             self.empty_tangent = None
-
-            # Betas array for contact reduction (using the configured contact_reduction_betas tuple)
-            self.betas = create_betas_array(betas=self.betas_tuple, device=device)
 
             if sdf_hydroelastic is not None:
                 self.shape_pairs_sdf_sdf = wp.zeros(sdf_hydroelastic.max_num_shape_pairs, dtype=wp.vec2i, device=device)
