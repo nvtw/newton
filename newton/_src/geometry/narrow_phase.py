@@ -1097,9 +1097,9 @@ class NarrowPhase:
             self.global_contact_reducer_mesh_plane.clear_active()
 
             # Collect contacts into the reducer
-            # Launch with 2D grid: (num_blocks,) blocks x block_dim threads per block
+            # Launch with tiled kernel for 2D thread indexing: (block_id, thread_id)
             reducer_data_mesh_plane = self.global_contact_reducer_mesh_plane.get_data_struct()
-            wp.launch(
+            wp.launch_tiled(
                 kernel=mesh_plane_contacts_to_reducer_kernel,
                 dim=(self.num_tile_blocks,),
                 inputs=[
