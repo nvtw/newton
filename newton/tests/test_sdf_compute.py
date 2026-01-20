@@ -114,20 +114,46 @@ def create_sphere_mesh(radius: float, subdivisions: int = 2) -> Mesh:
 
     # Icosahedron vertices (normalized and scaled by radius)
     verts_list = [
-        [-1, phi, 0], [1, phi, 0], [-1, -phi, 0], [1, -phi, 0],
-        [0, -1, phi], [0, 1, phi], [0, -1, -phi], [0, 1, -phi],
-        [phi, 0, -1], [phi, 0, 1], [-phi, 0, -1], [-phi, 0, 1],
+        [-1, phi, 0],
+        [1, phi, 0],
+        [-1, -phi, 0],
+        [1, -phi, 0],
+        [0, -1, phi],
+        [0, 1, phi],
+        [0, -1, -phi],
+        [0, 1, -phi],
+        [phi, 0, -1],
+        [phi, 0, 1],
+        [-phi, 0, -1],
+        [-phi, 0, 1],
     ]
     norm_factor = np.linalg.norm(verts_list[0])
-    verts_list = [[v[0] / norm_factor * radius, v[1] / norm_factor * radius, v[2] / norm_factor * radius]
-                  for v in verts_list]
+    verts_list = [
+        [v[0] / norm_factor * radius, v[1] / norm_factor * radius, v[2] / norm_factor * radius] for v in verts_list
+    ]
 
     # Icosahedron faces (CCW winding for outward normals)
     faces = [
-        [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
-        [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
-        [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
-        [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
+        [0, 11, 5],
+        [0, 5, 1],
+        [0, 1, 7],
+        [0, 7, 10],
+        [0, 10, 11],
+        [1, 5, 9],
+        [5, 11, 4],
+        [11, 10, 2],
+        [10, 7, 6],
+        [7, 1, 8],
+        [3, 9, 4],
+        [3, 4, 2],
+        [3, 2, 6],
+        [3, 6, 8],
+        [3, 8, 9],
+        [4, 9, 5],
+        [2, 4, 11],
+        [6, 2, 10],
+        [8, 6, 7],
+        [9, 8, 1],
     ]
 
     # Subdivide
@@ -135,16 +161,16 @@ def create_sphere_mesh(radius: float, subdivisions: int = 2) -> Mesh:
         new_faces = []
         edge_midpoints = {}
 
-        def get_midpoint(i0, i1):
+        def get_midpoint(i0, i1, _edge_midpoints=edge_midpoints):
             key = (min(i0, i1), max(i0, i1))
-            if key not in edge_midpoints:
+            if key not in _edge_midpoints:
                 v0, v1 = verts_list[i0], verts_list[i1]
                 mid = [(v0[0] + v1[0]) / 2, (v0[1] + v1[1]) / 2, (v0[2] + v1[2]) / 2]
-                length = np.sqrt(mid[0]**2 + mid[1]**2 + mid[2]**2)
+                length = np.sqrt(mid[0] ** 2 + mid[1] ** 2 + mid[2] ** 2)
                 mid = [mid[0] / length * radius, mid[1] / length * radius, mid[2] / length * radius]
-                edge_midpoints[key] = len(verts_list)
+                _edge_midpoints[key] = len(verts_list)
                 verts_list.append(mid)
-            return edge_midpoints[key]
+            return _edge_midpoints[key]
 
         for f in faces:
             a = get_midpoint(f[0], f[1])
@@ -620,34 +646,34 @@ class TestComputeSDF(unittest.TestCase):
         self.assertIsNotNone(coarse_volume)
 
         # Test points inside the sphere (should be negative)
-        inside_points = np.array([
-            [0.0, 0.0, 0.0],      # Center
-            [0.1, 0.0, 0.0],      # Slightly off center
-            [0.0, 0.2, 0.0],      # Another inside point
-            [0.1, 0.1, 0.1],      # Inside diagonal
-        ], dtype=np.float32)
+        inside_points = np.array(
+            [
+                [0.0, 0.0, 0.0],  # Center
+                [0.1, 0.0, 0.0],  # Slightly off center
+                [0.0, 0.2, 0.0],  # Another inside point
+                [0.1, 0.1, 0.1],  # Inside diagonal
+            ],
+            dtype=np.float32,
+        )
 
         inside_values = sample_sdf_at_points(coarse_volume, inside_points)
         for i, (point, value) in enumerate(zip(inside_points, inside_values, strict=False)):
-            self.assertLess(
-                value, 0.0,
-                f"Point {i} at {point} should be inside (negative), got {value}"
-            )
+            self.assertLess(value, 0.0, f"Point {i} at {point} should be inside (negative), got {value}")
 
         # Test points near but inside sphere surface (should be negative)
         # The SDF extent is ~1.1, so stay well within bounds
-        near_inside_points = np.array([
-            [radius - 0.05, 0.0, 0.0],   # Just inside +X
-            [0.0, radius - 0.05, 0.0],   # Just inside +Y
-            [0.0, 0.0, radius - 0.05],   # Just inside +Z
-        ], dtype=np.float32)
+        near_inside_points = np.array(
+            [
+                [radius - 0.05, 0.0, 0.0],  # Just inside +X
+                [0.0, radius - 0.05, 0.0],  # Just inside +Y
+                [0.0, 0.0, radius - 0.05],  # Just inside +Z
+            ],
+            dtype=np.float32,
+        )
 
         near_inside_values = sample_sdf_at_points(coarse_volume, near_inside_points)
         for i, (point, value) in enumerate(zip(near_inside_points, near_inside_values, strict=False)):
-            self.assertLess(
-                value, 0.0,
-                f"Point {i} at {point} should be inside (negative), got {value}"
-            )
+            self.assertLess(value, 0.0, f"Point {i} at {point} should be inside (negative), got {value}")
 
 
 @unittest.skipUnless(_cuda_available, "wp.Volume requires CUDA device")
