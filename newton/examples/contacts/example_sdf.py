@@ -93,7 +93,8 @@ class Example:
         self.fps = 120
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 5
+        # Use more substeps for gears scene to improve stability
+        self.sim_substeps = 50 if scene == "gears" else 5
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.num_worlds = num_worlds
@@ -169,7 +170,7 @@ class Example:
                 iterations=15,
                 ls_iterations=100,
                 ls_parallel=True,
-                impratio=1000.0,
+                impratio=1.0,
             )
         else:
             raise ValueError(f"Unknown solver type: {self.solver_type}. Choose from 'xpbd' or 'mujoco'.")
