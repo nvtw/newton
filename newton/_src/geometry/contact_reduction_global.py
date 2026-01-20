@@ -741,7 +741,7 @@ def create_export_reduced_contacts_kernel(writer_func: Any, values_per_key: int 
                 # Use per-shape contact margin (max of both shapes, matching other kernels)
                 margin_a = shape_contact_margin[shape_a]
                 margin_b = shape_contact_margin[shape_b]
-                margin = wp.max(margin_a, margin_b)
+                margin = margin_a + margin_b
 
                 # Create ContactData struct
                 contact_data = ContactData()
@@ -848,7 +848,7 @@ def create_mesh_triangle_contacts_to_reducer_kernel(beta0: float, beta1: float):
             # Use per-shape contact margin
             margin_a = shape_contact_margin[shape_a]
             margin_b = shape_contact_margin[shape_b]
-            margin = wp.max(margin_a, margin_b)
+            margin = margin_a + margin_b
 
             # Compute and write contacts using GJK/MPR
             wp.static(create_compute_gjk_mpr_contacts(write_to_reducer_with_betas))(
