@@ -675,6 +675,25 @@ class TestComputeSDF(unittest.TestCase):
         for i, (point, value) in enumerate(zip(near_inside_points, near_inside_values, strict=False)):
             self.assertLess(value, 0.0, f"Point {i} at {point} should be inside (negative), got {value}")
 
+        # Test points just outside sphere surface (should be positive)
+        # Use small offset (0.02) to stay well within the narrow band and volume extent
+        outside_offset = 0.02
+        outside_points = np.array(
+            [
+                [radius + outside_offset, 0.0, 0.0],  # Just outside +X
+                [0.0, radius + outside_offset, 0.0],  # Just outside +Y
+                [0.0, 0.0, radius + outside_offset],  # Just outside +Z
+                [-(radius + outside_offset), 0.0, 0.0],  # Just outside -X
+                [0.0, -(radius + outside_offset), 0.0],  # Just outside -Y
+                [0.0, 0.0, -(radius + outside_offset)],  # Just outside -Z
+            ],
+            dtype=np.float32,
+        )
+
+        outside_values = sample_sdf_at_points(coarse_volume, outside_points)
+        for i, (point, value) in enumerate(zip(outside_points, outside_values, strict=False)):
+            self.assertGreater(value, 0.0, f"Point {i} at {point} should be outside (positive), got {value}")
+
 
 @unittest.skipUnless(_cuda_available, "wp.Volume requires CUDA device")
 class TestComputeSDFGridSampling(unittest.TestCase):
