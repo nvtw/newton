@@ -15,6 +15,8 @@
 
 import warp as wp
 
+from newton._src.core.types import MAXVAL
+
 from ..geometry.contact_reduction import (
     create_shared_memory_pointer_block_dim_func,
     synchronize,
@@ -200,7 +202,7 @@ def sample_sdf_extrapolated(
         sparse_idx = wp.volume_world_to_index(sdf_data.sparse_sdf_ptr, sdf_pos)
         sparse_dist = wp.volume_sample_f(sdf_data.sparse_sdf_ptr, sparse_idx, wp.Volume.LINEAR)
 
-        if sparse_dist >= wp.inf or wp.isnan(sparse_dist):
+        if sparse_dist >= wp.static(MAXVAL * 0.99) or wp.isnan(sparse_dist):
             # Fallback to coarse grid when sparse sample is diluted by background
             coarse_idx = wp.volume_world_to_index(sdf_data.coarse_sdf_ptr, sdf_pos)
             return wp.volume_sample_f(sdf_data.coarse_sdf_ptr, coarse_idx, wp.Volume.LINEAR)
@@ -208,7 +210,7 @@ def sample_sdf_extrapolated(
             return sparse_dist
     else:
         # Point is outside extent - project to boundary
-        eps = 1e-2 * sdf_data.sparse_voxel_size  # slightly shrink to avoid sampling NaN
+        eps = 1e-2 * sdf_data.sparse_voxel_size  # slightly shrink to avoid sampling background
         clamped_pos = wp.min(wp.max(sdf_pos, lower + eps), upper - eps)
         dist_to_boundary = wp.length(sdf_pos - clamped_pos)
 
@@ -260,7 +262,7 @@ def sample_sdf_grad_extrapolated(
         sparse_idx = wp.volume_world_to_index(sdf_data.sparse_sdf_ptr, sdf_pos)
         sparse_dist = wp.volume_sample_grad_f(sdf_data.sparse_sdf_ptr, sparse_idx, wp.Volume.LINEAR, gradient)
 
-        if sparse_dist >= wp.inf or wp.isnan(sparse_dist):
+        if sparse_dist >= wp.static(MAXVAL * 0.99) or wp.isnan(sparse_dist):
             # Fallback to coarse grid when sparse sample is diluted by background
             coarse_idx = wp.volume_world_to_index(sdf_data.coarse_sdf_ptr, sdf_pos)
             coarse_dist = wp.volume_sample_grad_f(sdf_data.coarse_sdf_ptr, coarse_idx, wp.Volume.LINEAR, gradient)
