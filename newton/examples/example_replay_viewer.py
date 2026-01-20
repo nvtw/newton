@@ -30,6 +30,7 @@
 ###########################################################################
 
 import os
+import traceback
 
 import newton
 import newton.examples
@@ -205,8 +206,6 @@ class ReplayUI:
             self.status_color = (1.0, 0.3, 0.3, 1.0)  # Red
             print(f"[ReplayUI] File not found: {file_path}")
         except Exception as e:
-            import traceback
-
             self.status_message = f"Error loading recording: {str(e)[:50]}..."
             self.status_color = (1.0, 0.3, 0.3, 1.0)  # Red
             print(f"[ReplayUI] Error loading recording: {file_path}")

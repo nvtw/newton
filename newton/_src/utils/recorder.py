@@ -22,6 +22,7 @@ from typing import Generic, TypeVar
 
 import numpy as np
 import warp as wp
+from warp._src import types as warp_types
 
 from ..geometry import Mesh
 from ..sim import Model, State
@@ -508,8 +509,6 @@ def _serialize_warp_dtype(dtype) -> dict:
     Returns:
         A dict containing dtype info that can be used to reconstruct the type.
     """
-    from warp._src import types as warp_types
-
     dtype_str = str(dtype)
     dtype_name = dtype.__name__
 
