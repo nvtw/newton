@@ -818,6 +818,9 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
         shape_transform: wp.array(dtype=wp.transform),
         shape_source: wp.array(dtype=wp.uint64),
         shape_contact_margin: wp.array(dtype=float),
+        _shape_local_aabb_lower: wp.array(dtype=wp.vec3),  # Unused but kept for API compatibility
+        _shape_local_aabb_upper: wp.array(dtype=wp.vec3),  # Unused but kept for API compatibility
+        _shape_voxel_resolution: wp.array(dtype=wp.vec3i),  # Unused but kept for API compatibility
         shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_plane_count: wp.array(dtype=int),
         _betas: wp.array(dtype=wp.float32),  # Unused but kept for API compatibility

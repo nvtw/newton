@@ -326,7 +326,7 @@ def test_contact_reduction_produces_valid_output(test, device):
 
 def test_contact_reduction_reduces_count(test, device):
     """Test that contact reduction reduces the number of contacts."""
-    reduction_funcs = ContactReductionFunctions(betas=(10.0,))
+    reduction_funcs = ContactReductionFunctions()
     num_slots = reduction_funcs.num_reduction_slots
 
     kernel = _create_reduction_test_kernel(reduction_funcs)
@@ -395,8 +395,8 @@ for device in cuda_devices:
     )
     add_function_test(
         TestContactReduction,
-        "test_reduction_functions_single_beta",
-        test_reduction_functions_single_beta,
+        "test_reduction_functions_slot_count",
+        test_reduction_functions_slot_count,
         devices=[device],
     )
     add_function_test(
