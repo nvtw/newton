@@ -551,6 +551,8 @@ class ContactReductionFunctions:
                 keep_flags[i] = 0
             synchronize()
 
+            # Phase 2: Duplicate detection within each bin (20 threads active)
+            # Each bin is processed by one thread to find unique contacts
             if thread_id < wp.static(NUM_NORMAL_BINS):
                 bin_id = thread_id
                 base_key = bin_id * slots_per_bin
@@ -565,15 +567,18 @@ class ContactReductionFunctions:
                                 is_dup = 1
                         if is_dup == 0:
                             keep_flags[key_i] = 1
+
+            # Reset counter for parallel compaction
+            if thread_id == 0:
+                active_ids[num_slots] = 0
             synchronize()
 
-            if thread_id == 0:
-                write_idx = int(0)
-                for key in range(num_slots):
-                    if keep_flags[key] == 1:
-                        active_ids[write_idx] = key
-                        write_idx += 1
-                active_ids[num_slots] = write_idx
+            # Phase 3: Parallel compaction - all threads participate
+            # Each thread checks its subset of slots and uses atomic_add for write index
+            for key in range(thread_id, num_slots, wp.block_dim()):
+                if keep_flags[key] == 1:
+                    write_idx = wp.atomic_add(active_ids, num_slots, 1)
+                    active_ids[write_idx] = key
             synchronize()
 
         return filter_unique_contacts
