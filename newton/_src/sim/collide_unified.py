@@ -709,6 +709,9 @@ class CollisionPipelineUnified:
             shape_contact_margin=model.shape_contact_margin,
             shape_collision_radius=model.shape_collision_radius,
             shape_flags=model.shape_flags,
+            shape_local_aabb_lower=model.shape_local_aabb_lower,
+            shape_local_aabb_upper=model.shape_local_aabb_upper,
+            shape_voxel_resolution=model.shape_voxel_resolution,
             writer_data=writer_data,
             device=self.device,
         )

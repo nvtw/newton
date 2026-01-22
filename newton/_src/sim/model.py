@@ -235,6 +235,14 @@ class Model:
         self.shape_sdf_coarse_volume = []
         """List of coarse SDF volume references for mesh shapes, shape [shape_count]. None for non-mesh shapes. Empty if there are no colliding meshes. Kept for reference counting."""
 
+        # Local AABB and voxel grid for contact reduction
+        self.shape_local_aabb_lower = None
+        """Local-space AABB lower bound for each shape, shape [shape_count, 3], float. Used for voxel-based contact reduction."""
+        self.shape_local_aabb_upper = None
+        """Local-space AABB upper bound for each shape, shape [shape_count, 3], float. Used for voxel-based contact reduction."""
+        self.shape_voxel_resolution = None
+        """Voxel grid resolution (nx, ny, nz) for each shape, shape [shape_count, 3], int. Used for voxel-based contact reduction."""
+
         self.spring_indices = None
         """Particle spring indices, shape [spring_count*2], int."""
         self.spring_rest_length = None

@@ -233,6 +233,7 @@ def get_spatial_direction_2d(dir_idx: int) -> wp.vec2:
 
 NUM_SPATIAL_DIRECTIONS = 6  # Evenly-spaced 2D directions (60 degrees apart)
 NUM_NORMAL_BINS = 20  # Icosahedron faces
+NUM_VOXEL_DEPTH_SLOTS = 120  # Voxel-based depth slots (replaces normal-binned max-depth)
 
 
 def compute_num_reduction_slots(num_betas: int) -> int:
@@ -242,10 +243,51 @@ def compute_num_reduction_slots(num_betas: int) -> int:
         num_betas: Number of beta values
 
     Returns:
-        Total number of reduction slots (20 bins * (6 directions * num_betas + 1))
-        The +1 is for the max depth slot per bin.
+        Total number of reduction slots:
+        - 20 normal bins * 6 spatial directions * num_betas (spatial extremes)
+        - + 120 voxel-based depth slots (deepest contact per voxel region)
     """
-    return NUM_NORMAL_BINS * (NUM_SPATIAL_DIRECTIONS * num_betas + 1)
+    return NUM_NORMAL_BINS * NUM_SPATIAL_DIRECTIONS * num_betas + NUM_VOXEL_DEPTH_SLOTS
+
+
+@wp.func
+def compute_voxel_index(
+    pos_local: wp.vec3,
+    aabb_lower: wp.vec3,
+    aabb_upper: wp.vec3,
+    resolution: wp.vec3i,
+) -> int:
+    """Compute voxel index for a position in local space.
+
+    Args:
+        pos_local: Position in mesh local space
+        aabb_lower: Local AABB lower bound
+        aabb_upper: Local AABB upper bound
+        resolution: Voxel grid resolution (nx, ny, nz)
+
+    Returns:
+        Linear voxel index in [0, nx*ny*nz)
+    """
+    size = aabb_upper - aabb_lower
+    # Normalize position to [0, 1]
+    rel = wp.vec3(0.0, 0.0, 0.0)
+    if size[0] > 1e-6:
+        rel = wp.vec3((pos_local[0] - aabb_lower[0]) / size[0], rel[1], rel[2])
+    if size[1] > 1e-6:
+        rel = wp.vec3(rel[0], (pos_local[1] - aabb_lower[1]) / size[1], rel[2])
+    if size[2] > 1e-6:
+        rel = wp.vec3(rel[0], rel[1], (pos_local[2] - aabb_lower[2]) / size[2])
+
+    # Clamp to [0, 1) and map to voxel indices
+    nx = resolution[0]
+    ny = resolution[1]
+    nz = resolution[2]
+
+    ix = wp.clamp(int(rel[0] * float(nx)), 0, nx - 1)
+    iy = wp.clamp(int(rel[1] * float(ny)), 0, ny - 1)
+    iz = wp.clamp(int(rel[2] * float(nz)), 0, nz - 1)
+
+    return ix + iy * nx + iz * nx * ny
 
 
 def create_betas_array(betas: tuple = (10.0,), device=None) -> wp.array:
@@ -359,10 +401,11 @@ class ContactReductionFunctions:
     **Algorithm Overview:**
 
     1. Contacts are binned by normal direction (20 bins based on icosahedron faces)
-    2. Within each bin, contacts compete for slots using a scoring function
-    3. Winners are determined via atomic operations in shared memory
+    2. Within each normal bin, contacts compete for spatial extreme slots
+    3. Additionally, contacts compete for voxel-based depth slots (120 slots)
+    4. Winners are determined via atomic operations in shared memory
 
-    **Scoring Function:**
+    **Spatial Extreme Slots (per normal bin):**
 
     Contacts are filtered by depth threshold, then compete with pure spatial score::
 
@@ -371,9 +414,16 @@ class ContactReductionFunctions:
 
     Where:
         - ``position``: Contact point in centered world coordinates
-        - ``scan_direction``: One of 6 spatial probing directions (±X, ±Y, ±Z)
+        - ``scan_direction``: One of 6 spatial probing directions (60° apart)
         - ``depth``: Signed penetration depth (negative = penetrating)
         - ``beta``: Depth threshold controlling which contacts participate
+
+    **Voxel-Based Depth Slots (120 slots):**
+
+    Each mesh is divided into a virtual voxel grid (up to 120 voxels). Each voxel
+    tracks its deepest contact independently, providing spatial coverage across the
+    mesh surface. This prevents sudden contact jumps when different mesh regions
+    become the deepest penetration point.
 
     **Beta Parameter (Depth Threshold):**
 
@@ -381,15 +431,12 @@ class ContactReductionFunctions:
     - ``beta = 0``: Only penetrating contacts (depth < 0) participate
     - ``beta = -0.01``: Only contacts with at least 1cm penetration participate
 
-    Multiple betas can be specified to keep contacts at different depth thresholds.
-    Each beta adds 6 slots per normal bin (one per spatial direction).
-
     Args:
-        betas: Tuple of depth thresholds. Default ``(1000000.0, 0.0001)`` keeps both
-               all spatial extremes and near-penetrating spatial extremes.
+        betas: Tuple of depth thresholds. Default ``(0.0,)`` keeps spatial extremes
+               of penetrating contacts only.
     """
 
-    def __init__(self, betas: tuple = (1000000.0, 0.0001)):
+    def __init__(self, betas: tuple = (0.0,)):
         self.betas = betas
         self.num_betas = len(betas)
         self.num_reduction_slots = compute_num_reduction_slots(self.num_betas)
@@ -412,12 +459,16 @@ class ContactReductionFunctions:
 
         The returned function competes contacts for reduction slots using atomic max.
         Each thread with a contact computes scores for all (direction, beta) combinations
-        and atomically competes for the corresponding slots. Winners write their contact
-        to the shared buffer.
+        and atomically competes for the corresponding slots. Additionally, contacts
+        compete for voxel-based depth slots.
+
+        Winners write their contact to the shared buffer.
         """
         num_reduction_slots = self.num_reduction_slots
         num_betas = self.num_betas
         get_smem = self.get_smem_reduction
+        # Number of spatial extreme slots (before voxel depth slots)
+        num_spatial_slots = NUM_NORMAL_BINS * NUM_SPATIAL_DIRECTIONS * num_betas
 
         @wp.func
         def store_reduced_contact(
@@ -428,6 +479,7 @@ class ContactReductionFunctions:
             active_ids: wp.array(dtype=int),
             betas_arr: wp.array(dtype=wp.float32),
             empty_marker: float,
+            voxel_index: int,
         ):
             """Compete this thread's contact for reduction slots via atomic max.
 
@@ -439,9 +491,10 @@ class ContactReductionFunctions:
                 active_ids: Tracks which slots contain valid contacts
                 betas_arr: Array of depth thresholds (contact participates if depth < beta)
                 empty_marker: Sentinel value indicating empty slots
+                voxel_index: Voxel index for the contact position (0 to NUM_VOXEL_DEPTH_SLOTS-1)
             """
-            slots_per_bin = wp.static(NUM_SPATIAL_DIRECTIONS * num_betas + 1)
-            num_slots = wp.static(NUM_NORMAL_BINS * slots_per_bin)
+            slots_per_bin = wp.static(NUM_SPATIAL_DIRECTIONS * num_betas)
+            num_slots = wp.static(num_reduction_slots)
 
             winner_slots = wp.array(
                 ptr=wp.static(get_smem)(),
@@ -471,10 +524,12 @@ class ContactReductionFunctions:
                             score = spatial_dp
                             key = base_key + dir_i * wp.static(num_betas) + beta_i
                             wp.atomic_max(winner_slots, key, pack_value_thread_id(score, thread_id))
-                # Compete for max depth slot (last slot in bin)
-                max_depth_key = base_key + slots_per_bin - 1
+
+                # Compete for voxel-based depth slot
+                # Voxel slots start after spatial slots
+                voxel_key = wp.static(num_spatial_slots) + wp.clamp(voxel_index, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1))
                 # Use -depth as score so atomicMax selects the deepest (most negative depth)
-                wp.atomic_max(winner_slots, max_depth_key, pack_value_thread_id(-c.depth, thread_id))
+                wp.atomic_max(winner_slots, voxel_key, pack_value_thread_id(-c.depth, thread_id))
             synchronize()
 
             if active:
@@ -489,25 +544,26 @@ class ContactReductionFunctions:
                             if unpack_thread_id(winner_slots[key]) == thread_id:
                                 p = buffer[key].projection
                                 if p == empty_marker:
-                                    id = wp.atomic_add(active_ids, num_slots, 1)
-                                    if id < num_slots:
-                                        active_ids[id] = key
+                                    slot_id = wp.atomic_add(active_ids, num_slots, 1)
+                                    if slot_id < num_slots:
+                                        active_ids[slot_id] = key
                                 score = spatial_dp
                                 if score > p:
                                     c.projection = score
                                     buffer[key] = c
-                # Check max depth slot
-                max_depth_key = base_key + slots_per_bin - 1
-                if unpack_thread_id(winner_slots[max_depth_key]) == thread_id:
-                    p = buffer[max_depth_key].projection
+
+                # Check voxel depth slot
+                voxel_key = wp.static(num_spatial_slots) + wp.clamp(voxel_index, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1))
+                if unpack_thread_id(winner_slots[voxel_key]) == thread_id:
+                    p = buffer[voxel_key].projection
                     if p == empty_marker:
-                        id = wp.atomic_add(active_ids, num_slots, 1)
-                        if id < num_slots:
-                            active_ids[id] = max_depth_key
+                        slot_id = wp.atomic_add(active_ids, num_slots, 1)
+                        if slot_id < num_slots:
+                            active_ids[slot_id] = voxel_key
                     score = -c.depth
                     if score > p:
                         c.projection = score
-                        buffer[max_depth_key] = c
+                        buffer[voxel_key] = c
             synchronize()
 
         return store_reduced_contact
@@ -522,6 +578,7 @@ class ContactReductionFunctions:
         num_reduction_slots = self.num_reduction_slots
         num_betas = self.num_betas
         get_smem = self.get_smem_reduction
+        num_spatial_slots = NUM_NORMAL_BINS * NUM_SPATIAL_DIRECTIONS * num_betas
 
         @wp.func
         def filter_unique_contacts(
@@ -538,8 +595,8 @@ class ContactReductionFunctions:
                 active_ids: Output array of unique contact slot indices
                 empty_marker: Sentinel value indicating empty slots
             """
-            slots_per_bin = wp.static(NUM_SPATIAL_DIRECTIONS * num_betas + 1)
-            num_slots = wp.static(NUM_NORMAL_BINS * slots_per_bin)
+            slots_per_bin = wp.static(NUM_SPATIAL_DIRECTIONS * num_betas)
+            num_slots = wp.static(num_reduction_slots)
 
             keep_flags = wp.array(
                 ptr=wp.static(get_smem)(),
@@ -551,7 +608,7 @@ class ContactReductionFunctions:
                 keep_flags[i] = 0
             synchronize()
 
-            # Phase 2: Duplicate detection within each bin (20 threads active)
+            # Phase 2a: Duplicate detection within each normal bin (20 threads active)
             # Each bin is processed by one thread to find unique contacts
             if thread_id < wp.static(NUM_NORMAL_BINS):
                 bin_id = thread_id
@@ -567,6 +624,30 @@ class ContactReductionFunctions:
                                 is_dup = 1
                         if is_dup == 0:
                             keep_flags[key_i] = 1
+            synchronize()
+
+            # Phase 2b: Duplicate detection for voxel slots
+            # We check if a voxel slot's feature already exists in spatial slots or earlier voxel slots
+            # Use strided parallel processing
+            for voxel_slot in range(thread_id, wp.static(NUM_VOXEL_DEPTH_SLOTS), wp.block_dim()):
+                voxel_key = wp.static(num_spatial_slots) + voxel_slot
+                if buffer[voxel_key].projection > empty_marker:
+                    feature_v = buffer[voxel_key].feature
+                    is_dup = int(0)
+
+                    # Check against all spatial slots
+                    for spatial_key in range(wp.static(num_spatial_slots)):
+                        if buffer[spatial_key].projection > empty_marker and buffer[spatial_key].feature == feature_v:
+                            is_dup = 1
+
+                    # Check against earlier voxel slots
+                    for earlier_voxel in range(voxel_slot):
+                        earlier_key = wp.static(num_spatial_slots) + earlier_voxel
+                        if buffer[earlier_key].projection > empty_marker and buffer[earlier_key].feature == feature_v:
+                            is_dup = 1
+
+                    if is_dup == 0:
+                        keep_flags[voxel_key] = 1
 
             # Reset counter for parallel compaction
             if thread_id == 0:

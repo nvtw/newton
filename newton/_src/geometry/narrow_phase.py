@@ -46,6 +46,7 @@ from ..geometry.contact_reduction import (
     NUM_SPATIAL_DIRECTIONS,
     ContactReductionFunctions,
     ContactStruct,
+    compute_voxel_index,
     create_betas_array,
     synchronize,
 )
@@ -927,6 +928,9 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
         shape_transform: wp.array(dtype=wp.transform),
         shape_source: wp.array(dtype=wp.uint64),
         shape_contact_margin: wp.array(dtype=float),
+        shape_local_aabb_lower: wp.array(dtype=wp.vec3),
+        shape_local_aabb_upper: wp.array(dtype=wp.vec3),
+        shape_voxel_resolution: wp.array(dtype=wp.vec3i),
         shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_plane_count: wp.array(dtype=int),
         betas: wp.array(dtype=wp.float32),
@@ -975,6 +979,12 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
 
             # Get mesh world transform
             X_mesh_ws = shape_transform[mesh_shape]
+            X_ws_mesh = wp.transform_inverse(X_mesh_ws)  # World to mesh local
+
+            # Load voxel binning data for mesh
+            aabb_lower_mesh = shape_local_aabb_lower[mesh_shape]
+            aabb_upper_mesh = shape_local_aabb_upper[mesh_shape]
+            voxel_res_mesh = shape_voxel_resolution[mesh_shape]
 
             # Get plane world transform
             X_plane_ws = shape_transform[plane_shape]
@@ -1045,9 +1055,15 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
                         c.feature = vertex_idx
                         c.projection = empty_marker
 
+                # Compute voxel index for contact position in mesh's local space
+                voxel_idx = int(0)
+                if has_contact:
+                    point_mesh_local = wp.transform_point(X_ws_mesh, contact_pos)
+                    voxel_idx = compute_voxel_index(point_mesh_local, aabb_lower_mesh, aabb_upper_mesh, voxel_res_mesh)
+
                 # Apply contact reduction
                 store_reduced_contact_func(
-                    t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, betas, empty_marker
+                    t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, betas, empty_marker, voxel_idx
                 )
 
             # Write reduced contacts to output (store_reduced_contact ends with sync)
@@ -1309,6 +1325,9 @@ class NarrowPhase:
         shape_contact_margin: wp.array(dtype=wp.float32, ndim=1),  # per-shape contact margin
         shape_collision_radius: wp.array(dtype=wp.float32, ndim=1),  # per-shape collision radius for AABB fallback
         shape_flags: wp.array(dtype=wp.int32, ndim=1),  # per-shape flags (includes ShapeFlags.HYDROELASTIC)
+        shape_local_aabb_lower: wp.array(dtype=wp.vec3, ndim=1),  # Local-space AABB lower bounds
+        shape_local_aabb_upper: wp.array(dtype=wp.vec3, ndim=1),  # Local-space AABB upper bounds
+        shape_voxel_resolution: wp.array(dtype=wp.vec3i, ndim=1),  # Voxel grid resolution per shape
         writer_data: Any,
         device=None,  # Device to launch on
     ):
@@ -1326,6 +1345,9 @@ class NarrowPhase:
             shape_contact_margin: Array of contact margins for each shape
             shape_collision_radius: Array of collision radii for each shape (for AABB fallback for planes/meshes)
             shape_flags: Array of shape flags for each shape (includes ShapeFlags.HYDROELASTIC)
+            shape_local_aabb_lower: Local-space AABB lower bounds for each shape (for voxel binning)
+            shape_local_aabb_upper: Local-space AABB upper bounds for each shape (for voxel binning)
+            shape_voxel_resolution: Voxel grid resolution for each shape (for voxel binning)
             writer_data: Custom struct instance for contact writing (type must match the custom writer function)
             device: Device to launch on
         """
@@ -1404,6 +1426,9 @@ class NarrowPhase:
                 shape_transform,
                 shape_source,
                 shape_contact_margin,
+                shape_local_aabb_lower,
+                shape_local_aabb_upper,
+                shape_voxel_resolution,
                 self.shape_pairs_mesh_plane,
                 self.shape_pairs_mesh_plane_count,
                 self.betas,
@@ -1543,6 +1568,9 @@ class NarrowPhase:
                         shape_source,
                         shape_sdf_data,
                         shape_contact_margin,
+                        shape_local_aabb_lower,
+                        shape_local_aabb_upper,
+                        shape_voxel_resolution,
                         self.shape_pairs_mesh_mesh,
                         self.shape_pairs_mesh_mesh_count,
                         self.betas,
@@ -1575,6 +1603,9 @@ class NarrowPhase:
         shape_contact_margin: wp.array(dtype=wp.float32, ndim=1),  # per-shape contact margin
         shape_collision_radius: wp.array(dtype=wp.float32, ndim=1),  # per-shape collision radius for AABB fallback
         shape_flags: wp.array(dtype=wp.int32, ndim=1),  # per-shape flags (includes ShapeFlags.HYDROELASTIC)
+        shape_local_aabb_lower: wp.array(dtype=wp.vec3, ndim=1),  # Local-space AABB lower bounds
+        shape_local_aabb_upper: wp.array(dtype=wp.vec3, ndim=1),  # Local-space AABB upper bounds
+        shape_voxel_resolution: wp.array(dtype=wp.vec3i, ndim=1),  # Voxel grid resolution per shape
         # Outputs
         contact_pair: wp.array(dtype=wp.vec2i),
         contact_position: wp.array(dtype=wp.vec3),
@@ -1600,6 +1631,9 @@ class NarrowPhase:
             shape_sdf_data: Array of SDFData structs for mesh shapes
             shape_contact_margin: Array of contact margins for each shape
             shape_collision_radius: Array of collision radii for each shape (for AABB fallback for planes/meshes)
+            shape_local_aabb_lower: Local-space AABB lower bounds for each shape (for voxel binning)
+            shape_local_aabb_upper: Local-space AABB upper bounds for each shape (for voxel binning)
+            shape_voxel_resolution: Voxel grid resolution for each shape (for voxel binning)
             contact_pair: Output array for contact shape pairs
             contact_position: Output array for contact positions (center point)
             contact_normal: Output array for contact normals
@@ -1642,6 +1676,9 @@ class NarrowPhase:
             shape_contact_margin,
             shape_collision_radius,
             shape_flags,
+            shape_local_aabb_lower,
+            shape_local_aabb_upper,
+            shape_voxel_resolution,
             writer_data,
             device,
         )

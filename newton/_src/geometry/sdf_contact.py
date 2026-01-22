@@ -26,6 +26,7 @@ from ..geometry.sdf_utils import SDFData
 from .contact_reduction import (
     ContactReductionFunctions,
     ContactStruct,
+    compute_voxel_index,
     get_shared_memory_pointer_block_dim_plus_2_ints,
     synchronize,
 )
@@ -896,6 +897,9 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         shape_source: wp.array(dtype=wp.uint64),
         shape_sdf_data: wp.array(dtype=SDFData),
         shape_contact_margin: wp.array(dtype=float),
+        shape_local_aabb_lower: wp.array(dtype=wp.vec3),
+        shape_local_aabb_upper: wp.array(dtype=wp.vec3),
+        shape_voxel_resolution: wp.array(dtype=wp.vec3i),
         shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_mesh_count: wp.array(dtype=int),
         betas: wp.array(dtype=wp.float32),
@@ -962,6 +966,12 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                 X_tri_ws = shape_transform[tri_shape]
                 X_sdf_ws = shape_transform[sdf_shape]
+                X_ws_tri = wp.transform_inverse(X_tri_ws)  # World to triangle local
+
+                # Load voxel binning data for triangle mesh
+                aabb_lower_tri = shape_local_aabb_lower[tri_shape]
+                aabb_upper_tri = shape_local_aabb_upper[tri_shape]
+                voxel_res_tri = shape_voxel_resolution[tri_shape]
 
                 # Load SDF data and determine scale
                 sdf_data = SDFData()
@@ -1072,8 +1082,14 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             c.feature = tri_idx if mode == 0 else -(tri_idx + 1)
                             c.projection = empty_marker
 
+                    # Compute voxel index for contact position in triangle mesh's local space
+                    voxel_idx = int(0)
+                    if has_contact:
+                        point_tri_local = wp.transform_point(X_ws_tri, point_world)
+                        voxel_idx = compute_voxel_index(point_tri_local, aabb_lower_tri, aabb_upper_tri, voxel_res_tri)
+
                     store_reduced_contact_func(
-                        t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, betas, empty_marker
+                        t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, betas, empty_marker, voxel_idx
                     )
 
                     # Reset buffer for next batch

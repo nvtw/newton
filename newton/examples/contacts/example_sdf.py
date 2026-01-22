@@ -132,6 +132,7 @@ class Example:
             raise ValueError(f"Unknown scene: {scene}")
 
         main_scene = newton.ModelBuilder()
+        main_scene.rigid_contact_margin = 0.01
         # Add ground plane with offset (plane equation: z = offset)
         main_scene.add_shape_plane(
             plane=(0.0, 0.0, 1.0, self.ground_plane_offset),
@@ -432,7 +433,7 @@ if __name__ == "__main__":
         "--solver",
         type=str,
         choices=["xpbd", "mujoco"],
-        default="mujoco",
+        default="xpbd",
         help="Solver to use: 'xpbd' (Extended Position-Based Dynamics) or 'mujoco' (MuJoCo constraint solver).",
     )
     parser.add_argument(
