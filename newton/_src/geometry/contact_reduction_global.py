@@ -127,35 +127,38 @@ def reduction_insert_slot(
 # Contact key/value packing
 # =============================================================================
 
-# Bit layout for hashtable key (64 bits total):
+# Bit layout for hashtable key (63 bits used, bit 63 kept 0 for signed/unsigned safety):
 # Key is (shape_a, shape_b, bin_id) - NO slot_id (slots are handled via values_per_key)
-# - Bits 0-28:   shape_a (29 bits, up to ~537M shapes)
-# - Bits 29-57:  shape_b (29 bits, up to ~537M shapes)
-# - Bits 58-62:  icosahedron_bin (5 bits, 0-19)
-# - Bit 63:      unused (could be used for flags)
+# - Bits 0-26:   shape_a (27 bits, up to ~134M shapes)
+# - Bits 27-54:  shape_b (28 bits, up to ~268M shapes)
+# - Bits 55-62:  bin_id (8 bits, 0-255, supports normal bins 0-19 + voxel bins 20-139)
+# - Bit 63:      unused (kept 0 for signed/unsigned compatibility)
 # Total: 63 bits used
 
-SHAPE_ID_BITS = wp.constant(wp.uint64(29))
-SHAPE_ID_MASK = wp.constant(wp.uint64((1 << 29) - 1))
-BIN_BITS = wp.constant(wp.uint64(5))
-BIN_MASK = wp.constant(wp.uint64((1 << 5) - 1))
+SHAPE_A_BITS = wp.constant(wp.uint64(27))
+SHAPE_A_MASK = wp.constant(wp.uint64((1 << 27) - 1))
+SHAPE_B_BITS = wp.constant(wp.uint64(28))
+SHAPE_B_MASK = wp.constant(wp.uint64((1 << 28) - 1))
+BIN_BITS = wp.constant(wp.uint64(8))
+BIN_MASK = wp.constant(wp.uint64((1 << 8) - 1))
 
 
 @wp.func
 def make_contact_key(shape_a: int, shape_b: int, bin_id: int) -> wp.uint64:
-    """Create a hashtable key from shape pair and normal bin.
+    """Create a hashtable key from shape pair and bin.
 
     Args:
         shape_a: First shape index
         shape_b: Second shape index
-        bin_id: Icosahedron bin index (0-19)
+        bin_id: Bin index (0-19 for normal bins, 20-139 for voxel bins)
 
     Returns:
-        64-bit key for hashtable lookup
+        64-bit key for hashtable lookup (only 63 bits used)
     """
-    key = wp.uint64(shape_a) & SHAPE_ID_MASK
-    key = key | ((wp.uint64(shape_b) & SHAPE_ID_MASK) << SHAPE_ID_BITS)
-    key = key | ((wp.uint64(bin_id) & BIN_MASK) << wp.uint64(58))
+    key = wp.uint64(shape_a) & SHAPE_A_MASK
+    key = key | ((wp.uint64(shape_b) & SHAPE_B_MASK) << SHAPE_A_BITS)
+    # bin_id goes at bits 55-62 (after 27 + 28 = 55 bits for shape IDs)
+    key = key | ((wp.uint64(bin_id) & BIN_MASK) << wp.uint64(55))
     return key
 
 
@@ -444,6 +447,7 @@ def reduce_contact_in_hashtable(
     contact_id: int,
     reducer_data: GlobalContactReducerData,
     beta: float,
+    shape_transform: wp.array(dtype=wp.transform),
     shape_local_aabb_lower: wp.array(dtype=wp.vec3),
     shape_local_aabb_upper: wp.array(dtype=wp.vec3),
     shape_voxel_resolution: wp.array(dtype=wp.vec3i),
@@ -464,6 +468,7 @@ def reduce_contact_in_hashtable(
         contact_id: Index of contact in buffer
         reducer_data: Reducer data
         beta: Depth threshold (contacts with depth < beta participate in spatial competition)
+        shape_transform: Per-shape world transforms (for transforming position to local space)
         shape_local_aabb_lower: Per-shape local AABB lower bounds
         shape_local_aabb_upper: Per-shape local AABB upper bounds
         shape_voxel_resolution: Per-shape voxel grid resolution
@@ -511,15 +516,16 @@ def reduce_contact_in_hashtable(
         reduction_update_slot(entry_idx, max_depth_slot_id, max_depth_value, reducer_data.ht_values, ht_capacity)
 
     # === Part 2: Voxel-based reduction (deepest contact per voxel) ===
-    # Compute voxel index using mesh's (shape_a) local AABB
+    # Transform contact position from world space to mesh (shape_a) local space
+    X_mesh_ws = shape_transform[shape_a]
+    X_ws_mesh = wp.transform_inverse(X_mesh_ws)
+    position_local = wp.transform_point(X_ws_mesh, position)
+
+    # Compute voxel index using mesh's local AABB
     aabb_lower = shape_local_aabb_lower[shape_a]
     aabb_upper = shape_local_aabb_upper[shape_a]
     voxel_res = shape_voxel_resolution[shape_a]
-
-    # Contact position is in world space, but we need mesh-local space
-    # For mesh-triangle contacts, position is already close to mesh surface
-    # We use the world position directly (approximation - works well in practice)
-    voxel_idx = compute_voxel_index(position, aabb_lower, aabb_upper, voxel_res)
+    voxel_idx = compute_voxel_index(position_local, aabb_lower, aabb_upper, voxel_res)
 
     # Voxel bins use bin_id = NUM_NORMAL_BINS + voxel_idx (20-139)
     voxel_bin_id = NUM_NORMAL_BINS + voxel_idx
@@ -541,6 +547,7 @@ def export_and_reduce_contact(
     depth: float,
     reducer_data: GlobalContactReducerData,
     beta: float,
+    shape_transform: wp.array(dtype=wp.transform),
     shape_local_aabb_lower: wp.array(dtype=wp.vec3),
     shape_local_aabb_upper: wp.array(dtype=wp.vec3),
     shape_voxel_resolution: wp.array(dtype=wp.vec3i),
@@ -553,6 +560,7 @@ def export_and_reduce_contact(
             contact_id,
             reducer_data,
             beta,
+            shape_transform,
             shape_local_aabb_lower,
             shape_local_aabb_upper,
             shape_voxel_resolution,
@@ -577,6 +585,7 @@ def create_reduce_buffered_contacts_kernel(beta: float):
     @wp.kernel(enable_backward=False)
     def reduce_buffered_contacts_kernel(
         reducer_data: GlobalContactReducerData,
+        shape_transform: wp.array(dtype=wp.transform),
         shape_local_aabb_lower: wp.array(dtype=wp.vec3),
         shape_local_aabb_upper: wp.array(dtype=wp.vec3),
         shape_voxel_resolution: wp.array(dtype=wp.vec3i),
@@ -601,6 +610,7 @@ def create_reduce_buffered_contacts_kernel(beta: float):
                 i,
                 reducer_data,
                 beta,
+                shape_transform,
                 shape_local_aabb_lower,
                 shape_local_aabb_upper,
                 shape_voxel_resolution,
@@ -686,7 +696,7 @@ def create_export_reduced_contacts_kernel(writer_func: Any, values_per_key: int 
     Args:
         writer_func: A warp function with signature (ContactData, writer_data) -> None
                      This follows the same pattern as narrow_phase.py's write_contact_simple.
-        values_per_key: Number of value slots per hashtable entry (default 13 for 2 betas)
+        values_per_key: Number of value slots per hashtable entry (default 7: 6 spatial + 1 max-depth)
 
     Returns:
         A warp kernel that can be launched to export reduced contacts.

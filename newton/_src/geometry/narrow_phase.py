@@ -1492,6 +1492,7 @@ class NarrowPhase:
                     dim=self.total_num_threads,
                     inputs=[
                         reducer_data,
+                        shape_transform,
                         shape_local_aabb_lower,
                         shape_local_aabb_upper,
                         shape_voxel_resolution,
