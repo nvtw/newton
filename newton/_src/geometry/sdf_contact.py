@@ -822,82 +822,108 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 contact_threshold = margin + triangle_mesh_thickness
                 contact_threshold_unscaled = contact_threshold / min_sdf_scale
 
+                # Initialize shared memory buffer for triangle selection
+                # Buffer layout: [0..block_dim-1] = triangle indices, [block_dim] = count, [block_dim+1] = progress
+                tri_capacity = wp.block_dim()
+                selected_triangles = wp.array(
+                    ptr=get_shared_memory_pointer_block_dim_plus_2_ints(),
+                    shape=(wp.block_dim() + 2,),
+                    dtype=wp.int32,
+                )
+
+                # Reset buffer for this mode
+                if t == 0:
+                    selected_triangles[tri_capacity] = 0  # count
+                    selected_triangles[tri_capacity + 1] = 0  # progress
+                synchronize()
+
                 num_tris = mesh.indices.shape[0] // 3
-                # strided loop over triangles
-                for tri_idx in range(t, num_tris, wp.block_dim()):
-                    # Get triangle vertices in SDF's scaled local space, then convert to unscaled
-                    v0_scaled, v1_scaled, v2_scaled = get_triangle_from_mesh(
-                        mesh_id, mesh_scale, X_mesh_to_sdf, tri_idx
-                    )
-                    # Transform to unscaled SDF space (SDF is computed from unscaled mesh vertices)
-                    v0 = wp.cw_mul(v0_scaled, inv_sdf_scale)
-                    v1 = wp.cw_mul(v1_scaled, inv_sdf_scale)
-                    v2 = wp.cw_mul(v2_scaled, inv_sdf_scale)
 
-                    # Early out: check bounding sphere distance to SDF surface using extrapolated sampling
-                    # Bounding sphere is in unscaled SDF space
-                    bounding_sphere_center, bounding_sphere_radius = get_bounding_sphere(v0, v1, v2)
-                    if use_bvh_for_sdf:
-                        # For BVH queries, the mesh is also in unscaled space, so this is consistent
-                        sdf_dist = sample_sdf_using_mesh(
-                            sdf_mesh_id,
-                            bounding_sphere_center,
-                            1.01 * (bounding_sphere_radius + contact_threshold_unscaled),
+                # Process triangles using collaborative filtering
+                while selected_triangles[tri_capacity + 1] < num_tris:
+                    # Fill buffer with interesting triangles
+                    find_interesting_triangles(
+                        t,
+                        mesh_scale,
+                        X_mesh_to_sdf,
+                        mesh_id,
+                        sdf_data,
+                        sdf_mesh_id,
+                        selected_triangles,
+                        contact_threshold_unscaled,
+                        use_bvh_for_sdf,
+                        inv_sdf_scale,
+                    )
+
+                    # Process triangles from buffer
+                    has_triangle = t < selected_triangles[tri_capacity]
+                    synchronize()
+
+                    if has_triangle:
+                        tri_idx = selected_triangles[t]
+
+                        # Get triangle vertices in SDF's scaled local space, then convert to unscaled
+                        v0_scaled, v1_scaled, v2_scaled = get_triangle_from_mesh(
+                            mesh_id, mesh_scale, X_mesh_to_sdf, tri_idx
                         )
-                    else:
-                        sdf_dist = sample_sdf_extrapolated(sdf_data, bounding_sphere_center)
+                        # Transform to unscaled SDF space (SDF is computed from unscaled mesh vertices)
+                        v0 = wp.cw_mul(v0_scaled, inv_sdf_scale)
+                        v1 = wp.cw_mul(v1_scaled, inv_sdf_scale)
+                        v2 = wp.cw_mul(v2_scaled, inv_sdf_scale)
 
-                    # Skip triangles that are too far from the SDF surface (comparison in unscaled space)
-                    if sdf_dist > (bounding_sphere_radius + contact_threshold_unscaled):
-                        continue
+                        # Collision detection in unscaled SDF space
+                        dist_unscaled, point_unscaled, direction_unscaled = do_triangle_sdf_collision(
+                            sdf_data, sdf_mesh_id, v0, v1, v2, use_bvh_for_sdf
+                        )
 
-                    # Collision detection in unscaled SDF space
-                    dist_unscaled, point_unscaled, direction_unscaled = do_triangle_sdf_collision(
-                        sdf_data, sdf_mesh_id, v0, v1, v2, use_bvh_for_sdf
-                    )
+                        # Scale distance and direction back to scaled space
+                        dist, direction = scale_sdf_result_to_world(
+                            dist_unscaled, direction_unscaled, sdf_scale, inv_sdf_scale, min_sdf_scale
+                        )
+                        # Scale point back to scaled SDF local space
+                        point = wp.cw_mul(point_unscaled, sdf_scale)
 
-                    # Scale distance and direction back to scaled space
-                    dist, direction = scale_sdf_result_to_world(
-                        dist_unscaled, direction_unscaled, sdf_scale, inv_sdf_scale, min_sdf_scale
-                    )
-                    # Scale point back to scaled SDF local space
-                    point = wp.cw_mul(point_unscaled, sdf_scale)
+                        if dist < contact_threshold:
+                            point_world = wp.transform_point(X_sdf_ws, point)
 
-                    if dist < contact_threshold:
-                        point_world = wp.transform_point(X_sdf_ws, point)
+                            direction_world = wp.transform_vector(X_sdf_ws, direction)
+                            direction_len = wp.length(direction_world)
+                            if direction_len > 0.0:
+                                direction_world = direction_world / direction_len
 
-                        direction_world = wp.transform_vector(X_sdf_ws, direction)
-                        direction_len = wp.length(direction_world)
-                        if direction_len > 0.0:
-                            direction_world = direction_world / direction_len
+                            if mode == 0:
+                                contact_normal = -direction_world
+                            else:
+                                contact_normal = direction_world
 
-                        if mode == 0:
-                            contact_normal = -direction_world
-                        else:
-                            contact_normal = direction_world
+                            # Create contact data
+                            # Always use consistent pair ordering (mesh_shape_a, mesh_shape_b) regardless of mode
+                            contact_data = ContactData()
+                            contact_data.contact_point_center = point_world
+                            contact_data.contact_normal_a_to_b = contact_normal
+                            contact_data.contact_distance = dist
+                            contact_data.radius_eff_a = 0.0
+                            contact_data.radius_eff_b = 0.0
+                            # SDF mesh's thickness is already baked into the SDF, so set it to 0
+                            # Mode 0: mesh_a triangles vs mesh_b's SDF -> thickness_b already in SDF
+                            # Mode 1: mesh_b triangles vs mesh_a's SDF -> thickness_a already in SDF
+                            if mode == 0:
+                                contact_data.thickness_a = thickness_a
+                                contact_data.thickness_b = 0.0
+                            else:
+                                contact_data.thickness_a = 0.0
+                                contact_data.thickness_b = thickness_b
+                            contact_data.shape_a = mesh_shape_a
+                            contact_data.shape_b = mesh_shape_b
+                            contact_data.margin = margin
 
-                        # Create contact data
-                        # Always use consistent pair ordering (mesh_shape_a, mesh_shape_b) regardless of mode
-                        contact_data = ContactData()
-                        contact_data.contact_point_center = point_world
-                        contact_data.contact_normal_a_to_b = contact_normal
-                        contact_data.contact_distance = dist
-                        contact_data.radius_eff_a = 0.0
-                        contact_data.radius_eff_b = 0.0
-                        # SDF mesh's thickness is already baked into the SDF, so set it to 0
-                        # Mode 0: mesh_a triangles vs mesh_b's SDF -> thickness_b already in SDF
-                        # Mode 1: mesh_b triangles vs mesh_a's SDF -> thickness_a already in SDF
-                        if mode == 0:
-                            contact_data.thickness_a = thickness_a
-                            contact_data.thickness_b = 0.0
-                        else:
-                            contact_data.thickness_a = 0.0
-                            contact_data.thickness_b = thickness_b
-                        contact_data.shape_a = mesh_shape_a
-                        contact_data.shape_b = mesh_shape_b
-                        contact_data.margin = margin
+                            writer_func(contact_data, writer_data, -1)
 
-                        writer_func(contact_data, writer_data, -1)
+                    # Reset buffer for next batch
+                    synchronize()
+                    if t == 0:
+                        selected_triangles[tri_capacity] = 0  # Reset count
+                    synchronize()
 
     # Return early if contact reduction is disabled
     if contact_reduction_funcs is None:
