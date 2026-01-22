@@ -283,11 +283,11 @@ def compute_voxel_index(
     ny = resolution[1]
     nz = resolution[2]
 
-    vx = wp.clamp(int(rel[0] * float(nx)), 0, nx - 1)
-    vy = wp.clamp(int(rel[1] * float(ny)), 0, ny - 1)
-    vz = wp.clamp(int(rel[2] * float(nz)), 0, nz - 1)
+    ix = wp.clamp(int(rel[0] * float(nx)), 0, nx - 1)
+    iy = wp.clamp(int(rel[1] * float(ny)), 0, ny - 1)
+    iz = wp.clamp(int(rel[2] * float(nz)), 0, nz - 1)
 
-    return vx + vy * nx + vz * nx * ny
+    return ix + iy * nx + iz * nx * ny
 
 
 def create_betas_array(betas: tuple = (10.0,), device=None) -> wp.array:

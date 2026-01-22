@@ -1958,7 +1958,7 @@ def compute_contact_constraint_delta(
     denom += wp.dot(rot_angular_b, I_inv_b * rot_angular_b)
 
     # Mass-independent compliance (MuJoCo-style)
-    # Stiffness k = m_eff / tau^2, so compliance alpha = tau^2 / m_eff
+    # Stiffness k = m_eff / τ², so compliance α = τ² / m_eff
     # This ensures behavior is consistent regardless of object mass
     if time_constant > 0.0:
         m_eff = 1.0 / (m_inv_a + m_inv_b + 1e-10)

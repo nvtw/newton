@@ -6287,8 +6287,8 @@ class ModelBuilder:
             voxel_resolution = []
             voxel_budget = 120  # Maximum voxels per shape for contact reduction
 
-            for shape_type, shape_src, shape_scale in zip(
-                self.shape_type, self.shape_source, self.shape_scale, strict=True
+            for i, (shape_type, shape_src, shape_scale) in enumerate(
+                zip(self.shape_type, self.shape_source, self.shape_scale, strict=True)
             ):
                 if shape_type == GeoType.MESH and shape_src is not None:
                     # Compute local AABB from mesh vertices
