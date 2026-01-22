@@ -425,20 +425,22 @@ class ContactReductionFunctions:
     mesh surface. This prevents sudden contact jumps when different mesh regions
     become the deepest penetration point.
 
-    **Beta Parameter (Depth Threshold):**
+    **Depth Threshold:**
 
-    - ``beta = inf`` (or large value like 1000000): All contacts participate
-    - ``beta = 0``: Only penetrating contacts (depth < 0) participate
-    - ``beta = -0.01``: Only contacts with at least 1cm penetration participate
+    Contacts with depth < 0.0001m (0.1mm) participate in spatial extreme competition.
+    This small positive threshold avoids contact flickering due to numerical noise
+    while effectively selecting only penetrating contacts.
 
-    Args:
-        betas: Tuple of depth thresholds. Default ``(0.0,)`` keeps spatial extremes
-               of penetrating contacts only.
+    The overall contact detection range is controlled by the contact margin parameter
+    on shapes, not by the reduction system.
     """
 
-    def __init__(self, betas: tuple = (0.0,)):
-        self.betas = betas
-        self.num_betas = len(betas)
+    # Fixed beta threshold - small positive value to avoid flickering from numerical noise
+    BETA_THRESHOLD = 0.0001
+
+    def __init__(self):
+        self.betas = (self.BETA_THRESHOLD,)
+        self.num_betas = 1
         self.num_reduction_slots = compute_num_reduction_slots(self.num_betas)
 
         # Shared memory pointers
@@ -451,7 +453,7 @@ class ContactReductionFunctions:
         self.filter_unique_contacts = self._create_filter_unique_contacts()
 
     def create_betas_array(self, device=None) -> wp.array:
-        """Create a warp array with the beta values."""
+        """Create a warp array with the beta value."""
         return create_betas_array(self.betas, device)
 
     def _create_store_reduced_contact(self):
@@ -527,7 +529,9 @@ class ContactReductionFunctions:
 
                 # Compete for voxel-based depth slot
                 # Voxel slots start after spatial slots
-                voxel_key = wp.static(num_spatial_slots) + wp.clamp(voxel_index, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1))
+                voxel_key = wp.static(num_spatial_slots) + wp.clamp(
+                    voxel_index, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1)
+                )
                 # Use -depth as score so atomicMax selects the deepest (most negative depth)
                 wp.atomic_max(winner_slots, voxel_key, pack_value_thread_id(-c.depth, thread_id))
             synchronize()
@@ -553,7 +557,9 @@ class ContactReductionFunctions:
                                     buffer[key] = c
 
                 # Check voxel depth slot
-                voxel_key = wp.static(num_spatial_slots) + wp.clamp(voxel_index, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1))
+                voxel_key = wp.static(num_spatial_slots) + wp.clamp(
+                    voxel_index, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1)
+                )
                 if unpack_thread_id(winner_slots[voxel_key]) == thread_id:
                     p = buffer[voxel_key].projection
                     if p == empty_marker:

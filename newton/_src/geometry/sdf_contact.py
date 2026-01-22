@@ -1089,7 +1089,14 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         voxel_idx = compute_voxel_index(point_tri_local, aabb_lower_tri, aabb_upper_tri, voxel_res_tri)
 
                     store_reduced_contact_func(
-                        t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, betas, empty_marker, voxel_idx
+                        t,
+                        has_contact,
+                        c,
+                        contacts_shared_mem,
+                        active_contacts_shared_mem,
+                        betas,
+                        empty_marker,
+                        voxel_idx,
                     )
 
                     # Reset buffer for next batch

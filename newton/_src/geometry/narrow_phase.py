@@ -1106,7 +1106,6 @@ class NarrowPhase:
         shape_aabb_lower: wp.array(dtype=wp.vec3) | None = None,
         shape_aabb_upper: wp.array(dtype=wp.vec3) | None = None,
         contact_writer_warp_func: Any | None = None,
-        contact_reduction_betas: tuple = (1000000.0, 0.0001),
         sdf_hydroelastic: SDFHydroelastic | None = None,
         has_meshes: bool = True,
     ):
@@ -1123,24 +1122,6 @@ class NarrowPhase:
             shape_aabb_lower: Optional external AABB lower bounds array (if provided, AABBs won't be computed internally)
             shape_aabb_upper: Optional external AABB upper bounds array (if provided, AABBs won't be computed internally)
             contact_writer_warp_func: Optional custom contact writer function (first arg: ContactData, second arg: custom struct type)
-            contact_reduction_betas: Tuple of depth thresholds for contact reduction. When colliding complex meshes,
-                thousands of triangle pairs may generate contacts. Contact reduction efficiently reduces them to a
-                manageable set while preserving contacts that are important for stable simulation.
-
-                Contacts are binned by normal direction (20 bins) and compete for slots using a scoring function.
-                Contacts are filtered by depth threshold, then compete with pure spatial score:
-                ``score = dot(position, scan_direction)`` when ``depth < beta``.
-
-                The ``beta`` parameter controls which contacts participate:
-
-                - ``beta = inf`` (or large value like 1000000): All contacts participate
-                - ``beta = 0``: Only penetrating contacts (depth < 0) participate
-                - ``beta = -0.01``: Only contacts with at least 1cm penetration participate
-
-                Multiple betas can be specified to keep contacts at different depth thresholds.
-                Each beta adds 6 slots per normal bin (one per spatial direction).
-                Default is ``(1000000.0, 0.0001)`` which keeps both all spatial extremes and
-                near-penetrating spatial extremes. The number of reduction slots is ``20 * (6 * len(betas) + 1)``.
             sdf_hydroelastic: Optional SDF hydroelastic instance. Set is_hydroelastic=True on shapes to enable hydroelastic collisions.
             has_meshes: Whether the scene contains any mesh shapes (GeoType.MESH). When False, mesh-related
                 kernel launches are skipped, improving performance for scenes with only primitive shapes.
@@ -1149,7 +1130,6 @@ class NarrowPhase:
         self.max_candidate_pairs = max_candidate_pairs
         self.max_triangle_pairs = max_triangle_pairs
         self.device = device
-        self.betas_tuple = contact_reduction_betas
         self.reduce_contacts = reduce_contacts
         self.has_meshes = has_meshes
 
@@ -1157,7 +1137,7 @@ class NarrowPhase:
         # Contact reduction requires GPU for shared memory operations and is only used for mesh contacts
         is_gpu_device = wp.get_device(device).is_cuda
         if reduce_contacts and is_gpu_device and has_meshes:
-            self.contact_reduction_funcs = ContactReductionFunctions(contact_reduction_betas)
+            self.contact_reduction_funcs = ContactReductionFunctions()
             self.num_reduction_slots = self.contact_reduction_funcs.num_reduction_slots
         else:
             self.contact_reduction_funcs = None
@@ -1214,14 +1194,16 @@ class NarrowPhase:
 
         # Create global contact reduction kernels for mesh-triangle contacts (only if has_meshes and reduce_contacts)
         if self.reduce_contacts and has_meshes:
-            beta0 = self.betas_tuple[0]
-            beta1 = self.betas_tuple[1]
-            num_betas = len(self.betas_tuple)
+            # Fixed beta threshold for contact reduction (small positive to avoid flickering)
+            beta_threshold = ContactReductionFunctions.BETA_THRESHOLD
+            num_betas = 1
 
             self.mesh_triangle_to_reducer_kernel = create_mesh_triangle_contacts_to_reducer_kernel(
-                beta0=beta0, beta1=beta1
+                beta0=beta_threshold, beta1=beta_threshold
             )
-            self.reduce_buffered_contacts_kernel = create_reduce_buffered_contacts_kernel(beta0=beta0, beta1=beta1)
+            self.reduce_buffered_contacts_kernel = create_reduce_buffered_contacts_kernel(
+                beta0=beta_threshold, beta1=beta_threshold
+            )
             self.export_reduced_contacts_kernel = create_export_reduced_contacts_kernel(
                 writer_func, values_per_key=NUM_SPATIAL_DIRECTIONS * num_betas + 1
             )
@@ -1273,8 +1255,8 @@ class NarrowPhase:
                 self.shape_pairs_mesh_plane = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
                 self.shape_pairs_mesh_plane_cumsum = wp.zeros(max_candidate_pairs, dtype=wp.int32, device=device)
                 self.shape_pairs_mesh_mesh = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
-                # Betas array for contact reduction (using the configured contact_reduction_betas tuple)
-                self.betas = create_betas_array(betas=self.betas_tuple, device=device)
+                # Betas array for contact reduction (single fixed threshold)
+                self.betas = create_betas_array(betas=(ContactReductionFunctions.BETA_THRESHOLD,), device=device)
             else:
                 self.shape_pairs_mesh = None
                 self.triangle_pairs = None

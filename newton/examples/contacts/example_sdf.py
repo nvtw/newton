@@ -433,7 +433,7 @@ if __name__ == "__main__":
         "--solver",
         type=str,
         choices=["xpbd", "mujoco"],
-        default="xpbd",
+        default="mujoco",
         help="Solver to use: 'xpbd' (Extended Position-Based Dynamics) or 'mujoco' (MuJoCo constraint solver).",
     )
     parser.add_argument(

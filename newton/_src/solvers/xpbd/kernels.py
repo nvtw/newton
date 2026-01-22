@@ -2182,7 +2182,20 @@ def solve_body_contact_positions(
             wp.atomic_add(contact_inv_weight, body_b, 1.0)
 
     lambda_n = compute_contact_constraint_delta(
-        d, X_wb_a, X_wb_b, m_inv_a, m_inv_b, I_inv_a, I_inv_b, -n, n, angular_a, angular_b, relaxation, time_constant, dt
+        d,
+        X_wb_a,
+        X_wb_b,
+        m_inv_a,
+        m_inv_b,
+        I_inv_a,
+        I_inv_b,
+        -n,
+        n,
+        angular_a,
+        angular_b,
+        relaxation,
+        time_constant,
+        dt,
     )
 
     lin_delta_a = -n * lambda_n
