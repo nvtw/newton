@@ -1194,22 +1194,18 @@ class NarrowPhase:
 
         # Create global contact reduction kernels for mesh-triangle contacts (only if has_meshes and reduce_contacts)
         if self.reduce_contacts and has_meshes:
-            # Fixed beta threshold for contact reduction (small positive to avoid flickering)
+            # Global contact reducer uses single beta threshold (same as shared-memory reduction)
+            # Slot layout: 6 spatial direction slots + 1 max-depth slot = 7 slots per key
             beta_threshold = ContactReductionFunctions.BETA_THRESHOLD
-            num_betas = 1
 
-            self.mesh_triangle_to_reducer_kernel = create_mesh_triangle_contacts_to_reducer_kernel(
-                beta0=beta_threshold, beta1=beta_threshold
-            )
-            self.reduce_buffered_contacts_kernel = create_reduce_buffered_contacts_kernel(
-                beta0=beta_threshold, beta1=beta_threshold
-            )
+            self.mesh_triangle_to_reducer_kernel = create_mesh_triangle_contacts_to_reducer_kernel()
+            self.reduce_buffered_contacts_kernel = create_reduce_buffered_contacts_kernel(beta=beta_threshold)
             self.export_reduced_contacts_kernel = create_export_reduced_contacts_kernel(
-                writer_func, values_per_key=NUM_SPATIAL_DIRECTIONS * num_betas + 1
+                writer_func, values_per_key=NUM_SPATIAL_DIRECTIONS + 1
             )
             # Global contact reducer for mesh-triangle contacts
             # Capacity is based on max_triangle_pairs since that's the max contacts we might generate
-            self.global_contact_reducer = GlobalContactReducer(max_triangle_pairs, device=device, num_betas=num_betas)
+            self.global_contact_reducer = GlobalContactReducer(max_triangle_pairs, device=device)
         else:
             self.mesh_triangle_to_reducer_kernel = None
             self.reduce_buffered_contacts_kernel = None
@@ -1493,6 +1489,9 @@ class NarrowPhase:
                     dim=self.total_num_threads,
                     inputs=[
                         reducer_data,
+                        shape_local_aabb_lower,
+                        shape_local_aabb_upper,
+                        shape_voxel_resolution,
                         self.total_num_threads,
                     ],
                     device=device,
