@@ -1940,6 +1940,7 @@ def compute_contact_constraint_delta(
     angular_a: wp.vec3,
     angular_b: wp.vec3,
     relaxation: float,
+    time_constant: float,
     dt: float,
 ) -> float:
     denom = 0.0
@@ -1955,6 +1956,14 @@ def compute_contact_constraint_delta(
 
     denom += wp.dot(rot_angular_a, I_inv_a * rot_angular_a)
     denom += wp.dot(rot_angular_b, I_inv_b * rot_angular_b)
+
+    # Mass-independent compliance (MuJoCo-style)
+    # Stiffness k = m_eff / τ², so compliance α = τ² / m_eff
+    # This ensures behavior is consistent regardless of object mass
+    if time_constant > 0.0:
+        m_eff = 1.0 / (m_inv_a + m_inv_b + 1e-10)
+        alpha_tilde = (time_constant * time_constant) / (m_eff * dt * dt)
+        denom += alpha_tilde
 
     delta_lambda = -err
     if denom > 0.0:
@@ -2065,6 +2074,7 @@ def solve_body_contact_positions(
     shape_material_torsional_friction: wp.array(dtype=float),
     shape_material_rolling_friction: wp.array(dtype=float),
     relaxation: float,
+    time_constant: float,
     dt: float,
     # outputs
     deltas: wp.array(dtype=wp.spatial_vector),
@@ -2172,7 +2182,7 @@ def solve_body_contact_positions(
             wp.atomic_add(contact_inv_weight, body_b, 1.0)
 
     lambda_n = compute_contact_constraint_delta(
-        d, X_wb_a, X_wb_b, m_inv_a, m_inv_b, I_inv_a, I_inv_b, -n, n, angular_a, angular_b, relaxation, dt
+        d, X_wb_a, X_wb_b, m_inv_a, m_inv_b, I_inv_a, I_inv_b, -n, n, angular_a, angular_b, relaxation, time_constant, dt
     )
 
     lin_delta_a = -n * lambda_n
@@ -2215,6 +2225,7 @@ def solve_body_contact_positions(
                 angular_a,
                 angular_b,
                 relaxation,
+                0.0,  # No compliance for friction
                 dt,
             )
 
@@ -2235,7 +2246,7 @@ def solve_body_contact_positions(
         if wp.abs(err) > 0.0:
             lin = wp.vec3(0.0)
             lambda_torsion = compute_contact_constraint_delta(
-                err, X_wb_a, X_wb_b, m_inv_a, m_inv_b, I_inv_a, I_inv_b, lin, lin, -n, n, relaxation, dt
+                err, X_wb_a, X_wb_b, m_inv_a, m_inv_b, I_inv_a, I_inv_b, lin, lin, -n, n, relaxation, 0.0, dt
             )
 
             lambda_torsion = wp.clamp(lambda_torsion, -lambda_n * torsional_friction, lambda_n * torsional_friction)
@@ -2250,7 +2261,7 @@ def solve_body_contact_positions(
             lin = wp.vec3(0.0)
             roll_n = wp.normalize(delta_omega)
             lambda_roll = compute_contact_constraint_delta(
-                err, X_wb_a, X_wb_b, m_inv_a, m_inv_b, I_inv_a, I_inv_b, lin, lin, -roll_n, roll_n, relaxation, dt
+                err, X_wb_a, X_wb_b, m_inv_a, m_inv_b, I_inv_a, I_inv_b, lin, lin, -roll_n, roll_n, relaxation, 0.0, dt
             )
 
             lambda_roll = wp.max(lambda_roll, -lambda_n * rolling_friction)
