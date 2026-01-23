@@ -504,7 +504,7 @@ class SurfaceReconstructor:
 
     def _downsample(self, points: np.ndarray, normals: np.ndarray, voxel_size: float) -> tuple[np.ndarray, np.ndarray]:
         """Downsample point cloud using voxel grid filtering."""
-        import open3d as o3d
+        import open3d as o3d  # noqa: PLC0415
 
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(points.astype(np.float64))
@@ -538,7 +538,7 @@ class SurfaceReconstructor:
         Returns:
             ReconstructedMesh containing vertices and triangle indices.
         """
-        import open3d as o3d
+        import open3d as o3d  # noqa: PLC0415
 
         points = np.asarray(points, dtype=np.float32)
         normals = np.asarray(normals, dtype=np.float32)
