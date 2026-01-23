@@ -107,12 +107,12 @@ def test_constants(test, device):
 
 def test_compute_num_reduction_slots(test, device):
     """Test compute_num_reduction_slots calculation."""
-    # Formula: (20 bins * 6 directions * num_betas) + 120 voxel slots
-    # With 1 beta: 120 + 120 = 240
+    # Formula: 20 bins * (6 directions * num_betas + 1 max-depth) + 100 voxel slots
+    # With 1 beta: 20 * (6 + 1) + 100 = 140 + 100 = 240
     test.assertEqual(compute_num_reduction_slots(1), 240)
-    # With 2 betas: 240 + 120 = 360
+    # With 2 betas: 20 * (12 + 1) + 100 = 260 + 100 = 360
     test.assertEqual(compute_num_reduction_slots(2), 360)
-    # With 3 betas: 360 + 120 = 480
+    # With 3 betas: 20 * (18 + 1) + 100 = 380 + 100 = 480
     test.assertEqual(compute_num_reduction_slots(3), 480)
 
 
@@ -248,7 +248,7 @@ def _create_reduction_test_kernel(reduction_funcs: ContactReductionFunctions):
         c = _generate_test_contact(t)
 
         # Use thread_id as voxel_index for testing (mod NUM_VOXEL_DEPTH_SLOTS)
-        voxel_idx = t % 120
+        voxel_idx = t % 100
         store_reduced_contact(t, has_contact, c, buffer, active_ids, betas_arr, empty_marker, voxel_idx)
 
         # Filter duplicates
@@ -272,7 +272,7 @@ def test_reduction_functions_initialization(test, device):
 
     test.assertEqual(funcs.num_betas, 1)
     test.assertEqual(funcs.betas, (ContactReductionFunctions.BETA_THRESHOLD,))
-    # (20 bins * 6 directions * 1 beta) + 120 voxel slots = 240
+    # 20 bins * (6 directions * 1 beta + 1 max-depth) + 100 voxel slots = 140 + 100 = 240
     test.assertEqual(funcs.num_reduction_slots, 240)
 
 
@@ -281,7 +281,7 @@ def test_reduction_functions_slot_count(test, device):
     funcs = ContactReductionFunctions()
 
     test.assertEqual(funcs.num_betas, 1)
-    # (20 bins * 6 directions * 1 beta) + 120 voxel slots = 240
+    # 20 bins * (6 directions * 1 beta + 1 max-depth) + 100 voxel slots = 140 + 100 = 240
     test.assertEqual(funcs.num_reduction_slots, 240)
 
 

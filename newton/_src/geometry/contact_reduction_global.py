@@ -17,14 +17,44 @@
 
 This module provides a global contact reduction system that uses a hashtable
 to track the best contacts across shape pairs, normal bins, and scan directions.
-Unlike the shared-memory based approach in contact_reduction.py, this works
+Unlike the shared-memory based approach in ``contact_reduction.py``, this works
 across the entire GPU without block-level synchronization constraints.
 
-Key Design:
-- Contacts are stored in a global buffer (struct of arrays, packed into vec4)
-- A hashtable tracks the best contact per (shape_pair, normal_bin, scan_direction)
-- Each contact is registered 6 times (once per scan direction)
-- Atomic max selects the best contact based on spatial projection score
+**When to Use:**
+
+- Used for mesh-mesh (SDF) collisions where contacts span multiple GPU blocks
+- The shared-memory approach in ``contact_reduction.py`` is used for mesh-plane
+  and mesh-convex where all contacts for a pair fit in one block
+
+**Contact Reduction Strategy:**
+
+The same three-strategy approach as ``ContactReductionFunctions``:
+
+1. **Spatial Extreme Slots** (6 per normal bin = 120 total per pair)
+   - Builds support polygon boundary for stable stacking
+   - Only contacts with depth < beta participate
+
+2. **Per-Bin Max-Depth Slots** (1 per normal bin = 20 total per pair)
+   - Tracks deepest contact per normal direction
+   - Critical for gear-like contacts with varied normal orientations
+   - Participates unconditionally (not gated by beta)
+
+3. **Voxel-Based Depth Slots** (100 total per pair)
+   - Tracks deepest contact per mesh-local voxel region
+   - Ensures early detection of contacts at mesh centers
+   - Prevents sudden contact jumps between frames
+
+**Implementation Details:**
+
+- Contacts stored in global buffer (struct of arrays: position_depth, normal, shape_pairs)
+- Hashtable key: (shape_a, shape_b, bin_id) where bin_id is 0-19 for normal bins, 20-119 for voxels
+- Each normal bin entry has 7 value slots (6 spatial + 1 max-depth)
+- Each voxel bin entry uses only slot 0 for max-depth
+- Atomic max on packed (score, contact_id) selects winners
+
+See Also:
+    :class:`ContactReductionFunctions` in ``contact_reduction.py`` for the
+    shared-memory variant and detailed algorithm documentation.
 """
 
 from __future__ import annotations
@@ -285,19 +315,32 @@ class GlobalContactReducer:
     """Global contact reduction using hashtable-based tracking.
 
     This class manages:
+
     1. A global contact buffer storing contact data (struct of arrays)
     2. A hashtable tracking the best contact per (shape_pair, bin, slot)
 
-    The hashtable key is (shape_a, shape_b, bin_id). Each key has multiple
-    values (one per slot = 6 directions + 1 deepest = 7 total).
+    **Hashtable Structure:**
 
-    Contact data is packed for efficient memory access:
+    - Key: ``(shape_a, shape_b, bin_id)`` packed into 64 bits
+    - bin_id 0-19: Normal bins (icosahedron faces)
+    - bin_id 20-119: Voxel bins (mesh-local spatial regions)
+
+    **Slot Layout per Normal Bin Entry (7 slots):**
+
+    - Slots 0-5: Spatial direction extremes (contacts with depth < beta)
+    - Slot 6: Maximum depth contact for the bin (unconditional)
+
+    **Slot Layout per Voxel Bin Entry:**
+
+    - Slot 0: Maximum depth contact for this voxel region
+
+    **Contact Data Storage:**
+
+    Packed for efficient memory access:
+
     - position_depth: vec4(position.x, position.y, position.z, depth)
     - normal: vec3(normal.x, normal.y, normal.z)
-
-    Slot layout per key:
-    - Slots 0-5: Spatial direction extremes (contacts with depth < beta)
-    - Slot 6: Maximum depth contact for the bin
+    - shape_pairs: vec2i(shape_a, shape_b)
 
     Attributes:
         capacity: Maximum number of contacts that can be stored
@@ -456,11 +499,11 @@ def reduce_contact_in_hashtable(
 
     Uses single beta threshold for contact reduction with two strategies:
 
-    1. **Normal-binned spatial slots** (20 bins x 7 slots = 140 entries):
+    1. **Normal-binned slots** (20 bins x 7 slots = 140 entries):
        - 6 spatial direction slots for contacts with depth < beta
-       - 1 max-depth slot per normal bin
+       - 1 max-depth slot per normal bin (always participates)
 
-    2. **Voxel-based depth slots** (120 entries):
+    2. **Voxel-based depth slots** (100 entries):
        - Each voxel tracks the deepest contact in that mesh-local region
        - Provides spatial coverage independent of contact normal
 

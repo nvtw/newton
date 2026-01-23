@@ -6341,7 +6341,7 @@ class ModelBuilder:
             local_aabb_lower = []
             local_aabb_upper = []
             voxel_resolution = []
-            voxel_budget = 120  # Maximum voxels per shape for contact reduction
+            voxel_budget = 100  # Maximum voxels per shape for contact reduction
 
             # Cache per unique (mesh_id, scale) to avoid redundant AABB computation
             # for instanced meshes (e.g., 256 robots sharing the same mesh sources)
