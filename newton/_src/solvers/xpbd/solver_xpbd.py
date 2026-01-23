@@ -47,6 +47,37 @@ class SolverXPBD(SolverBase):
     After constructing :class:`Model`, :class:`State`, and :class:`Control` (optional) objects, this time-integrator
     may be used to advance the simulation state forward in time.
 
+    Args:
+        model: The simulation model
+        iterations: Number of solver iterations per substep
+        soft_body_relaxation: Relaxation factor for soft body constraints
+        soft_contact_relaxation: Relaxation factor for soft body contacts
+        joint_linear_relaxation: Relaxation factor for joint linear constraints
+        joint_angular_relaxation: Relaxation factor for joint angular constraints
+        joint_linear_compliance: Compliance for joint linear constraints
+        joint_angular_compliance: Compliance for joint angular constraints
+        rigid_contact_relaxation: Relaxation factor for rigid contact constraints (0.0-1.0)
+        rigid_contact_time_constant: Time constant for mass-independent contact compliance (seconds).
+            When > 0, adds compliance that scales with effective mass, making contact behavior
+            consistent regardless of object mass. Set to 0 for hard contacts. This is equivalent
+            to MuJoCo's solref[0] parameter.
+        rigid_contact_damping_ratio: Damping ratio for contact dynamics (MuJoCo-style). Only active
+            when time_constant > 0. Values: 0 = undamped (oscillatory), 1 = critically damped
+            (smooth, no overshoot), >1 = overdamped (slow but stable). Default is 1.0 (critically
+            damped). This is equivalent to MuJoCo's solref[1] parameter.
+        rigid_contact_con_weighting: Whether to weight contact corrections by contact count
+        rigid_contact_max_depenetration_velocity: Hard limit on the resulting relative normal
+            velocity (m/s) at contact points after contact resolution. This clamps how fast
+            the contact points can be separating after the impulse is applied, preventing
+            violent "explosion" artifacts when objects are deeply interpenetrating. Set to 0
+            to disable (default). Typical values: 1-5 m/s. This is mass-independent
+            and acts as a physical velocity cap on the contact resolution outcome.
+        angular_damping: Angular velocity damping factor applied during integration.
+            Reduces angular velocity by a factor of (1 - angular_damping * dt) each step.
+            Set to 0.0 (default) for no damping. Note: this is an approximate linear
+            damping model, not exact exponential decay.
+        enable_restitution: Whether to enable contact restitution (bounciness)
+
     Example
     -------
 
@@ -73,7 +104,9 @@ class SolverXPBD(SolverBase):
         joint_angular_compliance: float = 0.0,
         rigid_contact_relaxation: float = 0.8,
         rigid_contact_time_constant: float = 0.0,
+        rigid_contact_damping_ratio: float = 1.0,
         rigid_contact_con_weighting: bool = True,
+        rigid_contact_max_depenetration_velocity: float = 0.0,
         angular_damping: float = 0.0,
         enable_restitution: bool = False,
     ):
@@ -90,7 +123,9 @@ class SolverXPBD(SolverBase):
 
         self.rigid_contact_relaxation = rigid_contact_relaxation
         self.rigid_contact_time_constant = rigid_contact_time_constant
+        self.rigid_contact_damping_ratio = rigid_contact_damping_ratio
         self.rigid_contact_con_weighting = rigid_contact_con_weighting
+        self.rigid_contact_max_depenetration_velocity = rigid_contact_max_depenetration_velocity
 
         self.angular_damping = angular_damping
 
@@ -535,6 +570,8 @@ class SolverXPBD(SolverBase):
                                 model.shape_material_rolling_friction,
                                 self.rigid_contact_relaxation,
                                 self.rigid_contact_time_constant,
+                                self.rigid_contact_damping_ratio,
+                                self.rigid_contact_max_depenetration_velocity,
                                 dt,
                             ],
                             outputs=[
