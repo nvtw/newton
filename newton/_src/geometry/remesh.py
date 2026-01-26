@@ -65,6 +65,270 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
+from newton._src.geometry.hashtable import HashTable, hashtable_find_or_insert
+
+# -----------------------------------------------------------------------------
+# Morton encoding for sparse voxel grid (21 bits per axis = 63 bits total)
+# -----------------------------------------------------------------------------
+
+# Offset to handle negative coordinates: shift by 2^20 so range [-2^20, 2^20) maps to [0, 2^21)
+VOXEL_COORD_OFFSET = wp.constant(wp.int32(1 << 20))  # 1,048,576
+VOXEL_COORD_MASK = wp.constant(wp.uint64(0x1FFFFF))  # 21 bits = 2,097,151
+
+
+@wp.func
+def _split_by_3(x: wp.uint64) -> wp.uint64:
+    """Spread 21-bit integer into 63 bits with 2 zeros between each bit (for Morton encoding)."""
+    # x = ---- ---- ---- ---- ---- ---- ---x xxxx xxxx xxxx xxxx xxxx (21 bits)
+    x = x & wp.uint64(0x1FFFFF)  # Mask to 21 bits
+    # Spread bits apart using magic numbers (interleave with zeros)
+    x = (x | (x << wp.uint64(32))) & wp.uint64(0x1F00000000FFFF)
+    x = (x | (x << wp.uint64(16))) & wp.uint64(0x1F0000FF0000FF)
+    x = (x | (x << wp.uint64(8))) & wp.uint64(0x100F00F00F00F00F)
+    x = (x | (x << wp.uint64(4))) & wp.uint64(0x10C30C30C30C30C3)
+    x = (x | (x << wp.uint64(2))) & wp.uint64(0x1249249249249249)
+    return x
+
+
+@wp.func
+def morton_encode_3d(ix: wp.int32, iy: wp.int32, iz: wp.int32) -> wp.uint64:
+    """Encode 3 signed integers into a 63-bit Morton code.
+
+    Each coordinate is shifted by VOXEL_COORD_OFFSET to handle negatives,
+    then the 21-bit values are interleaved: z takes bits 2,5,8,..., y takes 1,4,7,..., x takes 0,3,6,...
+    """
+    # Shift to unsigned range
+    ux = wp.uint64(ix + VOXEL_COORD_OFFSET) & VOXEL_COORD_MASK
+    uy = wp.uint64(iy + VOXEL_COORD_OFFSET) & VOXEL_COORD_MASK
+    uz = wp.uint64(iz + VOXEL_COORD_OFFSET) & VOXEL_COORD_MASK
+    # Interleave bits
+    return _split_by_3(ux) | (_split_by_3(uy) << wp.uint64(1)) | (_split_by_3(uz) << wp.uint64(2))
+
+
+@wp.func
+def compute_voxel_key(
+    point: wp.vec3,
+    inv_voxel_size: wp.float32,
+) -> wp.uint64:
+    """Compute Morton-encoded voxel key for a point."""
+    # Quantize to integer voxel coordinates
+    ix = wp.int32(wp.floor(point[0] * inv_voxel_size))
+    iy = wp.int32(wp.floor(point[1] * inv_voxel_size))
+    iz = wp.int32(wp.floor(point[2] * inv_voxel_size))
+    return morton_encode_3d(ix, iy, iz)
+
+
+# -----------------------------------------------------------------------------
+# VoxelHashGrid - sparse voxel grid with online accumulation
+# -----------------------------------------------------------------------------
+
+
+@wp.kernel
+def _accumulate_point_kernel(
+    point: wp.vec3,
+    normal: wp.vec3,
+    inv_voxel_size: wp.float32,
+    # Hash table arrays
+    keys: wp.array(dtype=wp.uint64),
+    active_slots: wp.array(dtype=wp.int32),
+    # Accumulator arrays
+    sum_positions_x: wp.array(dtype=wp.float32),
+    sum_positions_y: wp.array(dtype=wp.float32),
+    sum_positions_z: wp.array(dtype=wp.float32),
+    sum_normals_x: wp.array(dtype=wp.float32),
+    sum_normals_y: wp.array(dtype=wp.float32),
+    sum_normals_z: wp.array(dtype=wp.float32),
+    counts: wp.array(dtype=wp.int32),
+):
+    """Accumulate a single point into the voxel grid (for testing)."""
+    key = compute_voxel_key(point, inv_voxel_size)
+    idx = hashtable_find_or_insert(key, keys, active_slots)
+    if idx >= 0:
+        wp.atomic_add(sum_positions_x, idx, point[0])
+        wp.atomic_add(sum_positions_y, idx, point[1])
+        wp.atomic_add(sum_positions_z, idx, point[2])
+        wp.atomic_add(sum_normals_x, idx, normal[0])
+        wp.atomic_add(sum_normals_y, idx, normal[1])
+        wp.atomic_add(sum_normals_z, idx, normal[2])
+        wp.atomic_add(counts, idx, 1)
+
+
+@wp.kernel
+def _finalize_voxels_kernel(
+    active_slots: wp.array(dtype=wp.int32),
+    num_active: wp.int32,
+    # Accumulator arrays (input)
+    sum_positions_x: wp.array(dtype=wp.float32),
+    sum_positions_y: wp.array(dtype=wp.float32),
+    sum_positions_z: wp.array(dtype=wp.float32),
+    sum_normals_x: wp.array(dtype=wp.float32),
+    sum_normals_y: wp.array(dtype=wp.float32),
+    sum_normals_z: wp.array(dtype=wp.float32),
+    counts: wp.array(dtype=wp.int32),
+    # Output arrays
+    out_points: wp.array(dtype=wp.vec3),
+    out_normals: wp.array(dtype=wp.vec3),
+):
+    """Finalize voxel averages and write to output arrays."""
+    tid = wp.tid()
+    if tid >= num_active:
+        return
+
+    idx = active_slots[tid]
+    count = counts[idx]
+    if count <= 0:
+        return
+
+    inv_count = 1.0 / wp.float32(count)
+
+    # Average position
+    avg_pos = wp.vec3(
+        sum_positions_x[idx] * inv_count,
+        sum_positions_y[idx] * inv_count,
+        sum_positions_z[idx] * inv_count,
+    )
+
+    # Average and normalize normal
+    avg_normal = wp.vec3(
+        sum_normals_x[idx],
+        sum_normals_y[idx],
+        sum_normals_z[idx],
+    )
+    normal_len = wp.length(avg_normal)
+    if normal_len > 1e-8:
+        avg_normal = avg_normal / normal_len
+    else:
+        avg_normal = wp.vec3(0.0, 1.0, 0.0)  # Fallback
+
+    out_points[tid] = avg_pos
+    out_normals[tid] = avg_normal
+
+
+class VoxelHashGrid:
+    """Sparse voxel grid with online accumulation of positions and normals.
+
+    Uses a GPU hash table to map voxel coordinates (Morton-encoded) to
+    accumulator slots. Points and normals are accumulated using atomic
+    operations, allowing fully parallel insertion from multiple threads.
+
+    This is useful for voxel-based downsampling of point clouds directly
+    on the GPU without intermediate storage.
+
+    Args:
+        capacity: Maximum number of unique voxels. Rounded up to power of two.
+        voxel_size: Size of each cubic voxel.
+        device: Warp device for computation.
+
+    Example:
+        >>> grid = VoxelHashGrid(capacity=1_000_000, voxel_size=0.01)
+        >>> # Accumulate points (typically done in a kernel)
+        >>> # ...
+        >>> points, normals, count = grid.finalize()
+    """
+
+    def __init__(
+        self,
+        capacity: int,
+        voxel_size: float,
+        device: str | None = None,
+    ):
+        if voxel_size <= 0:
+            raise ValueError(f"voxel_size must be positive, got {voxel_size}")
+
+        self.voxel_size = voxel_size
+        self.inv_voxel_size = 1.0 / voxel_size
+        self.device = device
+
+        # Hash table for voxel keys
+        self._hashtable = HashTable(capacity, device=device)
+        self.capacity = self._hashtable.capacity
+
+        # Accumulator arrays (separate x/y/z for atomic_add compatibility)
+        self.sum_positions_x = wp.zeros(self.capacity, dtype=wp.float32, device=device)
+        self.sum_positions_y = wp.zeros(self.capacity, dtype=wp.float32, device=device)
+        self.sum_positions_z = wp.zeros(self.capacity, dtype=wp.float32, device=device)
+        self.sum_normals_x = wp.zeros(self.capacity, dtype=wp.float32, device=device)
+        self.sum_normals_y = wp.zeros(self.capacity, dtype=wp.float32, device=device)
+        self.sum_normals_z = wp.zeros(self.capacity, dtype=wp.float32, device=device)
+        self.counts = wp.zeros(self.capacity, dtype=wp.int32, device=device)
+
+    @property
+    def keys(self) -> wp.array:
+        """Hash table keys array (for use in kernels)."""
+        return self._hashtable.keys
+
+    @property
+    def active_slots(self) -> wp.array:
+        """Active slots tracking array (for use in kernels)."""
+        return self._hashtable.active_slots
+
+    def clear(self):
+        """Clear all voxels and reset accumulators."""
+        self._hashtable.clear()
+        self.sum_positions_x.zero_()
+        self.sum_positions_y.zero_()
+        self.sum_positions_z.zero_()
+        self.sum_normals_x.zero_()
+        self.sum_normals_y.zero_()
+        self.sum_normals_z.zero_()
+        self.counts.zero_()
+
+    def get_num_voxels(self) -> int:
+        """Get the current number of occupied voxels."""
+        return int(self._hashtable.active_slots.numpy()[self.capacity])
+
+    def finalize(self) -> tuple[np.ndarray, np.ndarray, int]:
+        """Finalize accumulation and return averaged points and normals.
+
+        Computes the average position and normalized normal for each occupied
+        voxel and returns the results as numpy arrays.
+
+        Returns:
+            Tuple of (points, normals, num_points) where:
+            - points: (N, 3) float32 array of averaged positions
+            - normals: (N, 3) float32 array of normalized normals
+            - num_points: number of occupied voxels
+        """
+        num_active = self.get_num_voxels()
+        if num_active == 0:
+            return (
+                np.zeros((0, 3), dtype=np.float32),
+                np.zeros((0, 3), dtype=np.float32),
+                0,
+            )
+
+        # Allocate output buffers
+        out_points = wp.zeros(num_active, dtype=wp.vec3, device=self.device)
+        out_normals = wp.zeros(num_active, dtype=wp.vec3, device=self.device)
+
+        # Launch finalization kernel
+        wp.launch(
+            _finalize_voxels_kernel,
+            dim=num_active,
+            inputs=[
+                self.active_slots,
+                num_active,
+                self.sum_positions_x,
+                self.sum_positions_y,
+                self.sum_positions_z,
+                self.sum_normals_x,
+                self.sum_normals_y,
+                self.sum_normals_z,
+                self.counts,
+                out_points,
+                out_normals,
+            ],
+            device=self.device,
+        )
+
+        wp.synchronize()
+
+        return (
+            out_points.numpy(),
+            out_normals.numpy(),
+            num_active,
+        )
+
 
 @dataclass
 class PointCloudResult:
@@ -272,16 +536,25 @@ def raycast_orthographic_kernel(
     pixel_size: wp.float32,
     resolution: wp.int32,
     max_ray_dist: wp.float32,
-    # Output buffers
-    out_points: wp.array(dtype=wp.vec3),
-    out_normals: wp.array(dtype=wp.vec3),
-    out_count: wp.array(dtype=wp.int32),
-    max_points: wp.int32,
+    # Voxel hash grid parameters
+    inv_voxel_size: wp.float32,
+    # Hash table arrays
+    keys: wp.array(dtype=wp.uint64),
+    active_slots: wp.array(dtype=wp.int32),
+    # Accumulator arrays
+    sum_positions_x: wp.array(dtype=wp.float32),
+    sum_positions_y: wp.array(dtype=wp.float32),
+    sum_positions_z: wp.array(dtype=wp.float32),
+    sum_normals_x: wp.array(dtype=wp.float32),
+    sum_normals_y: wp.array(dtype=wp.float32),
+    sum_normals_z: wp.array(dtype=wp.float32),
+    counts: wp.array(dtype=wp.int32),
 ):
-    """Raycast kernel for orthographic projection from a single camera view.
+    """Raycast kernel for orthographic projection with direct voxel accumulation.
 
     Each thread handles one pixel. Rays are shot parallel to cam_dir from a grid
-    defined by cam_right and cam_up.
+    defined by cam_right and cam_up. Hits are accumulated directly into a sparse
+    voxel hash grid for memory-efficient point cloud extraction.
     """
     px, py = wp.tid()
 
@@ -310,13 +583,17 @@ def raycast_orthographic_kernel(
             normal = -normal
         normal = wp.normalize(normal)
 
-        # Atomically append to output buffers.
-        # Note: out_count may exceed max_points if more rays hit than buffer capacity,
-        # but we only write to valid indices. The caller clamps the final count.
-        idx = wp.atomic_add(out_count, 0, 1)
-        if idx < max_points:
-            out_points[idx] = hit_point
-            out_normals[idx] = normal
+        # Accumulate into voxel hash grid
+        key = compute_voxel_key(hit_point, inv_voxel_size)
+        idx = hashtable_find_or_insert(key, keys, active_slots)
+        if idx >= 0:
+            wp.atomic_add(sum_positions_x, idx, hit_point[0])
+            wp.atomic_add(sum_positions_y, idx, hit_point[1])
+            wp.atomic_add(sum_positions_z, idx, hit_point[2])
+            wp.atomic_add(sum_normals_x, idx, normal[0])
+            wp.atomic_add(sum_normals_y, idx, normal[1])
+            wp.atomic_add(sum_normals_z, idx, normal[2])
+            wp.atomic_add(counts, idx, 1)
 
 
 class PointCloudExtractor:
@@ -326,19 +603,30 @@ class PointCloudExtractor:
     an icosphere to capture the complete surface of a mesh. Normals are
     guaranteed to be consistent (always pointing outward toward the camera).
 
+    Points are accumulated directly into a sparse voxel hash grid during
+    raycasting, providing built-in downsampling and dramatically reducing
+    memory usage compared to storing all ray hits.
+
     Args:
         subdivision_level: Icosahedron subdivision level (0-5). Level 0 gives 20 views,
             level 1 gives 80 views, level 2 gives 320 views, etc. Higher levels provide
-            better coverage but use significantly more memory.
+            better coverage.
         resolution: Pixel resolution of the orthographic camera (resolution x resolution).
             Must be between 1 and 10000.
+        voxel_size: Size of voxels for point accumulation. If None (default), automatically
+            computed as 0.1% of the mesh bounding sphere diameter. Smaller values give
+            denser point clouds but require more memory.
+        max_voxels: Maximum number of unique voxels (hash table capacity). Default 2^20
+            (~1 million). Increase if you expect very dense sampling.
         device: Warp device to use for computation.
+        seed: Random seed for camera roll angles. Each camera is rotated by a random
+            angle around its view direction to reduce sample correlation and improve
+            coverage uniformity. Set to None for non-deterministic behavior.
 
     Note:
-        Memory usage scales with ``resolution^2 * num_views``. For example, with
-        ``resolution=1000`` and ``subdivision_level=2`` (320 views), the extractor
-        allocates buffers for up to 320 million points (~7.7 GB GPU memory).
-        Use lower resolution or subdivision_level for memory-constrained systems.
+        Memory usage is dominated by the voxel hash grid, which scales with
+        ``max_voxels`` (~28 bytes per voxel slot), not with ``resolution^2 * num_views``.
+        This makes high-resolution extraction practical even on memory-constrained systems.
 
     Example:
         >>> extractor = PointCloudExtractor(subdivision_level=2, resolution=1000)
@@ -350,17 +638,27 @@ class PointCloudExtractor:
         self,
         subdivision_level: int = 1,
         resolution: int = 1000,
+        voxel_size: float | None = None,
+        max_voxels: int = 1 << 20,
         device: str | None = None,
+        seed: int | None = 42,
     ):
         # Validate parameters
         if subdivision_level < 0 or subdivision_level > 5:
             raise ValueError(f"subdivision_level must be between 0 and 5 (inclusive), got {subdivision_level}")
         if resolution < 1 or resolution > 10000:
             raise ValueError(f"resolution must be between 1 and 10000 (inclusive), got {resolution}")
+        if voxel_size is not None and voxel_size <= 0:
+            raise ValueError(f"voxel_size must be positive, got {voxel_size}")
+        if max_voxels < 1:
+            raise ValueError(f"max_voxels must be >= 1, got {max_voxels}")
 
         self.subdivision_level = subdivision_level
         self.resolution = resolution
+        self.voxel_size = voxel_size  # None means auto-compute
+        self.max_voxels = max_voxels
         self.device = device if device is not None else wp.get_device()
+        self.seed = seed
 
         # Pre-compute camera directions
         self.directions = create_icosahedron_directions(subdivision_level)
@@ -412,29 +710,49 @@ class PointCloudExtractor:
         # Maximum ray distance (diameter of bounding sphere with padding)
         max_ray_dist = 2.0 * padded_radius * 1.5
 
+        # Compute voxel size (auto or user-specified)
+        if self.voxel_size is None:
+            # Auto: 0.1% of bounding sphere diameter
+            voxel_size = (2.0 * radius) * 0.001
+            # Guard against zero (single point)
+            if voxel_size == 0.0:
+                voxel_size = 1e-6
+        else:
+            voxel_size = self.voxel_size
+
+        # Create sparse voxel hash grid for accumulation
+        voxel_grid = VoxelHashGrid(
+            capacity=self.max_voxels,
+            voxel_size=voxel_size,
+            device=self.device,
+        )
+
         # Create Warp mesh
         wp_vertices = wp.array(vertices, dtype=wp.vec3, device=self.device)
         wp_indices = wp.array(indices, dtype=wp.int32, device=self.device)
         mesh = wp.Mesh(points=wp_vertices, indices=wp_indices)
 
-        # Estimate max points (all pixels from all views could potentially hit)
-        max_points_per_view = self.resolution * self.resolution
-        max_total_points = max_points_per_view * self.num_views
+        # Create random generator for camera roll angles
+        rng = np.random.default_rng(self.seed)
 
-        # Allocate output buffers
-        out_points = wp.zeros(max_total_points, dtype=wp.vec3, device=self.device)
-        out_normals = wp.zeros(max_total_points, dtype=wp.vec3, device=self.device)
-        out_count = wp.zeros(1, dtype=wp.int32, device=self.device)
-
-        # Cast rays from each camera direction
+        # Cast rays from each camera direction, accumulating into voxel grid
         for i in range(self.num_views):
             direction = self.directions[i]
             right, up = compute_camera_basis(direction)
 
+            # Apply random rotation around view direction (camera roll)
+            # This reduces sample correlation and improves coverage uniformity
+            theta = rng.uniform(0, 2 * np.pi)
+            cos_theta = np.cos(theta)
+            sin_theta = np.sin(theta)
+            right_rot = cos_theta * right + sin_theta * up
+            up_rot = cos_theta * up - sin_theta * right
+            right, up = right_rot, up_rot
+
             # Camera origin is at bounding sphere center, offset back along view direction
             cam_origin = center - direction * padded_radius
 
-            # Launch kernel
+            # Launch kernel - accumulates directly into voxel grid
             wp.launch(
                 kernel=raycast_orthographic_kernel,
                 dim=(self.resolution, self.resolution),
@@ -447,23 +765,22 @@ class PointCloudExtractor:
                     float(pixel_size),
                     self.resolution,
                     float(max_ray_dist),
-                    out_points,
-                    out_normals,
-                    out_count,
-                    max_total_points,
+                    float(voxel_grid.inv_voxel_size),
+                    voxel_grid.keys,
+                    voxel_grid.active_slots,
+                    voxel_grid.sum_positions_x,
+                    voxel_grid.sum_positions_y,
+                    voxel_grid.sum_positions_z,
+                    voxel_grid.sum_normals_x,
+                    voxel_grid.sum_normals_y,
+                    voxel_grid.sum_normals_z,
+                    voxel_grid.counts,
                 ],
                 device=self.device,
             )
 
-        # Synchronize and get results
-        wp.synchronize()
-
-        num_points = int(out_count.numpy()[0])
-        num_points = min(num_points, max_total_points)
-
-        # Copy results to numpy
-        points_np = out_points.numpy()[:num_points]
-        normals_np = out_normals.numpy()[:num_points]
+        # Finalize voxel grid to get averaged points and normals
+        points_np, normals_np, num_points = voxel_grid.finalize()
 
         return PointCloudResult(
             points=points_np,
@@ -493,8 +810,11 @@ class SurfaceReconstructor:
     """Reconstruct triangle meshes from point clouds using Poisson reconstruction.
 
     Uses Open3D's implementation of Screened Poisson Surface Reconstruction.
-    Includes optional voxel downsampling to remove duplicates and ensure
-    uniform point density before reconstruction.
+
+    Note:
+        When used with PointCloudExtractor, the point cloud is already downsampled
+        via the built-in voxel hash grid accumulation. No additional downsampling
+        is needed.
 
     Args:
         depth: Octree depth for Poisson reconstruction (higher = more detail, slower).
@@ -503,9 +823,6 @@ class SurfaceReconstructor:
         linear_fit: Use linear interpolation for iso-surface extraction. Default False.
         density_threshold_quantile: Quantile for removing low-density vertices
             (boundary artifacts). Default 0.01 removes bottom 1%.
-        downsample_voxel_size: Voxel size for downsampling before reconstruction.
-            If None, no downsampling is performed. If "auto", computes based on
-            point cloud extent (~0.1% of largest dimension).
         simplify_ratio: Target ratio to reduce triangle count (e.g., 0.1 = keep 10%).
             If None, no simplification is performed. Uses quadric decimation which
             preserves shape well and removes unnecessary triangles in flat areas.
@@ -532,7 +849,6 @@ class SurfaceReconstructor:
         scale: float = 1.1,
         linear_fit: bool = False,
         density_threshold_quantile: float = 0.01,
-        downsample_voxel_size: float | str | None = "auto",
         simplify_ratio: float | None = None,
         target_triangles: int | None = None,
         simplify_tolerance: float | None = None,
@@ -555,30 +871,9 @@ class SurfaceReconstructor:
         self.scale = scale
         self.linear_fit = linear_fit
         self.density_threshold_quantile = density_threshold_quantile
-        self.downsample_voxel_size = downsample_voxel_size
         self.simplify_ratio = simplify_ratio
         self.target_triangles = target_triangles
         self.simplify_tolerance = simplify_tolerance
-
-    def _downsample(self, points: np.ndarray, normals: np.ndarray, voxel_size: float) -> tuple[np.ndarray, np.ndarray]:
-        """Downsample point cloud using voxel grid filtering."""
-        import open3d as o3d  # noqa: PLC0415
-
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points.astype(np.float64))
-        pcd.normals = o3d.utility.Vector3dVector(normals.astype(np.float64))
-
-        pcd_down = pcd.voxel_down_sample(voxel_size)
-
-        down_points = np.asarray(pcd_down.points, dtype=np.float32)
-        down_normals = np.asarray(pcd_down.normals, dtype=np.float32)
-
-        # Re-normalize normals (voxel downsampling averages them)
-        norms = np.linalg.norm(down_normals, axis=1, keepdims=True)
-        norms = np.maximum(norms, 1e-8)
-        down_normals = down_normals / norms
-
-        return down_points, down_normals
 
     def reconstruct(
         self,
@@ -600,38 +895,10 @@ class SurfaceReconstructor:
 
         points = np.asarray(points, dtype=np.float32)
         normals = np.asarray(normals, dtype=np.float32)
-        original_count = len(points)
 
         # Validate inputs
-        if original_count == 0:
+        if len(points) == 0:
             raise ValueError("Cannot reconstruct from empty point cloud")
-
-        # Downsample if requested
-        if self.downsample_voxel_size is not None:
-            if self.downsample_voxel_size == "auto":
-                # Auto-compute: ~0.1% of largest dimension (keeps more detail)
-                extent = np.max(points, axis=0) - np.min(points, axis=0)
-                voxel_size = float(np.max(extent)) * 0.001
-                # Guard against zero extent (all points identical)
-                if voxel_size == 0.0:
-                    voxel_size = 1e-6
-            else:
-                voxel_size = float(self.downsample_voxel_size)
-
-            if verbose:
-                print(f"Downsampling point cloud (voxel_size={voxel_size:.6f})...")
-
-            points, normals = self._downsample(points, normals, voxel_size)
-
-            # Check for empty result after downsampling
-            if len(points) == 0:
-                raise ValueError(
-                    "Point cloud is empty after downsampling; use a smaller downsample_voxel_size or set it to None"
-                )
-
-            if verbose:
-                ratio = 100 * len(points) / original_count
-                print(f"Downsampled: {original_count} -> {len(points)} points ({ratio:.1f}%)")
 
         # Create Open3D point cloud
         pcd = o3d.geometry.PointCloud()
