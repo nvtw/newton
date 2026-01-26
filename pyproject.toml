@@ -227,5 +227,4 @@ ba = "ba"
 HAA = "HAA"
 
 [tool.typos.default.extend-identifiers]
-iy = "iy"
 PNGs = "PNGs"
