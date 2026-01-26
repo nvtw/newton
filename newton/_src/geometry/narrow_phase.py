@@ -1102,6 +1102,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
 class NarrowPhase:
     def __init__(
         self,
+        *,
         max_candidate_pairs: int,
         max_triangle_pairs: int = 1000000,
         reduce_contacts: bool = True,

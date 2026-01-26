@@ -793,6 +793,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 if t == 0:
                     selected_triangles[tri_capacity] = 0  # count
                     selected_triangles[tri_capacity + 1] = 0  # progress
+                # SYNC: Ensure buffer reset is visible to all threads before triangle selection
                 synchronize()
 
                 mesh = wp.mesh_get(mesh_id_tri)
@@ -816,6 +817,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                     # Process triangles from buffer
                     has_triangle = t < selected_triangles[tri_capacity]
+                    # SYNC: Ensure all threads have read triangle count before any thread processes
                     synchronize()
 
                     if has_triangle:
@@ -877,9 +879,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             writer_func(contact_data, writer_data, -1)
 
                     # Reset buffer for next batch
+                    # SYNC: Ensure all contact writes complete before resetting buffer
                     synchronize()
                     if t == 0:
                         selected_triangles[tri_capacity] = 0  # Reset count
+                    # SYNC: Ensure buffer reset is visible before next iteration's while-check
                     synchronize()
 
     # Return early if contact reduction is disabled
@@ -938,6 +942,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
             if t == 0:
                 active_contacts_shared_mem[wp.static(num_reduction_slots)] = 0
+            # Note: No sync needed here - the per-mode buffer reset below provides the barrier
 
             # Test both directions using smart indexing:
             # mode 0: pair[0] triangles vs pair[1] SDF
@@ -1014,6 +1019,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 if t == 0:
                     selected_triangles[tri_capacity] = 0  # count
                     selected_triangles[tri_capacity + 1] = 0  # progress
+                # SYNC: Ensure buffer reset is visible to all threads before triangle selection
                 synchronize()
 
                 mesh = wp.mesh_get(mesh_id_tri)
@@ -1037,6 +1043,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                     # Process triangles from buffer
                     has_triangle = t < selected_triangles[tri_capacity]
+                    # SYNC: Ensure all threads have read triangle count before any thread processes
                     synchronize()
                     c = ContactStruct()
                     has_contact = wp.bool(False)
@@ -1103,14 +1110,17 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     )
 
                     # Reset buffer for next batch
+                    # SYNC: Ensure all store_reduced_contact calls complete before resetting buffer
                     synchronize()
                     if t == 0:
                         selected_triangles[tri_capacity] = 0  # Reset count
+                    # SYNC: Ensure buffer reset is visible before next iteration's while-check
                     synchronize()
 
             # Now write the reduced contacts to the output array
             # Contacts are in centered world space - add midpoint back to get true world position
             # All contacts use consistent convention: shape_a = pair[0], shape_b = pair[1]
+            # SYNC: Ensure all contacts from both modes are stored before filtering
             synchronize()
 
             # Filter out duplicate contacts (same contact may have won multiple directions)
