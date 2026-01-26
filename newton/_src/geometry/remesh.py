@@ -77,6 +77,8 @@ Example:
         new_indices = clean_mesh.indices  # (M,) int32, flattened
 """
 
+import math
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -108,16 +110,16 @@ def _split_by_3(x: wp.uint64) -> wp.uint64:
 
 
 @wp.func
-def morton_encode_3d(ix: wp.int32, iy: wp.int32, iz: wp.int32) -> wp.uint64:
+def morton_encode_3d(cx: wp.int32, cy: wp.int32, cz: wp.int32) -> wp.uint64:
     """Encode 3 signed integers into a 63-bit Morton code.
 
     Each coordinate is shifted by VOXEL_COORD_OFFSET to handle negatives,
     then the 21-bit values are interleaved: z takes bits 2,5,8,..., y takes 1,4,7,..., x takes 0,3,6,...
     """
     # Shift to unsigned range
-    ux = wp.uint64(ix + VOXEL_COORD_OFFSET) & VOXEL_COORD_MASK
-    uy = wp.uint64(iy + VOXEL_COORD_OFFSET) & VOXEL_COORD_MASK
-    uz = wp.uint64(iz + VOXEL_COORD_OFFSET) & VOXEL_COORD_MASK
+    ux = wp.uint64(cx + VOXEL_COORD_OFFSET) & VOXEL_COORD_MASK
+    uy = wp.uint64(cy + VOXEL_COORD_OFFSET) & VOXEL_COORD_MASK
+    uz = wp.uint64(cz + VOXEL_COORD_OFFSET) & VOXEL_COORD_MASK
     # Interleave bits
     return _split_by_3(ux) | (_split_by_3(uy) << wp.uint64(1)) | (_split_by_3(uz) << wp.uint64(2))
 
@@ -129,10 +131,10 @@ def compute_voxel_key(
 ) -> wp.uint64:
     """Compute Morton-encoded voxel key for a point."""
     # Quantize to integer voxel coordinates
-    ix = wp.int32(wp.floor(point[0] * inv_voxel_size))
-    iy = wp.int32(wp.floor(point[1] * inv_voxel_size))
-    iz = wp.int32(wp.floor(point[2] * inv_voxel_size))
-    return morton_encode_3d(ix, iy, iz)
+    cx = wp.int32(wp.floor(point[0] * inv_voxel_size))
+    cy = wp.int32(wp.floor(point[1] * inv_voxel_size))
+    cz = wp.int32(wp.floor(point[2] * inv_voxel_size))
+    return morton_encode_3d(cx, cy, cz)
 
 
 # -----------------------------------------------------------------------------
@@ -164,8 +166,8 @@ def rand_next(state: wp.uint32) -> wp.uint32:
 
 @wp.func
 def rand_float(state: wp.uint32) -> float:
-    """Convert random state to a float in [0, 1)."""
-    # Use upper bits (better quality in LCG)
+    """Convert random state to a float in [0, 1]."""
+    # Use upper 31 bits (better quality in LCG)
     return wp.float32(state & wp.uint32(0x7FFFFFFF)) / wp.float32(0x7FFFFFFF)
 
 
@@ -226,12 +228,10 @@ def _finalize_voxels_kernel(
     sum_normals_x: wp.array(dtype=wp.float32),
     sum_normals_y: wp.array(dtype=wp.float32),
     sum_normals_z: wp.array(dtype=wp.float32),
-    sum_hit_distances: wp.array(dtype=wp.float32),
     counts: wp.array(dtype=wp.int32),
     # Output arrays
     out_points: wp.array(dtype=wp.vec3),
     out_normals: wp.array(dtype=wp.vec3),
-    out_hit_distances: wp.array(dtype=wp.float32),
 ):
     """Finalize voxel averages and write to output arrays."""
     tid = wp.tid()
@@ -264,24 +264,19 @@ def _finalize_voxels_kernel(
     else:
         avg_normal = wp.vec3(0.0, 1.0, 0.0)  # Fallback
 
-    # Average hit distance
-    avg_hit_dist = sum_hit_distances[idx] * inv_count
-
     out_points[tid] = avg_pos
     out_normals[tid] = avg_normal
-    out_hit_distances[tid] = avg_hit_dist
 
 
 class VoxelHashGrid:
-    """Sparse voxel grid with online accumulation of positions, normals, and hit distances.
+    """Sparse voxel grid with online accumulation of positions and normals.
 
     Uses a GPU hash table to map voxel coordinates (Morton-encoded) to
-    accumulator slots. Points, normals, and hit distances are accumulated using
-    atomic operations, allowing fully parallel insertion from multiple threads.
+    accumulator slots. Points and normals are accumulated using atomic
+    operations, allowing fully parallel insertion from multiple threads.
 
     This is useful for voxel-based downsampling of point clouds directly
-    on the GPU without intermediate storage. Hit distances are tracked to enable
-    weighted sampling for cavity camera placement.
+    on the GPU without intermediate storage.
 
     Args:
         capacity: Maximum number of unique voxels. Rounded up to power of two.
@@ -292,7 +287,7 @@ class VoxelHashGrid:
         >>> grid = VoxelHashGrid(capacity=1_000_000, voxel_size=0.01)
         >>> # Accumulate points (typically done in a kernel)
         >>> # ...
-        >>> points, normals, hit_distances, count = grid.finalize()
+        >>> points, normals, count = grid.finalize()
     """
 
     def __init__(
@@ -319,7 +314,6 @@ class VoxelHashGrid:
         self.sum_normals_x = wp.zeros(self.capacity, dtype=wp.float32, device=device)
         self.sum_normals_y = wp.zeros(self.capacity, dtype=wp.float32, device=device)
         self.sum_normals_z = wp.zeros(self.capacity, dtype=wp.float32, device=device)
-        self.sum_hit_distances = wp.zeros(self.capacity, dtype=wp.float32, device=device)
         self.counts = wp.zeros(self.capacity, dtype=wp.int32, device=device)
 
     @property
@@ -341,24 +335,22 @@ class VoxelHashGrid:
         self.sum_normals_x.zero_()
         self.sum_normals_y.zero_()
         self.sum_normals_z.zero_()
-        self.sum_hit_distances.zero_()
         self.counts.zero_()
 
     def get_num_voxels(self) -> int:
         """Get the current number of occupied voxels."""
         return int(self._hashtable.active_slots.numpy()[self.capacity])
 
-    def finalize(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
-        """Finalize accumulation and return averaged points, normals, and hit distances.
+    def finalize(self) -> tuple[np.ndarray, np.ndarray, int]:
+        """Finalize accumulation and return averaged points and normals.
 
-        Computes the average position, normalized normal, and average hit distance
-        for each occupied voxel and returns the results as numpy arrays.
+        Computes the average position and normalized normal for each occupied
+        voxel and returns the results as numpy arrays.
 
         Returns:
-            Tuple of (points, normals, hit_distances, num_points) where:
+            Tuple of (points, normals, num_points) where:
             - points: (N, 3) float32 array of averaged positions
             - normals: (N, 3) float32 array of normalized normals
-            - hit_distances: (N,) float32 array of averaged hit distances
             - num_points: number of occupied voxels
         """
         num_active = self.get_num_voxels()
@@ -366,14 +358,12 @@ class VoxelHashGrid:
             return (
                 np.zeros((0, 3), dtype=np.float32),
                 np.zeros((0, 3), dtype=np.float32),
-                np.zeros((0,), dtype=np.float32),
                 0,
             )
 
         # Allocate output buffers
         out_points = wp.zeros(num_active, dtype=wp.vec3, device=self.device)
         out_normals = wp.zeros(num_active, dtype=wp.vec3, device=self.device)
-        out_hit_distances = wp.zeros(num_active, dtype=wp.float32, device=self.device)
 
         # Launch finalization kernel
         wp.launch(
@@ -388,11 +378,9 @@ class VoxelHashGrid:
                 self.sum_normals_x,
                 self.sum_normals_y,
                 self.sum_normals_z,
-                self.sum_hit_distances,
                 self.counts,
                 out_points,
                 out_normals,
-                out_hit_distances,
             ],
             device=self.device,
         )
@@ -402,7 +390,6 @@ class VoxelHashGrid:
         return (
             out_points.numpy(),
             out_normals.numpy(),
-            out_hit_distances.numpy(),
             num_active,
         )
 
@@ -504,87 +491,105 @@ def create_icosahedron_directions(edge_segments: int = 2) -> np.ndarray:
     ico_verts = ico_verts / np.linalg.norm(ico_verts, axis=1, keepdims=True)
 
     # Icosahedron faces (20 triangles)
-    ico_faces = [
-        (0, 11, 5),
-        (0, 5, 1),
-        (0, 1, 7),
-        (0, 7, 10),
-        (0, 10, 11),
-        (1, 5, 9),
-        (5, 11, 4),
-        (11, 10, 2),
-        (10, 7, 6),
-        (7, 1, 8),
-        (3, 9, 4),
-        (3, 4, 2),
-        (3, 2, 6),
-        (3, 6, 8),
-        (3, 8, 9),
-        (4, 9, 5),
-        (2, 4, 11),
-        (6, 2, 10),
-        (8, 6, 7),
-        (9, 8, 1),
-    ]
+    ico_faces = np.array(
+        [
+            [0, 11, 5],
+            [0, 5, 1],
+            [0, 1, 7],
+            [0, 7, 10],
+            [0, 10, 11],
+            [1, 5, 9],
+            [5, 11, 4],
+            [11, 10, 2],
+            [10, 7, 6],
+            [7, 1, 8],
+            [3, 9, 4],
+            [3, 4, 2],
+            [3, 2, 6],
+            [3, 6, 8],
+            [3, 8, 9],
+            [4, 9, 5],
+            [2, 4, 11],
+            [6, 2, 10],
+            [8, 6, 7],
+            [9, 8, 1],
+        ],
+        dtype=np.int32,
+    )
+
+    # Get vertices for all 20 faces: (20, 3, 3) - 20 faces, 3 vertices each, 3 coords
+    v0_all = ico_verts[ico_faces[:, 0]]  # (20, 3)
+    v1_all = ico_verts[ico_faces[:, 1]]  # (20, 3)
+    v2_all = ico_verts[ico_faces[:, 2]]  # (20, 3)
 
     if n == 1:
         # No subdivision needed - just return face centers
-        face_centers = np.zeros((20, 3), dtype=np.float64)
-        for i, (i0, i1, i2) in enumerate(ico_faces):
-            center = (ico_verts[i0] + ico_verts[i1] + ico_verts[i2]) / 3.0
-            face_centers[i] = center / np.linalg.norm(center)
-        return face_centers.astype(np.float32)
+        centers = (v0_all + v1_all + v2_all) / 3.0
+        centers = centers / np.linalg.norm(centers, axis=1, keepdims=True)
+        return centers.astype(np.float32)
 
     # Subdivide each face into n^2 triangles using barycentric coordinates
-    # For n segments per edge, we create a grid of vertices in barycentric space
-    # and then map to 3D, projecting onto the unit sphere.
+    # Total sub-faces = 20 * n^2
 
-    all_face_centers = []
+    # Pre-compute barycentric coordinates for all sub-triangle centers
+    # For upward triangles: centers at (i + 1/3, j + 1/3) in barycentric grid coords
+    # For downward triangles: centers at (i + 2/3, j + 2/3) in barycentric grid coords
 
-    for i0, i1, i2 in ico_faces:
-        v0 = ico_verts[i0]
-        v1 = ico_verts[i1]
-        v2 = ico_verts[i2]
+    # Generate all upward triangle barycentric centers
+    # Upward triangles exist for i in [0, n-1], j in [0, n-i-1]
+    up_coords = []
+    for i in range(n):
+        for j in range(n - i):
+            # Center of triangle with vertices at (i,j), (i+1,j), (i,j+1)
+            # Barycentric center: ((i + i+1 + i)/3, (j + j + j+1)/3) = (i + 1/3, j + 1/3)
+            bi = (i + (i + 1) + i) / 3.0
+            bj = (j + j + (j + 1)) / 3.0
+            up_coords.append((bi, bj))
 
-        # Create vertex grid using barycentric coordinates
-        # For n segments, we have (n+1) points along each edge
-        # Barycentric coords (i, j, k) where i + j + k = n, and each >= 0
-        # Map to 3D: p = (i*v0 + j*v1 + k*v2) / n, then normalize to sphere
+    # Generate all downward triangle barycentric centers
+    down_coords = []
+    for i in range(n):
+        for j in range(n - i - 1):
+            # Center of triangle with vertices at (i+1,j), (i+1,j+1), (i,j+1)
+            bi = ((i + 1) + (i + 1) + i) / 3.0
+            bj = (j + (j + 1) + (j + 1)) / 3.0
+            down_coords.append((bi, bj))
 
-        # Build vertex lookup: key = (i, j) -> vertex position on sphere
-        vertex_grid = {}
-        for i in range(n + 1):
-            for j in range(n + 1 - i):
-                k = n - i - j
-                # Barycentric interpolation
-                p = (i * v0 + j * v1 + k * v2) / n
-                # Project to unit sphere
-                p = p / np.linalg.norm(p)
-                vertex_grid[(i, j)] = p
+    # Combine all sub-triangle centers
+    all_bary = np.array(up_coords + down_coords, dtype=np.float64)  # (n^2, 2)
 
-        # Create n^2 small triangles
-        # For each row i (0 to n-1), we have triangles pointing up and down
-        for i in range(n):
-            for j in range(n - i):
-                # Upward-pointing triangle: (i,j), (i+1,j), (i,j+1)
-                p0 = vertex_grid[(i, j)]
-                p1 = vertex_grid[(i + 1, j)]
-                p2 = vertex_grid[(i, j + 1)]
-                center = (p0 + p1 + p2) / 3.0
-                center = center / np.linalg.norm(center)
-                all_face_centers.append(center)
+    # Convert barycentric (i, j) to weights (w0, w1, w2) where w0 + w1 + w2 = 1
+    # p = w0*v0 + w1*v1 + w2*v2 where w0 = (n - i - j)/n, w1 = j/n, w2 = i/n
+    # Wait, need to be careful: barycentric coords (i, j, k) where k = n - i - j
+    # p = (i*v0 + j*v1 + k*v2) / n
+    # So w0 = i/n (weight for v0), w1 = j/n (weight for v1), w2 = k/n = (n-i-j)/n (weight for v2)
 
-                # Downward-pointing triangle (if not on the edge): (i+1,j), (i+1,j+1), (i,j+1)
-                if j < n - i - 1:
-                    p0 = vertex_grid[(i + 1, j)]
-                    p1 = vertex_grid[(i + 1, j + 1)]
-                    p2 = vertex_grid[(i, j + 1)]
-                    center = (p0 + p1 + p2) / 3.0
-                    center = center / np.linalg.norm(center)
-                    all_face_centers.append(center)
+    bi = all_bary[:, 0]  # (num_subtris,)
+    bj = all_bary[:, 1]  # (num_subtris,)
+    bk = n - bi - bj
 
-    face_centers = np.array(all_face_centers, dtype=np.float64)
-    return face_centers.astype(np.float32)
+    w0 = bi / n  # (num_subtris,)
+    w1 = bj / n
+    w2 = bk / n
+
+    # Compute centers for all 20 faces x num_subtris sub-triangles
+    # Result shape: (20, num_subtris, 3)
+    # centers[f, s] = w0[s]*v0_all[f] + w1[s]*v1_all[f] + w2[s]*v2_all[f]
+
+    # Use broadcasting: (20, 1, 3) * (1, num_subtris, 1) -> (20, num_subtris, 3)
+    centers = (
+        v0_all[:, np.newaxis, :] * w0[np.newaxis, :, np.newaxis]
+        + v1_all[:, np.newaxis, :] * w1[np.newaxis, :, np.newaxis]
+        + v2_all[:, np.newaxis, :] * w2[np.newaxis, :, np.newaxis]
+    )  # (20, num_subtris, 3)
+
+    # Normalize to unit sphere
+    centers = centers / np.linalg.norm(centers, axis=2, keepdims=True)
+
+    # Reshape to (20 * num_subtris, 3)
+    centers = centers.reshape(-1, 3)
+
+    return centers.astype(np.float32)
 
 
 def compute_hemisphere_edge_segments(target_rays: int) -> int:
@@ -602,8 +607,6 @@ def compute_hemisphere_edge_segments(target_rays: int) -> int:
     Returns:
         Edge segments value that gives at least target_rays hemisphere directions.
     """
-    import math
-
     # Direct formula: n = ceil(sqrt(target_rays / 10))
     n = max(1, math.ceil(math.sqrt(target_rays / 10.0)))
     return n
@@ -690,7 +693,6 @@ def raycast_orthographic_kernel(
     sum_normals_x: wp.array(dtype=wp.float32),
     sum_normals_y: wp.array(dtype=wp.float32),
     sum_normals_z: wp.array(dtype=wp.float32),
-    sum_hit_distances: wp.array(dtype=wp.float32),
     counts: wp.array(dtype=wp.int32),
     # Cavity camera candidate buffers (optional - pass empty arrays to disable)
     cavity_origins: wp.array(dtype=wp.vec3),
@@ -705,8 +707,8 @@ def raycast_orthographic_kernel(
     """Raycast kernel for orthographic projection with direct voxel accumulation.
 
     Each thread handles one pixel (resolution x resolution grid). Rays are shot
-    parallel to cam_dir from positions on the image plane. Hit points, normals,
-    and ray distances are accumulated directly into a sparse voxel hash grid.
+    parallel to cam_dir from positions on the image plane. Hit points and normals
+    are accumulated directly into a sparse voxel hash grid.
 
     Normals are flipped to always point toward the camera (outward from surface).
 
@@ -751,7 +753,6 @@ def raycast_orthographic_kernel(
             wp.atomic_add(sum_normals_x, idx, normal[0])
             wp.atomic_add(sum_normals_y, idx, normal[1])
             wp.atomic_add(sum_normals_z, idx, normal[2])
-            wp.atomic_add(sum_hit_distances, idx, query.t)
             wp.atomic_add(counts, idx, 1)
 
         # Probabilistically select this hit as a cavity camera candidate
@@ -789,7 +790,6 @@ def raycast_hemisphere_kernel(
     cam_forward: wp.vec3,
     min_ray_dist: wp.float32,
     max_ray_dist: wp.float32,
-    origin_hit_dist: wp.float32,  # Hit distance at the camera origin point
     # Hemisphere directions (local frame, z > 0)
     hemisphere_dirs: wp.array(dtype=wp.vec3),
     num_directions: wp.int32,
@@ -805,7 +805,6 @@ def raycast_hemisphere_kernel(
     sum_normals_x: wp.array(dtype=wp.float32),
     sum_normals_y: wp.array(dtype=wp.float32),
     sum_normals_z: wp.array(dtype=wp.float32),
-    sum_hit_distances: wp.array(dtype=wp.float32),
     counts: wp.array(dtype=wp.int32),
 ):
     """Raycast kernel for hemisphere projection from a cavity camera.
@@ -816,9 +815,6 @@ def raycast_hemisphere_kernel(
     The camera origin and forward direction come from cavity candidates collected
     during primary raycasting - the origin is offset back along the original ray
     direction to guarantee it's outside the mesh.
-
-    Hit distances are accumulated as the sum of origin_hit_dist (how far the primary
-    ray traveled) plus the secondary ray's travel distance, giving total cavity depth.
 
     Hits are accumulated directly into the sparse voxel hash grid.
     """
@@ -860,8 +856,6 @@ def raycast_hemisphere_kernel(
             wp.atomic_add(sum_normals_x, idx, normal[0])
             wp.atomic_add(sum_normals_y, idx, normal[1])
             wp.atomic_add(sum_normals_z, idx, normal[2])
-            # Total hit distance = distance to reach camera origin + this ray's distance
-            wp.atomic_add(sum_hit_distances, idx, origin_hit_dist + query.t)
             wp.atomic_add(counts, idx, 1)
 
 
@@ -1165,7 +1159,6 @@ class PointCloudExtractor:
                     voxel_grid.sum_normals_x,
                     voxel_grid.sum_normals_y,
                     voxel_grid.sum_normals_z,
-                    voxel_grid.sum_hit_distances,
                     voxel_grid.counts,
                     cavity_origins,
                     cavity_directions,
@@ -1183,8 +1176,6 @@ class PointCloudExtractor:
         num_voxels_after_primary = voxel_grid.get_num_voxels()
         load_factor = num_voxels_after_primary / voxel_grid.capacity
         if load_factor > 0.7:
-            import warnings
-
             warnings.warn(
                 f"Voxel hash table is {load_factor:.0%} full ({num_voxels_after_primary}/{voxel_grid.capacity}). "
                 f"This may cause slowdowns. Consider increasing max_voxels or using a larger voxel_size.",
@@ -1243,7 +1234,6 @@ class PointCloudExtractor:
                     sample_idx = sample_indices[i]
                     cam_origin = origins_np[sample_idx]
                     cam_forward = directions_np[sample_idx]  # Already points into mesh
-                    sample_hit_dist = hit_dists_np[sample_idx]
 
                     # Compute camera basis (cam_forward is the forward direction)
                     right, up = compute_camera_basis(cam_forward)
@@ -1268,7 +1258,6 @@ class PointCloudExtractor:
                             wp.vec3(cam_forward[0], cam_forward[1], cam_forward[2]),
                             float(min_ray_dist),
                             float(max_ray_dist),
-                            float(sample_hit_dist),  # Hit distance at camera origin
                             wp_hemisphere_dirs,
                             self.num_hemisphere_dirs,
                             float(voxel_grid.inv_voxel_size),
@@ -1280,7 +1269,6 @@ class PointCloudExtractor:
                             voxel_grid.sum_normals_x,
                             voxel_grid.sum_normals_y,
                             voxel_grid.sum_normals_z,
-                            voxel_grid.sum_hit_distances,
                             voxel_grid.counts,
                         ],
                         device=self.device,
@@ -1296,7 +1284,7 @@ class PointCloudExtractor:
             f"({final_num_voxels:,}/{voxel_grid.capacity:,})"
         )
 
-        points_np, normals_np, _hit_distances_np, num_points = voxel_grid.finalize()
+        points_np, normals_np, num_points = voxel_grid.finalize()
 
         return PointCloudResult(
             points=points_np,
@@ -1407,7 +1395,7 @@ class SurfaceReconstructor:
         Returns:
             ReconstructedMesh containing vertices and triangle indices.
         """
-        import open3d as o3d  # noqa: PLC0415
+        import open3d as o3d  # noqa: PLC0415 - lazy import, open3d is optional
 
         points = np.asarray(points, dtype=np.float32)
         normals = np.asarray(normals, dtype=np.float32)
