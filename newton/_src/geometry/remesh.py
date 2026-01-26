@@ -354,13 +354,9 @@ class PointCloudExtractor:
     ):
         # Validate parameters
         if subdivision_level < 0 or subdivision_level > 5:
-            raise ValueError(
-                f"subdivision_level must be between 0 and 5 (inclusive), got {subdivision_level}"
-            )
+            raise ValueError(f"subdivision_level must be between 0 and 5 (inclusive), got {subdivision_level}")
         if resolution < 1 or resolution > 10000:
-            raise ValueError(
-                f"resolution must be between 1 and 10000 (inclusive), got {resolution}"
-            )
+            raise ValueError(f"resolution must be between 1 and 10000 (inclusive), got {resolution}")
 
         self.subdivision_level = subdivision_level
         self.resolution = resolution
@@ -403,8 +399,7 @@ class PointCloudExtractor:
             raise ValueError(f"Indices length must be a multiple of 3, got {len(indices)}")
         if np.any(indices < 0) or np.any(indices >= len(vertices)):
             raise ValueError(
-                f"Indices must be in range [0, {len(vertices)}), "
-                f"got range [{indices.min()}, {indices.max()}]"
+                f"Indices must be in range [0, {len(vertices)}), got range [{indices.min()}, {indices.max()}]"
             )
 
         # Compute bounding sphere
@@ -548,9 +543,7 @@ class SurfaceReconstructor:
         if scale <= 0:
             raise ValueError(f"scale must be > 0, got {scale}")
         if not (0.0 <= density_threshold_quantile <= 1.0):
-            raise ValueError(
-                f"density_threshold_quantile must be in [0, 1], got {density_threshold_quantile}"
-            )
+            raise ValueError(f"density_threshold_quantile must be in [0, 1], got {density_threshold_quantile}")
         if simplify_ratio is not None and (simplify_ratio <= 0 or simplify_ratio > 1):
             raise ValueError(f"simplify_ratio must be in (0, 1], got {simplify_ratio}")
         if target_triangles is not None and target_triangles < 1:
@@ -633,8 +626,7 @@ class SurfaceReconstructor:
             # Check for empty result after downsampling
             if len(points) == 0:
                 raise ValueError(
-                    "Point cloud is empty after downsampling; "
-                    "use a smaller downsample_voxel_size or set it to None"
+                    "Point cloud is empty after downsampling; use a smaller downsample_voxel_size or set it to None"
                 )
 
             if verbose:

@@ -23,21 +23,17 @@ This test suite validates:
 Note: SurfaceReconstructor requires Open3D which is an optional dependency.
 """
 
+import importlib.util
 import unittest
 
 import numpy as np
 import warp as wp
 
-from newton.geometry import PointCloudExtractor, PointCloudResult
-from newton.tests.unittest_utils import get_cuda_test_devices
+from newton._src.geometry.remesh import compute_bounding_sphere, compute_camera_basis
+from newton.geometry import PointCloudExtractor, SurfaceReconstructor
 
 # Check if Open3D is available for reconstruction tests
-try:
-    import open3d as o3d
-
-    OPEN3D_AVAILABLE = True
-except ImportError:
-    OPEN3D_AVAILABLE = False
+OPEN3D_AVAILABLE = importlib.util.find_spec("open3d") is not None
 
 # Check if CUDA is available (required for Warp mesh raycasting)
 _cuda_available = wp.is_cuda_available()
@@ -385,8 +381,6 @@ class TestSurfaceReconstructor(unittest.TestCase):
 
     def test_reconstruct_cube_mesh(self):
         """Test full remeshing pipeline: extract point cloud and reconstruct mesh."""
-        from newton.geometry import SurfaceReconstructor
-
         vertices, indices = create_unit_cube_mesh()
 
         # Step 1: Extract point cloud
@@ -434,8 +428,6 @@ class TestSurfaceReconstructor(unittest.TestCase):
 
     def test_reconstruct_produces_reasonable_triangle_count(self):
         """Test that reconstruction produces a reasonable number of triangles."""
-        from newton.geometry import SurfaceReconstructor
-
         vertices, indices = create_unit_cube_mesh()
 
         extractor = PointCloudExtractor(subdivision_level=1, resolution=100)
@@ -452,8 +444,6 @@ class TestSurfaceReconstructor(unittest.TestCase):
 
     def test_parameter_validation(self):
         """Test that invalid parameters raise ValueError."""
-        from newton.geometry import SurfaceReconstructor
-
         # Invalid depth
         with self.assertRaises(ValueError):
             SurfaceReconstructor(depth=0)
@@ -482,8 +472,6 @@ class TestSurfaceReconstructor(unittest.TestCase):
 
     def test_reconstruct_empty_pointcloud_raises(self):
         """Test that reconstructing from empty point cloud raises ValueError."""
-        from newton.geometry import SurfaceReconstructor
-
         reconstructor = SurfaceReconstructor(depth=6)
 
         empty_points = np.array([], dtype=np.float32).reshape(0, 3)
@@ -498,15 +486,11 @@ class TestRemeshHelperFunctions(unittest.TestCase):
 
     def test_compute_bounding_sphere_empty_raises(self):
         """Test that empty vertices raise ValueError."""
-        from newton._src.geometry.remesh import compute_bounding_sphere
-
         with self.assertRaises(ValueError):
             compute_bounding_sphere(np.array([], dtype=np.float32).reshape(0, 3))
 
     def test_compute_bounding_sphere_single_vertex(self):
         """Test bounding sphere for single vertex."""
-        from newton._src.geometry.remesh import compute_bounding_sphere
-
         vertices = np.array([[1.0, 2.0, 3.0]], dtype=np.float32)
         center, radius = compute_bounding_sphere(vertices)
 
@@ -515,8 +499,6 @@ class TestRemeshHelperFunctions(unittest.TestCase):
 
     def test_compute_bounding_sphere_cube(self):
         """Test bounding sphere for cube vertices."""
-        from newton._src.geometry.remesh import compute_bounding_sphere
-
         vertices, _ = create_unit_cube_mesh()
         center, radius = compute_bounding_sphere(vertices)
 
@@ -529,15 +511,11 @@ class TestRemeshHelperFunctions(unittest.TestCase):
 
     def test_compute_camera_basis_zero_direction_raises(self):
         """Test that zero direction raises ValueError."""
-        from newton._src.geometry.remesh import compute_camera_basis
-
         with self.assertRaises(ValueError):
             compute_camera_basis(np.array([0.0, 0.0, 0.0]))
 
     def test_compute_camera_basis_produces_orthonormal(self):
         """Test that camera basis produces orthonormal vectors."""
-        from newton._src.geometry.remesh import compute_camera_basis
-
         direction = np.array([1.0, 0.5, 0.3], dtype=np.float32)
         direction = direction / np.linalg.norm(direction)
 
@@ -554,8 +532,6 @@ class TestRemeshHelperFunctions(unittest.TestCase):
 
     def test_compute_camera_basis_multiple_directions(self):
         """Test camera basis for multiple different directions."""
-        from newton._src.geometry.remesh import compute_camera_basis
-
         # Test various directions including edge cases
         directions = [
             [1.0, 0.0, 0.0],  # Along X
@@ -565,21 +541,21 @@ class TestRemeshHelperFunctions(unittest.TestCase):
             [-0.5, 0.8, 0.3],  # Arbitrary
         ]
 
-        for direction in directions:
-            direction = np.array(direction, dtype=np.float32)
+        for dir_vec in directions:
+            direction = np.array(dir_vec, dtype=np.float32)
             direction = direction / np.linalg.norm(direction)
 
             right, up = compute_camera_basis(direction)
 
             # All should produce orthonormal bases
             self.assertAlmostEqual(
-                np.dot(right, up), 0.0, places=4, msg=f"right·up should be 0 for direction {direction}"
+                np.dot(right, up), 0.0, places=4, msg=f"right·up should be 0 for direction {dir_vec}"
             )
             self.assertAlmostEqual(
-                np.dot(right, direction), 0.0, places=4, msg=f"right·dir should be 0 for direction {direction}"
+                np.dot(right, direction), 0.0, places=4, msg=f"right·dir should be 0 for direction {dir_vec}"
             )
             self.assertAlmostEqual(
-                np.dot(up, direction), 0.0, places=4, msg=f"up·dir should be 0 for direction {direction}"
+                np.dot(up, direction), 0.0, places=4, msg=f"up·dir should be 0 for direction {dir_vec}"
             )
 
 
