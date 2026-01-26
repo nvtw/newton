@@ -29,7 +29,13 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.geometry.remesh import compute_bounding_sphere, compute_camera_basis
+from newton._src.geometry.hashtable import hashtable_find_or_insert
+from newton._src.geometry.remesh import (
+    VoxelHashGrid,
+    compute_bounding_sphere,
+    compute_camera_basis,
+    compute_voxel_key,
+)
 from newton.geometry import PointCloudExtractor, SurfaceReconstructor
 
 # Check if Open3D is available for reconstruction tests
@@ -198,8 +204,8 @@ class TestPointCloudExtractor(unittest.TestCase):
         """Test that extracting a point cloud from a cube produces many points."""
         vertices, indices = create_unit_cube_mesh()
 
-        # Use fast settings: low resolution, low subdivision
-        extractor = PointCloudExtractor(subdivision_level=1, resolution=100)
+        # Use fast settings: low resolution, few edge segments
+        extractor = PointCloudExtractor(edge_segments=1, resolution=100)
         result = extractor.extract(vertices, indices)
 
         # With 80 views at 100x100 = 800,000 potential rays
@@ -218,7 +224,7 @@ class TestPointCloudExtractor(unittest.TestCase):
         """Test that extracted points are precisely on the cube surface."""
         vertices, indices = create_unit_cube_mesh()
 
-        extractor = PointCloudExtractor(subdivision_level=1, resolution=100)
+        extractor = PointCloudExtractor(edge_segments=1, resolution=100)
         result = extractor.extract(vertices, indices)
 
         # Compute distance of each extracted point to the cube surface
@@ -244,7 +250,7 @@ class TestPointCloudExtractor(unittest.TestCase):
         """Test that point cloud extraction covers all 6 faces of the cube."""
         vertices, indices = create_unit_cube_mesh()
 
-        extractor = PointCloudExtractor(subdivision_level=1, resolution=100)
+        extractor = PointCloudExtractor(edge_segments=1, resolution=100)
         result = extractor.extract(vertices, indices)
 
         # Classify points by face
@@ -263,7 +269,7 @@ class TestPointCloudExtractor(unittest.TestCase):
         """Test that extracted normals are unit length."""
         vertices, indices = create_unit_cube_mesh()
 
-        extractor = PointCloudExtractor(subdivision_level=1, resolution=100)
+        extractor = PointCloudExtractor(edge_segments=1, resolution=100)
         result = extractor.extract(vertices, indices)
 
         # Compute normal lengths
@@ -279,7 +285,7 @@ class TestPointCloudExtractor(unittest.TestCase):
         """Test that normals point outward from the cube surface."""
         vertices, indices = create_unit_cube_mesh()
 
-        extractor = PointCloudExtractor(subdivision_level=1, resolution=100)
+        extractor = PointCloudExtractor(edge_segments=1, resolution=100)
         result = extractor.extract(vertices, indices)
 
         # For a cube centered at origin, outward normals should point away from center
@@ -305,7 +311,7 @@ class TestPointCloudExtractor(unittest.TestCase):
         center = np.array([10.0, -5.0, 3.0])
         vertices, indices = create_unit_cube_mesh(center=center)
 
-        extractor = PointCloudExtractor(subdivision_level=1, resolution=100)
+        extractor = PointCloudExtractor(edge_segments=1, resolution=100)
         result = extractor.extract(vertices, indices)
 
         # Points should still be on the (translated) cube surface
@@ -325,13 +331,13 @@ class TestPointCloudExtractor(unittest.TestCase):
         for face_name, count in face_counts.items():
             self.assertGreater(count, 50, f"Face {face_name} should have points even for translated cube")
 
-    def test_parameter_validation_subdivision_level(self):
-        """Test that invalid subdivision_level raises ValueError."""
+    def test_parameter_validation_edge_segments(self):
+        """Test that invalid edge_segments raises ValueError."""
         with self.assertRaises(ValueError):
-            PointCloudExtractor(subdivision_level=-1)
+            PointCloudExtractor(edge_segments=0)
 
         with self.assertRaises(ValueError):
-            PointCloudExtractor(subdivision_level=6)
+            PointCloudExtractor(edge_segments=-1)
 
     def test_parameter_validation_resolution(self):
         """Test that invalid resolution raises ValueError."""
@@ -343,7 +349,7 @@ class TestPointCloudExtractor(unittest.TestCase):
 
     def test_extract_empty_mesh_raises(self):
         """Test that extracting from empty mesh raises ValueError."""
-        extractor = PointCloudExtractor(subdivision_level=1, resolution=100)
+        extractor = PointCloudExtractor(edge_segments=1, resolution=100)
 
         # Empty vertices
         with self.assertRaises(ValueError):
@@ -357,7 +363,7 @@ class TestPointCloudExtractor(unittest.TestCase):
     def test_extract_invalid_indices_raises(self):
         """Test that invalid indices raise ValueError."""
         vertices, indices = create_unit_cube_mesh()
-        extractor = PointCloudExtractor(subdivision_level=1, resolution=100)
+        extractor = PointCloudExtractor(edge_segments=1, resolution=100)
 
         # Indices not multiple of 3
         with self.assertRaises(ValueError):
@@ -385,15 +391,15 @@ class TestSurfaceReconstructor(unittest.TestCase):
 
         # Step 1: Extract point cloud
         # Use slightly higher resolution for better reconstruction quality
-        extractor = PointCloudExtractor(subdivision_level=1, resolution=150)
+        extractor = PointCloudExtractor(edge_segments=1, resolution=150)
         pointcloud = extractor.extract(vertices, indices)
 
         self.assertGreater(pointcloud.num_points, 500, "Should extract sufficient points for reconstruction")
 
         # Step 2: Reconstruct mesh
+        # Note: downsampling is handled by PointCloudExtractor's voxel hash grid
         reconstructor = SurfaceReconstructor(
             depth=7,  # Reasonable depth for a cube
-            downsample_voxel_size="auto",
             simplify_tolerance=None,
             simplify_ratio=None,
             target_triangles=None,
@@ -430,10 +436,10 @@ class TestSurfaceReconstructor(unittest.TestCase):
         """Test that reconstruction produces a reasonable number of triangles."""
         vertices, indices = create_unit_cube_mesh()
 
-        extractor = PointCloudExtractor(subdivision_level=1, resolution=100)
+        extractor = PointCloudExtractor(edge_segments=1, resolution=100)
         pointcloud = extractor.extract(vertices, indices)
 
-        reconstructor = SurfaceReconstructor(depth=6, downsample_voxel_size="auto")
+        reconstructor = SurfaceReconstructor(depth=6)
         recon_mesh = reconstructor.reconstruct_from_result(pointcloud, verbose=False)
 
         # A cube needs at minimum 12 triangles (2 per face)
@@ -479,6 +485,465 @@ class TestSurfaceReconstructor(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             reconstructor.reconstruct(empty_points, empty_normals, verbose=False)
+
+
+@unittest.skipUnless(_cuda_available, "VoxelHashGrid requires CUDA")
+class TestVoxelHashGrid(unittest.TestCase):
+    """Test the VoxelHashGrid class for sparse voxel accumulation."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Set up test fixtures once for all tests."""
+        wp.init()
+
+    def test_init_valid_parameters(self):
+        """Test that VoxelHashGrid initializes correctly with valid parameters."""
+        grid = VoxelHashGrid(capacity=1000, voxel_size=0.1)
+
+        # Capacity is rounded up to power of two
+        self.assertGreaterEqual(grid.capacity, 1000)
+        self.assertEqual(grid.capacity & (grid.capacity - 1), 0, "Capacity should be power of two")
+        self.assertEqual(grid.voxel_size, 0.1)
+        self.assertAlmostEqual(grid.inv_voxel_size, 10.0)
+        self.assertEqual(grid.get_num_voxels(), 0)
+
+    def test_init_invalid_voxel_size_raises(self):
+        """Test that invalid voxel_size raises ValueError."""
+        with self.assertRaises(ValueError):
+            VoxelHashGrid(capacity=1000, voxel_size=0)
+
+        with self.assertRaises(ValueError):
+            VoxelHashGrid(capacity=1000, voxel_size=-0.1)
+
+    def test_finalize_empty_grid(self):
+        """Test that finalizing an empty grid returns empty arrays."""
+        grid = VoxelHashGrid(capacity=1000, voxel_size=0.1)
+
+        points, normals, hit_distances, num_points = grid.finalize()
+
+        self.assertEqual(num_points, 0)
+        self.assertEqual(points.shape, (0, 3))
+        self.assertEqual(normals.shape, (0, 3))
+        self.assertEqual(hit_distances.shape, (0,))
+
+    def test_accumulate_single_point(self):
+        """Test accumulating a single point into the grid."""
+        grid = VoxelHashGrid(capacity=1000, voxel_size=0.1)
+
+        # Accumulate a single point using the kernel
+        @wp.kernel
+        def accumulate_test_point(
+            point: wp.vec3,
+            normal: wp.vec3,
+            hit_dist: float,
+            inv_voxel_size: float,
+            keys: wp.array(dtype=wp.uint64),
+            active_slots: wp.array(dtype=wp.int32),
+            sum_pos_x: wp.array(dtype=wp.float32),
+            sum_pos_y: wp.array(dtype=wp.float32),
+            sum_pos_z: wp.array(dtype=wp.float32),
+            sum_norm_x: wp.array(dtype=wp.float32),
+            sum_norm_y: wp.array(dtype=wp.float32),
+            sum_norm_z: wp.array(dtype=wp.float32),
+            sum_hit_dist: wp.array(dtype=wp.float32),
+            counts: wp.array(dtype=wp.int32),
+        ):
+            key = compute_voxel_key(point, inv_voxel_size)
+            idx = hashtable_find_or_insert(key, keys, active_slots)
+            if idx >= 0:
+                wp.atomic_add(sum_pos_x, idx, point[0])
+                wp.atomic_add(sum_pos_y, idx, point[1])
+                wp.atomic_add(sum_pos_z, idx, point[2])
+                wp.atomic_add(sum_norm_x, idx, normal[0])
+                wp.atomic_add(sum_norm_y, idx, normal[1])
+                wp.atomic_add(sum_norm_z, idx, normal[2])
+                wp.atomic_add(sum_hit_dist, idx, hit_dist)
+                wp.atomic_add(counts, idx, 1)
+
+        test_point = wp.vec3(0.5, 0.5, 0.5)
+        test_normal = wp.vec3(1.0, 0.0, 0.0)
+        test_hit_dist = 2.5
+
+        wp.launch(
+            accumulate_test_point,
+            dim=1,
+            inputs=[
+                test_point,
+                test_normal,
+                test_hit_dist,
+                grid.inv_voxel_size,
+                grid.keys,
+                grid.active_slots,
+                grid.sum_positions_x,
+                grid.sum_positions_y,
+                grid.sum_positions_z,
+                grid.sum_normals_x,
+                grid.sum_normals_y,
+                grid.sum_normals_z,
+                grid.sum_hit_distances,
+                grid.counts,
+            ],
+        )
+        wp.synchronize()
+
+        self.assertEqual(grid.get_num_voxels(), 1)
+
+        points, normals, hit_distances, num_points = grid.finalize()
+
+        self.assertEqual(num_points, 1)
+        np.testing.assert_array_almost_equal(points[0], [0.5, 0.5, 0.5], decimal=5)
+        np.testing.assert_array_almost_equal(normals[0], [1.0, 0.0, 0.0], decimal=5)
+        self.assertAlmostEqual(hit_distances[0], 2.5, places=5)
+
+    def test_accumulate_multiple_points_same_voxel(self):
+        """Test that multiple points in the same voxel are averaged correctly."""
+        grid = VoxelHashGrid(capacity=1000, voxel_size=1.0)  # Large voxel
+
+        # Create points that fall in the same voxel
+        points_data = np.array(
+            [
+                [0.1, 0.2, 0.3],
+                [0.4, 0.5, 0.6],
+                [0.7, 0.8, 0.9],
+            ],
+            dtype=np.float32,
+        )
+        normals_data = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+        hit_dists_data = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+
+        wp_points = wp.array(points_data, dtype=wp.vec3)
+        wp_normals = wp.array(normals_data, dtype=wp.vec3)
+        wp_hit_dists = wp.array(hit_dists_data, dtype=wp.float32)
+
+        @wp.kernel
+        def accumulate_points(
+            points: wp.array(dtype=wp.vec3),
+            normals: wp.array(dtype=wp.vec3),
+            hit_dists: wp.array(dtype=wp.float32),
+            inv_voxel_size: float,
+            keys: wp.array(dtype=wp.uint64),
+            active_slots: wp.array(dtype=wp.int32),
+            sum_pos_x: wp.array(dtype=wp.float32),
+            sum_pos_y: wp.array(dtype=wp.float32),
+            sum_pos_z: wp.array(dtype=wp.float32),
+            sum_norm_x: wp.array(dtype=wp.float32),
+            sum_norm_y: wp.array(dtype=wp.float32),
+            sum_norm_z: wp.array(dtype=wp.float32),
+            sum_hit_dist: wp.array(dtype=wp.float32),
+            counts: wp.array(dtype=wp.int32),
+        ):
+            tid = wp.tid()
+            point = points[tid]
+            normal = normals[tid]
+            hit_dist = hit_dists[tid]
+
+            key = compute_voxel_key(point, inv_voxel_size)
+            idx = hashtable_find_or_insert(key, keys, active_slots)
+            if idx >= 0:
+                wp.atomic_add(sum_pos_x, idx, point[0])
+                wp.atomic_add(sum_pos_y, idx, point[1])
+                wp.atomic_add(sum_pos_z, idx, point[2])
+                wp.atomic_add(sum_norm_x, idx, normal[0])
+                wp.atomic_add(sum_norm_y, idx, normal[1])
+                wp.atomic_add(sum_norm_z, idx, normal[2])
+                wp.atomic_add(sum_hit_dist, idx, hit_dist)
+                wp.atomic_add(counts, idx, 1)
+
+        wp.launch(
+            accumulate_points,
+            dim=3,
+            inputs=[
+                wp_points,
+                wp_normals,
+                wp_hit_dists,
+                grid.inv_voxel_size,
+                grid.keys,
+                grid.active_slots,
+                grid.sum_positions_x,
+                grid.sum_positions_y,
+                grid.sum_positions_z,
+                grid.sum_normals_x,
+                grid.sum_normals_y,
+                grid.sum_normals_z,
+                grid.sum_hit_distances,
+                grid.counts,
+            ],
+        )
+        wp.synchronize()
+
+        # All points should fall in the same voxel (voxel_size=1.0, all coords in [0,1))
+        self.assertEqual(grid.get_num_voxels(), 1)
+
+        points, normals, hit_distances, num_points = grid.finalize()
+
+        self.assertEqual(num_points, 1)
+
+        # Check averaged position
+        expected_pos = np.mean(points_data, axis=0)
+        np.testing.assert_array_almost_equal(points[0], expected_pos, decimal=5)
+
+        # Check averaged hit distance
+        expected_hit_dist = np.mean(hit_dists_data)
+        self.assertAlmostEqual(hit_distances[0], expected_hit_dist, places=5)
+
+        # Check normalized normal (sum of normals, then normalized)
+        sum_normal = np.sum(normals_data, axis=0)
+        expected_normal = sum_normal / np.linalg.norm(sum_normal)
+        np.testing.assert_array_almost_equal(normals[0], expected_normal, decimal=5)
+
+    def test_accumulate_points_different_voxels(self):
+        """Test that points in different voxels create separate entries."""
+        grid = VoxelHashGrid(capacity=1000, voxel_size=0.1)
+
+        # Points that should fall in different voxels
+        points_data = np.array(
+            [
+                [0.05, 0.05, 0.05],  # Voxel (0, 0, 0)
+                [0.15, 0.05, 0.05],  # Voxel (1, 0, 0)
+                [0.05, 0.15, 0.05],  # Voxel (0, 1, 0)
+            ],
+            dtype=np.float32,
+        )
+        normals_data = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+        hit_dists_data = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+
+        wp_points = wp.array(points_data, dtype=wp.vec3)
+        wp_normals = wp.array(normals_data, dtype=wp.vec3)
+        wp_hit_dists = wp.array(hit_dists_data, dtype=wp.float32)
+
+        @wp.kernel
+        def accumulate_points(
+            points: wp.array(dtype=wp.vec3),
+            normals: wp.array(dtype=wp.vec3),
+            hit_dists: wp.array(dtype=wp.float32),
+            inv_voxel_size: float,
+            keys: wp.array(dtype=wp.uint64),
+            active_slots: wp.array(dtype=wp.int32),
+            sum_pos_x: wp.array(dtype=wp.float32),
+            sum_pos_y: wp.array(dtype=wp.float32),
+            sum_pos_z: wp.array(dtype=wp.float32),
+            sum_norm_x: wp.array(dtype=wp.float32),
+            sum_norm_y: wp.array(dtype=wp.float32),
+            sum_norm_z: wp.array(dtype=wp.float32),
+            sum_hit_dist: wp.array(dtype=wp.float32),
+            counts: wp.array(dtype=wp.int32),
+        ):
+            tid = wp.tid()
+            point = points[tid]
+            normal = normals[tid]
+            hit_dist = hit_dists[tid]
+
+            key = compute_voxel_key(point, inv_voxel_size)
+            idx = hashtable_find_or_insert(key, keys, active_slots)
+            if idx >= 0:
+                wp.atomic_add(sum_pos_x, idx, point[0])
+                wp.atomic_add(sum_pos_y, idx, point[1])
+                wp.atomic_add(sum_pos_z, idx, point[2])
+                wp.atomic_add(sum_norm_x, idx, normal[0])
+                wp.atomic_add(sum_norm_y, idx, normal[1])
+                wp.atomic_add(sum_norm_z, idx, normal[2])
+                wp.atomic_add(sum_hit_dist, idx, hit_dist)
+                wp.atomic_add(counts, idx, 1)
+
+        wp.launch(
+            accumulate_points,
+            dim=3,
+            inputs=[
+                wp_points,
+                wp_normals,
+                wp_hit_dists,
+                grid.inv_voxel_size,
+                grid.keys,
+                grid.active_slots,
+                grid.sum_positions_x,
+                grid.sum_positions_y,
+                grid.sum_positions_z,
+                grid.sum_normals_x,
+                grid.sum_normals_y,
+                grid.sum_normals_z,
+                grid.sum_hit_distances,
+                grid.counts,
+            ],
+        )
+        wp.synchronize()
+
+        # Should have 3 separate voxels
+        self.assertEqual(grid.get_num_voxels(), 3)
+
+        points, normals, hit_distances, num_points = grid.finalize()
+
+        self.assertEqual(num_points, 3)
+        # All normals should be unit length
+        normal_lengths = np.linalg.norm(normals, axis=1)
+        np.testing.assert_array_almost_equal(normal_lengths, [1.0, 1.0, 1.0], decimal=5)
+
+    def test_clear_resets_grid(self):
+        """Test that clear() resets the grid to empty state."""
+        grid = VoxelHashGrid(capacity=1000, voxel_size=0.1)
+
+        # Add a point
+        @wp.kernel
+        def add_point(
+            inv_voxel_size: float,
+            keys: wp.array(dtype=wp.uint64),
+            active_slots: wp.array(dtype=wp.int32),
+            sum_pos_x: wp.array(dtype=wp.float32),
+            counts: wp.array(dtype=wp.int32),
+        ):
+            point = wp.vec3(0.5, 0.5, 0.5)
+            key = compute_voxel_key(point, inv_voxel_size)
+            idx = hashtable_find_or_insert(key, keys, active_slots)
+            if idx >= 0:
+                wp.atomic_add(sum_pos_x, idx, point[0])
+                wp.atomic_add(counts, idx, 1)
+
+        wp.launch(
+            add_point,
+            dim=1,
+            inputs=[
+                grid.inv_voxel_size,
+                grid.keys,
+                grid.active_slots,
+                grid.sum_positions_x,
+                grid.counts,
+            ],
+        )
+        wp.synchronize()
+
+        self.assertEqual(grid.get_num_voxels(), 1)
+
+        # Clear the grid
+        grid.clear()
+
+        self.assertEqual(grid.get_num_voxels(), 0)
+
+        # Finalize should return empty
+        points, normals, hit_distances, num_points = grid.finalize()
+        self.assertEqual(num_points, 0)
+
+    def test_negative_coordinates(self):
+        """Test that negative coordinates are handled correctly."""
+        grid = VoxelHashGrid(capacity=1000, voxel_size=0.1)
+
+        # Points with negative coordinates
+        points_data = np.array(
+            [
+                [-0.5, -0.5, -0.5],
+                [-0.5, 0.5, -0.5],
+                [0.5, -0.5, 0.5],
+            ],
+            dtype=np.float32,
+        )
+        normals_data = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+
+        wp_points = wp.array(points_data, dtype=wp.vec3)
+        wp_normals = wp.array(normals_data, dtype=wp.vec3)
+
+        @wp.kernel
+        def accumulate_points(
+            points: wp.array(dtype=wp.vec3),
+            normals: wp.array(dtype=wp.vec3),
+            inv_voxel_size: float,
+            keys: wp.array(dtype=wp.uint64),
+            active_slots: wp.array(dtype=wp.int32),
+            sum_pos_x: wp.array(dtype=wp.float32),
+            sum_pos_y: wp.array(dtype=wp.float32),
+            sum_pos_z: wp.array(dtype=wp.float32),
+            sum_norm_x: wp.array(dtype=wp.float32),
+            sum_norm_y: wp.array(dtype=wp.float32),
+            sum_norm_z: wp.array(dtype=wp.float32),
+            counts: wp.array(dtype=wp.int32),
+        ):
+            tid = wp.tid()
+            point = points[tid]
+            normal = normals[tid]
+
+            key = compute_voxel_key(point, inv_voxel_size)
+            idx = hashtable_find_or_insert(key, keys, active_slots)
+            if idx >= 0:
+                wp.atomic_add(sum_pos_x, idx, point[0])
+                wp.atomic_add(sum_pos_y, idx, point[1])
+                wp.atomic_add(sum_pos_z, idx, point[2])
+                wp.atomic_add(sum_norm_x, idx, normal[0])
+                wp.atomic_add(sum_norm_y, idx, normal[1])
+                wp.atomic_add(sum_norm_z, idx, normal[2])
+                wp.atomic_add(counts, idx, 1)
+
+        wp.launch(
+            accumulate_points,
+            dim=3,
+            inputs=[
+                wp_points,
+                wp_normals,
+                grid.inv_voxel_size,
+                grid.keys,
+                grid.active_slots,
+                grid.sum_positions_x,
+                grid.sum_positions_y,
+                grid.sum_positions_z,
+                grid.sum_normals_x,
+                grid.sum_normals_y,
+                grid.sum_normals_z,
+                grid.counts,
+            ],
+        )
+        wp.synchronize()
+
+        # Should have 3 separate voxels
+        self.assertEqual(grid.get_num_voxels(), 3)
+
+        points, normals, hit_distances, num_points = grid.finalize()
+
+        self.assertEqual(num_points, 3)
+
+        # Verify points are preserved (order may differ due to hash table)
+        for orig_point in points_data:
+            # Find matching finalized point
+            found = False
+            for final_point in points:
+                if np.allclose(orig_point, final_point, atol=1e-5):
+                    found = True
+                    break
+            self.assertTrue(found, f"Point {orig_point} not found in finalized output")
+
+    def test_capacity_power_of_two(self):
+        """Test that capacity is always rounded up to power of two."""
+        test_cases = [
+            (100, 128),
+            (128, 128),
+            (129, 256),
+            (1000, 1024),
+            (1025, 2048),
+        ]
+
+        for requested, expected in test_cases:
+            grid = VoxelHashGrid(capacity=requested, voxel_size=0.1)
+            self.assertEqual(
+                grid.capacity,
+                expected,
+                f"Capacity {requested} should round to {expected}, got {grid.capacity}",
+            )
 
 
 class TestRemeshHelperFunctions(unittest.TestCase):

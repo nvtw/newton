@@ -15,20 +15,33 @@
 
 """Point cloud extraction and surface reconstruction for mesh repair.
 
-This module provides utilities to extract dense point clouds with reliable surface
-normals from triangle meshes by shooting parallel rays from multiple viewpoints
-arranged on an icosphere. The point cloud can then be used to reconstruct a clean,
-watertight mesh using Poisson surface reconstruction.
+This module provides GPU-accelerated utilities to extract dense point clouds with
+reliable surface normals from triangle meshes. The extraction uses multi-view
+orthographic raycasting from camera directions distributed on an icosphere, with
+online voxel-based downsampling for memory efficiency. Optional secondary "cavity
+cameras" improve coverage of deep cavities and occluded regions.
+
+The point cloud can then be used to reconstruct a clean, watertight mesh using
+Poisson surface reconstruction.
+
+Key features:
+    - GPU-accelerated raycasting using Warp
+    - Online downsampling via sparse voxel hash grid (Morton-encoded keys)
+    - Random camera roll and randomized processing order to reduce sampling bias
+    - Optional cavity cameras for improved coverage of occluded regions
+    - Probability-scaled selection of cavity candidates (favors deeper hits)
+    - Consistent outward-facing normals
 
 Requirements:
     - Point cloud extraction (PointCloudExtractor): Only requires Warp (included with Newton)
     - Surface reconstruction (SurfaceReconstructor): Requires Open3D (`pip install open3d`)
 
 This is useful for repairing meshes with:
-- Inconsistent or flipped triangle winding
-- Missing or incorrect vertex normals
-- Non-manifold geometry
-- Holes or self-intersections
+    - Inconsistent or flipped triangle winding
+    - Missing or incorrect vertex normals
+    - Non-manifold geometry
+    - Holes or self-intersections
+    - Deep cavities that are hard to capture from external viewpoints
 
 Example:
     Remesh a problematic mesh to get a clean, watertight version::
@@ -41,14 +54,17 @@ Example:
         indices = np.array(...)  # your mesh triangle indices
 
         # Step 1: Extract point cloud with reliable normals
-        # More edge_segments = more views = better coverage (but slower)
-        # Views = 20 * n^2 (e.g., n=4 gives 320 views)
-        extractor = PointCloudExtractor(edge_segments=4, resolution=1000)
+        # edge_segments controls view count: views = 20 * n^2
+        # cavity_cameras adds secondary cameras for deep cavities
+        extractor = PointCloudExtractor(
+            edge_segments=4,  # 320 views
+            resolution=1000,  # 1000x1000 rays per view
+            cavity_cameras=100,  # 100 secondary hemisphere cameras
+        )
         pointcloud = extractor.extract(vertices, indices)
         print(f"Extracted {pointcloud.num_points} points")
 
         # Step 2: Reconstruct clean mesh using Poisson reconstruction
-        # Higher depth = more detail, simplify_tolerance controls decimation
         reconstructor = SurfaceReconstructor(
             depth=10,
             simplify_tolerance=1e-7,  # fraction of mesh diagonal
@@ -117,6 +133,51 @@ def compute_voxel_key(
     iy = wp.int32(wp.floor(point[1] * inv_voxel_size))
     iz = wp.int32(wp.floor(point[2] * inv_voxel_size))
     return morton_encode_3d(ix, iy, iz)
+
+
+# -----------------------------------------------------------------------------
+# Random number generation (LCG-based, suitable for GPU)
+# -----------------------------------------------------------------------------
+
+# LCG constants (same as glibc)
+_LCG_A = wp.constant(wp.uint32(1103515245))
+_LCG_C = wp.constant(wp.uint32(12345))
+
+
+@wp.func
+def rand_init(seed: wp.uint32, thread_id: wp.uint32) -> wp.uint32:
+    """Initialize random state from a seed and thread ID.
+
+    Combines seed with thread_id using XOR and applies one LCG step
+    to ensure different threads have different starting states.
+    """
+    state = seed ^ thread_id
+    # Apply one LCG step to mix the bits
+    return state * _LCG_A + _LCG_C
+
+
+@wp.func
+def rand_next(state: wp.uint32) -> wp.uint32:
+    """Advance the random state and return the new state."""
+    return state * _LCG_A + _LCG_C
+
+
+@wp.func
+def rand_float(state: wp.uint32) -> float:
+    """Convert random state to a float in [0, 1)."""
+    # Use upper bits (better quality in LCG)
+    return wp.float32(state & wp.uint32(0x7FFFFFFF)) / wp.float32(0x7FFFFFFF)
+
+
+@wp.func
+def rand_next_float(state: wp.uint32) -> tuple[wp.uint32, float]:
+    """Advance state and return (new_state, random_float).
+
+    Use this when you need multiple random numbers in sequence.
+    """
+    new_state = state * _LCG_A + _LCG_C
+    rand_val = wp.float32(new_state & wp.uint32(0x7FFFFFFF)) / wp.float32(0x7FFFFFFF)
+    return new_state, rand_val
 
 
 # -----------------------------------------------------------------------------
@@ -631,12 +692,27 @@ def raycast_orthographic_kernel(
     sum_normals_z: wp.array(dtype=wp.float32),
     sum_hit_distances: wp.array(dtype=wp.float32),
     counts: wp.array(dtype=wp.int32),
+    # Cavity camera candidate buffers (optional - pass empty arrays to disable)
+    cavity_origins: wp.array(dtype=wp.vec3),
+    cavity_directions: wp.array(dtype=wp.vec3),
+    cavity_hit_distances: wp.array(dtype=wp.float32),
+    cavity_count: wp.array(dtype=wp.int32),  # Single-element array for atomic counter
+    max_cavity_candidates: wp.int32,
+    camera_offset: wp.float32,
+    cavity_prob_scale: wp.float32,  # Scale factor to control acceptance rate
+    random_seed: wp.uint32,
 ):
     """Raycast kernel for orthographic projection with direct voxel accumulation.
 
-    Each thread handles one pixel. Rays are shot parallel to cam_dir from a grid
-    defined by cam_right and cam_up. Hits are accumulated directly into a sparse
-    voxel hash grid for memory-efficient point cloud extraction.
+    Each thread handles one pixel (resolution x resolution grid). Rays are shot
+    parallel to cam_dir from positions on the image plane. Hit points, normals,
+    and ray distances are accumulated directly into a sparse voxel hash grid.
+
+    Normals are flipped to always point toward the camera (outward from surface).
+
+    Additionally, hits with larger distances (deeper in cavities) are probabilistically
+    selected as cavity camera candidates. The acceptance probability is scaled by
+    cavity_prob_scale to control the expected number of candidates.
     """
     px, py = wp.tid()
 
@@ -678,6 +754,29 @@ def raycast_orthographic_kernel(
             wp.atomic_add(sum_hit_distances, idx, query.t)
             wp.atomic_add(counts, idx, 1)
 
+        # Probabilistically select this hit as a cavity camera candidate
+        # Higher hit distance = higher probability of selection
+        if max_cavity_candidates > 0:
+            # Generate random number
+            thread_id = wp.uint32(px * resolution + py)
+            rand_state = rand_init(random_seed, thread_id)
+            rand_val = rand_float(rand_state)
+
+            # Acceptance probability: scaled by hit distance to favor deeper hits
+            # cavity_prob_scale controls overall rate to match expected ray count
+            accept_prob = (query.t / max_ray_dist) * cavity_prob_scale
+            if rand_val < accept_prob:
+                # Atomically claim a slot
+                slot = wp.atomic_add(cavity_count, 0, 1)
+                if slot < max_cavity_candidates:
+                    # Origin: offset back along ray direction (guaranteed outside mesh)
+                    cavity_origin = hit_point - ray_direction * camera_offset
+                    # Direction: negative ray direction (points into the mesh)
+                    cavity_dir = -ray_direction
+                    cavity_origins[slot] = cavity_origin
+                    cavity_directions[slot] = cavity_dir
+                    cavity_hit_distances[slot] = query.t
+
 
 @wp.kernel
 def raycast_hemisphere_kernel(
@@ -690,6 +789,7 @@ def raycast_hemisphere_kernel(
     cam_forward: wp.vec3,
     min_ray_dist: wp.float32,
     max_ray_dist: wp.float32,
+    origin_hit_dist: wp.float32,  # Hit distance at the camera origin point
     # Hemisphere directions (local frame, z > 0)
     hemisphere_dirs: wp.array(dtype=wp.vec3),
     num_directions: wp.int32,
@@ -708,10 +808,18 @@ def raycast_hemisphere_kernel(
     sum_hit_distances: wp.array(dtype=wp.float32),
     counts: wp.array(dtype=wp.int32),
 ):
-    """Raycast kernel for hemisphere projection from a single point (cavity camera).
+    """Raycast kernel for hemisphere projection from a cavity camera.
 
     Each thread handles one ray direction. Rays are shot from cam_origin in directions
     transformed from local hemisphere frame to world frame using the camera basis.
+
+    The camera origin and forward direction come from cavity candidates collected
+    during primary raycasting - the origin is offset back along the original ray
+    direction to guarantee it's outside the mesh.
+
+    Hit distances are accumulated as the sum of origin_hit_dist (how far the primary
+    ray traveled) plus the secondary ray's travel distance, giving total cavity depth.
+
     Hits are accumulated directly into the sparse voxel hash grid.
     """
     tid = wp.tid()
@@ -752,7 +860,8 @@ def raycast_hemisphere_kernel(
             wp.atomic_add(sum_normals_x, idx, normal[0])
             wp.atomic_add(sum_normals_y, idx, normal[1])
             wp.atomic_add(sum_normals_z, idx, normal[2])
-            wp.atomic_add(sum_hit_distances, idx, query.t)
+            # Total hit distance = distance to reach camera origin + this ray's distance
+            wp.atomic_add(sum_hit_distances, idx, origin_hit_dist + query.t)
             wp.atomic_add(counts, idx, 1)
 
 
@@ -767,10 +876,13 @@ class PointCloudExtractor:
     raycasting, providing built-in downsampling and dramatically reducing
     memory usage compared to storing all ray hits.
 
-    Optionally, secondary "cavity cameras" can be placed at sampled surface points
-    to shoot hemisphere rays inward, improving coverage of deep cavities and
-    occluded regions. Cavity cameras are placed preferentially at points with
-    high hit distances (indicating they are deep inside cavities).
+    Optionally, secondary "cavity cameras" can shoot hemisphere rays to improve
+    coverage of deep cavities and occluded regions. During primary raycasting,
+    hits with large ray distances are probabilistically collected as cavity camera
+    candidates (acceptance probability scales with hit distance and is auto-tuned
+    to match buffer capacity). The camera origin is offset back along the ray
+    direction to guarantee it's outside the mesh. Primary cameras are processed
+    in randomized order to ensure even distribution of cavity candidates.
 
     Args:
         edge_segments: Number of segments per icosahedron edge for camera directions.
@@ -792,12 +904,14 @@ class PointCloudExtractor:
             automatically estimated based on voxel_size and mesh extent to keep hash table
             load factor around 50%. Set explicitly if you know your requirements.
         device: Warp device to use for computation.
-        seed: Random seed for camera roll angles. Each camera is rotated by a random
-            angle around its view direction to reduce sample correlation and improve
-            coverage uniformity. Set to None for non-deterministic behavior.
-        cavity_cameras: Number of secondary hemisphere cameras to place at sampled
-            surface points for improved cavity coverage. Set to 0 (default) to disable.
-            Each camera shoots ~resolution^2 rays in a hemisphere pattern.
+        seed: Random seed for reproducibility. Controls camera roll angles, camera
+            processing order, and cavity candidate selection. Set to None for
+            non-deterministic behavior.
+        cavity_cameras: Number of secondary hemisphere cameras for improved cavity
+            coverage. Set to 0 (default) to disable. Camera positions are collected
+            during primary raycasting from hits with large ray distances (deep in
+            cavities). Each camera shoots ~resolution^2 rays in a hemisphere pattern,
+            with position and direction guaranteed to be outside the mesh surface.
 
     Note:
         Memory usage is dominated by the voxel hash grid, which scales with
@@ -865,6 +979,20 @@ class PointCloudExtractor:
     ) -> PointCloudResult:
         """Extract point cloud from a triangle mesh.
 
+        Performs multi-view orthographic raycasting with online voxel-based accumulation:
+
+        1. Primary pass: Rays from icosphere-distributed cameras (processed in random
+           order) with random roll per camera. Hits with large ray distances are
+           probabilistically collected as cavity camera candidates, with acceptance
+           probability auto-scaled based on expected hit count and buffer capacity.
+        2. Secondary pass (if cavity_cameras > 0): Hemisphere rays from sampled cavity
+           camera candidates (weighted by hit distance to favor deeper cavities).
+           Camera positions are offset back along the original ray direction to
+           guarantee they're outside the mesh.
+
+        Points are accumulated into a sparse voxel hash grid, automatically averaging
+        multiple hits per voxel. This provides built-in downsampling with minimal memory.
+
         Args:
             vertices: (N, 3) array of vertex positions.
             indices: (M,) or (M/3, 3) array of triangle indices.
@@ -917,10 +1045,11 @@ class PointCloudExtractor:
         if self.max_voxels is None:
             # Estimate based on surface area: voxels ≈ 4πr² / voxel_size²
             # Use 2x safety factor for non-spherical shapes
-            # Use 4x more for hash table load factor (~25%)
-            # Minimum 1M to handle edge cases
+            # Estimate surface voxels assuming sphere surface area (upper bound)
+            # Use 4x for hash table load factor (~25%)
+            # Cap at 16M to avoid excessive memory for small voxels
             estimated_surface_voxels = 4.0 * np.pi * (radius / voxel_size) ** 2
-            max_voxels = max(1 << 20, int(estimated_surface_voxels * 8))
+            max_voxels = min(1 << 24, max(1 << 20, int(estimated_surface_voxels * 4)))
         else:
             max_voxels = self.max_voxels
 
@@ -939,22 +1068,80 @@ class PointCloudExtractor:
         # Create random generator for camera roll angles
         rng = np.random.default_rng(self.seed)
 
+        # Pre-compute all camera bases and random rotations (vectorized)
+        # directions is (num_views, 3)
+        directions = self.directions
+
+        # Compute camera bases for all directions at once
+        # Choose world_up based on direction[1] magnitude
+        world_ups = np.where(
+            np.abs(directions[:, 1:2]) < 0.9,
+            np.array([[0.0, 1.0, 0.0]]),
+            np.array([[0.0, 0.0, 1.0]]),
+        )  # (num_views, 3)
+
+        # right = cross(world_up, direction), then normalize
+        rights = np.cross(world_ups, directions)
+        rights /= np.linalg.norm(rights, axis=1, keepdims=True)
+
+        # up = cross(direction, right)
+        ups = np.cross(directions, rights)
+
+        # Pre-generate all random roll angles and apply rotation
+        thetas = rng.uniform(0, 2 * np.pi, size=self.num_views)
+        cos_thetas = np.cos(thetas)[:, np.newaxis]  # (num_views, 1)
+        sin_thetas = np.sin(thetas)[:, np.newaxis]
+
+        # Rotated: right' = cos*right + sin*up, up' = cos*up - sin*right
+        rights_rot = cos_thetas * rights + sin_thetas * ups
+        ups_rot = cos_thetas * ups - sin_thetas * rights
+
+        # Camera origins: center - direction * padded_radius
+        cam_origins = center - directions * padded_radius
+
+        # Camera offset for cavity candidates (0.1% of bounding sphere radius)
+        camera_offset = radius * 0.001
+
+        # Allocate cavity camera candidate buffers if needed
+        if self.cavity_cameras > 0:
+            # Large buffer to collect candidates - at least 100K or 100x requested cameras
+            max_cavity_candidates = max(100_000, self.cavity_cameras * 100)
+            cavity_origins = wp.zeros(max_cavity_candidates, dtype=wp.vec3, device=self.device)
+            cavity_directions = wp.zeros(max_cavity_candidates, dtype=wp.vec3, device=self.device)
+            cavity_hit_distances = wp.zeros(max_cavity_candidates, dtype=wp.float32, device=self.device)
+            cavity_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+
+            # Calculate probability scale to target ~2x buffer size candidates
+            # Total rays = num_views * resolution^2, assume ~50% hit rate
+            total_expected_hits = self.num_views * self.resolution * self.resolution * 0.5
+            # Average hit distance ratio is ~0.5, so base acceptance would be 0.5
+            # We want: 0.5 * prob_scale * total_hits ≈ 2 * max_cavity_candidates
+            # prob_scale = 4 * max_cavity_candidates / total_hits
+            cavity_prob_scale = float(4.0 * max_cavity_candidates / max(total_expected_hits, 1.0))
+            # Clamp to reasonable range
+            cavity_prob_scale = min(1.0, max(1e-6, cavity_prob_scale))
+        else:
+            # Empty arrays when cavity cameras disabled
+            max_cavity_candidates = 0
+            cavity_origins = wp.empty(0, dtype=wp.vec3, device=self.device)
+            cavity_directions = wp.empty(0, dtype=wp.vec3, device=self.device)
+            cavity_hit_distances = wp.empty(0, dtype=wp.float32, device=self.device)
+            cavity_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+            cavity_prob_scale = 0.0
+
+        # Randomize camera order to get even distribution of cavity candidates
+        # (prevents later cameras from always overflowing the buffer)
+        camera_order = rng.permutation(self.num_views)
+
         # Cast rays from each camera direction, accumulating into voxel grid
-        for i in range(self.num_views):
-            direction = self.directions[i]
-            right, up = compute_camera_basis(direction)
+        for i in camera_order:
+            direction = directions[i]
+            right = rights_rot[i]
+            up = ups_rot[i]
+            cam_origin = cam_origins[i]
 
-            # Apply random rotation around view direction (camera roll)
-            # This reduces sample correlation and improves coverage uniformity
-            theta = rng.uniform(0, 2 * np.pi)
-            cos_theta = np.cos(theta)
-            sin_theta = np.sin(theta)
-            right_rot = cos_theta * right + sin_theta * up
-            up_rot = cos_theta * up - sin_theta * right
-            right, up = right_rot, up_rot
-
-            # Camera origin is at bounding sphere center, offset back along view direction
-            cam_origin = center - direction * padded_radius
+            # Different random seed per view for cavity candidate selection
+            random_seed = rng.integers(0, 2**31, dtype=np.uint32)
 
             # Launch kernel - accumulates directly into voxel grid
             wp.launch(
@@ -980,6 +1167,14 @@ class PointCloudExtractor:
                     voxel_grid.sum_normals_z,
                     voxel_grid.sum_hit_distances,
                     voxel_grid.counts,
+                    cavity_origins,
+                    cavity_directions,
+                    cavity_hit_distances,
+                    cavity_count,
+                    max_cavity_candidates,
+                    float(camera_offset),
+                    float(cavity_prob_scale),
+                    int(random_seed),
                 ],
                 device=self.device,
             )
@@ -997,55 +1192,69 @@ class PointCloudExtractor:
             )
 
         # Secondary pass: cavity cameras for improved coverage of occluded regions
-        if self.cavity_cameras > 0 and num_voxels_after_primary > 0:
+        if self.cavity_cameras > 0:
             wp.synchronize()
 
-            # Get intermediate results for sampling camera positions
-            points_np, normals_np, hit_distances_np, num_points = voxel_grid.finalize()
+            # Get the number of cavity candidates that were attempted to write
+            total_attempts = int(cavity_count.numpy()[0])
+            # Clamp to buffer size (some may have been dropped due to overflow)
+            num_candidates = min(total_attempts, max_cavity_candidates)
 
-            if num_points > 0:
-                # Prepare hemisphere directions on GPU
-                wp_hemisphere_dirs = wp.array(
-                    self.hemisphere_directions, dtype=wp.vec3, device=self.device
+            # Report buffer status
+            if total_attempts > max_cavity_candidates:
+                overflow_count = total_attempts - max_cavity_candidates
+                print(
+                    f"Cavity candidates: {num_candidates:,} collected, "
+                    f"{overflow_count:,} dropped (buffer overflow, not critical)"
                 )
+            elif num_candidates > 0:
+                print(f"Cavity candidates: {num_candidates:,} collected")
 
-                # Camera offset to avoid self-intersection (0.1% of bounding sphere radius)
-                camera_offset = radius * 0.001
+            if num_candidates > 0:
+                # Prepare hemisphere directions on GPU
+                wp_hemisphere_dirs = wp.array(self.hemisphere_directions, dtype=wp.vec3, device=self.device)
+
                 # Minimum ray distance to avoid self-occlusion
                 min_ray_dist = camera_offset * 2.0
 
-                # Sample cavity camera positions with rejection sampling
-                # Favor samples with higher hit distances (deeper in cavities)
-                max_hit_dist = max(float(np.max(hit_distances_np)), radius)
-                max_attempts = 100  # Cap rejection sampling iterations
+                # Get cavity candidate data from GPU
+                origins_np = cavity_origins.numpy()[:num_candidates]
+                directions_np = cavity_directions.numpy()[:num_candidates]
+                hit_dists_np = cavity_hit_distances.numpy()[:num_candidates]
 
-                for _ in range(self.cavity_cameras):
-                    # Rejection sampling: accept samples proportional to hit distance
-                    for _attempt in range(max_attempts):
-                        sample_idx = rng.integers(0, num_points)
-                        hit_dist = hit_distances_np[sample_idx]
-                        # Accept with probability proportional to hit_dist / max_hit_dist
-                        if rng.random() < hit_dist / max_hit_dist:
-                            break
-                    # If all attempts failed, use the last sample anyway
+                # Sample cavity cameras with weighted random choice
+                # Weight by hit distance to favor deeper cavities
+                weights = hit_dists_np.copy()
+                weights_sum = weights.sum()
+                if weights_sum > 0:
+                    weights /= weights_sum
+                else:
+                    weights = np.ones(num_candidates) / num_candidates
 
-                    # Get sample position and normal
-                    sample_pos = points_np[sample_idx]
-                    sample_normal = normals_np[sample_idx]
+                # Sample up to cavity_cameras, but no more than available candidates
+                num_to_sample = min(self.cavity_cameras, num_candidates)
+                sample_indices = rng.choice(num_candidates, size=num_to_sample, p=weights, replace=True)
 
-                    # Compute camera basis (normal is the forward direction)
-                    right, up = compute_camera_basis(sample_normal)
+                # Pre-generate all random roll angles
+                thetas = rng.uniform(0, 2 * np.pi, size=num_to_sample)
 
-                    # Apply random roll around normal
-                    theta = rng.uniform(0, 2 * np.pi)
+                # Launch kernel for each cavity camera
+                for i in range(num_to_sample):
+                    sample_idx = sample_indices[i]
+                    cam_origin = origins_np[sample_idx]
+                    cam_forward = directions_np[sample_idx]  # Already points into mesh
+                    sample_hit_dist = hit_dists_np[sample_idx]
+
+                    # Compute camera basis (cam_forward is the forward direction)
+                    right, up = compute_camera_basis(cam_forward)
+
+                    # Apply random roll around forward direction
+                    theta = thetas[i]
                     cos_theta = np.cos(theta)
                     sin_theta = np.sin(theta)
                     right_rot = cos_theta * right + sin_theta * up
                     up_rot = cos_theta * up - sin_theta * right
                     right, up = right_rot, up_rot
-
-                    # Offset camera position slightly along normal to avoid self-intersection
-                    cam_origin = sample_pos + sample_normal * camera_offset
 
                     # Launch hemisphere raycast kernel
                     wp.launch(
@@ -1056,9 +1265,10 @@ class PointCloudExtractor:
                             wp.vec3(cam_origin[0], cam_origin[1], cam_origin[2]),
                             wp.vec3(right[0], right[1], right[2]),
                             wp.vec3(up[0], up[1], up[2]),
-                            wp.vec3(sample_normal[0], sample_normal[1], sample_normal[2]),
+                            wp.vec3(cam_forward[0], cam_forward[1], cam_forward[2]),
                             float(min_ray_dist),
                             float(max_ray_dist),
+                            float(sample_hit_dist),  # Hit distance at camera origin
                             wp_hemisphere_dirs,
                             self.num_hemisphere_dirs,
                             float(voxel_grid.inv_voxel_size),
@@ -1142,7 +1352,7 @@ class SurfaceReconstructor:
             Overrides simplify_ratio and target_triangles if set.
 
     Example:
-        >>> extractor = PointCloudExtractor(subdivision_level=2, resolution=1000)
+        >>> extractor = PointCloudExtractor(edge_segments=4, resolution=1000)
         >>> pointcloud = extractor.extract(vertices, indices)
         >>> reconstructor = SurfaceReconstructor(depth=10, simplify_tolerance=1e-7)
         >>> mesh = reconstructor.reconstruct_from_result(pointcloud)
