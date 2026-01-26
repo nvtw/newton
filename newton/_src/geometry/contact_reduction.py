@@ -559,7 +559,7 @@ class ContactReductionFunctions:
 
         Winners write their contact to the shared buffer.
         """
-        num_reduction_slots = self.num_reduction_slots
+        NUM_REDUCTION_SLOTS = self.num_reduction_slots
         num_betas = self.num_betas
         get_smem = self.get_smem_reduction
         # Number of per-bin slots (spatial extremes + max-depth per bin)
@@ -590,15 +590,14 @@ class ContactReductionFunctions:
             """
             # Slot layout per bin: 6 spatial directions * num_betas + 1 max-depth
             slots_per_bin = wp.static(NUM_SPATIAL_DIRECTIONS * num_betas + 1)
-            num_slots = wp.static(num_reduction_slots)
 
             winner_slots = wp.array(
                 ptr=wp.static(get_smem)(),
-                shape=(wp.static(num_reduction_slots),),
+                shape=(NUM_REDUCTION_SLOTS,),
                 dtype=wp.uint64,
             )
 
-            for i in range(thread_id, num_slots, wp.block_dim()):
+            for i in range(thread_id, NUM_REDUCTION_SLOTS, wp.block_dim()):
                 winner_slots[i] = wp.uint64(0)
             synchronize()
 
@@ -646,8 +645,8 @@ class ContactReductionFunctions:
                             if unpack_thread_id(winner_slots[key]) == thread_id:
                                 p = buffer[key].projection
                                 if p == empty_marker:
-                                    slot_id = wp.atomic_add(active_ids, num_slots, 1)
-                                    if slot_id < num_slots:
+                                    slot_id = wp.atomic_add(active_ids, NUM_REDUCTION_SLOTS, 1)
+                                    if slot_id < NUM_REDUCTION_SLOTS:
                                         active_ids[slot_id] = key
                                 score = spatial_dp
                                 if score > p:
@@ -659,8 +658,8 @@ class ContactReductionFunctions:
                 if unpack_thread_id(winner_slots[max_depth_key]) == thread_id:
                     p = buffer[max_depth_key].projection
                     if p == empty_marker:
-                        slot_id = wp.atomic_add(active_ids, num_slots, 1)
-                        if slot_id < num_slots:
+                        slot_id = wp.atomic_add(active_ids, NUM_REDUCTION_SLOTS, 1)
+                        if slot_id < NUM_REDUCTION_SLOTS:
                             active_ids[slot_id] = max_depth_key
                     score = -c.depth
                     if score > p:
@@ -674,8 +673,8 @@ class ContactReductionFunctions:
                 if unpack_thread_id(winner_slots[voxel_key]) == thread_id:
                     p = buffer[voxel_key].projection
                     if p == empty_marker:
-                        slot_id = wp.atomic_add(active_ids, num_slots, 1)
-                        if slot_id < num_slots:
+                        slot_id = wp.atomic_add(active_ids, NUM_REDUCTION_SLOTS, 1)
+                        if slot_id < NUM_REDUCTION_SLOTS:
                             active_ids[slot_id] = voxel_key
                     score = -c.depth
                     if score > p:
@@ -692,7 +691,7 @@ class ContactReductionFunctions:
         but originate from the same geometric feature (e.g., same triangle).
         Only the first occurrence per feature is kept.
         """
-        num_reduction_slots = self.num_reduction_slots
+        NUM_REDUCTION_SLOTS = self.num_reduction_slots
         num_betas = self.num_betas
         get_smem = self.get_smem_reduction
         # Number of per-bin slots (spatial extremes + max-depth per bin)
@@ -715,15 +714,14 @@ class ContactReductionFunctions:
             """
             # Slot layout per bin: 6 spatial directions * num_betas + 1 max-depth
             slots_per_bin = wp.static(NUM_SPATIAL_DIRECTIONS * num_betas + 1)
-            num_slots = wp.static(num_reduction_slots)
 
             keep_flags = wp.array(
                 ptr=wp.static(get_smem)(),
-                shape=(wp.static(num_reduction_slots),),
+                shape=(NUM_REDUCTION_SLOTS,),
                 dtype=wp.int32,
             )
 
-            for i in range(thread_id, num_slots, wp.block_dim()):
+            for i in range(thread_id, NUM_REDUCTION_SLOTS, wp.block_dim()):
                 keep_flags[i] = 0
             synchronize()
 
@@ -770,14 +768,14 @@ class ContactReductionFunctions:
 
             # Reset counter for parallel compaction
             if thread_id == 0:
-                active_ids[num_slots] = 0
+                active_ids[NUM_REDUCTION_SLOTS] = 0
             synchronize()
 
             # Phase 3: Parallel compaction - all threads participate
             # Each thread checks its subset of slots and uses atomic_add for write index
-            for key in range(thread_id, num_slots, wp.block_dim()):
+            for key in range(thread_id, NUM_REDUCTION_SLOTS, wp.block_dim()):
                 if keep_flags[key] == 1:
-                    write_idx = wp.atomic_add(active_ids, num_slots, 1)
+                    write_idx = wp.atomic_add(active_ids, NUM_REDUCTION_SLOTS, 1)
                     active_ids[write_idx] = key
             synchronize()
 

@@ -132,7 +132,7 @@ class Example:
             raise ValueError(f"Unknown scene: {scene}")
 
         main_scene = newton.ModelBuilder()
-        main_scene.rigid_contact_margin = 0.01
+        main_scene.default_shape_config.contact_margin = 0.01
         # Add ground plane with offset (plane equation: z = offset)
         main_scene.add_shape_plane(
             plane=(0.0, 0.0, 1.0, self.ground_plane_offset),
@@ -210,7 +210,7 @@ class Example:
         print(f"Assets downloaded to: {asset_path}")
 
         world_builder = newton.ModelBuilder()
-        world_builder.rigid_contact_margin = 0.01 * self.scene_scale
+        world_builder.default_shape_config.contact_margin = 0.01 * self.scene_scale
 
         bolt_file = str(asset_path / f"factory_bolt_{ASSEMBLY_STR}.obj")
         nut_file = str(asset_path / f"factory_nut_{ASSEMBLY_STR}_subdiv_3x.obj")
@@ -267,7 +267,7 @@ class Example:
         print(f"Assets downloaded to: {asset_path}")
 
         world_builder = newton.ModelBuilder()
-        world_builder.rigid_contact_margin = 0.003 * self.scene_scale
+        world_builder.default_shape_config.contact_margin = 0.003 * self.scene_scale
 
         for _, (gear_filename, gear_key) in enumerate(GEAR_FILES):
             gear_file = str(asset_path / gear_filename)

@@ -920,7 +920,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
             margin = shape_contact_margin[pair[0]] + shape_contact_margin[pair[1]]
 
             # Initialize (shared memory) buffers for contact reduction
-            empty_marker = wp.static(-1000000000.0)
+            empty_marker = wp.static(-MAXVAL)
 
             active_contacts_shared_mem = wp.array(
                 ptr=wp.static(get_smem_slots_plus_1)(),
