@@ -786,10 +786,11 @@ class PointCloudExtractor:
             Must be between 1 and 10000. Also determines the number of rays per cavity
             camera (~resolution^2 hemisphere directions).
         voxel_size: Size of voxels for point accumulation. If None (default), automatically
-            computed as 0.1% of the mesh bounding sphere diameter. Smaller values give
+            computed as 0.1% of the mesh bounding sphere radius. Smaller values give
             denser point clouds but require more memory.
-        max_voxels: Maximum number of unique voxels (hash table capacity). Default 2^20
-            (~1 million). Increase if you expect very dense sampling.
+        max_voxels: Maximum number of unique voxels (hash table capacity). If None (default),
+            automatically estimated based on voxel_size and mesh extent to keep hash table
+            load factor around 50%. Set explicitly if you know your requirements.
         device: Warp device to use for computation.
         seed: Random seed for camera roll angles. Each camera is rotated by a random
             angle around its view direction to reduce sample correlation and improve
@@ -818,7 +819,7 @@ class PointCloudExtractor:
         edge_segments: int = 2,
         resolution: int = 1000,
         voxel_size: float | None = None,
-        max_voxels: int = 1 << 20,
+        max_voxels: int | None = None,
         device: str | None = None,
         seed: int | None = 42,
         cavity_cameras: int = 0,
@@ -830,7 +831,7 @@ class PointCloudExtractor:
             raise ValueError(f"resolution must be between 1 and 10000 (inclusive), got {resolution}")
         if voxel_size is not None and voxel_size <= 0:
             raise ValueError(f"voxel_size must be positive, got {voxel_size}")
-        if max_voxels < 1:
+        if max_voxels is not None and max_voxels < 1:
             raise ValueError(f"max_voxels must be >= 1, got {max_voxels}")
         if cavity_cameras < 0:
             raise ValueError(f"cavity_cameras must be >= 0, got {cavity_cameras}")
@@ -838,7 +839,7 @@ class PointCloudExtractor:
         self.edge_segments = edge_segments
         self.resolution = resolution
         self.voxel_size = voxel_size  # None means auto-compute
-        self.max_voxels = max_voxels
+        self.max_voxels = max_voxels  # None means auto-compute
         self.device = device if device is not None else wp.get_device()
         self.seed = seed
         self.cavity_cameras = cavity_cameras
@@ -904,17 +905,28 @@ class PointCloudExtractor:
 
         # Compute voxel size (auto or user-specified)
         if self.voxel_size is None:
-            # Auto: 0.1% of bounding sphere diameter
-            voxel_size = (2.0 * radius) * 0.001
+            # Auto: 0.1% of bounding sphere radius (small for high quality)
+            voxel_size = radius * 0.001
             # Guard against zero (single point)
             if voxel_size == 0.0:
                 voxel_size = 1e-6
         else:
             voxel_size = self.voxel_size
 
+        # Compute max_voxels (auto or user-specified)
+        if self.max_voxels is None:
+            # Estimate based on surface area: voxels ≈ 4πr² / voxel_size²
+            # Use 2x safety factor for non-spherical shapes
+            # Use 4x more for hash table load factor (~25%)
+            # Minimum 1M to handle edge cases
+            estimated_surface_voxels = 4.0 * np.pi * (radius / voxel_size) ** 2
+            max_voxels = max(1 << 20, int(estimated_surface_voxels * 8))
+        else:
+            max_voxels = self.max_voxels
+
         # Create sparse voxel hash grid for accumulation
         voxel_grid = VoxelHashGrid(
-            capacity=self.max_voxels,
+            capacity=max_voxels,
             voxel_size=voxel_size,
             device=self.device,
         )
@@ -972,8 +984,20 @@ class PointCloudExtractor:
                 device=self.device,
             )
 
+        # Check hash table load factor and warn if too high
+        num_voxels_after_primary = voxel_grid.get_num_voxels()
+        load_factor = num_voxels_after_primary / voxel_grid.capacity
+        if load_factor > 0.7:
+            import warnings
+
+            warnings.warn(
+                f"Voxel hash table is {load_factor:.0%} full ({num_voxels_after_primary}/{voxel_grid.capacity}). "
+                f"This may cause slowdowns. Consider increasing max_voxels or using a larger voxel_size.",
+                stacklevel=2,
+            )
+
         # Secondary pass: cavity cameras for improved coverage of occluded regions
-        if self.cavity_cameras > 0 and voxel_grid.get_num_voxels() > 0:
+        if self.cavity_cameras > 0 and num_voxels_after_primary > 0:
             wp.synchronize()
 
             # Get intermediate results for sampling camera positions
@@ -1053,6 +1077,15 @@ class PointCloudExtractor:
                     )
 
         # Finalize voxel grid to get averaged points and normals
+        wp.synchronize()
+        final_num_voxels = voxel_grid.get_num_voxels()
+        final_load_factor = final_num_voxels / voxel_grid.capacity
+        print(
+            f"Voxel grid: {final_num_voxels:,} voxels, "
+            f"{final_load_factor:.1%} load factor "
+            f"({final_num_voxels:,}/{voxel_grid.capacity:,})"
+        )
+
         points_np, normals_np, _hit_distances_np, num_points = voxel_grid.finalize()
 
         return PointCloudResult(
