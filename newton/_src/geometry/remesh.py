@@ -1015,9 +1015,22 @@ class PointCloudExtractor:
                 f"Indices must be in range [0, {len(vertices)}), got range [{indices.min()}, {indices.max()}]"
             )
 
-        # Compute bounding sphere
+        # Compute bounding sphere in original space
         center, radius = compute_bounding_sphere(vertices)
-        padded_radius = radius * padding_factor
+
+        # Normalize mesh to unit sphere centered at origin
+        # This ensures voxel coordinates are always in a predictable range (~±1000)
+        # regardless of input mesh scale, preventing hash coordinate overflow
+        if radius > 0:
+            normalized_vertices = (vertices - center) / radius
+        else:
+            # Degenerate case: single point or zero-size mesh
+            normalized_vertices = vertices - center
+
+        # In normalized space, the mesh fits in unit sphere (radius=1)
+        # All parameters are now in normalized space
+        normalized_radius = 1.0 if radius > 0 else 1e-6
+        padded_radius = normalized_radius * padding_factor
 
         # Compute pixel size to cover the bounding sphere diameter
         pixel_size = (2.0 * padded_radius) / self.resolution
@@ -1025,37 +1038,33 @@ class PointCloudExtractor:
         # Maximum ray distance (diameter of bounding sphere with padding)
         max_ray_dist = 2.0 * padded_radius * 1.5
 
-        # Compute voxel size (auto or user-specified)
+        # Voxel size in normalized space
+        # Auto: 0.001 gives ~1000 voxels across the diameter, well within ±1M Morton range
         if self.voxel_size is None:
-            # Auto: 0.1% of bounding sphere radius (small for high quality)
-            voxel_size = radius * 0.001
-            # Guard against zero (single point)
-            if voxel_size == 0.0:
-                voxel_size = 1e-6
+            voxel_size = 0.001  # Fixed in normalized space
         else:
-            voxel_size = self.voxel_size
+            # User specified voxel_size is in original space, convert to normalized
+            voxel_size = self.voxel_size / radius if radius > 0 else self.voxel_size
 
         # Compute max_voxels (auto or user-specified)
         if self.max_voxels is None:
-            # Estimate based on surface area: voxels ≈ 4πr² / voxel_size²
-            # Use 2x safety factor for non-spherical shapes
-            # Estimate surface voxels assuming sphere surface area (upper bound)
+            # In normalized space, radius=1, so surface voxels ≈ 4π / voxel_size²
             # Use 4x for hash table load factor (~25%)
             # Cap at 16M to avoid excessive memory for small voxels
-            estimated_surface_voxels = 4.0 * np.pi * (radius / voxel_size) ** 2
+            estimated_surface_voxels = 4.0 * np.pi / (voxel_size**2)
             max_voxels = min(1 << 24, max(1 << 20, int(estimated_surface_voxels * 4)))
         else:
             max_voxels = self.max_voxels
 
-        # Create sparse voxel hash grid for accumulation
+        # Create sparse voxel hash grid for accumulation (in normalized space)
         voxel_grid = VoxelHashGrid(
             capacity=max_voxels,
             voxel_size=voxel_size,
             device=self.device,
         )
 
-        # Create Warp mesh
-        wp_vertices = wp.array(vertices, dtype=wp.vec3, device=self.device)
+        # Create Warp mesh from normalized vertices
+        wp_vertices = wp.array(normalized_vertices, dtype=wp.vec3, device=self.device)
         wp_indices = wp.array(indices, dtype=wp.int32, device=self.device)
         mesh = wp.Mesh(points=wp_vertices, indices=wp_indices)
 
@@ -1090,11 +1099,12 @@ class PointCloudExtractor:
         rights_rot = cos_thetas * rights + sin_thetas * ups
         ups_rot = cos_thetas * ups - sin_thetas * rights
 
-        # Camera origins: center - direction * padded_radius
-        cam_origins = center - directions * padded_radius
+        # Camera origins in normalized space (mesh is centered at origin)
+        # Cameras are placed at distance padded_radius from origin along each direction
+        cam_origins = -directions * padded_radius  # Origin is at (0,0,0) in normalized space
 
-        # Camera offset for cavity candidates (0.1% of bounding sphere radius)
-        camera_offset = radius * 0.001
+        # Camera offset for cavity candidates (0.1% of normalized radius = 0.001)
+        camera_offset = 0.001
 
         # Allocate cavity camera candidate buffers if needed
         if self.cavity_cameras > 0:
@@ -1285,6 +1295,15 @@ class PointCloudExtractor:
         )
 
         points_np, normals_np, num_points = voxel_grid.finalize()
+
+        # Transform points back from normalized space to original space
+        # normalized = (original - center) / radius
+        # original = normalized * radius + center
+        if radius > 0:
+            points_np = points_np * radius + center
+        else:
+            points_np = points_np + center
+        # Normals are unit vectors, no transformation needed
 
         return PointCloudResult(
             points=points_np,
