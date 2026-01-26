@@ -41,8 +41,9 @@ Example:
         indices = np.array(...)  # your mesh triangle indices
 
         # Step 1: Extract point cloud with reliable normals
-        # More subdivision = more views = better coverage (but slower)
-        extractor = PointCloudExtractor(subdivision_level=2, resolution=1000)
+        # More edge_segments = more views = better coverage (but slower)
+        # Views = 20 * n^2 (e.g., n=4 gives 320 views)
+        extractor = PointCloudExtractor(edge_segments=4, resolution=1000)
         pointcloud = extractor.extract(vertices, indices)
         print(f"Extracted {pointcloud.num_points} points")
 
@@ -164,10 +165,12 @@ def _finalize_voxels_kernel(
     sum_normals_x: wp.array(dtype=wp.float32),
     sum_normals_y: wp.array(dtype=wp.float32),
     sum_normals_z: wp.array(dtype=wp.float32),
+    sum_hit_distances: wp.array(dtype=wp.float32),
     counts: wp.array(dtype=wp.int32),
     # Output arrays
     out_points: wp.array(dtype=wp.vec3),
     out_normals: wp.array(dtype=wp.vec3),
+    out_hit_distances: wp.array(dtype=wp.float32),
 ):
     """Finalize voxel averages and write to output arrays."""
     tid = wp.tid()
@@ -200,19 +203,24 @@ def _finalize_voxels_kernel(
     else:
         avg_normal = wp.vec3(0.0, 1.0, 0.0)  # Fallback
 
+    # Average hit distance
+    avg_hit_dist = sum_hit_distances[idx] * inv_count
+
     out_points[tid] = avg_pos
     out_normals[tid] = avg_normal
+    out_hit_distances[tid] = avg_hit_dist
 
 
 class VoxelHashGrid:
-    """Sparse voxel grid with online accumulation of positions and normals.
+    """Sparse voxel grid with online accumulation of positions, normals, and hit distances.
 
     Uses a GPU hash table to map voxel coordinates (Morton-encoded) to
-    accumulator slots. Points and normals are accumulated using atomic
-    operations, allowing fully parallel insertion from multiple threads.
+    accumulator slots. Points, normals, and hit distances are accumulated using
+    atomic operations, allowing fully parallel insertion from multiple threads.
 
     This is useful for voxel-based downsampling of point clouds directly
-    on the GPU without intermediate storage.
+    on the GPU without intermediate storage. Hit distances are tracked to enable
+    weighted sampling for cavity camera placement.
 
     Args:
         capacity: Maximum number of unique voxels. Rounded up to power of two.
@@ -223,7 +231,7 @@ class VoxelHashGrid:
         >>> grid = VoxelHashGrid(capacity=1_000_000, voxel_size=0.01)
         >>> # Accumulate points (typically done in a kernel)
         >>> # ...
-        >>> points, normals, count = grid.finalize()
+        >>> points, normals, hit_distances, count = grid.finalize()
     """
 
     def __init__(
@@ -250,6 +258,7 @@ class VoxelHashGrid:
         self.sum_normals_x = wp.zeros(self.capacity, dtype=wp.float32, device=device)
         self.sum_normals_y = wp.zeros(self.capacity, dtype=wp.float32, device=device)
         self.sum_normals_z = wp.zeros(self.capacity, dtype=wp.float32, device=device)
+        self.sum_hit_distances = wp.zeros(self.capacity, dtype=wp.float32, device=device)
         self.counts = wp.zeros(self.capacity, dtype=wp.int32, device=device)
 
     @property
@@ -271,22 +280,24 @@ class VoxelHashGrid:
         self.sum_normals_x.zero_()
         self.sum_normals_y.zero_()
         self.sum_normals_z.zero_()
+        self.sum_hit_distances.zero_()
         self.counts.zero_()
 
     def get_num_voxels(self) -> int:
         """Get the current number of occupied voxels."""
         return int(self._hashtable.active_slots.numpy()[self.capacity])
 
-    def finalize(self) -> tuple[np.ndarray, np.ndarray, int]:
-        """Finalize accumulation and return averaged points and normals.
+    def finalize(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+        """Finalize accumulation and return averaged points, normals, and hit distances.
 
-        Computes the average position and normalized normal for each occupied
-        voxel and returns the results as numpy arrays.
+        Computes the average position, normalized normal, and average hit distance
+        for each occupied voxel and returns the results as numpy arrays.
 
         Returns:
-            Tuple of (points, normals, num_points) where:
+            Tuple of (points, normals, hit_distances, num_points) where:
             - points: (N, 3) float32 array of averaged positions
             - normals: (N, 3) float32 array of normalized normals
+            - hit_distances: (N,) float32 array of averaged hit distances
             - num_points: number of occupied voxels
         """
         num_active = self.get_num_voxels()
@@ -294,12 +305,14 @@ class VoxelHashGrid:
             return (
                 np.zeros((0, 3), dtype=np.float32),
                 np.zeros((0, 3), dtype=np.float32),
+                np.zeros((0,), dtype=np.float32),
                 0,
             )
 
         # Allocate output buffers
         out_points = wp.zeros(num_active, dtype=wp.vec3, device=self.device)
         out_normals = wp.zeros(num_active, dtype=wp.vec3, device=self.device)
+        out_hit_distances = wp.zeros(num_active, dtype=wp.float32, device=self.device)
 
         # Launch finalization kernel
         wp.launch(
@@ -314,9 +327,11 @@ class VoxelHashGrid:
                 self.sum_normals_x,
                 self.sum_normals_y,
                 self.sum_normals_z,
+                self.sum_hit_distances,
                 self.counts,
                 out_points,
                 out_normals,
+                out_hit_distances,
             ],
             device=self.device,
         )
@@ -326,6 +341,7 @@ class VoxelHashGrid:
         return (
             out_points.numpy(),
             out_normals.numpy(),
+            out_hit_distances.numpy(),
             num_active,
         )
 
@@ -379,25 +395,35 @@ def compute_bounding_sphere(vertices: np.ndarray) -> tuple[np.ndarray, float]:
     return center, radius
 
 
-def create_icosahedron_directions(subdivision_level: int = 2) -> np.ndarray:
+def create_icosahedron_directions(edge_segments: int = 2) -> np.ndarray:
     """Create camera directions from subdivided icosahedron face centers.
 
-    An icosahedron has 20 faces. Each subdivision level multiplies the face
-    count by 4. The camera directions are the normalized vectors from origin
-    to each face center.
+    An icosahedron has 20 faces. Each face is subdivided into n^2 smaller
+    triangles where n is the number of segments per edge. This gives
+    fine-grained control over the number of directions.
 
     Args:
-        subdivision_level: Number of subdivision iterations (0 = 20 faces,
-            1 = 80 faces, 2 = 320 faces, etc.).
+        edge_segments: Number of segments per triangle edge (n >= 1).
+            Total faces = 20 * n^2. Examples:
+            - n=1: 20 faces (original icosahedron)
+            - n=2: 80 faces
+            - n=3: 180 faces
+            - n=4: 320 faces
+            - n=5: 500 faces
 
     Returns:
         (N, 3) array of unit direction vectors, one per face.
     """
+    if edge_segments < 1:
+        raise ValueError(f"edge_segments must be >= 1, got {edge_segments}")
+
+    n = edge_segments
+
     # Golden ratio
     phi = (1.0 + np.sqrt(5.0)) / 2.0
 
     # Icosahedron vertices (normalized)
-    verts = np.array(
+    ico_verts = np.array(
         [
             [-1, phi, 0],
             [1, phi, 0],
@@ -414,82 +440,137 @@ def create_icosahedron_directions(subdivision_level: int = 2) -> np.ndarray:
         ],
         dtype=np.float64,
     )
-    verts = verts / np.linalg.norm(verts, axis=1, keepdims=True)
+    ico_verts = ico_verts / np.linalg.norm(ico_verts, axis=1, keepdims=True)
 
     # Icosahedron faces (20 triangles)
-    faces = np.array(
-        [
-            [0, 11, 5],
-            [0, 5, 1],
-            [0, 1, 7],
-            [0, 7, 10],
-            [0, 10, 11],
-            [1, 5, 9],
-            [5, 11, 4],
-            [11, 10, 2],
-            [10, 7, 6],
-            [7, 1, 8],
-            [3, 9, 4],
-            [3, 4, 2],
-            [3, 2, 6],
-            [3, 6, 8],
-            [3, 8, 9],
-            [4, 9, 5],
-            [2, 4, 11],
-            [6, 2, 10],
-            [8, 6, 7],
-            [9, 8, 1],
-        ],
-        dtype=np.int32,
-    )
+    ico_faces = [
+        (0, 11, 5),
+        (0, 5, 1),
+        (0, 1, 7),
+        (0, 7, 10),
+        (0, 10, 11),
+        (1, 5, 9),
+        (5, 11, 4),
+        (11, 10, 2),
+        (10, 7, 6),
+        (7, 1, 8),
+        (3, 9, 4),
+        (3, 4, 2),
+        (3, 2, 6),
+        (3, 6, 8),
+        (3, 8, 9),
+        (4, 9, 5),
+        (2, 4, 11),
+        (6, 2, 10),
+        (8, 6, 7),
+        (9, 8, 1),
+    ]
 
-    # Subdivide faces
-    verts_list = verts.tolist()
+    if n == 1:
+        # No subdivision needed - just return face centers
+        face_centers = np.zeros((20, 3), dtype=np.float64)
+        for i, (i0, i1, i2) in enumerate(ico_faces):
+            center = (ico_verts[i0] + ico_verts[i1] + ico_verts[i2]) / 3.0
+            face_centers[i] = center / np.linalg.norm(center)
+        return face_centers.astype(np.float32)
 
-    for _ in range(subdivision_level):
-        new_faces = []
-        edge_midpoints = {}
+    # Subdivide each face into n^2 triangles using barycentric coordinates
+    # For n segments per edge, we create a grid of vertices in barycentric space
+    # and then map to 3D, projecting onto the unit sphere.
 
-        for face in faces:
-            v0, v1, v2 = face
+    all_face_centers = []
 
-            # Get or create midpoints for each edge
-            midpoint_indices = []
-            for i0, i1 in [(v0, v1), (v1, v2), (v2, v0)]:
-                edge = (min(i0, i1), max(i0, i1))
-                if edge in edge_midpoints:
-                    midpoint_indices.append(edge_midpoints[edge])
-                else:
-                    # Create new vertex at midpoint, projected to unit sphere
-                    p0 = np.array(verts_list[i0])
-                    p1 = np.array(verts_list[i1])
-                    midpoint = (p0 + p1) / 2.0
-                    midpoint = midpoint / np.linalg.norm(midpoint)
+    for i0, i1, i2 in ico_faces:
+        v0 = ico_verts[i0]
+        v1 = ico_verts[i1]
+        v2 = ico_verts[i2]
 
-                    new_idx = len(verts_list)
-                    verts_list.append(midpoint.tolist())
-                    edge_midpoints[edge] = new_idx
-                    midpoint_indices.append(new_idx)
+        # Create vertex grid using barycentric coordinates
+        # For n segments, we have (n+1) points along each edge
+        # Barycentric coords (i, j, k) where i + j + k = n, and each >= 0
+        # Map to 3D: p = (i*v0 + j*v1 + k*v2) / n, then normalize to sphere
 
-            m01, m12, m20 = midpoint_indices
+        # Build vertex lookup: key = (i, j) -> vertex position on sphere
+        vertex_grid = {}
+        for i in range(n + 1):
+            for j in range(n + 1 - i):
+                k = n - i - j
+                # Barycentric interpolation
+                p = (i * v0 + j * v1 + k * v2) / n
+                # Project to unit sphere
+                p = p / np.linalg.norm(p)
+                vertex_grid[(i, j)] = p
 
-            # Create 4 new faces
-            new_faces.append([v0, m01, m20])
-            new_faces.append([v1, m12, m01])
-            new_faces.append([v2, m20, m12])
-            new_faces.append([m01, m12, m20])
+        # Create n^2 small triangles
+        # For each row i (0 to n-1), we have triangles pointing up and down
+        for i in range(n):
+            for j in range(n - i):
+                # Upward-pointing triangle: (i,j), (i+1,j), (i,j+1)
+                p0 = vertex_grid[(i, j)]
+                p1 = vertex_grid[(i + 1, j)]
+                p2 = vertex_grid[(i, j + 1)]
+                center = (p0 + p1 + p2) / 3.0
+                center = center / np.linalg.norm(center)
+                all_face_centers.append(center)
 
-        faces = np.array(new_faces, dtype=np.int32)
+                # Downward-pointing triangle (if not on the edge): (i+1,j), (i+1,j+1), (i,j+1)
+                if j < n - i - 1:
+                    p0 = vertex_grid[(i + 1, j)]
+                    p1 = vertex_grid[(i + 1, j + 1)]
+                    p2 = vertex_grid[(i, j + 1)]
+                    center = (p0 + p1 + p2) / 3.0
+                    center = center / np.linalg.norm(center)
+                    all_face_centers.append(center)
 
-    verts = np.array(verts_list, dtype=np.float64)
-
-    # Compute face centers as camera directions
-    face_centers = np.zeros((len(faces), 3), dtype=np.float64)
-    for i, face in enumerate(faces):
-        center = (verts[face[0]] + verts[face[1]] + verts[face[2]]) / 3.0
-        face_centers[i] = center / np.linalg.norm(center)
-
+    face_centers = np.array(all_face_centers, dtype=np.float64)
     return face_centers.astype(np.float32)
+
+
+def compute_hemisphere_edge_segments(target_rays: int) -> int:
+    """Compute the icosahedron edge segments to get approximately target_rays hemisphere directions.
+
+    The number of hemisphere directions is approximately half of the full sphere directions:
+    - n edge segments gives 20 * n^2 full sphere directions
+    - Hemisphere has ~10 * n^2 directions
+
+    We solve: 10 * n^2 >= target_rays => n >= sqrt(target_rays / 10)
+
+    Args:
+        target_rays: Target number of hemisphere directions.
+
+    Returns:
+        Edge segments value that gives at least target_rays hemisphere directions.
+    """
+    import math
+
+    # Direct formula: n = ceil(sqrt(target_rays / 10))
+    n = max(1, math.ceil(math.sqrt(target_rays / 10.0)))
+    return n
+
+
+def create_hemisphere_directions(target_rays: int) -> np.ndarray:
+    """Create hemisphere directions from a subdivided icosahedron.
+
+    Generates approximately target_rays directions distributed over a hemisphere
+    (local Z > 0). These can be rotated to align with any surface normal.
+
+    Args:
+        target_rays: Target number of hemisphere directions. The actual count
+            will be the smallest icosahedron subdivision that meets or exceeds this.
+
+    Returns:
+        (N, 3) array of unit direction vectors in the upper hemisphere (z > 0).
+    """
+    # Find edge segments that gives enough rays
+    edge_segments = compute_hemisphere_edge_segments(target_rays)
+
+    # Generate full sphere directions
+    all_directions = create_icosahedron_directions(edge_segments)
+
+    # Filter to upper hemisphere (z > 0)
+    hemisphere_directions = all_directions[all_directions[:, 2] > 0]
+
+    return hemisphere_directions
 
 
 def compute_camera_basis(direction: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -548,6 +629,7 @@ def raycast_orthographic_kernel(
     sum_normals_x: wp.array(dtype=wp.float32),
     sum_normals_y: wp.array(dtype=wp.float32),
     sum_normals_z: wp.array(dtype=wp.float32),
+    sum_hit_distances: wp.array(dtype=wp.float32),
     counts: wp.array(dtype=wp.int32),
 ):
     """Raycast kernel for orthographic projection with direct voxel accumulation.
@@ -593,6 +675,84 @@ def raycast_orthographic_kernel(
             wp.atomic_add(sum_normals_x, idx, normal[0])
             wp.atomic_add(sum_normals_y, idx, normal[1])
             wp.atomic_add(sum_normals_z, idx, normal[2])
+            wp.atomic_add(sum_hit_distances, idx, query.t)
+            wp.atomic_add(counts, idx, 1)
+
+
+@wp.kernel
+def raycast_hemisphere_kernel(
+    # Mesh
+    mesh_id: wp.uint64,
+    # Camera parameters
+    cam_origin: wp.vec3,
+    cam_right: wp.vec3,
+    cam_up: wp.vec3,
+    cam_forward: wp.vec3,
+    min_ray_dist: wp.float32,
+    max_ray_dist: wp.float32,
+    # Hemisphere directions (local frame, z > 0)
+    hemisphere_dirs: wp.array(dtype=wp.vec3),
+    num_directions: wp.int32,
+    # Voxel hash grid parameters
+    inv_voxel_size: wp.float32,
+    # Hash table arrays
+    keys: wp.array(dtype=wp.uint64),
+    active_slots: wp.array(dtype=wp.int32),
+    # Accumulator arrays
+    sum_positions_x: wp.array(dtype=wp.float32),
+    sum_positions_y: wp.array(dtype=wp.float32),
+    sum_positions_z: wp.array(dtype=wp.float32),
+    sum_normals_x: wp.array(dtype=wp.float32),
+    sum_normals_y: wp.array(dtype=wp.float32),
+    sum_normals_z: wp.array(dtype=wp.float32),
+    sum_hit_distances: wp.array(dtype=wp.float32),
+    counts: wp.array(dtype=wp.int32),
+):
+    """Raycast kernel for hemisphere projection from a single point (cavity camera).
+
+    Each thread handles one ray direction. Rays are shot from cam_origin in directions
+    transformed from local hemisphere frame to world frame using the camera basis.
+    Hits are accumulated directly into the sparse voxel hash grid.
+    """
+    tid = wp.tid()
+
+    if tid >= num_directions:
+        return
+
+    # Get local hemisphere direction (z > 0 in local frame)
+    local_dir = hemisphere_dirs[tid]
+
+    # Transform to world space: local (x, y, z) -> world (right, up, forward)
+    # local z (forward) maps to cam_forward (the surface normal)
+    # local x maps to cam_right
+    # local y maps to cam_up
+    world_dir = cam_right * local_dir[0] + cam_up * local_dir[1] + cam_forward * local_dir[2]
+    world_dir = wp.normalize(world_dir)
+
+    # Query mesh intersection
+    query = wp.mesh_query_ray(mesh_id, cam_origin, world_dir, max_ray_dist)
+
+    if query.result and query.t > min_ray_dist:
+        # Compute hit point
+        hit_point = cam_origin + world_dir * query.t
+
+        # Get surface normal - ensure it points toward camera (opposite to ray direction)
+        normal = query.normal
+        if wp.dot(normal, world_dir) > 0.0:
+            normal = -normal
+        normal = wp.normalize(normal)
+
+        # Accumulate into voxel hash grid
+        key = compute_voxel_key(hit_point, inv_voxel_size)
+        idx = hashtable_find_or_insert(key, keys, active_slots)
+        if idx >= 0:
+            wp.atomic_add(sum_positions_x, idx, hit_point[0])
+            wp.atomic_add(sum_positions_y, idx, hit_point[1])
+            wp.atomic_add(sum_positions_z, idx, hit_point[2])
+            wp.atomic_add(sum_normals_x, idx, normal[0])
+            wp.atomic_add(sum_normals_y, idx, normal[1])
+            wp.atomic_add(sum_normals_z, idx, normal[2])
+            wp.atomic_add(sum_hit_distances, idx, query.t)
             wp.atomic_add(counts, idx, 1)
 
 
@@ -607,12 +767,24 @@ class PointCloudExtractor:
     raycasting, providing built-in downsampling and dramatically reducing
     memory usage compared to storing all ray hits.
 
+    Optionally, secondary "cavity cameras" can be placed at sampled surface points
+    to shoot hemisphere rays inward, improving coverage of deep cavities and
+    occluded regions. Cavity cameras are placed preferentially at points with
+    high hit distances (indicating they are deep inside cavities).
+
     Args:
-        subdivision_level: Icosahedron subdivision level (0-5). Level 0 gives 20 views,
-            level 1 gives 80 views, level 2 gives 320 views, etc. Higher levels provide
-            better coverage.
+        edge_segments: Number of segments per icosahedron edge for camera directions.
+            Total views = 20 * n^2. Examples:
+            - n=1: 20 views
+            - n=2: 80 views
+            - n=3: 180 views
+            - n=4: 320 views
+            - n=5: 500 views
+            Higher values provide better coverage with finer control than recursive
+            subdivision.
         resolution: Pixel resolution of the orthographic camera (resolution x resolution).
-            Must be between 1 and 10000.
+            Must be between 1 and 10000. Also determines the number of rays per cavity
+            camera (~resolution^2 hemisphere directions).
         voxel_size: Size of voxels for point accumulation. If None (default), automatically
             computed as 0.1% of the mesh bounding sphere diameter. Smaller values give
             denser point clouds but require more memory.
@@ -622,47 +794,67 @@ class PointCloudExtractor:
         seed: Random seed for camera roll angles. Each camera is rotated by a random
             angle around its view direction to reduce sample correlation and improve
             coverage uniformity. Set to None for non-deterministic behavior.
+        cavity_cameras: Number of secondary hemisphere cameras to place at sampled
+            surface points for improved cavity coverage. Set to 0 (default) to disable.
+            Each camera shoots ~resolution^2 rays in a hemisphere pattern.
 
     Note:
         Memory usage is dominated by the voxel hash grid, which scales with
-        ``max_voxels`` (~28 bytes per voxel slot), not with ``resolution^2 * num_views``.
+        ``max_voxels`` (~32 bytes per voxel slot), not with ``resolution^2 * num_views``.
         This makes high-resolution extraction practical even on memory-constrained systems.
 
     Example:
-        >>> extractor = PointCloudExtractor(subdivision_level=2, resolution=1000)
+        >>> extractor = PointCloudExtractor(edge_segments=4, resolution=1000)
         >>> result = extractor.extract(vertices, indices)
         >>> print(f"Extracted {result.num_points} points with normals")
+
+        >>> # With cavity cameras for better coverage of occluded regions
+        >>> extractor = PointCloudExtractor(edge_segments=4, resolution=500, cavity_cameras=100)
+        >>> result = extractor.extract(vertices, indices)
     """
 
     def __init__(
         self,
-        subdivision_level: int = 1,
+        edge_segments: int = 2,
         resolution: int = 1000,
         voxel_size: float | None = None,
         max_voxels: int = 1 << 20,
         device: str | None = None,
         seed: int | None = 42,
+        cavity_cameras: int = 0,
     ):
         # Validate parameters
-        if subdivision_level < 0 or subdivision_level > 5:
-            raise ValueError(f"subdivision_level must be between 0 and 5 (inclusive), got {subdivision_level}")
+        if edge_segments < 1:
+            raise ValueError(f"edge_segments must be >= 1, got {edge_segments}")
         if resolution < 1 or resolution > 10000:
             raise ValueError(f"resolution must be between 1 and 10000 (inclusive), got {resolution}")
         if voxel_size is not None and voxel_size <= 0:
             raise ValueError(f"voxel_size must be positive, got {voxel_size}")
         if max_voxels < 1:
             raise ValueError(f"max_voxels must be >= 1, got {max_voxels}")
+        if cavity_cameras < 0:
+            raise ValueError(f"cavity_cameras must be >= 0, got {cavity_cameras}")
 
-        self.subdivision_level = subdivision_level
+        self.edge_segments = edge_segments
         self.resolution = resolution
         self.voxel_size = voxel_size  # None means auto-compute
         self.max_voxels = max_voxels
         self.device = device if device is not None else wp.get_device()
         self.seed = seed
+        self.cavity_cameras = cavity_cameras
 
-        # Pre-compute camera directions
-        self.directions = create_icosahedron_directions(subdivision_level)
+        # Pre-compute camera directions for primary pass
+        self.directions = create_icosahedron_directions(edge_segments)
         self.num_views = len(self.directions)
+
+        # Pre-compute hemisphere directions for cavity cameras
+        if cavity_cameras > 0:
+            target_rays = resolution * resolution
+            self.hemisphere_directions = create_hemisphere_directions(target_rays)
+            self.num_hemisphere_dirs = len(self.hemisphere_directions)
+        else:
+            self.hemisphere_directions = None
+            self.num_hemisphere_dirs = 0
 
     def extract(
         self,
@@ -774,13 +966,94 @@ class PointCloudExtractor:
                     voxel_grid.sum_normals_x,
                     voxel_grid.sum_normals_y,
                     voxel_grid.sum_normals_z,
+                    voxel_grid.sum_hit_distances,
                     voxel_grid.counts,
                 ],
                 device=self.device,
             )
 
+        # Secondary pass: cavity cameras for improved coverage of occluded regions
+        if self.cavity_cameras > 0 and voxel_grid.get_num_voxels() > 0:
+            wp.synchronize()
+
+            # Get intermediate results for sampling camera positions
+            points_np, normals_np, hit_distances_np, num_points = voxel_grid.finalize()
+
+            if num_points > 0:
+                # Prepare hemisphere directions on GPU
+                wp_hemisphere_dirs = wp.array(
+                    self.hemisphere_directions, dtype=wp.vec3, device=self.device
+                )
+
+                # Camera offset to avoid self-intersection (0.1% of bounding sphere radius)
+                camera_offset = radius * 0.001
+                # Minimum ray distance to avoid self-occlusion
+                min_ray_dist = camera_offset * 2.0
+
+                # Sample cavity camera positions with rejection sampling
+                # Favor samples with higher hit distances (deeper in cavities)
+                max_hit_dist = max(float(np.max(hit_distances_np)), radius)
+                max_attempts = 100  # Cap rejection sampling iterations
+
+                for _ in range(self.cavity_cameras):
+                    # Rejection sampling: accept samples proportional to hit distance
+                    for _attempt in range(max_attempts):
+                        sample_idx = rng.integers(0, num_points)
+                        hit_dist = hit_distances_np[sample_idx]
+                        # Accept with probability proportional to hit_dist / max_hit_dist
+                        if rng.random() < hit_dist / max_hit_dist:
+                            break
+                    # If all attempts failed, use the last sample anyway
+
+                    # Get sample position and normal
+                    sample_pos = points_np[sample_idx]
+                    sample_normal = normals_np[sample_idx]
+
+                    # Compute camera basis (normal is the forward direction)
+                    right, up = compute_camera_basis(sample_normal)
+
+                    # Apply random roll around normal
+                    theta = rng.uniform(0, 2 * np.pi)
+                    cos_theta = np.cos(theta)
+                    sin_theta = np.sin(theta)
+                    right_rot = cos_theta * right + sin_theta * up
+                    up_rot = cos_theta * up - sin_theta * right
+                    right, up = right_rot, up_rot
+
+                    # Offset camera position slightly along normal to avoid self-intersection
+                    cam_origin = sample_pos + sample_normal * camera_offset
+
+                    # Launch hemisphere raycast kernel
+                    wp.launch(
+                        kernel=raycast_hemisphere_kernel,
+                        dim=self.num_hemisphere_dirs,
+                        inputs=[
+                            mesh.id,
+                            wp.vec3(cam_origin[0], cam_origin[1], cam_origin[2]),
+                            wp.vec3(right[0], right[1], right[2]),
+                            wp.vec3(up[0], up[1], up[2]),
+                            wp.vec3(sample_normal[0], sample_normal[1], sample_normal[2]),
+                            float(min_ray_dist),
+                            float(max_ray_dist),
+                            wp_hemisphere_dirs,
+                            self.num_hemisphere_dirs,
+                            float(voxel_grid.inv_voxel_size),
+                            voxel_grid.keys,
+                            voxel_grid.active_slots,
+                            voxel_grid.sum_positions_x,
+                            voxel_grid.sum_positions_y,
+                            voxel_grid.sum_positions_z,
+                            voxel_grid.sum_normals_x,
+                            voxel_grid.sum_normals_y,
+                            voxel_grid.sum_normals_z,
+                            voxel_grid.sum_hit_distances,
+                            voxel_grid.counts,
+                        ],
+                        device=self.device,
+                    )
+
         # Finalize voxel grid to get averaged points and normals
-        points_np, normals_np, num_points = voxel_grid.finalize()
+        points_np, normals_np, _hit_distances_np, num_points = voxel_grid.finalize()
 
         return PointCloudResult(
             points=points_np,
