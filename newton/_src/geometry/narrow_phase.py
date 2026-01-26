@@ -1297,6 +1297,7 @@ class NarrowPhase:
 
     def launch_custom_write(
         self,
+        *,
         candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),  # Maybe colliding pairs
         num_candidate_pair: wp.array(dtype=wp.int32, ndim=1),  # Size one array
         shape_types: wp.array(dtype=wp.int32, ndim=1),  # All shape types, pairs index into it
@@ -1579,6 +1580,7 @@ class NarrowPhase:
 
     def launch(
         self,
+        *,
         candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),  # Maybe colliding pairs
         num_candidate_pair: wp.array(dtype=wp.int32, ndim=1),  # Size one array
         shape_types: wp.array(dtype=wp.int32, ndim=1),  # All shape types, pairs index into it
