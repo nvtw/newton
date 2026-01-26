@@ -47,9 +47,10 @@ The same three-strategy approach as ``ContactReductionFunctions``:
 **Implementation Details:**
 
 - Contacts stored in global buffer (struct of arrays: position_depth, normal, shape_pairs)
-- Hashtable key: (shape_a, shape_b, bin_id) where bin_id is 0-19 for normal bins, 20-119 for voxels
+- Hashtable key: (shape_a, shape_b, bin_id) where bin_id is 0-19 for normal bins, 20-34 for voxel groups
 - Each normal bin entry has 7 value slots (6 spatial + 1 max-depth)
-- Each voxel bin entry uses only slot 0 for max-depth
+- Voxels are grouped by 7: bin_id = 20 + (voxel_idx // 7), slot = voxel_idx % 7
+- This reduces voxel hashtable entries from 100 to 15 (⌈100/7⌉)
 - Atomic max on packed (score, contact_id) selects winners
 
 See Also:
@@ -77,6 +78,7 @@ from .contact_data import ContactData
 from .contact_reduction import (
     NUM_NORMAL_BINS,
     NUM_SPATIAL_DIRECTIONS,
+    NUM_VOXEL_DEPTH_SLOTS,
     compute_voxel_index,
     float_flip,
     get_slot,
@@ -161,7 +163,7 @@ def reduction_insert_slot(
 # Key is (shape_a, shape_b, bin_id) - NO slot_id (slots are handled via values_per_key)
 # - Bits 0-26:   shape_a (27 bits, up to ~134M shapes)
 # - Bits 27-54:  shape_b (28 bits, up to ~268M shapes)
-# - Bits 55-62:  bin_id (8 bits, 0-255, supports normal bins 0-19 + voxel bins 20-139)
+# - Bits 55-62:  bin_id (8 bits, 0-255, supports normal bins 0-19 + voxel groups 20-34)
 # - Bit 63:      unused (kept 0 for signed/unsigned compatibility)
 # Total: 63 bits used
 
@@ -180,7 +182,7 @@ def make_contact_key(shape_a: int, shape_b: int, bin_id: int) -> wp.uint64:
     Args:
         shape_a: First shape index
         shape_b: Second shape index
-        bin_id: Bin index (0-19 for normal bins, 20-139 for voxel bins)
+        bin_id: Bin index (0-19 for normal bins, 20-34 for voxel groups)
 
     Returns:
         64-bit key for hashtable lookup (only 63 bits used)
@@ -323,16 +325,18 @@ class GlobalContactReducer:
 
     - Key: ``(shape_a, shape_b, bin_id)`` packed into 64 bits
     - bin_id 0-19: Normal bins (icosahedron faces)
-    - bin_id 20-119: Voxel bins (mesh-local spatial regions)
+    - bin_id 20-34: Voxel groups (100 voxels grouped by 7)
 
     **Slot Layout per Normal Bin Entry (7 slots):**
 
     - Slots 0-5: Spatial direction extremes (contacts with depth < beta)
     - Slot 6: Maximum depth contact for the bin (unconditional)
 
-    **Slot Layout per Voxel Bin Entry:**
+    **Slot Layout per Voxel Group Entry (7 slots):**
 
-    - Slot 0: Maximum depth contact for this voxel region
+    - Slots 0-6: Maximum depth contacts for voxels in this group
+    - voxel_idx maps to: bin_id = 20 + (voxel_idx // 7), slot = voxel_idx % 7
+    - This groups 100 voxels into 15 hashtable entries (⌈100/7⌉)
 
     **Contact Data Storage:**
 
@@ -499,12 +503,13 @@ def reduce_contact_in_hashtable(
 
     Uses single beta threshold for contact reduction with two strategies:
 
-    1. **Normal-binned slots** (20 bins x 7 slots = 140 entries):
+    1. **Normal-binned slots** (20 bins x 7 slots = 140 slot values):
        - 6 spatial direction slots for contacts with depth < beta
        - 1 max-depth slot per normal bin (always participates)
 
-    2. **Voxel-based depth slots** (100 entries):
-       - Each voxel tracks the deepest contact in that mesh-local region
+    2. **Voxel-based depth slots** (100 voxels grouped into 15 entries x 7 slots):
+       - Voxels are grouped by 7: bin_id = 20 + (voxel_idx // 7), slot = voxel_idx % 7
+       - Each slot tracks the deepest contact in that voxel region
        - Provides spatial coverage independent of contact normal
 
     Args:
@@ -570,15 +575,25 @@ def reduce_contact_in_hashtable(
     voxel_res = shape_voxel_resolution[shape_a]
     voxel_idx = compute_voxel_index(position_local, aabb_lower, aabb_upper, voxel_res)
 
-    # Voxel bins use bin_id = NUM_NORMAL_BINS + voxel_idx (20-139)
-    voxel_bin_id = NUM_NORMAL_BINS + voxel_idx
+    # Clamp voxel index to valid range
+    voxel_idx = wp.clamp(voxel_idx, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1))
+
+    # Group voxels by 7 to maximize slot utilization (matches values_per_key)
+    # 100 voxels -> 15 hashtable entries (ceil(100/7) = 15)
+    # bin_id = NUM_NORMAL_BINS + voxel_group (20-34)
+    # slot = voxel_local (0-6)
+    voxels_per_group = wp.static(NUM_SPATIAL_DIRECTIONS + 1)  # = 7 (same as values_per_key)
+    voxel_group = voxel_idx // voxels_per_group
+    voxel_local_slot = voxel_idx % voxels_per_group
+
+    voxel_bin_id = NUM_NORMAL_BINS + voxel_group
     voxel_key = make_contact_key(shape_a, shape_b, voxel_bin_id)
 
     voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
     if voxel_entry_idx >= 0:
-        # For voxel bins, only use slot 0 for max-depth tracking
+        # Use voxel_local_slot (0-6) for this voxel's max-depth tracking
         voxel_value = make_contact_value(-depth, contact_id)
-        reduction_update_slot(voxel_entry_idx, 0, voxel_value, reducer_data.ht_values, ht_capacity)
+        reduction_update_slot(voxel_entry_idx, voxel_local_slot, voxel_value, reducer_data.ht_values, ht_capacity)
 
 
 @wp.func
