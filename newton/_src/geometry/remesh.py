@@ -34,10 +34,7 @@ Example:
     Remesh a problematic mesh to get a clean, watertight version::
 
         import numpy as np
-        from newton._src.geometry.remesh import (
-            PointCloudExtractor,
-            SurfaceReconstructor,
-        )
+        from newton.geometry import PointCloudExtractor, SurfaceReconstructor
 
         # Load your mesh (vertices: Nx3, indices: Mx3 or flattened)
         vertices = np.array(...)  # your mesh vertices
@@ -95,7 +92,13 @@ def compute_bounding_sphere(vertices: np.ndarray) -> tuple[np.ndarray, float]:
 
     Returns:
         Tuple of (center, radius) where center is (3,) array.
+
+    Raises:
+        ValueError: If vertices array is empty.
     """
+    if len(vertices) == 0:
+        raise ValueError("Cannot compute bounding sphere for empty vertex array")
+
     # Start with axis-aligned bounding box center
     min_pt = np.min(vertices, axis=0)
     max_pt = np.max(vertices, axis=0)
@@ -103,7 +106,11 @@ def compute_bounding_sphere(vertices: np.ndarray) -> tuple[np.ndarray, float]:
 
     # Compute radius as max distance from center
     distances = np.linalg.norm(vertices - center, axis=1)
-    radius = np.max(distances)
+    radius = float(np.max(distances))
+
+    # Handle single-vertex case: use small positive radius
+    if radius == 0.0:
+        radius = 1e-6
 
     return center, radius
 
@@ -229,8 +236,14 @@ def compute_camera_basis(direction: np.ndarray) -> tuple[np.ndarray, np.ndarray]
 
     Returns:
         Tuple of (right, up) unit vectors forming an orthonormal basis with direction.
+
+    Raises:
+        ValueError: If direction vector has zero or near-zero length.
     """
-    direction = direction / np.linalg.norm(direction)
+    norm = np.linalg.norm(direction)
+    if norm < 1e-10:
+        raise ValueError("Direction vector has zero or near-zero length")
+    direction = direction / norm
 
     # Choose an arbitrary up vector that's not parallel to direction
     if abs(direction[1]) < 0.9:
@@ -297,7 +310,9 @@ def raycast_orthographic_kernel(
             normal = -normal
         normal = wp.normalize(normal)
 
-        # Atomically append to output buffers
+        # Atomically append to output buffers.
+        # Note: out_count may exceed max_points if more rays hit than buffer capacity,
+        # but we only write to valid indices. The caller clamps the final count.
         idx = wp.atomic_add(out_count, 0, 1)
         if idx < max_points:
             out_points[idx] = hit_point
@@ -312,10 +327,18 @@ class PointCloudExtractor:
     guaranteed to be consistent (always pointing outward toward the camera).
 
     Args:
-        subdivision_level: Icosahedron subdivision level. Level 0 gives 20 views,
-            level 1 gives 80 views, level 2 gives 320 views, etc.
+        subdivision_level: Icosahedron subdivision level (0-5). Level 0 gives 20 views,
+            level 1 gives 80 views, level 2 gives 320 views, etc. Higher levels provide
+            better coverage but use significantly more memory.
         resolution: Pixel resolution of the orthographic camera (resolution x resolution).
+            Must be between 1 and 10000.
         device: Warp device to use for computation.
+
+    Note:
+        Memory usage scales with ``resolution^2 * num_views``. For example, with
+        ``resolution=1000`` and ``subdivision_level=2`` (320 views), the extractor
+        allocates buffers for up to 320 million points (~7.7 GB GPU memory).
+        Use lower resolution or subdivision_level for memory-constrained systems.
 
     Example:
         >>> extractor = PointCloudExtractor(subdivision_level=2, resolution=1000)
@@ -329,6 +352,16 @@ class PointCloudExtractor:
         resolution: int = 1000,
         device: str | None = None,
     ):
+        # Validate parameters
+        if subdivision_level < 0 or subdivision_level > 5:
+            raise ValueError(
+                f"subdivision_level must be between 0 and 5 (inclusive), got {subdivision_level}"
+            )
+        if resolution < 1 or resolution > 10000:
+            raise ValueError(
+                f"resolution must be between 1 and 10000 (inclusive), got {resolution}"
+            )
+
         self.subdivision_level = subdivision_level
         self.resolution = resolution
         self.device = device if device is not None else wp.get_device()
@@ -353,10 +386,26 @@ class PointCloudExtractor:
 
         Returns:
             PointCloudResult containing extracted points and normals.
+
+        Raises:
+            ValueError: If vertices or indices are empty, or indices are invalid.
         """
         # Ensure correct shapes
         vertices = np.asarray(vertices, dtype=np.float32)
         indices = np.asarray(indices, dtype=np.int32).flatten()
+
+        # Validate inputs
+        if len(vertices) == 0:
+            raise ValueError("Vertices array cannot be empty")
+        if len(indices) == 0:
+            raise ValueError("Indices array cannot be empty")
+        if len(indices) % 3 != 0:
+            raise ValueError(f"Indices length must be a multiple of 3, got {len(indices)}")
+        if np.any(indices < 0) or np.any(indices >= len(vertices)):
+            raise ValueError(
+                f"Indices must be in range [0, {len(vertices)}), "
+                f"got range [{indices.min()}, {indices.max()}]"
+            )
 
         # Compute bounding sphere
         center, radius = compute_bounding_sphere(vertices)
@@ -493,6 +542,22 @@ class SurfaceReconstructor:
         target_triangles: int | None = None,
         simplify_tolerance: float | None = None,
     ):
+        # Validate parameters
+        if depth < 1:
+            raise ValueError(f"depth must be >= 1, got {depth}")
+        if scale <= 0:
+            raise ValueError(f"scale must be > 0, got {scale}")
+        if not (0.0 <= density_threshold_quantile <= 1.0):
+            raise ValueError(
+                f"density_threshold_quantile must be in [0, 1], got {density_threshold_quantile}"
+            )
+        if simplify_ratio is not None and (simplify_ratio <= 0 or simplify_ratio > 1):
+            raise ValueError(f"simplify_ratio must be in (0, 1], got {simplify_ratio}")
+        if target_triangles is not None and target_triangles < 1:
+            raise ValueError(f"target_triangles must be >= 1, got {target_triangles}")
+        if simplify_tolerance is not None and simplify_tolerance < 0:
+            raise ValueError(f"simplify_tolerance must be >= 0, got {simplify_tolerance}")
+
         self.depth = depth
         self.scale = scale
         self.linear_fit = linear_fit
@@ -544,12 +609,19 @@ class SurfaceReconstructor:
         normals = np.asarray(normals, dtype=np.float32)
         original_count = len(points)
 
+        # Validate inputs
+        if original_count == 0:
+            raise ValueError("Cannot reconstruct from empty point cloud")
+
         # Downsample if requested
         if self.downsample_voxel_size is not None:
             if self.downsample_voxel_size == "auto":
                 # Auto-compute: ~0.1% of largest dimension (keeps more detail)
                 extent = np.max(points, axis=0) - np.min(points, axis=0)
                 voxel_size = float(np.max(extent)) * 0.001
+                # Guard against zero extent (all points identical)
+                if voxel_size == 0.0:
+                    voxel_size = 1e-6
             else:
                 voxel_size = float(self.downsample_voxel_size)
 
@@ -557,6 +629,13 @@ class SurfaceReconstructor:
                 print(f"Downsampling point cloud (voxel_size={voxel_size:.6f})...")
 
             points, normals = self._downsample(points, normals, voxel_size)
+
+            # Check for empty result after downsampling
+            if len(points) == 0:
+                raise ValueError(
+                    "Point cloud is empty after downsampling; "
+                    "use a smaller downsample_voxel_size or set it to None"
+                )
 
             if verbose:
                 ratio = 100 * len(points) / original_count
@@ -625,10 +704,13 @@ class SurfaceReconstructor:
         if verbose and (
             self.simplify_tolerance is not None or self.target_triangles is not None or self.simplify_ratio is not None
         ):
-            reduction = 100 * (1 - len(indices) // 3 / num_triangles_before)
-            print(
-                f"Simplified mesh: {len(vertices)} vertices, {len(indices) // 3} triangles ({reduction:.1f}% reduction)"
-            )
+            if num_triangles_before > 0:
+                reduction = 100 * (1 - len(indices) // 3 / num_triangles_before)
+                print(
+                    f"Simplified mesh: {len(vertices)} vertices, {len(indices) // 3} triangles ({reduction:.1f}% reduction)"
+                )
+            else:
+                print(f"Simplified mesh: {len(vertices)} vertices, {len(indices) // 3} triangles")
 
         return ReconstructedMesh(
             vertices=vertices,
