@@ -55,6 +55,11 @@ importers = [
     "newton-usd-schemas>=0.1.0a1",
 ]
 
+# Remeshing dependencies (for SurfaceReconstructor)
+remesh = [
+    "open3d>=0.18.0",              # for Poisson surface reconstruction
+]
+
 # Examples dependencies including visualization
 examples = [
     "newton[sim]",          # include simulation dependencies
