@@ -130,40 +130,6 @@ def reduction_update_slot(
         wp.atomic_max(values, value_idx, value)
 
 
-@wp.func
-def reduction_insert_slot(
-    key: wp.uint64,
-    slot_id: int,
-    value: wp.uint64,
-    keys: wp.array(dtype=wp.uint64),
-    values: wp.array(dtype=wp.uint64),
-    active_slots: wp.array(dtype=wp.int32),
-) -> bool:
-    """Insert or update a value in a specific reduction slot.
-
-    Convenience function that combines hashtable_find_or_insert()
-    and reduction_update_slot(). For inserting multiple values to
-    the same key, prefer using those functions separately.
-
-    Args:
-        key: The uint64 key to insert
-        slot_id: Which value slot to write to (0 to values_per_key-1)
-        value: The uint64 value to insert or max with
-        keys: The hash table keys array (length must be power of two)
-        values: Values array in slot-major layout
-        active_slots: Array of size (capacity + 1) tracking active entry indices.
-
-    Returns:
-        True if insertion/update succeeded, False if the table is full
-    """
-    capacity = keys.shape[0]
-    entry_idx = hashtable_find_or_insert(key, keys, active_slots)
-    if entry_idx < 0:
-        return False
-    reduction_update_slot(entry_idx, slot_id, value, values, capacity)
-    return True
-
-
 # =============================================================================
 # Contact key/value packing
 # =============================================================================
@@ -670,37 +636,6 @@ def reduce_contact_in_hashtable(
         # Use voxel_local_slot (0-6) for this voxel's max-depth tracking
         voxel_value = make_contact_value(-depth, contact_id)
         reduction_update_slot(voxel_entry_idx, voxel_local_slot, voxel_value, reducer_data.ht_values, ht_capacity)
-
-
-@wp.func
-def export_and_reduce_contact(
-    shape_a: int,
-    shape_b: int,
-    position: wp.vec3,
-    normal: wp.vec3,
-    depth: float,
-    reducer_data: GlobalContactReducerData,
-    beta: float,
-    shape_transform: wp.array(dtype=wp.transform),
-    shape_local_aabb_lower: wp.array(dtype=wp.vec3),
-    shape_local_aabb_upper: wp.array(dtype=wp.vec3),
-    shape_voxel_resolution: wp.array(dtype=wp.vec3i),
-) -> int:
-    """Export contact to buffer and register in hashtable for reduction."""
-    contact_id = export_contact_to_buffer(shape_a, shape_b, position, normal, depth, reducer_data)
-
-    if contact_id >= 0:
-        reduce_contact_in_hashtable(
-            contact_id,
-            reducer_data,
-            beta,
-            shape_transform,
-            shape_local_aabb_lower,
-            shape_local_aabb_upper,
-            shape_voxel_resolution,
-        )
-
-    return contact_id
 
 
 @wp.kernel(enable_backward=False)

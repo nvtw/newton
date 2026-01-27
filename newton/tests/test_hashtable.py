@@ -20,9 +20,27 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.geometry.contact_reduction_global import reduction_insert_slot
-from newton._src.geometry.hashtable import HashTable
+from newton._src.geometry.hashtable import HashTable, hashtable_find_or_insert
+from newton._src.geometry.contact_reduction_global import reduction_update_slot
 from newton.tests.unittest_utils import add_function_test, get_test_devices
+
+
+@wp.func
+def reduction_insert_slot(
+    key: wp.uint64,
+    slot_id: int,
+    value: wp.uint64,
+    keys: wp.array(dtype=wp.uint64),
+    values: wp.array(dtype=wp.uint64),
+    active_slots: wp.array(dtype=wp.int32),
+) -> bool:
+    """Test helper: Insert or update a value in a specific reduction slot."""
+    capacity = keys.shape[0]
+    entry_idx = hashtable_find_or_insert(key, keys, active_slots)
+    if entry_idx < 0:
+        return False
+    reduction_update_slot(entry_idx, slot_id, value, values, capacity)
+    return True
 
 # =============================================================================
 # Test class
