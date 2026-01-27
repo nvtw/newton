@@ -31,12 +31,14 @@ import warp as wp
 
 from newton._src.geometry.hashtable import hashtable_find_or_insert
 from newton._src.geometry.remesh import (
+    PointCloudExtractor,
+    SurfaceReconstructor,
     VoxelHashGrid,
     compute_bounding_sphere,
     compute_camera_basis,
     compute_voxel_key,
 )
-from newton.geometry import PointCloudExtractor, SurfaceReconstructor
+from newton.geometry import create_box_mesh
 
 # Check if Open3D is available for reconstruction tests
 OPEN3D_AVAILABLE = importlib.util.find_spec("open3d") is not None
@@ -54,71 +56,9 @@ def create_unit_cube_mesh(center: np.ndarray | None = None) -> tuple[np.ndarray,
     Returns:
         Tuple of (vertices, indices) where vertices is (8, 3) and indices is (36,).
     """
-    # Half extents of 0.5 gives a unit cube
-    hx, hy, hz = 0.5, 0.5, 0.5
-    vertices = np.array(
-        [
-            [-hx, -hy, -hz],
-            [hx, -hy, -hz],
-            [hx, hy, -hz],
-            [-hx, hy, -hz],
-            [-hx, -hy, hz],
-            [hx, -hy, hz],
-            [hx, hy, hz],
-            [-hx, hy, hz],
-        ],
-        dtype=np.float32,
-    )
+    vertices, indices = create_box_mesh((0.5, 0.5, 0.5))
     if center is not None:
         vertices = vertices + np.array(center, dtype=np.float32)
-
-    indices = np.array(
-        [
-            # Bottom face (z = -hz)
-            0,
-            2,
-            1,
-            0,
-            3,
-            2,
-            # Top face (z = hz)
-            4,
-            5,
-            6,
-            4,
-            6,
-            7,
-            # Front face (y = -hy)
-            0,
-            1,
-            5,
-            0,
-            5,
-            4,
-            # Back face (y = hy)
-            2,
-            3,
-            7,
-            2,
-            7,
-            6,
-            # Left face (x = -hx)
-            0,
-            4,
-            7,
-            0,
-            7,
-            3,
-            # Right face (x = hx)
-            1,
-            2,
-            6,
-            1,
-            6,
-            5,
-        ],
-        dtype=np.int32,
-    )
     return vertices, indices
 
 
@@ -206,29 +146,27 @@ class TestPointCloudExtractor(unittest.TestCase):
 
         # Use fast settings: low resolution, few edge segments
         extractor = PointCloudExtractor(edge_segments=1, resolution=100)
-        result = extractor.extract(vertices, indices)
+        points, normals = extractor.extract(vertices, indices)
 
         # With 80 views at 100x100 = 800,000 potential rays
         # A unit cube should intercept a significant fraction of rays
         # Expect at least 1000 points (very conservative minimum)
-        self.assertGreater(
-            result.num_points, 1000, f"Should extract many points from a cube, got only {result.num_points}"
-        )
+        self.assertGreater(len(points), 1000, f"Should extract many points from a cube, got only {len(points)}")
 
         # Points should have correct shape
-        self.assertEqual(result.points.shape[1], 3, "Points should be 3D")
-        self.assertEqual(result.normals.shape[1], 3, "Normals should be 3D")
-        self.assertEqual(len(result.points), len(result.normals), "Should have same number of points and normals")
+        self.assertEqual(points.shape[1], 3, "Points should be 3D")
+        self.assertEqual(normals.shape[1], 3, "Normals should be 3D")
+        self.assertEqual(len(points), len(normals), "Should have same number of points and normals")
 
     def test_extract_cube_points_on_surface(self):
         """Test that extracted points are precisely on the cube surface."""
         vertices, indices = create_unit_cube_mesh()
 
         extractor = PointCloudExtractor(edge_segments=1, resolution=100)
-        result = extractor.extract(vertices, indices)
+        points, normals = extractor.extract(vertices, indices)
 
         # Compute distance of each extracted point to the cube surface
-        distances = compute_distance_to_cube(result.points)
+        distances = compute_distance_to_cube(points)
 
         # Ray intersection points should be ON the surface, not near it
         # Allow only floating-point precision errors
@@ -251,10 +189,10 @@ class TestPointCloudExtractor(unittest.TestCase):
         vertices, indices = create_unit_cube_mesh()
 
         extractor = PointCloudExtractor(edge_segments=1, resolution=100)
-        result = extractor.extract(vertices, indices)
+        points, normals = extractor.extract(vertices, indices)
 
         # Classify points by face
-        face_counts = classify_points_by_face(result.points, tolerance=0.01)
+        face_counts = classify_points_by_face(points, tolerance=0.01)
 
         # Each face should have a significant number of points
         min_points_per_face = 100  # Conservative minimum
@@ -270,10 +208,10 @@ class TestPointCloudExtractor(unittest.TestCase):
         vertices, indices = create_unit_cube_mesh()
 
         extractor = PointCloudExtractor(edge_segments=1, resolution=100)
-        result = extractor.extract(vertices, indices)
+        points, normals = extractor.extract(vertices, indices)
 
         # Compute normal lengths
-        normal_lengths = np.linalg.norm(result.normals, axis=1)
+        normal_lengths = np.linalg.norm(normals, axis=1)
 
         # Normals should be exactly unit length (within floating point precision)
         self.assertTrue(
@@ -286,7 +224,7 @@ class TestPointCloudExtractor(unittest.TestCase):
         vertices, indices = create_unit_cube_mesh()
 
         extractor = PointCloudExtractor(edge_segments=1, resolution=100)
-        result = extractor.extract(vertices, indices)
+        points, normals = extractor.extract(vertices, indices)
 
         # For a cube centered at origin, outward normals should point away from center
         # For each point on the surface, the normal should point in the same general
@@ -296,7 +234,7 @@ class TestPointCloudExtractor(unittest.TestCase):
         # Check that most normals point outward (dot product with position > 0)
         # Note: For points exactly at face centers, position and normal are parallel
         # For points near edges/corners, this is less precise
-        dots = np.sum(result.points * result.normals, axis=1)
+        dots = np.sum(points * normals, axis=1)
 
         # Almost all should be positive (pointing outward)
         fraction_outward = np.mean(dots > -0.01)  # Small negative tolerance for edge cases
@@ -312,10 +250,10 @@ class TestPointCloudExtractor(unittest.TestCase):
         vertices, indices = create_unit_cube_mesh(center=center)
 
         extractor = PointCloudExtractor(edge_segments=1, resolution=100)
-        result = extractor.extract(vertices, indices)
+        points, normals = extractor.extract(vertices, indices)
 
         # Points should still be on the (translated) cube surface
-        distances = compute_distance_to_cube(result.points, half_extent=0.5, center=center)
+        distances = compute_distance_to_cube(points, half_extent=0.5, center=center)
         max_distance = np.max(distances)
 
         self.assertLess(
@@ -326,7 +264,7 @@ class TestPointCloudExtractor(unittest.TestCase):
 
         # Should still cover all faces
         # Translate points back to origin for face classification
-        centered_points = result.points - center
+        centered_points = points - center
         face_counts = classify_points_by_face(centered_points, tolerance=0.01)
         for face_name, count in face_counts.items():
             self.assertGreater(count, 50, f"Face {face_name} should have points even for translated cube")
@@ -392,9 +330,9 @@ class TestSurfaceReconstructor(unittest.TestCase):
         # Step 1: Extract point cloud
         # Use slightly higher resolution for better reconstruction quality
         extractor = PointCloudExtractor(edge_segments=1, resolution=150)
-        pointcloud = extractor.extract(vertices, indices)
+        points, normals = extractor.extract(vertices, indices)
 
-        self.assertGreater(pointcloud.num_points, 500, "Should extract sufficient points for reconstruction")
+        self.assertGreater(len(points), 500, "Should extract sufficient points for reconstruction")
 
         # Step 2: Reconstruct mesh
         # Note: downsampling is handled by PointCloudExtractor's voxel hash grid
@@ -404,11 +342,11 @@ class TestSurfaceReconstructor(unittest.TestCase):
             simplify_ratio=None,
             target_triangles=None,
         )
-        recon_mesh = reconstructor.reconstruct_from_result(pointcloud, verbose=False)
+        recon_mesh = reconstructor.reconstruct(points, normals, verbose=False)
 
         # Should produce a valid mesh
-        self.assertGreater(recon_mesh.num_vertices, 0, "Should produce vertices")
-        self.assertGreater(recon_mesh.num_triangles, 0, "Should produce triangles")
+        self.assertGreater(len(recon_mesh.vertices), 0, "Should produce vertices")
+        self.assertGreater(len(recon_mesh.indices) // 3, 0, "Should produce triangles")
 
         # Step 3: Validate reconstructed mesh is close to original cube
         distances = compute_distance_to_cube(recon_mesh.vertices, half_extent=0.5)
@@ -437,16 +375,17 @@ class TestSurfaceReconstructor(unittest.TestCase):
         vertices, indices = create_unit_cube_mesh()
 
         extractor = PointCloudExtractor(edge_segments=1, resolution=100)
-        pointcloud = extractor.extract(vertices, indices)
+        points, normals = extractor.extract(vertices, indices)
 
         reconstructor = SurfaceReconstructor(depth=6)
-        recon_mesh = reconstructor.reconstruct_from_result(pointcloud, verbose=False)
+        recon_mesh = reconstructor.reconstruct(points, normals, verbose=False)
 
         # A cube needs at minimum 12 triangles (2 per face)
         # Poisson reconstruction typically produces more (smoother surface)
         # But it shouldn't be absurdly high for a simple cube
-        self.assertGreater(recon_mesh.num_triangles, 12, "Should have at least 12 triangles")
-        self.assertLess(recon_mesh.num_triangles, 50000, "Should not have excessive triangles for a simple cube")
+        num_triangles = len(recon_mesh.indices) // 3
+        self.assertGreater(num_triangles, 12, "Should have at least 12 triangles")
+        self.assertLess(num_triangles, 50000, "Should not have excessive triangles for a simple cube")
 
     def test_parameter_validation(self):
         """Test that invalid parameters raise ValueError."""

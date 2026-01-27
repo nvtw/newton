@@ -25,7 +25,9 @@ classifiers = [
 description = "A GPU-accelerated physics engine for robotics simulation"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["warp-lang>=1.12.0.dev20251219"]
+dependencies = [
+    "warp-lang>=1.12.0.dev20251219",
+]
 
 [project.optional-dependencies]
 # Core simulation dependencies
@@ -58,6 +60,7 @@ importers = [
 # Remeshing dependencies (for SurfaceReconstructor)
 remesh = [
     "open3d>=0.18.0",              # for Poisson surface reconstruction
+    "pyfqmr>=0.5.0",               # for fast mesh simplification
 ]
 
 # Examples dependencies including visualization

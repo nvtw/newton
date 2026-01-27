@@ -47,7 +47,7 @@ Example:
     Remesh a problematic mesh to get a clean, watertight version::
 
         import numpy as np
-        from newton.geometry import PointCloudExtractor, SurfaceReconstructor
+        from newton._src.geometry.remesh import PointCloudExtractor, SurfaceReconstructor
 
         # Load your mesh (vertices: Nx3, indices: Mx3 or flattened)
         vertices = np.array(...)  # your mesh vertices
@@ -61,16 +61,16 @@ Example:
             resolution=1000,  # 1000x1000 rays per view
             cavity_cameras=100,  # 100 secondary hemisphere cameras
         )
-        pointcloud = extractor.extract(vertices, indices)
-        print(f"Extracted {pointcloud.num_points} points")
+        points, normals = extractor.extract(vertices, indices)
+        print(f"Extracted {len(points)} points")
 
         # Step 2: Reconstruct clean mesh using Poisson reconstruction
         reconstructor = SurfaceReconstructor(
             depth=10,
             simplify_tolerance=1e-7,  # fraction of mesh diagonal
         )
-        clean_mesh = reconstructor.reconstruct_from_result(pointcloud)
-        print(f"Reconstructed {clean_mesh.num_triangles} triangles")
+        clean_mesh = reconstructor.reconstruct(points, normals)
+        print(f"Reconstructed {len(clean_mesh.indices) // 3} triangles")
 
         # Use the clean mesh
         new_vertices = clean_mesh.vertices  # (N, 3) float32
@@ -79,12 +79,12 @@ Example:
 
 import math
 import warnings
-from dataclasses import dataclass
 
 import numpy as np
 import warp as wp
 
 from newton._src.geometry.hashtable import HashTable, hashtable_find_or_insert
+from newton._src.geometry.types import Mesh
 
 # -----------------------------------------------------------------------------
 # Morton encoding for sparse voxel grid (21 bits per axis = 63 bits total)
@@ -392,22 +392,6 @@ class VoxelHashGrid:
             out_normals.numpy(),
             num_active,
         )
-
-
-@dataclass
-class PointCloudResult:
-    """Result of point cloud extraction.
-
-    Attributes:
-        points: World-space intersection points (N, 3).
-        normals: World-space surface normals at each point (N, 3).
-            Normals are guaranteed to point toward the camera that captured them.
-        num_points: Total number of valid points extracted.
-    """
-
-    points: np.ndarray
-    normals: np.ndarray
-    num_points: int
 
 
 def compute_bounding_sphere(vertices: np.ndarray) -> tuple[np.ndarray, float]:
@@ -914,12 +898,12 @@ class PointCloudExtractor:
 
     Example:
         >>> extractor = PointCloudExtractor(edge_segments=4, resolution=1000)
-        >>> result = extractor.extract(vertices, indices)
-        >>> print(f"Extracted {result.num_points} points with normals")
+        >>> points, normals = extractor.extract(vertices, indices)
+        >>> print(f"Extracted {len(points)} points with normals")
 
         >>> # With cavity cameras for better coverage of occluded regions
         >>> extractor = PointCloudExtractor(edge_segments=4, resolution=500, cavity_cameras=100)
-        >>> result = extractor.extract(vertices, indices)
+        >>> points, normals = extractor.extract(vertices, indices)
     """
 
     def __init__(
@@ -970,7 +954,7 @@ class PointCloudExtractor:
         vertices: np.ndarray,
         indices: np.ndarray,
         padding_factor: float = 1.1,
-    ) -> PointCloudResult:
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Extract point cloud from a triangle mesh.
 
         Performs multi-view orthographic raycasting with online voxel-based accumulation:
@@ -994,7 +978,9 @@ class PointCloudExtractor:
                 rays start outside the mesh.
 
         Returns:
-            PointCloudResult containing extracted points and normals.
+            Tuple of (points, normals) where:
+            - points: (N, 3) float32 array of world-space intersection points
+            - normals: (N, 3) float32 array of world-space surface normals
 
         Raises:
             ValueError: If vertices or indices are empty, or indices are invalid.
@@ -1041,7 +1027,7 @@ class PointCloudExtractor:
         # Voxel size in normalized space
         # Auto: 0.001 gives ~1000 voxels across the diameter, well within ±1M Morton range
         if self.voxel_size is None:
-            voxel_size = 0.001  # Fixed in normalized space
+            voxel_size = 0.0005  # Fixed in normalized space
         else:
             # User specified voxel_size is in original space, convert to normalized
             voxel_size = self.voxel_size / radius if radius > 0 else self.voxel_size
@@ -1052,7 +1038,7 @@ class PointCloudExtractor:
             # Use 4x for hash table load factor (~25%)
             # Cap at 16M to avoid excessive memory for small voxels
             estimated_surface_voxels = 4.0 * np.pi / (voxel_size**2)
-            max_voxels = min(1 << 24, max(1 << 20, int(estimated_surface_voxels * 4)))
+            max_voxels = min(1 << 26, max(1 << 20, int(estimated_surface_voxels * 4)))
         else:
             max_voxels = self.max_voxels
 
@@ -1305,28 +1291,7 @@ class PointCloudExtractor:
             points_np = points_np + center
         # Normals are unit vectors, no transformation needed
 
-        return PointCloudResult(
-            points=points_np,
-            normals=normals_np,
-            num_points=num_points,
-        )
-
-
-@dataclass
-class ReconstructedMesh:
-    """Result of surface reconstruction.
-
-    Attributes:
-        vertices: (N, 3) array of vertex positions.
-        indices: (M,) array of triangle indices (flattened).
-        num_vertices: Number of vertices.
-        num_triangles: Number of triangles.
-    """
-
-    vertices: np.ndarray
-    indices: np.ndarray
-    num_vertices: int
-    num_triangles: int
+        return points_np, normals_np
 
 
 class SurfaceReconstructor:
@@ -1357,13 +1322,16 @@ class SurfaceReconstructor:
             The mesh keeps all triangles it needs to stay within tolerance.
             This is the recommended option for quality-preserving simplification.
             Overrides simplify_ratio and target_triangles if set.
+        fast_simplification: If True (default), use pyfqmr for fast mesh simplification.
+            If False, use Open3D's simplify_quadric_decimation which may produce
+            slightly higher quality results but is significantly slower.
 
     Example:
         >>> extractor = PointCloudExtractor(edge_segments=4, resolution=1000)
-        >>> pointcloud = extractor.extract(vertices, indices)
+        >>> points, normals = extractor.extract(vertices, indices)
         >>> reconstructor = SurfaceReconstructor(depth=10, simplify_tolerance=1e-7)
-        >>> mesh = reconstructor.reconstruct_from_result(pointcloud)
-        >>> print(f"Reconstructed {mesh.num_triangles} triangles")
+        >>> mesh = reconstructor.reconstruct(points, normals)
+        >>> print(f"Reconstructed {len(mesh.indices) // 3} triangles")
     """
 
     def __init__(
@@ -1375,6 +1343,7 @@ class SurfaceReconstructor:
         simplify_ratio: float | None = None,
         target_triangles: int | None = None,
         simplify_tolerance: float | None = None,
+        fast_simplification: bool = True,
     ):
         # Validate parameters
         if depth < 1:
@@ -1397,13 +1366,14 @@ class SurfaceReconstructor:
         self.simplify_ratio = simplify_ratio
         self.target_triangles = target_triangles
         self.simplify_tolerance = simplify_tolerance
+        self.fast_simplification = fast_simplification
 
     def reconstruct(
         self,
         points: np.ndarray,
         normals: np.ndarray,
         verbose: bool = True,
-    ) -> ReconstructedMesh:
+    ) -> Mesh:
         """Reconstruct a triangle mesh from a point cloud.
 
         Args:
@@ -1412,9 +1382,9 @@ class SurfaceReconstructor:
             verbose: Print progress information.
 
         Returns:
-            ReconstructedMesh containing vertices and triangle indices.
+            Mesh containing vertices and triangle indices.
         """
-        import open3d as o3d  # noqa: PLC0415 - lazy import, open3d is optional
+        import open3d as o3d  # lazy import, open3d is optional
 
         points = np.asarray(points, dtype=np.float32)
         normals = np.asarray(normals, dtype=np.float32)
@@ -1451,18 +1421,84 @@ class SurfaceReconstructor:
         if verbose:
             print(f"Reconstructed mesh: {len(mesh.vertices)} vertices, {num_triangles_before} triangles")
 
-        # Simplify mesh using quadric decimation (preserves shape, reduces flat areas)
+        # Simplify mesh if requested
+        needs_simplification = (
+            self.simplify_tolerance is not None or self.target_triangles is not None or self.simplify_ratio is not None
+        )
+
+        if needs_simplification:
+            if self.fast_simplification:
+                # Use pyfqmr (fast quadric mesh reduction)
+                vertices, faces = self._simplify_pyfqmr(mesh, num_triangles_before, verbose)
+            else:
+                # Use Open3D (slower but potentially higher quality)
+                vertices, faces = self._simplify_open3d(mesh, num_triangles_before, verbose)
+        else:
+            vertices = np.asarray(mesh.vertices, dtype=np.float32)
+            faces = np.asarray(mesh.triangles, dtype=np.int32)
+
+        # Convert to output format
+        indices = faces.flatten().astype(np.int32)
+
+        if verbose and needs_simplification:
+            num_triangles_after = len(faces)
+            if num_triangles_before > 0:
+                reduction = 100 * (1 - num_triangles_after / num_triangles_before)
+                print(
+                    f"Simplified mesh: {len(vertices)} vertices, {num_triangles_after} triangles ({reduction:.1f}% reduction)"
+                )
+            else:
+                print(f"Simplified mesh: {len(vertices)} vertices, {num_triangles_after} triangles")
+
+        return Mesh(vertices=vertices, indices=indices, compute_inertia=False)
+
+    def _simplify_pyfqmr(self, mesh, num_triangles_before: int, verbose: bool) -> tuple[np.ndarray, np.ndarray]:
+        """Simplify mesh using pyfqmr (fast)."""
+        from pyfqmr import Simplify  # lazy import
+
+        vertices = np.asarray(mesh.vertices, dtype=np.float64)
+        faces = np.asarray(mesh.triangles, dtype=np.int32)
+
+        mesh_simplifier = Simplify()
+        mesh_simplifier.setMesh(vertices, faces)
+
+        if self.simplify_tolerance is not None:
+            # Error-based: use lossless mode with epsilon threshold
+            # Scale tolerance by mesh bounding box diagonal to make it scale-independent
+            min_coords = vertices.min(axis=0)
+            max_coords = vertices.max(axis=0)
+            diagonal = np.linalg.norm(max_coords - min_coords)
+            absolute_tolerance = self.simplify_tolerance * diagonal
+            if verbose:
+                print(
+                    f"Simplifying mesh with pyfqmr (tolerance={self.simplify_tolerance} = {absolute_tolerance:.6f} absolute, diagonal={diagonal:.4f})..."
+                )
+            mesh_simplifier.simplify_mesh_lossless(epsilon=absolute_tolerance, verbose=False)
+        elif self.target_triangles is not None:
+            target = self.target_triangles
+            if verbose:
+                print(f"Simplifying mesh with pyfqmr to {target} triangles...")
+            mesh_simplifier.simplify_mesh(target_count=target, verbose=False)
+        elif self.simplify_ratio is not None:
+            target = int(num_triangles_before * self.simplify_ratio)
+            if verbose:
+                print(f"Simplifying mesh with pyfqmr to {self.simplify_ratio:.1%} ({target} triangles)...")
+            mesh_simplifier.simplify_mesh(target_count=target, verbose=False)
+
+        vertices, faces, _ = mesh_simplifier.getMesh()
+        return np.asarray(vertices, dtype=np.float32), faces
+
+    def _simplify_open3d(self, mesh, num_triangles_before: int, verbose: bool) -> tuple[np.ndarray, np.ndarray]:
+        """Simplify mesh using Open3D (higher quality, slower)."""
         if self.simplify_tolerance is not None:
             # Error-based: aggressively target 1 triangle, but stop when error exceeds tolerance
-            # This only removes triangles that are truly redundant (coplanar within tolerance)
-            # Scale tolerance by mesh bounding box diagonal to make it scale-independent
             bbox = mesh.get_axis_aligned_bounding_box()
             diagonal = np.linalg.norm(bbox.get_max_bound() - bbox.get_min_bound())
-            # QEM uses squared distances, so square the tolerance
+            # Open3D QEM uses squared distances, so square the tolerance
             absolute_tolerance = (self.simplify_tolerance * diagonal) ** 2
             if verbose:
                 print(
-                    f"Simplifying mesh (tolerance={self.simplify_tolerance} = {self.simplify_tolerance * diagonal:.6f} absolute, diagonal={diagonal:.4f})..."
+                    f"Simplifying mesh with Open3D (tolerance={self.simplify_tolerance} = {self.simplify_tolerance * diagonal:.6f} absolute, diagonal={diagonal:.4f})..."
                 )
             mesh = mesh.simplify_quadric_decimation(
                 target_number_of_triangles=1,
@@ -1471,54 +1507,14 @@ class SurfaceReconstructor:
         elif self.target_triangles is not None:
             target = self.target_triangles
             if verbose:
-                print(f"Simplifying mesh to {target} triangles...")
+                print(f"Simplifying mesh with Open3D to {target} triangles...")
             mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=target)
         elif self.simplify_ratio is not None:
             target = int(num_triangles_before * self.simplify_ratio)
             if verbose:
-                print(f"Simplifying mesh to {self.simplify_ratio:.1%} ({target} triangles)...")
+                print(f"Simplifying mesh with Open3D to {self.simplify_ratio:.1%} ({target} triangles)...")
             mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=target)
 
-        # Extract results
         vertices = np.asarray(mesh.vertices, dtype=np.float32)
-        indices = np.asarray(mesh.triangles, dtype=np.int32).flatten()
-
-        if verbose and (
-            self.simplify_tolerance is not None or self.target_triangles is not None or self.simplify_ratio is not None
-        ):
-            if num_triangles_before > 0:
-                reduction = 100 * (1 - len(indices) // 3 / num_triangles_before)
-                print(
-                    f"Simplified mesh: {len(vertices)} vertices, {len(indices) // 3} triangles ({reduction:.1f}% reduction)"
-                )
-            else:
-                print(f"Simplified mesh: {len(vertices)} vertices, {len(indices) // 3} triangles")
-
-        return ReconstructedMesh(
-            vertices=vertices,
-            indices=indices,
-            num_vertices=len(vertices),
-            num_triangles=len(indices) // 3,
-        )
-
-    def reconstruct_from_result(
-        self,
-        result: PointCloudResult,
-        verbose: bool = True,
-    ) -> ReconstructedMesh:
-        """Reconstruct a triangle mesh from a PointCloudResult.
-
-        Convenience method that extracts points and normals from the result.
-
-        Args:
-            result: PointCloudResult from extract_pointcloud or PointCloudExtractor.
-            verbose: Print progress information.
-
-        Returns:
-            ReconstructedMesh containing vertices and triangle indices.
-        """
-        return self.reconstruct(
-            result.points[: result.num_points],
-            result.normals[: result.num_points],
-            verbose=verbose,
-        )
+        faces = np.asarray(mesh.triangles, dtype=np.int32)
+        return vertices, faces

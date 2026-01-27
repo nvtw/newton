@@ -2704,6 +2704,7 @@ notebook = [
 ]
 remesh = [
     { name = "open3d" },
+    { name = "pyfqmr" },
 ]
 sim = [
     { name = "cbor2" },
@@ -2799,6 +2800,7 @@ requires-dist = [
     { name = "pycollada", marker = "extra == 'notebook'", specifier = ">=0.9" },
     { name = "pycollada", marker = "extra == 'torch-cu12'", specifier = ">=0.9" },
     { name = "pydata-sphinx-theme", marker = "extra == 'docs'", specifier = ">=0.16.1" },
+    { name = "pyfqmr", marker = "extra == 'remesh'", specifier = ">=0.5.0" },
     { name = "pyglet", marker = "extra == 'dev'", specifier = ">=2.1.6" },
     { name = "pyglet", marker = "extra == 'examples'", specifier = ">=2.1.6" },
     { name = "pyglet", marker = "extra == 'notebook'", specifier = ">=2.1.6" },
@@ -3084,7 +3086,7 @@ name = "nvidia-cudnn-cu12"
 version = "9.10.2.21"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas-cu12" },
+    { name = "nvidia-cublas-cu12", marker = "(python_full_version < '3.11' and sys_platform == 'emscripten') or (python_full_version < '3.11' and sys_platform == 'win32') or (sys_platform != 'emscripten' and sys_platform != 'win32')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fa/41/e79269ce215c857c935fd86bcfe91a451a584dfc27f1e068f568b9ad1ab7/nvidia_cudnn_cu12-9.10.2.21-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:c9132cc3f8958447b4910a1720036d9eff5928cc3179b0a51fb6d167c6cc87d8", size = 705026878, upload-time = "2025-06-06T21:52:51.348Z" },
@@ -3096,7 +3098,7 @@ name = "nvidia-cufft-cu12"
 version = "11.3.3.83"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(python_full_version < '3.11' and sys_platform == 'emscripten') or (python_full_version < '3.11' and sys_platform == 'win32') or (sys_platform != 'emscripten' and sys_platform != 'win32')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/60/bc/7771846d3a0272026c416fbb7e5f4c1f146d6d80704534d0b187dd6f4800/nvidia_cufft_cu12-11.3.3.83-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:848ef7224d6305cdb2a4df928759dca7b1201874787083b6e7550dd6765ce69a", size = 193109211, upload-time = "2025-03-07T01:44:56.873Z" },
@@ -3126,9 +3128,9 @@ name = "nvidia-cusolver-cu12"
 version = "11.7.3.90"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas-cu12" },
-    { name = "nvidia-cusparse-cu12" },
-    { name = "nvidia-nvjitlink-cu12" },
+    { name = "nvidia-cublas-cu12", marker = "(python_full_version < '3.11' and sys_platform == 'emscripten') or (python_full_version < '3.11' and sys_platform == 'win32') or (sys_platform != 'emscripten' and sys_platform != 'win32')" },
+    { name = "nvidia-cusparse-cu12", marker = "(python_full_version < '3.11' and sys_platform == 'emscripten') or (python_full_version < '3.11' and sys_platform == 'win32') or (sys_platform != 'emscripten' and sys_platform != 'win32')" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(python_full_version < '3.11' and sys_platform == 'emscripten') or (python_full_version < '3.11' and sys_platform == 'win32') or (sys_platform != 'emscripten' and sys_platform != 'win32')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c8/32/f7cd6ce8a7690544d084ea21c26e910a97e077c9b7f07bf5de623ee19981/nvidia_cusolver_cu12-11.7.3.90-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:db9ed69dbef9715071232caa9b69c52ac7de3a95773c2db65bdba85916e4e5c0", size = 267229841, upload-time = "2025-03-07T01:46:54.356Z" },
@@ -3140,7 +3142,7 @@ name = "nvidia-cusparse-cu12"
 version = "12.5.8.93"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(python_full_version < '3.11' and sys_platform == 'emscripten') or (python_full_version < '3.11' and sys_platform == 'win32') or (sys_platform != 'emscripten' and sys_platform != 'win32')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/bc/f7/cd777c4109681367721b00a106f491e0d0d15cfa1fd59672ce580ce42a97/nvidia_cusparse_cu12-12.5.8.93-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:9b6c161cb130be1a07a27ea6923df8141f3c295852f4b260c65f18f3e0a091dc", size = 288117129, upload-time = "2025-03-07T01:47:40.407Z" },
@@ -3403,7 +3405,7 @@ name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "ptyprocess" },
+    { name = "ptyprocess", marker = "(python_full_version < '3.11' and sys_platform == 'emscripten') or (python_full_version < '3.11' and sys_platform == 'win32') or (sys_platform != 'emscripten' and sys_platform != 'win32')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/42/92/cc564bf6381ff43ce1f4d06852fc19a2f11d180f23dc32d9588bee2f149d/pexpect-4.9.0.tar.gz", hash = "sha256:ee7d41123f3c9911050ea2c2dac107568dc43b2d3b0c7557a33212c398ead30f", size = 166450, upload-time = "2023-11-25T09:07:26.339Z" }
 wheels = [
@@ -3726,6 +3728,70 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/00/20/bb50f9de3a6de69e6abd6b087b52fa2418a0418b19597601605f855ad044/pydata_sphinx_theme-0.16.1.tar.gz", hash = "sha256:a08b7f0b7f70387219dc659bff0893a7554d5eb39b59d3b8ef37b8401b7642d7", size = 2412693, upload-time = "2024-12-17T10:53:39.537Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e2/0d/8ba33fa83a7dcde13eb3c1c2a0c1cc29950a048bfed6d9b0d8b6bd710b4c/pydata_sphinx_theme-0.16.1-py3-none-any.whl", hash = "sha256:225331e8ac4b32682c18fcac5a57a6f717c4e632cea5dd0e247b55155faeccde", size = 6723264, upload-time = "2024-12-17T10:53:35.645Z" },
+]
+
+[[package]]
+name = "pyfqmr"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.3.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1e/a3/6552d4168e3d6cf5c8ce5edbf317fc18812165d3336afaf2c5b458eff59a/pyfqmr-0.5.0-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:7d68cd81ceaef955b80e6b059a616749923256c0c1f84496a638315456812628", size = 137161, upload-time = "2025-08-23T10:06:27.144Z" },
+    { url = "https://files.pythonhosted.org/packages/53/cf/dabbc0cdf60924639bfd994e3b4c62265a888647437c695f5de2ff7e95c9/pyfqmr-0.5.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:c9e510feac2f3d0c5bd4135aa94d3c5a9d7f82074ba3d5a6ce207ffe41b03eb4", size = 126582, upload-time = "2025-08-23T10:06:34.338Z" },
+    { url = "https://files.pythonhosted.org/packages/92/16/407e1cbdbf6692030732adcb9eb61c598ad2ed5c4364d3282d22dd6b85bd/pyfqmr-0.5.0-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:70e6688e8506bc761a64c89dc49bdefb7cedfe408e49f00f86f1c0110884fa40", size = 879727, upload-time = "2025-08-23T10:04:56.803Z" },
+    { url = "https://files.pythonhosted.org/packages/16/3f/4a02534ebd615548be0b77fc96a49b47e1b2cb3d8f7b796c13bd2e919fca/pyfqmr-0.5.0-cp310-cp310-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:f8cfb0ec8fae30cc9b2799d920ab054d850d5ffb38ca49799504b3e8c40ff626", size = 895153, upload-time = "2025-08-23T10:05:01.655Z" },
+    { url = "https://files.pythonhosted.org/packages/05/a8/6d4e199edf2b1edd4013669e088caad8b96af31d63afbd3a947590fd4bf8/pyfqmr-0.5.0-cp310-cp310-musllinux_1_2_aarch64.whl", hash = "sha256:adc2a17cd77a8cf5f4a4834d5cf5a6ba4688deeb6af679c2776483f1f803fd15", size = 1859200, upload-time = "2025-08-23T10:07:15.434Z" },
+    { url = "https://files.pythonhosted.org/packages/10/b1/224c2c7ac9567d7ec0d11d7bb2339e72ad7e7745229a7f483e68dc4b815d/pyfqmr-0.5.0-cp310-cp310-musllinux_1_2_x86_64.whl", hash = "sha256:d71a9d1ca0c6b778196027ba0db93a9138f093f8e6439c59cf4da88b2f61fc37", size = 1939662, upload-time = "2025-08-23T10:07:24.097Z" },
+    { url = "https://files.pythonhosted.org/packages/10/9e/97f95898405f2670bde747c73f9e7715ddb6ccad67ff32e3a070ffaaf8f9/pyfqmr-0.5.0-cp310-cp310-win32.whl", hash = "sha256:6dce024e6137630cdcb881f0c878d4f58adc194ee53c0f6694b3d82d3f4a800b", size = 95900, upload-time = "2025-08-23T10:05:58.487Z" },
+    { url = "https://files.pythonhosted.org/packages/66/cb/5f0a08443d728b86a0e392b2afd285ade59cd4fcd53ef352d302962ebc03/pyfqmr-0.5.0-cp310-cp310-win_amd64.whl", hash = "sha256:9e91ae195e6b431c32cdd9655da46a14b68421b8350f973d36317e9481298225", size = 111663, upload-time = "2025-08-23T10:05:59.738Z" },
+    { url = "https://files.pythonhosted.org/packages/0b/c2/a19a20eb20d5f37a186038032297985a66c4ca29a5b6db565bd5deedf947/pyfqmr-0.5.0-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:f02d1fc1c83d3f3d0c21fae04028174b819fc9a56513735a9778afd8b42b3209", size = 137462, upload-time = "2025-08-23T10:06:36.997Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/40/c94869228c912c0f502a76e557b9fbde79d835d8e7fad279ad652a645e66/pyfqmr-0.5.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:09b276c227ef2b27ae543f49c874abbecbf36dd7885c8f42b1491097646686c1", size = 126846, upload-time = "2025-08-23T10:06:38.961Z" },
+    { url = "https://files.pythonhosted.org/packages/06/a5/d9cb290c96b515c90e71a8b2ad1770ac61427b862d9d649553f16e3594e6/pyfqmr-0.5.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:2f26681507f3ea0aebc141162b131f2c18ca8802a9bc083cee17bbe3f409ace4", size = 915221, upload-time = "2025-08-23T10:05:06.951Z" },
+    { url = "https://files.pythonhosted.org/packages/88/fe/9d88703350cb47104b910ea39fb7576cde52a0cd0eb15cd6a267e0ffce6c/pyfqmr-0.5.0-cp311-cp311-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:908e33e7f051bfc6a2baef076eed2cd1f29f4558394ad969f829a09f1a6102f3", size = 927345, upload-time = "2025-08-23T10:05:11.841Z" },
+    { url = "https://files.pythonhosted.org/packages/a0/b3/a99f66b15b0648bc50da00ceefebcf2e47f5c4692136e5733ef424b9f0c0/pyfqmr-0.5.0-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:3d0abd5a649a94e88ce5657637cc1f1ada48bb747c600c54145cb056c4b1070a", size = 1892902, upload-time = "2025-08-23T10:07:35.039Z" },
+    { url = "https://files.pythonhosted.org/packages/53/06/a4af1c528b1c315517619b69922169e11a941a9d7250e92dd0487799ee2c/pyfqmr-0.5.0-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:8f0f5b802a89daed7067d99cf8265958f8e7d486960c109e1ae2acfeb72adcdc", size = 1973190, upload-time = "2025-08-23T10:07:43.974Z" },
+    { url = "https://files.pythonhosted.org/packages/d5/fc/59dbd08be5fd95c545ad993713265df188970dfa0f4e894f94ddc4ab0b20/pyfqmr-0.5.0-cp311-cp311-win32.whl", hash = "sha256:33c271bafeb18d089d12b60a19a6dd120f9f96c6d92858362ce549edadf4db04", size = 95485, upload-time = "2025-08-23T10:06:01.258Z" },
+    { url = "https://files.pythonhosted.org/packages/81/42/a6b7d67986eaba204a085a8b1d94c38a02f46972ce939c93fb1d69ea43ca/pyfqmr-0.5.0-cp311-cp311-win_amd64.whl", hash = "sha256:55abc2fadd1984f3d016c01b39bb474313bcd19b539112eebe29804ec818c0a9", size = 111457, upload-time = "2025-08-23T10:06:02.512Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/3a/9892f2c13f3ed5f54a667390bc316a4c1b1eeb90b5c80f5b0aa3e588ffad/pyfqmr-0.5.0-cp311-cp311-win_arm64.whl", hash = "sha256:f684b3bea605ae354c44068e5c895616f26cf3c6f9d257389f1f0b29ca5451ee", size = 96559, upload-time = "2025-08-23T10:06:15.104Z" },
+    { url = "https://files.pythonhosted.org/packages/be/0e/4cf9da10545a743e4e0cee3337c8badc307af1fe2547de26ed25ed7844f3/pyfqmr-0.5.0-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:eaf0b8e6faba08915195f2cca96341f25e787d749a52ff8e955e9319be489eb5", size = 137924, upload-time = "2025-08-23T10:06:40.358Z" },
+    { url = "https://files.pythonhosted.org/packages/31/84/4cff76b969c419be71eb4dd5804db48423bb7429fb0386a4840d439e26fb/pyfqmr-0.5.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:64148abbface12f19b4ae4038d5ed6f0810bc34eb2d8b1c6ed496db61aa885af", size = 126348, upload-time = "2025-08-23T10:06:41.774Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/62/fa3452cc1734a05c16fd143b5d0ff3cddfee836e7222a624477ca08eadae/pyfqmr-0.5.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:b43126b0e90121de1ed9ebd7bc954c2663dc4f9eee70191296e4f93fbb08bfb5", size = 906983, upload-time = "2025-08-23T10:05:16.705Z" },
+    { url = "https://files.pythonhosted.org/packages/58/97/0e220e9a920aebe236b9a7b11cecb2850d71ff81982beb8c5f567640bfa8/pyfqmr-0.5.0-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:4096ab1be7f760890b7ed83e9b8cc21c7ce9de8b3b7e376112108180c8bd86b6", size = 921236, upload-time = "2025-08-23T10:05:21.627Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/30/5273ab8b7a2f14395521de33c429cbcf4e5cc17d48520bf01d781e6e5bbd/pyfqmr-0.5.0-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:c83c9c51815e4a6583316ed4a357c56bb503158640744e6df1fe51fc3f6ef468", size = 1881416, upload-time = "2025-08-23T10:07:52.964Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/fb/d8b33946c6bc21de92a38331a5e11c328bf6dd1773ad7e74852fc2de8f0c/pyfqmr-0.5.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:6ca0ed0c4bfb6b50709358b320e4ef8b71543df0daff02c1deb6574eaf1295b7", size = 1966415, upload-time = "2025-08-23T10:08:01.71Z" },
+    { url = "https://files.pythonhosted.org/packages/ea/60/05adfc409c1c0c6f4de41cdaf3a0cf62d9655d6b2f91f9d714ead6dde5e7/pyfqmr-0.5.0-cp312-cp312-win32.whl", hash = "sha256:39a0bd53b52145cb4aefd90a2cf4e180cc2e791d1643b8423662036457733e4d", size = 95016, upload-time = "2025-08-23T10:06:04.039Z" },
+    { url = "https://files.pythonhosted.org/packages/00/43/44030166f27a4d074903513011bff4cc81f37181c7a19b8f66e30c4a7db4/pyfqmr-0.5.0-cp312-cp312-win_amd64.whl", hash = "sha256:1139989bd9e86c28c3249e348b45a5307620a00f06f5b766aaa853970bae7808", size = 111572, upload-time = "2025-08-23T10:06:05.339Z" },
+    { url = "https://files.pythonhosted.org/packages/cc/a2/c59d2f1b8148b0ce87f262644a7e2090d99fec4cdc45c699b608697d6ff3/pyfqmr-0.5.0-cp312-cp312-win_arm64.whl", hash = "sha256:8437d10db5ec9367d0686d21f6fa4303025ee30af901dc98e03a321c52f4eb07", size = 95661, upload-time = "2025-08-23T10:06:16.233Z" },
+    { url = "https://files.pythonhosted.org/packages/a5/12/4cbf371f0c766907265d3f6a80f0ad0065131bc989ea6f6516b2b8a7d100/pyfqmr-0.5.0-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:f3da47f150089c75d2eaf01f9464f25204ee121425c1fd6a2649cad1ad1c23a3", size = 136689, upload-time = "2025-08-23T10:06:43.227Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/c1/7113184247c8f91ad4816fa434c3ffc0821e9382f264c697a1252af56a78/pyfqmr-0.5.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:931f0c26b2784d58c768cd8e2c65809071efa735f3b9c9a7f9ad209ffd003027", size = 125140, upload-time = "2025-08-23T10:06:44.667Z" },
+    { url = "https://files.pythonhosted.org/packages/24/4f/0c1a6a1d01657b7f8501b206e30889f5bf6cf8ee3bafd204496f73cf6e00/pyfqmr-0.5.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:60d9962a71dca13f2d5ce6dc2befb773620e529c299d11eeee23586a9850edcd", size = 903182, upload-time = "2025-08-23T10:05:26.606Z" },
+    { url = "https://files.pythonhosted.org/packages/2b/99/b15f67c6ff617eb4354bbe99bd0239d92febea137ea34eacf6ec273a2389/pyfqmr-0.5.0-cp313-cp313-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:9e432ce841c16ea782ad5ec9cec05132e344d653af97c44ec62aa809c9058a00", size = 915015, upload-time = "2025-08-23T10:05:33.004Z" },
+    { url = "https://files.pythonhosted.org/packages/cc/f5/39c4a5d3738e7fb4206ecbff6c5fa7c6e446fd7db0a0ed0f2409ef723ea7/pyfqmr-0.5.0-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:c4da1a0c111be732a59f36d19a4d3677c892cf1f6e3789e14fa5a07c8764983d", size = 1876631, upload-time = "2025-08-23T10:08:10.558Z" },
+    { url = "https://files.pythonhosted.org/packages/9f/62/4dfd5976f14cee44c3b33a8d6b472f457e31583e4407c6e6f9b63f66e181/pyfqmr-0.5.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:f2f0fff6f4f37b05421826dcca3817d7ba4f9ae00348587856a53c4c6f0ecd3a", size = 1962443, upload-time = "2025-08-23T10:08:20.037Z" },
+    { url = "https://files.pythonhosted.org/packages/b5/96/f33c9deb9b7a6df78d429bd34fbe6d94f3e0863f9e52a86bc1a5fb6b3d91/pyfqmr-0.5.0-cp313-cp313-win32.whl", hash = "sha256:9bf340441d0b8fa6abae41daea78bcb98404b6f3b7567f25197261a86a3a10b9", size = 94684, upload-time = "2025-08-23T10:06:07.01Z" },
+    { url = "https://files.pythonhosted.org/packages/77/77/5ff8093f23a99d96966e17cd03a37a3fd0923ff664c60ed6927d023d5432/pyfqmr-0.5.0-cp313-cp313-win_amd64.whl", hash = "sha256:01f19e4acf7a11afaee31db8a75d65aab161d64788dcb598612afaf58420ae4e", size = 111215, upload-time = "2025-08-23T10:06:08.303Z" },
+    { url = "https://files.pythonhosted.org/packages/58/46/c26e19d6439425c258d566dbc82a0076850549ba2c71f09602e88bd51f4d/pyfqmr-0.5.0-cp313-cp313-win_arm64.whl", hash = "sha256:552e30048340c666c229ee34f0b8184b5f11f0169fa3bc35d9a68ac82b2d4d0d", size = 95533, upload-time = "2025-08-23T10:06:17.415Z" },
+    { url = "https://files.pythonhosted.org/packages/ac/89/7cb9d69daaaf5f0cc61068c1495adcc400087ca9dcb7e758ec84544dca8e/pyfqmr-0.5.0-cp314-cp314-macosx_10_13_x86_64.whl", hash = "sha256:5ff0c52324a163d06d3403c243ab6fb583fccb75117fddf85c3c3d4f3ac4995f", size = 136444, upload-time = "2025-08-23T10:06:46.093Z" },
+    { url = "https://files.pythonhosted.org/packages/11/c3/723568c3661ed9ecb3855f7ca09bbdce80b095503d61d3077f460fdf60c1/pyfqmr-0.5.0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:5460da201d05dc7e9571dd1e2d91332db8a07e8e7df87b4b17bc381e666d4191", size = 125561, upload-time = "2025-08-23T10:06:47.794Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/37/dcfe50e818740904478b87f8bdb96805d072456985ca08a90e0e2873ae41/pyfqmr-0.5.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:b8956c5354da5e15e940c024fb78b4fe3c4fc98455fa100d7c2db332aee0c981", size = 896691, upload-time = "2025-08-23T10:05:37.589Z" },
+    { url = "https://files.pythonhosted.org/packages/7d/fc/90d331389a392621a2c32225635222164b95d98d0e86b28a3837d349fdc9/pyfqmr-0.5.0-cp314-cp314-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:f9e94bd600d6a466adcecd64fa721df792d89641ee2025f23b34467fc485f46b", size = 913242, upload-time = "2025-08-23T10:05:42.153Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/73/b96bbe1fa9d5e2727884d4fa4b76fb207be471c879eacda5058ec7505458/pyfqmr-0.5.0-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:0325adb697c976404de0bf10d052de45ef6b73bcd1f5ccf2d9f89ccbc508bd66", size = 1874457, upload-time = "2025-08-23T10:08:34.494Z" },
+    { url = "https://files.pythonhosted.org/packages/06/8d/a617dc8f3dfb2c2da2ae20d67c7c17165b991ba1c26a2933aaf10df71f93/pyfqmr-0.5.0-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:d91a7d108166615a948b2f0ab65e0a1a1d22a84d59c6c218362f3f91bdc94e5b", size = 1956659, upload-time = "2025-08-23T10:08:44.275Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/7f/4b4a28f8b9e2072d540a07b1ef2eab7da08bbc6e65f1f1825e96051d4cfc/pyfqmr-0.5.0-cp314-cp314-win32.whl", hash = "sha256:cc0100c6956fea1307c8f6d760b0445b379cba4dff84759a1575b9f9e80f9ee7", size = 97588, upload-time = "2025-08-23T10:06:09.583Z" },
+    { url = "https://files.pythonhosted.org/packages/40/61/ca0fb284808f4f0f21f0a21cb05401fbed9f526ea93b1c7de0c2dcea1abc/pyfqmr-0.5.0-cp314-cp314-win_amd64.whl", hash = "sha256:5868fabec5beb182e75038e780363713fc5f6242fd7c0ea22d3238f1950d0d79", size = 114496, upload-time = "2025-08-23T10:06:11.192Z" },
+    { url = "https://files.pythonhosted.org/packages/b0/5d/fecb35c5a98068088b16ad15f29feeeccc5cfa1c4f6a00d07fb2aef38a87/pyfqmr-0.5.0-cp314-cp314-win_arm64.whl", hash = "sha256:798a6d3ea151e785aa1b8b1a7bd27bcb0fdb0a2fc90faa76c9598f4d53d5d2be", size = 99018, upload-time = "2025-08-23T10:06:18.593Z" },
+    { url = "https://files.pythonhosted.org/packages/1a/74/ed35aa28edc8ca5437389b45c3411f5569968b8e6d4d8fd34c091f3dab2d/pyfqmr-0.5.0-cp314-cp314t-macosx_10_13_x86_64.whl", hash = "sha256:eb33528014c5d074249dcb2c645351e19a312b3efe65414f40e4bd5628f5cb64", size = 143006, upload-time = "2025-08-23T10:06:49.156Z" },
+    { url = "https://files.pythonhosted.org/packages/8f/19/83023083b5f5c9e332f83e4669bf5b8a5a05f7f8d79ca5edb2a36b4f2f52/pyfqmr-0.5.0-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:f5693590b49eeb4fe27bf24ff2352a35f0bcaadac8a46a64645f9ab98638e615", size = 133156, upload-time = "2025-08-23T10:06:50.498Z" },
+    { url = "https://files.pythonhosted.org/packages/bb/4f/d0fa88c3506bbbb057326595c13dd1a2535f3779ccc4703a239492d976ab/pyfqmr-0.5.0-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:0a9aa2812949bd19962caecb5c52ae7ef7945ada1de790e16d710444f81b4b46", size = 894050, upload-time = "2025-08-23T10:05:46.739Z" },
+    { url = "https://files.pythonhosted.org/packages/7c/d4/5c1e334f0cd7e4228a6426b5aec6df55ec5e8c5a6b5e61632f53e45dcefa/pyfqmr-0.5.0-cp314-cp314t-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:7d6fb33de8f9e056cf803fab65cc07b9095ca53d2003266c50b13203b6e8c5e5", size = 936150, upload-time = "2025-08-23T10:05:51.12Z" },
+    { url = "https://files.pythonhosted.org/packages/1a/b7/6c7dc022f81aa557644b478f11ceee378bd8b8470ccb67b5ccfb97e15653/pyfqmr-0.5.0-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:9821b9f6db87d6ca61f7fc96c07858cd858afea85b7b72df7ea0e6ed6d8d8196", size = 1887078, upload-time = "2025-08-23T10:08:52.949Z" },
+    { url = "https://files.pythonhosted.org/packages/ea/6a/88db807b8d63c63732aaf49949ab52ebcaa8ec73e7dba3a53bf0aa0aa929/pyfqmr-0.5.0-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:b1e26cda30fd7e522c54cdd104e7e62ca8dd09de5fcacbad5cb3eea0f835957b", size = 1950472, upload-time = "2025-08-23T10:09:01.855Z" },
+    { url = "https://files.pythonhosted.org/packages/05/50/98c843d64ad332349ce70a8f55eca4e3d9c3340232d45db25b4ae9e1f30f/pyfqmr-0.5.0-cp314-cp314t-win32.whl", hash = "sha256:6f3fc8e3253a22445816e32727f129d08f40ec0e90c2c4f33c19c7e2d8372940", size = 108428, upload-time = "2025-08-23T10:06:12.686Z" },
+    { url = "https://files.pythonhosted.org/packages/b1/3c/8fb3d39df2a0f1eb400ee3bf8ae06611d0880aa9f7da69810a23b3114592/pyfqmr-0.5.0-cp314-cp314t-win_amd64.whl", hash = "sha256:f63044734180f1cad199f96ea9ae9c21872757f56558318c5d91daf4113dc7ed", size = 129052, upload-time = "2025-08-23T10:06:13.952Z" },
+    { url = "https://files.pythonhosted.org/packages/d3/03/5d0d52b427239617aa63cd1850ac8fc5e161d889b201cd196dee6401e6a0/pyfqmr-0.5.0-cp314-cp314t-win_arm64.whl", hash = "sha256:671fd93d7b2666d99f902e6a14bcc42adb498a5053d31cb0a87d6a0467c2108c", size = 103519, upload-time = "2025-08-23T10:06:20.135Z" },
 ]
 
 [[package]]
@@ -5020,27 +5086,27 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp310-cp310-manylinux_2_28_aarch64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp310-cp310-win_amd64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp311-cp311-manylinux_2_28_aarch64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp311-cp311-manylinux_2_28_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp311-cp311-win_amd64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp312-cp312-manylinux_2_28_aarch64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp312-cp312-win_amd64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp313-cp313-manylinux_2_28_aarch64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp313-cp313-manylinux_2_28_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp313-cp313-win_amd64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp313-cp313t-manylinux_2_28_aarch64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp313-cp313t-manylinux_2_28_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp313-cp313t-win_amd64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp314-cp314-manylinux_2_28_aarch64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp314-cp314-manylinux_2_28_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp314-cp314-win_amd64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp314-cp314t-manylinux_2_28_aarch64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp314-cp314t-manylinux_2_28_x86_64.whl" },
-    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp314-cp314t-win_amd64.whl" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp310-cp310-manylinux_2_28_aarch64.whl", hash = "sha256:72f0f096475e8095a6bea3fba75bd3b46cf42c761b29588f7599314e67a32661" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:c8d670aa0be6fbecd2b0e7b7d514a104dbdefcc3786ca446cf0c3415043ea40a" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp310-cp310-win_amd64.whl", hash = "sha256:64399adaa8ea0896d02cf844cba3c5dd77e769520a1af73572599e0eaa2cf551" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp311-cp311-manylinux_2_28_aarch64.whl", hash = "sha256:cf4ad82430824a80a9f398e29369524ed26c152cf00c2c12002e5400b35e260d" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:2a1da940f0757621d098c9755f7504d791a72a40920ec85a4fd98b20253fca4e" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp311-cp311-win_amd64.whl", hash = "sha256:633005a3700e81b5be0df2a7d3c1d48aced23ed927653797a3bd2b144a3aeeb6" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:1176f250311fa95cc3bca8077af323e0d73ea385ba266e096af82e7e2b91f256" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:7cb4018f4ce68b61fd3ef87dc1c4ca520731c7b5b200e360ad47b612d7844063" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp312-cp312-win_amd64.whl", hash = "sha256:3a01f0b64c10a82d444d9fd06b3e8c567b1158b76b2764b8f51bfd8f535064b0" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:0b80b7555dcd0a75b7b06016991f01281a0bb078cf28fa2d1dfb949fad2fbd07" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:63381a109a569b280ed3319da89d3afe5cf9ab5c879936382a212affb5c90552" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp313-cp313-win_amd64.whl", hash = "sha256:ad9183864acdd99fc5143d7ca9d3d2e7ddfc9a9600ff43217825d4e5e9855ccc" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp313-cp313t-manylinux_2_28_aarch64.whl", hash = "sha256:2314521c74d76e513c53bb72c0ce3511ef0295ff657a432790df6c207e5d7962" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp313-cp313t-manylinux_2_28_x86_64.whl", hash = "sha256:4454a4faca31af81566e3a4208f10f20b8a6d9cfe42791b0ca7ff134326468fc" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp313-cp313t-win_amd64.whl", hash = "sha256:24420e430e77136f7079354134b34e7ba9d87e539f5ac84c33b08e5c13412ebe" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:32c036296c557f19a1537ce981c40533650097114e1720a321a39a3b08d9df56" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:7788d3d03d939cf00f93ac0da5ab520846f66411e339cfbf519a806e8facf519" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp314-cp314-win_amd64.whl", hash = "sha256:7bcd40cbffac475b478d6ce812f03da84e9a4894956efb89c3b7bcca5dbd4f91" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:e88c78e5b08ae9303aa15da43b68b44287ecbec16d898d9fad6998832fe626a5" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:7d8769bdf3200ca16a92f14df404c3370171ac3732996528a8973d753eac562f" },
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp314-cp314t-win_amd64.whl", hash = "sha256:0c784b600959ec70ee01cb23e8bc870a0e0475af30378ff5e39f4abed8b7c1cc" },
 ]
 
 [[package]]
