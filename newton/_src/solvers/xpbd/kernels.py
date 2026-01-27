@@ -2020,26 +2020,29 @@ def compute_contact_constraint_delta_compliant(
 ) -> float:
     """Compute contact constraint correction using ke/kd directly.
 
-    Uses a modified XPBD formula that directly incorporates spring stiffness (ke)
-    and damping (kd), inspired by Erin Catto's Box2D approach:
+    Uses a simplified XPBD formula inspired by Erin Catto's Box2D approach::
 
-        α̃ = 1 / (ke · dt)              (scaled compliance from stiffness)
-        γ = kd · dt                     (damping coefficient)
-        Δλ = -(C + α̃·λ + γ·Ċ) / ((1 + γ/dt)·w + α̃)
+        alpha_tilde = 1 / (ke * dt)     (scaled compliance from stiffness)
+        gamma = 1 / kd                  (damping compliance, inverse of damping coefficient)
+        delta_lambda = -(C + alpha_tilde*lambda + gamma*C_dot) / (dt*w + alpha_tilde)
+
+    Note: This is a simplified variant of the full XPBD damped constraint formula.
+    The simplification removes the (1 + gamma/dt) term from the denominator, which
+    provides stable behavior while being compatible with direct ke/kd parameters.
 
     This produces physically correct spring-damper behavior:
         - Equilibrium penetration: x_eq = mg/ke (matches spring physics)
-        - Damping force: F_damp = kd · v (velocity-proportional damping)
+        - Damping: Higher kd values produce faster damping (lower gamma = 1/kd)
 
     Args:
         err: Constraint error C (penetration depth, negative when penetrating)
-        err_dot: Constraint velocity Ċ (relative normal velocity)
+        err_dot: Constraint velocity C_dot (relative normal velocity)
         ke: Contact elastic stiffness (N/m)
-        kd: Contact damping coefficient (N·s/m)
+        kd: Contact damping coefficient (Ns/m)
         lambda_accumulated: Accumulated Lagrange multiplier from previous iterations
         dt: Timestep size
     """
-    # Compute generalized inverse mass w = ∇C^T · M^(-1) · ∇C
+    # Compute generalized inverse mass w = gradC^T * M^(-1) * gradC
     w = 0.0
     w += wp.length_sq(linear_a) * m_inv_a
     w += wp.length_sq(linear_b) * m_inv_b
@@ -2056,49 +2059,49 @@ def compute_contact_constraint_delta_compliant(
 
     # XPBD soft contact with accumulated lambda
     #
-    # Standard XPBD formula: Δλ = -(C + α̃·λ) / (w + α̃)
-    # where α̃ is the scaled compliance and λ is accumulated this timestep.
+    # Standard XPBD formula: delta_lambda = -(C + alpha_tilde*lambda) / (w + alpha_tilde)
+    # where alpha_tilde is the scaled compliance and lambda is accumulated this timestep.
     #
     # Key insight: apply_body_deltas computes position change as:
-    #   Δx = λ · inv_m · dt
+    #   delta_x = lambda * inv_m * dt
     #
-    # For the hard contact formula: Δλ = -err / (dt * w)
-    # With w = inv_m, this gives Δx = -err (corrects full penetration).
+    # For the hard contact formula: delta_lambda = -err / (dt * w)
+    # With w = inv_m, this gives delta_x = -err (corrects full penetration).
     #
     # For XPBD soft contacts:
-    #   α = 1/ke (compliance = inverse stiffness)
-    #   α̃ = α/dt = 1/(ke·dt) (scaled compliance, accounts for dt in position update)
+    #   alpha = 1/ke (compliance = inverse stiffness)
+    #   alpha_tilde = alpha/dt = 1/(ke*dt) (scaled compliance, accounts for dt in position update)
     #
-    # At convergence (Δλ→0): C + α̃·λ_total = 0
-    #   λ_total = -C/α̃ = -err/(1/(ke·dt)) = -err·ke·dt
-    #   Δx_total = λ_total·inv_m·dt = -err·ke·dt²/m
+    # At convergence (delta_lambda -> 0): C + alpha_tilde*lambda_total = 0
+    #   lambda_total = -C/alpha_tilde = -err/(1/(ke*dt)) = -err*ke*dt
+    #   delta_x_total = lambda_total*inv_m*dt = -err*ke*dt^2/m
     #
-    # At equilibrium (Δx_contact = Δx_gravity = g·dt²):
-    #   |err|·ke·dt²/m = g·dt²
-    #   |err| = m·g/ke ✓  (physically correct spring equilibrium!)
-    
+    # At equilibrium (delta_x_contact = delta_x_gravity = g*dt^2):
+    #   |err|*ke*dt^2/m = g*dt^2
+    #   |err| = m*g/ke (physically correct spring equilibrium!)
+
     delta_lambda = 0.0
     if ke > 0.0 and w > 0.0:
-        # Scaled compliance: α̃ = α/dt = 1/(ke·dt)
+        # Scaled compliance: alpha_tilde = alpha/dt = 1/(ke*dt)
         # This scaling accounts for apply_body_deltas multiplying by dt
         alpha_tilde = 1.0 / (ke * dt)
-        
+
         # Damping term (velocity-proportional)
         damping_term = 0.0
         if kd > 0.0:
-            # γ = 1/kd gives damping proportional to velocity
+            # gamma = 1/kd gives damping proportional to velocity
             gamma = 1.0 / kd
             damping_term = gamma * err_dot
-        
-        # XPBD formula: Δλ = -(C + α̃·λ + γ·Ċ) / (dt·w + α̃)
-        # The dt·w term matches the hard contact formula structure
+
+        # XPBD formula: delta_lambda = -(C + alpha_tilde*lambda + gamma*C_dot) / (dt*w + alpha_tilde)
+        # The dt*w term matches the hard contact formula structure
         numerator = -(err + alpha_tilde * lambda_accumulated + damping_term)
         denominator = dt * w + alpha_tilde
-        
+
         delta_lambda = 0.0
         if denominator > 0.0:
             delta_lambda = numerator / denominator
-        
+
         delta_lambda *= relaxation
 
     # Clamp resulting velocity to prevent explosive separation
@@ -2702,7 +2705,8 @@ def solve_body_contact_positions_shape_material(
             )
 
             # limit friction based on incremental normal force, good approximation to limiting on total force
-            lambda_fr = wp.max(lambda_fr, -delta_lambda_n * mu)
+            # Use abs(delta_lambda_n) since delta_lambda_n can be negative after Box2D-style clamping
+            lambda_fr = wp.max(lambda_fr, -wp.abs(delta_lambda_n) * mu)
 
             lin_delta_a -= perp * lambda_fr
             lin_delta_b += perp * lambda_fr
@@ -2733,7 +2737,12 @@ def solve_body_contact_positions_shape_material(
                 dt,
             )
 
-            lambda_torsion = wp.clamp(lambda_torsion, -delta_lambda_n * torsional_friction, delta_lambda_n * torsional_friction)
+            # Use abs(delta_lambda_n) since delta_lambda_n can be negative after Box2D-style clamping
+            # Without abs(), inverted clamp bounds would cause undefined behavior
+            abs_lambda_n = wp.abs(delta_lambda_n)
+            lambda_torsion = wp.clamp(
+                lambda_torsion, -abs_lambda_n * torsional_friction, abs_lambda_n * torsional_friction
+            )
 
             ang_delta_a -= n * lambda_torsion
             ang_delta_b += n * lambda_torsion
@@ -2760,7 +2769,8 @@ def solve_body_contact_positions_shape_material(
                 dt,
             )
 
-            lambda_roll = wp.max(lambda_roll, -delta_lambda_n * rolling_friction)
+            # Use abs(delta_lambda_n) since delta_lambda_n can be negative after Box2D-style clamping
+            lambda_roll = wp.max(lambda_roll, -wp.abs(delta_lambda_n) * rolling_friction)
 
             ang_delta_a -= roll_n * lambda_roll
             ang_delta_b += roll_n * lambda_roll
