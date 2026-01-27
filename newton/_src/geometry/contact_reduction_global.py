@@ -93,6 +93,9 @@ from .support_function import extract_shape_data
 # the support polygon. Same value as used in ContactReductionFunctions.BETA_THRESHOLD.
 BETA_THRESHOLD = 0.0001  # 0.1mm
 
+# Number of value slots per hashtable entry: 6 spatial directions + 1 max-depth = 7
+VALUES_PER_KEY = NUM_SPATIAL_DIRECTIONS + 1
+
 # =============================================================================
 # Reduction slot functions (specific to contact reduction)
 # =============================================================================
@@ -912,12 +915,13 @@ def write_contact_to_reducer(
     )
 
 
-def create_export_reduced_contacts_kernel(writer_func: Any, values_per_key: int = 7):
+def create_export_reduced_contacts_kernel(writer_func: Any):
     """Create a kernel that exports reduced contacts using a custom writer function.
 
     The kernel processes one hashtable ENTRY per thread (not one value slot).
-    Each entry has values_per_key value slots. The thread reads all slots,
-    collects unique contact IDs, and exports each unique contact once.
+    Each entry has VALUES_PER_KEY value slots (7: 6 spatial + 1 max-depth).
+    The thread reads all slots, collects unique contact IDs, and exports each
+    unique contact once.
 
     This naturally deduplicates: one thread handles one (shape_pair, bin) entry
     and can locally track which contact IDs it has already exported.
@@ -925,13 +929,12 @@ def create_export_reduced_contacts_kernel(writer_func: Any, values_per_key: int 
     Args:
         writer_func: A warp function with signature (ContactData, writer_data) -> None
                      This follows the same pattern as narrow_phase.py's write_contact_simple.
-        values_per_key: Number of value slots per hashtable entry (default 7: 6 spatial + 1 max-depth)
 
     Returns:
         A warp kernel that can be launched to export reduced contacts.
     """
     # Define vector type for tracking exported contact IDs
-    exported_ids_vec = wp.types.vector(length=values_per_key, dtype=wp.int32)
+    exported_ids_vec = wp.types.vector(length=VALUES_PER_KEY, dtype=wp.int32)
 
     @wp.kernel(enable_backward=False)
     def export_reduced_contacts_kernel(
@@ -978,7 +981,7 @@ def create_export_reduced_contacts_kernel(writer_func: Any, values_per_key: int 
             num_exported = int(0)
 
             # Read all value slots for this entry (slot-major layout)
-            for slot in range(values_per_key):
+            for slot in range(wp.static(VALUES_PER_KEY)):
                 value = ht_values[slot * ht_capacity + entry_idx]
 
                 # Skip empty slots (value = 0)
@@ -989,7 +992,7 @@ def create_export_reduced_contacts_kernel(writer_func: Any, values_per_key: int 
                 contact_id = unpack_contact_id(value)
 
                 # Skip if already exported - use while loop with early exit
-                # This is O(num_exported) instead of O(values_per_key) per slot
+                # This is O(num_exported) instead of O(VALUES_PER_KEY) per slot
                 # Note: Use explicit type declarations for variables mutated in while loops (Warp requirement)
                 already_exported = bool(False)
                 j = int(0)
@@ -1041,101 +1044,92 @@ def create_export_reduced_contacts_kernel(writer_func: Any, values_per_key: int 
     return export_reduced_contacts_kernel
 
 
-def create_mesh_triangle_contacts_to_reducer_kernel():
-    """Create a kernel that processes mesh-triangle contacts and stores them in GlobalContactReducer.
+@wp.kernel(enable_backward=False)
+def mesh_triangle_contacts_to_reducer_kernel(
+    shape_types: wp.array(dtype=int),
+    shape_data: wp.array(dtype=wp.vec4),
+    shape_transform: wp.array(dtype=wp.transform),
+    shape_source: wp.array(dtype=wp.uint64),
+    shape_contact_margin: wp.array(dtype=float),
+    triangle_pairs: wp.array(dtype=wp.vec3i),
+    triangle_pairs_count: wp.array(dtype=int),
+    reducer_data: GlobalContactReducerData,
+    total_num_threads: int,
+):
+    """Process mesh-triangle contacts and store them in GlobalContactReducer.
 
     This kernel processes triangle pairs (mesh-shape, convex-shape, triangle_index) and
     computes contacts using GJK/MPR, storing results in the GlobalContactReducer for
     subsequent reduction and export.
 
-    Returns:
-        A warp kernel for processing mesh-triangle contacts with global reduction.
+    Uses grid stride loop over triangle pairs.
     """
+    tid = wp.tid()
 
-    @wp.kernel(enable_backward=False)
-    def mesh_triangle_contacts_to_reducer_kernel(
-        shape_types: wp.array(dtype=int),
-        shape_data: wp.array(dtype=wp.vec4),
-        shape_transform: wp.array(dtype=wp.transform),
-        shape_source: wp.array(dtype=wp.uint64),
-        shape_contact_margin: wp.array(dtype=float),
-        triangle_pairs: wp.array(dtype=wp.vec3i),
-        triangle_pairs_count: wp.array(dtype=int),
-        reducer_data: GlobalContactReducerData,
-        total_num_threads: int,
-    ):
-        """Process triangle pairs and store contacts in GlobalContactReducer.
+    num_triangle_pairs = triangle_pairs_count[0]
 
-        Uses grid stride loop over triangle pairs.
-        """
-        tid = wp.tid()
+    for i in range(tid, num_triangle_pairs, total_num_threads):
+        if i >= triangle_pairs.shape[0]:
+            break
 
-        num_triangle_pairs = triangle_pairs_count[0]
+        triple = triangle_pairs[i]
+        shape_a = triple[0]  # Mesh shape
+        shape_b = triple[1]  # Convex shape
+        tri_idx = triple[2]
 
-        for i in range(tid, num_triangle_pairs, total_num_threads):
-            if i >= triangle_pairs.shape[0]:
-                break
+        # Get mesh data for shape A
+        mesh_id_a = shape_source[shape_a]
+        if mesh_id_a == wp.uint64(0):
+            continue
 
-            triple = triangle_pairs[i]
-            shape_a = triple[0]  # Mesh shape
-            shape_b = triple[1]  # Convex shape
-            tri_idx = triple[2]
+        scale_data_a = shape_data[shape_a]
+        mesh_scale_a = wp.vec3(scale_data_a[0], scale_data_a[1], scale_data_a[2])
 
-            # Get mesh data for shape A
-            mesh_id_a = shape_source[shape_a]
-            if mesh_id_a == wp.uint64(0):
-                continue
+        # Get mesh world transform
+        X_mesh_ws_a = shape_transform[shape_a]
 
-            scale_data_a = shape_data[shape_a]
-            mesh_scale_a = wp.vec3(scale_data_a[0], scale_data_a[1], scale_data_a[2])
+        # Extract triangle shape data from mesh
+        shape_data_a, v0_world = get_triangle_shape_from_mesh(mesh_id_a, mesh_scale_a, X_mesh_ws_a, tri_idx)
 
-            # Get mesh world transform
-            X_mesh_ws_a = shape_transform[shape_a]
+        # Extract shape B data
+        pos_b, quat_b, shape_data_b, _scale_b, thickness_b = extract_shape_data(
+            shape_b,
+            shape_transform,
+            shape_types,
+            shape_data,
+            shape_source,
+        )
 
-            # Extract triangle shape data from mesh
-            shape_data_a, v0_world = get_triangle_shape_from_mesh(mesh_id_a, mesh_scale_a, X_mesh_ws_a, tri_idx)
+        # Set pos_a to be vertex A (origin of triangle in local frame)
+        pos_a = v0_world
+        quat_a = wp.quat_identity()  # Triangle has no orientation
 
-            # Extract shape B data
-            pos_b, quat_b, shape_data_b, _scale_b, thickness_b = extract_shape_data(
-                shape_b,
-                shape_transform,
-                shape_types,
-                shape_data,
-                shape_source,
-            )
+        # Extract thickness for shape A
+        thickness_a = shape_data[shape_a][3]
 
-            # Set pos_a to be vertex A (origin of triangle in local frame)
-            pos_a = v0_world
-            quat_a = wp.quat_identity()  # Triangle has no orientation
+        # Use per-shape contact margin
+        margin_a = shape_contact_margin[shape_a]
+        margin_b = shape_contact_margin[shape_b]
+        margin = wp.max(margin_a, margin_b)
 
-            # Extract thickness for shape A
-            thickness_a = shape_data[shape_a][3]
-
-            # Use per-shape contact margin
-            margin_a = shape_contact_margin[shape_a]
-            margin_b = shape_contact_margin[shape_b]
-            margin = wp.max(margin_a, margin_b)
-
-            # Compute and write contacts using GJK/MPR
-            wp.static(create_compute_gjk_mpr_contacts(write_contact_to_reducer))(
-                shape_data_a,
-                shape_data_b,
-                quat_a,
-                quat_b,
-                pos_a,
-                pos_b,
-                margin,
-                shape_a,
-                shape_b,
-                thickness_a,
-                thickness_b,
-                reducer_data,
-            )
-
-    return mesh_triangle_contacts_to_reducer_kernel
+        # Compute and write contacts using GJK/MPR
+        wp.static(create_compute_gjk_mpr_contacts(write_contact_to_reducer))(
+            shape_data_a,
+            shape_data_b,
+            quat_a,
+            quat_b,
+            pos_a,
+            pos_b,
+            margin,
+            shape_a,
+            shape_b,
+            thickness_a,
+            thickness_b,
+            reducer_data,
+        )
 
 
-def create_export_hydroelastic_reduced_contacts_kernel(writer_func: Any, margin_contact_area: float, values_per_key: int = 7):
+def create_export_hydroelastic_reduced_contacts_kernel(writer_func: Any, margin_contact_area: float):
     """Create a kernel that exports reduced hydroelastic contacts using a custom writer function.
 
     Similar to create_export_reduced_contacts_kernel but computes contact stiffness
@@ -1144,13 +1138,12 @@ def create_export_hydroelastic_reduced_contacts_kernel(writer_func: Any, margin_
     Args:
         writer_func: A warp function with signature (ContactData, writer_data, int) -> None
         margin_contact_area: Contact area to use for non-penetrating contacts at the margin
-        values_per_key: Number of value slots per hashtable entry (default 7)
 
     Returns:
         A warp kernel that can be launched to export reduced hydroelastic contacts.
     """
     # Define vector type for tracking exported contact IDs
-    exported_ids_vec = wp.types.vector(length=values_per_key, dtype=wp.int32)
+    exported_ids_vec = wp.types.vector(length=VALUES_PER_KEY, dtype=wp.int32)
 
     @wp.kernel(enable_backward=False)
     def export_hydroelastic_reduced_contacts_kernel(
@@ -1198,7 +1191,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(writer_func: Any, margin_
             num_exported = int(0)
 
             # Read all value slots for this entry (slot-major layout)
-            for slot in range(values_per_key):
+            for slot in range(wp.static(VALUES_PER_KEY)):
                 value = ht_values[slot * ht_capacity + entry_idx]
 
                 # Skip empty slots (value = 0)

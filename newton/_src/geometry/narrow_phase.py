@@ -43,7 +43,6 @@ from ..geometry.collision_primitive import (
 )
 from ..geometry.contact_data import ContactData, contact_passes_margin_check
 from ..geometry.contact_reduction import (
-    NUM_SPATIAL_DIRECTIONS,
     ContactReductionFunctions,
     ContactStruct,
     compute_voxel_index,
@@ -53,7 +52,7 @@ from ..geometry.contact_reduction import (
 from ..geometry.contact_reduction_global import (
     GlobalContactReducer,
     create_export_reduced_contacts_kernel,
-    create_mesh_triangle_contacts_to_reducer_kernel,
+    mesh_triangle_contacts_to_reducer_kernel,
     reduce_buffered_contacts_kernel,
 )
 from ..geometry.flags import ShapeFlags
@@ -1199,16 +1198,12 @@ class NarrowPhase:
         # Create global contact reduction kernels for mesh-triangle contacts (only if has_meshes and reduce_contacts)
         if self.reduce_contacts and has_meshes:
             # Global contact reducer uses hardcoded BETA_THRESHOLD (0.1mm) same as shared-memory reduction
-            # Slot layout: 6 spatial direction slots + 1 max-depth slot = 7 slots per key
-            self.mesh_triangle_to_reducer_kernel = create_mesh_triangle_contacts_to_reducer_kernel()
-            self.export_reduced_contacts_kernel = create_export_reduced_contacts_kernel(
-                writer_func, values_per_key=NUM_SPATIAL_DIRECTIONS + 1
-            )
+            # Slot layout: 6 spatial direction slots + 1 max-depth slot = 7 slots per key (VALUES_PER_KEY)
+            self.export_reduced_contacts_kernel = create_export_reduced_contacts_kernel(writer_func)
             # Global contact reducer for mesh-triangle contacts
             # Capacity is based on max_triangle_pairs since that's the max contacts we might generate
             self.global_contact_reducer = GlobalContactReducer(max_triangle_pairs, device=device)
         else:
-            self.mesh_triangle_to_reducer_kernel = None
             self.export_reduced_contacts_kernel = None
             self.global_contact_reducer = None
 
@@ -1466,7 +1461,7 @@ class NarrowPhase:
                 # Collect contacts into the reducer
                 reducer_data = self.global_contact_reducer.get_data_struct()
                 wp.launch(
-                    kernel=self.mesh_triangle_to_reducer_kernel,
+                    kernel=mesh_triangle_contacts_to_reducer_kernel,
                     dim=self.total_num_threads,
                     inputs=[
                         shape_types,
