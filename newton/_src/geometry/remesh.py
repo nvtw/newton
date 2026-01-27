@@ -756,8 +756,9 @@ def raycast_orthographic_kernel(
                 if slot < max_cavity_candidates:
                     # Origin: offset back along ray direction (guaranteed outside mesh)
                     cavity_origin = hit_point - ray_direction * camera_offset
-                    # Direction: negative ray direction (points into the mesh)
-                    cavity_dir = -ray_direction
+                    # Direction: use surface normal (points into cavity perpendicular to surface)
+                    cavity_dir = normal
+                    # cavity_dir = -ray_direction # Alternative: use ray direction
                     cavity_origins[slot] = cavity_origin
                     cavity_directions[slot] = cavity_dir
                     cavity_hit_distances[slot] = query.t
@@ -798,7 +799,8 @@ def raycast_hemisphere_kernel(
 
     The camera origin and forward direction come from cavity candidates collected
     during primary raycasting - the origin is offset back along the original ray
-    direction to guarantee it's outside the mesh.
+    direction to guarantee it's outside the mesh, and the view direction is the
+    inward surface normal.
 
     Hits are accumulated directly into the sparse voxel hash grid.
     """
