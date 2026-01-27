@@ -81,7 +81,9 @@ def simulate(solver, model, state_0, state_1, control, contacts, collision_pipel
     return state_0, state_1
 
 
-def build_stacked_cubes_scene(device, solver_fn, shape_type: ShapeType, cube_half: float = CUBE_HALF_LARGE):
+def build_stacked_cubes_scene(
+    device, solver_fn, shape_type: ShapeType, cube_half: float = CUBE_HALF_LARGE, reduce_contacts: bool = True
+):
     """Build the stacked cubes scene and return all components for simulation."""
     cube_mesh = None
     if shape_type == ShapeType.MESH:
@@ -125,11 +127,14 @@ def build_stacked_cubes_scene(device, solver_fn, shape_type: ShapeType, cube_hal
 
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
 
-    sdf_hydroelastic_config = SDFHydroelasticConfig(output_contact_surface=True)
+    sdf_hydroelastic_config = SDFHydroelasticConfig(output_contact_surface=True, reduce_contacts=reduce_contacts)
+
+    # Hydroelastic without contact reduction can generate many contacts
+    rigid_contact_max = 6000 if not reduce_contacts else 100
 
     collision_pipeline = newton.CollisionPipelineUnified.from_model(
         model,
-        rigid_contact_max=100,
+        rigid_contact_max=rigid_contact_max,
         broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
         sdf_hydroelastic_config=sdf_hydroelastic_config,
     )
@@ -141,11 +146,11 @@ def build_stacked_cubes_scene(device, solver_fn, shape_type: ShapeType, cube_hal
 
 
 def run_stacked_cubes_hydroelastic_test(
-    test, device, solver_fn, shape_type: ShapeType, cube_half: float = CUBE_HALF_LARGE
+    test, device, solver_fn, shape_type: ShapeType, cube_half: float = CUBE_HALF_LARGE, reduce_contacts: bool = True
 ):
     """Shared test for stacking 3 cubes using hydroelastic contacts."""
     model, solver, state_0, state_1, control, collision_pipeline, initial_positions, cube_half = (
-        build_stacked_cubes_scene(device, solver_fn, shape_type, cube_half)
+        build_stacked_cubes_scene(device, solver_fn, shape_type, cube_half, reduce_contacts)
     )
 
     contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
