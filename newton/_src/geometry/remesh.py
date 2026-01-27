@@ -208,13 +208,16 @@ def _accumulate_point_kernel(
     key = compute_voxel_key(point, inv_voxel_size)
     idx = hashtable_find_or_insert(key, keys, active_slots)
     if idx >= 0:
-        wp.atomic_add(sum_positions_x, idx, point[0])
-        wp.atomic_add(sum_positions_y, idx, point[1])
-        wp.atomic_add(sum_positions_z, idx, point[2])
+        old_count = wp.atomic_add(counts, idx, 1)
+        # Only store position on first hit
+        if old_count == 0:
+            sum_positions_x[idx] = point[0]
+            sum_positions_y[idx] = point[1]
+            sum_positions_z[idx] = point[2]
+        # Always accumulate normals
         wp.atomic_add(sum_normals_x, idx, normal[0])
         wp.atomic_add(sum_normals_y, idx, normal[1])
         wp.atomic_add(sum_normals_z, idx, normal[2])
-        wp.atomic_add(counts, idx, 1)
 
 
 @wp.kernel
@@ -243,16 +246,16 @@ def _finalize_voxels_kernel(
     if count <= 0:
         return
 
-    inv_count = 1.0 / wp.float32(count)
-
-    # Average position
-    avg_pos = wp.vec3(
-        sum_positions_x[idx] * inv_count,
-        sum_positions_y[idx] * inv_count,
-        sum_positions_z[idx] * inv_count,
+    # Position: use the stored position directly (first hit, no averaging)
+    # This avoids position drift artifacts (bumps) from averaging hits
+    # at slightly different depths from different ray angles
+    pos = wp.vec3(
+        sum_positions_x[idx],
+        sum_positions_y[idx],
+        sum_positions_z[idx],
     )
 
-    # Average and normalize normal
+    # Normal: average and normalize (averaging normals is good for smoothness)
     avg_normal = wp.vec3(
         sum_normals_x[idx],
         sum_normals_y[idx],
@@ -264,7 +267,7 @@ def _finalize_voxels_kernel(
     else:
         avg_normal = wp.vec3(0.0, 1.0, 0.0)  # Fallback
 
-    out_points[tid] = avg_pos
+    out_points[tid] = pos
     out_normals[tid] = avg_normal
 
 
@@ -315,6 +318,8 @@ class VoxelHashGrid:
         self.sum_normals_y = wp.zeros(self.capacity, dtype=wp.float32, device=device)
         self.sum_normals_z = wp.zeros(self.capacity, dtype=wp.float32, device=device)
         self.counts = wp.zeros(self.capacity, dtype=wp.int32, device=device)
+        # Max confidence per voxel (for two-pass best-hit selection)
+        self.max_confidences = wp.zeros(self.capacity, dtype=wp.float32, device=device)
 
     @property
     def keys(self) -> wp.array:
@@ -336,6 +341,7 @@ class VoxelHashGrid:
         self.sum_normals_y.zero_()
         self.sum_normals_z.zero_()
         self.counts.zero_()
+        self.max_confidences.zero_()
 
     def get_num_voxels(self) -> int:
         """Get the current number of occupied voxels."""
@@ -678,6 +684,9 @@ def raycast_orthographic_kernel(
     sum_normals_y: wp.array(dtype=wp.float32),
     sum_normals_z: wp.array(dtype=wp.float32),
     counts: wp.array(dtype=wp.int32),
+    max_confidences: wp.array(dtype=wp.float32),
+    # Two-pass mode: 0 = confidence pass, 1 = position pass
+    pass_mode: wp.int32,
     # Cavity camera candidate buffers (optional - pass empty arrays to disable)
     cavity_origins: wp.array(dtype=wp.vec3),
     cavity_directions: wp.array(dtype=wp.vec3),
@@ -688,17 +697,19 @@ def raycast_orthographic_kernel(
     cavity_prob_scale: wp.float32,  # Scale factor to control acceptance rate
     random_seed: wp.uint32,
 ):
-    """Raycast kernel for orthographic projection with direct voxel accumulation.
+    """Raycast kernel for orthographic projection with two-pass best-hit selection.
 
-    Each thread handles one pixel (resolution x resolution grid). Rays are shot
-    parallel to cam_dir from positions on the image plane. Hit points and normals
-    are accumulated directly into a sparse voxel hash grid.
+    Uses a two-pass approach for highest quality point cloud extraction:
+    - Pass 0 (confidence): Find max confidence per voxel (confidence = |dot(ray, normal)|)
+    - Pass 1 (position): Only write position/normal if confidence matches max
+
+    This ensures we keep the most perpendicular hit per voxel, which has the most
+    accurate position (least depth error from ray angle).
 
     Normals are flipped to always point toward the camera (outward from surface).
 
     Additionally, hits with larger distances (deeper in cavities) are probabilistically
-    selected as cavity camera candidates. The acceptance probability is scaled by
-    cavity_prob_scale to control the expected number of candidates.
+    selected as cavity camera candidates.
     """
     px, py = wp.tid()
 
@@ -727,21 +738,37 @@ def raycast_orthographic_kernel(
             normal = -normal
         normal = wp.normalize(normal)
 
-        # Accumulate into voxel hash grid
+        # Confidence = how perpendicular the ray is to the surface
+        # Higher confidence = more accurate position (less depth error)
+        confidence = wp.abs(wp.dot(ray_direction, normal))
+
+        # Get or create voxel slot
         key = compute_voxel_key(hit_point, inv_voxel_size)
         idx = hashtable_find_or_insert(key, keys, active_slots)
-        if idx >= 0:
-            wp.atomic_add(sum_positions_x, idx, hit_point[0])
-            wp.atomic_add(sum_positions_y, idx, hit_point[1])
-            wp.atomic_add(sum_positions_z, idx, hit_point[2])
-            wp.atomic_add(sum_normals_x, idx, normal[0])
-            wp.atomic_add(sum_normals_y, idx, normal[1])
-            wp.atomic_add(sum_normals_z, idx, normal[2])
-            wp.atomic_add(counts, idx, 1)
 
-        # Probabilistically select this hit as a cavity camera candidate
+        if idx >= 0:
+            if pass_mode == 0:
+                # Pass 0: Confidence pass - find max confidence per voxel
+                wp.atomic_max(max_confidences, idx, confidence)
+            else:
+                # Pass 1: Position pass - only write if we have the best confidence
+                # Use small epsilon for floating point comparison
+                max_conf = max_confidences[idx]
+                if confidence >= max_conf - 1.0e-6:
+                    # We're the best (or tied) - write position and accumulate normal
+                    sum_positions_x[idx] = hit_point[0]
+                    sum_positions_y[idx] = hit_point[1]
+                    sum_positions_z[idx] = hit_point[2]
+
+                    # Accumulate normals (averaging is good for smoothness)
+                    wp.atomic_add(sum_normals_x, idx, normal[0])
+                    wp.atomic_add(sum_normals_y, idx, normal[1])
+                    wp.atomic_add(sum_normals_z, idx, normal[2])
+                    wp.atomic_add(counts, idx, 1)
+
+        # Probabilistically select this hit as a cavity camera candidate (only in pass 1)
         # Higher hit distance = higher probability of selection
-        if max_cavity_candidates > 0:
+        if pass_mode == 1 and max_cavity_candidates > 0:
             # Generate random number
             thread_id = wp.uint32(px * resolution + py)
             rand_state = rand_init(random_seed, thread_id)
@@ -791,18 +818,18 @@ def raycast_hemisphere_kernel(
     sum_normals_y: wp.array(dtype=wp.float32),
     sum_normals_z: wp.array(dtype=wp.float32),
     counts: wp.array(dtype=wp.int32),
+    max_confidences: wp.array(dtype=wp.float32),
+    # Two-pass mode: 0 = confidence pass, 1 = position pass
+    pass_mode: wp.int32,
 ):
-    """Raycast kernel for hemisphere projection from a cavity camera.
+    """Raycast kernel for hemisphere projection from a cavity camera (two-pass).
 
-    Each thread handles one ray direction. Rays are shot from cam_origin in directions
-    transformed from local hemisphere frame to world frame using the camera basis.
+    Uses a two-pass approach for highest quality point cloud extraction:
+    - Pass 0 (confidence): Find max confidence per voxel
+    - Pass 1 (position): Only write position/normal if confidence matches max
 
     The camera origin and forward direction come from cavity candidates collected
-    during primary raycasting - the origin is offset back along the original ray
-    direction to guarantee it's outside the mesh, and the view direction is the
-    inward surface normal.
-
-    Hits are accumulated directly into the sparse voxel hash grid.
+    during primary raycasting.
     """
     tid = wp.tid()
 
@@ -832,17 +859,30 @@ def raycast_hemisphere_kernel(
             normal = -normal
         normal = wp.normalize(normal)
 
-        # Accumulate into voxel hash grid
+        # Confidence = how perpendicular the ray is to the surface
+        confidence = wp.abs(wp.dot(world_dir, normal))
+
+        # Get or create voxel slot
         key = compute_voxel_key(hit_point, inv_voxel_size)
         idx = hashtable_find_or_insert(key, keys, active_slots)
+
         if idx >= 0:
-            wp.atomic_add(sum_positions_x, idx, hit_point[0])
-            wp.atomic_add(sum_positions_y, idx, hit_point[1])
-            wp.atomic_add(sum_positions_z, idx, hit_point[2])
-            wp.atomic_add(sum_normals_x, idx, normal[0])
-            wp.atomic_add(sum_normals_y, idx, normal[1])
-            wp.atomic_add(sum_normals_z, idx, normal[2])
-            wp.atomic_add(counts, idx, 1)
+            if pass_mode == 0:
+                # Pass 0: Confidence pass - find max confidence per voxel
+                wp.atomic_max(max_confidences, idx, confidence)
+            else:
+                # Pass 1: Position pass - only write if we have the best confidence
+                max_conf = max_confidences[idx]
+                if confidence >= max_conf - 1.0e-6:
+                    # We're the best (or tied) - write position and accumulate normal
+                    sum_positions_x[idx] = hit_point[0]
+                    sum_positions_y[idx] = hit_point[1]
+                    sum_positions_z[idx] = hit_point[2]
+
+                    wp.atomic_add(sum_normals_x, idx, normal[0])
+                    wp.atomic_add(sum_normals_y, idx, normal[1])
+                    wp.atomic_add(sum_normals_z, idx, normal[2])
+                    wp.atomic_add(counts, idx, 1)
 
 
 class PointCloudExtractor:
@@ -1125,50 +1165,62 @@ class PointCloudExtractor:
         # (prevents later cameras from always overflowing the buffer)
         camera_order = rng.permutation(self.num_views)
 
-        # Cast rays from each camera direction, accumulating into voxel grid
-        for i in camera_order:
-            direction = directions[i]
-            right = rights_rot[i]
-            up = ups_rot[i]
-            cam_origin = cam_origins[i]
+        # Two-pass approach for best-hit selection:
+        # Pass 0: Find max confidence (|dot(ray, normal)|) per voxel across all cameras
+        # Pass 1: Only write position/normal for hits that match max confidence
 
-            # Different random seed per view for cavity candidate selection
-            random_seed = rng.integers(0, 2**31, dtype=np.uint32)
+        # Helper function to run all cameras with given pass mode
+        def run_primary_cameras(pass_mode: int):
+            for i in camera_order:
+                direction = directions[i]
+                right = rights_rot[i]
+                up = ups_rot[i]
+                cam_origin = cam_origins[i]
 
-            # Launch kernel - accumulates directly into voxel grid
-            wp.launch(
-                kernel=raycast_orthographic_kernel,
-                dim=(self.resolution, self.resolution),
-                inputs=[
-                    mesh.id,
-                    wp.vec3(cam_origin[0], cam_origin[1], cam_origin[2]),
-                    wp.vec3(direction[0], direction[1], direction[2]),
-                    wp.vec3(right[0], right[1], right[2]),
-                    wp.vec3(up[0], up[1], up[2]),
-                    float(pixel_size),
-                    self.resolution,
-                    float(max_ray_dist),
-                    float(voxel_grid.inv_voxel_size),
-                    voxel_grid.keys,
-                    voxel_grid.active_slots,
-                    voxel_grid.sum_positions_x,
-                    voxel_grid.sum_positions_y,
-                    voxel_grid.sum_positions_z,
-                    voxel_grid.sum_normals_x,
-                    voxel_grid.sum_normals_y,
-                    voxel_grid.sum_normals_z,
-                    voxel_grid.counts,
-                    cavity_origins,
-                    cavity_directions,
-                    cavity_hit_distances,
-                    cavity_count,
-                    max_cavity_candidates,
-                    float(camera_offset),
-                    float(cavity_prob_scale),
-                    int(random_seed),
-                ],
-                device=self.device,
-            )
+                # Different random seed per view for cavity candidate selection
+                random_seed = rng.integers(0, 2**31, dtype=np.uint32)
+
+                wp.launch(
+                    kernel=raycast_orthographic_kernel,
+                    dim=(self.resolution, self.resolution),
+                    inputs=[
+                        mesh.id,
+                        wp.vec3(cam_origin[0], cam_origin[1], cam_origin[2]),
+                        wp.vec3(direction[0], direction[1], direction[2]),
+                        wp.vec3(right[0], right[1], right[2]),
+                        wp.vec3(up[0], up[1], up[2]),
+                        float(pixel_size),
+                        self.resolution,
+                        float(max_ray_dist),
+                        float(voxel_grid.inv_voxel_size),
+                        voxel_grid.keys,
+                        voxel_grid.active_slots,
+                        voxel_grid.sum_positions_x,
+                        voxel_grid.sum_positions_y,
+                        voxel_grid.sum_positions_z,
+                        voxel_grid.sum_normals_x,
+                        voxel_grid.sum_normals_y,
+                        voxel_grid.sum_normals_z,
+                        voxel_grid.counts,
+                        voxel_grid.max_confidences,
+                        pass_mode,
+                        cavity_origins,
+                        cavity_directions,
+                        cavity_hit_distances,
+                        cavity_count,
+                        max_cavity_candidates,
+                        float(camera_offset),
+                        float(cavity_prob_scale),
+                        int(random_seed),
+                    ],
+                    device=self.device,
+                )
+
+        # Pass 0: Find max confidence per voxel
+        run_primary_cameras(pass_mode=0)
+
+        # Pass 1: Write positions for best-confidence hits
+        run_primary_cameras(pass_mode=1)
 
         # Check hash table load factor and warn if too high
         num_voxels_after_primary = voxel_grid.get_num_voxels()
@@ -1227,7 +1279,8 @@ class PointCloudExtractor:
                 # Pre-generate all random roll angles
                 thetas = rng.uniform(0, 2 * np.pi, size=num_to_sample)
 
-                # Launch kernel for each cavity camera
+                # Pre-compute camera bases for all sampled cavity cameras
+                cavity_cam_data = []
                 for i in range(num_to_sample):
                     sample_idx = sample_indices[i]
                     cam_origin = origins_np[sample_idx]
@@ -1244,33 +1297,43 @@ class PointCloudExtractor:
                     up_rot = cos_theta * up - sin_theta * right
                     right, up = right_rot, up_rot
 
-                    # Launch hemisphere raycast kernel
-                    wp.launch(
-                        kernel=raycast_hemisphere_kernel,
-                        dim=self.num_hemisphere_dirs,
-                        inputs=[
-                            mesh.id,
-                            wp.vec3(cam_origin[0], cam_origin[1], cam_origin[2]),
-                            wp.vec3(right[0], right[1], right[2]),
-                            wp.vec3(up[0], up[1], up[2]),
-                            wp.vec3(cam_forward[0], cam_forward[1], cam_forward[2]),
-                            float(min_ray_dist),
-                            float(max_ray_dist),
-                            wp_hemisphere_dirs,
-                            self.num_hemisphere_dirs,
-                            float(voxel_grid.inv_voxel_size),
-                            voxel_grid.keys,
-                            voxel_grid.active_slots,
-                            voxel_grid.sum_positions_x,
-                            voxel_grid.sum_positions_y,
-                            voxel_grid.sum_positions_z,
-                            voxel_grid.sum_normals_x,
-                            voxel_grid.sum_normals_y,
-                            voxel_grid.sum_normals_z,
-                            voxel_grid.counts,
-                        ],
-                        device=self.device,
-                    )
+                    cavity_cam_data.append((cam_origin, right, up, cam_forward))
+
+                # Helper function to run all cavity cameras with given pass mode
+                def run_cavity_cameras(pass_mode: int):
+                    for cam_origin, right, up, cam_forward in cavity_cam_data:
+                        wp.launch(
+                            kernel=raycast_hemisphere_kernel,
+                            dim=self.num_hemisphere_dirs,
+                            inputs=[
+                                mesh.id,
+                                wp.vec3(cam_origin[0], cam_origin[1], cam_origin[2]),
+                                wp.vec3(right[0], right[1], right[2]),
+                                wp.vec3(up[0], up[1], up[2]),
+                                wp.vec3(cam_forward[0], cam_forward[1], cam_forward[2]),
+                                float(min_ray_dist),
+                                float(max_ray_dist),
+                                wp_hemisphere_dirs,
+                                self.num_hemisphere_dirs,
+                                float(voxel_grid.inv_voxel_size),
+                                voxel_grid.keys,
+                                voxel_grid.active_slots,
+                                voxel_grid.sum_positions_x,
+                                voxel_grid.sum_positions_y,
+                                voxel_grid.sum_positions_z,
+                                voxel_grid.sum_normals_x,
+                                voxel_grid.sum_normals_y,
+                                voxel_grid.sum_normals_z,
+                                voxel_grid.counts,
+                                voxel_grid.max_confidences,
+                                pass_mode,
+                            ],
+                            device=self.device,
+                        )
+
+                # Two-pass for cavity cameras as well
+                run_cavity_cameras(pass_mode=0)  # Confidence pass
+                run_cavity_cameras(pass_mode=1)  # Position pass
 
         # Finalize voxel grid to get averaged points and normals
         wp.synchronize()
@@ -1522,6 +1585,124 @@ class SurfaceReconstructor:
         return vertices, faces
 
 
+def extract_largest_island(
+    vertices: np.ndarray,
+    indices: np.ndarray,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Extract the largest connected component (island) from a mesh.
+
+    Uses edge-based connectivity: triangles sharing an edge are considered connected.
+    Optimized using NumPy vectorization and SciPy sparse connected components.
+
+    This is useful as post-processing after Poisson reconstruction, which can
+    sometimes create small floating fragments in areas with sparse point coverage.
+
+    Args:
+        vertices: Vertex positions, shape (N, 3).
+        indices: Triangle indices, shape (M*3,) or (M, 3).
+        verbose: Print progress information. Default is False.
+
+    Returns:
+        Tuple of (new_vertices, new_indices) containing only the largest island.
+        Indices are returned as a flattened array (M*3,).
+    """
+    from scipy import sparse  # noqa: PLC0415
+
+    # Ensure indices are flattened
+    indices = np.asarray(indices).flatten()
+    num_triangles = len(indices) // 3
+
+    if num_triangles == 0:
+        return vertices, indices
+
+    # Reshape indices to (num_triangles, 3)
+    triangles = indices.reshape(-1, 3)
+
+    # Build edges array: each triangle contributes 3 edges
+    # Edge format: (min_vertex, max_vertex) for consistent ordering
+    # Shape: (num_triangles * 3, 2)
+    v0, v1, v2 = triangles[:, 0], triangles[:, 1], triangles[:, 2]
+
+    edges = np.stack(
+        [
+            np.stack([np.minimum(v0, v1), np.maximum(v0, v1)], axis=1),
+            np.stack([np.minimum(v1, v2), np.maximum(v1, v2)], axis=1),
+            np.stack([np.minimum(v2, v0), np.maximum(v2, v0)], axis=1),
+        ],
+        axis=1,
+    ).reshape(-1, 2)  # Shape: (num_triangles * 3, 2)
+
+    # Triangle index for each edge
+    tri_indices = np.repeat(np.arange(num_triangles), 3)
+
+    # Encode edges as single integers for fast grouping
+    # Use a large multiplier to avoid collisions
+    max_vertex = int(vertices.shape[0])
+    edge_keys = edges[:, 0].astype(np.int64) * max_vertex + edges[:, 1].astype(np.int64)
+
+    # Sort edges to group identical edges together
+    sort_idx = np.argsort(edge_keys)
+    sorted_keys = edge_keys[sort_idx]
+    sorted_tris = tri_indices[sort_idx]
+
+    # Find where consecutive edges are the same (shared edges)
+    same_as_next = sorted_keys[:-1] == sorted_keys[1:]
+
+    # For each shared edge, connect the two triangles
+    # Get pairs of triangles that share an edge
+    tri_a = sorted_tris[:-1][same_as_next]
+    tri_b = sorted_tris[1:][same_as_next]
+
+    # Build sparse adjacency matrix for triangles
+    # Each shared edge creates a connection between two triangles
+    if len(tri_a) > 0:
+        # Create symmetric adjacency matrix
+        row = np.concatenate([tri_a, tri_b])
+        col = np.concatenate([tri_b, tri_a])
+        data = np.ones(len(row), dtype=np.int8)
+        adjacency = sparse.csr_matrix((data, (row, col)), shape=(num_triangles, num_triangles))
+    else:
+        # No shared edges - each triangle is its own component
+        adjacency = sparse.csr_matrix((num_triangles, num_triangles), dtype=np.int8)
+
+    # Find connected components using SciPy (highly optimized C code)
+    num_components, labels = sparse.csgraph.connected_components(adjacency, directed=False)
+
+    # If only one component, return as-is
+    if num_components == 1:
+        if verbose:
+            print("Island filtering: 1 component (mesh is fully connected)")
+        return vertices, indices
+
+    # Count triangles per component
+    component_sizes = np.bincount(labels)
+    largest_component = np.argmax(component_sizes)
+    largest_size = component_sizes[largest_component]
+
+    # Get mask of triangles to keep
+    keep_mask = labels == largest_component
+    keep_triangles = triangles[keep_mask]
+
+    # Find unique vertices used by kept triangles
+    used_vertices = np.unique(keep_triangles.flatten())
+
+    # Create vertex remapping
+    vertex_remap = np.full(len(vertices), -1, dtype=np.int32)
+    vertex_remap[used_vertices] = np.arange(len(used_vertices), dtype=np.int32)
+
+    # Remap triangle indices
+    new_indices = vertex_remap[keep_triangles.flatten()]
+    new_vertices = vertices[used_vertices]
+
+    if verbose:
+        print(f"Island filtering: {num_components} components found")
+        print(f"  Kept largest: {largest_size} triangles ({largest_size * 100.0 / num_triangles:.1f}%)")
+        print(f"  Removed: {num_triangles - largest_size} triangles from {num_components - 1} smaller islands")
+
+    return new_vertices, new_indices
+
+
 def remesh_poisson(
     vertices,
     faces,
@@ -1537,6 +1718,8 @@ def remesh_poisson(
     simplify_ratio: float | None = None,
     target_triangles: int | None = None,
     fast_simplification: bool = True,
+    # Post-processing parameters
+    keep_largest_island: bool = True,
     # Control parameters
     device: str | None = None,
     seed: int | None = 42,
@@ -1579,6 +1762,9 @@ def remesh_poisson(
             Only used if simplify_tolerance and simplify_ratio are None.
         fast_simplification: If True (default), use pyfqmr for fast mesh simplification.
             If False, use Open3D (slower but potentially higher quality).
+        keep_largest_island: If True (default), keep only the largest connected component
+            after reconstruction. This removes small floating fragments that can occur
+            in areas with sparse point coverage.
         device: Warp device for GPU computation. Default uses the default Warp device.
         seed: Random seed for reproducibility. Default is 42.
         verbose: Print progress information. Default is False.
@@ -1621,8 +1807,13 @@ def remesh_poisson(
     )
     mesh = reconstructor.reconstruct(points, normals, verbose=verbose)
 
-    # Return as (vertices, faces) tuple to match other remesh functions
+    # Get vertices and faces from reconstructed mesh
     new_vertices = mesh.vertices
     new_faces = mesh.indices.reshape(-1, 3)
+
+    # Post-processing: keep only the largest connected component
+    if keep_largest_island:
+        new_vertices, new_indices = extract_largest_island(new_vertices, new_faces, verbose=verbose)
+        new_faces = new_indices.reshape(-1, 3)
 
     return new_vertices, new_faces
