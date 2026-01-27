@@ -24,7 +24,6 @@ from newton._src.core.types import MAXVAL
 
 from ..sim.model import Model
 from .collision_core import sat_box_intersection
-from .contact_data import ContactData
 from .contact_reduction_global import (
     GlobalContactReducer,
     GlobalContactReducerData,
@@ -72,11 +71,6 @@ class SDFHydroelasticConfig:
     Controls properties of SDF hydroelastic collision handling.
     """
 
-    reduce_contacts: bool = True
-    """Whether to reduce contacts to a smaller representative set per shape pair.
-    Uses the standard global contact reduction with normal bins, spatial extremes,
-    and voxel-based depth tracking. Beta threshold is fixed at 0.1mm (same as
-    standard SDF contact reduction)."""
     buffer_mult_broad: int = 1
     """Multiplier for the preallocated broadphase buffer that stores overlapping
     block pairs. Increase only if a broadphase overflow warning is issued."""
@@ -197,7 +191,6 @@ class SDFHydroelastic:
             self.iso_voxel_count = self.iso_buffer_counts[4]
             self.iso_voxel_coords = self.iso_buffer_coords[4]
             self.iso_voxel_shape_pair = self.iso_buffer_shape_pairs[4]
-            self.face_contact_count = wp.zeros((1,), dtype=wp.int32)
 
             # Broadphase buffers
             self.block_start_prefix = wp.zeros((self.max_num_shape_pairs,), dtype=wp.int32)
@@ -215,58 +208,31 @@ class SDFHydroelastic:
 
             self.mc_tables = get_mc_tables(device)
 
-            if self.config.reduce_contacts:
-                # Use standard global contact reduction with hydroelastic data support
-                # Marching cubes writes directly to reducer buffer (no intermediate buffers needed)
-                self.contact_reducer = GlobalContactReducer(
-                    capacity=self.max_num_face_contacts,
-                    device=device,
-                    store_hydroelastic_data=True,
-                )
+            # Use GlobalContactReducer - marching cubes writes directly to reducer buffer
+            self.contact_reducer = GlobalContactReducer(
+                capacity=self.max_num_face_contacts,
+                device=device,
+                store_hydroelastic_data=True,
+            )
 
-                # Visualization buffers (optional, sized to reducer capacity)
-                if self.config.output_contact_surface:
-                    self.iso_vertex_point = wp.empty((3 * self.max_num_face_contacts,), dtype=wp.vec3f)
-                    self.iso_vertex_depth = wp.empty((self.max_num_face_contacts,), dtype=wp.float32)
-                    self.iso_vertex_shape_pair = wp.empty((self.max_num_face_contacts,), dtype=wp.vec2i)
-                else:
-                    self.iso_vertex_point = wp.empty((0,), dtype=wp.vec3f)
-                    self.iso_vertex_depth = wp.empty((0,), dtype=wp.float32)
-                    self.iso_vertex_shape_pair = wp.empty((0,), dtype=wp.vec2i)
-
-                # Kernels for direct-to-reducer path
-                self.count_faces_kernel, self.scatter_faces_kernel = get_generate_contacts_kernel(
-                    output_vertices=self.config.output_contact_surface,
-                    reduce_contacts=True,
-                )
-                self.export_reduced_contacts_kernel = create_export_hydroelastic_reduced_contacts_kernel(
-                    writer_func,
-                    self.config.margin_contact_area,
-                )
+            # Visualization buffers (optional, sized to reducer capacity)
+            if self.config.output_contact_surface:
+                self.iso_vertex_point = wp.empty((3 * self.max_num_face_contacts,), dtype=wp.vec3f)
+                self.iso_vertex_depth = wp.empty((self.max_num_face_contacts,), dtype=wp.float32)
+                self.iso_vertex_shape_pair = wp.empty((self.max_num_face_contacts,), dtype=wp.vec2i)
             else:
-                # Non-reduced path: use intermediate buffers with prefix sum allocation
-                self.voxel_face_prefix = wp.zeros((self.max_num_iso_voxels,), dtype=wp.int32)
-                self.face_contact_count = wp.zeros((1,), dtype=wp.int32)
-                self.face_contact_pair = wp.empty((self.max_num_face_contacts,), dtype=wp.vec2i)
-                self.face_contact_pos = wp.empty((self.max_num_face_contacts,), dtype=wp.vec3)
-                self.face_contact_normal = wp.empty((self.max_num_face_contacts,), dtype=wp.vec3)
-                self.face_contact_depth = wp.empty((self.max_num_face_contacts,), dtype=wp.float32)
-                self.face_contact_area = wp.empty((self.max_num_face_contacts,), dtype=wp.float32)
+                self.iso_vertex_point = wp.empty((0,), dtype=wp.vec3f)
+                self.iso_vertex_depth = wp.empty((0,), dtype=wp.float32)
+                self.iso_vertex_shape_pair = wp.empty((0,), dtype=wp.vec2i)
 
-                if self.config.output_contact_surface:
-                    self.iso_vertex_point = wp.empty((3 * self.max_num_face_contacts,), dtype=wp.vec3f)
-                    self.iso_vertex_depth = wp.empty((self.max_num_face_contacts,), dtype=wp.float32)
-                    self.iso_vertex_shape_pair = wp.empty((self.max_num_face_contacts,), dtype=wp.vec2i)
-                else:
-                    self.iso_vertex_point = wp.empty((0,), dtype=wp.vec3f)
-                    self.iso_vertex_depth = wp.empty((0,), dtype=wp.float32)
-                    self.iso_vertex_shape_pair = wp.empty((0,), dtype=wp.vec2i)
-
-                self.count_faces_kernel, self.scatter_faces_kernel = get_generate_contacts_kernel(
-                    output_vertices=self.config.output_contact_surface,
-                    reduce_contacts=False,
-                )
-                self.decode_contacts_kernel = get_decode_contacts_kernel(self.config.margin_contact_area, writer_func)
+            # Kernels for contact generation and export
+            self.count_faces_kernel, self.scatter_faces_kernel = get_generate_contacts_kernel(
+                output_vertices=self.config.output_contact_surface,
+            )
+            self.export_reduced_contacts_kernel = create_export_hydroelastic_reduced_contacts_kernel(
+                writer_func,
+                self.config.margin_contact_area,
+            )
 
         self.grid_size = min(self.config.grid_size, self.max_num_face_contacts)
 
@@ -353,7 +319,7 @@ class SDFHydroelastic:
             contact_surface_point=self.iso_vertex_point,
             contact_surface_depth=self.iso_vertex_depth,
             contact_surface_shape_pair=self.iso_vertex_shape_pair,
-            face_contact_count=self.face_contact_count,
+            face_contact_count=self.contact_reducer.contact_count,
             max_num_face_contacts=self.max_num_face_contacts,
         )
 
@@ -387,19 +353,12 @@ class SDFHydroelastic:
 
         self._generate_contacts(shape_sdf_data, shape_transform, shape_contact_margin)
 
-        if self.config.reduce_contacts:
-            self._reduce_decode_contacts(
-                shape_transform,
-                shape_contact_margin,
-                shape_sdf_data,
-                writer_data,
-            )
-        else:
-            self._decode_contacts(
-                shape_transform,
-                shape_contact_margin,
-                writer_data,
-            )
+        self._reduce_decode_contacts(
+            shape_transform,
+            shape_contact_margin,
+            shape_sdf_data,
+            writer_data,
+        )
 
         wp.launch(
             kernel=verify_collision_step,
@@ -415,7 +374,7 @@ class SDFHydroelastic:
                 self.iso_max_dims[2],
                 self.iso_voxel_count,
                 self.max_num_iso_voxels,
-                self.face_contact_count,
+                self.contact_reducer.contact_count,
                 self.max_num_face_contacts,
                 writer_data.contact_count,
                 writer_data.contact_max,
@@ -560,11 +519,8 @@ class SDFHydroelastic:
     ) -> None:
         """Generate marching cubes contacts from iso-voxels.
 
-        When reduce_contacts=True, contacts are written directly to the GlobalContactReducer
-        buffer using atomic allocation (no intermediate buffers needed).
-
-        When reduce_contacts=False, contacts are written to intermediate buffers using
-        prefix sum allocation for deterministic ordering.
+        Contacts are written directly to the GlobalContactReducer buffer using
+        atomic allocation.
         """
         self.voxel_face_count.zero_()
         wp.launch(
@@ -591,100 +547,34 @@ class SDFHydroelastic:
             device=self.device,
         )
 
-        if self.config.reduce_contacts:
-            # Direct-to-reducer path: write contacts directly to GlobalContactReducer
-            # using atomic allocation (simpler, no prefix sum needed)
-            self.contact_reducer.clear_active()  # Clear for new frame
-            reducer_data = self.contact_reducer.get_data_struct()
-            wp.launch(
-                kernel=self.scatter_faces_kernel,
-                dim=[self.grid_size],
-                inputs=[
-                    self.grid_size,
-                    self.iso_voxel_count,
-                    shape_sdf_data,
-                    shape_transform,
-                    self.shape_material_k_hydro,
-                    self.iso_voxel_coords,
-                    self.iso_voxel_shape_pair,
-                    self.mc_tables[0],
-                    self.mc_tables[4],
-                    self.mc_tables[3],
-                    self.max_num_iso_voxels,
-                    self.voxel_cube_indices,
-                    self.voxel_corner_vals,
-                    self.voxel_face_count,
-                    reducer_data,
-                ],
-                outputs=[
-                    self.iso_vertex_point,
-                    self.iso_vertex_depth,
-                    self.iso_vertex_shape_pair,
-                ],
-                device=self.device,
-            )
-        else:
-            # Non-reduced path: use prefix sum for deterministic allocation
-            scan_with_total(
-                self.voxel_face_count, self.voxel_face_prefix, self.iso_voxel_count, self.face_contact_count
-            )
-            wp.launch(
-                kernel=self.scatter_faces_kernel,
-                dim=[self.grid_size],
-                inputs=[
-                    self.grid_size,
-                    self.iso_voxel_count,
-                    shape_sdf_data,
-                    shape_transform,
-                    self.shape_material_k_hydro,
-                    self.iso_voxel_coords,
-                    self.iso_voxel_shape_pair,
-                    self.mc_tables[0],
-                    self.mc_tables[4],
-                    self.mc_tables[3],
-                    self.max_num_face_contacts,
-                    self.max_num_iso_voxels,
-                    self.voxel_face_prefix,
-                    self.voxel_cube_indices,
-                    self.voxel_corner_vals,
-                    self.voxel_face_count,
-                ],
-                outputs=[
-                    self.face_contact_pair,
-                    self.face_contact_pos,
-                    self.face_contact_depth,
-                    self.face_contact_normal,
-                    self.face_contact_area,
-                    self.iso_vertex_point,
-                    self.iso_vertex_depth,
-                    self.iso_vertex_shape_pair,
-                ],
-                device=self.device,
-            )
-
-    def _decode_contacts(
-        self,
-        shape_transform: wp.array(dtype=wp.transform),
-        shape_contact_margin: wp.array(dtype=wp.float32),
-        writer_data: Any,
-    ) -> None:
+        # Write contacts directly to GlobalContactReducer using atomic allocation
+        self.contact_reducer.clear_active()
+        reducer_data = self.contact_reducer.get_data_struct()
         wp.launch(
-            kernel=self.decode_contacts_kernel,
+            kernel=self.scatter_faces_kernel,
             dim=[self.grid_size],
             inputs=[
                 self.grid_size,
-                self.face_contact_count,
-                self.shape_material_k_hydro,
+                self.iso_voxel_count,
+                shape_sdf_data,
                 shape_transform,
-                shape_contact_margin,
-                self.face_contact_pair,
-                self.face_contact_pos,
-                self.face_contact_depth,
-                self.face_contact_normal,
-                self.face_contact_area,
-                self.max_num_face_contacts,
+                self.shape_material_k_hydro,
+                self.iso_voxel_coords,
+                self.iso_voxel_shape_pair,
+                self.mc_tables[0],
+                self.mc_tables[4],
+                self.mc_tables[3],
+                self.max_num_iso_voxels,
+                self.voxel_cube_indices,
+                self.voxel_corner_vals,
+                self.voxel_face_count,
+                reducer_data,
             ],
-            outputs=[writer_data],
+            outputs=[
+                self.iso_vertex_point,
+                self.iso_vertex_depth,
+                self.iso_vertex_shape_pair,
+            ],
             device=self.device,
         )
 
@@ -1097,13 +987,11 @@ def mc_iterate_voxel_vertices(
     return cube_idx, corner_vals, any_verts_inside_margin, True
 
 
-def get_generate_contacts_kernel(output_vertices: bool, reduce_contacts: bool):
+def get_generate_contacts_kernel(output_vertices: bool):
     """Create kernels for hydroelastic contact generation.
 
     Args:
         output_vertices: Whether to output contact surface vertices for visualization
-        reduce_contacts: Whether to write directly to GlobalContactReducer (True) or
-                        to intermediate buffers for non-reduced output (False)
 
     Returns:
         Tuple of (count_faces_kernel, scatter_faces_kernel)
@@ -1185,260 +1073,90 @@ def get_generate_contacts_kernel(output_vertices: bool, reduce_contacts: bool):
             voxel_cube_indices[tid] = cube_idx
             voxel_corner_vals[tid] = corner_vals
 
-    if reduce_contacts:
-        # Write directly to GlobalContactReducer using atomic allocation
-        @wp.kernel(enable_backward=False)
-        def scatter_faces_kernel(
-            grid_size: int,
-            iso_voxel_count: wp.array(dtype=int),
-            shape_sdf_data: wp.array(dtype=SDFData),
-            shape_transform: wp.array(dtype=wp.transform),
-            shape_material_k_hydro: wp.array(dtype=wp.float32),
-            iso_voxel_coords: wp.array(dtype=wp.vec3us),
-            iso_voxel_shape_pair: wp.array(dtype=wp.vec2i),
-            tri_range_table: wp.array(dtype=wp.int32),
-            flat_edge_verts_table: wp.array(dtype=wp.vec2ub),
-            corner_offsets_table: wp.array(dtype=wp.vec3ub),
-            max_num_iso_voxels: int,
-            voxel_cube_indices: wp.array(dtype=wp.uint8),
-            voxel_corner_vals: wp.array(dtype=vec8f),
-            voxel_face_count: wp.array(dtype=wp.int32),
-            reducer_data: GlobalContactReducerData,
-            # outputs for visualization (optional)
-            iso_vertex_point: wp.array(dtype=wp.vec3f),
-            iso_vertex_depth: wp.array(dtype=wp.float32),
-            iso_vertex_shape_pair: wp.array(dtype=wp.vec2i),
-        ):
-            """Scatter marching cubes faces directly to GlobalContactReducer buffer."""
-            offset = wp.tid()
-            num_voxels = wp.min(iso_voxel_count[0], max_num_iso_voxels)
-            for tid in range(offset, num_voxels, grid_size):
-                num_faces = voxel_face_count[tid]
-                if num_faces == 0:
-                    continue
-
-                pair = iso_voxel_shape_pair[tid]
-                shape_a = pair[0]
-                shape_b = pair[1]
-
-                sdf_b = shape_sdf_data[shape_b].sparse_sdf_ptr
-
-                iso_coords = iso_voxel_coords[tid]
-                X_ws_b = shape_transform[shape_b]
-
-                x_id = wp.int32(iso_coords.x)
-                y_id = wp.int32(iso_coords.y)
-                z_id = wp.int32(iso_coords.z)
-
-                cube_idx = voxel_cube_indices[tid]
-                corner_vals = voxel_corner_vals[tid]
-
-                tri_range_start = tri_range_table[wp.int32(cube_idx)]
-
-                # Compute effective stiffness coefficient
-                k_a = shape_material_k_hydro[shape_a]
-                k_b = shape_material_k_hydro[shape_b]
-                k_eff = get_effective_stiffness(k_a, k_b)
-
-                for fi in range(num_faces):
-                    area, normal, face_center, pen_depth, face_verts = mc_calc_face(
-                        flat_edge_verts_table,
-                        corner_offsets_table,
-                        tri_range_start + 3 * fi,
-                        corner_vals,
-                        sdf_b,
-                        x_id,
-                        y_id,
-                        z_id,
-                    )
-
-                    # Write directly to reducer buffer with atomic allocation
-                    contact_id = export_hydroelastic_contact_to_buffer(
-                        shape_a,
-                        shape_b,
-                        face_center,  # Position in SDF local space
-                        normal,
-                        pen_depth,
-                        area,
-                        k_eff,
-                        reducer_data,
-                    )
-
-                    if wp.static(output_vertices) and contact_id >= 0:
-                        for vi in range(3):
-                            iso_vertex_point[3 * contact_id + vi] = wp.transform_point(X_ws_b, face_verts[vi])
-                        iso_vertex_depth[contact_id] = pen_depth
-                        iso_vertex_shape_pair[contact_id] = pair
-    else:
-        # Write to intermediate buffers using prefix sum (for non-reduced output)
-        @wp.kernel(enable_backward=False)
-        def scatter_faces_kernel(
-            grid_size: int,
-            iso_voxel_count: wp.array(dtype=int),
-            shape_sdf_data: wp.array(dtype=SDFData),
-            shape_transform: wp.array(dtype=wp.transform),
-            shape_material_k_hydro: wp.array(dtype=wp.float32),
-            iso_voxel_coords: wp.array(dtype=wp.vec3us),
-            iso_voxel_shape_pair: wp.array(dtype=wp.vec2i),
-            tri_range_table: wp.array(dtype=wp.int32),
-            flat_edge_verts_table: wp.array(dtype=wp.vec2ub),
-            corner_offsets_table: wp.array(dtype=wp.vec3ub),
-            max_num_contacts: int,
-            max_num_iso_voxels: int,
-            face_contact_prefix: wp.array(dtype=wp.int32),
-            voxel_cube_indices: wp.array(dtype=wp.uint8),
-            voxel_corner_vals: wp.array(dtype=vec8f),
-            voxel_face_count: wp.array(dtype=wp.int32),
-            # outputs
-            contact_pair: wp.array(dtype=wp.vec2i),
-            contact_pos: wp.array(dtype=wp.vec3),
-            contact_depth: wp.array(dtype=wp.float32),
-            contact_normal: wp.array(dtype=wp.vec3),
-            contact_area: wp.array(dtype=wp.float32),
-            iso_vertex_point: wp.array(dtype=wp.vec3f),
-            iso_vertex_depth: wp.array(dtype=wp.float32),
-            iso_vertex_shape_pair: wp.array(dtype=wp.vec2i),
-        ):
-            """Scatter marching cubes faces to intermediate buffers using prefix sum."""
-            offset = wp.tid()
-            num_voxels = wp.min(iso_voxel_count[0], max_num_iso_voxels)
-            for tid in range(offset, num_voxels, grid_size):
-                num_faces = voxel_face_count[tid]
-                idx_base = face_contact_prefix[tid]
-                if num_faces == 0 or idx_base + num_faces > max_num_contacts:
-                    continue
-
-                pair = iso_voxel_shape_pair[tid]
-                shape_b = pair[1]
-
-                sdf_b = shape_sdf_data[shape_b].sparse_sdf_ptr
-
-                iso_coords = iso_voxel_coords[tid]
-                X_ws_b = shape_transform[shape_b]
-
-                x_id = wp.int32(iso_coords.x)
-                y_id = wp.int32(iso_coords.y)
-                z_id = wp.int32(iso_coords.z)
-
-                cube_idx = voxel_cube_indices[tid]
-                corner_vals = voxel_corner_vals[tid]
-
-                tri_range_start = tri_range_table[wp.int32(cube_idx)]
-
-                for fi in range(num_faces):
-                    area, normal, face_center, pen_depth, face_verts = mc_calc_face(
-                        flat_edge_verts_table,
-                        corner_offsets_table,
-                        tri_range_start + 3 * fi,
-                        corner_vals,
-                        sdf_b,
-                        x_id,
-                        y_id,
-                        z_id,
-                    )
-
-                    idx = idx_base + fi
-
-                    contact_pair[idx] = pair
-                    contact_pos[idx] = face_center
-                    contact_depth[idx] = pen_depth
-                    contact_normal[idx] = normal
-                    contact_area[idx] = area
-
-                    if wp.static(output_vertices):
-                        for vi in range(3):
-                            iso_vertex_point[3 * idx + vi] = wp.transform_point(X_ws_b, face_verts[vi])
-                        iso_vertex_depth[idx] = pen_depth
-                        iso_vertex_shape_pair[idx] = pair
-
-    return count_faces_kernel, scatter_faces_kernel
-
-
-def get_decode_contacts_kernel(margin_contact_area: float = 1e-4, writer_func: Any = None):
     @wp.kernel(enable_backward=False)
-    def decode_contacts_kernel(
+    def scatter_faces_kernel(
         grid_size: int,
-        contact_count: wp.array(dtype=int),
-        shape_material_k_hydro: wp.array(dtype=wp.float32),
+        iso_voxel_count: wp.array(dtype=int),
+        shape_sdf_data: wp.array(dtype=SDFData),
         shape_transform: wp.array(dtype=wp.transform),
-        shape_contact_margin: wp.array(dtype=wp.float32),
-        contact_pair: wp.array(dtype=wp.vec2i),
-        contact_pos: wp.array(dtype=wp.vec3),
-        contact_depth: wp.array(dtype=wp.float32),
-        contact_normal: wp.array(dtype=wp.vec3),
-        contact_area: wp.array(dtype=wp.float32),
-        max_num_face_contacts: int,
-        # outputs
-        writer_data: Any,
+        shape_material_k_hydro: wp.array(dtype=wp.float32),
+        iso_voxel_coords: wp.array(dtype=wp.vec3us),
+        iso_voxel_shape_pair: wp.array(dtype=wp.vec2i),
+        tri_range_table: wp.array(dtype=wp.int32),
+        flat_edge_verts_table: wp.array(dtype=wp.vec2ub),
+        corner_offsets_table: wp.array(dtype=wp.vec3ub),
+        max_num_iso_voxels: int,
+        voxel_cube_indices: wp.array(dtype=wp.uint8),
+        voxel_corner_vals: wp.array(dtype=vec8f),
+        voxel_face_count: wp.array(dtype=wp.int32),
+        reducer_data: GlobalContactReducerData,
+        # outputs for visualization (optional)
+        iso_vertex_point: wp.array(dtype=wp.vec3f),
+        iso_vertex_depth: wp.array(dtype=wp.float32),
+        iso_vertex_shape_pair: wp.array(dtype=wp.vec2i),
     ):
+        """Scatter marching cubes faces directly to GlobalContactReducer buffer."""
         offset = wp.tid()
-        num_contacts = wp.min(contact_count[0], max_num_face_contacts)
-
-        # Calculate how many contacts this thread will process
-        my_contact_count = 0
-        if offset < num_contacts:
-            my_contact_count = (num_contacts - 1 - offset) // grid_size + 1
-
-        if my_contact_count == 0:
-            return
-
-        # Single atomic to reserve all slots for this thread (no rollback)
-        my_base_index = wp.atomic_add(writer_data.contact_count, 0, my_contact_count)
-
-        # Write contacts using reserved range
-        local_idx = int(0)
-        for tid in range(offset, num_contacts, grid_size):
-            output_index = my_base_index + local_idx
-            local_idx += 1
-
-            if output_index >= writer_data.contact_max:
+        num_voxels = wp.min(iso_voxel_count[0], max_num_iso_voxels)
+        for tid in range(offset, num_voxels, grid_size):
+            num_faces = voxel_face_count[tid]
+            if num_faces == 0:
                 continue
 
-            pair = contact_pair[tid]
+            pair = iso_voxel_shape_pair[tid]
             shape_a = pair[0]
             shape_b = pair[1]
 
-            transform_b = shape_transform[shape_b]
+            sdf_b = shape_sdf_data[shape_b].sparse_sdf_ptr
 
-            depth = contact_depth[tid]
-            normal = contact_normal[tid]
-            pos = contact_pos[tid]
+            iso_coords = iso_voxel_coords[tid]
+            X_ws_b = shape_transform[shape_b]
 
-            normal_world = wp.transform_vector(transform_b, normal)
-            pos_world = wp.transform_point(transform_b, pos)
+            x_id = wp.int32(iso_coords.x)
+            y_id = wp.int32(iso_coords.y)
+            z_id = wp.int32(iso_coords.z)
 
-            # Sum margins for consistency with thickness summing
-            margin_a = shape_contact_margin[shape_a]
-            margin_b = shape_contact_margin[shape_b]
-            margin = margin_a + margin_b
+            cube_idx = voxel_cube_indices[tid]
+            corner_vals = voxel_corner_vals[tid]
 
+            tri_range_start = tri_range_table[wp.int32(cube_idx)]
+
+            # Compute effective stiffness coefficient
             k_a = shape_material_k_hydro[shape_a]
             k_b = shape_material_k_hydro[shape_b]
-
             k_eff = get_effective_stiffness(k_a, k_b)
-            # Compute stiffness, use margin_contact_area for non-penetrating contacts
-            if depth > 0.0:
-                c_stiffness = contact_area[tid] * k_eff
-            else:
-                c_stiffness = wp.static(margin_contact_area) * k_eff
 
-            # Create ContactData for the writer function
-            contact_data = ContactData()
-            contact_data.contact_point_center = pos_world
-            contact_data.contact_normal_a_to_b = normal_world
-            contact_data.contact_distance = -2.0 * depth  # depth is the distance to the isosurface
-            contact_data.radius_eff_a = 0.0
-            contact_data.radius_eff_b = 0.0
-            contact_data.thickness_a = 0.0
-            contact_data.thickness_b = 0.0
-            contact_data.shape_a = shape_a
-            contact_data.shape_b = shape_b
-            contact_data.margin = margin
-            contact_data.contact_stiffness = c_stiffness
+            for fi in range(num_faces):
+                area, normal, face_center, pen_depth, face_verts = mc_calc_face(
+                    flat_edge_verts_table,
+                    corner_offsets_table,
+                    tri_range_start + 3 * fi,
+                    corner_vals,
+                    sdf_b,
+                    x_id,
+                    y_id,
+                    z_id,
+                )
 
-            writer_func(contact_data, writer_data, output_index)
+                # Write directly to reducer buffer with atomic allocation
+                contact_id = export_hydroelastic_contact_to_buffer(
+                    shape_a,
+                    shape_b,
+                    face_center,  # Position in SDF local space
+                    normal,
+                    pen_depth,
+                    area,
+                    k_eff,
+                    reducer_data,
+                )
 
-    return decode_contacts_kernel
+                if wp.static(output_vertices) and contact_id >= 0:
+                    for vi in range(3):
+                        iso_vertex_point[3 * contact_id + vi] = wp.transform_point(X_ws_b, face_verts[vi])
+                    iso_vertex_depth[contact_id] = pen_depth
+                    iso_vertex_shape_pair[contact_id] = pair
+
+    return count_faces_kernel, scatter_faces_kernel
 
 
 @wp.kernel(enable_backward=False)
