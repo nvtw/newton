@@ -24,43 +24,11 @@ from newton._src.geometry.contact_reduction_global import (
     GlobalContactReducer,
     GlobalContactReducerData,
     create_export_reduced_contacts_kernel,
-    export_contact_to_buffer,
+    export_and_reduce_contact,
     make_contact_key,
-    reduce_contact_in_hashtable,
 )
 from newton._src.geometry.narrow_phase import ContactWriterData
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-
-
-@wp.func
-def export_and_reduce_contact(
-    shape_a: int,
-    shape_b: int,
-    position: wp.vec3,
-    normal: wp.vec3,
-    depth: float,
-    reducer_data: GlobalContactReducerData,
-    beta: float,
-    shape_transform: wp.array(dtype=wp.transform),
-    shape_local_aabb_lower: wp.array(dtype=wp.vec3),
-    shape_local_aabb_upper: wp.array(dtype=wp.vec3),
-    shape_voxel_resolution: wp.array(dtype=wp.vec3i),
-) -> int:
-    """Test helper: Export contact to buffer and register in hashtable for reduction."""
-    contact_id = export_contact_to_buffer(shape_a, shape_b, position, normal, depth, reducer_data)
-
-    if contact_id >= 0:
-        reduce_contact_in_hashtable(
-            contact_id,
-            reducer_data,
-            beta,
-            shape_transform,
-            shape_local_aabb_lower,
-            shape_local_aabb_upper,
-            shape_voxel_resolution,
-        )
-
-    return contact_id
 
 # =============================================================================
 # Test helper functions
