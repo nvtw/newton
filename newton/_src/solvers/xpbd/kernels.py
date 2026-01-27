@@ -1927,39 +1927,6 @@ def solve_body_joints(
 
 
 @wp.func
-def ke_kd_to_solref(ke: float, kd: float) -> wp.vec2:
-    """Convert stiffness (ke) and damping (kd) to time constant and damping ratio.
-
-    This conversion matches MuJoCo's solref parameter format, enabling consistent
-    contact behavior between XPBD and MuJoCo solvers.
-
-    Args:
-        ke: Contact elastic stiffness (N/m or equivalent)
-        kd: Contact damping coefficient (N*s/m or equivalent)
-
-    Returns:
-        vec2 containing (time_constant, damping_ratio):
-        - time_constant: Characteristic time for contact dynamics (seconds)
-        - damping_ratio: 1.0 = critically damped, <1 = underdamped, >1 = overdamped
-    """
-    time_constant = 0.0
-    damping_ratio = 1.0
-
-    if ke > 0.0 and kd > 0.0:
-        # Convert from stiffness/damping to MuJoCo's solref timeconst and dampratio
-        # Based on: kd = 2 / timeconst, ke = 1 / (timeconst^2 * dampratio^2)
-        time_constant = 2.0 / kd
-        damping_ratio = wp.sqrt(1.0 / (time_constant * time_constant * ke))
-    elif ke > 0.0:
-        # If no damping was set, use default damping ratio
-        time_constant = wp.sqrt(1.0 / ke)
-        damping_ratio = 1.0
-    # else: hard contact (time_constant = 0)
-
-    return wp.vec2(time_constant, damping_ratio)
-
-
-@wp.func
 def compute_contact_constraint_delta(
     err: float,
     tf_a: wp.transform,
