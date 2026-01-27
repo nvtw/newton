@@ -1282,7 +1282,7 @@ class PointCloudExtractor:
             f"({final_num_voxels:,}/{voxel_grid.capacity:,})"
         )
 
-        points_np, normals_np, num_points = voxel_grid.finalize()
+        points_np, normals_np, _num_points = voxel_grid.finalize()
 
         # Transform points back from normalized space to original space
         # normalized = (original - center) / radius
@@ -1386,7 +1386,7 @@ class SurfaceReconstructor:
         Returns:
             Mesh containing vertices and triangle indices.
         """
-        import open3d as o3d  # lazy import, open3d is optional
+        import open3d as o3d  # noqa: PLC0415  # lazy import, open3d is optional
 
         points = np.asarray(points, dtype=np.float32)
         normals = np.asarray(normals, dtype=np.float32)
@@ -1456,7 +1456,7 @@ class SurfaceReconstructor:
 
     def _simplify_pyfqmr(self, mesh, num_triangles_before: int, verbose: bool) -> tuple[np.ndarray, np.ndarray]:
         """Simplify mesh using pyfqmr (fast)."""
-        from pyfqmr import Simplify  # lazy import
+        from pyfqmr import Simplify  # noqa: PLC0415  # lazy import
 
         vertices = np.asarray(mesh.vertices, dtype=np.float64)
         faces = np.asarray(mesh.triangles, dtype=np.int32)

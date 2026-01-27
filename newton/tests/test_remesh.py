@@ -163,7 +163,7 @@ class TestPointCloudExtractor(unittest.TestCase):
         vertices, indices = create_unit_cube_mesh()
 
         extractor = PointCloudExtractor(edge_segments=1, resolution=100)
-        points, normals = extractor.extract(vertices, indices)
+        points, _normals = extractor.extract(vertices, indices)
 
         # Compute distance of each extracted point to the cube surface
         distances = compute_distance_to_cube(points)
@@ -189,7 +189,7 @@ class TestPointCloudExtractor(unittest.TestCase):
         vertices, indices = create_unit_cube_mesh()
 
         extractor = PointCloudExtractor(edge_segments=1, resolution=100)
-        points, normals = extractor.extract(vertices, indices)
+        points, _normals = extractor.extract(vertices, indices)
 
         # Classify points by face
         face_counts = classify_points_by_face(points, tolerance=0.01)
@@ -208,7 +208,7 @@ class TestPointCloudExtractor(unittest.TestCase):
         vertices, indices = create_unit_cube_mesh()
 
         extractor = PointCloudExtractor(edge_segments=1, resolution=100)
-        points, normals = extractor.extract(vertices, indices)
+        _points, normals = extractor.extract(vertices, indices)
 
         # Compute normal lengths
         normal_lengths = np.linalg.norm(normals, axis=1)
@@ -250,7 +250,7 @@ class TestPointCloudExtractor(unittest.TestCase):
         vertices, indices = create_unit_cube_mesh(center=center)
 
         extractor = PointCloudExtractor(edge_segments=1, resolution=100)
-        points, normals = extractor.extract(vertices, indices)
+        points, _normals = extractor.extract(vertices, indices)
 
         # Points should still be on the (translated) cube surface
         distances = compute_distance_to_cube(points, half_extent=0.5, center=center)
@@ -1037,7 +1037,7 @@ class TestRemeshUnifiedAPI(unittest.TestCase):
 
     def test_remesh_poisson_array_api(self):
         """Test remesh() with method='poisson' using array-based API."""
-        from newton._src.geometry.utils import remesh
+        from newton._src.geometry.utils import remesh  # noqa: PLC0415
 
         vertices, indices = create_unit_cube_mesh()
         faces = indices.reshape(-1, 3)
@@ -1066,8 +1066,8 @@ class TestRemeshUnifiedAPI(unittest.TestCase):
 
     def test_remesh_mesh_poisson(self):
         """Test remesh_mesh() with method='poisson' using Mesh-based API."""
-        import newton
-        from newton.geometry import remesh_mesh
+        import newton  # noqa: PLC0415
+        from newton.geometry import remesh_mesh  # noqa: PLC0415
 
         vertices, indices = create_unit_cube_mesh()
 
