@@ -54,7 +54,7 @@ from ..geometry.contact_reduction_global import (
     GlobalContactReducer,
     create_export_reduced_contacts_kernel,
     create_mesh_triangle_contacts_to_reducer_kernel,
-    reduce_buffered_contacts_kernel,
+    create_reduce_buffered_contacts_kernel,
 )
 from ..geometry.flags import ShapeFlags
 from ..geometry.sdf_contact import create_narrow_phase_process_mesh_mesh_contacts_kernel
@@ -1198,9 +1198,12 @@ class NarrowPhase:
 
         # Create global contact reduction kernels for mesh-triangle contacts (only if has_meshes and reduce_contacts)
         if self.reduce_contacts and has_meshes:
-            # Global contact reducer uses hardcoded BETA_THRESHOLD (0.1mm) same as shared-memory reduction
+            # Global contact reducer uses single beta threshold (same as shared-memory reduction)
             # Slot layout: 6 spatial direction slots + 1 max-depth slot = 7 slots per key
+            beta_threshold = ContactReductionFunctions.BETA_THRESHOLD
+
             self.mesh_triangle_to_reducer_kernel = create_mesh_triangle_contacts_to_reducer_kernel()
+            self.reduce_buffered_contacts_kernel = create_reduce_buffered_contacts_kernel(beta=beta_threshold)
             self.export_reduced_contacts_kernel = create_export_reduced_contacts_kernel(
                 writer_func, values_per_key=NUM_SPATIAL_DIRECTIONS + 1
             )
@@ -1209,6 +1212,7 @@ class NarrowPhase:
             self.global_contact_reducer = GlobalContactReducer(max_triangle_pairs, device=device)
         else:
             self.mesh_triangle_to_reducer_kernel = None
+            self.reduce_buffered_contacts_kernel = None
             self.export_reduced_contacts_kernel = None
             self.global_contact_reducer = None
 
@@ -1483,10 +1487,10 @@ class NarrowPhase:
                     block_dim=self.block_dim,
                 )
 
-                # Register buffered contacts to hashtable (uses hardcoded BETA_THRESHOLD)
+                # Register buffered contacts to hashtable
                 # This is a separate pass to reduce register pressure on the contact generation kernel
                 wp.launch(
-                    kernel=reduce_buffered_contacts_kernel,
+                    kernel=self.reduce_buffered_contacts_kernel,
                     dim=self.total_num_threads,
                     inputs=[
                         reducer_data,
