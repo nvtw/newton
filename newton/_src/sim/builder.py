@@ -1472,7 +1472,6 @@ class ModelBuilder:
         joint_drive_gains_scaling: float = 1.0,
         verbose: bool = False,
         ignore_paths: list[str] | None = None,
-        cloned_world: str | None = None,
         collapse_fixed_joints: bool = False,
         enable_self_collisions: bool = True,
         apply_up_axis_from_stage: bool = False,
@@ -1483,6 +1482,7 @@ class ModelBuilder:
         load_sites: bool = True,
         load_visual_shapes: bool = True,
         hide_collision_shapes: bool = False,
+        parse_mujoco_options: bool = True,
         mesh_maxhullvert: int = MESH_MAXHULLVERT,
         schema_resolvers: list[SchemaResolver] | None = None,
     ) -> dict[str, Any]:
@@ -1500,7 +1500,6 @@ class ModelBuilder:
             joint_drive_gains_scaling (float): The default scaling of the PD control gains (stiffness and damping), if not set in the PhysicsScene with as "newton:joint_drive_gains_scaling".
             verbose (bool): If True, print additional information about the parsed USD file. Default is False.
             ignore_paths (List[str]): A list of regular expressions matching prim paths to ignore.
-            cloned_world (str): The prim path of a world which is cloned within this USD file. Siblings of this world prim will not be parsed but instead be replicated via `ModelBuilder.add_world(builder, xform)` to speed up the loading of many instantiated worlds.
             collapse_fixed_joints (bool): If True, fixed joints are removed and the respective bodies are merged. Only considered if not set on the PhysicsScene as "newton:collapse_fixed_joints".
             enable_self_collisions (bool): Determines the default behavior of whether self-collisions are enabled for all shapes within an articulation. If an articulation has the attribute ``physxArticulation:enabledSelfCollisions`` defined, this attribute takes precedence.
             apply_up_axis_from_stage (bool): If True, the up axis of the stage will be used to set :attr:`newton.ModelBuilder.up_axis`. Otherwise, the stage will be rotated such that its up axis aligns with the builder's up axis. Default is False.
@@ -1511,6 +1510,7 @@ class ModelBuilder:
             load_sites (bool): If True, sites (prims with MjcSiteAPI) are loaded as non-colliding reference points. If False, sites are ignored. Default is True.
             load_visual_shapes (bool): If True, non-physics visual geometry is loaded. If False, visual-only shapes are ignored (sites are still controlled by ``load_sites``). Default is True.
             hide_collision_shapes (bool): If True, collision shapes are hidden. Default is False.
+            parse_mujoco_options (bool): Whether MuJoCo solver options from the PhysicsScene should be parsed. If False, solver options are not loaded and custom attributes retain their default values. Default is True.
             mesh_maxhullvert (int): Maximum vertices for convex hull approximation of meshes. Note that an authored ``newton:maxHullVertices`` attribute on any shape with a ``NewtonMeshCollisionAPI`` will take priority over this value.
             schema_resolvers (list[SchemaResolver]): Resolver instances in priority order. Default is to only parse Newton-specific attributes.
                 Schema resolvers collect per-prim "solver-specific" attributes, see :ref:`schema_resolvers` for more information.
@@ -1573,7 +1573,6 @@ class ModelBuilder:
             joint_drive_gains_scaling=joint_drive_gains_scaling,
             verbose=verbose,
             ignore_paths=ignore_paths,
-            cloned_world=cloned_world,
             collapse_fixed_joints=collapse_fixed_joints,
             enable_self_collisions=enable_self_collisions,
             apply_up_axis_from_stage=apply_up_axis_from_stage,
@@ -1584,6 +1583,7 @@ class ModelBuilder:
             load_sites=load_sites,
             load_visual_shapes=load_visual_shapes,
             hide_collision_shapes=hide_collision_shapes,
+            parse_mujoco_options=parse_mujoco_options,
             mesh_maxhullvert=mesh_maxhullvert,
             schema_resolvers=schema_resolvers,
         )
@@ -1602,6 +1602,7 @@ class ModelBuilder:
         parse_meshes: bool = True,
         parse_sites: bool = True,
         parse_visuals: bool = True,
+        parse_mujoco_options: bool = True,
         up_axis: AxisType = Axis.Z,
         ignore_names: Sequence[str] = (),
         ignore_classes: Sequence[str] = (),
@@ -1635,6 +1636,7 @@ class ModelBuilder:
             parse_meshes (bool): Whether geometries of type `"mesh"` should be parsed. If False, geometries of type `"mesh"` are ignored.
             parse_sites (bool): Whether sites (non-colliding reference points) should be parsed. If False, sites are ignored.
             parse_visuals (bool): Whether visual geometries (non-collision shapes) should be loaded. If False, visual shapes are not loaded (different from `hide_visuals` which loads but hides them). Default is True.
+            parse_mujoco_options (bool): Whether solver options from the MJCF `<option>` tag should be parsed. If False, solver options are not loaded and custom attributes retain their default values. Default is True.
             up_axis (AxisType): The up axis of the MuJoCo scene. The default is Z up.
             ignore_names (Sequence[str]): A list of regular expressions. Bodies and joints with a name matching one of the regular expressions will be ignored.
             ignore_classes (Sequence[str]): A list of regular expressions. Bodies and joints with a class matching one of the regular expressions will be ignored.
@@ -1669,6 +1671,7 @@ class ModelBuilder:
             parse_meshes=parse_meshes,
             parse_sites=parse_sites,
             parse_visuals=parse_visuals,
+            parse_mujoco_options=parse_mujoco_options,
             up_axis=up_axis,
             ignore_names=ignore_names,
             ignore_classes=ignore_classes,
