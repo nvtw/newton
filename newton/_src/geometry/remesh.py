@@ -1339,7 +1339,7 @@ class SurfaceReconstructor:
         depth: int = 10,
         scale: float = 1.1,
         linear_fit: bool = False,
-        density_threshold_quantile: float = 0.01,
+        density_threshold_quantile: float = 0.0,
         simplify_ratio: float | None = None,
         target_triangles: int | None = None,
         simplify_tolerance: float | None = None,
@@ -1518,3 +1518,109 @@ class SurfaceReconstructor:
         vertices = np.asarray(mesh.vertices, dtype=np.float32)
         faces = np.asarray(mesh.triangles, dtype=np.int32)
         return vertices, faces
+
+
+def remesh_poisson(
+    vertices,
+    faces,
+    # Point cloud extraction parameters
+    edge_segments: int = 2,
+    resolution: int = 1000,
+    voxel_size: float | None = None,
+    cavity_cameras: int = 0,
+    # Surface reconstruction parameters
+    depth: int = 10,
+    density_threshold_quantile: float = 0.0,
+    simplify_tolerance: float | None = 1e-7,
+    simplify_ratio: float | None = None,
+    target_triangles: int | None = None,
+    fast_simplification: bool = True,
+    # Control parameters
+    device: str | None = None,
+    seed: int | None = 42,
+    verbose: bool = False,
+):
+    """Remesh a 3D triangular surface mesh using Poisson surface reconstruction.
+
+    This function extracts a dense point cloud from the input mesh using GPU-accelerated
+    multi-view raycasting, then reconstructs a clean, watertight mesh using Screened
+    Poisson Surface Reconstruction.
+
+    This is useful for repairing meshes with:
+        - Inconsistent or flipped triangle winding
+        - Missing or incorrect vertex normals
+        - Non-manifold geometry
+        - Holes or self-intersections
+
+    Args:
+        vertices: A numpy array of shape (N, 3) containing the vertex positions.
+        faces: A numpy array of shape (M, 3) containing the vertex indices of the faces.
+        edge_segments: Number of segments per icosahedron edge for camera directions.
+            Total views = 20 * n^2. Higher values provide better surface coverage.
+            Default is 2 (80 views).
+        resolution: Pixel resolution of the orthographic camera (resolution x resolution).
+            Higher values capture finer details. Default is 1000.
+        voxel_size: Size of voxels for point accumulation. If None (default), automatically
+            computed based on mesh size.
+        cavity_cameras: Number of secondary hemisphere cameras for improved cavity
+            coverage. Set to 0 (default) to disable.
+        depth: Octree depth for Poisson reconstruction (higher = more detail, slower).
+            Default is 10.
+        density_threshold_quantile: Quantile for removing low-density vertices
+            (boundary artifacts). Default 0.0 keeps all vertices.
+        simplify_tolerance: Maximum geometric error allowed during simplification,
+            as a fraction of the mesh bounding box diagonal. Default is 1e-7.
+            Set to None to disable simplification.
+        simplify_ratio: Target ratio to reduce triangle count (e.g., 0.1 = keep 10%).
+            Only used if simplify_tolerance is None.
+        target_triangles: Target number of triangles after simplification.
+            Only used if simplify_tolerance and simplify_ratio are None.
+        fast_simplification: If True (default), use pyfqmr for fast mesh simplification.
+            If False, use Open3D (slower but potentially higher quality).
+        device: Warp device for GPU computation. Default uses the default Warp device.
+        seed: Random seed for reproducibility. Default is 42.
+        verbose: Print progress information. Default is False.
+
+    Returns:
+        A tuple (vertices, faces) containing the remeshed mesh:
+        - vertices: A numpy array of shape (K, 3) with vertex positions.
+        - faces: A numpy array of shape (L, 3) with triangle indices.
+
+    Example:
+        >>> import numpy as np
+        >>> from newton._src.geometry.remesh import remesh_poisson
+        >>> # Remesh with default settings
+        >>> new_verts, new_faces = remesh_poisson(vertices, faces)
+        >>> # Remesh with higher quality (more views, finer resolution)
+        >>> new_verts, new_faces = remesh_poisson(vertices, faces, edge_segments=4, resolution=2000)
+    """
+    # Extract point cloud
+    extractor = PointCloudExtractor(
+        edge_segments=edge_segments,
+        resolution=resolution,
+        voxel_size=voxel_size,
+        device=device,
+        seed=seed,
+        cavity_cameras=cavity_cameras,
+    )
+    points, normals = extractor.extract(vertices, faces.flatten())
+
+    if verbose:
+        print(f"Extracted {len(points)} points")
+
+    # Reconstruct mesh
+    reconstructor = SurfaceReconstructor(
+        depth=depth,
+        density_threshold_quantile=density_threshold_quantile,
+        simplify_tolerance=simplify_tolerance,
+        simplify_ratio=simplify_ratio,
+        target_triangles=target_triangles,
+        fast_simplification=fast_simplification,
+    )
+    mesh = reconstructor.reconstruct(points, normals, verbose=verbose)
+
+    # Return as (vertices, faces) tuple to match other remesh functions
+    new_vertices = mesh.vertices
+    new_faces = mesh.indices.reshape(-1, 3)
+
+    return new_vertices, new_faces

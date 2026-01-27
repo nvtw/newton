@@ -1026,5 +1026,82 @@ class TestRemeshHelperFunctions(unittest.TestCase):
             )
 
 
+@unittest.skipUnless(_cuda_available, "Remeshing requires CUDA")
+@unittest.skipUnless(OPEN3D_AVAILABLE, "SurfaceReconstructor requires Open3D")
+class TestRemeshUnifiedAPI(unittest.TestCase):
+    """Test the unified remeshing API in utils.py with method='poisson'."""
+
+    @classmethod
+    def setUpClass(cls):
+        wp.init()
+
+    def test_remesh_poisson_array_api(self):
+        """Test remesh() with method='poisson' using array-based API."""
+        from newton._src.geometry.utils import remesh
+
+        vertices, indices = create_unit_cube_mesh()
+        faces = indices.reshape(-1, 3)
+
+        # Remesh using the unified API
+        new_vertices, new_faces = remesh(
+            vertices,
+            faces,
+            method="poisson",
+            edge_segments=1,
+            resolution=100,
+            depth=6,
+            simplify_tolerance=None,
+            verbose=False,
+        )
+
+        # Validate output shapes
+        self.assertEqual(new_vertices.ndim, 2)
+        self.assertEqual(new_vertices.shape[1], 3)
+        self.assertEqual(new_faces.ndim, 2)
+        self.assertEqual(new_faces.shape[1], 3)
+
+        # Should produce a reasonable mesh
+        self.assertGreater(len(new_vertices), 8, "Should have more vertices than original cube")
+        self.assertGreater(len(new_faces), 12, "Should have at least 12 triangles")
+
+    def test_remesh_mesh_poisson(self):
+        """Test remesh_mesh() with method='poisson' using Mesh-based API."""
+        import newton
+        from newton.geometry import remesh_mesh
+
+        vertices, indices = create_unit_cube_mesh()
+
+        # Create Newton Mesh
+        original_mesh = newton.Mesh(vertices, indices)
+
+        # Remesh using the unified API
+        recon_mesh = remesh_mesh(
+            original_mesh,
+            method="poisson",
+            edge_segments=1,
+            resolution=100,
+            depth=6,
+            simplify_tolerance=None,
+            verbose=False,
+        )
+
+        # Validate output is a Mesh
+        self.assertIsInstance(recon_mesh, newton.Mesh)
+
+        # Should produce a reasonable mesh
+        self.assertGreater(len(recon_mesh.vertices), 8, "Should have more vertices than original cube")
+        num_triangles = len(recon_mesh.indices) // 3
+        self.assertGreater(num_triangles, 12, "Should have at least 12 triangles")
+
+        # Check that reconstructed mesh is close to original cube surface
+        distances = compute_distance_to_cube(recon_mesh.vertices)
+        mean_distance = np.mean(distances)
+        max_distance = np.max(distances)
+
+        # Poisson reconstruction should stay close to the original surface
+        self.assertLess(mean_distance, 0.1, "Mean distance to cube should be small")
+        self.assertLess(max_distance, 0.2, "Max distance to cube should be reasonable")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
