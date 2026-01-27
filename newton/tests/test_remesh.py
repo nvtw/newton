@@ -527,7 +527,12 @@ class TestVoxelHashGrid(unittest.TestCase):
         np.testing.assert_array_almost_equal(normals[0], [1.0, 0.0, 0.0], decimal=5)
 
     def test_accumulate_multiple_points_same_voxel(self):
-        """Test that multiple points in the same voxel are averaged correctly."""
+        """Test that multiple points in the same voxel use best-confidence-wins strategy.
+
+        The new two-pass approach keeps the position from the highest confidence hit,
+        while still averaging normals for smoothness. In this test without confidence
+        tracking, the first hit's position is kept (simulating best confidence).
+        """
         grid = VoxelHashGrid(capacity=1000, voxel_size=1.0)  # Large voxel
 
         # Create points that fall in the same voxel
@@ -573,13 +578,18 @@ class TestVoxelHashGrid(unittest.TestCase):
             key = compute_voxel_key(point, inv_voxel_size)
             idx = hashtable_find_or_insert(key, keys, active_slots)
             if idx >= 0:
-                wp.atomic_add(sum_pos_x, idx, point[0])
-                wp.atomic_add(sum_pos_y, idx, point[1])
-                wp.atomic_add(sum_pos_z, idx, point[2])
+                # New behavior: only store position on first hit (best confidence wins)
+                # In production, this is determined by the two-pass confidence comparison
+                old_count = wp.atomic_add(counts, idx, 1)
+                if old_count == 0:
+                    sum_pos_x[idx] = point[0]
+                    sum_pos_y[idx] = point[1]
+                    sum_pos_z[idx] = point[2]
+
+                # Always accumulate normals for averaging
                 wp.atomic_add(sum_norm_x, idx, normal[0])
                 wp.atomic_add(sum_norm_y, idx, normal[1])
                 wp.atomic_add(sum_norm_z, idx, normal[2])
-                wp.atomic_add(counts, idx, 1)
 
         wp.launch(
             accumulate_points,
@@ -608,9 +618,15 @@ class TestVoxelHashGrid(unittest.TestCase):
 
         self.assertEqual(num_points, 1)
 
-        # Check averaged position
-        expected_pos = np.mean(points_data, axis=0)
-        np.testing.assert_array_almost_equal(points[0], expected_pos, decimal=5)
+        # With best-confidence-wins, position comes from one hit (first in this test)
+        # Due to GPU thread ordering, we can't guarantee which point "wins",
+        # so we just verify the position is one of the input points
+        found_match = False
+        for p in points_data:
+            if np.allclose(points[0], p, atol=1e-5):
+                found_match = True
+                break
+        self.assertTrue(found_match, f"Position {points[0]} doesn't match any input point")
 
         # Check normalized normal (sum of normals, then normalized)
         sum_normal = np.sum(normals_data, axis=0)
