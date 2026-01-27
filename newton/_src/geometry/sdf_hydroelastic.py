@@ -247,6 +247,9 @@ class SDFHydroelastic:
                     store_hydroelastic_data=True,
                 )
 
+                # Create kernel to write face contacts to reducer
+                self.write_face_contacts_to_reducer_kernel = get_write_face_contacts_to_reducer_kernel()
+
                 # Create kernel to export reduced contacts
                 self.export_reduced_contacts_kernel = create_export_hydroelastic_reduced_contacts_kernel(
                     writer_func,
@@ -651,7 +654,7 @@ class SDFHydroelastic:
 
         # Step 1: Write face contacts to the reducer buffer with hydroelastic data
         wp.launch(
-            kernel=write_face_contacts_to_reducer_kernel,
+            kernel=self.write_face_contacts_to_reducer_kernel,
             dim=[self.grid_size],
             inputs=[
                 self.grid_size,
@@ -1320,58 +1323,67 @@ def get_decode_contacts_kernel(margin_contact_area: float = 1e-4, writer_func: A
     return decode_contacts_kernel
 
 
-@wp.kernel(enable_backward=False)
-def write_face_contacts_to_reducer_kernel(
-    grid_size: int,
-    contact_count: wp.array(dtype=int),
-    contact_pair: wp.array(dtype=wp.vec2i),
-    contact_pos: wp.array(dtype=wp.vec3),
-    contact_depth: wp.array(dtype=wp.float32),
-    contact_normal: wp.array(dtype=wp.vec3),
-    contact_area: wp.array(dtype=wp.float32),
-    shape_material_k_hydro: wp.array(dtype=wp.float32),
-    max_num_face_contacts: int,
-    reducer_data: GlobalContactReducerData,
-):
-    """Write hydroelastic face contacts to GlobalContactReducer buffer.
+def get_write_face_contacts_to_reducer_kernel():
+    """Create a kernel that writes face contacts to GlobalContactReducer with hydroelastic data.
 
     This kernel transfers face contacts from the intermediate buffers to the
     GlobalContactReducer buffer, storing position, normal, depth, area, and
     effective stiffness coefficient for each contact.
 
-    Contacts are stored in SDF local space (shape_b's frame) with area and k_eff
-    for stiffness computation during export.
+    Returns:
+        A warp kernel for writing face contacts to the reducer.
     """
-    offset = wp.tid()
-    num_contacts = wp.min(contact_count[0], max_num_face_contacts)
 
-    # Grid stride loop over contacts
-    for tid in range(offset, num_contacts, grid_size):
-        pair = contact_pair[tid]
-        shape_a = pair[0]
-        shape_b = pair[1]
+    @wp.kernel(enable_backward=False)
+    def write_face_contacts_to_reducer_kernel(
+        grid_size: int,
+        contact_count: wp.array(dtype=int),
+        contact_pair: wp.array(dtype=wp.vec2i),
+        contact_pos: wp.array(dtype=wp.vec3),
+        contact_depth: wp.array(dtype=wp.float32),
+        contact_normal: wp.array(dtype=wp.vec3),
+        contact_area: wp.array(dtype=wp.float32),
+        shape_material_k_hydro: wp.array(dtype=wp.float32),
+        max_num_face_contacts: int,
+        reducer_data: GlobalContactReducerData,
+    ):
+        """Write hydroelastic face contacts to GlobalContactReducer buffer.
 
-        pos = contact_pos[tid]
-        depth = contact_depth[tid]
-        normal = contact_normal[tid]
-        area = contact_area[tid]
+        Contacts are stored in SDF local space (shape_b's frame) with area and k_eff
+        for stiffness computation during export.
+        """
+        offset = wp.tid()
+        num_contacts = wp.min(contact_count[0], max_num_face_contacts)
 
-        # Compute effective stiffness coefficient
-        k_a = shape_material_k_hydro[shape_a]
-        k_b = shape_material_k_hydro[shape_b]
-        k_eff = get_effective_stiffness(k_a, k_b)
+        # Grid stride loop over contacts
+        for tid in range(offset, num_contacts, grid_size):
+            pair = contact_pair[tid]
+            shape_a = pair[0]
+            shape_b = pair[1]
 
-        # Store contact in reducer buffer (position is in SDF local space)
-        export_hydroelastic_contact_to_buffer(
-            shape_a,
-            shape_b,
-            pos,
-            normal,
-            depth,
-            area,
-            k_eff,
-            reducer_data,
-        )
+            pos = contact_pos[tid]
+            depth = contact_depth[tid]
+            normal = contact_normal[tid]
+            area = contact_area[tid]
+
+            # Compute effective stiffness coefficient
+            k_a = shape_material_k_hydro[shape_a]
+            k_b = shape_material_k_hydro[shape_b]
+            k_eff = get_effective_stiffness(k_a, k_b)
+
+            # Store contact in reducer buffer (position is in SDF local space)
+            export_hydroelastic_contact_to_buffer(
+                shape_a,
+                shape_b,
+                pos,
+                normal,
+                depth,
+                area,
+                k_eff,
+                reducer_data,
+            )
+
+    return write_face_contacts_to_reducer_kernel
 
 
 @wp.kernel(enable_backward=False)
