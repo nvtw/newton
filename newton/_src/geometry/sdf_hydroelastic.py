@@ -51,6 +51,7 @@ from newton._src.core.types import MAXVAL
 from ..sim.builder import ShapeFlags
 from ..sim.model import Model
 from .collision_core import sat_box_intersection
+from .contact_data import ContactData
 from .contact_reduction_global import GlobalContactReducerData
 from .contact_reduction_hydroelastic import (
     HydroelasticContactReduction,
@@ -103,6 +104,9 @@ class SDFHydroelasticConfig:
     Controls properties of SDF hydroelastic collision handling.
     """
 
+    reduce_contacts: bool = True
+    """Whether to reduce contacts to a smaller representative set per shape pair.
+    When False, all generated contacts are passed through without reduction."""
     buffer_mult_broad: int = 1
     """Multiplier for the preallocated broadphase buffer that stores overlapping
     block pairs. Increase only if a broadphase overflow warning is issued."""
@@ -118,14 +122,13 @@ class SDFHydroelasticConfig:
     """Whether to output hydroelastic contact surface vertices for visualization."""
     normal_matching: bool = True
     """Whether to rotate reduced contact normals so their weighted sum aligns with
-    the aggregate force direction."""
+    the aggregate force direction. Only active when reduce_contacts is True."""
     anchor_contact: bool = False
     """Whether to add an anchor contact at the center of pressure for each normal bin.
-    The anchor contact helps preserve moment balance."""
+    The anchor contact helps preserve moment balance. Only active when reduce_contacts is True."""
     moment_matching: bool = False
     """Whether to scale friction coefficients to match the aggregate moment from unreduced contacts.
-    Requires anchor_contact=True to be effective. When enabled, friction is scaled so that
-    the moment arm of the reduced contacts matches the reference moment from all contacts."""
+    Requires anchor_contact=True to be effective. Only active when reduce_contacts is True."""
     margin_contact_area: float = 1e-2
     """Contact area used for non-penetrating contacts at the margin."""
 
@@ -260,20 +263,34 @@ class SDFHydroelastic:
                 self.config.output_contact_surface,
             )
 
-            # Use HydroelasticContactReduction for efficient hashtable-based contact reduction
-            # The reducer uses spatial extremes + max-depth per normal bin + voxel-based slots
-            reduction_config = HydroelasticReductionConfig(
-                normal_matching=self.config.normal_matching,
-                anchor_contact=self.config.anchor_contact,
-                moment_matching=self.config.moment_matching,
-                margin_contact_area=self.config.margin_contact_area,
-            )
-            self.contact_reduction = HydroelasticContactReduction(
-                capacity=self.max_num_face_contacts,
-                device=device,
-                writer_func=writer_func,
-                config=reduction_config,
-            )
+            if self.config.reduce_contacts:
+                # Use HydroelasticContactReduction for efficient hashtable-based contact reduction
+                # The reducer uses spatial extremes + max-depth per normal bin + voxel-based slots
+                reduction_config = HydroelasticReductionConfig(
+                    normal_matching=self.config.normal_matching,
+                    anchor_contact=self.config.anchor_contact,
+                    moment_matching=self.config.moment_matching,
+                    margin_contact_area=self.config.margin_contact_area,
+                )
+                self.contact_reduction = HydroelasticContactReduction(
+                    capacity=self.max_num_face_contacts,
+                    device=device,
+                    writer_func=writer_func,
+                    config=reduction_config,
+                )
+                self.decode_contacts_kernel = None
+            else:
+                # No reduction - create a simple reducer for buffer storage and decode kernel
+                self.contact_reduction = HydroelasticContactReduction(
+                    capacity=self.max_num_face_contacts,
+                    device=device,
+                    writer_func=writer_func,
+                    config=HydroelasticReductionConfig(margin_contact_area=self.config.margin_contact_area),
+                )
+                self.decode_contacts_kernel = get_decode_contacts_kernel(
+                    self.config.margin_contact_area,
+                    writer_func,
+                )
 
         self.grid_size = min(self.config.grid_size, self.max_num_face_contacts)
 
@@ -397,14 +414,21 @@ class SDFHydroelastic:
 
         self._generate_contacts(shape_sdf_data, shape_transform, shape_contact_margin)
 
-        self._reduce_decode_contacts(
-            shape_transform,
-            shape_local_aabb_lower,
-            shape_local_aabb_upper,
-            shape_voxel_resolution,
-            shape_contact_margin,
-            writer_data,
-        )
+        if self.config.reduce_contacts:
+            self._reduce_decode_contacts(
+                shape_transform,
+                shape_local_aabb_lower,
+                shape_local_aabb_upper,
+                shape_voxel_resolution,
+                shape_contact_margin,
+                writer_data,
+            )
+        else:
+            self._decode_contacts(
+                shape_transform,
+                shape_contact_margin,
+                writer_data,
+            )
 
         wp.launch(
             kernel=verify_collision_step,
@@ -592,6 +616,37 @@ class SDFHydroelastic:
                 self.iso_vertex_depth,
                 self.iso_vertex_shape_pair,
             ],
+            device=self.device,
+        )
+
+    def _decode_contacts(
+        self,
+        shape_transform: wp.array(dtype=wp.transform),
+        shape_contact_margin: wp.array(dtype=wp.float32),
+        writer_data: Any,
+    ) -> None:
+        """Decode hydroelastic contacts without reduction.
+
+        Contacts are already in the buffer (written by _generate_contacts).
+        This method exports all contacts directly without any reduction.
+        """
+        wp.launch(
+            kernel=self.decode_contacts_kernel,
+            dim=[self.grid_size],
+            inputs=[
+                self.grid_size,
+                self.contact_reduction.contact_count,
+                self.shape_material_k_hydro,
+                shape_transform,
+                shape_contact_margin,
+                self.contact_reduction.reducer.position_depth,
+                self.contact_reduction.reducer.normal,
+                self.contact_reduction.reducer.shape_pairs,
+                self.contact_reduction.reducer.contact_area,
+                self.contact_reduction.reducer.contact_k_eff,
+                self.max_num_face_contacts,
+            ],
+            outputs=[writer_data],
             device=self.device,
         )
 
@@ -972,6 +1027,117 @@ def mc_iterate_voxel_vertices(
             any_verts_inside_margin = True
 
     return cube_idx, corner_vals, any_verts_inside_margin, True
+
+
+# =============================================================================
+# Contact decode kernel (no reduction)
+# =============================================================================
+
+
+def get_decode_contacts_kernel(margin_contact_area: float = 1e-4, writer_func: Any = None):
+    """Create a kernel that decodes hydroelastic contacts without reduction.
+
+    This kernel is used when reduce_contacts=False. It exports all generated
+    contacts directly to the writer without any spatial reduction.
+
+    Args:
+        margin_contact_area: Contact area used for non-penetrating contacts at the margin.
+        writer_func: Warp function for writing decoded contacts.
+
+    Returns:
+        A warp kernel that can be launched to decode all contacts.
+    """
+
+    @wp.kernel(enable_backward=False)
+    def decode_contacts_kernel(
+        grid_size: int,
+        contact_count: wp.array(dtype=int),
+        shape_material_k_hydro: wp.array(dtype=wp.float32),
+        shape_transform: wp.array(dtype=wp.transform),
+        shape_contact_margin: wp.array(dtype=wp.float32),
+        position_depth: wp.array(dtype=wp.vec4),
+        normal: wp.array(dtype=wp.vec3),
+        shape_pairs: wp.array(dtype=wp.vec2i),
+        contact_area: wp.array(dtype=wp.float32),
+        contact_k_eff: wp.array(dtype=wp.float32),
+        max_num_face_contacts: int,
+        # outputs
+        writer_data: Any,
+    ):
+        """Decode all hydroelastic contacts without reduction.
+
+        Uses grid stride loop to process all contacts in the buffer.
+        """
+        offset = wp.tid()
+        num_contacts = wp.min(contact_count[0], max_num_face_contacts)
+
+        # Calculate how many contacts this thread will process
+        my_contact_count = 0
+        if offset < num_contacts:
+            my_contact_count = (num_contacts - 1 - offset) // grid_size + 1
+
+        if my_contact_count == 0:
+            return
+
+        # Single atomic to reserve all slots for this thread (no rollback)
+        my_base_index = wp.atomic_add(writer_data.contact_count, 0, my_contact_count)
+
+        # Write contacts using reserved range
+        local_idx = int(0)
+        for tid in range(offset, num_contacts, grid_size):
+            output_index = my_base_index + local_idx
+            local_idx += 1
+
+            if output_index >= writer_data.contact_max:
+                continue
+
+            pair = shape_pairs[tid]
+            shape_a = pair[0]
+            shape_b = pair[1]
+
+            transform_b = shape_transform[shape_b]
+
+            pd = position_depth[tid]
+            pos = wp.vec3(pd[0], pd[1], pd[2])
+            depth = pd[3]
+            contact_normal = normal[tid]
+
+            normal_world = wp.transform_vector(transform_b, contact_normal)
+            pos_world = wp.transform_point(transform_b, pos)
+
+            # Sum margins for consistency with thickness summing
+            margin_a = shape_contact_margin[shape_a]
+            margin_b = shape_contact_margin[shape_b]
+            margin = margin_a + margin_b
+
+            k_eff = contact_k_eff[tid]
+            area = contact_area[tid]
+
+            # Compute stiffness, use margin_contact_area for non-penetrating contacts
+            # Standard convention: depth < 0 = penetrating
+            if depth < 0.0:
+                c_stiffness = area * k_eff
+            else:
+                c_stiffness = wp.static(margin_contact_area) * k_eff
+
+            # Create ContactData for the writer function
+            # contact_distance = 2 * depth (depth is negative for penetrating)
+            contact_data = ContactData()
+            contact_data.contact_point_center = pos_world
+            contact_data.contact_normal_a_to_b = normal_world
+            contact_data.contact_distance = 2.0 * depth
+            contact_data.radius_eff_a = 0.0
+            contact_data.radius_eff_b = 0.0
+            contact_data.thickness_a = 0.0
+            contact_data.thickness_b = 0.0
+            contact_data.shape_a = shape_a
+            contact_data.shape_b = shape_b
+            contact_data.margin = margin
+            contact_data.contact_stiffness = c_stiffness
+
+            writer_func(contact_data, writer_data, output_index)
+
+    return decode_contacts_kernel
 
 
 # =============================================================================
