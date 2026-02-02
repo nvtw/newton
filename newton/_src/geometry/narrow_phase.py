@@ -46,7 +46,6 @@ from ..geometry.contact_reduction import (
     ContactReductionFunctions,
     ContactStruct,
     compute_voxel_index,
-    create_betas_array,
     synchronize,
 )
 from ..geometry.contact_reduction_global import (
@@ -822,7 +821,6 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
         _shape_voxel_resolution: wp.array(dtype=wp.vec3i),  # Unused but kept for API compatibility
         shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_plane_count: wp.array(dtype=int),
-        _betas: wp.array(dtype=wp.float32),  # Unused but kept for API compatibility
         writer_data: Any,
         total_num_blocks: int,
     ):
@@ -935,7 +933,6 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
         shape_voxel_resolution: wp.array(dtype=wp.vec3i),
         shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_plane_count: wp.array(dtype=int),
-        betas: wp.array(dtype=wp.float32),
         writer_data: Any,
         total_num_blocks: int,
     ):
@@ -1065,7 +1062,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
 
                 # Apply contact reduction
                 store_reduced_contact_func(
-                    t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, betas, empty_marker, voxel_idx
+                    t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, empty_marker, voxel_idx
                 )
 
             # Write reduced contacts to output (store_reduced_contact ends with sync)
@@ -1246,15 +1243,12 @@ class NarrowPhase:
                 self.shape_pairs_mesh_plane = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
                 self.shape_pairs_mesh_plane_cumsum = wp.zeros(max_candidate_pairs, dtype=wp.int32, device=device)
                 self.shape_pairs_mesh_mesh = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
-                # Betas array for contact reduction (single fixed threshold)
-                self.betas = create_betas_array(betas=(ContactReductionFunctions.BETA_THRESHOLD,), device=device)
             else:
                 self.shape_pairs_mesh = None
                 self.triangle_pairs = None
                 self.shape_pairs_mesh_plane = None
                 self.shape_pairs_mesh_plane_cumsum = None
                 self.shape_pairs_mesh_mesh = None
-                self.betas = None
 
             # None values for when optional features are disabled
             self.empty_tangent = None
@@ -1405,7 +1399,6 @@ class NarrowPhase:
                 shape_voxel_resolution,
                 self.shape_pairs_mesh_plane,
                 self.shape_pairs_mesh_plane_count,
-                self.betas,
                 writer_data,
                 self.num_tile_blocks,
             ]
@@ -1551,7 +1544,6 @@ class NarrowPhase:
                         shape_voxel_resolution,
                         self.shape_pairs_mesh_mesh,
                         self.shape_pairs_mesh_mesh_count,
-                        self.betas,
                         writer_data,
                         self.num_tile_blocks,
                     ],

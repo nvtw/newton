@@ -559,6 +559,74 @@ def export_contact_to_buffer(
 
 
 @wp.func
+def reduce_contact_to_voxel_slots(
+    contact_id: int,
+    position: wp.vec3,
+    depth: float,
+    shape_a: int,
+    shape_b: int,
+    reducer_data: GlobalContactReducerData,
+    shape_transform: wp.array(dtype=wp.transform),
+    shape_local_aabb_lower: wp.array(dtype=wp.vec3),
+    shape_local_aabb_upper: wp.array(dtype=wp.vec3),
+    shape_voxel_resolution: wp.array(dtype=wp.vec3i),
+):
+    """Register a contact in voxel-based reduction slots.
+
+    This function handles the voxel-based spatial coverage strategy, which tracks
+    the deepest contact per mesh-local voxel region. This is shared between
+    standard and hydroelastic contact reduction.
+
+    The voxel grid is divided into 100 cells, grouped by 7 into 15 hashtable entries
+    to maximize slot utilization (matching values_per_key = 7).
+
+    Args:
+        contact_id: Index of the contact in the buffer
+        position: Contact position in world space
+        depth: Penetration depth (negative = penetrating)
+        shape_a: First shape index (mesh shape for voxel computation)
+        shape_b: Second shape index
+        reducer_data: GlobalContactReducerData with all arrays
+        shape_transform: Per-shape world transforms
+        shape_local_aabb_lower: Per-shape local AABB lower bounds
+        shape_local_aabb_upper: Per-shape local AABB upper bounds
+        shape_voxel_resolution: Per-shape voxel grid resolution
+    """
+    ht_capacity = reducer_data.ht_capacity
+
+    # Transform contact position from world space to shape_a's local space
+    X_shape_ws = shape_transform[shape_a]
+    X_ws_shape = wp.transform_inverse(X_shape_ws)
+    position_local = wp.transform_point(X_ws_shape, position)
+
+    # Compute voxel index using shape_a's local AABB
+    aabb_lower = shape_local_aabb_lower[shape_a]
+    aabb_upper = shape_local_aabb_upper[shape_a]
+    voxel_res = shape_voxel_resolution[shape_a]
+    voxel_idx = compute_voxel_index(position_local, aabb_lower, aabb_upper, voxel_res)
+
+    # Clamp voxel index to valid range
+    voxel_idx = wp.clamp(voxel_idx, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1))
+
+    # Group voxels by 7 to maximize slot utilization (matches values_per_key)
+    # 100 voxels -> 15 hashtable entries (ceil(100/7) = 15)
+    # bin_id = NUM_NORMAL_BINS + voxel_group (20-34)
+    # slot = voxel_local (0-6)
+    voxels_per_group = wp.static(NUM_SPATIAL_DIRECTIONS + 1)  # = 7 (same as values_per_key)
+    voxel_group = voxel_idx // voxels_per_group
+    voxel_local_slot = voxel_idx % voxels_per_group
+
+    voxel_bin_id = NUM_NORMAL_BINS + voxel_group
+    voxel_key = make_contact_key(shape_a, shape_b, voxel_bin_id)
+
+    voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
+    if voxel_entry_idx >= 0:
+        # Use -depth so atomic_max selects most penetrating (most negative depth)
+        voxel_value = make_contact_value(-depth, contact_id)
+        reduction_update_slot(voxel_entry_idx, voxel_local_slot, voxel_value, reducer_data.ht_values, ht_capacity)
+
+
+@wp.func
 def reduce_contact_in_hashtable(
     contact_id: int,
     reducer_data: GlobalContactReducerData,
@@ -633,36 +701,18 @@ def reduce_contact_in_hashtable(
         reduction_update_slot(entry_idx, max_depth_slot_id, max_depth_value, reducer_data.ht_values, ht_capacity)
 
     # === Part 2: Voxel-based reduction (deepest contact per voxel) ===
-    # Transform contact position from world space to mesh (shape_a) local space
-    X_mesh_ws = shape_transform[shape_a]
-    X_ws_mesh = wp.transform_inverse(X_mesh_ws)
-    position_local = wp.transform_point(X_ws_mesh, position)
-
-    # Compute voxel index using mesh's local AABB
-    aabb_lower = shape_local_aabb_lower[shape_a]
-    aabb_upper = shape_local_aabb_upper[shape_a]
-    voxel_res = shape_voxel_resolution[shape_a]
-    voxel_idx = compute_voxel_index(position_local, aabb_lower, aabb_upper, voxel_res)
-
-    # Clamp voxel index to valid range
-    voxel_idx = wp.clamp(voxel_idx, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1))
-
-    # Group voxels by 7 to maximize slot utilization (matches values_per_key)
-    # 100 voxels -> 15 hashtable entries (ceil(100/7) = 15)
-    # bin_id = NUM_NORMAL_BINS + voxel_group (20-34)
-    # slot = voxel_local (0-6)
-    voxels_per_group = wp.static(NUM_SPATIAL_DIRECTIONS + 1)  # = 7 (same as values_per_key)
-    voxel_group = voxel_idx // voxels_per_group
-    voxel_local_slot = voxel_idx % voxels_per_group
-
-    voxel_bin_id = NUM_NORMAL_BINS + voxel_group
-    voxel_key = make_contact_key(shape_a, shape_b, voxel_bin_id)
-
-    voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
-    if voxel_entry_idx >= 0:
-        # Use voxel_local_slot (0-6) for this voxel's max-depth tracking
-        voxel_value = make_contact_value(-depth, contact_id)
-        reduction_update_slot(voxel_entry_idx, voxel_local_slot, voxel_value, reducer_data.ht_values, ht_capacity)
+    reduce_contact_to_voxel_slots(
+        contact_id,
+        position,
+        depth,
+        shape_a,
+        shape_b,
+        reducer_data,
+        shape_transform,
+        shape_local_aabb_lower,
+        shape_local_aabb_upper,
+        shape_voxel_resolution,
+    )
 
 
 @wp.func

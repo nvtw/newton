@@ -53,8 +53,6 @@ from .contact_data import ContactData
 from .contact_reduction import (
     NUM_NORMAL_BINS,
     NUM_SPATIAL_DIRECTIONS,
-    NUM_VOXEL_DEPTH_SLOTS,
-    compute_voxel_index,
     get_slot,
     get_spatial_direction_2d,
     project_point_to_plane,
@@ -64,8 +62,10 @@ from .contact_reduction_global import (
     VALUES_PER_KEY,
     GlobalContactReducer,
     GlobalContactReducerData,
+    export_contact_to_buffer,
     make_contact_key,
     make_contact_value,
+    reduce_contact_to_voxel_slots,
     reduction_update_slot,
     unpack_contact,
     unpack_contact_id,
@@ -98,6 +98,9 @@ def export_hydroelastic_contact_to_buffer(
 ) -> int:
     """Store a hydroelastic contact in the buffer with area and stiffness.
 
+    Extends :func:`export_contact_to_buffer` by storing additional hydroelastic
+    data (area and effective stiffness).
+
     Args:
         shape_a: First shape index
         shape_b: Second shape index
@@ -111,19 +114,13 @@ def export_hydroelastic_contact_to_buffer(
     Returns:
         Contact ID if successfully stored, -1 if buffer full
     """
-    # Allocate contact slot
-    contact_id = wp.atomic_add(reducer_data.contact_count, 0, 1)
-    if contact_id >= reducer_data.capacity:
-        return -1
+    # Use base function to store common contact data
+    contact_id = export_contact_to_buffer(shape_a, shape_b, position, normal, depth, reducer_data)
 
-    # Store contact data (packed into vec4)
-    reducer_data.position_depth[contact_id] = wp.vec4(position[0], position[1], position[2], depth)
-    reducer_data.normal[contact_id] = normal
-    reducer_data.shape_pairs[contact_id] = wp.vec2i(shape_a, shape_b)
-
-    # Store hydroelastic-specific data
-    reducer_data.contact_area[contact_id] = area
-    reducer_data.contact_k_eff[contact_id] = k_eff
+    if contact_id >= 0:
+        # Store hydroelastic-specific data
+        reducer_data.contact_area[contact_id] = area
+        reducer_data.contact_k_eff[contact_id] = k_eff
 
     return contact_id
 
@@ -219,34 +216,19 @@ def reduce_hydroelastic_contacts_kernel(
                 # weight_sum = sum(area * |depth|) - for normalizing anchor position
                 wp.atomic_add(reducer_data.weight_sum, entry_idx, force_weight)
 
-        # === Part 2: Voxel-based reduction (matching global contact reducer) ===
-        # Transform contact position from world space to shape_a's local space
-        X_shape_ws = shape_transform[shape_a]
-        X_ws_shape = wp.transform_inverse(X_shape_ws)
-        position_local = wp.transform_point(X_ws_shape, position)
-
-        # Compute voxel index using shape_a's local AABB (same as global reducer)
-        aabb_lower = shape_local_aabb_lower[shape_a]
-        aabb_upper = shape_local_aabb_upper[shape_a]
-        voxel_res = shape_voxel_resolution[shape_a]
-        voxel_idx = compute_voxel_index(position_local, aabb_lower, aabb_upper, voxel_res)
-
-        # Clamp voxel index to valid range
-        voxel_idx = wp.clamp(voxel_idx, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1))
-
-        # Group voxels by 7 to maximize slot utilization (matches values_per_key)
-        voxels_per_group = wp.static(NUM_SPATIAL_DIRECTIONS + 1)  # = 7
-        voxel_group = voxel_idx // voxels_per_group
-        voxel_local_slot = voxel_idx % voxels_per_group
-
-        voxel_bin_id = NUM_NORMAL_BINS + voxel_group
-        voxel_key = make_contact_key(shape_a, shape_b, voxel_bin_id)
-
-        voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
-        if voxel_entry_idx >= 0:
-            # Use -depth so atomic_max selects most penetrating (most negative depth)
-            voxel_value = make_contact_value(-depth, i)
-            reduction_update_slot(voxel_entry_idx, voxel_local_slot, voxel_value, reducer_data.ht_values, ht_capacity)
+        # === Part 2: Voxel-based reduction (shared with global contact reducer) ===
+        reduce_contact_to_voxel_slots(
+            i,  # contact_id
+            position,
+            depth,
+            shape_a,
+            shape_b,
+            reducer_data,
+            shape_transform,
+            shape_local_aabb_lower,
+            shape_local_aabb_upper,
+            shape_voxel_resolution,
+        )
 
 
 @wp.kernel(enable_backward=False)
