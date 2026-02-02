@@ -24,8 +24,8 @@ from newton._src.core.types import MAXVAL
 
 from ..sim.model import Model
 from .collision_core import sat_box_intersection
-from .contact_reduction_global import (
-    GlobalContactReducerData,
+from .contact_reduction_global import GlobalContactReducerData
+from .contact_reduction_hydroelastic import (
     HydroelasticContactReduction,
     HydroelasticReductionConfig,
     export_hydroelastic_contact_to_buffer,
