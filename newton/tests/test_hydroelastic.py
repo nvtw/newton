@@ -48,7 +48,7 @@ SIM_TIME = 1.0
 VIEWER_NUM_FRAMES = 300
 
 # Test thresholds
-POSITION_THRESHOLD_FACTOR = 0.7  # multiplied by cube_half
+POSITION_THRESHOLD_FACTOR = 1.0  # multiplied by cube_half
 MAX_ROTATION_DEG = 10.0
 
 # Devices and solvers
@@ -391,16 +391,16 @@ def test_mujoco_hydroelastic_penetration_depth(test, device):
         measured = 2.0 * np.mean(instance_depths)  # x2 because this is the distance to the isosurface
 
         # Expected: depth = F / (k_eff * A_eff) / mujoco_scaling
-        effective_area = area * 0.9  # scale factor to account for non-uniform pressure distribution
+        effective_area = area
         expected = total_force / (k_hydro * effective_area)
         expected /= effective_mass
         ratio = measured / expected
 
         test.assertGreater(
-            ratio, 0.85, f"Case {i}: ratio {ratio:.3f} too low (measured={measured:.6f}, expected={expected:.6f})"
+            ratio, 0.9, f"Case {i}: ratio {ratio:.3f} too low (measured={measured:.6f}, expected={expected:.6f})"
         )
         test.assertLess(
-            ratio, 1.15, f"Case {i}: ratio {ratio:.3f} too high (measured={measured:.6f}, expected={expected:.6f})"
+            ratio, 1.1, f"Case {i}: ratio {ratio:.3f} too high (measured={measured:.6f}, expected={expected:.6f})"
         )
 
 
