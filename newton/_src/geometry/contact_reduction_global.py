@@ -919,6 +919,79 @@ def reduce_hydroelastic_contacts_kernel(
             reduction_update_slot(voxel_entry_idx, voxel_local_slot, voxel_value, reducer_data.ht_values, ht_capacity)
 
 
+@wp.kernel(enable_backward=False)
+def reduce_hydroelastic_moment_kernel(
+    reducer_data: GlobalContactReducerData,
+    grid_size: int,
+):
+    """Accumulate moment contributions for hydroelastic contacts (Pass 2).
+
+    This kernel runs AFTER reduce_hydroelastic_contacts_kernel to compute moment
+    contributions relative to the anchor position (center of pressure).
+
+    The moment is used for moment matching - scaling friction coefficients so
+    that the moment arm of reduced contacts matches the reference moment from
+    all unreduced contacts.
+
+    Must be called only after reduce_hydroelastic_contacts_kernel has accumulated:
+    - weighted_pos_sum: sum(area * depth * position) for penetrating contacts
+    - weight_sum: sum(area * depth) for penetrating contacts
+    """
+    tid = wp.tid()
+
+    # Grid stride loop over all contacts in the buffer
+    contact_count = reducer_data.contact_count[0]
+    capacity = reducer_data.capacity
+
+    for i in range(tid, contact_count, grid_size):
+        if i >= capacity:
+            continue
+
+        # Read contact data
+        pd = reducer_data.position_depth[i]
+        position = wp.vec3(pd[0], pd[1], pd[2])
+        depth = pd[3]
+        normal = reducer_data.normal[i]
+        area = reducer_data.contact_area[i]
+
+        # Only penetrating contacts contribute to moment
+        if depth <= 0.0:
+            continue
+
+        # Get shape pair and compute normal bin
+        pair = reducer_data.shape_pairs[i]
+        shape_a = pair[0]
+        shape_b = pair[1]
+        bin_id = get_slot(normal)
+
+        # Find the hashtable entry for this (shape_pair, normal_bin)
+        key = make_contact_key(shape_a, shape_b, bin_id)
+        entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
+
+        if entry_idx < 0:
+            continue
+
+        # Compute anchor position from accumulated sums
+        entry_weight_sum = reducer_data.weight_sum[entry_idx]
+        if entry_weight_sum <= 1e-20:
+            continue
+
+        anchor_pos = reducer_data.weighted_pos_sum[entry_idx] / entry_weight_sum
+
+        # Compute moment contribution: |cross(r, normal)| * area * depth
+        # where r = position - anchor_pos
+        r_to_contact = position - anchor_pos
+        moment_contrib = wp.length(wp.cross(r_to_contact, normal)) * area * depth
+
+        # Accumulate moment for this entry
+        wp.atomic_add(reducer_data.agg_moment, entry_idx, moment_contrib)
+
+
+# =============================================================================
+# Helper functions for contact unpacking and writing
+# =============================================================================
+
+
 @wp.func
 def unpack_contact(
     contact_id: int,
@@ -1201,11 +1274,15 @@ EPS_LARGE = 1e-8
 EPS_SMALL = 1e-20
 
 
+MIN_FRICTION = 1e-4
+
+
 def create_export_hydroelastic_reduced_contacts_kernel(
     writer_func: Any,
     margin_contact_area: float,
     normal_matching: bool = True,
     anchor_contact: bool = False,
+    moment_matching: bool = False,
 ):
     """Create a kernel that exports reduced hydroelastic contacts using a custom writer function.
 
@@ -1224,6 +1301,9 @@ def create_export_hydroelastic_reduced_contacts_kernel(
         margin_contact_area: Contact area to use for non-penetrating contacts at the margin
         normal_matching: If True, rotate contact normals so their weighted sum aligns with aggregate force
         anchor_contact: If True, add an anchor contact at the center of pressure for each entry
+        moment_matching: If True, scale friction coefficients to match reference moment from unreduced contacts.
+            Requires anchor_contact=True. Scales friction so moment arm of reduced contacts matches
+            the aggregate moment from all penetrating contacts.
 
     Returns:
         A warp kernel that can be launched to export reduced hydroelastic contacts.
@@ -1242,6 +1322,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
         agg_force: wp.array(dtype=wp.vec3),
         weighted_pos_sum: wp.array(dtype=wp.vec3),
         weight_sum: wp.array(dtype=wp.float32),
+        agg_moment: wp.array(dtype=wp.float32),
         # Contact buffer arrays
         position_depth: wp.array(dtype=wp.vec4),
         normal: wp.array(dtype=wp.vec3),
@@ -1262,6 +1343,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
         - Aggregate stiffness: c_stiffness = k_eff * |agg_force| / total_depth
         - Normal matching: rotates normals so weighted sum aligns with agg_force direction
         - Anchor contact: adds synthetic contact at center of pressure
+        - Moment matching: scales friction to match reference moment from all contacts
         """
         tid = wp.tid()
 
@@ -1403,6 +1485,49 @@ def create_export_hydroelastic_reduced_contacts_kernel(
             margin_b = shape_contact_margin[shape_b_first]
             margin = margin_a + margin_b
 
+            # === Moment matching: compute friction scaling ===
+            # Friction scaling preserves total tangential friction capacity while matching moments
+            unique_friction = wp.float32(1.0)
+            anchor_friction = wp.float32(1.0)
+
+            if wp.static(moment_matching and anchor_contact) and add_anchor == 1:
+                # Get reference moment from all penetrating contacts (accumulated in moment kernel)
+                ref_moment = agg_moment[entry_idx]
+
+                # Compute selected_moment: moment of reduced contacts relative to anchor
+                selected_moment = wp.float32(0.0)
+                for idx in range(num_exported):
+                    contact_id = exported_ids[idx]
+                    depth = exported_depths[idx]
+                    if depth > 0.0:
+                        # Get contact position
+                        pd = position_depth[contact_id]
+                        pos = wp.vec3(pd[0], pd[1], pd[2])
+                        contact_normal = normal[contact_id]
+                        # Moment arm from anchor to contact
+                        r_to_contact = pos - anchor_pos
+                        selected_moment = selected_moment + depth * wp.length(wp.cross(r_to_contact, contact_normal))
+
+                # Scale unique friction to match moments:
+                # unique_friction = (ref_moment * total_depth) / (agg_force_mag * selected_moment)
+                denom = wp.max(agg_force_mag * selected_moment, wp.static(EPS_SMALL))
+                unique_friction = (ref_moment * total_depth_with_anchor) / denom
+
+                # Compute anchor friction to preserve tangential friction invariant:
+                # unique_friction * total_depth + anchor_friction * anchor_depth = total_depth_with_anchor
+                agg_depth = total_depth  # depth from selected contacts (not including anchor)
+                anchor_friction = (total_depth_with_anchor - unique_friction * agg_depth) / anchor_depth
+
+                # Joint clamping: if one friction hits lower bound, adjust the other
+                if anchor_friction < wp.static(MIN_FRICTION):
+                    anchor_friction = wp.static(MIN_FRICTION)
+                    unique_friction = (total_depth_with_anchor - wp.static(MIN_FRICTION) * anchor_depth) / wp.max(agg_depth, wp.static(EPS_SMALL))
+
+                if unique_friction < wp.static(MIN_FRICTION):
+                    unique_friction = wp.static(MIN_FRICTION)
+                    anchor_friction = (total_depth_with_anchor - wp.static(MIN_FRICTION) * agg_depth) / anchor_depth
+                    anchor_friction = wp.max(anchor_friction, wp.static(MIN_FRICTION))
+
             # === Second pass: export contacts ===
             for idx in range(num_exported):
                 contact_id = exported_ids[idx]
@@ -1451,6 +1576,8 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 contact_data.shape_b = shape_b
                 contact_data.margin = margin
                 contact_data.contact_stiffness = c_stiffness
+                # Apply friction scaling for penetrating contacts (moment matching)
+                contact_data.contact_friction_scale = unique_friction * wp.float32(depth > 0.0)
 
                 # Call the writer function
                 writer_func(contact_data, writer_data, -1)
@@ -1475,6 +1602,8 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 contact_data.shape_b = shape_b_first
                 contact_data.margin = margin
                 contact_data.contact_stiffness = shared_stiffness
+                # Apply friction scaling for anchor (moment matching)
+                contact_data.contact_friction_scale = anchor_friction
 
                 # Call the writer function for anchor
                 writer_func(contact_data, writer_data, -1)

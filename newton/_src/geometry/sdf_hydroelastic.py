@@ -30,6 +30,7 @@ from .contact_reduction_global import (
     create_export_hydroelastic_reduced_contacts_kernel,
     export_hydroelastic_contact_to_buffer,
     reduce_hydroelastic_contacts_kernel,
+    reduce_hydroelastic_moment_kernel,
 )
 from .sdf_contact import sample_sdf_extrapolated
 from .sdf_mc import get_mc_tables, mc_calc_face
@@ -100,6 +101,10 @@ class SDFHydroelasticConfig:
     anchor_contact: bool = False
     """Whether to add an anchor contact at the center of pressure for each normal bin.
     The anchor contact helps preserve moment balance."""
+    moment_matching: bool = False
+    """Whether to scale friction coefficients to match the aggregate moment from unreduced contacts.
+    Requires anchor_contact=True to be effective. When enabled, friction is scaled so that
+    the moment arm of the reduced contacts matches the reference moment from all contacts."""
     margin_contact_area: float = 1e-2
     """Contact area used for non-penetrating contacts at the margin."""
 
@@ -252,6 +257,7 @@ class SDFHydroelastic:
                 margin_contact_area=self.config.margin_contact_area,
                 normal_matching=self.config.normal_matching,
                 anchor_contact=self.config.anchor_contact,
+                moment_matching=self.config.moment_matching,
             )
 
         self.grid_size = min(self.config.grid_size, self.max_num_face_contacts)
@@ -627,6 +633,19 @@ class SDFHydroelastic:
             device=self.device,
         )
 
+        # Pass 1.5: Compute moment contributions (only when moment_matching enabled)
+        # This must run after reduce_hydroelastic_contacts_kernel which accumulates weighted_pos_sum/weight_sum
+        if self.config.moment_matching:
+            wp.launch(
+                kernel=reduce_hydroelastic_moment_kernel,
+                dim=[self.grid_size],
+                inputs=[
+                    reducer_data,
+                    self.grid_size,
+                ],
+                device=self.device,
+            )
+
         # Pass 2: Export reduced contacts with aggregate stiffness
         # c_stiffness = k_eff * |agg_force| / total_depth (matching original binning behavior)
         wp.launch(
@@ -639,6 +658,7 @@ class SDFHydroelastic:
                 self.contact_reducer.agg_force,
                 self.contact_reducer.weighted_pos_sum,
                 self.contact_reducer.weight_sum,
+                self.contact_reducer.agg_moment,
                 self.contact_reducer.position_depth,
                 self.contact_reducer.normal,
                 self.contact_reducer.shape_pairs,
