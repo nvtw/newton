@@ -18,6 +18,11 @@
 This module provides hydroelastic-specific contact reduction functionality,
 building on the core ``GlobalContactReducer`` from ``contact_reduction_global.py``.
 
+**Sign Convention:**
+
+Uses standard SDF sign convention: negative depth = penetrating, positive = separated.
+This matches the global contact reducer and other contact systems.
+
 **Hydroelastic Contact Features:**
 
 - Aggregate stiffness calculation: ``c_stiffness = k_eff * |agg_force| / total_depth``
@@ -65,7 +70,6 @@ from .contact_reduction_global import (
     unpack_contact,
     unpack_contact_id,
 )
-from .sdf_utils import SDFData
 
 # =============================================================================
 # Constants for hydroelastic export
@@ -99,7 +103,7 @@ def export_hydroelastic_contact_to_buffer(
         shape_b: Second shape index
         position: Contact position in world space
         normal: Contact normal
-        depth: Penetration depth (positive = penetrating for hydroelastic)
+        depth: Penetration depth (negative = penetrating, standard convention)
         area: Contact surface area
         k_eff: Effective stiffness coefficient k_a*k_b/(k_a+k_b)
         reducer_data: GlobalContactReducerData with all arrays
@@ -133,22 +137,23 @@ def export_hydroelastic_contact_to_buffer(
 def reduce_hydroelastic_contacts_kernel(
     reducer_data: GlobalContactReducerData,
     shape_transform: wp.array(dtype=wp.transform),
-    shape_sdf_data: wp.array(dtype=SDFData),
+    shape_local_aabb_lower: wp.array(dtype=wp.vec3),
+    shape_local_aabb_upper: wp.array(dtype=wp.vec3),
+    shape_voxel_resolution: wp.array(dtype=wp.vec3i),
     total_num_threads: int,
 ):
     """Register hydroelastic contacts in the hashtable for reduction.
 
     Uses the fixed BETA_THRESHOLD for spatial competition.
-    Uses SDF extent data (half_extents) to compute voxel indices for
-    spatial coverage tracking.
+    Uses pre-computed shape local AABBs and voxel resolution for voxel indices
+    (matching the global contact reducer pattern).
 
     Also accumulates aggregate force per (shape_pair, normal_bin) for stiffness calculation:
-    agg_force = sum(area * depth * normal) for all penetrating contacts.
+    agg_force = sum(area * |depth| * normal) for all penetrating contacts.
 
-    Note: Hydroelastic contacts have POSITIVE depth for penetrating contacts,
-    opposite to standard mesh contacts. This kernel handles the sign convention:
-    - Spatial competition: includes contacts with depth > -BETA_THRESHOLD (all penetrating)
-    - Max-depth/voxel slots: uses +depth so atomic_max selects most penetrating
+    Uses standard sign convention: negative depth = penetrating (same as global reducer).
+    - Spatial competition: includes contacts with depth < BETA_THRESHOLD
+    - Max-depth/voxel slots: uses -depth so atomic_max selects most penetrating (most negative)
     """
     tid = wp.tid()
 
@@ -173,7 +178,7 @@ def reduce_hydroelastic_contacts_kernel(
         position = wp.vec3(pd[0], pd[1], pd[2])
         depth = pd[3]
         shape_a = pair[0]  # First shape
-        shape_b = pair[1]  # SDF shape (contact is in this frame)
+        shape_b = pair[1]  # Second shape
 
         ht_capacity = reducer_data.ht_capacity
 
@@ -185,9 +190,9 @@ def reduce_hydroelastic_contacts_kernel(
 
         entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
         if entry_idx >= 0:
-            # For hydroelastic: depth > 0 means penetrating
+            # Standard convention: depth < 0 means penetrating
             # Include all penetrating contacts and near-surface contacts in spatial competition
-            use_beta = depth > -wp.static(BETA_THRESHOLD)
+            use_beta = depth < wp.static(BETA_THRESHOLD)
             for dir_i in range(NUM_SPATIAL_DIRECTIONS):
                 if use_beta:
                     dir_2d = get_spatial_direction_2d(dir_i)
@@ -197,49 +202,40 @@ def reduce_hydroelastic_contacts_kernel(
                     reduction_update_slot(entry_idx, slot_id, value, reducer_data.ht_values, ht_capacity)
 
             # Max-depth slot (last slot = 6)
-            # For hydroelastic: use +depth so atomic_max selects most penetrating (highest positive depth)
+            # Use -depth so atomic_max selects most penetrating (most negative depth)
             max_depth_slot_id = NUM_SPATIAL_DIRECTIONS
-            max_depth_value = make_contact_value(depth, i)
+            max_depth_value = make_contact_value(-depth, i)
             reduction_update_slot(entry_idx, max_depth_slot_id, max_depth_value, reducer_data.ht_values, ht_capacity)
 
-            # Accumulate aggregates for penetrating contacts (depth > 0)
+            # Accumulate aggregates for penetrating contacts (depth < 0)
             # These are used for stiffness calculation, anchor contact, and moment matching
-            if depth > 0.0:
-                force_weight = area * depth
-                # agg_force = sum(area * depth * normal) - for stiffness calculation
+            # Use |depth| (negate since depth is negative) for weighting
+            if depth < 0.0:
+                force_weight = area * (-depth)  # -depth to get positive weight
+                # agg_force = sum(area * |depth| * normal) - for stiffness calculation
                 wp.atomic_add(reducer_data.agg_force, entry_idx, force_weight * normal)
-                # weighted_pos_sum = sum(area * depth * position) - for anchor position
+                # weighted_pos_sum = sum(area * |depth| * position) - for anchor position
                 wp.atomic_add(reducer_data.weighted_pos_sum, entry_idx, force_weight * position)
-                # weight_sum = sum(area * depth) - for normalizing anchor position
+                # weight_sum = sum(area * |depth|) - for normalizing anchor position
                 wp.atomic_add(reducer_data.weight_sum, entry_idx, force_weight)
 
-        # === Part 2: Voxel-based reduction using SDF extent ===
-        # Hydroelastic contacts are in SDF local space (shape_b's frame)
-        # Use SDF half_extents and center to compute voxel index
-        sdf_data = shape_sdf_data[shape_b]
-        aabb_lower = sdf_data.center - sdf_data.half_extents
-        aabb_upper = sdf_data.center + sdf_data.half_extents
+        # === Part 2: Voxel-based reduction (matching global contact reducer) ===
+        # Transform contact position from world space to shape_a's local space
+        X_shape_ws = shape_transform[shape_a]
+        X_ws_shape = wp.transform_inverse(X_shape_ws)
+        position_local = wp.transform_point(X_ws_shape, position)
 
-        # Compute voxel resolution from SDF extent (target ~4-5 voxels per axis)
-        # This gives roughly 64-125 voxels total, fitting within NUM_VOXEL_DEPTH_SLOTS
-        extent = sdf_data.half_extents * 2.0
-        max_extent = wp.max(wp.max(extent[0], extent[1]), extent[2])
-        if max_extent > 0.0:
-            voxel_size = max_extent / 5.0  # ~5 voxels along longest axis
-            nx = wp.clamp(int(extent[0] / voxel_size + 0.5), 1, 5)
-            ny = wp.clamp(int(extent[1] / voxel_size + 0.5), 1, 5)
-            nz = wp.clamp(int(extent[2] / voxel_size + 0.5), 1, 5)
-        else:
-            nx = 1
-            ny = 1
-            nz = 1
+        # Compute voxel index using shape_a's local AABB (same as global reducer)
+        aabb_lower = shape_local_aabb_lower[shape_a]
+        aabb_upper = shape_local_aabb_upper[shape_a]
+        voxel_res = shape_voxel_resolution[shape_a]
+        voxel_idx = compute_voxel_index(position_local, aabb_lower, aabb_upper, voxel_res)
 
-        voxel_res = wp.vec3i(nx, ny, nz)
-        voxel_idx = compute_voxel_index(position, aabb_lower, aabb_upper, voxel_res)
+        # Clamp voxel index to valid range
         voxel_idx = wp.clamp(voxel_idx, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1))
 
-        # Group voxels by 7
-        voxels_per_group = wp.static(NUM_SPATIAL_DIRECTIONS + 1)
+        # Group voxels by 7 to maximize slot utilization (matches values_per_key)
+        voxels_per_group = wp.static(NUM_SPATIAL_DIRECTIONS + 1)  # = 7
         voxel_group = voxel_idx // voxels_per_group
         voxel_local_slot = voxel_idx % voxels_per_group
 
@@ -248,8 +244,8 @@ def reduce_hydroelastic_contacts_kernel(
 
         voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
         if voxel_entry_idx >= 0:
-            # For hydroelastic: use +depth so atomic_max selects most penetrating
-            voxel_value = make_contact_value(depth, i)
+            # Use -depth so atomic_max selects most penetrating (most negative depth)
+            voxel_value = make_contact_value(-depth, i)
             reduction_update_slot(voxel_entry_idx, voxel_local_slot, voxel_value, reducer_data.ht_values, ht_capacity)
 
 
@@ -268,8 +264,8 @@ def reduce_hydroelastic_moment_kernel(
     all unreduced contacts.
 
     Must be called only after reduce_hydroelastic_contacts_kernel has accumulated:
-    - weighted_pos_sum: sum(area * depth * position) for penetrating contacts
-    - weight_sum: sum(area * depth) for penetrating contacts
+    - weighted_pos_sum: sum(area * |depth| * position) for penetrating contacts
+    - weight_sum: sum(area * |depth|) for penetrating contacts
     """
     tid = wp.tid()
 
@@ -288,8 +284,8 @@ def reduce_hydroelastic_moment_kernel(
         normal = reducer_data.normal[i]
         area = reducer_data.contact_area[i]
 
-        # Only penetrating contacts contribute to moment
-        if depth <= 0.0:
+        # Only penetrating contacts contribute to moment (depth < 0 = penetrating)
+        if depth >= 0.0:
             continue
 
         # Get shape pair and compute normal bin
@@ -312,10 +308,11 @@ def reduce_hydroelastic_moment_kernel(
 
         anchor_pos = reducer_data.weighted_pos_sum[entry_idx] / entry_weight_sum
 
-        # Compute moment contribution: |cross(r, normal)| * area * depth
+        # Compute moment contribution: |cross(r, normal)| * area * |depth|
         # where r = position - anchor_pos
+        # Use -depth since depth is negative for penetrating contacts
         r_to_contact = position - anchor_pos
-        moment_contrib = wp.length(wp.cross(r_to_contact, normal)) * area * depth
+        moment_contrib = wp.length(wp.cross(r_to_contact, normal)) * area * (-depth)
 
         # Accumulate moment for this entry
         wp.atomic_add(reducer_data.agg_moment, entry_idx, moment_contrib)
@@ -413,13 +410,13 @@ def create_export_hydroelastic_reduced_contacts_kernel(
             exported_ids = exported_ids_vec()
             exported_depths = exported_depths_vec()
             num_exported = int(0)
-            total_depth = float(0.0)
-            max_depth = float(0.0)
+            total_depth = float(0.0)  # Sum of |depth| for penetrating contacts
+            max_pen_depth = float(0.0)  # Maximum penetration magnitude (positive value)
             k_eff_first = float(0.0)
             shape_a_first = int(0)
             shape_b_first = int(0)
 
-            # For normal matching: sum of (depth * normal) for selected penetrating contacts
+            # For normal matching: sum of (|depth| * normal) for selected penetrating contacts
             selected_normal_sum = wp.vec3(0.0, 0.0, 0.0)
 
             # Read all value slots for this entry (slot-major layout)
@@ -454,13 +451,14 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 exported_depths[num_exported] = depth
                 num_exported = num_exported + 1
 
-                # Sum penetrating depths for stiffness calculation
-                if depth > 0.0:
-                    total_depth = total_depth + depth
-                    max_depth = wp.max(max_depth, depth)
+                # Sum penetrating depths for stiffness calculation (depth < 0 = penetrating)
+                if depth < 0.0:
+                    pen_magnitude = -depth  # Convert to positive magnitude
+                    total_depth = total_depth + pen_magnitude
+                    max_pen_depth = wp.max(max_pen_depth, pen_magnitude)
                     # Accumulate for normal matching
                     if wp.static(normal_matching):
-                        selected_normal_sum = selected_normal_sum + depth * contact_normal
+                        selected_normal_sum = selected_normal_sum + pen_magnitude * contact_normal
 
                 # Store first contact's data (same for all contacts in the entry)
                 if k_eff_first == 0.0:
@@ -484,13 +482,13 @@ def create_export_hydroelastic_reduced_contacts_kernel(
             anchor_pos = wp.vec3(0.0, 0.0, 0.0)
             add_anchor = int(0)
             entry_weight_sum = weight_sum[entry_idx]
-            if wp.static(anchor_contact) and use_aggregate_stiffness and max_depth > 1e-6:
+            if wp.static(anchor_contact) and use_aggregate_stiffness and max_pen_depth > 1e-6:
                 if entry_weight_sum > wp.static(EPS_SMALL):
                     anchor_pos = weighted_pos_sum[entry_idx] / entry_weight_sum
                     add_anchor = 1
 
             # Compute total_depth including anchor contribution
-            anchor_depth = max_depth  # Anchor uses max depth
+            anchor_depth = max_pen_depth  # Anchor uses max penetration depth (positive magnitude)
             total_depth_with_anchor = total_depth + wp.float32(add_anchor) * anchor_depth
 
             # Compute shared stiffness for normal bin entries
@@ -548,14 +546,15 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 for idx in range(num_exported):
                     contact_id = exported_ids[idx]
                     depth = exported_depths[idx]
-                    if depth > 0.0:
+                    if depth < 0.0:  # Penetrating contact (depth < 0)
                         # Get contact position
                         pd = position_depth[contact_id]
                         pos = wp.vec3(pd[0], pd[1], pd[2])
                         contact_normal = normal[contact_id]
                         # Moment arm from anchor to contact
                         r_to_contact = pos - anchor_pos
-                        selected_moment = selected_moment + depth * wp.length(wp.cross(r_to_contact, contact_normal))
+                        # Use |depth| for moment calculation
+                        selected_moment = selected_moment + (-depth) * wp.length(wp.cross(r_to_contact, contact_normal))
 
                 # Scale unique friction to match moments:
                 # unique_friction = (ref_moment * total_depth) / (agg_force_mag * selected_moment)
@@ -592,9 +591,9 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 shape_a = pair[0]
                 shape_b = pair[1]
 
-                # Apply normal matching rotation for penetrating contacts
+                # Apply normal matching rotation for penetrating contacts (depth < 0)
                 final_normal = contact_normal
-                if wp.static(normal_matching) and use_aggregate_stiffness and depth > 0.0:
+                if wp.static(normal_matching) and use_aggregate_stiffness and depth < 0.0:
                     final_normal = wp.normalize(wp.quat_rotate(rotation_q, contact_normal))
 
                 # Compute stiffness based on entry type
@@ -605,7 +604,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                     # Voxel bin: per-contact stiffness (area * k_eff)
                     area = contact_area[contact_id]
                     k_eff = contact_k_eff[contact_id]
-                    if depth > 0.0:
+                    if depth < 0.0:  # Penetrating
                         c_stiffness = area * k_eff
                     else:
                         c_stiffness = wp.static(margin_contact_area) * k_eff
@@ -615,10 +614,12 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 pos_world = wp.transform_point(transform_b, position)
 
                 # Create ContactData struct
+                # contact_distance = 2 * depth (depth is already negative for penetrating)
+                # This gives negative contact_distance for penetrating contacts
                 contact_data = ContactData()
                 contact_data.contact_point_center = pos_world
                 contact_data.contact_normal_a_to_b = normal_world
-                contact_data.contact_distance = -2.0 * depth  # depth is distance to isosurface
+                contact_data.contact_distance = 2.0 * depth  # depth is negative = penetrating
                 contact_data.radius_eff_a = 0.0
                 contact_data.radius_eff_b = 0.0
                 contact_data.thickness_a = 0.0
@@ -628,7 +629,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 contact_data.margin = margin
                 contact_data.contact_stiffness = c_stiffness
                 # Apply friction scaling for penetrating contacts (moment matching)
-                contact_data.contact_friction_scale = unique_friction * wp.float32(depth > 0.0)
+                contact_data.contact_friction_scale = unique_friction * wp.float32(depth < 0.0)
 
                 # Call the writer function
                 writer_func(contact_data, writer_data, -1)
@@ -641,10 +642,11 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 anchor_pos_world = wp.transform_point(transform_b, anchor_pos)
 
                 # Create ContactData for anchor
+                # anchor_depth is positive magnitude, so negate for standard convention
                 contact_data = ContactData()
                 contact_data.contact_point_center = anchor_pos_world
                 contact_data.contact_normal_a_to_b = anchor_normal_world
-                contact_data.contact_distance = -2.0 * anchor_depth
+                contact_data.contact_distance = -2.0 * anchor_depth  # anchor_depth is positive magnitude
                 contact_data.radius_eff_a = 0.0
                 contact_data.radius_eff_b = 0.0
                 contact_data.thickness_a = 0.0
@@ -807,7 +809,9 @@ class HydroelasticContactReduction:
     def reduce(
         self,
         shape_transform: wp.array,
-        shape_sdf_data: wp.array,
+        shape_local_aabb_lower: wp.array,
+        shape_local_aabb_upper: wp.array,
+        shape_voxel_resolution: wp.array,
         grid_size: int,
     ):
         """Register buffered contacts in the hashtable for reduction.
@@ -821,7 +825,9 @@ class HydroelasticContactReduction:
 
         Args:
             shape_transform: Per-shape world transforms (dtype: wp.transform).
-            shape_sdf_data: Per-shape SDF data (dtype: SDFData).
+            shape_local_aabb_lower: Per-shape local AABB lower bounds (dtype: wp.vec3).
+            shape_local_aabb_upper: Per-shape local AABB upper bounds (dtype: wp.vec3).
+            shape_voxel_resolution: Per-shape voxel grid resolution (dtype: wp.vec3i).
             grid_size: Number of threads for the kernel launch.
         """
         reducer_data = self.reducer.get_data_struct()
@@ -831,7 +837,9 @@ class HydroelasticContactReduction:
             inputs=[
                 reducer_data,
                 shape_transform,
-                shape_sdf_data,
+                shape_local_aabb_lower,
+                shape_local_aabb_upper,
+                shape_voxel_resolution,
                 grid_size,
             ],
             device=self.device,
@@ -906,7 +914,9 @@ class HydroelasticContactReduction:
     def reduce_and_export(
         self,
         shape_transform: wp.array,
-        shape_sdf_data: wp.array,
+        shape_local_aabb_lower: wp.array,
+        shape_local_aabb_upper: wp.array,
+        shape_voxel_resolution: wp.array,
         shape_contact_margin: wp.array,
         writer_data: Any,
         grid_size: int,
@@ -918,12 +928,14 @@ class HydroelasticContactReduction:
 
         Args:
             shape_transform: Per-shape world transforms (dtype: wp.transform).
-            shape_sdf_data: Per-shape SDF data (dtype: SDFData).
+            shape_local_aabb_lower: Per-shape local AABB lower bounds (dtype: wp.vec3).
+            shape_local_aabb_upper: Per-shape local AABB upper bounds (dtype: wp.vec3).
+            shape_voxel_resolution: Per-shape voxel grid resolution (dtype: wp.vec3i).
             shape_contact_margin: Per-shape contact margin (dtype: float).
             writer_data: Data struct for the writer function.
             grid_size: Number of threads for the kernel launch.
         """
-        self.reduce(shape_transform, shape_sdf_data, grid_size)
+        self.reduce(shape_transform, shape_local_aabb_lower, shape_local_aabb_upper, shape_voxel_resolution, grid_size)
 
         if self.config.moment_matching:
             self.reduce_moments(grid_size)

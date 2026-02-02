@@ -48,7 +48,7 @@ SIM_TIME = 1.0
 VIEWER_NUM_FRAMES = 300
 
 # Test thresholds
-POSITION_THRESHOLD_FACTOR = 1.0  # multiplied by cube_half
+POSITION_THRESHOLD_FACTOR = 0.1  # multiplied by cube_half
 MAX_ROTATION_DEG = 10.0
 
 # Devices and solvers
@@ -155,9 +155,12 @@ def run_stacked_cubes_hydroelastic_test(
 
     num_frames = int(SIM_TIME / SIM_DT)
 
+    # Scale substeps for small objects - they need smaller time steps for stability
+    substeps = SIM_SUBSTEPS if cube_half >= CUBE_HALF_LARGE else 20
+
     for _ in range(num_frames):
         state_0, state_1 = simulate(
-            solver, model, state_0, state_1, control, contacts, collision_pipeline, SIM_DT, SIM_SUBSTEPS
+            solver, model, state_0, state_1, control, contacts, collision_pipeline, SIM_DT, substeps
         )
 
     body_q = state_0.body_q.numpy()
@@ -384,11 +387,13 @@ def test_mujoco_hydroelastic_penetration_depth(test, device):
             (shape_pairs[:, 0] == upper_shape) & (shape_pairs[:, 1] == lower_shape)
         )
         instance_depths = depths[mask]
-        instance_depths = instance_depths[instance_depths > 0]  # only consider positive depths = penetrating
+        # Standard convention: negative depth = penetrating
+        instance_depths = instance_depths[instance_depths < 0]
 
-        test.assertGreater(len(instance_depths), 0, f"Case {i} should have positive depth contacts")
+        test.assertGreater(len(instance_depths), 0, f"Case {i} should have penetrating contacts (negative depth)")
 
-        measured = 2.0 * np.mean(instance_depths)  # x2 because this is the distance to the isosurface
+        # x2 because depth is distance to isosurface; use |depth| for magnitude
+        measured = 2.0 * np.mean(-instance_depths)
 
         # Expected: depth = F / (k_eff * A_eff) / mujoco_scaling
         effective_area = area
