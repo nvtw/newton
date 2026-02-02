@@ -48,6 +48,7 @@ import warp as wp
 
 from newton._src.core.types import MAXVAL
 
+from ..sim.builder import ShapeFlags
 from ..sim.model import Model
 from .collision_core import sat_box_intersection
 from .contact_reduction_global import GlobalContactReducerData
@@ -290,9 +291,6 @@ class SDFHydroelastic:
         Returns:
             SDFHydroelastic instance, or None if no hydroelastic shape pairs exist.
         """
-
-        from ..sim.builder import ShapeFlags
-
         shape_flags = model.shape_flags.numpy()
 
         # Check if any shapes have hydroelastic flag
