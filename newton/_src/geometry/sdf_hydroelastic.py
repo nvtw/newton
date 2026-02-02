@@ -155,6 +155,12 @@ class SDFHydroelasticConfig:
     """Grid size for contact handling. Can be tuned for performance."""
     output_contact_surface: bool = False
     """Whether to output hydroelastic contact surface vertices for visualization."""
+    normal_matching: bool = True
+    """Whether to rotate reduced contact normals so their weighted sum aligns with
+    the aggregate force direction. Only active when `reduce_contacts` is True."""
+    anchor_contact: bool = False
+    """Whether to add an anchor contact at the center of pressure for each normal bin.
+    The anchor contact helps preserve moment balance. Only active when `reduce_contacts` is True."""
     margin_contact_area: float = 1e-2
     """Contact area used for non-penetrating contacts at the margin."""
 
@@ -313,10 +319,12 @@ class SDFHydroelastic:
                 )
                 # Create write kernel to copy face contacts to reducer buffer
                 self.write_face_contacts_to_reducer_kernel = get_write_face_contacts_to_reducer_kernel()
-                # Create export kernel with the user's writer function
+                # Create export kernel with the user's writer function and config options
                 self.export_reduced_contacts_kernel = create_export_hydroelastic_reduced_contacts_kernel(
                     writer_func=writer_func,
                     margin_contact_area=self.config.margin_contact_area,
+                    normal_matching=self.config.normal_matching,
+                    anchor_contact=self.config.anchor_contact,
                 )
             else:
                 self.decode_contacts_kernel = get_decode_contacts_kernel(self.config.margin_contact_area, writer_func)
@@ -751,6 +759,7 @@ class SDFHydroelastic:
 
         # Pass 3: Export reduced contacts with aggregate stiffness
         # c_stiffness = k_eff * |agg_force| / total_depth (matching original binning behavior)
+        # Also supports normal matching and anchor contact if enabled
         wp.launch(
             kernel=self.export_reduced_contacts_kernel,
             dim=[self.grid_size],
@@ -759,6 +768,8 @@ class SDFHydroelastic:
                 self.contact_reducer.ht_values,
                 self.contact_reducer.hashtable.active_slots,
                 self.contact_reducer.agg_force,
+                self.contact_reducer.weighted_pos_sum,
+                self.contact_reducer.weight_sum,
                 self.contact_reducer.position_depth,
                 self.contact_reducer.normal,
                 self.contact_reducer.shape_pairs,

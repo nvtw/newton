@@ -267,6 +267,19 @@ class GlobalContactReducerData:
     # Accumulates sum(area * depth * normal) for all penetrating contacts per entry
     agg_force: wp.array(dtype=wp.vec3)
 
+    # Weighted position sum per hashtable entry (for anchor contact computation)
+    # Accumulates sum(area * depth * position) for penetrating contacts
+    # Divide by weight_sum to get center of pressure (anchor position)
+    weighted_pos_sum: wp.array(dtype=wp.vec3)
+
+    # Weight sum per hashtable entry (for anchor contact normalization)
+    # Accumulates sum(area * depth) for penetrating contacts
+    weight_sum: wp.array(dtype=wp.float32)
+
+    # Aggregate moment per hashtable entry (for moment matching)
+    # Accumulates moment contributions for friction scaling
+    agg_moment: wp.array(dtype=wp.float32)
+
     # Hashtable arrays
     ht_keys: wp.array(dtype=wp.uint64)
     ht_values: wp.array(dtype=wp.uint64)
@@ -281,15 +294,19 @@ def _clear_active_kernel(
     ht_keys: wp.array(dtype=wp.uint64),
     ht_values: wp.array(dtype=wp.uint64),
     ht_active_slots: wp.array(dtype=wp.int32),
+    # Hydroelastic aggregate arrays (indexed by hashtable entry)
     agg_force: wp.array(dtype=wp.vec3),
+    weighted_pos_sum: wp.array(dtype=wp.vec3),
+    weight_sum: wp.array(dtype=wp.float32),
+    agg_moment: wp.array(dtype=wp.float32),
     ht_capacity: int,
     values_per_key: int,
     num_threads: int,
 ):
-    """Kernel to clear active hashtable entries (keys, values, and aggregate force).
+    """Kernel to clear active hashtable entries (keys, values, and hydroelastic aggregates).
 
     Uses grid-stride loop for efficient thread utilization.
-    Each thread handles one value slot, with key and agg_force clearing done once per entry.
+    Each thread handles one value slot, with key and aggregate clearing done once per entry.
 
     Memory layout for values is slot-major (SoA):
     [slot0_entry0, slot0_entry1, ..., slot0_entryN, slot1_entry0, ...]
@@ -310,12 +327,15 @@ def _clear_active_kernel(
         local_idx = i % values_per_key
         entry_idx = ht_active_slots[active_idx]
 
-        # Clear the key and agg_force only once per entry (when processing slot 0)
+        # Clear keys and hydroelastic aggregates only once per entry (when processing slot 0)
         if local_idx == 0:
             ht_keys[entry_idx] = HASHTABLE_EMPTY_KEY
-            # Clear aggregate force if array is not empty
+            # Clear hydroelastic aggregates if arrays are not empty
             if agg_force.shape[0] > 0:
                 agg_force[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
+                weighted_pos_sum[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
+                weight_sum[entry_idx] = 0.0
+                agg_moment[entry_idx] = 0.0
 
         # Clear this value slot (slot-major layout)
         value_idx = local_idx * ht_capacity + entry_idx
@@ -433,8 +453,17 @@ class GlobalContactReducer:
         # Accumulates sum(area * depth * normal) for all penetrating contacts per entry
         if store_hydroelastic_data:
             self.agg_force = wp.zeros(self.hashtable.capacity, dtype=wp.vec3, device=device)
+            # Weighted position sum for anchor contact computation
+            self.weighted_pos_sum = wp.zeros(self.hashtable.capacity, dtype=wp.vec3, device=device)
+            # Weight sum for normalizing weighted_pos_sum
+            self.weight_sum = wp.zeros(self.hashtable.capacity, dtype=wp.float32, device=device)
+            # Aggregate moment for moment matching
+            self.agg_moment = wp.zeros(self.hashtable.capacity, dtype=wp.float32, device=device)
         else:
             self.agg_force = wp.zeros(0, dtype=wp.vec3, device=device)
+            self.weighted_pos_sum = wp.zeros(0, dtype=wp.vec3, device=device)
+            self.weight_sum = wp.zeros(0, dtype=wp.float32, device=device)
+            self.agg_moment = wp.zeros(0, dtype=wp.float32, device=device)
 
     def clear(self):
         """Clear all contacts and reset the reducer (full clear)."""
@@ -451,7 +480,7 @@ class GlobalContactReducer:
         # Use fixed thread count for efficient GPU utilization
         num_threads = min(1024, self.hashtable.capacity)
 
-        # Single kernel clears keys, values, and agg_force for active entries
+        # Single kernel clears keys, values, and hydroelastic aggregates for active entries
         wp.launch(
             _clear_active_kernel,
             dim=num_threads,
@@ -460,6 +489,9 @@ class GlobalContactReducer:
                 self.ht_values,
                 self.hashtable.active_slots,
                 self.agg_force,
+                self.weighted_pos_sum,
+                self.weight_sum,
+                self.agg_moment,
                 self.hashtable.capacity,
                 self.values_per_key,
                 num_threads,
@@ -494,6 +526,9 @@ class GlobalContactReducer:
         data.contact_area = self.contact_area
         data.contact_k_eff = self.contact_k_eff
         data.agg_force = self.agg_force
+        data.weighted_pos_sum = self.weighted_pos_sum
+        data.weight_sum = self.weight_sum
+        data.agg_moment = self.agg_moment
         data.ht_keys = self.hashtable.keys
         data.ht_values = self.ht_values
         data.ht_active_slots = self.hashtable.active_slots
@@ -830,11 +865,16 @@ def reduce_hydroelastic_contacts_kernel(
             max_depth_value = make_contact_value(depth, i)
             reduction_update_slot(entry_idx, max_depth_slot_id, max_depth_value, reducer_data.ht_values, ht_capacity)
 
-            # Accumulate aggregate force for penetrating contacts (depth > 0)
-            # agg_force = sum(area * depth * normal) - used for stiffness calculation
+            # Accumulate aggregates for penetrating contacts (depth > 0)
+            # These are used for stiffness calculation, anchor contact, and moment matching
             if depth > 0.0:
                 force_weight = area * depth
+                # agg_force = sum(area * depth * normal) - for stiffness calculation
                 wp.atomic_add(reducer_data.agg_force, entry_idx, force_weight * normal)
+                # weighted_pos_sum = sum(area * depth * position) - for anchor position
+                wp.atomic_add(reducer_data.weighted_pos_sum, entry_idx, force_weight * position)
+                # weight_sum = sum(area * depth) - for normalizing anchor position
+                wp.atomic_add(reducer_data.weight_sum, entry_idx, force_weight)
 
         # === Part 2: Voxel-based reduction using SDF extent ===
         # Hydroelastic contacts are in SDF local space (shape_b's frame)
@@ -1164,9 +1204,16 @@ def create_mesh_triangle_contacts_to_reducer_kernel():
 
 
 EPS_LARGE = 1e-8
+EPS_SMALL = 1e-20
 
 
-def create_export_hydroelastic_reduced_contacts_kernel(writer_func: Any, margin_contact_area: float, values_per_key: int = 7):
+def create_export_hydroelastic_reduced_contacts_kernel(
+    writer_func: Any,
+    margin_contact_area: float,
+    normal_matching: bool = True,
+    anchor_contact: bool = False,
+    values_per_key: int = 7,
+):
     """Create a kernel that exports reduced hydroelastic contacts using a custom writer function.
 
     Similar to create_export_reduced_contacts_kernel but computes contact stiffness
@@ -1182,6 +1229,8 @@ def create_export_hydroelastic_reduced_contacts_kernel(writer_func: Any, margin_
     Args:
         writer_func: A warp function with signature (ContactData, writer_data, int) -> None
         margin_contact_area: Contact area to use for non-penetrating contacts at the margin
+        normal_matching: If True, rotate contact normals so their weighted sum aligns with aggregate force
+        anchor_contact: If True, add an anchor contact at the center of pressure for each entry
         values_per_key: Number of value slots per hashtable entry (default 7)
 
     Returns:
@@ -1197,8 +1246,10 @@ def create_export_hydroelastic_reduced_contacts_kernel(writer_func: Any, margin_
         ht_keys: wp.array(dtype=wp.uint64),
         ht_values: wp.array(dtype=wp.uint64),
         ht_active_slots: wp.array(dtype=wp.int32),
-        # Aggregate force per entry (from reduce kernel)
+        # Aggregate data per entry (from reduce kernel)
         agg_force: wp.array(dtype=wp.vec3),
+        weighted_pos_sum: wp.array(dtype=wp.vec3),
+        weight_sum: wp.array(dtype=wp.float32),
         # Contact buffer arrays
         position_depth: wp.array(dtype=wp.vec4),
         normal: wp.array(dtype=wp.vec3),
@@ -1215,11 +1266,10 @@ def create_export_hydroelastic_reduced_contacts_kernel(writer_func: Any, margin_
     ):
         """Export reduced hydroelastic contacts to the writer with aggregate stiffness.
 
-        Uses two passes per entry:
-        1. First pass: collect unique contacts, sum their depths to get total_depth
-        2. Second pass: export contacts with shared stiffness = k_eff * |agg_force| / total_depth
-
-        This matches the original hydroelastic binning system's stiffness computation.
+        Features:
+        - Aggregate stiffness: c_stiffness = k_eff * |agg_force| / total_depth
+        - Normal matching: rotates normals so weighted sum aligns with agg_force direction
+        - Anchor contact: adds synthetic contact at center of pressure
         """
         tid = wp.tid()
 
@@ -1236,12 +1286,18 @@ def create_export_hydroelastic_reduced_contacts_kernel(writer_func: Any, margin_
             # Get the hashtable entry index
             entry_idx = ht_active_slots[i]
 
-            # === First pass: collect unique contacts and compute total_depth ===
+            # === First pass: collect unique contacts and compute aggregates ===
             exported_ids = exported_ids_vec()
             exported_depths = exported_depths_vec()
             num_exported = int(0)
             total_depth = float(0.0)
-            k_eff_first = float(0.0)  # k_eff is shared by all contacts in the entry
+            max_depth = float(0.0)
+            k_eff_first = float(0.0)
+            shape_a_first = int(0)
+            shape_b_first = int(0)
+
+            # For normal matching: sum of (depth * normal) for selected penetrating contacts
+            selected_normal_sum = wp.vec3(0.0, 0.0, 0.0)
 
             # Read all value slots for this entry (slot-major layout)
             for slot in range(values_per_key):
@@ -1265,8 +1321,9 @@ def create_export_hydroelastic_reduced_contacts_kernel(writer_func: Any, margin_
                 if already_exported:
                     continue
 
-                # Unpack depth
+                # Unpack contact data
                 pd = position_depth[contact_id]
+                contact_normal = normal[contact_id]
                 depth = pd[3]
 
                 # Record this contact and its depth
@@ -1277,31 +1334,82 @@ def create_export_hydroelastic_reduced_contacts_kernel(writer_func: Any, margin_
                 # Sum penetrating depths for stiffness calculation
                 if depth > 0.0:
                     total_depth = total_depth + depth
+                    max_depth = wp.max(max_depth, depth)
+                    # Accumulate for normal matching
+                    if wp.static(normal_matching):
+                        selected_normal_sum = selected_normal_sum + depth * contact_normal
 
-                # Store k_eff (same for all contacts in the entry)
+                # Store first contact's data (same for all contacts in the entry)
                 if k_eff_first == 0.0:
                     k_eff_first = contact_k_eff[contact_id]
+                    pair = shape_pairs[contact_id]
+                    shape_a_first = pair[0]
+                    shape_b_first = pair[1]
 
             # Skip entries with no contacts
             if num_exported == 0:
                 continue
 
-            # === Compute stiffness based on entry type ===
+            # === Compute stiffness and optional features based on entry type ===
             # Normal bin entries (bin_id 0-19): have aggregate force, use aggregate stiffness
             # Voxel bin entries (bin_id 20+): no aggregate force, use per-contact stiffness
             agg_force_vec = agg_force[entry_idx]
             agg_force_mag = wp.length(agg_force_vec)
             use_aggregate_stiffness = agg_force_mag > wp.static(EPS_LARGE)
 
+            # Compute anchor position (center of pressure) for normal bin entries
+            anchor_pos = wp.vec3(0.0, 0.0, 0.0)
+            add_anchor = int(0)
+            entry_weight_sum = weight_sum[entry_idx]
+            if wp.static(anchor_contact) and use_aggregate_stiffness and max_depth > 1e-6:
+                if entry_weight_sum > wp.static(EPS_SMALL):
+                    anchor_pos = weighted_pos_sum[entry_idx] / entry_weight_sum
+                    add_anchor = 1
+
+            # Compute total_depth including anchor contribution
+            anchor_depth = max_depth  # Anchor uses max depth
+            total_depth_with_anchor = total_depth + wp.float32(add_anchor) * anchor_depth
+
             # Compute shared stiffness for normal bin entries
             # c_stiffness = k_eff * |agg_force| / total_depth (matches original hydroelastic system)
             shared_stiffness = float(0.0)
             if use_aggregate_stiffness:
-                if total_depth > 0.0:
-                    shared_stiffness = k_eff_first * agg_force_mag / (total_depth + wp.static(EPS_LARGE))
+                if total_depth_with_anchor > 0.0:
+                    shared_stiffness = k_eff_first * agg_force_mag / (total_depth_with_anchor + wp.static(EPS_LARGE))
                 else:
                     # Fallback for non-penetrating contacts
                     shared_stiffness = wp.static(margin_contact_area) * k_eff_first
+
+            # Compute normal matching rotation quaternion
+            rotation_q = wp.quat_identity()
+            if wp.static(normal_matching) and use_aggregate_stiffness:
+                selected_mag = wp.length(selected_normal_sum)
+                if selected_mag > wp.static(EPS_LARGE) and agg_force_mag > wp.static(EPS_LARGE):
+                    selected_dir = selected_normal_sum / selected_mag
+                    agg_dir = agg_force_vec / agg_force_mag
+
+                    cross = wp.cross(selected_dir, agg_dir)
+                    cross_mag = wp.length(cross)
+                    dot_val = wp.dot(selected_dir, agg_dir)
+
+                    if cross_mag > wp.static(EPS_LARGE):
+                        # Normal case: compute rotation around cross product axis
+                        axis = cross / cross_mag
+                        angle = wp.acos(wp.clamp(dot_val, -1.0, 1.0))
+                        rotation_q = wp.quat_from_axis_angle(axis, angle)
+                    elif dot_val < 0.0:
+                        # Vectors are anti-parallel: rotate 180 degrees around a perpendicular axis
+                        perp = wp.vec3(1.0, 0.0, 0.0)
+                        if wp.abs(wp.dot(selected_dir, perp)) > 0.9:
+                            perp = wp.vec3(0.0, 1.0, 0.0)
+                        axis = wp.normalize(wp.cross(selected_dir, perp))
+                        rotation_q = wp.quat_from_axis_angle(axis, 3.14159265359)
+
+            # Get transform and margin (same for all contacts in the entry)
+            transform_b = shape_transform[shape_b_first]
+            margin_a = shape_contact_margin[shape_a_first]
+            margin_b = shape_contact_margin[shape_b_first]
+            margin = margin_a + margin_b
 
             # === Second pass: export contacts ===
             for idx in range(num_exported):
@@ -1316,6 +1424,11 @@ def create_export_hydroelastic_reduced_contacts_kernel(writer_func: Any, margin_
                 shape_a = pair[0]
                 shape_b = pair[1]
 
+                # Apply normal matching rotation for penetrating contacts
+                final_normal = contact_normal
+                if wp.static(normal_matching) and use_aggregate_stiffness and depth > 0.0:
+                    final_normal = wp.normalize(wp.quat_rotate(rotation_q, contact_normal))
+
                 # Compute stiffness based on entry type
                 if use_aggregate_stiffness:
                     # Normal bin: shared stiffness from aggregate force
@@ -1329,14 +1442,8 @@ def create_export_hydroelastic_reduced_contacts_kernel(writer_func: Any, margin_
                     else:
                         c_stiffness = wp.static(margin_contact_area) * k_eff
 
-                # Sum margins for consistency with thickness summing
-                margin_a = shape_contact_margin[shape_a]
-                margin_b = shape_contact_margin[shape_b]
-                margin = margin_a + margin_b
-
                 # Transform contact to world space
-                transform_b = shape_transform[shape_b]
-                normal_world = wp.transform_vector(transform_b, contact_normal)
+                normal_world = wp.transform_vector(transform_b, final_normal)
                 pos_world = wp.transform_point(transform_b, position)
 
                 # Create ContactData struct
@@ -1354,6 +1461,30 @@ def create_export_hydroelastic_reduced_contacts_kernel(writer_func: Any, margin_
                 contact_data.contact_stiffness = c_stiffness
 
                 # Call the writer function
+                writer_func(contact_data, writer_data, -1)
+
+            # === Export anchor contact if enabled ===
+            if add_anchor == 1:
+                # Anchor normal is aligned with aggregate force direction
+                anchor_normal = wp.normalize(agg_force_vec)
+                anchor_normal_world = wp.transform_vector(transform_b, anchor_normal)
+                anchor_pos_world = wp.transform_point(transform_b, anchor_pos)
+
+                # Create ContactData for anchor
+                contact_data = ContactData()
+                contact_data.contact_point_center = anchor_pos_world
+                contact_data.contact_normal_a_to_b = anchor_normal_world
+                contact_data.contact_distance = -2.0 * anchor_depth
+                contact_data.radius_eff_a = 0.0
+                contact_data.radius_eff_b = 0.0
+                contact_data.thickness_a = 0.0
+                contact_data.thickness_b = 0.0
+                contact_data.shape_a = shape_a_first
+                contact_data.shape_b = shape_b_first
+                contact_data.margin = margin
+                contact_data.contact_stiffness = shared_stiffness
+
+                # Call the writer function for anchor
                 writer_func(contact_data, writer_data, -1)
 
     return export_hydroelastic_reduced_contacts_kernel
