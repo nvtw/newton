@@ -60,7 +60,6 @@ See Also:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 import warp as wp
@@ -86,7 +85,6 @@ from .contact_reduction import (
     get_spatial_direction_2d,
     project_point_to_plane,
 )
-from .sdf_utils import SDFData
 from .support_function import extract_shape_data
 
 # Fixed beta threshold for contact reduction - small positive value to avoid flickering
