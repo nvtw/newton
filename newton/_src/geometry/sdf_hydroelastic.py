@@ -25,12 +25,10 @@ from newton._src.core.types import MAXVAL
 from ..sim.model import Model
 from .collision_core import sat_box_intersection
 from .contact_reduction_global import (
-    GlobalContactReducer,
     GlobalContactReducerData,
-    create_export_hydroelastic_reduced_contacts_kernel,
+    HydroelasticContactReduction,
+    HydroelasticReductionConfig,
     export_hydroelastic_contact_to_buffer,
-    reduce_hydroelastic_contacts_kernel,
-    reduce_hydroelastic_moment_kernel,
 )
 from .sdf_contact import sample_sdf_extrapolated
 from .sdf_mc import get_mc_tables, mc_calc_face
@@ -38,10 +36,6 @@ from .sdf_utils import SDFData
 from .utils import scan_with_total
 
 vec8f = wp.types.vector(length=8, dtype=wp.float32)
-
-MIN_FRICTION = 1e-4
-EPS_LARGE = 1e-8
-EPS_SMALL = 1e-20
 
 
 @wp.func
@@ -239,20 +233,19 @@ class SDFHydroelastic:
                 self.config.output_contact_surface,
             )
 
-            # Use GlobalContactReducer for efficient hashtable-based contact reduction
+            # Use HydroelasticContactReduction for efficient hashtable-based contact reduction
             # The reducer uses spatial extremes + max-depth per normal bin + voxel-based slots
-            self.contact_reducer = GlobalContactReducer(
-                capacity=self.max_num_face_contacts,
-                device=device,
-                store_hydroelastic_data=True,  # Need area and k_eff for stiffness computation
-            )
-            # Create export kernel with the user's writer function and config options
-            self.export_reduced_contacts_kernel = create_export_hydroelastic_reduced_contacts_kernel(
-                writer_func=writer_func,
-                margin_contact_area=self.config.margin_contact_area,
+            reduction_config = HydroelasticReductionConfig(
                 normal_matching=self.config.normal_matching,
                 anchor_contact=self.config.anchor_contact,
                 moment_matching=self.config.moment_matching,
+                margin_contact_area=self.config.margin_contact_area,
+            )
+            self.contact_reduction = HydroelasticContactReduction(
+                capacity=self.max_num_face_contacts,
+                device=device,
+                writer_func=writer_func,
+                config=reduction_config,
             )
 
         self.grid_size = min(self.config.grid_size, self.max_num_face_contacts)
@@ -340,7 +333,7 @@ class SDFHydroelastic:
             contact_surface_point=self.iso_vertex_point,
             contact_surface_depth=self.iso_vertex_depth,
             contact_surface_shape_pair=self.iso_vertex_shape_pair,
-            face_contact_count=self.contact_reducer.contact_count,
+            face_contact_count=self.contact_reduction.contact_count,
             max_num_face_contacts=self.max_num_face_contacts,
         )
 
@@ -395,7 +388,7 @@ class SDFHydroelastic:
                 self.iso_max_dims[2],
                 self.iso_voxel_count,
                 self.max_num_iso_voxels,
-                self.contact_reducer.contact_count,
+                self.contact_reduction.contact_count,
                 self.max_num_face_contacts,
                 writer_data.contact_count,
                 writer_data.contact_max,
@@ -538,12 +531,12 @@ class SDFHydroelastic:
         shape_transform: wp.array(dtype=wp.transform),
         shape_contact_margin: wp.array(dtype=wp.float32),
     ) -> None:
-        """Generate marching cubes contacts and write directly to GlobalContactReducer.
+        """Generate marching cubes contacts and write directly to the contact buffer.
 
         Single pass: compute cube state and immediately write faces to reducer buffer.
         """
-        self.contact_reducer.clear_active()
-        reducer_data = self.contact_reducer.get_data_struct()
+        self.contact_reduction.clear()
+        reducer_data = self.contact_reduction.get_data_struct()
         wp.launch(
             kernel=self.generate_contacts_kernel,
             dim=[self.grid_size],
@@ -577,63 +570,17 @@ class SDFHydroelastic:
         shape_contact_margin: wp.array(dtype=wp.float32),
         writer_data: Any,
     ) -> None:
-        """Reduce and decode hydroelastic contacts using GlobalContactReducer.
+        """Reduce and decode hydroelastic contacts.
 
-        Contacts are already in the reducer buffer (written by _generate_contacts).
+        Contacts are already in the buffer (written by _generate_contacts).
         This method registers them in the hashtable and exports the reduced set.
         """
-        # Pass 1: Register contacts in hashtable (spatial extremes + max-depth + voxel slots)
-        # Also accumulates aggregate force per (shape_pair, normal_bin) for stiffness calculation
-        reducer_data = self.contact_reducer.get_data_struct()
-        wp.launch(
-            kernel=reduce_hydroelastic_contacts_kernel,
-            dim=[self.grid_size],
-            inputs=[
-                reducer_data,
-                shape_transform,
-                shape_sdf_data,
-                self.grid_size,
-            ],
-            device=self.device,
-        )
-
-        # Pass 1.5: Compute moment contributions (only when moment_matching enabled)
-        # This must run after reduce_hydroelastic_contacts_kernel which accumulates weighted_pos_sum/weight_sum
-        if self.config.moment_matching:
-            wp.launch(
-                kernel=reduce_hydroelastic_moment_kernel,
-                dim=[self.grid_size],
-                inputs=[
-                    reducer_data,
-                    self.grid_size,
-                ],
-                device=self.device,
-            )
-
-        # Pass 2: Export reduced contacts with aggregate stiffness
-        # c_stiffness = k_eff * |agg_force| / total_depth (matching original binning behavior)
-        wp.launch(
-            kernel=self.export_reduced_contacts_kernel,
-            dim=[self.grid_size],
-            inputs=[
-                self.contact_reducer.hashtable.keys,
-                self.contact_reducer.ht_values,
-                self.contact_reducer.hashtable.active_slots,
-                self.contact_reducer.agg_force,
-                self.contact_reducer.weighted_pos_sum,
-                self.contact_reducer.weight_sum,
-                self.contact_reducer.agg_moment,
-                self.contact_reducer.position_depth,
-                self.contact_reducer.normal,
-                self.contact_reducer.shape_pairs,
-                self.contact_reducer.contact_area,
-                self.contact_reducer.contact_k_eff,
-                shape_contact_margin,
-                shape_transform,
-                writer_data,
-                self.grid_size,
-            ],
-            device=self.device,
+        self.contact_reduction.reduce_and_export(
+            shape_transform=shape_transform,
+            shape_sdf_data=shape_sdf_data,
+            shape_contact_margin=shape_contact_margin,
+            writer_data=writer_data,
+            grid_size=self.grid_size,
         )
 
 

@@ -60,6 +60,7 @@ See Also:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import warp as wp
@@ -225,22 +226,6 @@ return static_cast<int32_t>(packed & 0xFFFFFFFFull);
 """)
 def unpack_contact_id(packed: wp.uint64) -> int:
     """Extract contact_id from packed value."""
-    ...
-
-
-@wp.func_native("""
-return reinterpret_cast<float&>(i);
-""")
-def int_as_float(i: wp.int32) -> float:
-    """Reinterpret int32 bits as float32."""
-    ...
-
-
-@wp.func_native("""
-return reinterpret_cast<int&>(f);
-""")
-def float_as_int(f: float) -> wp.int32:
-    """Reinterpret float32 bits as int32."""
     ...
 
 
@@ -1609,3 +1594,272 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 writer_func(contact_data, writer_data, -1)
 
     return export_hydroelastic_reduced_contacts_kernel
+
+
+# =============================================================================
+# Hydroelastic Contact Reduction API
+# =============================================================================
+
+
+@dataclass
+class HydroelasticReductionConfig:
+    """Configuration for hydroelastic contact reduction.
+
+    Attributes:
+        normal_matching: If True, rotate reduced contact normals so their weighted
+            sum aligns with the aggregate force direction.
+        anchor_contact: If True, add an anchor contact at the center of pressure
+            for each normal bin. The anchor contact helps preserve moment balance.
+        moment_matching: If True, scale friction coefficients to match the aggregate
+            moment from unreduced contacts. Requires anchor_contact=True.
+        margin_contact_area: Contact area used for non-penetrating contacts at the margin.
+    """
+
+    normal_matching: bool = True
+    anchor_contact: bool = False
+    moment_matching: bool = False
+    margin_contact_area: float = 1e-2
+
+
+class HydroelasticContactReduction:
+    """High-level API for hydroelastic contact reduction.
+
+    This class encapsulates the hydroelastic contact reduction pipeline, providing
+    a clean interface that hides the low-level kernel launch details. It manages:
+
+    1. A ``GlobalContactReducer`` for contact storage and hashtable tracking
+    2. The reduction kernels for hashtable registration
+    3. The export kernel for writing reduced contacts
+
+    **Usage Pattern:**
+
+    The typical usage in a contact generation pipeline is:
+
+    1. Call ``clear()`` at the start of each frame
+    2. Write contacts to the buffer using ``export_hydroelastic_contact_to_buffer``
+       in your contact generation kernel (use ``get_data_struct()`` to get the data)
+    3. Call ``reduce()`` to register contacts in the hashtable
+    4. Call ``export()`` to write reduced contacts using the writer function
+
+    Example:
+
+        .. code-block:: python
+
+            # Initialize once
+            config = HydroelasticReductionConfig(normal_matching=True)
+            reduction = HydroelasticContactReduction(
+                capacity=100000,
+                device="cuda:0",
+                writer_func=my_writer_func,
+                config=config,
+            )
+
+            # Each frame
+            reduction.clear()
+
+            # Launch your contact generation kernel that uses:
+            # export_hydroelastic_contact_to_buffer(..., reduction.get_data_struct())
+
+            reduction.reduce(shape_transform, shape_sdf_data, grid_size)
+            reduction.export(shape_contact_margin, shape_transform, writer_data, grid_size)
+
+    Attributes:
+        reducer: The underlying ``GlobalContactReducer`` instance.
+        config: The ``HydroelasticReductionConfig`` for this instance.
+        contact_count: Array containing the number of contacts in the buffer.
+
+    See Also:
+        :func:`export_hydroelastic_contact_to_buffer`: Warp function for writing
+            contacts to the buffer from custom kernels.
+        :class:`GlobalContactReducerData`: Struct for passing reducer data to kernels.
+    """
+
+    def __init__(
+        self,
+        capacity: int,
+        device: str | None = None,
+        writer_func: Any = None,
+        config: HydroelasticReductionConfig | None = None,
+    ):
+        """Initialize the hydroelastic contact reduction system.
+
+        Args:
+            capacity: Maximum number of contacts to store in the buffer.
+            device: Warp device (e.g., "cuda:0", "cpu"). If None, uses default device.
+            writer_func: Warp function for writing decoded contacts. Must have signature
+                ``(ContactData, writer_data, int) -> None``.
+            config: Configuration options. If None, uses default ``HydroelasticReductionConfig``.
+        """
+        if config is None:
+            config = HydroelasticReductionConfig()
+        self.config = config
+        self.device = device
+
+        # Create the underlying reducer with hydroelastic data storage enabled
+        self.reducer = GlobalContactReducer(
+            capacity=capacity,
+            device=device,
+            store_hydroelastic_data=True,
+        )
+
+        # Create the export kernel with the configured options
+        self._export_kernel = create_export_hydroelastic_reduced_contacts_kernel(
+            writer_func=writer_func,
+            margin_contact_area=config.margin_contact_area,
+            normal_matching=config.normal_matching,
+            anchor_contact=config.anchor_contact,
+            moment_matching=config.moment_matching,
+        )
+
+    @property
+    def contact_count(self) -> wp.array:
+        """Array containing the current number of contacts in the buffer."""
+        return self.reducer.contact_count
+
+    @property
+    def capacity(self) -> int:
+        """Maximum number of contacts that can be stored."""
+        return self.reducer.capacity
+
+    def get_data_struct(self) -> GlobalContactReducerData:
+        """Get the data struct for passing to Warp kernels.
+
+        Returns:
+            A ``GlobalContactReducerData`` struct containing all arrays needed
+            for contact storage and reduction.
+        """
+        return self.reducer.get_data_struct()
+
+    def clear(self):
+        """Clear all contacts and reset for a new frame.
+
+        This efficiently clears only the active hashtable entries and resets
+        the contact counter. Call this at the start of each simulation step.
+        """
+        self.reducer.clear_active()
+
+    def reduce(
+        self,
+        shape_transform: wp.array,
+        shape_sdf_data: wp.array,
+        grid_size: int,
+    ):
+        """Register buffered contacts in the hashtable for reduction.
+
+        This launches the reduction kernel that processes all contacts in the
+        buffer and registers them in the hashtable based on spatial extremes,
+        max-depth per normal bin, and voxel-based slots.
+
+        Also accumulates aggregate force per (shape_pair, normal_bin) for
+        stiffness calculation.
+
+        Args:
+            shape_transform: Per-shape world transforms (dtype: wp.transform).
+            shape_sdf_data: Per-shape SDF data (dtype: SDFData).
+            grid_size: Number of threads for the kernel launch.
+        """
+        reducer_data = self.reducer.get_data_struct()
+        wp.launch(
+            kernel=reduce_hydroelastic_contacts_kernel,
+            dim=[grid_size],
+            inputs=[
+                reducer_data,
+                shape_transform,
+                shape_sdf_data,
+                grid_size,
+            ],
+            device=self.device,
+        )
+
+    def reduce_moments(self, grid_size: int):
+        """Compute moment contributions for moment matching.
+
+        This is a second pass that computes moment contributions relative to
+        the anchor position (center of pressure) for each normal bin entry.
+        Only call this if ``config.moment_matching`` is True.
+
+        Must be called after ``reduce()`` which accumulates weighted_pos_sum
+        and weight_sum needed for anchor position computation.
+
+        Args:
+            grid_size: Number of threads for the kernel launch.
+        """
+        reducer_data = self.reducer.get_data_struct()
+        wp.launch(
+            kernel=reduce_hydroelastic_moment_kernel,
+            dim=[grid_size],
+            inputs=[
+                reducer_data,
+                grid_size,
+            ],
+            device=self.device,
+        )
+
+    def export(
+        self,
+        shape_contact_margin: wp.array,
+        shape_transform: wp.array,
+        writer_data: Any,
+        grid_size: int,
+    ):
+        """Export reduced contacts using the writer function.
+
+        This exports the winning contacts from the hashtable, computing
+        aggregate stiffness and applying optional normal/moment matching.
+
+        Args:
+            shape_contact_margin: Per-shape contact margin (dtype: float).
+            shape_transform: Per-shape world transforms (dtype: wp.transform).
+            writer_data: Data struct for the writer function.
+            grid_size: Number of threads for the kernel launch.
+        """
+        wp.launch(
+            kernel=self._export_kernel,
+            dim=[grid_size],
+            inputs=[
+                self.reducer.hashtable.keys,
+                self.reducer.ht_values,
+                self.reducer.hashtable.active_slots,
+                self.reducer.agg_force,
+                self.reducer.weighted_pos_sum,
+                self.reducer.weight_sum,
+                self.reducer.agg_moment,
+                self.reducer.position_depth,
+                self.reducer.normal,
+                self.reducer.shape_pairs,
+                self.reducer.contact_area,
+                self.reducer.contact_k_eff,
+                shape_contact_margin,
+                shape_transform,
+                writer_data,
+                grid_size,
+            ],
+            device=self.device,
+        )
+
+    def reduce_and_export(
+        self,
+        shape_transform: wp.array,
+        shape_sdf_data: wp.array,
+        shape_contact_margin: wp.array,
+        writer_data: Any,
+        grid_size: int,
+    ):
+        """Convenience method to reduce and export in one call.
+
+        Combines ``reduce()``, optionally ``reduce_moments()`` (if moment_matching
+        is enabled), and ``export()`` into a single method call.
+
+        Args:
+            shape_transform: Per-shape world transforms (dtype: wp.transform).
+            shape_sdf_data: Per-shape SDF data (dtype: SDFData).
+            shape_contact_margin: Per-shape contact margin (dtype: float).
+            writer_data: Data struct for the writer function.
+            grid_size: Number of threads for the kernel launch.
+        """
+        self.reduce(shape_transform, shape_sdf_data, grid_size)
+
+        if self.config.moment_matching:
+            self.reduce_moments(grid_size)
+
+        self.export(shape_contact_margin, shape_transform, writer_data, grid_size)

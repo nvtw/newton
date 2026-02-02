@@ -325,7 +325,6 @@ class CollisionPipelineUnified:
         - Multiple broad phase modes: NXN (all-pairs), SAP (sweep-and-prune), EXPLICIT (precomputed pairs)
         - Mesh-mesh collision via SDF with contact reduction
         - Optional hydroelastic contact model for compliant surfaces
-        - Contact matching support for warm-starting solvers
     """
 
     def __init__(
