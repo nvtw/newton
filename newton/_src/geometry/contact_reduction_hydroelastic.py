@@ -53,6 +53,8 @@ from .contact_data import ContactData
 from .contact_reduction import (
     NUM_NORMAL_BINS,
     NUM_SPATIAL_DIRECTIONS,
+    NUM_VOXEL_DEPTH_SLOTS,
+    compute_voxel_index,
     get_slot,
     get_spatial_direction_2d,
     project_point_to_plane,
@@ -65,7 +67,6 @@ from .contact_reduction_global import (
     export_contact_to_buffer,
     make_contact_key,
     make_contact_value,
-    reduce_contact_to_voxel_slots,
     reduction_update_slot,
     unpack_contact,
     unpack_contact_id,
@@ -216,19 +217,28 @@ def reduce_hydroelastic_contacts_kernel(
                 # weight_sum = sum(area * |depth|) - for normalizing anchor position
                 wp.atomic_add(reducer_data.weight_sum, entry_idx, force_weight)
 
-        # === Part 2: Voxel-based reduction (shared with global contact reducer) ===
-        reduce_contact_to_voxel_slots(
-            i,  # contact_id
-            position,
-            depth,
-            shape_a,
-            shape_b,
-            reducer_data,
-            shape_transform,
-            shape_local_aabb_lower,
-            shape_local_aabb_upper,
-            shape_voxel_resolution,
-        )
+        # === Part 2: Voxel-based reduction using shape_b's (SDF) local space ===
+        # Hydroelastic contacts are in SDF local space (shape_b's frame)
+        # Use shape_b's local AABB for voxel computation (contact surface lives here)
+        aabb_lower = shape_local_aabb_lower[shape_b]
+        aabb_upper = shape_local_aabb_upper[shape_b]
+        voxel_res = shape_voxel_resolution[shape_b]
+        voxel_idx = compute_voxel_index(position, aabb_lower, aabb_upper, voxel_res)
+        voxel_idx = wp.clamp(voxel_idx, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1))
+
+        # Group voxels by 7 to maximize slot utilization (matches values_per_key)
+        voxels_per_group = wp.static(NUM_SPATIAL_DIRECTIONS + 1)  # = 7
+        voxel_group = voxel_idx // voxels_per_group
+        voxel_local_slot = voxel_idx % voxels_per_group
+
+        voxel_bin_id = NUM_NORMAL_BINS + voxel_group
+        voxel_key = make_contact_key(shape_a, shape_b, voxel_bin_id)
+
+        voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
+        if voxel_entry_idx >= 0:
+            # Use -depth so atomic_max selects most penetrating (most negative depth)
+            voxel_value = make_contact_value(-depth, i)
+            reduction_update_slot(voxel_entry_idx, voxel_local_slot, voxel_value, reducer_data.ht_values, ht_capacity)
 
 
 @wp.kernel(enable_backward=False)
