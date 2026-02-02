@@ -178,6 +178,9 @@ def reduce_hydroelastic_contacts_kernel(
         shape_a = pair[0]  # First shape
         shape_b = pair[1]  # Second shape
 
+        aabb_lower = shape_local_aabb_lower[shape_b]
+        aabb_upper = shape_local_aabb_upper[shape_b]
+
         ht_capacity = reducer_data.ht_capacity
 
         # === Part 1: Normal-binned reduction (spatial extremes + max-depth per bin) ===
@@ -190,7 +193,7 @@ def reduce_hydroelastic_contacts_kernel(
         if entry_idx >= 0:
             # Standard convention: depth < 0 means penetrating
             # Include all penetrating contacts and near-surface contacts in spatial competition
-            use_beta = depth < wp.static(BETA_THRESHOLD)
+            use_beta = depth < wp.static(BETA_THRESHOLD) * wp.length(aabb_upper - aabb_lower)
             for dir_i in range(NUM_SPATIAL_DIRECTIONS):
                 if use_beta:
                     dir_2d = get_spatial_direction_2d(dir_i)
@@ -220,8 +223,6 @@ def reduce_hydroelastic_contacts_kernel(
         # === Part 2: Voxel-based reduction using shape_b's (SDF) local space ===
         # Hydroelastic contacts are in SDF local space (shape_b's frame)
         # Use shape_b's local AABB for voxel computation (contact surface lives here)
-        aabb_lower = shape_local_aabb_lower[shape_b]
-        aabb_upper = shape_local_aabb_upper[shape_b]
         voxel_res = shape_voxel_resolution[shape_b]
         voxel_idx = compute_voxel_index(position, aabb_lower, aabb_upper, voxel_res)
         voxel_idx = wp.clamp(voxel_idx, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1))
