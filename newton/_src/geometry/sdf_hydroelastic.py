@@ -25,12 +25,13 @@ from newton._src.core.types import MAXVAL
 from ..sim.model import Model
 from .collision_core import sat_box_intersection
 from .contact_data import ContactData
-from .contact_reduction import (
-    NUM_NORMAL_BINS,
-    NUM_SPATIAL_DIRECTIONS,
-    get_slot,
-    get_spatial_direction_2d,
-    project_point_to_plane,
+from .contact_reduction import NUM_NORMAL_BINS, NUM_SPATIAL_DIRECTIONS
+from .contact_reduction_global import (
+    GlobalContactReducer,
+    GlobalContactReducerData,
+    create_export_hydroelastic_reduced_contacts_kernel,
+    export_hydroelastic_contact_to_buffer,
+    reduce_hydroelastic_contacts_kernel,
 )
 from .sdf_contact import sample_sdf_extrapolated
 from .sdf_mc import get_mc_tables, mc_calc_face
@@ -47,6 +48,68 @@ EPS_SMALL = 1e-20
 @wp.func
 def int_to_vec3f(x: wp.int32, y: wp.int32, z: wp.int32):
     return wp.vec3f(float(x), float(y), float(z))
+
+
+@wp.func
+def get_effective_stiffness(k_a: wp.float32, k_b: wp.float32) -> wp.float32:
+    """Compute effective stiffness for two materials in series."""
+    return (k_a * k_b) / (k_a + k_b)
+
+
+def get_write_face_contacts_to_reducer_kernel():
+    """Create a kernel that writes face contacts to the GlobalContactReducer buffer.
+
+    This kernel copies contact data from the hydroelastic face contact buffers
+    to the GlobalContactReducer's contact buffer, including area and k_eff
+    needed for stiffness computation during export.
+
+    Returns:
+        A warp kernel for writing face contacts to the reducer.
+    """
+
+    @wp.kernel(enable_backward=False)
+    def write_face_contacts_to_reducer_kernel(
+        grid_size: int,
+        face_contact_count: wp.array(dtype=wp.int32),
+        face_contact_pair: wp.array(dtype=wp.vec2i),
+        face_contact_pos: wp.array(dtype=wp.vec3),
+        face_contact_normal: wp.array(dtype=wp.vec3),
+        face_contact_depth: wp.array(dtype=wp.float32),
+        face_contact_area: wp.array(dtype=wp.float32),
+        shape_material_k_hydro: wp.array(dtype=wp.float32),
+        max_num_face_contacts: int,
+        reducer_data: GlobalContactReducerData,
+    ):
+        """Copy face contacts to the reducer buffer with area and k_eff."""
+        tid = wp.tid()
+
+        # Get actual contact count
+        count = face_contact_count[0]
+        if count > max_num_face_contacts:
+            count = max_num_face_contacts
+
+        # Grid-stride loop over face contacts
+        for i in range(tid, count, grid_size):
+            pair = face_contact_pair[i]
+            shape_a = pair[0]
+            shape_b = pair[1]
+
+            pos = face_contact_pos[i]
+            normal = face_contact_normal[i]
+            depth = face_contact_depth[i]
+            area = face_contact_area[i]
+
+            # Compute effective stiffness
+            k_a = shape_material_k_hydro[shape_a]
+            k_b = shape_material_k_hydro[shape_b]
+            k_eff = get_effective_stiffness(k_a, k_b)
+
+            # Write to reducer buffer
+            export_hydroelastic_contact_to_buffer(
+                shape_a, shape_b, pos, normal, depth, area, k_eff, reducer_data
+            )
+
+    return write_face_contacts_to_reducer_kernel
 
 
 @dataclass
@@ -77,7 +140,8 @@ class SDFHydroelasticConfig:
     """
 
     reduce_contacts: bool = True
-    """Whether to reduce contacts to a smaller representative set per shape pair."""
+    """Whether to reduce contacts to a smaller representative set per shape pair using
+    the GlobalContactReducer (hashtable-based spatial extremes + max-depth + voxel slots)."""
     buffer_mult_broad: int = 1
     """Multiplier for the preallocated broadphase buffer that stores overlapping
     block pairs. Increase only if a broadphase overflow warning is issued."""
@@ -91,16 +155,6 @@ class SDFHydroelasticConfig:
     """Grid size for contact handling. Can be tuned for performance."""
     output_contact_surface: bool = False
     """Whether to output hydroelastic contact surface vertices for visualization."""
-    betas: tuple[float, float] = (10.0, -0.5)
-    """Penetration beta values for contact reduction heuristics. See :meth:`compute_score` for more details."""
-    sticky_contacts: float = 0.0
-    """Stickiness factor for temporal contact persistence. Setting it to a small positive value (e.g. 1e-6) can prevent jittering contacts in certain scenarios. Default is 0.0 (no stickiness)."""
-    normal_matching: bool = True
-    """Whether to adjust reduced contacts normals so their net force direction matches
-    that of the reference given by unreduced contacts. Only active when `reduce_contacts` is True."""
-    moment_matching: bool = False
-    """Whether to attempt adjusting reduced contacts friction coefficients so their net maximum moment matches
-    that of the reference given by unreduced contacts. Only active when `reduce_contacts` is True."""
     margin_contact_area: float = 1e-2
     """Contact area used for non-penetrating contacts at the margin."""
 
@@ -250,48 +304,19 @@ class SDFHydroelastic:
             )
 
             if self.config.reduce_contacts:
-                self.penetration_betas = wp.array(self.config.betas, dtype=wp.float32)
-                self.num_betas = len(self.config.betas)
-                self.bin_directions = NUM_SPATIAL_DIRECTIONS
-                num_normal_bins = NUM_NORMAL_BINS
-
-                self.max_num_bins = self.max_num_shape_pairs
-                self.sparse_pair_size = self.n_shapes * self.n_shapes
-
-                self.shape_pairs_mask = wp.zeros(self.sparse_pair_size, dtype=wp.int32)
-                self.shape_pairs_to_bin = wp.zeros((self.sparse_pair_size,), dtype=wp.int32)
-                self.shape_pairs_to_bin_prev = wp.clone(self.shape_pairs_to_bin)
-                self.bin_to_shape_pair = wp.zeros((self.max_num_bins,), dtype=wp.int32)
-                self.num_total_pairs = wp.array((self.max_num_shape_pairs,), dtype=wp.int32)
-                self.num_active_pairs = wp.zeros((1,), dtype=wp.int32)
-
-                n_slots = (
-                    self.num_betas * self.bin_directions + 1
-                )  # track the max dot product for each beta and direction + contact with deepest penetration depth
-                self.binned_normals = wp.zeros((self.max_num_bins, num_normal_bins, n_slots), dtype=wp.vec3f)
-                self.binned_pos = wp.zeros((self.max_num_bins, num_normal_bins, n_slots), dtype=wp.vec3f)
-                self.binned_depth = wp.zeros((self.max_num_bins, num_normal_bins, n_slots), dtype=wp.float32)
-                self.binned_dot_product = wp.zeros((self.max_num_bins, num_normal_bins, n_slots), dtype=wp.float32)
-                self.binned_id = wp.full((self.max_num_bins, num_normal_bins, n_slots), dtype=wp.int32, value=-1)
-                self.binned_id_prev = wp.clone(self.binned_id)
-
-                self.bin_occupied = wp.zeros((self.max_num_bins, num_normal_bins), dtype=wp.bool)
-                self.binned_agg_force = wp.zeros((self.max_num_bins, num_normal_bins), dtype=wp.vec3f)
-                self.binned_weighted_pos_sum = wp.zeros((self.max_num_bins, num_normal_bins), dtype=wp.vec3f)
-                self.binned_weight_sum = wp.zeros((self.max_num_bins, num_normal_bins), dtype=wp.float32)
-                self.binned_agg_moment = wp.zeros((self.max_num_bins, num_normal_bins), dtype=wp.float32)
-
-                self.compute_bin_scores, self.assign_contacts_to_bins, self.generate_contacts_from_bins = (
-                    get_binning_kernels(
-                        self.bin_directions,
-                        num_normal_bins,
-                        self.num_betas,
-                        self.config.sticky_contacts,
-                        self.config.normal_matching,
-                        self.config.moment_matching,
-                        self.config.margin_contact_area,
-                        writer_func,
-                    )
+                # Use GlobalContactReducer for efficient hashtable-based contact reduction
+                # The reducer uses spatial extremes + max-depth per normal bin + voxel-based slots
+                self.contact_reducer = GlobalContactReducer(
+                    capacity=self.max_num_face_contacts,
+                    device=device,
+                    store_hydroelastic_data=True,  # Need area and k_eff for stiffness computation
+                )
+                # Create write kernel to copy face contacts to reducer buffer
+                self.write_face_contacts_to_reducer_kernel = get_write_face_contacts_to_reducer_kernel()
+                # Create export kernel with the user's writer function
+                self.export_reduced_contacts_kernel = create_export_hydroelastic_reduced_contacts_kernel(
+                    writer_func=writer_func,
+                    margin_contact_area=self.config.margin_contact_area,
                 )
             else:
                 self.decode_contacts_kernel = get_decode_contacts_kernel(self.config.margin_contact_area, writer_func)
@@ -417,6 +442,7 @@ class SDFHydroelastic:
 
         if self.config.reduce_contacts:
             self._reduce_decode_contacts(
+                shape_sdf_data,
                 shape_transform,
                 shape_contact_margin,
                 writer_data,
@@ -674,126 +700,74 @@ class SDFHydroelastic:
 
     def _reduce_decode_contacts(
         self,
+        shape_sdf_data: wp.array(dtype=SDFData),
         shape_transform: wp.array(dtype=wp.transform),
         shape_contact_margin: wp.array(dtype=wp.float32),
         writer_data: Any,
     ) -> None:
-        wp.copy(self.binned_id_prev, self.binned_id)
-        wp.copy(self.shape_pairs_to_bin_prev, self.shape_pairs_to_bin)
+        """Reduce and decode hydroelastic contacts using GlobalContactReducer.
 
-        self.binned_dot_product.fill_(-1e10)
-        self.binned_agg_force.zero_()
-        self.binned_weighted_pos_sum.zero_()
-        self.binned_weight_sum.zero_()
-        self.binned_agg_moment.zero_()
-        self.bin_occupied.zero_()
-        self.shape_pairs_mask.zero_()
-        self.bin_to_shape_pair.fill_(-1)
-        self.num_active_pairs.zero_()
+        Uses a three-pass approach:
+        1. Write face contacts to the reducer buffer (with area and k_eff)
+        2. Register contacts in hashtable for reduction (accumulates agg_force)
+        3. Export reduced contacts with aggregate stiffness calculation
+        """
+        # Clear the reducer (efficient sparse clear)
+        self.contact_reducer.clear_active()
 
-        # Pass 1: Mark active shape pairs from face_contact_pair (vec2i)
+        # Pass 1: Copy face contacts to the reducer buffer
         wp.launch(
-            mark_active_shape_pairs,
-            dim=[self.max_num_face_contacts],
-            inputs=[
-                self.face_contact_pair,
-                self.face_contact_count,
-                self.max_num_face_contacts,
-                self.n_shapes,
-            ],
-            outputs=[self.shape_pairs_mask],
-            device=self.device,
-        )
-
-        # Pass 2: Prefix sum to get contiguous bin indices
-        wp.utils.array_scan(self.shape_pairs_mask, self.shape_pairs_to_bin, inclusive=False)
-
-        wp.launch(
-            kernel=self.compute_bin_scores,
+            kernel=self.write_face_contacts_to_reducer_kernel,
             dim=[self.grid_size],
             inputs=[
                 self.grid_size,
                 self.face_contact_count,
-                self.face_contact_normal,
+                self.face_contact_pair,
                 self.face_contact_pos,
+                self.face_contact_normal,
                 self.face_contact_depth,
                 self.face_contact_area,
-                self.face_contact_id,
-                self.face_contact_pair,
-                self.n_shapes,
-                self.max_num_face_contacts,
-                self.shape_pairs_to_bin,
-                self.penetration_betas,
-                self.binned_id_prev,
-                self.shape_pairs_to_bin_prev,
-            ],
-            outputs=[
-                self.binned_dot_product,
-                self.binned_agg_force,
-                self.bin_occupied,
-                self.contact_normal_bin_idx,
-                self.bin_to_shape_pair,
-                self.binned_weighted_pos_sum,
-                self.binned_weight_sum,
-            ],
-            device=self.device,
-        )
-
-        wp.launch(
-            kernel=self.assign_contacts_to_bins,
-            dim=[self.grid_size],
-            inputs=[
-                self.grid_size,
-                self.face_contact_count,
-                self.face_contact_normal,
-                self.contact_normal_bin_idx,
-                self.face_contact_pos,
-                self.face_contact_depth,
-                self.face_contact_area,
-                self.face_contact_pair,
-                self.n_shapes,
-                self.max_num_face_contacts,
-                self.face_contact_id,
-                self.shape_pairs_to_bin,
-                self.penetration_betas,
-                self.binned_dot_product,
-                self.binned_id_prev,
-                self.shape_pairs_to_bin_prev,
-                self.binned_weighted_pos_sum,
-                self.binned_weight_sum,
-            ],
-            outputs=[
-                self.binned_normals,
-                self.binned_pos,
-                self.binned_depth,
-                self.binned_id,
-                self.binned_agg_moment,
-            ],
-            device=self.device,
-        )
-
-        wp.launch(
-            kernel=self.generate_contacts_from_bins,
-            dim=[self.binned_pos.shape[0], self.binned_pos.shape[1]],
-            inputs=[
-                shape_transform,
-                shape_contact_margin,
                 self.shape_material_k_hydro,
-                self.n_shapes,
-                self.bin_to_shape_pair,
-                self.binned_normals,
-                self.binned_pos,
-                self.binned_depth,
-                self.binned_id,
-                self.binned_dot_product,
-                self.bin_occupied,
-                self.binned_agg_force,
-                self.binned_agg_moment,
-                self.binned_weighted_pos_sum,
-                self.binned_weight_sum,
+                self.max_num_face_contacts,
+                self.contact_reducer.get_data_struct(),
             ],
-            outputs=[
+            device=self.device,
+        )
+
+        # Pass 2: Register contacts in hashtable (spatial extremes + max-depth + voxel slots)
+        # Also accumulates aggregate force per (shape_pair, normal_bin) for stiffness calculation
+        reducer_data = self.contact_reducer.get_data_struct()
+        wp.launch(
+            kernel=reduce_hydroelastic_contacts_kernel,
+            dim=[self.grid_size],
+            inputs=[
+                reducer_data,
+                shape_transform,
+                shape_sdf_data,
+                self.grid_size,
+            ],
+            device=self.device,
+        )
+
+        # Pass 3: Export reduced contacts with aggregate stiffness
+        # c_stiffness = k_eff * |agg_force| / total_depth (matching original binning behavior)
+        wp.launch(
+            kernel=self.export_reduced_contacts_kernel,
+            dim=[self.grid_size],
+            inputs=[
+                self.contact_reducer.hashtable.keys,
+                self.contact_reducer.ht_values,
+                self.contact_reducer.hashtable.active_slots,
+                self.contact_reducer.agg_force,
+                self.contact_reducer.position_depth,
+                self.contact_reducer.normal,
+                self.contact_reducer.shape_pairs,
+                self.contact_reducer.contact_area,
+                self.contact_reducer.contact_k_eff,
+                shape_contact_margin,
+                shape_transform,
                 writer_data,
+                self.grid_size,
             ],
             device=self.device,
         )
@@ -933,11 +907,6 @@ def decode_coords_8(bit_pos: wp.uint8) -> wp.vec3ub:
 def get_rel_stiffness(k_a: wp.float32, k_b: wp.float32) -> tuple[wp.float32, wp.float32]:
     k_m_inv = 1.0 / wp.sqrt(k_a * k_b)
     return k_a * k_m_inv, k_b * k_m_inv
-
-
-@wp.func
-def get_effective_stiffness(k_a: wp.float32, k_b: wp.float32) -> wp.float32:
-    return (k_a * k_b) / (k_a + k_b)
 
 
 @wp.func
