@@ -65,6 +65,7 @@ from .contact_reduction_global import (
     GlobalContactReducer,
     GlobalContactReducerData,
     export_contact_to_buffer,
+    is_contact_already_exported,
     make_contact_key,
     make_contact_value,
     reduction_update_slot,
@@ -424,14 +425,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 contact_id = unpack_contact_id(value)
 
                 # Skip if already exported
-                already_exported = bool(False)
-                j = int(0)
-                while j < num_exported:
-                    if exported_ids[j] == contact_id:
-                        already_exported = True
-                        break
-                    j = j + 1
-                if already_exported:
+                if is_contact_already_exported(contact_id, exported_ids, num_exported):
                     continue
 
                 # Unpack contact data

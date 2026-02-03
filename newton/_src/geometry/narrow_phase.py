@@ -1499,6 +1499,7 @@ class NarrowPhase:
                         self.global_contact_reducer.position_depth,
                         self.global_contact_reducer.normal,
                         self.global_contact_reducer.shape_pairs,
+                        shape_types,
                         shape_data,
                         shape_contact_margin,
                         writer_data,

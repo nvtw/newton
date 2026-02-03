@@ -86,6 +86,7 @@ from .contact_reduction import (
     project_point_to_plane,
 )
 from .support_function import extract_shape_data
+from .types import GeoType
 
 # Fixed beta threshold for contact reduction - small positive value to avoid flickering
 # from numerical noise while effectively selecting only near-penetrating contacts for
@@ -94,6 +95,53 @@ BETA_THRESHOLD = 0.0001  # 0.1mm
 
 # Number of value slots per hashtable entry: 6 spatial directions + 1 max-depth = 7
 VALUES_PER_KEY = NUM_SPATIAL_DIRECTIONS + 1
+
+# Vector type for tracking exported contact IDs (used in export kernels)
+exported_ids_vec_type = wp.types.vector(length=VALUES_PER_KEY, dtype=wp.int32)
+
+
+@wp.func
+def is_contact_already_exported(
+    contact_id: int,
+    exported_ids: wp.types.vector(length=VALUES_PER_KEY, dtype=wp.int32),
+    num_exported: int,
+) -> bool:
+    """Check if a contact_id is already in the exported list.
+
+    Args:
+        contact_id: The contact ID to check
+        exported_ids: Vector of already exported contact IDs
+        num_exported: Number of valid entries in exported_ids
+
+    Returns:
+        True if contact_id is already in the list, False otherwise
+    """
+    j = int(0)
+    while j < num_exported:
+        if exported_ids[j] == contact_id:
+            return True
+        j = j + 1
+    return False
+
+
+@wp.func
+def compute_effective_radius(shape_type: int, shape_scale: wp.vec4) -> float:
+    """Compute effective radius for a shape based on its type.
+
+    For shapes that can be represented as Minkowski sums with a sphere (sphere, capsule),
+    the effective radius is the sphere radius component. For other shapes, it's 0.
+
+    Args:
+        shape_type: The GeoType of the shape
+        shape_scale: Shape scale data (vec4, xyz are scale components)
+
+    Returns:
+        Effective radius (scale[0] for sphere/capsule, 0 otherwise)
+    """
+    if shape_type == int(wp.static(GeoType.SPHERE)) or shape_type == int(wp.static(GeoType.CAPSULE)):
+        return shape_scale[0]
+    return 0.0
+
 
 # =============================================================================
 # Reduction slot functions (specific to contact reduction)
@@ -837,7 +885,8 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
         position_depth: wp.array(dtype=wp.vec4),
         normal: wp.array(dtype=wp.vec3),
         shape_pairs: wp.array(dtype=wp.vec2i),
-        # Shape data for extracting thickness
+        # Shape data for extracting thickness and effective radius
+        shape_types: wp.array(dtype=int),
         shape_data: wp.array(dtype=wp.vec4),
         # Per-shape contact margins
         shape_contact_margin: wp.array(dtype=float),
@@ -882,17 +931,8 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
                 # Extract contact ID from low 32 bits
                 contact_id = unpack_contact_id(value)
 
-                # Skip if already exported - use while loop with early exit
-                # This is O(num_exported) instead of O(VALUES_PER_KEY) per slot
-                # Note: Use explicit type declarations for variables mutated in while loops (Warp requirement)
-                already_exported = bool(False)
-                j = int(0)
-                while j < num_exported:
-                    if exported_ids[j] == contact_id:
-                        already_exported = True
-                        break  # Early exit when duplicate found
-                    j = j + 1
-                if already_exported:
+                # Skip if already exported
+                if is_contact_already_exported(contact_id, exported_ids, num_exported):
                     continue
 
                 # Record this contact ID as exported
@@ -911,6 +951,10 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
                 thickness_a = shape_data[shape_a][3]
                 thickness_b = shape_data[shape_b][3]
 
+                # Compute effective radius for spheres, capsules, and cones
+                radius_eff_a = compute_effective_radius(shape_types[shape_a], shape_data[shape_a])
+                radius_eff_b = compute_effective_radius(shape_types[shape_b], shape_data[shape_b])
+
                 # Use per-shape contact margin (max of both shapes, matching other kernels)
                 margin_a = shape_contact_margin[shape_a]
                 margin_b = shape_contact_margin[shape_b]
@@ -921,8 +965,8 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
                 contact_data.contact_point_center = position
                 contact_data.contact_normal_a_to_b = contact_normal
                 contact_data.contact_distance = depth
-                contact_data.radius_eff_a = 0.0
-                contact_data.radius_eff_b = 0.0
+                contact_data.radius_eff_a = radius_eff_a
+                contact_data.radius_eff_b = radius_eff_b
                 contact_data.thickness_a = thickness_a
                 contact_data.thickness_b = thickness_b
                 contact_data.shape_a = shape_a
