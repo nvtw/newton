@@ -535,19 +535,23 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 ref_moment = agg_moment[entry_idx]
 
                 # Compute selected_moment: moment of reduced contacts relative to anchor
+                # Must use area * |depth| weighting to match agg_moment accumulation
                 selected_moment = wp.float32(0.0)
                 for idx in range(num_exported):
                     contact_id = exported_ids[idx]
                     depth = exported_depths[idx]
                     if depth < 0.0:  # Penetrating contact (depth < 0)
-                        # Get contact position
+                        # Get contact position and area
                         pd = position_depth[contact_id]
                         pos = wp.vec3(pd[0], pd[1], pd[2])
                         contact_normal = normal[contact_id]
+                        contact_area_val = contact_area[contact_id]
                         # Moment arm from anchor to contact
                         r_to_contact = pos - anchor_pos
-                        # Use |depth| for moment calculation
-                        selected_moment = selected_moment + (-depth) * wp.length(wp.cross(r_to_contact, contact_normal))
+                        # Use area * |depth| for moment calculation (matches agg_moment weighting)
+                        selected_moment = selected_moment + contact_area_val * (-depth) * wp.length(
+                            wp.cross(r_to_contact, contact_normal)
+                        )
 
                 # Scale unique friction to match moments:
                 # unique_friction = (ref_moment * total_depth) / (agg_force_mag * selected_moment)

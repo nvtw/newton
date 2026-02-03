@@ -817,8 +817,9 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
     and can locally track which contact IDs it has already exported.
 
     Args:
-        writer_func: A warp function with signature (ContactData, writer_data) -> None
-                     This follows the same pattern as narrow_phase.py's write_contact_simple.
+        writer_func: A warp function with signature (ContactData, writer_data, int) -> None.
+            The third argument is an output_index (-1 indicates the writer should allocate
+            a new slot). This follows the same pattern as narrow_phase.py's write_contact_simple.
 
     Returns:
         A warp kernel that can be launched to export reduced contacts.

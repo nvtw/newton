@@ -438,7 +438,7 @@ class Example:
         ]
 
         if self.put_in_cup:
-            loose_pos = 0.76
+            loose_pos = 0.74
             wps = []
             cup_pos_higher = wp.vec3([self.cup_pos[0] + self.place_offset, self.cup_pos[1], self.z_rest])
             cup_pos_lower = wp.vec3([self.cup_pos[0] + self.place_offset, self.cup_pos[1], self.z_rest - 0.1])
