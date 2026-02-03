@@ -6676,9 +6676,9 @@ class ModelBuilder:
             voxel_resolution = []
             voxel_budget = 100  # Maximum voxels per shape for contact reduction
 
-            # Cache per unique (mesh_id, scale) to avoid redundant AABB computation
-            # for instanced meshes (e.g., 256 robots sharing the same mesh sources)
-            mesh_aabb_cache = {}
+            # Cache per unique (shape_type, shape_params, margin) to avoid redundant AABB computation
+            # for instanced shapes (e.g., 256 robots sharing the same shape parameters)
+            shape_aabb_cache = {}
 
             def compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget):
                 """Compute voxel resolution from AABB with given budget."""
@@ -6714,14 +6714,18 @@ class ModelBuilder:
                 # Get margin to expand AABB (SDF extends beyond shape bounds by margin + thickness)
                 margin = self.shape_contact_margin[shape_idx] + self.shape_thickness[shape_idx]
 
+                # Create cache key based on shape type and parameters
                 if shape_type == GeoType.MESH and shape_src is not None:
-                    # Use mesh id, scale, and margin as cache key
-                    cache_key = (id(shape_src), tuple(shape_scale), margin)
+                    cache_key = (shape_type, id(shape_src), tuple(shape_scale), margin)
+                else:
+                    cache_key = (shape_type, tuple(shape_scale), margin)
 
-                    if cache_key in mesh_aabb_cache:
-                        # Reuse cached result
-                        aabb_lower, aabb_upper, nx, ny, nz = mesh_aabb_cache[cache_key]
-                    else:
+                # Check cache first
+                if cache_key in shape_aabb_cache:
+                    aabb_lower, aabb_upper, nx, ny, nz = shape_aabb_cache[cache_key]
+                else:
+                    # Compute AABB based on shape type
+                    if shape_type == GeoType.MESH and shape_src is not None:
                         # Compute local AABB from mesh vertices
                         vertices = shape_src.vertices
                         aabb_lower = vertices.min(axis=0)
@@ -6737,53 +6741,53 @@ class ModelBuilder:
 
                         nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
-                        # Cache the result
-                        mesh_aabb_cache[cache_key] = (aabb_lower, aabb_upper, nx, ny, nz)
+                    elif shape_type == GeoType.BOX:
+                        # Box: shape_scale = (hx, hy, hz) half-extents
+                        hx, hy, hz = shape_scale
+                        aabb_lower = np.array([-hx - margin, -hy - margin, -hz - margin])
+                        aabb_upper = np.array([hx + margin, hy + margin, hz + margin])
+                        nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
-                elif shape_type == GeoType.BOX:
-                    # Box: shape_scale = (hx, hy, hz) half-extents
-                    hx, hy, hz = shape_scale
-                    aabb_lower = np.array([-hx - margin, -hy - margin, -hz - margin])
-                    aabb_upper = np.array([hx + margin, hy + margin, hz + margin])
-                    nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
+                    elif shape_type == GeoType.SPHERE:
+                        # Sphere: shape_scale = (radius, radius, radius)
+                        r = shape_scale[0] + margin
+                        aabb_lower = np.array([-r, -r, -r])
+                        aabb_upper = np.array([r, r, r])
+                        nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
-                elif shape_type == GeoType.SPHERE:
-                    # Sphere: shape_scale = (radius, radius, radius)
-                    r = shape_scale[0] + margin
-                    aabb_lower = np.array([-r, -r, -r])
-                    aabb_upper = np.array([r, r, r])
-                    nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
+                    elif shape_type == GeoType.CAPSULE:
+                        # Capsule: shape_scale = (radius, half_height, radius)
+                        # Capsule is along Z axis with hemispherical caps (matches SDF in kernels.py)
+                        r, half_height, _ = shape_scale
+                        r_expanded = r + margin
+                        aabb_lower = np.array([-r_expanded, -r_expanded, -half_height - r_expanded])
+                        aabb_upper = np.array([r_expanded, r_expanded, half_height + r_expanded])
+                        nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
-                elif shape_type == GeoType.CAPSULE:
-                    # Capsule: shape_scale = (radius, half_height, radius)
-                    # Capsule is along Z axis with hemispherical caps (matches SDF in kernels.py)
-                    r, half_height, _ = shape_scale
-                    r_expanded = r + margin
-                    aabb_lower = np.array([-r_expanded, -r_expanded, -half_height - r_expanded])
-                    aabb_upper = np.array([r_expanded, r_expanded, half_height + r_expanded])
-                    nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
+                    elif shape_type == GeoType.CYLINDER:
+                        # Cylinder: shape_scale = (radius, half_height, radius)
+                        # Cylinder is along Z axis (matches SDF in kernels.py)
+                        r, half_height, _ = shape_scale
+                        aabb_lower = np.array([-r - margin, -r - margin, -half_height - margin])
+                        aabb_upper = np.array([r + margin, r + margin, half_height + margin])
+                        nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
-                elif shape_type == GeoType.CYLINDER:
-                    # Cylinder: shape_scale = (radius, half_height, radius)
-                    # Cylinder is along Z axis (matches SDF in kernels.py)
-                    r, half_height, _ = shape_scale
-                    aabb_lower = np.array([-r - margin, -r - margin, -half_height - margin])
-                    aabb_upper = np.array([r + margin, r + margin, half_height + margin])
-                    nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
+                    elif shape_type == GeoType.CONE:
+                        # Cone: shape_scale = (radius, half_height, radius)
+                        # Cone is along Z axis (matches SDF in kernels.py)
+                        r, half_height, _ = shape_scale
+                        aabb_lower = np.array([-r - margin, -r - margin, -half_height - margin])
+                        aabb_upper = np.array([r + margin, r + margin, half_height + margin])
+                        nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
-                elif shape_type == GeoType.CONE:
-                    # Cone: shape_scale = (radius, half_height, radius)
-                    # Cone is along Z axis (matches SDF in kernels.py)
-                    r, half_height, _ = shape_scale
-                    aabb_lower = np.array([-r - margin, -r - margin, -half_height - margin])
-                    aabb_upper = np.array([r + margin, r + margin, half_height + margin])
-                    nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
+                    else:
+                        # Other shapes (PLANE, HFIELD, etc.): use default unit cube with 1x1x1 voxel grid
+                        aabb_lower = np.array([-1.0, -1.0, -1.0])
+                        aabb_upper = np.array([1.0, 1.0, 1.0])
+                        nx, ny, nz = 1, 1, 1
 
-                else:
-                    # Other shapes (PLANE, HFIELD, etc.): use default unit cube with 1x1x1 voxel grid
-                    aabb_lower = np.array([-1.0, -1.0, -1.0])
-                    aabb_upper = np.array([1.0, 1.0, 1.0])
-                    nx, ny, nz = 1, 1, 1
+                    # Cache the result for reuse by identical shapes
+                    shape_aabb_cache[cache_key] = (aabb_lower, aabb_upper, nx, ny, nz)
 
                 local_aabb_lower.append(aabb_lower)
                 local_aabb_upper.append(aabb_upper)

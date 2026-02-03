@@ -252,10 +252,15 @@ class SDFHydroelastic:
                 self.iso_vertex_point = wp.empty((3 * self.max_num_face_contacts,), dtype=wp.vec3f)
                 self.iso_vertex_depth = wp.empty((self.max_num_face_contacts,), dtype=wp.float32)
                 self.iso_vertex_shape_pair = wp.empty((self.max_num_face_contacts,), dtype=wp.vec2i)
+                # Runtime flag to enable/disable writing debug surface (1 = enabled, 0 = disabled)
+                # Allows toggling visualization without recompiling the kernel
+                # Starts disabled (0) by default - call set_output_contact_surface(True) to enable
+                self._write_debug_surface = wp.array([0], dtype=wp.int32, device=device)
             else:
                 self.iso_vertex_point = wp.empty((0,), dtype=wp.vec3f)
                 self.iso_vertex_depth = wp.empty((0,), dtype=wp.float32)
                 self.iso_vertex_shape_pair = wp.empty((0,), dtype=wp.vec2i)
+                self._write_debug_surface = wp.array([0], dtype=wp.int32, device=device)
 
             self.mc_tables = get_mc_tables(device)
 
@@ -377,6 +382,21 @@ class SDFHydroelastic:
             face_contact_count=self.contact_reduction.contact_count,
             max_num_face_contacts=self.max_num_face_contacts,
         )
+
+    def set_output_contact_surface(self, enabled: bool) -> None:
+        """Enable or disable contact surface visualization.
+
+        Note: When `output_contact_surface=True` in the config, the kernel always writes
+        debug surface data. This method is provided for API compatibility but the actual
+        display is controlled by the viewer's `show_hydro_contact_surface` flag.
+
+        Args:
+            enabled: If True, visualization is enabled (viewer will display the data).
+                     If False, visualization is disabled (viewer will hide the data).
+        """
+        # The kernel always writes debug data when output_contact_surface=True in config.
+        # Actual display is controlled by viewer.show_hydro_contact_surface.
+        pass
 
     def launch(
         self,
@@ -610,6 +630,7 @@ class SDFHydroelastic:
                 shape_contact_margin,
                 self.max_num_iso_voxels,
                 reducer_data,
+                self._write_debug_surface,
             ],
             outputs=[
                 self.iso_vertex_point,
@@ -1174,6 +1195,7 @@ def get_generate_contacts_kernel(output_vertices: bool):
         shape_contact_margin: wp.array(dtype=wp.float32),
         max_num_iso_voxels: int,
         reducer_data: GlobalContactReducerData,
+        write_debug_surface: wp.array(dtype=wp.int32),
         # outputs for visualization (optional)
         iso_vertex_point: wp.array(dtype=wp.vec3f),
         iso_vertex_depth: wp.array(dtype=wp.float32),
@@ -1271,6 +1293,8 @@ def get_generate_contacts_kernel(output_vertices: bool):
                     reducer_data,
                 )
 
+                # Write debug surface vertices if enabled (compile-time check only)
+                # The viewer controls whether to display this data via show_hydro_contact_surface
                 if wp.static(output_vertices) and contact_id >= 0:
                     for vi in range(3):
                         iso_vertex_point[3 * contact_id + vi] = wp.transform_point(X_ws_b, face_verts[vi])

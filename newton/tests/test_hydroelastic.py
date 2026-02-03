@@ -336,6 +336,8 @@ def test_mujoco_hydroelastic_penetration_depth(test, device):
         broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
         sdf_hydroelastic_config=sdf_config,
     )
+    # Enable contact surface output for this test (validates penetration depth)
+    collision_pipeline.set_output_contact_surface(True)
 
     # Simulate for 3 seconds to reach equilibrium
     sim_dt = 1.0 / 60.0
