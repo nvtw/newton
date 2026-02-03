@@ -127,7 +127,9 @@ def build_stacked_cubes_scene(
 
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
 
-    sdf_hydroelastic_config = SDFHydroelasticConfig(output_contact_surface=True, reduce_contacts=reduce_contacts)
+    sdf_hydroelastic_config = SDFHydroelasticConfig(
+        output_contact_surface=True, reduce_contacts=reduce_contacts, anchor_contact=True
+    )
 
     # Hydroelastic without contact reduction can generate many contacts
     rigid_contact_max = 6000 if not reduce_contacts else 100
