@@ -510,8 +510,14 @@ class ContactReductionFunctions:
         hashtable-based variant used for mesh-mesh (SDF) collisions.
     """
 
-    # Fixed beta threshold - small positive value to avoid flickering from numerical noise
     BETA_THRESHOLD = 0.0001
+    """Penetration depth threshold for spatial extreme slot competition.
+
+    Only contacts with depth below this value (i.e., penetrating or near-touching)
+    compete for spatial extreme slots that build the support polygon boundary.
+    A small positive value (rather than zero) accounts for numerical tolerances,
+    preventing contact flickering when stacked objects have near-zero depths.
+    """
 
     def __init__(self):
         self.num_reduction_slots = compute_num_reduction_slots()
