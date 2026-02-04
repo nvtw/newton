@@ -473,10 +473,13 @@ class GlobalContactReducer:
         # Atomic counter for contact allocation
         self.contact_count = wp.zeros(1, dtype=wp.int32, device=device)
 
-        # Hashtable: sized for worst case where each contact is a unique (shape_pair, bin)
-        # Each contact goes into exactly ONE normal bin, so max unique keys = num_contacts
-        # Use 2x for load factor to reduce hash collisions
-        hashtable_size = capacity * 2
+        # Hashtable sizing: estimate unique (shape_pair, bin) keys needed
+        # - 35 bins per shape pair (20 normal + 15 voxel groups)
+        # - Dense hydroelastic contacts: many contacts share the same bin
+        # - Assume ~8 contacts per unique key on average (conservative for dense contacts)
+        # - Provides 2x load factor headroom within the /4 estimate
+        # - If table fills, contacts gracefully skip reduction (still in buffer)
+        hashtable_size = max(capacity // 4, 1024)  # minimum 1024 for small scenes
         self.hashtable = HashTable(hashtable_size, device=device)
 
         # Values array for hashtable - managed here, not by HashTable
