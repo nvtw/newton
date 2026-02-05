@@ -29,11 +29,8 @@ from newton.tests.unittest_utils import (
 )
 
 
-def simulate(solver, model, state_0, state_1, control, sim_dt, substeps, collision_pipeline=None):
+def simulate(solver, model, state_0, state_1, control, sim_dt, substeps, collision_pipeline):
     if not isinstance(solver, newton.solvers.SolverMuJoCo):
-        if collision_pipeline is None:
-            # Create unified collision pipeline if not provided
-            collision_pipeline = newton.CollisionPipelineUnified.from_model(model)
         contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
     else:
         contacts = None
@@ -164,22 +161,27 @@ def test_shapes_on_plane(test, device, solver_fn):
     state_0, state_1 = model.state(), model.state()
     control = model.control()
 
+    # Create collision pipeline once (reused across all steps)
+    collision_pipeline = None
+    if not isinstance(solver, newton.solvers.SolverMuJoCo):
+        collision_pipeline = newton.CollisionPipelineUnified.from_model(model)
+
     use_cuda_graph = device.is_cuda and wp.is_mempool_enabled(device)
     substeps = 10
     sim_dt = 1.0 / 60.0
     if use_cuda_graph:
         # ensure data is allocated and modules are loaded before graph capture
         # in case of an earlier CUDA version
-        simulate(solver, model, state_0, state_1, control, sim_dt, substeps)
+        simulate(solver, model, state_0, state_1, control, sim_dt, substeps, collision_pipeline)
         with wp.ScopedCapture(device) as capture:
-            simulate(solver, model, state_0, state_1, control, sim_dt, substeps)
+            simulate(solver, model, state_0, state_1, control, sim_dt, substeps, collision_pipeline)
         graph = capture.graph
 
     for _ in range(250):
         if use_cuda_graph:
             wp.capture_launch(graph)
         else:
-            simulate(solver, model, state_0, state_1, control, sim_dt, substeps)
+            simulate(solver, model, state_0, state_1, control, sim_dt, substeps, collision_pipeline)
 
     body_q = state_0.body_q.numpy()
     expected_end_positions = np.array(expected_end_positions)
