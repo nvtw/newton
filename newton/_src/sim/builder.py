@@ -7753,7 +7753,8 @@ class ModelBuilder:
             m.equality_constraint_count = len(self.equality_constraint_type)
 
             self.find_shape_contact_pairs(m)
-            m.rigid_contact_max = m._count_rigid_contact_points()
+            # rigid_contact_max is estimated by the unified collision pipeline when needed
+            m.rigid_contact_max = 0
 
             # enable ground plane
             m.up_axis = self.up_axis

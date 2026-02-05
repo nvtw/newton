@@ -90,15 +90,7 @@ class Example:
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
         # Create collision pipeline from command-line args
-        # This example uses the standard pipeline by default (unlike other examples that default to unified)
-        # Users can override with --collision-pipeline unified if desired
-        # If no args provided or no collision_pipeline arg, defaults to "standard" for this example
-        if args is None or not hasattr(args, "collision_pipeline"):
-            self.collision_pipeline = newton.examples.create_collision_pipeline(
-                self.model, collision_pipeline_type="standard"
-            )
-        else:
-            self.collision_pipeline = newton.examples.create_collision_pipeline(self.model, args)
+        self.collision_pipeline = newton.examples.create_collision_pipeline(self.model, args)
         self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
 
         self.viewer.set_model(self.model)
@@ -164,6 +156,8 @@ if __name__ == "__main__":
     # Create parser that inherits common arguments and adds example-specific ones
     parser = newton.examples.create_parser()
     parser.add_argument("--num-worlds", type=int, default=100, help="Total number of simulated worlds.")
+    # Override default num-frames - unified pipeline needs more time to settle
+    parser.set_defaults(num_frames=200)
 
     # Parse arguments and initialize viewer
     viewer, args = newton.examples.init(parser)

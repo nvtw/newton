@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 from enum import IntEnum
+from typing import TYPE_CHECKING
 
 import numpy as np
 import warp as wp
@@ -26,6 +27,9 @@ from ..core.types import Devicelike
 from .contacts import Contacts
 from .control import Control
 from .state import State
+
+if TYPE_CHECKING:
+    from .collide_unified import CollisionPipelineUnified
 
 
 class Model:
@@ -818,8 +822,7 @@ class Model:
     def collide(
         self: Model,
         state: State,
-        collision_pipeline: CollisionPipeline | None = None,
-        rigid_contact_max_per_pair: int | None = None,
+        collision_pipeline: CollisionPipelineUnified | None = None,
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
         edge_sdf_iter: int = 10,
@@ -833,10 +836,8 @@ class Model:
 
         Args:
             state (State): The current state of the model.
-            collision_pipeline (CollisionPipeline, optional): Collision pipeline to use for contact generation.
+            collision_pipeline (CollisionPipelineUnified, optional): Collision pipeline to use for contact generation.
                 If not provided, a new one will be created if it hasn't been constructed before for this model.
-            rigid_contact_max_per_pair (int, optional): Maximum number of rigid contacts per shape pair.
-                If None, a kernel is launched to count the number of possible contacts.
             soft_contact_max (int, optional): Maximum number of soft contacts.
                 If None, a kernel is launched to count the number of possible contacts.
             soft_contact_margin (float, optional): Margin for soft contact generation. Default is 0.01.
@@ -852,7 +853,7 @@ class Model:
             it defaults to ``builder.rigid_contact_margin``. To adjust contact margins, set them before calling
             :meth:`ModelBuilder.finalize`.
         """
-        from .collide import CollisionPipeline  # noqa: PLC0415
+        from .collide_unified import CollisionPipelineUnified  # noqa: PLC0415
 
         if requires_grad is None:
             requires_grad = self.requires_grad
@@ -860,9 +861,8 @@ class Model:
         if collision_pipeline is not None:
             self._collision_pipeline = collision_pipeline
         elif not hasattr(self, "_collision_pipeline"):
-            self._collision_pipeline = CollisionPipeline.from_model(
+            self._collision_pipeline = CollisionPipelineUnified.from_model(
                 model=self,
-                rigid_contact_max_per_pair=rigid_contact_max_per_pair,
                 soft_contact_max=soft_contact_max,
                 soft_contact_margin=soft_contact_margin,
                 edge_sdf_iter=edge_sdf_iter,
@@ -1084,43 +1084,3 @@ class Model:
 
         attributes.extend(self._requested_state_attributes.difference(attributes))
         return attributes
-
-    def _count_rigid_contact_points(self, rigid_contact_max_per_pair: int | None = None) -> int:
-        """
-        Count the maximum number of rigid contact points that need to be allocated.
-
-        This method estimates the upper bound on the number of rigid contact points that may be generated
-        during collision detection, based on the current set of shape contact pairs and their geometry.
-
-        Args:
-            rigid_contact_max_per_pair: Maximum number of contact points per shape pair.
-                If None or <= 0, no limit is applied.
-
-        Returns:
-            The potential number of rigid contact points that may need to be allocated.
-        """
-        from ..geometry.kernels import count_contact_points  # noqa: PLC0415
-
-        if self.shape_contact_pair_count == 0:
-            return 0
-
-        if rigid_contact_max_per_pair is None or rigid_contact_max_per_pair <= 0:
-            rigid_contact_max_per_pair = 0
-        # calculate the potential number of shape pair contact points
-        contact_count = wp.zeros(1, dtype=wp.int32, device=self.device)
-        wp.launch(
-            kernel=count_contact_points,
-            dim=self.shape_contact_pair_count,
-            inputs=[
-                self.shape_contact_pairs,
-                self.shape_type,
-                self.shape_scale,
-                self.shape_source_ptr,
-                rigid_contact_max_per_pair,
-            ],
-            outputs=[contact_count],
-            device=self.device,
-            record_tape=False,
-        )
-        counts = contact_count.numpy()
-        return int(counts[0])
