@@ -155,7 +155,7 @@ class TestJointDrive(unittest.TestCase):
         state_in = model.state()
         state_out = model.state()
         control = model.control()
-        
+
         # Use unified collision pipeline
         collision_pipeline = newton.CollisionPipelineUnified.from_model(model)
         contacts = model.collide(state_in, collision_pipeline=collision_pipeline)

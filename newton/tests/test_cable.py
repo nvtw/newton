@@ -533,7 +533,7 @@ def _cable_bend_stiffness_impl(test: unittest.TestCase, device):
     collision_pipeline = newton.CollisionPipelineUnified.from_model(
         model,
         rigid_contact_max=100000,  # Increased from default
-        soft_contact_max=100000,   # Increased from default
+        soft_contact_max=100000,  # Increased from default
     )
 
     frame_dt = 1.0 / 60.0
@@ -588,14 +588,14 @@ def _cable_sagging_and_stability_impl(test: unittest.TestCase, device):
     segment_length = 0.2
     model, state0, state1, control, _rod_bodies = _build_cable_chain(device, num_links=6, segment_length=segment_length)
     solver = newton.solvers.SolverVBD(model, iterations=10)
-    
+
     # Create unified collision pipeline with larger buffers for cable tests
     collision_pipeline = newton.CollisionPipelineUnified.from_model(
         model,
         rigid_contact_max=100000,  # Increased from default
-        soft_contact_max=100000,   # Increased from default
+        soft_contact_max=100000,  # Increased from default
     )
-    
+
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
     sim_dt = frame_dt / sim_substeps
@@ -709,7 +709,7 @@ def _cable_twist_response_impl(test: unittest.TestCase, device):
     collision_pipeline = newton.CollisionPipelineUnified.from_model(
         model,
         rigid_contact_max=100000,  # Increased from default
-        soft_contact_max=100000,   # Increased from default
+        soft_contact_max=100000,  # Increased from default
         broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
     )
 
@@ -895,15 +895,15 @@ def _two_layer_cable_pile_collision_impl(test: unittest.TestCase, device):
     control = model.control()
 
     solver = newton.solvers.SolverVBD(model, iterations=10, friction_epsilon=0.1)
-    
+
     # Create unified collision pipeline with larger buffers for cable tests
     collision_pipeline = newton.CollisionPipelineUnified.from_model(
         model,
         rigid_contact_max=100000,  # Increased from default
-        soft_contact_max=100000,   # Increased from default
+        soft_contact_max=100000,  # Increased from default
         broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
     )
-    
+
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
     sim_dt = frame_dt / sim_substeps

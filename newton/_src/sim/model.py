@@ -853,7 +853,9 @@ class Model:
 
         contacts = self._collision_pipeline.collide(self, state)
         # attach custom attributes with assignment==CONTACT
-        self._add_custom_attributes(contacts, Model.AttributeAssignment.CONTACT, requires_grad=collision_pipeline.requires_grad)
+        self._add_custom_attributes(
+            contacts, Model.AttributeAssignment.CONTACT, requires_grad=collision_pipeline.requires_grad
+        )
         return contacts
 
     def request_state_attributes(self, *attributes: str) -> None:
@@ -1062,4 +1064,3 @@ class Model:
 
         attributes.extend(self._requested_state_attributes.difference(attributes))
         return attributes
-

@@ -15,9 +15,6 @@
 
 import warp as wp
 
-from newton._src.core.types import MAXVAL
-
-from . import collision_primitive as primitive
 from .broad_phase_common import binary_search
 from .flags import ParticleFlags, ShapeFlags
 from .types import (

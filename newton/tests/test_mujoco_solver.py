@@ -3621,7 +3621,7 @@ class TestMuJoCoSolverNewtonContacts(unittest.TestCase):
         self.state_in = self.model.state()
         self.state_out = self.model.state()
         self.control = self.model.control()
-        
+
         # Use unified collision pipeline
         self.collision_pipeline = newton.CollisionPipelineUnified.from_model(self.model)
         self.contacts = self.model.collide(self.state_in, collision_pipeline=self.collision_pipeline)
