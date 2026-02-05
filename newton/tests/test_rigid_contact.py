@@ -29,9 +29,12 @@ from newton.tests.unittest_utils import (
 )
 
 
-def simulate(solver, model, state_0, state_1, control, sim_dt, substeps):
+def simulate(solver, model, state_0, state_1, control, sim_dt, substeps, collision_pipeline=None):
     if not isinstance(solver, newton.solvers.SolverMuJoCo):
-        contacts = model.collide(state_0)
+        if collision_pipeline is None:
+            # Create unified collision pipeline if not provided
+            collision_pipeline = newton.CollisionPipelineUnified.from_model(model)
+        contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
     else:
         contacts = None
     for _ in range(substeps):
@@ -757,7 +760,9 @@ def test_box_drop(test, device, solver_fn):
         for _ in range(substeps):
             state_0.clear_forces()
             if not isinstance(solver, newton.solvers.SolverMuJoCo):
-                contacts = model.collide(state_0)
+                # Use unified collision pipeline
+                collision_pipeline = newton.CollisionPipelineUnified.from_model(model)
+                contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
             else:
                 contacts = None
             solver.step(state_0, state_1, None, contacts, sim_dt / substeps)

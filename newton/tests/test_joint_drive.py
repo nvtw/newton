@@ -151,11 +151,14 @@ class TestJointDrive(unittest.TestCase):
             main_builder.joint_qd[i] = joint_start_velocity
 
         # Create the MujocoSolver instance
-        model = main_builder.finalize()
+        model = main_builder.finalize(device=device)
         state_in = model.state()
         state_out = model.state()
         control = model.control()
-        contacts = model.collide(state_in)
+        
+        # Use unified collision pipeline
+        collision_pipeline = newton.CollisionPipelineUnified.from_model(model)
+        contacts = model.collide(state_in, collision_pipeline=collision_pipeline)
         newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
         solver = SolverMuJoCo(
             model, iterations=1, ls_iterations=1, disable_contacts=True, use_mujoco_cpu=False, integrator="euler"

@@ -3618,7 +3618,10 @@ class TestMuJoCoSolverNewtonContacts(unittest.TestCase):
         self.state_in = self.model.state()
         self.state_out = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.state_in)
+        
+        # Use unified collision pipeline
+        self.collision_pipeline = newton.CollisionPipelineUnified.from_model(self.model)
+        self.contacts = self.model.collide(self.state_in, collision_pipeline=self.collision_pipeline)
         self.sphere_body_idx = sphere_body_idx
 
     def test_sphere_on_plane_with_newton_contacts(self):
@@ -3633,7 +3636,7 @@ class TestMuJoCoSolverNewtonContacts(unittest.TestCase):
         num_steps = 120  # Simulate for 0.5 seconds to ensure it settles
 
         for _ in range(num_steps):
-            self.contacts = self.model.collide(self.state_in)
+            self.contacts = self.model.collide(self.state_in, collision_pipeline=self.collision_pipeline)
             solver.step(self.state_in, self.state_out, self.control, self.contacts, sim_dt)
             self.state_in, self.state_out = self.state_out, self.state_in
 

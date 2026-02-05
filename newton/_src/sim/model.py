@@ -818,7 +818,7 @@ class Model:
     def collide(
         self: Model,
         state: State,
-        collision_pipeline: CollisionPipeline | None = None,
+        collision_pipeline=None,  # CollisionPipeline | CollisionPipelineUnified | None
         rigid_contact_max_per_pair: int | None = None,
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
@@ -833,8 +833,8 @@ class Model:
 
         Args:
             state (State): The current state of the model.
-            collision_pipeline (CollisionPipeline, optional): Collision pipeline to use for contact generation.
-                If not provided, a new one will be created if it hasn't been constructed before for this model.
+            collision_pipeline (CollisionPipeline | CollisionPipelineUnified, optional): Collision pipeline to use for contact generation.
+                If not provided, a new CollisionPipeline (standard) will be created if it hasn't been constructed before for this model.
             rigid_contact_max_per_pair (int, optional): Maximum number of rigid contacts per shape pair.
                 If None, a kernel is launched to count the number of possible contacts.
             soft_contact_max (int, optional): Maximum number of soft contacts.
@@ -860,6 +860,7 @@ class Model:
         if collision_pipeline is not None:
             self._collision_pipeline = collision_pipeline
         elif not hasattr(self, "_collision_pipeline"):
+            # Default to standard pipeline for backward compatibility
             self._collision_pipeline = CollisionPipeline.from_model(
                 model=self,
                 rigid_contact_max_per_pair=rigid_contact_max_per_pair,

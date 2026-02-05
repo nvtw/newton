@@ -209,8 +209,11 @@ def test_particle_particle_friction_with_relative_motion(test, device):
         state0 = model.state()
         state1 = model.state()
 
+        # Create unified collision pipeline  
+        collision_pipeline = newton.CollisionPipelineUnified.from_model(model)
+
         # One step: measure tangential slip (relative z displacement).
-        contacts = model.collide(state0)
+        contacts = model.collide(state0, collision_pipeline=collision_pipeline)
         control = model.control()
         solver.step(state0, state1, control, contacts, dt)
 
