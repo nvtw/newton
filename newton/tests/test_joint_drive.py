@@ -151,7 +151,7 @@ class TestJointDrive(unittest.TestCase):
             main_builder.joint_qd[i] = joint_start_velocity
 
         # Create the MujocoSolver instance
-        model = main_builder.finalize(device=device)
+        model = main_builder.finalize()
         state_in = model.state()
         state_out = model.state()
         control = model.control()

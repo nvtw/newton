@@ -17,6 +17,7 @@ import unittest
 
 import warp as wp
 
+import newton
 from newton import ModelBuilder
 from newton._src.geometry.broad_phase_common import test_world_and_group_pair
 

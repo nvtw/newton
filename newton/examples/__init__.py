@@ -318,18 +318,11 @@ def create_parser():
         help="Whether to run the example in test mode.",
     )
     parser.add_argument(
-        "--collision-pipeline",
-        type=str,
-        default="unified",
-        choices=["unified", "standard"],
-        help="Collision pipeline to use. 'unified' uses CollisionPipelineUnified (default), 'standard' uses CollisionPipeline.",
-    )
-    parser.add_argument(
         "--broad-phase-mode",
         type=str,
         default="explicit",
         choices=["nxn", "sap", "explicit"],
-        help="Broad phase mode for CollisionPipelineUnified. Only used when --collision-pipeline=unified.",
+        help="Broad phase mode for collision detection.",
     )
     parser.add_argument(
         "--use-mujoco-contacts",

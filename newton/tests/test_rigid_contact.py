@@ -746,6 +746,11 @@ def test_box_drop(test, device, solver_fn):
     state_1 = model.state()
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
 
+    # Create collision pipeline once (reused across all substeps)
+    collision_pipeline = None
+    if not isinstance(solver, newton.solvers.SolverMuJoCo):
+        collision_pipeline = newton.CollisionPipelineUnified.from_model(model)
+
     # Max velocity: box 2 dropping to ground (z=4.2*box_size to z=box_size)
     g = 9.81
     max_drop = box_size * 3.2
@@ -759,9 +764,7 @@ def test_box_drop(test, device, solver_fn):
     for _ in range(max_frames):
         for _ in range(substeps):
             state_0.clear_forces()
-            if not isinstance(solver, newton.solvers.SolverMuJoCo):
-                # Use unified collision pipeline
-                collision_pipeline = newton.CollisionPipelineUnified.from_model(model)
+            if collision_pipeline is not None:
                 contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
             else:
                 contacts = None
