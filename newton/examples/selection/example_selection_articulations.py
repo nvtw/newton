@@ -135,6 +135,11 @@ class Example:
         self.state_1 = self.model.state()
         self.control = self.model.control()
 
+        # Create collision pipeline
+        self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
+            self.model, broad_phase_mode=newton.BroadPhaseMode.EXPLICIT
+        )
+
         self.next_reset = 0.0
         self.step_count = 0
 
@@ -219,7 +224,7 @@ class Example:
 
             # explicit collisions needed without MuJoCo solver
             if not isinstance(self.solver, newton.solvers.SolverMuJoCo):
-                contacts = self.model.collide(self.state_0)
+                contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
             else:
                 contacts = None
 

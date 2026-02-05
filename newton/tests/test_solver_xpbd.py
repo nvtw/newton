@@ -119,8 +119,11 @@ def test_particle_particle_friction_uses_relative_velocity(test, device):
     initial_relative_z_vel = initial_vel[0, 2] - initial_vel[1, 2]
 
     # Run simulation
+    collision_pipeline = newton.CollisionPipelineUnified.from_model(
+        model, broad_phase_mode=newton.BroadPhaseMode.EXPLICIT
+    )
     for _ in range(num_steps):
-        contacts = model.collide(state0)
+        contacts = model.collide(state0, collision_pipeline=collision_pipeline)
         control = model.control()
         solver.step(state0, state1, control, contacts, dt)
         state0, state1 = state1, state0

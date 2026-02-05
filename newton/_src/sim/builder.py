@@ -7753,7 +7753,9 @@ class ModelBuilder:
             m.equality_constraint_count = len(self.equality_constraint_type)
 
             self.find_shape_contact_pairs(m)
-            m.rigid_contact_max = m._count_rigid_contact_points()
+            # Set a default rigid_contact_max for backward compatibility with SolverVBD
+            # The actual value is estimated by CollisionPipelineUnified.from_model()
+            m.rigid_contact_max = max(10000, len(m.shape_contact_pairs) * 20)
 
             # enable ground plane
             m.up_axis = self.up_axis

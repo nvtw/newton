@@ -273,7 +273,10 @@ class TestMuJoCoSolverPropertiesBase(TestMuJoCoSolver):
         self.state_in = self.model.state()
         self.state_out = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.state_in)
+        self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
+            self.model, broad_phase_mode=newton.BroadPhaseMode.EXPLICIT
+        )
+        self.contacts = self.model.collide(self.state_in, collision_pipeline=self.collision_pipeline)
 
 
 class TestMuJoCoSolverMassProperties(TestMuJoCoSolverPropertiesBase):
