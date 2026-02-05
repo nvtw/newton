@@ -126,16 +126,17 @@ class SolverVBD(SolverBase):
         model = builder.finalize()
 
         solver = newton.solvers.SolverVBD(model)
+        collision_pipeline = newton.CollisionPipelineUnified.from_model(model)
 
         # Initialize states and contacts
         state_in = model.state()
         state_out = model.state()
         control = model.control()
-        contacts = model.collide(state_in)
+        contacts = model.collide(state_in, collision_pipeline=collision_pipeline)
 
         # Simulation loop
         for i in range(100):
-            contacts = model.collide(state_in)  # Update contacts
+            contacts = model.collide(state_in, collision_pipeline=collision_pipeline)  # Update contacts
             solver.step(state_in, state_out, control, contacts, dt)
             state_in, state_out = state_out, state_in
     """

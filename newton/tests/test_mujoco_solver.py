@@ -4240,6 +4240,10 @@ class TestMuJoCoConversion(unittest.TestCase):
         solver_soft = newton.solvers.SolverMuJoCo(model_soft)
         solver_stiff = newton.solvers.SolverMuJoCo(model_stiff)
 
+        # Create collision pipelines for each model
+        collision_pipeline_soft = newton.CollisionPipelineUnified.from_model(model_soft)
+        collision_pipeline_stiff = newton.CollisionPipelineUnified.from_model(model_stiff)
+
         dt = 0.005
         num_steps = 50
 
@@ -4257,8 +4261,8 @@ class TestMuJoCoConversion(unittest.TestCase):
 
         control_soft = model_soft.control()
         control_stiff = model_stiff.control()
-        contacts_soft = model_soft.collide(state_soft_in)
-        contacts_stiff = model_stiff.collide(state_stiff_in)
+        contacts_soft = model_soft.collide(state_soft_in, collision_pipeline=collision_pipeline_soft)
+        contacts_stiff = model_stiff.collide(state_stiff_in, collision_pipeline=collision_pipeline_stiff)
 
         # Track minimum positions during simulation
         min_q_soft = float("inf")
