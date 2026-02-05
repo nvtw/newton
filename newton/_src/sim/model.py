@@ -818,12 +818,7 @@ class Model:
     def collide(
         self: Model,
         state: State,
-        collision_pipeline=None,  # CollisionPipeline | CollisionPipelineUnified | None
-        rigid_contact_max_per_pair: int | None = None,
-        soft_contact_max: int | None = None,
-        soft_contact_margin: float = 0.01,
-        edge_sdf_iter: int = 10,
-        requires_grad: bool | None = None,
+        collision_pipeline,  # CollisionPipelineUnified
     ) -> Contacts:
         """
         Generate contact points for the particles and rigid bodies in the model.
@@ -833,15 +828,8 @@ class Model:
 
         Args:
             state (State): The current state of the model.
-            collision_pipeline (CollisionPipeline | CollisionPipelineUnified, optional): Collision pipeline to use for contact generation.
-                If not provided, a new CollisionPipeline (standard) will be created if it hasn't been constructed before for this model.
-            rigid_contact_max_per_pair (int, optional): Maximum number of rigid contacts per shape pair.
-                If None, a kernel is launched to count the number of possible contacts.
-            soft_contact_max (int, optional): Maximum number of soft contacts.
-                If None, a kernel is launched to count the number of possible contacts.
-            soft_contact_margin (float, optional): Margin for soft contact generation. Default is 0.01.
-            edge_sdf_iter (int, optional): Number of search iterations for finding closest contact points between edges and SDF. Default is 10.
-            requires_grad (bool, optional): Whether to duplicate contact arrays for gradient computation. If None, uses :attr:`Model.requires_grad`.
+            collision_pipeline (CollisionPipelineUnified): Collision pipeline to use for contact generation.
+                Create one using :meth:`CollisionPipelineUnified.from_model`.
 
         Returns:
             Contacts: The contact object containing collision information.
@@ -851,32 +839,21 @@ class Model:
             from ``ShapeConfig.contact_margin`` during model building. If a shape doesn't specify a contact margin,
             it defaults to ``builder.rigid_contact_margin``. To adjust contact margins, set them before calling
             :meth:`ModelBuilder.finalize`.
+
+        Example:
+            >>> collision_pipeline = newton.CollisionPipelineUnified.from_model(model)
+            >>> contacts = model.collide(state, collision_pipeline)
         """
-        from .collide import CollisionPipeline  # noqa: PLC0415
-
-        if requires_grad is None:
-            requires_grad = self.requires_grad
-
-        if collision_pipeline is not None:
-            self._collision_pipeline = collision_pipeline
-        elif not hasattr(self, "_collision_pipeline"):
-            # Default to standard pipeline for backward compatibility
-            self._collision_pipeline = CollisionPipeline.from_model(
-                model=self,
-                rigid_contact_max_per_pair=rigid_contact_max_per_pair,
-                soft_contact_max=soft_contact_max,
-                soft_contact_margin=soft_contact_margin,
-                edge_sdf_iter=edge_sdf_iter,
-                requires_grad=requires_grad,
+        if collision_pipeline is None:
+            raise ValueError(
+                "collision_pipeline is required. Create one with CollisionPipelineUnified.from_model(model)"
             )
 
-        # update any additional parameters
-        self._collision_pipeline.soft_contact_margin = soft_contact_margin
-        self._collision_pipeline.edge_sdf_iter = edge_sdf_iter
+        self._collision_pipeline = collision_pipeline
 
         contacts = self._collision_pipeline.collide(self, state)
         # attach custom attributes with assignment==CONTACT
-        self._add_custom_attributes(contacts, Model.AttributeAssignment.CONTACT, requires_grad=requires_grad)
+        self._add_custom_attributes(contacts, Model.AttributeAssignment.CONTACT, requires_grad=collision_pipeline.requires_grad)
         return contacts
 
     def request_state_attributes(self, *attributes: str) -> None:

@@ -62,7 +62,6 @@ class CollisionSetup:
         shape_type_b,
         solver_fn,
         sim_substeps,
-        use_unified_pipeline=False,
         broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
         sdf_max_resolution_a=None,
         sdf_max_resolution_b=None,
@@ -74,7 +73,6 @@ class CollisionSetup:
 
         self.shape_type_a = shape_type_a
         self.shape_type_b = shape_type_b
-        self.use_unified_pipeline = use_unified_pipeline
         self.sdf_max_resolution_a = sdf_max_resolution_a
         self.sdf_max_resolution_b = sdf_max_resolution_b
 
@@ -97,16 +95,12 @@ class CollisionSetup:
         self.state_1 = self.model.state()
         self.control = self.model.control()
 
-        # Initialize collision pipeline
-        if use_unified_pipeline:
-            self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
-                self.model,
-                broad_phase_mode=broad_phase_mode,
-            )
-            self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
-        else:
-            self.collision_pipeline = None
-            self.contacts = self.model.collide(self.state_0)
+        # Initialize unified collision pipeline
+        self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
+            self.model,
+            broad_phase_mode=broad_phase_mode,
+        )
+        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
 
         self.solver = solver_fn(self.model)
 
@@ -129,11 +123,8 @@ class CollisionSetup:
         elif shape_type == GeoType.CYLINDER:
             self.builder.add_shape_cylinder(body, radius=0.25, half_height=0.4, key=type_to_str(shape_type))
         elif shape_type == GeoType.MESH:
-            # Use box mesh for unified pipeline (works correctly), sphere mesh for legacy pipeline (box mesh has issues)
-            if self.use_unified_pipeline:
-                vertices, indices = newton.utils.create_box_mesh(extents=(0.5, 0.5, 0.5))
-            else:
-                vertices, indices = newton.utils.create_sphere_mesh(radius=0.5)
+            # Use box mesh (works correctly with unified pipeline)
+            vertices, indices = newton.utils.create_box_mesh(extents=(0.5, 0.5, 0.5))
             # Configure SDF settings if specified
             cfg = newton.ModelBuilder.ShapeConfig(sdf_max_resolution=sdf_max_resolution)
             self.builder.add_shape_mesh(
@@ -156,10 +147,7 @@ class CollisionSetup:
             self.graph = None
 
     def simulate(self):
-        if self.use_unified_pipeline:
-            self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
-        else:
-            self.contacts = self.model.collide(self.state_0)
+        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
 
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
@@ -220,64 +208,6 @@ class CollisionSetup:
 devices = get_cuda_test_devices(mode="basic")
 
 
-class TestCollisionPipeline(unittest.TestCase):
-    pass
-
-
-# Note that body A does sometimes bounce off body B or continue moving forward
-# due to inertia differences, so we only test linear velocity along the Y and Z directions.
-# Some collisions also cause unwanted angular velocity, so we only test linear velocity
-# for those cases.
-contact_tests = [
-    (GeoType.SPHERE, GeoType.SPHERE, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
-    (GeoType.SPHERE, GeoType.BOX, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
-    (GeoType.SPHERE, GeoType.CAPSULE, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
-    (GeoType.SPHERE, GeoType.MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
-    (GeoType.BOX, GeoType.BOX, TestLevel.VELOCITY_YZ, TestLevel.VELOCITY_LINEAR),
-    (GeoType.BOX, GeoType.MESH, TestLevel.VELOCITY_YZ, TestLevel.VELOCITY_LINEAR),
-    (GeoType.CAPSULE, GeoType.CAPSULE, TestLevel.VELOCITY_YZ, TestLevel.VELOCITY_LINEAR),
-    (GeoType.CAPSULE, GeoType.MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
-    (
-        GeoType.MESH,
-        GeoType.MESH,
-        TestLevel.VELOCITY_YZ,
-        TestLevel.VELOCITY_LINEAR,
-    ),
-]
-
-
-def test_collision_pipeline(
-    _test, device, shape_type_a: GeoType, shape_type_b: GeoType, test_level_a: TestLevel, test_level_b: TestLevel
-):
-    viewer = newton.viewer.ViewerNull()
-    setup = CollisionSetup(
-        viewer=viewer,
-        device=device,
-        solver_fn=newton.solvers.SolverXPBD,
-        sim_substeps=10,
-        shape_type_a=shape_type_a,
-        shape_type_b=shape_type_b,
-    )
-    for _ in range(200):
-        setup.step()
-        setup.render()
-    setup.test(test_level_a, 0)
-    setup.test(test_level_b, 1)
-
-
-for shape_type_a, shape_type_b, test_level_a, test_level_b in contact_tests:
-    add_function_test(
-        TestCollisionPipeline,
-        f"test_{type_to_str(shape_type_a)}_{type_to_str(shape_type_b)}",
-        test_collision_pipeline,
-        devices=devices,
-        shape_type_a=shape_type_a,
-        shape_type_b=shape_type_b,
-        test_level_a=test_level_a,
-        test_level_b=test_level_b,
-    )
-
-
 class TestUnifiedCollisionPipeline(unittest.TestCase):
     pass
 
@@ -326,7 +256,6 @@ def test_unified_collision_pipeline(
         sim_substeps=10,
         shape_type_a=shape_type_a,
         shape_type_b=shape_type_b,
-        use_unified_pipeline=True,
         broad_phase_mode=broad_phase_mode,
     )
     for _ in range(200):
@@ -439,7 +368,6 @@ def test_mesh_mesh_sdf_modes(
         sim_substeps=10,
         shape_type_a=GeoType.MESH,
         shape_type_b=GeoType.MESH,
-        use_unified_pipeline=True,
         broad_phase_mode=broad_phase_mode,
         sdf_max_resolution_a=sdf_max_resolution_a,
         sdf_max_resolution_b=sdf_max_resolution_b,
@@ -530,7 +458,7 @@ class TestParticleShapeContacts(unittest.TestCase):
     pass
 
 
-def test_particle_shape_contacts(test, device, use_unified_pipeline: bool, shape_type: GeoType):
+def test_particle_shape_contacts(test, device, shape_type: GeoType):
     """
     Test that particle-shape contacts are correctly generated.
 
@@ -575,26 +503,17 @@ def test_particle_shape_contacts(test, device, use_unified_pipeline: bool, shape
 
         model = builder.finalize(device=device)
 
-        # Create appropriate collision pipeline
-        if use_unified_pipeline:
-            collision_pipeline = newton.CollisionPipelineUnified.from_model(
-                model,
-                broad_phase_mode=newton.BroadPhaseMode.NXN,
-                soft_contact_margin=soft_contact_margin,
-            )
-        else:
-            collision_pipeline = newton.CollisionPipeline.from_model(
-                model,
-                soft_contact_margin=soft_contact_margin,
-            )
+        # Create unified collision pipeline
+        collision_pipeline = newton.CollisionPipelineUnified.from_model(
+            model,
+            broad_phase_mode=newton.BroadPhaseMode.NXN,
+            soft_contact_margin=soft_contact_margin,
+        )
 
         state = model.state()
 
         # Run collision detection
-        if use_unified_pipeline:
-            contacts = collision_pipeline.collide(model, state)
-        else:
-            contacts = collision_pipeline.collide(model, state)
+        contacts = collision_pipeline.collide(model, state)
 
         # Verify soft contacts were generated
         soft_count = contacts.soft_contact_count.numpy()[0]
@@ -645,25 +564,13 @@ particle_shape_tests = [
 ]
 
 
-# Add tests for standard collision pipeline
-for shape_type in particle_shape_tests:
-    add_function_test(
-        TestParticleShapeContacts,
-        f"test_particle_{type_to_str(shape_type)}_standard",
-        test_particle_shape_contacts,
-        devices=devices,
-        use_unified_pipeline=False,
-        shape_type=shape_type,
-    )
-
 # Add tests for unified collision pipeline
 for shape_type in particle_shape_tests:
     add_function_test(
         TestParticleShapeContacts,
-        f"test_particle_{type_to_str(shape_type)}_unified",
+        f"test_particle_{type_to_str(shape_type)}",
         test_particle_shape_contacts,
         devices=devices,
-        use_unified_pipeline=True,
         shape_type=shape_type,
     )
 
