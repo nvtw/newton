@@ -588,6 +588,14 @@ def _cable_sagging_and_stability_impl(test: unittest.TestCase, device):
     segment_length = 0.2
     model, state0, state1, control, _rod_bodies = _build_cable_chain(device, num_links=6, segment_length=segment_length)
     solver = newton.solvers.SolverVBD(model, iterations=10)
+    
+    # Create unified collision pipeline with larger buffers for cable tests
+    collision_pipeline = newton.CollisionPipelineUnified.from_model(
+        model,
+        rigid_contact_max=100000,  # Increased from default
+        soft_contact_max=100000,   # Increased from default
+    )
+    
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
     sim_dt = frame_dt / sim_substeps
@@ -600,7 +608,7 @@ def _cable_sagging_and_stability_impl(test: unittest.TestCase, device):
     for _step in range(num_steps):
         for _substep in range(sim_substeps):
             state0.clear_forces()
-            contacts = model.collide(state0)
+            contacts = model.collide(state0, collision_pipeline=collision_pipeline)
             solver.step(state0, state1, control, contacts, sim_dt)
             state0, state1 = state1, state0
 
