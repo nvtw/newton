@@ -274,9 +274,8 @@ def _estimate_rigid_contact_max_unified(model: Model) -> int:
     """
     Estimate the maximum number of rigid contacts for the unified collision pipeline.
 
-    Unlike the standard collision pipeline which uses per-vertex contact counting,
-    the unified pipeline uses SDF-based collision with contact reduction for mesh-mesh
-    pairs. This function provides a linear estimate assuming each shape contacts
+    Uses a linear estimate based on shape count and types, with contact reduction
+    for mesh-mesh pairs. This function assumes each shape contacts
     only a limited number of neighbors (due to spatial locality).
 
     Args:
@@ -337,7 +336,6 @@ class CollisionPipelineUnified:
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
         edge_sdf_iter: int = 10,
-        iterate_mesh_vertices: bool = True,
         requires_grad: bool = False,
         device: Devicelike = None,
         broad_phase_mode: BroadPhaseMode = BroadPhaseMode.EXPLICIT,
@@ -366,7 +364,6 @@ class CollisionPipelineUnified:
                 If None, computed as shape_count * particle_count.
             soft_contact_margin (float, optional): Margin for soft contact generation. Defaults to 0.01.
             edge_sdf_iter (int, optional): Number of iterations for edge SDF collision. Defaults to 10.
-            iterate_mesh_vertices (bool, optional): Whether to iterate mesh vertices for collision. Defaults to True.
             requires_grad (bool, optional): Whether to enable gradient computation. Defaults to False.
             device (Devicelike, optional): The device on which to allocate arrays and perform computation.
             broad_phase_mode (BroadPhaseMode, optional): Broad phase mode for collision detection.
@@ -489,7 +486,6 @@ class CollisionPipelineUnified:
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
         edge_sdf_iter: int = 10,
-        iterate_mesh_vertices: bool = True,
         requires_grad: bool | None = None,
         broad_phase_mode: BroadPhaseMode = BroadPhaseMode.EXPLICIT,
         shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
@@ -507,7 +503,6 @@ class CollisionPipelineUnified:
             soft_contact_max (int | None, optional): Maximum number of soft contacts to allocate.
             soft_contact_margin (float, optional): Margin for soft contact generation. Defaults to 0.01.
             edge_sdf_iter (int, optional): Number of iterations for edge SDF collision. Defaults to 10.
-            iterate_mesh_vertices (bool, optional): Whether to iterate mesh vertices for collision. Defaults to True.
             requires_grad (bool | None, optional): Whether to enable gradient computation. If None, uses model.requires_grad.
             broad_phase_mode (BroadPhaseMode, optional): Broad phase collision detection mode. Defaults to BroadPhaseMode.EXPLICIT.
             shape_pairs_filtered (wp.array | None, optional): Precomputed shape pairs for EXPLICIT mode.
@@ -554,7 +549,6 @@ class CollisionPipelineUnified:
             soft_contact_max,
             soft_contact_margin,
             edge_sdf_iter,
-            iterate_mesh_vertices,
             requires_grad,
             model.device,
             broad_phase_mode,

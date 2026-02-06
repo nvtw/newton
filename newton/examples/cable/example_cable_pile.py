@@ -31,9 +31,6 @@ import warp as wp
 import newton
 import newton.examples
 
-# Global flag to enable/disable unified collision pipeline
-USE_UNIFIED_COLLISION = True
-
 
 def create_cable_geometry(
     start_pos: wp.vec3,

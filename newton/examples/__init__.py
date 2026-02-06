@@ -388,61 +388,28 @@ def init(parser=None):
     return viewer, args
 
 
-def create_collision_pipeline(
-    model,
-    args=None,
-    broad_phase_mode=None,
-):
-    """Create a unified collision pipeline based on command-line arguments or explicit parameters.
-
-    This helper function creates a CollisionPipelineUnified instance.
+def create_collision_pipeline(model, args=None, broad_phase_mode=None):
+    """Create a collision pipeline, optionally using --broad-phase-mode from args.
 
     Args:
-        model: The Newton model to create the pipeline for
-        args: Parsed arguments from create_parser() (optional if explicit parameters provided)
-        broad_phase_mode: Explicit broad phase mode ("nxn", "sap", "explicit"), overrides args
+        model: The Newton model to create the pipeline for.
+        args: Parsed arguments from create_parser() (optional).
+        broad_phase_mode: Override broad phase mode ("nxn", "sap", "explicit"). Default from args or "explicit".
 
     Returns:
-        CollisionPipelineUnified instance
-
-    Note:
-        Contact margins for rigid contacts are read from ``model.shape_contact_margin`` array.
-
-    Examples:
-        # Using command-line args
-        viewer, args = newton.examples.init()
-        model = builder.finalize()
-        pipeline = newton.examples.create_collision_pipeline(model, args)
-        contacts = model.collide(state, collision_pipeline=pipeline)
-
-        # Using explicit parameters
-        pipeline = newton.examples.create_collision_pipeline(
-            model,
-            broad_phase_mode="nxn"
-        )
+        CollisionPipelineUnified instance.
     """
     import newton  # noqa: PLC0415
 
-    # Determine broad phase mode
     if broad_phase_mode is None:
-        if args is not None and hasattr(args, "broad_phase_mode"):
-            broad_phase_mode = args.broad_phase_mode
-        else:
-            broad_phase_mode = "explicit"  # Default
-
-    # Map string to BroadPhaseMode enum
+        broad_phase_mode = getattr(args, "broad_phase_mode", "explicit") if args else "explicit"
     broad_phase_map = {
         "nxn": newton.BroadPhaseMode.NXN,
         "sap": newton.BroadPhaseMode.SAP,
         "explicit": newton.BroadPhaseMode.EXPLICIT,
     }
-    broad_phase_enum = broad_phase_map.get(broad_phase_mode.lower(), newton.BroadPhaseMode.EXPLICIT)
-
-    # Create and return CollisionPipelineUnified
-    return newton.CollisionPipelineUnified.from_model(
-        model,
-        broad_phase_mode=broad_phase_enum,
-    )
+    mode = broad_phase_map.get(str(broad_phase_mode).lower(), newton.BroadPhaseMode.EXPLICIT)
+    return newton.CollisionPipelineUnified.from_model(model, broad_phase_mode=mode)
 
 
 def main():
