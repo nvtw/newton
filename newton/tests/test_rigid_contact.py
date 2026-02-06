@@ -525,14 +525,14 @@ def test_mesh_box_on_ground(test, device):
     for i, vel in enumerate(linear_vel):
         test.assertLess(
             abs(vel),
-            0.1,
+            0.01,
             f"Mesh box has non-zero linear velocity[{i}] = {vel:.6f}, should be at rest",
         )
 
     for i, vel in enumerate(angular_vel):
         test.assertLess(
             abs(vel),
-            0.1,
+            0.01,
             f"Mesh box has non-zero angular velocity[{i}] = {vel:.6f}, should be at rest",
         )
 

@@ -217,7 +217,7 @@ unified_contact_tests = [
     (GeoType.SPHERE, GeoType.MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
     (GeoType.SPHERE, GeoType.CONVEX_MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
     (GeoType.BOX, GeoType.BOX, TestLevel.VELOCITY_YZ, TestLevel.VELOCITY_LINEAR),
-    (GeoType.BOX, GeoType.MESH, TestLevel.VELOCITY_YZ, TestLevel.VELOCITY_LINEAR, 0.3),
+    (GeoType.BOX, GeoType.MESH, TestLevel.VELOCITY_YZ, TestLevel.VELOCITY_LINEAR, 0.02),
     (GeoType.BOX, GeoType.CONVEX_MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
     (GeoType.CAPSULE, GeoType.CAPSULE, TestLevel.VELOCITY_YZ, TestLevel.VELOCITY_LINEAR),
     (GeoType.CAPSULE, GeoType.MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
