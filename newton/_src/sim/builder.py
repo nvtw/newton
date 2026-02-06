@@ -7259,7 +7259,7 @@ class ModelBuilder:
                 margin = self.shape_contact_margin[shape_idx] + self.shape_thickness[shape_idx]
 
                 # Create cache key based on shape type and parameters
-                if shape_type == GeoType.MESH and shape_src is not None:
+                if (shape_type == GeoType.MESH or shape_type == GeoType.CONVEX_MESH) and shape_src is not None:
                     cache_key = (shape_type, id(shape_src), tuple(shape_scale), margin)
                 else:
                     cache_key = (shape_type, tuple(shape_scale), margin)
@@ -7283,6 +7283,29 @@ class ModelBuilder:
                         aabb_lower = aabb_lower - margin
                         aabb_upper = aabb_upper + margin
 
+                        nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
+
+                    elif shape_type == GeoType.CONVEX_MESH and shape_src is not None:
+                        # Compute local AABB from convex mesh vertices (similar to MESH)
+                        vertices = shape_src.vertices
+                        aabb_lower = vertices.min(axis=0)
+                        aabb_upper = vertices.max(axis=0)
+
+                        # Apply scale to get the actual local-space bounds
+                        aabb_lower = aabb_lower * np.array(shape_scale)
+                        aabb_upper = aabb_upper * np.array(shape_scale)
+
+                        # Expand by margin
+                        aabb_lower = aabb_lower - margin
+                        aabb_upper = aabb_upper + margin
+
+                        nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
+
+                    elif shape_type == GeoType.ELLIPSOID:
+                        # Ellipsoid: shape_scale = (semi_axis_x, semi_axis_y, semi_axis_z)
+                        sx, sy, sz = shape_scale
+                        aabb_lower = np.array([-sx - margin, -sy - margin, -sz - margin])
+                        aabb_upper = np.array([sx + margin, sy + margin, sz + margin])
                         nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
                     elif shape_type == GeoType.BOX:
