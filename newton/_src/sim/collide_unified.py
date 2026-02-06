@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from enum import IntEnum
 
+import numpy as np
 import warp as wp
 
 from ..core.types import Devicelike
@@ -325,6 +326,7 @@ class CollisionPipelineUnified:
         - Multiple broad phase modes: NXN (all-pairs), SAP (sweep-and-prune), EXPLICIT (precomputed pairs)
         - Mesh-mesh collision via SDF with contact reduction
         - Optional hydroelastic contact model for compliant surfaces
+        - For NXN and SAP, model.shape_collision_filter_pairs is honored (excluded pairs are not reported).
     """
 
     def __init__(
@@ -347,6 +349,7 @@ class CollisionPipelineUnified:
         sap_sort_type=None,
         sdf_hydroelastic: SDFHydroelastic | None = None,
         has_meshes: bool = True,
+        shape_pairs_excluded: wp.array(dtype=wp.vec2i) | None = None,
     ):
         """
         Initialize the CollisionPipelineUnified.
@@ -389,6 +392,8 @@ class CollisionPipelineUnified:
             has_meshes (bool, optional): Whether the scene contains any mesh shapes (GeoType.MESH).
                 When False, mesh-related kernel launches in the narrow phase are skipped, improving performance
                 for scenes with only primitive shapes. Defaults to True for safety.
+            shape_pairs_excluded (wp.array | None, optional): Sorted array of excluded shape pairs (vec2i)
+                for NXN/SAP broad phase. Pairs in this list are not reported as contacts. Ignored for EXPLICIT.
         """
         self.contacts = None
         self.shape_count = shape_count
@@ -396,6 +401,8 @@ class CollisionPipelineUnified:
         self.device = device
         self.reduce_contacts = reduce_contacts
         self.shape_pairs_max = (shape_count * (shape_count - 1)) // 2
+        self.shape_pairs_excluded = shape_pairs_excluded
+        self.shape_pairs_excluded_count = shape_pairs_excluded.shape[0] if shape_pairs_excluded is not None else 0
 
         # Initialize broad phase
         if self.broad_phase_mode == BroadPhaseMode.NXN:
@@ -512,6 +519,7 @@ class CollisionPipelineUnified:
             broad_phase_mode (BroadPhaseMode, optional): Broad phase collision detection mode. Defaults to BroadPhaseMode.EXPLICIT.
             shape_pairs_filtered (wp.array | None, optional): Precomputed shape pairs for EXPLICIT mode.
                 When broad_phase_mode is BroadPhaseMode.EXPLICIT, uses model.shape_contact_pairs if not provided. For NXN/SAP modes, ignored.
+                For NXN and SAP, model.shape_collision_filter_pairs is always honored (excluded pairs are not reported as contacts).
             sap_sort_type (SAPSortType | None, optional): Sorting algorithm for SAP broad phase.
                 Only used when broad_phase_mode is BroadPhaseMode.SAP. If None, uses default (SEGMENTED).
             sdf_hydroelastic_config (SDFHydroelasticConfig | None, optional): Configuration for SDF hydroelastic collision handling. Defaults to None.
@@ -534,6 +542,21 @@ class CollisionPipelineUnified:
             else:
                 # Will raise error in __init__ if EXPLICIT mode requires it
                 shape_pairs_filtered = None
+
+        # For NXN/SAP, build sorted exclusion array from model.shape_collision_filter_pairs
+        shape_pairs_excluded = None
+        if broad_phase_mode in (BroadPhaseMode.NXN, BroadPhaseMode.SAP) and hasattr(
+            model, "shape_collision_filter_pairs"
+        ):
+            filters = model.shape_collision_filter_pairs
+            if filters:
+                sorted_pairs = sorted(filters)  # lexicographic (already canonical min,max)
+                shape_pairs_excluded = wp.array(
+                    np.array(sorted_pairs),
+                    dtype=wp.vec2i,
+                    device=model.device,
+                )
+            # else: leave None, __init__ will use count 0
 
         # Initialize SDF hydroelastic
         # returns None if no hydroelastic shape pairs in the model
@@ -564,6 +587,7 @@ class CollisionPipelineUnified:
             sap_sort_type=sap_sort_type,
             sdf_hydroelastic=sdf_hydroelastic,
             has_meshes=has_meshes,
+            shape_pairs_excluded=shape_pairs_excluded,
         )
 
         return pipeline
@@ -631,6 +655,8 @@ class CollisionPipelineUnified:
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
                 device=self.device,
+                filter_pairs=self.shape_pairs_excluded,
+                num_filter_pairs=self.shape_pairs_excluded_count,
             )
         elif self.broad_phase_mode == BroadPhaseMode.SAP:
             self.sap_broadphase.launch(
@@ -643,6 +669,8 @@ class CollisionPipelineUnified:
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
                 device=self.device,
+                filter_pairs=self.shape_pairs_excluded,
+                num_filter_pairs=self.shape_pairs_excluded_count,
             )
         else:  # BroadPhaseMode.EXPLICIT
             self.explicit_broadphase.launch(

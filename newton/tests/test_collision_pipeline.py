@@ -441,6 +441,61 @@ for mode_name, test_func in mesh_mesh_sdf_tests:
 
 
 # ============================================================================
+# Shape collision filter pairs (excluded pairs) with NxN/SAP
+# ============================================================================
+
+
+def test_unified_pipeline_shape_collision_filter_pairs(test, device, broad_phase_mode: newton.BroadPhaseMode):
+    """Excluded shape pairs must not appear in contacts when using NxN or SAP broad phase."""
+    with wp.ScopedDevice(device):
+        builder = newton.ModelBuilder(gravity=0.0)
+        builder.rigid_contact_margin = 0.01
+        # Two overlapping spheres (same position so they definitely overlap)
+        body_a = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0)))
+        shape_a = builder.add_shape_sphere(body=body_a, radius=0.5)
+        body_b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0)))
+        shape_b = builder.add_shape_sphere(body=body_b, radius=0.5)
+        # Exclude this pair so they must not generate contacts
+        builder.shape_collision_filter_pairs.append((min(shape_a, shape_b), max(shape_a, shape_b)))
+        model = builder.finalize(device=device)
+        pipeline = newton.CollisionPipelineUnified.from_model(
+            model,
+            broad_phase_mode=broad_phase_mode,
+        )
+        state = model.state()
+        contacts = pipeline.collide(model, state)
+        n = contacts.rigid_contact_count.numpy()[0]
+        excluded = (min(shape_a, shape_b), max(shape_a, shape_b))
+        for i in range(n):
+            s0 = int(contacts.rigid_contact_shape0.numpy()[i])
+            s1 = int(contacts.rigid_contact_shape1.numpy()[i])
+            pair = (min(s0, s1), max(s0, s1))
+            test.assertNotEqual(
+                pair,
+                excluded,
+                f"Excluded pair {excluded} must not appear in contacts (broad_phase={broad_phase_mode.name})",
+            )
+        # With the only pair excluded, we must have zero rigid contacts
+        test.assertEqual(n, 0, f"Expected 0 rigid contacts when only pair is excluded (got {n})")
+
+
+add_function_test(
+    TestUnifiedCollisionPipeline,
+    "test_shape_collision_filter_pairs_nxn",
+    test_unified_pipeline_shape_collision_filter_pairs,
+    devices=devices,
+    broad_phase_mode=newton.BroadPhaseMode.NXN,
+)
+add_function_test(
+    TestUnifiedCollisionPipeline,
+    "test_shape_collision_filter_pairs_sap",
+    test_unified_pipeline_shape_collision_filter_pairs,
+    devices=devices,
+    broad_phase_mode=newton.BroadPhaseMode.SAP,
+)
+
+
+# ============================================================================
 # Particle-Shape (Soft) Contact Tests
 # ============================================================================
 # These tests verify that particle-shape contacts are correctly generated
