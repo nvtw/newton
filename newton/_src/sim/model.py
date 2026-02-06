@@ -841,6 +841,13 @@ class Model:
             :meth:`ModelBuilder.finalize`.
 
         Example:
+            >>> import newton
+            >>> import warp as wp
+            >>> builder = newton.ModelBuilder()
+            >>> body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()))
+            >>> _ = builder.add_shape_sphere(body=body, radius=1.0)
+            >>> model = builder.finalize()
+            >>> state = model.state()
             >>> contacts = model.collide(state)
 
             Or with an explicit pipeline for more control:
