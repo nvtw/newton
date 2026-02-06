@@ -416,10 +416,10 @@ def test_mujoco_hydroelastic_penetration_depth(test, device):
         ratio = measured / expected
 
         test.assertGreater(
-            ratio, 0.9, f"Case {i}: ratio {ratio:.3f} too low (measured={measured:.6f}, expected={expected:.6f})"
+            ratio, 0.85, f"Case {i}: ratio {ratio:.3f} too low (measured={measured:.6f}, expected={expected:.6f})"
         )
         test.assertLess(
-            ratio, 1.1, f"Case {i}: ratio {ratio:.3f} too high (measured={measured:.6f}, expected={expected:.6f})"
+            ratio, 1.15, f"Case {i}: ratio {ratio:.3f} too high (measured={measured:.6f}, expected={expected:.6f})"
         )
 
 

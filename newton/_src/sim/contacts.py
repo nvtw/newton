@@ -121,9 +121,11 @@ class Contacts:
                 self.rigid_contact_damping = wp.zeros(rigid_contact_max, dtype=wp.float32, requires_grad=requires_grad)
                 self.rigid_contact_friction = wp.zeros(rigid_contact_max, dtype=wp.float32, requires_grad=requires_grad)
             else:
-                self.rigid_contact_stiffness = None
-                self.rigid_contact_damping = None
-                self.rigid_contact_friction = None
+                # Create empty arrays (zero-length) to avoid None in tape.backward()
+                # These are never written to, but the tape needs valid array objects
+                self.rigid_contact_stiffness = wp.zeros(0, dtype=wp.float32, requires_grad=requires_grad, device=device)
+                self.rigid_contact_damping = wp.zeros(0, dtype=wp.float32, requires_grad=requires_grad, device=device)
+                self.rigid_contact_friction = wp.zeros(0, dtype=wp.float32, requires_grad=requires_grad, device=device)
 
             # soft contacts
             self.soft_contact_count = self._counter_array[1:2]

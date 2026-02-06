@@ -209,6 +209,19 @@ class ArrayCache(Generic[T]):
             self._next_index = index + 1
         return index
 
+    def register_value_by_index(self, value: T, index: int) -> None:
+        """Register an object directly by its index (used during deserialization).
+
+        During deserialization, pointer-based keys are unreliable because freshly
+        allocated arrays may share memory addresses. This method bypasses the
+        key-based lookup and registers the value directly by index.
+        """
+        if index in self._index_to_entry:
+            return  # Already registered (e.g. via a full payload earlier in the stream)
+        self._index_to_entry[index] = value
+        if index >= self._next_index:
+            self._next_index = index + 1
+
     def get_index_for_key(self, key: int) -> int:
         """Return the assigned index for an existing key, else raise KeyError."""
         existing_entry = self._key_to_entry.get(key, None)
@@ -294,11 +307,29 @@ def serialize_ndarray(arr: np.ndarray, format_type: str = "json", cache: ArrayCa
         A dictionary containing the array's type, dtype, shape, and data.
     """
     if format_type == "json":
+
+        def _deep_tolist(obj):
+            """Recursively convert numpy objects to JSON-serializable Python types."""
+            if isinstance(obj, np.ndarray):
+                if obj.dtype == object or obj.dtype.names is not None:
+                    # Object or structured arrays: convert element-by-element
+                    if obj.ndim == 0:
+                        return _deep_tolist(obj.item())
+                    return [_deep_tolist(item) for item in obj]
+                return obj.tolist()  # Fast C-level conversion for standard numeric dtypes
+            if isinstance(obj, dict):
+                return {str(k): _deep_tolist(v) for k, v in obj.items()}
+            if isinstance(obj, list | tuple):
+                return [_deep_tolist(item) for item in obj]
+            if isinstance(obj, np.generic):
+                return obj.item()
+            return obj
+
         return {
             "__type__": "numpy.ndarray",
             "dtype": str(arr.dtype),
             "shape": arr.shape,
-            "data": json.dumps(arr.tolist()),
+            "data": json.dumps(_deep_tolist(arr)),
         }
     elif format_type == "cbor2":
         try:
@@ -388,10 +419,9 @@ def deserialize_ndarray(data: dict, format_type: str = "json", cache: ArrayCache
             arr = arr.reshape(shape, order=order)
             # Register in cache if available and index provided
             if cache is not None and "cache_index" in data:
-                # We cannot recover a stable pointer from bytes; use id(arr.data) as key surrogate
-                # Since no aliasing is guaranteed, each full array is unique in the stream
-                key = _np_key(arr)
-                cache.try_register_pointer_and_value_and_index(key, arr, int(data["cache_index"]))
+                # During deserialization, pointer-based keys are unreliable
+                # (freshly allocated arrays may share addresses). Register by index directly.
+                cache.register_value_by_index(arr, int(data["cache_index"]))
             return arr
         else:
             # Fallback to list deserialization for non-binary data
@@ -940,8 +970,7 @@ def depointer_as_key(data: dict, format_type: str = "json", cache: ArrayCache | 
                 # Register in cache if provided index present (optimization: single dict lookup)
                 cache_index = x.get("cache_index")
                 if cache is not None and cache_index is not None:
-                    key = _warp_key(result)
-                    cache.try_register_pointer_and_value_and_index(key, result, int(cache_index))
+                    cache.register_value_by_index(result, int(cache_index))
                 return result
             except Exception as e:
                 print(f"[Recorder] Warning: Failed to deserialize warp.array at '{path}': {e}")
@@ -986,8 +1015,7 @@ def depointer_as_key(data: dict, format_type: str = "json", cache: ArrayCache | 
                 # Optimization: single dict lookup
                 cache_index = x.get("cache_index")
                 if cache is not None and cache_index is not None:
-                    mesh_key = _mesh_key_from_vertices(vertices, fallback_obj=mesh)
-                    cache.try_register_pointer_and_value_and_index(mesh_key, mesh, int(cache_index))
+                    cache.register_value_by_index(mesh, int(cache_index))
                 return mesh
             except Exception as e:
                 print(f"[Recorder] Warning: Failed to deserialize Mesh at '{path}': {e}")

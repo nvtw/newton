@@ -7162,6 +7162,8 @@ class ModelBuilder:
             m.shape_transform = wp.array(self.shape_transform, dtype=wp.transform, requires_grad=requires_grad)
             m.shape_body = wp.array(self.shape_body, dtype=wp.int32)
             m.shape_flags = wp.array(self.shape_flags, dtype=wp.int32)
+            # Cache host shape flags to avoid device->host copies during capture
+            m.shape_flags_host = np.array(self.shape_flags, dtype=np.int32)
             m.body_shapes = self.body_shapes
 
             # build list of ids for geometry sources (meshes, sdfs)
@@ -7178,6 +7180,8 @@ class ModelBuilder:
                     geo_sources.append(0)
 
             m.shape_type = wp.array(self.shape_type, dtype=wp.int32)
+            # Cache host shape types to avoid device->host copies during capture.
+            m.shape_type_host = np.array(self.shape_type, dtype=np.int32)
             m.shape_source_ptr = wp.array(geo_sources, dtype=wp.uint64)
             m.shape_scale = wp.array(self.shape_scale, dtype=wp.vec3, requires_grad=requires_grad)
             m.shape_is_solid = wp.array(self.shape_is_solid, dtype=wp.bool)
@@ -7480,20 +7484,28 @@ class ModelBuilder:
 
                 # Create array of SDFData structs
                 m.shape_sdf_data = wp.array(sdf_data_list, dtype=SDFData, device=device)
+                # Cache host copy for CUDA capture (must be done after array creation)
+                m.shape_sdf_data_host = m.shape_sdf_data.numpy() if m.device.is_cuda else None
                 # Keep volume objects alive for reference counting
                 m.shape_sdf_volume = sdf_volumes
                 m.shape_sdf_coarse_volume = sdf_coarse_volumes
-                m.shape_sdf_block_coords = wp.array(sdf_block_coords, dtype=wp.vec3us)
-                m.shape_sdf_shape2blocks = wp.array(sdf_shape2blocks, dtype=wp.vec2i)
+                sdf_block_coords_np = np.array(sdf_block_coords, dtype=np.uint16).reshape(-1, 3)
+                m.shape_sdf_block_coords = wp.array(sdf_block_coords_np, dtype=wp.vec3us)
+                sdf_shape2blocks_np = np.array(sdf_shape2blocks, dtype=np.int32).reshape(-1, 2)
+                m.shape_sdf_shape2blocks = wp.array(sdf_shape2blocks_np, dtype=wp.vec2i)
+                m.shape_sdf_shape2blocks_host = sdf_shape2blocks_np  # Cache for CUDA capture
             else:
                 # SDF mesh-mesh collision and hydroelastics not enabled or no colliding meshes/shapes
                 # Still need one SDFData per shape (all empty) so narrow phase can safely access shape_sdf_data[shape_idx]
                 empty_sdf_data = create_empty_sdf_data()
                 m.shape_sdf_data = wp.array([empty_sdf_data] * len(self.shape_type), dtype=SDFData, device=device)
+                # Cache host copy for CUDA capture (must be done after array creation)
+                m.shape_sdf_data_host = m.shape_sdf_data.numpy() if m.device.is_cuda else None
                 m.shape_sdf_volume = [None] * len(self.shape_type)
                 m.shape_sdf_coarse_volume = [None] * len(self.shape_type)
                 m.shape_sdf_block_coords = wp.array([], dtype=wp.vec3us)
                 m.shape_sdf_shape2blocks = wp.array([], dtype=wp.vec2i)
+                m.shape_sdf_shape2blocks_host = np.array([], dtype=np.int32).reshape(0, 2)  # Cache for CUDA capture
 
             # ---------------------
             # springs
@@ -7968,5 +7980,7 @@ class ModelBuilder:
                 if (shape_a, shape_b) not in filters:
                     contact_pairs.append((shape_a, shape_b))
 
-        model.shape_contact_pairs = wp.array(np.array(contact_pairs), dtype=wp.vec2i, device=model.device)
+        contact_pairs_np = np.array(contact_pairs, dtype=np.int32).reshape(-1, 2)
+        model.shape_contact_pairs = wp.array(contact_pairs_np, dtype=wp.vec2i, device=model.device)
+        model.shape_contact_pairs_host = contact_pairs_np  # Cache for CUDA capture
         model.shape_contact_pair_count = len(contact_pairs)

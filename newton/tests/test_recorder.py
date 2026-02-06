@@ -397,6 +397,7 @@ add_function_test(
     "test_model_and_state_recorder_json",
     test_model_and_state_recorder_json,
     devices=devices,
+    check_output=False,  # Ignore "Please install 'psutil'" UserWarning
 )
 
 add_function_test(
