@@ -371,10 +371,7 @@ def test_mesh_mesh_sdf_modes(
         setup.step()
         setup.render()
     setup.test(TestLevel.VELOCITY_YZ, 0, tolerance=tolerance)
-    # Only check lateral velocity for body 1: mesh-mesh contacts can add slight
-    # energy due to contact normal variability, so forward velocity may exceed
-    # the initial velocity.
-    setup.test(TestLevel.VELOCITY_YZ, 1, tolerance=tolerance)
+    setup.test(TestLevel.VELOCITY_LINEAR, 1, tolerance=tolerance)
 
 
 # Wrapper functions for different SDF modes
