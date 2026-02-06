@@ -595,15 +595,15 @@ add_example_test(
     use_viewer=True,
 )
 
-# Skipped: Requires enable_backward=True on collision pipeline (not yet implemented)
-# add_example_test(
-#     TestDiffSimExamples,
-#     name="diffsim.example_diffsim_soft_body",
-#     devices=test_devices,
-#     test_options={"num-frames": 4 * 60},  # train_iters * sim_steps
-#     test_options_cpu={"num-frames": 2 * 60},
-#     use_viewer=True,
-# )
+add_example_test(
+    TestDiffSimExamples,
+    name="diffsim.example_diffsim_soft_body",
+    devices=test_devices,
+    test_options={"num-frames": 4 * 60},  # train_iters * sim_steps
+    test_options_cpu={"num-frames": 2 * 60},
+    use_viewer=True,
+    skip_reason="Requires enable_backward=True on collision pipeline (not yet implemented)",
+)
 
 add_example_test(
     TestDiffSimExamples,

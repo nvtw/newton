@@ -308,20 +308,14 @@ class SDFHydroelastic:
         Returns:
             SDFHydroelastic instance, or None if no hydroelastic shape pairs exist.
         """
-        # Use cached host copy if available to avoid device->host copy during CUDA capture
-        shape_flags = getattr(model, "shape_flags_host", None)
-        if shape_flags is None:
-            shape_flags = model.shape_flags.numpy()
+        shape_flags = model.shape_flags.numpy()
 
         # Check if any shapes have hydroelastic flag
         has_hydroelastic = any((flags & ShapeFlags.HYDROELASTIC) for flags in shape_flags)
         if not has_hydroelastic:
             return None
 
-        # Use cached host copy if available to avoid device->host copy during CUDA capture
-        shape_pairs = getattr(model, "shape_contact_pairs_host", None)
-        if shape_pairs is None:
-            shape_pairs = model.shape_contact_pairs.numpy()
+        shape_pairs = model.shape_contact_pairs.numpy()
         num_hydroelastic_pairs = 0
         for shape_a, shape_b in shape_pairs:
             if (shape_flags[shape_a] & ShapeFlags.HYDROELASTIC) and (shape_flags[shape_b] & ShapeFlags.HYDROELASTIC):
@@ -330,10 +324,7 @@ class SDFHydroelastic:
         if num_hydroelastic_pairs == 0:
             return None
 
-        # Use cached host copy if available to avoid device->host copy during CUDA capture
-        shape_sdf_shape2blocks = getattr(model, "shape_sdf_shape2blocks_host", None)
-        if shape_sdf_shape2blocks is None:
-            shape_sdf_shape2blocks = model.shape_sdf_shape2blocks.numpy()
+        shape_sdf_shape2blocks = model.shape_sdf_shape2blocks.numpy()
 
         # Get indices of shapes that can collide and are hydroelastic
         hydroelastic_indices = [
@@ -343,10 +334,7 @@ class SDFHydroelastic:
         ]
 
         # Verify all hydroelastic shapes have scale baked into their SDF
-        # Use cached host copy if available to avoid device->host copy during CUDA capture
-        shape_sdf_data = getattr(model, "shape_sdf_data_host", None)
-        if shape_sdf_data is None:
-            shape_sdf_data = model.shape_sdf_data.numpy()
+        shape_sdf_data = model.shape_sdf_data.numpy()
         for idx in hydroelastic_indices:
             if not shape_sdf_data[idx]["scale_baked"]:
                 raise ValueError(f"Hydroelastic shape {idx} does not have scale baked into its SDF.")
