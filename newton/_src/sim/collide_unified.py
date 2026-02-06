@@ -340,7 +340,7 @@ class CollisionPipelineUnified:
         iterate_mesh_vertices: bool = True,
         requires_grad: bool = False,
         device: Devicelike = None,
-        broad_phase_mode: BroadPhaseMode = BroadPhaseMode.NXN,
+        broad_phase_mode: BroadPhaseMode = BroadPhaseMode.EXPLICIT,
         shape_collision_group: wp.array(dtype=int) | None = None,
         shape_world: wp.array(dtype=int) | None = None,
         shape_flags: wp.array(dtype=int) | None = None,
@@ -373,7 +373,7 @@ class CollisionPipelineUnified:
                 - BroadPhaseMode.NXN: Use all-pairs AABB broad phase (O(N²), good for small scenes)
                 - BroadPhaseMode.SAP: Use sweep-and-prune AABB broad phase (O(N log N), better for larger scenes)
                 - BroadPhaseMode.EXPLICIT: Use precomputed shape pairs (most efficient when pairs known)
-                Defaults to BroadPhaseMode.NXN.
+                Defaults to BroadPhaseMode.EXPLICIT.
             shape_collision_group (wp.array | None, optional): Array of collision group IDs for each shape.
                 Used during broad phase kernel execution to filter pairs based on collision group rules.
             shape_world (wp.array | None, optional): Array of world indices for each shape.
@@ -491,7 +491,7 @@ class CollisionPipelineUnified:
         edge_sdf_iter: int = 10,
         iterate_mesh_vertices: bool = True,
         requires_grad: bool | None = None,
-        broad_phase_mode: BroadPhaseMode = BroadPhaseMode.NXN,
+        broad_phase_mode: BroadPhaseMode = BroadPhaseMode.EXPLICIT,
         shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
         sap_sort_type=None,
         sdf_hydroelastic_config: SDFHydroelasticConfig | None = None,
@@ -509,9 +509,9 @@ class CollisionPipelineUnified:
             edge_sdf_iter (int, optional): Number of iterations for edge SDF collision. Defaults to 10.
             iterate_mesh_vertices (bool, optional): Whether to iterate mesh vertices for collision. Defaults to True.
             requires_grad (bool | None, optional): Whether to enable gradient computation. If None, uses model.requires_grad.
-            broad_phase_mode (BroadPhaseMode, optional): Broad phase collision detection mode. Defaults to BroadPhaseMode.NXN.
+            broad_phase_mode (BroadPhaseMode, optional): Broad phase collision detection mode. Defaults to BroadPhaseMode.EXPLICIT.
             shape_pairs_filtered (wp.array | None, optional): Precomputed shape pairs for EXPLICIT mode.
-                Required when broad_phase_mode is BroadPhaseMode.EXPLICIT. For NXN/SAP modes, can use model.shape_contact_pairs if available.
+                When broad_phase_mode is BroadPhaseMode.EXPLICIT, uses model.shape_contact_pairs if not provided. For NXN/SAP modes, ignored.
             sap_sort_type (SAPSortType | None, optional): Sorting algorithm for SAP broad phase.
                 Only used when broad_phase_mode is BroadPhaseMode.SAP. If None, uses default (SEGMENTED).
             sdf_hydroelastic_config (SDFHydroelasticConfig | None, optional): Configuration for SDF hydroelastic collision handling. Defaults to None.

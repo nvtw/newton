@@ -223,12 +223,12 @@ def test_shapes_on_plane(test, device, solver_fn):
     max_angular_vel = np.max(np.abs(body_qd[:, 3:]))
     test.assertLess(
         max_linear_vel,
-        0.5,  # Allow some small residual velocity
+        0.2,
         f"Objects should be at rest, but max linear velocity is {max_linear_vel:.6f}",
     )
     test.assertLess(
         max_angular_vel,
-        0.5,  # Allow some small residual angular velocity
+        0.2,
         f"Objects should be at rest, but max angular velocity is {max_angular_vel:.6f}",
     )
 
