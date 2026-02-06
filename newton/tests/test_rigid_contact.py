@@ -164,7 +164,9 @@ def test_shapes_on_plane(test, device, solver_fn):
     # Create collision pipeline once (reused across all steps)
     collision_pipeline = None
     if not isinstance(solver, newton.solvers.SolverMuJoCo):
-        collision_pipeline = newton.CollisionPipelineUnified.from_model(model)
+        collision_pipeline = newton.CollisionPipelineUnified.from_model(
+            model, broad_phase_mode=newton.BroadPhaseMode.EXPLICIT
+        )
 
     use_cuda_graph = device.is_cuda and wp.is_mempool_enabled(device)
     substeps = 10

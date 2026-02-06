@@ -782,7 +782,9 @@ def test_mesh_ground_collision_index(test, device):
     state = model.state()
 
     # Use unified collision pipeline
-    collision_pipeline = newton.CollisionPipelineUnified.from_model(model)
+    collision_pipeline = newton.CollisionPipelineUnified.from_model(
+        model, broad_phase_mode=newton.BroadPhaseMode.EXPLICIT
+    )
     contacts = model.collide(state, collision_pipeline=collision_pipeline)
     test.assertEqual(contacts.rigid_contact_max, 12)
     test.assertEqual(contacts.rigid_contact_count.numpy()[0], 3)
@@ -836,7 +838,9 @@ def test_avbd_particle_ground_penalty_grows(test, device):
     state_out = model.state()
 
     # Use unified collision pipeline
-    collision_pipeline = newton.CollisionPipelineUnified.from_model(model)
+    collision_pipeline = newton.CollisionPipelineUnified.from_model(
+        model, broad_phase_mode=newton.BroadPhaseMode.EXPLICIT
+    )
     contacts = model.collide(state_in, collision_pipeline=collision_pipeline)
 
     soft_count = int(contacts.soft_contact_count.numpy()[0])

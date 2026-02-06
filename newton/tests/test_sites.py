@@ -256,7 +256,9 @@ class TestSiteNonCollision(unittest.TestCase):
         state = model.state()
 
         # Run collision detection with unified pipeline
-        collision_pipeline = newton.CollisionPipelineUnified.from_model(model)
+        collision_pipeline = newton.CollisionPipelineUnified.from_model(
+            model, broad_phase_mode=newton.BroadPhaseMode.EXPLICIT
+        )
         contacts = model.collide(state, collision_pipeline=collision_pipeline)
 
         # Should have no contacts (site doesn't collide)
