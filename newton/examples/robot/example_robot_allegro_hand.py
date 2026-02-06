@@ -144,11 +144,7 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        # Create collision pipeline
-        self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
-            self.model, broad_phase_mode=newton.BroadPhaseMode.EXPLICIT
-        )
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+        self.contacts = self.model.collide(self.state_0)
 
         self.viewer.set_model(self.model)
 
@@ -162,7 +158,7 @@ class Example:
             self.graph = capture.graph
 
     def simulate(self):
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+        self.contacts = self.model.collide(self.state_0)
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
 

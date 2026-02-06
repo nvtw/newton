@@ -816,7 +816,7 @@ class Model:
     def collide(
         self: Model,
         state: State,
-        collision_pipeline,  # CollisionPipelineUnified
+        collision_pipeline=None,  # CollisionPipelineUnified | None
     ) -> Contacts:
         """
         Generate contact points for the particles and rigid bodies in the model.
@@ -826,8 +826,10 @@ class Model:
 
         Args:
             state (State): The current state of the model.
-            collision_pipeline (CollisionPipelineUnified): Collision pipeline to use for contact generation.
-                Create one using :meth:`CollisionPipelineUnified.from_model`.
+            collision_pipeline (CollisionPipelineUnified, optional): Collision pipeline to use for contact generation.
+                If not provided, a default :class:`CollisionPipelineUnified` is created automatically
+                (and cached for subsequent calls). For more control, create one explicitly via
+                :meth:`CollisionPipelineUnified.from_model`.
 
         Returns:
             Contacts: The contact object containing collision information.
@@ -839,20 +841,26 @@ class Model:
             :meth:`ModelBuilder.finalize`.
 
         Example:
-            >>> collision_pipeline = newton.CollisionPipelineUnified.from_model(model)
-            >>> contacts = model.collide(state, collision_pipeline)
-        """
-        if collision_pipeline is None:
-            raise ValueError(
-                "collision_pipeline is required. Create one with CollisionPipelineUnified.from_model(model)"
-            )
+            >>> contacts = model.collide(state)
 
-        self._collision_pipeline = collision_pipeline
+            Or with an explicit pipeline for more control:
+
+            >>> collision_pipeline = newton.CollisionPipelineUnified.from_model(model)
+            >>> contacts = model.collide(state, collision_pipeline=collision_pipeline)
+        """
+        if collision_pipeline is not None:
+            self._collision_pipeline = collision_pipeline
+        elif not hasattr(self, "_collision_pipeline"):
+            from .collide_unified import BroadPhaseMode, CollisionPipelineUnified  # noqa: PLC0415
+
+            self._collision_pipeline = CollisionPipelineUnified.from_model(
+                model=self, broad_phase_mode=BroadPhaseMode.EXPLICIT
+            )
 
         contacts = self._collision_pipeline.collide(self, state)
         # attach custom attributes with assignment==CONTACT
         self._add_custom_attributes(
-            contacts, Model.AttributeAssignment.CONTACT, requires_grad=collision_pipeline.requires_grad
+            contacts, Model.AttributeAssignment.CONTACT, requires_grad=self._collision_pipeline.requires_grad
         )
         return contacts
 

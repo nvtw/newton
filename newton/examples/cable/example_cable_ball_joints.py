@@ -386,11 +386,7 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        # Create collision pipeline
-        self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
-            self.model, broad_phase_mode=newton.BroadPhaseMode.EXPLICIT
-        )
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+        self.contacts = self.model.collide(self.state_0)
 
         self.viewer.set_model(self.model)
 
@@ -443,7 +439,7 @@ class Example:
             update_step_history = (substep % self.update_step_interval) == 0
 
             if update_step_history:
-                self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+                self.contacts = self.model.collide(self.state_0)
 
             self.solver.set_rigid_history_update(update_step_history)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)

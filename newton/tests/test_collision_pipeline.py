@@ -95,12 +95,7 @@ class CollisionSetup:
         self.state_1 = self.model.state()
         self.control = self.model.control()
 
-        # Initialize unified collision pipeline
-        self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
-            self.model,
-            broad_phase_mode=broad_phase_mode,
-        )
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+        self.contacts = self.model.collide(self.state_0)
 
         self.solver = solver_fn(self.model)
 
@@ -147,7 +142,7 @@ class CollisionSetup:
             self.graph = None
 
     def simulate(self):
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+        self.contacts = self.model.collide(self.state_0)
 
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()

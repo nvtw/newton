@@ -119,11 +119,8 @@ def test_particle_particle_friction_uses_relative_velocity(test, device):
     initial_relative_z_vel = initial_vel[0, 2] - initial_vel[1, 2]
 
     # Run simulation
-    collision_pipeline = newton.CollisionPipelineUnified.from_model(
-        model, broad_phase_mode=newton.BroadPhaseMode.EXPLICIT
-    )
     for _ in range(num_steps):
-        contacts = model.collide(state0, collision_pipeline=collision_pipeline)
+        contacts = model.collide(state0)
         control = model.control()
         solver.step(state0, state1, control, contacts, dt)
         state0, state1 = state1, state0
@@ -212,13 +209,8 @@ def test_particle_particle_friction_with_relative_motion(test, device):
         state0 = model.state()
         state1 = model.state()
 
-        # Create unified collision pipeline
-        collision_pipeline = newton.CollisionPipelineUnified.from_model(
-            model, broad_phase_mode=newton.BroadPhaseMode.EXPLICIT
-        )
-
         # One step: measure tangential slip (relative z displacement).
-        contacts = model.collide(state0, collision_pipeline=collision_pipeline)
+        contacts = model.collide(state0)
         control = model.control()
         solver.step(state0, state1, control, contacts, dt)
 

@@ -529,13 +529,6 @@ def _cable_bend_stiffness_impl(test: unittest.TestCase, device):
     control = model.control()
     solver = newton.solvers.SolverVBD(model, iterations=10)
 
-    # Create unified collision pipeline with larger buffers for cable tests
-    collision_pipeline = newton.CollisionPipelineUnified.from_model(
-        model,
-        rigid_contact_max=100000,  # Increased from default
-        soft_contact_max=100000,  # Increased from default
-    )
-
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
     sim_dt = frame_dt / sim_substeps
@@ -545,7 +538,7 @@ def _cable_bend_stiffness_impl(test: unittest.TestCase, device):
     for _step in range(num_steps):
         for _substep in range(sim_substeps):
             state0.clear_forces()
-            contacts = model.collide(state0, collision_pipeline=collision_pipeline)
+            contacts = model.collide(state0)
             solver.step(state0, state1, control, contacts, sim_dt)
             state0, state1 = state1, state0
 
@@ -589,13 +582,6 @@ def _cable_sagging_and_stability_impl(test: unittest.TestCase, device):
     model, state0, state1, control, _rod_bodies = _build_cable_chain(device, num_links=6, segment_length=segment_length)
     solver = newton.solvers.SolverVBD(model, iterations=10)
 
-    # Create unified collision pipeline with larger buffers for cable tests
-    collision_pipeline = newton.CollisionPipelineUnified.from_model(
-        model,
-        rigid_contact_max=100000,  # Increased from default
-        soft_contact_max=100000,  # Increased from default
-    )
-
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
     sim_dt = frame_dt / sim_substeps
@@ -608,7 +594,7 @@ def _cable_sagging_and_stability_impl(test: unittest.TestCase, device):
     for _step in range(num_steps):
         for _substep in range(sim_substeps):
             state0.clear_forces()
-            contacts = model.collide(state0, collision_pipeline=collision_pipeline)
+            contacts = model.collide(state0)
             solver.step(state0, state1, control, contacts, sim_dt)
             state0, state1 = state1, state0
 
@@ -705,14 +691,6 @@ def _cable_twist_response_impl(test: unittest.TestCase, device):
     # Write back to the device array (CPU or CUDA) explicitly
     state0.body_q = wp.array(q_initial, dtype=wp.transform, device=device)
 
-    # Create unified collision pipeline with larger buffers for cable tests
-    collision_pipeline = newton.CollisionPipelineUnified.from_model(
-        model,
-        rigid_contact_max=100000,  # Increased from default
-        soft_contact_max=100000,  # Increased from default
-        broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
-    )
-
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
     sim_dt = frame_dt / sim_substeps
@@ -722,7 +700,7 @@ def _cable_twist_response_impl(test: unittest.TestCase, device):
     for _step in range(num_steps):
         for _substep in range(sim_substeps):
             state0.clear_forces()
-            contacts = model.collide(state0, collision_pipeline=collision_pipeline)
+            contacts = model.collide(state0)
             solver.step(state0, state1, control, contacts, sim_dt)
             state0, state1 = state1, state0
 
@@ -896,14 +874,6 @@ def _two_layer_cable_pile_collision_impl(test: unittest.TestCase, device):
 
     solver = newton.solvers.SolverVBD(model, iterations=10, friction_epsilon=0.1)
 
-    # Create unified collision pipeline with larger buffers for cable tests
-    collision_pipeline = newton.CollisionPipelineUnified.from_model(
-        model,
-        rigid_contact_max=100000,  # Increased from default
-        soft_contact_max=100000,  # Increased from default
-        broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
-    )
-
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
     sim_dt = frame_dt / sim_substeps
@@ -913,7 +883,7 @@ def _two_layer_cable_pile_collision_impl(test: unittest.TestCase, device):
     for _step in range(num_steps):
         for _substep in range(sim_substeps):
             state0.clear_forces()
-            contacts = model.collide(state0, collision_pipeline=collision_pipeline)
+            contacts = model.collide(state0)
             solver.step(state0, state1, control, contacts, sim_dt)
             state0, state1 = state1, state0
 
@@ -1051,11 +1021,6 @@ def _cable_ball_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device
         iterations=10,
     )
 
-    # Create collision pipeline once
-    collision_pipeline = newton.CollisionPipelineUnified.from_model(
-        model, broad_phase_mode=newton.BroadPhaseMode.EXPLICIT
-    )
-
     # Smoothly move the anchor with substeps (mirrors cable example pattern).
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
@@ -1075,7 +1040,7 @@ def _cable_ball_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device
                 device=device,
             )
 
-            contacts = model.collide(state0, collision_pipeline=collision_pipeline)
+            contacts = model.collide(state0)
             solver.step(state0, state1, control, contacts, dt=sim_dt)
             state0, state1 = state1, state0
 
@@ -1186,11 +1151,6 @@ def _cable_fixed_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, devic
         rigid_joint_angular_k_start=1.0e7,
     )
 
-    # Create collision pipeline once
-    collision_pipeline = newton.CollisionPipelineUnified.from_model(
-        model, broad_phase_mode=newton.BroadPhaseMode.EXPLICIT
-    )
-
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
     sim_dt = frame_dt / sim_substeps
@@ -1213,7 +1173,7 @@ def _cable_fixed_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, devic
                 device=device,
             )
 
-            contacts = model.collide(state0, collision_pipeline=collision_pipeline)
+            contacts = model.collide(state0)
             solver.step(state0, state1, control, contacts, dt=sim_dt)
             state0, state1 = state1, state0
 
@@ -1342,11 +1302,6 @@ def _cable_kinematic_gripper_picks_capsule_impl(test: unittest.TestCase, device)
     gripper_body_ids = wp.array([g_neg, g_pos], dtype=wp.int32, device=device)
     gripper_signs = wp.array([-1.0, 1.0], dtype=wp.float32, device=device)
 
-    # Create collision pipeline once
-    collision_pipeline = newton.CollisionPipelineUnified.from_model(
-        model, broad_phase_mode=newton.BroadPhaseMode.EXPLICIT
-    )
-
     # Timeline
     ramp_time = 0.25
     pull_start_time = 0.25
@@ -1390,7 +1345,7 @@ def _cable_kinematic_gripper_picks_capsule_impl(test: unittest.TestCase, device)
             device=device,
         )
 
-        contacts = model.collide(state0, collision_pipeline=collision_pipeline)
+        contacts = model.collide(state0)
         solver.step(state0, state1, control, contacts, sim_dt)
         state0, state1 = state1, state0
 

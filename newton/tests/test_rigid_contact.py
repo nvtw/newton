@@ -29,9 +29,9 @@ from newton.tests.unittest_utils import (
 )
 
 
-def simulate(solver, model, state_0, state_1, control, sim_dt, substeps, collision_pipeline):
+def simulate(solver, model, state_0, state_1, control, sim_dt, substeps):
     if not isinstance(solver, newton.solvers.SolverMuJoCo):
-        contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
+        contacts = model.collide(state_0)
     else:
         contacts = None
     for _ in range(substeps):
@@ -161,29 +161,22 @@ def test_shapes_on_plane(test, device, solver_fn):
     state_0, state_1 = model.state(), model.state()
     control = model.control()
 
-    # Create collision pipeline once (reused across all steps)
-    collision_pipeline = None
-    if not isinstance(solver, newton.solvers.SolverMuJoCo):
-        collision_pipeline = newton.CollisionPipelineUnified.from_model(
-            model, broad_phase_mode=newton.BroadPhaseMode.EXPLICIT
-        )
-
     use_cuda_graph = device.is_cuda and wp.is_mempool_enabled(device)
     substeps = 10
     sim_dt = 1.0 / 60.0
     if use_cuda_graph:
         # ensure data is allocated and modules are loaded before graph capture
         # in case of an earlier CUDA version
-        simulate(solver, model, state_0, state_1, control, sim_dt, substeps, collision_pipeline)
+        simulate(solver, model, state_0, state_1, control, sim_dt, substeps)
         with wp.ScopedCapture(device) as capture:
-            simulate(solver, model, state_0, state_1, control, sim_dt, substeps, collision_pipeline)
+            simulate(solver, model, state_0, state_1, control, sim_dt, substeps)
         graph = capture.graph
 
     for _ in range(250):
         if use_cuda_graph:
             wp.capture_launch(graph)
         else:
-            simulate(solver, model, state_0, state_1, control, sim_dt, substeps, collision_pipeline)
+            simulate(solver, model, state_0, state_1, control, sim_dt, substeps)
 
     body_q = state_0.body_q.numpy()
     expected_end_positions = np.array(expected_end_positions)
@@ -383,12 +376,6 @@ def test_shape_collisions_gjk_mpr_multicontact(test, device, verbose=False):
     # Finalize model (shape pairs are built automatically)
     model = builder.finalize(device=device)
 
-    # Create CollisionPipelineUnified with EXPLICIT broad phase mode
-    collision_pipeline = newton.CollisionPipelineUnified.from_model(
-        model,
-        broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
-    )
-
     # Use XPBD solver
     solver = newton.solvers.SolverXPBD(model, iterations=2)
     state_0 = model.state()
@@ -406,8 +393,7 @@ def test_shape_collisions_gjk_mpr_multicontact(test, device, verbose=False):
     for _frame in range(max_frames):
         for _ in range(substeps):
             state_0.clear_forces()
-            # Use unified collision pipeline (CollisionPipelineUnified)
-            contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
+            contacts = model.collide(state_0)
             solver.step(state_0, state_1, control, contacts, sim_dt / substeps)
             state_0, state_1 = state_1, state_0
 
@@ -494,14 +480,6 @@ def test_mesh_box_on_ground(test, device):
     # Finalize model
     model = builder.finalize(device=device)
 
-    # Create collision pipeline (unified)
-    # Mesh boxes can generate many contacts, so we need a larger buffer
-    collision_pipeline = newton.CollisionPipelineUnified.from_model(
-        model,
-        rigid_contact_max=500,
-        broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
-    )
-
     # Create solver and states
     solver = newton.solvers.SolverXPBD(model, iterations=2)
     state_0 = model.state()
@@ -519,7 +497,7 @@ def test_mesh_box_on_ground(test, device):
     for _ in range(max_frames):
         for _ in range(substeps):
             state_0.clear_forces()
-            contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
+            contacts = model.collide(state_0)
             solver.step(state_0, state_1, control, contacts, sim_dt / substeps)
             state_0, state_1 = state_1, state_0
 
@@ -588,12 +566,6 @@ def test_mujoco_warp_newton_contacts(test, device):
     # Finalize model (shape pairs are built automatically)
     model = builder.finalize(device=device)
 
-    # Create unified collision pipeline (critical for this test)
-    collision_pipeline = newton.CollisionPipelineUnified.from_model(
-        model,
-        broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
-    )
-
     # Create MuJoCo Warp solver with Newton contacts
     solver = newton.solvers.SolverMuJoCo(
         model,
@@ -625,8 +597,7 @@ def test_mujoco_warp_newton_contacts(test, device):
         for _ in range(substeps):
             state_0.clear_forces()
 
-            # Use unified collision pipeline - this is the key part being tested
-            contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
+            contacts = model.collide(state_0)
 
             solver.step(state_0, state_1, control, contacts, sim_dt / substeps)
             state_0, state_1 = state_1, state_0
@@ -750,11 +721,6 @@ def test_box_drop(test, device, solver_fn):
     state_1 = model.state()
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
 
-    # Create collision pipeline once (reused across all substeps)
-    collision_pipeline = None
-    if not isinstance(solver, newton.solvers.SolverMuJoCo):
-        collision_pipeline = newton.CollisionPipelineUnified.from_model(model)
-
     # Max velocity: box 2 dropping to ground (z=4.2*box_size to z=box_size)
     g = 9.81
     max_drop = box_size * 3.2
@@ -768,8 +734,8 @@ def test_box_drop(test, device, solver_fn):
     for _ in range(max_frames):
         for _ in range(substeps):
             state_0.clear_forces()
-            if collision_pipeline is not None:
-                contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
+            if not isinstance(solver, newton.solvers.SolverMuJoCo):
+                contacts = model.collide(state_0)
             else:
                 contacts = None
             solver.step(state_0, state_1, None, contacts, sim_dt / substeps)

@@ -273,10 +273,7 @@ class TestMuJoCoSolverPropertiesBase(TestMuJoCoSolver):
         self.state_in = self.model.state()
         self.state_out = self.model.state()
         self.control = self.model.control()
-        self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
-            self.model, broad_phase_mode=newton.BroadPhaseMode.EXPLICIT
-        )
-        self.contacts = self.model.collide(self.state_in, collision_pipeline=self.collision_pipeline)
+        self.contacts = self.model.collide(self.state_in)
 
 
 class TestMuJoCoSolverMassProperties(TestMuJoCoSolverPropertiesBase):
@@ -3622,11 +3619,7 @@ class TestMuJoCoSolverNewtonContacts(unittest.TestCase):
         self.state_out = self.model.state()
         self.control = self.model.control()
 
-        # Use unified collision pipeline
-        self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
-            self.model, broad_phase_mode=newton.BroadPhaseMode.EXPLICIT
-        )
-        self.contacts = self.model.collide(self.state_in, collision_pipeline=self.collision_pipeline)
+        self.contacts = self.model.collide(self.state_in)
         self.sphere_body_idx = sphere_body_idx
 
     def test_sphere_on_plane_with_newton_contacts(self):
@@ -3641,7 +3634,7 @@ class TestMuJoCoSolverNewtonContacts(unittest.TestCase):
         num_steps = 120  # Simulate for 0.5 seconds to ensure it settles
 
         for _ in range(num_steps):
-            self.contacts = self.model.collide(self.state_in, collision_pipeline=self.collision_pipeline)
+            self.contacts = self.model.collide(self.state_in)
             solver.step(self.state_in, self.state_out, self.control, self.contacts, sim_dt)
             self.state_in, self.state_out = self.state_out, self.state_in
 
@@ -4242,10 +4235,6 @@ class TestMuJoCoConversion(unittest.TestCase):
         solver_soft = newton.solvers.SolverMuJoCo(model_soft)
         solver_stiff = newton.solvers.SolverMuJoCo(model_stiff)
 
-        # Create collision pipelines for each model
-        collision_pipeline_soft = newton.CollisionPipelineUnified.from_model(model_soft)
-        collision_pipeline_stiff = newton.CollisionPipelineUnified.from_model(model_stiff)
-
         dt = 0.005
         num_steps = 50
 
@@ -4263,8 +4252,8 @@ class TestMuJoCoConversion(unittest.TestCase):
 
         control_soft = model_soft.control()
         control_stiff = model_stiff.control()
-        contacts_soft = model_soft.collide(state_soft_in, collision_pipeline=collision_pipeline_soft)
-        contacts_stiff = model_stiff.collide(state_stiff_in, collision_pipeline=collision_pipeline_stiff)
+        contacts_soft = model_soft.collide(state_soft_in)
+        contacts_stiff = model_stiff.collide(state_stiff_in)
 
         # Track minimum positions during simulation
         min_q_soft = float("inf")

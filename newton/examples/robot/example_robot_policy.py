@@ -280,11 +280,7 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        # Create collision pipeline
-        self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
-            self.model, broad_phase_mode=newton.BroadPhaseMode.EXPLICIT
-        )
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+        self.contacts = self.model.collide(self.state_0)
 
         # Set model in viewer
         self.viewer.set_model(self.model)
@@ -329,7 +325,7 @@ class Example:
 
     def simulate(self):
         """Simulate performs one frame's worth of updates."""
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+        self.contacts = self.model.collide(self.state_0)
 
         need_state_copy = self.use_cuda_graph and self.sim_substeps % 2 == 1
 
