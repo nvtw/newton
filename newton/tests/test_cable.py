@@ -581,7 +581,6 @@ def _cable_sagging_and_stability_impl(test: unittest.TestCase, device):
     segment_length = 0.2
     model, state0, state1, control, _rod_bodies = _build_cable_chain(device, num_links=6, segment_length=segment_length)
     solver = newton.solvers.SolverVBD(model, iterations=10)
-
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
     sim_dt = frame_dt / sim_substeps
@@ -873,7 +872,6 @@ def _two_layer_cable_pile_collision_impl(test: unittest.TestCase, device):
     control = model.control()
 
     solver = newton.solvers.SolverVBD(model, iterations=10, friction_epsilon=0.1)
-
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
     sim_dt = frame_dt / sim_substeps

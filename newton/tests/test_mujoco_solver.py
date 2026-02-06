@@ -3618,7 +3618,6 @@ class TestMuJoCoSolverNewtonContacts(unittest.TestCase):
         self.state_in = self.model.state()
         self.state_out = self.model.state()
         self.control = self.model.control()
-
         self.contacts = self.model.collide(self.state_in)
         self.sphere_body_idx = sphere_body_idx
 
