@@ -118,7 +118,7 @@ class CollisionSetup:
         elif shape_type == GeoType.CYLINDER:
             self.builder.add_shape_cylinder(body, radius=0.25, half_height=0.4, key=type_to_str(shape_type))
         elif shape_type == GeoType.MESH:
-            # Use box mesh (works correctly with unified pipeline)
+            # Use box mesh (works correctly with collision pipeline)
             vertices, indices = newton.utils.create_box_mesh(extents=(0.5, 0.5, 0.5))
             # Configure SDF settings if specified
             cfg = newton.ModelBuilder.ShapeConfig(sdf_max_resolution=sdf_max_resolution)
@@ -203,14 +203,14 @@ class CollisionSetup:
 devices = get_cuda_test_devices(mode="basic")
 
 
-class TestUnifiedCollisionPipeline(unittest.TestCase):
+class TestCollisionPipeline(unittest.TestCase):
     pass
 
 
-# Unified collision pipeline tests - now supports both MESH and CONVEX_MESH
+# Collision pipeline tests - now supports both MESH and CONVEX_MESH
 # Format: (shape_a, shape_b, test_level_a, test_level_b, tolerance)
 # tolerance defaults to 3e-3 if not specified
-unified_contact_tests = [
+collision_pipeline_contact_tests = [
     (GeoType.SPHERE, GeoType.SPHERE, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
     (GeoType.SPHERE, GeoType.BOX, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
     (GeoType.SPHERE, GeoType.CAPSULE, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
@@ -233,7 +233,7 @@ unified_contact_tests = [
 ]
 
 
-def test_unified_collision_pipeline(
+def test_collision_pipeline(
     _test,
     device,
     shape_type_a: GeoType,
@@ -261,7 +261,7 @@ def test_unified_collision_pipeline(
 
 
 # Wrapper functions for each broad phase mode
-def test_unified_collision_pipeline_explicit(
+def test_collision_pipeline_explicit(
     _test,
     device,
     shape_type_a: GeoType,
@@ -270,12 +270,12 @@ def test_unified_collision_pipeline_explicit(
     test_level_b: TestLevel,
     tolerance: float = 3e-3,
 ):
-    test_unified_collision_pipeline(
+    test_collision_pipeline(
         _test, device, shape_type_a, shape_type_b, test_level_a, test_level_b, newton.BroadPhaseMode.EXPLICIT, tolerance
     )
 
 
-def test_unified_collision_pipeline_nxn(
+def test_collision_pipeline_nxn(
     _test,
     device,
     shape_type_a: GeoType,
@@ -284,12 +284,12 @@ def test_unified_collision_pipeline_nxn(
     test_level_b: TestLevel,
     tolerance: float = 3e-3,
 ):
-    test_unified_collision_pipeline(
+    test_collision_pipeline(
         _test, device, shape_type_a, shape_type_b, test_level_a, test_level_b, newton.BroadPhaseMode.NXN, tolerance
     )
 
 
-def test_unified_collision_pipeline_sap(
+def test_collision_pipeline_sap(
     _test,
     device,
     shape_type_a: GeoType,
@@ -298,19 +298,19 @@ def test_unified_collision_pipeline_sap(
     test_level_b: TestLevel,
     tolerance: float = 3e-3,
 ):
-    test_unified_collision_pipeline(
+    test_collision_pipeline(
         _test, device, shape_type_a, shape_type_b, test_level_a, test_level_b, newton.BroadPhaseMode.SAP, tolerance
     )
 
 
-for test_config in unified_contact_tests:
+for test_config in collision_pipeline_contact_tests:
     shape_type_a, shape_type_b, test_level_a, test_level_b = test_config[:4]
     tolerance = test_config[4] if len(test_config) > 4 else 3e-3
     # EXPLICIT broad phase tests
     add_function_test(
-        TestUnifiedCollisionPipeline,
+        TestCollisionPipeline,
         f"test_{type_to_str(shape_type_a)}_{type_to_str(shape_type_b)}_explicit",
-        test_unified_collision_pipeline_explicit,
+        test_collision_pipeline_explicit,
         devices=devices,
         shape_type_a=shape_type_a,
         shape_type_b=shape_type_b,
@@ -320,9 +320,9 @@ for test_config in unified_contact_tests:
     )
     # NXN broad phase tests
     add_function_test(
-        TestUnifiedCollisionPipeline,
+        TestCollisionPipeline,
         f"test_{type_to_str(shape_type_a)}_{type_to_str(shape_type_b)}_nxn",
-        test_unified_collision_pipeline_nxn,
+        test_collision_pipeline_nxn,
         devices=devices,
         shape_type_a=shape_type_a,
         shape_type_b=shape_type_b,
@@ -332,9 +332,9 @@ for test_config in unified_contact_tests:
     )
     # SAP broad phase tests
     add_function_test(
-        TestUnifiedCollisionPipeline,
+        TestCollisionPipeline,
         f"test_{type_to_str(shape_type_a)}_{type_to_str(shape_type_b)}_sap",
-        test_unified_collision_pipeline_sap,
+        test_collision_pipeline_sap,
         devices=devices,
         shape_type_a=shape_type_a,
         shape_type_b=shape_type_b,
@@ -431,7 +431,7 @@ for mode_name, test_func in mesh_mesh_sdf_tests:
         ("sap", newton.BroadPhaseMode.SAP),
     ]:
         add_function_test(
-            TestUnifiedCollisionPipeline,
+            TestCollisionPipeline,
             f"test_mesh_mesh_{mode_name}_{broad_phase_name}",
             test_func,
             devices=devices,
@@ -496,8 +496,8 @@ def test_particle_shape_contacts(test, device, shape_type: GeoType):
 
         model = builder.finalize(device=device)
 
-        # Create unified collision pipeline
-        collision_pipeline = newton.CollisionPipelineUnified.from_model(
+        # Create collision pipeline
+        collision_pipeline = newton.CollisionPipeline.from_model(
             model,
             broad_phase_mode=newton.BroadPhaseMode.NXN,
             soft_contact_margin=soft_contact_margin,
@@ -557,7 +557,7 @@ particle_shape_tests = [
 ]
 
 
-# Add tests for unified collision pipeline
+# Add tests for collision pipeline
 for shape_type in particle_shape_tests:
     add_function_test(
         TestParticleShapeContacts,

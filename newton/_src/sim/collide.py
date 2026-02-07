@@ -40,8 +40,8 @@ from ..sim.state import State
 
 
 @wp.struct
-class UnifiedContactWriterData:
-    """Contact writer data for collide_unified write_contact function."""
+class ContactWriterData:
+    """Contact writer data for collide write_contact function."""
 
     contact_max: int
     # Body information arrays (for transforming to body-local coordinates)
@@ -83,15 +83,15 @@ class BroadPhaseMode(IntEnum):
 @wp.func
 def write_contact(
     contact_data: ContactData,
-    writer_data: UnifiedContactWriterData,
+    writer_data: ContactWriterData,
     output_index: int,
 ):
     """
-    Write a contact to the output arrays using ContactData and UnifiedContactWriterData.
+    Write a contact to the output arrays using ContactData and ContactWriterData.
 
     Args:
         contact_data: ContactData struct containing contact information
-        writer_data: UnifiedContactWriterData struct containing body info and output arrays
+        writer_data: ContactWriterData struct containing body info and output arrays
         output_index: If -1, use atomic_add to get the next available index if contact distance is less than margin. If >= 0, use this index directly and skip margin check.
     """
     total_separation_needed = (
@@ -270,9 +270,9 @@ def prepare_geom_data_kernel(
         geom_transform[idx] = shape_transform[idx]
 
 
-def _estimate_rigid_contact_max_unified(model: Model) -> int:
+def _estimate_rigid_contact_max(model: Model) -> int:
     """
-    Estimate the maximum number of rigid contacts for the unified collision pipeline.
+    Estimate the maximum number of rigid contacts for the collision pipeline.
 
     Uses a linear estimate based on shape count and types, with contact reduction
     for mesh-mesh pairs. This function assumes each shape contacts
@@ -315,7 +315,7 @@ def _estimate_rigid_contact_max_unified(model: Model) -> int:
     return max(1000, total_contacts)
 
 
-class CollisionPipelineUnified:
+class CollisionPipeline:
     """
     Full-featured collision pipeline with GJK/MPR narrow phase and pluggable broad phase.
 
@@ -347,7 +347,7 @@ class CollisionPipelineUnified:
         has_meshes: bool = True,
     ):
         """
-        Initialize the CollisionPipelineUnified.
+        Initialize the CollisionPipeline.
 
         Args:
             shape_count (int): Number of shapes in the simulation.
@@ -424,7 +424,7 @@ class CollisionPipelineUnified:
             self.shape_pairs_max = len(shape_pairs_filtered)
 
         # Set rigid_contact_max
-        # For unified pipeline, we don't multiply by per-pair factors since broad phase
+        # For collision pipeline, we don't multiply by per-pair factors since broad phase
         # discovers pairs dynamically. Users should provide rigid_contact_max explicitly,
         # or use model.rigid_contact_max which is computed from actual collision pairs.
         if rigid_contact_max is not None:
@@ -491,9 +491,9 @@ class CollisionPipelineUnified:
         shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
         sap_sort_type=None,
         sdf_hydroelastic_config: SDFHydroelasticConfig | None = None,
-    ) -> CollisionPipelineUnified:
+    ) -> CollisionPipeline:
         """
-        Create a CollisionPipelineUnified instance from a Model.
+        Create a CollisionPipeline instance from a Model.
 
         Args:
             model (Model): The simulation model.
@@ -512,11 +512,11 @@ class CollisionPipelineUnified:
             sdf_hydroelastic_config (SDFHydroelasticConfig | None, optional): Configuration for SDF hydroelastic collision handling. Defaults to None.
 
         Returns:
-            CollisionPipelineUnified: The constructed collision pipeline.
+            CollisionPipeline: The constructed collision pipeline.
         """
-        # Estimate rigid_contact_max for unified pipeline (accounts for contact reduction)
+        # Estimate rigid_contact_max for collision pipeline (accounts for contact reduction)
         if rigid_contact_max is None:
-            rigid_contact_max = _estimate_rigid_contact_max_unified(model)
+            rigid_contact_max = _estimate_rigid_contact_max(model)
         if requires_grad is None:
             requires_grad = model.requires_grad
 
@@ -540,7 +540,7 @@ class CollisionPipelineUnified:
             shape_types = model.shape_type.numpy()
             has_meshes = bool((shape_types == int(GeoType.MESH)).any())
 
-        pipeline = CollisionPipelineUnified(
+        pipeline = CollisionPipeline(
             model.shape_count,
             model.particle_count,
             reduce_contacts,
@@ -669,8 +669,8 @@ class CollisionPipelineUnified:
             device=self.device,
         )
 
-        # Create UnifiedContactWriterData struct for custom contact writing
-        writer_data = UnifiedContactWriterData()
+        # Create ContactWriterData struct for custom contact writing
+        writer_data = ContactWriterData()
         writer_data.contact_max = contacts.rigid_contact_max
         writer_data.body_q = state.body_q
         writer_data.shape_body = model.shape_body

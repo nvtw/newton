@@ -4206,7 +4206,7 @@ class ModelBuilder:
         `a`, `b`, `c` along the local X, Y, Z axes respectively.
 
         Note:
-            Ellipsoid collision is handled by the unified GJK/MPR collision pipeline,
+            Ellipsoid collision is handled by the GJK/MPR collision pipeline,
             which provides accurate collision detection for all convex shape pairs.
 
         Args:
@@ -7777,7 +7777,7 @@ class ModelBuilder:
 
             self.find_shape_contact_pairs(m)
             # Set a default rigid_contact_max for backward compatibility with SolverVBD
-            # The actual value is estimated by CollisionPipelineUnified.from_model()
+            # The actual value is estimated by CollisionPipeline.from_model()
             m.rigid_contact_max = max(10000, len(m.shape_contact_pairs) * 20)
 
             # enable ground plane

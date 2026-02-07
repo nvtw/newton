@@ -397,7 +397,7 @@ def create_collision_pipeline(model, args=None, broad_phase_mode=None):
         broad_phase_mode: Override broad phase mode ("nxn", "sap", "explicit"). Default from args or "explicit".
 
     Returns:
-        CollisionPipelineUnified instance.
+        CollisionPipeline instance.
     """
     import newton  # noqa: PLC0415
 
@@ -409,7 +409,7 @@ def create_collision_pipeline(model, args=None, broad_phase_mode=None):
         "explicit": newton.BroadPhaseMode.EXPLICIT,
     }
     mode = broad_phase_map.get(str(broad_phase_mode).lower(), newton.BroadPhaseMode.EXPLICIT)
-    return newton.CollisionPipelineUnified.from_model(model, broad_phase_mode=mode)
+    return newton.CollisionPipeline.from_model(model, broad_phase_mode=mode)
 
 
 def main():

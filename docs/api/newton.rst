@@ -35,7 +35,7 @@ newton
    ActuatorMode
    Axis
    BroadPhaseMode
-   CollisionPipelineUnified
+   CollisionPipeline
    Contacts
    Control
    EqType

@@ -15,7 +15,7 @@
 
 from .articulation import eval_fk, eval_ik
 from .builder import ModelBuilder
-from .collide_unified import BroadPhaseMode, CollisionPipelineUnified
+from .collide import BroadPhaseMode, CollisionPipeline
 from .contacts import Contacts
 from .control import Control
 from .joints import (
@@ -29,7 +29,7 @@ from .state import State
 __all__ = [
     "ActuatorMode",
     "BroadPhaseMode",
-    "CollisionPipelineUnified",
+    "CollisionPipeline",
     "Contacts",
     "Control",
     "EqType",

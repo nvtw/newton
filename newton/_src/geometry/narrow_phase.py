@@ -410,7 +410,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 num_contacts = 1
 
             # =====================================================================
-            # Write all contacts (unified write block for 0, 1, or 2 contacts)
+            # Write all contacts (single write block for 0, 1, or 2 contacts)
             # =====================================================================
             if num_contacts > 0:
                 # Prepare contact data (shared fields for both contacts)

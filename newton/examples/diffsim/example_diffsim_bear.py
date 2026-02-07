@@ -172,7 +172,7 @@ class Example:
         # initialize control and one-shot contacts (valid for simple collisions against constant plane)
         self.control = self.model.control()
         # Create collision pipeline with soft contact margin (requires_grad for differentiable simulation)
-        self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
+        self.collision_pipeline = newton.CollisionPipeline.from_model(
             self.model,
             broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
             soft_contact_margin=10.0,
