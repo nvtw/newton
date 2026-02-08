@@ -602,7 +602,6 @@ add_example_test(
     test_options={"num-frames": 4 * 60},  # train_iters * sim_steps
     test_options_cpu={"num-frames": 2 * 60},
     use_viewer=True,
-    skip_reason="Requires enable_backward=True on collision pipeline (not yet implemented)",
 )
 
 add_example_test(
