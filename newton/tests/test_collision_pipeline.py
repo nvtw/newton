@@ -43,6 +43,8 @@ def type_to_str(shape_type: GeoType):
         return "capsule"
     elif shape_type == GeoType.CYLINDER:
         return "cylinder"
+    elif shape_type == GeoType.CONE:
+        return "cone"
     elif shape_type == GeoType.MESH:
         return "mesh"
     elif shape_type == GeoType.CONVEX_MESH:
@@ -95,7 +97,12 @@ class CollisionSetup:
         self.state_1 = self.model.state()
         self.control = self.model.control()
 
-        self.contacts = self.model.collide(self.state_0)
+        # Create collision pipeline with the requested broad phase mode
+        self.collision_pipeline = newton.CollisionPipeline.from_model(
+            self.model,
+            broad_phase_mode=broad_phase_mode,
+        )
+        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
 
         self.solver = solver_fn(self.model)
 
@@ -117,6 +124,11 @@ class CollisionSetup:
             self.builder.add_shape_capsule(body, radius=0.25, half_height=0.3, key=type_to_str(shape_type))
         elif shape_type == GeoType.CYLINDER:
             self.builder.add_shape_cylinder(body, radius=0.25, half_height=0.4, key=type_to_str(shape_type))
+        elif shape_type == GeoType.CONE:
+            # Rotate cone so flat base faces -X (toward the incoming object)
+            rot = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), -np.pi / 2.0)
+            xform = wp.transform(wp.vec3(), rot)
+            self.builder.add_shape_cone(body, xform=xform, radius=0.25, half_height=0.4, key=type_to_str(shape_type))
         elif shape_type == GeoType.MESH:
             # Use box mesh (works correctly with collision pipeline)
             vertices, indices = newton.utils.create_box_mesh(extents=(0.5, 0.5, 0.5))
@@ -142,7 +154,7 @@ class CollisionSetup:
             self.graph = None
 
     def simulate(self):
-        self.contacts = self.model.collide(self.state_0)
+        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
 
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
@@ -215,6 +227,8 @@ collision_pipeline_contact_tests = [
     (GeoType.SPHERE, GeoType.BOX, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
     (GeoType.SPHERE, GeoType.CAPSULE, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
     (GeoType.SPHERE, GeoType.MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
+    (GeoType.SPHERE, GeoType.CYLINDER, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
+    (GeoType.SPHERE, GeoType.CONE, TestLevel.VELOCITY_YZ, TestLevel.VELOCITY_YZ),
     (GeoType.SPHERE, GeoType.CONVEX_MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
     (GeoType.BOX, GeoType.BOX, TestLevel.VELOCITY_YZ, TestLevel.VELOCITY_LINEAR),
     (GeoType.BOX, GeoType.MESH, TestLevel.VELOCITY_YZ, TestLevel.VELOCITY_LINEAR, 0.02),
