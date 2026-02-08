@@ -403,12 +403,16 @@ def create_collision_pipeline(model, args=None, broad_phase_mode=None):
 
     if broad_phase_mode is None:
         broad_phase_mode = getattr(args, "broad_phase_mode", "explicit") if args else "explicit"
-    broad_phase_map = {
-        "nxn": newton.BroadPhaseMode.NXN,
-        "sap": newton.BroadPhaseMode.SAP,
-        "explicit": newton.BroadPhaseMode.EXPLICIT,
-    }
-    mode = broad_phase_map.get(str(broad_phase_mode).lower(), newton.BroadPhaseMode.EXPLICIT)
+    # Accept both string names and BroadPhaseMode enum values
+    if isinstance(broad_phase_mode, newton.BroadPhaseMode):
+        mode = broad_phase_mode
+    else:
+        broad_phase_map = {
+            "nxn": newton.BroadPhaseMode.NXN,
+            "sap": newton.BroadPhaseMode.SAP,
+            "explicit": newton.BroadPhaseMode.EXPLICIT,
+        }
+        mode = broad_phase_map.get(str(broad_phase_mode).lower(), newton.BroadPhaseMode.EXPLICIT)
     return newton.CollisionPipeline.from_model(model, broad_phase_mode=mode)
 
 
