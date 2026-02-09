@@ -12,8 +12,8 @@ newton.geometry
    BroadPhaseAllPairs
    BroadPhaseExplicit
    BroadPhaseSAP
-   SDFData
-   SDFHydroelasticConfig
+   HydroelasticSDF
+   NarrowPhase
 
 .. rubric:: Functions
 

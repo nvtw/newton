@@ -211,11 +211,11 @@ class Model:
         """Shape coefficient of friction, shape [shape_count], float."""
         self.shape_material_restitution = None
         """Shape coefficient of restitution, shape [shape_count], float."""
-        self.shape_material_torsional_friction = None
+        self.shape_material_mu_torsional = None
         """Shape torsional friction coefficient (resistance to spinning at contact point), shape [shape_count], float."""
-        self.shape_material_rolling_friction = None
+        self.shape_material_mu_rolling = None
         """Shape rolling friction coefficient (resistance to rolling motion), shape [shape_count], float."""
-        self.shape_material_k_hydro = None
+        self.shape_material_kh = None
         """Shape hydroelastic stiffness coefficient, shape [shape_count], float."""
         self.shape_contact_margin = None
         """Shape contact margin for collision detection, shape [shape_count], float."""
@@ -273,11 +273,11 @@ class Model:
         # Local AABB and voxel grid for contact reduction
         # Note: These are stored in Model (not Contacts) because they are static geometry properties
         # computed once during finalization, not per-frame contact data.
-        self.shape_local_aabb_lower = None
+        self.shape_collision_aabb_lower = None
         """Local-space AABB lower bound for each shape, shape [shape_count, 3], float.
         Computed from base geometry only (excludes thickness - thickness is added during contact
         margin calculations). Used for voxel-based contact reduction."""
-        self.shape_local_aabb_upper = None
+        self.shape_collision_aabb_upper = None
         """Local-space AABB upper bound for each shape, shape [shape_count, 3], float.
         Computed from base geometry only (excludes thickness - thickness is added during contact
         margin calculations). Used for voxel-based contact reduction."""
@@ -678,9 +678,9 @@ class Model:
         self.attribute_frequency["shape_material_ka"] = Model.AttributeFrequency.SHAPE
         self.attribute_frequency["shape_material_mu"] = Model.AttributeFrequency.SHAPE
         self.attribute_frequency["shape_material_restitution"] = Model.AttributeFrequency.SHAPE
-        self.attribute_frequency["shape_material_torsional_friction"] = Model.AttributeFrequency.SHAPE
-        self.attribute_frequency["shape_material_rolling_friction"] = Model.AttributeFrequency.SHAPE
-        self.attribute_frequency["shape_material_k_hydro"] = Model.AttributeFrequency.SHAPE
+        self.attribute_frequency["shape_material_mu_torsional"] = Model.AttributeFrequency.SHAPE
+        self.attribute_frequency["shape_material_mu_rolling"] = Model.AttributeFrequency.SHAPE
+        self.attribute_frequency["shape_material_kh"] = Model.AttributeFrequency.SHAPE
         self.attribute_frequency["shape_contact_margin"] = Model.AttributeFrequency.SHAPE
         self.attribute_frequency["shape_type"] = Model.AttributeFrequency.SHAPE
         self.attribute_frequency["shape_is_solid"] = Model.AttributeFrequency.SHAPE
@@ -843,11 +843,9 @@ class Model:
         if collision_pipeline is not None:
             self._collision_pipeline = collision_pipeline
         elif not hasattr(self, "_collision_pipeline"):
-            from .collide import BroadPhaseMode, CollisionPipeline  # noqa: PLC0415
+            from .collide import CollisionPipeline  # noqa: PLC0415
 
-            self._collision_pipeline = CollisionPipeline.from_model(
-                model=self, broad_phase_mode=BroadPhaseMode.EXPLICIT
-            )
+            self._collision_pipeline = CollisionPipeline.from_model(model=self, broad_phase="explicit")
 
         contacts = self._collision_pipeline.collide(self, state)
         # attach custom attributes with assignment==CONTACT

@@ -388,32 +388,27 @@ def init(parser=None):
     return viewer, args
 
 
-def create_collision_pipeline(model, args=None, broad_phase_mode=None):
-    """Create a collision pipeline, optionally using --broad-phase-mode from args.
+def create_collision_pipeline(model, args=None, broad_phase=None):
+    """Create a collision pipeline, optionally using --broad-phase from args.
 
     Args:
         model: The Newton model to create the pipeline for.
         args: Parsed arguments from create_parser() (optional).
-        broad_phase_mode: Override broad phase mode ("nxn", "sap", "explicit"). Default from args or "explicit".
+        broad_phase: Override broad phase ("nxn", "sap", "explicit"). Default from args or "explicit".
 
     Returns:
         CollisionPipeline instance.
     """
     import newton  # noqa: PLC0415
 
-    if broad_phase_mode is None:
-        broad_phase_mode = getattr(args, "broad_phase_mode", "explicit") if args else "explicit"
-    # Accept both string names and BroadPhaseMode enum values
-    if isinstance(broad_phase_mode, newton.BroadPhaseMode):
-        mode = broad_phase_mode
-    else:
-        broad_phase_map = {
-            "nxn": newton.BroadPhaseMode.NXN,
-            "sap": newton.BroadPhaseMode.SAP,
-            "explicit": newton.BroadPhaseMode.EXPLICIT,
-        }
-        mode = broad_phase_map.get(str(broad_phase_mode).lower(), newton.BroadPhaseMode.EXPLICIT)
-    return newton.CollisionPipeline.from_model(model, broad_phase_mode=mode)
+    if broad_phase is None:
+        broad_phase = (
+            getattr(args, "broad_phase_mode", None) or getattr(args, "broad_phase", "explicit") if args else "explicit"
+        )
+    broad_phase = str(broad_phase).lower()
+    if broad_phase not in ("nxn", "sap", "explicit"):
+        broad_phase = "explicit"
+    return newton.CollisionPipeline.from_model(model, broad_phase=broad_phase)
 
 
 def main():
