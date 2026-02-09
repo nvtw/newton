@@ -495,7 +495,6 @@ class CollisionPipeline:
             contact_writer_warp_func=write_contact,
             sdf_hydroelastic=sdf_hydroelastic,
             has_meshes=has_meshes,
-            shape_pairs_excluded=shape_pairs_excluded,
         )
 
         soft_max = soft_contact_max if soft_contact_max is not None else shape_count * particle_count
