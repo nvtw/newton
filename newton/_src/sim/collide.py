@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-from enum import Enum
 from typing import Literal
 
 import numpy as np
@@ -39,14 +38,6 @@ from ..geometry.types import GeoType
 from ..sim.contacts import Contacts
 from ..sim.model import Model
 from ..sim.state import State
-
-
-class BroadPhaseMode(str, Enum):
-    """Broad phase algorithms for collision detection."""
-
-    NXN = "nxn"
-    SAP = "sap"
-    EXPLICIT = "explicit"
 
 
 @wp.struct
@@ -396,8 +387,7 @@ class CollisionPipeline:
         cls,
         model: Model,
         *,
-        broad_phase: Literal["nxn", "sap", "explicit"] | BroadPhaseMode = "explicit",
-        broad_phase_mode: BroadPhaseMode | None = None,
+        broad_phase: Literal["nxn", "sap", "explicit"] = "explicit",
         reduce_contacts: bool = True,
         rigid_contact_max: int | None = None,
         soft_contact_max: int | None = None,
@@ -414,8 +404,7 @@ class CollisionPipeline:
         Args:
             model: The simulation model.
             broad_phase: Broad phase algorithm: "nxn" (all-pairs), "sap" (sweep-and-prune), or "explicit" (precomputed pairs).
-                Accepts a :class:`BroadPhaseMode` value as well. Defaults to "explicit".
-            broad_phase_mode: Optional BroadPhaseMode value. If provided, overrides broad_phase.
+                Defaults to "explicit".
             reduce_contacts: Whether to reduce contacts for mesh-mesh collisions. Defaults to True.
             rigid_contact_max: Maximum number of rigid contacts. If None, estimated from model.
             soft_contact_max: Maximum number of soft contacts. If None, shape_count * particle_count.
@@ -429,11 +418,7 @@ class CollisionPipeline:
         Returns:
             The constructed collision pipeline.
         """
-        if broad_phase_mode is not None:
-            broad_phase = broad_phase_mode.value
-        elif isinstance(broad_phase, BroadPhaseMode):
-            broad_phase = broad_phase.value
-        elif isinstance(broad_phase, str):
+        if isinstance(broad_phase, str):
             broad_phase = broad_phase.lower()
         else:
             broad_phase = str(broad_phase).lower()
@@ -489,9 +474,7 @@ class CollisionPipeline:
                 )
 
         # Initialize SDF hydroelastic (returns None if no hydroelastic shape pairs)
-        sdf_hydroelastic = HydroelasticSDF._from_model(
-            model, config=sdf_hydroelastic_config, writer_func=write_contact
-        )
+        sdf_hydroelastic = HydroelasticSDF._from_model(model, config=sdf_hydroelastic_config, writer_func=write_contact)
 
         # Detect if any mesh shapes are present to optimize kernel launches
         has_meshes = False

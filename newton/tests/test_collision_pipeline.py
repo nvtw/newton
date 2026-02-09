@@ -459,7 +459,7 @@ class TestCollisionPipelineFilterPairs(unittest.TestCase):
     pass
 
 
-def test_shape_collision_filter_pairs(test, device, broad_phase_mode: newton.BroadPhaseMode):
+def test_shape_collision_filter_pairs(test, device, broad_phase_mode: str):
     """Verify that excluded shape pairs produce no contacts under NxN or SAP broad phase.
 
     Args:
@@ -480,7 +480,7 @@ def test_shape_collision_filter_pairs(test, device, broad_phase_mode: newton.Bro
         model = builder.finalize(device=device)
         pipeline = newton.CollisionPipeline.from_model(
             model,
-            broad_phase_mode=broad_phase_mode,
+            broad_phase=broad_phase_mode,
         )
         state = model.state()
         contacts = pipeline.collide(model, state)
@@ -504,14 +504,14 @@ add_function_test(
     "test_shape_collision_filter_pairs_nxn",
     test_shape_collision_filter_pairs,
     devices=devices,
-    broad_phase_mode=newton.BroadPhaseMode.NXN,
+    broad_phase_mode="nxn",
 )
 add_function_test(
     TestCollisionPipelineFilterPairs,
     "test_shape_collision_filter_pairs_sap",
     test_shape_collision_filter_pairs,
     devices=devices,
-    broad_phase_mode=newton.BroadPhaseMode.SAP,
+    broad_phase_mode="sap",
 )
 
 
@@ -540,7 +540,7 @@ def test_collision_filter_consistent_across_broadphases(test, device):
         model = builder.finalize(device=device)
 
         def _contact_pairs(broad_phase_mode):
-            pipeline = newton.CollisionPipeline.from_model(model, broad_phase_mode=broad_phase_mode)
+            pipeline = newton.CollisionPipeline.from_model(model, broad_phase=broad_phase_mode)
             state = model.state()
             contacts = pipeline.collide(model, state)
             n = contacts.rigid_contact_count.numpy()[0]
@@ -551,9 +551,9 @@ def test_collision_filter_consistent_across_broadphases(test, device):
                 pairs.add((min(s0, s1), max(s0, s1)))
             return pairs
 
-        pairs_explicit = _contact_pairs(newton.BroadPhaseMode.EXPLICIT)
-        pairs_nxn = _contact_pairs(newton.BroadPhaseMode.NXN)
-        pairs_sap = _contact_pairs(newton.BroadPhaseMode.SAP)
+        pairs_explicit = _contact_pairs("explicit")
+        pairs_nxn = _contact_pairs("nxn")
+        pairs_sap = _contact_pairs("sap")
 
         # The excluded pair must not appear in any broad phase result
         for name, pairs in [("EXPLICIT", pairs_explicit), ("NXN", pairs_nxn), ("SAP", pairs_sap)]:
