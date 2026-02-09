@@ -33,8 +33,7 @@ import warp as wp
 import newton
 from newton import GeoType, Mesh
 from newton._src.geometry.sdf_contact import sample_sdf_extrapolated, sample_sdf_grad_extrapolated
-from newton._src.geometry.sdf_utils import SDFData
-from newton.geometry import compute_sdf
+from newton._src.geometry.sdf_utils import SDFData, compute_sdf
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
 
 # Skip all tests in this module if CUDA is not available
