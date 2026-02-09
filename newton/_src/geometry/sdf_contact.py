@@ -754,6 +754,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 mesh_scale_tri = wp.vec3(scale_data_tri[0], scale_data_tri[1], scale_data_tri[2])
                 mesh_scale_sdf = wp.vec3(scale_data_sdf[0], scale_data_sdf[1], scale_data_sdf[2])
 
+                # For shapes with baked-scale companion meshes (e.g. convex primitives),
+                # the scale is already baked into the mesh vertices, so use identity scale.
+                if shape_sdf_data[tri_shape].scale_baked:
+                    mesh_scale_tri = wp.vec3(1.0, 1.0, 1.0)
+
                 X_tri_ws = shape_transform[tri_shape]
                 X_sdf_ws = shape_transform[sdf_shape]
 
@@ -969,6 +974,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 scale_data_sdf = shape_data[sdf_shape]
                 mesh_scale_tri = wp.vec3(scale_data_tri[0], scale_data_tri[1], scale_data_tri[2])
                 mesh_scale_sdf = wp.vec3(scale_data_sdf[0], scale_data_sdf[1], scale_data_sdf[2])
+
+                # For shapes with baked-scale companion meshes (e.g. convex primitives),
+                # the scale is already baked into the mesh vertices, so use identity scale.
+                if shape_sdf_data[tri_shape].scale_baked:
+                    mesh_scale_tri = wp.vec3(1.0, 1.0, 1.0)
 
                 X_tri_ws = shape_transform[tri_shape]
                 X_sdf_ws = shape_transform[sdf_shape]

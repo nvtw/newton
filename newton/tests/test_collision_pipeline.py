@@ -455,6 +455,145 @@ for mode_name, test_func in mesh_mesh_sdf_tests:
 
 
 # ============================================================================
+# Mesh-Convex SDF Contact Tests
+# ============================================================================
+# These tests verify that when a convex shape has an SDF (via hydroelastic),
+# the mesh-convex collision correctly routes through the SDF-based path
+# instead of the BVH + GJK/MPR path.
+
+
+def test_mesh_convex_sdf(
+    _test,
+    device,
+    convex_type: GeoType,
+    broad_phase_mode: newton.BroadPhaseMode,
+    tolerance: float = 0.02,
+):
+    """Test mesh vs convex-with-SDF collision using the SDF-based path."""
+    viewer = newton.viewer.ViewerNull()
+
+    builder = newton.ModelBuilder(gravity=0.0)
+    builder.rigid_contact_margin = 0.005
+
+    # Body A: mesh (box mesh) - NOT hydroelastic, no SDF
+    body_a = builder.add_body(xform=wp.transform(wp.vec3(-1.0, 0.0, 0.0)))
+    vertices, indices = newton.utils.create_box_mesh(extents=(0.5, 0.5, 0.5))
+    builder.add_shape_mesh(body_a, mesh=newton.Mesh(vertices[:, :3], indices), key="mesh")
+
+    init_velocity = 5.0
+    builder.joint_qd[0] = builder.body_qd[-1][0] = init_velocity
+
+    # Body B: convex shape with SDF (hydroelastic flag triggers SDF generation)
+    body_b = builder.add_body(xform=wp.transform(wp.vec3(1.0, 0.0, 0.0)))
+    hydro_cfg = newton.ModelBuilder.ShapeConfig(
+        sdf_max_resolution=32,
+        is_hydroelastic=True,
+    )
+    if convex_type == GeoType.BOX:
+        builder.add_shape_box(body_b, cfg=hydro_cfg, key="convex_box")
+    elif convex_type == GeoType.SPHERE:
+        builder.add_shape_sphere(body_b, radius=0.5, cfg=hydro_cfg, key="convex_sphere")
+    elif convex_type == GeoType.CAPSULE:
+        builder.add_shape_capsule(body_b, radius=0.25, half_height=0.3, cfg=hydro_cfg, key="convex_capsule")
+    elif convex_type == GeoType.CYLINDER:
+        builder.add_shape_cylinder(body_b, radius=0.25, half_height=0.4, cfg=hydro_cfg, key="convex_cylinder")
+    else:
+        raise NotImplementedError(f"Shape type {convex_type} not implemented for this test")
+
+    model = builder.finalize(device=device)
+    state_0 = model.state()
+    state_1 = model.state()
+    control = model.control()
+
+    collision_pipeline = newton.CollisionPipeline.from_model(model, broad_phase_mode=broad_phase_mode)
+    contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
+    solver = newton.solvers.SolverXPBD(model)
+
+    viewer.set_model(model)
+
+    graph = None
+    if wp.get_device(device).is_cuda:
+
+        def simulate():
+            nonlocal contacts
+            contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
+            for _ in range(10):
+                state_0.clear_forces()
+                solver.step(state_0, state_1, control, contacts, (1.0 / 60.0) / 10)
+                state_0.__dict__, state_1.__dict__ = state_1.__dict__, state_0.__dict__
+
+        with wp.ScopedCapture() as capture:
+            simulate()
+        graph = capture.graph
+
+    for _ in range(200):
+        if graph:
+            wp.capture_launch(graph)
+        else:
+            contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
+            for _ in range(10):
+                state_0.clear_forces()
+                solver.step(state_0, state_1, control, contacts, (1.0 / 60.0) / 10)
+                state_0.__dict__, state_1.__dict__ = state_1.__dict__, state_0.__dict__
+
+    # SDF contacts can inject small amounts of energy due to discrete voxel sampling,
+    # so allow a small tolerance above init_velocity.
+    velocity_upper_bound = init_velocity * 1.25
+
+    # Verify body A (mesh) is moving forward and has correct velocity
+    test_body_state(
+        model,
+        state_0,
+        "mesh body is moving forward",
+        lambda _q, qd: qd[0] > 0.03 and qd[0] <= velocity_upper_bound,
+        indices=[0],
+        show_body_qd=True,
+    )
+    test_body_state(
+        model,
+        state_0,
+        "mesh body has correct linear velocity",
+        lambda _q, qd: abs(qd[1]) < tolerance and abs(qd[2]) < tolerance,
+        indices=[0],
+        show_body_qd=True,
+    )
+
+    # Verify body B (convex with SDF) is moving forward
+    test_body_state(
+        model,
+        state_0,
+        "convex body is moving forward",
+        lambda _q, qd: qd[0] > 0.03 and qd[0] <= velocity_upper_bound,
+        indices=[1],
+        show_body_qd=True,
+    )
+
+
+# Add mesh-convex SDF tests for supported convex types
+mesh_convex_sdf_convex_types = [
+    GeoType.BOX,
+    GeoType.SPHERE,
+    GeoType.CAPSULE,
+    GeoType.CYLINDER,
+]
+
+for convex_type in mesh_convex_sdf_convex_types:
+    for broad_phase_name, broad_phase_mode in [
+        ("explicit", newton.BroadPhaseMode.EXPLICIT),
+        ("sap", newton.BroadPhaseMode.SAP),
+    ]:
+        add_function_test(
+            TestCollisionPipeline,
+            f"test_mesh_{type_to_str(convex_type)}_sdf_{broad_phase_name}",
+            test_mesh_convex_sdf,
+            devices=devices,
+            convex_type=convex_type,
+            broad_phase_mode=broad_phase_mode,
+            check_output=False,  # Disable output checking due to Warp module loading messages
+        )
+
+
+# ============================================================================
 # Particle-Shape (Soft) Contact Tests
 # ============================================================================
 # These tests verify that particle-shape contacts are correctly generated

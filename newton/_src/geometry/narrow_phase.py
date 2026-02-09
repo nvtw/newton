@@ -157,6 +157,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
         shape_source: wp.array(dtype=wp.uint64),
         shape_contact_margin: wp.array(dtype=float),
         shape_flags: wp.array(dtype=wp.int32),
+        shape_sdf_data: wp.array(dtype=SDFData),
         writer_data: Any,
         total_num_threads: int,
         # Output: pairs that need GJK/MPR processing
@@ -170,7 +171,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
         shape_pairs_mesh_plane_cumsum: wp.array(dtype=int),
         shape_pairs_mesh_plane_count: wp.array(dtype=int),
         mesh_plane_vertex_total_count: wp.array(dtype=int),
-        # Output: mesh-mesh collision pairs
+        # Output: mesh-mesh collision pairs (also used for mesh-convex SDF pairs)
         shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_mesh_count: wp.array(dtype=int),
         # Output: sdf-sdf hydroelastic collision pairs
@@ -272,9 +273,21 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
 
             # Mesh-convex collision
             if is_mesh_a or is_mesh_b:
-                idx = wp.atomic_add(shape_pairs_mesh_count, 0, 1)
-                if idx < shape_pairs_mesh.shape[0]:
-                    shape_pairs_mesh[idx] = wp.vec2i(shape_a, shape_b)
+                # Check if non-mesh shape has a valid SDF -> use faster SDF-based collision
+                non_mesh_shape = shape_b if is_mesh_a else shape_a
+                has_sdf = False
+                if shape_sdf_data.shape[0] > 0:
+                    has_sdf = shape_sdf_data[non_mesh_shape].sparse_sdf_ptr != wp.uint64(0)
+                if has_sdf:
+                    # Route to mesh-mesh SDF kernel (triangle vs SDF approach)
+                    idx = wp.atomic_add(shape_pairs_mesh_mesh_count, 0, 1)
+                    if idx < shape_pairs_mesh_mesh.shape[0]:
+                        shape_pairs_mesh_mesh[idx] = wp.vec2i(shape_a, shape_b)
+                else:
+                    # Standard BVH + GJK/MPR path
+                    idx = wp.atomic_add(shape_pairs_mesh_count, 0, 1)
+                    if idx < shape_pairs_mesh.shape[0]:
+                        shape_pairs_mesh[idx] = wp.vec2i(shape_a, shape_b)
                 continue
 
             # =====================================================================
@@ -1354,6 +1367,7 @@ class NarrowPhase:
                 shape_source,
                 shape_contact_margin,
                 shape_flags,
+                shape_sdf_data,
                 writer_data,
                 self.total_num_threads,
             ],

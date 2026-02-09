@@ -76,6 +76,58 @@ from .joints import (
 from .model import Model
 
 
+def _create_primitive_companion_mesh(
+    shape_type: int,
+    effective_scale: tuple[float, ...],
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Create a companion triangle mesh for a primitive shape.
+
+    Used by the mesh-mesh SDF kernel to iterate triangles of convex primitives
+    against a mesh's SDF. The mesh is created at actual size (scale baked into
+    vertices) so the kernel can use mesh_scale=(1,1,1).
+
+    Args:
+        shape_type: GeoType enum value for the primitive.
+        effective_scale: Shape scale with bake_scale applied. For hydroelastic
+            primitives this contains the actual shape parameters.
+
+    Returns:
+        Tuple of (vertices, indices) as numpy arrays suitable for wp.Mesh,
+        or (None, None) if the shape type is not supported.
+    """
+    from ..utils.mesh import (  # noqa: PLC0415
+        create_box_mesh,
+        create_capsule_mesh,
+        create_cone_mesh,
+        create_cylinder_mesh,
+        create_ellipsoid_mesh,
+        create_sphere_mesh,
+    )
+
+    verts = None
+    indices = None
+
+    if shape_type == GeoType.BOX:
+        verts, indices = create_box_mesh(extents=effective_scale[:3])
+    elif shape_type == GeoType.SPHERE:
+        verts, indices = create_sphere_mesh(radius=effective_scale[0])
+    elif shape_type == GeoType.CAPSULE:
+        verts, indices = create_capsule_mesh(radius=effective_scale[0], half_height=effective_scale[1], up_axis=2)
+    elif shape_type == GeoType.CYLINDER:
+        verts, indices = create_cylinder_mesh(radius=effective_scale[0], half_height=effective_scale[1], up_axis=2)
+    elif shape_type == GeoType.CONE:
+        verts, indices = create_cone_mesh(radius=effective_scale[0], half_height=effective_scale[1], up_axis=2)
+    elif shape_type == GeoType.ELLIPSOID:
+        verts, indices = create_ellipsoid_mesh(rx=effective_scale[0], ry=effective_scale[1], rz=effective_scale[2])
+
+    if verts is not None:
+        # Mesh creation functions return (N, 8) arrays with [x, y, z, nx, ny, nz, u, v]
+        # Extract only the position columns for wp.Mesh
+        verts = np.ascontiguousarray(verts[:, :3])
+
+    return verts, indices
+
+
 class ModelBuilder:
     """A helper class for building simulation models at runtime.
 
@@ -7972,6 +8024,42 @@ class ModelBuilder:
                     sdf_volumes.append(sparse_volume)
                     sdf_coarse_volumes.append(coarse_volume)
                     sdf_shape2blocks.append(shape2blocks)
+
+                # Create companion triangle meshes for non-mesh shapes that have SDF.
+                # This allows the mesh-mesh SDF kernel to iterate triangles of convex primitives
+                # against a mesh's SDF (direction 2 of the bidirectional collision).
+                # Meshes are created at actual size (scale baked in) since hydroelastic
+                # shapes always use bake_scale=True.
+                sdf_companion_meshes = []  # keep wp.Mesh objects alive for reference counting
+                for i in range(len(self.shape_type)):
+                    shape_type = self.shape_type[i]
+                    shape_flags = self.shape_flags[i]
+                    is_hydroelastic = bool(shape_flags & ShapeFlags.HYDROELASTIC)
+
+                    # Only create companion meshes for non-mesh shapes that have SDF
+                    if (
+                        shape_type != GeoType.MESH
+                        and shape_type != GeoType.CONVEX_MESH
+                        and sdf_data_list[i].sparse_sdf_ptr != 0
+                    ):
+                        effective_scale = tuple(self.shape_scale[i]) if is_hydroelastic else (1.0, 1.0, 1.0)
+                        companion_verts, companion_indices = _create_primitive_companion_mesh(
+                            shape_type, effective_scale
+                        )
+                        if companion_verts is not None:
+                            companion_wp_mesh = wp.Mesh(
+                                points=wp.array(companion_verts, dtype=wp.vec3, device=device),
+                                indices=wp.array(companion_indices.flatten(), dtype=wp.int32, device=device),
+                            )
+                            geo_sources[i] = companion_wp_mesh.id
+                            sdf_companion_meshes.append(companion_wp_mesh)
+
+                # Recreate shape_source_ptr if any companion meshes were added
+                if sdf_companion_meshes:
+                    m.shape_source_ptr = wp.array(geo_sources, dtype=wp.uint64)
+
+                # Keep companion meshes alive for reference counting
+                m.shape_sdf_companion_meshes = sdf_companion_meshes
 
                 # Create array of SDFData structs
                 m.shape_sdf_data = wp.array(sdf_data_list, dtype=SDFData, device=device)
