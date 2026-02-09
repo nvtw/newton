@@ -325,7 +325,6 @@ class CollisionPipeline:
         - Multiple broad phase modes: NXN (all-pairs), SAP (sweep-and-prune), EXPLICIT (precomputed pairs)
         - Mesh-mesh collision via SDF with contact reduction
         - Optional hydroelastic contact model for compliant surfaces
-        - For NXN and SAP, model.shape_collision_filter_pairs is honored (excluded pairs are not reported).
     """
 
     def __init__(
@@ -514,7 +513,6 @@ class CollisionPipeline:
             broad_phase_mode (BroadPhaseMode, optional): Broad phase collision detection mode. Defaults to BroadPhaseMode.EXPLICIT.
             shape_pairs_filtered (wp.array | None, optional): Precomputed shape pairs for EXPLICIT mode.
                 When broad_phase_mode is BroadPhaseMode.EXPLICIT, uses model.shape_contact_pairs if not provided. For NXN/SAP modes, ignored.
-                For NXN and SAP, model.shape_collision_filter_pairs is always honored (excluded pairs are not reported as contacts).
             sap_sort_type (SAPSortType | None, optional): Sorting algorithm for SAP broad phase.
                 Only used when broad_phase_mode is BroadPhaseMode.SAP. If None, uses default (SEGMENTED).
             sdf_hydroelastic_config (SDFHydroelasticConfig | None, optional): Configuration for SDF hydroelastic collision handling. Defaults to None.
