@@ -559,12 +559,22 @@ class SDFHydroelastic:
         shape_transform: wp.array(dtype=wp.transform),
         shape_contact_margin: wp.array(dtype=wp.float32),
     ) -> None:
-        # Find voxels which contain the isosurface between the shapes using octree-like pruning.
-        # We do this by computing the difference between sdfs at the voxel/subblock center and comparing it to the voxel/subblock radius.
-        # The check is first performed for subblocks of size (8 x 8 x 8), then (4 x 4 x 4), then (2 x 2 x 2), and finally for each voxel.
+        """Find iso-voxels via 4-level octree refinement with fused count-and-scatter.
+
+        Each level uses a single kernel that tests sub-blocks and atomically
+        writes survivors to the output buffer. Cross-level work rebalancing
+        is preserved: each level reads from the compacted output of the
+        previous level, so threads at every level are load-balanced.
+
+        This replaces the previous count + prefix-sum + scatter pattern
+        (4 kernel launches per level = 16 total) with 1 launch per level = 4 total.
+        """
         for i, (subblock_size, n_blocks) in enumerate([(8, 1), (4, 2), (2, 2), (1, 2)]):
+            # Zero the output counter before each level
+            self.iso_buffer_counts[i + 1].zero_()
+
             wp.launch(
-                kernel=count_iso_voxels_block,
+                kernel=refine_octree_level,
                 dim=[self.grid_size],
                 inputs=[
                     self.grid_size,
@@ -578,36 +588,10 @@ class SDFHydroelastic:
                     subblock_size,
                     n_blocks,
                     self.input_sizes[i],
-                ],
-                outputs=[
-                    self.iso_buffer_num[i],
-                    self.iso_subblock_idx[i],
-                ],
-                device=self.device,
-            )
-
-            scan_with_total(
-                self.iso_buffer_num[i],
-                self.iso_buffer_prefix[i],
-                self.iso_buffer_counts[i],
-                self.iso_buffer_counts[i + 1],
-            )
-
-            wp.launch(
-                kernel=scatter_iso_subblock,
-                dim=[self.grid_size],
-                inputs=[
-                    self.grid_size,
-                    self.iso_buffer_counts[i],
-                    self.iso_buffer_prefix[i],
-                    self.iso_subblock_idx[i],
-                    self.iso_buffer_shape_pairs[i],
-                    self.iso_buffer_coords[i],
-                    subblock_size,
-                    self.input_sizes[i],
                     self.iso_max_dims[i],
                 ],
                 outputs=[
+                    self.iso_buffer_counts[i + 1],
                     self.iso_buffer_coords[i + 1],
                     self.iso_buffer_shape_pairs[i + 1],
                 ],
@@ -912,6 +896,84 @@ def sdf_diff_sdf(
     else:
         diff = valA - valB
     return diff, valA, valB, is_valid
+
+
+@wp.kernel(enable_backward=False)
+def refine_octree_level(
+    grid_size: int,
+    in_count: wp.array(dtype=int),
+    shape_sdf_data: wp.array(dtype=SDFData),
+    shape_transform: wp.array(dtype=wp.transform),
+    shape_material_k_hydro: wp.array(dtype=float),
+    in_coords: wp.array(dtype=wp.vec3us),
+    in_shape_pairs: wp.array(dtype=wp.vec2i),
+    shape_contact_margin: wp.array(dtype=wp.float32),
+    subblock_size: int,
+    n_blocks: int,
+    max_input: int,
+    max_output: int,
+    # outputs
+    out_count: wp.array(dtype=int),
+    out_coords: wp.array(dtype=wp.vec3us),
+    out_shape_pairs: wp.array(dtype=wp.vec2i),
+):
+    """Fused count-and-scatter for one octree refinement level.
+
+    Each thread tests one input block's sub-blocks and directly writes
+    surviving sub-blocks to the output using atomic allocation. This
+    replaces the separate count + prefix-sum + scatter pattern while
+    preserving cross-level work rebalancing (the compacted output of
+    this level becomes the input of the next level).
+
+    Reduces kernel launches from 4 per level (count + scan + total + scatter)
+    to 1 per level, and eliminates prefix-sum, count, and bitmask buffers.
+    """
+    offset = wp.tid()
+    num_items = wp.min(in_count[0], max_input)
+    for tid in range(offset, num_items, grid_size):
+        pair = in_shape_pairs[tid]
+        shape_a = pair[0]
+        shape_b = pair[1]
+
+        sdf_data_a = shape_sdf_data[shape_a]
+        sdf_data_b = shape_sdf_data[shape_b]
+
+        X_ws_a = shape_transform[shape_a]
+        X_ws_b = shape_transform[shape_b]
+
+        margin_a = shape_contact_margin[shape_a]
+        margin_b = shape_contact_margin[shape_b]
+
+        voxel_radius = sdf_data_b.sparse_voxel_radius
+        r = float(subblock_size) * voxel_radius
+
+        k_a = shape_material_k_hydro[shape_a]
+        k_b = shape_material_k_hydro[shape_b]
+
+        k_eff_a, k_eff_b = get_rel_stiffness(k_a, k_b)
+        r_eff = r * (k_eff_a + k_eff_b)
+
+        bc = in_coords[tid]
+
+        for x_local in range(n_blocks):
+            for y_local in range(n_blocks):
+                for z_local in range(n_blocks):
+                    x_global = wp.vec3i(bc) + wp.vec3i(x_local, y_local, z_local) * subblock_size
+
+                    x_center = wp.vec3f(x_global) + wp.vec3f(0.5 * float(subblock_size))
+                    diff_val, vb, va, is_valid = sdf_diff_sdf(
+                        sdf_data_b, sdf_data_a, X_ws_b, X_ws_a, k_eff_b, k_eff_a, x_center
+                    )
+
+                    if wp.abs(diff_val) > r_eff or va > r + margin_a or vb > r + margin_b or not is_valid:
+                        continue
+
+                    write_idx = wp.atomic_add(out_count, 0, 1)
+                    if write_idx < max_output:
+                        out_coords[write_idx] = wp.vec3us(
+                            wp.uint16(x_global[0]), wp.uint16(x_global[1]), wp.uint16(x_global[2])
+                        )
+                        out_shape_pairs[write_idx] = pair
 
 
 @wp.kernel(enable_backward=False)
