@@ -460,7 +460,13 @@ for mode_name, test_func in mesh_mesh_sdf_tests:
 
 
 def test_unified_pipeline_shape_collision_filter_pairs(test, device, broad_phase_mode: newton.BroadPhaseMode):
-    """Excluded shape pairs must not appear in contacts when using NxN or SAP broad phase."""
+    """Verify that excluded shape pairs produce no contacts under NxN or SAP broad phase.
+
+    Args:
+        test: The test case instance.
+        device: Warp device to run on.
+        broad_phase_mode: Broad phase algorithm to test (NXN or SAP).
+    """
     with wp.ScopedDevice(device):
         builder = newton.ModelBuilder(gravity=0.0)
         builder.rigid_contact_margin = 0.01
