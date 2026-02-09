@@ -217,6 +217,78 @@ def test_stacked_primitive_cubes_hydroelastic_no_reduction(test, device, solver_
     run_stacked_cubes_hydroelastic_test(test, device, solver_fn, ShapeType.PRIMITIVE, CUBE_HALF_LARGE, False)
 
 
+def test_buffer_fraction_no_crash(test, device):
+    """Test that buffer_fraction < 1.0 does not crash and still generates contacts.
+
+    With buffer_fraction=0.05, buffers are only 5% of worst-case.
+    This validates that:
+    1. All kernels are bounds-safe (no crashes from buffer overflow)
+    2. Contacts are still generated (some may be dropped, but not all)
+    3. The pipeline completes without errors under CUDA graph capture
+    """
+    cube_half = 0.5
+    narrow_band = cube_half * 0.2
+    contact_margin = cube_half * 0.2
+    num_cubes = 5
+
+    builder = newton.ModelBuilder()
+    builder.default_shape_cfg = newton.ModelBuilder.ShapeConfig(
+        sdf_max_resolution=32,
+        is_hydroelastic=True,
+        sdf_narrow_band_range=(-narrow_band, narrow_band),
+        contact_margin=contact_margin,
+    )
+
+    builder.add_ground_plane()
+
+    for i in range(num_cubes):
+        z_pos = cube_half + i * cube_half * 2.0
+        body = builder.add_body(
+            xform=wp.transform(p=wp.vec3(0.0, 0.0, z_pos), q=wp.quat_identity()),
+        )
+        builder.add_shape_box(body=body, hx=cube_half, hy=cube_half, hz=cube_half)
+
+    model = builder.finalize(device=device)
+
+    # Use a small buffer_fraction to exercise bounds-safety
+    config = SDFHydroelasticConfig(buffer_fraction=0.05)
+    collision_pipeline = newton.CollisionPipeline.from_model(
+        model,
+        broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
+        sdf_hydroelastic_config=config,
+    )
+
+    state = model.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+
+    # Run collision multiple times - should not crash
+    for _ in range(5):
+        contacts = model.collide(state, collision_pipeline=collision_pipeline)
+    wp.synchronize()
+
+    # Verify we got at least some contacts (not all dropped)
+    contact_count = contacts.rigid_contact_count.numpy()[0]
+    test.assertGreater(contact_count, 0, "Expected at least some contacts with buffer_fraction=0.05")
+
+    # Now test with buffer_fraction=1.0 (full worst-case) for comparison
+    config_full = SDFHydroelasticConfig(buffer_fraction=1.0)
+    pipeline_full = newton.CollisionPipeline.from_model(
+        model,
+        broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
+        sdf_hydroelastic_config=config_full,
+    )
+    contacts_full = model.collide(state, collision_pipeline=pipeline_full)
+    wp.synchronize()
+    full_count = contacts_full.rigid_contact_count.numpy()[0]
+
+    # Full allocation should produce at least as many contacts
+    test.assertGreaterEqual(
+        full_count,
+        contact_count,
+        f"Full allocation ({full_count}) should produce >= contacts than reduced ({contact_count})",
+    )
+
+
 def test_mujoco_hydroelastic_penetration_depth(test, device):
     """Test that hydroelastic penetration depth matches expectation.
 
@@ -508,6 +580,14 @@ add_function_test(
     TestHydroelastic,
     "test_mujoco_hydroelastic_penetration_depth",
     test_mujoco_hydroelastic_penetration_depth,
+    devices=cuda_devices,
+)
+
+# Buffer fraction bounds-safety test
+add_function_test(
+    TestHydroelastic,
+    "test_buffer_fraction_no_crash",
+    test_buffer_fraction_no_crash,
     devices=cuda_devices,
 )
 

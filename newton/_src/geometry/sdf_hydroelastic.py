@@ -107,6 +107,28 @@ class SDFHydroelasticConfig:
     reduce_contacts: bool = True
     """Whether to reduce contacts to a smaller representative set per shape pair.
     When False, all generated contacts are passed through without reduction."""
+    buffer_fraction: float = 1.0
+    """Fraction of worst-case buffer sizes to allocate. Range (0, 1].
+
+    The hydroelastic pipeline pre-allocates buffers for octree traversal,
+    contact generation, and contact reduction. By default these are sized for
+    the theoretical worst case where every SDF tile produces iso-voxels.
+    In practice, only a small fraction of tiles overlap at any given time.
+
+    Reducing this value shrinks all buffers proportionally, trading a small
+    risk of dropped contacts for significantly lower GPU memory usage.
+    All kernels are bounds-safe: overflow causes contacts to be silently
+    dropped (not crashes), and the ``verify_collision_step`` kernel prints
+    a warning when any buffer overflows.
+
+    Tuning guidance:
+
+    - **1.0** (default): Full worst-case allocation, no contacts dropped.
+    - **0.1 - 0.2**: Dense contact scenarios (stacking, multi-object grasping).
+    - **0.05**: Typical RL workloads with sparse contacts (~20x memory savings).
+
+    Composes multiplicatively with ``buffer_mult_broad``, ``buffer_mult_iso``,
+    and ``buffer_mult_contact`` for per-stage fine-tuning."""
     buffer_mult_broad: int = 1
     """Multiplier for the preallocated broadphase buffer that stores overlapping
     block pairs. Increase only if a broadphase overflow warning is issued."""
@@ -206,9 +228,10 @@ class SDFHydroelastic:
         self.total_num_tiles = total_num_tiles
         self.max_num_blocks_per_shape = max_num_blocks_per_shape
 
-        mult = self.config.buffer_mult_iso * self.total_num_tiles
-        self.max_num_blocks_broad = int(
-            self.max_num_shape_pairs * self.max_num_blocks_per_shape * self.config.buffer_mult_broad
+        frac = self.config.buffer_fraction
+        mult = max(int(self.config.buffer_mult_iso * self.total_num_tiles * frac), 64)
+        self.max_num_blocks_broad = max(
+            int(self.max_num_shape_pairs * self.max_num_blocks_per_shape * self.config.buffer_mult_broad * frac), 64
         )
         # Output buffer sizes for each octree level (subblocks 8x8x8 -> 4x4x4 -> 2x2x2 -> voxels)
         self.iso_max_dims = (int(2 * mult), int(2 * mult), int(16 * mult), int(32 * mult))
@@ -1314,46 +1337,70 @@ def verify_collision_step(
     contact_count: wp.array(dtype=int),
     max_contact_count: int,
 ):
-    # Checks if any buffer overflowed in any stage of the collision pipeline and print a warning
+    # Checks if any buffer overflowed in any stage of the collision pipeline and print a warning.
+    # Overflow messages include guidance to increase buffer_fraction or the per-stage multiplier.
+    has_overflow = False
+
     if num_broad_collide[0] > max_num_broad_collide:
         wp.printf(
-            "Warning: Broad phase buffer overflowed %d > %d. Increase buffer_mult_broad.\n",
+            "Warning: Broad phase buffer overflowed %d / %d. Increase buffer_fraction or buffer_mult_broad.\n",
             num_broad_collide[0],
             max_num_broad_collide,
         )
+        has_overflow = True
     if num_iso_subblocks_0[0] > max_num_iso_subblocks_0:
         wp.printf(
-            "Warning: Iso subblock 0 buffer overflowed %d > %d. Increase buffer_mult_iso.\n",
+            "Warning: Iso subblock 0 buffer overflowed %d / %d. Increase buffer_fraction or buffer_mult_iso.\n",
             num_iso_subblocks_0[0],
             max_num_iso_subblocks_0,
         )
+        has_overflow = True
     if num_iso_subblocks_1[0] > max_num_iso_subblocks_1:
         wp.printf(
-            "Warning: Iso subblock 1 buffer overflowed %d > %d. Increase buffer_mult_iso.\n",
+            "Warning: Iso subblock 1 buffer overflowed %d / %d. Increase buffer_fraction or buffer_mult_iso.\n",
             num_iso_subblocks_1[0],
             max_num_iso_subblocks_1,
         )
+        has_overflow = True
     if num_iso_subblocks_2[0] > max_num_iso_subblocks_2:
         wp.printf(
-            "Warning: Iso subblock 2 buffer overflowed %d > %d. Increase buffer_mult_iso.\n",
+            "Warning: Iso subblock 2 buffer overflowed %d / %d. Increase buffer_fraction or buffer_mult_iso.\n",
             num_iso_subblocks_2[0],
             max_num_iso_subblocks_2,
         )
+        has_overflow = True
     if num_iso_voxels[0] > max_num_iso_voxels:
         wp.printf(
-            "Warning: Iso voxel buffer overflowed %d > %d. Increase buffer_mult_iso.\n",
+            "Warning: Iso voxel buffer overflowed %d / %d. Increase buffer_fraction or buffer_mult_iso.\n",
             num_iso_voxels[0],
             max_num_iso_voxels,
         )
+        has_overflow = True
     if face_contact_count[0] > max_face_contact_count:
         wp.printf(
-            "Warning: Face contact buffer overflowed %d > %d. Increase buffer_mult_contact.\n",
+            "Warning: Face contact buffer overflowed %d / %d. Increase buffer_fraction or buffer_mult_contact.\n",
             face_contact_count[0],
             max_face_contact_count,
         )
+        has_overflow = True
     if contact_count[0] > max_contact_count:
         wp.printf(
-            "Warning: Contact buffer overflowed %d > %d. Increase contact buffer size.\n",
+            "Warning: Contact buffer overflowed %d / %d. Increase contact buffer size.\n",
+            contact_count[0],
+            max_contact_count,
+        )
+        has_overflow = True
+
+    # Print usage summary when any overflow occurs to help with tuning buffer_fraction
+    if has_overflow:
+        wp.printf(
+            "  Hydroelastic usage: broad=%d/%d  voxels=%d/%d  contacts=%d/%d  output=%d/%d\n",
+            num_broad_collide[0],
+            max_num_broad_collide,
+            num_iso_voxels[0],
+            max_num_iso_voxels,
+            face_contact_count[0],
+            max_face_contact_count,
             contact_count[0],
             max_contact_count,
         )

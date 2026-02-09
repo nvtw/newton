@@ -556,6 +556,7 @@ For hydroelastic and SDF-based contacts, use :class:`~newton.SDFHydroelasticConf
 
     config = SDFHydroelasticConfig(
         reduce_contacts=True,           # Enable contact reduction
+        buffer_fraction=0.1,            # 10% of worst-case buffers (saves GPU memory)
         betas=(10.0, -0.5),             # Scoring thresholds (default)
         sticky_contacts=0.0,            # Temporal persistence (0 = disabled)
         normal_matching=True,           # Align reduced normals with aggregate force
@@ -879,6 +880,27 @@ When ``is_hydroelastic=True`` on **both** shapes in a pair, the system generates
 The ``k_hydro`` parameter on each shape controls area-dependent contact stiffness. For a pair, the effective stiffness is computed as the harmonic mean: ``k_eff = 2 * k_a * k_b / (k_a + k_b)``. Tune this for desired penetration behavior.
 
 Contact reduction options for hydroelastic contacts are configured via :class:`~newton.SDFHydroelasticConfig` (see :ref:`Contact Reduction`).
+
+**Memory tuning (buffer_fraction):**
+
+The hydroelastic pipeline pre-allocates GPU buffers for the theoretical worst case where every SDF tile in the scene produces iso-voxels simultaneously. In multi-environment RL workloads, the actual buffer utilization is typically 1--5 % of the worst case. Use the ``buffer_fraction`` parameter on :class:`~newton.geometry.SDFHydroelasticConfig` to scale buffers down proportionally:
+
+.. code-block:: python
+
+    from newton.geometry import SDFHydroelasticConfig
+
+    config = SDFHydroelasticConfig(
+        buffer_fraction=0.1,   # allocate 10% of worst-case buffers
+    )
+    pipeline = CollisionPipeline.from_model(model, sdf_hydroelastic_config=config)
+
+All kernels are bounds-safe -- if a buffer overflows, excess contacts are silently dropped (no crashes or out-of-bounds reads). A warning is printed at runtime when overflow occurs.
+
+Recommended values:
+
+- **1.0** (default): Full worst-case allocation, no contacts dropped.
+- **0.1 -- 0.2**: Dense contact scenarios (stacking, multi-object grasping).
+- **0.05**: Typical RL workloads with sparse contacts (~20x memory savings).
 
 .. _Contact Material Properties:
 
