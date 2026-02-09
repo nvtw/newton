@@ -459,7 +459,11 @@ for mode_name, test_func in mesh_mesh_sdf_tests:
 # ============================================================================
 
 
-def test_unified_pipeline_shape_collision_filter_pairs(test, device, broad_phase_mode: newton.BroadPhaseMode):
+class TestCollisionPipelineFilterPairs(unittest.TestCase):
+    pass
+
+
+def test_shape_collision_filter_pairs(test, device, broad_phase_mode: newton.BroadPhaseMode):
     """Verify that excluded shape pairs produce no contacts under NxN or SAP broad phase.
 
     Args:
@@ -478,7 +482,7 @@ def test_unified_pipeline_shape_collision_filter_pairs(test, device, broad_phase
         # Exclude this pair so they must not generate contacts
         builder.shape_collision_filter_pairs.append((min(shape_a, shape_b), max(shape_a, shape_b)))
         model = builder.finalize(device=device)
-        pipeline = newton.CollisionPipelineUnified.from_model(
+        pipeline = newton.CollisionPipeline.from_model(
             model,
             broad_phase_mode=broad_phase_mode,
         )
@@ -500,16 +504,16 @@ def test_unified_pipeline_shape_collision_filter_pairs(test, device, broad_phase
 
 
 add_function_test(
-    TestUnifiedCollisionPipeline,
+    TestCollisionPipelineFilterPairs,
     "test_shape_collision_filter_pairs_nxn",
-    test_unified_pipeline_shape_collision_filter_pairs,
+    test_shape_collision_filter_pairs,
     devices=devices,
     broad_phase_mode=newton.BroadPhaseMode.NXN,
 )
 add_function_test(
-    TestUnifiedCollisionPipeline,
+    TestCollisionPipelineFilterPairs,
     "test_shape_collision_filter_pairs_sap",
-    test_unified_pipeline_shape_collision_filter_pairs,
+    test_shape_collision_filter_pairs,
     devices=devices,
     broad_phase_mode=newton.BroadPhaseMode.SAP,
 )
