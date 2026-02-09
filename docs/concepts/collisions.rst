@@ -1000,7 +1000,6 @@ See Also
     import newton
     from newton import (
         CollisionPipeline,
-        BroadPhaseMode,
         Contacts,
         GeoType,
     )
