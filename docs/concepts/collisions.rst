@@ -12,7 +12,7 @@ Newton's collision system is also compatible with MuJoCo-imported models via MJW
 Collision Pipeline
 ------------------
 
-Newton uses a single collision implementation, :class:`~newton.CollisionPipeline`, which supports multiple broad phase algorithms and advanced contact models (SDF-based, hydroelastic, cylinder/cone primitives). See :ref:`Collision Pipeline Details` for details.
+Newton's collision pipeline implementation supports multiple broad phase algorithms and advanced contact models (SDF-based, hydroelastic, cylinder/cone primitives). See :ref:`Collision Pipeline Details` for details.
 
 Basic usage:
 

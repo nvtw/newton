@@ -425,8 +425,8 @@ class CollisionPipeline:
 
         # Set rigid_contact_max
         # For collision pipeline, we don't multiply by per-pair factors since broad phase
-        # discovers pairs dynamically. Users should provide rigid_contact_max explicitly,
-        # or use model.rigid_contact_max which is computed from actual collision pairs.
+        # discovers pairs dynamically. Users can provide rigid_contact_max explicitly,
+        # otherwise it is estimated from shape count and broad phase mode.
         if rigid_contact_max is not None:
             self.rigid_contact_max = rigid_contact_max
         else:
