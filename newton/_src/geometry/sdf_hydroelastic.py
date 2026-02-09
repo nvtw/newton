@@ -390,7 +390,7 @@ class HydroelasticSDF:
         shape_sdf_data: wp.array(dtype=SDFData),
         shape_transform: wp.array(dtype=wp.transform),
         shape_contact_margin: wp.array(dtype=wp.float32),
-        shape_local_aabb_lower: wp.array(dtype=wp.vec3),
+        shape_collision_aabb_lower: wp.array(dtype=wp.vec3),
         shape_collision_aabb_upper: wp.array(dtype=wp.vec3),
         shape_voxel_resolution: wp.array(dtype=wp.vec3i),
         shape_pairs_sdf_sdf: wp.array(dtype=wp.vec2i),
@@ -403,8 +403,8 @@ class HydroelasticSDF:
             shape_sdf_data: SDF data for each shape.
             shape_transform: World transforms for each shape.
             shape_contact_margin: Contact margin for each shape.
-            shape_local_aabb_lower: Per-shape local AABB lower bounds.
-            shape_collision_aabb_upper: Per-shape local AABB upper bounds.
+            shape_collision_aabb_lower: Per-shape collision AABB lower bounds.
+            shape_collision_aabb_upper: Per-shape collision AABB upper bounds.
             shape_voxel_resolution: Per-shape voxel grid resolution.
             shape_pairs_sdf_sdf: Pairs of shape indices to check for collision.
             shape_pairs_sdf_sdf_count: Number of valid shape pairs.
@@ -424,7 +424,7 @@ class HydroelasticSDF:
         if self.config.reduce_contacts:
             self._reduce_decode_contacts(
                 shape_transform,
-                shape_local_aabb_lower,
+                shape_collision_aabb_lower,
                 shape_collision_aabb_upper,
                 shape_voxel_resolution,
                 shape_contact_margin,
@@ -660,7 +660,7 @@ class HydroelasticSDF:
     def _reduce_decode_contacts(
         self,
         shape_transform: wp.array(dtype=wp.transform),
-        shape_local_aabb_lower: wp.array(dtype=wp.vec3),
+        shape_collision_aabb_lower: wp.array(dtype=wp.vec3),
         shape_collision_aabb_upper: wp.array(dtype=wp.vec3),
         shape_voxel_resolution: wp.array(dtype=wp.vec3i),
         shape_contact_margin: wp.array(dtype=wp.float32),
@@ -673,7 +673,7 @@ class HydroelasticSDF:
         """
         self.contact_reduction.reduce_and_export(
             shape_transform=shape_transform,
-            shape_local_aabb_lower=shape_local_aabb_lower,
+            shape_collision_aabb_lower=shape_collision_aabb_lower,
             shape_collision_aabb_upper=shape_collision_aabb_upper,
             shape_voxel_resolution=shape_voxel_resolution,
             shape_contact_margin=shape_contact_margin,

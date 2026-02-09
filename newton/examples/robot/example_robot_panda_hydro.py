@@ -36,7 +36,7 @@ import newton.examples
 import newton.ik as ik
 import newton.usd
 import newton.utils
-from newton.geometry import create_box_mesh
+from newton.geometry import HydroelasticSDF, create_box_mesh
 
 
 class SceneType(Enum):
