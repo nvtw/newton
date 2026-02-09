@@ -110,7 +110,7 @@ class Example:
         self.control = self.model.control()
 
         # Create collision pipeline (requires_grad for differentiable simulation)
-        self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
+        self.collision_pipeline = newton.CollisionPipeline.from_model(
             self.model,
             broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
             soft_contact_margin=10.0,

@@ -816,7 +816,7 @@ class Model:
     def collide(
         self: Model,
         state: State,
-        collision_pipeline=None,  # CollisionPipelineUnified | None
+        collision_pipeline=None,  # CollisionPipeline | None
     ) -> Contacts:
         """
         Generate contact points for the particles and rigid bodies in the model.
@@ -826,10 +826,10 @@ class Model:
 
         Args:
             state (State): The current state of the model.
-            collision_pipeline (CollisionPipelineUnified, optional): Collision pipeline to use for contact generation.
-                If not provided, a default :class:`CollisionPipelineUnified` is created automatically
+            collision_pipeline (CollisionPipeline, optional): Collision pipeline to use for contact generation.
+                If not provided, a default :class:`CollisionPipeline` is created automatically
                 (and cached for subsequent calls). For more control, create one explicitly via
-                :meth:`CollisionPipelineUnified.from_model`.
+                :meth:`CollisionPipeline.from_model`.
 
         Returns:
             Contacts: The contact object containing collision information.
@@ -843,9 +843,9 @@ class Model:
         if collision_pipeline is not None:
             self._collision_pipeline = collision_pipeline
         elif not hasattr(self, "_collision_pipeline"):
-            from .collide_unified import BroadPhaseMode, CollisionPipelineUnified  # noqa: PLC0415
+            from .collide import BroadPhaseMode, CollisionPipeline  # noqa: PLC0415
 
-            self._collision_pipeline = CollisionPipelineUnified.from_model(
+            self._collision_pipeline = CollisionPipeline.from_model(
                 model=self, broad_phase_mode=BroadPhaseMode.EXPLICIT
             )
 

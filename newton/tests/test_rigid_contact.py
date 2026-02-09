@@ -232,9 +232,9 @@ def test_shapes_on_plane(test, device, solver_fn):
         f"Objects should be at rest, but max angular velocity is {max_angular_vel:.6f}",
     )
 
-    # Check final positions with tolerance for unified pipeline differences
+    # Check final positions with tolerance for collision pipeline differences
     expected_end_positions = np.array(expected_end_positions)
-    # Unified pipeline may produce slightly different final positions due to contact handling differences
+    # Collision pipeline may produce slightly different final positions due to contact handling differences
     # Allow larger tolerance while still ensuring objects are on the ground
     assert_np_equal(body_q[:, :3], expected_end_positions, tol=0.25)
     expected_quats = np.tile(wp.quat_identity(), (model.body_count, 1))
@@ -594,7 +594,7 @@ def test_mesh_box_on_ground(test, device):
 
 
 def test_mujoco_warp_newton_contacts(test, device):
-    """Test that MuJoCo Warp solver correctly handles contact transfer from Newton's unified collision pipeline.
+    """Test that MuJoCo Warp solver correctly handles contact transfer from Newton's collision pipeline.
 
     This test creates 4 environments, each with a single cube on the ground, and verifies that the cubes
     remain stable (don't fall through the ground) when using Newton's collision detection with MuJoCo Warp solver.
@@ -859,7 +859,7 @@ add_function_test(
     devices=devices,
 )
 
-# Add test for mesh box on ground with unified pipeline
+# Add test for mesh box on ground with collision pipeline
 add_function_test(
     TestRigidContact,
     "test_mesh_box_on_ground",

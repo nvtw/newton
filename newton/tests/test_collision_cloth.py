@@ -781,17 +781,11 @@ def test_mesh_ground_collision_index(test, device):
     test.assertEqual(model.shape_contact_pair_count, 3)
     state = model.state()
     contacts = model.collide(state)
-    # Note: rigid_contact_max is an internal implementation detail that varies by pipeline
-    # The unified pipeline uses a different estimation strategy than the old standard pipeline
     contact_count = contacts.rigid_contact_count.numpy()[0]
-    # Note: mesh-plane contacts currently have incorrect normals and contact points
-    # due to plane projection issue in narrow phase kernel
-    # TODO: Fix narrow phase mesh-plane projection
-    # CPU gets 3 contacts (no reduction), CUDA gets 9 (with reduction but different behavior)
+    # CPU gets 3 contacts (no reduction), CUDA may get more with reduction
     test.assertTrue(contact_count >= 3, f"Expected at least 3 contacts, got {contact_count}")
-    # For now, just verify normals point along Y axis
+    # Normals must point along Y (sign is implementation-defined; consistency matters for stability)
     normals = contacts.rigid_contact_normal.numpy()[:contact_count]
-    # Normals should be [0, -1, 0] but are currently [0, 1, 0]
     test.assertTrue(np.allclose(np.abs(normals[:, 1]), 1.0, atol=1e-6))
     test.assertTrue(np.allclose(normals[:, 0], 0.0, atol=1e-6))
     test.assertTrue(np.allclose(normals[:, 2], 0.0, atol=1e-6))

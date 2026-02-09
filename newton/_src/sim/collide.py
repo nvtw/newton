@@ -41,8 +41,8 @@ from ..sim.state import State
 
 
 @wp.struct
-class UnifiedContactWriterData:
-    """Contact writer data for collide_unified write_contact function."""
+class ContactWriterData:
+    """Contact writer data for collide write_contact function."""
 
     contact_max: int
     # Body information arrays (for transforming to body-local coordinates)
@@ -84,15 +84,15 @@ class BroadPhaseMode(IntEnum):
 @wp.func
 def write_contact(
     contact_data: ContactData,
-    writer_data: UnifiedContactWriterData,
+    writer_data: ContactWriterData,
     output_index: int,
 ):
     """
-    Write a contact to the output arrays using ContactData and UnifiedContactWriterData.
+    Write a contact to the output arrays using ContactData and ContactWriterData.
 
     Args:
         contact_data: ContactData struct containing contact information
-        writer_data: UnifiedContactWriterData struct containing body info and output arrays
+        writer_data: ContactWriterData struct containing body info and output arrays
         output_index: If -1, use atomic_add to get the next available index if contact distance is less than margin. If >= 0, use this index directly and skip margin check.
     """
     total_separation_needed = (
@@ -271,13 +271,12 @@ def prepare_geom_data_kernel(
         geom_transform[idx] = shape_transform[idx]
 
 
-def _estimate_rigid_contact_max_unified(model: Model) -> int:
+def _estimate_rigid_contact_max(model: Model) -> int:
     """
-    Estimate the maximum number of rigid contacts for the unified collision pipeline.
+    Estimate the maximum number of rigid contacts for the collision pipeline.
 
-    Unlike the standard collision pipeline which uses per-vertex contact counting,
-    the unified pipeline uses SDF-based collision with contact reduction for mesh-mesh
-    pairs. This function provides a linear estimate assuming each shape contacts
+    Uses a linear estimate based on shape count and types, with contact reduction
+    for mesh-mesh pairs. This function assumes each shape contacts
     only a limited number of neighbors (due to spatial locality).
 
     Args:
@@ -317,7 +316,7 @@ def _estimate_rigid_contact_max_unified(model: Model) -> int:
     return max(1000, total_contacts)
 
 
-class CollisionPipelineUnified:
+class CollisionPipeline:
     """
     Full-featured collision pipeline with GJK/MPR narrow phase and pluggable broad phase.
 
@@ -339,7 +338,6 @@ class CollisionPipelineUnified:
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
         edge_sdf_iter: int = 10,
-        iterate_mesh_vertices: bool = True,
         requires_grad: bool = False,
         device: Devicelike = None,
         broad_phase_mode: BroadPhaseMode = BroadPhaseMode.EXPLICIT,
@@ -352,7 +350,7 @@ class CollisionPipelineUnified:
         shape_pairs_excluded: wp.array(dtype=wp.vec2i) | None = None,
     ):
         """
-        Initialize the CollisionPipelineUnified.
+        Initialize the CollisionPipeline.
 
         Args:
             shape_count (int): Number of shapes in the simulation.
@@ -369,7 +367,6 @@ class CollisionPipelineUnified:
                 If None, computed as shape_count * particle_count.
             soft_contact_margin (float, optional): Margin for soft contact generation. Defaults to 0.01.
             edge_sdf_iter (int, optional): Number of iterations for edge SDF collision. Defaults to 10.
-            iterate_mesh_vertices (bool, optional): Whether to iterate mesh vertices for collision. Defaults to True.
             requires_grad (bool, optional): Whether to enable gradient computation. Defaults to False.
             device (Devicelike, optional): The device on which to allocate arrays and perform computation.
             broad_phase_mode (BroadPhaseMode, optional): Broad phase mode for collision detection.
@@ -434,9 +431,9 @@ class CollisionPipelineUnified:
             self.shape_pairs_max = len(shape_pairs_filtered)
 
         # Set rigid_contact_max
-        # For unified pipeline, we don't multiply by per-pair factors since broad phase
-        # discovers pairs dynamically. Users should provide rigid_contact_max explicitly,
-        # or use model.rigid_contact_max which is computed from actual collision pairs.
+        # For collision pipeline, we don't multiply by per-pair factors since broad phase
+        # discovers pairs dynamically. Users can provide rigid_contact_max explicitly,
+        # otherwise it is estimated from shape count and broad phase mode.
         if rigid_contact_max is not None:
             self.rigid_contact_max = rigid_contact_max
         else:
@@ -496,15 +493,14 @@ class CollisionPipelineUnified:
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
         edge_sdf_iter: int = 10,
-        iterate_mesh_vertices: bool = True,
         requires_grad: bool | None = None,
         broad_phase_mode: BroadPhaseMode = BroadPhaseMode.EXPLICIT,
         shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
         sap_sort_type=None,
         sdf_hydroelastic_config: SDFHydroelasticConfig | None = None,
-    ) -> CollisionPipelineUnified:
+    ) -> CollisionPipeline:
         """
-        Create a CollisionPipelineUnified instance from a Model.
+        Create a CollisionPipeline instance from a Model.
 
         Args:
             model (Model): The simulation model.
@@ -514,7 +510,6 @@ class CollisionPipelineUnified:
             soft_contact_max (int | None, optional): Maximum number of soft contacts to allocate.
             soft_contact_margin (float, optional): Margin for soft contact generation. Defaults to 0.01.
             edge_sdf_iter (int, optional): Number of iterations for edge SDF collision. Defaults to 10.
-            iterate_mesh_vertices (bool, optional): Whether to iterate mesh vertices for collision. Defaults to True.
             requires_grad (bool | None, optional): Whether to enable gradient computation. If None, uses model.requires_grad.
             broad_phase_mode (BroadPhaseMode, optional): Broad phase collision detection mode. Defaults to BroadPhaseMode.EXPLICIT.
             shape_pairs_filtered (wp.array | None, optional): Precomputed shape pairs for EXPLICIT mode.
@@ -525,11 +520,11 @@ class CollisionPipelineUnified:
             sdf_hydroelastic_config (SDFHydroelasticConfig | None, optional): Configuration for SDF hydroelastic collision handling. Defaults to None.
 
         Returns:
-            CollisionPipelineUnified: The constructed collision pipeline.
+            CollisionPipeline: The constructed collision pipeline.
         """
-        # Estimate rigid_contact_max for unified pipeline (accounts for contact reduction)
+        # Estimate rigid_contact_max for collision pipeline (accounts for contact reduction)
         if rigid_contact_max is None:
-            rigid_contact_max = _estimate_rigid_contact_max_unified(model)
+            rigid_contact_max = _estimate_rigid_contact_max(model)
         if requires_grad is None:
             requires_grad = model.requires_grad
 
@@ -568,7 +563,7 @@ class CollisionPipelineUnified:
             shape_types = model.shape_type.numpy()
             has_meshes = bool((shape_types == int(GeoType.MESH)).any())
 
-        pipeline = CollisionPipelineUnified(
+        pipeline = CollisionPipeline(
             model.shape_count,
             model.particle_count,
             reduce_contacts,
@@ -577,7 +572,6 @@ class CollisionPipelineUnified:
             soft_contact_max,
             soft_contact_margin,
             edge_sdf_iter,
-            iterate_mesh_vertices,
             requires_grad,
             model.device,
             broad_phase_mode,
@@ -622,127 +616,130 @@ class CollisionPipelineUnified:
         # Clear counters
         self.broad_phase_pair_count.zero_()
 
-        # Compute AABBs for all shapes (already expanded by per-shape contact margins)
-        wp.launch(
-            kernel=compute_shape_aabbs,
-            dim=model.shape_count,
-            inputs=[
-                state.body_q,
-                model.shape_transform,
-                model.shape_body,
-                model.shape_type,
-                model.shape_scale,
-                model.shape_collision_radius,
-                model.shape_source_ptr,
-                model.shape_contact_margin,
-            ],
-            outputs=[
-                self.shape_aabb_lower,
-                self.shape_aabb_upper,
-            ],
-            device=self.device,
-        )
-
-        # Run broad phase (AABBs are already expanded by contact margins, so pass None)
-        if self.broad_phase_mode == BroadPhaseMode.NXN:
-            self.nxn_broadphase.launch(
-                self.shape_aabb_lower,
-                self.shape_aabb_upper,
-                None,  # AABBs are pre-expanded, no additional margin needed
-                model.shape_collision_group,
-                model.shape_world,
-                model.shape_count,
-                self.broad_phase_shape_pairs,
-                self.broad_phase_pair_count,
-                device=self.device,
-                filter_pairs=self.shape_pairs_excluded,
-                num_filter_pairs=self.shape_pairs_excluded_count,
-            )
-        elif self.broad_phase_mode == BroadPhaseMode.SAP:
-            self.sap_broadphase.launch(
-                self.shape_aabb_lower,
-                self.shape_aabb_upper,
-                None,  # AABBs are pre-expanded, no additional margin needed
-                model.shape_collision_group,
-                model.shape_world,
-                model.shape_count,
-                self.broad_phase_shape_pairs,
-                self.broad_phase_pair_count,
-                device=self.device,
-                filter_pairs=self.shape_pairs_excluded,
-                num_filter_pairs=self.shape_pairs_excluded_count,
-            )
-        else:  # BroadPhaseMode.EXPLICIT
-            self.explicit_broadphase.launch(
-                self.shape_aabb_lower,
-                self.shape_aabb_upper,
-                None,  # AABBs are pre-expanded, no additional margin needed
-                self.shape_pairs_filtered,
-                len(self.shape_pairs_filtered),
-                self.broad_phase_shape_pairs,
-                self.broad_phase_pair_count,
+        # When requires_grad, skip rigid contact path so the tape does not record narrow phase
+        # kernels (they have enable_backward=False). Only soft contacts are differentiable.
+        if not self.requires_grad:
+            # Compute AABBs for all shapes (already expanded by per-shape contact margins)
+            wp.launch(
+                kernel=compute_shape_aabbs,
+                dim=model.shape_count,
+                inputs=[
+                    state.body_q,
+                    model.shape_transform,
+                    model.shape_body,
+                    model.shape_type,
+                    model.shape_scale,
+                    model.shape_collision_radius,
+                    model.shape_source_ptr,
+                    model.shape_contact_margin,
+                ],
+                outputs=[
+                    self.shape_aabb_lower,
+                    self.shape_aabb_upper,
+                ],
                 device=self.device,
             )
 
-        # Prepare geometry data arrays for NarrowPhase API
-        wp.launch(
-            kernel=prepare_geom_data_kernel,
-            dim=model.shape_count,
-            inputs=[
-                model.shape_transform,
-                model.shape_body,
-                model.shape_type,
-                model.shape_scale,
-                model.shape_thickness,
-                state.body_q,
-            ],
-            outputs=[
-                self.geom_data,
-                self.geom_transform,
-            ],
-            device=self.device,
-        )
+            # Run broad phase (AABBs are already expanded by contact margins, so pass None)
+            if self.broad_phase_mode == BroadPhaseMode.NXN:
+                self.nxn_broadphase.launch(
+                    self.shape_aabb_lower,
+                    self.shape_aabb_upper,
+                    None,  # AABBs are pre-expanded, no additional margin needed
+                    model.shape_collision_group,
+                    model.shape_world,
+                    model.shape_count,
+                    self.broad_phase_shape_pairs,
+                    self.broad_phase_pair_count,
+                    device=self.device,
+                    filter_pairs=self.shape_pairs_excluded,
+                    num_filter_pairs=self.shape_pairs_excluded_count,
+                )
+            elif self.broad_phase_mode == BroadPhaseMode.SAP:
+                self.sap_broadphase.launch(
+                    self.shape_aabb_lower,
+                    self.shape_aabb_upper,
+                    None,  # AABBs are pre-expanded, no additional margin needed
+                    model.shape_collision_group,
+                    model.shape_world,
+                    model.shape_count,
+                    self.broad_phase_shape_pairs,
+                    self.broad_phase_pair_count,
+                    device=self.device,
+                    filter_pairs=self.shape_pairs_excluded,
+                    num_filter_pairs=self.shape_pairs_excluded_count,
+                )
+            else:  # BroadPhaseMode.EXPLICIT
+                self.explicit_broadphase.launch(
+                    self.shape_aabb_lower,
+                    self.shape_aabb_upper,
+                    None,  # AABBs are pre-expanded, no additional margin needed
+                    self.shape_pairs_filtered,
+                    len(self.shape_pairs_filtered),
+                    self.broad_phase_shape_pairs,
+                    self.broad_phase_pair_count,
+                    device=self.device,
+                )
 
-        # Create UnifiedContactWriterData struct for custom contact writing
-        writer_data = UnifiedContactWriterData()
-        writer_data.contact_max = contacts.rigid_contact_max
-        writer_data.body_q = state.body_q
-        writer_data.shape_body = model.shape_body
-        writer_data.shape_contact_margin = model.shape_contact_margin
-        writer_data.contact_count = contacts.rigid_contact_count
-        writer_data.out_shape0 = contacts.rigid_contact_shape0
-        writer_data.out_shape1 = contacts.rigid_contact_shape1
-        writer_data.out_point0 = contacts.rigid_contact_point0
-        writer_data.out_point1 = contacts.rigid_contact_point1
-        writer_data.out_offset0 = contacts.rigid_contact_offset0
-        writer_data.out_offset1 = contacts.rigid_contact_offset1
-        writer_data.out_normal = contacts.rigid_contact_normal
-        writer_data.out_thickness0 = contacts.rigid_contact_thickness0
-        writer_data.out_thickness1 = contacts.rigid_contact_thickness1
-        writer_data.out_tids = contacts.rigid_contact_tids
+            # Prepare geometry data arrays for NarrowPhase API
+            wp.launch(
+                kernel=prepare_geom_data_kernel,
+                dim=model.shape_count,
+                inputs=[
+                    model.shape_transform,
+                    model.shape_body,
+                    model.shape_type,
+                    model.shape_scale,
+                    model.shape_thickness,
+                    state.body_q,
+                ],
+                outputs=[
+                    self.geom_data,
+                    self.geom_transform,
+                ],
+                device=self.device,
+            )
 
-        writer_data.out_stiffness = contacts.rigid_contact_stiffness
-        writer_data.out_damping = contacts.rigid_contact_damping
-        writer_data.out_friction = contacts.rigid_contact_friction
+            # Create ContactWriterData struct for custom contact writing
+            writer_data = ContactWriterData()
+            writer_data.contact_max = contacts.rigid_contact_max
+            writer_data.body_q = state.body_q
+            writer_data.shape_body = model.shape_body
+            writer_data.shape_contact_margin = model.shape_contact_margin
+            writer_data.contact_count = contacts.rigid_contact_count
+            writer_data.out_shape0 = contacts.rigid_contact_shape0
+            writer_data.out_shape1 = contacts.rigid_contact_shape1
+            writer_data.out_point0 = contacts.rigid_contact_point0
+            writer_data.out_point1 = contacts.rigid_contact_point1
+            writer_data.out_offset0 = contacts.rigid_contact_offset0
+            writer_data.out_offset1 = contacts.rigid_contact_offset1
+            writer_data.out_normal = contacts.rigid_contact_normal
+            writer_data.out_thickness0 = contacts.rigid_contact_thickness0
+            writer_data.out_thickness1 = contacts.rigid_contact_thickness1
+            writer_data.out_tids = contacts.rigid_contact_tids
 
-        # Run narrow phase with custom contact writer (writes directly to Contacts format)
-        self.narrow_phase.launch_custom_write(
-            candidate_pair=self.broad_phase_shape_pairs,
-            num_candidate_pair=self.broad_phase_pair_count,
-            shape_types=model.shape_type,
-            shape_data=self.geom_data,
-            shape_transform=self.geom_transform,
-            shape_source=model.shape_source_ptr,
-            shape_sdf_data=model.shape_sdf_data,
-            shape_contact_margin=model.shape_contact_margin,
-            shape_collision_radius=model.shape_collision_radius,
-            shape_flags=model.shape_flags,
-            shape_local_aabb_lower=model.shape_local_aabb_lower,
-            shape_local_aabb_upper=model.shape_local_aabb_upper,
-            shape_voxel_resolution=model.shape_voxel_resolution,
-            writer_data=writer_data,
-            device=self.device,
-        )
+            writer_data.out_stiffness = contacts.rigid_contact_stiffness
+            writer_data.out_damping = contacts.rigid_contact_damping
+            writer_data.out_friction = contacts.rigid_contact_friction
+
+            # Run narrow phase with custom contact writer (writes directly to Contacts format)
+            self.narrow_phase.launch_custom_write(
+                candidate_pair=self.broad_phase_shape_pairs,
+                num_candidate_pair=self.broad_phase_pair_count,
+                shape_types=model.shape_type,
+                shape_data=self.geom_data,
+                shape_transform=self.geom_transform,
+                shape_source=model.shape_source_ptr,
+                shape_sdf_data=model.shape_sdf_data,
+                shape_contact_margin=model.shape_contact_margin,
+                shape_collision_radius=model.shape_collision_radius,
+                shape_flags=model.shape_flags,
+                shape_local_aabb_lower=model.shape_local_aabb_lower,
+                shape_local_aabb_upper=model.shape_local_aabb_upper,
+                shape_voxel_resolution=model.shape_voxel_resolution,
+                writer_data=writer_data,
+                device=self.device,
+            )
 
         # Generate soft contacts for particles and shapes
         particle_count = len(state.particle_q) if state.particle_q else 0
