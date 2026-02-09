@@ -16,8 +16,10 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Literal
 
+import numpy as np
 import warp as wp
 
 from ..core.types import Devicelike
@@ -37,6 +39,14 @@ from ..geometry.types import GeoType
 from ..sim.contacts import Contacts
 from ..sim.model import Model
 from ..sim.state import State
+
+
+class BroadPhaseMode(str, Enum):
+    """Broad phase algorithms for collision detection."""
+
+    NXN = "nxn"
+    SAP = "sap"
+    EXPLICIT = "explicit"
 
 
 @wp.struct
@@ -329,6 +339,7 @@ class CollisionPipeline:
         edge_sdf_iter: int = 10,
         requires_grad: bool = False,
         device: Devicelike = None,
+        shape_pairs_excluded: wp.array(dtype=wp.vec2i) | None = None,
     ):
         """
         Initialize the CollisionPipeline (expert API).
@@ -343,6 +354,8 @@ class CollisionPipeline:
             edge_sdf_iter: Number of iterations for edge SDF collision. Defaults to 10.
             requires_grad: Whether to enable gradient computation. Defaults to False.
             device: Device for pipeline buffers. Defaults to narrow_phase.device.
+            shape_pairs_excluded (wp.array | None, optional): Sorted array of excluded shape pairs (vec2i)
+                for NXN/SAP broad phase. Pairs in this list are not reported as contacts. Ignored for EXPLICIT.
         """
         self.broad_phase = broad_phase
         self.narrow_phase = narrow_phase
@@ -352,6 +365,8 @@ class CollisionPipeline:
         self.requires_grad = requires_grad
         self.soft_contact_margin = soft_contact_margin
         self.contacts = None
+        self.shape_pairs_excluded = shape_pairs_excluded
+        self.shape_pairs_excluded_count = shape_pairs_excluded.shape[0] if shape_pairs_excluded is not None else 0
 
         shape_pairs_max = narrow_phase.max_candidate_pairs
         shape_count = len(narrow_phase.shape_aabb_lower) if narrow_phase.shape_aabb_lower is not None else 0
@@ -381,7 +396,8 @@ class CollisionPipeline:
         cls,
         model: Model,
         *,
-        broad_phase: Literal["nxn", "sap", "explicit"] = "explicit",
+        broad_phase: Literal["nxn", "sap", "explicit"] | BroadPhaseMode = "explicit",
+        broad_phase_mode: BroadPhaseMode | None = None,
         reduce_contacts: bool = True,
         rigid_contact_max: int | None = None,
         soft_contact_max: int | None = None,
@@ -397,7 +413,9 @@ class CollisionPipeline:
 
         Args:
             model: The simulation model.
-            broad_phase: Broad phase algorithm: "nxn" (all-pairs), "sap" (sweep-and-prune), or "explicit" (precomputed pairs). Defaults to "explicit".
+            broad_phase: Broad phase algorithm: "nxn" (all-pairs), "sap" (sweep-and-prune), or "explicit" (precomputed pairs).
+                Accepts a :class:`BroadPhaseMode` value as well. Defaults to "explicit".
+            broad_phase_mode: Optional BroadPhaseMode value. If provided, overrides broad_phase.
             reduce_contacts: Whether to reduce contacts for mesh-mesh collisions. Defaults to True.
             rigid_contact_max: Maximum number of rigid contacts. If None, estimated from model.
             soft_contact_max: Maximum number of soft contacts. If None, shape_count * particle_count.
@@ -411,6 +429,15 @@ class CollisionPipeline:
         Returns:
             The constructed collision pipeline.
         """
+        if broad_phase_mode is not None:
+            broad_phase = broad_phase_mode.value
+        elif isinstance(broad_phase, BroadPhaseMode):
+            broad_phase = broad_phase.value
+        elif isinstance(broad_phase, str):
+            broad_phase = broad_phase.lower()
+        else:
+            broad_phase = str(broad_phase).lower()
+
         if rigid_contact_max is None:
             rigid_contact_max = _estimate_rigid_contact_max(model)
         if requires_grad is None:
@@ -449,7 +476,24 @@ class CollisionPipeline:
         else:
             raise ValueError(f"broad_phase must be 'nxn', 'sap', or 'explicit', got {broad_phase!r}")
 
-        sdf_hydroelastic = HydroelasticSDF._from_model(model, config=sdf_hydroelastic_config, writer_func=write_contact)
+        # For NXN/SAP, build sorted exclusion array from model.shape_collision_filter_pairs
+        shape_pairs_excluded = None
+        if broad_phase in ("nxn", "sap") and hasattr(model, "shape_collision_filter_pairs"):
+            filters = model.shape_collision_filter_pairs
+            if filters:
+                sorted_pairs = sorted(filters)  # lexicographic (already canonical min,max)
+                shape_pairs_excluded = wp.array(
+                    np.array(sorted_pairs),
+                    dtype=wp.vec2i,
+                    device=model.device,
+                )
+
+        # Initialize SDF hydroelastic (returns None if no hydroelastic shape pairs)
+        sdf_hydroelastic = HydroelasticSDF._from_model(
+            model, config=sdf_hydroelastic_config, writer_func=write_contact
+        )
+
+        # Detect if any mesh shapes are present to optimize kernel launches
         has_meshes = False
         if hasattr(model, "shape_type") and model.shape_type is not None:
             has_meshes = bool((model.shape_type.numpy() == int(GeoType.MESH)).any())
@@ -468,6 +512,7 @@ class CollisionPipeline:
             contact_writer_warp_func=write_contact,
             sdf_hydroelastic=sdf_hydroelastic,
             has_meshes=has_meshes,
+            shape_pairs_excluded=shape_pairs_excluded,
         )
 
         soft_max = soft_contact_max if soft_contact_max is not None else shape_count * particle_count
@@ -481,6 +526,7 @@ class CollisionPipeline:
             edge_sdf_iter=edge_sdf_iter,
             requires_grad=requires_grad,
             device=device,
+            shape_pairs_excluded=shape_pairs_excluded,
         )
 
     def collide(self, model: Model, state: State) -> Contacts:
@@ -549,6 +595,8 @@ class CollisionPipeline:
                     self.broad_phase_shape_pairs,
                     self.broad_phase_pair_count,
                     device=self.device,
+                    filter_pairs=self.shape_pairs_excluded,
+                    num_filter_pairs=self.shape_pairs_excluded_count,
                 )
             elif isinstance(self.broad_phase, BroadPhaseSAP):
                 self.broad_phase.launch(
@@ -561,6 +609,8 @@ class CollisionPipeline:
                     self.broad_phase_shape_pairs,
                     self.broad_phase_pair_count,
                     device=self.device,
+                    filter_pairs=self.shape_pairs_excluded,
+                    num_filter_pairs=self.shape_pairs_excluded_count,
                 )
             else:  # BroadPhaseExplicit
                 self.broad_phase.launch(
