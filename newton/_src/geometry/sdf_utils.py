@@ -325,7 +325,7 @@ def compute_sdf(
 
     offset = margin + shape_thickness
 
-    if shape_type == GeoType.MESH:
+    if shape_type in (GeoType.MESH, GeoType.CONVEX_MESH):
         verts = mesh_src.vertices * np.array(effective_scale)[None, :]
         pos = wp.array(verts, dtype=wp.vec3)
         indices = wp.array(mesh_src.indices, dtype=wp.int32)
@@ -390,7 +390,7 @@ def compute_sdf(
     tile_radius = np.linalg.norm(4 * actual_voxel_size)
     threshold = wp.vec2f(narrow_band_distance[0] - tile_radius, narrow_band_distance[1] + tile_radius)
 
-    if shape_type == GeoType.MESH:
+    if shape_type in (GeoType.MESH, GeoType.CONVEX_MESH):
         wp.launch(
             check_tile_occupied_mesh_kernel,
             dim=(len(tile_points)),
@@ -409,6 +409,9 @@ def compute_sdf(
         print("Occupancy: ", tile_occupied.numpy().sum() / len(tile_points))
 
     tile_points = tile_points[tile_occupied.numpy()]
+    if len(tile_points) == 0:
+        # Ensure at least one tile to avoid invalid allocations
+        tile_points = np.array([[0, 0, 0]], dtype=np.int32)
     tile_points_wp = wp.array(tile_points, dtype=wp.vec3i)
 
     sparse_volume = wp.Volume.allocate_by_tiles(
@@ -421,7 +424,7 @@ def compute_sdf(
     # populate the sparse volume with the sdf values
     # Only process allocated tiles (num_tiles x 8x8x8)
     num_allocated_tiles = len(tile_points)
-    if shape_type == GeoType.MESH:
+    if shape_type in (GeoType.MESH, GeoType.CONVEX_MESH):
         wp.launch(
             sdf_from_mesh_kernel,
             dim=(num_allocated_tiles, 8, 8, 8),
@@ -451,7 +454,7 @@ def compute_sdf(
     )
 
     # Populate the coarse volume with SDF values (single tile)
-    if shape_type == GeoType.MESH:
+    if shape_type in (GeoType.MESH, GeoType.CONVEX_MESH):
         wp.launch(
             sdf_from_mesh_kernel,
             dim=(1, 8, 8, 8),
