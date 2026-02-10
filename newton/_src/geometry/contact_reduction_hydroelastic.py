@@ -141,8 +141,8 @@ def _flush_claimed_slots_hydro(
     sweep = int(0)
     while remaining > 0:
         sweep += 1
-        if sweep > 32:
-            break
+        if sweep > 1024:
+            break  # This should never happen but let's keep it to be 100% sure that we don't have a deadlock
         for i in range(wp.static(MAX_CLAIMS_PER_CONTACT)):
             if i >= num_claims:
                 break
@@ -171,6 +171,24 @@ def _flush_claimed_slots_hydro(
 
             claim_idxs[i] = -1
             remaining -= 1
+
+    # Safety cleanup: never leave unresolved claimed winners pointing to
+    # potentially stale slot payload. If we failed to flush a claimed slot
+    # within the bounded sweeps, atomically clear the exact claimed value.
+    #
+    # This trades occasional contact drops under heavy contention for
+    # deterministic correctness (no stale slot reads during export).
+    if remaining > 0:
+        for i in range(wp.static(MAX_CLAIMS_PER_CONTACT)):
+            if i >= num_claims:
+                break
+            value_idx = claim_idxs[i]
+            if value_idx < 0:
+                continue
+
+            value = (wp.uint64(wp.uint32(claim_his[i])) << wp.uint64(32)) | wp.uint64(wp.uint32(value_idx))
+            wp.atomic_cas(reducer_data.ht_values, value_idx, value, wp.uint64(0))
+            claim_idxs[i] = -1
 
 
 @wp.func

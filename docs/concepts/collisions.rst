@@ -903,8 +903,8 @@ All kernels are bounds-safe -- if a buffer overflows, excess contacts are silent
 
 Recommended values:
 
-- **0.2** (default): Good balance for most scenes; headroom for dense contacts.
-- **1.0**: Full worst-case allocation if you still see overflow warnings at 0.2.
+- **1.0** (default): Full worst-case allocation.
+- **0.2**: Good balance for most scenes; headroom for dense contacts.
 - **0.1**: Denser scenarios when 0.2 uses too much memory; less headroom.
 - **0.05**: Aggressive; minimal headroom, for memory-bound sparse-contact workloads (e.g. RL). May overflow on denser frames.
 

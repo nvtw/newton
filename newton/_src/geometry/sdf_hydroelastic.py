@@ -107,14 +107,14 @@ class SDFHydroelasticConfig:
     reduce_contacts: bool = True
     """Whether to reduce contacts to a smaller representative set per shape pair.
     When False, all generated contacts are passed through without reduction."""
-    buffer_fraction: float = 0.5
+    buffer_fraction: float = 1.0
     """Fraction of worst-case buffer sizes to allocate. Range (0, 1].
 
     The hydroelastic pipeline pre-allocates buffers for octree traversal,
     contact generation, and contact reduction. Worst case assumes every SDF
     tile and every shape-pair block could be active at once; in practice only
     a small fraction are (broad phase and refinement cull most work). By
-    default buffers are sized at 50% of that worst case.
+    default buffers are sized at full worst-case allocation.
 
     Lower values reduce GPU memory at the cost of possible overflow: kernels
     are bounds-safe (overflow drops contacts, no crashes), and a one-time
@@ -123,9 +123,9 @@ class SDFHydroelasticConfig:
 
     Tuning guidance:
 
-    - **0.5** (default): Safe for dense contact scenes (stacking, grasping)
+    - **1.0** (default): Full worst-case allocation.
+    - **0.5**: Safe for dense contact scenes (stacking, grasping)
       with ~2x memory savings over full allocation.
-    - **1.0**: Full worst-case allocation; use if 0.5 still overflows.
     - **0.2**: Moderate scenes with lighter contact density; ~5x savings.
     - **0.05**: Aggressive; minimal headroom. Use only when memory-bound and
       contacts are known to be sparse (e.g. sparse RL). May overflow on
