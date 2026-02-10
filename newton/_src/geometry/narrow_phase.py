@@ -57,7 +57,7 @@ from ..geometry.contact_reduction_global import (
 )
 from ..geometry.flags import ShapeFlags
 from ..geometry.sdf_contact import create_narrow_phase_process_mesh_mesh_contacts_kernel
-from ..geometry.sdf_hydroelastic import HydroelasticSDF
+from ..geometry.sdf_hydroelastic import HydroelasticSDF as _HydroelasticSDF
 from ..geometry.sdf_utils import SDFData
 from ..geometry.support_function import (
     SupportMapDataProvider,
@@ -1097,6 +1097,10 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
 
 
 class NarrowPhase:
+    # Public nested alias for hydroelastic SDF support to keep the API discoverable
+    # from the narrow-phase entry point.
+    HydroelasticSDF = _HydroelasticSDF
+
     def __init__(
         self,
         *,
@@ -1106,8 +1110,9 @@ class NarrowPhase:
         device=None,
         shape_aabb_lower: wp.array(dtype=wp.vec3) | None = None,
         shape_aabb_upper: wp.array(dtype=wp.vec3) | None = None,
+        shape_voxel_resolution: wp.array(dtype=wp.vec3i) | None = None,
         contact_writer_warp_func: Any | None = None,
-        sdf_hydroelastic: HydroelasticSDF | None = None,
+        hydroelastic_sdf: _HydroelasticSDF | None = None,
         has_meshes: bool = True,
     ):
         """
@@ -1122,8 +1127,10 @@ class NarrowPhase:
             device: Device to allocate buffers on
             shape_aabb_lower: Optional external AABB lower bounds array (if provided, AABBs won't be computed internally)
             shape_aabb_upper: Optional external AABB upper bounds array (if provided, AABBs won't be computed internally)
+            shape_voxel_resolution: Optional per-shape voxel resolution array used for mesh/SDF and
+                hydroelastic contact processing.
             contact_writer_warp_func: Optional custom contact writer function (first arg: ContactData, second arg: custom struct type)
-            sdf_hydroelastic: Optional SDF hydroelastic instance. Set is_hydroelastic=True on shapes to enable hydroelastic collisions.
+            hydroelastic_sdf: Optional SDF hydroelastic instance. Set is_hydroelastic=True on shapes to enable hydroelastic collisions.
             has_meshes: Whether the scene contains any mesh shapes (GeoType.MESH). When False, mesh-related
                 kernel launches are skipped, improving performance for scenes with only primitive shapes.
                 Defaults to True for safety. Set to False when constructing from a model with no meshes.
@@ -1166,6 +1173,7 @@ class NarrowPhase:
             with wp.ScopedDevice(device):
                 self.shape_aabb_lower = wp.zeros(0, dtype=wp.vec3, device=device)
                 self.shape_aabb_upper = wp.zeros(0, dtype=wp.vec3, device=device)
+        self.shape_voxel_resolution = shape_voxel_resolution
 
         # Determine the writer function
         if contact_writer_warp_func is None:
@@ -1218,7 +1226,7 @@ class NarrowPhase:
             self.export_reduced_contacts_kernel = None
             self.global_contact_reducer = None
 
-        self.sdf_hydroelastic = sdf_hydroelastic
+        self.hydroelastic_sdf = hydroelastic_sdf
 
         # Pre-allocate all intermediate buffers
         with wp.ScopedDevice(device):
@@ -1267,8 +1275,8 @@ class NarrowPhase:
             # None values for when optional features are disabled
             self.empty_tangent = None
 
-            if sdf_hydroelastic is not None:
-                self.shape_pairs_sdf_sdf = wp.zeros(sdf_hydroelastic.max_num_shape_pairs, dtype=wp.vec2i, device=device)
+            if hydroelastic_sdf is not None:
+                self.shape_pairs_sdf_sdf = wp.zeros(hydroelastic_sdf.max_num_shape_pairs, dtype=wp.vec2i, device=device)
             else:
                 # Empty arrays for when hydroelastic is disabled
                 self.shape_pairs_sdf_sdf = None
@@ -1567,8 +1575,8 @@ class NarrowPhase:
                     block_dim=self.tile_size_mesh_mesh,
                 )
 
-        if self.sdf_hydroelastic is not None:
-            self.sdf_hydroelastic.launch(
+        if self.hydroelastic_sdf is not None:
+            self.hydroelastic_sdf.launch(
                 shape_sdf_data,
                 shape_transform,
                 shape_contact_margin,

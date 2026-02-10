@@ -28,7 +28,6 @@ from ..geometry.collision_core import compute_tight_aabb_from_support
 from ..geometry.contact_data import ContactData
 from ..geometry.kernels import create_soft_contacts
 from ..geometry.narrow_phase import NarrowPhase
-from ..geometry.sdf_hydroelastic import HydroelasticSDF
 from ..geometry.support_function import (
     GenericShapeData,
     SupportMapDataProvider,
@@ -350,7 +349,7 @@ class CollisionPipeline:
         """
         self.broad_phase = broad_phase
         self.narrow_phase = narrow_phase
-        self.sdf_hydroelastic = narrow_phase.sdf_hydroelastic
+        self.hydroelastic_sdf = narrow_phase.hydroelastic_sdf
         self.device = device if device is not None else narrow_phase.device
         self.edge_sdf_iter = edge_sdf_iter
         self.requires_grad = requires_grad
@@ -396,7 +395,7 @@ class CollisionPipeline:
         requires_grad: bool | None = None,
         shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
         sap_sort_type: SAPSortType | None = None,
-        sdf_hydroelastic_config: HydroelasticSDF.Config | None = None,
+        sdf_hydroelastic_config: NarrowPhase.HydroelasticSDF.Config | None = None,
     ) -> CollisionPipeline:
         """
         Create a CollisionPipeline instance from a Model.
@@ -474,7 +473,11 @@ class CollisionPipeline:
                 )
 
         # Initialize SDF hydroelastic (returns None if no hydroelastic shape pairs)
-        sdf_hydroelastic = HydroelasticSDF._from_model(model, config=sdf_hydroelastic_config, writer_func=write_contact)
+        hydroelastic_sdf = NarrowPhase.HydroelasticSDF._from_model(
+            model,
+            config=sdf_hydroelastic_config,
+            writer_func=write_contact,
+        )
 
         # Detect if any mesh shapes are present to optimize kernel launches
         has_meshes = False
@@ -493,7 +496,8 @@ class CollisionPipeline:
             shape_aabb_lower=shape_aabb_lower,
             shape_aabb_upper=shape_aabb_upper,
             contact_writer_warp_func=write_contact,
-            sdf_hydroelastic=sdf_hydroelastic,
+            shape_voxel_resolution=model._shape_voxel_resolution,
+            hydroelastic_sdf=hydroelastic_sdf,
             has_meshes=has_meshes,
         )
 
@@ -530,7 +534,7 @@ class CollisionPipeline:
                 self.soft_contact_max,
                 requires_grad=self.requires_grad,
                 device=self.device,
-                per_contact_shape_properties=self.narrow_phase.sdf_hydroelastic is not None,
+                per_contact_shape_properties=self.narrow_phase.hydroelastic_sdf is not None,
                 requested_attributes=model.get_requested_contact_attributes(),
             )
         else:
@@ -661,7 +665,7 @@ class CollisionPipeline:
                 shape_flags=model.shape_flags,
                 shape_collision_aabb_lower=model.shape_collision_aabb_lower,
                 shape_collision_aabb_upper=model.shape_collision_aabb_upper,
-                shape_voxel_resolution=model.shape_voxel_resolution,
+                shape_voxel_resolution=self.narrow_phase.shape_voxel_resolution,
                 writer_data=writer_data,
                 device=self.device,
             )
@@ -707,10 +711,10 @@ class CollisionPipeline:
         """Get hydroelastic contact surface data for visualization, if available.
 
         Returns:
-            HydroelasticContactSurfaceData if sdf_hydroelastic is configured, None otherwise.
+            HydroelasticContactSurfaceData if hydroelastic_sdf is configured, None otherwise.
         """
-        if self.sdf_hydroelastic is not None:
-            return self.sdf_hydroelastic.get_hydro_contact_surface()
+        if self.hydroelastic_sdf is not None:
+            return self.hydroelastic_sdf.get_hydro_contact_surface()
         return None
 
     def set_output_contact_surface(self, enabled: bool) -> None:
@@ -724,5 +728,5 @@ class CollisionPipeline:
             enabled: If True, visualization is enabled (viewer will display the data).
                      If False, visualization is disabled (viewer will hide the data).
         """
-        if self.sdf_hydroelastic is not None:
-            self.sdf_hydroelastic.set_output_contact_surface(enabled)
+        if self.hydroelastic_sdf is not None:
+            self.hydroelastic_sdf.set_output_contact_surface(enabled)
