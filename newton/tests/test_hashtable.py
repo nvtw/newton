@@ -20,9 +20,28 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.geometry.contact_reduction_global import reduction_insert_slot
-from newton._src.geometry.hashtable import HashTable
+from newton._src.geometry.hashtable import HashTable, hashtable_find_or_insert
 from newton.tests.unittest_utils import add_function_test, get_test_devices
+
+
+@wp.func
+def _insert_slot(
+    key: wp.uint64,
+    slot_id: int,
+    value: wp.uint64,
+    keys: wp.array(dtype=wp.uint64),
+    values: wp.array(dtype=wp.uint64),
+    active_slots: wp.array(dtype=wp.int32),
+) -> bool:
+    """Test helper: find-or-insert a key, then atomic-max a value into a slot."""
+    capacity = keys.shape[0]
+    entry_idx = hashtable_find_or_insert(key, keys, active_slots)
+    if entry_idx < 0:
+        return False
+    value_idx = slot_id * capacity + entry_idx
+    if values[value_idx] < value:
+        wp.atomic_max(values, value_idx, value)
+    return True
 
 # =============================================================================
 # Test class
@@ -72,11 +91,11 @@ def test_insert_single_slot(test, device):
         active_slots: wp.array(dtype=wp.int32),
     ):
         # Insert into slot 0
-        reduction_insert_slot(wp.uint64(123), 0, wp.uint64(100), keys, values, active_slots)
+        _insert_slot(wp.uint64(123), 0, wp.uint64(100), keys, values, active_slots)
         # Insert into slot 5
-        reduction_insert_slot(wp.uint64(123), 5, wp.uint64(200), keys, values, active_slots)
+        _insert_slot(wp.uint64(123), 5, wp.uint64(200), keys, values, active_slots)
         # Insert into slot 12
-        reduction_insert_slot(wp.uint64(123), 12, wp.uint64(300), keys, values, active_slots)
+        _insert_slot(wp.uint64(123), 12, wp.uint64(300), keys, values, active_slots)
 
     ht = HashTable(capacity=64, device=device)
     # Allocate values array externally (caller-managed)
@@ -117,7 +136,7 @@ def test_atomic_max_behavior(test, device):
         tid = wp.tid()
         # All threads try to write to same key and slot
         # Values are 1, 2, 3, ..., 100
-        reduction_insert_slot(wp.uint64(999), 0, wp.uint64(tid + 1), keys, values, active_slots)
+        _insert_slot(wp.uint64(999), 0, wp.uint64(tid + 1), keys, values, active_slots)
 
     ht = HashTable(capacity=64, device=device)
     values = wp.zeros(ht.capacity * values_per_key, dtype=wp.uint64, device=device)
@@ -155,7 +174,7 @@ def test_multiple_keys(test, device):
         tid = wp.tid()
         key = wp.uint64(tid + 1)  # Keys 1, 2, 3, ...
         value = wp.uint64((tid + 1) * 10)  # Values 10, 20, 30, ...
-        reduction_insert_slot(key, 0, value, keys, values, active_slots)
+        _insert_slot(key, 0, value, keys, values, active_slots)
 
     ht = HashTable(capacity=256, device=device)
     values = wp.zeros(ht.capacity * values_per_key, dtype=wp.uint64, device=device)
@@ -189,7 +208,7 @@ def test_clear(test, device):
         active_slots: wp.array(dtype=wp.int32),
     ):
         tid = wp.tid()
-        reduction_insert_slot(wp.uint64(tid + 1), 0, wp.uint64(tid * 10), keys, values, active_slots)
+        _insert_slot(wp.uint64(tid + 1), 0, wp.uint64(tid * 10), keys, values, active_slots)
 
     ht = HashTable(capacity=64, device=device)
     values = wp.zeros(ht.capacity * values_per_key, dtype=wp.uint64, device=device)
@@ -230,7 +249,7 @@ def test_clear_active(test, device):
         active_slots: wp.array(dtype=wp.int32),
     ):
         tid = wp.tid()
-        reduction_insert_slot(wp.uint64(tid + 1), 0, wp.uint64(tid * 10), keys, values, active_slots)
+        _insert_slot(wp.uint64(tid + 1), 0, wp.uint64(tid * 10), keys, values, active_slots)
 
     ht = HashTable(capacity=256, device=device)
     values = wp.zeros(ht.capacity * values_per_key, dtype=wp.uint64, device=device)
@@ -279,7 +298,7 @@ def test_high_collision(test, device):
         key = wp.uint64(tid % 10)
         slot = tid % 13
         value = wp.uint64(tid)
-        reduction_insert_slot(key, slot, value, keys, values, active_slots)
+        _insert_slot(key, slot, value, keys, values, active_slots)
 
     ht = HashTable(capacity=64, device=device)
     values = wp.zeros(ht.capacity * values_per_key, dtype=wp.uint64, device=device)
@@ -319,7 +338,7 @@ def test_early_exit_optimization(test, device):
         tid = wp.tid()
         # Insert values in descending order: 999, 998, 997, ...
         value = wp.uint64(999 - tid)
-        reduction_insert_slot(wp.uint64(1), 0, value, keys, values, active_slots)
+        _insert_slot(wp.uint64(1), 0, value, keys, values, active_slots)
 
     ht = HashTable(capacity=64, device=device)
     values = wp.zeros(ht.capacity * values_per_key, dtype=wp.uint64, device=device)

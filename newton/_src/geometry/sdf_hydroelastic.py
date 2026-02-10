@@ -56,7 +56,6 @@ from .contact_reduction_global import GlobalContactReducerData
 from .contact_reduction_hydroelastic import (
     HydroelasticContactReduction,
     HydroelasticReductionConfig,
-    export_hydroelastic_contact_to_buffer,
     register_hydroelastic_contact_inline,
 )
 from .sdf_contact import sample_sdf_extrapolated
@@ -1158,17 +1157,6 @@ def get_generate_contacts_kernel(
                         contact_data.margin = margin
                         contact_data.contact_stiffness = c_stiffness
                         writer_func(contact_data, writer_data, output_index)
-                else:
-                    contact_id = export_hydroelastic_contact_to_buffer(
-                        shape_a,
-                        shape_b,
-                        face_center,
-                        normal,
-                        pen_depth,
-                        area,
-                        k_eff,
-                        reducer_data,
-                    )
 
                 if wp.static(output_vertices) and contact_id >= 0 and contact_id < max_num_face_contacts:
                     for vi in range(3):

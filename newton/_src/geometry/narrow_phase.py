@@ -52,8 +52,7 @@ from ..geometry.contact_reduction import (
 from ..geometry.contact_reduction_global import (
     GlobalContactReducer,
     create_export_reduced_contacts_kernel,
-    mesh_triangle_contacts_to_reducer_kernel,
-    reduce_buffered_contacts_kernel,
+    mesh_triangle_contacts_to_reducer_inline_kernel,
 )
 from ..geometry.flags import ShapeFlags
 from ..geometry.sdf_contact import create_narrow_phase_process_mesh_mesh_contacts_kernel
@@ -1211,9 +1210,15 @@ class NarrowPhase:
             # Global contact reducer uses hardcoded BETA_THRESHOLD (0.1mm) same as shared-memory reduction
             # Slot layout: 6 spatial direction slots + 1 max-depth slot = 7 slots per key (VALUES_PER_KEY)
             self.export_reduced_contacts_kernel = create_export_reduced_contacts_kernel(writer_func)
-            # Global contact reducer for mesh-triangle contacts
-            # Capacity is based on max_triangle_pairs since that's the max contacts we might generate
-            self.global_contact_reducer = GlobalContactReducer(max_triangle_pairs, device=device)
+            # Use inline reduction: hashtable sized by shape pairs (35 bins per pair),
+            # slot-major storage eliminates the large sequential contact buffer.
+            ht_size = max(max_candidate_pairs * 35, 1024)
+            self.global_contact_reducer = GlobalContactReducer(
+                capacity=0,
+                device=device,
+                use_inline_reduction=True,
+                hashtable_size=ht_size,
+            )
         else:
             self.export_reduced_contacts_kernel = None
             self.global_contact_reducer = None
@@ -1462,13 +1467,19 @@ class NarrowPhase:
             if self.reduce_contacts:
                 assert self.global_contact_reducer is not None
                 # Use global contact reduction for mesh-triangle contacts
-                # First, clear the reducer
+                # Clear the reducer and populate per-shape arrays for inline voxel indexing
                 self.global_contact_reducer.clear_active()
+                self.global_contact_reducer.set_shape_arrays(
+                    shape_transform,
+                    shape_local_aabb_lower,
+                    shape_local_aabb_upper,
+                    shape_voxel_resolution,
+                )
 
-                # Collect contacts into the reducer
+                # Inline reduction: generate contacts and register in hashtable in one pass
                 reducer_data = self.global_contact_reducer.get_data_struct()
                 wp.launch(
-                    kernel=mesh_triangle_contacts_to_reducer_kernel,
+                    kernel=mesh_triangle_contacts_to_reducer_inline_kernel,
                     dim=self.total_num_threads,
                     inputs=[
                         shape_types,
@@ -1479,23 +1490,6 @@ class NarrowPhase:
                         self.triangle_pairs,
                         self.triangle_pairs_count,
                         reducer_data,
-                        self.total_num_threads,
-                    ],
-                    device=device,
-                    block_dim=self.block_dim,
-                )
-
-                # Register buffered contacts to hashtable (uses hardcoded BETA_THRESHOLD)
-                # This is a separate pass to reduce register pressure on the contact generation kernel
-                wp.launch(
-                    kernel=reduce_buffered_contacts_kernel,
-                    dim=self.total_num_threads,
-                    inputs=[
-                        reducer_data,
-                        shape_transform,
-                        shape_local_aabb_lower,
-                        shape_local_aabb_upper,
-                        shape_voxel_resolution,
                         self.total_num_threads,
                     ],
                     device=device,

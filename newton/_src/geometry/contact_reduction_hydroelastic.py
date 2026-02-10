@@ -65,11 +65,9 @@ from .contact_reduction_global import (
     GlobalContactReducer,
     GlobalContactReducerData,
     _threadfence,
-    export_contact_to_buffer,
     is_contact_already_exported,
     make_contact_key,
     make_contact_value,
-    reduction_update_slot,
     unpack_contact,
     unpack_contact_id,
 )
@@ -85,46 +83,6 @@ EPS_SMALL = 1e-20
 # =============================================================================
 # Hydroelastic contact buffer function
 # =============================================================================
-
-
-@wp.func
-def export_hydroelastic_contact_to_buffer(
-    shape_a: int,
-    shape_b: int,
-    position: wp.vec3,
-    normal: wp.vec3,
-    depth: float,
-    area: float,
-    k_eff: float,
-    reducer_data: GlobalContactReducerData,
-) -> int:
-    """Store a hydroelastic contact in the buffer with area and stiffness.
-
-    Extends :func:`export_contact_to_buffer` by storing additional hydroelastic
-    data (area and effective stiffness).
-
-    Args:
-        shape_a: First shape index
-        shape_b: Second shape index
-        position: Contact position in world space
-        normal: Contact normal
-        depth: Penetration depth (negative = penetrating, standard convention)
-        area: Contact surface area
-        k_eff: Effective stiffness coefficient k_a*k_b/(k_a+k_b)
-        reducer_data: GlobalContactReducerData with all arrays
-
-    Returns:
-        Contact ID if successfully stored, -1 if buffer full
-    """
-    # Use base function to store common contact data
-    contact_id = export_contact_to_buffer(shape_a, shape_b, position, normal, depth, reducer_data)
-
-    if contact_id >= 0:
-        # Store hydroelastic-specific data
-        reducer_data.contact_area[contact_id] = area
-        reducer_data.contact_k_eff[contact_id] = k_eff
-
-    return contact_id
 
 
 # =============================================================================
@@ -319,117 +277,6 @@ def register_hydroelastic_contact_inline(
 # =============================================================================
 # Hydroelastic reduction kernels
 # =============================================================================
-
-
-@wp.kernel(enable_backward=False)
-def reduce_hydroelastic_contacts_kernel(
-    reducer_data: GlobalContactReducerData,
-    shape_transform: wp.array(dtype=wp.transform),
-    shape_local_aabb_lower: wp.array(dtype=wp.vec3),
-    shape_local_aabb_upper: wp.array(dtype=wp.vec3),
-    shape_voxel_resolution: wp.array(dtype=wp.vec3i),
-    total_num_threads: int,
-):
-    """Register hydroelastic contacts in the hashtable for reduction.
-
-    Uses the fixed BETA_THRESHOLD for spatial competition.
-    Uses pre-computed shape local AABBs and voxel resolution for voxel indices
-    (matching the global contact reducer pattern).
-
-    Also accumulates aggregate force per (shape_pair, normal_bin) for stiffness calculation:
-    agg_force = sum(area * |depth| * normal) for all penetrating contacts.
-
-    Uses standard sign convention: negative depth = penetrating (same as global reducer).
-    - Spatial competition: includes contacts with depth < BETA_THRESHOLD
-    - Max-depth/voxel slots: uses -depth so atomic_max selects most penetrating (most negative)
-    """
-    tid = wp.tid()
-
-    # Get total number of contacts written
-    num_contacts = reducer_data.contact_count[0]
-
-    # Early exit if no contacts
-    if num_contacts == 0:
-        return
-
-    # Cap at capacity
-    num_contacts = wp.min(num_contacts, reducer_data.capacity)
-
-    # Grid stride loop over contacts
-    for i in range(tid, num_contacts, total_num_threads):
-        # Read contact data from buffer
-        pd = reducer_data.position_depth[i]
-        normal = reducer_data.normal[i]
-        pair = reducer_data.shape_pairs[i]
-        area = reducer_data.contact_area[i]
-
-        position = wp.vec3(pd[0], pd[1], pd[2])
-        depth = pd[3]
-        shape_a = pair[0]  # First shape
-        shape_b = pair[1]  # Second shape
-
-        aabb_lower = shape_local_aabb_lower[shape_b]
-        aabb_upper = shape_local_aabb_upper[shape_b]
-
-        ht_capacity = reducer_data.ht_capacity
-
-        # === Part 1: Normal-binned reduction (spatial extremes + max-depth per bin) ===
-        bin_id = get_slot(normal)
-        pos_2d = project_point_to_plane(bin_id, position)
-
-        key = make_contact_key(shape_a, shape_b, bin_id)
-
-        entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
-        if entry_idx >= 0:
-            # Standard convention: depth < 0 means penetrating
-            # Include all penetrating contacts and near-surface contacts in spatial competition
-            use_beta = depth < wp.static(BETA_THRESHOLD) * wp.length(aabb_upper - aabb_lower)
-            for dir_i in range(NUM_SPATIAL_DIRECTIONS):
-                if use_beta:
-                    dir_2d = get_spatial_direction_2d(dir_i)
-                    score = wp.dot(pos_2d, dir_2d)
-                    value = make_contact_value(score, i)
-                    slot_id = dir_i
-                    reduction_update_slot(entry_idx, slot_id, value, reducer_data.ht_values, ht_capacity)
-
-            # Max-depth slot (last slot = 6)
-            # Use -depth so atomic_max selects most penetrating (most negative depth)
-            max_depth_slot_id = NUM_SPATIAL_DIRECTIONS
-            max_depth_value = make_contact_value(-depth, i)
-            reduction_update_slot(entry_idx, max_depth_slot_id, max_depth_value, reducer_data.ht_values, ht_capacity)
-
-            # Accumulate aggregates for penetrating contacts (depth < 0)
-            # These are used for stiffness calculation and anchor contact
-            # Use |depth| (negate since depth is negative) for weighting
-            if depth < 0.0:
-                force_weight = area * (-depth)  # -depth to get positive weight
-                # agg_force = sum(area * |depth| * normal) - for stiffness calculation
-                wp.atomic_add(reducer_data.agg_force, entry_idx, force_weight * normal)
-                # weighted_pos_sum = sum(area * |depth| * position) - for anchor position
-                wp.atomic_add(reducer_data.weighted_pos_sum, entry_idx, force_weight * position)
-                # weight_sum = sum(area * |depth|) - for normalizing anchor position
-                wp.atomic_add(reducer_data.weight_sum, entry_idx, force_weight)
-
-        # === Part 2: Voxel-based reduction using shape_b's (SDF) local space ===
-        # Hydroelastic contacts are in SDF local space (shape_b's frame)
-        # Use shape_b's local AABB for voxel computation (contact surface lives here)
-        voxel_res = shape_voxel_resolution[shape_b]
-        voxel_idx = compute_voxel_index(position, aabb_lower, aabb_upper, voxel_res)
-        voxel_idx = wp.clamp(voxel_idx, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1))
-
-        # Group voxels by 7 to maximize slot utilization (matches values_per_key)
-        voxels_per_group = wp.static(NUM_SPATIAL_DIRECTIONS + 1)  # = 7
-        voxel_group = voxel_idx // voxels_per_group
-        voxel_local_slot = voxel_idx % voxels_per_group
-
-        voxel_bin_id = NUM_NORMAL_BINS + voxel_group
-        voxel_key = make_contact_key(shape_a, shape_b, voxel_bin_id)
-
-        voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
-        if voxel_entry_idx >= 0:
-            # Use -depth so atomic_max selects most penetrating (most negative depth)
-            voxel_value = make_contact_value(-depth, i)
-            reduction_update_slot(voxel_entry_idx, voxel_local_slot, voxel_value, reducer_data.ht_values, ht_capacity)
 
 
 # =============================================================================
@@ -724,19 +571,20 @@ class HydroelasticContactReduction:
     This class encapsulates the hydroelastic contact reduction pipeline, providing
     a clean interface that hides the low-level kernel launch details. It manages:
 
-    1. A ``GlobalContactReducer`` for contact storage and hashtable tracking
-    2. The reduction kernels for hashtable registration
-    3. The export kernel for writing reduced contacts
+    1. A ``GlobalContactReducer`` for slot-major contact storage and hashtable tracking
+    2. The export kernel for writing reduced contacts
+
+    Reduction is performed inline in the generation kernel via
+    ``register_hydroelastic_contact_inline``.
 
     **Usage Pattern:**
 
     The typical usage in a contact generation pipeline is:
 
     1. Call ``clear()`` at the start of each frame
-    2. Write contacts to the buffer using ``export_hydroelastic_contact_to_buffer``
-       in your contact generation kernel (use ``get_data_struct()`` to get the data)
-    3. Call ``reduce()`` to register contacts in the hashtable
-    4. Call ``export()`` to write reduced contacts using the writer function
+    2. Launch the contact generation kernel using
+       ``register_hydroelastic_contact_inline`` to perform inline reduction
+    3. Call ``export()`` to write reduced contacts using the writer function
 
     Example:
 
@@ -749,15 +597,15 @@ class HydroelasticContactReduction:
                 device="cuda:0",
                 writer_func=my_writer_func,
                 config=config,
+                use_inline_reduction=True,
             )
 
             # Each frame
             reduction.clear()
 
             # Launch your contact generation kernel that uses:
-            # export_hydroelastic_contact_to_buffer(..., reduction.get_data_struct())
+            # register_hydroelastic_contact_inline(..., reduction.get_data_struct())
 
-            reduction.reduce(shape_transform, shape_sdf_data, grid_size)
             reduction.export(shape_contact_margin, shape_transform, writer_data, grid_size)
 
     Attributes:
@@ -766,8 +614,8 @@ class HydroelasticContactReduction:
         contact_count: Array containing the number of contacts in the buffer.
 
     See Also:
-        :func:`export_hydroelastic_contact_to_buffer`: Warp function for writing
-            contacts to the buffer from custom kernels.
+        :func:`register_hydroelastic_contact_inline`: Warp function for inline
+            contact registration from generation kernels.
         :class:`GlobalContactReducerData`: Struct for passing reducer data to kernels.
     """
 
@@ -851,45 +699,6 @@ class HydroelasticContactReduction:
         """
         self.reducer.clear_active()
 
-    def reduce(
-        self,
-        shape_transform: wp.array,
-        shape_local_aabb_lower: wp.array,
-        shape_local_aabb_upper: wp.array,
-        shape_voxel_resolution: wp.array,
-        grid_size: int,
-    ):
-        """Register buffered contacts in the hashtable for reduction.
-
-        This launches the reduction kernel that processes all contacts in the
-        buffer and registers them in the hashtable based on spatial extremes,
-        max-depth per normal bin, and voxel-based slots.
-
-        Also accumulates aggregate force per (shape_pair, normal_bin) for
-        stiffness calculation.
-
-        Args:
-            shape_transform: Per-shape world transforms (dtype: wp.transform).
-            shape_local_aabb_lower: Per-shape local AABB lower bounds (dtype: wp.vec3).
-            shape_local_aabb_upper: Per-shape local AABB upper bounds (dtype: wp.vec3).
-            shape_voxel_resolution: Per-shape voxel grid resolution (dtype: wp.vec3i).
-            grid_size: Number of threads for the kernel launch.
-        """
-        reducer_data = self.reducer.get_data_struct()
-        wp.launch(
-            kernel=reduce_hydroelastic_contacts_kernel,
-            dim=[grid_size],
-            inputs=[
-                reducer_data,
-                shape_transform,
-                shape_local_aabb_lower,
-                shape_local_aabb_upper,
-                shape_voxel_resolution,
-                grid_size,
-            ],
-            device=self.device,
-        )
-
     def export(
         self,
         shape_contact_margin: wp.array,
@@ -941,9 +750,10 @@ class HydroelasticContactReduction:
         writer_data: Any,
         grid_size: int,
     ):
-        """Convenience method to reduce and export in one call.
+        """Export reduced contacts.
 
-        Combines ``reduce()`` and ``export()`` into a single method call.
+        Reduction is performed inline in the generation kernel, so this
+        method only runs the export pass.
 
         Args:
             shape_transform: Per-shape world transforms (dtype: wp.transform).
@@ -954,13 +764,4 @@ class HydroelasticContactReduction:
             writer_data: Data struct for the writer function.
             grid_size: Number of threads for the kernel launch.
         """
-        # In inline mode reduction was done in the generation kernel; skip separate reduce pass.
-        if not self.reducer.use_inline_reduction:
-            self.reduce(
-                shape_transform,
-                shape_local_aabb_lower,
-                shape_local_aabb_upper,
-                shape_voxel_resolution,
-                grid_size,
-            )
         self.export(shape_contact_margin, shape_transform, writer_data, grid_size)
