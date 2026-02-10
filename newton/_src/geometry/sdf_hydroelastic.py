@@ -57,6 +57,7 @@ from .contact_reduction_hydroelastic import (
     HydroelasticContactReduction,
     HydroelasticReductionConfig,
     export_hydroelastic_contact_to_buffer,
+    register_hydroelastic_contact_inline,
 )
 from .sdf_contact import sample_sdf_extrapolated
 from .sdf_mc import get_mc_tables, mc_calc_face
@@ -107,27 +108,26 @@ class SDFHydroelasticConfig:
     reduce_contacts: bool = True
     """Whether to reduce contacts to a smaller representative set per shape pair.
     When False, all generated contacts are passed through without reduction."""
-    buffer_fraction: float = 0.2
+    buffer_fraction: float = 0.5
     """Fraction of worst-case buffer sizes to allocate. Range (0, 1].
 
     The hydroelastic pipeline pre-allocates buffers for octree traversal,
     contact generation, and contact reduction. Worst case assumes every SDF
     tile and every shape-pair block could be active at once; in practice only
     a small fraction are (broad phase and refinement cull most work). By
-    default buffers are sized at 20% of that worst case.
+    default buffers are sized at 50% of that worst case.
 
     Lower values reduce GPU memory at the cost of possible overflow: kernels
-    are bounds-safe (overflow drops contacts, no crashes), and
-    ``verify_collision_step`` prints a warning. Increase if you see overflow
-    warnings.
+    are bounds-safe (overflow drops contacts, no crashes), and a one-time
+    warning is printed when overflow first occurs. Increase if you see
+    overflow warnings.
 
     Tuning guidance:
 
-    - **0.2** (default): Good balance for most scenes; leaves headroom for
-      dense contacts and temporal spikes.
-    - **1.0**: Full worst-case allocation; use if 0.2 still overflows.
-    - **0.1**: Denser scenarios (e.g. stacking, grasping) when 0.2 uses
-      too much memory; less headroom than default.
+    - **0.5** (default): Safe for dense contact scenes (stacking, grasping)
+      with ~2x memory savings over full allocation.
+    - **1.0**: Full worst-case allocation; use if 0.5 still overflows.
+    - **0.2**: Moderate scenes with lighter contact density; ~5x savings.
     - **0.05**: Aggressive; minimal headroom. Use only when memory-bound and
       contacts are known to be sparse (e.g. sparse RL). May overflow on
       denser frames.
@@ -299,11 +299,15 @@ class SDFHydroelastic:
                     moment_matching=self.config.moment_matching,
                     margin_contact_area=self.config.margin_contact_area,
                 )
+                # Inline reduction when reduce_contacts and not moment_matching; else legacy buffer.
+                use_inline = not reduction_config.moment_matching
                 self.contact_reduction = HydroelasticContactReduction(
                     capacity=self.max_num_face_contacts,
                     device=device,
                     writer_func=writer_func,
                     config=reduction_config,
+                    num_shape_pairs=self.max_num_shape_pairs,
+                    use_inline_reduction=use_inline,
                 )
                 self.decode_contacts_kernel = None
             else:
@@ -449,7 +453,14 @@ class SDFHydroelastic:
 
         self._find_iso_voxels(shape_sdf_data, shape_transform, shape_contact_margin)
 
-        self._generate_contacts(shape_sdf_data, shape_transform, shape_contact_margin)
+        self._generate_contacts(
+            shape_sdf_data,
+            shape_transform,
+            shape_contact_margin,
+            shape_local_aabb_lower,
+            shape_local_aabb_upper,
+            shape_voxel_resolution,
+        )
 
         if self.config.reduce_contacts:
             self._reduce_decode_contacts(
@@ -607,10 +618,13 @@ class SDFHydroelastic:
         shape_sdf_data: wp.array(dtype=SDFData),
         shape_transform: wp.array(dtype=wp.transform),
         shape_contact_margin: wp.array(dtype=wp.float32),
+        shape_local_aabb_lower: wp.array(dtype=wp.vec3),
+        shape_local_aabb_upper: wp.array(dtype=wp.vec3),
+        shape_voxel_resolution: wp.array(dtype=wp.vec3i),
     ) -> None:
-        """Generate marching cubes contacts and write directly to the contact buffer.
+        """Generate marching cubes contacts and write to reducer (inline or legacy buffer).
 
-        Single pass: compute cube state and immediately write faces to reducer buffer.
+        Single pass: compute cube state and immediately write faces to reducer.
         """
         self.contact_reduction.clear()
         reducer_data = self.contact_reduction.get_data_struct()
@@ -629,6 +643,9 @@ class SDFHydroelastic:
                 self.mc_tables[4],
                 self.mc_tables[3],
                 shape_contact_margin,
+                shape_local_aabb_lower,
+                shape_local_aabb_upper,
+                shape_voxel_resolution,
                 self.max_num_iso_voxels,
                 reducer_data,
             ],
@@ -1152,6 +1169,9 @@ def get_generate_contacts_kernel(output_vertices: bool):
         flat_edge_verts_table: wp.array(dtype=wp.vec2ub),
         corner_offsets_table: wp.array(dtype=wp.vec3ub),
         shape_contact_margin: wp.array(dtype=wp.float32),
+        shape_local_aabb_lower: wp.array(dtype=wp.vec3),
+        shape_local_aabb_upper: wp.array(dtype=wp.vec3),
+        shape_voxel_resolution: wp.array(dtype=wp.vec3i),
         max_num_iso_voxels: int,
         reducer_data: GlobalContactReducerData,
         # outputs for visualization (optional)
@@ -1159,13 +1179,15 @@ def get_generate_contacts_kernel(output_vertices: bool):
         iso_vertex_depth: wp.array(dtype=wp.float32),
         iso_vertex_shape_pair: wp.array(dtype=wp.vec2i),
     ):
-        """Generate marching cubes contacts and write directly to GlobalContactReducer.
+        """Generate marching cubes contacts and write to reducer (inline or legacy buffer).
 
-        Computes cube state and immediately writes faces to the reducer buffer
-        in a single pass, using atomic allocation for buffer slots.
+        When reducer has winner buffers (inline mode), registers contacts on the fly.
+        Otherwise writes to legacy contact buffer for a separate reduce pass.
         """
         offset = wp.tid()
         num_voxels = wp.min(iso_voxel_count[0], max_num_iso_voxels)
+        use_inline = reducer_data.winner_position_depth.shape[0] > 0
+
         for tid in range(offset, num_voxels, grid_size):
             pair = iso_voxel_shape_pair[tid]
             shape_a = pair[0]
@@ -1192,7 +1214,6 @@ def get_generate_contacts_kernel(output_vertices: bool):
             y_id = wp.int32(iso_coords.y)
             z_id = wp.int32(iso_coords.z)
 
-            # Compute cube state (marching cubes lookup)
             cube_idx, corner_vals, any_verts_inside, all_verts_valid = mc_iterate_voxel_vertices(
                 x_id,
                 y_id,
@@ -1220,13 +1241,10 @@ def get_generate_contacts_kernel(output_vertices: bool):
             if num_faces == 0:
                 continue
 
-            # Compute effective stiffness coefficient
             k_eff = get_effective_stiffness(k_a, k_b)
-
             sdf_b = sdf_data_b.sparse_sdf_ptr
             X_ws_b = transform_b
 
-            # Generate faces and write directly to reducer buffer
             for fi in range(num_faces):
                 area, normal, face_center, pen_depth, face_verts = mc_calc_face(
                     flat_edge_verts_table,
@@ -1239,20 +1257,33 @@ def get_generate_contacts_kernel(output_vertices: bool):
                     z_id,
                 )
 
-                # Write directly to reducer buffer with atomic allocation
-                contact_id = export_hydroelastic_contact_to_buffer(
-                    shape_a,
-                    shape_b,
-                    face_center,  # Position in SDF local space
-                    normal,
-                    pen_depth,
-                    area,
-                    k_eff,
-                    reducer_data,
-                )
+                if use_inline:
+                    register_hydroelastic_contact_inline(
+                        shape_a,
+                        shape_b,
+                        face_center,
+                        normal,
+                        pen_depth,
+                        area,
+                        k_eff,
+                        reducer_data,
+                        shape_local_aabb_lower,
+                        shape_local_aabb_upper,
+                        shape_voxel_resolution,
+                    )
+                    contact_id = -1
+                else:
+                    contact_id = export_hydroelastic_contact_to_buffer(
+                        shape_a,
+                        shape_b,
+                        face_center,
+                        normal,
+                        pen_depth,
+                        area,
+                        k_eff,
+                        reducer_data,
+                    )
 
-                # Write debug surface vertices if enabled (compile-time check only)
-                # The viewer controls whether to display this data via show_hydro_contact_surface
                 if wp.static(output_vertices) and contact_id >= 0:
                     for vi in range(3):
                         iso_vertex_point[3 * contact_id + vi] = wp.transform_point(X_ws_b, face_verts[vi])
@@ -1284,70 +1315,62 @@ def verify_collision_step(
     contact_count: wp.array(dtype=int),
     max_contact_count: int,
 ):
-    # Checks if any buffer overflowed in any stage of the collision pipeline and print a warning.
-    # Overflow messages include guidance to increase buffer_fraction or the per-stage multiplier.
+    # Check if any buffer overflowed and print a clear diagnostic.
+    # Stages: broadphase -> octree refinement (3 levels) -> iso-voxels -> contact reducer -> output contacts.
     has_overflow = False
 
     if num_broad_collide[0] > max_num_broad_collide:
         wp.printf(
-            "Warning: Broad phase buffer overflowed %d / %d. Increase buffer_fraction or buffer_mult_broad.\n",
+            "  [hydroelastic] broadphase pairs overflowed: %d needed, %d allocated. Increase buffer_fraction or buffer_mult_broad.\n",
             num_broad_collide[0],
             max_num_broad_collide,
         )
         has_overflow = True
     if num_iso_subblocks_0[0] > max_num_iso_subblocks_0:
         wp.printf(
-            "Warning: Iso subblock 0 buffer overflowed %d / %d. Increase buffer_fraction or buffer_mult_iso.\n",
+            "  [hydroelastic] octree level 0 (8x8x8) overflowed: %d needed, %d allocated. Increase buffer_fraction or buffer_mult_iso.\n",
             num_iso_subblocks_0[0],
             max_num_iso_subblocks_0,
         )
         has_overflow = True
     if num_iso_subblocks_1[0] > max_num_iso_subblocks_1:
         wp.printf(
-            "Warning: Iso subblock 1 buffer overflowed %d / %d. Increase buffer_fraction or buffer_mult_iso.\n",
+            "  [hydroelastic] octree level 1 (4x4x4) overflowed: %d needed, %d allocated. Increase buffer_fraction or buffer_mult_iso.\n",
             num_iso_subblocks_1[0],
             max_num_iso_subblocks_1,
         )
         has_overflow = True
     if num_iso_subblocks_2[0] > max_num_iso_subblocks_2:
         wp.printf(
-            "Warning: Iso subblock 2 buffer overflowed %d / %d. Increase buffer_fraction or buffer_mult_iso.\n",
+            "  [hydroelastic] octree level 2 (2x2x2) overflowed: %d needed, %d allocated. Increase buffer_fraction or buffer_mult_iso.\n",
             num_iso_subblocks_2[0],
             max_num_iso_subblocks_2,
         )
         has_overflow = True
     if num_iso_voxels[0] > max_num_iso_voxels:
         wp.printf(
-            "Warning: Iso voxel buffer overflowed %d / %d. Increase buffer_fraction or buffer_mult_iso.\n",
+            "  [hydroelastic] iso-voxel buffer overflowed: %d needed, %d allocated. Increase buffer_fraction or buffer_mult_iso.\n",
             num_iso_voxels[0],
             max_num_iso_voxels,
         )
         has_overflow = True
     if face_contact_count[0] > max_face_contact_count:
         wp.printf(
-            "Warning: Face contact buffer overflowed %d / %d. Increase buffer_fraction or buffer_mult_contact.\n",
+            "  [hydroelastic] contact reducer overflowed: %d generated, %d capacity. Increase buffer_fraction or buffer_mult_contact.\n",
             face_contact_count[0],
             max_face_contact_count,
         )
         has_overflow = True
     if contact_count[0] > max_contact_count:
         wp.printf(
-            "Warning: Contact buffer overflowed %d / %d. Increase contact buffer size.\n",
+            "  [hydroelastic] output contact buffer overflowed: %d generated, %d capacity. Increase rigid_contact_max.\n",
             contact_count[0],
             max_contact_count,
         )
         has_overflow = True
 
-    # Print usage summary when any overflow occurs to help with tuning buffer_fraction
     if has_overflow:
         wp.printf(
-            "  Hydroelastic usage: broad=%d/%d  voxels=%d/%d  contacts=%d/%d  output=%d/%d\n",
-            num_broad_collide[0],
-            max_num_broad_collide,
-            num_iso_voxels[0],
-            max_num_iso_voxels,
-            face_contact_count[0],
-            max_face_contact_count,
-            contact_count[0],
-            max_contact_count,
+            "Warning: Hydroelastic buffer overflow -- some contacts were dropped. "
+            "Increase SDFHydroelasticConfig.buffer_fraction (currently producing the above).\n",
         )

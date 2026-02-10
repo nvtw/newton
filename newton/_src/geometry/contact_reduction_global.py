@@ -281,9 +281,16 @@ class GlobalContactReducerData:
 
     This struct bundles all the arrays needed for global contact reduction
     so they can be passed as a single argument to warp kernels/functions.
+
+    **Modes:**
+    - Legacy buffered: position_depth/normal/shape_pairs (and contact_area/contact_k_eff
+      when hydroelastic) hold all raw contacts; ht_values store contact_id into this buffer.
+    - Inline reduced: winner_* arrays hold one contact per (entry_idx, slot); ht_values
+      store winner_slot_id (entry_idx * values_per_key + slot_id). Legacy contact
+      buffers may be size 0. Kernels infer mode from winner_position_depth.shape[0] > 0.
     """
 
-    # Contact buffer arrays
+    # Contact buffer arrays (legacy mode; size 0 when using inline reduction)
     position_depth: wp.array(dtype=wp.vec4)
     normal: wp.array(dtype=wp.vec3)
     shape_pairs: wp.array(dtype=wp.vec2i)
@@ -295,6 +302,14 @@ class GlobalContactReducerData:
     # contact_k_eff: effective stiffness coefficient k_a*k_b/(k_a+k_b)
     contact_area: wp.array(dtype=wp.float32)
     contact_k_eff: wp.array(dtype=wp.float32)
+
+    # Winner buffer (inline reduction mode): slot-major, size ht_capacity * values_per_key.
+    # Index = slot_id * ht_capacity + entry_idx. Empty (shape[0]==0) in legacy mode.
+    winner_position_depth: wp.array(dtype=wp.vec4)
+    winner_normal: wp.array(dtype=wp.vec3)
+    winner_shape_pairs: wp.array(dtype=wp.vec2i)
+    winner_contact_area: wp.array(dtype=wp.float32)
+    winner_contact_k_eff: wp.array(dtype=wp.float32)
 
     # Aggregate force per hashtable entry (indexed by ht_capacity)
     # Used for hydroelastic stiffness calculation: c_stiffness = k_eff * |agg_force| / total_depth
@@ -333,47 +348,50 @@ def _clear_active_kernel(
     weighted_pos_sum: wp.array(dtype=wp.vec3),
     weight_sum: wp.array(dtype=wp.float32),
     agg_moment: wp.array(dtype=wp.float32),
+    # Winner buffer (inline mode); empty arrays when not used
+    winner_position_depth: wp.array(dtype=wp.vec4),
+    winner_normal: wp.array(dtype=wp.vec3),
+    winner_shape_pairs: wp.array(dtype=wp.vec2i),
+    winner_contact_area: wp.array(dtype=wp.float32),
+    winner_contact_k_eff: wp.array(dtype=wp.float32),
     ht_capacity: int,
     values_per_key: int,
     num_threads: int,
 ):
-    """Kernel to clear active hashtable entries (keys, values, and hydroelastic aggregates).
+    """Kernel to clear active hashtable entries (keys, values, aggregates, and winner slots).
 
-    Uses grid-stride loop for efficient thread utilization.
-    Each thread handles one value slot, with key and aggregate clearing done once per entry.
-
-    Memory layout for values is slot-major (SoA):
-    [slot0_entry0, slot0_entry1, ..., slot0_entryN, slot1_entry0, ...]
+    Uses grid-stride loop. Memory layout for values and winner buffer is slot-major (SoA).
     """
     tid = wp.tid()
-
-    # Read count from GPU - stored at active_slots[capacity]
     count = ht_active_slots[ht_capacity]
-
-    # Total work items: count entries * values_per_key slots per entry
     total_work = count * values_per_key
+    has_winner = winner_position_depth.shape[0] > 0
 
-    # Grid-stride loop: each thread processes one value slot
     i = tid
     while i < total_work:
-        # Compute which entry and which slot within that entry
         active_idx = i / values_per_key
         local_idx = i % values_per_key
         entry_idx = ht_active_slots[active_idx]
 
-        # Clear keys and hydroelastic aggregates only once per entry (when processing slot 0)
         if local_idx == 0:
             ht_keys[entry_idx] = HASHTABLE_EMPTY_KEY
-            # Clear hydroelastic aggregates if arrays are not empty
             if agg_force.shape[0] > 0:
                 agg_force[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
                 weighted_pos_sum[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
                 weight_sum[entry_idx] = 0.0
                 agg_moment[entry_idx] = 0.0
 
-        # Clear this value slot (slot-major layout)
         value_idx = local_idx * ht_capacity + entry_idx
         ht_values[value_idx] = wp.uint64(0)
+
+        if has_winner:
+            winner_idx = value_idx
+            winner_position_depth[winner_idx] = wp.vec4(0.0, 0.0, 0.0, 0.0)
+            winner_normal[winner_idx] = wp.vec3(0.0, 0.0, 0.0)
+            winner_shape_pairs[winner_idx] = wp.vec2i(0, 0)
+            winner_contact_area[winner_idx] = 0.0
+            winner_contact_k_eff[winner_idx] = 0.0
+
         i += num_threads
 
 
@@ -441,60 +459,75 @@ class GlobalContactReducer:
         capacity: int,
         device: str | None = None,
         store_hydroelastic_data: bool = False,
+        use_inline_reduction: bool = False,
+        hashtable_size: int | None = None,
     ):
         """Initialize the global contact reducer.
 
         Args:
-            capacity: Maximum number of contacts to store
+            capacity: Maximum number of contacts to store (legacy buffer). Use 0 when
+                use_inline_reduction=True and no fallback buffer is needed.
             device: Warp device (e.g., "cuda:0", "cpu")
             store_hydroelastic_data: If True, allocate arrays for contact_area and contact_k_eff
+            use_inline_reduction: If True, use winner-buffer storage (no large contact buffer).
+                Requires store_hydroelastic_data=True and hashtable_size provided.
+            hashtable_size: Hashtable capacity. If None, uses max(capacity // 4, 1024).
+                When use_inline_reduction=True, must be provided (e.g. num_shape_pairs * 35).
         """
         self.capacity = capacity
         self.device = device
         self.store_hydroelastic_data = store_hydroelastic_data
+        self.use_inline_reduction = use_inline_reduction
 
         # Values per key: 6 directions + 1 deepest = 7
         self.values_per_key = NUM_SPATIAL_DIRECTIONS + 1
 
-        # Contact buffer (struct of arrays)
+        # Hashtable sizing
+        if hashtable_size is not None:
+            ht_cap = max(hashtable_size, 1024)
+        else:
+            ht_cap = max(capacity // 4, 1024)
+        self.hashtable = HashTable(ht_cap, device=device)
+
+        # Contact buffer (legacy mode only; size 0 when inline and no fallback)
         self.position_depth = wp.zeros(capacity, dtype=wp.vec4, device=device)
         self.normal = wp.zeros(capacity, dtype=wp.vec3, device=device)
         self.shape_pairs = wp.zeros(capacity, dtype=wp.vec2i, device=device)
 
-        # Optional hydroelastic data arrays
+        # Optional hydroelastic data arrays (legacy buffer)
         if store_hydroelastic_data:
             self.contact_area = wp.zeros(capacity, dtype=wp.float32, device=device)
             self.contact_k_eff = wp.zeros(capacity, dtype=wp.float32, device=device)
         else:
-            # Empty arrays (0 capacity) for non-hydroelastic use
             self.contact_area = wp.zeros(0, dtype=wp.float32, device=device)
             self.contact_k_eff = wp.zeros(0, dtype=wp.float32, device=device)
 
-        # Atomic counter for contact allocation
+        # Atomic counter for contact allocation (legacy path)
         self.contact_count = wp.zeros(1, dtype=wp.int32, device=device)
 
-        # Hashtable sizing: estimate unique (shape_pair, bin) keys needed
-        # - 35 bins per shape pair (20 normal + 15 voxel groups)
-        # - Dense hydroelastic contacts: many contacts share the same bin
-        # - Assume ~8 contacts per unique key on average (conservative for dense contacts)
-        # - Provides 2x load factor headroom within the /4 estimate
-        # - If table fills, contacts gracefully skip reduction (still in buffer)
-        hashtable_size = max(capacity // 4, 1024)  # minimum 1024 for small scenes
-        self.hashtable = HashTable(hashtable_size, device=device)
+        # Winner buffer (inline reduction): slot-major, size ht_capacity * values_per_key
+        winner_capacity = self.hashtable.capacity * self.values_per_key if use_inline_reduction else 0
+        if winner_capacity > 0:
+            self.winner_position_depth = wp.zeros(winner_capacity, dtype=wp.vec4, device=device)
+            self.winner_normal = wp.zeros(winner_capacity, dtype=wp.vec3, device=device)
+            self.winner_shape_pairs = wp.zeros(winner_capacity, dtype=wp.vec2i, device=device)
+            self.winner_contact_area = wp.zeros(winner_capacity, dtype=wp.float32, device=device)
+            self.winner_contact_k_eff = wp.zeros(winner_capacity, dtype=wp.float32, device=device)
+        else:
+            self.winner_position_depth = wp.zeros(0, dtype=wp.vec4, device=device)
+            self.winner_normal = wp.zeros(0, dtype=wp.vec3, device=device)
+            self.winner_shape_pairs = wp.zeros(0, dtype=wp.vec2i, device=device)
+            self.winner_contact_area = wp.zeros(0, dtype=wp.float32, device=device)
+            self.winner_contact_k_eff = wp.zeros(0, dtype=wp.float32, device=device)
 
-        # Values array for hashtable - managed here, not by HashTable
-        # This is contact-reduction-specific (slot-major layout with values_per_key slots)
+        # Values array for hashtable - slot-major layout
         self.ht_values = wp.zeros(self.hashtable.capacity * self.values_per_key, dtype=wp.uint64, device=device)
 
         # Aggregate force per hashtable entry (for hydroelastic stiffness calculation)
-        # Accumulates sum(area * depth * normal) for all penetrating contacts per entry
         if store_hydroelastic_data:
             self.agg_force = wp.zeros(self.hashtable.capacity, dtype=wp.vec3, device=device)
-            # Weighted position sum for anchor contact computation
             self.weighted_pos_sum = wp.zeros(self.hashtable.capacity, dtype=wp.vec3, device=device)
-            # Weight sum for normalizing weighted_pos_sum
             self.weight_sum = wp.zeros(self.hashtable.capacity, dtype=wp.float32, device=device)
-            # Aggregate moment for moment matching
             self.agg_moment = wp.zeros(self.hashtable.capacity, dtype=wp.float32, device=device)
         else:
             self.agg_force = wp.zeros(0, dtype=wp.vec3, device=device)
@@ -517,7 +550,7 @@ class GlobalContactReducer:
         # Use fixed thread count for efficient GPU utilization
         num_threads = min(1024, self.hashtable.capacity)
 
-        # Single kernel clears keys, values, and hydroelastic aggregates for active entries
+        # Single kernel clears keys, values, aggregates, and winner slots for active entries
         wp.launch(
             _clear_active_kernel,
             dim=num_threads,
@@ -529,6 +562,11 @@ class GlobalContactReducer:
                 self.weighted_pos_sum,
                 self.weight_sum,
                 self.agg_moment,
+                self.winner_position_depth,
+                self.winner_normal,
+                self.winner_shape_pairs,
+                self.winner_contact_area,
+                self.winner_contact_k_eff,
                 self.hashtable.capacity,
                 self.values_per_key,
                 num_threads,
@@ -562,6 +600,11 @@ class GlobalContactReducer:
         data.capacity = self.capacity
         data.contact_area = self.contact_area
         data.contact_k_eff = self.contact_k_eff
+        data.winner_position_depth = self.winner_position_depth
+        data.winner_normal = self.winner_normal
+        data.winner_shape_pairs = self.winner_shape_pairs
+        data.winner_contact_area = self.winner_contact_area
+        data.winner_contact_k_eff = self.winner_contact_k_eff
         data.agg_force = self.agg_force
         data.weighted_pos_sum = self.weighted_pos_sum
         data.weight_sum = self.weight_sum

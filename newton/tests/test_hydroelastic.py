@@ -81,7 +81,12 @@ def simulate(solver, model, state_0, state_1, control, contacts, collision_pipel
 
 
 def build_stacked_cubes_scene(
-    device, solver_fn, shape_type: ShapeType, cube_half: float = CUBE_HALF_LARGE, reduce_contacts: bool = True
+    device,
+    solver_fn,
+    shape_type: ShapeType,
+    cube_half: float = CUBE_HALF_LARGE,
+    reduce_contacts: bool = True,
+    sdf_hydroelastic_config: SDFHydroelasticConfig | None = None,
 ):
     """Build the stacked cubes scene and return all components for simulation."""
     cube_mesh = None
@@ -126,9 +131,10 @@ def build_stacked_cubes_scene(
 
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
 
-    sdf_hydroelastic_config = SDFHydroelasticConfig(
-        output_contact_surface=True, reduce_contacts=reduce_contacts, anchor_contact=True, buffer_fraction=1.0
-    )
+    if sdf_hydroelastic_config is None:
+        sdf_hydroelastic_config = SDFHydroelasticConfig(
+            output_contact_surface=True, reduce_contacts=reduce_contacts, anchor_contact=True, buffer_fraction=1.0
+        )
 
     # Hydroelastic without contact reduction can generate many contacts
     rigid_contact_max = 6000 if not reduce_contacts else 100
@@ -147,11 +153,17 @@ def build_stacked_cubes_scene(
 
 
 def run_stacked_cubes_hydroelastic_test(
-    test, device, solver_fn, shape_type: ShapeType, cube_half: float = CUBE_HALF_LARGE, reduce_contacts: bool = True
+    test,
+    device,
+    solver_fn,
+    shape_type: ShapeType,
+    cube_half: float = CUBE_HALF_LARGE,
+    reduce_contacts: bool = True,
+    config: SDFHydroelasticConfig | None = None,
 ):
     """Shared test for stacking 3 cubes using hydroelastic contacts."""
     model, solver, state_0, state_1, control, collision_pipeline, initial_positions, cube_half = (
-        build_stacked_cubes_scene(device, solver_fn, shape_type, cube_half, reduce_contacts)
+        build_stacked_cubes_scene(device, solver_fn, shape_type, cube_half, reduce_contacts, config)
     )
 
     contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
@@ -589,6 +601,35 @@ add_function_test(
     test_buffer_fraction_no_crash,
     devices=cuda_devices,
     check_output=False,
+)
+
+
+def test_moment_matching_legacy_path(test, device):
+    """Test that moment_matching=True uses legacy buffered path and still produces contacts."""
+    config = SDFHydroelasticConfig(
+        reduce_contacts=True,
+        moment_matching=True,
+        anchor_contact=True,
+        buffer_fraction=1.0,
+        output_contact_surface=True,
+    )
+    model, solver, state_0, state_1, control, collision_pipeline, _, _ = build_stacked_cubes_scene(
+        device, solvers["xpbd"], ShapeType.MESH, CUBE_HALF_LARGE, reduce_contacts=True, sdf_hydroelastic_config=config
+    )
+    contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
+    test.assertGreater(
+        int(contacts.rigid_contact_count.numpy()[0]),
+        0,
+        "Legacy path with moment_matching should produce contacts",
+    )
+
+
+add_function_test(
+    TestHydroelastic,
+    "test_moment_matching_legacy_path",
+    test_moment_matching_legacy_path,
+    devices=cuda_devices,
+    solver_fn=solvers["xpbd"],
 )
 
 

@@ -596,7 +596,9 @@ another prioritizes spatial coverage. More betas = more contacts retained but be
    * - ``moment_matching``
      - Preserves torsional friction by adding an anchor contact at the depth-weighted centroid and 
        scaling friction coefficients. This ensures the reduced contact set produces similar resistance 
-       to rotational sliding as the original contacts. Experimental. Default: False.
+       to rotational sliding as the original contacts. Experimental. Default: False. When True, the 
+       pipeline uses the legacy buffered path (full contact buffer + separate reduce pass); when 
+       False (default), reduction is done on the fly with a small winner buffer (lower memory).
    * - ``margin_contact_area``
      - Lower bound on contact area. Hydroelastic stiffness is ``area * k_eff``, but contacts 
        within the contact margin that are not yet penetrating (speculative contacts) have zero 
@@ -881,9 +883,13 @@ The ``k_hydro`` parameter on each shape controls area-dependent contact stiffnes
 
 Contact reduction options for hydroelastic contacts are configured via :class:`~newton.SDFHydroelasticConfig` (see :ref:`Contact Reduction`).
 
+**Inline reduction (default):**
+
+When ``reduce_contacts=True`` and ``moment_matching=False`` (the default), contact reduction is done **on the fly** during contact generation: contacts are registered in a hashtable and only winner data is stored in a small buffer (sized by shape-pair and bin count), avoiding a large raw-contact staging buffer. When ``moment_matching=True``, the pipeline uses the legacy buffered path (full contact buffer plus a separate reduce pass) so that moment contributions can be computed from all contacts.
+
 **Memory tuning (buffer_fraction):**
 
-The hydroelastic pipeline pre-allocates GPU buffers for a theoretical worst case (every SDF tile and shape-pair block active at once). In practice, broad phase and octree refinement cull most work, so actual usage is often a small fraction of that. Use the ``buffer_fraction`` parameter on :class:`~newton.geometry.SDFHydroelasticConfig` to scale buffers down and trade memory for headroom:
+The hydroelastic pipeline pre-allocates GPU buffers for octree refinement and (in legacy mode) the contact buffer. With inline reduction (default), the main contact storage is the small winner buffer, so ``buffer_fraction`` mainly scales the octree buffers. Use the ``buffer_fraction`` parameter on :class:`~newton.geometry.SDFHydroelasticConfig` to scale buffers down and trade memory for headroom:
 
 .. code-block:: python
 
