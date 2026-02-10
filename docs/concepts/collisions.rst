@@ -883,7 +883,7 @@ Contact reduction options for hydroelastic contacts are configured via :class:`~
 
 **Memory tuning (buffer_fraction):**
 
-The hydroelastic pipeline pre-allocates GPU buffers for the theoretical worst case where every SDF tile in the scene produces iso-voxels simultaneously. In multi-environment RL workloads, the actual buffer utilization is typically 1--5 % of the worst case. Use the ``buffer_fraction`` parameter on :class:`~newton.geometry.SDFHydroelasticConfig` to scale buffers down proportionally:
+The hydroelastic pipeline pre-allocates GPU buffers for a theoretical worst case (every SDF tile and shape-pair block active at once). In practice, broad phase and octree refinement cull most work, so actual usage is often a small fraction of that. Use the ``buffer_fraction`` parameter on :class:`~newton.geometry.SDFHydroelasticConfig` to scale buffers down and trade memory for headroom:
 
 .. code-block:: python
 
@@ -898,9 +898,10 @@ All kernels are bounds-safe -- if a buffer overflows, excess contacts are silent
 
 Recommended values:
 
-- **1.0** (default): Full worst-case allocation, no contacts dropped.
-- **0.1 -- 0.2**: Dense contact scenarios (stacking, multi-object grasping).
-- **0.05**: Typical RL workloads with sparse contacts (~20x memory savings).
+- **0.2** (default): Good balance for most scenes; headroom for dense contacts.
+- **1.0**: Full worst-case allocation if you still see overflow warnings at 0.2.
+- **0.1**: Denser scenarios when 0.2 uses too much memory; less headroom.
+- **0.05**: Aggressive; minimal headroom, for memory-bound sparse-contact workloads (e.g. RL). May overflow on denser frames.
 
 .. _Contact Material Properties:
 

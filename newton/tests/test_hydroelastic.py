@@ -224,7 +224,6 @@ def test_buffer_fraction_no_crash(test, device):
     This validates that:
     1. All kernels are bounds-safe (no crashes from buffer overflow)
     2. Contacts are still generated (some may be dropped, but not all)
-    3. The pipeline completes without errors under CUDA graph capture
     """
     cube_half = 0.5
     narrow_band = cube_half * 0.2

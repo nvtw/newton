@@ -107,25 +107,30 @@ class SDFHydroelasticConfig:
     reduce_contacts: bool = True
     """Whether to reduce contacts to a smaller representative set per shape pair.
     When False, all generated contacts are passed through without reduction."""
-    buffer_fraction: float = 1.0
+    buffer_fraction: float = 0.2
     """Fraction of worst-case buffer sizes to allocate. Range (0, 1].
 
     The hydroelastic pipeline pre-allocates buffers for octree traversal,
-    contact generation, and contact reduction. By default these are sized for
-    the theoretical worst case where every SDF tile produces iso-voxels.
-    In practice, only a small fraction of tiles overlap at any given time.
+    contact generation, and contact reduction. Worst case assumes every SDF
+    tile and every shape-pair block could be active at once; in practice only
+    a small fraction are (broad phase and refinement cull most work). By
+    default buffers are sized at 20% of that worst case.
 
-    Reducing this value shrinks all buffers proportionally, trading a small
-    risk of dropped contacts for significantly lower GPU memory usage.
-    All kernels are bounds-safe: overflow causes contacts to be silently
-    dropped (not crashes), and the ``verify_collision_step`` kernel prints
-    a warning when any buffer overflows.
+    Lower values reduce GPU memory at the cost of possible overflow: kernels
+    are bounds-safe (overflow drops contacts, no crashes), and
+    ``verify_collision_step`` prints a warning. Increase if you see overflow
+    warnings.
 
     Tuning guidance:
 
-    - **1.0** (default): Full worst-case allocation, no contacts dropped.
-    - **0.1 - 0.2**: Dense contact scenarios (stacking, multi-object grasping).
-    - **0.05**: Typical RL workloads with sparse contacts (~20x memory savings).
+    - **0.2** (default): Good balance for most scenes; leaves headroom for
+      dense contacts and temporal spikes.
+    - **1.0**: Full worst-case allocation; use if 0.2 still overflows.
+    - **0.1**: Denser scenarios (e.g. stacking, grasping) when 0.2 uses
+      too much memory; less headroom than default.
+    - **0.05**: Aggressive; minimal headroom. Use only when memory-bound and
+      contacts are known to be sparse (e.g. sparse RL). May overflow on
+      denser frames.
 
     Composes multiplicatively with ``buffer_mult_broad``, ``buffer_mult_iso``,
     and ``buffer_mult_contact`` for per-stage fine-tuning."""
@@ -805,7 +810,6 @@ def broadphase_get_block_coords(
     for tid in range(offset, num_blocks, grid_size):
         block_idx = block_broad_idx[tid]
         block_broad_collide_coords[tid] = block_coords[block_idx]
-
 
 
 @wp.func
