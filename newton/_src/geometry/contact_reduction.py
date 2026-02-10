@@ -280,6 +280,27 @@ def get_spatial_direction_2d(dir_idx: int) -> wp.vec2:
     return wp.vec2(wp.cos(angle), wp.sin(angle))
 
 
+@wp.func
+def compute_spatial_score_2d(pos_2d: wp.vec2, dir_idx: int) -> float:
+    """Compute one fixed-direction projection score without trig or tables."""
+    x = pos_2d[0]
+    y = pos_2d[1]
+    half_x = 0.5 * x
+    sin60 = wp.static(0.8660254037844386)
+
+    if dir_idx == 0:
+        return x
+    if dir_idx == 1:
+        return half_x + sin60 * y
+    if dir_idx == 2:
+        return -half_x + sin60 * y
+    if dir_idx == 3:
+        return -x
+    if dir_idx == 4:
+        return -half_x - sin60 * y
+    return half_x - sin60 * y
+
+
 NUM_SPATIAL_DIRECTIONS = 6  # Evenly-spaced 2D directions (60 degrees apart)
 NUM_NORMAL_BINS = 20  # Icosahedron faces
 NUM_VOXEL_DEPTH_SLOTS = 100  # Voxel-based depth slots for spatial coverage
@@ -592,12 +613,10 @@ class ContactReductionFunctions:
                 base_key = bin_id * slots_per_bin
                 # Compete for spatial direction slots (contacts with depth < beta)
                 use_beta = c.depth < wp.static(BETA)
-                for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
-                    if use_beta:
-                        dir_2d = get_spatial_direction_2d(dir_i)
-                        score = wp.dot(pos_2d, dir_2d)
-                        key = base_key + dir_i
-                        wp.atomic_max(winner_slots, key, pack_value_thread_id(score, thread_id))
+                if use_beta:
+                    for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
+                        score = compute_spatial_score_2d(pos_2d, dir_i)
+                        wp.atomic_max(winner_slots, base_key + dir_i, pack_value_thread_id(score, thread_id))
 
                 # Compete for per-bin max-depth slot (last slot in bin)
                 max_depth_key = base_key + slots_per_bin - 1
@@ -615,8 +634,8 @@ class ContactReductionFunctions:
             if active:
                 base_key = bin_id * slots_per_bin
                 # Check spatial direction slots
-                for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
-                    if use_beta:
+                if use_beta:
+                    for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
                         key = base_key + dir_i
                         if unpack_thread_id(winner_slots[key]) == thread_id:
                             p = buffer[key].projection
@@ -624,8 +643,7 @@ class ContactReductionFunctions:
                                 slot_id = wp.atomic_add(active_ids, NUM_REDUCTION_SLOTS, 1)
                                 if slot_id < NUM_REDUCTION_SLOTS:
                                     active_ids[slot_id] = key
-                            dir_2d = get_spatial_direction_2d(dir_i)
-                            score = wp.dot(pos_2d, dir_2d)
+                            score = compute_spatial_score_2d(pos_2d, dir_i)
                             if score > p:
                                 c.projection = score
                                 buffer[key] = c
@@ -711,10 +729,12 @@ class ContactReductionFunctions:
                     if buffer[key_i].projection > empty_marker:
                         feature_i = buffer[key_i].feature
                         is_dup = int(0)
-                        for slot_j in range(slot_i):
+                        slot_j = int(0)
+                        while slot_j < slot_i and is_dup == 0:
                             key_j = base_key + slot_j
                             if buffer[key_j].projection > empty_marker and buffer[key_j].feature == feature_i:
                                 is_dup = 1
+                            slot_j = slot_j + 1
                         if is_dup == 0:
                             keep_flags[key_i] = 1
             synchronize()
@@ -729,15 +749,19 @@ class ContactReductionFunctions:
                     is_dup = int(0)
 
                     # Check against all per-bin slots (spatial extremes + max-depth)
-                    for per_bin_key in range(wp.static(num_per_bin_slots)):
+                    per_bin_key = int(0)
+                    while per_bin_key < wp.static(num_per_bin_slots) and is_dup == 0:
                         if buffer[per_bin_key].projection > empty_marker and buffer[per_bin_key].feature == feature_v:
                             is_dup = 1
+                        per_bin_key = per_bin_key + 1
 
                     # Check against earlier voxel slots
-                    for earlier_voxel in range(voxel_slot):
+                    earlier_voxel = int(0)
+                    while earlier_voxel < voxel_slot and is_dup == 0:
                         earlier_key = wp.static(num_per_bin_slots) + earlier_voxel
                         if buffer[earlier_key].projection > empty_marker and buffer[earlier_key].feature == feature_v:
                             is_dup = 1
+                        earlier_voxel = earlier_voxel + 1
 
                     if is_dup == 0:
                         keep_flags[voxel_key] = 1
