@@ -582,12 +582,13 @@ add_function_test(
     devices=cuda_devices,
 )
 
-# Buffer fraction bounds-safety test
+# Buffer fraction bounds-safety test (overflow warnings expected, so disable CheckOutput)
 add_function_test(
     TestHydroelastic,
     "test_buffer_fraction_no_crash",
     test_buffer_fraction_no_crash,
     devices=cuda_devices,
+    check_output=False,
 )
 
 
