@@ -272,8 +272,16 @@ def register_hydroelastic_contact_inline(
     # Phase 2: Flush -- non-blocking try-lock round-robin for data writes
     # =====================================================================
     _flush_claimed_slots_hydro(
-        claim_idxs, claim_his, num_claims,
-        shape_a, shape_b, position, normal, depth, area, k_eff,
+        claim_idxs,
+        claim_his,
+        num_claims,
+        shape_a,
+        shape_b,
+        position,
+        normal,
+        depth,
+        area,
+        k_eff,
         reducer_data,
     )
 
