@@ -146,15 +146,43 @@ class ViewerFile(ViewerBase):
         print(f"ViewerFile closed. Total frames recorded: {self._frame_count}")
 
     def load_recording(self, file_path: str):
-        """Load a previously recorded file."""
+        """Load a previously recorded file for playback.
+
+        After loading, use load_model() and load_state() to restore the model
+        and state at a given frame. For playback-only usage, output_path may
+        be passed as empty string in the constructor.
+        """
         self._recorder.load_from_file(file_path)
         self._frame_count = len(self._recorder.history)
         print(f"Loaded recording with {self._frame_count} frames from {file_path}")
 
     def get_frame_count(self) -> int:
-        """Get the number of recorded frames."""
+        """Return the number of frames in the loaded or recorded session."""
         return self._frame_count
 
-    def get_recorder(self) -> RecorderModelAndState:
-        """Get access to the underlying recorder for advanced operations."""
-        return self._recorder
+    def has_model(self) -> bool:
+        """Return True if the loaded recording contains model data (for playback)."""
+        return self._recorder.deserialized_model is not None
+
+    def load_model(self, model):
+        """Restore a Model from the loaded recording.
+
+        Must be called after load_recording(). The given model is populated
+        with the recorded model structure (bodies, shapes, etc.).
+
+        Args:
+            model: A Newton Model instance to populate.
+        """
+        self._recorder.playback_model(model)
+
+    def load_state(self, state, frame_id: int):
+        """Restore State to a specific frame from the loaded recording.
+
+        Must be called after load_recording(). The given state is updated
+        with the state snapshot at frame_id.
+
+        Args:
+            state: A Newton State instance to populate.
+            frame_id: Frame index in [0, get_frame_count()).
+        """
+        self._recorder.playback(state, frame_id)

@@ -25,13 +25,13 @@ import newton.examples
 from newton._src.utils.import_mjcf import parse_mjcf
 from newton._src.utils.recorder import (
     HAS_CBOR2,
-    RecorderBasic,
     RecorderModelAndState,
     RingBuffer,
     depointer_as_key,
     pointer_as_key,
 )
 from newton.tests.unittest_utils import add_function_test, get_test_devices
+from newton.viewer import ViewerFile
 
 
 class TestRecorder(unittest.TestCase):
@@ -215,33 +215,60 @@ def test_recorder_ringbuffer_save_load(test: TestRecorder, device):
             os.remove(file_path)
 
 
-def test_body_transform_recorder(test: TestRecorder, device):
-    recorder = RecorderBasic()
+def test_viewer_file_playback(test: TestRecorder, device):
+    """Test ViewerFile load_recording, load_model, and load_state for playback."""
+    builder = newton.ModelBuilder()
+    body = builder.add_body()
+    builder.add_shape_capsule(body)
+    model = builder.finalize(device=device)
 
-    transform1 = wp.array([wp.transform([1, 2, 3], [0, 0, 0, 1])], dtype=wp.transform, device=device)
-    transform2 = wp.array([wp.transform([4, 5, 6], [0, 0, 0, 1])], dtype=wp.transform, device=device)
+    states = []
+    for i in range(3):
+        state = model.state()
+        state.body_q.fill_(wp.transform([1.0 + i, 2.0 + i, 3.0 + i], wp.quat_identity()))
+        state.body_qd.fill_(wp.spatial_vector([0.1 * i, 0.2 * i, 0.3 * i, 0.4 * i, 0.5 * i, 0.6 * i]))
+        states.append(state)
 
-    recorder.record(transform1)
-    recorder.record(transform2)
-
-    test.assertEqual(len(recorder.transforms_history), 2)
-
-    np.testing.assert_allclose(recorder.transforms_history[0].numpy(), transform1.numpy())
-    np.testing.assert_allclose(recorder.transforms_history[1].numpy(), transform2.numpy())
-
-    with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
         file_path = tmp.name
 
     try:
-        recorder.save_to_file(file_path)
+        # Record via ViewerFile
+        viewer_file_record = ViewerFile(file_path, auto_save=False)
+        viewer_file_record.set_model(model)
+        for state in states:
+            viewer_file_record.log_state(state)
+        viewer_file_record.save_recording()
+        viewer_file_record.close()
 
-        new_recorder = RecorderBasic()
-        new_recorder.load_from_file(file_path, device=device)
+        # Playback via ViewerFile
+        viewer_file_play = ViewerFile("")
+        viewer_file_play.load_recording(file_path)
 
-        test.assertEqual(len(new_recorder.transforms_history), 2)
-        np.testing.assert_allclose(new_recorder.transforms_history[0].numpy(), transform1.numpy())
-        np.testing.assert_allclose(new_recorder.transforms_history[1].numpy(), transform2.numpy())
+        test.assertTrue(viewer_file_play.has_model())
+        test.assertEqual(viewer_file_play.get_frame_count(), 3)
 
+        restored_model = newton.Model(device=device)
+        viewer_file_play.load_model(restored_model)
+
+        test.assertEqual(restored_model.body_count, model.body_count)
+        test.assertEqual(restored_model.shape_count, model.shape_count)
+
+        for frame_id in range(3):
+            restored_state = restored_model.state()
+            viewer_file_play.load_state(restored_state, frame_id)
+            np.testing.assert_allclose(
+                restored_state.body_q.numpy(),
+                states[frame_id].body_q.numpy(),
+                atol=1e-6,
+                err_msg=f"body_q mismatch at frame {frame_id}",
+            )
+            np.testing.assert_allclose(
+                restored_state.body_qd.numpy(),
+                states[frame_id].body_qd.numpy(),
+                atol=1e-6,
+                err_msg=f"body_qd mismatch at frame {frame_id}",
+            )
     finally:
         if os.path.exists(file_path):
             os.remove(file_path)
@@ -387,9 +414,10 @@ add_function_test(
 
 add_function_test(
     TestRecorder,
-    "test_body_transform_recorder",
-    test_body_transform_recorder,
+    "test_viewer_file_playback",
+    test_viewer_file_playback,
     devices=devices,
+    check_output=False,  # ViewerFile prints save/load messages
 )
 
 add_function_test(
