@@ -61,10 +61,13 @@ from .contact_reduction import (
 )
 from .contact_reduction_global import (
     BETA_THRESHOLD,
+    MAX_CLAIMS_PER_CONTACT,
     VALUES_PER_KEY,
     GlobalContactReducer,
     GlobalContactReducerData,
-    _threadfence,
+    _claim_hi_type,
+    _claim_idx_type,
+    _try_claim_slot,
     is_contact_already_exported,
     make_contact_key,
     make_contact_value,
@@ -115,10 +118,10 @@ def _write_slot(
 
 
 @wp.func
-def _reduction_update_slot_and_maybe_write_slot(
-    entry_idx: int,
-    slot_id: int,
-    value: wp.uint64,
+def _flush_claimed_slots_hydro(
+    claim_idxs: _claim_idx_type,
+    claim_his: _claim_hi_type,
+    num_claims: int,
     shape_a: int,
     shape_b: int,
     position: wp.vec3,
@@ -128,47 +131,46 @@ def _reduction_update_slot_and_maybe_write_slot(
     k_eff: float,
     reducer_data: GlobalContactReducerData,
 ):
-    """Atomically update a slot value and write contact data under a per-slot spinlock.
+    """Write hydroelastic contact data to claimed slots using non-blocking try-lock round-robin.
 
-    Uses a hybrid fast-path / locked-path strategy:
-
-    1. **Fast-path filter** -- read the current value without locking.  If we
-       cannot possibly win (current >= ours), bail out immediately.  The vast
-       majority of threads exit here with zero lock contention.
-    2. **Spinlock acquire** -- ``atomic_cas`` on the per-slot lock.
-    3. **Guarded compare-and-write** -- under the lock, re-read the value.  If
-       we still win, write both the new value *and* the contact data
-       atomically from the observer's perspective.
-    4. **Threadfence + release** -- ``__threadfence()`` ensures all stores are
-       globally visible before the lock is released via ``atomic_exch``.
-
-    This eliminates the TOCTOU race of the previous lock-free approach where
-    the value and the contact data could be written by different threads.
-
-    ``value`` must pack ``(score, slot_storage_id)`` with
-    ``slot_storage_id = slot_id * ht_capacity + entry_idx``.
+    Same strategy as ``_flush_claimed_slots_basic`` but writes additional
+    hydroelastic data (area, k_eff).  See that function for the full
+    algorithm description.
     """
-    ht_capacity = reducer_data.ht_capacity
-    value_idx = slot_id * ht_capacity + entry_idx
+    remaining = num_claims
+    sweep = int(0)
+    while remaining > 0:
+        sweep += 1
+        if sweep > 32:
+            break
+        for i in range(wp.static(MAX_CLAIMS_PER_CONTACT)):
+            if i >= num_claims:
+                break
+            value_idx = claim_idxs[i]
+            if value_idx < 0:
+                continue
 
-    # Fast path: skip if we cannot win (no lock needed)
-    if reducer_data.ht_values[value_idx] >= value:
-        return
+            value = (wp.uint64(wp.uint32(claim_his[i])) << wp.uint64(32)) | wp.uint64(wp.uint32(value_idx))
 
-    # Acquire per-slot spinlock
-    while wp.atomic_cas(reducer_data.slot_locks, value_idx, 0, 1) != 0:
-        pass
+            # Pre-lock winner check: discard early if overtaken
+            if reducer_data.ht_values[value_idx] != value:
+                claim_idxs[i] = -1
+                remaining -= 1
+                continue
 
-    # Under lock: compare and conditionally write value + contact data
-    if reducer_data.ht_values[value_idx] < value:
-        reducer_data.ht_values[value_idx] = value
-        _write_slot(value_idx, shape_a, shape_b, position, normal, depth, area, k_eff, reducer_data)
+            # Try to acquire lock (non-blocking)
+            if wp.atomic_cas(reducer_data.slot_locks, value_idx, 0, 1) != 0:
+                continue
 
-    # Device-scope fence: ensure all stores are visible before release
-    _threadfence()
+            # Under lock: authoritative winner re-check
+            if reducer_data.ht_values[value_idx] == value:
+                _write_slot(value_idx, shape_a, shape_b, position, normal, depth, area, k_eff, reducer_data)
 
-    # Release lock
-    wp.atomic_exch(reducer_data.slot_locks, value_idx, 0)
+            # Release lock
+            wp.atomic_exch(reducer_data.slot_locks, value_idx, 0)
+
+            claim_idxs[i] = -1
+            remaining -= 1
 
 
 @wp.func
@@ -187,9 +189,17 @@ def register_hydroelastic_contact_inline(
 ):
     """Register one hydroelastic contact in the hashtable on the fly.
 
-    Use when reducer is in inline mode (slot-backed storage in contact arrays). Performs
-    hashtable find_or_insert, atomic max per slot, conditional slot write, and aggregate
-    accumulation for penetrating contacts.
+    Uses a two-phase approach to minimise spinlock hold time:
+
+    **Phase 1 -- Claim** (lock-free ``atomic_max`` only):
+        Compete for every eligible slot.  Record which slots we won in a
+        local vector (up to 8: 6 spatial + 1 max-depth + 1 voxel).
+        Also accumulates aggregate force for penetrating contacts.
+
+    **Phase 2 -- Flush** (non-blocking try-lock round-robin):
+        For each claimed slot, try to acquire the per-slot lock (skip if
+        busy), re-check that we are still the winner, write contact data,
+        and release.  Sweep until all claims are written or discarded.
     """
     if reducer_data.position_depth.shape[0] == 0:
         return
@@ -198,7 +208,16 @@ def register_hydroelastic_contact_inline(
     aabb_upper = shape_local_aabb_upper[shape_b]
     ht_capacity = reducer_data.ht_capacity
 
-    # === Part 1: Normal-binned reduction ===
+    # Local accumulators for claimed slots
+    claim_idxs = _claim_idx_type()
+    claim_his = _claim_hi_type()
+    num_claims = int(0)
+
+    # =====================================================================
+    # Phase 1: Claim -- atomic_max competition only, no locks
+    # =====================================================================
+
+    # --- Normal-binned reduction ---
     bin_id = get_slot(normal)
     pos_2d = project_point_to_plane(bin_id, position)
     key = make_contact_key(shape_a, shape_b, bin_id)
@@ -209,44 +228,29 @@ def register_hydroelastic_contact_inline(
             if use_beta:
                 dir_2d = get_spatial_direction_2d(dir_i)
                 score = wp.dot(pos_2d, dir_2d)
-                slot_storage_id = dir_i * ht_capacity + entry_idx
-                value = make_contact_value(score, slot_storage_id)
-                _reduction_update_slot_and_maybe_write_slot(
-                    entry_idx,
-                    dir_i,
-                    value,
-                    shape_a,
-                    shape_b,
-                    position,
-                    normal,
-                    depth,
-                    area,
-                    k_eff,
-                    reducer_data,
-                )
+                value = make_contact_value(score, dir_i * ht_capacity + entry_idx)
+                vidx = _try_claim_slot(entry_idx, dir_i, value, reducer_data)
+                if vidx >= 0:
+                    claim_idxs[num_claims] = vidx
+                    claim_his[num_claims] = wp.int32(value >> wp.uint64(32))
+                    num_claims += 1
+
         max_depth_slot_id = NUM_SPATIAL_DIRECTIONS
-        slot_storage_id = max_depth_slot_id * ht_capacity + entry_idx
-        max_depth_value = make_contact_value(-depth, slot_storage_id)
-        _reduction_update_slot_and_maybe_write_slot(
-            entry_idx,
-            max_depth_slot_id,
-            max_depth_value,
-            shape_a,
-            shape_b,
-            position,
-            normal,
-            depth,
-            area,
-            k_eff,
-            reducer_data,
-        )
+        max_depth_value = make_contact_value(-depth, max_depth_slot_id * ht_capacity + entry_idx)
+        vidx = _try_claim_slot(entry_idx, max_depth_slot_id, max_depth_value, reducer_data)
+        if vidx >= 0:
+            claim_idxs[num_claims] = vidx
+            claim_his[num_claims] = wp.int32(max_depth_value >> wp.uint64(32))
+            num_claims += 1
+
+        # Aggregate force accumulation (lock-free, independent of slot claims)
         if depth < 0.0:
             force_weight = area * (-depth)
             wp.atomic_add(reducer_data.agg_force, entry_idx, force_weight * normal)
             wp.atomic_add(reducer_data.weighted_pos_sum, entry_idx, force_weight * position)
             wp.atomic_add(reducer_data.weight_sum, entry_idx, force_weight)
 
-    # === Part 2: Voxel-based reduction ===
+    # --- Voxel-based reduction ---
     voxel_res = shape_voxel_resolution[shape_b]
     voxel_idx = compute_voxel_index(position, aabb_lower, aabb_upper, voxel_res)
     voxel_idx = wp.clamp(voxel_idx, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1))
@@ -257,21 +261,21 @@ def register_hydroelastic_contact_inline(
     voxel_key = make_contact_key(shape_a, shape_b, voxel_bin_id)
     voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
     if voxel_entry_idx >= 0:
-        slot_storage_id = voxel_local_slot * ht_capacity + voxel_entry_idx
-        voxel_value = make_contact_value(-depth, slot_storage_id)
-        _reduction_update_slot_and_maybe_write_slot(
-            voxel_entry_idx,
-            voxel_local_slot,
-            voxel_value,
-            shape_a,
-            shape_b,
-            position,
-            normal,
-            depth,
-            area,
-            k_eff,
-            reducer_data,
-        )
+        voxel_value = make_contact_value(-depth, voxel_local_slot * ht_capacity + voxel_entry_idx)
+        vidx = _try_claim_slot(voxel_entry_idx, voxel_local_slot, voxel_value, reducer_data)
+        if vidx >= 0:
+            claim_idxs[num_claims] = vidx
+            claim_his[num_claims] = wp.int32(voxel_value >> wp.uint64(32))
+            num_claims += 1
+
+    # =====================================================================
+    # Phase 2: Flush -- non-blocking try-lock round-robin for data writes
+    # =====================================================================
+    _flush_claimed_slots_hydro(
+        claim_idxs, claim_his, num_claims,
+        shape_a, shape_b, position, normal, depth, area, k_eff,
+        reducer_data,
+    )
 
 
 # =============================================================================

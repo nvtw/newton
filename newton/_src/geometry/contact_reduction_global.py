@@ -89,26 +89,6 @@ from .support_function import extract_shape_data
 from .types import GeoType
 
 
-# =============================================================================
-# Native CUDA helpers for inline reduction
-# =============================================================================
-
-
-@wp.func_native("""
-#if defined(__CUDA_ARCH__)
-__threadfence();
-#endif
-""")
-def _threadfence():
-    """Issue a device-scope memory fence (CUDA) or no-op (CPU).
-
-    Ensures that all prior writes by this thread are visible to every
-    other thread on the device before any subsequent memory operation.
-    Used between a guarded data write and a spinlock release so that
-    the next lock holder observes the written data.
-    """
-    ...
-
 # Fixed beta threshold for contact reduction - small positive value to avoid flickering
 # from numerical noise while effectively selecting only near-penetrating contacts for
 # the support polygon. Same value as used in ContactReductionFunctions.BETA_THRESHOLD.
@@ -119,6 +99,12 @@ VALUES_PER_KEY = NUM_SPATIAL_DIRECTIONS + 1
 
 # Vector type for tracking exported contact IDs (used in export kernels)
 exported_ids_vec_type = wp.types.vector(length=VALUES_PER_KEY, dtype=wp.int32)
+
+# Maximum reduction slots a single contact can claim:
+# 6 spatial directions + 1 max-depth + 1 voxel = 8
+MAX_CLAIMS_PER_CONTACT = 8
+_claim_idx_type = wp.types.vector(length=MAX_CLAIMS_PER_CONTACT, dtype=wp.int32)
+_claim_hi_type = wp.types.vector(length=MAX_CLAIMS_PER_CONTACT, dtype=wp.int32)
 
 
 @wp.func
@@ -611,10 +597,31 @@ def _write_slot_basic(
 
 
 @wp.func
-def _reduction_update_slot_and_maybe_write_slot_basic(
+def _try_claim_slot(
     entry_idx: int,
     slot_id: int,
     value: wp.uint64,
+    reducer_data: GlobalContactReducerData,
+) -> int:
+    """Compete for a value slot via ``atomic_max``.
+
+    Returns ``value_idx`` if this thread won (its value was written),
+    or ``-1`` if it lost (existing value was already >= ours).
+    This is purely the competition step -- no locks, no data writes.
+    """
+    ht_capacity = reducer_data.ht_capacity
+    value_idx = slot_id * ht_capacity + entry_idx
+    old = wp.atomic_max(reducer_data.ht_values, value_idx, value)
+    if old >= value:
+        return -1
+    return value_idx
+
+
+@wp.func
+def _flush_claimed_slots_basic(
+    claim_idxs: _claim_idx_type,
+    claim_his: _claim_hi_type,
+    num_claims: int,
     shape_a: int,
     shape_b: int,
     position: wp.vec3,
@@ -622,34 +629,59 @@ def _reduction_update_slot_and_maybe_write_slot_basic(
     depth: float,
     reducer_data: GlobalContactReducerData,
 ):
-    """Atomically update a slot value and write contact data under a per-slot spinlock.
+    """Write contact data to claimed slots using non-blocking try-lock round-robin.
 
-    Non-hydroelastic variant: writes only position_depth, normal, shape_pairs.
-    Uses the same hybrid fast-path / spinlock strategy as the hydroelastic version.
-    See ``_reduction_update_slot_and_maybe_write_slot`` in
-    ``contact_reduction_hydroelastic.py`` for the full docstring.
+    Instead of blocking on a busy lock, each slot that fails to acquire the
+    lock is skipped and retried on the next sweep.  This avoids warp-level
+    stalls: threads cycle to their next pending slot rather than spinning.
+
+    Per slot, the logic is:
+
+    1. **Pre-lock winner check** -- read ``ht_values`` (cheap, may be stale).
+       If we are no longer the winner, discard immediately.
+    2. **Try-lock** -- non-blocking ``atomic_cas`` on the per-slot lock.
+       If busy, skip to the next pending slot.
+    3. **Post-lock winner check** -- re-read under the lock (authoritative).
+       Write contact data only if we are still the winner.
+    4. **Release** -- ``atomic_exch`` to unlock.
+
+    The outer loop sweeps until all claims are either written or discarded.
     """
-    ht_capacity = reducer_data.ht_capacity
-    value_idx = slot_id * ht_capacity + entry_idx
+    remaining = num_claims
+    sweep = int(0)
+    while remaining > 0:
+        sweep += 1
+        if sweep > 32:  # Safety limit (generous; typical exit is 1-2 sweeps)
+            break
+        for i in range(wp.static(MAX_CLAIMS_PER_CONTACT)):
+            if i >= num_claims:
+                break
+            value_idx = claim_idxs[i]
+            if value_idx < 0:
+                continue  # Already processed
 
-    # Fast path: skip if we cannot win (no lock needed)
-    if reducer_data.ht_values[value_idx] >= value:
-        return
+            # Reconstruct the packed value
+            value = (wp.uint64(wp.uint32(claim_his[i])) << wp.uint64(32)) | wp.uint64(wp.uint32(value_idx))
 
-    # Acquire per-slot spinlock
-    while wp.atomic_cas(reducer_data.slot_locks, value_idx, 0, 1) != 0:
-        pass
+            # Pre-lock winner check: discard early if overtaken
+            if reducer_data.ht_values[value_idx] != value:
+                claim_idxs[i] = -1
+                remaining -= 1
+                continue
 
-    # Under lock: compare and conditionally write value + contact data
-    if reducer_data.ht_values[value_idx] < value:
-        reducer_data.ht_values[value_idx] = value
-        _write_slot_basic(value_idx, shape_a, shape_b, position, normal, depth, reducer_data)
+            # Try to acquire lock (non-blocking)
+            if wp.atomic_cas(reducer_data.slot_locks, value_idx, 0, 1) != 0:
+                continue  # Lock busy -- skip, retry next sweep
 
-    # Device-scope fence: ensure all stores are visible before release
-    _threadfence()
+            # Under lock: authoritative winner re-check
+            if reducer_data.ht_values[value_idx] == value:
+                _write_slot_basic(value_idx, shape_a, shape_b, position, normal, depth, reducer_data)
 
-    # Release lock
-    wp.atomic_exch(reducer_data.slot_locks, value_idx, 0)
+            # Release lock
+            wp.atomic_exch(reducer_data.slot_locks, value_idx, 0)
+
+            claim_idxs[i] = -1
+            remaining -= 1
 
 
 @wp.func
@@ -663,9 +695,18 @@ def register_contact_inline(
 ):
     """Register one non-hydroelastic contact in the hashtable on the fly.
 
-    Use when the reducer is in inline mode (slot-backed storage). Performs
-    hashtable find_or_insert, spinlock-guarded slot write, and voxel-based
-    reduction -- all in a single call from the contact generation kernel.
+    Uses a two-phase approach to minimise spinlock hold time:
+
+    **Phase 1 -- Claim** (lock-free ``atomic_max`` only):
+        Compete for every eligible slot.  Record which slots we won in a
+        local vector (up to 8: 6 spatial + 1 max-depth + 1 voxel).
+
+    **Phase 2 -- Flush** (spinlock-protected writes):
+        For each claimed slot, acquire the per-slot spinlock, re-check that
+        we are still the winner, write contact data, and release.
+
+    Splitting the phases keeps the lock hold window as short as possible
+    and avoids interleaving locks with hashtable lookups.
 
     Position is in **world space** (from GJK/MPR). Voxel indexing uses
     ``shape_a`` (the mesh shape) for AABB bounds and transforms the position
@@ -683,7 +724,16 @@ def register_contact_inline(
     aabb_upper = reducer_data.shape_local_aabb_upper[shape_a]
     ht_capacity = reducer_data.ht_capacity
 
-    # === Part 1: Normal-binned reduction ===
+    # Local accumulators for claimed slots
+    claim_idxs = _claim_idx_type()
+    claim_his = _claim_hi_type()
+    num_claims = int(0)
+
+    # =====================================================================
+    # Phase 1: Claim -- atomic_max competition only, no locks
+    # =====================================================================
+
+    # --- Normal-binned reduction ---
     bin_id = get_slot(normal)
     pos_2d = project_point_to_plane(bin_id, position)
     key = make_contact_key(shape_a, shape_b, bin_id)
@@ -694,36 +744,22 @@ def register_contact_inline(
             if use_beta:
                 dir_2d = get_spatial_direction_2d(dir_i)
                 score = wp.dot(pos_2d, dir_2d)
-                slot_storage_id = dir_i * ht_capacity + entry_idx
-                value = make_contact_value(score, slot_storage_id)
-                _reduction_update_slot_and_maybe_write_slot_basic(
-                    entry_idx,
-                    dir_i,
-                    value,
-                    shape_a,
-                    shape_b,
-                    position,
-                    normal,
-                    depth,
-                    reducer_data,
-                )
-        max_depth_slot_id = NUM_SPATIAL_DIRECTIONS
-        slot_storage_id = max_depth_slot_id * ht_capacity + entry_idx
-        max_depth_value = make_contact_value(-depth, slot_storage_id)
-        _reduction_update_slot_and_maybe_write_slot_basic(
-            entry_idx,
-            max_depth_slot_id,
-            max_depth_value,
-            shape_a,
-            shape_b,
-            position,
-            normal,
-            depth,
-            reducer_data,
-        )
+                value = make_contact_value(score, dir_i * ht_capacity + entry_idx)
+                vidx = _try_claim_slot(entry_idx, dir_i, value, reducer_data)
+                if vidx >= 0:
+                    claim_idxs[num_claims] = vidx
+                    claim_his[num_claims] = wp.int32(value >> wp.uint64(32))
+                    num_claims += 1
 
-    # === Part 2: Voxel-based reduction ===
-    # Transform contact position from world space to shape_a's local space
+        max_depth_slot_id = NUM_SPATIAL_DIRECTIONS
+        max_depth_value = make_contact_value(-depth, max_depth_slot_id * ht_capacity + entry_idx)
+        vidx = _try_claim_slot(entry_idx, max_depth_slot_id, max_depth_value, reducer_data)
+        if vidx >= 0:
+            claim_idxs[num_claims] = vidx
+            claim_his[num_claims] = wp.int32(max_depth_value >> wp.uint64(32))
+            num_claims += 1
+
+    # --- Voxel-based reduction ---
     X_shape_ws = reducer_data.shape_transform[shape_a]
     X_ws_shape = wp.transform_inverse(X_shape_ws)
     position_local = wp.transform_point(X_ws_shape, position)
@@ -738,19 +774,21 @@ def register_contact_inline(
     voxel_key = make_contact_key(shape_a, shape_b, voxel_bin_id)
     voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
     if voxel_entry_idx >= 0:
-        slot_storage_id = voxel_local_slot * ht_capacity + voxel_entry_idx
-        voxel_value = make_contact_value(-depth, slot_storage_id)
-        _reduction_update_slot_and_maybe_write_slot_basic(
-            voxel_entry_idx,
-            voxel_local_slot,
-            voxel_value,
-            shape_a,
-            shape_b,
-            position,
-            normal,
-            depth,
-            reducer_data,
-        )
+        voxel_value = make_contact_value(-depth, voxel_local_slot * ht_capacity + voxel_entry_idx)
+        vidx = _try_claim_slot(voxel_entry_idx, voxel_local_slot, voxel_value, reducer_data)
+        if vidx >= 0:
+            claim_idxs[num_claims] = vidx
+            claim_his[num_claims] = wp.int32(voxel_value >> wp.uint64(32))
+            num_claims += 1
+
+    # =====================================================================
+    # Phase 2: Flush -- spinlock-protected data writes for claimed slots
+    # =====================================================================
+    _flush_claimed_slots_basic(
+        claim_idxs, claim_his, num_claims,
+        shape_a, shape_b, position, normal, depth,
+        reducer_data,
+    )
 
 
 @wp.func
