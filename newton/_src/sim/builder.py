@@ -7964,14 +7964,23 @@ class ModelBuilder:
                     is_hydroelastic = bool(shape_flags & ShapeFlags.HYDROELASTIC)
 
                     # Determine if this shape needs SDF:
-                    # - Mesh shapes with sdf_max_resolution/sdf_target_voxel_size set, OR
-                    # - Any colliding shape with is_hydroelastic=True
+                    # - Mesh/CONVEX_MESH shapes with sdf_max_resolution/sdf_target_voxel_size set, OR
+                    # - Any colliding shape with is_hydroelastic=True, OR
+                    # - Primitive shapes (sphere, box, capsule, etc.) with sdf_max_resolution/sdf_target_voxel_size
+                    #   set (enables mesh-primitive SDF path and avoids triangle-overlap path)
+                    is_mesh_like = shape_type in (GeoType.MESH, GeoType.CONVEX_MESH)
+                    has_sdf_resolution = sdf_max_resolution is not None or sdf_target_voxel_size is not None
+                    primitive_with_sdf_cfg = (
+                        shape_type not in (GeoType.MESH, GeoType.CONVEX_MESH, GeoType.PLANE, GeoType.HFIELD)
+                        and shape_flags & ShapeFlags.COLLIDE_SHAPES
+                        and has_sdf_resolution
+                    )
                     needs_sdf = (
-                        shape_type == GeoType.MESH
+                        is_mesh_like
                         and shape_src is not None
                         and shape_flags & ShapeFlags.COLLIDE_SHAPES
-                        and (sdf_max_resolution is not None or sdf_target_voxel_size is not None)
-                    ) or (is_hydroelastic and shape_flags & ShapeFlags.COLLIDE_SHAPES)
+                        and has_sdf_resolution
+                    ) or (is_hydroelastic and shape_flags & ShapeFlags.COLLIDE_SHAPES) or primitive_with_sdf_cfg
 
                     if needs_sdf:
                         # Mesh-sdf collisions handle shape scaling at collision time,
@@ -7979,6 +7988,8 @@ class ModelBuilder:
                         # For hydrelastic collisions this impact of this approximation has yet to be quantified
                         # so we will bake scale into the SDF data here for now.
                         bake_scale = is_hydroelastic
+                        # Primitive SDFs depend on scale for extents; include in cache key.
+                        include_scale_in_cache = bake_scale or primitive_with_sdf_cfg
 
                         cache_key = (
                             hash(shape_src),
@@ -7988,7 +7999,7 @@ class ModelBuilder:
                             tuple(sdf_narrow_band_range),
                             sdf_target_voxel_size,
                             sdf_max_resolution,
-                            tuple(shape_scale) if bake_scale else None,
+                            tuple(shape_scale) if include_scale_in_cache else None,
                         )
                         if cache_key in sdf_cache:
                             idx = sdf_cache[cache_key]
