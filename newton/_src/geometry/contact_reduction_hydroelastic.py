@@ -133,9 +133,9 @@ def _flush_claimed_slots_hydro(
 ):
     """Write hydroelastic contact data to claimed slots using non-blocking try-lock round-robin.
 
-    Same strategy as ``_flush_claimed_slots_basic`` but writes additional
-    hydroelastic data (area, k_eff).  See that function for the full
-    algorithm description.
+    Per slot: pre-lock winner check, try-lock (atomic_cas), post-lock winner
+    re-check, write position/normal/area/k_eff, release lock. Writes additional
+    hydroelastic data (area, k_eff) compared to the basic slot writer.
     """
     remaining = num_claims
     sweep = int(0)
