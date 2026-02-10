@@ -560,7 +560,6 @@ For hydroelastic and SDF-based contacts, use :class:`~newton.SDFHydroelasticConf
         betas=(10.0, -0.5),             # Scoring thresholds (default)
         sticky_contacts=0.0,            # Temporal persistence (0 = disabled)
         normal_matching=True,           # Align reduced normals with aggregate force
-        moment_matching=False,          # Match friction moments (experimental)
     )
 
     pipeline = CollisionPipeline.from_model(model, sdf_hydroelastic_config=config)
@@ -593,12 +592,6 @@ another prioritizes spatial coverage. More betas = more contacts retained but be
    * - ``normal_matching``
      - Rotates selected contact normals so their weighted sum aligns with the aggregate force direction 
        from all unreduced contacts. Preserves net force direction after reduction. Default: True.
-   * - ``moment_matching``
-     - Preserves torsional friction by adding an anchor contact at the depth-weighted centroid and 
-       scaling friction coefficients. This ensures the reduced contact set produces similar resistance 
-       to rotational sliding as the original contacts. Experimental. Default: False. When True, the 
-       pipeline uses the legacy buffered path (full contact buffer + separate reduce pass); when 
-       False (default), reduction is done on the fly with a small winner buffer (lower memory).
    * - ``margin_contact_area``
      - Lower bound on contact area. Hydroelastic stiffness is ``area * k_eff``, but contacts 
        within the contact margin that are not yet penetrating (speculative contacts) have zero 
@@ -885,11 +878,17 @@ Contact reduction options for hydroelastic contacts are configured via :class:`~
 
 **Inline reduction (default):**
 
-When ``reduce_contacts=True`` and ``moment_matching=False`` (the default), contact reduction is done **on the fly** during contact generation: contacts are registered in a hashtable and only winner data is stored in a small buffer (sized by shape-pair and bin count), avoiding a large raw-contact staging buffer. When ``moment_matching=True``, the pipeline uses the legacy buffered path (full contact buffer plus a separate reduce pass) so that moment contributions can be computed from all contacts.
+When ``reduce_contacts=True`` (the default), contact reduction is done **on the fly** during
+contact generation: contacts are registered in a hashtable and only slot-backed reduced contact
+data is stored, avoiding a large raw-contact staging buffer.
 
 **Memory tuning (buffer_fraction):**
 
-The hydroelastic pipeline pre-allocates GPU buffers for octree refinement and (in legacy mode) the contact buffer. With inline reduction (default), the main contact storage is the small winner buffer, so ``buffer_fraction`` mainly scales the octree buffers. Use the ``buffer_fraction`` parameter on :class:`~newton.geometry.SDFHydroelasticConfig` to scale buffers down and trade memory for headroom:
+The hydroelastic pipeline pre-allocates GPU buffers for octree refinement and reduced-contact
+slot storage. Because reduction is inline by default, ``buffer_fraction`` mainly scales the
+octree buffers. Use the ``buffer_fraction`` parameter on
+:class:`~newton.geometry.SDFHydroelasticConfig` to scale buffers down and trade memory for
+headroom:
 
 .. code-block:: python
 

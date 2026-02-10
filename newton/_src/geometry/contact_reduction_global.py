@@ -319,10 +319,6 @@ class GlobalContactReducerData:
     # Accumulates sum(area * depth) for penetrating contacts
     weight_sum: wp.array(dtype=wp.float32)
 
-    # Aggregate moment per hashtable entry (for moment matching)
-    # Accumulates moment contributions for friction scaling
-    agg_moment: wp.array(dtype=wp.float32)
-
     # Hashtable arrays
     ht_keys: wp.array(dtype=wp.uint64)
     ht_values: wp.array(dtype=wp.uint64)
@@ -341,7 +337,6 @@ def _clear_active_kernel(
     agg_force: wp.array(dtype=wp.vec3),
     weighted_pos_sum: wp.array(dtype=wp.vec3),
     weight_sum: wp.array(dtype=wp.float32),
-    agg_moment: wp.array(dtype=wp.float32),
     ht_capacity: int,
     values_per_key: int,
     num_threads: int,
@@ -365,7 +360,6 @@ def _clear_active_kernel(
                 agg_force[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
                 weighted_pos_sum[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
                 weight_sum[entry_idx] = 0.0
-                agg_moment[entry_idx] = 0.0
 
         value_idx = local_idx * ht_capacity + entry_idx
         ht_values[value_idx] = wp.uint64(0)
@@ -443,8 +437,8 @@ class GlobalContactReducer:
         """Initialize the global contact reducer.
 
         Args:
-            capacity: Maximum number of contacts to store (legacy buffer). Use 0 when
-                use_inline_reduction=True and no fallback buffer is needed.
+            capacity: Maximum number of contacts for sequential storage mode.
+                Use 0 when use_inline_reduction=True.
             device: Warp device (e.g., "cuda:0", "cpu")
             store_hydroelastic_data: If True, allocate arrays for contact_area and contact_k_eff
             use_inline_reduction: If True, use slot-backed inline storage in the
@@ -495,12 +489,10 @@ class GlobalContactReducer:
             self.agg_force = wp.zeros(self.hashtable.capacity, dtype=wp.vec3, device=device)
             self.weighted_pos_sum = wp.zeros(self.hashtable.capacity, dtype=wp.vec3, device=device)
             self.weight_sum = wp.zeros(self.hashtable.capacity, dtype=wp.float32, device=device)
-            self.agg_moment = wp.zeros(self.hashtable.capacity, dtype=wp.float32, device=device)
         else:
             self.agg_force = wp.zeros(0, dtype=wp.vec3, device=device)
             self.weighted_pos_sum = wp.zeros(0, dtype=wp.vec3, device=device)
             self.weight_sum = wp.zeros(0, dtype=wp.float32, device=device)
-            self.agg_moment = wp.zeros(0, dtype=wp.float32, device=device)
 
     def clear(self):
         """Clear all contacts and reset the reducer (full clear)."""
@@ -528,7 +520,6 @@ class GlobalContactReducer:
                 self.agg_force,
                 self.weighted_pos_sum,
                 self.weight_sum,
-                self.agg_moment,
                 self.hashtable.capacity,
                 self.values_per_key,
                 num_threads,
@@ -566,7 +557,6 @@ class GlobalContactReducer:
         data.agg_force = self.agg_force
         data.weighted_pos_sum = self.weighted_pos_sum
         data.weight_sum = self.weight_sum
-        data.agg_moment = self.agg_moment
         data.ht_keys = self.hashtable.keys
         data.ht_values = self.ht_values
         data.ht_active_slots = self.hashtable.active_slots

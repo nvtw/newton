@@ -604,34 +604,5 @@ add_function_test(
 )
 
 
-def test_moment_matching_legacy_path(test, device):
-    """Test that moment_matching=True uses legacy buffered path and still produces contacts."""
-    config = SDFHydroelasticConfig(
-        reduce_contacts=True,
-        moment_matching=True,
-        anchor_contact=True,
-        buffer_fraction=1.0,
-        output_contact_surface=True,
-    )
-    model, solver, state_0, state_1, control, collision_pipeline, _, _ = build_stacked_cubes_scene(
-        device, solvers["xpbd"], ShapeType.MESH, CUBE_HALF_LARGE, reduce_contacts=True, sdf_hydroelastic_config=config
-    )
-    contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
-    test.assertGreater(
-        int(contacts.rigid_contact_count.numpy()[0]),
-        0,
-        "Legacy path with moment_matching should produce contacts",
-    )
-
-
-add_function_test(
-    TestHydroelastic,
-    "test_moment_matching_legacy_path",
-    test_moment_matching_legacy_path,
-    devices=cuda_devices,
-    solver_fn=solvers["xpbd"],
-)
-
-
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=True)
