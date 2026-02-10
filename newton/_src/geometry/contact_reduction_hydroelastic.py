@@ -64,6 +64,7 @@ from .contact_reduction_global import (
     VALUES_PER_KEY,
     GlobalContactReducer,
     GlobalContactReducerData,
+    _threadfence,
     export_contact_to_buffer,
     is_contact_already_exported,
     make_contact_key,
@@ -169,18 +170,47 @@ def _reduction_update_slot_and_maybe_write_slot(
     k_eff: float,
     reducer_data: GlobalContactReducerData,
 ):
-    """Update slot with atomic max; if our value wins, write contact to slot storage.
+    """Atomically update a slot value and write contact data under a per-slot spinlock.
 
-    value must pack (score, slot_storage_id) with slot_storage_id = slot_id * ht_capacity + entry_idx.
+    Uses a hybrid fast-path / locked-path strategy:
+
+    1. **Fast-path filter** -- read the current value without locking.  If we
+       cannot possibly win (current >= ours), bail out immediately.  The vast
+       majority of threads exit here with zero lock contention.
+    2. **Spinlock acquire** -- ``atomic_cas`` on the per-slot lock.
+    3. **Guarded compare-and-write** -- under the lock, re-read the value.  If
+       we still win, write both the new value *and* the contact data
+       atomically from the observer's perspective.
+    4. **Threadfence + release** -- ``__threadfence()`` ensures all stores are
+       globally visible before the lock is released via ``atomic_exch``.
+
+    This eliminates the TOCTOU race of the previous lock-free approach where
+    the value and the contact data could be written by different threads.
+
+    ``value`` must pack ``(score, slot_storage_id)`` with
+    ``slot_storage_id = slot_id * ht_capacity + entry_idx``.
     """
     ht_capacity = reducer_data.ht_capacity
     value_idx = slot_id * ht_capacity + entry_idx
+
+    # Fast path: skip if we cannot win (no lock needed)
+    if reducer_data.ht_values[value_idx] >= value:
+        return
+
+    # Acquire per-slot spinlock
+    while wp.atomic_cas(reducer_data.slot_locks, value_idx, 0, 1) != 0:
+        pass
+
+    # Under lock: compare and conditionally write value + contact data
     if reducer_data.ht_values[value_idx] < value:
-        wp.atomic_max(reducer_data.ht_values, value_idx, value)
-    # Read back after max: if slot still holds our value, we won (or tied); write contact data.
-    current = reducer_data.ht_values[value_idx]
-    if current == value:
+        reducer_data.ht_values[value_idx] = value
         _write_slot(value_idx, shape_a, shape_b, position, normal, depth, area, k_eff, reducer_data)
+
+    # Device-scope fence: ensure all stores are visible before release
+    _threadfence()
+
+    # Release lock
+    wp.atomic_exch(reducer_data.slot_locks, value_idx, 0)
 
 
 @wp.func

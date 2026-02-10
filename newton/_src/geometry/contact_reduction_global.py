@@ -88,6 +88,27 @@ from .contact_reduction import (
 from .support_function import extract_shape_data
 from .types import GeoType
 
+
+# =============================================================================
+# Native CUDA helpers for inline reduction
+# =============================================================================
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+__threadfence();
+#endif
+""")
+def _threadfence():
+    """Issue a device-scope memory fence (CUDA) or no-op (CPU).
+
+    Ensures that all prior writes by this thread are visible to every
+    other thread on the device before any subsequent memory operation.
+    Used between a guarded data write and a spinlock release so that
+    the next lock holder observes the written data.
+    """
+    ...
+
 # Fixed beta threshold for contact reduction - small positive value to avoid flickering
 # from numerical noise while effectively selecting only near-penetrating contacts for
 # the support polygon. Same value as used in ContactReductionFunctions.BETA_THRESHOLD.
@@ -319,6 +340,11 @@ class GlobalContactReducerData:
     # Accumulates sum(area * depth) for penetrating contacts
     weight_sum: wp.array(dtype=wp.float32)
 
+    # Per-slot spinlocks for inline reduction (same indexing as ht_values).
+    # Zero = unlocked, non-zero = locked.  Only allocated when
+    # use_inline_reduction is True; otherwise an empty (length-0) array.
+    slot_locks: wp.array(dtype=wp.int32)
+
     # Hashtable arrays
     ht_keys: wp.array(dtype=wp.uint64)
     ht_values: wp.array(dtype=wp.uint64)
@@ -337,6 +363,8 @@ def _clear_active_kernel(
     agg_force: wp.array(dtype=wp.vec3),
     weighted_pos_sum: wp.array(dtype=wp.vec3),
     weight_sum: wp.array(dtype=wp.float32),
+    # Per-slot spinlocks (same indexing as ht_values; length-0 when unused)
+    slot_locks: wp.array(dtype=wp.int32),
     ht_capacity: int,
     values_per_key: int,
     num_threads: int,
@@ -363,6 +391,8 @@ def _clear_active_kernel(
 
         value_idx = local_idx * ht_capacity + entry_idx
         ht_values[value_idx] = wp.uint64(0)
+        if slot_locks.shape[0] > 0:
+            slot_locks[value_idx] = 0
 
         i += num_threads
 
@@ -482,7 +512,14 @@ class GlobalContactReducer:
         self.contact_count = wp.zeros(1, dtype=wp.int32, device=device)
 
         # Values array for hashtable - slot-major layout
-        self.ht_values = wp.zeros(self.hashtable.capacity * self.values_per_key, dtype=wp.uint64, device=device)
+        ht_values_size = self.hashtable.capacity * self.values_per_key
+        self.ht_values = wp.zeros(ht_values_size, dtype=wp.uint64, device=device)
+
+        # Per-slot spinlocks for inline reduction (same size as ht_values)
+        if use_inline_reduction:
+            self.slot_locks = wp.zeros(ht_values_size, dtype=wp.int32, device=device)
+        else:
+            self.slot_locks = wp.zeros(0, dtype=wp.int32, device=device)
 
         # Aggregate force per hashtable entry (for hydroelastic stiffness calculation)
         if store_hydroelastic_data:
@@ -499,6 +536,8 @@ class GlobalContactReducer:
         self.contact_count.zero_()
         self.hashtable.clear()
         self.ht_values.zero_()
+        if self.use_inline_reduction:
+            self.slot_locks.zero_()
 
     def clear_active(self):
         """Clear only the active entries (efficient for sparse usage).
@@ -509,7 +548,7 @@ class GlobalContactReducer:
         # Use fixed thread count for efficient GPU utilization
         num_threads = min(1024, self.hashtable.capacity)
 
-        # Single kernel clears keys, values, and aggregates for active entries
+        # Single kernel clears keys, values, locks, and aggregates for active entries
         wp.launch(
             _clear_active_kernel,
             dim=num_threads,
@@ -520,6 +559,7 @@ class GlobalContactReducer:
                 self.agg_force,
                 self.weighted_pos_sum,
                 self.weight_sum,
+                self.slot_locks,
                 self.hashtable.capacity,
                 self.values_per_key,
                 num_threads,
@@ -557,6 +597,7 @@ class GlobalContactReducer:
         data.agg_force = self.agg_force
         data.weighted_pos_sum = self.weighted_pos_sum
         data.weight_sum = self.weight_sum
+        data.slot_locks = self.slot_locks
         data.ht_keys = self.hashtable.keys
         data.ht_values = self.ht_values
         data.ht_active_slots = self.hashtable.active_slots
