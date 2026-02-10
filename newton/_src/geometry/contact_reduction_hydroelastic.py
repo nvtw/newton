@@ -133,8 +133,8 @@ def export_hydroelastic_contact_to_buffer(
 
 
 @wp.func
-def _write_winner_slot(
-    winner_slot_id: int,
+def _write_slot(
+    slot_id: int,
     shape_a: int,
     shape_b: int,
     position: wp.vec3,
@@ -144,22 +144,22 @@ def _write_winner_slot(
     k_eff: float,
     reducer_data: GlobalContactReducerData,
 ):
-    """Write contact data to winner buffer at the given slot (inline mode only)."""
-    if reducer_data.winner_position_depth.shape[0] == 0:
+    """Write contact data to contact storage at the given slot (inline mode only)."""
+    if reducer_data.position_depth.shape[0] == 0:
         return
-    if winner_slot_id >= reducer_data.winner_position_depth.shape[0]:
+    if slot_id >= reducer_data.position_depth.shape[0]:
         return
-    reducer_data.winner_position_depth[winner_slot_id] = wp.vec4(
+    reducer_data.position_depth[slot_id] = wp.vec4(
         position[0], position[1], position[2], depth
     )
-    reducer_data.winner_normal[winner_slot_id] = normal
-    reducer_data.winner_shape_pairs[winner_slot_id] = wp.vec2i(shape_a, shape_b)
-    reducer_data.winner_contact_area[winner_slot_id] = area
-    reducer_data.winner_contact_k_eff[winner_slot_id] = k_eff
+    reducer_data.normal[slot_id] = normal
+    reducer_data.shape_pairs[slot_id] = wp.vec2i(shape_a, shape_b)
+    reducer_data.contact_area[slot_id] = area
+    reducer_data.contact_k_eff[slot_id] = k_eff
 
 
 @wp.func
-def _reduction_update_slot_and_maybe_write_winner(
+def _reduction_update_slot_and_maybe_write_slot(
     entry_idx: int,
     slot_id: int,
     value: wp.uint64,
@@ -172,20 +172,19 @@ def _reduction_update_slot_and_maybe_write_winner(
     k_eff: float,
     reducer_data: GlobalContactReducerData,
 ):
-    """Update slot with atomic max; if our value wins, write contact to winner buffer.
+    """Update slot with atomic max; if our value wins, write contact to slot storage.
 
-    value must pack (score, winner_slot_id) with winner_slot_id = slot_id * ht_capacity + entry_idx.
+    value must pack (score, slot_storage_id) with slot_storage_id = slot_id * ht_capacity + entry_idx.
     """
     ht_capacity = reducer_data.ht_capacity
     value_idx = slot_id * ht_capacity + entry_idx
-    winner_slot_id = value_idx  # slot-major layout
     if reducer_data.ht_values[value_idx] < value:
         wp.atomic_max(reducer_data.ht_values, value_idx, value)
-    # Read back after max: if slot still holds our value, we won (or tied); write winner data.
+    # Read back after max: if slot still holds our value, we won (or tied); write contact data.
     current = reducer_data.ht_values[value_idx]
     if current == value:
-        _write_winner_slot(
-            winner_slot_id, shape_a, shape_b, position, normal, depth, area, k_eff, reducer_data
+        _write_slot(
+            value_idx, shape_a, shape_b, position, normal, depth, area, k_eff, reducer_data
         )
 
 
@@ -203,13 +202,13 @@ def register_hydroelastic_contact_inline(
     shape_local_aabb_upper: wp.array(dtype=wp.vec3),
     shape_voxel_resolution: wp.array(dtype=wp.vec3i),
 ):
-    """Register one hydroelastic contact in the hashtable on the fly and optionally write winner data.
+    """Register one hydroelastic contact in the hashtable on the fly.
 
-    Use when reducer is in inline mode (winner buffers allocated). Does not use the
-    legacy contact buffer. Performs hashtable find_or_insert, atomic max per slot,
-    conditional winner write, and aggregate accumulation for penetrating contacts.
+    Use when reducer is in inline mode (slot-backed storage in contact arrays). Performs
+    hashtable find_or_insert, atomic max per slot, conditional slot write, and aggregate
+    accumulation for penetrating contacts.
     """
-    if reducer_data.winner_position_depth.shape[0] == 0:
+    if reducer_data.position_depth.shape[0] == 0:
         return
 
     aabb_lower = shape_local_aabb_lower[shape_b]
@@ -229,16 +228,16 @@ def register_hydroelastic_contact_inline(
             if use_beta:
                 dir_2d = get_spatial_direction_2d(dir_i)
                 score = wp.dot(pos_2d, dir_2d)
-                winner_slot_id = dir_i * ht_capacity + entry_idx
-                value = make_contact_value(score, winner_slot_id)
-                _reduction_update_slot_and_maybe_write_winner(
+                slot_storage_id = dir_i * ht_capacity + entry_idx
+                value = make_contact_value(score, slot_storage_id)
+                _reduction_update_slot_and_maybe_write_slot(
                     entry_idx, dir_i, value,
                     shape_a, shape_b, position, normal, depth, area, k_eff, reducer_data,
                 )
         max_depth_slot_id = NUM_SPATIAL_DIRECTIONS
-        winner_slot_id = max_depth_slot_id * ht_capacity + entry_idx
-        max_depth_value = make_contact_value(-depth, winner_slot_id)
-        _reduction_update_slot_and_maybe_write_winner(
+        slot_storage_id = max_depth_slot_id * ht_capacity + entry_idx
+        max_depth_value = make_contact_value(-depth, slot_storage_id)
+        _reduction_update_slot_and_maybe_write_slot(
             entry_idx, max_depth_slot_id, max_depth_value,
             shape_a, shape_b, position, normal, depth, area, k_eff, reducer_data,
         )
@@ -261,9 +260,9 @@ def register_hydroelastic_contact_inline(
         voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots
     )
     if voxel_entry_idx >= 0:
-        winner_slot_id = voxel_local_slot * ht_capacity + voxel_entry_idx
-        voxel_value = make_contact_value(-depth, winner_slot_id)
-        _reduction_update_slot_and_maybe_write_winner(
+        slot_storage_id = voxel_local_slot * ht_capacity + voxel_entry_idx
+        voxel_value = make_contact_value(-depth, slot_storage_id)
+        _reduction_update_slot_and_maybe_write_slot(
             voxel_entry_idx, voxel_local_slot, voxel_value,
             shape_a, shape_b, position, normal, depth, area, k_eff, reducer_data,
         )
@@ -506,18 +505,14 @@ def create_export_hydroelastic_reduced_contacts_kernel(
         weighted_pos_sum: wp.array(dtype=wp.vec3),
         weight_sum: wp.array(dtype=wp.float32),
         agg_moment: wp.array(dtype=wp.float32),
-        # Legacy contact buffer (used when winner buffers are empty)
+        # Contact storage:
+        # - legacy mode: sequential contacts
+        # - inline mode: slot-major contacts (slot_id = slot * ht_capacity + entry_idx)
         position_depth: wp.array(dtype=wp.vec4),
         normal: wp.array(dtype=wp.vec3),
         shape_pairs: wp.array(dtype=wp.vec2i),
         contact_area: wp.array(dtype=wp.float32),
         contact_k_eff: wp.array(dtype=wp.float32),
-        # Winner buffer (inline mode; empty when legacy mode)
-        winner_position_depth: wp.array(dtype=wp.vec4),
-        winner_normal: wp.array(dtype=wp.vec3),
-        winner_shape_pairs: wp.array(dtype=wp.vec2i),
-        winner_contact_area: wp.array(dtype=wp.float32),
-        winner_contact_k_eff: wp.array(dtype=wp.float32),
         # Shape data for margin
         shape_contact_margin: wp.array(dtype=float),
         shape_transform: wp.array(dtype=wp.transform),
@@ -528,13 +523,12 @@ def create_export_hydroelastic_reduced_contacts_kernel(
     ):
         """Export reduced hydroelastic contacts to the writer with aggregate stiffness.
 
-        In inline mode (winner_* arrays non-empty), value low bits are winner_slot_id.
-        In legacy mode, value low bits are contact_id into legacy buffer.
+        In inline mode, value low bits are slot_id into slot-major contact storage.
+        In legacy mode, value low bits are contact_id into sequential contact storage.
         """
         tid = wp.tid()
         ht_capacity = ht_keys.shape[0]
         num_active = ht_active_slots[ht_capacity]
-        use_inline = winner_position_depth.shape[0] > 0
 
         if num_active == 0:
             return
@@ -557,19 +551,13 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 if value == wp.uint64(0):
                     continue
 
-                # In inline mode: low bits = winner_slot_id; in legacy: low bits = contact_id
                 slot_or_contact_id = unpack_contact_id(value)
                 if is_contact_already_exported(slot_or_contact_id, exported_ids, num_exported):
                     continue
 
-                if use_inline:
-                    pd = winner_position_depth[slot_or_contact_id]
-                    contact_normal = winner_normal[slot_or_contact_id]
-                    depth = pd[3]
-                else:
-                    pd = position_depth[slot_or_contact_id]
-                    contact_normal = normal[slot_or_contact_id]
-                    depth = pd[3]
+                pd = position_depth[slot_or_contact_id]
+                contact_normal = normal[slot_or_contact_id]
+                depth = pd[3]
 
                 exported_ids[num_exported] = slot_or_contact_id
                 exported_depths[num_exported] = depth
@@ -583,12 +571,8 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                         selected_normal_sum = selected_normal_sum + pen_magnitude * contact_normal
 
                 if k_eff_first == 0.0:
-                    if use_inline:
-                        k_eff_first = winner_contact_k_eff[slot_or_contact_id]
-                        pair = winner_shape_pairs[slot_or_contact_id]
-                    else:
-                        k_eff_first = contact_k_eff[slot_or_contact_id]
-                        pair = shape_pairs[slot_or_contact_id]
+                    k_eff_first = contact_k_eff[slot_or_contact_id]
+                    pair = shape_pairs[slot_or_contact_id]
                     shape_a_first = pair[0]
                     shape_b_first = pair[1]
 
@@ -669,16 +653,10 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                     slot_or_contact_id = exported_ids[idx]
                     depth = exported_depths[idx]
                     if depth < 0.0:
-                        if use_inline:
-                            pd = winner_position_depth[slot_or_contact_id]
-                            pos = wp.vec3(pd[0], pd[1], pd[2])
-                            contact_normal = winner_normal[slot_or_contact_id]
-                            contact_area_val = winner_contact_area[slot_or_contact_id]
-                        else:
-                            pd = position_depth[slot_or_contact_id]
-                            pos = wp.vec3(pd[0], pd[1], pd[2])
-                            contact_normal = normal[slot_or_contact_id]
-                            contact_area_val = contact_area[slot_or_contact_id]
+                        pd = position_depth[slot_or_contact_id]
+                        pos = wp.vec3(pd[0], pd[1], pd[2])
+                        contact_normal = normal[slot_or_contact_id]
+                        contact_area_val = contact_area[slot_or_contact_id]
                         r_to_contact = pos - anchor_pos
                         selected_moment = selected_moment + contact_area_val * (-depth) * wp.length(
                             wp.cross(r_to_contact, contact_normal)
@@ -711,16 +689,10 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 slot_or_contact_id = exported_ids[idx]
                 depth = exported_depths[idx]
 
-                if use_inline:
-                    pd = winner_position_depth[slot_or_contact_id]
-                    position = wp.vec3(pd[0], pd[1], pd[2])
-                    contact_normal = winner_normal[slot_or_contact_id]
-                    pair = winner_shape_pairs[slot_or_contact_id]
-                else:
-                    position, contact_normal, _ = unpack_contact(
-                        slot_or_contact_id, position_depth, normal
-                    )
-                    pair = shape_pairs[slot_or_contact_id]
+                position, contact_normal, _ = unpack_contact(
+                    slot_or_contact_id, position_depth, normal
+                )
+                pair = shape_pairs[slot_or_contact_id]
                 shape_a = pair[0]
                 shape_b = pair[1]
 
@@ -731,12 +703,8 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 if use_aggregate_stiffness:
                     c_stiffness = shared_stiffness
                 else:
-                    if use_inline:
-                        area = winner_contact_area[slot_or_contact_id]
-                        k_eff = winner_contact_k_eff[slot_or_contact_id]
-                    else:
-                        area = contact_area[slot_or_contact_id]
-                        k_eff = contact_k_eff[slot_or_contact_id]
+                    area = contact_area[slot_or_contact_id]
+                    k_eff = contact_k_eff[slot_or_contact_id]
                     if depth < 0.0:
                         c_stiffness = area * k_eff
                     else:
@@ -894,7 +862,8 @@ class HydroelasticContactReduction:
             config: Configuration options. If None, uses default ``HydroelasticReductionConfig``.
             num_shape_pairs: Number of hydroelastic shape pairs (for inline-mode hashtable sizing).
                 Used when use_inline_reduction is True.
-            use_inline_reduction: If True, use winner-buffer path (no large contact buffer).
+            use_inline_reduction: If True, use slot-backed inline storage
+                (no large sequential contact buffer).
                 Caller should set True only when reduce_contacts is True and moment_matching is False.
         """
         if config is None:
@@ -1052,11 +1021,6 @@ class HydroelasticContactReduction:
                 self.reducer.shape_pairs,
                 self.reducer.contact_area,
                 self.reducer.contact_k_eff,
-                self.reducer.winner_position_depth,
-                self.reducer.winner_normal,
-                self.reducer.winner_shape_pairs,
-                self.reducer.winner_contact_area,
-                self.reducer.winner_contact_k_eff,
                 shape_contact_margin,
                 shape_transform,
                 writer_data,

@@ -288,6 +288,9 @@ class SDFHydroelastic:
 
             self.generate_contacts_kernel = get_generate_contacts_kernel(
                 self.config.output_contact_surface,
+                self.config.margin_contact_area,
+                writer_func,
+                direct_write=not self.config.reduce_contacts,
             )
 
             if self.config.reduce_contacts:
@@ -311,17 +314,16 @@ class SDFHydroelastic:
                 )
                 self.decode_contacts_kernel = None
             else:
-                # No reduction - create a simple reducer for buffer storage and decode kernel
+                # No reduction - write contacts directly to the final output writer.
+                # Keep a lightweight reducer only for contact_count bookkeeping.
                 self.contact_reduction = HydroelasticContactReduction(
-                    capacity=self.max_num_face_contacts,
+                    capacity=0,
                     device=device,
                     writer_func=writer_func,
                     config=HydroelasticReductionConfig(margin_contact_area=self.config.margin_contact_area),
+                    use_inline_reduction=False,
                 )
-                self.decode_contacts_kernel = get_decode_contacts_kernel(
-                    self.config.margin_contact_area,
-                    writer_func,
-                )
+                self.decode_contacts_kernel = None
 
         self.grid_size = min(self.config.grid_size, self.max_num_face_contacts)
 
@@ -460,6 +462,7 @@ class SDFHydroelastic:
             shape_local_aabb_lower,
             shape_local_aabb_upper,
             shape_voxel_resolution,
+            writer_data,
         )
 
         if self.config.reduce_contacts:
@@ -471,12 +474,7 @@ class SDFHydroelastic:
                 shape_contact_margin,
                 writer_data,
             )
-        else:
-            self._decode_contacts(
-                shape_transform,
-                shape_contact_margin,
-                writer_data,
-            )
+        # reduce_contacts=False writes directly to writer_data in _generate_contacts.
 
         wp.launch(
             kernel=verify_collision_step,
@@ -621,10 +619,14 @@ class SDFHydroelastic:
         shape_local_aabb_lower: wp.array(dtype=wp.vec3),
         shape_local_aabb_upper: wp.array(dtype=wp.vec3),
         shape_voxel_resolution: wp.array(dtype=wp.vec3i),
+        writer_data: Any,
     ) -> None:
-        """Generate marching cubes contacts and write to reducer (inline or legacy buffer).
+        """Generate marching cubes contacts and write contacts in one pass.
 
-        Single pass: compute cube state and immediately write faces to reducer.
+        Writes to one of:
+        - inline reducer slots (reduce_contacts=True, moment_matching=False)
+        - legacy reducer buffer (reduce_contacts=True, moment_matching=True)
+        - final writer output directly (reduce_contacts=False)
         """
         self.contact_reduction.clear()
         reducer_data = self.contact_reduction.get_data_struct()
@@ -647,7 +649,9 @@ class SDFHydroelastic:
                 shape_local_aabb_upper,
                 shape_voxel_resolution,
                 self.max_num_iso_voxels,
+                self.max_num_face_contacts,
                 reducer_data,
+                writer_data,
             ],
             outputs=[
                 self.iso_vertex_point,
@@ -1142,7 +1146,12 @@ def get_decode_contacts_kernel(margin_contact_area: float = 1e-4, writer_func: A
 # =============================================================================
 
 
-def get_generate_contacts_kernel(output_vertices: bool):
+def get_generate_contacts_kernel(
+    output_vertices: bool,
+    margin_contact_area: float,
+    writer_func: Any,
+    direct_write: bool,
+):
     """Create kernel for hydroelastic contact generation.
 
     This is a merged kernel that computes cube state and immediately writes
@@ -1173,20 +1182,22 @@ def get_generate_contacts_kernel(output_vertices: bool):
         shape_local_aabb_upper: wp.array(dtype=wp.vec3),
         shape_voxel_resolution: wp.array(dtype=wp.vec3i),
         max_num_iso_voxels: int,
+        max_num_face_contacts: int,
         reducer_data: GlobalContactReducerData,
+        writer_data: Any,
         # outputs for visualization (optional)
         iso_vertex_point: wp.array(dtype=wp.vec3f),
         iso_vertex_depth: wp.array(dtype=wp.float32),
         iso_vertex_shape_pair: wp.array(dtype=wp.vec2i),
     ):
-        """Generate marching cubes contacts and write to reducer (inline or legacy buffer).
+        """Generate marching cubes contacts and write output according to mode.
 
-        When reducer has winner buffers (inline mode), registers contacts on the fly.
-        Otherwise writes to legacy contact buffer for a separate reduce pass.
+        Inline mode and legacy-reduction mode write to reducer storage.
+        Direct-write mode (reduce_contacts=False) writes to writer_data directly.
         """
         offset = wp.tid()
         num_voxels = wp.min(iso_voxel_count[0], max_num_iso_voxels)
-        use_inline = reducer_data.winner_position_depth.shape[0] > 0
+        use_inline = reducer_data.use_inline_reduction != 0
 
         for tid in range(offset, num_voxels, grid_size):
             pair = iso_voxel_shape_pair[tid]
@@ -1258,6 +1269,7 @@ def get_generate_contacts_kernel(output_vertices: bool):
                 )
 
                 if use_inline:
+                    contact_id = wp.atomic_add(reducer_data.contact_count, 0, 1)
                     register_hydroelastic_contact_inline(
                         shape_a,
                         shape_b,
@@ -1271,7 +1283,30 @@ def get_generate_contacts_kernel(output_vertices: bool):
                         shape_local_aabb_upper,
                         shape_voxel_resolution,
                     )
-                    contact_id = -1
+                elif wp.static(direct_write):
+                    contact_id = wp.atomic_add(reducer_data.contact_count, 0, 1)
+                    output_index = wp.atomic_add(writer_data.contact_count, 0, 1)
+                    if output_index < writer_data.contact_max:
+                        normal_world = wp.transform_vector(transform_b, normal)
+                        pos_world = wp.transform_point(transform_b, face_center)
+                        if pen_depth < 0.0:
+                            c_stiffness = area * k_eff
+                        else:
+                            c_stiffness = wp.static(margin_contact_area) * k_eff
+
+                        contact_data = ContactData()
+                        contact_data.contact_point_center = pos_world
+                        contact_data.contact_normal_a_to_b = normal_world
+                        contact_data.contact_distance = 2.0 * pen_depth
+                        contact_data.radius_eff_a = 0.0
+                        contact_data.radius_eff_b = 0.0
+                        contact_data.thickness_a = 0.0
+                        contact_data.thickness_b = 0.0
+                        contact_data.shape_a = shape_a
+                        contact_data.shape_b = shape_b
+                        contact_data.margin = margin
+                        contact_data.contact_stiffness = c_stiffness
+                        writer_func(contact_data, writer_data, output_index)
                 else:
                     contact_id = export_hydroelastic_contact_to_buffer(
                         shape_a,
@@ -1284,7 +1319,7 @@ def get_generate_contacts_kernel(output_vertices: bool):
                         reducer_data,
                     )
 
-                if wp.static(output_vertices) and contact_id >= 0:
+                if wp.static(output_vertices) and contact_id >= 0 and contact_id < max_num_face_contacts:
                     for vi in range(3):
                         iso_vertex_point[3 * contact_id + vi] = wp.transform_point(X_ws_b, face_verts[vi])
                     iso_vertex_depth[contact_id] = pen_depth
