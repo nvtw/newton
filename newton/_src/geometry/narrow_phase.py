@@ -1097,9 +1097,17 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
 
 
 class NarrowPhase:
-    # Public nested alias for hydroelastic SDF support to keep the API discoverable
-    # from the narrow-phase entry point.
-    HydroelasticSDF = _HydroelasticSDF
+    class HydroelasticSDF(_HydroelasticSDF):
+        """NarrowPhase-scoped hydroelastic API wrapper.
+
+        This wrapper keeps the discoverable API path ``NarrowPhase.HydroelasticSDF``
+        without aliasing the exact same class object that is already documented in
+        ``newton.geometry``. Using a distinct subclass avoids duplicate Sphinx object
+        descriptions under ``-W`` docs builds.
+        """
+
+        class Config(_HydroelasticSDF.Config):
+            """Hydroelastic configuration namespace for NarrowPhase usage."""
 
     def __init__(
         self,
