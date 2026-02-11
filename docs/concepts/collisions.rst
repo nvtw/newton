@@ -557,6 +557,7 @@ For hydroelastic and SDF-based contacts, use :class:`~newton.SDFHydroelasticConf
     config = SDFHydroelasticConfig(
         reduce_contacts=True,           # Enable contact reduction
         buffer_fraction=0.2,            # Reduce hydroelastic GPU buffer allocations
+        contact_buffer_fraction=0.5,    # Half-size intermediate contact buffer
         betas=(10.0, -0.5),             # Scoring thresholds (default)
         sticky_contacts=0.0,            # Temporal persistence (0 = disabled)
         normal_matching=True,           # Align reduced normals with aggregate force
@@ -895,6 +896,15 @@ size. Lower values reduce memory usage but also reduce overflow headroom.
 
 If runtime overflow warnings appear, increase ``buffer_fraction`` (or stage-specific
 ``buffer_mult_*`` values) until warnings disappear in your target scenes.
+
+To scale only the large intermediate face-contact buffer (while keeping all
+``buffer_mult_*`` values at 1), use ``contact_buffer_fraction``:
+
+.. code-block:: python
+
+    config = SDFHydroelasticConfig(
+        contact_buffer_fraction=0.5,  # default: half-sized contact buffer
+    )
 
 .. _Contact Material Properties:
 
