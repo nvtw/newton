@@ -141,6 +141,10 @@ class SDFHydroelasticConfig:
     buffer_mult_contact: int = 1
     """Multiplier for the preallocated face contact buffer that stores contact
     positions, normals, depths, and areas. Increase only if a face contact overflow warning is issued."""
+    contact_buffer_fraction: float = 0.5
+    """Fraction of the face contact buffer to allocate when ``reduce_contacts`` is True.
+    Pre-pruning dramatically reduces buffer occupancy so a smaller buffer suffices.
+    Range: (0, 1]. Only applied when ``reduce_contacts`` is enabled; ignored otherwise."""
     grid_size: int = 256 * 8 * 128
     """Grid size for contact handling. Can be tuned for performance."""
     output_contact_surface: bool = False
@@ -151,9 +155,6 @@ class SDFHydroelasticConfig:
     anchor_contact: bool = False
     """Whether to add an anchor contact at the center of pressure for each normal bin.
     The anchor contact helps preserve moment balance. Only active when reduce_contacts is True."""
-    moment_matching: bool = False
-    """Whether to scale friction coefficients to match the aggregate moment from unreduced contacts.
-    Requires anchor_contact=True to be effective. Only active when reduce_contacts is True."""
     margin_contact_area: float = 1e-2
     """Contact area used for non-penetrating contacts at the margin."""
 
@@ -278,7 +279,12 @@ class SDFHydroelastic:
             self.block_broad_collide_shape_pair = self.iso_buffer_shape_pairs[0]
 
             # Face contacts written directly to GlobalContactReducer (no intermediate buffers)
-            self.max_num_face_contacts = max(int(config.buffer_mult_contact * self.max_num_iso_voxels), 64)
+            # When pre-pruning is active, far fewer contacts reach the buffer so we
+            # scale down by contact_buffer_fraction to save memory.
+            face_contact_budget = config.buffer_mult_contact * self.max_num_iso_voxels
+            if config.reduce_contacts:
+                face_contact_budget = face_contact_budget * config.contact_buffer_fraction
+            self.max_num_face_contacts = max(int(face_contact_budget), 64)
 
             if self.config.output_contact_surface:
                 # stores the point and depth of the contact surface vertex
@@ -307,7 +313,6 @@ class SDFHydroelastic:
                 reduction_config = HydroelasticReductionConfig(
                     normal_matching=self.config.normal_matching,
                     anchor_contact=self.config.anchor_contact,
-                    moment_matching=self.config.moment_matching,
                     margin_contact_area=self.config.margin_contact_area,
                 )
                 self.contact_reduction = HydroelasticContactReduction(
@@ -736,12 +741,8 @@ class SDFHydroelastic:
         """Export reduced hydroelastic contacts.
 
         The hashtable and aggregates are already populated by the pre-pruning
-        generate kernel.  Only optional moment matching and the export pass
-        are needed here.
+        generate kernel.  Only the export pass is needed here.
         """
-        if self.contact_reduction.config.moment_matching:
-            self.contact_reduction.reduce_moments(self.grid_size)
-
         self.contact_reduction.export(
             shape_contact_margin=shape_contact_margin,
             shape_transform=shape_transform,
@@ -1379,9 +1380,10 @@ def get_generate_contacts_kernel(output_vertices: bool, pre_prune: bool = False)
                     )
 
                     can_win = False
+                    use_beta = pen_depth < wp.static(BETA_THRESHOLD) * wp.length(aabb_upper - aabb_lower)
 
-                    if normal_entry_idx >= 0 and not can_win:
-                        # Max-depth slot (slot 6) — cheapest check, do first
+                    if normal_entry_idx >= 0:
+                        # Max-depth slot (slot 6)
                         depth_candidate = make_contact_value(-pen_depth, 0)
                         depth_current = reducer_data.ht_values[
                             wp.static(NUM_SPATIAL_DIRECTIONS) * ht_capacity + normal_entry_idx
@@ -1389,18 +1391,15 @@ def get_generate_contacts_kernel(output_vertices: bool, pre_prune: bool = False)
                         if depth_candidate > depth_current:
                             can_win = True
 
-                    if normal_entry_idx >= 0 and not can_win:
                         # Spatial direction slots (6 directions)
-                        use_beta = pen_depth < wp.static(BETA_THRESHOLD) * wp.length(aabb_upper - aabb_lower)
-                        if use_beta:
-                            for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
-                                if not can_win:
-                                    dir_2d = get_spatial_direction_2d(dir_i)
-                                    score = wp.dot(pos_2d, dir_2d)
-                                    candidate = make_contact_value(score, 0)
-                                    current = reducer_data.ht_values[dir_i * ht_capacity + normal_entry_idx]
-                                    if candidate > current:
-                                        can_win = True
+                        for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
+                            if use_beta:
+                                dir_2d = get_spatial_direction_2d(dir_i)
+                                score = wp.dot(pos_2d, dir_2d)
+                                candidate = make_contact_value(score, 0)
+                                current = reducer_data.ht_values[dir_i * ht_capacity + normal_entry_idx]
+                                if candidate > current:
+                                    can_win = True
 
                     # -- Voxel-bin: insert entry + check score --
                     voxel_res = shape_voxel_resolution[shape_b]
@@ -1415,7 +1414,7 @@ def get_generate_contacts_kernel(output_vertices: bool, pre_prune: bool = False)
                         voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots,
                     )
 
-                    if voxel_entry_idx >= 0 and not can_win:
+                    if voxel_entry_idx >= 0:
                         voxel_candidate = make_contact_value(-pen_depth, 0)
                         voxel_current = reducer_data.ht_values[
                             voxel_local_slot * ht_capacity + voxel_entry_idx
@@ -1435,11 +1434,8 @@ def get_generate_contacts_kernel(output_vertices: bool, pre_prune: bool = False)
 
                             # Update normal-bin hashtable slots with real contact_id
                             if normal_entry_idx >= 0:
-                                use_beta_update = pen_depth < wp.static(BETA_THRESHOLD) * wp.length(
-                                    aabb_upper - aabb_lower
-                                )
                                 for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
-                                    if use_beta_update:
+                                    if use_beta:
                                         dir_2d = get_spatial_direction_2d(dir_i)
                                         score = wp.dot(pos_2d, dir_2d)
                                         value = make_contact_value(score, contact_id)
@@ -1466,8 +1462,7 @@ def get_generate_contacts_kernel(output_vertices: bool, pre_prune: bool = False)
                                 )
 
                     # Accumulate aggregates for ALL penetrating faces (even pruned
-                    # ones) so downstream stiffness/anchor/moment calculations
-                    # remain correct.
+                    # ones) so downstream stiffness/anchor calculations remain correct.
                     if normal_entry_idx >= 0 and pen_depth < 0.0:
                         force_weight = area * (-pen_depth)
                         wp.atomic_add(reducer_data.agg_force, normal_entry_idx, force_weight * normal)
