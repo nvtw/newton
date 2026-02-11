@@ -64,6 +64,7 @@ from .contact_reduction_global import (
     VALUES_PER_KEY,
     GlobalContactReducer,
     GlobalContactReducerData,
+    decode_oct,
     export_contact_to_buffer,
     is_contact_already_exported,
     make_contact_key,
@@ -167,9 +168,9 @@ def reduce_hydroelastic_contacts_kernel(
 
     # Grid stride loop over contacts
     for i in range(tid, num_contacts, total_num_threads):
-        # Read contact data from buffer
+        # Read contact data from buffer (normal is octahedral-encoded)
         pd = reducer_data.position_depth[i]
-        normal = reducer_data.normal[i]
+        normal = decode_oct(reducer_data.normal[i])
         pair = reducer_data.shape_pairs[i]
         area = reducer_data.contact_area[i]
 
@@ -289,7 +290,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
         weight_sum: wp.array(dtype=wp.float32),
         # Contact buffer arrays
         position_depth: wp.array(dtype=wp.vec4),
-        normal: wp.array(dtype=wp.vec3),
+        normal: wp.array(dtype=wp.vec2),  # Octahedral-encoded
         shape_pairs: wp.array(dtype=wp.vec2i),
         contact_area: wp.array(dtype=wp.float32),
         contact_k_eff: wp.array(dtype=wp.float32),
@@ -351,9 +352,9 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 if is_contact_already_exported(contact_id, exported_ids, num_exported):
                     continue
 
-                # Unpack contact data
+                # Unpack contact data (normal is octahedral-encoded)
                 pd = position_depth[contact_id]
-                contact_normal = normal[contact_id]
+                contact_normal = decode_oct(normal[contact_id])
                 depth = pd[3]
 
                 # Record this contact and its depth

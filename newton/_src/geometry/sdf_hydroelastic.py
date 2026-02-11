@@ -64,6 +64,7 @@ from .contact_reduction import (
 from .contact_reduction_global import (
     BETA_THRESHOLD,
     GlobalContactReducerData,
+    decode_oct,
     export_contact_to_buffer,
     make_contact_key,
     make_contact_value,
@@ -1132,7 +1133,7 @@ def get_decode_contacts_kernel(margin_contact_area: float = 1e-4, writer_func: A
         shape_transform: wp.array(dtype=wp.transform),
         shape_contact_margin: wp.array(dtype=wp.float32),
         position_depth: wp.array(dtype=wp.vec4),
-        normal: wp.array(dtype=wp.vec3),
+        normal: wp.array(dtype=wp.vec2),  # Octahedral-encoded
         shape_pairs: wp.array(dtype=wp.vec2i),
         contact_area: wp.array(dtype=wp.float32),
         contact_k_eff: wp.array(dtype=wp.float32),
@@ -1176,7 +1177,7 @@ def get_decode_contacts_kernel(margin_contact_area: float = 1e-4, writer_func: A
             pd = position_depth[tid]
             pos = wp.vec3(pd[0], pd[1], pd[2])
             depth = pd[3]
-            contact_normal = normal[tid]
+            contact_normal = decode_oct(normal[tid])
 
             normal_world = wp.transform_vector(transform_b, contact_normal)
             pos_world = wp.transform_point(transform_b, pos)

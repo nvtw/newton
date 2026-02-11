@@ -275,6 +275,58 @@ def unpack_contact_id(packed: wp.uint64) -> int:
     ...
 
 
+@wp.func
+def encode_oct(n: wp.vec3) -> wp.vec2:
+    """Encode a unit normal into octahedral 2D representation.
+
+    Projects the unit vector onto an octahedron and flattens to 2D.
+    Near-uniform precision, stable numerics, no trig needed.
+    """
+    inv_l1 = 1.0 / (wp.abs(n[0]) + wp.abs(n[1]) + wp.abs(n[2]))
+    ox = n[0] * inv_l1
+    oy = n[1] * inv_l1
+    oz = n[2] * inv_l1
+
+    if oz < 0.0:
+        sign_x = 1.0
+        if ox < 0.0:
+            sign_x = -1.0
+        sign_y = 1.0
+        if oy < 0.0:
+            sign_y = -1.0
+        new_x = (1.0 - wp.abs(oy)) * sign_x
+        new_y = (1.0 - wp.abs(ox)) * sign_y
+        ox = new_x
+        oy = new_y
+
+    return wp.vec2(ox, oy)
+
+
+@wp.func
+def decode_oct(e: wp.vec2) -> wp.vec3:
+    """Decode octahedral 2D representation back to a unit normal.
+
+    Inverse of encode_oct.  Lossless within float precision.
+    """
+    nz = 1.0 - wp.abs(e[0]) - wp.abs(e[1])
+    nx = e[0]
+    ny = e[1]
+
+    if nz < 0.0:
+        sign_x = 1.0
+        if nx < 0.0:
+            sign_x = -1.0
+        sign_y = 1.0
+        if ny < 0.0:
+            sign_y = -1.0
+        new_x = (1.0 - wp.abs(ny)) * sign_x
+        new_y = (1.0 - wp.abs(nx)) * sign_y
+        nx = new_x
+        ny = new_y
+
+    return wp.normalize(wp.vec3(nx, ny, nz))
+
+
 @wp.struct
 class GlobalContactReducerData:
     """Struct for passing GlobalContactReducer arrays to kernels.
@@ -285,7 +337,7 @@ class GlobalContactReducerData:
 
     # Contact buffer arrays
     position_depth: wp.array(dtype=wp.vec4)
-    normal: wp.array(dtype=wp.vec3)
+    normal: wp.array(dtype=wp.vec2)  # Octahedral-encoded unit normal (see encode_oct/decode_oct)
     shape_pairs: wp.array(dtype=wp.vec2i)
     contact_count: wp.array(dtype=wp.int32)
     capacity: int
@@ -452,7 +504,7 @@ class GlobalContactReducer:
 
         # Contact buffer (struct of arrays)
         self.position_depth = wp.zeros(capacity, dtype=wp.vec4, device=device)
-        self.normal = wp.zeros(capacity, dtype=wp.vec3, device=device)
+        self.normal = wp.zeros(capacity, dtype=wp.vec2, device=device)  # Octahedral-encoded normals
         self.shape_pairs = wp.zeros(capacity, dtype=wp.vec2i, device=device)
 
         # Optional hydroelastic data arrays
@@ -590,9 +642,9 @@ def export_contact_to_buffer(
     if contact_id >= reducer_data.capacity:
         return -1
 
-    # Store contact data (packed into vec4)
+    # Store contact data (packed into vec4, normal octahedral-encoded into vec2)
     reducer_data.position_depth[contact_id] = wp.vec4(position[0], position[1], position[2], depth)
-    reducer_data.normal[contact_id] = normal
+    reducer_data.normal[contact_id] = encode_oct(normal)
     reducer_data.shape_pairs[contact_id] = wp.vec2i(shape_a, shape_b)
 
     return contact_id
@@ -630,9 +682,9 @@ def reduce_contact_in_hashtable(
         shape_local_aabb_upper: Per-shape local AABB upper bounds
         shape_voxel_resolution: Per-shape voxel grid resolution
     """
-    # Read contact data from buffer
+    # Read contact data from buffer (normal is octahedral-encoded)
     pd = reducer_data.position_depth[contact_id]
-    normal = reducer_data.normal[contact_id]
+    normal = decode_oct(reducer_data.normal[contact_id])
     pair = reducer_data.shape_pairs[contact_id]
 
     position = wp.vec3(pd[0], pd[1], pd[2])
@@ -785,20 +837,22 @@ def reduce_buffered_contacts_kernel(
 def unpack_contact(
     contact_id: int,
     position_depth: wp.array(dtype=wp.vec4),
-    normal: wp.array(dtype=wp.vec3),
+    normal: wp.array(dtype=wp.vec2),
 ):
     """Unpack contact data from the buffer.
+
+    Normal is stored as octahedral-encoded vec2 and decoded back to vec3.
 
     Args:
         contact_id: Index into the contact buffer
         position_depth: Contact buffer for position.xyz + depth
-        normal: Contact buffer for normal
+        normal: Contact buffer for octahedral-encoded normal
 
     Returns:
         Tuple of (position, normal, depth)
     """
     pd = position_depth[contact_id]
-    n = normal[contact_id]
+    n = decode_oct(normal[contact_id])
 
     position = wp.vec3(pd[0], pd[1], pd[2])
     depth = pd[3]
@@ -875,7 +929,7 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
         ht_active_slots: wp.array(dtype=wp.int32),
         # Contact buffer arrays
         position_depth: wp.array(dtype=wp.vec4),
-        normal: wp.array(dtype=wp.vec3),
+        normal: wp.array(dtype=wp.vec2),  # Octahedral-encoded
         shape_pairs: wp.array(dtype=wp.vec2i),
         # Shape data for extracting thickness and effective radius
         shape_types: wp.array(dtype=int),
