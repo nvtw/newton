@@ -107,6 +107,14 @@ class SDFHydroelasticConfig:
     reduce_contacts: bool = True
     """Whether to reduce contacts to a smaller representative set per shape pair.
     When False, all generated contacts are passed through without reduction."""
+    buffer_fraction: float = 1.0
+    """Fraction of worst-case hydroelastic buffer allocations. Range: (0, 1].
+
+    This scales pre-allocated broadphase, iso-refinement, and face-contact
+    buffers before applying stage multipliers. Lower values reduce memory
+    usage and may cause overflows in dense scenes. Overflows are bounds-safe
+    and emit warnings; increase this value when warnings appear.
+    """
     buffer_mult_broad: int = 1
     """Multiplier for the preallocated broadphase buffer that stores overlapping
     block pairs. Increase only if a broadphase overflow warning is issued."""
@@ -206,9 +214,14 @@ class SDFHydroelastic:
         self.total_num_tiles = total_num_tiles
         self.max_num_blocks_per_shape = max_num_blocks_per_shape
 
-        mult = self.config.buffer_mult_iso * self.total_num_tiles
-        self.max_num_blocks_broad = int(
-            self.max_num_shape_pairs * self.max_num_blocks_per_shape * self.config.buffer_mult_broad
+        frac = float(self.config.buffer_fraction)
+        if frac <= 0.0 or frac > 1.0:
+            raise ValueError(f"SDFHydroelasticConfig.buffer_fraction must be in (0, 1], got {frac}")
+
+        mult = max(int(self.config.buffer_mult_iso * self.total_num_tiles * frac), 64)
+        self.max_num_blocks_broad = max(
+            int(self.max_num_shape_pairs * self.max_num_blocks_per_shape * self.config.buffer_mult_broad * frac),
+            64,
         )
         # Output buffer sizes for each octree level (subblocks 8x8x8 -> 4x4x4 -> 2x2x2 -> voxels)
         self.iso_max_dims = (int(2 * mult), int(2 * mult), int(16 * mult), int(32 * mult))
@@ -221,9 +234,12 @@ class SDFHydroelastic:
 
             # Allocate buffers for octree traversal (broadphase + 4 refinement levels)
             self.iso_buffer_counts = [wp.zeros((1,), dtype=wp.int32) for _ in range(5)]
-            self.iso_buffer_prefix = [wp.zeros(self.input_sizes[i], dtype=wp.int32) for i in range(4)]
-            self.iso_buffer_num = [wp.zeros(self.input_sizes[i], dtype=wp.int32) for i in range(4)]
-            self.iso_subblock_idx = [wp.zeros(self.input_sizes[i], dtype=wp.uint8) for i in range(4)]
+            # Scratch buffers are shared across all octree levels since level-i
+            # scratch data is consumed before level-(i+1) writes.
+            max_level_input = max(self.input_sizes)
+            self.iso_buffer_prefix_scratch = wp.zeros(max_level_input, dtype=wp.int32)
+            self.iso_buffer_num_scratch = wp.zeros(max_level_input, dtype=wp.int32)
+            self.iso_subblock_idx_scratch = wp.zeros(max_level_input, dtype=wp.uint8)
             self.iso_buffer_coords = [wp.empty((self.max_num_blocks_broad,), dtype=wp.vec3us)] + [
                 wp.empty((self.iso_max_dims[i],), dtype=wp.vec3us) for i in range(4)
             ]
@@ -245,7 +261,7 @@ class SDFHydroelastic:
             self.block_broad_collide_shape_pair = self.iso_buffer_shape_pairs[0]
 
             # Face contacts written directly to GlobalContactReducer (no intermediate buffers)
-            self.max_num_face_contacts = int(config.buffer_mult_contact * self.max_num_iso_voxels)
+            self.max_num_face_contacts = max(int(config.buffer_mult_contact * self.max_num_iso_voxels), 64)
 
             if self.config.output_contact_surface:
                 # stores the point and depth of the contact surface vertex
@@ -557,15 +573,15 @@ class SDFHydroelastic:
                     self.input_sizes[i],
                 ],
                 outputs=[
-                    self.iso_buffer_num[i],
-                    self.iso_subblock_idx[i],
+                    self.iso_buffer_num_scratch,
+                    self.iso_subblock_idx_scratch,
                 ],
                 device=self.device,
             )
 
             scan_with_total(
-                self.iso_buffer_num[i],
-                self.iso_buffer_prefix[i],
+                self.iso_buffer_num_scratch,
+                self.iso_buffer_prefix_scratch,
                 self.iso_buffer_counts[i],
                 self.iso_buffer_counts[i + 1],
             )
@@ -576,8 +592,8 @@ class SDFHydroelastic:
                 inputs=[
                     self.grid_size,
                     self.iso_buffer_counts[i],
-                    self.iso_buffer_prefix[i],
-                    self.iso_subblock_idx[i],
+                    self.iso_buffer_prefix_scratch,
+                    self.iso_subblock_idx_scratch,
                     self.iso_buffer_shape_pairs[i],
                     self.iso_buffer_coords[i],
                     subblock_size,
@@ -1314,46 +1330,60 @@ def verify_collision_step(
     contact_count: wp.array(dtype=int),
     max_contact_count: int,
 ):
-    # Checks if any buffer overflowed in any stage of the collision pipeline and print a warning
+    # Checks if any buffer overflowed in any stage of the collision pipeline.
+    has_overflow = False
     if num_broad_collide[0] > max_num_broad_collide:
         wp.printf(
-            "Warning: Broad phase buffer overflowed %d > %d. Increase buffer_mult_broad.\n",
+            "  [hydroelastic] broad phase overflow: %d > %d. Increase buffer_fraction or buffer_mult_broad.\n",
             num_broad_collide[0],
             max_num_broad_collide,
         )
+        has_overflow = True
     if num_iso_subblocks_0[0] > max_num_iso_subblocks_0:
         wp.printf(
-            "Warning: Iso subblock 0 buffer overflowed %d > %d. Increase buffer_mult_iso.\n",
+            "  [hydroelastic] iso subblock L0 overflow: %d > %d. Increase buffer_fraction or buffer_mult_iso.\n",
             num_iso_subblocks_0[0],
             max_num_iso_subblocks_0,
         )
+        has_overflow = True
     if num_iso_subblocks_1[0] > max_num_iso_subblocks_1:
         wp.printf(
-            "Warning: Iso subblock 1 buffer overflowed %d > %d. Increase buffer_mult_iso.\n",
+            "  [hydroelastic] iso subblock L1 overflow: %d > %d. Increase buffer_fraction or buffer_mult_iso.\n",
             num_iso_subblocks_1[0],
             max_num_iso_subblocks_1,
         )
+        has_overflow = True
     if num_iso_subblocks_2[0] > max_num_iso_subblocks_2:
         wp.printf(
-            "Warning: Iso subblock 2 buffer overflowed %d > %d. Increase buffer_mult_iso.\n",
+            "  [hydroelastic] iso subblock L2 overflow: %d > %d. Increase buffer_fraction or buffer_mult_iso.\n",
             num_iso_subblocks_2[0],
             max_num_iso_subblocks_2,
         )
+        has_overflow = True
     if num_iso_voxels[0] > max_num_iso_voxels:
         wp.printf(
-            "Warning: Iso voxel buffer overflowed %d > %d. Increase buffer_mult_iso.\n",
+            "  [hydroelastic] iso voxel overflow: %d > %d. Increase buffer_fraction or buffer_mult_iso.\n",
             num_iso_voxels[0],
             max_num_iso_voxels,
         )
+        has_overflow = True
     if face_contact_count[0] > max_face_contact_count:
         wp.printf(
-            "Warning: Face contact buffer overflowed %d > %d. Increase buffer_mult_contact.\n",
+            "  [hydroelastic] face contact overflow: %d > %d. Increase buffer_fraction or buffer_mult_contact.\n",
             face_contact_count[0],
             max_face_contact_count,
         )
+        has_overflow = True
     if contact_count[0] > max_contact_count:
         wp.printf(
-            "Warning: Contact buffer overflowed %d > %d. Increase contact buffer size.\n",
+            "  [hydroelastic] rigid contact output overflow: %d > %d. Increase rigid_contact_max.\n",
             contact_count[0],
             max_contact_count,
+        )
+        has_overflow = True
+
+    if has_overflow:
+        wp.printf(
+            "Warning: Hydroelastic buffers overflowed; some contacts may be dropped. "
+            "Increase SDFHydroelasticConfig.buffer_fraction and/or per-stage buffer multipliers.\n",
         )
