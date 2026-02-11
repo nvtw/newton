@@ -224,7 +224,11 @@ def test_stacked_small_primitive_cubes_hydroelastic(test, device, solver_fn):
 
 def test_stacked_small_mesh_cubes_hydroelastic(test, device, solver_fn):
     """Test 3 small mesh cubes (1cm) stacked on each other remain stable for 1 second using hydroelastic contacts."""
-    run_stacked_cubes_hydroelastic_test(test, device, solver_fn, ShapeType.MESH, CUBE_HALF_SMALL)
+    # This scene can exceed the default pre-pruned face-contact budget on CI GPUs,
+    # which emits overflow warnings that fail check_output-enabled tests.
+    # Keep defaults unchanged and increase capacity only for this stress test.
+    config = SDFHydroelasticConfig(buffer_mult_contact=2)
+    run_stacked_cubes_hydroelastic_test(test, device, solver_fn, ShapeType.MESH, CUBE_HALF_SMALL, config=config)
 
 
 def test_stacked_primitive_cubes_hydroelastic_no_reduction(test, device, solver_fn):
