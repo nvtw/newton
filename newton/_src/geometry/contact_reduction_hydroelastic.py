@@ -206,8 +206,11 @@ def get_reduce_hydroelastic_contacts_kernel(skip_aggregates: bool = False):
 
                 max_depth_value = make_contact_value(-depth, i)
                 reduction_update_slot(
-                    entry_idx, wp.static(NUM_SPATIAL_DIRECTIONS),
-                    max_depth_value, reducer_data.ht_values, ht_capacity,
+                    entry_idx,
+                    wp.static(NUM_SPATIAL_DIRECTIONS),
+                    max_depth_value,
+                    reducer_data.ht_values,
+                    ht_capacity,
                 )
 
                 if wp.static(not skip_aggregates):
@@ -236,7 +239,11 @@ def get_reduce_hydroelastic_contacts_kernel(skip_aggregates: bool = False):
                 )
                 voxel_value = make_contact_value(-depth, i)
                 reduction_update_slot(
-                    voxel_entry_idx, voxel_local_slot, voxel_value, reducer_data.ht_values, ht_capacity,
+                    voxel_entry_idx,
+                    voxel_local_slot,
+                    voxel_value,
+                    reducer_data.ht_values,
+                    ht_capacity,
                 )
 
     return reduce_hydroelastic_contacts_kernel
