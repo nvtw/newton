@@ -342,11 +342,13 @@ class GlobalContactReducerData:
     contact_count: wp.array(dtype=wp.int32)
     capacity: int
 
-    # Optional hydroelastic data (area and stiffness coefficient)
-    # contact_area: area of contact surface element (for hydroelastic contacts)
-    # contact_k_eff: effective stiffness coefficient k_a*k_b/(k_a+k_b)
+    # Optional hydroelastic data
+    # contact_area: area of contact surface element (per contact)
     contact_area: wp.array(dtype=wp.float32)
-    contact_k_eff: wp.array(dtype=wp.float32)
+
+    # Effective stiffness coefficient k_a*k_b/(k_a+k_b) per hashtable entry
+    # Constant for a given shape pair, stored once per entry instead of per contact
+    entry_k_eff: wp.array(dtype=wp.float32)
 
     # Aggregate force per hashtable entry (indexed by ht_capacity)
     # Used for hydroelastic stiffness calculation: c_stiffness = k_eff * |agg_force| / total_depth
@@ -376,10 +378,11 @@ def _clear_active_kernel(
     ht_keys: wp.array(dtype=wp.uint64),
     ht_values: wp.array(dtype=wp.uint64),
     ht_active_slots: wp.array(dtype=wp.int32),
-    # Hydroelastic aggregate arrays (indexed by hashtable entry)
+    # Hydroelastic per-entry arrays
     agg_force: wp.array(dtype=wp.vec3),
     weighted_pos_sum: wp.array(dtype=wp.vec3),
     weight_sum: wp.array(dtype=wp.float32),
+    entry_k_eff: wp.array(dtype=wp.float32),
     ht_capacity: int,
     values_per_key: int,
     num_threads: int,
@@ -416,6 +419,7 @@ def _clear_active_kernel(
                 agg_force[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
                 weighted_pos_sum[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
                 weight_sum[entry_idx] = 0.0
+                entry_k_eff[entry_idx] = 0.0
 
         # Clear this value slot (slot-major layout)
         value_idx = local_idx * ht_capacity + entry_idx
@@ -466,8 +470,7 @@ class GlobalContactReducer:
     - position_depth: vec4(position.x, position.y, position.z, depth)
     - normal: vec3(normal.x, normal.y, normal.z)
     - shape_pairs: vec2i(shape_a, shape_b)
-    - contact_area: float (optional, for hydroelastic contacts)
-    - contact_k_eff: float (optional, for hydroelastic contacts)
+    - contact_area: float (optional, per contact, for hydroelastic contacts)
 
     Attributes:
         capacity: Maximum number of contacts that can be stored
@@ -475,8 +478,8 @@ class GlobalContactReducer:
         position_depth: vec4 array storing position.xyz and depth
         normal: vec3 array storing contact normal
         shape_pairs: vec2i array storing (shape_a, shape_b) per contact
-        contact_area: float array storing contact area (for hydroelastic)
-        contact_k_eff: float array storing effective stiffness (for hydroelastic)
+        contact_area: float array storing contact area per contact (for hydroelastic)
+        entry_k_eff: float array storing effective stiffness per hashtable entry (for hydroelastic)
         contact_count: Atomic counter for allocated contacts
         hashtable: HashTable for tracking best contacts (keys only)
         ht_values: Values array for hashtable (managed here, not by HashTable)
@@ -493,7 +496,7 @@ class GlobalContactReducer:
         Args:
             capacity: Maximum number of contacts to store
             device: Warp device (e.g., "cuda:0", "cpu")
-            store_hydroelastic_data: If True, allocate arrays for contact_area and contact_k_eff
+            store_hydroelastic_data: If True, allocate arrays for contact_area and entry_k_eff
         """
         self.capacity = capacity
         self.device = device
@@ -510,11 +513,8 @@ class GlobalContactReducer:
         # Optional hydroelastic data arrays
         if store_hydroelastic_data:
             self.contact_area = wp.zeros(capacity, dtype=wp.float32, device=device)
-            self.contact_k_eff = wp.zeros(capacity, dtype=wp.float32, device=device)
         else:
-            # Empty arrays (0 capacity) for non-hydroelastic use
             self.contact_area = wp.zeros(0, dtype=wp.float32, device=device)
-            self.contact_k_eff = wp.zeros(0, dtype=wp.float32, device=device)
 
         # Atomic counter for contact allocation
         self.contact_count = wp.zeros(1, dtype=wp.int32, device=device)
@@ -536,14 +536,15 @@ class GlobalContactReducer:
         # Accumulates sum(area * depth * normal) for all penetrating contacts per entry
         if store_hydroelastic_data:
             self.agg_force = wp.zeros(self.hashtable.capacity, dtype=wp.vec3, device=device)
-            # Weighted position sum for anchor contact computation
             self.weighted_pos_sum = wp.zeros(self.hashtable.capacity, dtype=wp.vec3, device=device)
-            # Weight sum for normalizing weighted_pos_sum
             self.weight_sum = wp.zeros(self.hashtable.capacity, dtype=wp.float32, device=device)
+            # k_eff per entry (constant per shape pair, set once on first insert)
+            self.entry_k_eff = wp.zeros(self.hashtable.capacity, dtype=wp.float32, device=device)
         else:
             self.agg_force = wp.zeros(0, dtype=wp.vec3, device=device)
             self.weighted_pos_sum = wp.zeros(0, dtype=wp.vec3, device=device)
             self.weight_sum = wp.zeros(0, dtype=wp.float32, device=device)
+            self.entry_k_eff = wp.zeros(0, dtype=wp.float32, device=device)
 
     def clear(self):
         """Clear all contacts and reset the reducer (full clear)."""
@@ -571,6 +572,7 @@ class GlobalContactReducer:
                 self.agg_force,
                 self.weighted_pos_sum,
                 self.weight_sum,
+                self.entry_k_eff,
                 self.hashtable.capacity,
                 self.values_per_key,
                 num_threads,
@@ -603,7 +605,7 @@ class GlobalContactReducer:
         data.contact_count = self.contact_count
         data.capacity = self.capacity
         data.contact_area = self.contact_area
-        data.contact_k_eff = self.contact_k_eff
+        data.entry_k_eff = self.entry_k_eff
         data.agg_force = self.agg_force
         data.weighted_pos_sum = self.weighted_pos_sum
         data.weight_sum = self.weight_sum
