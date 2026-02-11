@@ -124,14 +124,6 @@ class SDFHydroelasticConfig:
     buffer_mult_contact: int = 1
     """Multiplier for the preallocated face contact buffer that stores contact
     positions, normals, depths, and areas. Increase only if a face contact overflow warning is issued."""
-    contact_buffer_fraction: float = 0.5
-    """Fraction of iso-voxel worst-case used to size the face-contact buffer. Range: (0, 1].
-
-    This scales only the intermediate face-contact buffer capacity (the large
-    global buffer that stores generated hydroelastic contacts before reduction/
-    decoding). Keep ``buffer_mult_contact`` at 1 by default and tune this value
-    to control contact-buffer memory directly.
-    """
     grid_size: int = 256 * 8 * 128
     """Grid size for contact handling. Can be tuned for performance."""
     output_contact_surface: bool = False
@@ -225,11 +217,6 @@ class SDFHydroelastic:
         frac = float(self.config.buffer_fraction)
         if frac <= 0.0 or frac > 1.0:
             raise ValueError(f"SDFHydroelasticConfig.buffer_fraction must be in (0, 1], got {frac}")
-        contact_frac = float(self.config.contact_buffer_fraction)
-        if contact_frac <= 0.0 or contact_frac > 1.0:
-            raise ValueError(
-                f"SDFHydroelasticConfig.contact_buffer_fraction must be in (0, 1], got {contact_frac}"
-            )
 
         mult = max(int(self.config.buffer_mult_iso * self.total_num_tiles * frac), 64)
         self.max_num_blocks_broad = max(
@@ -274,9 +261,7 @@ class SDFHydroelastic:
             self.block_broad_collide_shape_pair = self.iso_buffer_shape_pairs[0]
 
             # Face contacts written directly to GlobalContactReducer (no intermediate buffers)
-            self.max_num_face_contacts = max(
-                int(config.buffer_mult_contact * config.contact_buffer_fraction * self.max_num_iso_voxels), 64
-            )
+            self.max_num_face_contacts = max(int(config.buffer_mult_contact * self.max_num_iso_voxels), 64)
 
             if self.config.output_contact_surface:
                 # stores the point and depth of the contact surface vertex
@@ -1222,9 +1207,8 @@ def get_generate_contacts_kernel(output_vertices: bool):
     ):
         """Generate marching cubes contacts and write directly to GlobalContactReducer.
 
-        Computes cube state and performs in-kernel per-voxel contact reduction:
-        all faces in a voxel are aggregated into one representative contact
-        before writing to the reducer buffer.
+        Computes cube state and immediately writes faces to the reducer buffer
+        in a single pass, using atomic allocation for buffer slots.
         """
         offset = wp.tid()
         num_voxels = wp.min(iso_voxel_count[0], max_num_iso_voxels)
@@ -1288,18 +1272,9 @@ def get_generate_contacts_kernel(output_vertices: bool):
             sdf_b = sdf_data_b.sparse_sdf_ptr
             X_ws_b = transform_b
 
-            # Generate faces and reduce to one representative contact per voxel
-            sum_area = float(0.0)
-            sum_area_pos = wp.vec3(0.0, 0.0, 0.0)
-            sum_area_normal = wp.vec3(0.0, 0.0, 0.0)
-            sum_pen_weight = float(0.0)
-            sum_pen_pos = wp.vec3(0.0, 0.0, 0.0)
-            sum_pen_normal = wp.vec3(0.0, 0.0, 0.0)
-            min_depth = float(1.0e20)
-            deepest_face_idx = int(0)
-
+            # Generate faces and write directly to reducer buffer
             for fi in range(num_faces):
-                area, normal, face_center, pen_depth, _face_verts_unused = mc_calc_face(
+                area, normal, face_center, pen_depth, face_verts = mc_calc_face(
                     flat_edge_verts_table,
                     corner_offsets_table,
                     tri_range_start + 3 * fi,
@@ -1310,90 +1285,25 @@ def get_generate_contacts_kernel(output_vertices: bool):
                     z_id,
                 )
 
-                # Aggregate area-weighted geometry for fallback (non-penetrating voxels).
-                sum_area = sum_area + area
-                sum_area_pos = sum_area_pos + area * face_center
-                sum_area_normal = sum_area_normal + area * normal
-
-                # Aggregate penetrating faces with force-like weight area * |depth|.
-                pen_mag = wp.max(-pen_depth, 0.0)
-                pen_weight = area * pen_mag
-                if pen_weight > 0.0:
-                    sum_pen_weight = sum_pen_weight + pen_weight
-                    sum_pen_pos = sum_pen_pos + pen_weight * face_center
-                    sum_pen_normal = sum_pen_normal + pen_weight * normal
-
-                # Track deepest face for representative depth and debug triangle.
-                if pen_depth < min_depth:
-                    min_depth = pen_depth
-                    deepest_face_idx = fi
-
-            # Choose representative center and normal.
-            rep_center = wp.vec3(0.0, 0.0, 0.0)
-            rep_normal = wp.vec3(0.0, 0.0, 0.0)
-            if sum_pen_weight > 1.0e-12:
-                rep_center = sum_pen_pos / sum_pen_weight
-                if wp.length_sq(sum_pen_normal) > 1.0e-20:
-                    rep_normal = wp.normalize(sum_pen_normal)
-            elif sum_area > 1.0e-12:
-                rep_center = sum_area_pos / sum_area
-                if wp.length_sq(sum_area_normal) > 1.0e-20:
-                    rep_normal = wp.normalize(sum_area_normal)
-            else:
-                # Degenerate fallback: should be rare, but avoid invalid writes.
-                continue
-
-            # If averaged normal is degenerate, recover from deepest face.
-            if wp.length_sq(rep_normal) <= 1.0e-20:
-                _deepest_area, deepest_normal, _deepest_center, _deepest_depth, _deepest_verts_for_normal = mc_calc_face(
-                    flat_edge_verts_table,
-                    corner_offsets_table,
-                    tri_range_start + 3 * deepest_face_idx,
-                    corner_vals,
-                    sdf_b,
-                    x_id,
-                    y_id,
-                    z_id,
+                # Write directly to reducer buffer with atomic allocation
+                contact_id = export_hydroelastic_contact_to_buffer(
+                    shape_a,
+                    shape_b,
+                    face_center,  # Position in SDF local space
+                    normal,
+                    pen_depth,
+                    area,
+                    k_eff,
+                    reducer_data,
                 )
-                rep_normal = deepest_normal
 
-            # Re-evaluate penetration depth at the representative position so
-            # the exported depth is consistent with the averaged contact location.
-            rep_idx = wp.volume_world_to_index(sdf_b, rep_center)
-            rep_depth = wp.volume_sample_f(sdf_b, rep_idx, wp.Volume.LINEAR)
-            if rep_depth >= wp.static(MAXVAL * 0.99) or wp.isnan(rep_depth):
-                rep_depth = min_depth
-            rep_area = sum_area
-
-            # Write one contact per voxel.
-            contact_id = export_hydroelastic_contact_to_buffer(
-                shape_a,
-                shape_b,
-                rep_center,  # Position in SDF local space
-                rep_normal,
-                rep_depth,
-                rep_area,
-                k_eff,
-                reducer_data,
-            )
-
-            # Write debug surface vertices (triangle from deepest face).
-            # The viewer controls whether to display this data via show_hydro_contact_surface.
-            if wp.static(output_vertices) and contact_id >= 0:
-                _debug_area, _debug_normal, _debug_center, _debug_depth, deepest_face_verts = mc_calc_face(
-                    flat_edge_verts_table,
-                    corner_offsets_table,
-                    tri_range_start + 3 * deepest_face_idx,
-                    corner_vals,
-                    sdf_b,
-                    x_id,
-                    y_id,
-                    z_id,
-                )
-                for vi in range(3):
-                    iso_vertex_point[3 * contact_id + vi] = wp.transform_point(X_ws_b, deepest_face_verts[vi])
-                iso_vertex_depth[contact_id] = rep_depth
-                iso_vertex_shape_pair[contact_id] = pair
+                # Write debug surface vertices if enabled (compile-time check only)
+                # The viewer controls whether to display this data via show_hydro_contact_surface
+                if wp.static(output_vertices) and contact_id >= 0:
+                    for vi in range(3):
+                        iso_vertex_point[3 * contact_id + vi] = wp.transform_point(X_ws_b, face_verts[vi])
+                    iso_vertex_depth[contact_id] = pen_depth
+                    iso_vertex_shape_pair[contact_id] = pair
 
     return generate_contacts_kernel
 
