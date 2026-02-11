@@ -127,7 +127,7 @@ class SDFHydroelasticConfig:
     buffer_mult_contact: int = 1
     """Multiplier for the preallocated face contact buffer that stores contact
     positions, normals, depths, and areas. Increase only if a face contact overflow warning is issued."""
-    contact_buffer_fraction: float = 1.0
+    contact_buffer_fraction: float = 0.5
     """Fraction of the face contact buffer to allocate when ``reduce_contacts`` is True.
     The reduce kernel selects winners from whatever fits in the buffer, so a smaller
     buffer trades off coverage for memory savings.
@@ -222,6 +222,11 @@ class SDFHydroelastic:
         frac = float(self.config.buffer_fraction)
         if frac <= 0.0 or frac > 1.0:
             raise ValueError(f"SDFHydroelasticConfig.buffer_fraction must be in (0, 1], got {frac}")
+        contact_frac = float(self.config.contact_buffer_fraction)
+        if contact_frac <= 0.0 or contact_frac > 1.0:
+            raise ValueError(
+                f"SDFHydroelasticConfig.contact_buffer_fraction must be in (0, 1], got {contact_frac}"
+            )
 
         mult = max(int(self.config.buffer_mult_iso * self.total_num_tiles * frac), 64)
         self.max_num_blocks_broad = max(
@@ -662,6 +667,7 @@ class SDFHydroelastic:
                 self.mc_tables[3],
                 shape_contact_margin,
                 self.max_num_iso_voxels,
+                int(self.config.reduce_contacts),
                 reducer_data,
                 shape_local_aabb_lower,
                 shape_local_aabb_upper,
@@ -1233,6 +1239,7 @@ def get_generate_contacts_kernel(output_vertices: bool):
         corner_offsets_table: wp.array(dtype=wp.vec3ub),
         shape_contact_margin: wp.array(dtype=wp.float32),
         max_num_iso_voxels: int,
+        enable_per_voxel_reduction: int,
         reducer_data: GlobalContactReducerData,
         # Unused — kept for signature compatibility with pre-prune callers
         shape_local_aabb_lower: wp.array(dtype=wp.vec3),
@@ -1243,7 +1250,11 @@ def get_generate_contacts_kernel(output_vertices: bool):
         iso_vertex_depth: wp.array(dtype=wp.float32),
         iso_vertex_shape_pair: wp.array(dtype=wp.vec2i),
     ):
-        """Generate marching cubes contacts and write to GlobalContactReducer."""
+        """Generate marching cubes contacts and write to GlobalContactReducer.
+
+        Supports optional in-kernel per-voxel reduction to cap emitted contacts
+        before global reduction.
+        """
         offset = wp.tid()
         num_voxels = wp.min(iso_voxel_count[0], max_num_iso_voxels)
         for tid in range(offset, num_voxels, grid_size):
@@ -1306,33 +1317,159 @@ def get_generate_contacts_kernel(output_vertices: bool):
             sdf_b = sdf_data_b.sparse_sdf_ptr
             X_ws_b = transform_b
 
-            # Generate faces and write to reducer buffer
-            for fi in range(num_faces):
-                area, normal, face_center, pen_depth, face_verts = mc_calc_face(
-                    flat_edge_verts_table,
-                    corner_offsets_table,
-                    tri_range_start + 3 * fi,
-                    corner_vals,
-                    sdf_b,
-                    x_id,
-                    y_id,
-                    z_id,
-                )
-                contact_id = export_hydroelastic_contact_to_buffer(
+            if enable_per_voxel_reduction <= 0:
+                # Legacy path: emit all marching-cubes face contacts.
+                for fi in range(num_faces):
+                    area, normal, face_center, pen_depth, face_verts = mc_calc_face(
+                        flat_edge_verts_table,
+                        corner_offsets_table,
+                        tri_range_start + 3 * fi,
+                        corner_vals,
+                        sdf_b,
+                        x_id,
+                        y_id,
+                        z_id,
+                    )
+                    contact_id = export_hydroelastic_contact_to_buffer(
+                        shape_a,
+                        shape_b,
+                        face_center,
+                        normal,
+                        pen_depth,
+                        area,
+                        k_eff,
+                        reducer_data,
+                    )
+                    if wp.static(output_vertices) and contact_id >= 0:
+                        for vi in range(3):
+                            iso_vertex_point[3 * contact_id + vi] = wp.transform_point(X_ws_b, face_verts[vi])
+                        iso_vertex_depth[contact_id] = pen_depth
+                        iso_vertex_shape_pair[contact_id] = pair
+            else:
+                # Per-voxel path: always emit one representative contact, and in
+                # adaptive mode optionally emit the deepest face as a second contact.
+                sum_area = float(0.0)
+                sum_area_pos = wp.vec3(0.0, 0.0, 0.0)
+                sum_area_normal = wp.vec3(0.0, 0.0, 0.0)
+                sum_pen_weight = float(0.0)
+                sum_pen_pos = wp.vec3(0.0, 0.0, 0.0)
+                sum_pen_normal = wp.vec3(0.0, 0.0, 0.0)
+                min_depth = float(1.0e20)
+                deepest_face_idx = int(0)
+                deepest_area = float(0.0)
+                deepest_normal = wp.vec3(0.0, 0.0, 0.0)
+                deepest_center = wp.vec3(0.0, 0.0, 0.0)
+
+                for fi in range(num_faces):
+                    area, normal, face_center, pen_depth, _face_verts_unused = mc_calc_face(
+                        flat_edge_verts_table,
+                        corner_offsets_table,
+                        tri_range_start + 3 * fi,
+                        corner_vals,
+                        sdf_b,
+                        x_id,
+                        y_id,
+                        z_id,
+                    )
+
+                    sum_area = sum_area + area
+                    sum_area_pos = sum_area_pos + area * face_center
+                    sum_area_normal = sum_area_normal + area * normal
+
+                    pen_mag = wp.max(-pen_depth, 0.0)
+                    pen_weight = area * pen_mag
+                    if pen_weight > 0.0:
+                        sum_pen_weight = sum_pen_weight + pen_weight
+                        sum_pen_pos = sum_pen_pos + pen_weight * face_center
+                        sum_pen_normal = sum_pen_normal + pen_weight * normal
+
+                    if pen_depth < min_depth:
+                        min_depth = pen_depth
+                        deepest_face_idx = fi
+                        deepest_area = area
+                        deepest_normal = normal
+                        deepest_center = face_center
+
+                if sum_area <= 1.0e-12:
+                    continue
+
+                rep_center = wp.vec3(0.0, 0.0, 0.0)
+                rep_normal = wp.vec3(0.0, 0.0, 0.0)
+                if sum_pen_weight > 1.0e-12:
+                    rep_center = sum_pen_pos / sum_pen_weight
+                    if wp.length_sq(sum_pen_normal) > 1.0e-20:
+                        rep_normal = wp.normalize(sum_pen_normal)
+                else:
+                    rep_center = sum_area_pos / sum_area
+                    if wp.length_sq(sum_area_normal) > 1.0e-20:
+                        rep_normal = wp.normalize(sum_area_normal)
+
+                if wp.length_sq(rep_normal) <= 1.0e-20:
+                    rep_normal = deepest_normal
+
+                # Re-evaluate penetration depth at representative location.
+                rep_idx = wp.volume_world_to_index(sdf_b, rep_center)
+                rep_depth = wp.volume_sample_f(sdf_b, rep_idx, wp.Volume.LINEAR)
+                if rep_depth >= wp.static(MAXVAL * 0.99) or wp.isnan(rep_depth):
+                    rep_depth = min_depth
+
+                rep_contact_id = export_hydroelastic_contact_to_buffer(
                     shape_a,
                     shape_b,
-                    face_center,
-                    normal,
-                    pen_depth,
-                    area,
+                    rep_center,
+                    rep_normal,
+                    rep_depth,
+                    sum_area,
                     k_eff,
                     reducer_data,
                 )
-                if wp.static(output_vertices) and contact_id >= 0:
-                    for vi in range(3):
-                        iso_vertex_point[3 * contact_id + vi] = wp.transform_point(X_ws_b, face_verts[vi])
-                    iso_vertex_depth[contact_id] = pen_depth
-                    iso_vertex_shape_pair[contact_id] = pair
+
+                deep_contact_id = int(-1)
+                if num_faces > 1:
+                    # Internal heuristic constants (not exposed as user-facing knobs).
+                    secondary_normal_cos = float(0.7)
+                    secondary_area_fraction = float(0.2)
+                    normal_agreement = wp.dot(rep_normal, deepest_normal)
+                    deep_area_ok = deepest_area >= secondary_area_fraction * sum_area
+                    deep_separation = wp.abs(min_depth - rep_depth)
+                    if (
+                        normal_agreement < secondary_normal_cos
+                        and deep_area_ok
+                        and deep_separation > 1.0e-6
+                    ):
+                        deep_contact_id = export_hydroelastic_contact_to_buffer(
+                            shape_a,
+                            shape_b,
+                            deepest_center,
+                            deepest_normal,
+                            min_depth,
+                            deepest_area,
+                            k_eff,
+                            reducer_data,
+                        )
+
+                if wp.static(output_vertices):
+                    if rep_contact_id >= 0 or deep_contact_id >= 0:
+                        _debug_area, _debug_normal, _debug_center, _debug_depth, deepest_face_verts = mc_calc_face(
+                            flat_edge_verts_table,
+                            corner_offsets_table,
+                            tri_range_start + 3 * deepest_face_idx,
+                            corner_vals,
+                            sdf_b,
+                            x_id,
+                            y_id,
+                            z_id,
+                        )
+                        if rep_contact_id >= 0:
+                            for vi in range(3):
+                                iso_vertex_point[3 * rep_contact_id + vi] = wp.transform_point(X_ws_b, deepest_face_verts[vi])
+                            iso_vertex_depth[rep_contact_id] = rep_depth
+                            iso_vertex_shape_pair[rep_contact_id] = pair
+                        if deep_contact_id >= 0:
+                            for vi in range(3):
+                                iso_vertex_point[3 * deep_contact_id + vi] = wp.transform_point(X_ws_b, deepest_face_verts[vi])
+                            iso_vertex_depth[deep_contact_id] = min_depth
+                            iso_vertex_shape_pair[deep_contact_id] = pair
 
     return generate_contacts_kernel
 
