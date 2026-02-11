@@ -52,12 +52,29 @@ from ..sim.builder import ShapeFlags
 from ..sim.model import Model
 from .collision_core import sat_box_intersection
 from .contact_data import ContactData
-from .contact_reduction_global import GlobalContactReducerData
+from .contact_reduction import (
+    NUM_NORMAL_BINS,
+    NUM_SPATIAL_DIRECTIONS,
+    NUM_VOXEL_DEPTH_SLOTS,
+    compute_voxel_index,
+    get_slot,
+    get_spatial_direction_2d,
+    project_point_to_plane,
+)
+from .contact_reduction_global import (
+    BETA_THRESHOLD,
+    GlobalContactReducerData,
+    export_contact_to_buffer,
+    make_contact_key,
+    make_contact_value,
+    reduction_update_slot,
+)
 from .contact_reduction_hydroelastic import (
     HydroelasticContactReduction,
     HydroelasticReductionConfig,
     export_hydroelastic_contact_to_buffer,
 )
+from .hashtable import hashtable_find_or_insert
 from .sdf_contact import sample_sdf_extrapolated
 from .sdf_mc import get_mc_tables, mc_calc_face
 from .sdf_utils import SDFData
@@ -275,8 +292,13 @@ class SDFHydroelastic:
 
             self.mc_tables = get_mc_tables(device)
 
+            # Placeholder empty arrays for kernel parameters unused in no-prune mode
+            self._empty_vec3 = wp.empty((0,), dtype=wp.vec3, device=device)
+            self._empty_vec3i = wp.empty((0,), dtype=wp.vec3i, device=device)
+
             self.generate_contacts_kernel = get_generate_contacts_kernel(
-                self.config.output_contact_surface,
+                output_vertices=self.config.output_contact_surface,
+                pre_prune=self.config.reduce_contacts,
             )
 
             if self.config.reduce_contacts:
@@ -438,9 +460,17 @@ class SDFHydroelastic:
 
         self._find_iso_voxels(shape_sdf_data, shape_transform, shape_contact_margin)
 
-        self._generate_contacts(shape_sdf_data, shape_transform, shape_contact_margin)
-
         if self.config.reduce_contacts:
+            # Pre-prune mode: pass AABB/voxel arrays so the generate kernel
+            # populates the hashtable and gates buffer writes.
+            self._generate_contacts(
+                shape_sdf_data,
+                shape_transform,
+                shape_contact_margin,
+                shape_local_aabb_lower=shape_local_aabb_lower,
+                shape_local_aabb_upper=shape_local_aabb_upper,
+                shape_voxel_resolution=shape_voxel_resolution,
+            )
             self._reduce_decode_contacts(
                 shape_transform,
                 shape_local_aabb_lower,
@@ -450,6 +480,7 @@ class SDFHydroelastic:
                 writer_data,
             )
         else:
+            self._generate_contacts(shape_sdf_data, shape_transform, shape_contact_margin)
             self._decode_contacts(
                 shape_transform,
                 shape_contact_margin,
@@ -612,13 +643,27 @@ class SDFHydroelastic:
         shape_sdf_data: wp.array(dtype=SDFData),
         shape_transform: wp.array(dtype=wp.transform),
         shape_contact_margin: wp.array(dtype=wp.float32),
+        shape_local_aabb_lower: wp.array | None = None,
+        shape_local_aabb_upper: wp.array | None = None,
+        shape_voxel_resolution: wp.array | None = None,
     ) -> None:
         """Generate marching cubes contacts and write directly to the contact buffer.
 
         Single pass: compute cube state and immediately write faces to reducer buffer.
+        When pre-pruning is active the extra AABB/voxel-resolution arrays must be
+        provided so the kernel can populate the hashtable and gate buffer writes.
         """
         self.contact_reduction.clear()
         reducer_data = self.contact_reduction.get_data_struct()
+
+        # Placeholder arrays for the pre-prune parameters when not used
+        if shape_local_aabb_lower is None:
+            shape_local_aabb_lower = self._empty_vec3
+        if shape_local_aabb_upper is None:
+            shape_local_aabb_upper = self._empty_vec3
+        if shape_voxel_resolution is None:
+            shape_voxel_resolution = self._empty_vec3i
+
         wp.launch(
             kernel=self.generate_contacts_kernel,
             dim=[self.grid_size],
@@ -636,6 +681,9 @@ class SDFHydroelastic:
                 shape_contact_margin,
                 self.max_num_iso_voxels,
                 reducer_data,
+                shape_local_aabb_lower,
+                shape_local_aabb_upper,
+                shape_voxel_resolution,
             ],
             outputs=[
                 self.iso_vertex_point,
@@ -685,17 +733,18 @@ class SDFHydroelastic:
         shape_contact_margin: wp.array(dtype=wp.float32),
         writer_data: Any,
     ) -> None:
-        """Reduce and decode hydroelastic contacts.
+        """Export reduced hydroelastic contacts.
 
-        Contacts are already in the buffer (written by _generate_contacts).
-        This method registers them in the hashtable and exports the reduced set.
+        The hashtable and aggregates are already populated by the pre-pruning
+        generate kernel.  Only optional moment matching and the export pass
+        are needed here.
         """
-        self.contact_reduction.reduce_and_export(
-            shape_transform=shape_transform,
-            shape_local_aabb_lower=shape_local_aabb_lower,
-            shape_local_aabb_upper=shape_local_aabb_upper,
-            shape_voxel_resolution=shape_voxel_resolution,
+        if self.contact_reduction.config.moment_matching:
+            self.contact_reduction.reduce_moments(self.grid_size)
+
+        self.contact_reduction.export(
             shape_contact_margin=shape_contact_margin,
+            shape_transform=shape_transform,
             writer_data=writer_data,
             grid_size=self.grid_size,
         )
@@ -1171,18 +1220,28 @@ def get_decode_contacts_kernel(margin_contact_area: float = 1e-4, writer_func: A
 # =============================================================================
 
 
-def get_generate_contacts_kernel(output_vertices: bool):
+def get_generate_contacts_kernel(output_vertices: bool, pre_prune: bool = False):
     """Create kernel for hydroelastic contact generation.
 
     This is a merged kernel that computes cube state and immediately writes
     faces to the reducer buffer in a single pass, eliminating intermediate
     storage for cube indices and corner values.
 
+    When ``pre_prune`` is True the kernel also populates the reduction
+    hashtable and accumulates hydroelastic aggregates.  A face is written
+    to the contact buffer **only** if its score can beat at least one
+    current hashtable slot (spatial extreme, max-depth, or voxel).  This
+    dramatically reduces buffer occupancy in dense scenes while keeping
+    the downstream export kernel unchanged.
+
     Args:
-        output_vertices: Whether to output contact surface vertices for visualization
+        output_vertices: Whether to output contact surface vertices for visualization.
+        pre_prune: If True, gate buffer writes by hashtable winner checks
+            and populate the hashtable during generation so the separate
+            ``reduce_hydroelastic_contacts_kernel`` can be skipped.
 
     Returns:
-        generate_contacts_kernel: Warp kernel for contact generation
+        generate_contacts_kernel: Warp kernel for contact generation.
     """
 
     @wp.kernel(enable_backward=False)
@@ -1200,15 +1259,21 @@ def get_generate_contacts_kernel(output_vertices: bool):
         shape_contact_margin: wp.array(dtype=wp.float32),
         max_num_iso_voxels: int,
         reducer_data: GlobalContactReducerData,
-        # outputs for visualization (optional)
+        # Pre-prune extras (only read when pre_prune=True at compile time)
+        shape_local_aabb_lower: wp.array(dtype=wp.vec3),
+        shape_local_aabb_upper: wp.array(dtype=wp.vec3),
+        shape_voxel_resolution: wp.array(dtype=wp.vec3i),
+        # Outputs for visualization (optional)
         iso_vertex_point: wp.array(dtype=wp.vec3f),
         iso_vertex_depth: wp.array(dtype=wp.float32),
         iso_vertex_shape_pair: wp.array(dtype=wp.vec2i),
     ):
-        """Generate marching cubes contacts and write directly to GlobalContactReducer.
+        """Generate marching cubes contacts and write to GlobalContactReducer.
 
-        Computes cube state and immediately writes faces to the reducer buffer
-        in a single pass, using atomic allocation for buffer slots.
+        When pre_prune is compiled in, each face is checked against
+        current hashtable slot scores before allocating a buffer entry.
+        The hashtable and aggregate arrays are populated during this pass
+        so the separate reduce kernel can be skipped.
         """
         offset = wp.tid()
         num_voxels = wp.min(iso_voxel_count[0], max_num_iso_voxels)
@@ -1272,7 +1337,7 @@ def get_generate_contacts_kernel(output_vertices: bool):
             sdf_b = sdf_data_b.sparse_sdf_ptr
             X_ws_b = transform_b
 
-            # Generate faces and write directly to reducer buffer
+            # Generate faces and write to reducer buffer
             for fi in range(num_faces):
                 area, normal, face_center, pen_depth, face_verts = mc_calc_face(
                     flat_edge_verts_table,
@@ -1285,20 +1350,131 @@ def get_generate_contacts_kernel(output_vertices: bool):
                     z_id,
                 )
 
-                # Write directly to reducer buffer with atomic allocation
-                contact_id = export_hydroelastic_contact_to_buffer(
-                    shape_a,
-                    shape_b,
-                    face_center,  # Position in SDF local space
-                    normal,
-                    pen_depth,
-                    area,
-                    k_eff,
-                    reducer_data,
-                )
+                if wp.static(not pre_prune):
+                    # ---- Original path: write every face unconditionally ----
+                    contact_id = export_hydroelastic_contact_to_buffer(
+                        shape_a,
+                        shape_b,
+                        face_center,
+                        normal,
+                        pen_depth,
+                        area,
+                        k_eff,
+                        reducer_data,
+                    )
+
+                if wp.static(pre_prune):
+                    # ---- Pre-prune path: gate writes by hashtable scores ----
+                    ht_capacity = reducer_data.ht_capacity
+
+                    aabb_lower = shape_local_aabb_lower[shape_b]
+                    aabb_upper = shape_local_aabb_upper[shape_b]
+
+                    # -- Normal-bin: insert entry + check scores --
+                    bin_id = get_slot(normal)
+                    pos_2d = project_point_to_plane(bin_id, face_center)
+                    normal_key = make_contact_key(shape_a, shape_b, bin_id)
+                    normal_entry_idx = hashtable_find_or_insert(
+                        normal_key, reducer_data.ht_keys, reducer_data.ht_active_slots,
+                    )
+
+                    can_win = False
+
+                    if normal_entry_idx >= 0 and not can_win:
+                        # Max-depth slot (slot 6) — cheapest check, do first
+                        depth_candidate = make_contact_value(-pen_depth, 0)
+                        depth_current = reducer_data.ht_values[
+                            wp.static(NUM_SPATIAL_DIRECTIONS) * ht_capacity + normal_entry_idx
+                        ]
+                        if depth_candidate > depth_current:
+                            can_win = True
+
+                    if normal_entry_idx >= 0 and not can_win:
+                        # Spatial direction slots (6 directions)
+                        use_beta = pen_depth < wp.static(BETA_THRESHOLD) * wp.length(aabb_upper - aabb_lower)
+                        if use_beta:
+                            for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
+                                if not can_win:
+                                    dir_2d = get_spatial_direction_2d(dir_i)
+                                    score = wp.dot(pos_2d, dir_2d)
+                                    candidate = make_contact_value(score, 0)
+                                    current = reducer_data.ht_values[dir_i * ht_capacity + normal_entry_idx]
+                                    if candidate > current:
+                                        can_win = True
+
+                    # -- Voxel-bin: insert entry + check score --
+                    voxel_res = shape_voxel_resolution[shape_b]
+                    voxel_idx = compute_voxel_index(face_center, aabb_lower, aabb_upper, voxel_res)
+                    voxel_idx = wp.clamp(voxel_idx, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1))
+                    voxels_per_group = wp.static(NUM_SPATIAL_DIRECTIONS + 1)
+                    voxel_group = voxel_idx // voxels_per_group
+                    voxel_local_slot = voxel_idx % voxels_per_group
+                    voxel_bin_id = NUM_NORMAL_BINS + voxel_group
+                    voxel_key = make_contact_key(shape_a, shape_b, voxel_bin_id)
+                    voxel_entry_idx = hashtable_find_or_insert(
+                        voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots,
+                    )
+
+                    if voxel_entry_idx >= 0 and not can_win:
+                        voxel_candidate = make_contact_value(-pen_depth, 0)
+                        voxel_current = reducer_data.ht_values[
+                            voxel_local_slot * ht_capacity + voxel_entry_idx
+                        ]
+                        if voxel_candidate > voxel_current:
+                            can_win = True
+
+                    # -- Allocate + write only if this face can win at least one slot --
+                    contact_id = int(-1)
+                    if can_win:
+                        contact_id = export_contact_to_buffer(
+                            shape_a, shape_b, face_center, normal, pen_depth, reducer_data,
+                        )
+                        if contact_id >= 0:
+                            reducer_data.contact_area[contact_id] = area
+                            reducer_data.contact_k_eff[contact_id] = k_eff
+
+                            # Update normal-bin hashtable slots with real contact_id
+                            if normal_entry_idx >= 0:
+                                use_beta_update = pen_depth < wp.static(BETA_THRESHOLD) * wp.length(
+                                    aabb_upper - aabb_lower
+                                )
+                                for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
+                                    if use_beta_update:
+                                        dir_2d = get_spatial_direction_2d(dir_i)
+                                        score = wp.dot(pos_2d, dir_2d)
+                                        value = make_contact_value(score, contact_id)
+                                        reduction_update_slot(
+                                            normal_entry_idx, dir_i, value,
+                                            reducer_data.ht_values, ht_capacity,
+                                        )
+                                # Max-depth slot
+                                depth_value = make_contact_value(-pen_depth, contact_id)
+                                reduction_update_slot(
+                                    normal_entry_idx,
+                                    wp.static(NUM_SPATIAL_DIRECTIONS),
+                                    depth_value,
+                                    reducer_data.ht_values,
+                                    ht_capacity,
+                                )
+
+                            # Update voxel-bin hashtable slot
+                            if voxel_entry_idx >= 0:
+                                voxel_value = make_contact_value(-pen_depth, contact_id)
+                                reduction_update_slot(
+                                    voxel_entry_idx, voxel_local_slot, voxel_value,
+                                    reducer_data.ht_values, ht_capacity,
+                                )
+
+                    # Accumulate aggregates for ALL penetrating faces (even pruned
+                    # ones) so downstream stiffness/anchor/moment calculations
+                    # remain correct.
+                    if normal_entry_idx >= 0 and pen_depth < 0.0:
+                        force_weight = area * (-pen_depth)
+                        wp.atomic_add(reducer_data.agg_force, normal_entry_idx, force_weight * normal)
+                        wp.atomic_add(reducer_data.weighted_pos_sum, normal_entry_idx, force_weight * face_center)
+                        wp.atomic_add(reducer_data.weight_sum, normal_entry_idx, force_weight)
 
                 # Write debug surface vertices if enabled (compile-time check only)
-                # The viewer controls whether to display this data via show_hydro_contact_surface
                 if wp.static(output_vertices) and contact_id >= 0:
                     for vi in range(3):
                         iso_vertex_point[3 * contact_id + vi] = wp.transform_point(X_ws_b, face_verts[vi])
