@@ -23,7 +23,7 @@ import warp as wp
 import newton
 import newton.examples
 from newton._src.utils.import_mjcf import parse_mjcf
-from newton._src.utils.recorder import (
+from newton._src.viewer.viewer_file import (
     HAS_CBOR2,
     RecorderModelAndState,
     RingBuffer,
