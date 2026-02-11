@@ -110,6 +110,11 @@ class SDFHydroelasticConfig:
     reduce_contacts: bool = True
     """Whether to reduce contacts to a smaller representative set per shape pair.
     When False, all generated contacts are passed through without reduction."""
+    pre_prune_contacts: bool = True
+    """Whether to perform local-first face compaction during generation.
+    This mode avoids global hashtable traffic in the hot generation loop and
+    writes a smaller contact set to the buffer before the normal reduce pass.
+    Only active when ``reduce_contacts`` is True."""
     buffer_fraction: float = 1.0
     """Fraction of worst-case hydroelastic buffer allocations. Range: (0, 1].
 
@@ -127,7 +132,7 @@ class SDFHydroelasticConfig:
     buffer_mult_contact: int = 1
     """Multiplier for the preallocated face contact buffer that stores contact
     positions, normals, depths, and areas. Increase only if a face contact overflow warning is issued."""
-    contact_buffer_fraction: float = 1.0
+    contact_buffer_fraction: float = 0.5
     """Fraction of the face contact buffer to allocate when ``reduce_contacts`` is True.
     The reduce kernel selects winners from whatever fits in the buffer, so a smaller
     buffer trades off coverage for memory savings.
@@ -269,7 +274,7 @@ class SDFHydroelastic:
             # When pre-pruning is active, far fewer contacts reach the buffer so we
             # scale down by contact_buffer_fraction to save memory.
             face_contact_budget = config.buffer_mult_contact * self.max_num_iso_voxels
-            if config.reduce_contacts:
+            if config.reduce_contacts and config.pre_prune_contacts:
                 face_contact_budget = face_contact_budget * config.contact_buffer_fraction
             self.max_num_face_contacts = max(int(face_contact_budget), 64)
 
@@ -291,6 +296,7 @@ class SDFHydroelastic:
 
             self.generate_contacts_kernel = get_generate_contacts_kernel(
                 output_vertices=self.config.output_contact_surface,
+                pre_prune=self.config.reduce_contacts and self.config.pre_prune_contacts,
             )
 
             if self.config.reduce_contacts:
@@ -721,6 +727,7 @@ class SDFHydroelastic:
         winning contacts via the writer function.
         """
         self.contact_reduction.reduce_and_export(
+            shape_material_k_hydro=self.shape_material_k_hydro,
             shape_transform=shape_transform,
             shape_local_aabb_lower=shape_local_aabb_lower,
             shape_local_aabb_upper=shape_local_aabb_upper,
@@ -1202,7 +1209,7 @@ def get_decode_contacts_kernel(margin_contact_area: float = 1e-4, writer_func: A
 # =============================================================================
 
 
-def get_generate_contacts_kernel(output_vertices: bool):
+def get_generate_contacts_kernel(output_vertices: bool, pre_prune: bool = False):
     """Create kernel for hydroelastic contact generation.
 
     This is a merged kernel that computes cube state and immediately writes
@@ -1211,6 +1218,11 @@ def get_generate_contacts_kernel(output_vertices: bool):
 
     A separate ``reduce_hydroelastic_contacts_kernel`` then runs on the
     buffer to populate the hashtable and select representative contacts.
+
+    When ``pre_prune`` is enabled, this kernel applies a local-first compaction
+    rule before writing contacts:
+    - keep all penetrating faces (depth < 0)
+    - keep at most one non-penetrating fallback face (closest to penetration)
 
     Args:
         output_vertices: Whether to output contact surface vertices for visualization.
@@ -1234,7 +1246,7 @@ def get_generate_contacts_kernel(output_vertices: bool):
         shape_contact_margin: wp.array(dtype=wp.float32),
         max_num_iso_voxels: int,
         reducer_data: GlobalContactReducerData,
-        # Unused — kept for signature compatibility with pre-prune callers
+        # Unused — kept for signature compatibility with prior callers
         shape_local_aabb_lower: wp.array(dtype=wp.vec3),
         shape_local_aabb_upper: wp.array(dtype=wp.vec3),
         shape_voxel_resolution: wp.array(dtype=wp.vec3i),
@@ -1307,6 +1319,14 @@ def get_generate_contacts_kernel(output_vertices: bool):
             X_ws_b = transform_b
 
             # Generate faces and write to reducer buffer
+            best_nonpen_valid = int(0)
+            best_nonpen_depth = float(MAXVAL)
+            best_nonpen_area = float(0.0)
+            best_nonpen_normal = wp.vec3(0.0, 0.0, 1.0)
+            best_nonpen_center = wp.vec3(0.0, 0.0, 0.0)
+            best_nonpen_v0 = wp.vec3(0.0, 0.0, 0.0)
+            best_nonpen_v1 = wp.vec3(0.0, 0.0, 0.0)
+            best_nonpen_v2 = wp.vec3(0.0, 0.0, 0.0)
             for fi in range(num_faces):
                 area, normal, face_center, pen_depth, face_verts = mc_calc_face(
                     flat_edge_verts_table,
@@ -1318,21 +1338,70 @@ def get_generate_contacts_kernel(output_vertices: bool):
                     y_id,
                     z_id,
                 )
-                contact_id = export_hydroelastic_contact_to_buffer(
+                if wp.static(not pre_prune):
+                    contact_id = export_hydroelastic_contact_to_buffer(
+                        shape_a,
+                        shape_b,
+                        face_center,
+                        normal,
+                        pen_depth,
+                        area,
+                        k_eff,
+                        reducer_data,
+                    )
+                    if wp.static(output_vertices) and contact_id >= 0:
+                        for vi in range(3):
+                            iso_vertex_point[3 * contact_id + vi] = wp.transform_point(X_ws_b, face_verts[vi])
+                        iso_vertex_depth[contact_id] = pen_depth
+                        iso_vertex_shape_pair[contact_id] = pair
+                    continue
+
+                # Local-first compaction: keep all penetrating faces immediately.
+                if pen_depth < 0.0:
+                    contact_id = export_hydroelastic_contact_to_buffer(
+                        shape_a,
+                        shape_b,
+                        face_center,
+                        normal,
+                        pen_depth,
+                        area,
+                        k_eff,
+                        reducer_data,
+                    )
+                    if wp.static(output_vertices) and contact_id >= 0:
+                        for vi in range(3):
+                            iso_vertex_point[3 * contact_id + vi] = wp.transform_point(X_ws_b, face_verts[vi])
+                        iso_vertex_depth[contact_id] = pen_depth
+                        iso_vertex_shape_pair[contact_id] = pair
+                else:
+                    # Defer non-penetrating contact and keep only the closest one.
+                    if pen_depth < best_nonpen_depth:
+                        best_nonpen_valid = int(1)
+                        best_nonpen_depth = pen_depth
+                        best_nonpen_area = area
+                        best_nonpen_normal = normal
+                        best_nonpen_center = face_center
+                        best_nonpen_v0 = face_verts[0]
+                        best_nonpen_v1 = face_verts[1]
+                        best_nonpen_v2 = face_verts[2]
+
+            if wp.static(pre_prune) and best_nonpen_valid == 1:
+                nonpen_id = export_hydroelastic_contact_to_buffer(
                     shape_a,
                     shape_b,
-                    face_center,
-                    normal,
-                    pen_depth,
-                    area,
+                    best_nonpen_center,
+                    best_nonpen_normal,
+                    best_nonpen_depth,
+                    best_nonpen_area,
                     k_eff,
                     reducer_data,
                 )
-                if wp.static(output_vertices) and contact_id >= 0:
-                    for vi in range(3):
-                        iso_vertex_point[3 * contact_id + vi] = wp.transform_point(X_ws_b, face_verts[vi])
-                    iso_vertex_depth[contact_id] = pen_depth
-                    iso_vertex_shape_pair[contact_id] = pair
+                if wp.static(output_vertices) and nonpen_id >= 0:
+                    iso_vertex_point[3 * nonpen_id + 0] = wp.transform_point(X_ws_b, best_nonpen_v0)
+                    iso_vertex_point[3 * nonpen_id + 1] = wp.transform_point(X_ws_b, best_nonpen_v1)
+                    iso_vertex_point[3 * nonpen_id + 2] = wp.transform_point(X_ws_b, best_nonpen_v2)
+                    iso_vertex_depth[nonpen_id] = best_nonpen_depth
+                    iso_vertex_shape_pair[nonpen_id] = pair
 
     return generate_contacts_kernel
 

@@ -81,6 +81,11 @@ EPS_LARGE = 1e-8
 EPS_SMALL = 1e-20
 
 
+@wp.func
+def _effective_stiffness(k_a: wp.float32, k_b: wp.float32) -> wp.float32:
+    return (k_a * k_b) / (k_a + k_b)
+
+
 # =============================================================================
 # Hydroelastic contact buffer function
 # =============================================================================
@@ -145,6 +150,7 @@ def get_reduce_hydroelastic_contacts_kernel(skip_aggregates: bool = False):
     @wp.kernel(enable_backward=False)
     def reduce_hydroelastic_contacts_kernel(
         reducer_data: GlobalContactReducerData,
+        shape_material_k_hydro: wp.array(dtype=wp.float32),
         shape_transform: wp.array(dtype=wp.transform),
         shape_local_aabb_lower: wp.array(dtype=wp.vec3),
         shape_local_aabb_upper: wp.array(dtype=wp.vec3),
@@ -186,6 +192,10 @@ def get_reduce_hydroelastic_contacts_kernel(skip_aggregates: bool = False):
 
             entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
             if entry_idx >= 0:
+                # k_eff is constant for a shape pair, so redundant writes are safe.
+                reducer_data.entry_k_eff[entry_idx] = _effective_stiffness(
+                    shape_material_k_hydro[shape_a], shape_material_k_hydro[shape_b]
+                )
                 use_beta = depth < wp.static(BETA_THRESHOLD) * wp.length(aabb_upper - aabb_lower)
                 if use_beta:
                     for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
@@ -221,6 +231,9 @@ def get_reduce_hydroelastic_contacts_kernel(skip_aggregates: bool = False):
 
             voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
             if voxel_entry_idx >= 0:
+                reducer_data.entry_k_eff[voxel_entry_idx] = _effective_stiffness(
+                    shape_material_k_hydro[shape_a], shape_material_k_hydro[shape_b]
+                )
                 voxel_value = make_contact_value(-depth, i)
                 reduction_update_slot(
                     voxel_entry_idx, voxel_local_slot, voxel_value, reducer_data.ht_values, ht_capacity,
@@ -670,6 +683,7 @@ class HydroelasticContactReduction:
 
     def reduce(
         self,
+        shape_material_k_hydro: wp.array,
         shape_transform: wp.array,
         shape_local_aabb_lower: wp.array,
         shape_local_aabb_upper: wp.array,
@@ -684,6 +698,7 @@ class HydroelasticContactReduction:
         max-depth per normal bin, and voxel-based slots.
 
         Args:
+            shape_material_k_hydro: Per-shape hydroelastic material stiffness (dtype: float).
             shape_transform: Per-shape world transforms (dtype: wp.transform).
             shape_local_aabb_lower: Per-shape local AABB lower bounds (dtype: wp.vec3).
             shape_local_aabb_upper: Per-shape local AABB upper bounds (dtype: wp.vec3).
@@ -699,6 +714,7 @@ class HydroelasticContactReduction:
             dim=[grid_size],
             inputs=[
                 reducer_data,
+                shape_material_k_hydro,
                 shape_transform,
                 shape_local_aabb_lower,
                 shape_local_aabb_upper,
@@ -751,6 +767,7 @@ class HydroelasticContactReduction:
 
     def reduce_and_export(
         self,
+        shape_material_k_hydro: wp.array,
         shape_transform: wp.array,
         shape_local_aabb_lower: wp.array,
         shape_local_aabb_upper: wp.array,
@@ -764,6 +781,7 @@ class HydroelasticContactReduction:
         Combines ``reduce()`` and ``export()`` into a single method call.
 
         Args:
+            shape_material_k_hydro: Per-shape hydroelastic material stiffness (dtype: float).
             shape_transform: Per-shape world transforms (dtype: wp.transform).
             shape_local_aabb_lower: Per-shape local AABB lower bounds (dtype: wp.vec3).
             shape_local_aabb_upper: Per-shape local AABB upper bounds (dtype: wp.vec3).
@@ -772,5 +790,12 @@ class HydroelasticContactReduction:
             writer_data: Data struct for the writer function.
             grid_size: Number of threads for the kernel launch.
         """
-        self.reduce(shape_transform, shape_local_aabb_lower, shape_local_aabb_upper, shape_voxel_resolution, grid_size)
+        self.reduce(
+            shape_material_k_hydro,
+            shape_transform,
+            shape_local_aabb_lower,
+            shape_local_aabb_upper,
+            shape_voxel_resolution,
+            grid_size,
+        )
         self.export(shape_contact_margin, shape_transform, writer_data, grid_size)
