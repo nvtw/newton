@@ -35,8 +35,10 @@ from ..geometry.collision_core import (
 )
 from ..geometry.collision_primitive import (
     collide_capsule_capsule,
+    collide_plane_box,
     collide_plane_capsule,
     collide_plane_cylinder,
+    collide_plane_ellipsoid,
     collide_plane_sphere,
     collide_sphere_box,
     collide_sphere_capsule,
@@ -285,6 +287,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             is_sphere_b = type_b == int(GeoType.SPHERE)
             is_capsule_a = type_a == int(GeoType.CAPSULE)
             is_capsule_b = type_b == int(GeoType.CAPSULE)
+            is_ellipsoid_b = type_b == int(GeoType.ELLIPSOID)
             is_cylinder_b = type_b == int(GeoType.CYLINDER)
             is_box_b = type_b == int(GeoType.BOX)
 
@@ -318,6 +321,39 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 contact_dist_0, contact_pos_0 = collide_plane_sphere(plane_normal, pos_a, pos_b, sphere_radius)
                 contact_normal = plane_normal
                 num_contacts = 1
+
+            # -----------------------------------------------------------------
+            # Plane-Ellipsoid collision (type_a=PLANE=0, type_b=ELLIPSOID=4)
+            # Produces 1 contact
+            # -----------------------------------------------------------------
+            elif is_plane_a and is_ellipsoid_b:
+                plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
+                ellipsoid_rot = wp.quat_to_matrix(quat_b)
+                ellipsoid_size = scale_b
+                contact_dist_0, contact_pos_0, contact_normal = collide_plane_ellipsoid(
+                    plane_normal, pos_a, pos_b, ellipsoid_rot, ellipsoid_size
+                )
+                num_contacts = 1
+
+            # -----------------------------------------------------------------
+            # Plane-Box collision (type_a=PLANE=0, type_b=BOX=6)
+            # Produces up to 4 contacts
+            # -----------------------------------------------------------------
+            elif is_plane_a and is_box_b:
+                plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
+                box_rot = wp.quat_to_matrix(quat_b)
+                box_size = scale_b
+                dists4_box, positions4_box, contact_normal = collide_plane_box(plane_normal, pos_a, pos_b, box_rot, box_size)
+
+                contact_dist_0 = dists4_box[0]
+                contact_dist_1 = dists4_box[1]
+                contact_dist_2 = dists4_box[2]
+                contact_dist_3 = dists4_box[3]
+                contact_pos_0 = wp.vec3(positions4_box[0, 0], positions4_box[0, 1], positions4_box[0, 2])
+                contact_pos_1 = wp.vec3(positions4_box[1, 0], positions4_box[1, 1], positions4_box[1, 2])
+                contact_pos_2 = wp.vec3(positions4_box[2, 0], positions4_box[2, 1], positions4_box[2, 2])
+                contact_pos_3 = wp.vec3(positions4_box[3, 0], positions4_box[3, 1], positions4_box[3, 2])
+                num_contacts = 4
 
             # -----------------------------------------------------------------
             # Sphere-Sphere collision (type_a=SPHERE=2, type_b=SPHERE=2)
