@@ -399,8 +399,8 @@ def collide_plane_box(
     dist = wp.vec4(MAXVAL)
     pos = _mat43f()
 
-    # test all corners, pick bottom 4
-    ncontact = wp.int32(0)
+    # Test all corners and keep up to 4 deepest (most negative) contacts.
+    # Use fixed-size insertion to keep this branch-efficient and allocation-free.
     for i in range(8):
         # get corner in local coordinates
         corner.x = wp.where((i & 1) != 0, box_size.x, -box_size.x)
@@ -410,19 +410,28 @@ def collide_plane_box(
         # get corner in global coordinates relative to box center
         corner = box_rot @ corner
 
-        # compute distance to plane, skip if too far or pointing up
+        # Compute signed corner distance to plane.
+        # Do not cull positive distances here: the caller applies contact margin
+        # filtering, so keeping near-separation candidates is important for stable
+        # pre-contact behavior.
         ldist = wp.dot(plane_normal, corner)
-        if center_dist + ldist > 0 or ldist > 0:
-            continue
-
         cdist = center_dist + ldist
 
-        dist[ncontact] = cdist
-        pos[ncontact] = corner + box_pos - 0.5 * plane_normal * cdist
-        ncontact += 1
+        cpos = corner + box_pos - 0.5 * plane_normal * cdist
 
-        if ncontact >= 4:
-            break
+        insert_idx = wp.int32(-1)
+        for j in range(4):
+            if cdist < dist[j]:
+                insert_idx = j
+                break
+
+        if insert_idx >= 0:
+            for k in range(3, 0, -1):
+                if k > insert_idx:
+                    dist[k] = dist[k - 1]
+                    pos[k] = pos[k - 1]
+            dist[insert_idx] = cdist
+            pos[insert_idx] = cpos
 
     return dist, pos, plane_normal
 
