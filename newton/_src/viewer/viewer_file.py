@@ -1026,58 +1026,89 @@ def depointer_as_key(data: dict, format_type: str = "json", cache: ArrayCache | 
     return _resolve_cache_refs(result)
 
 
-class RecorderModelAndState:
-    """A class to record and playback simulation model and state using JSON serialization."""
+class ViewerFile(ViewerBase):
+    """
+    File-based viewer backend for Newton physics simulations.
 
-    def __init__(self, max_history_size: int | None = None):
+    This backend records simulation data to JSON or binary files using the same
+    ViewerBase API as other viewers. It captures model structure and state data
+    during simulation for later replay or analysis.
+
+    Format is determined by file extension:
+    - .json: Human-readable JSON format
+    - .bin: Binary CBOR2 format (more efficient)
+    """
+
+    def __init__(
+        self,
+        output_path: str,
+        auto_save: bool = True,
+        save_interval: int = 100,
+        max_history_size: int | None = None,
+    ):
         """
-        Initializes the Recorder.
+        Initialize the File viewer backend for Newton physics simulations.
 
         Args:
-            max_history_size (int | None): Maximum number of states to keep in history.
-                If None, uses unlimited history (regular list). If specified, uses a
-                ring buffer that keeps only the last N states. Default is None for
-                backward compatibility.
+            output_path (str): Path to the output file (.json or .bin)
+            auto_save (bool): If True, automatically save periodically during recording
+            save_interval (int): Number of frames between auto-saves (when auto_save=True)
+            max_history_size (int | None): Maximum number of states to keep in memory.
+                If None, uses unlimited history. If set, keeps only the last N states.
         """
+        super().__init__()
+
+        self.output_path = Path(output_path)
+        self.auto_save = auto_save
+        self.save_interval = save_interval
+
+        # Recording storage
         if max_history_size is None:
             self.history: list[dict] = []
         else:
             self.history: RingBuffer[dict] = RingBuffer(max_history_size)
         self.raw_model: Model | None = None
         self.deserialized_model: dict | None = None
-        # Streaming (CBOR) state
-        self._stream_file = None
-        self._stream_encoder = None
-        self._stream_fsync = False
-        self._stream_open = False
-        self._stream_next_frame = 0
 
-    def _get_device_from_state(self, state: State):
-        """
-        Retrieves the device from a simulation state object.
+        self._frame_count = 0
+        self._model_recorded = False
 
-        This is done by finding the first `wp.array` attribute in the state
-        and returning its device.
+    @override
+    def set_model(self, model, max_worlds: int | None = None):
+        """Override set_model to record the model when it's set."""
+        super().set_model(model, max_worlds=max_worlds)
 
-        Args:
-            state (State): The simulation state.
+        if model is not None and not self._model_recorded:
+            self.record_model(model)
+            self._model_recorded = True
 
-        Returns:
-            The device of the state's arrays, or None if no wp.array is found.
-        """
-        # device can be retrieved from any warp array attribute in the state
-        for _name, value in state.__dict__.items():
-            if isinstance(value, wp.array):
-                return value.device
-        return None
+    @override
+    def log_state(self, state):
+        """Override log_state to record the state in addition to standard processing."""
+        super().log_state(state)
+
+        # Record the state
+        self.record(state)
+        self._frame_count += 1
+
+        # Auto-save if enabled
+        if self.auto_save and self._frame_count % self.save_interval == 0:
+            self._save_recording()
+
+    def save_recording(self):
+        """Save the recorded data to file."""
+        self._save_recording()
+
+    def _save_recording(self):
+        """Internal method to save recording."""
+        try:
+            self.save_to_file(str(self.output_path))
+            print(f"Recording saved to {self.output_path} ({self._frame_count} frames)")
+        except Exception as e:
+            print(f"Error saving recording: {e}")
 
     def record(self, state: State):
-        """
-        Records a snapshot of the state.
-
-        Args:
-            state (State): The simulation state.
-        """
+        """Record a snapshot of the provided simulation state."""
         state_data = {}
         for name, value in state.__dict__.items():
             if isinstance(value, wp.array):
@@ -1085,13 +1116,7 @@ class RecorderModelAndState:
         self.history.append(state_data)
 
     def playback(self, state: State, frame_id: int):
-        """
-        Plays back a recorded frame by updating the state.
-
-        Args:
-            state (State): The simulation state to restore.
-            frame_id (int): The integer index of the frame to be played back.
-        """
+        """Restore a state snapshot from history into a State object."""
         if not (0 <= frame_id < len(self.history)):
             print(f"Warning: frame_id {frame_id} is out of bounds. Playback skipped.")
             return
@@ -1102,21 +1127,11 @@ class RecorderModelAndState:
                 setattr(state, name, value_wp)
 
     def record_model(self, model: Model):
-        """
-        Records a snapshot of the model.
-
-        Args:
-            model (Model): The simulation model.
-        """
+        """Record a reference to the simulation model for later serialization."""
         self.raw_model = model
 
     def playback_model(self, model: Model):
-        """
-        Plays back a recorded model by updating its attributes.
-
-        Args:
-            model (Model): The simulation model to restore.
-        """
+        """Populate a Model instance from loaded recording data."""
         if not self.deserialized_model:
             print("Warning: No model data to playback.")
             return
@@ -1128,30 +1143,18 @@ class RecorderModelAndState:
         transfer_to_model(self.deserialized_model, model, post_load_init_callback)
 
     def save_to_file(self, file_path: str):
-        """
-        Saves the recorded model and state history to a file.
-        Format is determined by file extension: .json for JSON, .bin for CBOR2.
-
-        Args:
-            file_path (str): The full path to the file (with extension).
-                - .json: Human-readable JSON format
-                - .bin: Binary CBOR2 format (uncompressed)
-        """
-        # Determine format based on extension
+        """Save recorded model and history to disk."""
         try:
             format_type = _get_serialization_format(file_path)
         except ValueError:
-            # If no extension provided, default to JSON
             if "." not in os.path.basename(file_path):
                 file_path = file_path + ".json"
                 format_type = "json"
             else:
                 raise
 
-        # Convert history to list for serialization if needed
         states_to_save = self.history.to_list() if isinstance(self.history, RingBuffer) else self.history
         data_to_save = {"model": self.raw_model, "states": states_to_save}
-        # Use a single ArrayCache to deduplicate arrays across the whole payload
         array_cache = ArrayCache()
         serialized_data = pointer_as_key(data_to_save, format_type, cache=array_cache)
 
@@ -1159,26 +1162,15 @@ class RecorderModelAndState:
             with open(file_path, "w") as f:
                 json.dump(serialized_data, f, indent=2)
         elif format_type == "cbor2":
-            # Save as uncompressed CBOR2 binary format
             cbor_data = cbor2.dumps(serialized_data)
             with open(file_path, "wb") as f:
                 f.write(cbor_data)
 
     def load_from_file(self, file_path: str):
-        """
-        Loads a recorded history from a file, replacing the current history.
-        Format is determined by file extension: .json for JSON, .bin for CBOR2.
-
-        Args:
-            file_path (str): The full path to the file (with extension).
-                - .json: Human-readable JSON format
-                - .bin: Binary CBOR2 format (uncompressed)
-        """
-        # Determine format based on extension
+        """Load recording data from disk, replacing current model/history."""
         try:
             format_type = _get_serialization_format(file_path)
         except ValueError:
-            # If no extension provided, try .json first for backward compatibility
             if "." not in os.path.basename(file_path):
                 json_path = file_path + ".json"
                 if os.path.exists(json_path):
@@ -1193,92 +1185,19 @@ class RecorderModelAndState:
             with open(file_path) as f:
                 serialized_data = json.load(f)
         elif format_type == "cbor2":
-            # Load uncompressed CBOR2 binary format
             with open(file_path, "rb") as f:
                 file_data = f.read()
             serialized_data = cbor2.loads(file_data)
 
-        # Reconstruct using the same cache model (single cache per document)
         array_cache = ArrayCache()
         raw = depointer_as_key(serialized_data, format_type, cache=array_cache)
         self.deserialized_model = raw["model"]
 
-        # Handle loading states into the appropriate container type
         loaded_states = raw["states"]
         if isinstance(self.history, RingBuffer):
-            # If we're using a ring buffer, load states into it
             self.history.from_list(loaded_states)
         else:
-            # If we're using a regular list, assign directly
             self.history = loaded_states
-
-
-class ViewerFile(ViewerBase):
-    """
-    File-based viewer backend for Newton physics simulations.
-
-    This backend records simulation data to JSON or binary files using the same
-    ViewerBase API as other viewers. It captures model structure and state data
-    during simulation for later replay or analysis.
-
-    Format is determined by file extension:
-    - .json: Human-readable JSON format
-    - .bin: Binary CBOR2 format (more efficient)
-    """
-
-    def __init__(self, output_path: str, auto_save: bool = True, save_interval: int = 100):
-        """
-        Initialize the File viewer backend for Newton physics simulations.
-
-        Args:
-            output_path (str): Path to the output file (.json or .bin)
-            auto_save (bool): If True, automatically save periodically during recording
-            save_interval (int): Number of frames between auto-saves (when auto_save=True)
-        """
-        super().__init__()
-
-        self.output_path = Path(output_path)
-        self.auto_save = auto_save
-        self.save_interval = save_interval
-
-        # Initialize the recorder
-        self._recorder = RecorderModelAndState()
-        self._frame_count = 0
-        self._model_recorded = False
-
-    @override
-    def set_model(self, model, max_worlds: int | None = None):
-        """Override set_model to record the model when it's set."""
-        super().set_model(model, max_worlds=max_worlds)
-
-        if model is not None and not self._model_recorded:
-            self._recorder.record_model(model)
-            self._model_recorded = True
-
-    @override
-    def log_state(self, state):
-        """Override log_state to record the state in addition to standard processing."""
-        super().log_state(state)
-
-        # Record the state
-        self._recorder.record(state)
-        self._frame_count += 1
-
-        # Auto-save if enabled
-        if self.auto_save and self._frame_count % self.save_interval == 0:
-            self._save_recording()
-
-    def save_recording(self):
-        """Save the recorded data to file."""
-        self._save_recording()
-
-    def _save_recording(self):
-        """Internal method to save recording."""
-        try:
-            self._recorder.save_to_file(str(self.output_path))
-            print(f"Recording saved to {self.output_path} ({self._frame_count} frames)")
-        except Exception as e:
-            print(f"Error saving recording: {e}")
 
     # Abstract method implementations (no-ops for file recording)
 
@@ -1341,8 +1260,8 @@ class ViewerFile(ViewerBase):
         and state at a given frame. For playback-only usage, output_path may
         be passed as empty string in the constructor.
         """
-        self._recorder.load_from_file(file_path)
-        self._frame_count = len(self._recorder.history)
+        self.load_from_file(file_path)
+        self._frame_count = len(self.history)
         print(f"Loaded recording with {self._frame_count} frames from {file_path}")
 
     def get_frame_count(self) -> int:
@@ -1351,7 +1270,7 @@ class ViewerFile(ViewerBase):
 
     def has_model(self) -> bool:
         """Return True if the loaded recording contains model data (for playback)."""
-        return self._recorder.deserialized_model is not None
+        return self.deserialized_model is not None
 
     def load_model(self, model):
         """Restore a Model from the loaded recording.
@@ -1362,7 +1281,7 @@ class ViewerFile(ViewerBase):
         Args:
             model: A Newton Model instance to populate.
         """
-        self._recorder.playback_model(model)
+        self.playback_model(model)
 
     def load_state(self, state, frame_id: int):
         """Restore State to a specific frame from the loaded recording.
@@ -1374,4 +1293,4 @@ class ViewerFile(ViewerBase):
             state: A Newton State instance to populate.
             frame_id: Frame index in [0, get_frame_count()).
         """
-        self._recorder.playback(state, frame_id)
+        self.playback(state, frame_id)
