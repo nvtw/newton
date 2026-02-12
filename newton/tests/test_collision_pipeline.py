@@ -22,6 +22,7 @@ import warp.examples
 
 import newton
 from newton import GeoType
+from newton._src.sim.collide import _estimate_rigid_contact_max
 from newton.examples import test_body_state
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
 
@@ -590,6 +591,42 @@ add_function_test(
 
 class TestParticleShapeContacts(unittest.TestCase):
     pass
+
+
+class TestContactEstimator(unittest.TestCase):
+    def test_world_aware_fallback_estimate(self):
+        model = newton.Model()
+        model.num_worlds = 4
+        model.shape_contact_pair_count = 0
+
+        # 4 worlds, each with 10 boxes and 10 planes.
+        # World-aware fallback should estimate:
+        # - non-plane pairs: 4 * ((10 * 20) // 2) = 400 pairs -> 400 * 5 = 2000 contacts
+        # - plane/non-plane pairs: 4 * (10 * 10) = 400 pairs -> 400 * 5 = 2000 contacts
+        # total contacts = 4000
+        shape_type = np.array(
+            ([int(GeoType.BOX)] * 10 + [int(GeoType.PLANE)] * 10) * 4,
+            dtype=np.int32,
+        )
+        shape_world = np.repeat(np.arange(4, dtype=np.int32), 20)
+
+        model.shape_type = wp.array(shape_type, dtype=wp.int32)
+        model.shape_world = wp.array(shape_world, dtype=wp.int32)
+
+        estimate = _estimate_rigid_contact_max(model)
+        self.assertEqual(estimate, 4000)
+
+    def test_prefers_precomputed_pair_count(self):
+        model = newton.Model()
+        model.num_worlds = 2048
+        model.shape_contact_pair_count = 3276
+
+        # Dummy arrays to satisfy estimator inputs; pair-count path should be used.
+        model.shape_type = wp.array(np.array([int(GeoType.BOX), int(GeoType.BOX)], dtype=np.int32), dtype=wp.int32)
+        model.shape_world = wp.array(np.array([0, 1], dtype=np.int32), dtype=wp.int32)
+
+        estimate = _estimate_rigid_contact_max(model)
+        self.assertEqual(estimate, 3276 * 20)
 
 
 def test_particle_shape_contacts(test, device, shape_type: GeoType):
