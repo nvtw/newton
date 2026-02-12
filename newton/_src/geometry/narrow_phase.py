@@ -36,6 +36,7 @@ from ..geometry.collision_core import (
 from ..geometry.collision_primitive import (
     collide_capsule_capsule,
     collide_plane_capsule,
+    collide_plane_cylinder,
     collide_plane_sphere,
     collide_sphere_box,
     collide_sphere_capsule,
@@ -300,8 +301,12 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             num_contacts = 0
             contact_dist_0 = float(0.0)
             contact_dist_1 = float(0.0)
+            contact_dist_2 = float(0.0)
+            contact_dist_3 = float(0.0)
             contact_pos_0 = wp.vec3()
             contact_pos_1 = wp.vec3()
+            contact_pos_2 = wp.vec3()
+            contact_pos_3 = wp.vec3()
             contact_normal = wp.vec3()
 
             # -----------------------------------------------------------------
@@ -343,6 +348,30 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 contact_pos_1 = wp.vec3(positions[1, 0], positions[1, 1], positions[1, 2])
                 contact_normal = plane_normal
                 num_contacts = 2
+
+            # -----------------------------------------------------------------
+            # Plane-Cylinder collision (type_a=PLANE=0, type_b=CYLINDER=5)
+            # Produces up to 4 contacts
+            # -----------------------------------------------------------------
+            elif is_plane_a and is_cylinder_b:
+                plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
+                cylinder_axis = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
+                cylinder_radius = scale_b[0]
+                cylinder_half_height = scale_b[1]
+
+                dists4, positions4, contact_normal = collide_plane_cylinder(
+                    plane_normal, pos_a, pos_b, cylinder_axis, cylinder_radius, cylinder_half_height
+                )
+
+                contact_dist_0 = dists4[0]
+                contact_dist_1 = dists4[1]
+                contact_dist_2 = dists4[2]
+                contact_dist_3 = dists4[3]
+                contact_pos_0 = wp.vec3(positions4[0, 0], positions4[0, 1], positions4[0, 2])
+                contact_pos_1 = wp.vec3(positions4[1, 0], positions4[1, 1], positions4[1, 2])
+                contact_pos_2 = wp.vec3(positions4[2, 0], positions4[2, 1], positions4[2, 2])
+                contact_pos_3 = wp.vec3(positions4[3, 0], positions4[3, 1], positions4[3, 2])
+                num_contacts = 4
 
             # -----------------------------------------------------------------
             # Sphere-Capsule collision (type_a=SPHERE=2, type_b=CAPSULE=3)
@@ -424,7 +453,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 contact_data.shape_b = shape_b
                 contact_data.margin = margin
 
-                # Check margin for both contacts
+                # Check margin for all possible contacts
                 contact_data.contact_point_center = contact_pos_0
                 contact_data.contact_distance = contact_dist_0
                 contact_0_valid = contact_passes_margin_check(contact_data)
@@ -435,8 +464,20 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                     contact_data.contact_distance = contact_dist_1
                     contact_1_valid = contact_passes_margin_check(contact_data)
 
+                contact_2_valid = False
+                if num_contacts > 2:
+                    contact_data.contact_point_center = contact_pos_2
+                    contact_data.contact_distance = contact_dist_2
+                    contact_2_valid = contact_passes_margin_check(contact_data)
+
+                contact_3_valid = False
+                if num_contacts > 3:
+                    contact_data.contact_point_center = contact_pos_3
+                    contact_data.contact_distance = contact_dist_3
+                    contact_3_valid = contact_passes_margin_check(contact_data)
+
                 # Count valid contacts and allocate consecutive indices
-                num_valid = int(contact_0_valid) + int(contact_1_valid)
+                num_valid = int(contact_0_valid) + int(contact_1_valid) + int(contact_2_valid) + int(contact_3_valid)
                 if num_valid > 0:
                     base_index = wp.atomic_add(writer_data.contact_count, 0, num_valid)
 
@@ -457,6 +498,20 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                     if contact_1_valid:
                         contact_data.contact_point_center = contact_pos_1
                         contact_data.contact_distance = contact_dist_1
+                        writer_func(contact_data, writer_data, base_index)
+                        base_index += 1
+
+                    # Write third contact if valid
+                    if contact_2_valid:
+                        contact_data.contact_point_center = contact_pos_2
+                        contact_data.contact_distance = contact_dist_2
+                        writer_func(contact_data, writer_data, base_index)
+                        base_index += 1
+
+                    # Write fourth contact if valid
+                    if contact_3_valid:
+                        contact_data.contact_point_center = contact_pos_3
+                        contact_data.contact_distance = contact_dist_3
                         writer_func(contact_data, writer_data, base_index)
 
                 continue
