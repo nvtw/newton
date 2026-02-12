@@ -577,24 +577,26 @@ def collide_plane_cylinder(
     contact_pos[contact_count] = pos2
     contact_count = contact_count + 1
 
-    # Try triangle contact points on side closer to plane
+    # Try two additional side contacts on the end cap closer to plane.
+    # For degenerate configurations (cross product near zero), keep these as MAXVAL.
     prjvec1 = -prjvec * 0.5
     dist3 = dist0 + prjaxis + prjvec1
-    # Compute sideways vector scaled by radius*sqrt(3)/2
     vec1 = wp.cross(vec, axis)
-    vec1 = wp.normalize(vec1) * (cylinder_radius * wp.sqrt(3.0) * 0.5)
+    vec1_len_sqr = wp.dot(vec1, vec1)
+    if vec1_len_sqr >= 1e-12:
+        vec1 = vec1 * safe_div(cylinder_radius * wp.sqrt(3.0) * 0.5, wp.sqrt(vec1_len_sqr))
 
-    # Add contact point A - adjust to closest side
-    pos3 = cylinder_center + vec1 + axis - vec * 0.5 - n * (dist3 * 0.5)
-    contact_dist[contact_count] = dist3
-    contact_pos[contact_count] = pos3
-    contact_count = contact_count + 1
+        # Add contact point A - adjust to closest side
+        pos3 = cylinder_center + vec1 + axis - vec * 0.5 - n * (dist3 * 0.5)
+        contact_dist[contact_count] = dist3
+        contact_pos[contact_count] = pos3
+        contact_count = contact_count + 1
 
-    # Add contact point B - adjust to closest side
-    pos4 = cylinder_center - vec1 + axis - vec * 0.5 - n * (dist3 * 0.5)
-    contact_dist[contact_count] = dist3
-    contact_pos[contact_count] = pos4
-    contact_count = contact_count + 1
+        # Add contact point B - adjust to closest side
+        pos4 = cylinder_center - vec1 + axis - vec * 0.5 - n * (dist3 * 0.5)
+        contact_dist[contact_count] = dist3
+        contact_pos[contact_count] = pos4
+        contact_count = contact_count + 1
 
     return contact_dist, contact_pos, n
 

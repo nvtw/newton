@@ -343,7 +343,9 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
                 box_rot = wp.quat_to_matrix(quat_b)
                 box_size = scale_b
-                dists4_box, positions4_box, contact_normal = collide_plane_box(plane_normal, pos_a, pos_b, box_rot, box_size)
+                dists4_box, positions4_box, contact_normal = collide_plane_box(
+                    plane_normal, pos_a, pos_b, box_rot, box_size
+                )
 
                 contact_dist_0 = dists4_box[0]
                 contact_dist_1 = dists4_box[1]
@@ -475,7 +477,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 num_contacts = 1
 
             # =====================================================================
-            # Write all contacts (single write block for 0, 1, or 2 contacts)
+            # Write all contacts (single write block for 0 to 4 contacts)
             # =====================================================================
             if num_contacts > 0:
                 # Prepare contact data (shared fields for both contacts)
@@ -490,24 +492,26 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 contact_data.margin = margin
 
                 # Check margin for all possible contacts
-                contact_data.contact_point_center = contact_pos_0
-                contact_data.contact_distance = contact_dist_0
-                contact_0_valid = contact_passes_margin_check(contact_data)
+                contact_0_valid = False
+                if contact_dist_0 < MAXVAL:
+                    contact_data.contact_point_center = contact_pos_0
+                    contact_data.contact_distance = contact_dist_0
+                    contact_0_valid = contact_passes_margin_check(contact_data)
 
                 contact_1_valid = False
-                if num_contacts > 1:
+                if num_contacts > 1 and contact_dist_1 < MAXVAL:
                     contact_data.contact_point_center = contact_pos_1
                     contact_data.contact_distance = contact_dist_1
                     contact_1_valid = contact_passes_margin_check(contact_data)
 
                 contact_2_valid = False
-                if num_contacts > 2:
+                if num_contacts > 2 and contact_dist_2 < MAXVAL:
                     contact_data.contact_point_center = contact_pos_2
                     contact_data.contact_distance = contact_dist_2
                     contact_2_valid = contact_passes_margin_check(contact_data)
 
                 contact_3_valid = False
-                if num_contacts > 3:
+                if num_contacts > 3 and contact_dist_3 < MAXVAL:
                     contact_data.contact_point_center = contact_pos_3
                     contact_data.contact_distance = contact_dist_3
                     contact_3_valid = contact_passes_margin_check(contact_data)
