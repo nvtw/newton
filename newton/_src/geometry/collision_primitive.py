@@ -376,6 +376,7 @@ def collide_plane_box(
     box_pos: wp.vec3,
     box_rot: wp.mat33,
     box_size: wp.vec3,
+    margin: float = 0.0,
 ) -> tuple[wp.vec4, wp.types.matrix((4, 3), wp.float32), wp.vec3]:
     """Core contact geometry calculation for plane-box collision.
 
@@ -385,6 +386,7 @@ def collide_plane_box(
       box_pos: Center position of the box
       box_rot: Rotation matrix of the box
       box_size: Half-extents of the box along each axis
+      margin: Contact margin for early contact generation (default: 0.0)
 
     Returns:
       Tuple containing:
@@ -400,7 +402,9 @@ def collide_plane_box(
     pos = _mat43f()
 
     # Test all corners and keep up to 4 deepest (most negative) contacts.
-    # Use fixed-size insertion to keep this branch-efficient and allocation-free.
+    # Track the current worst kept contact by index for O(1) replacement checks.
+    ncontact = wp.int32(0)
+    worst_idx = wp.int32(0)
     for i in range(8):
         # get corner in local coordinates
         corner.x = wp.where((i & 1) != 0, box_size.x, -box_size.x)
@@ -410,28 +414,33 @@ def collide_plane_box(
         # get corner in global coordinates relative to box center
         corner = box_rot @ corner
 
-        # Compute signed corner distance to plane.
-        # Do not cull positive distances here: the caller applies contact margin
-        # filtering, so keeping near-separation candidates is important for stable
-        # pre-contact behavior.
+        # Compute distance to plane and skip corners beyond margin.
         ldist = wp.dot(plane_normal, corner)
         cdist = center_dist + ldist
+        if cdist > margin:
+            continue
 
         cpos = corner + box_pos - 0.5 * plane_normal * cdist
 
-        insert_idx = wp.int32(-1)
-        for j in range(4):
-            if cdist < dist[j]:
-                insert_idx = j
-                break
+        if ncontact < 4:
+            dist[ncontact] = cdist
+            pos[ncontact] = cpos
+            if ncontact == 0 or cdist > dist[worst_idx]:
+                worst_idx = ncontact
+            ncontact += 1
+        else:
+            if cdist < dist[worst_idx]:
+                dist[worst_idx] = cdist
+                pos[worst_idx] = cpos
 
-        if insert_idx >= 0:
-            for k in range(3, 0, -1):
-                if k > insert_idx:
-                    dist[k] = dist[k - 1]
-                    pos[k] = pos[k - 1]
-            dist[insert_idx] = cdist
-            pos[insert_idx] = cpos
+                # Recompute worst index (largest distance among kept contacts).
+                worst_idx = 0
+                if dist[1] > dist[worst_idx]:
+                    worst_idx = 1
+                if dist[2] > dist[worst_idx]:
+                    worst_idx = 2
+                if dist[3] > dist[worst_idx]:
+                    worst_idx = 3
 
     return dist, pos, plane_normal
 

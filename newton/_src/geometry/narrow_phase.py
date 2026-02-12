@@ -343,8 +343,9 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
                 box_rot = wp.quat_to_matrix(quat_b)
                 box_size = scale_b
+
                 dists4_box, positions4_box, contact_normal = collide_plane_box(
-                    plane_normal, pos_a, pos_b, box_rot, box_size
+                    plane_normal, pos_a, pos_b, box_rot, box_size, margin
                 )
 
                 contact_dist_0 = dists4_box[0]
