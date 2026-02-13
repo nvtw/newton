@@ -531,8 +531,8 @@ class CollisionPipeline:
             shape_aabb_lower=self.shape_aabb_lower,
             shape_aabb_upper=self.shape_aabb_upper,
             contact_writer_warp_func=write_contact,
-                shape_voxel_resolution=model._shape_voxel_resolution,
-                hydroelastic_sdf=hydroelastic_sdf,
+            shape_voxel_resolution=model._shape_voxel_resolution,
+            hydroelastic_sdf=hydroelastic_sdf,
             has_meshes=has_meshes,
         )
         self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
