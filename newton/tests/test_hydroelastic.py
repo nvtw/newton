@@ -268,25 +268,27 @@ def test_buffer_fraction_no_crash(test, device):
 
     # Reduced allocation with moderate headroom.
     config_reduced = SDFHydroelasticConfig(buffer_fraction=0.8)
-    pipeline_reduced = newton.CollisionPipeline.from_model(
+    pipeline_reduced = newton.CollisionPipeline(
         model,
         broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
         sdf_hydroelastic_config=config_reduced,
     )
 
-    contacts_reduced = model.collide(state, collision_pipeline=pipeline_reduced)
+    contacts_reduced = pipeline_reduced.contacts()
+    pipeline_reduced.collide(state, contacts_reduced)
     wp.synchronize()
     reduced_count = int(contacts_reduced.rigid_contact_count.numpy()[0])
     test.assertGreater(reduced_count, 0, "Expected non-zero contacts with reduced buffer_fraction")
 
     # Full allocation should not produce fewer contacts.
     config_full = SDFHydroelasticConfig(buffer_fraction=1.0)
-    pipeline_full = newton.CollisionPipeline.from_model(
+    pipeline_full = newton.CollisionPipeline(
         model,
         broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
         sdf_hydroelastic_config=config_full,
     )
-    contacts_full = model.collide(state, collision_pipeline=pipeline_full)
+    contacts_full = pipeline_full.contacts()
+    pipeline_full.collide(state, contacts_full)
     wp.synchronize()
     full_count = int(contacts_full.rigid_contact_count.numpy()[0])
 
@@ -411,7 +413,7 @@ def test_mujoco_hydroelastic_penetration_depth(test, device):
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
 
     sdf_config = SDFHydroelasticConfig(output_contact_surface=True, buffer_fraction=1.0)
-    collision_pipeline = newton.CollisionPipeline.from_model(
+    collision_pipeline = newton.CollisionPipeline(
         model,
         broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
         sdf_hydroelastic_config=sdf_config,
