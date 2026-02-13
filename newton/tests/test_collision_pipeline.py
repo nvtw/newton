@@ -493,7 +493,7 @@ def test_shape_collision_filter_pairs(test, device, broad_phase_mode: str):
             test.assertNotEqual(
                 pair,
                 excluded,
-                f"Excluded pair {excluded} must not appear in contacts (broad_phase={broad_phase_mode.name})",
+                f"Excluded pair {excluded} must not appear in contacts (broad_phase={broad_phase_mode})",
             )
         # With the only pair excluded, we must have zero rigid contacts
         test.assertEqual(n, 0, f"Expected 0 rigid contacts when only pair is excluded (got {n})")

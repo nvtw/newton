@@ -848,11 +848,11 @@ For control over broad phase mode, contact limits, or hydroelastic configuration
 
 .. code-block:: python
 
-    from newton import CollisionPipeline, BroadPhaseMode
+    from newton import CollisionPipeline
 
     pipeline = CollisionPipeline(
         model,
-        broad_phase_mode=BroadPhaseMode.SAP,
+        broad_phase_mode="sap",
         rigid_contact_max=50000,
     )
     contacts = pipeline.contacts()
