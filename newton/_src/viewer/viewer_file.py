@@ -1097,24 +1097,27 @@ class ViewerFile(ViewerBase):
         if self.auto_save and self._frame_count % self.save_interval == 0:
             self._save_recording()
 
-    def save_recording(self, file_path: str | None = None):
+    def save_recording(self, file_path: str | None = None, verbose: bool = False):
         """Save the recorded data to file.
 
         Args:
             file_path: Optional override for the output path. If omitted, uses
                 the ``output_path`` from construction.
+            verbose: If True, print status output on success/failure.
         """
         effective_path = file_path if file_path is not None else str(self.output_path)
-        self._save_recording(effective_path)
+        self._save_recording(effective_path, verbose=verbose)
 
-    def _save_recording(self, file_path: str | None = None):
+    def _save_recording(self, file_path: str | None = None, verbose: bool = True):
         """Internal method to save recording."""
         try:
             effective_path = file_path if file_path is not None else str(self.output_path)
             self._save_to_file(effective_path)
-            print(f"Recording saved to {effective_path} ({self._frame_count} frames)")
+            if verbose:
+                print(f"Recording saved to {effective_path} ({self._frame_count} frames)")
         except Exception as e:
-            print(f"Error saving recording: {e}")
+            if verbose:
+                print(f"Error saving recording: {e}")
 
     def record(self, state: State):
         """Record a snapshot of the provided simulation state."""
@@ -1262,7 +1265,7 @@ class ViewerFile(ViewerBase):
             self._save_recording()
         print(f"ViewerFile closed. Total frames recorded: {self._frame_count}")
 
-    def load_recording(self, file_path: str | None = None):
+    def load_recording(self, file_path: str | None = None, verbose: bool = False):
         """Load a previously recorded file for playback.
 
         After loading, use load_model() and load_state() to restore the model
@@ -1271,11 +1274,13 @@ class ViewerFile(ViewerBase):
         Args:
             file_path: Optional override for the file path. If omitted, uses
                 the ``output_path`` from construction.
+            verbose: If True, print status output after loading.
         """
         effective_path = file_path if file_path is not None else str(self.output_path)
         self._load_from_file(effective_path)
         self._frame_count = len(self.history)
-        print(f"Loaded recording with {self._frame_count} frames from {effective_path}")
+        if verbose:
+            print(f"Loaded recording with {self._frame_count} frames from {effective_path}")
 
     def get_frame_count(self) -> int:
         """Return the number of frames in the loaded or recorded session."""
