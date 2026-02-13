@@ -168,8 +168,8 @@ class ReplayUI:
     def _load_recording(self, file_path):
         """Load a recording file for playback using ViewerFile."""
         try:
-            viewer_file = newton.viewer.ViewerFile("")
-            viewer_file.load_recording(file_path)
+            viewer_file = newton.viewer.ViewerFile(file_path)
+            viewer_file.load_recording()
 
             self.total_frames = viewer_file.get_frame_count()
             self.selected_file = os.path.basename(file_path)

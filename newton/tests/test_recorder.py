@@ -121,7 +121,7 @@ def test_ringbuffer_edge_cases(test: TestRecorder, device):
 def test_recorder_with_ringbuffer(test: TestRecorder, device):
     """Test ViewerFile with RingBuffer-backed history."""
     # Test with ring buffer (capacity 3)
-    recorder_rb = ViewerFile("", auto_save=False, max_history_size=3)
+    recorder_rb = ViewerFile("recording.json", auto_save=False, max_history_size=3)
 
     # Simulate recording states
     for i in range(5):
@@ -144,7 +144,7 @@ def test_recorder_with_ringbuffer(test: TestRecorder, device):
 def test_recorder_backward_compatibility(test: TestRecorder, device):
     """Test that ViewerFile keeps backward-compatible unlimited history behavior."""
     # Test with default (unlimited history)
-    recorder_list = ViewerFile("", auto_save=False)
+    recorder_list = ViewerFile("recording.json", auto_save=False)
 
     # Should use regular list
     test.assertIsInstance(recorder_list.history, list)
@@ -168,7 +168,7 @@ def test_recorder_ringbuffer_save_load(test: TestRecorder, device):
     model = builder.finalize(device=device)
 
     # Create recorder with ring buffer (capacity 3)
-    recorder = ViewerFile("", auto_save=False, max_history_size=3)
+    recorder = ViewerFile("recording.json", auto_save=False, max_history_size=3)
     recorder.record_model(model)
 
     # Record 5 states (should only keep last 3)
@@ -187,11 +187,11 @@ def test_recorder_ringbuffer_save_load(test: TestRecorder, device):
         file_path = tmp.name
 
     try:
-        recorder.save_to_file(file_path)
+        recorder.save_recording(file_path)
 
         # Load into a new recorder with different capacity
-        new_recorder = ViewerFile("", auto_save=False, max_history_size=5)
-        new_recorder.load_from_file(file_path)
+        new_recorder = ViewerFile(file_path, auto_save=False, max_history_size=5)
+        new_recorder.load_recording()
 
         # Should have loaded the 3 states that were saved
         test.assertEqual(len(new_recorder.history), 3)
@@ -241,8 +241,8 @@ def test_viewer_file_playback(test: TestRecorder, device):
         viewer_file_record.close()
 
         # Playback via ViewerFile
-        viewer_file_play = ViewerFile("")
-        viewer_file_play.load_recording(file_path)
+        viewer_file_play = ViewerFile(file_path)
+        viewer_file_play.load_recording()
 
         test.assertTrue(viewer_file_play.has_model())
         test.assertEqual(viewer_file_play.get_frame_count(), 3)
@@ -314,7 +314,7 @@ def _test_model_and_state_recorder_with_format(test: TestRecorder, device, file_
         state.body_qd.fill_(wp.spatial_vector([0.1 * i, 0.2 * i, 0.3 * i, 0.4 * i, 0.5 * i, 0.6 * i]))
         states.append(state)
 
-    recorder = ViewerFile("", auto_save=False)
+    recorder = ViewerFile("recording.json", auto_save=False)
     recorder.record_model(model)
     for state in states:
         recorder.record(state)
@@ -323,7 +323,7 @@ def _test_model_and_state_recorder_with_format(test: TestRecorder, device, file_
         file_path = tmp.name
 
     try:
-        recorder.save_to_file(file_path)
+        recorder.save_recording(file_path)
 
         # Verify the file was created with the expected format
         test.assertTrue(os.path.exists(file_path), f"File {file_path} was not created")
@@ -335,8 +335,8 @@ def _test_model_and_state_recorder_with_format(test: TestRecorder, device, file_
                 # CBOR2 binary data should not be readable as text
                 test.assertIsInstance(data, bytes, "Binary file should contain bytes")
 
-        new_recorder = ViewerFile("", auto_save=False)
-        new_recorder.load_from_file(file_path)
+        new_recorder = ViewerFile(file_path, auto_save=False)
+        new_recorder.load_recording()
 
         # Test that the model was loaded correctly
         test.assertIsNotNone(new_recorder.deserialized_model)
@@ -599,15 +599,15 @@ def test_warp_dtype_file_roundtrip(test: TestRecorder, device):
 
             try:
                 # Record
-                recorder = ViewerFile("", auto_save=False)
+                recorder = ViewerFile("recording.json", auto_save=False)
                 recorder.record(state)
 
                 # Save
-                recorder.save_to_file(file_path)
+                recorder.save_recording(file_path)
 
                 # Load into new recorder
-                new_recorder = ViewerFile("", auto_save=False)
-                new_recorder.load_from_file(file_path)
+                new_recorder = ViewerFile(file_path, auto_save=False)
+                new_recorder.load_recording()
 
                 # Verify
                 test.assertEqual(len(new_recorder.history), 1)
@@ -681,7 +681,7 @@ def test_real_model_recording_roundtrip(test: TestRecorder, device):
     state = model.state()
 
     # Record the model and state
-    recorder = ViewerFile("", auto_save=False)
+    recorder = ViewerFile("recording.json", auto_save=False)
     recorder.record_model(model)
     recorder.record(state)
 
@@ -696,11 +696,11 @@ def test_real_model_recording_roundtrip(test: TestRecorder, device):
 
             try:
                 # Save
-                recorder.save_to_file(file_path)
+                recorder.save_recording(file_path)
 
                 # Load
-                new_recorder = ViewerFile("", auto_save=False)
-                new_recorder.load_from_file(file_path)
+                new_recorder = ViewerFile(file_path, auto_save=False)
+                new_recorder.load_recording()
 
                 # Verify model loaded
                 test.assertIsNotNone(new_recorder.deserialized_model, f"Model not loaded in {format_name}")

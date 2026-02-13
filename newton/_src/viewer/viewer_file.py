@@ -1058,6 +1058,8 @@ class ViewerFile(ViewerBase):
         """
         super().__init__()
 
+        if not output_path:
+            raise ValueError("output_path must be a non-empty path")
         self.output_path = Path(output_path)
         self.auto_save = auto_save
         self.save_interval = save_interval
@@ -1095,15 +1097,22 @@ class ViewerFile(ViewerBase):
         if self.auto_save and self._frame_count % self.save_interval == 0:
             self._save_recording()
 
-    def save_recording(self):
-        """Save the recorded data to file."""
-        self._save_recording()
+    def save_recording(self, file_path: str | None = None):
+        """Save the recorded data to file.
 
-    def _save_recording(self):
+        Args:
+            file_path: Optional override for the output path. If omitted, uses
+                the ``output_path`` from construction.
+        """
+        effective_path = file_path if file_path is not None else str(self.output_path)
+        self._save_recording(effective_path)
+
+    def _save_recording(self, file_path: str | None = None):
         """Internal method to save recording."""
         try:
-            self.save_to_file(str(self.output_path))
-            print(f"Recording saved to {self.output_path} ({self._frame_count} frames)")
+            effective_path = file_path if file_path is not None else str(self.output_path)
+            self._save_to_file(effective_path)
+            print(f"Recording saved to {effective_path} ({self._frame_count} frames)")
         except Exception as e:
             print(f"Error saving recording: {e}")
 
@@ -1142,7 +1151,7 @@ class ViewerFile(ViewerBase):
 
         transfer_to_model(self.deserialized_model, model, post_load_init_callback)
 
-    def save_to_file(self, file_path: str):
+    def _save_to_file(self, file_path: str):
         """Save recorded model and history to disk."""
         try:
             format_type = _get_serialization_format(file_path)
@@ -1166,7 +1175,7 @@ class ViewerFile(ViewerBase):
             with open(file_path, "wb") as f:
                 f.write(cbor_data)
 
-    def load_from_file(self, file_path: str):
+    def _load_from_file(self, file_path: str):
         """Load recording data from disk, replacing current model/history."""
         try:
             format_type = _get_serialization_format(file_path)
@@ -1253,16 +1262,20 @@ class ViewerFile(ViewerBase):
             self._save_recording()
         print(f"ViewerFile closed. Total frames recorded: {self._frame_count}")
 
-    def load_recording(self, file_path: str):
+    def load_recording(self, file_path: str | None = None):
         """Load a previously recorded file for playback.
 
         After loading, use load_model() and load_state() to restore the model
-        and state at a given frame. For playback-only usage, output_path may
-        be passed as empty string in the constructor.
+        and state at a given frame.
+
+        Args:
+            file_path: Optional override for the file path. If omitted, uses
+                the ``output_path`` from construction.
         """
-        self.load_from_file(file_path)
+        effective_path = file_path if file_path is not None else str(self.output_path)
+        self._load_from_file(effective_path)
         self._frame_count = len(self.history)
-        print(f"Loaded recording with {self._frame_count} frames from {file_path}")
+        print(f"Loaded recording with {self._frame_count} frames from {effective_path}")
 
     def get_frame_count(self) -> int:
         """Return the number of frames in the loaded or recorded session."""

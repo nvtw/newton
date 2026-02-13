@@ -114,9 +114,9 @@ Use :class:`~newton.viewer.ViewerFile` to load a recording, then restore the mod
 
 .. code-block:: python
 
-    # Load a recording for playback (output_path="" for playback-only)
-    viewer_file = newton.viewer.ViewerFile("")
-    viewer_file.load_recording("simulation.bin")
+    # Load a recording for playback
+    viewer_file = newton.viewer.ViewerFile("simulation.bin")
+    viewer_file.load_recording()
 
     # Restore the model and state from the recording
     model = newton.Model()
