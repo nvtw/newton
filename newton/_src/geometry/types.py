@@ -20,7 +20,7 @@ from collections.abc import Sequence
 import numpy as np
 import warp as wp
 
-from ..core.types import Devicelike, Mat33, Vec2, Vec3, nparray, override
+from ..core.types import Devicelike, Vec2, Vec3, nparray, override
 from ..utils.texture import compute_texture_hash
 
 
@@ -73,9 +73,6 @@ class GeoType(enum.IntEnum):
     MESH = 7
     """Triangle mesh."""
 
-    SDF = 8
-    """Signed distance field."""
-
     CONE = 9
     """Cone."""
 
@@ -84,54 +81,6 @@ class GeoType(enum.IntEnum):
 
     NONE = 11
     """No geometry (placeholder)."""
-
-
-class SDF:
-    """
-    Represents a signed distance field (SDF) for simulation.
-
-    An SDF is a volumetric representation of a shape, where each point in the volume
-    stores the signed distance to the closest surface. This class encapsulates the
-    SDF volume and its physical properties for use in simulation.
-    """
-
-    def __init__(
-        self,
-        volume: wp.Volume | None = None,
-        inertia: Mat33 | None = None,
-        mass: float = 1.0,
-        com: Vec3 | None = None,
-    ):
-        """
-        Initialize an SDF object.
-
-        Args:
-            volume: The Warp volume object representing the SDF.
-            inertia: 3x3 inertia matrix. Defaults to identity.
-            mass: Total mass. Defaults to 1.0.
-            com: Center of mass. Defaults to zero vector.
-        """
-        self.volume = volume
-        self.I = inertia if inertia is not None else wp.mat33(np.eye(3))
-        self.mass = mass
-        self.com = com if com is not None else wp.vec3()
-
-        # Need to specify these for now
-        self.has_inertia = True
-        self.is_solid = True
-
-    def finalize(self) -> wp.uint64:
-        """
-        Returns the ID of the underlying SDF volume.
-
-        Returns:
-            The unique identifier of the SDF volume.
-        """
-        return self.volume.id
-
-    @override
-    def __hash__(self) -> int:
-        return hash(self.volume.id)
 
 
 class Mesh:

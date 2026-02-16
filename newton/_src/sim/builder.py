@@ -46,7 +46,6 @@ from ..core.types import (
     nparray,
 )
 from ..geometry import (
-    SDF,
     GeoType,
     Mesh,
     ParticleFlags,
@@ -3853,8 +3852,6 @@ class ModelBuilder:
                 return "cone"
             if type == GeoType.MESH:
                 return "mesh"
-            if type == GeoType.SDF:
-                return "sdf"
             if type == GeoType.PLANE:
                 return "plane"
             if type == GeoType.CONVEX_MESH:
@@ -4412,7 +4409,7 @@ class ModelBuilder:
         xform: Transform | None = None,
         cfg: ShapeConfig | None = None,
         scale: Vec3 | None = None,
-        src: SDF | Mesh | Any | None = None,
+        src: Mesh | Any | None = None,
         is_static: bool = False,
         key: str | None = None,
         custom_attributes: dict[str, Any] | None = None,
@@ -4427,7 +4424,7 @@ class ModelBuilder:
             xform (Transform | None): The transform of the shape in the parent body's local frame. If `None`, the identity transform `wp.transform()` is used. Defaults to `None`.
             cfg (ShapeConfig | None): The configuration for the shape's physical and collision properties. If `None`, :attr:`default_shape_cfg` is used. Defaults to `None`.
             scale (Vec3 | None): The scale of the geometry. The interpretation depends on the shape type. Defaults to `(1.0, 1.0, 1.0)` if `None`.
-            src (SDF | Mesh | Any | None): The source geometry data, e.g., a :class:`Mesh` object for `GeoType.MESH` or an :class:`SDF` object for `GeoType.SDF`. Defaults to `None`.
+            src (Mesh | Any | None): The source geometry data, e.g., a :class:`Mesh` object for `GeoType.MESH`. Defaults to `None`.
             is_static (bool): If `True`, the shape will have zero mass, and its density property in `cfg` will be effectively ignored for mass calculation. Typically used for fixed, non-movable collision geometry. Defaults to `False`.
             key (str | None): An optional unique key for identifying the shape. If `None`, a default key is automatically generated (e.g., "shape_N"). Defaults to `None`.
             custom_attributes: Dictionary of custom attribute names to values.
@@ -4962,40 +4959,6 @@ class ModelBuilder:
             cfg=cfg,
             scale=scale,
             src=mesh,
-            key=key,
-            custom_attributes=custom_attributes,
-        )
-
-    def add_shape_sdf(
-        self,
-        body: int,
-        xform: Transform | None = None,
-        sdf: SDF | None = None,
-        cfg: ShapeConfig | None = None,
-        key: str | None = None,
-        custom_attributes: dict[str, Any] | None = None,
-    ) -> int:
-        """Adds a signed distance field (SDF) collision shape to a body.
-
-        Args:
-            body (int): The index of the parent body this shape belongs to. Use -1 for shapes not attached to any specific body.
-            xform (Transform | None): The transform of the SDF in the parent body's local frame. If `None`, the identity transform `wp.transform()` is used. Defaults to `None`.
-            sdf (SDF | None): The :class:`SDF` object representing the signed distance field. Defaults to `None`.
-            cfg (ShapeConfig | None): The configuration for the shape's physical and collision properties. If `None`, :attr:`default_shape_cfg` is used. Defaults to `None`.
-            key (str | None): An optional unique key for identifying the shape. If `None`, a default key is automatically generated. Defaults to `None`.
-            custom_attributes: Dictionary of custom attribute values for SHAPE frequency attributes.
-
-        Returns:
-            int: The index of the newly added shape.
-        """
-        if cfg is None:
-            cfg = self.default_shape_cfg
-        return self.add_shape(
-            body=body,
-            type=GeoType.SDF,
-            xform=xform,
-            cfg=cfg,
-            src=sdf,
             key=key,
             custom_attributes=custom_attributes,
         )

@@ -84,7 +84,7 @@ Collision shapes are attached to rigid bodies. Each shape has:
 - **Local transform** (``shape_transform``): Position and orientation relative to the body frame.
 - **Scale** (``shape_scale``): 3D scale factors applied to the shape geometry.
 - **Thickness** (``shape_thickness``): Surface thickness used in contact generation (see :ref:`Shape Configuration`).
-- **Source geometry** (``shape_source``): Reference to the underlying geometry object (e.g., :class:`~newton.Mesh`, :class:`~newton.SDF`).
+- **Source geometry** (``shape_source``): Reference to the underlying geometry object (e.g., :class:`~newton.Mesh`).
 
 During collision detection, shapes are transformed to world space using their parent body's pose:
 

@@ -978,10 +978,6 @@ class ViewerBase:
             geo_is_solid = bool(shape_geo_is_solid[s])
             geo_src = shape_geo_src[s]
 
-            # skip unsupported
-            if geo_type == newton.GeoType.SDF:
-                continue
-
             # check whether we can instance an already created shape with the same geometry
             geo_hash = self._hash_geometry(
                 int(geo_type),

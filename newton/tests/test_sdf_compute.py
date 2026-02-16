@@ -1145,6 +1145,26 @@ class TestMeshSDFCollisionFlag(unittest.TestCase):
         # SDF pointer should be non-zero (SDF was generated)
         self.assertNotEqual(model.shape_sdf_data.numpy()[0]["sparse_sdf_ptr"], 0)
 
+    def test_standalone_sdf_shape_api_removed(self):
+        """GeoType.SDF and add_shape_sdf should not exist."""
+        self.assertFalse(hasattr(newton.GeoType, "SDF"))
+        self.assertFalse(hasattr(newton.ModelBuilder, "add_shape_sdf"))
+
+    @unittest.skipUnless(_cuda_available, "Requires CUDA device")
+    def test_hydroelastic_primitive_generates_sdf_on_gpu(self):
+        """Hydroelastic primitives should generate per-shape SDF data."""
+        builder = newton.ModelBuilder()
+        cfg = newton.ModelBuilder.ShapeConfig()
+        cfg.sdf_max_resolution = 32
+        cfg.is_hydroelastic = True
+
+        body = builder.add_body()
+        builder.add_shape_box(body=body, hx=0.5, hy=0.4, hz=0.3, cfg=cfg)
+
+        model = builder.finalize(device="cuda:0")
+        self.assertEqual(model.shape_sdf_data.shape[0], 1)
+        self.assertNotEqual(model.shape_sdf_data.numpy()[0]["sparse_sdf_ptr"], 0)
+
 
 class TestSDFNonUniformScaleBrickPyramid(unittest.TestCase):
     """Test SDF collision with non-uniform scaling using a brick pyramid."""
