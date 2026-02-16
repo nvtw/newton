@@ -25,7 +25,7 @@ Basic usage:
     # Or create a pipeline explicitly to choose broad phase mode
     from newton import CollisionPipeline
 
-    pipeline = CollisionPipeline.from_model(
+    pipeline = CollisionPipeline(
         model,
         broad_phase="sap",
     )
@@ -351,10 +351,10 @@ Broad Phase and Shape Compatibility
     pipeline = CollisionPipeline(model)
 
     # NxN for small scenes
-    pipeline = CollisionPipeline.from_model(model, broad_phase="nxn")
+    pipeline = CollisionPipeline(model, broad_phase="nxn")
 
     # SAP for larger scenes
-    pipeline = CollisionPipeline.from_model(model, broad_phase="sap")
+    pipeline = CollisionPipeline(model, broad_phase="sap")
 
     contacts = pipeline.contacts()
     pipeline.collide(state, contacts)

@@ -359,6 +359,8 @@ def _estimate_rigid_contact_max(model: Model) -> int:
 
 
 BROAD_PHASE_MODES = ("nxn", "sap", "explicit")
+BroadPhaseMode = Literal["nxn", "sap", "explicit"]
+BroadPhaseInstance = BroadPhaseAllPairs | BroadPhaseSAP | BroadPhaseExplicit
 
 
 def _normalize_broad_phase_mode(mode: str) -> str:
@@ -366,6 +368,19 @@ def _normalize_broad_phase_mode(mode: str) -> str:
     if mode_str not in BROAD_PHASE_MODES:
         raise ValueError(f"Unsupported broad phase mode: {mode!r}")
     return mode_str
+
+
+def _infer_broad_phase_mode_from_instance(broad_phase: BroadPhaseInstance) -> str:
+    if isinstance(broad_phase, BroadPhaseAllPairs):
+        return "nxn"
+    if isinstance(broad_phase, BroadPhaseSAP):
+        return "sap"
+    if isinstance(broad_phase, BroadPhaseExplicit):
+        return "explicit"
+    raise TypeError(
+        "broad_phase must be a BroadPhaseAllPairs, BroadPhaseSAP, or BroadPhaseExplicit instance "
+        f"(got {type(broad_phase)!r})"
+    )
 
 
 class CollisionPipeline:
@@ -379,7 +394,6 @@ class CollisionPipeline:
         - Optional hydroelastic contact model for compliant surfaces
 
     For most users, construct with ``CollisionPipeline(model, ...)``.
-    The :meth:`from_model` classmethod is kept for backward compatibility.
     """
 
     def __init__(
@@ -392,8 +406,9 @@ class CollisionPipeline:
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
         requires_grad: bool | None = None,
-        broad_phase: Literal["nxn", "sap", "explicit"] | None = None,
-        broad_phase_mode: Literal["nxn", "sap", "explicit"] = "explicit",
+        broad_phase: BroadPhaseMode | BroadPhaseInstance | None = None,
+        broad_phase_mode: BroadPhaseMode | None = None,
+        narrow_phase: NarrowPhase | None = None,
         sap_sort_type=None,
         sdf_hydroelastic_config: NarrowPhase.HydroelasticSDF.Config | None = None,
     ):
@@ -412,10 +427,14 @@ class CollisionPipeline:
                 If None, computed as shape_count * particle_count.
             soft_contact_margin (float, optional): Margin for soft contact generation. Defaults to 0.01.
             requires_grad (bool | None, optional): Whether to enable gradient computation. If None, uses model.requires_grad.
-            broad_phase (Literal["nxn", "sap", "explicit"] | None, optional):
-                Backward-compatible alias for broad_phase_mode. Prefer broad_phase_mode for new code.
-            broad_phase_mode (Literal["nxn", "sap", "explicit"], optional): Broad phase mode for collision
-                detection. Defaults to "explicit".
+            broad_phase (BroadPhaseMode | BroadPhaseAllPairs | BroadPhaseSAP | BroadPhaseExplicit | None, optional):
+                Either a broad phase mode string (backward-compatible alias for broad_phase_mode) or
+                a prebuilt broad phase instance for expert usage.
+            broad_phase_mode (BroadPhaseMode | None, optional): Broad phase mode for collision detection.
+                Used with model-driven construction. Defaults to "explicit" when neither broad_phase nor
+                broad_phase_mode is provided.
+            narrow_phase (NarrowPhase | None, optional): Optional prebuilt narrow phase instance. Must be
+                provided together with a broad phase instance for expert usage.
             shape_pairs_filtered (wp.array | None, optional): Precomputed shape pairs for EXPLICIT mode.
                 When broad_phase_mode is "explicit", uses model.shape_contact_pairs if not provided. For
                 "nxn"/"sap" modes, ignored.
@@ -425,12 +444,21 @@ class CollisionPipeline:
             sdf_hydroelastic_config (NarrowPhase.HydroelasticSDF.Config | None, optional): Configuration for
                 hydroelastic collision handling. Defaults to None.
         """
-        broad_phase_mode = _normalize_broad_phase_mode(broad_phase_mode)
+        mode_from_broad_phase: str | None = None
+        broad_phase_instance: BroadPhaseInstance | None = None
         if broad_phase is not None:
-            broad_phase = _normalize_broad_phase_mode(broad_phase)
-            if broad_phase_mode != "explicit" and broad_phase_mode != broad_phase:
-                raise ValueError("broad_phase and broad_phase_mode are both provided with different values")
-            broad_phase_mode = broad_phase
+            if isinstance(broad_phase, str):
+                mode_from_broad_phase = _normalize_broad_phase_mode(broad_phase)
+            else:
+                broad_phase_instance = broad_phase
+
+        mode_from_kwarg = _normalize_broad_phase_mode(broad_phase_mode) if broad_phase_mode is not None else None
+        if (
+            mode_from_kwarg is not None
+            and mode_from_broad_phase is not None
+            and mode_from_kwarg != mode_from_broad_phase
+        ):
+            raise ValueError("broad_phase and broad_phase_mode are both provided with different values")
 
         shape_count = model.shape_count
         particle_count = model.particle_count
@@ -443,103 +471,162 @@ class CollisionPipeline:
         if requires_grad is None:
             requires_grad = model.requires_grad
 
-        # For EXPLICIT mode, use provided shape_pairs_filtered or fall back to model pairs
-        if shape_pairs_filtered is None and broad_phase_mode == "explicit":
-            shape_pairs_filtered = getattr(model, "shape_contact_pairs", None)
-
         shape_world = getattr(model, "shape_world", None)
         shape_flags = getattr(model, "shape_flags", None)
+        with wp.ScopedDevice(device):
+            shape_aabb_lower = wp.zeros(shape_count, dtype=wp.vec3, device=device)
+            shape_aabb_upper = wp.zeros(shape_count, dtype=wp.vec3, device=device)
 
         self.model = model
         self.shape_count = shape_count
-        self.broad_phase_mode = broad_phase_mode
         self.device = device
         self.reduce_contacts = reduce_contacts
         self.requires_grad = requires_grad
         self.soft_contact_margin = soft_contact_margin
 
-        if broad_phase_mode == "explicit":
-            if shape_pairs_filtered is None:
-                shape_pairs_filtered = getattr(model, "shape_contact_pairs", None)
-            if shape_pairs_filtered is None:
+        using_expert_components = broad_phase_instance is not None or narrow_phase is not None
+        if using_expert_components:
+            if broad_phase_instance is None or narrow_phase is None:
+                raise ValueError("Provide both broad_phase and narrow_phase for expert component construction")
+            if sdf_hydroelastic_config is not None:
+                raise ValueError("sdf_hydroelastic_config cannot be used when narrow_phase is provided")
+            if sap_sort_type is not None:
+                raise ValueError("sap_sort_type cannot be used when broad_phase instance is provided")
+
+            inferred_mode = _infer_broad_phase_mode_from_instance(broad_phase_instance)
+            if mode_from_kwarg is not None and mode_from_kwarg != inferred_mode:
                 raise ValueError(
-                    "shape_pairs_filtered must be provided for broad_phase_mode=EXPLICIT "
-                    "(or set model.shape_contact_pairs)"
+                    "broad_phase_mode does not match the provided broad_phase instance "
+                    f"(expected {inferred_mode!r}, got {mode_from_kwarg!r})"
                 )
-            self.broad_phase = BroadPhaseExplicit()
-            self.shape_pairs_filtered = shape_pairs_filtered
-            self.shape_pairs_max = len(shape_pairs_filtered)
-            self.shape_pairs_excluded = None
-            self.shape_pairs_excluded_count = 0
-        elif broad_phase_mode == "nxn":
-            if shape_world is None:
-                raise ValueError("model.shape_world is required for broad_phase_mode=NXN")
-            self.broad_phase = BroadPhaseAllPairs(shape_world, shape_flags=shape_flags, device=device)
-            self.shape_pairs_filtered = None
-            self.shape_pairs_max = (shape_count * (shape_count - 1)) // 2
-            self.shape_pairs_excluded = self._build_excluded_pairs(model)
-            self.shape_pairs_excluded_count = (
-                self.shape_pairs_excluded.shape[0] if self.shape_pairs_excluded is not None else 0
-            )
-        elif broad_phase_mode == "sap":
-            if shape_world is None:
-                raise ValueError("model.shape_world is required for broad_phase_mode=SAP")
-            sort_type = sap_sort_type if sap_sort_type is not None else SAPSortType.SEGMENTED
-            self.broad_phase = BroadPhaseSAP(shape_world, shape_flags=shape_flags, sort_type=sort_type, device=device)
-            self.shape_pairs_filtered = None
-            self.shape_pairs_max = (shape_count * (shape_count - 1)) // 2
-            self.shape_pairs_excluded = self._build_excluded_pairs(model)
-            self.shape_pairs_excluded_count = (
-                self.shape_pairs_excluded.shape[0] if self.shape_pairs_excluded is not None else 0
-            )
+            self.broad_phase_mode = inferred_mode
+            self.broad_phase = broad_phase_instance
+
+            if self.broad_phase_mode == "explicit":
+                if shape_pairs_filtered is None:
+                    shape_pairs_filtered = getattr(model, "shape_contact_pairs", None)
+                if shape_pairs_filtered is None:
+                    raise ValueError(
+                        "shape_pairs_filtered must be provided for explicit broad phase "
+                        "(or set model.shape_contact_pairs)"
+                    )
+                self.shape_pairs_filtered = shape_pairs_filtered
+                self.shape_pairs_max = len(shape_pairs_filtered)
+                self.shape_pairs_excluded = None
+                self.shape_pairs_excluded_count = 0
+            else:
+                self.shape_pairs_filtered = None
+                self.shape_pairs_max = (shape_count * (shape_count - 1)) // 2
+                self.shape_pairs_excluded = self._build_excluded_pairs(model)
+                self.shape_pairs_excluded_count = (
+                    self.shape_pairs_excluded.shape[0] if self.shape_pairs_excluded is not None else 0
+                )
+
+            if narrow_phase.max_candidate_pairs < self.shape_pairs_max:
+                raise ValueError(
+                    "Provided narrow_phase.max_candidate_pairs is too small for this model and broad phase mode "
+                    f"(required at least {self.shape_pairs_max}, got {narrow_phase.max_candidate_pairs})"
+                )
+            self.narrow_phase = narrow_phase
+            self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
         else:
-            raise ValueError(f"Unsupported broad phase mode: {broad_phase_mode}")
+            selected_mode = mode_from_kwarg if mode_from_kwarg is not None else mode_from_broad_phase
+            self.broad_phase_mode = selected_mode if selected_mode is not None else "explicit"
 
-        # Initialize SDF hydroelastic (returns None if no hydroelastic shape pairs in the model)
-        hydroelastic_sdf = NarrowPhase.HydroelasticSDF._from_model(
-            model,
-            config=sdf_hydroelastic_config,
-            writer_func=write_contact,
-        )
+            if self.broad_phase_mode == "explicit":
+                if shape_pairs_filtered is None:
+                    shape_pairs_filtered = getattr(model, "shape_contact_pairs", None)
+                if shape_pairs_filtered is None:
+                    raise ValueError(
+                        "shape_pairs_filtered must be provided for broad_phase_mode=EXPLICIT "
+                        "(or set model.shape_contact_pairs)"
+                    )
+                self.broad_phase = BroadPhaseExplicit()
+                self.shape_pairs_filtered = shape_pairs_filtered
+                self.shape_pairs_max = len(shape_pairs_filtered)
+                self.shape_pairs_excluded = None
+                self.shape_pairs_excluded_count = 0
+            elif self.broad_phase_mode == "nxn":
+                if shape_world is None:
+                    raise ValueError("model.shape_world is required for broad_phase_mode=NXN")
+                self.broad_phase = BroadPhaseAllPairs(shape_world, shape_flags=shape_flags, device=device)
+                self.shape_pairs_filtered = None
+                self.shape_pairs_max = (shape_count * (shape_count - 1)) // 2
+                self.shape_pairs_excluded = self._build_excluded_pairs(model)
+                self.shape_pairs_excluded_count = (
+                    self.shape_pairs_excluded.shape[0] if self.shape_pairs_excluded is not None else 0
+                )
+            elif self.broad_phase_mode == "sap":
+                if shape_world is None:
+                    raise ValueError("model.shape_world is required for broad_phase_mode=SAP")
+                sort_type = sap_sort_type if sap_sort_type is not None else SAPSortType.SEGMENTED
+                self.broad_phase = BroadPhaseSAP(
+                    shape_world, shape_flags=shape_flags, sort_type=sort_type, device=device
+                )
+                self.shape_pairs_filtered = None
+                self.shape_pairs_max = (shape_count * (shape_count - 1)) // 2
+                self.shape_pairs_excluded = self._build_excluded_pairs(model)
+                self.shape_pairs_excluded_count = (
+                    self.shape_pairs_excluded.shape[0] if self.shape_pairs_excluded is not None else 0
+                )
+            else:
+                raise ValueError(f"Unsupported broad phase mode: {self.broad_phase_mode}")
 
-        # Detect if any mesh or heightfield shapes are present to optimize kernel launches
-        has_meshes = False
-        has_heightfields = False
-        if hasattr(model, "shape_type") and model.shape_type is not None:
-            shape_types = model.shape_type.numpy()
-            has_meshes = bool((shape_types == int(GeoType.MESH)).any())
-            has_heightfields = bool((shape_types == int(GeoType.HFIELD)).any())
+            # Initialize SDF hydroelastic (returns None if no hydroelastic shape pairs in the model)
+            hydroelastic_sdf = NarrowPhase.HydroelasticSDF._from_model(
+                model,
+                config=sdf_hydroelastic_config,
+                writer_func=write_contact,
+            )
+
+            # Detect if any mesh or heightfield shapes are present to optimize kernel launches
+            has_meshes = False
+            has_heightfields = False
+            if hasattr(model, "shape_type") and model.shape_type is not None:
+                shape_types = model.shape_type.numpy()
+                has_meshes = bool((shape_types == int(GeoType.MESH)).any())
+                has_heightfields = bool((shape_types == int(GeoType.HFIELD)).any())
+
+            # Initialize narrow phase with pre-allocated buffers
+            # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs
+            # Pass write_contact as custom writer to write directly to final Contacts format
+            self.narrow_phase = NarrowPhase(
+                max_candidate_pairs=self.shape_pairs_max,
+                max_triangle_pairs=1000000,
+                reduce_contacts=self.reduce_contacts,
+                device=device,
+                shape_aabb_lower=shape_aabb_lower,
+                shape_aabb_upper=shape_aabb_upper,
+                contact_writer_warp_func=write_contact,
+                shape_voxel_resolution=model._shape_voxel_resolution,
+                hydroelastic_sdf=hydroelastic_sdf,
+                has_meshes=has_meshes,
+                has_heightfields=has_heightfields,
+            )
+            self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
 
         # Allocate buffers
         with wp.ScopedDevice(device):
             self.broad_phase_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
             self.broad_phase_shape_pairs = wp.zeros(self.shape_pairs_max, dtype=wp.vec2i, device=device)
-            self.shape_aabb_lower = wp.zeros(shape_count, dtype=wp.vec3, device=device)
-            self.shape_aabb_upper = wp.zeros(shape_count, dtype=wp.vec3, device=device)
-
-        # Initialize narrow phase with pre-allocated buffers
-        # Pass AABB arrays so narrow phase can use them instead of computing AABBs internally
-        # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs
-        # Pass write_contact as custom writer to write directly to final Contacts format
-        self.narrow_phase = NarrowPhase(
-            max_candidate_pairs=self.shape_pairs_max,
-            max_triangle_pairs=1000000,
-            reduce_contacts=self.reduce_contacts,
-            device=device,
-            shape_aabb_lower=self.shape_aabb_lower,
-            shape_aabb_upper=self.shape_aabb_upper,
-            contact_writer_warp_func=write_contact,
-            shape_voxel_resolution=model._shape_voxel_resolution,
-            hydroelastic_sdf=hydroelastic_sdf,
-            has_meshes=has_meshes,
-            has_heightfields=has_heightfields,
-        )
-        self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
-
-        with wp.ScopedDevice(device):
-            # Narrow phase input arrays
             self.geom_data = wp.zeros(shape_count, dtype=wp.vec4, device=device)
             self.geom_transform = wp.zeros(shape_count, dtype=wp.transform, device=device)
+
+        if (
+            getattr(self.narrow_phase, "shape_aabb_lower", None) is None
+            or getattr(self.narrow_phase, "shape_aabb_upper", None) is None
+        ):
+            raise ValueError("narrow_phase must expose shape_aabb_lower and shape_aabb_upper arrays")
+        if self.narrow_phase.shape_aabb_lower.shape[0] != shape_count:
+            raise ValueError(
+                "narrow_phase.shape_aabb_lower must have one entry per model shape "
+                f"(expected {shape_count}, got {self.narrow_phase.shape_aabb_lower.shape[0]})"
+            )
+        if self.narrow_phase.shape_aabb_upper.shape[0] != shape_count:
+            raise ValueError(
+                "narrow_phase.shape_aabb_upper must have one entry per model shape "
+                f"(expected {shape_count}, got {self.narrow_phase.shape_aabb_upper.shape[0]})"
+            )
 
         if soft_contact_max is None:
             soft_contact_max = shape_count * particle_count
@@ -579,40 +666,6 @@ class CollisionPipeline:
             np.array(sorted_pairs),
             dtype=wp.vec2i,
             device=model.device,
-        )
-
-    @classmethod
-    def from_model(
-        cls,
-        model: Model,
-        *,
-        broad_phase: Literal["nxn", "sap", "explicit"] | None = None,
-        broad_phase_mode: Literal["nxn", "sap", "explicit"] | None = None,
-        reduce_contacts: bool = True,
-        rigid_contact_max: int | None = None,
-        soft_contact_max: int | None = None,
-        soft_contact_margin: float = 0.01,
-        requires_grad: bool | None = None,
-        shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
-        sap_sort_type: SAPSortType | None = None,
-        sdf_hydroelastic_config: NarrowPhase.HydroelasticSDF.Config | None = None,
-    ) -> CollisionPipeline:
-        """Backward-compatible constructor for a model-based collision pipeline."""
-        mode_any = broad_phase_mode if broad_phase_mode is not None else broad_phase
-        if mode_any is None:
-            mode_any = "explicit"
-        mode = _normalize_broad_phase_mode(mode_any)
-        return cls(
-            model,
-            reduce_contacts=reduce_contacts,
-            rigid_contact_max=rigid_contact_max,
-            shape_pairs_filtered=shape_pairs_filtered,
-            soft_contact_max=soft_contact_max,
-            soft_contact_margin=soft_contact_margin,
-            requires_grad=requires_grad,
-            broad_phase_mode=mode,
-            sap_sort_type=sap_sort_type,
-            sdf_hydroelastic_config=sdf_hydroelastic_config,
         )
 
     def collide(

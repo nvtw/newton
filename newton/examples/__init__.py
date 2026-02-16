@@ -412,18 +412,15 @@ def create_collision_pipeline(model, args=None, broad_phase=None, **kwargs):
     """
     import newton  # noqa: PLC0415
 
-    if "broad_phase_mode" in kwargs:
-        broad_phase_mode = kwargs.pop("broad_phase_mode")
-    else:
-        if broad_phase is None:
-            broad_phase = (
-                getattr(args, "broad_phase_mode", None) or getattr(args, "broad_phase", "explicit")
-                if args
-                else "explicit"
-            )
-        broad_phase_mode = broad_phase
+    if broad_phase is None:
+        broad_phase = (
+            kwargs.pop("broad_phase_mode", None)
+            or (getattr(args, "broad_phase_mode", None) if args else None)
+            or (getattr(args, "broad_phase", None) if args else None)
+            or "explicit"
+        )
 
-    return newton.CollisionPipeline.from_model(model, broad_phase_mode=broad_phase_mode, **kwargs)
+    return newton.CollisionPipeline(model, broad_phase=broad_phase, **kwargs)
 
 
 def main():
