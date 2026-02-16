@@ -1039,13 +1039,8 @@ See Also
 - :class:`~newton.Contacts` - Contact data container
 - :class:`~newton.GeoType` - Shape geometry types
 - :class:`~newton.ModelBuilder.ShapeConfig` - Shape configuration options
-- :meth:`~newton.Model.collide` - Collision detection method
 - :class:`~newton.geometry.HydroelasticSDF.Config` - Hydroelastic contact configuration
 - :meth:`~newton.CollisionPipeline.contacts` - Allocate a contacts buffer for a custom pipeline
-- :class:`~newton.Contacts` - Contact data container
-- :class:`~newton.GeoType` - Shape geometry types
-- :class:`~newton.ModelBuilder.ShapeConfig` - Shape configuration options
-- :class:`~newton.geometry.HydroelasticSDF.Config` - Hydroelastic contact configuration
 
 **Model attributes:**
 

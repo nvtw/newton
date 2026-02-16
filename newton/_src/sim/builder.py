@@ -326,29 +326,44 @@ class ModelBuilder:
 
             Args:
                 max_resolution: Maximum dimension for sparse SDF grid (must be divisible by 8).
-                    If provided (and target_voxel_size is None), enables SDF-based mesh-mesh collision.
+                    If provided, enables SDF-based mesh-mesh collision and clears any
+                    previous target_voxel_size setting.
                 target_voxel_size: Target voxel size for sparse SDF grid. If provided, enables
-                    SDF generation and takes precedence over max_resolution.
+                    SDF generation and clears any previous max_resolution setting.
                 is_hydroelastic: Whether to use SDF-based hydroelastic contacts. Both shapes
                     in a pair must have this enabled.
                 kh: Contact stiffness coefficient for hydroelastic collisions.
+
+            Raises:
+                ValueError: If both max_resolution and target_voxel_size are provided.
             """
+            if max_resolution is not None and target_voxel_size is not None:
+                raise ValueError("configure_sdf accepts either max_resolution or target_voxel_size, not both.")
             if max_resolution is not None:
                 self.sdf_max_resolution = max_resolution
+                self.sdf_target_voxel_size = None
             if target_voxel_size is not None:
                 self.sdf_target_voxel_size = target_voxel_size
+                self.sdf_max_resolution = None
             self.is_hydroelastic = is_hydroelastic
             self.kh = kh
 
-        def validate(self) -> None:
-            """Validate ShapeConfig parameters."""
+        def validate(self, shape_type: int | None = None) -> None:
+            """Validate ShapeConfig parameters.
+
+            Args:
+                shape_type: Optional shape geometry type used for context-specific
+                    validation.
+            """
             if self.sdf_max_resolution is not None and self.sdf_max_resolution % 8 != 0:
                 raise ValueError(
                     f"sdf_max_resolution must be divisible by 8 (got {self.sdf_max_resolution}). "
                     "This is required because SDF volumes are allocated in 8x8x8 tiles."
                 )
+            hydroelastic_supported = shape_type not in (GeoType.PLANE, GeoType.HFIELD)
             if (
                 self.is_hydroelastic
+                and hydroelastic_supported
                 and self.has_shape_collision
                 and self.sdf_max_resolution is None
                 and self.sdf_target_voxel_size is None
@@ -4426,7 +4441,7 @@ class ModelBuilder:
             xform = wp.transform(*xform)
         if cfg is None:
             cfg = self.default_shape_cfg
-        cfg.validate()
+        cfg.validate(shape_type=type)
         if scale is None:
             scale = (1.0, 1.0, 1.0)
 
