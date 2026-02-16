@@ -852,7 +852,7 @@ For control over broad phase mode, contact limits, or hydroelastic configuration
 
     pipeline = CollisionPipeline(
         model,
-        broad_phase_mode="sap",
+        broad_phase="sap",
         rigid_contact_max=50000,
     )
     contacts = pipeline.contacts()
