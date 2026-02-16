@@ -200,8 +200,9 @@ def compute_shape_aabbs(
     is_infinite_plane = (geo_type == int(GeoType.PLANE)) and (scale[0] == 0.0 and scale[1] == 0.0)
     is_mesh = geo_type == int(GeoType.MESH)
     is_sdf = geo_type == int(GeoType.SDF)
+    is_hfield = geo_type == int(GeoType.HFIELD)
 
-    if is_infinite_plane or is_mesh or is_sdf:
+    if is_infinite_plane or is_mesh or is_sdf or is_hfield:
         # Use conservative bounding sphere approach for infinite planes, meshes, and SDFs
         radius = shape_collision_radius[shape_id]
         half_extents = wp.vec3(radius, radius, radius)
@@ -501,10 +502,13 @@ class CollisionPipeline:
             writer_func=write_contact,
         )
 
-        # Detect if any mesh shapes are present to optimize kernel launches
+        # Detect if any mesh or heightfield shapes are present to optimize kernel launches
         has_meshes = False
+        has_heightfields = False
         if hasattr(model, "shape_type") and model.shape_type is not None:
-            has_meshes = bool((model.shape_type.numpy() == int(GeoType.MESH)).any())
+            shape_types = model.shape_type.numpy()
+            has_meshes = bool((shape_types == int(GeoType.MESH)).any())
+            has_heightfields = bool((shape_types == int(GeoType.HFIELD)).any())
 
         # Allocate buffers
         with wp.ScopedDevice(device):
@@ -528,6 +532,7 @@ class CollisionPipeline:
             shape_voxel_resolution=model._shape_voxel_resolution,
             hydroelastic_sdf=hydroelastic_sdf,
             has_meshes=has_meshes,
+            has_heightfields=has_heightfields,
         )
         self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
 
@@ -758,6 +763,8 @@ class CollisionPipeline:
                 shape_collision_aabb_lower=model.shape_collision_aabb_lower,
                 shape_collision_aabb_upper=model.shape_collision_aabb_upper,
                 shape_voxel_resolution=self.narrow_phase.shape_voxel_resolution,
+                shape_heightfield_data=model.shape_heightfield_data,
+                heightfield_elevation_data=model.heightfield_elevation_data,
                 writer_data=writer_data,
                 device=self.device,
             )

@@ -39,6 +39,7 @@ newton
    Control
    EqType
    GeoType
+   Heightfield
    JointType
    Mesh
    Model
