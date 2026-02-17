@@ -148,7 +148,7 @@ class ModelBuilder:
         desired.
     """
 
-    @dataclass(init=False)
+    @dataclass
     class ShapeConfig:
         """
         Represents the properties of a collision shape used in simulation.
@@ -194,121 +194,31 @@ class ModelBuilder:
         """Indicates whether the shape is visible in the simulation. Defaults to True."""
         is_site: bool = False
         """Indicates whether the shape is a site (non-colliding reference point). Directly setting this to True will NOT enforce site invariants. Use `mark_as_site()` or set via the `flags` property to ensure invariants. Defaults to False."""
-        _sdf_narrow_band_range: tuple[float, float] = (-0.1, 0.1)
+        sdf_narrow_band_range: tuple[float, float] = (-0.1, 0.1)
         """The narrow band distance range (inner, outer) for SDF computation. Only used for mesh shapes when SDF is enabled."""
-        _sdf_target_voxel_size: float | None = None
+        sdf_target_voxel_size: float | None = None
         """Target voxel size for sparse SDF grid.
         If provided, enables SDF generation and takes precedence over sdf_max_resolution.
         Requires GPU since wp.Volume only supports CUDA. Only used for mesh shapes."""
-        _sdf_max_resolution: int | None = None
+        sdf_max_resolution: int | None = None
         """Maximum dimension for sparse SDF grid (must be divisible by 8).
         If provided (and sdf_target_voxel_size is None), enables SDF-based mesh-mesh collision.
         Set to None (default) to disable SDF generation for this shape (uses BVH-based collision for mesh-mesh instead).
         Requires GPU since wp.Volume only supports CUDA. Only used for mesh shapes."""
-        _is_hydroelastic: bool = False
+        is_hydroelastic: bool = False
         """Whether the shape collides using SDF-based hydroelastics. For hydroelastic collisions, both participating shapes must have is_hydroelastic set to True. Defaults to False.
 
         .. note::
             Hydroelastic collision handling only works with volumetric shapes and in particular will not work for shapes like flat meshes or cloth.
             This flag will be automatically set to False for planes and heightfields in :meth:`ModelBuilder.add_shape`.
         """
-        _kh: float = 1.0e10
+        kh: float = 1.0e10
         """Contact stiffness coefficient for hydroelastic collisions. Used by MuJoCo, Featherstone, SemiImplicit when is_hydroelastic is True.
 
         .. note::
             For MuJoCo, stiffness values will internally be scaled by masses.
             Users should choose kh to match their desired force-to-penetration ratio.
         """
-
-        def __init__(
-            self,
-            density: float = 1000.0,
-            ke: float = 2.5e3,
-            kd: float = 100.0,
-            kf: float = 1000.0,
-            ka: float = 0.0,
-            mu: float = 0.5,
-            restitution: float = 0.0,
-            mu_torsional: float = 0.25,
-            mu_rolling: float = 0.0005,
-            thickness: float = 1e-5,
-            contact_margin: float | None = None,
-            is_solid: bool = True,
-            collision_group: int = 1,
-            collision_filter_parent: bool = True,
-            has_shape_collision: bool = True,
-            has_particle_collision: bool = True,
-            is_visible: bool = True,
-            is_site: bool = False,
-            sdf_narrow_band_range: tuple[float, float] = (-0.1, 0.1),
-            sdf_target_voxel_size: float | None = None,
-            sdf_max_resolution: int | None = None,
-            is_hydroelastic: bool = False,
-            kh: float = 1.0e10,
-        ) -> None:
-            self.density = density
-            self.ke = ke
-            self.kd = kd
-            self.kf = kf
-            self.ka = ka
-            self.mu = mu
-            self.restitution = restitution
-            self.mu_torsional = mu_torsional
-            self.mu_rolling = mu_rolling
-            self.thickness = thickness
-            self.contact_margin = contact_margin
-            self.is_solid = is_solid
-            self.collision_group = collision_group
-            self.collision_filter_parent = collision_filter_parent
-            self.has_shape_collision = has_shape_collision
-            self.has_particle_collision = has_particle_collision
-            self.is_visible = is_visible
-            self.is_site = is_site
-            self.sdf_narrow_band_range = sdf_narrow_band_range
-            self.sdf_target_voxel_size = sdf_target_voxel_size
-            self.sdf_max_resolution = sdf_max_resolution
-            self.is_hydroelastic = is_hydroelastic
-            self.kh = kh
-
-        @property
-        def sdf_narrow_band_range(self) -> tuple[float, float]:
-            return self._sdf_narrow_band_range
-
-        @sdf_narrow_band_range.setter
-        def sdf_narrow_band_range(self, value: tuple[float, float]) -> None:
-            self._sdf_narrow_band_range = value
-
-        @property
-        def sdf_target_voxel_size(self) -> float | None:
-            return self._sdf_target_voxel_size
-
-        @sdf_target_voxel_size.setter
-        def sdf_target_voxel_size(self, value: float | None) -> None:
-            self._sdf_target_voxel_size = value
-
-        @property
-        def sdf_max_resolution(self) -> int | None:
-            return self._sdf_max_resolution
-
-        @sdf_max_resolution.setter
-        def sdf_max_resolution(self, value: int | None) -> None:
-            self._sdf_max_resolution = value
-
-        @property
-        def is_hydroelastic(self) -> bool:
-            return self._is_hydroelastic
-
-        @is_hydroelastic.setter
-        def is_hydroelastic(self, value: bool) -> None:
-            self._is_hydroelastic = value
-
-        @property
-        def kh(self) -> float:
-            return self._kh
-
-        @kh.setter
-        def kh(self, value: float) -> None:
-            self._kh = value
 
         def configure_sdf(
             self,
@@ -689,7 +599,7 @@ class ModelBuilder:
             gravity (float, optional): The magnitude of gravity to apply along the up axis.
                 Defaults to -9.81.
         """
-        self.num_worlds = 0
+        self.world_count = 0
 
         # region defaults
         self.default_shape_cfg = ModelBuilder.ShapeConfig()
@@ -1419,7 +1329,7 @@ class ModelBuilder:
     def replicate(
         self,
         builder: ModelBuilder,
-        num_worlds: int,
+        world_count: int,
         spacing: tuple[float, float, float] = (0.0, 0.0, 0.0),
     ):
         """
@@ -1436,14 +1346,14 @@ class ModelBuilder:
 
         Args:
             builder (ModelBuilder): The builder to replicate. All entities from this builder will be copied.
-            num_worlds (int): The number of worlds to create.
+            world_count (int): The number of worlds to create.
             spacing (tuple[float, float, float], optional): The spacing between each copy along each axis.
                 For example, (5.0, 5.0, 0.0) arranges copies in a 2D grid in the XY plane.
                 Defaults to (0.0, 0.0, 0.0).
         """
-        offsets = compute_world_offsets(num_worlds, spacing, self.up_axis)
+        offsets = compute_world_offsets(world_count, spacing, self.up_axis)
         xform = wp.transform_identity()
-        for i in range(num_worlds):
+        for i in range(world_count):
             xform[:3] = offsets[i]
             self.add_world(builder, xform=xform)
 
@@ -2132,8 +2042,8 @@ class ModelBuilder:
             )
 
         # Set the current world to the next available world index
-        self.current_world = self.num_worlds
-        self.num_worlds += 1
+        self.current_world = self.world_count
+        self.world_count += 1
 
         # Store world metadata if needed (for future use)
         # Note: We might want to add world_key and world_attributes lists in __init__ if needed
@@ -7643,7 +7553,7 @@ class ModelBuilder:
         1. World indices are monotonic (non-decreasing after first non-negative)
         2. World indices are contiguous (no gaps in sequence)
         3. Global entities (world -1) only appear at beginning or end of arrays
-        4. All world indices are in valid range [-1, num_worlds-1]
+        4. All world indices are in valid range [-1, world_count-1]
 
         Raises:
             ValueError: If any validation check fails.
@@ -7667,14 +7577,14 @@ class ModelBuilder:
 
             arr = np.array(world_array, dtype=np.int32)
 
-            # Check for invalid world indices (must be in range [-1, num_worlds-1])
-            max_valid = self.num_worlds - 1
+            # Check for invalid world indices (must be in range [-1, world_count-1])
+            max_valid = self.world_count - 1
             invalid_indices = np.where((arr < -1) | (arr > max_valid))[0]
             if len(invalid_indices) > 0:
                 invalid_values = arr[invalid_indices]
                 raise ValueError(
                     f"Invalid world index in {array_name}: found value(s) {invalid_values.tolist()} "
-                    f"at indices {invalid_indices.tolist()}. Valid range is -1 to {max_valid} (num_worlds={self.num_worlds})."
+                    f"at indices {invalid_indices.tolist()}. Valid range is -1 to {max_valid} (world_count={self.world_count})."
                 )
 
             # Check for global entity positioning (world -1)
@@ -8140,7 +8050,7 @@ class ModelBuilder:
 
             # Initialize world_entity_start with zeros
             world_entity_start.clear()
-            world_entity_start.extend([0] * (self.num_worlds + 2))
+            world_entity_start.extend([0] * (self.world_count + 2))
 
             # Count global entities at the front of the entity_world array
             front_global_entity_count = 0
@@ -8153,8 +8063,8 @@ class ModelBuilder:
 
             # Compute per-world cumulative counts
             entity_world_np = np.asarray(entity_world, dtype=np.int32)
-            world_counts = np.bincount(entity_world_np[entity_world_np >= 0], minlength=self.num_worlds)
-            for w in range(self.num_worlds):
+            world_counts = np.bincount(entity_world_np[entity_world_np >= 0], minlength=self.world_count)
+            for w in range(self.world_count):
                 world_entity_start[w + 1] = world_entity_start[w] + int(world_counts[w])
 
             # Set the last element to the total entity counts over all worlds in the model
@@ -8165,8 +8075,8 @@ class ModelBuilder:
             # First build the start lists by appending tail-end global and total entity counts
             build_entity_start_array(total_count, entity_world_array, world_start_array, name)
 
-            # Ensure the world_start array has length num_worlds + 2 (for global entities at start/end)
-            expected_length = self.num_worlds + 2
+            # Ensure the world_start array has length world_count + 2 (for global entities at start/end)
+            expected_length = self.world_count + 2
             if len(world_start_array) != expected_length:
                 raise ValueError(
                     f"World start indices for {name}s have incorrect length: "
@@ -8175,7 +8085,7 @@ class ModelBuilder:
 
             # Ensure that per-world start indices are non-decreasing and compute sum of per-world counts
             sum_of_counts = world_start_array[0]
-            for w in range(self.num_worlds + 1):
+            for w in range(self.world_count + 1):
                 start_idx = world_start_array[w]
                 end_idx = world_start_array[w + 1]
                 count = end_idx - start_idx
@@ -8219,7 +8129,7 @@ class ModelBuilder:
 
             # Initialize world_space_start with zeros
             world_space_start.clear()
-            world_space_start.extend([0] * (self.num_worlds + 2))
+            world_space_start.extend([0] * (self.world_count + 2))
 
             # Extend joint_space_start with total count to enable computing per-world counts
             joint_space_start_ext = copy.copy(joint_space_start)
@@ -8240,7 +8150,7 @@ class ModelBuilder:
 
             # Convert per-world counts to cumulative start indices
             world_space_start[0] += front_global_space_count
-            for w in range(self.num_worlds):
+            for w in range(self.world_count):
                 world_space_start[w + 1] += world_space_start[w]
 
             # Add total (i.e. final) entity counts to the per-world start indices
@@ -8251,8 +8161,8 @@ class ModelBuilder:
             # First finalize the start array by appending tail-end global and total entity counts
             build_joint_space_start_array(total_count, space_start_array, world_start_array, name)
 
-            # Ensure the world_start array has length num_worlds + 2 (for global entities at start/end)
-            expected_length = self.num_worlds + 2
+            # Ensure the world_start array has length world_count + 2 (for global entities at start/end)
+            expected_length = self.world_count + 2
             if len(world_start_array) != expected_length:
                 raise ValueError(
                     f"World start indices for {name}s have incorrect length: "
@@ -8261,7 +8171,7 @@ class ModelBuilder:
 
             # Ensure that per-world start indices are non-decreasing and compute sum of per-world counts
             sum_of_counts = world_start_array[0]
-            for w in range(self.num_worlds + 1):
+            for w in range(self.world_count + 1):
                 start_idx = world_start_array[w]
                 end_idx = world_start_array[w + 1]
                 count = end_idx - start_idx
@@ -8328,7 +8238,7 @@ class ModelBuilder:
         """
 
         # ensure the world count is set correctly
-        self.num_worlds = max(1, self.num_worlds)
+        self.world_count = max(1, self.world_count)
 
         # validate world ordering and contiguity
         if not skip_all_validations and not skip_validation_worlds:
@@ -8369,7 +8279,7 @@ class ModelBuilder:
             m.request_state_attributes(*self._requested_state_attributes)
             m.requires_grad = requires_grad
 
-            m.num_worlds = self.num_worlds
+            m.world_count = self.world_count
 
             # ---------------------
             # particles
@@ -8495,17 +8405,14 @@ class ModelBuilder:
 
                 return nx, ny, nz
 
-            for shape_idx, (shape_type, shape_src, shape_scale) in enumerate(
+            for _shape_idx, (shape_type, shape_src, shape_scale) in enumerate(
                 zip(self.shape_type, self.shape_source, self.shape_scale, strict=True)
             ):
-                # Get margin to expand AABB (SDF extends beyond shape bounds by margin + thickness)
-                margin = self.shape_contact_margin[shape_idx] + self.shape_thickness[shape_idx]
-
                 # Create cache key based on shape type and parameters
                 if (shape_type == GeoType.MESH or shape_type == GeoType.CONVEX_MESH) and shape_src is not None:
-                    cache_key = (shape_type, id(shape_src), tuple(shape_scale), margin)
+                    cache_key = (shape_type, id(shape_src), tuple(shape_scale))
                 else:
-                    cache_key = (shape_type, tuple(shape_scale), margin)
+                    cache_key = (shape_type, tuple(shape_scale))
 
                 # Check cache first
                 if cache_key in shape_aabb_cache:
@@ -8522,10 +8429,6 @@ class ModelBuilder:
                         aabb_lower = aabb_lower * np.array(shape_scale)
                         aabb_upper = aabb_upper * np.array(shape_scale)
 
-                        # Expand by margin (SDF extends beyond mesh bounds)
-                        aabb_lower = aabb_lower - margin
-                        aabb_upper = aabb_upper + margin
-
                         nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
                     elif shape_type == GeoType.CONVEX_MESH and shape_src is not None:
@@ -8538,29 +8441,25 @@ class ModelBuilder:
                         aabb_lower = aabb_lower * np.array(shape_scale)
                         aabb_upper = aabb_upper * np.array(shape_scale)
 
-                        # Expand by margin
-                        aabb_lower = aabb_lower - margin
-                        aabb_upper = aabb_upper + margin
-
                         nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
                     elif shape_type == GeoType.ELLIPSOID:
                         # Ellipsoid: shape_scale = (semi_axis_x, semi_axis_y, semi_axis_z)
                         sx, sy, sz = shape_scale
-                        aabb_lower = np.array([-sx - margin, -sy - margin, -sz - margin])
-                        aabb_upper = np.array([sx + margin, sy + margin, sz + margin])
+                        aabb_lower = np.array([-sx, -sy, -sz])
+                        aabb_upper = np.array([sx, sy, sz])
                         nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
                     elif shape_type == GeoType.BOX:
                         # Box: shape_scale = (hx, hy, hz) half-extents
                         hx, hy, hz = shape_scale
-                        aabb_lower = np.array([-hx - margin, -hy - margin, -hz - margin])
-                        aabb_upper = np.array([hx + margin, hy + margin, hz + margin])
+                        aabb_lower = np.array([-hx, -hy, -hz])
+                        aabb_upper = np.array([hx, hy, hz])
                         nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
                     elif shape_type == GeoType.SPHERE:
                         # Sphere: shape_scale = (radius, radius, radius)
-                        r = shape_scale[0] + margin
+                        r = shape_scale[0]
                         aabb_lower = np.array([-r, -r, -r])
                         aabb_upper = np.array([r, r, r])
                         nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
@@ -8569,25 +8468,24 @@ class ModelBuilder:
                         # Capsule: shape_scale = (radius, half_height, radius)
                         # Capsule is along Z axis with hemispherical caps (matches SDF in kernels.py)
                         r, half_height, _ = shape_scale
-                        r_expanded = r + margin
-                        aabb_lower = np.array([-r_expanded, -r_expanded, -half_height - r_expanded])
-                        aabb_upper = np.array([r_expanded, r_expanded, half_height + r_expanded])
+                        aabb_lower = np.array([-r, -r, -half_height - r])
+                        aabb_upper = np.array([r, r, half_height + r])
                         nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
                     elif shape_type == GeoType.CYLINDER:
                         # Cylinder: shape_scale = (radius, half_height, radius)
                         # Cylinder is along Z axis (matches SDF in kernels.py)
                         r, half_height, _ = shape_scale
-                        aabb_lower = np.array([-r - margin, -r - margin, -half_height - margin])
-                        aabb_upper = np.array([r + margin, r + margin, half_height + margin])
+                        aabb_lower = np.array([-r, -r, -half_height])
+                        aabb_upper = np.array([r, r, half_height])
                         nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
                     elif shape_type == GeoType.CONE:
                         # Cone: shape_scale = (radius, half_height, radius)
                         # Cone is along Z axis (matches SDF in kernels.py)
                         r, half_height, _ = shape_scale
-                        aabb_lower = np.array([-r - margin, -r - margin, -half_height - margin])
-                        aabb_upper = np.array([r + margin, r + margin, half_height + margin])
+                        aabb_lower = np.array([-r, -r, -half_height])
+                        aabb_upper = np.array([r, r, half_height])
                         nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
                     else:
@@ -9094,7 +8992,7 @@ class ModelBuilder:
             else:
                 # Fallback: use scalar gravity for all worlds
                 gravity_vec = wp.vec3(*(g * self.gravity for g in self.up_vector))
-                gravity_vecs = [gravity_vec] * self.num_worlds
+                gravity_vecs = [gravity_vec] * self.world_count
             m.gravity = wp.array(
                 gravity_vecs,
                 dtype=wp.vec3,
@@ -9170,7 +9068,7 @@ class ModelBuilder:
                 elif freq_key == Model.AttributeFrequency.ARTICULATION:
                     count = m.articulation_count
                 elif freq_key == Model.AttributeFrequency.WORLD:
-                    count = m.num_worlds
+                    count = m.world_count
                 elif freq_key == Model.AttributeFrequency.EQUALITY_CONSTRAINT:
                     count = m.equality_constraint_count
                 elif freq_key == Model.AttributeFrequency.CONSTRAINT_MIMIC:

@@ -593,7 +593,7 @@ class TestContactEstimator(unittest.TestCase):
     def test_heuristic_caps_large_pair_count(self):
         """When pair count is huge, the heuristic provides a tighter bound."""
         model = newton.Model()
-        model.num_worlds = 1
+        model.world_count = 1
         model.shape_contact_pair_count = 999999
 
         # 4 primitives (CPP=5), 3 meshes (CPP=40), 2 planes, all in world 0.
@@ -616,7 +616,7 @@ class TestContactEstimator(unittest.TestCase):
     def test_world_aware_plane_estimate(self):
         """Per-world plane computation avoids quadratic cross-world overcount."""
         model = newton.Model()
-        model.num_worlds = 4
+        model.world_count = 4
         model.shape_contact_pair_count = 0
 
         # 4 worlds, each with 10 boxes (CPP=5) and 10 planes.
@@ -639,7 +639,7 @@ class TestContactEstimator(unittest.TestCase):
     def test_pair_count_tighter_than_heuristic(self):
         """When precomputed pair count is tighter than the heuristic, it is used."""
         model = newton.Model()
-        model.num_worlds = 4
+        model.world_count = 4
         model.shape_contact_pair_count = 300
 
         # 40 boxes (CPP=5) across 4 worlds, no planes.
