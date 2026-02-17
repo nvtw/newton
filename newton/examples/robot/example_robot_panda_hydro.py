@@ -85,6 +85,9 @@ class Example:
             mu_torsional=0.0,
             mu_rolling=0.0,
         )
+        mesh_shape_cfg = copy.deepcopy(shape_cfg)
+        mesh_shape_cfg.sdf_max_resolution = None
+        mesh_shape_cfg.sdf_target_voxel_size = None
         hydro_mesh_sdf_max_resolution = 64
 
         builder = newton.ModelBuilder()
@@ -92,6 +95,8 @@ class Example:
         # for import-time shapes unless they provide explicit mesh.sdf payloads.
         urdf_shape_cfg = copy.deepcopy(shape_cfg)
         urdf_shape_cfg.is_hydroelastic = False
+        urdf_shape_cfg.sdf_max_resolution = None
+        urdf_shape_cfg.sdf_target_voxel_size = None
         builder.default_shape_cfg = urdf_shape_cfg
 
         builder.add_urdf(
@@ -178,8 +183,8 @@ class Example:
                 wp.vec3(0.0, 0.005, 0.045),
                 wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), -np.pi),
             )
-            builder.add_shape_mesh(body=left_finger_idx, mesh=pad_mesh, xform=pad_xform, cfg=shape_cfg)
-            builder.add_shape_mesh(body=right_finger_idx, mesh=pad_mesh, xform=pad_xform, cfg=shape_cfg)
+            builder.add_shape_mesh(body=left_finger_idx, mesh=pad_mesh, xform=pad_xform, cfg=mesh_shape_cfg)
+            builder.add_shape_mesh(body=right_finger_idx, mesh=pad_mesh, xform=pad_xform, cfg=mesh_shape_cfg)
 
         # Table
         box_size = 0.05
@@ -195,7 +200,7 @@ class Example:
             body=-1,
             mesh=table_mesh,
             xform=wp.transform(wp.vec3(0.08, -0.5, box_size), wp.quat_identity()),
-            cfg=shape_cfg,
+            cfg=mesh_shape_cfg,
         )
 
         # Object to manipulate
@@ -246,7 +251,7 @@ class Example:
                 wp.quat_identity(),
             )
             cup_body = builder.add_body(key="cup", xform=cup_xform)
-            builder.add_shape_mesh(body=cup_body, mesh=cup_mesh, cfg=shape_cfg)
+            builder.add_shape_mesh(body=cup_body, mesh=cup_mesh, cfg=mesh_shape_cfg)
 
         # build model for IK
         self.model_single = copy.deepcopy(builder).finalize()
