@@ -78,6 +78,7 @@ class Example:
 
         shape_cfg = newton.ModelBuilder.ShapeConfig(
             kh=1e11,
+            sdf_max_resolution=64,
             is_hydroelastic=True,
             sdf_narrow_band_range=(-0.01, 0.01),
             contact_margin=0.01,
