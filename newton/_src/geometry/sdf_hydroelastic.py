@@ -31,11 +31,11 @@ where contact force is distributed over a contact patch rather than point contac
 
 **Usage:**
 
-Configure shapes with ``ShapeConfig(is_hydroelastic=True, k_hydro=1e9)`` and
-pass ``SDFHydroelasticConfig`` to the collision pipeline.
+Configure shapes with ``ShapeConfig(is_hydroelastic=True, kh=1e9)`` and
+pass :class:`HydroelasticSDF.Config` to the collision pipeline.
 
 See Also:
-    :class:`SDFHydroelasticConfig`: Configuration options for this module.
+    :class:`HydroelasticSDF.Config`: Configuration options for this module.
     :class:`HydroelasticContactReduction`: Contact reduction for hydroelastic contacts.
 """
 
@@ -106,65 +106,7 @@ class HydroelasticContactSurfaceData:
     """Maximum number of face contacts (buffer size)."""
 
 
-@dataclass
-class SDFHydroelasticConfig:
-    """
-    Controls properties of SDF hydroelastic collision handling.
-    """
-
-    reduce_contacts: bool = True
-    """Whether to reduce contacts to a smaller representative set per shape pair.
-    When False, all generated contacts are passed through without reduction."""
-    pre_prune_contacts: bool = True
-    """Whether to perform local-first face compaction during generation.
-    This mode avoids global hashtable traffic in the hot generation loop and
-    writes a smaller contact set to the buffer before the normal reduce pass.
-    Only active when ``reduce_contacts`` is True."""
-    buffer_fraction: float = 1.0
-    """Fraction of worst-case hydroelastic buffer allocations. Range: (0, 1].
-
-    This scales pre-allocated broadphase, iso-refinement, and face-contact
-    buffers before applying stage multipliers. Lower values reduce memory
-    usage and may cause overflows in dense scenes. Overflows are bounds-safe
-    and emit warnings; increase this value when warnings appear.
-    """
-    buffer_mult_broad: int = 1
-    """Multiplier for the preallocated broadphase buffer that stores overlapping
-    block pairs. Increase only if a broadphase overflow warning is issued."""
-    buffer_mult_iso: int = 1
-    """Multiplier for preallocated iso-surface extraction buffers used during
-    hierarchical octree refinement (subblocks and voxels). Increase only if an iso buffer overflow warning is issued."""
-    buffer_mult_contact: int = 1
-    """Multiplier for the preallocated face contact buffer that stores contact
-    positions, normals, depths, and areas. Increase only if a face contact overflow warning is issued."""
-    contact_buffer_fraction: float = 0.5
-    """Fraction of the face contact buffer to allocate when ``reduce_contacts`` is True.
-    The reduce kernel selects winners from whatever fits in the buffer, so a smaller
-    buffer trades off coverage for memory savings.
-    Range: (0, 1]. Only applied when ``reduce_contacts`` is enabled; ignored otherwise."""
-    grid_size: int = 256 * 8 * 128
-    """Grid size for contact handling. Can be tuned for performance."""
-    output_contact_surface: bool = False
-    """Whether to output hydroelastic contact surface vertices for visualization."""
-    normal_matching: bool = True
-    """Whether to rotate reduced contact normals so their weighted sum aligns with
-    the aggregate force direction. Only active when reduce_contacts is True."""
-    anchor_contact: bool = False
-    """Whether to add an anchor contact at the center of pressure for each normal bin.
-    The anchor contact helps preserve moment balance. Only active when reduce_contacts is True."""
-    margin_contact_area: float = 1e-2
-    """Contact area used for non-penetrating contacts at the margin."""
-    pre_prune_accumulate_all_penetrating_aggregates: bool = False
-    """When pre-pruning is enabled, also accumulate aggregate force terms from all
-    penetrating faces before pruning writes to the contact buffer.
-
-    This preserves aggregate stiffness/normal/anchor fidelity while keeping the
-    fast local compaction path for contact storage. The default keeps the current
-    fastest behavior (aggregates from retained contacts only).
-    """
-
-
-class SDFHydroelastic:
+class HydroelasticSDF:
     """Hydroelastic contact generation with SDF-based collision detection.
 
     This class implements hydroelastic contact modeling between shapes represented
@@ -187,10 +129,10 @@ class SDFHydroelastic:
         max_num_blocks_per_shape: Maximum block count for any single shape.
         shape_sdf_block_coords: Block coordinates for each shape's SDF representation.
         shape_sdf_shape2blocks: Mapping from shape index to (start, end) block range.
-        shape_material_k_hydro: Hydroelastic stiffness coefficient for each shape.
+        shape_material_kh: Hydroelastic stiffness coefficient for each shape.
         n_shapes: Total number of shapes in the simulation.
         config: Configuration options controlling buffer sizes, contact reduction,
-            and other behavior. Defaults to :class:`SDFHydroelasticConfig`.
+            and other behavior. Defaults to :class:`HydroelasticSDF.Config`.
         device: Warp device for GPU computation.
         writer_func: Callback for writing decoded contact data.
 
@@ -203,8 +145,63 @@ class SDFHydroelastic:
         which can affect contact matching accuracy for warm-starting physics solvers.
 
     See Also:
-        :class:`SDFHydroelasticConfig`: Configuration options for this class.
+        :class:`HydroelasticSDF.Config`: Configuration options for this class.
     """
+
+    @dataclass
+    class Config:
+        """Controls properties of SDF hydroelastic collision handling."""
+
+        reduce_contacts: bool = True
+        """Whether to reduce contacts to a smaller representative set per shape pair.
+        When False, all generated contacts are passed through without reduction."""
+        pre_prune_contacts: bool = True
+        """Whether to perform local-first face compaction during generation.
+        This mode avoids global hashtable traffic in the hot generation loop and
+        writes a smaller contact set to the buffer before the normal reduce pass.
+        Only active when ``reduce_contacts`` is True."""
+        buffer_fraction: float = 1.0
+        """Fraction of worst-case hydroelastic buffer allocations. Range: (0, 1].
+
+        This scales pre-allocated broadphase, iso-refinement, and face-contact
+        buffers before applying stage multipliers. Lower values reduce memory
+        usage and may cause overflows in dense scenes. Overflows are bounds-safe
+        and emit warnings; increase this value when warnings appear.
+        """
+        buffer_mult_broad: int = 1
+        """Multiplier for the preallocated broadphase buffer that stores overlapping
+        block pairs. Increase only if a broadphase overflow warning is issued."""
+        buffer_mult_iso: int = 1
+        """Multiplier for preallocated iso-surface extraction buffers used during
+        hierarchical octree refinement (subblocks and voxels). Increase only if an iso buffer overflow warning is issued."""
+        buffer_mult_contact: int = 1
+        """Multiplier for the preallocated face contact buffer that stores contact
+        positions, normals, depths, and areas. Increase only if a face contact overflow warning is issued."""
+        contact_buffer_fraction: float = 0.5
+        """Fraction of the face contact buffer to allocate when ``reduce_contacts`` is True.
+        The reduce kernel selects winners from whatever fits in the buffer, so a smaller
+        buffer trades off coverage for memory savings.
+        Range: (0, 1]. Only applied when ``reduce_contacts`` is enabled; ignored otherwise."""
+        grid_size: int = 256 * 8 * 128
+        """Grid size for contact handling. Can be tuned for performance."""
+        output_contact_surface: bool = False
+        """Whether to output hydroelastic contact surface vertices for visualization."""
+        normal_matching: bool = True
+        """Whether to rotate reduced contact normals so their weighted sum aligns with
+        the aggregate force direction. Only active when reduce_contacts is True."""
+        anchor_contact: bool = False
+        """Whether to add an anchor contact at the center of pressure for each normal bin.
+        The anchor contact helps preserve moment balance. Only active when reduce_contacts is True."""
+        margin_contact_area: float = 1e-2
+        """Contact area used for non-penetrating contacts at the margin."""
+        pre_prune_accumulate_all_penetrating_aggregates: bool = False
+        """When pre-pruning is enabled, also accumulate aggregate force terms from all
+        penetrating faces before pruning writes to the contact buffer.
+
+        This preserves aggregate stiffness/normal/anchor fidelity while keeping the
+        fast local compaction path for contact storage. The default keeps the current
+        fastest behavior (aggregates from retained contacts only).
+        """
 
     def __init__(
         self,
@@ -213,14 +210,14 @@ class SDFHydroelastic:
         max_num_blocks_per_shape: int,
         shape_sdf_block_coords: wp.array(dtype=wp.vec3us),
         shape_sdf_shape2blocks: wp.array(dtype=wp.vec2i),
-        shape_material_k_hydro: wp.array(dtype=wp.float32),
+        shape_material_kh: wp.array(dtype=wp.float32),
         n_shapes: int,
-        config: SDFHydroelasticConfig = None,
+        config: HydroelasticSDF.Config | None = None,
         device: Any = None,
         writer_func: Any = None,
     ):
         if config is None:
-            config = SDFHydroelasticConfig()
+            config = HydroelasticSDF.Config()
 
         self.config = config
         if device is None:
@@ -230,7 +227,7 @@ class SDFHydroelastic:
         # keep local references for model arrays
         self.shape_sdf_block_coords = shape_sdf_block_coords
         self.shape_sdf_shape2blocks = shape_sdf_shape2blocks
-        self.shape_material_k_hydro = shape_material_k_hydro
+        self.shape_material_kh = shape_material_kh
 
         self.n_shapes = n_shapes
         self.max_num_shape_pairs = num_shape_pairs
@@ -239,7 +236,7 @@ class SDFHydroelastic:
 
         frac = float(self.config.buffer_fraction)
         if frac <= 0.0 or frac > 1.0:
-            raise ValueError(f"SDFHydroelasticConfig.buffer_fraction must be in (0, 1], got {frac}")
+            raise ValueError(f"HydroelasticSDF.Config.buffer_fraction must be in (0, 1], got {frac}")
 
         mult = max(int(self.config.buffer_mult_iso * self.total_num_tiles * frac), 64)
         self.max_num_blocks_broad = max(
@@ -348,9 +345,9 @@ class SDFHydroelastic:
 
     @classmethod
     def _from_model(
-        cls, model: Model, config: SDFHydroelasticConfig = None, writer_func: Any = None
-    ) -> SDFHydroelastic | None:
-        """Create SDFHydroelastic from a model.
+        cls, model: Model, config: HydroelasticSDF.Config | None = None, writer_func: Any = None
+    ) -> HydroelasticSDF | None:
+        """Create HydroelasticSDF from a model.
 
         Args:
             model: The simulation model.
@@ -358,7 +355,7 @@ class SDFHydroelastic:
             writer_func: Optional writer function for decoding contacts.
 
         Returns:
-            SDFHydroelastic instance, or None if no hydroelastic shape pairs exist.
+            HydroelasticSDF instance, or None if no hydroelastic shape pairs exist.
         """
         shape_flags = model.shape_flags.numpy()
 
@@ -406,7 +403,7 @@ class SDFHydroelastic:
             max_num_blocks_per_shape=max_num_blocks_per_shape,
             shape_sdf_block_coords=model.shape_sdf_block_coords,
             shape_sdf_shape2blocks=model.shape_sdf_shape2blocks,
-            shape_material_k_hydro=model.shape_material_k_hydro,
+            shape_material_kh=model.shape_material_kh,
             n_shapes=model.shape_count,
             config=config,
             device=model.device,
@@ -445,8 +442,8 @@ class SDFHydroelastic:
         shape_sdf_data: wp.array(dtype=SDFData),
         shape_transform: wp.array(dtype=wp.transform),
         shape_contact_margin: wp.array(dtype=wp.float32),
-        shape_local_aabb_lower: wp.array(dtype=wp.vec3),
-        shape_local_aabb_upper: wp.array(dtype=wp.vec3),
+        shape_collision_aabb_lower: wp.array(dtype=wp.vec3),
+        shape_collision_aabb_upper: wp.array(dtype=wp.vec3),
         shape_voxel_resolution: wp.array(dtype=wp.vec3i),
         shape_pairs_sdf_sdf: wp.array(dtype=wp.vec2i),
         shape_pairs_sdf_sdf_count: wp.array(dtype=wp.int32),
@@ -458,8 +455,8 @@ class SDFHydroelastic:
             shape_sdf_data: SDF data for each shape.
             shape_transform: World transforms for each shape.
             shape_contact_margin: Contact margin for each shape.
-            shape_local_aabb_lower: Per-shape local AABB lower bounds.
-            shape_local_aabb_upper: Per-shape local AABB upper bounds.
+            shape_collision_aabb_lower: Per-shape collision AABB lower bounds.
+            shape_collision_aabb_upper: Per-shape collision AABB upper bounds.
             shape_voxel_resolution: Per-shape voxel grid resolution.
             shape_pairs_sdf_sdf: Pairs of shape indices to check for collision.
             shape_pairs_sdf_sdf_count: Number of valid shape pairs.
@@ -478,8 +475,8 @@ class SDFHydroelastic:
             self._generate_contacts(shape_sdf_data, shape_transform, shape_contact_margin)
             self._reduce_decode_contacts(
                 shape_transform,
-                shape_local_aabb_lower,
-                shape_local_aabb_upper,
+                shape_collision_aabb_lower,
+                shape_collision_aabb_upper,
                 shape_voxel_resolution,
                 shape_contact_margin,
                 writer_data,
@@ -600,7 +597,7 @@ class SDFHydroelastic:
                     self.iso_buffer_counts[i],
                     shape_sdf_data,
                     shape_transform,
-                    self.shape_material_k_hydro,
+                    self.shape_material_kh,
                     self.iso_buffer_coords[i],
                     self.iso_buffer_shape_pairs[i],
                     shape_contact_margin,
@@ -677,7 +674,7 @@ class SDFHydroelastic:
                 self.iso_voxel_count,
                 shape_sdf_data,
                 shape_transform,
-                self.shape_material_k_hydro,
+                self.shape_material_kh,
                 self.iso_voxel_coords,
                 self.iso_voxel_shape_pair,
                 self.mc_tables[0],
@@ -715,7 +712,7 @@ class SDFHydroelastic:
             inputs=[
                 self.grid_size,
                 self.contact_reduction.contact_count,
-                self.shape_material_k_hydro,
+                self.shape_material_kh,
                 shape_transform,
                 shape_contact_margin,
                 self.contact_reduction.reducer.position_depth,
@@ -731,8 +728,8 @@ class SDFHydroelastic:
     def _reduce_decode_contacts(
         self,
         shape_transform: wp.array(dtype=wp.transform),
-        shape_local_aabb_lower: wp.array(dtype=wp.vec3),
-        shape_local_aabb_upper: wp.array(dtype=wp.vec3),
+        shape_collision_aabb_lower: wp.array(dtype=wp.vec3),
+        shape_collision_aabb_upper: wp.array(dtype=wp.vec3),
         shape_voxel_resolution: wp.array(dtype=wp.vec3i),
         shape_contact_margin: wp.array(dtype=wp.float32),
         writer_data: Any,
@@ -746,8 +743,8 @@ class SDFHydroelastic:
         self.contact_reduction.reduce(
             shape_material_k_hydro=self.shape_material_k_hydro,
             shape_transform=shape_transform,
-            shape_local_aabb_lower=shape_local_aabb_lower,
-            shape_local_aabb_upper=shape_local_aabb_upper,
+            shape_collision_aabb_lower=shape_collision_aabb_lower,
+            shape_collision_aabb_upper=shape_collision_aabb_upper,
             shape_voxel_resolution=shape_voxel_resolution,
             grid_size=self.grid_size,
             skip_aggregates=(
@@ -974,7 +971,7 @@ def count_iso_voxels_block(
     in_buffer_collide_count: wp.array(dtype=int),
     shape_sdf_data: wp.array(dtype=SDFData),
     shape_transform: wp.array(dtype=wp.transform),
-    shape_material_k_hydro: wp.array(dtype=float),
+    shape_material_kh: wp.array(dtype=float),
     in_buffer_collide_coords: wp.array(dtype=wp.vec3us),
     in_buffer_collide_shape_pair: wp.array(dtype=wp.vec2i),
     shape_contact_margin: wp.array(dtype=wp.float32),
@@ -1006,8 +1003,8 @@ def count_iso_voxels_block(
         voxel_radius = sdf_data_b.sparse_voxel_radius
         r = float(subblock_size) * voxel_radius
 
-        k_a = shape_material_k_hydro[shape_a]
-        k_b = shape_material_k_hydro[shape_b]
+        k_a = shape_material_kh[shape_a]
+        k_b = shape_material_kh[shape_b]
 
         k_eff_a, k_eff_b = get_rel_stiffness(k_a, k_b)
         r_eff = r * (k_eff_a + k_eff_b)
@@ -1139,7 +1136,7 @@ def get_decode_contacts_kernel(margin_contact_area: float = 1e-4, writer_func: A
     def decode_contacts_kernel(
         grid_size: int,
         contact_count: wp.array(dtype=int),
-        shape_material_k_hydro: wp.array(dtype=wp.float32),
+        shape_material_kh: wp.array(dtype=wp.float32),
         shape_transform: wp.array(dtype=wp.transform),
         shape_contact_margin: wp.array(dtype=wp.float32),
         position_depth: wp.array(dtype=wp.vec4),
@@ -1269,7 +1266,7 @@ def get_generate_contacts_kernel(
         iso_voxel_count: wp.array(dtype=wp.int32),
         shape_sdf_data: wp.array(dtype=SDFData),
         shape_transform: wp.array(dtype=wp.transform),
-        shape_material_k_hydro: wp.array(dtype=float),
+        shape_material_kh: wp.array(dtype=float),
         iso_voxel_coords: wp.array(dtype=wp.vec3us),
         iso_voxel_shape_pair: wp.array(dtype=wp.vec2i),
         tri_range_table: wp.array(dtype=wp.int32),
@@ -1307,8 +1304,8 @@ def get_generate_contacts_kernel(
             margin_b = shape_contact_margin[shape_b]
             margin = margin_a + margin_b
 
-            k_a = shape_material_k_hydro[shape_a]
-            k_b = shape_material_k_hydro[shape_b]
+            k_a = shape_material_kh[shape_a]
+            k_b = shape_material_kh[shape_b]
 
             k_eff_a, k_eff_b = get_rel_stiffness(k_a, k_b)
 
@@ -1611,5 +1608,5 @@ def verify_collision_step(
     if has_overflow:
         wp.printf(
             "Warning: Hydroelastic buffers overflowed; some contacts may be dropped. "
-            "Increase SDFHydroelasticConfig.buffer_fraction and/or per-stage buffer multipliers.\n",
+            "Increase HydroelasticSDF.Config.buffer_fraction and/or per-stage buffer multipliers.\n",
         )

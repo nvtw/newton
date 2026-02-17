@@ -151,8 +151,8 @@ def get_reduce_hydroelastic_contacts_kernel(skip_aggregates: bool = False):
         reducer_data: GlobalContactReducerData,
         shape_material_k_hydro: wp.array(dtype=wp.float32),
         shape_transform: wp.array(dtype=wp.transform),
-        shape_local_aabb_lower: wp.array(dtype=wp.vec3),
-        shape_local_aabb_upper: wp.array(dtype=wp.vec3),
+        shape_collision_aabb_lower: wp.array(dtype=wp.vec3),
+        shape_collision_aabb_upper: wp.array(dtype=wp.vec3),
         shape_voxel_resolution: wp.array(dtype=wp.vec3i),
         total_num_threads: int,
     ):
@@ -179,8 +179,8 @@ def get_reduce_hydroelastic_contacts_kernel(skip_aggregates: bool = False):
             shape_a = pair[0]
             shape_b = pair[1]
 
-            aabb_lower = shape_local_aabb_lower[shape_b]
-            aabb_upper = shape_local_aabb_upper[shape_b]
+            aabb_lower = shape_collision_aabb_lower[shape_b]
+            aabb_upper = shape_collision_aabb_upper[shape_b]
 
             ht_capacity = reducer_data.ht_capacity
 
@@ -691,8 +691,8 @@ class HydroelasticContactReduction:
         self,
         shape_material_k_hydro: wp.array,
         shape_transform: wp.array,
-        shape_local_aabb_lower: wp.array,
-        shape_local_aabb_upper: wp.array,
+        shape_collision_aabb_lower: wp.array,
+        shape_collision_aabb_upper: wp.array,
         shape_voxel_resolution: wp.array,
         grid_size: int,
         skip_aggregates: bool = False,
@@ -706,8 +706,8 @@ class HydroelasticContactReduction:
         Args:
             shape_material_k_hydro: Per-shape hydroelastic material stiffness (dtype: float).
             shape_transform: Per-shape world transforms (dtype: wp.transform).
-            shape_local_aabb_lower: Per-shape local AABB lower bounds (dtype: wp.vec3).
-            shape_local_aabb_upper: Per-shape local AABB upper bounds (dtype: wp.vec3).
+            shape_collision_aabb_lower: Per-shape local AABB lower bounds (dtype: wp.vec3).
+            shape_collision_aabb_upper: Per-shape local AABB upper bounds (dtype: wp.vec3).
             shape_voxel_resolution: Per-shape voxel grid resolution (dtype: wp.vec3i).
             grid_size: Number of threads for the kernel launch.
             skip_aggregates: If True, skip aggregate accumulation (use when the
@@ -722,8 +722,8 @@ class HydroelasticContactReduction:
                 reducer_data,
                 shape_material_k_hydro,
                 shape_transform,
-                shape_local_aabb_lower,
-                shape_local_aabb_upper,
+                shape_collision_aabb_lower,
+                shape_collision_aabb_upper,
                 shape_voxel_resolution,
                 grid_size,
             ],
@@ -775,8 +775,8 @@ class HydroelasticContactReduction:
         self,
         shape_material_k_hydro: wp.array,
         shape_transform: wp.array,
-        shape_local_aabb_lower: wp.array,
-        shape_local_aabb_upper: wp.array,
+        shape_collision_aabb_lower: wp.array,
+        shape_collision_aabb_upper: wp.array,
         shape_voxel_resolution: wp.array,
         shape_contact_margin: wp.array,
         writer_data: Any,
@@ -789,8 +789,8 @@ class HydroelasticContactReduction:
         Args:
             shape_material_k_hydro: Per-shape hydroelastic material stiffness (dtype: float).
             shape_transform: Per-shape world transforms (dtype: wp.transform).
-            shape_local_aabb_lower: Per-shape local AABB lower bounds (dtype: wp.vec3).
-            shape_local_aabb_upper: Per-shape local AABB upper bounds (dtype: wp.vec3).
+            shape_collision_aabb_lower: Per-shape local AABB lower bounds (dtype: wp.vec3).
+            shape_collision_aabb_upper: Per-shape local AABB upper bounds (dtype: wp.vec3).
             shape_voxel_resolution: Per-shape voxel grid resolution (dtype: wp.vec3i).
             shape_contact_margin: Per-shape contact margin (dtype: float).
             writer_data: Data struct for the writer function.
@@ -799,8 +799,8 @@ class HydroelasticContactReduction:
         self.reduce(
             shape_material_k_hydro,
             shape_transform,
-            shape_local_aabb_lower,
-            shape_local_aabb_upper,
+            shape_collision_aabb_lower,
+            shape_collision_aabb_upper,
             shape_voxel_resolution,
             grid_size,
         )

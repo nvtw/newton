@@ -658,8 +658,8 @@ def reduce_contact_in_hashtable(
     reducer_data: GlobalContactReducerData,
     beta: float,
     shape_transform: wp.array(dtype=wp.transform),
-    shape_local_aabb_lower: wp.array(dtype=wp.vec3),
-    shape_local_aabb_upper: wp.array(dtype=wp.vec3),
+    shape_collision_aabb_lower: wp.array(dtype=wp.vec3),
+    shape_collision_aabb_upper: wp.array(dtype=wp.vec3),
     shape_voxel_resolution: wp.array(dtype=wp.vec3i),
 ):
     """Register a buffered contact in the reduction hashtable.
@@ -680,8 +680,8 @@ def reduce_contact_in_hashtable(
         reducer_data: Reducer data
         beta: Depth threshold (contacts with depth < beta participate in spatial competition)
         shape_transform: Per-shape world transforms (for transforming position to local space)
-        shape_local_aabb_lower: Per-shape local AABB lower bounds
-        shape_local_aabb_upper: Per-shape local AABB upper bounds
+        shape_collision_aabb_lower: Per-shape local AABB lower bounds
+        shape_collision_aabb_upper: Per-shape local AABB upper bounds
         shape_voxel_resolution: Per-shape voxel grid resolution
     """
     # Read contact data from buffer (normal is octahedral-encoded)
@@ -694,8 +694,8 @@ def reduce_contact_in_hashtable(
     shape_a = pair[0]  # Mesh shape
     shape_b = pair[1]  # Convex shape
 
-    aabb_lower = shape_local_aabb_lower[shape_a]
-    aabb_upper = shape_local_aabb_upper[shape_a]
+    aabb_lower = shape_collision_aabb_lower[shape_a]
+    aabb_upper = shape_collision_aabb_upper[shape_a]
 
     ht_capacity = reducer_data.ht_capacity
 
@@ -770,8 +770,8 @@ def export_and_reduce_contact(
     reducer_data: GlobalContactReducerData,
     beta: float,
     shape_transform: wp.array(dtype=wp.transform),
-    shape_local_aabb_lower: wp.array(dtype=wp.vec3),
-    shape_local_aabb_upper: wp.array(dtype=wp.vec3),
+    shape_collision_aabb_lower: wp.array(dtype=wp.vec3),
+    shape_collision_aabb_upper: wp.array(dtype=wp.vec3),
     shape_voxel_resolution: wp.array(dtype=wp.vec3i),
 ) -> int:
     """Export contact to buffer and register in hashtable for reduction."""
@@ -783,8 +783,8 @@ def export_and_reduce_contact(
             reducer_data,
             beta,
             shape_transform,
-            shape_local_aabb_lower,
-            shape_local_aabb_upper,
+            shape_collision_aabb_lower,
+            shape_collision_aabb_upper,
             shape_voxel_resolution,
         )
 
@@ -795,8 +795,8 @@ def export_and_reduce_contact(
 def reduce_buffered_contacts_kernel(
     reducer_data: GlobalContactReducerData,
     shape_transform: wp.array(dtype=wp.transform),
-    shape_local_aabb_lower: wp.array(dtype=wp.vec3),
-    shape_local_aabb_upper: wp.array(dtype=wp.vec3),
+    shape_collision_aabb_lower: wp.array(dtype=wp.vec3),
+    shape_collision_aabb_upper: wp.array(dtype=wp.vec3),
     shape_voxel_resolution: wp.array(dtype=wp.vec3i),
     total_num_threads: int,
 ):
@@ -824,8 +824,8 @@ def reduce_buffered_contacts_kernel(
             reducer_data,
             wp.static(BETA_THRESHOLD),
             shape_transform,
-            shape_local_aabb_lower,
-            shape_local_aabb_upper,
+            shape_collision_aabb_lower,
+            shape_collision_aabb_upper,
             shape_voxel_resolution,
         )
 
