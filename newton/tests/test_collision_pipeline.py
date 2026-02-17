@@ -134,11 +134,10 @@ class CollisionSetup:
         elif shape_type == GeoType.MESH:
             # Use box mesh (works correctly with collision pipeline)
             vertices, indices = newton.utils.create_box_mesh(extents=(0.5, 0.5, 0.5))
-            # Configure SDF settings if specified
-            cfg = newton.ModelBuilder.ShapeConfig(sdf_max_resolution=sdf_max_resolution)
-            self.builder.add_shape_mesh(
-                body, mesh=newton.Mesh(vertices[:, :3], indices), cfg=cfg, key=type_to_str(shape_type)
-            )
+            mesh = newton.Mesh(vertices[:, :3], indices)
+            if sdf_max_resolution is not None:
+                mesh.build_sdf(max_resolution=sdf_max_resolution)
+            self.builder.add_shape_mesh(body, mesh=mesh, key=type_to_str(shape_type))
         elif shape_type == GeoType.CONVEX_MESH:
             # Use a sphere mesh as it's already convex
             vertices, indices = newton.utils.create_sphere_mesh(radius=0.5)

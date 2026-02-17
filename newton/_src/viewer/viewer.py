@@ -181,7 +181,8 @@ class ViewerBase:
             return None
 
         # Check if this shape has an SDF volume
-        sdf_volume = self.model.shape_sdf_volume[shape_idx] if self.model.shape_sdf_volume else None
+        sdf_idx = int(self.model.shape_sdf_index.numpy()[shape_idx]) if self.model.shape_sdf_index is not None else -1
+        sdf_volume = self.model.sdf_volume[sdf_idx] if (sdf_idx >= 0 and self.model.sdf_volume) else None
         if sdf_volume is None:
             return None
 
@@ -1016,7 +1017,8 @@ class ViewerBase:
             is_collision_shape = flags & int(newton.ShapeFlags.COLLIDE_SHAPES)
             is_visible = flags & int(newton.ShapeFlags.VISIBLE)
             # Check for SDF volume existence without computing the isomesh (lazy evaluation)
-            has_sdf = self.model.shape_sdf_volume and self.model.shape_sdf_volume[s] is not None
+            sdf_idx = int(self.model.shape_sdf_index.numpy()[s]) if self.model.shape_sdf_index is not None else -1
+            has_sdf = sdf_idx >= 0 and self.model.sdf_volume and self.model.sdf_volume[sdf_idx] is not None
             if is_collision_shape and is_visible and has_sdf:
                 # Remove COLLIDE_SHAPES flag so this is treated as a visual shape
                 flags = flags & ~int(newton.ShapeFlags.COLLIDE_SHAPES)
@@ -1121,7 +1123,8 @@ class ViewerBase:
         shape_flags = self.model.shape_flags.numpy()
         shape_world = self.model.shape_world.numpy()
         shape_geo_scale = self.model.shape_scale.numpy()
-        shape_sdf_data = self.model.shape_sdf_data.numpy() if self.model.shape_sdf_data is not None else None
+        sdf_data = self.model.sdf_data.numpy() if self.model.sdf_data is not None else None
+        shape_sdf_index = self.model.shape_sdf_index.numpy() if self.model.shape_sdf_index is not None else None
         shape_count = len(shape_body)
 
         for s in range(shape_count):
@@ -1139,7 +1142,8 @@ class ViewerBase:
                 continue
 
             # Check if scale was baked into the SDF
-            scale_baked = shape_sdf_data[s]["scale_baked"] if shape_sdf_data is not None else True
+            sdf_idx = int(shape_sdf_index[s]) if shape_sdf_index is not None else -1
+            scale_baked = bool(sdf_data[sdf_idx]["scale_baked"]) if (sdf_data is not None and sdf_idx >= 0) else True
 
             # Create isomesh geometry (always use (1,1,1) for geometry since isomesh is in SDF space)
             geo_type = newton.GeoType.MESH

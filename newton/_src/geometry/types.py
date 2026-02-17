@@ -16,12 +16,16 @@
 import enum
 import os
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 import warp as wp
 
 from ..core.types import Devicelike, Vec2, Vec3, nparray, override
 from ..utils.texture import compute_texture_hash
+
+if TYPE_CHECKING:
+    from .sdf_utils import SDF
 
 
 def _normalize_texture_input(texture: str | os.PathLike[str] | nparray | None) -> str | nparray | None:
@@ -122,6 +126,8 @@ class Mesh:
         roughness: float | None = None,
         metallic: float | None = None,
         texture: str | nparray | None = None,
+        *,
+        sdf: "SDF | None" = None,
     ):
         """
         Construct a Mesh object from a triangle mesh.
@@ -142,6 +148,7 @@ class Mesh:
             roughness: Optional mesh roughness in [0, 1].
             metallic: Optional mesh metallic in [0, 1].
             texture: Optional texture path/URL or image data (H, W, C).
+            sdf: Optional prebuilt SDF object owned by this mesh.
         """
         from .inertia import compute_mesh_inertia  # noqa: PLC0415
 
@@ -162,6 +169,7 @@ class Mesh:
         self.maxhullvert = maxhullvert
         self._cached_hash = None
         self._texture_hash = None
+        self.sdf = sdf
 
         if compute_inertia:
             self.mass, self.com, self.I, _ = compute_mesh_inertia(1.0, vertices, indices, is_solid=is_solid)
@@ -211,7 +219,39 @@ class Mesh:
             m.mass = self.mass
             m.com = self.com
             m.has_inertia = self.has_inertia
+        m.sdf = self.sdf
         return m
+
+    def build_sdf(
+        self,
+        *,
+        narrow_band_range: tuple[float, float] | None = None,
+        target_voxel_size: float | None = None,
+        max_resolution: int | None = None,
+        margin: float | None = None,
+    ) -> "SDF":
+        """Build and attach an SDF for this mesh.
+
+        Raises:
+            RuntimeError: If this mesh already has an SDF attached.
+        """
+        if self.sdf is not None:
+            raise RuntimeError("Mesh already has an SDF. Call clear_sdf() before rebuilding.")
+
+        from .sdf_utils import create_sdf_from_mesh  # noqa: PLC0415
+
+        self.sdf = create_sdf_from_mesh(
+            self,
+            narrow_band_range=narrow_band_range if narrow_band_range is not None else (-0.1, 0.1),
+            target_voxel_size=target_voxel_size,
+            max_resolution=max_resolution,
+            margin=margin if margin is not None else 0.05,
+        )
+        return self.sdf
+
+    def clear_sdf(self) -> None:
+        """Detach and release the currently attached SDF."""
+        self.sdf = None
 
     @property
     def vertices(self):

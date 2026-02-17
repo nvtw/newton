@@ -88,6 +88,9 @@ def build_stacked_cubes_scene(
     if shape_type == ShapeType.MESH:
         vertices, indices = create_box_mesh((cube_half, cube_half, cube_half))
         cube_mesh = newton.Mesh(vertices, indices)
+        cube_mesh.build_sdf(
+            max_resolution=32, narrow_band_range=(-cube_half * 0.2, cube_half * 0.2), margin=cube_half * 0.2
+        )
 
     # Scale SDF parameters proportionally to cube size
     narrow_band = cube_half * 0.2
@@ -95,11 +98,12 @@ def build_stacked_cubes_scene(
 
     builder = newton.ModelBuilder()
     builder.default_shape_cfg = newton.ModelBuilder.ShapeConfig(
-        sdf_max_resolution=32,
         is_hydroelastic=True,
         sdf_narrow_band_range=(-narrow_band, narrow_band),
         contact_margin=contact_margin,
     )
+    if shape_type == ShapeType.PRIMITIVE:
+        builder.default_shape_cfg.sdf_max_resolution = 32
 
     builder.add_ground_plane()
 

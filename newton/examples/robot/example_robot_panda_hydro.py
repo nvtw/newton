@@ -78,7 +78,6 @@ class Example:
 
         shape_cfg = newton.ModelBuilder.ShapeConfig(
             kh=1e11,
-            sdf_max_resolution=64,
             is_hydroelastic=True,
             sdf_narrow_band_range=(-0.01, 0.01),
             contact_margin=0.01,
@@ -144,6 +143,11 @@ class Example:
                 load_normals=True,
                 face_varying_normal_conversion="vertex_splitting",
             )
+            pad_mesh.build_sdf(
+                max_resolution=64,
+                narrow_band_range=shape_cfg.sdf_narrow_band_range,
+                margin=shape_cfg.contact_margin if shape_cfg.contact_margin is not None else 0.05,
+            )
             pad_scale = newton.usd.get_scale(pad_stage.GetPrimAtPath("/root/Model"))
             pad_xform = wp.transform(
                 wp.vec3(0.0, 0.005, 0.045),
@@ -159,6 +163,11 @@ class Example:
         table_half_extents = (box_size * 2, box_size * 2, box_size)  # half-extents
         table_vertices, table_indices = create_box_mesh(table_half_extents, duplicate_vertices=True)
         table_mesh = newton.Mesh(table_vertices, table_indices)
+        table_mesh.build_sdf(
+            max_resolution=64,
+            narrow_band_range=shape_cfg.sdf_narrow_band_range,
+            margin=shape_cfg.contact_margin if shape_cfg.contact_margin is not None else 0.05,
+        )
         builder.add_shape_mesh(
             body=-1,
             mesh=table_mesh,
@@ -199,6 +208,11 @@ class Example:
             cup_stage = Usd.Stage.Open(str(cup_asset_path / "model.usda"))
             prim = cup_stage.GetPrimAtPath("/root/Model/Model")
             cup_mesh = newton.usd.get_mesh(prim, load_normals=True, face_varying_normal_conversion="vertex_splitting")
+            cup_mesh.build_sdf(
+                max_resolution=64,
+                narrow_band_range=shape_cfg.sdf_narrow_band_range,
+                margin=shape_cfg.contact_margin if shape_cfg.contact_margin is not None else 0.05,
+            )
             cup_scale = newton.usd.get_scale(cup_stage.GetPrimAtPath("/root/Model"))
             cup_xform = wp.transform(
                 wp.vec3(self.cup_pos),

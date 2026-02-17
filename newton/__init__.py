@@ -33,21 +33,23 @@ __all__ = [
 # ==================================================================================
 # geometry
 # ==================================================================================
-from ._src.geometry import (
+from ._src.geometry import (  # noqa: I001
     GeoType,
     Heightfield,
     Mesh,
     ParticleFlags,
     SAPSortType,
+    SDF,
     ShapeFlags,
 )
 
-__all__ += [
+__all__ += [  # noqa: RUF022
     "GeoType",
     "Heightfield",
     "Mesh",
     "ParticleFlags",
     "SAPSortType",
+    "SDF",
     "ShapeFlags",
 ]
 

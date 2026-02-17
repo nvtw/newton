@@ -1601,7 +1601,8 @@ class NarrowPhase:
         shape_data: wp.array(dtype=wp.vec4, ndim=1),  # Shape data (scale xyz, thickness w)
         shape_transform: wp.array(dtype=wp.transform, ndim=1),  # In world space
         shape_source: wp.array(dtype=wp.uint64, ndim=1),  # The index into the source array, type define by shape_types
-        shape_sdf_data: wp.array(dtype=SDFData, ndim=1),  # SDF data structs for mesh shapes
+        sdf_data: wp.array(dtype=SDFData, ndim=1),  # Compact SDF data table
+        shape_sdf_index: wp.array(dtype=wp.int32, ndim=1),  # Per-shape index into sdf_data (-1 for none)
         shape_contact_margin: wp.array(dtype=wp.float32, ndim=1),  # per-shape contact margin
         shape_collision_radius: wp.array(dtype=wp.float32, ndim=1),  # per-shape collision radius for AABB fallback
         shape_flags: wp.array(dtype=wp.int32, ndim=1),  # per-shape flags (includes ShapeFlags.HYDROELASTIC)
@@ -1623,7 +1624,8 @@ class NarrowPhase:
             shape_data: Array of vec4 containing scale (xyz) and thickness (w) for each shape
             shape_transform: Array of world-space transforms for each shape
             shape_source: Array of source pointers (mesh IDs, etc.) for each shape
-            shape_sdf_data: Array of SDFData structs for mesh shapes
+            sdf_data: Compact array of SDFData structs
+            shape_sdf_index: Per-shape SDF table index (-1 for shapes without SDF)
             shape_contact_margin: Array of contact margins for each shape
             shape_collision_radius: Array of collision radii for each shape (for AABB fallback for planes/meshes)
             shape_flags: Array of shape flags for each shape (includes ShapeFlags.HYDROELASTIC)
@@ -1847,7 +1849,7 @@ class NarrowPhase:
             # Launch mesh-mesh contact processing kernel (only on CUDA with SDF data)
             # SDF-based mesh-mesh collision requires GPU: uses shared memory (launch_tiled)
             # and wp.Volume which only supports CUDA
-            if shape_sdf_data.shape[0] > 0 and wp.get_device(device).is_cuda:
+            if sdf_data.shape[0] > 0 and wp.get_device(device).is_cuda:
                 wp.launch_tiled(
                     kernel=self.mesh_mesh_contacts_kernel,
                     dim=(self.num_tile_blocks,),
@@ -1855,7 +1857,8 @@ class NarrowPhase:
                         shape_data,
                         shape_transform,
                         shape_source,
-                        shape_sdf_data,
+                        sdf_data,
+                        shape_sdf_index,
                         shape_contact_margin,
                         shape_collision_aabb_lower,
                         shape_collision_aabb_upper,
@@ -1916,7 +1919,8 @@ class NarrowPhase:
 
         if self.hydroelastic_sdf is not None:
             self.hydroelastic_sdf.launch(
-                shape_sdf_data,
+                sdf_data,
+                shape_sdf_index,
                 shape_transform,
                 shape_contact_margin,
                 shape_collision_aabb_lower,
@@ -1936,7 +1940,8 @@ class NarrowPhase:
         shape_data: wp.array(dtype=wp.vec4, ndim=1),  # Shape data (scale xyz, thickness w)
         shape_transform: wp.array(dtype=wp.transform, ndim=1),  # In world space
         shape_source: wp.array(dtype=wp.uint64, ndim=1),  # The index into the source array, type define by shape_types
-        shape_sdf_data: wp.array(dtype=SDFData, ndim=1),  # SDF data structs for mesh shapes
+        sdf_data: wp.array(dtype=SDFData, ndim=1),  # Compact SDF data table
+        shape_sdf_index: wp.array(dtype=wp.int32, ndim=1),  # Per-shape index into sdf_data (-1 for none)
         shape_contact_margin: wp.array(dtype=wp.float32, ndim=1),  # per-shape contact margin
         shape_collision_radius: wp.array(dtype=wp.float32, ndim=1),  # per-shape collision radius for AABB fallback
         shape_flags: wp.array(dtype=wp.int32, ndim=1),  # per-shape flags (includes ShapeFlags.HYDROELASTIC)
@@ -1965,7 +1970,8 @@ class NarrowPhase:
             shape_data: Array of vec4 containing scale (xyz) and thickness (w) for each shape
             shape_transform: Array of world-space transforms for each shape
             shape_source: Array of source pointers (mesh IDs, etc.) for each shape
-            shape_sdf_data: Array of SDFData structs for mesh shapes
+            sdf_data: Compact array of SDFData structs
+            shape_sdf_index: Per-shape SDF table index (-1 for shapes without SDF)
             shape_contact_margin: Array of contact margins for each shape
             shape_collision_radius: Array of collision radii for each shape (for AABB fallback for planes/meshes)
             shape_collision_aabb_lower: Local-space AABB lower bounds for each shape (for voxel binning)
@@ -2009,7 +2015,8 @@ class NarrowPhase:
             shape_data=shape_data,
             shape_transform=shape_transform,
             shape_source=shape_source,
-            shape_sdf_data=shape_sdf_data,
+            sdf_data=sdf_data,
+            shape_sdf_index=shape_sdf_index,
             shape_contact_margin=shape_contact_margin,
             shape_collision_radius=shape_collision_radius,
             shape_flags=shape_flags,

@@ -270,13 +270,19 @@ class Model:
         self.heightfield_elevation_data = None
         """Concatenated 1D elevation array for all heightfields. Kernels index via HeightfieldData.data_offset."""
 
-        # Mesh SDF storage
-        self.shape_sdf_data = None
-        """Array of SDFData structs for mesh shapes, shape [shape_count]. Contains sparse and coarse SDF pointers, extents, and voxel sizes. Empty array if there are no colliding meshes."""
-        self.shape_sdf_volume = []
-        """List of sparse SDF volume references for mesh shapes, shape [shape_count]. None for non-mesh shapes. Empty if there are no colliding meshes. Kept for reference counting."""
-        self.shape_sdf_coarse_volume = []
-        """List of coarse SDF volume references for mesh shapes, shape [shape_count]. None for non-mesh shapes. Empty if there are no colliding meshes. Kept for reference counting."""
+        # SDF storage (compact table + per-shape index indirection)
+        self.sdf_data = None
+        """Compact array of SDFData structs, shape [num_sdfs]."""
+        self.sdf_volume = []
+        """Sparse SDF volumes matching sdf_data by index. Kept for reference counting."""
+        self.sdf_coarse_volume = []
+        """Coarse SDF volumes matching sdf_data by index. Kept for reference counting."""
+        self.shape_sdf_index = None
+        """Per-shape SDF index, shape [shape_count]. -1 means shape has no SDF."""
+        self.sdf_block_coords = None
+        """Compact flat array of active SDF block coordinates."""
+        self.sdf_index2blocks = None
+        """Per-SDF [start, end) indices into sdf_block_coords, shape [num_sdfs, 2]."""
 
         # Local AABB and voxel grid for contact reduction
         # Note: These are stored in Model (not Contacts) because they are static geometry properties

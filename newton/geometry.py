@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from ._src.geometry import (
+    SDF,
     BroadPhaseAllPairs,
     BroadPhaseExplicit,
     BroadPhaseSAP,
@@ -31,6 +32,8 @@ from ._src.geometry import (
     collide_sphere_sphere,
     create_mesh_heightfield,
     create_mesh_terrain,
+    create_sdf_from_data,
+    create_sdf_from_mesh,
 )
 from ._src.geometry.inertia import compute_shape_inertia, transform_inertia
 from ._src.geometry.narrow_phase import NarrowPhase
@@ -38,6 +41,7 @@ from ._src.geometry.sdf_hydroelastic import HydroelasticSDF
 from ._src.geometry.utils import create_box_mesh, remesh_mesh
 
 __all__ = [
+    "SDF",
     "BroadPhaseAllPairs",
     "BroadPhaseExplicit",
     "BroadPhaseSAP",
@@ -59,6 +63,8 @@ __all__ = [
     "create_box_mesh",
     "create_mesh_heightfield",
     "create_mesh_terrain",
+    "create_sdf_from_data",
+    "create_sdf_from_mesh",
     "remesh_mesh",
     "transform_inertia",
 ]
