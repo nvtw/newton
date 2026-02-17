@@ -259,15 +259,9 @@ class SDFHydroelastic:
             self.iso_buffer_counts = [wp.zeros((1,), dtype=wp.int32) for _ in range(5)]
             # Scratch buffers are per-level to avoid scanning the worst-case
             # size at all refinement levels during graph-captured execution.
-            self.iso_buffer_prefix_scratch = [
-                wp.zeros(level_input, dtype=wp.int32) for level_input in self.input_sizes
-            ]
-            self.iso_buffer_num_scratch = [
-                wp.zeros(level_input, dtype=wp.int32) for level_input in self.input_sizes
-            ]
-            self.iso_subblock_idx_scratch = [
-                wp.zeros(level_input, dtype=wp.uint8) for level_input in self.input_sizes
-            ]
+            self.iso_buffer_prefix_scratch = [wp.zeros(level_input, dtype=wp.int32) for level_input in self.input_sizes]
+            self.iso_buffer_num_scratch = [wp.zeros(level_input, dtype=wp.int32) for level_input in self.input_sizes]
+            self.iso_subblock_idx_scratch = [wp.zeros(level_input, dtype=wp.uint8) for level_input in self.input_sizes]
             self.iso_buffer_coords = [wp.empty((self.max_num_blocks_broad,), dtype=wp.vec3us)] + [
                 wp.empty((self.iso_max_dims[i],), dtype=wp.vec3us) for i in range(4)
             ]
