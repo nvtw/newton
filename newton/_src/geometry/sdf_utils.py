@@ -134,6 +134,8 @@ def create_sdf_from_mesh(
     target_voxel_size: float | None = None,
     max_resolution: int | None = None,
     margin: float = 0.05,
+    thickness: float = 0.0,
+    scale: tuple[float, float, float] | None = None,
 ) -> SDF:
     """Create an SDF from a mesh in local mesh coordinates.
 
@@ -145,21 +147,32 @@ def create_sdf_from_mesh(
         max_resolution: Maximum sparse-grid dimension [voxel]. Used when
             ``target_voxel_size`` is not provided.
         margin: Extra AABB padding [m] added before discretization.
+        thickness: Thickness offset [m] to subtract from SDF values. When non-zero,
+            the SDF surface is effectively shrunk inward by this amount. Useful for
+            modeling compliant layers in hydroelastic collision. Defaults to ``0.0``
+            (no offset, thickness applied at runtime).
+        scale: Scale factors ``(sx, sy, sz)`` to bake into the SDF. When provided,
+            the mesh vertices are scaled before SDF generation and ``scale_baked``
+            is set to ``True`` in the resulting SDF. Required for hydroelastic
+            collision with non-unit shape scale. Defaults to ``None`` (no scale
+            baking, scale applied at runtime).
 
     Returns:
         A validated :class:`SDF` runtime handle with sparse/coarse volumes.
     """
     effective_max_resolution = 64 if max_resolution is None and target_voxel_size is None else max_resolution
+    bake_scale = scale is not None
+    effective_scale = scale if scale is not None else (1.0, 1.0, 1.0)
     sdf_data, sparse_volume, coarse_volume, block_coords = _compute_sdf_from_shape_impl(
         shape_type=GeoType.MESH,
         shape_geo=mesh,
-        shape_scale=(1.0, 1.0, 1.0),
-        shape_thickness=0.0,
+        shape_scale=effective_scale,
+        shape_thickness=thickness,
         narrow_band_distance=narrow_band_range,
         margin=margin,
         target_voxel_size=target_voxel_size,
         max_resolution=effective_max_resolution if effective_max_resolution is not None else 64,
-        bake_scale=False,
+        bake_scale=bake_scale,
     )
     sdf = SDF(
         data=sdf_data,
@@ -666,17 +679,17 @@ def compute_sdf_from_shape(
     if shape_type == GeoType.MESH:
         if shape_geo is None:
             raise ValueError("shape_geo must be provided for GeoType.MESH.")
-        # Canonical mesh path: use create_sdf_from_mesh when no mesh-only internal
-        # overrides are requested.
-        if shape_thickness == 0.0 and not bake_scale and tuple(shape_scale) == (1.0, 1.0, 1.0):
-            sdf = create_sdf_from_mesh(
-                shape_geo,
-                narrow_band_range=tuple(narrow_band_distance),
-                target_voxel_size=target_voxel_size,
-                max_resolution=max_resolution,
-                margin=margin,
-            )
-            return sdf.to_kernel_data(), sdf.sparse_volume, sdf.coarse_volume, (sdf.block_coords or [])
+        # Canonical mesh path: use create_sdf_from_mesh for all mesh SDF generation.
+        sdf = create_sdf_from_mesh(
+            shape_geo,
+            narrow_band_range=tuple(narrow_band_distance),
+            target_voxel_size=target_voxel_size,
+            max_resolution=max_resolution,
+            margin=margin,
+            thickness=shape_thickness,
+            scale=tuple(shape_scale) if bake_scale else None,
+        )
+        return sdf.to_kernel_data(), sdf.sparse_volume, sdf.coarse_volume, (sdf.block_coords or [])
 
     return _compute_sdf_from_shape_impl(
         shape_type=shape_type,

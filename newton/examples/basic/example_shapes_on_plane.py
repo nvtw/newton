@@ -26,7 +26,6 @@ import warp as wp
 import newton
 import newton.examples
 from newton._src.core import quat_between_axes
-from newton._src.geometry.utils import create_box_mesh
 
 
 class Example:
@@ -211,30 +210,26 @@ class Example:
         angular_vel = body_qd[:, 3:]
         max_linear_vel = np.max(np.abs(linear_vel))
         max_angular_vel = np.max(np.abs(angular_vel))
-        
+
         print("\n=== Final State ===")
         print(f"Body positions:\n{body_q[:, :3]}")
         print(f"\nExpected positions:\n{expected_end_positions}")
         print(f"\nBody velocities:\n{body_qd[:, :3]}")
         print(f"\nMax linear velocity: {max_linear_vel:.6f}")
         print(f"Max angular velocity: {max_angular_vel:.6f}")
-        
+
         # Check velocities are near zero (objects should be at rest)
         if max_linear_vel > 0.5:
-            raise AssertionError(
-                f"Objects should be at rest, but max linear velocity is {max_linear_vel:.6f}"
-            )
+            raise AssertionError(f"Objects should be at rest, but max linear velocity is {max_linear_vel:.6f}")
         if max_angular_vel > 0.5:
-            raise AssertionError(
-                f"Objects should be at rest, but max angular velocity is {max_angular_vel:.6f}"
-            )
+            raise AssertionError(f"Objects should be at rest, but max angular velocity is {max_angular_vel:.6f}")
 
         # Check final positions with tolerance for unified pipeline differences
         # Unified pipeline may produce slightly different final positions due to contact handling differences
         pos_diff = np.abs(body_q[:, :3] - expected_end_positions)
         max_pos_diff = np.max(pos_diff)
         print(f"\nMax position difference: {max_pos_diff:.6f}")
-        
+
         if max_pos_diff > 0.25:
             raise AssertionError(
                 f"Objects not at expected positions. Max difference: {max_pos_diff:.6f} (tolerance: 0.25)\n"
@@ -247,12 +242,12 @@ class Example:
         quat_diff = np.abs(body_q[:, 3:] - expected_quats)
         max_quat_diff = np.max(quat_diff)
         print(f"Max quaternion difference: {max_quat_diff:.6f}")
-        
+
         if max_quat_diff > 0.1:
             raise AssertionError(
                 f"Objects rotated unexpectedly. Max quaternion difference: {max_quat_diff:.6f} (tolerance: 0.1)"
             )
-        
+
         print("\n✓ All tests passed!")
 
 
