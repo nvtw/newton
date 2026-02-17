@@ -2064,8 +2064,8 @@ class NarrowPhase:
         shape_data: wp.array(dtype=wp.vec4, ndim=1),  # Shape data (scale xyz, thickness w)
         shape_transform: wp.array(dtype=wp.transform, ndim=1),  # In world space
         shape_source: wp.array(dtype=wp.uint64, ndim=1),  # The index into the source array, type define by shape_types
-        sdf_data: wp.array(dtype=SDFData, ndim=1),  # Compact SDF data table
-        shape_sdf_index: wp.array(dtype=wp.int32, ndim=1),  # Per-shape index into sdf_data (-1 for none)
+        sdf_data: wp.array(dtype=SDFData, ndim=1) | None = None,  # Compact SDF data table
+        shape_sdf_index: wp.array(dtype=wp.int32, ndim=1) | None = None,  # Per-shape index into sdf_data (-1 for none)
         shape_contact_margin: wp.array(dtype=wp.float32, ndim=1),  # per-shape contact margin
         shape_collision_radius: wp.array(dtype=wp.float32, ndim=1),  # per-shape collision radius for AABB fallback
         shape_flags: wp.array(dtype=wp.int32, ndim=1),  # per-shape flags (includes ShapeFlags.HYDROELASTIC)
@@ -2114,9 +2114,14 @@ class NarrowPhase:
             device = self.device if self.device is not None else candidate_pair.device
 
         # Backward compatibility for older call sites/tests that still pass
-        # shape_local_aabb_lower/upper.
+        # shape_local_aabb_lower/upper and shape_sdf_data.
         shape_local_aabb_lower = kwargs.pop("shape_local_aabb_lower", None)
         shape_local_aabb_upper = kwargs.pop("shape_local_aabb_upper", None)
+        legacy_shape_sdf_data = kwargs.pop("shape_sdf_data", None)
+        if sdf_data is not None and legacy_shape_sdf_data is not None:
+            raise TypeError("NarrowPhase.launch() received both 'sdf_data' and legacy 'shape_sdf_data'")
+        if sdf_data is None:
+            sdf_data = legacy_shape_sdf_data
         if kwargs:
             unknown_keys = sorted(kwargs.keys())
             if len(unknown_keys) == 1:
@@ -2134,6 +2139,10 @@ class NarrowPhase:
                 "shape_collision_aabb_lower/shape_collision_aabb_upper or "
                 "shape_local_aabb_lower/shape_local_aabb_upper"
             )
+        if shape_sdf_index is None:
+            shape_sdf_index = wp.full(shape_types.shape[0], -1, dtype=wp.int32, device=device)
+        if sdf_data is None:
+            sdf_data = wp.zeros(0, dtype=SDFData, device=device)
 
         contact_max = contact_pair.shape[0]
 
