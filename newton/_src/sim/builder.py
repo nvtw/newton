@@ -263,6 +263,8 @@ class ModelBuilder:
                 shape_type: Optional shape geometry type used for context-specific
                     validation.
             """
+            if self.sdf_max_resolution is not None and self.sdf_target_voxel_size is not None:
+                raise ValueError("Set only one of sdf_max_resolution or sdf_target_voxel_size, not both.")
             if self.sdf_max_resolution is not None and self.sdf_max_resolution % 8 != 0:
                 raise ValueError(
                     f"sdf_max_resolution must be divisible by 8 (got {self.sdf_max_resolution}). "

@@ -410,7 +410,6 @@ def create_collision_pipeline(model, args=None, broad_phase=None, **kwargs):
     Returns:
         CollisionPipeline instance.
     """
-    import newton  # noqa: PLC0415
 
     if broad_phase is None:
         broad_phase = (

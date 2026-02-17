@@ -29,7 +29,8 @@ Basic usage:
         model,
         broad_phase="sap",
     )
-    contacts = model.collide(state, collision_pipeline=pipeline)
+    contacts = pipeline.contacts()
+    pipeline.collide(state, contacts)
 
 .. _Supported Shape Types:
 
@@ -881,6 +882,7 @@ When ``is_hydroelastic=True`` on **both** shapes in a pair, the system generates
 - Shapes must have SDF data available:
   - mesh shapes: call ``mesh.build_sdf(...)``
   - primitive shapes: use ``sdf_max_resolution`` or ``sdf_target_voxel_size`` in ``ShapeConfig``
+- For non-unit shape scale, the attached SDF must be scale-baked
 - Only volumetric shapes supported (not planes, heightfields, or non-watertight meshes)
 
 .. code-block:: python

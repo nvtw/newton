@@ -221,7 +221,7 @@ class Model:
         """Shape rolling friction coefficient [dimensionless] (resistance to rolling motion), shape [shape_count], float."""
         self.shape_material_kh = None
         """Shape hydroelastic stiffness coefficient [N/m^3], shape [shape_count], float.
-        Contact stiffness is computed as ``area * k_hydro``, yielding an effective spring constant [N/m]."""
+        Contact stiffness is computed as ``area * kh``, yielding an effective spring constant [N/m]."""
         self.shape_contact_margin = None
         """Shape contact margin for collision detection [m], shape [shape_count], float."""
 

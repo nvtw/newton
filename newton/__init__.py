@@ -56,6 +56,8 @@ __all__ += [
 # ==================================================================================
 from ._src.sim import (  # noqa: E402
     ActuatorMode,
+    BroadPhaseInstance,
+    BroadPhaseMode,
     CollisionPipeline,
     Contacts,
     Control,
@@ -72,6 +74,8 @@ from ._src.sim import (  # noqa: E402
 
 __all__ += [
     "ActuatorMode",
+    "BroadPhaseInstance",
+    "BroadPhaseMode",
     "CollisionPipeline",
     "Contacts",
     "Control",

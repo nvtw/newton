@@ -232,6 +232,19 @@ class Mesh:
     ) -> "SDF":
         """Build and attach an SDF for this mesh.
 
+        Args:
+            narrow_band_range: Signed narrow-band distance range [m] as
+                ``(inner, outer)``. Uses ``(-0.1, 0.1)`` when not provided.
+            target_voxel_size: Target sparse-grid voxel size [m]. If provided,
+                takes precedence over ``max_resolution``.
+            max_resolution: Maximum sparse-grid dimension [voxel] when
+                ``target_voxel_size`` is not provided.
+            margin: Extra AABB padding [m] added before discretization. Uses
+                ``0.05`` when not provided.
+
+        Returns:
+            The attached :class:`SDF` instance.
+
         Raises:
             RuntimeError: If this mesh already has an SDF attached.
         """
@@ -250,7 +263,11 @@ class Mesh:
         return self.sdf
 
     def clear_sdf(self) -> None:
-        """Detach and release the currently attached SDF."""
+        """Detach and release the currently attached SDF.
+
+        Returns:
+            ``None``.
+        """
         self.sdf = None
 
     @property

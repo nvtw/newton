@@ -135,7 +135,20 @@ def create_sdf_from_mesh(
     max_resolution: int | None = None,
     margin: float = 0.05,
 ) -> SDF:
-    """Create a new SDF from mesh geometry."""
+    """Create an SDF from a mesh in local mesh coordinates.
+
+    Args:
+        mesh: Source mesh geometry.
+        narrow_band_range: Signed narrow-band distance range [m] as ``(inner, outer)``.
+        target_voxel_size: Target sparse-grid voxel size [m]. If provided, takes
+            precedence over ``max_resolution``.
+        max_resolution: Maximum sparse-grid dimension [voxel]. Used when
+            ``target_voxel_size`` is not provided.
+        margin: Extra AABB padding [m] added before discretization.
+
+    Returns:
+        A validated :class:`SDF` runtime handle with sparse/coarse volumes.
+    """
     effective_max_resolution = 64 if max_resolution is None and target_voxel_size is None else max_resolution
     sdf_data, sparse_volume, coarse_volume, block_coords = _compute_sdf_from_shape_impl(
         shape_type=GeoType.MESH,
@@ -169,7 +182,20 @@ def create_sdf_from_data(
     background_value: float = MAXVAL,
     scale_baked: bool = False,
 ) -> SDF:
-    """Create a new SDF from already prepared runtime resources."""
+    """Create an SDF from already prepared runtime resources.
+
+    Args:
+        sparse_volume: Sparse narrow-band SDF volume.
+        coarse_volume: Coarse background SDF volume.
+        block_coords: Sparse tile coordinates for allocated blocks.
+        center: SDF AABB center [m].
+        half_extents: SDF AABB half extents [m].
+        background_value: Background SDF value used for unallocated voxels [m].
+        scale_baked: Whether shape scaling was baked into this SDF.
+
+    Returns:
+        A validated :class:`SDF` runtime handle with the provided resources.
+    """
     sdf_data = create_empty_sdf_data()
     if sparse_volume is not None:
         sdf_data.sparse_sdf_ptr = sparse_volume.id
@@ -618,7 +644,24 @@ def compute_sdf_from_shape(
 ) -> tuple[SDFData, wp.Volume | None, wp.Volume | None, Sequence[wp.vec3us]]:
     """Compute sparse and coarse SDF volumes for a shape.
 
-    Mesh shape dispatches through create_sdf_from_mesh() to keep that path canonical.
+    Mesh shape dispatches through :func:`create_sdf_from_mesh` to keep that path canonical.
+
+    Args:
+        shape_type: Geometry type identifier from :class:`GeoType`.
+        shape_geo: Source mesh geometry when ``shape_type`` is ``GeoType.MESH``.
+        shape_scale: Shape scale [unitless].
+        shape_thickness: Shape thickness offset [m] subtracted from sampled SDF.
+        narrow_band_distance: Signed narrow-band distance range [m] as ``(inner, outer)``.
+        margin: Extra AABB padding [m] added before discretization.
+        target_voxel_size: Target sparse-grid voxel size [m]. If provided, takes
+            precedence over ``max_resolution``.
+        max_resolution: Maximum sparse-grid dimension [voxel] when
+            ``target_voxel_size`` is not provided.
+        bake_scale: If ``True``, bake ``shape_scale`` into generated SDF data.
+        verbose: If ``True``, print debug information during SDF construction.
+
+    Returns:
+        Tuple ``(sdf_data, sparse_volume, coarse_volume, block_coords)``.
     """
     if shape_type == GeoType.MESH:
         if shape_geo is None:
