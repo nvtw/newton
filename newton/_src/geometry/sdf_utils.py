@@ -88,6 +88,19 @@ class SDF:
         if int(self.data.coarse_sdf_ptr) == 0 and self.coarse_volume is not None:
             raise ValueError("SDFData coarse pointer is empty but coarse_volume is set.")
 
+    def __copy__(self) -> "SDF":
+        """Return self; SDF runtime handles are immutable and shared."""
+        return self
+
+    def __deepcopy__(self, memo: dict[int, object]) -> "SDF":
+        """Keep deep-copy stable by reusing this instance.
+
+        `wp.Volume` instances inside SDF are ctypes-backed and not picklable.
+        Treating SDF as an immutable runtime handle keeps builder deepcopy usable.
+        """
+        memo[id(self)] = self
+        return self
+
 
 # Default background value for unallocated voxels in sparse SDF.
 # Using MAXVAL ensures trilinear interpolation with unallocated voxels produces values >= MAXVAL * 0.99,

@@ -84,6 +84,7 @@ class Example:
             mu_torsional=0.0,
             mu_rolling=0.0,
         )
+        hydro_mesh_sdf_max_resolution = 64
 
         builder = newton.ModelBuilder()
         # URDF mesh colliders are imported as plain meshes; keep hydroelastic disabled
@@ -108,7 +109,22 @@ class Example:
         }
         non_finger_shape_indices = []
         for shape_idx, body_idx in enumerate(builder.shape_body):
-            if body_idx not in finger_body_indices:
+            if body_idx in finger_body_indices and builder.shape_type[shape_idx] == newton.GeoType.MESH:
+                mesh = builder.shape_source[shape_idx]
+                if mesh is not None and mesh.sdf is None:
+                    shape_scale = np.asarray(builder.shape_scale[shape_idx], dtype=np.float32)
+                    if not np.allclose(shape_scale, 1.0):
+                        # Hydroelastic mesh SDFs must be scale-baked for non-unit shape scale.
+                        mesh = mesh.copy(vertices=mesh.vertices * shape_scale, recompute_inertia=True)
+                        builder.shape_source[shape_idx] = mesh
+                        builder.shape_scale[shape_idx] = (1.0, 1.0, 1.0)
+                    mesh.build_sdf(
+                        max_resolution=hydro_mesh_sdf_max_resolution,
+                        narrow_band_range=shape_cfg.sdf_narrow_band_range,
+                        margin=shape_cfg.contact_margin if shape_cfg.contact_margin is not None else 0.05,
+                    )
+                builder.shape_flags[shape_idx] |= newton.ShapeFlags.HYDROELASTIC
+            elif body_idx not in finger_body_indices:
                 builder.shape_flags[shape_idx] &= ~newton.ShapeFlags.HYDROELASTIC
                 non_finger_shape_indices.append(shape_idx)
 
@@ -148,20 +164,21 @@ class Example:
                 load_normals=True,
                 face_varying_normal_conversion="vertex_splitting",
             )
+            pad_scale = np.asarray(newton.usd.get_scale(pad_stage.GetPrimAtPath("/root/Model")), dtype=np.float32)
+            if not np.allclose(pad_scale, 1.0):
+                # Hydroelastic mesh SDFs must be scale-baked for non-unit shape scale.
+                pad_mesh = pad_mesh.copy(vertices=pad_mesh.vertices * pad_scale, recompute_inertia=True)
             pad_mesh.build_sdf(
-                max_resolution=64,
+                max_resolution=hydro_mesh_sdf_max_resolution,
                 narrow_band_range=shape_cfg.sdf_narrow_band_range,
                 margin=shape_cfg.contact_margin if shape_cfg.contact_margin is not None else 0.05,
             )
-            pad_scale = newton.usd.get_scale(pad_stage.GetPrimAtPath("/root/Model"))
             pad_xform = wp.transform(
                 wp.vec3(0.0, 0.005, 0.045),
                 wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), -np.pi),
             )
-            builder.add_shape_mesh(body=left_finger_idx, mesh=pad_mesh, xform=pad_xform, scale=pad_scale, cfg=shape_cfg)
-            builder.add_shape_mesh(
-                body=right_finger_idx, mesh=pad_mesh, xform=pad_xform, scale=pad_scale, cfg=shape_cfg
-            )
+            builder.add_shape_mesh(body=left_finger_idx, mesh=pad_mesh, xform=pad_xform, cfg=shape_cfg)
+            builder.add_shape_mesh(body=right_finger_idx, mesh=pad_mesh, xform=pad_xform, cfg=shape_cfg)
 
         # Table
         box_size = 0.05
@@ -169,7 +186,7 @@ class Example:
         table_vertices, table_indices = create_box_mesh(table_half_extents, duplicate_vertices=True)
         table_mesh = newton.Mesh(table_vertices, table_indices)
         table_mesh.build_sdf(
-            max_resolution=64,
+            max_resolution=hydro_mesh_sdf_max_resolution,
             narrow_band_range=shape_cfg.sdf_narrow_band_range,
             margin=shape_cfg.contact_margin if shape_cfg.contact_margin is not None else 0.05,
         )
@@ -192,6 +209,7 @@ class Example:
                 wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), np.pi / 2),
             )
             pen_cfg = copy.deepcopy(shape_cfg)
+            pen_cfg.sdf_max_resolution = hydro_mesh_sdf_max_resolution
             self.object_body_local = builder.add_body(xform=object_xform, key="object")
             builder.add_shape_capsule(body=self.object_body_local, radius=radius, half_height=length / 2, cfg=pen_cfg)
             self.grasping_offset = [-0.03, 0.0, 0.13]
@@ -213,18 +231,21 @@ class Example:
             cup_stage = Usd.Stage.Open(str(cup_asset_path / "model.usda"))
             prim = cup_stage.GetPrimAtPath("/root/Model/Model")
             cup_mesh = newton.usd.get_mesh(prim, load_normals=True, face_varying_normal_conversion="vertex_splitting")
+            cup_scale = np.asarray(newton.usd.get_scale(cup_stage.GetPrimAtPath("/root/Model")), dtype=np.float32)
+            if not np.allclose(cup_scale, 1.0):
+                # Hydroelastic mesh SDFs must be scale-baked for non-unit shape scale.
+                cup_mesh = cup_mesh.copy(vertices=cup_mesh.vertices * cup_scale, recompute_inertia=True)
             cup_mesh.build_sdf(
-                max_resolution=64,
+                max_resolution=hydro_mesh_sdf_max_resolution,
                 narrow_band_range=shape_cfg.sdf_narrow_band_range,
                 margin=shape_cfg.contact_margin if shape_cfg.contact_margin is not None else 0.05,
             )
-            cup_scale = newton.usd.get_scale(cup_stage.GetPrimAtPath("/root/Model"))
             cup_xform = wp.transform(
                 wp.vec3(self.cup_pos),
                 wp.quat_identity(),
             )
             cup_body = builder.add_body(key="cup", xform=cup_xform)
-            builder.add_shape_mesh(body=cup_body, mesh=cup_mesh, scale=cup_scale, cfg=shape_cfg)
+            builder.add_shape_mesh(body=cup_body, mesh=cup_mesh, cfg=shape_cfg)
 
         # build model for IK
         self.model_single = copy.deepcopy(builder).finalize()
