@@ -2069,8 +2069,8 @@ class NarrowPhase:
         shape_contact_margin: wp.array(dtype=wp.float32, ndim=1),  # per-shape contact margin
         shape_collision_radius: wp.array(dtype=wp.float32, ndim=1),  # per-shape collision radius for AABB fallback
         shape_flags: wp.array(dtype=wp.int32, ndim=1),  # per-shape flags (includes ShapeFlags.HYDROELASTIC)
-        shape_collision_aabb_lower: wp.array(dtype=wp.vec3, ndim=1),  # Local-space AABB lower bounds
-        shape_collision_aabb_upper: wp.array(dtype=wp.vec3, ndim=1),  # Local-space AABB upper bounds
+        shape_collision_aabb_lower: wp.array(dtype=wp.vec3, ndim=1) | None = None,  # Local-space AABB lower bounds
+        shape_collision_aabb_upper: wp.array(dtype=wp.vec3, ndim=1) | None = None,  # Local-space AABB upper bounds
         shape_voxel_resolution: wp.array(dtype=wp.vec3i, ndim=1),  # Voxel grid resolution per shape
         # Outputs
         contact_pair: wp.array(dtype=wp.vec2i),
@@ -2083,6 +2083,7 @@ class NarrowPhase:
         contact_tangent: wp.array(dtype=wp.vec3)
         | None = None,  # Represents x axis of local contact frame (None to disable)
         device=None,  # Device to launch on
+        **kwargs,
     ):
         """
         Launch narrow phase collision detection on candidate pairs from broad phase.
@@ -2111,6 +2112,28 @@ class NarrowPhase:
         """
         if device is None:
             device = self.device if self.device is not None else candidate_pair.device
+
+        # Backward compatibility for older call sites/tests that still pass
+        # shape_local_aabb_lower/upper.
+        shape_local_aabb_lower = kwargs.pop("shape_local_aabb_lower", None)
+        shape_local_aabb_upper = kwargs.pop("shape_local_aabb_upper", None)
+        if kwargs:
+            unknown_keys = sorted(kwargs.keys())
+            if len(unknown_keys) == 1:
+                raise TypeError(f"NarrowPhase.launch() got an unexpected keyword argument '{unknown_keys[0]}'")
+            unknown = ", ".join(unknown_keys)
+            raise TypeError(f"NarrowPhase.launch() got unexpected keyword arguments: {unknown}")
+
+        if shape_collision_aabb_lower is None:
+            shape_collision_aabb_lower = shape_local_aabb_lower
+        if shape_collision_aabb_upper is None:
+            shape_collision_aabb_upper = shape_local_aabb_upper
+        if shape_collision_aabb_lower is None or shape_collision_aabb_upper is None:
+            raise TypeError(
+                "NarrowPhase.launch() missing required AABB bounds: provide either "
+                "shape_collision_aabb_lower/shape_collision_aabb_upper or "
+                "shape_local_aabb_lower/shape_local_aabb_upper"
+            )
 
         contact_max = contact_pair.shape[0]
 
