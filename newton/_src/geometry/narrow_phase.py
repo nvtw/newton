@@ -1846,10 +1846,9 @@ class NarrowPhase:
                     block_dim=self.block_dim,
                 )
 
-            # Launch mesh-mesh contact processing kernel (only on CUDA with SDF data)
-            # SDF-based mesh-mesh collision requires GPU: uses shared memory (launch_tiled)
-            # and wp.Volume which only supports CUDA
-            if sdf_data.shape[0] > 0 and wp.get_device(device).is_cuda:
+            # Launch mesh-mesh contact processing kernel on CUDA.
+            # The kernel supports both SDF-backed and BVH fallback paths via shape_sdf_index.
+            if wp.get_device(device).is_cuda:
                 wp.launch_tiled(
                     kernel=self.mesh_mesh_contacts_kernel,
                     dim=(self.num_tile_blocks,),

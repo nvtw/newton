@@ -86,7 +86,11 @@ class Example:
         )
 
         builder = newton.ModelBuilder()
-        builder.default_shape_cfg = shape_cfg
+        # URDF mesh colliders are imported as plain meshes; keep hydroelastic disabled
+        # for import-time shapes unless they provide explicit mesh.sdf payloads.
+        urdf_shape_cfg = copy.deepcopy(shape_cfg)
+        urdf_shape_cfg.is_hydroelastic = False
+        builder.default_shape_cfg = urdf_shape_cfg
 
         builder.add_urdf(
             newton.utils.download_asset("franka_emika_panda") / "urdf/fr3_franka_hand.urdf",
@@ -94,6 +98,7 @@ class Example:
             enable_self_collisions=False,
             parse_visuals_as_colliders=True,
         )
+        builder.default_shape_cfg = shape_cfg
 
         # Disable SDF collisions on all panda links except the fingers and hand
         finger_body_indices = {
