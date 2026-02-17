@@ -149,7 +149,7 @@ class ModelBuilder:
         desired.
     """
 
-    @dataclass(init=False)
+    @dataclass
     class ShapeConfig:
         """
         Represents the properties of a collision shape used in simulation.
@@ -195,121 +195,31 @@ class ModelBuilder:
         """Indicates whether the shape is visible in the simulation. Defaults to True."""
         is_site: bool = False
         """Indicates whether the shape is a site (non-colliding reference point). Directly setting this to True will NOT enforce site invariants. Use `mark_as_site()` or set via the `flags` property to ensure invariants. Defaults to False."""
-        _sdf_narrow_band_range: tuple[float, float] = (-0.1, 0.1)
+        sdf_narrow_band_range: tuple[float, float] = (-0.1, 0.1)
         """The narrow band distance range (inner, outer) for SDF computation. Only used for mesh shapes when SDF is enabled."""
-        _sdf_target_voxel_size: float | None = None
+        sdf_target_voxel_size: float | None = None
         """Target voxel size for sparse SDF grid.
         If provided, enables SDF generation and takes precedence over sdf_max_resolution.
         Requires GPU since wp.Volume only supports CUDA. Only used for mesh shapes."""
-        _sdf_max_resolution: int | None = None
+        sdf_max_resolution: int | None = None
         """Maximum dimension for sparse SDF grid (must be divisible by 8).
         If provided (and sdf_target_voxel_size is None), enables SDF-based mesh-mesh collision.
         Set to None (default) to disable SDF generation for this shape (uses BVH-based collision for mesh-mesh instead).
         Requires GPU since wp.Volume only supports CUDA. Only used for mesh shapes."""
-        _is_hydroelastic: bool = False
+        is_hydroelastic: bool = False
         """Whether the shape collides using SDF-based hydroelastics. For hydroelastic collisions, both participating shapes must have is_hydroelastic set to True. Defaults to False.
 
         .. note::
             Hydroelastic collision handling only works with volumetric shapes and in particular will not work for shapes like flat meshes or cloth.
             This flag will be automatically set to False for planes and heightfields in :meth:`ModelBuilder.add_shape`.
         """
-        _kh: float = 1.0e10
+        kh: float = 1.0e10
         """Contact stiffness coefficient for hydroelastic collisions. Used by MuJoCo, Featherstone, SemiImplicit when is_hydroelastic is True.
 
         .. note::
             For MuJoCo, stiffness values will internally be scaled by masses.
             Users should choose kh to match their desired force-to-penetration ratio.
         """
-
-        def __init__(
-            self,
-            density: float = 1000.0,
-            ke: float = 2.5e3,
-            kd: float = 100.0,
-            kf: float = 1000.0,
-            ka: float = 0.0,
-            mu: float = 0.5,
-            restitution: float = 0.0,
-            mu_torsional: float = 0.25,
-            mu_rolling: float = 0.0005,
-            thickness: float = 1e-5,
-            contact_margin: float | None = None,
-            is_solid: bool = True,
-            collision_group: int = 1,
-            collision_filter_parent: bool = True,
-            has_shape_collision: bool = True,
-            has_particle_collision: bool = True,
-            is_visible: bool = True,
-            is_site: bool = False,
-            sdf_narrow_band_range: tuple[float, float] = (-0.1, 0.1),
-            sdf_target_voxel_size: float | None = None,
-            sdf_max_resolution: int | None = None,
-            is_hydroelastic: bool = False,
-            kh: float = 1.0e10,
-        ) -> None:
-            self.density = density
-            self.ke = ke
-            self.kd = kd
-            self.kf = kf
-            self.ka = ka
-            self.mu = mu
-            self.restitution = restitution
-            self.mu_torsional = mu_torsional
-            self.mu_rolling = mu_rolling
-            self.thickness = thickness
-            self.contact_margin = contact_margin
-            self.is_solid = is_solid
-            self.collision_group = collision_group
-            self.collision_filter_parent = collision_filter_parent
-            self.has_shape_collision = has_shape_collision
-            self.has_particle_collision = has_particle_collision
-            self.is_visible = is_visible
-            self.is_site = is_site
-            self.sdf_narrow_band_range = sdf_narrow_band_range
-            self.sdf_target_voxel_size = sdf_target_voxel_size
-            self.sdf_max_resolution = sdf_max_resolution
-            self.is_hydroelastic = is_hydroelastic
-            self.kh = kh
-
-        @property
-        def sdf_narrow_band_range(self) -> tuple[float, float]:
-            return self._sdf_narrow_band_range
-
-        @sdf_narrow_band_range.setter
-        def sdf_narrow_band_range(self, value: tuple[float, float]) -> None:
-            self._sdf_narrow_band_range = value
-
-        @property
-        def sdf_target_voxel_size(self) -> float | None:
-            return self._sdf_target_voxel_size
-
-        @sdf_target_voxel_size.setter
-        def sdf_target_voxel_size(self, value: float | None) -> None:
-            self._sdf_target_voxel_size = value
-
-        @property
-        def sdf_max_resolution(self) -> int | None:
-            return self._sdf_max_resolution
-
-        @sdf_max_resolution.setter
-        def sdf_max_resolution(self, value: int | None) -> None:
-            self._sdf_max_resolution = value
-
-        @property
-        def is_hydroelastic(self) -> bool:
-            return self._is_hydroelastic
-
-        @is_hydroelastic.setter
-        def is_hydroelastic(self, value: bool) -> None:
-            self._is_hydroelastic = value
-
-        @property
-        def kh(self) -> float:
-            return self._kh
-
-        @kh.setter
-        def kh(self, value: float) -> None:
-            self._kh = value
 
         def configure_sdf(
             self,
