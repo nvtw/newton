@@ -270,7 +270,7 @@ def test_buffer_fraction_no_crash(test, device):
     config_reduced = HydroelasticSDF.Config(buffer_fraction=0.8)
     pipeline_reduced = newton.CollisionPipeline(
         model,
-        broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
+        broad_phase_mode="explicit",
         sdf_hydroelastic_config=config_reduced,
     )
 
@@ -284,7 +284,7 @@ def test_buffer_fraction_no_crash(test, device):
     config_full = HydroelasticSDF.Config(buffer_fraction=1.0)
     pipeline_full = newton.CollisionPipeline(
         model,
-        broad_phase_mode=newton.BroadPhaseMode.EXPLICIT,
+        broad_phase_mode="explicit",
         sdf_hydroelastic_config=config_full,
     )
     contacts_full = pipeline_full.contacts()
@@ -305,7 +305,7 @@ def _compute_total_active_weight_sum(collision_pipeline, state):
     collision_pipeline.collide(state, contacts)
     wp.synchronize()
 
-    hydro = collision_pipeline.sdf_hydroelastic
+    hydro = collision_pipeline.hydroelastic_sdf
     reducer = hydro.contact_reduction.reducer
     active_slots = reducer.hashtable.active_slots.numpy()
     ht_capacity = reducer.hashtable.capacity
@@ -319,20 +319,21 @@ def _compute_total_active_weight_sum(collision_pipeline, state):
 
 def test_iso_scan_scratch_buffers_are_level_sized(test, device):
     """Validate iso scan scratch buffers use per-level sizes."""
+    # Small cubes generate many contacts; increase buffer to avoid overflow warnings
     model, _, state_0, _, _, pipeline, _, _ = build_stacked_cubes_scene(
         device=device,
         solver_fn=solvers["xpbd"],
         shape_type=ShapeType.PRIMITIVE,
         cube_half=CUBE_HALF_SMALL,
         reduce_contacts=True,
-        sdf_hydroelastic_config=HydroelasticSDF.Config(),
+        sdf_hydroelastic_config=HydroelasticSDF.Config(buffer_mult_contact=2),
     )
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
     contacts = pipeline.contacts()
     pipeline.collide(state_0, contacts)
     wp.synchronize()
 
-    hydro = pipeline.sdf_hydroelastic
+    hydro = pipeline.hydroelastic_sdf
     test.assertIsNotNone(hydro)
 
     test.assertEqual(len(hydro.input_sizes), 4)

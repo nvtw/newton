@@ -741,7 +741,7 @@ class HydroelasticSDF:
         winning contacts via the writer function.
         """
         self.contact_reduction.reduce(
-            shape_material_k_hydro=self.shape_material_k_hydro,
+            shape_material_k_hydro=self.shape_material_kh,
             shape_transform=shape_transform,
             shape_collision_aabb_lower=shape_collision_aabb_lower,
             shape_collision_aabb_upper=shape_collision_aabb_upper,
@@ -1193,8 +1193,8 @@ def get_decode_contacts_kernel(margin_contact_area: float = 1e-4, writer_func: A
             margin_b = shape_contact_margin[shape_b]
             margin = margin_a + margin_b
 
-            k_a = shape_material_k_hydro[shape_a]
-            k_b = shape_material_k_hydro[shape_b]
+            k_a = shape_material_kh[shape_a]
+            k_b = shape_material_kh[shape_b]
             k_eff = get_effective_stiffness(k_a, k_b)
             area = contact_area[tid]
 
