@@ -299,6 +299,99 @@ def test_buffer_fraction_no_crash(test, device):
     )
 
 
+def _compute_total_active_weight_sum(collision_pipeline, state):
+    """Return total active weight_sum from hydroelastic reducer."""
+    contacts = collision_pipeline.contacts()
+    collision_pipeline.collide(state, contacts)
+    wp.synchronize()
+
+    hydro = collision_pipeline.sdf_hydroelastic
+    reducer = hydro.contact_reduction.reducer
+    active_slots = reducer.hashtable.active_slots.numpy()
+    ht_capacity = reducer.hashtable.capacity
+    active_count = int(active_slots[ht_capacity])
+    if active_count <= 0:
+        return 0.0
+    active_indices = active_slots[:active_count]
+    weight_sum = reducer.weight_sum.numpy()
+    return float(np.sum(weight_sum[active_indices]))
+
+
+def test_iso_scan_scratch_buffers_are_level_sized(test, device):
+    """Validate iso scan scratch buffers use per-level sizes."""
+    model, _, state_0, _, _, pipeline, _, _ = build_stacked_cubes_scene(
+        device=device,
+        solver_fn=solvers["xpbd"],
+        shape_type=ShapeType.PRIMITIVE,
+        cube_half=CUBE_HALF_SMALL,
+        reduce_contacts=True,
+        sdf_hydroelastic_config=SDFHydroelasticConfig(),
+    )
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+    contacts = pipeline.contacts()
+    pipeline.collide(state_0, contacts)
+    wp.synchronize()
+
+    hydro = pipeline.sdf_hydroelastic
+    test.assertIsNotNone(hydro)
+
+    test.assertEqual(len(hydro.input_sizes), 4)
+    test.assertEqual(len(hydro.iso_buffer_num_scratch), 4)
+    test.assertEqual(len(hydro.iso_buffer_prefix_scratch), 4)
+    test.assertEqual(len(hydro.iso_subblock_idx_scratch), 4)
+    for i, level_input in enumerate(hydro.input_sizes):
+        test.assertEqual(hydro.iso_buffer_num_scratch[i].shape[0], level_input)
+        test.assertEqual(hydro.iso_buffer_prefix_scratch[i].shape[0], level_input)
+        test.assertEqual(hydro.iso_subblock_idx_scratch[i].shape[0], level_input)
+
+
+def test_pre_prune_accumulate_all_penetrating_aggregates_increases_total_weight_sum(test, device):
+    """Validate opt-in aggregate mode captures at least as much penetrating weight."""
+    config_default = SDFHydroelasticConfig(
+        reduce_contacts=True,
+        pre_prune_contacts=True,
+        pre_prune_accumulate_all_penetrating_aggregates=False,
+        buffer_fraction=1.0,
+        buffer_mult_contact=2,
+    )
+    model_default, _, state_default, _, _, pipeline_default, _, _ = build_stacked_cubes_scene(
+        device=device,
+        solver_fn=solvers["xpbd"],
+        shape_type=ShapeType.MESH,
+        cube_half=CUBE_HALF_SMALL,
+        reduce_contacts=True,
+        sdf_hydroelastic_config=config_default,
+    )
+    newton.eval_fk(model_default, model_default.joint_q, model_default.joint_qd, state_default)
+    total_weight_default = _compute_total_active_weight_sum(pipeline_default, state_default)
+
+    config_accurate = SDFHydroelasticConfig(
+        reduce_contacts=True,
+        pre_prune_contacts=True,
+        pre_prune_accumulate_all_penetrating_aggregates=True,
+        buffer_fraction=1.0,
+        buffer_mult_contact=2,
+    )
+    model_accurate, _, state_accurate, _, _, pipeline_accurate, _, _ = build_stacked_cubes_scene(
+        device=device,
+        solver_fn=solvers["xpbd"],
+        shape_type=ShapeType.MESH,
+        cube_half=CUBE_HALF_SMALL,
+        reduce_contacts=True,
+        sdf_hydroelastic_config=config_accurate,
+    )
+    newton.eval_fk(model_accurate, model_accurate.joint_q, model_accurate.joint_qd, state_accurate)
+    total_weight_accurate = _compute_total_active_weight_sum(pipeline_accurate, state_accurate)
+
+    test.assertGreater(total_weight_default, 0.0, "Expected positive aggregate weight in default mode")
+    test.assertGreater(total_weight_accurate, 0.0, "Expected positive aggregate weight in accurate mode")
+    test.assertGreaterEqual(
+        total_weight_accurate,
+        total_weight_default - 1e-6,
+        "Expected accurate aggregate mode to retain at least as much penetrating aggregate weight",
+    )
+
+
 def test_mujoco_hydroelastic_penetration_depth(test, device):
     """Test that hydroelastic penetration depth matches expectation.
 
@@ -601,6 +694,20 @@ add_function_test(
     test_buffer_fraction_no_crash,
     devices=cuda_devices,
     check_output=False,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_iso_scan_scratch_buffers_are_level_sized",
+    test_iso_scan_scratch_buffers_are_level_sized,
+    devices=cuda_devices,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_pre_prune_accumulate_all_penetrating_aggregates_increases_total_weight_sum",
+    test_pre_prune_accumulate_all_penetrating_aggregates_increases_total_weight_sum,
+    devices=cuda_devices,
 )
 
 

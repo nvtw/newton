@@ -28,7 +28,6 @@ This matches the global contact reducer and other contact systems.
 - Aggregate stiffness calculation: ``c_stiffness = k_eff * |agg_force| / total_depth``
 - Normal matching: rotates reduced normals to align with aggregate force direction
 - Anchor contact: synthetic contact at center of pressure for moment balance
-- Moment matching: friction scaling to match aggregate moment from unreduced contacts
 
 **Usage:**
 
@@ -141,7 +140,7 @@ def get_reduce_hydroelastic_contacts_kernel(skip_aggregates: bool = False):
     Args:
         skip_aggregates: If True, skip aggregate accumulation (agg_force,
             weighted_pos_sum, weight_sum).  Use this when the generate kernel
-            already accumulated aggregates for ALL faces (two-pass pre-prune).
+            already accumulated aggregates for all penetrating faces.
 
     Returns:
         A Warp kernel that registers buffered contacts in the hashtable.
@@ -741,7 +740,7 @@ class HydroelasticContactReduction:
         """Export reduced contacts using the writer function.
 
         This exports the winning contacts from the hashtable, computing
-        aggregate stiffness and applying optional normal/moment matching.
+        aggregate stiffness and applying optional normal matching.
 
         Args:
             shape_contact_margin: Per-shape contact margin (dtype: float).

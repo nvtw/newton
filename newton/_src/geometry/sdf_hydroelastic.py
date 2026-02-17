@@ -52,16 +52,19 @@ from ..sim.builder import ShapeFlags
 from ..sim.model import Model
 from .collision_core import sat_box_intersection
 from .contact_data import ContactData
+from .contact_reduction import get_slot
 from .contact_reduction_global import (
     GlobalContactReducerData,
     decode_oct,
     encode_oct,
+    make_contact_key,
 )
 from .contact_reduction_hydroelastic import (
     HydroelasticContactReduction,
     HydroelasticReductionConfig,
     export_hydroelastic_contact_to_buffer,
 )
+from .hashtable import hashtable_find_or_insert
 from .sdf_contact import sample_sdf_extrapolated
 from .sdf_mc import get_mc_tables, mc_calc_face
 from .sdf_utils import SDFData
@@ -151,6 +154,14 @@ class SDFHydroelasticConfig:
     The anchor contact helps preserve moment balance. Only active when reduce_contacts is True."""
     margin_contact_area: float = 1e-2
     """Contact area used for non-penetrating contacts at the margin."""
+    pre_prune_accumulate_all_penetrating_aggregates: bool = False
+    """When pre-pruning is enabled, also accumulate aggregate force terms from all
+    penetrating faces before pruning writes to the contact buffer.
+
+    This preserves aggregate stiffness/normal/anchor fidelity while keeping the
+    fast local compaction path for contact storage. The default keeps the current
+    fastest behavior (aggregates from retained contacts only).
+    """
 
 
 class SDFHydroelastic:
@@ -246,12 +257,17 @@ class SDFHydroelastic:
 
             # Allocate buffers for octree traversal (broadphase + 4 refinement levels)
             self.iso_buffer_counts = [wp.zeros((1,), dtype=wp.int32) for _ in range(5)]
-            # Scratch buffers are shared across all octree levels since level-i
-            # scratch data is consumed before level-(i+1) writes.
-            max_level_input = max(self.input_sizes)
-            self.iso_buffer_prefix_scratch = wp.zeros(max_level_input, dtype=wp.int32)
-            self.iso_buffer_num_scratch = wp.zeros(max_level_input, dtype=wp.int32)
-            self.iso_subblock_idx_scratch = wp.zeros(max_level_input, dtype=wp.uint8)
+            # Scratch buffers are per-level to avoid scanning the worst-case
+            # size at all refinement levels during graph-captured execution.
+            self.iso_buffer_prefix_scratch = [
+                wp.zeros(level_input, dtype=wp.int32) for level_input in self.input_sizes
+            ]
+            self.iso_buffer_num_scratch = [
+                wp.zeros(level_input, dtype=wp.int32) for level_input in self.input_sizes
+            ]
+            self.iso_subblock_idx_scratch = [
+                wp.zeros(level_input, dtype=wp.uint8) for level_input in self.input_sizes
+            ]
             self.iso_buffer_coords = [wp.empty((self.max_num_blocks_broad,), dtype=wp.vec3us)] + [
                 wp.empty((self.iso_max_dims[i],), dtype=wp.vec3us) for i in range(4)
             ]
@@ -299,6 +315,11 @@ class SDFHydroelastic:
             self.generate_contacts_kernel = get_generate_contacts_kernel(
                 output_vertices=self.config.output_contact_surface,
                 pre_prune=self.config.reduce_contacts and self.config.pre_prune_contacts,
+                accumulate_all_penetrating_aggregates=(
+                    self.config.reduce_contacts
+                    and self.config.pre_prune_contacts
+                    and self.config.pre_prune_accumulate_all_penetrating_aggregates
+                ),
             )
 
             if self.config.reduce_contacts:
@@ -594,15 +615,15 @@ class SDFHydroelastic:
                     self.input_sizes[i],
                 ],
                 outputs=[
-                    self.iso_buffer_num_scratch,
-                    self.iso_subblock_idx_scratch,
+                    self.iso_buffer_num_scratch[i],
+                    self.iso_subblock_idx_scratch[i],
                 ],
                 device=self.device,
             )
 
             scan_with_total(
-                self.iso_buffer_num_scratch,
-                self.iso_buffer_prefix_scratch,
+                self.iso_buffer_num_scratch[i],
+                self.iso_buffer_prefix_scratch[i],
                 self.iso_buffer_counts[i],
                 self.iso_buffer_counts[i + 1],
             )
@@ -613,8 +634,8 @@ class SDFHydroelastic:
                 inputs=[
                     self.grid_size,
                     self.iso_buffer_counts[i],
-                    self.iso_buffer_prefix_scratch,
-                    self.iso_subblock_idx_scratch,
+                    self.iso_buffer_prefix_scratch[i],
+                    self.iso_subblock_idx_scratch[i],
                     self.iso_buffer_shape_pairs[i],
                     self.iso_buffer_coords[i],
                     subblock_size,
@@ -728,13 +749,20 @@ class SDFHydroelastic:
         max-depth, voxel bins) and accumulate aggregates, then exports the
         winning contacts via the writer function.
         """
-        self.contact_reduction.reduce_and_export(
+        self.contact_reduction.reduce(
             shape_material_k_hydro=self.shape_material_k_hydro,
             shape_transform=shape_transform,
             shape_local_aabb_lower=shape_local_aabb_lower,
             shape_local_aabb_upper=shape_local_aabb_upper,
             shape_voxel_resolution=shape_voxel_resolution,
+            grid_size=self.grid_size,
+            skip_aggregates=(
+                self.config.pre_prune_contacts and self.config.pre_prune_accumulate_all_penetrating_aggregates
+            ),
+        )
+        self.contact_reduction.export(
             shape_contact_margin=shape_contact_margin,
+            shape_transform=shape_transform,
             writer_data=writer_data,
             grid_size=self.grid_size,
         )
@@ -1211,7 +1239,11 @@ def get_decode_contacts_kernel(margin_contact_area: float = 1e-4, writer_func: A
 # =============================================================================
 
 
-def get_generate_contacts_kernel(output_vertices: bool, pre_prune: bool = False):
+def get_generate_contacts_kernel(
+    output_vertices: bool,
+    pre_prune: bool = False,
+    accumulate_all_penetrating_aggregates: bool = False,
+):
     """Create kernel for hydroelastic contact generation.
 
     This is a merged kernel that computes cube state and immediately writes
@@ -1225,6 +1257,10 @@ def get_generate_contacts_kernel(output_vertices: bool, pre_prune: bool = False)
     rule before writing contacts:
     - keep top-K penetrating faces by area*|depth| (K=2)
     - keep at most one non-penetrating fallback face (closest to penetration)
+
+    When ``accumulate_all_penetrating_aggregates`` is enabled, all penetrating
+    faces contribute to aggregate force terms (via hashtable entries) even if
+    they are later pruned from buffer writes.
 
     Args:
         output_vertices: Whether to output contact surface vertices for visualization.
@@ -1378,6 +1414,20 @@ def get_generate_contacts_kernel(output_vertices: bool, pre_prune: bool = False)
                         iso_vertex_depth[contact_id] = pen_depth
                         iso_vertex_shape_pair[contact_id] = pair
                     continue
+
+                if wp.static(accumulate_all_penetrating_aggregates) and pen_depth < 0.0:
+                    # Optional accurate aggregate mode: accumulate ALL penetrating
+                    # faces before local write pruning. This preserves downstream
+                    # aggregate stiffness/normal/anchor terms.
+                    bin_id = get_slot(normal)
+                    key = make_contact_key(shape_a, shape_b, bin_id)
+                    entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
+                    if entry_idx >= 0:
+                        force_weight = area * (-pen_depth)
+                        wp.atomic_add(reducer_data.agg_force, entry_idx, force_weight * normal)
+                        wp.atomic_add(reducer_data.weighted_pos_sum, entry_idx, force_weight * face_center)
+                        wp.atomic_add(reducer_data.weight_sum, entry_idx, force_weight)
+                        reducer_data.entry_k_eff[entry_idx] = k_eff
 
                 # Local-first compaction: keep top-K penetrating faces by score.
                 if pen_depth < 0.0:
