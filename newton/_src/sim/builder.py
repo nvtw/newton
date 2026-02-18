@@ -4377,7 +4377,11 @@ class ModelBuilder:
             cfg = self.default_shape_cfg
         cfg.validate(shape_type=type)
         if type == GeoType.MESH:
-            if cfg.sdf_max_resolution is not None or cfg.sdf_target_voxel_size is not None:
+            if (
+                cfg.sdf_max_resolution is not None
+                or cfg.sdf_target_voxel_size is not None
+                or cfg.sdf_narrow_band_range != (-0.1, 0.1)
+            ):
                 raise ValueError(
                     "Mesh shapes do not use cfg.sdf_* for SDF generation. "
                     "Build and attach an SDF on the mesh via mesh.build_sdf()."

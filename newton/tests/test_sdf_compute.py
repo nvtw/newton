@@ -1101,6 +1101,16 @@ class TestMeshSDFCollisionFlag(unittest.TestCase):
             builder.add_shape_mesh(body=-1, mesh=self.mesh, cfg=cfg)
         self.assertIn("mesh.build_sdf", str(context.exception))
 
+    def test_mesh_cfg_sdf_narrow_band_conflict_raises(self):
+        """Mesh shapes should reject cfg.sdf_narrow_band_range overrides."""
+        builder = newton.ModelBuilder()
+        cfg = newton.ModelBuilder.ShapeConfig()
+        cfg.sdf_narrow_band_range = (-0.2, 0.2)
+        builder.add_body()
+        with self.assertRaises(ValueError) as context:
+            builder.add_shape_mesh(body=-1, mesh=self.mesh, cfg=cfg)
+        self.assertIn("mesh.build_sdf", str(context.exception))
+
     def test_sdf_disabled_works_on_cpu(self):
         """Mesh without mesh.sdf should still finalize on CPU."""
         builder = newton.ModelBuilder()

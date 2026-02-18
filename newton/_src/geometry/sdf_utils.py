@@ -152,7 +152,32 @@ class SDF:
         thickness: float = 0.0,
         scale: tuple[float, float, float] | None = None,
     ) -> "SDF":
-        """Create an SDF from a :class:`Mesh`."""
+        """Create an SDF from a mesh in local mesh coordinates.
+
+        Args:
+            mesh: Source mesh geometry.
+            narrow_band_range: Signed narrow-band distance range [m] as
+                ``(inner, outer)``.
+            target_voxel_size: Target sparse-grid voxel size [m]. If provided,
+                takes precedence over ``max_resolution``.
+            max_resolution: Maximum sparse-grid dimension [voxel]. Used when
+                ``target_voxel_size`` is not provided.
+            margin: Extra AABB padding [m] added before discretization.
+            thickness: Thickness offset [m] to subtract from SDF values. When
+                non-zero, the SDF surface is effectively shrunk inward by this
+                amount. Useful for modeling compliant layers in hydroelastic
+                collision. Defaults to ``0.0`` (no offset, thickness applied
+                at runtime).
+            scale: Scale factors ``(sx, sy, sz)`` [unitless] to bake into the
+                SDF. When provided, mesh vertices are scaled before SDF
+                generation and ``scale_baked`` is set to ``True`` in the
+                resulting SDF. Required for hydroelastic collision with
+                non-unit shape scale. Defaults to ``None`` (no scale baking;
+                scale applied at runtime).
+
+        Returns:
+            A validated :class:`SDF` runtime handle with sparse/coarse volumes.
+        """
         effective_max_resolution = 64 if max_resolution is None and target_voxel_size is None else max_resolution
         bake_scale = scale is not None
         effective_scale = scale if scale is not None else (1.0, 1.0, 1.0)
@@ -214,6 +239,7 @@ class SDF:
         )
         sdf.validate()
         return sdf
+
 
 # Default background value for unallocated voxels in sparse SDF.
 # Using MAXVAL ensures trilinear interpolation with unallocated voxels produces values >= MAXVAL * 0.99,
