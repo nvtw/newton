@@ -88,6 +88,7 @@ class Example:
         mesh_shape_cfg = copy.deepcopy(shape_cfg)
         mesh_shape_cfg.sdf_max_resolution = None
         mesh_shape_cfg.sdf_target_voxel_size = None
+        mesh_shape_cfg.sdf_narrow_band_range = (-0.1, 0.1)
         hydro_mesh_sdf_max_resolution = 64
 
         builder = newton.ModelBuilder()
@@ -97,6 +98,7 @@ class Example:
         urdf_shape_cfg.is_hydroelastic = False
         urdf_shape_cfg.sdf_max_resolution = None
         urdf_shape_cfg.sdf_target_voxel_size = None
+        urdf_shape_cfg.sdf_narrow_band_range = (-0.1, 0.1)
         builder.default_shape_cfg = urdf_shape_cfg
 
         builder.add_urdf(
@@ -197,6 +199,11 @@ class Example:
             compute_normals=False,
             compute_uvs=False,
             compute_inertia=True,
+        )
+        table_mesh.build_sdf(
+            max_resolution=hydro_mesh_sdf_max_resolution,
+            narrow_band_range=shape_cfg.sdf_narrow_band_range,
+            margin=shape_cfg.contact_margin if shape_cfg.contact_margin is not None else 0.05,
         )
         builder.add_shape_mesh(
             body=-1,

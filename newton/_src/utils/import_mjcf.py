@@ -685,6 +685,7 @@ def parse_mjcf(
                     mesh_cfg = shape_cfg.copy()
                     mesh_cfg.sdf_max_resolution = None
                     mesh_cfg.sdf_target_voxel_size = None
+                    mesh_cfg.sdf_narrow_band_range = (-0.1, 0.1)
                     mesh_shape_kwargs["cfg"] = mesh_cfg
                     s = builder.add_shape_mesh(
                         xform=tf,
