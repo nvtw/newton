@@ -66,7 +66,8 @@ class SDF:
     ):
         if not _internal:
             raise RuntimeError(
-                "SDF objects are created via mesh.build_sdf(), create_sdf_from_mesh(), or create_sdf_from_data()."
+                "SDF objects are created via mesh.build_sdf(), SDF.create_from_mesh(), SDF.create_from_data(), "
+                "create_sdf_from_mesh(), or create_sdf_from_data()."
             )
         self.data = data
         self.sparse_volume = sparse_volume
@@ -100,6 +101,90 @@ class SDF:
         """
         memo[id(self)] = self
         return self
+
+    @staticmethod
+    def create_from_points(
+        points: nparray | Sequence[Sequence[float]],
+        indices: nparray | Sequence[int],
+        *,
+        narrow_band_range: tuple[float, float] = (-0.1, 0.1),
+        target_voxel_size: float | None = None,
+        max_resolution: int | None = None,
+        margin: float = 0.05,
+        thickness: float = 0.0,
+        scale: tuple[float, float, float] | None = None,
+    ) -> "SDF":
+        """Create an SDF from triangle mesh points and indices.
+
+        Args:
+            points: Vertex positions [m], shape ``(N, 3)``.
+            indices: Triangle vertex indices [index], flattened or shape ``(M, 3)``.
+            narrow_band_range: Signed narrow-band distance range [m] as ``(inner, outer)``.
+            target_voxel_size: Target sparse-grid voxel size [m]. If provided, takes
+                precedence over ``max_resolution``.
+            max_resolution: Maximum sparse-grid dimension [voxel]. Used when
+                ``target_voxel_size`` is not provided.
+            margin: Extra AABB padding [m] added before discretization.
+            thickness: Thickness offset [m] to subtract from SDF values.
+            scale: Scale factors ``(sx, sy, sz)`` to bake into the SDF.
+
+        Returns:
+            A validated :class:`SDF` runtime handle with sparse/coarse volumes.
+        """
+        mesh = Mesh(points, indices, compute_inertia=False)
+        return create_sdf_from_mesh(
+            mesh,
+            narrow_band_range=narrow_band_range,
+            target_voxel_size=target_voxel_size,
+            max_resolution=max_resolution,
+            margin=margin,
+            thickness=thickness,
+            scale=scale,
+        )
+
+    @staticmethod
+    def create_from_mesh(
+        mesh: Mesh,
+        *,
+        narrow_band_range: tuple[float, float] = (-0.1, 0.1),
+        target_voxel_size: float | None = None,
+        max_resolution: int | None = None,
+        margin: float = 0.05,
+        thickness: float = 0.0,
+        scale: tuple[float, float, float] | None = None,
+    ) -> "SDF":
+        """Create an SDF from a :class:`Mesh`."""
+        return create_sdf_from_mesh(
+            mesh,
+            narrow_band_range=narrow_band_range,
+            target_voxel_size=target_voxel_size,
+            max_resolution=max_resolution,
+            margin=margin,
+            thickness=thickness,
+            scale=scale,
+        )
+
+    @staticmethod
+    def create_from_data(
+        *,
+        sparse_volume: wp.Volume | None = None,
+        coarse_volume: wp.Volume | None = None,
+        block_coords: nparray | Sequence[wp.vec3us] | None = None,
+        center: Sequence[float] | None = None,
+        half_extents: Sequence[float] | None = None,
+        background_value: float = MAXVAL,
+        scale_baked: bool = False,
+    ) -> "SDF":
+        """Create an SDF from precomputed runtime resources."""
+        return create_sdf_from_data(
+            sparse_volume=sparse_volume,
+            coarse_volume=coarse_volume,
+            block_coords=block_coords,
+            center=center,
+            half_extents=half_extents,
+            background_value=background_value,
+            scale_baked=scale_baked,
+        )
 
 
 # Default background value for unallocated voxels in sparse SDF.

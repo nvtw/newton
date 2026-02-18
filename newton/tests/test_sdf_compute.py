@@ -1155,7 +1155,7 @@ class TestMeshSDFCollisionFlag(unittest.TestCase):
         sdf = mesh.sdf
         assert sdf is not None
 
-        rebuilt = newton.geometry.create_sdf_from_data(
+        rebuilt = newton.geometry.SDF.create_from_data(
             sparse_volume=sdf.sparse_volume,
             coarse_volume=sdf.coarse_volume,
             block_coords=sdf.block_coords,
@@ -1168,6 +1168,28 @@ class TestMeshSDFCollisionFlag(unittest.TestCase):
         self.assertEqual(int(rebuilt.data.coarse_sdf_ptr), int(sdf.data.coarse_sdf_ptr))
         np.testing.assert_allclose(np.array(rebuilt.data.sparse_voxel_size), np.array(sdf.data.sparse_voxel_size))
         np.testing.assert_allclose(np.array(rebuilt.data.coarse_voxel_size), np.array(sdf.data.coarse_voxel_size))
+
+    @unittest.skipUnless(_cuda_available, "Requires CUDA device")
+    def test_sdf_static_create_methods(self):
+        """SDF static creation methods should mirror module-level creators."""
+        mesh = create_box_mesh((0.3, 0.2, 0.1))
+
+        sdf_from_mesh = newton.geometry.SDF.create_from_mesh(mesh, max_resolution=32)
+        self.assertNotEqual(int(sdf_from_mesh.data.sparse_sdf_ptr), 0)
+
+        sdf_from_points = newton.geometry.SDF.create_from_points(mesh.vertices, mesh.indices, max_resolution=32)
+        self.assertNotEqual(int(sdf_from_points.data.sparse_sdf_ptr), 0)
+
+        rebuilt = newton.geometry.SDF.create_from_data(
+            sparse_volume=sdf_from_mesh.sparse_volume,
+            coarse_volume=sdf_from_mesh.coarse_volume,
+            block_coords=sdf_from_mesh.block_coords,
+            center=tuple(sdf_from_mesh.data.center),
+            half_extents=tuple(sdf_from_mesh.data.half_extents),
+            background_value=float(sdf_from_mesh.data.background_value),
+            scale_baked=bool(sdf_from_mesh.data.scale_baked),
+        )
+        self.assertEqual(int(rebuilt.data.sparse_sdf_ptr), int(sdf_from_mesh.data.sparse_sdf_ptr))
 
     def test_standalone_sdf_shape_api_removed(self):
         """GeoType.SDF and add_shape_sdf should not exist."""
