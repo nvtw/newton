@@ -142,9 +142,9 @@ class CollisionSetup:
                 compute_uvs=False,
                 compute_inertia=False,
             )
-            # Configure SDF settings if specified
-            cfg = newton.ModelBuilder.ShapeConfig(sdf_max_resolution=sdf_max_resolution)
-            self.builder.add_shape_mesh(body, mesh=mesh, cfg=cfg, key=type_to_str(shape_type))
+            if sdf_max_resolution is not None:
+                mesh.build_sdf(max_resolution=sdf_max_resolution)
+            self.builder.add_shape_mesh(body, mesh=mesh, key=type_to_str(shape_type))
         elif shape_type == GeoType.CONVEX_MESH:
             # Use a sphere mesh as it's already convex
             mesh = newton.Mesh.create_sphere(0.5, compute_normals=False, compute_uvs=False, compute_inertia=False)
