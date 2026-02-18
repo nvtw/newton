@@ -97,6 +97,9 @@ class ViewerBase:
         # SDF isomesh instances -- created on-demand for collision visualization
         self._sdf_isomesh_instances: dict[int, ViewerBase.ShapeInstances] = {}
         self._sdf_isomesh_populated: bool = False  # lazy flag for SDF isomesh population
+        # Host mirror of per-shape SDF table indices. Filled once in set_model()
+        # to avoid repeated device->host copies in shape population loops.
+        self._shape_sdf_index_host: nparray | None = None
 
     def is_running(self) -> bool:
         return True
@@ -132,6 +135,7 @@ class ViewerBase:
 
         if model is not None:
             self.device = model.device
+            self._shape_sdf_index_host = model.shape_sdf_index.numpy() if model.shape_sdf_index is not None else None
             self._populate_shapes()
 
             # Auto-compute world offsets if not already set
@@ -171,7 +175,7 @@ class ViewerBase:
             return None
 
         # Check if this shape has an SDF volume
-        sdf_idx = int(self.model.shape_sdf_index.numpy()[shape_idx]) if self.model.shape_sdf_index is not None else -1
+        sdf_idx = int(self._shape_sdf_index_host[shape_idx]) if self._shape_sdf_index_host is not None else -1
         sdf_volume = self.model.sdf_volume[sdf_idx] if (sdf_idx >= 0 and self.model.sdf_volume) else None
         if sdf_volume is None:
             return None
@@ -952,6 +956,7 @@ class ViewerBase:
         shape_transform = self.model.shape_transform.numpy()
         shape_flags = self.model.shape_flags.numpy()
         shape_world = self.model.shape_world.numpy()
+        shape_sdf_index = self._shape_sdf_index_host
         shape_count = len(shape_body)
 
         # loop over shapes
@@ -1004,7 +1009,7 @@ class ViewerBase:
             is_collision_shape = flags & int(newton.ShapeFlags.COLLIDE_SHAPES)
             is_visible = flags & int(newton.ShapeFlags.VISIBLE)
             # Check for SDF volume existence without computing the isomesh (lazy evaluation)
-            sdf_idx = int(self.model.shape_sdf_index.numpy()[s]) if self.model.shape_sdf_index is not None else -1
+            sdf_idx = int(shape_sdf_index[s]) if shape_sdf_index is not None else -1
             has_sdf = sdf_idx >= 0 and self.model.sdf_volume and self.model.sdf_volume[sdf_idx] is not None
             if is_collision_shape and is_visible and has_sdf:
                 # Remove COLLIDE_SHAPES flag so this is treated as a visual shape
@@ -1111,7 +1116,7 @@ class ViewerBase:
         shape_world = self.model.shape_world.numpy()
         shape_geo_scale = self.model.shape_scale.numpy()
         sdf_data = self.model.sdf_data.numpy() if self.model.sdf_data is not None else None
-        shape_sdf_index = self.model.shape_sdf_index.numpy() if self.model.shape_sdf_index is not None else None
+        shape_sdf_index = self._shape_sdf_index_host
         shape_count = len(shape_body)
 
         for s in range(shape_count):
