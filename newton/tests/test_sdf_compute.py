@@ -1148,7 +1148,7 @@ class TestMeshSDFCollisionFlag(unittest.TestCase):
         self.assertIsNotNone(mesh.sdf)
 
     @unittest.skipUnless(_cuda_available, "Requires CUDA device")
-    def test_create_sdf_from_data_roundtrip(self):
+    def test_sdf_create_from_data_roundtrip(self):
         """Round-trip SDF reconstruction from generated volumes."""
         mesh = create_box_mesh((0.3, 0.2, 0.1))
         mesh.build_sdf(max_resolution=32)
@@ -1171,7 +1171,7 @@ class TestMeshSDFCollisionFlag(unittest.TestCase):
 
     @unittest.skipUnless(_cuda_available, "Requires CUDA device")
     def test_sdf_static_create_methods(self):
-        """SDF static creation methods should mirror module-level creators."""
+        """SDF static creation methods should construct valid SDF handles."""
         mesh = create_box_mesh((0.3, 0.2, 0.1))
 
         sdf_from_mesh = newton.geometry.SDF.create_from_mesh(mesh, max_resolution=32)
@@ -1195,6 +1195,15 @@ class TestMeshSDFCollisionFlag(unittest.TestCase):
         """GeoType.SDF and add_shape_sdf should not exist."""
         self.assertFalse(hasattr(newton.GeoType, "SDF"))
         self.assertFalse(hasattr(newton.ModelBuilder, "add_shape_sdf"))
+
+
+class TestSDFPublicApi(unittest.TestCase):
+    """Test public API shape for SDF creators."""
+
+    def test_module_level_sdf_creators_removed(self):
+        """Module-level SDF creators should not be exposed in public API."""
+        self.assertFalse(hasattr(newton.geometry, "create_sdf_from_mesh"))
+        self.assertFalse(hasattr(newton.geometry, "create_sdf_from_data"))
 
     @unittest.skipUnless(_cuda_available, "Requires CUDA device")
     def test_hydroelastic_primitive_generates_sdf_on_gpu(self):

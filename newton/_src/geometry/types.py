@@ -263,9 +263,9 @@ class Mesh:
         if self.sdf is not None:
             raise RuntimeError("Mesh already has an SDF. Call clear_sdf() before rebuilding.")
 
-        from .sdf_utils import create_sdf_from_mesh  # noqa: PLC0415
+        from .sdf_utils import SDF  # noqa: PLC0415
 
-        self.sdf = create_sdf_from_mesh(
+        self.sdf = SDF.create_from_mesh(
             self,
             narrow_band_range=narrow_band_range if narrow_band_range is not None else (-0.1, 0.1),
             target_voxel_size=target_voxel_size,

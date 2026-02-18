@@ -32,7 +32,7 @@ from .collision_primitive import (
 )
 from .flags import ParticleFlags, ShapeFlags
 from .inertia import compute_shape_inertia, compute_sphere_inertia, transform_inertia
-from .sdf_utils import SDF, create_sdf_from_data, create_sdf_from_mesh
+from .sdf_utils import SDF
 from .terrain_generator import create_mesh_heightfield, create_mesh_terrain
 from .types import (
     GeoType,
@@ -69,8 +69,6 @@ __all__ = [
     "compute_sphere_inertia",
     "create_mesh_heightfield",
     "create_mesh_terrain",
-    "create_sdf_from_data",
-    "create_sdf_from_mesh",
     "test_group_pair",
     "test_world_and_group_pair",
     "transform_inertia",

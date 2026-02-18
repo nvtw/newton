@@ -38,7 +38,5 @@ newton.geometry
    create_box_mesh
    create_mesh_heightfield
    create_mesh_terrain
-   create_sdf_from_data
-   create_sdf_from_mesh
    remesh_mesh
    transform_inertia
