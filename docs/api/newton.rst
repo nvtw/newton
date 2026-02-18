@@ -45,6 +45,7 @@ newton
    Model
    ModelBuilder
    ParticleFlags
+   SDF
    ShapeFlags
    State
 
