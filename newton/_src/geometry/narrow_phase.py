@@ -259,7 +259,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 continue
             if type_a == GeoType.PLANE and is_hfield_b:
                 continue
-            if is_hfield_a and (type_b == GeoType.MESH or type_b == GeoType.SDF):
+            if is_hfield_a and type_b == GeoType.MESH:
                 continue
 
             # Route heightfield-convex to dedicated buffer
@@ -678,8 +678,7 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
                 margin_vec_b = wp.vec3(margin_b, margin_b, margin_b)
 
                 # Shape A AABB
-                is_sdf_a = type_a == GeoType.SDF
-                if is_infinite_plane_a or is_sdf_a:
+                if is_infinite_plane_a:
                     radius_a = shape_collision_radius[shape_a]
                     half_extents_a = wp.vec3(radius_a, radius_a, radius_a)
                     aabb_a_lower = pos_a - half_extents_a - margin_vec_a
@@ -693,8 +692,7 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
                     aabb_a_upper = aabb_a_upper + margin_vec_a
 
                 # Shape B AABB
-                is_sdf_b = type_b == GeoType.SDF
-                if is_infinite_plane_b or is_sdf_b:
+                if is_infinite_plane_b:
                     radius_b = shape_collision_radius[shape_b]
                     half_extents_b = wp.vec3(radius_b, radius_b, radius_b)
                     aabb_b_lower = pos_b - half_extents_b - margin_vec_b

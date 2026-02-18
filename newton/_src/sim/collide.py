@@ -199,10 +199,9 @@ def compute_shape_aabbs(
     scale = shape_scale[shape_id]
     is_infinite_plane = (geo_type == GeoType.PLANE) and (scale[0] == 0.0 and scale[1] == 0.0)
     is_mesh = geo_type == GeoType.MESH
-    is_sdf = geo_type == GeoType.SDF
     is_hfield = geo_type == GeoType.HFIELD
 
-    if is_infinite_plane or is_mesh or is_sdf or is_hfield:
+    if is_infinite_plane or is_mesh or is_hfield:
         # Use conservative bounding sphere approach for infinite planes, meshes, and heightfields
         radius = shape_collision_radius[shape_id]
         half_extents = wp.vec3(radius, radius, radius)
