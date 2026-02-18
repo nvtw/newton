@@ -45,7 +45,6 @@ newton
    Model
    ModelBuilder
    ParticleFlags
-   SAPSortType
    ShapeFlags
    State
 
