@@ -870,7 +870,7 @@ class Model:
         """
         from .collide import CollisionPipeline  # noqa: PLC0415
 
-        self._collision_pipeline = CollisionPipeline(self, broad_phase_mode="explicit")
+        self._collision_pipeline = CollisionPipeline(self, broad_phase="explicit")
 
     def contacts(
         self: Model,

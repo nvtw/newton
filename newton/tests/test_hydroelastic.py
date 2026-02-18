@@ -338,7 +338,7 @@ def test_mujoco_hydroelastic_penetration_depth(test, device):
     sdf_config = HydroelasticSDF.Config(output_contact_surface=True)
     collision_pipeline = newton.CollisionPipeline(
         model,
-        broad_phase_mode="explicit",
+        broad_phase="explicit",
         sdf_hydroelastic_config=sdf_config,
     )
     # Enable contact surface output for this test (validates penetration depth)

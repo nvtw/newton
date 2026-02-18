@@ -8604,11 +8604,10 @@ class ModelBuilder:
                         block_coords = list(mesh_sdf.block_coords) if mesh_sdf.block_coords is not None else []
                 elif is_hydroelastic and has_shape_collision:
                     bake_scale = True
-                    effective_max_resolution = (
-                        sdf_max_resolution
-                        if sdf_max_resolution is not None or sdf_target_voxel_size is not None
-                        else 64
-                    )
+                    # Keep voxel-size-driven generation independent from max_resolution.
+                    effective_max_resolution = sdf_max_resolution
+                    if sdf_target_voxel_size is None and effective_max_resolution is None:
+                        effective_max_resolution = 64
                     cache_key = (
                         "primitive_generated",
                         shape_type,
@@ -8628,7 +8627,7 @@ class ModelBuilder:
                             narrow_band_distance=sdf_narrow_band_range,
                             margin=shape_contact_margin,
                             target_voxel_size=sdf_target_voxel_size,
-                            max_resolution=effective_max_resolution if effective_max_resolution is not None else 64,
+                            max_resolution=effective_max_resolution,
                             bake_scale=bake_scale,
                         )
 

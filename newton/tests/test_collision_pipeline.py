@@ -100,7 +100,7 @@ class CollisionSetup:
 
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
-            broad_phase_mode=broad_phase,
+            broad_phase=broad_phase,
         )
         self.contacts = self.collision_pipeline.contacts()
 
@@ -460,13 +460,13 @@ class TestCollisionPipelineFilterPairs(unittest.TestCase):
     pass
 
 
-def test_shape_collision_filter_pairs(test, device, broad_phase_mode: str):
+def test_shape_collision_filter_pairs(test, device, broad_phase: str):
     """Verify that excluded shape pairs produce no contacts under NxN or SAP broad phase.
 
     Args:
         test: The test case instance.
         device: Warp device to run on.
-        broad_phase_mode: Broad phase algorithm to test (NXN or SAP).
+        broad_phase: Broad phase algorithm to test (NXN or SAP).
     """
     with wp.ScopedDevice(device):
         builder = newton.ModelBuilder(gravity=0.0)
@@ -479,7 +479,7 @@ def test_shape_collision_filter_pairs(test, device, broad_phase_mode: str):
         # Exclude this pair so they must not generate contacts
         builder.shape_collision_filter_pairs.append((min(shape_a, shape_b), max(shape_a, shape_b)))
         model = builder.finalize(device=device)
-        pipeline = newton.CollisionPipeline(model, broad_phase_mode=broad_phase_mode)
+        pipeline = newton.CollisionPipeline(model, broad_phase=broad_phase)
         state = model.state()
         contacts = pipeline.contacts()
         pipeline.collide(state, contacts)
@@ -492,7 +492,7 @@ def test_shape_collision_filter_pairs(test, device, broad_phase_mode: str):
             test.assertNotEqual(
                 pair,
                 excluded,
-                f"Excluded pair {excluded} must not appear in contacts (broad_phase={broad_phase_mode})",
+                f"Excluded pair {excluded} must not appear in contacts (broad_phase={broad_phase})",
             )
         # With the only pair excluded, we must have zero rigid contacts
         test.assertEqual(n, 0, f"Expected 0 rigid contacts when only pair is excluded (got {n})")
@@ -503,14 +503,14 @@ add_function_test(
     "test_shape_collision_filter_pairs_nxn",
     test_shape_collision_filter_pairs,
     devices=devices,
-    broad_phase_mode="nxn",
+    broad_phase="nxn",
 )
 add_function_test(
     TestCollisionPipelineFilterPairs,
     "test_shape_collision_filter_pairs_sap",
     test_shape_collision_filter_pairs,
     devices=devices,
-    broad_phase_mode="sap",
+    broad_phase="sap",
 )
 
 
@@ -538,8 +538,8 @@ def test_collision_filter_consistent_across_broadphases(test, device):
 
         model = builder.finalize(device=device)
 
-        def _contact_pairs(broad_phase_mode):
-            pipeline = newton.CollisionPipeline(model, broad_phase_mode=broad_phase_mode)
+        def _contact_pairs(broad_phase):
+            pipeline = newton.CollisionPipeline(model, broad_phase=broad_phase)
             state = model.state()
             contacts = pipeline.contacts()
             pipeline.collide(state, contacts)
