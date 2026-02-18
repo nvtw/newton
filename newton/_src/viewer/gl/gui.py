@@ -20,6 +20,9 @@ import os
 
 class UI:
     def __init__(self, window):
+        self._file_dialog_result: str | None = None
+        self._pending_file_dialog = None
+
         try:
             from imgui_bundle import (
                 imgui,
@@ -51,8 +54,6 @@ class UI:
             self.io.display_size = (fb_width, fb_height)
 
         self._setup_dark_style()
-        self._file_dialog_result: str | None = None
-        self._pending_file_dialog = None
 
     def _setup_grey_style(self):
         if not self.is_available:
@@ -315,45 +316,67 @@ class UI:
             return fallback_color
 
     def consume_file_dialog_result(self) -> str | None:
-        """Return the file dialog result once, then clear it."""
+        """Return the latest completed file dialog path once.
+
+        File dialogs are asynchronous: `open_load_file_dialog()` and
+        `open_save_file_dialog()` queue a native dialog and return immediately.
+        Poll this method from the render loop to retrieve the selected path.
+        """
+        if not self.is_available:
+            return None
+
         result = self._file_dialog_result
         self._file_dialog_result = None
         return result
 
     def _poll_file_dialog(self):
         """Check if pending file dialog has completed."""
+        if not self.is_available:
+            return
+
         if self._pending_file_dialog is None:
             return
         if self._pending_file_dialog.ready():
             result = self._pending_file_dialog.result()
             if result:
-                self._file_dialog_result = result[0] if isinstance(result, list) else result
+                if isinstance(result, list):
+                    if len(result) == 1:
+                        self._file_dialog_result = result[0]
+                    elif len(result) > 1:
+                        print("Warning: multiple files selected; expected a single file.")
+                else:
+                    self._file_dialog_result = result
             self._pending_file_dialog = None
 
-    def open_save_file_dialog(
-        self,
-        title: str = "Save File",
-        defaultextension: str = "",
-        filetypes=None,
-    ) -> str | None:
-        """Open native OS save file dialog."""
+    def open_save_file_dialog(self, title: str = "Save File") -> None:
+        """Start an asynchronous native OS save-file dialog.
+
+        Use `consume_file_dialog_result()` to retrieve the selected path.
+        """
+        if not self.is_available:
+            return
+
         try:
             from imgui_bundle import portable_file_dialogs as pfd
 
             self._pending_file_dialog = pfd.save_file(title, os.getcwd())
         except ImportError:
             print("Warning: portable_file_dialogs not available")
-        return None
 
-    def open_load_file_dialog(self, title: str = "Open File", filetypes=None) -> str | None:
-        """Open native OS file dialog."""
+    def open_load_file_dialog(self, title: str = "Open File") -> None:
+        """Start an asynchronous native OS open-file dialog.
+
+        Use `consume_file_dialog_result()` to retrieve the selected path.
+        """
+        if not self.is_available:
+            return
+
         try:
             from imgui_bundle import portable_file_dialogs as pfd
 
             self._pending_file_dialog = pfd.open_file(title, os.getcwd())
         except ImportError:
             print("Warning: portable_file_dialogs not available")
-        return None
 
     def shutdown(self):
         if not self.is_available:

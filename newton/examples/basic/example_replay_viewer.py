@@ -118,15 +118,7 @@ class ReplayUI:
         imgui.text(self.selected_file if self.selected_file else "No file loaded")
 
         if imgui.button("Load Recording..."):
-            self.viewer.ui.open_load_file_dialog(
-                filetypes=[
-                    ("Recording files", ("*.json", "*.bin")),
-                    ("JSON files", "*.json"),
-                    ("Binary files", "*.bin"),
-                    ("All files", "*.*"),
-                ],
-                title="Select Recording File",
-            )
+            self.viewer.ui.open_load_file_dialog(title="Select Recording File")
 
         # Playback controls (only if recording is loaded)
         if self.total_frames > 0:
