@@ -1165,7 +1165,7 @@ class TestMeshSDFCollisionFlag(unittest.TestCase):
         sdf = mesh.sdf
         assert sdf is not None
 
-        rebuilt = newton.geometry.SDF.create_from_data(
+        rebuilt = newton.SDF.create_from_data(
             sparse_volume=sdf.sparse_volume,
             coarse_volume=sdf.coarse_volume,
             block_coords=sdf.block_coords,
@@ -1184,13 +1184,13 @@ class TestMeshSDFCollisionFlag(unittest.TestCase):
         """SDF static creation methods should construct valid SDF handles."""
         mesh = create_box_mesh((0.3, 0.2, 0.1))
 
-        sdf_from_mesh = newton.geometry.SDF.create_from_mesh(mesh, max_resolution=32)
+        sdf_from_mesh = newton.SDF.create_from_mesh(mesh, max_resolution=32)
         self.assertNotEqual(int(sdf_from_mesh.data.sparse_sdf_ptr), 0)
 
-        sdf_from_points = newton.geometry.SDF.create_from_points(mesh.vertices, mesh.indices, max_resolution=32)
+        sdf_from_points = newton.SDF.create_from_points(mesh.vertices, mesh.indices, max_resolution=32)
         self.assertNotEqual(int(sdf_from_points.data.sparse_sdf_ptr), 0)
 
-        rebuilt = newton.geometry.SDF.create_from_data(
+        rebuilt = newton.SDF.create_from_data(
             sparse_volume=sdf_from_mesh.sparse_volume,
             coarse_volume=sdf_from_mesh.coarse_volume,
             block_coords=sdf_from_mesh.block_coords,
@@ -1209,6 +1209,11 @@ class TestMeshSDFCollisionFlag(unittest.TestCase):
 
 class TestSDFPublicApi(unittest.TestCase):
     """Test public API shape for SDF creators."""
+
+    def test_top_level_sdf_exported(self):
+        """Top-level package should expose SDF as newton.SDF."""
+        self.assertTrue(hasattr(newton, "SDF"))
+        self.assertFalse(hasattr(newton.geometry, "SDF"))
 
     def test_module_level_sdf_creators_removed(self):
         """Module-level SDF creators should not be exposed in public API."""

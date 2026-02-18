@@ -14,7 +14,6 @@ newton.geometry
    BroadPhaseSAP
    HydroelasticSDF
    NarrowPhase
-   SDF
 
 .. rubric:: Functions
 

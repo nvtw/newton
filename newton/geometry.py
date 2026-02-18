@@ -14,7 +14,6 @@
 # limitations under the License.
 
 from ._src.geometry import (
-    SDF,
     BroadPhaseAllPairs,
     BroadPhaseExplicit,
     BroadPhaseSAP,
@@ -39,7 +38,6 @@ from ._src.geometry.sdf_hydroelastic import HydroelasticSDF
 from ._src.geometry.utils import create_box_mesh, remesh_mesh
 
 __all__ = [
-    "SDF",
     "BroadPhaseAllPairs",
     "BroadPhaseExplicit",
     "BroadPhaseSAP",
