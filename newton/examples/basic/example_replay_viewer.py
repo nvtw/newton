@@ -108,13 +108,17 @@ class ReplayUI:
 
     def _render_playback_controls(self, imgui):
         """Render playback controls section."""
+        file_path = self.viewer.ui.consume_file_dialog_result()
+        if file_path:
+            self._clear_status()
+            self._load_recording(file_path)
 
         # File loading
         imgui.text("Recording File:")
         imgui.text(self.selected_file if self.selected_file else "No file loaded")
 
         if imgui.button("Load Recording..."):
-            file_path = self.viewer.ui.open_load_file_dialog(
+            self.viewer.ui.open_load_file_dialog(
                 filetypes=[
                     ("Recording files", ("*.json", "*.bin")),
                     ("JSON files", "*.json"),
@@ -123,9 +127,6 @@ class ReplayUI:
                 ],
                 title="Select Recording File",
             )
-            if file_path:
-                self._clear_status()
-                self._load_recording(file_path)
 
         # Playback controls (only if recording is loaded)
         if self.total_frames > 0:
