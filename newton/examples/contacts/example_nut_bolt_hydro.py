@@ -446,10 +446,7 @@ class Example:
 
         current_bytes = wp.get_mempool_used_mem_current(self._device)
         current_mib = current_bytes / (1024.0 * 1024.0)
-        print(
-            f"[t={self.sim_time:.2f}s] "
-            f"Warp mempool current usage: {current_bytes} bytes ({current_mib:.2f} MiB)"
-        )
+        print(f"[t={self.sim_time:.2f}s] Warp mempool current usage: {current_bytes} bytes ({current_mib:.2f} MiB)")
         self._next_mempool_log_time += self.mempool_log_interval_s
 
 
@@ -493,10 +490,7 @@ def run_benchmark(example: Example, benchmark_seconds: float):
 
     elapsed = perf_counter() - start_time
     average_fps = num_steps / elapsed if elapsed > 0.0 else 0.0
-    print(
-        f"Benchmark complete: {num_steps} frames in {elapsed:.2f} s "
-        f"({average_fps:.2f} FPS average)"
-    )
+    print(f"Benchmark complete: {num_steps} frames in {elapsed:.2f} s ({average_fps:.2f} FPS average)")
 
     example.viewer.close()
 
