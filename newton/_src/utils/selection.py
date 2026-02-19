@@ -15,6 +15,7 @@
 
 import functools
 from fnmatch import fnmatch
+from types import NoneType
 from typing import Any
 
 import warp as wp
@@ -278,6 +279,21 @@ class ArticulationView:
     subsets of articulations and their joints, links, and shapes within a Model.
     It supports pattern-based selection, inclusion/exclusion filters, and convenient
     attribute access and modification for simulation and control.
+
+    This is useful in RL and batched simulation workflows where a single policy or
+    control routine operates on many parallel environments with consistent tensor shapes.
+
+    Example:
+
+    .. code-block:: python
+
+        import newton
+
+        view = newton.selection.ArticulationView(model, pattern="robot*")
+        q = view.get_dof_positions(state)
+        q_np = q.numpy()
+        q_np[..., 0] = 0.0
+        view.set_dof_positions(state, q_np)
 
     Args:
         model (Model): The model containing the articulations.
@@ -989,38 +1005,29 @@ class ArticulationView:
         # handle custom slice
         if isinstance(_slice, Slice):
             _slice = _slice.get()
-        elif isinstance(_slice, int):
-            _slice = slice(_slice, _slice + 1)
+        elif not isinstance(_slice, (NoneType, int, slice)):
+            raise ValueError(f"Invalid slice type: expected slice or int, got {type(_slice)}")
 
         if _slice is None:
+            value_slice = layout.indices if is_indexed else layout.slice
             value_count = layout.value_count
-            if is_indexed:
-                value_slice = layout.indices
-            else:
-                value_slice = layout.slice
         else:
-            value_count = _slice.stop - _slice.start
-            if is_indexed:
-                value_slice = layout.indices[_slice]
-            else:
-                value_slice = _slice
-
-        shape = (self.world_count, self.count_per_world, value_count)
-        strides = (
-            layout.stride_between_worlds * value_stride,
-            layout.stride_within_worlds * value_stride,
-            value_stride,
-        )
-        slices = (slice(self.world_count), slice(self.count_per_world), value_slice)
+            value_slice = _slice
+            value_count = 1 if isinstance(_slice, int) else _slice.stop - _slice.start
 
         # trailing dimensions for multidimensional attributes
         trailing_shape = attrib.shape[1:]
         trailing_strides = attrib.strides[1:]
         trailing_slices = [slice(s) for s in trailing_shape]
 
-        shape = (*shape, *trailing_shape)
-        strides = (*strides, *trailing_strides)
-        slices = (*slices, *trailing_slices)
+        shape = (self.world_count, self.count_per_world, value_count, *trailing_shape)
+        strides = (
+            layout.stride_between_worlds * value_stride,
+            layout.stride_within_worlds * value_stride,
+            value_stride,
+            *trailing_strides,
+        )
+        slices = (slice(self.world_count), slice(self.count_per_world), value_slice, *trailing_slices)
 
         # construct reshaped attribute array
         attrib = wp.array(

@@ -219,8 +219,8 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 type_a, type_b = type_b, type_a
 
             # Check if both shapes are hydroelastic - route to SDF-SDF pipeline
-            is_hydro_a = (shape_flags[shape_a] & int(ShapeFlags.HYDROELASTIC)) != 0
-            is_hydro_b = (shape_flags[shape_b] & int(ShapeFlags.HYDROELASTIC)) != 0
+            is_hydro_a = (shape_flags[shape_a] & ShapeFlags.HYDROELASTIC) != 0
+            is_hydro_b = (shape_flags[shape_b] & ShapeFlags.HYDROELASTIC) != 0
             if is_hydro_a and is_hydro_b and shape_pairs_sdf_sdf:
                 idx = wp.atomic_add(shape_pairs_sdf_sdf_count, 0, 1)
                 if idx < shape_pairs_sdf_sdf.shape[0]:
@@ -251,15 +251,15 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             # =====================================================================
             # Route heightfield pairs to specialized buffer
             # =====================================================================
-            is_hfield_a = type_a == int(GeoType.HFIELD)
-            is_hfield_b = type_b == int(GeoType.HFIELD)
+            is_hfield_a = type_a == GeoType.HFIELD
+            is_hfield_b = type_b == GeoType.HFIELD
 
             # Skip unsupported heightfield combinations
             if is_hfield_a and is_hfield_b:
                 continue
-            if type_a == int(GeoType.PLANE) and is_hfield_b:
+            if type_a == GeoType.PLANE and is_hfield_b:
                 continue
-            if is_hfield_a and (type_b == int(GeoType.MESH) or type_b == int(GeoType.SDF)):
+            if is_hfield_a and type_b == GeoType.MESH:
                 continue
 
             # Route heightfield-convex to dedicated buffer
@@ -272,9 +272,9 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             # =====================================================================
             # Route mesh pairs to specialized buffers
             # =====================================================================
-            is_mesh_a = type_a == int(GeoType.MESH)
-            is_mesh_b = type_b == int(GeoType.MESH)
-            is_plane_a = type_a == int(GeoType.PLANE)
+            is_mesh_a = type_a == GeoType.MESH
+            is_mesh_b = type_b == GeoType.MESH
+            is_plane_a = type_a == GeoType.PLANE
             is_infinite_plane_a = is_plane_a and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
 
             # Mesh-mesh collision
@@ -308,13 +308,13 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             # =====================================================================
             # Handle lightweight primitives analytically
             # =====================================================================
-            is_sphere_a = type_a == int(GeoType.SPHERE)
-            is_sphere_b = type_b == int(GeoType.SPHERE)
-            is_capsule_a = type_a == int(GeoType.CAPSULE)
-            is_capsule_b = type_b == int(GeoType.CAPSULE)
-            is_ellipsoid_b = type_b == int(GeoType.ELLIPSOID)
-            is_cylinder_b = type_b == int(GeoType.CYLINDER)
-            is_box_b = type_b == int(GeoType.BOX)
+            is_sphere_a = type_a == GeoType.SPHERE
+            is_sphere_b = type_b == GeoType.SPHERE
+            is_capsule_a = type_a == GeoType.CAPSULE
+            is_capsule_b = type_b == GeoType.CAPSULE
+            is_ellipsoid_b = type_b == GeoType.ELLIPSOID
+            is_cylinder_b = type_b == GeoType.CYLINDER
+            is_box_b = type_b == GeoType.BOX
 
             # Compute effective radii for spheres and capsules
             # (radius that can be represented as Minkowski sum with a sphere)
@@ -658,8 +658,8 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
             )
 
             # Check for infinite planes
-            is_infinite_plane_a = (type_a == int(GeoType.PLANE)) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
-            is_infinite_plane_b = (type_b == int(GeoType.PLANE)) and (scale_b[0] == 0.0 and scale_b[1] == 0.0)
+            is_infinite_plane_a = (type_a == GeoType.PLANE) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
+            is_infinite_plane_b = (type_b == GeoType.PLANE) and (scale_b[0] == 0.0 and scale_b[1] == 0.0)
 
             # Early exit: both infinite planes can't collide
             if is_infinite_plane_a and is_infinite_plane_b:
@@ -678,8 +678,7 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
                 margin_vec_b = wp.vec3(margin_b, margin_b, margin_b)
 
                 # Shape A AABB
-                is_sdf_a = type_a == int(GeoType.SDF)
-                if is_infinite_plane_a or is_sdf_a:
+                if is_infinite_plane_a:
                     radius_a = shape_collision_radius[shape_a]
                     half_extents_a = wp.vec3(radius_a, radius_a, radius_a)
                     aabb_a_lower = pos_a - half_extents_a - margin_vec_a
@@ -693,8 +692,7 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
                     aabb_a_upper = aabb_a_upper + margin_vec_a
 
                 # Shape B AABB
-                is_sdf_b = type_b == int(GeoType.SDF)
-                if is_infinite_plane_b or is_sdf_b:
+                if is_infinite_plane_b:
                     radius_b = shape_collision_radius[shape_b]
                     half_extents_b = wp.vec3(radius_b, radius_b, radius_b)
                     aabb_b_lower = pos_b - half_extents_b - margin_vec_b
@@ -789,10 +787,10 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
         mesh_shape = -1
         non_mesh_shape = -1
 
-        if type_a == int(GeoType.MESH) and type_b != int(GeoType.MESH):
+        if type_a == GeoType.MESH and type_b != GeoType.MESH:
             mesh_shape = shape_a
             non_mesh_shape = shape_b
-        elif type_b == int(GeoType.MESH) and type_a != int(GeoType.MESH):
+        elif type_b == GeoType.MESH and type_a != GeoType.MESH:
             mesh_shape = shape_b
             non_mesh_shape = shape_a
         else:
@@ -1252,7 +1250,7 @@ def heightfield_midphase_kernel(
         # Determine which is the heightfield
         hfield_shape = shape_a
         other_shape = shape_b
-        if shape_types[shape_b] == int(GeoType.HFIELD):
+        if shape_types[shape_b] == GeoType.HFIELD:
             hfield_shape = shape_b
             other_shape = shape_a
 
@@ -1699,7 +1697,8 @@ class NarrowPhase:
         shape_data: wp.array(dtype=wp.vec4, ndim=1),  # Shape data (scale xyz, thickness w)
         shape_transform: wp.array(dtype=wp.transform, ndim=1),  # In world space
         shape_source: wp.array(dtype=wp.uint64, ndim=1),  # The index into the source array, type define by shape_types
-        shape_sdf_data: wp.array(dtype=SDFData, ndim=1),  # SDF data structs for mesh shapes
+        sdf_data: wp.array(dtype=SDFData, ndim=1),  # Compact SDF data table
+        shape_sdf_index: wp.array(dtype=wp.int32, ndim=1),  # Per-shape index into sdf_data (-1 for none)
         shape_contact_margin: wp.array(dtype=wp.float32, ndim=1),  # per-shape contact margin
         shape_collision_radius: wp.array(dtype=wp.float32, ndim=1),  # per-shape collision radius for AABB fallback
         shape_flags: wp.array(dtype=wp.int32, ndim=1),  # per-shape flags (includes ShapeFlags.HYDROELASTIC)
@@ -1721,7 +1720,8 @@ class NarrowPhase:
             shape_data: Array of vec4 containing scale (xyz) and thickness (w) for each shape
             shape_transform: Array of world-space transforms for each shape
             shape_source: Array of source pointers (mesh IDs, etc.) for each shape
-            shape_sdf_data: Array of SDFData structs for mesh shapes
+            sdf_data: Compact array of SDFData structs
+            shape_sdf_index: Per-shape SDF table index (-1 for shapes without SDF)
             shape_contact_margin: Array of contact margins for each shape
             shape_collision_radius: Array of collision radii for each shape (for AABB fallback for planes/meshes)
             shape_flags: Array of shape flags for each shape (includes ShapeFlags.HYDROELASTIC)
@@ -1942,10 +1942,9 @@ class NarrowPhase:
                     block_dim=self.block_dim,
                 )
 
-            # Launch mesh-mesh contact processing kernel (only on CUDA with SDF data)
-            # SDF-based mesh-mesh collision requires GPU: uses shared memory (launch_tiled)
-            # and wp.Volume which only supports CUDA
-            if shape_sdf_data.shape[0] > 0 and wp.get_device(device).is_cuda:
+            # Launch mesh-mesh contact processing kernel on CUDA.
+            # The kernel supports both SDF-backed and BVH fallback paths via shape_sdf_index.
+            if wp.get_device(device).is_cuda:
                 wp.launch_tiled(
                     kernel=self.mesh_mesh_contacts_kernel,
                     dim=(self.num_tile_blocks,),
@@ -1953,7 +1952,8 @@ class NarrowPhase:
                         shape_data,
                         shape_transform,
                         shape_source,
-                        shape_sdf_data,
+                        sdf_data,
+                        shape_sdf_index,
                         shape_contact_margin,
                         shape_collision_aabb_lower,
                         shape_collision_aabb_upper,
@@ -2014,7 +2014,8 @@ class NarrowPhase:
 
         if self.hydroelastic_sdf is not None:
             self.hydroelastic_sdf.launch(
-                shape_sdf_data,
+                sdf_data,
+                shape_sdf_index,
                 shape_transform,
                 shape_contact_margin,
                 shape_collision_aabb_lower,
@@ -2063,7 +2064,8 @@ class NarrowPhase:
         shape_data: wp.array(dtype=wp.vec4, ndim=1),  # Shape data (scale xyz, thickness w)
         shape_transform: wp.array(dtype=wp.transform, ndim=1),  # In world space
         shape_source: wp.array(dtype=wp.uint64, ndim=1),  # The index into the source array, type define by shape_types
-        shape_sdf_data: wp.array(dtype=SDFData, ndim=1),  # SDF data structs for mesh shapes
+        sdf_data: wp.array(dtype=SDFData, ndim=1) | None = None,  # Compact SDF data table
+        shape_sdf_index: wp.array(dtype=wp.int32, ndim=1) | None = None,  # Per-shape index into sdf_data (-1 for none)
         shape_contact_margin: wp.array(dtype=wp.float32, ndim=1),  # per-shape contact margin
         shape_collision_radius: wp.array(dtype=wp.float32, ndim=1),  # per-shape collision radius for AABB fallback
         shape_flags: wp.array(dtype=wp.int32, ndim=1),  # per-shape flags (includes ShapeFlags.HYDROELASTIC)
@@ -2093,7 +2095,8 @@ class NarrowPhase:
             shape_data: Array of vec4 containing scale (xyz) and thickness (w) for each shape
             shape_transform: Array of world-space transforms for each shape
             shape_source: Array of source pointers (mesh IDs, etc.) for each shape
-            shape_sdf_data: Array of SDFData structs for mesh shapes
+            sdf_data: Compact array of SDFData structs
+            shape_sdf_index: Per-shape SDF table index (-1 for shapes without SDF)
             shape_contact_margin: Array of contact margins for each shape
             shape_collision_radius: Array of collision radii for each shape (for AABB fallback for planes/meshes)
             shape_collision_aabb_lower: Local-space AABB lower bounds for each shape (for voxel binning)
@@ -2111,9 +2114,14 @@ class NarrowPhase:
             device = self.device if self.device is not None else candidate_pair.device
 
         # Backward compatibility for older call sites/tests that still pass
-        # shape_local_aabb_lower/upper.
+        # shape_local_aabb_lower/upper and shape_sdf_data.
         shape_local_aabb_lower = kwargs.pop("shape_local_aabb_lower", None)
         shape_local_aabb_upper = kwargs.pop("shape_local_aabb_upper", None)
+        legacy_shape_sdf_data = kwargs.pop("shape_sdf_data", None)
+        if sdf_data is not None and legacy_shape_sdf_data is not None:
+            raise TypeError("NarrowPhase.launch() received both 'sdf_data' and legacy 'shape_sdf_data'")
+        if sdf_data is None:
+            sdf_data = legacy_shape_sdf_data
         if kwargs:
             unknown_keys = sorted(kwargs.keys())
             if len(unknown_keys) == 1:
@@ -2131,6 +2139,10 @@ class NarrowPhase:
                 "shape_collision_aabb_lower/shape_collision_aabb_upper or "
                 "shape_local_aabb_lower/shape_local_aabb_upper"
             )
+        if shape_sdf_index is None:
+            shape_sdf_index = wp.full(shape_types.shape[0], -1, dtype=wp.int32, device=device)
+        if sdf_data is None:
+            sdf_data = wp.zeros(0, dtype=SDFData, device=device)
 
         contact_max = contact_pair.shape[0]
 
@@ -2159,7 +2171,8 @@ class NarrowPhase:
             shape_data=shape_data,
             shape_transform=shape_transform,
             shape_source=shape_source,
-            shape_sdf_data=shape_sdf_data,
+            sdf_data=sdf_data,
+            shape_sdf_index=shape_sdf_index,
             shape_contact_margin=shape_contact_margin,
             shape_collision_radius=shape_collision_radius,
             shape_flags=shape_flags,
