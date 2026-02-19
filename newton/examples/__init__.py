@@ -292,8 +292,8 @@ def create_parser():
         "--viewer",
         type=str,
         default="gl",
-        choices=["gl", "usd", "rerun", "null", "viser"],
-        help="Viewer to use (gl, usd, rerun, or null).",
+        choices=["gl", "optix", "usd", "rerun", "null", "viser"],
+        help="Viewer to use (gl, optix, usd, rerun, or null).",
     )
     parser.add_argument(
         "--rerun-address",
@@ -382,6 +382,8 @@ def init(parser=None):
     # Create viewer based on type
     if args.viewer == "gl":
         viewer = newton.viewer.ViewerGL(headless=args.headless)
+    elif args.viewer == "optix":
+        viewer = newton.viewer.ViewerOptix(headless=args.headless)
     elif args.viewer == "usd":
         if args.output_path is None:
             raise ValueError("--output-path is required when using usd viewer")

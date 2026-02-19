@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+OptiX Path Tracing Package.
+
+A Python/OptiX port of the C# Vulkan path tracer, providing hardware-accelerated
+ray tracing with PBR materials.
+
+Components:
+    - camera: First-person/orbit camera with matrix generation
+    - materials: PBR material management
+    - scene: Mesh and acceleration structure management
+    - tonemap: HDR to LDR tonemapping
+    - pathtracing_viewer: Main viewer integrating all components
+"""
+
+from .a_beautiful_game_sample import ABeautifulGameSample, create_a_beautiful_game_viewer
+from .bridge import PathTracingBridge
+from .camera import Camera
+from .emissive_gallery_sample import build_emissive_gallery, create_emissive_gallery_viewer
+from .materials import MaterialManager
+from .pathtracing_viewer import PathTracingViewer
+from .scene import Mesh, Scene
+from .tonemap import Tonemapper
+
+__all__ = [
+    "ABeautifulGameSample",
+    "Camera",
+    "MaterialManager",
+    "Mesh",
+    "PathTracingBridge",
+    "PathTracingViewer",
+    "Scene",
+    "Tonemapper",
+    "build_emissive_gallery",
+    "create_a_beautiful_game_viewer",
+    "create_emissive_gallery_viewer",
+]

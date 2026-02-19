@@ -12,6 +12,7 @@ wheels/
 # Tool cache
 .cache/
 .thumbs/
+newton/_src/viewer/optix/pathtracing/.ptx_cache/
 
 # Coverage reports
 .coverage
