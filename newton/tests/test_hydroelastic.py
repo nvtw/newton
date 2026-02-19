@@ -270,7 +270,7 @@ def test_buffer_fraction_no_crash(test, device):
     config_reduced = HydroelasticSDF.Config(buffer_fraction=0.8)
     pipeline_reduced = newton.CollisionPipeline(
         model,
-        broad_phase_mode="explicit",
+        broad_phase="explicit",
         sdf_hydroelastic_config=config_reduced,
     )
 
@@ -284,7 +284,7 @@ def test_buffer_fraction_no_crash(test, device):
     config_full = HydroelasticSDF.Config(buffer_fraction=1.0)
     pipeline_full = newton.CollisionPipeline(
         model,
-        broad_phase_mode="explicit",
+        broad_phase="explicit",
         sdf_hydroelastic_config=config_full,
     )
     contacts_full = pipeline_full.contacts()
@@ -509,7 +509,7 @@ def test_mujoco_hydroelastic_penetration_depth(test, device):
     sdf_config = HydroelasticSDF.Config(output_contact_surface=True, buffer_fraction=1.0)
     collision_pipeline = newton.CollisionPipeline(
         model,
-        broad_phase_mode="explicit",
+        broad_phase="explicit",
         sdf_hydroelastic_config=sdf_config,
     )
     # Enable contact surface output for this test (validates penetration depth)
