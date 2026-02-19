@@ -19,10 +19,12 @@
 # Demonstrates mesh-mesh collision using SDF (Signed Distance Field).
 # Supports two scenes "nut_bolt" and "gears":
 #
-# Command: python -m newton.examples sdf --scene nut_bolt
-#          python -m newton.examples sdf --scene gears
+# Command: python -m newton.examples nut_bolt_hydro --scene nut_bolt
+#          python -m newton.examples nut_bolt_hydro --scene gears
 #
 ###########################################################################
+
+from time import perf_counter
 
 import numpy as np
 import trimesh
@@ -43,6 +45,9 @@ GEAR_FILES = [
     ("factory_gear_small_space_5e-4.obj", "gear_small"),
 ]
 
+SDF_MAX_RESOLUTION = 256
+SDF_NARROW_BAND_RANGE = (-0.005, 0.005)
+
 SHAPE_CFG = newton.ModelBuilder.ShapeConfig(
     thickness=0.0,
     mu=0.01,
@@ -52,10 +57,8 @@ SHAPE_CFG = newton.ModelBuilder.ShapeConfig(
     density=8000.0,
     mu_torsional=0.0,
     mu_rolling=0.0,
-    is_hydroelastic=False,
+    is_hydroelastic=True,
 )
-MESH_SDF_MAX_RESOLUTION = 512
-MESH_SDF_NARROW_BAND_RANGE = (-0.005, 0.005)
 
 
 def add_mesh_object(
@@ -82,22 +85,28 @@ def add_mesh_object(
 
     mesh = newton.Mesh(vertices, indices)
     mesh.build_sdf(
-        max_resolution=MESH_SDF_MAX_RESOLUTION,
-        narrow_band_range=MESH_SDF_NARROW_BAND_RANGE,
-        margin=shape_cfg.contact_margin if shape_cfg and shape_cfg.contact_margin is not None else 0.05,
+        max_resolution=SDF_MAX_RESOLUTION,
+        narrow_band_range=SDF_NARROW_BAND_RANGE,
+        margin=shape_cfg.contact_margin if shape_cfg and shape_cfg.contact_margin is not None else 0.005,
+        scale=(scale, scale, scale),
     )
 
-    if key == "gear_base":
-        body = -1
-        builder.add_shape_mesh(body, mesh=mesh, scale=(scale, scale, scale), xform=transform, cfg=shape_cfg, key=key)
-    else:
-        body = builder.add_body(key=key, xform=transform)
-        builder.add_shape_mesh(body, mesh=mesh, scale=(scale, scale, scale), cfg=shape_cfg)
+    body = builder.add_body(key=key, xform=transform)
+    builder.add_shape_mesh(body, mesh=mesh, scale=(scale, scale, scale), cfg=shape_cfg)
     return body
 
 
 class Example:
-    def __init__(self, viewer, world_count=1, num_per_world=1, scene="nut_bolt", solver="xpbd", test_mode=False):
+    def __init__(
+        self,
+        viewer,
+        num_worlds=1,
+        num_per_world=1,
+        scene="nut_bolt",
+        solver="xpbd",
+        test_mode=False,
+        mempool_log_interval_s=1.0,
+    ):
         self.fps = 120
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
@@ -105,11 +114,15 @@ class Example:
         self.sim_substeps = 50 if scene == "gears" else 5
         self.sim_dt = self.frame_dt / self.sim_substeps
 
-        self.world_count = world_count
+        self.num_worlds = num_worlds
         self.viewer = viewer
         self.scene = scene
         self.solver_type = solver
         self.test_mode = test_mode
+        self.mempool_log_interval_s = mempool_log_interval_s
+        self._next_mempool_log_time = self.mempool_log_interval_s
+        self._device = wp.get_device()
+        self._can_log_mempool = self._device.is_cuda and wp.is_mempool_enabled(self._device)
 
         # XPBD contact correction (0.0 = no correction, 1.0 = full correction)
         self.xpbd_contact_relaxation = 0.8
@@ -130,7 +143,7 @@ class Example:
         self.rigid_contact_max = 100000
 
         # Broad phase mode: NXN (O(N²)), SAP (O(N log N)), EXPLICIT (precomputed pairs)
-        self.broad_phase = "sap"
+        self.broad_phase_mode = "sap"
 
         if scene == "nut_bolt":
             world_builder = self._build_nut_bolt_scene()
@@ -150,17 +163,15 @@ class Example:
             length=0.0,
             key="ground_plane",
         )
-        main_scene.replicate(world_builder, world_count=self.world_count)
+        main_scene.replicate(world_builder, world_count=self.num_worlds)
 
         self.model = main_scene.finalize()
-
-        # Override rigid_contact_max BEFORE creating collision pipeline to limit memory allocation
-        self.model.rigid_contact_max = self.rigid_contact_max
 
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
             reduce_contacts=True,
-            broad_phase=self.broad_phase,
+            rigid_contact_max=self.rigid_contact_max,
+            broad_phase=self.broad_phase_mode,
         )
 
         # Create solver based on user choice
@@ -171,7 +182,7 @@ class Example:
                 rigid_contact_relaxation=self.xpbd_contact_relaxation,
             )
         elif self.solver_type == "mujoco":
-            num_per_world = self.rigid_contact_max // self.world_count
+            num_per_world = self.rigid_contact_max // self.num_worlds
             self.solver = newton.solvers.SolverMuJoCo(
                 self.model,
                 use_mujoco_contacts=False,
@@ -193,20 +204,7 @@ class Example:
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
-        if self.scene == "gears":
-            joint_child = self.model.joint_child.numpy()
-            joint_qd_start = self.model.joint_qd_start.numpy()
-            joint_f = self.control.joint_f.numpy()
-            for body_idx, key in enumerate(self.model.body_key):
-                if key == "gear_large":
-                    for j in range(self.model.joint_count):
-                        if joint_child[j] == body_idx:
-                            qd_start = int(joint_qd_start[j])
-                            joint_f[qd_start + 5] = 2.0  # z-axis torque (N·m)
-                            break
-            self.control.joint_f.assign(joint_f)
-
-        self.contacts = self.collision_pipeline.contacts()
+        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
 
         self.viewer.set_model(self.model)
 
@@ -314,12 +312,12 @@ class Example:
             self.graph = None
 
     def simulate(self):
-        self.collision_pipeline.collide(self.state_0, self.contacts)
+        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
 
             self.viewer.apply_forces(self.state_0)
-            # self.collision_pipeline.collide(self.state_0, self.contacts)
+            # self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
             self.state_0, self.state_1 = self.state_1, self.state_0
@@ -331,6 +329,7 @@ class Example:
             self.simulate()
 
         self.sim_time += self.frame_dt
+        self._maybe_log_mempool_usage()
 
         # Track transforms for test validation
         self._track_test_data()
@@ -437,13 +436,77 @@ class Example:
                 f"Nut {i}: did not move downward. Initial z={initial_z:.4f}, min z reached={min_z:.4f}"
             )
 
+    def _maybe_log_mempool_usage(self):
+        """Print current Warp mempool usage at a fixed simulation-time interval."""
+        if not self._can_log_mempool or self.mempool_log_interval_s <= 0.0:
+            return
+
+        if self.sim_time < self._next_mempool_log_time:
+            return
+
+        current_bytes = wp.get_mempool_used_mem_current(self._device)
+        current_mib = current_bytes / (1024.0 * 1024.0)
+        print(
+            f"[t={self.sim_time:.2f}s] "
+            f"Warp mempool current usage: {current_bytes} bytes ({current_mib:.2f} MiB)"
+        )
+        self._next_mempool_log_time += self.mempool_log_interval_s
+
+
+def print_mempool_peak_usage():
+    """Print Warp memory pool high-water mark on CUDA devices."""
+    device = wp.get_device()
+    if not device.is_cuda:
+        print("Warp mempool peak usage: unavailable (CUDA device required).")
+        return
+
+    if not wp.is_mempool_enabled(device):
+        print("Warp mempool peak usage: unavailable (mempool disabled).")
+        return
+
+    # Ensure pending kernels complete before querying memory statistics.
+    wp.synchronize_device(device)
+    peak_bytes = wp.get_mempool_used_mem_high(device)
+    peak_mib = peak_bytes / (1024.0 * 1024.0)
+    print(f"Warp mempool peak usage: {peak_bytes} bytes ({peak_mib:.2f} MiB)")
+
+
+def run_benchmark(example: Example, benchmark_seconds: float):
+    """Run the simulation for a fixed wall-clock duration and print average FPS."""
+    if benchmark_seconds <= 0.0:
+        raise ValueError("benchmark_seconds must be > 0")
+
+    print(f"Running benchmark for {benchmark_seconds:.2f} seconds...")
+    start_time = perf_counter()
+    end_time = start_time + benchmark_seconds
+    num_steps = 0
+
+    while example.viewer.is_running():
+        if perf_counter() >= end_time:
+            break
+
+        if not example.viewer.is_paused():
+            example.step()
+            num_steps += 1
+
+        example.render()
+
+    elapsed = perf_counter() - start_time
+    average_fps = num_steps / elapsed if elapsed > 0.0 else 0.0
+    print(
+        f"Benchmark complete: {num_steps} frames in {elapsed:.2f} s "
+        f"({average_fps:.2f} FPS average)"
+    )
+
+    example.viewer.close()
+
 
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
     parser.add_argument(
-        "--world-count",
+        "--num-worlds",
         type=int,
-        default=100,
+        default=20,
         help="Total number of simulated worlds.",
     )
     parser.add_argument(
@@ -460,15 +523,39 @@ if __name__ == "__main__":
         default="mujoco",
         help="Solver to use: 'xpbd' (Extended Position-Based Dynamics) or 'mujoco' (MuJoCo constraint solver).",
     )
+    parser.add_argument(
+        "--num-per-world",
+        type=int,
+        default=1,
+        help="Number of assemblies per world.",
+    )
+    parser.add_argument(
+        "--mempool-log-interval",
+        type=float,
+        default=1.0,
+        help="Seconds between current mempool usage logs (<=0 disables periodic logging).",
+    )
+    parser.add_argument(
+        "--benchmark-seconds",
+        type=float,
+        default=10.0,
+        help="Run benchmark for this many wall-clock seconds (>0 enables benchmark mode).",
+    )
 
     viewer, args = newton.examples.init(parser)
 
     example = Example(
         viewer,
-        world_count=args.world_count,
+        num_worlds=args.num_worlds,
+        num_per_world=args.num_per_world,
         scene=args.scene,
         solver=args.solver,
         test_mode=args.test,
+        mempool_log_interval_s=args.mempool_log_interval,
     )
 
-    newton.examples.run(example, args)
+    if args.benchmark_seconds > 0.0:
+        run_benchmark(example, args.benchmark_seconds)
+    else:
+        newton.examples.run(example, args)
+    print_mempool_peak_usage()
