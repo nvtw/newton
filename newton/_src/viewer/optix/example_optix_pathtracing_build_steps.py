@@ -129,7 +129,7 @@ def _run_step2_pathtracing(
 
 def main() -> int:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--step", choices=["1", "2", "3", "all"], default="all")
+    parser.add_argument("--step", choices=["1", "2", "3", "all"], default="3")
     parser.add_argument("--width", type=int, default=1600)
     parser.add_argument("--height", type=int, default=1000)
     parser.add_argument("--fps", type=int, default=60)
@@ -144,6 +144,8 @@ def main() -> int:
     print("=" * 72)
     print("OptiX Pathtracing Build Steps")
     print("=" * 72)
+    if args.step == "3":
+        print("[Fast start] Running live viewer directly (skip steps 1/2).")
 
     if args.step in ("1", "all"):
         _run_step1_mini_renderer(args.width, args.height, args.frames_step1)

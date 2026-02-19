@@ -24,6 +24,7 @@ displaying raw buffers (radiance, normals, depth, etc.) for debugging.
 import hashlib
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import Callable, Optional
@@ -192,6 +193,11 @@ def _build_ptx(optix_include_dir: str, headers_dir: Path) -> bytes:
 
         digest = hashlib.sha256(cuda_source.encode("utf-8")).hexdigest()[:16]
         local_cache_root = headers_dir.parent / ".ptx_cache"
+        # Keep cache by default for fast startup. If build fails (stale/corrupt
+        # cache), clear and retry once. Users can force a clean cache per run.
+        force_clear_ptx_cache = os.environ.get("NEWTON_OPTIX_CLEAR_PTX_CACHE", "0").lower() in ("1", "true", "yes")
+        if force_clear_ptx_cache:
+            shutil.rmtree(local_cache_root, ignore_errors=True)
         local_cache_root.mkdir(parents=True, exist_ok=True)
         module_dir = os.path.join(str(local_cache_root), f"wp_pathtracing_{module_tag}_{digest}")
         os.makedirs(module_dir, exist_ok=True)
@@ -207,7 +213,14 @@ def _build_ptx(optix_include_dir: str, headers_dir: Path) -> bytes:
         old_use_pch = wp.config.use_precompiled_headers
         try:
             wp.config.use_precompiled_headers = False
-            wp_build.build_cuda(cu_path, arch=device_obj.arch, output_path=ptx_path)
+            try:
+                wp_build.build_cuda(cu_path, arch=device_obj.arch, output_path=ptx_path)
+            except Exception:
+                # Automatic recovery path for stale local PTX cache issues.
+                shutil.rmtree(local_cache_root, ignore_errors=True)
+                local_cache_root.mkdir(parents=True, exist_ok=True)
+                os.makedirs(module_dir, exist_ok=True)
+                wp_build.build_cuda(cu_path, arch=device_obj.arch, output_path=ptx_path)
         finally:
             wp.config.use_precompiled_headers = old_use_pch
         with open(ptx_path, "rb") as f:
