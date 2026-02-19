@@ -89,7 +89,7 @@ def add_mesh_object(
         scale=(scale, scale, scale),
     )
 
-    body = builder.add_body(key=key, xform=transform)
+    body = builder.add_body(label=key, xform=transform)
     builder.add_shape_mesh(body, mesh=mesh, scale=(scale, scale, scale), cfg=shape_cfg)
     return body
 
@@ -154,7 +154,7 @@ class Example:
             plane=(0.0, 0.0, 1.0, -self.ground_plane_offset),
             width=0.0,
             length=0.0,
-            key="ground_plane",
+            label="ground_plane",
         )
         main_scene.replicate(world_builder, world_count=self.num_worlds)
 
