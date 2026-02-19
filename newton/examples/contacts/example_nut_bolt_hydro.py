@@ -24,8 +24,6 @@
 #
 ###########################################################################
 
-from time import perf_counter
-
 import numpy as np
 import trimesh
 import warp as wp
@@ -105,7 +103,6 @@ class Example:
         scene="nut_bolt",
         solver="xpbd",
         test_mode=False,
-        mempool_log_interval_s=1.0,
     ):
         self.fps = 120
         self.frame_dt = 1.0 / self.fps
@@ -119,10 +116,6 @@ class Example:
         self.scene = scene
         self.solver_type = solver
         self.test_mode = test_mode
-        self.mempool_log_interval_s = mempool_log_interval_s
-        self._next_mempool_log_time = self.mempool_log_interval_s
-        self._device = wp.get_device()
-        self._can_log_mempool = self._device.is_cuda and wp.is_mempool_enabled(self._device)
 
         # XPBD contact correction (0.0 = no correction, 1.0 = full correction)
         self.xpbd_contact_relaxation = 0.8
@@ -329,7 +322,6 @@ class Example:
             self.simulate()
 
         self.sim_time += self.frame_dt
-        self._maybe_log_mempool_usage()
 
         # Track transforms for test validation
         self._track_test_data()
@@ -436,69 +428,11 @@ class Example:
                 f"Nut {i}: did not move downward. Initial z={initial_z:.4f}, min z reached={min_z:.4f}"
             )
 
-    def _maybe_log_mempool_usage(self):
-        """Print current Warp mempool usage at a fixed simulation-time interval."""
-        if not self._can_log_mempool or self.mempool_log_interval_s <= 0.0:
-            return
-
-        if self.sim_time < self._next_mempool_log_time:
-            return
-
-        current_bytes = wp.get_mempool_used_mem_current(self._device)
-        current_mib = current_bytes / (1024.0 * 1024.0)
-        print(f"[t={self.sim_time:.2f}s] Warp mempool current usage: {current_bytes} bytes ({current_mib:.2f} MiB)")
-        self._next_mempool_log_time += self.mempool_log_interval_s
-
-
-def print_mempool_peak_usage():
-    """Print Warp memory pool high-water mark on CUDA devices."""
-    device = wp.get_device()
-    if not device.is_cuda:
-        print("Warp mempool peak usage: unavailable (CUDA device required).")
-        return
-
-    if not wp.is_mempool_enabled(device):
-        print("Warp mempool peak usage: unavailable (mempool disabled).")
-        return
-
-    # Ensure pending kernels complete before querying memory statistics.
-    wp.synchronize_device(device)
-    peak_bytes = wp.get_mempool_used_mem_high(device)
-    peak_mib = peak_bytes / (1024.0 * 1024.0)
-    print(f"Warp mempool peak usage: {peak_bytes} bytes ({peak_mib:.2f} MiB)")
-
-
-def run_benchmark(example: Example, benchmark_seconds: float):
-    """Run the simulation for a fixed wall-clock duration and print average FPS."""
-    if benchmark_seconds <= 0.0:
-        raise ValueError("benchmark_seconds must be > 0")
-
-    print(f"Running benchmark for {benchmark_seconds:.2f} seconds...")
-    start_time = perf_counter()
-    end_time = start_time + benchmark_seconds
-    num_steps = 0
-
-    while example.viewer.is_running():
-        if perf_counter() >= end_time:
-            break
-
-        if not example.viewer.is_paused():
-            example.step()
-            num_steps += 1
-
-        example.render()
-
-    elapsed = perf_counter() - start_time
-    average_fps = num_steps / elapsed if elapsed > 0.0 else 0.0
-    print(f"Benchmark complete: {num_steps} frames in {elapsed:.2f} s ({average_fps:.2f} FPS average)")
-
-    example.viewer.close()
-
 
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
     parser.add_argument(
-        "--num-worlds",
+        "--world-count",
         type=int,
         default=20,
         help="Total number of simulated worlds.",
@@ -517,39 +451,14 @@ if __name__ == "__main__":
         default="mujoco",
         help="Solver to use: 'xpbd' (Extended Position-Based Dynamics) or 'mujoco' (MuJoCo constraint solver).",
     )
-    parser.add_argument(
-        "--num-per-world",
-        type=int,
-        default=1,
-        help="Number of assemblies per world.",
-    )
-    parser.add_argument(
-        "--mempool-log-interval",
-        type=float,
-        default=1.0,
-        help="Seconds between current mempool usage logs (<=0 disables periodic logging).",
-    )
-    parser.add_argument(
-        "--benchmark-seconds",
-        type=float,
-        default=10.0,
-        help="Run benchmark for this many wall-clock seconds (>0 enables benchmark mode).",
-    )
-
     viewer, args = newton.examples.init(parser)
 
     example = Example(
         viewer,
-        num_worlds=args.num_worlds,
-        num_per_world=args.num_per_world,
+        num_worlds=args.world_count,
         scene=args.scene,
         solver=args.solver,
         test_mode=args.test,
-        mempool_log_interval_s=args.mempool_log_interval,
     )
 
-    if args.benchmark_seconds > 0.0:
-        run_benchmark(example, args.benchmark_seconds)
-    else:
-        newton.examples.run(example, args)
-    print_mempool_peak_usage()
+    newton.examples.run(example, args)
