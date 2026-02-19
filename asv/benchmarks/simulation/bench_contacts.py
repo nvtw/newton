@@ -58,7 +58,6 @@ class FastExampleContactHydroWorkingDefaults:
             scene="nut_bolt",
             solver="mujoco",
             test_mode=False,
-            mempool_log_interval_s=1.0,
         )
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)

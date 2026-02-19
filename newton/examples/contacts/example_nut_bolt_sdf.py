@@ -19,8 +19,8 @@
 # Demonstrates mesh-mesh collision using SDF (Signed Distance Field).
 # Supports two scenes "nut_bolt" and "gears":
 #
-# Command: python -m newton.examples nut_bolt_sdf --scene nut_bolt
-#          python -m newton.examples nut_bolt_sdf --scene gears
+# Command: python -m newton.examples sdf --scene nut_bolt
+#          python -m newton.examples sdf --scene gears
 #
 ###########################################################################
 
