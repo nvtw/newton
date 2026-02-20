@@ -17,11 +17,14 @@
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
+import importlib.util
+import os
+import sys
 
 import numpy as np
 
-from .pathtracing_viewer import PathTracingViewer
+from .pathtracing_viewer import PathTracingViewer, _get_optix_include_dir
 from .scene import Mesh
 
 
@@ -73,6 +76,21 @@ class PathTracingBridge:
         self._built = False
         self._running = True
         self._time = 0.0
+        self._init_error: str | None = None
+
+    def _build_init_error_message(self) -> str:
+        """Build actionable diagnostics for OptiX initialization failures."""
+        optix_available = importlib.util.find_spec("optix") is not None
+        optix_sdk_env = os.environ.get("OPTIX_SDK_INCLUDE_DIR")
+        optix_sdk_auto = _get_optix_include_dir()
+        return (
+            "PathTracingBridge initialization failed.\n"
+            f"- python executable: {sys.executable}\n"
+            f"- optix module importable: {optix_available}\n"
+            f"- OPTIX_SDK_INCLUDE_DIR: {optix_sdk_env!r}\n"
+            f"- auto-detected OptiX include dir: {optix_sdk_auto!r}\n"
+            "Ensure `optix` is installed in THIS interpreter and OptiX SDK include path is valid."
+        )
 
     @property
     def viewer(self) -> PathTracingViewer:
@@ -82,10 +100,20 @@ class PathTracingBridge:
     def scene(self):
         return self._viewer._scene  # internal, initialized by build()
 
+    def _require_scene(self):
+        """Ensure an initialized scene is available or raise a clear error."""
+        if self._viewer._scene is None:
+            ok = self.initialize()
+            if (not ok) or self._viewer._scene is None:
+                raise RuntimeError(self._init_error or self._build_init_error_message())
+        return self._viewer._scene
+
     def initialize(self) -> bool:
         if self._built:
             return True
         self._built = bool(self._viewer.build())
+        if not self._built:
+            self._init_error = self._build_init_error_message()
         return self._built
 
     def is_running(self) -> bool:
@@ -114,26 +142,29 @@ class PathTracingBridge:
         return (image * 255.0).astype(np.uint8)
 
     def build_scene(self):
-        self.initialize()
-        self.scene.build(self._viewer._optix)
+        scene = self._require_scene()
+        scene.build(self._viewer._optix)
         self._viewer._create_sbt()
         self._viewer.sample_index = 0
         self._viewer.frame_index = 0
 
+    def rebuild_tlas(self):
+        scene = self._require_scene()
+        scene.rebuild_tlas()
+        self._viewer.sample_index = 0
+        self._viewer.frame_index = 0
+
     def clear_scene(self):
-        self.initialize()
-        self.scene.clear()
+        self._require_scene().clear()
 
     def load_scene_from_gltf(self, gltf_path: str) -> bool:
-        self.initialize()
-        ok = bool(self.scene.load_from_gltf(gltf_path))
+        ok = bool(self._require_scene().load_from_gltf(gltf_path))
         if ok:
             self.build_scene()
         return ok
 
     def load_scene_from_obj(self, obj_path: str) -> bool:
-        self.initialize()
-        ok = bool(self.scene.load_from_obj(obj_path))
+        ok = bool(self._require_scene().load_from_obj(obj_path))
         if ok:
             self.build_scene()
         return ok
@@ -146,7 +177,7 @@ class PathTracingBridge:
         uvs: np.ndarray | None = None,
         material_id: int = 0,
     ) -> int:
-        self.initialize()
+        scene = self._require_scene()
         mesh = Mesh(
             vertices=np.asarray(positions, dtype=np.float32),
             indices=np.asarray(indices, dtype=np.uint32),
@@ -154,11 +185,10 @@ class PathTracingBridge:
             texcoords=None if uvs is None else np.asarray(uvs, dtype=np.float32),
             material_id=int(material_id),
         )
-        return int(self.scene.add_mesh(mesh))
+        return int(scene.add_mesh(mesh))
 
     def create_instance(self, mesh_id: int) -> int:
-        self.initialize()
-        return int(self.scene.add_instance(int(mesh_id)))
+        return int(self._require_scene().add_instance(int(mesh_id)))
 
     def create_instance_with_transform(
         self,
@@ -167,9 +197,8 @@ class PathTracingBridge:
         rotation_xyzw: Iterable[float],
         scale: float = 1.0,
     ) -> int:
-        self.initialize()
         transform = _build_transform(position, rotation_xyzw, scale)
-        return int(self.scene.add_instance(int(mesh_id), transform=transform))
+        return int(self._require_scene().add_instance(int(mesh_id), transform=transform))
 
     def set_instance_transform(
         self,
@@ -178,14 +207,12 @@ class PathTracingBridge:
         rotation_xyzw: Iterable[float],
         scale: float = 1.0,
     ):
-        self.initialize()
         transform = _build_transform(position, rotation_xyzw, scale)
-        self.scene.set_instance_transform(int(instance_id), transform)
+        self._require_scene().set_instance_transform(int(instance_id), transform)
 
     def set_instance_transform_matrix(self, instance_id: int, matrix: np.ndarray):
-        self.initialize()
         m = np.asarray(matrix, dtype=np.float32).reshape(4, 4)
-        self.scene.set_instance_transform(int(instance_id), m)
+        self._require_scene().set_instance_transform(int(instance_id), m)
 
     def set_instance_transforms_batch(self, instance_ids: Iterable[int], transforms_flat: np.ndarray):
         self.initialize()
@@ -203,21 +230,18 @@ class PathTracingBridge:
             )
 
     def create_diffuse_material(self, color: Iterable[float]) -> int:
-        self.initialize()
-        return int(self.scene.materials.add_diffuse(tuple(float(v) for v in color)))
+        return int(self._require_scene().materials.add_diffuse(tuple(float(v) for v in color)))
 
     def create_metallic_material(self, color: Iterable[float], roughness: float = 0.1) -> int:
-        self.initialize()
-        return int(self.scene.materials.add_metal(tuple(float(v) for v in color), float(roughness)))
+        return int(self._require_scene().materials.add_metal(tuple(float(v) for v in color), float(roughness)))
 
     def create_emissive_material(self, color: Iterable[float], intensity: float = 1.0) -> int:
-        self.initialize()
-        return int(self.scene.materials.add_emissive(tuple(float(v) for v in color), float(intensity)))
+        return int(self._require_scene().materials.add_emissive(tuple(float(v) for v in color), float(intensity)))
 
     def create_pbr_material(self, color: Iterable[float], roughness: float, metallic: float) -> int:
-        self.initialize()
+        scene = self._require_scene()
         return int(
-            self.scene.materials.add_pbr(
+            scene.materials.add_pbr(
                 base_color=tuple(float(v) for v in color),
                 roughness=float(roughness),
                 metallic=float(metallic),
@@ -225,13 +249,13 @@ class PathTracingBridge:
         )
 
     def add_box(self, min_pt: Iterable[float], max_pt: Iterable[float], material_id: int) -> int:
-        self.initialize()
-        return int(self.scene.add_box(tuple(float(v) for v in min_pt), tuple(float(v) for v in max_pt), int(material_id)))
+        return int(
+            self._require_scene().add_box(tuple(float(v) for v in min_pt), tuple(float(v) for v in max_pt), int(material_id))
+        )
 
     def add_sphere(self, center: Iterable[float], radius: float, segments: int, material_id: int) -> int:
-        self.initialize()
         return int(
-            self.scene.add_sphere(
+            self._require_scene().add_sphere(
                 tuple(float(v) for v in center),
                 float(radius),
                 int(segments),

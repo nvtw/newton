@@ -19,7 +19,6 @@ Handles mesh loading, BLAS/TLAS construction, and instance management.
 """
 
 import numpy as np
-
 import warp as wp
 
 from .materials import MaterialManager
@@ -655,6 +654,18 @@ class Scene:
         total_verts = sum(len(m.vertices) for m in self._meshes)
         total_tris = sum(len(m.indices) for m in self._meshes)
         print(f"[Scene] Built: {total_verts} vertices, {total_tris} triangles")
+
+    def rebuild_tlas(self):
+        """Rebuild only TLAS after instance transform updates."""
+        if len(self._meshes) == 0 or len(self._instances) == 0:
+            return
+        if self._optix is None:
+            return
+        if len(self._gas_handles) != len(self._meshes):
+            # Fallback if a full build has not been completed yet.
+            self.build(self._optix)
+            return
+        self._build_tlas()
 
     def _build_blas(self):
         """Build bottom-level acceleration structures for all meshes."""

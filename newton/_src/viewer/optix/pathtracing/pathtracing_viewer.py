@@ -1097,11 +1097,15 @@ class PathTracingViewer:
         params[0]["skyInfo"]["sunDiskScale"] = np.float32(self.sky_sun_disk_scale)
         params[0]["skyInfo"]["sunGlowIntensity"] = np.float32(self.sky_sun_glow_intensity)
         params[0]["skyInfo"]["yIsUp"] = np.int32(self.sky_y_is_up)
-        params[0]["materialAddress"] = np.uint64(self._scene.materials.gpu_address)
-        params[0]["compactMaterialAddress"] = np.uint64(self._scene.compact_materials_address)
-        params[0]["instanceMaterialIdAddress"] = np.uint64(self._scene.instance_material_ids_address)
-        params[0]["instanceRenderPrimIdAddress"] = np.uint64(self._scene.instance_render_prim_ids_address)
-        params[0]["renderPrimitiveAddress"] = np.uint64(self._scene.render_primitives_address)
+        # Some Warp-backed buffers can report ptr=None transiently; map that to address 0.
+        def _addr_u64(value) -> np.uint64:
+            return np.uint64(0 if value is None else value)
+
+        params[0]["materialAddress"] = _addr_u64(self._scene.materials.gpu_address)
+        params[0]["compactMaterialAddress"] = _addr_u64(self._scene.compact_materials_address)
+        params[0]["instanceMaterialIdAddress"] = _addr_u64(self._scene.instance_material_ids_address)
+        params[0]["instanceRenderPrimIdAddress"] = _addr_u64(self._scene.instance_render_prim_ids_address)
+        params[0]["renderPrimitiveAddress"] = _addr_u64(self._scene.render_primitives_address)
         params[0]["instanceTransformsAddress"] = np.uint64(
             0 if self._instance_transforms_buffer is None else self._instance_transforms_buffer.ptr
         )
@@ -1116,16 +1120,16 @@ class PathTracingViewer:
         params[0]["maxBounces"] = np.uint32(self.max_bounces)
         # Match C# primary path: one direct environment sample per pixel path.
         params[0]["directLightSamples"] = np.uint32(1)
-        params[0]["textureDescAddress"] = np.uint64(self._scene.texture_descs_address)
-        params[0]["textureDataAddress"] = np.uint64(self._scene.texture_data_address)
+        params[0]["textureDescAddress"] = _addr_u64(self._scene.texture_descs_address)
+        params[0]["textureDataAddress"] = _addr_u64(self._scene.texture_data_address)
         params[0]["textureCount"] = np.uint32(self._scene.texture_count)
         # Environment map parameters
         if self._env_map is not None:
-            params[0]["envMapAddress"] = np.uint64(self._env_map.env_map_address)
+            params[0]["envMapAddress"] = _addr_u64(self._env_map.env_map_address)
             params[0]["envMapWidth"] = np.uint32(self._env_map.width)
             params[0]["envMapHeight"] = np.uint32(self._env_map.height)
             params[0]["envMapFormat"] = np.uint32(0)  # ENV_MAP_FORMAT_RGBA32F
-            params[0]["envAccelAddress"] = np.uint64(self._env_map.env_accel_address)
+            params[0]["envAccelAddress"] = _addr_u64(self._env_map.env_accel_address)
             params[0]["envMapIntegral"] = np.float32(self._env_map.integral)
             params[0]["envMapAverage"] = np.float32(self._env_map.average)
         else:

@@ -125,6 +125,9 @@ notebook = [
 [tool.hatch.version]
 path = "newton/_version.py"
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 include = ["/newton", "/newton/licenses"]
 
