@@ -95,6 +95,7 @@ class PathTracingViewer:
         direct_light_samples: int = 1,
         use_halton_jitter: bool = True,
         enable_dlss_rr: bool = True,
+        enable_ser: bool = True,
     ):
         """
         Initialize the path tracing viewer.
@@ -115,6 +116,8 @@ class PathTracingViewer:
         self.direct_light_samples = max(1, int(direct_light_samples))
         self.use_halton_jitter = bool(use_halton_jitter)
         self.enable_dlss_rr = bool(enable_dlss_rr)
+        self.enable_ser = bool(enable_ser)
+        self._ser_active = False
 
         # Camera
         if camera is None:
@@ -275,9 +278,28 @@ class PathTracingViewer:
         cu_context = wp_device.context.value if hasattr(wp_device.context, "value") else int(wp_device.context)
         self._ctx, self._optix_logger = _create_optix_context(optix, int(cu_context))
 
-        # Build PTX
+        # Build PTX (optionally with Shader Execution Reordering).
         headers_dir = Path(__file__).parent / "cpp"
-        self._ptx = build_ptx(optix_include, headers_dir)
+        requested_ser = self.enable_ser
+        if requested_ser and hasattr(optix, "version"):
+            try:
+                # SER is expected on newer OptiX versions.
+                requested_ser = bool(optix.version()[1] >= 7)
+            except Exception:
+                requested_ser = False
+
+        if requested_ser:
+            try:
+                self._ptx = build_ptx(optix_include, headers_dir, use_set=True)
+                self._ser_active = True
+                logger.info("SER path enabled for PTX compilation.")
+            except Exception as exc:
+                logger.warning("SER PTX compilation failed, falling back to baseline path: %s", exc)
+                self._ptx = build_ptx(optix_include, headers_dir, use_set=False)
+                self._ser_active = False
+        else:
+            self._ptx = build_ptx(optix_include, headers_dir, use_set=False)
+            self._ser_active = False
 
         # Create scene
         self._scene = Scene(self._ctx)
@@ -291,11 +313,19 @@ class PathTracingViewer:
         self._create_buffers()
         self._init_dlss_rr()
 
-        # Create pipeline
-        self._create_pipeline()
-
-        # Create SBT
-        self._create_sbt()
+        # Create pipeline + SBT. If SER path fails at module/pipeline/SBT creation,
+        # fall back to the baseline PTX path to preserve viewer robustness.
+        try:
+            self._create_pipeline()
+            self._create_sbt()
+        except Exception as exc:
+            if not self._ser_active:
+                raise
+            logger.warning("SER pipeline/SBT creation failed, falling back to baseline path: %s", exc)
+            self._ptx = build_ptx(optix_include, headers_dir, use_set=False)
+            self._ser_active = False
+            self._create_pipeline()
+            self._create_sbt()
 
         logger.info("OptiX path tracing viewer build complete.")
         return True

@@ -40,6 +40,7 @@
 #include "mat_eval_common.h"
 #include "dlss_helper.h"
 #include "sky_common.h"
+#include "set_common.h"
 #include "viewer_rt_common.h"
 #include "primary_rchit.h"
 
@@ -216,6 +217,7 @@ extern "C" __global__ void __raygen__primary()
             params.tlas, origin, direction, 0.01f, 1e32f, 0.0f, 0xFF, rayFlags, 0, 1, 0, p0, p1, p2, p3, p4, p5, p6, p7,
             p8, p9, p10, p11, p12, p13, p14, p15, p16, p17, p18
         );
+        SET_REORDER();
 
         const float hitT = __uint_as_float(p0);
         hitSky = (hitT == DLSS_INF_DISTANCE);
@@ -490,6 +492,7 @@ extern "C" __global__ void __raygen__primary()
                         | OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
                     SBTOFFSET_SECONDARY, 1, MISSINDEX_SECONDARY, visibility
                 );
+                SET_REORDER();
                 if (visibility == 1u) {
                     const float misWeight = powerHeuristic(lightPdf, evalData.pdf);
                     const float3 bsdfSum = evalData.bsdf_diffuse + evalData.bsdf_glossy;
@@ -541,6 +544,7 @@ extern "C" __global__ void __raygen__primary()
                 params.tlas, secOrigin, secDirection, 0.001f, 1e16f, 0.0f, 0xFF, rayFlags, 0, 1, 0, q0, q1, q2, q3, q4,
                 q5, q6, q7, q8, q9, q10, q11, q12, q13, q14, q15, q16, q17, q18
             );
+            SET_REORDER();
 
             const float t = __uint_as_float(q0);
             const bool miss = (t >= DLSS_INF_DISTANCE * 0.99f);
@@ -628,6 +632,7 @@ extern "C" __global__ void __raygen__primary()
                                 | OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
                             SBTOFFSET_SECONDARY, 1, MISSINDEX_SECONDARY, vis
                         );
+                        SET_REORDER();
                         if (vis == 1u) {
                             const float mw = powerHeuristic(secLightPdf, secEval.pdf);
                             radiance = radiance

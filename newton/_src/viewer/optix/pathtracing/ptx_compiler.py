@@ -147,7 +147,7 @@ def _get_ptx_cache_root() -> Path:
     return Path.home() / ".cache" / "newton" / "optix" / "ptx"
 
 
-def build_ptx(optix_include_dir: str, headers_dir: Path) -> bytes:
+def build_ptx(optix_include_dir: str, headers_dir: Path, *, use_set: bool = False) -> bytes:
     """Build PTX from path tracing headers."""
 
     def _compile_cuda_source_to_ptx(cuda_source: str, module_tag: str, device: str = "cuda") -> bytes:
@@ -314,11 +314,15 @@ extern "C" __constant__ LaunchParams params;
         return "#define __OPTIX_INCLUDE_INTERNAL_HEADERS__\n" + inline_local_includes(optix_device_h)
 
     optix_header_text = _load_optix_device_header_text()
+    ser_define = "#define USE_SET 1\n" if use_set else ""
     cuda_source = f"""
 // OptiX Path Tracing Kernels
 // Auto-generated from header files
 
 {optix_header_text}
+
+// Optional Shader Execution Reordering (SER)
+{ser_define}
 
 // CUDA texture/surface opaque handle types
 typedef unsigned long long cudaTextureObject_t;
@@ -337,7 +341,8 @@ typedef unsigned long long cudaSurfaceObject_t;
 {rt_content}
 """
 
-    logger.info("Compiling path tracing kernels.")
-    ptx = _compile_cuda_source_to_ptx(cuda_source, module_tag="kernels", device="cuda")
+    module_tag = "kernels_ser" if use_set else "kernels"
+    logger.info("Compiling path tracing kernels (SER=%s).", use_set)
+    ptx = _compile_cuda_source_to_ptx(cuda_source, module_tag=module_tag, device="cuda")
     logger.info("Compiled path tracing PTX: %d bytes.", len(ptx))
     return ptx

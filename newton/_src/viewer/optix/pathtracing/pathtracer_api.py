@@ -17,10 +17,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 import importlib.util
 import os
 import sys
+from collections.abc import Iterable
 
 import numpy as np
 
@@ -29,10 +29,17 @@ from .pathtracing_viewer import PathTracingViewer
 from .ptx_compiler import get_optix_include_dir
 from .scene import Mesh
 
+
 class PathTracerAPI:
     """High-level API for driving the OptiX path tracer directly from Python."""
 
-    def __init__(self, width: int = 1280, height: int = 720, enable_dlss_rr: bool = True):
+    def __init__(
+        self,
+        width: int = 1280,
+        height: int = 720,
+        enable_dlss_rr: bool = True,
+        enable_ser: bool = True,
+    ):
         self.width = int(width)
         self.height = int(height)
         self._viewer = PathTracingViewer(
@@ -40,6 +47,7 @@ class PathTracerAPI:
             height=self.height,
             scene_setup=lambda _scene: None,
             enable_dlss_rr=bool(enable_dlss_rr),
+            enable_ser=bool(enable_ser),
             accumulate_samples=False,
         )
         self._built = False

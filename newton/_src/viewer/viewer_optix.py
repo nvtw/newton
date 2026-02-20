@@ -171,6 +171,7 @@ class ViewerOptix(ViewerBase):
         vsync: bool = False,
         headless: bool = False,
         enable_dlss_rr: bool = True,
+        enable_ser: bool = True,
     ):
         """Initialize the OptiX viewer.
 
@@ -188,6 +189,7 @@ class ViewerOptix(ViewerBase):
         self._vsync = bool(vsync)
         self._headless = bool(headless)
         self._enable_dlss_rr = bool(enable_dlss_rr)
+        self._enable_ser = bool(enable_ser)
 
         self._api: PathTracerAPI | None = None
         self._scene: OptixScene | None = None
@@ -293,6 +295,7 @@ class ViewerOptix(ViewerBase):
             width=self._width,
             height=self._height,
             enable_dlss_rr=self._enable_dlss_rr,
+            enable_ser=self._enable_ser,
         )
         ok = self._api.initialize()
         if not ok:
