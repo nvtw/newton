@@ -27,17 +27,14 @@ Components:
     - pathtracing_viewer: Main viewer integrating all components
 """
 
-from .a_beautiful_game_sample import ABeautifulGameSample, create_a_beautiful_game_viewer
 from .bridge import PathTracingBridge
 from .camera import Camera
-from .emissive_gallery_sample import build_emissive_gallery, create_emissive_gallery_viewer
 from .materials import MaterialManager
 from .pathtracing_viewer import PathTracingViewer
 from .scene import Mesh, Scene
 from .tonemap import Tonemapper
 
 __all__ = [
-    "ABeautifulGameSample",
     "Camera",
     "MaterialManager",
     "Mesh",
@@ -45,7 +42,4 @@ __all__ = [
     "PathTracingViewer",
     "Scene",
     "Tonemapper",
-    "build_emissive_gallery",
-    "create_a_beautiful_game_viewer",
-    "create_emissive_gallery_viewer",
 ]
