@@ -756,14 +756,28 @@ class PathTracingViewer:
     def _addr_u64(value) -> np.uint64:
         return np.uint64(0 if value is None else value)
 
-    def _update_launch_params(self, frame_index_override: int | None = None):
+    def _update_launch_params(
+        self,
+        frame_index_override: int | None = None,
+        *,
+        update_instance_transforms: bool = True,
+        view: np.ndarray | None = None,
+        proj: np.ndarray | None = None,
+        view_inv: np.ndarray | None = None,
+        proj_inv: np.ndarray | None = None,
+    ):
         """Update launch parameters for the current frame."""
-        self._update_instance_transform_buffers()
+        if update_instance_transforms:
+            self._update_instance_transform_buffers()
 
-        view = self.camera.get_view_matrix()
-        proj = self.camera.get_projection_matrix()
-        view_inv = np.linalg.inv(view)
-        proj_inv = np.linalg.inv(proj)
+        if view is None:
+            view = self.camera.get_view_matrix()
+        if proj is None:
+            proj = self.camera.get_projection_matrix()
+        if view_inv is None:
+            view_inv = np.linalg.inv(view)
+        if proj_inv is None:
+            proj_inv = np.linalg.inv(proj)
 
         dt = self._get_launch_params_dtype()
         params_size = dt.itemsize
@@ -900,11 +914,27 @@ class PathTracingViewer:
         )
         return bool(reset_temporal)
 
-    def _launch_samples(self, samples_this_frame: int, use_external_accum: bool):
+    def _launch_samples(
+        self,
+        samples_this_frame: int,
+        use_external_accum: bool,
+        *,
+        view: np.ndarray,
+        proj: np.ndarray,
+        view_inv: np.ndarray,
+        proj_inv: np.ndarray,
+    ):
         """Launch OptiX path tracing and optional external accumulation kernels."""
         for s in range(samples_this_frame):
             launch_frame_index = self.sample_index + s
-            self._update_launch_params(frame_index_override=launch_frame_index)
+            self._update_launch_params(
+                frame_index_override=launch_frame_index,
+                update_instance_transforms=False,
+                view=view,
+                proj=proj,
+                view_inv=view_inv,
+                proj_inv=proj_inv,
+            )
 
             self._optix.launch(
                 self._pipeline,
@@ -963,10 +993,20 @@ class PathTracingViewer:
 
         current_view = self.camera.get_view_matrix().copy()
         current_proj = self.camera.get_projection_matrix().copy()
+        current_view_inv = np.linalg.inv(current_view)
+        current_proj_inv = np.linalg.inv(current_proj)
         use_external_accum = self.accumulate_samples and not self._dlss_enabled
         samples_this_frame = 1 if self._dlss_enabled else self.samples_per_frame
         reset_temporal = self._update_temporal_state(current_view, current_proj, use_external_accum)
-        self._launch_samples(samples_this_frame, use_external_accum)
+        self._update_instance_transform_buffers()
+        self._launch_samples(
+            samples_this_frame,
+            use_external_accum,
+            view=current_view,
+            proj=current_proj,
+            view_inv=current_view_inv,
+            proj_inv=current_proj_inv,
+        )
 
         # Snapshot current instance transforms -> previous for next frame's
         # rigid-body motion vectors.  This is a GPU-side copy so it is cheap.

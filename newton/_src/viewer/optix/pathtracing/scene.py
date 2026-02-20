@@ -304,6 +304,8 @@ class Scene:
         self._ias_handle = None
         self._ias_buffer = None
         self._instance_buffer = None
+        self._instance_np_cache = None
+        self._instance_np_capacity = 0
 
         # Keepalive references
         self._keepalive = {}
@@ -611,6 +613,9 @@ class Scene:
         self._gas_buffers.clear()
         self._ias_handle = None
         self._ias_buffer = None
+        self._instance_buffer = None
+        self._instance_np_cache = None
+        self._instance_np_capacity = 0
         self._keepalive.clear()
         self.materials.clear()
         self._instance_material_ids = None
@@ -714,7 +719,12 @@ class Scene:
         if len(self._instances) == 0:
             return
         inst_dtype = _build_optix_instance_dtype()
-        inst_np = np.zeros(len(self._instances), dtype=inst_dtype)
+        count = len(self._instances)
+        if self._instance_np_capacity < count:
+            self._instance_np_capacity = max(count, 1, self._instance_np_capacity * 2)
+            self._instance_np_cache = np.zeros(self._instance_np_capacity, dtype=inst_dtype)
+        inst_np = self._instance_np_cache[:count]
+
         for i, inst in enumerate(self._instances):
             gas_handle = self._gas_handles[inst.mesh_index]
             inst_np["transform"][i] = mat4_to_optix_transform12(inst.transform)
@@ -724,9 +734,10 @@ class Scene:
             inst_np["flags"][i] = np.uint32(int(optix.INSTANCE_FLAG_NONE))
             inst_np["traversableHandle"][i] = np.uint64(gas_handle)
 
-        inst_bytes = np.ascontiguousarray(inst_np).view(np.uint8).reshape(-1)
-        d_instances = wp.array(inst_bytes, dtype=wp.uint8, device="cuda")
-        self._instance_buffer = d_instances
+        inst_bytes = inst_np.view(np.uint8).reshape(-1)
+        if self._instance_buffer is None or self._instance_buffer.shape[0] != inst_bytes.shape[0]:
+            self._instance_buffer = wp.empty(inst_bytes.shape[0], dtype=wp.uint8, device="cuda")
+        self._instance_buffer.assign(inst_bytes)
 
         accel_options = optix.AccelBuildOptions(
             buildFlags=int(optix.BUILD_FLAG_ALLOW_UPDATE),
@@ -734,8 +745,8 @@ class Scene:
         )
 
         ias_input = optix.BuildInputInstanceArray()
-        ias_input.instances = int(d_instances.ptr)
-        ias_input.numInstances = len(self._instances)
+        ias_input.instances = int(self._instance_buffer.ptr)
+        ias_input.numInstances = count
 
         sizes = self._ctx.accelComputeMemoryUsage([accel_options], [ias_input])
         d_temp = wp.empty(sizes.tempSizeInBytes, dtype=wp.uint8, device="cuda")
