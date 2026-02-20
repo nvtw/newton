@@ -85,6 +85,58 @@ def _extract_rgb_from_tonemapped(
     dst[y, x, 2] = wp.uint8(wp.clamp(c[2] * 255.0, 0.0, 255.0))
 
 
+@wp.func
+def _rotate_zup_to_yup(v: wp.vec3) -> wp.vec3:
+    # Rotate -90 deg around X: (x, y, z) -> (x, z, -y)
+    return wp.vec3(v[0], v[2], -v[1])
+
+
+@wp.func
+def _rotate_xup_to_yup(v: wp.vec3) -> wp.vec3:
+    # Rotate -90 deg around Z: (x, y, z) -> (y, -x, z)
+    return wp.vec3(v[1], -v[0], v[2])
+
+
+@wp.kernel
+def _pack_instance_mats_from_xforms(
+    xforms: wp.array(dtype=wp.transform),
+    scales: wp.array(dtype=wp.vec3),
+    up_mode: int,  # 0: Y-up, 1: Z-up -> Y-up, 2: X-up -> Y-up
+    out_mats: wp.array(dtype=wp.mat44),
+):
+    tid = wp.tid()
+    t = xforms[tid]
+    p = wp.transform_get_translation(t)
+    q = wp.transform_get_rotation(t)
+    r = wp.quat_to_matrix(q)
+    s = scales[tid]
+
+    c0 = wp.vec3(r[0, 0] * s[0], r[1, 0] * s[0], r[2, 0] * s[0])
+    c1 = wp.vec3(r[0, 1] * s[1], r[1, 1] * s[1], r[2, 1] * s[1])
+    c2 = wp.vec3(r[0, 2] * s[2], r[1, 2] * s[2], r[2, 2] * s[2])
+
+    if up_mode == 1:
+        p = _rotate_zup_to_yup(p)
+        c0 = _rotate_zup_to_yup(c0)
+        c1 = _rotate_zup_to_yup(c1)
+        c2 = _rotate_zup_to_yup(c2)
+    elif up_mode == 2:
+        p = _rotate_xup_to_yup(p)
+        c0 = _rotate_xup_to_yup(c0)
+        c1 = _rotate_xup_to_yup(c1)
+        c2 = _rotate_xup_to_yup(c2)
+
+    # Match _build_instance_matrix() convention:
+    # - columns c0/c1/c2 are scaled rotation basis vectors
+    # - translation is in the last column
+    out_mats[tid] = wp.mat44(
+        c0[0], c1[0], c2[0], p[0],
+        c0[1], c1[1], c2[1], p[1],
+        c0[2], c1[2], c2[2], p[2],
+        0.0, 0.0, 0.0, 1.0,
+    )
+
+
 class ViewerOptix(ViewerBase):
     """OptiX path-tracing interactive viewer for Newton physics models.
 
@@ -190,6 +242,10 @@ class ViewerOptix(ViewerBase):
 
         # Track whether scene needs TLAS rebuild
         self._tlas_dirty = False
+        # Reusable transform staging buffers for device-path instance updates
+        self._instance_mat_capacity: dict[str, int] = {}
+        self._instance_mats_device: dict[str, wp.array] = {}
+        self._instance_mats_host: dict[str, wp.array] = {}
 
     # ------------------------------------------------------------------
     # Bridge / renderer lifecycle
@@ -383,20 +439,42 @@ class ViewerOptix(ViewerBase):
 
         self._instance_hidden[name] = hidden
 
-        xforms_np = xforms.numpy() if isinstance(xforms, wp.array) else np.asarray(xforms)
-        scales_np = scales.numpy() if isinstance(scales, wp.array) else np.asarray(scales) if scales is not None else None
+        xforms_np = None
+        scales_np = None
+        use_device_path = False
+
+        if (
+            isinstance(xforms, wp.array)
+            and xforms.device is not None
+            and xforms.device.is_cuda
+            and (
+                scales is None
+                or (isinstance(scales, wp.array) and scales.device is not None and scales.device.is_cuda)
+            )
+        ):
+            use_device_path = True
+            xforms_np, scales_np = self._pack_instance_mats_device_to_host(name, xforms, scales, transform_count)
+        else:
+            xforms_np = xforms.numpy() if isinstance(xforms, wp.array) else np.asarray(xforms)
+            scales_np = scales.numpy() if isinstance(scales, wp.array) else np.asarray(scales) if scales is not None else None
 
         existing_ids = self._instance_name_to_optix_ids.get(name)
 
         if existing_ids is not None and len(existing_ids) == transform_count:
             for i, inst_id in enumerate(existing_ids):
-                mat = self._build_instance_matrix(xforms_np[i], scales_np[i] if scales_np is not None else None)
+                if use_device_path:
+                    mat = xforms_np[i]
+                else:
+                    mat = self._build_instance_matrix(xforms_np[i], scales_np[i] if scales_np is not None else None)
                 self._scene.set_instance_transform(inst_id, mat)
             self._tlas_dirty = True
         else:
             instance_ids = []
             for i in range(transform_count):
-                mat = self._build_instance_matrix(xforms_np[i], scales_np[i] if scales_np is not None else None)
+                if use_device_path:
+                    mat = xforms_np[i]
+                else:
+                    mat = self._build_instance_matrix(xforms_np[i], scales_np[i] if scales_np is not None else None)
                 inst_id = self._scene.add_instance(mesh_id, transform=mat)
                 instance_ids.append(inst_id)
             self._instance_name_to_optix_ids[name] = instance_ids
@@ -431,6 +509,48 @@ class ViewerOptix(ViewerBase):
                 self._instance_material_map[inst_ids[i]] = mat_id
 
             self._materials_dirty = True
+
+    def _pack_instance_mats_device_to_host(self, name: str, xforms: wp.array, scales, count: int):
+        """Pack instance matrices on GPU, stage to pinned host, return numpy views."""
+        capacity = self._instance_mat_capacity.get(name, 0)
+        if capacity < count:
+            new_capacity = max(count, 1, capacity * 2)
+            self._instance_mats_device[name] = wp.empty(new_capacity, dtype=wp.mat44, device="cuda")
+            self._instance_mats_host[name] = wp.empty(new_capacity, dtype=wp.mat44, device="cpu", pinned=True)
+            self._instance_mat_capacity[name] = new_capacity
+
+        mats_dev = self._instance_mats_device[name]
+        mats_host = self._instance_mats_host[name]
+        mats_dev_view = mats_dev[:count]
+        mats_host_view = mats_host[:count]
+
+        if scales is None:
+            scales_dev = wp.empty(count, dtype=wp.vec3, device="cuda")
+            scales_dev.fill_(wp.vec3(1.0, 1.0, 1.0))
+        else:
+            scales_dev = scales
+
+        up_mode = 0
+        if self._global_transform is not None:
+            # Mapping based on set_model()/up-axis conversion behavior.
+            if self.model is not None and self.model.up_axis == 2:
+                up_mode = 1
+            elif self.model is not None and self.model.up_axis == 0:
+                up_mode = 2
+
+        wp.launch(
+            _pack_instance_mats_from_xforms,
+            dim=count,
+            inputs=[xforms, scales_dev, up_mode],
+            outputs=[mats_dev_view],
+            device="cuda",
+            record_tape=False,
+        )
+        wp.copy(mats_host_view, mats_dev_view)
+        wp.synchronize_device("cuda")
+
+        mats_np = mats_host_view.numpy()
+        return mats_np, None
 
     @override
     def log_lines(self, name, starts, ends, colors, width: float = 0.01, hidden=False):
