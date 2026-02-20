@@ -27,7 +27,7 @@ Components:
     - pathtracing_viewer: Main viewer integrating all components
 """
 
-from .pathtracer_api import PathTracingBridge
+from .pathtracer_api import PathTracerAPI
 from .camera import Camera
 from .materials import MaterialManager
 from .pathtracing_viewer import PathTracingViewer
@@ -38,7 +38,7 @@ __all__ = [
     "Camera",
     "MaterialManager",
     "Mesh",
-    "PathTracingBridge",
+    "PathTracerAPI",
     "PathTracingViewer",
     "Scene",
     "Tonemapper",

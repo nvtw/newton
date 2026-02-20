@@ -99,7 +99,7 @@ class Example:
     def _try_load_a_beautiful_game(self):
         if self.args.viewer != "optix":
             return
-        if not hasattr(self.viewer, "_ensure_bridge"):
+        if not hasattr(self.viewer, "_ensure_api"):
             return
 
         gltf_path = self._resolve_a_beautiful_game_gltf()
@@ -110,16 +110,16 @@ class Example:
                 "or enable network for auto-download."
             )
 
-        self.viewer._ensure_bridge()
-        bridge = getattr(self.viewer, "_bridge", None)
-        if bridge is None:
-            raise RuntimeError("ViewerOptix bridge was not created.")
+        self.viewer._ensure_api()
+        api = getattr(self.viewer, "_api", None)
+        if api is None:
+            raise RuntimeError("ViewerOptix PathTracerAPI was not created.")
 
-        ok = bridge.load_scene_from_gltf(str(gltf_path))
+        ok = api.load_scene_from_gltf(str(gltf_path))
         if not ok:
             raise RuntimeError(f"Failed to load glTF scene: {gltf_path}")
 
-        bridge.set_camera_angles(position=(0.0, 0.0, 6.0), yaw=180.0, pitch=0.0, fov=45.0)
+        self.viewer.set_camera(wp.vec3(-0.803, 0.340, 0.327), pitch=-21.8, yaw=115.2)
         self.loaded_external_scene = True
         print(f"[optix] loaded ABeautifulGame scene: {gltf_path}")
 

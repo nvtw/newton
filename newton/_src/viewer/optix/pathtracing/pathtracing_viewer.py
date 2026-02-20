@@ -173,6 +173,25 @@ def _get_aligned_itemsize(formats: list[str], alignment: int) -> int:
     return _round_up(temp_dtype.itemsize, alignment)
 
 
+def _get_ptx_cache_root() -> Path:
+    """Return OS-appropriate cache directory for OptiX PTX artifacts.
+
+    Resolution order:
+      1) user cache dir via Warp's bundled appdirs
+      2) fallback to ~/.cache/newton/optix/ptx
+    """
+    try:
+        from warp.thirdparty import appdirs  # noqa: PLC0415
+
+        cache_dir = appdirs.user_cache_dir(appname="newton", appauthor="Newton", version="optix-ptx")
+        if cache_dir:
+            return Path(cache_dir)
+    except Exception:
+        pass
+
+    return Path.home() / ".cache" / "newton" / "optix" / "ptx"
+
+
 def _build_ptx(optix_include_dir: str, headers_dir: Path) -> bytes:
     """
     Build PTX from the path tracing headers.
@@ -192,12 +211,9 @@ def _build_ptx(optix_include_dir: str, headers_dir: Path) -> bytes:
             raise RuntimeError(f"PTX can only be generated for CUDA devices, got '{device_obj}'")
 
         digest = hashlib.sha256(cuda_source.encode("utf-8")).hexdigest()[:16]
-        local_cache_root = headers_dir.parent / ".ptx_cache"
+        local_cache_root = _get_ptx_cache_root()
         # Keep cache by default for fast startup. If build fails (stale/corrupt
-        # cache), clear and retry once. Users can force a clean cache per run.
-        force_clear_ptx_cache = os.environ.get("NEWTON_OPTIX_CLEAR_PTX_CACHE", "0").lower() in ("1", "true", "yes")
-        if force_clear_ptx_cache:
-            shutil.rmtree(local_cache_root, ignore_errors=True)
+        # cache), clear and retry once.
         local_cache_root.mkdir(parents=True, exist_ok=True)
         module_dir = os.path.join(str(local_cache_root), f"wp_pathtracing_{module_tag}_{digest}")
         os.makedirs(module_dir, exist_ok=True)

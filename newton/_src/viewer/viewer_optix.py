@@ -45,7 +45,7 @@ from ..core.types import override
 from .viewer import ViewerBase
 
 if TYPE_CHECKING:
-    from .optix.pathtracing.pathtracer_api import PathTracingBridge
+    from .optix.pathtracing.pathtracer_api import PathTracerAPI
     from .optix.pathtracing.scene import Scene as OptixScene
 
 
@@ -142,7 +142,7 @@ class ViewerOptix(ViewerBase):
 
     Provides the same public API as :class:`ViewerGL` so it can be used as a
     drop-in replacement in simulation loops.  Rendering is performed by the
-    OptiX path tracer (via :class:`PathTracingBridge`) and displayed in a
+    OptiX path tracer (via :class:`PathTracerAPI`) and displayed in a
     Pyglet window with CUDA-GL interop.
 
     Key features:
@@ -181,7 +181,7 @@ class ViewerOptix(ViewerBase):
         self._headless = bool(headless)
         self._enable_dlss_rr = bool(enable_dlss_rr)
 
-        self._bridge: PathTracingBridge | None = None
+        self._api: PathTracerAPI | None = None
         self._scene: OptixScene | None = None
         self._built = False
         self._running = True
@@ -220,6 +220,7 @@ class ViewerOptix(ViewerBase):
         self._cam_yaw = 180.0  # Look toward -Z (toward origin)
         self._cam_fov = 45.0
         self._cam_speed = 4.0  # m/s
+        self._cam_user_set = False
 
         # Previous camera state for dirty detection (None = never synced)
         self._prev_cam_pos: np.ndarray | None = None
@@ -248,28 +249,28 @@ class ViewerOptix(ViewerBase):
         self._instance_mats_host: dict[str, wp.array] = {}
 
     # ------------------------------------------------------------------
-    # Bridge / renderer lifecycle
+    # Path tracer lifecycle
     # ------------------------------------------------------------------
 
-    def _ensure_bridge(self):
-        """Lazily create the PathTracingBridge and initialize OptiX."""
-        if self._bridge is not None:
+    def _ensure_api(self):
+        """Lazily create the PathTracerAPI and initialize OptiX."""
+        if self._api is not None:
             return
 
-        from .optix.pathtracing.pathtracer_api import PathTracingBridge  # noqa: PLC0415
+        from .optix.pathtracing.pathtracer_api import PathTracerAPI  # noqa: PLC0415
 
-        self._bridge = PathTracingBridge(
+        self._api = PathTracerAPI(
             width=self._width,
             height=self._height,
             enable_dlss_rr=self._enable_dlss_rr,
         )
-        ok = self._bridge.initialize()
+        ok = self._api.initialize()
         if not ok:
             raise RuntimeError("Failed to initialize OptiX path tracer. Check GPU drivers and OptiX SDK installation.")
-        self._scene = self._bridge.scene
+        self._scene = self._api.scene
 
         # Configure procedural sky matching PythonBridge.cs PhysicalSkyParameters.Default
-        viewer = self._bridge.viewer
+        viewer = self._api.viewer
         viewer._env_map = None
         viewer.sky_rgb_unit_conversion = (1.0 / 80000.0, 1.0 / 80000.0, 1.0 / 80000.0)
         viewer.sky_multiplier = 1.0
@@ -299,7 +300,9 @@ class ViewerOptix(ViewerBase):
             height=self._height,
             caption="Newton Viewer (OptiX)",
             vsync=self._vsync,
+            resizable=True,
         )
+        self._window.set_minimum_size(128, 128)
 
         self._gl_texture = pyglet.image.Texture.create(
             width=self._width, height=self._height, rectangle=False
@@ -330,6 +333,47 @@ class ViewerOptix(ViewerBase):
 
         self._window.push_handlers(self)
 
+    def _recreate_gl_resources(self):
+        """Recreate GL texture, PBO, and CUDA interop for the current resolution."""
+        if self._window is None:
+            return
+
+        import pyglet
+        from pyglet import gl
+
+        w, h = self._width, self._height
+
+        # Release CUDA-GL interop before deleting the GL buffer
+        self._cuda_gl = None
+        if self._pbo is not None:
+            gl.glDeleteBuffers(1, self._pbo)
+            self._pbo = None
+
+        # Recreate texture + sprite
+        self._gl_texture = pyglet.image.Texture.create(width=w, height=h, rectangle=False)
+        self._gl_texture.min_filter = gl.GL_NEAREST
+        self._gl_texture.mag_filter = gl.GL_NEAREST
+        self._sprite = pyglet.sprite.Sprite(self._gl_texture, x=0, y=0)
+
+        # Recreate PBO
+        pbo = gl.GLuint()
+        gl.glGenBuffers(1, pbo)
+        gl.glBindBuffer(gl.GL_PIXEL_UNPACK_BUFFER, pbo)
+        gl.glBufferData(gl.GL_PIXEL_UNPACK_BUFFER, w * h * 4, None, gl.GL_DYNAMIC_DRAW)
+        gl.glBindBuffer(gl.GL_PIXEL_UNPACK_BUFFER, 0)
+        self._pbo = pbo
+
+        self._cuda_gl = wp.RegisteredGLBuffer(
+            int(pbo.value),
+            device="cuda",
+            flags=wp.RegisteredGLBuffer.WRITE_DISCARD,
+            fallback_to_copy=False,
+        )
+        self._display_u32 = wp.empty(w * h, dtype=wp.uint32, device="cuda")
+
+        # Update GL viewport
+        gl.glViewport(0, 0, w, h)
+
     # ------------------------------------------------------------------
     # ViewerBase abstract method implementations
     # ------------------------------------------------------------------
@@ -341,10 +385,10 @@ class ViewerOptix(ViewerBase):
         if model is not None:
             self._setup_global_transform(model.up_axis)
 
-            # Default camera in rendering (Y-up) space
-            self._cam_pos = np.array([0.0, 2.0, 8.0], dtype=np.float32)
-            self._cam_yaw = 180.0
-            self._cam_pitch = 0.0
+            if not self._cam_user_set:
+                self._cam_pos = np.array([0.0, 2.0, 8.0], dtype=np.float32)
+                self._cam_yaw = 180.0
+                self._cam_pitch = 0.0
             self._prev_cam_pos = self._cam_pos.copy()
             self._prev_cam_pitch = self._cam_pitch
             self._prev_cam_yaw = self._cam_yaw
@@ -385,6 +429,7 @@ class ViewerOptix(ViewerBase):
         self._cam_pos = np.array([float(pos[0]), float(pos[1]), float(pos[2])], dtype=np.float32)
         self._cam_pitch = float(pitch)
         self._cam_yaw = float(yaw)
+        self._cam_user_set = True
 
     @override
     def begin_frame(self, time_val):
@@ -402,7 +447,7 @@ class ViewerOptix(ViewerBase):
         hidden=False,
         backface_culling=True,
     ):
-        self._ensure_bridge()
+        self._ensure_api()
 
         if name in self._mesh_name_to_optix_id:
             return
@@ -415,7 +460,7 @@ class ViewerOptix(ViewerBase):
         if self._scene is not None and self._scene.materials.count == 0:
             self._scene.materials.add_diffuse((0.8, 0.8, 0.8))
 
-        mesh_id = self._bridge.create_mesh(
+        mesh_id = self._api.create_mesh(
             positions=pts_np,
             indices=idx_np,
             normals=nrm_np,
@@ -426,7 +471,7 @@ class ViewerOptix(ViewerBase):
 
     @override
     def log_instances(self, name, mesh, xforms, scales, colors, materials, hidden=False):
-        self._ensure_bridge()
+        self._ensure_api()
 
         mesh_id = self._mesh_name_to_optix_id.get(mesh)
         if mesh_id is None:
@@ -570,7 +615,7 @@ class ViewerOptix(ViewerBase):
 
     @override
     def end_frame(self):
-        self._ensure_bridge()
+        self._ensure_api()
         self._ensure_window()
 
         self._sync_camera()
@@ -580,7 +625,7 @@ class ViewerOptix(ViewerBase):
             if not self._built:
                 self._build_scene_if_needed()
             elif mesh_count > self._meshes_at_last_build:
-                self._bridge.build_scene()
+                self._api.build_scene()
                 self._meshes_at_last_build = mesh_count
                 self._tlas_dirty = False
                 self._upload_instance_materials()
@@ -593,7 +638,7 @@ class ViewerOptix(ViewerBase):
             self._materials_dirty = False
 
         if self._built:
-            self._bridge.viewer.render()
+            self._api.viewer.render()
 
         if not self._headless and self._window is not None:
             if self._built:
@@ -661,8 +706,8 @@ class ViewerOptix(ViewerBase):
             self._cuda_gl = None
             self._window.close()
             self._window = None
-        if self._bridge is not None:
-            self._bridge.close()
+        if self._api is not None:
+            self._api.close()
 
     def get_frame(self, target_image: wp.array | None = None, render_ui: bool = False) -> wp.array:
         """Retrieve the last rendered frame as a GPU array.
@@ -675,10 +720,10 @@ class ViewerOptix(ViewerBase):
         Returns:
             GPU array of shape ``(height, width, 3)`` with dtype ``wp.uint8``.
         """
-        self._ensure_bridge()
+        self._ensure_api()
 
         h, w = self._height, self._width
-        tonemapped = self._bridge.viewer._tonemapper.output
+        tonemapped = self._api.viewer._tonemapper.output
 
         if target_image is None:
             target_image = wp.empty(shape=(h, w, 3), dtype=wp.uint8, device="cuda")
@@ -712,7 +757,7 @@ class ViewerOptix(ViewerBase):
     def _quat_scale_to_mat4(xform_np, scale_np=None) -> np.ndarray:
         """Convert a Newton transform (pos + quat) and optional scale to a 4x4 matrix.
 
-        Matches bridge.py ``_build_transform``: rotation is stored row-major
+        Matches pathtracer_api.py ``_build_transform``: rotation is stored row-major
         and scale is applied per-column (axis-aligned in world space).
         """
         px, py, pz = float(xform_np[0]), float(xform_np[1]), float(xform_np[2])
@@ -776,7 +821,7 @@ class ViewerOptix(ViewerBase):
         Uses the C# camera convention (matching hybrid_viewer / PythonBridge):
         yaw=0 looks in +Z, X = sin(yaw)*cos(pitch), Z = cos(yaw)*cos(pitch).
         """
-        if self._bridge is None:
+        if self._api is None:
             return
 
         if not self._camera_changed():
@@ -796,7 +841,7 @@ class ViewerOptix(ViewerBase):
         )
 
         target = self._cam_pos + fwd
-        cam = self._bridge.viewer.camera
+        cam = self._api.viewer.camera
         cam.position = self._cam_pos.copy()
         cam.target = target
         cam.up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
@@ -812,12 +857,12 @@ class ViewerOptix(ViewerBase):
         """Build the OptiX scene (BLAS + TLAS) if not yet built."""
         if self._built:
             return
-        if self._bridge is None:
+        if self._api is None:
             return
         if self._scene is None or len(self._scene._meshes) == 0:
             return
 
-        self._bridge.build_scene()
+        self._api.build_scene()
         self._meshes_at_last_build = len(self._scene._meshes)
         self._built = True
         self._tlas_dirty = False
@@ -932,7 +977,7 @@ class ViewerOptix(ViewerBase):
         """Copy the tonemapped output to the Pyglet GL texture via PBO."""
         from pyglet import gl
 
-        viewer = self._bridge.viewer
+        viewer = self._api.viewer
         tonemapped = viewer._tonemapper.output
         w, h = self._width, self._height
 
@@ -1054,8 +1099,8 @@ class ViewerOptix(ViewerBase):
         elif symbol == key.ESCAPE:
             if self._window is not None:
                 self._window.close()
-        elif self._bridge is not None:
-            viewer = self._bridge.viewer
+        elif self._api is not None:
+            viewer = self._api.viewer
             if symbol == key._1:
                 viewer.output_mode = viewer.OUTPUT_FINAL
             elif symbol == key._2:
@@ -1104,7 +1149,20 @@ class ViewerOptix(ViewerBase):
         self._running = False
 
     def on_resize(self, width, height):
-        pass
+        if width == 0 or height == 0:
+            return
+        self._width = width
+        self._height = height
+
+        if self._api is not None:
+            self._api.viewer.resize(width, height)
+            self._api.viewer.sample_index = 0
+            self._api.viewer.frame_index = 0
+
+        self._recreate_gl_resources()
+
+        # Force camera re-sync so aspect ratio is updated
+        self._prev_cam_pos = None
 
     def on_deactivate(self):
         pass

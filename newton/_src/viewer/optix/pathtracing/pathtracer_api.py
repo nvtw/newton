@@ -69,8 +69,8 @@ def _build_transform(position: Iterable[float], rotation_xyzw: Iterable[float], 
     return m
 
 
-class PathTracingBridge:
-    """Bridge-like API for driving the OptiX path tracer directly from Python."""
+class PathTracerAPI:
+    """High-level API for driving the OptiX path tracer directly from Python."""
 
     def __init__(self, width: int = 1280, height: int = 720, enable_dlss_rr: bool = True):
         self.width = int(width)
@@ -93,7 +93,7 @@ class PathTracingBridge:
         optix_sdk_env = os.environ.get("OPTIX_SDK_INCLUDE_DIR")
         optix_sdk_auto = _get_optix_include_dir()
         return (
-            "PathTracingBridge initialization failed.\n"
+            "PathTracerAPI initialization failed.\n"
             f"- python executable: {sys.executable}\n"
             f"- optix module importable: {optix_available}\n"
             f"- OPTIX_SDK_INCLUDE_DIR: {optix_sdk_env!r}\n"
