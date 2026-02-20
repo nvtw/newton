@@ -230,7 +230,7 @@ class Example:
 
     def _build_nut_bolt_scene(self) -> newton.ModelBuilder:
         print("Downloading nut/bolt assets...")
-        asset_path = newton.utils.download_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER)
+        asset_path = newton.examples.download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER)
         print(f"Assets downloaded to: {asset_path}")
 
         world_builder = newton.ModelBuilder()
@@ -292,7 +292,7 @@ class Example:
 
     def _build_gears_scene(self) -> newton.ModelBuilder:
         print("Downloading gear assets...")
-        asset_path = newton.utils.download_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_GEARS_FOLDER)
+        asset_path = newton.examples.download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_GEARS_FOLDER)
         print(f"Assets downloaded to: {asset_path}")
 
         world_builder = newton.ModelBuilder()

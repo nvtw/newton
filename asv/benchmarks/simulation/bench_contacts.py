@@ -19,6 +19,7 @@ from asv_runner.benchmarks.mark import skip_benchmark_if
 wp.config.quiet = True
 
 import newton
+import newton.examples
 from newton.examples.contacts.example_nut_bolt_hydro import Example as ExampleHydroWorking
 from newton.examples.contacts.example_nut_bolt_sdf import Example as ExampleSdf
 from newton.viewer import ViewerNull
@@ -33,8 +34,8 @@ class FastExampleContactSdfDefaults:
     number = 1
 
     def setup_cache(self):
-        newton.utils.download_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER)
-        newton.utils.download_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_GEARS_FOLDER)
+        newton.examples.download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER)
+        newton.examples.download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_GEARS_FOLDER)
 
     def setup(self):
         self.num_frames = 20
@@ -59,8 +60,8 @@ class FastExampleContactHydroWorkingDefaults:
     number = 1
 
     def setup_cache(self):
-        newton.utils.download_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER)
-        newton.utils.download_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_GEARS_FOLDER)
+        newton.examples.download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER)
+        newton.examples.download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_GEARS_FOLDER)
 
     def setup(self):
         self.num_frames = 20
