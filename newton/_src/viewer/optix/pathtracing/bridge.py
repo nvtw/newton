@@ -49,13 +49,22 @@ def _quat_to_mat3(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
     )
 
 
-def _build_transform(position: Iterable[float], rotation_xyzw: Iterable[float], scale: float) -> np.ndarray:
+def _build_transform(position: Iterable[float], rotation_xyzw: Iterable[float], scale: float | Iterable[float]) -> np.ndarray:
     """Build a 4x4 row-major transform matrix from position/quaternion/scale."""
     px, py, pz = [float(v) for v in position]
     qx, qy, qz, qw = [float(v) for v in rotation_xyzw]
-    s = float(scale)
+    if isinstance(scale, Iterable) and not isinstance(scale, (str, bytes)):
+        sx, sy, sz = [float(v) for v in scale]
+    else:
+        s = float(scale)
+        sx = sy = sz = s
     m = np.eye(4, dtype=np.float32)
-    m[:3, :3] = _quat_to_mat3(qx, qy, qz, qw) * s
+    r = _quat_to_mat3(qx, qy, qz, qw)
+    # Column scale for non-uniform axis scaling.
+    r[:, 0] *= sx
+    r[:, 1] *= sy
+    r[:, 2] *= sz
+    m[:3, :3] = r
     m[:3, 3] = np.array([px, py, pz], dtype=np.float32)
     return m
 
@@ -178,12 +187,17 @@ class PathTracingBridge:
         material_id: int = 0,
     ) -> int:
         scene = self._require_scene()
+        if scene.materials.count == 0:
+            scene.materials.add_diffuse((0.8, 0.8, 0.8))
+        mat_id = int(material_id)
+        if mat_id < 0 or mat_id >= scene.materials.count:
+            mat_id = 0
         mesh = Mesh(
             vertices=np.asarray(positions, dtype=np.float32),
             indices=np.asarray(indices, dtype=np.uint32),
             normals=None if normals is None else np.asarray(normals, dtype=np.float32),
             texcoords=None if uvs is None else np.asarray(uvs, dtype=np.float32),
-            material_id=int(material_id),
+            material_id=mat_id,
         )
         return int(scene.add_mesh(mesh))
 
@@ -195,7 +209,7 @@ class PathTracingBridge:
         mesh_id: int,
         position: Iterable[float],
         rotation_xyzw: Iterable[float],
-        scale: float = 1.0,
+        scale: float | Iterable[float] = 1.0,
     ) -> int:
         transform = _build_transform(position, rotation_xyzw, scale)
         return int(self._require_scene().add_instance(int(mesh_id), transform=transform))
@@ -205,7 +219,7 @@ class PathTracingBridge:
         instance_id: int,
         position: Iterable[float],
         rotation_xyzw: Iterable[float],
-        scale: float = 1.0,
+        scale: float | Iterable[float] = 1.0,
     ):
         transform = _build_transform(position, rotation_xyzw, scale)
         self._require_scene().set_instance_transform(int(instance_id), transform)
