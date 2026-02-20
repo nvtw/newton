@@ -43,8 +43,8 @@ struct CompactMaterial {
 
 static __forceinline__ __device__ float rand01(unsigned int& state)
 {
-    state = 1664525u * state + 1013904223u;
-    return float(state & 0x00FFFFFFu) * (1.0f / 16777216.0f);
+    unsigned int r = pcg(state);
+    return float(r & 0x00FFFFFFu) * (1.0f / 16777216.0f);
 }
 
 static __forceinline__ __device__ float3 sample_cosine_hemisphere(float3 n, unsigned int& rng)

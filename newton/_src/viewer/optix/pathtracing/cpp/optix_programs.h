@@ -184,7 +184,7 @@ extern "C" __global__ void __raygen__primary()
 
     const unsigned int pixelIndex = idx.y * dim.x + idx.x;
     const unsigned int rayFlags = OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
-    unsigned int rng = (idx.x * 1973u) ^ (idx.y * 9277u) ^ (params.frameIndex * 26699u) ^ 0x68bc21ebu;
+    unsigned int rng = xxhash32(make_uint3(idx.x, idx.y, params.frameIndex));
 
     PbrMaterial pbrMat;
     bool hitSky = false;
@@ -458,7 +458,7 @@ extern "C" __global__ void __raygen__primary()
             const PhysicalSkyParameters sky = sky_params_from_launch();
             const float2 lightXi = make_float2(rand01(rng), rand01(rng));
             const SkySamplingResult skySample = samplePhysicalSky(sky, lightXi);
-            dirToLight = rotate_environment_dir(skySample.direction, params.frameInfo.envRotation, sky.yIsUp);
+            dirToLight = skySample.direction;
             lightRadiance = skySample.radiance
                 * make_float3(params.frameInfo.envIntensity[0], params.frameInfo.envIntensity[1],
                               params.frameInfo.envIntensity[2]);
@@ -483,7 +483,7 @@ extern "C" __global__ void __raygen__primary()
 
             if (evalData.pdf > 1.0e-6f) {
                 unsigned int visibility = 0u;
-                const float3 shadowOrigin = hitPos + pbrMat.Ng * 0.001f;
+                const float3 shadowOrigin = offsetRay(hitPos, pbrMat.Ng);
                 optixTrace(
                     params.tlas, shadowOrigin, dirToLight, 0.001f, DLSS_INF_DISTANCE, 0.0f, 0xFF,
                     OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT
@@ -596,8 +596,7 @@ extern "C" __global__ void __raygen__primary()
                     const PhysicalSkyParameters sky = sky_params_from_launch();
                     const float2 xi2 = make_float2(rand01(rng), rand01(rng));
                     const SkySamplingResult skySample = samplePhysicalSky(sky, xi2);
-                    secDirToLight
-                        = rotate_environment_dir(skySample.direction, params.frameInfo.envRotation, sky.yIsUp);
+                    secDirToLight = skySample.direction;
                     secLightRadiance = skySample.radiance
                         * make_float3(params.frameInfo.envIntensity[0], params.frameInfo.envIntensity[1],
                                       params.frameInfo.envIntensity[2]);

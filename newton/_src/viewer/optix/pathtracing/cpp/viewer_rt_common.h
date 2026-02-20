@@ -317,16 +317,16 @@ static __forceinline__ __device__ float4 sample_envmap_uv(float u, float v)
     return c0 * (1.0f - ty) + c1 * ty;
 }
 
-// Evaluate environment map for a given world direction
+// Evaluate environment map for a given world direction.
+// Matches GLSL primary.rmiss: procedural sky uses the direction unrotated;
+// envRotation only applies to HDR envmap lookups.
 static __forceinline__ __device__ float3 eval_environment(float3 worldDir)
 {
     // If using procedural physical sky model
     if (TEST_FLAG(params.frameInfo.flags, FLAGS_ENVMAP_SKY))
     {
         const PhysicalSkyParameters sky = sky_params_from_launch();
-        const float3 localDir =
-            rotate_environment_dir(normalize(worldDir), -params.frameInfo.envRotation, sky.yIsUp);
-        const float3 env = evalPhysicalSky(sky, localDir);
+        const float3 env = evalPhysicalSky(sky, normalize(worldDir));
         return env * make_float3(
             params.frameInfo.envIntensity[0],
             params.frameInfo.envIntensity[1],

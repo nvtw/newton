@@ -49,33 +49,41 @@ static __forceinline__ __device__ float3 EnvironmentTerm_Rtg(float3 Rf0, float N
     Y.z = alphaRoughness * alphaRoughness;
     Y.w = alphaRoughness * Y.z;
 
-    // Matrix multiplications - done manually since CUDA doesn't have mat2/mat3 types
+    // GLSL mat2/mat3 constructors fill column-major:
+    //   mat2(a,b,c,d)       -> col0=(a,b), col1=(c,d)
+    //   mat3(a,b,c,d,e,f,g,h,i) -> col0=(a,b,c), col1=(d,e,f), col2=(g,h,i)
+    // mul(M, v) = M * v  (column-major matrix times column vector)
+    //
     // M1 = mat2(0.99044, -1.28514, 1.29678, -0.755907)
+    //   col0=(0.99044, -1.28514)  col1=(1.29678, -0.755907)
     // M2 = mat3(1.0, 2.92338, 59.4188, 20.3225, -27.0302, 222.592, 121.563, 626.13, 316.627)
+    //   col0=(1.0, 2.92338, 59.4188)  col1=(20.3225, -27.0302, 222.592)  col2=(121.563, 626.13, 316.627)
     // M3 = mat2(0.0365463, 3.32707, 9.0632, -9.04756)
+    //   col0=(0.0365463, 3.32707)  col1=(9.0632, -9.04756)
     // M4 = mat3(1.0, 3.59685, -1.36772, 9.04401, -16.3174, 9.22949, 5.56589, 19.7886, -20.2123)
+    //   col0=(1.0, 3.59685, -1.36772)  col1=(9.04401, -16.3174, 9.22949)  col2=(5.56589, 19.7886, -20.2123)
 
-    // M1 * X.xy (2x2 * 2x1 = 2x1)
+    // M1 * X.xy: result[i] = col0[i]*X.x + col1[i]*X.y
     float2 M1_X;
-    M1_X.x = 0.99044f * X.x + (-1.28514f) * X.y;
-    M1_X.y = 1.29678f * X.x + (-0.755907f) * X.y;
+    M1_X.x =  0.99044f * X.x +  1.29678f * X.y;
+    M1_X.y = -1.28514f * X.x + (-0.755907f) * X.y;
 
-    // M2 * X.xyw (3x3 * 3x1 = 3x1)
+    // M2 * X.xyw: result[i] = col0[i]*X.x + col1[i]*X.y + col2[i]*X.w
     float3 M2_X;
-    M2_X.x = 1.0f * X.x + 2.92338f * X.y + 59.4188f * X.w;
-    M2_X.y = 20.3225f * X.x + (-27.0302f) * X.y + 222.592f * X.w;
-    M2_X.z = 121.563f * X.x + 626.13f * X.y + 316.627f * X.w;
+    M2_X.x =  1.0f     * X.x +  20.3225f * X.y + 121.563f * X.w;
+    M2_X.y =  2.92338f * X.x + (-27.0302f) * X.y + 626.13f * X.w;
+    M2_X.z = 59.4188f  * X.x + 222.592f  * X.y + 316.627f * X.w;
 
-    // M3 * X.xy
+    // M3 * X.xy: result[i] = col0[i]*X.x + col1[i]*X.y
     float2 M3_X;
-    M3_X.x = 0.0365463f * X.x + 3.32707f * X.y;
-    M3_X.y = 9.0632f * X.x + (-9.04756f) * X.y;
+    M3_X.x = 0.0365463f * X.x +  9.0632f * X.y;
+    M3_X.y = 3.32707f   * X.x + (-9.04756f) * X.y;
 
-    // M4 * X.xzw
+    // M4 * X.xzw: result[i] = col0[i]*X.x + col1[i]*X.z + col2[i]*X.w
     float3 M4_X;
-    M4_X.x = 1.0f * X.x + 3.59685f * X.z + (-1.36772f) * X.w;
-    M4_X.y = 9.04401f * X.x + (-16.3174f) * X.z + 9.22949f * X.w;
-    M4_X.z = 5.56589f * X.x + 19.7886f * X.z + (-20.2123f) * X.w;
+    M4_X.x =  1.0f      * X.x +   9.04401f * X.z +  5.56589f * X.w;
+    M4_X.y =  3.59685f  * X.x + (-16.3174f) * X.z + 19.7886f  * X.w;
+    M4_X.z = -1.36772f  * X.x +   9.22949f * X.z + (-20.2123f) * X.w;
 
     // dot(M1_X, Y.xy)
     float dot_M1_Y = M1_X.x * Y.x + M1_X.y * Y.y;
