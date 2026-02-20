@@ -73,14 +73,33 @@ def _run_headless(width: int, height: int, frames: int) -> None:
     )
 
 
-def _run_gui(width: int, height: int, fps: int, frames: int) -> None:
-    import pyglet  # noqa: PLC0415
-    from pyglet import gl  # noqa: PLC0415
-    from pyglet.window import key, mouse  # noqa: PLC0415
+def _run_gui(width: int, height: int, fps: int, frames: int, use_procedural_sky: bool = True) -> None:
+    import pyglet
+    from pyglet import gl
+    from pyglet.window import key, mouse
 
     viewer = create_a_beautiful_game_viewer(width=width, height=height)
+    if use_procedural_sky:
+        # Force procedural sky path for parity testing against C# bridge behavior.
+        viewer._env_map = None
+        viewer.sky_rgb_unit_conversion = (1.0 / 80000.0, 1.0 / 80000.0, 1.0 / 80000.0)
+        viewer.sky_multiplier = 1.0
+        viewer.sky_haze = 0.0
+        viewer.sky_redblueshift = 0.0
+        viewer.sky_saturation = 1.0
+        viewer.sky_horizon_height = 0.0
+        viewer.sky_ground_color = (0.4, 0.4, 0.4)
+        viewer.sky_horizon_blur = 1.0
+        viewer.sky_night_color = (0.0, 0.0, 0.0)
+        viewer.sky_sun_disk_intensity = 1.0
+        viewer.sky_sun_direction = (0.0, 1.0, 0.5)
+        viewer.sky_sun_disk_scale = 1.0
+        viewer.sky_sun_glow_intensity = 1.0
+        viewer.sky_y_is_up = 1
     if not viewer.build():
         raise RuntimeError("Failed to build A Beautiful Game viewer")
+    if use_procedural_sky and viewer._env_map is not None:
+        raise RuntimeError("Procedural sky requested, but an environment map is still active.")
 
     window = pyglet.window.Window(width=width, height=height, caption="A Beautiful Game Pathtracing", vsync=False)
     texture = pyglet.image.Texture.create(width=width, height=height, rectangle=False)

@@ -59,25 +59,9 @@ class ViewerOptix(ViewerBase):
         self._height = int(height)
         self._headless = bool(headless)
         self._bridge = PathTracingBridge(width=self._width, height=self._height, enable_dlss_rr=bool(enable_dlss_rr))
-        # Use a visible procedural-sky baseline for generic Newton scenes.
-        # PathTracingViewer defaults are tuned for HDR workflows and can appear too dark.
-        self._bridge.set_use_procedural_sky(True)
-        self._bridge.set_sky_parameters(
-            sun_direction=(0.2, 0.9, 0.25),
-            multiplier=1.0,
-            haze=0.05,
-            red_blue_shift=0.0,
-            saturation=1.0,
-            horizon_height=0.0,
-            ground_color=(0.20, 0.20, 0.30),
-            horizon_blur=1.0,
-            night_color=(0.50, 0.70, 1.00),
-            sun_disk_intensity=0.0,
-            sun_disk_scale=1.0,
-            sun_glow_intensity=0.0,
-            y_is_up=1,
-        )
-        self._bridge.viewer.sky_rgb_unit_conversion = (1.0, 1.0, 1.0)
+        self._up_axis = 1  # 0=X, 1=Y, 2=Z
+        self._user_camera_control = False
+        self._configure_default_sky()
         self._running = True
         self._paused = False
         self._scene_dirty = False
@@ -104,13 +88,57 @@ class ViewerOptix(ViewerBase):
         self._fps_last_frames = 0
         self._presented_frames = 0
 
+    def _up_vector(self) -> tuple[float, float, float]:
+        if self._up_axis == 2:
+            return (0.0, 0.0, 1.0)
+        if self._up_axis == 0:
+            return (1.0, 0.0, 0.0)
+        return (0.0, 1.0, 0.0)
+
+    def _direction_from_yaw_pitch(self, yaw: float, pitch: float) -> np.ndarray:
+        yaw_rad = np.deg2rad(float(yaw))
+        pitch_rad = np.deg2rad(float(pitch))
+        cp = float(np.cos(pitch_rad))
+        sp = float(np.sin(pitch_rad))
+        if self._up_axis == 2:
+            # Z-up convention used by Newton camera.
+            return np.array([np.cos(yaw_rad) * cp, np.sin(yaw_rad) * cp, sp], dtype=np.float32)
+        if self._up_axis == 0:
+            return np.array([sp, np.cos(yaw_rad) * cp, np.sin(yaw_rad) * cp], dtype=np.float32)
+        # Y-up convention.
+        return np.array([np.cos(yaw_rad) * cp, sp, np.sin(yaw_rad) * cp], dtype=np.float32)
+
+    def _configure_default_sky(self):
+        # Keep procedural sky enabled by default like the C# bridge sample.
+        y_is_up = 0 if self._up_axis == 2 else 1
+        sun_dir = (0.20, 0.25, 0.90) if self._up_axis == 2 else (0.20, 0.90, 0.25)
+        self._bridge.set_use_procedural_sky(True)
+        self._bridge.set_sky_parameters(
+            sun_direction=sun_dir,
+            multiplier=1.5,
+            haze=0.03,
+            red_blue_shift=0.0,
+            saturation=1.0,
+            horizon_height=0.0,
+            ground_color=(0.70, 0.70, 0.75),
+            horizon_blur=0.3,
+            night_color=(0.50, 0.70, 1.00),
+            sun_disk_intensity=1.0,
+            sun_disk_scale=1.0,
+            sun_glow_intensity=0.8,
+            y_is_up=y_is_up,
+        )
+        # Brighter baseline than sample defaults for general Newton scenes.
+        self._bridge.viewer.sky_rgb_unit_conversion = (1.0, 1.0, 1.0)
+        self._bridge.viewer._env_map = None
+
     def _ensure_window(self):
         if self._headless or self._window is not None:
             return
         try:
             import pyglet
             from pyglet import gl
-            from pyglet.window import key
+            from pyglet.window import key, mouse
         except Exception:
             print("[ViewerOptix] pyglet is not available, running headless.")
             self._headless = True
@@ -162,6 +190,23 @@ class ViewerOptix(ViewerBase):
         @self._window.event
         def on_key_release(symbol, _modifiers):
             self._pressed_keys.discard(symbol)
+
+        @self._window.event
+        def on_mouse_drag(_x, _y, dx, dy, buttons, _modifiers):
+            if buttons & mouse.LEFT:
+                self._bridge.viewer.camera.rotate(yaw=0.005 * float(dx), pitch=0.005 * float(dy))
+                self._user_camera_control = True
+            elif buttons & mouse.MIDDLE:
+                self._bridge.viewer.camera.orbit(yaw=0.005 * float(dx), pitch=0.005 * float(dy))
+                self._user_camera_control = True
+            elif buttons & mouse.RIGHT:
+                self._bridge.viewer.camera.pan(-0.01 * float(dx), 0.01 * float(dy))
+                self._user_camera_control = True
+
+        @self._window.event
+        def on_mouse_scroll(_x, _y, _sx, sy):
+            self._bridge.viewer.camera.zoom(delta=0.5 * float(sy))
+            self._user_camera_control = True
 
     def _is_key_down(self, symbol: int) -> bool:
         return symbol in self._pressed_keys or (self._keys is not None and bool(self._keys[symbol]))
@@ -240,17 +285,22 @@ class ViewerOptix(ViewerBase):
     @override
     def set_model(self, model: newton.Model, max_worlds: int | None = None):
         super().set_model(model, max_worlds=max_worlds)
+        self._up_axis = int(getattr(model, "up_axis", 1))
+        self._configure_default_sky()
+        cam_up = np.asarray(self._up_vector(), dtype=np.float32)
+        self._bridge.viewer.camera.up = cam_up
         self._scene_dirty = True
         self._instance_transforms_dirty = False
+        self._user_camera_control = False
 
     @override
     def set_camera(self, pos: wp.vec3, pitch: float, yaw: float):
-        self._bridge.set_camera_angles(
-            position=(float(pos[0]), float(pos[1]), float(pos[2])),
-            yaw=float(yaw),
-            pitch=float(pitch),
-            fov=45.0,
-        )
+        if self._user_camera_control:
+            return
+        position = np.array([float(pos[0]), float(pos[1]), float(pos[2])], dtype=np.float32)
+        forward = self._direction_from_yaw_pitch(float(yaw), float(pitch))
+        up = np.asarray(self._up_vector(), dtype=np.float32)
+        self._bridge.set_camera_look_at(position=position, target=position + forward, up=up, fov=45.0)
 
     @override
     def begin_frame(self, time):

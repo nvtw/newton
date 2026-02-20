@@ -68,7 +68,12 @@ def _run_step1_mini_renderer(width: int, height: int, frames: int) -> int:
 
 
 def _run_step2_pathtracing(
-    width: int, height: int, frames: int, scene_gltf: str | None = None, scene_obj: str | None = None
+    width: int,
+    height: int,
+    frames: int,
+    scene_gltf: str | None = None,
+    scene_obj: str | None = None,
+    use_procedural_sky: bool = True,
 ) -> tuple[tuple[int, ...], float, float]:
     print("[Step 2] OptiX pathtracing")
 
@@ -82,6 +87,23 @@ def _run_step2_pathtracing(
             loaded = bridge.load_scene_from_obj(scene_obj)
         if not loaded:
             raise RuntimeError("External scene failed to load from provided glTF/OBJ paths")
+        if use_procedural_sky:
+            bridge.set_use_procedural_sky(True)
+            bridge.set_sky_parameters(
+                sun_direction=(0.0, 1.0, 0.5),
+                multiplier=1.0,
+                haze=0.0,
+                red_blue_shift=0.0,
+                saturation=1.0,
+                horizon_height=0.0,
+                ground_color=(0.4, 0.4, 0.4),
+                horizon_blur=1.0,
+                night_color=(0.0, 0.0, 0.0),
+                sun_disk_intensity=1.0,
+                sun_disk_scale=1.0,
+                sun_glow_intensity=1.0,
+                y_is_up=1,
+            )
         bridge.set_camera_angles(position=(0.0, 0.0, 6.0), yaw=180.0, pitch=0.0, fov=45.0)
         frame_count = max(1, int(frames))
         t0 = time.perf_counter()
@@ -104,6 +126,23 @@ def _run_step2_pathtracing(
         return output_shape, output_min, output_max
 
     viewer = create_a_beautiful_game_viewer(width=width, height=height)
+    if use_procedural_sky:
+        # Force procedural-sky path for C# parity testing.
+        viewer._env_map = None
+        viewer.sky_rgb_unit_conversion = (1.0 / 80000.0, 1.0 / 80000.0, 1.0 / 80000.0)
+        viewer.sky_multiplier = 1.0
+        viewer.sky_haze = 0.0
+        viewer.sky_redblueshift = 0.0
+        viewer.sky_saturation = 1.0
+        viewer.sky_horizon_height = 0.0
+        viewer.sky_ground_color = (0.4, 0.4, 0.4)
+        viewer.sky_horizon_blur = 1.0
+        viewer.sky_night_color = (0.0, 0.0, 0.0)
+        viewer.sky_sun_disk_intensity = 1.0
+        viewer.sky_sun_direction = (0.0, 1.0, 0.5)
+        viewer.sky_sun_disk_scale = 1.0
+        viewer.sky_sun_glow_intensity = 1.0
+        viewer.sky_y_is_up = 1
     if not viewer.build():
         raise RuntimeError("A Beautiful Game viewer build failed")
     frame_count = max(1, int(frames))
@@ -136,6 +175,12 @@ def main() -> int:
     parser.add_argument("--frames-step1", type=int, default=4)
     parser.add_argument("--frames-step2", type=int, default=16)
     parser.add_argument("--frames-step3", type=int, default=0, help="0 means run until window close")
+    parser.add_argument(
+        "--use-procedural-sky",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use procedural sky instead of HDR environment map (default: enabled).",
+    )
     parser.add_argument("--scene-gltf", type=str, default=None, help="Optional external glTF/GLB scene path for step 2.")
     parser.add_argument("--scene-obj", type=str, default=None, help="Optional external OBJ scene path for step 2 fallback.")
     args = parser.parse_args()
@@ -156,10 +201,17 @@ def main() -> int:
             args.frames_step2,
             scene_gltf=args.scene_gltf,
             scene_obj=args.scene_obj,
+            use_procedural_sky=bool(args.use_procedural_sky),
         )
     if args.step in ("3", "all"):
         print("[Step 3] A Beautiful Game live viewer")
-        _run_step3_live_gui(args.width, args.height, args.fps, args.frames_step3)
+        _run_step3_live_gui(
+            args.width,
+            args.height,
+            args.fps,
+            args.frames_step3,
+            use_procedural_sky=bool(args.use_procedural_sky),
+        )
 
     print("Done.")
     return 0
