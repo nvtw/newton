@@ -21,10 +21,6 @@ This viewer renders a scene using OptiX ray tracing with PBR materials,
 displaying raw buffers (radiance, normals, depth, etc.) for debugging.
 """
 
-import hashlib
-import os
-import re
-import shutil
 import sys
 from pathlib import Path
 from typing import Callable, Optional
@@ -32,7 +28,6 @@ from typing import Callable, Optional
 import numpy as np
 
 import warp as wp
-import warp._src.build as wp_build
 
 # Initialize warp
 wp.init()
@@ -43,6 +38,7 @@ from ..hit_kernels import HitKernel
 from ..sbt_helpers import SbtKernelManager
 from .camera import Camera
 from .environment_map import EnvironmentMap
+from .ptx_compiler import build_ptx, get_optix_include_dir
 from .scene import Scene
 from .tonemap import Tonemapper
 
@@ -64,352 +60,6 @@ def _accumulate_sample(
     a = accum[y, x]
     t = 1.0 / float(sample_index + 1)
     accum[y, x] = a + (s - a) * t
-
-
-def _get_optix_include_dir():
-    """Get the OptiX SDK include directory."""
-
-    def _has_optix_device_header(path: str) -> bool:
-        return os.path.isfile(os.path.join(path, "optix_device.h"))
-
-    def _parse_version_from_path(path: str) -> tuple[int, ...]:
-        # Windows example: ".../OptiX SDK 9.0.0/include"
-        m = re.search(r"OptiX SDK (\d+(?:\.\d+)*)", path)
-        if not m:
-            return (0,)
-        return tuple(int(p) for p in m.group(1).split("."))
-
-    # Check environment variable first.
-    optix_dir = os.environ.get("OPTIX_SDK_INCLUDE_DIR")
-    if optix_dir and os.path.isdir(optix_dir) and _has_optix_device_header(optix_dir):
-        return optix_dir
-
-    # Prefer highest installed OptiX SDK version on Windows.
-    discovered: list[str] = []
-    sdk_root = Path("C:/ProgramData/NVIDIA Corporation")
-    if sdk_root.is_dir():
-        for p in sdk_root.glob("OptiX SDK */include"):
-            if p.is_dir() and _has_optix_device_header(str(p)):
-                discovered.append(str(p))
-    discovered.sort(key=_parse_version_from_path, reverse=True)
-
-    # Common fallback locations (keep 9.0.0 first).
-    candidates = [
-        *discovered,
-        "C:/ProgramData/NVIDIA Corporation/OptiX SDK 9.0.0/include",
-        "C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.1.0/include",
-        "C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0/include",
-        "C:/ProgramData/NVIDIA Corporation/OptiX SDK 7.7.0/include",
-        "/opt/optix/include",
-        os.path.expanduser("~/optix/include"),
-    ]
-
-    for path in candidates:
-        if os.path.isdir(path) and _has_optix_device_header(path):
-            return path
-
-    return None
-
-
-def _load_header(path: Path) -> str:
-    """Load a header file as text."""
-    return path.read_text(encoding="utf-8")
-
-
-def _load_header_with_resolved_includes(path: Path, include_dirs: list[Path]) -> str:
-    """
-    Load a header and recursively inline local includes.
-
-    Supports ``#include "relative/path.h"`` and resolves first relative to the
-    including file, then against ``include_dirs``.
-    """
-    include_re = re.compile(r'^\s*#\s*include\s+"([^"]+)"\s*$')
-    visited: set[Path] = set()
-
-    def _resolve_include(include_name: str, current_dir: Path) -> Path | None:
-        candidates = [current_dir / include_name, *[inc_dir / include_name for inc_dir in include_dirs]]
-        for candidate in candidates:
-            candidate = candidate.resolve()
-            if candidate.is_file():
-                return candidate
-        return None
-
-    def _inline(file_path: Path) -> str:
-        file_path = file_path.resolve()
-        if file_path in visited:
-            return ""
-        visited.add(file_path)
-
-        out_lines = []
-        for line in file_path.read_text(encoding="utf-8").splitlines():
-            match = include_re.match(line)
-            if not match:
-                out_lines.append(line)
-                continue
-
-            include_name = match.group(1)
-            resolved = _resolve_include(include_name, file_path.parent)
-            if resolved is None:
-                # Keep unknown include lines untouched (e.g., non-local includes).
-                out_lines.append(line)
-                continue
-
-            out_lines.append(f"// === begin include: {include_name} ===")
-            out_lines.append(_inline(resolved))
-            out_lines.append(f"// === end include: {include_name} ===")
-
-        return "\n".join(out_lines)
-
-    return _inline(path)
-
-
-def _round_up(val: int, mult_of: int) -> int:
-    return val if val % mult_of == 0 else val + mult_of - val % mult_of
-
-
-def _get_aligned_itemsize(formats: list[str], alignment: int) -> int:
-    names = [f"x{i}" for i in range(len(formats))]
-    temp_dtype = np.dtype({"names": names, "formats": formats, "align": True})
-    return _round_up(temp_dtype.itemsize, alignment)
-
-
-def _get_ptx_cache_root() -> Path:
-    """Return OS-appropriate cache directory for OptiX PTX artifacts.
-
-    Resolution order:
-      1) user cache dir via Warp's bundled appdirs
-      2) fallback to ~/.cache/newton/optix/ptx
-    """
-    try:
-        from warp.thirdparty import appdirs  # noqa: PLC0415
-
-        cache_dir = appdirs.user_cache_dir(appname="newton", appauthor="Newton", version="optix-ptx")
-        if cache_dir:
-            return Path(cache_dir)
-    except Exception:
-        pass
-
-    return Path.home() / ".cache" / "newton" / "optix" / "ptx"
-
-
-def _build_ptx(optix_include_dir: str, headers_dir: Path) -> bytes:
-    """
-    Build PTX from the path tracing headers.
-
-    Args:
-        optix_include_dir: Path to OptiX SDK include directory
-        headers_dir: Path to the `cpp/` headers directory
-
-    Returns:
-        PTX string
-    """
-
-    def _compile_cuda_source_to_ptx(cuda_source: str, module_tag: str, device: str = "cuda") -> bytes:
-        """Compile in-memory CUDA source into PTX bytes."""
-        device_obj = wp.get_device(device)
-        if not device_obj.is_cuda:
-            raise RuntimeError(f"PTX can only be generated for CUDA devices, got '{device_obj}'")
-
-        digest = hashlib.sha256(cuda_source.encode("utf-8")).hexdigest()[:16]
-        local_cache_root = _get_ptx_cache_root()
-        # Keep cache by default for fast startup. If build fails (stale/corrupt
-        # cache), clear and retry once.
-        local_cache_root.mkdir(parents=True, exist_ok=True)
-        module_dir = os.path.join(str(local_cache_root), f"wp_pathtracing_{module_tag}_{digest}")
-        os.makedirs(module_dir, exist_ok=True)
-
-        cu_path = os.path.join(module_dir, f"wp_pathtracing_{module_tag}_{digest}.cu")
-        ptx_path = os.path.join(module_dir, f"wp_pathtracing_{module_tag}_{digest}.ptx")
-
-        with open(cu_path, "w", encoding="utf-8") as f:
-            f.write(cuda_source)
-
-        # Avoid stale/incompatible NVRTC PCH reuse across sessions. We only
-        # disable PCH for this local PTX build path.
-        old_use_pch = wp.config.use_precompiled_headers
-        try:
-            wp.config.use_precompiled_headers = False
-            try:
-                wp_build.build_cuda(cu_path, arch=device_obj.arch, output_path=ptx_path)
-            except Exception:
-                # Automatic recovery path for stale local PTX cache issues.
-                shutil.rmtree(local_cache_root, ignore_errors=True)
-                local_cache_root.mkdir(parents=True, exist_ok=True)
-                os.makedirs(module_dir, exist_ok=True)
-                wp_build.build_cuda(cu_path, arch=device_obj.arch, output_path=ptx_path)
-        finally:
-            wp.config.use_precompiled_headers = old_use_pch
-        with open(ptx_path, "rb") as f:
-            return f.read()
-
-    # Load func_common.h first (defines float4x4, float3, etc.)
-    func_common_path = headers_dir / "func_common.h"
-    func_common_content = _load_header(func_common_path) if func_common_path.exists() else ""
-
-    # Load constants.h
-    constants_path = headers_dir / "constants.h"
-    constants_content = _load_header(constants_path) if constants_path.exists() else ""
-
-    # Runtime launch params for the currently enabled OptiX programs.
-    # Keep this struct in strict sync with _update_launch_params().
-    runtime_launch_params = """
-// Display/output modes (mirrors pathtracing launch_params naming)
-#define OUTPUT_MODE_FINAL       0
-#define OUTPUT_MODE_RADIANCE    1
-#define OUTPUT_MODE_DEPTH       2
-#define OUTPUT_MODE_MOTION      3
-#define OUTPUT_MODE_NORMAL      4
-#define OUTPUT_MODE_ROUGHNESS   5
-#define OUTPUT_MODE_DIFFUSE     6
-#define OUTPUT_MODE_SPECULAR    7
-#define OUTPUT_MODE_SPEC_HITDIST 8
-
-struct RuntimeFrameInfo
-{
-    float view[16];
-    float proj[16];
-    float prevView[16];
-    float prevProj[16];
-    float prevMVP[16];
-    float viewInv[16];
-    float projInv[16];
-    float jitter[2];
-    float envIntensity[4];
-    float envRotation;
-    unsigned int flags;
-};
-
-struct RuntimeSkyInfo
-{
-    float rgbUnitConversion[3];
-    float multiplier;
-    float haze;
-    float redblueshift;
-    float saturation;
-    float horizonHeight;
-    float groundColor[3];
-    float horizonBlur;
-    float nightColor[3];
-    float sunDiskIntensity;
-    float sunDirection[3];
-    float sunDiskScale;
-    float sunGlowIntensity;
-    int   yIsUp;
-};
-
-struct LaunchParams
-{
-    OptixTraversableHandle tlas;
-    RuntimeFrameInfo       frameInfo;
-    RuntimeSkyInfo         skyInfo;
-    unsigned long long     materialAddress;
-    unsigned long long     compactMaterialAddress;
-    unsigned long long     instanceMaterialIdAddress;
-    unsigned long long     instanceRenderPrimIdAddress;
-    unsigned long long     renderPrimitiveAddress;
-    unsigned long long     instanceTransformsAddress;
-    unsigned long long     prevInstanceTransformsAddress;
-    unsigned int           materialCount;
-    unsigned int           instanceCount;
-    unsigned int           renderPrimCount;
-    unsigned int           frameIndex;
-    unsigned int           maxBounces;
-    unsigned int           directLightSamples;
-    unsigned long long     textureDescAddress;
-    unsigned long long     textureDataAddress;
-    unsigned int           textureCount;
-    unsigned int           _pad0;
-    unsigned long long     envMapAddress;
-    unsigned int           envMapWidth;
-    unsigned int           envMapHeight;
-    unsigned int           envMapFormat;
-    unsigned int           _pad1;
-    unsigned long long     envAccelAddress;
-    float                  envMapIntegral;
-    float                  envMapAverage;
-    unsigned long long     colorOutput;
-    unsigned long long     normalRoughnessOutput;
-    unsigned long long     motionVectorOutput;
-    unsigned long long     depthOutput;
-    unsigned long long     diffuseAlbedoOutput;
-    unsigned long long     specularAlbedoOutput;
-    unsigned long long     specHitDistOutput;
-    int                    outputMode;
-    int                    _pad2;
-};
-
-extern "C" __constant__ LaunchParams params;
-"""
-
-    # Entry header for runtime programs. Local includes are resolved recursively
-    # to avoid manual copy/paste concatenation of helper headers.
-    entry_header = headers_dir / "optix_programs.h"
-    if not entry_header.exists():
-        raise RuntimeError(f"Entry OptiX header not found: {entry_header}")
-    rt_content = _load_header_with_resolved_includes(entry_header, [headers_dir])
-
-    def _load_optix_device_header_text() -> str:
-        root = os.path.normpath(optix_include_dir)
-        optix_device_h = os.path.join(root, "optix_device.h")
-        if not os.path.isfile(optix_device_h):
-            raise RuntimeError(f"OptiX device header not found: {optix_device_h}")
-
-        include_pattern = re.compile(r'^\s*#\s*include\s+"([^"]+)"\s*$', re.MULTILINE)
-        visited = set()
-
-        def inline_local_includes(file_path: str) -> str:
-            norm_path = os.path.normpath(file_path)
-            if norm_path in visited:
-                return ""
-            visited.add(norm_path)
-
-            with open(norm_path, encoding="utf-8") as f:
-                src = f.read()
-
-            def replace_include(match):
-                rel = match.group(1)
-                include_path = os.path.normpath(os.path.join(os.path.dirname(norm_path), rel))
-                if not os.path.isfile(include_path):
-                    include_path = os.path.normpath(os.path.join(root, rel))
-                if include_path.startswith(root) and os.path.isfile(include_path):
-                    return inline_local_includes(include_path)
-                return match.group(0)
-
-            return include_pattern.sub(replace_include, src)
-
-        return "#define __OPTIX_INCLUDE_INTERNAL_HEADERS__\n" + inline_local_includes(optix_device_h)
-
-    # Build complete CUDA source
-    optix_header_text = _load_optix_device_header_text()
-    cuda_source = f"""
-// OptiX Path Tracing Kernels
-// Auto-generated from header files
-
-{optix_header_text}
-
-// CUDA texture/surface opaque handle types
-typedef unsigned long long cudaTextureObject_t;
-typedef unsigned long long cudaSurfaceObject_t;
-
-// === constants.h ===
-{constants_content}
-
-// === func_common.h ===
-{func_common_content}
-
-// === runtime launch params ===
-{runtime_launch_params}
-
-// RT headers (resolved from cpp/optix_programs.h includes)
-{rt_content}
-"""
-
-    # Compile to PTX
-    print("[PTX] Compiling path tracing kernels...")
-    ptx = _compile_cuda_source_to_ptx(cuda_source, module_tag="kernels", device="cuda")
-    print(f"[PTX] Compiled {len(ptx)} bytes")
-
-    return ptx
 
 
 class PathTracingViewer:
@@ -601,10 +251,9 @@ class PathTracingViewer:
         self._optix = optix
 
         # Get OptiX include directory
-        optix_include = _get_optix_include_dir()
+        optix_include = get_optix_include_dir(optix)
         if not optix_include:
             print("ERROR: Could not find OptiX SDK include directory.")
-            print("Set OPTIX_SDK_INCLUDE_DIR environment variable.")
             return False
 
         print(f"[Viewer] Using OptiX SDK: {optix_include}")
@@ -616,7 +265,7 @@ class PathTracingViewer:
 
         # Build PTX
         headers_dir = Path(__file__).parent / "cpp"
-        self._ptx = _build_ptx(optix_include, headers_dir)
+        self._ptx = build_ptx(optix_include, headers_dir)
 
         # Create scene
         self._scene = Scene(self._ctx)

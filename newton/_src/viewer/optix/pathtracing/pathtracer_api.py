@@ -24,7 +24,8 @@ import sys
 
 import numpy as np
 
-from .pathtracing_viewer import PathTracingViewer, _get_optix_include_dir
+from .pathtracing_viewer import PathTracingViewer
+from .ptx_compiler import get_optix_include_dir
 from .scene import Mesh
 
 
@@ -91,7 +92,7 @@ class PathTracerAPI:
         """Build actionable diagnostics for OptiX initialization failures."""
         optix_available = importlib.util.find_spec("optix") is not None
         optix_sdk_env = os.environ.get("OPTIX_SDK_INCLUDE_DIR")
-        optix_sdk_auto = _get_optix_include_dir()
+        optix_sdk_auto = get_optix_include_dir()
         return (
             "PathTracerAPI initialization failed.\n"
             f"- python executable: {sys.executable}\n"
