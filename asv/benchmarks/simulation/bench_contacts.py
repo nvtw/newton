@@ -18,14 +18,23 @@ from asv_runner.benchmarks.mark import skip_benchmark_if
 
 wp.config.quiet = True
 
+import newton
 from newton.examples.contacts.example_nut_bolt_hydro import Example as ExampleHydroWorking
 from newton.examples.contacts.example_nut_bolt_sdf import Example as ExampleSdf
 from newton.viewer import ViewerNull
+
+ISAACGYM_ENVS_REPO_URL = "https://github.com/isaac-sim/IsaacGymEnvs.git"
+ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
+ISAACGYM_GEARS_FOLDER = "assets/factory/mesh/factory_gears"
 
 
 class FastExampleContactSdfDefaults:
     repeat = 2
     number = 1
+
+    def setup_cache(self):
+        newton.utils.download_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER)
+        newton.utils.download_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_GEARS_FOLDER)
 
     def setup(self):
         self.num_frames = 20
@@ -48,6 +57,10 @@ class FastExampleContactSdfDefaults:
 class FastExampleContactHydroWorkingDefaults:
     repeat = 2
     number = 1
+
+    def setup_cache(self):
+        newton.utils.download_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER)
+        newton.utils.download_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_GEARS_FOLDER)
 
     def setup(self):
         self.num_frames = 20
