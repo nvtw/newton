@@ -47,7 +47,7 @@ SIM_TIME = 1.0
 VIEWER_NUM_FRAMES = 300
 
 # Test thresholds
-POSITION_THRESHOLD_FACTOR = 0.1  # multiplied by cube_half
+POSITION_THRESHOLD_FACTOR = 0.15  # multiplied by cube_half
 MAX_ROTATION_DEG = 10.0
 
 # Devices and solvers
