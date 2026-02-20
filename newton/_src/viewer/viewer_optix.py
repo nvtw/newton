@@ -289,6 +289,22 @@ class ViewerOptix(ViewerBase):
         viewer.sky_sun_glow_intensity = 1.0
         viewer.sky_y_is_up = 1
 
+    @staticmethod
+    def _create_texture_2d_compat(pyglet_module, gl_module, width: int, height: int):
+        """Create a 2D pyglet texture across pyglet API versions.
+
+        Newer pyglet versions (2.1.x) expose ``target`` and do not accept the
+        legacy ``rectangle`` argument, while older versions use ``rectangle``.
+        """
+        try:
+            return pyglet_module.image.Texture.create(width=width, height=height, rectangle=False)
+        except TypeError:
+            return pyglet_module.image.Texture.create(
+                width=width,
+                height=height,
+                target=gl_module.GL_TEXTURE_2D,
+            )
+
     def _ensure_window(self):
         """Lazily create the Pyglet display window and GL resources."""
         if self._headless or self._window is not None:
@@ -306,9 +322,7 @@ class ViewerOptix(ViewerBase):
         )
         self._window.set_minimum_size(128, 128)
 
-        self._gl_texture = pyglet.image.Texture.create(
-            width=self._width, height=self._height, rectangle=False
-        )
+        self._gl_texture = self._create_texture_2d_compat(pyglet, gl, self._width, self._height)
         self._gl_texture.min_filter = gl.GL_NEAREST
         self._gl_texture.mag_filter = gl.GL_NEAREST
         self._sprite = pyglet.sprite.Sprite(self._gl_texture, x=0, y=0)
@@ -351,7 +365,7 @@ class ViewerOptix(ViewerBase):
             self._pbo = None
 
         # Recreate texture + sprite
-        self._gl_texture = pyglet.image.Texture.create(width=w, height=h, rectangle=False)
+        self._gl_texture = self._create_texture_2d_compat(pyglet, gl, w, h)
         self._gl_texture.min_filter = gl.GL_NEAREST
         self._gl_texture.mag_filter = gl.GL_NEAREST
         self._sprite = pyglet.sprite.Sprite(self._gl_texture, x=0, y=0)
