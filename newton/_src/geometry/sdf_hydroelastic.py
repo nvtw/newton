@@ -106,7 +106,10 @@ def int_to_vec3f(x: wp.int32, y: wp.int32, z: wp.int32):
 @wp.func
 def get_effective_stiffness(k_a: wp.float32, k_b: wp.float32) -> wp.float32:
     """Compute effective stiffness for two materials in series."""
-    return (k_a * k_b) / (k_a + k_b)
+    denom = k_a + k_b
+    if denom <= 0.0:
+        return 0.0
+    return (k_a * k_b) / denom
 
 
 @dataclass
@@ -261,6 +264,11 @@ class HydroelasticSDF:
         frac = float(self.config.buffer_fraction)
         if frac <= 0.0 or frac > 1.0:
             raise ValueError(f"HydroelasticSDF.Config.buffer_fraction must be in (0, 1], got {frac}")
+        contact_frac = float(self.config.contact_buffer_fraction)
+        if contact_frac <= 0.0 or contact_frac > 1.0:
+            raise ValueError(
+                f"HydroelasticSDF.Config.contact_buffer_fraction must be in (0, 1], got {contact_frac}"
+            )
 
         mult = max(int(self.config.buffer_mult_iso * self.total_num_tiles * frac), 64)
         self.max_num_blocks_broad = max(

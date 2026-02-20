@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -111,7 +111,7 @@ class Example:
     def __init__(
         self,
         viewer,
-        num_worlds=1,
+        world_count=1,
         num_per_world=1,
         scene="nut_bolt",
         solver="xpbd",
@@ -124,7 +124,7 @@ class Example:
         self.sim_substeps = 50 if scene == "gears" else 5
         self.sim_dt = self.frame_dt / self.sim_substeps
 
-        self.num_worlds = num_worlds
+        self.world_count = world_count
         self.viewer = viewer
         self.scene = scene
         self.solver_type = solver
@@ -169,7 +169,7 @@ class Example:
             length=0.0,
             label="ground_plane",
         )
-        main_scene.replicate(world_builder, world_count=self.num_worlds)
+        main_scene.replicate(world_builder, world_count=self.world_count)
 
         self.model = main_scene.finalize()
 
@@ -188,7 +188,7 @@ class Example:
                 rigid_contact_relaxation=self.xpbd_contact_relaxation,
             )
         elif self.solver_type == "mujoco":
-            num_per_world = self.rigid_contact_max // self.num_worlds
+            num_per_world = self.rigid_contact_max // self.world_count
             self.solver = newton.solvers.SolverMuJoCo(
                 self.model,
                 use_mujoco_contacts=False,
@@ -330,7 +330,6 @@ class Example:
             self.state_0.clear_forces()
 
             self.viewer.apply_forces(self.state_0)
-            # self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
             self.state_0, self.state_1 = self.state_1, self.state_0
@@ -475,7 +474,7 @@ if __name__ == "__main__":
 
     example = Example(
         viewer,
-        num_worlds=args.world_count,
+        world_count=args.world_count,
         scene=args.scene,
         solver=args.solver,
         test_mode=args.test,

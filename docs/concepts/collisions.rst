@@ -561,7 +561,6 @@ For hydroelastic and SDF-based contacts, use :class:`~newton.geometry.Hydroelast
         betas=(10.0, -0.5),             # Scoring thresholds (default)
         sticky_contacts=0.0,            # Temporal persistence (0 = disabled)
         normal_matching=True,           # Align reduced normals with aggregate force
-        moment_matching=False,          # Match friction moments (experimental)
     )
 
     pipeline = CollisionPipeline(model, sdf_hydroelastic_config=config)
@@ -594,10 +593,6 @@ another prioritizes spatial coverage. More betas = more contacts retained but be
    * - ``normal_matching``
      - Rotates selected contact normals so their weighted sum aligns with the aggregate force direction 
        from all unreduced contacts. Preserves net force direction after reduction. Default: True.
-   * - ``moment_matching``
-     - Preserves torsional friction by adding an anchor contact at the depth-weighted centroid and 
-       scaling friction coefficients. This ensures the reduced contact set produces similar resistance 
-       to rotational sliding as the original contacts. Experimental. Default: False.
    * - ``margin_contact_area``
      - Lower bound on contact area. Hydroelastic stiffness is ``area * k_eff``, but contacts 
        within the contact margin that are not yet penetrating (speculative contacts) have zero 
@@ -909,13 +904,15 @@ The ``kh`` parameter on each shape controls area-dependent contact stiffness. Fo
 Contact reduction options for hydroelastic contacts are configured via :class:`~newton.geometry.HydroelasticSDF.Config` (see :ref:`Contact Reduction`).
 
 Hydroelastic memory can be tuned with ``buffer_fraction`` on
-:class:`~newton.SDFHydroelasticConfig`. This scales broadphase, iso-refinement,
+:class:`~newton.geometry.HydroelasticSDF.Config`. This scales broadphase, iso-refinement,
 and hydroelastic face-contact buffer allocations as a fraction of the worst-case
 size. Lower values reduce memory usage but also reduce overflow headroom.
 
 .. code-block:: python
 
-    config = SDFHydroelasticConfig(
+    from newton.geometry import HydroelasticSDF
+
+    config = HydroelasticSDF.Config(
         reduce_contacts=True,
         buffer_fraction=0.2,  # 20% of worst-case hydroelastic buffers
     )

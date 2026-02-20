@@ -82,7 +82,10 @@ EPS_SMALL = 1e-20
 
 @wp.func
 def _effective_stiffness(k_a: wp.float32, k_b: wp.float32) -> wp.float32:
-    return (k_a * k_b) / (k_a + k_b)
+    denom = k_a + k_b
+    if denom <= 0.0:
+        return 0.0
+    return (k_a * k_b) / denom
 
 
 # =============================================================================

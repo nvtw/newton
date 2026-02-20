@@ -282,7 +282,10 @@ def encode_oct(n: wp.vec3) -> wp.vec2:
     Projects the unit vector onto an octahedron and flattens to 2D.
     Near-uniform precision, stable numerics, no trig needed.
     """
-    inv_l1 = 1.0 / (wp.abs(n[0]) + wp.abs(n[1]) + wp.abs(n[2]))
+    l1 = wp.abs(n[0]) + wp.abs(n[1]) + wp.abs(n[2])
+    if l1 < 1.0e-20:
+        return wp.vec2(0.0, 0.0)
+    inv_l1 = 1.0 / l1
     ox = n[0] * inv_l1
     oy = n[1] * inv_l1
     oz = n[2] * inv_l1

@@ -91,7 +91,7 @@ class FastExampleContactHydroWorkingDefaults:
         self.num_frames = 20
         self.example = example_cls(
             viewer=ViewerNull(num_frames=self.num_frames),
-            num_worlds=20,
+            world_count=20,
             num_per_world=1,
             scene="nut_bolt",
             solver="mujoco",
