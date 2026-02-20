@@ -159,6 +159,7 @@ class PathTracingViewer:
         self._dlss_output_buffer = None
         self._instance_transforms_buffer = None
         self._prev_instance_transforms_buffer = None
+        self._prev_instance_transforms_valid = False
 
         # Launch params buffer — cached to avoid per-frame allocation
         self._launch_params_buffer = None
@@ -549,7 +550,14 @@ class PathTracingViewer:
         )
 
     def _update_instance_transform_buffers(self):
-        """Upload current/previous instance transforms for motion vectors."""
+        """Upload current instance transforms for motion vectors.
+
+        The *previous* transforms buffer is populated by
+        :meth:`_snapshot_instance_transforms` which copies the current
+        buffer to the previous buffer **after** each rendered frame.
+        This guarantees that ``prev`` always holds exactly the transforms
+        that were used for the last rendered frame.
+        """
         if self._scene is None or self._scene.instance_count == 0:
             self._instance_transforms_buffer = None
             self._prev_instance_transforms_buffer = None
@@ -565,28 +573,41 @@ class PathTracingViewer:
 
         count = len(instances)
 
-        # Reuse numpy staging buffers when instance count is stable.
+        # (Re)allocate GPU buffers when the instance count changes.
         if count != self._instance_transform_count:
             self._instance_xform_curr_np = np.empty((count, 12), dtype=np.float32)
-            self._instance_xform_prev_np = np.empty((count, 12), dtype=np.float32)
             self._instance_transforms_buffer = wp.empty(count * 12, dtype=wp.float32, device="cuda")
             self._prev_instance_transforms_buffer = wp.empty(count * 12, dtype=wp.float32, device="cuda")
             self._instance_transform_count = count
+            self._prev_instance_transforms_valid = False
 
         curr = self._instance_xform_curr_np
-        prev = self._instance_xform_prev_np
         for i, inst in enumerate(instances):
             m = np.asarray(inst.transform, dtype=np.float32).reshape(4, 4)
-            pm = np.asarray(inst.prev_transform, dtype=np.float32).reshape(4, 4)
             curr[i, 0:4] = m[0, :]
             curr[i, 4:8] = m[1, :]
             curr[i, 8:12] = m[2, :]
-            prev[i, 0:4] = pm[0, :]
-            prev[i, 4:8] = pm[1, :]
-            prev[i, 8:12] = pm[2, :]
 
         self._instance_transforms_buffer.assign(curr.reshape(-1))
-        self._prev_instance_transforms_buffer.assign(prev.reshape(-1))
+
+        # First frame (or after resize): prev == current so motion is zero.
+        if not self._prev_instance_transforms_valid:
+            wp.copy(self._prev_instance_transforms_buffer, self._instance_transforms_buffer)
+            self._prev_instance_transforms_valid = True
+
+    def _snapshot_instance_transforms(self):
+        """Copy current instance transforms to the previous-frame buffer on GPU.
+
+        Must be called once per frame **after** the OptiX launch so that the
+        next frame sees the correct previous-frame transforms for rigid-body
+        motion vectors.
+        """
+        if (
+            self._instance_transforms_buffer is not None
+            and self._prev_instance_transforms_buffer is not None
+            and self._instance_transforms_buffer.shape == self._prev_instance_transforms_buffer.shape
+        ):
+            wp.copy(self._prev_instance_transforms_buffer, self._instance_transforms_buffer)
 
     def _create_pipeline(self):
         """Create the OptiX pipeline."""
@@ -946,6 +967,10 @@ class PathTracingViewer:
         samples_this_frame = 1 if self._dlss_enabled else self.samples_per_frame
         reset_temporal = self._update_temporal_state(current_view, current_proj, use_external_accum)
         self._launch_samples(samples_this_frame, use_external_accum)
+
+        # Snapshot current instance transforms -> previous for next frame's
+        # rigid-body motion vectors.  This is a GPU-side copy so it is cheap.
+        self._snapshot_instance_transforms()
 
         # Keep previous matrices for next frame's motion-vector calculation.
         self._prev_view = current_view.copy()
