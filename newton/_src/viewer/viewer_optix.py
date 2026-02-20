@@ -97,6 +97,8 @@ class ViewerOptix(ViewerBase):
         - Hardware-accelerated path tracing with PBR materials.
         - Procedural sky / HDR environment lighting.
         - DLSS Ray Reconstruction denoising (when available).
+        - Automatic coordinate system conversion (Z-up / X-up -> Y-up).
+        - sRGB-to-linear color conversion for correct PBR shading.
         - WASD/QE + mouse camera controls.
         - 1-8 debug output modes (final, depth, normal, roughness, ...).
         - Headless mode for offscreen rendering.
@@ -148,6 +150,9 @@ class ViewerOptix(ViewerBase):
         # Whether per-instance material IDs need uploading after scene build
         self._materials_dirty = False
 
+        # Global transform for coordinate system conversion (identity = Y-up native)
+        self._global_transform: np.ndarray | None = None
+
         # Pyglet window resources (created lazily in _ensure_window)
         self._window = None
         self._gl_texture = None
@@ -156,14 +161,13 @@ class ViewerOptix(ViewerBase):
         self._cuda_gl = None
         self._display_u32 = None
 
-        # Camera state (pitch/yaw in degrees, matching ViewerGL convention)
-        self._cam_pos = np.array([0.0, 2.0, 10.0], dtype=np.float32)
+        # Camera state (pitch/yaw in degrees)
+        # Convention matches hybrid_viewer / C#: yaw=0 looks in +Z
+        self._cam_pos = np.array([0.0, 2.0, 8.0], dtype=np.float32)
         self._cam_pitch = 0.0
-        self._cam_yaw = 0.0
+        self._cam_yaw = 180.0  # Look toward -Z (toward origin)
         self._cam_fov = 45.0
         self._cam_speed = 4.0  # m/s
-        self._cam_vel = np.zeros(3, dtype=np.float32)
-        self._cam_damp_tau = 0.083  # s
 
         # Previous camera state for dirty detection (None = never synced)
         self._prev_cam_pos: np.ndarray | None = None
@@ -208,7 +212,7 @@ class ViewerOptix(ViewerBase):
             raise RuntimeError("Failed to initialize OptiX path tracer. Check GPU drivers and OptiX SDK installation.")
         self._scene = self._bridge.scene
 
-        # Configure default procedural sky (matching example_a_beautiful_game_live_viewer)
+        # Configure procedural sky matching PythonBridge.cs PhysicalSkyParameters.Default
         viewer = self._bridge.viewer
         viewer._env_map = None
         viewer.sky_rgb_unit_conversion = (1.0 / 80000.0, 1.0 / 80000.0, 1.0 / 80000.0)
@@ -221,7 +225,7 @@ class ViewerOptix(ViewerBase):
         viewer.sky_horizon_blur = 1.0
         viewer.sky_night_color = (0.0, 0.0, 0.0)
         viewer.sky_sun_disk_intensity = 1.0
-        viewer.sky_sun_direction = (0.5, 1.0, 0.3)
+        viewer.sky_sun_direction = (0.0, 1.0, 0.5)
         viewer.sky_sun_disk_scale = 1.0
         viewer.sky_sun_glow_intensity = 1.0
         viewer.sky_y_is_up = 1
@@ -279,16 +283,46 @@ class ViewerOptix(ViewerBase):
         super().set_model(model, max_worlds=max_worlds)
 
         if model is not None:
-            if model.up_axis == 0:  # X up
-                self._cam_pos = np.array([2.0, 0.0, 10.0], dtype=np.float32)
-            elif model.up_axis == 2:  # Z up
-                self._cam_pos = np.array([10.0, 0.0, 2.0], dtype=np.float32)
-            else:  # Y up
-                self._cam_pos = np.array([0.0, 2.0, 10.0], dtype=np.float32)
+            self._setup_global_transform(model.up_axis)
+
+            # Default camera in rendering (Y-up) space
+            self._cam_pos = np.array([0.0, 2.0, 8.0], dtype=np.float32)
+            self._cam_yaw = 180.0
+            self._cam_pitch = 0.0
             self._prev_cam_pos = self._cam_pos.copy()
             self._prev_cam_pitch = self._cam_pitch
             self._prev_cam_yaw = self._cam_yaw
             self._prev_cam_fov = self._cam_fov
+
+    def _setup_global_transform(self, up_axis: int):
+        """Set up global transform based on model's up_axis.
+
+        Matches hybrid_viewer.py: converts physics coordinates to Y-up
+        rendering space by applying a rotation to all instance transforms.
+
+        Args:
+            up_axis: 0 for X-up, 1 for Y-up, 2 for Z-up.
+        """
+        if up_axis == 2:  # Z-up -> Y-up: rotate -90 degrees around X
+            angle = -np.pi / 2
+            c, s = float(np.cos(angle)), float(np.sin(angle))
+            self._global_transform = np.array([
+                [1, 0, 0, 0],
+                [0, c, -s, 0],
+                [0, s, c, 0],
+                [0, 0, 0, 1],
+            ], dtype=np.float32)
+        elif up_axis == 0:  # X-up -> Y-up: rotate -90 degrees around Z
+            angle = -np.pi / 2
+            c, s = float(np.cos(angle)), float(np.sin(angle))
+            self._global_transform = np.array([
+                [c, -s, 0, 0],
+                [s, c, 0, 0],
+                [0, 0, 1, 0],
+                [0, 0, 0, 1],
+            ], dtype=np.float32)
+        else:  # Y-up (native) - no transform needed
+            self._global_transform = None
 
     @override
     def set_camera(self, pos: wp.vec3, pitch: float, yaw: float):
@@ -356,38 +390,39 @@ class ViewerOptix(ViewerBase):
 
         if existing_ids is not None and len(existing_ids) == transform_count:
             for i, inst_id in enumerate(existing_ids):
-                mat = self._transform_scale_to_mat4(xforms_np[i], scales_np[i] if scales_np is not None else None)
+                mat = self._build_instance_matrix(xforms_np[i], scales_np[i] if scales_np is not None else None)
                 self._scene.set_instance_transform(inst_id, mat)
             self._tlas_dirty = True
         else:
             instance_ids = []
             for i in range(transform_count):
-                mat = self._transform_scale_to_mat4(xforms_np[i], scales_np[i] if scales_np is not None else None)
+                mat = self._build_instance_matrix(xforms_np[i], scales_np[i] if scales_np is not None else None)
                 inst_id = self._scene.add_instance(mesh_id, transform=mat)
                 instance_ids.append(inst_id)
             self._instance_name_to_optix_ids[name] = instance_ids
             self._tlas_dirty = True
 
-        # Assign per-instance materials from colors
+        # Assign per-instance materials from colors (sRGB -> linear conversion)
         if colors is not None and self._scene is not None:
             colors_np = colors.numpy() if isinstance(colors, wp.array) else np.asarray(colors)
             materials_np = materials.numpy() if isinstance(materials, wp.array) and materials is not None else None
 
             inst_ids = self._instance_name_to_optix_ids.get(name, [])
             for i in range(min(len(inst_ids), len(colors_np))):
-                r, g, b = (
-                    round(float(colors_np[i][0]), 3),
-                    round(float(colors_np[i][1]), 3),
-                    round(float(colors_np[i][2]), 3),
-                )
+                r_srgb = round(float(colors_np[i][0]), 2)
+                g_srgb = round(float(colors_np[i][1]), 2)
+                b_srgb = round(float(colors_np[i][2]), 2)
                 roughness = round(float(materials_np[i][0]), 3) if materials_np is not None and i < len(materials_np) else 0.5
                 metallic = round(float(materials_np[i][1]), 3) if materials_np is not None and i < len(materials_np) else 0.0
 
-                cache_key = (r, g, b, roughness, metallic)
+                cache_key = (r_srgb, g_srgb, b_srgb, roughness, metallic)
                 mat_id = self._material_cache.get(cache_key)
                 if mat_id is None:
+                    r_lin = self._srgb_to_linear(r_srgb)
+                    g_lin = self._srgb_to_linear(g_srgb)
+                    b_lin = self._srgb_to_linear(b_srgb)
                     mat_id = self._scene.materials.add_pbr(
-                        base_color=(r, g, b),
+                        base_color=(r_lin, g_lin, b_lin),
                         roughness=roughness,
                         metallic=metallic,
                     )
@@ -544,8 +579,22 @@ class ViewerOptix(ViewerBase):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _transform_scale_to_mat4(xform_np, scale_np=None) -> np.ndarray:
-        """Convert a Newton transform (pos + quat) and optional scale to a 4x4 matrix."""
+    def _srgb_to_linear(c: float) -> float:
+        """Convert a single sRGB channel value to linear space.
+
+        Matches hybrid_viewer.py's conversion for correct PBR shading.
+        """
+        if c <= 0.04045:
+            return c / 12.92
+        return ((c + 0.055) / 1.055) ** 2.4
+
+    @staticmethod
+    def _quat_scale_to_mat4(xform_np, scale_np=None) -> np.ndarray:
+        """Convert a Newton transform (pos + quat) and optional scale to a 4x4 matrix.
+
+        Matches bridge.py ``_build_transform``: rotation is stored row-major
+        and scale is applied per-column (axis-aligned in world space).
+        """
         px, py, pz = float(xform_np[0]), float(xform_np[1]), float(xform_np[2])
         qx, qy, qz, qw = float(xform_np[3]), float(xform_np[4]), float(xform_np[5]), float(xform_np[6])
 
@@ -569,11 +618,23 @@ class ViewerOptix(ViewerBase):
 
         if scale_np is not None:
             sx, sy, sz = float(scale_np[0]), float(scale_np[1]), float(scale_np[2])
-            m[0, :3] *= sx
-            m[1, :3] *= sy
-            m[2, :3] *= sz
+            m[:3, 0] *= sx
+            m[:3, 1] *= sy
+            m[:3, 2] *= sz
 
         return m
+
+    def _build_instance_matrix(self, xform_np, scale_np=None) -> np.ndarray:
+        """Build a 4x4 instance matrix with the global up-axis transform applied.
+
+        OptiX uses column-vector convention (``p' = M * p``), so the global
+        transform (coordinate system conversion) must pre-multiply the local
+        object transform: ``final = global @ local``.
+        """
+        local = self._quat_scale_to_mat4(xform_np, scale_np)
+        if self._global_transform is not None:
+            return self._global_transform @ local
+        return local
 
     def _camera_changed(self) -> bool:
         """Return True if the camera moved since the last sync (or never synced)."""
@@ -590,7 +651,11 @@ class ViewerOptix(ViewerBase):
         return False
 
     def _sync_camera(self):
-        """Push the viewer camera state into the OptiX camera only when it changes."""
+        """Push the viewer camera state into the OptiX camera only when it changes.
+
+        Uses the C# camera convention (matching hybrid_viewer / PythonBridge):
+        yaw=0 looks in +Z, X = sin(yaw)*cos(pitch), Z = cos(yaw)*cos(pitch).
+        """
         if self._bridge is None:
             return
 
@@ -603,9 +668,9 @@ class ViewerOptix(ViewerBase):
         cos_p = math.cos(pitch_rad)
         fwd = np.array(
             [
-                math.cos(yaw_rad) * cos_p,
-                math.sin(pitch_rad),
                 math.sin(yaw_rad) * cos_p,
+                math.sin(pitch_rad),
+                math.cos(yaw_rad) * cos_p,
             ],
             dtype=np.float32,
         )
@@ -618,7 +683,6 @@ class ViewerOptix(ViewerBase):
         cam.fov = self._cam_fov
         cam.set_aspect_ratio(self._width, self._height)
 
-        self._bridge.viewer.sample_index = 0
         self._prev_cam_pos = self._cam_pos.copy()
         self._prev_cam_pitch = self._cam_pitch
         self._prev_cam_yaw = self._cam_yaw
@@ -791,44 +855,55 @@ class ViewerOptix(ViewerBase):
         self._update_camera_movement(dt)
 
     def _update_camera_movement(self, dt: float):
-        """Integrate WASD/QE camera movement."""
+        """Move camera directly at constant speed (no inertia).
+
+        Matches hybrid_viewer._update_camera_from_input: immediate response,
+        no velocity damping.
+        """
         try:
             from pyglet.window import key
         except ImportError:
             return
 
         yaw_rad = math.radians(self._cam_yaw)
+        pitch_rad = math.radians(self._cam_pitch)
 
-        fwd_horiz = np.array([math.cos(yaw_rad), 0.0, math.sin(yaw_rad)], dtype=np.float32)
-        n = np.linalg.norm(fwd_horiz)
-        if n > 1e-6:
-            fwd_horiz /= n
-        right = np.array([-math.sin(yaw_rad), 0.0, math.cos(yaw_rad)], dtype=np.float32)
-        up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        cos_p = math.cos(pitch_rad)
+        forward = np.array(
+            [math.sin(yaw_rad) * cos_p, math.sin(pitch_rad), math.cos(yaw_rad) * cos_p],
+            dtype=np.float32,
+        )
+        world_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        right = np.cross(forward, world_up)
+        rn = np.linalg.norm(right)
+        if rn > 1e-6:
+            right /= rn
 
-        desired = np.zeros(3, dtype=np.float32)
+        direction = np.zeros(3, dtype=np.float32)
+        has_input = False
         if key.W in self._keys_down or key.UP in self._keys_down:
-            desired += fwd_horiz
+            direction += forward
+            has_input = True
         if key.S in self._keys_down or key.DOWN in self._keys_down:
-            desired -= fwd_horiz
+            direction -= forward
+            has_input = True
         if key.A in self._keys_down or key.LEFT in self._keys_down:
-            desired -= right
+            direction -= right
+            has_input = True
         if key.D in self._keys_down or key.RIGHT in self._keys_down:
-            desired += right
+            direction += right
+            has_input = True
         if key.Q in self._keys_down:
-            desired -= up
+            direction -= world_up
+            has_input = True
         if key.E in self._keys_down:
-            desired += up
+            direction += world_up
+            has_input = True
 
-        dn = np.linalg.norm(desired)
-        if dn > 1e-6:
-            desired = desired / dn * self._cam_speed
-        else:
-            desired[:] = 0.0
-
-        tau = max(1e-4, self._cam_damp_tau)
-        self._cam_vel += (desired - self._cam_vel) * (dt / tau)
-        self._cam_pos += self._cam_vel * dt
+        if has_input:
+            dn = float(np.linalg.norm(direction))
+            if dn > 1e-6:
+                self._cam_pos += (direction / dn) * self._cam_speed * dt
 
     def _update_timing(self):
         """Track FPS and update window title."""

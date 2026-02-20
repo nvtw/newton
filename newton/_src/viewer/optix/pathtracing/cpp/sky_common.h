@@ -288,6 +288,38 @@ static __forceinline__ __device__ float nightBrightnessAdjustment(float3 sunDir)
     return factor;
 }
 
+static __forceinline__ __device__ float2 calcPhysicalScale(float sunDiskScale, float sunGlowIntensity, float sunDiskIntensity)
+{
+    float sunAngularRadius = 0.00465f;
+    float sunDiskRadius = sunAngularRadius * sunDiskScale;
+    float sunGlowRadius = sunDiskRadius * 10.0f;
+
+    float glowFuncIntegral = sunGlowIntensity
+        * ((4.0f * M_PIf) - (24.0f * M_PIf) / (sunGlowRadius * sunGlowRadius)
+           + (24.0f * M_PIf) * sinf(sunGlowRadius) / (sunGlowRadius * sunGlowRadius * sunGlowRadius));
+
+    float targetSundiskIntegral = sunDiskIntensity * M_PIf;
+
+    float skySunglowScale = 1.0f;
+    float maxGlowIntegral = 0.5f * targetSundiskIntegral;
+    if (glowFuncIntegral > maxGlowIntegral) {
+        skySunglowScale *= maxGlowIntegral / glowFuncIntegral;
+        targetSundiskIntegral -= maxGlowIntegral;
+    } else {
+        targetSundiskIntegral -= glowFuncIntegral;
+    }
+
+    float sundiskArea = 2.0f * M_PIf * (1.0f - cosf(sunDiskRadius));
+    float targetSundiskIntensity = targetSundiskIntegral / sundiskArea;
+
+    float actualSundiskIntegral = 1.0f * sundiskArea;
+    float actualSundiskIntensity = sunDiskIntensity * 100.0f * actualSundiskIntegral / sundiskArea;
+    return make_float2(
+        (targetSundiskIntensity == 0.0f) ? 0.0f : targetSundiskIntensity / actualSundiskIntensity,
+        skySunglowScale
+    );
+}
+
 static __forceinline__ __device__ float3 evalPhysicalSky(const PhysicalSkyParameters& ss, float3 inDirection)
 {
     if (ss.multiplier <= 0.0f)
@@ -326,9 +358,12 @@ static __forceinline__ __device__ float3 evalPhysicalSky(const PhysicalSkyParame
         float sunAngle = acosf(dot(realDir, realSunDir));
         float glowRadius = 0.00465f * ss.sunDiskScale * 10.0f;
         if (sunAngle < glowRadius) {
+            float2 scales = calcPhysicalScale(ss.sunDiskScale, ss.sunGlowIntensity, ss.sunDiskIntensity);
             float centerProximity = (1.0f - sunAngle / glowRadius);
-            float glowFactor = powf(centerProximity, 3.0f) * 2.0f * ss.sunGlowIntensity;
-            float diskFactor = (centerProximity > 0.85f) ? 100.0f * ss.sunDiskIntensity : 0.0f;
+            float glowFactor = powf(centerProximity, 3.0f) * 2.0f * ss.sunGlowIntensity * scales.y;
+            float smoothEdge = 0.95f + (localHaze / 500.0f);
+            float t_ss = fminf(fmaxf((centerProximity - 0.85f) / (smoothEdge - 0.85f), 0.0f), 1.0f);
+            float diskFactor = (t_ss * t_ss * (3.0f - 2.0f * t_ss)) * 100.0f * ss.sunDiskIntensity * scales.x;
             tint = tint + dataSunColor * (glowFactor + diskFactor);
         }
     }

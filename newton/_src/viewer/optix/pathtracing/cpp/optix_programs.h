@@ -528,6 +528,7 @@ extern "C" __global__ void __raygen__primary()
         float3 secOrigin = origin;
         float3 secDirection = sampleData.k2;
         float3 throughput = sampleData.bsdf_over_pdf;
+        float bsdfPdf = fmaxf(sampleData.pdf, 0.0001f);
 
         // STEP 3.3 - Trace secondary bounces.
         const int maxDepth = int((params.maxBounces > 0u) ? params.maxBounces : 1u);
@@ -549,7 +550,22 @@ extern "C" __global__ void __raygen__primary()
                 pathLength = fabsf(t);
 
             if (miss) {
-                radiance = radiance + throughput * eval_environment(secDirection);
+                float3 envColor;
+                float envPdf;
+                if (TEST_FLAG(params.frameInfo.flags, FLAGS_ENVMAP_SKY)) {
+                    const PhysicalSkyParameters sky = sky_params_from_launch();
+                    envColor = evalPhysicalSky(sky, secDirection)
+                        * make_float3(params.frameInfo.envIntensity[0], params.frameInfo.envIntensity[1],
+                                      params.frameInfo.envIntensity[2]);
+                    envPdf = samplePhysicalSkyPDF(sky, secDirection);
+                } else {
+                    envColor = eval_environment(secDirection);
+                    envPdf = 1.0f / (4.0f * M_PIf);
+                }
+                float misWeight = powerHeuristic(bsdfPdf, fmaxf(envPdf, 0.0001f));
+                if (isnan(misWeight) || isinf(misWeight))
+                    misWeight = 0.0f;
+                radiance = radiance + throughput * envColor * misWeight;
                 break;
             }
 
@@ -651,6 +667,7 @@ extern "C" __global__ void __raygen__primary()
 
             secOrigin = offsetRay(secHitPos, secPbrMat.Ng);
             secDirection = normalize(secSample.k2);
+            bsdfPdf = fmaxf(secSample.pdf, 0.0001f);
         }
     }
 
