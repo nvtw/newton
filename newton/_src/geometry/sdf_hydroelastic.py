@@ -266,9 +266,7 @@ class HydroelasticSDF:
             raise ValueError(f"HydroelasticSDF.Config.buffer_fraction must be in (0, 1], got {frac}")
         contact_frac = float(self.config.contact_buffer_fraction)
         if contact_frac <= 0.0 or contact_frac > 1.0:
-            raise ValueError(
-                f"HydroelasticSDF.Config.contact_buffer_fraction must be in (0, 1], got {contact_frac}"
-            )
+            raise ValueError(f"HydroelasticSDF.Config.contact_buffer_fraction must be in (0, 1], got {contact_frac}")
 
         mult = max(int(self.config.buffer_mult_iso * self.total_num_tiles * frac), 64)
         self.max_num_blocks_broad = max(
