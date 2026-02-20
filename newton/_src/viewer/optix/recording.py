@@ -139,10 +139,15 @@ class LiveMp4Recorder:
             codec,
         ]
         if codec == "h264_nvenc":
-            cmd += ["-preset", "p4"]
+            # High-quality VBR mode for NVENC.
+            cmd += ["-preset", "p7", "-tune", "hq", "-rc", "vbr", "-cq", "16", "-b:v", "0"]
+        elif codec in {"h264_qsv", "h264_amf"}:
+            # Use a high target bitrate on other HW encoders to reduce visible artifacts.
+            cmd += ["-b:v", "50M", "-maxrate", "100M", "-bufsize", "150M"]
         elif codec == "libx264":
-            cmd += ["-preset", "fast"]
-        cmd += ["-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output_path)]
+            # Stronger quality setting while keeping H.264 web compatibility.
+            cmd += ["-preset", "slow", "-crf", "16"]
+        cmd += ["-vf", "vflip", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output_path)]
 
         self._proc = subprocess.Popen(
             cmd,

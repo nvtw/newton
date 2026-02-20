@@ -798,15 +798,18 @@ class ViewerOptix(ViewerBase):
         fps_hint = self._current_fps if self._current_fps > 1.0 else 60.0
         target_path = self._recorder.suggested_output_path()
         logger.info("Starting recording. Output file: %s", target_path)
+        print(f"[OptiX Recording] Starting: {target_path}")
         if self._recorder.start(self._width, self._height, fps=fps_hint, output_path=target_path):
             self._record_frame_gpu = wp.empty(shape=(self._height, self._width, 3), dtype=wp.uint8, device="cuda")
         else:
             logger.info("Recording backend unavailable; recording skipped for %s", target_path)
+            print(f"[OptiX Recording] Unavailable (missing optional dependency): {target_path}")
 
     def _stop_recording(self):
         output_path = self._recorder.stop()
         if output_path is not None:
             logger.info("Recording saved to: %s", output_path)
+            print(f"[OptiX Recording] Saved: {output_path}")
         self._record_frame_gpu = None
 
     def _record_frame_if_needed(self):
