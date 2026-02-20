@@ -14,19 +14,33 @@
 # limitations under the License.
 
 import warp as wp
-from asv_runner.benchmarks.mark import skip_benchmark_if
+from asv_runner.benchmarks.mark import SkipNotImplemented, skip_benchmark_if
 
 wp.config.quiet = True
 
-import newton
-import newton.examples
-from newton.examples.contacts.example_nut_bolt_hydro import Example as ExampleHydroWorking
-from newton.examples.contacts.example_nut_bolt_sdf import Example as ExampleSdf
+import importlib
+
 from newton.viewer import ViewerNull
 
 ISAACGYM_ENVS_REPO_URL = "https://github.com/isaac-sim/IsaacGymEnvs.git"
 ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
 ISAACGYM_GEARS_FOLDER = "assets/factory/mesh/factory_gears"
+
+try:
+    from newton.examples import download_external_git_folder as _download_external_git_folder
+except ImportError:
+    from newton._src.utils.download_assets import download_git_folder as _download_external_git_folder
+
+
+def _import_example_class(module_names: list[str]):
+    for module_name in module_names:
+        try:
+            module = importlib.import_module(module_name)
+        except ModuleNotFoundError:
+            continue
+        return module.Example
+
+    raise SkipNotImplemented
 
 
 class FastExampleContactSdfDefaults:
@@ -34,12 +48,17 @@ class FastExampleContactSdfDefaults:
     number = 1
 
     def setup_cache(self):
-        newton.examples.download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER)
-        newton.examples.download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_GEARS_FOLDER)
+        _download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER)
+        _download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_GEARS_FOLDER)
 
     def setup(self):
+        example_cls = _import_example_class(
+            [
+                "newton.examples.contacts.example_nut_bolt_sdf",
+            ]
+        )
         self.num_frames = 20
-        self.example = ExampleSdf(
+        self.example = example_cls(
             viewer=ViewerNull(num_frames=self.num_frames),
             world_count=100,
             num_per_world=1,
@@ -60,12 +79,17 @@ class FastExampleContactHydroWorkingDefaults:
     number = 1
 
     def setup_cache(self):
-        newton.examples.download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER)
-        newton.examples.download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_GEARS_FOLDER)
+        _download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER)
+        _download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_GEARS_FOLDER)
 
     def setup(self):
+        example_cls = _import_example_class(
+            [
+                "newton.examples.contacts.example_nut_bolt_hydro",
+            ]
+        )
         self.num_frames = 20
-        self.example = ExampleHydroWorking(
+        self.example = example_cls(
             viewer=ViewerNull(num_frames=self.num_frames),
             num_worlds=20,
             num_per_world=1,
