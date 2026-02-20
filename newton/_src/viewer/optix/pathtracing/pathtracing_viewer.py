@@ -507,8 +507,12 @@ class PathTracingViewer:
         self._instance_transforms_buffer = None
         self._prev_instance_transforms_buffer = None
 
-        # Launch params buffer
+        # Launch params buffer — cached to avoid per-frame allocation
         self._launch_params_buffer = None
+        self._launch_params_dtype = None
+        self._launch_params_np = None
+        self._launch_params_size = 0
+        self._instance_transform_count = 0
 
         # CUDA surface objects
         self._color_surface = None
@@ -886,33 +890,40 @@ class PathTracingViewer:
         if self._scene is None or self._scene.instance_count == 0:
             self._instance_transforms_buffer = None
             self._prev_instance_transforms_buffer = None
+            self._instance_transform_count = 0
             return
 
         instances = getattr(self._scene, "_instances", None)
         if not instances:
             self._instance_transforms_buffer = None
             self._prev_instance_transforms_buffer = None
+            self._instance_transform_count = 0
             return
 
         count = len(instances)
-        curr = np.zeros((count, 12), dtype=np.float32)
-        prev = np.zeros((count, 12), dtype=np.float32)
+
+        # Reuse numpy staging buffers when instance count is stable.
+        if count != self._instance_transform_count:
+            self._instance_xform_curr_np = np.empty((count, 12), dtype=np.float32)
+            self._instance_xform_prev_np = np.empty((count, 12), dtype=np.float32)
+            self._instance_transforms_buffer = wp.empty(count * 12, dtype=wp.float32, device="cuda")
+            self._prev_instance_transforms_buffer = wp.empty(count * 12, dtype=wp.float32, device="cuda")
+            self._instance_transform_count = count
+
+        curr = self._instance_xform_curr_np
+        prev = self._instance_xform_prev_np
         for i, inst in enumerate(instances):
             m = np.asarray(inst.transform, dtype=np.float32).reshape(4, 4)
             pm = np.asarray(inst.prev_transform, dtype=np.float32).reshape(4, 4)
-            curr[i, :] = (
-                m[0, 0], m[0, 1], m[0, 2], m[0, 3],
-                m[1, 0], m[1, 1], m[1, 2], m[1, 3],
-                m[2, 0], m[2, 1], m[2, 2], m[2, 3],
-            )
-            prev[i, :] = (
-                pm[0, 0], pm[0, 1], pm[0, 2], pm[0, 3],
-                pm[1, 0], pm[1, 1], pm[1, 2], pm[1, 3],
-                pm[2, 0], pm[2, 1], pm[2, 2], pm[2, 3],
-            )
+            curr[i, 0:4] = m[0, :]
+            curr[i, 4:8] = m[1, :]
+            curr[i, 8:12] = m[2, :]
+            prev[i, 0:4] = pm[0, :]
+            prev[i, 4:8] = pm[1, :]
+            prev[i, 8:12] = pm[2, :]
 
-        self._instance_transforms_buffer = wp.array(curr, dtype=wp.float32, device="cuda")
-        self._prev_instance_transforms_buffer = wp.array(prev, dtype=wp.float32, device="cuda")
+        self._instance_transforms_buffer.assign(curr.reshape(-1))
+        self._prev_instance_transforms_buffer.assign(prev.reshape(-1))
 
     def _create_pipeline(self):
         """Create the OptiX pipeline."""
@@ -978,22 +989,11 @@ class PathTracingViewer:
             i //= b
         return r
 
-    def _update_launch_params(self, frame_index_override: Optional[int] = None):
-        """Update launch parameters for the current frame."""
-        # Build launch params structure
-        # This needs to match the LaunchParams struct in launch_params.h
+    def _get_launch_params_dtype(self):
+        """Return the cached numpy structured dtype for launch params."""
+        if self._launch_params_dtype is not None:
+            return self._launch_params_dtype
 
-        # For now, create a simple params buffer
-        # In a full implementation, this would be a proper struct
-
-        self._update_instance_transform_buffers()
-
-        view = self.camera.get_view_matrix()
-        proj = self.camera.get_projection_matrix()
-        view_inv = np.linalg.inv(view)
-        proj_inv = np.linalg.inv(proj)
-
-        # Create params as numpy structured array matching Runtime LaunchParams.
         sky_dtype = np.dtype(
             [
                 ("rgbUnitConversion", np.float32, (3,)),
@@ -1014,10 +1014,9 @@ class PathTracingViewer:
             align=True,
         )
 
-        params_dtype = np.dtype(
+        self._launch_params_dtype = np.dtype(
             [
                 ("tlas", np.uint64),
-                # RuntimeFrameInfo
                 ("view", np.float32, (16,)),
                 ("proj", np.float32, (16,)),
                 ("prevView", np.float32, (16,)),
@@ -1055,7 +1054,6 @@ class PathTracingViewer:
                 ("envAccelAddress", np.uint64),
                 ("envMapIntegral", np.float32),
                 ("envMapAverage", np.float32),
-                # Output surface
                 ("colorOutput", np.uint64),
                 ("normalRoughnessOutput", np.uint64),
                 ("motionVectorOutput", np.uint64),
@@ -1068,111 +1066,124 @@ class PathTracingViewer:
             ],
             align=True,
         )
+        return self._launch_params_dtype
 
-        params = np.zeros(1, dtype=params_dtype)
-        params[0]["tlas"] = self._scene.tlas_handle
-        params[0]["view"] = view.reshape(-1)
-        params[0]["proj"] = proj.reshape(-1)
-        params[0]["prevView"] = self._prev_view.reshape(-1)
-        params[0]["prevProj"] = self._prev_proj.reshape(-1)
-        params[0]["prevMVP"] = self._prev_mvp.reshape(-1)
-        params[0]["viewInv"] = view_inv.reshape(-1)
-        params[0]["projInv"] = proj_inv.reshape(-1)
+    @staticmethod
+    def _addr_u64(value) -> np.uint64:
+        return np.uint64(0 if value is None else value)
+
+    def _update_launch_params(self, frame_index_override: int | None = None):
+        """Update launch parameters for the current frame."""
+        self._update_instance_transform_buffers()
+
+        view = self.camera.get_view_matrix()
+        proj = self.camera.get_projection_matrix()
+        view_inv = np.linalg.inv(view)
+        proj_inv = np.linalg.inv(proj)
+
+        dt = self._get_launch_params_dtype()
+        params_size = dt.itemsize
+
+        if self._launch_params_np is None:
+            self._launch_params_np = np.zeros(1, dtype=dt)
+        p = self._launch_params_np[0]
+
+        p["tlas"] = self._scene.tlas_handle
+        p["view"] = view.reshape(-1)
+        p["proj"] = proj.reshape(-1)
+        p["prevView"] = self._prev_view.reshape(-1)
+        p["prevProj"] = self._prev_proj.reshape(-1)
+        p["prevMVP"] = self._prev_mvp.reshape(-1)
+        p["viewInv"] = view_inv.reshape(-1)
+        p["projInv"] = proj_inv.reshape(-1)
         frame_index_value = self.sample_index if frame_index_override is None else int(frame_index_override)
         if self.use_halton_jitter:
-            # Match C# exactly: jitter = Halton(FrameIndex) - 0.5
             jitter_x = self._halton(frame_index_value, 2) - 0.5
             jitter_y = self._halton(frame_index_value, 3) - 0.5
-            params[0]["jitter"] = (np.float32(jitter_x), np.float32(jitter_y))
+            p["jitter"] = (np.float32(jitter_x), np.float32(jitter_y))
             self._last_jitter = (float(jitter_x), float(jitter_y))
         else:
-            params[0]["jitter"] = (0.0, 0.0)
+            p["jitter"] = (0.0, 0.0)
             self._last_jitter = (0.0, 0.0)
-        params[0]["envIntensity"] = (1.0, 1.0, 1.0, 1.0)
-        params[0]["envRotation"] = np.float32(0.0)
-        # FLAGS_USE_PSR is always on; FLAGS_ENVMAP_SKY is used only when no HDR map.
+        p["envIntensity"] = (1.0, 1.0, 1.0, 1.0)
+        p["envRotation"] = np.float32(0.0)
         flags = 2
         if self._env_map is None:
             flags |= 1
-        params[0]["flags"] = np.uint32(flags)
+        p["flags"] = np.uint32(flags)
         sky_dir = np.asarray(self.sky_sun_direction, dtype=np.float32)
         sky_dir_norm = np.linalg.norm(sky_dir)
         if sky_dir_norm > 1.0e-8:
             sky_dir = sky_dir / sky_dir_norm
-        params[0]["skyInfo"]["rgbUnitConversion"] = np.asarray(self.sky_rgb_unit_conversion, dtype=np.float32)
-        params[0]["skyInfo"]["multiplier"] = np.float32(self.sky_multiplier)
-        params[0]["skyInfo"]["haze"] = np.float32(self.sky_haze)
-        params[0]["skyInfo"]["redblueshift"] = np.float32(self.sky_redblueshift)
-        params[0]["skyInfo"]["saturation"] = np.float32(self.sky_saturation)
-        params[0]["skyInfo"]["horizonHeight"] = np.float32(self.sky_horizon_height)
-        params[0]["skyInfo"]["groundColor"] = np.asarray(self.sky_ground_color, dtype=np.float32)
-        params[0]["skyInfo"]["horizonBlur"] = np.float32(self.sky_horizon_blur)
-        params[0]["skyInfo"]["nightColor"] = np.asarray(self.sky_night_color, dtype=np.float32)
-        params[0]["skyInfo"]["sunDiskIntensity"] = np.float32(self.sky_sun_disk_intensity)
-        params[0]["skyInfo"]["sunDirection"] = sky_dir
-        params[0]["skyInfo"]["sunDiskScale"] = np.float32(self.sky_sun_disk_scale)
-        params[0]["skyInfo"]["sunGlowIntensity"] = np.float32(self.sky_sun_glow_intensity)
-        params[0]["skyInfo"]["yIsUp"] = np.int32(self.sky_y_is_up)
-        # Some Warp-backed buffers can report ptr=None transiently; map that to address 0.
-        def _addr_u64(value) -> np.uint64:
-            return np.uint64(0 if value is None else value)
+        p["skyInfo"]["rgbUnitConversion"] = np.asarray(self.sky_rgb_unit_conversion, dtype=np.float32)
+        p["skyInfo"]["multiplier"] = np.float32(self.sky_multiplier)
+        p["skyInfo"]["haze"] = np.float32(self.sky_haze)
+        p["skyInfo"]["redblueshift"] = np.float32(self.sky_redblueshift)
+        p["skyInfo"]["saturation"] = np.float32(self.sky_saturation)
+        p["skyInfo"]["horizonHeight"] = np.float32(self.sky_horizon_height)
+        p["skyInfo"]["groundColor"] = np.asarray(self.sky_ground_color, dtype=np.float32)
+        p["skyInfo"]["horizonBlur"] = np.float32(self.sky_horizon_blur)
+        p["skyInfo"]["nightColor"] = np.asarray(self.sky_night_color, dtype=np.float32)
+        p["skyInfo"]["sunDiskIntensity"] = np.float32(self.sky_sun_disk_intensity)
+        p["skyInfo"]["sunDirection"] = sky_dir
+        p["skyInfo"]["sunDiskScale"] = np.float32(self.sky_sun_disk_scale)
+        p["skyInfo"]["sunGlowIntensity"] = np.float32(self.sky_sun_glow_intensity)
+        p["skyInfo"]["yIsUp"] = np.int32(self.sky_y_is_up)
 
-        params[0]["materialAddress"] = _addr_u64(self._scene.materials.gpu_address)
-        params[0]["compactMaterialAddress"] = _addr_u64(self._scene.compact_materials_address)
-        params[0]["instanceMaterialIdAddress"] = _addr_u64(self._scene.instance_material_ids_address)
-        params[0]["instanceRenderPrimIdAddress"] = _addr_u64(self._scene.instance_render_prim_ids_address)
-        params[0]["renderPrimitiveAddress"] = _addr_u64(self._scene.render_primitives_address)
-        params[0]["instanceTransformsAddress"] = np.uint64(
+        _a = self._addr_u64
+        p["materialAddress"] = _a(self._scene.materials.gpu_address)
+        p["compactMaterialAddress"] = _a(self._scene.compact_materials_address)
+        p["instanceMaterialIdAddress"] = _a(self._scene.instance_material_ids_address)
+        p["instanceRenderPrimIdAddress"] = _a(self._scene.instance_render_prim_ids_address)
+        p["renderPrimitiveAddress"] = _a(self._scene.render_primitives_address)
+        p["instanceTransformsAddress"] = np.uint64(
             0 if self._instance_transforms_buffer is None else self._instance_transforms_buffer.ptr
         )
-        params[0]["prevInstanceTransformsAddress"] = np.uint64(
+        p["prevInstanceTransformsAddress"] = np.uint64(
             0 if self._prev_instance_transforms_buffer is None else self._prev_instance_transforms_buffer.ptr
         )
-        params[0]["materialCount"] = np.uint32(self._scene.materials.count)
-        params[0]["instanceCount"] = np.uint32(self._scene.instance_count)
-        params[0]["renderPrimCount"] = np.uint32(self._scene.mesh_count)
-        # Keep stochastic sample index evolving every launched sample.
-        params[0]["frameIndex"] = np.uint32(frame_index_value)
-        params[0]["maxBounces"] = np.uint32(self.max_bounces)
-        # Match C# primary path: one direct environment sample per pixel path.
-        params[0]["directLightSamples"] = np.uint32(1)
-        params[0]["textureDescAddress"] = _addr_u64(self._scene.texture_descs_address)
-        params[0]["textureDataAddress"] = _addr_u64(self._scene.texture_data_address)
-        params[0]["textureCount"] = np.uint32(self._scene.texture_count)
-        # Environment map parameters
+        p["materialCount"] = np.uint32(self._scene.materials.count)
+        p["instanceCount"] = np.uint32(self._scene.instance_count)
+        p["renderPrimCount"] = np.uint32(self._scene.mesh_count)
+        p["frameIndex"] = np.uint32(frame_index_value)
+        p["maxBounces"] = np.uint32(self.max_bounces)
+        p["directLightSamples"] = np.uint32(1)
+        p["textureDescAddress"] = _a(self._scene.texture_descs_address)
+        p["textureDataAddress"] = _a(self._scene.texture_data_address)
+        p["textureCount"] = np.uint32(self._scene.texture_count)
         if self._env_map is not None:
-            params[0]["envMapAddress"] = _addr_u64(self._env_map.env_map_address)
-            params[0]["envMapWidth"] = np.uint32(self._env_map.width)
-            params[0]["envMapHeight"] = np.uint32(self._env_map.height)
-            params[0]["envMapFormat"] = np.uint32(0)  # ENV_MAP_FORMAT_RGBA32F
-            params[0]["envAccelAddress"] = _addr_u64(self._env_map.env_accel_address)
-            params[0]["envMapIntegral"] = np.float32(self._env_map.integral)
-            params[0]["envMapAverage"] = np.float32(self._env_map.average)
+            p["envMapAddress"] = _a(self._env_map.env_map_address)
+            p["envMapWidth"] = np.uint32(self._env_map.width)
+            p["envMapHeight"] = np.uint32(self._env_map.height)
+            p["envMapFormat"] = np.uint32(0)
+            p["envAccelAddress"] = _a(self._env_map.env_accel_address)
+            p["envMapIntegral"] = np.float32(self._env_map.integral)
+            p["envMapAverage"] = np.float32(self._env_map.average)
         else:
-            params[0]["envMapAddress"] = np.uint64(0)
-            params[0]["envMapWidth"] = np.uint32(0)
-            params[0]["envMapHeight"] = np.uint32(0)
-            params[0]["envMapFormat"] = np.uint32(0)
-            params[0]["envAccelAddress"] = np.uint64(0)
-            params[0]["envMapIntegral"] = np.float32(0.0)
-            params[0]["envMapAverage"] = np.float32(0.0)
+            p["envMapAddress"] = np.uint64(0)
+            p["envMapWidth"] = np.uint32(0)
+            p["envMapHeight"] = np.uint32(0)
+            p["envMapFormat"] = np.uint32(0)
+            p["envAccelAddress"] = np.uint64(0)
+            p["envMapIntegral"] = np.float32(0.0)
+            p["envMapAverage"] = np.float32(0.0)
 
-        # Get surface object for color buffer
-        # Note: In a full implementation, we'd create proper CUDA surface objects
-        params[0]["colorOutput"] = self._color_buffer.ptr
-        params[0]["normalRoughnessOutput"] = self._normal_roughness_buffer.ptr
-        params[0]["motionVectorOutput"] = self._motion_buffer.ptr
-        params[0]["depthOutput"] = self._depth_buffer.ptr
-        params[0]["diffuseAlbedoOutput"] = self._diffuse_buffer.ptr
-        params[0]["specularAlbedoOutput"] = self._specular_buffer.ptr
-        params[0]["specHitDistOutput"] = self._spec_hit_dist_buffer.ptr
-        # Match C# path: ray tracing always writes the same core DLSS inputs.
-        # Debug visualization is handled as a post-process pass.
-        params[0]["outputMode"] = self.OUTPUT_FINAL
+        p["colorOutput"] = self._color_buffer.ptr
+        p["normalRoughnessOutput"] = self._normal_roughness_buffer.ptr
+        p["motionVectorOutput"] = self._motion_buffer.ptr
+        p["depthOutput"] = self._depth_buffer.ptr
+        p["diffuseAlbedoOutput"] = self._diffuse_buffer.ptr
+        p["specularAlbedoOutput"] = self._specular_buffer.ptr
+        p["specHitDistOutput"] = self._spec_hit_dist_buffer.ptr
+        p["outputMode"] = self.OUTPUT_FINAL
 
-        # Upload to GPU
-        params_bytes = params.view(np.uint8).reshape(-1)
-        self._launch_params_buffer = wp.array(params_bytes, dtype=wp.uint8, device="cuda")
+        # Reuse GPU buffer when size matches; only reallocate on resize.
+        params_bytes = self._launch_params_np.view(np.uint8).reshape(-1)
+        if self._launch_params_buffer is not None and self._launch_params_size == params_size:
+            self._launch_params_buffer.assign(params_bytes)
+        else:
+            self._launch_params_buffer = wp.array(params_bytes, dtype=wp.uint8, device="cuda")
+            self._launch_params_size = params_size
 
     def render(self):
         """Render a frame."""
@@ -1256,18 +1267,14 @@ class PathTracingViewer:
         self._last_output_mode = self.output_mode
 
         if self._dlss_enabled:
-            # Ensure OptiX + Warp writes to all DLSS input buffers are visible
-            # before copying into DLSS texture resources.
+            # Single sync: ensure OptiX launch + Warp kernel writes are visible
+            # before copying into DLSS texture resources and running DLSS.
             wp.synchronize_device("cuda")
             self._copy_linear_to_dlss_textures()
-            # Ensure all copy_from_array operations are complete before DLSS evaluate.
-            wp.synchronize_device("cuda")
             if self._run_dlss_rr(reset_temporal):
-                # Ensure DLSS RR writes are complete before copying the output texture.
+                # Single sync: ensure DLSS writes are complete before reading output.
                 wp.synchronize_device("cuda")
                 self._copy_dlss_output_to_color()
-                # Ensure copy_to_array completed before tonemapper reads the output buffer.
-                wp.synchronize_device("cuda")
                 if self._dlss_output_buffer is not None:
                     if self.output_mode == self.OUTPUT_FINAL:
                         self._tonemapper.process(self._dlss_output_buffer)

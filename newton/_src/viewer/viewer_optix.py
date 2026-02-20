@@ -211,7 +211,6 @@ class ViewerOptix(ViewerBase):
         self._sprite = None
         self._pbo = None
         self._cuda_gl = None
-        self._display_u32 = None
 
         # Camera state (pitch/yaw in degrees)
         # Convention matches hybrid_viewer / C#: yaw=0 looks in +Z
@@ -247,6 +246,9 @@ class ViewerOptix(ViewerBase):
         self._instance_mat_capacity: dict[str, int] = {}
         self._instance_mats_device: dict[str, wp.array] = {}
         self._instance_mats_host: dict[str, wp.array] = {}
+        # Cached default-scale buffer to avoid per-call allocation
+        self._default_scales_dev: wp.array | None = None
+        self._default_scales_count = 0
 
     # ------------------------------------------------------------------
     # Path tracer lifecycle
@@ -329,7 +331,6 @@ class ViewerOptix(ViewerBase):
             flags=wp.RegisteredGLBuffer.WRITE_DISCARD,
             fallback_to_copy=False,
         )
-        self._display_u32 = wp.empty(self._width * self._height, dtype=wp.uint32, device="cuda")
 
         self._window.push_handlers(self)
 
@@ -369,7 +370,6 @@ class ViewerOptix(ViewerBase):
             flags=wp.RegisteredGLBuffer.WRITE_DISCARD,
             fallback_to_copy=False,
         )
-        self._display_u32 = wp.empty(w * h, dtype=wp.uint32, device="cuda")
 
         # Update GL viewport
         gl.glViewport(0, 0, w, h)
@@ -570,8 +570,11 @@ class ViewerOptix(ViewerBase):
         mats_host_view = mats_host[:count]
 
         if scales is None:
-            scales_dev = wp.empty(count, dtype=wp.vec3, device="cuda")
-            scales_dev.fill_(wp.vec3(1.0, 1.0, 1.0))
+            if self._default_scales_count < count:
+                self._default_scales_dev = wp.empty(max(count, self._default_scales_count * 2, 64), dtype=wp.vec3, device="cuda")
+                self._default_scales_dev.fill_(wp.vec3(1.0, 1.0, 1.0))
+                self._default_scales_count = self._default_scales_dev.shape[0]
+            scales_dev = self._default_scales_dev
         else:
             scales_dev = scales
 
@@ -981,15 +984,13 @@ class ViewerOptix(ViewerBase):
         tonemapped = viewer._tonemapper.output
         w, h = self._width, self._height
 
+        mapped = self._cuda_gl.map(dtype=wp.uint32, shape=(w * h,))
         wp.launch(
             _pack_display_rgba8,
             dim=(w, h),
-            inputs=[tonemapped, self._display_u32, w, h],
+            inputs=[tonemapped, mapped, w, h],
             device="cuda",
         )
-
-        mapped = self._cuda_gl.map(dtype=wp.uint32, shape=(w * h,))
-        wp.copy(mapped, self._display_u32)
         self._cuda_gl.unmap()
 
         self._window.switch_to()
