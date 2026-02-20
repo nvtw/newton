@@ -13,11 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Smooth normal generation with sharp-edge detection.
+"""Shared color conversion helpers for OptiX viewer modules."""
 
-Implementation aligned with the upstream DLSS-RR sample normal workflow.
-"""
+from __future__ import annotations
 
-from .auto_normals import compute_normals
+import numpy as np
 
-__all__ = ["compute_normals"]
+
+def srgb_to_linear(channel: float) -> float:
+    """Convert a single sRGB channel value to linear color space."""
+    if channel <= 0.04045:
+        return channel / 12.92
+    return ((channel + 0.055) / 1.055) ** 2.4
+
+
+def srgb_to_linear_rgb(rgb: np.ndarray) -> np.ndarray:
+    """Convert an array of RGB values from sRGB to linear space."""
+    threshold = 0.04045
+    return np.where(rgb <= threshold, rgb / 12.92, np.power((rgb + 0.055) / 1.055, 2.4))

@@ -43,7 +43,7 @@ class Camera:
         self.aspect_ratio = aspect_ratio
         self.near = near
         self.far = far
-        # Match C# Camera.MovementSpeedFactor
+        # Match reference movement speed factor.
         self._movement_speed = 1.0
 
     @property
@@ -114,7 +114,7 @@ class Camera:
             yaw: Horizontal rotation in radians
             pitch: Vertical rotation in radians
         """
-        # Match C# Camera.Rotate() exactly (spherical yaw/pitch around target direction).
+        # Match reference camera rotate behavior (spherical yaw/pitch around target).
         direction = self.target - self.position
         dist = np.linalg.norm(direction)
         if dist <= 1.0e-8:
@@ -124,7 +124,7 @@ class Camera:
         current_yaw = math.atan2(direction[0], direction[2])
         current_pitch = math.asin(direction[1] / dist)
 
-        # Apply rotation with C# signs.
+        # Apply rotation with reference sign conventions.
         current_yaw -= yaw
         current_pitch += pitch
 
@@ -238,7 +238,7 @@ class Camera:
         result[1, 1] = 1.0 / tan_half_fov
         result[2, 2] = far / (near - far)
         result[2, 3] = -1.0
-        # Match MinimalDlssRRViewer Camera.cs (CreatePerspectiveRH_ZO, M43).
+        # Match reference perspective projection convention (RH_ZO, M43).
         result[3, 2] = -(near * far) / (near - far)
 
         return result

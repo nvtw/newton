@@ -15,13 +15,17 @@
 
 """Small reusable helper for creating an OptiX device context."""
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class _Logger:
     def __init__(self):
         self.num_messages = 0
 
     def __call__(self, level, tag, message):
-        print(f"[{level:>2}][{tag:>12}]: {message}")
+        logger.info("[%2s][%12s]: %s", level, tag, message)
         self.num_messages += 1
 
 

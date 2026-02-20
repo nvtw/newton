@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Environment map loading, processing and importance sampling for OptiX path tracing.
-# Ported from C# MiniOptixScene/EnvironmentMap.cs and MinimalDlssRRViewer/HdrImportanceSampler.cs.
+# Aligned with the environment-map sampling flow used in the reference sample.
 
 """
 Environment map handling with importance sampling using the alias method.
@@ -18,12 +18,15 @@ crucial for efficient Monte Carlo path tracing.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Tuple
 
 import numpy as np
 
 import warp as wp
+
+logger = logging.getLogger(__name__)
 
 # Try to import imageio for HDR loading, fall back to pure Python
 try:
@@ -35,7 +38,7 @@ except ImportError:
 
 
 def _luminance(r: float, g: float, b: float) -> float:
-    """CIE luminance - matches C# implementation."""
+    """CIE luminance."""
     return r * 0.2126 + g * 0.7152 + b * 0.0722
 
 
@@ -46,7 +49,7 @@ def _build_alias_table(importance: np.ndarray, total_importance: float) -> Tuple
     This implements the alias method as described in:
     https://arxiv.org/pdf/1901.05423.pdf, section 2.6
 
-    Directly ported from C# MiniOptixScene/EnvironmentMap.cs BuildAliasmap()
+    Implements the alias-table construction used by the reference sample.
 
     Args:
         importance: Array of importance values (area * max(R,G,B)) for each pixel
@@ -174,7 +177,7 @@ class EnvironmentMap:
         """
         path = Path(path)
         if not path.exists():
-            print(f"[EnvMap] File not found: {path}")
+            logger.warning("Environment map file not found: %s", path)
             return False
 
         # Try imageio first
@@ -206,7 +209,7 @@ class EnvironmentMap:
                 # hdr_loader returns bottom-up; flip to top-down
                 arr = np.flipud(arr)
             except Exception as e:
-                print(f"[EnvMap] Failed to load HDR: {e}")
+                logger.warning("Failed to load HDR '%s': %s", path, e)
                 return False
 
         return self.load_from_array(arr, scaling=scaling, source_path=str(path), loader=loader)
@@ -238,7 +241,7 @@ class EnvironmentMap:
             arr = np.stack([arr, arr, arr], axis=-1)
 
         if arr.ndim != 3:
-            print(f"[EnvMap] Invalid array shape: {arr.shape}")
+            logger.warning("Invalid environment array shape: %s", arr.shape)
             return False
 
         # Ensure RGB or RGBA
@@ -260,14 +263,20 @@ class EnvironmentMap:
         # Log info
         vmin = float(np.nanmin(arr[..., :3]))
         vmax = float(np.nanmax(arr[..., :3]))
-        print(
-            f"[EnvMap] Loaded {source_path} ({self.width}x{self.height}) "
-            f"via {loader}, range=[{vmin:.2f}, {vmax:.2f}], "
-            f"integral={self.integral:.2f}, avg={self.average:.4f}"
+        logger.info(
+            "Loaded env map %s (%dx%d) via %s, range=[%.2f, %.2f], integral=%.2f, avg=%.4f",
+            source_path,
+            self.width,
+            self.height,
+            loader,
+            vmin,
+            vmax,
+            self.integral,
+            self.average,
         )
 
         if vmax <= 1.0:
-            print("[EnvMap][WARN] Max value <= 1.0 - image may be LDR")
+            logger.warning("Environment map max value <= 1.0; image may be LDR.")
 
         return True
 
@@ -299,7 +308,7 @@ class EnvironmentMap:
         2. Alias table for O(1) sampling
         3. PDF values stored in alpha channel of texture
 
-        Directly ported from C# MiniOptixScene/EnvironmentMap.cs CreateEnvironmentAccel()
+        Follows the environment-acceleration construction used by the reference sample.
         """
         h, w = pixels_rgba.shape[0], pixels_rgba.shape[1]
         size = w * h
@@ -328,7 +337,7 @@ class EnvironmentMap:
                 b = float(pixels_rgba[y, x, 2])
 
                 cie_luminance = _luminance(r, g, b)
-                # importance_data = area * max(R,G,B) - matches C#
+                # importance_data = area * max(R,G,B)
                 max_comp = max(r, max(g, b))
                 importance_data[idx] = area * max(max_comp, 0.0)
                 total_luminance += cie_luminance
@@ -343,7 +352,7 @@ class EnvironmentMap:
         alias, q = _build_alias_table(importance_data, self.integral)
 
         # Store PDF in alpha channel of pixels
-        # PDF = max(R,G,B) / integral  (matches C# exactly)
+        # PDF = max(R,G,B) / integral
         inv_env_integral = 1.0 / self.integral
         for y in range(h):
             for x in range(w):
@@ -356,13 +365,13 @@ class EnvironmentMap:
         self.pixels = np.ascontiguousarray(pixels_rgba, dtype=np.float32)
 
         # Create EnvAccel structure array
-        # Matches C# struct EnvAccel { uint alias; float q; } - only 8 bytes!
+        # EnvAccel layout: { uint alias; float q } - 8 bytes total.
         accel_dtype = np.dtype(
             [
                 ("alias", np.uint32),
                 ("q", np.float32),
             ],
-            align=False,  # No padding - must match C# exactly
+            align=False,  # No padding to keep the expected packed layout.
         )
         env_accel = np.zeros(size, dtype=accel_dtype)
         env_accel["alias"] = alias

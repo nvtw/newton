@@ -9,7 +9,7 @@ T = TypeVar("T")
 
 @dataclass(frozen=True)
 class Handle:
-    """Small typed-handle equivalent to C# HandleT<T>."""
+    """Small typed handle wrapper."""
 
     value: int
 
@@ -24,8 +24,7 @@ class Handle:
 class HandleBuffer(Generic[T]):
     """Sparse handle buffer with stable integer IDs.
 
-    This mirrors the usage pattern in the C# framework where objects are stored
-    behind small integer handles and can be removed/reused.
+    Objects are stored behind small integer handles and can be removed/reused.
     """
 
     def __init__(self) -> None:

@@ -153,7 +153,7 @@ struct RtxPushConstant {
 };
 
 // Environment acceleration structure for importance sampling
-// Matches C# MiniOptixScene EnvAccel struct exactly - only alias and q
+// Matches the reference EnvAccel struct layout - only alias and q.
 // PDF is stored in the alpha channel of the environment map texture
 struct EnvAccel {
     unsigned int alias;

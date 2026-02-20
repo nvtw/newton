@@ -15,13 +15,14 @@
 
 """
 OptiX Path Tracing Viewer.
-A Python/OptiX port of the C# Vulkan path tracer.
+Python/OptiX path tracing viewer with DLSS RR support.
 
 This viewer renders a scene using OptiX ray tracing with PBR materials,
 displaying raw buffers (radiance, normals, depth, etc.) for debugging.
 """
 
 import sys
+import logging
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -31,6 +32,8 @@ import warp as wp
 
 # Initialize warp
 wp.init()
+
+logger = logging.getLogger(__name__)
 
 # Import local modules
 from ..optix_context import _create_optix_context
@@ -190,7 +193,7 @@ class PathTracingViewer:
         self._sync_prev_camera_matrices_to_current()
         self._last_output_mode = self.output_mode
 
-        # Physical sky defaults matched to C# PhysicalSkyParameters.Default.
+        # Physical sky defaults aligned with the upstream DLSS-RR sample behavior.
         self.sky_rgb_unit_conversion = (1.0 / 80000.0, 1.0 / 80000.0, 1.0 / 80000.0)
         self.sky_multiplier = 1.0
         self.sky_haze = 0.0
@@ -223,7 +226,7 @@ class PathTracingViewer:
         if env_map.load_from_file(hdr_path, scaling=scaling):
             self._env_map = env_map
         else:
-            print(f"[Viewer] Failed to load HDR environment: {hdr_path}")
+            logger.warning("Failed to load HDR environment: %s", hdr_path)
 
     def set_environment_color(self, color: tuple[float, float, float]):
         """
@@ -236,16 +239,24 @@ class PathTracingViewer:
         if env_map.load_from_color(color):
             self._env_map = env_map
 
+    def clear_environment_map(self):
+        """Clear the HDR environment map and use procedural sky only."""
+        self._env_map = None
+
+    @property
+    def tonemapped_output(self):
+        """Return the tonemapped output buffer used for display/extraction."""
+        return self._tonemapper.output
+
     def build(self):
         """Build the OptiX pipeline and scene."""
-        print("[Viewer] Initializing OptiX...")
+        logger.info("Initializing OptiX path tracing viewer.")
 
         # Import optix
         try:
             import optix
         except ImportError:
-            print("ERROR: Could not import optix module.")
-            print("Make sure warp.pyoptix is available and OptiX SDK is installed.")
+            logger.error("Could not import optix module. Ensure warp.pyoptix and OptiX SDK are installed.")
             return False
 
         self._optix = optix
@@ -253,10 +264,10 @@ class PathTracingViewer:
         # Get OptiX include directory
         optix_include = get_optix_include_dir(optix)
         if not optix_include:
-            print("ERROR: Could not find OptiX SDK include directory.")
+            logger.error("Could not find OptiX SDK include directory.")
             return False
 
-        print(f"[Viewer] Using OptiX SDK: {optix_include}")
+        logger.info("Using OptiX SDK include directory: %s", optix_include)
 
         # Create OptiX context
         wp_device = wp.get_device("cuda")
@@ -285,7 +296,7 @@ class PathTracingViewer:
         # Create SBT
         self._create_sbt()
 
-        print("[Viewer] Build complete!")
+        logger.info("OptiX path tracing viewer build complete.")
         return True
 
     @staticmethod
@@ -327,7 +338,7 @@ class PathTracingViewer:
     def _sync_prev_camera_matrices_to_current(self):
         """Initialize previous-frame camera transforms from the current camera pose.
 
-        Mirrors C# first-frame behavior where prevMVP is set to currentMVP to avoid
+        Mirrors reference first-frame behavior where prevMVP is set to currentMVP to avoid
         spurious large motion vectors after resets/resizes.
         """
         view = self.camera.get_view_matrix().copy()
@@ -357,14 +368,14 @@ class PathTracingViewer:
             try:
                 self._dlss_denoiser.deinit()
             except Exception as exc:
-                print(f"[DLSS] Warning: failed to deinit denoiser: {exc}")
+                logger.warning("Failed to deinitialize DLSS denoiser: %s", exc)
         self._dlss_denoiser = None
 
         if self._dlss_context is not None:
             try:
                 self._dlss_context.deinit()
             except Exception as exc:
-                print(f"[DLSS] Warning: failed to deinit context: {exc}")
+                logger.warning("Failed to deinitialize DLSS context: %s", exc)
         self._dlss_context = None
         self._dlss_enabled = False
         # If DLSS gets disabled at runtime, restore full-resolution rendering.
@@ -377,14 +388,14 @@ class PathTracingViewer:
 
         required = ("DlssRRContext", "DlssRRInitInfo", "DlssRRResource", "DlssPerfQuality")
         if not all(hasattr(self._optix, name) for name in required):
-            print("[DLSS] DLSS RR bindings not present in optix module.")
+            logger.info("DLSS RR bindings not present in optix module.")
             return
 
         try:
             context = self._optix.DlssRRContext()
             context.init()
             if not context.isDlssRRAvailable():
-                print("[DLSS] DLSS RR not available on this system.")
+                logger.info("DLSS RR not available on this system.")
                 return
 
             init_info = self._optix.DlssRRInitInfo()
@@ -401,7 +412,7 @@ class PathTracingViewer:
                 quality_name = "BALANCED" if hasattr(quality_enum, "BALANCED") else "DLAA"
             init_info.quality = getattr(quality_enum, quality_name)
             init_info.preset = self._optix.RayReconstructionHintRenderPreset.DEFAULT
-            # Match C#/optix-subd reference:
+            # Match reference behavior:
             # - MVJittered=false while still passing per-frame jitter to denoise()
             # - lowResolutionMotionVectors=true (motion vectors provided at render resolution)
             init_info.mvJittered = False
@@ -411,7 +422,7 @@ class PathTracingViewer:
             init_info.autoExposure = False
             init_info.useHWDepth = False
 
-            # Match the C# reference path: ask NGX for the optimal input size
+            # Ask NGX for the optimal input size for the chosen quality mode,
             # for the selected quality mode, and only fallback to half-res on failure.
             if hasattr(context, "querySupportedDlssInputSizes"):
                 try:
@@ -424,7 +435,7 @@ class PathTracingViewer:
                         init_info.inputWidth = int(render_width)
                         init_info.inputHeight = int(render_height)
                 except Exception as exc:
-                    print(f"[DLSS] Warning: failed to query optimal input size, using half-res fallback: {exc}")
+                    logger.warning("Failed to query optimal DLSS input size; using half-res fallback: %s", exc)
 
             denoiser = context.initDlssRR(init_info)
             self._set_render_resolution(render_width, render_height)
@@ -456,12 +467,15 @@ class PathTracingViewer:
             self._dlss_denoiser = denoiser
             self._dlss_enabled = True
             self._dlss_reset_history = True
-            print(
-                f"[DLSS] Ray Reconstruction enabled "
-                f"(render={self._render_width}x{self._render_height}, output={self.width}x{self.height})."
+            logger.info(
+                "DLSS Ray Reconstruction enabled (render=%dx%d, output=%dx%d).",
+                self._render_width,
+                self._render_height,
+                self.width,
+                self.height,
             )
         except Exception as exc:
-            print(f"[DLSS] Failed to initialize DLSS RR: {exc}")
+            logger.warning("Failed to initialize DLSS RR: %s", exc)
             self._destroy_dlss_rr()
 
     def _copy_linear_to_dlss_textures(self):
@@ -490,7 +504,7 @@ class PathTracingViewer:
         if not self._dlss_enabled or self._dlss_denoiser is None:
             return False
         try:
-            # Match C# MatrixToArray() packing used by MinimalDlssRRViewer:
+            # Match upstream matrix packing in the Vulkan DLSS-RR sample:
             # output in column-major memory order (m11,m21,m31,m41,...).
             view_m = self.camera.get_view_matrix().astype(np.float32)
             proj_m = self.camera.get_projection_matrix().astype(np.float32)
@@ -512,7 +526,7 @@ class PathTracingViewer:
             self._dlss_reset_history = False
             return True
         except Exception as exc:
-            print(f"[DLSS] Denoise failed, disabling DLSS RR: {exc}")
+            logger.warning("DLSS denoise failed; disabling DLSS RR: %s", exc)
             self._destroy_dlss_rr()
             return False
 
@@ -796,7 +810,7 @@ class PathTracingViewer:
         p["renderPrimCount"] = np.uint32(self._scene.mesh_count)
         p["frameIndex"] = np.uint32(frame_index_value)
         p["maxBounces"] = np.uint32(self.max_bounces)
-        p["directLightSamples"] = np.uint32(1)
+        p["directLightSamples"] = np.uint32(self.direct_light_samples)
         p["textureDescAddress"] = _a(self._scene.texture_descs_address)
         p["textureDataAddress"] = _a(self._scene.texture_data_address)
         p["textureCount"] = np.uint32(self._scene.texture_count)
@@ -834,30 +848,19 @@ class PathTracingViewer:
             self._launch_params_buffer = wp.array(params_bytes, dtype=wp.uint8, device="cuda")
             self._launch_params_size = params_size
 
-    def render(self):
-        """Render a frame."""
-        if self._pipeline is None:
-            print("ERROR: Pipeline not built. Call build() first.")
-            return
-
-        current_view = self.camera.get_view_matrix().copy()
-        current_proj = self.camera.get_projection_matrix().copy()
-        use_external_accum = self.accumulate_samples and not self._dlss_enabled
-        samples_this_frame = 1 if self._dlss_enabled else self.samples_per_frame
-        reset_temporal = False
+    def _update_temporal_state(self, current_view: np.ndarray, current_proj: np.ndarray, use_external_accum: bool) -> bool:
+        """Update accumulation state and return whether temporal history resets."""
         if self._dlss_enabled:
-            # Match C# behavior: do NOT reset DLSS on camera motion.
-            # History reset is handled only by explicit lifecycle events
-            # (first frame/init/resize) via _dlss_reset_history.
-            reset_temporal = False
-        elif use_external_accum:
-            reset_accum = (
-                self.output_mode != self._last_output_mode
-                or (not np.allclose(current_view, self._last_accum_view))
-                or (not np.allclose(current_proj, self._last_accum_proj))
-            )
-            reset_temporal = bool(reset_accum)
-            if reset_accum:
+            return False
+
+        reset_temporal = (
+            self.output_mode != self._last_output_mode
+            or (not np.allclose(current_view, self._last_accum_view))
+            or (not np.allclose(current_proj, self._last_accum_proj))
+        )
+
+        if use_external_accum:
+            if reset_temporal:
                 wp.launch(
                     _reset_accum_buffer,
                     dim=(self._render_width, self._render_height),
@@ -865,21 +868,19 @@ class PathTracingViewer:
                     device="cuda",
                 )
                 self.frame_index = 0
-        else:
-            reset_temporal = (
-                self.output_mode != self._last_output_mode
-                or (not np.allclose(current_view, self._last_accum_view))
-                or (not np.allclose(current_proj, self._last_accum_proj))
-            )
-            # No persistent external accumulation for this mode.
-            wp.launch(
-                _reset_accum_buffer,
-                dim=(self._render_width, self._render_height),
-                inputs=[self._accum_buffer],
-                device="cuda",
-            )
+            return bool(reset_temporal)
 
-        # With DLSS enabled, keep one fresh sample per frame and let DLSS own temporal history.
+        # No persistent external accumulation for this mode.
+        wp.launch(
+            _reset_accum_buffer,
+            dim=(self._render_width, self._render_height),
+            inputs=[self._accum_buffer],
+            device="cuda",
+        )
+        return bool(reset_temporal)
+
+    def _launch_samples(self, samples_this_frame: int, use_external_accum: bool):
+        """Launch OptiX path tracing and optional external accumulation kernels."""
         for s in range(samples_this_frame):
             launch_frame_index = self.sample_index + s
             self._update_launch_params(frame_index_override=launch_frame_index)
@@ -907,6 +908,45 @@ class PathTracingViewer:
                 if use_external_accum:
                     self.frame_index += 1
 
+    def _process_debug_output(self):
+        self._tonemapper.resize(self.width, self.height)
+        self._tonemapper.process_debug(
+            self.output_mode,
+            self._color_buffer,
+            self._depth_buffer,
+            self._motion_buffer,
+            self._normal_roughness_buffer,
+            self._diffuse_buffer,
+            self._specular_buffer,
+            self._spec_hit_dist_buffer,
+            self._render_width,
+            self._render_height,
+        )
+
+    def _process_final_output(self, source_buffer, *, resize_to_render: bool):
+        if resize_to_render:
+            self._tonemapper.resize(self._render_width, self._render_height)
+        self._tonemapper.process(source_buffer)
+
+    def _process_output(self, source_buffer, *, resize_final_to_render: bool):
+        if self.output_mode == self.OUTPUT_FINAL:
+            self._process_final_output(source_buffer, resize_to_render=resize_final_to_render)
+            return
+        self._process_debug_output()
+
+    def render(self):
+        """Render a frame."""
+        if self._pipeline is None:
+            logger.error("Pipeline not built. Call build() first.")
+            return
+
+        current_view = self.camera.get_view_matrix().copy()
+        current_proj = self.camera.get_projection_matrix().copy()
+        use_external_accum = self.accumulate_samples and not self._dlss_enabled
+        samples_this_frame = 1 if self._dlss_enabled else self.samples_per_frame
+        reset_temporal = self._update_temporal_state(current_view, current_proj, use_external_accum)
+        self._launch_samples(samples_this_frame, use_external_accum)
+
         # Keep previous matrices for next frame's motion-vector calculation.
         self._prev_view = current_view.copy()
         self._prev_proj = current_proj.copy()
@@ -925,75 +965,13 @@ class PathTracingViewer:
                 wp.synchronize_device("cuda")
                 self._copy_dlss_output_to_color()
                 if self._dlss_output_buffer is not None:
-                    if self.output_mode == self.OUTPUT_FINAL:
-                        self._tonemapper.process(self._dlss_output_buffer)
-                    else:
-                        self._tonemapper.resize(self.width, self.height)
-                        self._tonemapper.process_debug(
-                            self.output_mode,
-                            self._color_buffer,
-                            self._depth_buffer,
-                            self._motion_buffer,
-                            self._normal_roughness_buffer,
-                            self._diffuse_buffer,
-                            self._specular_buffer,
-                            self._spec_hit_dist_buffer,
-                            self._render_width,
-                            self._render_height,
-                        )
+                    self._process_output(self._dlss_output_buffer, resize_final_to_render=False)
                 else:
-                    if self.output_mode == self.OUTPUT_FINAL:
-                        self._tonemapper.process(self._color_buffer)
-                    else:
-                        self._tonemapper.resize(self.width, self.height)
-                        self._tonemapper.process_debug(
-                            self.output_mode,
-                            self._color_buffer,
-                            self._depth_buffer,
-                            self._motion_buffer,
-                            self._normal_roughness_buffer,
-                            self._diffuse_buffer,
-                            self._specular_buffer,
-                            self._spec_hit_dist_buffer,
-                            self._render_width,
-                            self._render_height,
-                        )
+                    self._process_output(self._color_buffer, resize_final_to_render=False)
             else:
-                if self.output_mode == self.OUTPUT_FINAL:
-                    self._tonemapper.resize(self._render_width, self._render_height)
-                    self._tonemapper.process(self._color_buffer)
-                else:
-                    self._tonemapper.resize(self.width, self.height)
-                    self._tonemapper.process_debug(
-                        self.output_mode,
-                        self._color_buffer,
-                        self._depth_buffer,
-                        self._motion_buffer,
-                        self._normal_roughness_buffer,
-                        self._diffuse_buffer,
-                        self._specular_buffer,
-                        self._spec_hit_dist_buffer,
-                        self._render_width,
-                        self._render_height,
-                    )
+                self._process_output(self._color_buffer, resize_final_to_render=True)
         else:
-            if self.output_mode == self.OUTPUT_FINAL:
-                self._tonemapper.resize(self._render_width, self._render_height)
-                self._tonemapper.process(self._accum_buffer)
-            else:
-                self._tonemapper.resize(self.width, self.height)
-                self._tonemapper.process_debug(
-                    self.output_mode,
-                    self._color_buffer,
-                    self._depth_buffer,
-                    self._motion_buffer,
-                    self._normal_roughness_buffer,
-                    self._diffuse_buffer,
-                    self._specular_buffer,
-                    self._spec_hit_dist_buffer,
-                    self._render_width,
-                    self._render_height,
-                )
+            self._process_output(self._accum_buffer, resize_final_to_render=True)
         self.sample_index += samples_this_frame
 
     def get_output(self) -> np.ndarray:
@@ -1019,26 +997,26 @@ class PathTracingViewer:
 
 def main():
     """Run the path tracing viewer."""
-    print("=" * 60)
-    print("OptiX Path Tracing Viewer")
-    print("=" * 60)
+    logger.info("%s", "=" * 60)
+    logger.info("OptiX Path Tracing Viewer")
+    logger.info("%s", "=" * 60)
 
     viewer = PathTracingViewer(width=800, height=600)
 
     if not viewer.build():
-        print("Failed to build viewer")
+        logger.error("Failed to build viewer.")
         return 1
 
     # Render a few frames
-    print("\nRendering frames...")
+    logger.info("Rendering frames.")
     for i in range(10):
         viewer.render()
-        print(f"  Frame {i + 1}")
+        logger.info("Frame %d", i + 1)
 
     # Get final output
     output = viewer.get_output()
-    print(f"\nOutput shape: {output.shape}")
-    print(f"Output range: [{output.min():.3f}, {output.max():.3f}]")
+    logger.info("Output shape: %s", output.shape)
+    logger.info("Output range: [%.3f, %.3f]", float(output.min()), float(output.max()))
 
     # Save to file if possible
     try:
@@ -1048,11 +1026,11 @@ def main():
         img_data = (output[:, :, :3] * 255).astype(np.uint8)
         img = Image.fromarray(img_data)
         img.save("pathtracing_output.png")
-        print("\nSaved output to pathtracing_output.png")
+        logger.info("Saved output to pathtracing_output.png")
     except ImportError:
-        print("\nPillow not installed, skipping image save")
+        logger.info("Pillow not installed; skipping image save.")
 
-    print("\nDone!")
+    logger.info("Done.")
     return 0
 
 

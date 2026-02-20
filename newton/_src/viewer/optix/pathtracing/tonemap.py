@@ -15,12 +15,12 @@
 
 """Tonemapping for path tracing viewer.
 
-Matches Vulkan C# ``shaders/tonemap.comp`` behavior and defaults.
+Matches the Vulkan tonemap shader behavior and defaults from the reference sample.
 """
 
 import warp as wp
 
-# Tonemap methods (match Vulkan C# tonemap.comp)
+# Tonemap methods (match Vulkan reference tonemap shader behavior)
 TONEMAP_FILMIC = 0
 TONEMAP_UNCHARTED2 = 1
 TONEMAP_CLIP = 2
@@ -343,7 +343,7 @@ class Tonemapper:
     """
     HDR to LDR tonemapping processor.
 
-    Matches Vulkan C# tonemap.comp behavior.
+    Matches Vulkan reference tonemap behavior.
     """
 
     def __init__(self, width: int, height: int):
@@ -419,7 +419,7 @@ class Tonemapper:
         src_height: int,
         max_depth: float = 100.0,
     ):
-        """C#-style debug visualization from DLSS input buffers."""
+        """Debug visualization from DLSS input buffers."""
         wp.launch(
             debug_visualize_kernel,
             dim=(self.width, self.height),

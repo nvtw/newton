@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""PythonBridge-style OptiX API for standalone path tracing usage."""
+"""High-level OptiX API for standalone path tracing usage."""
 
 from __future__ import annotations
 
@@ -24,51 +24,10 @@ import sys
 
 import numpy as np
 
+from ..transform_utils import build_transform_matrix
 from .pathtracing_viewer import PathTracingViewer
 from .ptx_compiler import get_optix_include_dir
 from .scene import Mesh
-
-
-def _quat_to_mat3(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
-    """Convert quaternion [x, y, z, w] to a 3x3 rotation matrix."""
-    xx = qx * qx
-    yy = qy * qy
-    zz = qz * qz
-    xy = qx * qy
-    xz = qx * qz
-    yz = qy * qz
-    wx = qw * qx
-    wy = qw * qy
-    wz = qw * qz
-    return np.array(
-        [
-            [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)],
-            [2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
-            [2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)],
-        ],
-        dtype=np.float32,
-    )
-
-
-def _build_transform(position: Iterable[float], rotation_xyzw: Iterable[float], scale: float | Iterable[float]) -> np.ndarray:
-    """Build a 4x4 row-major transform matrix from position/quaternion/scale."""
-    px, py, pz = [float(v) for v in position]
-    qx, qy, qz, qw = [float(v) for v in rotation_xyzw]
-    if isinstance(scale, Iterable) and not isinstance(scale, (str, bytes)):
-        sx, sy, sz = [float(v) for v in scale]
-    else:
-        s = float(scale)
-        sx = sy = sz = s
-    m = np.eye(4, dtype=np.float32)
-    r = _quat_to_mat3(qx, qy, qz, qw)
-    # Column scale for non-uniform axis scaling.
-    r[:, 0] *= sx
-    r[:, 1] *= sy
-    r[:, 2] *= sz
-    m[:3, :3] = r
-    m[:3, 3] = np.array([px, py, pz], dtype=np.float32)
-    return m
-
 
 class PathTracerAPI:
     """High-level API for driving the OptiX path tracer directly from Python."""
@@ -85,7 +44,6 @@ class PathTracerAPI:
         )
         self._built = False
         self._running = True
-        self._time = 0.0
         self._init_error: str | None = None
 
     def _build_init_error_message(self) -> str:
@@ -133,7 +91,8 @@ class PathTracerAPI:
         self._running = False
 
     def begin_frame(self, time_sec: float):
-        self._time = float(time_sec)
+        # Kept for ViewerBase API compatibility; rendering is driven explicitly.
+        _ = float(time_sec)
 
     def end_frame(self):
         # Rendering is explicit in render_frame(); kept for API parity.
@@ -212,7 +171,7 @@ class PathTracerAPI:
         rotation_xyzw: Iterable[float],
         scale: float | Iterable[float] = 1.0,
     ) -> int:
-        transform = _build_transform(position, rotation_xyzw, scale)
+        transform = build_transform_matrix(position, rotation_xyzw, scale)
         return int(self._require_scene().add_instance(int(mesh_id), transform=transform))
 
     def set_instance_transform(
@@ -222,7 +181,7 @@ class PathTracerAPI:
         rotation_xyzw: Iterable[float],
         scale: float | Iterable[float] = 1.0,
     ):
-        transform = _build_transform(position, rotation_xyzw, scale)
+        transform = build_transform_matrix(position, rotation_xyzw, scale)
         self._require_scene().set_instance_transform(int(instance_id), transform)
 
     def set_instance_transform_matrix(self, instance_id: int, matrix: np.ndarray):

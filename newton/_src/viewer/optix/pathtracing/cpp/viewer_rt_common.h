@@ -283,7 +283,7 @@ static __forceinline__ __device__ float4 load_env_texel_at(unsigned int x, unsig
     return texels32[idx];
 }
 
-// Spherical UV mapping - matches C# EnvMap.getSphericalUv()
+// Spherical UV mapping - matches the reference EnvMap.getSphericalUv behavior.
 // Maps 3D direction to 2D texture coordinates for lat-long environment maps.
 // Y-up convention: Y is vertical axis (zenith/nadir)
 static __forceinline__ __device__ float2 get_spherical_uv_csharp(float3 v)
@@ -339,7 +339,7 @@ static __forceinline__ __device__ float3 eval_environment(float3 worldDir)
         const float3 d = rotate_environment_dir(normalize(worldDir), -params.frameInfo.envRotation, 1);
         const float2 uv = get_spherical_uv_csharp(d);
         const float u = uv.x - floorf(uv.x);
-        // Match C# HdrEnvironment/StbImage orientation: V=0 at top row.
+        // Match reference HdrEnvironment/StbImage orientation: V=0 at top row.
         const float v = fminf(fmaxf(uv.y, 0.0f), 1.0f);
         const float4 c = sample_envmap_uv(u, v);
         return make_float3(c.x, c.y, c.z) * make_float3(
@@ -353,7 +353,7 @@ static __forceinline__ __device__ float3 eval_environment(float3 worldDir)
 }
 
 // Environment importance sampling using the alias method
-// Directly ported from C# MiniOptixScene/EnvMap.cs environmentSample()
+// Environment sampling aligned with the reference sample implementation.
 // Reference: https://arxiv.org/pdf/1901.05423.pdf, section 2.6, "The Alias Method"
 static __forceinline__ __device__ bool sample_environment_importance(
     unsigned int& rng,
@@ -436,8 +436,8 @@ static __forceinline__ __device__ bool sample_environment_importance(
         params.frameInfo.envIntensity[1],
         params.frameInfo.envIntensity[2]);
 
-    // PDF is stored directly in alpha channel - matches C# exactly
-    // C# MiniPathTracer: lightPdf = sampleResult.W;
+    // PDF is stored directly in alpha channel (reference behavior).
+    // Reference path tracer uses: lightPdf = sampleResult.W;
     // No Jacobian needed - the alias method samples proportional to importance
     // which already accounts for solid angle weighting
     outPdf = fmaxf(c.w, 1.0e-8f);

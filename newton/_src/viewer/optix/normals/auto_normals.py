@@ -15,7 +15,7 @@
 
 """Smooth normal generation with sharp-edge detection.
 
-1:1 port of the C# ``MinimalDlssRRViewer.Normals`` algorithm.
+Implementation aligned with the reference ``MinimalDlssRRViewer.Normals`` algorithm.
 
 Pipeline:
     1. De-duplicate vertices (exact float equality).
@@ -46,7 +46,7 @@ def _duplicate_map(points: NDArray[np.float32]) -> NDArray[np.int32]:
     """Map each vertex index to its canonical (first-occurrence) index.
 
     Uses a dict keyed on the raw float triple for exact equality, matching
-    the C# ``DuplicatePointRemover.DuplicateMap``.
+    the reference ``DuplicatePointRemover.DuplicateMap``.
     """
     n = len(points)
     canon = np.arange(n, dtype=np.int32)
@@ -87,7 +87,7 @@ def _remove_duplicate_triangles(
 ) -> NDArray[np.int32]:
     """Remove duplicate triangles (ignoring winding order).
 
-    Matches C# ``DuplicateTriangleRemover.RemoveDuplicatedTriangles``.
+    Matches reference ``DuplicateTriangleRemover.RemoveDuplicatedTriangles``.
     """
     sorted_idx = np.sort(mapped, axis=1)
     _, unique_idx = np.unique(sorted_idx, axis=0, return_index=True)
@@ -98,7 +98,7 @@ def _remove_duplicate_triangles(
 def _make_orientation_consistent(tris: NDArray[np.int32]) -> NDArray[np.int32]:
     """BFS flood-fill to make triangle winding consistent.
 
-    Matches C# ``DuplicateTriangleRemover.MakeTriOrientationConsistent``.
+    Matches reference ``DuplicateTriangleRemover.MakeTriOrientationConsistent``.
     """
     n = len(tris)
     if n == 0:
@@ -152,7 +152,7 @@ def _build_edge_list(tris: NDArray[np.int32]) -> dict[tuple[int, int], list[int]
     """Build a mapping from canonical edge ``(min, max)`` to triangle indices.
 
     Edges shared by >2 triangles are marked invalid (empty list).
-    Matches C# ``Adjacency.BuildEdgeList``.
+    Matches reference ``Adjacency.BuildEdgeList``.
     """
     edges: dict[tuple[int, int], list[int]] = {}
     n = len(tris)
@@ -180,7 +180,7 @@ def _build_adjacency(tris: NDArray[np.int32]) -> NDArray[np.int32]:
     """Build per-triangle adjacency array ``(N, 3)`` with neighbour indices.
 
     ``adj[i, 0]`` = neighbour across edge AB, ``[i,1]`` = BC, ``[i,2]`` = CA.
-    ``-1`` means no neighbour.  Matches C# ``Adjacency.BuildAdjacencyInformation``.
+    ``-1`` means no neighbour. Matches reference ``Adjacency.BuildAdjacencyInformation``.
     """
     n = len(tris)
     adj = np.full((n, 3), -1, dtype=np.int32)
@@ -224,7 +224,7 @@ def _connect_segments(
     """Connect edge-segments into strips/loops.
 
     Returns a list of ``(vertex_strip, is_closed)`` tuples.
-    Matches C# ``HashSegmentConnector.ConnectAndResolve``.
+    Matches reference ``HashSegmentConnector.ConnectAndResolve``.
     """
     if not segments:
         raise ValueError("No segments to connect")
@@ -357,7 +357,7 @@ def _sort_fan(
     """Sort adjacent triangles into fan order around *vertex*.
 
     Returns a list of ``(sorted_tri_indices, is_closed)`` per connected
-    component.  Matches C# ``SortTrianglesInFanOrder``.
+    component. Matches reference ``SortTrianglesInFanOrder``.
     """
     edge_to_tri: dict[tuple[int, int], int] = {}
     segments: list[tuple[int, int]] = []
@@ -426,7 +426,7 @@ def _compute_vertex_normals(
     """Accumulate angle-weighted normals for *vertex*, splitting at sharp edges.
 
     Writes directly into *result* which has shape ``(num_tris, 3, 3)``.
-    Matches C# ``ComputeVertexNormals``.
+    Matches reference ``ComputeVertexNormals``.
     """
     num = len(adj_tris)
 

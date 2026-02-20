@@ -46,7 +46,7 @@
 // Compute motion vector for camera motion only (static objects, or sky).
 // motionOrigin is the world-space position to be projected into previous frame's screen.
 // Use w=0 and a direction vector for points at infinity (sky).
-// Matches C# computeCameraMotionVector: uses jittered pixelCenter with MVJittered=false.
+// Matches reference computeCameraMotionVector: uses jittered pixelCenter with MVJittered=false.
 // All matrices use GLM/NumPy column-major-in-memory convention; use mul_cm.
 static __forceinline__ __device__ float2 compute_camera_motion_vector(
     const float2 pixelCenter, const float4 motionOrigin, const float4x4 prevMVP, const uint2 dim
@@ -156,7 +156,7 @@ extern "C" __global__ void __raygen__primary()
     const uint3 idx = optixGetLaunchIndex();
     const uint3 dim = optixGetLaunchDimensions();
 
-    // Camera jitter from frame info - matches C# primary.rgen exactly.
+    // Camera jitter from frame info - matches reference primary.rgen behavior.
     const float2 pixel = make_float2(float(idx.x), float(idx.y));
     const float2 jitter = make_float2(params.frameInfo.jitter[0], params.frameInfo.jitter[1]);
     const float2 pixelCenter = make_float2(pixel.x + jitter.x + 0.5f, pixel.y + jitter.y + 0.5f);
@@ -176,7 +176,7 @@ extern "C" __global__ void __raygen__primary()
     float3 origin = eyePos;
 
     // Ray direction: projInv * ndc -> view space target, then viewInv rotation to world.
-    // Matches C#: target = projInv * vec4(d.x, d.y, 0.01, 1.0)
+    // Matches reference: target = projInv * vec4(d.x, d.y, 0.01, 1.0)
     const float4 target = mul_cm(projInv, make_float4(d.x, d.y, 0.01f, 1.0f));
     const float3x3 viewInv3 = make_float3x3(viewInv);
     float3 direction = mul_cm(viewInv3, normalize(make_float3(target.x, target.y, target.z)));
@@ -197,7 +197,7 @@ extern "C" __global__ void __raygen__primary()
 
     //====================================================================
     // STEP 1 - Find first non-mirror primary hit (PSR loop).
-    // Matches C# primary.rgen STEP 1 exactly.
+    // Matches reference primary.rgen STEP 1 behavior.
     //====================================================================
     int psrDepth = 0;
     const int MAX_PSR_DEPTH = 5;
@@ -250,7 +250,7 @@ extern "C" __global__ void __raygen__primary()
 
         origin = offsetRay(hitPos, pbrMat.Ng);
 
-        // Match C# alpha traversal intent: skip transparent hits and keep tracing.
+        // Match reference alpha traversal intent: skip transparent hits and keep tracing.
         // We only have resolved opacity here (not full alpha mode), so use a robust
         // stochastic alpha test for partial coverage and a hard reject for near-zero alpha.
         if (hasPbr)
@@ -308,7 +308,7 @@ extern "C" __global__ void __raygen__primary()
         ++psrDepth;
     } while (psrDepth < MAX_PSR_DEPTH);
 
-    // Virtual origin for PSR depth computation (matches C#).
+    // Virtual origin for PSR depth computation (reference behavior).
     const float3 virtualOrigin = eyePos + orgDirection * psrHitDist;
     const float viewDepth = -mul_cm(view, make_float4(virtualOrigin.x, virtualOrigin.y, virtualOrigin.z, 1.0f)).z;
 
@@ -322,7 +322,7 @@ extern "C" __global__ void __raygen__primary()
     float4 auxSpecularAlbedo = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
     float auxSpecHitDist = 0.0f;
 
-    // Early out when hitting sky (even via mirrors) - matches C# exactly.
+    // Early out when hitting sky (even via mirrors) - matches reference behavior.
     if (hitSky) {
         const float3 skyGuide = reinhardMax(psrDirectRadiance);
         auxDiffuseAlbedo = make_float4(skyGuide.x, skyGuide.y, skyGuide.z, 0.0f);
@@ -388,7 +388,7 @@ extern "C" __global__ void __raygen__primary()
     pbrMat.specularColor = pbrMat.specularColor * psrThroughput;
     pbrMat.emissive = pbrMat.emissive * psrThroughput + psrDirectRadiance;
 
-    // Motion Vector Buffer - matches C# exactly.
+    // Motion Vector Buffer - matches reference behavior.
     {
         float2 motionVec;
         if (isPsr) {
@@ -446,7 +446,7 @@ extern "C" __global__ void __raygen__primary()
 
     //====================================================================
     // STEP 2 - Direct light contribution at hit position.
-    // Matches C# primary.rgen HdrContrib.
+    // Matches reference primary.rgen HdrContrib.
     //====================================================================
     float3 hdrRadiance = make_float3(0.0f, 0.0f, 0.0f);
     {
@@ -506,7 +506,7 @@ extern "C" __global__ void __raygen__primary()
 
     //====================================================================
     // STEP 3 - Indirect contribution (path tracing from PSR surface).
-    // Matches C# primary.rgen STEP 3.
+    // Matches reference primary.rgen STEP 3.
     //====================================================================
     float3 radiance = hdrRadiance;
     float pathLength = 0.0f;

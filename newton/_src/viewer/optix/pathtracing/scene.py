@@ -18,10 +18,16 @@ Scene management for path tracing viewer.
 Handles mesh loading, BLAS/TLAS construction, and instance management.
 """
 
+import logging
+
 import numpy as np
 import warp as wp
 
+from ..color_utils import srgb_to_linear_rgb
+from ..transform_utils import mat4_to_optix_transform12
 from .materials import MaterialManager
+
+logger = logging.getLogger(__name__)
 
 
 def _create_vertex_buffers_dtype():
@@ -92,28 +98,6 @@ def _build_optix_instance_dtype() -> np.dtype:
     return np.dtype({"names": names, "formats": formats, "offsets": offsets, "itemsize": 80})
 
 
-def _mat4_to_optix_transform12(m: np.ndarray) -> np.ndarray:
-    """Convert 4x4 matrix into OptiX 3x4 row-major transform array."""
-    m = np.asarray(m, dtype=np.float32).reshape(4, 4)
-    return np.array(
-        [
-            m[0, 0],
-            m[0, 1],
-            m[0, 2],
-            m[0, 3],
-            m[1, 0],
-            m[1, 1],
-            m[1, 2],
-            m[1, 3],
-            m[2, 0],
-            m[2, 1],
-            m[2, 2],
-            m[2, 3],
-        ],
-        dtype=np.float32,
-    )
-
-
 class Mesh:
     """Represents a mesh with vertices, indices, and GPU buffers."""
 
@@ -171,7 +155,7 @@ class Mesh:
         normals: np.ndarray,
         texcoords: np.ndarray,
     ) -> np.ndarray:
-        """Compute vertex tangents from UVs (C#-equivalent, vectorized)."""
+        """Compute vertex tangents from UVs using vectorized operations."""
         n_verts = len(vertices)
         tangents = np.zeros((n_verts, 4), dtype=np.float32)
         tan1 = np.zeros((n_verts, 3), dtype=np.float32)
@@ -382,11 +366,24 @@ class Scene:
         """Get number of loaded glTF textures."""
         return len(self._gltf_textures)
 
-    @staticmethod
-    def _srgb_to_linear_rgb(rgb: np.ndarray) -> np.ndarray:
-        """Convert sRGB channels to linear RGB (alpha remains unchanged)."""
-        threshold = 0.04045
-        return np.where(rgb <= threshold, rgb / 12.92, np.power((rgb + 0.055) / 1.055, 2.4))
+    @property
+    def has_meshes(self) -> bool:
+        """Return True when at least one mesh is present."""
+        return bool(self._meshes)
+
+    def get_instance_material_ids_host(self) -> np.ndarray | None:
+        """Return per-instance material IDs as a host NumPy array copy."""
+        if self._instance_material_ids is None:
+            return None
+        return self._instance_material_ids.numpy()
+
+    def set_instance_material_ids_host(self, material_ids: np.ndarray):
+        """Upload per-instance material IDs from host memory."""
+        self._instance_material_ids = wp.array(np.asarray(material_ids, dtype=np.uint32), dtype=wp.uint32, device="cuda")
+
+    def set_compact_material_bytes(self, compact_bytes: np.ndarray):
+        """Upload compact material table bytes to GPU."""
+        self._compact_materials = wp.array(np.asarray(compact_bytes, dtype=np.uint8), dtype=wp.uint8, device="cuda")
 
     def set_gltf_textures(self, textures: list[np.ndarray], srgb_texture_indices: set[int] | None = None):
         """
@@ -404,7 +401,7 @@ class Scene:
             tex_f = np.ascontiguousarray(tex, dtype=np.float32)
             if tex_idx in srgb_indices:
                 tex_f = tex_f.copy()
-                tex_f[..., :3] = self._srgb_to_linear_rgb(np.clip(tex_f[..., :3], 0.0, 1.0))
+                tex_f[..., :3] = srgb_to_linear_rgb(np.clip(tex_f[..., :3], 0.0, 1.0))
             converted.append(tex_f)
         self._gltf_textures = converted
 
@@ -633,10 +630,10 @@ class Scene:
         self._optix = optix_module
 
         if len(self._meshes) == 0:
-            print("[Scene] No meshes to build")
+            logger.info("No meshes to build.")
             return
 
-        print(f"[Scene] Building {len(self._meshes)} meshes, {len(self._instances)} instances...")
+        logger.info("Building scene with %d meshes and %d instances.", len(self._meshes), len(self._instances))
 
         # Upload meshes to GPU
         for mesh in self._meshes:
@@ -653,7 +650,7 @@ class Scene:
 
         total_verts = sum(len(m.vertices) for m in self._meshes)
         total_tris = sum(len(m.indices) for m in self._meshes)
-        print(f"[Scene] Built: {total_verts} vertices, {total_tris} triangles")
+        logger.info("Scene build complete: %d vertices, %d triangles.", total_verts, total_tris)
 
     def rebuild_tlas(self):
         """Rebuild only TLAS after instance transform updates."""
@@ -720,7 +717,7 @@ class Scene:
         inst_np = np.zeros(len(self._instances), dtype=inst_dtype)
         for i, inst in enumerate(self._instances):
             gas_handle = self._gas_handles[inst.mesh_index]
-            inst_np["transform"][i] = _mat4_to_optix_transform12(inst.transform)
+            inst_np["transform"][i] = mat4_to_optix_transform12(inst.transform)
             inst_np["instanceId"][i] = np.uint32(i)
             inst_np["sbtOffset"][i] = np.uint32(0)
             inst_np["visibilityMask"][i] = np.uint32(0xFF)

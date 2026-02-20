@@ -16,8 +16,8 @@
 """
 OptiX Path Tracing Package.
 
-A Python/OptiX port of the C# Vulkan path tracer, providing hardware-accelerated
-ray tracing with PBR materials.
+Python/OptiX path tracing components providing hardware-accelerated ray
+tracing with PBR materials.
 
 Components:
     - camera: First-person/orbit camera with matrix generation

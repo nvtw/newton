@@ -1,6 +1,6 @@
 """Asset loaders for path tracing scenes.
 
-This module ports the C# sample loader flow:
+This module follows the reference sample loader flow:
 - glTF first
 - OBJ fallback
 - procedural fallback in caller
@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import logging
 import struct
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -21,6 +22,8 @@ import numpy as np
 
 if TYPE_CHECKING:
     from .scene import Scene
+
+logger = logging.getLogger(__name__)
 
 
 _GLTF_COMPONENT_DTYPES = {
@@ -181,7 +184,7 @@ def _load_gltf_images(path: Path, root: dict, buffers: list[bytes]) -> list[np.n
             arr = arr.astype(np.float32) * (1.0 / 255.0)
         else:
             arr = arr.astype(np.float32)
-        # No vertical flip — matches C# StbImage.stbi_set_flip_vertically_on_load(0).
+        # No vertical flip to keep texture orientation consistent with the reference.
         # glTF defines UV (0,0) = top-left, and images are stored top-to-bottom,
         # so row 0 in memory IS the top. The shader samples with fy = v * (height-1)
         # which correctly maps V=0 → row 0 → image top.
@@ -434,18 +437,24 @@ def load_scene_from_gltf(scene: Scene, gltf_path: str | Path) -> bool:
             visit(i, np.eye(4, dtype=np.float32))
 
     t_total = time.perf_counter() - t_all_start
-    print(
-        "[glTF timing] "
-        f"parse={t_parse * 1000.0:.1f} ms, "
-        f"images={t_images * 1000.0:.1f} ms, "
-        f"set_textures={t_textures * 1000.0:.1f} ms, "
-        f"accessors={stats['t_accessors'] * 1000.0:.1f} ms, "
-        f"xform={stats['t_xform'] * 1000.0:.1f} ms, "
-        f"materials={stats['t_material'] * 1000.0:.1f} ms, "
-        f"mesh_build={stats['t_mesh'] * 1000.0:.1f} ms, "
-        f"total={t_total * 1000.0:.1f} ms, "
-        f"nodes={stats['nodes']} prims={stats['prims']} verts={stats['verts']} tris={stats['tris']} "
-        f"images={len(gltf_images)} textures={len(root.get('textures', []))}"
+    logger.info(
+        "[glTF timing] parse=%.1f ms, images=%.1f ms, set_textures=%.1f ms, "
+        "accessors=%.1f ms, xform=%.1f ms, materials=%.1f ms, mesh_build=%.1f ms, "
+        "total=%.1f ms, nodes=%d prims=%d verts=%d tris=%d images=%d textures=%d",
+        t_parse * 1000.0,
+        t_images * 1000.0,
+        t_textures * 1000.0,
+        stats["t_accessors"] * 1000.0,
+        stats["t_xform"] * 1000.0,
+        stats["t_material"] * 1000.0,
+        stats["t_mesh"] * 1000.0,
+        t_total * 1000.0,
+        stats["nodes"],
+        stats["prims"],
+        stats["verts"],
+        stats["tris"],
+        len(gltf_images),
+        len(root.get("textures", [])),
     )
 
     return scene.mesh_count > 0

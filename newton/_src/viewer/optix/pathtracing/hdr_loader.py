@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Pure Python Radiance RGBE HDR loader.
-# Translated from C# HDRLoader.cs (PhoneX / MiniOptixScene).
-# Matches C# behavior: RGB float, row order (first scanline -> row height-1).
+# Aligned with the HDR loader behavior used in the reference sample.
+# Preserves RGB float conversion and row order (first scanline -> row height-1).
 # No OpenCV or imageio dependency for HDR.
 
-"""Load Radiance RGBE (.hdr) files. Direct translation of C# HDRLoader."""
+"""Load Radiance RGBE (.hdr) files with reference-compatible behavior."""
 
 import re
 from pathlib import Path
@@ -18,14 +18,14 @@ MAXELEN = 0x7FFF
 
 
 def _convert_component(expo: int, val: int) -> float:
-    """RGBE to float: val/256 * 2^expo. Matches C# convertComponent."""
+    """RGBE to float: val/256 * 2^expo."""
     v = val / 256.0
     d = 2.0**expo
     return v * d
 
 
 class _Reader:
-    """Byte reader over buffer, matching C# BinaryReader semantics."""
+    """Byte reader over buffer with binary-reader semantics."""
 
     def __init__(self, data: bytes):
         self.data = data
@@ -46,7 +46,7 @@ class _Reader:
 
 
 def _old_decrunch(reader: _Reader, width: int, scanline: bytearray, offset: int = 0) -> bool:
-    """Legacy non-RLE format. Matches C# oldDecrunch."""
+    """Legacy non-RLE format."""
     rshift = 0
     j = 0
 
@@ -57,7 +57,7 @@ def _old_decrunch(reader: _Reader, width: int, scanline: bytearray, offset: int 
         g = reader.read_byte()
         b = reader.read_byte()
         e = reader.read_byte()
-        # Do not fail when EOF after reading last pixel (C# checks feof before next iter)
+        # Do not fail when EOF after reading last pixel.
 
         idx = offset + j * 4
         scanline[idx + 0] = r
@@ -87,7 +87,7 @@ def _old_decrunch(reader: _Reader, width: int, scanline: bytearray, offset: int 
 
 
 def _decrunch(reader: _Reader, width: int, scanline: bytearray) -> bool:
-    """RLE or legacy format. Matches C# decrunch."""
+    """RLE or legacy format."""
     if width < MINELEN or width > MAXELEN:
         return _old_decrunch(reader, width, scanline)
 
@@ -138,9 +138,9 @@ def _decrunch(reader: _Reader, width: int, scanline: bytearray) -> bool:
 
 def load_hdr(path: str | Path) -> tuple[np.ndarray, int, int]:
     """
-    Load Radiance RGBE HDR file. Direct translation of C# HDRLoader.load().
+    Load Radiance RGBE HDR file with reference-compatible row ordering.
 
-    Row order matches C#: first scanline in file -> row h-1 (bottom),
+    Row order: first scanline in file -> row h-1 (bottom),
     last scanline -> row 0 (top). So row 0 = bottom of image.
 
     Returns:
@@ -174,7 +174,7 @@ def load_hdr(path: str | Path) -> tuple[np.ndarray, int, int]:
     rgbe = np.zeros((height, width, 4), dtype=np.uint8)
     scanline = bytearray(width * 4)
 
-    # C#: for (int y = h - 1; y >= 0; y--) — first scanline -> row h-1
+    # First scanline in the file maps to row h-1.
     for y in range(height - 1, -1, -1):
         scanline[:] = b"\x00" * (width * 4)
         ok = _decrunch(reader, width, scanline)

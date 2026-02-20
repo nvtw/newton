@@ -42,6 +42,8 @@ import warp as wp
 import newton as nt
 
 from ..core.types import override
+from .optix.color_utils import srgb_to_linear
+from .optix.transform_utils import build_transform_matrix
 from .viewer import ViewerBase
 
 if TYPE_CHECKING:
@@ -273,7 +275,7 @@ class ViewerOptix(ViewerBase):
 
         # Configure procedural sky matching PythonBridge.cs PhysicalSkyParameters.Default
         viewer = self._api.viewer
-        viewer._env_map = None
+        viewer.clear_environment_map()
         viewer.sky_rgb_unit_conversion = (1.0 / 80000.0, 1.0 / 80000.0, 1.0 / 80000.0)
         viewer.sky_multiplier = 1.0
         viewer.sky_haze = 0.0
@@ -497,11 +499,14 @@ class ViewerOptix(ViewerBase):
             return
 
         self._instance_hidden[name] = hidden
+        xforms_np, scales_np, use_device_path = self._prepare_instance_transforms(name, xforms, scales, transform_count)
+        self._upsert_instances(name, mesh_id, xforms_np, scales_np, use_device_path, transform_count)
 
-        xforms_np = None
-        scales_np = None
+        # Assign per-instance materials from colors (sRGB -> linear conversion)
+        self._assign_instance_materials(name, colors, materials)
+
+    def _prepare_instance_transforms(self, name, xforms, scales, transform_count: int):
         use_device_path = False
-
         if (
             isinstance(xforms, wp.array)
             and xforms.device is not None
@@ -515,59 +520,64 @@ class ViewerOptix(ViewerBase):
             xforms_np, scales_np = self._pack_instance_mats_device_to_host(name, xforms, scales, transform_count)
         else:
             xforms_np = xforms.numpy() if isinstance(xforms, wp.array) else np.asarray(xforms)
-            scales_np = scales.numpy() if isinstance(scales, wp.array) else np.asarray(scales) if scales is not None else None
+            scales_np = (
+                scales.numpy() if isinstance(scales, wp.array) else np.asarray(scales) if scales is not None else None
+            )
+        return xforms_np, scales_np, use_device_path
 
+    def _instance_matrix_for_index(self, xforms_np, scales_np, index: int, use_device_path: bool):
+        if use_device_path:
+            return xforms_np[index]
+        return self._build_instance_matrix(xforms_np[index], scales_np[index] if scales_np is not None else None)
+
+    def _upsert_instances(self, name, mesh_id: int, xforms_np, scales_np, use_device_path: bool, transform_count: int):
         existing_ids = self._instance_name_to_optix_ids.get(name)
-
         if existing_ids is not None and len(existing_ids) == transform_count:
             for i, inst_id in enumerate(existing_ids):
-                if use_device_path:
-                    mat = xforms_np[i]
-                else:
-                    mat = self._build_instance_matrix(xforms_np[i], scales_np[i] if scales_np is not None else None)
+                mat = self._instance_matrix_for_index(xforms_np, scales_np, i, use_device_path)
                 self._scene.set_instance_transform(inst_id, mat)
             self._tlas_dirty = True
-        else:
-            instance_ids = []
-            for i in range(transform_count):
-                if use_device_path:
-                    mat = xforms_np[i]
-                else:
-                    mat = self._build_instance_matrix(xforms_np[i], scales_np[i] if scales_np is not None else None)
-                inst_id = self._scene.add_instance(mesh_id, transform=mat)
-                instance_ids.append(inst_id)
-            self._instance_name_to_optix_ids[name] = instance_ids
-            self._tlas_dirty = True
+            return
 
-        # Assign per-instance materials from colors (sRGB -> linear conversion)
-        if colors is not None and self._scene is not None:
-            colors_np = colors.numpy() if isinstance(colors, wp.array) else np.asarray(colors)
-            materials_np = materials.numpy() if isinstance(materials, wp.array) and materials is not None else None
+        instance_ids = []
+        for i in range(transform_count):
+            mat = self._instance_matrix_for_index(xforms_np, scales_np, i, use_device_path)
+            inst_id = self._scene.add_instance(mesh_id, transform=mat)
+            instance_ids.append(inst_id)
+        self._instance_name_to_optix_ids[name] = instance_ids
+        self._tlas_dirty = True
 
-            inst_ids = self._instance_name_to_optix_ids.get(name, [])
-            for i in range(min(len(inst_ids), len(colors_np))):
-                r_srgb = round(float(colors_np[i][0]), 2)
-                g_srgb = round(float(colors_np[i][1]), 2)
-                b_srgb = round(float(colors_np[i][2]), 2)
-                roughness = round(float(materials_np[i][0]), 3) if materials_np is not None and i < len(materials_np) else 0.5
-                metallic = round(float(materials_np[i][1]), 3) if materials_np is not None and i < len(materials_np) else 0.0
+    def _assign_instance_materials(self, name, colors, materials):
+        if colors is None or self._scene is None:
+            return
 
-                cache_key = (r_srgb, g_srgb, b_srgb, roughness, metallic)
-                mat_id = self._material_cache.get(cache_key)
-                if mat_id is None:
-                    r_lin = self._srgb_to_linear(r_srgb)
-                    g_lin = self._srgb_to_linear(g_srgb)
-                    b_lin = self._srgb_to_linear(b_srgb)
-                    mat_id = self._scene.materials.add_pbr(
-                        base_color=(r_lin, g_lin, b_lin),
-                        roughness=roughness,
-                        metallic=metallic,
-                    )
-                    self._material_cache[cache_key] = mat_id
+        colors_np = colors.numpy() if isinstance(colors, wp.array) else np.asarray(colors)
+        materials_np = materials.numpy() if isinstance(materials, wp.array) and materials is not None else None
+        inst_ids = self._instance_name_to_optix_ids.get(name, [])
 
-                self._instance_material_map[inst_ids[i]] = mat_id
+        for i in range(min(len(inst_ids), len(colors_np))):
+            r_srgb = round(float(colors_np[i][0]), 2)
+            g_srgb = round(float(colors_np[i][1]), 2)
+            b_srgb = round(float(colors_np[i][2]), 2)
+            roughness = round(float(materials_np[i][0]), 3) if materials_np is not None and i < len(materials_np) else 0.5
+            metallic = round(float(materials_np[i][1]), 3) if materials_np is not None and i < len(materials_np) else 0.0
 
-            self._materials_dirty = True
+            cache_key = (r_srgb, g_srgb, b_srgb, roughness, metallic)
+            mat_id = self._material_cache.get(cache_key)
+            if mat_id is None:
+                r_lin = srgb_to_linear(r_srgb)
+                g_lin = srgb_to_linear(g_srgb)
+                b_lin = srgb_to_linear(b_srgb)
+                mat_id = self._scene.materials.add_pbr(
+                    base_color=(r_lin, g_lin, b_lin),
+                    roughness=roughness,
+                    metallic=metallic,
+                )
+                self._material_cache[cache_key] = mat_id
+
+            self._instance_material_map[inst_ids[i]] = mat_id
+
+        self._materials_dirty = True
 
     def _pack_instance_mats_device_to_host(self, name: str, xforms: wp.array, scales, count: int):
         """Pack instance matrices on GPU, stage to pinned host, return numpy views."""
@@ -637,8 +647,8 @@ class ViewerOptix(ViewerBase):
 
         self._sync_camera()
 
-        if self._scene is not None and len(self._scene._meshes) > 0:
-            mesh_count = len(self._scene._meshes)
+        if self._scene is not None and self._scene.mesh_count > 0:
+            mesh_count = self._scene.mesh_count
             if not self._built:
                 self._build_scene_if_needed()
             elif mesh_count > self._meshes_at_last_build:
@@ -740,7 +750,7 @@ class ViewerOptix(ViewerBase):
         self._ensure_api()
 
         h, w = self._height, self._width
-        tonemapped = self._api.viewer._tonemapper.output
+        tonemapped = self._api.viewer.tonemapped_output
 
         if target_image is None:
             target_image = wp.empty(shape=(h, w, 3), dtype=wp.uint8, device="cuda")
@@ -760,52 +770,6 @@ class ViewerOptix(ViewerBase):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _srgb_to_linear(c: float) -> float:
-        """Convert a single sRGB channel value to linear space.
-
-        Matches hybrid_viewer.py's conversion for correct PBR shading.
-        """
-        if c <= 0.04045:
-            return c / 12.92
-        return ((c + 0.055) / 1.055) ** 2.4
-
-    @staticmethod
-    def _quat_scale_to_mat4(xform_np, scale_np=None) -> np.ndarray:
-        """Convert a Newton transform (pos + quat) and optional scale to a 4x4 matrix.
-
-        Matches pathtracer_api.py ``_build_transform``: rotation is stored row-major
-        and scale is applied per-column (axis-aligned in world space).
-        """
-        px, py, pz = float(xform_np[0]), float(xform_np[1]), float(xform_np[2])
-        qx, qy, qz, qw = float(xform_np[3]), float(xform_np[4]), float(xform_np[5]), float(xform_np[6])
-
-        xx, yy, zz = qx * qx, qy * qy, qz * qz
-        xy, xz, yz = qx * qy, qx * qz, qy * qz
-        wx, wy, wz = qw * qx, qw * qy, qw * qz
-
-        m = np.eye(4, dtype=np.float32)
-        m[0, 0] = 1.0 - 2.0 * (yy + zz)
-        m[0, 1] = 2.0 * (xy - wz)
-        m[0, 2] = 2.0 * (xz + wy)
-        m[1, 0] = 2.0 * (xy + wz)
-        m[1, 1] = 1.0 - 2.0 * (xx + zz)
-        m[1, 2] = 2.0 * (yz - wx)
-        m[2, 0] = 2.0 * (xz - wy)
-        m[2, 1] = 2.0 * (yz + wx)
-        m[2, 2] = 1.0 - 2.0 * (xx + yy)
-        m[0, 3] = px
-        m[1, 3] = py
-        m[2, 3] = pz
-
-        if scale_np is not None:
-            sx, sy, sz = float(scale_np[0]), float(scale_np[1]), float(scale_np[2])
-            m[:3, 0] *= sx
-            m[:3, 1] *= sy
-            m[:3, 2] *= sz
-
-        return m
-
     def _build_instance_matrix(self, xform_np, scale_np=None) -> np.ndarray:
         """Build a 4x4 instance matrix with the global up-axis transform applied.
 
@@ -813,7 +777,8 @@ class ViewerOptix(ViewerBase):
         transform (coordinate system conversion) must pre-multiply the local
         object transform: ``final = global @ local``.
         """
-        local = self._quat_scale_to_mat4(xform_np, scale_np)
+        scale = 1.0 if scale_np is None else scale_np
+        local = build_transform_matrix(xform_np[:3], xform_np[3:7], scale)
         if self._global_transform is not None:
             return self._global_transform @ local
         return local
@@ -876,11 +841,11 @@ class ViewerOptix(ViewerBase):
             return
         if self._api is None:
             return
-        if self._scene is None or len(self._scene._meshes) == 0:
+        if self._scene is None or self._scene.mesh_count == 0:
             return
 
         self._api.build_scene()
-        self._meshes_at_last_build = len(self._scene._meshes)
+        self._meshes_at_last_build = self._scene.mesh_count
         self._built = True
         self._tlas_dirty = False
 
@@ -895,16 +860,16 @@ class ViewerOptix(ViewerBase):
         """
         if not self._instance_material_map or self._scene is None:
             return
-        if self._scene._instance_material_ids is None:
+        mat_ids = self._scene.get_instance_material_ids_host()
+        if mat_ids is None:
             return
 
-        num_instances = len(self._scene._instances)
-        mat_ids = self._scene._instance_material_ids.numpy()
+        num_instances = self._scene.instance_count
         for inst_id, mat_id in self._instance_material_map.items():
             if 0 <= inst_id < num_instances:
                 mat_ids[inst_id] = np.uint32(mat_id)
 
-        self._scene._instance_material_ids = wp.array(mat_ids, dtype=wp.uint32, device="cuda")
+        self._scene.set_instance_material_ids_host(mat_ids)
 
         self._rebuild_compact_materials()
 
@@ -949,7 +914,7 @@ class ViewerOptix(ViewerBase):
             align=True,
         )
         compact = np.zeros(mat_count, dtype=compact_dt)
-        for i, mat in enumerate(self._scene.materials._materials):
+        for i, mat in enumerate(self._scene.materials.get_material_entries()):
             compact[i]["baseColor"] = mat["pbrBaseColorFactor"][:3]
             compact[i]["emissive"] = mat["emissiveFactor"]
             compact[i]["roughness"] = mat["pbrRoughnessFactor"]
@@ -988,14 +953,14 @@ class ViewerOptix(ViewerBase):
                     mat[mat_key]["uvTransform12"],
                 )
         compact_bytes = compact.view(np.uint8).reshape(-1)
-        self._scene._compact_materials = wp.array(compact_bytes, dtype=wp.uint8, device="cuda")
+        self._scene.set_compact_material_bytes(compact_bytes)
 
     def _blit_to_window(self):
         """Copy the tonemapped output to the Pyglet GL texture via PBO."""
         from pyglet import gl
 
         viewer = self._api.viewer
-        tonemapped = viewer._tonemapper.output
+        tonemapped = viewer.tonemapped_output
         w, h = self._width, self._height
 
         mapped = self._cuda_gl.map(dtype=wp.uint32, shape=(w * h,))

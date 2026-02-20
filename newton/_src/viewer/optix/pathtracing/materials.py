@@ -204,6 +204,10 @@ class MaterialManager:
             return 0
         return self._gpu_buffer.ptr
 
+    def get_material_entries(self):
+        """Return the underlying material entry list for packing helpers."""
+        return self._materials
+
     def add_default(self) -> int:
         """Add a default PBR material and return its index."""
         mat = self._create_default_material()
@@ -294,7 +298,7 @@ class MaterialManager:
         attenuation_color: tuple = (1.0, 1.0, 1.0),
         attenuation_distance: float = 1.0e10,
     ) -> int:
-        """Add a glTF PBR material (C# loader equivalent fields)."""
+        """Add a glTF PBR material using reference loader-compatible fields."""
         mat = self._create_default_material()
         mat["pbrBaseColorFactor"] = (
             float(base_color[0]),

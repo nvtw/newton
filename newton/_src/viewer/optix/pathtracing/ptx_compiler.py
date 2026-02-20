@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 import shutil
@@ -25,6 +26,8 @@ from pathlib import Path
 
 import warp as wp
 import warp._src.build as wp_build
+
+logger = logging.getLogger(__name__)
 
 
 def get_optix_include_dir(optix_module=None) -> str | None:
@@ -47,33 +50,38 @@ def get_optix_include_dir(optix_module=None) -> str | None:
         except Exception:
             optix_dir = None
         if optix_dir and os.path.isdir(optix_dir) and _has_optix_device_header(optix_dir):
-            print(f"[Viewer] OptiX header found: {os.path.join(optix_dir, 'optix_device.h')}")
+            logger.info("OptiX header found: %s", os.path.join(optix_dir, "optix_device.h"))
             return optix_dir
-        print("BIG")
-        print(
+        logger.warning(
             "[Viewer] optix.get_optix_include_dir() did not provide a directory "
             "with optix_device.h; falling back to SDK discovery."
         )
 
+    env_candidates = [
+        os.environ.get("OPTIX_SDK_INCLUDE_DIR"),
+        os.environ.get("OPTIX_INCLUDE_DIR"),
+    ]
+    for path in env_candidates:
+        if path and os.path.isdir(path) and _has_optix_device_header(path):
+            logger.info("Using OptiX include directory from environment: %s", path)
+            return path
+
     discovered: list[str] = []
-    sdk_root = Path("C:/ProgramData/NVIDIA Corporation")
-    if sdk_root.is_dir():
-        for include_dir in sdk_root.glob("OptiX SDK */include"):
+    windows_sdk_root = Path("C:/ProgramData/NVIDIA Corporation")
+    if windows_sdk_root.is_dir():
+        for include_dir in windows_sdk_root.glob("OptiX SDK */include"):
             if include_dir.is_dir() and _has_optix_device_header(str(include_dir)):
                 discovered.append(str(include_dir))
-    discovered.sort(key=_parse_version_from_path, reverse=True)
 
-    candidates = [
-        *discovered,
-        "C:/ProgramData/NVIDIA Corporation/OptiX SDK 9.0.0/include",
-        "C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.1.0/include",
-        "C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0/include",
-        "C:/ProgramData/NVIDIA Corporation/OptiX SDK 7.7.0/include",
-        "/opt/optix/include",
-        os.path.expanduser("~/optix/include"),
-    ]
+    for include_dir in (
+        Path("/opt/optix/include"),
+        Path.home() / "optix" / "include",
+    ):
+        if include_dir.is_dir() and _has_optix_device_header(str(include_dir)):
+            discovered.append(str(include_dir))
 
-    for path in candidates:
+    discovered = sorted(set(discovered), key=_parse_version_from_path, reverse=True)
+    for path in discovered:
         if os.path.isdir(path) and _has_optix_device_header(path):
             return path
 
@@ -329,7 +337,7 @@ typedef unsigned long long cudaSurfaceObject_t;
 {rt_content}
 """
 
-    print("[PTX] Compiling path tracing kernels...")
+    logger.info("Compiling path tracing kernels.")
     ptx = _compile_cuda_source_to_ptx(cuda_source, module_tag="kernels", device="cuda")
-    print(f"[PTX] Compiled {len(ptx)} bytes")
+    logger.info("Compiled path tracing PTX: %d bytes.", len(ptx))
     return ptx
