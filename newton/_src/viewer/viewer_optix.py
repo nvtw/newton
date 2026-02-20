@@ -221,7 +221,7 @@ class ViewerOptix(ViewerBase):
         self._cuda_gl = None
 
         # Camera state (pitch/yaw in degrees)
-        # Convention matches hybrid_viewer / C#: yaw=0 looks in +Z
+        # Convention matches hybrid_viewer: yaw=0 looks in +Z
         self._cam_pos = np.array([0.0, 2.0, 8.0], dtype=np.float32)
         self._cam_pitch = 0.0
         self._cam_yaw = 180.0  # Look toward -Z (toward origin)
@@ -264,7 +264,19 @@ class ViewerOptix(ViewerBase):
         self._picking: Picking | None = None
         self._global_transform_inv: np.ndarray | None = None
         self.ui = None
-        self._show_ui = True
+        self.show_ui = True
+        self._show_ui = self.show_ui
+        # UI callback system (parity with ViewerGL): side, stats, free-floating.
+        self._ui_callbacks = {"side": [], "stats": [], "free": []}
+
+    def register_ui_callback(self, callback, position="side"):
+        """Register a UI callback rendered in the requested panel region."""
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        if position not in self._ui_callbacks:
+            valid_positions = list(self._ui_callbacks.keys())
+            raise ValueError(f"Invalid position '{position}'. Must be one of: {valid_positions}")
+        self._ui_callbacks[position].append(callback)
 
     # ------------------------------------------------------------------
     # Path tracer lifecycle
@@ -287,7 +299,7 @@ class ViewerOptix(ViewerBase):
             raise RuntimeError("Failed to initialize OptiX path tracer. Check GPU drivers and OptiX SDK installation.")
         self._scene = self._api.scene
 
-        # Configure procedural sky matching PythonBridge.cs PhysicalSkyParameters.Default
+        # Configure procedural sky using the default physical-sky values.
         viewer = self._api.viewer
         viewer.clear_environment_map()
         viewer.sky_rgb_unit_conversion = (1.0 / 80000.0, 1.0 / 80000.0, 1.0 / 80000.0)
@@ -875,7 +887,7 @@ class ViewerOptix(ViewerBase):
     def _sync_camera(self):
         """Push the viewer camera state into the OptiX camera only when it changes.
 
-        Uses the C# camera convention (matching hybrid_viewer / PythonBridge):
+        Uses the camera convention matching hybrid_viewer:
         yaw=0 looks in +Z, X = sin(yaw)*cos(pitch), Z = cos(yaw)*cos(pitch).
         """
         if self._api is None:
@@ -1064,27 +1076,16 @@ class ViewerOptix(ViewerBase):
         self._sprite.draw()
 
     def _render_ui(self):
-        if self.ui is None or not self.ui.is_available or not self._show_ui:
+        if self.ui is None or not self.ui.is_available or not self.show_ui:
             return
         try:
             self.ui.begin_frame()
+            self._render_left_panel()
+            self._render_stats_overlay()
             imgui = self.ui.imgui
-            imgui.set_next_window_pos(imgui.ImVec2(10, 10))
-            imgui.set_next_window_size(imgui.ImVec2(320, 0), imgui.Cond_.appearing)
-            if imgui.begin("OptiX Viewer"):
-                imgui.text(f"FPS: {self._current_fps:.1f}")
-                if self.model is not None:
-                    imgui.text(f"Bodies: {self.model.body_count}")
-                    imgui.text(f"Shapes: {self.model.shape_count}")
-                imgui.separator()
-                imgui.text("Controls:")
-                imgui.text("WASD/QE - Move")
-                imgui.text("Left drag - Look")
-                imgui.text("Right drag - Pick")
-                imgui.text("R/T - Record start/stop")
-                _, self.picking_enabled = imgui.checkbox("Enable Picking", self.picking_enabled)
-                _, self._show_ui = imgui.checkbox("Show UI", self._show_ui)
-            imgui.end()
+            for callback in self._ui_callbacks["free"]:
+                callback(imgui)
+            self._show_ui = self.show_ui
             self.ui.end_frame()
             self.ui.render()
         except Exception as exc:
@@ -1096,6 +1097,152 @@ class ViewerOptix(ViewerBase):
                 except Exception:
                     pass
             self.ui = None
+
+    def _render_left_panel(self):
+        if self.ui is None or not self.ui.is_available:
+            return
+        imgui = self.ui.imgui
+        io = self.ui.io
+
+        imgui.set_next_window_pos(imgui.ImVec2(10, 10))
+        imgui.set_next_window_size(imgui.ImVec2(320, io.display_size[1] - 20))
+        flags = imgui.WindowFlags_.no_resize.value
+        if imgui.begin(f"Newton Viewer v{nt.__version__}", flags=flags):
+            if self.model is not None:
+                imgui.set_next_item_open(True, imgui.Cond_.appearing)
+                if imgui.collapsing_header("Model Information"):
+                    imgui.separator()
+                    axis_names = ["X", "Y", "Z"]
+                    imgui.text(f"Worlds: {self.model.world_count}")
+                    imgui.text(f"Up Axis: {axis_names[self.model.up_axis]}")
+                    gravity = self.model.gravity.numpy()[0]
+                    imgui.text(f"Gravity: ({gravity[0]:.2f}, {gravity[1]:.2f}, {gravity[2]:.2f})")
+                    _, self._paused = imgui.checkbox("Pause", self._paused)
+
+            imgui.set_next_item_open(True, imgui.Cond_.appearing)
+            if imgui.collapsing_header("Visualization"):
+                imgui.separator()
+                _, self.show_visual = imgui.checkbox("Show Visual", self.show_visual)
+                _, self.show_collision = imgui.checkbox("Show Collision", self.show_collision)
+                _, self.show_static = imgui.checkbox("Show Static", self.show_static)
+                _, self.show_inertia_boxes = imgui.checkbox("Show Inertia Boxes", self.show_inertia_boxes)
+                _, self.show_triangles = imgui.checkbox("Show Cloth", self.show_triangles)
+
+            imgui.set_next_item_open(True, imgui.Cond_.appearing)
+            if imgui.collapsing_header("OptiX Rendering"):
+                imgui.separator()
+                viewer = self._api.viewer if self._api is not None else None
+                if viewer is not None:
+                    mode_labels = {
+                        viewer.OUTPUT_FINAL: "Final",
+                        viewer.OUTPUT_DEPTH: "Depth",
+                        viewer.OUTPUT_NORMAL: "Normal",
+                        viewer.OUTPUT_ROUGHNESS: "Roughness",
+                        viewer.OUTPUT_DIFFUSE: "Diffuse",
+                        viewer.OUTPUT_SPECULAR: "Specular",
+                        viewer.OUTPUT_MOTION: "Motion",
+                        viewer.OUTPUT_SPEC_HITDIST: "Spec HitDist",
+                    }
+                    mode_values = list(mode_labels.keys())
+                    mode_names = list(mode_labels.values())
+                    try:
+                        current_mode_idx = mode_values.index(int(viewer.output_mode))
+                    except ValueError:
+                        current_mode_idx = 0
+                    changed, new_mode_idx = imgui.combo("Output", current_mode_idx, mode_names)
+                    if changed:
+                        viewer.output_mode = mode_values[new_mode_idx]
+                    imgui.text("Hotkeys: 1-8")
+                    imgui.text(f"DLSS RR: {'on' if viewer.enable_dlss_rr else 'off'}")
+                    imgui.text(f"Sample: {viewer.sample_index}")
+                else:
+                    imgui.text("Renderer not initialized yet.")
+
+                changed, cam_speed = imgui.slider_float("Camera Speed", float(self._cam_speed), 0.1, 25.0, "%.2f")
+                if changed:
+                    self._cam_speed = float(cam_speed)
+                changed, cam_fov = imgui.slider_float("FOV", float(self._cam_fov), 15.0, 90.0, "%.1f")
+                if changed:
+                    self._cam_fov = float(cam_fov)
+                _, self.picking_enabled = imgui.checkbox("Enable Picking", self.picking_enabled)
+                _, self.show_ui = imgui.checkbox("Show UI", self.show_ui)
+                self._show_ui = self.show_ui
+
+            imgui.set_next_item_open(False, imgui.Cond_.appearing)
+            if imgui.collapsing_header("Recording"):
+                imgui.separator()
+                if self._recorder.is_recording:
+                    output_path = self._recorder.output_path
+                    imgui.text("Status: recording")
+                    if output_path is not None:
+                        imgui.text_wrapped(str(output_path))
+                    if imgui.button("Stop Recording"):
+                        self._stop_recording()
+                else:
+                    imgui.text("Status: idle")
+                    imgui.text_wrapped(str(self._recorder.suggested_output_path()))
+                    if imgui.button("Start Recording"):
+                        self._start_recording()
+
+            imgui.set_next_item_open(True, imgui.Cond_.appearing)
+            if imgui.collapsing_header("Example Options"):
+                for callback in self._ui_callbacks["side"]:
+                    callback(imgui)
+
+            imgui.set_next_item_open(False, imgui.Cond_.appearing)
+            if imgui.collapsing_header("Controls"):
+                imgui.separator()
+                imgui.text("WASD/QE - Move")
+                imgui.text("Left drag - Look")
+                imgui.text("Right drag - Pick")
+                imgui.text("Mouse wheel - Zoom")
+                imgui.text("Space - Pause")
+                imgui.text("R/T - Record start/stop")
+                imgui.text("H - Toggle UI")
+        imgui.end()
+
+    def _render_stats_overlay(self):
+        if self.ui is None or not self.ui.is_available:
+            return
+        imgui = self.ui.imgui
+        io = self.ui.io
+        imgui.set_next_window_pos(imgui.ImVec2(io.display_size[0] - 10, 10), pivot=imgui.ImVec2(1.0, 0.0))
+        flags = (
+            imgui.WindowFlags_.no_decoration.value
+            | imgui.WindowFlags_.always_auto_resize.value
+            | imgui.WindowFlags_.no_resize.value
+            | imgui.WindowFlags_.no_saved_settings.value
+            | imgui.WindowFlags_.no_focus_on_appearing.value
+            | imgui.WindowFlags_.no_nav.value
+            | imgui.WindowFlags_.no_move.value
+        )
+        pushed_window_bg = False
+        try:
+            imgui.set_next_window_bg_alpha(0.7)
+        except AttributeError:
+            imgui.push_style_color(imgui.Col_.window_bg, imgui.ImVec4(0.094, 0.094, 0.094, 0.7))
+            pushed_window_bg = True
+
+        if imgui.begin("OptiX Stats", flags=flags):
+            imgui.text(f"FPS: {self._current_fps:.1f}")
+            if self.model is not None:
+                imgui.separator()
+                imgui.text(f"Bodies: {self.model.body_count}")
+                imgui.text(f"Shapes: {self.model.shape_count}")
+                imgui.text(f"Joints: {self.model.joint_count}")
+                imgui.text(f"Particles: {self.model.particle_count}")
+                imgui.text(f"Springs: {self.model.spring_count}")
+                imgui.text(f"Triangles: {self.model.tri_count}")
+            if self._api is not None:
+                viewer = self._api.viewer
+                imgui.separator()
+                imgui.text(f"Sample: {viewer.sample_index}")
+                imgui.text(f"Frame: {viewer.frame_index}")
+            for callback in self._ui_callbacks["stats"]:
+                callback(imgui)
+        imgui.end()
+        if pushed_window_bg:
+            imgui.pop_style_color()
 
     def _to_framebuffer_coords(self, x: float, y: float) -> tuple[float, float]:
         if self._window is None:
@@ -1250,7 +1397,8 @@ class ViewerOptix(ViewerBase):
         elif symbol == key.T:
             self._stop_recording()
         elif symbol == key.H:
-            self._show_ui = not self._show_ui
+            self.show_ui = not self.show_ui
+            self._show_ui = self.show_ui
         elif self._api is not None:
             viewer = self._api.viewer
             if symbol == key._1:

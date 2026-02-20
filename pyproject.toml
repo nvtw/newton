@@ -88,6 +88,7 @@ optix = [
     "newton[examples]",
     "optix @ git+https://github.com/nvtw/otk-pyoptix.git#subdirectory=optix",
     "imageio>=2.37.0",
+    "imageio-ffmpeg>=0.6.0",
     "Pillow>=10.0.0",
 ]
 
