@@ -306,6 +306,9 @@ class Scene:
         self._instance_buffer = None
         self._instance_np_cache = None
         self._instance_np_capacity = 0
+        self._tlas_temp_buffer = None
+        self._tlas_temp_capacity = 0
+        self._tlas_output_capacity = 0
 
         # Keepalive references
         self._keepalive = {}
@@ -616,6 +619,9 @@ class Scene:
         self._instance_buffer = None
         self._instance_np_cache = None
         self._instance_np_capacity = 0
+        self._tlas_temp_buffer = None
+        self._tlas_temp_capacity = 0
+        self._tlas_output_capacity = 0
         self._keepalive.clear()
         self.materials.clear()
         self._instance_material_ids = None
@@ -749,22 +755,31 @@ class Scene:
         ias_input.numInstances = count
 
         sizes = self._ctx.accelComputeMemoryUsage([accel_options], [ias_input])
-        d_temp = wp.empty(sizes.tempSizeInBytes, dtype=wp.uint8, device="cuda")
-        d_ias = wp.empty(sizes.outputSizeInBytes, dtype=wp.uint8, device="cuda")
+        required_temp = int(sizes.tempSizeInBytes)
+        required_output = int(sizes.outputSizeInBytes)
+
+        # Reuse TLAS scratch/output buffers across rebuilds.
+        # Overallocate slightly to reduce realloc churn when scene size
+        # changes by a small amount.
+        if self._tlas_temp_buffer is None or self._tlas_temp_capacity < required_temp:
+            self._tlas_temp_capacity = max(required_temp, int(required_temp * 1.25))
+            self._tlas_temp_buffer = wp.empty(self._tlas_temp_capacity, dtype=wp.uint8, device="cuda")
+        if self._ias_buffer is None or self._tlas_output_capacity < required_output:
+            self._tlas_output_capacity = max(required_output, int(required_output * 1.25))
+            self._ias_buffer = wp.empty(self._tlas_output_capacity, dtype=wp.uint8, device="cuda")
 
         self._ias_handle = self._ctx.accelBuild(
             0,
             [accel_options],
             [ias_input],
-            d_temp.ptr,
-            sizes.tempSizeInBytes,
-            d_ias.ptr,
-            sizes.outputSizeInBytes,
+            self._tlas_temp_buffer.ptr,
+            required_temp,
+            self._ias_buffer.ptr,
+            required_output,
             [],
         )
 
-        self._ias_buffer = d_ias
-        self._keepalive["ias_temp"] = d_temp
+        self._keepalive["ias_temp"] = self._tlas_temp_buffer
         wp.synchronize_device("cuda")
 
     def _build_scene_buffers(self):
