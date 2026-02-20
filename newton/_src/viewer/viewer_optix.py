@@ -32,6 +32,7 @@ accelerated ray tracing via NVIDIA OptiX. The viewer uses the same
 from __future__ import annotations
 
 import ctypes
+import logging
 import math
 import time
 from typing import TYPE_CHECKING
@@ -43,12 +44,15 @@ import newton as nt
 
 from ..core.types import override
 from .optix.color_utils import srgb_to_linear
+from .optix.recording import LiveMp4Recorder
 from .optix.transform_utils import build_transform_matrix
 from .viewer import ViewerBase
 
 if TYPE_CHECKING:
     from .optix.pathtracing.pathtracer_api import PathTracerAPI
     from .optix.pathtracing.scene import Scene as OptixScene
+
+logger = logging.getLogger(__name__)
 
 
 @wp.kernel
@@ -251,6 +255,9 @@ class ViewerOptix(ViewerBase):
         # Cached default-scale buffer to avoid per-call allocation
         self._default_scales_dev: wp.array | None = None
         self._default_scales_count = 0
+        # Optional live MP4 recording (R=start, T=stop)
+        self._recorder = LiveMp4Recorder()
+        self._record_frame_gpu: wp.array | None = None
 
     # ------------------------------------------------------------------
     # Path tracer lifecycle
@@ -666,6 +673,7 @@ class ViewerOptix(ViewerBase):
 
         if self._built:
             self._api.viewer.render()
+            self._record_frame_if_needed()
 
         if not self._headless and self._window is not None:
             if self._built:
@@ -723,6 +731,7 @@ class ViewerOptix(ViewerBase):
 
     @override
     def close(self):
+        self._stop_recording()
         self._running = False
         if self._window is not None:
             from pyglet import gl
@@ -782,6 +791,31 @@ class ViewerOptix(ViewerBase):
         if self._global_transform is not None:
             return self._global_transform @ local
         return local
+
+    def _start_recording(self):
+        if self._api is None:
+            return
+        fps_hint = self._current_fps if self._current_fps > 1.0 else 60.0
+        target_path = self._recorder.suggested_output_path()
+        logger.info("Starting recording. Output file: %s", target_path)
+        if self._recorder.start(self._width, self._height, fps=fps_hint, output_path=target_path):
+            self._record_frame_gpu = wp.empty(shape=(self._height, self._width, 3), dtype=wp.uint8, device="cuda")
+        else:
+            logger.info("Recording backend unavailable; recording skipped for %s", target_path)
+
+    def _stop_recording(self):
+        output_path = self._recorder.stop()
+        if output_path is not None:
+            logger.info("Recording saved to: %s", output_path)
+        self._record_frame_gpu = None
+
+    def _record_frame_if_needed(self):
+        if not self._recorder.is_recording or not self._built:
+            return
+        if self._record_frame_gpu is None or self._record_frame_gpu.shape != (self._height, self._width, 3):
+            self._record_frame_gpu = wp.empty(shape=(self._height, self._width, 3), dtype=wp.uint8, device="cuda")
+        frame_gpu = self.get_frame(target_image=self._record_frame_gpu)
+        self._recorder.write_frame(frame_gpu.numpy())
 
     def _camera_changed(self) -> bool:
         """Return True if the camera moved since the last sync (or never synced)."""
@@ -1079,6 +1113,10 @@ class ViewerOptix(ViewerBase):
         elif symbol == key.ESCAPE:
             if self._window is not None:
                 self._window.close()
+        elif symbol == key.R:
+            self._start_recording()
+        elif symbol == key.T:
+            self._stop_recording()
         elif self._api is not None:
             viewer = self._api.viewer
             if symbol == key._1:
@@ -1126,6 +1164,7 @@ class ViewerOptix(ViewerBase):
         self._cam_fov = max(15.0, min(90.0, self._cam_fov))
 
     def on_close(self):
+        self._stop_recording()
         self._running = False
 
     def on_resize(self, width, height):
@@ -1133,6 +1172,8 @@ class ViewerOptix(ViewerBase):
             return
         self._width = width
         self._height = height
+        if self._recorder.is_recording:
+            self._stop_recording()
 
         if self._api is not None:
             self._api.viewer.resize(width, height)

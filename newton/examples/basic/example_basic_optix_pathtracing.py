@@ -61,6 +61,8 @@ class Example:
         self.args = args
         self.frame = 0
         self.loaded_external_scene = False
+        if hasattr(self.viewer, "_cam_speed"):
+            self.viewer._cam_speed *= 0.2
 
         self._try_load_a_beautiful_game()
 
