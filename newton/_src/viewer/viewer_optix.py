@@ -43,9 +43,11 @@ import warp as wp
 import newton as nt
 
 from ..core.types import override
+from .gl.gui import UI
 from .optix.color_utils import srgb_to_linear
 from .optix.recording import LiveMp4Recorder
 from .optix.transform_utils import build_transform_matrix
+from .picking import Picking
 from .viewer import ViewerBase
 
 if TYPE_CHECKING:
@@ -258,6 +260,11 @@ class ViewerOptix(ViewerBase):
         # Optional live MP4 recording (R=start, T=stop)
         self._recorder = LiveMp4Recorder()
         self._record_frame_gpu: wp.array | None = None
+        self._last_state = None
+        self._picking: Picking | None = None
+        self._global_transform_inv: np.ndarray | None = None
+        self.ui = None
+        self._show_ui = True
 
     # ------------------------------------------------------------------
     # Path tracer lifecycle
@@ -356,6 +363,12 @@ class ViewerOptix(ViewerBase):
         )
 
         self._window.push_handlers(self)
+        try:
+            self.ui = UI(self._window)
+        except Exception as exc:
+            self.ui = None
+            logger.warning("ImGui UI disabled for ViewerOptix: %s", exc)
+            print(f"[OptiX UI] Disabled (ImGui backend unavailable): {exc}")
 
     def _recreate_gl_resources(self):
         """Recreate GL texture, PBO, and CUDA interop for the current resolution."""
@@ -404,6 +417,13 @@ class ViewerOptix(ViewerBase):
     @override
     def set_model(self, model: nt.Model | None, max_worlds: int | None = None):
         super().set_model(model, max_worlds=max_worlds)
+        if model is not None:
+            self._picking = Picking(
+                model,
+                pick_stiffness=10000.0,
+                pick_damping=1000.0,
+                world_offsets=self.world_offsets,
+            )
 
         if model is not None:
             self._setup_global_transform(model.up_axis)
@@ -446,6 +466,9 @@ class ViewerOptix(ViewerBase):
             ], dtype=np.float32)
         else:  # Y-up (native) - no transform needed
             self._global_transform = None
+        self._global_transform_inv = (
+            np.linalg.inv(self._global_transform).astype(np.float32) if self._global_transform is not None else None
+        )
 
     @override
     def set_camera(self, pos: wp.vec3, pitch: float, yaw: float):
@@ -632,6 +655,16 @@ class ViewerOptix(ViewerBase):
         return mats_np, None
 
     @override
+    def log_state(self, state):
+        self._last_state = state
+        super().log_state(state)
+
+    @override
+    def apply_forces(self, state):
+        if self.picking_enabled and self._picking is not None:
+            self._picking._apply_picking_force(state)
+
+    @override
     def log_lines(self, name, starts, ends, colors, width: float = 0.01, hidden=False):
         pass
 
@@ -678,6 +711,8 @@ class ViewerOptix(ViewerBase):
         if not self._headless and self._window is not None:
             if self._built:
                 self._blit_to_window()
+            self._render_ui()
+            self._window.flip()
             self._process_window_events()
 
         self._update_timing()
@@ -742,6 +777,9 @@ class ViewerOptix(ViewerBase):
             self._cuda_gl = None
             self._window.close()
             self._window = None
+        if self.ui is not None:
+            self.ui.shutdown()
+            self.ui = None
         if self._api is not None:
             self._api.close()
 
@@ -1024,7 +1062,95 @@ class ViewerOptix(ViewerBase):
         gl.glBindTexture(self._gl_texture.target, 0)
         gl.glBindBuffer(gl.GL_PIXEL_UNPACK_BUFFER, 0)
         self._sprite.draw()
-        self._window.flip()
+
+    def _render_ui(self):
+        if self.ui is None or not self.ui.is_available or not self._show_ui:
+            return
+        try:
+            self.ui.begin_frame()
+            imgui = self.ui.imgui
+            imgui.set_next_window_pos(imgui.ImVec2(10, 10))
+            imgui.set_next_window_size(imgui.ImVec2(320, 0), imgui.Cond_.appearing)
+            if imgui.begin("OptiX Viewer"):
+                imgui.text(f"FPS: {self._current_fps:.1f}")
+                if self.model is not None:
+                    imgui.text(f"Bodies: {self.model.body_count}")
+                    imgui.text(f"Shapes: {self.model.shape_count}")
+                imgui.separator()
+                imgui.text("Controls:")
+                imgui.text("WASD/QE - Move")
+                imgui.text("Left drag - Look")
+                imgui.text("Right drag - Pick")
+                imgui.text("R/T - Record start/stop")
+                _, self.picking_enabled = imgui.checkbox("Enable Picking", self.picking_enabled)
+                _, self._show_ui = imgui.checkbox("Show UI", self._show_ui)
+            imgui.end()
+            self.ui.end_frame()
+            self.ui.render()
+        except Exception as exc:
+            logger.warning("Disabling ImGui UI in ViewerOptix due to runtime error: %s", exc)
+            print(f"[OptiX UI] Disabled (runtime backend error): {exc}")
+            if self.ui is not None:
+                try:
+                    self.ui.shutdown()
+                except Exception:
+                    pass
+            self.ui = None
+
+    def _to_framebuffer_coords(self, x: float, y: float) -> tuple[float, float]:
+        if self._window is None:
+            return float(x), float(y)
+        fb_w, fb_h = self._window.get_framebuffer_size()
+        win_w, win_h = self._window.get_size()
+        if win_w <= 0 or win_h <= 0:
+            return float(x), float(y)
+        return float(x) * (fb_w / win_w), float(y) * (fb_h / win_h)
+
+    def _window_ray_to_world(self, x: float, y: float) -> tuple[wp.vec3, wp.vec3] | None:
+        u = (2.0 * x / max(1.0, float(self._width))) - 1.0
+        v = (2.0 * y / max(1.0, float(self._height))) - 1.0
+        fov_rad = math.radians(float(self._cam_fov))
+        aspect = max(1.0e-6, float(self._width) / max(1.0, float(self._height)))
+        alpha = math.tan(fov_rad * 0.5)
+
+        pitch_clamped = max(min(float(self._cam_pitch), 89.0), -89.0)
+        yaw_rad = math.radians(float(self._cam_yaw))
+        pitch_rad = math.radians(pitch_clamped)
+
+        # Match the camera convention used in _sync_camera().
+        forward = np.array(
+            [
+                math.sin(yaw_rad) * math.cos(pitch_rad),
+                math.sin(pitch_rad),
+                math.cos(yaw_rad) * math.cos(pitch_rad),
+            ],
+            dtype=np.float32,
+        )
+        world_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        right = np.cross(forward, world_up)
+        right_norm = np.linalg.norm(right)
+        if right_norm > 1.0e-6:
+            right /= right_norm
+        else:
+            right = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        up = np.cross(right, forward)
+
+        direction = forward + right * u * alpha * aspect + up * v * alpha
+        d_norm = np.linalg.norm(direction)
+        if d_norm <= 1.0e-8:
+            return None
+        direction /= d_norm
+        origin = self._cam_pos.astype(np.float32).copy()
+
+        if self._global_transform_inv is not None:
+            o4 = np.array([origin[0], origin[1], origin[2], 1.0], dtype=np.float32)
+            d4 = np.array([direction[0], direction[1], direction[2], 0.0], dtype=np.float32)
+            origin = (self._global_transform_inv @ o4)[:3].astype(np.float32)
+            direction = (self._global_transform_inv @ d4)[:3].astype(np.float32)
+            d_norm = np.linalg.norm(direction)
+            if d_norm > 1e-8:
+                direction /= d_norm
+        return wp.vec3(*origin.tolist()), wp.vec3(*direction.tolist())
 
     def _process_window_events(self):
         """Poll Pyglet events and update camera from keyboard input."""
@@ -1111,6 +1237,9 @@ class ViewerOptix(ViewerBase):
         except ImportError:
             return
 
+        if self.ui and self.ui.is_capturing():
+            return
+
         if symbol == key.SPACE:
             self._paused = not self._paused
         elif symbol == key.ESCAPE:
@@ -1120,6 +1249,8 @@ class ViewerOptix(ViewerBase):
             self._start_recording()
         elif symbol == key.T:
             self._stop_recording()
+        elif symbol == key.H:
+            self._show_ui = not self._show_ui
         elif self._api is not None:
             viewer = self._api.viewer
             if symbol == key._1:
@@ -1143,12 +1274,32 @@ class ViewerOptix(ViewerBase):
         self._keys_down.discard(symbol)
 
     def on_mouse_press(self, x, y, button, modifiers):
+        if self.ui and self.ui.is_capturing():
+            return
         self._mouse_buttons |= button
         self._last_mouse_x = float(x)
         self._last_mouse_y = float(y)
+        try:
+            from pyglet.window import mouse
+        except ImportError:
+            return
+        if button == mouse.RIGHT and self.picking_enabled and self._picking is not None and self._last_state is not None:
+            fb_x, fb_y = self._to_framebuffer_coords(x, y)
+            ray = self._window_ray_to_world(fb_x, fb_y)
+            if ray is not None:
+                ray_start, ray_dir = ray
+                self._picking.pick(self._last_state, ray_start, ray_dir)
 
     def on_mouse_release(self, x, y, button, modifiers):
+        if self.ui and self.ui.is_capturing():
+            return
         self._mouse_buttons &= ~button
+        try:
+            from pyglet.window import mouse
+        except ImportError:
+            return
+        if button == mouse.RIGHT and self._picking is not None:
+            self._picking.release()
 
     def on_mouse_drag(self, x, y, dx, dy, buttons, modifiers):
         try:
@@ -1156,11 +1307,20 @@ class ViewerOptix(ViewerBase):
         except ImportError:
             return
 
+        if self.ui and self.ui.is_capturing():
+            return
+
         if buttons & mouse.LEFT:
             sensitivity = 0.1
             self._cam_yaw -= float(dx) * sensitivity
             self._cam_pitch += float(dy) * sensitivity
             self._cam_pitch = max(-89.0, min(89.0, self._cam_pitch))
+        if buttons & mouse.RIGHT and self.picking_enabled and self._picking is not None and self._picking.is_picking():
+            fb_x, fb_y = self._to_framebuffer_coords(x, y)
+            ray = self._window_ray_to_world(fb_x, fb_y)
+            if ray is not None:
+                ray_start, ray_dir = ray
+                self._picking.update(ray_start, ray_dir)
 
     def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
         self._cam_fov -= float(scroll_y) * 2.0
@@ -1184,6 +1344,8 @@ class ViewerOptix(ViewerBase):
             self._api.viewer.frame_index = 0
 
         self._recreate_gl_resources()
+        if self.ui is not None:
+            self.ui.resize(width, height)
 
         # Force camera re-sync so aspect ratio is updated
         self._prev_cam_pos = None
