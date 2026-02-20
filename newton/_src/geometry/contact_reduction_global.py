@@ -371,6 +371,7 @@ class GlobalContactReducerData:
     ht_keys: wp.array(dtype=wp.uint64)
     ht_values: wp.array(dtype=wp.uint64)
     ht_active_slots: wp.array(dtype=wp.int32)
+    ht_insert_failures: wp.array(dtype=wp.int32)
     ht_capacity: int
     ht_values_per_key: int
 
@@ -434,11 +435,13 @@ def _clear_active_kernel(
 def _zero_count_and_contacts_kernel(
     ht_active_slots: wp.array(dtype=wp.int32),
     contact_count: wp.array(dtype=wp.int32),
+    ht_insert_failures: wp.array(dtype=wp.int32),
     ht_capacity: int,
 ):
     """Zero the active slots count and contact count."""
     ht_active_slots[ht_capacity] = 0
     contact_count[0] = 0
+    ht_insert_failures[0] = 0
 
 
 class GlobalContactReducer:
@@ -471,7 +474,7 @@ class GlobalContactReducer:
     Packed for efficient memory access:
 
     - position_depth: vec4(position.x, position.y, position.z, depth)
-    - normal: vec3(normal.x, normal.y, normal.z)
+    - normal: vec2(octahedral-encoded unit normal)
     - shape_pairs: vec2i(shape_a, shape_b)
     - contact_area: float (optional, per contact, for hydroelastic contacts)
 
@@ -479,7 +482,7 @@ class GlobalContactReducer:
         capacity: Maximum number of contacts that can be stored
         values_per_key: Number of value slots per hashtable entry (7)
         position_depth: vec4 array storing position.xyz and depth
-        normal: vec3 array storing contact normal
+        normal: vec2 array storing octahedral-encoded contact normal
         shape_pairs: vec2i array storing (shape_a, shape_b) per contact
         contact_area: float array storing contact area per contact (for hydroelastic)
         entry_k_eff: float array storing effective stiffness per hashtable entry (for hydroelastic)
@@ -521,6 +524,8 @@ class GlobalContactReducer:
 
         # Atomic counter for contact allocation
         self.contact_count = wp.zeros(1, dtype=wp.int32, device=device)
+        # Count failed hashtable inserts (e.g., table full)
+        self.ht_insert_failures = wp.zeros(1, dtype=wp.int32, device=device)
 
         # Hashtable sizing: estimate unique (shape_pair, bin) keys needed
         # - 35 bins per shape pair (20 normal + 15 voxel groups)
@@ -552,6 +557,7 @@ class GlobalContactReducer:
     def clear(self):
         """Clear all contacts and reset the reducer (full clear)."""
         self.contact_count.zero_()
+        self.ht_insert_failures.zero_()
         self.hashtable.clear()
         self.ht_values.zero_()
 
@@ -590,6 +596,7 @@ class GlobalContactReducer:
             inputs=[
                 self.hashtable.active_slots,
                 self.contact_count,
+                self.ht_insert_failures,
                 self.hashtable.capacity,
             ],
             device=self.device,
@@ -615,6 +622,7 @@ class GlobalContactReducer:
         data.ht_keys = self.hashtable.keys
         data.ht_values = self.ht_values
         data.ht_active_slots = self.hashtable.active_slots
+        data.ht_insert_failures = self.ht_insert_failures
         data.ht_capacity = self.hashtable.capacity
         data.ht_values_per_key = self.values_per_key
         return data

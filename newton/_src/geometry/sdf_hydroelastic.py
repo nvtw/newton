@@ -41,6 +41,7 @@ See Also:
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Any
 
@@ -372,6 +373,8 @@ class HydroelasticSDF:
                 )
 
         self.grid_size = min(self.config.grid_size, self.max_num_face_contacts)
+        self._host_warning_poll_interval = 120
+        self._launch_counter = 0
 
     @classmethod
     def _from_model(
@@ -562,9 +565,24 @@ class HydroelasticSDF:
                 self.max_num_face_contacts,
                 writer_data.contact_count,
                 writer_data.contact_max,
+                self.contact_reduction.reducer.ht_insert_failures,
             ],
             device=self.device,
         )
+
+        # Poll infrequently to avoid per-step host sync overhead while still surfacing
+        # dropped-contact conditions outside stdout-captured environments.
+        self._launch_counter += 1
+        if self._launch_counter % self._host_warning_poll_interval == 0:
+            hashtable_failures = int(self.contact_reduction.reducer.ht_insert_failures.numpy()[0])
+            if hashtable_failures > 0:
+                warnings.warn(
+                    "Hydroelastic reduction dropped contacts due to hashtable insert "
+                    f"failures ({hashtable_failures}). Increase rigid_contact_max "
+                    "and/or HydroelasticSDF.Config.buffer_fraction.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
     def _broadphase_sdfs(
         self,
@@ -1331,9 +1349,9 @@ def get_generate_contacts_kernel(
         max_num_iso_voxels: int,
         reducer_data: GlobalContactReducerData,
         # Unused — kept for signature compatibility with prior callers
-        shape_local_aabb_lower: wp.array(dtype=wp.vec3),
-        shape_local_aabb_upper: wp.array(dtype=wp.vec3),
-        shape_voxel_resolution: wp.array(dtype=wp.vec3i),
+        _shape_local_aabb_lower: wp.array(dtype=wp.vec3),
+        _shape_local_aabb_upper: wp.array(dtype=wp.vec3),
+        _shape_voxel_resolution: wp.array(dtype=wp.vec3i),
         # Outputs for visualization (optional)
         iso_vertex_point: wp.array(dtype=wp.vec3f),
         iso_vertex_depth: wp.array(dtype=wp.float32),
@@ -1474,6 +1492,8 @@ def get_generate_contacts_kernel(
                         wp.atomic_add(reducer_data.weighted_pos_sum, entry_idx, force_weight * face_center)
                         wp.atomic_add(reducer_data.weight_sum, entry_idx, force_weight)
                         reducer_data.entry_k_eff[entry_idx] = k_eff
+                    else:
+                        wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
 
                 # Local-first compaction: keep top-K penetrating faces by score.
                 if pen_depth < 0.0:
@@ -1607,6 +1627,7 @@ def verify_collision_step(
     max_face_contact_count: int,
     contact_count: wp.array(dtype=int),
     max_contact_count: int,
+    ht_insert_failures: wp.array(dtype=int),
 ):
     # Checks if any buffer overflowed in any stage of the collision pipeline.
     has_overflow = False
@@ -1657,6 +1678,13 @@ def verify_collision_step(
             "  [hydroelastic] rigid contact output overflow: %d > %d. Increase rigid_contact_max.\n",
             contact_count[0],
             max_contact_count,
+        )
+        has_overflow = True
+    if ht_insert_failures[0] > 0:
+        wp.printf(
+            "  [hydroelastic] reduction hashtable full: %d insert failures. "
+            "Increase rigid_contact_max and/or buffer_fraction.\n",
+            ht_insert_failures[0],
         )
         has_overflow = True
 

@@ -618,7 +618,12 @@ def test_key_uniqueness(test, device):
 
 
 def test_oct_encode_decode_roundtrip(test, device):
-    """Test octahedral normal encoding/decoding round-trip accuracy."""
+    """Validate octahedral normal encode/decode round-trip accuracy.
+
+    Args:
+        test: Unittest-style assertion helper.
+        device: Warp device under test.
+    """
 
     @wp.kernel
     def roundtrip_error_kernel(normals: wp.array(dtype=wp.vec3), errors: wp.array(dtype=wp.float32)):

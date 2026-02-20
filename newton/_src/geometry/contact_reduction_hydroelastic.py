@@ -221,6 +221,8 @@ def get_reduce_hydroelastic_contacts_kernel(skip_aggregates: bool = False):
                         wp.atomic_add(reducer_data.agg_force, entry_idx, force_weight * normal)
                         wp.atomic_add(reducer_data.weighted_pos_sum, entry_idx, force_weight * position)
                         wp.atomic_add(reducer_data.weight_sum, entry_idx, force_weight)
+            else:
+                wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
 
             # === Part 2: Voxel-based reduction ===
             voxel_res = shape_voxel_resolution[shape_b]
@@ -247,6 +249,8 @@ def get_reduce_hydroelastic_contacts_kernel(skip_aggregates: bool = False):
                     reducer_data.ht_values,
                     ht_capacity,
                 )
+            else:
+                wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
 
     return reduce_hydroelastic_contacts_kernel
 

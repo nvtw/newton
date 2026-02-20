@@ -265,7 +265,12 @@ def test_stacked_primitive_cubes_hydroelastic_no_reduction(test, device, solver_
 
 
 def test_buffer_fraction_no_crash(test, device):
-    """Validate reduced buffer_fraction runs and still returns contacts."""
+    """Validate reduced buffer allocation still yields contacts.
+
+    Args:
+        test: Unittest-style assertion helper.
+        device: Warp device under test.
+    """
     cube_half = 0.5
     narrow_band = cube_half * 0.2
     contact_margin = cube_half * 0.2
@@ -323,7 +328,15 @@ def test_buffer_fraction_no_crash(test, device):
 
 
 def _compute_total_active_weight_sum(collision_pipeline, state):
-    """Return total active weight_sum from hydroelastic reducer."""
+    """Compute total active aggregate weight in the hydroelastic reducer.
+
+    Args:
+        collision_pipeline: Collision pipeline configured for hydroelastic contacts.
+        state: Simulation state used for collision evaluation.
+
+    Returns:
+        Sum of active reducer ``weight_sum`` entries [unitless].
+    """
     contacts = collision_pipeline.contacts()
     collision_pipeline.collide(state, contacts)
     wp.synchronize()
@@ -341,7 +354,12 @@ def _compute_total_active_weight_sum(collision_pipeline, state):
 
 
 def test_iso_scan_scratch_buffers_are_level_sized(test, device):
-    """Validate iso scan scratch buffers use per-level sizes."""
+    """Validate iso-scan scratch buffers match each level input size.
+
+    Args:
+        test: Unittest-style assertion helper.
+        device: Warp device under test.
+    """
     # Small cubes generate many contacts; increase buffer to avoid overflow warnings
     model, _, state_0, _, _, pipeline, _, _ = build_stacked_cubes_scene(
         device=device,
@@ -370,7 +388,12 @@ def test_iso_scan_scratch_buffers_are_level_sized(test, device):
 
 
 def test_pre_prune_accumulate_all_penetrating_aggregates_increases_total_weight_sum(test, device):
-    """Validate opt-in aggregate mode captures at least as much penetrating weight."""
+    """Validate opt-in aggregate mode keeps at least as much penetrating weight.
+
+    Args:
+        test: Unittest-style assertion helper.
+        device: Warp device under test.
+    """
     config_default = HydroelasticSDF.Config(
         reduce_contacts=True,
         pre_prune_contacts=True,
@@ -413,6 +436,70 @@ def test_pre_prune_accumulate_all_penetrating_aggregates_increases_total_weight_
         total_weight_accurate,
         total_weight_default - 1e-6,
         "Expected accurate aggregate mode to retain at least as much penetrating aggregate weight",
+    )
+
+
+def test_reduce_contacts_with_pre_prune_disabled_no_crash(test, device):
+    """Validate the reduce_contacts=True, pre_prune_contacts=False path."""
+    config = HydroelasticSDF.Config(
+        reduce_contacts=True,
+        pre_prune_contacts=False,
+        buffer_fraction=1.0,
+        buffer_mult_contact=2,
+    )
+    model, _, state_0, _, _, pipeline, _, _ = build_stacked_cubes_scene(
+        device=device,
+        solver_fn=solvers["xpbd"],
+        shape_type=ShapeType.MESH,
+        cube_half=CUBE_HALF_SMALL,
+        reduce_contacts=True,
+        sdf_hydroelastic_config=config,
+    )
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+    contacts = pipeline.contacts()
+    pipeline.collide(state_0, contacts)
+    wp.synchronize()
+
+    rigid_count = int(contacts.rigid_contact_count.numpy()[0])
+    test.assertGreater(rigid_count, 0, "Expected non-zero contacts with pre_prune_contacts=False")
+
+
+def test_entry_k_eff_matches_shape_harmonic_mean(test, device):
+    """Validate entry_k_eff uses the pairwise harmonic-mean stiffness formula."""
+    expected_k_eff = 0.5 * 1.0e10  # k_a == k_b == default kh for these shapes
+    config = HydroelasticSDF.Config(
+        reduce_contacts=True,
+        pre_prune_contacts=False,
+        buffer_fraction=1.0,
+        buffer_mult_contact=2,
+    )
+    model, _, state_0, _, _, pipeline, _, _ = build_stacked_cubes_scene(
+        device=device,
+        solver_fn=solvers["xpbd"],
+        shape_type=ShapeType.MESH,
+        cube_half=CUBE_HALF_SMALL,
+        reduce_contacts=True,
+        sdf_hydroelastic_config=config,
+    )
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+    contacts = pipeline.contacts()
+    pipeline.collide(state_0, contacts)
+    wp.synchronize()
+
+    hydro = pipeline.hydroelastic_sdf
+    reducer = hydro.contact_reduction.reducer
+    active_slots = reducer.hashtable.active_slots.numpy()
+    ht_capacity = reducer.hashtable.capacity
+    active_count = int(active_slots[ht_capacity])
+    test.assertGreater(active_count, 0, "Expected at least one active reduction hashtable entry")
+
+    active_indices = active_slots[:active_count]
+    entry_k_eff = reducer.entry_k_eff.numpy()[active_indices]
+    nonzero_k_eff = entry_k_eff[entry_k_eff > 0.0]
+    test.assertGreater(len(nonzero_k_eff), 0, "Expected non-zero entry_k_eff values")
+    test.assertTrue(
+        np.allclose(nonzero_k_eff, expected_k_eff, rtol=1.0e-4, atol=1.0e-3),
+        f"Expected entry_k_eff to match harmonic mean ({expected_k_eff:.6e})",
     )
 
 
@@ -732,6 +819,19 @@ add_function_test(
     TestHydroelastic,
     "test_pre_prune_accumulate_all_penetrating_aggregates_increases_total_weight_sum",
     test_pre_prune_accumulate_all_penetrating_aggregates_increases_total_weight_sum,
+    devices=cuda_devices,
+)
+add_function_test(
+    TestHydroelastic,
+    "test_reduce_contacts_with_pre_prune_disabled_no_crash",
+    test_reduce_contacts_with_pre_prune_disabled_no_crash,
+    devices=cuda_devices,
+    check_output=False,
+)
+add_function_test(
+    TestHydroelastic,
+    "test_entry_k_eff_matches_shape_harmonic_mean",
+    test_entry_k_eff_matches_shape_harmonic_mean,
     devices=cuda_devices,
 )
 

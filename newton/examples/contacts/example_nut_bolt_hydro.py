@@ -70,6 +70,20 @@ def add_mesh_object(
     center_vec: wp.vec3 | None = None,
     scale: float = 1.0,
 ) -> int:
+    """Add a mesh shape on a new body.
+
+    Args:
+        builder: Model builder that receives the body and shape.
+        mesh: Mesh geometry with SDF data.
+        transform: Body transform with position [m] and orientation.
+        shape_cfg: Optional shape configuration.
+        key: Optional body label.
+        center_vec: Optional mesh center offset in local coordinates [m].
+        scale: Uniform mesh scale [unitless].
+
+    Returns:
+        Created body index.
+    """
     if center_vec is not None:
         center_world = wp.quat_rotate(transform.q, center_vec)
         transform = wp.transform(transform.p + center_world, transform.q)
@@ -85,6 +99,17 @@ def load_mesh_with_sdf(
     scale: float = 1.0,
     center_origin: bool = True,
 ) -> tuple[newton.Mesh, wp.vec3]:
+    """Load a triangle mesh and build an SDF.
+
+    Args:
+        mesh_file: Mesh file path.
+        shape_cfg: Optional shape configuration used for contact margin [m].
+        scale: Uniform mesh scale [unitless].
+        center_origin: Whether to recenter mesh vertices about the AABB center.
+
+    Returns:
+        Tuple of ``(mesh, center_vec)`` where ``center_vec`` is the recenter offset [m].
+    """
     mesh_data = trimesh.load(mesh_file, force="mesh")
     vertices = np.array(mesh_data.vertices, dtype=np.float32)
     indices = np.array(mesh_data.faces.flatten(), dtype=np.int32)
@@ -156,7 +181,7 @@ class Example:
         elif scene == "gears":
             world_builder = self._build_gears_scene()
         else:
-            raise ValueError(f"Unknown scene: {scene}")
+            raise ValueError(f"Unknown scene '{scene}'")
 
         main_scene = newton.ModelBuilder()
         main_scene.default_shape_cfg.contact_margin = 0.01
@@ -202,7 +227,7 @@ class Example:
                 impratio=1.0,
             )
         else:
-            raise ValueError(f"Unknown solver type: {self.solver_type}. Choose from 'xpbd' or 'mujoco'.")
+            raise ValueError(f"Unknown solver '{self.solver_type}'")
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -367,10 +392,10 @@ class Example:
                 bolt_key = f"bolt_{i}_{j}"
                 nut_key = f"nut_{i}_{j}"
 
-                if bolt_key in self.model.body_key:
-                    self.bolt_body_indices.append(self.model.body_key.index(bolt_key))
-                if nut_key in self.model.body_key:
-                    self.nut_body_indices.append(self.model.body_key.index(nut_key))
+                if bolt_key in self.model.body_label:
+                    self.bolt_body_indices.append(self.model.body_label.index(bolt_key))
+                if nut_key in self.model.body_label:
+                    self.nut_body_indices.append(self.model.body_label.index(nut_key))
 
         # Store initial transforms
         body_q = self.state_0.body_q.numpy()

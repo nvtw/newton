@@ -543,7 +543,7 @@ Contact reduction is enabled by default. For scenes with many mesh-mesh interact
 
 1. Contacts are binned by normal direction (20 icosahedron face directions)
 2. Within each bin, contacts are scored by spatial distribution and penetration depth
-3. Representative contacts are selected using configurable depth thresholds (betas)
+3. Representative contacts are selected to preserve coverage and depth cues
 
 To disable reduction, set ``reduce_contacts=False`` when creating the pipeline.
 
@@ -558,27 +558,11 @@ For hydroelastic and SDF-based contacts, use :class:`~newton.geometry.Hydroelast
     config = HydroelasticSDF.Config(
         reduce_contacts=True,           # Enable contact reduction
         buffer_fraction=0.2,            # Reduce hydroelastic GPU buffer allocations
-        betas=(10.0, -0.5),             # Scoring thresholds (default)
-        sticky_contacts=0.0,            # Temporal persistence (0 = disabled)
         normal_matching=True,           # Align reduced normals with aggregate force
+        anchor_contact=False,           # Optional center-of-pressure anchor contact
     )
 
     pipeline = CollisionPipeline(model, sdf_hydroelastic_config=config)
-
-**Understanding betas:**
-
-The ``betas`` tuple controls how contacts are scored for selection. Each beta value (first element, second element, etc.) produces a separate set of representative contacts per normal bin:
-
-- **Positive beta** (e.g., ``10.0``): Score = ``spatial_position + depth * beta``. Higher values favor deeper contacts.
-- **Negative beta** (e.g., ``-0.5``): Score = ``spatial_position * depth^(-beta)`` for penetrating contacts.
-  This weighs spatial distribution more heavily for shallow contacts.
-
-The default ``(10.0, -0.5)`` provides a balance: one set prioritizes penetration depth,
-another prioritizes spatial coverage. More betas = more contacts retained but better coverage.
-
-.. note::
-   The beta scoring behavior is subject to refinement. The collision pipeline 
-   is under active development and these parameters may change in future releases.
 
 **Other reduction options:**
 
@@ -588,11 +572,12 @@ another prioritizes spatial coverage. More betas = more contacts retained but be
 
    * - Parameter
      - Description
-   * - ``sticky_contacts``
-     - Temporal persistence threshold. When > 0, contacts from previous frames within this distance are preserved to prevent jittering. Default: 0.0 (disabled).
    * - ``normal_matching``
      - Rotates selected contact normals so their weighted sum aligns with the aggregate force direction 
        from all unreduced contacts. Preserves net force direction after reduction. Default: True.
+   * - ``anchor_contact``
+     - Adds an anchor contact at the center of pressure for each normal bin to better preserve moments.
+       Default: False.
    * - ``margin_contact_area``
      - Lower bound on contact area. Hydroelastic stiffness is ``area * k_eff``, but contacts 
        within the contact margin that are not yet penetrating (speculative contacts) have zero 

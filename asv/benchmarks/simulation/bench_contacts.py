@@ -33,6 +33,17 @@ except ImportError:
 
 
 def _import_example_class(module_names: list[str]):
+    """Import and return the ``Example`` class from candidate modules.
+
+    Args:
+        module_names: Ordered module names to try importing.
+
+    Returns:
+        The first successfully imported module's ``Example`` class.
+
+    Raises:
+        SkipNotImplemented: If none of the module names can be imported.
+    """
     for module_name in module_names:
         try:
             module = importlib.import_module(module_name)
@@ -44,6 +55,8 @@ def _import_example_class(module_names: list[str]):
 
 
 class FastExampleContactSdfDefaults:
+    """Benchmark the SDF nut-bolt example default configuration."""
+
     repeat = 2
     number = 1
 
@@ -75,6 +88,8 @@ class FastExampleContactSdfDefaults:
 
 
 class FastExampleContactHydroWorkingDefaults:
+    """Benchmark the hydroelastic nut-bolt example default configuration."""
+
     repeat = 2
     number = 1
 
