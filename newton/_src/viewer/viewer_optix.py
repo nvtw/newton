@@ -45,7 +45,7 @@ from ..core.types import override
 from .viewer import ViewerBase
 
 if TYPE_CHECKING:
-    from .optix.pathtracing.bridge import PathTracingBridge
+    from .optix.pathtracing.pathtracer_api import PathTracingBridge
     from .optix.pathtracing.scene import Scene as OptixScene
 
 
@@ -200,7 +200,7 @@ class ViewerOptix(ViewerBase):
         if self._bridge is not None:
             return
 
-        from .optix.pathtracing.bridge import PathTracingBridge  # noqa: PLC0415
+        from .optix.pathtracing.pathtracer_api import PathTracingBridge  # noqa: PLC0415
 
         self._bridge = PathTracingBridge(
             width=self._width,

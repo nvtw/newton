@@ -38,7 +38,7 @@ import warp._src.build as wp_build
 wp.init()
 
 # Import local modules
-from ..example_pyoptix_empty_buffer import _create_optix_context
+from ..optix_context import _create_optix_context
 from ..hit_kernels import HitKernel
 from ..sbt_helpers import SbtKernelManager
 from .camera import Camera

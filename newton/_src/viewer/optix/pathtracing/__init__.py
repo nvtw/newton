@@ -27,7 +27,7 @@ Components:
     - pathtracing_viewer: Main viewer integrating all components
 """
 
-from .bridge import PathTracingBridge
+from .pathtracer_api import PathTracingBridge
 from .camera import Camera
 from .materials import MaterialManager
 from .pathtracing_viewer import PathTracingViewer
