@@ -134,9 +134,21 @@ class PathTracerAPI:
     def clear_scene(self):
         self._require_scene().clear()
 
-    def load_scene_from_gltf(self, gltf_path: str) -> bool:
-        ok = bool(self._require_scene().load_from_gltf(gltf_path))
-        if ok:
+    def load_scene_from_gltf(
+        self,
+        gltf_path: str,
+        root_transform: np.ndarray | None = None,
+        clear_existing: bool = True,
+        build_scene: bool = True,
+    ) -> bool:
+        ok = bool(
+            self._require_scene().load_from_gltf(
+                gltf_path,
+                root_transform=root_transform,
+                clear_existing=clear_existing,
+            )
+        )
+        if ok and build_scene:
             self.build_scene()
         return ok
 

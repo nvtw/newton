@@ -390,7 +390,12 @@ class Scene:
         """Upload compact material table bytes to GPU."""
         self._compact_materials = wp.array(np.asarray(compact_bytes, dtype=np.uint8), dtype=wp.uint8, device="cuda")
 
-    def set_gltf_textures(self, textures: list[np.ndarray], srgb_texture_indices: set[int] | None = None):
+    def set_gltf_textures(
+        self,
+        textures: list[np.ndarray],
+        srgb_texture_indices: set[int] | None = None,
+        append: bool = False,
+    ):
         """
         Set glTF texture list as RGBA float32 images.
 
@@ -408,7 +413,10 @@ class Scene:
                 tex_f = tex_f.copy()
                 tex_f[..., :3] = srgb_to_linear_rgb(np.clip(tex_f[..., :3], 0.0, 1.0))
             converted.append(tex_f)
-        self._gltf_textures = converted
+        if append:
+            self._gltf_textures.extend(converted)
+        else:
+            self._gltf_textures = converted
 
     def add_mesh(self, mesh: Mesh) -> int:
         """Add a mesh to the scene and return its index."""
@@ -455,12 +463,18 @@ class Scene:
         # Light
         self.add_box((-0.5, 1.85, -0.5), (0.5, 1.89, 0.5), light)
 
-    def load_from_gltf(self, gltf_path: str) -> bool:
+    def load_from_gltf(
+        self,
+        gltf_path: str,
+        root_transform: np.ndarray | None = None,
+        clear_existing: bool = True,
+    ) -> bool:
         """Load a glTF/GLB scene into this scene."""
         from .asset_loaders import load_scene_from_gltf  # noqa: PLC0415
 
-        self.clear()
-        return bool(load_scene_from_gltf(self, gltf_path))
+        if clear_existing:
+            self.clear()
+        return bool(load_scene_from_gltf(self, gltf_path, root_transform=root_transform))
 
     def load_from_obj(self, obj_path: str) -> bool:
         """Load an OBJ scene into this scene."""

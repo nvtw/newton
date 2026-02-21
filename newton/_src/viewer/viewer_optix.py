@@ -228,7 +228,9 @@ class ViewerOptix(ViewerBase):
         self._cam_pitch = 0.0
         self._cam_yaw = 180.0  # Look toward -Z (toward origin)
         self._cam_fov = 45.0
-        self._cam_speed = 4.0  # m/s
+        self._cam_speed_base = 4.0  # m/s
+        self._cam_speed_multiplier = 1.0
+        self._cam_speed = self._cam_speed_base * self._cam_speed_multiplier
         self._cam_user_set = False
 
         # Previous camera state for dirty detection (None = never synced)
@@ -1161,9 +1163,25 @@ class ViewerOptix(ViewerBase):
                 else:
                     imgui.text("Renderer not initialized yet.")
 
-                changed, cam_speed = imgui.slider_float("Camera Speed", float(self._cam_speed), 0.1, 25.0, "%.2f")
+                # Keep compatibility with code that sets _cam_speed directly.
+                expected_speed = float(self._cam_speed_base * self._cam_speed_multiplier)
+                if abs(float(self._cam_speed) - expected_speed) > 1.0e-6:
+                    self._cam_speed_base = max(1.0e-4, float(self._cam_speed))
+                    self._cam_speed_multiplier = 1.0
+
+                changed, cam_speed_base = imgui.slider_float(
+                    "Camera Speed Base", float(self._cam_speed_base), 0.1, 25.0, "%.2f"
+                )
                 if changed:
-                    self._cam_speed = float(cam_speed)
+                    self._cam_speed_base = float(cam_speed_base)
+
+                log_mult = float(math.log10(max(self._cam_speed_multiplier, 1.0e-6)))
+                changed, log_mult = imgui.slider_float("Camera Speed Mult (log10)", log_mult, -2.0, 2.0, "%.2f")
+                if changed:
+                    self._cam_speed_multiplier = float(10.0**log_mult)
+
+                self._cam_speed = float(self._cam_speed_base * self._cam_speed_multiplier)
+                imgui.text(f"Camera Speed Effective: {self._cam_speed:.3f} m/s")
                 changed, cam_fov = imgui.slider_float("FOV", float(self._cam_fov), 15.0, 90.0, "%.1f")
                 if changed:
                     self._cam_fov = float(cam_fov)

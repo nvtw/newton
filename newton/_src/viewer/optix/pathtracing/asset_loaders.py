@@ -268,7 +268,13 @@ def _collect_srgb_texture_indices(root: dict) -> set[int]:
     return srgb
 
 
-def _add_gltf_material(scene: Scene, root: dict, material_index: int | None, cache: dict[int, int]) -> int:
+def _add_gltf_material(
+    scene: Scene,
+    root: dict,
+    material_index: int | None,
+    cache: dict[int, int],
+    texture_index_offset: int = 0,
+) -> int:
     if material_index is None:
         return scene.materials.add_default()
     material_index = int(material_index)
@@ -283,8 +289,11 @@ def _add_gltf_material(scene: Scene, root: dict, material_index: int | None, cac
     def _tex_info(t: dict | None, *, include_scale: bool = False) -> dict:
         if not t:
             return dict(tex_default)
+        tex_index = int(t.get("index", -1))
+        if tex_index >= 0:
+            tex_index += int(texture_index_offset)
         out = {
-            "index": int(t.get("index", -1)),
+            "index": tex_index,
             "texCoord": int(t.get("texCoord", 0)),
         }
         ext = t.get("extensions", {})
@@ -325,7 +334,7 @@ def _add_gltf_material(scene: Scene, root: dict, material_index: int | None, cac
     return mat_id
 
 
-def load_scene_from_gltf(scene: Scene, gltf_path: str | Path) -> bool:
+def load_scene_from_gltf(scene: Scene, gltf_path: str | Path, root_transform: np.ndarray | None = None) -> bool:
     path = Path(gltf_path)
     if not path.exists():
         return False
@@ -343,10 +352,19 @@ def load_scene_from_gltf(scene: Scene, gltf_path: str | Path) -> bool:
     t_images = time.perf_counter() - t0
 
     t0 = time.perf_counter()
+    texture_index_offset = int(scene.texture_count)
     textures = _build_texture_list(root, gltf_images)
     srgb_texture_indices = _collect_srgb_texture_indices(root)
-    scene.set_gltf_textures(textures, srgb_texture_indices=srgb_texture_indices)
+    scene.set_gltf_textures(
+        textures,
+        srgb_texture_indices=srgb_texture_indices,
+        append=texture_index_offset > 0,
+    )
     t_textures = time.perf_counter() - t0
+
+    root_world = np.eye(4, dtype=np.float32)
+    if root_transform is not None:
+        root_world = np.asarray(root_transform, dtype=np.float32).reshape(4, 4)
 
     nodes = root.get("nodes", [])
     meshes = root.get("meshes", [])
@@ -415,7 +433,13 @@ def load_scene_from_gltf(scene: Scene, gltf_path: str | Path) -> bool:
                 stats["t_xform"] += time.perf_counter() - t_xf
 
                 t_mat = time.perf_counter()
-                mat_id = _add_gltf_material(scene, root, prim.get("material"), material_cache)
+                mat_id = _add_gltf_material(
+                    scene,
+                    root,
+                    prim.get("material"),
+                    material_cache,
+                    texture_index_offset=texture_index_offset,
+                )
                 stats["t_material"] += time.perf_counter() - t_mat
 
                 t_mesh = time.perf_counter()
@@ -431,10 +455,10 @@ def load_scene_from_gltf(scene: Scene, gltf_path: str | Path) -> bool:
 
     if default_scene >= 0:
         for node_idx in scenes[default_scene].get("nodes", []):
-            visit(int(node_idx), np.eye(4, dtype=np.float32))
+            visit(int(node_idx), root_world)
     else:
         for i in range(len(nodes)):
-            visit(i, np.eye(4, dtype=np.float32))
+            visit(i, root_world)
 
     t_total = time.perf_counter() - t_all_start
     logger.info(
