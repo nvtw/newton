@@ -13,13 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""OptiX reference plate scene with procedural studio environment lighting."""
+"""OptiX reference plate - cube pyramid physics demo with studio lighting."""
 
 from __future__ import annotations
 
 import math
 
 import numpy as np
+import warp as wp
 
 import newton
 import newton.examples
@@ -34,6 +35,10 @@ PRINT_CAMERA_POSE = False
 # Global multiplier for focused spot light intensities (shadow strength).
 SPOT_INTENSITY = 1.0
 
+# Pyramid dimensions.
+PYRAMID_LEVELS = 15
+PLATE_HALF = 1.30
+
 
 def _generate_studio_env_map(width: int = 512, height: int = 256) -> np.ndarray:
     """Generate a lat-long HDR environment map with multi-light studio setup.
@@ -47,29 +52,20 @@ def _generate_studio_env_map(width: int = 512, height: int = 256) -> np.ndarray:
     """
     env = np.zeros((height, width, 3), dtype=np.float32)
 
-    # Pre-compute per-pixel spherical directions (Y-up lat-long).
-    # v in [0, pi]: 0 = north pole (+Y), pi = south pole (-Y).
-    # u in [0, 2*pi]: azimuth around Y axis.
     v_angles = np.linspace(0, math.pi, height, dtype=np.float32)
     u_angles = np.linspace(0, 2.0 * math.pi, width, endpoint=False, dtype=np.float32)
     uu, vv = np.meshgrid(u_angles, v_angles)
 
-    # Unit direction vectors for every pixel.
     dir_x = np.sin(vv) * np.sin(uu)
     dir_y = np.cos(vv)
     dir_z = np.sin(vv) * np.cos(uu)
 
-    # --- Base sky gradient ---
-    # Colorful sky: warm peach/gold near horizon on the key-light side,
-    # cool blue at zenith, pale lavender opposite horizon.
     horizon_weight = np.exp(-5.0 * dir_y**2)
 
-    # Blend zenith color from cool blue (overhead) toward warm at horizon.
     sky_zenith = np.array([0.30, 0.35, 0.55], dtype=np.float32)
     sky_horizon_warm = np.array([1.10, 0.80, 0.45], dtype=np.float32)
     sky_horizon_cool = np.array([0.55, 0.60, 0.80], dtype=np.float32)
 
-    # Azimuth-based warm/cool blend: key-light side is warm, opposite is cool.
     key_az = math.radians(-40.0)
     key_lx = math.sin(key_az)
     key_lz = math.cos(key_az)
@@ -88,49 +84,33 @@ def _generate_studio_env_map(width: int = 512, height: int = 256) -> np.ndarray:
     )
     env += base_sky
 
-    # --- Studio lights (Gaussian blobs in angular space) ---
-    # Each light: (elevation_deg, azimuth_deg, angular_sigma_deg, intensity, r, g, b)
-    # Mix of compact directed lights (small sigma, lower elevation) for
-    # shadow definition and broader fills for ambient color.
+    # (elevation_deg, azimuth_deg, angular_sigma_deg, intensity, r, g, b)
     lights = [
-        # === Dominant focused spots (cast hard shadows) ===
-        # Warm white key: the main shadow caster
+        # Focused spots (cast hard shadows).
         (30.0, -40.0, 1.5, 300.0, 1.00, 0.95, 0.85),
-        # Cold white fill: secondary shadow from opposite side
         (25.0, 55.0, 1.5, 200.0, 0.85, 0.92, 1.00),
-        # Warm accent: grazing angle, long shadows
         (10.0, -65.0, 1.2, 150.0, 1.00, 0.88, 0.70),
-        # Cool rim: backlight edge definition
         (18.0, 165.0, 1.5, 150.0, 0.75, 0.80, 1.00),
-        # === Broad washes (colored ambient, keep sky alive) ===
-        # Warm wash from key side
+        # Broad washes (colored ambient).
         (45.0, -30.0, 35.0, 1.0, 1.00, 0.85, 0.55),
-        # Cool wash from fill side
         (40.0, 60.0, 35.0, 0.8, 0.50, 0.65, 1.00),
-        # Back wash: purple tint
         (40.0, 170.0, 30.0, 0.7, 0.70, 0.55, 1.00),
-        # Ground bounce
         (-20.0, 0.0, 40.0, 0.3, 1.00, 0.80, 0.45),
     ]
 
-    for elev_deg, az_deg, sigma_deg, intensity, lr, lg, lb in lights:
-        # Apply global spot multiplier to focused lights (sigma < 10 deg).
-        if sigma_deg < 10.0:
-            intensity *= SPOT_INTENSITY
+    for elev_deg, az_deg, sigma_deg, base_intensity, lr, lg, lb in lights:
+        intensity = base_intensity * SPOT_INTENSITY if sigma_deg < 10.0 else base_intensity
         elev = math.radians(elev_deg)
         az = math.radians(az_deg)
         sigma = math.radians(sigma_deg)
 
-        # Light direction on the unit sphere (Y-up).
         lx = math.cos(elev) * math.sin(az)
         ly = math.sin(elev)
         lz = math.cos(elev) * math.cos(az)
 
-        # Angular distance from each pixel direction to the light direction.
         dot = np.clip(dir_x * lx + dir_y * ly + dir_z * lz, -1.0, 1.0)
         ang_dist = np.arccos(dot)
 
-        # Gaussian falloff.
         weight = np.exp(-0.5 * (ang_dist / sigma) ** 2)
         env[..., 0] += weight * intensity * lr
         env[..., 1] += weight * intensity * lg
@@ -141,125 +121,132 @@ def _generate_studio_env_map(width: int = 512, height: int = 256) -> np.ndarray:
 
 class Example:
     def __init__(self, viewer, args):
+        self.fps = 100
+        self.frame_dt = 1.0 / self.fps
+        self.sim_time = 0.0
+        self.sim_substeps = 10
+        self.sim_dt = self.frame_dt / self.sim_substeps
+
         self.viewer = viewer
-        self.args = args
-        self.frame = 0
 
         if hasattr(self.viewer, "_cam_speed"):
             self.viewer._cam_speed = 3.0
 
-        if args.viewer != "optix":
-            raise RuntimeError("This example is intended for the OptiX viewer (`--viewer optix`).")
+        # --- OptiX scene setup (materials, env map, static geometry) ---
+        use_optix = args.viewer == "optix"
+        if use_optix:
+            if not hasattr(self.viewer, "_ensure_api"):
+                raise RuntimeError("Viewer does not expose OptiX API hooks.")
+            self.viewer._ensure_api()
+            api = getattr(self.viewer, "_api", None)
+            if api is None:
+                raise RuntimeError("ViewerOptix PathTracerAPI was not created.")
 
-        if not hasattr(self.viewer, "_ensure_api"):
-            raise RuntimeError("Viewer does not expose OptiX API hooks.")
+            if USE_STUDIO_ENV_MAP:
+                self._setup_studio_env_map(api)
+            else:
+                api.set_use_procedural_sky(True)
+                api.set_sky_parameters(
+                    sun_direction=(-0.3, 0.7, 0.5),
+                    multiplier=0.6,
+                    haze=0.25,
+                    red_blue_shift=0.06,
+                    saturation=0.7,
+                    horizon_height=0.0,
+                    ground_color=(0.72, 0.72, 0.74),
+                    horizon_blur=0.8,
+                    night_color=(0.0, 0.0, 0.0),
+                    sun_disk_intensity=0.35,
+                    sun_disk_scale=1.2,
+                    sun_glow_intensity=0.5,
+                    y_is_up=1,
+                )
 
-        self.viewer._ensure_api()
-        api = getattr(self.viewer, "_api", None)
-        if api is None:
-            raise RuntimeError("ViewerOptix PathTracerAPI was not created.")
+        # --- Physics model ---
+        builder = newton.ModelBuilder()
 
-        if USE_STUDIO_ENV_MAP:
-            self._setup_studio_env_map(api)
-        else:
-            api.set_use_procedural_sky(True)
-            api.set_sky_parameters(
-                sun_direction=(-0.3, 0.7, 0.5),
-                multiplier=0.6,
-                haze=0.25,
-                red_blue_shift=0.06,
-                saturation=0.7,
-                horizon_height=0.0,
-                ground_color=(0.72, 0.72, 0.74),
-                horizon_blur=0.8,
-                night_color=(0.0, 0.0, 0.0),
-                sun_disk_intensity=0.35,
-                sun_disk_scale=1.2,
-                sun_glow_intensity=0.5,
-                y_is_up=1,
-            )
+        # Static presenter plate (two layers, Z-up) - top surface at z = 0.
+        plate_half = PLATE_HALF
+        plate_bottom_thickness = 0.05
+        plate_top_thickness = 0.02
+        plate_base_z = -(plate_bottom_thickness + plate_top_thickness)
 
-        api.clear_scene()
-
-        bottom_mat = api.create_pbr_material(
-            color=(0.36, 0.37, 0.40),
-            roughness=0.82,
-            metallic=0.02,
-        )
-        top_mat = api.create_pbr_material(
-            color=(0.12, 0.11, 0.11),
-            roughness=0.18,
-            metallic=0.62,
-        )
-        ground_mat = api.create_pbr_material(
-            color=(0.86, 0.86, 0.86),
-            roughness=0.9,
-            metallic=0.0,
-        )
-
-        # Clean rainbow palette (no pink/rosa): red, orange, yellow, green, teal, blue.
-        palette = [
-            (0.85, 0.12, 0.08),
-            (0.92, 0.52, 0.08),
-            (0.92, 0.82, 0.15),
-            (0.22, 0.72, 0.22),
-            (0.12, 0.68, 0.68),
-            (0.14, 0.38, 0.88),
-        ]
-        pyramid_mats = [api.create_pbr_material(color=c, roughness=0.45, metallic=0.05) for c in palette]
-
-        # Ground plane - much larger than the presenter plate.
-        api.add_box(min_pt=(-20.0, -0.09, -20.0), max_pt=(20.0, -0.07, 20.0), material_id=ground_mat)
-
-        # Bottom layer (square presenter plate).
-        plate_half = 1.30
-        api.add_box(
-            min_pt=(-plate_half, -0.07, -plate_half),
-            max_pt=(plate_half, -0.02, plate_half),
-            material_id=bottom_mat,
+        # Large visible ground floor whose top face meets the plate bottom.
+        ground_thickness = 0.02
+        builder.add_shape_box(
+            -1,
+            xform=wp.transform(
+                p=wp.vec3(0.0, 0.0, plate_base_z - ground_thickness * 0.5),
+                q=wp.quat_identity(),
+            ),
+            hx=20.0,
+            hy=20.0,
+            hz=ground_thickness * 0.5,
         )
 
-        # Top layer: same square footprint, thinner, darker, metallic, top at y=0.
-        api.add_box(
-            min_pt=(-plate_half, -0.02, -plate_half),
-            max_pt=(plate_half, 0.00, plate_half),
-            material_id=top_mat,
+        builder.add_shape_box(
+            -1,
+            xform=wp.transform(
+                p=wp.vec3(0.0, 0.0, plate_base_z + plate_bottom_thickness * 0.5),
+                q=wp.quat_identity(),
+            ),
+            hx=plate_half,
+            hy=plate_half,
+            hz=plate_bottom_thickness * 0.5,
+        )
+        builder.add_shape_box(
+            -1,
+            xform=wp.transform(
+                p=wp.vec3(0.0, 0.0, plate_base_z + plate_bottom_thickness + plate_top_thickness * 0.5),
+                q=wp.quat_identity(),
+            ),
+            hx=plate_half,
+            hy=plate_half,
+            hz=plate_top_thickness * 0.5,
         )
 
-        # Colorful 3-2-1 box pyramid for quick visual checks.
-        cube_half = 0.14
-        cube_spacing = 2.05 * cube_half
-        base_y = 0.0
-        color_idx = 0
-        for level, count in enumerate((3, 2, 1)):
-            y0 = base_y + level * (2.0 * cube_half)
-            y1 = y0 + 2.0 * cube_half
+        # --- Pyramid of cubes (Z-up) ---
+        # Size cubes so the base row (PYRAMID_LEVELS cubes) fits on the plate
+        # with a small margin.
+        usable_width = 2.0 * plate_half * 0.92
+        cube_spacing = usable_width / PYRAMID_LEVELS
+        cube_half = cube_spacing * 0.47
+
+        drop_height = 0.005
+
+        self._pyramid_body_start = builder.body_count
+        for level in range(PYRAMID_LEVELS):
+            count = PYRAMID_LEVELS - level
+            z0 = drop_height + level * (2.0 * cube_half)
             x_start = -0.5 * (count - 1) * cube_spacing
             for i in range(count):
                 x = x_start + i * cube_spacing
-                z = 0.0
-                mat = pyramid_mats[color_idx % len(pyramid_mats)]
-                color_idx += 1
-                api.add_box(
-                    min_pt=(x - cube_half, y0, z - cube_half),
-                    max_pt=(x + cube_half, y1, z + cube_half),
-                    material_id=mat,
+                body = builder.add_body(
+                    xform=wp.transform(p=wp.vec3(x, 0.0, z0 + cube_half), q=wp.quat_identity()),
                 )
+                builder.add_shape_box(body, hx=cube_half, hy=cube_half, hz=cube_half)
+        self._pyramid_body_end = builder.body_count
 
-        api.build_scene()
+        self.model = builder.finalize()
 
-        # Set camera via the viewer's internal state so it doesn't get
-        # overwritten by _sync_camera (api.set_camera_look_at only sets the
-        # pathtracing camera which the viewer overwrites each frame).
-        pos = np.array([0.8579, 1.4811, 3.6018], dtype=np.float32)
-        tgt = np.array([0.5751, 1.1556, 2.6995], dtype=np.float32)
-        fwd = tgt - pos
-        fwd /= np.linalg.norm(fwd)
-        self.viewer._cam_pos = pos
-        self.viewer._cam_yaw = float(np.degrees(np.arctan2(fwd[0], fwd[2])))
-        self.viewer._cam_pitch = float(np.degrees(np.arcsin(np.clip(fwd[1], -1.0, 1.0))))
-        self.viewer._cam_fov = 45.0
-        self.viewer._cam_user_set = True
+        self.solver = newton.solvers.SolverXPBD(self.model, iterations=10)
+
+        self.state_0 = self.model.state()
+        self.state_1 = self.model.state()
+        self.control = self.model.control()
+        self.contacts = self.model.contacts()
+
+        self.viewer.set_model(self.model)
+
+        if use_optix:
+            self._apply_optix_materials(api)
+            self._setup_camera()
+
+        self.capture()
+
+    # ------------------------------------------------------------------ #
+    # OptiX helpers
+    # ------------------------------------------------------------------ #
 
     @staticmethod
     def _setup_studio_env_map(api):
@@ -271,8 +258,71 @@ class Example:
         env_map.load_from_array(env_array)
         api._viewer._env_map = env_map
 
+    def _apply_optix_materials(self, api):
+        """Override shape colours via the OptiX viewer."""
+        if not hasattr(self.viewer, "update_shape_colors"):
+            return
+
+        palette = [
+            [0.85, 0.12, 0.08],
+            [0.92, 0.52, 0.08],
+            [0.92, 0.82, 0.15],
+            [0.22, 0.72, 0.22],
+            [0.12, 0.68, 0.68],
+            [0.14, 0.38, 0.88],
+        ]
+
+        shape_colors = {}
+        for s in range(self.model.shape_count):
+            if s == 0:
+                shape_colors[s] = [0.86, 0.86, 0.86]  # ground floor
+            elif s == 1:
+                shape_colors[s] = [0.36, 0.37, 0.40]  # bottom plate
+            elif s == 2:
+                shape_colors[s] = [0.12, 0.11, 0.11]  # top plate
+            else:
+                shape_colors[s] = palette[(s - 3) % len(palette)]
+
+        self.viewer.update_shape_colors(shape_colors)
+
+    def _setup_camera(self):
+        """Set initial camera pose via internal viewer state."""
+        pos = np.array([0.8579, 1.4811, 3.6018], dtype=np.float32)
+        tgt = np.array([0.5751, 1.1556, 2.6995], dtype=np.float32)
+        fwd = tgt - pos
+        fwd /= np.linalg.norm(fwd)
+        self.viewer._cam_pos = pos
+        self.viewer._cam_yaw = float(np.degrees(np.arctan2(fwd[0], fwd[2])))
+        self.viewer._cam_pitch = float(np.degrees(np.arcsin(np.clip(fwd[1], -1.0, 1.0))))
+        self.viewer._cam_fov = 45.0
+        self.viewer._cam_user_set = True
+
+    # ------------------------------------------------------------------ #
+    # Simulation
+    # ------------------------------------------------------------------ #
+
+    def capture(self):
+        if wp.get_device().is_cuda:
+            with wp.ScopedCapture() as capture:
+                self.simulate()
+            self.graph = capture.graph
+        else:
+            self.graph = None
+
+    def simulate(self):
+        for _ in range(self.sim_substeps):
+            self.state_0.clear_forces()
+            self.viewer.apply_forces(self.state_0)
+            self.model.collide(self.state_0, self.contacts)
+            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+            self.state_0, self.state_1 = self.state_1, self.state_0
+
     def step(self):
-        self.frame += 1
+        if self.graph:
+            wp.capture_launch(self.graph)
+        else:
+            self.simulate()
+        self.sim_time += self.frame_dt
 
     def render(self):
         if PRINT_CAMERA_POSE and hasattr(self.viewer, "_camera_changed") and self.viewer._camera_changed():
@@ -292,11 +342,12 @@ class Example:
                 f"    fov={fov:.1f},\n"
                 f")"
             )
-        self.viewer.begin_frame(self.frame / 60.0)
+        self.viewer.begin_frame(self.sim_time)
+        self.viewer.log_state(self.state_0)
         self.viewer.end_frame()
 
     def test_final(self):
-        if self.frame <= 0:
+        if self.sim_time <= 0.0:
             raise ValueError("Example did not advance any frames.")
 
 
