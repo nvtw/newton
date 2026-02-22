@@ -40,9 +40,11 @@ SPOT_INTENSITY = 1.0
 PYRAMID_LEVELS = 15
 PLATE_HALF = 1.30
 
-# Fraction of pyramid cubes that glow (emissive).
-EMISSIVE_FRACTION = 0.20
+# Fraction of pyramid cubes with special materials (must sum to <= 1.0).
+EMISSIVE_FRACTION = 0.10
 EMISSIVE_INTENSITY = 8
+MIRROR_FRACTION = 0.10
+GLASS_FRACTION = 0.10
 
 
 def _generate_studio_env_map(width: int = 512, height: int = 256) -> np.ndarray:
@@ -279,13 +281,21 @@ class Example:
             [0.14, 0.38, 0.88],
         ]
 
-        # Randomly pick ~10% of cube shapes to be emissive.
+        # Partition cube shapes into non-overlapping special-material groups.
         cube_start = 3
         cube_indices = list(range(cube_start, self.model.shape_count))
-        num_emissive = max(1, int(len(cube_indices) * EMISSIVE_FRACTION))
         rng = random.Random(42)
-        self._emissive_shapes = set(rng.sample(cube_indices, num_emissive))
-        self._emissive_colors = {}
+        rng.shuffle(cube_indices)
+
+        n_emissive = max(1, int(len(cube_indices) * EMISSIVE_FRACTION))
+        n_mirror = max(1, int(len(cube_indices) * MIRROR_FRACTION))
+        n_glass = max(1, int(len(cube_indices) * GLASS_FRACTION))
+
+        emissive_set = set(cube_indices[:n_emissive])
+        mirror_set = set(cube_indices[n_emissive : n_emissive + n_mirror])
+        glass_set = set(cube_indices[n_emissive + n_mirror : n_emissive + n_mirror + n_glass])
+
+        self._special_shapes = {}  # shape_idx -> ("emissive"|"mirror"|"glass", color)
 
         shape_colors = {}
         for s in range(self.model.shape_count):
@@ -298,43 +308,63 @@ class Example:
             else:
                 color = palette[(s - cube_start) % len(palette)]
                 shape_colors[s] = color
-                if s in self._emissive_shapes:
-                    self._emissive_colors[s] = color
+                if s in emissive_set:
+                    self._special_shapes[s] = ("emissive", color)
+                elif s in mirror_set:
+                    self._special_shapes[s] = ("mirror", color)
+                elif s in glass_set:
+                    self._special_shapes[s] = ("glass", color)
 
         self.viewer.update_shape_colors(shape_colors)
 
-    def _apply_emissive_materials(self):
-        """Swap selected cube instances to emissive materials after scene build."""
+    def _apply_special_materials(self):
+        """Assign emissive / mirror / glass materials after scene build."""
         scene = getattr(self.viewer, "_scene", None)
-        if scene is None or not self._emissive_colors:
+        if scene is None or not self._special_shapes:
             return
 
-        # Build shape_index -> OptiX instance ID mapping from the viewer's
-        # batch data structures.
+        # Build shape_index -> OptiX instance ID mapping.
         shape_to_inst = {}
         for batch in self.viewer._shape_instances.values():
-            name = batch.name
-            inst_ids = self.viewer._instance_name_to_optix_ids.get(name, [])
+            inst_ids = self.viewer._instance_name_to_optix_ids.get(batch.name, [])
             for local_idx, s_idx in enumerate(batch.model_shapes):
                 if local_idx < len(inst_ids):
                     shape_to_inst[s_idx] = inst_ids[local_idx]
 
-        for s, color in self._emissive_colors.items():
-            max_c = max(color[0], color[1], color[2], 1e-6)
-            emissive = (
-                color[0] / max_c * EMISSIVE_INTENSITY,
-                color[1] / max_c * EMISSIVE_INTENSITY,
-                color[2] / max_c * EMISSIVE_INTENSITY,
-            )
-            mat_id = scene.materials.add_gltf_material(
-                base_color=(0.0, 0.0, 0.0, 1.0),
-                emissive_factor=emissive,
-                roughness=1.0,
-                metallic=0.0,
-            )
+        for s, (kind, color) in self._special_shapes.items():
             inst_id = shape_to_inst.get(s)
-            if inst_id is not None:
-                self.viewer._instance_material_map[inst_id] = mat_id
+            if inst_id is None:
+                continue
+
+            if kind == "emissive":
+                max_c = max(color[0], color[1], color[2], 1e-6)
+                emissive = (
+                    color[0] / max_c * EMISSIVE_INTENSITY,
+                    color[1] / max_c * EMISSIVE_INTENSITY,
+                    color[2] / max_c * EMISSIVE_INTENSITY,
+                )
+                mat_id = scene.materials.add_gltf_material(
+                    base_color=(0.0, 0.0, 0.0, 1.0),
+                    emissive_factor=emissive,
+                    roughness=1.0,
+                    metallic=0.0,
+                )
+            elif kind == "mirror":
+                mat_id = scene.materials.add_gltf_material(
+                    base_color=(0.95, 0.95, 0.95, 1.0),
+                    metallic=1.0,
+                    roughness=0.005,
+                )
+            elif kind == "glass":
+                mat_id = scene.materials.add_glass(
+                    tint=tuple(color),
+                    ior=1.45,
+                    transmission=0.6,
+                )
+            else:
+                continue
+
+            self.viewer._instance_material_map[inst_id] = mat_id
 
         self.viewer._materials_dirty = True
 
@@ -400,7 +430,7 @@ class Example:
         self.viewer.end_frame()
 
         if not self._emissive_applied and self._use_optix:
-            self._apply_emissive_materials()
+            self._apply_special_materials()
             self._emissive_applied = True
 
     def test_final(self):
