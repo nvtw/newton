@@ -494,6 +494,14 @@ class ViewerOptix(ViewerBase):
         self._cam_yaw = float(yaw)
         self._cam_user_set = True
 
+    def set_recording_quality(self, quality: float):
+        """Set MP4 recording quality in [0, 100], where 100 is highest quality."""
+        self._recorder.set_quality(float(quality))
+
+    def get_recording_quality(self) -> float:
+        """Return MP4 recording quality in [0, 100]."""
+        return float(self._recorder.quality)
+
     @override
     def begin_frame(self, time_val):
         super().begin_frame(time_val)
@@ -1192,9 +1200,19 @@ class ViewerOptix(ViewerBase):
             imgui.set_next_item_open(False, imgui.Cond_.appearing)
             if imgui.collapsing_header("Recording"):
                 imgui.separator()
+                changed, quality = imgui.slider_float(
+                    "Video Quality",
+                    float(self._recorder.quality),
+                    0.0,
+                    100.0,
+                    "%.0f",
+                )
+                if changed:
+                    self._recorder.set_quality(float(quality))
                 if self._recorder.is_recording:
                     output_path = self._recorder.output_path
                     imgui.text("Status: recording")
+                    imgui.text(f"Quality: {self._recorder.quality:.0f}/100")
                     if output_path is not None:
                         imgui.text_wrapped(str(output_path))
                     if imgui.button("Stop Recording"):

@@ -39,6 +39,7 @@ class LiveMp4Recorder:
         self._output_path: Path | None = None
         self._width = 0
         self._height = 0
+        self._quality = 90.0
 
     @property
     def is_recording(self) -> bool:
@@ -47,6 +48,15 @@ class LiveMp4Recorder:
     @property
     def output_path(self) -> Path | None:
         return self._output_path
+
+    @property
+    def quality(self) -> float:
+        """Recording quality in [0, 100], where 100 is highest quality."""
+        return float(self._quality)
+
+    def set_quality(self, quality: float):
+        """Set recording quality in [0, 100], where 100 is highest quality."""
+        self._quality = float(np.clip(float(quality), 0.0, 100.0))
 
     def default_output_directory(self) -> Path:
         """Return a cross-platform default directory for recordings."""
@@ -119,6 +129,7 @@ class LiveMp4Recorder:
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         codec = self._pick_encoder(ffmpeg_exe)
+        quality = float(np.clip(self._quality, 0.0, 100.0))
         cmd = [
             ffmpeg_exe,
             "-y",
@@ -139,14 +150,26 @@ class LiveMp4Recorder:
             codec,
         ]
         if codec == "h264_nvenc":
-            # High-quality VBR mode for NVENC.
-            cmd += ["-preset", "p7", "-tune", "hq", "-rc", "vbr", "-cq", "16", "-b:v", "0"]
+            # Lower CQ means higher quality; map quality in [0,100] -> CQ in [34,14].
+            cq = int(round(34.0 - (quality / 100.0) * 20.0))
+            cmd += ["-preset", "p7", "-tune", "hq", "-rc", "vbr", "-cq", str(max(14, min(34, cq))), "-b:v", "0"]
         elif codec in {"h264_qsv", "h264_amf"}:
-            # Use a high target bitrate on other HW encoders to reduce visible artifacts.
-            cmd += ["-b:v", "50M", "-maxrate", "100M", "-bufsize", "150M"]
+            # Map quality in [0,100] to a practical bitrate range.
+            bitrate_mbps = 4.0 + (quality / 100.0) * 76.0
+            maxrate_mbps = bitrate_mbps * 2.0
+            bufsize_mbps = bitrate_mbps * 3.0
+            cmd += [
+                "-b:v",
+                f"{bitrate_mbps:.0f}M",
+                "-maxrate",
+                f"{maxrate_mbps:.0f}M",
+                "-bufsize",
+                f"{bufsize_mbps:.0f}M",
+            ]
         elif codec == "libx264":
-            # Stronger quality setting while keeping H.264 web compatibility.
-            cmd += ["-preset", "slow", "-crf", "16"]
+            # Lower CRF means higher quality; map quality in [0,100] -> CRF in [35,14].
+            crf = int(round(35.0 - (quality / 100.0) * 21.0))
+            cmd += ["-preset", "slow", "-crf", str(max(14, min(35, crf)))]
         cmd += ["-vf", "vflip", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output_path)]
 
         self._proc = subprocess.Popen(
