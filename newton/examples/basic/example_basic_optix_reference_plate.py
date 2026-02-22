@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import math
+import random
 
 import numpy as np
 import warp as wp
@@ -38,6 +39,10 @@ SPOT_INTENSITY = 1.0
 # Pyramid dimensions.
 PYRAMID_LEVELS = 15
 PLATE_HALF = 1.30
+
+# Fraction of pyramid cubes that glow (emissive).
+EMISSIVE_FRACTION = 0.20
+EMISSIVE_INTENSITY = 8
 
 
 def _generate_studio_env_map(width: int = 512, height: int = 256) -> np.ndarray:
@@ -238,9 +243,11 @@ class Example:
 
         self.viewer.set_model(self.model)
 
+        self._use_optix = use_optix
         if use_optix:
             self._apply_optix_materials(api)
             self._setup_camera()
+        self._emissive_applied = False
 
         self.capture()
 
@@ -272,6 +279,14 @@ class Example:
             [0.14, 0.38, 0.88],
         ]
 
+        # Randomly pick ~10% of cube shapes to be emissive.
+        cube_start = 3
+        cube_indices = list(range(cube_start, self.model.shape_count))
+        num_emissive = max(1, int(len(cube_indices) * EMISSIVE_FRACTION))
+        rng = random.Random(42)
+        self._emissive_shapes = set(rng.sample(cube_indices, num_emissive))
+        self._emissive_colors = {}
+
         shape_colors = {}
         for s in range(self.model.shape_count):
             if s == 0:
@@ -281,9 +296,47 @@ class Example:
             elif s == 2:
                 shape_colors[s] = [0.12, 0.11, 0.11]  # top plate
             else:
-                shape_colors[s] = palette[(s - 3) % len(palette)]
+                color = palette[(s - cube_start) % len(palette)]
+                shape_colors[s] = color
+                if s in self._emissive_shapes:
+                    self._emissive_colors[s] = color
 
         self.viewer.update_shape_colors(shape_colors)
+
+    def _apply_emissive_materials(self):
+        """Swap selected cube instances to emissive materials after scene build."""
+        scene = getattr(self.viewer, "_scene", None)
+        if scene is None or not self._emissive_colors:
+            return
+
+        # Build shape_index -> OptiX instance ID mapping from the viewer's
+        # batch data structures.
+        shape_to_inst = {}
+        for batch in self.viewer._shape_instances.values():
+            name = batch.name
+            inst_ids = self.viewer._instance_name_to_optix_ids.get(name, [])
+            for local_idx, s_idx in enumerate(batch.model_shapes):
+                if local_idx < len(inst_ids):
+                    shape_to_inst[s_idx] = inst_ids[local_idx]
+
+        for s, color in self._emissive_colors.items():
+            max_c = max(color[0], color[1], color[2], 1e-6)
+            emissive = (
+                color[0] / max_c * EMISSIVE_INTENSITY,
+                color[1] / max_c * EMISSIVE_INTENSITY,
+                color[2] / max_c * EMISSIVE_INTENSITY,
+            )
+            mat_id = scene.materials.add_gltf_material(
+                base_color=(0.0, 0.0, 0.0, 1.0),
+                emissive_factor=emissive,
+                roughness=1.0,
+                metallic=0.0,
+            )
+            inst_id = shape_to_inst.get(s)
+            if inst_id is not None:
+                self.viewer._instance_material_map[inst_id] = mat_id
+
+        self.viewer._materials_dirty = True
 
     def _setup_camera(self):
         """Set initial camera pose via internal viewer state."""
@@ -345,6 +398,10 @@ class Example:
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
         self.viewer.end_frame()
+
+        if not self._emissive_applied and self._use_optix:
+            self._apply_emissive_materials()
+            self._emissive_applied = True
 
     def test_final(self):
         if self.sim_time <= 0.0:
