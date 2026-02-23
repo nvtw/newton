@@ -87,7 +87,7 @@ class TestSelection(unittest.TestCase):
         self.assertEqual(single_ant_view.get_attribute("joint_type", single_ant_model).shape, (1, 1, J))
         self.assertEqual(single_ant_view.get_attribute("joint_dof_dim", single_ant_model).shape, (1, 1, J, 2))
         self.assertEqual(single_ant_view.get_attribute("joint_limit_ke", single_ant_model).shape, (1, 1, D))
-        self.assertEqual(single_ant_view.get_attribute("shape_thickness", single_ant_model).shape, (1, 1, S))
+        self.assertEqual(single_ant_view.get_attribute("shape_margin", single_ant_model).shape, (1, 1, S))
 
         W = 10  # num worlds
 
@@ -122,7 +122,7 @@ class TestSelection(unittest.TestCase):
             single_ant_per_world_view.get_attribute("joint_limit_ke", single_ant_per_world_model).shape, (W, 1, D)
         )
         self.assertEqual(
-            single_ant_per_world_view.get_attribute("shape_thickness", single_ant_per_world_model).shape, (W, 1, S)
+            single_ant_per_world_view.get_attribute("shape_margin", single_ant_per_world_model).shape, (W, 1, S)
         )
 
         A = 3  # num articulations per world
@@ -161,7 +161,7 @@ class TestSelection(unittest.TestCase):
             multi_ant_per_world_view.get_attribute("joint_limit_ke", multi_ant_per_world_model).shape, (W, A, D)
         )
         self.assertEqual(
-            multi_ant_per_world_view.get_attribute("shape_thickness", multi_ant_per_world_model).shape, (W, A, S)
+            multi_ant_per_world_view.get_attribute("shape_margin", multi_ant_per_world_model).shape, (W, A, S)
         )
 
     def test_selection_shapes_floating_base(self):
@@ -184,7 +184,7 @@ class TestSelection(unittest.TestCase):
             hx=0.1,
             hy=0.1,
             hz=0.1,
-            cfg=newton.ModelBuilder.ShapeConfig(thickness=thicknesses[0]),
+            cfg=newton.ModelBuilder.ShapeConfig(margin=thicknesses[0]),
             label="shape_base",
         )
 
@@ -193,7 +193,7 @@ class TestSelection(unittest.TestCase):
             link1,
             radius=0.05,
             half_height=0.2,
-            cfg=newton.ModelBuilder.ShapeConfig(thickness=thicknesses[1]),
+            cfg=newton.ModelBuilder.ShapeConfig(margin=thicknesses[1]),
             label="shape_link1",
         )
 
@@ -201,7 +201,7 @@ class TestSelection(unittest.TestCase):
         robot.add_shape_sphere(
             link2,
             radius=0.05,
-            cfg=newton.ModelBuilder.ShapeConfig(thickness=thicknesses[2]),
+            cfg=newton.ModelBuilder.ShapeConfig(margin=thicknesses[2]),
             label="shape_link2",
         )
 
@@ -222,8 +222,8 @@ class TestSelection(unittest.TestCase):
         self.assertFalse(view.shapes_contiguous, "Expected non-contiguous shape selection")
         self.assertEqual(view.shape_count, 2)
 
-        # read shape_thickness through ArticulationView and check values
-        vals = view.get_attribute("shape_thickness", model)
+        # read shape_margin through ArticulationView and check values
+        vals = view.get_attribute("shape_margin", model)
         self.assertEqual(vals.shape, (W, 1, 2))
         vals_np = vals.numpy()
 
