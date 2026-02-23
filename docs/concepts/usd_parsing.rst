@@ -239,7 +239,7 @@ Each solver has its own namespace prefixes for solver-specific attributes. The t
      - ``mjc:model:joint:testMjcJointScalar``, ``mjc:state:joint:testMjcJointVec3``
    * - **Newton**
      - ``newton``
-    - ``newton:hullVertexLimit``, ``newton:gap``
+     - ``newton:hullVertexLimit``, ``newton:gap``
 
 **Accessing Collected Solver-Specific Attributes:**
 
