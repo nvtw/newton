@@ -309,10 +309,10 @@ class ClothSim:
         self.fixed_particles = []
         self.renderer_scale_factor = 0.01
         # controls particle-shape contact
-        self.soft_contact_margin = 1.0
+        self.soft_gap = 1.0
         # controls self-contact of trimesh
         self.particle_self_contact_radius = 0.1
-        self.particle_self_contact_margin = 0.1
+        self.particle_self_gap = 0.1
         # whether to use collision pipeline for particle-shape contacts
         self.use_collision_pipeline = use_collision_pipeline
 
@@ -704,7 +704,7 @@ class ClothSim:
         self.renderer_scale_factor = 0.1
 
         self.finalize(particle_enable_self_contact=False, ground=False, use_gravity=True)
-        self.soft_contact_margin = particle_radius * 1.1
+        self.soft_gap = particle_radius * 1.1
         self.model.soft_contact_ke = stretching_stiffness
 
     def set_up_stitching_experiment(self):
@@ -771,7 +771,7 @@ class ClothSim:
         self.fixed_particles = [1]
 
         self.particle_self_contact_radius = 0.1
-        self.particle_self_contact_margin = 0.1
+        self.particle_self_gap = 0.1
 
         self.finalize(particle_enable_self_contact=True, ground=False, use_gravity=True)
 
@@ -825,7 +825,7 @@ class ClothSim:
         self.renderer_scale_factor = 0.1
 
         self.finalize(ground=False, use_gravity=True)
-        self.soft_contact_margin = particle_radius * 1.1
+        self.soft_gap = particle_radius * 1.1
         self.model.soft_contact_ke = 1e5
 
     def finalize(self, particle_enable_self_contact=False, ground=True, use_gravity=True):
@@ -848,7 +848,7 @@ class ClothSim:
                 iterations=self.iterations,
                 particle_enable_self_contact=particle_enable_self_contact,
                 particle_self_contact_radius=self.particle_self_contact_radius,
-                particle_self_contact_margin=self.particle_self_contact_margin,
+                particle_self_gap=self.particle_self_gap,
             )
         elif self.solver_name == "xpbd":
             self.solver = newton.solvers.SolverXPBD(
@@ -864,7 +864,7 @@ class ClothSim:
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
             broad_phase="nxn",
-            soft_contact_margin=self.soft_contact_margin,
+            soft_gap=self.soft_gap,
         )
 
         self.state0 = self.model.state()

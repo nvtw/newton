@@ -156,7 +156,7 @@ class Collision:
             particle_q_prev (wp.array): Previous positions (optional, for velocity-based damping).
             particle_stiff (wp.array): Optional stiffness array for particles.
         """
-        thickness = 2.0 * self.radius
+        margin = 2.0 * self.radius
         self.contact_hessian_diags.zero_()
 
         if self.stiff_vf > 0:
@@ -164,7 +164,7 @@ class Collision:
                 handle_vertex_triangle_contacts_kernel,
                 dim=len(state_in.particle_q),
                 inputs=[
-                    thickness,
+                    margin,
                     self.stiff_vf,
                     state_in.particle_q,
                     self.model.tri_indices,
@@ -180,7 +180,7 @@ class Collision:
                 handle_edge_edge_contacts_kernel,
                 dim=self.model.edge_indices.shape[0],
                 inputs=[
-                    thickness,
+                    margin,
                     self.stiff_ee,
                     state_in.particle_q,
                     self.model.edge_indices,
@@ -196,7 +196,7 @@ class Collision:
                 solve_untangling_kernel,
                 dim=self.model.edge_indices.shape[0],
                 inputs=[
-                    thickness,
+                    margin,
                     self.stiff_ef,
                     state_in.particle_q,
                     self.model.tri_indices,

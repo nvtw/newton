@@ -126,7 +126,7 @@ class Example:
 
         # set up contact query and contact detection distances
         self.model.soft_contact_radius = 0.2e-2
-        self.model.soft_contact_margin = 0.35e-2
+        self.model.soft_gap = 0.35e-2
         self.model.soft_contact_ke = 1.0e1
         self.model.soft_contact_kd = 1.0e-6
         self.model.soft_contact_mu = 0.2

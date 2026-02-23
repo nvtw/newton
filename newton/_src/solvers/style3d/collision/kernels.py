@@ -105,7 +105,7 @@ def eval_body_contact_kernel(
 
 @wp.kernel
 def handle_vertex_triangle_contacts_kernel(
-    thickness: float,
+    margin: float,
     stiff_factor: float,
     pos: wp.array(dtype=wp.vec3),
     tri_indices: wp.array(dtype=int, ndim=2),
@@ -135,7 +135,7 @@ def handle_vertex_triangle_contacts_kernel(
         p = x0 - tri_normal * dist
         bary_coord = triangle_barycentric(x1, x2, x3, p)
 
-        if wp.abs(dist) > thickness:
+        if wp.abs(dist) > margin:
             continue
         if bary_coord[0] < 0.0 or bary_coord[1] < 0.0 or bary_coord[2] < 0.0:
             continue  # is outside triangle
@@ -143,7 +143,7 @@ def handle_vertex_triangle_contacts_kernel(
         face_stiff = (static_diags[face[0]] + static_diags[face[1]] + static_diags[face[2]]) / 3.0
         stiff = stiff_factor * (vert_stiff * face_stiff) / (vert_stiff + face_stiff)
 
-        force = stiff * tri_normal * (thickness - wp.abs(dist)) * wp.sign(dist)
+        force = stiff * tri_normal * (margin - wp.abs(dist)) * wp.sign(dist)
         hess = stiff * wp.outer(tri_normal, tri_normal)
 
         force0 += force
@@ -164,7 +164,7 @@ def handle_vertex_triangle_contacts_kernel(
 
 @wp.kernel
 def handle_edge_edge_contacts_kernel(
-    thickness: float,
+    margin: float,
     stiff_factor: float,
     pos: wp.array(dtype=wp.vec3),
     edge_indices: wp.array(dtype=int, ndim=2),
@@ -204,25 +204,25 @@ def handle_edge_edge_contacts_kernel(
         c2 = wp.lerp(x2, x3, t)
         dir = c1 - c2
         dist = wp.length(dir)
-        limited_thickness = thickness
+        limited_margin = margin
 
         len1 = wp.length(x2 - x3)
         avg_len = (len0 + len1) * 0.5
         if edge0[2] == edge1[0] or edge0[3] == edge1[0]:
-            limited_thickness = wp.min(limited_thickness, avg_len * 0.5)
+            limited_margin = wp.min(limited_margin, avg_len * 0.5)
         elif edge0[2] == edge1[1] or edge0[3] == edge1[1]:
-            limited_thickness = wp.min(limited_thickness, avg_len * 0.5)
+            limited_margin = wp.min(limited_margin, avg_len * 0.5)
         if edge1[2] == edge0[0] or edge1[3] == edge0[0]:
-            limited_thickness = wp.min(limited_thickness, avg_len * 0.5)
+            limited_margin = wp.min(limited_margin, avg_len * 0.5)
         elif edge1[2] == edge0[1] or edge1[3] == edge0[1]:
-            limited_thickness = wp.min(limited_thickness, avg_len * 0.5)
+            limited_margin = wp.min(limited_margin, avg_len * 0.5)
 
-        if 1e-6 < dist < limited_thickness:
+        if 1e-6 < dist < limited_margin:
             stiff_1 = (static_diags[edge1[0]] + static_diags[edge1[1]]) / 2.0
             stiff = stiff_factor * (stiff_0 * stiff_1) / (stiff_0 + stiff_1)
 
             dir = wp.normalize(dir)
-            force = stiff * dir * (limited_thickness - dist)
+            force = stiff * dir * (limited_margin - dist)
             hess = stiff * wp.outer(dir, dir)
 
             force0 += force * (1.0 - s)
@@ -262,7 +262,7 @@ def intersection_gradient_vector(R: wp.vec3, E: wp.vec3, N: wp.vec3):
 
 @wp.kernel
 def solve_untangling_kernel(
-    thickness: float,
+    margin: float,
     stiff_factor: float,
     pos: wp.array(dtype=wp.vec3),
     tri_indices: wp.array(dtype=int, ndim=2),
@@ -351,7 +351,7 @@ def solve_untangling_kernel(
         # Can be precomputed
         stiff_1 = (static_diags[face[0]] + static_diags[face[1]] + static_diags[face[2]]) / 3.0
         stiff = stiff_factor * (stiff_0 * stiff_1) / (stiff_0 + stiff_1)
-        disp = 2.0 * thickness
+        disp = 2.0 * margin
 
         force = stiff * G * disp
         hess = stiff * wp.outer(G, G)

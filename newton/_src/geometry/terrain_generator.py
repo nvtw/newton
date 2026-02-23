@@ -388,14 +388,14 @@ def _gap_terrain(
     center = (size[0] / 2, size[1] / 2, -0.5)
 
     # Outer border
-    thickness_x = (size[0] - platform_width - 2 * gap_width) / 2
-    thickness_y = (size[1] - platform_width - 2 * gap_width) / 2
+    margin_x = (size[0] - platform_width - 2 * gap_width) / 2
+    margin_y = (size[1] - platform_width - 2 * gap_width) / 2
 
     for dx, dy, sx, sy in [
-        (0, (size[1] - thickness_y) / 2, size[0], thickness_y),  # top
-        (0, -(size[1] - thickness_y) / 2, size[0], thickness_y),  # bottom
-        ((size[0] - thickness_x) / 2, 0, thickness_x, platform_width + 2 * gap_width),  # right
-        (-(size[0] - thickness_x) / 2, 0, thickness_x, platform_width + 2 * gap_width),  # left
+        (0, (size[1] - margin_y) / 2, size[0], margin_y),  # top
+        (0, -(size[1] - margin_y) / 2, size[0], margin_y),  # bottom
+        ((size[0] - margin_x) / 2, 0, margin_x, platform_width + 2 * gap_width),  # right
+        (-(size[0] - margin_x) / 2, 0, margin_x, platform_width + 2 * gap_width),  # left
     ]:
         pos = (center[0] + dx, center[1] + dy, center[2])
         meshes.append(_create_box((sx, sy, 1.0), pos))

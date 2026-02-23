@@ -271,7 +271,7 @@ class TestComputeSDF(unittest.TestCase):
         sdf_data, sparse_volume, coarse_volume, _ = compute_sdf_from_shape(
             shape_geo=self.mesh,
             shape_type=GeoType.MESH,
-            shape_thickness=0.0,
+            shape_margin=0.0,
         )
 
         self.assertIsNotNone(sparse_volume)
@@ -284,7 +284,7 @@ class TestComputeSDF(unittest.TestCase):
         sdf_data, _, _, _ = compute_sdf_from_shape(
             shape_geo=self.mesh,
             shape_type=GeoType.MESH,
-            shape_thickness=0.0,
+            shape_margin=0.0,
             margin=0.05,
         )
 
@@ -304,7 +304,7 @@ class TestComputeSDF(unittest.TestCase):
         sdf_data, sparse_volume, _, _ = compute_sdf_from_shape(
             shape_geo=self.mesh,
             shape_type=GeoType.MESH,
-            shape_thickness=0.0,
+            shape_margin=0.0,
             narrow_band_distance=(-0.1, 0.1),
         )
 
@@ -335,7 +335,7 @@ class TestComputeSDF(unittest.TestCase):
         sdf_data, _, coarse_volume, _ = compute_sdf_from_shape(
             shape_geo=self.mesh,
             shape_type=GeoType.MESH,
-            shape_thickness=0.0,
+            shape_margin=0.0,
         )
 
         # Sample points inside the SDF extent
@@ -372,7 +372,7 @@ class TestComputeSDF(unittest.TestCase):
         sdf_data, _, coarse_volume, _ = compute_sdf_from_shape(
             shape_geo=self.mesh,
             shape_type=GeoType.MESH,
-            shape_thickness=0.0,
+            shape_margin=0.0,
             margin=margin,
         )
 
@@ -442,7 +442,7 @@ class TestComputeSDF(unittest.TestCase):
         sdf_data, sparse_volume, _, _ = compute_sdf_from_shape(
             shape_geo=self.mesh,
             shape_type=GeoType.MESH,
-            shape_thickness=0.0,
+            shape_margin=0.0,
             margin=margin,
         )
 
@@ -501,7 +501,7 @@ class TestComputeSDF(unittest.TestCase):
         _sdf_data, sparse_volume, coarse_volume, _ = compute_sdf_from_shape(
             shape_geo=self.mesh,
             shape_type=GeoType.MESH,
-            shape_thickness=0.0,
+            shape_margin=0.0,
         )
 
         # For sparse SDF: test point just inside a face (within narrow band)
@@ -521,7 +521,7 @@ class TestComputeSDF(unittest.TestCase):
         _sdf_data, sparse_volume, coarse_volume, _ = compute_sdf_from_shape(
             shape_geo=self.mesh,
             shape_type=GeoType.MESH,
-            shape_thickness=0.0,
+            shape_margin=0.0,
         )
 
         # Point well outside the box
@@ -540,7 +540,7 @@ class TestComputeSDF(unittest.TestCase):
         _sdf_data, sparse_volume, _, _ = compute_sdf_from_shape(
             shape_geo=self.mesh,
             shape_type=GeoType.MESH,
-            shape_thickness=0.0,
+            shape_margin=0.0,
         )
 
         # Test gradient at a point slightly inside the +X face
@@ -569,7 +569,7 @@ class TestComputeSDF(unittest.TestCase):
         _sdf_data, sparse_volume, coarse_volume, _ = compute_sdf_from_shape(
             shape_geo=self.mesh,
             shape_type=GeoType.MESH,
-            shape_thickness=0.0,
+            shape_margin=0.0,
         )
 
         # Sample at a point near the surface (within narrow band)
@@ -585,37 +585,37 @@ class TestComputeSDF(unittest.TestCase):
             f"Sparse ({sparse_values[0]}) and coarse ({coarse_values[0]}) should have same sign near surface",
         )
 
-    def test_thickness_offset(self):
-        """Test that thickness offsets the SDF values.
+    def test_margin_offset(self):
+        """Test that margin offsets the SDF values.
 
         We test near the surface where the sparse SDF has valid values.
         """
-        thickness = 0.1
+        margin = 0.1
 
-        _, sparse_no_thickness, _, _ = compute_sdf_from_shape(
+        _, sparse_no_margin, _, _ = compute_sdf_from_shape(
             shape_geo=self.mesh,
             shape_type=GeoType.MESH,
-            shape_thickness=0.0,
+            shape_margin=0.0,
         )
 
-        _, sparse_with_thickness, _, _ = compute_sdf_from_shape(
+        _, sparse_with_margin, _, _ = compute_sdf_from_shape(
             shape_geo=self.mesh,
             shape_type=GeoType.MESH,
-            shape_thickness=thickness,
+            shape_margin=margin,
         )
 
         # Sample near the surface (within narrow band)
         near_surface = np.array([[0.45, 0.0, 0.0]], dtype=np.float32)
 
-        values_no_thick = sample_sdf_at_points(sparse_no_thickness, near_surface)
-        values_with_thick = sample_sdf_at_points(sparse_with_thickness, near_surface)
+        values_no_thick = sample_sdf_at_points(sparse_no_margin, near_surface)
+        values_with_thick = sample_sdf_at_points(sparse_with_margin, near_surface)
 
-        # With thickness, SDF should be offset (more negative = thicker shell)
+        # With margin, SDF should be offset (more negative = thicker shell)
         self.assertAlmostEqual(
             values_with_thick[0],
-            values_no_thick[0] - thickness,
+            values_no_thick[0] - margin,
             places=2,
-            msg=f"Thickness should offset SDF by -{thickness}",
+            msg=f"Thickness should offset SDF by -{margin}",
         )
 
     def test_inverted_winding_sphere(self):
@@ -634,7 +634,7 @@ class TestComputeSDF(unittest.TestCase):
         _, sparse_volume, coarse_volume, _ = compute_sdf_from_shape(
             shape_geo=inverted_sphere,
             shape_type=GeoType.MESH,
-            shape_thickness=0.0,
+            shape_margin=0.0,
             max_resolution=32,
             narrow_band_distance=(-0.2, 0.2),  # Wider band for testing
         )
@@ -712,7 +712,7 @@ class TestComputeSDFGridSampling(unittest.TestCase):
         sdf_data, sparse_volume, _, _ = compute_sdf_from_shape(
             shape_geo=self.mesh,
             shape_type=GeoType.MESH,
-            shape_thickness=0.0,
+            shape_margin=0.0,
         )
 
         # Sample points on a grid near the +X face of the box (within narrow band)
@@ -741,7 +741,7 @@ class TestComputeSDFGridSampling(unittest.TestCase):
         sdf_data, _, coarse_volume, _ = compute_sdf_from_shape(
             shape_geo=self.mesh,
             shape_type=GeoType.MESH,
-            shape_thickness=0.0,
+            shape_margin=0.0,
         )
 
         # Create a grid of test points inside the extent
@@ -843,7 +843,7 @@ class TestSDFExtrapolation(unittest.TestCase):
         cls.sdf_data, cls.sparse_volume, cls.coarse_volume, _ = compute_sdf_from_shape(
             shape_geo=cls.mesh,
             shape_type=GeoType.MESH,
-            shape_thickness=0.0,
+            shape_margin=0.0,
             narrow_band_distance=(-0.1, 0.1),
             margin=0.05,
         )
@@ -1240,7 +1240,7 @@ def test_brick_pyramid_stability(test, device):
     stays in place after simulation.
     """
     builder = newton.ModelBuilder()
-    builder.rigid_contact_margin = 0.005
+    builder.rigid_contact_gap = 0.005
 
     # Add ground plane
     builder.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)

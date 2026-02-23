@@ -226,7 +226,7 @@ class Example:
             iterations=self.iterations,
             particle_enable_self_contact=True,
             particle_self_contact_radius=0.04,
-            particle_self_contact_margin=0.06,
+            particle_self_gap=0.06,
             particle_topological_contact_filter_threshold=1,
             particle_enable_tile_solve=False,
         )

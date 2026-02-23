@@ -152,7 +152,7 @@ class SolverVBD(SolverBase):
         # Particle parameters
         particle_enable_self_contact: bool = False,
         particle_self_contact_radius: float = 0.2,
-        particle_self_contact_margin: float = 0.2,
+        particle_self_gap: float = 0.2,
         particle_conservative_bound_relaxation: float = 0.85,
         particle_vertex_contact_buffer_size: int = 32,
         particle_edge_contact_buffer_size: int = 64,
@@ -193,7 +193,7 @@ class SolverVBD(SolverBase):
             particle_enable_self_contact: Whether to enable self-contact detection for particles.
             particle_self_contact_radius: The radius used for self-contact detection. This is the distance at which
                 vertex-triangle pairs and edge-edge pairs will start to interact with each other.
-            particle_self_contact_margin: The margin used for self-contact detection. This is the distance at which
+            particle_self_gap: The margin used for self-contact detection. This is the distance at which
                 vertex-triangle pairs and edge-edge will be considered in contact generation. It should be larger than
                 `particle_self_contact_radius` to avoid missing contacts.
             integrate_with_external_rigid_solver: Indicator for coupled rigid body-cloth simulation. When set to `True`,
@@ -275,7 +275,7 @@ class SolverVBD(SolverBase):
             model,
             particle_enable_self_contact,
             particle_self_contact_radius,
-            particle_self_contact_margin,
+            particle_self_gap,
             particle_conservative_bound_relaxation,
             particle_vertex_contact_buffer_size,
             particle_edge_contact_buffer_size,
@@ -322,7 +322,7 @@ class SolverVBD(SolverBase):
         model: Model,
         particle_enable_self_contact: bool,
         particle_self_contact_radius: float,
-        particle_self_contact_margin: float,
+        particle_self_gap: float,
         particle_conservative_bound_relaxation: float,
         particle_vertex_contact_buffer_size: int,
         particle_edge_contact_buffer_size: int,
@@ -355,7 +355,7 @@ class SolverVBD(SolverBase):
         # Self-contact settings
         self.particle_enable_self_contact = particle_enable_self_contact
         self.particle_self_contact_radius = particle_self_contact_radius
-        self.particle_self_contact_margin = particle_self_contact_margin
+        self.particle_self_gap = particle_self_gap
         self.particle_q_rest = model.particle_q
 
         # Tile solve settings
@@ -365,10 +365,10 @@ class SolverVBD(SolverBase):
         self.use_particle_tile_solve = particle_enable_tile_solve and model.device.is_cuda
 
         if particle_enable_self_contact:
-            if particle_self_contact_margin < particle_self_contact_radius:
+            if particle_self_gap < particle_self_contact_radius:
                 raise ValueError(
-                    "particle_self_contact_margin is smaller than particle_self_contact_radius, this will result in missing contacts and cause instability.\n"
-                    "It is advisable to make particle_self_contact_margin 1.5-2 times larger than particle_self_contact_radius."
+                    "particle_self_gap is smaller than particle_self_contact_radius, this will result in missing contacts and cause instability.\n"
+                    "It is advisable to make particle_self_gap 1.5-2 times larger than particle_self_contact_radius."
                 )
 
             self.particle_conservative_bound_relaxation = particle_conservative_bound_relaxation
@@ -1238,7 +1238,7 @@ class SolverVBD(SolverBase):
                     self.pos_prev_collision_detection,
                     self.particle_displacements,
                     self.truncation_ts,
-                    self.particle_self_contact_margin
+                    self.particle_self_gap
                     * self.particle_conservative_bound_relaxation
                     * 0.5,  # max_displacement: degenerate to isotropic truncation
                 ],
@@ -1795,8 +1795,8 @@ class SolverVBD(SolverBase):
                         contacts.rigid_contact_point0,
                         contacts.rigid_contact_point1,
                         contacts.rigid_contact_normal,
-                        contacts.rigid_contact_thickness0,
-                        contacts.rigid_contact_thickness1,
+                        contacts.rigid_contact_margin0,
+                        contacts.rigid_contact_margin1,
                         model.shape_body,
                         self.body_body_contact_buffer_pre_alloc,
                         self.body_body_contact_counts,
@@ -1871,8 +1871,8 @@ class SolverVBD(SolverBase):
                     contacts.rigid_contact_point0,
                     contacts.rigid_contact_point1,
                     contacts.rigid_contact_normal,
-                    contacts.rigid_contact_thickness0,
-                    contacts.rigid_contact_thickness1,
+                    contacts.rigid_contact_margin0,
+                    contacts.rigid_contact_margin1,
                     model.shape_body,
                     state_out.body_q,
                     self.body_body_contact_material_ke,
@@ -1997,12 +1997,12 @@ class SolverVBD(SolverBase):
 
         self.trimesh_collision_detector.refit(current_state.particle_q)
         self.trimesh_collision_detector.vertex_triangle_collision_detection(
-            self.particle_self_contact_margin,
+            self.particle_self_gap,
             min_query_radius=self.particle_rest_shape_contact_exclusion_radius,
             min_distance_filtering_ref_pos=self.particle_q_rest,
         )
         self.trimesh_collision_detector.edge_edge_collision_detection(
-            self.particle_self_contact_margin,
+            self.particle_self_gap,
             min_query_radius=self.particle_rest_shape_contact_exclusion_radius,
             min_distance_filtering_ref_pos=self.particle_q_rest,
         )

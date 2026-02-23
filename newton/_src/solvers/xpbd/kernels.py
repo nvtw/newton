@@ -2058,8 +2058,8 @@ def solve_body_contact_positions(
     contact_offset0: wp.array(dtype=wp.vec3),
     contact_offset1: wp.array(dtype=wp.vec3),
     contact_normal: wp.array(dtype=wp.vec3),
-    contact_thickness0: wp.array(dtype=float),
-    contact_thickness1: wp.array(dtype=float),
+    contact_margin0: wp.array(dtype=float),
+    contact_margin1: wp.array(dtype=float),
     contact_shape0: wp.array(dtype=int),
     contact_shape1: wp.array(dtype=int),
     shape_material_mu: wp.array(dtype=float),
@@ -2102,9 +2102,9 @@ def solve_body_contact_positions(
     bx_a = wp.transform_point(X_wb_a, contact_point0[tid])
     bx_b = wp.transform_point(X_wb_b, contact_point1[tid])
 
-    thickness = contact_thickness0[tid] + contact_thickness1[tid]
+    margin = contact_margin0[tid] + contact_margin1[tid]
     n = -contact_normal[tid]
-    d = wp.dot(n, bx_b - bx_a) - thickness
+    d = wp.dot(n, bx_b - bx_a) - margin
 
     if d >= 0.0:
         return
@@ -2183,7 +2183,7 @@ def solve_body_contact_positions(
 
     # linear friction
     if mu > 0.0:
-        # add on displacement from surface offsets, this ensures we include any rotational effects due to thickness from feature
+        # add on displacement from surface offsets, this ensures we include any rotational effects due to margin from feature
         # need to use the current rotation to account for friction due to angular effects (e.g.: slipping contact)
         bx_a += wp.transform_vector(X_wb_a, offset_a)
         bx_b += wp.transform_vector(X_wb_b, offset_b)
@@ -2320,8 +2320,8 @@ def apply_rigid_restitution(
     contact_point1: wp.array(dtype=wp.vec3),
     contact_offset0: wp.array(dtype=wp.vec3),
     contact_offset1: wp.array(dtype=wp.vec3),
-    contact_thickness0: wp.array(dtype=float),
-    contact_thickness1: wp.array(dtype=float),
+    contact_margin0: wp.array(dtype=float),
+    contact_margin1: wp.array(dtype=float),
     contact_inv_weight: wp.array(dtype=float),
     gravity: wp.array(dtype=wp.vec3),
     dt: float,
@@ -2393,9 +2393,9 @@ def apply_rigid_restitution(
     bx_a = wp.transform_point(X_wb_a_prev, contact_point0[tid] + contact_offset0[tid])
     bx_b = wp.transform_point(X_wb_b_prev, contact_point1[tid] + contact_offset1[tid])
 
-    thickness = contact_thickness0[tid] + contact_thickness1[tid]
+    margin = contact_margin0[tid] + contact_margin1[tid]
     n = contact_normal[tid]
-    d = -wp.dot(n, bx_b - bx_a) - thickness
+    d = -wp.dot(n, bx_b - bx_a) - margin
     if d >= 0.0:
         return
 

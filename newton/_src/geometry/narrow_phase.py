@@ -96,7 +96,7 @@ def write_contact_simple(
         output_index: If -1, use atomic_add to get the next available index if contact distance is less than margin. If >= 0, use this index directly and skip margin check.
     """
     total_separation_needed = (
-        contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.thickness_a + contact_data.thickness_b
+        contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.margin_a + contact_data.margin_b
     )
 
     contact_normal_a_to_b = wp.normalize(contact_data.contact_normal_a_to_b)
@@ -113,7 +113,7 @@ def write_contact_simple(
     d = distance - total_separation_needed
 
     if output_index < 0:
-        if d >= contact_data.margin:
+        if d >= contact_data.gap:
             return
         index = wp.atomic_add(writer_data.contact_count, 0, 1)
     else:
@@ -158,7 +158,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
         shape_data: wp.array(dtype=wp.vec4),
         shape_transform: wp.array(dtype=wp.transform),
         shape_source: wp.array(dtype=wp.uint64),
-        shape_contact_margin: wp.array(dtype=float),
+        shape_gap: wp.array(dtype=float),
         shape_flags: wp.array(dtype=wp.int32),
         writer_data: Any,
         total_num_threads: int,
@@ -231,8 +231,8 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             data_b = shape_data[shape_b]
             scale_a = wp.vec3(data_a[0], data_a[1], data_a[2])
             scale_b = wp.vec3(data_b[0], data_b[1], data_b[2])
-            thickness_a = data_a[3]
-            thickness_b = data_b[3]
+            margin_a = data_a[3]
+            margin_b = data_b[3]
 
             # Get transforms
             X_a = shape_transform[shape_a]
@@ -242,10 +242,10 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             quat_a = wp.transform_get_rotation(X_a)
             quat_b = wp.transform_get_rotation(X_b)
 
-            # Calculate contact margin
-            margin_a = shape_contact_margin[shape_a]
-            margin_b = shape_contact_margin[shape_b]
-            margin = margin_a + margin_b
+            # Calculate pair gap for speculative contact generation
+            gap_a = shape_gap[shape_a]
+            gap_b = shape_gap[shape_b]
+            gap = gap_a + gap_b
 
             # =====================================================================
             # Route heightfield pairs to specialized buffer
@@ -369,7 +369,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 box_size = scale_b
 
                 dists4_box, positions4_box, contact_normal = collide_plane_box(
-                    plane_normal, pos_a, pos_b, box_rot, box_size, margin
+                    plane_normal, pos_a, pos_b, box_rot, box_size, gap
                 )
 
                 contact_dist_0 = dists4_box[0]
@@ -510,11 +510,11 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 contact_data.contact_normal_a_to_b = contact_normal
                 contact_data.radius_eff_a = radius_eff_a
                 contact_data.radius_eff_b = radius_eff_b
-                contact_data.thickness_a = thickness_a
-                contact_data.thickness_b = thickness_b
+                contact_data.margin_a = margin_a
+                contact_data.margin_b = margin_b
                 contact_data.shape_a = shape_a
                 contact_data.shape_b = shape_b
-                contact_data.margin = margin
+                contact_data.gap = gap
 
                 # Check margin for all possible contacts
                 contact_0_valid = False
@@ -612,7 +612,7 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
         shape_data: wp.array(dtype=wp.vec4),
         shape_transform: wp.array(dtype=wp.transform),
         shape_source: wp.array(dtype=wp.uint64),
-        shape_contact_margin: wp.array(dtype=float),
+        shape_gap: wp.array(dtype=float),
         shape_collision_radius: wp.array(dtype=float),
         shape_aabb_lower: wp.array(dtype=wp.vec3),
         shape_aabb_upper: wp.array(dtype=wp.vec3),
@@ -648,10 +648,10 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
             type_b = shape_types[shape_b]
 
             # Extract shape data
-            pos_a, quat_a, shape_data_a, scale_a, thickness_a = extract_shape_data(
+            pos_a, quat_a, shape_data_a, scale_a, margin_a = extract_shape_data(
                 shape_a, shape_transform, shape_types, shape_data, shape_source
             )
-            pos_b, quat_b, shape_data_b, scale_b, thickness_b = extract_shape_data(
+            pos_b, quat_b, shape_data_b, scale_b, margin_b = extract_shape_data(
                 shape_b, shape_transform, shape_types, shape_data, shape_source
             )
 
@@ -670,10 +670,12 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
                 aabb_b_lower = shape_aabb_lower[shape_b]
                 aabb_b_upper = shape_aabb_upper[shape_b]
             if wp.static(not external_aabb):
-                margin_a = shape_contact_margin[shape_a]
-                margin_b = shape_contact_margin[shape_b]
-                margin_vec_a = wp.vec3(margin_a, margin_a, margin_a)
-                margin_vec_b = wp.vec3(margin_b, margin_b, margin_b)
+                gap_a = shape_gap[shape_a]
+                gap_b = shape_gap[shape_b]
+                expansion_a = margin_a + gap_a
+                expansion_b = margin_b + gap_b
+                margin_vec_a = wp.vec3(expansion_a, expansion_a, expansion_a)
+                margin_vec_b = wp.vec3(expansion_b, expansion_b, expansion_b)
 
                 # Shape A AABB
                 if is_infinite_plane_a:
@@ -721,10 +723,10 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
             ):
                 continue
 
-            # Compute contact margin
-            margin_a = shape_contact_margin[shape_a]
-            margin_b = shape_contact_margin[shape_b]
-            margin = margin_a + margin_b
+            # Compute pair gap
+            gap_a = shape_gap[shape_a]
+            gap_b = shape_gap[shape_b]
+            gap = gap_a + gap_b
 
             # Find and write contacts using GJK/MPR
             wp.static(create_find_contacts(writer_func))(
@@ -738,11 +740,11 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
                 is_infinite_plane_b,
                 bsphere_radius_a,
                 bsphere_radius_b,
-                margin,
+                gap,
                 shape_a,
                 shape_b,
-                thickness_a,
-                thickness_b,
+                margin_a,
+                margin_b,
                 writer_data,
             )
 
@@ -754,8 +756,8 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
     shape_types: wp.array(dtype=int),
     shape_transform: wp.array(dtype=wp.transform),
     shape_source: wp.array(dtype=wp.uint64),
-    shape_contact_margin: wp.array(dtype=float),  # Per-shape contact margins
-    shape_data: wp.array(dtype=wp.vec4),  # Shape data (scale xyz, thickness w)
+    shape_gap: wp.array(dtype=float),  # Per-shape contact margins
+    shape_data: wp.array(dtype=wp.vec4),  # Shape data (scale xyz, margin w)
     shape_pairs_mesh: wp.array(dtype=wp.vec2i),
     shape_pairs_mesh_count: wp.array(dtype=int),
     total_num_threads: int,
@@ -806,11 +808,12 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
         # Get non-mesh shape world transform
         X_ws = shape_transform[non_mesh_shape]
 
-        # Use per-shape contact margin for the non-mesh shape
-        # Sum margins for consistency with thickness summing
-        margin_non_mesh = shape_contact_margin[non_mesh_shape]
-        margin_mesh = shape_contact_margin[mesh_shape]
-        margin = margin_non_mesh + margin_mesh
+        # Use combined margin+gap window for conservative mesh triangle overlap culling.
+        margin_non_mesh = shape_data[non_mesh_shape][3]
+        margin_mesh = shape_data[mesh_shape][3]
+        gap_non_mesh = shape_gap[non_mesh_shape]
+        gap_mesh = shape_gap[mesh_shape]
+        margin = margin_non_mesh + margin_mesh + gap_non_mesh + gap_mesh
 
         # Call mesh_vs_convex_midphase with the shape_data and margin
         mesh_vs_convex_midphase(
@@ -836,7 +839,7 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
         shape_data: wp.array(dtype=wp.vec4),
         shape_transform: wp.array(dtype=wp.transform),
         shape_source: wp.array(dtype=wp.uint64),
-        shape_contact_margin: wp.array(dtype=float),  # Per-shape contact margins
+        shape_gap: wp.array(dtype=float),  # Per-shape contact margins
         triangle_pairs: wp.array(dtype=wp.vec3i),
         triangle_pairs_count: wp.array(dtype=int),
         writer_data: Any,
@@ -873,7 +876,7 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
             shape_data_a, v0_world = get_triangle_shape_from_mesh(mesh_id_a, mesh_scale_a, X_mesh_ws_a, tri_idx)
 
             # Extract shape B data
-            pos_b, quat_b, shape_data_b, _scale_b, thickness_b = extract_shape_data(
+            pos_b, quat_b, shape_data_b, _scale_b, margin_b = extract_shape_data(
                 shape_b,
                 shape_transform,
                 shape_types,
@@ -885,14 +888,13 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
             pos_a = v0_world
             quat_a = wp.quat_identity()  # Triangle has no orientation, use identity
 
-            # Extract thickness for shape A
-            thickness_a = shape_data[shape_a][3]
+            # Extract margin for shape A
+            margin_a = shape_data[shape_a][3]
 
-            # Use per-shape contact margin for contact detection
-            # Sum margins for consistency with thickness summing
-            margin_a = shape_contact_margin[shape_a]
-            margin_b = shape_contact_margin[shape_b]
-            margin = margin_a + margin_b
+            # Use per-shape gap for speculative contact generation
+            gap_a = shape_gap[shape_a]
+            gap_b = shape_gap[shape_b]
+            gap = gap_a + gap_b
 
             # Compute and write contacts using GJK/MPR with standard post-processing
             wp.static(create_compute_gjk_mpr_contacts(writer_func))(
@@ -902,11 +904,11 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
                 quat_b,
                 pos_a,
                 pos_b,
-                margin,
+                gap,
                 shape_a,
                 shape_b,
-                thickness_a,
-                thickness_b,
+                margin_a,
+                margin_b,
                 writer_data,
             )
 
@@ -933,7 +935,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
         shape_data: wp.array(dtype=wp.vec4),
         shape_transform: wp.array(dtype=wp.transform),
         shape_source: wp.array(dtype=wp.uint64),
-        shape_contact_margin: wp.array(dtype=float),
+        shape_gap: wp.array(dtype=float),
         _shape_collision_aabb_lower: wp.array(dtype=wp.vec3),  # Unused but kept for API compatibility
         _shape_collision_aabb_upper: wp.array(dtype=wp.vec3),  # Unused but kept for API compatibility
         _shape_voxel_resolution: wp.array(dtype=wp.vec3i),  # Unused but kept for API compatibility
@@ -979,16 +981,15 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
             scale_data = shape_data[mesh_shape]
             mesh_scale = wp.vec3(scale_data[0], scale_data[1], scale_data[2])
 
-            # Extract thickness values
-            thickness_mesh = shape_data[mesh_shape][3]
-            thickness_plane = shape_data[plane_shape][3]
-            total_thickness = thickness_mesh + thickness_plane
+            # Extract margin values
+            margin_mesh = shape_data[mesh_shape][3]
+            margin_plane = shape_data[plane_shape][3]
+            total_margin = margin_mesh + margin_plane
 
-            # Use per-shape contact margin for contact detection
-            # Sum margins for consistency with thickness summing
-            margin_mesh = shape_contact_margin[mesh_shape]
-            margin_plane = shape_contact_margin[plane_shape]
-            margin = margin_mesh + margin_plane
+            # Use per-shape gap for speculative contact generation
+            gap_mesh = shape_gap[mesh_shape]
+            gap_plane = shape_gap[plane_shape]
+            gap = gap_mesh + gap_plane
 
             # Strided loop over vertices across all threads in the launch
             total_num_threads = total_num_blocks * wp.block_dim()
@@ -1007,7 +1008,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
                 distance = wp.dot(diff, plane_normal)
 
                 # Check if this vertex generates a contact
-                if distance < margin + total_thickness:
+                if distance < gap + total_margin:
                     # Contact position is the midpoint
                     contact_pos = (vertex_world + point_on_plane) * 0.5
 
@@ -1021,11 +1022,11 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
                     contact_data.contact_distance = distance
                     contact_data.radius_eff_a = 0.0
                     contact_data.radius_eff_b = 0.0
-                    contact_data.thickness_a = thickness_mesh
-                    contact_data.thickness_b = thickness_plane
+                    contact_data.margin_a = margin_mesh
+                    contact_data.margin_b = margin_plane
                     contact_data.shape_a = mesh_shape
                     contact_data.shape_b = plane_shape
-                    contact_data.margin = margin
+                    contact_data.gap = gap
 
                     if writer_data.contact_count[0] < writer_data.contact_max:
                         writer_func(contact_data, writer_data, -1)
@@ -1046,7 +1047,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
         shape_data: wp.array(dtype=wp.vec4),
         shape_transform: wp.array(dtype=wp.transform),
         shape_source: wp.array(dtype=wp.uint64),
-        shape_contact_margin: wp.array(dtype=float),
+        shape_gap: wp.array(dtype=float),
         shape_collision_aabb_lower: wp.array(dtype=wp.vec3),
         shape_collision_aabb_upper: wp.array(dtype=wp.vec3),
         shape_voxel_resolution: wp.array(dtype=wp.vec3i),
@@ -1115,16 +1116,15 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
             scale_data = shape_data[mesh_shape]
             mesh_scale = wp.vec3(scale_data[0], scale_data[1], scale_data[2])
 
-            # Extract thickness values
-            thickness_mesh = shape_data[mesh_shape][3]
-            thickness_plane = shape_data[plane_shape][3]
-            total_thickness = thickness_mesh + thickness_plane
+            # Extract margin values
+            margin_mesh = shape_data[mesh_shape][3]
+            margin_plane = shape_data[plane_shape][3]
+            total_margin = margin_mesh + margin_plane
 
-            # Use per-shape contact margin for contact detection
-            # Sum margins for consistency with thickness summing
-            margin_mesh = shape_contact_margin[mesh_shape]
-            margin_plane = shape_contact_margin[plane_shape]
-            margin = margin_mesh + margin_plane
+            # Use per-shape gap for speculative contact generation
+            gap_mesh = shape_gap[mesh_shape]
+            gap_plane = shape_gap[plane_shape]
+            gap = gap_mesh + gap_plane
 
             # Reset contact buffer for this pair
             for i in range(t, wp.static(reduction_slot_count), wp.block_dim()):
@@ -1158,7 +1158,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
                     distance = wp.dot(diff, plane_normal)
 
                     # Check if this vertex generates a contact
-                    if distance < margin + total_thickness:
+                    if distance < gap + total_margin:
                         has_contact = True
 
                         # Contact position is the midpoint
@@ -1200,11 +1200,11 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
                 contact_data.contact_distance = contact.depth
                 contact_data.radius_eff_a = 0.0
                 contact_data.radius_eff_b = 0.0
-                contact_data.thickness_a = thickness_mesh
-                contact_data.thickness_b = thickness_plane
+                contact_data.margin_a = margin_mesh
+                contact_data.margin_b = margin_plane
                 contact_data.shape_a = mesh_shape
                 contact_data.shape_b = plane_shape
-                contact_data.margin = margin
+                contact_data.gap = gap
 
                 if writer_data.contact_count[0] < writer_data.contact_max:
                     writer_func(contact_data, writer_data, -1)
@@ -1220,7 +1220,7 @@ def heightfield_midphase_kernel(
     shape_types: wp.array(dtype=int),
     shape_transform: wp.array(dtype=wp.transform),
     shape_collision_radius: wp.array(dtype=float),
-    shape_contact_margin: wp.array(dtype=float),
+    shape_gap: wp.array(dtype=float),
     shape_heightfield_data: wp.array(dtype=HeightfieldData),
     shape_pairs_heightfield: wp.array(dtype=wp.vec2i),
     shape_pairs_heightfield_count: wp.array(dtype=int),
@@ -1266,8 +1266,9 @@ def heightfield_midphase_kernel(
 
         # Use bounding sphere radius for conservative AABB in heightfield-local space
         radius = shape_collision_radius[other_shape]
-        margin = shape_contact_margin[hfield_shape] + shape_contact_margin[other_shape]
-        extent = radius + margin
+        gap = shape_gap[hfield_shape] + shape_gap[other_shape]
+        total_margin = shape_data[hfield_shape][3] + shape_data[other_shape][3]
+        extent = radius + total_margin + gap
 
         aabb_lower = pos_in_hfield - wp.vec3(extent, extent, extent)
         aabb_upper = pos_in_hfield + wp.vec3(extent, extent, extent)
@@ -1302,7 +1303,7 @@ def create_heightfield_triangle_contacts_kernel(writer_func: Any):
         shape_data: wp.array(dtype=wp.vec4),
         shape_transform: wp.array(dtype=wp.transform),
         shape_source: wp.array(dtype=wp.uint64),
-        shape_contact_margin: wp.array(dtype=float),
+        shape_gap: wp.array(dtype=float),
         shape_heightfield_data: wp.array(dtype=HeightfieldData),
         heightfield_elevation_data: wp.array(dtype=wp.float32),
         heightfield_cell_pairs: wp.array(dtype=wp.vec4i),
@@ -1333,14 +1334,14 @@ def create_heightfield_triangle_contacts_kernel(writer_func: Any):
             X_hfield_ws = shape_transform[hfield_shape]
 
             # Extract convex shape data
-            pos_b, quat_b, shape_data_b, _scale_b, thickness_b = extract_shape_data(
+            pos_b, quat_b, shape_data_b, _scale_b, margin_b = extract_shape_data(
                 convex_shape, shape_transform, shape_types, shape_data, shape_source
             )
 
-            thickness_a = shape_data[hfield_shape][3]
-            margin_a = shape_contact_margin[hfield_shape]
-            margin_b = shape_contact_margin[convex_shape]
-            margin = margin_a + margin_b
+            margin_a = shape_data[hfield_shape][3]
+            gap_a = shape_gap[hfield_shape]
+            gap_b = shape_gap[convex_shape]
+            gap = gap_a + gap_b
 
             # Process 2 triangles per cell
             for tri_sub in range(2):
@@ -1355,11 +1356,11 @@ def create_heightfield_triangle_contacts_kernel(writer_func: Any):
                     quat_b,
                     v0_world,
                     pos_b,
-                    margin,
+                    gap,
                     hfield_shape,
                     convex_shape,
-                    thickness_a,
-                    thickness_b,
+                    margin_a,
+                    margin_b,
                     writer_data,
                 )
 
@@ -1694,12 +1695,12 @@ class NarrowPhase:
         candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),  # Maybe colliding pairs
         candidate_pair_count: wp.array(dtype=wp.int32, ndim=1),  # Size one array
         shape_types: wp.array(dtype=wp.int32, ndim=1),  # All shape types, pairs index into it
-        shape_data: wp.array(dtype=wp.vec4, ndim=1),  # Shape data (scale xyz, thickness w)
+        shape_data: wp.array(dtype=wp.vec4, ndim=1),  # Shape data (scale xyz, margin w)
         shape_transform: wp.array(dtype=wp.transform, ndim=1),  # In world space
         shape_source: wp.array(dtype=wp.uint64, ndim=1),  # The index into the source array, type define by shape_types
         sdf_data: wp.array(dtype=SDFData, ndim=1),  # Compact SDF data table
         shape_sdf_index: wp.array(dtype=wp.int32, ndim=1),  # Per-shape index into sdf_data (-1 for none)
-        shape_contact_margin: wp.array(dtype=wp.float32, ndim=1),  # per-shape contact margin
+        shape_gap: wp.array(dtype=wp.float32, ndim=1),  # per-shape contact margin
         shape_collision_radius: wp.array(dtype=wp.float32, ndim=1),  # per-shape collision radius for AABB fallback
         shape_flags: wp.array(dtype=wp.int32, ndim=1),  # per-shape flags (includes ShapeFlags.HYDROELASTIC)
         shape_collision_aabb_lower: wp.array(dtype=wp.vec3, ndim=1),  # Local-space AABB lower bounds
@@ -1717,12 +1718,12 @@ class NarrowPhase:
             candidate_pair: Array of potentially colliding shape pairs from broad phase
             candidate_pair_count: Single-element array containing the number of candidate pairs
             shape_types: Array of geometry types for all shapes
-            shape_data: Array of vec4 containing scale (xyz) and thickness (w) for each shape
+            shape_data: Array of vec4 containing scale (xyz) and margin (w) for each shape
             shape_transform: Array of world-space transforms for each shape
             shape_source: Array of source pointers (mesh IDs, etc.) for each shape
             sdf_data: Compact array of SDFData structs
             shape_sdf_index: Per-shape SDF table index (-1 for shapes without SDF)
-            shape_contact_margin: Array of contact margins for each shape
+            shape_gap: Array of contact margins for each shape
             shape_collision_radius: Array of collision radii for each shape (for AABB fallback for planes/meshes)
             shape_flags: Array of shape flags for each shape (includes ShapeFlags.HYDROELASTIC)
             shape_collision_aabb_lower: Local-space AABB lower bounds for each shape (for voxel binning)
@@ -1750,7 +1751,7 @@ class NarrowPhase:
                 shape_data,
                 shape_transform,
                 shape_source,
-                shape_contact_margin,
+                shape_gap,
                 shape_flags,
                 writer_data,
                 self.total_num_threads,
@@ -1788,7 +1789,7 @@ class NarrowPhase:
                 shape_data,
                 shape_transform,
                 shape_source,
-                shape_contact_margin,
+                shape_gap,
                 shape_collision_radius,
                 self.shape_aabb_lower,
                 self.shape_aabb_upper,
@@ -1807,7 +1808,7 @@ class NarrowPhase:
                 shape_data,
                 shape_transform,
                 shape_source,
-                shape_contact_margin,
+                shape_gap,
                 shape_collision_aabb_lower,
                 shape_collision_aabb_upper,
                 shape_voxel_resolution,
@@ -1844,7 +1845,7 @@ class NarrowPhase:
                     shape_types,
                     shape_transform,
                     shape_source,
-                    shape_contact_margin,
+                    shape_gap,
                     shape_data,
                     self.shape_pairs_mesh,
                     self.shape_pairs_mesh_count,
@@ -1875,7 +1876,7 @@ class NarrowPhase:
                         shape_data,
                         shape_transform,
                         shape_source,
-                        shape_contact_margin,
+                        shape_gap,
                         self.triangle_pairs,
                         self.triangle_pairs_count,
                         reducer_data,
@@ -1915,7 +1916,7 @@ class NarrowPhase:
                         self.global_contact_reducer.shape_pairs,
                         shape_types,
                         shape_data,
-                        shape_contact_margin,
+                        shape_gap,
                         writer_data,
                         self.total_num_threads,
                     ],
@@ -1932,7 +1933,7 @@ class NarrowPhase:
                         shape_data,
                         shape_transform,
                         shape_source,
-                        shape_contact_margin,
+                        shape_gap,
                         self.triangle_pairs,
                         self.triangle_pairs_count,
                         writer_data,
@@ -1954,7 +1955,7 @@ class NarrowPhase:
                         shape_source,
                         sdf_data,
                         shape_sdf_index,
-                        shape_contact_margin,
+                        shape_gap,
                         shape_collision_aabb_lower,
                         shape_collision_aabb_upper,
                         shape_voxel_resolution,
@@ -1977,7 +1978,7 @@ class NarrowPhase:
                     shape_types,
                     shape_transform,
                     shape_collision_radius,
-                    shape_contact_margin,
+                    shape_gap,
                     shape_heightfield_data,
                     self.shape_pairs_heightfield,
                     self.shape_pairs_heightfield_count,
@@ -2000,7 +2001,7 @@ class NarrowPhase:
                     shape_data,
                     shape_transform,
                     shape_source,
-                    shape_contact_margin,
+                    shape_gap,
                     shape_heightfield_data,
                     heightfield_elevation_data,
                     self.heightfield_cell_pairs,
@@ -2017,7 +2018,7 @@ class NarrowPhase:
                 sdf_data,
                 shape_sdf_index,
                 shape_transform,
-                shape_contact_margin,
+                shape_gap,
                 shape_collision_aabb_lower,
                 shape_collision_aabb_upper,
                 shape_voxel_resolution,
@@ -2061,12 +2062,12 @@ class NarrowPhase:
         candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),  # Maybe colliding pairs
         candidate_pair_count: wp.array(dtype=wp.int32, ndim=1),  # Size one array
         shape_types: wp.array(dtype=wp.int32, ndim=1),  # All shape types, pairs index into it
-        shape_data: wp.array(dtype=wp.vec4, ndim=1),  # Shape data (scale xyz, thickness w)
+        shape_data: wp.array(dtype=wp.vec4, ndim=1),  # Shape data (scale xyz, margin w)
         shape_transform: wp.array(dtype=wp.transform, ndim=1),  # In world space
         shape_source: wp.array(dtype=wp.uint64, ndim=1),  # The index into the source array, type define by shape_types
         sdf_data: wp.array(dtype=SDFData, ndim=1) | None = None,  # Compact SDF data table
         shape_sdf_index: wp.array(dtype=wp.int32, ndim=1) | None = None,  # Per-shape index into sdf_data (-1 for none)
-        shape_contact_margin: wp.array(dtype=wp.float32, ndim=1),  # per-shape contact margin
+        shape_gap: wp.array(dtype=wp.float32, ndim=1),  # per-shape contact margin
         shape_collision_radius: wp.array(dtype=wp.float32, ndim=1),  # per-shape collision radius for AABB fallback
         shape_flags: wp.array(dtype=wp.int32, ndim=1),  # per-shape flags (includes ShapeFlags.HYDROELASTIC)
         shape_collision_aabb_lower: wp.array(dtype=wp.vec3, ndim=1) | None = None,  # Local-space AABB lower bounds
@@ -2092,12 +2093,12 @@ class NarrowPhase:
             candidate_pair: Array of potentially colliding shape pairs from broad phase
             candidate_pair_count: Single-element array containing the number of candidate pairs
             shape_types: Array of geometry types for all shapes
-            shape_data: Array of vec4 containing scale (xyz) and thickness (w) for each shape
+            shape_data: Array of vec4 containing scale (xyz) and margin (w) for each shape
             shape_transform: Array of world-space transforms for each shape
             shape_source: Array of source pointers (mesh IDs, etc.) for each shape
             sdf_data: Compact array of SDFData structs
             shape_sdf_index: Per-shape SDF table index (-1 for shapes without SDF)
-            shape_contact_margin: Array of contact margins for each shape
+            shape_gap: Array of contact margins for each shape
             shape_collision_radius: Array of collision radii for each shape (for AABB fallback for planes/meshes)
             shape_collision_aabb_lower: Local-space AABB lower bounds for each shape (for voxel binning)
             shape_collision_aabb_upper: Local-space AABB upper bounds for each shape (for voxel binning)
@@ -2173,7 +2174,7 @@ class NarrowPhase:
             shape_source=shape_source,
             sdf_data=sdf_data,
             shape_sdf_index=shape_sdf_index,
-            shape_contact_margin=shape_contact_margin,
+            shape_gap=shape_gap,
             shape_collision_radius=shape_collision_radius,
             shape_flags=shape_flags,
             shape_collision_aabb_lower=shape_collision_aabb_lower,

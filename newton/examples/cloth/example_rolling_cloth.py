@@ -83,7 +83,7 @@ def rolled_cloth_mesh(
     nu=200,
     nv=15,
     inner_radius=10.0,
-    thickness=0.4,
+    margin=0.4,
     target_x=None,
     target_y=None,
     extension_segments=10,
@@ -103,7 +103,7 @@ def rolled_cloth_mesh(
     for i in range(nu):
         u = length * i / (nu - 1)
         theta = u / inner_radius
-        r = inner_radius + (thickness / (2.0 * np.pi)) * theta
+        r = inner_radius + (margin / (2.0 * np.pi)) * theta
 
         for j in range(nv):
             v = width * (j / (nv - 1) - 0.5)  # Center around z=0 for XZ plane symmetry
@@ -114,7 +114,7 @@ def rolled_cloth_mesh(
 
     # Get outer edge position
     last_theta = length / inner_radius
-    last_r = inner_radius + (thickness / (2.0 * np.pi)) * last_theta
+    last_r = inner_radius + (margin / (2.0 * np.pi)) * last_theta
     outer_x = last_r * np.cos(last_theta)
     outer_y = last_r * np.sin(last_theta)
 
@@ -192,7 +192,7 @@ class Example:
         args=None,
         cloth_length=800.0,
         cloth_nu=300,
-        cloth_thickness=0.4,
+        cloth_margin=0.4,
         angular_speed=2 * np.pi,
         spin_duration=20.0,
     ):
@@ -211,7 +211,7 @@ class Example:
         self.iterations = 12
 
         # Cloth parameters
-        self.cloth_thickness = cloth_thickness
+        self.cloth_margin = cloth_margin
         self.nv = 15  # vertices per row
 
         # Cylinder properties - cylinders are now further apart
@@ -229,7 +229,7 @@ class Example:
         # World target: (cyl2_x - radius - offset, cyl2_z)
         # Local coords: local_x = world_x - cloth_offset_x, local_y = world_z - cloth_offset_z
         self_contact_radius = 0.40
-        attach_offset = self.cloth_thickness + self_contact_radius
+        attach_offset = self.cloth_margin + self_contact_radius
         target_world_x = self.cyl2_center[0] - self.cyl2_radius - attach_offset
         target_world_z = self.cyl2_center[1]
 
@@ -243,7 +243,7 @@ class Example:
         self.cloth_verts, self.cloth_faces, self.spiral_rows, self.ext_rows = rolled_cloth_mesh(
             length=cloth_length,
             nu=cloth_nu,
-            thickness=self.cloth_thickness,
+            margin=self.cloth_margin,
             target_x=target_local_x,
             target_y=target_local_y,
             extension_segments=20,
@@ -327,7 +327,7 @@ class Example:
 
         # Position the outer edge at cylinder 2's leftmost line
         # This avoids penetration by placing cloth on the surface facing the spiral
-        # Offset = cloth thickness + self_contact_radius to allow air gap
+        # Offset = cloth margin + self_contact_radius to allow air gap
         positions = self.model.particle_q.numpy()
         attach_offset = self_contact_radius * 1.2
         left_x = self.cyl2_center[0] - self.cyl2_radius - attach_offset
@@ -378,7 +378,7 @@ class Example:
             iterations=self.iterations,
             particle_enable_self_contact=True,
             particle_self_contact_radius=0.3,
-            particle_self_contact_margin=0.6,
+            particle_self_gap=0.6,
             particle_vertex_contact_buffer_size=48,
             particle_edge_contact_buffer_size=64,
             particle_collision_detection_interval=5,

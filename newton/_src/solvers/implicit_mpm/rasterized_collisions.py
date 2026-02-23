@@ -56,8 +56,8 @@ class Collider:
     collider_mesh: wp.array(dtype=wp.uint64)
     """Mesh of the collider. Shape (collider_count,)."""
 
-    collider_max_thickness: wp.array(dtype=float)
-    """Max thickness of each collider mesh. Shape (collider_count,)."""
+    collider_max_margin: wp.array(dtype=float)
+    """Max margin of each collider mesh. Shape (collider_count,)."""
 
     collider_body_index: wp.array(dtype=int)
     """Body index of each collider. Shape (collider_count,)"""
@@ -65,7 +65,7 @@ class Collider:
     face_material_index: wp.array(dtype=int)
     """Material index for each collider mesh face. Shape (sum(mesh.face_count for mesh in meshes),)"""
 
-    material_thickness: wp.array(dtype=float)
+    material_margin: wp.array(dtype=float)
     """Thickness for each collider material. Shape (material_count,)"""
 
     material_friction: wp.array(dtype=float)
@@ -144,7 +144,7 @@ def collision_sdf(
     global_face_id = int(0)
     for m in range(collider.collider_mesh.shape[0]):
         mesh = collider.collider_mesh[m]
-        thickness = collider.collider_max_thickness[m]
+        margin = collider.collider_max_margin[m]
         body_id = collider.collider_body_index[m]
 
         if body_id >= 0:
@@ -154,7 +154,7 @@ def collision_sdf(
         else:
             x_local = x
 
-        max_dist = collider.query_max_dist + thickness
+        max_dist = collider.query_max_dist + margin
 
         if wp.static(_SDF_SIGN_FROM_AVERAGE_NORMAL):
             query = wp.mesh_query_point_no_sign(mesh, x_local, max_dist)
@@ -172,11 +172,11 @@ def collision_sdf(
                 sign = query.sign
 
             mesh_material_id = collider.face_material_index[global_face_id + query.face]
-            thickness = collider.material_thickness[mesh_material_id]
+            margin = collider.material_margin[mesh_material_id]
 
             offset = x_local - cp
             d = wp.length(offset) * sign
-            sdf = d - thickness
+            sdf = d - margin
 
             if sdf < min_sdf:
                 min_sdf = sdf

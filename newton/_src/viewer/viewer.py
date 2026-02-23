@@ -523,7 +523,7 @@ class ViewerBase:
         xforms,
         colors=None,
         materials=None,
-        geo_thickness: float = 0.0,
+        geo_margin: float = 0.0,
         geo_is_solid: bool = True,
         geo_src=None,
         hidden=False,
@@ -543,7 +543,7 @@ class ViewerBase:
             xforms: wp.array(dtype=wp.transform) of instance transforms
             colors: wp.array(dtype=wp.vec3) or None (broadcasted if length 1)
             materials: wp.array(dtype=wp.vec4) or None (broadcasted if length 1)
-            thickness: Optional thickness (used for hashing consistency)
+            margin: Optional margin (used for hashing consistency)
             is_solid: If False, can be used for wire/solid hashing parity
             geo_src: Source geometry to use only when `geo_type` is `newton.GeoType.MESH`
             hidden: If True, the shape will not be rendered
@@ -562,7 +562,7 @@ class ViewerBase:
         mesh_path = self._populate_geometry(
             int(geo_type),
             tuple(geo_scale),
-            float(geo_thickness),
+            float(geo_margin),
             bool(geo_is_solid),
             geo_src=geo_src,
         )
@@ -610,7 +610,7 @@ class ViewerBase:
         name,
         geo_type: int,
         geo_scale: tuple[float, ...],
-        geo_thickness: float,
+        geo_margin: float,
         geo_is_solid: bool,
         geo_src=None,
         hidden=False,
@@ -650,7 +650,7 @@ class ViewerBase:
 
             # resolve points/indices from source, solidify if requested
             if not geo_is_solid:
-                indices, points = solidify_mesh(geo_src.indices, geo_src.vertices, geo_thickness)
+                indices, points = solidify_mesh(geo_src.indices, geo_src.vertices, geo_margin)
             else:
                 indices, points = geo_src.indices, geo_src.vertices
 
@@ -855,8 +855,8 @@ class ViewerBase:
             )
 
     # returns a unique (non-stable) identifier for a geometry configuration
-    def _hash_geometry(self, geo_type: int, geo_scale, thickness: float, is_solid: bool, geo_src=None) -> int:
-        return hash((int(geo_type), geo_src, *geo_scale, float(thickness), bool(is_solid)))
+    def _hash_geometry(self, geo_type: int, geo_scale, margin: float, is_solid: bool, geo_src=None) -> int:
+        return hash((int(geo_type), geo_src, *geo_scale, float(margin), bool(is_solid)))
 
     def _hash_shape(self, geo_hash, shape_static, shape_flags) -> int:
         return hash((geo_hash, shape_static, shape_flags))
@@ -886,7 +886,7 @@ class ViewerBase:
         self,
         geo_type: int,
         geo_scale,
-        thickness: float,
+        margin: float,
         is_solid: bool,
         geo_src=None,
     ) -> str:
@@ -905,7 +905,7 @@ class ViewerBase:
         geo_hash = self._hash_geometry(
             int(geo_type),
             tuple(scale_list),
-            float(thickness),
+            float(margin),
             bool(is_solid),
             geo_src,
         )
@@ -934,7 +934,7 @@ class ViewerBase:
             mesh_path,
             int(geo_type),
             tuple(scale_list),
-            float(thickness),
+            float(margin),
             bool(is_solid),
             geo_src=geo_src
             if geo_type in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH, newton.GeoType.HFIELD)
@@ -951,7 +951,7 @@ class ViewerBase:
         shape_geo_src = self.model.shape_source
         shape_geo_type = self.model.shape_type.numpy()
         shape_geo_scale = self.model.shape_scale.numpy()
-        shape_geo_thickness = self.model.shape_thickness.numpy()
+        shape_geo_margin = self.model.shape_margin.numpy()
         shape_geo_is_solid = self.model.shape_is_solid.numpy()
         shape_transform = self.model.shape_transform.numpy()
         shape_flags = self.model.shape_flags.numpy()
@@ -967,7 +967,7 @@ class ViewerBase:
 
             geo_type = shape_geo_type[s]
             geo_scale = [float(v) for v in shape_geo_scale[s]]
-            geo_thickness = float(shape_geo_thickness[s])
+            geo_margin = float(shape_geo_margin[s])
             geo_is_solid = bool(shape_geo_is_solid[s])
             geo_src = shape_geo_src[s]
 
@@ -975,7 +975,7 @@ class ViewerBase:
             geo_hash = self._hash_geometry(
                 int(geo_type),
                 tuple(geo_scale),
-                float(geo_thickness),
+                float(geo_margin),
                 bool(geo_is_solid),
                 geo_src,
             )
@@ -985,7 +985,7 @@ class ViewerBase:
                 mesh_name = self._populate_geometry(
                     int(geo_type),
                     tuple(geo_scale),
-                    float(geo_thickness),
+                    float(geo_margin),
                     bool(geo_is_solid),
                     geo_src=geo_src
                     if geo_type in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH, newton.GeoType.HFIELD)
@@ -1140,13 +1140,13 @@ class ViewerBase:
             # Create isomesh geometry (always use (1,1,1) for geometry since isomesh is in SDF space)
             geo_type = newton.GeoType.MESH
             geo_scale = (1.0, 1.0, 1.0)
-            geo_thickness = 0.0
+            geo_margin = 0.0
             geo_is_solid = True
 
             geo_hash = self._hash_geometry(
                 int(geo_type),
                 geo_scale,
-                geo_thickness,
+                geo_margin,
                 geo_is_solid,
                 isomesh,
             )
@@ -1156,7 +1156,7 @@ class ViewerBase:
                 mesh_name = self._populate_geometry(
                     int(geo_type),
                     geo_scale,
-                    geo_thickness,
+                    geo_margin,
                     geo_is_solid,
                     geo_src=isomesh,
                 )
@@ -1232,10 +1232,10 @@ class ViewerBase:
         body_world = self.model.body_world.numpy()
 
         scale = (1.0, 1.0, 1.0)
-        thickness = 0.0
+        margin = 0.0
         is_solid = True
         geo_src = None
-        geo_args = (newton.GeoType.BOX, scale, thickness, is_solid, geo_src)
+        geo_args = (newton.GeoType.BOX, scale, margin, is_solid, geo_src)
         geo_hash = self._hash_geometry(*geo_args)
         if geo_hash not in self._geometry_cache:
             mesh_name = self._populate_geometry(*geo_args)

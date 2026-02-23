@@ -92,7 +92,7 @@ class CollisionHandler:
         model: Model,
         friction_epsilon: float = 1e-2,
         self_contact_radius: float = 2e-3,
-        self_contact_margin: float = 2e-3,
+        self_gap: float = 2e-3,
         collision_detection_interval: int = 0,
         edge_edge_parallel_epsilon: float = 1e-5,
         edge_collision_buffer_pre_alloc: int = 64,
@@ -107,7 +107,7 @@ class CollisionHandler:
             model (Model): The simulation model containing particle and geometry data.
             self_contact_radius: The radius used for self-contact detection. This is the distance at which vertex-triangle
                 pairs and edge-edge pairs will start to interact with each other.
-            self_contact_margin: The margin used for self-contact detection. This is the distance at which vertex-triangle
+            self_gap: The margin used for self-contact detection. This is the distance at which vertex-triangle
                 pairs and edge-edge will be considered in contact generation. It should be larger than `self_contact_radius`
                 to avoid missing contacts.
             integrate_with_external_rigid_solver: an indicator of coupled rigid body - cloth simulation.  When set to
@@ -125,15 +125,15 @@ class CollisionHandler:
         warnings.warn(
             "CollisionHandler is deprecated. Use `Collision` instead.", category=DeprecationWarning, stacklevel=2
         )
-        if self_contact_margin < self_contact_radius:
+        if self_gap < self_contact_radius:
             raise ValueError(
-                "self_contact_margin is smaller than self_contact_radius, this will result in missing contacts and cause instability.\n"
-                "It is advisable to make self_contact_margin 1.5-2 times larger than self_contact_radius."
+                "self_gap is smaller than self_contact_radius, this will result in missing contacts and cause instability.\n"
+                "It is advisable to make self_gap 1.5-2 times larger than self_contact_radius."
             )
 
         self.model = model
         self.friction_epsilon = friction_epsilon
-        self.self_contact_margin = self_contact_margin
+        self.self_gap = self_gap
         self.self_contact_radius = self_contact_radius
         self.collision_detection_interval = collision_detection_interval
         self.integrate_with_external_rigid_solver = integrate_with_external_rigid_solver
@@ -198,8 +198,8 @@ class CollisionHandler:
             self.collision_detection_interval >= 1 and _iter % self.collision_detection_interval == 0
         ):
             self.trimesh_collision_detector.refit(state_in.particle_q)
-            self.trimesh_collision_detector.edge_edge_collision_detection(self.self_contact_margin)
-            self.trimesh_collision_detector.vertex_triangle_collision_detection(self.self_contact_margin)
+            self.trimesh_collision_detector.edge_edge_collision_detection(self.self_gap)
+            self.trimesh_collision_detector.vertex_triangle_collision_detection(self.self_gap)
 
         curr_color = 0
         self.contact_hessian_diags.zero_()
@@ -274,7 +274,7 @@ class CollisionHandler:
             particle_conservative_bounds_kernel,
             dim=self.model.particle_count,
             inputs=[
-                self.self_contact_margin,
+                self.self_gap,
                 self.penetration_free_conservative_bound_relaxation,
                 self.trimesh_collision_detector.collision_info,
             ],

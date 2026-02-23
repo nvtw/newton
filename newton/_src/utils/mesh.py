@@ -1286,7 +1286,7 @@ def create_mesh_plane(
 def solidify_mesh_kernel(
     indices: wp.array(dtype=int, ndim=2),
     vertices: wp.array(dtype=wp.vec3, ndim=1),
-    thickness: wp.array(dtype=float, ndim=1),
+    margin: wp.array(dtype=float, ndim=1),
     # outputs
     out_vertices: wp.array(dtype=wp.vec3, ndim=1),
     out_indices: wp.array(dtype=int, ndim=2),
@@ -1295,16 +1295,16 @@ def solidify_mesh_kernel(
 
     For each input triangle, creates 6 vertices (3 on each side of the surface)
     and 8 output triangles forming a closed wedge. The extrusion is along the
-    face normal, with per-vertex thickness values.
+    face normal, with per-vertex margin values.
 
     Launch with dim=num_triangles.
 
     Args:
         indices: Triangle indices of shape (num_triangles, 3).
         vertices: Vertex positions of shape (num_vertices,).
-        thickness: Per-vertex thickness values of shape (num_vertices,).
+        margin: Per-vertex margin values of shape (num_vertices,).
         out_vertices: Output vertices of shape (num_vertices * 2,). Each input
-            vertex produces two output vertices (offset ± thickness along normal).
+            vertex produces two output vertices (offset ± margin along normal).
         out_indices: Output triangle indices of shape (num_triangles * 8, 3).
     """
     tid = wp.tid()
@@ -1317,9 +1317,9 @@ def solidify_mesh_kernel(
     vk = vertices[k]
 
     normal = wp.normalize(wp.cross(vj - vi, vk - vi))
-    ti = normal * thickness[i]
-    tj = normal * thickness[j]
-    tk = normal * thickness[k]
+    ti = normal * margin[i]
+    tj = normal * margin[j]
+    tk = normal * margin[k]
 
     # wedge vertices
     vi0 = vi + ti
@@ -1373,7 +1373,7 @@ def solidify_mesh_kernel(
 def solidify_mesh(
     faces: np.ndarray,
     vertices: np.ndarray,
-    thickness: float | list | np.ndarray,
+    margin: float | list | np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Convert a surface mesh into a solid mesh by extruding along face normals.
 
@@ -1387,9 +1387,9 @@ def solidify_mesh(
             triangles.
         vertices: Vertex positions of shape (M, 3), where M is the number of
             vertices.
-        thickness: Extrusion distance from the surface. Can be a single float
-            (uniform thickness), a list, or an array of shape (M,) for
-            per-vertex thickness.
+        margin: Extrusion distance from the surface. Can be a single float
+            (uniform margin), a list, or an array of shape (M,) for
+            per-vertex margin.
 
     Returns:
         A tuple containing:
@@ -1399,12 +1399,12 @@ def solidify_mesh(
     faces = np.array(faces).reshape(-1, 3)
     out_faces = wp.zeros((len(faces) * 8, 3), dtype=wp.int32)
     out_vertices = wp.zeros(len(vertices) * 2, dtype=wp.vec3)
-    if not isinstance(thickness, np.ndarray) and not isinstance(thickness, list):
-        thickness = [thickness] * len(vertices)
+    if not isinstance(margin, np.ndarray) and not isinstance(margin, list):
+        margin = [margin] * len(vertices)
     wp.launch(
         solidify_mesh_kernel,
         dim=len(faces),
-        inputs=[wp.array(faces, dtype=int), wp.array(vertices, dtype=wp.vec3), wp.array(thickness, dtype=float)],
+        inputs=[wp.array(faces, dtype=int), wp.array(vertices, dtype=wp.vec3), wp.array(margin, dtype=float)],
         outputs=[out_vertices, out_faces],
     )
     faces = out_faces.numpy()

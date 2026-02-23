@@ -1370,7 +1370,7 @@ class SolverImplicitMPM(SolverBase):
         self,
         collider_meshes: list[wp.Mesh] | None = None,
         collider_body_ids: list[int] | None = None,
-        collider_thicknesses: list[float] | None = None,
+        collider_margins: list[float] | None = None,
         collider_friction: list[float] | None = None,
         collider_adhesion: list[float] | None = None,
         collider_projection_threshold: list[float] | None = None,
@@ -1389,7 +1389,7 @@ class SolverImplicitMPM(SolverBase):
         Args:
             collider_meshes: Warp triangular meshes used as colliders.
             collider_body_ids: For dynamic colliders, per-mesh body ids.
-            collider_thicknesses: Per-mesh signed distance offsets (m).
+            collider_margins: Per-mesh signed distance offsets (m).
             collider_friction: Per-mesh Coulomb friction coefficients.
             collider_adhesion: Per-mesh adhesion (Pa).
             collider_projection_threshold: Per-mesh projection threshold (m).
@@ -1402,7 +1402,7 @@ class SolverImplicitMPM(SolverBase):
         self._mpm_model.setup_collider(
             collider_meshes=collider_meshes,
             collider_body_ids=collider_body_ids,
-            collider_thicknesses=collider_thicknesses,
+            collider_margins=collider_margins,
             collider_friction=collider_friction,
             collider_adhesion=collider_adhesion,
             collider_projection_threshold=collider_projection_threshold,

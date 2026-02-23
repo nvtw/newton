@@ -545,17 +545,17 @@ def test_export_reduced_contacts_kernel(test, device):
     contact_count_out = wp.zeros(1, dtype=int, device=device)
     contact_tangent_out = wp.zeros(0, dtype=wp.vec3, device=device)
 
-    # Create dummy shape_data for thickness lookup
+    # Create dummy shape_data for margin lookup
     num_shapes = 200
     shape_types = wp.zeros(num_shapes, dtype=int, device=device)  # Shape types (0 = PLANE, doesn't affect test)
     shape_data = wp.zeros(num_shapes, dtype=wp.vec4, device=device)
     shape_data_np = shape_data.numpy()
     for i in range(num_shapes):
-        shape_data_np[i] = [1.0, 1.0, 1.0, 0.01]  # scale xyz, thickness
+        shape_data_np[i] = [1.0, 1.0, 1.0, 0.01]  # scale xyz, margin
     shape_data = wp.array(shape_data_np, dtype=wp.vec4, device=device)
 
     # Create per-shape contact margins
-    shape_contact_margin = wp.full(num_shapes, 0.01, dtype=wp.float32, device=device)
+    shape_gap = wp.full(num_shapes, 0.01, dtype=wp.float32, device=device)
 
     writer_data = ContactWriterData()
     writer_data.contact_max = max_output
@@ -580,7 +580,7 @@ def test_export_reduced_contacts_kernel(test, device):
             reducer.shape_pairs,
             shape_types,
             shape_data,
-            shape_contact_margin,
+            shape_gap,
             writer_data,
             total_threads,
         ],

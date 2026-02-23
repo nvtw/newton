@@ -261,7 +261,7 @@ def compute_solid_mesh_inertia(
 def compute_hollow_mesh_inertia(
     indices: wp.array(dtype=int),
     vertices: wp.array(dtype=wp.vec3),
-    thickness: wp.array(dtype=float),
+    margin: wp.array(dtype=float),
     # outputs
     volume: wp.array(dtype=float),
     first: wp.array(dtype=wp.vec3),
@@ -277,9 +277,9 @@ def compute_hollow_mesh_inertia(
     vk = vertices[k]
 
     normal = -wp.normalize(wp.cross(vj - vi, vk - vi))
-    ti = normal * thickness[i]
-    tj = normal * thickness[j]
-    tk = normal * thickness[k]
+    ti = normal * margin[i]
+    tj = normal * margin[j]
+    tk = normal * margin[k]
 
     # wedge vertices
     vi0 = vi - ti
@@ -336,7 +336,7 @@ def compute_inertia_mesh(
     vertices: list,
     indices: list,
     is_solid: bool = True,
-    thickness: list[float] | float = 0.001,
+    margin: list[float] | float = 0.001,
 ) -> tuple[float, wp.vec3, wp.mat33, float]:
     """
     Compute the mass, center of mass, inertia, and volume of a triangular mesh.
@@ -345,8 +345,8 @@ def compute_inertia_mesh(
         density: The density of the mesh material.
         vertices: A list of vertex positions (3D coordinates).
         indices: A list of triangle indices (each triangle is defined by 3 vertex indices).
-        is_solid: If True, compute inertia for a solid mesh; if False, for a hollow mesh using the given thickness.
-        thickness: Thickness of the mesh if it is hollow. Can be a single value or a list of values for each vertex.
+        is_solid: If True, compute inertia for a solid mesh; if False, for a hollow mesh using the given margin.
+        margin: Thickness of the mesh if it is hollow. Can be a single value or a list of values for each vertex.
 
     Returns:
         A tuple containing:
@@ -382,15 +382,15 @@ def compute_inertia_mesh(
             ],
         )
     else:
-        if isinstance(thickness, float):
-            thickness = [thickness] * len(vertices)
+        if isinstance(margin, float):
+            margin = [margin] * len(vertices)
         wp.launch(
             kernel=compute_hollow_mesh_inertia,
             dim=num_tris,
             inputs=[
                 wp_indices,
                 wp_vertices,
-                wp.array(thickness, dtype=float),
+                wp.array(margin, dtype=float),
             ],
             outputs=[
                 vol_warp,
@@ -468,7 +468,7 @@ def compute_inertia_shape(
     src: Mesh | Heightfield | None,
     density: float,
     is_solid: bool = True,
-    thickness: list[float] | float = 0.001,
+    margin: list[float] | float = 0.001,
 ) -> tuple[float, wp.vec3, wp.mat33]:
     """Computes the mass, center of mass and 3x3 inertia tensor of a shape
 
@@ -478,7 +478,7 @@ def compute_inertia_shape(
         src: The source shape (Mesh or Heightfield)
         density: The density of the shape
         is_solid: Whether the shape is solid or hollow
-        thickness: The thickness of the shape (used for collision detection, and inertia computation of hollow shapes)
+        margin: The margin of the shape (used for collision detection, and inertia computation of hollow shapes)
 
     Returns:
         The mass, center of mass and 3x3 inertia tensor of the shape
@@ -491,8 +491,8 @@ def compute_inertia_shape(
         if is_solid:
             return solid
         else:
-            assert isinstance(thickness, float), "thickness must be a float for a hollow sphere geom"
-            hollow = compute_inertia_sphere(density, scale[0] - thickness)
+            assert isinstance(margin, float), "margin must be a float for a hollow sphere geom"
+            hollow = compute_inertia_sphere(density, scale[0] - margin)
             return solid[0] - hollow[0], solid[1], solid[2] - hollow[2]
     elif type == GeoType.BOX:
         # scale stores half-extents (hx, hy, hz)
@@ -500,8 +500,8 @@ def compute_inertia_shape(
         if is_solid:
             return solid
         else:
-            assert isinstance(thickness, float), "thickness must be a float for a hollow box geom"
-            hollow = compute_inertia_box(density, scale[0] - thickness, scale[1] - thickness, scale[2] - thickness)
+            assert isinstance(margin, float), "margin must be a float for a hollow box geom"
+            hollow = compute_inertia_box(density, scale[0] - margin, scale[1] - margin, scale[2] - margin)
             return solid[0] - hollow[0], solid[1], solid[2] - hollow[2]
     elif type == GeoType.CAPSULE:
         # scale[0] = radius, scale[1] = half_height
@@ -509,8 +509,8 @@ def compute_inertia_shape(
         if is_solid:
             return solid
         else:
-            assert isinstance(thickness, float), "thickness must be a float for a hollow capsule geom"
-            hollow = compute_inertia_capsule(density, scale[0] - thickness, scale[1] - thickness)
+            assert isinstance(margin, float), "margin must be a float for a hollow capsule geom"
+            hollow = compute_inertia_capsule(density, scale[0] - margin, scale[1] - margin)
             return solid[0] - hollow[0], solid[1], solid[2] - hollow[2]
     elif type == GeoType.CYLINDER:
         # scale[0] = radius, scale[1] = half_height
@@ -518,8 +518,8 @@ def compute_inertia_shape(
         if is_solid:
             return solid
         else:
-            assert isinstance(thickness, float), "thickness must be a float for a hollow cylinder geom"
-            hollow = compute_inertia_cylinder(density, scale[0] - thickness, scale[1] - thickness)
+            assert isinstance(margin, float), "margin must be a float for a hollow cylinder geom"
+            hollow = compute_inertia_cylinder(density, scale[0] - margin, scale[1] - margin)
             return solid[0] - hollow[0], solid[1], solid[2] - hollow[2]
     elif type == GeoType.CONE:
         # scale[0] = radius, scale[1] = half_height
@@ -527,13 +527,13 @@ def compute_inertia_shape(
         if is_solid:
             return solid
         else:
-            assert isinstance(thickness, float), "thickness must be a float for a hollow cone geom"
-            hollow = compute_inertia_cone(density, scale[0] - thickness, scale[1] - thickness)
+            assert isinstance(margin, float), "margin must be a float for a hollow cone geom"
+            hollow = compute_inertia_cone(density, scale[0] - margin, scale[1] - margin)
             m_shell = solid[0] - hollow[0]
             if m_shell <= 0.0:
                 raise ValueError(
                     f"Hollow cone shell has non-positive mass ({m_shell:.6g}). "
-                    f"The thickness ({thickness}) must be smaller than both the "
+                    f"The margin ({margin}) must be smaller than both the "
                     f"radius ({scale[0]}) and half_height ({scale[1]})."
                 )
             # Cones have non-zero COM so outer and inner cones have different COMs;
@@ -557,9 +557,9 @@ def compute_inertia_shape(
         if is_solid:
             return solid
         else:
-            assert isinstance(thickness, float), "thickness must be a float for a hollow ellipsoid geom"
+            assert isinstance(margin, float), "margin must be a float for a hollow ellipsoid geom"
             hollow = compute_inertia_ellipsoid(
-                density, scale[0] - thickness, scale[1] - thickness, scale[2] - thickness
+                density, scale[0] - margin, scale[1] - margin, scale[2] - margin
             )
             return solid[0] - hollow[0], solid[1], solid[2] - hollow[2]
     elif type == GeoType.HFIELD:
@@ -591,7 +591,7 @@ def compute_inertia_shape(
             assert isinstance(src, Mesh), "src must be a Mesh for mesh or convex hull shapes"
             # fall back to computing inertia from mesh geometry
             vertices = np.array(src.vertices) * np.array(scale)
-            m, c, I, _vol = compute_inertia_mesh(density, vertices, src.indices, is_solid, thickness)
+            m, c, I, _vol = compute_inertia_mesh(density, vertices, src.indices, is_solid, margin)
             return m, c, I
     raise ValueError(f"Unsupported shape type: {type}")
 

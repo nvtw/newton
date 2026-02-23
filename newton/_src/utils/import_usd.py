@@ -1868,9 +1868,9 @@ def parse_usd(
                 if collect_schema_attrs:
                     R.collect_prim_attrs(prim)
 
-                contact_margin = R.get_value(prim, prim_type=PrimType.SHAPE, key="contact_margin", verbose=verbose)
-                if contact_margin == float("-inf"):
-                    contact_margin = builder.default_shape_cfg.contact_margin
+                gap = R.get_value(prim, prim_type=PrimType.SHAPE, key="gap", verbose=verbose)
+                if gap == float("-inf"):
+                    gap = builder.default_shape_cfg.gap
 
                 shape_params = {
                     "body": body_id,
@@ -1888,10 +1888,10 @@ def parse_usd(
                         ka=usd.get_float_with_fallback(
                             prim_and_scene, "newton:contact_ka", builder.default_shape_cfg.ka
                         ),
-                        thickness=usd.get_float_with_fallback(
-                            prim_and_scene, "newton:contact_thickness", builder.default_shape_cfg.thickness
+                        margin=usd.get_float_with_fallback(
+                            prim_and_scene, "newton:margin", builder.default_shape_cfg.margin
                         ),
-                        contact_margin=contact_margin,
+                        gap=gap,
                         mu=material.dynamicFriction,
                         restitution=material.restitution,
                         mu_torsional=material.torsionalFriction,

@@ -580,7 +580,7 @@ class ViewerViser(ViewerBase):
         name,
         geo_type: int,
         geo_scale: tuple[float, ...],
-        geo_thickness: float,
+        geo_margin: float,
         geo_is_solid: bool,
         geo_src=None,
         hidden=False,
@@ -606,7 +606,7 @@ class ViewerViser(ViewerBase):
             indices = wp.array(mesh.indices, dtype=wp.int32, device=self.device)
             self.log_mesh(name, points, indices, normals, uvs, hidden=hidden)
         else:
-            super().log_geo(name, geo_type, geo_scale, geo_thickness, geo_is_solid, geo_src, hidden)
+            super().log_geo(name, geo_type, geo_scale, geo_margin, geo_is_solid, geo_src, hidden)
 
     @override
     def log_points(self, name, points, radii=None, colors=None, hidden=False):

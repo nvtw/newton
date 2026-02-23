@@ -944,11 +944,11 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
         position_depth: wp.array(dtype=wp.vec4),
         normal: wp.array(dtype=wp.vec2),  # Octahedral-encoded
         shape_pairs: wp.array(dtype=wp.vec2i),
-        # Shape data for extracting thickness and effective radius
+        # Shape data for extracting margin and effective radius
         shape_types: wp.array(dtype=int),
         shape_data: wp.array(dtype=wp.vec4),
         # Per-shape contact margins
-        shape_contact_margin: wp.array(dtype=float),
+        shape_gap: wp.array(dtype=float),
         # Writer data (custom struct)
         writer_data: Any,
         # Grid stride parameters
@@ -1006,17 +1006,17 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
                 shape_a = pair[0]
                 shape_b = pair[1]
 
-                # Extract thickness from shape_data (stored in w component)
-                thickness_a = shape_data[shape_a][3]
-                thickness_b = shape_data[shape_b][3]
+                # Extract margin from shape_data (stored in w component)
+                margin_a = shape_data[shape_a][3]
+                margin_b = shape_data[shape_b][3]
 
                 # Compute effective radius for spheres, capsules, and cones
                 radius_eff_a = compute_effective_radius(shape_types[shape_a], shape_data[shape_a])
                 radius_eff_b = compute_effective_radius(shape_types[shape_b], shape_data[shape_b])
 
                 # Use per-shape contact margin (max of both shapes, matching other kernels)
-                margin_a = shape_contact_margin[shape_a]
-                margin_b = shape_contact_margin[shape_b]
+                margin_a = shape_gap[shape_a]
+                margin_b = shape_gap[shape_b]
                 margin = wp.max(margin_a, margin_b)
 
                 # Create ContactData struct
@@ -1026,11 +1026,11 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
                 contact_data.contact_distance = depth
                 contact_data.radius_eff_a = radius_eff_a
                 contact_data.radius_eff_b = radius_eff_b
-                contact_data.thickness_a = thickness_a
-                contact_data.thickness_b = thickness_b
+                contact_data.margin_a = margin_a
+                contact_data.margin_b = margin_b
                 contact_data.shape_a = shape_a
                 contact_data.shape_b = shape_b
-                contact_data.margin = margin
+                contact_data.gap = margin
 
                 # Call the writer function
                 writer_func(contact_data, writer_data, -1)
@@ -1044,7 +1044,7 @@ def mesh_triangle_contacts_to_reducer_kernel(
     shape_data: wp.array(dtype=wp.vec4),
     shape_transform: wp.array(dtype=wp.transform),
     shape_source: wp.array(dtype=wp.uint64),
-    shape_contact_margin: wp.array(dtype=float),
+    shape_gap: wp.array(dtype=float),
     triangle_pairs: wp.array(dtype=wp.vec3i),
     triangle_pairs_count: wp.array(dtype=int),
     reducer_data: GlobalContactReducerData,
@@ -1086,7 +1086,7 @@ def mesh_triangle_contacts_to_reducer_kernel(
         shape_data_a, v0_world = get_triangle_shape_from_mesh(mesh_id_a, mesh_scale_a, X_mesh_ws_a, tri_idx)
 
         # Extract shape B data
-        pos_b, quat_b, shape_data_b, _scale_b, thickness_b = extract_shape_data(
+        pos_b, quat_b, shape_data_b, _scale_b, margin_b = extract_shape_data(
             shape_b,
             shape_transform,
             shape_types,
@@ -1098,12 +1098,12 @@ def mesh_triangle_contacts_to_reducer_kernel(
         pos_a = v0_world
         quat_a = wp.quat_identity()  # Triangle has no orientation
 
-        # Extract thickness for shape A
-        thickness_a = shape_data[shape_a][3]
+        # Extract margin for shape A
+        margin_a = shape_data[shape_a][3]
 
         # Use per-shape contact margin
-        margin_a = shape_contact_margin[shape_a]
-        margin_b = shape_contact_margin[shape_b]
+        margin_a = shape_gap[shape_a]
+        margin_b = shape_gap[shape_b]
         margin = wp.max(margin_a, margin_b)
 
         # Compute and write contacts using GJK/MPR
@@ -1117,7 +1117,7 @@ def mesh_triangle_contacts_to_reducer_kernel(
             margin,
             shape_a,
             shape_b,
-            thickness_a,
-            thickness_b,
+            margin_a,
+            margin_b,
             reducer_data,
         )

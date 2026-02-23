@@ -103,7 +103,7 @@ def test_shapes_on_plane(test, device, solver_fn):
     # Set contact margin via ShapeConfig (preferred method)
     # Must be set BEFORE adding shapes
     # Using 0.1 like the example (which is stable)
-    builder.default_shape_cfg.contact_margin = 0.1
+    builder.default_shape_cfg.gap = 0.1
 
     expected_end_positions = []
 
@@ -279,26 +279,26 @@ def test_shape_collisions_gjk_mpr_multicontact(test, device, verbose=False):
 
     # Add side guide walls along the ramp
     guide_height = 0.3
-    guide_thickness = 0.1
+    guide_margin = 0.1
 
     # Left side guide wall
-    left_guide_offset = (RAMP_WIDTH / 2 + guide_thickness / 2) * ramp_right
+    left_guide_offset = (RAMP_WIDTH / 2 + guide_margin / 2) * ramp_right
     left_guide_center = ramp_center + left_guide_offset + (guide_height / 2) * ramp_up
     builder.add_shape_box(
         body=-1,
         xform=wp.transform(p=left_guide_center, q=ramp_quat),
-        hx=guide_thickness / 2,
+        hx=guide_margin / 2,
         hy=RAMP_LENGTH / 2,
         hz=guide_height / 2,
     )
 
     # Right side guide wall
-    right_guide_offset = -(RAMP_WIDTH / 2 + guide_thickness / 2) * ramp_right
+    right_guide_offset = -(RAMP_WIDTH / 2 + guide_margin / 2) * ramp_right
     right_guide_center = ramp_center + right_guide_offset + (guide_height / 2) * ramp_up
     builder.add_shape_box(
         body=-1,
         xform=wp.transform(p=right_guide_center, q=ramp_quat),
-        hx=guide_thickness / 2,
+        hx=guide_margin / 2,
         hy=RAMP_LENGTH / 2,
         hz=guide_height / 2,
     )

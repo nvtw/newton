@@ -93,14 +93,14 @@ class Example:
             self.iterations,
             particle_enable_self_contact=True,
             particle_self_contact_radius=0.2,
-            particle_self_contact_margin=0.35,
+            particle_self_gap=0.35,
         )
 
         # Use collision pipeline for particle-shape contacts
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
             broad_phase="nxn",
-            soft_contact_margin=0.1,
+            soft_gap=0.1,
         )
 
         self.state_0 = self.model.state()

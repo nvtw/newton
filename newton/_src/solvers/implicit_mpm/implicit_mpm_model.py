@@ -37,7 +37,7 @@ _DEFAULT_PROJECTION_THRESHOLD = 0.01
 """Default threshold for projection outside of collider, as a fraction of the voxel size"""
 
 _DEFAULT_THICKNESS = 0.01
-"""Default thickness for colliders, as a fraction of the voxel size"""
+"""Default margin for colliders, as a fraction of the voxel size"""
 _DEFAULT_FRICTION = 0.5
 """Default friction coefficient for colliders"""
 _DEFAULT_ADHESION = 0.0
@@ -237,10 +237,10 @@ def _get_body_collision_shapes(model: newton.Model, body_index: int):
 
 def _get_shape_collision_materials(model: newton.Model, shape_ids: list[int]):
     """Returns the collision materials from the model for a list of shapes"""
-    thicknesses = model.shape_thickness.numpy()[shape_ids]
+    margins = model.shape_margin.numpy()[shape_ids]
     friction = model.shape_material_mu.numpy()[shape_ids]
 
-    return thicknesses, friction
+    return margins, friction
 
 
 def _create_body_collider_mesh(
@@ -376,7 +376,7 @@ class ImplicitMPMModel:
         self,
         collider_meshes: list[wp.Mesh] | None = None,
         collider_body_ids: list[int] | None = None,
-        collider_thicknesses: list[float] | None = None,
+        collider_margins: list[float] | None = None,
         collider_friction: list[float] | None = None,
         collider_adhesion: list[float] | None = None,
         collider_projection_threshold: list[float] | None = None,
@@ -389,7 +389,7 @@ class ImplicitMPMModel:
         """Initialize collider parameters and defaults from inputs.
 
         Populates the ``Collider`` struct with meshes, body mapping, and per-material
-        properties (thickness, friction, adhesion, projection threshold).
+        properties (margin, friction, adhesion, projection threshold).
 
         By default, this will setup collisions against all collision shapes in the model with flag `newton.ShapeFlag.COLLIDE_PARTICLES`.
         Rigid body colliders will be treated as kinematic if their mass is zero; for all model bodies to be treated as kinematic,
@@ -402,7 +402,7 @@ class ImplicitMPMModel:
         Args:
             collider_meshes: Warp triangular meshes used as colliders.
             collider_body_ids: For dynamic colliders, per-mesh body ids.
-            collider_thicknesses: Per-mesh signed distance offsets (m).
+            collider_margins: Per-mesh signed distance offsets (m).
             collider_friction: Per-mesh Coulomb friction coefficients.
             collider_adhesion: Per-mesh adhesion (Pa).
             collider_projection_threshold: Per-mesh projection threshold, i.e. how far below the surface the
@@ -442,8 +442,8 @@ class ImplicitMPMModel:
 
         collider_count = len(collider_body_ids)
 
-        if collider_thicknesses is None:
-            collider_thicknesses = [None] * collider_count
+        if collider_margins is None:
+            collider_margins = [None] * collider_count
         if collider_projection_threshold is None:
             collider_projection_threshold = [None] * collider_count
         if collider_friction is None:
@@ -451,7 +451,7 @@ class ImplicitMPMModel:
         if collider_adhesion is None:
             collider_adhesion = [None] * collider_count
 
-        assert len(collider_body_ids) == len(collider_thicknesses)
+        assert len(collider_body_ids) == len(collider_margins)
         assert len(collider_body_ids) == len(collider_projection_threshold)
         assert len(collider_body_ids) == len(collider_friction)
         assert len(collider_body_ids) == len(collider_adhesion)
@@ -483,20 +483,20 @@ class ImplicitMPMModel:
                 material_count += 1
 
         # assign material values
-        material_thickness = [_DEFAULT_THICKNESS * self.voxel_size] * material_count
+        material_margin = [_DEFAULT_THICKNESS * self.voxel_size] * material_count
         material_friction = [_DEFAULT_FRICTION] * material_count
         material_adhesion = [_DEFAULT_ADHESION] * material_count
         material_projection_threshold = [_DEFAULT_PROJECTION_THRESHOLD * self.voxel_size] * material_count
 
         def assign_material(
             material_id: int,
-            thickness: float | None = None,
+            margin: float | None = None,
             friction: float | None = None,
             adhesion: float | None = None,
             projection_threshold: float | None = None,
         ):
-            if thickness is not None:
-                material_thickness[material_id] = thickness
+            if margin is not None:
+                material_margin[material_id] = margin
             if friction is not None:
                 material_friction[material_id] = friction
             if adhesion is not None:
@@ -507,7 +507,7 @@ class ImplicitMPMModel:
         def assign_collider_material(material_id: int, collider_id: int):
             assign_material(
                 material_id,
-                collider_thicknesses[collider_id],
+                collider_margins[collider_id],
                 collider_friction[collider_id],
                 collider_adhesion[collider_id],
                 collider_projection_threshold[collider_id],
@@ -515,21 +515,21 @@ class ImplicitMPMModel:
 
         for collider_id, body_id in enumerate(collider_body_ids):
             if body_id is not None:
-                for material_id, shape_thickness, shape_friction in zip(
+                for material_id, shape_margin, shape_friction in zip(
                     collider_material_ids[collider_id],
                     *_get_shape_collision_materials(model, body_shapes[body_id]),
                     strict=True,
                 ):
                     # use material from shapes as default
-                    assign_material(material_id, thickness=shape_thickness, friction=shape_friction)
+                    assign_material(material_id, margin=shape_margin, friction=shape_friction)
                     # override with user-provided material
                     assign_collider_material(material_id, collider_id)
             else:
                 # user-provided collider, single material
                 assign_collider_material(collider_material_ids[collider_id][0], collider_id)
 
-        collider_max_thickness = [
-            max((material_thickness[material_id] for material_id in collider_material_ids[collider_id]), default=0.0)
+        collider_max_margin = [
+            max((material_margin[material_id] for material_id in collider_material_ids[collider_id]), default=0.0)
             for collider_id in range(collider_count)
         ]
 
@@ -558,11 +558,11 @@ class ImplicitMPMModel:
 
             self.collider.collider_body_index = wp.array(collider_body_ids, dtype=int)
             self.collider.collider_mesh = wp.array([collider.id for collider in collider_meshes], dtype=wp.uint64)
-            self.collider.collider_max_thickness = wp.array(collider_max_thickness, dtype=float)
+            self.collider.collider_max_margin = wp.array(collider_max_margin, dtype=float)
 
             self.collider.face_material_index = wp.array(np.concatenate(face_material_ids), dtype=int)
 
-            self.collider.material_thickness = wp.array(material_thickness, dtype=float)
+            self.collider.material_margin = wp.array(material_margin, dtype=float)
             self.collider.material_friction = wp.array(material_friction, dtype=float)
             self.collider.material_adhesion = wp.array(material_adhesion, dtype=float)
             self.collider.material_projection_threshold = wp.array(material_projection_threshold, dtype=float)

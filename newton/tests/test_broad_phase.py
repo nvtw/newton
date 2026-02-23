@@ -2051,7 +2051,7 @@ class TestBroadPhase(unittest.TestCase):
         """Test SAP edge cases with tile sort."""
         self._test_sap_edge_cases_impl("tile")
 
-    def test_per_shape_contact_margin_broad_phase(self):
+    def test_per_shape_gap_broad_phase(self):
         """
         Test that all broad phase modes correctly handle per-shape contact margins
         by applying them during AABB overlap checks (not pre-expanded).
@@ -2089,7 +2089,7 @@ class TestBroadPhase(unittest.TestCase):
         # - Ground AABB becomes [-0.01, 0.01] in z
         # - Sphere A AABB becomes [0.04-0.02, 0.44+0.02] = [0.02, 0.46] - does NOT overlap ground
         # - Sphere B AABB becomes [0.04-0.06, 0.44+0.06] = [-0.02, 0.50] - DOES overlap ground
-        shape_contact_margin = wp.array([0.01, 0.02, 0.06], dtype=wp.float32)
+        shape_gap = wp.array([0.01, 0.02, 0.06], dtype=wp.float32)
 
         # Use collision group 1 for all shapes (group -1 collides with everything, group 0 means no collision)
         collision_group = wp.array([1, 1, 1], dtype=wp.int32)
@@ -2103,7 +2103,7 @@ class TestBroadPhase(unittest.TestCase):
         nxn_bp.launch(
             aabb_lower,
             aabb_upper,
-            shape_contact_margin,
+            shape_gap,
             collision_group,
             shape_world,
             3,
@@ -2130,7 +2130,7 @@ class TestBroadPhase(unittest.TestCase):
         sap_bp.launch(
             aabb_lower,
             aabb_upper,
-            shape_contact_margin,
+            shape_gap,
             collision_group,
             shape_world,
             3,
@@ -2147,6 +2147,30 @@ class TestBroadPhase(unittest.TestCase):
 
         self.assertTrue(has_sphere_b_ground, "SAP: Sphere B (large margin) should overlap ground")
         self.assertFalse(has_sphere_a_ground, "SAP: Sphere A (small margin) should NOT overlap ground")
+
+    def test_pair_gap_uses_sum_not_max(self):
+        """Regression test: broad phase must combine per-shape cutoffs additively."""
+        # Two boxes with a 0.05 gap along z.
+        aabb_lower = wp.array([wp.vec3(0.0, 0.0, 0.0), wp.vec3(0.0, 0.0, 1.05)], dtype=wp.vec3)
+        aabb_upper = wp.array([wp.vec3(1.0, 1.0, 1.0), wp.vec3(1.0, 1.0, 2.05)], dtype=wp.vec3)
+        collision_group = wp.array([1, 1], dtype=wp.int32)
+        shape_world = wp.array([0, 0], dtype=wp.int32)
+
+        # Case 1: 0.02 + 0.02 < 0.05 => no overlap.
+        shape_gap = wp.array([0.02, 0.02], dtype=wp.float32)
+        bp = BroadPhaseAllPairs(shape_world)
+        pairs = wp.zeros(8, dtype=wp.vec2i)
+        pair_count = wp.zeros(1, dtype=wp.int32)
+        bp.launch(aabb_lower, aabb_upper, shape_gap, collision_group, shape_world, 2, pairs, pair_count)
+        wp.synchronize()
+        self.assertEqual(pair_count.numpy()[0], 0)
+
+        # Case 2: 0.02 + 0.03 == 0.05 => overlap at boundary.
+        shape_gap = wp.array([0.02, 0.03], dtype=wp.float32)
+        pair_count.zero_()
+        bp.launch(aabb_lower, aabb_upper, shape_gap, collision_group, shape_world, 2, pairs, pair_count)
+        wp.synchronize()
+        self.assertEqual(pair_count.numpy()[0], 1)
 
 
 if __name__ == "__main__":
