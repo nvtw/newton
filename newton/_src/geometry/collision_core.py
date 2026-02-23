@@ -274,8 +274,8 @@ def create_compute_gjk_mpr_contacts(
         rigid_contact_margin: float,
         shape_a: int,
         shape_b: int,
-        thickness_a: float,
-        thickness_b: float,
+        gap_a: float,
+        gap_b: float,
         writer_data: Any,
     ):
         """
@@ -291,8 +291,8 @@ def create_compute_gjk_mpr_contacts(
             rigid_contact_margin: Contact margin for rigid bodies
             shape_a: Index of shape A
             shape_b: Index of shape B
-            thickness_a: Thickness of shape A
-            thickness_b: Thickness of shape B
+            gap_a: Gap of shape A
+            gap_b: Gap of shape B
             writer_data: Data structure for contact writer
         """
         data_provider = SupportMapDataProvider()
@@ -319,11 +319,11 @@ def create_compute_gjk_mpr_contacts(
         contact_template = ContactData()
         contact_template.radius_eff_a = radius_eff_a
         contact_template.radius_eff_b = radius_eff_b
-        contact_template.thickness_a = thickness_a
-        contact_template.thickness_b = thickness_b
+        contact_template.gap_a = gap_a
+        contact_template.gap_b = gap_b
         contact_template.shape_a = shape_a
         contact_template.shape_b = shape_b
-        contact_template.margin = rigid_contact_margin
+        contact_template.pair_margin = rigid_contact_margin
 
         if wp.static(ENABLE_MULTI_CONTACT):
             wp.static(create_solve_convex_multi_contact(support_map, writer_func, post_process_contact))(
@@ -582,8 +582,8 @@ def create_find_contacts(writer_func: Any):
         rigid_contact_margin: float,
         shape_a: int,
         shape_b: int,
-        thickness_a: float,
-        thickness_b: float,
+        gap_a: float,
+        gap_b: float,
         writer_data: Any,
     ):
         """
@@ -603,8 +603,8 @@ def create_find_contacts(writer_func: Any):
             rigid_contact_margin: Contact margin for rigid bodies
             shape_a: Index of shape A
             shape_b: Index of shape B
-            thickness_a: Thickness of shape A
-            thickness_b: Thickness of shape B
+            gap_a: Gap of shape A
+            gap_b: Gap of shape B
             writer_data: Data structure for contact writer
         """
         if writer_data.contact_count[0] >= writer_data.contact_max:
@@ -640,8 +640,8 @@ def create_find_contacts(writer_func: Any):
             rigid_contact_margin,
             shape_a,
             shape_b,
-            thickness_a,
-            thickness_b,
+            gap_a,
+            gap_b,
             writer_data,
         )
 
@@ -806,7 +806,7 @@ def mesh_vs_convex_midphase(
         X_ws: Non-mesh shape world-space transform
         mesh_id: Mesh BVH ID
         shape_type: Array of shape types
-        shape_data: Array of shape data (vec4: scale.xyz, thickness.w)
+        shape_data: Array of shape data (vec4: scale.xyz, gap.w)
         shape_source_ptr: Array of mesh/SDF source pointers
         rigid_contact_margin: Contact margin for rigid bodies
         triangle_pairs: Output array for triangle pairs (mesh_shape, non_mesh_shape, tri_index)

@@ -148,7 +148,7 @@ The following USD example demonstrates how PhysX attributes are authored in a US
        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxCollisionAPI"]
    ) {
        # PhysX collision settings
-       float physxCollision:contactOffset = 0.02  # → contact_margin = 0.02
+       float physxCollision:contactOffset = 0.02  # → margin = 0.02
    }
 
 2. Priority-Based Resolution

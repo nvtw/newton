@@ -664,7 +664,7 @@ class Mesh:
         target_voxel_size: float | None = None,
         max_resolution: int | None = None,
         margin: float | None = None,
-        thickness: float = 0.0,
+        gap: float = 0.0,
         scale: tuple[float, float, float] | None = None,
     ) -> "SDF":
         """Build and attach an SDF for this mesh.
@@ -678,10 +678,10 @@ class Mesh:
                 ``target_voxel_size`` is not provided.
             margin: Extra AABB padding [m] added before discretization. Uses
                 ``0.05`` when not provided.
-            thickness: Thickness offset [m] to subtract from SDF values. When
+            gap: Gap offset [m] to subtract from SDF values. When
                 non-zero, the SDF surface is effectively shrunk inward by this
                 amount. Useful for modeling compliant layers in hydroelastic
-                collision. Defaults to ``0.0`` (no offset, thickness applied
+                collision. Defaults to ``0.0`` (no offset, gap applied
                 at runtime).
             scale: Scale factors ``(sx, sy, sz)`` to bake into the SDF. When
                 provided, the mesh vertices are scaled before SDF generation
@@ -706,7 +706,7 @@ class Mesh:
             target_voxel_size=target_voxel_size,
             max_resolution=max_resolution,
             margin=margin if margin is not None else 0.05,
-            thickness=thickness,
+            gap=gap,
             scale=scale,
         )
         return self.sdf

@@ -323,7 +323,7 @@ def eval_triangles_body_contact(
     # moment arm
     r = pos - x0  # basically just c_point in the new coordinates
     rhat = wp.normalize(r)
-    pos = pos + rhat * c_dist  # add on 'thickness' of shape, e.g.: radius of sphere/capsule
+    pos = pos + rhat * c_dist  # add shape gap offset, e.g.: radius of sphere/capsule
 
     # contact point velocity
     dpdt = v0 + wp.cross(w0, r)  # this is body velocity cross offset, so it's the velocity of the contact point.
@@ -407,8 +407,8 @@ def eval_body_contact(
     contact_normal: wp.array(dtype=wp.vec3),
     contact_shape0: wp.array(dtype=int),
     contact_shape1: wp.array(dtype=int),
-    contact_thickness0: wp.array(dtype=float),
-    contact_thickness1: wp.array(dtype=float),
+    contact_gap0: wp.array(dtype=float),
+    contact_gap1: wp.array(dtype=float),
     rigid_contact_stiffness: wp.array(dtype=float),
     rigid_contact_damping: wp.array(dtype=float),
     rigid_contact_friction_scale: wp.array(dtype=float),
@@ -423,15 +423,15 @@ def eval_body_contact(
     if tid >= count:
         return
 
-    # retrieve contact thickness, compute average contact material properties
+    # retrieve contact gap, compute average contact material properties
     ke = 0.0  # contact normal force stiffness
     kd = 0.0  # damping coefficient
     kf = 0.0  # friction force stiffness
     ka = 0.0  # adhesion distance
     mu = 0.0  # friction coefficient
     mat_nonzero = 0
-    thickness_a = contact_thickness0[tid]
-    thickness_b = contact_thickness1[tid]
+    gap_a = contact_gap0[tid]
+    gap_b = contact_gap1[tid]
     shape_a = contact_shape0[tid]
     shape_b = contact_shape1[tid]
     if shape_a == shape_b:
@@ -479,13 +479,13 @@ def eval_body_contact(
     if body_a >= 0:
         X_wb_a = body_q[body_a]
         X_com_a = body_com[body_a]
-        bx_a = wp.transform_point(X_wb_a, bx_a) - thickness_a * n
+        bx_a = wp.transform_point(X_wb_a, bx_a) - gap_a * n
         r_a = bx_a - wp.transform_point(X_wb_a, X_com_a)
 
     if body_b >= 0:
         X_wb_b = body_q[body_b]
         X_com_b = body_com[body_b]
-        bx_b = wp.transform_point(X_wb_b, bx_b) + thickness_b * n
+        bx_b = wp.transform_point(X_wb_b, bx_b) + gap_b * n
         r_b = bx_b - wp.transform_point(X_wb_b, X_com_b)
 
     d = wp.dot(n, bx_a - bx_b)
@@ -639,8 +639,8 @@ def eval_body_contact_forces(
                 contacts.rigid_contact_normal,
                 contacts.rigid_contact_shape0,
                 contacts.rigid_contact_shape1,
-                contacts.rigid_contact_thickness0,
-                contacts.rigid_contact_thickness1,
+                contacts.rigid_contact_gap0,
+                contacts.rigid_contact_gap1,
                 contacts.rigid_contact_stiffness,
                 contacts.rigid_contact_damping,
                 contacts.rigid_contact_friction,

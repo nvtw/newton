@@ -67,7 +67,7 @@ class SchemaResolverNewton(SchemaResolver):
             # Mesh
             "max_hull_vertices": SchemaAttribute("newton:maxHullVertices", -1),
             # Collisions
-            "contact_margin": SchemaAttribute("newton:contactMargin", float("-inf")),
+            "margin": SchemaAttribute("newton:contactMargin", float("-inf")),
         },
         PrimType.BODY: {},
         PrimType.MATERIAL: {
@@ -148,7 +148,7 @@ class SchemaResolverPhysx(SchemaResolver):
             # Mesh
             "max_hull_vertices": SchemaAttribute("physxConvexHullCollision:hullVertexLimit", 64),
             # Collisions
-            "contact_margin": SchemaAttribute("physxCollision:contactOffset", float("-inf")),
+            "margin": SchemaAttribute("physxCollision:contactOffset", float("-inf")),
         },
         PrimType.MATERIAL: {
             "stiffness": SchemaAttribute("physxMaterial:compliantContactStiffness", 0.0),

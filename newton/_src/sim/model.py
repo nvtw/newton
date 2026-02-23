@@ -222,7 +222,7 @@ class Model:
         self.shape_material_kh = None
         """Shape hydroelastic stiffness coefficient [N/m^3], shape [shape_count], float.
         Contact stiffness is computed as ``area * kh``, yielding an effective spring constant [N/m]."""
-        self.shape_contact_margin = None
+        self.shape_margin = None
         """Shape contact margin for collision detection [m], shape [shape_count], float."""
 
         # Shape geometry properties
@@ -230,8 +230,8 @@ class Model:
         """Shape geometry type, shape [shape_count], int32."""
         self.shape_is_solid = None
         """Whether shape is solid or hollow, shape [shape_count], bool."""
-        self.shape_thickness = None
-        """Shape thickness [m], shape [shape_count], float."""
+        self.shape_gap = None
+        """Shape gap (outward offset) [m], shape [shape_count], float."""
         self.shape_source = []
         """List of source geometry objects (e.g., :class:`~newton.Mesh`) used for rendering and broadphase, shape [shape_count]."""
         self.shape_source_ptr = None
@@ -292,11 +292,11 @@ class Model:
         # computed once during finalization, not per-frame contact data.
         self.shape_collision_aabb_lower = None
         """Local-space AABB lower bound [m] for each shape, shape [shape_count, 3], float.
-        Computed from base geometry only (excludes thickness - thickness is added during contact
+        Computed from base geometry only (excludes gap - gap is added during contact
         margin calculations). Used for voxel-based contact reduction."""
         self.shape_collision_aabb_upper = None
         """Local-space AABB upper bound [m] for each shape, shape [shape_count, 3], float.
-        Computed from base geometry only (excludes thickness - thickness is added during contact
+        Computed from base geometry only (excludes gap - gap is added during contact
         margin calculations). Used for voxel-based contact reduction."""
         self._shape_voxel_resolution = None
         """Voxel grid resolution (nx, ny, nz) for each shape, shape [shape_count, 3], int. Used for voxel-based contact reduction."""
@@ -728,10 +728,10 @@ class Model:
         self.attribute_frequency["shape_material_mu_torsional"] = Model.AttributeFrequency.SHAPE
         self.attribute_frequency["shape_material_mu_rolling"] = Model.AttributeFrequency.SHAPE
         self.attribute_frequency["shape_material_kh"] = Model.AttributeFrequency.SHAPE
-        self.attribute_frequency["shape_contact_margin"] = Model.AttributeFrequency.SHAPE
+        self.attribute_frequency["shape_margin"] = Model.AttributeFrequency.SHAPE
         self.attribute_frequency["shape_type"] = Model.AttributeFrequency.SHAPE
         self.attribute_frequency["shape_is_solid"] = Model.AttributeFrequency.SHAPE
-        self.attribute_frequency["shape_thickness"] = Model.AttributeFrequency.SHAPE
+        self.attribute_frequency["shape_gap"] = Model.AttributeFrequency.SHAPE
         self.attribute_frequency["shape_source_ptr"] = Model.AttributeFrequency.SHAPE
         self.attribute_frequency["shape_scale"] = Model.AttributeFrequency.SHAPE
         self.attribute_frequency["shape_filter"] = Model.AttributeFrequency.SHAPE
@@ -884,8 +884,8 @@ class Model:
         Call :meth:`collide` to run the collision detection and populate the contacts object.
 
         Note:
-            Rigid contact margins are controlled per-shape via :attr:`Model.shape_contact_margin`, which is populated
-            from ``ShapeConfig.contact_margin`` during model building. If a shape doesn't specify a contact margin,
+            Rigid contact margins are controlled per-shape via :attr:`Model.shape_margin`, which is populated
+            from ``ShapeConfig.margin`` during model building. If a shape doesn't specify a contact margin,
             it defaults to ``builder.rigid_contact_margin``. To adjust contact margins, set them before calling
             :meth:`ModelBuilder.finalize`.
         Returns:

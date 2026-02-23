@@ -2720,12 +2720,12 @@ class SolverMuJoCo(SolverBase):
                 contacts.rigid_contact_point0,
                 contacts.rigid_contact_point1,
                 contacts.rigid_contact_normal,
-                contacts.rigid_contact_thickness0,
-                contacts.rigid_contact_thickness1,
+                contacts.rigid_contact_gap0,
+                contacts.rigid_contact_gap1,
                 contacts.rigid_contact_stiffness,
                 contacts.rigid_contact_damping,
                 contacts.rigid_contact_friction,
-                model.shape_thickness,
+                model.shape_gap,
                 bodies_per_world,
                 self.newton_shape_to_mjc_geom,
                 # Mujoco warp contacts
@@ -3492,7 +3492,7 @@ class SolverMuJoCo(SolverBase):
         shape_kd = model.shape_material_kd.numpy()
         shape_mu_torsional = model.shape_material_mu_torsional.numpy()
         shape_mu_rolling = model.shape_material_mu_rolling.numpy()
-        shape_thickness = model.shape_thickness.numpy()
+        shape_gap = model.shape_gap.numpy()
 
         # retrieve MuJoCo-specific attributes
         mujoco_attrs = getattr(model, "mujoco", None)
@@ -3814,7 +3814,7 @@ class SolverMuJoCo(SolverBase):
                 if shape_geom_gap is not None:
                     geom_params["gap"] = shape_geom_gap[shape]
 
-                geom_params["margin"] = float(shape_thickness[shape])
+                geom_params["margin"] = float(shape_gap[shape])
 
                 body.add_geom(**geom_params)
                 # store the geom name instead of assuming index
@@ -5134,7 +5134,7 @@ class SolverMuJoCo(SolverBase):
                 shape_geom_solimp,
                 shape_geom_solmix,
                 shape_geom_gap,
-                self.model.shape_thickness,
+                self.model.shape_gap,
             ],
             outputs=[
                 self.mjw_model.geom_friction,

@@ -46,7 +46,8 @@ class ContactWriterData:
     # Body information arrays (for transforming to body-local coordinates)
     body_q: wp.array(dtype=wp.transform)
     shape_body: wp.array(dtype=int)
-    shape_contact_margin: wp.array(dtype=float)
+    shape_gap: wp.array(dtype=float)
+    shape_margin: wp.array(dtype=float)
     # Output arrays
     contact_count: wp.array(dtype=int)
     out_shape0: wp.array(dtype=int)
@@ -56,8 +57,8 @@ class ContactWriterData:
     out_offset0: wp.array(dtype=wp.vec3)
     out_offset1: wp.array(dtype=wp.vec3)
     out_normal: wp.array(dtype=wp.vec3)
-    out_thickness0: wp.array(dtype=float)
-    out_thickness1: wp.array(dtype=float)
+    out_gap0: wp.array(dtype=float)
+    out_gap1: wp.array(dtype=float)
     out_tids: wp.array(dtype=int)
     # Per-contact shape properties, empty arrays if not enabled.
     # Zero-values indicate that no per-contact shape properties are set for this contact
@@ -75,17 +76,26 @@ def write_contact(
     """
     Write a contact to the output arrays using ContactData and ContactWriterData.
 
+    Uses additive gap+margin semantics: contact_threshold = pair_gap + pair_margin,
+    contact accepted when d <= contact_threshold.
+
     Args:
         contact_data: ContactData struct containing contact information
         writer_data: ContactWriterData struct containing body info and output arrays
-        output_index: If -1, use atomic_add to get the next available index if contact distance is less than margin. If >= 0, use this index directly and skip margin check.
+        output_index: If -1, use atomic_add to get the next available index if contact distance is within threshold. If >= 0, use this index directly and skip threshold check.
     """
+    pair_gap = contact_data.gap_a + contact_data.gap_b
+    margin_a = writer_data.shape_margin[contact_data.shape_a]
+    margin_b = writer_data.shape_margin[contact_data.shape_b]
+    pair_margin = margin_a + margin_b
+    contact_threshold = pair_gap + pair_margin
+
     total_separation_needed = (
-        contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.thickness_a + contact_data.thickness_b
+        contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.gap_a + contact_data.gap_b
     )
 
-    offset_mag_a = contact_data.radius_eff_a + contact_data.thickness_a
-    offset_mag_b = contact_data.radius_eff_b + contact_data.thickness_b
+    offset_mag_a = contact_data.radius_eff_a + contact_data.gap_a
+    offset_mag_b = contact_data.radius_eff_b + contact_data.gap_b
 
     # Distance calculation matching box_plane_collision
     contact_normal_a_to_b = wp.normalize(contact_data.contact_normal_a_to_b)
@@ -101,16 +111,11 @@ def write_contact(
     distance = wp.dot(diff, contact_normal_a_to_b)
     d = distance - total_separation_needed
 
-    # Use per-shape contact margins (sum of both shapes, consistent with thickness)
-    margin_a = writer_data.shape_contact_margin[contact_data.shape_a]
-    margin_b = writer_data.shape_contact_margin[contact_data.shape_b]
-    contact_margin = margin_a + margin_b
-
     index = output_index
 
     if index < 0:
         # compute index using atomic counter
-        if d > contact_margin:
+        if d > contact_threshold:
             return
         index = wp.atomic_add(writer_data.contact_count, 0, 1)
     if index >= writer_data.contact_max:
@@ -139,8 +144,8 @@ def write_contact(
     writer_data.out_offset1[index] = wp.transform_vector(X_bw_b, offset_mag_b * contact_normal)
 
     writer_data.out_normal[index] = contact_normal
-    writer_data.out_thickness0[index] = offset_mag_a
-    writer_data.out_thickness1[index] = offset_mag_b
+    writer_data.out_gap0[index] = offset_mag_a
+    writer_data.out_gap1[index] = offset_mag_b
     writer_data.out_tids[index] = 0  # tid not available in this context
 
     # Write stiffness/damping/friction only if per-contact shape properties are enabled
@@ -159,7 +164,8 @@ def compute_shape_aabbs(
     shape_scale: wp.array(dtype=wp.vec3),
     shape_collision_radius: wp.array(dtype=float),
     shape_source_ptr: wp.array(dtype=wp.uint64),
-    shape_contact_margin: wp.array(dtype=float),
+    shape_gap: wp.array(dtype=float),
+    shape_margin: wp.array(dtype=float),
     # outputs
     aabb_lower: wp.array(dtype=wp.vec3),
     aabb_upper: wp.array(dtype=wp.vec3),
@@ -167,10 +173,7 @@ def compute_shape_aabbs(
     """Compute axis-aligned bounding boxes for each shape in world space.
 
     Uses support function for most shapes. Infinite planes and meshes use bounding sphere fallback.
-    AABBs are enlarged by per-shape contact margin for contact detection.
-
-    Note: Shape thickness is NOT included in AABB expansion - it is applied during narrow phase.
-    Therefore, shape_contact_margin should be >= shape_thickness to ensure proper broad phase detection.
+    AABBs are enlarged by per-shape (gap + margin) for contact detection to avoid false negatives.
     """
     shape_id = wp.tid()
 
@@ -186,9 +189,9 @@ def compute_shape_aabbs(
     pos = wp.transform_get_translation(X_ws)
     orientation = wp.transform_get_rotation(X_ws)
 
-    # Enlarge AABB by per-shape contact margin for contact detection
-    contact_margin = shape_contact_margin[shape_id]
-    margin_vec = wp.vec3(contact_margin, contact_margin, contact_margin)
+    # Enlarge AABB by per-shape (gap + margin) for contact detection
+    expansion = shape_gap[shape_id] + shape_margin[shape_id]
+    expansion_vec = wp.vec3(expansion, expansion, expansion)
 
     # Check if this is an infinite plane, mesh, or heightfield - use bounding sphere fallback
     scale = shape_scale[shape_id]
@@ -200,8 +203,8 @@ def compute_shape_aabbs(
         # Use conservative bounding sphere approach for infinite planes, meshes, and heightfields
         radius = shape_collision_radius[shape_id]
         half_extents = wp.vec3(radius, radius, radius)
-        aabb_lower[shape_id] = pos - half_extents - margin_vec
-        aabb_upper[shape_id] = pos + half_extents + margin_vec
+        aabb_lower[shape_id] = pos - half_extents - expansion_vec
+        aabb_upper[shape_id] = pos + half_extents + expansion_vec
     else:
         # Use support function to compute tight AABB
         # Create generic shape data
@@ -219,8 +222,8 @@ def compute_shape_aabbs(
         # Compute tight AABB using helper function
         aabb_min_world, aabb_max_world = compute_tight_aabb_from_support(shape_data, orientation, pos, data_provider)
 
-        aabb_lower[shape_id] = aabb_min_world - margin_vec
-        aabb_upper[shape_id] = aabb_max_world + margin_vec
+        aabb_lower[shape_id] = aabb_min_world - expansion_vec
+        aabb_upper[shape_id] = aabb_max_world + expansion_vec
 
 
 @wp.kernel
@@ -229,19 +232,19 @@ def prepare_geom_data_kernel(
     shape_body: wp.array(dtype=int),
     shape_type: wp.array(dtype=int),
     shape_scale: wp.array(dtype=wp.vec3),
-    shape_thickness: wp.array(dtype=float),
+    shape_gap: wp.array(dtype=float),
     body_q: wp.array(dtype=wp.transform),
     # Outputs
-    geom_data: wp.array(dtype=wp.vec4),  # scale xyz, thickness w
+    geom_data: wp.array(dtype=wp.vec4),  # scale xyz, gap w
     geom_transform: wp.array(dtype=wp.transform),  # world space transform
 ):
     """Prepare geometry data arrays for NarrowPhase API."""
     idx = wp.tid()
 
-    # Pack scale and thickness into geom_data
+    # Pack scale and gap into geom_data
     scale = shape_scale[idx]
-    thickness = shape_thickness[idx]
-    geom_data[idx] = wp.vec4(scale[0], scale[1], scale[2], thickness)
+    gap = shape_gap[idx]
+    geom_data[idx] = wp.vec4(scale[0], scale[1], scale[2], gap)
 
     # Compute world space transform
     body_idx = shape_body[idx]
@@ -682,7 +685,9 @@ class CollisionPipeline:
         # When requires_grad, skip rigid contact path so the tape does not record narrow phase
         # kernels (they have enable_backward=False). Only soft contacts are differentiable.
         if not self.requires_grad:
-            # Compute AABBs for all shapes (already expanded by per-shape contact margins)
+            # Compute AABBs for all shapes (expanded by per-shape gap + margin)
+            shape_gap = model.shape_gap  # gap = outward offset (collision semantic)
+            shape_margin = model.shape_margin  # margin = contact threshold component
             wp.launch(
                 kernel=compute_shape_aabbs,
                 dim=model.shape_count,
@@ -694,7 +699,8 @@ class CollisionPipeline:
                     model.shape_scale,
                     model.shape_collision_radius,
                     model.shape_source_ptr,
-                    model.shape_contact_margin,
+                    shape_gap,
+                    shape_margin,
                 ],
                 outputs=[
                     self.narrow_phase.shape_aabb_lower,
@@ -753,7 +759,7 @@ class CollisionPipeline:
                     model.shape_body,
                     model.shape_type,
                     model.shape_scale,
-                    model.shape_thickness,
+                    shape_gap,
                     state.body_q,
                 ],
                 outputs=[
@@ -768,7 +774,8 @@ class CollisionPipeline:
             writer_data.contact_max = contacts.rigid_contact_max
             writer_data.body_q = state.body_q
             writer_data.shape_body = model.shape_body
-            writer_data.shape_contact_margin = model.shape_contact_margin
+            writer_data.shape_gap = shape_gap
+            writer_data.shape_margin = shape_margin
             writer_data.contact_count = contacts.rigid_contact_count
             writer_data.out_shape0 = contacts.rigid_contact_shape0
             writer_data.out_shape1 = contacts.rigid_contact_shape1
@@ -777,8 +784,8 @@ class CollisionPipeline:
             writer_data.out_offset0 = contacts.rigid_contact_offset0
             writer_data.out_offset1 = contacts.rigid_contact_offset1
             writer_data.out_normal = contacts.rigid_contact_normal
-            writer_data.out_thickness0 = contacts.rigid_contact_thickness0
-            writer_data.out_thickness1 = contacts.rigid_contact_thickness1
+            writer_data.out_gap0 = contacts.rigid_contact_gap0
+            writer_data.out_gap1 = contacts.rigid_contact_gap1
             writer_data.out_tids = contacts.rigid_contact_tids
 
             writer_data.out_stiffness = contacts.rigid_contact_stiffness
@@ -795,7 +802,7 @@ class CollisionPipeline:
                 shape_source=model.shape_source_ptr,
                 sdf_data=model.sdf_data,
                 shape_sdf_index=model.shape_sdf_index,
-                shape_contact_margin=model.shape_contact_margin,
+                shape_margin=shape_margin,
                 shape_collision_radius=model.shape_collision_radius,
                 shape_flags=model.shape_flags,
                 shape_collision_aabb_lower=model.shape_collision_aabb_lower,

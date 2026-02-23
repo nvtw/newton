@@ -37,11 +37,11 @@ class ContactData:
         contact_distance: Signed distance between shapes (negative indicates penetration)
         radius_eff_a: Effective radius of shape A (for rounded shapes like spheres/capsules)
         radius_eff_b: Effective radius of shape B (for rounded shapes like spheres/capsules)
-        thickness_a: Collision thickness offset for shape A
-        thickness_b: Collision thickness offset for shape B
+        gap_a: Collision gap (outward offset) for shape A [m]
+        gap_b: Collision gap (outward offset) for shape B [m]
         shape_a: Index of the first shape in the collision pair
         shape_b: Index of the second shape in the collision pair
-        margin: Contact detection margin/threshold
+        pair_margin: Sum of per-shape margins (margin_a + margin_b) for contact threshold [m]
         contact_stiffness: Contact stiffness. 0.0 means no stiffness was set.
         contact_damping: Contact damping scale. 0.0 means no damping was set.
         contact_friction_scale: Friction scaling factor. 0.0 means no friction was set.
@@ -52,11 +52,11 @@ class ContactData:
     contact_distance: float
     radius_eff_a: float
     radius_eff_b: float
-    thickness_a: float
-    thickness_b: float
+    gap_a: float
+    gap_b: float
     shape_a: int
     shape_b: int
-    margin: float
+    pair_margin: float
     contact_stiffness: float
     contact_damping: float
     contact_friction_scale: float
@@ -67,16 +67,22 @@ def contact_passes_margin_check(
     contact_data: ContactData,
 ) -> bool:
     """
-    Check if a contact passes the margin check and should be written.
+    Check if a contact passes the threshold and should be written.
+
+    Uses additive gap+margin semantics: contact_threshold = pair_gap + pair_margin,
+    contact accepted when d <= contact_threshold.
 
     Args:
         contact_data: ContactData struct containing contact information
 
     Returns:
-        True if the contact distance is within the contact margin, False otherwise
+        True if the contact distance is within the contact threshold, False otherwise
     """
+    pair_gap = contact_data.gap_a + contact_data.gap_b
+    contact_threshold = pair_gap + contact_data.pair_margin
+
     total_separation_needed = (
-        contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.thickness_a + contact_data.thickness_b
+        contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.gap_a + contact_data.gap_b
     )
 
     # Distance calculation matching box_plane_collision
@@ -93,4 +99,4 @@ def contact_passes_margin_check(
     distance = wp.dot(diff, contact_normal_a_to_b)
     d = distance - total_separation_needed
 
-    return d <= contact_data.margin
+    return d <= contact_threshold

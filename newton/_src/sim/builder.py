@@ -176,14 +176,14 @@ class ModelBuilder:
         """The coefficient of torsional friction (resistance to spinning at contact point). Used by XPBD, MuJoCo."""
         mu_rolling: float = 0.0001
         """The coefficient of rolling friction (resistance to rolling motion). Used by XPBD, MuJoCo."""
-        thickness: float = 0.0
+        gap: float = 0.0
         """Outward offset from the shape's surface for collision detection.
         Extends the effective collision surface outward by this amount. When two shapes collide,
-        their thicknesses are summed (thickness_a + thickness_b) to determine the total separation."""
-        contact_margin: float | None = None
+        their gaps are summed (gap_a + gap_b) to determine the total separation."""
+        margin: float | None = None
         """The contact margin for collision detection. If None, uses builder.rigid_contact_margin as default.
-        AABBs are expanded by this value for broad phase detection. Must be >= thickness to ensure
-        collisions are not missed when thickened surfaces approach each other."""
+        AABBs are expanded by (gap + margin) per shape for broad phase. Each shape should have
+        (gap + margin) > 0 for reliable collision detection."""
         is_solid: bool = True
         """Indicates whether the shape is solid or hollow. Defaults to True."""
         collision_group: int = 1
@@ -799,7 +799,7 @@ class ModelBuilder:
         self.shape_scale = []
         self.shape_source = []
         self.shape_is_solid = []
-        self.shape_thickness = []
+        self.shape_gap = []
         self.shape_material_ke = []
         self.shape_material_kd = []
         self.shape_material_kf = []
@@ -809,7 +809,7 @@ class ModelBuilder:
         self.shape_material_mu_torsional = []
         self.shape_material_mu_rolling = []
         self.shape_material_kh = []
-        self.shape_contact_margin = []
+        self.shape_margin = []
         # collision groups within collisions are handled
         self.shape_collision_group = []
         # radius to use for broadphase collision checking
@@ -2641,7 +2641,7 @@ class ModelBuilder:
             "shape_scale",
             "shape_source",
             "shape_is_solid",
-            "shape_thickness",
+            "shape_gap",
             "shape_material_ke",
             "shape_material_kd",
             "shape_material_kf",
@@ -2652,7 +2652,7 @@ class ModelBuilder:
             "shape_material_mu_rolling",
             "shape_material_kh",
             "shape_collision_radius",
-            "shape_contact_margin",
+            "shape_margin",
             "shape_sdf_narrow_band_range",
             "shape_sdf_max_resolution",
             "shape_sdf_target_voxel_size",
@@ -4689,7 +4689,7 @@ class ModelBuilder:
         self.shape_type.append(type)
         self.shape_scale.append((scale[0], scale[1], scale[2]))
         self.shape_source.append(src)
-        self.shape_thickness.append(cfg.thickness)
+        self.shape_gap.append(cfg.gap)
         self.shape_is_solid.append(cfg.is_solid)
         self.shape_material_ke.append(cfg.ke)
         self.shape_material_kd.append(cfg.kd)
@@ -4700,8 +4700,8 @@ class ModelBuilder:
         self.shape_material_mu_torsional.append(cfg.mu_torsional)
         self.shape_material_mu_rolling.append(cfg.mu_rolling)
         self.shape_material_kh.append(cfg.kh)
-        self.shape_contact_margin.append(
-            cfg.contact_margin if cfg.contact_margin is not None else self.rigid_contact_margin
+        self.shape_margin.append(
+            cfg.margin if cfg.margin is not None else self.rigid_contact_margin
         )
         self.shape_collision_group.append(cfg.collision_group)
         self.shape_collision_radius.append(compute_shape_radius(type, scale, src))
@@ -4722,7 +4722,7 @@ class ModelBuilder:
                     self.add_shape_collision_filter_pair(shape, child_shape)
 
         if not is_static and cfg.density > 0.0 and body >= 0 and not self.body_lock_inertia[body]:
-            (m, c, I) = compute_inertia_shape(type, scale, src, cfg.density, cfg.is_solid, cfg.thickness)
+            (m, c, I) = compute_inertia_shape(type, scale, src, cfg.density, cfg.is_solid, cfg.gap)
             com_body = wp.transform_point(xform, c)
             self._update_body_mass(body, m, I, com_body, xform.q)
 
@@ -5376,7 +5376,7 @@ class ModelBuilder:
                 xform = self.shape_transform[shape]
                 cfg = ModelBuilder.ShapeConfig(
                     density=0.0,  # do not add extra mass / inertia
-                    thickness=self.shape_thickness[shape],
+                    gap=self.shape_gap[shape],
                     is_solid=self.shape_is_solid[shape],
                     has_shape_collision=False,
                     has_particle_collision=False,
@@ -5458,7 +5458,7 @@ class ModelBuilder:
                             mu_torsional=self.shape_material_mu_torsional[shape],
                             mu_rolling=self.shape_material_mu_rolling[shape],
                             kh=self.shape_material_kh[shape],
-                            thickness=self.shape_thickness[shape],
+                            gap=self.shape_gap[shape],
                             is_solid=self.shape_is_solid[shape],
                             collision_group=self.shape_collision_group[shape],
                             collision_filter_parent=self.default_shape_cfg.collision_filter_parent,
@@ -7987,44 +7987,44 @@ class ModelBuilder:
                 )
 
     def _validate_shapes(self) -> bool:
-        """Validate shape contact margins against thickness for stable broad phase detection.
+        """Validate shape gap+margin for stable broad phase detection.
 
-        Thickness is an outward offset from a shape's surface, while AABBs are expanded
-        by `contact_margin`. For reliable broad phase detection, each colliding shape
-        should satisfy `contact_margin >= thickness` so that thickened surfaces produce
-        overlapping AABBs.
+        AABBs are expanded by (gap + margin) per shape. For reliable broad phase detection,
+        each colliding shape should have (gap + margin) > 0 so that surfaces produce
+        overlapping AABBs when within contact threshold.
 
         This check only considers shapes that participate in collisions (with the
         `COLLIDE_SHAPES` or `COLLIDE_PARTICLES` flag).
 
         Warns:
-            UserWarning: If any colliding shape has `thickness > contact_margin`.
+            UserWarning: If any colliding shape has (gap + margin) <= 0.
 
         Returns:
-            bool: True if no shapes with thickness > contact_margin, False otherwise.
+            bool: True if no shapes with (gap + margin) <= 0, False otherwise.
         """
         collision_flags_mask = ShapeFlags.COLLIDE_SHAPES | ShapeFlags.COLLIDE_PARTICLES
-        shapes_with_bad_margin = []
+        shapes_with_bad_expansion = []
         for i in range(self.shape_count):
             # Skip shapes that don't participate in any collisions (e.g., sites, visual-only)
             if not (self.shape_flags[i] & collision_flags_mask):
                 continue
-            thickness = self.shape_thickness[i]
-            margin = self.shape_contact_margin[i]
-            if thickness > margin:
-                shapes_with_bad_margin.append(
-                    f"{self.shape_label[i] or f'shape_{i}'} (thickness={thickness:.6g}, margin={margin:.6g})"
+            gap = self.shape_gap[i]
+            margin = self.shape_margin[i]
+            expansion = gap + margin
+            if expansion <= 0:
+                shapes_with_bad_expansion.append(
+                    f"{self.shape_label[i] or f'shape_{i}'} (gap={gap:.6g}, margin={margin:.6g}, expansion={expansion:.6g})"
                 )
-        if shapes_with_bad_margin:
-            example_shapes = shapes_with_bad_margin[:5]
+        if shapes_with_bad_expansion:
+            example_shapes = shapes_with_bad_expansion[:5]
             warnings.warn(
-                f"Found {len(shapes_with_bad_margin)} shape(s) with thickness > contact_margin. "
-                f"This can cause missed collisions in broad phase since AABBs are only expanded by contact_margin. "
-                f"Set contact_margin >= thickness for each shape. "
-                f"Affected shapes: {example_shapes}" + ("..." if len(shapes_with_bad_margin) > 5 else ""),
+                f"Found {len(shapes_with_bad_expansion)} shape(s) with (gap + margin) <= 0. "
+                f"This can cause missed collisions in broad phase since AABBs are expanded by gap + margin. "
+                f"Set gap + margin > 0 for each shape. "
+                f"Affected shapes: {example_shapes}" + ("..." if len(shapes_with_bad_expansion) > 5 else ""),
                 stacklevel=2,
             )
-        return len(shapes_with_bad_margin) == 0
+        return len(shapes_with_bad_expansion) == 0
 
     def _validate_structure(self) -> None:
         """Validate structural invariants of the model.
@@ -8635,7 +8635,7 @@ class ModelBuilder:
             m.shape_source_ptr = wp.array(geo_sources, dtype=wp.uint64)
             m.shape_scale = wp.array(self.shape_scale, dtype=wp.vec3, requires_grad=requires_grad)
             m.shape_is_solid = wp.array(self.shape_is_solid, dtype=wp.bool)
-            m.shape_thickness = wp.array(self.shape_thickness, dtype=wp.float32, requires_grad=requires_grad)
+            m.shape_gap = wp.array(self.shape_gap, dtype=wp.float32, requires_grad=requires_grad)
             m.shape_collision_radius = wp.array(
                 self.shape_collision_radius, dtype=wp.float32, requires_grad=requires_grad
             )
@@ -8658,7 +8658,7 @@ class ModelBuilder:
                 self.shape_material_mu_rolling, dtype=wp.float32, requires_grad=requires_grad
             )
             m.shape_material_kh = wp.array(self.shape_material_kh, dtype=wp.float32, requires_grad=requires_grad)
-            m.shape_contact_margin = wp.array(self.shape_contact_margin, dtype=wp.float32, requires_grad=requires_grad)
+            m.shape_margin = wp.array(self.shape_margin, dtype=wp.float32, requires_grad=requires_grad)
 
             m.shape_collision_filter_pairs = {
                 (min(s1, s2), max(s1, s2)) for s1, s2 in self.shape_collision_filter_pairs
@@ -8841,8 +8841,8 @@ class ModelBuilder:
                 shape_src = self.shape_source[i]
                 shape_flags = self.shape_flags[i]
                 shape_scale = self.shape_scale[i]
-                shape_thickness = self.shape_thickness[i]
-                shape_contact_margin = self.shape_contact_margin[i]
+                shape_gap = self.shape_gap[i]
+                shape_margin = self.shape_margin[i]
                 sdf_narrow_band_range = self.shape_sdf_narrow_band_range[i]
                 sdf_target_voxel_size = self.shape_sdf_target_voxel_size[i]
                 sdf_max_resolution = self.shape_sdf_max_resolution[i]
@@ -8872,8 +8872,8 @@ class ModelBuilder:
                     cache_key = (
                         "primitive_generated",
                         shape_type,
-                        shape_thickness,
-                        shape_contact_margin,
+                        shape_gap,
+                        shape_margin,
                         tuple(sdf_narrow_band_range),
                         sdf_target_voxel_size,
                         effective_max_resolution,
@@ -8884,9 +8884,9 @@ class ModelBuilder:
                             shape_type=shape_type,
                             shape_geo=None,
                             shape_scale=shape_scale,
-                            shape_thickness=shape_thickness,
+                            shape_gap=shape_gap,
                             narrow_band_distance=sdf_narrow_band_range,
-                            margin=shape_contact_margin,
+                            margin=shape_margin,
                             target_voxel_size=sdf_target_voxel_size,
                             max_resolution=effective_max_resolution,
                             bake_scale=bake_scale,

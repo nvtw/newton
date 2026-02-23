@@ -31,19 +31,24 @@ from .flags import ShapeFlags
 def check_aabb_overlap(
     box1_lower: wp.vec3,
     box1_upper: wp.vec3,
-    box1_cutoff: float,
+    box1_expansion: float,
     box2_lower: wp.vec3,
     box2_upper: wp.vec3,
-    box2_cutoff: float,
+    box2_expansion: float,
 ) -> bool:
-    cutoff_combined = max(box1_cutoff, box2_cutoff)
+    """Check AABB overlap with optional per-box expansion (e.g. gap + margin).
+
+    Uses additive expansion: effective threshold is box1_expansion + box2_expansion
+    so that pairs within contact_threshold produce overlapping AABBs.
+    """
+    expansion_combined = box1_expansion + box2_expansion
     return (
-        box1_lower[0] <= box2_upper[0] + cutoff_combined
-        and box1_upper[0] >= box2_lower[0] - cutoff_combined
-        and box1_lower[1] <= box2_upper[1] + cutoff_combined
-        and box1_upper[1] >= box2_lower[1] - cutoff_combined
-        and box1_lower[2] <= box2_upper[2] + cutoff_combined
-        and box1_upper[2] >= box2_lower[2] - cutoff_combined
+        box1_lower[0] <= box2_upper[0] + expansion_combined
+        and box1_upper[0] >= box2_lower[0] - expansion_combined
+        and box1_lower[1] <= box2_upper[1] + expansion_combined
+        and box1_upper[1] >= box2_lower[1] - expansion_combined
+        and box1_lower[2] <= box2_upper[2] + expansion_combined
+        and box1_upper[2] >= box2_lower[2] - expansion_combined
     )
 
 

@@ -57,20 +57,20 @@ def _sap_project_aabb(
     direction: wp.vec3,  # Must be normalized
     shape_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
     shape_bounding_box_upper: wp.array(dtype=wp.vec3, ndim=1),
-    shape_contact_margin: wp.array(
+    shape_expansion: wp.array(
         dtype=float, ndim=1
-    ),  # Optional per-shape contact margins (can be empty if AABBs pre-expanded)
+    ),  # Optional per-shape expansion (gap + margin); empty if AABBs pre-expanded
 ) -> wp.vec2:
     lower = shape_bounding_box_lower[elementid]
     upper = shape_bounding_box_upper[elementid]
 
-    # Check if margins are provided (empty array means AABBs are pre-expanded)
-    margin = 0.0
-    if shape_contact_margin.shape[0] > 0:
-        margin = shape_contact_margin[elementid]
+    # Check if expansion is provided (empty array means AABBs are pre-expanded)
+    expansion = 0.0
+    if shape_expansion.shape[0] > 0:
+        expansion = shape_expansion[elementid]
 
     half_size = 0.5 * (upper - lower)
-    half_size = wp.vec3(half_size[0] + margin, half_size[1] + margin, half_size[2] + margin)
+    half_size = wp.vec3(half_size[0] + expansion, half_size[1] + expansion, half_size[2] + expansion)
     radius = wp.dot(direction, half_size)
     center = wp.dot(direction, 0.5 * (lower + upper))
     return wp.vec2(center - radius, center + radius)
@@ -159,9 +159,9 @@ def _sap_project_kernel(
     direction: wp.vec3,  # Must be normalized
     shape_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
     shape_bounding_box_upper: wp.array(dtype=wp.vec3, ndim=1),
-    shape_contact_margin: wp.array(
+    shape_expansion: wp.array(
         dtype=float, ndim=1
-    ),  # Optional per-shape contact margins (can be empty if AABBs pre-expanded)
+    ),  # Optional per-shape expansion (gap + margin); empty if AABBs pre-expanded
     world_index_map: wp.array(dtype=int, ndim=1),
     world_slice_ends: wp.array(dtype=int, ndim=1),
     max_shapes_per_world: int,
@@ -195,7 +195,7 @@ def _sap_project_kernel(
 
     # Project AABB onto direction
     range = _sap_project_aabb(
-        shape_id, direction, shape_bounding_box_lower, shape_bounding_box_upper, shape_contact_margin
+        shape_id, direction, shape_bounding_box_lower, shape_bounding_box_upper, shape_expansion
     )
 
     sap_projection_lower_out[idx] = range[0]
@@ -261,9 +261,9 @@ def _process_single_sap_pair(
     pair: wp.vec2i,
     shape_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
     shape_bounding_box_upper: wp.array(dtype=wp.vec3, ndim=1),
-    shape_contact_margin: wp.array(
+    shape_expansion: wp.array(
         dtype=float, ndim=1
-    ),  # Optional per-shape contact margins (can be empty if AABBs pre-expanded)
+    ),  # Optional per-shape expansion (gap + margin); empty if AABBs pre-expanded
     candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),
     candidate_pair_count: wp.array(dtype=int, ndim=1),  # Size one array
     max_candidate_pair: int,
@@ -277,20 +277,20 @@ def _process_single_sap_pair(
     if num_filter_pairs > 0 and is_pair_excluded(pair, filter_pairs, num_filter_pairs):
         return
 
-    # Check if margins are provided (empty array means AABBs are pre-expanded)
-    margin1 = 0.0
-    margin2 = 0.0
-    if shape_contact_margin.shape[0] > 0:
-        margin1 = shape_contact_margin[shape1]
-        margin2 = shape_contact_margin[shape2]
+    # Check if expansion is provided (empty array means AABBs are pre-expanded)
+    expansion1 = 0.0
+    expansion2 = 0.0
+    if shape_expansion.shape[0] > 0:
+        expansion1 = shape_expansion[shape1]
+        expansion2 = shape_expansion[shape2]
 
     if check_aabb_overlap(
         shape_bounding_box_lower[shape1],
         shape_bounding_box_upper[shape1],
-        margin1,
+        expansion1,
         shape_bounding_box_lower[shape2],
         shape_bounding_box_upper[shape2],
-        margin2,
+        expansion2,
     ):
         write_pair(
             pair,
@@ -305,9 +305,9 @@ def _sap_broadphase_kernel(
     # Input arrays
     shape_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
     shape_bounding_box_upper: wp.array(dtype=wp.vec3, ndim=1),
-    shape_contact_margin: wp.array(
+    shape_expansion: wp.array(
         dtype=float, ndim=1
-    ),  # Optional per-shape contact margins (can be empty if AABBs pre-expanded)
+    ),  # Optional per-shape expansion (gap + margin); empty if AABBs pre-expanded
     collision_group: wp.array(dtype=int, ndim=1),
     shape_world: wp.array(dtype=int, ndim=1),  # World indices
     world_index_map: wp.array(dtype=int, ndim=1),
@@ -404,7 +404,7 @@ def _sap_broadphase_kernel(
                 wp.vec2i(shape1, shape2),
                 shape_bounding_box_lower,
                 shape_bounding_box_upper,
-                shape_contact_margin,
+                shape_expansion,
                 candidate_pair,
                 candidate_pair_count,
                 max_candidate_pair,
@@ -532,7 +532,7 @@ class BroadPhaseSAP:
         self,
         shape_lower: wp.array(dtype=wp.vec3, ndim=1),  # Lower bounds of shape bounding boxes
         shape_upper: wp.array(dtype=wp.vec3, ndim=1),  # Upper bounds of shape bounding boxes
-        shape_contact_margin: wp.array(dtype=float, ndim=1) | None,  # Optional per-shape contact margins
+        shape_expansion: wp.array(dtype=float, ndim=1) | None,  # Optional per-shape expansion (gap + margin)
         shape_collision_group: wp.array(dtype=int, ndim=1),  # Collision group ID per box
         shape_shape_world: wp.array(dtype=int, ndim=1),  # World index per box
         shape_count: int,  # Number of active bounding boxes
@@ -552,8 +552,8 @@ class BroadPhaseSAP:
         Args:
             shape_lower: Array of lower bounds for each shape's AABB
             shape_upper: Array of upper bounds for each shape's AABB
-            shape_contact_margin: Optional array of per-shape contact margins. If None or empty array,
-                assumes AABBs are pre-expanded (margins = 0). If provided, margins are added during overlap checks.
+            shape_expansion: Optional array of per-shape expansion (gap + margin). If None or empty,
+                assumes AABBs are pre-expanded. If provided, expansion is added during overlap checks.
             shape_collision_group: Array of collision group IDs for each shape. Positive values indicate
                 groups that only collide with themselves (and with negative groups). Negative values indicate
                 groups that collide with everything except their negative counterpart. Zero indicates no collisions.
@@ -580,9 +580,9 @@ class BroadPhaseSAP:
         if device is None:
             device = shape_lower.device
 
-        # If no margins provided, pass empty array (kernel will use 0.0 margins)
-        if shape_contact_margin is None:
-            shape_contact_margin = wp.empty(0, dtype=wp.float32, device=device)
+        # If no expansion provided, pass empty array (AABBs are pre-expanded)
+        if shape_expansion is None:
+            shape_expansion = wp.empty(0, dtype=wp.float32, device=device)
 
         # Exclusion filter: empty array and 0 when not provided or empty
         if filter_pairs is None or filter_pairs.shape[0] == 0:
@@ -600,7 +600,7 @@ class BroadPhaseSAP:
                 direction,
                 shape_lower,
                 shape_upper,
-                shape_contact_margin,
+                shape_expansion,
                 self.world_index_map,
                 self.world_slice_ends,
                 self.max_shapes_per_world,
@@ -665,7 +665,7 @@ class BroadPhaseSAP:
             inputs=[
                 shape_lower,
                 shape_upper,
-                shape_contact_margin,
+                shape_expansion,
                 shape_collision_group,
                 shape_shape_world,
                 self.world_index_map,

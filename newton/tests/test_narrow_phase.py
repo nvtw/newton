@@ -189,7 +189,7 @@ class TestNarrowPhase(unittest.TestCase):
             max_triangle_pairs=100000,
             device=None,
         )
-        self.contact_margin = 0.01
+        self.margin = 0.01
 
     def _create_geometry_arrays(self, geom_list):
         """Create geometry arrays from a list of geometry descriptions.
@@ -197,12 +197,12 @@ class TestNarrowPhase(unittest.TestCase):
         Each geometry is a dict with:
             - type: GeoType value
             - transform: (position, quaternion) tuple
-            - data: scale/size as vec3, thickness as float
+            - data: scale/size as vec3, gap as float
             - source: mesh pointer (default 0)
-            - cutoff: contact margin (default 0.0)
+            - cutoff: margin (default 0.0)
 
         Returns:
-            Tuple of (geom_types, geom_data, geom_transform, geom_source, shape_contact_margin, geom_collision_radius)
+            Tuple of (geom_types, geom_data, geom_transform, geom_source, shape_margin, geom_collision_radius)
         """
         n = len(geom_list)
 
@@ -210,20 +210,20 @@ class TestNarrowPhase(unittest.TestCase):
         geom_data = np.zeros(n, dtype=wp.vec4)
         geom_transforms = []
         geom_source = np.zeros(n, dtype=np.uint64)
-        shape_contact_margin = np.zeros(n, dtype=np.float32)
+        shape_margin = np.zeros(n, dtype=np.float32)
         geom_collision_radius = np.zeros(n, dtype=np.float32)
 
         for i, geom in enumerate(geom_list):
             geom_types[i] = int(geom["type"])
 
-            # Data: (scale_x, scale_y, scale_z, thickness)
+            # Data: (scale_x, scale_y, scale_z, gap)
             data = geom.get("data", ([1.0, 1.0, 1.0], 0.0))
             if isinstance(data, tuple):
-                scale, thickness = data
+                scale, gap = data
             else:
                 scale = data
-                thickness = 0.0
-            geom_data[i] = wp.vec4(scale[0], scale[1], scale[2], thickness)
+                gap = 0.0
+            geom_data[i] = wp.vec4(scale[0], scale[1], scale[2], gap)
 
             # Transform: position and quaternion
             pos, quat = geom.get("transform", ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]))
@@ -232,7 +232,7 @@ class TestNarrowPhase(unittest.TestCase):
             )
 
             geom_source[i] = geom.get("source", 0)
-            shape_contact_margin[i] = geom.get("cutoff", 0.0)
+            shape_margin[i] = geom.get("cutoff", 0.0)
 
             # Compute collision radius for AABB fallback (used for planes/meshes)
             geo_type = geom_types[i]
@@ -262,7 +262,7 @@ class TestNarrowPhase(unittest.TestCase):
             wp.array(geom_data, dtype=wp.vec4),
             wp.array(geom_transforms, dtype=wp.transform),
             wp.array(geom_source, dtype=wp.uint64),
-            wp.array(shape_contact_margin, dtype=wp.float32),
+            wp.array(shape_margin, dtype=wp.float32),
             wp.array(geom_collision_radius, dtype=wp.float32),
             wp.zeros(0, dtype=SDFData),  # sdf_data - empty compact table for non-mesh tests
             wp.full(len(geom_list), -1, dtype=wp.int32),  # shape_sdf_index - no SDF for all shapes
@@ -289,7 +289,7 @@ class TestNarrowPhase(unittest.TestCase):
             geom_data,
             geom_transform,
             geom_source,
-            shape_contact_margin,
+            shape_margin,
             geom_collision_radius,
             sdf_data,
             shape_sdf_index,
@@ -322,7 +322,7 @@ class TestNarrowPhase(unittest.TestCase):
             shape_source=geom_source,
             sdf_data=sdf_data,
             shape_sdf_index=shape_sdf_index,
-            shape_contact_margin=shape_contact_margin,
+            shape_margin=shape_margin,
             shape_collision_radius=geom_collision_radius,
             shape_flags=shape_flags,
             shape_collision_aabb_lower=shape_collision_aabb_lower,
@@ -1273,7 +1273,7 @@ class TestNarrowPhase(unittest.TestCase):
                 msg=f"Contact {i} tangent should be perpendicular to normal, dot product = {dot_product}",
             )
 
-    def test_per_shape_contact_margin(self):
+    def test_per_shape_margin(self):
         """
         Test that per-shape contact margins work correctly by testing two spheres
         with different margins approaching a plane.
@@ -1298,7 +1298,7 @@ class TestNarrowPhase(unittest.TestCase):
         shape_flags = wp.full(3, ShapeFlags.COLLIDE_SHAPES, dtype=wp.int32)  # Collision enabled, no hydroelastic
 
         # Contact margins: plane=0.01, sphereA=0.02, sphereB=0.06
-        shape_contact_margin = wp.array([0.01, 0.02, 0.06], dtype=wp.float32)
+        shape_margin = wp.array([0.01, 0.02, 0.06], dtype=wp.float32)
 
         # Dummy AABB arrays (not used for primitive tests)
         shape_collision_aabb_lower = wp.zeros(3, dtype=wp.vec3)
@@ -1336,7 +1336,7 @@ class TestNarrowPhase(unittest.TestCase):
             shape_source=geom_source,
             sdf_data=sdf_data,
             shape_sdf_index=shape_sdf_index,
-            shape_contact_margin=shape_contact_margin,
+            shape_margin=shape_margin,
             shape_collision_radius=geom_collision_radius,
             shape_flags=shape_flags,
             shape_collision_aabb_lower=shape_collision_aabb_lower,
@@ -1372,7 +1372,7 @@ class TestNarrowPhase(unittest.TestCase):
             shape_source=geom_source,
             sdf_data=sdf_data,
             shape_sdf_index=shape_sdf_index,
-            shape_contact_margin=shape_contact_margin,
+            shape_margin=shape_margin,
             shape_collision_radius=geom_collision_radius,
             shape_flags=shape_flags,
             shape_collision_aabb_lower=shape_collision_aabb_lower,
@@ -1409,7 +1409,7 @@ class TestNarrowPhase(unittest.TestCase):
             shape_source=geom_source,
             sdf_data=sdf_data,
             shape_sdf_index=shape_sdf_index,
-            shape_contact_margin=shape_contact_margin,
+            shape_margin=shape_margin,
             shape_collision_radius=geom_collision_radius,
             shape_flags=shape_flags,
             shape_collision_aabb_lower=shape_collision_aabb_lower,
@@ -1743,24 +1743,24 @@ class TestBufferOverflowWarnings(unittest.TestCase):
         geom_data = np.zeros(n, dtype=wp.vec4)
         geom_transforms = []
         geom_source = np.zeros(n, dtype=np.uint64)
-        shape_contact_margin = np.zeros(n, dtype=np.float32)
+        shape_margin = np.zeros(n, dtype=np.float32)
         geom_collision_radius = np.zeros(n, dtype=np.float32)
 
         for i, geom in enumerate(geom_list):
             geom_types[i] = int(geom["type"])
             data = geom.get("data", ([1.0, 1.0, 1.0], 0.0))
             if isinstance(data, tuple):
-                scale, thickness = data
+                scale, gap = data
             else:
                 scale = data
-                thickness = 0.0
-            geom_data[i] = wp.vec4(scale[0], scale[1], scale[2], thickness)
+                gap = 0.0
+            geom_data[i] = wp.vec4(scale[0], scale[1], scale[2], gap)
             pos, quat = geom.get("transform", ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]))
             geom_transforms.append(
                 wp.transform(wp.vec3(pos[0], pos[1], pos[2]), wp.quat(quat[0], quat[1], quat[2], quat[3]))
             )
             geom_source[i] = geom.get("source", 0)
-            shape_contact_margin[i] = geom.get("cutoff", 0.0)
+            shape_margin[i] = geom.get("cutoff", 0.0)
             geom_collision_radius[i] = max(scale[0], scale[1], scale[2])
 
         return (
@@ -1768,7 +1768,7 @@ class TestBufferOverflowWarnings(unittest.TestCase):
             wp.array(geom_data, dtype=wp.vec4),
             wp.array(geom_transforms, dtype=wp.transform),
             wp.array(geom_source, dtype=wp.uint64),
-            wp.array(shape_contact_margin, dtype=wp.float32),
+            wp.array(shape_margin, dtype=wp.float32),
             wp.array(geom_collision_radius, dtype=wp.float32),
             wp.zeros(n, dtype=SDFData),
             wp.full(n, ShapeFlags.COLLIDE_SHAPES, dtype=wp.int32),
@@ -1810,7 +1810,7 @@ class TestBufferOverflowWarnings(unittest.TestCase):
             shape_transform=arrays[2],
             shape_source=arrays[3],
             shape_sdf_data=arrays[6],
-            shape_contact_margin=arrays[4],
+            shape_margin=arrays[4],
             shape_collision_radius=arrays[5],
             shape_flags=arrays[7],
             shape_local_aabb_lower=arrays[8],
@@ -1876,7 +1876,7 @@ class TestBufferOverflowWarnings(unittest.TestCase):
             shape_transform=arrays[2],
             shape_source=arrays[3],
             shape_sdf_data=arrays[6],
-            shape_contact_margin=arrays[4],
+            shape_margin=arrays[4],
             shape_collision_radius=arrays[5],
             shape_flags=arrays[7],
             shape_local_aabb_lower=arrays[8],

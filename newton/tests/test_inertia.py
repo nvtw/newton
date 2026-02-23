@@ -81,7 +81,7 @@ class TestInertia(unittest.TestCase):
             vertices=vertices,
             indices=indices,
             is_solid=False,
-            thickness=0.1,
+            gap=0.1,
         )
         assert_np_equal(np.array(com_0_hollow), np.array([0.5, 0.5, 0.5]), tol=1e-6)
 
@@ -108,7 +108,7 @@ class TestInertia(unittest.TestCase):
             vertices=vertices,
             indices=indices,
             is_solid=False,
-            thickness=0.1,
+            gap=0.1,
         )
 
         # Inertia values should be the same as before
@@ -372,17 +372,17 @@ class TestInertia(unittest.TestCase):
         density = 1000.0
         outer_radius = 1.0
         outer_half_height = 2.0
-        thickness = 0.1
+        gap_val = 0.1
 
         # Analytical hollow cone via compute_inertia_shape
         scale = wp.vec3(outer_radius, outer_half_height, 0.0)
         m_an, com_an, I_an = compute_inertia_shape(
-            GeoType.CONE, scale, None, density, is_solid=False, thickness=thickness
+            GeoType.CONE, scale, None, density, is_solid=False, gap=gap_val
         )
 
         # Reference: mesh subtraction with proper parallel-axis shifts
-        inner_radius = outer_radius - thickness
-        inner_half_height = outer_half_height - thickness
+        inner_radius = outer_radius - gap_val
+        inner_half_height = outer_half_height - gap_val
         v_out, i_out = self._create_cone_mesh(outer_radius, outer_half_height)
         v_in, i_in = self._create_cone_mesh(inner_radius, inner_half_height)
         m_out, com_out, I_out, _ = compute_inertia_mesh(density, v_out, i_out, is_solid=True)
