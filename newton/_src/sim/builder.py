@@ -177,12 +177,13 @@ class ModelBuilder:
         mu_rolling: float = 0.0001
         """The coefficient of rolling friction (resistance to rolling motion). Used by XPBD, MuJoCo."""
         margin: float = 0.0
-        """Outward offset from the shape's surface for collision detection.
+        """Outward offset from the shape's surface [m] for collision detection.
         Extends the effective collision surface outward by this amount. When two shapes collide,
-        their margins are summed (margin_a + margin_b) to determine the total separation."""
+        their margins are summed (margin_a + margin_b) to determine the total separation [m].
+        This value is also used when computing inertia for hollow shapes (``is_solid=False``)."""
         gap: float | None = None
-        """Additional contact detection gap. If None, uses builder.rigid_gap as default.
-        Broad phase uses (margin + gap) for AABB expansion and pair filtering."""
+        """Additional contact detection gap [m]. If None, uses builder.rigid_gap as default.
+        Broad phase uses (margin + gap) [m] for AABB expansion and pair filtering."""
         is_solid: bool = True
         """Indicates whether the shape is solid or hollow. Defaults to True."""
         collision_group: int = 1
@@ -7986,9 +7987,10 @@ class ModelBuilder:
     def _validate_shapes(self) -> bool:
         """Validate shape gaps for stable broad phase detection.
 
-        Margin is an outward offset from a shape's surface, while broad phase uses
-        ``margin + gap`` for expansion/filtering. For reliable detection, ``gap`` should
-        be non-negative so effective expansion is not reduced below the shape margin.
+        Margin is an outward offset from a shape's surface [m], while broad phase uses
+        ``margin + gap`` [m] for expansion/filtering. For reliable detection, ``gap`` [m]
+        should be non-negative so effective expansion is not reduced below the shape
+        margin.
 
         This check only considers shapes that participate in collisions (with the
         `COLLIDE_SHAPES` or `COLLIDE_PARTICLES` flag).

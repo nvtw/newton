@@ -189,7 +189,6 @@ class TestNarrowPhase(unittest.TestCase):
             max_triangle_pairs=100000,
             device=None,
         )
-        self.gap = 0.01
 
     def _create_geometry_arrays(self, geom_list):
         """Create geometry arrays from a list of geometry descriptions.
@@ -1823,7 +1822,7 @@ class TestBufferOverflowWarnings(unittest.TestCase):
             contact_count=contact_count,
         )
         wp.synchronize()
-        output = capture.end()
+        capture.end()
 
         # Verify overflow was detected (counter exceeds buffer capacity)
         gjk_count = narrow_phase.gjk_candidate_pairs_count.numpy()[0]
@@ -1832,8 +1831,6 @@ class TestBufferOverflowWarnings(unittest.TestCase):
 
         # Warning capture via wp.printf can be flaky across driver/runtime combinations.
         # The overflow counter check above is the primary correctness signal.
-        if "GJK candidate pair buffer overflowed" in output:
-            self.assertIn("GJK candidate pair buffer overflowed", output)
 
         # Verify some contacts were still produced (from the pairs that fit)
         count = contact_count.numpy()[0]
@@ -1890,14 +1887,13 @@ class TestBufferOverflowWarnings(unittest.TestCase):
             contact_count=contact_count,
         )
         wp.synchronize()
-        output = capture.end()
+        capture.end()
 
         # Verify overflow was detected by count/capacity even if wp.printf is not captured.
         self.assertGreater(
             num_candidate_pair.numpy()[0], candidate_pair.shape[0], "Broad phase buffer should have overflowed"
         )
-        if "Broad phase pair buffer overflowed" in output:
-            self.assertIn("Broad phase pair buffer overflowed", output)
+        # Warning capture via wp.printf is optional; counter/capacity check above is authoritative.
 
 
 if __name__ == "__main__":

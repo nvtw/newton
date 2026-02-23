@@ -1014,10 +1014,10 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
                 radius_eff_a = compute_effective_radius(shape_types[shape_a], shape_data[shape_a])
                 radius_eff_b = compute_effective_radius(shape_types[shape_b], shape_data[shape_b])
 
-                # Use per-shape contact margin (max of both shapes, matching other kernels)
+                # Use additive per-shape contact gap (matching broad/narrow phase)
                 margin_a = shape_gap[shape_a]
                 margin_b = shape_gap[shape_b]
-                margin = wp.max(margin_a, margin_b)
+                margin = margin_a + margin_b
 
                 # Create ContactData struct
                 contact_data = ContactData()
@@ -1101,10 +1101,10 @@ def mesh_triangle_contacts_to_reducer_kernel(
         # Extract margin offset for shape A (signed distance padding)
         margin_offset_a = shape_data[shape_a][3]
 
-        # Use per-shape contact gap for detection threshold
+        # Use additive per-shape contact gap for detection threshold
         margin_a = shape_gap[shape_a]
         margin_b = shape_gap[shape_b]
-        margin = wp.max(margin_a, margin_b)
+        margin = margin_a + margin_b
 
         # Compute and write contacts using GJK/MPR
         wp.static(create_compute_gjk_mpr_contacts(write_contact_to_reducer))(
