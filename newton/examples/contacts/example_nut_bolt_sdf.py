@@ -46,7 +46,7 @@ ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
 ISAACGYM_GEARS_FOLDER = "assets/factory/mesh/factory_gears"
 
 SHAPE_CFG = newton.ModelBuilder.ShapeConfig(
-    thickness=0.0,
+    margin=0.0,
     mu=0.01,
     ke=1e7,  # Contact stiffness for MuJoCo solver
     kd=1e4,  # Contact damping

@@ -979,16 +979,15 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
             scale_data = shape_data[mesh_shape]
             mesh_scale = wp.vec3(scale_data[0], scale_data[1], scale_data[2])
 
-            # Extract thickness values
-            margin_mesh = shape_data[mesh_shape][3]
-            margin_plane = shape_data[plane_shape][3]
-            total_margin_offset = margin_mesh + margin_plane
+            # Extract per-shape margin offsets (stored in shape_data.w)
+            margin_offset_mesh = shape_data[mesh_shape][3]
+            margin_offset_plane = shape_data[plane_shape][3]
+            total_margin_offset = margin_offset_mesh + margin_offset_plane
 
-            # Use per-shape contact margin for contact detection
-            # Sum margins for consistency with thickness summing
-            margin_mesh = shape_gap[mesh_shape]
-            margin_plane = shape_gap[plane_shape]
-            margin = margin_mesh + margin_plane
+            # Use per-shape contact gap for contact detection threshold
+            gap_mesh = shape_gap[mesh_shape]
+            gap_plane = shape_gap[plane_shape]
+            margin = gap_mesh + gap_plane
 
             # Strided loop over vertices across all threads in the launch
             total_num_threads = total_num_blocks * wp.block_dim()
@@ -1021,8 +1020,8 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
                     contact_data.contact_distance = distance
                     contact_data.radius_eff_a = 0.0
                     contact_data.radius_eff_b = 0.0
-                    contact_data.margin_a = margin_mesh
-                    contact_data.margin_b = margin_plane
+                    contact_data.margin_a = margin_offset_mesh
+                    contact_data.margin_b = margin_offset_plane
                     contact_data.shape_a = mesh_shape
                     contact_data.shape_b = plane_shape
                     contact_data.margin = margin
@@ -1115,16 +1114,15 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
             scale_data = shape_data[mesh_shape]
             mesh_scale = wp.vec3(scale_data[0], scale_data[1], scale_data[2])
 
-            # Extract thickness values
-            margin_mesh = shape_data[mesh_shape][3]
-            margin_plane = shape_data[plane_shape][3]
-            total_margin_offset = margin_mesh + margin_plane
+            # Extract per-shape margin offsets (stored in shape_data.w)
+            margin_offset_mesh = shape_data[mesh_shape][3]
+            margin_offset_plane = shape_data[plane_shape][3]
+            total_margin_offset = margin_offset_mesh + margin_offset_plane
 
-            # Use per-shape contact margin for contact detection
-            # Sum margins for consistency with thickness summing
-            margin_mesh = shape_gap[mesh_shape]
-            margin_plane = shape_gap[plane_shape]
-            margin = margin_mesh + margin_plane
+            # Use per-shape contact gap for contact detection threshold
+            gap_mesh = shape_gap[mesh_shape]
+            gap_plane = shape_gap[plane_shape]
+            margin = gap_mesh + gap_plane
 
             # Reset contact buffer for this pair
             for i in range(t, wp.static(reduction_slot_count), wp.block_dim()):
@@ -1200,8 +1198,8 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
                 contact_data.contact_distance = contact.depth
                 contact_data.radius_eff_a = 0.0
                 contact_data.radius_eff_b = 0.0
-                contact_data.margin_a = margin_mesh
-                contact_data.margin_b = margin_plane
+                contact_data.margin_a = margin_offset_mesh
+                contact_data.margin_b = margin_offset_plane
                 contact_data.shape_a = mesh_shape
                 contact_data.shape_b = plane_shape
                 contact_data.margin = margin

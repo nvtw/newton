@@ -49,7 +49,7 @@ SDF_MAX_RESOLUTION = 256
 SDF_NARROW_BAND_RANGE = (-0.005, 0.005)
 
 SHAPE_CFG = newton.ModelBuilder.ShapeConfig(
-    thickness=0.0,
+    margin=0.0,
     mu=0.01,
     ke=1e7,  # Contact stiffness for MuJoCo solver
     kd=1e4,  # Contact damping

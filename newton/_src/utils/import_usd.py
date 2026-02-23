@@ -1888,7 +1888,13 @@ def parse_usd(
                         ka=usd.get_float_with_fallback(
                             prim_and_scene, "newton:contact_ka", builder.default_shape_cfg.ka
                         ),
-                        margin=usd.get_float_with_fallback(prim_and_scene, "newton:margin", builder.default_shape_cfg.margin),
+                        margin=usd.get_float_with_fallback(
+                            prim_and_scene,
+                            "newton:margin",
+                            usd.get_float_with_fallback(
+                                prim_and_scene, "newton:contact_thickness", builder.default_shape_cfg.margin
+                            ),
+                        ),
                         gap=gap,
                         mu=material.dynamicFriction,
                         restitution=material.restitution,

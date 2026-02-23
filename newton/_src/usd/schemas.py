@@ -67,7 +67,8 @@ class SchemaResolverNewton(SchemaResolver):
             # Mesh
             "max_hull_vertices": SchemaAttribute("newton:maxHullVertices", -1),
             # Collisions
-            "gap": SchemaAttribute("newton:gap", float("-inf")),
+            # Keep USD wire attribute stable; internal key was renamed to "gap".
+            "gap": SchemaAttribute("newton:contactMargin", float("-inf")),
         },
         PrimType.BODY: {},
         PrimType.MATERIAL: {

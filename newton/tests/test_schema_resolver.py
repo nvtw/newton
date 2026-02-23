@@ -1311,7 +1311,7 @@ class TestSchemaResolver(unittest.TestCase):
         self.assertEqual(gap, float("-inf"))
 
         # an explicit newton value should be used
-        collider.GetAttribute("newton:gap").Set(0.2)
+        collider.GetAttribute("newton:contactMargin").Set(0.2)
         gap = resolver.get_value(collider, PrimType.SHAPE, "gap")
         self.assertAlmostEqual(gap, 0.2)
 

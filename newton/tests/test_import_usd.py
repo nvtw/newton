@@ -4508,12 +4508,12 @@ def Xform "Articulation" (
         body_prim = body.GetPrim()
         UsdPhysics.RigidBodyAPI.Apply(body_prim)
 
-        # Create a collider with newton:gap
+        # Create a collider with newton:contactMargin (mapped to internal "gap")
         collider1 = UsdGeom.Cube.Define(stage, "/Articulation/Body/Collider1")
         collider1_prim = collider1.GetPrim()
         collider1_prim.ApplyAPI("NewtonCollisionAPI")
         UsdPhysics.CollisionAPI.Apply(collider1_prim)
-        collider1_prim.GetAttribute("newton:gap").Set(0.05)
+        collider1_prim.GetAttribute("newton:contactMargin").Set(0.05)
 
         # Create another collider without gap (should use default)
         collider2 = UsdGeom.Sphere.Define(stage, "/Articulation/Body/Collider2")
