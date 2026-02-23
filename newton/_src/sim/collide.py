@@ -80,7 +80,9 @@ def write_contact(
         writer_data: ContactWriterData struct containing body info and output arrays
         output_index: If -1, use atomic_add to get the next available index if contact distance is less than margin. If >= 0, use this index directly and skip margin check.
     """
-    total_separation_needed = contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.margin_a + contact_data.margin_b
+    total_separation_needed = (
+        contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.margin_a + contact_data.margin_b
+    )
 
     offset_mag_a = contact_data.radius_eff_a + contact_data.margin_a
     offset_mag_b = contact_data.radius_eff_b + contact_data.margin_b

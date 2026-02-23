@@ -75,7 +75,9 @@ def contact_passes_margin_check(
     Returns:
         True if the contact distance is within the contact margin, False otherwise
     """
-    total_separation_needed = contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.margin_a + contact_data.margin_b
+    total_separation_needed = (
+        contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.margin_a + contact_data.margin_b
+    )
 
     # Distance calculation matching box_plane_collision
     contact_normal_a_to_b = wp.normalize(contact_data.contact_normal_a_to_b)

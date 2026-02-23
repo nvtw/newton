@@ -1893,7 +1893,9 @@ class TestBufferOverflowWarnings(unittest.TestCase):
         output = capture.end()
 
         # Verify overflow was detected by count/capacity even if wp.printf is not captured.
-        self.assertGreater(num_candidate_pair.numpy()[0], candidate_pair.shape[0], "Broad phase buffer should have overflowed")
+        self.assertGreater(
+            num_candidate_pair.numpy()[0], candidate_pair.shape[0], "Broad phase buffer should have overflowed"
+        )
         if "Broad phase pair buffer overflowed" in output:
             self.assertIn("Broad phase pair buffer overflowed", output)
 

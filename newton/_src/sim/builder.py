@@ -4699,9 +4699,7 @@ class ModelBuilder:
         self.shape_material_mu_torsional.append(cfg.mu_torsional)
         self.shape_material_mu_rolling.append(cfg.mu_rolling)
         self.shape_material_kh.append(cfg.kh)
-        self.shape_gap.append(
-            cfg.gap if cfg.gap is not None else self.rigid_gap
-        )
+        self.shape_gap.append(cfg.gap if cfg.gap is not None else self.rigid_gap)
         self.shape_collision_group.append(cfg.collision_group)
         self.shape_collision_radius.append(compute_shape_radius(type, scale, src))
         self.shape_world.append(self.current_world)

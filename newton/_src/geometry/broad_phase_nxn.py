@@ -41,9 +41,7 @@ def _nxn_broadphase_precomputed_pairs(
     # Input arrays
     shape_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
     shape_bounding_box_upper: wp.array(dtype=wp.vec3, ndim=1),
-    shape_gap: wp.array(
-        dtype=float, ndim=1
-    ),  # Optional per-shape effective gaps (can be empty if AABBs pre-expanded)
+    shape_gap: wp.array(dtype=float, ndim=1),  # Optional per-shape effective gaps (can be empty if AABBs pre-expanded)
     nxn_shape_pair: wp.array(dtype=wp.vec2i, ndim=1),
     # Output arrays
     candidate_pair: wp.array(dtype=wp.vec2i, ndim=1),
@@ -144,9 +142,7 @@ def _nxn_broadphase_kernel(
     # Input arrays
     shape_bounding_box_lower: wp.array(dtype=wp.vec3, ndim=1),
     shape_bounding_box_upper: wp.array(dtype=wp.vec3, ndim=1),
-    shape_gap: wp.array(
-        dtype=float, ndim=1
-    ),  # Optional per-shape effective gaps (can be empty if AABBs pre-expanded)
+    shape_gap: wp.array(dtype=float, ndim=1),  # Optional per-shape effective gaps (can be empty if AABBs pre-expanded)
     collision_group: wp.array(dtype=int, ndim=1),  # per-shape
     shape_world: wp.array(dtype=int, ndim=1),  # per-shape world indices
     world_cumsum_lower_tri: wp.array(dtype=int, ndim=1),  # Cumulative sum of lower tri elements per world
