@@ -557,9 +557,8 @@ often be improved by attaching a precomputed SDF to the mesh (``mesh.build_sdf(.
    scenes that use the collision pipeline for particle-shape contacts.
 
 .. note::
-   ``HFIELD`` uses a hybrid path: native heightfield kernels remain active for convex
-   rigid pairs, and unsupported rigid classes (plane-heightfield and mesh-heightfield)
-   route through a generated mesh fallback.
+   ``HFIELD`` collisions in the Newton pipeline are routed through a generated mesh
+   fallback path, reusing mesh-vs-X narrow-phase processing.
 
 .. note::
    **SDF** in this table refers to shapes with precomputed SDF data. There is no
