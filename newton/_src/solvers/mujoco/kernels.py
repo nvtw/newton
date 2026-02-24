@@ -226,7 +226,7 @@ def convert_newton_contacts_to_mjwarp_kernel(
     rigid_contact_margin1: wp.array(dtype=wp.float32),
     rigid_contact_stiffness: wp.array(dtype=wp.float32),
     rigid_contact_damping: wp.array(dtype=wp.float32),
-    rigid_contact_friction_scale: wp.array(dtype=wp.float32),
+    rigid_contact_friction: wp.array(dtype=wp.float32),
     shape_margin: wp.array(dtype=float),
     bodies_per_world: int,
     newton_shape_to_mjc_geom: wp.array(dtype=wp.int32),
@@ -357,7 +357,7 @@ def convert_newton_contacts_to_mjwarp_kernel(
 
             solref = wp.vec2(timeconst, dampratio)
 
-        friction_scale = rigid_contact_friction_scale[tid]
+        friction_scale = rigid_contact_friction[tid]
         if friction_scale > 0.0:
             friction = vec5(
                 friction[0] * friction_scale,

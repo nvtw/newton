@@ -2053,7 +2053,7 @@ class TestBroadPhase(unittest.TestCase):
 
     def test_per_shape_gap_broad_phase(self):
         """
-        Test that all broad phase modes correctly handle per-shape contact margins
+        Test that all broad phase modes correctly handle per-shape contact gaps
         by applying them during AABB overlap checks (not pre-expanded).
 
         Setup two spheres (A and B) at different separations from a ground plane:

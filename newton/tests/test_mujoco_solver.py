@@ -2681,9 +2681,9 @@ class TestMuJoCoSolverGeomProperties(TestMuJoCoSolverPropertiesBase):
                 )
         self.assertGreater(tested_count, 0)
 
-        # Update thickness values at runtime
-        new_thickness = np.array([0.02 + i * 0.005 for i in range(model.shape_count)], dtype=np.float32)
-        model.shape_margin.assign(wp.array(new_thickness, dtype=wp.float32, device=model.device))
+        # Update margin values at runtime
+        new_margin = np.array([0.02 + i * 0.005 for i in range(model.shape_count)], dtype=np.float32)
+        model.shape_margin.assign(wp.array(new_margin, dtype=wp.float32, device=model.device))
         solver.notify_model_changed(SolverNotifyFlags.SHAPE_PROPERTIES)
 
         # Verify runtime update
@@ -2695,7 +2695,7 @@ class TestMuJoCoSolverGeomProperties(TestMuJoCoSolverPropertiesBase):
                     continue
                 self.assertAlmostEqual(
                     float(updated_margin[world_idx, geom_idx]),
-                    float(new_thickness[shape_idx]),
+                    float(new_margin[shape_idx]),
                     places=5,
                     msg=f"Updated geom_margin mismatch for shape {shape_idx} in world {world_idx}",
                 )

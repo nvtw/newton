@@ -173,10 +173,10 @@ class TestSelection(unittest.TestCase):
     def test_selection_shape_values_noncontiguous(self):
         """Test that shape attribute values are correct when shape selection is non-contiguous."""
         # Build a 3-link chain: base -> link1 -> link2
-        # Each link has one shape with a distinct thickness value
+        # Each link has one shape with a distinct margin value
         robot = newton.ModelBuilder()
 
-        thicknesses = [0.001, 0.002, 0.003]
+        margins = [0.001, 0.002, 0.003]
 
         base = robot.add_link(xform=wp.transform([0, 0, 0], wp.quat_identity()), mass=1.0, label="base")
         robot.add_shape_box(
@@ -184,7 +184,7 @@ class TestSelection(unittest.TestCase):
             hx=0.1,
             hy=0.1,
             hz=0.1,
-            cfg=newton.ModelBuilder.ShapeConfig(margin=thicknesses[0]),
+            cfg=newton.ModelBuilder.ShapeConfig(margin=margins[0]),
             label="shape_base",
         )
 
@@ -193,7 +193,7 @@ class TestSelection(unittest.TestCase):
             link1,
             radius=0.05,
             half_height=0.2,
-            cfg=newton.ModelBuilder.ShapeConfig(margin=thicknesses[1]),
+            cfg=newton.ModelBuilder.ShapeConfig(margin=margins[1]),
             label="shape_link1",
         )
 
@@ -201,7 +201,7 @@ class TestSelection(unittest.TestCase):
         robot.add_shape_sphere(
             link2,
             radius=0.05,
-            cfg=newton.ModelBuilder.ShapeConfig(margin=thicknesses[2]),
+            cfg=newton.ModelBuilder.ShapeConfig(margin=margins[2]),
             label="shape_link2",
         )
 
@@ -227,12 +227,12 @@ class TestSelection(unittest.TestCase):
         self.assertEqual(vals.shape, (W, 1, 2))
         vals_np = vals.numpy()
 
-        expected = [thicknesses[0], thicknesses[2]]  # base and link2 (link1 excluded)
+        expected = [margins[0], margins[2]]  # base and link2 (link1 excluded)
         for w in range(W):
-            for s, expected_thickness in enumerate(expected):
+            for s, expected_margin in enumerate(expected):
                 self.assertAlmostEqual(
                     float(vals_np[w, 0, s]),
-                    expected_thickness,
+                    expected_margin,
                     places=6,
                     msg=f"world={w}, shape={s}",
                 )

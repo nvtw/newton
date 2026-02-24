@@ -1006,7 +1006,7 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
                 shape_a = pair[0]
                 shape_b = pair[1]
 
-                # Extract thickness from shape_data (stored in w component)
+                # Extract margin offsets from shape_data (stored in w component)
                 margin_offset_a = shape_data[shape_a][3]
                 margin_offset_b = shape_data[shape_b][3]
 

@@ -754,8 +754,8 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
     shape_types: wp.array(dtype=int),
     shape_transform: wp.array(dtype=wp.transform),
     shape_source: wp.array(dtype=wp.uint64),
-    shape_gap: wp.array(dtype=float),  # Per-shape contact margins
-    shape_data: wp.array(dtype=wp.vec4),  # Shape data (scale xyz, thickness w)
+    shape_gap: wp.array(dtype=float),  # Per-shape contact gaps
+    shape_data: wp.array(dtype=wp.vec4),  # Shape data (scale xyz, margin w)
     shape_pairs_mesh: wp.array(dtype=wp.vec2i),
     shape_pairs_mesh_count: wp.array(dtype=int),
     total_num_threads: int,
@@ -807,7 +807,7 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
         X_ws = shape_transform[non_mesh_shape]
 
         # Use per-shape contact margin for the non-mesh shape
-        # Sum margins for consistency with thickness summing
+        # Sum per-shape contact gaps for consistent pairwise thresholding
         margin_non_mesh = shape_gap[non_mesh_shape]
         margin_mesh = shape_gap[mesh_shape]
         margin = margin_non_mesh + margin_mesh
@@ -836,7 +836,7 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
         shape_data: wp.array(dtype=wp.vec4),
         shape_transform: wp.array(dtype=wp.transform),
         shape_source: wp.array(dtype=wp.uint64),
-        shape_gap: wp.array(dtype=float),  # Per-shape contact margins
+        shape_gap: wp.array(dtype=float),  # Per-shape contact gaps
         triangle_pairs: wp.array(dtype=wp.vec3i),
         triangle_pairs_count: wp.array(dtype=int),
         writer_data: Any,
@@ -889,7 +889,7 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
             margin_offset_a = shape_data[shape_a][3]
 
             # Use per-shape contact margin for contact detection
-            # Sum margins for consistency with thickness summing
+            # Sum per-shape contact gaps for consistent pairwise thresholding
             margin_a = shape_gap[shape_a]
             margin_b = shape_gap[shape_b]
             margin = margin_a + margin_b

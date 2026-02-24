@@ -407,8 +407,8 @@ def eval_body_contact(
     contact_normal: wp.array(dtype=wp.vec3),
     contact_shape0: wp.array(dtype=int),
     contact_shape1: wp.array(dtype=int),
-    contact_thickness0: wp.array(dtype=float),
-    contact_thickness1: wp.array(dtype=float),
+    contact_margin0: wp.array(dtype=float),
+    contact_margin1: wp.array(dtype=float),
     rigid_contact_stiffness: wp.array(dtype=float),
     rigid_contact_damping: wp.array(dtype=float),
     rigid_contact_friction_scale: wp.array(dtype=float),
@@ -423,15 +423,15 @@ def eval_body_contact(
     if tid >= count:
         return
 
-    # retrieve contact thickness, compute average contact material properties
+    # retrieve contact margins, compute average contact material properties
     ke = 0.0  # contact normal force stiffness
     kd = 0.0  # damping coefficient
     kf = 0.0  # friction force stiffness
     ka = 0.0  # adhesion distance
     mu = 0.0  # friction coefficient
     mat_nonzero = 0
-    margin_a = contact_thickness0[tid]
-    margin_b = contact_thickness1[tid]
+    margin_a = contact_margin0[tid]
+    margin_b = contact_margin1[tid]
     shape_a = contact_shape0[tid]
     shape_b = contact_shape1[tid]
     if shape_a == shape_b:
