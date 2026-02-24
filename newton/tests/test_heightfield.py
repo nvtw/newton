@@ -390,6 +390,80 @@ class TestHeightfield(unittest.TestCase):
         contact_count = int(contacts.rigid_contact_count.numpy()[0])
         self.assertEqual(contact_count, 0, f"Unexpected contacts detected: {contact_count}")
 
+    def test_heightfield_fallback_mesh_pointer_population(self):
+        """Test that finalize populates fallback mesh pointers for heightfields."""
+        builder = newton.ModelBuilder()
+        hfield = Heightfield(
+            data=np.zeros((8, 8), dtype=np.float32),
+            nrow=8,
+            ncol=8,
+            hx=2.0,
+            hy=2.0,
+            min_z=0.0,
+            max_z=1.0,
+        )
+        hfield_shape = builder.add_shape_heightfield(heightfield=hfield)
+        sphere_shape = builder.add_shape_sphere(body=-1, radius=0.2)
+
+        model = builder.finalize()
+
+        fallback_ptr = model.shape_hfield_fallback_mesh_source_ptr.numpy()
+        source_ptr = model.shape_source_ptr.numpy()
+        self.assertEqual(len(fallback_ptr), model.shape_count)
+        self.assertGreater(int(fallback_ptr[hfield_shape]), 0)
+        self.assertEqual(int(fallback_ptr[sphere_shape]), int(source_ptr[sphere_shape]))
+
+    def test_mesh_heightfield_routes_to_mesh_mesh_fallback(self):
+        """Test unsupported mesh-heightfield pairs route to mesh-mesh fallback buffers."""
+        builder = newton.ModelBuilder()
+        hfield = Heightfield(
+            data=np.zeros((8, 8), dtype=np.float32),
+            nrow=8,
+            ncol=8,
+            hx=2.0,
+            hy=2.0,
+            min_z=0.0,
+            max_z=1.0,
+        )
+        mesh_body = builder.add_body()
+        mesh = newton.Mesh.create_box(1.0, 1.0, 1.0, compute_inertia=False)
+        builder.add_shape_mesh(body=mesh_body, mesh=mesh)
+        builder.add_shape_heightfield(heightfield=hfield)
+
+        model = builder.finalize()
+        state = model.state()
+        pipeline = newton.CollisionPipeline(model)
+        contacts = pipeline.contacts()
+        pipeline.collide(state, contacts)
+
+        mesh_mesh_count = int(pipeline.narrow_phase.shape_pairs_mesh_mesh_count.numpy()[0])
+        self.assertGreaterEqual(mesh_mesh_count, 1)
+
+    def test_particle_heightfield_soft_contacts(self):
+        """Test that particles generate soft contacts against heightfield via fallback mesh."""
+        builder = newton.ModelBuilder()
+        hfield = Heightfield(
+            data=np.zeros((8, 8), dtype=np.float32),
+            nrow=8,
+            ncol=8,
+            hx=2.0,
+            hy=2.0,
+            min_z=0.0,
+            max_z=1.0,
+        )
+        hfield_shape = builder.add_shape_heightfield(heightfield=hfield)
+        builder.add_particle(pos=(0.0, 0.0, 0.02), vel=(0.0, 0.0, 0.0), mass=1.0, radius=0.05)
+
+        model = builder.finalize()
+        state = model.state()
+        pipeline = newton.CollisionPipeline(model)
+        contacts = pipeline.contacts()
+        pipeline.collide(state, contacts)
+
+        soft_count = int(contacts.soft_contact_count.numpy()[0])
+        self.assertGreater(soft_count, 0)
+        self.assertEqual(int(contacts.soft_contact_shape.numpy()[0]), hfield_shape)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

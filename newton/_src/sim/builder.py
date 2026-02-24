@@ -8772,7 +8772,10 @@ class ModelBuilder:
             # build list of ids for geometry sources (meshes, sdfs)
             geo_sources = []
             finalized_geos = {}  # do not duplicate geometry
-            for geo in self.shape_source:
+            hfield_fallback_mesh_sources = []
+            hfield_fallback_mesh_refs = []
+            finalized_hfield_fallback_meshes = {}  # do not duplicate generated heightfield fallback meshes
+            for shape_type, geo in zip(self.shape_type, self.shape_source, strict=True):
                 geo_hash = hash(geo)  # avoid repeated hash computations
                 if geo:
                     if geo_hash not in finalized_geos:
@@ -8785,8 +8788,34 @@ class ModelBuilder:
                     # add null pointer
                     geo_sources.append(0)
 
+                # Build optional fallback mesh pointer for heightfield-vs-X routes that
+                # reuse mesh collision kernels.
+                fallback_mesh_ptr = geo_sources[-1]
+                fallback_mesh_ref = None
+                if shape_type == GeoType.HFIELD and geo is not None:
+                    hfield = geo
+                    hfield_hash = hash(hfield)
+                    if hfield_hash not in finalized_hfield_fallback_meshes:
+                        hfield_world = hfield.min_z + hfield.data * (hfield.max_z - hfield.min_z)
+                        fallback_mesh = Mesh.create_heightfield(
+                            heightfield=hfield_world,
+                            extent_x=2.0 * hfield.hx,
+                            extent_y=2.0 * hfield.hy,
+                            ground_z=hfield.min_z,
+                            compute_inertia=False,
+                        )
+                        fallback_ptr = fallback_mesh.finalize(device=device)
+                        finalized_hfield_fallback_meshes[hfield_hash] = (fallback_mesh, fallback_ptr)
+                    fallback_mesh_ref, fallback_mesh_ptr = finalized_hfield_fallback_meshes[hfield_hash]
+                elif shape_type == GeoType.HFIELD:
+                    fallback_mesh_ptr = 0
+                hfield_fallback_mesh_sources.append(fallback_mesh_ptr)
+                hfield_fallback_mesh_refs.append(fallback_mesh_ref)
+
             m.shape_type = wp.array(self.shape_type, dtype=wp.int32)
             m.shape_source_ptr = wp.array(geo_sources, dtype=wp.uint64)
+            m.shape_hfield_fallback_mesh_source_ptr = wp.array(hfield_fallback_mesh_sources, dtype=wp.uint64)
+            m._shape_hfield_fallback_mesh_refs = hfield_fallback_mesh_refs
             m.shape_scale = wp.array(self.shape_scale, dtype=wp.vec3, requires_grad=requires_grad)
             m.shape_is_solid = wp.array(self.shape_is_solid, dtype=wp.bool)
             m.shape_margin = wp.array(self.shape_margin, dtype=wp.float32, requires_grad=requires_grad)

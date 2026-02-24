@@ -253,16 +253,50 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             is_hfield_a = type_a == GeoType.HFIELD
             is_hfield_b = type_b == GeoType.HFIELD
 
-            # Skip unsupported heightfield combinations
-            if is_hfield_a and is_hfield_b:
-                continue
-            if type_a == GeoType.PLANE and is_hfield_b:
-                continue
-            if is_hfield_a and type_b == GeoType.MESH:
-                continue
+            # Route heightfield pairs:
+            # - Keep native heightfield-vs-convex path
+            # - Route unsupported combinations to mesh fallback buffers
+            if is_hfield_a or is_hfield_b:
+                is_plane_a = type_a == GeoType.PLANE
+                is_plane_b = type_b == GeoType.PLANE
+                is_mesh_a = type_a == GeoType.MESH
+                is_mesh_b = type_b == GeoType.MESH
 
-            # Route heightfield-convex to dedicated buffer
-            if is_hfield_a:
+                # Keep hfield-hfield disabled for now to avoid excessive mesh-mesh fallback cost.
+                if is_hfield_a and is_hfield_b:
+                    continue
+
+                # Fallback unsupported mesh-hfield to mesh-mesh pipeline.
+                if (is_hfield_a and is_mesh_b) or (is_mesh_a and is_hfield_b):
+                    idx = wp.atomic_add(shape_pairs_mesh_mesh_count, 0, 1)
+                    if idx < shape_pairs_mesh_mesh.shape[0]:
+                        shape_pairs_mesh_mesh[idx] = wp.vec2i(shape_a, shape_b)
+                    continue
+
+                # Fallback plane-hfield to mesh-plane pipeline (infinite planes only).
+                if (is_plane_a and is_hfield_b) or (is_hfield_a and is_plane_b):
+                    plane_shape = shape_a
+                    mesh_shape = shape_b
+                    plane_scale = scale_a
+                    if is_hfield_a and is_plane_b:
+                        plane_shape = shape_b
+                        mesh_shape = shape_a
+                        plane_scale = scale_b
+                    is_infinite_plane = plane_scale[0] == 0.0 and plane_scale[1] == 0.0
+                    if is_infinite_plane:
+                        mesh_id = shape_source[mesh_shape]
+                        if mesh_id != wp.uint64(0):
+                            mesh_obj = wp.mesh_get(mesh_id)
+                            vertex_count = mesh_obj.points.shape[0]
+                            mesh_plane_idx = wp.atomic_add(shape_pairs_mesh_plane_count, 0, 1)
+                            if mesh_plane_idx < shape_pairs_mesh_plane.shape[0]:
+                                # Store (mesh, plane)
+                                shape_pairs_mesh_plane[mesh_plane_idx] = wp.vec2i(mesh_shape, plane_shape)
+                                cumulative_count_before = wp.atomic_add(mesh_plane_vertex_total_count, 0, vertex_count)
+                                shape_pairs_mesh_plane_cumsum[mesh_plane_idx] = cumulative_count_before + vertex_count
+                    continue
+
+                # All remaining hfield pairs use native heightfield-vs-convex path.
                 idx = wp.atomic_add(shape_pairs_heightfield_count, 0, 1)
                 if idx < shape_pairs_heightfield.shape[0]:
                     shape_pairs_heightfield[idx] = wp.vec2i(shape_a, shape_b)

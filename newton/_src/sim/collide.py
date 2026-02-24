@@ -552,12 +552,15 @@ class CollisionPipeline:
                 writer_func=write_contact,
             )
 
-            # Detect if any mesh or heightfield shapes are present to optimize kernel launches
+            # Detect if any mesh or heightfield shapes are present to optimize kernel launches.
+            # Heightfields may route unsupported pairs through mesh fallback kernels.
             has_meshes = False
             has_heightfields = False
             if hasattr(model, "shape_type") and model.shape_type is not None:
                 shape_types = model.shape_type.numpy()
-                has_meshes = bool((shape_types == int(GeoType.MESH)).any())
+                has_meshes = bool(
+                    ((shape_types == int(GeoType.MESH)) | (shape_types == int(GeoType.HFIELD))).any()
+                )
                 has_heightfields = bool((shape_types == int(GeoType.HFIELD)).any())
 
             # Initialize narrow phase with pre-allocated buffers
@@ -675,6 +678,9 @@ class CollisionPipeline:
         self.broad_phase_pair_count.zero_()
 
         model = self.model
+        shape_source_for_collision = model.shape_hfield_fallback_mesh_source_ptr
+        if shape_source_for_collision is None:
+            shape_source_for_collision = model.shape_source_ptr
         # update any additional parameters
         soft_contact_margin = soft_contact_margin if soft_contact_margin is not None else self.soft_contact_margin
 
@@ -792,7 +798,7 @@ class CollisionPipeline:
                 shape_types=model.shape_type,
                 shape_data=self.geom_data,
                 shape_transform=self.geom_transform,
-                shape_source=model.shape_source_ptr,
+                shape_source=shape_source_for_collision,
                 sdf_data=model.sdf_data,
                 shape_sdf_index=model.shape_sdf_index,
                 shape_gap=model.shape_gap,
@@ -823,7 +829,7 @@ class CollisionPipeline:
                     model.shape_body,
                     model.shape_type,
                     model.shape_scale,
-                    model.shape_source_ptr,
+                    shape_source_for_collision,
                     model.shape_world,
                     soft_contact_margin,
                     self.soft_contact_max,

@@ -1101,7 +1101,7 @@ def create_soft_contacts(
         d = sdf_ellipsoid(x_local, geo_scale)
         n = sdf_ellipsoid_grad(x_local, geo_scale)
 
-    if geo_type == GeoType.MESH or geo_type == GeoType.CONVEX_MESH:
+    if geo_type == GeoType.MESH or geo_type == GeoType.CONVEX_MESH or geo_type == GeoType.HFIELD:
         mesh = shape_source_ptr[shape_index]
 
         face_index = int(0)
