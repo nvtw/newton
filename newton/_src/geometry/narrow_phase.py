@@ -253,25 +253,12 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             is_hfield_a = type_a == GeoType.HFIELD
             is_hfield_b = type_b == GeoType.HFIELD
 
-            # Route heightfield pairs:
-            # - Keep native heightfield-vs-convex path
-            # - Route unsupported combinations to mesh fallback buffers
+            # Route all heightfield pairs through mesh fallback buffers.
             if is_hfield_a or is_hfield_b:
                 is_plane_a = type_a == GeoType.PLANE
                 is_plane_b = type_b == GeoType.PLANE
-                is_mesh_a = type_a == GeoType.MESH
-                is_mesh_b = type_b == GeoType.MESH
-
-                # Keep hfield-hfield disabled for now to avoid excessive mesh-mesh fallback cost.
-                if is_hfield_a and is_hfield_b:
-                    continue
-
-                # Fallback unsupported mesh-hfield to mesh-mesh pipeline.
-                if (is_hfield_a and is_mesh_b) or (is_mesh_a and is_hfield_b):
-                    idx = wp.atomic_add(shape_pairs_mesh_mesh_count, 0, 1)
-                    if idx < shape_pairs_mesh_mesh.shape[0]:
-                        shape_pairs_mesh_mesh[idx] = wp.vec2i(shape_a, shape_b)
-                    continue
+                is_mesh_a = type_a == GeoType.MESH or is_hfield_a
+                is_mesh_b = type_b == GeoType.MESH or is_hfield_b
 
                 # Fallback plane-hfield to mesh-plane pipeline (infinite planes only).
                 if (is_plane_a and is_hfield_b) or (is_hfield_a and is_plane_b):
@@ -296,10 +283,17 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                                 shape_pairs_mesh_plane_cumsum[mesh_plane_idx] = cumulative_count_before + vertex_count
                     continue
 
-                # All remaining hfield pairs use native heightfield-vs-convex path.
-                idx = wp.atomic_add(shape_pairs_heightfield_count, 0, 1)
-                if idx < shape_pairs_heightfield.shape[0]:
-                    shape_pairs_heightfield[idx] = wp.vec2i(shape_a, shape_b)
+                # Mesh-like pairs (including hfield-hfield and mesh-hfield) go through mesh-mesh.
+                if is_mesh_a and is_mesh_b:
+                    idx = wp.atomic_add(shape_pairs_mesh_mesh_count, 0, 1)
+                    if idx < shape_pairs_mesh_mesh.shape[0]:
+                        shape_pairs_mesh_mesh[idx] = wp.vec2i(shape_a, shape_b)
+                    continue
+
+                # Remaining hfield pairs are treated as mesh-vs-convex.
+                idx = wp.atomic_add(shape_pairs_mesh_count, 0, 1)
+                if idx < shape_pairs_mesh.shape[0]:
+                    shape_pairs_mesh[idx] = wp.vec2i(shape_a, shape_b)
                 continue
 
             # =====================================================================
@@ -819,14 +813,17 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
         mesh_shape = -1
         non_mesh_shape = -1
 
-        if type_a == GeoType.MESH and type_b != GeoType.MESH:
+        is_mesh_like_a = type_a == GeoType.MESH or type_a == GeoType.HFIELD
+        is_mesh_like_b = type_b == GeoType.MESH or type_b == GeoType.HFIELD
+
+        if is_mesh_like_a and not is_mesh_like_b:
             mesh_shape = shape_a
             non_mesh_shape = shape_b
-        elif type_b == GeoType.MESH and type_a != GeoType.MESH:
+        elif is_mesh_like_b and not is_mesh_like_a:
             mesh_shape = shape_b
             non_mesh_shape = shape_a
         else:
-            # Mesh-mesh collision not supported yet
+            # Mesh-like vs mesh-like pairs are handled by the mesh-mesh kernel.
             return
 
         # Get mesh BVH ID and mesh transform
@@ -1981,6 +1978,7 @@ class NarrowPhase:
                     kernel=self.mesh_mesh_contacts_kernel,
                     dim=(self.num_tile_blocks,),
                     inputs=[
+                        shape_types,
                         shape_data,
                         shape_transform,
                         shape_source,

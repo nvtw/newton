@@ -21,6 +21,7 @@ from newton._src.core.types import MAXVAL
 
 from ..geometry.contact_data import ContactData
 from ..geometry.sdf_utils import SDFData
+from ..geometry.types import GeoType
 
 # Handle both direct execution and module import
 from .contact_reduction import (
@@ -684,6 +685,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 ):
     @wp.kernel(enable_backward=False, module="unique")
     def mesh_sdf_collision_kernel(
+        shape_types: wp.array(dtype=wp.int32),
         shape_data: wp.array(dtype=wp.vec4),
         shape_transform: wp.array(dtype=wp.transform),
         shape_source: wp.array(dtype=wp.uint64),
@@ -724,6 +726,15 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         # Strided loop over pairs
         for pair_idx in range(block_id, pair_count, total_num_blocks):
             pair = shape_pairs_mesh_mesh[pair_idx]
+            type_a = shape_types[pair[0]]
+            type_b = shape_types[pair[1]]
+            has_hfield_pair = type_a == GeoType.HFIELD or type_b == GeoType.HFIELD
+            hfield_shape = pair[0] if type_a == GeoType.HFIELD else pair[1]
+            other_shape = pair[1] if type_a == GeoType.HFIELD else pair[0]
+            other_sdf_idx = shape_sdf_index[other_shape]
+            other_has_sdf = False
+            if other_sdf_idx >= 0:
+                other_has_sdf = sdf_table[other_sdf_idx].sparse_sdf_ptr != wp.uint64(0)
 
             # Sum margins for contact detection (needed for all modes)
             margin = shape_gap[pair[0]] + shape_gap[pair[1]]
@@ -735,6 +746,14 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 # Smart indexing: tri_shape provides triangles, sdf_shape provides SDF
                 tri_shape = pair[mode]
                 sdf_shape = pair[1 - mode]
+                if has_hfield_pair:
+                    # For mesh-hfield fallback pairs:
+                    # - If the non-heightfield shape has an SDF, use hfield triangles vs mesh SDF.
+                    # - Otherwise use mesh triangles vs hfield BVH fallback SDF.
+                    if other_has_sdf and tri_shape != hfield_shape:
+                        continue
+                    if not other_has_sdf and sdf_shape != hfield_shape:
+                        continue
 
                 # Load data for this mode
                 mesh_id_tri = shape_source[tri_shape]
@@ -895,6 +914,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
     @wp.kernel(enable_backward=False, module="unique")
     def mesh_sdf_collision_reduce_kernel(
+        shape_types: wp.array(dtype=wp.int32),
         shape_data: wp.array(dtype=wp.vec4),
         shape_transform: wp.array(dtype=wp.transform),
         shape_source: wp.array(dtype=wp.uint64),
@@ -915,6 +935,15 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         # Grid stride loop over pairs - each block processes multiple pairs if pair_count > total_num_blocks
         for pair_idx in range(block_id, pair_count, total_num_blocks):
             pair = shape_pairs_mesh_mesh[pair_idx]
+            type_a = shape_types[pair[0]]
+            type_b = shape_types[pair[1]]
+            has_hfield_pair = type_a == GeoType.HFIELD or type_b == GeoType.HFIELD
+            hfield_shape = pair[0] if type_a == GeoType.HFIELD else pair[1]
+            other_shape = pair[1] if type_a == GeoType.HFIELD else pair[0]
+            other_sdf_idx = shape_sdf_index[other_shape]
+            other_has_sdf = False
+            if other_sdf_idx >= 0:
+                other_has_sdf = sdf_table[other_sdf_idx].sparse_sdf_ptr != wp.uint64(0)
 
             # Sum margins for contact detection (needed for all modes)
             margin = shape_gap[pair[0]] + shape_gap[pair[1]]
@@ -947,6 +976,14 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 # Smart indexing: tri_shape provides triangles, sdf_shape provides SDF
                 tri_shape = pair[mode]
                 sdf_shape = pair[1 - mode]
+                if has_hfield_pair:
+                    # For mesh-hfield fallback pairs:
+                    # - If the non-heightfield shape has an SDF, use hfield triangles vs mesh SDF.
+                    # - Otherwise use mesh triangles vs hfield BVH fallback SDF.
+                    if other_has_sdf and tri_shape != hfield_shape:
+                        continue
+                    if not other_has_sdf and sdf_shape != hfield_shape:
+                        continue
 
                 # Load data for this mode
                 mesh_id_tri = shape_source[tri_shape]

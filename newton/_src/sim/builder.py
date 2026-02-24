@@ -8787,7 +8787,9 @@ class ModelBuilder:
                     if hfield_hash not in finalized_hfield_fallback_meshes:
                         hfield_world = hfield.min_z + hfield.data * (hfield.max_z - hfield.min_z)
                         fallback_mesh = Mesh.create_heightfield(
-                            heightfield=hfield_world,
+                            # create_mesh_heightfield expects ij indexing (i=X, j=Y),
+                            # while Heightfield stores row-major data (row=Y, col=X).
+                            heightfield=hfield_world.T,
                             extent_x=2.0 * hfield.hx,
                             extent_y=2.0 * hfield.hy,
                             ground_z=hfield.min_z,
