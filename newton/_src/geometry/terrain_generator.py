@@ -622,11 +622,11 @@ def create_mesh_heightfield(
     The ``ground_z`` parameter is retained for backward compatibility but not used.
 
     Args:
-        heightfield: (grid_size_x, grid_size_y) array of Z heights for top surface
-        extent_x: Physical size in X direction (meters)
-        extent_y: Physical size in Y direction (meters)
-        center_x: Center X coordinate (default: 0.0)
-        center_y: Center Y coordinate (default: 0.0)
+        heightfield: (grid_size_x, grid_size_y) array of Z heights [m] for top surface.
+        extent_x: Physical size in X direction [m].
+        extent_y: Physical size in Y direction [m].
+        center_x: Center X coordinate [m] (default: 0.0).
+        center_y: Center Y coordinate [m] (default: 0.0).
         ground_z: Deprecated. Kept for backward compatibility; ignored.
 
     Returns:

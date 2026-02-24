@@ -313,14 +313,14 @@ def extract_shape_data(
     Extract shape data from the narrow phase API arrays.
 
     Args:
-        shape_idx: Index of the shape
-        shape_transform: World space transforms (already computed)
-        shape_types: Shape types
-        shape_data: Shape data (vec4 - scale xyz, margin_offset w)
-        shape_source: Source pointers (mesh IDs etc.)
+        shape_idx: Index of the shape.
+        shape_transform: World space transforms (already computed).
+        shape_types: Shape types.
+        shape_data: Shape data (vec4 - scale xyz, margin_offset w).
+        shape_source: Source pointers (mesh IDs etc.).
 
     Returns:
-        tuple: (position, orientation, shape_data, scale, margin_offset)
+        tuple: (position, orientation, generic_shape_data, scale, margin_offset [m])
     """
     # Get shape's world transform (already in world space)
     X_ws = shape_transform[shape_idx]

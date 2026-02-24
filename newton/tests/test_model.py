@@ -273,7 +273,7 @@ class TestModelMesh(unittest.TestCase):
         self.assertIn("missed collisions", warning_msg)
 
     def test_shape_gap_non_negative_no_warning(self):
-        """Test that no warning is raised when shape gap >= 0."""
+        """Test that no warning is raised when shape gap [m] >= 0."""
         builder = ModelBuilder()
         body = builder.add_body(mass=1.0)
 

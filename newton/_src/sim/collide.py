@@ -281,7 +281,7 @@ def _estimate_rigid_contact_max(model: Model) -> int:
     MESH_CPP = 40
     MAX_NEIGHBORS_PER_SHAPE = 20
 
-    mesh_mask = shape_types == int(GeoType.MESH)
+    mesh_mask = (shape_types == int(GeoType.MESH)) | (shape_types == int(GeoType.HFIELD))
     plane_mask = shape_types == int(GeoType.PLANE)
     non_plane_mask = ~plane_mask
     num_meshes = int(np.count_nonzero(mesh_mask))
