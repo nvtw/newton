@@ -4542,7 +4542,12 @@ def Xform "Articulation" (
 
     @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
     def test_gap_parsing(self):
-        """Test that gap is parsed correctly from USD."""
+        """Verify USD contact margin parsing into shape gap values [m].
+
+        The ``newton:contactMargin`` USD attribute should map to per-shape
+        ``gap`` values [m], while colliders without an explicit value should
+        fall back to the configured default gap [m].
+        """
         from pxr import Usd, UsdGeom, UsdPhysics
 
         stage = Usd.Stage.CreateInMemory()

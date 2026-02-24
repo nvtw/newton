@@ -2632,12 +2632,12 @@ class TestMuJoCoSolverGeomProperties(TestMuJoCoSolverPropertiesBase):
                     msg=f"Updated geom_gap mismatch for shape {shape_idx} in world {world_idx}",
                 )
 
-    def test_geom_margin_from_thickness(self):
-        """Test shape_margin to geom_margin conversion and runtime updates.
+    def test_geom_margin_from_shape_margin(self):
+        """Verify shape_margin to geom_margin conversion and runtime updates.
 
-        Verifies that shape_margin [m] values are correctly propagated to
-        geom_margin [m] during solver initialization and after runtime updates
-        via notify_model_changed across multiple worlds.
+        Confirms that shape_margin [m] values are propagated to geom_margin [m]
+        during solver initialization and after runtime updates via
+        notify_model_changed across multiple worlds.
         """
         num_worlds = 2
         template_builder = newton.ModelBuilder()
