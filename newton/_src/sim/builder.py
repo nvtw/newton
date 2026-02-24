@@ -8796,7 +8796,6 @@ class ModelBuilder:
                             heightfield=hfield_world.T,
                             extent_x=2.0 * hfield.hx,
                             extent_y=2.0 * hfield.hy,
-                            ground_z=hfield.min_z,
                             compute_inertia=False,
                         )
                         fallback_ptr = fallback_mesh.finalize(device=device)

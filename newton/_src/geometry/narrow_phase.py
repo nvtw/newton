@@ -260,7 +260,9 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 is_mesh_a = type_a == GeoType.MESH or is_hfield_a
                 is_mesh_b = type_b == GeoType.MESH or is_hfield_b
 
-                # Fallback plane-hfield to mesh-plane pipeline (infinite planes only).
+                # Plane-hfield: infinite planes use the mesh-plane pipeline,
+                # finite planes are treated as convex shapes and go through
+                # mesh-vs-convex (GJK/MPR).
                 if (is_plane_a and is_hfield_b) or (is_hfield_a and is_plane_b):
                     plane_shape = shape_a
                     mesh_shape = shape_b
@@ -277,10 +279,13 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                             vertex_count = mesh_obj.points.shape[0]
                             mesh_plane_idx = wp.atomic_add(shape_pairs_mesh_plane_count, 0, 1)
                             if mesh_plane_idx < shape_pairs_mesh_plane.shape[0]:
-                                # Store (mesh, plane)
                                 shape_pairs_mesh_plane[mesh_plane_idx] = wp.vec2i(mesh_shape, plane_shape)
                                 cumulative_count_before = wp.atomic_add(mesh_plane_vertex_total_count, 0, vertex_count)
                                 shape_pairs_mesh_plane_cumsum[mesh_plane_idx] = cumulative_count_before + vertex_count
+                    else:
+                        idx = wp.atomic_add(shape_pairs_mesh_count, 0, 1)
+                        if idx < shape_pairs_mesh.shape[0]:
+                            shape_pairs_mesh[idx] = wp.vec2i(shape_a, shape_b)
                     continue
 
                 # Mesh-like pairs (including hfield-hfield and mesh-hfield) go through mesh-mesh.
@@ -1787,7 +1792,6 @@ class NarrowPhase:
                     kernel=self.mesh_mesh_contacts_kernel,
                     dim=(self.num_tile_blocks,),
                     inputs=[
-                        shape_types,
                         shape_data,
                         shape_transform,
                         shape_source,

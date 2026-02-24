@@ -582,7 +582,6 @@ class Mesh:
         extent_y: float,
         center_x: float = 0.0,
         center_y: float = 0.0,
-        ground_z: float = 0.0,
         *,
         compute_inertia: bool = True,
     ) -> "Mesh":
@@ -595,8 +594,6 @@ class Mesh:
             extent_y [m]: Total extent along Y.
             center_x [m]: Heightfield center position along X.
             center_y [m]: Heightfield center position along Y.
-            ground_z [m]: Deprecated compatibility argument. Bottom depth is
-                derived automatically from heightfield spacing.
             compute_inertia: If ``True``, compute mesh mass properties.
 
         Returns:
@@ -610,7 +607,6 @@ class Mesh:
             extent_y=extent_y,
             center_x=center_x,
             center_y=center_y,
-            ground_z=ground_z,
         )
         return Mesh(vertices, indices, compute_inertia=compute_inertia)
 

@@ -715,7 +715,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 ):
     @wp.kernel(enable_backward=False, module="unique")
     def mesh_sdf_collision_kernel(
-        shape_types: wp.array(dtype=wp.int32),
         shape_data: wp.array(dtype=wp.vec4),
         shape_transform: wp.array(dtype=wp.transform),
         shape_source: wp.array(dtype=wp.uint64),
@@ -926,7 +925,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
     @wp.kernel(enable_backward=False, module="unique")
     def mesh_sdf_collision_reduce_kernel(
-        shape_types: wp.array(dtype=wp.int32),
         shape_data: wp.array(dtype=wp.vec4),
         shape_transform: wp.array(dtype=wp.transform),
         shape_source: wp.array(dtype=wp.uint64),

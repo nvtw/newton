@@ -622,11 +622,12 @@ def compute_sdf_from_heightfield_mesh(
     """
     if not wp.is_cuda_available():
         raise RuntimeError("compute_sdf_from_heightfield_mesh requires CUDA but no CUDA device is available")
-    assert len(narrow_band_distance) == 2, "narrow_band_distance must be a tuple of two floats"
-    assert narrow_band_distance[0] < 0.0 < narrow_band_distance[1], (
-        "narrow_band_distance[0] must be less than 0.0 and narrow_band_distance[1] must be greater than 0.0"
-    )
-    assert margin > 0, "margin must be > 0"
+    if len(narrow_band_distance) != 2:
+        raise ValueError("narrow_band_distance must be a sequence of exactly two floats")
+    if not (narrow_band_distance[0] < 0.0 < narrow_band_distance[1]):
+        raise ValueError(f"narrow_band_distance must satisfy inner < 0 < outer, got {narrow_band_distance}")
+    if margin <= 0:
+        raise ValueError(f"margin must be > 0, got {margin}")
 
     grid = _compute_heightfield_aligned_sdf_grid_params(
         heightfield,

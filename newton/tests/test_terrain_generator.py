@@ -164,7 +164,7 @@ class TestTerrainGenerator(unittest.TestCase):
         """Test heightfield to mesh with flat terrain (all zeros)."""
         heightfield = np.zeros((5, 5), dtype=np.float32)
 
-        vertices, _indices = create_mesh_heightfield(heightfield=heightfield, extent_x=4.0, extent_y=4.0, ground_z=-1.0)
+        vertices, _indices = create_mesh_heightfield(heightfield=heightfield, extent_x=4.0, extent_y=4.0)
 
         # Check that top surface is at z=0
         top_count = heightfield.size
@@ -249,7 +249,7 @@ class TestTerrainGenerator(unittest.TestCase):
         """Test that the generated mesh is watertight (closed)."""
         heightfield = np.array([[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32)
 
-        vertices, _indices = create_mesh_heightfield(heightfield=heightfield, extent_x=2.0, extent_y=2.0, ground_z=-0.5)
+        vertices, _indices = create_mesh_heightfield(heightfield=heightfield, extent_x=2.0, extent_y=2.0)
 
         # Check top + bottom boundary ring vertex count
         num_grid_points = heightfield.size
@@ -411,14 +411,12 @@ class TestTerrainGenerator(unittest.TestCase):
         self.assertAlmostEqual(x_center, center_x, places=5)
         self.assertAlmostEqual(y_center, center_y, places=5)
 
-    def test_heightfield_terrain_with_custom_ground_z(self):
-        """Test heightfield terrain generation with custom ground_z."""
+    def test_heightfield_terrain_auto_derived_bottom(self):
+        """Test that heightfield terrain bottom is auto-derived from cell size."""
         size = (10.0, 10.0)
         heightfield = np.array([[0.0, 0.5], [0.5, 1.0]], dtype=np.float32)
-        ground_z = -2.0
-        vertices, _indices = _heightfield_terrain(size, heightfield=heightfield, ground_z=ground_z)
+        vertices, _indices = _heightfield_terrain(size, heightfield=heightfield)
 
-        # ground_z is accepted for compatibility but bottom is auto-derived.
         cell_x = size[0] / (heightfield.shape[0] - 1)
         cell_y = size[1] / (heightfield.shape[1] - 1)
         expected_bottom_z = float(np.min(heightfield) - 2.0 * max(cell_x, cell_y))

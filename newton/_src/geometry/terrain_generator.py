@@ -416,7 +416,6 @@ def _heightfield_terrain(
     heightfield: np.ndarray | None = None,
     center_x: float | None = None,
     center_y: float | None = None,
-    ground_z: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Generate terrain from a custom heightfield array.
 
@@ -427,8 +426,6 @@ def _heightfield_terrain(
         heightfield: (grid_size, grid_size) array of Z heights. If None, creates flat terrain.
         center_x: Center X coordinate. If None, defaults to size[0]/2 to align with other terrain types.
         center_y: Center Y coordinate. If None, defaults to size[1]/2 to align with other terrain types.
-        ground_z: Deprecated compatibility argument. Bottom depth is derived
-            automatically from the heightfield and cell size.
 
     Returns:
         tuple of (vertices, indices) where vertices is (N, 3) float32 array
@@ -450,7 +447,6 @@ def _heightfield_terrain(
         extent_y=size[1],
         center_x=center_x,
         center_y=center_y,
-        ground_z=ground_z,
     )
 
     return vertices, indices
@@ -608,7 +604,6 @@ def create_mesh_heightfield(
     extent_y: float,
     center_x: float = 0.0,
     center_y: float = 0.0,
-    ground_z: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Convert a 2D heightfield array to a watertight triangle mesh.
 
@@ -619,7 +614,6 @@ def create_mesh_heightfield(
 
     The bottom cap height is computed automatically as:
     ``bottom_z = min(heightfield) - 2 * max(cell_size_x, cell_size_y)``.
-    The ``ground_z`` parameter is retained for backward compatibility but not used.
 
     Args:
         heightfield: (grid_size_x, grid_size_y) array of Z heights [m] for top surface.
@@ -627,7 +621,6 @@ def create_mesh_heightfield(
         extent_y: Physical size in Y direction [m].
         center_x: Center X coordinate [m] (default: 0.0).
         center_y: Center Y coordinate [m] (default: 0.0).
-        ground_z: Deprecated. Kept for backward compatibility; ignored.
 
     Returns:
         tuple of (vertices, indices) where vertices is (N, 3) float32 array
