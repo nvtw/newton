@@ -903,8 +903,8 @@ class Model:
 
         Note:
             Rigid contact gaps are controlled per-shape via :attr:`Model.shape_gap`, which is populated
-            from ``ShapeConfig.gap`` during model building. If a shape doesn't specify a gap,
-            it defaults to ``builder.rigid_gap``. To adjust contact gaps, set them before calling
+            from ``ShapeConfig.gap`` [m] during model building. If a shape doesn't specify a gap [m],
+            it defaults to ``builder.rigid_gap`` [m]. To adjust contact gaps [m], set them before calling
             :meth:`ModelBuilder.finalize`.
         Returns:
             Contacts: The contact object containing collision information.
