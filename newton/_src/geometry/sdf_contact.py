@@ -620,6 +620,13 @@ def add_to_shared_buffer_atomic(
 
 
 @wp.func
+def _sphere_aabb_distance(center: wp.vec3, aabb_lower: wp.vec3, aabb_upper: wp.vec3) -> float:
+    """Signed distance from a point to an AABB (0 when inside, positive outside)."""
+    closest = wp.min(wp.max(center, aabb_lower), aabb_upper)
+    return wp.length(center - closest)
+
+
+@wp.func
 def find_interesting_triangles(
     thread_id: int,
     mesh_scale: wp.vec3,
@@ -638,10 +645,25 @@ def find_interesting_triangles(
     Determines which triangles are close enough to the SDF to potentially generate contacts.
     Triangles are transformed to unscaled SDF space before testing.
 
+    Uses a two-level culling strategy:
+    1. **AABB early-out (pure ALU, no memory access):** If the triangle's bounding
+       sphere is farther from the SDF volume's AABB than ``contact_distance``, the
+       triangle is discarded immediately.  This avoids the expensive volume sample
+       for the vast majority of triangles in large meshes (e.g. heightfield terrains
+       where a small object only touches a tiny patch).
+    2. **SDF sample:** For triangles that survive the AABB test, sample the SDF at
+       the bounding-sphere center to get a tighter distance estimate.
+
     Buffer layout: [0..block_dim-1] = triangle indices, [block_dim] = count, [block_dim+1] = progress
     """
     num_tris_indices = wp.mesh_get(mesh_id).indices.shape[0]
     capacity = wp.block_dim()
+
+    # Precompute SDF AABB in unscaled local space (constant for all triangles in
+    # this pair).  For the BVH fallback path sdf_data is empty so the AABB check
+    # is skipped — the BVH query already has its own max_dist early-out.
+    sdf_aabb_lower = sdf_data.center - sdf_data.half_extents
+    sdf_aabb_upper = sdf_data.center + sdf_data.half_extents
 
     synchronize()  # Ensure buffer state is consistent before starting
 
@@ -662,14 +684,23 @@ def find_interesting_triangles(
             v2 = wp.cw_mul(v2_scaled, inv_sdf_scale)
             bounding_sphere_center, bounding_sphere_radius = get_bounding_sphere(v0, v1, v2)
 
-            # Use extrapolated SDF distance query for culling (in unscaled space)
+            threshold = bounding_sphere_radius + contact_distance
+
             if use_bvh_for_sdf:
-                sdf_dist = sample_sdf_using_mesh(
-                    sdf_mesh_id, bounding_sphere_center, 1.01 * (bounding_sphere_radius + contact_distance)
-                )
+                # BVH path: mesh_query_point_sign_normal already uses max_dist
+                # internally, so no separate AABB early-out needed.
+                sdf_dist = sample_sdf_using_mesh(sdf_mesh_id, bounding_sphere_center, 1.01 * threshold)
+                add_triangle = sdf_dist <= threshold
             else:
-                sdf_dist = sample_sdf_extrapolated(sdf_data, bounding_sphere_center)
-            add_triangle = sdf_dist <= (bounding_sphere_radius + contact_distance)
+                # SDF path: cheap AABB-vs-sphere test before the expensive volume
+                # sample.  If the bounding sphere can't reach the SDF extent there
+                # is no way the triangle can be within contact_distance of the
+                # surface, because SDF values outside the extent are >= the
+                # distance to the extent boundary.
+                aabb_dist = _sphere_aabb_distance(bounding_sphere_center, sdf_aabb_lower, sdf_aabb_upper)
+                if aabb_dist <= threshold:
+                    sdf_dist = sample_sdf_extrapolated(sdf_data, bounding_sphere_center)
+                    add_triangle = sdf_dist <= threshold
 
         synchronize()  # Ensure all threads have read base_tri_idx before any writes
         add_to_shared_buffer_atomic(thread_id, add_triangle, tri_idx, buffer)
