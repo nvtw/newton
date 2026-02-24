@@ -595,7 +595,8 @@ class Mesh:
             extent_y [m]: Total extent along Y.
             center_x [m]: Heightfield center position along X.
             center_y [m]: Heightfield center position along Y.
-            ground_z [m]: Bottom surface Z value for watertight side walls.
+            ground_z [m]: Deprecated compatibility argument. Bottom depth is
+                derived automatically from heightfield spacing.
             compute_inertia: If ``True``, compute mesh mass properties.
 
         Returns:

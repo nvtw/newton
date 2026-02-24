@@ -76,8 +76,10 @@ class TestTerrainGenerator(unittest.TestCase):
         self.assertEqual(vertices.dtype, np.float32)
         self.assertEqual(indices.dtype, np.int32)
 
-        # Check vertex count: 3x3 grid = 9 top vertices + 9 bottom vertices = 18 total
-        self.assertEqual(len(vertices), 18)
+        # Check vertex count: top grid + bottom boundary ring.
+        nrow, ncol = heightfield.shape
+        expected_vertices = nrow * ncol + (2 * nrow + 2 * ncol - 4)
+        self.assertEqual(len(vertices), expected_vertices)
 
         # Check that vertices have 3 coordinates
         self.assertEqual(vertices.shape[1], 3)
@@ -165,12 +167,16 @@ class TestTerrainGenerator(unittest.TestCase):
         vertices, _indices = create_mesh_heightfield(heightfield=heightfield, extent_x=4.0, extent_y=4.0, ground_z=-1.0)
 
         # Check that top surface is at z=0
-        top_vertices = vertices[: len(vertices) // 2]
+        top_count = heightfield.size
+        top_vertices = vertices[:top_count]
         assert_np_equal(top_vertices[:, 2], np.zeros(len(top_vertices)), tol=1e-6)
 
-        # Check that bottom surface is at ground_z=-1.0
-        bottom_vertices = vertices[len(vertices) // 2 :]
-        assert_np_equal(bottom_vertices[:, 2], np.full(len(bottom_vertices), -1.0), tol=1e-6)
+        # Bottom is auto-derived: min_z - 2*max(cell_x, cell_y)
+        cell_x = 4.0 / (heightfield.shape[0] - 1)
+        cell_y = 4.0 / (heightfield.shape[1] - 1)
+        expected_bottom_z = float(np.min(heightfield) - 2.0 * max(cell_x, cell_y))
+        bottom_vertices = vertices[top_count:]
+        assert_np_equal(bottom_vertices[:, 2], np.full(len(bottom_vertices), expected_bottom_z), tol=1e-6)
 
     def test_heightfield_to_mesh_sloped_terrain(self):
         """Test heightfield to mesh with sloped terrain."""
@@ -180,7 +186,7 @@ class TestTerrainGenerator(unittest.TestCase):
         vertices, _indices = create_mesh_heightfield(heightfield=heightfield, extent_x=2.0, extent_y=2.0)
 
         # Check that heights are preserved in top vertices
-        top_vertices = vertices[: len(vertices) // 2]
+        top_vertices = vertices[: heightfield.size]
         expected_heights = heightfield.ravel()
         assert_np_equal(top_vertices[:, 2], expected_heights, tol=1e-6)
 
@@ -192,11 +198,11 @@ class TestTerrainGenerator(unittest.TestCase):
         vertices, _indices = create_mesh_heightfield(heightfield=heightfield, extent_x=5.0, extent_y=5.0)
 
         # Check vertex count
-        expected_vertices = 10 * 10 * 2  # top + bottom
+        expected_vertices = 10 * 10 + (2 * 10 + 2 * 10 - 4)  # top + bottom boundary ring
         self.assertEqual(len(vertices), expected_vertices)
 
         # Check that heights are preserved
-        top_vertices = vertices[: len(vertices) // 2]
+        top_vertices = vertices[: heightfield.size]
         assert_np_equal(top_vertices[:, 2], heightfield.ravel(), tol=1e-6)
 
     def test_heightfield_to_mesh_center_offset(self):
@@ -221,8 +227,8 @@ class TestTerrainGenerator(unittest.TestCase):
         """Test that the correct number of faces are generated."""
         # For an NxM grid, we expect:
         # - Top surface: 2 * (N-1) * (M-1) triangles
-        # - Bottom surface: 2 * (N-1) * (M-1) triangles
-        # - 4 side walls: 2 * (N-1) + 2 * (M-1) + 2 * (N-1) + 2 * (M-1) = 4 * (N-1 + M-1) triangles
+        # - Side walls: 4 * (N-1 + M-1) triangles
+        # - Bottom cap: 2 triangles
         N, M = 5, 7
         rng = np.random.default_rng(42)
         heightfield = rng.random((N, M)).astype(np.float32)
@@ -232,10 +238,10 @@ class TestTerrainGenerator(unittest.TestCase):
         # Each triangle has 3 indices
         num_triangles = len(indices) // 3
 
-        # Expected: top + bottom + 4 walls
-        expected_top_bottom = 2 * 2 * (N - 1) * (M - 1)
+        # Expected: top + walls + two-triangle flat bottom cap
+        expected_top = 2 * (N - 1) * (M - 1)
         expected_walls = 4 * ((N - 1) + (M - 1))
-        expected_total = expected_top_bottom + expected_walls
+        expected_total = expected_top + expected_walls + 2
 
         self.assertEqual(num_triangles, expected_total)
 
@@ -245,13 +251,17 @@ class TestTerrainGenerator(unittest.TestCase):
 
         vertices, _indices = create_mesh_heightfield(heightfield=heightfield, extent_x=2.0, extent_y=2.0, ground_z=-0.5)
 
-        # Check that we have both top and bottom vertices
+        # Check top + bottom boundary ring vertex count
         num_grid_points = heightfield.size
-        self.assertEqual(len(vertices), 2 * num_grid_points)
+        num_boundary_points = 2 * heightfield.shape[0] + 2 * heightfield.shape[1] - 4
+        self.assertEqual(len(vertices), num_grid_points + num_boundary_points)
 
-        # Check that bottom vertices are at ground_z
+        # Bottom is auto-derived: min_z - 2*max(cell_x, cell_y)
+        cell_x = 2.0 / (heightfield.shape[0] - 1)
+        cell_y = 2.0 / (heightfield.shape[1] - 1)
+        expected_bottom_z = float(np.min(heightfield) - 2.0 * max(cell_x, cell_y))
         bottom_vertices = vertices[num_grid_points:]
-        assert_np_equal(bottom_vertices[:, 2], np.full(num_grid_points, -0.5), tol=1e-6)
+        assert_np_equal(bottom_vertices[:, 2], np.full(num_boundary_points, expected_bottom_z), tol=1e-6)
 
     # =========================================================================
     # Tests for existing terrain generation functions
@@ -408,9 +418,11 @@ class TestTerrainGenerator(unittest.TestCase):
         ground_z = -2.0
         vertices, _indices = _heightfield_terrain(size, heightfield=heightfield, ground_z=ground_z)
 
-        # Check that bottom vertices are at ground_z
-        # Bottom vertices should be at ground_z
-        self.assertAlmostEqual(vertices[:, 2].min(), ground_z, places=5)
+        # ground_z is accepted for compatibility but bottom is auto-derived.
+        cell_x = size[0] / (heightfield.shape[0] - 1)
+        cell_y = size[1] / (heightfield.shape[1] - 1)
+        expected_bottom_z = float(np.min(heightfield) - 2.0 * max(cell_x, cell_y))
+        self.assertAlmostEqual(vertices[:, 2].min(), expected_bottom_z, places=5)
 
     # =========================================================================
     # Tests for generate_terrain_grid

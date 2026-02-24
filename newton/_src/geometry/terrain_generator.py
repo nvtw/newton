@@ -427,7 +427,8 @@ def _heightfield_terrain(
         heightfield: (grid_size, grid_size) array of Z heights. If None, creates flat terrain.
         center_x: Center X coordinate. If None, defaults to size[0]/2 to align with other terrain types.
         center_y: Center Y coordinate. If None, defaults to size[1]/2 to align with other terrain types.
-        ground_z: Z coordinate of bottom surface (default: 0.0)
+        ground_z: Deprecated compatibility argument. Bottom depth is derived
+            automatically from the heightfield and cell size.
 
     Returns:
         tuple of (vertices, indices) where vertices is (N, 3) float32 array
@@ -611,8 +612,14 @@ def create_mesh_heightfield(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Convert a 2D heightfield array to a watertight triangle mesh.
 
-    Creates a closed mesh with top surface (from heightfield), bottom surface (at ground_z),
-    and side walls connecting them. Each grid cell becomes two triangles.
+    Creates a closed mesh with:
+      - full top triangulation from the heightfield grid
+      - side skirts (two triangles per boundary edge segment)
+      - a flat bottom cap made of exactly two triangles
+
+    The bottom cap height is computed automatically as:
+    ``bottom_z = min(heightfield) - 2 * max(cell_size_x, cell_size_y)``.
+    The ``ground_z`` parameter is retained for backward compatibility but not used.
 
     Args:
         heightfield: (grid_size_x, grid_size_y) array of Z heights for top surface
@@ -620,7 +627,7 @@ def create_mesh_heightfield(
         extent_y: Physical size in Y direction (meters)
         center_x: Center X coordinate (default: 0.0)
         center_y: Center Y coordinate (default: 0.0)
-        ground_z: Z coordinate of bottom surface (default: 0.0)
+        ground_z: Deprecated. Kept for backward compatibility; ignored.
 
     Returns:
         tuple of (vertices, indices) where vertices is (N, 3) float32 array
@@ -652,11 +659,38 @@ def create_mesh_heightfield(
     y = np.linspace(-extent_y / 2, extent_y / 2, grid_size_y) + center_y
     X, Y = np.meshgrid(x, y, indexing="ij")
 
-    # Top and bottom surface vertices
+    # Top surface vertices
     top_vertices = np.column_stack([X.ravel(), Y.ravel(), heightfield.ravel()]).astype(np.float32)
-    bottom_z = np.full_like(heightfield, ground_z)
-    bottom_vertices = np.column_stack([X.ravel(), Y.ravel(), bottom_z.ravel()]).astype(np.float32)
-    vertices = np.vstack([top_vertices, bottom_vertices])
+    num_top_vertices = len(top_vertices)
+
+    # Bottom cap level: exactly two max-cell-sizes below min top height.
+    cell_size_x = extent_x / float(grid_size_x - 1)
+    cell_size_y = extent_y / float(grid_size_y - 1)
+    bottom_z = float(np.min(heightfield) - 2.0 * max(cell_size_x, cell_size_y))
+
+    # Build bottom boundary vertices (same XY as top boundary, constant Z).
+    # We keep perimeter segmentation for side skirts and use only the four
+    # corners for the two-triangle bottom cap.
+    boundary_top_ids: list[int] = []
+    # Front edge (j=0): i=0..N-1
+    for i in range(grid_size_x):
+        boundary_top_ids.append(i * grid_size_y)
+    # Right edge (i=N-1): j=1..M-1
+    for j in range(1, grid_size_y):
+        boundary_top_ids.append((grid_size_x - 1) * grid_size_y + j)
+    # Back edge (j=M-1): i=N-2..0
+    for i in range(grid_size_x - 2, -1, -1):
+        boundary_top_ids.append(i * grid_size_y + (grid_size_y - 1))
+    # Left edge (i=0): j=M-2..1
+    for j in range(grid_size_y - 2, 0, -1):
+        boundary_top_ids.append(j)
+
+    boundary_top_ids_np = np.array(boundary_top_ids, dtype=np.int32)
+    boundary_bottom_vertices = top_vertices[boundary_top_ids_np].copy()
+    boundary_bottom_vertices[:, 2] = bottom_z
+    boundary_bottom_offset = num_top_vertices
+
+    vertices = np.vstack([top_vertices, boundary_bottom_vertices])
 
     # Generate quad indices for all grid cells
     i_indices = np.arange(grid_size_x - 1)
@@ -672,52 +706,39 @@ def create_mesh_heightfield(
     # Top surface faces (counter-clockwise)
     top_faces = np.column_stack([np.column_stack([v0, v2, v1]), np.column_stack([v1, v2, v3])]).reshape(-1, 3)
 
-    # Bottom surface faces (clockwise)
-    num_top_vertices = len(top_vertices)
-    bottom_faces = np.column_stack(
+    # Side wall faces: two triangles per perimeter segment
+    ring_len = len(boundary_top_ids)
+    side_faces = np.empty((2 * ring_len, 3), dtype=np.int32)
+    for k in range(ring_len):
+        kn = (k + 1) % ring_len
+        t0 = boundary_top_ids[k]
+        t1 = boundary_top_ids[kn]
+        b0 = boundary_bottom_offset + k
+        b1 = boundary_bottom_offset + kn
+        # Outward winding for the boundary order above.
+        side_faces[2 * k + 0] = (t0, b0, t1)
+        side_faces[2 * k + 1] = (t1, b0, b1)
+
+    # Flat bottom cap: exactly two triangles using bottom corner vertices.
+    # Corner positions in boundary ring:
+    #   c0: (i=0, j=0)
+    #   c1: (i=N-1, j=0)
+    #   c2: (i=N-1, j=M-1)
+    #   c3: (i=0, j=M-1)
+    c0 = boundary_bottom_offset + 0
+    c1 = boundary_bottom_offset + (grid_size_x - 1)
+    c2 = boundary_bottom_offset + (grid_size_x + grid_size_y - 2)
+    c3 = boundary_bottom_offset + (2 * grid_size_x + grid_size_y - 3)
+    bottom_faces = np.array(
         [
-            np.column_stack([num_top_vertices + v0, num_top_vertices + v1, num_top_vertices + v2]),
-            np.column_stack([num_top_vertices + v1, num_top_vertices + v3, num_top_vertices + v2]),
-        ]
-    ).reshape(-1, 3)
-
-    # Side wall faces (4 edges)
-    side_faces_list = []
-    i_edge = np.arange(grid_size_x - 1)
-    j_edge = np.arange(grid_size_y - 1)
-
-    # Front edge (j=0)
-    t0, t1 = i_edge * grid_size_y, (i_edge + 1) * grid_size_y
-    b0, b1 = num_top_vertices + t0, num_top_vertices + t1
-    side_faces_list.append(
-        np.column_stack([np.column_stack([t0, b0, t1]), np.column_stack([t1, b0, b1])]).reshape(-1, 3)
-    )
-
-    # Back edge (j=grid_size_y-1)
-    t0 = i_edge * grid_size_y + (grid_size_y - 1)
-    t1 = (i_edge + 1) * grid_size_y + (grid_size_y - 1)
-    b0, b1 = num_top_vertices + t0, num_top_vertices + t1
-    side_faces_list.append(
-        np.column_stack([np.column_stack([t0, t1, b0]), np.column_stack([t1, b1, b0])]).reshape(-1, 3)
-    )
-
-    # Left edge (i=0)
-    t0, t1 = j_edge, j_edge + 1
-    b0, b1 = num_top_vertices + t0, num_top_vertices + t1
-    side_faces_list.append(
-        np.column_stack([np.column_stack([t0, t1, b0]), np.column_stack([t1, b1, b0])]).reshape(-1, 3)
-    )
-
-    # Right edge (i=grid_size_x-1)
-    t0 = (grid_size_x - 1) * grid_size_y + j_edge
-    t1 = (grid_size_x - 1) * grid_size_y + (j_edge + 1)
-    b0, b1 = num_top_vertices + t0, num_top_vertices + t1
-    side_faces_list.append(
-        np.column_stack([np.column_stack([t0, b0, t1]), np.column_stack([t1, b0, b1])]).reshape(-1, 3)
+            [c0, c3, c1],
+            [c1, c3, c2],
+        ],
+        dtype=np.int32,
     )
 
     # Combine all faces
-    all_faces = np.vstack([top_faces, bottom_faces, *side_faces_list])
+    all_faces = np.vstack([top_faces, side_faces, bottom_faces])
     indices = all_faces.astype(np.int32).flatten()
 
     return vertices, indices

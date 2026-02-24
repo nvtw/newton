@@ -558,7 +558,10 @@ often be improved by attaching a precomputed SDF to the mesh (``mesh.build_sdf(.
 
 .. note::
    ``HFIELD`` collisions in the Newton pipeline are routed through a generated mesh
-   fallback path, reusing mesh-vs-X narrow-phase processing.
+   fallback path, reusing mesh-vs-X narrow-phase processing. On CUDA devices,
+   Newton additionally builds an internal, automatically aligned SDF for each
+   heightfield to accelerate mesh/SDF-vs-heightfield contact queries. This
+   acceleration path is transparent to user code.
 
 .. note::
    **SDF** in this table refers to shapes with precomputed SDF data. There is no

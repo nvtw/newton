@@ -33,7 +33,11 @@ import warp as wp
 import newton
 from newton import GeoType, Mesh
 from newton._src.geometry.sdf_contact import sample_sdf_extrapolated, sample_sdf_grad_extrapolated
-from newton._src.geometry.sdf_utils import SDFData, compute_sdf_from_shape
+from newton._src.geometry.sdf_utils import (
+    SDFData,
+    _compute_heightfield_aligned_sdf_grid_params,
+    compute_sdf_from_shape,
+)
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
 
 # Skip all tests in this module if CUDA is not available
@@ -1194,6 +1198,75 @@ class TestMeshSDFCollisionFlag(unittest.TestCase):
         """GeoType.SDF and add_shape_sdf should not exist."""
         self.assertFalse(hasattr(newton.GeoType, "SDF"))
         self.assertFalse(hasattr(newton.ModelBuilder, "add_shape_sdf"))
+
+
+class TestHeightfieldSDFAlignmentGrid(unittest.TestCase):
+    """Tests for heightfield-aligned SDF grid parameter helper."""
+
+    def test_heightfield_aligned_xy_samples_and_even_mapping(self):
+        hfield = newton.Heightfield(
+            data=np.zeros((9, 13), dtype=np.float32),
+            nrow=9,
+            ncol=13,
+            hx=3.0,
+            hy=2.0,
+            min_z=-0.25,
+            max_z=0.75,
+        )
+        grid = _compute_heightfield_aligned_sdf_grid_params(
+            hfield,
+            shape_margin=0.01,
+            margin=0.02,
+            planar_upsampling=2,
+        )
+
+        min_ext = np.asarray(grid["min_ext"], dtype=np.float64)
+        voxel = np.asarray(grid["voxel_size"], dtype=np.float64)
+        dims = np.asarray(grid["grid_dims"], dtype=np.int32)
+
+        dx = 2.0 * hfield.hx / (hfield.ncol - 1)
+        dy = 2.0 * hfield.hy / (hfield.nrow - 1)
+        self.assertAlmostEqual(voxel[0], dx / 2.0, places=7)
+        self.assertAlmostEqual(voxel[1], dy / 2.0, places=7)
+
+        # Tile constraints: intervals are multiples of 8.
+        self.assertEqual(int((dims[0] - 1) % 8), 0)
+        self.assertEqual(int((dims[1] - 1) % 8), 0)
+        self.assertEqual(int((dims[2] - 1) % 8), 0)
+
+        # Heightfield nodes land on even indices with planar_upsampling=2.
+        x_nodes = np.linspace(-hfield.hx, hfield.hx, hfield.ncol)
+        y_nodes = np.linspace(-hfield.hy, hfield.hy, hfield.nrow)
+        x_idx_f = (x_nodes - min_ext[0]) / voxel[0]
+        y_idx_f = (y_nodes - min_ext[1]) / voxel[1]
+        x_idx = np.rint(x_idx_f).astype(np.int64)
+        y_idx = np.rint(y_idx_f).astype(np.int64)
+        self.assertTrue(np.all(np.abs(x_idx_f - x_idx) < 1.0e-6))
+        self.assertTrue(np.all(np.abs(y_idx_f - y_idx) < 1.0e-6))
+        self.assertTrue(np.all((x_idx % 2) == 0))
+        self.assertTrue(np.all((y_idx % 2) == 0))
+
+    def test_heightfield_aligned_z_spacing_uses_planar_average(self):
+        hfield = newton.Heightfield(
+            data=np.zeros((7, 11), dtype=np.float32),
+            nrow=7,
+            ncol=11,
+            hx=2.5,
+            hy=1.5,
+            min_z=-0.5,
+            max_z=1.0,
+        )
+        grid = _compute_heightfield_aligned_sdf_grid_params(
+            hfield,
+            shape_margin=0.01,
+            margin=0.01,
+            planar_upsampling=2,
+        )
+        voxel = np.asarray(grid["voxel_size"], dtype=np.float64)
+        dx = 2.0 * hfield.hx / (hfield.ncol - 1)
+        dy = 2.0 * hfield.hy / (hfield.nrow - 1)
+        expected_dz = 0.5 * (dx / 2.0 + dy / 2.0)
+        self.assertAlmostEqual(voxel[2], expected_dz, places=7)
 
 
 class TestSDFPublicApi(unittest.TestCase):

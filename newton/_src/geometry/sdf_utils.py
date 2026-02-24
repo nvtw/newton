@@ -21,7 +21,7 @@ import warp as wp
 from ..core.types import MAXVAL, Axis, nparray
 from .kernels import sdf_box, sdf_capsule, sdf_cone, sdf_cylinder, sdf_ellipsoid, sdf_sphere
 from .sdf_mc import get_mc_tables, int_to_vec3f, mc_calc_face, vec8f
-from .types import GeoType, Mesh
+from .types import GeoType, Heightfield, Mesh
 
 
 @wp.struct
@@ -453,6 +453,225 @@ def get_primitive_extents(shape_type: int, shape_scale: Sequence[float]) -> tupl
     else:
         raise NotImplementedError(f"Extents not implemented for shape type: {shape_type}")
     return min_ext, max_ext
+
+
+def _round_up_to_multiple(value: int, multiple: int) -> int:
+    """Round positive integer up to a multiple."""
+    if multiple <= 0:
+        raise ValueError("multiple must be > 0")
+    return ((value + multiple - 1) // multiple) * multiple
+
+
+def _compute_heightfield_aligned_sdf_grid_params(
+    heightfield: Heightfield,
+    *,
+    shape_margin: float,
+    margin: float,
+    planar_upsampling: int = 2,
+) -> dict[str, np.ndarray | float | int]:
+    """Compute tile-aligned SDF grid parameters for a heightfield.
+
+    Args:
+        heightfield: Heightfield source geometry.
+        shape_margin: SDF thickness offset [m].
+        margin: Extra padding distance [m].
+        planar_upsampling: Planar SDF sample upsampling factor [voxel per hfield edge step].
+
+    Returns:
+        Dict containing min/max extents [m], voxel size [m], and grid dims [voxel].
+    """
+    if heightfield.nrow < 2 or heightfield.ncol < 2:
+        raise ValueError("heightfield requires nrow>=2 and ncol>=2")
+    if planar_upsampling < 1:
+        raise ValueError("planar_upsampling must be >= 1")
+
+    offset = float(shape_margin + margin)
+    dx = float(2.0 * heightfield.hx / (heightfield.ncol - 1))
+    dy = float(2.0 * heightfield.hy / (heightfield.nrow - 1))
+    vx = dx / float(planar_upsampling)
+    vy = dy / float(planar_upsampling)
+    vz = max(0.5 * (vx + vy), 1.0e-5)
+
+    base_min = np.array([-heightfield.hx, -heightfield.hy, heightfield.min_z], dtype=np.float32)
+    base_max = np.array([heightfield.hx, heightfield.hy, heightfield.max_z], dtype=np.float32)
+
+    # X/Y: preserve exact node alignment. Original hfield nodes map to every
+    # `planar_upsampling`-th SDF sample along each axis.
+    low_pad_x = int(np.ceil(offset / vx))
+    low_pad_y = int(np.ceil(offset / vy))
+    low_pad_x = _round_up_to_multiple(low_pad_x, planar_upsampling)
+    low_pad_y = _round_up_to_multiple(low_pad_y, planar_upsampling)
+
+    x_base_intervals = planar_upsampling * (heightfield.ncol - 1)
+    y_base_intervals = planar_upsampling * (heightfield.nrow - 1)
+
+    x_intervals = x_base_intervals + 2 * low_pad_x
+    y_intervals = y_base_intervals + 2 * low_pad_y
+    x_intervals = _round_up_to_multiple(x_intervals, 8)
+    y_intervals = _round_up_to_multiple(y_intervals, 8)
+
+    high_pad_x = x_intervals - x_base_intervals - low_pad_x
+    high_pad_y = y_intervals - y_base_intervals - low_pad_y
+
+    z_base_intervals = max(1, int(np.ceil((base_max[2] - base_min[2]) / vz)))
+    low_pad_z = int(np.ceil(offset / vz))
+    z_intervals = _round_up_to_multiple(z_base_intervals + 2 * low_pad_z, 8)
+    high_pad_z = z_intervals - z_base_intervals - low_pad_z
+
+    min_ext = np.array(
+        [
+            base_min[0] - low_pad_x * vx,
+            base_min[1] - low_pad_y * vy,
+            base_min[2] - low_pad_z * vz,
+        ],
+        dtype=np.float32,
+    )
+    max_ext = np.array(
+        [
+            base_max[0] + high_pad_x * vx,
+            base_max[1] + high_pad_y * vy,
+            base_max[2] + high_pad_z * vz,
+        ],
+        dtype=np.float32,
+    )
+
+    grid_dims = np.array([x_intervals + 1, y_intervals + 1, z_intervals + 1], dtype=np.int32)
+    voxel_size = np.array([vx, vy, vz], dtype=np.float32)
+
+    return {
+        "min_ext": min_ext,
+        "max_ext": max_ext,
+        "voxel_size": voxel_size,
+        "grid_dims": grid_dims,
+        "planar_upsampling": planar_upsampling,
+    }
+
+
+def compute_sdf_from_heightfield_mesh(
+    *,
+    heightfield: Heightfield,
+    fallback_mesh: Mesh,
+    shape_margin: float,
+    narrow_band_distance: Sequence[float],
+    margin: float,
+    planar_upsampling: int = 2,
+    verbose: bool = False,
+) -> tuple[SDFData, wp.Volume | None, wp.Volume | None, Sequence[wp.vec3us]]:
+    """Compute sparse/coarse SDF for a heightfield from its fallback mesh.
+
+    Args:
+        heightfield: Heightfield source geometry.
+        fallback_mesh: Fallback mesh generated from the heightfield surface.
+        shape_margin: Thickness offset [m] subtracted from sampled SDF.
+        narrow_band_distance: Signed narrow-band distance range [m] as ``(inner, outer)``.
+        margin: Extra AABB padding [m].
+        planar_upsampling: Planar SDF sample upsampling factor.
+        verbose: If ``True``, print debug information.
+
+    Returns:
+        Tuple ``(sdf_data, sparse_volume, coarse_volume, block_coords)``.
+    """
+    if not wp.is_cuda_available():
+        raise RuntimeError("compute_sdf_from_heightfield_mesh requires CUDA but no CUDA device is available")
+    assert len(narrow_band_distance) == 2, "narrow_band_distance must be a tuple of two floats"
+    assert narrow_band_distance[0] < 0.0 < narrow_band_distance[1], (
+        "narrow_band_distance[0] must be less than 0.0 and narrow_band_distance[1] must be greater than 0.0"
+    )
+    assert margin > 0, "margin must be > 0"
+
+    grid = _compute_heightfield_aligned_sdf_grid_params(
+        heightfield,
+        shape_margin=shape_margin,
+        margin=margin,
+        planar_upsampling=planar_upsampling,
+    )
+    min_ext = grid["min_ext"]
+    max_ext = grid["max_ext"]
+    voxel_size = grid["voxel_size"]
+    grid_dims = grid["grid_dims"]
+
+    verts = fallback_mesh.vertices
+    pos = wp.array(verts, dtype=wp.vec3)
+    indices = wp.array(fallback_mesh.indices, dtype=wp.int32)
+    mesh = wp.Mesh(points=pos, indices=indices, support_winding_number=True)
+    m_id = mesh.id
+    signed_volume = compute_mesh_signed_volume(pos, indices)
+    winding_threshold = 0.5 if signed_volume >= 0.0 else -0.5
+
+    if verbose:
+        print(
+            f"HField SDF grid dims={grid_dims.tolist()}, voxel_size={voxel_size.tolist()}, "
+            f"ext= {(max_ext - min_ext).tolist()}"
+        )
+
+    tile_counts = (grid_dims - 1) // 8
+    tiles = np.array(
+        [[i, j, k] for i in range(tile_counts[0]) for j in range(tile_counts[1]) for k in range(tile_counts[2])],
+        dtype=np.int32,
+    )
+
+    tile_points = tiles * 8
+    tile_center_points_world = (tile_points + 4) * voxel_size + min_ext
+    tile_center_points_world = wp.array(tile_center_points_world, dtype=wp.vec3f)
+    tile_occupied = wp.zeros(len(tile_points), dtype=bool)
+
+    tile_radius = float(np.linalg.norm(4 * voxel_size))
+    threshold = wp.vec2f(narrow_band_distance[0] - tile_radius, narrow_band_distance[1] + tile_radius)
+    wp.launch(
+        check_tile_occupied_mesh_kernel,
+        dim=(len(tile_points)),
+        inputs=[m_id, tile_center_points_world, threshold, winding_threshold],
+        outputs=[tile_occupied],
+    )
+
+    tile_points = tile_points[tile_occupied.numpy()]
+    tile_points_wp = wp.array(tile_points, dtype=wp.vec3i)
+    sparse_volume = wp.Volume.allocate_by_tiles(
+        tile_points=tile_points_wp,
+        voxel_size=wp.vec3(voxel_size),
+        translation=wp.vec3(min_ext),
+        bg_value=SDF_BACKGROUND_VALUE,
+    )
+
+    num_allocated_tiles = len(tile_points)
+    if num_allocated_tiles > 0:
+        wp.launch(
+            sdf_from_mesh_kernel,
+            dim=(num_allocated_tiles, 8, 8, 8),
+            inputs=[m_id, sparse_volume.id, tile_points_wp, shape_margin, winding_threshold],
+        )
+
+    tiles = sparse_volume.get_tiles().numpy()
+    block_coords = [wp.vec3us(t_coords) for t_coords in tiles]
+
+    coarse_tile_points_wp = wp.array(np.array([[0, 0, 0]], dtype=np.int32), dtype=wp.vec3i)
+    coarse_voxel_size = (max_ext - min_ext) / 7.0
+    coarse_volume = wp.Volume.allocate_by_tiles(
+        tile_points=coarse_tile_points_wp,
+        voxel_size=wp.vec3(coarse_voxel_size),
+        translation=wp.vec3(min_ext),
+        bg_value=SDF_BACKGROUND_VALUE,
+    )
+    wp.launch(
+        sdf_from_mesh_kernel,
+        dim=(1, 8, 8, 8),
+        inputs=[m_id, coarse_volume.id, coarse_tile_points_wp, shape_margin, winding_threshold],
+    )
+
+    center = (min_ext + max_ext) * 0.5
+    half_extents = (max_ext - min_ext) * 0.5
+    sdf_data = SDFData()
+    sdf_data.sparse_sdf_ptr = sparse_volume.id
+    sdf_data.sparse_voxel_size = wp.vec3(voxel_size)
+    sdf_data.sparse_voxel_radius = 0.5 * float(np.linalg.norm(voxel_size))
+    sdf_data.coarse_sdf_ptr = coarse_volume.id
+    sdf_data.coarse_voxel_size = wp.vec3(coarse_voxel_size)
+    sdf_data.center = wp.vec3(center)
+    sdf_data.half_extents = wp.vec3(half_extents)
+    sdf_data.background_value = SDF_BACKGROUND_VALUE
+    sdf_data.scale_baked = False
+
+    return sdf_data, sparse_volume, coarse_volume, block_coords
 
 
 def _compute_sdf_from_shape_impl(

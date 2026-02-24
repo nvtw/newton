@@ -8987,7 +8987,11 @@ class ModelBuilder:
 
             # ---------------------
             # Compute and compact SDF resources (shared table + per-shape index indirection)
-            from ..geometry.sdf_utils import SDFData, compute_sdf_from_shape  # noqa: PLC0415
+            from ..geometry.sdf_utils import (  # noqa: PLC0415
+                SDFData,
+                compute_sdf_from_heightfield_mesh,
+                compute_sdf_from_shape,
+            )
 
             current_device = wp.get_device(device)
             is_gpu = current_device.is_cuda
@@ -9044,6 +9048,29 @@ class ModelBuilder:
                         sparse_volume = mesh_sdf.sparse_volume
                         coarse_volume = mesh_sdf.coarse_volume
                         block_coords = list(mesh_sdf.block_coords) if mesh_sdf.block_coords is not None else []
+                elif shape_type == GeoType.HFIELD and has_shape_collision and shape_src is not None and is_gpu:
+                    hfield_hash = hash(shape_src)
+                    cache_key = (
+                        "heightfield_fallback_mesh_generated",
+                        hfield_hash,
+                        shape_margin,
+                        shape_gap,
+                        tuple(sdf_narrow_band_range),
+                    )
+                    if cache_key not in sdf_cache:
+                        fallback_entry = finalized_hfield_fallback_meshes.get(hfield_hash)
+                        if fallback_entry is not None:
+                            fallback_mesh, _ = fallback_entry
+                            sdf_data, sparse_volume, coarse_volume, block_coords = compute_sdf_from_heightfield_mesh(
+                                heightfield=shape_src,
+                                fallback_mesh=fallback_mesh,
+                                shape_margin=shape_margin,
+                                narrow_band_distance=sdf_narrow_band_range,
+                                margin=shape_gap,
+                                planar_upsampling=2,
+                            )
+                        else:
+                            cache_key = None
                 elif is_hydroelastic and has_shape_collision:
                     bake_scale = True
                     # Keep voxel-size-driven generation independent from max_resolution.

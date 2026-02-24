@@ -24,6 +24,8 @@ import newton
 from newton import Heightfield
 from newton.tests.unittest_utils import assert_np_equal
 
+_cuda_available = wp.is_cuda_available()
+
 
 class TestHeightfield(unittest.TestCase):
     """Test suite for heightfield support."""
@@ -414,6 +416,52 @@ class TestHeightfield(unittest.TestCase):
         self.assertGreater(int(source_ptr[hfield_shape]), 0)
         # Sphere should also have a valid pointer (or 0 if no mesh)
         self.assertGreaterEqual(int(source_ptr[sphere_shape]), 0)
+
+    @unittest.skipUnless(_cuda_available, "Heightfield auto-SDF generation requires CUDA")
+    def test_heightfield_auto_sdf_population(self):
+        """Test that finalize auto-generates SDF resources for heightfields."""
+        builder = newton.ModelBuilder()
+        hfield = Heightfield(
+            data=np.zeros((8, 8), dtype=np.float32),
+            nrow=8,
+            ncol=8,
+            hx=2.0,
+            hy=2.0,
+            min_z=0.0,
+            max_z=1.0,
+        )
+        hfield_shape = builder.add_shape_heightfield(heightfield=hfield)
+        model = builder.finalize()
+
+        sdf_idx = int(model.shape_sdf_index.numpy()[hfield_shape])
+        self.assertGreaterEqual(sdf_idx, 0)
+
+        sdf_data = model.sdf_data.numpy()
+        self.assertGreater(int(sdf_data[sdf_idx]["sparse_sdf_ptr"]), 0)
+        self.assertGreater(int(sdf_data[sdf_idx]["coarse_sdf_ptr"]), 0)
+
+    @unittest.skipUnless(_cuda_available, "Heightfield auto-SDF generation requires CUDA")
+    def test_heightfield_auto_sdf_shared_for_identical_sources(self):
+        """Test that identical heightfields share one compacted SDF entry."""
+        builder = newton.ModelBuilder()
+        hfield = Heightfield(
+            data=np.zeros((8, 8), dtype=np.float32),
+            nrow=8,
+            ncol=8,
+            hx=2.0,
+            hy=2.0,
+            min_z=0.0,
+            max_z=1.0,
+        )
+        s0 = builder.add_shape_heightfield(heightfield=hfield)
+        s1 = builder.add_shape_heightfield(heightfield=hfield)
+        model = builder.finalize()
+
+        sdf_index = model.shape_sdf_index.numpy()
+        idx0 = int(sdf_index[s0])
+        idx1 = int(sdf_index[s1])
+        self.assertGreaterEqual(idx0, 0)
+        self.assertEqual(idx0, idx1)
 
     def test_mesh_heightfield_routes_to_mesh_mesh_fallback_without_sdf(self):
         """Test mesh-heightfield fallback routing when mesh has no precomputed SDF."""
