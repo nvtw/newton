@@ -556,9 +556,7 @@ class CollisionPipeline:
             has_meshes = False
             if hasattr(model, "shape_type") and model.shape_type is not None:
                 shape_types = model.shape_type.numpy()
-                has_meshes = bool(
-                    ((shape_types == int(GeoType.MESH)) | (shape_types == int(GeoType.HFIELD))).any()
-                )
+                has_meshes = bool(((shape_types == int(GeoType.MESH)) | (shape_types == int(GeoType.HFIELD))).any())
 
             # Initialize narrow phase with pre-allocated buffers
             # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs

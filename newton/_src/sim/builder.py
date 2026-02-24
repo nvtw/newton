@@ -8769,11 +8769,15 @@ class ModelBuilder:
             m.shape_flags = wp.array(self.shape_flags, dtype=wp.int32)
             m.body_shapes = self.body_shapes
 
-            # build list of ids for geometry sources (meshes, sdfs)
-            # For heightfields, we store the fallback mesh pointer directly in shape_source_ptr
-            # so that mesh-based collision paths (mesh-mesh, mesh-plane, soft contacts) work
-            # without needing a separate array. The native heightfield collision kernel uses
-            # shape_heightfield_data instead of shape_source_ptr.
+            # Build list of geometry source pointers (Warp mesh IDs, etc.).
+            #
+            # Heightfields do not have a native collision kernel.  Instead, each
+            # heightfield is converted to a watertight triangle mesh (the "fallback
+            # mesh") and its pointer is stored directly in shape_source_ptr.  This
+            # lets the narrow phase treat heightfields identically to regular meshes
+            # for all collision routes (mesh-mesh, mesh-convex, mesh-plane, soft
+            # contacts).  An aligned SDF is also generated automatically on CUDA
+            # (see the SDF section below) to accelerate distance queries.
             geo_sources = []
             finalized_geos = {}  # do not duplicate geometry
             hfield_fallback_mesh_refs = []  # keep references alive for Warp mesh IDs
@@ -9127,48 +9131,6 @@ class ModelBuilder:
             m.sdf_index2blocks = (
                 wp.array(sdf_index2blocks, dtype=wp.vec2i) if sdf_index2blocks else wp.array([], dtype=wp.vec2i)
             )
-
-            # ---------------------
-            # heightfield collision data
-            has_heightfields = any(t == GeoType.HFIELD for t in self.shape_type)
-            if has_heightfields:
-                from ..utils.heightfield import HeightfieldData, create_empty_heightfield_data  # noqa: PLC0415
-
-                hfield_data_list = []
-                elevation_chunks = []
-                offset = 0
-                empty_hfield = create_empty_heightfield_data()
-                for i in range(len(self.shape_type)):
-                    if self.shape_type[i] == GeoType.HFIELD and self.shape_source[i] is not None:
-                        hf = self.shape_source[i]
-                        hd = HeightfieldData()
-                        hd.data_offset = offset
-                        hd.nrow = hf.nrow
-                        hd.ncol = hf.ncol
-                        hd.hx = hf.hx
-                        hd.hy = hf.hy
-                        hd.min_z = hf.min_z
-                        hd.max_z = hf.max_z
-                        hfield_data_list.append(hd)
-                        elevation_chunks.append(hf.data.flatten())
-                        offset += hf.nrow * hf.ncol
-                    else:
-                        hfield_data_list.append(empty_hfield)
-                m.shape_heightfield_data = wp.array(hfield_data_list, dtype=HeightfieldData, device=device)
-                if elevation_chunks:
-                    m.heightfield_elevation_data = wp.array(
-                        np.concatenate(elevation_chunks), dtype=wp.float32, device=device
-                    )
-                else:
-                    m.heightfield_elevation_data = wp.zeros(1, dtype=wp.float32, device=device)
-            else:
-                from ..utils.heightfield import HeightfieldData, create_empty_heightfield_data  # noqa: PLC0415
-
-                empty_hfield = create_empty_heightfield_data()
-                m.shape_heightfield_data = wp.array(
-                    [empty_hfield] * max(len(self.shape_type), 1), dtype=HeightfieldData, device=device
-                )
-                m.heightfield_elevation_data = wp.zeros(1, dtype=wp.float32, device=device)
 
             # ---------------------
             # springs

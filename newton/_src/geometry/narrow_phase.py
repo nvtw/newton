@@ -244,12 +244,16 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             margin = margin_a + margin_b
 
             # =====================================================================
-            # Route heightfield pairs through mesh-compatible buffers
+            # Route heightfield pairs through mesh collision buffers.
+            #
+            # Heightfields have no dedicated collision kernels.  During finalize,
+            # each heightfield is converted to a triangle mesh (with an auto-
+            # generated SDF on CUDA) and its mesh pointer is stored in
+            # shape_source_ptr.  Here we simply classify HFIELD as MESH so the
+            # existing mesh-plane, mesh-mesh, and mesh-convex pipelines handle it.
             # =====================================================================
             is_hfield_a = type_a == GeoType.HFIELD
             is_hfield_b = type_b == GeoType.HFIELD
-
-            # Route all heightfield pairs through mesh fallback buffers.
             if is_hfield_a or is_hfield_b:
                 is_plane_a = type_a == GeoType.PLANE
                 is_plane_b = type_b == GeoType.PLANE

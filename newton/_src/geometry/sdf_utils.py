@@ -471,11 +471,36 @@ def _compute_heightfield_aligned_sdf_grid_params(
 ) -> dict[str, np.ndarray | float | int]:
     """Compute tile-aligned SDF grid parameters for a heightfield.
 
+    **Why an SDF for heightfields?**
+    Heightfields are converted to triangle meshes for collision (the "fallback mesh").
+    Without an SDF, every mesh-vs-heightfield or convex-vs-heightfield query must
+    walk the BVH and run GJK/MPR per triangle — O(log N) per query point.  With a
+    precomputed SDF the narrow phase can resolve distances in O(1) via trilinear
+    interpolation in the volume, which is dramatically faster for large terrains.
+
+    **Why align the SDF grid to heightfield nodes?**
+    The heightfield surface is piecewise-linear between its grid nodes.  If SDF
+    samples land exactly on those nodes the SDF captures the true surface elevation
+    without interpolation error.  Between nodes the SDF interpolates linearly —
+    matching the triangle mesh exactly.  Misaligned grids would introduce systematic
+    bias at every node, degrading contact accuracy near the surface.
+
+    **How alignment is preserved despite the tile-size-of-8 constraint:**
+    Warp sparse volumes allocate storage in 8-voxel tiles, so the number of
+    intervals along each axis must be a multiple of 8.  Rather than distorting the
+    voxel size (which would break node alignment), we pad the domain outward with
+    extra cells beyond the heightfield boundary until the interval count reaches
+    the next multiple of 8.  The voxel size is locked to
+    ``heightfield_cell_size / planar_upsampling``, so every heightfield node maps
+    to an integer SDF index that is a multiple of ``planar_upsampling``.
+
     Args:
         heightfield: Heightfield source geometry.
         shape_margin: SDF thickness offset [m].
         margin: Extra padding distance [m].
-        planar_upsampling: Planar SDF sample upsampling factor [voxel per hfield edge step].
+        planar_upsampling: How many SDF voxels per heightfield cell edge.
+            With the default of 2, every heightfield node lands on an even-indexed
+            SDF sample and there is one additional sample at each cell midpoint.
 
     Returns:
         Dict containing min/max extents [m], voxel size [m], and grid dims [voxel].
@@ -486,6 +511,9 @@ def _compute_heightfield_aligned_sdf_grid_params(
         raise ValueError("planar_upsampling must be >= 1")
 
     offset = float(shape_margin + margin)
+
+    # Derive voxel size from heightfield spacing — this is the key to alignment.
+    # dx/dy are the physical distances between adjacent heightfield nodes.
     dx = float(2.0 * heightfield.hx / (heightfield.ncol - 1))
     dy = float(2.0 * heightfield.hy / (heightfield.nrow - 1))
     vx = dx / float(planar_upsampling)
@@ -495,16 +523,22 @@ def _compute_heightfield_aligned_sdf_grid_params(
     base_min = np.array([-heightfield.hx, -heightfield.hy, heightfield.min_z], dtype=np.float32)
     base_max = np.array([heightfield.hx, heightfield.hy, heightfield.max_z], dtype=np.float32)
 
-    # X/Y: preserve exact node alignment. Original hfield nodes map to every
-    # `planar_upsampling`-th SDF sample along each axis.
+    # The "base" interval count covers exactly the heightfield extent.
+    # With planar_upsampling=2 and ncol=13 nodes there are 12 edges → 24 intervals.
+    x_base_intervals = planar_upsampling * (heightfield.ncol - 1)
+    y_base_intervals = planar_upsampling * (heightfield.nrow - 1)
+
+    # Add padding cells on both sides to cover margin+gap for narrow-band queries.
+    # Round padding to a multiple of planar_upsampling so the first heightfield
+    # node still lands on an aligned index after the shift.
     low_pad_x = int(np.ceil(offset / vx))
     low_pad_y = int(np.ceil(offset / vy))
     low_pad_x = _round_up_to_multiple(low_pad_x, planar_upsampling)
     low_pad_y = _round_up_to_multiple(low_pad_y, planar_upsampling)
 
-    x_base_intervals = planar_upsampling * (heightfield.ncol - 1)
-    y_base_intervals = planar_upsampling * (heightfield.nrow - 1)
-
+    # Total intervals = base + symmetric padding, then round up to multiple of 8
+    # for Warp tile allocation.  Any extra cells go into high_pad (asymmetric on
+    # the positive side) — the voxel size is never changed.
     x_intervals = x_base_intervals + 2 * low_pad_x
     y_intervals = y_base_intervals + 2 * low_pad_y
     x_intervals = _round_up_to_multiple(x_intervals, 8)
@@ -518,6 +552,8 @@ def _compute_heightfield_aligned_sdf_grid_params(
     z_intervals = _round_up_to_multiple(z_base_intervals + 2 * low_pad_z, 8)
     high_pad_z = z_intervals - z_base_intervals - low_pad_z
 
+    # Domain origin is shifted outward by low_pad * voxel_size so that the first
+    # heightfield node at -hx sits at SDF index low_pad_x (an aligned index).
     min_ext = np.array(
         [
             base_min[0] - low_pad_x * vx,
@@ -559,13 +595,26 @@ def compute_sdf_from_heightfield_mesh(
 ) -> tuple[SDFData, wp.Volume | None, wp.Volume | None, Sequence[wp.vec3us]]:
     """Compute sparse/coarse SDF for a heightfield from its fallback mesh.
 
+    This is called automatically during ``ModelBuilder.finalize()`` on CUDA
+    devices.  The resulting SDF is stored alongside regular mesh SDFs in the
+    compact SDF table so that the mesh-mesh narrow-phase kernel can resolve
+    heightfield distances via O(1) trilinear lookups instead of per-triangle
+    BVH traversal.
+
+    The SDF grid is aligned to the heightfield nodes via
+    ``_compute_heightfield_aligned_sdf_grid_params`` — see its docstring for
+    the alignment rationale and the strategy for satisfying the tile-size-of-8
+    constraint without breaking alignment.
+
     Args:
         heightfield: Heightfield source geometry.
-        fallback_mesh: Fallback mesh generated from the heightfield surface.
-        shape_margin: Thickness offset [m] subtracted from sampled SDF.
-        narrow_band_distance: Signed narrow-band distance range [m] as ``(inner, outer)``.
+        fallback_mesh: Watertight triangle mesh generated from the heightfield
+            surface (top + side skirts + bottom cap).
+        shape_margin: Thickness offset [m] subtracted from sampled SDF values.
+        narrow_band_distance: Signed narrow-band distance range [m] as
+            ``(inner, outer)``.
         margin: Extra AABB padding [m].
-        planar_upsampling: Planar SDF sample upsampling factor.
+        planar_upsampling: How many SDF voxels per heightfield cell edge.
         verbose: If ``True``, print debug information.
 
     Returns:
