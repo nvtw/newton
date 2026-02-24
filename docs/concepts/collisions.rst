@@ -83,7 +83,8 @@ Collision shapes are attached to rigid bodies. Each shape has:
 - **Body index** (``shape_body``): The rigid body this shape is attached to. Use ``body=-1`` for static/world-fixed shapes.
 - **Local transform** (``shape_transform``): Position and orientation relative to the body frame.
 - **Scale** (``shape_scale``): 3D scale factors applied to the shape geometry.
-- **Margin** (``shape_margin``): Surface margin used in contact generation (see :ref:`Shape Configuration`).
+- **Margin** (``shape_margin``): Surface offset that shifts where contact points are placed.
+- **Gap** (``shape_gap``): Extra detection distance that shifts when contacts are generated.
 - **Source geometry** (``shape_source``): Reference to the underlying geometry object (e.g., :class:`~newton.Mesh`).
 
 During collision detection, shapes are transformed to world space using their parent body's pose:
@@ -626,10 +627,44 @@ Shape collision behavior is controlled via :class:`~newton.ModelBuilder.ShapeCon
    * - ``kh``
      - Contact stiffness for hydroelastic collisions. Used by MuJoCo, Featherstone, SemiImplicit when ``is_hydroelastic=True``. Default: 1.0e10.
 
+**Margin and gap semantics (where vs when):**
+
+- **Where contacts are placed** is controlled by ``margin``.
+- **When contacts are generated** is controlled by ``gap``.
+
+For a shape pair ``(a, b)``:
+
+- Pair margin: ``m = margin_a + margin_b``
+- Pair gap: ``g = gap_a + gap_b``
+- Surface distance (true geometry, no offsets): ``s``
+- Contact-space distance used by Newton: ``d = s - m``
+
+Contacts are generated when:
+
+.. math::
+
+   d < g \quad\Leftrightarrow\quad s < (m + g)
+
+Broad phase uses the same idea by expanding each shape AABB by:
+
+.. math::
+
+   margin_i + gap_i
+
+This keeps broad-phase culling and narrow-phase contact generation consistent.
+
+.. figure:: ../images/margin_and_gap.svg
+   :alt: Margin and gap contact generation phases
+   :width: 90%
+   :align: center
+
+   Margin sets contact location (surface offset), while gap adds speculative
+   detection distance on top of margin. Left: no contact generated. Middle:
+   contact generated but not yet active. Right: active contact support.
+
 .. note::
-   **Contact generation**: A contact is created when ``d < (gap_a + gap_b)``, where 
-   ``d = surface_distance - (margin_a + margin_b)``. The solver enforces ``d >= 0``, 
-   so objects at rest settle with surfaces separated by ``margin_a + margin_b``.
+   At rest, rigid contacts generally settle near ``d = 0``, which corresponds to
+   geometric separation ``s \approx m`` (the pairwise summed margin).
 
 **SDF configuration (primitive generation defaults):**
 
@@ -658,7 +693,7 @@ Example (mesh SDF workflow):
     my_mesh.build_sdf(max_resolution=64)
     builder.add_shape_mesh(body, mesh=my_mesh, cfg=cfg)
 
-**Builder default margin:**
+**Builder default gap:**
 
 The builder's ``rigid_gap`` (default 0.1) applies to shapes without explicit ``gap``. Alternatively, use ``builder.default_shape_cfg.gap``.
 
