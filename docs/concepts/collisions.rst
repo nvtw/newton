@@ -703,9 +703,9 @@ Shape collision behavior is controlled via :class:`~newton.ModelBuilder.ShapeCon
    * - Parameter
      - Description
    * - ``margin``
-     - Surface margin. Pairwise: summed (``m_a + m_b``). Creates visible separation at rest. Essential for thin shells and cloth to improve simulation stability and reduce self-intersections. Default: 1e-5.
+     - Surface offset used by narrow phase. Pairwise effect is additive (``m_a + m_b``): contacts are evaluated against the signed distance to the margin-shifted surfaces, so resting separation is ``m_a + m_b``. Helps thin shells/cloth stability and reduces self-intersections. Default: 1e-5.
    * - ``gap``
-     - Additional contact detection gap. Pairwise: summed (``g_a + g_b``). Broad phase expansion uses ``(margin + gap)`` per shape. Increasing gap helps avoid tunneling by detecting contacts earlier. Default: None (uses ``builder.rigid_gap``, which defaults to 0.1).
+     - Additional detection threshold. Pairwise effect is additive (``g_a + g_b``). Broad phase expands each shape AABB by ``(margin + gap)`` per shape; narrow phase then keeps a candidate contact when ``d <= g_a + g_b`` (with ``d`` measured relative to margin-shifted surfaces). Increasing gap detects contacts earlier and helps reduce tunneling. Default: None (uses ``builder.rigid_gap``, which defaults to 0.1).
    * - ``is_solid``
      - Whether shape is solid or hollow. Affects inertia and SDF sign. Default: True.
    * - ``is_hydroelastic``
@@ -749,8 +749,9 @@ This keeps broad-phase culling and narrow-phase contact generation consistent.
    contact generated but not yet active. Right: active contact support.
 
 .. note::
-   At rest, rigid contacts generally settle near ``d = 0``, which corresponds to
-   geometric separation ``s \approx m`` (the pairwise summed margin).
+   **Contact generation**: A contact is created when ``d <= (gap_a + gap_b)``, where
+   ``d = surface_distance - (margin_a + margin_b)``. The solver enforces ``d >= 0``,
+   so objects at rest settle with surfaces separated by ``margin_a + margin_b``.
 
 **SDF configuration (primitive generation defaults):**
 
