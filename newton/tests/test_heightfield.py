@@ -391,7 +391,7 @@ class TestHeightfield(unittest.TestCase):
         self.assertEqual(contact_count, 0, f"Unexpected contacts detected: {contact_count}")
 
     def test_heightfield_fallback_mesh_pointer_population(self):
-        """Test that finalize populates fallback mesh pointers for heightfields."""
+        """Test that finalize populates fallback mesh pointers for heightfields in shape_source_ptr."""
         builder = newton.ModelBuilder()
         hfield = Heightfield(
             data=np.zeros((8, 8), dtype=np.float32),
@@ -407,11 +407,13 @@ class TestHeightfield(unittest.TestCase):
 
         model = builder.finalize()
 
-        fallback_ptr = model.shape_hfield_fallback_mesh_source_ptr.numpy()
+        # Heightfield shapes store the fallback mesh pointer directly in shape_source_ptr
         source_ptr = model.shape_source_ptr.numpy()
-        self.assertEqual(len(fallback_ptr), model.shape_count)
-        self.assertGreater(int(fallback_ptr[hfield_shape]), 0)
-        self.assertEqual(int(fallback_ptr[sphere_shape]), int(source_ptr[sphere_shape]))
+        self.assertEqual(len(source_ptr), model.shape_count)
+        # Heightfield should have a valid mesh pointer (fallback mesh)
+        self.assertGreater(int(source_ptr[hfield_shape]), 0)
+        # Sphere should also have a valid pointer (or 0 if no mesh)
+        self.assertGreaterEqual(int(source_ptr[sphere_shape]), 0)
 
     def test_mesh_heightfield_routes_to_mesh_mesh_fallback_without_sdf(self):
         """Test mesh-heightfield fallback routing when mesh has no precomputed SDF."""

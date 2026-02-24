@@ -678,9 +678,6 @@ class CollisionPipeline:
         self.broad_phase_pair_count.zero_()
 
         model = self.model
-        shape_source_for_collision = model.shape_hfield_fallback_mesh_source_ptr
-        if shape_source_for_collision is None:
-            shape_source_for_collision = model.shape_source_ptr
         # update any additional parameters
         soft_contact_margin = soft_contact_margin if soft_contact_margin is not None else self.soft_contact_margin
 
@@ -798,7 +795,7 @@ class CollisionPipeline:
                 shape_types=model.shape_type,
                 shape_data=self.geom_data,
                 shape_transform=self.geom_transform,
-                shape_source=shape_source_for_collision,
+                shape_source=model.shape_source_ptr,
                 sdf_data=model.sdf_data,
                 shape_sdf_index=model.shape_sdf_index,
                 shape_gap=model.shape_gap,
@@ -829,7 +826,7 @@ class CollisionPipeline:
                     model.shape_body,
                     model.shape_type,
                     model.shape_scale,
-                    shape_source_for_collision,
+                    model.shape_source_ptr,
                     model.shape_world,
                     soft_contact_margin,
                     self.soft_contact_max,
