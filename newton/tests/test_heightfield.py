@@ -489,6 +489,7 @@ class TestHeightfield(unittest.TestCase):
         mesh_mesh_count = int(pipeline.narrow_phase.shape_pairs_mesh_mesh_count.numpy()[0])
         self.assertGreaterEqual(mesh_mesh_count, 1)
 
+    @unittest.skipUnless(_cuda_available, "build_sdf requires CUDA")
     def test_mesh_heightfield_routes_to_mesh_mesh_fallback_with_sdf(self):
         """Test mesh-heightfield fallback routing when mesh has precomputed SDF."""
         builder = newton.ModelBuilder()
