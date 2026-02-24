@@ -552,16 +552,13 @@ class CollisionPipeline:
                 writer_func=write_contact,
             )
 
-            # Detect if any mesh or heightfield shapes are present to optimize kernel launches.
-            # Heightfields may route unsupported pairs through mesh fallback kernels.
+            # Detect if any mesh-like shapes are present to optimize kernel launches.
             has_meshes = False
-            has_heightfields = False
             if hasattr(model, "shape_type") and model.shape_type is not None:
                 shape_types = model.shape_type.numpy()
                 has_meshes = bool(
                     ((shape_types == int(GeoType.MESH)) | (shape_types == int(GeoType.HFIELD))).any()
                 )
-                has_heightfields = bool((shape_types == int(GeoType.HFIELD)).any())
 
             # Initialize narrow phase with pre-allocated buffers
             # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs
@@ -577,7 +574,6 @@ class CollisionPipeline:
                 shape_voxel_resolution=model._shape_voxel_resolution,
                 hydroelastic_sdf=hydroelastic_sdf,
                 has_meshes=has_meshes,
-                has_heightfields=has_heightfields,
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
 
@@ -804,8 +800,6 @@ class CollisionPipeline:
                 shape_collision_aabb_lower=model.shape_collision_aabb_lower,
                 shape_collision_aabb_upper=model.shape_collision_aabb_upper,
                 shape_voxel_resolution=self.narrow_phase.shape_voxel_resolution,
-                shape_heightfield_data=model.shape_heightfield_data,
-                heightfield_elevation_data=model.heightfield_elevation_data,
                 writer_data=writer_data,
                 device=self.device,
             )
