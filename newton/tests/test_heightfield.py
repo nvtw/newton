@@ -413,8 +413,8 @@ class TestHeightfield(unittest.TestCase):
         self.assertGreater(int(fallback_ptr[hfield_shape]), 0)
         self.assertEqual(int(fallback_ptr[sphere_shape]), int(source_ptr[sphere_shape]))
 
-    def test_mesh_heightfield_routes_to_mesh_mesh_fallback(self):
-        """Test unsupported mesh-heightfield pairs route to mesh-mesh fallback buffers."""
+    def test_mesh_heightfield_routes_to_mesh_mesh_fallback_without_sdf(self):
+        """Test mesh-heightfield fallback routing when mesh has no precomputed SDF."""
         builder = newton.ModelBuilder()
         hfield = Heightfield(
             data=np.zeros((8, 8), dtype=np.float32),
@@ -427,6 +427,33 @@ class TestHeightfield(unittest.TestCase):
         )
         mesh_body = builder.add_body()
         mesh = newton.Mesh.create_box(1.0, 1.0, 1.0, compute_inertia=False)
+        builder.add_shape_mesh(body=mesh_body, mesh=mesh)
+        builder.add_shape_heightfield(heightfield=hfield)
+
+        model = builder.finalize()
+        state = model.state()
+        pipeline = newton.CollisionPipeline(model)
+        contacts = pipeline.contacts()
+        pipeline.collide(state, contacts)
+
+        mesh_mesh_count = int(pipeline.narrow_phase.shape_pairs_mesh_mesh_count.numpy()[0])
+        self.assertGreaterEqual(mesh_mesh_count, 1)
+
+    def test_mesh_heightfield_routes_to_mesh_mesh_fallback_with_sdf(self):
+        """Test mesh-heightfield fallback routing when mesh has precomputed SDF."""
+        builder = newton.ModelBuilder()
+        hfield = Heightfield(
+            data=np.zeros((8, 8), dtype=np.float32),
+            nrow=8,
+            ncol=8,
+            hx=2.0,
+            hy=2.0,
+            min_z=0.0,
+            max_z=1.0,
+        )
+        mesh_body = builder.add_body()
+        mesh = newton.Mesh.create_box(1.0, 1.0, 1.0, compute_inertia=False)
+        mesh.build_sdf(max_resolution=16)
         builder.add_shape_mesh(body=mesh_body, mesh=mesh)
         builder.add_shape_heightfield(heightfield=hfield)
 
