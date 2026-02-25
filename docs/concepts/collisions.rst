@@ -82,8 +82,8 @@ Collision shapes are attached to rigid bodies. Each shape has:
 - **Body index** (``shape_body``): The rigid body this shape is attached to. Use ``body=-1`` for static/world-fixed shapes.
 - **Local transform** (``shape_transform``): Position and orientation relative to the body frame.
 - **Scale** (``shape_scale``): 3D scale factors applied to the shape geometry.
-- **Margin** (``shape_margin``): Surface offset that shifts where contact points are placed.
-- **Gap** (``shape_gap``): Extra detection distance that shifts when contacts are generated.
+- **Margin** (``shape_margin``): Surface offset that shifts where contact points are placed. See :ref:`margin-gap-semantics`.
+- **Gap** (``shape_gap``): Extra detection distance that shifts when contacts are generated. See :ref:`margin-gap-semantics`.
 - **Source geometry** (``shape_source``): Reference to the underlying geometry object (e.g., :class:`~newton.Mesh`).
 
 During collision detection, shapes are transformed to world space using their parent body's pose:
@@ -370,19 +370,19 @@ Shape compatibility summary (rigid + soft particle-shape):
    :header-rows: 1
    :widths: 11 7 7 7 7 7 7 7 7 7 7 7 7
 
-   * - 
+   * -
      - Plane
      - HField
-     - S
-     - Caps
+     - Sphere
+     - Capsule
      - Box
-     - Cyl
+     - Cylinder
      - Cone
-     - El
-     - CH
+     - Ellipsoid
+     - ConvexHull
      - Mesh
      - SDF
-     - P
+     - Particle
    * - **Plane**
      - [#static-static]_
      - [#static-static]_
@@ -409,7 +409,7 @@ Shape compatibility summary (rigid + soft particle-shape):
      - ✅⚠️
      - ✅
      - ✅
-   * - **Sphere (S)**
+   * - **Sphere**
      - ✅
      - ✅
      - ✅
@@ -422,7 +422,7 @@ Shape compatibility summary (rigid + soft particle-shape):
      - ✅
      - ✅
      - ✅
-   * - **Capsule (Caps)**
+   * - **Capsule**
      - ✅
      - ✅
      - ✅
@@ -448,7 +448,7 @@ Shape compatibility summary (rigid + soft particle-shape):
      - ✅
      - ✅
      - ✅
-   * - **Cylinder (Cyl)**
+   * - **Cylinder**
      - ✅
      - ✅
      - ✅
@@ -474,7 +474,7 @@ Shape compatibility summary (rigid + soft particle-shape):
      - ✅
      - ✅
      - ✅
-   * - **Ellipsoid (El)**
+   * - **Ellipsoid**
      - ✅
      - ✅
      - ✅
@@ -487,7 +487,7 @@ Shape compatibility summary (rigid + soft particle-shape):
      - ✅
      - ✅
      - ✅
-   * - **ConvexHull (CH)**
+   * - **ConvexHull**
      - ✅
      - ✅
      - ✅
@@ -526,7 +526,7 @@ Shape compatibility summary (rigid + soft particle-shape):
      - ✅⚠️
      - ✅
      - ✅
-   * - **Particle (P)**
+   * - **Particle**
      - ✅
      - ✅
      - ✅
@@ -557,11 +557,19 @@ often be improved by attaching a precomputed SDF to the mesh (``mesh.build_sdf(.
    scenes that use the collision pipeline for particle-shape contacts.
 
 .. note::
-   ``HFIELD`` collisions in the Newton pipeline are routed through a generated mesh
-   fallback path, reusing mesh-vs-X narrow-phase processing. On CUDA devices,
-   Newton additionally builds an internal, automatically aligned SDF for each
-   heightfield to accelerate mesh/SDF-vs-heightfield contact queries. This
-   acceleration path is transparent to user code.
+   **Heightfield interpolation:** A heightfield (``HFIELD``) stores a regular 2D grid
+   of elevation samples.  During finalization Newton converts it to a triangle mesh
+   via :meth:`~newton.Mesh.create_heightfield` — each grid cell is split into two
+   triangles, so the surface is **piecewise-linear** (bilinear interpolation between
+   the four corner elevations of each cell).  Collision detection operates on this
+   triangle mesh, meaning contact normals and penetration depths reflect the linear
+   facets, not a smooth surface.
+
+   On CUDA devices Newton additionally builds an internal, automatically aligned SDF
+   for each heightfield to accelerate mesh/SDF-vs-heightfield contact queries.  The
+   SDF grid is aligned to the heightfield nodes so that the signed-distance values
+   exactly reproduce the piecewise-linear surface.  This acceleration path is
+   transparent to user code.
 
 .. note::
    **SDF** in this table refers to shapes with precomputed SDF data. There is no
@@ -712,6 +720,8 @@ Shape collision behavior is controlled via :class:`~newton.ModelBuilder.ShapeCon
      - Whether the shape uses SDF-based hydroelastic contacts. Both shapes in a pair must have this enabled. See :ref:`Hydroelastic Contacts`. Default: False.
    * - ``kh``
      - Contact stiffness for hydroelastic collisions. Used by MuJoCo, Featherstone, SemiImplicit when ``is_hydroelastic=True``. Default: 1.0e10.
+
+.. _margin-gap-semantics:
 
 **Margin and gap semantics (where vs when):**
 

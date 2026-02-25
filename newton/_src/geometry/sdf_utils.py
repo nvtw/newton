@@ -456,7 +456,18 @@ def get_primitive_extents(shape_type: int, shape_scale: Sequence[float]) -> tupl
 
 
 def _round_up_to_multiple(value: int, multiple: int) -> int:
-    """Round positive integer up to a multiple."""
+    """Round positive integer up to the nearest multiple.
+
+    Args:
+        value: Non-negative integer to round up.
+        multiple: Positive integer defining the rounding granularity.
+
+    Returns:
+        Smallest integer >= ``value`` that is divisible by ``multiple``.
+
+    Raises:
+        ValueError: If ``multiple`` is not positive.
+    """
     if multiple <= 0:
         raise ValueError("multiple must be > 0")
     return ((value + multiple - 1) // multiple) * multiple
