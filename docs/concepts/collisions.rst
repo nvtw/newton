@@ -82,8 +82,8 @@ Collision shapes are attached to rigid bodies. Each shape has:
 - **Body index** (``shape_body``): The rigid body this shape is attached to. Use ``body=-1`` for static/world-fixed shapes.
 - **Local transform** (``shape_transform``): Position and orientation relative to the body frame.
 - **Scale** (``shape_scale``): 3D scale factors applied to the shape geometry.
-- **Margin** (``shape_margin``): Surface offset that shifts where contact points are placed. See :ref:`margin-gap-semantics`.
-- **Gap** (``shape_gap``): Extra detection distance that shifts when contacts are generated. See :ref:`margin-gap-semantics`.
+- **Margin** (``shape_margin``): Surface offset that shifts where contact points are placed. See :ref:`Margin and gap semantics <margin-gap-semantics>`.
+- **Gap** (``shape_gap``): Extra detection distance that shifts when contacts are generated. See :ref:`Margin and gap semantics <margin-gap-semantics>`.
 - **Source geometry** (``shape_source``): Reference to the underlying geometry object (e.g., :class:`~newton.Mesh`).
 
 During collision detection, shapes are transformed to world space using their parent body's pose:
