@@ -560,10 +560,10 @@ often be improved by attaching a precomputed SDF to the mesh (``mesh.build_sdf(.
    **Heightfield interpolation:** A heightfield (``HFIELD``) stores a regular 2D grid
    of elevation samples.  During finalization Newton converts it to a triangle mesh
    via :meth:`~newton.Mesh.create_heightfield` — each grid cell is split into two
-   triangles, so the surface is **piecewise-linear** (bilinear interpolation between
-   the four corner elevations of each cell).  Collision detection operates on this
-   triangle mesh, meaning contact normals and penetration depths reflect the linear
-   facets, not a smooth surface.
+   triangles, so the surface is **piecewise-planar** (each triangle is a flat plane
+   through three of the four corner elevations of the cell).  Collision detection
+   operates on this triangle mesh, meaning contact normals and penetration depths
+   reflect the planar facets, not a smooth surface.
 
    On CUDA devices Newton additionally builds an internal, automatically aligned SDF
    for each heightfield to accelerate mesh/SDF-vs-heightfield contact queries.  The
@@ -739,7 +739,7 @@ Contacts are generated when:
 
 .. math::
 
-   d < g \quad\Leftrightarrow\quad s < (m + g)
+   d \leq g \quad\Leftrightarrow\quad s \leq (m + g)
 
 Broad phase uses the same idea by expanding each shape AABB by:
 

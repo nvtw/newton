@@ -26,6 +26,7 @@ import warp as wp
 
 from ...core.types import MAXVAL, nparray, override, vec5, vec10
 from ...geometry import GeoType, ShapeFlags
+from ...geometry.types import Heightfield
 from ...sim import (
     Contacts,
     Control,
@@ -4010,10 +4011,11 @@ class SolverMuJoCo(SolverBase):
                 }
                 tf = wp.transform(*shape_transform[shape])
                 if stype == GeoType.HFIELD:
-                    # shape_source stores the fallback Mesh; the original Heightfield
-                    # is stashed on it during finalize.
-                    fallback = model.shape_source[shape]
-                    hfield_src = getattr(fallback, "_heightfield_source", None) if fallback is not None else None
+                    source = model.shape_source[shape]
+                    if isinstance(source, Heightfield):
+                        hfield_src = source
+                    else:
+                        hfield_src = getattr(source, "_heightfield_source", None) if source is not None else None
                     if hfield_src is None:
                         if wp.config.verbose:
                             print(f"Warning: Heightfield shape {shape} has no source data, skipping")
