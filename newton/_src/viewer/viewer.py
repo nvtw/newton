@@ -678,24 +678,14 @@ class ViewerBase(ABC):
             hidden: Whether the created mesh should be hidden.
         """
 
-        # Heightfield: convert to mesh for rendering
+        # Heightfield: shape_source stores the fallback Mesh generated during finalize.
         if geo_type == newton.GeoType.HFIELD:
             if geo_src is None:
                 raise ValueError(f"log_geo requires geo_src for HFIELD (name={name})")
-            assert isinstance(geo_src, newton.Heightfield)
+            assert isinstance(geo_src, newton.Mesh)
 
-            # Denormalize elevation data to actual Z heights.
-            # Transpose because create_mesh_heightfield uses ij indexing (i=X, j=Y)
-            # while Heightfield uses row-major (row=Y, col=X).
-            actual_heights = geo_src.min_z + geo_src.data * (geo_src.max_z - geo_src.min_z)
-            mesh = newton.Mesh.create_heightfield(
-                heightfield=actual_heights.T,
-                extent_x=geo_src.hx * 2.0,
-                extent_y=geo_src.hy * 2.0,
-                compute_inertia=False,
-            )
-            points = wp.array(mesh.vertices, dtype=wp.vec3, device=self.device)
-            indices = wp.array(mesh.indices, dtype=wp.int32, device=self.device)
+            points = wp.array(geo_src.vertices, dtype=wp.vec3, device=self.device)
+            indices = wp.array(geo_src.indices, dtype=wp.int32, device=self.device)
             self.log_mesh(name, points, indices, hidden=hidden)
             return
 

@@ -4010,8 +4010,10 @@ class SolverMuJoCo(SolverBase):
                 }
                 tf = wp.transform(*shape_transform[shape])
                 if stype == GeoType.HFIELD:
-                    # Retrieve heightfield source
-                    hfield_src = model.shape_source[shape]
+                    # shape_source stores the fallback Mesh; the original Heightfield
+                    # is stashed on it during finalize.
+                    fallback = model.shape_source[shape]
+                    hfield_src = getattr(fallback, "_heightfield_source", None) if fallback is not None else None
                     if hfield_src is None:
                         if wp.config.verbose:
                             print(f"Warning: Heightfield shape {shape} has no source data, skipping")

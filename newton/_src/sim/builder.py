@@ -8781,12 +8781,11 @@ class ModelBuilder:
             # (see the SDF section below) to accelerate distance queries.
             geo_sources = []
             finalized_geos = {}  # do not duplicate geometry
-            hfield_fallback_mesh_refs = []  # keep references alive for Warp mesh IDs
             finalized_hfield_fallback_meshes = {}  # do not duplicate generated heightfield fallback meshes
-            for shape_type, geo in zip(self.shape_type, self.shape_source, strict=True):
+            model_shape_source = list(self.shape_source)  # copy; heightfield entries get replaced below
+            for idx, (shape_type, geo) in enumerate(zip(self.shape_type, self.shape_source, strict=True)):
                 geo_hash = hash(geo)  # avoid repeated hash computations
                 if shape_type == GeoType.HFIELD and geo is not None:
-                    # For heightfields, store the fallback mesh pointer directly in shape_source_ptr
                     hfield = geo
                     hfield_hash = hash(hfield)
                     if hfield_hash not in finalized_hfield_fallback_meshes:
@@ -8799,11 +8798,12 @@ class ModelBuilder:
                             extent_y=2.0 * hfield.hy,
                             compute_inertia=False,
                         )
+                        fallback_mesh._heightfield_source = hfield
                         fallback_ptr = fallback_mesh.finalize(device=device)
                         finalized_hfield_fallback_meshes[hfield_hash] = (fallback_mesh, fallback_ptr)
                     fallback_mesh_ref, fallback_mesh_ptr = finalized_hfield_fallback_meshes[hfield_hash]
                     geo_sources.append(fallback_mesh_ptr)
-                    hfield_fallback_mesh_refs.append(fallback_mesh_ref)
+                    model_shape_source[idx] = fallback_mesh_ref
                 elif geo:
                     if geo_hash not in finalized_geos:
                         if isinstance(geo, Mesh):
@@ -8817,7 +8817,6 @@ class ModelBuilder:
 
             m.shape_type = wp.array(self.shape_type, dtype=wp.int32)
             m.shape_source_ptr = wp.array(geo_sources, dtype=wp.uint64)
-            m._shape_hfield_fallback_mesh_refs = hfield_fallback_mesh_refs
             m.shape_scale = wp.array(self.shape_scale, dtype=wp.vec3, requires_grad=requires_grad)
             m.shape_is_solid = wp.array(self.shape_is_solid, dtype=wp.bool)
             m.shape_margin = wp.array(self.shape_margin, dtype=wp.float32, requires_grad=requires_grad)
@@ -8826,7 +8825,7 @@ class ModelBuilder:
             )
             m.shape_world = wp.array(self.shape_world, dtype=wp.int32)
 
-            m.shape_source = self.shape_source  # used for rendering
+            m.shape_source = model_shape_source
 
             m.shape_material_ke = wp.array(self.shape_material_ke, dtype=wp.float32, requires_grad=requires_grad)
             m.shape_material_kd = wp.array(self.shape_material_kd, dtype=wp.float32, requires_grad=requires_grad)
