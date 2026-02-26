@@ -104,6 +104,97 @@ def create_empty_heightfield_data() -> HeightfieldData:
 
 
 @wp.func
+def sample_sdf_heightfield(
+    hfd: HeightfieldData,
+    elevation_data: wp.array(dtype=wp.float32),
+    pos: wp.vec3,
+) -> float:
+    """On-the-fly signed distance to a piecewise-planar heightfield surface.
+
+    Positive above the surface, negative below. Exact for the piecewise-linear
+    triangulation when the query point projects inside the heightfield extent.
+    """
+    dx = 2.0 * hfd.hx / wp.float32(hfd.ncol - 1)
+    dy = 2.0 * hfd.hy / wp.float32(hfd.nrow - 1)
+    z_range = hfd.max_z - hfd.min_z
+
+    col_f = (pos[0] + hfd.hx) / dx
+    row_f = (pos[1] + hfd.hy) / dy
+    col_f = wp.clamp(col_f, 0.0, wp.float32(hfd.ncol - 1))
+    row_f = wp.clamp(row_f, 0.0, wp.float32(hfd.nrow - 1))
+
+    col = wp.min(wp.int32(col_f), hfd.ncol - 2)
+    row = wp.min(wp.int32(row_f), hfd.nrow - 2)
+    fx = col_f - wp.float32(col)
+    fy = row_f - wp.float32(row)
+
+    base = hfd.data_offset
+    h00 = hfd.min_z + elevation_data[base + row * hfd.ncol + col] * z_range
+    h10 = hfd.min_z + elevation_data[base + row * hfd.ncol + col + 1] * z_range
+    h01 = hfd.min_z + elevation_data[base + (row + 1) * hfd.ncol + col] * z_range
+    h11 = hfd.min_z + elevation_data[base + (row + 1) * hfd.ncol + col + 1] * z_range
+
+    x0 = -hfd.hx + wp.float32(col) * dx
+    y0 = -hfd.hy + wp.float32(row) * dy
+
+    if fx >= fy:
+        v0 = wp.vec3(x0, y0, h00)
+        e1 = wp.vec3(dx, 0.0, h10 - h00)
+        e2 = wp.vec3(dx, dy, h11 - h00)
+    else:
+        v0 = wp.vec3(x0, y0, h00)
+        e1 = wp.vec3(dx, dy, h11 - h00)
+        e2 = wp.vec3(0.0, dy, h01 - h00)
+
+    normal = wp.normalize(wp.cross(e1, e2))
+    return wp.dot(pos - v0, normal)
+
+
+@wp.func
+def sample_sdf_grad_heightfield(
+    hfd: HeightfieldData,
+    elevation_data: wp.array(dtype=wp.float32),
+    pos: wp.vec3,
+) -> tuple[float, wp.vec3]:
+    """On-the-fly signed distance and gradient for a heightfield surface."""
+    dx = 2.0 * hfd.hx / wp.float32(hfd.ncol - 1)
+    dy = 2.0 * hfd.hy / wp.float32(hfd.nrow - 1)
+    z_range = hfd.max_z - hfd.min_z
+
+    col_f = (pos[0] + hfd.hx) / dx
+    row_f = (pos[1] + hfd.hy) / dy
+    col_f = wp.clamp(col_f, 0.0, wp.float32(hfd.ncol - 1))
+    row_f = wp.clamp(row_f, 0.0, wp.float32(hfd.nrow - 1))
+
+    col = wp.min(wp.int32(col_f), hfd.ncol - 2)
+    row = wp.min(wp.int32(row_f), hfd.nrow - 2)
+    fx = col_f - wp.float32(col)
+    fy = row_f - wp.float32(row)
+
+    base = hfd.data_offset
+    h00 = hfd.min_z + elevation_data[base + row * hfd.ncol + col] * z_range
+    h10 = hfd.min_z + elevation_data[base + row * hfd.ncol + col + 1] * z_range
+    h01 = hfd.min_z + elevation_data[base + (row + 1) * hfd.ncol + col] * z_range
+    h11 = hfd.min_z + elevation_data[base + (row + 1) * hfd.ncol + col + 1] * z_range
+
+    x0 = -hfd.hx + wp.float32(col) * dx
+    y0 = -hfd.hy + wp.float32(row) * dy
+
+    if fx >= fy:
+        v0 = wp.vec3(x0, y0, h00)
+        e1 = wp.vec3(dx, 0.0, h10 - h00)
+        e2 = wp.vec3(dx, dy, h11 - h00)
+    else:
+        v0 = wp.vec3(x0, y0, h00)
+        e1 = wp.vec3(dx, dy, h11 - h00)
+        e2 = wp.vec3(0.0, dy, h01 - h00)
+
+    normal = wp.normalize(wp.cross(e1, e2))
+    dist = wp.dot(pos - v0, normal)
+    return dist, normal
+
+
+@wp.func
 def get_triangle_from_heightfield_cell(
     hfd: HeightfieldData,
     elevation_data: wp.array(dtype=wp.float32),
