@@ -33,6 +33,9 @@ from .contact_reduction import (
     synchronize,
 )
 
+SHAPE_PAIR_HFIELD_BIT = wp.int32(1 << 30)
+SHAPE_PAIR_INDEX_MASK = wp.int32((1 << 30) - 1)
+
 
 @wp.func
 def scale_sdf_result_to_world(
@@ -790,6 +793,7 @@ def find_interesting_triangles(
 def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     writer_func: Any,
     contact_reduction_funcs: ContactReductionFunctions | None = None,
+    enable_heightfields: bool = True,
 ):
     @wp.kernel(enable_backward=False, module="unique")
     def mesh_sdf_collision_kernel(
@@ -804,7 +808,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         _shape_voxel_resolution: wp.array(dtype=wp.vec3i),
         shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_mesh_count: wp.array(dtype=int),
-        shape_types: wp.array(dtype=int),
         shape_heightfield_data: wp.array(dtype=HeightfieldData),
         heightfield_elevation_data: wp.array(dtype=wp.float32),
         writer_data: Any,
@@ -817,7 +820,13 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
         # Strided loop over pairs
         for pair_idx in range(block_id, pair_count, total_num_blocks):
-            pair = shape_pairs_mesh_mesh[pair_idx]
+            pair_encoded = shape_pairs_mesh_mesh[pair_idx]
+            if wp.static(enable_heightfields):
+                has_hfield = (pair_encoded[0] & SHAPE_PAIR_HFIELD_BIT) != 0
+                pair = wp.vec2i(pair_encoded[0] & SHAPE_PAIR_INDEX_MASK, pair_encoded[1])
+            else:
+                has_hfield = False
+                pair = pair_encoded
 
             margin = shape_gap[pair[0]] + shape_gap[pair[1]]
 
@@ -825,10 +834,14 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 tri_shape = pair[mode]
                 sdf_shape = pair[1 - mode]
 
-                tri_type = shape_types[tri_shape]
-                sdf_type = shape_types[sdf_shape]
-                tri_is_hfield = tri_type == GeoType.HFIELD
-                sdf_is_hfield = sdf_type == GeoType.HFIELD
+                if wp.static(enable_heightfields):
+                    tri_is_hfield = has_hfield and mode == 0
+                    sdf_is_hfield = has_hfield and mode == 1
+                else:
+                    tri_is_hfield = False
+                    sdf_is_hfield = False
+                tri_type = GeoType.HFIELD if tri_is_hfield else GeoType.MESH
+                sdf_type = GeoType.HFIELD if sdf_is_hfield else GeoType.MESH
 
                 mesh_id_tri = shape_source[tri_shape]
                 mesh_id_sdf = shape_source[sdf_shape]
@@ -839,8 +852,13 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 if not sdf_is_hfield and mesh_id_sdf == wp.uint64(0):
                     continue
 
-                hfd_tri = shape_heightfield_data[tri_shape]
-                hfd_sdf = shape_heightfield_data[sdf_shape]
+                hfd_tri = HeightfieldData()
+                hfd_sdf = HeightfieldData()
+                if wp.static(enable_heightfields):
+                    if tri_is_hfield:
+                        hfd_tri = shape_heightfield_data[tri_shape]
+                    if sdf_is_hfield:
+                        hfd_sdf = shape_heightfield_data[sdf_shape]
 
                 # SDF availability: heightfields always use on-the-fly evaluation
                 use_bvh_for_sdf = False
@@ -999,7 +1017,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         shape_voxel_resolution: wp.array(dtype=wp.vec3i),
         shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_mesh_count: wp.array(dtype=int),
-        shape_types: wp.array(dtype=int),
         shape_heightfield_data: wp.array(dtype=HeightfieldData),
         heightfield_elevation_data: wp.array(dtype=wp.float32),
         writer_data: Any,
@@ -1009,7 +1026,13 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         pair_count = shape_pairs_mesh_mesh_count[0]
 
         for pair_idx in range(block_id, pair_count, total_num_blocks):
-            pair = shape_pairs_mesh_mesh[pair_idx]
+            pair_encoded = shape_pairs_mesh_mesh[pair_idx]
+            if wp.static(enable_heightfields):
+                has_hfield = (pair_encoded[0] & SHAPE_PAIR_HFIELD_BIT) != 0
+                pair = wp.vec2i(pair_encoded[0] & SHAPE_PAIR_INDEX_MASK, pair_encoded[1])
+            else:
+                has_hfield = False
+                pair = pair_encoded
 
             margin = shape_gap[pair[0]] + shape_gap[pair[1]]
 
@@ -1036,10 +1059,14 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 tri_shape = pair[mode]
                 sdf_shape = pair[1 - mode]
 
-                tri_type = shape_types[tri_shape]
-                sdf_type = shape_types[sdf_shape]
-                tri_is_hfield = tri_type == GeoType.HFIELD
-                sdf_is_hfield = sdf_type == GeoType.HFIELD
+                if wp.static(enable_heightfields):
+                    tri_is_hfield = has_hfield and mode == 0
+                    sdf_is_hfield = has_hfield and mode == 1
+                else:
+                    tri_is_hfield = False
+                    sdf_is_hfield = False
+                tri_type = GeoType.HFIELD if tri_is_hfield else GeoType.MESH
+                sdf_type = GeoType.HFIELD if sdf_is_hfield else GeoType.MESH
 
                 mesh_id_tri = shape_source[tri_shape]
                 mesh_id_sdf = shape_source[sdf_shape]
@@ -1049,8 +1076,13 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 if not sdf_is_hfield and mesh_id_sdf == wp.uint64(0):
                     continue
 
-                hfd_tri = shape_heightfield_data[tri_shape]
-                hfd_sdf = shape_heightfield_data[sdf_shape]
+                hfd_tri = HeightfieldData()
+                hfd_sdf = HeightfieldData()
+                if wp.static(enable_heightfields):
+                    if tri_is_hfield:
+                        hfd_tri = shape_heightfield_data[tri_shape]
+                    if sdf_is_hfield:
+                        hfd_sdf = shape_heightfield_data[sdf_shape]
 
                 use_bvh_for_sdf = False
                 sdf_data = SDFData()

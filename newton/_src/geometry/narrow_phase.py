@@ -68,6 +68,8 @@ from ..geometry.support_function import (
 from ..geometry.types import GeoType
 from ..utils.heightfield import HeightfieldData, create_empty_heightfield_data, get_triangle_from_heightfield_cell
 
+SHAPE_PAIR_HFIELD_BIT = wp.int32(1 << 30)
+
 
 @wp.struct
 class ContactWriterData:
@@ -261,9 +263,23 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 is_mesh_like_b = type_b == GeoType.MESH or is_hfield_b
 
                 if is_mesh_like_a and is_mesh_like_b:
+                    # Heightfield-vs-heightfield is unsupported in this path.
+                    if is_hfield_a and is_hfield_b:
+                        continue
+                    # Normalize order so heightfield (if present) is always pair[0],
+                    # and mark pair[0] with a high-bit flag consumed by the SDF kernel.
+                    if is_hfield_b:
+                        encoded_a = shape_b | SHAPE_PAIR_HFIELD_BIT
+                        encoded_b = shape_a
+                    elif is_hfield_a:
+                        encoded_a = shape_a | SHAPE_PAIR_HFIELD_BIT
+                        encoded_b = shape_b
+                    else:
+                        encoded_a = shape_a
+                        encoded_b = shape_b
                     idx = wp.atomic_add(shape_pairs_mesh_mesh_count, 0, 1)
                     if idx < shape_pairs_mesh_mesh.shape[0]:
-                        shape_pairs_mesh_mesh[idx] = wp.vec2i(shape_a, shape_b)
+                        shape_pairs_mesh_mesh[idx] = wp.vec2i(encoded_a, encoded_b)
                     continue
 
                 # All other heightfield pairs: midphase + GJK/MPR
@@ -1575,6 +1591,7 @@ class NarrowPhase:
                 self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     writer_func,
                     contact_reduction_funcs=self.contact_reduction_funcs,
+                    enable_heightfields=has_heightfields,
                 )
             else:
                 self.mesh_mesh_contacts_kernel = None
@@ -1962,7 +1979,6 @@ class NarrowPhase:
                         shape_voxel_resolution,
                         self.shape_pairs_mesh_mesh,
                         self.shape_pairs_mesh_mesh_count,
-                        shape_types,
                         hf_data,
                         hf_elev,
                         writer_data,
