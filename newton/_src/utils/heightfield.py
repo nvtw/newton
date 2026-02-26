@@ -103,37 +103,6 @@ def create_empty_heightfield_data() -> HeightfieldData:
     return hd
 
 
-def pack_heightfield_into_sdf_data(hd: HeightfieldData):
-    """Pack heightfield metadata into an SDFData entry for the SDF table union.
-
-    The mesh-mesh SDF kernel loads a single SDFData per shape.  For heightfield
-    shapes we reuse the same struct, storing the seven HeightfieldData scalars
-    in otherwise-unused SDFData fields.  Integer fields are stored as their
-    ``float32`` representation (exact for values up to 2**24).
-
-    Layout:
-        center          = (hx, hy, min_z)
-        half_extents    = (max_z, float(data_offset), float(nrow))
-        background_value = float(ncol)
-
-    All other SDFData fields are zeroed so the entry is never mistaken for a
-    valid sparse/coarse SDF volume.
-    """
-    from ..geometry.sdf_utils import SDFData  # noqa: PLC0415
-
-    sd = SDFData()
-    sd.sparse_sdf_ptr = wp.uint64(0)
-    sd.sparse_voxel_size = wp.vec3(0.0, 0.0, 0.0)
-    sd.sparse_voxel_radius = 0.0
-    sd.coarse_sdf_ptr = wp.uint64(0)
-    sd.coarse_voxel_size = wp.vec3(0.0, 0.0, 0.0)
-    sd.center = wp.vec3(hd.hx, hd.hy, hd.min_z)
-    sd.half_extents = wp.vec3(hd.max_z, float(hd.data_offset), float(hd.nrow))
-    sd.background_value = float(hd.ncol)
-    sd.scale_baked = False
-    return sd
-
-
 @wp.func
 def _heightfield_surface_query(
     hfd: HeightfieldData,

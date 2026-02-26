@@ -8991,16 +8991,6 @@ class ModelBuilder:
             shape_sdf_index = [-1] * len(self.shape_type)
             sdf_cache = {}
 
-            # Pre-compute heightfield data offsets so we can pack them into
-            # sdf_table entries alongside mesh SDFs.
-            hfield_data_offsets = {}
-            hfield_offset = 0
-            for i in range(len(self.shape_type)):
-                if self.shape_type[i] == GeoType.HFIELD and self.shape_source[i] is not None:
-                    hfield_data_offsets[i] = hfield_offset
-                    hf = self.shape_source[i]
-                    hfield_offset += hf.nrow * hf.ncol
-
             for i in range(len(self.shape_type)):
                 shape_type = self.shape_type[i]
                 shape_src = self.shape_source[i]
@@ -9028,20 +9018,6 @@ class ModelBuilder:
                         sparse_volume = mesh_sdf.sparse_volume
                         coarse_volume = mesh_sdf.coarse_volume
                         block_coords = list(mesh_sdf.block_coords) if mesh_sdf.block_coords is not None else []
-                elif shape_type == GeoType.HFIELD and shape_src is not None and i in hfield_data_offsets:
-                    from ..utils.heightfield import HeightfieldData as HFD  # noqa: PLC0415
-                    from ..utils.heightfield import pack_heightfield_into_sdf_data  # noqa: PLC0415
-
-                    hd = HFD()
-                    hd.data_offset = hfield_data_offsets[i]
-                    hd.nrow = shape_src.nrow
-                    hd.ncol = shape_src.ncol
-                    hd.hx = shape_src.hx
-                    hd.hy = shape_src.hy
-                    hd.min_z = shape_src.min_z
-                    hd.max_z = shape_src.max_z
-                    sdf_data = pack_heightfield_into_sdf_data(hd)
-                    cache_key = ("heightfield_packed", i)
                 elif is_hydroelastic and has_shape_collision:
                     bake_scale = True
                     # Keep voxel-size-driven generation independent from max_resolution.

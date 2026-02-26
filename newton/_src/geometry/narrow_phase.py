@@ -66,7 +66,7 @@ from ..geometry.support_function import (
     extract_shape_data,
 )
 from ..geometry.types import GeoType
-from ..utils.heightfield import HeightfieldData, get_triangle_from_heightfield_cell
+from ..utils.heightfield import HeightfieldData, create_empty_heightfield_data, get_triangle_from_heightfield_cell
 
 
 @wp.struct
@@ -248,9 +248,8 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
 
             # =====================================================================
             # Route heightfield pairs.
-            # Heightfield-vs-mesh goes through the mesh-mesh SDF kernel
-            # (on-the-fly triangle + SDF evaluation), with the heightfield
-            # always placed at pair[0] so the kernel needs only one type check.
+            # Heightfield-vs-mesh and heightfield-vs-heightfield go through the
+            # mesh-mesh SDF kernel (on-the-fly triangle + SDF evaluation).
             # Other heightfield combinations (convex, plane) use the dedicated
             # heightfield midphase with GJK/MPR per cell.
             # =====================================================================
@@ -262,13 +261,9 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 is_mesh_like_b = type_b == GeoType.MESH or is_hfield_b
 
                 if is_mesh_like_a and is_mesh_like_b:
-                    if is_hfield_b:
-                        ordered = wp.vec2i(shape_b, shape_a)
-                    else:
-                        ordered = wp.vec2i(shape_a, shape_b)
                     idx = wp.atomic_add(shape_pairs_mesh_mesh_count, 0, 1)
                     if idx < shape_pairs_mesh_mesh.shape[0]:
-                        shape_pairs_mesh_mesh[idx] = ordered
+                        shape_pairs_mesh_mesh[idx] = wp.vec2i(shape_a, shape_b)
                     continue
 
                 # All other heightfield pairs: midphase + GJK/MPR
@@ -1655,6 +1650,10 @@ class NarrowPhase:
             self.shape_pairs_heightfield = wp.zeros(hf_n, dtype=wp.vec2i, device=device)
             self.heightfield_cell_pairs = wp.zeros(hf_n * 20 if has_heightfields else 1, dtype=wp.vec4i, device=device)
 
+            # Empty fallback arrays so the mesh-mesh SDF kernel can always receive
+            # HeightfieldData / elevation arrays even when no heightfields exist.
+            empty_hfield = create_empty_heightfield_data()
+            self._empty_heightfield_data = wp.array([empty_hfield], dtype=HeightfieldData, device=device)
             self._empty_elevation_data = wp.zeros(1, dtype=wp.float32, device=device)
 
             self.empty_tangent = None
@@ -1941,10 +1940,10 @@ class NarrowPhase:
                 )
 
             # Launch mesh-mesh contact processing kernel on CUDA.
-            # The kernel supports SDF-backed, BVH fallback, and on-the-fly
-            # heightfield evaluation.  Heightfield metadata is packed into
-            # sdf_table entries (union); only the elevation array is separate.
+            # The kernel supports both SDF-backed and BVH fallback paths via shape_sdf_index,
+            # as well as on-the-fly heightfield evaluation via shape_heightfield_data.
             if wp.get_device(device).is_cuda:
+                hf_data = shape_heightfield_data if shape_heightfield_data is not None else self._empty_heightfield_data
                 hf_elev = (
                     heightfield_elevation_data if heightfield_elevation_data is not None else self._empty_elevation_data
                 )
@@ -1964,6 +1963,7 @@ class NarrowPhase:
                         self.shape_pairs_mesh_mesh,
                         self.shape_pairs_mesh_mesh_count,
                         shape_types,
+                        hf_data,
                         hf_elev,
                         writer_data,
                         self.num_tile_blocks,
