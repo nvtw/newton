@@ -68,8 +68,6 @@ from ..geometry.support_function import (
 from ..geometry.types import GeoType
 from ..utils.heightfield import HeightfieldData, get_triangle_from_heightfield_cell
 
-SHAPE_PAIR_HFIELD_BIT = wp.int32(1 << 30)
-
 
 @wp.struct
 class ContactWriterData:
@@ -263,13 +261,11 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 is_mesh_like_a = type_a == GeoType.MESH or is_hfield_a
                 is_mesh_like_b = type_b == GeoType.MESH or is_hfield_b
 
-                # Heightfield-vs-heightfield is not supported in this path.
-                if is_mesh_like_a and is_mesh_like_b and not (is_hfield_a and is_hfield_b):
+                if is_mesh_like_a and is_mesh_like_b:
                     if is_hfield_b:
                         ordered = wp.vec2i(shape_b, shape_a)
                     else:
                         ordered = wp.vec2i(shape_a, shape_b)
-                    ordered = wp.vec2i(ordered[0] | SHAPE_PAIR_HFIELD_BIT, ordered[1])
                     idx = wp.atomic_add(shape_pairs_mesh_mesh_count, 0, 1)
                     if idx < shape_pairs_mesh_mesh.shape[0]:
                         shape_pairs_mesh_mesh[idx] = ordered
@@ -1967,6 +1963,7 @@ class NarrowPhase:
                         shape_voxel_resolution,
                         self.shape_pairs_mesh_mesh,
                         self.shape_pairs_mesh_mesh_count,
+                        shape_types,
                         hf_elev,
                         writer_data,
                         self.num_tile_blocks,
