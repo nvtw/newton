@@ -21,12 +21,6 @@ from newton._src.core.types import MAXVAL
 
 from ..geometry.contact_data import ContactData
 from ..geometry.sdf_utils import SDFData
-from ..geometry.types import GeoType
-from ..utils.heightfield import (
-    HeightfieldData,
-    sample_sdf_grad_heightfield,
-    sample_sdf_heightfield,
-)
 
 # Handle both direct execution and module import
 from .contact_reduction import (
@@ -36,6 +30,9 @@ from .contact_reduction import (
     get_shared_memory_pointer_block_dim_plus_2_ints,
     synchronize,
 )
+
+SHAPE_PAIR_HFIELD_BIT = wp.int32(1 << 30)
+SHAPE_PAIR_INDEX_MASK = wp.int32((1 << 30) - 1)
 
 
 @wp.func
@@ -370,20 +367,119 @@ def closest_pt_point_bary_triangle(c: wp.vec3) -> wp.vec3:
 
 
 @wp.func
-def extract_heightfield_from_sdf(sdf_data: SDFData) -> HeightfieldData:
-    """Extract HeightfieldData packed inside an SDFData entry.
+def hfield_hx_from_sdf(sdf_data: SDFData) -> float:
+    return sdf_data.center[0]
 
-    Inverse of :func:`~newton._src.utils.heightfield.pack_heightfield_into_sdf_data`.
-    """
-    hfd = HeightfieldData()
-    hfd.hx = sdf_data.center[0]
-    hfd.hy = sdf_data.center[1]
-    hfd.min_z = sdf_data.center[2]
-    hfd.max_z = sdf_data.half_extents[0]
-    hfd.data_offset = wp.int32(sdf_data.half_extents[1])
-    hfd.nrow = wp.int32(sdf_data.half_extents[2])
-    hfd.ncol = wp.int32(sdf_data.background_value)
-    return hfd
+
+@wp.func
+def hfield_hy_from_sdf(sdf_data: SDFData) -> float:
+    return sdf_data.center[1]
+
+
+@wp.func
+def hfield_min_z_from_sdf(sdf_data: SDFData) -> float:
+    return sdf_data.center[2]
+
+
+@wp.func
+def hfield_max_z_from_sdf(sdf_data: SDFData) -> float:
+    return sdf_data.half_extents[0]
+
+
+@wp.func
+def hfield_data_offset_from_sdf(sdf_data: SDFData) -> int:
+    return wp.int32(sdf_data.half_extents[1])
+
+
+@wp.func
+def hfield_nrow_from_sdf(sdf_data: SDFData) -> int:
+    return wp.int32(sdf_data.half_extents[2])
+
+
+@wp.func
+def hfield_ncol_from_sdf(sdf_data: SDFData) -> int:
+    return wp.int32(sdf_data.background_value)
+
+
+@wp.func
+def _heightfield_surface_query_packed(
+    sdf_data: SDFData,
+    elevation_data: wp.array(dtype=wp.float32),
+    pos: wp.vec3,
+) -> tuple[float, wp.vec3, float]:
+    hx = hfield_hx_from_sdf(sdf_data)
+    hy = hfield_hy_from_sdf(sdf_data)
+    min_z = hfield_min_z_from_sdf(sdf_data)
+    max_z = hfield_max_z_from_sdf(sdf_data)
+    base = hfield_data_offset_from_sdf(sdf_data)
+    nrow = hfield_nrow_from_sdf(sdf_data)
+    ncol = hfield_ncol_from_sdf(sdf_data)
+
+    dx = 2.0 * hx / wp.float32(ncol - 1)
+    dy = 2.0 * hy / wp.float32(nrow - 1)
+    z_range = max_z - min_z
+
+    cx = wp.clamp(pos[0], -hx, hx)
+    cy = wp.clamp(pos[1], -hy, hy)
+    out_x = pos[0] - cx
+    out_y = pos[1] - cy
+    lateral_dist_sq = out_x * out_x + out_y * out_y
+
+    col_f = (cx + hx) / dx
+    row_f = (cy + hy) / dy
+    col_f = wp.clamp(col_f, 0.0, wp.float32(ncol - 1))
+    row_f = wp.clamp(row_f, 0.0, wp.float32(nrow - 1))
+
+    col = wp.min(wp.int32(col_f), ncol - 2)
+    row = wp.min(wp.int32(row_f), nrow - 2)
+    fx = col_f - wp.float32(col)
+    fy = row_f - wp.float32(row)
+
+    h00 = min_z + elevation_data[base + row * ncol + col] * z_range
+    h10 = min_z + elevation_data[base + row * ncol + col + 1] * z_range
+    h01 = min_z + elevation_data[base + (row + 1) * ncol + col] * z_range
+    h11 = min_z + elevation_data[base + (row + 1) * ncol + col + 1] * z_range
+
+    x0 = -hx + wp.float32(col) * dx
+    y0 = -hy + wp.float32(row) * dy
+
+    if fx >= fy:
+        v0 = wp.vec3(x0, y0, h00)
+        e1 = wp.vec3(dx, 0.0, h10 - h00)
+        e2 = wp.vec3(dx, dy, h11 - h00)
+    else:
+        v0 = wp.vec3(x0, y0, h00)
+        e1 = wp.vec3(dx, dy, h11 - h00)
+        e2 = wp.vec3(0.0, dy, h01 - h00)
+
+    normal = wp.normalize(wp.cross(e1, e2))
+    d_plane = wp.dot(pos - v0, normal)
+    return d_plane, normal, lateral_dist_sq
+
+
+@wp.func
+def sample_sdf_heightfield_packed(sdf_data: SDFData, elevation_data: wp.array(dtype=wp.float32), p: wp.vec3) -> float:
+    d_plane, _normal, lateral_dist_sq = _heightfield_surface_query_packed(sdf_data, elevation_data, p)
+    if lateral_dist_sq > 0.0:
+        return wp.sqrt(lateral_dist_sq + d_plane * d_plane)
+    return d_plane
+
+
+@wp.func
+def sample_sdf_grad_heightfield_packed(
+    sdf_data: SDFData, elevation_data: wp.array(dtype=wp.float32), p: wp.vec3
+) -> tuple[float, wp.vec3]:
+    d_plane, normal, lateral_dist_sq = _heightfield_surface_query_packed(sdf_data, elevation_data, p)
+    if lateral_dist_sq > 0.0:
+        dist = wp.sqrt(lateral_dist_sq + d_plane * d_plane)
+        hx = hfield_hx_from_sdf(sdf_data)
+        hy = hfield_hy_from_sdf(sdf_data)
+        cx = wp.clamp(p[0], -hx, hx)
+        cy = wp.clamp(p[1], -hy, hy)
+        lateral = wp.vec3(p[0] - cx, p[1] - cy, 0.0)
+        grad = wp.normalize(lateral + d_plane * normal)
+        return dist, grad
+    return d_plane, normal
 
 
 @wp.func
@@ -423,13 +519,11 @@ def do_triangle_sdf_collision(
     center = (v0 + v1 + v2) * third
     p = center
 
-    hfd_local = extract_heightfield_from_sdf(sdf_data)
-
     if sdf_is_heightfield:
-        dist = sample_sdf_heightfield(hfd_local, elevation_data, p)
-        d0 = sample_sdf_heightfield(hfd_local, elevation_data, v0)
-        d1 = sample_sdf_heightfield(hfd_local, elevation_data, v1)
-        d2 = sample_sdf_heightfield(hfd_local, elevation_data, v2)
+        dist = sample_sdf_heightfield_packed(sdf_data, elevation_data, p)
+        d0 = sample_sdf_heightfield_packed(sdf_data, elevation_data, v0)
+        d1 = sample_sdf_heightfield_packed(sdf_data, elevation_data, v1)
+        d2 = sample_sdf_heightfield_packed(sdf_data, elevation_data, v2)
     elif use_bvh_for_sdf:
         dist = sample_sdf_using_mesh(sdf_mesh_id, p)
         d0 = sample_sdf_using_mesh(sdf_mesh_id, v0)
@@ -469,7 +563,7 @@ def do_triangle_sdf_collision(
 
     for _iter in range(16):
         if sdf_is_heightfield:
-            _, sdf_gradient = sample_sdf_grad_heightfield(hfd_local, elevation_data, p)
+            _, sdf_gradient = sample_sdf_grad_heightfield_packed(sdf_data, elevation_data, p)
         elif use_bvh_for_sdf:
             _, sdf_gradient = sample_sdf_grad_using_mesh(sdf_mesh_id, p)
         else:
@@ -502,7 +596,7 @@ def do_triangle_sdf_collision(
         uvw = new_uvw
 
     if sdf_is_heightfield:
-        dist, sdf_gradient = sample_sdf_grad_heightfield(hfd_local, elevation_data, p)
+        dist, sdf_gradient = sample_sdf_grad_heightfield_packed(sdf_data, elevation_data, p)
     elif use_bvh_for_sdf:
         dist, sdf_gradient = sample_sdf_grad_using_mesh(sdf_mesh_id, p)
     else:
@@ -644,45 +738,46 @@ def _sphere_aabb_distance(center: wp.vec3, aabb_lower: wp.vec3, aabb_upper: wp.v
 
 
 @wp.func
-def get_triangle_from_heightfield(
-    hfd: HeightfieldData,
+def get_triangle_from_heightfield_packed(
+    hfield_sdf_data: SDFData,
     elevation_data: wp.array(dtype=wp.float32),
     mesh_scale: wp.vec3,
     X_ws: wp.transform,
     tri_idx: int,
 ) -> tuple[wp.vec3, wp.vec3, wp.vec3]:
-    """Extract a triangle from a heightfield by linear triangle index.
+    """Extract a triangle from packed heightfield metadata in ``SDFData``."""
+    nrow = hfield_nrow_from_sdf(hfield_sdf_data)
+    ncol = hfield_ncol_from_sdf(hfield_sdf_data)
+    hx = hfield_hx_from_sdf(hfield_sdf_data)
+    hy = hfield_hy_from_sdf(hfield_sdf_data)
+    min_z = hfield_min_z_from_sdf(hfield_sdf_data)
+    max_z = hfield_max_z_from_sdf(hfield_sdf_data)
+    base = hfield_data_offset_from_sdf(hfield_sdf_data)
 
-    Each grid cell produces 2 triangles. ``tri_idx`` encodes
-    ``(row, col, sub_tri)`` as ``row * (ncol-1) * 2 + col * 2 + sub_tri``.
-
-    Returns ``(v0_world, v1_world, v2_world)`` matching :func:`get_triangle_from_mesh`.
-    """
-    cells_per_row = hfd.ncol - 1
+    cells_per_row = ncol - 1
     cell_idx = tri_idx // 2
     tri_sub = tri_idx - cell_idx * 2
     row = cell_idx // cells_per_row
     col = cell_idx - row * cells_per_row
 
-    dx = 2.0 * hfd.hx / wp.float32(hfd.ncol - 1)
-    dy = 2.0 * hfd.hy / wp.float32(hfd.nrow - 1)
-    z_range = hfd.max_z - hfd.min_z
+    dx = 2.0 * hx / wp.float32(ncol - 1)
+    dy = 2.0 * hy / wp.float32(nrow - 1)
+    z_range = max_z - min_z
 
-    x0 = -hfd.hx + wp.float32(col) * dx
+    x0 = -hx + wp.float32(col) * dx
     x1 = x0 + dx
-    y0 = -hfd.hy + wp.float32(row) * dy
+    y0 = -hy + wp.float32(row) * dy
     y1 = y0 + dy
 
-    base = hfd.data_offset
-    h00 = elevation_data[base + row * hfd.ncol + col]
-    h10 = elevation_data[base + row * hfd.ncol + (col + 1)]
-    h01 = elevation_data[base + (row + 1) * hfd.ncol + col]
-    h11 = elevation_data[base + (row + 1) * hfd.ncol + (col + 1)]
+    h00 = elevation_data[base + row * ncol + col]
+    h10 = elevation_data[base + row * ncol + (col + 1)]
+    h01 = elevation_data[base + (row + 1) * ncol + col]
+    h11 = elevation_data[base + (row + 1) * ncol + (col + 1)]
 
-    p00 = wp.vec3(x0, y0, hfd.min_z + h00 * z_range)
-    p10 = wp.vec3(x1, y0, hfd.min_z + h10 * z_range)
-    p01 = wp.vec3(x0, y1, hfd.min_z + h01 * z_range)
-    p11 = wp.vec3(x1, y1, hfd.min_z + h11 * z_range)
+    p00 = wp.vec3(x0, y0, min_z + h00 * z_range)
+    p10 = wp.vec3(x1, y0, min_z + h10 * z_range)
+    p01 = wp.vec3(x0, y1, min_z + h01 * z_range)
+    p11 = wp.vec3(x1, y1, min_z + h11 * z_range)
 
     if tri_sub == 0:
         v0_local = p00
@@ -705,10 +800,10 @@ def get_triangle_from_heightfield(
 
 
 @wp.func
-def get_triangle_count(is_hfield: bool, mesh_id: wp.uint64, hfd: HeightfieldData) -> int:
+def get_triangle_count(is_hfield: bool, mesh_id: wp.uint64, tri_hfield_sdf_data: SDFData) -> int:
     """Return the number of triangles for a mesh or heightfield shape."""
     if is_hfield:
-        return 2 * (hfd.nrow - 1) * (hfd.ncol - 1)
+        return 2 * (hfield_nrow_from_sdf(tri_hfield_sdf_data) - 1) * (hfield_ncol_from_sdf(tri_hfield_sdf_data) - 1)
     return wp.mesh_get(mesh_id).indices.shape[0] // 3
 
 
@@ -726,7 +821,7 @@ def find_interesting_triangles(
     inv_sdf_scale: wp.vec3,
     tri_is_hfield: bool,
     sdf_is_hfield: bool,
-    hfd: HeightfieldData,
+    tri_hfield_sdf_data: SDFData,
     elevation_data: wp.array(dtype=wp.float32),
 ):
     """Midphase triangle culling for mesh-SDF collision.
@@ -736,13 +831,12 @@ def find_interesting_triangles(
        from the SDF AABB than ``contact_distance``.
     2. **SDF sample:** tighter distance estimate at the bounding-sphere center.
 
-    ``hfd`` carries heightfield metadata for the triangle source (when
-    ``tri_is_hfield``).  For the SDF side (when ``sdf_is_hfield``), the
-    heightfield data is extracted from ``sdf_data`` to avoid an extra parameter.
+    Triangle-side heightfield metadata is read from ``tri_hfield_sdf_data``.
+    SDF-side heightfield metadata is read from ``sdf_data``.
 
     Buffer layout: [0..block_dim-1] = triangle indices, [block_dim] = count, [block_dim+1] = progress
     """
-    num_tris = get_triangle_count(tri_is_hfield, mesh_id, hfd)
+    num_tris = get_triangle_count(tri_is_hfield, mesh_id, tri_hfield_sdf_data)
     capacity = wp.block_dim()
 
     sdf_aabb_lower = sdf_data.center - sdf_data.half_extents
@@ -757,8 +851,8 @@ def find_interesting_triangles(
 
         if tri_idx < num_tris:
             if tri_is_hfield:
-                v0_scaled, v1_scaled, v2_scaled = get_triangle_from_heightfield(
-                    hfd, elevation_data, mesh_scale, mesh_to_sdf_transform, tri_idx
+                v0_scaled, v1_scaled, v2_scaled = get_triangle_from_heightfield_packed(
+                    tri_hfield_sdf_data, elevation_data, mesh_scale, mesh_to_sdf_transform, tri_idx
                 )
             else:
                 v0_scaled, v1_scaled, v2_scaled = get_triangle_from_mesh(
@@ -772,8 +866,7 @@ def find_interesting_triangles(
             threshold = bounding_sphere_radius + contact_distance
 
             if sdf_is_hfield:
-                hfd_sdf = extract_heightfield_from_sdf(sdf_data)
-                sdf_dist = sample_sdf_heightfield(hfd_sdf, elevation_data, bounding_sphere_center)
+                sdf_dist = sample_sdf_heightfield_packed(sdf_data, elevation_data, bounding_sphere_center)
                 add_triangle = wp.abs(sdf_dist) <= threshold
             elif use_bvh_for_sdf:
                 sdf_dist = sample_sdf_using_mesh(sdf_mesh_id, bounding_sphere_center, 1.01 * threshold)
@@ -807,7 +900,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         _shape_voxel_resolution: wp.array(dtype=wp.vec3i),
         shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_mesh_count: wp.array(dtype=int),
-        shape_types: wp.array(dtype=int),
         heightfield_elevation_data: wp.array(dtype=wp.float32),
         writer_data: Any,
         total_num_blocks: int,
@@ -818,14 +910,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         pair_count = shape_pairs_mesh_mesh_count[0]
 
         for pair_idx in range(block_id, pair_count, total_num_blocks):
-            pair = shape_pairs_mesh_mesh[pair_idx]
+            pair_encoded = shape_pairs_mesh_mesh[pair_idx]
+            has_hfield = (pair_encoded[0] & SHAPE_PAIR_HFIELD_BIT) != 0
+            pair = wp.vec2i(pair_encoded[0] & SHAPE_PAIR_INDEX_MASK, pair_encoded[1])
 
             margin = shape_gap[pair[0]] + shape_gap[pair[1]]
-
-            has_hfield = shape_types[pair[0]] == GeoType.HFIELD
-            hfd = HeightfieldData()
-            if has_hfield:
-                hfd = extract_heightfield_from_sdf(sdf_table[shape_sdf_index[pair[0]]])
 
             for mode in range(2):
                 tri_shape = pair[mode]
@@ -841,6 +930,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     continue
                 if not sdf_is_hfield and mesh_id_sdf == wp.uint64(0):
                     continue
+
+                tri_hfield_sdf_data = SDFData()
+                if tri_is_hfield:
+                    tri_hfield_sdf_data = sdf_table[shape_sdf_index[tri_shape]]
 
                 use_bvh_for_sdf = False
                 sdf_data = SDFData()
@@ -891,7 +984,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     selected_triangles[tri_capacity + 1] = 0
                 synchronize()
 
-                num_tris = get_triangle_count(tri_is_hfield, mesh_id_tri, hfd)
+                num_tris = get_triangle_count(tri_is_hfield, mesh_id_tri, tri_hfield_sdf_data)
 
                 while selected_triangles[tri_capacity + 1] < num_tris:
                     find_interesting_triangles(
@@ -907,7 +1000,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         inv_sdf_scale,
                         tri_is_hfield,
                         sdf_is_hfield,
-                        hfd,
+                        tri_hfield_sdf_data,
                         heightfield_elevation_data,
                     )
 
@@ -918,8 +1011,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         tri_idx = selected_triangles[t]
 
                         if tri_is_hfield:
-                            v0_scaled, v1_scaled, v2_scaled = get_triangle_from_heightfield(
-                                hfd, heightfield_elevation_data, mesh_scale_tri, X_mesh_to_sdf, tri_idx
+                            v0_scaled, v1_scaled, v2_scaled = get_triangle_from_heightfield_packed(
+                                tri_hfield_sdf_data, heightfield_elevation_data, mesh_scale_tri, X_mesh_to_sdf, tri_idx
                             )
                         else:
                             v0_scaled, v1_scaled, v2_scaled = get_triangle_from_mesh(
@@ -998,7 +1091,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         shape_voxel_resolution: wp.array(dtype=wp.vec3i),
         shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_mesh_count: wp.array(dtype=int),
-        shape_types: wp.array(dtype=int),
         heightfield_elevation_data: wp.array(dtype=wp.float32),
         writer_data: Any,
         total_num_blocks: int,
@@ -1007,7 +1099,9 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         pair_count = shape_pairs_mesh_mesh_count[0]
 
         for pair_idx in range(block_id, pair_count, total_num_blocks):
-            pair = shape_pairs_mesh_mesh[pair_idx]
+            pair_encoded = shape_pairs_mesh_mesh[pair_idx]
+            has_hfield = (pair_encoded[0] & SHAPE_PAIR_HFIELD_BIT) != 0
+            pair = wp.vec2i(pair_encoded[0] & SHAPE_PAIR_INDEX_MASK, pair_encoded[1])
 
             margin = shape_gap[pair[0]] + shape_gap[pair[1]]
 
@@ -1030,11 +1124,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
             if t == 0:
                 active_contacts_shared_mem[wp.static(reduction_slot_count)] = 0
 
-            has_hfield = shape_types[pair[0]] == GeoType.HFIELD
-            hfd = HeightfieldData()
-            if has_hfield:
-                hfd = extract_heightfield_from_sdf(sdf_table[shape_sdf_index[pair[0]]])
-
             for mode in range(2):
                 tri_shape = pair[mode]
                 sdf_shape = pair[1 - mode]
@@ -1049,6 +1138,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     continue
                 if not sdf_is_hfield and mesh_id_sdf == wp.uint64(0):
                     continue
+
+                tri_hfield_sdf_data = SDFData()
+                if tri_is_hfield:
+                    tri_hfield_sdf_data = sdf_table[shape_sdf_index[tri_shape]]
 
                 use_bvh_for_sdf = False
                 sdf_data = SDFData()
@@ -1106,7 +1199,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     selected_triangles[tri_capacity + 1] = 0
                 synchronize()
 
-                num_tris = get_triangle_count(tri_is_hfield, mesh_id_tri, hfd)
+                num_tris = get_triangle_count(tri_is_hfield, mesh_id_tri, tri_hfield_sdf_data)
 
                 while selected_triangles[tri_capacity + 1] < num_tris:
                     find_interesting_triangles(
@@ -1122,7 +1215,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         inv_sdf_scale,
                         tri_is_hfield,
                         sdf_is_hfield,
-                        hfd,
+                        tri_hfield_sdf_data,
                         heightfield_elevation_data,
                     )
 
@@ -1135,8 +1228,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         tri_idx = selected_triangles[t]
 
                         if tri_is_hfield:
-                            v0_scaled, v1_scaled, v2_scaled = get_triangle_from_heightfield(
-                                hfd, heightfield_elevation_data, mesh_scale_tri, X_mesh_to_sdf, tri_idx
+                            v0_scaled, v1_scaled, v2_scaled = get_triangle_from_heightfield_packed(
+                                tri_hfield_sdf_data, heightfield_elevation_data, mesh_scale_tri, X_mesh_to_sdf, tri_idx
                             )
                         else:
                             v0_scaled, v1_scaled, v2_scaled = get_triangle_from_mesh(
