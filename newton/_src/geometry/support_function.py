@@ -139,27 +139,21 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
         mesh_ptr = unpack_mesh_ptr(geom.auxiliary)
         mesh = wp.mesh_get(mesh_ptr)
 
-        # The shape scale is stored in geom.scale
         mesh_scale = geom.scale
-
-        # Find the vertex with the maximum dot product with the direction
-        max_dot = float(-1.0e10)
-        best_vertex = wp.vec3(0.0, 0.0, 0.0)
-
         num_verts = mesh.points.shape[0]
 
+        # Pre-scale direction: dot(scale*v, d) == dot(v, scale*d)
+        # This moves the per-vertex cw_mul out of the loop (only 1 at the end)
+        scaled_dir = wp.cw_mul(dir_safe, mesh_scale)
+
+        max_dot = float(-1.0e10)
+        best_idx = int(0)
         for i in range(num_verts):
-            # Get vertex position (applying scale)
-            vertex = wp.cw_mul(mesh.points[i], mesh_scale)
-
-            # Compute dot product with direction
-            dot_val = wp.dot(vertex, dir_safe)
-
-            # Track the maximum
+            dot_val = wp.dot(mesh.points[i], scaled_dir)
             if dot_val > max_dot:
                 max_dot = dot_val
-                best_vertex = vertex
-        result = best_vertex
+                best_idx = i
+        result = wp.cw_mul(mesh.points[best_idx], mesh_scale)
 
     elif geom.shape_type == GeoTypeEx.TRIANGLE:
         # Triangle vertices: a at origin, b at scale, c at auxiliary
