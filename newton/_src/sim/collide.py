@@ -564,6 +564,16 @@ class CollisionPipeline:
                 has_heightfields = bool((shape_types == int(GeoType.HFIELD)).any())
                 has_meshes = bool((shape_types == int(GeoType.MESH)).any()) or has_heightfields
 
+            # Compute total triangle count across all mesh shapes (used to size
+            # the mesh-mesh SDF kernel launch for optimal GPU utilisation).
+            total_mesh_triangles = 0
+            if has_meshes and hasattr(model, "shape_source"):
+                from newton._src.geometry.types import Mesh  # noqa: PLC0415
+
+                for src in model.shape_source:
+                    if isinstance(src, Mesh) and src._indices is not None:
+                        total_mesh_triangles += len(src._indices) // 3
+
             # Initialize narrow phase with pre-allocated buffers
             # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs
             # Pass write_contact as custom writer to write directly to final Contacts format
@@ -579,6 +589,7 @@ class CollisionPipeline:
                 hydroelastic_sdf=hydroelastic_sdf,
                 has_meshes=has_meshes,
                 has_heightfields=has_heightfields,
+                total_mesh_triangles=total_mesh_triangles,
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
 

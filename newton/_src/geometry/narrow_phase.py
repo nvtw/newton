@@ -1502,6 +1502,7 @@ class NarrowPhase:
         hydroelastic_sdf: HydroelasticSDF | None = None,
         has_meshes: bool = True,
         has_heightfields: bool = False,
+        total_mesh_triangles: int = 0,
     ) -> None:
         """
         Initialize NarrowPhase with pre-allocated buffers.
@@ -1718,6 +1719,19 @@ class NarrowPhase:
         self.total_num_threads = self.block_dim * num_blocks
         self.num_tile_blocks = num_blocks
 
+        # The mesh-mesh SDF kernel is compute-heavy (16-iteration gradient descent per
+        # triangle) and benefits from much higher parallelism than other kernels.  When
+        # pair_count approaches or exceeds num_tile_blocks, each pair gets only one
+        # block and threads must iterate many times over thousands of triangles.
+        # Scale the block count with total mesh triangle count so scenes with many
+        # high-triangle meshes get enough parallelism while low-poly scenes avoid
+        # excessive block launch overhead.
+        if device_obj.is_cuda and total_mesh_triangles > 0:
+            desired_blocks = total_mesh_triangles // self.tile_size_mesh_mesh
+            self.num_mesh_mesh_blocks = max(num_blocks, min(desired_blocks, device_obj.sm_count * 16))
+        else:
+            self.num_mesh_mesh_blocks = num_blocks
+
     def launch_custom_write(
         self,
         *,
@@ -1931,7 +1945,7 @@ class NarrowPhase:
                     )
                     wp.launch_tiled(
                         kernel=self.mesh_mesh_reducer_kernel,
-                        dim=(self.num_tile_blocks,),
+                        dim=(self.num_mesh_mesh_blocks,),
                         inputs=[
                             shape_data,
                             shape_transform,
@@ -1944,7 +1958,7 @@ class NarrowPhase:
                             hf_data,
                             hf_elev,
                             reducer_data,
-                            self.num_tile_blocks,
+                            self.num_mesh_mesh_blocks,
                         ],
                         device=device,
                         block_dim=self.tile_size_mesh_mesh,
@@ -2018,7 +2032,7 @@ class NarrowPhase:
                     )
                     wp.launch_tiled(
                         kernel=self.mesh_mesh_contacts_kernel,
-                        dim=(self.num_tile_blocks,),
+                        dim=(self.num_mesh_mesh_blocks,),
                         inputs=[
                             shape_data,
                             shape_transform,
@@ -2034,7 +2048,7 @@ class NarrowPhase:
                             hf_data,
                             hf_elev,
                             writer_data,
-                            self.num_tile_blocks,
+                            self.num_mesh_mesh_blocks,
                         ],
                         device=device,
                         block_dim=self.tile_size_mesh_mesh,
