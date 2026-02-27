@@ -20,6 +20,7 @@ import warp as wp
 from newton._src.core.types import MAXVAL
 
 from ..geometry.contact_data import SHAPE_PAIR_HFIELD_BIT, SHAPE_PAIR_INDEX_MASK, ContactData
+from ..geometry.contact_reduction_global import GlobalContactReducerData, export_contact_to_buffer
 from ..geometry.sdf_utils import SDFData
 from ..geometry.types import GeoType
 from ..utils.heightfield import HeightfieldData, sample_sdf_grad_heightfield, sample_sdf_heightfield
@@ -376,6 +377,7 @@ def do_triangle_sdf_collision(
     sdf_is_heightfield: bool,
     hfd_sdf: HeightfieldData,
     elevation_data: wp.array(dtype=wp.float32),
+    max_distance: float = 1.0e6,
 ) -> tuple[float, wp.vec3, wp.vec3]:
     """
     Compute the deepest contact between a triangle and an SDF volume.
@@ -399,6 +401,9 @@ def do_triangle_sdf_collision(
         sdf_is_heightfield: If True, evaluate SDF on the fly from heightfield data.
         hfd_sdf: HeightfieldData for the SDF shape (used when ``sdf_is_heightfield``).
         elevation_data: Concatenated elevation array (used when ``sdf_is_heightfield``).
+        max_distance: Early-exit threshold [m in unscaled SDF space]. If all initial
+            SDF samples exceed this value, gradient descent is skipped entirely.
+            Pass the unscaled contact threshold for best culling.
 
     Returns:
         Tuple of:
@@ -426,6 +431,12 @@ def do_triangle_sdf_collision(
         d0 = sample_sdf_extrapolated(sdf_data, v0)
         d1 = sample_sdf_extrapolated(sdf_data, v1)
         d2 = sample_sdf_extrapolated(sdf_data, v2)
+
+    # Early exit: if all sample points are beyond max_distance, no contact is
+    # possible and the expensive gradient descent can be skipped entirely.
+    min_dist = wp.min(wp.min(dist, d0), wp.min(d1, d2))
+    if min_dist >= max_distance:
+        return min_dist, center, wp.vec3(0.0, 0.0, 1.0)
 
     # choose starting iterate among centroid and triangle vertices
     if d0 < d1 and d0 < d2 and d0 < dist:
@@ -457,11 +468,11 @@ def do_triangle_sdf_collision(
     for _iter in range(16):
         # Sample SDF gradient
         if sdf_is_heightfield:
-            _, sdf_gradient = sample_sdf_grad_heightfield(hfd_sdf, elevation_data, p)
+            _sdf_val, sdf_gradient = sample_sdf_grad_heightfield(hfd_sdf, elevation_data, p)
         elif use_bvh_for_sdf:
-            _, sdf_gradient = sample_sdf_grad_using_mesh(sdf_mesh_id, p)
+            _sdf_val, sdf_gradient = sample_sdf_grad_using_mesh(sdf_mesh_id, p)
         else:
-            _, sdf_gradient = sample_sdf_grad_extrapolated(sdf_data, p)
+            _sdf_val, sdf_gradient = sample_sdf_grad_extrapolated(sdf_data, p)
 
         grad_len = wp.length(sdf_gradient)
         if grad_len == 0.0:
@@ -961,6 +972,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             sdf_is_hfield,
                             hfd_sdf,
                             heightfield_elevation_data,
+                            contact_threshold_unscaled,
                         )
 
                         dist, direction = scale_sdf_result_to_world(
@@ -1193,6 +1205,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             sdf_is_hfield,
                             hfd_sdf,
                             heightfield_elevation_data,
+                            contact_threshold_unscaled,
                         )
 
                         dist, direction = scale_sdf_result_to_world(
@@ -1279,3 +1292,214 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 writer_func(contact_data, writer_data, -1)
 
     return mesh_sdf_collision_reduce_kernel
+
+
+def create_mesh_sdf_contacts_to_reducer_kernel(enable_heightfields: bool = True):
+    """Create a kernel that generates mesh-mesh SDF contacts and writes them to the global reducer.
+
+    Uses multi-block-per-pair dispatch: multiple thread blocks collaborate on the same
+    shape pair, each processing a different stripe of triangles.  Pair setup (transforms,
+    SDF data) is done once per block, so the overhead scales with pair_count, not with
+    total threads.  No shared memory or ``__syncthreads`` are used.
+
+    Args:
+        enable_heightfields: Whether to include heightfield support in the kernel.
+
+    Returns:
+        A warp kernel suitable for ``wp.launch_tiled``.
+    """
+
+    @wp.kernel(enable_backward=False, module="unique")
+    def mesh_sdf_contacts_to_reducer_kernel(
+        shape_data: wp.array(dtype=wp.vec4),
+        shape_transform: wp.array(dtype=wp.transform),
+        shape_source: wp.array(dtype=wp.uint64),
+        sdf_table: wp.array(dtype=SDFData),
+        shape_sdf_index: wp.array(dtype=wp.int32),
+        shape_gap: wp.array(dtype=float),
+        shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
+        shape_pairs_mesh_mesh_count: wp.array(dtype=int),
+        shape_heightfield_data: wp.array(dtype=HeightfieldData),
+        heightfield_elevation_data: wp.array(dtype=wp.float32),
+        reducer_data: GlobalContactReducerData,
+        total_num_blocks: int,
+    ):
+        """Process mesh-mesh/mesh-heightfield SDF collisions with multi-block parallelism.
+
+        Multiple blocks are assigned to each pair.  Within each pair, triangles are
+        distributed across all assigned blocks x threads via a strided loop.  When
+        pair_count exceeds total_num_blocks, the kernel falls back to one block per
+        pair with a strided outer loop (same as the original kernel).
+        """
+        block_id, t = wp.tid()
+        pair_count = shape_pairs_mesh_mesh_count[0]
+        if pair_count == 0:
+            return
+
+        # Assign multiple blocks per pair when possible
+        blocks_per_pair = wp.max(total_num_blocks // pair_count, 1)
+        pairs_per_round = total_num_blocks // blocks_per_pair
+
+        pair_idx_base = block_id // blocks_per_pair
+        block_in_pair = block_id - pair_idx_base * blocks_per_pair
+
+        # Triangle stride: all threads across all blocks assigned to this pair
+        tri_stride = blocks_per_pair * wp.block_dim()
+        tri_offset = block_in_pair * wp.block_dim() + t
+
+        # Strided loop over pairs (handles pair_count > pairs_per_round)
+        for pair_idx in range(pair_idx_base, pair_count, pairs_per_round):
+            pair_encoded = shape_pairs_mesh_mesh[pair_idx]
+            if wp.static(enable_heightfields):
+                has_hfield = (pair_encoded[0] & SHAPE_PAIR_HFIELD_BIT) != 0
+                pair = wp.vec2i(pair_encoded[0] & SHAPE_PAIR_INDEX_MASK, pair_encoded[1])
+            else:
+                has_hfield = False
+                pair = pair_encoded
+
+            margin = shape_gap[pair[0]] + shape_gap[pair[1]]
+
+            for mode in range(2):
+                tri_shape = pair[mode]
+                sdf_shape = pair[1 - mode]
+
+                if wp.static(enable_heightfields):
+                    tri_is_hfield = has_hfield and mode == 0
+                    sdf_is_hfield = has_hfield and mode == 1
+                else:
+                    tri_is_hfield = False
+                    sdf_is_hfield = False
+                tri_type = GeoType.HFIELD if tri_is_hfield else GeoType.MESH
+                sdf_type = GeoType.HFIELD if sdf_is_hfield else GeoType.MESH
+
+                mesh_id_tri = shape_source[tri_shape]
+                mesh_id_sdf = shape_source[sdf_shape]
+
+                if not tri_is_hfield and mesh_id_tri == wp.uint64(0):
+                    continue
+                if not sdf_is_hfield and mesh_id_sdf == wp.uint64(0):
+                    continue
+
+                hfd_tri = HeightfieldData()
+                hfd_sdf = HeightfieldData()
+                if wp.static(enable_heightfields):
+                    if tri_is_hfield:
+                        hfd_tri = shape_heightfield_data[tri_shape]
+                    if sdf_is_hfield:
+                        hfd_sdf = shape_heightfield_data[sdf_shape]
+
+                use_bvh_for_sdf = False
+                sdf_data = SDFData()
+                if not sdf_is_hfield:
+                    sdf_idx = shape_sdf_index[sdf_shape]
+                    use_bvh_for_sdf = sdf_idx < 0
+                    if not use_bvh_for_sdf:
+                        sdf_ptr = sdf_table[sdf_idx].sparse_sdf_ptr
+                        use_bvh_for_sdf = sdf_ptr == wp.uint64(0)
+                    if not use_bvh_for_sdf:
+                        sdf_data = sdf_table[sdf_idx]
+
+                scale_data_tri = shape_data[tri_shape]
+                scale_data_sdf = shape_data[sdf_shape]
+                mesh_scale_tri = wp.vec3(scale_data_tri[0], scale_data_tri[1], scale_data_tri[2])
+                mesh_scale_sdf = wp.vec3(scale_data_sdf[0], scale_data_sdf[1], scale_data_sdf[2])
+
+                X_tri_ws = shape_transform[tri_shape]
+                X_sdf_ws = shape_transform[sdf_shape]
+
+                sdf_scale = wp.vec3(1.0, 1.0, 1.0)
+                if not sdf_is_hfield and not use_bvh_for_sdf:
+                    if not sdf_data.scale_baked:
+                        sdf_scale = mesh_scale_sdf
+
+                X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_sdf_ws), X_tri_ws)
+
+                triangle_mesh_thickness = scale_data_tri[3]
+                sdf_mesh_thickness = scale_data_sdf[3]
+
+                inv_sdf_scale = wp.cw_div(wp.vec3(1.0, 1.0, 1.0), sdf_scale)
+                min_sdf_scale = wp.min(wp.min(sdf_scale[0], sdf_scale[1]), sdf_scale[2])
+
+                contact_threshold = margin + triangle_mesh_thickness + sdf_mesh_thickness
+                contact_threshold_unscaled = contact_threshold / min_sdf_scale
+
+                # Precompute SDF AABB for cheap early-out (pure ALU, no memory access)
+                sdf_aabb_lower = sdf_data.center - sdf_data.half_extents
+                sdf_aabb_upper = sdf_data.center + sdf_data.half_extents
+
+                sdf_is_heightfield = sdf_type == GeoType.HFIELD
+
+                num_tris = get_triangle_count(tri_type, mesh_id_tri, hfd_tri)
+
+                # Distribute triangles across all blocks assigned to this pair
+                for tri_idx in range(tri_offset, num_tris, tri_stride):
+                    if tri_is_hfield:
+                        v0_scaled, v1_scaled, v2_scaled = get_triangle_from_heightfield(
+                            hfd_tri, heightfield_elevation_data, mesh_scale_tri, X_mesh_to_sdf, tri_idx
+                        )
+                    else:
+                        v0_scaled, v1_scaled, v2_scaled = get_triangle_from_mesh(
+                            mesh_id_tri, mesh_scale_tri, X_mesh_to_sdf, tri_idx
+                        )
+                    v0 = wp.cw_mul(v0_scaled, inv_sdf_scale)
+                    v1 = wp.cw_mul(v1_scaled, inv_sdf_scale)
+                    v2 = wp.cw_mul(v2_scaled, inv_sdf_scale)
+
+                    # Midphase: bounding sphere + AABB + SDF distance check
+                    bounding_sphere_center, bounding_sphere_radius = get_bounding_sphere(v0, v1, v2)
+                    threshold_tri = bounding_sphere_radius + contact_threshold_unscaled
+
+                    interesting = True
+                    if sdf_is_heightfield:
+                        sdf_dist = sample_sdf_heightfield(hfd_sdf, heightfield_elevation_data, bounding_sphere_center)
+                        interesting = sdf_dist <= threshold_tri
+                    elif use_bvh_for_sdf:
+                        sdf_dist = sample_sdf_using_mesh(mesh_id_sdf, bounding_sphere_center, 1.01 * threshold_tri)
+                        interesting = sdf_dist <= threshold_tri
+                    else:
+                        aabb_dist = _sphere_aabb_distance(bounding_sphere_center, sdf_aabb_lower, sdf_aabb_upper)
+                        if aabb_dist <= threshold_tri:
+                            sdf_dist = sample_sdf_extrapolated(sdf_data, bounding_sphere_center)
+                            interesting = sdf_dist <= threshold_tri
+                        else:
+                            interesting = False
+
+                    if interesting:
+                        dist_unscaled, point_unscaled, direction_unscaled = do_triangle_sdf_collision(
+                            sdf_data,
+                            mesh_id_sdf,
+                            v0,
+                            v1,
+                            v2,
+                            use_bvh_for_sdf,
+                            sdf_is_heightfield,
+                            hfd_sdf,
+                            heightfield_elevation_data,
+                            contact_threshold_unscaled,
+                        )
+
+                        dist, direction = scale_sdf_result_to_world(
+                            dist_unscaled, direction_unscaled, sdf_scale, inv_sdf_scale, min_sdf_scale
+                        )
+                        point = wp.cw_mul(point_unscaled, sdf_scale)
+
+                        if dist < contact_threshold:
+                            point_world = wp.transform_point(X_sdf_ws, point)
+
+                            direction_world = wp.transform_vector(X_sdf_ws, direction)
+                            direction_len = wp.length(direction_world)
+                            if direction_len > 0.0:
+                                direction_world = direction_world / direction_len
+
+                            contact_normal = -direction_world if mode == 0 else direction_world
+
+                            export_contact_to_buffer(
+                                shape_a=pair[0],
+                                shape_b=pair[1],
+                                position=point_world,
+                                normal=contact_normal,
+                                depth=dist,
+                                reducer_data=reducer_data,
+                            )
+
+    return mesh_sdf_contacts_to_reducer_kernel

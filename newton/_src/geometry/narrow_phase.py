@@ -58,7 +58,10 @@ from ..geometry.contact_reduction_global import (
     reduce_buffered_contacts_kernel,
 )
 from ..geometry.flags import ShapeFlags
-from ..geometry.sdf_contact import create_narrow_phase_process_mesh_mesh_contacts_kernel
+from ..geometry.sdf_contact import (
+    create_mesh_sdf_contacts_to_reducer_kernel,
+    create_narrow_phase_process_mesh_mesh_contacts_kernel,
+)
 from ..geometry.sdf_hydroelastic import HydroelasticSDF
 from ..geometry.sdf_utils import SDFData
 from ..geometry.support_function import (
@@ -1591,13 +1594,23 @@ class NarrowPhase:
             )
             # Only create mesh-mesh SDF kernel on CUDA (uses __shared__ memory via func_native)
             if is_gpu_device:
-                self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
-                    writer_func,
-                    contact_reduction_funcs=self.contact_reduction_funcs,
-                    enable_heightfields=has_heightfields,
-                )
+                if self.reduce_contacts:
+                    # When reducing: use sync-free kernel that writes to global reducer
+                    self.mesh_mesh_reducer_kernel = create_mesh_sdf_contacts_to_reducer_kernel(
+                        enable_heightfields=has_heightfields,
+                    )
+                    self.mesh_mesh_contacts_kernel = None
+                else:
+                    # When not reducing: use original kernel with direct writer
+                    self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
+                        writer_func,
+                        contact_reduction_funcs=None,
+                        enable_heightfields=has_heightfields,
+                    )
+                    self.mesh_mesh_reducer_kernel = None
             else:
                 self.mesh_mesh_contacts_kernel = None
+                self.mesh_mesh_reducer_kernel = None
         else:
             self.mesh_triangle_contacts_kernel = None
             self.mesh_plane_contacts_kernel = None
@@ -1875,15 +1888,18 @@ class NarrowPhase:
                 block_dim=self.tile_size_mesh_convex,
             )
 
-            # Launch mesh triangle contact processing kernel
+            # Launch mesh triangle and mesh-mesh contact processing kernels.
+            # When using global reduction, both mesh-triangle and mesh-mesh SDF contacts
+            # are collected into the same reducer buffer before a single reduction pass.
             if self.reduce_contacts:
                 assert self.global_contact_reducer is not None
-                # Use global contact reduction for mesh-triangle contacts
-                # First, clear the reducer
+                # Clear the reducer
                 self.global_contact_reducer.clear_active()
 
-                # Collect contacts into the reducer
+                # Get reducer data struct (shared by mesh-triangle and mesh-mesh kernels)
                 reducer_data = self.global_contact_reducer.get_data_struct()
+
+                # Phase 1a: Collect mesh-triangle contacts into the reducer
                 wp.launch(
                     kernel=mesh_triangle_contacts_to_reducer_kernel,
                     dim=self.total_num_threads,
@@ -1902,8 +1918,39 @@ class NarrowPhase:
                     block_dim=self.block_dim,
                 )
 
-                # Register buffered contacts to hashtable (uses hardcoded BETA_THRESHOLD)
-                # This is a separate pass to reduce register pressure on the contact generation kernel
+                # Phase 1b: Collect mesh-mesh SDF contacts into the SAME reducer
+                # Uses multi-block-per-pair dispatch for maximum GPU utilization
+                if wp.get_device(device).is_cuda and self.mesh_mesh_reducer_kernel is not None:
+                    hf_data = (
+                        shape_heightfield_data if shape_heightfield_data is not None else self._empty_heightfield_data
+                    )
+                    hf_elev = (
+                        heightfield_elevation_data
+                        if heightfield_elevation_data is not None
+                        else self._empty_elevation_data
+                    )
+                    wp.launch_tiled(
+                        kernel=self.mesh_mesh_reducer_kernel,
+                        dim=(self.num_tile_blocks,),
+                        inputs=[
+                            shape_data,
+                            shape_transform,
+                            shape_source,
+                            sdf_data,
+                            shape_sdf_index,
+                            shape_gap,
+                            self.shape_pairs_mesh_mesh,
+                            self.shape_pairs_mesh_mesh_count,
+                            hf_data,
+                            hf_elev,
+                            reducer_data,
+                            self.num_tile_blocks,
+                        ],
+                        device=device,
+                        block_dim=self.tile_size_mesh_mesh,
+                    )
+
+                # Phase 2: Reduce all buffered contacts via hashtable
                 wp.launch(
                     kernel=reduce_buffered_contacts_kernel,
                     dim=self.total_num_threads,
@@ -1919,7 +1966,7 @@ class NarrowPhase:
                     block_dim=self.block_dim,
                 )
 
-                # Export reduced contacts to writer
+                # Phase 3: Export reduced contacts to writer
                 wp.launch(
                     kernel=self.export_reduced_contacts_kernel,
                     dim=self.total_num_threads,
@@ -1959,37 +2006,39 @@ class NarrowPhase:
                     block_dim=self.block_dim,
                 )
 
-            # Launch mesh-mesh contact processing kernel on CUDA.
-            # The kernel supports both SDF-backed and BVH fallback paths via shape_sdf_index,
-            # as well as on-the-fly heightfield evaluation via shape_heightfield_data.
-            if wp.get_device(device).is_cuda:
-                hf_data = shape_heightfield_data if shape_heightfield_data is not None else self._empty_heightfield_data
-                hf_elev = (
-                    heightfield_elevation_data if heightfield_elevation_data is not None else self._empty_elevation_data
-                )
-                wp.launch_tiled(
-                    kernel=self.mesh_mesh_contacts_kernel,
-                    dim=(self.num_tile_blocks,),
-                    inputs=[
-                        shape_data,
-                        shape_transform,
-                        shape_source,
-                        sdf_data,
-                        shape_sdf_index,
-                        shape_gap,
-                        shape_collision_aabb_lower,
-                        shape_collision_aabb_upper,
-                        shape_voxel_resolution,
-                        self.shape_pairs_mesh_mesh,
-                        self.shape_pairs_mesh_mesh_count,
-                        hf_data,
-                        hf_elev,
-                        writer_data,
-                        self.num_tile_blocks,
-                    ],
-                    device=device,
-                    block_dim=self.tile_size_mesh_mesh,
-                )
+                # Launch mesh-mesh contact processing kernel on CUDA (non-reduce path)
+                if wp.get_device(device).is_cuda and self.mesh_mesh_contacts_kernel is not None:
+                    hf_data = (
+                        shape_heightfield_data if shape_heightfield_data is not None else self._empty_heightfield_data
+                    )
+                    hf_elev = (
+                        heightfield_elevation_data
+                        if heightfield_elevation_data is not None
+                        else self._empty_elevation_data
+                    )
+                    wp.launch_tiled(
+                        kernel=self.mesh_mesh_contacts_kernel,
+                        dim=(self.num_tile_blocks,),
+                        inputs=[
+                            shape_data,
+                            shape_transform,
+                            shape_source,
+                            sdf_data,
+                            shape_sdf_index,
+                            shape_gap,
+                            shape_collision_aabb_lower,
+                            shape_collision_aabb_upper,
+                            shape_voxel_resolution,
+                            self.shape_pairs_mesh_mesh,
+                            self.shape_pairs_mesh_mesh_count,
+                            hf_data,
+                            hf_elev,
+                            writer_data,
+                            self.num_tile_blocks,
+                        ],
+                        device=device,
+                        block_dim=self.tile_size_mesh_mesh,
+                    )
 
         # Stage: Heightfield collision processing
         if self.has_heightfields and shape_heightfield_data is not None and heightfield_elevation_data is not None:
