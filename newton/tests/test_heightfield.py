@@ -435,6 +435,7 @@ class TestHeightfield(unittest.TestCase):
         builder.add_shape_mesh(body=mesh_body, mesh=mesh)
         return builder.finalize(), mesh_body
 
+    @unittest.skipUnless(_cuda_available, "mesh-heightfield collision requires CUDA")
     def test_non_convex_mesh_vs_heightfield(self):
         """Test non-convex mesh (no SDF) generates contacts against a flat heightfield."""
         mesh = self._create_non_convex_mesh()
@@ -463,6 +464,7 @@ class TestHeightfield(unittest.TestCase):
         contact_count = int(contacts.rigid_contact_count.numpy()[0])
         self.assertGreater(contact_count, 0, "No contacts between SDF mesh and heightfield")
 
+    @unittest.skipUnless(_cuda_available, "mesh-heightfield collision requires CUDA")
     def test_non_convex_mesh_vs_heightfield_no_contact(self):
         """Test no contacts when non-convex mesh is far above heightfield."""
         mesh = self._create_non_convex_mesh()
