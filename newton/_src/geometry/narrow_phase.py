@@ -44,7 +44,7 @@ from ..geometry.collision_primitive import (
     collide_sphere_cylinder,
     collide_sphere_sphere,
 )
-from ..geometry.contact_data import ContactData, contact_passes_margin_check
+from ..geometry.contact_data import SHAPE_PAIR_HFIELD_BIT, ContactData, contact_passes_margin_check
 from ..geometry.contact_reduction import (
     ContactReductionFunctions,
     ContactStruct,
@@ -67,8 +67,6 @@ from ..geometry.support_function import (
 )
 from ..geometry.types import GeoType
 from ..utils.heightfield import HeightfieldData, create_empty_heightfield_data, get_triangle_from_heightfield_cell
-
-SHAPE_PAIR_HFIELD_BIT = wp.int32(1 << 30)
 
 
 @wp.struct
@@ -405,7 +403,12 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 contact_pos_1 = wp.vec3(positions4_box[1, 0], positions4_box[1, 1], positions4_box[1, 2])
                 contact_pos_2 = wp.vec3(positions4_box[2, 0], positions4_box[2, 1], positions4_box[2, 2])
                 contact_pos_3 = wp.vec3(positions4_box[3, 0], positions4_box[3, 1], positions4_box[3, 2])
-                num_contacts = 4
+                num_contacts = (
+                    int(dists4_box[0] < MAXVAL)
+                    + int(dists4_box[1] < MAXVAL)
+                    + int(dists4_box[2] < MAXVAL)
+                    + int(dists4_box[3] < MAXVAL)
+                )
 
             # -----------------------------------------------------------------
             # Sphere-Sphere collision (type_a=SPHERE=2, type_b=SPHERE=2)
@@ -459,7 +462,12 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 contact_pos_1 = wp.vec3(positions4[1, 0], positions4[1, 1], positions4[1, 2])
                 contact_pos_2 = wp.vec3(positions4[2, 0], positions4[2, 1], positions4[2, 2])
                 contact_pos_3 = wp.vec3(positions4[3, 0], positions4[3, 1], positions4[3, 2])
-                num_contacts = 4
+                num_contacts = (
+                    int(dists4[0] < MAXVAL)
+                    + int(dists4[1] < MAXVAL)
+                    + int(dists4[2] < MAXVAL)
+                    + int(dists4[3] < MAXVAL)
+                )
 
             # -----------------------------------------------------------------
             # Sphere-Capsule collision (type_a=SPHERE=2, type_b=CAPSULE=3)

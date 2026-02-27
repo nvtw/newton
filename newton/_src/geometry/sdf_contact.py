@@ -19,7 +19,7 @@ import warp as wp
 
 from newton._src.core.types import MAXVAL
 
-from ..geometry.contact_data import ContactData
+from ..geometry.contact_data import SHAPE_PAIR_HFIELD_BIT, SHAPE_PAIR_INDEX_MASK, ContactData
 from ..geometry.sdf_utils import SDFData
 from ..geometry.types import GeoType
 from ..utils.heightfield import HeightfieldData, sample_sdf_grad_heightfield, sample_sdf_heightfield
@@ -32,9 +32,6 @@ from .contact_reduction import (
     get_shared_memory_pointer_block_dim_plus_2_ints,
     synchronize,
 )
-
-SHAPE_PAIR_HFIELD_BIT = wp.int32(1 << 30)
-SHAPE_PAIR_INDEX_MASK = wp.int32((1 << 30) - 1)
 
 
 @wp.func
