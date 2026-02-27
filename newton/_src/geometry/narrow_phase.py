@@ -347,12 +347,13 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             if is_sphere_b or is_capsule_b:
                 radius_eff_b = scale_b[0]
 
-            # Initialize contact result storage (supports up to 2 contacts)
-            num_contacts = 0
-            contact_dist_0 = float(0.0)
-            contact_dist_1 = float(0.0)
-            contact_dist_2 = float(0.0)
-            contact_dist_3 = float(0.0)
+            # Initialize contact result storage (up to 4 contacts).
+            # Distances default to MAXVAL so unused slots are automatically
+            # excluded by the unified num_contacts count after the if/elif chain.
+            contact_dist_0 = float(MAXVAL)
+            contact_dist_1 = float(MAXVAL)
+            contact_dist_2 = float(MAXVAL)
+            contact_dist_3 = float(MAXVAL)
             contact_pos_0 = wp.vec3()
             contact_pos_1 = wp.vec3()
             contact_pos_2 = wp.vec3()
@@ -367,7 +368,6 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 sphere_radius = scale_b[0]
                 contact_dist_0, contact_pos_0 = collide_plane_sphere(plane_normal, pos_a, pos_b, sphere_radius)
                 contact_normal = plane_normal
-                num_contacts = 1
 
             # -----------------------------------------------------------------
             # Plane-Ellipsoid collision (type_a=PLANE=0, type_b=ELLIPSOID=4)
@@ -380,7 +380,6 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 contact_dist_0, contact_pos_0, contact_normal = collide_plane_ellipsoid(
                     plane_normal, pos_a, pos_b, ellipsoid_rot, ellipsoid_size
                 )
-                num_contacts = 1
 
             # -----------------------------------------------------------------
             # Plane-Box collision (type_a=PLANE=0, type_b=BOX=6)
@@ -403,12 +402,6 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 contact_pos_1 = wp.vec3(positions4_box[1, 0], positions4_box[1, 1], positions4_box[1, 2])
                 contact_pos_2 = wp.vec3(positions4_box[2, 0], positions4_box[2, 1], positions4_box[2, 2])
                 contact_pos_3 = wp.vec3(positions4_box[3, 0], positions4_box[3, 1], positions4_box[3, 2])
-                num_contacts = (
-                    int(dists4_box[0] < MAXVAL)
-                    + int(dists4_box[1] < MAXVAL)
-                    + int(dists4_box[2] < MAXVAL)
-                    + int(dists4_box[3] < MAXVAL)
-                )
 
             # -----------------------------------------------------------------
             # Sphere-Sphere collision (type_a=SPHERE=2, type_b=SPHERE=2)
@@ -417,7 +410,6 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 radius_a = scale_a[0]
                 radius_b = scale_b[0]
                 contact_dist_0, contact_pos_0, contact_normal = collide_sphere_sphere(pos_a, radius_a, pos_b, radius_b)
-                num_contacts = 1
 
             # -----------------------------------------------------------------
             # Plane-Capsule collision (type_a=PLANE=0, type_b=CAPSULE=3)
@@ -438,7 +430,6 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 contact_pos_0 = wp.vec3(positions[0, 0], positions[0, 1], positions[0, 2])
                 contact_pos_1 = wp.vec3(positions[1, 0], positions[1, 1], positions[1, 2])
                 contact_normal = plane_normal
-                num_contacts = 2
 
             # -----------------------------------------------------------------
             # Plane-Cylinder collision (type_a=PLANE=0, type_b=CYLINDER=5)
@@ -462,12 +453,6 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 contact_pos_1 = wp.vec3(positions4[1, 0], positions4[1, 1], positions4[1, 2])
                 contact_pos_2 = wp.vec3(positions4[2, 0], positions4[2, 1], positions4[2, 2])
                 contact_pos_3 = wp.vec3(positions4[3, 0], positions4[3, 1], positions4[3, 2])
-                num_contacts = (
-                    int(dists4[0] < MAXVAL)
-                    + int(dists4[1] < MAXVAL)
-                    + int(dists4[2] < MAXVAL)
-                    + int(dists4[3] < MAXVAL)
-                )
 
             # -----------------------------------------------------------------
             # Sphere-Capsule collision (type_a=SPHERE=2, type_b=CAPSULE=3)
@@ -480,7 +465,6 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 contact_dist_0, contact_pos_0, contact_normal = collide_sphere_capsule(
                     pos_a, sphere_radius, pos_b, capsule_axis, capsule_radius, capsule_half_length
                 )
-                num_contacts = 1
 
             # -----------------------------------------------------------------
             # Capsule-Capsule collision (type_a=CAPSULE=3, type_b=CAPSULE=3)
@@ -500,14 +484,8 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
 
                 contact_dist_0 = dists[0]
                 contact_pos_0 = wp.vec3(positions[0, 0], positions[0, 1], positions[0, 2])
-
-                # Check if second contact is valid (parallel axes case)
-                if dists[1] < MAXVAL:
-                    contact_dist_1 = dists[1]
-                    contact_pos_1 = wp.vec3(positions[1, 0], positions[1, 1], positions[1, 2])
-                    num_contacts = 2
-                else:
-                    num_contacts = 1
+                contact_dist_1 = dists[1]
+                contact_pos_1 = wp.vec3(positions[1, 0], positions[1, 1], positions[1, 2])
 
             # -----------------------------------------------------------------
             # Sphere-Cylinder collision (type_a=SPHERE=2, type_b=CYLINDER=5)
@@ -520,7 +498,6 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 contact_dist_0, contact_pos_0, contact_normal = collide_sphere_cylinder(
                     pos_a, sphere_radius, pos_b, cylinder_axis, cylinder_radius, cylinder_half_height
                 )
-                num_contacts = 1
 
             # -----------------------------------------------------------------
             # Sphere-Box collision (type_a=SPHERE=2, type_b=BOX=6)
@@ -532,11 +509,16 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 contact_dist_0, contact_pos_0, contact_normal = collide_sphere_box(
                     pos_a, sphere_radius, pos_b, box_rot, box_size
                 )
-                num_contacts = 1
 
             # =====================================================================
             # Write all contacts (single write block for 0 to 4 contacts)
             # =====================================================================
+            num_contacts = (
+                int(contact_dist_0 < MAXVAL)
+                + int(contact_dist_1 < MAXVAL)
+                + int(contact_dist_2 < MAXVAL)
+                + int(contact_dist_3 < MAXVAL)
+            )
             if num_contacts > 0:
                 # Prepare contact data (shared fields for both contacts)
                 contact_data = ContactData()
@@ -557,19 +539,19 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                     contact_0_valid = contact_passes_margin_check(contact_data)
 
                 contact_1_valid = False
-                if num_contacts > 1 and contact_dist_1 < MAXVAL:
+                if contact_dist_1 < MAXVAL:
                     contact_data.contact_point_center = contact_pos_1
                     contact_data.contact_distance = contact_dist_1
                     contact_1_valid = contact_passes_margin_check(contact_data)
 
                 contact_2_valid = False
-                if num_contacts > 2 and contact_dist_2 < MAXVAL:
+                if contact_dist_2 < MAXVAL:
                     contact_data.contact_point_center = contact_pos_2
                     contact_data.contact_distance = contact_dist_2
                     contact_2_valid = contact_passes_margin_check(contact_data)
 
                 contact_3_valid = False
-                if num_contacts > 3 and contact_dist_3 < MAXVAL:
+                if contact_dist_3 < MAXVAL:
                     contact_data.contact_point_center = contact_pos_3
                     contact_data.contact_distance = contact_dist_3
                     contact_3_valid = contact_passes_margin_check(contact_data)
