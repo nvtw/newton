@@ -541,7 +541,9 @@ def collide_plane_cylinder(
 
     - Flat-surface mode (near upright): fixed-orientation stable tripod on
       the near cap plus one deepest rim point.
-    - Rolling mode: 2 rolling-line side contacts plus 2 near-cap rim contacts.
+    - Rolling mode: 1 deepest rim point + 2 side-generator contacts + 1
+      near-cap rim contact (one generator typically merges with the deepest
+      point, leaving 3 contacts).
 
     Args:
       plane_normal: Normal vector of the plane.

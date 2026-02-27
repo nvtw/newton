@@ -115,6 +115,9 @@ def _heightfield_surface_query(
     point within the heightfield XY extent, plus the squared lateral distance
     from the query point to that extent boundary.
     """
+    if hfd.nrow <= 1 or hfd.ncol <= 1:
+        return 1.0e10, wp.vec3(0.0, 0.0, 1.0), 0.0
+
     dx = 2.0 * hfd.hx / wp.float32(hfd.ncol - 1)
     dy = 2.0 * hfd.hy / wp.float32(hfd.nrow - 1)
     z_range = hfd.max_z - hfd.min_z
@@ -171,6 +174,11 @@ def sample_sdf_heightfield(
     triangulation when the query point projects inside the heightfield XY extent.
     Outside the extent the lateral gap is folded in, yielding a positive distance
     that prevents false contacts.
+
+    Note: This means objects penetrating near the boundary will experience a
+    discontinuous contact loss at the edge (the distance jumps from negative to
+    positive). This is an intentional tradeoff to avoid ghost contacts outside
+    the heightfield footprint.
     """
     d_plane, _normal, lateral_dist_sq = _heightfield_surface_query(hfd, elevation_data, pos)
     if lateral_dist_sq > 0.0:
@@ -195,7 +203,11 @@ def sample_sdf_grad_heightfield(
         cx = wp.clamp(pos[0], -hfd.hx, hfd.hx)
         cy = wp.clamp(pos[1], -hfd.hy, hfd.hy)
         lateral = wp.vec3(pos[0] - cx, pos[1] - cy, 0.0)
-        grad = wp.normalize(lateral + d_plane * normal)
+        raw_grad = lateral + d_plane * normal
+        if wp.length_sq(raw_grad) > 1.0e-20:
+            grad = wp.normalize(raw_grad)
+        else:
+            grad = wp.vec3(0.0, 0.0, 1.0)
         return dist, grad
     return d_plane, normal
 

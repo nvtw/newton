@@ -401,13 +401,16 @@ def do_triangle_sdf_collision(
         elevation_data: Concatenated elevation array (used when ``sdf_is_heightfield``).
 
     Returns:
-        Tuple of (distance, contact_point, contact_direction).
+        Tuple of:
+            - distance: Signed distance to SDF surface (negative = penetration).
+            - contact_point: The point on the triangle closest to the SDF surface.
+            - contact_direction: Normalized SDF gradient at the contact point.
     """
     third = 1.0 / 3.0
     center = (v0 + v1 + v2) * third
     p = center
 
-    # Use extrapolated sampling for initial distance estimates
+    # Sample SDF for initial distance estimates
     if sdf_is_heightfield:
         dist = sample_sdf_heightfield(hfd_sdf, elevation_data, p)
         d0 = sample_sdf_heightfield(hfd_sdf, elevation_data, v0)
@@ -452,7 +455,7 @@ def do_triangle_sdf_collision(
     step = 1.0 / (2.0 * difference)
 
     for _iter in range(16):
-        # Use extrapolated gradient sampling
+        # Sample SDF gradient
         if sdf_is_heightfield:
             _, sdf_gradient = sample_sdf_grad_heightfield(hfd_sdf, elevation_data, p)
         elif use_bvh_for_sdf:
@@ -462,6 +465,8 @@ def do_triangle_sdf_collision(
 
         grad_len = wp.length(sdf_gradient)
         if grad_len == 0.0:
+            # Zero gradient means we hit a discontinuity (e.g. the exact center
+            # of a cube). Pick an arbitrary unit-length direction to escape it.
             sdf_gradient = wp.vec3(0.571846586, 0.705545099, 0.418566116)
             grad_len = 1.0
 
@@ -486,7 +491,7 @@ def do_triangle_sdf_collision(
 
         uvw = new_uvw
 
-    # Final extrapolated sampling for result
+    # Final SDF sampling for result
     if sdf_is_heightfield:
         dist, sdf_gradient = sample_sdf_grad_heightfield(hfd_sdf, elevation_data, p)
     elif use_bvh_for_sdf:
@@ -624,7 +629,7 @@ def add_to_shared_buffer_atomic(
 
 @wp.func
 def _sphere_aabb_distance(center: wp.vec3, aabb_lower: wp.vec3, aabb_upper: wp.vec3) -> float:
-    """Signed distance from a point to an AABB (0 when inside, positive outside)."""
+    """Unsigned distance from a point to an AABB (0 when inside, positive outside)."""
     closest = wp.min(wp.max(center, aabb_lower), aabb_upper)
     return wp.length(center - closest)
 
@@ -694,6 +699,8 @@ def get_triangle_from_heightfield(
 def get_triangle_count(shape_type: int, mesh_id: wp.uint64, hfd: HeightfieldData) -> int:
     """Return the number of triangles for a mesh or heightfield shape."""
     if shape_type == GeoType.HFIELD:
+        if hfd.nrow <= 1 or hfd.ncol <= 1:
+            return 0
         return 2 * (hfd.nrow - 1) * (hfd.ncol - 1)
     return wp.mesh_get(mesh_id).indices.shape[0] // 3
 
@@ -969,21 +976,21 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             if direction_len > 0.0:
                                 direction_world = direction_world / direction_len
 
-                            contact_normal = -direction_world if mode == 0 else direction_world
+                                contact_normal = -direction_world if mode == 0 else direction_world
 
-                            contact_data = ContactData()
-                            contact_data.contact_point_center = point_world
-                            contact_data.contact_normal_a_to_b = contact_normal
-                            contact_data.contact_distance = dist
-                            contact_data.radius_eff_a = 0.0
-                            contact_data.radius_eff_b = 0.0
-                            contact_data.margin_a = shape_data[pair[0]][3]
-                            contact_data.margin_b = shape_data[pair[1]][3]
-                            contact_data.shape_a = pair[0]
-                            contact_data.shape_b = pair[1]
-                            contact_data.margin = margin
+                                contact_data = ContactData()
+                                contact_data.contact_point_center = point_world
+                                contact_data.contact_normal_a_to_b = contact_normal
+                                contact_data.contact_distance = dist
+                                contact_data.radius_eff_a = 0.0
+                                contact_data.radius_eff_b = 0.0
+                                contact_data.margin_a = shape_data[pair[0]][3]
+                                contact_data.margin_b = shape_data[pair[1]][3]
+                                contact_data.shape_a = pair[0]
+                                contact_data.shape_b = pair[1]
+                                contact_data.margin = margin
 
-                            writer_func(contact_data, writer_data, -1)
+                                writer_func(contact_data, writer_data, -1)
 
                     synchronize()
                     if t == 0:
@@ -1194,21 +1201,21 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         point = wp.cw_mul(point_unscaled, sdf_scale)
 
                         if dist < contact_threshold:
-                            has_contact = True
                             point_world = wp.transform_point(X_sdf_ws, point)
 
                             direction_world = wp.transform_vector(X_sdf_ws, direction)
                             direction_len = wp.length(direction_world)
                             if direction_len > 0.0:
                                 direction_world = direction_world / direction_len
+                                has_contact = True
 
-                            contact_normal = -direction_world if mode == 0 else direction_world
+                                contact_normal = -direction_world if mode == 0 else direction_world
 
-                            c.position = point_world - midpoint
-                            c.normal = contact_normal
-                            c.depth = dist
-                            c.feature = tri_idx if mode == 0 else -(tri_idx + 1)
-                            c.projection = empty_marker
+                                c.position = point_world - midpoint
+                                c.normal = contact_normal
+                                c.depth = dist
+                                c.feature = tri_idx if mode == 0 else -(tri_idx + 1)
+                                c.projection = empty_marker
 
                     voxel_idx = int(0)
                     if has_contact:
