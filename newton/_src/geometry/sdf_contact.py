@@ -378,6 +378,7 @@ def do_triangle_sdf_collision(
     hfd_sdf: HeightfieldData,
     elevation_data: wp.array(dtype=wp.float32),
     max_distance: float = 1.0e6,
+    centroid_sdf_val: float = 1.0e18,
 ) -> tuple[float, wp.vec3, wp.vec3]:
     """
     Compute the deepest contact between a triangle and an SDF volume.
@@ -404,6 +405,9 @@ def do_triangle_sdf_collision(
         max_distance: Early-exit threshold [m in unscaled SDF space]. If all initial
             SDF samples exceed this value, gradient descent is skipped entirely.
             Pass the unscaled contact threshold for best culling.
+        centroid_sdf_val: Pre-computed SDF value at the triangle centroid from
+            the midphase. When provided (< 1e18), the centroid SDF sample is
+            skipped. Pass the default to compute it inside the function.
 
     Returns:
         Tuple of:
@@ -416,40 +420,47 @@ def do_triangle_sdf_collision(
     p = center
 
     # Sample SDF for initial distance estimates
-    if sdf_is_heightfield:
+    # Sample SDF at centroid first (skip if pre-computed value was passed)
+    if centroid_sdf_val < 1.0e17:
+        dist = centroid_sdf_val
+    elif sdf_is_heightfield:
         dist = sample_sdf_heightfield(hfd_sdf, elevation_data, p)
-        d0 = sample_sdf_heightfield(hfd_sdf, elevation_data, v0)
-        d1 = sample_sdf_heightfield(hfd_sdf, elevation_data, v1)
-        d2 = sample_sdf_heightfield(hfd_sdf, elevation_data, v2)
     elif use_bvh_for_sdf:
         dist = sample_sdf_using_mesh(sdf_mesh_id, p)
-        d0 = sample_sdf_using_mesh(sdf_mesh_id, v0)
-        d1 = sample_sdf_using_mesh(sdf_mesh_id, v1)
-        d2 = sample_sdf_using_mesh(sdf_mesh_id, v2)
     else:
         dist = sample_sdf_extrapolated(sdf_data, p)
-        d0 = sample_sdf_extrapolated(sdf_data, v0)
-        d1 = sample_sdf_extrapolated(sdf_data, v1)
-        d2 = sample_sdf_extrapolated(sdf_data, v2)
 
-    # Early exit: if all sample points are beyond max_distance, no contact is
-    # possible and the expensive gradient descent can be skipped entirely.
-    min_dist = wp.min(wp.min(dist, d0), wp.min(d1, d2))
-    if min_dist >= max_distance:
-        return min_dist, center, wp.vec3(0.0, 0.0, 1.0)
+    uvw = wp.vec3(third, third, third)
 
-    # choose starting iterate among centroid and triangle vertices
-    if d0 < d1 and d0 < d2 and d0 < dist:
-        p = v0
-        uvw = wp.vec3(1.0, 0.0, 0.0)
-    elif d1 < d2 and d1 < dist:
-        p = v1
-        uvw = wp.vec3(0.0, 1.0, 0.0)
-    elif d2 < dist:
-        p = v2
-        uvw = wp.vec3(0.0, 0.0, 1.0)
-    else:
-        uvw = wp.vec3(third, third, third)
+    if dist >= max_distance:
+        # Centroid is far — sample vertices for a better starting point or early exit
+        if sdf_is_heightfield:
+            d0 = sample_sdf_heightfield(hfd_sdf, elevation_data, v0)
+            d1 = sample_sdf_heightfield(hfd_sdf, elevation_data, v1)
+            d2 = sample_sdf_heightfield(hfd_sdf, elevation_data, v2)
+        elif use_bvh_for_sdf:
+            d0 = sample_sdf_using_mesh(sdf_mesh_id, v0)
+            d1 = sample_sdf_using_mesh(sdf_mesh_id, v1)
+            d2 = sample_sdf_using_mesh(sdf_mesh_id, v2)
+        else:
+            d0 = sample_sdf_extrapolated(sdf_data, v0)
+            d1 = sample_sdf_extrapolated(sdf_data, v1)
+            d2 = sample_sdf_extrapolated(sdf_data, v2)
+
+        min_dist = wp.min(wp.min(dist, d0), wp.min(d1, d2))
+        if min_dist >= max_distance:
+            return min_dist, center, wp.vec3(0.0, 0.0, 1.0)
+
+        # Choose best vertex as starting iterate
+        if d0 < d1 and d0 < d2 and d0 < dist:
+            p = v0
+            uvw = wp.vec3(1.0, 0.0, 0.0)
+        elif d1 < d2 and d1 < dist:
+            p = v1
+            uvw = wp.vec3(0.0, 1.0, 0.0)
+        elif d2 < dist:
+            p = v2
+            uvw = wp.vec3(0.0, 0.0, 1.0)
 
     difference = wp.sqrt(
         wp.max(
@@ -1450,6 +1461,7 @@ def create_mesh_sdf_contacts_to_reducer_kernel(enable_heightfields: bool = True)
                     threshold_tri = bounding_sphere_radius + contact_threshold_unscaled
 
                     interesting = True
+                    sdf_dist = float(0.0)
                     if sdf_is_heightfield:
                         sdf_dist = sample_sdf_heightfield(hfd_sdf, heightfield_elevation_data, bounding_sphere_center)
                         interesting = sdf_dist <= threshold_tri
@@ -1476,6 +1488,7 @@ def create_mesh_sdf_contacts_to_reducer_kernel(enable_heightfields: bool = True)
                             hfd_sdf,
                             heightfield_elevation_data,
                             contact_threshold_unscaled,
+                            sdf_dist,
                         )
 
                         dist, direction = scale_sdf_result_to_world(
