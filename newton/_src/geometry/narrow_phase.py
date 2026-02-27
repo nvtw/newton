@@ -283,11 +283,15 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                     continue
 
                 # All other heightfield pairs: midphase + GJK/MPR
+                # Normalize so the heightfield is always pair[0].
                 if is_hfield_a:
-                    idx = wp.atomic_add(shape_pairs_heightfield_count, 0, 1)
-                    if idx < shape_pairs_heightfield.shape[0]:
-                        shape_pairs_heightfield[idx] = wp.vec2i(shape_a, shape_b)
-                    continue
+                    hf_pair = wp.vec2i(shape_a, shape_b)
+                else:
+                    hf_pair = wp.vec2i(shape_b, shape_a)
+                idx = wp.atomic_add(shape_pairs_heightfield_count, 0, 1)
+                if idx < shape_pairs_heightfield.shape[0]:
+                    shape_pairs_heightfield[idx] = hf_pair
+                continue
 
             # =====================================================================
             # Route mesh pairs to specialized buffers

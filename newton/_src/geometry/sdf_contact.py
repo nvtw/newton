@@ -773,7 +773,7 @@ def find_interesting_triangles(
 
             if sdf_is_heightfield:
                 sdf_dist = sample_sdf_heightfield(hfd_sdf, elevation_data, bounding_sphere_center)
-                add_triangle = wp.abs(sdf_dist) <= threshold
+                add_triangle = sdf_dist <= threshold
             elif use_bvh_for_sdf:
                 sdf_dist = sample_sdf_using_mesh(sdf_mesh_id, bounding_sphere_center, 1.01 * threshold)
                 add_triangle = sdf_dist <= threshold
