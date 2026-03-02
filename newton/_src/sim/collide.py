@@ -394,6 +394,8 @@ class CollisionPipeline:
         *,
         reduce_contacts: bool = True,
         rigid_contact_max: int | None = None,
+        max_triangle_pairs: int = 1000000,
+        max_heightfield_cell_pairs: int = 1000000,
         shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
@@ -417,6 +419,14 @@ class CollisionPipeline:
                 - If provided, use this value.
                 - Else if ``model.rigid_contact_max > 0``, use the model value.
                 - Else estimate automatically from model shape and pair metadata.
+            max_triangle_pairs:
+                Maximum number of mesh-triangle pairs allocated by narrow phase.
+                Increase this when scenes with large/complex meshes report
+                triangle-pair overflow warnings.
+            max_heightfield_cell_pairs:
+                Maximum number of heightfield cell pairs allocated by narrow phase.
+                Increase this when scenes with large/complex heightfields report
+                heightfield-cell-pair overflow warnings.
             soft_contact_max: Maximum number of soft contacts to allocate.
                 If None, computed as shape_count * particle_count.
             soft_contact_margin: Margin for soft contact generation. Defaults to 0.01.
@@ -452,6 +462,10 @@ class CollisionPipeline:
             else:
                 rigid_contact_max = _estimate_rigid_contact_max(model)
         self._rigid_contact_max = rigid_contact_max
+        if max_triangle_pairs <= 0:
+            raise ValueError("max_triangle_pairs must be > 0")
+        if max_heightfield_cell_pairs <= 0:
+            raise ValueError("max_heightfield_cell_pairs must be > 0")
         # Keep model-level default in sync with the resolved pipeline capacity.
         # This avoids divergence between model- and contacts-based users (e.g. VBD init).
         model.rigid_contact_max = rigid_contact_max
@@ -555,21 +569,23 @@ class CollisionPipeline:
                 writer_func=write_contact,
             )
 
-            # Detect if any mesh-like or heightfield shapes are present to optimize kernel launches.
-            # Heightfields are treated as mesh-like for the SDF collision kernel path.
+            # Detect shape classes to optimize narrow-phase kernel launches.
+            # Keep mesh and heightfield flags independent: heightfield-only scenes
+            # should not trigger mesh-only kernel setup/launches.
             has_meshes = False
             has_heightfields = False
             if hasattr(model, "shape_type") and model.shape_type is not None:
                 shape_types = model.shape_type.numpy()
                 has_heightfields = bool((shape_types == int(GeoType.HFIELD)).any())
-                has_meshes = bool((shape_types == int(GeoType.MESH)).any()) or has_heightfields
+                has_meshes = bool((shape_types == int(GeoType.MESH)).any())
 
             # Initialize narrow phase with pre-allocated buffers
             # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs
             # Pass write_contact as custom writer to write directly to final Contacts format
             self.narrow_phase = NarrowPhase(
                 max_candidate_pairs=self.shape_pairs_max,
-                max_triangle_pairs=1000000,
+                max_triangle_pairs=max_triangle_pairs,
+                max_heightfield_cell_pairs=max_heightfield_cell_pairs,
                 reduce_contacts=self.reduce_contacts,
                 device=device,
                 shape_aabb_lower=shape_aabb_lower,
