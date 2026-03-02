@@ -44,7 +44,7 @@ from ..geometry.collision_primitive import (
     collide_sphere_cylinder,
     collide_sphere_sphere,
 )
-from ..geometry.contact_data import ContactData, contact_passes_margin_check
+from ..geometry.contact_data import ContactData, contact_passes_gap_check
 from ..geometry.contact_reduction import (
     ContactReductionFunctions,
     ContactStruct,
@@ -518,25 +518,25 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 if contact_dist_0 < MAXVAL:
                     contact_data.contact_point_center = contact_pos_0
                     contact_data.contact_distance = contact_dist_0
-                    contact_0_valid = contact_passes_margin_check(contact_data)
+                    contact_0_valid = contact_passes_gap_check(contact_data)
 
                 contact_1_valid = False
                 if num_contacts > 1 and contact_dist_1 < MAXVAL:
                     contact_data.contact_point_center = contact_pos_1
                     contact_data.contact_distance = contact_dist_1
-                    contact_1_valid = contact_passes_margin_check(contact_data)
+                    contact_1_valid = contact_passes_gap_check(contact_data)
 
                 contact_2_valid = False
                 if num_contacts > 2 and contact_dist_2 < MAXVAL:
                     contact_data.contact_point_center = contact_pos_2
                     contact_data.contact_distance = contact_dist_2
-                    contact_2_valid = contact_passes_margin_check(contact_data)
+                    contact_2_valid = contact_passes_gap_check(contact_data)
 
                 contact_3_valid = False
                 if num_contacts > 3 and contact_dist_3 < MAXVAL:
                     contact_data.contact_point_center = contact_pos_3
                     contact_data.contact_distance = contact_dist_3
-                    contact_3_valid = contact_passes_margin_check(contact_data)
+                    contact_3_valid = contact_passes_gap_check(contact_data)
 
                 # Count valid contacts and allocate consecutive indices
                 num_valid = int(contact_0_valid) + int(contact_1_valid) + int(contact_2_valid) + int(contact_3_valid)
@@ -669,36 +669,36 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
             if wp.static(not external_aabb):
                 gap_a = shape_gap[shape_a]
                 gap_b = shape_gap[shape_b]
-                margin_vec_a = wp.vec3(gap_a, gap_a, gap_a)
-                margin_vec_b = wp.vec3(gap_b, gap_b, gap_b)
+                gap_vec_a = wp.vec3(gap_a, gap_a, gap_a)
+                gap_vec_b = wp.vec3(gap_b, gap_b, gap_b)
 
                 # Shape A AABB
                 if is_infinite_plane_a:
                     radius_a = shape_collision_radius[shape_a]
                     half_extents_a = wp.vec3(radius_a, radius_a, radius_a)
-                    aabb_a_lower = pos_a - half_extents_a - margin_vec_a
-                    aabb_a_upper = pos_a + half_extents_a + margin_vec_a
+                    aabb_a_lower = pos_a - half_extents_a - gap_vec_a
+                    aabb_a_upper = pos_a + half_extents_a + gap_vec_a
                 else:
                     data_provider = SupportMapDataProvider()
                     aabb_a_lower, aabb_a_upper = compute_tight_aabb_from_support(
                         shape_data_a, quat_a, pos_a, data_provider
                     )
-                    aabb_a_lower = aabb_a_lower - margin_vec_a
-                    aabb_a_upper = aabb_a_upper + margin_vec_a
+                    aabb_a_lower = aabb_a_lower - gap_vec_a
+                    aabb_a_upper = aabb_a_upper + gap_vec_a
 
                 # Shape B AABB
                 if is_infinite_plane_b:
                     radius_b = shape_collision_radius[shape_b]
                     half_extents_b = wp.vec3(radius_b, radius_b, radius_b)
-                    aabb_b_lower = pos_b - half_extents_b - margin_vec_b
-                    aabb_b_upper = pos_b + half_extents_b + margin_vec_b
+                    aabb_b_lower = pos_b - half_extents_b - gap_vec_b
+                    aabb_b_upper = pos_b + half_extents_b + gap_vec_b
                 else:
                     data_provider = SupportMapDataProvider()
                     aabb_b_lower, aabb_b_upper = compute_tight_aabb_from_support(
                         shape_data_b, quat_b, pos_b, data_provider
                     )
-                    aabb_b_lower = aabb_b_lower - margin_vec_b
-                    aabb_b_upper = aabb_b_upper + margin_vec_b
+                    aabb_b_lower = aabb_b_lower - gap_vec_b
+                    aabb_b_upper = aabb_b_upper + gap_vec_b
 
             # Compute bounding spheres and check for overlap (early rejection)
             bsphere_center_a, bsphere_radius_a = compute_bounding_sphere_from_aabb(aabb_a_lower, aabb_a_upper)
@@ -718,7 +718,7 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
             ):
                 continue
 
-            # Compute contact margin
+            # Compute pairwise gap sum for contact detection
             gap_a = shape_gap[shape_a]
             gap_b = shape_gap[shape_b]
             gap_sum = gap_a + gap_b
@@ -884,7 +884,6 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
             # Extract margin offset for shape A (signed distance padding)
             margin_offset_a = shape_data[shape_a][3]
 
-            # Use per-shape contact margin for contact detection
             # Sum per-shape contact gaps for consistent pairwise thresholding
             gap_a = shape_gap[shape_a]
             gap_b = shape_gap[shape_b]
@@ -983,7 +982,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
             # Use per-shape contact gap for contact detection threshold
             gap_mesh = shape_gap[mesh_shape]
             gap_plane = shape_gap[plane_shape]
-            margin = gap_mesh + gap_plane
+            gap_sum = gap_mesh + gap_plane
 
             # Strided loop over vertices across all threads in the launch
             total_num_threads = total_num_blocks * wp.block_dim()
@@ -1002,7 +1001,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
                 distance = wp.dot(diff, plane_normal)
 
                 # Check if this vertex generates a contact
-                if distance < margin + total_margin_offset:
+                if distance < gap_sum + total_margin_offset:
                     # Contact position is the midpoint
                     contact_pos = (vertex_world + point_on_plane) * 0.5
 
@@ -1020,7 +1019,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
                     contact_data.margin_b = margin_offset_plane
                     contact_data.shape_a = mesh_shape
                     contact_data.shape_b = plane_shape
-                    contact_data.gap_sum = margin
+                    contact_data.gap_sum = gap_sum
 
                     if writer_data.contact_count[0] < writer_data.contact_max:
                         writer_func(contact_data, writer_data, -1)
@@ -1118,7 +1117,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
             # Use per-shape contact gap for contact detection threshold
             gap_mesh = shape_gap[mesh_shape]
             gap_plane = shape_gap[plane_shape]
-            margin = gap_mesh + gap_plane
+            gap_sum = gap_mesh + gap_plane
 
             # Reset contact buffer for this pair
             for i in range(t, wp.static(reduction_slot_count), wp.block_dim()):
@@ -1152,7 +1151,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
                     distance = wp.dot(diff, plane_normal)
 
                     # Check if this vertex generates a contact
-                    if distance < margin + total_margin_offset:
+                    if distance < gap_sum + total_margin_offset:
                         has_contact = True
 
                         # Contact position is the midpoint
@@ -1198,7 +1197,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
                 contact_data.margin_b = margin_offset_plane
                 contact_data.shape_a = mesh_shape
                 contact_data.shape_b = plane_shape
-                contact_data.gap_sum = margin
+                contact_data.gap_sum = gap_sum
 
                 if writer_data.contact_count[0] < writer_data.contact_max:
                     writer_func(contact_data, writer_data, -1)

@@ -63,17 +63,17 @@ class ContactData:
 
 
 @wp.func
-def contact_passes_margin_check(
+def contact_passes_gap_check(
     contact_data: ContactData,
 ) -> bool:
     """
-    Check if a contact passes the margin check and should be written.
+    Check if a contact passes the gap threshold check and should be written.
 
     Args:
         contact_data: ContactData struct containing contact information
 
     Returns:
-        True if the contact distance is within the contact margin, False otherwise
+        True if the contact distance is within the contact gap threshold, False otherwise
     """
     total_separation_needed = (
         contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.margin_a + contact_data.margin_b

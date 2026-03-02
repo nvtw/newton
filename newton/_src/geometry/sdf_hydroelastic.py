@@ -1092,7 +1092,7 @@ def count_iso_voxels_block(
                         sdf_data_b, sdf_data_a, X_ws_b, X_ws_a, k_eff_b, k_eff_a, x_center
                     )
 
-                    # check if bounding sphere contains the isosurface and the distance is within contact margin
+                    # check if bounding sphere contains the isosurface and the distance is within contact gap
                     if wp.abs(diff_val) > r_eff or va > r + gap_a or vb > r + gap_b or not is_valid:
                         continue
                     num_iso_subblocks += 1
@@ -1148,11 +1148,11 @@ def mc_iterate_voxel_vertices(
     X_ws_other: wp.transform,
     k_eff: wp.float32,
     k_eff_other: wp.float32,
-    margin: wp.float32,
+    gap_sum: wp.float32,
 ) -> tuple[wp.uint8, vec8f, bool, bool]:
     """Iterate over the vertices of a voxel and return the cube index, corner values, and whether any vertices are inside the shape."""
     cube_idx = wp.uint8(0)
-    any_verts_inside_margin = False
+    any_verts_inside_gap = False
     corner_vals = vec8f()
 
     for i in range(8):
@@ -1173,10 +1173,10 @@ def mc_iterate_voxel_vertices(
         if v_diff < 0.0:
             cube_idx |= wp.uint8(1) << wp.uint8(i)
 
-        if v <= margin:
-            any_verts_inside_margin = True
+        if v <= gap_sum:
+            any_verts_inside_gap = True
 
-    return cube_idx, corner_vals, any_verts_inside_margin, True
+    return cube_idx, corner_vals, any_verts_inside_gap, True
 
 
 # =============================================================================
@@ -1254,7 +1254,7 @@ def get_decode_contacts_kernel(margin_contact_area: float = 1e-4, writer_func: A
             normal_world = wp.transform_vector(transform_b, contact_normal)
             pos_world = wp.transform_point(transform_b, pos)
 
-            # Sum per-shape gap to match collision margin convention (margin + gap)
+            # Sum per-shape gaps for pairwise contact detection threshold
             gap_a = shape_gap[shape_a]
             gap_b = shape_gap[shape_b]
             gap_sum = gap_a + gap_b

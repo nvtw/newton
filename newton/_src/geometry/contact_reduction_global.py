@@ -947,7 +947,7 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
         # Shape data for extracting margin and effective radius
         shape_types: wp.array(dtype=int),
         shape_data: wp.array(dtype=wp.vec4),
-        # Per-shape contact margins
+        # Per-shape contact gaps
         shape_gap: wp.array(dtype=float),
         # Writer data (custom struct)
         writer_data: Any,
