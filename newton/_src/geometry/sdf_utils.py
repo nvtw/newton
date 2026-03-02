@@ -110,7 +110,8 @@ class SDF:
         target_voxel_size: float | None = None,
         max_resolution: int | None = None,
         margin: float = 0.05,
-        thickness: float = 0.0,
+        shape_margin: float | None = None,
+        thickness: float | None = None,
         scale: tuple[float, float, float] | None = None,
     ) -> "SDF":
         """Create an SDF from triangle mesh points and indices.
@@ -124,12 +125,18 @@ class SDF:
             max_resolution: Maximum sparse-grid dimension [voxel]. Used when
                 ``target_voxel_size`` is not provided.
             margin: Extra AABB padding [m] added before discretization.
-            thickness: Thickness offset [m] to subtract from SDF values.
+            shape_margin: Shape margin offset [m] to subtract from SDF values.
+            thickness: Deprecated alias for ``shape_margin``.
             scale: Scale factors ``(sx, sy, sz)`` to bake into the SDF.
 
         Returns:
             A validated :class:`SDF` runtime handle with sparse/coarse volumes.
         """
+        if shape_margin is None:
+            shape_margin = 0.0 if thickness is None else thickness
+        elif thickness is not None:
+            raise ValueError("Provide only one of 'shape_margin' or deprecated 'thickness'.")
+
         mesh = Mesh(points, indices, compute_inertia=False)
         return SDF.create_from_mesh(
             mesh,
@@ -137,7 +144,7 @@ class SDF:
             target_voxel_size=target_voxel_size,
             max_resolution=max_resolution,
             margin=margin,
-            thickness=thickness,
+            shape_margin=shape_margin,
             scale=scale,
         )
 
@@ -149,7 +156,8 @@ class SDF:
         target_voxel_size: float | None = None,
         max_resolution: int | None = None,
         margin: float = 0.05,
-        thickness: float = 0.0,
+        shape_margin: float | None = None,
+        thickness: float | None = None,
         scale: tuple[float, float, float] | None = None,
     ) -> "SDF":
         """Create an SDF from a mesh in local mesh coordinates.
@@ -163,11 +171,11 @@ class SDF:
             max_resolution: Maximum sparse-grid dimension [voxel]. Used when
                 ``target_voxel_size`` is not provided.
             margin: Extra AABB padding [m] added before discretization.
-            thickness: Thickness offset [m] to subtract from SDF values. When
-                non-zero, the SDF surface is effectively shrunk inward by this
-                amount. Useful for modeling compliant layers in hydroelastic
-                collision. Defaults to ``0.0`` (no offset, thickness applied
-                at runtime).
+            shape_margin: Shape margin offset [m] to subtract from SDF values.
+                When non-zero, the SDF surface is effectively shrunk inward by
+                this amount. Useful for modeling compliant layers in hydroelastic
+                collision. Defaults to ``0.0``.
+            thickness: Deprecated alias for ``shape_margin``.
             scale: Scale factors ``(sx, sy, sz)`` [unitless] to bake into the
                 SDF. When provided, mesh vertices are scaled before SDF
                 generation and ``scale_baked`` is set to ``True`` in the
@@ -178,6 +186,11 @@ class SDF:
         Returns:
             A validated :class:`SDF` runtime handle with sparse/coarse volumes.
         """
+        if shape_margin is None:
+            shape_margin = 0.0 if thickness is None else thickness
+        elif thickness is not None:
+            raise ValueError("Provide only one of 'shape_margin' or deprecated 'thickness'.")
+
         effective_max_resolution = 64 if max_resolution is None and target_voxel_size is None else max_resolution
         bake_scale = scale is not None
         effective_scale = scale if scale is not None else (1.0, 1.0, 1.0)
@@ -185,7 +198,7 @@ class SDF:
             shape_type=GeoType.MESH,
             shape_geo=mesh,
             shape_scale=effective_scale,
-            shape_margin=thickness,
+            shape_margin=shape_margin,
             narrow_band_distance=narrow_band_range,
             margin=margin,
             target_voxel_size=target_voxel_size,
@@ -308,7 +321,7 @@ def sdf_from_mesh_kernel(
     mesh: wp.uint64,
     sdf: wp.uint64,
     tile_points: wp.array(dtype=wp.vec3i),
-    thickness: wp.float32,
+    shape_margin: wp.float32,
     winding_threshold: wp.float32,
 ):
     """
@@ -325,7 +338,7 @@ def sdf_from_mesh_kernel(
 
     sample_pos = wp.volume_index_to_world(sdf, int_to_vec3f(x_id, y_id, z_id))
     signed_distance = get_distance_to_mesh(mesh, sample_pos, 10000.0, winding_threshold)
-    signed_distance -= thickness
+    signed_distance -= shape_margin
     wp.volume_store(sdf, x_id, y_id, z_id, signed_distance)
 
 
@@ -335,7 +348,7 @@ def sdf_from_primitive_kernel(
     shape_scale: wp.vec3,
     sdf: wp.uint64,
     tile_points: wp.array(dtype=wp.vec3i),
-    thickness: wp.float32,
+    shape_margin: wp.float32,
 ):
     """
     Populate SDF grid from primitive shape.
@@ -362,7 +375,7 @@ def sdf_from_primitive_kernel(
         signed_distance = sdf_ellipsoid(sample_pos, shape_scale)
     elif shape_type == GeoType.CONE:
         signed_distance = sdf_cone(sample_pos, shape_scale[0], shape_scale[1], int(Axis.Z))
-    signed_distance -= thickness
+    signed_distance -= shape_margin
     wp.volume_store(sdf, x_id, y_id, z_id, signed_distance)
 
 
@@ -724,7 +737,7 @@ def compute_sdf_from_shape(
             target_voxel_size=target_voxel_size,
             max_resolution=max_resolution,
             margin=margin,
-            thickness=shape_margin,
+            shape_margin=shape_margin,
             scale=tuple(shape_scale) if bake_scale else None,
         )
         return sdf.to_kernel_data(), sdf.sparse_volume, sdf.coarse_volume, (sdf.block_coords or [])

@@ -706,7 +706,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
         Args:
             geom_types: Array of geometry types for all shapes
-            geom_data: Array of vec4 containing scale (xyz) and thickness (w) for each shape
+            geom_data: Array of vec4 containing scale (xyz) and margin (w) for each shape
             geom_transform: Array of world-space transforms for each shape
             geom_source: Array of source pointers (mesh IDs) for each shape
             sdf_table: Compact SDFData array
@@ -725,8 +725,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         for pair_idx in range(block_id, pair_count, total_num_blocks):
             pair = shape_pairs_mesh_mesh[pair_idx]
 
-            # Sum margins for contact detection (needed for all modes)
-            margin = shape_gap[pair[0]] + shape_gap[pair[1]]
+            # Sum per-shape gaps for contact detection (needed for all modes)
+            gap_sum = shape_gap[pair[0]] + shape_gap[pair[1]]
 
             # Test both directions using smart indexing:
             # mode 0: pair[0] triangles vs pair[1] SDF
@@ -772,15 +772,15 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 # Transform from triangle mesh space to SDF mesh space
                 X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_sdf_ws), X_tri_ws)
 
-                # Shape thickness is a runtime collision property.
-                triangle_mesh_thickness = scale_data_tri[3]
-                sdf_mesh_thickness = scale_data_sdf[3]
+                # Shape margin is a runtime collision property.
+                triangle_mesh_margin = scale_data_tri[3]
+                sdf_mesh_margin = scale_data_sdf[3]
 
                 # Precompute inverse scale for efficient point transforms
                 inv_sdf_scale = wp.cw_div(wp.vec3(1.0, 1.0, 1.0), sdf_scale)
                 min_sdf_scale = wp.min(wp.min(sdf_scale[0], sdf_scale[1]), sdf_scale[2])
 
-                contact_threshold = margin + triangle_mesh_thickness + sdf_mesh_thickness
+                contact_threshold = gap_sum + triangle_mesh_margin + sdf_mesh_margin
                 contact_threshold_unscaled = contact_threshold / min_sdf_scale
 
                 # Initialize shared memory buffer for triangle selection
@@ -870,7 +870,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             contact_data.margin_b = shape_data[pair[1]][3]
                             contact_data.shape_a = pair[0]
                             contact_data.shape_b = pair[1]
-                            contact_data.margin = margin
+                            contact_data.margin = gap_sum
 
                             writer_func(contact_data, writer_data, -1)
 
@@ -916,8 +916,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         for pair_idx in range(block_id, pair_count, total_num_blocks):
             pair = shape_pairs_mesh_mesh[pair_idx]
 
-            # Sum margins for contact detection (needed for all modes)
-            margin = shape_gap[pair[0]] + shape_gap[pair[1]]
+            # Sum per-shape gaps for contact detection (needed for all modes)
+            gap_sum = shape_gap[pair[0]] + shape_gap[pair[1]]
 
             # Initialize (shared memory) buffers for contact reduction
             empty_marker = wp.static(-MAXVAL)
@@ -990,9 +990,9 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 # Transform from triangle mesh space to SDF mesh space
                 X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_sdf_ws), X_tri_ws)
 
-                # Shape thickness is a runtime collision property.
-                triangle_mesh_thickness = scale_data_tri[3]
-                sdf_mesh_thickness = scale_data_sdf[3]
+                # Shape margin is a runtime collision property.
+                triangle_mesh_margin = scale_data_tri[3]
+                sdf_mesh_margin = scale_data_sdf[3]
 
                 # Compute midpoint for centering contacts (order doesn't matter for sum)
                 midpoint = (wp.transform_get_translation(X_tri_ws) + wp.transform_get_translation(X_sdf_ws)) * 0.5
@@ -1001,7 +1001,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 inv_sdf_scale = wp.cw_div(wp.vec3(1.0, 1.0, 1.0), sdf_scale)
                 min_sdf_scale = wp.min(wp.min(sdf_scale[0], sdf_scale[1]), sdf_scale[2])
 
-                contact_threshold = margin + triangle_mesh_thickness + sdf_mesh_thickness
+                contact_threshold = gap_sum + triangle_mesh_margin + sdf_mesh_margin
                 contact_threshold_unscaled = contact_threshold / min_sdf_scale
 
                 # Initialize shared memory buffer for triangle selection (late allocation to reduce register pressure)
@@ -1151,7 +1151,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 contact_data.margin_b = shape_data[pair[1]][3]
                 contact_data.shape_a = pair[0]
                 contact_data.shape_b = pair[1]
-                contact_data.margin = margin
+                contact_data.margin = gap_sum
 
                 writer_func(contact_data, writer_data, -1)
 
