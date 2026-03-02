@@ -4,8 +4,6 @@
 
 ### Added
 
-- Add heightfield collision support for meshes (with and without SDF), particles (soft contacts), and plane-cylinder stability improvements
-
 ### Changed
 
 ### Deprecated
