@@ -516,7 +516,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 contact_data.margin_b = 0.0
                 contact_data.shape_a = shape_a
                 contact_data.shape_b = shape_b
-                contact_data.margin = gap_sum
+                contact_data.gap_sum = gap_sum
                 contact_data.contact_stiffness = c_stiffness
                 contact_data.contact_friction_scale = wp.float32(1.0)
 
@@ -542,7 +542,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 contact_data.margin_b = 0.0
                 contact_data.shape_a = shape_a_first
                 contact_data.shape_b = shape_b_first
-                contact_data.margin = gap_sum
+                contact_data.gap_sum = gap_sum
                 contact_data.contact_stiffness = shared_stiffness
                 contact_data.contact_friction_scale = wp.float32(1.0)
 

@@ -1030,7 +1030,7 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
                 contact_data.margin_b = margin_offset_b
                 contact_data.shape_a = shape_a
                 contact_data.shape_b = shape_b
-                contact_data.margin = gap_sum
+                contact_data.gap_sum = gap_sum
 
                 # Call the writer function
                 writer_func(contact_data, writer_data, -1)

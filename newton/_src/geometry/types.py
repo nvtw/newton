@@ -670,8 +670,7 @@ class Mesh:
         target_voxel_size: float | None = None,
         max_resolution: int | None = None,
         margin: float | None = None,
-        shape_margin: float | None = None,
-        thickness: float | None = None,
+        shape_margin: float = 0.0,
         scale: tuple[float, float, float] | None = None,
     ) -> "SDF":
         """Build and attach an SDF for this mesh.
@@ -689,7 +688,6 @@ class Mesh:
                 When non-zero, the SDF surface is effectively shrunk inward by
                 this amount. Useful for modeling compliant layers in hydroelastic
                 collision. Defaults to ``0.0``.
-            thickness: Deprecated alias for ``shape_margin``.
             scale: Scale factors ``(sx, sy, sz)`` to bake into the SDF. When
                 provided, the mesh vertices are scaled before SDF generation
                 and ``scale_baked`` is set to ``True`` in the resulting SDF.
@@ -706,11 +704,6 @@ class Mesh:
             raise RuntimeError("Mesh already has an SDF. Call clear_sdf() before rebuilding.")
 
         from .sdf_utils import SDF  # noqa: PLC0415
-
-        if shape_margin is None:
-            shape_margin = 0.0 if thickness is None else thickness
-        elif thickness is not None:
-            raise ValueError("Provide only one of 'shape_margin' or deprecated 'thickness'.")
 
         self.sdf = SDF.create_from_mesh(
             self,

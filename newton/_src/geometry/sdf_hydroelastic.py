@@ -1283,7 +1283,7 @@ def get_decode_contacts_kernel(margin_contact_area: float = 1e-4, writer_func: A
             contact_data.margin_b = 0.0
             contact_data.shape_a = shape_a
             contact_data.shape_b = shape_b
-            contact_data.margin = gap_sum
+            contact_data.gap_sum = gap_sum
             contact_data.contact_stiffness = c_stiffness
 
             writer_func(contact_data, writer_data, output_index)

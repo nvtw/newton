@@ -41,7 +41,7 @@ class ContactData:
         margin_b: Collision surface margin offset for shape B
         shape_a: Index of the first shape in the collision pair
         shape_b: Index of the second shape in the collision pair
-        margin: Contact detection margin/threshold
+        gap_sum: Pairwise summed contact gap threshold that determines if a contact should be written
         contact_stiffness: Contact stiffness. 0.0 means no stiffness was set.
         contact_damping: Contact damping scale. 0.0 means no damping was set.
         contact_friction_scale: Friction scaling factor. 0.0 means no friction was set.
@@ -56,7 +56,7 @@ class ContactData:
     margin_b: float
     shape_a: int
     shape_b: int
-    margin: float
+    gap_sum: float
     contact_stiffness: float
     contact_damping: float
     contact_friction_scale: float
@@ -93,4 +93,4 @@ def contact_passes_margin_check(
     distance = wp.dot(diff, contact_normal_a_to_b)
     d = distance - total_separation_needed
 
-    return d <= contact_data.margin
+    return d <= contact_data.gap_sum

@@ -870,7 +870,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             contact_data.margin_b = shape_data[pair[1]][3]
                             contact_data.shape_a = pair[0]
                             contact_data.shape_b = pair[1]
-                            contact_data.margin = gap_sum
+                            contact_data.gap_sum = gap_sum
 
                             writer_func(contact_data, writer_data, -1)
 
@@ -1151,7 +1151,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 contact_data.margin_b = shape_data[pair[1]][3]
                 contact_data.shape_a = pair[0]
                 contact_data.shape_b = pair[1]
-                contact_data.margin = gap_sum
+                contact_data.gap_sum = gap_sum
 
                 writer_func(contact_data, writer_data, -1)
 

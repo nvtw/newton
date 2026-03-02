@@ -92,7 +92,7 @@ def write_contact_simple(
     Args:
         contact_data: ContactData struct containing contact information
         writer_data: ContactWriterData struct containing output arrays
-        output_index: If -1, use atomic_add to get the next available index if contact distance is less than margin. If >= 0, use this index directly and skip margin check.
+        output_index: If -1, use atomic_add to get the next available index if contact distance is less than gap_sum. If >= 0, use this index directly and skip gap check.
     """
     total_separation_needed = (
         contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.margin_a + contact_data.margin_b
@@ -112,7 +112,7 @@ def write_contact_simple(
     d = distance - total_separation_needed
 
     if output_index < 0:
-        if d >= contact_data.margin:
+        if d >= contact_data.gap_sum:
             return
         index = wp.atomic_add(writer_data.contact_count, 0, 1)
     else:
@@ -511,7 +511,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 contact_data.margin_b = margin_offset_b
                 contact_data.shape_a = shape_a
                 contact_data.shape_b = shape_b
-                contact_data.margin = gap_sum
+                contact_data.gap_sum = gap_sum
 
                 # Check margin for all possible contacts
                 contact_0_valid = False
@@ -1020,7 +1020,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
                     contact_data.margin_b = margin_offset_plane
                     contact_data.shape_a = mesh_shape
                     contact_data.shape_b = plane_shape
-                    contact_data.margin = margin
+                    contact_data.gap_sum = margin
 
                     if writer_data.contact_count[0] < writer_data.contact_max:
                         writer_func(contact_data, writer_data, -1)
@@ -1198,7 +1198,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
                 contact_data.margin_b = margin_offset_plane
                 contact_data.shape_a = mesh_shape
                 contact_data.shape_b = plane_shape
-                contact_data.margin = margin
+                contact_data.gap_sum = margin
 
                 if writer_data.contact_count[0] < writer_data.contact_max:
                     writer_func(contact_data, writer_data, -1)
