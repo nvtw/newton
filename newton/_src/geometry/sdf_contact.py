@@ -884,10 +884,21 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 X_tri_ws = shape_transform[tri_shape]
                 X_sdf_ws = shape_transform[sdf_shape]
 
-                sdf_scale = wp.vec3(1.0, 1.0, 1.0)
-                if not sdf_is_hfield and not use_bvh_for_sdf:
-                    if not sdf_data.scale_baked:
-                        sdf_scale = mesh_scale_sdf
+                # Determine sdf_scale for the SDF query.
+                # When using BVH fallback (mesh_query_point_sign_normal), the mesh stores
+                # unscaled vertices, so sdf_scale must equal the shape scale. Downstream code
+                # uses its inverse to transform points into unscaled mesh space.
+                # For precomputed SDF volumes, override to identity when scale is already
+                # baked into the SDF data.
+                # Heightfields always use scale=identity, since SDF is directly sampled from elevation grid.
+                if sdf_is_hfield:
+                    sdf_scale = wp.vec3(1.0, 1.0, 1.0)
+                else:
+                    sdf_scale = mesh_scale_sdf
+                    if not use_bvh_for_sdf:
+                        # Only override to identity for precomputed (non-BVH) SDF volumes with baked scale
+                        if sdf_data.scale_baked:
+                            sdf_scale = wp.vec3(1.0, 1.0, 1.0)
 
                 X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_sdf_ws), X_tri_ws)
 
@@ -1112,10 +1123,20 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 aabb_upper_tri = shape_collision_aabb_upper[tri_shape]
                 voxel_res_tri = shape_voxel_resolution[tri_shape]
 
-                sdf_scale = wp.vec3(1.0, 1.0, 1.0)
-                if not sdf_is_hfield and not use_bvh_for_sdf:
-                    if not sdf_data.scale_baked:
-                        sdf_scale = mesh_scale_sdf
+                # Determine sdf_scale for the SDF query.
+                # When using BVH fallback (mesh_query_point_sign_normal), the mesh stores
+                # unscaled vertices, so sdf_scale must equal the shape scale. Downstream code
+                # uses its inverse to transform points into unscaled mesh space.
+                # For precomputed SDF volumes, override to identity when scale is already
+                # baked into the SDF data.
+                if sdf_is_hfield:
+                    # Heightfields always use scale=identity, since SDF is directly sampled from elevation grid.
+                    sdf_scale = wp.vec3(1.0, 1.0, 1.0)
+                else:
+                    sdf_scale = mesh_scale_sdf
+                    if not use_bvh_for_sdf:
+                        if sdf_data.scale_baked:
+                            sdf_scale = wp.vec3(1.0, 1.0, 1.0)
 
                 X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_sdf_ws), X_tri_ws)
 
