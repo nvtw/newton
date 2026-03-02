@@ -20,6 +20,7 @@ import warp as wp
 from newton._src.core.types import MAXVAL
 
 from ..geometry.contact_data import ContactData
+from ..geometry.sdf_texture import TextureSDFData, texture_sample_sdf, texture_sample_sdf_grad
 from ..geometry.sdf_utils import SDFData
 
 # Handle both direct execution and module import
@@ -365,7 +366,7 @@ def closest_pt_point_bary_triangle(c: wp.vec3) -> wp.vec3:
 
 @wp.func
 def do_triangle_sdf_collision(
-    sdf_data: SDFData,
+    texture_sdf: TextureSDFData,
     sdf_mesh_id: wp.uint64,
     v0: wp.vec3,
     v1: wp.vec3,
@@ -380,10 +381,8 @@ def do_triangle_sdf_collision(
     The optimization starts from either the triangle centroid or one of its vertices
     (whichever has the smallest initial distance).
 
-    Uses extrapolated SDF sampling that handles:
-    - Points in narrow band: sparse grid value
-    - Points inside extent but outside narrow band: coarse grid value
-    - Points outside extent: extrapolated from boundary
+    Uses texture SDF sampling via 3D CUDA textures for fast lookups. Falls back to
+    BVH-based mesh distance when texture SDF is unavailable.
 
     Algorithm:
     1. Evaluate SDF distance at triangle vertices and centroid
@@ -396,10 +395,10 @@ def do_triangle_sdf_collision(
     4. Return final distance, contact point, and contact direction
 
     Args:
-        sdf_data: SDFData struct containing sparse/coarse volumes and extent info
+        texture_sdf: TextureSDFData struct containing texture-based SDF data
         sdf_mesh_id: Mesh ID for BVH-based collision (used when use_bvh_for_sdf is True)
         v0, v1, v2: Triangle vertices in the SDF's local coordinate space
-        use_bvh_for_sdf: If True, use BVH-based collision instead of SDF volumes
+        use_bvh_for_sdf: If True, use BVH-based collision instead of texture SDF
 
     Returns:
         Tuple of (distance, contact_point, contact_direction) where:
@@ -411,17 +410,17 @@ def do_triangle_sdf_collision(
     center = (v0 + v1 + v2) * third
     p = center
 
-    # Use extrapolated sampling for initial distance estimates
+    # Use texture SDF sampling for initial distance estimates
     if use_bvh_for_sdf:
         dist = sample_sdf_using_mesh(sdf_mesh_id, p)
         d0 = sample_sdf_using_mesh(sdf_mesh_id, v0)
         d1 = sample_sdf_using_mesh(sdf_mesh_id, v1)
         d2 = sample_sdf_using_mesh(sdf_mesh_id, v2)
     else:
-        dist = sample_sdf_extrapolated(sdf_data, p)
-        d0 = sample_sdf_extrapolated(sdf_data, v0)
-        d1 = sample_sdf_extrapolated(sdf_data, v1)
-        d2 = sample_sdf_extrapolated(sdf_data, v2)
+        dist = texture_sample_sdf(texture_sdf, p)
+        d0 = texture_sample_sdf(texture_sdf, v0)
+        d1 = texture_sample_sdf(texture_sdf, v1)
+        d2 = texture_sample_sdf(texture_sdf, v2)
 
     # choose starting iterate among centroid and triangle vertices
     if d0 < d1 and d0 < d2 and d0 < dist:
@@ -451,11 +450,11 @@ def do_triangle_sdf_collision(
     step = 1.0 / (2.0 * difference)
 
     for _iter in range(16):
-        # Use extrapolated gradient sampling
+        # Use texture SDF gradient sampling (analytical trilinear gradient)
         if use_bvh_for_sdf:
             _, sdf_gradient = sample_sdf_grad_using_mesh(sdf_mesh_id, p)
         else:
-            _, sdf_gradient = sample_sdf_grad_extrapolated(sdf_data, p)
+            _, sdf_gradient = texture_sample_sdf_grad(texture_sdf, p)
 
         grad_len = wp.length(sdf_gradient)
         if grad_len == 0.0:
@@ -485,11 +484,11 @@ def do_triangle_sdf_collision(
 
         uvw = new_uvw
 
-    # Final extrapolated sampling for result
+    # Final texture SDF sampling for result
     if use_bvh_for_sdf:
         dist, sdf_gradient = sample_sdf_grad_using_mesh(sdf_mesh_id, p)
     else:
-        dist, sdf_gradient = sample_sdf_grad_extrapolated(sdf_data, p)
+        dist, sdf_gradient = texture_sample_sdf_grad(texture_sdf, p)
 
     point = p
     direction = sdf_gradient
@@ -625,7 +624,7 @@ def find_interesting_triangles(
     mesh_scale: wp.vec3,
     mesh_to_sdf_transform: wp.transform,
     mesh_id: wp.uint64,
-    sdf_data: SDFData,
+    texture_sdf: TextureSDFData,
     sdf_mesh_id: wp.uint64,
     buffer: wp.array(dtype=wp.int32),
     contact_distance: float,
@@ -675,16 +674,16 @@ def find_interesting_triangles(
             else:
                 # Fast AABB pre-filter: skip SDF lookup if bounding sphere is entirely
                 # outside the SDF extent. Uses point-to-AABB distance which is much cheaper
-                # than a volume lookup.
+                # than a texture lookup.
                 culling_radius = bounding_sphere_radius + contact_distance
-                sdf_lower = sdf_data.center - sdf_data.half_extents
-                sdf_upper = sdf_data.center + sdf_data.half_extents
+                sdf_lower = texture_sdf.sdf_box_lower
+                sdf_upper = texture_sdf.sdf_box_upper
                 clamped = wp.min(wp.max(bounding_sphere_center, sdf_lower), sdf_upper)
                 aabb_dist_sq = wp.length_sq(bounding_sphere_center - clamped)
                 if aabb_dist_sq > culling_radius * culling_radius:
                     add_triangle = False
                 else:
-                    sdf_dist = sample_sdf_extrapolated(sdf_data, bounding_sphere_center)
+                    sdf_dist = texture_sample_sdf(texture_sdf, bounding_sphere_center)
                     add_triangle = sdf_dist <= culling_radius
 
         synchronize()  # Ensure all threads have read base_tri_idx before any writes
@@ -755,7 +754,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         shape_data: wp.array(dtype=wp.vec4),
         shape_transform: wp.array(dtype=wp.transform),
         shape_source: wp.array(dtype=wp.uint64),
-        sdf_table: wp.array(dtype=SDFData),
+        texture_sdf_table: wp.array(dtype=TextureSDFData),
         shape_sdf_index: wp.array(dtype=wp.int32),
         shape_gap: wp.array(dtype=float),
         _shape_collision_aabb_lower: wp.array(dtype=wp.vec3),  # Unused but kept for API compatibility
@@ -767,23 +766,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         total_num_blocks: int,
     ):
         """
-        Process mesh-mesh collisions using SDF-mesh collision detection.
+        Process mesh-mesh collisions using texture SDF-mesh collision detection.
 
         Uses a strided loop to process mesh-mesh pairs, with threads within each block
         parallelizing over triangles. This follows the pattern from do_sdf_mesh_collision.
-
-        Args:
-            geom_types: Array of geometry types for all shapes
-            geom_data: Array of vec4 containing scale (xyz) and thickness (w) for each shape
-            geom_transform: Array of world-space transforms for each shape
-            geom_source: Array of source pointers (mesh IDs) for each shape
-            sdf_table: Compact SDFData array
-            shape_sdf_index: Per-shape SDF table index (-1 means fallback to BVH)
-            geom_cutoff: Array of cutoff distances for each shape
-            shape_pairs_mesh_mesh: Array of mesh-mesh pairs to process
-            shape_pairs_mesh_mesh_count: Number of mesh-mesh pairs
-            writer_data: Contact writer data structure
-            total_num_blocks: Total number of blocks launched for strided loop
         """
         block_id, t = wp.tid()
 
@@ -812,13 +798,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 if mesh_id_tri == wp.uint64(0) or mesh_id_sdf == wp.uint64(0):
                     continue
 
-                # Check SDF availability
+                # Check texture SDF availability
                 sdf_idx = shape_sdf_index[sdf_shape]
                 use_bvh_for_sdf = sdf_idx < 0
-                sdf_ptr = wp.uint64(0)
                 if not use_bvh_for_sdf:
-                    sdf_ptr = sdf_table[sdf_idx].sparse_sdf_ptr
-                    use_bvh_for_sdf = sdf_ptr == wp.uint64(0)
+                    use_bvh_for_sdf = texture_sdf_table[sdf_idx].coarse_size_x == 0
 
                 # Load shape data
                 scale_data_tri = shape_data[tri_shape]
@@ -829,12 +813,12 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 X_tri_ws = shape_transform[tri_shape]
                 X_sdf_ws = shape_transform[sdf_shape]
 
-                # Load SDF data and determine scale
-                sdf_data = SDFData()
+                # Load texture SDF data and determine scale
+                texture_sdf = TextureSDFData()
                 sdf_scale = wp.vec3(1.0, 1.0, 1.0)
                 if not use_bvh_for_sdf:
-                    sdf_data = sdf_table[sdf_idx]
-                    if not sdf_data.scale_baked:
+                    texture_sdf = texture_sdf_table[sdf_idx]
+                    if not texture_sdf.scale_baked:
                         sdf_scale = mesh_scale_sdf
 
                 # Transform from triangle mesh space to SDF mesh space
@@ -877,7 +861,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         mesh_scale_tri,
                         X_mesh_to_sdf,
                         mesh_id_tri,
-                        sdf_data,
+                        texture_sdf,
                         mesh_id_sdf,
                         selected_triangles,
                         contact_threshold_unscaled,
@@ -905,7 +889,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                         # Collision detection in unscaled SDF space
                         dist_unscaled, point_unscaled, direction_unscaled = do_triangle_sdf_collision(
-                            sdf_data, mesh_id_sdf, v0, v1, v2, use_bvh_for_sdf
+                            texture_sdf, mesh_id_sdf, v0, v1, v2, use_bvh_for_sdf
                         )
 
                         # Scale distance and direction back to scaled space
@@ -966,7 +950,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         shape_data: wp.array(dtype=wp.vec4),
         shape_transform: wp.array(dtype=wp.transform),
         shape_source: wp.array(dtype=wp.uint64),
-        sdf_table: wp.array(dtype=SDFData),
+        texture_sdf_table: wp.array(dtype=TextureSDFData),
         shape_sdf_index: wp.array(dtype=wp.int32),
         shape_gap: wp.array(dtype=float),
         shape_collision_aabb_lower: wp.array(dtype=wp.vec3),
@@ -1039,13 +1023,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 if mesh_id_tri == wp.uint64(0) or mesh_id_sdf == wp.uint64(0):
                     continue
 
-                # Check SDF availability
+                # Check texture SDF availability
                 sdf_idx = shape_sdf_index[sdf_shape]
                 use_bvh_for_sdf = sdf_idx < 0
-                sdf_ptr = wp.uint64(0)
                 if not use_bvh_for_sdf:
-                    sdf_ptr = sdf_table[sdf_idx].sparse_sdf_ptr
-                    use_bvh_for_sdf = sdf_ptr == wp.uint64(0)
+                    use_bvh_for_sdf = texture_sdf_table[sdf_idx].coarse_size_x == 0
 
                 # Load shape data
                 scale_data_tri = shape_data[tri_shape]
@@ -1062,12 +1044,12 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 aabb_upper_tri = shape_collision_aabb_upper[tri_shape]
                 voxel_res_tri = shape_voxel_resolution[tri_shape]
 
-                # Load SDF data and determine scale
-                sdf_data = SDFData()
+                # Load texture SDF data and determine scale
+                texture_sdf = TextureSDFData()
                 sdf_scale = wp.vec3(1.0, 1.0, 1.0)
                 if not use_bvh_for_sdf:
-                    sdf_data = sdf_table[sdf_idx]
-                    if not sdf_data.scale_baked:
+                    texture_sdf = texture_sdf_table[sdf_idx]
+                    if not texture_sdf.scale_baked:
                         sdf_scale = mesh_scale_sdf
 
                 # Transform from triangle mesh space to SDF mesh space
@@ -1117,7 +1099,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         mesh_scale_tri,
                         X_mesh_to_sdf,
                         mesh_id_tri,
-                        sdf_data,
+                        texture_sdf,
                         mesh_id_sdf,
                         selected_triangles,
                         contact_threshold_unscaled,
@@ -1147,7 +1129,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                         # Collision detection in unscaled SDF space
                         dist_unscaled, point_unscaled, direction_unscaled = do_triangle_sdf_collision(
-                            sdf_data, mesh_id_sdf, v0, v1, v2, use_bvh_for_sdf
+                            texture_sdf, mesh_id_sdf, v0, v1, v2, use_bvh_for_sdf
                         )
 
                         # Scale distance and direction back to scaled space

@@ -34,8 +34,6 @@ providing exact accuracy with only 8 texture reads (vs 56 for finite differences
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import numpy as np
 import warp as wp
 
@@ -640,23 +638,24 @@ def texture_sample_sdf_grad(
     # Convert to fine grid coordinates
     f = (clamped - sdf.sdf_box_lower) * sdf.inv_sdf_dx
 
-    # Fine grid dimensions
-    fine_max_x = float(sdf.coarse_size_x) * sdf.subgrid_size_f - 1.0
-    fine_max_y = float(sdf.coarse_size_y) * sdf.subgrid_size_f - 1.0
-    fine_max_z = float(sdf.coarse_size_z) * sdf.subgrid_size_f - 1.0
+    # Fine grid vertex count per dimension (vertex-centered: subgrid_size+1 per coarse cell)
+    fine_verts_x = float(sdf.coarse_size_x) * sdf.subgrid_size_f
+    fine_verts_y = float(sdf.coarse_size_y) * sdf.subgrid_size_f
+    fine_verts_z = float(sdf.coarse_size_z) * sdf.subgrid_size_f
 
-    # Clamp to valid range for interpolation
-    fx = wp.clamp(f[0], 0.0, fine_max_x)
-    fy = wp.clamp(f[1], 0.0, fine_max_y)
-    fz = wp.clamp(f[2], 0.0, fine_max_z)
+    # Clamp to valid vertex range [0, fine_verts]
+    fx = wp.clamp(f[0], 0.0, fine_verts_x)
+    fy = wp.clamp(f[1], 0.0, fine_verts_y)
+    fz = wp.clamp(f[2], 0.0, fine_verts_z)
 
     # Integer cell indices and fractional parts
-    ix = int(wp.floor(fx))
-    iy = int(wp.floor(fy))
-    iz = int(wp.floor(fz))
-    ix = wp.clamp(ix, 0, int(fine_max_x) - 1)
-    iy = wp.clamp(iy, 0, int(fine_max_y) - 1)
-    iz = wp.clamp(iz, 0, int(fine_max_z) - 1)
+    # Cell index must be in [0, num_fine_cells - 1]
+    num_fine_cells_x = int(fine_verts_x)
+    num_fine_cells_y = int(fine_verts_y)
+    num_fine_cells_z = int(fine_verts_z)
+    ix = wp.clamp(int(wp.floor(fx)), 0, num_fine_cells_x - 1)
+    iy = wp.clamp(int(wp.floor(fy)), 0, num_fine_cells_y - 1)
+    iz = wp.clamp(int(wp.floor(fz)), 0, num_fine_cells_z - 1)
     tx = fx - float(ix)
     ty = fy - float(iy)
     tz = fz - float(iz)
@@ -745,24 +744,9 @@ def texture_sample_sdf_grad(
     omty = 1.0 - ty
     omtz = 1.0 - tz
 
-    gx = (
-        omty * omtz * (v100 - v000)
-        + ty * omtz * (v110 - v010)
-        + omty * tz * (v101 - v001)
-        + ty * tz * (v111 - v011)
-    )
-    gy = (
-        omtx * omtz * (v010 - v000)
-        + tx * omtz * (v110 - v100)
-        + omtx * tz * (v011 - v001)
-        + tx * tz * (v111 - v101)
-    )
-    gz = (
-        omtx * omty * (v001 - v000)
-        + tx * omty * (v101 - v100)
-        + omtx * ty * (v011 - v010)
-        + tx * ty * (v111 - v110)
-    )
+    gx = omty * omtz * (v100 - v000) + ty * omtz * (v110 - v010) + omty * tz * (v101 - v001) + ty * tz * (v111 - v011)
+    gy = omtx * omtz * (v010 - v000) + tx * omtz * (v110 - v100) + omtx * tz * (v011 - v001) + tx * tz * (v111 - v101)
+    gz = omtx * omty * (v001 - v000) + tx * omty * (v101 - v100) + omtx * ty * (v011 - v010) + tx * ty * (v111 - v110)
 
     # Gradient is in grid coordinates; convert to world coordinates
     grad = wp.vec3(gx, gy, gz) * sdf.inv_sdf_dx
@@ -980,9 +964,19 @@ def build_sparse_sdf_from_dense(
                 _populate_subgrid_texture_float32_kernel,
                 dim=total_work,
                 inputs=[
-                    dense_sdf, subgrid_required, subgrid_addresses, subgrid_start_slots_gpu,
-                    subgrid_texture_gpu, subgrid_size, dense_size_x, dense_size_y,
-                    w, h, d, tex_blocks_per_dim, tex_size,
+                    dense_sdf,
+                    subgrid_required,
+                    subgrid_addresses,
+                    subgrid_start_slots_gpu,
+                    subgrid_texture_gpu,
+                    subgrid_size,
+                    dense_size_x,
+                    dense_size_y,
+                    w,
+                    h,
+                    d,
+                    tex_blocks_per_dim,
+                    tex_size,
                 ],
                 device=device,
             )
@@ -997,10 +991,21 @@ def build_sparse_sdf_from_dense(
                 _populate_subgrid_texture_uint16_kernel,
                 dim=total_work,
                 inputs=[
-                    dense_sdf, subgrid_required, subgrid_addresses, subgrid_start_slots_gpu,
-                    subgrid_texture_gpu, subgrid_size, dense_size_x, dense_size_y,
-                    w, h, d, tex_blocks_per_dim, tex_size,
-                    global_sdf_min, sdf_range_inv,
+                    dense_sdf,
+                    subgrid_required,
+                    subgrid_addresses,
+                    subgrid_start_slots_gpu,
+                    subgrid_texture_gpu,
+                    subgrid_size,
+                    dense_size_x,
+                    dense_size_y,
+                    w,
+                    h,
+                    d,
+                    tex_blocks_per_dim,
+                    tex_size,
+                    global_sdf_min,
+                    sdf_range_inv,
                 ],
                 device=device,
             )
@@ -1015,10 +1020,21 @@ def build_sparse_sdf_from_dense(
                 _populate_subgrid_texture_uint8_kernel,
                 dim=total_work,
                 inputs=[
-                    dense_sdf, subgrid_required, subgrid_addresses, subgrid_start_slots_gpu,
-                    subgrid_texture_gpu, subgrid_size, dense_size_x, dense_size_y,
-                    w, h, d, tex_blocks_per_dim, tex_size,
-                    global_sdf_min, sdf_range_inv,
+                    dense_sdf,
+                    subgrid_required,
+                    subgrid_addresses,
+                    subgrid_start_slots_gpu,
+                    subgrid_texture_gpu,
+                    subgrid_size,
+                    dense_size_x,
+                    dense_size_y,
+                    w,
+                    h,
+                    d,
+                    tex_blocks_per_dim,
+                    tex_size,
+                    global_sdf_min,
+                    sdf_range_inv,
                 ],
                 device=device,
             )
