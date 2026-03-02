@@ -386,6 +386,39 @@ def test_texture_sdf_multi_resolution(test, device):
             prev_mean_err = mean_err
 
 
+def test_texture_sdf_in_model(test, device):
+    """Build a scene with 2 mesh shapes with SDFs and verify model.texture_sdf_data."""
+    import newton
+
+    builder = newton.ModelBuilder(gravity=0.0)
+
+    for i in range(2):
+        body = builder.add_body(xform=wp.transform(wp.vec3(float(i) * 2.0, 0.0, 0.0)))
+        mesh = _create_box_mesh(half_extents=(0.5, 0.5, 0.5))
+        mesh.build_sdf(max_resolution=8)
+        builder.add_shape_mesh(body, mesh=mesh)
+
+    model = builder.finalize(device=device)
+
+    # Both shapes should have SDF indices
+    sdf_indices = model.shape_sdf_index.numpy()
+    test.assertEqual(sdf_indices[0], 0)
+    test.assertEqual(sdf_indices[1], 1)
+
+    # texture_sdf_data should have 2 entries
+    test.assertIsNotNone(model.texture_sdf_data)
+    test.assertEqual(len(model.texture_sdf_data), 2)
+
+    # Both entries should have non-zero coarse_size_x (not empty)
+    tex_np = model.texture_sdf_data.numpy()
+    for idx in range(2):
+        test.assertGreater(tex_np[idx]["coarse_size_x"], 0, f"texture_sdf_data[{idx}] is empty")
+
+    # Texture references should be kept alive
+    test.assertEqual(len(model.texture_sdf_coarse_textures), 2)
+    test.assertEqual(len(model.texture_sdf_subgrid_textures), 2)
+
+
 def test_empty_texture_sdf_data(test, device):
     """Verify create_empty_texture_sdf_data returns a valid empty struct."""
     empty = create_empty_texture_sdf_data()
@@ -403,6 +436,7 @@ add_function_test(TestTextureSDF, "test_texture_sdf_gradient_accuracy", test_tex
 add_function_test(TestTextureSDF, "test_texture_sdf_extrapolation", test_texture_sdf_extrapolation, devices=devices)
 add_function_test(TestTextureSDF, "test_texture_sdf_array_indexing", test_texture_sdf_array_indexing, devices=devices)
 add_function_test(TestTextureSDF, "test_texture_sdf_multi_resolution", test_texture_sdf_multi_resolution, devices=devices)
+add_function_test(TestTextureSDF, "test_texture_sdf_in_model", test_texture_sdf_in_model, devices=devices)
 add_function_test(TestTextureSDF, "test_empty_texture_sdf_data", test_empty_texture_sdf_data, devices=devices)
 
 

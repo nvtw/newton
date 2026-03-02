@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 import warp as wp
@@ -22,6 +23,9 @@ from ..core.types import MAXVAL, Axis, nparray
 from .kernels import sdf_box, sdf_capsule, sdf_cone, sdf_cylinder, sdf_ellipsoid, sdf_sphere
 from .sdf_mc import get_mc_tables, int_to_vec3f, mc_calc_face, vec8f
 from .types import GeoType, Mesh
+
+if TYPE_CHECKING:
+    from .sdf_texture import TextureSDFData
 
 
 @wp.struct
@@ -62,6 +66,9 @@ class SDF:
         sparse_volume: wp.Volume | None = None,
         coarse_volume: wp.Volume | None = None,
         block_coords: nparray | Sequence[wp.vec3us] | None = None,
+        texture_data: "TextureSDFData | None" = None,
+        _coarse_texture: wp.Texture3D | None = None,
+        _subgrid_texture: wp.Texture3D | None = None,
         _internal: bool = False,
     ):
         if not _internal:
@@ -72,10 +79,18 @@ class SDF:
         self.sparse_volume = sparse_volume
         self.coarse_volume = coarse_volume
         self.block_coords = block_coords
+        self.texture_data = texture_data
+        # Keep texture references alive to prevent GC
+        self._coarse_texture = _coarse_texture
+        self._subgrid_texture = _subgrid_texture
 
     def to_kernel_data(self) -> SDFData:
         """Return kernel-facing SDF payload."""
         return self.data
+
+    def to_texture_kernel_data(self) -> "TextureSDFData | None":
+        """Return texture SDF kernel payload, or ``None`` if unavailable."""
+        return self.texture_data
 
     def is_empty(self) -> bool:
         """Return True when this SDF has no sparse/coarse payload."""
@@ -192,11 +207,42 @@ class SDF:
             max_resolution=effective_max_resolution if effective_max_resolution is not None else 64,
             bake_scale=bake_scale,
         )
+
+        # Build texture SDF alongside NanoVDB
+        texture_data = None
+        coarse_texture = None
+        subgrid_texture = None
+        if wp.is_cuda_available():
+            from .sdf_texture import QuantizationMode, create_texture_sdf_from_mesh  # noqa: PLC0415
+
+            verts = mesh.vertices * np.array(effective_scale)[None, :]
+            pos = wp.array(verts, dtype=wp.vec3)
+            indices = wp.array(mesh.indices, dtype=wp.int32)
+            tex_mesh = wp.Mesh(points=pos, indices=indices, support_winding_number=True)
+
+            signed_volume = compute_mesh_signed_volume(pos, indices)
+            winding_threshold = 0.5 if signed_volume >= 0.0 else -0.5
+
+            res = effective_max_resolution if effective_max_resolution is not None else 64
+            texture_data, coarse_texture, subgrid_texture = create_texture_sdf_from_mesh(
+                tex_mesh,
+                margin=margin,
+                narrow_band_range=narrow_band_range,
+                max_resolution=res,
+                quantization_mode=QuantizationMode.FLOAT32,
+                winding_threshold=winding_threshold,
+                scale_baked=bake_scale,
+            )
+            wp.synchronize()
+
         sdf = SDF(
             data=sdf_data,
             sparse_volume=sparse_volume,
             coarse_volume=coarse_volume,
             block_coords=block_coords,
+            texture_data=texture_data,
+            _coarse_texture=coarse_texture,
+            _subgrid_texture=subgrid_texture,
             _internal=True,
         )
         sdf.validate()
@@ -212,6 +258,7 @@ class SDF:
         half_extents: Sequence[float] | None = None,
         background_value: float = MAXVAL,
         scale_baked: bool = False,
+        texture_data: "TextureSDFData | None" = None,
     ) -> "SDF":
         """Create an SDF from precomputed runtime resources."""
         sdf_data = create_empty_sdf_data()
@@ -235,6 +282,7 @@ class SDF:
             sparse_volume=sparse_volume,
             coarse_volume=coarse_volume,
             block_coords=block_coords,
+            texture_data=texture_data,
             _internal=True,
         )
         sdf.validate()

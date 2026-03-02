@@ -291,6 +291,14 @@ class Model:
         self.sdf_index2blocks = None
         """Per-SDF [start, end) indices into sdf_block_coords, shape [num_sdfs, 2]."""
 
+        # Texture SDF storage (parallel to sdf_data, used for mesh-mesh collision)
+        self.texture_sdf_data = None
+        """Compact array of TextureSDFData structs, shape [num_sdfs]."""
+        self.texture_sdf_coarse_textures = []
+        """Coarse 3D textures matching texture_sdf_data by index. Kept for reference counting."""
+        self.texture_sdf_subgrid_textures = []
+        """Subgrid 3D textures matching texture_sdf_data by index. Kept for reference counting."""
+
         # Local AABB and voxel grid for contact reduction
         # Note: These are stored in Model (not Contacts) because they are static geometry properties
         # computed once during finalization, not per-frame contact data.

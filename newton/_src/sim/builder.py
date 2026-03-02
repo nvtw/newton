@@ -9045,6 +9045,11 @@ class ModelBuilder:
             compact_sdf_coarse_volume = []
             sdf_block_coords = []
             sdf_index2blocks = []
+            from ..geometry.sdf_texture import TextureSDFData, create_empty_texture_sdf_data  # noqa: PLC0415
+
+            compact_texture_sdf_data = []
+            compact_texture_sdf_coarse_textures = []
+            compact_texture_sdf_subgrid_textures = []
             shape_sdf_index = [-1] * len(self.shape_type)
             sdf_cache = {}
 
@@ -9066,6 +9071,7 @@ class ModelBuilder:
                 coarse_volume = None
                 block_coords = []
                 cache_key = None
+                mesh_sdf = None
 
                 if shape_type == GeoType.MESH and has_shape_collision and shape_src is not None:
                     mesh_sdf = getattr(shape_src, "sdf", None)
@@ -9119,6 +9125,22 @@ class ModelBuilder:
                         sdf_block_coords.extend(block_coords)
                         sdf_index2blocks.append([block_start_idx, len(sdf_block_coords)])
 
+                        # Collect texture SDF data alongside NanoVDB
+                        if mesh_sdf is not None:
+                            tex_data = mesh_sdf.to_texture_kernel_data()
+                            if tex_data is not None:
+                                compact_texture_sdf_data.append(tex_data)
+                                compact_texture_sdf_coarse_textures.append(mesh_sdf._coarse_texture)
+                                compact_texture_sdf_subgrid_textures.append(mesh_sdf._subgrid_texture)
+                            else:
+                                compact_texture_sdf_data.append(create_empty_texture_sdf_data())
+                                compact_texture_sdf_coarse_textures.append(None)
+                                compact_texture_sdf_subgrid_textures.append(None)
+                        else:
+                            compact_texture_sdf_data.append(create_empty_texture_sdf_data())
+                            compact_texture_sdf_coarse_textures.append(None)
+                            compact_texture_sdf_subgrid_textures.append(None)
+
             m.sdf_data = (
                 wp.array(compact_sdf_data, dtype=SDFData, device=device)
                 if compact_sdf_data
@@ -9131,6 +9153,15 @@ class ModelBuilder:
             m.sdf_index2blocks = (
                 wp.array(sdf_index2blocks, dtype=wp.vec2i) if sdf_index2blocks else wp.array([], dtype=wp.vec2i)
             )
+
+            # Texture SDF data (parallel to sdf_data, for mesh-mesh collision)
+            m.texture_sdf_data = (
+                wp.array(compact_texture_sdf_data, dtype=TextureSDFData, device=device)
+                if compact_texture_sdf_data
+                else wp.array([], dtype=TextureSDFData, device=device)
+            )
+            m.texture_sdf_coarse_textures = compact_texture_sdf_coarse_textures
+            m.texture_sdf_subgrid_textures = compact_texture_sdf_subgrid_textures
 
             # ---------------------
             # heightfield collision data
