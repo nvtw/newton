@@ -694,6 +694,58 @@ def find_interesting_triangles(
     synchronize()  # Final sync before returning
 
 
+@wp.kernel(enable_backward=False)
+def compute_mesh_mesh_block_offsets(
+    shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
+    shape_pairs_mesh_mesh_count: wp.array(dtype=int),
+    shape_source: wp.array(dtype=wp.uint64),
+    target_blocks: int,
+    block_offsets: wp.array(dtype=wp.int32),
+):
+    """Compute per-pair block counts and prefix sum for dynamic load balancing.
+
+    Block counts are proportional to the total triangle count of both meshes
+    in each pair, so pairs with larger meshes get more GPU blocks.
+
+    Args:
+        target_blocks: Desired total number of blocks (e.g., sm_count * 4).
+        block_offsets: Output array of size ``max_pairs + 1``.
+            ``block_offsets[i]`` is the cumulative block count up to pair *i*.
+    """
+    tid = wp.tid()
+    if tid > 0:
+        return
+    pair_count = shape_pairs_mesh_mesh_count[0]
+
+    # First pass: sum all triangle counts across all pairs and directions
+    total_tris = int(0)
+    for i in range(pair_count):
+        pair = shape_pairs_mesh_mesh[i]
+        for mode in range(2):
+            mesh_id = shape_source[pair[mode]]
+            if mesh_id != wp.uint64(0):
+                total_tris += wp.mesh_get(mesh_id).indices.shape[0] // 3
+
+    # Compute target triangles per block
+    tris_per_block = int(total_tris)
+    if target_blocks > 0 and total_tris > 0:
+        tris_per_block = wp.max(256, total_tris // target_blocks)
+
+    # Second pass: compute per-pair block counts and prefix sum
+    offset = int(0)
+    for i in range(pair_count):
+        block_offsets[i] = offset
+        pair = shape_pairs_mesh_mesh[i]
+        pair_tris = int(0)
+        for mode in range(2):
+            mesh_id = shape_source[pair[mode]]
+            if mesh_id != wp.uint64(0):
+                pair_tris += wp.mesh_get(mesh_id).indices.shape[0] // 3
+        blocks = wp.max(1, (pair_tris + tris_per_block - 1) // tris_per_block)
+        offset += blocks
+    block_offsets[pair_count] = offset
+
+
 def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     writer_func: Any,
     contact_reduction_funcs: ContactReductionFunctions | None = None,
@@ -922,20 +974,29 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         shape_voxel_resolution: wp.array(dtype=wp.vec3i),
         shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_mesh_count: wp.array(dtype=int),
+        block_offsets: wp.array(dtype=wp.int32),
         writer_data: Any,
         total_num_blocks: int,
-        blocks_per_pair: int,
     ):
         block_id, t = wp.tid()
         pair_count = shape_pairs_mesh_mesh_count[0]
-        total_combos = pair_count * blocks_per_pair
+        total_combos = block_offsets[pair_count]
 
         # Grid stride loop over (pair, sub-block) combos for multi-block load balancing.
-        # Each combo maps to one pair and a sub-range of its triangles.
-        # When blocks_per_pair=1, this is equivalent to the original 1-block-per-pair behavior.
+        # Binary search block_offsets to find the pair for each block.
         for combo_idx in range(block_id, total_combos, total_num_blocks):
-            pair_idx = combo_idx // blocks_per_pair
-            block_in_pair = combo_idx - pair_idx * blocks_per_pair
+            lo = int(0)
+            hi = int(pair_count)
+            while lo < hi:
+                mid = (lo + hi) // 2
+                if block_offsets[mid + 1] <= combo_idx:
+                    lo = mid + 1
+                else:
+                    hi = mid
+            pair_idx = int(lo)
+            pair_block_start = block_offsets[pair_idx]
+            block_in_pair = combo_idx - pair_block_start
+            blocks_for_pair = block_offsets[pair_idx + 1] - pair_block_start
             pair = shape_pairs_mesh_mesh[pair_idx]
 
             # Sum margins for contact detection (needed for all modes)
@@ -1037,7 +1098,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                 # Compute triangle range for this sub-block
                 num_tris = wp.mesh_get(mesh_id_tri).indices.shape[0] // 3
-                chunk_size = (num_tris + blocks_per_pair - 1) // blocks_per_pair
+                chunk_size = (num_tris + blocks_for_pair - 1) // blocks_for_pair
                 tri_start = block_in_pair * chunk_size
                 tri_end = wp.min(tri_start + chunk_size, num_tris)
 
@@ -1079,7 +1140,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         v0_scaled, v1_scaled, v2_scaled = get_triangle_from_mesh(
                             mesh_id_tri, mesh_scale_tri, X_mesh_to_sdf, tri_idx
                         )
-                        # Transform to unscaled SDF space (SDF is computed from unscaled mesh vertices)
+                        # Transform to unscaled SDF space
                         v0 = wp.cw_mul(v0_scaled, inv_sdf_scale)
                         v1 = wp.cw_mul(v1_scaled, inv_sdf_scale)
                         v2 = wp.cw_mul(v2_scaled, inv_sdf_scale)
@@ -1108,11 +1169,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             # Normal convention: mode 0 negates (A->B), mode 1 keeps (B->A)
                             contact_normal = -direction_world if mode == 0 else direction_world
 
-                            # Store contact for reduction (centered by midpoint for consistent dot products)
+                            # Store contact for reduction (centered by midpoint)
                             c.position = point_world - midpoint
                             c.normal = contact_normal
                             c.depth = dist
-                            # Encode mode into feature to distinguish triangles from mesh_a vs mesh_b
+                            # Encode mode into feature to distinguish A vs B triangles
                             c.feature = tri_idx if mode == 0 else -(tri_idx + 1)
                             c.projection = empty_marker
 
@@ -1140,10 +1201,9 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     # SYNC: Ensure buffer reset is visible before next iteration's while-check
                     synchronize()
 
-            # Now write the reduced contacts to the output array
-            # Contacts are in centered world space - add midpoint back to get true world position
-            # All contacts use consistent convention: shape_a = pair[0], shape_b = pair[1]
-            # SYNC: Ensure all contacts from both modes are stored before filtering
+            # Write reduced contacts to output
+            # Contacts are in centered world space - add midpoint back for true world position
+            # SYNC: Ensure all contacts are stored before filtering
             synchronize()
 
             # Filter out duplicate contacts (same contact may have won multiple directions)
@@ -1153,7 +1213,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 active_contacts_shared_mem[wp.static(reduction_slot_count)], wp.static(reduction_slot_count)
             )
 
-            # Compute midpoint for uncentering contacts (same as computed in mode loop)
+            # Compute midpoint for uncentering contacts
             midpoint_out = (
                 wp.transform_get_translation(shape_transform[pair[0]])
                 + wp.transform_get_translation(shape_transform[pair[1]])
@@ -1163,7 +1223,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 contact_id = active_contacts_shared_mem[i]
                 contact = contacts_shared_mem[contact_id]
 
-                # Add midpoint back to get true world position (contact.position is centered)
+                # Add midpoint back to get true world position
                 point_world = contact.position + midpoint_out
 
                 # Create contact data

@@ -59,7 +59,10 @@ from ..geometry.contact_reduction_global import (
     write_contact_to_reducer,
 )
 from ..geometry.flags import ShapeFlags
-from ..geometry.sdf_contact import create_narrow_phase_process_mesh_mesh_contacts_kernel
+from ..geometry.sdf_contact import (
+    compute_mesh_mesh_block_offsets,
+    create_narrow_phase_process_mesh_mesh_contacts_kernel,
+)
 from ..geometry.sdf_hydroelastic import HydroelasticSDF
 from ..geometry.sdf_utils import SDFData
 from ..geometry.support_function import (
@@ -1576,25 +1579,20 @@ class NarrowPhase:
             )
             # Only create mesh-mesh SDF kernel on CUDA (uses __shared__ memory via func_native)
             if is_gpu_device:
-                self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
-                    writer_func,
-                    contact_reduction_funcs=self.contact_reduction_funcs,
-                )
-                # Multi-block kernel for better GPU utilization: uses global reducer as writer
-                # so per-block reduction results can be merged across blocks for the same pair
                 if self.reduce_contacts:
-                    self.mesh_mesh_contacts_multiblock_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
+                    # Dynamic multi-block kernel: writes to global reducer for cross-block merging
+                    self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         write_contact_to_reducer,
                         contact_reduction_funcs=self.contact_reduction_funcs,
                     )
-                    self.blocks_per_pair_mesh_mesh = 4
                 else:
-                    self.mesh_mesh_contacts_multiblock_kernel = None
-                    self.blocks_per_pair_mesh_mesh = 1
+                    # Non-reduce kernel: direct contact write
+                    self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
+                        writer_func,
+                        contact_reduction_funcs=None,
+                    )
             else:
                 self.mesh_mesh_contacts_kernel = None
-                self.mesh_mesh_contacts_multiblock_kernel = None
-                self.blocks_per_pair_mesh_mesh = 1
         else:
             self.mesh_triangle_contacts_kernel = None
             self.mesh_plane_contacts_kernel = None
@@ -1696,12 +1694,16 @@ class NarrowPhase:
         self.total_num_threads = self.block_dim * num_blocks
         self.num_tile_blocks = num_blocks
 
-        # Separate block count for mesh-mesh multi-block launch
-        # Use sm_count * 4 to maximize GPU occupancy with multiple blocks per pair
-        if device_obj.is_cuda and self.blocks_per_pair_mesh_mesh > 1:
+        # Mesh-mesh dynamic block allocation
+        if device_obj.is_cuda and self.reduce_contacts:
             self.num_mesh_mesh_blocks = device_obj.sm_count * 4
+            self.mesh_mesh_target_blocks = self.num_mesh_mesh_blocks
+            # block_offsets: prefix sum for per-pair block counts
+            # Size: max_pairs + 1 (sentinel)
+            self.mesh_mesh_block_offsets = wp.zeros(max_candidate_pairs + 1, dtype=wp.int32, device=device)
         else:
             self.num_mesh_mesh_blocks = self.num_tile_blocks
+            self.mesh_mesh_block_offsets = None
 
     def launch_custom_write(
         self,
@@ -1960,16 +1962,28 @@ class NarrowPhase:
             # Launch mesh-mesh contact processing kernel on CUDA.
             # The kernel supports both SDF-backed and BVH fallback paths via shape_sdf_index.
             if wp.get_device(device).is_cuda:
-                if self.blocks_per_pair_mesh_mesh > 1 and self.mesh_mesh_contacts_multiblock_kernel is not None:
-                    # Multi-block approach: K blocks per pair for better GPU utilization.
-                    # Each block does shared-memory reduction on its triangle subset,
-                    # then writes reduced contacts to the global reducer for cross-block merging.
+                if self.reduce_contacts and self.mesh_mesh_block_offsets is not None:
+                    # Dynamic multi-block with two-level reduction.
+                    # Phase 0: Compute per-pair block counts and prefix sum
+                    wp.launch(
+                        kernel=compute_mesh_mesh_block_offsets,
+                        dim=1,
+                        inputs=[
+                            self.shape_pairs_mesh_mesh,
+                            self.shape_pairs_mesh_mesh_count,
+                            shape_source,
+                            self.mesh_mesh_target_blocks,
+                            self.mesh_mesh_block_offsets,
+                        ],
+                        device=device,
+                    )
+
+                    # Phase 1: Clear global reducer and launch multi-block kernel
                     self.global_contact_reducer.clear_active()
                     reducer_data = self.global_contact_reducer.get_data_struct()
 
-                    # Phase 1: Multi-block kernel writes pre-reduced contacts to global buffer
                     wp.launch_tiled(
-                        kernel=self.mesh_mesh_contacts_multiblock_kernel,
+                        kernel=self.mesh_mesh_contacts_kernel,
                         dim=(self.num_mesh_mesh_blocks,),
                         inputs=[
                             shape_data,
@@ -1983,9 +1997,9 @@ class NarrowPhase:
                             shape_voxel_resolution,
                             self.shape_pairs_mesh_mesh,
                             self.shape_pairs_mesh_mesh_count,
+                            self.mesh_mesh_block_offsets,
                             reducer_data,
                             self.num_mesh_mesh_blocks,
-                            self.blocks_per_pair_mesh_mesh,
                         ],
                         device=device,
                         block_dim=self.tile_size_mesh_mesh,
@@ -2028,29 +2042,25 @@ class NarrowPhase:
                         block_dim=self.block_dim,
                     )
                 else:
-                    # Single-block approach: one block per pair with direct writer
-                    mesh_mesh_inputs = [
-                        shape_data,
-                        shape_transform,
-                        shape_source,
-                        sdf_data,
-                        shape_sdf_index,
-                        shape_gap,
-                        shape_collision_aabb_lower,
-                        shape_collision_aabb_upper,
-                        shape_voxel_resolution,
-                        self.shape_pairs_mesh_mesh,
-                        self.shape_pairs_mesh_mesh_count,
-                        writer_data,
-                        self.num_tile_blocks,
-                    ]
-                    # Reduce kernel has an extra blocks_per_pair parameter
-                    if self.reduce_contacts:
-                        mesh_mesh_inputs.append(1)  # blocks_per_pair=1
+                    # Non-reduce fallback: direct contact write, no dynamic allocation
                     wp.launch_tiled(
                         kernel=self.mesh_mesh_contacts_kernel,
                         dim=(self.num_tile_blocks,),
-                        inputs=mesh_mesh_inputs,
+                        inputs=[
+                            shape_data,
+                            shape_transform,
+                            shape_source,
+                            sdf_data,
+                            shape_sdf_index,
+                            shape_gap,
+                            shape_collision_aabb_lower,
+                            shape_collision_aabb_upper,
+                            shape_voxel_resolution,
+                            self.shape_pairs_mesh_mesh,
+                            self.shape_pairs_mesh_mesh_count,
+                            writer_data,
+                            self.num_tile_blocks,
+                        ],
                         device=device,
                         block_dim=self.tile_size_mesh_mesh,
                     )
