@@ -631,6 +631,7 @@ def find_interesting_triangles(
     contact_distance: float,
     use_bvh_for_sdf: bool,
     inv_sdf_scale: wp.vec3,
+    tri_end: int,
 ):
     """
     Midphase triangle culling for mesh-SDF collision.
@@ -639,19 +640,22 @@ def find_interesting_triangles(
     Triangles are transformed to unscaled SDF space before testing.
 
     Buffer layout: [0..block_dim-1] = triangle indices, [block_dim] = count, [block_dim+1] = progress
+
+    Args:
+        tri_end: Maximum triangle index (exclusive). The function processes triangles starting
+            from the progress counter in the buffer up to this limit.
     """
-    num_tris_indices = wp.mesh_get(mesh_id).indices.shape[0]
     capacity = wp.block_dim()
 
     synchronize()  # Ensure buffer state is consistent before starting
 
-    while buffer[capacity + 1] * 3 < num_tris_indices and buffer[capacity] < capacity:
+    while buffer[capacity + 1] < tri_end and buffer[capacity] < capacity:
         # All threads read the same base index (buffer consistent from previous sync)
         base_tri_idx = buffer[capacity + 1]
         tri_idx = base_tri_idx + thread_id
         add_triangle = False
 
-        if tri_idx * 3 < num_tris_indices:
+        if tri_idx < tri_end:
             # Get vertices in scaled SDF local space, then convert to unscaled
             v0_scaled, v1_scaled, v2_scaled = get_triangle_from_mesh(
                 mesh_id, mesh_scale, mesh_to_sdf_transform, tri_idx
@@ -667,9 +671,21 @@ def find_interesting_triangles(
                 sdf_dist = sample_sdf_using_mesh(
                     sdf_mesh_id, bounding_sphere_center, 1.01 * (bounding_sphere_radius + contact_distance)
                 )
+                add_triangle = sdf_dist <= (bounding_sphere_radius + contact_distance)
             else:
-                sdf_dist = sample_sdf_extrapolated(sdf_data, bounding_sphere_center)
-            add_triangle = sdf_dist <= (bounding_sphere_radius + contact_distance)
+                # Fast AABB pre-filter: skip SDF lookup if bounding sphere is entirely
+                # outside the SDF extent. Uses point-to-AABB distance which is much cheaper
+                # than a volume lookup.
+                culling_radius = bounding_sphere_radius + contact_distance
+                sdf_lower = sdf_data.center - sdf_data.half_extents
+                sdf_upper = sdf_data.center + sdf_data.half_extents
+                clamped = wp.min(wp.max(bounding_sphere_center, sdf_lower), sdf_upper)
+                aabb_dist_sq = wp.length_sq(bounding_sphere_center - clamped)
+                if aabb_dist_sq > culling_radius * culling_radius:
+                    add_triangle = False
+                else:
+                    sdf_dist = sample_sdf_extrapolated(sdf_data, bounding_sphere_center)
+                    add_triangle = sdf_dist <= culling_radius
 
         synchronize()  # Ensure all threads have read base_tri_idx before any writes
         add_to_shared_buffer_atomic(thread_id, add_triangle, tri_idx, buffer)
@@ -799,8 +815,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 # SYNC: Ensure buffer reset is visible to all threads before triangle selection
                 synchronize()
 
-                mesh = wp.mesh_get(mesh_id_tri)
-                num_tris = mesh.indices.shape[0] // 3
+                num_tris = wp.mesh_get(mesh_id_tri).indices.shape[0] // 3
 
                 # Process triangles using collaborative filtering
                 while selected_triangles[tri_capacity + 1] < num_tris:
@@ -816,6 +831,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         contact_threshold_unscaled,
                         use_bvh_for_sdf,
                         inv_sdf_scale,
+                        num_tris,
                     )
 
                     # Process triangles from buffer
@@ -908,12 +924,18 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         shape_pairs_mesh_mesh_count: wp.array(dtype=int),
         writer_data: Any,
         total_num_blocks: int,
+        blocks_per_pair: int,
     ):
         block_id, t = wp.tid()
         pair_count = shape_pairs_mesh_mesh_count[0]
+        total_combos = pair_count * blocks_per_pair
 
-        # Grid stride loop over pairs - each block processes multiple pairs if pair_count > total_num_blocks
-        for pair_idx in range(block_id, pair_count, total_num_blocks):
+        # Grid stride loop over (pair, sub-block) combos for multi-block load balancing.
+        # Each combo maps to one pair and a sub-range of its triangles.
+        # When blocks_per_pair=1, this is equivalent to the original 1-block-per-pair behavior.
+        for combo_idx in range(block_id, total_combos, total_num_blocks):
+            pair_idx = combo_idx // blocks_per_pair
+            block_in_pair = combo_idx - pair_idx * blocks_per_pair
             pair = shape_pairs_mesh_mesh[pair_idx]
 
             # Sum margins for contact detection (needed for all modes)
@@ -1013,18 +1035,21 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     dtype=wp.int32,
                 )
 
-                # Reset buffer for this mode
+                # Compute triangle range for this sub-block
+                num_tris = wp.mesh_get(mesh_id_tri).indices.shape[0] // 3
+                chunk_size = (num_tris + blocks_per_pair - 1) // blocks_per_pair
+                tri_start = block_in_pair * chunk_size
+                tri_end = wp.min(tri_start + chunk_size, num_tris)
+
+                # Reset buffer for this mode, starting progress at this block's range
                 if t == 0:
                     selected_triangles[tri_capacity] = 0  # count
-                    selected_triangles[tri_capacity + 1] = 0  # progress
+                    selected_triangles[tri_capacity + 1] = tri_start  # progress starts at block's range
                 # SYNC: Ensure buffer reset is visible to all threads before triangle selection
                 synchronize()
 
-                mesh = wp.mesh_get(mesh_id_tri)
-                num_tris = mesh.indices.shape[0] // 3
-
                 # Process triangles using collaborative filtering
-                while selected_triangles[tri_capacity + 1] < num_tris:
+                while selected_triangles[tri_capacity + 1] < tri_end:
                     # Fill buffer with interesting triangles
                     find_interesting_triangles(
                         t,
@@ -1037,6 +1062,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         contact_threshold_unscaled,
                         use_bvh_for_sdf,
                         inv_sdf_scale,
+                        tri_end,
                     )
 
                     # Process triangles from buffer

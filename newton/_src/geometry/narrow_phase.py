@@ -56,6 +56,7 @@ from ..geometry.contact_reduction_global import (
     create_export_reduced_contacts_kernel,
     mesh_triangle_contacts_to_reducer_kernel,
     reduce_buffered_contacts_kernel,
+    write_contact_to_reducer,
 )
 from ..geometry.flags import ShapeFlags
 from ..geometry.sdf_contact import create_narrow_phase_process_mesh_mesh_contacts_kernel
@@ -1579,8 +1580,21 @@ class NarrowPhase:
                     writer_func,
                     contact_reduction_funcs=self.contact_reduction_funcs,
                 )
+                # Multi-block kernel for better GPU utilization: uses global reducer as writer
+                # so per-block reduction results can be merged across blocks for the same pair
+                if self.reduce_contacts:
+                    self.mesh_mesh_contacts_multiblock_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
+                        write_contact_to_reducer,
+                        contact_reduction_funcs=self.contact_reduction_funcs,
+                    )
+                    self.blocks_per_pair_mesh_mesh = 4
+                else:
+                    self.mesh_mesh_contacts_multiblock_kernel = None
+                    self.blocks_per_pair_mesh_mesh = 1
             else:
                 self.mesh_mesh_contacts_kernel = None
+                self.mesh_mesh_contacts_multiblock_kernel = None
+                self.blocks_per_pair_mesh_mesh = 1
         else:
             self.mesh_triangle_contacts_kernel = None
             self.mesh_plane_contacts_kernel = None
@@ -1681,6 +1695,13 @@ class NarrowPhase:
         num_blocks = max(min_blocks, min(candidate_blocks, max_blocks_limit))
         self.total_num_threads = self.block_dim * num_blocks
         self.num_tile_blocks = num_blocks
+
+        # Separate block count for mesh-mesh multi-block launch
+        # Use sm_count * 4 to maximize GPU occupancy with multiple blocks per pair
+        if device_obj.is_cuda and self.blocks_per_pair_mesh_mesh > 1:
+            self.num_mesh_mesh_blocks = device_obj.sm_count * 4
+        else:
+            self.num_mesh_mesh_blocks = self.num_tile_blocks
 
     def launch_custom_write(
         self,
@@ -1939,10 +1960,76 @@ class NarrowPhase:
             # Launch mesh-mesh contact processing kernel on CUDA.
             # The kernel supports both SDF-backed and BVH fallback paths via shape_sdf_index.
             if wp.get_device(device).is_cuda:
-                wp.launch_tiled(
-                    kernel=self.mesh_mesh_contacts_kernel,
-                    dim=(self.num_tile_blocks,),
-                    inputs=[
+                if self.blocks_per_pair_mesh_mesh > 1 and self.mesh_mesh_contacts_multiblock_kernel is not None:
+                    # Multi-block approach: K blocks per pair for better GPU utilization.
+                    # Each block does shared-memory reduction on its triangle subset,
+                    # then writes reduced contacts to the global reducer for cross-block merging.
+                    self.global_contact_reducer.clear_active()
+                    reducer_data = self.global_contact_reducer.get_data_struct()
+
+                    # Phase 1: Multi-block kernel writes pre-reduced contacts to global buffer
+                    wp.launch_tiled(
+                        kernel=self.mesh_mesh_contacts_multiblock_kernel,
+                        dim=(self.num_mesh_mesh_blocks,),
+                        inputs=[
+                            shape_data,
+                            shape_transform,
+                            shape_source,
+                            sdf_data,
+                            shape_sdf_index,
+                            shape_gap,
+                            shape_collision_aabb_lower,
+                            shape_collision_aabb_upper,
+                            shape_voxel_resolution,
+                            self.shape_pairs_mesh_mesh,
+                            self.shape_pairs_mesh_mesh_count,
+                            reducer_data,
+                            self.num_mesh_mesh_blocks,
+                            self.blocks_per_pair_mesh_mesh,
+                        ],
+                        device=device,
+                        block_dim=self.tile_size_mesh_mesh,
+                    )
+
+                    # Phase 2: Reduce buffered contacts into hashtable
+                    wp.launch(
+                        kernel=reduce_buffered_contacts_kernel,
+                        dim=self.total_num_threads,
+                        inputs=[
+                            reducer_data,
+                            shape_transform,
+                            shape_collision_aabb_lower,
+                            shape_collision_aabb_upper,
+                            shape_voxel_resolution,
+                            self.total_num_threads,
+                        ],
+                        device=device,
+                        block_dim=self.block_dim,
+                    )
+
+                    # Phase 3: Export reduced contacts to final writer
+                    wp.launch(
+                        kernel=self.export_reduced_contacts_kernel,
+                        dim=self.total_num_threads,
+                        inputs=[
+                            self.global_contact_reducer.hashtable.keys,
+                            self.global_contact_reducer.ht_values,
+                            self.global_contact_reducer.hashtable.active_slots,
+                            self.global_contact_reducer.position_depth,
+                            self.global_contact_reducer.normal,
+                            self.global_contact_reducer.shape_pairs,
+                            shape_types,
+                            shape_data,
+                            shape_gap,
+                            writer_data,
+                            self.total_num_threads,
+                        ],
+                        device=device,
+                        block_dim=self.block_dim,
+                    )
+                else:
+                    # Single-block approach: one block per pair with direct writer
+                    mesh_mesh_inputs = [
                         shape_data,
                         shape_transform,
                         shape_source,
@@ -1956,10 +2043,17 @@ class NarrowPhase:
                         self.shape_pairs_mesh_mesh_count,
                         writer_data,
                         self.num_tile_blocks,
-                    ],
-                    device=device,
-                    block_dim=self.tile_size_mesh_mesh,
-                )
+                    ]
+                    # Reduce kernel has an extra blocks_per_pair parameter
+                    if self.reduce_contacts:
+                        mesh_mesh_inputs.append(1)  # blocks_per_pair=1
+                    wp.launch_tiled(
+                        kernel=self.mesh_mesh_contacts_kernel,
+                        dim=(self.num_tile_blocks,),
+                        inputs=mesh_mesh_inputs,
+                        device=device,
+                        block_dim=self.tile_size_mesh_mesh,
+                    )
 
         # Stage: Heightfield collision processing
         if self.has_heightfields and shape_heightfield_data is not None and heightfield_elevation_data is not None:

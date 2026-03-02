@@ -346,7 +346,9 @@ class Example:
         if self.nut_motion_check_period_dt <= 0.0:
             return
 
-        rot_speed_deg_s = np.degrees((self.nut_cumulative_yaw - self.nut_last_check_angle) / self.nut_motion_check_period_dt)
+        rot_speed_deg_s = np.degrees(
+            (self.nut_cumulative_yaw - self.nut_last_check_angle) / self.nut_motion_check_period_dt
+        )
         z_speed_m_s = (self.nut_current_z - self.nut_last_check_z) / self.nut_motion_check_period_dt
 
         expected_rot_speed = float(np.median(rot_speed_deg_s))
