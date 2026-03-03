@@ -401,7 +401,7 @@ Shape compatibility summary (rigid + soft particle-shape):
      - ✅
    * - **HField**
      - [#static-static]_
-     - [#hfield-hfield]_
+     - [#static-static]_
      - ✅
      - ✅
      - ✅
@@ -410,7 +410,7 @@ Shape compatibility summary (rigid + soft particle-shape):
      - ✅
      - ✅
      - ✅⚠️
-     - ✅⚠️
+     - ✅
      - ✅
    * - **Sphere**
      - ✅
@@ -548,9 +548,6 @@ often be improved by attaching a precomputed SDF to the mesh (``mesh.build_sdf(.
 
 .. [#static-static] Plane and heightfield shapes are static (world-attached) in Newton.
    Static-static pairs are filtered from rigid collision generation.
-
-.. [#hfield-hfield] Heightfield-vs-heightfield rigid collision is currently not supported
-   and is skipped.
 
 .. [#particle-particle] Particle-particle interactions are handled by the particle/soft-body
    solver self-collision path, not by the shape compatibility pipeline in this table.
