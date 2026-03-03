@@ -423,6 +423,37 @@ def create_shared_memory_pointer_block_dim_func(
     return get_shared_memory_pointer
 
 
+def create_shared_memory_pointer_block_dim_mul_func(
+    mul: int,
+):
+    """Create a shared memory pointer whose size scales with the block dimension.
+
+    Allocates ``WP_TILE_BLOCK_DIM * mul`` int32 elements of shared memory.
+
+    Args:
+        mul: Multiplier applied to WP_TILE_BLOCK_DIM.
+
+    Returns:
+        A Warp function that returns a pointer to shared memory
+    """
+
+    snippet = f"""
+#if defined(__CUDA_ARCH__)
+    constexpr int array_size = WP_TILE_BLOCK_DIM * {mul};
+    __shared__ int s[array_size];
+    auto ptr = &s[0];
+    return (uint64_t)ptr;
+#else
+    return (uint64_t)0;
+#endif
+    """
+
+    @wp.func_native(snippet)
+    def get_shared_memory_pointer() -> wp.uint64: ...
+
+    return get_shared_memory_pointer
+
+
 class ContactReductionFunctions:
     """Reduces many candidate contacts to a representative subset using GPU shared memory.
 
