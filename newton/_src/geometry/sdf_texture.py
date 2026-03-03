@@ -69,7 +69,7 @@ class TextureSDFData:
     # Grid parameters
     sdf_box_lower: wp.vec3
     sdf_box_upper: wp.vec3
-    inv_sdf_dx: float
+    inv_sdf_dx: wp.vec3
     coarse_size_x: int
     coarse_size_y: int
     coarse_size_z: int
@@ -77,6 +77,16 @@ class TextureSDFData:
     subgrid_size_f: float  # float(subgrid_size) - avoids int->float conversion
     subgrid_samples_f: float  # float(subgrid_size + 1) - samples per subgrid dimension
     fine_to_coarse: float
+
+    # Spatial metadata (mirrors SDFData.center / half_extents)
+    center: wp.vec3
+    half_extents: wp.vec3
+    voxel_size: wp.vec3
+    voxel_radius: wp.float32
+
+    # Narrow-band half-width used during construction [m].
+    # SDF values with |val| > narrow_band_width are outside the accurate region.
+    narrow_band_width: wp.float32
 
     # Quantization parameters for subgrid values
     subgrids_min_sdf_value: float
@@ -398,6 +408,24 @@ def _populate_subgrid_texture_uint8_kernel(
 
 
 # ============================================================================
+# Volume Sampling Kernel (for NanoVDB → texture conversion)
+# ============================================================================
+
+
+@wp.kernel
+def _sample_volume_at_positions_kernel(
+    volume: wp.uint64,
+    positions: wp.array(dtype=wp.vec3),
+    out_values: wp.array(dtype=float),
+):
+    """Sample NanoVDB volume at world-space positions."""
+    tid = wp.tid()
+    pos = positions[tid]
+    idx = wp.volume_world_to_index(volume, pos)
+    out_values[tid] = wp.volume_sample_f(volume, idx, wp.Volume.LINEAR)
+
+
+# ============================================================================
 # Texture Sampling Functions (wp.func, used by collision kernels)
 # ============================================================================
 
@@ -459,6 +487,33 @@ def _sample_texture_at_cell(
 
 
 @wp.func
+def texture_has_subgrid(
+    sdf: TextureSDFData,
+    local_pos: wp.vec3,
+) -> bool:
+    """Return True when *local_pos* maps to a subgrid (narrow-band) cell.
+
+    Points that fall in coarse-only cells (or outside the SDF box) return
+    False.  This mirrors the NanoVDB behaviour where un-allocated tiles
+    return MAXVAL and are treated as invalid by downstream consumers.
+    """
+    clamped = wp.vec3(
+        wp.clamp(local_pos[0], sdf.sdf_box_lower[0], sdf.sdf_box_upper[0]),
+        wp.clamp(local_pos[1], sdf.sdf_box_lower[1], sdf.sdf_box_upper[1]),
+        wp.clamp(local_pos[2], sdf.sdf_box_lower[2], sdf.sdf_box_upper[2]),
+    )
+    if wp.length(local_pos - clamped) > 0.0:
+        return False
+    f = wp.cw_mul(clamped - sdf.sdf_box_lower, sdf.inv_sdf_dx)
+    x_base = wp.clamp(int(f[0] * sdf.fine_to_coarse), 0, sdf.coarse_size_x - 1)
+    y_base = wp.clamp(int(f[1] * sdf.fine_to_coarse), 0, sdf.coarse_size_y - 1)
+    z_base = wp.clamp(int(f[2] * sdf.fine_to_coarse), 0, sdf.coarse_size_z - 1)
+    slot_idx = (z_base * sdf.coarse_size_y + y_base) * sdf.coarse_size_x + x_base
+    start_slot = sdf.subgrid_start_slots[slot_idx]
+    return start_slot != wp.uint32(0xFFFFFFFF)
+
+
+@wp.func
 def texture_sample_sdf(
     sdf: TextureSDFData,
     local_pos: wp.vec3,
@@ -479,7 +534,7 @@ def texture_sample_sdf(
     )
     diff_mag = wp.length(local_pos - clamped)
 
-    f = (clamped - sdf.sdf_box_lower) * sdf.inv_sdf_dx
+    f = wp.cw_mul(clamped - sdf.sdf_box_lower, sdf.inv_sdf_dx)
 
     x_base = wp.clamp(int(f[0] * sdf.fine_to_coarse), 0, sdf.coarse_size_x - 1)
     y_base = wp.clamp(int(f[1] * sdf.fine_to_coarse), 0, sdf.coarse_size_y - 1)
@@ -521,7 +576,7 @@ def texture_sample_sdf_grad(
     diff_mag = wp.length(diff)
 
     # Convert to fine grid coordinates
-    f = (clamped - sdf.sdf_box_lower) * sdf.inv_sdf_dx
+    f = wp.cw_mul(clamped - sdf.sdf_box_lower, sdf.inv_sdf_dx)
 
     # Fine grid vertex count per dimension (vertex-centered: subgrid_size+1 per coarse cell)
     fine_verts_x = float(sdf.coarse_size_x) * sdf.subgrid_size_f
@@ -634,7 +689,7 @@ def texture_sample_sdf_grad(
     gz = omtx * omty * (v001 - v000) + tx * omty * (v101 - v100) + omtx * ty * (v011 - v010) + tx * ty * (v111 - v110)
 
     # Gradient is in grid coordinates; convert to world coordinates
-    grad = wp.vec3(gx, gy, gz) * sdf.inv_sdf_dx
+    grad = wp.cw_mul(wp.vec3(gx, gy, gz), sdf.inv_sdf_dx)
 
     # Handle extrapolation for points outside the SDF box
     if diff_mag > 0.0:
@@ -685,9 +740,16 @@ def build_sparse_sdf_from_mesh(
     Returns:
         Dictionary with all sparse SDF data.
     """
-    w = (grid_size_x - 1) // subgrid_size
-    h = (grid_size_y - 1) // subgrid_size
-    d = (grid_size_z - 1) // subgrid_size
+    # Ceiling division ensures the subgrid grid fully covers the fine grid.
+    # Floor division can truncate the domain when the number of fine cells
+    # is not a multiple of subgrid_size, leaving narrow-band regions without
+    # subgrid coverage.
+    num_cells_x = grid_size_x - 1
+    num_cells_y = grid_size_y - 1
+    num_cells_z = grid_size_z - 1
+    w = (num_cells_x + subgrid_size - 1) // subgrid_size
+    h = (num_cells_y + subgrid_size - 1) // subgrid_size
+    d = (num_cells_z + subgrid_size - 1) // subgrid_size
     total_subgrids = w * h * d
 
     min_corner_wp = wp.vec3(float(min_corner[0]), float(min_corner[1]), float(min_corner[2]))
@@ -881,6 +943,11 @@ def build_sparse_sdf_from_mesh(
 
     background_sdf_np = background_sdf.numpy().reshape((bg_size_z, bg_size_y, bg_size_x))
 
+    # Padded max covers the full ceiling-divided subgrid grid.
+    padded_max = min_corner + np.array([w, h, d], dtype=float) * subgrid_size * cell_size
+    center = 0.5 * (min_corner + padded_max)
+    half_extents = 0.5 * (padded_max - min_corner)
+
     return {
         "coarse_sdf": background_sdf_np.astype(np.float32),
         "subgrid_data": subgrid_texture_data.astype(np.float32),
@@ -889,12 +956,16 @@ def build_sparse_sdf_from_mesh(
         "subgrid_tex_size": tex_size,
         "num_subgrids": num_required,
         "min_extents": min_corner,
-        "max_extents": max_corner,
+        "max_extents": padded_max,
         "cell_size": cell_size,
         "subgrid_size": subgrid_size,
         "quantization_mode": quantization_mode,
         "subgrids_min_sdf_value": final_sdf_min,
         "subgrids_sdf_value_range": final_sdf_range,
+        "center": center,
+        "half_extents": half_extents,
+        "subgrid_required": required_np,
+        "narrow_band_thickness": narrow_band_thickness,
     }
 
 
@@ -930,26 +1001,21 @@ def create_sparse_sdf_textures(
 
     subgrid_slots = wp.array(sparse_data["subgrid_start_slots"], dtype=wp.uint32, device=device)
 
-    avg_spacing = float(np.mean(sparse_data["cell_size"]))
+    cell_size = sparse_data["cell_size"]
     coarse_x = sparse_data["coarse_dims"][0]
     coarse_y = sparse_data["coarse_dims"][1]
     coarse_z = sparse_data["coarse_dims"][2]
+
+    min_ext = sparse_data["min_extents"]
+    max_ext = sparse_data["max_extents"]
 
     sdf_params = TextureSDFData()
     sdf_params.coarse_texture = coarse_tex
     sdf_params.subgrid_texture = subgrid_tex
     sdf_params.subgrid_start_slots = subgrid_slots
-    sdf_params.sdf_box_lower = wp.vec3(
-        float(sparse_data["min_extents"][0]),
-        float(sparse_data["min_extents"][1]),
-        float(sparse_data["min_extents"][2]),
-    )
-    sdf_params.sdf_box_upper = wp.vec3(
-        float(sparse_data["max_extents"][0]),
-        float(sparse_data["max_extents"][1]),
-        float(sparse_data["max_extents"][2]),
-    )
-    sdf_params.inv_sdf_dx = 1.0 / avg_spacing
+    sdf_params.sdf_box_lower = wp.vec3(float(min_ext[0]), float(min_ext[1]), float(min_ext[2]))
+    sdf_params.sdf_box_upper = wp.vec3(float(max_ext[0]), float(max_ext[1]), float(max_ext[2]))
+    sdf_params.inv_sdf_dx = wp.vec3(1.0 / float(cell_size[0]), 1.0 / float(cell_size[1]), 1.0 / float(cell_size[2]))
     sdf_params.coarse_size_x = coarse_x
     sdf_params.coarse_size_y = coarse_y
     sdf_params.coarse_size_z = coarse_z
@@ -957,6 +1023,16 @@ def create_sparse_sdf_textures(
     sdf_params.subgrid_size_f = float(sparse_data["subgrid_size"])
     sdf_params.subgrid_samples_f = float(sparse_data["subgrid_size"] + 1)
     sdf_params.fine_to_coarse = 1.0 / sparse_data["subgrid_size"]
+
+    # Spatial metadata (mirrors SDFData fields)
+    center = 0.5 * (min_ext + max_ext)
+    half_extents = 0.5 * (max_ext - min_ext)
+    sdf_params.center = wp.vec3(float(center[0]), float(center[1]), float(center[2]))
+    sdf_params.half_extents = wp.vec3(float(half_extents[0]), float(half_extents[1]), float(half_extents[2]))
+    sdf_params.voxel_size = wp.vec3(float(cell_size[0]), float(cell_size[1]), float(cell_size[2]))
+    sdf_params.voxel_radius = float(0.5 * np.linalg.norm(cell_size))
+    sdf_params.narrow_band_width = float(sparse_data.get("narrow_band_thickness", 0.0))
+
     sdf_params.subgrids_min_sdf_value = sparse_data["subgrids_min_sdf_value"]
     sdf_params.subgrids_sdf_value_range = sparse_data["subgrids_sdf_value_range"]
     sdf_params.scale_baked = False
@@ -1034,7 +1110,296 @@ def create_texture_sdf_from_mesh(
     sdf_params, coarse_tex, subgrid_tex = create_sparse_sdf_textures(sparse_data, device)
     sdf_params.scale_baked = scale_baked
 
+    block_coords = block_coords_from_subgrid_required(
+        sparse_data["subgrid_required"],
+        sparse_data["coarse_dims"],
+        sparse_data["subgrid_size"],
+    )
+
+    return sdf_params, coarse_tex, subgrid_tex, block_coords
+
+
+def create_texture_sdf_from_volume(
+    sparse_volume: wp.Volume,
+    coarse_volume: wp.Volume,
+    *,
+    min_ext: np.ndarray,
+    max_ext: np.ndarray,
+    voxel_size: np.ndarray,
+    narrow_band_range: tuple[float, float] = (-0.1, 0.1),
+    subgrid_size: int = 8,
+    scale_baked: bool = False,
+    device: str = "cuda",
+) -> tuple[TextureSDFData, wp.Texture3D, wp.Texture3D]:
+    """Create texture SDF from existing NanoVDB sparse and coarse volumes.
+
+    Samples the NanoVDB volumes at each texel position to build the texture SDF.
+    This is used during construction for primitive shapes that already have NanoVDB
+    volumes but need texture SDFs for the collision pipeline.
+
+    Args:
+        sparse_volume: NanoVDB sparse volume with SDF values.
+        coarse_volume: NanoVDB coarse (background) volume with SDF values.
+        min_ext: lower corner of the SDF domain [m].
+        max_ext: upper corner of the SDF domain [m].
+        voxel_size: fine grid cell size per axis [m].
+        narrow_band_range: signed narrow-band distance range [m] as ``(inner, outer)``.
+        subgrid_size: cells per subgrid.
+        scale_baked: whether shape scale was baked into the SDF.
+        device: Warp device string.
+
+    Returns:
+        Tuple of ``(texture_sdf, coarse_texture, subgrid_texture)``.
+        Caller must keep texture references alive to prevent GC.
+    """
+    ext = max_ext - min_ext
+    # Compute fine grid dimensions from extents and voxel size.
+    # Use ceiling division so the coarse grid fully covers the NanoVDB domain.
+    cells_per_axis = np.round(ext / voxel_size).astype(int)
+    w = int((cells_per_axis[0] + subgrid_size - 1) // subgrid_size)
+    h = int((cells_per_axis[1] + subgrid_size - 1) // subgrid_size)
+    d = int((cells_per_axis[2] + subgrid_size - 1) // subgrid_size)
+    total_subgrids = w * h * d
+
+    # Padded grid covers w*subgrid_size cells (+ 1 vertex) per axis.
+    # Keep cell_size = voxel_size so voxel indices map 1:1.
+    cell_size = voxel_size.copy()
+    padded_max = min_ext + np.array([w, h, d], dtype=float) * subgrid_size * cell_size
+
+    # Build background/coarse SDF by sampling coarse volume at subgrid corners
+    bg_size_x = w + 1
+    bg_size_y = h + 1
+    bg_size_z = d + 1
+    total_bg = bg_size_x * bg_size_y * bg_size_z
+
+    # Sample coarse grid from the coarse NanoVDB volume using a GPU kernel
+    bg_positions = np.zeros((total_bg, 3), dtype=np.float32)
+    for idx in range(total_bg):
+        z_block = idx // (bg_size_x * bg_size_y)
+        rem = idx - z_block * bg_size_x * bg_size_y
+        y_block = rem // bg_size_x
+        x_block = rem - y_block * bg_size_x
+        bg_positions[idx] = min_ext + np.array([
+            float(x_block * subgrid_size) * cell_size[0],
+            float(y_block * subgrid_size) * cell_size[1],
+            float(z_block * subgrid_size) * cell_size[2],
+        ])
+
+    bg_positions_gpu = wp.array(bg_positions, dtype=wp.vec3, device=device)
+    bg_sdf_gpu = wp.zeros(total_bg, dtype=float, device=device)
+    wp.launch(
+        _sample_volume_at_positions_kernel,
+        dim=total_bg,
+        inputs=[coarse_volume.id, bg_positions_gpu, bg_sdf_gpu],
+        device=device,
+    )
+
+    # Check subgrid occupancy by sampling sparse volume at subgrid centers
+    narrow_band_thickness = max(abs(narrow_band_range[0]), abs(narrow_band_range[1]))
+    half_subgrid = subgrid_size * 0.5 * cell_size
+    subgrid_radius = float(np.linalg.norm(half_subgrid))
+
+    subgrid_centers = np.empty((total_subgrids, 3), dtype=np.float32)
+    for idx in range(total_subgrids):
+        bz = idx // (w * h)
+        rem = idx - bz * w * h
+        by = rem // w
+        bx = rem - by * w
+        subgrid_centers[idx, 0] = (bx * subgrid_size + subgrid_size * 0.5) * cell_size[0] + min_ext[0]
+        subgrid_centers[idx, 1] = (by * subgrid_size + subgrid_size * 0.5) * cell_size[1] + min_ext[1]
+        subgrid_centers[idx, 2] = (bz * subgrid_size + subgrid_size * 0.5) * cell_size[2] + min_ext[2]
+
+    center_positions_gpu = wp.array(subgrid_centers, dtype=wp.vec3, device=device)
+    center_sdf_gpu = wp.zeros(total_subgrids, dtype=float, device=device)
+    wp.launch(
+        _sample_volume_at_positions_kernel,
+        dim=total_subgrids,
+        inputs=[sparse_volume.id, center_positions_gpu, center_sdf_gpu],
+        device=device,
+    )
+    wp.synchronize()
+
+    center_sdf_np = center_sdf_gpu.numpy()
+    threshold_inner = -narrow_band_thickness - subgrid_radius
+    threshold_outer = narrow_band_thickness + subgrid_radius
+
+    subgrid_required = np.zeros(total_subgrids, dtype=np.int32)
+    for idx in range(total_subgrids):
+        val = center_sdf_np[idx]
+        if val > 0:
+            subgrid_required[idx] = 1 if val < threshold_outer else 0
+        else:
+            subgrid_required[idx] = 1 if val > threshold_inner else 0
+
+    num_required = int(np.sum(subgrid_required))
+
+    # Conservative quantization bounds from narrow band range
+    global_sdf_min = threshold_inner
+    global_sdf_max = threshold_outer
+    sdf_range = global_sdf_max - global_sdf_min
+    if sdf_range < 1e-10:
+        sdf_range = 1.0
+
+    if num_required == 0:
+        subgrid_start_slots = np.full(total_subgrids, 0xFFFFFFFF, dtype=np.uint32)
+        subgrid_texture_data = np.zeros((1, 1, 1), dtype=np.float32)
+        tex_size = 1
+    else:
+        cubic_root = num_required ** (1.0 / 3.0)
+        tex_blocks_per_dim = max(1, int(np.ceil(cubic_root)))
+        while tex_blocks_per_dim**3 < num_required:
+            tex_blocks_per_dim += 1
+
+        samples_per_dim = subgrid_size + 1
+        tex_size = tex_blocks_per_dim * samples_per_dim
+
+        # Assign sequential addresses to required subgrids
+        subgrid_start_slots = np.full(total_subgrids, 0xFFFFFFFF, dtype=np.uint32)
+        address = 0
+        for idx in range(total_subgrids):
+            if subgrid_required[idx]:
+                addr_z = address // (tex_blocks_per_dim * tex_blocks_per_dim)
+                addr_rem = address - addr_z * tex_blocks_per_dim * tex_blocks_per_dim
+                addr_y = addr_rem // tex_blocks_per_dim
+                addr_x = addr_rem - addr_y * tex_blocks_per_dim
+                subgrid_start_slots[idx] = int(addr_x) | (int(addr_y) << 10) | (int(addr_z) << 20)
+                address += 1
+
+        # Build positions array for all subgrid texels, then sample volume
+        total_texel_work = num_required * samples_per_dim**3
+        texel_positions = np.empty((total_texel_work, 3), dtype=np.float32)
+        texel_tex_indices = np.empty(total_texel_work, dtype=np.int32)
+
+        work_idx = 0
+        subgrid_texture_data = np.zeros((tex_size, tex_size, tex_size), dtype=np.float32)
+        for sg_idx in range(total_subgrids):
+            if not subgrid_required[sg_idx]:
+                continue
+            sg_z = sg_idx // (w * h)
+            sg_rem = sg_idx - sg_z * w * h
+            sg_y = sg_rem // w
+            sg_x = sg_rem - sg_y * w
+
+            slot = subgrid_start_slots[sg_idx]
+            addr_x = int(slot & 0x3FF)
+            addr_y = int((slot >> 10) & 0x3FF)
+            addr_z = int((slot >> 20) & 0x3FF)
+
+            for lz in range(samples_per_dim):
+                for ly in range(samples_per_dim):
+                    for lx in range(samples_per_dim):
+                        gx = sg_x * subgrid_size + lx
+                        gy = sg_y * subgrid_size + ly
+                        gz = sg_z * subgrid_size + lz
+                        pos = min_ext + np.array([
+                            float(gx) * cell_size[0],
+                            float(gy) * cell_size[1],
+                            float(gz) * cell_size[2],
+                        ])
+                        tex_x = addr_x * samples_per_dim + lx
+                        tex_y = addr_y * samples_per_dim + ly
+                        tex_z = addr_z * samples_per_dim + lz
+                        texel_positions[work_idx] = pos
+                        texel_tex_indices[work_idx] = tex_z * tex_size * tex_size + tex_y * tex_size + tex_x
+                        work_idx += 1
+
+        # Sample all texel positions from the sparse volume on GPU
+        texel_positions_gpu = wp.array(texel_positions, dtype=wp.vec3, device=device)
+        texel_sdf_gpu = wp.zeros(total_texel_work, dtype=float, device=device)
+        wp.launch(
+            _sample_volume_at_positions_kernel,
+            dim=total_texel_work,
+            inputs=[sparse_volume.id, texel_positions_gpu, texel_sdf_gpu],
+            device=device,
+        )
+        wp.synchronize()
+
+        texel_sdf_np = texel_sdf_gpu.numpy()
+
+        # Replace background/corrupted values from sparse volume with
+        # coarse volume samples.  The NanoVDB sparse volume uses 1e18 as
+        # background for unallocated tiles; linear interpolation near tile
+        # boundaries blends this background into texels, corrupting them.
+        bg_threshold = threshold_outer * 2.0
+        outlier_mask = (texel_sdf_np > bg_threshold) | (texel_sdf_np < -bg_threshold)
+        if np.any(outlier_mask):
+            outlier_positions = texel_positions[outlier_mask]
+            outlier_gpu = wp.array(outlier_positions, dtype=wp.vec3, device=device)
+            outlier_sdf_gpu = wp.zeros(len(outlier_positions), dtype=float, device=device)
+            wp.launch(
+                _sample_volume_at_positions_kernel,
+                dim=len(outlier_positions),
+                inputs=[coarse_volume.id, outlier_gpu, outlier_sdf_gpu],
+                device=device,
+            )
+            wp.synchronize()
+            texel_sdf_np[outlier_mask] = outlier_sdf_gpu.numpy()
+        flat_texture = subgrid_texture_data.ravel()
+        for i in range(total_texel_work):
+            flat_texture[texel_tex_indices[i]] = texel_sdf_np[i]
+        subgrid_texture_data = flat_texture.reshape((tex_size, tex_size, tex_size))
+
+    wp.synchronize()
+    background_sdf_np = bg_sdf_gpu.numpy().reshape((bg_size_z, bg_size_y, bg_size_x))
+
+    # Use the padded extent so the texture grid exactly covers the coarse blocks.
+    center = 0.5 * (min_ext + padded_max)
+    half_extents = 0.5 * (padded_max - min_ext)
+
+    sparse_data = {
+        "coarse_sdf": background_sdf_np.astype(np.float32),
+        "subgrid_data": subgrid_texture_data.astype(np.float32),
+        "subgrid_start_slots": subgrid_start_slots,
+        "coarse_dims": (w, h, d),
+        "subgrid_tex_size": tex_size,
+        "num_subgrids": num_required,
+        "min_extents": min_ext,
+        "max_extents": padded_max,
+        "cell_size": cell_size,
+        "subgrid_size": subgrid_size,
+        "quantization_mode": QuantizationMode.FLOAT32,
+        "subgrids_min_sdf_value": 0.0,
+        "subgrids_sdf_value_range": 1.0,
+        "center": center,
+        "half_extents": half_extents,
+        "subgrid_required": subgrid_required,
+        "narrow_band_thickness": narrow_band_thickness,
+    }
+
+    sdf_params, coarse_tex, subgrid_tex = create_sparse_sdf_textures(sparse_data, device)
+    sdf_params.scale_baked = scale_baked
+
     return sdf_params, coarse_tex, subgrid_tex
+
+
+def block_coords_from_subgrid_required(
+    subgrid_required: np.ndarray,
+    coarse_dims: tuple[int, int, int],
+    subgrid_size: int,
+) -> list:
+    """Derive SDF block coordinates from texture subgrid occupancy.
+
+    This converts the texture subgrid occupancy array into voxel-space block
+    coordinates compatible with the hydroelastic broadphase pipeline.
+
+    Args:
+        subgrid_required: 1D array of occupancy flags for each subgrid.
+        coarse_dims: tuple (w, h, d) number of subgrids per axis.
+        subgrid_size: cells per subgrid.
+
+    Returns:
+        List of ``wp.vec3us`` block coordinates for occupied subgrids.
+    """
+    w, h, d = coarse_dims
+    coords = []
+    for idx in range(len(subgrid_required)):
+        if subgrid_required[idx]:
+            bz = idx // (w * h)
+            rem = idx - bz * w * h
+            by = rem // w
+            bx = rem - by * w
+            coords.append(wp.vec3us(bx * subgrid_size, by * subgrid_size, bz * subgrid_size))
+    return coords
 
 
 def create_empty_texture_sdf_data() -> TextureSDFData:
@@ -1055,10 +1420,224 @@ def create_empty_texture_sdf_data() -> TextureSDFData:
     sdf.subgrid_size_f = 0.0
     sdf.subgrid_samples_f = 0.0
     sdf.fine_to_coarse = 0.0
-    sdf.inv_sdf_dx = 0.0
+    sdf.inv_sdf_dx = wp.vec3(0.0, 0.0, 0.0)
     sdf.sdf_box_lower = wp.vec3(0.0, 0.0, 0.0)
     sdf.sdf_box_upper = wp.vec3(0.0, 0.0, 0.0)
+    sdf.center = wp.vec3(0.0, 0.0, 0.0)
+    sdf.half_extents = wp.vec3(0.0, 0.0, 0.0)
+    sdf.voxel_size = wp.vec3(0.0, 0.0, 0.0)
+    sdf.voxel_radius = 0.0
+    sdf.narrow_band_width = 0.0
     sdf.subgrids_min_sdf_value = 0.0
     sdf.subgrids_sdf_value_range = 1.0
     sdf.scale_baked = False
     return sdf
+
+
+# ============================================================================
+# Isomesh extraction from texture SDF (marching cubes)
+# ============================================================================
+
+vec8f = wp.types.vector(length=8, dtype=wp.float32)
+
+
+@wp.kernel(enable_backward=False)
+def _count_isomesh_faces_texture_kernel(
+    sdf_array: wp.array(dtype=TextureSDFData),
+    active_coarse_cells: wp.array(dtype=wp.vec3i),
+    subgrid_size: int,
+    tri_range_table: wp.array(dtype=wp.int32),
+    corner_offsets_table: wp.array(dtype=wp.vec3ub),
+    face_count: wp.array(dtype=int),
+):
+    cell_idx, local_x, local_y, local_z = wp.tid()
+    sdf = sdf_array[0]
+    coarse = active_coarse_cells[cell_idx]
+    x_id = coarse[0] * subgrid_size + local_x
+    y_id = coarse[1] * subgrid_size + local_y
+    z_id = coarse[2] * subgrid_size + local_z
+
+    isovalue = 0.0
+    cube_idx = wp.int32(0)
+    for i in range(8):
+        co = wp.vec3i(corner_offsets_table[i])
+        pos = sdf.sdf_box_lower + wp.cw_mul(
+            wp.vec3(float(x_id + co.x), float(y_id + co.y), float(z_id + co.z)),
+            sdf.voxel_size,
+        )
+        v = texture_sample_sdf(sdf, pos)
+        if wp.isnan(v):
+            return
+        if v < isovalue:
+            cube_idx |= 1 << i
+
+    tri_start = tri_range_table[cube_idx]
+    tri_end = tri_range_table[cube_idx + 1]
+    num_faces = (tri_end - tri_start) // 3
+    if num_faces > 0:
+        wp.atomic_add(face_count, 0, num_faces)
+
+
+@wp.kernel(enable_backward=False)
+def _generate_isomesh_texture_kernel(
+    sdf_array: wp.array(dtype=TextureSDFData),
+    active_coarse_cells: wp.array(dtype=wp.vec3i),
+    subgrid_size: int,
+    tri_range_table: wp.array(dtype=wp.int32),
+    flat_edge_verts_table: wp.array(dtype=wp.vec2ub),
+    corner_offsets_table: wp.array(dtype=wp.vec3ub),
+    face_count: wp.array(dtype=int),
+    vertices: wp.array(dtype=wp.vec3),
+):
+    cell_idx, local_x, local_y, local_z = wp.tid()
+    sdf = sdf_array[0]
+    coarse = active_coarse_cells[cell_idx]
+    x_id = coarse[0] * subgrid_size + local_x
+    y_id = coarse[1] * subgrid_size + local_y
+    z_id = coarse[2] * subgrid_size + local_z
+
+    isovalue = 0.0
+    cube_idx = wp.int32(0)
+    corner_vals = vec8f()
+    for i in range(8):
+        co = wp.vec3i(corner_offsets_table[i])
+        pos = sdf.sdf_box_lower + wp.cw_mul(
+            wp.vec3(float(x_id + co.x), float(y_id + co.y), float(z_id + co.z)),
+            sdf.voxel_size,
+        )
+        v = texture_sample_sdf(sdf, pos)
+        if wp.isnan(v):
+            return
+        corner_vals[i] = v
+        if v < isovalue:
+            cube_idx |= 1 << i
+
+    tri_start = tri_range_table[cube_idx]
+    tri_end = tri_range_table[cube_idx + 1]
+    num_verts = tri_end - tri_start
+    num_faces = num_verts // 3
+    if num_faces == 0:
+        return
+
+    out_idx = wp.atomic_add(face_count, 0, num_faces)
+
+    for fi in range(5):
+        if fi >= num_faces:
+            return
+        for vi in range(3):
+            edge_verts = wp.vec2i(flat_edge_verts_table[tri_start + 3 * fi + vi])
+            v_from = edge_verts[0]
+            v_to = edge_verts[1]
+            val_0 = wp.float32(corner_vals[v_from])
+            val_1 = wp.float32(corner_vals[v_to])
+            p_0 = wp.vec3f(corner_offsets_table[v_from])
+            p_1 = wp.vec3f(corner_offsets_table[v_to])
+            val_diff = val_1 - val_0
+            if wp.abs(val_diff) < 1e-8:
+                p = 0.5 * (p_0 + p_1)
+            else:
+                t = (0.0 - val_0) / val_diff
+                p = p_0 + t * (p_1 - p_0)
+            vol_idx = p + wp.vec3(float(x_id), float(y_id), float(z_id))
+            local_pos = sdf.sdf_box_lower + wp.cw_mul(vol_idx, sdf.voxel_size)
+            vertices[3 * out_idx + 3 * fi + vi] = local_pos
+
+
+def compute_isomesh_from_texture_sdf(
+    tex_data_array: wp.array,
+    sdf_idx: int,
+    subgrid_start_slots: wp.array,
+    device=None,
+) -> Mesh | None:
+    """Extract an isosurface mesh from a texture SDF via marching cubes.
+
+    Iterates over coarse cells that have subgrids (the narrow-band region
+    where the surface lives) and runs marching cubes on their fine voxels.
+
+    Args:
+        tex_data_array: Warp array of :class:`TextureSDFData` structs.
+        sdf_idx: Index into *tex_data_array* to extract.
+        subgrid_start_slots: The ``subgrid_start_slots`` array for this SDF
+            entry (used to determine which coarse cells are active).
+        device: Warp device.
+
+    Returns:
+        :class:`~newton.Mesh` with the zero-isosurface, or ``None`` if empty.
+    """
+    from .sdf_mc import get_mc_tables  # noqa: PLC0415
+    from .types import Mesh  # noqa: PLC0415
+
+    if device is None:
+        device = wp.get_device()
+
+    if subgrid_start_slots is None:
+        return None
+
+    tex_np = tex_data_array.numpy()
+    entry = tex_np[sdf_idx]
+    subgrid_size = int(entry["subgrid_size"])
+    if subgrid_size == 0:
+        return None
+
+    cx = int(entry["coarse_size_x"])
+    cy = int(entry["coarse_size_y"])
+    cz = int(entry["coarse_size_z"])
+
+    single = tex_data_array[sdf_idx : sdf_idx + 1]
+
+    slots_np = subgrid_start_slots.numpy()
+    active_cells = []
+    for iz in range(cz):
+        for iy in range(cy):
+            for ix in range(cx):
+                idx = (iz * cy + iy) * cx + ix
+                if slots_np[idx] != 0xFFFFFFFF:
+                    active_cells.append((ix, iy, iz))
+
+    if not active_cells:
+        return None
+
+    active_coarse_cells = wp.array(active_cells, dtype=wp.vec3i, device=device)
+    num_active = len(active_cells)
+
+    mc_tables = get_mc_tables(device)
+    tri_range_table = mc_tables[0]
+    flat_edge_verts_table = mc_tables[4]
+    corner_offsets_table = mc_tables[3]
+
+    face_count = wp.zeros((1,), dtype=int, device=device)
+    wp.launch(
+        _count_isomesh_faces_texture_kernel,
+        dim=(num_active, subgrid_size, subgrid_size, subgrid_size),
+        inputs=[single, active_coarse_cells, subgrid_size, tri_range_table, corner_offsets_table],
+        outputs=[face_count],
+        device=device,
+    )
+
+    num_faces = int(face_count.numpy()[0])
+    if num_faces == 0:
+        return None
+
+    max_verts = 3 * num_faces
+    verts = wp.empty((max_verts,), dtype=wp.vec3, device=device)
+
+    face_count.zero_()
+    wp.launch(
+        _generate_isomesh_texture_kernel,
+        dim=(num_active, subgrid_size, subgrid_size, subgrid_size),
+        inputs=[
+            single,
+            active_coarse_cells,
+            subgrid_size,
+            tri_range_table,
+            flat_edge_verts_table,
+            corner_offsets_table,
+        ],
+        outputs=[face_count, verts],
+        device=device,
+    )
+
+    verts_np = verts.numpy()
+    faces_np = np.arange(3 * num_faces).reshape(-1, 3)
+    faces_np = faces_np[:, ::-1]
+    return Mesh(verts_np, faces_np)

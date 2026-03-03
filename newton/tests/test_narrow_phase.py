@@ -290,7 +290,7 @@ class TestNarrowPhase(unittest.TestCase):
             geom_source,
             shape_gap,
             geom_collision_radius,
-            sdf_data,
+            _sdf_data,
             shape_sdf_index,
             shape_flags,
             shape_collision_aabb_lower,
@@ -319,7 +319,6 @@ class TestNarrowPhase(unittest.TestCase):
             shape_data=geom_data,
             shape_transform=geom_transform,
             shape_source=geom_source,
-            sdf_data=sdf_data,
             shape_sdf_index=shape_sdf_index,
             shape_gap=shape_gap,
             shape_collision_radius=geom_collision_radius,
@@ -1291,7 +1290,6 @@ class TestNarrowPhase(unittest.TestCase):
             dtype=wp.vec4,
         )
         geom_source = wp.zeros(3, dtype=wp.uint64)
-        sdf_data = wp.zeros(0, dtype=SDFData)  # Compact SDF table (unused in this test)
         shape_sdf_index = wp.full(3, -1, dtype=wp.int32)
         geom_collision_radius = wp.array([1e6, 0.2, 0.2], dtype=wp.float32)
         shape_flags = wp.full(3, ShapeFlags.COLLIDE_SHAPES, dtype=wp.int32)  # Collision enabled, no hydroelastic
@@ -1333,7 +1331,6 @@ class TestNarrowPhase(unittest.TestCase):
             shape_data=geom_data,
             shape_transform=geom_transform,
             shape_source=geom_source,
-            sdf_data=sdf_data,
             shape_sdf_index=shape_sdf_index,
             shape_gap=shape_gap,
             shape_collision_radius=geom_collision_radius,
@@ -1369,7 +1366,6 @@ class TestNarrowPhase(unittest.TestCase):
             shape_data=geom_data,
             shape_transform=geom_transform,
             shape_source=geom_source,
-            sdf_data=sdf_data,
             shape_sdf_index=shape_sdf_index,
             shape_gap=shape_gap,
             shape_collision_radius=geom_collision_radius,
@@ -1406,7 +1402,6 @@ class TestNarrowPhase(unittest.TestCase):
             shape_data=geom_data,
             shape_transform=geom_transform,
             shape_source=geom_source,
-            sdf_data=sdf_data,
             shape_sdf_index=shape_sdf_index,
             shape_gap=shape_gap,
             shape_collision_radius=geom_collision_radius,
@@ -1808,7 +1803,6 @@ class TestBufferOverflowWarnings(unittest.TestCase):
             shape_data=arrays[1],
             shape_transform=arrays[2],
             shape_source=arrays[3],
-            shape_sdf_data=arrays[6],
             shape_gap=arrays[4],
             shape_collision_radius=arrays[5],
             shape_flags=arrays[7],
@@ -1873,7 +1867,6 @@ class TestBufferOverflowWarnings(unittest.TestCase):
             shape_data=arrays[1],
             shape_transform=arrays[2],
             shape_source=arrays[3],
-            shape_sdf_data=arrays[6],
             shape_gap=arrays[4],
             shape_collision_radius=arrays[5],
             shape_flags=arrays[7],

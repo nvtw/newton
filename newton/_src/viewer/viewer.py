@@ -93,8 +93,8 @@ class ViewerBase(ABC):
         # map from shape index -> Instances
         self._shape_to_batch: list[ViewerBase.ShapeInstances | None] | None = None
 
-        # cache for isomeshes (computed on demand for collision shapes with SDF volumes)
-        # keyed by volume.id (uint64) to deduplicate when multiple shapes share the same SDF volume
+        # cache for isomeshes (computed on demand for collision shapes with texture SDFs)
+        # keyed by sdf_idx to deduplicate when multiple shapes share the same SDF
         self._isomesh_cache: dict[int, newton.Mesh | None] = {}
 
         # SDF isomesh instances -- created on-demand for collision visualization
@@ -172,39 +172,43 @@ class ViewerBase(ABC):
         return min(self.max_worlds, self.model.world_count)
 
     def _get_shape_isomesh(self, shape_idx: int) -> newton.Mesh | None:
-        """Get the isomesh for a collision shape with an SDF volume.
+        """Get the isomesh for a collision shape with a texture SDF.
 
-        Computes the marching-cubes isosurface from the SDF volume and caches it.
-        Uses the volume.id (uint64) as cache key, so shapes sharing the same SDF
-        volume will reuse the same isomesh.
+        Computes the marching-cubes isosurface from the texture SDF and caches it
+        by SDF table index.
 
         Args:
             shape_idx: Index of the shape.
 
         Returns:
-            Mesh object for the isomesh, or None if shape has no SDF volume.
+            Mesh object for the isomesh, or ``None`` if shape has no texture SDF.
         """
         if self.model is None:
             return None
 
-        # Check if this shape has an SDF volume
         sdf_idx = int(self._shape_sdf_index_host[shape_idx]) if self._shape_sdf_index_host is not None else -1
-        sdf_volume = self.model.sdf_volume[sdf_idx] if (sdf_idx >= 0 and self.model.sdf_volume) else None
-        if sdf_volume is None:
+        if sdf_idx < 0 or self.model.texture_sdf_data is None:
             return None
 
-        # Use volume.id as cache key - this is a unique uint64 pointer
-        volume_id = int(sdf_volume.id)
+        if sdf_idx in self._isomesh_cache:
+            return self._isomesh_cache[sdf_idx]
 
-        # Check if already computed. Cached None means "computed but no mesh".
-        if volume_id in self._isomesh_cache:
-            return self._isomesh_cache[volume_id]
+        slots = (
+            self.model.texture_sdf_subgrid_start_slots[sdf_idx]
+            if hasattr(self.model, "texture_sdf_subgrid_start_slots")
+            and self.model.texture_sdf_subgrid_start_slots
+            else None
+        )
+        if slots is None:
+            self._isomesh_cache[sdf_idx] = None
+            return None
 
-        # Compute isomesh from SDF volume
-        from ..geometry.sdf_utils import compute_isomesh  # noqa: PLC0415
+        from ..geometry.sdf_texture import compute_isomesh_from_texture_sdf  # noqa: PLC0415
 
-        isomesh = compute_isomesh(sdf_volume)
-        self._isomesh_cache[volume_id] = isomesh
+        isomesh = compute_isomesh_from_texture_sdf(
+            self.model.texture_sdf_data, sdf_idx, slots, device=self.device
+        )
+        self._isomesh_cache[sdf_idx] = isomesh
         return isomesh
 
     def set_camera(self, pos: wp.vec3, pitch: float, yaw: float):
@@ -1231,9 +1235,9 @@ class ViewerBase(ABC):
             # visual-only copy exists.
             is_collision_shape = flags & int(newton.ShapeFlags.COLLIDE_SHAPES)
             is_visible = flags & int(newton.ShapeFlags.VISIBLE)
-            # Check for SDF volume existence without computing the isomesh (lazy evaluation)
+            # Check for texture SDF existence without computing the isomesh (lazy evaluation)
             sdf_idx = int(shape_sdf_index[s]) if shape_sdf_index is not None else -1
-            has_sdf = sdf_idx >= 0 and self.model.sdf_volume and self.model.sdf_volume[sdf_idx] is not None
+            has_sdf = sdf_idx >= 0 and self.model.texture_sdf_data is not None
             if is_collision_shape and is_visible and has_sdf:
                 # Remove COLLIDE_SHAPES flag so this is treated as a visual shape
                 flags = flags & ~int(newton.ShapeFlags.COLLIDE_SHAPES)
@@ -1338,7 +1342,7 @@ class ViewerBase(ABC):
         shape_flags = self.model.shape_flags.numpy()
         shape_world = self.model.shape_world.numpy()
         shape_geo_scale = self.model.shape_scale.numpy()
-        sdf_data = self.model.sdf_data.numpy() if self.model.sdf_data is not None else None
+        tex_sdf_np = self.model.texture_sdf_data.numpy() if self.model.texture_sdf_data is not None else None
         shape_sdf_index = self._shape_sdf_index_host
         shape_count = len(shape_body)
 
@@ -1347,7 +1351,7 @@ class ViewerBase(ABC):
             if not self._should_render_world(shape_world[s]):
                 continue
 
-            # Only process collision shapes with SDF volumes
+            # Only process collision shapes with texture SDFs
             is_collision_shape = shape_flags[s] & int(newton.ShapeFlags.COLLIDE_SHAPES)
             if not is_collision_shape:
                 continue
@@ -1356,9 +1360,10 @@ class ViewerBase(ABC):
             if isomesh is None:
                 continue
 
-            # Check if scale was baked into the SDF
             sdf_idx = int(shape_sdf_index[s]) if shape_sdf_index is not None else -1
-            scale_baked = bool(sdf_data[sdf_idx]["scale_baked"]) if (sdf_data is not None and sdf_idx >= 0) else True
+            scale_baked = (
+                bool(tex_sdf_np[sdf_idx]["scale_baked"]) if (tex_sdf_np is not None and sdf_idx >= 0) else True
+            )
 
             # Create isomesh geometry (always use (1,1,1) for geometry since isomesh is in SDF space)
             geo_type = newton.GeoType.MESH

@@ -170,7 +170,7 @@ def _build_texture_and_nanovdb(mesh, resolution=64, margin=0.05, narrow_band_ran
     )
 
     # Build texture SDF
-    tex_sdf, coarse_tex, subgrid_tex = create_texture_sdf_from_mesh(
+    tex_sdf, coarse_tex, subgrid_tex, _block_coords = create_texture_sdf_from_mesh(
         wp_mesh,
         margin=margin,
         narrow_band_range=narrow_band_range,
@@ -224,7 +224,9 @@ def test_texture_sdf_construction(test, device):
     test.assertGreater(tex_sdf.coarse_size_x, 0)
     test.assertGreater(tex_sdf.coarse_size_y, 0)
     test.assertGreater(tex_sdf.coarse_size_z, 0)
-    test.assertGreater(tex_sdf.inv_sdf_dx, 0.0)
+    test.assertGreater(tex_sdf.inv_sdf_dx[0], 0.0)
+    test.assertGreater(tex_sdf.inv_sdf_dx[1], 0.0)
+    test.assertGreater(tex_sdf.inv_sdf_dx[2], 0.0)
     test.assertGreater(tex_sdf.subgrid_size, 0)
     test.assertEqual(tex_sdf.subgrid_size_f, float(tex_sdf.subgrid_size))
     test.assertEqual(tex_sdf.subgrid_samples_f, float(tex_sdf.subgrid_size + 1))
@@ -357,14 +359,14 @@ def test_texture_sdf_array_indexing(test, device):
         support_winding_number=True,
     )
 
-    tex_sdf1, _coarse1, _sub1 = create_texture_sdf_from_mesh(
+    tex_sdf1, _coarse1, _sub1, _ = create_texture_sdf_from_mesh(
         wp_mesh1,
         margin=0.05,
         narrow_band_range=(-0.1, 0.1),
         max_resolution=32,
         device=device,
     )
-    tex_sdf2, _coarse2, _sub2 = create_texture_sdf_from_mesh(
+    tex_sdf2, _coarse2, _sub2, _ = create_texture_sdf_from_mesh(
         wp_mesh2,
         margin=0.05,
         narrow_band_range=(-0.1, 0.1),
@@ -427,7 +429,7 @@ def test_texture_sdf_multi_resolution(test, device):
             indices=wp.array(mesh.indices, dtype=wp.int32, device=device),
             support_winding_number=True,
         )
-        tex_sdf, _coarse_tex, _subgrid_tex = create_texture_sdf_from_mesh(
+        tex_sdf, _coarse_tex, _subgrid_tex, _ = create_texture_sdf_from_mesh(
             wp_mesh,
             margin=0.05,
             narrow_band_range=(-0.1, 0.1),

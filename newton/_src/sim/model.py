@@ -278,12 +278,6 @@ class Model:
         """Concatenated 1D elevation array for all heightfields. Kernels index via HeightfieldData.data_offset."""
 
         # SDF storage (compact table + per-shape index indirection)
-        self.sdf_data = None
-        """Compact array of SDFData structs, shape [num_sdfs]."""
-        self.sdf_volume = []
-        """Sparse SDF volumes matching sdf_data by index. Kept for reference counting."""
-        self.sdf_coarse_volume = []
-        """Coarse SDF volumes matching sdf_data by index. Kept for reference counting."""
         self.shape_sdf_index = None
         """Per-shape SDF index, shape [shape_count]. -1 means shape has no SDF."""
         self.sdf_block_coords = None
@@ -291,13 +285,15 @@ class Model:
         self.sdf_index2blocks = None
         """Per-SDF [start, end) indices into sdf_block_coords, shape [num_sdfs, 2]."""
 
-        # Texture SDF storage (parallel to sdf_data, used for mesh-mesh collision)
+        # Texture SDF storage
         self.texture_sdf_data = None
         """Compact array of TextureSDFData structs, shape [num_sdfs]."""
         self.texture_sdf_coarse_textures = []
         """Coarse 3D textures matching texture_sdf_data by index. Kept for reference counting."""
         self.texture_sdf_subgrid_textures = []
         """Subgrid 3D textures matching texture_sdf_data by index. Kept for reference counting."""
+        self.texture_sdf_subgrid_start_slots = []
+        """Subgrid start slot arrays matching texture_sdf_data by index. Kept for reference counting."""
 
         # Local AABB and voxel grid for contact reduction
         # Note: These are stored in Model (not Contacts) because they are static geometry properties

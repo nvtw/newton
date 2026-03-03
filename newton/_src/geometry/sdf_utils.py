@@ -66,6 +66,7 @@ class SDF:
         sparse_volume: wp.Volume | None = None,
         coarse_volume: wp.Volume | None = None,
         block_coords: nparray | Sequence[wp.vec3us] | None = None,
+        texture_block_coords: Sequence[wp.vec3us] | None = None,
         texture_data: "TextureSDFData | None" = None,
         _coarse_texture: wp.Texture3D | None = None,
         _subgrid_texture: wp.Texture3D | None = None,
@@ -79,6 +80,7 @@ class SDF:
         self.sparse_volume = sparse_volume
         self.coarse_volume = coarse_volume
         self.block_coords = block_coords
+        self.texture_block_coords = texture_block_coords
         self.texture_data = texture_data
         # Keep texture references alive to prevent GC
         self._coarse_texture = _coarse_texture
@@ -224,7 +226,7 @@ class SDF:
             winding_threshold = 0.5 if signed_volume >= 0.0 else -0.5
 
             res = effective_max_resolution if effective_max_resolution is not None else 64
-            texture_data, coarse_texture, subgrid_texture = create_texture_sdf_from_mesh(
+            texture_data, coarse_texture, subgrid_texture, tex_block_coords = create_texture_sdf_from_mesh(
                 tex_mesh,
                 margin=margin,
                 narrow_band_range=narrow_band_range,
@@ -240,6 +242,7 @@ class SDF:
             sparse_volume=sparse_volume,
             coarse_volume=coarse_volume,
             block_coords=block_coords,
+            texture_block_coords=tex_block_coords,
             texture_data=texture_data,
             _coarse_texture=coarse_texture,
             _subgrid_texture=subgrid_texture,

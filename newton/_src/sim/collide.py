@@ -796,7 +796,6 @@ class CollisionPipeline:
                 shape_data=self.geom_data,
                 shape_transform=self.geom_transform,
                 shape_source=model.shape_source_ptr,
-                sdf_data=model.sdf_data,
                 shape_sdf_index=model.shape_sdf_index,
                 texture_sdf_data=model.texture_sdf_data,
                 shape_gap=model.shape_gap,
