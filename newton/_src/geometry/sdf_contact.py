@@ -536,7 +536,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
 
         difference = wp.max(difference, 1e-8)
 
-        tolerance_sq = 1e-3 * 1e-3
+        tolerance_sq = 3e-3 * 3e-3
 
         sdf_gradient = wp.vec3(0.0, 0.0, 0.0)
         step = 1.0 / (2.0 * difference)
