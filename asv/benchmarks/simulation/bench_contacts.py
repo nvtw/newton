@@ -24,7 +24,6 @@ from newton.viewer import ViewerNull
 
 ISAACGYM_ENVS_REPO_URL = "https://github.com/isaac-sim/IsaacGymEnvs.git"
 ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
-ISAACGYM_GEARS_FOLDER = "assets/factory/mesh/factory_gears"
 
 try:
     from newton.examples import download_external_git_folder as _download_external_git_folder
@@ -62,7 +61,6 @@ class FastExampleContactSdfDefaults:
 
     def setup_cache(self):
         _download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER)
-        _download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_GEARS_FOLDER)
 
     def setup(self):
         example_cls = _import_example_class(
@@ -74,10 +72,7 @@ class FastExampleContactSdfDefaults:
         self.example = example_cls(
             viewer=ViewerNull(num_frames=self.num_frames),
             world_count=100,
-            num_per_world=1,
-            scene="nut_bolt",
             solver="mujoco",
-            test_mode=False,
         )
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
@@ -95,7 +90,6 @@ class FastExampleContactHydroWorkingDefaults:
 
     def setup_cache(self):
         _download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER)
-        _download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_GEARS_FOLDER)
 
     def setup(self):
         example_cls = _import_example_class(
@@ -107,10 +101,7 @@ class FastExampleContactHydroWorkingDefaults:
         self.example = example_cls(
             viewer=ViewerNull(num_frames=self.num_frames),
             world_count=20,
-            num_per_world=1,
-            scene="nut_bolt",
             solver="mujoco",
-            test_mode=False,
         )
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
