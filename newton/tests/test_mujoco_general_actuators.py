@@ -18,7 +18,7 @@
 import unittest
 
 import numpy as np
-from unittest_utils import USD_AVAILABLE
+from newton.tests.unittest_utils import USD_AVAILABLE
 
 from newton import JointTargetMode, ModelBuilder
 from newton.solvers import SolverMuJoCo, SolverNotifyFlags

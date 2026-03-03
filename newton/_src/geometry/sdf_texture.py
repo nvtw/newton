@@ -875,6 +875,12 @@ def build_sparse_sdf_from_mesh(
     )
     wp.synchronize()
 
+    # Snapshot the full narrow-band occupancy before linearization demotes
+    # some subgrids.  The hydroelastic broadphase needs block coordinates
+    # for ALL occupied subgrids (including linear ones) so the octree
+    # explores the full contact surface.
+    subgrid_occupied = subgrid_required.numpy().copy()
+
     # Demote occupied subgrids whose SDF is well-approximated by the coarse
     # grid (linear field).  Demoted subgrids get 0xFFFFFFFE instead of a
     # subgrid address, saving texture memory while preserving narrow-band
@@ -1072,6 +1078,7 @@ def build_sparse_sdf_from_mesh(
         "subgrids_min_sdf_value": final_sdf_min,
         "subgrids_sdf_value_range": final_sdf_range,
         "subgrid_required": required_np,
+        "subgrid_occupied": subgrid_occupied,
     }
 
 
@@ -1204,10 +1211,14 @@ def create_texture_sdf_from_mesh(
     sdf_params, coarse_tex, subgrid_tex = create_sparse_sdf_textures(sparse_data, device)
     sdf_params.scale_baked = scale_baked
 
+    # Dilate the non-linear subgrid set by one ring of occupied neighbors so
+    # the hydroelastic broadphase explores flat box faces (which are linear
+    # but adjacent to non-linear edges/corners).
     block_coords = block_coords_from_subgrid_required(
         sparse_data["subgrid_required"],
         sparse_data["coarse_dims"],
         sparse_data["subgrid_size"],
+        subgrid_occupied=sparse_data["subgrid_occupied"],
     )
 
     return sdf_params, coarse_tex, subgrid_tex, block_coords
@@ -1329,6 +1340,9 @@ def create_texture_sdf_from_volume(
             subgrid_required[idx] = 1 if val < threshold_outer else 0
         else:
             subgrid_required[idx] = 1 if val > threshold_inner else 0
+
+    # Snapshot occupancy before linearization (see GPU path comment).
+    subgrid_occupied = subgrid_required.copy()
 
     # Demote occupied subgrids whose SDF is well-approximated by the coarse
     # grid (linear field).
@@ -1562,6 +1576,7 @@ def create_texture_sdf_from_volume(
         "subgrids_min_sdf_value": 0.0,
         "subgrids_sdf_value_range": 1.0,
         "subgrid_required": subgrid_required,
+        "subgrid_occupied": subgrid_occupied,
     }
 
     sdf_params, coarse_tex, subgrid_tex = create_sparse_sdf_textures(sparse_data, device)
@@ -1574,24 +1589,35 @@ def block_coords_from_subgrid_required(
     subgrid_required: np.ndarray,
     coarse_dims: tuple[int, int, int],
     subgrid_size: int,
+    subgrid_occupied: np.ndarray | None = None,
 ) -> list:
     """Derive SDF block coordinates from texture subgrid occupancy.
 
     This converts the texture subgrid occupancy array into voxel-space block
     coordinates compatible with the hydroelastic broadphase pipeline.
 
+    When *subgrid_occupied* is supplied (the pre-linearization narrow-band
+    mask), all occupied subgrids are included — matching the behavior of
+    NanoVDB active tiles.  This ensures full contact surface coverage for
+    flat faces that were demoted to linear interpolation.
+
     Args:
-        subgrid_required: 1D array of occupancy flags for each subgrid.
+        subgrid_required: 1D array of occupancy flags for non-linear subgrids.
         coarse_dims: tuple (w, h, d) number of subgrids per axis.
         subgrid_size: cells per subgrid.
+        subgrid_occupied: optional 1D array of full narrow-band occupancy
+            (before linearization).  When provided, all occupied subgrids
+            are included in the output.
 
     Returns:
-        List of ``wp.vec3us`` block coordinates for occupied subgrids.
+        List of ``wp.vec3us`` block coordinates for selected subgrids.
     """
     w, h, d = coarse_dims
+    include = subgrid_occupied if subgrid_occupied is not None else subgrid_required
+
     coords = []
-    for idx in range(len(subgrid_required)):
-        if subgrid_required[idx]:
+    for idx in range(len(include)):
+        if include[idx]:
             bz = idx // (w * h)
             rem = idx - bz * w * h
             by = rem // w

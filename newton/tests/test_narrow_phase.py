@@ -1483,7 +1483,6 @@ class TestNarrowPhase(unittest.TestCase):
                 shape_data=geom_data,
                 shape_transform=geom_transform,
                 shape_source=geom_source,
-                sdf_data=sdf_data,
                 shape_sdf_index=shape_sdf_index,
                 shape_gap=shape_gap,
                 shape_collision_radius=geom_collision_radius,

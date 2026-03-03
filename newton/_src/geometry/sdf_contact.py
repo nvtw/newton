@@ -679,13 +679,15 @@ def compute_mesh_mesh_block_offsets(
     shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
     shape_pairs_mesh_mesh_count: wp.array(dtype=int),
     shape_source: wp.array(dtype=wp.uint64),
+    shape_heightfield_data: wp.array(dtype=HeightfieldData),
     target_blocks: int,
     block_offsets: wp.array(dtype=wp.int32),
 ):
     """Compute per-pair block counts and prefix sum for dynamic load balancing.
 
     Block counts are proportional to the total triangle count of both meshes
-    in each pair, so pairs with larger meshes get more GPU blocks.
+    (or heightfields) in each pair, so pairs with larger geometry get more
+    GPU blocks.
 
     Args:
         target_blocks: Desired total number of blocks (e.g., sm_count * 4).
@@ -700,11 +702,19 @@ def compute_mesh_mesh_block_offsets(
     # First pass: sum all triangle counts across all pairs and directions
     total_tris = int(0)
     for i in range(pair_count):
-        pair = shape_pairs_mesh_mesh[i]
+        pair_encoded = shape_pairs_mesh_mesh[i]
+        has_hfield = (pair_encoded[0] & SHAPE_PAIR_HFIELD_BIT) != 0
+        pair = wp.vec2i(pair_encoded[0] & SHAPE_PAIR_INDEX_MASK, pair_encoded[1])
         for mode in range(2):
-            mesh_id = shape_source[pair[mode]]
-            if mesh_id != wp.uint64(0):
-                total_tris += wp.mesh_get(mesh_id).indices.shape[0] // 3
+            is_hfield = has_hfield and mode == 0
+            shape_idx = pair[mode]
+            if is_hfield:
+                hfd = shape_heightfield_data[shape_idx]
+                total_tris += get_triangle_count(GeoType.HFIELD, wp.uint64(0), hfd)
+            else:
+                mesh_id = shape_source[shape_idx]
+                if mesh_id != wp.uint64(0):
+                    total_tris += wp.mesh_get(mesh_id).indices.shape[0] // 3
 
     # Compute target triangles per block
     tris_per_block = int(total_tris)
@@ -715,12 +725,20 @@ def compute_mesh_mesh_block_offsets(
     offset = int(0)
     for i in range(pair_count):
         block_offsets[i] = offset
-        pair = shape_pairs_mesh_mesh[i]
+        pair_encoded = shape_pairs_mesh_mesh[i]
+        has_hfield = (pair_encoded[0] & SHAPE_PAIR_HFIELD_BIT) != 0
+        pair = wp.vec2i(pair_encoded[0] & SHAPE_PAIR_INDEX_MASK, pair_encoded[1])
         pair_tris = int(0)
         for mode in range(2):
-            mesh_id = shape_source[pair[mode]]
-            if mesh_id != wp.uint64(0):
-                pair_tris += wp.mesh_get(mesh_id).indices.shape[0] // 3
+            is_hfield = has_hfield and mode == 0
+            shape_idx = pair[mode]
+            if is_hfield:
+                hfd = shape_heightfield_data[shape_idx]
+                pair_tris += get_triangle_count(GeoType.HFIELD, wp.uint64(0), hfd)
+            else:
+                mesh_id = shape_source[shape_idx]
+                if mesh_id != wp.uint64(0):
+                    pair_tris += wp.mesh_get(mesh_id).indices.shape[0] // 3
         blocks = wp.max(1, (pair_tris + tris_per_block - 1) // tris_per_block)
         offset += blocks
     block_offsets[pair_count] = offset

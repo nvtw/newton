@@ -2013,6 +2013,7 @@ class NarrowPhase:
                             self.shape_pairs_mesh_mesh,
                             self.shape_pairs_mesh_mesh_count,
                             shape_source,
+                            hf_data,
                             self.mesh_mesh_target_blocks,
                             self.mesh_mesh_block_offsets,
                         ],
