@@ -56,6 +56,121 @@ class SDFData:
     scale_baked: wp.bool
 
 
+@wp.func
+def sample_sdf_extrapolated(
+    sdf_data: SDFData,
+    sdf_pos: wp.vec3,
+) -> float:
+    """Sample NanoVDB SDF with extrapolation for points outside the narrow band or extent.
+
+    Handles three cases:
+
+    1. Point in narrow band: returns sparse grid value directly.
+    2. Point inside extent but outside narrow band: returns coarse grid value.
+    3. Point outside extent: projects to boundary, returns value at boundary + distance to boundary.
+
+    Args:
+        sdf_data: SDFData struct containing sparse/coarse volumes and extent info.
+        sdf_pos: Query position in the SDF's local coordinate space [m].
+
+    Returns:
+        The signed distance value [m], extrapolated if necessary.
+    """
+    lower = sdf_data.center - sdf_data.half_extents
+    upper = sdf_data.center + sdf_data.half_extents
+
+    inside_extent = (
+        sdf_pos[0] >= lower[0]
+        and sdf_pos[0] <= upper[0]
+        and sdf_pos[1] >= lower[1]
+        and sdf_pos[1] <= upper[1]
+        and sdf_pos[2] >= lower[2]
+        and sdf_pos[2] <= upper[2]
+    )
+
+    if inside_extent:
+        sparse_idx = wp.volume_world_to_index(sdf_data.sparse_sdf_ptr, sdf_pos)
+        sparse_dist = wp.volume_sample_f(sdf_data.sparse_sdf_ptr, sparse_idx, wp.Volume.LINEAR)
+
+        if sparse_dist >= wp.static(MAXVAL * 0.99) or wp.isnan(sparse_dist):
+            coarse_idx = wp.volume_world_to_index(sdf_data.coarse_sdf_ptr, sdf_pos)
+            return wp.volume_sample_f(sdf_data.coarse_sdf_ptr, coarse_idx, wp.Volume.LINEAR)
+        else:
+            return sparse_dist
+    else:
+        eps = 1e-2 * sdf_data.sparse_voxel_size
+        clamped_pos = wp.min(wp.max(sdf_pos, lower + eps), upper - eps)
+        dist_to_boundary = wp.length(sdf_pos - clamped_pos)
+
+        coarse_idx = wp.volume_world_to_index(sdf_data.coarse_sdf_ptr, clamped_pos)
+        boundary_dist = wp.volume_sample_f(sdf_data.coarse_sdf_ptr, coarse_idx, wp.Volume.LINEAR)
+
+        return boundary_dist + dist_to_boundary
+
+
+@wp.func
+def sample_sdf_grad_extrapolated(
+    sdf_data: SDFData,
+    sdf_pos: wp.vec3,
+) -> tuple[float, wp.vec3]:
+    """Sample NanoVDB SDF with gradient, with extrapolation for points outside narrow band or extent.
+
+    Handles three cases:
+
+    1. Point in narrow band: returns sparse grid value and gradient directly.
+    2. Point inside extent but outside narrow band: returns coarse grid value and gradient.
+    3. Point outside extent: returns extrapolated distance and direction toward boundary.
+
+    Args:
+        sdf_data: SDFData struct containing sparse/coarse volumes and extent info.
+        sdf_pos: Query position in the SDF's local coordinate space [m].
+
+    Returns:
+        Tuple of (distance [m], gradient [unitless]) where gradient points toward increasing distance.
+    """
+    lower = sdf_data.center - sdf_data.half_extents
+    upper = sdf_data.center + sdf_data.half_extents
+
+    gradient = wp.vec3(0.0, 0.0, 0.0)
+
+    inside_extent = (
+        sdf_pos[0] >= lower[0]
+        and sdf_pos[0] <= upper[0]
+        and sdf_pos[1] >= lower[1]
+        and sdf_pos[1] <= upper[1]
+        and sdf_pos[2] >= lower[2]
+        and sdf_pos[2] <= upper[2]
+    )
+
+    if inside_extent:
+        sparse_idx = wp.volume_world_to_index(sdf_data.sparse_sdf_ptr, sdf_pos)
+        sparse_dist = wp.volume_sample_grad_f(sdf_data.sparse_sdf_ptr, sparse_idx, wp.Volume.LINEAR, gradient)
+
+        if sparse_dist >= wp.static(MAXVAL * 0.99) or wp.isnan(sparse_dist):
+            coarse_idx = wp.volume_world_to_index(sdf_data.coarse_sdf_ptr, sdf_pos)
+            coarse_dist = wp.volume_sample_grad_f(sdf_data.coarse_sdf_ptr, coarse_idx, wp.Volume.LINEAR, gradient)
+            return coarse_dist, gradient
+        else:
+            return sparse_dist, gradient
+    else:
+        eps = 1e-2 * sdf_data.sparse_voxel_size
+        clamped_pos = wp.min(wp.max(sdf_pos, lower + eps), upper - eps)
+        diff = sdf_pos - clamped_pos
+        dist_to_boundary = wp.length(diff)
+
+        coarse_idx = wp.volume_world_to_index(sdf_data.coarse_sdf_ptr, clamped_pos)
+        boundary_dist = wp.volume_sample_f(sdf_data.coarse_sdf_ptr, coarse_idx, wp.Volume.LINEAR)
+
+        extrapolated_dist = boundary_dist + dist_to_boundary
+
+        if dist_to_boundary > 0.0:
+            gradient = diff / dist_to_boundary
+        else:
+            wp.volume_sample_grad_f(sdf_data.coarse_sdf_ptr, coarse_idx, wp.Volume.LINEAR, gradient)
+
+        return extrapolated_dist, gradient
+
+
 class SDF:
     """Opaque SDF container owning kernel payload and runtime references."""
 

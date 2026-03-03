@@ -21,7 +21,6 @@ from newton._src.core.types import MAXVAL
 
 from ..geometry.contact_data import ContactData
 from ..geometry.sdf_texture import TextureSDFData, texture_sample_sdf, texture_sample_sdf_grad
-from ..geometry.sdf_utils import SDFData
 
 # Handle both direct execution and module import
 from .contact_reduction import (
@@ -164,137 +163,6 @@ def sample_sdf_grad_using_mesh(
 
     # No hit found - return max distance with arbitrary gradient
     return max_dist, wp.vec3(0.0, 0.0, 1.0)
-
-
-@wp.func
-def sample_sdf_extrapolated(
-    sdf_data: SDFData,
-    sdf_pos: wp.vec3,
-) -> float:
-    """
-    Sample SDF with extrapolation for points outside the narrow band or extent.
-
-    This function handles three cases:
-    1. Point in narrow band: Returns sparse grid value directly
-    2. Point inside extent but outside narrow band: Returns coarse grid value
-    3. Point outside extent: Projects to boundary, returns value at boundary + distance to boundary
-
-    Args:
-        sdf_data: SDFData struct containing sparse/coarse volumes and extent info
-        sdf_pos: Query position in the SDF's local coordinate space
-
-    Returns:
-        The signed distance value, extrapolated if necessary
-    """
-    # Compute extent bounds
-    lower = sdf_data.center - sdf_data.half_extents
-    upper = sdf_data.center + sdf_data.half_extents
-
-    # Check if point is inside extent
-    inside_extent = (
-        sdf_pos[0] >= lower[0]
-        and sdf_pos[0] <= upper[0]
-        and sdf_pos[1] >= lower[1]
-        and sdf_pos[1] <= upper[1]
-        and sdf_pos[2] >= lower[2]
-        and sdf_pos[2] <= upper[2]
-    )
-
-    if inside_extent:
-        sparse_idx = wp.volume_world_to_index(sdf_data.sparse_sdf_ptr, sdf_pos)
-        sparse_dist = wp.volume_sample_f(sdf_data.sparse_sdf_ptr, sparse_idx, wp.Volume.LINEAR)
-
-        if sparse_dist >= wp.static(MAXVAL * 0.99) or wp.isnan(sparse_dist):
-            # Fallback to coarse grid when sparse sample is diluted by background
-            coarse_idx = wp.volume_world_to_index(sdf_data.coarse_sdf_ptr, sdf_pos)
-            return wp.volume_sample_f(sdf_data.coarse_sdf_ptr, coarse_idx, wp.Volume.LINEAR)
-        else:
-            return sparse_dist
-    else:
-        # Point is outside extent - project to boundary
-        eps = 1e-2 * sdf_data.sparse_voxel_size  # slightly shrink to avoid sampling background
-        clamped_pos = wp.min(wp.max(sdf_pos, lower + eps), upper - eps)
-        dist_to_boundary = wp.length(sdf_pos - clamped_pos)
-
-        # Sample at the boundary point using coarse grid
-        coarse_idx = wp.volume_world_to_index(sdf_data.coarse_sdf_ptr, clamped_pos)
-        boundary_dist = wp.volume_sample_f(sdf_data.coarse_sdf_ptr, coarse_idx, wp.Volume.LINEAR)
-
-        # Extrapolate: value at boundary + distance to boundary
-        return boundary_dist + dist_to_boundary
-
-
-@wp.func
-def sample_sdf_grad_extrapolated(
-    sdf_data: SDFData,
-    sdf_pos: wp.vec3,
-) -> tuple[float, wp.vec3]:
-    """
-    Sample SDF with gradient, with extrapolation for points outside narrow band or extent.
-
-    This function handles three cases:
-    1. Point in narrow band: Returns sparse grid value and gradient directly
-    2. Point inside extent but outside narrow band: Returns coarse grid value and gradient
-    3. Point outside extent: Returns extrapolated distance and direction toward boundary
-
-    Args:
-        sdf_data: SDFData struct containing sparse/coarse volumes and extent info
-        sdf_pos: Query position in the SDF's local coordinate space
-
-    Returns:
-        Tuple of (distance, gradient) where gradient points toward increasing distance
-    """
-    # Compute extent bounds
-    lower = sdf_data.center - sdf_data.half_extents
-    upper = sdf_data.center + sdf_data.half_extents
-
-    gradient = wp.vec3(0.0, 0.0, 0.0)
-
-    # Check if point is inside extent
-    inside_extent = (
-        sdf_pos[0] >= lower[0]
-        and sdf_pos[0] <= upper[0]
-        and sdf_pos[1] >= lower[1]
-        and sdf_pos[1] <= upper[1]
-        and sdf_pos[2] >= lower[2]
-        and sdf_pos[2] <= upper[2]
-    )
-
-    if inside_extent:
-        sparse_idx = wp.volume_world_to_index(sdf_data.sparse_sdf_ptr, sdf_pos)
-        sparse_dist = wp.volume_sample_grad_f(sdf_data.sparse_sdf_ptr, sparse_idx, wp.Volume.LINEAR, gradient)
-
-        if sparse_dist >= wp.static(MAXVAL * 0.99) or wp.isnan(sparse_dist):
-            # Fallback to coarse grid when sparse sample is diluted by background
-            coarse_idx = wp.volume_world_to_index(sdf_data.coarse_sdf_ptr, sdf_pos)
-            coarse_dist = wp.volume_sample_grad_f(sdf_data.coarse_sdf_ptr, coarse_idx, wp.Volume.LINEAR, gradient)
-            return coarse_dist, gradient
-        else:
-            return sparse_dist, gradient
-    else:
-        # Point is outside extent - project to boundary
-        eps = (
-            1e-2 * sdf_data.sparse_voxel_size
-        )  # slightly shrink the extent to avoid sampling the background value at edge
-        clamped_pos = wp.min(wp.max(sdf_pos, lower + eps), upper - eps)
-        diff = sdf_pos - clamped_pos
-        dist_to_boundary = wp.length(diff)
-
-        # Sample at the boundary point using coarse grid
-        coarse_idx = wp.volume_world_to_index(sdf_data.coarse_sdf_ptr, clamped_pos)
-        boundary_dist = wp.volume_sample_f(sdf_data.coarse_sdf_ptr, coarse_idx, wp.Volume.LINEAR)
-
-        # Extrapolate distance: value at boundary + distance to boundary
-        extrapolated_dist = boundary_dist + dist_to_boundary
-
-        # Gradient points from boundary toward the query point (direction of increasing distance)
-        if dist_to_boundary > 0.0:
-            gradient = diff / dist_to_boundary
-        else:
-            # Fallback: get gradient from coarse grid
-            wp.volume_sample_grad_f(sdf_data.coarse_sdf_ptr, coarse_idx, wp.Volume.LINEAR, gradient)
-
-        return extrapolated_dist, gradient
 
 
 @wp.func
@@ -802,7 +670,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 sdf_idx = shape_sdf_index[sdf_shape]
                 use_bvh_for_sdf = sdf_idx < 0
                 if not use_bvh_for_sdf:
-                    use_bvh_for_sdf = texture_sdf_table[sdf_idx].coarse_size_x == 0
+                    use_bvh_for_sdf = texture_sdf_table[sdf_idx].coarse_texture.width == 0
 
                 # Load shape data
                 scale_data_tri = shape_data[tri_shape]
@@ -1027,7 +895,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 sdf_idx = shape_sdf_index[sdf_shape]
                 use_bvh_for_sdf = sdf_idx < 0
                 if not use_bvh_for_sdf:
-                    use_bvh_for_sdf = texture_sdf_table[sdf_idx].coarse_size_x == 0
+                    use_bvh_for_sdf = texture_sdf_table[sdf_idx].coarse_texture.width == 0
 
                 # Load shape data
                 scale_data_tri = shape_data[tri_shape]

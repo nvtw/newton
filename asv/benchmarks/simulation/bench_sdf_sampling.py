@@ -26,7 +26,7 @@ from asv_runner.benchmarks.mark import skip_benchmark_if
 wp.config.quiet = True
 
 from newton import Mesh
-from newton._src.geometry.sdf_contact import sample_sdf_extrapolated, sample_sdf_grad_extrapolated
+from newton._src.geometry.sdf_utils import sample_sdf_extrapolated, sample_sdf_grad_extrapolated
 from newton._src.geometry.sdf_texture import TextureSDFData, texture_sample_sdf, texture_sample_sdf_grad
 from newton._src.geometry.sdf_utils import SDF, SDFData
 

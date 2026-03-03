@@ -85,11 +85,8 @@ def map_shape_texture_sdf_data_kernel(
     shape_idx = wp.tid()
     sdf_idx = shape_sdf_index[shape_idx]
     if sdf_idx < 0:
-        out_shape_sdf_data[shape_idx].coarse_size_x = 0
-        out_shape_sdf_data[shape_idx].coarse_size_y = 0
-        out_shape_sdf_data[shape_idx].coarse_size_z = 0
-        out_shape_sdf_data[shape_idx].center = wp.vec3(0.0, 0.0, 0.0)
-        out_shape_sdf_data[shape_idx].half_extents = wp.vec3(0.0, 0.0, 0.0)
+        out_shape_sdf_data[shape_idx].sdf_box_lower = wp.vec3(0.0, 0.0, 0.0)
+        out_shape_sdf_data[shape_idx].sdf_box_upper = wp.vec3(0.0, 0.0, 0.0)
         out_shape_sdf_data[shape_idx].voxel_size = wp.vec3(0.0, 0.0, 0.0)
         out_shape_sdf_data[shape_idx].voxel_radius = 0.0
         out_shape_sdf_data[shape_idx].scale_baked = False
@@ -900,11 +897,13 @@ def broadphase_collision_pairs_count(
     pair = shape_pairs_sdf_sdf[tid]
     shape_a = pair[0]
     shape_b = pair[1]
-    half_extents_a = shape_sdf_data[shape_a].half_extents
-    half_extents_b = shape_sdf_data[shape_b].half_extents
+    sdf_a = shape_sdf_data[shape_a]
+    sdf_b = shape_sdf_data[shape_b]
+    half_extents_a = 0.5 * (sdf_a.sdf_box_upper - sdf_a.sdf_box_lower)
+    half_extents_b = 0.5 * (sdf_b.sdf_box_upper - sdf_b.sdf_box_lower)
 
-    center_offset_a = shape_sdf_data[shape_a].center
-    center_offset_b = shape_sdf_data[shape_b].center
+    center_offset_a = 0.5 * (sdf_a.sdf_box_lower + sdf_a.sdf_box_upper)
+    center_offset_b = 0.5 * (sdf_b.sdf_box_lower + sdf_b.sdf_box_upper)
 
     does_collide = wp.bool(False)
 

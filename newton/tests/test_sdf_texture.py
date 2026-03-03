@@ -28,7 +28,7 @@ import warp as wp
 
 import newton
 from newton import Mesh
-from newton._src.geometry.sdf_contact import sample_sdf_extrapolated, sample_sdf_grad_extrapolated
+from newton._src.geometry.sdf_utils import sample_sdf_extrapolated, sample_sdf_grad_extrapolated
 from newton._src.geometry.sdf_texture import (
     QuantizationMode,
     TextureSDFData,
@@ -221,9 +221,6 @@ def test_texture_sdf_construction(test, device):
     mesh = _create_box_mesh()
     tex_sdf, _coarse_tex, _subgrid_tex, _, _wp_mesh = _build_texture_and_nanovdb(mesh)
 
-    test.assertGreater(tex_sdf.coarse_size_x, 0)
-    test.assertGreater(tex_sdf.coarse_size_y, 0)
-    test.assertGreater(tex_sdf.coarse_size_z, 0)
     test.assertGreater(tex_sdf.inv_sdf_dx[0], 0.0)
     test.assertGreater(tex_sdf.inv_sdf_dx[1], 0.0)
     test.assertGreater(tex_sdf.inv_sdf_dx[2], 0.0)
@@ -474,10 +471,11 @@ def test_texture_sdf_in_model(test, device):
     test.assertIsNotNone(model.texture_sdf_data)
     test.assertEqual(len(model.texture_sdf_data), 2)
 
-    # Both entries should have non-zero coarse_size_x (not empty)
-    tex_np = model.texture_sdf_data.numpy()
+    # Both entries should have valid coarse textures (not empty)
     for idx in range(2):
-        test.assertGreater(tex_np[idx]["coarse_size_x"], 0, f"texture_sdf_data[{idx}] is empty")
+        test.assertGreater(
+            model.texture_sdf_coarse_textures[idx].width, 0, f"texture_sdf_data[{idx}] is empty"
+        )
 
     # Texture references should be kept alive
     test.assertEqual(len(model.texture_sdf_coarse_textures), 2)
@@ -487,9 +485,7 @@ def test_texture_sdf_in_model(test, device):
 def test_empty_texture_sdf_data(test, device):
     """Verify create_empty_texture_sdf_data returns a valid empty struct."""
     empty = create_empty_texture_sdf_data()
-    test.assertEqual(empty.coarse_size_x, 0)
-    test.assertEqual(empty.coarse_size_y, 0)
-    test.assertEqual(empty.coarse_size_z, 0)
+    test.assertEqual(empty.subgrid_size, 0)
     test.assertFalse(empty.scale_baked)
 
 

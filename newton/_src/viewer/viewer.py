@@ -205,8 +205,10 @@ class ViewerBase(ABC):
 
         from ..geometry.sdf_texture import compute_isomesh_from_texture_sdf  # noqa: PLC0415
 
+        coarse_tex = self.model.texture_sdf_coarse_textures[sdf_idx]
+        coarse_dims = (coarse_tex.width - 1, coarse_tex.height - 1, coarse_tex.depth - 1)
         isomesh = compute_isomesh_from_texture_sdf(
-            self.model.texture_sdf_data, sdf_idx, slots, device=self.device
+            self.model.texture_sdf_data, sdf_idx, slots, coarse_dims, device=self.device
         )
         self._isomesh_cache[sdf_idx] = isomesh
         return isomesh

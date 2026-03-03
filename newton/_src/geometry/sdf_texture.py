@@ -64,35 +64,26 @@ class TextureSDFData:
     # Textures and indirection
     coarse_texture: wp.Texture3D
     subgrid_texture: wp.Texture3D
-    subgrid_start_slots: wp.array(dtype=wp.uint32)
+    subgrid_start_slots: wp.array(dtype=wp.uint32, ndim=3)
 
     # Grid parameters
     sdf_box_lower: wp.vec3
     sdf_box_upper: wp.vec3
     inv_sdf_dx: wp.vec3
-    coarse_size_x: int
-    coarse_size_y: int
-    coarse_size_z: int
     subgrid_size: int
     subgrid_size_f: float  # float(subgrid_size) - avoids int->float conversion
     subgrid_samples_f: float  # float(subgrid_size + 1) - samples per subgrid dimension
     fine_to_coarse: float
 
-    # Spatial metadata (mirrors SDFData.center / half_extents)
-    center: wp.vec3
-    half_extents: wp.vec3
+    # Spatial metadata
     voxel_size: wp.vec3
     voxel_radius: wp.float32
-
-    # Narrow-band half-width used during construction [m].
-    # SDF values with |val| > narrow_band_width are outside the accurate region.
-    narrow_band_width: wp.float32
 
     # Quantization parameters for subgrid values
     subgrids_min_sdf_value: float
     subgrids_sdf_value_range: float  # max - min
 
-    # Whether shape_scale was baked into the SDF (mirrors SDFData.scale_baked)
+    # Whether shape_scale was baked into the SDF
     scale_baked: wp.bool
 
 
@@ -180,7 +171,7 @@ def _populate_subgrid_texture_float32_kernel(
     mesh: wp.uint64,
     subgrid_required: wp.array(dtype=wp.int32),
     subgrid_addresses: wp.array(dtype=wp.int32),
-    subgrid_start_slots: wp.array(dtype=wp.uint32),
+    subgrid_start_slots: wp.array(dtype=wp.uint32, ndim=3),
     subgrid_texture: wp.array(dtype=float),
     cells_per_subgrid: int,
     min_corner: wp.vec3,
@@ -239,7 +230,7 @@ def _populate_subgrid_texture_float32_kernel(
 
     if local_sample == 0:
         start_slot = wp.uint32(addr_x) | (wp.uint32(addr_y) << wp.uint32(10)) | (wp.uint32(addr_z) << wp.uint32(20))
-        subgrid_start_slots[subgrid_idx] = start_slot
+        subgrid_start_slots[block_x, block_y, block_z] = start_slot
 
     tex_x = addr_x * samples_per_dim + lx
     tex_y = addr_y * samples_per_dim + ly
@@ -254,7 +245,7 @@ def _populate_subgrid_texture_uint16_kernel(
     mesh: wp.uint64,
     subgrid_required: wp.array(dtype=wp.int32),
     subgrid_addresses: wp.array(dtype=wp.int32),
-    subgrid_start_slots: wp.array(dtype=wp.uint32),
+    subgrid_start_slots: wp.array(dtype=wp.uint32, ndim=3),
     subgrid_texture: wp.array(dtype=wp.uint16),
     cells_per_subgrid: int,
     min_corner: wp.vec3,
@@ -315,7 +306,7 @@ def _populate_subgrid_texture_uint16_kernel(
 
     if local_sample == 0:
         start_slot = wp.uint32(addr_x) | (wp.uint32(addr_y) << wp.uint32(10)) | (wp.uint32(addr_z) << wp.uint32(20))
-        subgrid_start_slots[subgrid_idx] = start_slot
+        subgrid_start_slots[block_x, block_y, block_z] = start_slot
 
     tex_x = addr_x * samples_per_dim + lx
     tex_y = addr_y * samples_per_dim + ly
@@ -333,7 +324,7 @@ def _populate_subgrid_texture_uint8_kernel(
     mesh: wp.uint64,
     subgrid_required: wp.array(dtype=wp.int32),
     subgrid_addresses: wp.array(dtype=wp.int32),
-    subgrid_start_slots: wp.array(dtype=wp.uint32),
+    subgrid_start_slots: wp.array(dtype=wp.uint32, ndim=3),
     subgrid_texture: wp.array(dtype=wp.uint8),
     cells_per_subgrid: int,
     min_corner: wp.vec3,
@@ -394,7 +385,7 @@ def _populate_subgrid_texture_uint8_kernel(
 
     if local_sample == 0:
         start_slot = wp.uint32(addr_x) | (wp.uint32(addr_y) << wp.uint32(10)) | (wp.uint32(addr_z) << wp.uint32(20))
-        subgrid_start_slots[subgrid_idx] = start_slot
+        subgrid_start_slots[block_x, block_y, block_z] = start_slot
 
     tex_x = addr_x * samples_per_dim + lx
     tex_y = addr_y * samples_per_dim + ly
@@ -505,11 +496,13 @@ def texture_has_subgrid(
     if wp.length(local_pos - clamped) > 0.0:
         return False
     f = wp.cw_mul(clamped - sdf.sdf_box_lower, sdf.inv_sdf_dx)
-    x_base = wp.clamp(int(f[0] * sdf.fine_to_coarse), 0, sdf.coarse_size_x - 1)
-    y_base = wp.clamp(int(f[1] * sdf.fine_to_coarse), 0, sdf.coarse_size_y - 1)
-    z_base = wp.clamp(int(f[2] * sdf.fine_to_coarse), 0, sdf.coarse_size_z - 1)
-    slot_idx = (z_base * sdf.coarse_size_y + y_base) * sdf.coarse_size_x + x_base
-    start_slot = sdf.subgrid_start_slots[slot_idx]
+    cx = sdf.coarse_texture.width - 1
+    cy = sdf.coarse_texture.height - 1
+    cz = sdf.coarse_texture.depth - 1
+    x_base = wp.clamp(int(f[0] * sdf.fine_to_coarse), 0, cx - 1)
+    y_base = wp.clamp(int(f[1] * sdf.fine_to_coarse), 0, cy - 1)
+    z_base = wp.clamp(int(f[2] * sdf.fine_to_coarse), 0, cz - 1)
+    start_slot = sdf.subgrid_start_slots[x_base, y_base, z_base]
     return start_slot != wp.uint32(0xFFFFFFFF)
 
 
@@ -536,12 +529,14 @@ def texture_sample_sdf(
 
     f = wp.cw_mul(clamped - sdf.sdf_box_lower, sdf.inv_sdf_dx)
 
-    x_base = wp.clamp(int(f[0] * sdf.fine_to_coarse), 0, sdf.coarse_size_x - 1)
-    y_base = wp.clamp(int(f[1] * sdf.fine_to_coarse), 0, sdf.coarse_size_y - 1)
-    z_base = wp.clamp(int(f[2] * sdf.fine_to_coarse), 0, sdf.coarse_size_z - 1)
+    cx = sdf.coarse_texture.width - 1
+    cy = sdf.coarse_texture.height - 1
+    cz = sdf.coarse_texture.depth - 1
+    x_base = wp.clamp(int(f[0] * sdf.fine_to_coarse), 0, cx - 1)
+    y_base = wp.clamp(int(f[1] * sdf.fine_to_coarse), 0, cy - 1)
+    z_base = wp.clamp(int(f[2] * sdf.fine_to_coarse), 0, cz - 1)
 
-    slot_idx = (z_base * sdf.coarse_size_y + y_base) * sdf.coarse_size_x + x_base
-    start_slot = sdf.subgrid_start_slots[slot_idx]
+    start_slot = sdf.subgrid_start_slots[x_base, y_base, z_base]
 
     sdf_val = _sample_texture_at_cell(sdf, start_slot, x_base, y_base, z_base, f)
     return sdf_val + diff_mag
@@ -578,10 +573,15 @@ def texture_sample_sdf_grad(
     # Convert to fine grid coordinates
     f = wp.cw_mul(clamped - sdf.sdf_box_lower, sdf.inv_sdf_dx)
 
+    # Coarse grid dimensions (number of coarse cells per axis)
+    coarse_x = sdf.coarse_texture.width - 1
+    coarse_y = sdf.coarse_texture.height - 1
+    coarse_z = sdf.coarse_texture.depth - 1
+
     # Fine grid vertex count per dimension (vertex-centered: subgrid_size+1 per coarse cell)
-    fine_verts_x = float(sdf.coarse_size_x) * sdf.subgrid_size_f
-    fine_verts_y = float(sdf.coarse_size_y) * sdf.subgrid_size_f
-    fine_verts_z = float(sdf.coarse_size_z) * sdf.subgrid_size_f
+    fine_verts_x = float(coarse_x) * sdf.subgrid_size_f
+    fine_verts_y = float(coarse_y) * sdf.subgrid_size_f
+    fine_verts_z = float(coarse_z) * sdf.subgrid_size_f
 
     # Clamp to valid vertex range [0, fine_verts]
     fx = wp.clamp(f[0], 0.0, fine_verts_x)
@@ -601,13 +601,12 @@ def texture_sample_sdf_grad(
     tz = fz - float(iz)
 
     # Coarse cell containing this fine cell
-    x_base = wp.clamp(int(float(ix) * sdf.fine_to_coarse), 0, sdf.coarse_size_x - 1)
-    y_base = wp.clamp(int(float(iy) * sdf.fine_to_coarse), 0, sdf.coarse_size_y - 1)
-    z_base = wp.clamp(int(float(iz) * sdf.fine_to_coarse), 0, sdf.coarse_size_z - 1)
+    x_base = wp.clamp(int(float(ix) * sdf.fine_to_coarse), 0, coarse_x - 1)
+    y_base = wp.clamp(int(float(iy) * sdf.fine_to_coarse), 0, coarse_y - 1)
+    z_base = wp.clamp(int(float(iz) * sdf.fine_to_coarse), 0, coarse_z - 1)
 
     # Look up indirection slot
-    slot_idx = (z_base * sdf.coarse_size_y + y_base) * sdf.coarse_size_x + x_base
-    start_slot = sdf.subgrid_start_slots[slot_idx]
+    start_slot = sdf.subgrid_start_slots[x_base, y_base, z_base]
 
     # -- Sample 8 corner texels --
     v000 = float(0.0)
@@ -824,7 +823,7 @@ def build_sparse_sdf_from_mesh(
         sdf_range = 1.0
 
     if num_required == 0:
-        subgrid_start_slots = np.full(total_subgrids, 0xFFFFFFFF, dtype=np.uint32)
+        subgrid_start_slots = np.full((w, h, d), 0xFFFFFFFF, dtype=np.uint32)
         subgrid_texture_data = np.zeros((1, 1, 1), dtype=np.float32)
         tex_size = 1
         final_sdf_min = 0.0
@@ -838,7 +837,7 @@ def build_sparse_sdf_from_mesh(
         samples_per_dim = subgrid_size + 1
         tex_size = tex_blocks_per_dim * samples_per_dim
 
-        subgrid_start_slots = np.full(total_subgrids, 0xFFFFFFFF, dtype=np.uint32)
+        subgrid_start_slots = np.full((w, h, d), 0xFFFFFFFF, dtype=np.uint32)
         subgrid_start_slots_gpu = wp.array(subgrid_start_slots, dtype=wp.uint32, device=device)
 
         total_tex_samples = tex_size * tex_size * tex_size
@@ -945,8 +944,6 @@ def build_sparse_sdf_from_mesh(
 
     # Padded max covers the full ceiling-divided subgrid grid.
     padded_max = min_corner + np.array([w, h, d], dtype=float) * subgrid_size * cell_size
-    center = 0.5 * (min_corner + padded_max)
-    half_extents = 0.5 * (padded_max - min_corner)
 
     return {
         "coarse_sdf": background_sdf_np.astype(np.float32),
@@ -962,10 +959,7 @@ def build_sparse_sdf_from_mesh(
         "quantization_mode": quantization_mode,
         "subgrids_min_sdf_value": final_sdf_min,
         "subgrids_sdf_value_range": final_sdf_range,
-        "center": center,
-        "half_extents": half_extents,
         "subgrid_required": required_np,
-        "narrow_band_thickness": narrow_band_thickness,
     }
 
 
@@ -1002,9 +996,6 @@ def create_sparse_sdf_textures(
     subgrid_slots = wp.array(sparse_data["subgrid_start_slots"], dtype=wp.uint32, device=device)
 
     cell_size = sparse_data["cell_size"]
-    coarse_x = sparse_data["coarse_dims"][0]
-    coarse_y = sparse_data["coarse_dims"][1]
-    coarse_z = sparse_data["coarse_dims"][2]
 
     min_ext = sparse_data["min_extents"]
     max_ext = sparse_data["max_extents"]
@@ -1016,22 +1007,13 @@ def create_sparse_sdf_textures(
     sdf_params.sdf_box_lower = wp.vec3(float(min_ext[0]), float(min_ext[1]), float(min_ext[2]))
     sdf_params.sdf_box_upper = wp.vec3(float(max_ext[0]), float(max_ext[1]), float(max_ext[2]))
     sdf_params.inv_sdf_dx = wp.vec3(1.0 / float(cell_size[0]), 1.0 / float(cell_size[1]), 1.0 / float(cell_size[2]))
-    sdf_params.coarse_size_x = coarse_x
-    sdf_params.coarse_size_y = coarse_y
-    sdf_params.coarse_size_z = coarse_z
     sdf_params.subgrid_size = sparse_data["subgrid_size"]
     sdf_params.subgrid_size_f = float(sparse_data["subgrid_size"])
     sdf_params.subgrid_samples_f = float(sparse_data["subgrid_size"] + 1)
     sdf_params.fine_to_coarse = 1.0 / sparse_data["subgrid_size"]
 
-    # Spatial metadata (mirrors SDFData fields)
-    center = 0.5 * (min_ext + max_ext)
-    half_extents = 0.5 * (max_ext - min_ext)
-    sdf_params.center = wp.vec3(float(center[0]), float(center[1]), float(center[2]))
-    sdf_params.half_extents = wp.vec3(float(half_extents[0]), float(half_extents[1]), float(half_extents[2]))
     sdf_params.voxel_size = wp.vec3(float(cell_size[0]), float(cell_size[1]), float(cell_size[2]))
     sdf_params.voxel_radius = float(0.5 * np.linalg.norm(cell_size))
-    sdf_params.narrow_band_width = float(sparse_data.get("narrow_band_thickness", 0.0))
 
     sdf_params.subgrids_min_sdf_value = sparse_data["subgrids_min_sdf_value"]
     sdf_params.subgrids_sdf_value_range = sparse_data["subgrids_sdf_value_range"]
@@ -1241,7 +1223,7 @@ def create_texture_sdf_from_volume(
         sdf_range = 1.0
 
     if num_required == 0:
-        subgrid_start_slots = np.full(total_subgrids, 0xFFFFFFFF, dtype=np.uint32)
+        subgrid_start_slots = np.full((w, h, d), 0xFFFFFFFF, dtype=np.uint32)
         subgrid_texture_data = np.zeros((1, 1, 1), dtype=np.float32)
         tex_size = 1
     else:
@@ -1254,7 +1236,7 @@ def create_texture_sdf_from_volume(
         tex_size = tex_blocks_per_dim * samples_per_dim
 
         # Assign sequential addresses to required subgrids
-        subgrid_start_slots = np.full(total_subgrids, 0xFFFFFFFF, dtype=np.uint32)
+        subgrid_start_slots = np.full((w, h, d), 0xFFFFFFFF, dtype=np.uint32)
         address = 0
         for idx in range(total_subgrids):
             if subgrid_required[idx]:
@@ -1262,7 +1244,11 @@ def create_texture_sdf_from_volume(
                 addr_rem = address - addr_z * tex_blocks_per_dim * tex_blocks_per_dim
                 addr_y = addr_rem // tex_blocks_per_dim
                 addr_x = addr_rem - addr_y * tex_blocks_per_dim
-                subgrid_start_slots[idx] = int(addr_x) | (int(addr_y) << 10) | (int(addr_z) << 20)
+                bz = idx // (w * h)
+                rem = idx - bz * w * h
+                by = rem // w
+                bx = rem - by * w
+                subgrid_start_slots[bx, by, bz] = int(addr_x) | (int(addr_y) << 10) | (int(addr_z) << 20)
                 address += 1
 
         # Build positions array for all subgrid texels, then sample volume
@@ -1280,7 +1266,7 @@ def create_texture_sdf_from_volume(
             sg_y = sg_rem // w
             sg_x = sg_rem - sg_y * w
 
-            slot = subgrid_start_slots[sg_idx]
+            slot = subgrid_start_slots[sg_x, sg_y, sg_z]
             addr_x = int(slot & 0x3FF)
             addr_y = int((slot >> 10) & 0x3FF)
             addr_z = int((slot >> 20) & 0x3FF)
@@ -1342,10 +1328,6 @@ def create_texture_sdf_from_volume(
     wp.synchronize()
     background_sdf_np = bg_sdf_gpu.numpy().reshape((bg_size_z, bg_size_y, bg_size_x))
 
-    # Use the padded extent so the texture grid exactly covers the coarse blocks.
-    center = 0.5 * (min_ext + padded_max)
-    half_extents = 0.5 * (padded_max - min_ext)
-
     sparse_data = {
         "coarse_sdf": background_sdf_np.astype(np.float32),
         "subgrid_data": subgrid_texture_data.astype(np.float32),
@@ -1360,10 +1342,7 @@ def create_texture_sdf_from_volume(
         "quantization_mode": QuantizationMode.FLOAT32,
         "subgrids_min_sdf_value": 0.0,
         "subgrids_sdf_value_range": 1.0,
-        "center": center,
-        "half_extents": half_extents,
         "subgrid_required": subgrid_required,
-        "narrow_band_thickness": narrow_band_thickness,
     }
 
     sdf_params, coarse_tex, subgrid_tex = create_sparse_sdf_textures(sparse_data, device)
@@ -1405,17 +1384,13 @@ def block_coords_from_subgrid_required(
 def create_empty_texture_sdf_data() -> TextureSDFData:
     """Return an empty TextureSDFData struct for shapes without texture SDF.
 
-    An empty struct has ``coarse_size_x == 0``, which collision kernels
+    An empty struct has ``coarse_texture.width == 0``, which collision kernels
     use to detect the absence of a texture SDF and fall back to BVH.
 
     Returns:
         A zeroed-out :class:`TextureSDFData` struct.
     """
     sdf = TextureSDFData()
-    # Zero-size signals "no texture SDF available"
-    sdf.coarse_size_x = 0
-    sdf.coarse_size_y = 0
-    sdf.coarse_size_z = 0
     sdf.subgrid_size = 0
     sdf.subgrid_size_f = 0.0
     sdf.subgrid_samples_f = 0.0
@@ -1423,11 +1398,8 @@ def create_empty_texture_sdf_data() -> TextureSDFData:
     sdf.inv_sdf_dx = wp.vec3(0.0, 0.0, 0.0)
     sdf.sdf_box_lower = wp.vec3(0.0, 0.0, 0.0)
     sdf.sdf_box_upper = wp.vec3(0.0, 0.0, 0.0)
-    sdf.center = wp.vec3(0.0, 0.0, 0.0)
-    sdf.half_extents = wp.vec3(0.0, 0.0, 0.0)
     sdf.voxel_size = wp.vec3(0.0, 0.0, 0.0)
     sdf.voxel_radius = 0.0
-    sdf.narrow_band_width = 0.0
     sdf.subgrids_min_sdf_value = 0.0
     sdf.subgrids_sdf_value_range = 1.0
     sdf.scale_baked = False
@@ -1547,6 +1519,7 @@ def compute_isomesh_from_texture_sdf(
     tex_data_array: wp.array,
     sdf_idx: int,
     subgrid_start_slots: wp.array,
+    coarse_dims: tuple[int, int, int],
     device=None,
 ) -> Mesh | None:
     """Extract an isosurface mesh from a texture SDF via marching cubes.
@@ -1557,8 +1530,9 @@ def compute_isomesh_from_texture_sdf(
     Args:
         tex_data_array: Warp array of :class:`TextureSDFData` structs.
         sdf_idx: Index into *tex_data_array* to extract.
-        subgrid_start_slots: The ``subgrid_start_slots`` array for this SDF
+        subgrid_start_slots: The 3D ``subgrid_start_slots`` array for this SDF
             entry (used to determine which coarse cells are active).
+        coarse_dims: ``(cx, cy, cz)`` number of coarse cells per axis.
         device: Warp device.
 
     Returns:
@@ -1579,19 +1553,16 @@ def compute_isomesh_from_texture_sdf(
     if subgrid_size == 0:
         return None
 
-    cx = int(entry["coarse_size_x"])
-    cy = int(entry["coarse_size_y"])
-    cz = int(entry["coarse_size_z"])
+    cx, cy, cz = coarse_dims
 
     single = tex_data_array[sdf_idx : sdf_idx + 1]
 
     slots_np = subgrid_start_slots.numpy()
     active_cells = []
-    for iz in range(cz):
+    for ix in range(cx):
         for iy in range(cy):
-            for ix in range(cx):
-                idx = (iz * cy + iy) * cx + ix
-                if slots_np[idx] != 0xFFFFFFFF:
+            for iz in range(cz):
+                if slots_np[ix, iy, iz] != 0xFFFFFFFF:
                     active_cells.append((ix, iy, iz))
 
     if not active_cells:
