@@ -137,7 +137,7 @@ class Example:
         world_builder = self._build_nut_bolt_scene()
 
         main_scene = newton.ModelBuilder()
-        main_scene.default_shape_cfg.gap = 0.01
+        main_scene.default_shape_cfg.gap = 0.001 * self.scene_scale
         # Add ground plane with offset (plane equation: z = offset)
         # For plane equation n·x + d = 0, with n=(0,0,1): z + d = 0, so z = -d
         # Therefore, to get plane at z = offset, we need d = -offset
@@ -210,7 +210,7 @@ class Example:
         print(f"Assets downloaded to: {asset_path}")
 
         world_builder = newton.ModelBuilder()
-        world_builder.default_shape_cfg.gap = 0.01 * self.scene_scale
+        world_builder.default_shape_cfg.gap = 0.001 * self.scene_scale
 
         bolt_file = str(asset_path / f"factory_bolt_{ASSEMBLY_STR}.obj")
         nut_file = str(asset_path / f"factory_nut_{ASSEMBLY_STR}_subdiv_3x.obj")
