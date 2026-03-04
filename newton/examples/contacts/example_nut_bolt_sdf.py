@@ -63,14 +63,8 @@ def add_mesh_object(
         center_world = wp.quat_rotate(transform.q, center_vec)
         transform = wp.transform(transform.p + center_world, transform.q)
 
-    if label == "gear_base":
-        body = -1
-        builder.add_shape_mesh(
-            body, mesh=mesh, scale=(scale, scale, scale), xform=transform, cfg=shape_cfg, label=label
-        )
-    else:
-        body = builder.add_body(label=label, xform=transform)
-        builder.add_shape_mesh(body, mesh=mesh, scale=(scale, scale, scale), cfg=shape_cfg)
+    body = builder.add_body(label=label, xform=transform)
+    builder.add_shape_mesh(body, mesh=mesh, scale=(scale, scale, scale), cfg=shape_cfg)
     return body
 
 

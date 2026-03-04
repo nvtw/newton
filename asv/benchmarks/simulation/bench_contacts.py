@@ -72,7 +72,9 @@ class FastExampleContactSdfDefaults:
         self.example = example_cls(
             viewer=ViewerNull(num_frames=self.num_frames),
             world_count=100,
+            num_per_world=1,
             solver="mujoco",
+            test_mode=False,
         )
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
@@ -101,7 +103,9 @@ class FastExampleContactHydroWorkingDefaults:
         self.example = example_cls(
             viewer=ViewerNull(num_frames=self.num_frames),
             world_count=20,
+            num_per_world=1,
             solver="mujoco",
+            test_mode=False,
         )
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
