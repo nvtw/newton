@@ -1345,6 +1345,127 @@ with advanced models (SDF, hydroelastic):
 When ``use_mujoco_contacts=True``, MuJoCo handles its own contact generation and the
 ``contacts`` argument to ``step`` should be ``None``.
 
+.. _Advanced Customization:
+
+Advanced Customization
+----------------------
+
+:class:`~newton.CollisionPipeline` covers the vast majority of use cases, but Newton also
+exposes the underlying broad phase, narrow phase, and primitive collision building blocks
+for users who need full control — for example, writing contacts in a custom format,
+implementing a domain-specific culling strategy, or integrating Newton's collision
+detection into an external solver.
+
+**Pipeline stages**
+
+The standard pipeline runs three stages:
+
+1. **AABB computation** — shape bounding boxes in world space.
+2. **Broad phase** — identifies candidate shape pairs whose AABBs overlap.
+3. **Narrow phase** — generates contacts for each candidate pair.
+
+You can replace or compose these stages independently.
+
+**Broad phase classes**
+
+All broad phase classes expose a ``launch`` method that writes candidate pairs
+(``wp.array(dtype=wp.vec2i)``) and a pair count:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Class
+     - Description
+   * - :class:`~newton.geometry.BroadPhaseAllPairs`
+     - All-pairs O(N²) AABB test. Accepts ``shape_world`` and optional ``shape_flags``.
+   * - :class:`~newton.geometry.BroadPhaseSAP`
+     - Sweep-and-prune. Same interface, with optional ``sweep_thread_count_multiplier``
+       and ``sort_type`` tuning parameters.
+   * - :class:`~newton.geometry.BroadPhaseExplicit`
+     - Tests precomputed ``shape_pairs`` against AABBs. No constructor arguments.
+
+.. code-block:: python
+
+    from newton.geometry import BroadPhaseSAP
+
+    bp = BroadPhaseSAP(model.shape_world, model.shape_flags)
+    bp.launch(
+        shape_lower=shape_aabb_lower,
+        shape_upper=shape_aabb_upper,
+        shape_gap=model.shape_gap,
+        shape_collision_group=model.shape_collision_group,
+        shape_world=model.shape_world,
+        shape_count=model.shape_count,
+        candidate_pair=candidate_pair_buffer,
+        candidate_pair_count=candidate_pair_count,
+        device=device,
+    )
+
+**Narrow phase**
+
+:class:`~newton.geometry.NarrowPhase` accepts the candidate pairs from any broad phase and
+generates contacts. It supports a ``contact_writer_warp_func`` argument for writing contacts
+in a custom format instead of the default :class:`~newton.Contacts` layout:
+
+.. code-block:: python
+
+    from newton.geometry import NarrowPhase
+
+    np = NarrowPhase(
+        max_candidate_pairs=10000,
+        reduce_contacts=True,
+        device=device,
+    )
+    np.launch(
+        candidate_pair=candidate_pairs,
+        candidate_pair_count=pair_count,
+        shape_types=...,
+        shape_data=...,
+        shape_transform=...,
+        # ... remaining geometry arrays from Model
+        contact_pair=out_pairs,
+        contact_position=out_positions,
+        contact_normal=out_normals,
+        contact_penetration=out_depths,
+        contact_count=out_count,
+        device=device,
+    )
+
+Use ``launch_custom_write`` with a custom writer struct for full control over the output
+format.
+
+**Primitive collision functions**
+
+For per-pair queries outside the pipeline, ``newton.geometry`` exports Warp device
+functions (``@wp.func``) for specific shape combinations:
+
+- ``collide_sphere_sphere``, ``collide_sphere_capsule``, ``collide_sphere_box``,
+  ``collide_sphere_cylinder``
+- ``collide_capsule_capsule``, ``collide_capsule_box``
+- ``collide_box_box``
+- ``collide_plane_sphere``, ``collide_plane_capsule``, ``collide_plane_box``,
+  ``collide_plane_cylinder``, ``collide_plane_ellipsoid``
+
+These return signed distance (negative = penetration), contact position, and contact
+normal. Multi-contact variants (e.g., ``collide_box_box``) return fixed-size vectors with
+unused slots set to ``MAXVAL``. Because they are ``@wp.func``, they must be called from
+within Warp kernels.
+
+**GJK, MPR, and multi-contact generators**
+
+For convex shapes that lack a dedicated ``collide_*`` function, Newton provides
+factory functions that create Warp device functions from a support-map interface:
+
+- ``create_solve_mpr(support_func)`` — Minkowski Portal Refinement for boolean
+  collision and signed distance.
+- ``create_solve_closest_distance(support_func)`` — GJK closest-point query.
+- ``create_solve_convex_multi_contact(support_func, writer_func, post_process_contact)``
+  — generates a stable multi-contact manifold and writes results through a callback.
+
+These are available from ``newton._src.geometry`` and are intended for users building
+custom narrow-phase routines.
+
 See Also
 --------
 
@@ -1358,7 +1479,13 @@ See Also
         Contacts,
         GeoType,
     )
-    from newton.geometry import HydroelasticSDF
+    from newton.geometry import (
+        BroadPhaseAllPairs,
+        BroadPhaseExplicit,
+        BroadPhaseSAP,
+        HydroelasticSDF,
+        NarrowPhase,
+    )
 
 **API Reference:**
 
@@ -1375,6 +1502,8 @@ See Also
 - :meth:`~newton.Mesh.build_sdf` - Precompute SDF for a mesh
 - :meth:`~newton.ModelBuilder.approximate_meshes` - Replace mesh collision shapes with simpler geometry
 - :meth:`~newton.ModelBuilder.replicate` - Stamp out multi-world copies of a template builder
+- :class:`~newton.geometry.BroadPhaseAllPairs`, :class:`~newton.geometry.BroadPhaseSAP`, :class:`~newton.geometry.BroadPhaseExplicit` - Broad phase implementations
+- :class:`~newton.geometry.NarrowPhase` - Narrow phase contact generation
 
 **Model attributes:**
 
