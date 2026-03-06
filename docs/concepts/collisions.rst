@@ -187,17 +187,19 @@ World indices enable multi-world simulations, primarily for reinforcement learni
 For heterogeneous worlds, use :meth:`~newton.ModelBuilder.begin_world` and :meth:`~newton.ModelBuilder.end_world`.
 
 For large-scale parallel simulations (e.g., RL), :meth:`~newton.ModelBuilder.replicate` stamps
-out many copies of a template builder into separate worlds in one call:
+out many copies of a template environment builder into separate worlds in one call:
 
 .. testcode:: replicate
 
-    world_builder = newton.ModelBuilder()
-    body = world_builder.add_body()
-    world_builder.add_shape_sphere(body, radius=0.5)
+    # Template environment: one sphere per world
+    env_builder = newton.ModelBuilder()
+    body = env_builder.add_body()
+    env_builder.add_shape_sphere(body, radius=0.5)
 
+    # Combined builder: global geometry + 1024 replicated worlds
     main = newton.ModelBuilder()
-    main.add_ground_plane()
-    main.replicate(world_builder, world_count=1024)
+    main.add_ground_plane()  # global (world -1), shared across all worlds
+    main.replicate(env_builder, world_count=1024)
     model = main.finalize()
 
 .. note::
