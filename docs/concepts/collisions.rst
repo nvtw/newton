@@ -8,7 +8,7 @@ Collisions
 
 Newton provides a flexible collision detection system for rigid-rigid and soft-rigid contacts. The pipeline handles broad phase culling, narrow phase contact generation, and filtering.
 
-Newton's collision system is also compatible with MuJoCo-imported models via MJWarp, enabling advanced contact models (SDF, hydroelastic) for MuJoCo scenes. See ``examples/mjwarp/`` for usage.
+Newton's collision system is also compatible with :class:`~newton.solvers.SolverMuJoCo`, replacing MuJoCo's built-in contact generation to enable advanced contact models (SDF, hydroelastic). See ``examples/contacts/`` for usage (e.g., ``example_nut_bolt_hydro.py``, ``example_nut_bolt_sdf.py``).
 
 .. _Collision Pipeline:
 
@@ -1424,21 +1424,40 @@ object to :meth:`~newton.solvers.SolverBase.step`:
 
 **MuJoCo solver**
 
-:class:`~newton.solvers.SolverMuJoCo` can use either Newton's collision pipeline or MuJoCo's
-built-in contact generation. Set ``use_mujoco_contacts=False`` (default) to use Newton contacts
-with advanced models (SDF, hydroelastic):
+By default (``use_mujoco_contacts=True``), :class:`~newton.solvers.SolverMuJoCo` runs its own
+contact generation and the ``contacts`` argument to ``step`` should be ``None``.
 
-.. code-block:: python
+To replace MuJoCo's contact generation with Newton's pipeline — enabling advanced contact models
+(SDF, hydroelastic) — set ``use_mujoco_contacts=False`` and pass a populated
+:class:`~newton.Contacts` object to :meth:`~newton.solvers.SolverMuJoCo.step`:
 
+.. testsetup:: mujoco-solver
+
+    import warp as wp
+    import newton
+
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    body = builder.add_body(xform=wp.transform((0.0, 0.0, 2.0), wp.quat_identity()))
+    builder.add_shape_sphere(body, radius=0.5)
+    model = builder.finalize()
+    state_0 = model.state()
+    state_1 = model.state()
+    control = model.control()
+    num_steps = 2
+
+.. testcode:: mujoco-solver
+
+    pipeline = newton.CollisionPipeline(model, broad_phase="sap")
     solver = newton.solvers.SolverMuJoCo(
         model,
-        use_mujoco_contacts=False,  # Use Newton collision pipeline
-        njmax=10000,                # MuJoCo contact buffer size
-        nconmax=10000,
+        use_mujoco_contacts=False,
     )
-
-When ``use_mujoco_contacts=True``, MuJoCo handles its own contact generation and the
-``contacts`` argument to ``step`` should be ``None``.
+    contacts = pipeline.contacts()
+    for step in range(num_steps):
+        pipeline.collide(state_0, contacts)
+        solver.step(state_0, state_1, control, contacts, dt=1.0/60.0)
+        state_0, state_1 = state_1, state_0
 
 .. _Advanced Customization:
 
