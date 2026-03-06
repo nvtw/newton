@@ -706,18 +706,21 @@ Two approaches available:
 .. code-block:: python
 
     mesh.build_sdf(
-        max_resolution=256,                   # Grid dimension; must be divisible by 8 (None)
+        max_resolution=256,                   # Max voxels along longest AABB axis; must be divisible by 8 (None)
         narrow_band_range=(-0.005, 0.005),    # SDF narrow band [m] ((-0.1, 0.1))
         margin=0.005,                         # Extra AABB padding [m] (0.05)
         shape_margin=0.001,                   # Shrink SDF surface inward [m] (0.0)
-        scale=(1.0, 1.0, 1.0),               # Bake non-unit scale into the SDF (None)
+        scale=(1.0, 1.0, 1.0),                # Bake non-unit scale into the SDF (None)
     )
 
-Use ``narrow_band_range`` to limit the SDF computation to a thin shell around the surface
-(saves memory and build time). Set ``margin`` to at least the shape's ``gap`` so the SDF
-covers the full contact detection range. Pass ``scale`` when the shape will be added with
-non-unit scale to bake it into the SDF grid. ``shape_margin`` is mainly useful for
-hydroelastic collision where a compliant-layer offset is desired.
+``max_resolution`` sets the voxel count along the longest AABB axis (must be divisible by 8);
+voxel size is uniform across all axes. Use ``target_voxel_size`` instead to specify resolution
+in meters directly — it takes precedence over ``max_resolution`` when both are provided. Use
+``narrow_band_range`` to limit the SDF computation to a thin shell around the surface (saves
+memory and build time). Set ``margin`` to at least the shape's ``gap`` so the SDF covers the
+full contact detection range. Pass ``scale`` when the shape will be added with non-unit scale
+to bake it into the SDF grid. ``shape_margin`` is mainly useful for hydroelastic collision
+where a compliant-layer offset is desired.
 
 **Mesh simplification for collision**
 
