@@ -717,7 +717,7 @@ Two approaches available:
 voxel size is uniform across all axes. Use ``target_voxel_size`` instead to specify resolution
 in meters directly — it takes precedence over ``max_resolution`` when both are provided. Use
 ``narrow_band_range`` to limit the SDF computation to a thin shell around the surface (saves
-memory and build time). Set ``margin`` to at least the shape's ``gap`` so the SDF covers the
+memory and build time). Set the SDF ``margin`` to at least the sum of the shape's :ref:`margin and gap <margin-gap-semantics>` so the SDF covers the
 full contact detection range. Pass ``scale`` when the shape will be added with non-unit scale
 to bake it into the SDF grid. ``shape_margin`` is mainly useful for hydroelastic collision
 where a compliant-layer offset is desired.
