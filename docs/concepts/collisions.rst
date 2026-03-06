@@ -1017,7 +1017,7 @@ There are two common patterns for when to call ``collide`` relative to the subst
             solver.step(state_0, state_1, control, contacts, dt=sim_dt)
             state_0, state_1 = state_1, state_0
 
-You can also run collision every N substeps for a middle ground:
+Another pattern is to run collision detection every N substeps for a middle ground:
 
 .. testcode:: sim-loop
 
@@ -1032,16 +1032,25 @@ You can also run collision every N substeps for a middle ground:
 
 Soft contacts are generated automatically when particles are present. They use a separate margin:
 
-.. code-block:: python
+.. testsetup:: soft-contacts
 
-    # Add particles
+    import warp as wp
+    import newton
+    from newton import CollisionPipeline
+
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
     builder.add_particle(pos=wp.vec3(0, 0, 1), vel=wp.vec3(0, 0, 0), mass=1.0)
-    
+    model = builder.finalize()
+    state = model.state()
+
+.. testcode:: soft-contacts
+
     # Set soft contact margin
     pipeline = CollisionPipeline(model, soft_contact_margin=0.01)
     contacts = pipeline.contacts()
     pipeline.collide(state, contacts)
-    
+
     # Access soft contact data
     n_soft = contacts.soft_contact_count.numpy()[0]
     particles = contacts.soft_contact_particle.numpy()[:n_soft]
