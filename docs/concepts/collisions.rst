@@ -1399,7 +1399,7 @@ Performance
 
 - **No contacts generated?** Check that both shapes have compatible ``collision_group`` values (group 0 disables collision) and belong to the same world index.
 - **Mesh-mesh contacts slow?** Attach an SDF with ``mesh.build_sdf(...)`` — without it, Newton falls back to O(N) BVH vertex queries.
-- **Objects tunneling through each other?** Increase ``gap`` to detect contacts earlier, or increase substep count.
+- **Objects tunneling through each other?** Increase ``gap`` to detect contacts earlier, or increase substep count (decrease simulation ``dt``).
 - **Hydroelastic buffer overflow warnings?** Increase ``buffer_fraction`` in :class:`~newton.geometry.HydroelasticSDF.Config`.
 
 **CUDA graph capture**
@@ -1533,8 +1533,7 @@ All broad phase classes expose a ``launch`` method that writes candidate pairs
 **Narrow phase**
 
 :class:`~newton.geometry.NarrowPhase` accepts the candidate pairs from any broad phase and
-generates contacts. It supports a ``contact_writer_warp_func`` argument for writing contacts
-in a custom format instead of the default :class:`~newton.Contacts` layout:
+generates contacts:
 
 .. code-block:: python
 
@@ -1560,8 +1559,11 @@ in a custom format instead of the default :class:`~newton.Contacts` layout:
         device=device,
     )
 
-Use ``launch_custom_write`` with a custom writer struct for full control over the output
-format.
+To write contacts in a custom format, pass a ``contact_writer_warp_func`` (a Warp
+``@wp.func``) to the constructor to define the per-contact write logic, then call
+``launch_custom_write`` instead of ``launch``, providing a ``writer_data`` struct that
+matches your writer function. Together these give full control over how and where contacts
+are stored.
 
 **Primitive collision functions**
 
