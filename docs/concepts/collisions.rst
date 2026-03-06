@@ -19,7 +19,19 @@ Newton's collision pipeline implementation supports multiple broad phase algorit
 
 Basic usage:
 
-.. code-block:: python
+.. testsetup:: pipeline-basics
+
+    import warp as wp
+    import newton
+
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    body = builder.add_body(xform=wp.transform((0.0, 0.0, 2.0), wp.quat_identity()))
+    builder.add_shape_sphere(body, radius=0.5)
+    model = builder.finalize()
+    state = model.state()
+
+.. testcode:: pipeline-basics
 
     # Default: creates CollisionPipeline with EXPLICIT broad phase (precomputed pairs)
     contacts = model.contacts()
@@ -41,9 +53,10 @@ Quick Start
 -----------
 
 A minimal end-to-end example that creates shapes, runs collision detection, and steps the
-solver:
+solver (see also the :doc:`Introduction tutorial </tutorials/00_introduction>` and
+``example_basic_shapes.py`` — :github:`newton/examples/basic/example_basic_shapes.py`):
 
-.. code-block:: python
+.. testcode:: quickstart
 
     import warp as wp
     import newton
@@ -151,7 +164,7 @@ World indices enable multi-world simulations, primarily for reinforcement learni
 - **Index -1**: Global entities that collide with all worlds (e.g., ground plane)
 - **Index 0, 1, 2, ...**: World-specific entities that only interact within their world
 
-.. code-block:: python
+.. testcode:: world-indices
 
     builder = newton.ModelBuilder()
     
@@ -176,10 +189,11 @@ For heterogeneous worlds, use :meth:`~newton.ModelBuilder.begin_world` and :meth
 For large-scale parallel simulations (e.g., RL), :meth:`~newton.ModelBuilder.replicate` stamps
 out many copies of a template builder into separate worlds in one call:
 
-.. code-block:: python
+.. testcode:: replicate
 
     world_builder = newton.ModelBuilder()
-    # ... build one environment ...
+    body = world_builder.add_body()
+    world_builder.add_shape_sphere(body, radius=0.5)
 
     main = newton.ModelBuilder()
     main.add_ground_plane()
@@ -235,7 +249,7 @@ Collision groups control which shapes collide within the same world:
      - ✅
      - Different negative groups
 
-.. code-block:: python
+.. testcode:: collision-groups
 
     builder = newton.ModelBuilder()
     
@@ -266,7 +280,9 @@ Self-collisions within an articulation can be enabled or disabled with ``enable_
 
 Use ``has_shape_collision`` and ``has_particle_collision`` for fine-grained control over what a shape collides with. Setting both to ``False`` is equivalent to ``collision_group=0``.
 
-.. code-block:: python
+.. testcode:: particle-collision
+
+    builder = newton.ModelBuilder()
 
     # Shape that only collides with particles (not other shapes)
     cfg = builder.ShapeConfig(has_shape_collision=False, has_particle_collision=True)
@@ -338,7 +354,7 @@ The :attr:`ModelBuilder.shape_collision_filter_pairs` list stores explicit shape
 This is Newton's internal representation for pairwise filtering (including pairs imported from
 UsdPhysics ``physics:filteredPairs`` relationships).
 
-.. code-block:: python
+.. testcode:: filter-pairs
 
     builder = newton.ModelBuilder()
     
@@ -395,7 +411,19 @@ Broad Phase and Shape Compatibility
    * - **EXPLICIT**
      - Uses precomputed shape pairs (default). Combines static pair efficiency with advanced contact algorithms.
 
-.. code-block:: python
+.. testsetup:: broad-phase
+
+    import warp as wp
+    import newton
+
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    body = builder.add_body(xform=wp.transform((0.0, 0.0, 2.0), wp.quat_identity()))
+    builder.add_shape_sphere(body, radius=0.5)
+    model = builder.finalize()
+    state = model.state()
+
+.. testcode:: broad-phase
 
     from newton import CollisionPipeline
 
@@ -712,6 +740,12 @@ with convex hulls, bounding boxes, or convex decompositions:
 Supported methods: ``"convex_hull"`` (default), ``"bounding_box"``, ``"bounding_sphere"``,
 ``"coacd"`` (convex decomposition), ``"vhacd"``.
 
+.. note::
+   ``approximate_meshes()`` modifies the builder's shape geometry in-place. By default
+   (``keep_visual_shapes=False``), the original mesh is replaced for both collision and
+   rendering. Pass ``keep_visual_shapes=True`` to preserve the original mesh as a
+   visual-only shape alongside the simplified collision shape.
+
 .. _Contact Reduction:
 
 Contact Reduction
@@ -731,7 +765,19 @@ To disable reduction, set ``reduce_contacts=False`` when creating the pipeline.
 
 For hydroelastic and SDF-based contacts, use :class:`~newton.geometry.HydroelasticSDF.Config` to tune reduction behavior:
 
-.. code-block:: python
+.. testsetup:: hydro-config
+
+    import warp as wp
+    import newton
+    from newton import CollisionPipeline
+
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    body = builder.add_body(xform=wp.transform((0.0, 0.0, 2.0), wp.quat_identity()))
+    builder.add_shape_sphere(body, radius=0.5)
+    model = builder.finalize()
+
+.. testcode:: hydro-config
 
     from newton.geometry import HydroelasticSDF
 
@@ -863,8 +909,9 @@ by ``margin_a + margin_b``.
 The :meth:`~newton.ModelBuilder.ShapeConfig.configure_sdf` helper sets SDF and hydroelastic
 options in one call:
 
-.. code-block:: python
+.. testcode:: configure-sdf
 
+    builder = newton.ModelBuilder()
     cfg = builder.ShapeConfig()
     cfg.configure_sdf(max_resolution=64, is_hydroelastic=True, kh=1.0e11)
 
@@ -893,7 +940,7 @@ Common Patterns
 
 Use ``body=-1`` to attach shapes to the static world frame:
 
-.. code-block:: python
+.. testcode:: static-geometry
 
     builder = newton.ModelBuilder()
     
@@ -903,13 +950,12 @@ Use ``body=-1`` to attach shapes to the static world frame:
     # Or manually create static shapes
     builder.add_shape_plane(body=-1, xform=wp.transform_identity())
     builder.add_shape_box(body=-1, hx=5.0, hy=5.0, hz=0.1)  # Static floor
-    builder.add_shape_mesh(body=-1, mesh=terrain_mesh)      # Static terrain
 
 **Setting default shape configuration**
 
 Use ``builder.default_shape_cfg`` to set defaults for all shapes:
 
-.. code-block:: python
+.. testcode:: default-shape-cfg
 
     builder = newton.ModelBuilder()
     
@@ -924,9 +970,31 @@ Use ``builder.default_shape_cfg`` to set defaults for all shapes:
 
 There are two common patterns for when to call ``collide`` relative to the substep loop:
 
+.. testsetup:: sim-loop
+
+    import warp as wp
+    import newton
+    from newton import CollisionPipeline
+
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    body = builder.add_body(xform=wp.transform((0.0, 0.0, 2.0), wp.quat_identity()))
+    builder.add_shape_sphere(body, radius=0.5)
+    model = builder.finalize()
+    solver = newton.solvers.SolverXPBD(model, iterations=5)
+    pipeline = CollisionPipeline(model, broad_phase="sap")
+    state_0 = model.state()
+    state_1 = model.state()
+    control = model.control()
+    contacts = model.contacts()
+    num_frames = 2
+    sim_substeps = 3
+    sim_dt = 1.0 / 60.0 / sim_substeps
+    collide_every_n = 2
+
 *Every substep* (most accurate, used by most basic examples):
 
-.. code-block:: python
+.. testcode:: sim-loop
 
     for frame in range(num_frames):
         for substep in range(sim_substeps):
@@ -936,7 +1004,7 @@ There are two common patterns for when to call ``collide`` relative to the subst
 
 *Once per frame* (faster, common for hydroelastic/SDF-heavy scenes):
 
-.. code-block:: python
+.. testcode:: sim-loop
 
     for frame in range(num_frames):
         contacts = model.collide(state_0, collision_pipeline=pipeline)
@@ -946,7 +1014,7 @@ There are two common patterns for when to call ``collide`` relative to the subst
 
 You can also run collision every N substeps for a middle ground:
 
-.. code-block:: python
+.. testcode:: sim-loop
 
     for frame in range(num_frames):
         for substep in range(sim_substeps):
@@ -1035,7 +1103,19 @@ and is consumed by the solver :meth:`~newton.solvers.SolverBase.step` method for
 
 Example usage:
 
-.. code-block:: python
+.. testsetup:: contact-data
+
+    import warp as wp
+    import newton
+
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    body = builder.add_body(xform=wp.transform((0.0, 0.0, 2.0), wp.quat_identity()))
+    builder.add_shape_sphere(body, radius=0.5)
+    model = builder.finalize()
+    state = model.state()
+
+.. testcode:: contact-data
 
     contacts = model.contacts()
     model.collide(state, contacts)
@@ -1058,7 +1138,19 @@ Creating and Populating Contacts
 :class:`~newton.CollisionPipeline` (EXPLICIT broad phase, cached on first call).
 :meth:`~newton.Model.collide` populates it and returns the :class:`~newton.Contacts` object:
 
-.. code-block:: python
+.. testsetup:: creating-contacts
+
+    import warp as wp
+    import newton
+
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    body = builder.add_body(xform=wp.transform((0.0, 0.0, 2.0), wp.quat_identity()))
+    builder.add_shape_sphere(body, radius=0.5)
+    model = builder.finalize()
+    state = model.state()
+
+.. testcode:: creating-contacts
 
     contacts = model.contacts()
     model.collide(state, contacts)
@@ -1068,7 +1160,7 @@ The contacts buffer can be reused across steps -- ``collide`` clears it each tim
 Both methods accept an optional ``collision_pipeline`` keyword to override the default
 pipeline. When ``contacts`` is omitted from ``collide``, a buffer is allocated automatically:
 
-.. code-block:: python
+.. testcode:: creating-contacts
 
     from newton import CollisionPipeline
 
@@ -1117,8 +1209,10 @@ When ``is_hydroelastic=True`` on **both** shapes in a pair, the system generates
 - For non-unit shape scale, the attached SDF must be scale-baked
 - Only volumetric shapes supported (not planes, heightfields, or non-watertight meshes)
 
-.. code-block:: python
+.. testcode:: hydroelastic
 
+    builder = newton.ModelBuilder()
+    body = builder.add_body()
     cfg = builder.ShapeConfig(
         is_hydroelastic=True,   # Opt-in to hydroelastic contacts
         sdf_max_resolution=64,  # Required for hydroelastic
@@ -1144,7 +1238,7 @@ Hydroelastic memory can be tuned with ``buffer_fraction`` on
 and hydroelastic face-contact buffer allocations as a fraction of the worst-case
 size. Lower values reduce memory usage but also reduce overflow headroom.
 
-.. code-block:: python
+.. testcode:: hydro-buffer
 
     from newton.geometry import HydroelasticSDF
 
@@ -1238,8 +1332,9 @@ Shape material properties control contact resolution. Configure via :class:`~new
 
 Example:
 
-.. code-block:: python
+.. testcode:: material-config
 
+    builder = newton.ModelBuilder()
     cfg = builder.ShapeConfig(
         mu=0.8,           # High friction
         ke=1.0e6,         # Stiff contact
@@ -1471,7 +1566,7 @@ See Also
 
 **Imports:**
 
-.. code-block:: python
+.. testcode:: see-also-imports
 
     import newton
     from newton import (
