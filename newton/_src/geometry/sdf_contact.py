@@ -695,7 +695,15 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
 
             synchronize()  # Ensure all threads have read base_tri_idx before any writes
             add_to_shared_buffer_atomic(
-                thread_id, add_triangle, tri_idx, buffer, v0, v1, v2, vertex_cache, 0,
+                thread_id,
+                add_triangle,
+                tri_idx,
+                buffer,
+                v0,
+                v1,
+                v2,
+                vertex_cache,
+                0,
             )
             # add_to_shared_buffer_atomic ends with sync, buffer is consistent for next while check
 

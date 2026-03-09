@@ -568,7 +568,6 @@ def _sample_texture_at_cell(
         return apply_subgrid_sdf_scale(raw_val, sdf.subgrids_min_sdf_value, sdf.subgrids_sdf_value_range)
 
 
-
 @wp.func
 def texture_sample_sdf(
     sdf: TextureSDFData,
@@ -1289,11 +1288,13 @@ def create_texture_sdf_from_volume(
         rem = idx - z_block * bg_size_x * bg_size_y
         y_block = rem // bg_size_x
         x_block = rem - y_block * bg_size_x
-        bg_positions[idx] = min_ext + np.array([
-            float(x_block * subgrid_size) * cell_size[0],
-            float(y_block * subgrid_size) * cell_size[1],
-            float(z_block * subgrid_size) * cell_size[2],
-        ])
+        bg_positions[idx] = min_ext + np.array(
+            [
+                float(x_block * subgrid_size) * cell_size[0],
+                float(y_block * subgrid_size) * cell_size[1],
+                float(z_block * subgrid_size) * cell_size[2],
+            ]
+        )
 
     bg_positions_gpu = wp.array(bg_positions, dtype=wp.vec3, device=device)
     bg_sdf_gpu = wp.zeros(total_bg, dtype=float, device=device)
@@ -1368,16 +1369,16 @@ def create_texture_sdf_from_volume(
                             gx = bx * subgrid_size + lx
                             gy = by * subgrid_size + ly
                             gz = bz * subgrid_size + lz
-                            pos = min_ext + np.array([
-                                float(gx) * cell_size[0],
-                                float(gy) * cell_size[1],
-                                float(gz) * cell_size[2],
-                            ])
+                            pos = min_ext + np.array(
+                                [
+                                    float(gx) * cell_size[0],
+                                    float(gy) * cell_size[1],
+                                    float(gz) * cell_size[2],
+                                ]
+                            )
                             all_positions.append(pos)
 
-            all_positions_gpu = wp.array(
-                np.array(all_positions, dtype=np.float32), dtype=wp.vec3, device=device
-            )
+            all_positions_gpu = wp.array(np.array(all_positions, dtype=np.float32), dtype=wp.vec3, device=device)
             all_sdf_gpu = wp.zeros(len(all_positions), dtype=float, device=device)
             wp.launch(
                 _sample_volume_at_positions_kernel,
@@ -1399,11 +1400,7 @@ def create_texture_sdf_from_volume(
                 for lz in range(samples_per_dim_lin):
                     for ly in range(samples_per_dim_lin):
                         for lx in range(samples_per_dim_lin):
-                            local_idx = (
-                                lz * samples_per_dim_lin * samples_per_dim_lin
-                                + ly * samples_per_dim_lin
-                                + lx
-                            )
+                            local_idx = lz * samples_per_dim_lin * samples_per_dim_lin + ly * samples_per_dim_lin + lx
                             vol_val = all_sdf_np[base + local_idx]
 
                             cfx = float(bx_i) + float(lx) * s_inv
@@ -1498,11 +1495,13 @@ def create_texture_sdf_from_volume(
                         gx = sg_x * subgrid_size + lx
                         gy = sg_y * subgrid_size + ly
                         gz = sg_z * subgrid_size + lz
-                        pos = min_ext + np.array([
-                            float(gx) * cell_size[0],
-                            float(gy) * cell_size[1],
-                            float(gz) * cell_size[2],
-                        ])
+                        pos = min_ext + np.array(
+                            [
+                                float(gx) * cell_size[0],
+                                float(gy) * cell_size[1],
+                                float(gz) * cell_size[2],
+                            ]
+                        )
                         tex_x = addr_x * samples_per_dim + lx
                         tex_y = addr_y * samples_per_dim + ly
                         tex_z = addr_z * samples_per_dim + lz

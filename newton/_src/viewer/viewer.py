@@ -195,8 +195,7 @@ class ViewerBase(ABC):
 
         slots = (
             self.model.texture_sdf_subgrid_start_slots[sdf_idx]
-            if hasattr(self.model, "texture_sdf_subgrid_start_slots")
-            and self.model.texture_sdf_subgrid_start_slots
+            if hasattr(self.model, "texture_sdf_subgrid_start_slots") and self.model.texture_sdf_subgrid_start_slots
             else None
         )
         if slots is None:

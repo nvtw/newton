@@ -28,7 +28,6 @@ import warp as wp
 
 import newton
 from newton import Mesh
-from newton._src.geometry.sdf_utils import sample_sdf_extrapolated, sample_sdf_grad_extrapolated
 from newton._src.geometry.sdf_texture import (
     QuantizationMode,
     TextureSDFData,
@@ -37,7 +36,7 @@ from newton._src.geometry.sdf_texture import (
     texture_sample_sdf,
     texture_sample_sdf_grad,
 )
-from newton._src.geometry.sdf_utils import SDFData
+from newton._src.geometry.sdf_utils import SDFData, sample_sdf_extrapolated, sample_sdf_grad_extrapolated
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
 
 _cuda_available = wp.is_cuda_available()
@@ -473,9 +472,7 @@ def test_texture_sdf_in_model(test, device):
 
     # Both entries should have valid coarse textures (not empty)
     for idx in range(2):
-        test.assertGreater(
-            model.texture_sdf_coarse_textures[idx].width, 0, f"texture_sdf_data[{idx}] is empty"
-        )
+        test.assertGreater(model.texture_sdf_coarse_textures[idx].width, 0, f"texture_sdf_data[{idx}] is empty")
 
     # Texture references should be kept alive
     test.assertEqual(len(model.texture_sdf_coarse_textures), 2)

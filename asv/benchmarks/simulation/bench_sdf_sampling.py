@@ -26,9 +26,8 @@ from asv_runner.benchmarks.mark import skip_benchmark_if
 wp.config.quiet = True
 
 from newton import Mesh
-from newton._src.geometry.sdf_utils import sample_sdf_extrapolated, sample_sdf_grad_extrapolated
 from newton._src.geometry.sdf_texture import TextureSDFData, texture_sample_sdf, texture_sample_sdf_grad
-from newton._src.geometry.sdf_utils import SDF, SDFData
+from newton._src.geometry.sdf_utils import SDF, SDFData, sample_sdf_extrapolated, sample_sdf_grad_extrapolated
 
 
 # ---------------------------------------------------------------------------
@@ -100,12 +99,42 @@ def _create_box_mesh(half_extents=(0.5, 0.5, 0.5)):
     )
     indices = np.array(
         [
-            0, 2, 1, 0, 3, 2,
-            4, 5, 6, 4, 6, 7,
-            0, 1, 5, 0, 5, 4,
-            2, 3, 7, 2, 7, 6,
-            0, 4, 7, 0, 7, 3,
-            1, 2, 6, 1, 6, 5,
+            0,
+            2,
+            1,
+            0,
+            3,
+            2,
+            4,
+            5,
+            6,
+            4,
+            6,
+            7,
+            0,
+            1,
+            5,
+            0,
+            5,
+            4,
+            2,
+            3,
+            7,
+            2,
+            7,
+            6,
+            0,
+            4,
+            7,
+            0,
+            7,
+            3,
+            1,
+            2,
+            6,
+            1,
+            6,
+            5,
         ],
         dtype=np.int32,
     )
@@ -158,10 +187,30 @@ class FastSDFSampling:
         self.out_grad = wp.zeros(NUM_QUERY_POINTS, dtype=wp.vec3, device=device)
 
         # Warm-up: compile all four kernels
-        wp.launch(_bench_nanovdb_distance, dim=NUM_QUERY_POINTS, inputs=[self.sdf_data, self.positions, self.out_dist], device=device)
-        wp.launch(_bench_nanovdb_grad, dim=NUM_QUERY_POINTS, inputs=[self.sdf_data, self.positions, self.out_dist, self.out_grad], device=device)
-        wp.launch(_bench_texture_distance, dim=NUM_QUERY_POINTS, inputs=[self.tex_data, self.positions, self.out_dist], device=device)
-        wp.launch(_bench_texture_grad, dim=NUM_QUERY_POINTS, inputs=[self.tex_data, self.positions, self.out_dist, self.out_grad], device=device)
+        wp.launch(
+            _bench_nanovdb_distance,
+            dim=NUM_QUERY_POINTS,
+            inputs=[self.sdf_data, self.positions, self.out_dist],
+            device=device,
+        )
+        wp.launch(
+            _bench_nanovdb_grad,
+            dim=NUM_QUERY_POINTS,
+            inputs=[self.sdf_data, self.positions, self.out_dist, self.out_grad],
+            device=device,
+        )
+        wp.launch(
+            _bench_texture_distance,
+            dim=NUM_QUERY_POINTS,
+            inputs=[self.tex_data, self.positions, self.out_dist],
+            device=device,
+        )
+        wp.launch(
+            _bench_texture_grad,
+            dim=NUM_QUERY_POINTS,
+            inputs=[self.tex_data, self.positions, self.out_dist, self.out_grad],
+            device=device,
+        )
         wp.synchronize_device()
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
