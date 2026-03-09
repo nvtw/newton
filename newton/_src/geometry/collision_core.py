@@ -23,7 +23,14 @@ from ..core.types import vec5
 from .broad_phase_common import binary_search
 from .collision_convex import create_solve_convex_multi_contact, create_solve_convex_single_contact
 from .contact_data import ContactData
-from .support_function import GenericShapeData, GeoTypeEx, SupportMapDataProvider, pack_mesh_ptr, support_map
+from .support_function import (
+    GenericShapeData,
+    GeoTypeEx,
+    SupportMapDataProvider,
+    pack_mesh_ptr,
+    support_map,
+    unpack_mesh_ptr,
+)
 from .types import GeoType
 
 # Configuration flag for multi-contact generation
@@ -393,29 +400,64 @@ def compute_tight_aabb_from_support(
     # Compute AABB extents by evaluating support function in local space
     # Dot products are done in local space to avoid expensive rotations
 
-    # Max X: support along +local_x, dot in local space
-    support_point = support_map(shape_data, local_x, data_provider)
-    max_x = wp.dot(local_x, support_point)
+    min_x = float(0.0)
+    max_x = float(0.0)
+    min_y = float(0.0)
+    max_y = float(0.0)
+    min_z = float(0.0)
+    max_z = float(0.0)
 
-    # Max Y: support along +local_y, dot in local space
-    support_point = support_map(shape_data, local_y, data_provider)
-    max_y = wp.dot(local_y, support_point)
+    if shape_data.shape_type == GeoType.CONVEX_MESH:
+        # Single-pass AABB: iterate over vertices once, project onto all 3 axes.
+        # This replaces 6 separate support_map calls (each iterating all vertices)
+        # with 1 pass that computes min/max projections simultaneously.
+        mesh_ptr = unpack_mesh_ptr(shape_data.auxiliary)
+        mesh = wp.mesh_get(mesh_ptr)
+        mesh_scale = shape_data.scale
+        num_verts = mesh.points.shape[0]
 
-    # Max Z: support along +local_z, dot in local space
-    support_point = support_map(shape_data, local_z, data_provider)
-    max_z = wp.dot(local_z, support_point)
+        # Pre-scale axes: dot(local_axis, scale*v) == dot(scale*local_axis, v)
+        scaled_x = wp.cw_mul(local_x, mesh_scale)
+        scaled_y = wp.cw_mul(local_y, mesh_scale)
+        scaled_z = wp.cw_mul(local_z, mesh_scale)
 
-    # Min X: support along -local_x, dot in local space
-    support_point = support_map(shape_data, -local_x, data_provider)
-    min_x = wp.dot(local_x, support_point)
+        min_x = float(1.0e10)
+        max_x = float(-1.0e10)
+        min_y = float(1.0e10)
+        max_y = float(-1.0e10)
+        min_z = float(1.0e10)
+        max_z = float(-1.0e10)
 
-    # Min Y: support along -local_y, dot in local space
-    support_point = support_map(shape_data, -local_y, data_provider)
-    min_y = wp.dot(local_y, support_point)
+        for i in range(num_verts):
+            p = mesh.points[i]
+            vx = wp.dot(p, scaled_x)
+            vy = wp.dot(p, scaled_y)
+            vz = wp.dot(p, scaled_z)
+            min_x = wp.min(min_x, vx)
+            max_x = wp.max(max_x, vx)
+            min_y = wp.min(min_y, vy)
+            max_y = wp.max(max_y, vy)
+            min_z = wp.min(min_z, vz)
+            max_z = wp.max(max_z, vz)
+    else:
+        # Generic path: 6 support evaluations for other shape types (all O(1))
+        support_point = support_map(shape_data, local_x, data_provider)
+        max_x = wp.dot(local_x, support_point)
 
-    # Min Z: support along -local_z, dot in local space
-    support_point = support_map(shape_data, -local_z, data_provider)
-    min_z = wp.dot(local_z, support_point)
+        support_point = support_map(shape_data, local_y, data_provider)
+        max_y = wp.dot(local_y, support_point)
+
+        support_point = support_map(shape_data, local_z, data_provider)
+        max_z = wp.dot(local_z, support_point)
+
+        support_point = support_map(shape_data, -local_x, data_provider)
+        min_x = wp.dot(local_x, support_point)
+
+        support_point = support_map(shape_data, -local_y, data_provider)
+        min_y = wp.dot(local_y, support_point)
+
+        support_point = support_map(shape_data, -local_z, data_provider)
+        min_z = wp.dot(local_z, support_point)
 
     # AABB in world space (add world position to extents)
     aabb_min = wp.vec3(min_x, min_y, min_z) + center_pos
