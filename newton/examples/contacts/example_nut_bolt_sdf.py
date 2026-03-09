@@ -22,9 +22,6 @@
 #
 ###########################################################################
 
-import time
-from collections import defaultdict
-
 import numpy as np
 import trimesh
 import warp as wp
@@ -107,7 +104,6 @@ class Example:
 
         self.world_count = args.world_count
         self.viewer = viewer
-        self.scene = "nut_bolt"
         self.solver_type = args.solver
         self.test_mode = args.test
 
@@ -200,210 +196,8 @@ class Example:
 
         # Initialize test tracking data (only in test mode for nut_bolt scene)
         self._init_test_tracking()
-        self._init_nut_progress_tracking()
 
-        # CUDA graph launches do not provide per-kernel timings.
-        # Keep direct simulation path enabled so timing_begin/timing_end captures kernels.
-        if self.enable_kernel_timing:
-            self.graph = None
-        else:
-            self.capture()
-
-    @staticmethod
-    def _yaw_from_quat_xyzw(quat_xyzw: np.ndarray) -> float:
-        """Return world-frame yaw angle [rad] from quaternion [x, y, z, w]."""
-        x, y, z, w = quat_xyzw
-        return float(np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
-
-    def _find_nut_body_indices_and_labels(self) -> tuple[list[int], list[str]]:
-        """Collect body indices and labels for all nuts across all worlds."""
-        nut_indices = []
-        nut_labels = []
-        for body_idx, label in enumerate(self.model.body_label):
-            if label == "nut_0_0" or label.startswith("nut_") or "/nut_" in label:
-                nut_indices.append(body_idx)
-                nut_labels.append(label)
-        return nut_indices, nut_labels
-
-    def _init_nut_progress_tracking(self):
-        """Initialize periodic nut motion consistency checks."""
-        self.step_count = 0
-        self.max_sim_steps = 2000
-        self.enable_kernel_timing = True
-        self._terminate_requested = False
-        self._exit_report_printed = False
-        self.nut_log_period_steps = 60
-        self.nut_motion_check_period_dt = self.nut_log_period_steps * self.frame_dt
-        self.last_perf_step = 0
-        self.last_perf_time = time.perf_counter()
-        self._timing_totals: dict[str, list[float]] = defaultdict(list)
-        self._timing_frame_count = 0
-
-        # Tolerances for consistency checks every 60 steps:
-        # deviation tolerance = absolute + relative * |expected|
-        self.nut_rot_speed_abs_tol_deg_s = 30.0
-        self.nut_rot_speed_rel_tol = 0.35
-        self.nut_z_speed_abs_tol_m_s = 0.10
-        self.nut_z_speed_rel_tol = 0.40
-
-        if self.scene != "nut_bolt":
-            self.nut_log_indices = []
-            self.nut_log_labels = []
-            self.nut_prev_yaw = np.array([], dtype=np.float64)
-            self.nut_cumulative_yaw = np.array([], dtype=np.float64)
-            self.nut_current_z = np.array([], dtype=np.float64)
-            self.nut_last_check_angle = np.array([], dtype=np.float64)
-            self.nut_last_check_z = np.array([], dtype=np.float64)
-            return
-
-        self.nut_log_indices, self.nut_log_labels = self._find_nut_body_indices_and_labels()
-
-        if not self.nut_log_indices:
-            self.nut_prev_yaw = np.array([], dtype=np.float64)
-            self.nut_cumulative_yaw = np.array([], dtype=np.float64)
-            self.nut_current_z = np.array([], dtype=np.float64)
-            self.nut_last_check_angle = np.array([], dtype=np.float64)
-            self.nut_last_check_z = np.array([], dtype=np.float64)
-            return
-
-        body_q = self.state_0.body_q.numpy()
-        initial_yaw = []
-        initial_z = []
-        for idx in self.nut_log_indices:
-            pose = body_q[idx]
-            initial_yaw.append(self._yaw_from_quat_xyzw(pose[3:7]))
-            initial_z.append(float(pose[2]))
-
-        self.nut_prev_yaw = np.array(initial_yaw, dtype=np.float64)
-        self.nut_cumulative_yaw = np.zeros_like(self.nut_prev_yaw)
-        self.nut_current_z = np.array(initial_z, dtype=np.float64)
-        self.nut_last_check_angle = self.nut_cumulative_yaw.copy()
-        self.nut_last_check_z = self.nut_current_z.copy()
-
-    def _update_nut_motion_tracking(self):
-        """Accumulate per-nut yaw and z tracking at each simulation step."""
-        if self.scene != "nut_bolt" or len(self.nut_log_indices) == 0:
-            return
-
-        body_q = self.state_0.body_q.numpy()
-        for i, idx in enumerate(self.nut_log_indices):
-            pose = body_q[idx]
-            yaw = self._yaw_from_quat_xyzw(pose[3:7])
-
-            # Unwrap yaw increment so accumulated angle can exceed +/-180 deg.
-            delta = np.arctan2(np.sin(yaw - self.nut_prev_yaw[i]), np.cos(yaw - self.nut_prev_yaw[i]))
-            self.nut_cumulative_yaw[i] += delta
-            self.nut_prev_yaw[i] = yaw
-            self.nut_current_z[i] = float(pose[2])
-
-    def _check_nut_motion_progress(self):
-        """Check nut rotation/downward speeds and print only outliers."""
-        if self.scene != "nut_bolt" or self.step_count % self.nut_log_period_steps != 0:
-            return
-
-        if len(self.nut_log_indices) == 0:
-            return
-
-        if self.nut_motion_check_period_dt <= 0.0:
-            return
-
-        rot_speed_deg_s = np.degrees(
-            (self.nut_cumulative_yaw - self.nut_last_check_angle) / self.nut_motion_check_period_dt
-        )
-        z_speed_m_s = (self.nut_current_z - self.nut_last_check_z) / self.nut_motion_check_period_dt
-
-        expected_rot_speed = float(np.median(rot_speed_deg_s))
-        expected_z_speed = float(np.median(z_speed_m_s))
-
-        rot_tol = self.nut_rot_speed_abs_tol_deg_s + self.nut_rot_speed_rel_tol * abs(expected_rot_speed)
-        z_tol = self.nut_z_speed_abs_tol_m_s + self.nut_z_speed_rel_tol * abs(expected_z_speed)
-
-        deviating_nuts = []
-        for i, label in enumerate(self.nut_log_labels):
-            rot_dev = float(rot_speed_deg_s[i] - expected_rot_speed)
-            z_dev = float(z_speed_m_s[i] - expected_z_speed)
-            if abs(rot_dev) > rot_tol or abs(z_dev) > z_tol:
-                deviating_nuts.append((label, rot_speed_deg_s[i], rot_dev, z_speed_m_s[i], z_dev))
-
-        if deviating_nuts:
-            lines = [
-                (
-                    f"[step {self.step_count}] Nut motion deviation: {len(deviating_nuts)} / "
-                    f"{len(self.nut_log_labels)} nuts outside tolerance"
-                ),
-                (
-                    "  expected: "
-                    f"rot={expected_rot_speed:.2f} deg/s +/- {rot_tol:.2f}, "
-                    f"z={expected_z_speed:.5f} m/s +/- {z_tol:.5f}"
-                ),
-            ]
-            for label, rot_speed, rot_dev, z_speed, z_dev in deviating_nuts:
-                lines.append(
-                    "  "
-                    + (
-                        f"{label}: rot={float(rot_speed):.2f} deg/s (dev={rot_dev:+.2f}), "
-                        f"z={float(z_speed):.5f} m/s (dev={z_dev:+.5f})"
-                    )
-                )
-            print("\n".join(lines))
-
-        self.nut_last_check_angle = self.nut_cumulative_yaw.copy()
-        self.nut_last_check_z = self.nut_current_z.copy()
-
-    def _report_steps_per_second(self):
-        """Report simulation throughput in steps per second every check period."""
-        if self.step_count % self.nut_log_period_steps != 0:
-            return
-
-        now = time.perf_counter()
-        elapsed = now - self.last_perf_time
-        steps_elapsed = self.step_count - self.last_perf_step
-        if elapsed > 0.0 and steps_elapsed > 0:
-            steps_per_second = steps_elapsed / elapsed
-            print(f"[step {self.step_count}] throughput={steps_per_second:.2f} steps/s")
-
-        self.last_perf_step = self.step_count
-        self.last_perf_time = now
-
-    def _print_exit_benchmark_report(self):
-        """Print kernel timing summary and peak memory usage before exit."""
-        if self._exit_report_printed:
-            return
-        self._exit_report_printed = True
-
-        if self._timing_frame_count > 0:
-            frame_count = self._timing_frame_count
-            width = 110
-            kernel_width = width - 30
-            print(f"\n{'=' * width}")
-            print(f"  Kernel timing report ({frame_count} frames)")
-            print(f"{'=' * width}")
-            print(f"{'Kernel':<{kernel_width}} {'Total ms':>10} {'Avg ms':>10} {'Count':>7}")
-            print(f"{'-' * kernel_width} {'-' * 10} {'-' * 10} {'-' * 7}")
-
-            grand_total = 0.0
-            rows = []
-            for name, times in self._timing_totals.items():
-                total = float(sum(times))
-                grand_total += total
-                rows.append((total, name, total / len(times), len(times)))
-            rows.sort(key=lambda row: row[0], reverse=True)
-
-            for total, name, avg, count in rows:
-                label = name if len(name) <= kernel_width else name[: kernel_width - 3] + "..."
-                print(f"{label:<{kernel_width}} {total:>10.3f} {avg:>10.4f} {count:>7}")
-
-            print(f"{'-' * kernel_width} {'-' * 10}")
-            print(f"{'TOTAL':<{kernel_width}} {grand_total:>10.3f}")
-            print(f"{'Per-frame average':<{kernel_width}} {grand_total / frame_count:>10.3f}")
-            print()
-
-        device = wp.get_device()
-        if device.is_cuda and wp.is_mempool_enabled(device):
-            peak_bytes = wp.get_mempool_used_mem_high(device)
-            print(f"Warp mempool peak usage: {peak_bytes / (1024 * 1024):.2f} MiB")
-        else:
-            print("Warp mempool peak usage: unavailable (non-CUDA or mempool disabled)")
+        self.capture()
 
     def _build_nut_bolt_scene(self) -> newton.ModelBuilder:
         print("Downloading nut/bolt assets...")
@@ -483,37 +277,17 @@ class Example:
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
-        if self.enable_kernel_timing:
-            wp.timing_begin(cuda_filter=wp.TIMING_KERNEL | wp.TIMING_KERNEL_BUILTIN)
-            self.simulate()
-            timing_results = wp.timing_end()
-            for result in timing_results:
-                self._timing_totals[result.name].append(result.elapsed)
-            self._timing_frame_count += 1
-        elif self.graph:
+        if self.graph:
             wp.capture_launch(self.graph)
         else:
             self.simulate()
 
-        self.step_count += 1
         self.sim_time += self.frame_dt
 
         # Track transforms for test validation
         self._track_test_data()
-        self._update_nut_motion_tracking()
-        self._check_nut_motion_progress()
-        self._report_steps_per_second()
-
-        if self.step_count >= self.max_sim_steps and not self._terminate_requested:
-            self._terminate_requested = True
-            print(f"[step {self.step_count}] Reached hard stop at {self.max_sim_steps} simulation steps.")
 
     def render(self):
-        if self._terminate_requested:
-            self._print_exit_benchmark_report()
-            self.viewer.close()
-            return
-
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
         self.viewer.log_contacts(self.contacts, self.state_0)
@@ -634,4 +408,3 @@ if __name__ == "__main__":
     example = Example(viewer, args)
 
     newton.examples.run(example, args)
-    example._print_exit_benchmark_report()
