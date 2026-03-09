@@ -47,9 +47,6 @@ from ..geometry.collision_primitive import (
 from ..geometry.contact_data import SHAPE_PAIR_HFIELD_BIT, ContactData, contact_passes_gap_check
 from ..geometry.contact_reduction import (
     ContactReductionFunctions,
-    ContactStruct,
-    compute_voxel_index,
-    synchronize,
 )
 from ..geometry.contact_reduction_global import (
     GlobalContactReducer,
@@ -928,6 +925,58 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
     return narrow_phase_process_mesh_triangle_contacts_kernel
 
 
+@wp.kernel(enable_backward=False)
+def compute_mesh_plane_block_offsets(
+    shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
+    shape_pairs_mesh_plane_count: wp.array(dtype=int),
+    shape_source: wp.array(dtype=wp.uint64),
+    target_blocks: int,
+    block_offsets: wp.array(dtype=wp.int32),
+):
+    """Compute per-pair block counts and prefix sum for mesh-plane load balancing.
+
+    Block counts are proportional to the vertex count of the mesh in each pair,
+    so pairs with denser meshes get more GPU blocks.
+
+    Args:
+        target_blocks: Desired total number of blocks (e.g., sm_count * 4).
+        block_offsets: Output array of size ``max_pairs + 1``.
+            ``block_offsets[i]`` is the cumulative block count up to pair *i*.
+    """
+    tid = wp.tid()
+    if tid > 0:
+        return
+    pair_count = wp.min(shape_pairs_mesh_plane_count[0], shape_pairs_mesh_plane.shape[0])
+
+    # First pass: sum vertex counts across all pairs
+    total_verts = int(0)
+    for i in range(pair_count):
+        pair = shape_pairs_mesh_plane[i]
+        mesh_shape = pair[0]
+        mesh_id = shape_source[mesh_shape]
+        if mesh_id != wp.uint64(0):
+            total_verts += wp.mesh_get(mesh_id).points.shape[0]
+
+    # Compute target vertices per block
+    verts_per_block = int(total_verts)
+    if target_blocks > 0 and total_verts > 0:
+        verts_per_block = wp.max(256, total_verts // target_blocks)
+
+    # Second pass: compute per-pair block counts and prefix sum
+    offset = int(0)
+    for i in range(pair_count):
+        block_offsets[i] = offset
+        pair = shape_pairs_mesh_plane[i]
+        mesh_shape = pair[0]
+        mesh_id = shape_source[mesh_shape]
+        pair_verts = int(0)
+        if mesh_id != wp.uint64(0):
+            pair_verts = wp.mesh_get(mesh_id).points.shape[0]
+        blocks = wp.max(1, (pair_verts + verts_per_block - 1) // verts_per_block)
+        offset += blocks
+    block_offsets[pair_count] = offset
+
+
 def create_narrow_phase_process_mesh_plane_contacts_kernel(
     writer_func: Any,
     contact_reduction_funcs: ContactReductionFunctions | None = None,
@@ -1048,54 +1097,51 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
     if contact_reduction_funcs is None:
         return narrow_phase_process_mesh_plane_contacts_kernel
 
-    # Extract functions and constants from the contact reduction configuration
-
-    reduction_slot_count = contact_reduction_funcs.reduction_slot_count
-    store_reduced_contact_func = contact_reduction_funcs.store_reduced_contact
-    get_smem_slots_plus_1 = contact_reduction_funcs.get_smem_slots_plus_1
-    get_smem_slots_contacts = contact_reduction_funcs.get_smem_slots_contacts
-
     @wp.kernel(enable_backward=False, module="unique")
     def narrow_phase_process_mesh_plane_contacts_reduce_kernel(
         shape_data: wp.array(dtype=wp.vec4),
         shape_transform: wp.array(dtype=wp.transform),
         shape_source: wp.array(dtype=wp.uint64),
         shape_gap: wp.array(dtype=float),
-        shape_collision_aabb_lower: wp.array(dtype=wp.vec3),
-        shape_collision_aabb_upper: wp.array(dtype=wp.vec3),
-        shape_voxel_resolution: wp.array(dtype=wp.vec3i),
+        _shape_collision_aabb_lower: wp.array(dtype=wp.vec3),
+        _shape_collision_aabb_upper: wp.array(dtype=wp.vec3),
+        _shape_voxel_resolution: wp.array(dtype=wp.vec3i),
         shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
         shape_pairs_mesh_plane_count: wp.array(dtype=int),
+        block_offsets: wp.array(dtype=wp.int32),
         writer_data: Any,
         total_num_blocks: int,
     ):
-        """
-        Process mesh-plane collisions with contact reduction.
+        """Process mesh-plane collisions with dynamic load balancing.
 
-        Each thread block handles one mesh-plane pair. Threads cooperatively iterate
-        over all vertices of the mesh, generate contacts, and reduce them using
-        shared memory contact reduction. Uses grid stride loop to handle more pairs
-        than available blocks.
+        Multiple GPU blocks can be assigned to the same mesh-plane pair
+        based on vertex count.  Contacts are written directly to the
+        global contact reducer buffer via ``writer_func``; reduction into
+        the hashtable happens in a separate pass.  This avoids per-block
+        shared-memory reduction and unifies the contact reduction path
+        with the one used for mesh-mesh contacts.
         """
         block_id, t = wp.tid()
 
         pair_count = shape_pairs_mesh_plane_count[0]
+        total_combos = block_offsets[pair_count]
 
-        # Initialize shared memory buffers for contact reduction (reused across pairs)
-        empty_marker = -1000000000.0
-        active_contacts_shared_mem = wp.array(
-            ptr=wp.static(get_smem_slots_plus_1)(),
-            shape=(wp.static(reduction_slot_count) + 1,),
-            dtype=wp.int32,
-        )
-        contacts_shared_mem = wp.array(
-            ptr=wp.static(get_smem_slots_contacts)(),
-            shape=(wp.static(reduction_slot_count),),
-            dtype=ContactStruct,
-        )
+        # Grid stride loop over (pair, sub-block) combos for multi-block load balancing.
+        for combo_idx in range(block_id, total_combos, total_num_blocks):
+            # Binary search block_offsets to find the pair for this block
+            lo = int(0)
+            hi = int(pair_count)
+            while lo < hi:
+                mid = (lo + hi) // 2
+                if block_offsets[mid + 1] <= combo_idx:
+                    lo = mid + 1
+                else:
+                    hi = mid
+            pair_idx = int(lo)
+            pair_block_start = block_offsets[pair_idx]
+            block_in_pair = combo_idx - pair_block_start
+            blocks_for_pair = block_offsets[pair_idx + 1] - pair_block_start
 
-        # Grid stride loop over mesh-plane pairs
-        for pair_idx in range(block_id, pair_count, total_num_blocks):
             # Get the mesh-plane pair
             pair = shape_pairs_mesh_plane[pair_idx]
             mesh_shape = pair[0]
@@ -1109,20 +1155,19 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
             mesh_obj = wp.mesh_get(mesh_id)
             num_vertices = mesh_obj.points.shape[0]
 
+            # Compute vertex range for this sub-block
+            chunk_size = (num_vertices + blocks_for_pair - 1) // blocks_for_pair
+            vert_start = block_in_pair * chunk_size
+            vert_end = wp.min(vert_start + chunk_size, num_vertices)
+
             # Get mesh world transform
             X_mesh_ws = shape_transform[mesh_shape]
-            X_ws_mesh = wp.transform_inverse(X_mesh_ws)  # World to mesh local
-
-            # Load voxel binning data for mesh
-            aabb_lower_mesh = shape_collision_aabb_lower[mesh_shape]
-            aabb_upper_mesh = shape_collision_aabb_upper[mesh_shape]
-            voxel_res_mesh = shape_voxel_resolution[mesh_shape]
 
             # Get plane world transform
             X_plane_ws = shape_transform[plane_shape]
             X_plane_sw = wp.transform_inverse(X_plane_ws)
 
-            # Get plane normal in world space (plane normal is along local +Z, pointing upward)
+            # Get plane normal in world space (plane normal is along local +Z)
             plane_normal = wp.transform_vector(X_plane_ws, wp.vec3(0.0, 0.0, 1.0))
 
             # Get mesh scale
@@ -1139,24 +1184,14 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
             gap_plane = shape_gap[plane_shape]
             gap_sum = gap_mesh + gap_plane
 
-            # Reset contact buffer for this pair
-            for i in range(t, wp.static(reduction_slot_count), wp.block_dim()):
-                contacts_shared_mem[i].projection = empty_marker
-
-            if t == 0:
-                active_contacts_shared_mem[wp.static(reduction_slot_count)] = 0
-
-            synchronize()
-
-            # Process vertices in batches using strided loop
-
-            num_iterations = (num_vertices + wp.block_dim() - 1) // wp.block_dim()
+            # Process this block's chunk of vertices — write contacts directly
+            # to the global reducer buffer (no per-block shared memory reduction).
+            chunk_len = vert_end - vert_start
+            num_iterations = (chunk_len + wp.block_dim() - 1) // wp.block_dim()
             for i in range(num_iterations):
-                vertex_idx = i * wp.block_dim() + t
-                has_contact = wp.bool(False)
-                c = ContactStruct()
+                vertex_idx = vert_start + i * wp.block_dim() + t
 
-                if vertex_idx < num_vertices:
+                if vertex_idx < vert_end:
                     # Get vertex position in mesh local space and transform to world space
                     vertex_local = wp.cw_mul(mesh_obj.points[vertex_idx], mesh_scale)
                     vertex_world = wp.transform_point(X_mesh_ws, vertex_local)
@@ -1172,58 +1207,25 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
 
                     # Check if this vertex generates a contact
                     if distance < gap_sum + total_margin_offset:
-                        has_contact = True
-
                         # Contact position is the midpoint
                         contact_pos = (vertex_world + point_on_plane) * 0.5
 
-                        # Normal points from mesh to plane (negate plane normal since plane normal points up/away from plane)
+                        # Normal points from mesh to plane
                         contact_normal = -plane_normal
 
-                        c.position = contact_pos
-                        c.normal = contact_normal
-                        c.depth = distance
-                        c.feature = vertex_idx
-                        c.projection = empty_marker
+                        contact_data = ContactData()
+                        contact_data.contact_point_center = contact_pos
+                        contact_data.contact_normal_a_to_b = contact_normal
+                        contact_data.contact_distance = distance
+                        contact_data.radius_eff_a = 0.0
+                        contact_data.radius_eff_b = 0.0
+                        contact_data.margin_a = margin_offset_mesh
+                        contact_data.margin_b = margin_offset_plane
+                        contact_data.shape_a = mesh_shape
+                        contact_data.shape_b = plane_shape
+                        contact_data.gap_sum = gap_sum
 
-                # Compute voxel index for contact position in mesh's local space
-                voxel_idx = int(0)
-                if has_contact:
-                    point_mesh_local = wp.transform_point(X_ws_mesh, contact_pos)
-                    voxel_idx = compute_voxel_index(point_mesh_local, aabb_lower_mesh, aabb_upper_mesh, voxel_res_mesh)
-
-                # Apply contact reduction
-                store_reduced_contact_func(
-                    t, has_contact, c, contacts_shared_mem, active_contacts_shared_mem, empty_marker, voxel_idx
-                )
-
-            # Write reduced contacts to output (store_reduced_contact ends with sync)
-            num_contacts_to_keep = wp.min(
-                active_contacts_shared_mem[wp.static(reduction_slot_count)], wp.static(reduction_slot_count)
-            )
-
-            for i in range(t, num_contacts_to_keep, wp.block_dim()):
-                contact_id = active_contacts_shared_mem[i]
-                contact = contacts_shared_mem[contact_id]
-
-                # Create contact data - contacts are already in world space
-                contact_data = ContactData()
-                contact_data.contact_point_center = contact.position
-                contact_data.contact_normal_a_to_b = contact.normal
-                contact_data.contact_distance = contact.depth
-                contact_data.radius_eff_a = 0.0
-                contact_data.radius_eff_b = 0.0
-                contact_data.margin_a = margin_offset_mesh
-                contact_data.margin_b = margin_offset_plane
-                contact_data.shape_a = mesh_shape
-                contact_data.shape_b = plane_shape
-                contact_data.gap_sum = gap_sum
-
-                if writer_data.contact_count[0] < writer_data.contact_max:
-                    writer_func(contact_data, writer_data, -1)
-
-            # Ensure all threads complete before processing next pair
-            synchronize()
+                        writer_func(contact_data, writer_data, -1)
 
     return narrow_phase_process_mesh_plane_contacts_reduce_kernel
 
@@ -1592,11 +1594,19 @@ class NarrowPhase:
         if has_meshes:
             self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func)
 
-            # Create mesh-plane and mesh-mesh kernels (contact_reduction_funcs=None disables reduction)
-            self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(
-                writer_func,
-                contact_reduction_funcs=self.contact_reduction_funcs,
-            )
+            # Create mesh-plane kernel.
+            # When reducing, use multi-block load balancing and write contacts to the
+            # global reducer buffer (same path as mesh-mesh and mesh-triangle).
+            if self.reduce_contacts:
+                self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(
+                    write_contact_to_reducer,
+                    contact_reduction_funcs=self.contact_reduction_funcs,
+                )
+            else:
+                self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(
+                    writer_func,
+                    contact_reduction_funcs=None,
+                )
             # Only create mesh-mesh SDF kernel on CUDA (uses __shared__ memory via func_native)
             if is_gpu_device:
                 if self.reduce_contacts:
@@ -1723,16 +1733,23 @@ class NarrowPhase:
         self.total_num_threads = self.block_dim * num_blocks
         self.num_tile_blocks = num_blocks
 
-        # Mesh-mesh dynamic block allocation
+        # Dynamic block allocation for mesh-mesh and mesh-plane contacts
         if device_obj.is_cuda and self.reduce_contacts:
-            self.num_mesh_mesh_blocks = device_obj.sm_count * 4
-            self.mesh_mesh_target_blocks = self.num_mesh_mesh_blocks
-            # block_offsets: prefix sum for per-pair block counts
-            # Size: max_pairs + 1 (sentinel)
+            target_blocks = device_obj.sm_count * 4
+            # Mesh-mesh
+            self.num_mesh_mesh_blocks = target_blocks
+            self.mesh_mesh_target_blocks = target_blocks
             self.mesh_mesh_block_offsets = wp.zeros(max_candidate_pairs + 1, dtype=wp.int32, device=device)
+            # Mesh-plane
+            self.num_mesh_plane_blocks = target_blocks
+            self.mesh_plane_target_blocks = target_blocks
+            self.mesh_plane_block_offsets = wp.zeros(max_candidate_pairs + 1, dtype=wp.int32, device=device)
         else:
             self.num_mesh_mesh_blocks = self.num_tile_blocks
             self.mesh_mesh_block_offsets = None
+            self.num_mesh_plane_blocks = self.num_tile_blocks
+            self.mesh_plane_target_blocks = self.num_tile_blocks
+            self.mesh_plane_block_offsets = wp.zeros(max_candidate_pairs + 1, dtype=wp.int32, device=device)
 
     def launch_custom_write(
         self,
@@ -1849,34 +1866,24 @@ class NarrowPhase:
         # This avoids kernel launch overhead for primitive-only scenes
         if self.has_meshes:
             # Launch mesh-plane contact processing kernel
-            packaged_mesh_plane_inputs = [
-                shape_data,
-                shape_transform,
-                shape_source,
-                shape_gap,
-                shape_collision_aabb_lower,
-                shape_collision_aabb_upper,
-                shape_voxel_resolution,
-                self.shape_pairs_mesh_plane,
-                self.shape_pairs_mesh_plane_count,
-                writer_data,
-                self.num_tile_blocks,
-            ]
-            if self.reduce_contacts:
-                # With contact reduction - use tiled launch
-                wp.launch_tiled(
-                    kernel=self.mesh_plane_contacts_kernel,
-                    dim=(self.num_tile_blocks,),
-                    inputs=packaged_mesh_plane_inputs,
-                    device=device,
-                    block_dim=self.tile_size_mesh_plane,
-                )
-            else:
+            if not self.reduce_contacts:
                 # Without contact reduction - use regular launch
                 wp.launch(
                     kernel=self.mesh_plane_contacts_kernel,
                     dim=self.total_num_threads,
-                    inputs=packaged_mesh_plane_inputs,
+                    inputs=[
+                        shape_data,
+                        shape_transform,
+                        shape_source,
+                        shape_gap,
+                        shape_collision_aabb_lower,
+                        shape_collision_aabb_upper,
+                        shape_voxel_resolution,
+                        self.shape_pairs_mesh_plane,
+                        self.shape_pairs_mesh_plane_count,
+                        writer_data,
+                        self.num_tile_blocks,
+                    ],
                     device=device,
                     block_dim=self.block_dim,
                 )
@@ -1904,15 +1911,50 @@ class NarrowPhase:
                 block_dim=self.tile_size_mesh_convex,
             )
 
-            # Launch mesh triangle contact processing kernel
+            # Launch mesh-plane contacts with multi-block load balancing.
             if self.reduce_contacts:
+                # Unified global reduction for all mesh contact types.
+                # All contact kernels write to the same global reducer buffer,
+                # then a single reduce + export pass handles everything.
                 assert self.global_contact_reducer is not None
-                # Use global contact reduction for mesh-triangle contacts
-                # First, clear the reducer
                 self.global_contact_reducer.clear_active()
-
-                # Collect contacts into the reducer
                 reducer_data = self.global_contact_reducer.get_data_struct()
+
+                # Mesh-plane contacts → global reducer
+                wp.launch(
+                    kernel=compute_mesh_plane_block_offsets,
+                    dim=1,
+                    inputs=[
+                        self.shape_pairs_mesh_plane,
+                        self.shape_pairs_mesh_plane_count,
+                        shape_source,
+                        self.mesh_plane_target_blocks,
+                        self.mesh_plane_block_offsets,
+                    ],
+                    device=device,
+                )
+                wp.launch_tiled(
+                    kernel=self.mesh_plane_contacts_kernel,
+                    dim=(self.num_mesh_plane_blocks,),
+                    inputs=[
+                        shape_data,
+                        shape_transform,
+                        shape_source,
+                        shape_gap,
+                        shape_collision_aabb_lower,
+                        shape_collision_aabb_upper,
+                        shape_voxel_resolution,
+                        self.shape_pairs_mesh_plane,
+                        self.shape_pairs_mesh_plane_count,
+                        self.mesh_plane_block_offsets,
+                        reducer_data,
+                        self.num_mesh_plane_blocks,
+                    ],
+                    device=device,
+                    block_dim=self.tile_size_mesh_plane,
+                )
+
+                # Mesh-triangle contacts → same global reducer
                 wp.launch(
                     kernel=mesh_triangle_contacts_to_reducer_kernel,
                     dim=self.total_num_threads,
@@ -1925,44 +1967,6 @@ class NarrowPhase:
                         self.triangle_pairs,
                         self.triangle_pairs_count,
                         reducer_data,
-                        self.total_num_threads,
-                    ],
-                    device=device,
-                    block_dim=self.block_dim,
-                )
-
-                # Register buffered contacts to hashtable (uses hardcoded BETA_THRESHOLD)
-                # This is a separate pass to reduce register pressure on the contact generation kernel
-                wp.launch(
-                    kernel=reduce_buffered_contacts_kernel,
-                    dim=self.total_num_threads,
-                    inputs=[
-                        reducer_data,
-                        shape_transform,
-                        shape_collision_aabb_lower,
-                        shape_collision_aabb_upper,
-                        shape_voxel_resolution,
-                        self.total_num_threads,
-                    ],
-                    device=device,
-                    block_dim=self.block_dim,
-                )
-
-                # Export reduced contacts to writer
-                wp.launch(
-                    kernel=self.export_reduced_contacts_kernel,
-                    dim=self.total_num_threads,
-                    inputs=[
-                        self.global_contact_reducer.hashtable.keys,
-                        self.global_contact_reducer.ht_values,
-                        self.global_contact_reducer.hashtable.active_slots,
-                        self.global_contact_reducer.position_depth,
-                        self.global_contact_reducer.normal,
-                        self.global_contact_reducer.shape_pairs,
-                        shape_types,
-                        shape_data,
-                        shape_gap,
-                        writer_data,
                         self.total_num_threads,
                     ],
                     device=device,
@@ -2000,8 +2004,7 @@ class NarrowPhase:
                     heightfield_elevation_data if heightfield_elevation_data is not None else self._empty_elevation_data
                 )
                 if self.reduce_contacts and self.mesh_mesh_block_offsets is not None:
-                    # Dynamic multi-block with two-level reduction.
-                    # Phase 0: Compute per-pair block counts and prefix sum
+                    # Mesh-mesh contacts → same global reducer (already cleared above)
                     wp.launch(
                         kernel=compute_mesh_mesh_block_offsets,
                         dim=1,
@@ -2015,10 +2018,6 @@ class NarrowPhase:
                         ],
                         device=device,
                     )
-
-                    # Phase 1: Clear global reducer and launch multi-block kernel
-                    self.global_contact_reducer.clear_active()
-                    reducer_data = self.global_contact_reducer.get_data_struct()
 
                     wp.launch_tiled(
                         kernel=self.mesh_mesh_contacts_kernel,
@@ -2043,43 +2042,6 @@ class NarrowPhase:
                         ],
                         device=device,
                         block_dim=self.tile_size_mesh_mesh,
-                    )
-
-                    # Phase 2: Reduce buffered contacts into hashtable
-                    wp.launch(
-                        kernel=reduce_buffered_contacts_kernel,
-                        dim=self.total_num_threads,
-                        inputs=[
-                            reducer_data,
-                            shape_transform,
-                            shape_collision_aabb_lower,
-                            shape_collision_aabb_upper,
-                            shape_voxel_resolution,
-                            self.total_num_threads,
-                        ],
-                        device=device,
-                        block_dim=self.block_dim,
-                    )
-
-                    # Phase 3: Export reduced contacts to final writer
-                    wp.launch(
-                        kernel=self.export_reduced_contacts_kernel,
-                        dim=self.total_num_threads,
-                        inputs=[
-                            self.global_contact_reducer.hashtable.keys,
-                            self.global_contact_reducer.ht_values,
-                            self.global_contact_reducer.hashtable.active_slots,
-                            self.global_contact_reducer.position_depth,
-                            self.global_contact_reducer.normal,
-                            self.global_contact_reducer.shape_pairs,
-                            shape_types,
-                            shape_data,
-                            shape_gap,
-                            writer_data,
-                            self.total_num_threads,
-                        ],
-                        device=device,
-                        block_dim=self.block_dim,
                     )
                 else:
                     # Non-reduce fallback: direct contact write, no dynamic allocation
@@ -2106,6 +2068,43 @@ class NarrowPhase:
                         device=device,
                         block_dim=self.tile_size_mesh_mesh,
                     )
+
+            # Unified reduce + export pass for all mesh contact types
+            # (mesh-plane, mesh-triangle, mesh-mesh all wrote to the same global reducer)
+            if self.reduce_contacts:
+                wp.launch(
+                    kernel=reduce_buffered_contacts_kernel,
+                    dim=self.total_num_threads,
+                    inputs=[
+                        reducer_data,
+                        shape_transform,
+                        shape_collision_aabb_lower,
+                        shape_collision_aabb_upper,
+                        shape_voxel_resolution,
+                        self.total_num_threads,
+                    ],
+                    device=device,
+                    block_dim=self.block_dim,
+                )
+                wp.launch(
+                    kernel=self.export_reduced_contacts_kernel,
+                    dim=self.total_num_threads,
+                    inputs=[
+                        self.global_contact_reducer.hashtable.keys,
+                        self.global_contact_reducer.ht_values,
+                        self.global_contact_reducer.hashtable.active_slots,
+                        self.global_contact_reducer.position_depth,
+                        self.global_contact_reducer.normal,
+                        self.global_contact_reducer.shape_pairs,
+                        shape_types,
+                        shape_data,
+                        shape_gap,
+                        writer_data,
+                        self.total_num_threads,
+                    ],
+                    device=device,
+                    block_dim=self.block_dim,
+                )
 
         # Stage: Heightfield collision processing
         if self.has_heightfields and shape_heightfield_data is not None and heightfield_elevation_data is not None:
