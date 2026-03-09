@@ -1457,7 +1457,7 @@ class TestNarrowPhase(unittest.TestCase):
                 geom_source,
                 shape_gap,
                 geom_collision_radius,
-                sdf_data,
+                _sdf_data,
                 shape_sdf_index,
                 shape_flags,
                 shape_collision_aabb_lower,

@@ -123,7 +123,7 @@ def mc_calc_face_texture(
 
     Vertex positions are returned in the SDF's local coordinate space.
 
-    A tiny thickness (1e-4 × voxel_radius) biases the signed-distance depth
+    A tiny thickness (1e-4 x voxel_radius) biases the signed-distance depth
     just enough to classify touching-surface vertices as penetrating.  The
     resulting phantom force is negligible (< 0.1 % of typical contact forces)
     but prevents zero-area contacts at exactly-touching surfaces.

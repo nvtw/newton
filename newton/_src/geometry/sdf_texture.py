@@ -1611,7 +1611,7 @@ def block_coords_from_subgrid_required(
     Returns:
         List of ``wp.vec3us`` block coordinates for selected subgrids.
     """
-    w, h, d = coarse_dims
+    w, h, _d = coarse_dims
     include = subgrid_occupied if subgrid_occupied is not None else subgrid_required
 
     coords = []
