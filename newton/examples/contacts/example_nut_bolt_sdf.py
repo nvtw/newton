@@ -107,6 +107,7 @@ class Example:
 
         self.world_count = args.world_count
         self.viewer = viewer
+        self.scene = "nut_bolt"
         self.solver_type = args.solver
         self.test_mode = args.test
 
