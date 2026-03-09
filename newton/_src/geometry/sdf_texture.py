@@ -1151,7 +1151,7 @@ def create_texture_sdf_from_mesh(
     winding_threshold: float = 0.5,
     scale_baked: bool = False,
     device: str | None = None,
-) -> tuple[TextureSDFData, wp.Texture3D, wp.Texture3D]:
+) -> tuple[TextureSDFData, wp.Texture3D, wp.Texture3D, list]:
     """Create texture SDF from a Warp mesh.
 
     This is the main entry point for texture SDF construction. It mirrors the
@@ -1169,8 +1169,10 @@ def create_texture_sdf_from_mesh(
         device: Warp device string. ``None`` uses the mesh's device.
 
     Returns:
-        Tuple of ``(texture_sdf, coarse_texture, subgrid_texture)``.
+        Tuple of ``(texture_sdf, coarse_texture, subgrid_texture, block_coords)``.
         Caller must keep texture references alive to prevent GC.
+        ``block_coords`` is a list of ``wp.vec3us`` block coordinates for
+        hydroelastic broadphase.
     """
     if device is None:
         device = str(mesh.device)

@@ -159,9 +159,8 @@ def _sample_texture_sdf_from_array_kernel(
     results[tid] = texture_sample_sdf(sdf_table[sdf_idx], query_points[tid])
 
 
-def _build_texture_and_nanovdb(mesh, resolution=64, margin=0.05, narrow_band_range=(-0.1, 0.1)):
+def _build_texture_and_nanovdb(mesh, resolution=64, margin=0.05, narrow_band_range=(-0.1, 0.1), device="cuda:0"):
     """Build both texture SDF and NanoVDB SDF for comparison."""
-    device = "cuda:0"
     wp_mesh = wp.Mesh(
         points=wp.array(mesh.vertices, dtype=wp.vec3, device=device),
         indices=wp.array(mesh.indices, dtype=wp.int32, device=device),
@@ -218,7 +217,7 @@ class TestTextureSDF(unittest.TestCase):
 def test_texture_sdf_construction(test, device):
     """Build TextureSDFData and verify fields are populated."""
     mesh = _create_box_mesh()
-    tex_sdf, _coarse_tex, _subgrid_tex, _, _wp_mesh = _build_texture_and_nanovdb(mesh)
+    tex_sdf, _coarse_tex, _subgrid_tex, _, _wp_mesh = _build_texture_and_nanovdb(mesh, device=device)
 
     test.assertGreater(tex_sdf.inv_sdf_dx[0], 0.0)
     test.assertGreater(tex_sdf.inv_sdf_dx[1], 0.0)
@@ -239,7 +238,7 @@ def test_texture_sdf_construction(test, device):
 def test_texture_sdf_values_match_nanovdb(test, device):
     """Compare texture SDF vs NanoVDB at random points."""
     mesh = _create_box_mesh()
-    tex_sdf, _coarse_tex, _subgrid_tex, nanovdb_data, _wp_mesh = _build_texture_and_nanovdb(mesh)
+    tex_sdf, _coarse_tex, _subgrid_tex, nanovdb_data, _wp_mesh = _build_texture_and_nanovdb(mesh, device=device)
 
     query_np = _generate_query_points(mesh, num_points=1000)
     query_points = wp.array(query_np, dtype=wp.vec3, device=device)
@@ -266,7 +265,7 @@ def test_texture_sdf_values_match_nanovdb(test, device):
 def test_texture_sdf_gradient_accuracy(test, device):
     """Compare texture analytical gradient vs NanoVDB gradient."""
     mesh = _create_box_mesh()
-    tex_sdf, _coarse_tex, _subgrid_tex, nanovdb_data, _wp_mesh = _build_texture_and_nanovdb(mesh)
+    tex_sdf, _coarse_tex, _subgrid_tex, nanovdb_data, _wp_mesh = _build_texture_and_nanovdb(mesh, device=device)
 
     query_np = _generate_query_points(mesh, num_points=1000)
     query_points = wp.array(query_np, dtype=wp.vec3, device=device)
@@ -315,7 +314,7 @@ def test_texture_sdf_gradient_accuracy(test, device):
 def test_texture_sdf_extrapolation(test, device):
     """Points outside box have correct extrapolated distance."""
     mesh = _create_box_mesh(half_extents=(0.5, 0.5, 0.5))
-    tex_sdf, _coarse_tex, _subgrid_tex, _, _wp_mesh = _build_texture_and_nanovdb(mesh)
+    tex_sdf, _coarse_tex, _subgrid_tex, _, _wp_mesh = _build_texture_and_nanovdb(mesh, device=device)
 
     # Points well outside the box along +X axis
     outside_points = np.array(

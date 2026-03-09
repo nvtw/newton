@@ -4,7 +4,7 @@
 
 ### Added
 
-- Add CUDA 3D texture-based SDF for faster mesh-mesh collision sampling, replacing NanoVDB volume lookups in the mesh-mesh collision pipeline with analytical trilinear gradient from 8 corner texel reads.
+- Add 3D texture-based SDF, replacing NanoVDB volumes in the mesh-mesh collision pipeline for improved performance and CPU compatibility.
 - Interactive example browser in the GL viewer with tree-view navigation and switch/reset support
 
 ### Changed

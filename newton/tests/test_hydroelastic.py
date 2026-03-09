@@ -709,7 +709,8 @@ def test_mujoco_hydroelastic_penetration_depth(test, device):
         # discretization error (trilinear interpolation from a mesh-based SDF)
         # dominates the signal.  Skip the ratio check in that regime but still
         # verify contacts exist (asserted above).
-        voxel_size = (upper_size + 2 * 0.01) / 64  # SDF domain / max_resolution
+        case_upper_size = test_cases[i][1]
+        voxel_size = (case_upper_size + 2 * 0.01) / 64  # SDF domain / max_resolution
         depth_in_voxels = expected / voxel_size
         if depth_in_voxels > 0.05:
             test.assertGreater(
