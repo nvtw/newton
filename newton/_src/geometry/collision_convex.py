@@ -39,7 +39,9 @@ import warp as wp
 from .contact_data import ContactData
 from .mpr import create_solve_mpr
 from .multicontact import create_build_manifold
-from .simplex_solver import create_solve_closest_distance
+
+# GJK is no longer needed: MPR with inflation handles both separated and overlapping shapes.
+# from .simplex_solver import create_solve_closest_distance
 
 _mat43f = wp.types.matrix((4, 3), wp.float32)
 _mat53f = wp.types.matrix((5, 3), wp.float32)
@@ -112,11 +114,10 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
         Returns:
             Number of valid contact points written (0-5)
         """
-        # Enlarge a little bit to avoid contact flickering when the signed distance is close to 0.
-        # This ensures MPR consistently detects resting contacts, preventing alternation between
-        # MPR and GJK across frames for near-touching shapes.
-        enlarge = 1e-4
-        # Try MPR first (optimized for overlapping shapes, which is the common case)
+        # MPR-only with inflation: inflate shapes by contact_threshold to handle
+        # both overlapping and separated shapes in a single MPR pass.
+        # This eliminates GJK from the kernel, reducing compiled code size.
+        margin = contact_threshold + sum_of_contact_offsets
         collision, signed_distance, point, normal = wp.static(create_solve_mpr(support_func))(
             geom_a,
             geom_b,
@@ -124,23 +125,22 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
             orientation_b,
             position_a,
             position_b,
-            sum_of_contact_offsets + enlarge,
+            margin,
             data_provider,
         )
-        signed_distance += enlarge
+        signed_distance = signed_distance + margin
 
         if not collision:
-            # MPR reported no collision, fall back to GJK for separated shapes
-            collision, signed_distance, point, normal = wp.static(create_solve_closest_distance(support_func))(
-                geom_a,
-                geom_b,
-                orientation_a,
-                orientation_b,
-                position_a,
-                position_b,
-                sum_of_contact_offsets,
-                data_provider,
+            # Shapes separated by more than contact_threshold — no contact needed
+            contact_data = contact_template
+            contact_data.contact_point_center = point
+            contact_data.contact_normal_a_to_b = normal
+            contact_data.contact_distance = 1.0e6  # far away
+            contact_data = post_process_contact(
+                contact_data, geom_a, position_a, orientation_a, geom_b, position_b, orientation_b
             )
+            writer_func(contact_data, writer_data, -1)
+            return 1
 
         # Skip multi-contact manifold generation if requested or signed distance exceeds threshold
         if skip_multi_contact or signed_distance > contact_threshold:
@@ -235,35 +235,20 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
         Returns:
             Number of valid contact points written (0 or 1)
         """
-        # Enlarge a little bit to avoid contact flickering when the signed distance is close to 0.
-        # This ensures MPR consistently detects resting contacts, preventing alternation between
-        # MPR and GJK across frames for near-touching shapes.
-        enlarge = 1e-4
-        # Try MPR first (optimized for overlapping shapes, which is the common case)
-        collision, signed_distance, point, normal = wp.static(create_solve_mpr(support_func))(
+        # MPR-only with inflation: inflate shapes by contact_threshold to handle
+        # both overlapping and separated shapes in a single MPR pass.
+        margin = contact_threshold + sum_of_contact_offsets
+        _collision, signed_distance, point, normal = wp.static(create_solve_mpr(support_func))(
             geom_a,
             geom_b,
             orientation_a,
             orientation_b,
             position_a,
             position_b,
-            sum_of_contact_offsets + enlarge,
+            margin,
             data_provider,
         )
-        signed_distance += enlarge
-
-        if not collision:
-            # MPR reported no collision, fall back to GJK for separated shapes
-            collision, signed_distance, point, normal = wp.static(create_solve_closest_distance(support_func))(
-                geom_a,
-                geom_b,
-                orientation_a,
-                orientation_b,
-                position_a,
-                position_b,
-                sum_of_contact_offsets,
-                data_provider,
-            )
+        signed_distance = signed_distance + margin
 
         # Write single contact
         contact_data = contact_template

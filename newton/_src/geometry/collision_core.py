@@ -376,7 +376,7 @@ def create_compute_gjk_mpr_contacts(
                 pos_b_adjusted,
                 0.0,  # sum_of_contact_offsets - gap
                 data_provider,
-                rigid_gap + radius_eff_a + radius_eff_b,
+                rigid_gap + radius_eff_a + radius_eff_b + margin_a + margin_b,
                 type_a == GeoType.SPHERE
                 or type_b == GeoType.SPHERE
                 or type_a == GeoType.ELLIPSOID
@@ -394,7 +394,7 @@ def create_compute_gjk_mpr_contacts(
                 pos_b_adjusted,
                 0.0,  # sum_of_contact_offsets - gap
                 data_provider,
-                rigid_gap + radius_eff_a + radius_eff_b,
+                rigid_gap + radius_eff_a + radius_eff_b + margin_a + margin_b,
                 writer_data,
                 contact_template,
             )
