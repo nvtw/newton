@@ -802,6 +802,122 @@ def export_and_reduce_contact(
     return contact_id
 
 
+@wp.func
+def export_and_reduce_contact_centered(
+    shape_a: int,
+    shape_b: int,
+    position: wp.vec3,
+    normal: wp.vec3,
+    depth: float,
+    centered_position: wp.vec3,
+    X_ws_voxel_shape: wp.transform,
+    aabb_lower_voxel: wp.vec3,
+    aabb_upper_voxel: wp.vec3,
+    voxel_res: wp.vec3i,
+    reducer_data: GlobalContactReducerData,
+) -> int:
+    """Export contact to buffer and register in hashtable matching thread-block behavior.
+
+    Differs from :func:`export_and_reduce_contact` in three ways that match
+    the shared-memory reduction used for mesh-mesh contacts:
+
+    - Spatial projection uses *centered_position* (midpoint-centered)
+    - Beta threshold is fixed at 0.0001 m (not scale-relative)
+    - Voxel grid uses the caller-specified AABB/transform (tri_shape's)
+
+    Pre-prunes contacts by non-atomically reading current slot values before
+    allocating a buffer slot. Contacts that cannot beat any existing winner
+    are skipped entirely, reducing buffer pressure.
+
+    Args:
+        shape_a: First shape index (for hashtable key)
+        shape_b: Second shape index (for hashtable key)
+        position: World-space contact position (stored in buffer)
+        normal: Contact normal (a-to-b)
+        depth: Penetration depth
+        centered_position: Midpoint-centered position for spatial projection
+        X_ws_voxel_shape: World-to-local transform for voxel computation
+        aabb_lower_voxel: Local AABB lower for voxel grid
+        aabb_upper_voxel: Local AABB upper for voxel grid
+        voxel_res: Voxel grid resolution
+        reducer_data: Global reducer data
+    """
+    ht_capacity = reducer_data.ht_capacity
+    use_beta = depth < wp.static(BETA_THRESHOLD)
+
+    # === Compute scores and find/create hashtable entries ===
+    bin_id = get_slot(normal)
+    pos_2d = project_point_to_plane(bin_id, centered_position)
+    key = make_contact_key(shape_a, shape_b, bin_id)
+
+    entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
+
+    # Voxel parameters
+    position_local = wp.transform_point(X_ws_voxel_shape, position)
+    voxel_idx = compute_voxel_index(position_local, aabb_lower_voxel, aabb_upper_voxel, voxel_res)
+    voxel_idx = wp.clamp(voxel_idx, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1))
+
+    voxels_per_group = wp.static(NUM_SPATIAL_DIRECTIONS + 1)
+    voxel_group = voxel_idx // voxels_per_group
+    voxel_local_slot = voxel_idx % voxels_per_group
+    voxel_bin_id = NUM_NORMAL_BINS + voxel_group
+    voxel_key = make_contact_key(shape_a, shape_b, voxel_bin_id)
+
+    voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
+
+    # === Pre-prune: non-atomic reads to check if we could win any slot ===
+    might_win = False
+
+    if entry_idx >= 0:
+        # Check spatial direction slots (only if depth < beta)
+        for dir_i in range(NUM_SPATIAL_DIRECTIONS):
+            if use_beta:
+                dir_2d = get_spatial_direction_2d(dir_i)
+                score = wp.dot(pos_2d, dir_2d)
+                # Use contact_id=0 as lower bound — if even that loses, real value loses too
+                probe = make_contact_value(score, 0)
+                if reducer_data.ht_values[dir_i * ht_capacity + entry_idx] < probe:
+                    might_win = True
+
+        # Check max-depth slot
+        max_depth_probe = make_contact_value(-depth, 0)
+        if reducer_data.ht_values[NUM_SPATIAL_DIRECTIONS * ht_capacity + entry_idx] < max_depth_probe:
+            might_win = True
+
+    if voxel_entry_idx >= 0:
+        voxel_probe = make_contact_value(-depth, 0)
+        if reducer_data.ht_values[voxel_local_slot * ht_capacity + voxel_entry_idx] < voxel_probe:
+            might_win = True
+
+    if not might_win:
+        return -1
+
+    # === Allocate buffer slot (only for contacts that might win) ===
+    contact_id = export_contact_to_buffer(shape_a, shape_b, position, normal, depth, reducer_data)
+    if contact_id < 0:
+        return -1
+
+    # === Register in hashtable with real contact_id ===
+    if entry_idx >= 0:
+        for dir_i in range(NUM_SPATIAL_DIRECTIONS):
+            if use_beta:
+                dir_2d = get_spatial_direction_2d(dir_i)
+                score = wp.dot(pos_2d, dir_2d)
+                value = make_contact_value(score, contact_id)
+                reduction_update_slot(entry_idx, dir_i, value, reducer_data.ht_values, ht_capacity)
+
+        max_depth_value = make_contact_value(-depth, contact_id)
+        reduction_update_slot(
+            entry_idx, NUM_SPATIAL_DIRECTIONS, max_depth_value, reducer_data.ht_values, ht_capacity
+        )
+
+    if voxel_entry_idx >= 0:
+        voxel_value = make_contact_value(-depth, contact_id)
+        reduction_update_slot(voxel_entry_idx, voxel_local_slot, voxel_value, reducer_data.ht_values, ht_capacity)
+
+    return contact_id
+
+
 @wp.kernel(enable_backward=False)
 def reduce_buffered_contacts_kernel(
     reducer_data: GlobalContactReducerData,

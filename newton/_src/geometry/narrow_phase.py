@@ -1610,11 +1610,13 @@ class NarrowPhase:
             # Only create mesh-mesh SDF kernel on CUDA (uses __shared__ memory via func_native)
             if is_gpu_device:
                 if self.reduce_contacts:
-                    # Dynamic multi-block kernel: writes to global reducer for cross-block merging
+                    # Global reduction kernel: writes directly to buffer + hashtable inline.
+                    # No thread-block shared memory contact reduction needed.
                     self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         write_contact_to_reducer,
                         contact_reduction_funcs=self.contact_reduction_funcs,
                         enable_heightfields=has_heightfields,
+                        use_global_reduction=True,
                     )
                 else:
                     # Non-reduce kernel: direct contact write
@@ -1641,8 +1643,7 @@ class NarrowPhase:
             # Global contact reducer uses hardcoded BETA_THRESHOLD (0.1mm) same as shared-memory reduction
             # Slot layout: 6 spatial direction slots + 1 max-depth slot = 7 slots per key (VALUES_PER_KEY)
             self.export_reduced_contacts_kernel = create_export_reduced_contacts_kernel(writer_func)
-            # Global contact reducer for mesh-triangle contacts
-            # Capacity is based on max_triangle_pairs since that's the max contacts we might generate
+            # Global contact reducer for all mesh contact types
             self.global_contact_reducer = GlobalContactReducer(max_triangle_pairs, device=device)
         else:
             self.export_reduced_contacts_kernel = None
@@ -1992,6 +1993,26 @@ class NarrowPhase:
                     block_dim=self.block_dim,
                 )
 
+            # Register mesh-plane and mesh-triangle contacts in hashtable BEFORE
+            # mesh-mesh, since mesh-mesh does inline hashtable registration.
+            # reduce_buffered_contacts_kernel reads contact_count at execution time,
+            # so it only processes contacts written so far (mesh-plane + mesh-triangle).
+            if self.reduce_contacts:
+                wp.launch(
+                    kernel=reduce_buffered_contacts_kernel,
+                    dim=self.total_num_threads,
+                    inputs=[
+                        reducer_data,
+                        shape_transform,
+                        shape_collision_aabb_lower,
+                        shape_collision_aabb_upper,
+                        shape_voxel_resolution,
+                        self.total_num_threads,
+                    ],
+                    device=device,
+                    block_dim=self.block_dim,
+                )
+
             # Launch mesh-mesh contact processing kernel on CUDA.
             # The kernel uses texture SDF for fast sampling, with BVH fallback via shape_sdf_index,
             # as well as on-the-fly heightfield evaluation via shape_heightfield_data.
@@ -2004,7 +2025,7 @@ class NarrowPhase:
                     heightfield_elevation_data if heightfield_elevation_data is not None else self._empty_elevation_data
                 )
                 if self.reduce_contacts and self.mesh_mesh_block_offsets is not None:
-                    # Mesh-mesh contacts → same global reducer (already cleared above)
+                    # Mesh-mesh contacts → buffer + inline hashtable registration
                     wp.launch(
                         kernel=compute_mesh_mesh_block_offsets,
                         dim=1,
@@ -2069,23 +2090,10 @@ class NarrowPhase:
                         block_dim=self.tile_size_mesh_mesh,
                     )
 
-            # Unified reduce + export pass for all mesh contact types
-            # (mesh-plane, mesh-triangle, mesh-mesh all wrote to the same global reducer)
+            # Export reduced contacts from hashtable (mesh-plane + mesh-triangle
+            # registered by reduce_buffered_contacts_kernel above, mesh-mesh
+            # registered inline in its kernel)
             if self.reduce_contacts:
-                wp.launch(
-                    kernel=reduce_buffered_contacts_kernel,
-                    dim=self.total_num_threads,
-                    inputs=[
-                        reducer_data,
-                        shape_transform,
-                        shape_collision_aabb_lower,
-                        shape_collision_aabb_upper,
-                        shape_voxel_resolution,
-                        self.total_num_threads,
-                    ],
-                    device=device,
-                    block_dim=self.block_dim,
-                )
                 wp.launch(
                     kernel=self.export_reduced_contacts_kernel,
                     dim=self.total_num_threads,
