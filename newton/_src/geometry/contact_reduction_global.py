@@ -911,9 +911,7 @@ def export_and_reduce_contact_centered(
                 reduction_update_slot(entry_idx, dir_i, value, reducer_data.ht_values, ht_capacity)
 
         max_depth_value = make_contact_value(-depth, contact_id)
-        reduction_update_slot(
-            entry_idx, NUM_SPATIAL_DIRECTIONS, max_depth_value, reducer_data.ht_values, ht_capacity
-        )
+        reduction_update_slot(entry_idx, NUM_SPATIAL_DIRECTIONS, max_depth_value, reducer_data.ht_values, ht_capacity)
 
     # Deferred voxel entry lookup for contacts that won via normal bin
     if voxel_entry_idx < 0:

@@ -28,7 +28,7 @@ from .contact_reduction import (
     get_shared_memory_pointer_block_dim_plus_2_ints,
     synchronize,
 )
-from .contact_reduction_global import export_and_reduce_contact_centered
+from .contact_reduction_global import GlobalContactReducerData, export_and_reduce_contact_centered
 
 # Shared memory for caching triangle vertices that pass midphase culling.
 # block_dim triangles x 3 vertices x 3 floats = 9 int32s per thread.
@@ -994,7 +994,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     # Same block_offsets load balancing and shared-memory triangle selection,
     # but contacts are written directly to global buffer + hashtable.
     # =========================================================================
-    from .contact_reduction_global import GlobalContactReducerData
 
     @wp.kernel(enable_backward=False, module="unique")
     def mesh_sdf_collision_global_reduce_kernel(
@@ -1171,7 +1170,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     synchronize()
 
                     if has_triangle:
-                        tri_idx = selected_triangles[t]
                         v0 = vertex_cache[t * 3]
                         v1 = vertex_cache[t * 3 + 1]
                         v2 = vertex_cache[t * 3 + 2]
