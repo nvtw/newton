@@ -1612,6 +1612,7 @@ class NarrowPhase:
                 if self.reduce_contacts:
                     # Global reduction kernel: writes directly to buffer + hashtable inline.
                     # No thread-block shared memory contact reduction needed.
+                    self.use_global_reduction = True
                     self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         write_contact_to_reducer,
                         contact_reduction_funcs=self.contact_reduction_funcs,
@@ -1620,14 +1621,17 @@ class NarrowPhase:
                     )
                 else:
                     # Non-reduce kernel: direct contact write
+                    self.use_global_reduction = False
                     self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         writer_func,
                         contact_reduction_funcs=None,
                         enable_heightfields=has_heightfields,
                     )
             else:
+                self.use_global_reduction = False
                 self.mesh_mesh_contacts_kernel = None
         else:
+            self.use_global_reduction = False
             self.mesh_triangle_contacts_kernel = None
             self.mesh_plane_contacts_kernel = None
             self.mesh_mesh_contacts_kernel = None
@@ -1993,11 +1997,11 @@ class NarrowPhase:
                     block_dim=self.block_dim,
                 )
 
-            # Register mesh-plane and mesh-triangle contacts in hashtable BEFORE
-            # mesh-mesh, since mesh-mesh does inline hashtable registration.
-            # reduce_buffered_contacts_kernel reads contact_count at execution time,
-            # so it only processes contacts written so far (mesh-plane + mesh-triangle).
-            if self.reduce_contacts:
+            # When using global reduction, register mesh-plane/mesh-triangle contacts
+            # in hashtable BEFORE mesh-mesh (mesh-mesh does inline registration).
+            # When using thread-block reduction, register ALL buffered contacts AFTER
+            # mesh-mesh (thread-block writes reduced contacts to buffer).
+            if self.reduce_contacts and self.use_global_reduction:
                 wp.launch(
                     kernel=reduce_buffered_contacts_kernel,
                     dim=self.total_num_threads,
@@ -2090,10 +2094,27 @@ class NarrowPhase:
                         block_dim=self.tile_size_mesh_mesh,
                     )
 
-            # Export reduced contacts from hashtable (mesh-plane + mesh-triangle
-            # registered by reduce_buffered_contacts_kernel above, mesh-mesh
-            # registered inline in its kernel)
+            # Thread-block reduction: register ALL buffered contacts AFTER mesh-mesh
+            if self.reduce_contacts and not self.use_global_reduction:
+                wp.launch(
+                    kernel=reduce_buffered_contacts_kernel,
+                    dim=self.total_num_threads,
+                    inputs=[
+                        reducer_data,
+                        shape_transform,
+                        shape_collision_aabb_lower,
+                        shape_collision_aabb_upper,
+                        shape_voxel_resolution,
+                        self.total_num_threads,
+                    ],
+                    device=device,
+                    block_dim=self.block_dim,
+                )
+
+            # Export reduced contacts from hashtable
             if self.reduce_contacts:
+                # Zero exported_flags for cross-entry deduplication
+                self.global_contact_reducer.exported_flags.zero_()
                 wp.launch(
                     kernel=self.export_reduced_contacts_kernel,
                     dim=self.total_num_threads,
@@ -2104,6 +2125,7 @@ class NarrowPhase:
                         self.global_contact_reducer.position_depth,
                         self.global_contact_reducer.normal,
                         self.global_contact_reducer.shape_pairs,
+                        self.global_contact_reducer.exported_flags,
                         shape_types,
                         shape_data,
                         shape_gap,
@@ -2113,7 +2135,6 @@ class NarrowPhase:
                     device=device,
                     block_dim=self.block_dim,
                 )
-
         # Stage: Heightfield collision processing
         if self.has_heightfields and shape_heightfield_data is not None and heightfield_elevation_data is not None:
             # Midphase: find overlapping grid cells for each heightfield-convex pair

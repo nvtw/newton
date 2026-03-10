@@ -522,6 +522,9 @@ class GlobalContactReducer:
         else:
             self.contact_area = wp.zeros(0, dtype=wp.float32, device=device)
 
+        # Per-contact dedup flags for cross-entry deduplication during export
+        self.exported_flags = wp.zeros(capacity, dtype=wp.int32, device=device)
+
         # Atomic counter for contact allocation
         self.contact_count = wp.zeros(1, dtype=wp.int32, device=device)
         # Count failed hashtable inserts (e.g., table full)
@@ -845,14 +848,33 @@ def export_and_reduce_contact_centered(
     ht_capacity = reducer_data.ht_capacity
     use_beta = depth < wp.static(BETA_THRESHOLD)
 
-    # === Compute scores and find/create hashtable entries ===
+    # === Normal bin: find/create hashtable entry ===
     bin_id = get_slot(normal)
     pos_2d = project_point_to_plane(bin_id, centered_position)
     key = make_contact_key(shape_a, shape_b, bin_id)
 
     entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
 
-    # Voxel parameters
+    # === Pre-prune normal bin: non-atomic reads ===
+    might_win = False
+
+    if entry_idx >= 0:
+        # Check max-depth slot first (cheapest — no direction computation)
+        max_depth_probe = make_contact_value(-depth, 0)
+        if reducer_data.ht_values[NUM_SPATIAL_DIRECTIONS * ht_capacity + entry_idx] < max_depth_probe:
+            might_win = True
+
+        # Check spatial direction slots (only if depth < beta and not already winning)
+        if not might_win and use_beta:
+            for dir_i in range(NUM_SPATIAL_DIRECTIONS):
+                if not might_win:
+                    dir_2d = get_spatial_direction_2d(dir_i)
+                    score = wp.dot(pos_2d, dir_2d)
+                    probe = make_contact_value(score, 0)
+                    if reducer_data.ht_values[dir_i * ht_capacity + entry_idx] < probe:
+                        might_win = True
+
+    # === Voxel bin: only look up if normal bin didn't already show a win ===
     position_local = wp.transform_point(X_ws_voxel_shape, position)
     voxel_idx = compute_voxel_index(position_local, aabb_lower_voxel, aabb_upper_voxel, voxel_res)
     voxel_idx = wp.clamp(voxel_idx, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1))
@@ -863,31 +885,13 @@ def export_and_reduce_contact_centered(
     voxel_bin_id = NUM_NORMAL_BINS + voxel_group
     voxel_key = make_contact_key(shape_a, shape_b, voxel_bin_id)
 
-    voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
-
-    # === Pre-prune: non-atomic reads to check if we could win any slot ===
-    might_win = False
-
-    if entry_idx >= 0:
-        # Check spatial direction slots (only if depth < beta)
-        for dir_i in range(NUM_SPATIAL_DIRECTIONS):
-            if use_beta:
-                dir_2d = get_spatial_direction_2d(dir_i)
-                score = wp.dot(pos_2d, dir_2d)
-                # Use contact_id=0 as lower bound — if even that loses, real value loses too
-                probe = make_contact_value(score, 0)
-                if reducer_data.ht_values[dir_i * ht_capacity + entry_idx] < probe:
-                    might_win = True
-
-        # Check max-depth slot
-        max_depth_probe = make_contact_value(-depth, 0)
-        if reducer_data.ht_values[NUM_SPATIAL_DIRECTIONS * ht_capacity + entry_idx] < max_depth_probe:
-            might_win = True
-
-    if voxel_entry_idx >= 0:
-        voxel_probe = make_contact_value(-depth, 0)
-        if reducer_data.ht_values[voxel_local_slot * ht_capacity + voxel_entry_idx] < voxel_probe:
-            might_win = True
+    voxel_entry_idx = -1
+    if not might_win:
+        voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
+        if voxel_entry_idx >= 0:
+            voxel_probe = make_contact_value(-depth, 0)
+            if reducer_data.ht_values[voxel_local_slot * ht_capacity + voxel_entry_idx] < voxel_probe:
+                might_win = True
 
     if not might_win:
         return -1
@@ -911,6 +915,9 @@ def export_and_reduce_contact_centered(
             entry_idx, NUM_SPATIAL_DIRECTIONS, max_depth_value, reducer_data.ht_values, ht_capacity
         )
 
+    # Deferred voxel entry lookup for contacts that won via normal bin
+    if voxel_entry_idx < 0:
+        voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
     if voxel_entry_idx >= 0:
         voxel_value = make_contact_value(-depth, contact_id)
         reduction_update_slot(voxel_entry_idx, voxel_local_slot, voxel_value, reducer_data.ht_values, ht_capacity)
@@ -1060,6 +1067,8 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
         position_depth: wp.array(dtype=wp.vec4),
         normal: wp.array(dtype=wp.vec2),  # Octahedral-encoded
         shape_pairs: wp.array(dtype=wp.vec2i),
+        # Global dedup flags: one int per buffer contact, for cross-entry deduplication
+        exported_flags: wp.array(dtype=wp.int32),
         # Shape data for extracting margin and effective radius
         shape_types: wp.array(dtype=int),
         shape_data: wp.array(dtype=wp.vec4),
@@ -1074,7 +1083,8 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
 
         Uses grid stride loop to iterate over active hashtable ENTRIES.
         For each entry, reads all value slots, collects unique contact IDs,
-        and exports each unique contact once.
+        and exports each unique contact once. Uses atomic flags per contact_id
+        for cross-entry deduplication (same contact winning multiple entries).
         """
         tid = wp.tid()
 
@@ -1091,7 +1101,7 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
             # Get the hashtable entry index
             entry_idx = ht_active_slots[i]
 
-            # Track exported contact IDs for this entry
+            # Track exported contact IDs for this entry (intra-entry dedup)
             exported_ids = exported_ids_vec()
             num_exported = int(0)
 
@@ -1106,13 +1116,19 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
                 # Extract contact ID from low 32 bits
                 contact_id = unpack_contact_id(value)
 
-                # Skip if already exported
+                # Skip if already exported within this entry
                 if is_contact_already_exported(contact_id, exported_ids, num_exported):
                     continue
 
-                # Record this contact ID as exported
+                # Record this contact ID for intra-entry dedup
                 exported_ids[num_exported] = contact_id
                 num_exported = num_exported + 1
+
+                # Cross-entry dedup: same contact can win slots in different entries
+                # (e.g., normal-bin AND voxel entry). Atomic flag per contact_id.
+                old_flag = wp.atomic_add(exported_flags, contact_id, 1)
+                if old_flag > 0:
+                    continue
 
                 # Unpack contact data
                 position, contact_normal, depth = unpack_contact(contact_id, position_depth, normal)
