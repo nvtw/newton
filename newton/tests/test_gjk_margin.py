@@ -73,8 +73,14 @@ def overlap_comparison_kernel(
     data_provider = SupportMapDataProvider()
 
     mc, md, mp, mn = wp.static(solve_mpr_margin)(
-        geom_a, geom_b, orientations_a[tid], orientations_b[tid],
-        positions_a[tid], positions_b[tid], margins[tid], data_provider,
+        geom_a,
+        geom_b,
+        orientations_a[tid],
+        orientations_b[tid],
+        positions_a[tid],
+        positions_b[tid],
+        margins[tid],
+        data_provider,
     )
     mi_collision[tid] = int(mc)
     mi_distance[tid] = md
@@ -82,8 +88,14 @@ def overlap_comparison_kernel(
     mi_normal[tid] = mn
 
     xc, xd, xp, xn = wp.static(solve_mpr)(
-        geom_a, geom_b, orientations_a[tid], orientations_b[tid],
-        positions_a[tid], positions_b[tid], 0.0, data_provider,
+        geom_a,
+        geom_b,
+        orientations_a[tid],
+        orientations_b[tid],
+        positions_a[tid],
+        positions_b[tid],
+        0.0,
+        data_provider,
     )
     mpr_collision[tid] = int(xc)
     mpr_distance[tid] = xd
@@ -121,8 +133,14 @@ def separated_comparison_kernel(
     data_provider = SupportMapDataProvider()
 
     mc, md, mp, mn = wp.static(solve_mpr_margin)(
-        geom_a, geom_b, orientations_a[tid], orientations_b[tid],
-        positions_a[tid], positions_b[tid], margins[tid], data_provider,
+        geom_a,
+        geom_b,
+        orientations_a[tid],
+        orientations_b[tid],
+        positions_a[tid],
+        positions_b[tid],
+        margins[tid],
+        data_provider,
     )
     mi_collision[tid] = int(mc)
     mi_distance[tid] = md
@@ -130,8 +148,14 @@ def separated_comparison_kernel(
     mi_normal[tid] = mn
 
     rc, rd, rp, rn = wp.static(solve_full_gjk)(
-        geom_a, geom_b, orientations_a[tid], orientations_b[tid],
-        positions_a[tid], positions_b[tid], 0.0, data_provider,
+        geom_a,
+        geom_b,
+        orientations_a[tid],
+        orientations_b[tid],
+        positions_a[tid],
+        positions_b[tid],
+        0.0,
+        data_provider,
     )
     gjk_collision[tid] = int(rc)
     gjk_distance[tid] = rd
@@ -186,7 +210,14 @@ def analytical_comparison_kernel(
     ori = wp.quat(0.0, 0.0, 0.0, 1.0)
 
     mc, md, mp, mn = wp.static(solve_mpr_margin)(
-        geom_a, geom_b, ori, ori, pos_a, pos_b, margin, data_provider,
+        geom_a,
+        geom_b,
+        ori,
+        ori,
+        pos_a,
+        pos_b,
+        margin,
+        data_provider,
     )
     ss_mi_collision[tid] = int(mc)
     ss_mi_distance[tid] = md
@@ -241,7 +272,14 @@ def analytical_sphere_box_kernel(
     ori_a = wp.quat(0.0, 0.0, 0.0, 1.0)
 
     mc, md, mp, mn = wp.static(solve_mpr_margin)(
-        geom_a, geom_b, ori_a, b_quat, s_pos, b_pos, margin, data_provider,
+        geom_a,
+        geom_b,
+        ori_a,
+        b_quat,
+        s_pos,
+        b_pos,
+        margin,
+        data_provider,
     )
     mi_collision[tid] = int(mc)
     mi_distance[tid] = md
@@ -277,12 +315,8 @@ class _RunnerMixin:
             scales_b=wp.array([c["scale_b"] for c in cases], dtype=wp.vec3, device=DEVICE),
             positions_a=wp.array([c["pos_a"] for c in cases], dtype=wp.vec3, device=DEVICE),
             positions_b=wp.array([c["pos_b"] for c in cases], dtype=wp.vec3, device=DEVICE),
-            orientations_a=wp.array(
-                [c.get("ori_a", IDENTITY_QUAT) for c in cases], dtype=wp.quat, device=DEVICE
-            ),
-            orientations_b=wp.array(
-                [c.get("ori_b", IDENTITY_QUAT) for c in cases], dtype=wp.quat, device=DEVICE
-            ),
+            orientations_a=wp.array([c.get("ori_a", IDENTITY_QUAT) for c in cases], dtype=wp.quat, device=DEVICE),
+            orientations_b=wp.array([c.get("ori_b", IDENTITY_QUAT) for c in cases], dtype=wp.quat, device=DEVICE),
             margins=wp.array([c["margin"] for c in cases], dtype=float, device=DEVICE),
         )
 
@@ -296,16 +330,29 @@ class _RunnerMixin:
             outputs[f"{prefix}_point"] = wp.zeros(n, dtype=wp.vec3, device=DEVICE)
             outputs[f"{prefix}_normal"] = wp.zeros(n, dtype=wp.vec3, device=DEVICE)
         wp.launch(
-            overlap_comparison_kernel, dim=n,
-            inputs=[inputs["shape_types_a"], inputs["scales_a"],
-                    inputs["shape_types_b"], inputs["scales_b"],
-                    inputs["positions_a"], inputs["positions_b"],
-                    inputs["orientations_a"], inputs["orientations_b"],
-                    inputs["margins"]],
-            outputs=[outputs["mi_collision"], outputs["mi_distance"],
-                     outputs["mi_point"], outputs["mi_normal"],
-                     outputs["mpr_collision"], outputs["mpr_distance"],
-                     outputs["mpr_point"], outputs["mpr_normal"]],
+            overlap_comparison_kernel,
+            dim=n,
+            inputs=[
+                inputs["shape_types_a"],
+                inputs["scales_a"],
+                inputs["shape_types_b"],
+                inputs["scales_b"],
+                inputs["positions_a"],
+                inputs["positions_b"],
+                inputs["orientations_a"],
+                inputs["orientations_b"],
+                inputs["margins"],
+            ],
+            outputs=[
+                outputs["mi_collision"],
+                outputs["mi_distance"],
+                outputs["mi_point"],
+                outputs["mi_normal"],
+                outputs["mpr_collision"],
+                outputs["mpr_distance"],
+                outputs["mpr_point"],
+                outputs["mpr_normal"],
+            ],
             device=DEVICE,
         )
         return {k: v.numpy() for k, v in outputs.items()}
@@ -320,16 +367,29 @@ class _RunnerMixin:
             outputs[f"{prefix}_point"] = wp.zeros(n, dtype=wp.vec3, device=DEVICE)
             outputs[f"{prefix}_normal"] = wp.zeros(n, dtype=wp.vec3, device=DEVICE)
         wp.launch(
-            separated_comparison_kernel, dim=n,
-            inputs=[inputs["shape_types_a"], inputs["scales_a"],
-                    inputs["shape_types_b"], inputs["scales_b"],
-                    inputs["positions_a"], inputs["positions_b"],
-                    inputs["orientations_a"], inputs["orientations_b"],
-                    inputs["margins"]],
-            outputs=[outputs["mi_collision"], outputs["mi_distance"],
-                     outputs["mi_point"], outputs["mi_normal"],
-                     outputs["gjk_collision"], outputs["gjk_distance"],
-                     outputs["gjk_point"], outputs["gjk_normal"]],
+            separated_comparison_kernel,
+            dim=n,
+            inputs=[
+                inputs["shape_types_a"],
+                inputs["scales_a"],
+                inputs["shape_types_b"],
+                inputs["scales_b"],
+                inputs["positions_a"],
+                inputs["positions_b"],
+                inputs["orientations_a"],
+                inputs["orientations_b"],
+                inputs["margins"],
+            ],
+            outputs=[
+                outputs["mi_collision"],
+                outputs["mi_distance"],
+                outputs["mi_point"],
+                outputs["mi_normal"],
+                outputs["gjk_collision"],
+                outputs["gjk_distance"],
+                outputs["gjk_point"],
+                outputs["gjk_normal"],
+            ],
             device=DEVICE,
         )
         return {k: v.numpy() for k, v in outputs.items()}
@@ -337,9 +397,13 @@ class _RunnerMixin:
     @staticmethod
     def _case(type_a, scale_a, type_b, scale_b, pos_a, pos_b, margin=0.5, **kw):
         c = {
-            "type_a": int(type_a), "scale_a": tuple(scale_a),
-            "type_b": int(type_b), "scale_b": tuple(scale_b),
-            "pos_a": tuple(pos_a), "pos_b": tuple(pos_b), "margin": margin,
+            "type_a": int(type_a),
+            "scale_a": tuple(scale_a),
+            "type_b": int(type_b),
+            "scale_b": tuple(scale_b),
+            "pos_a": tuple(pos_a),
+            "pos_b": tuple(pos_b),
+            "margin": margin,
         }
         c.update(kw)
         return c
@@ -358,10 +422,16 @@ class TestOverlapVsPureMPR(unittest.TestCase, _RunnerMixin):
         cases = []
         seps = [0.95, 0.9, 0.8, 0.7, 0.6, 0.5, 0.3, 0.1, 0.0]
         for sep in seps:
-            cases.append(self._case(
-                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                [0.0, 0.0, 0.0], [sep, 0.0, 0.0],
-            ))
+            cases.append(
+                self._case(
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    [0.0, 0.0, 0.0],
+                    [sep, 0.0, 0.0],
+                )
+            )
         r = self._run_overlap(cases)
         for i, sep in enumerate(seps):
             expected = -(1.0 - sep)
@@ -376,10 +446,16 @@ class TestOverlapVsPureMPR(unittest.TestCase, _RunnerMixin):
         cases = []
         for axis_idx, axis in enumerate([(1, 0, 0), (0, 1, 0), (0, 0, 1)]):
             pos_b = [0.8 * a for a in axis]
-            cases.append(self._case(
-                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                [0.0, 0.0, 0.0], pos_b,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    [0.0, 0.0, 0.0],
+                    pos_b,
+                )
+            )
         r = self._run_overlap(cases)
         for i in range(3):
             self.assertAlmostEqual(r["mi_distance"][i], -0.2, places=2)
@@ -390,10 +466,17 @@ class TestOverlapVsPureMPR(unittest.TestCase, _RunnerMixin):
         angles = [0.0, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0]
         for angle_deg in angles:
             q = _quat_from_axis_angle([0, 0, 1], math.radians(angle_deg))
-            cases.append(self._case(
-                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                [0.0, 0.0, 0.0], [0.6, 0.0, 0.0], ori_b=q,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    [0.0, 0.0, 0.0],
+                    [0.6, 0.0, 0.0],
+                    ori_b=q,
+                )
+            )
         r = self._run_overlap(cases)
         for i, angle in enumerate(angles):
             with self.subTest(angle=angle):
@@ -405,10 +488,16 @@ class TestOverlapVsPureMPR(unittest.TestCase, _RunnerMixin):
         cases = []
         seps = [0.75, 0.6, 0.4, 0.2, 0.0]
         for sep in seps:
-            cases.append(self._case(
-                GeoType.SPHERE, [0.5, 0.0, 0.0], GeoType.SPHERE, [0.3, 0.0, 0.0],
-                [0.0, 0.0, 0.0], [sep, 0.0, 0.0],
-            ))
+            cases.append(
+                self._case(
+                    GeoType.SPHERE,
+                    [0.5, 0.0, 0.0],
+                    GeoType.SPHERE,
+                    [0.3, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                    [sep, 0.0, 0.0],
+                )
+            )
         r = self._run_overlap(cases)
         for i, sep in enumerate(seps):
             expected = sep - 0.8
@@ -419,26 +508,29 @@ class TestOverlapVsPureMPR(unittest.TestCase, _RunnerMixin):
         """Various shape type combinations overlapping."""
         cases = [
             # Sphere-box
-            self._case(GeoType.SPHERE, [0.5, 0.0, 0.0], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [0.0, 0.0, 0.0], [0.8, 0.0, 0.0]),
+            self._case(GeoType.SPHERE, [0.5, 0.0, 0.0], GeoType.BOX, [0.5, 0.5, 0.5], [0.0, 0.0, 0.0], [0.8, 0.0, 0.0]),
             # Ellipsoid-box
-            self._case(GeoType.ELLIPSOID, [1.0, 0.5, 0.3], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [0.0, 0.0, 0.0], [1.2, 0.0, 0.0]),
+            self._case(
+                GeoType.ELLIPSOID, [1.0, 0.5, 0.3], GeoType.BOX, [0.5, 0.5, 0.5], [0.0, 0.0, 0.0], [1.2, 0.0, 0.0]
+            ),
             # Capsule-capsule
-            self._case(GeoType.CAPSULE, [0.3, 0.5, 0.0], GeoType.CAPSULE, [0.3, 0.5, 0.0],
-                        [0.0, 0.0, 0.0], [0.4, 0.0, 0.0]),
+            self._case(
+                GeoType.CAPSULE, [0.3, 0.5, 0.0], GeoType.CAPSULE, [0.3, 0.5, 0.0], [0.0, 0.0, 0.0], [0.4, 0.0, 0.0]
+            ),
             # Capsule-box
-            self._case(GeoType.CAPSULE, [0.3, 0.5, 0.0], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [0.0, 0.0, 0.0], [0.6, 0.0, 0.0]),
+            self._case(
+                GeoType.CAPSULE, [0.3, 0.5, 0.0], GeoType.BOX, [0.5, 0.5, 0.5], [0.0, 0.0, 0.0], [0.6, 0.0, 0.0]
+            ),
             # Ellipsoid-ellipsoid
-            self._case(GeoType.ELLIPSOID, [1.0, 0.5, 0.3], GeoType.ELLIPSOID, [0.8, 0.4, 0.3],
-                        [0.0, 0.0, 0.0], [1.5, 0.0, 0.0]),
+            self._case(
+                GeoType.ELLIPSOID, [1.0, 0.5, 0.3], GeoType.ELLIPSOID, [0.8, 0.4, 0.3], [0.0, 0.0, 0.0], [1.5, 0.0, 0.0]
+            ),
             # Cylinder-box
-            self._case(GeoType.CYLINDER, [0.5, 0.5, 0.0], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [0.0, 0.0, 0.0], [0.8, 0.0, 0.0]),
+            self._case(
+                GeoType.CYLINDER, [0.5, 0.5, 0.0], GeoType.BOX, [0.5, 0.5, 0.5], [0.0, 0.0, 0.0], [0.8, 0.0, 0.0]
+            ),
             # Cone-box
-            self._case(GeoType.CONE, [0.5, 0.5, 0.0], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [0.0, 0.0, 0.0], [0.5, 0.0, 0.0]),
+            self._case(GeoType.CONE, [0.5, 0.5, 0.0], GeoType.BOX, [0.5, 0.5, 0.5], [0.0, 0.0, 0.0], [0.5, 0.0, 0.0]),
         ]
         expected_overlap = [-0.2, -0.3, -0.2, -0.2, -0.3, None, None]
         r = self._run_overlap(cases)
@@ -455,10 +547,16 @@ class TestOverlapVsPureMPR(unittest.TestCase, _RunnerMixin):
         dirs = [(1, 0, 0), (0, 1, 0), (0, 0, 1), (-1, 0, 0), (0, -1, 0), (0, 0, -1)]
         for d in dirs:
             pos_b = [0.8 * x for x in d]
-            cases.append(self._case(
-                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                [0.0, 0.0, 0.0], pos_b,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    [0.0, 0.0, 0.0],
+                    pos_b,
+                )
+            )
         r = self._run_overlap(cases)
         for i, d in enumerate(dirs):
             mi_n = r["mi_normal"][i]
@@ -469,10 +567,17 @@ class TestOverlapVsPureMPR(unittest.TestCase, _RunnerMixin):
         """Overlap depth should not depend on margin."""
         cases = []
         for margin in [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]:
-            cases.append(self._case(
-                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                [0.0, 0.0, 0.0], [0.8, 0.0, 0.0], margin=margin,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    [0.0, 0.0, 0.0],
+                    [0.8, 0.0, 0.0],
+                    margin=margin,
+                )
+            )
         r = self._run_overlap(cases)
         for i, margin in enumerate([0.1, 0.5, 1.0, 2.0, 5.0, 10.0]):
             with self.subTest(margin=margin):
@@ -482,11 +587,11 @@ class TestOverlapVsPureMPR(unittest.TestCase, _RunnerMixin):
         """One shape fully inside another."""
         cases = [
             # Small box inside large box
-            self._case(GeoType.BOX, [2.0, 2.0, 2.0], GeoType.BOX, [0.3, 0.3, 0.3],
-                        [0.0, 0.0, 0.0], [0.1, 0.0, 0.0]),
+            self._case(GeoType.BOX, [2.0, 2.0, 2.0], GeoType.BOX, [0.3, 0.3, 0.3], [0.0, 0.0, 0.0], [0.1, 0.0, 0.0]),
             # Sphere inside sphere
-            self._case(GeoType.SPHERE, [1.0, 0.0, 0.0], GeoType.SPHERE, [0.3, 0.0, 0.0],
-                        [0.0, 0.0, 0.0], [0.1, 0.0, 0.0]),
+            self._case(
+                GeoType.SPHERE, [1.0, 0.0, 0.0], GeoType.SPHERE, [0.3, 0.0, 0.0], [0.0, 0.0, 0.0], [0.1, 0.0, 0.0]
+            ),
         ]
         r = self._run_overlap(cases)
         for i in range(len(cases)):
@@ -507,10 +612,17 @@ class TestSeparatedVsGJK(unittest.TestCase, _RunnerMixin):
         cases = []
         gaps = [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.49]
         for gap in gaps:
-            cases.append(self._case(
-                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                [0.0, 0.0, 0.0], [1.0 + gap, 0.0, 0.0], margin=0.5,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    [0.0, 0.0, 0.0],
+                    [1.0 + gap, 0.0, 0.0],
+                    margin=0.5,
+                )
+            )
         r = self._run_separated(cases)
         for i, gap in enumerate(gaps):
             with self.subTest(gap=gap):
@@ -523,10 +635,17 @@ class TestSeparatedVsGJK(unittest.TestCase, _RunnerMixin):
         cases = []
         for axis in [(1, 0, 0), (0, 1, 0), (0, 0, 1), (-1, 0, 0), (0, -1, 0), (0, 0, -1)]:
             pos_b = [1.2 * a for a in axis]
-            cases.append(self._case(
-                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                [0.0, 0.0, 0.0], pos_b, margin=0.5,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    [0.0, 0.0, 0.0],
+                    pos_b,
+                    margin=0.5,
+                )
+            )
         r = self._run_separated(cases)
         for i in range(6):
             self.assertAlmostEqual(r["mi_distance"][i], 0.2, places=2)
@@ -539,10 +658,18 @@ class TestSeparatedVsGJK(unittest.TestCase, _RunnerMixin):
         for angle_deg in angles:
             q = _quat_from_axis_angle([0, 0, 1], math.radians(angle_deg))
             # Use margin=1.5 to ensure gap < margin for all rotations
-            cases.append(self._case(
-                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                [0.0, 0.0, 0.0], [2.0, 0.0, 0.0], ori_b=q, margin=1.5,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    [0.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.0],
+                    ori_b=q,
+                    margin=1.5,
+                )
+            )
         r = self._run_separated(cases)
         for i, angle in enumerate(angles):
             with self.subTest(angle=angle):
@@ -554,10 +681,17 @@ class TestSeparatedVsGJK(unittest.TestCase, _RunnerMixin):
         cases = []
         gaps = [0.005, 0.01, 0.05, 0.1, 0.2, 0.3, 0.49]
         for gap in gaps:
-            cases.append(self._case(
-                GeoType.SPHERE, [0.5, 0.0, 0.0], GeoType.SPHERE, [0.3, 0.0, 0.0],
-                [0.0, 0.0, 0.0], [0.8 + gap, 0.0, 0.0], margin=0.5,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.SPHERE,
+                    [0.5, 0.0, 0.0],
+                    GeoType.SPHERE,
+                    [0.3, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                    [0.8 + gap, 0.0, 0.0],
+                    margin=0.5,
+                )
+            )
         r = self._run_separated(cases)
         for i, gap in enumerate(gaps):
             with self.subTest(gap=gap):
@@ -568,26 +702,75 @@ class TestSeparatedVsGJK(unittest.TestCase, _RunnerMixin):
         """Various shape combinations separated."""
         cases = [
             # Sphere-box face
-            self._case(GeoType.SPHERE, [0.5, 0.0, 0.0], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [0.0, 0.0, 0.0], [1.2, 0.0, 0.0], margin=0.5),
+            self._case(
+                GeoType.SPHERE,
+                [0.5, 0.0, 0.0],
+                GeoType.BOX,
+                [0.5, 0.5, 0.5],
+                [0.0, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+                margin=0.5,
+            ),
             # Ellipsoid-box
-            self._case(GeoType.ELLIPSOID, [1.0, 0.5, 0.3], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [0.0, 0.0, 0.0], [1.7, 0.0, 0.0], margin=0.5),
+            self._case(
+                GeoType.ELLIPSOID,
+                [1.0, 0.5, 0.3],
+                GeoType.BOX,
+                [0.5, 0.5, 0.5],
+                [0.0, 0.0, 0.0],
+                [1.7, 0.0, 0.0],
+                margin=0.5,
+            ),
             # Capsule-capsule parallel
-            self._case(GeoType.CAPSULE, [0.3, 0.5, 0.0], GeoType.CAPSULE, [0.3, 0.5, 0.0],
-                        [0.0, 0.0, 0.0], [0.8, 0.0, 0.0], margin=0.5),
+            self._case(
+                GeoType.CAPSULE,
+                [0.3, 0.5, 0.0],
+                GeoType.CAPSULE,
+                [0.3, 0.5, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                margin=0.5,
+            ),
             # Capsule-box
-            self._case(GeoType.CAPSULE, [0.3, 0.5, 0.0], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], margin=0.5),
+            self._case(
+                GeoType.CAPSULE,
+                [0.3, 0.5, 0.0],
+                GeoType.BOX,
+                [0.5, 0.5, 0.5],
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                margin=0.5,
+            ),
             # Cylinder-box
-            self._case(GeoType.CYLINDER, [0.5, 0.5, 0.0], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [0.0, 0.0, 0.0], [1.2, 0.0, 0.0], margin=0.5),
+            self._case(
+                GeoType.CYLINDER,
+                [0.5, 0.5, 0.0],
+                GeoType.BOX,
+                [0.5, 0.5, 0.5],
+                [0.0, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+                margin=0.5,
+            ),
             # Cone-box
-            self._case(GeoType.CONE, [0.5, 0.5, 0.0], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [0.0, 0.0, 0.0], [1.2, 0.0, 0.0], margin=0.5),
+            self._case(
+                GeoType.CONE,
+                [0.5, 0.5, 0.0],
+                GeoType.BOX,
+                [0.5, 0.5, 0.5],
+                [0.0, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+                margin=0.5,
+            ),
             # Ellipsoid-ellipsoid
-            self._case(GeoType.ELLIPSOID, [1.0, 0.5, 0.3], GeoType.ELLIPSOID, [0.8, 0.4, 0.3],
-                        [0.0, 0.0, 0.0], [2.0, 0.0, 0.0], margin=0.5),
+            self._case(
+                GeoType.ELLIPSOID,
+                [1.0, 0.5, 0.3],
+                GeoType.ELLIPSOID,
+                [0.8, 0.4, 0.3],
+                [0.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                margin=0.5,
+            ),
         ]
         expected_gaps = [0.2, 0.2, 0.2, 0.2, 0.2, None, 0.2]
         r = self._run_separated(cases)
@@ -605,16 +788,30 @@ class TestSeparatedVsGJK(unittest.TestCase, _RunnerMixin):
         dirs = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
         for d in dirs:
             pos_b = [1.2 * x for x in d]
-            cases.append(self._case(
-                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                [0.0, 0.0, 0.0], pos_b, margin=0.5,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    [0.0, 0.0, 0.0],
+                    pos_b,
+                    margin=0.5,
+                )
+            )
             # Spheres
             pos_b_s = [(0.8 + 0.2) * x for x in d]
-            cases.append(self._case(
-                GeoType.SPHERE, [0.5, 0.0, 0.0], GeoType.SPHERE, [0.3, 0.0, 0.0],
-                [0.0, 0.0, 0.0], pos_b_s, margin=0.5,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.SPHERE,
+                    [0.5, 0.0, 0.0],
+                    GeoType.SPHERE,
+                    [0.3, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                    pos_b_s,
+                    margin=0.5,
+                )
+            )
         r = self._run_separated(cases)
         for i in range(len(cases)):
             mi_n = r["mi_normal"][i]
@@ -625,12 +822,27 @@ class TestSeparatedVsGJK(unittest.TestCase, _RunnerMixin):
     def test_separated_contact_points_close_to_gjk(self):
         """Contact points should be close to GJK reference."""
         cases = [
-            self._case(GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [0.0, 0.0, 0.0], [1.2, 0.0, 0.0], margin=0.5),
-            self._case(GeoType.SPHERE, [0.5, 0.0, 0.0], GeoType.SPHERE, [0.3, 0.0, 0.0],
-                        [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], margin=0.5),
-            self._case(GeoType.ELLIPSOID, [1.0, 0.5, 0.3], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [0.0, 0.0, 0.0], [1.7, 0.0, 0.0], margin=0.5),
+            self._case(
+                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5], [0.0, 0.0, 0.0], [1.2, 0.0, 0.0], margin=0.5
+            ),
+            self._case(
+                GeoType.SPHERE,
+                [0.5, 0.0, 0.0],
+                GeoType.SPHERE,
+                [0.3, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                margin=0.5,
+            ),
+            self._case(
+                GeoType.ELLIPSOID,
+                [1.0, 0.5, 0.3],
+                GeoType.BOX,
+                [0.5, 0.5, 0.5],
+                [0.0, 0.0, 0.0],
+                [1.7, 0.0, 0.0],
+                margin=0.5,
+            ),
         ]
         r = self._run_separated(cases)
         for i in range(len(cases)):
@@ -642,12 +854,27 @@ class TestSeparatedVsGJK(unittest.TestCase, _RunnerMixin):
     def test_beyond_margin_not_detected(self):
         """Shapes beyond margin should return collision=False."""
         cases = [
-            self._case(GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [0.0, 0.0, 0.0], [2.0, 0.0, 0.0], margin=0.5),
-            self._case(GeoType.SPHERE, [0.5, 0.0, 0.0], GeoType.SPHERE, [0.3, 0.0, 0.0],
-                        [0.0, 0.0, 0.0], [2.0, 0.0, 0.0], margin=0.5),
-            self._case(GeoType.ELLIPSOID, [1.0, 0.5, 0.3], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [0.0, 0.0, 0.0], [3.0, 0.0, 0.0], margin=0.5),
+            self._case(
+                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5], [0.0, 0.0, 0.0], [2.0, 0.0, 0.0], margin=0.5
+            ),
+            self._case(
+                GeoType.SPHERE,
+                [0.5, 0.0, 0.0],
+                GeoType.SPHERE,
+                [0.3, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                margin=0.5,
+            ),
+            self._case(
+                GeoType.ELLIPSOID,
+                [1.0, 0.5, 0.3],
+                GeoType.BOX,
+                [0.5, 0.5, 0.5],
+                [0.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+                margin=0.5,
+            ),
         ]
         r = self._run_separated(cases)
         for i in range(len(cases)):
@@ -667,10 +894,17 @@ class TestLargeInflation(unittest.TestCase, _RunnerMixin):
         # Box half-extent 0.5, margin=0.5 → effective half-extent ~1.0
         cases = []
         for gap in [0.01, 0.1, 0.3, 0.49]:
-            cases.append(self._case(
-                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                [0.0, 0.0, 0.0], [1.0 + gap, 0.0, 0.0], margin=0.5,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    [0.0, 0.0, 0.0],
+                    [1.0 + gap, 0.0, 0.0],
+                    margin=0.5,
+                )
+            )
         r = self._run_separated(cases)
         for i, gap in enumerate([0.01, 0.1, 0.3, 0.49]):
             with self.subTest(gap=gap):
@@ -681,10 +915,17 @@ class TestLargeInflation(unittest.TestCase, _RunnerMixin):
         """Margin = 2x body size."""
         cases = []
         for gap in [0.01, 0.1, 0.5, 0.9]:
-            cases.append(self._case(
-                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                [0.0, 0.0, 0.0], [1.0 + gap, 0.0, 0.0], margin=1.0,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    [0.0, 0.0, 0.0],
+                    [1.0 + gap, 0.0, 0.0],
+                    margin=1.0,
+                )
+            )
         r = self._run_separated(cases)
         for i, gap in enumerate([0.01, 0.1, 0.5, 0.9]):
             with self.subTest(gap=gap):
@@ -696,10 +937,17 @@ class TestLargeInflation(unittest.TestCase, _RunnerMixin):
         """Margin = 5x body size (extreme inflation)."""
         cases = []
         for gap in [0.01, 0.1, 0.5, 1.0, 2.0, 2.49]:
-            cases.append(self._case(
-                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                [0.0, 0.0, 0.0], [1.0 + gap, 0.0, 0.0], margin=2.5,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    [0.0, 0.0, 0.0],
+                    [1.0 + gap, 0.0, 0.0],
+                    margin=2.5,
+                )
+            )
         r = self._run_separated(cases)
         for i, gap in enumerate([0.01, 0.1, 0.5, 1.0, 2.0, 2.49]):
             with self.subTest(gap=gap):
@@ -710,10 +958,17 @@ class TestLargeInflation(unittest.TestCase, _RunnerMixin):
         """Margin = 10x body size (very extreme inflation)."""
         cases = []
         for gap in [0.01, 0.5, 2.0, 4.9]:
-            cases.append(self._case(
-                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                [0.0, 0.0, 0.0], [1.0 + gap, 0.0, 0.0], margin=5.0,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    [0.0, 0.0, 0.0],
+                    [1.0 + gap, 0.0, 0.0],
+                    margin=5.0,
+                )
+            )
         r = self._run_separated(cases)
         for i, gap in enumerate([0.01, 0.5, 2.0, 4.9]):
             with self.subTest(gap=gap):
@@ -725,10 +980,17 @@ class TestLargeInflation(unittest.TestCase, _RunnerMixin):
         cases = []
         for margin in [0.5, 1.0, 2.0, 5.0]:
             gap = margin * 0.9  # Just inside margin
-            cases.append(self._case(
-                GeoType.SPHERE, [0.5, 0.0, 0.0], GeoType.SPHERE, [0.3, 0.0, 0.0],
-                [0.0, 0.0, 0.0], [0.8 + gap, 0.0, 0.0], margin=margin,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.SPHERE,
+                    [0.5, 0.0, 0.0],
+                    GeoType.SPHERE,
+                    [0.3, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                    [0.8 + gap, 0.0, 0.0],
+                    margin=margin,
+                )
+            )
         r = self._run_separated(cases)
         for i, margin in enumerate([0.5, 1.0, 2.0, 5.0]):
             gap = margin * 0.9
@@ -740,10 +1002,17 @@ class TestLargeInflation(unittest.TestCase, _RunnerMixin):
         """Large margins should not affect overlap depth."""
         cases = []
         for margin in [0.1, 1.0, 5.0, 20.0]:
-            cases.append(self._case(
-                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                [0.0, 0.0, 0.0], [0.8, 0.0, 0.0], margin=margin,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    [0.0, 0.0, 0.0],
+                    [0.8, 0.0, 0.0],
+                    margin=margin,
+                )
+            )
         r = self._run_overlap(cases)
         for i, margin in enumerate([0.1, 1.0, 5.0, 20.0]):
             with self.subTest(margin=margin):
@@ -753,10 +1022,17 @@ class TestLargeInflation(unittest.TestCase, _RunnerMixin):
         """Very small shapes with large margin."""
         cases = []
         for gap in [0.01, 0.1, 0.5]:
-            cases.append(self._case(
-                GeoType.BOX, [0.05, 0.05, 0.05], GeoType.BOX, [0.05, 0.05, 0.05],
-                [0.0, 0.0, 0.0], [0.1 + gap, 0.0, 0.0], margin=1.0,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.BOX,
+                    [0.05, 0.05, 0.05],
+                    GeoType.BOX,
+                    [0.05, 0.05, 0.05],
+                    [0.0, 0.0, 0.0],
+                    [0.1 + gap, 0.0, 0.0],
+                    margin=1.0,
+                )
+            )
         r = self._run_separated(cases)
         for i, gap in enumerate([0.01, 0.1, 0.5]):
             with self.subTest(gap=gap):
@@ -800,7 +1076,8 @@ class TestVsAnalyticalPrimitives(unittest.TestCase):
             outputs[f"{prefix}_normal"] = wp.zeros(n, dtype=wp.vec3, device=DEVICE)
 
         wp.launch(
-            analytical_comparison_kernel, dim=n,
+            analytical_comparison_kernel,
+            dim=n,
             inputs=[
                 wp.array([(0.0, 0.0, 0.0)] * n, dtype=wp.vec3, device=DEVICE),
                 wp.array(radii_a, dtype=float, device=DEVICE),
@@ -810,9 +1087,12 @@ class TestVsAnalyticalPrimitives(unittest.TestCase):
                 n,
             ],
             outputs=[
-                outputs["ss_mi_collision"], outputs["ss_mi_distance"],
-                outputs["ss_mi_point"], outputs["ss_mi_normal"],
-                outputs["ss_ref_distance"], outputs["ss_ref_point"],
+                outputs["ss_mi_collision"],
+                outputs["ss_mi_distance"],
+                outputs["ss_mi_point"],
+                outputs["ss_mi_normal"],
+                outputs["ss_ref_distance"],
+                outputs["ss_ref_point"],
                 outputs["ss_ref_normal"],
             ],
             device=DEVICE,
@@ -834,8 +1114,9 @@ class TestVsAnalyticalPrimitives(unittest.TestCase):
                 # MPR-inflation should detect within margin
                 if expected <= margin:
                     self.assertTrue(mi_coll[i], f"sep={sep}")
-                    self.assertAlmostEqual(mi_dist[i], expected, places=2,
-                                           msg=f"mi={mi_dist[i]:.4f} ref={ref_dist[i]:.4f}")
+                    self.assertAlmostEqual(
+                        mi_dist[i], expected, places=2, msg=f"mi={mi_dist[i]:.4f} ref={ref_dist[i]:.4f}"
+                    )
                     # Normals should agree
                     dot = np.dot(mi_n[i], ref_n[i])
                     self.assertGreater(dot, 0.9, f"mi_n={mi_n[i]} ref_n={ref_n[i]}")
@@ -875,7 +1156,8 @@ class TestVsAnalyticalPrimitives(unittest.TestCase):
             outputs[f"{prefix}_normal"] = wp.zeros(n, dtype=wp.vec3, device=DEVICE)
 
         wp.launch(
-            analytical_sphere_box_kernel, dim=n,
+            analytical_sphere_box_kernel,
+            dim=n,
             inputs=[
                 wp.array(sphere_positions, dtype=wp.vec3, device=DEVICE),
                 wp.array(sphere_radii, dtype=float, device=DEVICE),
@@ -886,9 +1168,12 @@ class TestVsAnalyticalPrimitives(unittest.TestCase):
                 n,
             ],
             outputs=[
-                outputs["mi_collision"], outputs["mi_distance"],
-                outputs["mi_point"], outputs["mi_normal"],
-                outputs["ref_distance"], outputs["ref_point"],
+                outputs["mi_collision"],
+                outputs["mi_distance"],
+                outputs["mi_point"],
+                outputs["mi_normal"],
+                outputs["ref_distance"],
+                outputs["ref_point"],
                 outputs["ref_normal"],
             ],
             device=DEVICE,
@@ -907,8 +1192,9 @@ class TestVsAnalyticalPrimitives(unittest.TestCase):
                 self.assertAlmostEqual(ref_dist[i], expected, places=4)
                 if expected <= margin:
                     self.assertTrue(mi_coll[i], f"sep={sep}")
-                    self.assertAlmostEqual(mi_dist[i], expected, places=2,
-                                           msg=f"mi={mi_dist[i]:.4f} ref={ref_dist[i]:.4f}")
+                    self.assertAlmostEqual(
+                        mi_dist[i], expected, places=2, msg=f"mi={mi_dist[i]:.4f} ref={ref_dist[i]:.4f}"
+                    )
                     dot = np.dot(mi_n[i], ref_n[i])
                     self.assertGreater(dot, 0.9)
 
@@ -926,7 +1212,7 @@ class TestVsAnalyticalPrimitives(unittest.TestCase):
         n = len(dirs)
 
         for d in dirs:
-            norm = math.sqrt(sum(x ** 2 for x in d))
+            norm = math.sqrt(sum(x**2 for x in d))
             direction = [x / norm for x in d]
             dist = r_a + r_b + gap
             positions_b.append(tuple(x * dist for x in direction))
@@ -943,7 +1229,8 @@ class TestVsAnalyticalPrimitives(unittest.TestCase):
             outputs[f"{prefix}_normal"] = wp.zeros(n, dtype=wp.vec3, device=DEVICE)
 
         wp.launch(
-            analytical_comparison_kernel, dim=n,
+            analytical_comparison_kernel,
+            dim=n,
             inputs=[
                 wp.array([(0.0, 0.0, 0.0)] * n, dtype=wp.vec3, device=DEVICE),
                 wp.array(radii_a, dtype=float, device=DEVICE),
@@ -953,9 +1240,12 @@ class TestVsAnalyticalPrimitives(unittest.TestCase):
                 n,
             ],
             outputs=[
-                outputs["ss_mi_collision"], outputs["ss_mi_distance"],
-                outputs["ss_mi_point"], outputs["ss_mi_normal"],
-                outputs["ss_ref_distance"], outputs["ss_ref_point"],
+                outputs["ss_mi_collision"],
+                outputs["ss_mi_distance"],
+                outputs["ss_mi_point"],
+                outputs["ss_mi_normal"],
+                outputs["ss_ref_distance"],
+                outputs["ss_ref_point"],
                 outputs["ss_ref_normal"],
             ],
             device=DEVICE,
@@ -983,10 +1273,17 @@ class TestDetectionRange(unittest.TestCase, _RunnerMixin):
         cases = []
         for margin in [0.1, 0.5, 1.0, 2.0]:
             gap = margin - 0.01  # Just inside margin
-            cases.append(self._case(
-                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                [0.0, 0.0, 0.0], [1.0 + gap, 0.0, 0.0], margin=margin,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    [0.0, 0.0, 0.0],
+                    [1.0 + gap, 0.0, 0.0],
+                    margin=margin,
+                )
+            )
         r = self._run_separated(cases)
         for i, margin in enumerate([0.1, 0.5, 1.0, 2.0]):
             with self.subTest(margin=margin):
@@ -997,10 +1294,17 @@ class TestDetectionRange(unittest.TestCase, _RunnerMixin):
         cases = []
         for margin in [0.1, 0.5, 1.0, 2.0]:
             gap = margin + 0.1  # Beyond margin
-            cases.append(self._case(
-                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                [0.0, 0.0, 0.0], [1.0 + gap, 0.0, 0.0], margin=margin,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    [0.0, 0.0, 0.0],
+                    [1.0 + gap, 0.0, 0.0],
+                    margin=margin,
+                )
+            )
         r = self._run_separated(cases)
         for i, margin in enumerate([0.1, 0.5, 1.0, 2.0]):
             with self.subTest(margin=margin):
@@ -1011,10 +1315,17 @@ class TestDetectionRange(unittest.TestCase, _RunnerMixin):
         cases = []
         gap = 0.2
         for margin in [0.3, 0.5, 1.0, 5.0]:
-            cases.append(self._case(
-                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                [0.0, 0.0, 0.0], [1.0 + gap, 0.0, 0.0], margin=margin,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    GeoType.BOX,
+                    [0.5, 0.5, 0.5],
+                    [0.0, 0.0, 0.0],
+                    [1.0 + gap, 0.0, 0.0],
+                    margin=margin,
+                )
+            )
         r = self._run_separated(cases)
         for i in range(len(cases)):
             self.assertTrue(r["mi_collision"][i])
@@ -1027,10 +1338,17 @@ class TestDetectionRange(unittest.TestCase, _RunnerMixin):
         cases = []
         for frac in fractions:
             gap = margin * frac
-            cases.append(self._case(
-                GeoType.SPHERE, [0.5, 0.0, 0.0], GeoType.SPHERE, [0.3, 0.0, 0.0],
-                [0.0, 0.0, 0.0], [0.8 + gap, 0.0, 0.0], margin=margin,
-            ))
+            cases.append(
+                self._case(
+                    GeoType.SPHERE,
+                    [0.5, 0.0, 0.0],
+                    GeoType.SPHERE,
+                    [0.3, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                    [0.8 + gap, 0.0, 0.0],
+                    margin=margin,
+                )
+            )
         r = self._run_separated(cases)
         for i, frac in enumerate(fractions):
             gap = margin * frac
@@ -1050,10 +1368,18 @@ class TestEdgeCases(unittest.TestCase, _RunnerMixin):
     def test_just_touching(self):
         """Shapes exactly touching (signed_distance ≈ 0)."""
         cases = [
-            self._case(GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], margin=0.5),
-            self._case(GeoType.SPHERE, [0.5, 0.0, 0.0], GeoType.SPHERE, [0.3, 0.0, 0.0],
-                        [0.0, 0.0, 0.0], [0.8, 0.0, 0.0], margin=0.5),
+            self._case(
+                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], margin=0.5
+            ),
+            self._case(
+                GeoType.SPHERE,
+                [0.5, 0.0, 0.0],
+                GeoType.SPHERE,
+                [0.3, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                margin=0.5,
+            ),
         ]
         r = self._run_separated(cases)
         for i in range(len(cases)):
@@ -1063,16 +1389,44 @@ class TestEdgeCases(unittest.TestCase, _RunnerMixin):
         """Very small gap and overlap (1mm)."""
         eps = 0.001
         cases_sep = [
-            self._case(GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [0.0, 0.0, 0.0], [1.0 + eps, 0.0, 0.0], margin=0.5),
-            self._case(GeoType.SPHERE, [0.5, 0.0, 0.0], GeoType.SPHERE, [0.3, 0.0, 0.0],
-                        [0.0, 0.0, 0.0], [0.8 + eps, 0.0, 0.0], margin=0.5),
+            self._case(
+                GeoType.BOX,
+                [0.5, 0.5, 0.5],
+                GeoType.BOX,
+                [0.5, 0.5, 0.5],
+                [0.0, 0.0, 0.0],
+                [1.0 + eps, 0.0, 0.0],
+                margin=0.5,
+            ),
+            self._case(
+                GeoType.SPHERE,
+                [0.5, 0.0, 0.0],
+                GeoType.SPHERE,
+                [0.3, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.8 + eps, 0.0, 0.0],
+                margin=0.5,
+            ),
         ]
         cases_ovl = [
-            self._case(GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [0.0, 0.0, 0.0], [1.0 - eps, 0.0, 0.0], margin=0.5),
-            self._case(GeoType.SPHERE, [0.5, 0.0, 0.0], GeoType.SPHERE, [0.3, 0.0, 0.0],
-                        [0.0, 0.0, 0.0], [0.8 - eps, 0.0, 0.0], margin=0.5),
+            self._case(
+                GeoType.BOX,
+                [0.5, 0.5, 0.5],
+                GeoType.BOX,
+                [0.5, 0.5, 0.5],
+                [0.0, 0.0, 0.0],
+                [1.0 - eps, 0.0, 0.0],
+                margin=0.5,
+            ),
+            self._case(
+                GeoType.SPHERE,
+                [0.5, 0.0, 0.0],
+                GeoType.SPHERE,
+                [0.3, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.8 - eps, 0.0, 0.0],
+                margin=0.5,
+            ),
         ]
         r_sep = self._run_separated(cases_sep)
         r_ovl = self._run_overlap(cases_ovl)
@@ -1083,8 +1437,15 @@ class TestEdgeCases(unittest.TestCase, _RunnerMixin):
     def test_very_small_shapes(self):
         """Shapes much smaller than typical (1mm)."""
         cases = [
-            self._case(GeoType.BOX, [0.001, 0.001, 0.001], GeoType.BOX, [0.001, 0.001, 0.001],
-                        [0.0, 0.0, 0.0], [0.003, 0.0, 0.0], margin=0.01),
+            self._case(
+                GeoType.BOX,
+                [0.001, 0.001, 0.001],
+                GeoType.BOX,
+                [0.001, 0.001, 0.001],
+                [0.0, 0.0, 0.0],
+                [0.003, 0.0, 0.0],
+                margin=0.01,
+            ),
         ]
         r = self._run_separated(cases)
         self.assertTrue(r["mi_collision"][0])
@@ -1093,8 +1454,15 @@ class TestEdgeCases(unittest.TestCase, _RunnerMixin):
     def test_very_large_shapes(self):
         """Very large shapes."""
         cases = [
-            self._case(GeoType.BOX, [100.0, 100.0, 100.0], GeoType.BOX, [100.0, 100.0, 100.0],
-                        [0.0, 0.0, 0.0], [210.0, 0.0, 0.0], margin=20.0),
+            self._case(
+                GeoType.BOX,
+                [100.0, 100.0, 100.0],
+                GeoType.BOX,
+                [100.0, 100.0, 100.0],
+                [0.0, 0.0, 0.0],
+                [210.0, 0.0, 0.0],
+                margin=20.0,
+            ),
         ]
         r = self._run_separated(cases)
         self.assertTrue(r["mi_collision"][0])
@@ -1104,11 +1472,25 @@ class TestEdgeCases(unittest.TestCase, _RunnerMixin):
         """Flat/thin boxes."""
         cases = [
             # Very flat box (pancake)
-            self._case(GeoType.BOX, [5.0, 5.0, 0.01], GeoType.BOX, [5.0, 5.0, 0.01],
-                        [0.0, 0.0, 0.0], [0.0, 0.0, 0.12], margin=0.5),
+            self._case(
+                GeoType.BOX,
+                [5.0, 5.0, 0.01],
+                GeoType.BOX,
+                [5.0, 5.0, 0.01],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.12],
+                margin=0.5,
+            ),
             # Very thin box (needle)
-            self._case(GeoType.BOX, [0.01, 0.01, 5.0], GeoType.BOX, [0.01, 0.01, 5.0],
-                        [0.0, 0.0, 0.0], [0.12, 0.0, 0.0], margin=0.5),
+            self._case(
+                GeoType.BOX,
+                [0.01, 0.01, 5.0],
+                GeoType.BOX,
+                [0.01, 0.01, 5.0],
+                [0.0, 0.0, 0.0],
+                [0.12, 0.0, 0.0],
+                margin=0.5,
+            ),
         ]
         r = self._run_separated(cases)
         for i in range(2):
@@ -1118,10 +1500,24 @@ class TestEdgeCases(unittest.TestCase, _RunnerMixin):
     def test_shapes_at_non_origin(self):
         """Both shapes far from origin."""
         cases = [
-            self._case(GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [100.0, 200.0, 300.0], [101.2, 200.0, 300.0], margin=0.5),
-            self._case(GeoType.SPHERE, [0.5, 0.0, 0.0], GeoType.SPHERE, [0.3, 0.0, 0.0],
-                        [-50.0, -50.0, -50.0], [-49.0, -50.0, -50.0], margin=0.5),
+            self._case(
+                GeoType.BOX,
+                [0.5, 0.5, 0.5],
+                GeoType.BOX,
+                [0.5, 0.5, 0.5],
+                [100.0, 200.0, 300.0],
+                [101.2, 200.0, 300.0],
+                margin=0.5,
+            ),
+            self._case(
+                GeoType.SPHERE,
+                [0.5, 0.0, 0.0],
+                GeoType.SPHERE,
+                [0.3, 0.0, 0.0],
+                [-50.0, -50.0, -50.0],
+                [-49.0, -50.0, -50.0],
+                margin=0.5,
+            ),
         ]
         r = self._run_separated(cases)
         self.assertAlmostEqual(r["mi_distance"][0], 0.2, places=2)
@@ -1130,8 +1526,9 @@ class TestEdgeCases(unittest.TestCase, _RunnerMixin):
     def test_shapes_at_non_origin_overlap(self):
         """Overlapping shapes far from origin."""
         cases = [
-            self._case(GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [100.0, 200.0, 300.0], [100.8, 200.0, 300.0]),
+            self._case(
+                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5], [100.0, 200.0, 300.0], [100.8, 200.0, 300.0]
+            ),
         ]
         r = self._run_overlap(cases)
         self.assertAlmostEqual(r["mi_distance"][0], -0.2, places=2)
@@ -1141,9 +1538,17 @@ class TestEdgeCases(unittest.TestCase, _RunnerMixin):
         q30 = _quat_from_axis_angle([0, 0, 1], math.pi / 6.0)
         q45 = _quat_from_axis_angle([1, 0, 0], math.pi / 4.0)
         cases = [
-            self._case(GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [10.0, 20.0, 30.0], [11.5, 20.0, 30.0],
-                        ori_a=q30, ori_b=q45, margin=1.0),
+            self._case(
+                GeoType.BOX,
+                [0.5, 0.5, 0.5],
+                GeoType.BOX,
+                [0.5, 0.5, 0.5],
+                [10.0, 20.0, 30.0],
+                [11.5, 20.0, 30.0],
+                ori_a=q30,
+                ori_b=q45,
+                margin=1.0,
+            ),
         ]
         r = self._run_separated(cases)
         self.assertTrue(r["mi_collision"][0])
@@ -1152,8 +1557,15 @@ class TestEdgeCases(unittest.TestCase, _RunnerMixin):
     def test_large_size_difference(self):
         """Very different shape sizes."""
         cases = [
-            self._case(GeoType.BOX, [5.0, 5.0, 5.0], GeoType.BOX, [0.01, 0.01, 0.01],
-                        [0.0, 0.0, 0.0], [5.02, 0.0, 0.0], margin=0.5),
+            self._case(
+                GeoType.BOX,
+                [5.0, 5.0, 5.0],
+                GeoType.BOX,
+                [0.01, 0.01, 0.01],
+                [0.0, 0.0, 0.0],
+                [5.02, 0.0, 0.0],
+                margin=0.5,
+            ),
         ]
         r = self._run_separated(cases)
         self.assertTrue(r["mi_collision"][0])
@@ -1162,10 +1574,10 @@ class TestEdgeCases(unittest.TestCase, _RunnerMixin):
     def test_identical_positions_deep_overlap(self):
         """Shapes at the exact same position (maximum overlap)."""
         cases = [
-            self._case(GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                        [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
-            self._case(GeoType.SPHERE, [0.5, 0.0, 0.0], GeoType.SPHERE, [0.3, 0.0, 0.0],
-                        [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            self._case(GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            self._case(
+                GeoType.SPHERE, [0.5, 0.0, 0.0], GeoType.SPHERE, [0.3, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
+            ),
         ]
         r = self._run_overlap(cases)
         for i in range(2):
@@ -1183,10 +1595,13 @@ class TestContinuity(unittest.TestCase, _RunnerMixin):
 
     def test_box_box_continuity_sweep(self):
         """Sweep box-box from separated through touching to overlapping."""
-        offsets = [1.4, 1.3, 1.2, 1.1, 1.05, 1.02, 1.01, 1.005,
-                   1.0, 0.995, 0.99, 0.98, 0.95, 0.9, 0.8, 0.7]
-        cases = [self._case(GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5],
-                             [0.0, 0.0, 0.0], [o, 0.0, 0.0], margin=0.5) for o in offsets]
+        offsets = [1.4, 1.3, 1.2, 1.1, 1.05, 1.02, 1.01, 1.005, 1.0, 0.995, 0.99, 0.98, 0.95, 0.9, 0.8, 0.7]
+        cases = [
+            self._case(
+                GeoType.BOX, [0.5, 0.5, 0.5], GeoType.BOX, [0.5, 0.5, 0.5], [0.0, 0.0, 0.0], [o, 0.0, 0.0], margin=0.5
+            )
+            for o in offsets
+        ]
         r_sep = self._run_separated(cases)
         r_ovl = self._run_overlap(cases)
 
@@ -1196,8 +1611,7 @@ class TestContinuity(unittest.TestCase, _RunnerMixin):
             dist = r_sep["mi_distance"][i] if expected >= 0 else r_ovl["mi_distance"][i]
             distances.append(dist)
             if abs(expected) <= 0.49:  # Within margin
-                self.assertAlmostEqual(dist, expected, places=2,
-                                       msg=f"offset={offset}")
+                self.assertAlmostEqual(dist, expected, places=2, msg=f"offset={offset}")
 
         # Check monotonicity
         for i in range(1, len(distances)):
@@ -1205,10 +1619,19 @@ class TestContinuity(unittest.TestCase, _RunnerMixin):
 
     def test_sphere_sphere_continuity_sweep(self):
         """Sweep sphere-sphere across boundary."""
-        offsets = [1.1, 1.0, 0.9, 0.85, 0.82, 0.81, 0.805,
-                   0.8, 0.795, 0.79, 0.78, 0.75, 0.7, 0.6]
-        cases = [self._case(GeoType.SPHERE, [0.5, 0.0, 0.0], GeoType.SPHERE, [0.3, 0.0, 0.0],
-                             [0.0, 0.0, 0.0], [o, 0.0, 0.0], margin=0.5) for o in offsets]
+        offsets = [1.1, 1.0, 0.9, 0.85, 0.82, 0.81, 0.805, 0.8, 0.795, 0.79, 0.78, 0.75, 0.7, 0.6]
+        cases = [
+            self._case(
+                GeoType.SPHERE,
+                [0.5, 0.0, 0.0],
+                GeoType.SPHERE,
+                [0.3, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [o, 0.0, 0.0],
+                margin=0.5,
+            )
+            for o in offsets
+        ]
         r_sep = self._run_separated(cases)
         r_ovl = self._run_overlap(cases)
 

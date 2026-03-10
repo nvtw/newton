@@ -73,7 +73,9 @@ class Example:
         builder.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
 
         cube_hull_mesh = newton.Mesh.create_box(
-            CUBE_HALF, CUBE_HALF, CUBE_HALF,
+            CUBE_HALF,
+            CUBE_HALF,
+            CUBE_HALF,
             duplicate_vertices=False,
             compute_normals=False,
             compute_uvs=False,
@@ -227,7 +229,9 @@ class Example:
             width = 110
             kernel_width = width - 30
             print(f"\n{'=' * width}")
-            print(f"  Kernel timing report ({frame_count} frames, {self.hull_count} convex hulls x {self.world_count} worlds)")
+            print(
+                f"  Kernel timing report ({frame_count} frames, {self.hull_count} convex hulls x {self.world_count} worlds)"
+            )
             print(f"{'=' * width}")
             print(f"{'Kernel':<{kernel_width}} {'Total ms':>10} {'Avg ms':>10} {'Count':>7}")
             print(f"{'-' * kernel_width} {'-' * 10} {'-' * 10} {'-' * 7}")
