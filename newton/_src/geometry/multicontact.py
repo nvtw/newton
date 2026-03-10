@@ -664,7 +664,7 @@ def add_avoid_duplicates_vec2(
 def get_ptr(a: wp.array(dtype=wp.vec2)) -> wp.uint64: ...
 
 
-def create_build_manifold(support_func: Any, writer_func: Any, post_process_contact: Any):
+def create_build_manifold(support_func: Any, writer_func: Any, post_process_contact: Any, _support_funcs: Any = None):
     """
     Factory function to create manifold generation functions with a specific support mapping function.
 
@@ -682,6 +682,13 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
         build_manifold function that generates up to 5 contact points between two shapes
         using perturbed support mapping and polygon clipping.
     """
+
+    if _support_funcs is not None:
+        _support_map_b = _support_funcs[0]
+    else:
+        from .mpr import create_support_map_function
+
+        _support_map_b = create_support_map_function(support_func)[0]
 
     @wp.func
     def extract_4_point_contact_manifolds(
@@ -862,16 +869,11 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
             )
 
             # Find the support point on shape A in the perturbed direction.
-            # 1. Transform the world-space direction into shape A's local space.
-            tmp = wp.quat_rotate_inv(quaternion_a, offset_normal)
-            # 2. Find the furthest point on shape A in that local direction.
-            pt_a = support_func(geom_a, tmp, data_provider)
-            # 3. Transform the local-space support point back to world space.
-            pt_a_3d = wp.quat_rotate(quaternion_a, pt_a) + position_a
-            # 4. Project to 2D contact plane space
+            pt_a_3d = _support_map_b(geom_a, offset_normal, quaternion_a, position_a, data_provider)
+            # Project to 2D contact plane space
             projected_a = pt_a_3d - center
             pt_a_2d = wp.vec2(wp.dot(tangent_a, projected_a), wp.dot(tangent_b, projected_a))
-            # 5. Add the 2D projected point, checking for duplicates.
+            # Add the 2D projected point, checking for duplicates.
             a_count, was_added_a = add_avoid_duplicates_vec2(a_buffer, a_count, pt_a_2d, EPS)
             if was_added_a:
                 plane_tracker_a = update_incremental_plane_tracker(plane_tracker_a, pt_a_3d, a_count - 1)
@@ -880,10 +882,7 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
             offset_normal = -offset_normal
 
             # Find the support point on shape B in the opposite perturbed direction.
-            # (Process is identical to the one for shape A).
-            tmp = wp.quat_rotate_inv(quaternion_b, offset_normal)
-            pt_b = support_func(geom_b, tmp, data_provider)
-            pt_b_3d = wp.quat_rotate(quaternion_b, pt_b) + position_b
+            pt_b_3d = _support_map_b(geom_b, offset_normal, quaternion_b, position_b, data_provider)
             # Project to 2D contact plane space
             projected_b = pt_b_3d - center
             pt_b_2d = wp.vec2(wp.dot(tangent_a, projected_b), wp.dot(tangent_b, projected_b))

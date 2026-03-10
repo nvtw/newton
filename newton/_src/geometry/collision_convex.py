@@ -103,7 +103,9 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
             return 1
 
         # Generate multi-contact manifold
-        count = wp.static(create_build_manifold(support_func, writer_func, post_process_contact))(
+        count = wp.static(
+            create_build_manifold(support_func, writer_func, post_process_contact, _support_funcs=support_funcs)
+        )(
             geom_a,
             geom_b,
             orientation_a,
