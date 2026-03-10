@@ -574,10 +574,21 @@ class CollisionPipeline:
             # should not trigger mesh-only kernel setup/launches.
             has_meshes = False
             has_heightfields = False
+            use_lean_gjk_mpr = False
             if hasattr(model, "shape_type") and model.shape_type is not None:
                 shape_types = model.shape_type.numpy()
                 has_heightfields = bool((shape_types == int(GeoType.HFIELD)).any())
                 has_meshes = bool((shape_types == int(GeoType.MESH)).any())
+                # Use lean GJK/MPR kernel when scene has no capsules, ellipsoids,
+                # cylinders, or cones (which need full support function and axial
+                # rolling post-processing)
+                lean_unsupported = {
+                    int(GeoType.CAPSULE),
+                    int(GeoType.ELLIPSOID),
+                    int(GeoType.CYLINDER),
+                    int(GeoType.CONE),
+                }
+                use_lean_gjk_mpr = not bool(lean_unsupported & set(shape_types.tolist()))
 
             # Initialize narrow phase with pre-allocated buffers
             # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs
@@ -595,6 +606,7 @@ class CollisionPipeline:
                 hydroelastic_sdf=hydroelastic_sdf,
                 has_meshes=has_meshes,
                 has_heightfields=has_heightfields,
+                use_lean_gjk_mpr=use_lean_gjk_mpr,
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
 

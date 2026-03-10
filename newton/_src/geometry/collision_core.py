@@ -152,6 +152,34 @@ def no_post_process_contact(
 
 
 @wp.func
+def post_process_minkowski_only(
+    contact_data: ContactData,
+    shape_a: GenericShapeData,
+    pos_a_adjusted: wp.vec3,
+    rot_a: wp.quat,
+    shape_b: GenericShapeData,
+    pos_b_adjusted: wp.vec3,
+    rot_b: wp.quat,
+) -> ContactData:
+    """Lean post-processor: Minkowski sphere/capsule adjustment only, no axial rolling."""
+    type_a = shape_a.shape_type
+    type_b = shape_b.shape_type
+    normal = contact_data.contact_normal_a_to_b
+    radius_eff_a = contact_data.radius_eff_a
+    radius_eff_b = contact_data.radius_eff_b
+
+    if type_a == GeoType.SPHERE or type_a == GeoType.CAPSULE:
+        contact_data.contact_point_center = contact_data.contact_point_center + normal * (radius_eff_a * 0.5)
+        contact_data.contact_distance = contact_data.contact_distance - radius_eff_a
+
+    if type_b == GeoType.SPHERE or type_b == GeoType.CAPSULE:
+        contact_data.contact_point_center = contact_data.contact_point_center - normal * (radius_eff_b * 0.5)
+        contact_data.contact_distance = contact_data.contact_distance - radius_eff_b
+
+    return contact_data
+
+
+@wp.func
 def post_process_axial_on_discrete_contact(
     contact_data: ContactData,
     shape_a: GenericShapeData,
@@ -258,17 +286,23 @@ def post_process_axial_on_discrete_contact(
 
 
 def create_compute_gjk_mpr_contacts(
-    writer_func: Any, post_process_contact: Any = post_process_axial_on_discrete_contact
+    writer_func: Any,
+    post_process_contact: Any = post_process_axial_on_discrete_contact,
+    support_func: Any = None,
 ):
     """
     Factory function to create a compute_gjk_mpr_contacts function with a specific writer function.
 
     Args:
         writer_func: Function to write contact data (signature: (ContactData, writer_data) -> None)
+        post_process_contact: Function to post-process contact data
+        support_func: Support mapping function (defaults to support_map)
 
     Returns:
         A compute_gjk_mpr_contacts function with the writer function baked in
     """
+    if support_func is None:
+        support_func = support_map
 
     @wp.func
     def compute_gjk_mpr_contacts(
@@ -333,7 +367,7 @@ def create_compute_gjk_mpr_contacts(
         contact_template.gap_sum = rigid_gap
 
         if wp.static(ENABLE_MULTI_CONTACT):
-            wp.static(create_solve_convex_multi_contact(support_map, writer_func, post_process_contact))(
+            wp.static(create_solve_convex_multi_contact(support_func, writer_func, post_process_contact))(
                 shape_a_data,
                 shape_b_data,
                 rot_a,
@@ -351,7 +385,7 @@ def create_compute_gjk_mpr_contacts(
                 contact_template,
             )
         else:
-            wp.static(create_solve_convex_single_contact(support_map, writer_func, post_process_contact))(
+            wp.static(create_solve_convex_single_contact(support_func, writer_func, post_process_contact))(
                 shape_a_data,
                 shape_b_data,
                 rot_a,
@@ -598,16 +632,22 @@ def check_infinite_plane_bsphere_overlap(
     return center_dist <= other_radius
 
 
-def create_find_contacts(writer_func: Any):
+def create_find_contacts(writer_func: Any, support_func: Any = None, post_process_contact: Any = None):
     """
     Factory function to create a find_contacts function with a specific writer function.
 
     Args:
         writer_func: Function to write contact data (signature: (ContactData, writer_data) -> None)
+        support_func: Support mapping function (defaults to support_map)
+        post_process_contact: Post-processing function (defaults to post_process_axial_on_discrete_contact)
 
     Returns:
         A find_contacts function with the writer function baked in
     """
+    if support_func is None:
+        support_func = support_map
+    if post_process_contact is None:
+        post_process_contact = post_process_axial_on_discrete_contact
 
     @wp.func
     def find_contacts(
@@ -672,7 +712,11 @@ def create_find_contacts(writer_func: Any):
             )
 
         # Compute and write contacts using GJK/MPR
-        wp.static(create_compute_gjk_mpr_contacts(writer_func))(
+        wp.static(
+            create_compute_gjk_mpr_contacts(
+                writer_func, post_process_contact=post_process_contact, support_func=support_func
+            )
+        )(
             shape_data_a,
             shape_data_b,
             quat_a,

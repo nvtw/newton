@@ -148,10 +148,11 @@ def create_support_map_function(support_func: Any):
         tmp_direction = -direction
         v.B = support_map_b(geom_b, tmp_direction, orientation_b, position_b, data_provider)
 
-        # Apply contact offset extension
-        d = wp.normalize(direction) * extend * 0.5
-        point_a = point_a + d
-        v.B = v.B - d
+        # Apply contact offset extension (skip normalize when extend is 0)
+        if extend > 0.0:
+            d = wp.normalize(direction) * extend * 0.5
+            point_a = point_a + d
+            v.B = v.B - d
 
         # Store BtoA vector
         v.BtoA = point_a - v.B
@@ -219,7 +220,7 @@ def create_solve_mpr(support_func: Any):
         extend: float,
         data_provider: Any,
         MAX_ITER: int = 30,
-        COLLIDE_EPSILON: float = 1e-5,
+        COLLIDE_EPSILON: float = 1e-4,
     ) -> tuple[bool, wp.vec3, wp.vec3, wp.vec3, float]:
         """
         Core MPR algorithm implementation.
@@ -431,7 +432,7 @@ def create_solve_mpr(support_func: Any):
         sum_of_contact_offsets: float,
         data_provider: Any,
         MAX_ITER: int = 30,
-        COLLIDE_EPSILON: float = 1e-5,
+        COLLIDE_EPSILON: float = 1e-4,
     ) -> tuple[bool, float, wp.vec3, wp.vec3]:
         """
         Solve MPR (Minkowski Portal Refinement) for collision detection.

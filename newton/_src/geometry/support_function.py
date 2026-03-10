@@ -296,6 +296,48 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
 
 
 @wp.func
+def support_map_lean(geom: GenericShapeData, direction: wp.vec3, data_provider: SupportMapDataProvider) -> wp.vec3:
+    """
+    Lean support function for common shape types only: CONVEX_MESH, BOX, SPHERE.
+
+    This is a specialized version of support_map with reduced code size to improve
+    GPU instruction cache utilization. It omits support for CAPSULE, ELLIPSOID,
+    CYLINDER, CONE, PLANE, and TRIANGLE shapes.
+    """
+    result = wp.vec3(0.0, 0.0, 0.0)
+
+    if geom.shape_type == GeoType.CONVEX_MESH:
+        mesh_ptr = unpack_mesh_ptr(geom.auxiliary)
+        mesh = wp.mesh_get(mesh_ptr)
+        scaled_dir = wp.cw_mul(direction, geom.scale)
+        max_dot = float(-1.0e10)
+        best_idx = int(0)
+        for i in range(mesh.points.shape[0]):
+            dot_val = wp.dot(mesh.points[i], scaled_dir)
+            if dot_val > max_dot:
+                max_dot = dot_val
+                best_idx = i
+        result = wp.cw_mul(mesh.points[best_idx], geom.scale)
+
+    elif geom.shape_type == GeoType.BOX:
+        sx = 1.0 if direction[0] >= 0.0 else -1.0
+        sy = 1.0 if direction[1] >= 0.0 else -1.0
+        sz = 1.0 if direction[2] >= 0.0 else -1.0
+        result = wp.vec3(sx * geom.scale[0], sy * geom.scale[1], sz * geom.scale[2])
+
+    elif geom.shape_type == GeoType.SPHERE:
+        radius = geom.scale[0]
+        dir_len_sq = wp.length_sq(direction)
+        if dir_len_sq > 1.0e-12:
+            n = wp.normalize(direction)
+        else:
+            n = wp.vec3(1.0, 0.0, 0.0)
+        result = n * radius
+
+    return result
+
+
+@wp.func
 def extract_shape_data(
     shape_idx: int,
     shape_transform: wp.array(dtype=wp.transform),

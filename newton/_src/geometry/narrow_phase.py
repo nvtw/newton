@@ -31,6 +31,7 @@ from ..geometry.collision_core import (
     create_find_contacts,
     get_triangle_shape_from_mesh,
     mesh_vs_convex_midphase,
+    post_process_minkowski_only,
 )
 from ..geometry.collision_primitive import (
     collide_capsule_capsule,
@@ -62,6 +63,7 @@ from ..geometry.sdf_texture import TextureSDFData
 from ..geometry.support_function import (
     SupportMapDataProvider,
     extract_shape_data,
+    support_map_lean,
 )
 from ..geometry.types import GeoType
 from ..utils.heightfield import HeightfieldData, create_empty_heightfield_data, get_triangle_from_heightfield_cell
@@ -601,7 +603,9 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
     return narrow_phase_primitive_kernel
 
 
-def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
+def create_narrow_phase_kernel_gjk_mpr(
+    external_aabb: bool, writer_func: Any, support_func: Any = None, post_process_contact: Any = None
+):
     """
     Create a GJK/MPR narrow phase kernel for complex convex shape collisions.
 
@@ -674,63 +678,70 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
             if is_infinite_plane_a and is_infinite_plane_b:
                 continue
 
-            # Compute or fetch AABBs for bounding sphere overlap check
-            if wp.static(external_aabb):
-                aabb_a_lower = shape_aabb_lower[shape_a]
-                aabb_a_upper = shape_aabb_upper[shape_a]
-                aabb_b_lower = shape_aabb_lower[shape_b]
-                aabb_b_upper = shape_aabb_upper[shape_b]
-            if wp.static(not external_aabb):
-                gap_a = shape_gap[shape_a]
-                gap_b = shape_gap[shape_b]
-                gap_vec_a = wp.vec3(gap_a, gap_a, gap_a)
-                gap_vec_b = wp.vec3(gap_b, gap_b, gap_b)
+            # Bounding sphere check is only needed for infinite plane pairs.
+            # For non-plane pairs with external AABBs, SAP already verified AABB overlap.
+            bsphere_radius_a = float(0.0)
+            bsphere_radius_b = float(0.0)
+            has_infinite_plane = is_infinite_plane_a or is_infinite_plane_b
 
-                # Shape A AABB
-                if is_infinite_plane_a:
-                    radius_a = shape_collision_radius[shape_a]
-                    half_extents_a = wp.vec3(radius_a, radius_a, radius_a)
-                    aabb_a_lower = pos_a - half_extents_a - gap_vec_a
-                    aabb_a_upper = pos_a + half_extents_a + gap_vec_a
-                else:
-                    data_provider = SupportMapDataProvider()
-                    aabb_a_lower, aabb_a_upper = compute_tight_aabb_from_support(
-                        shape_data_a, quat_a, pos_a, data_provider
-                    )
-                    aabb_a_lower = aabb_a_lower - gap_vec_a
-                    aabb_a_upper = aabb_a_upper + gap_vec_a
+            if has_infinite_plane:
+                # Compute or fetch AABBs for bounding sphere overlap check
+                if wp.static(external_aabb):
+                    aabb_a_lower = shape_aabb_lower[shape_a]
+                    aabb_a_upper = shape_aabb_upper[shape_a]
+                    aabb_b_lower = shape_aabb_lower[shape_b]
+                    aabb_b_upper = shape_aabb_upper[shape_b]
+                if wp.static(not external_aabb):
+                    gap_a = shape_gap[shape_a]
+                    gap_b = shape_gap[shape_b]
+                    gap_vec_a = wp.vec3(gap_a, gap_a, gap_a)
+                    gap_vec_b = wp.vec3(gap_b, gap_b, gap_b)
 
-                # Shape B AABB
-                if is_infinite_plane_b:
-                    radius_b = shape_collision_radius[shape_b]
-                    half_extents_b = wp.vec3(radius_b, radius_b, radius_b)
-                    aabb_b_lower = pos_b - half_extents_b - gap_vec_b
-                    aabb_b_upper = pos_b + half_extents_b + gap_vec_b
-                else:
-                    data_provider = SupportMapDataProvider()
-                    aabb_b_lower, aabb_b_upper = compute_tight_aabb_from_support(
-                        shape_data_b, quat_b, pos_b, data_provider
-                    )
-                    aabb_b_lower = aabb_b_lower - gap_vec_b
-                    aabb_b_upper = aabb_b_upper + gap_vec_b
+                    # Shape A AABB
+                    if is_infinite_plane_a:
+                        radius_a = shape_collision_radius[shape_a]
+                        half_extents_a = wp.vec3(radius_a, radius_a, radius_a)
+                        aabb_a_lower = pos_a - half_extents_a - gap_vec_a
+                        aabb_a_upper = pos_a + half_extents_a + gap_vec_a
+                    else:
+                        data_provider = SupportMapDataProvider()
+                        aabb_a_lower, aabb_a_upper = compute_tight_aabb_from_support(
+                            shape_data_a, quat_a, pos_a, data_provider
+                        )
+                        aabb_a_lower = aabb_a_lower - gap_vec_a
+                        aabb_a_upper = aabb_a_upper + gap_vec_a
 
-            # Compute bounding spheres and check for overlap (early rejection)
-            bsphere_center_a, bsphere_radius_a = compute_bounding_sphere_from_aabb(aabb_a_lower, aabb_a_upper)
-            bsphere_center_b, bsphere_radius_b = compute_bounding_sphere_from_aabb(aabb_b_lower, aabb_b_upper)
+                    # Shape B AABB
+                    if is_infinite_plane_b:
+                        radius_b = shape_collision_radius[shape_b]
+                        half_extents_b = wp.vec3(radius_b, radius_b, radius_b)
+                        aabb_b_lower = pos_b - half_extents_b - gap_vec_b
+                        aabb_b_upper = pos_b + half_extents_b + gap_vec_b
+                    else:
+                        data_provider = SupportMapDataProvider()
+                        aabb_b_lower, aabb_b_upper = compute_tight_aabb_from_support(
+                            shape_data_b, quat_b, pos_b, data_provider
+                        )
+                        aabb_b_lower = aabb_b_lower - gap_vec_b
+                        aabb_b_upper = aabb_b_upper + gap_vec_b
 
-            if not check_infinite_plane_bsphere_overlap(
-                shape_data_a,
-                shape_data_b,
-                pos_a,
-                pos_b,
-                quat_a,
-                quat_b,
-                bsphere_center_a,
-                bsphere_center_b,
-                bsphere_radius_a,
-                bsphere_radius_b,
-            ):
-                continue
+                # Compute bounding spheres and check for overlap (early rejection)
+                bsphere_center_a, bsphere_radius_a = compute_bounding_sphere_from_aabb(aabb_a_lower, aabb_a_upper)
+                bsphere_center_b, bsphere_radius_b = compute_bounding_sphere_from_aabb(aabb_b_lower, aabb_b_upper)
+
+                if not check_infinite_plane_bsphere_overlap(
+                    shape_data_a,
+                    shape_data_b,
+                    pos_a,
+                    pos_b,
+                    quat_a,
+                    quat_b,
+                    bsphere_center_a,
+                    bsphere_center_b,
+                    bsphere_radius_a,
+                    bsphere_radius_b,
+                ):
+                    continue
 
             # Compute pairwise gap sum for contact detection
             gap_a = shape_gap[shape_a]
@@ -738,7 +749,9 @@ def create_narrow_phase_kernel_gjk_mpr(external_aabb: bool, writer_func: Any):
             gap_sum = gap_a + gap_b
 
             # Find and write contacts using GJK/MPR
-            wp.static(create_find_contacts(writer_func))(
+            wp.static(
+                create_find_contacts(writer_func, support_func=support_func, post_process_contact=post_process_contact)
+            )(
                 pos_a,
                 pos_b,
                 quat_a,
@@ -1500,6 +1513,7 @@ class NarrowPhase:
         hydroelastic_sdf: HydroelasticSDF | None = None,
         has_meshes: bool = True,
         has_heightfields: bool = False,
+        use_lean_gjk_mpr: bool = False,
     ) -> None:
         """
         Initialize NarrowPhase with pre-allocated buffers.
@@ -1579,8 +1593,17 @@ class NarrowPhase:
         # Primitive kernel handles lightweight primitives and routes remaining pairs
         self.primitive_kernel = create_narrow_phase_primitive_kernel(writer_func)
         # GJK/MPR kernel handles remaining convex-convex pairs
-        self.narrow_phase_kernel = create_narrow_phase_kernel_gjk_mpr(self.external_aabb, writer_func)
-
+        if use_lean_gjk_mpr:
+            # Use lean support function (CONVEX_MESH, BOX, SPHERE only) and lean post-processing
+            # (skip axial shape rolling stabilization) to reduce GPU i-cache pressure
+            self.narrow_phase_kernel = create_narrow_phase_kernel_gjk_mpr(
+                self.external_aabb,
+                writer_func,
+                support_func=support_map_lean,
+                post_process_contact=post_process_minkowski_only,
+            )
+        else:
+            self.narrow_phase_kernel = create_narrow_phase_kernel_gjk_mpr(self.external_aabb, writer_func)
         # Create mesh kernels only when has_meshes=True
         if has_meshes:
             self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func)

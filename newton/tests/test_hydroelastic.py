@@ -269,7 +269,13 @@ def test_stacked_primitive_cubes_hydroelastic_no_reduction(test, device, solver_
     # quantization; use more substeps to compensate and allow up to 50% of
     # cube_half (25% of cube size) positional drift.
     run_stacked_cubes_hydroelastic_test(
-        test, device, solver_fn, ShapeType.PRIMITIVE, CUBE_HALF_LARGE, False, position_threshold_factor=0.50,
+        test,
+        device,
+        solver_fn,
+        ShapeType.PRIMITIVE,
+        CUBE_HALF_LARGE,
+        False,
+        position_threshold_factor=0.50,
         substeps=20,
     )
 

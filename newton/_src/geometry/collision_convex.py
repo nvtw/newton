@@ -112,7 +112,9 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
         Returns:
             Number of valid contact points written (0-5)
         """
-        # Enlarge a little bit to avoid contact flickering when the signed distance is close to 0
+        # Enlarge a little bit to avoid contact flickering when the signed distance is close to 0.
+        # This ensures MPR consistently detects resting contacts, preventing alternation between
+        # MPR and GJK across frames for near-touching shapes.
         enlarge = 1e-4
         # Try MPR first (optimized for overlapping shapes, which is the common case)
         collision, signed_distance, point, normal = wp.static(create_solve_mpr(support_func))(
@@ -233,7 +235,9 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
         Returns:
             Number of valid contact points written (0 or 1)
         """
-        # Enlarge a little bit to avoid contact flickering when the signed distance is close to 0
+        # Enlarge a little bit to avoid contact flickering when the signed distance is close to 0.
+        # This ensures MPR consistently detects resting contacts, preventing alternation between
+        # MPR and GJK across frames for near-touching shapes.
         enlarge = 1e-4
         # Try MPR first (optimized for overlapping shapes, which is the common case)
         collision, signed_distance, point, normal = wp.static(create_solve_mpr(support_func))(
