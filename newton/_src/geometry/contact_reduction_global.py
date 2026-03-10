@@ -28,7 +28,7 @@ across the entire GPU without block-level synchronization constraints.
 
 **Contact Reduction Strategy:**
 
-The same three-strategy approach as ``ContactReductionFunctions``:
+The same three-strategy approach as the shared-memory reduction in ``contact_reduction.py``:
 
 1. **Spatial Extreme Slots** (6 per normal bin = 120 total per pair)
    - Builds support polygon boundary for stable stacking
@@ -54,8 +54,8 @@ The same three-strategy approach as ``ContactReductionFunctions``:
 - Atomic max on packed (score, contact_id) selects winners
 
 See Also:
-    :class:`ContactReductionFunctions` in ``contact_reduction.py`` for the
-    shared-memory variant and detailed algorithm documentation.
+    ``contact_reduction.py`` for shared utility functions and detailed
+    algorithm documentation.
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ from .types import GeoType
 
 # Fixed beta threshold for contact reduction - small positive value to avoid flickering
 # from numerical noise while effectively selecting only near-penetrating contacts for
-# the support polygon. Same value as used in ContactReductionFunctions.BETA_THRESHOLD.
+# the support polygon.
 BETA_THRESHOLD = 0.0001  # 0.1mm
 
 # Number of value slots per hashtable entry: 6 spatial directions + 1 max-depth = 7

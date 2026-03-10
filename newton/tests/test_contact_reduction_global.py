@@ -568,6 +568,7 @@ def test_export_reduced_contacts_kernel(test, device):
 
     # Launch export kernel
     total_threads = 128  # Grid stride threads
+    reducer.exported_flags.zero_()
     wp.launch(
         export_kernel,
         dim=total_threads,
@@ -578,6 +579,7 @@ def test_export_reduced_contacts_kernel(test, device):
             reducer.position_depth,
             reducer.normal,
             reducer.shape_pairs,
+            reducer.exported_flags,
             shape_types,
             shape_data,
             shape_gap,

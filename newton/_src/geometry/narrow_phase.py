@@ -45,9 +45,6 @@ from ..geometry.collision_primitive import (
     collide_sphere_sphere,
 )
 from ..geometry.contact_data import SHAPE_PAIR_HFIELD_BIT, ContactData, contact_passes_gap_check
-from ..geometry.contact_reduction import (
-    ContactReductionFunctions,
-)
 from ..geometry.contact_reduction_global import (
     GlobalContactReducer,
     create_export_reduced_contacts_kernel,
@@ -979,14 +976,14 @@ def compute_mesh_plane_block_offsets(
 
 def create_narrow_phase_process_mesh_plane_contacts_kernel(
     writer_func: Any,
-    contact_reduction_funcs: ContactReductionFunctions | None = None,
+    reduce_contacts: bool = False,
 ):
     """
     Create a mesh-plane collision kernel.
 
     Args:
         writer_func: Contact writer function (e.g., write_contact_simple)
-        contact_reduction_funcs: ContactReductionFunctions instance. If None, no contact reduction is used.
+        reduce_contacts: If True, return multi-block load-balanced variant for global reduction.
 
     Returns:
         A warp kernel that processes mesh-plane collisions
@@ -1094,7 +1091,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
                         writer_func(contact_data, writer_data, -1)
 
     # Return early if contact reduction is disabled
-    if contact_reduction_funcs is None:
+    if not reduce_contacts:
         return narrow_phase_process_mesh_plane_contacts_kernel
 
     @wp.kernel(enable_backward=False, module="unique")
@@ -1549,14 +1546,8 @@ class NarrowPhase:
                 stacklevel=2,
             )
 
-        # Create contact reduction functions only when reduce_contacts is enabled, running on GPU, and has meshes
-        # Contact reduction requires GPU for shared memory operations and is only used for mesh contacts
-        if reduce_contacts and is_gpu_device and has_meshes:
-            self.contact_reduction_funcs = ContactReductionFunctions()
-            self.reduction_slot_count = self.contact_reduction_funcs.reduction_slot_count
-        else:
-            self.contact_reduction_funcs = None
-            self.reduction_slot_count = 0
+        # Contact reduction requires GPU and meshes
+        if reduce_contacts and not (is_gpu_device and has_meshes):
             self.reduce_contacts = False
 
         # Determine if we're using external AABBs
@@ -1600,38 +1591,28 @@ class NarrowPhase:
             if self.reduce_contacts:
                 self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(
                     write_contact_to_reducer,
-                    contact_reduction_funcs=self.contact_reduction_funcs,
+                    reduce_contacts=True,
                 )
             else:
                 self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(
                     writer_func,
-                    contact_reduction_funcs=None,
                 )
             # Only create mesh-mesh SDF kernel on CUDA (uses __shared__ memory via func_native)
             if is_gpu_device:
                 if self.reduce_contacts:
-                    # Global reduction kernel: writes directly to buffer + hashtable inline.
-                    # No thread-block shared memory contact reduction needed.
-                    self.use_global_reduction = True
                     self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         write_contact_to_reducer,
-                        contact_reduction_funcs=self.contact_reduction_funcs,
                         enable_heightfields=has_heightfields,
-                        use_global_reduction=True,
+                        reduce_contacts=True,
                     )
                 else:
-                    # Non-reduce kernel: direct contact write
-                    self.use_global_reduction = False
                     self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         writer_func,
-                        contact_reduction_funcs=None,
                         enable_heightfields=has_heightfields,
                     )
             else:
-                self.use_global_reduction = False
                 self.mesh_mesh_contacts_kernel = None
         else:
-            self.use_global_reduction = False
             self.mesh_triangle_contacts_kernel = None
             self.mesh_plane_contacts_kernel = None
             self.mesh_mesh_contacts_kernel = None
@@ -1997,11 +1978,9 @@ class NarrowPhase:
                     block_dim=self.block_dim,
                 )
 
-            # When using global reduction, register mesh-plane/mesh-triangle contacts
-            # in hashtable BEFORE mesh-mesh (mesh-mesh does inline registration).
-            # When using thread-block reduction, register ALL buffered contacts AFTER
-            # mesh-mesh (thread-block writes reduced contacts to buffer).
-            if self.reduce_contacts and self.use_global_reduction:
+            # Register mesh-plane/mesh-triangle contacts in hashtable BEFORE mesh-mesh.
+            # Mesh-mesh does inline hashtable registration in its kernel.
+            if self.reduce_contacts:
                 wp.launch(
                     kernel=reduce_buffered_contacts_kernel,
                     dim=self.total_num_threads,
@@ -2093,23 +2072,6 @@ class NarrowPhase:
                         device=device,
                         block_dim=self.tile_size_mesh_mesh,
                     )
-
-            # Thread-block reduction: register ALL buffered contacts AFTER mesh-mesh
-            if self.reduce_contacts and not self.use_global_reduction:
-                wp.launch(
-                    kernel=reduce_buffered_contacts_kernel,
-                    dim=self.total_num_threads,
-                    inputs=[
-                        reducer_data,
-                        shape_transform,
-                        shape_collision_aabb_lower,
-                        shape_collision_aabb_upper,
-                        shape_voxel_resolution,
-                        self.total_num_threads,
-                    ],
-                    device=device,
-                    block_dim=self.block_dim,
-                )
 
             # Export reduced contacts from hashtable
             if self.reduce_contacts:
