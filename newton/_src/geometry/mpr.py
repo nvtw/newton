@@ -148,10 +148,11 @@ def create_support_map_function(support_func: Any):
         tmp_direction = -direction
         v.B = support_map_b(geom_b, tmp_direction, orientation_b, position_b, data_provider)
 
-        # Apply contact offset extension
-        d = wp.normalize(direction) * extend * 0.5
-        point_a = point_a + d
-        v.B = v.B - d
+        # Apply contact offset extension (skip normalize when extend is zero)
+        if extend != 0.0:
+            d = wp.normalize(direction) * extend * 0.5
+            point_a = point_a + d
+            v.B = v.B - d
 
         # Store BtoA vector
         v.BtoA = point_a - v.B
@@ -181,16 +182,10 @@ def create_support_map_function(support_func: Any):
         """
         center = Vert()
 
-        # Get geometric center of shape A
-        point_a = wp.vec3(0.0)  # center_func(geom_a, data_provider)
-
-        # Get geometric center of shape B and transform to world space
-        center.B = wp.vec3(0.0)  # center_func(geom_b, data_provider)
-        center.B = wp.quat_rotate(orientation_b, center.B)
-        center.B = position_b + center.B
-
-        # Store BtoA vector
-        center.BtoA = point_a - center.B
+        # Both shape centers are at their local origins, so in the relative frame:
+        # center_A = vec3(0), center_B = position_b
+        center.B = position_b
+        center.BtoA = -position_b
 
         return center
 

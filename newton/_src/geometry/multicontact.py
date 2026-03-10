@@ -857,19 +857,29 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
         a_buffer = wp.array(ptr=get_ptr(b_buffer) + wp.uint64(6 * 8), shape=(6,), dtype=wp.vec2f)
 
         # --- Step 1: Find Contact Polygons using Perturbed Support Mapping ---
+        # Pre-transform basis vectors to local space of each shape (saves 6 quat_rotate_inv).
+        local_normal_a = wp.quat_rotate_inv(quaternion_a, normal)
+        local_ta_a = wp.quat_rotate_inv(quaternion_a, tangent_a)
+        local_tb_a = wp.quat_rotate_inv(quaternion_a, tangent_b)
+        # For shape B, negate since it uses -offset_normal
+        local_normal_b = wp.quat_rotate_inv(quaternion_b, -normal)
+        local_ta_b = wp.quat_rotate_inv(quaternion_b, -tangent_a)
+        local_tb_b = wp.quat_rotate_inv(quaternion_b, -tangent_b)
+
         # Loop 6 times to find up to 6 vertices for each shape's contact polygon.
         for e in range(6):
-            # Create a perturbed normal direction. This is the main collision normal slightly
-            # altered by a vector on the contact plane, defined by the hexagonal vertices.
             angle = float(e) * ROT_DELTA_ANGLE
             s = wp.sin(angle)
             c = wp.cos(angle)
-            offset_normal = (
-                normal * COS_TILT_ANGLE + (c * SIN_TILT_ANGLE) * tangent_a + (s * SIN_TILT_ANGLE) * tangent_b
-            )
 
-            # Find the support point on shape A in the perturbed direction.
-            pt_a_3d = _support_map_b(geom_a, offset_normal, quaternion_a, position_a, data_provider)
+            cos_tilt = COS_TILT_ANGLE
+            c_sin = c * SIN_TILT_ANGLE
+            s_sin = s * SIN_TILT_ANGLE
+
+            # Compute support direction in shape A's local space directly.
+            local_dir_a = local_normal_a * cos_tilt + c_sin * local_ta_a + s_sin * local_tb_a
+            pt_a_local = support_func(geom_a, local_dir_a, data_provider)
+            pt_a_3d = wp.quat_rotate(quaternion_a, pt_a_local) + position_a
             # Project to 2D contact plane space
             projected_a = pt_a_3d - center
             pt_a_2d = wp.vec2(wp.dot(tangent_a, projected_a), wp.dot(tangent_b, projected_a))
@@ -878,11 +888,10 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
             if was_added_a:
                 plane_tracker_a = update_incremental_plane_tracker(plane_tracker_a, pt_a_3d, a_count - 1)
 
-            # Invert the direction for the other shape.
-            offset_normal = -offset_normal
-
-            # Find the support point on shape B in the opposite perturbed direction.
-            pt_b_3d = _support_map_b(geom_b, offset_normal, quaternion_b, position_b, data_provider)
+            # Compute support direction in shape B's local space directly (pre-negated basis).
+            local_dir_b = local_normal_b * cos_tilt + c_sin * local_ta_b + s_sin * local_tb_b
+            pt_b_local = support_func(geom_b, local_dir_b, data_provider)
+            pt_b_3d = wp.quat_rotate(quaternion_b, pt_b_local) + position_b
             # Project to 2D contact plane space
             projected_b = pt_b_3d - center
             pt_b_2d = wp.vec2(wp.dot(tangent_a, projected_b), wp.dot(tangent_b, projected_b))
