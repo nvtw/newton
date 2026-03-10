@@ -64,6 +64,7 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
 
         # MPR with extend=0: exact normals for overlapping shapes.
         # Exits early (few support queries) when shapes are separated.
+        # MAX_ITER=15: sufficient for typical convex shapes.
         collision, point_a, point_b, normal, penetration = wp.static(solve_mpr.core)(
             geom_a,
             geom_b,
@@ -71,12 +72,15 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
             relative_position_b,
             sum_of_contact_offsets,
             data_provider,
+            15,
         )
 
         if collision:
             signed_distance = -penetration
         else:
             # GJK fallback for separated shapes — proven accurate normals/distances.
+            # MAX_ITER=15: GJK only handles separated shapes (MPR covers overlapping),
+            # so fewer iterations suffice.
             _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
                 geom_a,
                 geom_b,
@@ -84,6 +88,7 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
                 relative_position_b,
                 sum_of_contact_offsets,
                 data_provider,
+                15,
             )
 
         # Transform results back to world space (once).
@@ -152,6 +157,7 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
         relative_position_b = wp.quat_rotate_inv(orientation_a, position_b - position_a)
 
         # MPR with extend=0: exact normals for overlapping shapes.
+        # MAX_ITER=15: sufficient for typical convex shapes.
         collision, point_a, point_b, normal, penetration = wp.static(solve_mpr.core)(
             geom_a,
             geom_b,
@@ -159,12 +165,15 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
             relative_position_b,
             sum_of_contact_offsets,
             data_provider,
+            15,
         )
 
         if collision:
             signed_distance = -penetration
         else:
             # GJK fallback for separated shapes.
+            # MAX_ITER=15: GJK only handles separated shapes (MPR covers overlapping),
+            # so fewer iterations suffice.
             _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
                 geom_a,
                 geom_b,
@@ -172,6 +181,7 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
                 relative_position_b,
                 sum_of_contact_offsets,
                 data_provider,
+                15,
             )
 
         # Transform results back to world space (once).

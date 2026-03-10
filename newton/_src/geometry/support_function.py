@@ -125,12 +125,7 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
     - TRIANGLE: scale contains vector B-A, auxiliary contains vector C-A (relative to vertex A at origin)
     """
 
-    # handle zero direction robustly
     eps = 1.0e-12
-    dir_len_sq = wp.length_sq(direction)
-    dir_safe = wp.vec3(1.0, 0.0, 0.0)
-    if dir_len_sq > eps:
-        dir_safe = direction
 
     result = wp.vec3(0.0, 0.0, 0.0)
 
@@ -144,7 +139,7 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
 
         # Pre-scale direction: dot(scale*v, d) == dot(v, scale*d)
         # This moves the per-vertex cw_mul out of the loop (only 1 at the end)
-        scaled_dir = wp.cw_mul(dir_safe, mesh_scale)
+        scaled_dir = wp.cw_mul(direction, mesh_scale)
 
         max_dot = float(-1.0e10)
         best_idx = int(0)
@@ -162,9 +157,9 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
         tri_c = geom.auxiliary
 
         # Compute dot products with direction for each vertex
-        dot_a = wp.dot(tri_a, dir_safe)
-        dot_b = wp.dot(tri_b, dir_safe)
-        dot_c = wp.dot(tri_c, dir_safe)
+        dot_a = wp.dot(tri_a, direction)
+        dot_b = wp.dot(tri_b, direction)
+        dot_c = wp.dot(tri_c, direction)
 
         # Find the vertex with maximum dot product (furthest in the direction)
         if dot_a >= dot_b and dot_a >= dot_c:
@@ -174,16 +169,17 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
         else:
             result = tri_c
     elif geom.shape_type == GeoType.BOX:
-        sx = 1.0 if dir_safe[0] >= 0.0 else -1.0
-        sy = 1.0 if dir_safe[1] >= 0.0 else -1.0
-        sz = 1.0 if dir_safe[2] >= 0.0 else -1.0
+        sx = 1.0 if direction[0] >= 0.0 else -1.0
+        sy = 1.0 if direction[1] >= 0.0 else -1.0
+        sz = 1.0 if direction[2] >= 0.0 else -1.0
 
         result = wp.vec3(sx * geom.scale[0], sy * geom.scale[1], sz * geom.scale[2])
 
     elif geom.shape_type == GeoType.SPHERE:
         radius = geom.scale[0]
+        dir_len_sq = wp.length_sq(direction)
         if dir_len_sq > eps:
-            n = wp.normalize(dir_safe)
+            n = wp.normalize(direction)
         else:
             n = wp.vec3(1.0, 0.0, 0.0)
         result = n * radius
@@ -194,15 +190,16 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
 
         # Capsule = segment + sphere (adapted from C# code to Z-axis convention)
         # Sphere part: support in normalized direction
+        dir_len_sq = wp.length_sq(direction)
         if dir_len_sq > eps:
-            n = wp.normalize(dir_safe)
+            n = wp.normalize(direction)
         else:
             n = wp.vec3(1.0, 0.0, 0.0)
         result = n * radius
 
         # Segment endpoints are at (0, 0, +half_height) and (0, 0, -half_height)
         # Use sign of Z-component to pick the correct endpoint
-        if dir_safe[2] >= 0.0:
+        if direction[2] >= 0.0:
             result = result + wp.vec3(0.0, 0.0, half_height)
         else:
             result = result + wp.vec3(0.0, 0.0, -half_height)
@@ -213,15 +210,16 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
         a = geom.scale[0]
         b = geom.scale[1]
         c = geom.scale[2]
+        dir_len_sq = wp.length_sq(direction)
         if dir_len_sq > eps:
-            adx = a * dir_safe[0]
-            bdy = b * dir_safe[1]
-            cdz = c * dir_safe[2]
+            adx = a * direction[0]
+            bdy = b * direction[1]
+            cdz = c * direction[2]
             denom_sq = adx * adx + bdy * bdy + cdz * cdz
             if denom_sq > eps:
                 denom = wp.sqrt(denom_sq)
                 result = wp.vec3(
-                    (a * a) * dir_safe[0] / denom, (b * b) * dir_safe[1] / denom, (c * c) * dir_safe[2] / denom
+                    (a * a) * direction[0] / denom, (b * b) * direction[1] / denom, (c * c) * direction[2] / denom
                 )
             else:
                 result = wp.vec3(a, 0.0, 0.0)
@@ -233,7 +231,7 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
         half_height = geom.scale[1]
 
         # Cylinder support: project direction to XY plane for lateral surface
-        dir_xy = wp.vec3(dir_safe[0], dir_safe[1], 0.0)
+        dir_xy = wp.vec3(direction[0], direction[1], 0.0)
         dir_xy_len_sq = wp.length_sq(dir_xy)
 
         if dir_xy_len_sq > eps:
@@ -243,9 +241,9 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
             lateral_point = wp.vec3(radius, 0.0, 0.0)
 
         # Choose between top cap, bottom cap, or lateral surface
-        if dir_safe[2] > 0.0:
+        if direction[2] > 0.0:
             result = wp.vec3(lateral_point[0], lateral_point[1], half_height)
-        elif dir_safe[2] < 0.0:
+        elif direction[2] < 0.0:
             result = wp.vec3(lateral_point[0], lateral_point[1], -half_height)
         else:
             result = lateral_point
@@ -258,18 +256,18 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
         # Using slope k = radius / (2*half_height), the optimal support is:
         #   apex if dz >= k * ||d_xy||, otherwise base rim in d_xy direction.
         apex = wp.vec3(0.0, 0.0, half_height)
-        dir_xy = wp.vec3(dir_safe[0], dir_safe[1], 0.0)
+        dir_xy = wp.vec3(direction[0], direction[1], 0.0)
         dir_xy_len = wp.length(dir_xy)
         k = radius / (2.0 * half_height) if half_height > eps else 0.0
 
         if dir_xy_len <= eps:
             # Purely vertical direction
-            if dir_safe[2] >= 0.0:
+            if direction[2] >= 0.0:
                 result = apex
             else:
                 result = wp.vec3(radius, 0.0, -half_height)
         else:
-            if dir_safe[2] >= k * dir_xy_len:
+            if direction[2] >= k * dir_xy_len:
                 result = apex
             else:
                 n_xy = dir_xy / dir_xy_len
@@ -282,8 +280,8 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
         half_length = geom.scale[1]
 
         # Clamp the direction to the plane boundaries
-        sx = 1.0 if dir_safe[0] >= 0.0 else -1.0
-        sy = 1.0 if dir_safe[1] >= 0.0 else -1.0
+        sx = 1.0 if direction[0] >= 0.0 else -1.0
+        sy = 1.0 if direction[1] >= 0.0 else -1.0
 
         # The support point is at the corner in the XY plane (z=0)
         result = wp.vec3(sx * half_width, sy * half_length, 0.0)

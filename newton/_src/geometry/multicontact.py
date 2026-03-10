@@ -837,7 +837,21 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
             Number of valid contact points written (0-5).
         """
 
-        ROT_DELTA_ANGLE = wp.static(2.0 * wp.pi / float(6))
+        # Precomputed cos/sin for 6 evenly spaced hexagonal angles (0°, 60°, ..., 300°).
+        # Avoids 12 transcendental calls per collision pair.
+        SQRT3_2 = wp.static(wp.sqrt(3.0) / 2.0)
+        HEX_COS_0 = float(1.0)
+        HEX_SIN_0 = float(0.0)
+        HEX_COS_1 = float(0.5)
+        HEX_SIN_1 = wp.static(SQRT3_2)
+        HEX_COS_2 = float(-0.5)
+        HEX_SIN_2 = wp.static(SQRT3_2)
+        HEX_COS_3 = float(-1.0)
+        HEX_SIN_3 = float(0.0)
+        HEX_COS_4 = float(-0.5)
+        HEX_SIN_4 = wp.static(-SQRT3_2)
+        HEX_COS_5 = float(0.5)
+        HEX_SIN_5 = wp.static(-SQRT3_2)
 
         # Reset all counters for a new calculation.
         a_count = int(0)
@@ -868,9 +882,24 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
 
         # Loop 6 times to find up to 6 vertices for each shape's contact polygon.
         for e in range(6):
-            angle = float(e) * ROT_DELTA_ANGLE
-            s = wp.sin(angle)
-            c = wp.cos(angle)
+            # Use precomputed cos/sin for hexagonal angles
+            c = HEX_COS_0
+            s = HEX_SIN_0
+            if e == 1:
+                c = HEX_COS_1
+                s = HEX_SIN_1
+            elif e == 2:
+                c = HEX_COS_2
+                s = HEX_SIN_2
+            elif e == 3:
+                c = HEX_COS_3
+                s = HEX_SIN_3
+            elif e == 4:
+                c = HEX_COS_4
+                s = HEX_SIN_4
+            elif e == 5:
+                c = HEX_COS_5
+                s = HEX_SIN_5
 
             cos_tilt = COS_TILT_ANGLE
             c_sin = c * SIN_TILT_ANGLE
