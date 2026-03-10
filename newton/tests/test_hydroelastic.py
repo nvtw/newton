@@ -188,6 +188,7 @@ def run_stacked_cubes_hydroelastic_test(
     reduce_contacts: bool = True,
     config: HydroelasticSDF.Config | None = None,
     position_threshold_factor: float = POSITION_THRESHOLD_FACTOR,
+    substeps: int | None = None,
 ):
     """Shared test for stacking 3 cubes using hydroelastic contacts."""
     model, solver, state_0, state_1, control, collision_pipeline, initial_positions, cube_half = (
@@ -203,7 +204,8 @@ def run_stacked_cubes_hydroelastic_test(
     num_frames = int(SIM_TIME / SIM_DT)
 
     # Scale substeps for small objects - they need smaller time steps for stability
-    substeps = SIM_SUBSTEPS if cube_half >= CUBE_HALF_LARGE else 20
+    if substeps is None:
+        substeps = SIM_SUBSTEPS if cube_half >= CUBE_HALF_LARGE else 25
 
     for _ in range(num_frames):
         state_0, state_1 = simulate(
@@ -264,9 +266,11 @@ def test_stacked_small_mesh_cubes_hydroelastic(test, device, solver_fn):
 def test_stacked_primitive_cubes_hydroelastic_no_reduction(test, device, solver_fn):
     """Test 3 primitive cubes (1m) stacked without contact reduction using hydroelastic contacts."""
     # Unreduced contacts carry more per-face noise from 16-bit texture SDF
-    # quantization; allow up to 50% of cube_half (25% of cube size).
+    # quantization; use more substeps to compensate and allow up to 50% of
+    # cube_half (25% of cube size) positional drift.
     run_stacked_cubes_hydroelastic_test(
-        test, device, solver_fn, ShapeType.PRIMITIVE, CUBE_HALF_LARGE, False, position_threshold_factor=0.50
+        test, device, solver_fn, ShapeType.PRIMITIVE, CUBE_HALF_LARGE, False, position_threshold_factor=0.50,
+        substeps=20,
     )
 
 
