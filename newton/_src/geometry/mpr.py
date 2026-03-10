@@ -182,16 +182,10 @@ def create_support_map_function(support_func: Any):
         """
         center = Vert()
 
-        # Get geometric center of shape A
-        point_a = wp.vec3(0.0)  # center_func(geom_a, data_provider)
-
-        # Get geometric center of shape B and transform to world space
-        center.B = wp.vec3(0.0)  # center_func(geom_b, data_provider)
-        center.B = wp.quat_rotate(orientation_b, center.B)
-        center.B = position_b + center.B
-
-        # Store BtoA vector
-        center.BtoA = point_a - center.B
+        # Both geometric centers are at their local origins.
+        # Shape A is at the world origin (relative frame), shape B is at position_b.
+        center.B = position_b
+        center.BtoA = -position_b
 
         return center
 

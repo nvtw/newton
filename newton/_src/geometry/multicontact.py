@@ -315,45 +315,21 @@ def insert_vec2(arr: wp.array(dtype=wp.vec2), arr_count: int, index: int, elemen
 
 
 @wp.func
-def insert_byte(arr: wp.array(dtype=wp.uint8), arr_count: int, index: int, element: wp.uint8):
-    """
-    Insert a byte element into an array at the specified index, shifting elements to the right.
-
-    Args:
-        arr: Array to insert into.
-        arr_count: Current number of elements in the array.
-        index: Index at which to insert the element.
-        element: Element to insert.
-    """
-    i = arr_count
-    while i > index:
-        arr[i] = arr[i - 1]
-        i -= 1
-    arr[index] = element
-
-
-@wp.func
 def trim_in_place(
     trim_seg_start: wp.vec2,
     trim_seg_end: wp.vec2,
-    trim_seg_id: wp.uint8,
     loop: wp.array(dtype=wp.vec2),
-    loop_seg_ids: wp.array(dtype=wp.uint8),
     loop_count: int,
 ) -> int:
     """
-    Trim a polygon in place using a line segment.
+    Trim a polygon in place using a line segment (Sutherland-Hodgman clip).
 
     All points are in 2D contact plane space.
-
-    loopSegIds[0] refers to the segment from loop[0] to loop[1], etc.
 
     Args:
         trim_seg_start: Start point of the trimming segment.
         trim_seg_end: End point of the trimming segment.
-        trim_seg_id: ID of the trimming segment.
         loop: Array of loop vertices (2D).
-        loop_seg_ids: Array of segment IDs for the loop.
         loop_count: Number of vertices in the loop.
 
     Returns:
@@ -364,10 +340,8 @@ def trim_in_place(
 
     intersection_a = wp.vec2(0.0, 0.0)
     change_a = int(-1)
-    change_a_seg_id = wp.uint8(255)
     intersection_b = wp.vec2(0.0, 0.0)
     change_b = int(-1)
-    change_b_seg_id = wp.uint8(255)
 
     keep = bool(False)
 
@@ -382,12 +356,10 @@ def trim_in_place(
             intersection = intersection_point(trim_seg_start, trim_seg_end, loop[i], loop[next_idx])
             if change_a < 0:
                 change_a = i
-                change_a_seg_id = loop_seg_ids[i]
                 keep = not prev_outside
                 intersection_a = intersection
             else:
                 change_b = i
-                change_b_seg_id = loop_seg_ids[i]
                 intersection_b = intersection
 
         prev_outside = outside
@@ -398,53 +370,34 @@ def trim_in_place(
 
         i = int(0)
         while i < loop_count:
-            # If the current vertex is on the side to be kept, copy it and its segment ID.
+            # If the current vertex is on the side to be kept, copy it.
             if keep:
                 loop_indexer += 1
                 loop[loop_indexer] = loop[i]
-                loop_seg_ids[loop_indexer] = loop_seg_ids[i]
 
-            # If the current edge is one of the two that intersects the trim line,
-            # add the intersection point to the new polygon.
+            # If the current edge intersects the trim line, add the intersection point.
             if i == change_a or i == change_b:
                 pt = intersection_a if i == change_a else intersection_b
-                original_seg_id = change_a_seg_id if i == change_a else change_b_seg_id
 
-                # Determine the correct ID for the segment starting at the new intersection point.
-                # If we are currently keeping vertices (`keep` is true), it means we're transitioning
-                # to a discarded section. The new segment connects the two intersection points,
-                # so its ID is `trim_seg_id`.
-                # If we are currently discarding vertices (`keep` is false), it means we're
-                # transitioning to a kept section. The new segment is a continuation of the
-                # original edge that was cut, so it keeps its `original_seg_id`.
-                new_seg_id = trim_seg_id if keep else original_seg_id
-
-                # This block handles a special case for inserting the new point.
+                # Handle special case: insertion needed when loop_indexer == i and not keep.
                 if loop_indexer == i and not keep:
                     loop_indexer += 1
                     insert_vec2(loop, new_loop_count, loop_indexer, pt)
-                    insert_byte(loop_seg_ids, new_loop_count, loop_indexer, new_seg_id)
 
                     new_loop_count += 1
-                    # Advance i and adjust change_b to account for insertion
                     i += 1
                     change_b += 1
-                    # Keep iteration bound consistent with source mutation
                     loop_count += 1
                 else:
                     loop_indexer += 1
                     loop[loop_indexer] = pt
-                    loop_seg_ids[loop_indexer] = new_seg_id
 
-                # Flip the keep flag after processing an intersection.
                 keep = not keep
 
             i += 1
 
         new_loop_count = loop_indexer + 1
     elif prev_outside:
-        # If there was no intersection, all points are on the same side.
-        # If all are outside, clear the loop.
         new_loop_count = 0
     else:
         new_loop_count = loop_count
@@ -457,11 +410,10 @@ def trim_all_in_place(
     trim_poly: wp.array(dtype=wp.vec2),
     trim_poly_count: int,
     loop: wp.array(dtype=wp.vec2),
-    loop_segments: wp.array(dtype=wp.uint8),
     loop_count: int,
 ) -> int:
     """
-    Trim a polygon using all edges of another polygon.
+    Trim a polygon using all edges of another polygon (Sutherland-Hodgman clipping).
 
     Both polygons (trim_poly and loop) are in 2D contact plane space and they are both convex.
 
@@ -469,7 +421,6 @@ def trim_all_in_place(
         trim_poly: Array of vertices defining the trimming polygon (2D).
         trim_poly_count: Number of vertices in the trimming polygon.
         loop: Array of vertices in the loop to be trimmed (2D).
-        loop_segments: Array of segment IDs for the loop.
         loop_count: Number of vertices in the loop.
 
     Returns:
@@ -483,21 +434,17 @@ def trim_all_in_place(
 
     if trim_poly_count == 2:
         # Convert line segment to thin rectangle
-        # Line segment: trim_poly[0] to trim_poly[1]
         p0 = trim_poly[0]
         p1 = trim_poly[1]
 
-        # Direction vector
         dir_x = p1[0] - p0[0]
         dir_y = p1[1] - p0[1]
         dir_len = wp.sqrt(dir_x * dir_x + dir_y * dir_y)
 
         if dir_len > 1e-10:
-            # Perpendicular vector (rotate 90 degrees: (x,y) -> (-y,x))
             perp_x = -dir_y / dir_len
             perp_y = dir_x / dir_len
 
-            # Create 4 corners of rectangle (counterclockwise order)
             offset_x = perp_x * move_distance
             offset_y = perp_y * move_distance
 
@@ -513,20 +460,15 @@ def trim_all_in_place(
         # Convert line segment to thin rectangle
         p0 = loop[0]
         p1 = loop[1]
-        seg0 = loop_segments[0]
-        seg1 = loop_segments[1]
 
-        # Direction vector
         dir_x = p1[0] - p0[0]
         dir_y = p1[1] - p0[1]
         dir_len = wp.sqrt(dir_x * dir_x + dir_y * dir_y)
 
         if dir_len > 1e-10:
-            # Perpendicular vector (rotate 90 degrees: (x,y) -> (-y,x))
             perp_x = -dir_y / dir_len
             perp_y = dir_x / dir_len
 
-            # Create 4 corners of rectangle (counterclockwise order)
             offset_x = perp_x * move_distance
             offset_y = perp_y * move_distance
 
@@ -534,13 +476,6 @@ def trim_all_in_place(
             loop[1] = wp.vec2(p1[0] - offset_x, p1[1] - offset_y)
             loop[2] = wp.vec2(p1[0] + offset_x, p1[1] + offset_y)
             loop[3] = wp.vec2(p0[0] + offset_x, p0[1] + offset_y)
-
-            # Segment IDs: edges 0-1 and 1-2 inherit from original edge 0-1
-            # edges 2-3 and 3-0 form the "caps"
-            loop_segments[0] = seg0
-            loop_segments[1] = seg1
-            loop_segments[2] = seg1
-            loop_segments[3] = seg0
 
             loop_count = 4
         else:
@@ -550,14 +485,9 @@ def trim_all_in_place(
 
     trim_poly_0 = trim_poly[0]  # This allows to do more memory aliasing
     for i in range(trim_poly_count):
-        # For each trim segment, we will call the efficient trim function.
         trim_seg_start = trim_poly[i]
-        # trim_seg_end = trim_poly[(i + 1) % trim_poly_count]
         trim_seg_end = trim_poly_0 if i == trim_poly_count - 1 else trim_poly[i + 1]
-        # Perform the in-place trimming for this segment.
-        current_loop_count = trim_in_place(
-            trim_seg_start, trim_seg_end, wp.uint8(i), loop, loop_segments, current_loop_count
-        )
+        current_loop_count = trim_in_place(trim_seg_start, trim_seg_end, loop, current_loop_count)
 
     return current_loop_count
 
@@ -659,61 +589,39 @@ def approx_max_quadrilateral_area_with_calipers(hull: wp.array(dtype=wp.vec2), h
 
 
 @wp.func
-def remove_zero_length_edges(
-    loop: wp.array(dtype=wp.vec2), loop_seg_ids: wp.array(dtype=wp.uint8), loop_count: int, eps: float
-) -> int:
+def remove_zero_length_edges(loop: wp.array(dtype=wp.vec2), loop_count: int, eps: float) -> int:
     """
     Remove zero-length edges from a polygon loop.
 
     Args:
         loop: Array of loop vertices (2D).
-        loop_seg_ids: Array of segment IDs for the loop.
         loop_count: Number of vertices in the loop.
         eps: Epsilon threshold for considering edges as zero-length.
 
     Returns:
         New number of vertices in the cleaned loop.
     """
-    # A loop must have at least 2 points to be valid per your requirement.
     if loop_count < 2:
         return 0
 
-    # 'write_idx' is the index for the new, compacted loop.
-    # It always points to the last valid point found so far.
     write_idx = int(0)
 
-    # Iterate through the original loop, starting from the second point.
-    # 'read_idx' is the index of the point we are currently considering.
     for read_idx in range(1, loop_count):
-        # Check if the current point is distinct from the last point we kept.
         diff = loop[read_idx] - loop[write_idx]
-
         if wp.length_sq(diff) > eps:
-            # It's a distinct point, so we advance the write index and keep it.
             write_idx += 1
             loop[write_idx] = loop[read_idx]
-            loop_seg_ids[write_idx - 1] = loop_seg_ids[read_idx - 1]
 
-    loop_seg_ids[write_idx] = loop_seg_ids[loop_count - 1]
-
-    # At this point, the loop is clean but might not be closed properly.
-    # The number of points in our cleaned chain is 'write_idx + 1'.
-
-    # Handle the loop closure by checking if the last point is the same as the first.
+    # Handle loop closure
     if write_idx > 0:
         diff = loop[write_idx] - loop[0]
-
         if wp.length_sq(diff) < eps:
-            # The last point is a duplicate of the first; we need to remove it.
             new_loop_count = write_idx
         else:
-            # The last point is not a duplicate, so we keep all 'write_idx + 1' points.
             new_loop_count = write_idx + 1
     else:
         new_loop_count = write_idx + 1
 
-    # Final check based on your requirement.
-    # If simplification resulted in fewer than 2 points, it's a degenerate point.
     if new_loop_count < 2:
         new_loop_count = 0
 
@@ -748,9 +656,6 @@ def add_avoid_duplicates_vec2(
 
     arr[arr_count] = vec
     return arr_count + 1, True
-
-
-vec6_uint8 = wp.types.vector(6, wp.uint8)
 
 
 @wp.func_native("""
@@ -840,14 +745,9 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
 
         normal_dot = wp.abs(wp.dot(projector_a.normal, projector_b.normal))
 
-        # Initialize loop segment IDs for polygon B
-        loop_seg_ids = wp.zeros(shape=(12,), dtype=wp.uint8)
-        for i in range(m_b_count):
-            loop_seg_ids[i] = wp.uint8(i + 6)
+        loop_count = trim_all_in_place(m_a, m_a_count, m_b, m_b_count)
 
-        loop_count = trim_all_in_place(m_a, m_a_count, m_b, loop_seg_ids, m_b_count)
-
-        loop_count = remove_zero_length_edges(m_b, loop_seg_ids, loop_count, EPS)
+        loop_count = remove_zero_length_edges(m_b, loop_count, EPS)
 
         if loop_count > 1:
             result = wp.vec4i()
