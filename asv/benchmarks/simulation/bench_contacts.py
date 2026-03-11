@@ -127,7 +127,7 @@ class FastExampleContactHydroWorkingDefaults:
 
 
 class FastExampleContactPyramidDefaults:
-    """Benchmark the box pyramid example with 50 pyramids."""
+    """Benchmark the box pyramid example with default configuration."""
 
     repeat = 2
     number = 1
@@ -141,12 +141,10 @@ class FastExampleContactPyramidDefaults:
         self.num_frames = 20
         if hasattr(newton.examples, "default_args") and hasattr(example_cls, "create_parser"):
             args = newton.examples.default_args(example_cls.create_parser())
-            args.num_pyramids = 50
             self.example = example_cls(ViewerNull(num_frames=self.num_frames), args)
         else:
             self.example = example_cls(
                 viewer=ViewerNull(num_frames=self.num_frames),
-                num_pyramids=50,
                 solver="xpbd",
                 test_mode=False,
             )

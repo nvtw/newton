@@ -29,13 +29,12 @@ import warp as wp
 import newton
 import newton.examples
 
-DEFAULT_NUM_PYRAMIDS = 50
+DEFAULT_NUM_PYRAMIDS = 20
 DEFAULT_PYRAMID_SIZE = 20
 CUBE_HALF = 0.4
 CUBE_SPACING = 2.1 * CUBE_HALF
 PYRAMID_SPACING = 2.0 * CUBE_SPACING
-DROP_Z = 2.0
-Y_STACK = 6.0
+Y_STACK = 15.0
 
 WRECKING_BALL_RADIUS = 2.0
 WRECKING_BALL_DENSITY_MULT = 100.0
@@ -56,7 +55,6 @@ class Example:
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.viewer = viewer
-        self.solver_type = args.solver
         self.test_mode = args.test
         self.world_count = args.world_count
 
@@ -93,7 +91,7 @@ class Example:
 
         if not self.test_mode:
             # Wrecking ball
-            ramp_height = pyramid_height / 2
+            ramp_height = 8.4
             ramp_angle = float(np.arctan2(ramp_height, RAMP_LENGTH))
             ball_x = 0.0
             ball_y = Y_STACK + RAMP_LENGTH * 0.9
@@ -131,25 +129,11 @@ class Example:
             broad_phase=args.broad_phase,
         )
 
-        if self.solver_type == "xpbd":
-            self.solver = newton.solvers.SolverXPBD(
-                self.model,
-                iterations=XPBD_ITERATIONS,
-                rigid_contact_relaxation=XPBD_CONTACT_RELAXATION,
-            )
-        elif self.solver_type == "mujoco":
-            self.solver = newton.solvers.SolverMuJoCo(
-                self.model,
-                use_mujoco_contacts=False,
-                solver="newton",
-                integrator="implicitfast",
-                cone="elliptic",
-                iterations=15,
-                ls_iterations=100,
-                impratio=1.0,
-            )
-        else:
-            raise ValueError(f"Unknown solver type: {self.solver_type}. Choose from 'xpbd' or 'mujoco'.")
+        self.solver = newton.solvers.SolverXPBD(
+            self.model,
+            iterations=XPBD_ITERATIONS,
+            rigid_contact_relaxation=XPBD_CONTACT_RELAXATION,
+        )
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -224,20 +208,8 @@ class Example:
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
         parser.set_defaults(world_count=1)
-        parser.add_argument(
-            "--solver",
-            type=str,
-            choices=["xpbd", "mujoco"],
-            default="xpbd",
-            help="Solver to use.",
-        )
-        parser.add_argument(
-            "--broad-phase",
-            type=str,
-            choices=["nxn", "sap", "explicit"],
-            default="sap",
-            help="Broad phase for collision detection.",
-        )
+        newton.examples.add_broad_phase_arg(parser)
+        parser.set_defaults(broad_phase="sap")
         parser.add_argument(
             "--num-pyramids",
             type=int,
