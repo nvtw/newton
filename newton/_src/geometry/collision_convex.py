@@ -80,7 +80,7 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
         if collision:
             signed_distance = -penetration + enlarge
         else:
-            # GJK fallback for separated shapes — proven accurate normals/distances.
+            # GJK fallback for separated shapes -- proven accurate normals/distances.
             _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
                 geom_a,
                 geom_b,
@@ -90,15 +90,15 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
                 data_provider,
             )
 
-        # Transform results back to world space (once).
-        point = 0.5 * (point_a + point_b)
-        point = wp.quat_rotate(orientation_a, point) + position_a
-        normal = wp.quat_rotate(orientation_a, normal)
-
         if skip_multi_contact or signed_distance > contact_threshold:
+            # Transform to world space only for the single-contact early-out.
+            point = 0.5 * (point_a + point_b)
+            point = wp.quat_rotate(orientation_a, point) + position_a
+            normal_ws = wp.quat_rotate(orientation_a, normal)
+
             contact_data = contact_template
             contact_data.contact_point_center = point
-            contact_data.contact_normal_a_to_b = normal
+            contact_data.contact_normal_a_to_b = normal_ws
             contact_data.contact_distance = signed_distance
             contact_data = post_process_contact(
                 contact_data, geom_a, position_a, orientation_a, geom_b, position_b, orientation_b
@@ -106,18 +106,19 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
             writer_func(contact_data, writer_data, -1)
             return 1
 
-        # Generate multi-contact manifold
+        # Generate multi-contact manifold -- pass A-local-frame data directly
+        # to avoid redundant world-space round-trip.
         count = wp.static(
             create_build_manifold(support_func, writer_func, post_process_contact, _support_funcs=support_funcs)
         )(
             geom_a,
             geom_b,
             orientation_a,
-            orientation_b,
             position_a,
-            position_b,
-            point - normal * (signed_distance * 0.5),
-            point + normal * (signed_distance * 0.5),
+            relative_orientation_b,
+            relative_position_b,
+            point_a,
+            point_b,
             normal,
             data_provider,
             writer_data,

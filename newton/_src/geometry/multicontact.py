@@ -695,12 +695,15 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
         m_a_count: int,
         m_b: wp.array(dtype=wp.vec2),
         m_b_count: int,
-        normal: wp.vec3,
+        normal_local: wp.vec3,
         cross_vector_1: wp.vec3,
         cross_vector_2: wp.vec3,
-        center: wp.vec3,
+        center_local: wp.vec3,
         projector_a: BodyProjector,
         projector_b: BodyProjector,
+        orientation_a: wp.quat,
+        position_a_world: wp.vec3,
+        normal_world: wp.vec3,
         writer_data: Any,
         contact_template: Any,
         geom_a: Any,
@@ -713,35 +716,31 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
         """
         Extract up to 4 contact points from two convex contact polygons and write them immediately.
 
-        This function performs the core manifold generation algorithm:
-        1. Validates input polygons (already in 2D contact plane space)
-        2. Clips polygon B against all edges of polygon A (Sutherland-Hodgman style clipping)
-        3. Removes zero-length edges from the clipped result
-        4. If more than 4 points remain, selects the best 4 using rotating calipers algorithm
-        5. Projects all contact points back onto the original shape surfaces in world space
-        6. Post-processes and writes each contact immediately
-
-        Uses writer_func and post_process_contact from the factory closure.
+        All intermediate work (clipping, projectors) operates in shape A's local frame.
+        Final contact points are transformed to world space before writing.
 
         Args:
-            m_a: Contact polygon vertices for shape A (2D contact plane space, up to 6 points).
+            m_a: Contact polygon vertices for shape A (2D contact plane space, up to 5 points).
             m_a_count: Number of vertices in polygon A.
-            m_b: Contact polygon vertices for shape B (2D contact plane space, up to 6 points, space for 12).
+            m_b: Contact polygon vertices for shape B (2D contact plane space, up to 5 points, space for 10).
             m_b_count: Number of vertices in polygon B.
-            normal: Collision normal vector pointing from A to B.
-            cross_vector_1: First tangent vector (forms contact plane basis).
-            cross_vector_2: Second tangent vector (forms contact plane basis).
-            center: Center point for back-projection to world space.
-            projector_a: Body projector for shape A.
-            projector_b: Body projector for shape B.
+            normal_local: Collision normal in A-local frame.
+            cross_vector_1: First tangent vector in A-local frame.
+            cross_vector_2: Second tangent vector in A-local frame.
+            center_local: Center point for back-projection in A-local frame.
+            projector_a: Body projector for shape A (in A-local frame).
+            projector_b: Body projector for shape B (in A-local frame).
+            orientation_a: World orientation of shape A (for final transform).
+            position_a_world: World position of shape A (for final transform).
+            normal_world: Contact normal in world space (for output).
             writer_data: Data structure for contact writer.
             contact_template: Pre-packed ContactData with static fields.
             geom_a: Geometry data for shape A.
             geom_b: Geometry data for shape B.
-            position_a: World position of shape A.
-            position_b: World position of shape B.
-            quaternion_a: Orientation of shape A.
-            quaternion_b: Orientation of shape B.
+            position_a: World position of shape A (for post_process_contact).
+            position_b: World position of shape B (for post_process_contact).
+            quaternion_a: Orientation of shape A (for post_process_contact).
+            quaternion_b: Orientation of shape B (for post_process_contact).
 
         Returns:
             Tuple of (loop_count, normal_dot) where:
@@ -766,19 +765,20 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
             for i in range(loop_count):
                 ia = int(result[i])
 
-                # Transform back to world space using projectors
-                p_world = m_b[ia].x * cross_vector_1 + m_b[ia].y * cross_vector_2 + center
+                # Back-project from 2D to 3D in A-local frame
+                p_local = m_b[ia].x * cross_vector_1 + m_b[ia].y * cross_vector_2 + center_local
 
-                # normal vector points from A to B
-                a = body_projector_project(projector_a, p_world, normal)
-                b = body_projector_project(projector_b, p_world, normal)
-                contact_point = 0.5 * (a + b)
-                signed_distance = wp.dot(b - a, normal)
+                a = body_projector_project(projector_a, p_local, normal_local)
+                b = body_projector_project(projector_b, p_local, normal_local)
+                contact_point_local = 0.5 * (a + b)
+                signed_distance = wp.dot(b - a, normal_local)
 
-                # Write contact immediately
+                # Transform from A-local to world space
+                contact_point_world = wp.quat_rotate(orientation_a, contact_point_local) + position_a_world
+
                 contact_data = contact_template
-                contact_data.contact_point_center = contact_point
-                contact_data.contact_normal_a_to_b = normal
+                contact_data.contact_point_center = contact_point_world
+                contact_data.contact_normal_a_to_b = normal_world
                 contact_data.contact_distance = signed_distance
 
                 contact_data = post_process_contact(
@@ -795,10 +795,10 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
     def build_manifold(
         geom_a: Any,
         geom_b: Any,
-        quaternion_a: wp.quat,
-        quaternion_b: wp.quat,
-        position_a: wp.vec3,
-        position_b: wp.vec3,
+        orientation_a: wp.quat,
+        position_a_world: wp.vec3,
+        relative_orientation_b: wp.quat,
+        relative_position_b: wp.vec3,
         p_a: wp.vec3,
         p_b: wp.vec3,
         normal: wp.vec3,
@@ -809,25 +809,20 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
         """
         Build a contact manifold between two convex shapes and write contacts directly.
 
-        This function generates up to 4 contact points between two colliding convex shapes by:
-        1. Finding contact polygons using perturbed support mapping in 6 directions
-        2. Clipping the polygons against each other in contact plane space
-        3. Selecting the best 4 points using rotating calipers algorithm if more than 4 exist
-        4. Transforming results back to world space
-        5. Post-processing each contact and writing it via the writer function
-
-        The contact normal is the same for all contact points in the manifold.
+        All intermediate work operates in shape A's local frame to avoid redundant
+        quaternion transforms. Final contact points are transformed to world space
+        before writing.
 
         Args:
             geom_a: Geometry data for the first shape.
             geom_b: Geometry data for the second shape.
-            quaternion_a: Orientation quaternion of the first shape.
-            quaternion_b: Orientation quaternion of the second shape.
-            position_a: World position of the first shape.
-            position_b: World position of the second shape.
-            p_a: Anchor contact point on the first shape (from GJK/MPR).
-            p_b: Anchor contact point on the second shape (from GJK/MPR).
-            normal: Contact normal vector pointing from shape A to shape B.
+            orientation_a: World orientation of shape A (for final world-space transform).
+            position_a_world: World position of shape A (for final world-space transform).
+            relative_orientation_b: Orientation of B relative to A.
+            relative_position_b: Position of B relative to A (in A-local frame).
+            p_a: Anchor contact point on shape A in A-local frame (from GJK/MPR).
+            p_b: Anchor contact point on shape B in A-local frame (from GJK/MPR).
+            normal: Contact normal in A-local frame pointing from A to B.
             data_provider: Support mapping data provider for shape queries.
             writer_data: Data structure for contact writer.
             contact_template: Pre-packed ContactData with static fields.
@@ -836,103 +831,92 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
             Number of valid contact points written (0-5).
         """
 
-        # Precomputed cos/sin for 6 evenly spaced hexagonal angles (0°, 60°, ..., 300°).
-        # Avoids 12 transcendental calls per collision pair.
-        SQRT3_2 = wp.static(wp.sqrt(3.0) / 2.0)
-        HEX_COS_0 = float(1.0)
-        HEX_SIN_0 = float(0.0)
-        HEX_COS_1 = float(0.5)
-        HEX_SIN_1 = wp.static(SQRT3_2)
-        HEX_COS_2 = float(-0.5)
-        HEX_SIN_2 = wp.static(SQRT3_2)
-        HEX_COS_3 = float(-1.0)
-        HEX_SIN_3 = float(0.0)
-        HEX_COS_4 = float(-0.5)
-        HEX_SIN_4 = wp.static(-SQRT3_2)
-        HEX_COS_5 = float(0.5)
-        HEX_SIN_5 = wp.static(-SQRT3_2)
+        # Precomputed cos/sin for 5 evenly spaced pentagonal angles (0, 72, 144, 216, 288 deg).
+        PENT_COS_0 = float(1.0)
+        PENT_SIN_0 = float(0.0)
+        PENT_COS_1 = wp.static(wp.cos(2.0 * wp.pi / 5.0))
+        PENT_SIN_1 = wp.static(wp.sin(2.0 * wp.pi / 5.0))
+        PENT_COS_2 = wp.static(wp.cos(4.0 * wp.pi / 5.0))
+        PENT_SIN_2 = wp.static(wp.sin(4.0 * wp.pi / 5.0))
+        PENT_COS_3 = wp.static(wp.cos(6.0 * wp.pi / 5.0))
+        PENT_SIN_3 = wp.static(wp.sin(6.0 * wp.pi / 5.0))
+        PENT_COS_4 = wp.static(wp.cos(8.0 * wp.pi / 5.0))
+        PENT_SIN_4 = wp.static(wp.sin(8.0 * wp.pi / 5.0))
 
-        # Reset all counters for a new calculation.
         a_count = int(0)
         b_count = int(0)
 
-        # Create an orthonormal basis from the collision normal.
+        # Orthonormal basis from the collision normal (in A-local frame).
         tangent_a, tangent_b = orthonormal_basis(normal)
 
         plane_tracker_a = IncrementalPlaneTracker()
         plane_tracker_b = IncrementalPlaneTracker()
 
-        # Compute center for 2D projection
         center = 0.5 * (p_a + p_b)
 
-        # Allocate buffers for contact polygons (2D projected)
-        b_buffer = wp.zeros(shape=(12,), dtype=wp.vec2f)
-        a_buffer = wp.array(ptr=get_ptr(b_buffer) + wp.uint64(6 * 8), shape=(6,), dtype=wp.vec2f)
+        # Allocate buffers: 5 for A, up to 10 for B (5 + clipping headroom)
+        b_buffer = wp.zeros(shape=(10,), dtype=wp.vec2f)
+        a_buffer = wp.array(ptr=get_ptr(b_buffer) + wp.uint64(5 * 8), shape=(5,), dtype=wp.vec2f)
 
         # --- Step 1: Find Contact Polygons using Perturbed Support Mapping ---
-        # Pre-transform basis vectors to local space of each shape (saves 6 quat_rotate_inv).
-        local_normal_a = wp.quat_rotate_inv(quaternion_a, normal)
-        local_ta_a = wp.quat_rotate_inv(quaternion_a, tangent_a)
-        local_tb_a = wp.quat_rotate_inv(quaternion_a, tangent_b)
-        # For shape B, negate since it uses -offset_normal
-        local_normal_b = wp.quat_rotate_inv(quaternion_b, -normal)
-        local_ta_b = wp.quat_rotate_inv(quaternion_b, -tangent_a)
-        local_tb_b = wp.quat_rotate_inv(quaternion_b, -tangent_b)
+        # Shape A: support_func returns points in A-local frame directly, no quat_rotate needed.
+        # Shape B: pre-transform basis to B-local, then transform results back to A-local.
+        local_normal_b = wp.quat_rotate_inv(relative_orientation_b, -normal)
+        local_ta_b = wp.quat_rotate_inv(relative_orientation_b, -tangent_a)
+        local_tb_b = wp.quat_rotate_inv(relative_orientation_b, -tangent_b)
 
-        # Loop 6 times to find up to 6 vertices for each shape's contact polygon.
-        for e in range(6):
-            # Use precomputed cos/sin for hexagonal angles
-            c = HEX_COS_0
-            s = HEX_SIN_0
+        for e in range(5):
+            c = PENT_COS_0
+            s = PENT_SIN_0
             if e == 1:
-                c = HEX_COS_1
-                s = HEX_SIN_1
+                c = PENT_COS_1
+                s = PENT_SIN_1
             elif e == 2:
-                c = HEX_COS_2
-                s = HEX_SIN_2
+                c = PENT_COS_2
+                s = PENT_SIN_2
             elif e == 3:
-                c = HEX_COS_3
-                s = HEX_SIN_3
+                c = PENT_COS_3
+                s = PENT_SIN_3
             elif e == 4:
-                c = HEX_COS_4
-                s = HEX_SIN_4
-            elif e == 5:
-                c = HEX_COS_5
-                s = HEX_SIN_5
+                c = PENT_COS_4
+                s = PENT_SIN_4
 
             cos_tilt = COS_TILT_ANGLE
             c_sin = c * SIN_TILT_ANGLE
             s_sin = s * SIN_TILT_ANGLE
 
-            # Compute support direction in shape A's local space directly.
-            local_dir_a = local_normal_a * cos_tilt + c_sin * local_ta_a + s_sin * local_tb_a
-            pt_a_local = support_func(geom_a, local_dir_a, data_provider)
-            pt_a_3d = wp.quat_rotate(quaternion_a, pt_a_local) + position_a
-            # Project to 2D contact plane space
+            # Shape A: direction and result both in A-local frame, zero quaternion ops.
+            dir_a = normal * cos_tilt + c_sin * tangent_a + s_sin * tangent_b
+            pt_a_3d = support_func(geom_a, dir_a, data_provider)
             projected_a = pt_a_3d - center
             pt_a_2d = wp.vec2(wp.dot(tangent_a, projected_a), wp.dot(tangent_b, projected_a))
-            # Add the 2D projected point, checking for duplicates.
             a_count, was_added_a = add_avoid_duplicates_vec2(a_buffer, a_count, pt_a_2d, EPS)
             if was_added_a:
                 plane_tracker_a = update_incremental_plane_tracker(plane_tracker_a, pt_a_3d, a_count - 1)
 
-            # Compute support direction in shape B's local space directly (pre-negated basis).
+            # Shape B: direction in B-local, result transformed to A-local.
             local_dir_b = local_normal_b * cos_tilt + c_sin * local_ta_b + s_sin * local_tb_b
             pt_b_local = support_func(geom_b, local_dir_b, data_provider)
-            pt_b_3d = wp.quat_rotate(quaternion_b, pt_b_local) + position_b
-            # Project to 2D contact plane space
+            pt_b_3d = wp.quat_rotate(relative_orientation_b, pt_b_local) + relative_position_b
             projected_b = pt_b_3d - center
             pt_b_2d = wp.vec2(wp.dot(tangent_a, projected_b), wp.dot(tangent_b, projected_b))
             b_count, was_added_b = add_avoid_duplicates_vec2(b_buffer, b_count, pt_b_2d, EPS)
             if was_added_b:
                 plane_tracker_b = update_incremental_plane_tracker(plane_tracker_b, pt_b_3d, b_count - 1)
 
-        # Early-out for simple cases: if both have <=2 or either is empty
+        # World-space normal (computed once for all output contacts)
+        normal_world = wp.quat_rotate(orientation_a, normal)
+
+        # World-space positions/orientations for post_process_contact
+        position_a_ws = position_a_world
+        position_b_ws = wp.quat_rotate(orientation_a, relative_position_b) + position_a_world
+        quaternion_a_ws = orientation_a
+        quaternion_b_ws = orientation_a * relative_orientation_b
+
         if a_count < 2 or b_count < 2:
             count_out = 0
             normal_dot = 0.0
         else:
-            # Projectors for back-projection onto the shape surfaces
             projector_a, projector_b = create_body_projectors(plane_tracker_a, p_a, plane_tracker_b, p_b, normal)
 
             if excess_normal_deviation(normal, projector_a.normal) or excess_normal_deviation(
@@ -941,7 +925,6 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
                 count_out = 0
                 normal_dot = 0.0
             else:
-                # Extract and write up to 4 contact points
                 num_manifold_points, normal_dot = extract_4_point_contact_manifolds(
                     a_buffer,
                     a_count,
@@ -950,34 +933,36 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
                     normal,
                     tangent_a,
                     tangent_b,
-                    0.5 * (p_a + p_b),
+                    center,
                     projector_a,
                     projector_b,
+                    orientation_a,
+                    position_a_world,
+                    normal_world,
                     writer_data,
                     contact_template,
                     geom_a,
                     geom_b,
-                    position_a,
-                    position_b,
-                    quaternion_a,
-                    quaternion_b,
+                    position_a_ws,
+                    position_b_ws,
+                    quaternion_a_ws,
+                    quaternion_b_ws,
                 )
                 count_out = wp.min(num_manifold_points, 4)
 
-        # Check if we should include the deepest contact point using the normal_dot
-        # computed from the polygon normals in extract_4_point_contact_manifolds
         if should_include_deepest_contact(normal_dot) or count_out == 0:
-            # Write the deepest contact immediately
-            deepest_contact_center = 0.5 * (p_a + p_b)
+            deepest_center_local = 0.5 * (p_a + p_b)
             deepest_signed_distance = wp.dot(p_b - p_a, normal)
 
+            deepest_center_world = wp.quat_rotate(orientation_a, deepest_center_local) + position_a_world
+
             contact_data = contact_template
-            contact_data.contact_point_center = deepest_contact_center
-            contact_data.contact_normal_a_to_b = normal
+            contact_data.contact_point_center = deepest_center_world
+            contact_data.contact_normal_a_to_b = normal_world
             contact_data.contact_distance = deepest_signed_distance
 
             contact_data = post_process_contact(
-                contact_data, geom_a, position_a, quaternion_a, geom_b, position_b, quaternion_b
+                contact_data, geom_a, position_a_ws, quaternion_a_ws, geom_b, position_b_ws, quaternion_b_ws
             )
             writer_func(contact_data, writer_data, -1)
 
