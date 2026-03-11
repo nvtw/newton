@@ -6,6 +6,7 @@
 
 - Add 3D texture-based SDF, replacing NanoVDB volumes in the mesh-mesh collision pipeline for improved performance and CPU compatibility.
 - Interactive example browser in the GL viewer with tree-view navigation and switch/reset support
+- Add box pyramid example and ASV benchmark for dense convex-on-convex contacts
 
 ### Changed
 
