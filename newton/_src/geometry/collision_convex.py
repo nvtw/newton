@@ -17,7 +17,7 @@
 High-level collision detection functions for convex shapes.
 
 Fused MPR + GJK approach with shared support functions and frame transform:
-1. MPR with extend=0 — exact normals for overlapping shapes (common case in piles).
+1. MPR with small inflate — exact normals for overlapping and near-touching shapes.
    Exits early for separated shapes (just a few support queries).
 2. Only if MPR finds no overlap: GJK for accurate speculative contacts.
 
@@ -62,19 +62,23 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
         relative_orientation_b = wp.quat_inverse(orientation_a) * orientation_b
         relative_position_b = wp.quat_rotate_inv(orientation_a, position_b - position_a)
 
-        # MPR with extend=0: exact normals for overlapping shapes.
+        # Enlarge a little bit to avoid contact flickering when the signed distance is close to 0.
+        # This ensures MPR consistently detects resting contacts, preventing alternation between
+        # MPR and GJK across frames for near-touching shapes.
+        enlarge = 1e-4
+        # MPR with small inflate for overlapping shapes.
         # Exits early (few support queries) when shapes are separated.
         collision, point_a, point_b, normal, penetration = wp.static(solve_mpr.core)(
             geom_a,
             geom_b,
             relative_orientation_b,
             relative_position_b,
-            sum_of_contact_offsets,
+            sum_of_contact_offsets + enlarge,
             data_provider,
         )
 
         if collision:
-            signed_distance = -penetration
+            signed_distance = -penetration + enlarge
         else:
             # GJK fallback for separated shapes — proven accurate normals/distances.
             _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
@@ -151,18 +155,22 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
         relative_orientation_b = wp.quat_inverse(orientation_a) * orientation_b
         relative_position_b = wp.quat_rotate_inv(orientation_a, position_b - position_a)
 
-        # MPR with extend=0: exact normals for overlapping shapes.
+        # Enlarge a little bit to avoid contact flickering when the signed distance is close to 0.
+        # This ensures MPR consistently detects resting contacts, preventing alternation between
+        # MPR and GJK across frames for near-touching shapes.
+        enlarge = 1e-4
+        # MPR with small inflate for overlapping shapes.
         collision, point_a, point_b, normal, penetration = wp.static(solve_mpr.core)(
             geom_a,
             geom_b,
             relative_orientation_b,
             relative_position_b,
-            sum_of_contact_offsets,
+            sum_of_contact_offsets + enlarge,
             data_provider,
         )
 
         if collision:
-            signed_distance = -penetration
+            signed_distance = -penetration + enlarge
         else:
             # GJK fallback for separated shapes.
             _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
