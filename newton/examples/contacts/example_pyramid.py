@@ -216,8 +216,7 @@ class Example:
             initial_pos = self.top_initial_positions[idx]
             displacement = np.linalg.norm(current_pos - initial_pos)
             assert displacement < max_displacement, (
-                f"Top cube body {idx}: displaced {displacement:.4f} m "
-                f"(max allowed {max_displacement:.4f} m)"
+                f"Top cube body {idx}: displaced {displacement:.4f} m (max allowed {max_displacement:.4f} m)"
             )
 
     @staticmethod
