@@ -33,6 +33,7 @@ import warp as wp
 from newton._src.math import orthonormal_basis
 
 from .contact_data import ContactData
+from .mpr import create_support_map_function
 
 # Constants
 EPS = 0.00001
@@ -686,8 +687,6 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
     if _support_funcs is not None:
         _support_map_b = _support_funcs[0]
     else:
-        from .mpr import create_support_map_function
-
         _support_map_b = create_support_map_function(support_func)[0]
 
     @wp.func

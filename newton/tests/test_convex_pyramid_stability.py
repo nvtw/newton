@@ -84,9 +84,7 @@ class TestConvexPyramidStability(unittest.TestCase):
         final_pos = state_0.body_q.numpy()[top_body][:3]
 
         z_drop = initial_pos[2] - final_pos[2]
-        xy_drift = np.sqrt(
-            (final_pos[0] - initial_pos[0]) ** 2 + (final_pos[1] - initial_pos[1]) ** 2
-        )
+        xy_drift = np.sqrt((final_pos[0] - initial_pos[0]) ** 2 + (final_pos[1] - initial_pos[1]) ** 2)
 
         # The top cube should settle slightly but stay in place.
         # z_drop > 0 means it fell, z_drop < 0 means it rose (pushed apart).
