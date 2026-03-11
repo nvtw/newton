@@ -901,7 +901,7 @@ class ModelBuilder:
         self.shape_sdf_max_resolution: list[int | None] = []
         """Per-shape SDF maximum resolutions retained until :meth:`finalize <ModelBuilder.finalize>`."""
 
-        # Mesh SDF storage (volumes kept for reference counting, SDFData array created at finalize)
+        # Mesh SDF storage (texture SDF arrays created at finalize)
 
         # filtering to ignore certain collision pairs
         self.shape_collision_filter_pairs: list[tuple[int, int]] = []

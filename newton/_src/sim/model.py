@@ -31,7 +31,6 @@ from .state import State
 if TYPE_CHECKING:
     from newton_actuators import Actuator
 
-    from ..geometry.sdf_utils import SDFData
     from ..utils.heightfield import HeightfieldData
     from .collide import CollisionPipeline
 
@@ -297,12 +296,6 @@ class Model:
         """Concatenated 1D elevation array for all heightfields. Kernels index via HeightfieldData.data_offset."""
 
         # SDF storage (compact table + per-shape index indirection)
-        self.sdf_data: wp.array(dtype=SDFData) | None = None
-        """Compact array of SDFData structs, shape [num_sdfs]."""
-        self.sdf_volume: list[wp.Volume | None] = []
-        """Sparse SDF volumes matching sdf_data by index. Kept for reference counting."""
-        self.sdf_coarse_volume: list[wp.Volume | None] = []
-        """Coarse SDF volumes matching sdf_data by index. Kept for reference counting."""
         self.shape_sdf_index: wp.array(dtype=wp.int32) | None = None
         """Per-shape SDF index, shape [shape_count]. -1 means shape has no SDF."""
         self.sdf_block_coords: wp.array(dtype=wp.vec3us) | None = None
