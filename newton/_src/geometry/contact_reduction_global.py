@@ -742,6 +742,8 @@ def reduce_contact_in_hashtable(
         max_depth_slot_id = NUM_SPATIAL_DIRECTIONS  # = 6
         max_depth_value = make_contact_value(-depth, contact_id)
         reduction_update_slot(entry_idx, max_depth_slot_id, max_depth_value, reducer_data.ht_values, ht_capacity)
+    else:
+        wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
 
     # === Part 2: Voxel-based reduction (deepest contact per voxel) ===
     # Transform contact position from world space to shape_a's local space
@@ -772,6 +774,8 @@ def reduce_contact_in_hashtable(
         # Use -depth so atomic_max selects most penetrating (most negative depth)
         voxel_value = make_contact_value(-depth, contact_id)
         reduction_update_slot(voxel_entry_idx, voxel_local_slot, voxel_value, reducer_data.ht_values, ht_capacity)
+    else:
+        wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
 
 
 @wp.func
@@ -912,6 +916,8 @@ def export_and_reduce_contact_centered(
 
         max_depth_value = make_contact_value(-depth, contact_id)
         reduction_update_slot(entry_idx, NUM_SPATIAL_DIRECTIONS, max_depth_value, reducer_data.ht_values, ht_capacity)
+    else:
+        wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
 
     # Deferred voxel entry lookup for contacts that won via normal bin
     if voxel_entry_idx < 0:
@@ -919,6 +925,8 @@ def export_and_reduce_contact_centered(
     if voxel_entry_idx >= 0:
         voxel_value = make_contact_value(-depth, contact_id)
         reduction_update_slot(voxel_entry_idx, voxel_local_slot, voxel_value, reducer_data.ht_values, ht_capacity)
+    else:
+        wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
 
     return contact_id
 

@@ -532,6 +532,9 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
 
         difference = wp.max(difference, 1e-8)
 
+        # Relaxed from 1e-3 to 3e-3: the tighter tolerance required more
+        # iterations that pushed float32 precision limits, hurting convergence
+        # without measurably improving contact quality.
         tolerance_sq = 3e-3 * 3e-3
 
         sdf_gradient = wp.vec3(0.0, 0.0, 0.0)
@@ -553,6 +556,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
 
             grad_len = wp.length(sdf_gradient)
             if grad_len == 0.0:
+                # Arbitrary non-axis-aligned unit vector to break symmetry
                 sdf_gradient = wp.vec3(0.571846586, 0.705545099, 0.418566116)
                 grad_len = 1.0
 
@@ -963,22 +967,29 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             direction_len = wp.length(direction_world)
                             if direction_len > 0.0:
                                 direction_world = direction_world / direction_len
+                            else:
+                                fallback_dir = point_world - wp.transform_get_translation(X_sdf_ws)
+                                fallback_len = wp.length(fallback_dir)
+                                if fallback_len > 0.0:
+                                    direction_world = fallback_dir / fallback_len
+                                else:
+                                    direction_world = wp.vec3(0.0, 1.0, 0.0)
 
-                                contact_normal = -direction_world if mode == 0 else direction_world
+                            contact_normal = -direction_world if mode == 0 else direction_world
 
-                                contact_data = ContactData()
-                                contact_data.contact_point_center = point_world
-                                contact_data.contact_normal_a_to_b = contact_normal
-                                contact_data.contact_distance = dist
-                                contact_data.radius_eff_a = 0.0
-                                contact_data.radius_eff_b = 0.0
-                                contact_data.margin_a = shape_data[pair[0]][3]
-                                contact_data.margin_b = shape_data[pair[1]][3]
-                                contact_data.shape_a = pair[0]
-                                contact_data.shape_b = pair[1]
-                                contact_data.gap_sum = gap_sum
+                            contact_data = ContactData()
+                            contact_data.contact_point_center = point_world
+                            contact_data.contact_normal_a_to_b = contact_normal
+                            contact_data.contact_distance = dist
+                            contact_data.radius_eff_a = 0.0
+                            contact_data.radius_eff_b = 0.0
+                            contact_data.margin_a = shape_data[pair[0]][3]
+                            contact_data.margin_b = shape_data[pair[1]][3]
+                            contact_data.shape_a = pair[0]
+                            contact_data.shape_b = pair[1]
+                            contact_data.gap_sum = gap_sum
 
-                                writer_func(contact_data, writer_data, -1)
+                            writer_func(contact_data, writer_data, -1)
 
                     synchronize()
                     if t == 0:
@@ -1198,21 +1209,29 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             direction_len = wp.length(direction_world)
                             if direction_len > 0.0:
                                 direction_world = direction_world / direction_len
-                                contact_normal = -direction_world if mode == 0 else direction_world
+                            else:
+                                fallback_dir = point_world - wp.transform_get_translation(X_sdf_ws)
+                                fallback_len = wp.length(fallback_dir)
+                                if fallback_len > 0.0:
+                                    direction_world = fallback_dir / fallback_len
+                                else:
+                                    direction_world = wp.vec3(0.0, 1.0, 0.0)
 
-                                export_and_reduce_contact_centered(
-                                    pair[0],
-                                    pair[1],
-                                    point_world,
-                                    contact_normal,
-                                    dist,
-                                    point_world - midpoint,
-                                    X_ws_tri,
-                                    aabb_lower_tri,
-                                    aabb_upper_tri,
-                                    voxel_res_tri,
-                                    reducer_data,
-                                )
+                            contact_normal = -direction_world if mode == 0 else direction_world
+
+                            export_and_reduce_contact_centered(
+                                pair[0],
+                                pair[1],
+                                point_world,
+                                contact_normal,
+                                dist,
+                                point_world - midpoint,
+                                X_ws_tri,
+                                aabb_lower_tri,
+                                aabb_upper_tri,
+                                voxel_res_tri,
+                                reducer_data,
+                            )
 
                     synchronize()
                     if t == 0:

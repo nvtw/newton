@@ -38,6 +38,10 @@ import warp as wp
 
 from .sdf_utils import get_distance_to_mesh
 
+# Sentinel values for subgrid indirection slots
+SLOT_EMPTY = np.uint32(0xFFFFFFFF)  # No subgrid data (empty/far-field cell)
+SLOT_LINEAR = np.uint32(0xFFFFFFFE)  # Subgrid demoted to coarse interpolation
+
 # ============================================================================
 # Texture SDF Data Structure
 # ============================================================================
@@ -542,7 +546,7 @@ def _sample_texture_at_cell(
     f: wp.vec3,
 ) -> float:
     """Sample SDF at a texture cell (coarse or subgrid)."""
-    if start_slot >= wp.uint32(0xFFFFFFFE):
+    if start_slot >= wp.static(SLOT_LINEAR):
         coarse_f = f * sdf.fine_to_coarse
         return wp.texture_sample(
             sdf.coarse_texture,
@@ -680,7 +684,7 @@ def texture_sample_sdf_grad(
     v011 = float(0.0)
     v111 = float(0.0)
 
-    if start_slot >= wp.uint32(0xFFFFFFFE):
+    if start_slot >= wp.static(SLOT_LINEAR):
         # Coarse texture: sample 8 corners at coarse cell indices
         cx = float(x_base)
         cy = float(y_base)
@@ -928,7 +932,7 @@ def build_sparse_sdf_from_mesh(
         sdf_range = 1.0
 
     if num_required == 0:
-        subgrid_start_slots = np.full((w, h, d), 0xFFFFFFFF, dtype=np.uint32)
+        subgrid_start_slots = np.full((w, h, d), SLOT_EMPTY, dtype=np.uint32)
         subgrid_texture_data = np.zeros((1, 1, 1), dtype=np.float32)
         tex_size = 1
         final_sdf_min = 0.0
@@ -942,7 +946,7 @@ def build_sparse_sdf_from_mesh(
         samples_per_dim = subgrid_size + 1
         tex_size = tex_blocks_per_dim * samples_per_dim
 
-        subgrid_start_slots = np.full((w, h, d), 0xFFFFFFFF, dtype=np.uint32)
+        subgrid_start_slots = np.full((w, h, d), SLOT_EMPTY, dtype=np.uint32)
         subgrid_start_slots_gpu = wp.array(subgrid_start_slots, dtype=wp.uint32, device=device)
 
         total_tex_samples = tex_size * tex_size * tex_size
@@ -1045,7 +1049,7 @@ def build_sparse_sdf_from_mesh(
         wp.synchronize()
         subgrid_start_slots = subgrid_start_slots_gpu.numpy()
 
-    # Write 0xFFFFFFFE for subgrids that overlap the narrow band but were
+    # Write SLOT_LINEAR for subgrids that overlap the narrow band but were
     # demoted because their SDF is well-approximated by the coarse grid.
     is_linear_np = subgrid_is_linear.numpy()
     if np.any(is_linear_np):
@@ -1055,7 +1059,7 @@ def build_sparse_sdf_from_mesh(
                 rem = idx - bz * w * h
                 by = rem // w
                 bx = rem - by * w
-                subgrid_start_slots[bx, by, bz] = np.uint32(0xFFFFFFFE)
+                subgrid_start_slots[bx, by, bz] = SLOT_LINEAR
 
     background_sdf_np = background_sdf.numpy().reshape((bg_size_z, bg_size_y, bg_size_x))
 
@@ -1187,6 +1191,8 @@ def create_texture_sdf_from_mesh(
     # Compute grid dimensions (same math as the former build_dense_sdf)
     ext = max_ext - min_ext
     max_ext_scalar = np.max(ext)
+    if max_ext_scalar < 1e-10:
+        return create_empty_texture_sdf_data(), None, None, []
     cell_size_scalar = max_ext_scalar / max_resolution
     dims = np.ceil(ext / cell_size_scalar).astype(int) + 1
     grid_x, grid_y, grid_z = int(dims[0]), int(dims[1]), int(dims[2])
@@ -1443,7 +1449,7 @@ def create_texture_sdf_from_volume(
         sdf_range = 1.0
 
     if num_required == 0:
-        subgrid_start_slots = np.full((w, h, d), 0xFFFFFFFF, dtype=np.uint32)
+        subgrid_start_slots = np.full((w, h, d), SLOT_EMPTY, dtype=np.uint32)
         subgrid_texture_data = np.zeros((1, 1, 1), dtype=np.float32)
         tex_size = 1
     else:
@@ -1456,7 +1462,7 @@ def create_texture_sdf_from_volume(
         tex_size = tex_blocks_per_dim * samples_per_dim
 
         # Assign sequential addresses to required subgrids
-        subgrid_start_slots = np.full((w, h, d), 0xFFFFFFFF, dtype=np.uint32)
+        subgrid_start_slots = np.full((w, h, d), SLOT_EMPTY, dtype=np.uint32)
         address = 0
         for idx in range(total_subgrids):
             if subgrid_required[idx]:
@@ -1549,7 +1555,7 @@ def create_texture_sdf_from_volume(
 
     wp.synchronize()
 
-    # Write 0xFFFFFFFE for subgrids that overlap the narrow band but were
+    # Write SLOT_LINEAR for subgrids that overlap the narrow band but were
     # demoted because their SDF is well-approximated by the coarse grid.
     if np.any(subgrid_is_linear):
         for idx in range(total_subgrids):
@@ -1558,7 +1564,7 @@ def create_texture_sdf_from_volume(
                 rem = idx - bz * w * h
                 by = rem // w
                 bx = rem - by * w
-                subgrid_start_slots[bx, by, bz] = np.uint32(0xFFFFFFFE)
+                subgrid_start_slots[bx, by, bz] = SLOT_LINEAR
 
     background_sdf_np = bg_sdf_gpu.numpy().reshape((bg_size_z, bg_size_y, bg_size_x))
 
@@ -1808,7 +1814,7 @@ def compute_isomesh_from_texture_sdf(
     for ix in range(cx):
         for iy in range(cy):
             for iz in range(cz):
-                if slots_np[ix, iy, iz] != 0xFFFFFFFF:
+                if slots_np[ix, iy, iz] != SLOT_EMPTY:
                     active_cells.append((ix, iy, iz))
 
     if not active_cells:

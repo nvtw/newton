@@ -9664,18 +9664,31 @@ class ModelBuilder:
                                     indices=wp.array(prim_mesh.indices.flatten(), dtype=wp.int32, device=device),
                                     support_winding_number=True,
                                 )
-                                tex_data, c_tex, s_tex, tex_bc = create_texture_sdf_from_mesh(
-                                    prim_wp_mesh,
-                                    margin=shape_gap,
-                                    narrow_band_range=tuple(sdf_narrow_band_range),
-                                    max_resolution=effective_max_resolution,
-                                    scale_baked=True,
-                                    device=device,
-                                )
+                                try:
+                                    tex_data, c_tex, s_tex, tex_bc = create_texture_sdf_from_mesh(
+                                        prim_wp_mesh,
+                                        margin=shape_gap,
+                                        narrow_band_range=tuple(sdf_narrow_band_range),
+                                        max_resolution=effective_max_resolution,
+                                        scale_baked=True,
+                                        device=device,
+                                    )
+                                except Exception as e:
+                                    warnings.warn(
+                                        f"Texture SDF construction failed for shape {i} "
+                                        f"(type={shape_type}): {e}. Falling back to BVH.",
+                                        stacklevel=2,
+                                    )
+                                    tex_data = create_empty_texture_sdf_data()
+                                    c_tex = None
+                                    s_tex = None
+                                    tex_bc = None
                                 compact_texture_sdf_data.append(tex_data)
                                 compact_texture_sdf_coarse_textures.append(c_tex)
                                 compact_texture_sdf_subgrid_textures.append(s_tex)
-                                compact_texture_sdf_subgrid_start_slots.append(tex_data.subgrid_start_slots)
+                                compact_texture_sdf_subgrid_start_slots.append(
+                                    tex_data.subgrid_start_slots if c_tex is not None else None
+                                )
                                 tex_block_coords = tex_bc
                             else:
                                 compact_texture_sdf_data.append(create_empty_texture_sdf_data())
