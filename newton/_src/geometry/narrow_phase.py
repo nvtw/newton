@@ -1620,7 +1620,7 @@ class NarrowPhase:
                 self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(
                     writer_func,
                 )
-            # Only create mesh-mesh SDF kernel on CUDA (uses __shared__ memory via func_native)
+            # Only create mesh-mesh SDF kernel on CUDA (uses tile_stack shared memory)
             if is_gpu_device:
                 if self.reduce_contacts:
                     self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(

@@ -21,13 +21,11 @@ from ..geometry.contact_data import SHAPE_PAIR_HFIELD_BIT, SHAPE_PAIR_INDEX_MASK
 from ..geometry.sdf_texture import TextureSDFData, texture_sample_sdf, texture_sample_sdf_grad
 from ..geometry.types import GeoType
 from ..utils.heightfield import HeightfieldData, sample_sdf_grad_heightfield, sample_sdf_heightfield
-
-# Handle both direct execution and module import
-from .contact_reduction import (
-    get_shared_memory_pointer_block_dim_plus_2_ints,
-    synchronize,
-)
 from .contact_reduction_global import GlobalContactReducerData, export_and_reduce_contact_centered
+
+# Stack capacity for the cooperative triangle selection buffer.
+# Must be >= block_dim so that one full batch always fits.
+STACK_CAPACITY = 256
 
 
 @wp.func
@@ -305,47 +303,6 @@ def get_bounding_sphere(v0: wp.vec3, v1: wp.vec3, v2: wp.vec3) -> tuple[wp.vec3,
     return center, wp.sqrt(radius)
 
 
-@wp.func
-def add_to_shared_buffer_atomic(
-    thread_id: int,
-    add_triangle: bool,
-    tri_idx: int,
-    buffer: wp.array(dtype=wp.int32),
-):
-    """Add a triangle index to a shared memory buffer using atomic operations.
-
-    Buffer layout:
-    - [0 .. block_dim-1]: Triangle indices
-    - [block_dim]: Current count of triangles in buffer
-    - [block_dim+1]: Progress counter (triangles processed so far)
-
-    Args:
-        thread_id: The calling thread's index within the thread block
-        add_triangle: Whether this thread wants to add a triangle
-        tri_idx: The triangle index to add (only used if add_triangle is True)
-        buffer: Shared memory buffer for triangle indices
-    """
-    capacity = wp.block_dim()
-    idx = -1
-
-    if add_triangle:
-        idx = wp.atomic_add(buffer, capacity, 1)
-        if idx < capacity:
-            buffer[idx] = tri_idx
-
-    if thread_id == 0:
-        buffer[capacity + 1] += capacity
-
-    synchronize()  # SYNC 1: All atomic writes and progress update complete
-
-    if thread_id == 0 and buffer[capacity] > capacity:
-        buffer[capacity] = capacity
-
-    if add_triangle and idx >= capacity:
-        wp.atomic_min(buffer, capacity + 1, tri_idx)
-
-    synchronize()  # SYNC 2: All corrections complete, buffer consistent
-
 
 @wp.func
 def get_triangle_from_heightfield(
@@ -430,8 +387,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
         enable_heightfields: When False, all heightfield code paths are compiled out.
 
     Returns:
-        Tuple of ``(prefetch_triangle_vertices, find_interesting_triangles,
-        do_triangle_sdf_collision)``.
+        The ``do_triangle_sdf_collision`` function.
     """
 
     @wp.func
@@ -571,112 +527,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
 
         return dist, p, sdf_gradient
 
-    @wp.func
-    def find_interesting_triangles_func(
-        thread_id: int,
-        mesh_scale: wp.vec3,
-        mesh_to_sdf_transform: wp.transform,
-        mesh_id: wp.uint64,
-        texture_sdf: TextureSDFData,
-        sdf_mesh_id: wp.uint64,
-        buffer: wp.array(dtype=wp.int32),
-        contact_distance: float,
-        use_bvh_for_sdf: bool,
-        inv_sdf_scale: wp.vec3,
-        tri_end: int,
-        tri_shape_type: int,
-        sdf_shape_type: int,
-        hfd_tri: HeightfieldData,
-        hfd_sdf: HeightfieldData,
-        elevation_data: wp.array(dtype=wp.float32),
-    ):
-        """Midphase triangle culling for mesh-SDF collision.
-
-        Determines which triangles are close enough to the SDF to potentially generate
-        contacts. Triangles are transformed to unscaled SDF space before testing.
-        Accepted triangle indices are stored in the shared buffer so the consumer
-        can re-fetch the vertices from global memory.
-
-        Uses a two-level culling strategy:
-
-        1. **AABB early-out (pure ALU, no memory access):** If the triangle's bounding
-           sphere is farther from the SDF volume's AABB than ``contact_distance``, the
-           triangle is discarded immediately.
-        2. **SDF sample:** For triangles that survive the AABB test, sample the SDF at
-           the bounding-sphere center to get a tighter distance estimate.
-
-        Buffer layout: [0..block_dim-1] = triangle indices, [block_dim] = count,
-        [block_dim+1] = progress.
-
-        Args:
-            tri_end: Maximum triangle index (exclusive).
-        """
-        capacity = wp.block_dim()
-
-        if wp.static(enable_heightfields):
-            sdf_is_heightfield = sdf_shape_type == GeoType.HFIELD
-        else:
-            sdf_is_heightfield = False
-
-        sdf_aabb_lower = texture_sdf.sdf_box_lower
-        sdf_aabb_upper = texture_sdf.sdf_box_upper
-
-        synchronize()  # Ensure buffer state is consistent before starting
-
-        while buffer[capacity + 1] < tri_end and buffer[capacity] < capacity:
-            base_tri_idx = buffer[capacity + 1]
-            tri_idx = base_tri_idx + thread_id
-            add_triangle = False
-
-            if tri_idx < tri_end:
-                if wp.static(enable_heightfields):
-                    if tri_shape_type == GeoType.HFIELD:
-                        v0_scaled, v1_scaled, v2_scaled = get_triangle_from_heightfield(
-                            hfd_tri, elevation_data, mesh_scale, mesh_to_sdf_transform, tri_idx
-                        )
-                    else:
-                        v0_scaled, v1_scaled, v2_scaled = get_triangle_from_mesh(
-                            mesh_id, mesh_scale, mesh_to_sdf_transform, tri_idx
-                        )
-                else:
-                    v0_scaled, v1_scaled, v2_scaled = get_triangle_from_mesh(
-                        mesh_id, mesh_scale, mesh_to_sdf_transform, tri_idx
-                    )
-                v0 = wp.cw_mul(v0_scaled, inv_sdf_scale)
-                v1 = wp.cw_mul(v1_scaled, inv_sdf_scale)
-                v2 = wp.cw_mul(v2_scaled, inv_sdf_scale)
-                bounding_sphere_center, bounding_sphere_radius = get_bounding_sphere(v0, v1, v2)
-
-                threshold = bounding_sphere_radius + contact_distance
-
-                if sdf_is_heightfield:
-                    sdf_dist = sample_sdf_heightfield(hfd_sdf, elevation_data, bounding_sphere_center)
-                    add_triangle = sdf_dist <= threshold
-                elif use_bvh_for_sdf:
-                    sdf_dist = sample_sdf_using_mesh(sdf_mesh_id, bounding_sphere_center, 1.01 * threshold)
-                    add_triangle = sdf_dist <= threshold
-                else:
-                    culling_radius = threshold
-                    clamped = wp.min(wp.max(bounding_sphere_center, sdf_aabb_lower), sdf_aabb_upper)
-                    aabb_dist_sq = wp.length_sq(bounding_sphere_center - clamped)
-                    if aabb_dist_sq > culling_radius * culling_radius:
-                        add_triangle = False
-                    else:
-                        sdf_dist = texture_sample_sdf(texture_sdf, bounding_sphere_center)
-                        add_triangle = sdf_dist <= culling_radius
-
-            synchronize()  # Ensure all threads have read base_tri_idx before any writes
-            add_to_shared_buffer_atomic(
-                thread_id,
-                add_triangle,
-                tri_idx,
-                buffer,
-            )
-            # add_to_shared_buffer_atomic ends with sync, buffer is consistent for next while check
-
-        synchronize()  # Final sync before returning
-
-    return find_interesting_triangles_func, do_triangle_sdf_collision_func
+    return do_triangle_sdf_collision_func
 
 
 @wp.kernel(enable_backward=False)
@@ -754,7 +605,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     enable_heightfields: bool = True,
     reduce_contacts: bool = False,
 ):
-    find_interesting_triangles, do_triangle_sdf_collision = _create_sdf_contact_funcs(enable_heightfields)
+    do_triangle_sdf_collision = _create_sdf_contact_funcs(enable_heightfields)
 
     @wp.kernel(enable_backward=False, module="unique")
     def mesh_sdf_collision_kernel(
@@ -778,6 +629,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         block_id, t = wp.tid()
 
         pair_count = wp.min(shape_pairs_mesh_mesh_count[0], shape_pairs_mesh_mesh.shape[0])
+
+        stack_data = wp.tile_zeros(shape=STACK_CAPACITY, dtype=int, storage="shared")
+        stack_count = wp.tile_zeros(shape=1, dtype=int, storage="shared")
+        progress = wp.tile_zeros(shape=1, dtype=int, storage="shared")
 
         # Strided loop over pairs
         for pair_idx in range(block_id, pair_count, total_num_blocks):
@@ -867,45 +722,84 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 contact_threshold = gap_sum + triangle_mesh_margin + sdf_mesh_margin
                 contact_threshold_unscaled = contact_threshold / min_sdf_scale
 
-                tri_capacity = wp.block_dim()
-                selected_triangles = wp.array(
-                    ptr=get_shared_memory_pointer_block_dim_plus_2_ints(),
-                    shape=(wp.block_dim() + 2,),
-                    dtype=wp.int32,
-                )
-
-                if t == 0:
-                    selected_triangles[tri_capacity] = 0
-                    selected_triangles[tri_capacity + 1] = 0
-                synchronize()
-
                 num_tris = get_triangle_count(tri_type, mesh_id_tri, hfd_tri)
 
-                while selected_triangles[tri_capacity + 1] < num_tris:
-                    find_interesting_triangles(
-                        t,
-                        mesh_scale_tri,
-                        X_mesh_to_sdf,
-                        mesh_id_tri,
-                        texture_sdf,
-                        mesh_id_sdf,
-                        selected_triangles,
-                        contact_threshold_unscaled,
-                        use_bvh_for_sdf,
-                        inv_sdf_scale,
-                        num_tris,
-                        tri_type,
-                        sdf_type,
-                        hfd_tri,
-                        hfd_sdf,
-                        heightfield_elevation_data,
-                    )
+                wp.tile_write_thread(progress, 0, 0, 0)
 
-                    has_triangle = t < selected_triangles[tri_capacity]
-                    synchronize()
+                if wp.static(enable_heightfields):
+                    sdf_is_heightfield = sdf_type == GeoType.HFIELD
+                else:
+                    sdf_is_heightfield = False
+                sdf_aabb_lower = texture_sdf.sdf_box_lower
+                sdf_aabb_upper = texture_sdf.sdf_box_upper
+
+                while wp.tile_extract(progress, 0) < num_tris:
+                    # -- begin: find interesting triangles (inlined) --
+                    # Two-level culling: AABB early-out then SDF sample.
+                    # Fills the tile-stack until full or all triangles scanned.
+                    capacity = wp.block_dim()
+                    while wp.tile_extract(progress, 0) < num_tris and wp.tile_extract(stack_count, 0) < capacity:
+                        base_tri_idx = wp.tile_extract(progress, 0)
+                        tri_idx = base_tri_idx + t
+                        add_triangle = False
+
+                        if tri_idx < num_tris:
+                            if wp.static(enable_heightfields):
+                                if tri_type == GeoType.HFIELD:
+                                    v0_scaled, v1_scaled, v2_scaled = get_triangle_from_heightfield(
+                                        hfd_tri, heightfield_elevation_data, mesh_scale_tri, X_mesh_to_sdf, tri_idx
+                                    )
+                                else:
+                                    v0_scaled, v1_scaled, v2_scaled = get_triangle_from_mesh(
+                                        mesh_id_tri, mesh_scale_tri, X_mesh_to_sdf, tri_idx
+                                    )
+                            else:
+                                v0_scaled, v1_scaled, v2_scaled = get_triangle_from_mesh(
+                                    mesh_id_tri, mesh_scale_tri, X_mesh_to_sdf, tri_idx
+                                )
+                            v0_cull = wp.cw_mul(v0_scaled, inv_sdf_scale)
+                            v1_cull = wp.cw_mul(v1_scaled, inv_sdf_scale)
+                            v2_cull = wp.cw_mul(v2_scaled, inv_sdf_scale)
+                            bsphere_center, bsphere_radius = get_bounding_sphere(v0_cull, v1_cull, v2_cull)
+
+                            threshold = bsphere_radius + contact_threshold_unscaled
+
+                            if sdf_is_heightfield:
+                                sdf_dist = sample_sdf_heightfield(
+                                    hfd_sdf, heightfield_elevation_data, bsphere_center
+                                )
+                                add_triangle = sdf_dist <= threshold
+                            elif use_bvh_for_sdf:
+                                sdf_dist = sample_sdf_using_mesh(
+                                    mesh_id_sdf, bsphere_center, 1.01 * threshold
+                                )
+                                add_triangle = sdf_dist <= threshold
+                            else:
+                                culling_radius = threshold
+                                clamped = wp.min(wp.max(bsphere_center, sdf_aabb_lower), sdf_aabb_upper)
+                                aabb_dist_sq = wp.length_sq(bsphere_center - clamped)
+                                if aabb_dist_sq > culling_radius * culling_radius:
+                                    add_triangle = False
+                                else:
+                                    sdf_dist = texture_sample_sdf(texture_sdf, bsphere_center)
+                                    add_triangle = sdf_dist <= culling_radius
+
+                        # Push into tile-stack and advance progress
+                        idx = wp.tile_stack_push(stack_data, stack_count, tri_idx, add_triangle)
+                        old_progress = wp.tile_extract(progress, 0)
+                        wp.tile_write_thread(progress, 0, old_progress + capacity, 0)
+
+                        # Rewind progress for overflowed triangles (replaces atomic_min)
+                        overflowed = add_triangle and idx == -1
+                        rewind_val = wp.where(overflowed, tri_idx, 2147483647)
+                        min_rewind = wp.tile_extract(wp.tile_min(wp.tile(rewind_val)), 0)
+                        if min_rewind < 2147483647:
+                            wp.tile_write_thread(progress, 0, min_rewind, 0)
+                    # -- end: find interesting triangles --
+
+                    my_tri_idx, has_triangle = wp.tile_stack_pop(stack_data, stack_count)
 
                     if has_triangle:
-                        my_tri_idx = selected_triangles[t]
                         if wp.static(enable_heightfields):
                             if tri_type == GeoType.HFIELD:
                                 v0_s, v1_s, v2_s = get_triangle_from_heightfield(
@@ -971,10 +865,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                             writer_func(contact_data, writer_data, -1)
 
-                    synchronize()
-                    if t == 0:
-                        selected_triangles[tri_capacity] = 0
-                    synchronize()
+                    wp.tile_write_thread(stack_count, 0, 0, 0)
 
     # Return early if contact reduction is disabled
     if not reduce_contacts:
@@ -1018,6 +909,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         block_id, t = wp.tid()
         pair_count = wp.min(shape_pairs_mesh_mesh_count[0], shape_pairs_mesh_mesh.shape[0])
         total_combos = block_offsets[pair_count]
+
+        stack_data = wp.tile_zeros(shape=STACK_CAPACITY, dtype=int, storage="shared")
+        stack_count = wp.tile_zeros(shape=1, dtype=int, storage="shared")
+        progress = wp.tile_zeros(shape=1, dtype=int, storage="shared")
 
         for combo_idx in range(block_id, total_combos, total_num_blocks):
             lo = int(0)
@@ -1119,48 +1014,83 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 contact_threshold = gap_sum + triangle_mesh_margin + sdf_mesh_margin
                 contact_threshold_unscaled = contact_threshold / min_sdf_scale
 
-                tri_capacity = wp.block_dim()
-                selected_triangles = wp.array(
-                    ptr=get_shared_memory_pointer_block_dim_plus_2_ints(),
-                    shape=(wp.block_dim() + 2,),
-                    dtype=wp.int32,
-                )
-
                 num_tris = get_triangle_count(tri_type, mesh_id_tri, hfd_tri)
                 chunk_size = (num_tris + blocks_for_pair - 1) // blocks_for_pair
                 tri_start = block_in_pair * chunk_size
                 tri_end = wp.min(tri_start + chunk_size, num_tris)
 
-                if t == 0:
-                    selected_triangles[tri_capacity] = 0
-                    selected_triangles[tri_capacity + 1] = tri_start
-                synchronize()
+                wp.tile_write_thread(progress, 0, tri_start, 0)
 
-                while selected_triangles[tri_capacity + 1] < tri_end:
-                    find_interesting_triangles(
-                        t,
-                        mesh_scale_tri,
-                        X_mesh_to_sdf,
-                        mesh_id_tri,
-                        texture_sdf,
-                        mesh_id_sdf,
-                        selected_triangles,
-                        contact_threshold_unscaled,
-                        use_bvh_for_sdf,
-                        inv_sdf_scale,
-                        tri_end,
-                        tri_type,
-                        sdf_type,
-                        hfd_tri,
-                        hfd_sdf,
-                        heightfield_elevation_data,
-                    )
+                if wp.static(enable_heightfields):
+                    sdf_is_heightfield = sdf_type == GeoType.HFIELD
+                else:
+                    sdf_is_heightfield = False
+                sdf_aabb_lower = texture_sdf.sdf_box_lower
+                sdf_aabb_upper = texture_sdf.sdf_box_upper
 
-                    has_triangle = t < selected_triangles[tri_capacity]
-                    synchronize()
+                while wp.tile_extract(progress, 0) < tri_end:
+                    # -- begin: find interesting triangles (inlined) --
+                    capacity = wp.block_dim()
+                    while wp.tile_extract(progress, 0) < tri_end and wp.tile_extract(stack_count, 0) < capacity:
+                        base_tri_idx = wp.tile_extract(progress, 0)
+                        tri_idx = base_tri_idx + t
+                        add_triangle = False
+
+                        if tri_idx < tri_end:
+                            if wp.static(enable_heightfields):
+                                if tri_type == GeoType.HFIELD:
+                                    v0_scaled, v1_scaled, v2_scaled = get_triangle_from_heightfield(
+                                        hfd_tri, heightfield_elevation_data, mesh_scale_tri, X_mesh_to_sdf, tri_idx
+                                    )
+                                else:
+                                    v0_scaled, v1_scaled, v2_scaled = get_triangle_from_mesh(
+                                        mesh_id_tri, mesh_scale_tri, X_mesh_to_sdf, tri_idx
+                                    )
+                            else:
+                                v0_scaled, v1_scaled, v2_scaled = get_triangle_from_mesh(
+                                    mesh_id_tri, mesh_scale_tri, X_mesh_to_sdf, tri_idx
+                                )
+                            v0_cull = wp.cw_mul(v0_scaled, inv_sdf_scale)
+                            v1_cull = wp.cw_mul(v1_scaled, inv_sdf_scale)
+                            v2_cull = wp.cw_mul(v2_scaled, inv_sdf_scale)
+                            bsphere_center, bsphere_radius = get_bounding_sphere(v0_cull, v1_cull, v2_cull)
+
+                            threshold = bsphere_radius + contact_threshold_unscaled
+
+                            if sdf_is_heightfield:
+                                sdf_dist = sample_sdf_heightfield(
+                                    hfd_sdf, heightfield_elevation_data, bsphere_center
+                                )
+                                add_triangle = sdf_dist <= threshold
+                            elif use_bvh_for_sdf:
+                                sdf_dist = sample_sdf_using_mesh(
+                                    mesh_id_sdf, bsphere_center, 1.01 * threshold
+                                )
+                                add_triangle = sdf_dist <= threshold
+                            else:
+                                culling_radius = threshold
+                                clamped = wp.min(wp.max(bsphere_center, sdf_aabb_lower), sdf_aabb_upper)
+                                aabb_dist_sq = wp.length_sq(bsphere_center - clamped)
+                                if aabb_dist_sq > culling_radius * culling_radius:
+                                    add_triangle = False
+                                else:
+                                    sdf_dist = texture_sample_sdf(texture_sdf, bsphere_center)
+                                    add_triangle = sdf_dist <= culling_radius
+
+                        idx = wp.tile_stack_push(stack_data, stack_count, tri_idx, add_triangle)
+                        old_progress = wp.tile_extract(progress, 0)
+                        wp.tile_write_thread(progress, 0, old_progress + capacity, 0)
+
+                        overflowed = add_triangle and idx == -1
+                        rewind_val = wp.where(overflowed, tri_idx, 2147483647)
+                        min_rewind = wp.tile_extract(wp.tile_min(wp.tile(rewind_val)), 0)
+                        if min_rewind < 2147483647:
+                            wp.tile_write_thread(progress, 0, min_rewind, 0)
+                    # -- end: find interesting triangles --
+
+                    my_tri_idx, has_triangle = wp.tile_stack_pop(stack_data, stack_count)
 
                     if has_triangle:
-                        my_tri_idx = selected_triangles[t]
                         if wp.static(enable_heightfields):
                             if tri_type == GeoType.HFIELD:
                                 v0_s, v1_s, v2_s = get_triangle_from_heightfield(
@@ -1226,9 +1156,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 reducer_data,
                             )
 
-                    synchronize()
-                    if t == 0:
-                        selected_triangles[tri_capacity] = 0
-                    synchronize()
+                    wp.tile_write_thread(stack_count, 0, 0, 0)
 
     return mesh_sdf_collision_global_reduce_kernel
