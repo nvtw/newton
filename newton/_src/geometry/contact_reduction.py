@@ -70,14 +70,6 @@ return i ^ mask;
 def float_flip(f: float) -> wp.uint32: ...
 
 
-@wp.func_native("""
-#if defined(__CUDA_ARCH__)
-__syncthreads();
-#endif
-""")
-def synchronize(): ...
-
-
 _mat20x3 = wp.types.matrix(shape=(20, 3), dtype=wp.float32)
 
 # Face normals ordered: top cap (0-4), equatorial (5-14), bottom cap (15-19)
@@ -299,35 +291,3 @@ def compute_voxel_index(
     vz = wp.clamp(int(rel[2] * float(nz)), 0, nz - 1)
 
     return vx + vy * nx + vz * nx * ny
-
-
-def create_shared_memory_pointer_block_dim_func(
-    add: int,
-):
-    """Create a shared memory pointer function for a block-dimension-dependent array size.
-
-    Args:
-        add: Number of additional int elements beyond WP_TILE_BLOCK_DIM.
-
-    Returns:
-        A Warp function that returns a pointer to shared memory
-    """
-
-    snippet = f"""
-#if defined(__CUDA_ARCH__)
-    constexpr int array_size = WP_TILE_BLOCK_DIM +{add};
-    __shared__ int s[array_size];
-    auto ptr = &s[0];
-    return (uint64_t)ptr;
-#else
-    return (uint64_t)0;
-#endif
-    """
-
-    @wp.func_native(snippet)
-    def get_shared_memory_pointer() -> wp.uint64: ...
-
-    return get_shared_memory_pointer
-
-
-get_shared_memory_pointer_block_dim_plus_2_ints = create_shared_memory_pointer_block_dim_func(2)
