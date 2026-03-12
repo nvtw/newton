@@ -653,7 +653,8 @@ def export_contact_to_buffer(
     Returns:
         Contact ID if successfully stored, -1 if buffer full
     """
-    # Allocate contact slot
+    # Allocate contact slot.  On overflow, contact_count keeps incrementing
+    # past capacity so (contact_count - capacity) gives the drop count.
     contact_id = wp.atomic_add(reducer_data.contact_count, 0, 1)
     if contact_id >= reducer_data.capacity:
         return -1

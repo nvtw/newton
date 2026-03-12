@@ -38,9 +38,10 @@ import warp as wp
 
 from .sdf_utils import get_distance_to_mesh
 
-# Sentinel values for subgrid indirection slots
-SLOT_EMPTY = np.uint32(0xFFFFFFFF)  # No subgrid data (empty/far-field cell)
-SLOT_LINEAR = np.uint32(0xFFFFFFFE)  # Subgrid demoted to coarse interpolation
+# Sentinel values for subgrid indirection slots.
+# Plain int so wp.static() works in kernels; numpy casts on assignment.
+SLOT_EMPTY = 0xFFFFFFFF  # No subgrid data (empty/far-field cell)
+SLOT_LINEAR = 0xFFFFFFFE  # Subgrid demoted to coarse interpolation
 
 # ============================================================================
 # Texture SDF Data Structure

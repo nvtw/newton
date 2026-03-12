@@ -889,8 +889,13 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 triangle_mesh_margin = scale_data_tri[3]
                 sdf_mesh_margin = scale_data_sdf[3]
 
-                inv_sdf_scale = wp.cw_div(wp.vec3(1.0, 1.0, 1.0), sdf_scale)
-                min_sdf_scale = wp.min(wp.min(sdf_scale[0], sdf_scale[1]), sdf_scale[2])
+                sdf_scale_safe = wp.vec3(
+                    wp.max(sdf_scale[0], 1e-10),
+                    wp.max(sdf_scale[1], 1e-10),
+                    wp.max(sdf_scale[2], 1e-10),
+                )
+                inv_sdf_scale = wp.cw_div(wp.vec3(1.0, 1.0, 1.0), sdf_scale_safe)
+                min_sdf_scale = wp.min(wp.min(sdf_scale_safe[0], sdf_scale_safe[1]), sdf_scale_safe[2])
 
                 contact_threshold = gap_sum + triangle_mesh_margin + sdf_mesh_margin
                 contact_threshold_unscaled = contact_threshold / min_sdf_scale
@@ -1128,8 +1133,13 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                 midpoint = (wp.transform_get_translation(X_tri_ws) + wp.transform_get_translation(X_sdf_ws)) * 0.5
 
-                inv_sdf_scale = wp.cw_div(wp.vec3(1.0, 1.0, 1.0), sdf_scale)
-                min_sdf_scale = wp.min(wp.min(sdf_scale[0], sdf_scale[1]), sdf_scale[2])
+                sdf_scale_safe = wp.vec3(
+                    wp.max(sdf_scale[0], 1e-10),
+                    wp.max(sdf_scale[1], 1e-10),
+                    wp.max(sdf_scale[2], 1e-10),
+                )
+                inv_sdf_scale = wp.cw_div(wp.vec3(1.0, 1.0, 1.0), sdf_scale_safe)
+                min_sdf_scale = wp.min(wp.min(sdf_scale_safe[0], sdf_scale_safe[1]), sdf_scale_safe[2])
 
                 contact_threshold = gap_sum + triangle_mesh_margin + sdf_mesh_margin
                 contact_threshold_unscaled = contact_threshold / min_sdf_scale

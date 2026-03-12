@@ -336,6 +336,7 @@ class SDF:
         texture_data = None
         coarse_texture = None
         subgrid_texture = None
+        tex_block_coords = None
         if wp.is_cuda_available():
             from .sdf_texture import QuantizationMode, create_texture_sdf_from_mesh  # noqa: PLC0415
 
