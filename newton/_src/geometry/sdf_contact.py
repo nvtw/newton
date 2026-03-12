@@ -724,7 +724,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                 num_tris = get_triangle_count(tri_type, mesh_id_tri, hfd_tri)
 
-                wp.tile_write_thread(progress, 0, 0, 0)
+                wp.tile_write_thread(progress, 0, 0, t == 0)
 
                 if wp.static(enable_heightfields):
                     sdf_is_heightfield = sdf_type == GeoType.HFIELD
@@ -787,14 +787,14 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         # Push into tile-stack and advance progress
                         idx = wp.tile_stack_push(stack_data, stack_count, tri_idx, add_triangle)
                         old_progress = wp.tile_extract(progress, 0)
-                        wp.tile_write_thread(progress, 0, old_progress + capacity, 0)
+                        wp.tile_write_thread(progress, 0, old_progress + capacity, t == 0)
 
                         # Rewind progress for overflowed triangles (replaces atomic_min)
                         overflowed = add_triangle and idx == -1
                         rewind_val = wp.where(overflowed, tri_idx, 2147483647)
                         min_rewind = wp.tile_extract(wp.tile_min(wp.tile(rewind_val)), 0)
                         if min_rewind < 2147483647:
-                            wp.tile_write_thread(progress, 0, min_rewind, 0)
+                            wp.tile_write_thread(progress, 0, min_rewind, t == 0)
                     # -- end: find interesting triangles --
 
                     my_tri_idx, has_triangle = wp.tile_stack_pop(stack_data, stack_count)
@@ -865,7 +865,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                             writer_func(contact_data, writer_data, -1)
 
-                    wp.tile_write_thread(stack_count, 0, 0, 0)
+                    wp.tile_write_thread(stack_count, 0, 0, t == 0)
 
     # Return early if contact reduction is disabled
     if not reduce_contacts:
@@ -1019,7 +1019,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 tri_start = block_in_pair * chunk_size
                 tri_end = wp.min(tri_start + chunk_size, num_tris)
 
-                wp.tile_write_thread(progress, 0, tri_start, 0)
+                wp.tile_write_thread(progress, 0, tri_start, t == 0)
 
                 if wp.static(enable_heightfields):
                     sdf_is_heightfield = sdf_type == GeoType.HFIELD
@@ -1079,13 +1079,13 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                         idx = wp.tile_stack_push(stack_data, stack_count, tri_idx, add_triangle)
                         old_progress = wp.tile_extract(progress, 0)
-                        wp.tile_write_thread(progress, 0, old_progress + capacity, 0)
+                        wp.tile_write_thread(progress, 0, old_progress + capacity, t == 0)
 
                         overflowed = add_triangle and idx == -1
                         rewind_val = wp.where(overflowed, tri_idx, 2147483647)
                         min_rewind = wp.tile_extract(wp.tile_min(wp.tile(rewind_val)), 0)
                         if min_rewind < 2147483647:
-                            wp.tile_write_thread(progress, 0, min_rewind, 0)
+                            wp.tile_write_thread(progress, 0, min_rewind, t == 0)
                     # -- end: find interesting triangles --
 
                     my_tri_idx, has_triangle = wp.tile_stack_pop(stack_data, stack_count)
@@ -1156,6 +1156,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 reducer_data,
                             )
 
-                    wp.tile_write_thread(stack_count, 0, 0, 0)
+                    wp.tile_write_thread(stack_count, 0, 0, t == 0)
 
     return mesh_sdf_collision_global_reduce_kernel
