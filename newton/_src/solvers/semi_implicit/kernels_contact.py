@@ -470,8 +470,9 @@ def eval_body_contact(
         contact_mu = rigid_contact_friction_scale[tid]
         mu = mu * contact_mu if contact_mu > 0.0 else mu
 
-    # contact normal in world space (A-to-B)
-    n = contact_normal[tid]
+    # contact normal stored as A-to-B; this spring-damper kernel uses B-to-A
+    # internally so that the existing force-application signs are preserved.
+    n = -contact_normal[tid]
     bx_a = contact_point0[tid]
     bx_b = contact_point1[tid]
     r_a = wp.vec3(0.0)
@@ -479,16 +480,16 @@ def eval_body_contact(
     if body_a >= 0:
         X_wb_a = body_q[body_a]
         X_com_a = body_com[body_a]
-        bx_a = wp.transform_point(X_wb_a, bx_a) + margin_a * n
+        bx_a = wp.transform_point(X_wb_a, bx_a) - margin_a * n
         r_a = bx_a - wp.transform_point(X_wb_a, X_com_a)
 
     if body_b >= 0:
         X_wb_b = body_q[body_b]
         X_com_b = body_com[body_b]
-        bx_b = wp.transform_point(X_wb_b, bx_b) - margin_b * n
+        bx_b = wp.transform_point(X_wb_b, bx_b) + margin_b * n
         r_b = bx_b - wp.transform_point(X_wb_b, X_com_b)
 
-    d = wp.dot(n, bx_b - bx_a)
+    d = wp.dot(n, bx_a - bx_b)
 
     if d >= ka:
         return
