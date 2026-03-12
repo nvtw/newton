@@ -12,6 +12,8 @@
 
 ### Changed
 
+- Standardize `rigid_contact_normal` to point from shape 0 toward shape 1 (A-to-B), matching the documented convention. Consumers that previously negated the normal on read (XPBD, VBD, MuJoCo, Kamino) no longer need to.
+
 ### Deprecated
 
 ### Removed
