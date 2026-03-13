@@ -340,25 +340,26 @@ class SDF:
         if wp.is_cuda_available():
             from .sdf_texture import QuantizationMode, create_texture_sdf_from_mesh  # noqa: PLC0415
 
-            verts = mesh.vertices * np.array(effective_scale)[None, :]
-            pos = wp.array(verts, dtype=wp.vec3)
-            indices = wp.array(mesh.indices, dtype=wp.int32)
-            tex_mesh = wp.Mesh(points=pos, indices=indices, support_winding_number=True)
+            with wp.ScopedDevice(device):
+                verts = mesh.vertices * np.array(effective_scale)[None, :]
+                pos = wp.array(verts, dtype=wp.vec3)
+                indices = wp.array(mesh.indices, dtype=wp.int32)
+                tex_mesh = wp.Mesh(points=pos, indices=indices, support_winding_number=True)
 
-            signed_volume = compute_mesh_signed_volume(pos, indices)
-            winding_threshold = 0.5 if signed_volume >= 0.0 else -0.5
+                signed_volume = compute_mesh_signed_volume(pos, indices)
+                winding_threshold = 0.5 if signed_volume >= 0.0 else -0.5
 
-            res = effective_max_resolution if effective_max_resolution is not None else 64
-            texture_data, coarse_texture, subgrid_texture, tex_block_coords = create_texture_sdf_from_mesh(
-                tex_mesh,
-                margin=margin,
-                narrow_band_range=narrow_band_range,
-                max_resolution=res,
-                quantization_mode=QuantizationMode.FLOAT32,
-                winding_threshold=winding_threshold,
-                scale_baked=bake_scale,
-            )
-            wp.synchronize()
+                res = effective_max_resolution if effective_max_resolution is not None else 64
+                texture_data, coarse_texture, subgrid_texture, tex_block_coords = create_texture_sdf_from_mesh(
+                    tex_mesh,
+                    margin=margin,
+                    narrow_band_range=narrow_band_range,
+                    max_resolution=res,
+                    quantization_mode=QuantizationMode.FLOAT32,
+                    winding_threshold=winding_threshold,
+                    scale_baked=bake_scale,
+                )
+                wp.synchronize()
 
         sdf = SDF(
             data=sdf_data,
