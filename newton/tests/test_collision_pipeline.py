@@ -704,7 +704,10 @@ def test_rigid_contact_normal_sphere_sphere(test, device, broad_phase: str):
                     f"(dot={dot:.4f}, normal={normal}, expected_dir={expected_dir})",
                 )
 
-                midpoint = (point0s[i] + point1s[i]) / 2.0
+                # point0/point1 are in body-local frames; transform to world
+                p0_world = point0s[i] + center_a
+                p1_world = point1s[i] + center_b
+                midpoint = (p0_world + p1_world) / 2.0
                 lo = min(center_a[0], center_b[0])
                 hi = max(center_a[0], center_b[0])
                 test.assertTrue(
