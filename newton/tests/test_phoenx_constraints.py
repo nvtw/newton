@@ -814,6 +814,70 @@ def test_schema_union_offsets(test, device):
                          msg=f"Drive field '{name}' mismatch: revolute={r_off}, prismatic={p_off}")
 
 
+def test_access_mode_roundtrip(test, device):
+    """vel→pos→vel and pos→vel→pos roundtrips recover original state."""
+    from newton._src.solvers.phoenx.constraints import sync_pos_to_vel, sync_vel_to_pos
+
+    dt = 1.0 / 240.0
+    inv_dt = 1.0 / dt
+
+    # Reference state: body at some position with a non-trivial orientation
+    ref_pos = wp.vec3(1.0, 2.0, 3.0)
+    ref_orient = wp.normalize(wp.quat(0.1, 0.2, 0.3, 0.9))
+
+    # --- vel → pos → vel roundtrip ---
+    vel_in = wp.vec3(0.5, -1.0, 2.0)
+    angvel_in = wp.vec3(0.3, -0.4, 0.1)
+
+    @wp.kernel
+    def _vel_pos_vel_kernel(
+        result_vel: wp.array(dtype=wp.vec3),
+        result_angvel: wp.array(dtype=wp.vec3),
+    ):
+        pos, orient = sync_vel_to_pos(ref_pos, ref_orient, vel_in, angvel_in, dt)
+        vel_out, angvel_out = sync_pos_to_vel(ref_pos, ref_orient, pos, orient, inv_dt)
+        result_vel[0] = vel_out
+        result_angvel[0] = angvel_out
+
+    rv = wp.zeros(1, dtype=wp.vec3, device=device)
+    ra = wp.zeros(1, dtype=wp.vec3, device=device)
+    wp.launch(_vel_pos_vel_kernel, dim=1, inputs=[], outputs=[rv, ra], device=device)
+
+    vel_out = rv.numpy()[0]
+    angvel_out = ra.numpy()[0]
+    np.testing.assert_allclose(vel_out, [0.5, -1.0, 2.0], atol=1e-4,
+                               err_msg="vel→pos→vel linear velocity mismatch")
+    np.testing.assert_allclose(angvel_out, [0.3, -0.4, 0.1], atol=1e-3,
+                               err_msg="vel→pos→vel angular velocity mismatch")
+
+    # --- pos → vel → pos roundtrip ---
+    cur_pos_in = wp.vec3(1.01, 2.02, 2.98)
+    cur_orient_in = wp.normalize(wp.quat(0.11, 0.19, 0.31, 0.89))
+
+    @wp.kernel
+    def _pos_vel_pos_kernel(
+        result_pos: wp.array(dtype=wp.vec3),
+        result_orient: wp.array(dtype=wp.vec4),
+    ):
+        vel, angvel = sync_pos_to_vel(ref_pos, ref_orient, cur_pos_in, cur_orient_in, inv_dt)
+        pos_out, orient_out = sync_vel_to_pos(ref_pos, ref_orient, vel, angvel, dt)
+        result_pos[0] = pos_out
+        result_orient[0] = wp.vec4(orient_out[0], orient_out[1], orient_out[2], orient_out[3])
+
+    rp = wp.zeros(1, dtype=wp.vec3, device=device)
+    ro = wp.zeros(1, dtype=wp.vec4, device=device)
+    wp.launch(_pos_vel_pos_kernel, dim=1, inputs=[], outputs=[rp, ro], device=device)
+
+    pos_out = rp.numpy()[0]
+    orient_out = ro.numpy()[0]
+    np.testing.assert_allclose(pos_out, [1.01, 2.02, 2.98], atol=1e-4,
+                               err_msg="pos→vel→pos position mismatch")
+    cur_orient_np = np.array([0.11, 0.19, 0.31, 0.89])
+    cur_orient_np /= np.linalg.norm(cur_orient_np)
+    np.testing.assert_allclose(orient_out, cur_orient_np, atol=1e-3,
+                               err_msg="pos→vel→pos orientation mismatch")
+
+
 # ---------------------------------------------------------------------------
 # Register tests
 # ---------------------------------------------------------------------------
@@ -842,6 +906,7 @@ add_function_test(TestPhoenXConstraints, "test_prismatic_position_drive", test_p
 add_function_test(TestPhoenXConstraints, "test_prismatic_velocity_drive", test_prismatic_velocity_drive, devices=devices)
 add_function_test(TestPhoenXConstraints, "test_fixed_joint_no_rotation", test_fixed_joint_no_rotation, devices=devices)
 add_function_test(TestPhoenXConstraints, "test_schema_union_offsets", test_schema_union_offsets, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_access_mode_roundtrip", test_access_mode_roundtrip, devices=devices)
 
 if __name__ == "__main__":
     wp.clear_kernel_cache()

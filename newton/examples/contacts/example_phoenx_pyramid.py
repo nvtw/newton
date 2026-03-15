@@ -38,7 +38,7 @@ from newton._src.solvers.phoenx.kernels import build_contact_lines_kernel
 from newton._src.solvers.phoenx.solver_phoenx import SolverState
 
 CUBE_HALF = 0.5
-NUM_LAYERS = 5
+NUM_LAYERS = 15
 PGS_ITERATIONS = 12
 SIM_SUBSTEPS = 8
 FPS = 60

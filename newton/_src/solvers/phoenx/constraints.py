@@ -60,6 +60,10 @@ DRIVE_OFF = 0
 DRIVE_POSITION = 1
 DRIVE_VELOCITY = 2
 
+# Constraint access mode (matches C# ConstraintAccessMode)
+ACCESS_MODE_VELOCITY_LEVEL = 0
+ACCESS_MODE_POSITION_LEVEL = 1
+
 # ---------------------------------------------------------------------------
 # Per-type joint schemas (union-style: overlapping storage)
 #
@@ -410,6 +414,85 @@ def quat_twist_angle(q: wp.quat, axis: wp.vec3) -> float:
     if proj * q[3] < 0.0:
         angle = -angle
     return angle
+
+
+# ---------------------------------------------------------------------------
+# Constraint access mode: velocity ↔ position state conversion
+#
+# Ported from C# TinyRigidState.SynchronizeVelAndPosStateUpdates.
+# When switching a body between velocity-level and position-level
+# solving, these functions convert the accumulated delta from one
+# representation to the other.
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def sync_pos_to_vel(
+    ref_pos: wp.vec3,
+    ref_orient: wp.quat,
+    cur_pos: wp.vec3,
+    cur_orient: wp.quat,
+    inv_dt: float,
+):
+    """Convert a position-level state delta back to velocity.
+
+    Given a reference (start-of-step) position/orientation and the
+    current (modified by position-level constraints) position/orientation,
+    compute the equivalent linear and angular velocity.
+
+    Matches C# Algorithm 2 from "Detailed Rigid Body Simulation with
+    Extended Position Based Dynamics".
+
+    Returns:
+        vel: linear velocity [m/s].
+        angvel: angular velocity [rad/s].
+    """
+    vel = (cur_pos - ref_pos) * inv_dt
+
+    delta_q = cur_orient * wp.quat_inverse(ref_orient)
+    qv = wp.vec3(delta_q[0], delta_q[1], delta_q[2])
+    angvel = 2.0 * inv_dt * qv
+    if delta_q[3] < 0.0:
+        angvel = -angvel
+
+    return vel, angvel
+
+
+@wp.func
+def sync_vel_to_pos(
+    ref_pos: wp.vec3,
+    ref_orient: wp.quat,
+    vel: wp.vec3,
+    angvel: wp.vec3,
+    dt: float,
+):
+    """Convert velocity-level state to a position-level state.
+
+    Integrates the given velocity forward by *dt* from the reference
+    state to produce a new position and orientation.
+
+    Returns:
+        new_pos: integrated position [m].
+        new_orient: integrated orientation (unit quaternion).
+    """
+    new_pos = ref_pos + vel * dt
+
+    # Quaternion integration: q' = q + 0.5 * dt * [wx, wy, wz, 0] * q
+    half_dt = 0.5 * dt
+    dq = wp.quat(
+        half_dt * (angvel[0] * ref_orient[3] + angvel[1] * ref_orient[2] - angvel[2] * ref_orient[1]),
+        half_dt * (-angvel[0] * ref_orient[2] + angvel[1] * ref_orient[3] + angvel[2] * ref_orient[0]),
+        half_dt * (angvel[0] * ref_orient[1] - angvel[1] * ref_orient[0] + angvel[2] * ref_orient[3]),
+        half_dt * (-angvel[0] * ref_orient[0] - angvel[1] * ref_orient[1] - angvel[2] * ref_orient[2]),
+    )
+    new_orient = wp.normalize(wp.quat(
+        ref_orient[0] + dq[0],
+        ref_orient[1] + dq[1],
+        ref_orient[2] + dq[2],
+        ref_orient[3] + dq[3],
+    ))
+
+    return new_pos, new_orient
 
 
 # ---------------------------------------------------------------------------
