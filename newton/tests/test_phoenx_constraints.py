@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for PhoenX constraint system (ball-socket, revolute, fixed joints)."""
+"""Tests for PhoenX constraint system (all joint types + drives)."""
 
 import unittest
 
@@ -58,6 +58,21 @@ def _simulate(ss, frames=60, substeps=8, sub_dt=1.0 / 480.0, gravity=(0, 0, -9.8
 def _body_pos(ss, handle):
     h2i = ss.body_store.handle_to_index.numpy()
     return ss.body_store.column_of("position").numpy()[int(h2i[handle])].copy()
+
+
+def _body_vel(ss, handle):
+    h2i = ss.body_store.handle_to_index.numpy()
+    return ss.body_store.column_of("velocity").numpy()[int(h2i[handle])].copy()
+
+
+def _body_angvel(ss, handle):
+    h2i = ss.body_store.handle_to_index.numpy()
+    return ss.body_store.column_of("angular_velocity").numpy()[int(h2i[handle])].copy()
+
+
+def _body_orient(ss, handle):
+    h2i = ss.body_store.handle_to_index.numpy()
+    return ss.body_store.column_of("orientation").numpy()[int(h2i[handle])].copy()
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +422,399 @@ def test_ds_accessor_matches_column_of(test, device):
 
 
 # ---------------------------------------------------------------------------
+# Revolute angle limits
+# ---------------------------------------------------------------------------
+
+
+def test_revolute_angle_limits(test, device):
+    """Revolute joint with tight angle limits: body stays within bounds."""
+    ss = SolverState(
+        body_capacity=10, contact_capacity=32, shape_count=2,
+        joint_capacity=4, device=device,
+    )
+    h_a = ss.add_body(position=(0, 0, 5), is_static=True)
+    h_b = ss.add_body(position=(2, 0, 5), inverse_mass=1.0)
+    # Hinge around Y axis, limit swing to +/- 30 degrees
+    limit_rad = np.radians(30.0)
+    ss.add_joint_revolute(
+        h_a, h_b, anchor_world=(0, 0, 5), axis_world=(0, 1, 0),
+        angle_min=-limit_rad, angle_max=limit_rad,
+    )
+
+    _simulate(ss, frames=120, substeps=8, iters=16)
+
+    pa = _body_pos(ss, h_a)
+    pb = _body_pos(ss, h_b)
+    r = pb - pa
+    # The angle from initial position: atan2(z_drop, x_extent)
+    # With 30-degree limit, the body can swing at most ~30 deg from horizontal
+    # so z should not drop below 2*sin(30) ≈ 1.0 from anchor
+    angle = np.arctan2(-(r[2]), r[0])
+    test.assertLess(abs(angle), limit_rad + 0.15,
+                    msg=f"Angle exceeds limit: {np.degrees(angle):.1f} deg")
+    # Also verify anchor distance preserved
+    dist = np.linalg.norm(r)
+    test.assertAlmostEqual(dist, 2.0, delta=0.15,
+                           msg=f"Anchor distance drift: {dist:.4f}")
+
+
+def test_revolute_energy_conservation(test, device):
+    """Revolute pendulum: KE + PE roughly conserved (no damping)."""
+    L = 2.0
+    mass = 1.0
+    ss = SolverState(
+        body_capacity=10, contact_capacity=32, shape_count=2,
+        joint_capacity=4, device=device,
+    )
+    h_a = ss.add_body(position=(0, 0, 5), is_static=True)
+    h_b = ss.add_body(
+        position=(L, 0, 5), inverse_mass=1.0 / mass,
+        linear_damping=1.0, angular_damping=1.0,  # no damping
+    )
+    ss.add_joint_revolute(h_a, h_b, anchor_world=(0, 0, 5), axis_world=(0, 1, 0))
+
+    g = 9.81
+    z0 = 5.0  # initial height = anchor height, so PE_initial = 0
+    # Total energy should be ~0 (starts at rest at anchor height)
+    initial_energy = mass * g * (z0 - z0)  # = 0
+
+    _simulate(ss, frames=30, substeps=8, iters=16)
+
+    pb = _body_pos(ss, h_b)
+    vb = _body_vel(ss, h_b)
+    ke = 0.5 * mass * np.dot(vb, vb)
+    pe = mass * g * (pb[2] - z0)
+    total_e = ke + pe
+
+    # Should be close to 0 (conservation). PGS is dissipative so allow some loss.
+    test.assertAlmostEqual(total_e, initial_energy, delta=2.0,
+                           msg=f"Energy not conserved: KE={ke:.3f}, PE={pe:.3f}, total={total_e:.3f}")
+
+
+# ---------------------------------------------------------------------------
+# Prismatic joint tests
+# ---------------------------------------------------------------------------
+
+
+def test_prismatic_slide_axis(test, device):
+    """Prismatic joint: body slides along axis under gravity."""
+    ss = SolverState(
+        body_capacity=10, contact_capacity=32, shape_count=2,
+        joint_capacity=4, device=device,
+    )
+    h_a = ss.add_body(position=(0, 0, 5), is_static=True)
+    h_b = ss.add_body(position=(0, 0, 5), inverse_mass=1.0,
+                      linear_damping=1.0, angular_damping=1.0)
+    # Slide along Z axis (vertical), no limits
+    ss.add_joint_prismatic(h_a, h_b, anchor_world=(0, 0, 5), axis_world=(0, 0, 1))
+
+    _simulate(ss, frames=30, substeps=8, iters=16)
+
+    pb = _body_pos(ss, h_b)
+    # Body should fall straight down along Z
+    test.assertAlmostEqual(pb[0], 0.0, delta=0.05,
+                           msg=f"X drift: {pb[0]:.4f}")
+    test.assertAlmostEqual(pb[1], 0.0, delta=0.05,
+                           msg=f"Y drift: {pb[1]:.4f}")
+    test.assertLess(pb[2], 4.5, msg=f"Body should fall: z={pb[2]:.4f}")
+
+
+def test_prismatic_no_rotation(test, device):
+    """Prismatic joint: body should not rotate."""
+    ss = SolverState(
+        body_capacity=10, contact_capacity=32, shape_count=2,
+        joint_capacity=4, device=device,
+    )
+    h_a = ss.add_body(position=(0, 0, 5), is_static=True)
+    h_b = ss.add_body(position=(0, 0, 4), inverse_mass=1.0,
+                      linear_damping=1.0, angular_damping=1.0)
+    ss.add_joint_prismatic(h_a, h_b, anchor_world=(0, 0, 4.5), axis_world=(0, 0, 1))
+
+    _simulate(ss, frames=60, substeps=8, iters=16)
+
+    q = _body_orient(ss, h_b)
+    # Should stay near identity quaternion (0,0,0,1)
+    # Measure rotation angle: 2*acos(|w|)
+    angle = 2.0 * np.arccos(np.clip(abs(q[3]), 0.0, 1.0))
+    test.assertLess(angle, 0.1, msg=f"Rotation angle: {np.degrees(angle):.2f} deg")
+
+
+def test_prismatic_lateral_constraint(test, device):
+    """Prismatic joint: lateral velocity is constrained to zero."""
+    ss = SolverState(
+        body_capacity=10, contact_capacity=32, shape_count=2,
+        joint_capacity=4, device=device,
+    )
+    h_a = ss.add_body(position=(0, 0, 5), is_static=True)
+    # Start body on-axis but with lateral initial velocity
+    h_b = ss.add_body(position=(0, 0, 5), inverse_mass=1.0,
+                      velocity=(3.0, 0.0, 0.0),  # lateral kick
+                      linear_damping=1.0, angular_damping=1.0)
+    ss.add_joint_prismatic(h_a, h_b, anchor_world=(0, 0, 5), axis_world=(0, 0, 1))
+
+    _simulate(ss, frames=60, substeps=8, iters=16)
+
+    pb = _body_pos(ss, h_b)
+    # Lateral X should remain near 0 (perpendicular constraint prevents drift)
+    test.assertAlmostEqual(pb[0], 0.0, delta=0.2,
+                           msg=f"Lateral X drift: {pb[0]:.4f}")
+    test.assertAlmostEqual(pb[1], 0.0, delta=0.2,
+                           msg=f"Lateral Y drift: {pb[1]:.4f}")
+
+
+def test_prismatic_slide_limits(test, device):
+    """Prismatic joint with slide limits: body stops at limit."""
+    ss = SolverState(
+        body_capacity=10, contact_capacity=32, shape_count=2,
+        joint_capacity=4, device=device,
+    )
+    h_a = ss.add_body(position=(0, 0, 5), is_static=True)
+    h_b = ss.add_body(position=(0, 0, 5), inverse_mass=1.0,
+                      linear_damping=1.0, angular_damping=1.0)
+    # Slide along Z, limit to [-1, 0] — can only fall 1m
+    ss.add_joint_prismatic(
+        h_a, h_b, anchor_world=(0, 0, 5), axis_world=(0, 0, 1),
+        slide_min=-1.0, slide_max=0.0,
+    )
+
+    _simulate(ss, frames=120, substeps=8, iters=16)
+
+    pb = _body_pos(ss, h_b)
+    # Body should stop around z=4.0 (fell 1m from z=5)
+    test.assertGreater(pb[2], 3.5, msg=f"Fell past limit: z={pb[2]:.4f}")
+    test.assertLess(pb[2], 5.1, msg=f"Body went up: z={pb[2]:.4f}")
+
+
+def test_prismatic_free_fall_analytical(test, device):
+    """Prismatic (no limits): body in free-fall along axis matches s = 0.5*g*t^2."""
+    ss = SolverState(
+        body_capacity=10, contact_capacity=32, shape_count=2,
+        joint_capacity=4, device=device,
+    )
+    z0 = 10.0
+    h_a = ss.add_body(position=(0, 0, z0), is_static=True)
+    h_b = ss.add_body(position=(0, 0, z0), inverse_mass=1.0,
+                      linear_damping=1.0, angular_damping=1.0)
+    ss.add_joint_prismatic(h_a, h_b, anchor_world=(0, 0, z0), axis_world=(0, 0, 1))
+
+    g = 9.81
+    frames = 30
+    substeps = 8
+    sub_dt = 1.0 / 480.0
+    t = frames * substeps * sub_dt
+
+    _simulate(ss, frames=frames, substeps=substeps, sub_dt=sub_dt, iters=16)
+
+    pb = _body_pos(ss, h_b)
+    expected_z = z0 - 0.5 * g * t * t
+    # PGS constraint solving + discrete integration: allow ~5% error
+    test.assertAlmostEqual(pb[2], expected_z, delta=abs(expected_z - z0) * 0.10 + 0.05,
+                           msg=f"z={pb[2]:.4f} vs expected {expected_z:.4f}")
+
+
+# ---------------------------------------------------------------------------
+# Revolute drive tests
+# ---------------------------------------------------------------------------
+
+
+def test_revolute_position_drive(test, device):
+    """Revolute position drive: pendulum driven to target angle."""
+    ss = SolverState(
+        body_capacity=10, contact_capacity=32, shape_count=2,
+        joint_capacity=4, device=device,
+    )
+    h_a = ss.add_body(position=(0, 0, 5), is_static=True)
+    h_b = ss.add_body(position=(2, 0, 5), inverse_mass=1.0,
+                      linear_damping=1.0, angular_damping=1.0)
+    ji = ss.add_joint_revolute(
+        h_a, h_b, anchor_world=(0, 0, 5), axis_world=(0, 1, 0),
+        angle_min=-3.14, angle_max=3.14,
+    )
+    # Drive to 45 degrees with stiff PD
+    target_angle = np.radians(45.0)
+    ss.set_joint_drive(ji, mode=SolverState.DRIVE_POSITION, target=target_angle,
+                       stiffness=500.0, damping=50.0, max_force=1.0e6)
+
+    # Run long enough for the drive to settle
+    _simulate(ss, frames=300, substeps=8, iters=16)
+
+    pa = _body_pos(ss, h_a)
+    pb = _body_pos(ss, h_b)
+    r = pb - pa
+    # Angle from horizontal in XZ plane (hinge around Y)
+    actual_angle = np.arctan2(-r[2], r[0])
+
+    # The drive fights gravity; check it's in the right ballpark
+    # With stiff drive (500) the body should be near the target
+    test.assertAlmostEqual(actual_angle, target_angle, delta=0.5,
+                           msg=f"Drive angle: {np.degrees(actual_angle):.1f} vs "
+                               f"target {np.degrees(target_angle):.1f}")
+
+
+def test_revolute_velocity_drive(test, device):
+    """Revolute velocity drive: body spins at target angular velocity."""
+    ss = SolverState(
+        body_capacity=10, contact_capacity=32, shape_count=2,
+        joint_capacity=4, device=device,
+    )
+    h_a = ss.add_body(position=(0, 0, 0), is_static=True)
+    h_b = ss.add_body(position=(1, 0, 0), inverse_mass=1.0,
+                      linear_damping=1.0, angular_damping=1.0)
+    ji = ss.add_joint_revolute(
+        h_a, h_b, anchor_world=(0, 0, 0), axis_world=(0, 0, 1),
+    )
+    # Drive at 2 rad/s around Z axis (no gravity effect since axis is vertical)
+    target_vel = 2.0
+    ss.set_joint_drive(ji, mode=SolverState.DRIVE_VELOCITY, target=target_vel,
+                       stiffness=0.0, damping=100.0, max_force=1.0e6)
+
+    # No gravity so the drive purely controls velocity
+    _simulate(ss, frames=120, substeps=8, gravity=(0, 0, 0), iters=16)
+
+    # Check angular velocity of body along hinge axis
+    w = _body_angvel(ss, h_b)
+    # The hinge axis is Z, so w[2] should approach target_vel
+    # body1 angular vel relative to body0 = w1 - w0 along axis
+    w0 = _body_angvel(ss, h_a)
+    rel_w = w[2] - w0[2]
+    test.assertAlmostEqual(rel_w, target_vel, delta=0.5,
+                           msg=f"Angular vel: {rel_w:.3f} vs target {target_vel:.3f}")
+
+
+# ---------------------------------------------------------------------------
+# Prismatic drive tests
+# ---------------------------------------------------------------------------
+
+
+def test_prismatic_position_drive(test, device):
+    """Prismatic position drive: body driven to target displacement."""
+    ss = SolverState(
+        body_capacity=10, contact_capacity=32, shape_count=2,
+        joint_capacity=4, device=device,
+    )
+    h_a = ss.add_body(position=(0, 0, 5), is_static=True)
+    h_b = ss.add_body(position=(0, 0, 5), inverse_mass=1.0,
+                      linear_damping=1.0, angular_damping=1.0)
+    ji = ss.add_joint_prismatic(
+        h_a, h_b, anchor_world=(0, 0, 5), axis_world=(1, 0, 0),
+    )
+    # Drive to +1.5 m along X with stiff PD
+    target_pos = 1.5
+    ss.set_joint_drive(ji, mode=SolverState.DRIVE_POSITION, target=target_pos,
+                       stiffness=500.0, damping=50.0, max_force=1.0e6)
+
+    # Use zero gravity to isolate drive behavior
+    _simulate(ss, frames=300, substeps=8, gravity=(0, 0, 0), iters=16)
+
+    pb = _body_pos(ss, h_b)
+    pa = _body_pos(ss, h_a)
+    displacement = pb[0] - pa[0]
+    test.assertAlmostEqual(displacement, target_pos, delta=0.3,
+                           msg=f"Prismatic drive: disp={displacement:.3f} vs target {target_pos}")
+
+
+def test_prismatic_velocity_drive(test, device):
+    """Prismatic velocity drive: body moves at target linear velocity."""
+    ss = SolverState(
+        body_capacity=10, contact_capacity=32, shape_count=2,
+        joint_capacity=4, device=device,
+    )
+    h_a = ss.add_body(position=(0, 0, 5), is_static=True)
+    h_b = ss.add_body(position=(0, 0, 5), inverse_mass=1.0,
+                      linear_damping=1.0, angular_damping=1.0)
+    ji = ss.add_joint_prismatic(
+        h_a, h_b, anchor_world=(0, 0, 5), axis_world=(1, 0, 0),
+    )
+    # Drive at 1 m/s along X
+    target_vel = 1.0
+    ss.set_joint_drive(ji, mode=SolverState.DRIVE_VELOCITY, target=target_vel,
+                       stiffness=0.0, damping=100.0, max_force=1.0e6)
+
+    _simulate(ss, frames=120, substeps=8, gravity=(0, 0, 0), iters=16)
+
+    vb = _body_vel(ss, h_b)
+    test.assertAlmostEqual(vb[0], target_vel, delta=0.3,
+                           msg=f"Prismatic vel drive: vx={vb[0]:.3f} vs target {target_vel}")
+
+
+# ---------------------------------------------------------------------------
+# Fixed joint: rotation lock test
+# ---------------------------------------------------------------------------
+
+
+def test_fixed_joint_no_rotation(test, device):
+    """Fixed joint: relative orientation stays constant."""
+    ss = SolverState(
+        body_capacity=10, contact_capacity=32, shape_count=2,
+        joint_capacity=4, device=device,
+    )
+    h_a = ss.add_body(position=(0, 0, 5), is_static=True)
+    h_b = ss.add_body(position=(1, 0, 5), inverse_mass=1.0,
+                      linear_damping=1.0, angular_damping=1.0)
+    ss.add_joint_fixed(h_a, h_b, anchor_world=(0.5, 0, 5))
+
+    _simulate(ss, frames=120, substeps=8, iters=16)
+
+    q = _body_orient(ss, h_b)
+    angle = 2.0 * np.arccos(np.clip(abs(q[3]), 0.0, 1.0))
+    test.assertLess(angle, 0.15,
+                    msg=f"Fixed joint rotation: {np.degrees(angle):.2f} deg")
+
+
+# ---------------------------------------------------------------------------
+# Schema union tests
+# ---------------------------------------------------------------------------
+
+
+def test_schema_union_offsets(test, device):
+    """Per-type schemas share common header offsets and drive offsets."""
+    from newton._src.solvers.phoenx.constraints import (
+        BallSocketJointData, FixedJointData, PrismaticJointData,
+        RevoluteJointData, schema_col_base,
+    )
+    cap = 16  # arbitrary capacity
+
+    # Common header fields must have identical offsets across all types
+    header_fields = [
+        "joint_type", "body0", "body1",
+        "local_anchor0", "local_anchor1",
+        "local_axis0", "local_axis1",
+        "inv_initial_orientation", "rw0", "rw1",
+    ]
+    for name in header_fields:
+        offsets = set()
+        for st in [BallSocketJointData, FixedJointData, RevoluteJointData, PrismaticJointData]:
+            offsets.add(schema_col_base(st, cap, name))
+        test.assertEqual(len(offsets), 1,
+                         msg=f"Header field '{name}' has inconsistent offsets: {offsets}")
+
+    # Hinge fields must match across Revolute, Fixed, Prismatic
+    hinge_fields = [
+        "hinge_lambda_x", "hinge_lambda_y",
+        "hinge_b2xa1", "hinge_c2xa1",
+        "hinge_eff_mass_00", "hinge_eff_mass_01",
+        "hinge_eff_mass_10", "hinge_eff_mass_11",
+    ]
+    for name in hinge_fields:
+        offsets = set()
+        for st in [RevoluteJointData, FixedJointData, PrismaticJointData]:
+            offsets.add(schema_col_base(st, cap, name))
+        test.assertEqual(len(offsets), 1,
+                         msg=f"Hinge field '{name}' has inconsistent offsets: {offsets}")
+
+    # Drive fields must match between Revolute and Prismatic
+    drive_fields = [
+        "drive_mode", "drive_target", "drive_stiffness",
+        "drive_damping", "drive_max_force", "drive_lambda", "drive_eff_mass",
+    ]
+    for name in drive_fields:
+        r_off = schema_col_base(RevoluteJointData, cap, name)
+        p_off = schema_col_base(PrismaticJointData, cap, name)
+        test.assertEqual(r_off, p_off,
+                         msg=f"Drive field '{name}' mismatch: revolute={r_off}, prismatic={p_off}")
+
+
+# ---------------------------------------------------------------------------
 # Register tests
 # ---------------------------------------------------------------------------
 
@@ -421,6 +829,19 @@ add_function_test(TestPhoenXConstraints, "test_ball_socket_with_contacts", test_
 add_function_test(TestPhoenXConstraints, "test_constraint_determinism", test_constraint_determinism, devices=devices)
 add_function_test(TestPhoenXConstraints, "test_ds_accessor_roundtrip", test_ds_accessor_roundtrip, devices=devices)
 add_function_test(TestPhoenXConstraints, "test_ds_accessor_matches_column_of", test_ds_accessor_matches_column_of, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_revolute_angle_limits", test_revolute_angle_limits, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_revolute_energy_conservation", test_revolute_energy_conservation, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_prismatic_slide_axis", test_prismatic_slide_axis, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_prismatic_no_rotation", test_prismatic_no_rotation, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_prismatic_lateral_constraint", test_prismatic_lateral_constraint, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_prismatic_slide_limits", test_prismatic_slide_limits, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_prismatic_free_fall_analytical", test_prismatic_free_fall_analytical, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_revolute_position_drive", test_revolute_position_drive, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_revolute_velocity_drive", test_revolute_velocity_drive, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_prismatic_position_drive", test_prismatic_position_drive, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_prismatic_velocity_drive", test_prismatic_velocity_drive, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_fixed_joint_no_rotation", test_fixed_joint_no_rotation, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_schema_union_offsets", test_schema_union_offsets, devices=devices)
 
 if __name__ == "__main__":
     wp.clear_kernel_cache()

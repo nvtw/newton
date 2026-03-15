@@ -32,6 +32,7 @@ import warp as wp
 from .constraints import (
     JOINT_BALL_SOCKET,
     JOINT_FIXED,
+    JOINT_PRISMATIC,
     JOINT_REVOLUTE,
     ConstraintKernels,
     JointSchema,
@@ -262,6 +263,92 @@ class SolverState:
             Joint index, or -1 if at capacity.
         """
         return self._add_joint(JOINT_FIXED, body_handle0, body_handle1, anchor_world, axis_world=(0.0, 0.0, 1.0))
+
+    def add_joint_prismatic(
+        self,
+        body_handle0: int,
+        body_handle1: int,
+        anchor_world: tuple[float, float, float],
+        axis_world: tuple[float, float, float],
+        slide_min: float = -1.0e7,
+        slide_max: float = 1.0e7,
+    ) -> int:
+        """Add a prismatic (slider) joint between two bodies.
+
+        The joint constrains body 1 to slide along *axis_world* relative to
+        body 0, while preventing rotation and lateral translation.
+
+        Args:
+            body_handle0: handle returned by :meth:`add_body`.
+            body_handle1: handle returned by :meth:`add_body`.
+            anchor_world: world-space anchor point [m].
+            axis_world: world-space slide axis (will be normalized).
+            slide_min: lower slide limit [m].
+            slide_max: upper slide limit [m].
+
+        Returns:
+            Joint index, or -1 if at capacity.
+        """
+        ji = self._add_joint(JOINT_PRISMATIC, body_handle0, body_handle1, anchor_world, axis_world)
+        if ji >= 0:
+            js = self.joint_store
+            a_min = js.column_of("angle_min").numpy()
+            a_max_arr = js.column_of("angle_max").numpy()
+            a_min[ji] = slide_min
+            a_max_arr[ji] = slide_max
+            js.column_of("angle_min").assign(wp.array(a_min, dtype=wp.float32, device=self.device))
+            js.column_of("angle_max").assign(wp.array(a_max_arr, dtype=wp.float32, device=self.device))
+        return ji
+
+    # -- drive configuration ------------------------------------------------
+
+    DRIVE_OFF = 0
+    DRIVE_POSITION = 1
+    DRIVE_VELOCITY = 2
+
+    def set_joint_drive(
+        self,
+        joint_index: int,
+        mode: int,
+        target: float,
+        stiffness: float = 100.0,
+        damping: float = 10.0,
+        max_force: float = 1.0e6,
+    ):
+        """Configure a motor/drive on a joint.
+
+        For revolute joints the drive acts on the hinge angle. For prismatic
+        joints the drive acts on the slide displacement.
+
+        Position drive (``mode=DRIVE_POSITION``): implicit PD controller
+        targeting *target* angle/position with given stiffness and damping.
+
+        Velocity drive (``mode=DRIVE_VELOCITY``): targets *target* angular/
+        linear velocity with given damping (stiffness is ignored).
+
+        Args:
+            joint_index: index returned by :meth:`add_joint_revolute` etc.
+            mode: ``DRIVE_OFF`` (0), ``DRIVE_POSITION`` (1), or ``DRIVE_VELOCITY`` (2).
+            target: target angle [rad] or target velocity [rad/s].
+            stiffness: spring stiffness for position drive [N m/rad or N/m].
+            damping: damping coefficient [N m s/rad or N s/m].
+            max_force: maximum drive torque/force [N m or N].
+        """
+        if self.joint_store is None or joint_index < 0 or joint_index >= self._joint_count:
+            return
+        js = self.joint_store
+        d = self.device
+
+        def _write(name, val, dtype):
+            col = js.column_of(name).numpy()
+            col[joint_index] = val
+            js.column_of(name).assign(wp.array(col, dtype=dtype, device=d))
+
+        _write("drive_mode", mode, wp.int32)
+        _write("drive_target", target, wp.float32)
+        _write("drive_stiffness", stiffness, wp.float32)
+        _write("drive_damping", damping, wp.float32)
+        _write("drive_max_force", max_force, wp.float32)
 
     def _add_joint(
         self,
