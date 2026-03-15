@@ -80,8 +80,7 @@ class Schema:
             byte_size = wp.types.type_size_in_bytes(dtype)
             if byte_size % 4 != 0:
                 raise ValueError(
-                    f"Field '{name}' dtype {dtype} has size {byte_size} which "
-                    f"is not a multiple of 4 bytes"
+                    f"Field '{name}' dtype {dtype} has size {byte_size} which is not a multiple of 4 bytes"
                 )
             width = byte_size // 4
             self.fields[name] = FieldInfo(name, dtype, width, self.floats_per_row)

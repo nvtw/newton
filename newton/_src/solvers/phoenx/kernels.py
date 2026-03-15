@@ -27,6 +27,8 @@ from .schemas import BODY_FLAG_STATIC
 
 BAUMGARTE_FACTOR = wp.constant(0.03)
 MAX_BIAS = wp.constant(100.0)
+WARM_START_SCALE = wp.constant(0.90)
+MAX_VELOCITY = wp.constant(100.0)
 
 # ---------------------------------------------------------------------------
 # Contact import
@@ -300,7 +302,9 @@ def prepare_contacts_kernel(
     pos1 = b_position[b1]
 
     gap = wp.dot(n, (pos1 + rw1) - (pos0 + rw0))
-    c_bias[ci] = compute_contact_bias(-gap, inv_dt)
+    # C# does: bias = -ComputeContactBias(-gap, invDt)
+    # Negative bias for overlapping bodies so that delta_n = -(dv + bias)*eff > 0
+    c_bias[ci] = -compute_contact_bias(-gap, inv_dt)
 
     inv_m0 = b_inverse_mass[b0]
     inv_m1 = b_inverse_mass[b1]
@@ -319,10 +323,14 @@ def prepare_contacts_kernel(
     c_eff_t1[ci] = compute_effective_mass_split(inv_m0, inv_m1, inv_i0, inv_i1, rw0, rw1, t1, split0, split1)
     c_eff_t2[ci] = compute_effective_mass_split(inv_m0, inv_m1, inv_i0, inv_i1, rw0, rw1, t2, split0, split1)
 
-    # Warm start: apply accumulated impulses with FULL (unsplit) mass
-    acc_n = c_accumulated_n[ci]
-    acc_t1 = c_accumulated_t1[ci]
-    acc_t2 = c_accumulated_t2[ci]
+    # Warm start: apply accumulated impulses with FULL (unsplit) mass,
+    # scaled by ImpulseInheritanceFactor (0.90) matching C# PhoenX.
+    acc_n = c_accumulated_n[ci] * WARM_START_SCALE
+    acc_t1 = c_accumulated_t1[ci] * WARM_START_SCALE
+    acc_t2 = c_accumulated_t2[ci] * WARM_START_SCALE
+    c_accumulated_n[ci] = acc_n
+    c_accumulated_t1[ci] = acc_t1
+    c_accumulated_t2[ci] = acc_t2
     impulse = acc_n * n + acc_t1 * t1 + acc_t2 * t2
 
     is_static_0 = (b_flags[b0] & BODY_FLAG_STATIC) != 0 or inv_m0 == 0.0
@@ -495,23 +503,29 @@ def integrate_positions_kernel(
     orientation: wp.array(dtype=wp.quat),
     velocity: wp.array(dtype=wp.vec3),
     angular_velocity: wp.array(dtype=wp.vec3),
-    linear_damping: wp.array(dtype=wp.float32),
-    angular_damping: wp.array(dtype=wp.float32),
     flags: wp.array(dtype=wp.int32),
     dt: float,
     count: wp.array(dtype=wp.int32),
 ):
-    """Integrate positions and orientations using semi-implicit Euler."""
+    """Integrate positions and orientations using semi-implicit Euler.
+
+    Velocity magnitude is clamped to :data:`MAX_VELOCITY` (100 m/s)
+    matching the C# PhoenX ``LimitMagnitude`` safety guard.
+    """
     tid = wp.tid()
     if tid >= count[0]:
         return
     if (flags[tid] & BODY_FLAG_STATIC) != 0:
         return
 
-    v = velocity[tid] * linear_damping[tid]
-    w = angular_velocity[tid] * angular_damping[tid]
-    velocity[tid] = v
-    angular_velocity[tid] = w
+    v = velocity[tid]
+    w = angular_velocity[tid]
+
+    # Clamp linear velocity magnitude (C# LimitMagnitude)
+    speed = wp.length(v)
+    if speed > MAX_VELOCITY:
+        v = v * (MAX_VELOCITY / speed)
+        velocity[tid] = v
 
     position[tid] = position[tid] + v * dt
     orientation[tid] = _quat_integrate(orientation[tid], w, dt)
@@ -527,15 +541,29 @@ def update_world_inertia_kernel(
     orientation: wp.array(dtype=wp.quat),
     inv_inertia_local: wp.array(dtype=wp.mat33),
     inv_inertia_world: wp.array(dtype=wp.mat33),
+    velocity: wp.array(dtype=wp.vec3),
+    angular_velocity: wp.array(dtype=wp.vec3),
+    linear_damping: wp.array(dtype=wp.float32),
+    angular_damping: wp.array(dtype=wp.float32),
+    flags: wp.array(dtype=wp.int32),
     count: wp.array(dtype=wp.int32),
 ):
-    """Recompute world-frame inverse inertia from orientation and local inertia."""
+    """Recompute world-frame inverse inertia and apply per-frame damping.
+
+    Matches C# PhoenX ``UpdateInertiaKernel`` which applies velocity
+    damping once per frame (not per substep).
+    """
     tid = wp.tid()
     if tid >= count[0]:
         return
     q = orientation[tid]
     r = wp.quat_to_matrix(q)
     inv_inertia_world[tid] = r * inv_inertia_local[tid] * wp.transpose(r)
+
+    if (flags[tid] & BODY_FLAG_STATIC) != 0:
+        return
+    velocity[tid] = velocity[tid] * linear_damping[tid]
+    angular_velocity[tid] = angular_velocity[tid] * angular_damping[tid]
 
 
 # ---------------------------------------------------------------------------

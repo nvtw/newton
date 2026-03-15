@@ -23,7 +23,6 @@ import warp as wp
 from newton._src.solvers.phoenx.data_base import DataStore, HandleStore, Schema
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
-
 # ---------------------------------------------------------------------------
 # Test schema struct
 # ---------------------------------------------------------------------------
@@ -302,14 +301,20 @@ devices = get_test_devices()
 
 add_function_test(TestDataBase, "test_schema_offsets", test_schema_offsets, devices=devices)
 add_function_test(TestDataBase, "test_schema_quat", test_schema_quat, devices=devices)
-add_function_test(TestDataBase, "test_datastore_column_of_write_read", test_datastore_column_of_write_read, devices=devices)
+add_function_test(
+    TestDataBase, "test_datastore_column_of_write_read", test_datastore_column_of_write_read, devices=devices
+)
 add_function_test(TestDataBase, "test_datastore_clear", test_datastore_clear, devices=devices)
 add_function_test(TestDataBase, "test_datastore_quat_column", test_datastore_quat_column, devices=devices)
 add_function_test(TestDataBase, "test_handlestore_allocate", test_handlestore_allocate, devices=devices)
 add_function_test(TestDataBase, "test_handlestore_remove", test_handlestore_remove, devices=devices)
-add_function_test(TestDataBase, "test_handlestore_allocate_after_remove", test_handlestore_allocate_after_remove, devices=devices)
+add_function_test(
+    TestDataBase, "test_handlestore_allocate_after_remove", test_handlestore_allocate_after_remove, devices=devices
+)
 add_function_test(TestDataBase, "test_handlestore_compact_basic", test_handlestore_compact_basic, devices=devices)
-add_function_test(TestDataBase, "test_handlestore_compact_data_integrity", test_handlestore_compact_data_integrity, devices=devices)
+add_function_test(
+    TestDataBase, "test_handlestore_compact_data_integrity", test_handlestore_compact_data_integrity, devices=devices
+)
 add_function_test(TestDataBase, "test_handlestore_full", test_handlestore_full, devices=devices)
 
 

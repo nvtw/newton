@@ -22,7 +22,6 @@ These types define the per-row column layouts consumed by
 
 import warp as wp
 
-
 BODY_FLAG_STATIC = 1
 
 

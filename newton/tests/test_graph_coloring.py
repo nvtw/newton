@@ -53,9 +53,7 @@ def _validate_independence(test, gc, elements_np, n_elements):
             for b in row:
                 if b < 0:
                     break
-                test.assertNotIn(
-                    b, bodies_seen, f"Partition {p}: body {b} duplicated (element {elem_id})"
-                )
+                test.assertNotIn(b, bodies_seen, f"Partition {p}: body {b} duplicated (element {elem_id})")
                 bodies_seen.add(b)
 
 

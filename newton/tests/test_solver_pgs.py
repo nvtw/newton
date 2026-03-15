@@ -73,9 +73,7 @@ class TestSolverPGS(unittest.TestCase):
 
 def test_ball_on_ground(test, device):
     """Dynamic sphere on a static ground plane should settle without penetrating."""
-    ss = SolverState(
-        body_capacity=8, contact_capacity=32, shape_count=4, device=device
-    )
+    ss = SolverState(body_capacity=8, contact_capacity=32, shape_count=4, device=device)
     h_ground = ss.add_body(position=(0.0, 0.0, 0.0), is_static=True)
     h_ball = ss.add_body(
         position=(0.0, 0.05, 0.0),
@@ -139,9 +137,7 @@ def test_ball_on_ground(test, device):
 
 def test_friction_holds(test, device):
     """A body with lateral velocity on a frictional surface should decelerate."""
-    ss = SolverState(
-        body_capacity=8, contact_capacity=32, shape_count=4, device=device
-    )
+    ss = SolverState(body_capacity=8, contact_capacity=32, shape_count=4, device=device)
     h_ground = ss.add_body(position=(0.0, 0.0, 0.0), is_static=True)
     h_box = ss.add_body(
         position=(0.0, 0.01, 0.0),
@@ -192,7 +188,8 @@ def test_friction_holds(test, device):
 
     vel = ss.body_store.column_of("velocity").numpy()[row_box]
     test.assertLess(
-        abs(vel[0]), 1.0,
+        abs(vel[0]),
+        1.0,
         f"Friction should have reduced lateral velocity; vx={vel[0]:.4f}",
     )
 
@@ -205,9 +202,7 @@ def test_friction_holds(test, device):
 
 def _run_ball_drop(device, num_iterations, use_warm_start):
     """Helper: drops a ball for 30 frames and returns final y-velocity magnitude."""
-    ss = SolverState(
-        body_capacity=8, contact_capacity=32, shape_count=4, device=device
-    )
+    ss = SolverState(body_capacity=8, contact_capacity=32, shape_count=4, device=device)
     h_ground = ss.add_body(position=(0.0, 0.0, 0.0), is_static=True)
     h_ball = ss.add_body(
         position=(0.0, 0.1, 0.0),
@@ -296,17 +291,13 @@ def test_warm_start_convergence(test, device):
 
 def test_partitioning_valid(test, device):
     """Graph coloring produces valid partitions where no two contacts share a body."""
-    ss = SolverState(
-        body_capacity=16, contact_capacity=64, shape_count=8, device=device
-    )
+    ss = SolverState(body_capacity=16, contact_capacity=64, shape_count=8, device=device)
     bodies = []
     for i in range(6):
         bodies.append(ss.add_body(position=(float(i), 1.0, 0.0)))
 
     num_contacts = 5
-    ss.contact_store.count.assign(
-        wp.array([num_contacts], dtype=wp.int32, device=device)
-    )
+    ss.contact_store.count.assign(wp.array([num_contacts], dtype=wp.int32, device=device))
 
     contact_pairs = [
         (0, 1),
@@ -353,11 +344,13 @@ def test_partitioning_valid(test, device):
             b0 = int(body0_np[ci])
             b1 = int(body1_np[ci])
             test.assertNotIn(
-                b0, bodies_in_partition,
+                b0,
+                bodies_in_partition,
                 f"Partition {p} has duplicate body {b0}",
             )
             test.assertNotIn(
-                b1, bodies_in_partition,
+                b1,
+                bodies_in_partition,
                 f"Partition {p} has duplicate body {b1}",
             )
             bodies_in_partition.add(b0)

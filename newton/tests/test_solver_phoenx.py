@@ -96,9 +96,7 @@ def _make_synthetic_contacts(device, n, shape_pairs):
     c.rigid_contact_count = wp.array([n], dtype=wp.int32, device=device)
     c.rigid_contact_shape0 = wp.array(s0, dtype=wp.int32, device=device)
     c.rigid_contact_shape1 = wp.array(s1, dtype=wp.int32, device=device)
-    c.rigid_contact_normal = wp.array(
-        [[0.0, 1.0, 0.0]] * n, dtype=wp.vec3, device=device
-    )
+    c.rigid_contact_normal = wp.array([[0.0, 1.0, 0.0]] * n, dtype=wp.vec3, device=device)
     c.rigid_contact_offset0 = wp.zeros(n, dtype=wp.vec3, device=device)
     c.rigid_contact_offset1 = wp.zeros(n, dtype=wp.vec3, device=device)
     c.rigid_contact_margin0 = wp.array([0.01] * n, dtype=wp.float32, device=device)

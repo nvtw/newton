@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
 import warp as wp
 
 from newton._src.geometry.flags import ShapeFlags
@@ -34,6 +33,9 @@ from newton.geometry import BroadPhaseAllPairs
 from .schemas import BODY_FLAG_STATIC
 
 GEO_TYPE_PLANE = 1
+GEO_TYPE_SPHERE = 3
+GEO_TYPE_CAPSULE = 4
+GEO_TYPE_CYLINDER = 6
 GEO_TYPE_BOX = 7
 
 # ---------------------------------------------------------------------------
@@ -105,7 +107,36 @@ def _compute_shape_aabbs_kernel(
 
         aabb_lower[tid] = pos - wp.vec3(ex, ey, ez)
         aabb_upper[tid] = pos + wp.vec3(ex, ey, ez)
+    elif geo == 3:  # SPHERE
+        radius = data[0] + data[3]
+        aabb_lower[tid] = pos - wp.vec3(radius, radius, radius)
+        aabb_upper[tid] = pos + wp.vec3(radius, radius, radius)
+    elif geo == 4:  # CAPSULE: data = (radius, half_length, 0, margin)
+        radius = data[0] + data[3]
+        half_len = data[1]
+        # Capsule axis is local Z
+        r = wp.quat_to_matrix(q)
+        ax = r[0, 2] * half_len
+        ay = r[1, 2] * half_len
+        az = r[2, 2] * half_len
+        ex = wp.abs(ax) + radius
+        ey = wp.abs(ay) + radius
+        ez = wp.abs(az) + radius
+        aabb_lower[tid] = pos - wp.vec3(ex, ey, ez)
+        aabb_upper[tid] = pos + wp.vec3(ex, ey, ez)
+    elif geo == 6:  # CYLINDER: data = (radius, half_height, 0, margin)
+        radius = data[0] + data[3]
+        half_h = data[1] + data[3]
+        # Cylinder axis is local Z
+        r = wp.quat_to_matrix(q)
+        # Conservative AABB: max of (rotated cylinder endpoint, rotated disc radius)
+        ex = wp.abs(r[0, 2]) * half_h + wp.sqrt(r[0, 0] * r[0, 0] + r[0, 1] * r[0, 1]) * radius
+        ey = wp.abs(r[1, 2]) * half_h + wp.sqrt(r[1, 0] * r[1, 0] + r[1, 1] * r[1, 1]) * radius
+        ez = wp.abs(r[2, 2]) * half_h + wp.sqrt(r[2, 0] * r[2, 0] + r[2, 1] * r[2, 1]) * radius
+        aabb_lower[tid] = pos - wp.vec3(ex, ey, ez)
+        aabb_upper[tid] = pos + wp.vec3(ex, ey, ez)
     else:
+        # Planes and unknown types: large AABB
         big = float(1.0e6)
         aabb_lower[tid] = wp.vec3(-big, -big, -big)
         aabb_upper[tid] = wp.vec3(big, big, big)
@@ -254,6 +285,94 @@ class PhoenXCollisionPipeline:
         self._shape_collision_radius_list.append(math.sqrt(hx * hx + hy * hy + hz * hz))
         return idx
 
+    def add_shape_sphere(
+        self,
+        body_row: int,
+        local_transform: tuple | None = None,
+        radius: float = 0.5,
+        margin: float = 0.0,
+    ) -> int:
+        """Register a sphere collision shape.
+
+        Args:
+            body_row: storage row in the solver's body store.
+            local_transform: ``(px, py, pz, qx, qy, qz, qw)`` or ``None``.
+            radius: sphere radius [m].
+            margin: collision margin [m].
+
+        Returns:
+            Shape index.
+        """
+        idx = len(self._shape_type_list)
+        self._shape_type_list.append(GEO_TYPE_SPHERE)
+        self._shape_data_list.append((radius, 0.0, 0.0, margin))
+        if local_transform is None:
+            local_transform = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+        self._shape_local_xf_list.append(local_transform)
+        self._shape_body_row_list.append(body_row)
+        self._shape_collision_radius_list.append(radius + margin)
+        return idx
+
+    def add_shape_capsule(
+        self,
+        body_row: int,
+        local_transform: tuple | None = None,
+        radius: float = 0.25,
+        half_length: float = 0.5,
+        margin: float = 0.0,
+    ) -> int:
+        """Register a capsule collision shape (axis along local Z).
+
+        Args:
+            body_row: storage row in the solver's body store.
+            local_transform: ``(px, py, pz, qx, qy, qz, qw)`` or ``None``.
+            radius: capsule radius [m].
+            half_length: half-length of the cylindrical section [m].
+            margin: collision margin [m].
+
+        Returns:
+            Shape index.
+        """
+        idx = len(self._shape_type_list)
+        self._shape_type_list.append(GEO_TYPE_CAPSULE)
+        self._shape_data_list.append((radius, half_length, 0.0, margin))
+        if local_transform is None:
+            local_transform = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+        self._shape_local_xf_list.append(local_transform)
+        self._shape_body_row_list.append(body_row)
+        self._shape_collision_radius_list.append(radius + half_length + margin)
+        return idx
+
+    def add_shape_cylinder(
+        self,
+        body_row: int,
+        local_transform: tuple | None = None,
+        radius: float = 0.25,
+        half_height: float = 0.5,
+        margin: float = 0.0,
+    ) -> int:
+        """Register a cylinder collision shape (axis along local Z).
+
+        Args:
+            body_row: storage row in the solver's body store.
+            local_transform: ``(px, py, pz, qx, qy, qz, qw)`` or ``None``.
+            radius: cylinder radius [m].
+            half_height: half-height along local Z [m].
+            margin: collision margin [m].
+
+        Returns:
+            Shape index.
+        """
+        idx = len(self._shape_type_list)
+        self._shape_type_list.append(GEO_TYPE_CYLINDER)
+        self._shape_data_list.append((radius, half_height, 0.0, margin))
+        if local_transform is None:
+            local_transform = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+        self._shape_local_xf_list.append(local_transform)
+        self._shape_body_row_list.append(body_row)
+        self._shape_collision_radius_list.append(math.sqrt(radius * radius + half_height * half_height) + margin)
+        return idx
+
     def add_shape_plane(
         self,
         body_row: int,
@@ -310,17 +429,13 @@ class PhoenXCollisionPipeline:
 
         self.shape_source = wp.zeros(n, dtype=wp.uint64, device=d)
         self.shape_gap = wp.zeros(n, dtype=wp.float32, device=d)
-        self.shape_collision_radius = wp.array(
-            self._shape_collision_radius_list, dtype=wp.float32, device=d
-        )
+        self.shape_collision_radius = wp.array(self._shape_collision_radius_list, dtype=wp.float32, device=d)
         flags_val = int(ShapeFlags.COLLIDE_SHAPES)
         self.shape_flags = wp.full(n, flags_val, dtype=wp.int32, device=d)
         self.shape_collision_group = wp.full(n, 1, dtype=wp.int32, device=d)
         self.shape_world = wp.zeros(n, dtype=wp.int32, device=d)
         self.shape_sdf_index = wp.full(n, -1, dtype=wp.int32, device=d)
-        self.shape_voxel_resolution = wp.array(
-            [wp.vec3i(4, 4, 4)] * n, dtype=wp.vec3i, device=d
-        )
+        self.shape_voxel_resolution = wp.array([wp.vec3i(4, 4, 4)] * n, dtype=wp.vec3i, device=d)
         self.shape_collision_aabb_lower = wp.zeros(n, dtype=wp.vec3, device=d)
         self.shape_collision_aabb_upper = wp.ones(n, dtype=wp.vec3, device=d)
 

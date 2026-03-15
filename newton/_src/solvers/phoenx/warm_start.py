@@ -225,17 +225,27 @@ class WarmStarter:
     def begin_frame(self):
         """Swap current and previous buffers (pointer swap, O(1))."""
         (
-            self.curr_keys, self.prev_keys,
-            self.curr_impulse_n, self.prev_impulse_n,
-            self.curr_impulse_t1, self.prev_impulse_t1,
-            self.curr_impulse_t2, self.prev_impulse_t2,
-            self.curr_count, self.prev_count,
+            self.curr_keys,
+            self.prev_keys,
+            self.curr_impulse_n,
+            self.prev_impulse_n,
+            self.curr_impulse_t1,
+            self.prev_impulse_t1,
+            self.curr_impulse_t2,
+            self.prev_impulse_t2,
+            self.curr_count,
+            self.prev_count,
         ) = (
-            self.prev_keys, self.curr_keys,
-            self.prev_impulse_n, self.curr_impulse_n,
-            self.prev_impulse_t1, self.curr_impulse_t1,
-            self.prev_impulse_t2, self.curr_impulse_t2,
-            self.prev_count, self.curr_count,
+            self.prev_keys,
+            self.curr_keys,
+            self.prev_impulse_n,
+            self.curr_impulse_n,
+            self.prev_impulse_t1,
+            self.curr_impulse_t1,
+            self.prev_impulse_t2,
+            self.curr_impulse_t2,
+            self.prev_count,
+            self.curr_count,
         )
 
     def import_keys(
@@ -349,9 +359,13 @@ class WarmStarter:
             _reorder_impulses_kernel,
             dim=cap,
             inputs=[
-                src_impulse_n, src_impulse_t1, src_impulse_t2,
+                src_impulse_n,
+                src_impulse_t1,
+                src_impulse_t2,
                 self.curr_indices,
-                self._tmp_n, self._tmp_t1, self._tmp_t2,
+                self._tmp_n,
+                self._tmp_t1,
+                self._tmp_t2,
                 self.curr_count,
             ],
             device=d,

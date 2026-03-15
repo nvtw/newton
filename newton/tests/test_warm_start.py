@@ -22,12 +22,10 @@ import warp as wp
 
 from newton._src.solvers.phoenx.warm_start import (
     WarmStarter,
-    _compute_pair_keys_kernel,
     binary_search_int64,
     make_pair_key,
 )
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-
 
 # ---------------------------------------------------------------------------
 # Helper kernels for testing device functions
@@ -285,7 +283,9 @@ add_function_test(TestWarmStart, "test_binary_search_missing", test_binary_searc
 add_function_test(TestWarmStart, "test_binary_search_single", test_binary_search_single, devices=devices)
 add_function_test(TestWarmStart, "test_warm_starter_basic_transfer", test_warm_starter_basic_transfer, devices=devices)
 add_function_test(TestWarmStart, "test_warm_starter_no_previous", test_warm_starter_no_previous, devices=devices)
-add_function_test(TestWarmStart, "test_warm_starter_reversed_pair_order", test_warm_starter_reversed_pair_order, devices=devices)
+add_function_test(
+    TestWarmStart, "test_warm_starter_reversed_pair_order", test_warm_starter_reversed_pair_order, devices=devices
+)
 
 if __name__ == "__main__":
     wp.init()

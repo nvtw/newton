@@ -142,26 +142,14 @@ class Example:
 
         # GPU-resident array of body-store rows for each box handle
         h2i = self.ss.body_store.handle_to_index.numpy()
-        self._box_rows = wp.array(
-            [int(h2i[bh]) for bh in self.box_handles], dtype=wp.int32, device=d
-        )
+        self._box_rows = wp.array([int(h2i[bh]) for bh in self.box_handles], dtype=wp.int32, device=d)
 
         self.box_xforms = wp.zeros(num_boxes, dtype=wp.transform, device=d)
-        self.box_colors = wp.array(
-            [wp.vec3(0.85, 0.55, 0.25)] * num_boxes, dtype=wp.vec3, device=d
-        )
-        self.box_materials = wp.array(
-            [wp.vec4(0.5, 0.3, 0.0, 0.0)] * num_boxes, dtype=wp.vec4, device=d
-        )
-        self.ground_xform = wp.array(
-            [wp.transform_identity()], dtype=wp.transform, device=d
-        )
-        self.ground_color = wp.array(
-            [wp.vec3(0.15, 0.15, 0.18)], dtype=wp.vec3, device=d
-        )
-        self.ground_material = wp.array(
-            [wp.vec4(0.5, 0.5, 1.0, 0.0)], dtype=wp.vec4, device=d
-        )
+        self.box_colors = wp.array([wp.vec3(0.85, 0.55, 0.25)] * num_boxes, dtype=wp.vec3, device=d)
+        self.box_materials = wp.array([wp.vec4(0.5, 0.3, 0.0, 0.0)] * num_boxes, dtype=wp.vec4, device=d)
+        self.ground_xform = wp.array([wp.transform_identity()], dtype=wp.transform, device=d)
+        self.ground_color = wp.array([wp.vec3(0.15, 0.15, 0.18)], dtype=wp.vec3, device=d)
+        self.ground_material = wp.array([wp.vec4(0.5, 0.5, 1.0, 0.0)], dtype=wp.vec4, device=d)
 
         # Contact line arrays for visualization
         self._contact_starts = wp.zeros(contact_capacity, dtype=wp.vec3, device=d)
@@ -181,6 +169,8 @@ class Example:
     # -- simulation (graph-capturable) --------------------------------------
 
     def simulate(self):
+        # Damping + world inertia update once per frame (C# PhoenX convention)
+        self.ss.update_world_inertia()
         for _ in range(self.sim_substeps):
             self.ss.warm_starter.begin_frame()
             self.pipeline.collide(self.ss)
