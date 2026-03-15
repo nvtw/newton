@@ -19,6 +19,20 @@ from __future__ import annotations
 
 import warp as wp
 
+from .constraints import (
+    col_base,
+    ds_load_float,
+    ds_load_int,
+    ds_load_mat33,
+    ds_load_quat,
+    ds_load_vec3,
+    ds_store_float,
+    ds_store_int,  # noqa: F401 – re-exported for completeness
+    ds_store_mat33,  # noqa: F401
+    ds_store_vec3,
+    float_as_int,  # noqa: F401
+    int_as_float,  # noqa: F401
+)
 from .schemas import BODY_FLAG_STATIC
 
 # ---------------------------------------------------------------------------
@@ -597,3 +611,265 @@ def build_contact_lines_kernel(
     n = c_normal[tid]
     line_starts[tid] = world_pt
     line_ends[tid] = world_pt + n * CONTACT_LINE_LENGTH
+
+
+# ---------------------------------------------------------------------------
+# ContactKernels — bakes DataStore column offsets via wp.static()
+# ---------------------------------------------------------------------------
+
+
+class ContactKernels:
+    """Compiled contact kernels bound to specific contact and body stores.
+
+    Each kernel receives only two flat ``float32`` arrays (the backing buffers
+    of the contact :class:`DataStore` and body :class:`HandleStore`) plus
+    partition metadata and the per-body contact count array.  Column offsets
+    are baked as compile-time integer constants via ``wp.static(col_base(...))``.
+
+    Args:
+        contact_store: :class:`DataStore` for :class:`ContactPointSchema`.
+        body_store: :class:`HandleStore` for :class:`RigidBodySchema`.
+    """
+
+    def __init__(self, contact_store, body_store):
+        body_ds = body_store.store  # HandleStore wraps a DataStore
+
+        # Contact column base indices (baked via wp.static in kernels)
+        c_body0 = col_base(contact_store, "body0")
+        c_body1 = col_base(contact_store, "body1")
+        c_normal = col_base(contact_store, "normal")
+        c_offset0 = col_base(contact_store, "offset0")
+        c_offset1 = col_base(contact_store, "offset1")
+        c_accumulated_n = col_base(contact_store, "accumulated_normal_impulse")
+        c_accumulated_t1 = col_base(contact_store, "accumulated_tangent_impulse1")
+        c_accumulated_t2 = col_base(contact_store, "accumulated_tangent_impulse2")
+        c_friction = col_base(contact_store, "friction")
+        c_tangent1 = col_base(contact_store, "tangent1")
+        c_rel0 = col_base(contact_store, "rel_pos_world0")
+        c_rel1 = col_base(contact_store, "rel_pos_world1")
+        c_eff_n = col_base(contact_store, "effective_mass_n")
+        c_eff_t1 = col_base(contact_store, "effective_mass_t1")
+        c_eff_t2 = col_base(contact_store, "effective_mass_t2")
+        c_bias = col_base(contact_store, "bias")
+
+        # Body column base indices
+        b_position = col_base(body_ds, "position")
+        b_orientation = col_base(body_ds, "orientation")
+        b_velocity = col_base(body_ds, "velocity")
+        b_angular_velocity = col_base(body_ds, "angular_velocity")
+        b_inverse_mass = col_base(body_ds, "inverse_mass")
+        b_inverse_inertia_world = col_base(body_ds, "inverse_inertia_world")
+        b_flags = col_base(body_ds, "flags")
+
+        # ---------------------------------------------------------------
+        # Prepare kernel
+        # ---------------------------------------------------------------
+
+        @wp.kernel
+        def _prepare(
+            cdata: wp.array(dtype=wp.float32),
+            bdata: wp.array(dtype=wp.float32),
+            partition_data: wp.array(dtype=wp.int32),
+            partition_ends: wp.array(dtype=wp.int32),
+            partition_slot: int,
+            contact_count_per_body: wp.array(dtype=wp.int32),
+            inv_dt: float,
+        ):
+            """Compute per-contact solver data and apply warm-start impulses.
+
+            Effective masses use split inverse masses (Tonge et al. 2012)
+            for faster PGS convergence.  Warm-start impulses use the full
+            inverse masses so that momentum is conserved.
+            """
+            tid = wp.tid()
+            p_start = int(0)
+            if partition_slot > 0:
+                p_start = partition_ends[partition_slot - 1]
+            p_end = partition_ends[partition_slot]
+            if tid >= p_end - p_start:
+                return
+
+            ci = partition_data[p_start + tid]
+
+            n = ds_load_vec3(cdata, wp.static(c_normal), ci)
+            t1 = compute_tangent_frame(n)
+            t2 = wp.cross(t1, n)
+            ds_store_vec3(cdata, wp.static(c_tangent1), ci, t1)
+
+            b0 = ds_load_int(cdata, wp.static(c_body0), ci)
+            b1 = ds_load_int(cdata, wp.static(c_body1), ci)
+
+            q0 = ds_load_quat(bdata, wp.static(b_orientation), b0)
+            q1 = ds_load_quat(bdata, wp.static(b_orientation), b1)
+
+            rw0 = wp.quat_rotate(q0, ds_load_vec3(cdata, wp.static(c_offset0), ci))
+            rw1 = wp.quat_rotate(q1, ds_load_vec3(cdata, wp.static(c_offset1), ci))
+            ds_store_vec3(cdata, wp.static(c_rel0), ci, rw0)
+            ds_store_vec3(cdata, wp.static(c_rel1), ci, rw1)
+
+            pos0 = ds_load_vec3(bdata, wp.static(b_position), b0)
+            pos1 = ds_load_vec3(bdata, wp.static(b_position), b1)
+
+            gap = wp.dot(n, (pos1 + rw1) - (pos0 + rw0))
+            # C# does: bias = -ComputeContactBias(-gap, invDt)
+            # Negative bias for overlapping bodies so that delta_n = -(dv + bias)*eff > 0
+            ds_store_float(cdata, wp.static(c_bias), ci, -compute_contact_bias(-gap, inv_dt))
+
+            inv_m0 = ds_load_float(bdata, wp.static(b_inverse_mass), b0)
+            inv_m1 = ds_load_float(bdata, wp.static(b_inverse_mass), b1)
+            inv_i0 = ds_load_mat33(bdata, wp.static(b_inverse_inertia_world), b0)
+            inv_i1 = ds_load_mat33(bdata, wp.static(b_inverse_inertia_world), b1)
+
+            # Mass splitting: each body's inverse-mass contribution is scaled
+            # by the number of contacts on that body.  Static bodies (count 0
+            # or mass 0) get split factor 1 so they remain zero.
+            nc0 = contact_count_per_body[b0]
+            nc1 = contact_count_per_body[b1]
+            split0 = wp.max(float(nc0), 1.0)
+            split1 = wp.max(float(nc1), 1.0)
+
+            ds_store_float(
+                cdata, wp.static(c_eff_n), ci,
+                compute_effective_mass_split(inv_m0, inv_m1, inv_i0, inv_i1, rw0, rw1, n, split0, split1),
+            )
+            ds_store_float(
+                cdata, wp.static(c_eff_t1), ci,
+                compute_effective_mass_split(inv_m0, inv_m1, inv_i0, inv_i1, rw0, rw1, t1, split0, split1),
+            )
+            ds_store_float(
+                cdata, wp.static(c_eff_t2), ci,
+                compute_effective_mass_split(inv_m0, inv_m1, inv_i0, inv_i1, rw0, rw1, t2, split0, split1),
+            )
+
+            # Warm start: apply accumulated impulses with FULL (unsplit) mass,
+            # scaled by ImpulseInheritanceFactor (0.90) matching C# PhoenX.
+            acc_n = ds_load_float(cdata, wp.static(c_accumulated_n), ci) * WARM_START_SCALE
+            acc_t1 = ds_load_float(cdata, wp.static(c_accumulated_t1), ci) * WARM_START_SCALE
+            acc_t2 = ds_load_float(cdata, wp.static(c_accumulated_t2), ci) * WARM_START_SCALE
+            ds_store_float(cdata, wp.static(c_accumulated_n), ci, acc_n)
+            ds_store_float(cdata, wp.static(c_accumulated_t1), ci, acc_t1)
+            ds_store_float(cdata, wp.static(c_accumulated_t2), ci, acc_t2)
+            impulse = acc_n * n + acc_t1 * t1 + acc_t2 * t2
+
+            f0 = ds_load_int(bdata, wp.static(b_flags), b0)
+            f1 = ds_load_int(bdata, wp.static(b_flags), b1)
+            is_static_0 = (f0 & BODY_FLAG_STATIC) != 0 or inv_m0 == 0.0
+            is_static_1 = (f1 & BODY_FLAG_STATIC) != 0 or inv_m1 == 0.0
+
+            if not is_static_0:
+                v0 = ds_load_vec3(bdata, wp.static(b_velocity), b0)
+                w0 = ds_load_vec3(bdata, wp.static(b_angular_velocity), b0)
+                ds_store_vec3(bdata, wp.static(b_velocity), b0, v0 - inv_m0 * impulse)
+                ds_store_vec3(bdata, wp.static(b_angular_velocity), b0, w0 - inv_i0 * wp.cross(rw0, impulse))
+
+            if not is_static_1:
+                v1 = ds_load_vec3(bdata, wp.static(b_velocity), b1)
+                w1 = ds_load_vec3(bdata, wp.static(b_angular_velocity), b1)
+                ds_store_vec3(bdata, wp.static(b_velocity), b1, v1 + inv_m1 * impulse)
+                ds_store_vec3(bdata, wp.static(b_angular_velocity), b1, w1 + inv_i1 * wp.cross(rw1, impulse))
+
+        # ---------------------------------------------------------------
+        # Solve kernel
+        # ---------------------------------------------------------------
+
+        @wp.kernel
+        def _solve(
+            cdata: wp.array(dtype=wp.float32),
+            bdata: wp.array(dtype=wp.float32),
+            partition_data: wp.array(dtype=wp.int32),
+            partition_ends: wp.array(dtype=wp.int32),
+            partition_slot: int,
+            use_bias: int,
+        ):
+            """One PGS iteration for a single partition's contacts."""
+            tid = wp.tid()
+            p_start = int(0)
+            if partition_slot > 0:
+                p_start = partition_ends[partition_slot - 1]
+            p_end = partition_ends[partition_slot]
+            if tid >= p_end - p_start:
+                return
+
+            ci = partition_data[p_start + tid]
+
+            n = ds_load_vec3(cdata, wp.static(c_normal), ci)
+            t1 = ds_load_vec3(cdata, wp.static(c_tangent1), ci)
+            t2 = wp.cross(t1, n)
+
+            b0 = ds_load_int(cdata, wp.static(c_body0), ci)
+            b1 = ds_load_int(cdata, wp.static(c_body1), ci)
+
+            rw0 = ds_load_vec3(cdata, wp.static(c_rel0), ci)
+            rw1 = ds_load_vec3(cdata, wp.static(c_rel1), ci)
+
+            v0 = ds_load_vec3(bdata, wp.static(b_velocity), b0)
+            w0 = ds_load_vec3(bdata, wp.static(b_angular_velocity), b0)
+            v1 = ds_load_vec3(bdata, wp.static(b_velocity), b1)
+            w1 = ds_load_vec3(bdata, wp.static(b_angular_velocity), b1)
+
+            # Relative velocity at contact point: v_rel = (v1 + w1 x r1) - (v0 + w0 x r0)
+            dv = (v1 + wp.cross(w1, rw1)) - (v0 + wp.cross(w0, rw0))
+
+            dv_n = wp.dot(n, dv)
+            dv_t1 = wp.dot(t1, dv)
+            dv_t2 = wp.dot(t2, dv)
+
+            bias_val = 0.0
+            if use_bias != 0:
+                bias_val = ds_load_float(cdata, wp.static(c_bias), ci)
+
+            eff_n = ds_load_float(cdata, wp.static(c_eff_n), ci)
+            eff_t1 = ds_load_float(cdata, wp.static(c_eff_t1), ci)
+            eff_t2 = ds_load_float(cdata, wp.static(c_eff_t2), ci)
+
+            # Normal impulse correction: lambda_n = -(Jv + bias) * W_n, clamped >= 0
+            delta_n = -(dv_n + bias_val) * eff_n
+            old_acc_n = ds_load_float(cdata, wp.static(c_accumulated_n), ci)
+            new_acc_n = wp.max(old_acc_n + delta_n, 0.0)
+            applied_n = new_acc_n - old_acc_n
+            ds_store_float(cdata, wp.static(c_accumulated_n), ci, new_acc_n)
+
+            # Friction impulse: clamped within [-mu * lambda_n, +mu * lambda_n]
+            mu = ds_load_float(cdata, wp.static(c_friction), ci)
+            max_friction = mu * new_acc_n
+
+            delta_t1 = -dv_t1 * eff_t1
+            old_acc_t1 = ds_load_float(cdata, wp.static(c_accumulated_t1), ci)
+            new_acc_t1 = wp.clamp(old_acc_t1 + delta_t1, -max_friction, max_friction)
+            applied_t1 = new_acc_t1 - old_acc_t1
+            ds_store_float(cdata, wp.static(c_accumulated_t1), ci, new_acc_t1)
+
+            delta_t2 = -dv_t2 * eff_t2
+            old_acc_t2 = ds_load_float(cdata, wp.static(c_accumulated_t2), ci)
+            new_acc_t2 = wp.clamp(old_acc_t2 + delta_t2, -max_friction, max_friction)
+            applied_t2 = new_acc_t2 - old_acc_t2
+            ds_store_float(cdata, wp.static(c_accumulated_t2), ci, new_acc_t2)
+
+            # Convert to world impulse and apply to bodies
+            impulse = applied_n * n + applied_t1 * t1 + applied_t2 * t2
+
+            inv_m0 = ds_load_float(bdata, wp.static(b_inverse_mass), b0)
+            inv_m1 = ds_load_float(bdata, wp.static(b_inverse_mass), b1)
+            inv_i0 = ds_load_mat33(bdata, wp.static(b_inverse_inertia_world), b0)
+            inv_i1 = ds_load_mat33(bdata, wp.static(b_inverse_inertia_world), b1)
+
+            f0 = ds_load_int(bdata, wp.static(b_flags), b0)
+            f1 = ds_load_int(bdata, wp.static(b_flags), b1)
+            is_static_0 = (f0 & BODY_FLAG_STATIC) != 0 or inv_m0 == 0.0
+            is_static_1 = (f1 & BODY_FLAG_STATIC) != 0 or inv_m1 == 0.0
+
+            if not is_static_0:
+                ds_store_vec3(bdata, wp.static(b_velocity), b0, v0 - inv_m0 * impulse)
+                ds_store_vec3(bdata, wp.static(b_angular_velocity), b0, w0 - inv_i0 * wp.cross(rw0, impulse))
+
+            if not is_static_1:
+                ds_store_vec3(bdata, wp.static(b_velocity), b1, v1 + inv_m1 * impulse)
+                ds_store_vec3(bdata, wp.static(b_angular_velocity), b1, w1 + inv_i1 * wp.cross(rw1, impulse))
+
+        # Store compiled kernels and data arrays for launch
+        self.prepare = _prepare
+        self.solve = _solve
+        self.contact_data = contact_store.data
+        self.body_data = body_ds.data
+        self.device = contact_store.device
+        self.contact_capacity = contact_store.capacity

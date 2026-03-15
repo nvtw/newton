@@ -21,6 +21,20 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.collision import PhoenXCollisionPipeline
+from newton._src.solvers.phoenx.constraints import (
+    JointSchema,
+    col_base,
+    ds_load_float,
+    ds_load_int,
+    ds_load_mat33,
+    ds_load_quat,
+    ds_load_vec3,
+    ds_store_float,
+    ds_store_int,
+    ds_store_mat33,
+    ds_store_vec3,
+)
+from newton._src.solvers.phoenx.data_base import DataStore
 from newton._src.solvers.phoenx.solver_phoenx import SolverState
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
@@ -255,6 +269,144 @@ def test_constraint_determinism(test, device):
 
 
 # ---------------------------------------------------------------------------
+# DataStore flat-array accessor tests
+# ---------------------------------------------------------------------------
+
+
+@wp.kernel
+def _ds_accessor_test_kernel(
+    data: wp.array(dtype=wp.float32),
+    base_int: int,
+    base_float: int,
+    base_vec3: int,
+    base_quat: int,
+    base_mat33: int,
+    out_int: wp.array(dtype=wp.int32),
+    out_float: wp.array(dtype=wp.float32),
+    out_vec3: wp.array(dtype=wp.vec3),
+    out_quat: wp.array(dtype=wp.quat),
+    out_mat33: wp.array(dtype=wp.mat33),
+):
+    tid = wp.tid()
+    # Write via ds_store, read back via ds_load
+    ds_store_int(data, base_int, tid, tid + 100)
+    ds_store_float(data, base_float, tid, float(tid) * 1.5)
+    ds_store_vec3(data, base_vec3, tid, wp.vec3(float(tid), float(tid) + 0.5, float(tid) + 1.0))
+    m = wp.mat33(
+        float(tid), 0.0, 0.0,
+        0.0, float(tid) + 1.0, 0.0,
+        0.0, 0.0, float(tid) + 2.0,
+    )
+    ds_store_mat33(data, base_mat33, tid, m)
+
+    out_int[tid] = ds_load_int(data, base_int, tid)
+    out_float[tid] = ds_load_float(data, base_float, tid)
+    out_vec3[tid] = ds_load_vec3(data, base_vec3, tid)
+    out_quat[tid] = ds_load_quat(data, base_quat, tid)
+    out_mat33[tid] = ds_load_mat33(data, base_mat33, tid)
+
+
+def test_ds_accessor_roundtrip(test, device):
+    """DataStore flat-array accessors read back exactly what was written."""
+    cap = 8
+    store = DataStore(JointSchema, cap, device=device)
+
+    # Write known quat values via column_of view
+    q_col = store.column_of("inv_initial_orientation").numpy()
+    for i in range(cap):
+        q_col[i] = [float(i) * 0.1, 0.0, 0.0, 1.0]
+    store.column_of("inv_initial_orientation").assign(
+        wp.array(q_col, dtype=wp.quat, device=device)
+    )
+
+    out_int = wp.zeros(cap, dtype=wp.int32, device=device)
+    out_float = wp.zeros(cap, dtype=wp.float32, device=device)
+    out_vec3 = wp.zeros(cap, dtype=wp.vec3, device=device)
+    out_quat = wp.zeros(cap, dtype=wp.quat, device=device)
+    out_mat33 = wp.zeros(cap, dtype=wp.mat33, device=device)
+
+    wp.launch(
+        _ds_accessor_test_kernel,
+        dim=cap,
+        inputs=[
+            store.data,
+            col_base(store, "joint_type"),
+            col_base(store, "hinge_lambda_x"),
+            col_base(store, "local_anchor0"),
+            col_base(store, "inv_initial_orientation"),
+            col_base(store, "point_eff_mass"),
+            out_int, out_float, out_vec3, out_quat, out_mat33,
+        ],
+        device=device,
+    )
+    wp.synchronize()
+
+    ints = out_int.numpy()
+    floats = out_float.numpy()
+    vecs = out_vec3.numpy()
+    quats = out_quat.numpy()
+    mats = out_mat33.numpy()
+
+    for i in range(cap):
+        test.assertEqual(ints[i], i + 100, msg=f"int roundtrip failed at {i}")
+        test.assertAlmostEqual(floats[i], i * 1.5, places=5, msg=f"float roundtrip at {i}")
+        np.testing.assert_allclose(vecs[i], [i, i + 0.5, i + 1.0], atol=1e-6)
+        np.testing.assert_allclose(quats[i], [i * 0.1, 0.0, 0.0, 1.0], atol=1e-6)
+        np.testing.assert_allclose(mats[i].diagonal(), [i, i + 1.0, i + 2.0], atol=1e-6)
+
+
+def test_ds_accessor_matches_column_of(test, device):
+    """Values written via ds_store are visible through column_of, and vice versa."""
+    cap = 4
+    store = DataStore(JointSchema, cap, device=device)
+
+    # Write via column_of
+    body0_col = store.column_of("body0").numpy()
+    body0_col[:] = [10, 20, 30, 40]
+    store.column_of("body0").assign(wp.array(body0_col, dtype=wp.int32, device=device))
+
+    anchor_col = store.column_of("local_anchor0").numpy()
+    anchor_col[0] = [1.0, 2.0, 3.0]
+    anchor_col[1] = [4.0, 5.0, 6.0]
+    store.column_of("local_anchor0").assign(wp.array(anchor_col, dtype=wp.vec3, device=device))
+
+    # Read back via ds_load in a kernel
+    out_int = wp.zeros(cap, dtype=wp.int32, device=device)
+    out_vec = wp.zeros(cap, dtype=wp.vec3, device=device)
+    b0_base = col_base(store, "body0")
+    a0_base = col_base(store, "local_anchor0")
+
+    @wp.kernel
+    def _read_kernel(
+        data: wp.array(dtype=wp.float32),
+        oi: wp.array(dtype=wp.int32),
+        ov: wp.array(dtype=wp.vec3),
+    ):
+        tid = wp.tid()
+        oi[tid] = ds_load_int(data, wp.static(b0_base), tid)
+        ov[tid] = ds_load_vec3(data, wp.static(a0_base), tid)
+
+    wp.launch(_read_kernel, dim=cap, inputs=[store.data, out_int, out_vec], device=device)
+    wp.synchronize()
+
+    np.testing.assert_array_equal(out_int.numpy(), [10, 20, 30, 40])
+    np.testing.assert_allclose(out_vec.numpy()[0], [1.0, 2.0, 3.0], atol=1e-6)
+    np.testing.assert_allclose(out_vec.numpy()[1], [4.0, 5.0, 6.0], atol=1e-6)
+
+    # Write via ds_store, read back via column_of
+    @wp.kernel
+    def _write_kernel(data: wp.array(dtype=wp.float32)):
+        ds_store_int(data, wp.static(b0_base), 0, 99)
+        ds_store_vec3(data, wp.static(a0_base), 0, wp.vec3(7.0, 8.0, 9.0))
+
+    wp.launch(_write_kernel, dim=1, inputs=[store.data], device=device)
+    wp.synchronize()
+
+    test.assertEqual(store.column_of("body0").numpy()[0], 99)
+    np.testing.assert_allclose(store.column_of("local_anchor0").numpy()[0], [7.0, 8.0, 9.0], atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
 # Register tests
 # ---------------------------------------------------------------------------
 
@@ -267,6 +419,8 @@ add_function_test(TestPhoenXConstraints, "test_revolute_anchor_preserved", test_
 add_function_test(TestPhoenXConstraints, "test_fixed_joint", test_fixed_joint, devices=devices)
 add_function_test(TestPhoenXConstraints, "test_ball_socket_with_contacts", test_ball_socket_with_contacts, devices=devices)
 add_function_test(TestPhoenXConstraints, "test_constraint_determinism", test_constraint_determinism, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_ds_accessor_roundtrip", test_ds_accessor_roundtrip, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_ds_accessor_matches_column_of", test_ds_accessor_matches_column_of, devices=devices)
 
 if __name__ == "__main__":
     wp.clear_kernel_cache()

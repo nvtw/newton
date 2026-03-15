@@ -33,21 +33,18 @@ from .constraints import (
     JOINT_BALL_SOCKET,
     JOINT_FIXED,
     JOINT_REVOLUTE,
+    ConstraintKernels,
     JointSchema,
-    build_joint_elements_kernel,
-    prepare_constraints_kernel,
-    solve_constraints_kernel,
 )
 from .data_base import DataStore, HandleStore
 from .kernels import (
+    ContactKernels,
     build_elements_kernel,
     clear_contact_count_kernel,
     count_contacts_per_body_kernel,
     import_contacts_kernel,
     integrate_positions_kernel,
     integrate_velocities_kernel,
-    prepare_contacts_kernel,
-    solve_contacts_kernel,
     update_world_inertia_kernel,
 )
 from .maximal_independent_set import GraphColoring
@@ -108,12 +105,17 @@ class SolverState:
         # Mass splitting: per-body contact count (Tonge et al. 2012)
         self._contact_count_per_body = wp.zeros(body_capacity, dtype=wp.int32, device=d)
 
+        # Contact kernels (bake column offsets at construction time)
+        self._contact_kernels = ContactKernels(self.contact_store, self.body_store)
+
         # Joint storage
         self.joint_capacity = joint_capacity
         if joint_capacity > 0:
             self.joint_store = DataStore(JointSchema, joint_capacity, device=d)
+            self._constraint_kernels = ConstraintKernels(self.joint_store, self.body_store)
         else:
             self.joint_store = None
+            self._constraint_kernels = None
         self._joint_count = 0
 
     # -- body management (host-side) ----------------------------------------
@@ -296,21 +298,37 @@ class SolverState:
         axis = np.array(axis_world, dtype=np.float32)
         axis = axis / (np.linalg.norm(axis) + 1e-12)
 
-        # Convert to body-local frames using quaternion inverse rotation
-        from scipy.spatial.transform import Rotation
+        # Convert to body-local frames using pure numpy quaternion math.
+        # Warp quaternion layout: (x, y, z, w).
+        def _quat_conj(q):
+            return np.array([-q[0], -q[1], -q[2], q[3]], dtype=np.float32)
 
-        r0 = Rotation.from_quat([q0[0], q0[1], q0[2], q0[3]])
-        r1 = Rotation.from_quat([q1[0], q1[1], q1[2], q1[3]])
-        local_anchor0 = r0.inv().apply(anchor - p0).astype(np.float32)
-        local_anchor1 = r1.inv().apply(anchor - p1).astype(np.float32)
-        local_axis0 = r0.inv().apply(axis).astype(np.float32)
-        local_axis1 = r1.inv().apply(axis).astype(np.float32)
+        def _quat_mul(a, b):
+            # Hamilton product, (x,y,z,w) layout
+            return np.array([
+                a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+                a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+                a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+                a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+            ], dtype=np.float32)
+
+        def _quat_rotate(q, v):
+            # Rotate vector v by quaternion q: q * (0,v) * conj(q)
+            qv = np.array([v[0], v[1], v[2], 0.0], dtype=np.float32)
+            return _quat_mul(_quat_mul(q, qv), _quat_conj(q))[:3]
+
+        def _quat_inv_rotate(q, v):
+            return _quat_rotate(_quat_conj(q), v)
+
+        local_anchor0 = _quat_inv_rotate(q0, anchor - p0)
+        local_anchor1 = _quat_inv_rotate(q1, anchor - p1)
+        local_axis0 = _quat_inv_rotate(q0, axis)
+        local_axis1 = _quat_inv_rotate(q1, axis)
 
         # Inverse initial relative orientation: (q0^-1 * q1)^-1
-        q0_inv = r0.inv()
-        rel = q0_inv * r1
-        inv_rel = rel.inv()
-        inv_rel_q = inv_rel.as_quat().astype(np.float32)  # [x,y,z,w]
+        q0_inv = _quat_conj(q0)
+        rel = _quat_mul(q0_inv, q1)
+        inv_rel_q = _quat_conj(rel)
 
         def _write_col(name, value, dtype):
             col = js.column_of(name).numpy()
@@ -414,24 +432,18 @@ class SolverState:
         )
 
         # Append joint elements right after contacts (contiguous)
-        if self.joint_store is not None and self._joint_count > 0:
-            js = self.joint_store
+        if self._constraint_kernels is not None and self._joint_count > 0:
+            ck = self._constraint_kernels
             wp.launch(
-                build_joint_elements_kernel,
-                dim=js.capacity,
-                inputs=[
-                    js.column_of("body0"),
-                    js.column_of("body1"),
-                    self._elements,
-                    js.count,
-                    cs.count,
-                ],
+                ck.build_elements,
+                dim=self.joint_capacity,
+                inputs=[ck.joint_data, self._elements, cs.count, ck.joint_count],
                 device=d,
             )
 
         # Total element count = contacts + joints (device-side)
         self._total_element_count = wp.zeros(1, dtype=wp.int32, device=d)
-        if self.joint_store is not None and self._joint_count > 0:
+        if self._constraint_kernels is not None and self._joint_count > 0:
             nc = cs.count.numpy()[0]
             nj = self.joint_store.count.numpy()[0]
             total = nc + nj
@@ -525,193 +537,76 @@ class SolverState:
     # -- partitioned PGS solve helpers --------------------------------------
 
     def _launch_prepare(self, partition_slot: int, inv_dt: float):
-        """Launch :func:`prepare_contacts_kernel` for one partition slot."""
-        d = self.device
-        cs = self.contact_store
-        bs = self.body_store
+        """Launch contact prepare kernel for one partition slot."""
+        ck = self._contact_kernels
         gc = self.graph_coloring
-
         wp.launch(
-            prepare_contacts_kernel,
-            dim=cs.capacity,
+            ck.prepare,
+            dim=ck.contact_capacity,
             inputs=[
+                ck.contact_data,
+                ck.body_data,
                 gc.partition_data,
                 gc.partition_ends,
                 partition_slot,
-                cs.column_of("normal"),
-                cs.column_of("offset0"),
-                cs.column_of("offset1"),
-                cs.column_of("body0"),
-                cs.column_of("body1"),
-                cs.column_of("accumulated_normal_impulse"),
-                cs.column_of("accumulated_tangent_impulse1"),
-                cs.column_of("accumulated_tangent_impulse2"),
-                cs.column_of("tangent1"),
-                cs.column_of("rel_pos_world0"),
-                cs.column_of("rel_pos_world1"),
-                cs.column_of("effective_mass_n"),
-                cs.column_of("effective_mass_t1"),
-                cs.column_of("effective_mass_t2"),
-                cs.column_of("bias"),
-                bs.column_of("position"),
-                bs.column_of("orientation"),
-                bs.column_of("velocity"),
-                bs.column_of("angular_velocity"),
-                bs.column_of("inverse_mass"),
-                bs.column_of("inverse_inertia_world"),
-                bs.column_of("flags"),
                 self._contact_count_per_body,
                 inv_dt,
             ],
-            device=d,
+            device=self.device,
         )
 
     def _launch_solve(self, partition_slot: int, use_bias: int):
-        """Launch :func:`solve_contacts_kernel` for one partition slot."""
-        d = self.device
-        cs = self.contact_store
-        bs = self.body_store
+        """Launch contact solve kernel for one partition slot."""
+        ck = self._contact_kernels
         gc = self.graph_coloring
-
         wp.launch(
-            solve_contacts_kernel,
-            dim=cs.capacity,
+            ck.solve,
+            dim=ck.contact_capacity,
             inputs=[
+                ck.contact_data,
+                ck.body_data,
                 gc.partition_data,
                 gc.partition_ends,
                 partition_slot,
-                cs.column_of("normal"),
-                cs.column_of("tangent1"),
-                cs.column_of("body0"),
-                cs.column_of("body1"),
-                cs.column_of("accumulated_normal_impulse"),
-                cs.column_of("accumulated_tangent_impulse1"),
-                cs.column_of("accumulated_tangent_impulse2"),
-                cs.column_of("rel_pos_world0"),
-                cs.column_of("rel_pos_world1"),
-                cs.column_of("effective_mass_n"),
-                cs.column_of("effective_mass_t1"),
-                cs.column_of("effective_mass_t2"),
-                cs.column_of("bias"),
-                cs.column_of("friction"),
-                bs.column_of("velocity"),
-                bs.column_of("angular_velocity"),
-                bs.column_of("inverse_mass"),
-                bs.column_of("inverse_inertia_world"),
-                bs.column_of("flags"),
                 use_bias,
             ],
-            device=d,
+            device=self.device,
         )
 
     # -- constraint launch helpers ------------------------------------------
 
     def _launch_prepare_constraints(self, partition_slot: int):
-        """Launch :func:`prepare_constraints_kernel` for one partition slot."""
-        if self.joint_store is None or self._joint_count == 0:
+        """Launch constraint prepare kernel for one partition slot."""
+        if self._constraint_kernels is None or self._joint_count == 0:
             return
-        d = self.device
-        js = self.joint_store
-        bs = self.body_store
+        ck = self._constraint_kernels
         gc = self.graph_coloring
-        # Use actual contact count (cached from partition step)
-        nc = self._cached_contact_count
-
         wp.launch(
-            prepare_constraints_kernel,
-            dim=js.capacity,
+            ck.prepare,
+            dim=self.joint_capacity,
             inputs=[
-                gc.partition_data,
-                gc.partition_ends,
-                partition_slot,
-                nc,
-                js.column_of("joint_type"),
-                js.column_of("body0"),
-                js.column_of("body1"),
-                js.column_of("local_anchor0"),
-                js.column_of("local_anchor1"),
-                js.column_of("local_axis0"),
-                js.column_of("local_axis1"),
-                js.column_of("inv_initial_orientation"),
-                js.column_of("point_lambda"),
-                js.column_of("hinge_lambda_x"),
-                js.column_of("hinge_lambda_y"),
-                js.column_of("angle_lambda"),
-                js.column_of("point_eff_mass"),
-                js.column_of("hinge_b2xa1"),
-                js.column_of("hinge_c2xa1"),
-                js.column_of("hinge_eff_mass_00"),
-                js.column_of("hinge_eff_mass_01"),
-                js.column_of("hinge_eff_mass_10"),
-                js.column_of("hinge_eff_mass_11"),
-                js.column_of("angle_eff_mass"),
-                js.column_of("angle_axis"),
-                js.column_of("rw0"),
-                js.column_of("rw1"),
-                js.column_of("angle_min"),
-                js.column_of("angle_max"),
-                js.column_of("angle_current"),
-                bs.column_of("position"),
-                bs.column_of("orientation"),
-                bs.column_of("velocity"),
-                bs.column_of("angular_velocity"),
-                bs.column_of("inverse_mass"),
-                bs.column_of("inverse_inertia_world"),
-                bs.column_of("flags"),
-                js.count,
+                ck.joint_data, ck.body_data,
+                gc.partition_data, gc.partition_ends, partition_slot,
+                self._cached_contact_count, ck.joint_count,
             ],
-            device=d,
+            device=self.device,
         )
 
     def _launch_solve_constraints(self, partition_slot: int, use_bias: int):
-        """Launch :func:`solve_constraints_kernel` for one partition slot."""
-        if self.joint_store is None or self._joint_count == 0:
+        """Launch constraint solve kernel for one partition slot."""
+        if self._constraint_kernels is None or self._joint_count == 0:
             return
-        d = self.device
-        js = self.joint_store
-        bs = self.body_store
+        ck = self._constraint_kernels
         gc = self.graph_coloring
-        nc = self._cached_contact_count
-
         wp.launch(
-            solve_constraints_kernel,
-            dim=js.capacity,
+            ck.solve,
+            dim=self.joint_capacity,
             inputs=[
-                gc.partition_data,
-                gc.partition_ends,
-                partition_slot,
-                nc,
-                js.column_of("joint_type"),
-                js.column_of("body0"),
-                js.column_of("body1"),
-                js.column_of("point_lambda"),
-                js.column_of("hinge_lambda_x"),
-                js.column_of("hinge_lambda_y"),
-                js.column_of("angle_lambda"),
-                js.column_of("point_eff_mass"),
-                js.column_of("hinge_b2xa1"),
-                js.column_of("hinge_c2xa1"),
-                js.column_of("hinge_eff_mass_00"),
-                js.column_of("hinge_eff_mass_01"),
-                js.column_of("hinge_eff_mass_10"),
-                js.column_of("hinge_eff_mass_11"),
-                js.column_of("angle_eff_mass"),
-                js.column_of("angle_axis"),
-                js.column_of("rw0"),
-                js.column_of("rw1"),
-                js.column_of("angle_min"),
-                js.column_of("angle_max"),
-                js.column_of("angle_current"),
-                bs.column_of("position"),
-                bs.column_of("velocity"),
-                bs.column_of("angular_velocity"),
-                bs.column_of("inverse_mass"),
-                bs.column_of("inverse_inertia_world"),
-                bs.column_of("flags"),
-                js.count,
-                use_bias,
+                ck.joint_data, ck.body_data,
+                gc.partition_data, gc.partition_ends, partition_slot,
+                self._cached_contact_count, ck.joint_count, use_bias,
             ],
-            device=d,
+            device=self.device,
         )
 
     # -- full step ----------------------------------------------------------
