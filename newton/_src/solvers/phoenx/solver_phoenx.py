@@ -79,7 +79,7 @@ class SolverState:
         shape_count: int,
         device: wp.context.Device | str | None = None,
         default_friction: float = 0.5,
-        max_colors: int = 31,
+        max_colors: int = 12,
         joint_capacity: int = 0,
     ):
         self.device = wp.get_device(device)
@@ -626,13 +626,13 @@ class SolverState:
 
     # -- partitioned PGS solve helpers --------------------------------------
 
-    def _launch_prepare(self, partition_slot: int, inv_dt: float):
+    def _launch_prepare(self, partition_slot: int, inv_dt: float, dim: int = 0):
         """Launch contact prepare kernel for one partition slot."""
         ck = self._contact_kernels
         gc = self.graph_coloring
         wp.launch(
             ck.prepare,
-            dim=ck.contact_capacity,
+            dim=dim if dim > 0 else ck.contact_capacity,
             inputs=[
                 ck.contact_data,
                 ck.body_data,
@@ -645,13 +645,13 @@ class SolverState:
             device=self.device,
         )
 
-    def _launch_solve(self, partition_slot: int, use_bias: int):
+    def _launch_solve(self, partition_slot: int, use_bias: int, dim: int = 0):
         """Launch contact solve kernel for one partition slot."""
         ck = self._contact_kernels
         gc = self.graph_coloring
         wp.launch(
             ck.solve,
-            dim=ck.contact_capacity,
+            dim=dim if dim > 0 else ck.contact_capacity,
             inputs=[
                 ck.contact_data,
                 ck.body_data,
@@ -665,7 +665,7 @@ class SolverState:
 
     # -- constraint launch helpers ------------------------------------------
 
-    def _launch_prepare_constraints(self, partition_slot: int):
+    def _launch_prepare_constraints(self, partition_slot: int, dim: int = 0):
         """Launch constraint prepare kernel for one partition slot."""
         if self._constraint_kernels is None or self._joint_count == 0:
             return
@@ -673,7 +673,7 @@ class SolverState:
         gc = self.graph_coloring
         wp.launch(
             ck.prepare,
-            dim=self.joint_capacity,
+            dim=dim if dim > 0 else self.joint_capacity,
             inputs=[
                 ck.joint_data,
                 ck.body_data,
@@ -686,7 +686,7 @@ class SolverState:
             device=self.device,
         )
 
-    def _launch_solve_constraints(self, partition_slot: int, use_bias: int):
+    def _launch_solve_constraints(self, partition_slot: int, use_bias: int, dim: int = 0):
         """Launch constraint solve kernel for one partition slot."""
         if self._constraint_kernels is None or self._joint_count == 0:
             return
@@ -694,7 +694,7 @@ class SolverState:
         gc = self.graph_coloring
         wp.launch(
             ck.solve,
-            dim=self.joint_capacity,
+            dim=dim if dim > 0 else self.joint_capacity,
             inputs=[
                 ck.joint_data,
                 ck.body_data,
@@ -780,19 +780,31 @@ class SolverState:
 
         max_slots = self.graph_coloring.max_colors + 1
 
+        # Read partition sizes to CPU once — skip empty slots and launch
+        # with exact dim to avoid wasted threads.  One sync point here
+        # replaces hundreds of redundant kernel launches.
+        p_ends = self.graph_coloring.partition_ends.numpy()
+        active_slots = []  # (slot_index, partition_size)
         for p in range(max_slots):
-            self._launch_prepare(p, inv_dt)
-            self._launch_prepare_constraints(p)
+            p_start = int(p_ends[p - 1]) if p > 0 else 0
+            p_end = int(p_ends[p])
+            size = p_end - p_start
+            if size > 0:
+                active_slots.append((p, size))
+
+        for p, size in active_slots:
+            self._launch_prepare(p, inv_dt, dim=size)
+            self._launch_prepare_constraints(p, dim=size)
 
         for _ in range(num_iterations):
-            for p in range(max_slots):
-                self._launch_solve(p, 1)
-                self._launch_solve_constraints(p, 1)
+            for p, size in active_slots:
+                self._launch_solve(p, 1, dim=size)
+                self._launch_solve_constraints(p, 1, dim=size)
 
         for _ in range(num_velocity_iterations):
-            for p in range(max_slots):
-                self._launch_solve(p, 0)
-                self._launch_solve_constraints(p, 0)
+            for p, size in active_slots:
+                self._launch_solve(p, 0, dim=size)
+                self._launch_solve_constraints(p, 0, dim=size)
 
         self.integrate_positions(dt)
 

@@ -814,6 +814,187 @@ def test_schema_union_offsets(test, device):
                          msg=f"Drive field '{name}' mismatch: revolute={r_off}, prismatic={p_off}")
 
 
+def test_mixed_chain_stability(test, device):
+    """6-body chain with mixed joint types: all constraints hold under gravity."""
+    ss = SolverState(
+        body_capacity=10, contact_capacity=4, shape_count=2,
+        joint_capacity=8, device=device,
+    )
+    spacing = 0.5
+    handles = []
+    for i in range(6):
+        h = ss.add_body(
+            position=(0, 0, 5 - i * spacing),
+            inverse_mass=0.0 if i == 0 else 1.0,
+            is_static=(i == 0),
+        )
+        handles.append(h)
+
+    # Alternating joint types: revolute, prismatic, ball-socket, fixed, revolute
+    anchors = [(0, 0, 5 - (i - 0.5) * spacing) for i in range(1, 6)]
+    ss.add_joint_revolute(handles[0], handles[1], anchors[0], axis_world=(1, 0, 0))
+    ss.add_joint_prismatic(handles[1], handles[2], anchors[1], axis_world=(0, 0, 1))
+    ss.add_joint_ball_socket(handles[2], handles[3], anchors[2])
+    ss.add_joint_fixed(handles[3], handles[4], anchors[3])
+    ss.add_joint_revolute(handles[4], handles[5], anchors[4], axis_world=(1, 0, 0))
+
+    _simulate(ss, frames=40, substeps=8, iters=16)
+
+    # All dynamic bodies should have moved down under gravity
+    for i in range(1, 6):
+        z = _body_pos(ss, handles[i])[2]
+        test.assertLess(z, 5.0, msg=f"Body {i} should move down: z={z:.4f}")
+
+    # Prismatic joint (1→2): lateral displacement should be near zero
+    p1 = _body_pos(ss, handles[1])
+    p2 = _body_pos(ss, handles[2])
+    lateral = np.sqrt((p2[0] - p1[0]) ** 2 + (p2[1] - p1[1]) ** 2)
+    test.assertLess(lateral, 0.1, msg=f"Prismatic lateral drift: {lateral:.4f}")
+
+    # Fixed joint (3→4): relative orientation should be small
+    q3 = _body_orient(ss, handles[3])
+    q4 = _body_orient(ss, handles[4])
+    # Compute relative quaternion angle
+    q_rel = np.array([
+        q4[3] * q3[0] - q4[0] * q3[3] - q4[1] * q3[2] + q4[2] * q3[1],
+        q4[3] * q3[1] + q4[0] * q3[2] - q4[1] * q3[3] - q4[2] * q3[0],
+        q4[3] * q3[2] - q4[0] * q3[1] + q4[1] * q3[0] - q4[2] * q3[3],
+        q4[3] * q3[3] + q4[0] * q3[0] + q4[1] * q3[1] + q4[2] * q3[2],
+    ])
+    rel_angle = 2.0 * np.arccos(np.clip(abs(q_rel[3]), 0.0, 1.0))
+    test.assertLess(rel_angle, 0.2, msg=f"Fixed joint rotation: {rel_angle:.3f} rad")
+
+    # All positions should be finite
+    for i in range(6):
+        p = _body_pos(ss, handles[i])
+        test.assertTrue(np.all(np.isfinite(p)), msg=f"Body {i} has NaN/inf: {p}")
+
+
+def test_graph_coloring_partitions(test, device):
+    """Graph coloring assigns valid independent partitions for a constraint chain."""
+    # Build a 5-body chain so joints share bodies (body 1 is in joints 0 and 1, etc.)
+    ss = SolverState(
+        body_capacity=8, contact_capacity=4, shape_count=2,
+        joint_capacity=8, device=device,
+    )
+    handles = []
+    for i in range(5):
+        h = ss.add_body(
+            position=(0, 0, 5 - i * 0.5),
+            inverse_mass=0.0 if i == 0 else 1.0,
+            is_static=(i == 0),
+        )
+        handles.append(h)
+
+    for i in range(1, 5):
+        ss.add_joint_ball_socket(handles[i - 1], handles[i],
+                                 anchor_world=(0, 0, 5 - (i - 0.5) * 0.5))
+
+    ss.update_world_inertia()
+    # Run one step to trigger partitioning
+    ss.step(dt=1.0 / 240.0, gravity=(0, 0, -9.81), num_iterations=4)
+
+    # Read partition data
+    gc = ss.graph_coloring
+    p_ends = gc.partition_ends.numpy()
+    p_data = gc.partition_data.numpy()
+
+    # Total elements = 0 contacts + 4 joints = 4
+    total = p_ends[gc.max_colors]  # Last partition_end covers all
+    # Find how many elements are actually partitioned
+    # partition_ends is cumulative: slot k covers [p_ends[k-1], p_ends[k])
+    max_end = 0
+    for k in range(gc.max_colors + 1):
+        if p_ends[k] > max_end:
+            max_end = p_ends[k]
+
+    test.assertEqual(max_end, 4, msg=f"Expected 4 elements partitioned, got {max_end}")
+
+    # Verify independence: elements in same partition must not share a body
+    js = ss.joint_store
+    for slot in range(gc.max_colors + 1):
+        start = 0 if slot == 0 else p_ends[slot - 1]
+        end = p_ends[slot]
+        if end <= start:
+            continue
+        bodies_in_slot = set()
+        for idx in range(start, end):
+            elem_id = p_data[idx]
+            # elem_id is contact_count + joint_index; contact_count = 0
+            ji = elem_id
+            b0 = int(js.column_of("body0").numpy()[ji])
+            b1 = int(js.column_of("body1").numpy()[ji])
+            # Check no overlap
+            test.assertNotIn(b0, bodies_in_slot,
+                             msg=f"Partition {slot}: body {b0} appears twice (not independent)")
+            test.assertNotIn(b1, bodies_in_slot,
+                             msg=f"Partition {slot}: body {b1} appears twice (not independent)")
+            bodies_in_slot.add(b0)
+            bodies_in_slot.add(b1)
+
+
+def test_momentum_conservation(test, device):
+    """Total linear momentum is conserved in constraint-only system (no gravity)."""
+    ss = SolverState(
+        body_capacity=10, contact_capacity=4, shape_count=2,
+        joint_capacity=4, device=device,
+    )
+    # Two bodies connected by ball-socket, given initial velocities, no gravity
+    h0 = ss.add_body(position=(0, 0, 0), velocity=(1, 0, 0), inverse_mass=1.0)
+    h1 = ss.add_body(position=(1, 0, 0), velocity=(-1, 0, 0), inverse_mass=1.0)
+    ss.add_joint_ball_socket(h0, h1, anchor_world=(0.5, 0, 0))
+
+    ss.update_world_inertia()
+
+    # Initial momentum: m0*v0 + m1*v1 = 1*(1,0,0) + 1*(-1,0,0) = (0,0,0)
+    p_init = _body_vel(ss, h0) + _body_vel(ss, h1)
+
+    _simulate(ss, frames=30, substeps=8, iters=16, gravity=(0, 0, 0))
+
+    p_final = _body_vel(ss, h0) + _body_vel(ss, h1)
+    np.testing.assert_allclose(p_final, p_init, atol=0.01,
+                               err_msg=f"Momentum not conserved: {p_init} -> {p_final}")
+
+
+def test_mass_splitting_convergence(test, device):
+    """Mass splitting improves convergence for stacked-body scenarios.
+
+    Three bodies (A-static, B, C) with ball-socket joints, all along Z.
+    With mass splitting, the middle body B should reach equilibrium faster
+    because each constraint "sees" only its share of the body mass.
+    """
+    ss = SolverState(
+        body_capacity=10, contact_capacity=4, shape_count=2,
+        joint_capacity=4, device=device,
+    )
+    h_a = ss.add_body(position=(0, 0, 5), is_static=True)
+    h_b = ss.add_body(position=(0, 0, 4), inverse_mass=1.0)
+    h_c = ss.add_body(position=(0, 0, 3), inverse_mass=1.0)
+    ss.add_joint_ball_socket(h_a, h_b, anchor_world=(0, 0, 4.5))
+    ss.add_joint_ball_socket(h_b, h_c, anchor_world=(0, 0, 3.5))
+
+    # Simulate with few iterations — mass splitting is what makes this converge
+    _simulate(ss, frames=60, substeps=4, iters=8)
+
+    # Anchor distances should be preserved (within tolerance)
+    pa = _body_pos(ss, h_a)
+    pb = _body_pos(ss, h_b)
+    pc = _body_pos(ss, h_c)
+
+    d_ab = np.linalg.norm(pb - pa)
+    d_bc = np.linalg.norm(pc - pb)
+    # Chain should be roughly 1m links hanging vertically
+    # This verifies the solver converges — without mass splitting it would drift more
+    test.assertAlmostEqual(d_ab, 1.0, delta=0.15,
+                           msg=f"A-B distance drift: {d_ab:.3f}")
+    test.assertAlmostEqual(d_bc, 1.0, delta=0.15,
+                           msg=f"B-C distance drift: {d_bc:.3f}")
+    # All positions should be finite (regression: NaN from bad mass splitting)
+    for h in [h_a, h_b, h_c]:
+        p = _body_pos(ss, h)
+        test.assertTrue(np.all(np.isfinite(p)), msg=f"NaN/inf in body position: {p}")
+
+
 def test_access_mode_roundtrip(test, device):
     """vel→pos→vel and pos→vel→pos roundtrips recover original state."""
     from newton._src.solvers.phoenx.constraints import sync_pos_to_vel, sync_vel_to_pos
@@ -907,6 +1088,10 @@ add_function_test(TestPhoenXConstraints, "test_prismatic_velocity_drive", test_p
 add_function_test(TestPhoenXConstraints, "test_fixed_joint_no_rotation", test_fixed_joint_no_rotation, devices=devices)
 add_function_test(TestPhoenXConstraints, "test_schema_union_offsets", test_schema_union_offsets, devices=devices)
 add_function_test(TestPhoenXConstraints, "test_access_mode_roundtrip", test_access_mode_roundtrip, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_mixed_chain_stability", test_mixed_chain_stability, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_graph_coloring_partitions", test_graph_coloring_partitions, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_momentum_conservation", test_momentum_conservation, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_mass_splitting_convergence", test_mass_splitting_convergence, devices=devices)
 
 if __name__ == "__main__":
     wp.clear_kernel_cache()

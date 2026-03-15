@@ -162,19 +162,29 @@ def _timed_step(ss, dt, gravity, num_iterations, device):
 
     max_slots = ss.graph_coloring.max_colors + 1
 
+    # Read partition sizes once (matches optimized step())
+    p_ends = ss.graph_coloring.partition_ends.numpy()
+    active_slots = []
+    for p in range(max_slots):
+        p_start = int(p_ends[p - 1]) if p > 0 else 0
+        p_end = int(p_ends[p])
+        size = p_end - p_start
+        if size > 0:
+            active_slots.append((p, size))
+
     # -- prepare --
     _phase("prepare_constraints")
-    for p in range(max_slots):
-        ss._launch_prepare(p, inv_dt)
-        ss._launch_prepare_constraints(p)
+    for p, size in active_slots:
+        ss._launch_prepare(p, inv_dt, dim=size)
+        ss._launch_prepare_constraints(p, dim=size)
     _end("prepare_constraints")
 
     # -- position iterations --
     _phase("solve_position")
     for _ in range(num_iterations):
-        for p in range(max_slots):
-            ss._launch_solve(p, 1)
-            ss._launch_solve_constraints(p, 1)
+        for p, size in active_slots:
+            ss._launch_solve(p, 1, dim=size)
+            ss._launch_solve_constraints(p, 1, dim=size)
     _end("solve_position")
 
     # -- integrate positions --
