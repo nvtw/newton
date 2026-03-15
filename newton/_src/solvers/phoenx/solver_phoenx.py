@@ -78,7 +78,7 @@ class SolverState:
         shape_count: int,
         device: wp.context.Device | str | None = None,
         default_friction: float = 0.5,
-        max_colors: int = 16,
+        max_colors: int = 31,
         joint_capacity: int = 0,
     ):
         self.device = wp.get_device(device)
@@ -305,12 +305,15 @@ class SolverState:
 
         def _quat_mul(a, b):
             # Hamilton product, (x,y,z,w) layout
-            return np.array([
-                a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
-                a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
-                a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
-                a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
-            ], dtype=np.float32)
+            return np.array(
+                [
+                    a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+                    a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+                    a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+                    a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+                ],
+                dtype=np.float32,
+            )
 
         def _quat_rotate(q, v):
             # Rotate vector v by quaternion q: q * (0,v) * conj(q)
@@ -585,9 +588,13 @@ class SolverState:
             ck.prepare,
             dim=self.joint_capacity,
             inputs=[
-                ck.joint_data, ck.body_data,
-                gc.partition_data, gc.partition_ends, partition_slot,
-                self._cached_contact_count, ck.joint_count,
+                ck.joint_data,
+                ck.body_data,
+                gc.partition_data,
+                gc.partition_ends,
+                partition_slot,
+                self._cached_contact_count,
+                ck.joint_count,
             ],
             device=self.device,
         )
@@ -602,9 +609,14 @@ class SolverState:
             ck.solve,
             dim=self.joint_capacity,
             inputs=[
-                ck.joint_data, ck.body_data,
-                gc.partition_data, gc.partition_ends, partition_slot,
-                self._cached_contact_count, ck.joint_count, use_bias,
+                ck.joint_data,
+                ck.body_data,
+                gc.partition_data,
+                gc.partition_ends,
+                partition_slot,
+                self._cached_contact_count,
+                ck.joint_count,
+                use_bias,
             ],
             device=self.device,
         )
@@ -696,3 +708,49 @@ class SolverState:
                 self._launch_solve_constraints(p, 0)
 
         self.integrate_positions(dt)
+
+    # -- external impulse application ---------------------------------------
+
+    def apply_body_impulse(
+        self,
+        body_row: int,
+        impulse_world: tuple[float, float, float],
+        point_world: tuple[float, float, float],
+        dt: float,
+    ):
+        """Apply an impulse to a body, modifying its linear and angular velocity.
+
+        The impulse is applied at a world-space point, producing both linear
+        and angular velocity changes::
+
+            v += impulse * inv_mass
+            w += inv_inertia_world * cross(r, impulse)
+
+        where ``r = point_world - position``.
+
+        Args:
+            body_row: storage row index for the body.
+            impulse_world: impulse vector in world frame [N*s].
+            point_world: world-space application point [m].
+            dt: time step (unused, kept for API symmetry).
+        """
+        bs = self.body_store
+        inv_mass = bs.column_of("inverse_mass").numpy()[body_row]
+        if inv_mass <= 0.0:
+            return
+        inv_inertia = bs.column_of("inverse_inertia_world").numpy()[body_row]
+        pos = bs.column_of("position").numpy()[body_row]
+
+        imp = np.array(impulse_world, dtype=np.float32)
+        r = np.array(point_world, dtype=np.float32) - pos
+
+        # Linear velocity change
+        vel = bs.column_of("velocity").numpy()
+        vel[body_row] += imp * inv_mass
+        bs.column_of("velocity").assign(wp.array(vel, dtype=wp.vec3, device=self.device))
+
+        # Angular velocity change: w += I_inv * (r x impulse)
+        torque_impulse = np.cross(r, imp)
+        ang_vel = bs.column_of("angular_velocity").numpy()
+        ang_vel[body_row] += inv_inertia @ torque_impulse
+        bs.column_of("angular_velocity").assign(wp.array(ang_vel, dtype=wp.vec3, device=self.device))

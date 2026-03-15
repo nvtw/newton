@@ -270,6 +270,8 @@ def prepare_contacts_kernel(
     c_eff_t1: wp.array(dtype=wp.float32),
     c_eff_t2: wp.array(dtype=wp.float32),
     c_bias: wp.array(dtype=wp.float32),
+    c_margin0: wp.array(dtype=wp.float32),
+    c_margin1: wp.array(dtype=wp.float32),
     b_position: wp.array(dtype=wp.vec3),
     b_orientation: wp.array(dtype=wp.quat),
     b_velocity: wp.array(dtype=wp.vec3),
@@ -315,9 +317,10 @@ def prepare_contacts_kernel(
     pos0 = b_position[b0]
     pos1 = b_position[b1]
 
-    gap = wp.dot(n, (pos1 + rw1) - (pos0 + rw0))
-    # C# does: bias = -ComputeContactBias(-gap, invDt)
-    # Negative bias for overlapping bodies so that delta_n = -(dv + bias)*eff > 0
+    # Newton convention: offsets point to margin-inward reference
+    # points; subtract margin0 + margin1 to get actual surface gap.
+    thickness = c_margin0[ci] + c_margin1[ci]
+    gap = wp.dot(n, (pos1 + rw1) - (pos0 + rw0)) - thickness
     c_bias[ci] = -compute_contact_bias(-gap, inv_dt)
 
     inv_m0 = b_inverse_mass[b0]
@@ -651,6 +654,8 @@ class ContactKernels:
         c_eff_t1 = col_base(contact_store, "effective_mass_t1")
         c_eff_t2 = col_base(contact_store, "effective_mass_t2")
         c_bias = col_base(contact_store, "bias")
+        c_margin0 = col_base(contact_store, "margin0")
+        c_margin1 = col_base(contact_store, "margin1")
 
         # Body column base indices
         b_position = col_base(body_ds, "position")
@@ -710,9 +715,10 @@ class ContactKernels:
             pos0 = ds_load_vec3(bdata, wp.static(b_position), b0)
             pos1 = ds_load_vec3(bdata, wp.static(b_position), b1)
 
-            gap = wp.dot(n, (pos1 + rw1) - (pos0 + rw0))
-            # C# does: bias = -ComputeContactBias(-gap, invDt)
-            # Negative bias for overlapping bodies so that delta_n = -(dv + bias)*eff > 0
+            # Newton convention: offsets point to margin-inward reference
+            # points; subtract margin0 + margin1 to get actual surface gap.
+            thickness = ds_load_float(cdata, wp.static(c_margin0), ci) + ds_load_float(cdata, wp.static(c_margin1), ci)
+            gap = wp.dot(n, (pos1 + rw1) - (pos0 + rw0)) - thickness
             ds_store_float(cdata, wp.static(c_bias), ci, -compute_contact_bias(-gap, inv_dt))
 
             inv_m0 = ds_load_float(bdata, wp.static(b_inverse_mass), b0)

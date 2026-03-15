@@ -625,6 +625,300 @@ def test_collision_pipeline_box_stack(test, device):
 
 
 # ===========================================================================
+# Test 13: Pyramid stability (regression test from example_phoenx_pyramid)
+# ===========================================================================
+
+def test_pyramid_stability(test, device):
+    """Pyramid of boxes on a plane should remain stable for several seconds.
+
+    Boxes may sink slightly due to PGS convergence limits, but should
+    not drift laterally or fall through the ground.  This catches
+    regressions in the contact solver, bias computation, or warm starting.
+    """
+    num_layers = 3
+    h = 0.5
+    spacing = 2.0 * h + 0.02
+
+    box_positions = []
+    for layer in range(num_layers):
+        n = num_layers - layer
+        z = layer * spacing + h
+        offset = -(n - 1) * spacing * 0.5
+        for row in range(n):
+            for col in range(n):
+                x = offset + col * spacing
+                y = offset + row * spacing
+                box_positions.append((x, y, z))
+
+    num_boxes = len(box_positions)
+    num_shapes = num_boxes + 1
+    body_cap = num_boxes + 1
+    contact_cap = max(num_boxes * 16, 512)
+
+    ss = SolverState(
+        body_capacity=body_cap, contact_capacity=contact_cap,
+        shape_count=num_shapes, device=device, default_friction=0.6,
+    )
+    pipeline = PhoenXCollisionPipeline(
+        max_shapes=num_shapes, max_contacts=contact_cap, device=device,
+    )
+
+    h_ground = ss.add_body(position=(0, 0, 0), is_static=True)
+    ground_row = int(ss.body_store.handle_to_index.numpy()[h_ground])
+    ss.set_shape_body(0, h_ground)
+    pipeline.add_shape_plane(body_row=ground_row)
+
+    mass = 1.0
+    inv_mass = 1.0 / mass
+    inv_inertia = np.eye(3, dtype=np.float32) * (6.0 * inv_mass / (2.0 * h) ** 2)
+
+    box_handles = []
+    for i, (px, py, pz) in enumerate(box_positions):
+        bh = ss.add_body(
+            position=(px, py, pz), inverse_mass=inv_mass,
+            inverse_inertia_local=inv_inertia,
+            linear_damping=0.995, angular_damping=0.99,
+        )
+        shape_idx = i + 1
+        ss.set_shape_body(shape_idx, bh)
+        pipeline.add_shape_box(
+            body_row=int(ss.body_store.handle_to_index.numpy()[bh]),
+            half_extents=(h, h, h),
+        )
+        box_handles.append(bh)
+
+    pipeline.finalize()
+
+    initial_positions = np.array(box_positions, dtype=np.float32)
+
+    dt = 1.0 / 60.0
+    substeps = 8
+    sub_dt = dt / substeps
+    num_frames = 120  # 2 seconds
+
+    for _ in range(num_frames):
+        ss.update_world_inertia()
+        for _ in range(substeps):
+            ss.warm_starter.begin_frame()
+            pipeline.collide(ss)
+            ss.step(sub_dt, gravity=(0, 0, -9.81), num_iterations=12)
+            ss.export_impulses()
+
+    wp.synchronize_device(device)
+
+    h2i = ss.body_store.handle_to_index.numpy()
+    positions = ss.body_store.column_of("position").numpy()
+
+    for i, bh in enumerate(box_handles):
+        row = int(h2i[bh])
+        pos = positions[row]
+        init = initial_positions[i]
+
+        # No box should fall through the ground
+        test.assertGreater(pos[2], -0.1,
+                           f"Box {i} fell through ground: z={pos[2]:.4f}")
+
+        # Lateral drift should be small (< 1 box width)
+        lateral_drift = np.sqrt((pos[0] - init[0]) ** 2 + (pos[1] - init[1]) ** 2)
+        test.assertLess(lateral_drift, 1.0,
+                         f"Box {i} drifted laterally: {lateral_drift:.4f}")
+
+        # Vertical sinking should be limited (allow up to 1 box height)
+        test.assertGreater(pos[2], init[2] - 2.0 * h,
+                           f"Box {i} sank too much: z={pos[2]:.4f} (init={init[2]:.2f})")
+
+
+# ===========================================================================
+# Test 14: Graph coloring invariant — simple contact graph
+# ===========================================================================
+
+def _validate_partition_invariant(test, elements_np, partition_data_np,
+                                  partition_ends_np, num_partitions,
+                                  has_additional, element_count):
+    """Check that no two contacts in the same partition share a body.
+
+    Args:
+        elements_np: (N, 8) int32 array of body indices per contact (-1 = unused).
+        partition_data_np: sorted element indices from GraphColoring.
+        partition_ends_np: cumulative partition sizes.
+        num_partitions: number of color partitions (excludes overflow).
+        has_additional: whether an overflow partition exists.
+        element_count: total number of active elements.
+    """
+    total_slots = num_partitions + (1 if has_additional else 0)
+    start = 0
+    for p in range(total_slots):
+        end = int(partition_ends_np[p])
+        is_overflow = (p == num_partitions) and has_additional
+        elem_indices = partition_data_np[start:end]
+
+        if not is_overflow:
+            # Collect all body indices touched by contacts in this partition
+            bodies_seen = set()
+            for ei in elem_indices:
+                ei = int(ei)
+                test.assertLess(ei, element_count,
+                                f"Partition {p} references out-of-range element {ei}")
+                row = elements_np[ei]
+                for b in row:
+                    if b < 0:
+                        break
+                    test.assertNotIn(
+                        b, bodies_seen,
+                        f"Partition {p}: body {b} appears in multiple contacts "
+                        f"(element {ei} conflicts with a prior element)")
+                    bodies_seen.add(b)
+        start = end
+
+
+def test_graph_coloring_simple(test, device):
+    """Graph coloring on a small contact graph must satisfy the partition invariant.
+
+    Setup: 3 bodies (0, 1, 2), 4 contacts:
+        c0: bodies (0, 1)
+        c1: bodies (1, 2)
+        c2: bodies (0, 2)
+        c3: bodies (0, 1)   -- duplicate of c0
+    Contacts c0 and c1 share body 1, c0 and c2 share body 0, etc.
+    The coloring must ensure no two contacts in the same partition share a body.
+    """
+    from newton._src.solvers.phoenx.maximal_independent_set import GraphColoring
+
+    num_contacts = 4
+    num_bodies = 3
+    max_elements = 16
+    max_nodes = 8
+    max_colors = 8
+
+    gc = GraphColoring(max_elements=max_elements, max_nodes=max_nodes,
+                       max_colors=max_colors, device=device)
+
+    # Build elements array: (max_elements, 8), padded with -1
+    elements_np = np.full((max_elements, 8), -1, dtype=np.int32)
+    elements_np[0, 0] = 0; elements_np[0, 1] = 1  # c0: bodies 0, 1
+    elements_np[1, 0] = 1; elements_np[1, 1] = 2  # c1: bodies 1, 2
+    elements_np[2, 0] = 0; elements_np[2, 1] = 2  # c2: bodies 0, 2
+    elements_np[3, 0] = 0; elements_np[3, 1] = 1  # c3: bodies 0, 1 (dup)
+
+    elements = wp.array(elements_np, dtype=wp.int32, device=device)
+    element_count = wp.array([num_contacts], dtype=wp.int32, device=device)
+    node_count = wp.array([num_bodies], dtype=wp.int32, device=device)
+
+    gc.color(elements, element_count, node_count)
+    wp.synchronize_device(device)
+
+    partition_data_np = gc.partition_data.numpy()[:max_elements]
+    partition_ends_np = gc.partition_ends.numpy()
+    num_partitions = int(gc.num_partitions.numpy()[0])
+    has_additional = int(gc.has_additional.numpy()[0]) != 0
+
+    # All contacts must be accounted for
+    total_assigned = int(partition_ends_np[num_partitions - 1]) if num_partitions > 0 else 0
+    if has_additional:
+        total_assigned = int(partition_ends_np[max_colors])
+    test.assertEqual(total_assigned, num_contacts,
+                     f"Expected {num_contacts} contacts assigned, got {total_assigned}")
+
+    # Validate the key invariant
+    _validate_partition_invariant(
+        test, elements_np, partition_data_np, partition_ends_np,
+        num_partitions, has_additional, num_contacts)
+
+
+# ===========================================================================
+# Test 15: Graph coloring — pyramid configuration
+# ===========================================================================
+
+def test_graph_coloring_pyramid(test, device):
+    """Graph coloring on a pyramid-like scene with heavy ground-body sharing.
+
+    15 bodies (body 0 = ground), ~40 contacts where many share body 0.
+    Validates the partition invariant and checks overflow is <10%.
+    """
+    from newton._src.solvers.phoenx.maximal_independent_set import GraphColoring
+
+    num_bodies = 15
+    # Build contacts: each non-ground body has a contact with the ground,
+    # plus contacts between adjacent bodies in a grid pattern.
+    contacts = []
+
+    # Layer 0: bodies 1..9 (3x3 grid on ground)
+    layer0 = list(range(1, 10))
+    for b in layer0:
+        contacts.append((0, b))  # ground contact
+
+    # Adjacent pairs in 3x3 grid
+    for r in range(3):
+        for c in range(3):
+            idx = 1 + r * 3 + c
+            if c < 2:
+                contacts.append((idx, idx + 1))
+            if r < 2:
+                contacts.append((idx, idx + 3))
+
+    # Layer 1: bodies 10..13 (2x2 on top of layer 0)
+    layer1 = list(range(10, 14))
+    for i, b in enumerate(layer1):
+        r, c = divmod(i, 2)
+        base = 1 + r * 3 + c
+        contacts.append((base, b))
+        contacts.append((base + 1, b))
+        contacts.append((base + 3, b))
+        contacts.append((base + 4, b))
+
+    # Layer 2: body 14 on top of layer 1
+    for b in layer1:
+        contacts.append((b, 14))
+
+    num_contacts = len(contacts)
+    max_elements = max(num_contacts * 2, 128)
+    max_nodes = max(num_bodies * 2, 32)
+    max_colors = 16
+
+    gc = GraphColoring(max_elements=max_elements, max_nodes=max_nodes,
+                       max_colors=max_colors, device=device)
+
+    elements_np = np.full((max_elements, 8), -1, dtype=np.int32)
+    for i, (b0, b1) in enumerate(contacts):
+        elements_np[i, 0] = b0
+        elements_np[i, 1] = b1
+
+    elements = wp.array(elements_np, dtype=wp.int32, device=device)
+    element_count = wp.array([num_contacts], dtype=wp.int32, device=device)
+    node_count = wp.array([num_bodies], dtype=wp.int32, device=device)
+
+    gc.color(elements, element_count, node_count)
+    wp.synchronize_device(device)
+
+    partition_data_np = gc.partition_data.numpy()[:max_elements]
+    partition_ends_np = gc.partition_ends.numpy()
+    num_partitions = int(gc.num_partitions.numpy()[0])
+    has_additional = int(gc.has_additional.numpy()[0]) != 0
+
+    # All contacts must be accounted for
+    total_assigned = int(partition_ends_np[num_partitions - 1]) if num_partitions > 0 else 0
+    overflow_count = 0
+    if has_additional:
+        total_with_overflow = int(partition_ends_np[max_colors])
+        overflow_count = total_with_overflow - total_assigned
+        total_assigned = total_with_overflow
+    test.assertEqual(total_assigned, num_contacts,
+                     f"Expected {num_contacts} contacts assigned, got {total_assigned}")
+
+    # Validate the key invariant
+    _validate_partition_invariant(
+        test, elements_np, partition_data_np, partition_ends_np,
+        num_partitions, has_additional, num_contacts)
+
+    # Flag if overflow exceeds 10%
+    overflow_pct = overflow_count / num_contacts * 100.0 if num_contacts > 0 else 0.0
+    test.assertLessEqual(
+        overflow_pct, 10.0,
+        f"Overflow partition has {overflow_count}/{num_contacts} contacts "
+        f"({overflow_pct:.1f}%), exceeding 10% threshold")
+
+
+# ===========================================================================
 # Registration
 # ===========================================================================
 
@@ -654,6 +948,12 @@ add_function_test(TestPhoenXComprehensive, "test_friction_stops_sliding",
                   test_friction_stops_sliding, devices=devices)
 add_function_test(TestPhoenXComprehensive, "test_collision_pipeline_box_stack",
                   test_collision_pipeline_box_stack, devices=devices)
+add_function_test(TestPhoenXComprehensive, "test_pyramid_stability",
+                  test_pyramid_stability, devices=devices)
+add_function_test(TestPhoenXComprehensive, "test_graph_coloring_simple",
+                  test_graph_coloring_simple, devices=devices)
+add_function_test(TestPhoenXComprehensive, "test_graph_coloring_pyramid",
+                  test_graph_coloring_pyramid, devices=devices)
 
 if __name__ == "__main__":
     wp.init()

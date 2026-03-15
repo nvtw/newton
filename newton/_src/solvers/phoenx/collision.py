@@ -206,6 +206,8 @@ def _convert_contacts_kernel(
     out_normal[tid] = n
     out_offset0[tid] = offset0
     out_offset1[tid] = offset1
+    # Newton convention: margin = radius_eff + shape_margin.
+    # For box/plane primitives with no rounding, margins are 0.
     out_margin0[tid] = 0.0
     out_margin1[tid] = 0.0
     out_friction[tid] = default_friction
