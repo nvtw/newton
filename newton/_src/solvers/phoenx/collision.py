@@ -37,6 +37,7 @@ GEO_TYPE_SPHERE = 3
 GEO_TYPE_CAPSULE = 4
 GEO_TYPE_CYLINDER = 6
 GEO_TYPE_BOX = 7
+GEO_TYPE_MESH = 8
 
 # ---------------------------------------------------------------------------
 # Kernels
@@ -79,6 +80,8 @@ def _compute_shape_aabbs_kernel(
     shape_type: wp.array(dtype=wp.int32),
     shape_data: wp.array(dtype=wp.vec4),
     shape_transform: wp.array(dtype=wp.transform),
+    shape_collision_aabb_lower: wp.array(dtype=wp.vec3),
+    shape_collision_aabb_upper: wp.array(dtype=wp.vec3),
     aabb_lower: wp.array(dtype=wp.vec3),
     aabb_upper: wp.array(dtype=wp.vec3),
     count: wp.array(dtype=wp.int32),
@@ -135,6 +138,20 @@ def _compute_shape_aabbs_kernel(
         ez = wp.abs(r[2, 2]) * half_h + wp.sqrt(r[2, 0] * r[2, 0] + r[2, 1] * r[2, 1]) * radius
         aabb_lower[tid] = pos - wp.vec3(ex, ey, ez)
         aabb_upper[tid] = pos + wp.vec3(ex, ey, ez)
+    elif geo == 8:  # MESH
+        # Transform pre-computed local-space AABB to world space
+        local_lo = shape_collision_aabb_lower[tid]
+        local_hi = shape_collision_aabb_upper[tid]
+        r = wp.quat_to_matrix(q)
+        # Compute rotated AABB extents
+        half = (local_hi - local_lo) * 0.5
+        center_local = (local_lo + local_hi) * 0.5
+        center_world = pos + wp.quat_rotate(q, center_local)
+        ex = wp.abs(r[0, 0]) * half[0] + wp.abs(r[0, 1]) * half[1] + wp.abs(r[0, 2]) * half[2]
+        ey = wp.abs(r[1, 0]) * half[0] + wp.abs(r[1, 1]) * half[1] + wp.abs(r[1, 2]) * half[2]
+        ez = wp.abs(r[2, 0]) * half[0] + wp.abs(r[2, 1]) * half[1] + wp.abs(r[2, 2]) * half[2]
+        aabb_lower[tid] = center_world - wp.vec3(ex, ey, ez)
+        aabb_upper[tid] = center_world + wp.vec3(ex, ey, ez)
     else:
         # Planes and unknown types: large AABB
         big = float(1.0e6)
@@ -252,6 +269,8 @@ class PhoenXCollisionPipeline:
         self._shape_local_xf_list: list[tuple] = []
         self._shape_body_row_list: list[int] = []
         self._shape_collision_radius_list: list[float] = []
+        self._shape_mesh_ids: dict[int, int] = {}  # shape index → wp.Mesh.id (uint64)
+        self._shape_local_aabb: dict[int, tuple] = {}  # shape index → (lower, upper) vec3 tuples
         self._finalized = False
 
     # -- shape registration (host-side, before finalize) --------------------
@@ -404,6 +423,42 @@ class PhoenXCollisionPipeline:
         self._shape_collision_radius_list.append(1.0e6)
         return idx
 
+    def add_shape_mesh(
+        self,
+        body_row: int,
+        mesh_id: int,
+        local_transform: tuple | None = None,
+        collision_radius: float = 1.0,
+        aabb_lower: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        aabb_upper: tuple[float, float, float] = (1.0, 1.0, 1.0),
+        voxel_resolution: tuple[int, int, int] = (4, 4, 4),
+    ) -> int:
+        """Register a triangle mesh collision shape.
+
+        Args:
+            body_row: storage row in the solver's body store.
+            mesh_id: ``wp.Mesh.id`` (uint64) for the mesh BVH.
+            local_transform: ``(px, py, pz, qx, qy, qz, qw)`` or ``None``.
+            collision_radius: bounding sphere radius [m] for broad phase.
+            aabb_lower: local-space AABB lower bound [m].
+            aabb_upper: local-space AABB upper bound [m].
+            voxel_resolution: voxel grid resolution for contact binning.
+
+        Returns:
+            Shape index.
+        """
+        idx = len(self._shape_type_list)
+        self._shape_type_list.append(GEO_TYPE_MESH)
+        self._shape_data_list.append((0.0, 0.0, 0.0, 0.0))
+        if local_transform is None:
+            local_transform = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+        self._shape_local_xf_list.append(local_transform)
+        self._shape_body_row_list.append(body_row)
+        self._shape_collision_radius_list.append(collision_radius)
+        self._shape_mesh_ids[idx] = mesh_id
+        self._shape_local_aabb[idx] = (aabb_lower, aabb_upper, voxel_resolution)
+        return idx
+
     # -- finalize -----------------------------------------------------------
 
     def finalize(self):
@@ -429,7 +484,12 @@ class PhoenXCollisionPipeline:
 
         self.shape_body_row = wp.array(self._shape_body_row_list, dtype=wp.int32, device=d)
 
-        self.shape_source = wp.zeros(n, dtype=wp.uint64, device=d)
+        # Populate shape_source with mesh IDs (0 for non-mesh shapes)
+        source_list = [0] * n
+        for idx, mesh_id in self._shape_mesh_ids.items():
+            source_list[idx] = mesh_id
+        self.shape_source = wp.array(source_list, dtype=wp.uint64, device=d)
+
         self.shape_gap = wp.zeros(n, dtype=wp.float32, device=d)
         self.shape_collision_radius = wp.array(self._shape_collision_radius_list, dtype=wp.float32, device=d)
         flags_val = int(ShapeFlags.COLLIDE_SHAPES)
@@ -437,9 +497,25 @@ class PhoenXCollisionPipeline:
         self.shape_collision_group = wp.full(n, 1, dtype=wp.int32, device=d)
         self.shape_world = wp.zeros(n, dtype=wp.int32, device=d)
         self.shape_sdf_index = wp.full(n, -1, dtype=wp.int32, device=d)
-        self.shape_voxel_resolution = wp.array([wp.vec3i(4, 4, 4)] * n, dtype=wp.vec3i, device=d)
-        self.shape_collision_aabb_lower = wp.zeros(n, dtype=wp.vec3, device=d)
-        self.shape_collision_aabb_upper = wp.ones(n, dtype=wp.vec3, device=d)
+
+        # Populate per-shape local AABBs and voxel resolutions (meshes have real values)
+        aabb_lower_list = []
+        aabb_upper_list = []
+        voxel_res_list = []
+        for i in range(n):
+            if i in self._shape_local_aabb:
+                lo, hi, vr = self._shape_local_aabb[i]
+                aabb_lower_list.append(lo)
+                aabb_upper_list.append(hi)
+                voxel_res_list.append(vr)
+            else:
+                aabb_lower_list.append((0.0, 0.0, 0.0))
+                aabb_upper_list.append((1.0, 1.0, 1.0))
+                voxel_res_list.append((4, 4, 4))
+
+        self.shape_voxel_resolution = wp.array([wp.vec3i(*v) for v in voxel_res_list], dtype=wp.vec3i, device=d)
+        self.shape_collision_aabb_lower = wp.array([wp.vec3(*v) for v in aabb_lower_list], dtype=wp.vec3, device=d)
+        self.shape_collision_aabb_upper = wp.array([wp.vec3(*v) for v in aabb_upper_list], dtype=wp.vec3, device=d)
 
         self.shape_transform = wp.zeros(n, dtype=wp.transform, device=d)
         self.shape_aabb_lower = wp.zeros(n, dtype=wp.vec3, device=d)
@@ -510,6 +586,8 @@ class PhoenXCollisionPipeline:
                 self.shape_type,
                 self.shape_data,
                 self.shape_transform,
+                self.shape_collision_aabb_lower,
+                self.shape_collision_aabb_upper,
                 self.shape_aabb_lower,
                 self.shape_aabb_upper,
                 self.shape_count,

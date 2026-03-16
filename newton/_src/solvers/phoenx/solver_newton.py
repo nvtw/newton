@@ -35,6 +35,7 @@ from .collision import (
     GEO_TYPE_BOX,
     GEO_TYPE_CAPSULE,
     GEO_TYPE_CYLINDER,
+    GEO_TYPE_MESH,
     GEO_TYPE_PLANE,
     GEO_TYPE_SPHERE,
     PhoenXCollisionPipeline,
@@ -101,6 +102,7 @@ _GEO_TYPE_MAP = {
     GEO_TYPE_CAPSULE: "capsule",
     GEO_TYPE_CYLINDER: "cylinder",
     GEO_TYPE_BOX: "box",
+    GEO_TYPE_MESH: "mesh",
 }
 
 
@@ -190,6 +192,15 @@ class SolverPhoenX(SolverBase):
         self._init_joints(model)
         self.pipeline.finalize()
 
+        # Wire up mesh data for voxel-bucketed warm starting
+        if any(t == GEO_TYPE_MESH for t in self.pipeline._shape_type_list):
+            self.ss.warm_starter.set_mesh_data(
+                shape_type=self.pipeline.shape_type,
+                shape_collision_aabb_lower=self.pipeline.shape_collision_aabb_lower,
+                shape_collision_aabb_upper=self.pipeline.shape_collision_aabb_upper,
+                shape_voxel_resolution=self.pipeline.shape_voxel_resolution,
+            )
+
     # -- initialisation helpers ---------------------------------------------
 
     def _init_bodies(self, model: Model) -> None:
@@ -246,6 +257,15 @@ class SolverPhoenX(SolverBase):
         shape_body_np = model.shape_body.numpy()
         shape_xf_np = model.shape_transform.numpy()
 
+        # Pre-load mesh-related arrays if any mesh shapes exist
+        has_meshes = any(int(t) == GEO_TYPE_MESH for t in shape_type_np)
+        if has_meshes:
+            source_ptr_np = model.shape_source_ptr.numpy()
+            collision_radius_np = model.shape_collision_radius.numpy()
+            collision_aabb_lo_np = model.shape_collision_aabb_lower.numpy()
+            collision_aabb_hi_np = model.shape_collision_aabb_upper.numpy()
+            voxel_res_np = model._shape_voxel_resolution.numpy()
+
         h2i = self.ss.body_store.handle_to_index.numpy()
 
         for i in range(n):
@@ -280,8 +300,13 @@ class SolverPhoenX(SolverBase):
             # Build local transform tuple (px, py, pz, qx, qy, qz, qw)
             xf = shape_xf_np[i]
             local_xf = (
-                float(xf[0]), float(xf[1]), float(xf[2]),
-                float(xf[3]), float(xf[4]), float(xf[5]), float(xf[6]),
+                float(xf[0]),
+                float(xf[1]),
+                float(xf[2]),
+                float(xf[3]),
+                float(xf[4]),
+                float(xf[5]),
+                float(xf[6]),
             )
 
             if geo == GEO_TYPE_BOX:
@@ -315,11 +340,25 @@ class SolverPhoenX(SolverBase):
                     body_row=body_row,
                     local_transform=local_xf,
                 )
+            elif geo == GEO_TYPE_MESH:
+                mesh_id = int(source_ptr_np[i])
+                coll_radius = float(collision_radius_np[i])
+                aabb_lo = collision_aabb_lo_np[i]
+                aabb_hi = collision_aabb_hi_np[i]
+                vr = voxel_res_np[i]
+                self.pipeline.add_shape_mesh(
+                    body_row=body_row,
+                    mesh_id=mesh_id,
+                    local_transform=local_xf,
+                    collision_radius=coll_radius,
+                    aabb_lower=(float(aabb_lo[0]), float(aabb_lo[1]), float(aabb_lo[2])),
+                    aabb_upper=(float(aabb_hi[0]), float(aabb_hi[1]), float(aabb_hi[2])),
+                    voxel_resolution=(int(vr[0]), int(vr[1]), int(vr[2])),
+                )
             else:
                 geo_name = _GEO_TYPE_MAP.get(geo, str(geo))
                 warnings.warn(
-                    f"Shape {i}: unsupported geometry type {geo_name} ({geo}), "
-                    f"contacts from Newton will still work.",
+                    f"Shape {i}: unsupported geometry type {geo_name} ({geo}), contacts from Newton will still work.",
                     stacklevel=2,
                 )
 
@@ -370,13 +409,18 @@ class SolverPhoenX(SolverBase):
         def _quat_rotate(q, v):
             """Rotate vector v by quaternion q (xyzw layout)."""
             qv = np.array([v[0], v[1], v[2], 0.0], dtype=np.float32)
+
             def _qmul(a, b):
-                return np.array([
-                    a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
-                    a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
-                    a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
-                    a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
-                ], dtype=np.float32)
+                return np.array(
+                    [
+                        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+                        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+                        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+                        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+                    ],
+                    dtype=np.float32,
+                )
+
             qc = np.array([-q[0], -q[1], -q[2], q[3]], dtype=np.float32)
             return _qmul(_qmul(q, qv), qc)[:3]
 
@@ -470,8 +514,12 @@ class SolverPhoenX(SolverBase):
             ji = -1
             if jtype == JointType.REVOLUTE:
                 ji = self.ss.add_joint_revolute(
-                    parent_handle, child_handle, anchor, axis,
-                    angle_min=angle_min, angle_max=angle_max,
+                    parent_handle,
+                    child_handle,
+                    anchor,
+                    axis,
+                    angle_min=angle_min,
+                    angle_max=angle_max,
                 )
             elif jtype == JointType.BALL:
                 ji = self.ss.add_joint_ball_socket(parent_handle, child_handle, anchor)
@@ -479,8 +527,12 @@ class SolverPhoenX(SolverBase):
                 ji = self.ss.add_joint_fixed(parent_handle, child_handle, anchor)
             elif jtype == JointType.PRISMATIC:
                 ji = self.ss.add_joint_prismatic(
-                    parent_handle, child_handle, anchor, axis,
-                    slide_min=angle_min, slide_max=angle_max,
+                    parent_handle,
+                    child_handle,
+                    anchor,
+                    axis,
+                    slide_min=angle_min,
+                    slide_max=angle_max,
                 )
             elif jtype == JointType.FREE:
                 continue  # No constraint needed

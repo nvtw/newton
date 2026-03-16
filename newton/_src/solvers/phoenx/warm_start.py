@@ -55,6 +55,36 @@ def make_pair_key(shape_a: wp.int32, shape_b: wp.int32) -> wp.int64:
 
 
 @wp.func
+def make_pair_key_voxel(
+    shape_a: wp.int32,
+    shape_b: wp.int32,
+    offset0: wp.vec3,
+    aabb_lower: wp.vec3,
+    aabb_upper: wp.vec3,
+    voxel_res: wp.vec3i,
+) -> wp.int64:
+    """Symmetric pair key with a spatial voxel bin in the lower 8 bits.
+
+    Encodes ``(min_shape << 32) | (max_shape << 8) | voxel_bin``.
+    The voxel bin is computed from the body-local contact offset within the
+    shape's local AABB, modulo 256 to fit in 8 bits.
+    """
+    lo = wp.min(shape_a, shape_b)
+    hi = wp.max(shape_a, shape_b)
+    # Compute voxel bin from offset0 position in AABB
+    extent = aabb_upper - aabb_lower
+    cell_x = extent[0] / float(wp.max(voxel_res[0], 1))
+    cell_y = extent[1] / float(wp.max(voxel_res[1], 1))
+    cell_z = extent[2] / float(wp.max(voxel_res[2], 1))
+    ix = wp.clamp(wp.int32((offset0[0] - aabb_lower[0]) / wp.max(cell_x, 1.0e-10)), 0, voxel_res[0] - 1)
+    iy = wp.clamp(wp.int32((offset0[1] - aabb_lower[1]) / wp.max(cell_y, 1.0e-10)), 0, voxel_res[1] - 1)
+    iz = wp.clamp(wp.int32((offset0[2] - aabb_lower[2]) / wp.max(cell_z, 1.0e-10)), 0, voxel_res[2] - 1)
+    linear = ix * voxel_res[1] * voxel_res[2] + iy * voxel_res[2] + iz
+    voxel_bin = linear % 256
+    return (wp.int64(lo) << wp.int64(32)) | (wp.int64(hi) << wp.int64(8)) | wp.int64(voxel_bin)
+
+
+@wp.func
 def binary_search_int64(
     keys: wp.array(dtype=wp.int64),
     count: wp.int32,
@@ -109,6 +139,40 @@ def _compute_pair_keys_kernel(
     tid = wp.tid()
     if tid < contact_count[0]:
         pair_keys[tid] = make_pair_key(shape0[tid], shape1[tid])
+
+
+@wp.kernel
+def _compute_pair_keys_voxel_kernel(
+    shape0: wp.array(dtype=wp.int32),
+    shape1: wp.array(dtype=wp.int32),
+    offset0: wp.array(dtype=wp.vec3),
+    shape_type: wp.array(dtype=wp.int32),
+    shape_collision_aabb_lower: wp.array(dtype=wp.vec3),
+    shape_collision_aabb_upper: wp.array(dtype=wp.vec3),
+    shape_voxel_resolution: wp.array(dtype=wp.vec3i),
+    pair_keys: wp.array(dtype=wp.int64),
+    contact_count: wp.array(dtype=wp.int32),
+):
+    """Compute pair keys with voxel binning for mesh shape pairs."""
+    tid = wp.tid()
+    if tid >= contact_count[0]:
+        return
+    s0 = shape0[tid]
+    s1 = shape1[tid]
+    # Use voxel-binned key if either shape is a mesh (type 8)
+    if shape_type[s0] == 8 or shape_type[s1] == 8:
+        # Use shape with lower index for AABB lookup (the "min" shape)
+        ref = wp.min(s0, s1)
+        pair_keys[tid] = make_pair_key_voxel(
+            s0,
+            s1,
+            offset0[tid],
+            shape_collision_aabb_lower[ref],
+            shape_collision_aabb_upper[ref],
+            shape_voxel_resolution[ref],
+        )
+    else:
+        pair_keys[tid] = make_pair_key(s0, s1)
 
 
 @wp.kernel
@@ -378,6 +442,29 @@ class WarmStarter:
             self.curr_count,
         )
 
+    def set_mesh_data(
+        self,
+        shape_type: wp.array,
+        shape_collision_aabb_lower: wp.array,
+        shape_collision_aabb_upper: wp.array,
+        shape_voxel_resolution: wp.array,
+    ):
+        """Provide mesh shape data for voxel-bucketed pair keys.
+
+        Call once after :meth:`finalize` on the collision pipeline. When set,
+        :meth:`import_keys` will use voxel-binned keys for mesh shape pairs.
+
+        Args:
+            shape_type: ``int32`` per-shape geometry type array.
+            shape_collision_aabb_lower: ``vec3`` per-shape local AABB lower bounds.
+            shape_collision_aabb_upper: ``vec3`` per-shape local AABB upper bounds.
+            shape_voxel_resolution: ``vec3i`` per-shape voxel grid resolution.
+        """
+        self._shape_type = shape_type
+        self._shape_collision_aabb_lower = shape_collision_aabb_lower
+        self._shape_collision_aabb_upper = shape_collision_aabb_upper
+        self._shape_voxel_resolution = shape_voxel_resolution
+
     def import_keys(
         self,
         shape0: wp.array,
@@ -398,12 +485,31 @@ class WarmStarter:
 
         wp.copy(self.curr_count, contact_count)
 
-        wp.launch(
-            _compute_pair_keys_kernel,
-            dim=cap,
-            inputs=[shape0, shape1, self.curr_keys, self.curr_count],
-            device=d,
-        )
+        if offset0 is not None and hasattr(self, "_shape_type") and self._shape_type is not None:
+            # Use voxel-binned keys when mesh data is available
+            wp.launch(
+                _compute_pair_keys_voxel_kernel,
+                dim=cap,
+                inputs=[
+                    shape0,
+                    shape1,
+                    offset0,
+                    self._shape_type,
+                    self._shape_collision_aabb_lower,
+                    self._shape_collision_aabb_upper,
+                    self._shape_voxel_resolution,
+                    self.curr_keys,
+                    self.curr_count,
+                ],
+                device=d,
+            )
+        else:
+            wp.launch(
+                _compute_pair_keys_kernel,
+                dim=cap,
+                inputs=[shape0, shape1, self.curr_keys, self.curr_count],
+                device=d,
+            )
 
         if offset0 is not None:
             wp.launch(
