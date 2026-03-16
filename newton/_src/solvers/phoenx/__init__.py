@@ -17,6 +17,7 @@ from .collision import PhoenXCollisionPipeline
 from .data_base import DataStore, HandleStore, Schema
 from .maximal_independent_set import GraphColoring
 from .schemas import BODY_FLAG_STATIC, ContactPointSchema, RigidBodySchema
+from .solver_newton import SolverPhoenX
 from .solver_phoenx import SolverState
 from .union_find import UnionFind
 from .warm_start import WarmStarter
@@ -30,6 +31,7 @@ __all__ = [
     "PhoenXCollisionPipeline",
     "RigidBodySchema",
     "Schema",
+    "SolverPhoenX",
     "SolverState",
     "UnionFind",
     "WarmStarter",

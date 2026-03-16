@@ -17,6 +17,7 @@ from .featherstone import SolverFeatherstone
 from .flags import SolverNotifyFlags
 from .implicit_mpm import SolverImplicitMPM
 from .kamino import SolverKamino
+from .phoenx import SolverPhoenX
 from .mujoco import SolverMuJoCo
 from .semi_implicit import SolverSemiImplicit
 from .solver import SolverBase
@@ -30,6 +31,7 @@ __all__ = [
     "SolverImplicitMPM",
     "SolverKamino",
     "SolverMuJoCo",
+    "SolverPhoenX",
     "SolverNotifyFlags",
     "SolverSemiImplicit",
     "SolverStyle3D",
