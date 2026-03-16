@@ -150,11 +150,15 @@ class SolverPhoenX(SolverBase):
         n_joints = model.joint_count
 
         # Determine whether we need a static world body for joints with
-        # parent == -1 (world-anchored).
+        # parent == -1 or shapes with body == -1 (ground plane, etc.).
         self._has_world_body = False
         if n_joints > 0 and model.joint_parent is not None:
             jp = model.joint_parent.numpy()
             if np.any(jp < 0):
+                self._has_world_body = True
+        if n_shapes > 0 and model.shape_body is not None:
+            sb = model.shape_body.numpy()
+            if np.any(sb < 0):
                 self._has_world_body = True
 
         total_bodies = n_bodies + (1 if self._has_world_body else 0)
@@ -266,6 +270,13 @@ class SolverPhoenX(SolverBase):
                     continue
                 body_row = int(h2i[handle])
 
+            # Always map shape → body in PhoenX (needed for contact import)
+            phoenx_handle = self._newton_to_phoenx.get(body_idx)
+            if phoenx_handle is not None:
+                self.ss.set_shape_body(i, phoenx_handle)
+            elif self._has_world_body:
+                self.ss.set_shape_body(i, self._world_body_handle)
+
             # Build local transform tuple (px, py, pz, qx, qy, qz, qw)
             xf = shape_xf_np[i]
             local_xf = (
@@ -307,17 +318,10 @@ class SolverPhoenX(SolverBase):
             else:
                 geo_name = _GEO_TYPE_MAP.get(geo, str(geo))
                 warnings.warn(
-                    f"Shape {i}: unsupported geometry type {geo_name} ({geo}), skipping.",
+                    f"Shape {i}: unsupported geometry type {geo_name} ({geo}), "
+                    f"contacts from Newton will still work.",
                     stacklevel=2,
                 )
-                continue
-
-            # Map shape → body in PhoenX solver state
-            phoenx_handle = self._newton_to_phoenx.get(body_idx)
-            if phoenx_handle is not None:
-                self.ss.set_shape_body(i, phoenx_handle)
-            elif self._has_world_body:
-                self.ss.set_shape_body(i, self._world_body_handle)
 
     def _init_joints(self, model: Model) -> None:
         """Translate Newton joints into PhoenX constraints."""
@@ -336,6 +340,22 @@ class SolverPhoenX(SolverBase):
         if has_axis:
             axis_np = model.joint_axis.numpy()
             qd_start_np = model.joint_qd_start.numpy()
+
+        # Joint limits and drives (per-DOF arrays)
+        has_limits = model.joint_limit_lower is not None and model.joint_limit_upper is not None
+        if has_limits:
+            lim_lo_np = model.joint_limit_lower.numpy()
+            lim_hi_np = model.joint_limit_upper.numpy()
+        has_drives = (
+            model.joint_target_ke is not None
+            and model.joint_target_kd is not None
+            and model.joint_target_pos is not None
+        )
+        if has_drives:
+            drive_ke_np = model.joint_target_ke.numpy()
+            drive_kd_np = model.joint_target_kd.numpy()
+            drive_pos_np = model.joint_target_pos.numpy()
+            drive_mode_np = model.joint_target_mode.numpy() if model.joint_target_mode is not None else None
 
         # Read body poses for computing world-space anchors
         body_q_np = model.body_q.numpy()
@@ -436,24 +456,57 @@ class SolverPhoenX(SolverBase):
             else:
                 axis = (0.0, 0.0, 1.0)
 
+            # Read per-DOF limits for this joint
+            angle_min = -1.0e7
+            angle_max = 1.0e7
+            if has_limits and has_axis:
+                dof_start = int(qd_start_np[i])
+                lo = float(lim_lo_np[dof_start])
+                hi = float(lim_hi_np[dof_start])
+                if lo > -1.0e6 or hi < 1.0e6:
+                    angle_min = lo
+                    angle_max = hi
+
+            ji = -1
             if jtype == JointType.REVOLUTE:
-                self.ss.add_joint_revolute(parent_handle, child_handle, anchor, axis)
+                ji = self.ss.add_joint_revolute(
+                    parent_handle, child_handle, anchor, axis,
+                    angle_min=angle_min, angle_max=angle_max,
+                )
             elif jtype == JointType.BALL:
-                self.ss.add_joint_ball_socket(parent_handle, child_handle, anchor)
+                ji = self.ss.add_joint_ball_socket(parent_handle, child_handle, anchor)
             elif jtype == JointType.FIXED:
-                self.ss.add_joint_fixed(parent_handle, child_handle, anchor)
+                ji = self.ss.add_joint_fixed(parent_handle, child_handle, anchor)
             elif jtype == JointType.PRISMATIC:
-                self.ss.add_joint_prismatic(parent_handle, child_handle, anchor, axis)
+                ji = self.ss.add_joint_prismatic(
+                    parent_handle, child_handle, anchor, axis,
+                    slide_min=angle_min, slide_max=angle_max,
+                )
             elif jtype == JointType.FREE:
-                pass  # No constraint needed
+                continue  # No constraint needed
             elif jtype == JointType.DISTANCE:
-                # Use ball-socket as approximation
-                self.ss.add_joint_ball_socket(parent_handle, child_handle, anchor)
+                ji = self.ss.add_joint_ball_socket(parent_handle, child_handle, anchor)
             else:
                 warnings.warn(
                     f"Joint {i}: unsupported joint type {jtype}, skipping.",
                     stacklevel=2,
                 )
+                continue
+
+            # Apply joint drives (position drive with stiffness/damping)
+            if ji >= 0 and has_drives and has_axis:
+                dof_start = int(qd_start_np[i])
+                ke = float(drive_ke_np[dof_start])
+                kd = float(drive_kd_np[dof_start])
+                target = float(drive_pos_np[dof_start])
+                if ke > 0.0 or kd > 0.0:
+                    self.ss.set_joint_drive(
+                        ji,
+                        mode=self.ss.DRIVE_POSITION,
+                        target=target,
+                        stiffness=ke,
+                        damping=kd,
+                    )
 
     # -- step ---------------------------------------------------------------
 
@@ -502,6 +555,7 @@ class SolverPhoenX(SolverBase):
 
         sub_dt = dt / float(self._num_substeps)
         for _ in range(self._num_substeps):
+            self.ss.warm_starter.begin_frame()
             self.pipeline.collide(self.ss)
             self.ss.step(
                 sub_dt,
@@ -509,8 +563,7 @@ class SolverPhoenX(SolverBase):
                 num_iterations=self._num_iterations,
                 num_velocity_iterations=self._num_velocity_iterations,
             )
-
-        self.ss.export_impulses()
+            self.ss.export_impulses()
 
         # 3. Sync PhoenX body store → Newton state_out
         wp.launch(
