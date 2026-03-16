@@ -780,7 +780,7 @@ def build_sparse_sdf_from_mesh(
     max_corner: np.ndarray,
     subgrid_size: int = 8,
     narrow_band_thickness: float = 0.1,
-    quantization_mode: int = QuantizationMode.FLOAT32,
+    quantization_mode: int = QuantizationMode.UINT16,
     winding_threshold: float = 0.5,
     linearization_error_threshold: float | None = None,
     device: str = "cuda",
@@ -982,7 +982,6 @@ def build_sparse_sdf_from_mesh(
             final_sdf_min = 0.0
             final_sdf_range = 1.0
             subgrid_texture_data = subgrid_texture_gpu.numpy().reshape((tex_size, tex_size, tex_size))
-            subgrid_texture_data = subgrid_texture_data.astype(np.float32)
 
         elif quantization_mode == QuantizationMode.UINT16:
             subgrid_texture_gpu = wp.zeros(total_tex_samples, dtype=wp.uint16, device=device)
@@ -1011,8 +1010,7 @@ def build_sparse_sdf_from_mesh(
             )
             final_sdf_min = global_sdf_min
             final_sdf_range = sdf_range
-            uint16_data = subgrid_texture_gpu.numpy().reshape((tex_size, tex_size, tex_size))
-            subgrid_texture_data = uint16_data.astype(np.float32) / 65535.0
+            subgrid_texture_data = subgrid_texture_gpu.numpy().reshape((tex_size, tex_size, tex_size))
 
         elif quantization_mode == QuantizationMode.UINT8:
             subgrid_texture_gpu = wp.zeros(total_tex_samples, dtype=wp.uint8, device=device)
@@ -1041,8 +1039,7 @@ def build_sparse_sdf_from_mesh(
             )
             final_sdf_min = global_sdf_min
             final_sdf_range = sdf_range
-            uint8_data = subgrid_texture_gpu.numpy().reshape((tex_size, tex_size, tex_size))
-            subgrid_texture_data = uint8_data.astype(np.float32) / 255.0
+            subgrid_texture_data = subgrid_texture_gpu.numpy().reshape((tex_size, tex_size, tex_size))
 
         else:
             raise ValueError(f"Unknown quantization mode: {quantization_mode}")
@@ -1069,7 +1066,7 @@ def build_sparse_sdf_from_mesh(
 
     return {
         "coarse_sdf": background_sdf_np.astype(np.float32),
-        "subgrid_data": subgrid_texture_data.astype(np.float32),
+        "subgrid_data": subgrid_texture_data,
         "subgrid_start_slots": subgrid_start_slots,
         "coarse_dims": (w, h, d),
         "subgrid_tex_size": tex_size,
@@ -1152,7 +1149,7 @@ def create_texture_sdf_from_mesh(
     narrow_band_range: tuple[float, float] = (-0.1, 0.1),
     max_resolution: int = 64,
     subgrid_size: int = 8,
-    quantization_mode: int = QuantizationMode.FLOAT32,
+    quantization_mode: int = QuantizationMode.UINT16,
     winding_threshold: float = 0.5,
     scale_baked: bool = False,
     device: str | None = None,
@@ -1571,7 +1568,7 @@ def create_texture_sdf_from_volume(
 
     sparse_data = {
         "coarse_sdf": background_sdf_np.astype(np.float32),
-        "subgrid_data": subgrid_texture_data.astype(np.float32),
+        "subgrid_data": subgrid_texture_data,
         "subgrid_start_slots": subgrid_start_slots,
         "coarse_dims": (w, h, d),
         "subgrid_tex_size": tex_size,

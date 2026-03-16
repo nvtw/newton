@@ -245,6 +245,11 @@ class ModelBuilder:
         """Maximum dimension for sparse SDF grid (must be divisible by 8).
         If provided (and sdf_target_voxel_size is None), enables primitive SDF
         generation. Requires GPU since wp.Volume only supports CUDA."""
+        sdf_texture_format: str = "uint16"
+        """Subgrid texture storage format for the SDF. ``"uint16"``
+        (default) stores subgrid voxels as 16-bit normalized textures (half
+        the memory of ``"float32"``). ``"float32"`` stores full-precision
+        values. ``"uint8"`` uses 8-bit textures for minimum memory."""
         is_hydroelastic: bool = False
         """Whether the shape collides using SDF-based hydroelastics. For hydroelastic collisions, both participating shapes must have is_hydroelastic set to True. Defaults to False.
 
@@ -267,6 +272,7 @@ class ModelBuilder:
             target_voxel_size: float | None = None,
             is_hydroelastic: bool = False,
             kh: float = 1.0e10,
+            texture_format: str | None = None,
         ) -> None:
             """Enable SDF-based collision for this shape.
 
@@ -282,6 +288,9 @@ class ModelBuilder:
                 is_hydroelastic: Whether to use SDF-based hydroelastic contacts. Both shapes
                     in a pair must have this enabled.
                 kh: Contact stiffness coefficient for hydroelastic collisions.
+                texture_format: Subgrid texture storage format. ``"uint16"``
+                    (default) uses 16-bit normalized textures. ``"float32"``
+                    uses full-precision. ``"uint8"`` uses 8-bit textures.
 
             Raises:
                 ValueError: If both max_resolution and target_voxel_size are provided.
@@ -296,6 +305,8 @@ class ModelBuilder:
                 self.sdf_max_resolution = None
             self.is_hydroelastic = is_hydroelastic
             self.kh = kh
+            if texture_format is not None:
+                self.sdf_texture_format = texture_format
 
         def validate(self, shape_type: int | None = None) -> None:
             """Validate ShapeConfig parameters.
@@ -900,6 +911,8 @@ class ModelBuilder:
         """Per-shape target SDF voxel sizes retained until :meth:`finalize <ModelBuilder.finalize>`."""
         self.shape_sdf_max_resolution: list[int | None] = []
         """Per-shape SDF maximum resolutions retained until :meth:`finalize <ModelBuilder.finalize>`."""
+        self.shape_sdf_texture_format: list[str] = []
+        """Per-shape SDF texture format retained until :meth:`finalize <ModelBuilder.finalize>`."""
 
         # Mesh SDF storage (texture SDF arrays created at finalize)
 
@@ -3061,6 +3074,7 @@ class ModelBuilder:
             "shape_sdf_narrow_band_range",
             "shape_sdf_max_resolution",
             "shape_sdf_target_voxel_size",
+            "shape_sdf_texture_format",
             "particle_qd",
             "particle_mass",
             "particle_radius",
@@ -5200,6 +5214,7 @@ class ModelBuilder:
         self.shape_sdf_narrow_band_range.append(cfg.sdf_narrow_band_range)
         self.shape_sdf_target_voxel_size.append(cfg.sdf_target_voxel_size)
         self.shape_sdf_max_resolution.append(cfg.sdf_max_resolution)
+        self.shape_sdf_texture_format.append(cfg.sdf_texture_format)
 
         if cfg.has_shape_collision and cfg.collision_filter_parent and body > -1 and body in self.joint_parents:
             for parent_body in self.joint_parents[body]:
@@ -9581,10 +9596,17 @@ class ModelBuilder:
             sdf_block_coords = []
             sdf_index2blocks = []
             from ..geometry.sdf_texture import (  # noqa: PLC0415
+                QuantizationMode,
                 TextureSDFData,
                 create_empty_texture_sdf_data,
                 create_texture_sdf_from_mesh,
             )
+
+            _tex_fmt_map = {
+                "float32": QuantizationMode.FLOAT32,
+                "uint16": QuantizationMode.UINT16,
+                "uint8": QuantizationMode.UINT8,
+            }
 
             compact_texture_sdf_data = []
             compact_texture_sdf_coarse_textures = []
@@ -9602,6 +9624,7 @@ class ModelBuilder:
                 sdf_narrow_band_range = self.shape_sdf_narrow_band_range[i]
                 sdf_target_voxel_size = self.shape_sdf_target_voxel_size[i]
                 sdf_max_resolution = self.shape_sdf_max_resolution[i]
+                sdf_tex_fmt = self.shape_sdf_texture_format[i]
                 is_hydroelastic = bool(shape_flags & ShapeFlags.HYDROELASTIC)
                 has_shape_collision = bool(shape_flags & ShapeFlags.COLLIDE_SHAPES)
 
@@ -9670,6 +9693,7 @@ class ModelBuilder:
                                         margin=shape_gap,
                                         narrow_band_range=tuple(sdf_narrow_band_range),
                                         max_resolution=effective_max_resolution,
+                                        quantization_mode=_tex_fmt_map.get(sdf_tex_fmt, QuantizationMode.UINT16),
                                         scale_baked=True,
                                         device=device,
                                     )

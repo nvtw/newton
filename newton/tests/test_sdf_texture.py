@@ -734,6 +734,222 @@ def test_texture_sdf_from_volume(test, device):
     test.assertGreater(val_out, 0.0, f"Far point should be outside box, got {val_out:.4f}")
 
 
+def _build_texture_sdf_with_mode(
+    mesh, quantization_mode, resolution=64, margin=0.05, narrow_band_range=(-0.1, 0.1), device="cuda:0"
+):
+    """Build a texture SDF with a specific quantization mode."""
+    wp_mesh = wp.Mesh(
+        points=wp.array(mesh.vertices, dtype=wp.vec3, device=device),
+        indices=wp.array(mesh.indices, dtype=wp.int32, device=device),
+        support_winding_number=True,
+    )
+    tex_sdf, coarse_tex, subgrid_tex, _block_coords = create_texture_sdf_from_mesh(
+        wp_mesh,
+        margin=margin,
+        narrow_band_range=narrow_band_range,
+        max_resolution=resolution,
+        quantization_mode=quantization_mode,
+        device=device,
+    )
+    return tex_sdf, coarse_tex, subgrid_tex, wp_mesh
+
+
+def test_uint16_native_texture_dtype(test, device):
+    """Verify uint16 mode produces native uint16 subgrid textures."""
+    mesh = _create_box_mesh()
+    _tex_sdf, _coarse_tex, subgrid_tex, _wp_mesh = _build_texture_sdf_with_mode(
+        mesh,
+        QuantizationMode.UINT16,
+        resolution=32,
+        device=device,
+    )
+    import warp  # noqa: PLC0415
+
+    test.assertEqual(subgrid_tex.dtype, warp.uint16, "Subgrid texture should be uint16")
+    test.assertEqual(_coarse_tex.dtype, warp.float32, "Coarse texture should remain float32")
+
+
+def test_uint16_vs_nanovdb_distance(test, device):
+    """Compare uint16 texture SDF vs NanoVDB SDF distance at random query points.
+
+    Verifies that uint16 texture SDF (with float32 background) matches
+    NanoVDB within tight tolerances for both near-surface and random points.
+    """
+    mesh = _create_box_mesh()
+    tex_sdf, _ct, _st, _wm = _build_texture_sdf_with_mode(
+        mesh,
+        QuantizationMode.UINT16,
+        resolution=64,
+        device=device,
+    )
+
+    mesh_copy = _create_box_mesh()
+    mesh_copy.build_sdf(max_resolution=64, narrow_band_range=(-0.1, 0.1), margin=0.05)
+    nanovdb_data = mesh_copy.sdf.to_kernel_data()
+
+    query_np = _generate_query_points(mesh, num_points=1000)
+    query_points = wp.array(query_np, dtype=wp.vec3, device=device)
+    n = len(query_np)
+
+    tex_results = wp.zeros(n, dtype=float, device=device)
+    nano_results = wp.zeros(n, dtype=float, device=device)
+    wp.launch(_sample_texture_sdf_kernel, dim=n, inputs=[tex_sdf, query_points, tex_results], device=device)
+    wp.launch(_sample_nanovdb_value_kernel, dim=n, inputs=[nanovdb_data, query_points, nano_results], device=device)
+    wp.synchronize()
+
+    tex_np = tex_results.numpy()
+    nano_np = nano_results.numpy()
+
+    valid = (np.abs(tex_np) < 1e5) & (np.abs(nano_np) < 1e5)
+    test.assertGreater(np.sum(valid), 500, f"Too few valid points: {np.sum(valid)}")
+
+    diff = np.abs(tex_np[valid] - nano_np[valid])
+    mean_err = float(diff.mean())
+    max_err = float(diff.max())
+    test.assertLess(mean_err, 0.02, f"UINT16 vs NanoVDB mean distance error too large: {mean_err:.6f}")
+    test.assertLess(max_err, 0.15, f"UINT16 vs NanoVDB max distance error too large: {max_err:.6f}")
+
+
+def test_uint16_vs_nanovdb_gradient(test, device):
+    """Compare uint16 texture SDF gradient vs NanoVDB gradient.
+
+    Uses analytical trilinear gradient for texture SDF and finite-difference
+    gradient for NanoVDB. Tests both angular agreement and magnitude similarity.
+    """
+    mesh = _create_box_mesh()
+    tex_sdf, _ct, _st, _wm = _build_texture_sdf_with_mode(
+        mesh,
+        QuantizationMode.UINT16,
+        resolution=64,
+        device=device,
+    )
+
+    mesh_copy = _create_box_mesh()
+    mesh_copy.build_sdf(max_resolution=64, narrow_band_range=(-0.1, 0.1), margin=0.05)
+    nanovdb_data = mesh_copy.sdf.to_kernel_data()
+
+    query_np = _generate_query_points(mesh, num_points=1000)
+    query_points = wp.array(query_np, dtype=wp.vec3, device=device)
+    n = len(query_np)
+
+    tex_vals = wp.zeros(n, dtype=float, device=device)
+    tex_grads = wp.zeros(n, dtype=wp.vec3, device=device)
+    nano_vals = wp.zeros(n, dtype=float, device=device)
+    nano_grads = wp.zeros(n, dtype=wp.vec3, device=device)
+
+    wp.launch(
+        _sample_texture_sdf_grad_kernel, dim=n, inputs=[tex_sdf, query_points, tex_vals, tex_grads], device=device
+    )
+    wp.launch(
+        _sample_nanovdb_grad_kernel, dim=n, inputs=[nanovdb_data, query_points, nano_vals, nano_grads], device=device
+    )
+    wp.synchronize()
+
+    tg = tex_grads.numpy()
+    ng = nano_grads.numpy()
+    tv = tex_vals.numpy()
+    nv = nano_vals.numpy()
+
+    valid = (np.abs(tv) < 1e5) & (np.abs(nv) < 1e5)
+    n1 = np.linalg.norm(tg, axis=1)
+    n2 = np.linalg.norm(ng, axis=1)
+    grad_valid = valid & (n1 > 1e-8) & (n2 > 1e-8)
+    test.assertGreater(np.sum(grad_valid), 300, f"Too few valid gradient points: {np.sum(grad_valid)}")
+
+    tg_n = tg[grad_valid] / n1[grad_valid, None]
+    ng_n = ng[grad_valid] / n2[grad_valid, None]
+    dots = np.sum(tg_n * ng_n, axis=1)
+    angles = np.arccos(np.clip(dots, -1, 1)) * 180.0 / np.pi
+
+    mean_angle = float(angles.mean())
+    test.assertLess(mean_angle, 10.0, f"UINT16 vs NanoVDB mean gradient angle too large: {mean_angle:.2f} deg")
+
+
+def test_uint16_vs_float32_texture_accuracy(test, device):
+    """Verify uint16 native textures match float32 textures within quantization precision.
+
+    Tests that switching from float32 to uint16 subgrid textures introduces
+    only minimal error from the 16-bit quantization, confirming the native
+    uint16 texture path works correctly.
+    """
+    mesh = _create_box_mesh()
+
+    tex_f32, _cf, _sf, _wf = _build_texture_sdf_with_mode(
+        mesh,
+        QuantizationMode.FLOAT32,
+        resolution=64,
+        device=device,
+    )
+    tex_u16, _cu, _su, _wu = _build_texture_sdf_with_mode(
+        mesh,
+        QuantizationMode.UINT16,
+        resolution=64,
+        device=device,
+    )
+
+    query_np = _generate_query_points(mesh, num_points=1000)
+    query_points = wp.array(query_np, dtype=wp.vec3, device=device)
+    n = len(query_np)
+
+    results_f32 = wp.zeros(n, dtype=float, device=device)
+    results_u16 = wp.zeros(n, dtype=float, device=device)
+    grads_f32 = wp.zeros(n, dtype=wp.vec3, device=device)
+    grads_u16 = wp.zeros(n, dtype=wp.vec3, device=device)
+
+    wp.launch(
+        _sample_texture_sdf_grad_kernel, dim=n, inputs=[tex_f32, query_points, results_f32, grads_f32], device=device
+    )
+    wp.launch(
+        _sample_texture_sdf_grad_kernel, dim=n, inputs=[tex_u16, query_points, results_u16, grads_u16], device=device
+    )
+    wp.synchronize()
+
+    f32_np = results_f32.numpy()
+    u16_np = results_u16.numpy()
+
+    valid = (np.abs(f32_np) < 1e5) & (np.abs(u16_np) < 1e5)
+    test.assertGreater(np.sum(valid), 500)
+
+    dist_diff = np.abs(f32_np[valid] - u16_np[valid])
+    mean_dist_err = float(dist_diff.mean())
+    max_dist_err = float(dist_diff.max())
+    test.assertLess(mean_dist_err, 1e-4, f"UINT16 vs FLOAT32 mean distance error: {mean_dist_err:.2e}")
+    test.assertLess(max_dist_err, 1e-3, f"UINT16 vs FLOAT32 max distance error: {max_dist_err:.2e}")
+
+    gf = grads_f32.numpy()
+    gu = grads_u16.numpy()
+    n1 = np.linalg.norm(gf, axis=1)
+    n2 = np.linalg.norm(gu, axis=1)
+    grad_valid = valid & (n1 > 1e-8) & (n2 > 1e-8)
+
+    if np.sum(grad_valid) > 100:
+        gf_n = gf[grad_valid] / n1[grad_valid, None]
+        gu_n = gu[grad_valid] / n2[grad_valid, None]
+        dots = np.sum(gf_n * gu_n, axis=1)
+        angles = np.arccos(np.clip(dots, -1, 1)) * 180.0 / np.pi
+        mean_angle = float(angles.mean())
+        test.assertLess(mean_angle, 1.0, f"UINT16 vs FLOAT32 mean gradient angle: {mean_angle:.4f} deg")
+
+
+def test_build_sdf_texture_format_parameter(test, device):
+    """Verify Mesh.build_sdf() respects the texture_format parameter."""
+    mesh_u16 = _create_box_mesh()
+    sdf_u16 = mesh_u16.build_sdf(max_resolution=32, texture_format="uint16")
+    test.assertIsNotNone(sdf_u16)
+    test.assertIsNotNone(sdf_u16._subgrid_texture)
+
+    mesh_f32 = _create_box_mesh()
+    sdf_f32 = mesh_f32.build_sdf(max_resolution=32, texture_format="float32")
+    test.assertIsNotNone(sdf_f32)
+
+    import warp  # noqa: PLC0415
+
+    if sdf_u16._subgrid_texture is not None:
+        test.assertEqual(sdf_u16._subgrid_texture.dtype, warp.uint16)
+    if sdf_f32._subgrid_texture is not None:
+        test.assertEqual(sdf_f32._subgrid_texture.dtype, warp.float32)
+
+
 # Register tests for CUDA devices
 devices = get_cuda_test_devices()
 add_function_test(TestTextureSDF, "test_texture_sdf_construction", test_texture_sdf_construction, devices=devices)
@@ -767,6 +983,15 @@ add_function_test(
 )
 add_function_test(TestTextureSDF, "test_texture_sdf_scale_baked", test_texture_sdf_scale_baked, devices=devices)
 add_function_test(TestTextureSDF, "test_texture_sdf_from_volume", test_texture_sdf_from_volume, devices=devices)
+add_function_test(TestTextureSDF, "test_uint16_native_texture_dtype", test_uint16_native_texture_dtype, devices=devices)
+add_function_test(TestTextureSDF, "test_uint16_vs_nanovdb_distance", test_uint16_vs_nanovdb_distance, devices=devices)
+add_function_test(TestTextureSDF, "test_uint16_vs_nanovdb_gradient", test_uint16_vs_nanovdb_gradient, devices=devices)
+add_function_test(
+    TestTextureSDF, "test_uint16_vs_float32_texture_accuracy", test_uint16_vs_float32_texture_accuracy, devices=devices
+)
+add_function_test(
+    TestTextureSDF, "test_build_sdf_texture_format_parameter", test_build_sdf_texture_format_parameter, devices=devices
+)
 
 
 if __name__ == "__main__":
