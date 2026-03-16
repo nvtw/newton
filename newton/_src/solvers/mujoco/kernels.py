@@ -755,6 +755,7 @@ def convert_mjw_contacts_to_newton_kernel(
 
 CTRL_SOURCE_JOINT_TARGET = wp.constant(0)
 CTRL_SOURCE_CTRL_DIRECT = wp.constant(1)
+CTRL_SOURCE_ADHESION = wp.constant(2)
 
 
 @wp.kernel
@@ -764,6 +765,7 @@ def apply_mjc_control_kernel(
     joint_target_pos: wp.array(dtype=wp.float32),
     joint_target_vel: wp.array(dtype=wp.float32),
     mujoco_ctrl: wp.array(dtype=wp.float32),
+    shape_adhesion_ctrl: wp.array(dtype=wp.float32),
     dofs_per_world: wp.int32,
     ctrls_per_world: wp.int32,
     # outputs
@@ -778,12 +780,15 @@ def apply_mjc_control_kernel(
 
     For CTRL_DIRECT (source=1), mjc_actuator_to_newton_idx is the ctrl index.
 
+    For ADHESION (source=2), mjc_actuator_to_newton_idx is the Newton shape index.
+
     Args:
-        mjc_actuator_ctrl_source: 0=JOINT_TARGET, 1=CTRL_DIRECT
+        mjc_actuator_ctrl_source: 0=JOINT_TARGET, 1=CTRL_DIRECT, 2=ADHESION
         mjc_actuator_to_newton_idx: Index into Newton array (sign-encoded for JOINT_TARGET)
         joint_target_pos: Per-DOF position targets
         joint_target_vel: Per-DOF velocity targets
         mujoco_ctrl: Direct control inputs (from control.mujoco.ctrl)
+        shape_adhesion_ctrl: Per-shape adhesion control signal [0, 1]
         dofs_per_world: Number of DOFs per world
         ctrls_per_world: Number of ctrl inputs per world
         mj_ctrl: Output MuJoCo control array
@@ -805,6 +810,11 @@ def apply_mjc_control_kernel(
             newton_axis = -(idx + 2)
             world_dof = world * dofs_per_world + newton_axis
             mj_ctrl[world, actuator] = joint_target_vel[world_dof]
+    elif source == CTRL_SOURCE_ADHESION:
+        if shape_adhesion_ctrl:
+            mj_ctrl[world, actuator] = shape_adhesion_ctrl[idx]
+        else:
+            mj_ctrl[world, actuator] = 0.0
     else:  # CTRL_SOURCE_CTRL_DIRECT
         world_ctrl_idx = world * ctrls_per_world + idx
         if world_ctrl_idx < mujoco_ctrl.shape[0]:

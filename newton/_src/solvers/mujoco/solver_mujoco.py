@@ -169,10 +169,12 @@ class SolverMuJoCo(SolverBase):
 
         - :attr:`JOINT_TARGET`: Maps from Newton's :attr:`~newton.Control.joint_target_pos`/:attr:`~newton.Control.joint_target_vel` arrays
         - :attr:`CTRL_DIRECT`: Uses ``control.mujoco.ctrl`` directly (for MuJoCo-native control)
+        - :attr:`ADHESION`: Maps from :attr:`~newton.Control.shape_adhesion_ctrl` (suction-cup adhesion)
         """
 
         JOINT_TARGET = 0
         CTRL_DIRECT = 1
+        ADHESION = 2
 
     class CtrlType(IntEnum):
         """Control type for MuJoCo actuators.
@@ -3179,6 +3181,7 @@ class SolverMuJoCo(SolverBase):
                         control.joint_target_pos,
                         control.joint_target_vel,
                         mujoco_ctrl,
+                        control.shape_adhesion_ctrl,
                         dofs_per_world,
                         ctrls_per_world,
                     ],
@@ -4889,6 +4892,44 @@ class SolverMuJoCo(SolverBase):
             mjc_tendon_names,
             body_name_mapping,
         )
+
+        # Add MuJoCo adhesion actuators for shapes with nonzero adhesion_gain.
+        # MuJoCo's adhesion actuator injects attractive forces at contact points
+        # along the contact normal, matching Newton's suction-cup model.
+        if model.shape_material_adhesion_gain is not None:
+            adhesion_gains = model.shape_material_adhesion_gain.numpy()
+            shape_bodies = model.shape_body.numpy()
+            for shape_idx in range(model.shape_count):
+                gain = float(adhesion_gains[shape_idx])
+                if gain <= 0.0:
+                    continue
+                body_idx = int(shape_bodies[shape_idx])
+                body_name = body_name_mapping.get(body_idx)
+                if body_name is None:
+                    continue
+                try:
+                    act = spec.add_actuator(
+                        name=f"adhesion_{body_name}_{shape_idx}",
+                        target=body_name,
+                        trntype=mujoco.mjtTrn.mjTRN_BODY,
+                        dyntype=mujoco.mjtDyn.mjDYN_NONE,
+                        gaintype=mujoco.mjtGain.mjGAIN_FIXED,
+                        biastype=mujoco.mjtBias.mjBIAS_NONE,
+                        gainprm=[gain, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        ctrlrange=[0.0, 1.0],
+                        ctrllimited=True,
+                    )
+                    act.is_adhesion = True
+                    mjc_actuator_ctrl_source_list.append(int(SolverMuJoCo.CtrlSource.ADHESION))
+                    mjc_actuator_to_newton_idx_list.append(shape_idx)
+                    actuator_count += 1
+                except (AttributeError, TypeError):
+                    if wp.config.verbose:
+                        print(
+                            f"Warning: MuJoCo version does not support adhesion actuators via spec API. "
+                            f"Adhesion for shape {shape_idx} on body '{body_name}' will not be active in MuJoCo solver."
+                        )
+                    break
 
         # Convert actuator mapping lists to warp arrays
         if mjc_actuator_ctrl_source_list:

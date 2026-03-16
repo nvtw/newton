@@ -933,5 +933,97 @@ for device in devices:
             solver_fn=solver_fn,
         )
 
+@wp.kernel
+def _apply_upward_force_kernel(
+    body_f: wp.array(dtype=wp.spatial_vector),
+    force_z: float,
+):
+    tid = wp.tid()
+    if tid == 0:
+        body_f[0] = wp.spatial_vector(0.0, 0.0, force_z, 0.0, 0.0, 0.0)
+
+
+def test_suction_cup_adhesion(test, device, solver_fn):
+    """Verify controllable suction-cup adhesion: box stays when ctrl=1, releases when ctrl=0."""
+    builder = newton.ModelBuilder()
+
+    box_size = 0.1
+    box_mass = 1.0
+    box_density = box_mass / (8.0 * box_size**3)
+    adhesion_force = 50.0  # well above gravity (9.81 N for 1 kg)
+
+    shape_cfg = newton.ModelBuilder.ShapeConfig(
+        density=box_density,
+        ke=1e3,
+        kd=100.0,
+        kf=100.0,
+        ka=0.05,
+        adhesion_gain=adhesion_force,
+    )
+
+    builder.add_ground_plane(cfg=shape_cfg)
+
+    b = builder.add_body(xform=wp.transform((0.0, 0.0, box_size), wp.quat_identity()))
+    builder.add_shape_box(body=b, hx=box_size, hy=box_size, hz=box_size, cfg=shape_cfg)
+
+    model = builder.finalize(device=device)
+    solver = solver_fn(model)
+    state_0 = model.state()
+    state_1 = model.state()
+    control = model.control()
+    contacts = model.contacts()
+
+    sub_dt = 1.0 / 1000.0
+    upward_force = 30.0  # less than adhesion_force (50 N)
+
+    # Phase 1: settle on the ground with adhesion OFF (ctrl=0)
+    control.shape_adhesion_ctrl.zero_()
+    for _ in range(2000):
+        state_0.clear_forces()
+        model.collide(state_0, contacts)
+        solver.step(state_0, state_1, control, contacts, sub_dt)
+        state_0, state_1 = state_1, state_0
+
+    settled_z = float(state_0.body_q.numpy()[0][2])
+
+    # Phase 2: enable adhesion (ctrl=1) and apply upward force < adhesion_gain
+    control.shape_adhesion_ctrl.fill_(1.0)
+    for _ in range(500):
+        state_0.clear_forces()
+        wp.launch(_apply_upward_force_kernel, dim=1, inputs=[state_0.body_f, upward_force], device=device)
+        model.collide(state_0, contacts)
+        solver.step(state_0, state_1, control, contacts, sub_dt)
+        state_0, state_1 = state_1, state_0
+
+    held_z = float(state_0.body_q.numpy()[0][2])
+    test.assertAlmostEqual(held_z, settled_z, delta=0.05, msg="Box should be held near ground by suction cup")
+
+    # Phase 3: disable adhesion (ctrl=0), box should fly up
+    control.shape_adhesion_ctrl.zero_()
+    for _ in range(500):
+        state_0.clear_forces()
+        wp.launch(_apply_upward_force_kernel, dim=1, inputs=[state_0.body_f, upward_force], device=device)
+        model.collide(state_0, contacts)
+        solver.step(state_0, state_1, control, contacts, sub_dt)
+        state_0, state_1 = state_1, state_0
+
+    released_z = float(state_0.body_q.numpy()[0][2])
+    test.assertGreater(released_z, settled_z + 0.1, msg="Box should fly up after suction released")
+
+
+# Register adhesion tests for XPBD, SemiImplicit, and Featherstone
+for device in devices:
+    for solver_name in ("xpbd", "semi_implicit", "featherstone"):
+        if solver_name not in solvers:
+            continue
+        add_function_test(
+            TestRigidContact,
+            f"test_suction_cup_adhesion_{solver_name}",
+            test_suction_cup_adhesion,
+            devices=[device],
+            solver_fn=solvers[solver_name],
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=True)

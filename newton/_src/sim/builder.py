@@ -204,7 +204,12 @@ class ModelBuilder:
         kf: float = 1000.0
         """The friction damping coefficient. Used by SemiImplicit, Featherstone."""
         ka: float = 0.0
-        """The contact adhesion distance. Used by SemiImplicit, Featherstone."""
+        """The contact adhesion distance [m]. Used by SemiImplicit, Featherstone, XPBD."""
+        adhesion_gain: float = 0.0
+        """Maximum adhesion force [N] for suction-cup contacts. When nonzero, contacts
+        within the adhesion distance :attr:`ka` apply an attractive normal force capped at
+        ``adhesion_gain * ctrl``, where *ctrl* is the runtime control signal in
+        :attr:`Control.shape_adhesion_ctrl`. Used by all solvers."""
         mu: float = 1.0
         """The coefficient of friction. Used by all solvers."""
         restitution: float = 0.0
@@ -875,6 +880,8 @@ class ModelBuilder:
         """Friction stiffness values accumulated for :attr:`Model.shape_material_kf`."""
         self.shape_material_ka: list[float] = []
         """Adhesion distances [m] accumulated for :attr:`Model.shape_material_ka`."""
+        self.shape_material_adhesion_gain: list[float] = []
+        """Maximum adhesion forces [N] accumulated for :attr:`Model.shape_material_adhesion_gain`."""
         self.shape_material_mu: list[float] = []
         """Friction coefficients accumulated for :attr:`Model.shape_material_mu`."""
         self.shape_material_restitution: list[float] = []
@@ -3051,6 +3058,7 @@ class ModelBuilder:
             "shape_material_kd",
             "shape_material_kf",
             "shape_material_ka",
+            "shape_material_adhesion_gain",
             "shape_material_mu",
             "shape_material_restitution",
             "shape_material_mu_torsional",
@@ -5188,6 +5196,7 @@ class ModelBuilder:
         self.shape_material_kd.append(cfg.kd)
         self.shape_material_kf.append(cfg.kf)
         self.shape_material_ka.append(cfg.ka)
+        self.shape_material_adhesion_gain.append(cfg.adhesion_gain)
         self.shape_material_mu.append(cfg.mu)
         self.shape_material_restitution.append(cfg.restitution)
         self.shape_material_mu_torsional.append(cfg.mu_torsional)
@@ -6027,6 +6036,7 @@ class ModelBuilder:
                             kd=self.shape_material_kd[shape],
                             kf=self.shape_material_kf[shape],
                             ka=self.shape_material_ka[shape],
+                            adhesion_gain=self.shape_material_adhesion_gain[shape],
                             mu=self.shape_material_mu[shape],
                             restitution=self.shape_material_restitution[shape],
                             mu_torsional=self.shape_material_mu_torsional[shape],
@@ -9377,6 +9387,9 @@ class ModelBuilder:
             m.shape_material_kd = wp.array(self.shape_material_kd, dtype=wp.float32, requires_grad=requires_grad)
             m.shape_material_kf = wp.array(self.shape_material_kf, dtype=wp.float32, requires_grad=requires_grad)
             m.shape_material_ka = wp.array(self.shape_material_ka, dtype=wp.float32, requires_grad=requires_grad)
+            m.shape_material_adhesion_gain = wp.array(
+                self.shape_material_adhesion_gain, dtype=wp.float32, requires_grad=requires_grad
+            )
             m.shape_material_mu = wp.array(self.shape_material_mu, dtype=wp.float32, requires_grad=requires_grad)
             m.shape_material_restitution = wp.array(
                 self.shape_material_restitution, dtype=wp.float32, requires_grad=requires_grad

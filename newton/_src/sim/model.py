@@ -222,6 +222,10 @@ class Model:
         """Shape contact friction stiffness [N·s/m], shape [shape_count], float."""
         self.shape_material_ka: wp.array(dtype=wp.float32) | None = None
         """Shape contact adhesion distance [m], shape [shape_count], float."""
+        self.shape_material_adhesion_gain: wp.array(dtype=wp.float32) | None = None
+        """Maximum adhesion force [N] for suction-cup contacts, shape [shape_count], float.
+        When nonzero, contacts within the adhesion distance :attr:`shape_material_ka` apply an
+        attractive normal force capped at ``adhesion_gain * ctrl``."""
         self.shape_material_mu: wp.array(dtype=wp.float32) | None = None
         """Shape coefficient of friction [dimensionless], shape [shape_count], float."""
         self.shape_material_restitution: wp.array(dtype=wp.float32) | None = None
@@ -788,6 +792,7 @@ class Model:
         self.attribute_frequency["shape_material_kd"] = Model.AttributeFrequency.SHAPE
         self.attribute_frequency["shape_material_kf"] = Model.AttributeFrequency.SHAPE
         self.attribute_frequency["shape_material_ka"] = Model.AttributeFrequency.SHAPE
+        self.attribute_frequency["shape_material_adhesion_gain"] = Model.AttributeFrequency.SHAPE
         self.attribute_frequency["shape_material_mu"] = Model.AttributeFrequency.SHAPE
         self.attribute_frequency["shape_material_restitution"] = Model.AttributeFrequency.SHAPE
         self.attribute_frequency["shape_material_mu_torsional"] = Model.AttributeFrequency.SHAPE
@@ -886,6 +891,10 @@ class Model:
                 c.tet_activations = wp.clone(self.tet_activations, requires_grad=requires_grad)
             if self.muscle_count:
                 c.muscle_activations = wp.clone(self.muscle_activations, requires_grad=requires_grad)
+            if self.shape_count:
+                c.shape_adhesion_ctrl = wp.zeros(
+                    self.shape_count, dtype=wp.float32, requires_grad=requires_grad, device=self.device
+                )
         else:
             c.joint_target_pos = self.joint_target_pos
             c.joint_target_vel = self.joint_target_vel
@@ -894,6 +903,10 @@ class Model:
             c.tri_activations = self.tri_activations
             c.tet_activations = self.tet_activations
             c.muscle_activations = self.muscle_activations
+            if self.shape_count:
+                c.shape_adhesion_ctrl = wp.zeros(
+                    self.shape_count, dtype=wp.float32, requires_grad=requires_grad, device=self.device
+                )
         # attach custom attributes with assignment==CONTROL
         self._add_custom_attributes(
             c, Model.AttributeAssignment.CONTROL, requires_grad=requires_grad, clone_arrays=clone_variables

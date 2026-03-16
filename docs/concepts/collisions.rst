@@ -1308,11 +1308,17 @@ Shape material properties control contact resolution. Configure via :class:`~new
      - :attr:`~newton.ModelBuilder.ShapeConfig.kf`
      - :attr:`~newton.Model.shape_material_kf`
    * - ``ka``
-     - Adhesion distance
-     - SemiImplicit, Featherstone
+     - Adhesion distance [m] (seal break threshold)
+     - SemiImplicit, Featherstone, XPBD
      - 0.0
      - :attr:`~newton.ModelBuilder.ShapeConfig.ka`
      - :attr:`~newton.Model.shape_material_ka`
+   * - ``adhesion_gain``
+     - Maximum adhesion (suction-cup) force [N]
+     - All
+     - 0.0
+     - :attr:`~newton.ModelBuilder.ShapeConfig.adhesion_gain`
+     - :attr:`~newton.Model.shape_material_adhesion_gain`
    * - ``restitution``
      - Bounciness (requires ``enable_restitution=True`` in solver)
      - XPBD

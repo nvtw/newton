@@ -17,7 +17,7 @@ import warp as wp
 
 from ...geometry import ParticleFlags
 from ...geometry.kernels import triangle_closest_point_barycentric
-from ...sim import Contacts, Model, State
+from ...sim import Contacts, Control, Model, State
 
 
 @wp.func
@@ -400,6 +400,8 @@ def eval_body_contact(
     shape_material_kf: wp.array(dtype=float),
     shape_material_ka: wp.array(dtype=float),
     shape_material_mu: wp.array(dtype=float),
+    shape_material_adhesion_gain: wp.array(dtype=float),
+    shape_adhesion_ctrl: wp.array(dtype=float),
     shape_body: wp.array(dtype=int),
     contact_count: wp.array(dtype=int),
     contact_point0: wp.array(dtype=wp.vec3),
@@ -429,6 +431,8 @@ def eval_body_contact(
     kf = 0.0  # friction force stiffness
     ka = 0.0  # adhesion distance
     mu = 0.0  # friction coefficient
+    adhesion_gain = 0.0
+    adhesion_ctrl = 0.0
     mat_nonzero = 0
     margin_a = contact_margin0[tid]
     margin_b = contact_margin1[tid]
@@ -445,6 +449,9 @@ def eval_body_contact(
         kf += shape_material_kf[shape_a]
         ka += shape_material_ka[shape_a]
         mu += shape_material_mu[shape_a]
+        adhesion_gain = wp.max(adhesion_gain, shape_material_adhesion_gain[shape_a])
+        if shape_adhesion_ctrl:
+            adhesion_ctrl = wp.max(adhesion_ctrl, shape_adhesion_ctrl[shape_a])
         body_a = shape_body[shape_a]
     if shape_b >= 0:
         mat_nonzero += 1
@@ -453,6 +460,9 @@ def eval_body_contact(
         kf += shape_material_kf[shape_b]
         ka += shape_material_ka[shape_b]
         mu += shape_material_mu[shape_b]
+        adhesion_gain = wp.max(adhesion_gain, shape_material_adhesion_gain[shape_b])
+        if shape_adhesion_ctrl:
+            adhesion_ctrl = wp.max(adhesion_ctrl, shape_adhesion_ctrl[shape_b])
         body_b = shape_body[shape_b]
     if mat_nonzero > 0:
         ke /= float(mat_nonzero)
@@ -527,29 +537,31 @@ def eval_body_contact(
     # contact elastic
     fn = d * ke
 
-    # contact damping
-    fd = wp.min(vn, 0.0) * kd * wp.step(d)
+    # clamp adhesion force (d > 0 = separated, fn > 0 = attractive in this convention)
+    has_adhesion = adhesion_gain > 0.0 and adhesion_ctrl > 0.0
+    if d > 0.0 and has_adhesion:
+        fn = wp.min(fn, adhesion_gain * adhesion_ctrl)
+    elif d > 0.0:
+        fn = 0.0
 
-    # viscous friction
-    # ft = vt*kf
-
-    # Coulomb friction (box)
-    # lower = mu * d * ke
-    # upper = -lower
-
-    # vx = wp.clamp(wp.dot(wp.vec3(kf, 0.0, 0.0), vt), lower, upper)
-    # vz = wp.clamp(wp.dot(wp.vec3(0.0, 0.0, kf), vt), lower, upper)
-
-    # ft = wp.vec3(vx, 0.0, vz)
+    # contact damping -- in penetration (d < 0) damp approach velocity only;
+    # in adhesion regime (d > 0) damp both directions for stability
+    fd = 0.0
+    if d < 0.0:
+        fd = wp.min(vn, 0.0) * kd
+    elif has_adhesion:
+        fd = vn * kd
 
     # Coulomb friction (smooth, but gradients are numerically unstable around |vt| = 0)
     ft = wp.vec3(0.0)
-    if d < 0.0:
+    if d < 0.0 or has_adhesion:
         # use a smooth vector norm to avoid gradient instability at/around zero velocity
         vs = wp.norm_huber(vt, delta=friction_smoothing)
         if vs > 0.0:
             fr = vt / vs
-            ft = fr * wp.min(kf * vs, -mu * (fn + fd))
+            # use absolute normal force for Coulomb limit (works for both repulsion and adhesion)
+            fn_abs = wp.abs(fn + fd)
+            ft = fr * wp.min(kf * vs, mu * fn_abs)
 
     f_total = n * (fn + fd) + ft
     # f_total = n * (fn + fd)
@@ -614,6 +626,7 @@ def eval_body_contact_forces(
     model: Model,
     state: State,
     contacts: Contacts | None,
+    control: Control | None = None,
     friction_smoothing: float = 1.0,
     force_in_world_frame: bool = False,
     body_f_out: wp.array | None = None,
@@ -633,6 +646,8 @@ def eval_body_contact_forces(
                 model.shape_material_kf,
                 model.shape_material_ka,
                 model.shape_material_mu,
+                model.shape_material_adhesion_gain,
+                control.shape_adhesion_ctrl if control else None,
                 model.shape_body,
                 contacts.rigid_contact_count,
                 contacts.rigid_contact_point0,

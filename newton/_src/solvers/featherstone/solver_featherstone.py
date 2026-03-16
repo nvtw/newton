@@ -470,6 +470,8 @@ class SolverFeatherstone(SolverBase):
                             model.shape_material_kf,
                             model.shape_material_ka,
                             model.shape_material_mu,
+                            model.shape_material_adhesion_gain,
+                            control.shape_adhesion_ctrl if control else None,
                             model.shape_body,
                             contacts.rigid_contact_count,
                             contacts.rigid_contact_point0,

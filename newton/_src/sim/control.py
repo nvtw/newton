@@ -72,6 +72,14 @@ class Control:
             Support for muscle dynamics is not yet implemented.
         """
 
+        self.shape_adhesion_ctrl: wp.array | None = None
+        """Per-shape adhesion control signal [dimensionless, 0 to 1] with shape ``(shape_count,)``
+        and type ``float``.
+
+        Modulates the attractive force at suction-cup contacts. A value of 0 means
+        no adhesion; 1 means the full :attr:`~newton.Model.shape_material_adhesion_gain`
+        force is applied. Used by all solvers."""
+
     def clear(self) -> None:
         """Reset the control inputs to zero."""
 
@@ -89,6 +97,8 @@ class Control:
             self.joint_target_vel.zero_()
         if self.joint_act is not None:
             self.joint_act.zero_()
+        if self.shape_adhesion_ctrl is not None:
+            self.shape_adhesion_ctrl.zero_()
         self._clear_namespaced_arrays()
 
     def _clear_namespaced_arrays(self) -> None:

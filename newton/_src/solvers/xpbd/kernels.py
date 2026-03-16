@@ -2082,6 +2082,9 @@ def solve_body_contact_positions(
     shape_material_mu: wp.array(dtype=float),
     shape_material_mu_torsional: wp.array(dtype=float),
     shape_material_mu_rolling: wp.array(dtype=float),
+    shape_material_ka: wp.array(dtype=float),
+    shape_material_adhesion_gain: wp.array(dtype=float),
+    shape_adhesion_ctrl: wp.array(dtype=float),
     relaxation: float,
     dt: float,
     # outputs
@@ -2123,8 +2126,27 @@ def solve_body_contact_positions(
     n = contact_normal[tid]
     d = wp.dot(n, bx_b - bx_a) - thickness
 
+    # adhesion: keep contact active when separated within the adhesion distance
+    adhesion_gain = 0.0
+    adhesion_ctrl = 0.0
+    ka = 0.0
+    if shape_a >= 0:
+        adhesion_gain = wp.max(adhesion_gain, shape_material_adhesion_gain[shape_a])
+        ka += shape_material_ka[shape_a]
+        if shape_adhesion_ctrl:
+            adhesion_ctrl = wp.max(adhesion_ctrl, shape_adhesion_ctrl[shape_a])
+    if shape_b >= 0:
+        adhesion_gain = wp.max(adhesion_gain, shape_material_adhesion_gain[shape_b])
+        ka += shape_material_ka[shape_b]
+        if shape_adhesion_ctrl:
+            adhesion_ctrl = wp.max(adhesion_ctrl, shape_adhesion_ctrl[shape_b])
+    if shape_a >= 0 and shape_b >= 0:
+        ka *= 0.5
+    has_adhesion = adhesion_gain > 0.0 and adhesion_ctrl > 0.0
+
     if d >= 0.0:
-        return
+        if not has_adhesion or d >= ka:
+            return
 
     m_inv_a = 0.0
     m_inv_b = 0.0
@@ -2193,13 +2215,18 @@ def solve_body_contact_positions(
         d, X_wb_a, X_wb_b, m_inv_a, m_inv_b, I_inv_a, I_inv_b, -n, n, angular_a, angular_b, relaxation, dt
     )
 
+    # clamp adhesion: when d > 0 lambda_n is negative (attractive); cap its magnitude
+    if d > 0.0 and has_adhesion:
+        max_adhesion_lambda = adhesion_gain * adhesion_ctrl * dt
+        lambda_n = wp.max(lambda_n, -max_adhesion_lambda)
+
     lin_delta_a = -n * lambda_n
     lin_delta_b = n * lambda_n
     ang_delta_a = angular_a * lambda_n
     ang_delta_b = angular_b * lambda_n
 
-    # linear friction
-    if mu > 0.0:
+    # linear friction (also active during adhesion so the suction cup resists sliding)
+    if mu > 0.0 and (d < 0.0 or has_adhesion):
         # add on displacement from surface offsets, this ensures we include any rotational effects due to thickness from feature
         # need to use the current rotation to account for friction due to angular effects (e.g.: slipping contact)
         bx_a += wp.transform_vector(X_wb_a, offset_a)
@@ -2250,7 +2277,10 @@ def solve_body_contact_positions(
             )
 
             # limit friction based on incremental normal force, good approximation to limiting on total force
-            lambda_fr = wp.max(lambda_fr, -lambda_n * mu)
+            if d > 0.0 and has_adhesion:
+                lambda_fr = wp.min(lambda_fr, wp.abs(lambda_n) * mu)
+            else:
+                lambda_fr = wp.max(lambda_fr, -lambda_n * mu)
 
             lin_delta_a -= perp * lambda_fr
             lin_delta_b += perp * lambda_fr
@@ -2346,6 +2376,9 @@ def apply_rigid_restitution(
     contact_shape0: wp.array(dtype=int),
     contact_shape1: wp.array(dtype=int),
     shape_material_restitution: wp.array(dtype=float),
+    shape_material_ka: wp.array(dtype=float),
+    shape_material_adhesion_gain: wp.array(dtype=float),
+    shape_adhesion_ctrl: wp.array(dtype=float),
     contact_point0: wp.array(dtype=wp.vec3),
     contact_point1: wp.array(dtype=wp.vec3),
     contact_offset0: wp.array(dtype=wp.vec3),
@@ -2426,8 +2459,28 @@ def apply_rigid_restitution(
     thickness = contact_thickness0[tid] + contact_thickness1[tid]
     n = contact_normal[tid]
     d = wp.dot(n, bx_b - bx_a) - thickness
+
+    # adhesion: keep contact active when separated within the adhesion distance
+    ka = 0.0
+    adhesion_gain = 0.0
+    adhesion_ctrl = 0.0
+    if shape_a >= 0:
+        ka += shape_material_ka[shape_a]
+        adhesion_gain = wp.max(adhesion_gain, shape_material_adhesion_gain[shape_a])
+        if shape_adhesion_ctrl:
+            adhesion_ctrl = wp.max(adhesion_ctrl, shape_adhesion_ctrl[shape_a])
+    if shape_b >= 0:
+        ka += shape_material_ka[shape_b]
+        adhesion_gain = wp.max(adhesion_gain, shape_material_adhesion_gain[shape_b])
+        if shape_adhesion_ctrl:
+            adhesion_ctrl = wp.max(adhesion_ctrl, shape_adhesion_ctrl[shape_b])
+    if shape_a >= 0 and shape_b >= 0:
+        ka *= 0.5
+    has_adhesion = adhesion_gain > 0.0 and adhesion_ctrl > 0.0
+
     if d >= 0.0:
-        return
+        if not has_adhesion or d >= ka:
+            return
 
     r_a = bx_a - wp.transform_point(X_wb_a_prev, com_a)
     r_b = bx_b - wp.transform_point(X_wb_b_prev, com_b)
