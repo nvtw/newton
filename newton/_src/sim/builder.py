@@ -5140,6 +5140,7 @@ class ModelBuilder:
                 cfg.sdf_max_resolution is not None
                 or cfg.sdf_target_voxel_size is not None
                 or cfg.sdf_narrow_band_range != (-0.1, 0.1)
+                or cfg.sdf_texture_format != "uint16"
             ):
                 raise ValueError(
                     "Mesh shapes do not use cfg.sdf_* for SDF generation. "
