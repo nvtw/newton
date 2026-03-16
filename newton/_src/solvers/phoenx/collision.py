@@ -596,8 +596,10 @@ class PhoenXCollisionPipeline:
             cs.column_of("shape0"),
             cs.column_of("shape1"),
             cs.count,
+            offset0=cs.column_of("offset0"),
         )
         solver_state.warm_starter.sort()
+        solver_state.warm_starter.build_bundles()
         solver_state.warm_starter.transfer_impulses(
             cs.column_of("accumulated_normal_impulse"),
             cs.column_of("accumulated_tangent_impulse1"),

@@ -109,7 +109,7 @@ def run_pyramid_drift_test():
     # Report
     print(f"\nPyramid drift analysis ({num_boxes} boxes, {num_layers} layers)")
     print(f"Settings: substeps={substeps}, PGS iterations=12, friction=0.6")
-    print(f"Damping: linear=0.995, angular=0.99")
+    print("Damping: linear=0.995, angular=0.99")
     print("=" * 80)
 
     for frame in check_frames:

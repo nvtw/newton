@@ -62,6 +62,25 @@ def _inject_contact(
     _write("accumulated_tangent_impulse2", contact_idx, 0.0, wp.float32)
 
 
+def _build_bundles(ss):
+    """Run the warm-start key pipeline: import_keys, sort, build_bundles."""
+    cs = ss.contact_store
+    ws = ss.warm_starter
+    ws.import_keys(
+        cs.column_of("shape0"),
+        cs.column_of("shape1"),
+        cs.count,
+        offset0=cs.column_of("offset0"),
+    )
+    ws.sort()
+    ws.build_bundles()
+    ws.transfer_impulses(
+        cs.column_of("accumulated_normal_impulse"),
+        cs.column_of("accumulated_tangent_impulse1"),
+        cs.column_of("accumulated_tangent_impulse2"),
+    )
+
+
 class TestSolverPGS(unittest.TestCase):
     pass
 
@@ -107,6 +126,7 @@ def test_ball_on_ground(test, device):
             friction=0.5,
         )
 
+        _build_bundles(ss)
         ss._partition_contacts()
 
         max_slots = ss.graph_coloring.max_colors + 1
@@ -170,6 +190,7 @@ def test_friction_holds(test, device):
             friction=0.8,
         )
 
+        _build_bundles(ss)
         ss._partition_contacts()
 
         max_slots = ss.graph_coloring.max_colors + 1
@@ -242,14 +263,17 @@ def _run_ball_drop(device, num_iterations, use_warm_start):
                 ss.contact_store.column_of("shape0"),
                 ss.contact_store.column_of("shape1"),
                 ss.contact_store.count,
+                offset0=ss.contact_store.column_of("offset0"),
             )
             ss.warm_starter.sort()
+            ss.warm_starter.build_bundles()
             ss.warm_starter.transfer_impulses(
                 ss.contact_store.column_of("accumulated_normal_impulse"),
                 ss.contact_store.column_of("accumulated_tangent_impulse1"),
                 ss.contact_store.column_of("accumulated_tangent_impulse2"),
             )
 
+        _build_bundles(ss)
         ss._partition_contacts()
 
         max_slots = ss.graph_coloring.max_colors + 1

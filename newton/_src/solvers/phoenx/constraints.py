@@ -1259,7 +1259,7 @@ class ConstraintKernels:
             partition_data: wp.array(dtype=wp.int32),
             partition_end_arr: wp.array(dtype=wp.int32),
             partition_slot: int,
-            contact_count: int,
+            contact_count_arr: wp.array(dtype=wp.int32),
             joint_count: wp.array(dtype=wp.int32),
         ):
             tid = wp.tid()
@@ -1270,6 +1270,7 @@ class ConstraintKernels:
             if tid >= p_end - p_start:
                 return
 
+            contact_count = contact_count_arr[0]
             elem_id = partition_data[p_start + tid]
             if elem_id < contact_count:
                 return
@@ -1332,7 +1333,7 @@ class ConstraintKernels:
             partition_data: wp.array(dtype=wp.int32),
             partition_end_arr: wp.array(dtype=wp.int32),
             partition_slot: int,
-            contact_count: int,
+            contact_count_arr: wp.array(dtype=wp.int32),
             joint_count: wp.array(dtype=wp.int32),
             use_bias: int,
         ):
@@ -1344,6 +1345,7 @@ class ConstraintKernels:
             if tid >= p_end - p_start:
                 return
 
+            contact_count = contact_count_arr[0]
             elem_id = partition_data[p_start + tid]
             if elem_id < contact_count:
                 return

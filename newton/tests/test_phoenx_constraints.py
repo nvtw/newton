@@ -769,8 +769,11 @@ def test_fixed_joint_no_rotation(test, device):
 def test_schema_union_offsets(test, device):
     """Per-type schemas share common header offsets and drive offsets."""
     from newton._src.solvers.phoenx.constraints import (
-        BallSocketJointData, FixedJointData, PrismaticJointData,
-        RevoluteJointData, schema_col_base,
+        BallSocketJointData,
+        FixedJointData,
+        PrismaticJointData,
+        RevoluteJointData,
+        schema_col_base,
     )
     cap = 16  # arbitrary capacity
 

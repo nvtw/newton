@@ -40,7 +40,8 @@ from .constraints import (
 from .data_base import DataStore, HandleStore
 from .kernels import (
     ContactKernels,
-    build_elements_kernel,
+    add_int32_kernel,
+    build_bundle_elements_kernel,
     clear_contact_count_kernel,
     count_contacts_per_body_kernel,
     import_contacts_kernel,
@@ -105,6 +106,9 @@ class SolverState:
 
         # Mass splitting: per-body contact count (Tonge et al. 2012)
         self._contact_count_per_body = wp.zeros(body_capacity, dtype=wp.int32, device=d)
+
+        # Maximum number of bundles (worst case: every contact is its own bundle)
+        self.capacity_bundles = contact_capacity
 
         # Contact kernels (bake column offsets at construction time)
         self._contact_kernels = ContactKernels(self.contact_store, self.body_store)
@@ -493,8 +497,10 @@ class SolverState:
             cs.column_of("shape0"),
             cs.column_of("shape1"),
             self.contact_store.count,
+            offset0=cs.column_of("offset0"),
         )
         self.warm_starter.sort()
+        self.warm_starter.build_bundles()
         self.warm_starter.transfer_impulses(
             cs.column_of("accumulated_normal_impulse"),
             cs.column_of("accumulated_tangent_impulse1"),
@@ -504,42 +510,47 @@ class SolverState:
     # -- partitioning -------------------------------------------------------
 
     def _partition_contacts(self):
-        """Build the element array and run graph coloring on contacts + joints."""
+        """Build the element array and run graph coloring on bundles + joints."""
         d = self.device
         cs = self.contact_store
-        cap = cs.capacity
+        ws = self.warm_starter
 
+        # Build elements from bundles (one element per bundle)
         wp.launch(
-            build_elements_kernel,
-            dim=cap,
+            build_bundle_elements_kernel,
+            dim=self.capacity_bundles,
             inputs=[
+                ws.bundle_starts,
+                ws.curr_indices,
                 cs.column_of("body0"),
                 cs.column_of("body1"),
                 self._elements,
-                cs.count,
+                ws.bundle_count,
             ],
             device=d,
         )
 
-        # Append joint elements right after contacts (contiguous)
+        # Append joint elements right after bundles (contiguous)
         if self._constraint_kernels is not None and self._joint_count > 0:
             ck = self._constraint_kernels
             wp.launch(
                 ck.build_elements,
                 dim=self.joint_capacity,
-                inputs=[ck.joint_data, self._elements, cs.count, ck.joint_count],
+                inputs=[ck.joint_data, self._elements, ws.bundle_count, ck.joint_count],
                 device=d,
             )
 
-        # Total element count = contacts + joints (device-side)
+        # Total element count = bundles + joints (device-side, no host sync)
         self._total_element_count = wp.zeros(1, dtype=wp.int32, device=d)
         if self._constraint_kernels is not None and self._joint_count > 0:
-            nc = cs.count.numpy()[0]
-            nj = self.joint_store.count.numpy()[0]
-            total = nc + nj
-            self._total_element_count.assign(wp.array([total], dtype=wp.int32, device=d))
+            wp.launch(
+                add_int32_kernel,
+                dim=1,
+                inputs=[ws.bundle_count, self.joint_store.count, self._total_element_count],
+                device=d,
+            )
         else:
-            wp.copy(self._total_element_count, cs.count)
+            wp.copy(self._total_element_count, ws.bundle_count)
 
         self.graph_coloring.color(
             elements=self._elements,
@@ -622,23 +633,28 @@ class SolverState:
             cs.column_of("accumulated_normal_impulse"),
             cs.column_of("accumulated_tangent_impulse1"),
             cs.column_of("accumulated_tangent_impulse2"),
+            src_offset0=cs.column_of("offset0"),
         )
 
     # -- partitioned PGS solve helpers --------------------------------------
 
     def _launch_prepare(self, partition_slot: int, inv_dt: float, dim: int = 0):
-        """Launch contact prepare kernel for one partition slot."""
+        """Launch bundled contact prepare kernel for one partition slot."""
         ck = self._contact_kernels
         gc = self.graph_coloring
+        ws = self.warm_starter
         wp.launch(
-            ck.prepare,
-            dim=dim if dim > 0 else ck.contact_capacity,
+            ck.prepare_bundled,
+            dim=dim if dim > 0 else self.capacity_bundles,
             inputs=[
                 ck.contact_data,
                 ck.body_data,
                 gc.partition_data,
                 gc.partition_ends,
                 partition_slot,
+                ws.bundle_starts,
+                ws.bundle_count,
+                ws.curr_indices,
                 self._contact_count_per_body,
                 inv_dt,
             ],
@@ -646,18 +662,22 @@ class SolverState:
         )
 
     def _launch_solve(self, partition_slot: int, use_bias: int, dim: int = 0):
-        """Launch contact solve kernel for one partition slot."""
+        """Launch bundled contact solve kernel for one partition slot."""
         ck = self._contact_kernels
         gc = self.graph_coloring
+        ws = self.warm_starter
         wp.launch(
-            ck.solve,
-            dim=dim if dim > 0 else ck.contact_capacity,
+            ck.solve_bundled,
+            dim=dim if dim > 0 else self.capacity_bundles,
             inputs=[
                 ck.contact_data,
                 ck.body_data,
                 gc.partition_data,
                 gc.partition_ends,
                 partition_slot,
+                ws.bundle_starts,
+                ws.bundle_count,
+                ws.curr_indices,
                 use_bias,
             ],
             device=self.device,
@@ -671,6 +691,7 @@ class SolverState:
             return
         ck = self._constraint_kernels
         gc = self.graph_coloring
+        ws = self.warm_starter
         wp.launch(
             ck.prepare,
             dim=dim if dim > 0 else self.joint_capacity,
@@ -680,7 +701,7 @@ class SolverState:
                 gc.partition_data,
                 gc.partition_ends,
                 partition_slot,
-                self._cached_contact_count,
+                ws.bundle_count,
                 ck.joint_count,
             ],
             device=self.device,
@@ -692,6 +713,7 @@ class SolverState:
             return
         ck = self._constraint_kernels
         gc = self.graph_coloring
+        ws = self.warm_starter
         wp.launch(
             ck.solve,
             dim=dim if dim > 0 else self.joint_capacity,
@@ -701,7 +723,7 @@ class SolverState:
                 gc.partition_data,
                 gc.partition_ends,
                 partition_slot,
-                self._cached_contact_count,
+                ws.bundle_count,
                 ck.joint_count,
                 use_bias,
             ],
@@ -749,12 +771,6 @@ class SolverState:
         bs = self.body_store
         cs = self.contact_store
 
-        # Cache contact count for constraint kernels (host sync once)
-        if self.joint_store is not None and self._joint_count > 0:
-            self._cached_contact_count = int(cs.count.numpy()[0])
-        else:
-            self._cached_contact_count = 0
-
         self.integrate_velocities(gravity, dt)
 
         self._partition_contacts()
@@ -780,31 +796,22 @@ class SolverState:
 
         max_slots = self.graph_coloring.max_colors + 1
 
-        # Read partition sizes to CPU once — skip empty slots and launch
-        # with exact dim to avoid wasted threads.  One sync point here
-        # replaces hundreds of redundant kernel launches.
-        p_ends = self.graph_coloring.partition_ends.numpy()
-        active_slots = []  # (slot_index, partition_size)
+        # Loop over all partition slots with full capacity — kernels
+        # early-exit for out-of-range threads, keeping this free of
+        # GPU-to-CPU sync so the entire method is graph-capturable.
         for p in range(max_slots):
-            p_start = int(p_ends[p - 1]) if p > 0 else 0
-            p_end = int(p_ends[p])
-            size = p_end - p_start
-            if size > 0:
-                active_slots.append((p, size))
-
-        for p, size in active_slots:
-            self._launch_prepare(p, inv_dt, dim=size)
-            self._launch_prepare_constraints(p, dim=size)
+            self._launch_prepare(p, inv_dt)
+            self._launch_prepare_constraints(p)
 
         for _ in range(num_iterations):
-            for p, size in active_slots:
-                self._launch_solve(p, 1, dim=size)
-                self._launch_solve_constraints(p, 1, dim=size)
+            for p in range(max_slots):
+                self._launch_solve(p, 1)
+                self._launch_solve_constraints(p, 1)
 
         for _ in range(num_velocity_iterations):
-            for p, size in active_slots:
-                self._launch_solve(p, 0, dim=size)
-                self._launch_solve_constraints(p, 0, dim=size)
+            for p in range(max_slots):
+                self._launch_solve(p, 0)
+                self._launch_solve_constraints(p, 0)
 
         self.integrate_positions(dt)
 

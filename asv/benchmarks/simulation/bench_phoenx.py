@@ -20,12 +20,9 @@ Builds a chain of rigid bodies connected by mixed joint types
 timing of the solver pipeline.
 """
 
-import math
 import time
 
-import numpy as np
 import warp as wp
-from asv_runner.benchmarks.mark import skip_benchmark_if
 
 wp.config.enable_backward = False
 wp.config.quiet = True
@@ -148,7 +145,7 @@ def _timed_step(ss, dt, gravity, num_iterations, device):
     cs = ss.contact_store
 
     if ss.joint_store is not None and ss._joint_count > 0:
-        ss._cached_contact_count = int(cs.count.numpy()[0])
+        ss._cached_contact_count = int(ss.warm_starter.bundle_count.numpy()[0])
     else:
         ss._cached_contact_count = 0
 

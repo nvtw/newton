@@ -213,6 +213,37 @@ def build_elements_kernel(
         elements[tid, j] = -1
 
 
+@wp.kernel
+def add_int32_kernel(
+    a: wp.array(dtype=wp.int32),
+    b: wp.array(dtype=wp.int32),
+    out: wp.array(dtype=wp.int32),
+):
+    """``out[0] = a[0] + b[0]`` on device."""
+    out[0] = a[0] + b[0]
+
+
+@wp.kernel
+def build_bundle_elements_kernel(
+    bundle_starts: wp.array(dtype=wp.int32),
+    sort_perm: wp.array(dtype=wp.int32),
+    body0: wp.array(dtype=wp.int32),
+    body1: wp.array(dtype=wp.int32),
+    elements: wp.array2d(dtype=wp.int32),
+    bundle_count: wp.array(dtype=wp.int32),
+):
+    """Build graph-coloring elements from contact bundles (one element per bundle)."""
+    tid = wp.tid()
+    if tid >= bundle_count[0]:
+        return
+    sorted_idx = bundle_starts[tid]
+    ci = sort_perm[sorted_idx]
+    elements[tid, 0] = body0[ci]
+    elements[tid, 1] = body1[ci]
+    for j in range(2, 8):
+        elements[tid, j] = -1
+
+
 # ---------------------------------------------------------------------------
 # Mass-splitting: per-body contact count
 # ---------------------------------------------------------------------------
@@ -872,9 +903,243 @@ class ContactKernels:
                 ds_store_vec3(bdata, wp.static(b_velocity), b1, v1 + inv_m1 * impulse)
                 ds_store_vec3(bdata, wp.static(b_angular_velocity), b1, w1 + inv_i1 * wp.cross(rw1, impulse))
 
+        # ---------------------------------------------------------------
+        # Bundled prepare kernel (one thread per bundle)
+        # ---------------------------------------------------------------
+
+        @wp.kernel
+        def _prepare_bundled(
+            cdata: wp.array(dtype=wp.float32),
+            bdata: wp.array(dtype=wp.float32),
+            partition_data: wp.array(dtype=wp.int32),
+            partition_ends: wp.array(dtype=wp.int32),
+            partition_slot: int,
+            bundle_starts: wp.array(dtype=wp.int32),
+            bundle_count: wp.array(dtype=wp.int32),
+            sort_perm: wp.array(dtype=wp.int32),
+            contact_count_per_body: wp.array(dtype=wp.int32),
+            inv_dt: float,
+        ):
+            """Compute per-contact solver data and warm-start for a bundle of contacts."""
+            tid = wp.tid()
+            p_start = int(0)
+            if partition_slot > 0:
+                p_start = partition_ends[partition_slot - 1]
+            p_end = partition_ends[partition_slot]
+            if tid >= p_end - p_start:
+                return
+
+            bundle_idx = partition_data[p_start + tid]
+            if bundle_idx >= bundle_count[0]:
+                return  # joint element, skip
+
+            b_start = bundle_starts[bundle_idx]
+            b_end = bundle_starts[bundle_idx + 1]
+
+            # Load body state from first contact in bundle
+            first_ci = sort_perm[b_start]
+            b0 = ds_load_int(cdata, wp.static(c_body0), first_ci)
+            b1 = ds_load_int(cdata, wp.static(c_body1), first_ci)
+
+            q0 = ds_load_quat(bdata, wp.static(b_orientation), b0)
+            q1 = ds_load_quat(bdata, wp.static(b_orientation), b1)
+            pos0 = ds_load_vec3(bdata, wp.static(b_position), b0)
+            pos1 = ds_load_vec3(bdata, wp.static(b_position), b1)
+            inv_m0 = ds_load_float(bdata, wp.static(b_inverse_mass), b0)
+            inv_m1 = ds_load_float(bdata, wp.static(b_inverse_mass), b1)
+            inv_i0 = ds_load_mat33(bdata, wp.static(b_inverse_inertia_world), b0)
+            inv_i1 = ds_load_mat33(bdata, wp.static(b_inverse_inertia_world), b1)
+            f0 = ds_load_int(bdata, wp.static(b_flags), b0)
+            f1 = ds_load_int(bdata, wp.static(b_flags), b1)
+            is_static_0 = (f0 & BODY_FLAG_STATIC) != 0 or inv_m0 == 0.0
+            is_static_1 = (f1 & BODY_FLAG_STATIC) != 0 or inv_m1 == 0.0
+
+            nc0 = contact_count_per_body[b0]
+            nc1 = contact_count_per_body[b1]
+            split0 = wp.max(float(nc0), 1.0)
+            split1 = wp.max(float(nc1), 1.0)
+
+            v0 = ds_load_vec3(bdata, wp.static(b_velocity), b0)
+            w0 = ds_load_vec3(bdata, wp.static(b_angular_velocity), b0)
+            v1 = ds_load_vec3(bdata, wp.static(b_velocity), b1)
+            w1 = ds_load_vec3(bdata, wp.static(b_angular_velocity), b1)
+
+            for s in range(b_start, b_end):
+                ci = sort_perm[s]
+
+                n = ds_load_vec3(cdata, wp.static(c_normal), ci)
+                t1 = compute_tangent_frame(n)
+                t2 = wp.cross(t1, n)
+                ds_store_vec3(cdata, wp.static(c_tangent1), ci, t1)
+
+                rw0 = wp.quat_rotate(q0, ds_load_vec3(cdata, wp.static(c_offset0), ci))
+                rw1 = wp.quat_rotate(q1, ds_load_vec3(cdata, wp.static(c_offset1), ci))
+                ds_store_vec3(cdata, wp.static(c_rel0), ci, rw0)
+                ds_store_vec3(cdata, wp.static(c_rel1), ci, rw1)
+
+                thickness = ds_load_float(cdata, wp.static(c_margin0), ci) + ds_load_float(
+                    cdata, wp.static(c_margin1), ci
+                )
+                gap = wp.dot(n, (pos1 + rw1) - (pos0 + rw0)) - thickness
+                ds_store_float(cdata, wp.static(c_bias), ci, -compute_contact_bias(-gap, inv_dt))
+
+                ds_store_float(
+                    cdata,
+                    wp.static(c_eff_n),
+                    ci,
+                    compute_effective_mass_split(inv_m0, inv_m1, inv_i0, inv_i1, rw0, rw1, n, split0, split1),
+                )
+                ds_store_float(
+                    cdata,
+                    wp.static(c_eff_t1),
+                    ci,
+                    compute_effective_mass_split(inv_m0, inv_m1, inv_i0, inv_i1, rw0, rw1, t1, split0, split1),
+                )
+                ds_store_float(
+                    cdata,
+                    wp.static(c_eff_t2),
+                    ci,
+                    compute_effective_mass_split(inv_m0, inv_m1, inv_i0, inv_i1, rw0, rw1, t2, split0, split1),
+                )
+
+                acc_n = ds_load_float(cdata, wp.static(c_accumulated_n), ci) * WARM_START_SCALE
+                acc_t1 = ds_load_float(cdata, wp.static(c_accumulated_t1), ci) * WARM_START_SCALE
+                acc_t2 = ds_load_float(cdata, wp.static(c_accumulated_t2), ci) * WARM_START_SCALE
+                ds_store_float(cdata, wp.static(c_accumulated_n), ci, acc_n)
+                ds_store_float(cdata, wp.static(c_accumulated_t1), ci, acc_t1)
+                ds_store_float(cdata, wp.static(c_accumulated_t2), ci, acc_t2)
+                impulse = acc_n * n + acc_t1 * t1 + acc_t2 * t2
+
+                if not is_static_0:
+                    v0 = v0 - inv_m0 * impulse
+                    w0 = w0 - inv_i0 * wp.cross(rw0, impulse)
+                if not is_static_1:
+                    v1 = v1 + inv_m1 * impulse
+                    w1 = w1 + inv_i1 * wp.cross(rw1, impulse)
+
+            if not is_static_0:
+                ds_store_vec3(bdata, wp.static(b_velocity), b0, v0)
+                ds_store_vec3(bdata, wp.static(b_angular_velocity), b0, w0)
+            if not is_static_1:
+                ds_store_vec3(bdata, wp.static(b_velocity), b1, v1)
+                ds_store_vec3(bdata, wp.static(b_angular_velocity), b1, w1)
+
+        # ---------------------------------------------------------------
+        # Bundled solve kernel (one thread per bundle)
+        # ---------------------------------------------------------------
+
+        @wp.kernel
+        def _solve_bundled(
+            cdata: wp.array(dtype=wp.float32),
+            bdata: wp.array(dtype=wp.float32),
+            partition_data: wp.array(dtype=wp.int32),
+            partition_ends: wp.array(dtype=wp.int32),
+            partition_slot: int,
+            bundle_starts: wp.array(dtype=wp.int32),
+            bundle_count: wp.array(dtype=wp.int32),
+            sort_perm: wp.array(dtype=wp.int32),
+            use_bias: int,
+        ):
+            """One PGS iteration for a single partition's contact bundles."""
+            tid = wp.tid()
+            p_start = int(0)
+            if partition_slot > 0:
+                p_start = partition_ends[partition_slot - 1]
+            p_end = partition_ends[partition_slot]
+            if tid >= p_end - p_start:
+                return
+
+            bundle_idx = partition_data[p_start + tid]
+            if bundle_idx >= bundle_count[0]:
+                return  # joint element, skip
+
+            b_start = bundle_starts[bundle_idx]
+            b_end = bundle_starts[bundle_idx + 1]
+
+            first_ci = sort_perm[b_start]
+            b0 = ds_load_int(cdata, wp.static(c_body0), first_ci)
+            b1 = ds_load_int(cdata, wp.static(c_body1), first_ci)
+
+            v0 = ds_load_vec3(bdata, wp.static(b_velocity), b0)
+            w0 = ds_load_vec3(bdata, wp.static(b_angular_velocity), b0)
+            v1 = ds_load_vec3(bdata, wp.static(b_velocity), b1)
+            w1 = ds_load_vec3(bdata, wp.static(b_angular_velocity), b1)
+
+            inv_m0 = ds_load_float(bdata, wp.static(b_inverse_mass), b0)
+            inv_m1 = ds_load_float(bdata, wp.static(b_inverse_mass), b1)
+            inv_i0 = ds_load_mat33(bdata, wp.static(b_inverse_inertia_world), b0)
+            inv_i1 = ds_load_mat33(bdata, wp.static(b_inverse_inertia_world), b1)
+            f0 = ds_load_int(bdata, wp.static(b_flags), b0)
+            f1 = ds_load_int(bdata, wp.static(b_flags), b1)
+            is_static_0 = (f0 & BODY_FLAG_STATIC) != 0 or inv_m0 == 0.0
+            is_static_1 = (f1 & BODY_FLAG_STATIC) != 0 or inv_m1 == 0.0
+
+            for s in range(b_start, b_end):
+                ci = sort_perm[s]
+
+                n = ds_load_vec3(cdata, wp.static(c_normal), ci)
+                t1 = ds_load_vec3(cdata, wp.static(c_tangent1), ci)
+                t2 = wp.cross(t1, n)
+
+                rw0 = ds_load_vec3(cdata, wp.static(c_rel0), ci)
+                rw1 = ds_load_vec3(cdata, wp.static(c_rel1), ci)
+
+                dv = (v1 + wp.cross(w1, rw1)) - (v0 + wp.cross(w0, rw0))
+
+                dv_n = wp.dot(n, dv)
+                dv_t1 = wp.dot(t1, dv)
+                dv_t2 = wp.dot(t2, dv)
+
+                bias_val = 0.0
+                if use_bias != 0:
+                    bias_val = ds_load_float(cdata, wp.static(c_bias), ci)
+
+                eff_n = ds_load_float(cdata, wp.static(c_eff_n), ci)
+                eff_t1 = ds_load_float(cdata, wp.static(c_eff_t1), ci)
+                eff_t2 = ds_load_float(cdata, wp.static(c_eff_t2), ci)
+
+                delta_n = -(dv_n + bias_val) * eff_n
+                old_acc_n = ds_load_float(cdata, wp.static(c_accumulated_n), ci)
+                new_acc_n = wp.max(old_acc_n + delta_n, 0.0)
+                applied_n = new_acc_n - old_acc_n
+                ds_store_float(cdata, wp.static(c_accumulated_n), ci, new_acc_n)
+
+                mu = ds_load_float(cdata, wp.static(c_friction), ci)
+                max_friction = mu * new_acc_n
+
+                delta_t1 = -dv_t1 * eff_t1
+                old_acc_t1 = ds_load_float(cdata, wp.static(c_accumulated_t1), ci)
+                new_acc_t1 = wp.clamp(old_acc_t1 + delta_t1, -max_friction, max_friction)
+                applied_t1 = new_acc_t1 - old_acc_t1
+                ds_store_float(cdata, wp.static(c_accumulated_t1), ci, new_acc_t1)
+
+                delta_t2 = -dv_t2 * eff_t2
+                old_acc_t2 = ds_load_float(cdata, wp.static(c_accumulated_t2), ci)
+                new_acc_t2 = wp.clamp(old_acc_t2 + delta_t2, -max_friction, max_friction)
+                applied_t2 = new_acc_t2 - old_acc_t2
+                ds_store_float(cdata, wp.static(c_accumulated_t2), ci, new_acc_t2)
+
+                impulse = applied_n * n + applied_t1 * t1 + applied_t2 * t2
+
+                if not is_static_0:
+                    v0 = v0 - inv_m0 * impulse
+                    w0 = w0 - inv_i0 * wp.cross(rw0, impulse)
+                if not is_static_1:
+                    v1 = v1 + inv_m1 * impulse
+                    w1 = w1 + inv_i1 * wp.cross(rw1, impulse)
+
+            if not is_static_0:
+                ds_store_vec3(bdata, wp.static(b_velocity), b0, v0)
+                ds_store_vec3(bdata, wp.static(b_angular_velocity), b0, w0)
+            if not is_static_1:
+                ds_store_vec3(bdata, wp.static(b_velocity), b1, v1)
+                ds_store_vec3(bdata, wp.static(b_angular_velocity), b1, w1)
+
         # Store compiled kernels and data arrays for launch
         self.prepare = _prepare
         self.solve = _solve
+        self.prepare_bundled = _prepare_bundled
+        self.solve_bundled = _solve_bundled
         self.contact_data = contact_store.data
         self.body_data = body_ds.data
         self.device = contact_store.device
