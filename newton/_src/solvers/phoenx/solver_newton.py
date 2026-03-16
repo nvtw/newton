@@ -360,10 +360,44 @@ class SolverPhoenX(SolverBase):
             qc = np.array([-q[0], -q[1], -q[2], q[3]], dtype=np.float32)
             return _qmul(_qmul(q, qv), qc)[:3]
 
+        # First pass: identify bodies that are fixed-jointed to world.
+        # These should be static in PhoenX (no gravity, no dynamics).
+        from .schemas import BODY_FLAG_STATIC
+
         for i in range(n):
             jtype = int(jt_np[i])
             parent_body = int(jp_np[i])
             child_body = int(jc_np[i])
+            if jtype == JointType.FIXED and parent_body < 0:
+                # Mark child body as static in PhoenX
+                handle = self._newton_to_phoenx.get(child_body)
+                if handle is not None:
+                    row = int(self.ss.body_store.handle_to_index.numpy()[handle])
+                    inv_m = self.ss.body_store.column_of("inverse_mass").numpy()
+                    inv_m[row] = 0.0
+                    self.ss.body_store.column_of("inverse_mass").assign(
+                        wp.array(inv_m, dtype=wp.float32, device=self.ss.device)
+                    )
+                    inv_i = self.ss.body_store.column_of("inverse_inertia_local").numpy()
+                    inv_i[row] = np.zeros((3, 3), dtype=np.float32)
+                    self.ss.body_store.column_of("inverse_inertia_local").assign(
+                        wp.array(inv_i, dtype=wp.mat33, device=self.ss.device)
+                    )
+                    flags_col = self.ss.body_store.column_of("flags").numpy()
+                    flags_col[row] = BODY_FLAG_STATIC
+                    self.ss.body_store.column_of("flags").assign(
+                        wp.array(flags_col, dtype=wp.int32, device=self.ss.device)
+                    )
+
+        # Second pass: create PhoenX joints (skip fixed-to-world, already handled)
+        for i in range(n):
+            jtype = int(jt_np[i])
+            parent_body = int(jp_np[i])
+            child_body = int(jc_np[i])
+
+            # Skip fixed-to-world joints (child is now static)
+            if jtype == JointType.FIXED and parent_body < 0:
+                continue
 
             # Resolve PhoenX handles
             if parent_body < 0:
