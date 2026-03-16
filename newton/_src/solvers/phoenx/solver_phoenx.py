@@ -437,12 +437,13 @@ class SolverState:
         _write_dl("limit_max", limit_max)
 
         # Pre-compute spring softness and bias factor (Erin Catto GDC 2011)
-        # softness = 1 / (dt * (c + dt * k)),  bias_factor = dt * k / (c + dt * k)
+        # Matching C# PhoenX: softness = 1 / (c + h * k), bias_factor = h * k / (c + h * k)
+        # where h = substep dt.  The kernels multiply by invDt during prepare/solve.
         # We use 1/480 as the default substep dt (60 FPS / 8 substeps).
         sim_dt = 1.0 / 480.0
         if stiffness > 0.0:
-            soft = 1.0 / (sim_dt * (damping + sim_dt * stiffness))
-            bf = sim_dt * stiffness * soft
+            soft = 1.0 / (damping + sim_dt * stiffness)
+            bf = sim_dt * stiffness / (damping + sim_dt * stiffness)
         else:
             soft = 0.0
             bf = 0.2  # hard constraint: standard Baumgarte factor

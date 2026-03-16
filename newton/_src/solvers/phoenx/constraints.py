@@ -1357,35 +1357,34 @@ class ConstraintKernels:
             has_slide_limits = s_min > -1.0e6 and s_max < 1.0e6
 
             if has_slide_limits and s_eff > 0.0:
-                s_axis = ds_load_vec3(jdata, wp.static(j_slide_axis), ji)
-                rw0_sl = ds_load_vec3(jdata, wp.static(j_rw0), ji)
-                rw1_sl = ds_load_vec3(jdata, wp.static(j_rw1), ji)
-                dv_s = (v1 + wp.cross(w1, rw1_sl)) - (v0 + wp.cross(w0, rw0_sl))
-                jv_s = wp.dot(s_axis, dv_s)
-
-                s_bias = 0.0
-                if use_bias != 0:
-                    s_cur = ds_load_float(jdata, wp.static(j_slide_current), ji)
-                    if s_cur < s_min:
-                        s_bias = CONSTRAINT_BAUMGARTE * (s_cur - s_min)
-                    elif s_cur > s_max:
-                        s_bias = CONSTRAINT_BAUMGARTE * (s_cur - s_max)
-
-                # Negate: slide uses (v1-v0) convention, so positive
-                # impulse pushes v1 in +axis. The one-sided PGS formula
-                # needs: sl = -eff*(jv + bias) to get the correct sign.
-                sl = -s_eff * (jv_s + s_bias)
-                old_sl = ds_load_float(jdata, wp.static(j_slide_lambda), ji)
-                new_sl = old_sl + sl
-
                 s_cur = ds_load_float(jdata, wp.static(j_slide_current), ji)
-                if s_cur < s_min:
-                    new_sl = wp.max(new_sl, 0.0)
-                elif s_cur > s_max:
-                    new_sl = wp.min(new_sl, 0.0)
 
-                sl = new_sl - old_sl
-                ds_store_float(jdata, wp.static(j_slide_lambda), ji, new_sl)
+                # Only activate when at or beyond limits
+                if s_cur <= s_min or s_cur >= s_max:
+                    s_axis = ds_load_vec3(jdata, wp.static(j_slide_axis), ji)
+                    rw0_sl = ds_load_vec3(jdata, wp.static(j_rw0), ji)
+                    rw1_sl = ds_load_vec3(jdata, wp.static(j_rw1), ji)
+                    dv_s = (v1 + wp.cross(w1, rw1_sl)) - (v0 + wp.cross(w0, rw0_sl))
+                    jv_s = wp.dot(s_axis, dv_s)
+
+                    s_bias = 0.0
+                    if use_bias != 0:
+                        if s_cur <= s_min:
+                            s_bias = CONSTRAINT_BAUMGARTE * (s_cur - s_min)
+                        elif s_cur >= s_max:
+                            s_bias = CONSTRAINT_BAUMGARTE * (s_cur - s_max)
+
+                    sl = -s_eff * (jv_s + s_bias)
+                    old_sl = ds_load_float(jdata, wp.static(j_slide_lambda), ji)
+                    new_sl = old_sl + sl
+
+                    if s_cur <= s_min:
+                        new_sl = wp.max(new_sl, 0.0)
+                    else:
+                        new_sl = wp.min(new_sl, 0.0)
+
+                    sl = new_sl - old_sl
+                    ds_store_float(jdata, wp.static(j_slide_lambda), ji, new_sl)
 
                 s_imp = s_axis * sl
                 if not is_static_0:

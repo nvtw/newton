@@ -140,12 +140,14 @@ class Example:
             device=device,
             default_friction=0.6,
             max_colors=12,
-            joint_capacity=1,  # one spring joint
+            joint_capacity=1,  # prismatic with spring drive
         )
         ss = self.ss
 
         self.pipeline = PhoenXCollisionPipeline(
-            max_shapes=num_shapes, max_contacts=contact_cap, device=device,
+            max_shapes=num_shapes,
+            max_contacts=contact_cap,
+            device=device,
         )
 
         # --- Ground (static, shape 0) ---
@@ -158,11 +160,16 @@ class Example:
         platform_mass = 5.0
         inv_mass = 1.0 / platform_mass
         hx, hy, hz = float(PLATFORM_HALF[0]), float(PLATFORM_HALF[1]), float(PLATFORM_HALF[2])
-        inv_inertia = np.diag(np.array([
-            12.0 * inv_mass / (4.0 * (hy**2 + hz**2)),
-            12.0 * inv_mass / (4.0 * (hx**2 + hz**2)),
-            12.0 * inv_mass / (4.0 * (hx**2 + hy**2)),
-        ], dtype=np.float32))
+        inv_inertia = np.diag(
+            np.array(
+                [
+                    12.0 * inv_mass / (4.0 * (hy**2 + hz**2)),
+                    12.0 * inv_mass / (4.0 * (hx**2 + hz**2)),
+                    12.0 * inv_mass / (4.0 * (hx**2 + hy**2)),
+                ],
+                dtype=np.float32,
+            )
+        )
 
         h_platform = ss.add_body(
             position=(0, 0, SPRING_REST_HEIGHT),
@@ -180,7 +187,7 @@ class Example:
         )
 
         # --- Spring constraint: prismatic joint + position drive ---
-        # A prismatic joint locks 5 DOF (lateral translation + all rotation),
+        # The prismatic joint locks 5 DOF (lateral translation + all rotation),
         # allowing only vertical sliding. The position drive adds spring
         # behavior (F = -k*x - c*v) so the platform bounces and settles.
         ji = ss.add_joint_prismatic(
@@ -248,14 +255,20 @@ class Example:
 
         # Cubes (NUM_CUBES bodies)
         self._cube_rows = wp.array(
-            [int(h2i[h]) for h in self.cube_handles], dtype=wp.int32, device=device,
+            [int(h2i[h]) for h in self.cube_handles],
+            dtype=wp.int32,
+            device=device,
         )
         self.cube_xforms = wp.zeros(NUM_CUBES, dtype=wp.transform, device=device)
         self.cube_colors = wp.array(
-            [wp.vec3(0.9, 0.5, 0.2)] * NUM_CUBES, dtype=wp.vec3, device=device,
+            [wp.vec3(0.9, 0.5, 0.2)] * NUM_CUBES,
+            dtype=wp.vec3,
+            device=device,
         )
         self.cube_materials = wp.array(
-            [wp.vec4(0.5, 0.3, 0.0, 0.0)] * NUM_CUBES, dtype=wp.vec4, device=device,
+            [wp.vec4(0.5, 0.3, 0.0, 0.0)] * NUM_CUBES,
+            dtype=wp.vec4,
+            device=device,
         )
 
         # Ground
@@ -266,7 +279,8 @@ class Example:
         # Picking data: pickable bodies are platform + cubes
         self._pickable_handles = [h_platform, *self.cube_handles]
         self._pickable_rows_np = np.array(
-            [self.row_platform, *self.cube_rows], dtype=np.int32,
+            [self.row_platform, *self.cube_rows],
+            dtype=np.int32,
         )
         self._pickable_halves = [
             np.array([hx, hy, hz], dtype=np.float32),
@@ -566,8 +580,7 @@ class Example:
 
         # Platform should have settled near equilibrium
         assert abs(pos_platform[2] - expected_z) < 0.3, (
-            f"Platform z={pos_platform[2]:.3f}, expected ~{expected_z:.3f} "
-            f"(displacement={expected_displacement:.3f}m)"
+            f"Platform z={pos_platform[2]:.3f}, expected ~{expected_z:.3f} (displacement={expected_displacement:.3f}m)"
         )
 
         # Velocity should be near zero (settled)

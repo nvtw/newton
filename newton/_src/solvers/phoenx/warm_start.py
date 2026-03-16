@@ -222,6 +222,17 @@ def _pad_keys_kernel(
 
 
 @wp.kernel
+def _break_uniform_keys_kernel(
+    keys: wp.array(dtype=wp.int64),
+    count: wp.array(dtype=wp.int32),
+    capacity: int,
+):
+    """Set the last key to 0 if all keys are sentinel (avoids radix sort hang)."""
+    if count[0] == 0 and capacity > 1:
+        keys[capacity - 1] = wp.int64(0)
+
+
+@wp.kernel
 def _copy_offset0_kernel(
     src: wp.array(dtype=wp.vec3),
     dst: wp.array(dtype=wp.vec3),
