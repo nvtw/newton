@@ -6,10 +6,21 @@
 Collisions
 ==========
 
-Newton provides a flexible collision detection system for rigid-rigid and soft-rigid
-contacts. This page starts with a :ref:`conceptual overview <Collision Overview>` of
-how geometry representations and narrow phase algorithms combine, then covers each
-stage in detail.
+Newton provides a GPU-accelerated collision detection system for rigid-rigid and
+soft-rigid contacts with:
+
+- **Full shape-pair coverage** — every shape type collides with every other shape type
+  (see :ref:`Shape Compatibility`).
+- **Mesh-mesh contacts** via precomputed SDFs for O(1) distance queries on complex
+  geometry.
+- **Hydroelastic contacts** that produce distributed contact areas instead of point
+  contacts, improving stability for non-convex and manipulation scenarios.
+- **Drop-in replacement for MuJoCo's contacts** — use Newton's pipeline with
+  :class:`~newton.solvers.SolverMuJoCo` for advanced contact models (see
+  :ref:`MuJoCo Warp Integration`).
+
+This page starts with a :ref:`conceptual overview <Collision Overview>` of how geometry
+representations and narrow phase algorithms combine, then covers each stage in detail.
 
 .. _Collision Overview:
 
