@@ -139,17 +139,22 @@ class Example:
             half_extents=(hx, hy, hz),
         )
 
-        # --- Spring constraint: ground anchor -> platform ---
-        # Ground anchor is at (0, 0, SPRING_REST_HEIGHT), platform anchor at its centre.
-        # Rest distance = 0 (anchors coincide at start).
-        # Limits: allow the platform to move ±0.8m from rest.
-        ss.add_joint_distance_limit(
+        # --- Spring constraint: prismatic joint + position drive ---
+        # A prismatic joint locks 5 DOF (lateral translation + all rotation),
+        # allowing only vertical sliding. The position drive adds spring
+        # behavior (F = -k*x - c*v) so the platform bounces and settles.
+        ji = ss.add_joint_prismatic(
             body_handle0=h_ground,
             body_handle1=h_platform,
-            anchor0_world=(0, 0, SPRING_REST_HEIGHT),
-            anchor1_world=(0, 0, SPRING_REST_HEIGHT),
-            limit_min=-0.8,
-            limit_max=0.8,
+            anchor_world=(0, 0, SPRING_REST_HEIGHT),
+            axis_world=(0, 0, 1),
+            slide_min=-0.8,
+            slide_max=0.8,
+        )
+        ss.set_joint_drive(
+            ji,
+            mode=ss.DRIVE_POSITION,
+            target=0.0,
             stiffness=SPRING_STIFFNESS,
             damping=SPRING_DAMPING,
         )
