@@ -718,6 +718,10 @@ class Mesh:
         if self.sdf is not None:
             raise RuntimeError("Mesh already has an SDF. Call clear_sdf() before rebuilding.")
 
+        _valid_tex_fmts = ("float32", "uint16", "uint8")
+        if texture_format not in _valid_tex_fmts:
+            raise ValueError(f"Unknown texture_format {texture_format!r}. Expected one of {list(_valid_tex_fmts)}.")
+
         from .sdf_utils import SDF  # noqa: PLC0415
 
         self.sdf = SDF.create_from_mesh(

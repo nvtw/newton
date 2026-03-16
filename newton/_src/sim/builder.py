@@ -315,6 +315,11 @@ class ModelBuilder:
                 shape_type: Optional shape geometry type used for context-specific
                     validation.
             """
+            _valid_tex_fmts = ("float32", "uint16", "uint8")
+            if self.sdf_texture_format not in _valid_tex_fmts:
+                raise ValueError(
+                    f"Unknown sdf_texture_format {self.sdf_texture_format!r}. Expected one of {list(_valid_tex_fmts)}."
+                )
             if self.sdf_max_resolution is not None and self.sdf_target_voxel_size is not None:
                 raise ValueError("Set only one of sdf_max_resolution or sdf_target_voxel_size, not both.")
             if self.sdf_max_resolution is not None and self.sdf_max_resolution % 8 != 0:
@@ -9693,7 +9698,7 @@ class ModelBuilder:
                                         margin=shape_gap,
                                         narrow_band_range=tuple(sdf_narrow_band_range),
                                         max_resolution=effective_max_resolution,
-                                        quantization_mode=_tex_fmt_map.get(sdf_tex_fmt, QuantizationMode.UINT16),
+                                        quantization_mode=_tex_fmt_map[sdf_tex_fmt],
                                         scale_baked=True,
                                         device=device,
                                     )

@@ -1172,20 +1172,16 @@ def test_texture_sdf_vs_ground_truth_gradient(test, device):
 def test_build_sdf_texture_format_parameter(test, device):
     """Verify Mesh.build_sdf() respects the texture_format parameter."""
     mesh_u16 = _create_box_mesh()
-    sdf_u16 = mesh_u16.build_sdf(max_resolution=32, texture_format="uint16")
+    sdf_u16 = mesh_u16.build_sdf(max_resolution=32, texture_format="uint16", device=device)
     test.assertIsNotNone(sdf_u16)
     test.assertIsNotNone(sdf_u16._subgrid_texture)
+    test.assertEqual(sdf_u16._subgrid_texture.dtype, wp.uint16)
 
     mesh_f32 = _create_box_mesh()
-    sdf_f32 = mesh_f32.build_sdf(max_resolution=32, texture_format="float32")
+    sdf_f32 = mesh_f32.build_sdf(max_resolution=32, texture_format="float32", device=device)
     test.assertIsNotNone(sdf_f32)
-
-    import warp  # noqa: PLC0415
-
-    if sdf_u16._subgrid_texture is not None:
-        test.assertEqual(sdf_u16._subgrid_texture.dtype, warp.uint16)
-    if sdf_f32._subgrid_texture is not None:
-        test.assertEqual(sdf_f32._subgrid_texture.dtype, warp.float32)
+    test.assertIsNotNone(sdf_f32._subgrid_texture)
+    test.assertEqual(sdf_f32._subgrid_texture.dtype, wp.float32)
 
 
 # Register tests for CUDA devices

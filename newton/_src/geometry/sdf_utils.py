@@ -350,7 +350,9 @@ class SDF:
                 "uint16": QuantizationMode.UINT16,
                 "uint8": QuantizationMode.UINT8,
             }
-            qmode = _tex_fmt_map.get(texture_format, QuantizationMode.UINT16)
+            if texture_format not in _tex_fmt_map:
+                raise ValueError(f"Unknown texture_format {texture_format!r}. Expected one of {list(_tex_fmt_map)}.")
+            qmode = _tex_fmt_map[texture_format]
 
             with wp.ScopedDevice(device):
                 verts = mesh.vertices * np.array(effective_scale)[None, :]
