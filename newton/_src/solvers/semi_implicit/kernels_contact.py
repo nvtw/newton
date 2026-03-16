@@ -402,6 +402,7 @@ def eval_body_contact(
     shape_material_mu: wp.array(dtype=float),
     shape_material_adhesion_gain: wp.array(dtype=float),
     shape_adhesion_ctrl: wp.array(dtype=float),
+    rigid_contact_adhesion_weight: wp.array(dtype=float),
     shape_body: wp.array(dtype=int),
     contact_count: wp.array(dtype=int),
     contact_point0: wp.array(dtype=wp.vec3),
@@ -540,7 +541,13 @@ def eval_body_contact(
     # clamp adhesion force (d > 0 = separated, fn > 0 = attractive in this convention)
     has_adhesion = adhesion_gain > 0.0 and adhesion_ctrl > 0.0
     if d > 0.0 and has_adhesion:
-        fn = wp.min(fn, adhesion_gain * adhesion_ctrl)
+        area_weight = float(0.0)
+        if rigid_contact_adhesion_weight:
+            area_weight = rigid_contact_adhesion_weight[tid]
+        if area_weight > 0.0:
+            fn = wp.min(fn, adhesion_gain * adhesion_ctrl * area_weight)
+        else:
+            fn = wp.min(fn, adhesion_gain * adhesion_ctrl)
     elif d > 0.0:
         fn = 0.0
 
@@ -648,6 +655,7 @@ def eval_body_contact_forces(
                 model.shape_material_mu,
                 model.shape_material_adhesion_gain,
                 control.shape_adhesion_ctrl if control else None,
+                contacts.rigid_contact_adhesion_weight,
                 model.shape_body,
                 contacts.rigid_contact_count,
                 contacts.rigid_contact_point0,

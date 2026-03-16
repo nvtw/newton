@@ -11,6 +11,7 @@
 - Add brick stacking example
 - Add box pyramid example and ASV benchmark for dense convex-on-convex contacts
 - Add controllable suction-cup adhesion via `ShapeConfig.adhesion_gain` and `Control.shape_adhesion_ctrl` for all solvers (XPBD, SemiImplicit, Featherstone, MuJoCo)
+- Add area-proportional adhesion force distribution: multi-contact manifold adhesion force scales with contact patch area and is uniformly distributed across contact points
 
 ### Changed
 

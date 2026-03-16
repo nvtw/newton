@@ -206,10 +206,13 @@ class ModelBuilder:
         ka: float = 0.0
         """The contact adhesion distance [m]. Used by SemiImplicit, Featherstone, XPBD."""
         adhesion_gain: float = 0.0
-        """Maximum adhesion force [N] for suction-cup contacts. When nonzero, contacts
-        within the adhesion distance :attr:`ka` apply an attractive normal force capped at
-        ``adhesion_gain * ctrl``, where *ctrl* is the runtime control signal in
-        :attr:`Control.shape_adhesion_ctrl`. Used by all solvers."""
+        """Maximum adhesion pressure [N/m^2] for suction-cup contacts. When nonzero,
+        contacts within the adhesion distance :attr:`ka` apply an attractive normal
+        force capped at ``adhesion_gain * ctrl * contact_area``, where *ctrl* is the
+        runtime control signal in :attr:`Control.shape_adhesion_ctrl` and
+        *contact_area* is the contact patch area computed from the clipped polygon.
+        For single-contact pairs (e.g. sphere-sphere) where area is unavailable, the
+        force is ``adhesion_gain * ctrl`` [N]. Used by all solvers."""
         mu: float = 1.0
         """The coefficient of friction. Used by all solvers."""
         restitution: float = 0.0
@@ -9390,6 +9393,7 @@ class ModelBuilder:
             m.shape_material_adhesion_gain = wp.array(
                 self.shape_material_adhesion_gain, dtype=wp.float32, requires_grad=requires_grad
             )
+            m.has_adhesion_shapes = any(g > 0.0 for g in self.shape_material_adhesion_gain)
             m.shape_material_mu = wp.array(self.shape_material_mu, dtype=wp.float32, requires_grad=requires_grad)
             m.shape_material_restitution = wp.array(
                 self.shape_material_restitution, dtype=wp.float32, requires_grad=requires_grad

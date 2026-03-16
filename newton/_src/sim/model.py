@@ -223,9 +223,13 @@ class Model:
         self.shape_material_ka: wp.array(dtype=wp.float32) | None = None
         """Shape contact adhesion distance [m], shape [shape_count], float."""
         self.shape_material_adhesion_gain: wp.array(dtype=wp.float32) | None = None
-        """Maximum adhesion force [N] for suction-cup contacts, shape [shape_count], float.
+        """Maximum adhesion pressure [N/m^2] for suction-cup contacts, shape [shape_count], float.
         When nonzero, contacts within the adhesion distance :attr:`shape_material_ka` apply an
-        attractive normal force capped at ``adhesion_gain * ctrl``."""
+        attractive normal force capped at ``adhesion_gain * ctrl * contact_area``.
+        For single-contact pairs where area is unavailable, the cap is ``adhesion_gain * ctrl`` [N]."""
+        self.has_adhesion_shapes: bool = False
+        """True when any shape has ``adhesion_gain > 0``. Gates allocation of per-contact
+        adhesion weight arrays and the adhesion weight distribution kernel."""
         self.shape_material_mu: wp.array(dtype=wp.float32) | None = None
         """Shape coefficient of friction [dimensionless], shape [shape_count], float."""
         self.shape_material_restitution: wp.array(dtype=wp.float32) | None = None

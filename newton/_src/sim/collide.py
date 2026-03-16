@@ -65,6 +65,8 @@ class ContactWriterData:
     out_stiffness: wp.array(dtype=float)
     out_damping: wp.array(dtype=float)
     out_friction: wp.array(dtype=float)
+    # Per-contact adhesion weight for area-proportional distribution (empty when disabled)
+    out_adhesion_weight: wp.array(dtype=float)
 
 
 @wp.func
@@ -148,6 +150,12 @@ def write_contact(
         writer_data.out_stiffness[index] = contact_data.contact_stiffness
         writer_data.out_damping[index] = contact_data.contact_damping
         writer_data.out_friction[index] = contact_data.contact_friction_scale
+
+    # Default adhesion weight: 0.0 signals the solver to use the fallback
+    # (full adhesion_gain * ctrl per contact). Multicontact manifolds overwrite
+    # this with patch_area / N for area-proportional distribution.
+    if writer_data.out_adhesion_weight.shape[0] > 0:
+        writer_data.out_adhesion_weight[index] = 0.0
 
 
 @wp.kernel
@@ -655,6 +663,7 @@ class CollisionPipeline:
             device=self.model.device,
             per_contact_shape_properties=self.narrow_phase.hydroelastic_sdf is not None,
             requested_attributes=self.model.get_requested_contact_attributes(),
+            has_adhesion_shapes=getattr(self.model, "has_adhesion_shapes", False),
         )
 
         # attach custom attributes with assignment==CONTACT
@@ -808,6 +817,7 @@ class CollisionPipeline:
             writer_data.out_stiffness = contacts.rigid_contact_stiffness
             writer_data.out_damping = contacts.rigid_contact_damping
             writer_data.out_friction = contacts.rigid_contact_friction
+            writer_data.out_adhesion_weight = contacts.rigid_contact_adhesion_weight
 
             # Run narrow phase with custom contact writer (writes directly to Contacts format)
             self.narrow_phase.launch_custom_write(

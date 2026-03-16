@@ -2085,6 +2085,7 @@ def solve_body_contact_positions(
     shape_material_ka: wp.array(dtype=float),
     shape_material_adhesion_gain: wp.array(dtype=float),
     shape_adhesion_ctrl: wp.array(dtype=float),
+    rigid_contact_adhesion_weight: wp.array(dtype=float),
     relaxation: float,
     dt: float,
     # outputs
@@ -2217,7 +2218,13 @@ def solve_body_contact_positions(
 
     # clamp adhesion: when d > 0 lambda_n is negative (attractive); cap its magnitude
     if d > 0.0 and has_adhesion:
-        max_adhesion_lambda = adhesion_gain * adhesion_ctrl * dt
+        area_weight = float(0.0)
+        if rigid_contact_adhesion_weight:
+            area_weight = rigid_contact_adhesion_weight[tid]
+        if area_weight > 0.0:
+            max_adhesion_lambda = adhesion_gain * adhesion_ctrl * area_weight * dt
+        else:
+            max_adhesion_lambda = adhesion_gain * adhesion_ctrl * dt
         lambda_n = wp.max(lambda_n, -max_adhesion_lambda)
 
     lin_delta_a = -n * lambda_n
@@ -2379,6 +2386,7 @@ def apply_rigid_restitution(
     shape_material_ka: wp.array(dtype=float),
     shape_material_adhesion_gain: wp.array(dtype=float),
     shape_adhesion_ctrl: wp.array(dtype=float),
+    rigid_contact_adhesion_weight: wp.array(dtype=float),
     contact_point0: wp.array(dtype=wp.vec3),
     contact_point1: wp.array(dtype=wp.vec3),
     contact_offset0: wp.array(dtype=wp.vec3),

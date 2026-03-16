@@ -345,6 +345,8 @@ class GlobalContactReducerData:
     shape_pairs: wp.array(dtype=wp.vec2i)
     contact_count: wp.array(dtype=wp.int32)
     capacity: int
+    contact_max: int
+    out_adhesion_weight: wp.array(dtype=wp.float32)
 
     # Optional hydroelastic data
     # contact_area: area of contact surface element (per contact)
@@ -523,6 +525,9 @@ class GlobalContactReducer:
         else:
             self.contact_area = wp.zeros(0, dtype=wp.float32, device=device)
 
+        # Zero-length stub — adhesion weights are not used by the reducer pipeline
+        self._adhesion_weight_stub = wp.zeros(0, dtype=wp.float32, device=device)
+
         # Per-contact dedup flags for cross-entry deduplication during export
         self.exported_flags = wp.zeros(capacity, dtype=wp.int32, device=device)
 
@@ -618,6 +623,8 @@ class GlobalContactReducer:
         data.shape_pairs = self.shape_pairs
         data.contact_count = self.contact_count
         data.capacity = self.capacity
+        data.contact_max = self.capacity
+        data.out_adhesion_weight = self._adhesion_weight_stub
         data.contact_area = self.contact_area
         data.entry_k_eff = self.entry_k_eff
         data.agg_force = self.agg_force

@@ -1314,7 +1314,7 @@ Shape material properties control contact resolution. Configure via :class:`~new
      - :attr:`~newton.ModelBuilder.ShapeConfig.ka`
      - :attr:`~newton.Model.shape_material_ka`
    * - ``adhesion_gain``
-     - Maximum adhesion (suction-cup) force [N]
+     - Maximum adhesion (suction-cup) pressure [N/m^2]. Force is proportional to contact area.
      - All
      - 0.0
      - :attr:`~newton.ModelBuilder.ShapeConfig.adhesion_gain`

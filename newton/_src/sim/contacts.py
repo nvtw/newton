@@ -73,6 +73,7 @@ class Contacts:
         per_contact_shape_properties: bool = False,
         clear_buffers: bool = False,
         requested_attributes: set[str] | None = None,
+        has_adhesion_shapes: bool = False,
     ):
         """
         Initialize Contacts storage.
@@ -93,6 +94,8 @@ class Contacts:
                 and safe since solvers only read up to contact_count.
             requested_attributes: Set of extended contact attribute names to allocate.
                 See :attr:`EXTENDED_ATTRIBUTES` for available options.
+            has_adhesion_shapes: Allocate per-contact adhesion weight array for
+                area-proportional adhesion force distribution.
         """
         self.per_contact_shape_properties = per_contact_shape_properties
         self.clear_buffers = clear_buffers
@@ -153,6 +156,13 @@ class Contacts:
             self.soft_contact_normal = wp.zeros(soft_contact_max, dtype=wp.vec3, requires_grad=requires_grad)
             """Contact normal direction [unitless], shape (soft_contact_max,), dtype :class:`vec3`."""
             self.soft_contact_tids = wp.full(soft_contact_max, -1, dtype=int)
+
+            if has_adhesion_shapes:
+                self.rigid_contact_adhesion_weight = wp.zeros(rigid_contact_max, dtype=wp.float32)
+                """Per-contact adhesion weight [dimensionless], shape (rigid_contact_max,), dtype float."""
+            else:
+                self.rigid_contact_adhesion_weight = None
+                """Per-contact adhesion weight [dimensionless], shape (rigid_contact_max,), dtype float."""
 
             # Extended contact attributes (optional, allocated on demand)
             self.force: wp.array | None = None

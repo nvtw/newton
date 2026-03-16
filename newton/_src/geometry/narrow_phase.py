@@ -82,6 +82,7 @@ class ContactWriterData:
     contact_normal: wp.array(dtype=wp.vec3)
     contact_penetration: wp.array(dtype=float)
     contact_tangent: wp.array(dtype=wp.vec3)
+    out_adhesion_weight: wp.array(dtype=float)
 
 
 @wp.func
@@ -135,6 +136,9 @@ def write_contact_simple(
         if wp.abs(wp.dot(normal, world_x)) > 0.99:
             world_x = wp.vec3(0.0, 1.0, 0.0)
         writer_data.contact_tangent[index] = wp.normalize(world_x - wp.dot(world_x, normal) * normal)
+
+    if writer_data.out_adhesion_weight.shape[0] > 0:
+        writer_data.out_adhesion_weight[index] = 0.0
 
 
 def create_narrow_phase_primitive_kernel(writer_func: Any):
@@ -558,12 +562,14 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 # Count valid contacts and allocate consecutive indices
                 num_valid = int(contact_0_valid) + int(contact_1_valid) + int(contact_2_valid) + int(contact_3_valid)
                 if num_valid > 0:
-                    base_index = wp.atomic_add(writer_data.contact_count, 0, num_valid)
+                    group_start = wp.atomic_add(writer_data.contact_count, 0, num_valid)
                     # Do not invoke the writer callback for overflowing batches.
                     # This keeps user-provided writers safe while still preserving
                     # overflow visibility via contact_count > contact_max.
-                    if base_index + num_valid > writer_data.contact_max:
+                    if group_start + num_valid > writer_data.contact_max:
                         continue
+
+                    base_index = group_start
 
                     # Write first contact if valid
                     if contact_0_valid:
@@ -2112,6 +2118,7 @@ class NarrowPhase:
         writer_data.contact_normal = contact_normal
         writer_data.contact_penetration = contact_penetration
         writer_data.contact_tangent = contact_tangent
+        writer_data.out_adhesion_weight = None
 
         # Delegate to launch_custom_write
         self.launch_custom_write(

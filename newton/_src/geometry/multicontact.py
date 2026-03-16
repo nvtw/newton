@@ -32,7 +32,7 @@ import warp as wp
 
 from newton._src.math import orthonormal_basis
 
-from .contact_data import ContactData
+from .contact_data import ContactData, contact_passes_gap_check
 from .mpr import create_support_map_function
 
 # Constants
@@ -665,6 +665,43 @@ def add_avoid_duplicates_vec2(
 def get_ptr(a: wp.array(dtype=wp.vec2)) -> wp.uint64: ...
 
 
+@wp.func
+def shoelace_area_centroid_2d(
+    poly: wp.array(dtype=wp.vec2),
+    count: int,
+) -> tuple[float, wp.vec2]:
+    """Compute the area and centroid of a 2D convex polygon using the shoelace formula.
+
+    Args:
+        poly: Array of polygon vertices in 2D (counter-clockwise or clockwise).
+        count: Number of vertices.
+
+    Returns:
+        Tuple of (area, centroid_2d) where area is always non-negative and
+        centroid_2d is the polygon centroid. Returns (0, (0,0)) for degenerate polygons.
+    """
+    twice_area = float(0.0)
+    cx = float(0.0)
+    cy = float(0.0)
+
+    for i in range(count):
+        j = (i + 1) % count
+        pi = poly[i]
+        pj = poly[j]
+        cross_val = pi[0] * pj[1] - pj[0] * pi[1]
+        twice_area += cross_val
+        cx += (pi[0] + pj[0]) * cross_val
+        cy += (pi[1] + pj[1]) * cross_val
+
+    area = wp.abs(twice_area) * 0.5
+    if wp.abs(twice_area) > 1.0e-12:
+        inv_6a = 1.0 / (3.0 * twice_area)
+        cx = cx * inv_6a
+        cy = cy * inv_6a
+
+    return area, wp.vec2(cx, cy)
+
+
 def create_build_manifold(support_func: Any, writer_func: Any, post_process_contact: Any, _support_funcs: Any = None):
     """
     Factory function to create manifold generation functions with a specific support mapping function.
@@ -712,12 +749,19 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
         position_b: wp.vec3,
         quaternion_a: wp.quat,
         quaternion_b: wp.quat,
-    ) -> tuple[int, float]:
-        """
-        Extract up to 4 contact points from two convex contact polygons and write them immediately.
+        reserve_extra: int,
+    ) -> tuple[int, float, float, wp.vec3, int]:
+        """Extract up to 4 contact points from two convex contact polygons.
+
+        Contacts are collected, gap-checked, and written as a contiguous batch
+        via a single atomic reservation so that all contacts from this manifold
+        occupy consecutive indices in the output buffer.
 
         All intermediate work (clipping, projectors) operates in shape A's local frame.
         Final contact points are transformed to world space before writing.
+
+        The contact patch area and centroid are computed from the full clipped polygon
+        (before 4-point reduction) using the shoelace formula for maximum accuracy.
 
         Args:
             m_a: Contact polygon vertices for shape A (2D contact plane space, up to 5 points).
@@ -741,11 +785,18 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
             position_b: World position of shape B (for post_process_contact).
             quaternion_a: Orientation of shape A (for post_process_contact).
             quaternion_b: Orientation of shape B (for post_process_contact).
+            reserve_extra: Number of additional slots to reserve after the manifold
+                contacts. The caller can write into these slots using the returned
+                ``extra_start`` index. Unused slots are wasted (acceptable for rare cases).
 
         Returns:
-            Tuple of (loop_count, normal_dot) where:
-            - loop_count: Number of valid contact points written (0-4)
+            Tuple of (count, normal_dot, patch_area, patch_centroid_world, extra_start):
+            - count: Number of valid manifold contact points written (0-4)
             - normal_dot: Absolute dot product of polygon normals
+            - patch_area: Area of the full clipped contact polygon [m^2]
+            - patch_centroid_world: Centroid of the contact patch in world space [m]
+            - extra_start: Buffer index where the extra reserved slots begin (-1 if
+              no contacts were written or buffer was full)
         """
 
         normal_dot = wp.abs(wp.dot(projector_a.normal, projector_b.normal))
@@ -753,6 +804,17 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
         loop_count = trim_all_in_place(m_a, m_a_count, m_b, m_b_count)
 
         loop_count = remove_zero_length_edges(m_b, loop_count, EPS)
+
+        # Compute area and centroid on the full clipped polygon before 4-point reduction
+        patch_area = float(0.0)
+        patch_centroid_world = wp.vec3(0.0, 0.0, 0.0)
+        if loop_count > 1:
+            patch_area, centroid_2d = shoelace_area_centroid_2d(m_b, loop_count)
+            centroid_local = centroid_2d[0] * cross_vector_1 + centroid_2d[1] * cross_vector_2 + center_local
+            ca = body_projector_project(projector_a, centroid_local, normal_local)
+            cb = body_projector_project(projector_b, centroid_local, normal_local)
+            centroid_3d_local = 0.5 * (ca + cb)
+            patch_centroid_world = wp.quat_rotate(orientation_a, centroid_3d_local) + position_a_world
 
         if loop_count > 1:
             result = wp.vec4i()
@@ -762,10 +824,28 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
             else:
                 result = wp.vec4i(0, 1, 2, 3)
 
+            # First pass: compute per-contact point + distance and gap-check.
+            # Only the two varying fields are stored; the rest comes from
+            # contact_template at write time (single ContactData in registers).
+            pt_0 = wp.vec3()
+            pt_1 = wp.vec3()
+            pt_2 = wp.vec3()
+            pt_3 = wp.vec3()
+            dist_0 = float(0.0)
+            dist_1 = float(0.0)
+            dist_2 = float(0.0)
+            dist_3 = float(0.0)
+            valid_0 = wp.bool(False)
+            valid_1 = wp.bool(False)
+            valid_2 = wp.bool(False)
+            valid_3 = wp.bool(False)
+
+            contact_data = contact_template
+            contact_data.contact_normal_a_to_b = normal_world
+
             for i in range(loop_count):
                 ia = int(result[i])
 
-                # Back-project from 2D to 3D in A-local frame
                 p_local = m_b[ia].x * cross_vector_1 + m_b[ia].y * cross_vector_2 + center_local
 
                 a = body_projector_project(projector_a, p_local, normal_local)
@@ -773,23 +853,77 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
                 contact_point_local = 0.5 * (a + b)
                 signed_distance = wp.dot(b - a, normal_local)
 
-                # Transform from A-local to world space
                 contact_point_world = wp.quat_rotate(orientation_a, contact_point_local) + position_a_world
 
-                contact_data = contact_template
                 contact_data.contact_point_center = contact_point_world
-                contact_data.contact_normal_a_to_b = normal_world
                 contact_data.contact_distance = signed_distance
 
                 contact_data = post_process_contact(
                     contact_data, geom_a, position_a, quaternion_a, geom_b, position_b, quaternion_b
                 )
-                writer_func(contact_data, writer_data, -1)
+
+                passes = wp.bool(contact_passes_gap_check(contact_data))
+                if i == 0:
+                    pt_0 = contact_data.contact_point_center
+                    dist_0 = contact_data.contact_distance
+                    valid_0 = passes
+                elif i == 1:
+                    pt_1 = contact_data.contact_point_center
+                    dist_1 = contact_data.contact_distance
+                    valid_1 = passes
+                elif i == 2:
+                    pt_2 = contact_data.contact_point_center
+                    dist_2 = contact_data.contact_distance
+                    valid_2 = passes
+                else:
+                    pt_3 = contact_data.contact_point_center
+                    dist_3 = contact_data.contact_distance
+                    valid_3 = passes
+
+            num_valid = int(valid_0) + int(valid_1) + int(valid_2) + int(valid_3)
+            total_reserve = num_valid + reserve_extra
+            extra_start = int(-1)
+
+            if num_valid > 0:
+                base_index = wp.atomic_add(writer_data.contact_count, 0, total_reserve)
+                if base_index + total_reserve <= writer_data.contact_max:
+                    group_start = base_index
+                    if valid_0:
+                        contact_data.contact_point_center = pt_0
+                        contact_data.contact_distance = dist_0
+                        writer_func(contact_data, writer_data, base_index)
+                        base_index += 1
+                    if valid_1:
+                        contact_data.contact_point_center = pt_1
+                        contact_data.contact_distance = dist_1
+                        writer_func(contact_data, writer_data, base_index)
+                        base_index += 1
+                    if valid_2:
+                        contact_data.contact_point_center = pt_2
+                        contact_data.contact_distance = dist_2
+                        writer_func(contact_data, writer_data, base_index)
+                        base_index += 1
+                    if valid_3:
+                        contact_data.contact_point_center = pt_3
+                        contact_data.contact_distance = dist_3
+                        writer_func(contact_data, writer_data, base_index)
+
+                    if writer_data.out_adhesion_weight.shape[0] > 0:
+                        w = patch_area / float(num_valid)
+                        for wi in range(num_valid):
+                            writer_data.out_adhesion_weight[group_start + wi] = w
+
+                    extra_start = group_start + num_valid
+
+            loop_count = num_valid
         else:
             normal_dot = 0.0
             loop_count = 0
+            patch_area = 0.0
+            patch_centroid_world = wp.vec3(0.0, 0.0, 0.0)
+            extra_start = int(-1)
 
-        return loop_count, normal_dot
+        return loop_count, normal_dot, patch_area, patch_centroid_world, extra_start
 
     @wp.func
     def build_manifold(
@@ -913,6 +1047,8 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
         quaternion_a_ws = orientation_a
         quaternion_b_ws = orientation_a * relative_orientation_b
 
+        extra_start = int(-1)
+
         if a_count < 2 or b_count < 2:
             count_out = 0
             normal_dot = 0.0
@@ -925,28 +1061,31 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
                 count_out = 0
                 normal_dot = 0.0
             else:
-                num_manifold_points, normal_dot = extract_4_point_contact_manifolds(
-                    a_buffer,
-                    a_count,
-                    b_buffer,
-                    b_count,
-                    normal,
-                    tangent_a,
-                    tangent_b,
-                    center,
-                    projector_a,
-                    projector_b,
-                    orientation_a,
-                    position_a_world,
-                    normal_world,
-                    writer_data,
-                    contact_template,
-                    geom_a,
-                    geom_b,
-                    position_a_ws,
-                    position_b_ws,
-                    quaternion_a_ws,
-                    quaternion_b_ws,
+                num_manifold_points, normal_dot, _unused_area, _unused_centroid, extra_start = (
+                    extract_4_point_contact_manifolds(
+                        a_buffer,
+                        a_count,
+                        b_buffer,
+                        b_count,
+                        normal,
+                        tangent_a,
+                        tangent_b,
+                        center,
+                        projector_a,
+                        projector_b,
+                        orientation_a,
+                        position_a_world,
+                        normal_world,
+                        writer_data,
+                        contact_template,
+                        geom_a,
+                        geom_b,
+                        position_a_ws,
+                        position_b_ws,
+                        quaternion_a_ws,
+                        quaternion_b_ws,
+                        1,
+                    )
                 )
                 count_out = wp.min(num_manifold_points, 4)
 
@@ -964,9 +1103,15 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
             contact_data = post_process_contact(
                 contact_data, geom_a, position_a_ws, quaternion_a_ws, geom_b, position_b_ws, quaternion_b_ws
             )
-            writer_func(contact_data, writer_data, -1)
 
-            count_out += 1
+            if contact_passes_gap_check(contact_data):
+                if extra_start >= 0:
+                    writer_func(contact_data, writer_data, extra_start)
+                else:
+                    idx = wp.atomic_add(writer_data.contact_count, 0, 1)
+                    if idx < writer_data.contact_max:
+                        writer_func(contact_data, writer_data, idx)
+                count_out += 1
 
         return count_out
 
