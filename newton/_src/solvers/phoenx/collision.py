@@ -169,6 +169,7 @@ def _convert_contacts_kernel(
     shape_body_row: wp.array(dtype=wp.int32),
     body_position: wp.array(dtype=wp.vec3),
     body_orientation: wp.array(dtype=wp.quat),
+    shape_friction: wp.array(dtype=wp.float32),
     default_friction: float,
     out_shape0: wp.array(dtype=wp.int32),
     out_shape1: wp.array(dtype=wp.int32),
@@ -227,7 +228,10 @@ def _convert_contacts_kernel(
     # For box/plane primitives with no rounding, margins are 0.
     out_margin0[tid] = 0.0
     out_margin1[tid] = 0.0
-    out_friction[tid] = default_friction
+    # Average of both shapes' friction (matching Newton XPBD convention).
+    mu0 = shape_friction[s0]
+    mu1 = shape_friction[s1]
+    out_friction[tid] = 0.5 * (mu0 + mu1)
     out_acc_n[tid] = 0.0
     out_acc_t1[tid] = 0.0
     out_acc_t2[tid] = 0.0
@@ -272,6 +276,7 @@ class PhoenXCollisionPipeline:
         self._shape_mesh_ids: dict[int, int] = {}  # shape index → wp.Mesh.id (uint64)
         self._shape_local_aabb: dict[int, tuple] = {}  # shape index → (lower, upper, voxel_res) tuples
         self._shape_gap_list: list[float] = []  # per-shape contact gap
+        self._shape_friction_list: list[float] = []  # per-shape friction coefficient
         self._finalized = False
 
     # -- shape registration (host-side, before finalize) --------------------
@@ -282,6 +287,7 @@ class PhoenXCollisionPipeline:
         local_transform: tuple | None = None,
         half_extents: tuple[float, float, float] = (0.5, 0.5, 0.5),
         margin: float = 0.0,
+        friction: float = 0.5,
     ) -> int:
         """Register a box collision shape.
 
@@ -306,6 +312,7 @@ class PhoenXCollisionPipeline:
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(math.sqrt(hx * hx + hy * hy + hz * hz))
         self._shape_gap_list.append(0.0)
+        self._shape_friction_list.append(friction)
         return idx
 
     def add_shape_sphere(
@@ -314,6 +321,7 @@ class PhoenXCollisionPipeline:
         local_transform: tuple | None = None,
         radius: float = 0.5,
         margin: float = 0.0,
+        friction: float = 0.5,
     ) -> int:
         """Register a sphere collision shape.
 
@@ -335,6 +343,7 @@ class PhoenXCollisionPipeline:
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(radius + margin)
         self._shape_gap_list.append(0.0)
+        self._shape_friction_list.append(friction)
         return idx
 
     def add_shape_capsule(
@@ -344,6 +353,7 @@ class PhoenXCollisionPipeline:
         radius: float = 0.25,
         half_length: float = 0.5,
         margin: float = 0.0,
+        friction: float = 0.5,
     ) -> int:
         """Register a capsule collision shape (axis along local Z).
 
@@ -366,6 +376,7 @@ class PhoenXCollisionPipeline:
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(radius + half_length + margin)
         self._shape_gap_list.append(0.0)
+        self._shape_friction_list.append(friction)
         return idx
 
     def add_shape_cylinder(
@@ -375,6 +386,7 @@ class PhoenXCollisionPipeline:
         radius: float = 0.25,
         half_height: float = 0.5,
         margin: float = 0.0,
+        friction: float = 0.5,
     ) -> int:
         """Register a cylinder collision shape (axis along local Z).
 
@@ -397,12 +409,14 @@ class PhoenXCollisionPipeline:
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(math.sqrt(radius * radius + half_height * half_height) + margin)
         self._shape_gap_list.append(0.0)
+        self._shape_friction_list.append(friction)
         return idx
 
     def add_shape_plane(
         self,
         body_row: int,
         local_transform: tuple | None = None,
+        friction: float = 0.5,
     ) -> int:
         """Register an infinite ground-plane shape.
 
@@ -427,6 +441,7 @@ class PhoenXCollisionPipeline:
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(1.0e6)
         self._shape_gap_list.append(0.0)
+        self._shape_friction_list.append(friction)
         return idx
 
     def add_shape_mesh(
@@ -438,6 +453,7 @@ class PhoenXCollisionPipeline:
         scale: tuple[float, float, float] = (1.0, 1.0, 1.0),
         margin: float = 0.0,
         gap: float = 0.0,
+        friction: float = 0.5,
         aabb_lower: tuple[float, float, float] = (0.0, 0.0, 0.0),
         aabb_upper: tuple[float, float, float] = (1.0, 1.0, 1.0),
         voxel_resolution: tuple[int, int, int] = (4, 4, 4),
@@ -452,6 +468,7 @@ class PhoenXCollisionPipeline:
             scale: mesh scale ``(sx, sy, sz)``.
             margin: collision margin [m].
             gap: contact detection gap [m].
+            friction: Coulomb friction coefficient.
             aabb_lower: local-space AABB lower bound [m].
             aabb_upper: local-space AABB upper bound [m].
             voxel_resolution: voxel grid resolution for contact binning.
@@ -469,6 +486,7 @@ class PhoenXCollisionPipeline:
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(collision_radius)
         self._shape_gap_list.append(gap)
+        self._shape_friction_list.append(friction)
         self._shape_mesh_ids[idx] = mesh_id
         self._shape_local_aabb[idx] = (aabb_lower, aabb_upper, voxel_resolution)
         return idx
@@ -505,6 +523,7 @@ class PhoenXCollisionPipeline:
         self.shape_source = wp.array(source_list, dtype=wp.uint64, device=d)
 
         self.shape_gap = wp.array(self._shape_gap_list, dtype=wp.float32, device=d)
+        self.shape_friction = wp.array(self._shape_friction_list, dtype=wp.float32, device=d)
         self.shape_collision_radius = wp.array(self._shape_collision_radius_list, dtype=wp.float32, device=d)
         flags_val = int(ShapeFlags.COLLIDE_SHAPES)
         self.shape_flags = wp.full(n, flags_val, dtype=wp.int32, device=d)
@@ -669,6 +688,7 @@ class PhoenXCollisionPipeline:
                 self.shape_body_row,
                 bs.column_of("position"),
                 bs.column_of("orientation"),
+                self.shape_friction,
                 solver_state.default_friction,
                 cs.column_of("shape0"),
                 cs.column_of("shape1"),

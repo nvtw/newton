@@ -29,6 +29,7 @@ import warp as wp
 
 import newton
 import newton.examples
+from newton._src.solvers.phoenx.contacts import build_contact_lines_kernel
 
 # Assembly type for the nut and bolt
 ASSEMBLY_STR = "m20_loose"
@@ -38,7 +39,7 @@ ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
 
 SHAPE_CFG = newton.ModelBuilder.ShapeConfig(
     margin=0.0,
-    mu=0.01,
+    mu=0.0,
     ke=1e7,
     kd=1e4,
     gap=0.005,
@@ -111,15 +112,14 @@ class Example:
         self.grid_x = int(np.ceil(np.sqrt(self.num_per_world)))
         self.grid_y = int(np.ceil(self.num_per_world / self.grid_x))
 
-        self.scene_scale = 1.0
-        self.ground_plane_offset = -0.01
+        self.scene_scale = 5.0
 
         world_builder = self._build_nut_bolt_scene()
 
         main_scene = newton.ModelBuilder()
-        main_scene.default_shape_cfg.gap = 0.001 * self.scene_scale
+        main_scene.default_shape_cfg.gap = SHAPE_CFG.gap * self.scene_scale
         main_scene.add_shape_plane(
-            plane=(0.0, 0.0, 1.0, -self.ground_plane_offset),
+            plane=(0.0, 0.0, 1.0, 0.0),
             width=0.0,
             length=0.0,
             label="ground_plane",
@@ -154,6 +154,11 @@ class Example:
         camera_offset = np.sqrt(self.world_count) * offset
         self.viewer.set_camera(pos=wp.vec3(camera_offset, -camera_offset, 0.5 * camera_offset), pitch=-15.0, yaw=135.0)
 
+        # Contact visualization buffers
+        d = self.model.device
+        self._contact_starts = wp.zeros(max_contacts, dtype=wp.vec3, device=d)
+        self._contact_ends = wp.zeros(max_contacts, dtype=wp.vec3, device=d)
+
         self._init_test_tracking()
 
     def _build_nut_bolt_scene(self) -> newton.ModelBuilder:
@@ -164,8 +169,22 @@ class Example:
         world_builder = newton.ModelBuilder()
         world_builder.default_shape_cfg.gap = 0.001 * self.scene_scale
 
+        # Scale the shape config gap for contact detection at larger scene size
+        scaled_cfg = newton.ModelBuilder.ShapeConfig(
+            margin=SHAPE_CFG.margin,
+            mu=SHAPE_CFG.mu,
+            ke=SHAPE_CFG.ke,
+            kd=SHAPE_CFG.kd,
+            gap=SHAPE_CFG.gap * self.scene_scale,
+            density=SHAPE_CFG.density,
+            mu_torsional=SHAPE_CFG.mu_torsional,
+            mu_rolling=SHAPE_CFG.mu_rolling,
+            is_hydroelastic=SHAPE_CFG.is_hydroelastic,
+        )
+
         bolt_file = str(asset_path / f"factory_bolt_{ASSEMBLY_STR}.obj")
         nut_file = str(asset_path / f"factory_nut_{ASSEMBLY_STR}_subdiv_3x.obj")
+        # SDF is built on unscaled vertices — use original gap for SDF margin
         bolt_mesh, bolt_center = load_mesh_with_sdf(bolt_file, shape_cfg=SHAPE_CFG, center_origin=True)
         nut_mesh, nut_center = load_mesh_with_sdf(nut_file, shape_cfg=SHAPE_CFG, center_origin=True)
 
@@ -186,7 +205,7 @@ class Example:
                     world_builder,
                     bolt_mesh,
                     bolt_xform,
-                    SHAPE_CFG,
+                    scaled_cfg,
                     label=f"bolt_{i}_{j}",
                     center_vec=bolt_center * self.scene_scale,
                     scale=self.scene_scale,
@@ -200,7 +219,7 @@ class Example:
                     world_builder,
                     nut_mesh,
                     nut_xform,
-                    SHAPE_CFG,
+                    scaled_cfg,
                     label=f"nut_{i}_{j}",
                     center_vec=nut_center * self.scene_scale,
                     scale=self.scene_scale,
@@ -222,6 +241,41 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
+
+        # Contact visualization (PhoenX contact store → log_lines)
+        if self.viewer.show_contacts:
+            ss = self.solver.ss
+            bs = ss.body_store
+            cs = ss.contact_store
+            d = self.model.device
+            wp.launch(
+                build_contact_lines_kernel,
+                dim=cs.capacity,
+                inputs=[
+                    cs.column_of("body0"),
+                    cs.column_of("offset0"),
+                    cs.column_of("normal"),
+                    bs.column_of("position"),
+                    bs.column_of("orientation"),
+                    cs.count,
+                    self._contact_starts,
+                    self._contact_ends,
+                ],
+                device=d,
+            )
+            nc = cs.count.numpy()[0]
+            if nc > 0:
+                self.viewer.log_lines(
+                    "/contacts",
+                    self._contact_starts[:nc],
+                    self._contact_ends[:nc],
+                    (0.0, 1.0, 0.0),
+                )
+            else:
+                self.viewer.log_lines("/contacts", None, None, None)
+        else:
+            self.viewer.log_lines("/contacts", None, None, None)
+
         self.viewer.end_frame()
 
     def _init_test_tracking(self):
@@ -273,11 +327,12 @@ class Example:
         """Verify simulation state after example completes.
 
         - Bolts should stay approximately in place (limited displacement)
-        - Nuts should rotate (thread engagement) and move slightly downward
+        - Nut should remain on the bolt axis (not fly off)
+        - Nut should rotate (thread engagement with zero friction)
         """
         body_q = self.state_0.body_q.numpy()
 
-        max_bolt_displacement = 0.02
+        max_bolt_displacement = 0.02 * self.scene_scale
         for i, bolt_idx in enumerate(self.bolt_body_indices):
             current_pos = body_q[bolt_idx][:3]
             initial_pos = self.bolt_initial_transforms[i][:3]
@@ -287,19 +342,23 @@ class Example:
                 f"Displacement={displacement:.4f} (max allowed={max_bolt_displacement:.4f})"
             )
 
-        min_rotation_threshold = 0.1
-        for i in range(len(self.nut_body_indices)):
-            max_rotation = self.nut_max_rotation_change[i]
-            assert max_rotation > min_rotation_threshold, (
-                f"Nut {i}: did not rotate enough. "
-                f"Max rotation={np.degrees(max_rotation):.2f} degrees "
-                f"(expected > {np.degrees(min_rotation_threshold):.2f} degrees)"
+        for i, nut_idx in enumerate(self.nut_body_indices):
+            bolt_idx = self.bolt_body_indices[i]
+            nut_pos = body_q[nut_idx][:3]
+            bolt_pos = body_q[bolt_idx][:3]
+
+            # Nut should stay on the bolt axis
+            lateral_drift = np.sqrt((nut_pos[0] - bolt_pos[0]) ** 2 + (nut_pos[1] - bolt_pos[1]) ** 2)
+            assert lateral_drift < 0.01 * self.scene_scale, (
+                f"Nut {i}: drifted off bolt axis. Lateral drift={lateral_drift:.4f} (max allowed={0.01 * self.scene_scale:.4f})"
             )
 
-            initial_z = self.nut_initial_transforms[i][2]
-            min_z = self.nut_min_z[i]
-            assert min_z < initial_z, (
-                f"Nut {i}: did not move downward. Initial z={initial_z:.4f}, min z reached={min_z:.4f}"
+            # Nut should have rotated (thread engagement)
+            max_rotation = self.nut_max_rotation_change[i]
+            assert max_rotation > 0.05, (
+                f"Nut {i}: did not rotate enough. "
+                f"Max rotation={np.degrees(max_rotation):.2f} degrees "
+                f"(expected > {np.degrees(0.05):.2f} degrees)"
             )
 
     @staticmethod

@@ -857,7 +857,7 @@ class SolverState:
             device=self.device,
         )
 
-    def _launch_solve_constraints(self, partition_slot: int, use_bias: int, dim: int = 0):
+    def _launch_solve_constraints(self, partition_slot: int, use_bias: int, inv_dt: float = 0.0, dim: int = 0):
         """Launch constraint solve kernel for one partition slot."""
         if self._constraint_kernels is None or self._joint_count == 0:
             return
@@ -876,6 +876,7 @@ class SolverState:
                 ws.bundle_count,
                 ck.joint_count,
                 use_bias,
+                inv_dt,
             ],
             device=self.device,
         )
@@ -955,16 +956,7 @@ class SolverState:
 
         self._partition_contacts()
 
-        # Mass splitting: count distinct contact partners per body.
-        # Tonge 2012 splits effective mass by the number of contacts on a
-        # body, but with 100+ mesh contacts between the same two bodies
-        # this makes each contact negligibly weak.  PhysX TGS uses no mass
-        # splitting at all — graph coloring ensures contacts on the same
-        # body are in different partitions, and substepping provides
-        # convergence.  We count distinct *partners* (from bundle
-        # structure, where each bundle = one body pair) as a compromise
-        # that preserves the Tonge stacking benefit while keeping mesh
-        # contacts solvable.
+        # Mass splitting: count how many contacts reference each body
         wp.launch(
             clear_contact_count_kernel,
             dim=bs.capacity,
@@ -972,14 +964,12 @@ class SolverState:
             device=d,
         )
         wp.launch(
-            count_partners_per_body_kernel,
-            dim=self.capacity_bundles,
+            count_contacts_per_body_kernel,
+            dim=cs.capacity,
             inputs=[
                 cs.column_of("body0"),
                 cs.column_of("body1"),
-                self.warm_starter.bundle_starts,
-                self.warm_starter.bundle_count,
-                self.warm_starter.curr_indices,
+                cs.count,
                 self._contact_count_per_body,
             ],
             device=d,
@@ -997,12 +987,12 @@ class SolverState:
         for _ in range(num_iterations):
             for p in range(max_slots):
                 self._launch_solve(p, 1)
-                self._launch_solve_constraints(p, 1)
+                self._launch_solve_constraints(p, 1, inv_dt)
 
         for _ in range(num_velocity_iterations):
             for p in range(max_slots):
                 self._launch_solve(p, 0)
-                self._launch_solve_constraints(p, 0)
+                self._launch_solve_constraints(p, 0, inv_dt)
 
         if is_xpbd:
             # Derive velocities from position change, skip integrate_positions

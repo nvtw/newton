@@ -262,6 +262,7 @@ class SolverPhoenX(SolverBase):
         shape_scale_np = model.shape_scale.numpy()
         shape_body_np = model.shape_body.numpy()
         shape_xf_np = model.shape_transform.numpy()
+        shape_mu_np = model.shape_material_mu.numpy()
 
         # Pre-load mesh-related arrays if any mesh shapes exist
         has_meshes = any(int(t) == GEO_TYPE_MESH for t in shape_type_np)
@@ -317,17 +318,21 @@ class SolverPhoenX(SolverBase):
                 float(xf[6]),
             )
 
+            mu = float(shape_mu_np[i])
+
             if geo == GEO_TYPE_BOX:
                 self.pipeline.add_shape_box(
                     body_row=body_row,
                     local_transform=local_xf,
                     half_extents=(float(scale[0]), float(scale[1]), float(scale[2])),
+                    friction=mu,
                 )
             elif geo == GEO_TYPE_SPHERE:
                 self.pipeline.add_shape_sphere(
                     body_row=body_row,
                     local_transform=local_xf,
                     radius=float(scale[0]),
+                    friction=mu,
                 )
             elif geo == GEO_TYPE_CAPSULE:
                 self.pipeline.add_shape_capsule(
@@ -335,6 +340,7 @@ class SolverPhoenX(SolverBase):
                     local_transform=local_xf,
                     radius=float(scale[0]),
                     half_length=float(scale[1]),
+                    friction=mu,
                 )
             elif geo == GEO_TYPE_CYLINDER:
                 self.pipeline.add_shape_cylinder(
@@ -342,11 +348,13 @@ class SolverPhoenX(SolverBase):
                     local_transform=local_xf,
                     radius=float(scale[0]),
                     half_height=float(scale[1]),
+                    friction=mu,
                 )
             elif geo == GEO_TYPE_PLANE:
                 self.pipeline.add_shape_plane(
                     body_row=body_row,
                     local_transform=local_xf,
+                    friction=mu,
                 )
             elif geo == GEO_TYPE_MESH:
                 mesh_id = int(source_ptr_np[i])
@@ -364,6 +372,7 @@ class SolverPhoenX(SolverBase):
                     scale=(float(scale[0]), float(scale[1]), float(scale[2])),
                     margin=mesh_margin,
                     gap=mesh_gap,
+                    friction=mu,
                     aabb_lower=(float(aabb_lo[0]), float(aabb_lo[1]), float(aabb_lo[2])),
                     aabb_upper=(float(aabb_hi[0]), float(aabb_hi[1]), float(aabb_hi[2])),
                     voxel_resolution=(int(vr[0]), int(vr[1]), int(vr[2])),

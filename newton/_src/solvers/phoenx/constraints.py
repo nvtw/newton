@@ -268,13 +268,11 @@ def joint_max_floats_per_row() -> int:
 
 
 @wp.func_native(snippet="union{float f;int i;}u;u.f=x;return u.i;")
-def float_as_int(x: float) -> int:
-    ...
+def float_as_int(x: float) -> int: ...
 
 
 @wp.func_native(snippet="union{float f;int i;}u;u.i=x;return u.f;")
-def int_as_float(x: int) -> float:
-    ...
+def int_as_float(x: int) -> float: ...
 
 
 # ---------------------------------------------------------------------------
@@ -326,9 +324,15 @@ def ds_load_quat(store: wp.array(dtype=wp.float32), base: int, row: int) -> wp.q
 def ds_load_mat33(store: wp.array(dtype=wp.float32), base: int, row: int) -> wp.mat33:
     i = base + row * 9
     return wp.mat33(
-        store[i + 0], store[i + 1], store[i + 2],
-        store[i + 3], store[i + 4], store[i + 5],
-        store[i + 6], store[i + 7], store[i + 8],
+        store[i + 0],
+        store[i + 1],
+        store[i + 2],
+        store[i + 3],
+        store[i + 4],
+        store[i + 5],
+        store[i + 6],
+        store[i + 7],
+        store[i + 8],
     )
 
 
@@ -403,9 +407,15 @@ def schema_column_of(data, struct_type, capacity: int, name: str, device):
 @wp.func
 def skew_symmetric(v: wp.vec3) -> wp.mat33:
     return wp.mat33(
-        0.0, -v[2], v[1],
-        v[2], 0.0, -v[0],
-        -v[1], v[0], 0.0,
+        0.0,
+        -v[2],
+        v[1],
+        v[2],
+        0.0,
+        -v[0],
+        -v[1],
+        v[0],
+        0.0,
     )
 
 
@@ -517,12 +527,14 @@ def sync_vel_to_pos(
         half_dt * (angvel[0] * ref_orient[1] - angvel[1] * ref_orient[0] + angvel[2] * ref_orient[3]),
         half_dt * (-angvel[0] * ref_orient[0] - angvel[1] * ref_orient[1] - angvel[2] * ref_orient[2]),
     )
-    new_orient = wp.normalize(wp.quat(
-        ref_orient[0] + dq[0],
-        ref_orient[1] + dq[1],
-        ref_orient[2] + dq[2],
-        ref_orient[3] + dq[3],
-    ))
+    new_orient = wp.normalize(
+        wp.quat(
+            ref_orient[0] + dq[0],
+            ref_orient[1] + dq[1],
+            ref_orient[2] + dq[2],
+            ref_orient[3] + dq[3],
+        )
+    )
 
     return new_pos, new_orient
 
@@ -668,11 +680,17 @@ class ConstraintKernels:
         def _prepare_point_constraint(
             jdata: wp.array(dtype=wp.float32),
             bdata: wp.array(dtype=wp.float32),
-            ji: int, b0: int, b1: int,
-            rw0: wp.vec3, rw1: wp.vec3,
-            inv_m0: float, inv_m1: float,
-            inv_i0: wp.mat33, inv_i1: wp.mat33,
-            is_static_0: bool, is_static_1: bool,
+            ji: int,
+            b0: int,
+            b1: int,
+            rw0: wp.vec3,
+            rw1: wp.vec3,
+            inv_m0: float,
+            inv_m1: float,
+            inv_i0: wp.mat33,
+            inv_i1: wp.mat33,
+            is_static_0: bool,
+            is_static_1: bool,
         ):
             r0x = skew_symmetric(rw0)
             r1x = skew_symmetric(rw1)
@@ -698,10 +716,15 @@ class ConstraintKernels:
         def _prepare_hinge_rotation(
             jdata: wp.array(dtype=wp.float32),
             bdata: wp.array(dtype=wp.float32),
-            ji: int, b0: int, b1: int,
-            q0: wp.quat, q1: wp.quat,
-            inv_i0: wp.mat33, inv_i1: wp.mat33,
-            is_static_0: bool, is_static_1: bool,
+            ji: int,
+            b0: int,
+            b1: int,
+            q0: wp.quat,
+            q1: wp.quat,
+            inv_i0: wp.mat33,
+            inv_i1: wp.mat33,
+            is_static_0: bool,
+            is_static_1: bool,
         ):
             a1 = wp.quat_rotate(q0, ds_load_vec3(jdata, wp.static(j_local_axis0), ji))
             a2 = wp.quat_rotate(q1, ds_load_vec3(jdata, wp.static(j_local_axis1), ji))
@@ -743,11 +766,19 @@ class ConstraintKernels:
         def _solve_point_constraint(
             jdata: wp.array(dtype=wp.float32),
             bdata: wp.array(dtype=wp.float32),
-            ji: int, b0: int, b1: int,
-            v0: wp.vec3, w0: wp.vec3, v1: wp.vec3, w1: wp.vec3,
-            inv_m0: float, inv_m1: float,
-            inv_i0: wp.mat33, inv_i1: wp.mat33,
-            is_static_0: bool, is_static_1: bool,
+            ji: int,
+            b0: int,
+            b1: int,
+            v0: wp.vec3,
+            w0: wp.vec3,
+            v1: wp.vec3,
+            w1: wp.vec3,
+            inv_m0: float,
+            inv_m1: float,
+            inv_i0: wp.mat33,
+            inv_i1: wp.mat33,
+            is_static_0: bool,
+            is_static_1: bool,
             use_bias: int,
         ):
             rw0 = ds_load_vec3(jdata, wp.static(j_rw0), ji)
@@ -779,9 +810,12 @@ class ConstraintKernels:
         def _solve_hinge_rotation(
             jdata: wp.array(dtype=wp.float32),
             ji: int,
-            w0: wp.vec3, w1: wp.vec3,
-            inv_i0: wp.mat33, inv_i1: wp.mat33,
-            is_static_0: bool, is_static_1: bool,
+            w0: wp.vec3,
+            w1: wp.vec3,
+            inv_i0: wp.mat33,
+            inv_i1: wp.mat33,
+            is_static_0: bool,
+            is_static_1: bool,
         ):
             b2xa1 = ds_load_vec3(jdata, wp.static(j_hinge_b2xa1), ji)
             c2xa1 = ds_load_vec3(jdata, wp.static(j_hinge_c2xa1), ji)
@@ -798,10 +832,12 @@ class ConstraintKernels:
             lx = em00 * jv_x + em01 * jv_y
             ly = em10 * jv_x + em11 * jv_y
 
-            ds_store_float(jdata, wp.static(j_hinge_lambda_x), ji,
-                           ds_load_float(jdata, wp.static(j_hinge_lambda_x), ji) + lx)
-            ds_store_float(jdata, wp.static(j_hinge_lambda_y), ji,
-                           ds_load_float(jdata, wp.static(j_hinge_lambda_y), ji) + ly)
+            ds_store_float(
+                jdata, wp.static(j_hinge_lambda_x), ji, ds_load_float(jdata, wp.static(j_hinge_lambda_x), ji) + lx
+            )
+            ds_store_float(
+                jdata, wp.static(j_hinge_lambda_y), ji, ds_load_float(jdata, wp.static(j_hinge_lambda_y), ji) + ly
+            )
 
             h_imp = b2xa1 * lx + c2xa1 * ly
             if not is_static_0:
@@ -820,50 +856,69 @@ class ConstraintKernels:
         def _prepare_ball_socket_joint(
             jdata: wp.array(dtype=wp.float32),
             bdata: wp.array(dtype=wp.float32),
-            ji: int, b0: int, b1: int,
-            q0: wp.quat, q1: wp.quat,
-            rw0: wp.vec3, rw1: wp.vec3,
-            inv_m0: float, inv_m1: float,
-            inv_i0: wp.mat33, inv_i1: wp.mat33,
-            is_static_0: bool, is_static_1: bool,
+            ji: int,
+            b0: int,
+            b1: int,
+            q0: wp.quat,
+            q1: wp.quat,
+            rw0: wp.vec3,
+            rw1: wp.vec3,
+            inv_m0: float,
+            inv_m1: float,
+            inv_i0: wp.mat33,
+            inv_i1: wp.mat33,
+            is_static_0: bool,
+            is_static_1: bool,
         ):
-            _prepare_point_constraint(jdata, bdata, ji, b0, b1, rw0, rw1,
-                                      inv_m0, inv_m1, inv_i0, inv_i1,
-                                      is_static_0, is_static_1)
+            _prepare_point_constraint(
+                jdata, bdata, ji, b0, b1, rw0, rw1, inv_m0, inv_m1, inv_i0, inv_i1, is_static_0, is_static_1
+            )
 
         @wp.func
         def _prepare_fixed_joint(
             jdata: wp.array(dtype=wp.float32),
             bdata: wp.array(dtype=wp.float32),
-            ji: int, b0: int, b1: int,
-            q0: wp.quat, q1: wp.quat,
-            rw0: wp.vec3, rw1: wp.vec3,
-            inv_m0: float, inv_m1: float,
-            inv_i0: wp.mat33, inv_i1: wp.mat33,
-            is_static_0: bool, is_static_1: bool,
+            ji: int,
+            b0: int,
+            b1: int,
+            q0: wp.quat,
+            q1: wp.quat,
+            rw0: wp.vec3,
+            rw1: wp.vec3,
+            inv_m0: float,
+            inv_m1: float,
+            inv_i0: wp.mat33,
+            inv_i1: wp.mat33,
+            is_static_0: bool,
+            is_static_1: bool,
         ):
-            _prepare_point_constraint(jdata, bdata, ji, b0, b1, rw0, rw1,
-                                      inv_m0, inv_m1, inv_i0, inv_i1,
-                                      is_static_0, is_static_1)
-            _prepare_hinge_rotation(jdata, bdata, ji, b0, b1, q0, q1,
-                                    inv_i0, inv_i1, is_static_0, is_static_1)
+            _prepare_point_constraint(
+                jdata, bdata, ji, b0, b1, rw0, rw1, inv_m0, inv_m1, inv_i0, inv_i1, is_static_0, is_static_1
+            )
+            _prepare_hinge_rotation(jdata, bdata, ji, b0, b1, q0, q1, inv_i0, inv_i1, is_static_0, is_static_1)
 
         @wp.func
         def _prepare_revolute_joint(
             jdata: wp.array(dtype=wp.float32),
             bdata: wp.array(dtype=wp.float32),
-            ji: int, b0: int, b1: int,
-            q0: wp.quat, q1: wp.quat,
-            rw0: wp.vec3, rw1: wp.vec3,
-            inv_m0: float, inv_m1: float,
-            inv_i0: wp.mat33, inv_i1: wp.mat33,
-            is_static_0: bool, is_static_1: bool,
+            ji: int,
+            b0: int,
+            b1: int,
+            q0: wp.quat,
+            q1: wp.quat,
+            rw0: wp.vec3,
+            rw1: wp.vec3,
+            inv_m0: float,
+            inv_m1: float,
+            inv_i0: wp.mat33,
+            inv_i1: wp.mat33,
+            is_static_0: bool,
+            is_static_1: bool,
         ):
-            _prepare_point_constraint(jdata, bdata, ji, b0, b1, rw0, rw1,
-                                      inv_m0, inv_m1, inv_i0, inv_i1,
-                                      is_static_0, is_static_1)
-            _prepare_hinge_rotation(jdata, bdata, ji, b0, b1, q0, q1,
-                                    inv_i0, inv_i1, is_static_0, is_static_1)
+            _prepare_point_constraint(
+                jdata, bdata, ji, b0, b1, rw0, rw1, inv_m0, inv_m1, inv_i0, inv_i1, is_static_0, is_static_1
+            )
+            _prepare_hinge_rotation(jdata, bdata, ji, b0, b1, q0, q1, inv_i0, inv_i1, is_static_0, is_static_1)
 
             # --- Angle constraint ---
             a_min_val = ds_load_float(jdata, wp.static(j_angle_min), ji)
@@ -926,15 +981,22 @@ class ConstraintKernels:
         def _prepare_prismatic_joint(
             jdata: wp.array(dtype=wp.float32),
             bdata: wp.array(dtype=wp.float32),
-            ji: int, b0: int, b1: int,
-            q0: wp.quat, q1: wp.quat,
-            rw0: wp.vec3, rw1: wp.vec3,
-            inv_m0: float, inv_m1: float,
-            inv_i0: wp.mat33, inv_i1: wp.mat33,
-            is_static_0: bool, is_static_1: bool,
+            ji: int,
+            b0: int,
+            b1: int,
+            q0: wp.quat,
+            q1: wp.quat,
+            rw0: wp.vec3,
+            rw1: wp.vec3,
+            inv_m0: float,
+            inv_m1: float,
+            inv_i0: wp.mat33,
+            inv_i1: wp.mat33,
+            is_static_0: bool,
+            is_static_1: bool,
+            inv_dt: float,
         ):
-            _prepare_hinge_rotation(jdata, bdata, ji, b0, b1, q0, q1,
-                                    inv_i0, inv_i1, is_static_0, is_static_1)
+            _prepare_hinge_rotation(jdata, bdata, ji, b0, b1, q0, q1, inv_i0, inv_i1, is_static_0, is_static_1)
 
             # --- Slide perpendicular + axis ---
             a1 = wp.quat_rotate(q0, ds_load_vec3(jdata, wp.static(j_local_axis0), ji))
@@ -987,19 +1049,20 @@ class ConstraintKernels:
                 ds_store_vec3(bdata, wp.static(b_velocity), b1, v1_p + inv_m1 * perp_imp)
                 ds_store_vec3(bdata, wp.static(b_angular_velocity), b1, w1_p + inv_i1 * wp.cross(rw1, perp_imp))
 
-            # --- Drive (prismatic) ---
+            # --- Drive (prismatic) — Jolt soft constraint (Erin Catto GDC 2011) ---
             dm = ds_load_int(jdata, wp.static(j_drive_mode), ji)
             if dm > 0:
                 axis_d = ds_load_vec3(jdata, wp.static(j_slide_axis), ji)
                 inv_eff_d = inv_m0 + inv_m1
 
-                d_damp_val = ds_load_float(jdata, wp.static(j_drive_damping), ji)
-                compliance = 0.0
-                if d_damp_val > 1.0e-6:
-                    compliance = 1.0 / d_damp_val
-                reg_inv = inv_eff_d + compliance
-                if reg_inv > 0.0:
-                    ds_store_float(jdata, wp.static(j_drive_eff_mass), ji, 1.0 / reg_inv)
+                d_stiff = ds_load_float(jdata, wp.static(j_drive_stiffness), ji)
+                d_damp = ds_load_float(jdata, wp.static(j_drive_damping), ji)
+                dt = 1.0 / wp.max(inv_dt, 1.0e-6)
+
+                if d_stiff > 0.0 or d_damp > 0.0:
+                    # softness = 1/(dt*(c + dt*k)),  eff_mass = 1/(inv_eff + softness)
+                    softness = 1.0 / (dt * (d_damp + dt * d_stiff))
+                    ds_store_float(jdata, wp.static(j_drive_eff_mass), ji, 1.0 / (inv_eff_d + softness))
                 else:
                     ds_store_float(jdata, wp.static(j_drive_eff_mass), ji, 0.0)
 
@@ -1021,54 +1084,102 @@ class ConstraintKernels:
         def _solve_ball_socket_joint(
             jdata: wp.array(dtype=wp.float32),
             bdata: wp.array(dtype=wp.float32),
-            ji: int, b0: int, b1: int,
-            v0: wp.vec3, w0: wp.vec3, v1: wp.vec3, w1: wp.vec3,
-            inv_m0: float, inv_m1: float,
-            inv_i0: wp.mat33, inv_i1: wp.mat33,
-            is_static_0: bool, is_static_1: bool,
+            ji: int,
+            b0: int,
+            b1: int,
+            v0: wp.vec3,
+            w0: wp.vec3,
+            v1: wp.vec3,
+            w1: wp.vec3,
+            inv_m0: float,
+            inv_m1: float,
+            inv_i0: wp.mat33,
+            inv_i1: wp.mat33,
+            is_static_0: bool,
+            is_static_1: bool,
             use_bias: int,
         ):
             v0, w0, v1, w1 = _solve_point_constraint(
-                jdata, bdata, ji, b0, b1, v0, w0, v1, w1,
-                inv_m0, inv_m1, inv_i0, inv_i1,
-                is_static_0, is_static_1, use_bias)
+                jdata,
+                bdata,
+                ji,
+                b0,
+                b1,
+                v0,
+                w0,
+                v1,
+                w1,
+                inv_m0,
+                inv_m1,
+                inv_i0,
+                inv_i1,
+                is_static_0,
+                is_static_1,
+                use_bias,
+            )
             return v0, w0, v1, w1
 
         @wp.func
         def _solve_fixed_joint(
             jdata: wp.array(dtype=wp.float32),
             bdata: wp.array(dtype=wp.float32),
-            ji: int, b0: int, b1: int,
-            v0: wp.vec3, w0: wp.vec3, v1: wp.vec3, w1: wp.vec3,
-            inv_m0: float, inv_m1: float,
-            inv_i0: wp.mat33, inv_i1: wp.mat33,
-            is_static_0: bool, is_static_1: bool,
+            ji: int,
+            b0: int,
+            b1: int,
+            v0: wp.vec3,
+            w0: wp.vec3,
+            v1: wp.vec3,
+            w1: wp.vec3,
+            inv_m0: float,
+            inv_m1: float,
+            inv_i0: wp.mat33,
+            inv_i1: wp.mat33,
+            is_static_0: bool,
+            is_static_1: bool,
             use_bias: int,
         ):
-            w0, w1 = _solve_hinge_rotation(jdata, ji, w0, w1,
-                                            inv_i0, inv_i1,
-                                            is_static_0, is_static_1)
+            w0, w1 = _solve_hinge_rotation(jdata, ji, w0, w1, inv_i0, inv_i1, is_static_0, is_static_1)
             v0, w0, v1, w1 = _solve_point_constraint(
-                jdata, bdata, ji, b0, b1, v0, w0, v1, w1,
-                inv_m0, inv_m1, inv_i0, inv_i1,
-                is_static_0, is_static_1, use_bias)
+                jdata,
+                bdata,
+                ji,
+                b0,
+                b1,
+                v0,
+                w0,
+                v1,
+                w1,
+                inv_m0,
+                inv_m1,
+                inv_i0,
+                inv_i1,
+                is_static_0,
+                is_static_1,
+                use_bias,
+            )
             return v0, w0, v1, w1
 
         @wp.func
         def _solve_revolute_joint(
             jdata: wp.array(dtype=wp.float32),
             bdata: wp.array(dtype=wp.float32),
-            ji: int, b0: int, b1: int,
-            v0: wp.vec3, w0: wp.vec3, v1: wp.vec3, w1: wp.vec3,
-            inv_m0: float, inv_m1: float,
-            inv_i0: wp.mat33, inv_i1: wp.mat33,
-            is_static_0: bool, is_static_1: bool,
+            ji: int,
+            b0: int,
+            b1: int,
+            v0: wp.vec3,
+            w0: wp.vec3,
+            v1: wp.vec3,
+            w1: wp.vec3,
+            inv_m0: float,
+            inv_m1: float,
+            inv_i0: wp.mat33,
+            inv_i1: wp.mat33,
+            is_static_0: bool,
+            is_static_1: bool,
             use_bias: int,
         ):
             # 1. Hinge rotation (C# rotationConstraintPart.SolveVelocityConstraint)
-            w0, w1 = _solve_hinge_rotation(jdata, ji, w0, w1,
-                                            inv_i0, inv_i1,
-                                            is_static_0, is_static_1)
+            w0, w1 = _solve_hinge_rotation(jdata, ji, w0, w1, inv_i0, inv_i1, is_static_0, is_static_1)
 
             # 2. Angle constraint with limits (C# motorConstraintPart.SolveVelocityConstraint)
             angle_eff = ds_load_float(jdata, wp.static(j_angle_eff_mass), ji)
@@ -1143,9 +1254,23 @@ class ConstraintKernels:
 
             # 4. Point-on-point (C# pointConstraintPart.SolveVelocityConstraint)
             v0, w0, v1, w1 = _solve_point_constraint(
-                jdata, bdata, ji, b0, b1, v0, w0, v1, w1,
-                inv_m0, inv_m1, inv_i0, inv_i1,
-                is_static_0, is_static_1, use_bias)
+                jdata,
+                bdata,
+                ji,
+                b0,
+                b1,
+                v0,
+                w0,
+                v1,
+                w1,
+                inv_m0,
+                inv_m1,
+                inv_i0,
+                inv_i1,
+                is_static_0,
+                is_static_1,
+                use_bias,
+            )
 
             return v0, w0, v1, w1
 
@@ -1153,17 +1278,24 @@ class ConstraintKernels:
         def _solve_prismatic_joint(
             jdata: wp.array(dtype=wp.float32),
             bdata: wp.array(dtype=wp.float32),
-            ji: int, b0: int, b1: int,
-            v0: wp.vec3, w0: wp.vec3, v1: wp.vec3, w1: wp.vec3,
-            inv_m0: float, inv_m1: float,
-            inv_i0: wp.mat33, inv_i1: wp.mat33,
-            is_static_0: bool, is_static_1: bool,
+            ji: int,
+            b0: int,
+            b1: int,
+            v0: wp.vec3,
+            w0: wp.vec3,
+            v1: wp.vec3,
+            w1: wp.vec3,
+            inv_m0: float,
+            inv_m1: float,
+            inv_i0: wp.mat33,
+            inv_i1: wp.mat33,
+            is_static_0: bool,
+            is_static_1: bool,
             use_bias: int,
+            inv_dt: float,
         ):
             # 1. Hinge rotation
-            w0, w1 = _solve_hinge_rotation(jdata, ji, w0, w1,
-                                            inv_i0, inv_i1,
-                                            is_static_0, is_static_1)
+            w0, w1 = _solve_hinge_rotation(jdata, ji, w0, w1, inv_i0, inv_i1, is_static_0, is_static_1)
 
             # 2. Slide perpendicular (C# DualAxisConstraintPart)
             perp0 = ds_load_vec3(jdata, wp.static(j_slide_perp0), ji)
@@ -1197,10 +1329,18 @@ class ConstraintKernels:
             lx = ep00 * rhs_x + ep01 * rhs_y
             ly = ep10 * rhs_x + ep11 * rhs_y
 
-            ds_store_float(jdata, wp.static(j_slide_perp_lambda_x), ji,
-                           ds_load_float(jdata, wp.static(j_slide_perp_lambda_x), ji) + lx)
-            ds_store_float(jdata, wp.static(j_slide_perp_lambda_y), ji,
-                           ds_load_float(jdata, wp.static(j_slide_perp_lambda_y), ji) + ly)
+            ds_store_float(
+                jdata,
+                wp.static(j_slide_perp_lambda_x),
+                ji,
+                ds_load_float(jdata, wp.static(j_slide_perp_lambda_x), ji) + lx,
+            )
+            ds_store_float(
+                jdata,
+                wp.static(j_slide_perp_lambda_y),
+                ji,
+                ds_load_float(jdata, wp.static(j_slide_perp_lambda_y), ji) + ly,
+            )
 
             perp_imp = perp0 * lx + perp1 * ly
             if not is_static_0:
@@ -1255,7 +1395,7 @@ class ConstraintKernels:
                     v1 = v1 + inv_m1 * s_imp
                     w1 = w1 + inv_i1 * wp.cross(rw1_sl, s_imp)
 
-            # 4. Drive (prismatic — linear)
+            # 4. Drive (prismatic — Jolt soft constraint)
             d_eff = ds_load_float(jdata, wp.static(j_drive_eff_mass), ji)
             dm = ds_load_int(jdata, wp.static(j_drive_mode), ji)
             if dm > 0 and d_eff > 0.0:
@@ -1271,18 +1411,23 @@ class ConstraintKernels:
                 jv_d = wp.dot(axis_d, dv_d)
                 current_val = ds_load_float(jdata, wp.static(j_slide_current), ji)
 
-                ratio = 0.0
-                if d_damp > 1.0e-6:
-                    ratio = d_stiff / d_damp
+                old_dl = ds_load_float(jdata, wp.static(j_drive_lambda), ji)
 
-                # Prismatic: jv_d = dot(axis, v1-v0) = +Jv (standard convention).
+                # Jolt soft constraint: lambda = -eff_mass * (Jv + GetBias)
+                # softness = 1/(dt*(c + dt*k)), bias_factor = dt*k*softness
+                # GetBias(total_lambda) = softness * total_lambda + bias_factor * C
                 dl = 0.0
                 if dm == DRIVE_POSITION:
-                    dl = -d_eff * (jv_d + ratio * (current_val - d_target))
+                    dt = 1.0 / wp.max(inv_dt, 1.0e-6)
+                    error = current_val - d_target
+                    if d_stiff > 0.0 or d_damp > 0.0:
+                        softness = 1.0 / (dt * (d_damp + dt * d_stiff))
+                        bias_factor = dt * d_stiff * softness
+                        bias = softness * old_dl + bias_factor * error
+                        dl = -d_eff * (jv_d + bias)
                 elif dm == DRIVE_VELOCITY:
                     dl = -d_eff * (jv_d - d_target)
 
-                old_dl = ds_load_float(jdata, wp.static(j_drive_lambda), ji)
                 new_dl = wp.clamp(old_dl + dl, -d_max, d_max)
                 dl = new_dl - old_dl
                 ds_store_float(jdata, wp.static(j_drive_lambda), ji, new_dl)
@@ -1303,12 +1448,19 @@ class ConstraintKernels:
         def _prepare_distance_limit(
             jdata: wp.array(dtype=wp.float32),
             bdata: wp.array(dtype=wp.float32),
-            ji: int, b0: int, b1: int,
-            q0: wp.quat, q1: wp.quat,
-            rw0: wp.vec3, rw1: wp.vec3,
-            inv_m0: float, inv_m1: float,
-            inv_i0: wp.mat33, inv_i1: wp.mat33,
-            is_static_0: bool, is_static_1: bool,
+            ji: int,
+            b0: int,
+            b1: int,
+            q0: wp.quat,
+            q1: wp.quat,
+            rw0: wp.vec3,
+            rw1: wp.vec3,
+            inv_m0: float,
+            inv_m1: float,
+            inv_i0: wp.mat33,
+            inv_i1: wp.mat33,
+            is_static_0: bool,
+            is_static_1: bool,
             inv_dt: float,
         ):
             # World positions
@@ -1405,11 +1557,19 @@ class ConstraintKernels:
         def _solve_distance_limit(
             jdata: wp.array(dtype=wp.float32),
             bdata: wp.array(dtype=wp.float32),
-            ji: int, b0: int, b1: int,
-            v0: wp.vec3, w0: wp.vec3, v1: wp.vec3, w1: wp.vec3,
-            inv_m0: float, inv_m1: float,
-            inv_i0: wp.mat33, inv_i1: wp.mat33,
-            is_static_0: bool, is_static_1: bool,
+            ji: int,
+            b0: int,
+            b1: int,
+            v0: wp.vec3,
+            w0: wp.vec3,
+            v1: wp.vec3,
+            w1: wp.vec3,
+            inv_m0: float,
+            inv_m1: float,
+            inv_i0: wp.mat33,
+            inv_i1: wp.mat33,
+            is_static_0: bool,
+            is_static_1: bool,
             use_bias: int,
         ):
             clamp_mode = ds_load_int(jdata, wp.static(dl_clamp), ji)
@@ -1517,30 +1677,55 @@ class ConstraintKernels:
             ds_store_vec3(jdata, wp.static(j_rw1), ji, rw1)
 
             if jtype == JOINT_BALL_SOCKET:
-                _prepare_ball_socket_joint(jdata, bdata, ji, b0, b1, q0, q1,
-                                           rw0, rw1, inv_m0, inv_m1,
-                                           inv_i0, inv_i1,
-                                           is_static_0, is_static_1)
+                _prepare_ball_socket_joint(
+                    jdata, bdata, ji, b0, b1, q0, q1, rw0, rw1, inv_m0, inv_m1, inv_i0, inv_i1, is_static_0, is_static_1
+                )
             elif jtype == JOINT_REVOLUTE:
-                _prepare_revolute_joint(jdata, bdata, ji, b0, b1, q0, q1,
-                                        rw0, rw1, inv_m0, inv_m1,
-                                        inv_i0, inv_i1,
-                                        is_static_0, is_static_1)
+                _prepare_revolute_joint(
+                    jdata, bdata, ji, b0, b1, q0, q1, rw0, rw1, inv_m0, inv_m1, inv_i0, inv_i1, is_static_0, is_static_1
+                )
             elif jtype == JOINT_FIXED:
-                _prepare_fixed_joint(jdata, bdata, ji, b0, b1, q0, q1,
-                                     rw0, rw1, inv_m0, inv_m1,
-                                     inv_i0, inv_i1,
-                                     is_static_0, is_static_1)
+                _prepare_fixed_joint(
+                    jdata, bdata, ji, b0, b1, q0, q1, rw0, rw1, inv_m0, inv_m1, inv_i0, inv_i1, is_static_0, is_static_1
+                )
             elif jtype == JOINT_PRISMATIC:
-                _prepare_prismatic_joint(jdata, bdata, ji, b0, b1, q0, q1,
-                                          rw0, rw1, inv_m0, inv_m1,
-                                          inv_i0, inv_i1,
-                                          is_static_0, is_static_1)
+                _prepare_prismatic_joint(
+                    jdata,
+                    bdata,
+                    ji,
+                    b0,
+                    b1,
+                    q0,
+                    q1,
+                    rw0,
+                    rw1,
+                    inv_m0,
+                    inv_m1,
+                    inv_i0,
+                    inv_i1,
+                    is_static_0,
+                    is_static_1,
+                    inv_dt,
+                )
             elif jtype == JOINT_DISTANCE_LIMIT:
-                _prepare_distance_limit(jdata, bdata, ji, b0, b1, q0, q1,
-                                        rw0, rw1, inv_m0, inv_m1,
-                                        inv_i0, inv_i1,
-                                        is_static_0, is_static_1, inv_dt)
+                _prepare_distance_limit(
+                    jdata,
+                    bdata,
+                    ji,
+                    b0,
+                    b1,
+                    q0,
+                    q1,
+                    rw0,
+                    rw1,
+                    inv_m0,
+                    inv_m1,
+                    inv_i0,
+                    inv_i1,
+                    is_static_0,
+                    is_static_1,
+                    inv_dt,
+                )
 
         # ===============================================================
         # Solve kernel (thin dispatcher)
@@ -1556,6 +1741,7 @@ class ConstraintKernels:
             contact_count_arr: wp.array(dtype=wp.int32),
             joint_count: wp.array(dtype=wp.int32),
             use_bias: int,
+            inv_dt: float,
         ):
             tid = wp.tid()
             p_start = int(0)
@@ -1594,29 +1780,100 @@ class ConstraintKernels:
 
             if jtype == JOINT_BALL_SOCKET:
                 v0, w0, v1, w1 = _solve_ball_socket_joint(
-                    jdata, bdata, ji, b0, b1, v0, w0, v1, w1,
-                    inv_m0, inv_m1, inv_i0, inv_i1,
-                    is_static_0, is_static_1, use_bias)
+                    jdata,
+                    bdata,
+                    ji,
+                    b0,
+                    b1,
+                    v0,
+                    w0,
+                    v1,
+                    w1,
+                    inv_m0,
+                    inv_m1,
+                    inv_i0,
+                    inv_i1,
+                    is_static_0,
+                    is_static_1,
+                    use_bias,
+                )
             elif jtype == JOINT_REVOLUTE:
                 v0, w0, v1, w1 = _solve_revolute_joint(
-                    jdata, bdata, ji, b0, b1, v0, w0, v1, w1,
-                    inv_m0, inv_m1, inv_i0, inv_i1,
-                    is_static_0, is_static_1, use_bias)
+                    jdata,
+                    bdata,
+                    ji,
+                    b0,
+                    b1,
+                    v0,
+                    w0,
+                    v1,
+                    w1,
+                    inv_m0,
+                    inv_m1,
+                    inv_i0,
+                    inv_i1,
+                    is_static_0,
+                    is_static_1,
+                    use_bias,
+                )
             elif jtype == JOINT_FIXED:
                 v0, w0, v1, w1 = _solve_fixed_joint(
-                    jdata, bdata, ji, b0, b1, v0, w0, v1, w1,
-                    inv_m0, inv_m1, inv_i0, inv_i1,
-                    is_static_0, is_static_1, use_bias)
+                    jdata,
+                    bdata,
+                    ji,
+                    b0,
+                    b1,
+                    v0,
+                    w0,
+                    v1,
+                    w1,
+                    inv_m0,
+                    inv_m1,
+                    inv_i0,
+                    inv_i1,
+                    is_static_0,
+                    is_static_1,
+                    use_bias,
+                )
             elif jtype == JOINT_PRISMATIC:
                 v0, w0, v1, w1 = _solve_prismatic_joint(
-                    jdata, bdata, ji, b0, b1, v0, w0, v1, w1,
-                    inv_m0, inv_m1, inv_i0, inv_i1,
-                    is_static_0, is_static_1, use_bias)
+                    jdata,
+                    bdata,
+                    ji,
+                    b0,
+                    b1,
+                    v0,
+                    w0,
+                    v1,
+                    w1,
+                    inv_m0,
+                    inv_m1,
+                    inv_i0,
+                    inv_i1,
+                    is_static_0,
+                    is_static_1,
+                    use_bias,
+                    inv_dt,
+                )
             elif jtype == JOINT_DISTANCE_LIMIT:
                 v0, w0, v1, w1 = _solve_distance_limit(
-                    jdata, bdata, ji, b0, b1, v0, w0, v1, w1,
-                    inv_m0, inv_m1, inv_i0, inv_i1,
-                    is_static_0, is_static_1, use_bias)
+                    jdata,
+                    bdata,
+                    ji,
+                    b0,
+                    b1,
+                    v0,
+                    w0,
+                    v1,
+                    w1,
+                    inv_m0,
+                    inv_m1,
+                    inv_i0,
+                    inv_i1,
+                    is_static_0,
+                    is_static_1,
+                    use_bias,
+                )
 
             # Write back
             if not is_static_0:

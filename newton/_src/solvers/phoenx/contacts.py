@@ -356,9 +356,6 @@ def prepare_contacts_kernel(
     inv_i0 = b_inverse_inertia_world[b0]
     inv_i1 = b_inverse_inertia_world[b1]
 
-    # Mass splitting: each body's inverse-mass contribution is scaled
-    # by the number of contacts on that body.  Static bodies (count 0
-    # or mass 0) get split factor 1 so they remain zero.
     nc0 = contact_count_per_body[b0]
     nc1 = contact_count_per_body[b1]
     split0 = wp.max(float(nc0), 1.0)
@@ -648,9 +645,6 @@ class ContactKernels:
             inv_i0 = ds_load_mat33(bdata, wp.static(b_inverse_inertia_world), b0)
             inv_i1 = ds_load_mat33(bdata, wp.static(b_inverse_inertia_world), b1)
 
-            # Mass splitting: each body's inverse-mass contribution is scaled
-            # by the number of contacts on that body.  Static bodies (count 0
-            # or mass 0) get split factor 1 so they remain zero.
             nc0 = contact_count_per_body[b0]
             nc1 = contact_count_per_body[b1]
             split0 = wp.max(float(nc0), 1.0)

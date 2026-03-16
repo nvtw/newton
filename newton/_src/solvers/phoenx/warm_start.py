@@ -620,10 +620,11 @@ class WarmStarter:
         self.bundle_count.zero_()
 
         if hasattr(self, "_shape_type") and self._shape_type is not None:
-            # Mesh-aware: group by pair (strip voxel bits) so contacts
-            # from the same shape pair are in consecutive bundles.  Keep
-            # bundles small (MAX_BUNDLE_CONTACTS) for good graph-coloring
-            # distribution across partitions.
+            # Mesh-aware: group by pair (strip voxel bits) so all
+            # contacts from the same shape pair form one large bundle.
+            # This puts each pair into a single graph-coloring element,
+            # avoiding overflow and enabling true sequential GS within
+            # the bundle — no mass splitting needed.
             wp.launch(
                 _mark_bundle_heads_mesh_kernel,
                 dim=cap,
@@ -632,7 +633,7 @@ class WarmStarter:
                     self._bundle_marks,
                     self.curr_count,
                     cap,
-                    MAX_BUNDLE_CONTACTS,
+                    MAX_BUNDLE_CONTACTS_MESH,
                 ],
                 device=d,
             )
