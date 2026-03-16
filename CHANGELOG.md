@@ -10,6 +10,7 @@
 - Support kinematic bodies in VBD solver
 - Add brick stacking example
 - Add box pyramid example and ASV benchmark for dense convex-on-convex contacts
+- Add conceptual overview and MuJoCo Warp integration primer to collision documentation
 
 ### Changed
 

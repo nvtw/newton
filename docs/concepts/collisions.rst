@@ -6,9 +6,135 @@
 Collisions
 ==========
 
-Newton provides a flexible collision detection system for rigid-rigid and soft-rigid contacts. The pipeline handles broad phase culling, narrow phase contact generation, and filtering.
+Newton provides a flexible collision detection system for rigid-rigid and soft-rigid
+contacts. This page starts with a :ref:`conceptual overview <Collision Overview>` of
+how geometry representations and narrow phase algorithms combine, then covers each
+stage in detail.
 
-Newton's collision system is also compatible with :class:`~newton.solvers.SolverMuJoCo`, replacing MuJoCo's built-in contact generation to enable advanced contact models (SDF, hydroelastic). See ``examples/contacts/`` for usage (e.g., ``example_nut_bolt_hydro.py``, ``example_nut_bolt_sdf.py``).
+.. _Collision Overview:
+
+Conceptual Overview
+-------------------
+
+Newton's collision pipeline runs in two stages: a **broad phase** that quickly
+eliminates shape pairs whose bounding boxes do not overlap, followed by a **narrow
+phase** that computes the actual contact geometry for surviving pairs.
+
+The narrow phase algorithm used for a given pair depends on how the shapes are
+represented:
+
+.. mermaid::
+   :config: {"theme": "forest", "themeVariables": {"lineColor": "#76b900"}}
+
+   flowchart LR
+     subgraph broadphase ["Broad Phase"]
+       AABB["AABB culling<br/>(NxN / SAP / Explicit)"]
+     end
+     subgraph geometry ["Geometry Representation"]
+       G1["Convex hulls<br/>and primitives"]
+       G2["Live BVH queries<br/>(simple meshes)"]
+       G3["Precomputed SDF<br/>(complex meshes)"]
+     end
+     subgraph narrowphase ["Narrow Phase"]
+       A["MPR / GJK<br/>→ contact points"]
+       B["SDF-based<br/>→ contacts → reduction"]
+       C["Hydroelastic<br/>→ surface → contacts → reduction"]
+     end
+     AABB --> G1 --> A
+     AABB --> G2 --> B
+     AABB --> G3
+     G3 --> B
+     G3 --> C
+
+**Geometry representations**
+
+1. **Convex hulls and primitives** — sphere, box, capsule, cylinder, cone, ellipsoid,
+   and convex mesh shapes expose canonical support functions. These feed directly into
+   the **MPR/GJK** narrow phase which produces contact points without further reduction.
+   See :ref:`Narrow Phase`.
+
+2. **Live BVH queries** — triangle meshes that do *not* have a precomputed SDF are
+   queried through Warp's BVH (Bounding Volume Hierarchy). This path generates
+   **SDF-based** contacts with optional contact reduction. It works out of the box but
+   can be slow for high-triangle-count meshes. Hydroelastic contacts are **not**
+   available on this path. See :ref:`Mesh Collisions`.
+
+3. **Precomputed SDFs** — calling ``mesh.build_sdf(...)`` on a mesh precomputes a
+   signed distance field that provides O(1) distance lookups. This path supports both
+   **SDF-based** and **Hydroelastic** contact generation (with contact reduction).
+   Hydroelastic contacts require precomputed SDF on *both* shapes in a pair. See
+   :ref:`Mesh Collisions` and :ref:`Hydroelastic Contacts`.
+
+.. note::
+   **Contact reduction** applies to the SDF-based and hydroelastic paths where many raw
+   contacts are generated from distance field queries. The direct MPR/GJK path for
+   convex pairs produces a small number of contacts and does not require reduction. See
+   :ref:`Contact Reduction`.
+
+.. tip::
+   For scenes with expensive collision (SDF or hydroelastic), running ``collide`` once
+   per frame instead of every substep can significantly improve performance. See
+   :ref:`Common Patterns` for the different collision-frequency patterns.
+
+.. _Contact Model:
+
+Contact Geometry
+^^^^^^^^^^^^^^^^
+
+The output of the narrow phase is a set of **contacts** — lightweight geometric
+descriptors that decouple the solver from the underlying shape complexity. A mesh may
+contain hundreds of thousands of triangles, but the collision pipeline distills the
+interaction into a manageable number of contacts that the solver can process efficiently.
+
+Each contact stores:
+
+.. figure:: ../images/contact_model.svg
+   :alt: Contact geometry: normal, contact points, contact distance
+   :width: 70%
+   :align: center
+
+   A contact between two shapes (B and A). The **contact normal** (blue, unit length)
+   points from shape A to shape B. **Body-frame contact points** (yellow) are stored in
+   each body's local frame. The **contact center** (red) and **contact distance** encode
+   the signed separation or penetration depth.
+
+- **Contact normal** — a unit vector pointing from shape A toward shape B.
+- **Body-frame contact points** — the contact location on each shape, stored in the
+  body's local coordinate frame (``rigid_contact_offset0/1``). Storing offsets in local
+  frame rather than world space is what makes the "collide once per frame" optimization
+  work: as the bodies move during substeps the solver can cheaply reproject the local
+  offsets into world space without re-running the full collision pipeline.
+- **Contact distance** — the signed separation between the two contact points along the
+  normal. Negative values indicate penetration.
+
+Because contacts are self-contained geometric objects, the solver never needs to query
+mesh triangles or SDF grids — it only works with the contact arrays stored in
+:class:`~newton.Contacts`. See :ref:`Contact Generation` for the full data layout.
+
+.. _MuJoCo Warp Integration:
+
+MuJoCo Warp Integration
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+:class:`~newton.solvers.SolverMuJoCo` (the MuJoCo Warp backend) ships with its own
+built-in collision pipeline that handles convex primitive contacts. For many use cases
+this is sufficient and requires no extra setup.
+
+However, Newton's :class:`~newton.CollisionPipeline` can **replace** MuJoCo's contact
+generation by setting ``use_mujoco_contacts=False``. This enables advanced contact
+models — SDF-based mesh-mesh contacts and hydroelastic contacts — that MuJoCo's
+built-in pipeline does not support.
+
+Examples using Newton's collision pipeline with :class:`~newton.solvers.SolverMuJoCo`:
+
+- **Hydroelastic mesh contacts** —
+  :github:`newton/examples/contacts/example_nut_bolt_hydro.py`
+- **SDF mesh contacts** —
+  :github:`newton/examples/contacts/example_nut_bolt_sdf.py`
+- **Robot manipulation with SDF** —
+  :github:`newton/examples/contacts/example_brick_stacking.py`
+
+See :ref:`Solver Integration` for the full code pattern.
 
 .. _Collision Pipeline:
 
@@ -657,9 +783,13 @@ Narrow Phase Algorithms
 
 After broad phase identifies candidate pairs, the narrow phase generates contact points.
 
-**MPR (Minkowski Portal Refinement)**
+**MPR (Minkowski Portal Refinement) and GJK**
 
-The primary algorithm for convex shape pairs. Uses support mapping functions to find the closest points between shapes via Minkowski difference sampling. Works with all convex primitives (sphere, box, capsule, cylinder, cone, ellipsoid) and convex meshes.
+The primary algorithm for convex shape pairs. Uses support mapping functions to find the
+closest points between shapes via Minkowski difference sampling. Works with all convex
+primitives (sphere, box, capsule, cylinder, cone, ellipsoid) and convex meshes. Newton
+uses MPR for penetration depth computation (not EPA); GJK handles the separated-shapes
+distance query.
 
 **Multi-contact Generation**
 
@@ -1436,7 +1566,7 @@ object to :meth:`~newton.solvers.SolverBase.step`:
 
     solver.step(state_0, state_1, control, contacts, dt)
 
-**MuJoCo solver**
+**MuJoCo solver** (see also :ref:`MuJoCo Warp Integration`)
 
 By default (``use_mujoco_contacts=True``), :class:`~newton.solvers.SolverMuJoCo` runs its own
 contact generation and the ``contacts`` argument to ``step`` should be ``None``.
