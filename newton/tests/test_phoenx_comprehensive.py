@@ -101,7 +101,7 @@ def _step_with_contacts(ss, dt, gravity, num_iterations=8):
     bs = ss.body_store
     cs = ss.contact_store
 
-    from newton._src.solvers.phoenx.kernels import (
+    from newton._src.solvers.phoenx.contacts import (
         clear_contact_count_kernel,
         count_contacts_per_body_kernel,
     )
@@ -1066,6 +1066,64 @@ def test_bundle_count_correctness(test, device):
 
 
 # ===========================================================================
+# Test 18: XPBD contacts — box on ground must settle
+# ===========================================================================
+
+def test_xpbd_box_on_ground(test, device):
+    """XPBD position-level contacts must support a box on a ground plane."""
+    ss = SolverState(body_capacity=8, contact_capacity=32, shape_count=4,
+                     device=device, contact_mode="xpbd")
+    h_ground = ss.add_body(position=(0, 0, 0), is_static=True)
+    h_box = ss.add_body(position=(0, 0.5, 0), inverse_mass=1.0)
+
+    row_g = int(ss.body_store.handle_to_index.numpy()[h_ground])
+    row_b = int(ss.body_store.handle_to_index.numpy()[h_box])
+
+    dt = 1.0 / 60.0
+    for _ in range(120):
+        ss.update_world_inertia()
+        ss.contact_store.count.assign(wp.array([1], dtype=wp.int32, device=device))
+        _inject_contact(ss, 0, 0, 1, row_g, row_b,
+                        normal=(0, 1, 0), offset0=(0, 0, 0), offset1=(0, -0.5, 0))
+        _build_bundles(ss)
+        ss.step(dt, gravity=(0, -9.81, 0), num_iterations=12)
+
+    wp.synchronize_device(device)
+    pos = ss.body_store.column_of("position").numpy()[row_b]
+    test.assertGreater(pos[1], -0.1,
+                       f"XPBD: Box fell through ground: y={pos[1]:.4f}")
+
+
+# ===========================================================================
+# Test 19: XPBD friction — lateral velocity should be reduced
+# ===========================================================================
+
+def test_xpbd_friction(test, device):
+    """XPBD contacts must apply friction to reduce lateral velocity."""
+    ss = SolverState(body_capacity=8, contact_capacity=32, shape_count=4,
+                     device=device, contact_mode="xpbd")
+    h_ground = ss.add_body(position=(0, 0, 0), is_static=True)
+    h_box = ss.add_body(position=(0, 0.01, 0), velocity=(2.0, 0, 0), inverse_mass=1.0)
+    row_g = int(ss.body_store.handle_to_index.numpy()[h_ground])
+    row_b = int(ss.body_store.handle_to_index.numpy()[h_box])
+
+    dt = 1.0 / 60.0
+    for _ in range(60):
+        ss.update_world_inertia()
+        ss.contact_store.count.assign(wp.array([1], dtype=wp.int32, device=device))
+        _inject_contact(ss, 0, 0, 1, row_g, row_b,
+                        normal=(0, 1, 0), offset0=(0, 0, 0), offset1=(0, -0.01, 0),
+                        friction=0.8)
+        _build_bundles(ss)
+        ss.step(dt, gravity=(0, -9.81, 0), num_iterations=8)
+
+    wp.synchronize_device(device)
+    vel = ss.body_store.column_of("velocity").numpy()[row_b]
+    test.assertLess(abs(vel[0]), 1.5,
+                    f"XPBD: Friction should have reduced lateral velocity; vx={vel[0]:.4f}")
+
+
+# ===========================================================================
 # Registration
 # ===========================================================================
 
@@ -1105,6 +1163,10 @@ add_function_test(TestPhoenXComprehensive, "test_step_cuda_graph_capture",
                   test_step_cuda_graph_capture, devices=devices)
 add_function_test(TestPhoenXComprehensive, "test_bundle_count_correctness",
                   test_bundle_count_correctness, devices=devices)
+add_function_test(TestPhoenXComprehensive, "test_xpbd_box_on_ground",
+                  test_xpbd_box_on_ground, devices=devices)
+add_function_test(TestPhoenXComprehensive, "test_xpbd_friction",
+                  test_xpbd_friction, devices=devices)
 
 if __name__ == "__main__":
     wp.init()

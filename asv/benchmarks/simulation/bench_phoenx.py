@@ -139,7 +139,7 @@ def _timed_step(ss, dt, gravity, num_iterations, device):
     _end("partition")
 
     # -- mass splitting --
-    from newton._src.solvers.phoenx.kernels import clear_contact_count_kernel, count_contacts_per_body_kernel
+    from newton._src.solvers.phoenx.contacts import clear_contact_count_kernel, count_contacts_per_body_kernel
 
     bs = ss.body_store
     cs = ss.contact_store

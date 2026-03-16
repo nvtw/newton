@@ -34,7 +34,7 @@ import warp as wp
 import newton
 import newton.examples
 from newton._src.solvers.phoenx.collision import PhoenXCollisionPipeline
-from newton._src.solvers.phoenx.kernels import build_contact_lines_kernel
+from newton._src.solvers.phoenx.contacts import build_contact_lines_kernel
 from newton._src.solvers.phoenx.solver_phoenx import SolverState
 
 CUBE_HALF = 0.5

@@ -38,13 +38,21 @@ from .constraints import (
     JointSchema,
 )
 from .data_base import DataStore, HandleStore
-from .kernels import (
+from .contacts import (
     ContactKernels,
-    add_int32_kernel,
     build_bundle_elements_kernel,
     clear_contact_count_kernel,
     count_contacts_per_body_kernel,
     import_contacts_kernel,
+)
+from .contacts_xpbd import (
+    ContactKernelsXPBD,
+    derive_velocities_kernel,
+    predict_positions_kernel,
+    store_ref_state_kernel,
+)
+from .kernels import (
+    add_int32_kernel,
     integrate_positions_kernel,
     integrate_velocities_kernel,
     update_world_inertia_kernel,
@@ -82,6 +90,7 @@ class SolverState:
         default_friction: float = 0.5,
         max_colors: int = 12,
         joint_capacity: int = 0,
+        contact_mode: str = "pgs",
     ):
         self.device = wp.get_device(device)
         d = self.device
@@ -115,7 +124,14 @@ class SolverState:
         self.capacity_bundles = contact_capacity
 
         # Contact kernels (bake column offsets at construction time)
-        self._contact_kernels = ContactKernels(self.contact_store, self.body_store)
+        self.contact_mode = contact_mode
+        if contact_mode == "xpbd":
+            self._contact_kernels = ContactKernelsXPBD(self.contact_store, self.body_store)
+            # Reference state arrays for XPBD position-level solving
+            self._ref_position = wp.zeros(body_capacity, dtype=wp.vec3, device=d)
+            self._ref_orientation = wp.zeros(body_capacity, dtype=wp.quat, device=d)
+        else:
+            self._contact_kernels = ContactKernels(self.contact_store, self.body_store)
 
         # Joint storage
         self.joint_capacity = joint_capacity
@@ -773,8 +789,38 @@ class SolverState:
         d = self.device
         bs = self.body_store
         cs = self.contact_store
+        is_xpbd = self.contact_mode == "xpbd"
 
         self.integrate_velocities(gravity, dt)
+
+        if is_xpbd:
+            # Store reference state and predict positions from velocities
+            wp.launch(
+                store_ref_state_kernel,
+                dim=bs.capacity,
+                inputs=[
+                    bs.column_of("position"),
+                    bs.column_of("orientation"),
+                    self._ref_position,
+                    self._ref_orientation,
+                    bs.count,
+                ],
+                device=d,
+            )
+            wp.launch(
+                predict_positions_kernel,
+                dim=bs.capacity,
+                inputs=[
+                    bs.column_of("position"),
+                    bs.column_of("orientation"),
+                    bs.column_of("velocity"),
+                    bs.column_of("angular_velocity"),
+                    bs.column_of("flags"),
+                    dt,
+                    bs.count,
+                ],
+                device=d,
+            )
 
         self._partition_contacts()
 
@@ -816,7 +862,27 @@ class SolverState:
                 self._launch_solve(p, 0)
                 self._launch_solve_constraints(p, 0)
 
-        self.integrate_positions(dt)
+        if is_xpbd:
+            # Derive velocities from position change, skip integrate_positions
+            # (positions are already at their final values after XPBD solving)
+            wp.launch(
+                derive_velocities_kernel,
+                dim=bs.capacity,
+                inputs=[
+                    bs.column_of("position"),
+                    bs.column_of("orientation"),
+                    self._ref_position,
+                    self._ref_orientation,
+                    bs.column_of("velocity"),
+                    bs.column_of("angular_velocity"),
+                    bs.column_of("flags"),
+                    inv_dt,
+                    bs.count,
+                ],
+                device=d,
+            )
+        else:
+            self.integrate_positions(dt)
 
     # -- external impulse application ---------------------------------------
 
