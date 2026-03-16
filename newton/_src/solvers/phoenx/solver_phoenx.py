@@ -44,6 +44,7 @@ from .contacts import (
     build_bundle_elements_kernel,
     clear_contact_count_kernel,
     count_contacts_per_body_kernel,
+    count_partners_per_body_kernel,
     import_contacts_kernel,
 )
 from .contacts_xpbd import (
@@ -385,12 +386,15 @@ class SolverState:
             return np.array([-q[0], -q[1], -q[2], q[3]], dtype=np.float32)
 
         def _quat_mul(a, b):
-            return np.array([
-                a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
-                a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
-                a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
-                a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
-            ], dtype=np.float32)
+            return np.array(
+                [
+                    a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+                    a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+                    a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+                    a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+                ],
+                dtype=np.float32,
+            )
 
         def _quat_inv_rotate(q, v):
             qc = _quat_conj(q)
@@ -951,7 +955,16 @@ class SolverState:
 
         self._partition_contacts()
 
-        # Mass splitting: count how many contacts reference each body
+        # Mass splitting: count distinct contact partners per body.
+        # Tonge 2012 splits effective mass by the number of contacts on a
+        # body, but with 100+ mesh contacts between the same two bodies
+        # this makes each contact negligibly weak.  PhysX TGS uses no mass
+        # splitting at all — graph coloring ensures contacts on the same
+        # body are in different partitions, and substepping provides
+        # convergence.  We count distinct *partners* (from bundle
+        # structure, where each bundle = one body pair) as a compromise
+        # that preserves the Tonge stacking benefit while keeping mesh
+        # contacts solvable.
         wp.launch(
             clear_contact_count_kernel,
             dim=bs.capacity,
@@ -959,12 +972,14 @@ class SolverState:
             device=d,
         )
         wp.launch(
-            count_contacts_per_body_kernel,
-            dim=cs.capacity,
+            count_partners_per_body_kernel,
+            dim=self.capacity_bundles,
             inputs=[
                 cs.column_of("body0"),
                 cs.column_of("body1"),
-                cs.count,
+                self.warm_starter.bundle_starts,
+                self.warm_starter.bundle_count,
+                self.warm_starter.curr_indices,
                 self._contact_count_per_body,
             ],
             device=d,

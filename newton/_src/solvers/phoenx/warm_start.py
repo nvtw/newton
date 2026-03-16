@@ -33,8 +33,15 @@ import warp as wp
 # Sentinel that sorts after any valid pair key (bit 63 clear).
 _KEY_SENTINEL = wp.constant(wp.int64(0x7FFFFFFFFFFFFFFF))
 
-# Maximum contacts per bundle (matches C# PhoenX).
+# Maximum contacts per bundle for primitive shape pairs (matches C# PhoenX).
 MAX_BUNDLE_CONTACTS = 5
+
+# Maximum contacts per bundle for mesh shape pairs.  Mesh contacts
+# use voxel-binned keys for warm-start matching, but the PGS solver
+# needs all contacts from the same shape pair processed sequentially
+# in one bundle so that impulses couple properly across the contact
+# manifold.  240 matches Newton's maximum reduced contacts per pair.
+MAX_BUNDLE_CONTACTS_MESH = 240
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +89,19 @@ def make_pair_key_voxel(
     linear = ix * voxel_res[1] * voxel_res[2] + iy * voxel_res[2] + iz
     voxel_bin = linear % 256
     return (wp.int64(lo) << wp.int64(32)) | (wp.int64(hi) << wp.int64(8)) | wp.int64(voxel_bin)
+
+
+@wp.func
+def pair_key_without_voxel(key: wp.int64) -> wp.int64:
+    """Strip the lower 8 voxel-bin bits from a voxel-extended pair key.
+
+    Voxel keys: ``(min_shape << 32) | (max_shape << 8) | voxel_bin``.
+    Plain keys: ``(min_shape << 32) | max_shape``.
+    For plain keys the lower 8 bits are part of max_shape, but since
+    we only use this to compare *within a sorted run*, it is safe to
+    mask them — contacts from the same pair are contiguous after sort.
+    """
+    return key >> wp.int64(8)
 
 
 @wp.func
@@ -290,6 +310,47 @@ def _mark_bundle_heads_kernel(
         s = s - 1
     offset_in_run = tid - run_start
     if offset_in_run % max_bundle == 0:
+        marks[tid] = 1
+    else:
+        marks[tid] = 0
+
+
+@wp.kernel
+def _mark_bundle_heads_mesh_kernel(
+    keys: wp.array(dtype=wp.int64),
+    marks: wp.array(dtype=wp.int32),
+    contact_count: wp.array(dtype=wp.int32),
+    capacity: int,
+    max_bundle_mesh: int,
+):
+    """Bundle-head marking that groups mesh contacts by shape pair.
+
+    Same as :func:`_mark_bundle_heads_kernel` but compares keys with
+    voxel bits stripped so that all contacts from the same shape pair
+    (regardless of voxel bin) land in one bundle, up to
+    *max_bundle_mesh* contacts.
+    """
+    tid = wp.tid()
+    if tid >= contact_count[0]:
+        if tid < capacity:
+            marks[tid] = 0
+        return
+    if tid == 0:
+        marks[tid] = 1
+        return
+    pair_curr = pair_key_without_voxel(keys[tid])
+    pair_prev = pair_key_without_voxel(keys[tid - 1])
+    if pair_curr != pair_prev:
+        marks[tid] = 1
+        return
+    # Same pair — check offset within pair run
+    run_start = tid
+    s = tid - 1
+    while s >= 0 and pair_key_without_voxel(keys[s]) == pair_curr:
+        run_start = s
+        s = s - 1
+    offset_in_run = tid - run_start
+    if offset_in_run % max_bundle_mesh == 0:
         marks[tid] = 1
     else:
         marks[tid] = 0
@@ -540,7 +601,14 @@ class WarmStarter:
         wp.utils.radix_sort_pairs(self.curr_keys, self.curr_indices, cap)
 
     def build_bundles(self):
-        """Split sorted contacts into bundles of up to ``MAX_BUNDLE_CONTACTS``.
+        """Split sorted contacts into bundles.
+
+        Primitive contacts use bundles of up to ``MAX_BUNDLE_CONTACTS``
+        (5).  When mesh data has been set via :meth:`set_mesh_data`,
+        contacts are grouped by **shape pair** (ignoring voxel bins)
+        with a limit of ``MAX_BUNDLE_CONTACTS_MESH`` (240) so that all
+        mesh contacts on the same pair are solved sequentially in one
+        bundle.
 
         Must be called after :meth:`sort`.  The entire operation runs on
         the GPU with no device-to-host sync, so it is safe inside a CUDA
@@ -551,12 +619,30 @@ class WarmStarter:
 
         self.bundle_count.zero_()
 
-        wp.launch(
-            _mark_bundle_heads_kernel,
-            dim=cap,
-            inputs=[self.curr_keys, self._bundle_marks, self.curr_count, cap, MAX_BUNDLE_CONTACTS],
-            device=d,
-        )
+        if hasattr(self, "_shape_type") and self._shape_type is not None:
+            # Mesh-aware: group by pair (strip voxel bits) so contacts
+            # from the same shape pair are in consecutive bundles.  Keep
+            # bundles small (MAX_BUNDLE_CONTACTS) for good graph-coloring
+            # distribution across partitions.
+            wp.launch(
+                _mark_bundle_heads_mesh_kernel,
+                dim=cap,
+                inputs=[
+                    self.curr_keys,
+                    self._bundle_marks,
+                    self.curr_count,
+                    cap,
+                    MAX_BUNDLE_CONTACTS,
+                ],
+                device=d,
+            )
+        else:
+            wp.launch(
+                _mark_bundle_heads_kernel,
+                dim=cap,
+                inputs=[self.curr_keys, self._bundle_marks, self.curr_count, cap, MAX_BUNDLE_CONTACTS],
+                device=d,
+            )
 
         wp.utils.array_scan(self._bundle_marks, self._bundle_prefix, inclusive=True)
 

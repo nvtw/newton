@@ -192,6 +192,12 @@ class SolverPhoenX(SolverBase):
         self._init_joints(model)
         self.pipeline.finalize()
 
+        # Pass through SDF data from Newton model for mesh-mesh contacts
+        if hasattr(model, "texture_sdf_data") and model.texture_sdf_data is not None:
+            self.pipeline.texture_sdf_data = model.texture_sdf_data
+        if hasattr(model, "shape_sdf_index") and model.shape_sdf_index is not None:
+            self.pipeline.shape_sdf_index = model.shape_sdf_index
+
         # Wire up mesh data for voxel-bucketed warm starting
         if any(t == GEO_TYPE_MESH for t in self.pipeline._shape_type_list):
             self.ss.warm_starter.set_mesh_data(
@@ -265,6 +271,8 @@ class SolverPhoenX(SolverBase):
             collision_aabb_lo_np = model.shape_collision_aabb_lower.numpy()
             collision_aabb_hi_np = model.shape_collision_aabb_upper.numpy()
             voxel_res_np = model._shape_voxel_resolution.numpy()
+            shape_margin_np = model.shape_margin.numpy()
+            shape_gap_np = model.shape_gap.numpy()
 
         h2i = self.ss.body_store.handle_to_index.numpy()
 
@@ -346,11 +354,16 @@ class SolverPhoenX(SolverBase):
                 aabb_lo = collision_aabb_lo_np[i]
                 aabb_hi = collision_aabb_hi_np[i]
                 vr = voxel_res_np[i]
+                mesh_margin = float(shape_margin_np[i])
+                mesh_gap = float(shape_gap_np[i])
                 self.pipeline.add_shape_mesh(
                     body_row=body_row,
                     mesh_id=mesh_id,
                     local_transform=local_xf,
                     collision_radius=coll_radius,
+                    scale=(float(scale[0]), float(scale[1]), float(scale[2])),
+                    margin=mesh_margin,
+                    gap=mesh_gap,
                     aabb_lower=(float(aabb_lo[0]), float(aabb_lo[1]), float(aabb_lo[2])),
                     aabb_upper=(float(aabb_hi[0]), float(aabb_hi[1]), float(aabb_hi[2])),
                     voxel_resolution=(int(vr[0]), int(vr[1]), int(vr[2])),

@@ -270,7 +270,8 @@ class PhoenXCollisionPipeline:
         self._shape_body_row_list: list[int] = []
         self._shape_collision_radius_list: list[float] = []
         self._shape_mesh_ids: dict[int, int] = {}  # shape index → wp.Mesh.id (uint64)
-        self._shape_local_aabb: dict[int, tuple] = {}  # shape index → (lower, upper) vec3 tuples
+        self._shape_local_aabb: dict[int, tuple] = {}  # shape index → (lower, upper, voxel_res) tuples
+        self._shape_gap_list: list[float] = []  # per-shape contact gap
         self._finalized = False
 
     # -- shape registration (host-side, before finalize) --------------------
@@ -304,6 +305,7 @@ class PhoenXCollisionPipeline:
         self._shape_local_xf_list.append(local_transform)
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(math.sqrt(hx * hx + hy * hy + hz * hz))
+        self._shape_gap_list.append(0.0)
         return idx
 
     def add_shape_sphere(
@@ -332,6 +334,7 @@ class PhoenXCollisionPipeline:
         self._shape_local_xf_list.append(local_transform)
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(radius + margin)
+        self._shape_gap_list.append(0.0)
         return idx
 
     def add_shape_capsule(
@@ -362,6 +365,7 @@ class PhoenXCollisionPipeline:
         self._shape_local_xf_list.append(local_transform)
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(radius + half_length + margin)
+        self._shape_gap_list.append(0.0)
         return idx
 
     def add_shape_cylinder(
@@ -392,6 +396,7 @@ class PhoenXCollisionPipeline:
         self._shape_local_xf_list.append(local_transform)
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(math.sqrt(radius * radius + half_height * half_height) + margin)
+        self._shape_gap_list.append(0.0)
         return idx
 
     def add_shape_plane(
@@ -421,6 +426,7 @@ class PhoenXCollisionPipeline:
         self._shape_local_xf_list.append(local_transform)
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(1.0e6)
+        self._shape_gap_list.append(0.0)
         return idx
 
     def add_shape_mesh(
@@ -429,6 +435,9 @@ class PhoenXCollisionPipeline:
         mesh_id: int,
         local_transform: tuple | None = None,
         collision_radius: float = 1.0,
+        scale: tuple[float, float, float] = (1.0, 1.0, 1.0),
+        margin: float = 0.0,
+        gap: float = 0.0,
         aabb_lower: tuple[float, float, float] = (0.0, 0.0, 0.0),
         aabb_upper: tuple[float, float, float] = (1.0, 1.0, 1.0),
         voxel_resolution: tuple[int, int, int] = (4, 4, 4),
@@ -440,6 +449,9 @@ class PhoenXCollisionPipeline:
             mesh_id: ``wp.Mesh.id`` (uint64) for the mesh BVH.
             local_transform: ``(px, py, pz, qx, qy, qz, qw)`` or ``None``.
             collision_radius: bounding sphere radius [m] for broad phase.
+            scale: mesh scale ``(sx, sy, sz)``.
+            margin: collision margin [m].
+            gap: contact detection gap [m].
             aabb_lower: local-space AABB lower bound [m].
             aabb_upper: local-space AABB upper bound [m].
             voxel_resolution: voxel grid resolution for contact binning.
@@ -449,12 +461,14 @@ class PhoenXCollisionPipeline:
         """
         idx = len(self._shape_type_list)
         self._shape_type_list.append(GEO_TYPE_MESH)
-        self._shape_data_list.append((0.0, 0.0, 0.0, 0.0))
+        # shape_data stores (scale_x, scale_y, scale_z, margin) for narrow phase
+        self._shape_data_list.append((scale[0], scale[1], scale[2], margin))
         if local_transform is None:
             local_transform = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
         self._shape_local_xf_list.append(local_transform)
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(collision_radius)
+        self._shape_gap_list.append(gap)
         self._shape_mesh_ids[idx] = mesh_id
         self._shape_local_aabb[idx] = (aabb_lower, aabb_upper, voxel_resolution)
         return idx
@@ -490,13 +504,16 @@ class PhoenXCollisionPipeline:
             source_list[idx] = mesh_id
         self.shape_source = wp.array(source_list, dtype=wp.uint64, device=d)
 
-        self.shape_gap = wp.zeros(n, dtype=wp.float32, device=d)
+        self.shape_gap = wp.array(self._shape_gap_list, dtype=wp.float32, device=d)
         self.shape_collision_radius = wp.array(self._shape_collision_radius_list, dtype=wp.float32, device=d)
         flags_val = int(ShapeFlags.COLLIDE_SHAPES)
         self.shape_flags = wp.full(n, flags_val, dtype=wp.int32, device=d)
         self.shape_collision_group = wp.full(n, 1, dtype=wp.int32, device=d)
         self.shape_world = wp.zeros(n, dtype=wp.int32, device=d)
-        self.shape_sdf_index = wp.full(n, -1, dtype=wp.int32, device=d)
+        if not hasattr(self, "_shape_sdf_index"):
+            self.shape_sdf_index = wp.full(n, -1, dtype=wp.int32, device=d)
+        if not hasattr(self, "texture_sdf_data"):
+            self.texture_sdf_data = None
 
         # Populate per-shape local AABBs and voxel resolutions (meshes have real values)
         aabb_lower_list = []
@@ -621,6 +638,7 @@ class PhoenXCollisionPipeline:
             shape_transform=self.shape_transform,
             shape_source=self.shape_source,
             shape_sdf_index=self.shape_sdf_index,
+            texture_sdf_data=self.texture_sdf_data,
             shape_gap=self.shape_gap,
             shape_collision_radius=self.shape_collision_radius,
             shape_flags=self.shape_flags,

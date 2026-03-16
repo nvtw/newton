@@ -39,6 +39,7 @@ BAUMGARTE_FACTOR = wp.constant(0.03)
 MAX_BIAS = wp.constant(100.0)
 WARM_START_SCALE = wp.constant(0.90)
 
+
 # ---------------------------------------------------------------------------
 # Contact import
 # ---------------------------------------------------------------------------
@@ -242,6 +243,34 @@ def count_contacts_per_body_kernel(
         return
     wp.atomic_add(contact_count_per_body, c_body0[tid], 1)
     wp.atomic_add(contact_count_per_body, c_body1[tid], 1)
+
+
+@wp.kernel
+def count_partners_per_body_kernel(
+    c_body0: wp.array(dtype=wp.int32),
+    c_body1: wp.array(dtype=wp.int32),
+    bundle_starts: wp.array(dtype=wp.int32),
+    bundle_count: wp.array(dtype=wp.int32),
+    sort_perm: wp.array(dtype=wp.int32),
+    partner_count_per_body: wp.array(dtype=wp.int32),
+):
+    """Count bundles per body for mass splitting.
+
+    Each bundle is an independent element in graph coloring and may
+    share a body with other bundles in the same partition.  The bundle
+    count per body is the correct Tonge mass-splitting factor: it
+    equals the number of contacts per body divided by the bundle size,
+    which is the effective parallelism the solver faces.
+    """
+    tid = wp.tid()
+    if tid >= bundle_count[0]:
+        return
+    ci = sort_perm[bundle_starts[tid]]
+    b0 = c_body0[ci]
+    b1 = c_body1[ci]
+    wp.atomic_add(partner_count_per_body, b0, 1)
+    if b0 != b1:
+        wp.atomic_add(partner_count_per_body, b1, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -628,15 +657,21 @@ class ContactKernels:
             split1 = wp.max(float(nc1), 1.0)
 
             ds_store_float(
-                cdata, wp.static(c_eff_n), ci,
+                cdata,
+                wp.static(c_eff_n),
+                ci,
                 compute_effective_mass_split(inv_m0, inv_m1, inv_i0, inv_i1, rw0, rw1, n, split0, split1),
             )
             ds_store_float(
-                cdata, wp.static(c_eff_t1), ci,
+                cdata,
+                wp.static(c_eff_t1),
+                ci,
                 compute_effective_mass_split(inv_m0, inv_m1, inv_i0, inv_i1, rw0, rw1, t1, split0, split1),
             )
             ds_store_float(
-                cdata, wp.static(c_eff_t2), ci,
+                cdata,
+                wp.static(c_eff_t2),
+                ci,
                 compute_effective_mass_split(inv_m0, inv_m1, inv_i0, inv_i1, rw0, rw1, t2, split0, split1),
             )
 
