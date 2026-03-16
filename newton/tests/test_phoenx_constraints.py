@@ -1135,6 +1135,68 @@ def test_distance_limit_spring_equilibrium(test, device):
     test.assertLess(speed, 2.0, f"Body should be settling, speed={speed:.3f}")
 
 
+def test_distance_limit_harmonic_oscillator(test, device):
+    """Damped spring oscillation: body must oscillate and amplitude must decay.
+
+    A body on a damped spring given an initial velocity should oscillate
+    around the rest position.  Due to PGS soft constraint numerics the
+    frequency may differ from the analytical spring formula, but the
+    oscillation must be present and damping must reduce amplitude over time.
+    """
+    mass = 1.0
+    stiffness = 100.0
+    damping = 2.0  # light damping for clear oscillation
+    anchor_z = 5.0
+
+    ss = SolverState(body_capacity=4, contact_capacity=1, shape_count=0,
+                     device=device, joint_capacity=1)
+    h0 = ss.add_body(position=(0, 0, anchor_z), is_static=True)
+    h1 = ss.add_body(position=(0, 0, anchor_z), velocity=(0, 0, -2.0),
+                     inverse_mass=1.0 / mass)
+
+    ss.add_joint_distance_limit(
+        h0, h1,
+        anchor0_world=(0, 0, anchor_z),
+        anchor1_world=(0, 0, anchor_z),
+        limit_min=0.0, limit_max=0.0,
+        stiffness=stiffness, damping=damping,
+    )
+
+    # Simulate and record z velocities (oscillation visible in velocity)
+    sub_dt = 1.0 / 480.0
+    substeps = 8
+    num_frames = 200
+    vz_history = []
+
+    ss.update_world_inertia()
+    for f in range(num_frames):
+        for _ in range(substeps):
+            ss.step(sub_dt, gravity=(0, 0, 0), num_iterations=12)
+        wp.synchronize_device(device)
+        v1 = _body_vel(ss, h1)
+        vz_history.append(v1[2])
+
+    vz = np.array(vz_history)
+
+    # 1. Body must oscillate (velocity changes sign multiple times)
+    sign_changes = np.sum(np.diff(np.sign(vz)) != 0)
+    test.assertGreater(sign_changes, 4,
+                       f"Expected oscillation (>4 sign changes), got {sign_changes}")
+
+    # 2. Velocity amplitude must decay (damping working)
+    abs_vz = np.abs(vz)
+    first_quarter = abs_vz[:50].max()
+    last_quarter = abs_vz[-50:].max()
+    test.assertLess(last_quarter, first_quarter,
+                    f"Damping should reduce amplitude: first_quarter_max={first_quarter:.4f}, "
+                    f"last_quarter_max={last_quarter:.4f}")
+
+    # 3. Body should still be near rest position after 200 frames
+    p1 = _body_pos(ss, h1)
+    test.assertAlmostEqual(p1[2], anchor_z, delta=0.1,
+                           msg=f"Body should be near rest z={anchor_z}, got z={p1[2]:.4f}")
+
+
 # ---------------------------------------------------------------------------
 # Register tests
 # ---------------------------------------------------------------------------
@@ -1170,6 +1232,7 @@ add_function_test(TestPhoenXConstraints, "test_momentum_conservation", test_mome
 add_function_test(TestPhoenXConstraints, "test_mass_splitting_convergence", test_mass_splitting_convergence, devices=devices)
 add_function_test(TestPhoenXConstraints, "test_distance_limit_hard", test_distance_limit_hard, devices=devices)
 add_function_test(TestPhoenXConstraints, "test_distance_limit_spring_equilibrium", test_distance_limit_spring_equilibrium, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_distance_limit_harmonic_oscillator", test_distance_limit_harmonic_oscillator, devices=devices)
 
 if __name__ == "__main__":
     wp.clear_kernel_cache()
