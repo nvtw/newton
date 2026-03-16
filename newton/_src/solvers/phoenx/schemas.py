@@ -60,7 +60,7 @@ class ContactPointSchema:
 
     Rebuilt every frame from Newton's :class:`CollisionPipeline` output.
     Fields below the ``tangent1`` marker are recomputed each frame by
-    :func:`prepare_contacts_kernel`.
+    the bundled prepare kernel.
 
     Attributes:
         shape0: Shape index for body 0.

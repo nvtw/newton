@@ -41,17 +41,10 @@ from .constraints import (
 from .data_base import DataStore, HandleStore
 from .contacts import (
     ContactKernels,
-    average_and_broadcast_kernel,
-    broadcast_to_copies_kernel,
     build_bundle_elements_kernel,
-    clear_contact_count_kernel,
     copy_bdata_to_partition_kernel,
     copy_partition_to_bdata_kernel,
-    count_contacts_per_body_kernel,
-    count_partitions_per_body_kernel,
-    count_partners_per_body_kernel,
     import_contacts_kernel,
-    popcount_partition_mask_kernel,
 )
 from .contacts_xpbd import (
     ContactKernelsXPBD,
@@ -61,6 +54,7 @@ from .contacts_xpbd import (
 )
 from .kernels import (
     add_int32_kernel,
+    apply_external_forces_kernel,
     integrate_positions_kernel,
     integrate_velocities_kernel,
     update_world_inertia_kernel,
@@ -106,6 +100,7 @@ class SolverState:
         self.body_store = HandleStore(RigidBodySchema, body_capacity, device=d)
         self.contact_store = DataStore(ContactPointSchema, contact_capacity, device=d)
         self.warm_starter = WarmStarter(contact_capacity, device=d)
+        self._cached_impulse_world = wp.zeros(contact_capacity, dtype=wp.vec3, device=d)
 
         total_elements = contact_capacity + joint_capacity
         self.graph_coloring = GraphColoring(
@@ -116,6 +111,7 @@ class SolverState:
         )
 
         self.shape_body = wp.full(shape_count, -1, dtype=wp.int32, device=d)
+        self.shape_friction = wp.zeros(shape_count, dtype=wp.float32, device=d)
         self.shape_count = shape_count
         self.default_friction = default_friction
 
@@ -143,6 +139,23 @@ class SolverState:
 
         # Maximum number of bundles (worst case: every contact is its own bundle)
         self.capacity_bundles = contact_capacity
+
+        # Constraint batching for overflow partition (C# ConstraintBatchSize).
+        # Colored partitions always use batch_size=1 (elements are independent).
+        # The overflow partition may use a larger batch size to serialize
+        # elements that share bodies, improving convergence. Default is 1
+        # (matching C# default).
+        self.constraint_batch_size = 1
+
+        # Frame counter for contact order rotation (C# SubFrameId).
+        # Rotates which contact in a bundle is processed first, preventing
+        # convergence bias toward earlier contacts in stacked scenarios.
+        self._frame_id = 0
+
+        # Per-body external force/torque (C# IntegrateForces / ForceAndTorque).
+        # Applied every substep, then cleared at the end of the frame.
+        self.ext_force = wp.zeros(body_capacity, dtype=wp.vec3, device=d)
+        self.ext_torque = wp.zeros(body_capacity, dtype=wp.vec3, device=d)
 
         # Contact kernels (bake column offsets at construction time)
         self.contact_mode = contact_mode
@@ -647,6 +660,7 @@ class SolverState:
                 contacts.rigid_contact_margin1,
                 self.contact_store.count,
                 self.shape_body,
+                self.shape_friction,
                 self.default_friction,
                 cs.column_of("shape0"),
                 cs.column_of("shape1"),
@@ -803,6 +817,8 @@ class SolverState:
             cs.column_of("accumulated_tangent_impulse1"),
             cs.column_of("accumulated_tangent_impulse2"),
             src_offset0=cs.column_of("offset0"),
+            src_normal=cs.column_of("normal"),
+            src_tangent1=cs.column_of("tangent1"),
         )
 
     # -- partitioned PGS solve helpers --------------------------------------
@@ -829,11 +845,13 @@ class SolverState:
                 self._copy_ang_vel,
                 self._body_capacity,
                 inv_dt,
+                self._frame_id,
+                self._cached_impulse_world,
             ],
             device=self.device,
         )
 
-    def _launch_solve(self, partition_slot: int, use_bias: int, dim: int = 0):
+    def _launch_solve(self, partition_slot: int, dim: int = 0):
         """Launch bundled contact solve kernel for one partition slot."""
         ck = self._contact_kernels
         gc = self.graph_coloring
@@ -854,7 +872,7 @@ class SolverState:
                 self._copy_ang_vel,
                 self._partition_count_per_body,
                 self._body_capacity,
-                use_bias,
+                self._frame_id,
             ],
             device=self.device,
         )
@@ -974,11 +992,15 @@ class SolverState:
 
         1. ``integrate_velocities(gravity, dt)``
         2. ``_partition_contacts()``
-        3. Count contacts per body (mass splitting)
-        4. ``prepare_contacts_kernel`` (per partition slot)
-        5. Position iterations (with bias)
-        6. Velocity iterations (no bias)
-        7. ``integrate_positions(dt)``
+        3. Sequential prepare (per partition: copy body→copy, warm-start,
+           copy copy→body)
+        4. Position iterations (per partition: copy, solve, copy-back)
+        5. Velocity iterations (same)
+        6. ``integrate_positions(dt)``
+
+        Partitions are processed with sequential Gauss-Seidel matching
+        C# PhoenX: each partition reads the latest body velocity
+        (including all prior partitions' changes).  ``invFactor = 1``.
 
         Call :meth:`update_world_inertia` once per frame (before the
         substep loop) to recompute world-space inertia and apply
@@ -993,8 +1015,25 @@ class SolverState:
         inv_dt = 1.0 / dt if dt > 0.0 else 0.0
         d = self.device
         bs = self.body_store
-        cs = self.contact_store
         is_xpbd = self.contact_mode == "xpbd"
+
+        # Apply external forces/torques before gravity (C# IntegrateForces)
+        wp.launch(
+            apply_external_forces_kernel,
+            dim=bs.capacity,
+            inputs=[
+                bs.column_of("velocity"),
+                bs.column_of("angular_velocity"),
+                bs.column_of("inverse_mass"),
+                bs.column_of("inverse_inertia_world"),
+                bs.column_of("flags"),
+                self.ext_force,
+                self.ext_torque,
+                dt,
+                bs.count,
+            ],
+            device=d,
+        )
 
         self.integrate_velocities(gravity, dt)
 
@@ -1029,136 +1068,40 @@ class SolverState:
 
         self._partition_contacts()
 
-        # Mass splitting with per-partition copy states (Tonge 2012, matching C# PhoenX).
-        # Count contacts per body (for split factor) and partitions per body (for averaging).
-        wp.launch(
-            clear_contact_count_kernel,
-            dim=bs.capacity,
-            inputs=[self._contact_count_per_body, bs.count],
-            device=d,
-        )
-        wp.launch(
-            count_contacts_per_body_kernel,
-            dim=cs.capacity,
-            inputs=[
-                cs.column_of("body0"),
-                cs.column_of("body1"),
-                cs.count,
-                self._contact_count_per_body,
-            ],
-            device=d,
-        )
-        # Build partition mask and count per body
-        self._partition_mask.zero_()
-        gc = self.graph_coloring
-        total_elem_cap = gc.partition_data.shape[0]
-        wp.launch(
-            count_partitions_per_body_kernel,
-            dim=total_elem_cap,
-            inputs=[
-                self._elements,
-                self._total_element_count,
-                gc.partition_data,
-                gc.partition_ends,
-                self._partition_mask,
-                self._max_partitions,
-            ],
-            device=d,
-        )
-        wp.launch(
-            popcount_partition_mask_kernel,
-            dim=bs.capacity,
-            inputs=[self._partition_mask, self._partition_count_per_body, bs.count],
-            device=d,
-        )
-
         max_slots = self.graph_coloring.max_colors + 1
 
-        # Broadcast body velocities to per-partition copy states
-        wp.launch(
-            broadcast_to_copies_kernel,
-            dim=bs.capacity,
-            inputs=[
-                bs.column_of("velocity"),
-                bs.column_of("angular_velocity"),
-                self._copy_vel,
-                self._copy_ang_vel,
-                bs.count,
-                self._body_capacity,
-                self._max_partitions,
-            ],
-            device=d,
-        )
+        # Sequential Gauss-Seidel per partition (matching C# PhoenX).
+        #
+        # C# uses a shared copy state with invFactor=1 for normal partitions:
+        # all partitions sequentially read/write the same body velocity.
+        # We emulate this by copying body→partition before processing
+        # and partition→body after, so each partition sees all prior updates.
+        #
+        # partition_count_per_body stays at 0 (initialized in __init__);
+        # the kernels clamp split = max(0, 1) = 1, giving full mass.
 
-        # Prepare: compute per-contact solver data + warm-start impulses
+        # Prepare: warm-start each partition sequentially
         for p in range(max_slots):
+            self._launch_copy_sync(p, to_bdata=False, d=d)
             self._launch_prepare(p, inv_dt)
             self._launch_prepare_constraints(p, inv_dt)
+            self._launch_copy_sync(p, to_bdata=True, d=d)
 
-        # Average copy states after prepare (warm start modifies velocities)
-        wp.launch(
-            average_and_broadcast_kernel,
-            dim=bs.capacity,
-            inputs=[
-                bs.column_of("velocity"),
-                bs.column_of("angular_velocity"),
-                self._copy_vel,
-                self._copy_ang_vel,
-                self._partition_count_per_body,
-                self._partition_mask,
-                bs.column_of("flags"),
-                bs.count,
-                self._body_capacity,
-                self._max_partitions,
-            ],
-            device=d,
-        )
-
-        # PGS iterations: solve + average after each iteration
+        # PGS position iterations (with Baumgarte bias)
         for _ in range(num_iterations):
             for p in range(max_slots):
-                self._launch_solve(p, 1)
+                self._launch_copy_sync(p, to_bdata=False, d=d)
+                self._launch_solve(p)
                 self._launch_solve_constraints(p, 1, inv_dt)
-            # Average and broadcast after each iteration
-            wp.launch(
-                average_and_broadcast_kernel,
-                dim=bs.capacity,
-                inputs=[
-                    bs.column_of("velocity"),
-                    bs.column_of("angular_velocity"),
-                    self._copy_vel,
-                    self._copy_ang_vel,
-                    self._partition_count_per_body,
-                    self._partition_mask,
-                    bs.column_of("flags"),
-                    bs.count,
-                    self._body_capacity,
-                    self._max_partitions,
-                ],
-                device=d,
-            )
+                self._launch_copy_sync(p, to_bdata=True, d=d)
 
+        # PGS velocity iterations (no bias)
         for _ in range(num_velocity_iterations):
             for p in range(max_slots):
-                self._launch_solve(p, 0)
+                self._launch_copy_sync(p, to_bdata=False, d=d)
+                self._launch_solve(p)
                 self._launch_solve_constraints(p, 0, inv_dt)
-            wp.launch(
-                average_and_broadcast_kernel,
-                dim=bs.capacity,
-                inputs=[
-                    bs.column_of("velocity"),
-                    bs.column_of("angular_velocity"),
-                    self._copy_vel,
-                    self._copy_ang_vel,
-                    self._partition_count_per_body,
-                    self._partition_mask,
-                    bs.column_of("flags"),
-                    bs.count,
-                    self._body_capacity,
-                    self._max_partitions,
-                ],
-                device=d,
-            )
+                self._launch_copy_sync(p, to_bdata=True, d=d)
 
         if is_xpbd:
             # Derive velocities from position change, skip integrate_positions
@@ -1181,6 +1124,8 @@ class SolverState:
             )
         else:
             self.integrate_positions(dt)
+
+        self._frame_id += 1
 
     # -- external impulse application ---------------------------------------
 
@@ -1227,3 +1172,24 @@ class SolverState:
         ang_vel = bs.column_of("angular_velocity").numpy()
         ang_vel[body_row] += inv_inertia @ torque_impulse
         bs.column_of("angular_velocity").assign(wp.array(ang_vel, dtype=wp.vec3, device=self.device))
+
+    def set_body_force(self, body_row: int, force: tuple[float, float, float], torque: tuple[float, float, float] = (0.0, 0.0, 0.0)):
+        """Set a persistent external force/torque on a body (C# ``ForceAndTorque``).
+
+        Forces are applied every substep and persist until cleared
+        with :meth:`clear_external_forces`.
+
+        Args:
+            body_row: storage row index for the body.
+            force: force vector in world frame [N].
+            torque: torque vector in world frame [N*m].
+        """
+        self.ext_force.numpy()[body_row] = force
+        self.ext_force.assign(wp.array(self.ext_force.numpy(), dtype=wp.vec3, device=self.device))
+        self.ext_torque.numpy()[body_row] = torque
+        self.ext_torque.assign(wp.array(self.ext_torque.numpy(), dtype=wp.vec3, device=self.device))
+
+    def clear_external_forces(self):
+        """Zero all external forces and torques."""
+        self.ext_force.zero_()
+        self.ext_torque.zero_()

@@ -42,7 +42,7 @@ DROP_HEIGHT = 0.0  # cubes start resting on platform (no drop)
 
 # Spring parameters
 SPRING_REST_HEIGHT = 2.0  # rest height of platform centre above ground [m]
-SPRING_STIFFNESS = 2000.0  # [N/m] — stiffer to support the pyramid
+SPRING_STIFFNESS = 20000.0  # [N/m] — stiffer to support the pyramid
 SPRING_DAMPING = 200.0  # [N s/m]
 
 # Solver parameters

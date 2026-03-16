@@ -244,49 +244,54 @@ def _copy_offset0_kernel(
         dst[tid] = src[tid]
 
 
+_MAX_MATCH_DISTANCE = wp.constant(0.1)
+_NORMAL_DOT_THRESHOLD = wp.constant(0.8)
+
+
 @wp.kernel
 def _transfer_impulses_kernel(
     curr_keys: wp.array(dtype=wp.int64),
     curr_offset0: wp.array(dtype=wp.vec3),
+    curr_normal: wp.array(dtype=wp.vec3),
     prev_keys: wp.array(dtype=wp.int64),
     prev_offset0: wp.array(dtype=wp.vec3),
-    prev_impulse_n: wp.array(dtype=wp.float32),
-    prev_impulse_t1: wp.array(dtype=wp.float32),
-    prev_impulse_t2: wp.array(dtype=wp.float32),
+    prev_normal: wp.array(dtype=wp.vec3),
+    prev_impulse_world: wp.array(dtype=wp.vec3),
     prev_count: wp.array(dtype=wp.int32),
-    out_impulse_n: wp.array(dtype=wp.float32),
-    out_impulse_t1: wp.array(dtype=wp.float32),
-    out_impulse_t2: wp.array(dtype=wp.float32),
+    out_impulse_world: wp.array(dtype=wp.vec3),
     curr_count: wp.array(dtype=wp.int32),
 ):
-    """Per-point warm start: match current contacts to previous by pair key + nearest offset0."""
+    """Match current contacts to previous by pair key + nearest offset0 + normal consistency.
+
+    Outputs a world-space impulse vector for each current contact.
+    """
     tid = wp.tid()
     if tid >= curr_count[0]:
         return
     key = curr_keys[tid]
-    # Lower-bound search to find first occurrence of key in prev_keys
     idx = binary_search_lower_bound(prev_keys, prev_count[0], key)
     if idx >= prev_count[0] or prev_keys[idx] != key:
-        out_impulse_n[tid] = 0.0
-        out_impulse_t1[tid] = 0.0
-        out_impulse_t2[tid] = 0.0
+        out_impulse_world[tid] = wp.vec3(0.0, 0.0, 0.0)
         return
-    # Scan the run of contacts with same key, find the one with closest offset0
     my_off = curr_offset0[tid]
-    best_idx = int(idx)
+    my_normal = curr_normal[tid]
+    best_idx = int(-1)
     best_dist = float(1.0e30)
     s = int(idx)
     while s < prev_count[0]:
         if prev_keys[s] != key:
             break
-        d = wp.length(prev_offset0[s] - my_off)
-        if d < best_dist:
-            best_dist = float(d)
-            best_idx = int(s)
+        ndot = wp.dot(prev_normal[s], my_normal)
+        if ndot > _NORMAL_DOT_THRESHOLD:
+            d = wp.length(prev_offset0[s] - my_off)
+            if d < best_dist:
+                best_dist = float(d)
+                best_idx = int(s)
         s = s + 1
-    out_impulse_n[tid] = prev_impulse_n[best_idx]
-    out_impulse_t1[tid] = prev_impulse_t1[best_idx]
-    out_impulse_t2[tid] = prev_impulse_t2[best_idx]
+    if best_idx < 0 or best_dist > _MAX_MATCH_DISTANCE:
+        out_impulse_world[tid] = wp.vec3(0.0, 0.0, 0.0)
+    else:
+        out_impulse_world[tid] = prev_impulse_world[best_idx]
 
 
 @wp.kernel
@@ -427,6 +432,47 @@ def _reorder_offset0_kernel(
     dst[tid] = src[perm[tid]]
 
 
+@wp.kernel
+def _reorder_vec3_kernel(
+    src: wp.array(dtype=wp.vec3),
+    perm: wp.array(dtype=wp.int32),
+    dst: wp.array(dtype=wp.vec3),
+    count: wp.array(dtype=wp.int32),
+):
+    """Reorder a vec3 array by *perm*."""
+    tid = wp.tid()
+    if tid >= count[0]:
+        return
+    dst[tid] = src[perm[tid]]
+
+
+@wp.kernel
+def _compute_world_impulse_kernel(
+    src_impulse_n: wp.array(dtype=wp.float32),
+    src_impulse_t1: wp.array(dtype=wp.float32),
+    src_impulse_t2: wp.array(dtype=wp.float32),
+    src_normal: wp.array(dtype=wp.vec3),
+    src_tangent1: wp.array(dtype=wp.vec3),
+    perm: wp.array(dtype=wp.int32),
+    dst_impulse_world: wp.array(dtype=wp.vec3),
+    dst_normal: wp.array(dtype=wp.vec3),
+    count: wp.array(dtype=wp.int32),
+):
+    """Compute world-space impulse vector and reorder into sorted key order."""
+    tid = wp.tid()
+    if tid >= count[0]:
+        return
+    old = perm[tid]
+    n = src_normal[old]
+    t1 = src_tangent1[old]
+    t2 = wp.cross(t1, n)
+    acc_n = src_impulse_n[old]
+    acc_t1 = src_impulse_t1[old]
+    acc_t2 = src_impulse_t2[old]
+    dst_impulse_world[tid] = acc_n * n + acc_t1 * t1 + acc_t2 * t2
+    dst_normal[tid] = n
+
+
 # ---------------------------------------------------------------------------
 # WarmStarter
 # ---------------------------------------------------------------------------
@@ -458,6 +504,8 @@ class WarmStarter:
         self.curr_impulse_n = wp.zeros(capacity, dtype=wp.float32, device=d)
         self.curr_impulse_t1 = wp.zeros(capacity, dtype=wp.float32, device=d)
         self.curr_impulse_t2 = wp.zeros(capacity, dtype=wp.float32, device=d)
+        self.curr_impulse_world = wp.zeros(capacity, dtype=wp.vec3, device=d)
+        self.curr_normal = wp.zeros(capacity, dtype=wp.vec3, device=d)
         self.curr_offset0 = wp.zeros(capacity, dtype=wp.vec3, device=d)
         self.curr_count = wp.zeros(1, dtype=wp.int32, device=d)
         self.curr_indices = wp.zeros(2 * capacity, dtype=wp.int32, device=d)
@@ -466,6 +514,8 @@ class WarmStarter:
         self.prev_impulse_n = wp.zeros(capacity, dtype=wp.float32, device=d)
         self.prev_impulse_t1 = wp.zeros(capacity, dtype=wp.float32, device=d)
         self.prev_impulse_t2 = wp.zeros(capacity, dtype=wp.float32, device=d)
+        self.prev_impulse_world = wp.zeros(capacity, dtype=wp.vec3, device=d)
+        self.prev_normal = wp.zeros(capacity, dtype=wp.vec3, device=d)
         self.prev_offset0 = wp.zeros(capacity, dtype=wp.vec3, device=d)
         self.prev_count = wp.zeros(1, dtype=wp.int32, device=d)
 
@@ -474,6 +524,8 @@ class WarmStarter:
         self._tmp_t1 = wp.zeros(capacity, dtype=wp.float32, device=d)
         self._tmp_t2 = wp.zeros(capacity, dtype=wp.float32, device=d)
         self._tmp_offset0 = wp.zeros(capacity, dtype=wp.vec3, device=d)
+        self._tmp_impulse_world = wp.zeros(capacity, dtype=wp.vec3, device=d)
+        self._tmp_normal = wp.zeros(capacity, dtype=wp.vec3, device=d)
 
         # Bundle metadata (built by build_bundles on GPU)
         # bundle_starts has capacity+1 entries to hold the sentinel end index.
@@ -495,6 +547,10 @@ class WarmStarter:
             self.prev_impulse_t1,
             self.curr_impulse_t2,
             self.prev_impulse_t2,
+            self.curr_impulse_world,
+            self.prev_impulse_world,
+            self.curr_normal,
+            self.prev_normal,
             self.curr_offset0,
             self.prev_offset0,
             self.curr_count,
@@ -508,6 +564,10 @@ class WarmStarter:
             self.curr_impulse_t1,
             self.prev_impulse_t2,
             self.curr_impulse_t2,
+            self.prev_impulse_world,
+            self.curr_impulse_world,
+            self.prev_normal,
+            self.curr_normal,
             self.prev_offset0,
             self.curr_offset0,
             self.prev_count,
@@ -543,6 +603,7 @@ class WarmStarter:
         shape1: wp.array,
         contact_count: wp.array,
         offset0: wp.array | None = None,
+        normal: wp.array | None = None,
     ):
         """Compute pair keys from shape index arrays for the current frame.
 
@@ -551,6 +612,7 @@ class WarmStarter:
             shape1: ``int32`` array of shape-1 indices.
             contact_count: ``int32[1]`` device array with the active count.
             offset0: ``vec3`` array of body-local contact offsets for per-point matching.
+            normal: ``vec3`` array of contact normals for normal-consistency matching.
         """
         d = self.device
         cap = self.capacity
@@ -558,7 +620,6 @@ class WarmStarter:
         wp.copy(self.curr_count, contact_count)
 
         if offset0 is not None and hasattr(self, "_shape_type") and self._shape_type is not None:
-            # Use voxel-binned keys when mesh data is available
             wp.launch(
                 _compute_pair_keys_voxel_kernel,
                 dim=cap,
@@ -591,8 +652,21 @@ class WarmStarter:
                 device=d,
             )
 
+        if normal is not None:
+            wp.launch(
+                _copy_offset0_kernel,
+                dim=cap,
+                inputs=[normal, self.curr_normal, self.curr_count],
+                device=d,
+            )
+
     def sort(self):
-        """Radix-sort current keys (and track the permutation)."""
+        """Radix-sort current keys (and track the permutation).
+
+        After sorting, ``curr_offset0`` and ``curr_normal`` are reordered
+        to match the sorted key order so that :meth:`transfer_impulses`
+        can access them directly by sorted index.
+        """
         d = self.device
         cap = self.capacity
 
@@ -610,6 +684,22 @@ class WarmStarter:
         )
 
         wp.utils.radix_sort_pairs(self.curr_keys, self.curr_indices, cap)
+
+        wp.launch(
+            _reorder_vec3_kernel,
+            dim=cap,
+            inputs=[self.curr_offset0, self.curr_indices, self._tmp_offset0, self.curr_count],
+            device=d,
+        )
+        wp.copy(self.curr_offset0, self._tmp_offset0, count=cap)
+
+        wp.launch(
+            _reorder_vec3_kernel,
+            dim=cap,
+            inputs=[self.curr_normal, self.curr_indices, self._tmp_normal, self.curr_count],
+            device=d,
+        )
+        wp.copy(self.curr_normal, self._tmp_normal, count=cap)
 
     def build_bundles(self):
         """Split sorted contacts into bundles.
@@ -667,21 +757,23 @@ class WarmStarter:
 
     def transfer_impulses(
         self,
-        out_impulse_n: wp.array,
-        out_impulse_t1: wp.array,
-        out_impulse_t2: wp.array,
+        out_cached_impulse_world: wp.array,
     ):
-        """Seed current-frame impulse columns from the previous frame.
+        """Seed current-frame warm-start impulses from the previous frame.
 
         For each current contact whose pair key exists in the previous
-        sorted keys, the corresponding accumulated impulse is copied
-        (matched by nearest body-local offset0 within the same pair).
-        New pairs get zero.
+        sorted keys, the corresponding world-space impulse vector is
+        copied (matched by nearest body-local offset0 within the same
+        pair, with distance and normal-consistency thresholds).
+        New or unmatched contacts get zero.
+
+        The normals used for matching come from :meth:`import_keys`
+        (current frame) and :meth:`export_impulses` (previous frame).
 
         Args:
-            out_impulse_n: target ``float32`` array for normal impulse.
-            out_impulse_t1: target ``float32`` array for tangent impulse 1.
-            out_impulse_t2: target ``float32`` array for tangent impulse 2.
+            out_cached_impulse_world: target ``vec3`` array sized to
+                the contact store capacity. The prepare kernel will
+                project these into the current frame's tangent basis.
         """
         d = self.device
         cap = self.capacity
@@ -692,15 +784,13 @@ class WarmStarter:
             inputs=[
                 self.curr_keys,
                 self.curr_offset0,
+                self.curr_normal,
                 self.prev_keys,
                 self.prev_offset0,
-                self.prev_impulse_n,
-                self.prev_impulse_t1,
-                self.prev_impulse_t2,
+                self.prev_normal,
+                self.prev_impulse_world,
                 self.prev_count,
-                out_impulse_n,
-                out_impulse_t1,
-                out_impulse_t2,
+                out_cached_impulse_world,
                 self.curr_count,
             ],
             device=d,
@@ -712,6 +802,8 @@ class WarmStarter:
         src_impulse_t1: wp.array,
         src_impulse_t2: wp.array,
         src_offset0: wp.array | None = None,
+        src_normal: wp.array | None = None,
+        src_tangent1: wp.array | None = None,
     ):
         """Snapshot solved impulses so the next frame can warm-start.
 
@@ -720,18 +812,21 @@ class WarmStarter:
 
         The impulses are reordered to match the sorted key order so
         that :meth:`transfer_impulses` can binary-search by key.
+        When *src_normal* and *src_tangent1* are provided, a world-space
+        impulse vector is computed and stored for frame-invariant transfer.
 
         Args:
             src_impulse_n: solved normal impulse column.
             src_impulse_t1: solved tangent impulse 1 column.
             src_impulse_t2: solved tangent impulse 2 column.
             src_offset0: body-local offset0 column for per-point matching.
+            src_normal: contact normal column (``vec3``).
+            src_tangent1: contact tangent1 column (``vec3``).
         """
         d = self.device
         cap = self.capacity
 
-        # The sort permutation (curr_indices) maps sorted position -> original
-        # position.  We reorder the impulses into sorted order.
+        # Reorder scalar impulses into sorted key order (kept for diagnostics).
         wp.launch(
             _reorder_impulses_kernel,
             dim=cap,
@@ -764,3 +859,23 @@ class WarmStarter:
                 device=d,
             )
             wp.copy(self.curr_offset0, self._tmp_offset0, count=cap)
+
+        if src_normal is not None and src_tangent1 is not None:
+            wp.launch(
+                _compute_world_impulse_kernel,
+                dim=cap,
+                inputs=[
+                    src_impulse_n,
+                    src_impulse_t1,
+                    src_impulse_t2,
+                    src_normal,
+                    src_tangent1,
+                    self.curr_indices,
+                    self._tmp_impulse_world,
+                    self._tmp_normal,
+                    self.curr_count,
+                ],
+                device=d,
+            )
+            wp.copy(self.curr_impulse_world, self._tmp_impulse_world, count=cap)
+            wp.copy(self.curr_normal, self._tmp_normal, count=cap)

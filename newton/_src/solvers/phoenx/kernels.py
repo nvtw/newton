@@ -67,13 +67,16 @@ def add_int32_kernel(
 
 @wp.func
 def _quat_integrate(q: wp.quat, w: wp.vec3, dt: float) -> wp.quat:
-    """Integrate orientation by angular velocity using axis-angle rotation."""
-    angle = wp.length(w) * dt
-    if angle > 1.0e-6:
-        axis = wp.normalize(w)
-        dq = wp.quat_from_axis_angle(axis, angle)
-        return wp.normalize(dq * q)
-    return q
+    """Integrate orientation by angular velocity (C# ``QuaternionIntegrationHelper``)."""
+    angle = wp.length(w)
+    if angle < 0.001:
+        # Taylor expansion: sin(θ/2)/θ ≈ dt/2 - dt^3*θ^2/48
+        scale = 0.5 * dt - dt * dt * dt * 0.020833333333 * angle * angle
+    else:
+        scale = wp.sin(0.5 * angle * dt) / angle
+    ax = w * scale
+    dq = wp.quat(ax[0], ax[1], ax[2], wp.cos(angle * dt * 0.5))
+    return wp.normalize(dq * q)
 
 
 @wp.kernel
@@ -95,6 +98,33 @@ def integrate_velocities_kernel(
     if inverse_mass[tid] == 0.0:
         return
     velocity[tid] = velocity[tid] + gravity * dt
+
+
+@wp.kernel
+def apply_external_forces_kernel(
+    velocity: wp.array(dtype=wp.vec3),
+    angular_velocity: wp.array(dtype=wp.vec3),
+    inverse_mass: wp.array(dtype=wp.float32),
+    inverse_inertia_world: wp.array(dtype=wp.mat33),
+    flags: wp.array(dtype=wp.int32),
+    ext_force: wp.array(dtype=wp.vec3),
+    ext_torque: wp.array(dtype=wp.vec3),
+    dt: float,
+    count: wp.array(dtype=wp.int32),
+):
+    """Apply per-body external forces/torques (C# ``ApplyExternalForcesKernel``)."""
+    tid = wp.tid()
+    if tid >= count[0]:
+        return
+    if (flags[tid] & BODY_FLAG_STATIC) != 0:
+        return
+    f = ext_force[tid]
+    tau = ext_torque[tid]
+    if wp.dot(f, f) == 0.0 and wp.dot(tau, tau) == 0.0:
+        return
+    inv_m = inverse_mass[tid]
+    velocity[tid] = velocity[tid] + f * inv_m * dt
+    angular_velocity[tid] = angular_velocity[tid] + inverse_inertia_world[tid] * tau * dt
 
 
 @wp.kernel

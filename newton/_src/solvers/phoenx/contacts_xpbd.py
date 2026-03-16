@@ -228,6 +228,8 @@ class ContactKernelsXPBD:
             copy_ang_vel: wp.array(dtype=wp.vec3),
             body_capacity: int,
             inv_dt: float,
+            frame_id: int,
+            cached_impulse_world: wp.array(dtype=wp.vec3),
         ):
             """Compute per-contact solver data and warm-start for a bundle of contacts."""
             tid = wp.tid()
@@ -311,9 +313,10 @@ class ContactKernelsXPBD:
                     compute_effective_mass_split(inv_m0, inv_m1, inv_i0, inv_i1, rw0, rw1, t2, split0, split1),
                 )
 
-                acc_n = ds_load_float(cdata, wp.static(c_accumulated_n), ci) * WARM_START_SCALE
-                acc_t1 = ds_load_float(cdata, wp.static(c_accumulated_t1), ci) * WARM_START_SCALE
-                acc_t2 = ds_load_float(cdata, wp.static(c_accumulated_t2), ci) * WARM_START_SCALE
+                iw = cached_impulse_world[s]
+                acc_n = wp.max(wp.dot(iw, n), 0.0) * WARM_START_SCALE
+                acc_t1 = wp.dot(iw, t1) * WARM_START_SCALE
+                acc_t2 = wp.dot(iw, t2) * WARM_START_SCALE
                 ds_store_float(cdata, wp.static(c_accumulated_n), ci, acc_n)
                 ds_store_float(cdata, wp.static(c_accumulated_t1), ci, acc_t1)
                 ds_store_float(cdata, wp.static(c_accumulated_t2), ci, acc_t2)

@@ -228,10 +228,9 @@ def _convert_contacts_kernel(
     # For box/plane primitives with no rounding, margins are 0.
     out_margin0[tid] = 0.0
     out_margin1[tid] = 0.0
-    # Average of both shapes' friction (matching Newton XPBD convention).
     mu0 = shape_friction[s0]
     mu1 = shape_friction[s1]
-    out_friction[tid] = 0.5 * (mu0 + mu1)
+    out_friction[tid] = wp.max(mu0, mu1)
     out_acc_n[tid] = 0.0
     out_acc_t1[tid] = 0.0
     out_acc_t2[tid] = 0.0
@@ -323,6 +322,7 @@ class PhoenXCollisionPipeline:
         radius: float = 0.5,
         margin: float = 0.0,
         friction: float = 0.5,
+        gap: float = 0.01,
     ) -> int:
         """Register a sphere collision shape.
 
@@ -331,6 +331,7 @@ class PhoenXCollisionPipeline:
             local_transform: ``(px, py, pz, qx, qy, qz, qw)`` or ``None``.
             radius: sphere radius [m].
             margin: collision margin [m].
+            gap: contact detection gap [m].
 
         Returns:
             Shape index.
@@ -343,7 +344,7 @@ class PhoenXCollisionPipeline:
         self._shape_local_xf_list.append(local_transform)
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(radius + margin)
-        self._shape_gap_list.append(0.01)
+        self._shape_gap_list.append(gap)
         self._shape_friction_list.append(friction)
         return idx
 
@@ -355,6 +356,7 @@ class PhoenXCollisionPipeline:
         half_length: float = 0.5,
         margin: float = 0.0,
         friction: float = 0.5,
+        gap: float = 0.01,
     ) -> int:
         """Register a capsule collision shape (axis along local Z).
 
@@ -364,6 +366,7 @@ class PhoenXCollisionPipeline:
             radius: capsule radius [m].
             half_length: half-length of the cylindrical section [m].
             margin: collision margin [m].
+            gap: contact detection gap [m].
 
         Returns:
             Shape index.
@@ -376,7 +379,7 @@ class PhoenXCollisionPipeline:
         self._shape_local_xf_list.append(local_transform)
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(radius + half_length + margin)
-        self._shape_gap_list.append(0.01)
+        self._shape_gap_list.append(gap)
         self._shape_friction_list.append(friction)
         return idx
 
@@ -388,6 +391,7 @@ class PhoenXCollisionPipeline:
         half_height: float = 0.5,
         margin: float = 0.0,
         friction: float = 0.5,
+        gap: float = 0.01,
     ) -> int:
         """Register a cylinder collision shape (axis along local Z).
 
@@ -397,6 +401,7 @@ class PhoenXCollisionPipeline:
             radius: cylinder radius [m].
             half_height: half-height along local Z [m].
             margin: collision margin [m].
+            gap: contact detection gap [m].
 
         Returns:
             Shape index.
@@ -409,7 +414,7 @@ class PhoenXCollisionPipeline:
         self._shape_local_xf_list.append(local_transform)
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(math.sqrt(radius * radius + half_height * half_height) + margin)
-        self._shape_gap_list.append(0.01)
+        self._shape_gap_list.append(gap)
         self._shape_friction_list.append(friction)
         return idx
 
@@ -418,6 +423,7 @@ class PhoenXCollisionPipeline:
         body_row: int,
         local_transform: tuple | None = None,
         friction: float = 0.5,
+        gap: float = 0.01,
     ) -> int:
         """Register an infinite ground-plane shape.
 
@@ -429,6 +435,7 @@ class PhoenXCollisionPipeline:
             body_row: storage row of the owning body.
             local_transform: ``(px, py, pz, qx, qy, qz, qw)`` or ``None``
                 for identity.
+            gap: contact detection gap [m].
 
         Returns:
             Shape index.
@@ -441,7 +448,7 @@ class PhoenXCollisionPipeline:
         self._shape_local_xf_list.append(local_transform)
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(1.0e6)
-        self._shape_gap_list.append(0.01)
+        self._shape_gap_list.append(gap)
         self._shape_friction_list.append(friction)
         return idx
 
@@ -453,7 +460,7 @@ class PhoenXCollisionPipeline:
         collision_radius: float = 1.0,
         scale: tuple[float, float, float] = (1.0, 1.0, 1.0),
         margin: float = 0.0,
-        gap: float = 0.0,
+        gap: float = 0.01,
         friction: float = 0.5,
         aabb_lower: tuple[float, float, float] = (0.0, 0.0, 0.0),
         aabb_upper: tuple[float, float, float] = (1.0, 1.0, 1.0),
@@ -714,11 +721,10 @@ class PhoenXCollisionPipeline:
             cs.column_of("shape1"),
             cs.count,
             offset0=cs.column_of("offset0"),
+            normal=cs.column_of("normal"),
         )
         solver_state.warm_starter.sort()
         solver_state.warm_starter.build_bundles()
         solver_state.warm_starter.transfer_impulses(
-            cs.column_of("accumulated_normal_impulse"),
-            cs.column_of("accumulated_tangent_impulse1"),
-            cs.column_of("accumulated_tangent_impulse2"),
+            solver_state._cached_impulse_world,
         )

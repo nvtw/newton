@@ -236,8 +236,8 @@ class SolverPhoenX(SolverBase):
                 angular_velocity=(0.0, 0.0, 0.0),
                 inverse_mass=inv_m,
                 inverse_inertia_local=inv_I,
-                linear_damping=1.0,
-                angular_damping=1.0,
+                linear_damping=0.995,
+                angular_damping=0.995,
                 is_static=is_static,
             )
             self._newton_to_phoenx[i] = handle
@@ -263,6 +263,7 @@ class SolverPhoenX(SolverBase):
         shape_body_np = model.shape_body.numpy()
         shape_xf_np = model.shape_transform.numpy()
         shape_mu_np = model.shape_material_mu.numpy()
+        shape_gap_np = model.shape_gap.numpy()
 
         # Pre-load mesh-related arrays if any mesh shapes exist
         has_meshes = any(int(t) == GEO_TYPE_MESH for t in shape_type_np)
@@ -273,7 +274,6 @@ class SolverPhoenX(SolverBase):
             collision_aabb_hi_np = model.shape_collision_aabb_upper.numpy()
             voxel_res_np = model._shape_voxel_resolution.numpy()
             shape_margin_np = model.shape_margin.numpy()
-            shape_gap_np = model.shape_gap.numpy()
 
         h2i = self.ss.body_store.handle_to_index.numpy()
 
@@ -320,12 +320,15 @@ class SolverPhoenX(SolverBase):
 
             mu = float(shape_mu_np[i])
 
+            shape_gap = float(shape_gap_np[i])
+
             if geo == GEO_TYPE_BOX:
                 self.pipeline.add_shape_box(
                     body_row=body_row,
                     local_transform=local_xf,
                     half_extents=(float(scale[0]), float(scale[1]), float(scale[2])),
                     friction=mu,
+                    gap=shape_gap,
                 )
             elif geo == GEO_TYPE_SPHERE:
                 self.pipeline.add_shape_sphere(
@@ -333,6 +336,7 @@ class SolverPhoenX(SolverBase):
                     local_transform=local_xf,
                     radius=float(scale[0]),
                     friction=mu,
+                    gap=shape_gap,
                 )
             elif geo == GEO_TYPE_CAPSULE:
                 self.pipeline.add_shape_capsule(
@@ -341,6 +345,7 @@ class SolverPhoenX(SolverBase):
                     radius=float(scale[0]),
                     half_length=float(scale[1]),
                     friction=mu,
+                    gap=shape_gap,
                 )
             elif geo == GEO_TYPE_CYLINDER:
                 self.pipeline.add_shape_cylinder(
@@ -349,12 +354,14 @@ class SolverPhoenX(SolverBase):
                     radius=float(scale[0]),
                     half_height=float(scale[1]),
                     friction=mu,
+                    gap=shape_gap,
                 )
             elif geo == GEO_TYPE_PLANE:
                 self.pipeline.add_shape_plane(
                     body_row=body_row,
                     local_transform=local_xf,
                     friction=mu,
+                    gap=shape_gap,
                 )
             elif geo == GEO_TYPE_MESH:
                 mesh_id = int(source_ptr_np[i])
@@ -363,7 +370,6 @@ class SolverPhoenX(SolverBase):
                 aabb_hi = collision_aabb_hi_np[i]
                 vr = voxel_res_np[i]
                 mesh_margin = float(shape_margin_np[i])
-                mesh_gap = float(shape_gap_np[i])
                 self.pipeline.add_shape_mesh(
                     body_row=body_row,
                     mesh_id=mesh_id,
@@ -371,7 +377,7 @@ class SolverPhoenX(SolverBase):
                     collision_radius=coll_radius,
                     scale=(float(scale[0]), float(scale[1]), float(scale[2])),
                     margin=mesh_margin,
-                    gap=mesh_gap,
+                    gap=shape_gap,
                     friction=mu,
                     aabb_lower=(float(aabb_lo[0]), float(aabb_lo[1]), float(aabb_lo[2])),
                     aabb_upper=(float(aabb_hi[0]), float(aabb_hi[1]), float(aabb_hi[2])),
@@ -383,6 +389,11 @@ class SolverPhoenX(SolverBase):
                     f"Shape {i}: unsupported geometry type {geo_name} ({geo}), contacts from Newton will still work.",
                     stacklevel=2,
                 )
+
+        # Populate per-shape friction for contact import
+        self.ss.shape_friction.assign(
+            wp.array(shape_mu_np.astype(np.float32), dtype=wp.float32, device=self.ss.device)
+        )
 
     def _init_joints(self, model: Model) -> None:
         """Translate Newton joints into PhoenX constraints."""
@@ -625,7 +636,6 @@ class SolverPhoenX(SolverBase):
         )
 
         # 2. PhoenX pipeline (matching C# World.Step: detect once, substep N times)
-        self.ss.update_world_inertia()
 
         # Collision detection ONCE per frame (C# lines 211-304)
         self.ss.warm_starter.begin_frame()
@@ -639,6 +649,9 @@ class SolverPhoenX(SolverBase):
                 num_iterations=self._num_iterations,
                 num_velocity_iterations=self._num_velocity_iterations,
             )
+
+        # Damping + world inertia update AFTER all substeps (C# line 340)
+        self.ss.update_world_inertia()
 
         self.ss.export_impulses()
 
