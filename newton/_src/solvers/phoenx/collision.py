@@ -288,6 +288,7 @@ class PhoenXCollisionPipeline:
         half_extents: tuple[float, float, float] = (0.5, 0.5, 0.5),
         margin: float = 0.0,
         friction: float = 0.5,
+        gap: float = 0.01,
     ) -> int:
         """Register a box collision shape.
 
@@ -311,7 +312,7 @@ class PhoenXCollisionPipeline:
         self._shape_local_xf_list.append(local_transform)
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(math.sqrt(hx * hx + hy * hy + hz * hz))
-        self._shape_gap_list.append(0.0)
+        self._shape_gap_list.append(gap)
         self._shape_friction_list.append(friction)
         return idx
 
@@ -342,7 +343,7 @@ class PhoenXCollisionPipeline:
         self._shape_local_xf_list.append(local_transform)
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(radius + margin)
-        self._shape_gap_list.append(0.0)
+        self._shape_gap_list.append(0.01)
         self._shape_friction_list.append(friction)
         return idx
 
@@ -375,7 +376,7 @@ class PhoenXCollisionPipeline:
         self._shape_local_xf_list.append(local_transform)
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(radius + half_length + margin)
-        self._shape_gap_list.append(0.0)
+        self._shape_gap_list.append(0.01)
         self._shape_friction_list.append(friction)
         return idx
 
@@ -408,7 +409,7 @@ class PhoenXCollisionPipeline:
         self._shape_local_xf_list.append(local_transform)
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(math.sqrt(radius * radius + half_height * half_height) + margin)
-        self._shape_gap_list.append(0.0)
+        self._shape_gap_list.append(0.01)
         self._shape_friction_list.append(friction)
         return idx
 
@@ -440,7 +441,7 @@ class PhoenXCollisionPipeline:
         self._shape_local_xf_list.append(local_transform)
         self._shape_body_row_list.append(body_row)
         self._shape_collision_radius_list.append(1.0e6)
-        self._shape_gap_list.append(0.0)
+        self._shape_gap_list.append(0.01)
         self._shape_friction_list.append(friction)
         return idx
 

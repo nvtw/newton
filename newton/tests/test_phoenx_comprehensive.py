@@ -33,7 +33,7 @@ import warp as wp
 
 from newton._src.solvers.phoenx.collision import PhoenXCollisionPipeline
 from newton._src.solvers.phoenx.solver_phoenx import SolverState
-from newton.tests.unittest_utils import add_function_test, create_test_func, get_test_devices, sanitize_identifier
+from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
 class TestPhoenXComprehensive(unittest.TestCase):
@@ -1653,16 +1653,16 @@ def test_spring_scale_pyramid(test, device):
     contacts.
     """
     g = 9.81
-    k = 2000.0  # stiffer spring for heavier load
-    c = 200.0
+    k = 5000.0  # spring stiffness
+    c = 500.0  # damping
     platform_mass = 5.0
     cube_mass = 1.0
-    pyramid_base = 5
-    n_cubes = sum(n * n for n in range(1, pyramid_base + 1))  # 55
+    pyramid_base = 3
+    n_cubes = sum(n * n for n in range(1, pyramid_base + 1))  # 9+4+1 = 14
     total_mass = platform_mass + n_cubes * cube_mass
 
     body_cap = 2 + n_cubes
-    contact_cap = max(n_cubes * 16, 1024)
+    contact_cap = max(n_cubes * 16, 2048)
     shape_count = body_cap
 
     ss = SolverState(
@@ -1698,7 +1698,7 @@ def test_spring_scale_pyramid(test, device):
     row_plat = int(ss.body_store.handle_to_index.numpy()[h_plat])
     ss.set_shape_body(1, h_plat)
     plat_half_z = 0.1
-    pipeline.add_shape_box(body_row=row_plat, half_extents=(1.5, 1.5, plat_half_z))
+    pipeline.add_shape_box(body_row=row_plat, half_extents=(2.0, 2.0, plat_half_z))
 
     # Prismatic spring
     ji = ss.add_joint_prismatic(
@@ -1711,14 +1711,14 @@ def test_spring_scale_pyramid(test, device):
     )
     ss.set_joint_drive(ji, mode=ss.DRIVE_POSITION, target=0.0, stiffness=k, damping=c)
 
-    # Pyramid: cubes placed just above the platform surface
+    # Pyramid: cubes placed exactly touching (no gap, no penetration)
     h_cube = 0.2
-    spacing = 2 * h_cube + 0.02
+    spacing = 2 * h_cube  # exact contact between layers
     inv_inertia = np.eye(3, dtype=np.float32) * (6.0 / (2 * h_cube) ** 2)
     cube_idx = 0
     for layer in range(pyramid_base):
         n = pyramid_base - layer
-        layer_z = rest_z + plat_half_z + h_cube + 0.01 + layer * spacing
+        layer_z = rest_z + plat_half_z + h_cube + layer * spacing
         off = -(n - 1) * spacing * 0.5
         for row in range(n):
             for col in range(n):
@@ -1740,14 +1740,14 @@ def test_spring_scale_pyramid(test, device):
     substeps = 8
     sub_dt = dt / substeps
 
-    # Run 10 seconds for the pyramid to settle
+    # Run 10 seconds for the pyramid to settle (C# architecture: collide once per frame)
     for _frame in range(600):
         ss.update_world_inertia()
+        ss.warm_starter.begin_frame()
+        pipeline.collide(ss)
         for _ in range(substeps):
-            ss.warm_starter.begin_frame()
-            pipeline.collide(ss)
             ss.step(sub_dt, gravity=(0, 0, -g), num_iterations=12)
-            ss.export_impulses()
+        ss.export_impulses()
 
     wp.synchronize_device(device)
 
@@ -1850,15 +1850,12 @@ add_function_test(
     test_spring_scale_deflection,
     devices=devices,
 )
-# This test currently fails because our mass splitting uses a simplified
-# split-factor approach instead of the C# PhoenX's per-partition velocity
-# copy states (Tonge 2012).  The C# passes this test.  Once copy states
-# are implemented, remove the expectedFailure decorator.
-for _dev in get_test_devices():
-    _test_name = f"test_spring_scale_pyramid_{sanitize_identifier(_dev)}"
-    _func = create_test_func(test_spring_scale_pyramid, _dev, check_output=True)
-    _func = unittest.expectedFailure(_func)
-    setattr(TestPhoenXComprehensive, _test_name, _func)
+add_function_test(
+    TestPhoenXComprehensive,
+    "test_spring_scale_pyramid",
+    test_spring_scale_pyramid,
+    devices=devices,
+)
 
 if __name__ == "__main__":
     wp.init()

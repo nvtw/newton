@@ -435,30 +435,35 @@ class Example:
             self.ground_material,
         )
 
-        # Contact visualization
-        wp.launch(
-            build_contact_lines_kernel,
-            dim=cs.capacity,
-            inputs=[
-                cs.column_of("body0"),
-                cs.column_of("offset0"),
-                cs.column_of("normal"),
-                bs.column_of("position"),
-                bs.column_of("orientation"),
-                cs.count,
-                self._contact_starts,
-                self._contact_ends,
-            ],
-            device=d,
-        )
-        nc = cs.count.numpy()[0]
-        if nc > 0:
-            self.viewer.log_lines(
-                "/contacts",
-                self._contact_starts[:nc],
-                self._contact_ends[:nc],
-                (0.0, 1.0, 0.0),
+        # Contact visualization (toggle via viewer UI)
+        if self.viewer.show_contacts:
+            wp.launch(
+                build_contact_lines_kernel,
+                dim=cs.capacity,
+                inputs=[
+                    cs.column_of("body0"),
+                    cs.column_of("offset0"),
+                    cs.column_of("normal"),
+                    bs.column_of("position"),
+                    bs.column_of("orientation"),
+                    cs.count,
+                    self._contact_starts,
+                    self._contact_ends,
+                ],
+                device=d,
             )
+            nc = cs.count.numpy()[0]
+            if nc > 0:
+                self.viewer.log_lines(
+                    "/contacts",
+                    self._contact_starts[:nc],
+                    self._contact_ends[:nc],
+                    (0.0, 1.0, 0.0),
+                )
+            else:
+                self.viewer.log_lines("/contacts", None, None, None)
+        else:
+            self.viewer.log_lines("/contacts", None, None, None)
 
         # Picking line visualization
         if self._pick_body_row >= 0:
