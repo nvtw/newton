@@ -210,8 +210,8 @@ def test_friction_holds(test, device):
     vel = ss.body_store.column_of("velocity").numpy()[row_box]
     test.assertLess(
         abs(vel[0]),
-        1.0,
-        f"Friction should have reduced lateral velocity; vx={vel[0]:.4f}",
+        0.1,
+        f"Friction should have nearly stopped lateral velocity; vx={vel[0]:.4f}",
     )
 
 
@@ -297,14 +297,14 @@ def _run_ball_drop(device, num_iterations, use_warm_start):
 
 
 def test_warm_start_convergence(test, device):
-    """Warm-started solver should converge to lower residual than cold start."""
+    """Warm-started solver must converge to strictly lower residual than cold start."""
     residual_cold = _run_ball_drop(device, num_iterations=4, use_warm_start=False)
     residual_warm = _run_ball_drop(device, num_iterations=4, use_warm_start=True)
 
-    test.assertLessEqual(
+    test.assertLess(
         residual_warm,
-        residual_cold + 0.1,
-        f"Warm start residual ({residual_warm:.4f}) should be <= cold ({residual_cold:.4f})",
+        residual_cold * 0.95,
+        f"Warm start residual ({residual_warm:.4f}) should be <95% of cold ({residual_cold:.4f})",
     )
 
 

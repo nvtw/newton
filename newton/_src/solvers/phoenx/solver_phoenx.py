@@ -107,6 +107,10 @@ class SolverState:
         # Mass splitting: per-body contact count (Tonge et al. 2012)
         self._contact_count_per_body = wp.zeros(body_capacity, dtype=wp.int32, device=d)
 
+        # Pre-allocated device counter for total element count (bundles + joints).
+        # Must NOT be re-allocated per frame — that breaks CUDA graph capture.
+        self._total_element_count = wp.zeros(1, dtype=wp.int32, device=d)
+
         # Maximum number of bundles (worst case: every contact is its own bundle)
         self.capacity_bundles = contact_capacity
 
@@ -541,7 +545,6 @@ class SolverState:
             )
 
         # Total element count = bundles + joints (device-side, no host sync)
-        self._total_element_count = wp.zeros(1, dtype=wp.int32, device=d)
         if self._constraint_kernels is not None and self._joint_count > 0:
             wp.launch(
                 add_int32_kernel,

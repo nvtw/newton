@@ -149,8 +149,8 @@ def test_bias_sign_box_on_ground(test, device):
     pos = ss.body_store.column_of("position").numpy()[row_b]
     vel = ss.body_store.column_of("velocity").numpy()[row_b]
 
-    test.assertGreater(pos[1], -0.05, f"Box fell through ground: y={pos[1]:.4f}")
-    test.assertLess(abs(vel[1]), 2.0, f"Excessive vertical velocity: vy={vel[1]:.4f}")
+    test.assertGreater(pos[1], -0.01, f"Box fell through ground: y={pos[1]:.4f}")
+    test.assertLess(abs(vel[1]), 0.5, f"Box not settling: vy={vel[1]:.4f}")
 
 
 # ===========================================================================
@@ -447,9 +447,9 @@ def test_collision_pipeline_box_on_plane(test, device):
     vel = ss.body_store.column_of("velocity").numpy()[box_row]
 
     # Box should settle near z=0.5 (half-extent above ground)
-    test.assertGreater(pos[2], 0.0, f"Box fell through ground: z={pos[2]:.4f}")
-    test.assertLess(pos[2], 2.0, f"Box didn't fall at all: z={pos[2]:.4f}")
-    test.assertLess(abs(vel[2]), 1.0, f"Box not settling: vz={vel[2]:.4f}")
+    test.assertGreater(pos[2], 0.1, f"Box fell through ground: z={pos[2]:.4f}")
+    test.assertLess(pos[2], 1.0, f"Box didn't settle: z={pos[2]:.4f}")
+    test.assertLess(abs(vel[2]), 0.5, f"Box not settling: vz={vel[2]:.4f}")
 
 
 # ===========================================================================
@@ -580,8 +580,8 @@ def test_friction_stops_sliding(test, device):
 
     wp.synchronize_device(device)
     vel = ss.body_store.column_of("velocity").numpy()[row_b]
-    test.assertLess(abs(vel[0]), 1.0,
-                    f"Friction should have slowed the body; vx={vel[0]:.4f}")
+    test.assertLess(abs(vel[0]), 0.2,
+                    f"Friction should have nearly stopped the body; vx={vel[0]:.4f}")
 
 
 # ===========================================================================
@@ -945,6 +945,127 @@ def test_graph_coloring_pyramid(test, device):
 
 
 # ===========================================================================
+# Test 16: CUDA graph capture — step() must be sync-free
+# ===========================================================================
+
+def test_step_cuda_graph_capture(test, device):
+    """step() must execute without GPU-to-CPU sync so it can be graph-captured.
+
+    Captures step() into a CUDA graph, replays it, and verifies that the
+    graph-captured result matches a non-captured run bit-for-bit.  Any .numpy()
+    or host sync inside step() will cause the capture to fail with RuntimeError.
+    """
+    if not device.is_cuda:
+        return  # graph capture is CUDA-only
+
+    def _setup_and_run(use_graph):
+        """Build identical scene, run 5 steps, return final position."""
+        ss = SolverState(body_capacity=8, contact_capacity=32, shape_count=4, device=device)
+        h_ground = ss.add_body(position=(0, 0, 0), is_static=True)
+        h_box = ss.add_body(position=(0, 0.5, 0), inverse_mass=1.0)
+        row_g = int(ss.body_store.handle_to_index.numpy()[h_ground])
+        row_b = int(ss.body_store.handle_to_index.numpy()[h_box])
+
+        dt = 1.0 / 60.0
+
+        # Inject contact and build bundles (runs outside step, OK to sync)
+        ss.update_world_inertia()
+        ss.contact_store.count.assign(wp.array([1], dtype=wp.int32, device=device))
+        _inject_contact(ss, 0, 0, 1, row_g, row_b,
+                        normal=(0, 1, 0), offset0=(0, 0, 0), offset1=(0, -0.5, 0))
+        _build_bundles(ss)
+
+        # Warm-up step (compiles kernels)
+        ss.step(dt, gravity=(0, -9.81, 0), num_iterations=4)
+        wp.synchronize_device(device)
+
+        # Re-inject for the timed run
+        ss.contact_store.count.assign(wp.array([1], dtype=wp.int32, device=device))
+        _inject_contact(ss, 0, 0, 1, row_g, row_b,
+                        normal=(0, 1, 0), offset0=(0, 0, 0), offset1=(0, -0.5, 0))
+        _build_bundles(ss)
+
+        if use_graph:
+            wp.capture_begin(device=device)
+            ss.step(dt, gravity=(0, -9.81, 0), num_iterations=4)
+            graph = wp.capture_end(device=device)
+            for _ in range(5):
+                wp.capture_launch(graph)
+        else:
+            for _ in range(5):
+                ss.step(dt, gravity=(0, -9.81, 0), num_iterations=4)
+
+        wp.synchronize_device(device)
+        return ss.body_store.column_of("position").numpy()[row_b].copy()
+
+    # Run without graph capture
+    pos_normal = _setup_and_run(use_graph=False)
+
+    # Run with graph capture — this will fail if step() has any CPU sync
+    try:
+        pos_graph = _setup_and_run(use_graph=True)
+    except RuntimeError as e:
+        test.fail(f"CUDA graph capture of step() failed: {e}")
+
+    # Results must match exactly
+    np.testing.assert_array_equal(
+        pos_graph, pos_normal,
+        err_msg=f"Graph-captured step() differs from normal: {pos_graph} vs {pos_normal}"
+    )
+
+
+# ===========================================================================
+# Test 17: Bundle correctness — bundle count matches expected grouping
+# ===========================================================================
+
+def test_bundle_count_correctness(test, device):
+    """Verify bundle building produces the correct number of bundles.
+
+    7 contacts: 5 for pair (0,1) -> 1 bundle of 5, 2 for pair (2,3) -> 1 bundle of 2.
+    Total: 2 bundles.
+    """
+    ss = SolverState(body_capacity=8, contact_capacity=32, shape_count=4, device=device)
+    h_g = ss.add_body(position=(0, 0, 0), is_static=True)
+    h_b1 = ss.add_body(position=(0, 1, 0), inverse_mass=1.0)
+    h_b2 = ss.add_body(position=(1, 1, 0), inverse_mass=1.0)
+
+    row_g = int(ss.body_store.handle_to_index.numpy()[h_g])
+    row_b1 = int(ss.body_store.handle_to_index.numpy()[h_b1])
+    row_b2 = int(ss.body_store.handle_to_index.numpy()[h_b2])
+
+    # 5 contacts for pair (shapes 0,1) -> body pair (row_g, row_b1)
+    # 2 contacts for pair (shapes 2,3) -> body pair (row_g, row_b2)
+    num_contacts = 7
+    ss.contact_store.count.assign(wp.array([num_contacts], dtype=wp.int32, device=device))
+    for ci in range(5):
+        _inject_contact(ss, ci, 0, 1, row_g, row_b1,
+                        normal=(0, 1, 0), offset0=(0, 0, float(ci) * 0.1))
+    for ci in range(5, 7):
+        _inject_contact(ss, ci, 2, 3, row_g, row_b2,
+                        normal=(0, 1, 0), offset0=(0, 0, float(ci) * 0.1))
+
+    _build_bundles(ss)
+    wp.synchronize_device(device)
+
+    n_bundles = int(ss.warm_starter.bundle_count.numpy()[0])
+    test.assertEqual(n_bundles, 2,
+                     f"Expected 2 bundles (5+2 contacts in 2 pairs), got {n_bundles}")
+
+    # With 6 contacts for one pair, it should split into 2 bundles (5+1)
+    ss.contact_store.count.assign(wp.array([6], dtype=wp.int32, device=device))
+    for ci in range(6):
+        _inject_contact(ss, ci, 0, 1, row_g, row_b1,
+                        normal=(0, 1, 0), offset0=(0, 0, float(ci) * 0.1))
+
+    _build_bundles(ss)
+    wp.synchronize_device(device)
+
+    n_bundles = int(ss.warm_starter.bundle_count.numpy()[0])
+    test.assertEqual(n_bundles, 2,
+                     f"Expected 2 bundles (6 contacts, max 5 per bundle), got {n_bundles}")
+
+
+# ===========================================================================
 # Registration
 # ===========================================================================
 
@@ -980,6 +1101,10 @@ add_function_test(TestPhoenXComprehensive, "test_graph_coloring_simple",
                   test_graph_coloring_simple, devices=devices)
 add_function_test(TestPhoenXComprehensive, "test_graph_coloring_pyramid",
                   test_graph_coloring_pyramid, devices=devices)
+add_function_test(TestPhoenXComprehensive, "test_step_cuda_graph_capture",
+                  test_step_cuda_graph_capture, devices=devices)
+add_function_test(TestPhoenXComprehensive, "test_bundle_count_correctness",
+                  test_bundle_count_correctness, devices=devices)
 
 if __name__ == "__main__":
     wp.init()

@@ -320,11 +320,16 @@ def test_lower_bound_past_end(test, device):
 
 
 def test_warm_starter_per_point_matching(test, device):
-    """Warm start matches contacts by nearest offset0 within same pair."""
+    """Warm start matches contacts by nearest offset0 within same pair.
+
+    Frame 1 has two contacts for pair (0,1) at offsets (0,0,+0.5) and (0,0,-0.5)
+    with impulses 100 and 200 respectively.  Frame 2 has two queries:
+    one near +0.5 and one near -0.5.  We verify each gets the correct impulse.
+    """
     cap = 16
     ws = WarmStarter(cap, device=device)
 
-    # Frame 1: pair (0, 1) with 2 contacts at different offsets
+    # Frame 1: pair (0, 1) with 2 contacts at well-separated offsets
     shape0_f1 = wp.array([0, 0], dtype=wp.int32, device=device)
     shape1_f1 = wp.array([1, 1], dtype=wp.int32, device=device)
     count_f1 = wp.array([2], dtype=wp.int32, device=device)
@@ -337,24 +342,31 @@ def test_warm_starter_per_point_matching(test, device):
     ws.import_keys(shape0_f1, shape1_f1, count_f1, offset0=offset0_f1)
     ws.sort()
 
-    # Write distinct impulses for the two contacts
+    # After sort, both contacts have the same key so their sorted order
+    # is stable by original index.  We need to figure out which sorted
+    # slot corresponds to which offset, then write known impulses.
+    perm = ws.curr_indices.numpy()[:2]  # sorted_pos -> original_idx
     impulse_n = wp.zeros(cap, dtype=wp.float32, device=device)
+    impulse_n_np = impulse_n.numpy()
+    # original 0 = offset (0,0,+0.5) -> impulse 100
+    # original 1 = offset (0,0,-0.5) -> impulse 200
+    for sorted_pos in range(2):
+        orig = perm[sorted_pos]
+        impulse_n_np[sorted_pos] = 100.0 if orig == 0 else 200.0
+    impulse_n.assign(wp.array(impulse_n_np, dtype=wp.float32, device=device))
     impulse_t1 = wp.zeros(cap, dtype=wp.float32, device=device)
     impulse_t2 = wp.zeros(cap, dtype=wp.float32, device=device)
-    impulse_n_np = impulse_n.numpy()
-    # After sort, the order might differ; write via sorted positions
-    impulse_n_np[0] = 10.0
-    impulse_n_np[1] = 20.0
-    impulse_n.assign(wp.array(impulse_n_np, dtype=wp.float32, device=device))
     ws.export_impulses(impulse_n, impulse_t1, impulse_t2, src_offset0=offset0_f1)
 
-    # Frame 2: same pair, single contact near (0, 0, -0.5) — should match the 2nd
+    # Frame 2: same pair, two contacts near the original offsets
     ws.begin_frame()
-    shape0_f2 = wp.array([0], dtype=wp.int32, device=device)
-    shape1_f2 = wp.array([1], dtype=wp.int32, device=device)
-    count_f2 = wp.array([1], dtype=wp.int32, device=device)
+    shape0_f2 = wp.array([0, 0], dtype=wp.int32, device=device)
+    shape1_f2 = wp.array([1, 1], dtype=wp.int32, device=device)
+    count_f2 = wp.array([2], dtype=wp.int32, device=device)
+    # Query near +0.5 (should get 100) and near -0.5 (should get 200)
     offset0_f2 = wp.array(
-        [np.array([0.0, 0.0, -0.4], dtype=np.float32)],
+        [np.array([0.0, 0.0, 0.45], dtype=np.float32),
+         np.array([0.0, 0.0, -0.45], dtype=np.float32)],
         dtype=wp.vec3, device=device,
     )
 
@@ -367,12 +379,19 @@ def test_warm_starter_per_point_matching(test, device):
     ws.transfer_impulses(out_n, out_t1, out_t2)
     wp.synchronize_device(device)
 
-    # Should get the impulse from the contact nearer to (0,0,-0.4) => (0,0,-0.5)
-    transferred = out_n.numpy()[0]
-    test.assertGreater(transferred, 0.0)
-    # Check it matched the -0.5 contact (value 10 or 20 depending on sort order)
-    # Either 10 or 20 is valid since the sorted order may differ, but the
-    # key test is that it matched the *nearer* offset, not the farther one.
+    # Map sorted results back to original frame-2 indices to check values
+    perm2 = ws.curr_indices.numpy()[:2]
+    results = {}
+    for sorted_pos in range(2):
+        orig = perm2[sorted_pos]
+        results[orig] = out_n.numpy()[sorted_pos]
+
+    # Original 0 queried near +0.5 -> should get 100
+    test.assertAlmostEqual(results[0], 100.0, delta=0.01,
+                           msg=f"Contact near +0.5 should get impulse 100, got {results[0]:.2f}")
+    # Original 1 queried near -0.5 -> should get 200
+    test.assertAlmostEqual(results[1], 200.0, delta=0.01,
+                           msg=f"Contact near -0.5 should get impulse 200, got {results[1]:.2f}")
 
 
 # ---------------------------------------------------------------------------
