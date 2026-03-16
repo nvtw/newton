@@ -224,6 +224,9 @@ class ContactKernelsXPBD:
             bundle_count: wp.array(dtype=wp.int32),
             sort_perm: wp.array(dtype=wp.int32),
             contact_count_per_body: wp.array(dtype=wp.int32),
+            copy_vel: wp.array(dtype=wp.vec3),
+            copy_ang_vel: wp.array(dtype=wp.vec3),
+            body_capacity: int,
             inv_dt: float,
         ):
             """Compute per-contact solver data and warm-start for a bundle of contacts."""
@@ -344,6 +347,10 @@ class ContactKernelsXPBD:
             bundle_starts: wp.array(dtype=wp.int32),
             bundle_count: wp.array(dtype=wp.int32),
             sort_perm: wp.array(dtype=wp.int32),
+            copy_vel: wp.array(dtype=wp.vec3),
+            copy_ang_vel: wp.array(dtype=wp.vec3),
+            partition_count_per_body: wp.array(dtype=wp.int32),
+            body_capacity: int,
             use_bias: int,
         ):
             """One XPBD iteration for a single partition's contact bundles.

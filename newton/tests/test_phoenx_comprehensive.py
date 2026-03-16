@@ -89,37 +89,9 @@ def _build_bundles(ss):
 
 
 def _step_with_contacts(ss, dt, gravity, num_iterations=8):
-    """Run a single substep: velocities -> partition -> solve -> integrate."""
-    inv_dt = 1.0 / dt
-    ss.integrate_velocities(gravity, dt)
-
+    """Run a single substep using the full solver step (with copy states)."""
     _build_bundles(ss)
-    ss._partition_contacts()
-
-    d = ss.device
-    bs = ss.body_store
-    cs = ss.contact_store
-
-    from newton._src.solvers.phoenx.contacts import (
-        clear_contact_count_kernel,
-        count_contacts_per_body_kernel,
-    )
-
-    wp.launch(clear_contact_count_kernel, dim=bs.capacity, inputs=[ss._contact_count_per_body, bs.count], device=d)
-    wp.launch(
-        count_contacts_per_body_kernel,
-        dim=cs.capacity,
-        inputs=[cs.column_of("body0"), cs.column_of("body1"), cs.count, ss._contact_count_per_body],
-        device=d,
-    )
-
-    max_slots = ss.graph_coloring.max_colors + 1
-    for p in range(max_slots):
-        ss._launch_prepare(p, inv_dt)
-    for _ in range(num_iterations):
-        for p in range(max_slots):
-            ss._launch_solve(p, 1)
-    ss.integrate_positions(dt)
+    ss.step(dt, gravity=gravity, num_iterations=num_iterations)
 
 
 # ===========================================================================

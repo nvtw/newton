@@ -1634,6 +1634,10 @@ class ConstraintKernels:
             partition_slot: int,
             contact_count_arr: wp.array(dtype=wp.int32),
             joint_count: wp.array(dtype=wp.int32),
+            copy_vel: wp.array(dtype=wp.vec3),
+            copy_ang_vel: wp.array(dtype=wp.vec3),
+            partition_count_per_body: wp.array(dtype=wp.int32),
+            body_capacity: int,
             inv_dt: float,
         ):
             tid = wp.tid()
@@ -1655,6 +1659,27 @@ class ConstraintKernels:
             jtype = ds_load_int(jdata, wp.static(j_type), ji)
             b0 = ds_load_int(jdata, wp.static(j_body0), ji)
             b1 = ds_load_int(jdata, wp.static(j_body1), ji)
+
+            # Sync copy state → bdata so per-joint functions see current velocity
+            ci0 = partition_slot * body_capacity + b0
+            ci1 = partition_slot * body_capacity + b1
+            ds_store_vec3(bdata, wp.static(b_velocity), b0, copy_vel[ci0])
+            ds_store_vec3(bdata, wp.static(b_angular_velocity), b0, copy_ang_vel[ci0])
+            ds_store_vec3(bdata, wp.static(b_velocity), b1, copy_vel[ci1])
+            ds_store_vec3(bdata, wp.static(b_angular_velocity), b1, copy_ang_vel[ci1])
+
+            # Scale inv mass/inertia by partition count for prepare
+            split0 = wp.max(float(partition_count_per_body[b0]), 1.0)
+            split1 = wp.max(float(partition_count_per_body[b1]), 1.0)
+            # Temporarily scale bdata inv_mass/inv_inertia for per-joint prepare
+            orig_inv_m0 = ds_load_float(bdata, wp.static(b_inverse_mass), b0)
+            orig_inv_m1 = ds_load_float(bdata, wp.static(b_inverse_mass), b1)
+            orig_inv_i0 = ds_load_mat33(bdata, wp.static(b_inverse_inertia_world), b0)
+            orig_inv_i1 = ds_load_mat33(bdata, wp.static(b_inverse_inertia_world), b1)
+            ds_store_float(bdata, wp.static(b_inverse_mass), b0, orig_inv_m0 * split0)
+            ds_store_float(bdata, wp.static(b_inverse_mass), b1, orig_inv_m1 * split1)
+            ds_store_mat33(bdata, wp.static(b_inverse_inertia_world), b0, orig_inv_i0 * split0)
+            ds_store_mat33(bdata, wp.static(b_inverse_inertia_world), b1, orig_inv_i1 * split1)
 
             q0 = ds_load_quat(bdata, wp.static(b_orientation), b0)
             q1 = ds_load_quat(bdata, wp.static(b_orientation), b1)
@@ -1726,6 +1751,22 @@ class ConstraintKernels:
                     inv_dt,
                 )
 
+            # Restore original inv_mass/inv_inertia in bdata (was scaled for prepare)
+            ds_store_float(bdata, wp.static(b_inverse_mass), b0, orig_inv_m0)
+            ds_store_float(bdata, wp.static(b_inverse_mass), b1, orig_inv_m1)
+            ds_store_mat33(bdata, wp.static(b_inverse_inertia_world), b0, orig_inv_i0)
+            ds_store_mat33(bdata, wp.static(b_inverse_inertia_world), b1, orig_inv_i1)
+
+            # Sync bdata → copy state after per-joint prepare modified velocities
+            f0_flag = ds_load_int(bdata, wp.static(b_flags), b0)
+            f1_flag = ds_load_int(bdata, wp.static(b_flags), b1)
+            if (f0_flag & BODY_FLAG_STATIC) == 0:
+                copy_vel[ci0] = ds_load_vec3(bdata, wp.static(b_velocity), b0)
+                copy_ang_vel[ci0] = ds_load_vec3(bdata, wp.static(b_angular_velocity), b0)
+            if (f1_flag & BODY_FLAG_STATIC) == 0:
+                copy_vel[ci1] = ds_load_vec3(bdata, wp.static(b_velocity), b1)
+                copy_ang_vel[ci1] = ds_load_vec3(bdata, wp.static(b_angular_velocity), b1)
+
         # ===============================================================
         # Solve kernel (thin dispatcher)
         # ===============================================================
@@ -1739,6 +1780,10 @@ class ConstraintKernels:
             partition_slot: int,
             contact_count_arr: wp.array(dtype=wp.int32),
             joint_count: wp.array(dtype=wp.int32),
+            copy_vel: wp.array(dtype=wp.vec3),
+            copy_ang_vel: wp.array(dtype=wp.vec3),
+            partition_count_per_body: wp.array(dtype=wp.int32),
+            body_capacity: int,
             use_bias: int,
             inv_dt: float,
         ):
@@ -1762,15 +1807,27 @@ class ConstraintKernels:
             b0 = ds_load_int(jdata, wp.static(j_body0), ji)
             b1 = ds_load_int(jdata, wp.static(j_body1), ji)
 
-            v0 = ds_load_vec3(bdata, wp.static(b_velocity), b0)
-            w0 = ds_load_vec3(bdata, wp.static(b_angular_velocity), b0)
-            v1 = ds_load_vec3(bdata, wp.static(b_velocity), b1)
-            w1 = ds_load_vec3(bdata, wp.static(b_angular_velocity), b1)
+            # Read velocity from per-partition copy state (Tonge 2012)
+            ci0 = partition_slot * body_capacity + b0
+            ci1 = partition_slot * body_capacity + b1
+            v0 = copy_vel[ci0]
+            w0 = copy_ang_vel[ci0]
+            v1 = copy_vel[ci1]
+            w1 = copy_ang_vel[ci1]
 
-            inv_m0 = ds_load_float(bdata, wp.static(b_inverse_mass), b0)
-            inv_m1 = ds_load_float(bdata, wp.static(b_inverse_mass), b1)
-            inv_i0 = ds_load_mat33(bdata, wp.static(b_inverse_inertia_world), b0)
-            inv_i1 = ds_load_mat33(bdata, wp.static(b_inverse_inertia_world), b1)
+            # Also write to bdata so per-joint solve functions can read/modify
+            ds_store_vec3(bdata, wp.static(b_velocity), b0, v0)
+            ds_store_vec3(bdata, wp.static(b_angular_velocity), b0, w0)
+            ds_store_vec3(bdata, wp.static(b_velocity), b1, v1)
+            ds_store_vec3(bdata, wp.static(b_angular_velocity), b1, w1)
+
+            # Scale inv mass/inertia by partition count (C# invFactor)
+            split0 = wp.max(float(partition_count_per_body[b0]), 1.0)
+            split1 = wp.max(float(partition_count_per_body[b1]), 1.0)
+            inv_m0 = ds_load_float(bdata, wp.static(b_inverse_mass), b0) * split0
+            inv_m1 = ds_load_float(bdata, wp.static(b_inverse_mass), b1) * split1
+            inv_i0 = ds_load_mat33(bdata, wp.static(b_inverse_inertia_world), b0) * split0
+            inv_i1 = ds_load_mat33(bdata, wp.static(b_inverse_inertia_world), b1) * split1
 
             f0 = ds_load_int(bdata, wp.static(b_flags), b0)
             f1 = ds_load_int(bdata, wp.static(b_flags), b1)
@@ -1874,13 +1931,13 @@ class ConstraintKernels:
                     use_bias,
                 )
 
-            # Write back
+            # Write back to per-partition copy state
             if not is_static_0:
-                ds_store_vec3(bdata, wp.static(b_velocity), b0, v0)
-                ds_store_vec3(bdata, wp.static(b_angular_velocity), b0, w0)
+                copy_vel[ci0] = v0
+                copy_ang_vel[ci0] = w0
             if not is_static_1:
-                ds_store_vec3(bdata, wp.static(b_velocity), b1, v1)
-                ds_store_vec3(bdata, wp.static(b_angular_velocity), b1, w1)
+                copy_vel[ci1] = v1
+                copy_ang_vel[ci1] = w1
 
         # Store compiled kernels and data arrays for launch
         self.build_elements = _build_elements

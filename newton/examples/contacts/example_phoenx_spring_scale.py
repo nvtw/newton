@@ -454,17 +454,18 @@ class Example:
     # -- simulation (graph-capturable) --------------------------------------
 
     def simulate(self):
-        """Run one frame of simulation (substeps)."""
+        """Run one frame of simulation (matching C# World.Step)."""
         self.ss.update_world_inertia()
+        # Collision detection once per frame (C# architecture)
+        self.ss.warm_starter.begin_frame()
+        self.pipeline.collide(self.ss)
         for _ in range(self.sim_substeps):
-            self.ss.warm_starter.begin_frame()
-            self.pipeline.collide(self.ss)
             self.ss.step(
                 self.sim_dt,
                 gravity=GRAVITY,
                 num_iterations=PGS_ITERATIONS,
             )
-            self.ss.export_impulses()
+        self.ss.export_impulses()
 
     def capture(self):
         """Capture simulate() into a CUDA graph."""

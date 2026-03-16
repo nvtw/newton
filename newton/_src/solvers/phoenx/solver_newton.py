@@ -624,20 +624,23 @@ class SolverPhoenX(SolverBase):
             device=d,
         )
 
-        # 2. PhoenX pipeline
+        # 2. PhoenX pipeline (matching C# World.Step: detect once, substep N times)
         self.ss.update_world_inertia()
+
+        # Collision detection ONCE per frame (C# lines 211-304)
+        self.ss.warm_starter.begin_frame()
+        self.pipeline.collide(self.ss)
 
         sub_dt = dt / float(self._num_substeps)
         for _ in range(self._num_substeps):
-            self.ss.warm_starter.begin_frame()
-            self.pipeline.collide(self.ss)
             self.ss.step(
                 sub_dt,
                 gravity=self._gravity,
                 num_iterations=self._num_iterations,
                 num_velocity_iterations=self._num_velocity_iterations,
             )
-            self.ss.export_impulses()
+
+        self.ss.export_impulses()
 
         # 3. Sync PhoenX body store → Newton state_out
         wp.launch(

@@ -45,6 +45,8 @@ from .contacts import (
     broadcast_to_copies_kernel,
     build_bundle_elements_kernel,
     clear_contact_count_kernel,
+    copy_bdata_to_partition_kernel,
+    copy_partition_to_bdata_kernel,
     count_contacts_per_body_kernel,
     count_partitions_per_body_kernel,
     count_partners_per_body_kernel,
@@ -822,7 +824,7 @@ class SolverState:
                 ws.bundle_starts,
                 ws.bundle_count,
                 ws.curr_indices,
-                self._contact_count_per_body,
+                self._partition_count_per_body,
                 self._copy_vel,
                 self._copy_ang_vel,
                 self._body_capacity,
@@ -850,11 +852,50 @@ class SolverState:
                 ws.curr_indices,
                 self._copy_vel,
                 self._copy_ang_vel,
+                self._partition_count_per_body,
                 self._body_capacity,
                 use_bias,
             ],
             device=self.device,
         )
+
+    def _launch_copy_sync(self, partition_slot: int, to_bdata: bool, d=None):
+        """Sync between copy states and bdata for one partition."""
+        if d is None:
+            d = self.device
+        bs = self.body_store
+        if to_bdata:
+            wp.launch(
+                copy_partition_to_bdata_kernel,
+                dim=bs.capacity,
+                inputs=[
+                    self._copy_vel,
+                    self._copy_ang_vel,
+                    bs.column_of("velocity"),
+                    bs.column_of("angular_velocity"),
+                    bs.column_of("flags"),
+                    bs.count,
+                    partition_slot,
+                    self._body_capacity,
+                ],
+                device=d,
+            )
+        else:
+            wp.launch(
+                copy_bdata_to_partition_kernel,
+                dim=bs.capacity,
+                inputs=[
+                    bs.column_of("velocity"),
+                    bs.column_of("angular_velocity"),
+                    self._copy_vel,
+                    self._copy_ang_vel,
+                    bs.column_of("flags"),
+                    bs.count,
+                    partition_slot,
+                    self._body_capacity,
+                ],
+                device=d,
+            )
 
     # -- constraint launch helpers ------------------------------------------
 
@@ -876,6 +917,10 @@ class SolverState:
                 partition_slot,
                 ws.bundle_count,
                 ck.joint_count,
+                self._copy_vel,
+                self._copy_ang_vel,
+                self._partition_count_per_body,
+                self._body_capacity,
                 inv_dt,
             ],
             device=self.device,
@@ -899,6 +944,10 @@ class SolverState:
                 partition_slot,
                 ws.bundle_count,
                 ck.joint_count,
+                self._copy_vel,
+                self._copy_ang_vel,
+                self._partition_count_per_body,
+                self._body_capacity,
                 use_bias,
                 inv_dt,
             ],

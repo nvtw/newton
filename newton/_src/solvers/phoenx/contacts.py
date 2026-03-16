@@ -402,6 +402,50 @@ def average_and_broadcast_kernel(
             copy_ang_vel[idx] = avg_w
 
 
+@wp.kernel
+def copy_partition_to_bdata_kernel(
+    copy_vel: wp.array(dtype=wp.vec3),
+    copy_ang_vel: wp.array(dtype=wp.vec3),
+    body_vel: wp.array(dtype=wp.vec3),
+    body_ang_vel: wp.array(dtype=wp.vec3),
+    body_flags: wp.array(dtype=wp.int32),
+    body_count: wp.array(dtype=wp.int32),
+    partition_slot: int,
+    body_capacity: int,
+):
+    """Copy one partition's copy-state velocities to body store."""
+    bi = wp.tid()
+    if bi >= body_count[0]:
+        return
+    if (body_flags[bi] & BODY_FLAG_STATIC) != 0:
+        return
+    idx = partition_slot * body_capacity + bi
+    body_vel[bi] = copy_vel[idx]
+    body_ang_vel[bi] = copy_ang_vel[idx]
+
+
+@wp.kernel
+def copy_bdata_to_partition_kernel(
+    body_vel: wp.array(dtype=wp.vec3),
+    body_ang_vel: wp.array(dtype=wp.vec3),
+    copy_vel: wp.array(dtype=wp.vec3),
+    copy_ang_vel: wp.array(dtype=wp.vec3),
+    body_flags: wp.array(dtype=wp.int32),
+    body_count: wp.array(dtype=wp.int32),
+    partition_slot: int,
+    body_capacity: int,
+):
+    """Copy body store velocities back to one partition's copy-state."""
+    bi = wp.tid()
+    if bi >= body_count[0]:
+        return
+    if (body_flags[bi] & BODY_FLAG_STATIC) != 0:
+        return
+    idx = partition_slot * body_capacity + bi
+    copy_vel[idx] = body_vel[bi]
+    copy_ang_vel[idx] = body_ang_vel[bi]
+
+
 # ---------------------------------------------------------------------------
 # Prepare contacts kernel
 # ---------------------------------------------------------------------------
@@ -1036,12 +1080,13 @@ class ContactKernels:
                 ds_store_float(cdata, wp.static(c_accumulated_t2), ci, acc_t2)
                 impulse = acc_n * n + acc_t1 * t1 + acc_t2 * t2
 
+                # Apply with scaled mass (matching C# invFactor)
                 if not is_static_0:
-                    v0 = v0 - inv_m0 * impulse
-                    w0 = w0 - inv_i0 * wp.cross(rw0, impulse)
+                    v0 = v0 - inv_m0 * split0 * impulse
+                    w0 = w0 - (inv_i0 * split0) * wp.cross(rw0, impulse)
                 if not is_static_1:
-                    v1 = v1 + inv_m1 * impulse
-                    w1 = w1 + inv_i1 * wp.cross(rw1, impulse)
+                    v1 = v1 + inv_m1 * split1 * impulse
+                    w1 = w1 + (inv_i1 * split1) * wp.cross(rw1, impulse)
 
             # Write back to per-partition copy state
             if not is_static_0:
@@ -1067,6 +1112,7 @@ class ContactKernels:
             sort_perm: wp.array(dtype=wp.int32),
             copy_vel: wp.array(dtype=wp.vec3),
             copy_ang_vel: wp.array(dtype=wp.vec3),
+            partition_count_per_body: wp.array(dtype=wp.int32),
             body_capacity: int,
             use_bias: int,
         ):
@@ -1106,6 +1152,10 @@ class ContactKernels:
             f1 = ds_load_int(bdata, wp.static(b_flags), b1)
             is_static_0 = (f0 & BODY_FLAG_STATIC) != 0 or inv_m0 == 0.0
             is_static_1 = (f1 & BODY_FLAG_STATIC) != 0 or inv_m1 == 0.0
+
+            # Scaled mass for impulse application (C# invFactor)
+            split0 = wp.max(float(partition_count_per_body[b0]), 1.0)
+            split1 = wp.max(float(partition_count_per_body[b1]), 1.0)
 
             for s in range(b_start, b_end):
                 ci = sort_perm[s]
@@ -1154,12 +1204,13 @@ class ContactKernels:
 
                 impulse = applied_n * n + applied_t1 * t1 + applied_t2 * t2
 
+                # Apply with scaled mass (C# invFactor)
                 if not is_static_0:
-                    v0 = v0 - inv_m0 * impulse
-                    w0 = w0 - inv_i0 * wp.cross(rw0, impulse)
+                    v0 = v0 - inv_m0 * split0 * impulse
+                    w0 = w0 - (inv_i0 * split0) * wp.cross(rw0, impulse)
                 if not is_static_1:
-                    v1 = v1 + inv_m1 * impulse
-                    w1 = w1 + inv_i1 * wp.cross(rw1, impulse)
+                    v1 = v1 + inv_m1 * split1 * impulse
+                    w1 = w1 + (inv_i1 * split1) * wp.cross(rw1, impulse)
 
             # Write back to per-partition copy state
             if not is_static_0:

@@ -364,17 +364,17 @@ class Example:
     # -- simulation (graph-capturable) --------------------------------------
 
     def simulate(self):
-        # Damping + world inertia update once per frame (C# PhoenX convention)
+        # Matching C# World.Step: detect once, substep N times
         self.ss.update_world_inertia()
+        self.ss.warm_starter.begin_frame()
+        self.pipeline.collide(self.ss)
         for _ in range(self.sim_substeps):
-            self.ss.warm_starter.begin_frame()
-            self.pipeline.collide(self.ss)
             self.ss.step(
                 self.sim_dt,
                 gravity=(0.0, 0.0, -9.81),
                 num_iterations=PGS_ITERATIONS,
             )
-            self.ss.export_impulses()
+        self.ss.export_impulses()
 
     def capture(self):
         self.graph = None
