@@ -54,6 +54,7 @@ JOINT_BALL_SOCKET = 0
 JOINT_REVOLUTE = 1
 JOINT_FIXED = 2
 JOINT_PRISMATIC = 3
+JOINT_DISTANCE_LIMIT = 4
 
 # Drive mode constants
 DRIVE_OFF = 0
@@ -217,8 +218,39 @@ class PrismaticJointData:
     drive_eff_mass: wp.float32
 
 
+@wp.struct
+class DistanceLimitJointData:
+    """Distance limit with optional spring: 1-DOF along distance axis."""
+
+    # --- common header (offset 0-24, shared by all types) ---
+    joint_type: wp.int32
+    body0: wp.int32
+    body1: wp.int32
+    local_anchor0: wp.vec3
+    local_anchor1: wp.vec3
+    local_axis0: wp.vec3
+    local_axis1: wp.vec3
+    inv_initial_orientation: wp.quat
+    rw0: wp.vec3
+    rw1: wp.vec3
+    # --- distance limit specific ---
+    rest_distance: wp.float32
+    limit_min: wp.float32
+    limit_max: wp.float32
+    softness: wp.float32
+    bias_factor: wp.float32
+    dl_eff_mass: wp.float32
+    dl_accumulated_impulse: wp.float32
+    dl_bias: wp.float32
+    dl_j0: wp.vec3
+    dl_j1: wp.vec3
+    dl_j2: wp.vec3
+    dl_j3: wp.vec3
+    dl_clamp: wp.int32
+
+
 # All joint types, used to compute max floats_per_row.
-ALL_JOINT_TYPES = (BallSocketJointData, FixedJointData, RevoluteJointData, PrismaticJointData)
+ALL_JOINT_TYPES = (BallSocketJointData, FixedJointData, RevoluteJointData, PrismaticJointData, DistanceLimitJointData)
 
 # Backwards-compatible alias used for DataStore creation and host-side column_of.
 # This is the largest schema (RevoluteJointData == PrismaticJointData == 64 floats).
@@ -582,6 +614,21 @@ class ConstraintKernels:
         j_drive_max_force = schema_col_base(RevoluteJointData, cap, "drive_max_force")
         j_drive_lambda = schema_col_base(RevoluteJointData, cap, "drive_lambda")
         j_drive_eff_mass = schema_col_base(RevoluteJointData, cap, "drive_eff_mass")
+
+        # -- Distance limit column offsets --------------------------------
+        dl_rest_distance = schema_col_base(DistanceLimitJointData, cap, "rest_distance")
+        dl_limit_min = schema_col_base(DistanceLimitJointData, cap, "limit_min")
+        dl_limit_max = schema_col_base(DistanceLimitJointData, cap, "limit_max")
+        dl_softness = schema_col_base(DistanceLimitJointData, cap, "softness")
+        dl_bias_factor = schema_col_base(DistanceLimitJointData, cap, "bias_factor")
+        dl_eff_mass = schema_col_base(DistanceLimitJointData, cap, "dl_eff_mass")
+        dl_accumulated_impulse = schema_col_base(DistanceLimitJointData, cap, "dl_accumulated_impulse")
+        dl_bias = schema_col_base(DistanceLimitJointData, cap, "dl_bias")
+        dl_j0 = schema_col_base(DistanceLimitJointData, cap, "dl_j0")
+        dl_j1 = schema_col_base(DistanceLimitJointData, cap, "dl_j1")
+        dl_j2 = schema_col_base(DistanceLimitJointData, cap, "dl_j2")
+        dl_j3 = schema_col_base(DistanceLimitJointData, cap, "dl_j3")
+        dl_clamp = schema_col_base(DistanceLimitJointData, cap, "dl_clamp")
 
         # -- Body column base indices -------------------------------------
         b_position = col_base(body_ds, "position")
@@ -1249,6 +1296,173 @@ class ConstraintKernels:
             return v0, w0, v1, w1
 
         # ===============================================================
+        # Distance limit prepare / solve
+        # ===============================================================
+
+        @wp.func
+        def _prepare_distance_limit(
+            jdata: wp.array(dtype=wp.float32),
+            bdata: wp.array(dtype=wp.float32),
+            ji: int, b0: int, b1: int,
+            q0: wp.quat, q1: wp.quat,
+            rw0: wp.vec3, rw1: wp.vec3,
+            inv_m0: float, inv_m1: float,
+            inv_i0: wp.mat33, inv_i1: wp.mat33,
+            is_static_0: bool, is_static_1: bool,
+            inv_dt: float,
+        ):
+            # World positions
+            pos0 = ds_load_vec3(bdata, wp.static(b_position), b0)
+            pos1 = ds_load_vec3(bdata, wp.static(b_position), b1)
+            p0 = pos0 + rw0
+            p1 = pos1 + rw1
+
+            # Distance and direction
+            dp = p1 - p0
+            dist = wp.length(dp)
+            rest = ds_load_float(jdata, wp.static(dl_rest_distance), ji)
+            error = dist - rest
+
+            lim_min = ds_load_float(jdata, wp.static(dl_limit_min), ji)
+            lim_max = ds_load_float(jdata, wp.static(dl_limit_max), ji)
+
+            # Clamp check: 1=max violated (stretched), 2=min violated (compressed)
+            clamp_mode = int(0)
+            error_from_limit = float(0.0)
+            if error > lim_max:
+                clamp_mode = int(1)
+                error_from_limit = float(error - lim_max)
+            elif error < lim_min:
+                clamp_mode = int(2)
+                error_from_limit = float(lim_min - error)  # positive = compression
+
+            ds_store_int(jdata, wp.static(dl_clamp), ji, clamp_mode)
+
+            if clamp_mode == 0:
+                # Inactive - reset accumulated impulse
+                ds_store_float(jdata, wp.static(dl_accumulated_impulse), ji, 0.0)
+                return
+
+            # Normalize direction (avoid division by zero)
+            n = wp.vec3(0.0, 1.0, 0.0)
+            if dist > 1.0e-6:
+                n = dp / dist
+
+            # Jacobians: J = [-n, -rw0×n, n, rw1×n]
+            j0_val = -n
+            j1_val = -wp.cross(rw0, n)
+            j2_val = n
+            j3_val = wp.cross(rw1, n)
+            ds_store_vec3(jdata, wp.static(dl_j0), ji, j0_val)
+            ds_store_vec3(jdata, wp.static(dl_j1), ji, j1_val)
+            ds_store_vec3(jdata, wp.static(dl_j2), ji, j2_val)
+            ds_store_vec3(jdata, wp.static(dl_j3), ji, j3_val)
+
+            # Effective mass: 1 / (J M^-1 J^T + softness)
+            ang0 = inv_i0 * j1_val
+            ang1 = inv_i1 * j3_val
+            inv_eff = inv_m0 + inv_m1 + wp.dot(j1_val, ang0) + wp.dot(j3_val, ang1)
+
+            soft = ds_load_float(jdata, wp.static(dl_softness), ji)
+            # C# multiplies softness by inv_dt in both effective mass and
+            # the solve softness scalar (impulse-based formulation).
+            soft_scaled = soft * inv_dt
+            inv_eff = inv_eff + soft_scaled
+
+            eff = 0.0
+            if inv_eff > 0.0:
+                eff = 1.0 / inv_eff
+            ds_store_float(jdata, wp.static(dl_eff_mass), ji, eff)
+            # Store soft_scaled in bias_factor (no longer needed after bias computation below)
+            # so that _solve_distance_limit can read it without inv_dt.
+
+            # Bias: error * bias_factor * inv_dt
+            bf = ds_load_float(jdata, wp.static(dl_bias_factor), ji)
+            if clamp_mode == 2:
+                # Compression: bias drives bodies apart
+                bias_val = -error_from_limit * bf * inv_dt
+            else:
+                # Tension: bias drives bodies together
+                bias_val = error_from_limit * bf * inv_dt
+            ds_store_float(jdata, wp.static(dl_bias), ji, bias_val)
+            # Repurpose bias_factor slot to store soft_scaled for the solve phase
+            ds_store_float(jdata, wp.static(dl_bias_factor), ji, soft_scaled)
+
+            # Warm start
+            acc = ds_load_float(jdata, wp.static(dl_accumulated_impulse), ji)
+            if not is_static_0:
+                v0 = ds_load_vec3(bdata, wp.static(b_velocity), b0)
+                w0 = ds_load_vec3(bdata, wp.static(b_angular_velocity), b0)
+                ds_store_vec3(bdata, wp.static(b_velocity), b0, v0 + inv_m0 * acc * j0_val)
+                ds_store_vec3(bdata, wp.static(b_angular_velocity), b0, w0 + inv_i0 * (acc * j1_val))
+            if not is_static_1:
+                v1 = ds_load_vec3(bdata, wp.static(b_velocity), b1)
+                w1 = ds_load_vec3(bdata, wp.static(b_angular_velocity), b1)
+                ds_store_vec3(bdata, wp.static(b_velocity), b1, v1 + inv_m1 * acc * j2_val)
+                ds_store_vec3(bdata, wp.static(b_angular_velocity), b1, w1 + inv_i1 * (acc * j3_val))
+
+        @wp.func
+        def _solve_distance_limit(
+            jdata: wp.array(dtype=wp.float32),
+            bdata: wp.array(dtype=wp.float32),
+            ji: int, b0: int, b1: int,
+            v0: wp.vec3, w0: wp.vec3, v1: wp.vec3, w1: wp.vec3,
+            inv_m0: float, inv_m1: float,
+            inv_i0: wp.mat33, inv_i1: wp.mat33,
+            is_static_0: bool, is_static_1: bool,
+            use_bias: int,
+        ):
+            clamp_mode = ds_load_int(jdata, wp.static(dl_clamp), ji)
+            if clamp_mode == 0:
+                return v0, w0, v1, w1
+
+            j0_val = ds_load_vec3(jdata, wp.static(dl_j0), ji)
+            j1_val = ds_load_vec3(jdata, wp.static(dl_j1), ji)
+            j2_val = ds_load_vec3(jdata, wp.static(dl_j2), ji)
+            j3_val = ds_load_vec3(jdata, wp.static(dl_j3), ji)
+
+            # Relative velocity along constraint
+            jv = wp.dot(j0_val, v0) + wp.dot(j1_val, w0) + wp.dot(j2_val, v1) + wp.dot(j3_val, w1)
+
+            eff = ds_load_float(jdata, wp.static(dl_eff_mass), ji)
+            acc = ds_load_float(jdata, wp.static(dl_accumulated_impulse), ji)
+
+            # Softness (spring damping): soft_scaled * accumulated_impulse
+            # soft_scaled = softness * inv_dt, stored in bias_factor slot by prepare
+            soft_scaled = ds_load_float(jdata, wp.static(dl_bias_factor), ji)
+            softness_scalar = acc * soft_scaled
+
+            # Bias
+            bias_val = 0.0
+            if use_bias != 0:
+                bias_val = ds_load_float(jdata, wp.static(dl_bias), ji)
+
+            # Compute impulse
+            delta = -eff * (jv + bias_val + softness_scalar)
+
+            # Accumulate with directional clamping
+            old_acc = acc
+            new_acc = old_acc + delta
+            if clamp_mode == 1:
+                # Max violated (stretched) — only pull inward (negative impulse)
+                new_acc = wp.min(new_acc, 0.0)
+            else:
+                # Min violated (compressed) — only push outward (positive impulse)
+                new_acc = wp.max(new_acc, 0.0)
+            ds_store_float(jdata, wp.static(dl_accumulated_impulse), ji, new_acc)
+            applied = new_acc - old_acc
+
+            # Apply to velocities
+            if not is_static_0:
+                v0 = v0 + inv_m0 * applied * j0_val
+                w0 = w0 + inv_i0 * (applied * j1_val)
+            if not is_static_1:
+                v1 = v1 + inv_m1 * applied * j2_val
+                w1 = w1 + inv_i1 * (applied * j3_val)
+
+            return v0, w0, v1, w1
+
+        # ===============================================================
         # Prepare kernel (thin dispatcher)
         # ===============================================================
 
@@ -1261,6 +1475,7 @@ class ConstraintKernels:
             partition_slot: int,
             contact_count_arr: wp.array(dtype=wp.int32),
             joint_count: wp.array(dtype=wp.int32),
+            inv_dt: float,
         ):
             tid = wp.tid()
             p_start = int(0)
@@ -1321,6 +1536,11 @@ class ConstraintKernels:
                                           rw0, rw1, inv_m0, inv_m1,
                                           inv_i0, inv_i1,
                                           is_static_0, is_static_1)
+            elif jtype == JOINT_DISTANCE_LIMIT:
+                _prepare_distance_limit(jdata, bdata, ji, b0, b1, q0, q1,
+                                        rw0, rw1, inv_m0, inv_m1,
+                                        inv_i0, inv_i1,
+                                        is_static_0, is_static_1, inv_dt)
 
         # ===============================================================
         # Solve kernel (thin dispatcher)
@@ -1389,6 +1609,11 @@ class ConstraintKernels:
                     is_static_0, is_static_1, use_bias)
             elif jtype == JOINT_PRISMATIC:
                 v0, w0, v1, w1 = _solve_prismatic_joint(
+                    jdata, bdata, ji, b0, b1, v0, w0, v1, w1,
+                    inv_m0, inv_m1, inv_i0, inv_i1,
+                    is_static_0, is_static_1, use_bias)
+            elif jtype == JOINT_DISTANCE_LIMIT:
+                v0, w0, v1, w1 = _solve_distance_limit(
                     jdata, bdata, ji, b0, b1, v0, w0, v1, w1,
                     inv_m0, inv_m1, inv_i0, inv_i1,
                     is_static_0, is_static_1, use_bias)

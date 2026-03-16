@@ -1063,6 +1063,79 @@ def test_access_mode_roundtrip(test, device):
 
 
 # ---------------------------------------------------------------------------
+# Distance limit (spring) tests
+# ---------------------------------------------------------------------------
+
+
+def test_distance_limit_hard(test, device):
+    """Hard distance limit maintains anchor distance under gravity."""
+    ss = SolverState(body_capacity=4, contact_capacity=1, shape_count=0,
+                     device=device, joint_capacity=1)
+    h0 = ss.add_body(position=(0, 0, 5), is_static=True)
+    h1 = ss.add_body(position=(0, 0, 3), inverse_mass=1.0)
+
+    # Hard distance limit: anchors at body centres, rest distance = 2,
+    # limit_min = limit_max = 0 (no slack).
+    ss.add_joint_distance_limit(
+        h0, h1,
+        anchor0_world=(0, 0, 5),
+        anchor1_world=(0, 0, 3),
+        limit_min=0.0, limit_max=0.0,
+        stiffness=0.0, damping=0.0,
+    )
+
+    _simulate(ss, frames=120, substeps=8, sub_dt=1.0 / 480.0, gravity=(0, 0, -9.81))
+    wp.synchronize_device(device)
+
+    p0 = _body_pos(ss, h0)
+    p1 = _body_pos(ss, h1)
+    dist = np.linalg.norm(p1 - p0)
+    test.assertAlmostEqual(dist, 2.0, delta=0.15,
+                           msg=f"Hard distance limit should maintain dist=2.0, got {dist:.3f}")
+
+
+def test_distance_limit_spring_equilibrium(test, device):
+    """Damped spring settles near equilibrium under gravity.
+
+    A body hanging on a damped spring should settle to a displacement
+    of approximately d = m*g/k below the rest position.  Soft constraint
+    PGS convergence means we allow some tolerance.
+    """
+    mass = 5.0
+    stiffness = 500.0
+    damping = 80.0
+
+    ss = SolverState(body_capacity=4, contact_capacity=1, shape_count=0,
+                     device=device, joint_capacity=1)
+    h0 = ss.add_body(position=(0, 0, 5), is_static=True)
+    h1 = ss.add_body(position=(0, 0, 5), inverse_mass=1.0 / mass)
+
+    ss.add_joint_distance_limit(
+        h0, h1,
+        anchor0_world=(0, 0, 5),
+        anchor1_world=(0, 0, 5),
+        limit_min=0.0, limit_max=0.0,
+        stiffness=stiffness, damping=damping,
+    )
+
+    _simulate(ss, frames=300, substeps=8, sub_dt=1.0 / 480.0, gravity=(0, 0, -9.81))
+    wp.synchronize_device(device)
+
+    p1 = _body_pos(ss, h1)
+
+    # With soft constraints, the spring should pull the body below the
+    # anchor. The body should NOT be in freefall (z should stay near 5.0).
+    test.assertGreater(p1[2], 3.5,
+                       msg=f"Spring should support body, got z={p1[2]:.3f}")
+    test.assertLess(p1[2], 5.1,
+                    msg=f"Body should be at or below rest, got z={p1[2]:.3f}")
+
+    v1 = _body_vel(ss, h1)
+    speed = np.linalg.norm(v1)
+    test.assertLess(speed, 2.0, f"Body should be settling, speed={speed:.3f}")
+
+
+# ---------------------------------------------------------------------------
 # Register tests
 # ---------------------------------------------------------------------------
 
@@ -1095,6 +1168,8 @@ add_function_test(TestPhoenXConstraints, "test_mixed_chain_stability", test_mixe
 add_function_test(TestPhoenXConstraints, "test_graph_coloring_partitions", test_graph_coloring_partitions, devices=devices)
 add_function_test(TestPhoenXConstraints, "test_momentum_conservation", test_momentum_conservation, devices=devices)
 add_function_test(TestPhoenXConstraints, "test_mass_splitting_convergence", test_mass_splitting_convergence, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_distance_limit_hard", test_distance_limit_hard, devices=devices)
+add_function_test(TestPhoenXConstraints, "test_distance_limit_spring_equilibrium", test_distance_limit_spring_equilibrium, devices=devices)
 
 if __name__ == "__main__":
     wp.clear_kernel_cache()

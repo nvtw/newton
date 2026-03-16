@@ -31,6 +31,7 @@ import warp as wp
 
 from .constraints import (
     JOINT_BALL_SOCKET,
+    JOINT_DISTANCE_LIMIT,
     JOINT_FIXED,
     JOINT_PRISMATIC,
     JOINT_REVOLUTE,
@@ -322,6 +323,131 @@ class SolverState:
             a_max_arr[ji] = slide_max
             js.column_of("angle_min").assign(wp.array(a_min, dtype=wp.float32, device=self.device))
             js.column_of("angle_max").assign(wp.array(a_max_arr, dtype=wp.float32, device=self.device))
+        return ji
+
+    def add_joint_distance_limit(
+        self,
+        body_handle0: int,
+        body_handle1: int,
+        anchor0_world: tuple[float, float, float],
+        anchor1_world: tuple[float, float, float],
+        limit_min: float = 0.0,
+        limit_max: float = 0.0,
+        stiffness: float = 0.0,
+        damping: float = 0.0,
+    ) -> int:
+        """Add a distance limit (optionally spring-loaded) between two bodies.
+
+        Constrains the distance between two anchor points to stay within
+        ``[rest + limit_min, rest + limit_max]`` where *rest* is the
+        initial distance between the anchors.  When ``stiffness > 0`` the
+        constraint acts as a damped spring (Erin Catto soft constraints).
+
+        Args:
+            body_handle0: handle returned by :meth:`add_body`.
+            body_handle1: handle returned by :meth:`add_body`.
+            anchor0_world: world-space attachment point on body 0 [m].
+            anchor1_world: world-space attachment point on body 1 [m].
+            limit_min: minimum distance offset from rest [m] (negative = allow compression).
+            limit_max: maximum distance offset from rest [m] (positive = allow extension).
+            stiffness: spring stiffness k [N/m].  0 = hard constraint.
+            damping: spring damping c [N s/m].  0 = undamped.
+
+        Returns:
+            Joint index, or -1 if at capacity.
+        """
+        # Use _add_joint with axis=(0,0,1) placeholder (unused for distance limit)
+        ji = self._add_joint(
+            JOINT_DISTANCE_LIMIT,
+            body_handle0,
+            body_handle1,
+            anchor0_world,  # stored as local_anchor0 after transform
+            axis_world=(0.0, 0.0, 1.0),
+        )
+        if ji < 0:
+            return -1
+
+        js = self.joint_store
+        d = self.device
+
+        # _add_joint stores local_anchor0 from anchor0_world.
+        # We also need local_anchor1 from anchor1_world.
+        bs = self.body_store
+        h2i = bs.handle_to_index.numpy()
+        row1 = int(h2i[body_handle1])
+        pos1 = bs.column_of("position").numpy()[row1]
+        orient1 = bs.column_of("orientation").numpy()[row1]
+
+        # Quaternion inverse-rotate (anchor1_world - pos1) into body1 local frame
+        a1 = np.array(anchor1_world, dtype=np.float32)
+
+        def _quat_conj(q):
+            return np.array([-q[0], -q[1], -q[2], q[3]], dtype=np.float32)
+
+        def _quat_mul(a, b):
+            return np.array([
+                a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+                a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+                a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+                a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+            ], dtype=np.float32)
+
+        def _quat_inv_rotate(q, v):
+            qc = _quat_conj(q)
+            qv = np.array([v[0], v[1], v[2], 0.0], dtype=np.float32)
+            return _quat_mul(_quat_mul(qc, qv), q)[:3]
+
+        local_anchor1 = _quat_inv_rotate(orient1, a1 - pos1)
+
+        col = js.column_of("local_anchor1").numpy()
+        col[ji] = local_anchor1
+        js.column_of("local_anchor1").assign(wp.array(col, dtype=wp.vec3, device=d))
+
+        # Compute rest distance from initial anchor positions
+        row0 = int(h2i[body_handle0])
+        pos0 = bs.column_of("position").numpy()[row0]
+        orient0 = bs.column_of("orientation").numpy()[row0]
+
+        def _quat_rotate(q, v):
+            qv = np.array([v[0], v[1], v[2], 0.0], dtype=np.float32)
+            return _quat_mul(_quat_mul(q, qv), _quat_conj(q))[:3]
+
+        w0 = pos0 + _quat_rotate(orient0, js.column_of("local_anchor0").numpy()[ji])
+        w1 = pos1 + _quat_rotate(orient1, local_anchor1)
+        rest_distance = float(np.linalg.norm(w1 - w0))
+
+        # Write distance-limit-specific fields via flat buffer offsets,
+        # since these fields don't exist in the JointSchema alias
+        # (RevoluteJointData).  Use schema_col_base to find the offset.
+        from .constraints import DistanceLimitJointData, schema_col_base
+
+        cap = js.capacity
+        data_np = js.data.numpy()
+
+        def _write_dl(field_name, val):
+            offset = schema_col_base(DistanceLimitJointData, cap, field_name)
+            data_np[offset + ji] = float(val)
+
+        _write_dl("rest_distance", rest_distance)
+        _write_dl("limit_min", limit_min)
+        _write_dl("limit_max", limit_max)
+
+        # Pre-compute spring softness and bias factor (Erin Catto GDC 2011)
+        # softness = 1 / (dt * (c + dt * k)),  bias_factor = dt * k / (c + dt * k)
+        # We use 1/480 as the default substep dt (60 FPS / 8 substeps).
+        sim_dt = 1.0 / 480.0
+        if stiffness > 0.0:
+            soft = 1.0 / (sim_dt * (damping + sim_dt * stiffness))
+            bf = sim_dt * stiffness * soft
+        else:
+            soft = 0.0
+            bf = 0.2  # hard constraint: standard Baumgarte factor
+        _write_dl("softness", soft)
+        _write_dl("bias_factor", bf)
+        _write_dl("dl_accumulated_impulse", 0.0)
+
+        js.data.assign(wp.array(data_np, dtype=wp.float32, device=d))
+
         return ji
 
     # -- drive configuration ------------------------------------------------
@@ -704,7 +830,7 @@ class SolverState:
 
     # -- constraint launch helpers ------------------------------------------
 
-    def _launch_prepare_constraints(self, partition_slot: int, dim: int = 0):
+    def _launch_prepare_constraints(self, partition_slot: int, inv_dt: float, dim: int = 0):
         """Launch constraint prepare kernel for one partition slot."""
         if self._constraint_kernels is None or self._joint_count == 0:
             return
@@ -722,6 +848,7 @@ class SolverState:
                 partition_slot,
                 ws.bundle_count,
                 ck.joint_count,
+                inv_dt,
             ],
             device=self.device,
         )
@@ -850,7 +977,7 @@ class SolverState:
         # GPU-to-CPU sync so the entire method is graph-capturable.
         for p in range(max_slots):
             self._launch_prepare(p, inv_dt)
-            self._launch_prepare_constraints(p)
+            self._launch_prepare_constraints(p, inv_dt)
 
         for _ in range(num_iterations):
             for p in range(max_slots):
