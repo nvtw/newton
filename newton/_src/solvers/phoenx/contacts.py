@@ -274,6 +274,135 @@ def count_partners_per_body_kernel(
 
 
 # ---------------------------------------------------------------------------
+# Copy-state kernels (Tonge 2012, matching C# PhoenX)
+# ---------------------------------------------------------------------------
+
+
+@wp.kernel
+def broadcast_to_copies_kernel(
+    body_vel: wp.array(dtype=wp.vec3),
+    body_ang_vel: wp.array(dtype=wp.vec3),
+    copy_vel: wp.array(dtype=wp.vec3),
+    copy_ang_vel: wp.array(dtype=wp.vec3),
+    body_count: wp.array(dtype=wp.int32),
+    body_capacity: int,
+    max_partitions: int,
+):
+    """Copy body velocity to all partition copy-state slots."""
+    bi = wp.tid()
+    if bi >= body_count[0]:
+        return
+    v = body_vel[bi]
+    w = body_ang_vel[bi]
+    for p in range(max_partitions):
+        idx = p * body_capacity + bi
+        copy_vel[idx] = v
+        copy_ang_vel[idx] = w
+
+
+@wp.kernel
+def count_partitions_per_body_kernel(
+    elements: wp.array2d(dtype=wp.int32),
+    element_count: wp.array(dtype=wp.int32),
+    partition_data: wp.array(dtype=wp.int32),
+    partition_ends: wp.array(dtype=wp.int32),
+    partition_mask: wp.array(dtype=wp.int32),
+    max_partitions: int,
+):
+    """Build per-body bitmask of which partitions each body is in.
+
+    For each element, finds its partition by scanning partition_data,
+    then ORs the partition bit into each body's mask.
+    """
+    # Iterate partition_data to find (partition, element) pairs
+    tid = wp.tid()
+    total = partition_ends[max_partitions - 1]
+    if tid >= total:
+        return
+    # Find partition for this slot
+    partition_slot = int(0)
+    for p in range(max_partitions):
+        if tid >= partition_ends[p]:
+            partition_slot = p + 1
+    elem_idx = partition_data[tid]
+    if elem_idx >= element_count[0]:
+        return
+    bit = 1 << partition_slot
+    # Mark all bodies in this element
+    for j in range(8):
+        body = elements[elem_idx, j]
+        if body < 0:
+            return
+        wp.atomic_or(partition_mask, body, bit)
+
+
+@wp.kernel
+def popcount_partition_mask_kernel(
+    partition_mask: wp.array(dtype=wp.int32),
+    partition_count: wp.array(dtype=wp.int32),
+    body_count: wp.array(dtype=wp.int32),
+):
+    """Count set bits in per-body partition mask."""
+    bi = wp.tid()
+    if bi >= body_count[0]:
+        return
+    mask = int(partition_mask[bi])
+    count = int(0)
+    while mask != 0:
+        count = count + (mask & 1)
+        mask = mask >> 1
+    partition_count[bi] = count
+
+
+@wp.kernel
+def average_and_broadcast_kernel(
+    body_vel: wp.array(dtype=wp.vec3),
+    body_ang_vel: wp.array(dtype=wp.vec3),
+    copy_vel: wp.array(dtype=wp.vec3),
+    copy_ang_vel: wp.array(dtype=wp.vec3),
+    partition_count: wp.array(dtype=wp.int32),
+    partition_mask: wp.array(dtype=wp.int32),
+    body_flags: wp.array(dtype=wp.int32),
+    body_count: wp.array(dtype=wp.int32),
+    body_capacity: int,
+    max_partitions: int,
+):
+    """Average per-partition copy states and broadcast back.
+
+    Only sums over partitions the body actually participates in
+    (determined by the partition_mask bitmask).
+    """
+    bi = wp.tid()
+    if bi >= body_count[0]:
+        return
+    if (body_flags[bi] & BODY_FLAG_STATIC) != 0:
+        return
+    n = partition_count[bi]
+    if n <= 0:
+        return
+    mask = partition_mask[bi]
+    sum_v = wp.vec3(0.0, 0.0, 0.0)
+    sum_w = wp.vec3(0.0, 0.0, 0.0)
+    for p in range(max_partitions):
+        if (mask & (1 << p)) != 0:
+            idx = p * body_capacity + bi
+            sum_v = sum_v + copy_vel[idx]
+            sum_w = sum_w + copy_ang_vel[idx]
+    inv_n = 1.0 / float(n)
+    avg_v = sum_v * inv_n
+    avg_w = sum_w * inv_n
+    # Write back to body store
+    body_vel[bi] = avg_v
+    body_ang_vel[bi] = avg_w
+    # Broadcast to all active copies
+    for p in range(max_partitions):
+        if (mask & (1 << p)) != 0:
+            idx = p * body_capacity + bi
+            copy_vel[idx] = avg_v
+            copy_ang_vel[idx] = avg_w
+
+
+# ---------------------------------------------------------------------------
 # Prepare contacts kernel
 # ---------------------------------------------------------------------------
 
@@ -809,6 +938,9 @@ class ContactKernels:
             bundle_count: wp.array(dtype=wp.int32),
             sort_perm: wp.array(dtype=wp.int32),
             contact_count_per_body: wp.array(dtype=wp.int32),
+            copy_vel: wp.array(dtype=wp.vec3),
+            copy_ang_vel: wp.array(dtype=wp.vec3),
+            body_capacity: int,
             inv_dt: float,
         ):
             """Compute per-contact solver data and warm-start for a bundle of contacts."""
@@ -850,10 +982,13 @@ class ContactKernels:
             split0 = wp.max(float(nc0), 1.0)
             split1 = wp.max(float(nc1), 1.0)
 
-            v0 = ds_load_vec3(bdata, wp.static(b_velocity), b0)
-            w0 = ds_load_vec3(bdata, wp.static(b_angular_velocity), b0)
-            v1 = ds_load_vec3(bdata, wp.static(b_velocity), b1)
-            w1 = ds_load_vec3(bdata, wp.static(b_angular_velocity), b1)
+            # Read from per-partition copy state (Tonge 2012)
+            ci0 = partition_slot * body_capacity + b0
+            ci1 = partition_slot * body_capacity + b1
+            v0 = copy_vel[ci0]
+            w0 = copy_ang_vel[ci0]
+            v1 = copy_vel[ci1]
+            w1 = copy_ang_vel[ci1]
 
             for s in range(b_start, b_end):
                 ci = sort_perm[s]
@@ -908,12 +1043,13 @@ class ContactKernels:
                     v1 = v1 + inv_m1 * impulse
                     w1 = w1 + inv_i1 * wp.cross(rw1, impulse)
 
+            # Write back to per-partition copy state
             if not is_static_0:
-                ds_store_vec3(bdata, wp.static(b_velocity), b0, v0)
-                ds_store_vec3(bdata, wp.static(b_angular_velocity), b0, w0)
+                copy_vel[ci0] = v0
+                copy_ang_vel[ci0] = w0
             if not is_static_1:
-                ds_store_vec3(bdata, wp.static(b_velocity), b1, v1)
-                ds_store_vec3(bdata, wp.static(b_angular_velocity), b1, w1)
+                copy_vel[ci1] = v1
+                copy_ang_vel[ci1] = w1
 
         # ---------------------------------------------------------------
         # Bundled solve kernel (one thread per bundle)
@@ -929,6 +1065,9 @@ class ContactKernels:
             bundle_starts: wp.array(dtype=wp.int32),
             bundle_count: wp.array(dtype=wp.int32),
             sort_perm: wp.array(dtype=wp.int32),
+            copy_vel: wp.array(dtype=wp.vec3),
+            copy_ang_vel: wp.array(dtype=wp.vec3),
+            body_capacity: int,
             use_bias: int,
         ):
             """One PGS iteration for a single partition's contact bundles."""
@@ -951,10 +1090,13 @@ class ContactKernels:
             b0 = ds_load_int(cdata, wp.static(c_body0), first_ci)
             b1 = ds_load_int(cdata, wp.static(c_body1), first_ci)
 
-            v0 = ds_load_vec3(bdata, wp.static(b_velocity), b0)
-            w0 = ds_load_vec3(bdata, wp.static(b_angular_velocity), b0)
-            v1 = ds_load_vec3(bdata, wp.static(b_velocity), b1)
-            w1 = ds_load_vec3(bdata, wp.static(b_angular_velocity), b1)
+            # Read from per-partition copy state
+            ci0 = partition_slot * body_capacity + b0
+            ci1 = partition_slot * body_capacity + b1
+            v0 = copy_vel[ci0]
+            w0 = copy_ang_vel[ci0]
+            v1 = copy_vel[ci1]
+            w1 = copy_ang_vel[ci1]
 
             inv_m0 = ds_load_float(bdata, wp.static(b_inverse_mass), b0)
             inv_m1 = ds_load_float(bdata, wp.static(b_inverse_mass), b1)
@@ -1019,12 +1161,13 @@ class ContactKernels:
                     v1 = v1 + inv_m1 * impulse
                     w1 = w1 + inv_i1 * wp.cross(rw1, impulse)
 
+            # Write back to per-partition copy state
             if not is_static_0:
-                ds_store_vec3(bdata, wp.static(b_velocity), b0, v0)
-                ds_store_vec3(bdata, wp.static(b_angular_velocity), b0, w0)
+                copy_vel[ci0] = v0
+                copy_ang_vel[ci0] = w0
             if not is_static_1:
-                ds_store_vec3(bdata, wp.static(b_velocity), b1, v1)
-                ds_store_vec3(bdata, wp.static(b_angular_velocity), b1, w1)
+                copy_vel[ci1] = v1
+                copy_ang_vel[ci1] = w1
 
         # Store compiled kernels and data arrays for launch
         self.prepare = _prepare

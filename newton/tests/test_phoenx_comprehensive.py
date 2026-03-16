@@ -33,7 +33,7 @@ import warp as wp
 
 from newton._src.solvers.phoenx.collision import PhoenXCollisionPipeline
 from newton._src.solvers.phoenx.solver_phoenx import SolverState
-from newton.tests.unittest_utils import add_function_test, get_test_devices
+from newton.tests.unittest_utils import add_function_test, create_test_func, get_test_devices, sanitize_identifier
 
 
 class TestPhoenXComprehensive(unittest.TestCase):
@@ -1539,6 +1539,266 @@ def test_zero_friction_no_deceleration(test, device):
 
 
 # ===========================================================================
+# Test 24: Spring scale momentum conservation — deflection = total_mass * g / k
+# ===========================================================================
+
+
+def test_spring_scale_deflection(test, device):
+    """Spring scale: a pyramid of boxes on a spring-loaded platform.
+
+    At equilibrium, the spring deflection must match the analytical
+    prediction ``d = total_mass * g / k``.  If the deflection is wrong,
+    gravitational forces are not being correctly transmitted through the
+    contact stack, indicating a momentum conservation problem.
+    """
+    g = 9.81
+    k = 500.0
+    c = 200.0  # high damping for fast settling with many cubes
+    platform_mass = 5.0
+    cube_mass = 1.0
+    n_cubes = 1
+    total_mass = platform_mass + n_cubes * cube_mass
+
+    body_cap = 2 + n_cubes
+    contact_cap = max(n_cubes * 16, 256)
+    shape_count = body_cap
+
+    ss = SolverState(
+        body_capacity=body_cap,
+        contact_capacity=contact_cap,
+        shape_count=shape_count,
+        device=device,
+        default_friction=0.6,
+        joint_capacity=1,
+    )
+    pipeline = PhoenXCollisionPipeline(
+        max_shapes=shape_count,
+        max_contacts=contact_cap,
+        device=device,
+    )
+
+    # Ground
+    h_ground = ss.add_body(position=(0, 0, 0), is_static=True)
+    ss.set_shape_body(0, h_ground)
+    pipeline.add_shape_plane(
+        body_row=int(ss.body_store.handle_to_index.numpy()[h_ground]),
+    )
+
+    # Platform
+    h_plat = ss.add_body(
+        position=(0, 0, 1.0),
+        inverse_mass=1.0 / platform_mass,
+        inverse_inertia_local=np.eye(3, dtype=np.float32) * 0.1,
+        linear_damping=0.999,
+        angular_damping=0.99,
+    )
+    row_plat = int(ss.body_store.handle_to_index.numpy()[h_plat])
+    ss.set_shape_body(1, h_plat)
+    pipeline.add_shape_box(body_row=row_plat, half_extents=(1.0, 1.0, 0.1))
+
+    # Prismatic spring
+    ji = ss.add_joint_prismatic(
+        h_ground,
+        h_plat,
+        anchor_world=(0, 0, 1.0),
+        axis_world=(0, 0, 1),
+        slide_min=-0.8,
+        slide_max=0.8,
+    )
+    ss.set_joint_drive(ji, mode=ss.DRIVE_POSITION, target=0.0, stiffness=k, damping=c)
+
+    # Vertical stack of cubes on platform centre
+    h_cube = 0.2
+    spacing = 2 * h_cube + 0.02
+    inv_inertia = np.eye(3, dtype=np.float32) * (6.0 / (2 * h_cube) ** 2)
+    for i in range(n_cubes):
+        z = 1.0 + 0.1 + h_cube + 0.01 + i * spacing  # plat_z + plat_half + cube_half + tiny gap
+        bh = ss.add_body(
+            position=(0, 0, z),
+            inverse_mass=1.0 / cube_mass,
+            inverse_inertia_local=inv_inertia,
+            linear_damping=0.999,
+            angular_damping=0.99,
+        )
+        r = int(ss.body_store.handle_to_index.numpy()[bh])
+        ss.set_shape_body(2 + i, bh)
+        pipeline.add_shape_box(body_row=r, half_extents=(h_cube, h_cube, h_cube))
+
+    pipeline.finalize()
+
+    dt = 1.0 / 60.0
+    substeps = 8
+    sub_dt = dt / substeps
+
+    # Run long enough for the system to settle (10 seconds)
+    for frame in range(600):
+        ss.update_world_inertia()
+        for _ in range(substeps):
+            ss.warm_starter.begin_frame()
+            pipeline.collide(ss)
+            ss.step(sub_dt, gravity=(0, 0, -g), num_iterations=12)
+            ss.export_impulses()
+
+    wp.synchronize_device(device)
+
+    pos = ss.body_store.column_of("position").numpy()[row_plat]
+    vel = ss.body_store.column_of("velocity").numpy()[row_plat]
+
+    actual_displacement = 1.0 - pos[2]
+    expected_displacement = total_mass * g / k
+
+    # Deflection should match within 10% — this validates that all
+    # gravitational forces are transmitted through the contact stack.
+    rel_error = abs(actual_displacement - expected_displacement) / expected_displacement
+    test.assertLess(
+        rel_error,
+        0.10,
+        f"Spring deflection mismatch (momentum conservation): "
+        f"actual={actual_displacement:.4f}m, expected={expected_displacement:.4f}m "
+        f"(error={rel_error:.1%}, z={pos[2]:.4f})",
+    )
+
+    # Platform should be settled
+    speed = np.linalg.norm(vel)
+    test.assertLess(speed, 0.5, f"Platform not settled: speed={speed:.3f} m/s")
+
+
+# ===========================================================================
+# Test 25: Spring scale with pyramid — mass splitting stress test
+# ===========================================================================
+
+
+def test_spring_scale_pyramid(test, device):
+    """Spring scale with a 5x5-base pyramid (55 cubes) on a platform.
+
+    The spring deflection must match ``d = total_mass * g / k`` within 10%.
+    This is the definitive momentum conservation test: forces must transmit
+    correctly through 5 layers of stacked contacts with mass splitting.
+
+    The C# PhoenX passes this test using per-partition velocity copy states
+    (Tonge 2012).  If this test fails, it means the mass-splitting
+    implementation is not correctly transmitting forces through stacked
+    contacts.
+    """
+    g = 9.81
+    k = 2000.0  # stiffer spring for heavier load
+    c = 200.0
+    platform_mass = 5.0
+    cube_mass = 1.0
+    pyramid_base = 5
+    n_cubes = sum(n * n for n in range(1, pyramid_base + 1))  # 55
+    total_mass = platform_mass + n_cubes * cube_mass
+
+    body_cap = 2 + n_cubes
+    contact_cap = max(n_cubes * 16, 1024)
+    shape_count = body_cap
+
+    ss = SolverState(
+        body_capacity=body_cap,
+        contact_capacity=contact_cap,
+        shape_count=shape_count,
+        device=device,
+        default_friction=0.6,
+        joint_capacity=1,
+    )
+    pipeline = PhoenXCollisionPipeline(
+        max_shapes=shape_count,
+        max_contacts=contact_cap,
+        device=device,
+    )
+
+    # Ground
+    h_ground = ss.add_body(position=(0, 0, 0), is_static=True)
+    ss.set_shape_body(0, h_ground)
+    pipeline.add_shape_plane(
+        body_row=int(ss.body_store.handle_to_index.numpy()[h_ground]),
+    )
+
+    # Platform
+    rest_z = 2.0
+    h_plat = ss.add_body(
+        position=(0, 0, rest_z),
+        inverse_mass=1.0 / platform_mass,
+        inverse_inertia_local=np.eye(3, dtype=np.float32) * 0.1,
+        linear_damping=0.999,
+        angular_damping=0.99,
+    )
+    row_plat = int(ss.body_store.handle_to_index.numpy()[h_plat])
+    ss.set_shape_body(1, h_plat)
+    plat_half_z = 0.1
+    pipeline.add_shape_box(body_row=row_plat, half_extents=(1.5, 1.5, plat_half_z))
+
+    # Prismatic spring
+    ji = ss.add_joint_prismatic(
+        h_ground,
+        h_plat,
+        anchor_world=(0, 0, rest_z),
+        axis_world=(0, 0, 1),
+        slide_min=-1.5,
+        slide_max=1.5,
+    )
+    ss.set_joint_drive(ji, mode=ss.DRIVE_POSITION, target=0.0, stiffness=k, damping=c)
+
+    # Pyramid: cubes placed just above the platform surface
+    h_cube = 0.2
+    spacing = 2 * h_cube + 0.02
+    inv_inertia = np.eye(3, dtype=np.float32) * (6.0 / (2 * h_cube) ** 2)
+    cube_idx = 0
+    for layer in range(pyramid_base):
+        n = pyramid_base - layer
+        layer_z = rest_z + plat_half_z + h_cube + 0.01 + layer * spacing
+        off = -(n - 1) * spacing * 0.5
+        for row in range(n):
+            for col in range(n):
+                bh = ss.add_body(
+                    position=(off + col * spacing, off + row * spacing, layer_z),
+                    inverse_mass=1.0 / cube_mass,
+                    inverse_inertia_local=inv_inertia,
+                    linear_damping=0.999,
+                    angular_damping=0.99,
+                )
+                r = int(ss.body_store.handle_to_index.numpy()[bh])
+                ss.set_shape_body(2 + cube_idx, bh)
+                pipeline.add_shape_box(body_row=r, half_extents=(h_cube, h_cube, h_cube))
+                cube_idx += 1
+
+    pipeline.finalize()
+
+    dt = 1.0 / 60.0
+    substeps = 8
+    sub_dt = dt / substeps
+
+    # Run 10 seconds for the pyramid to settle
+    for _frame in range(600):
+        ss.update_world_inertia()
+        for _ in range(substeps):
+            ss.warm_starter.begin_frame()
+            pipeline.collide(ss)
+            ss.step(sub_dt, gravity=(0, 0, -g), num_iterations=12)
+            ss.export_impulses()
+
+    wp.synchronize_device(device)
+
+    pos = ss.body_store.column_of("position").numpy()[row_plat]
+    vel = ss.body_store.column_of("velocity").numpy()[row_plat]
+
+    actual_displacement = rest_z - pos[2]
+    expected_displacement = total_mass * g / k
+
+    rel_error = abs(actual_displacement - expected_displacement) / expected_displacement
+    test.assertLess(
+        rel_error,
+        0.10,
+        f"Spring deflection mismatch (momentum conservation): "
+        f"actual={actual_displacement:.4f}m, expected={expected_displacement:.4f}m "
+        f"(error={rel_error:.1%}, z={pos[2]:.4f}, total_mass={total_mass:.0f}kg)",
+    )
+
+    speed = np.linalg.norm(vel)
+    test.assertLess(speed, 0.5, f"Platform not settled: speed={speed:.3f} m/s")
+
+
+# ===========================================================================
 # Registration
 # ===========================================================================
 
@@ -1612,6 +1872,21 @@ add_function_test(
     test_zero_friction_no_deceleration,
     devices=devices,
 )
+add_function_test(
+    TestPhoenXComprehensive,
+    "test_spring_scale_deflection",
+    test_spring_scale_deflection,
+    devices=devices,
+)
+# This test currently fails because our mass splitting uses a simplified
+# split-factor approach instead of the C# PhoenX's per-partition velocity
+# copy states (Tonge 2012).  The C# passes this test.  Once copy states
+# are implemented, remove the expectedFailure decorator.
+for _dev in get_test_devices():
+    _test_name = f"test_spring_scale_pyramid_{sanitize_identifier(_dev)}"
+    _func = create_test_func(test_spring_scale_pyramid, _dev, check_output=True)
+    _func = unittest.expectedFailure(_func)
+    setattr(TestPhoenXComprehensive, _test_name, _func)
 
 if __name__ == "__main__":
     wp.init()

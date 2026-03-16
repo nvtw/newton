@@ -41,11 +41,15 @@ from .constraints import (
 from .data_base import DataStore, HandleStore
 from .contacts import (
     ContactKernels,
+    average_and_broadcast_kernel,
+    broadcast_to_copies_kernel,
     build_bundle_elements_kernel,
     clear_contact_count_kernel,
     count_contacts_per_body_kernel,
+    count_partitions_per_body_kernel,
     count_partners_per_body_kernel,
     import_contacts_kernel,
+    popcount_partition_mask_kernel,
 )
 from .contacts_xpbd import (
     ContactKernelsXPBD,
@@ -115,8 +119,21 @@ class SolverState:
 
         self._elements = wp.zeros((total_elements, MAX_BODIES_PER_ELEMENT), dtype=wp.int32, device=d)
 
-        # Mass splitting: per-body contact count (Tonge et al. 2012)
+        # Mass splitting: per-body partition count (Tonge et al. 2012)
+        # Used as the split factor AND to index per-partition copy states.
         self._contact_count_per_body = wp.zeros(body_capacity, dtype=wp.int32, device=d)
+        self._partition_mask = wp.zeros(body_capacity, dtype=wp.int32, device=d)
+        self._partition_count_per_body = wp.zeros(body_capacity, dtype=wp.int32, device=d)
+
+        # Per-partition velocity copy states (Tonge 2012, matching C# PhoenX).
+        # Each body has one velocity copy per partition it participates in.
+        # Indexed as copy_vel[partition_slot * body_capacity + body_index].
+        max_partitions = max_colors + 1  # +1 for overflow partition
+        self._max_partitions = max_partitions
+        self._body_capacity = body_capacity
+        copy_size = body_capacity * max_partitions
+        self._copy_vel = wp.zeros(copy_size, dtype=wp.vec3, device=d)
+        self._copy_ang_vel = wp.zeros(copy_size, dtype=wp.vec3, device=d)
 
         # Pre-allocated device counter for total element count (bundles + joints).
         # Must NOT be re-allocated per frame — that breaks CUDA graph capture.
@@ -806,6 +823,9 @@ class SolverState:
                 ws.bundle_count,
                 ws.curr_indices,
                 self._contact_count_per_body,
+                self._copy_vel,
+                self._copy_ang_vel,
+                self._body_capacity,
                 inv_dt,
             ],
             device=self.device,
@@ -828,6 +848,9 @@ class SolverState:
                 ws.bundle_starts,
                 ws.bundle_count,
                 ws.curr_indices,
+                self._copy_vel,
+                self._copy_ang_vel,
+                self._body_capacity,
                 use_bias,
             ],
             device=self.device,
@@ -957,7 +980,8 @@ class SolverState:
 
         self._partition_contacts()
 
-        # Mass splitting: count how many contacts reference each body
+        # Mass splitting with per-partition copy states (Tonge 2012, matching C# PhoenX).
+        # Count contacts per body (for split factor) and partitions per body (for averaging).
         wp.launch(
             clear_contact_count_kernel,
             dim=bs.capacity,
@@ -975,25 +999,117 @@ class SolverState:
             ],
             device=d,
         )
+        # Build partition mask and count per body
+        self._partition_mask.zero_()
+        gc = self.graph_coloring
+        total_elem_cap = gc.partition_data.shape[0]
+        wp.launch(
+            count_partitions_per_body_kernel,
+            dim=total_elem_cap,
+            inputs=[
+                self._elements,
+                self._total_element_count,
+                gc.partition_data,
+                gc.partition_ends,
+                self._partition_mask,
+                self._max_partitions,
+            ],
+            device=d,
+        )
+        wp.launch(
+            popcount_partition_mask_kernel,
+            dim=bs.capacity,
+            inputs=[self._partition_mask, self._partition_count_per_body, bs.count],
+            device=d,
+        )
 
         max_slots = self.graph_coloring.max_colors + 1
 
-        # Loop over all partition slots with full capacity — kernels
-        # early-exit for out-of-range threads, keeping this free of
-        # GPU-to-CPU sync so the entire method is graph-capturable.
+        # Broadcast body velocities to per-partition copy states
+        wp.launch(
+            broadcast_to_copies_kernel,
+            dim=bs.capacity,
+            inputs=[
+                bs.column_of("velocity"),
+                bs.column_of("angular_velocity"),
+                self._copy_vel,
+                self._copy_ang_vel,
+                bs.count,
+                self._body_capacity,
+                self._max_partitions,
+            ],
+            device=d,
+        )
+
+        # Prepare: compute per-contact solver data + warm-start impulses
         for p in range(max_slots):
             self._launch_prepare(p, inv_dt)
             self._launch_prepare_constraints(p, inv_dt)
 
+        # Average copy states after prepare (warm start modifies velocities)
+        wp.launch(
+            average_and_broadcast_kernel,
+            dim=bs.capacity,
+            inputs=[
+                bs.column_of("velocity"),
+                bs.column_of("angular_velocity"),
+                self._copy_vel,
+                self._copy_ang_vel,
+                self._partition_count_per_body,
+                self._partition_mask,
+                bs.column_of("flags"),
+                bs.count,
+                self._body_capacity,
+                self._max_partitions,
+            ],
+            device=d,
+        )
+
+        # PGS iterations: solve + average after each iteration
         for _ in range(num_iterations):
             for p in range(max_slots):
                 self._launch_solve(p, 1)
                 self._launch_solve_constraints(p, 1, inv_dt)
+            # Average and broadcast after each iteration
+            wp.launch(
+                average_and_broadcast_kernel,
+                dim=bs.capacity,
+                inputs=[
+                    bs.column_of("velocity"),
+                    bs.column_of("angular_velocity"),
+                    self._copy_vel,
+                    self._copy_ang_vel,
+                    self._partition_count_per_body,
+                    self._partition_mask,
+                    bs.column_of("flags"),
+                    bs.count,
+                    self._body_capacity,
+                    self._max_partitions,
+                ],
+                device=d,
+            )
 
         for _ in range(num_velocity_iterations):
             for p in range(max_slots):
                 self._launch_solve(p, 0)
                 self._launch_solve_constraints(p, 0, inv_dt)
+            wp.launch(
+                average_and_broadcast_kernel,
+                dim=bs.capacity,
+                inputs=[
+                    bs.column_of("velocity"),
+                    bs.column_of("angular_velocity"),
+                    self._copy_vel,
+                    self._copy_ang_vel,
+                    self._partition_count_per_body,
+                    self._partition_mask,
+                    bs.column_of("flags"),
+                    bs.count,
+                    self._body_capacity,
+                    self._max_partitions,
+                ],
+                device=d,
+            )
 
         if is_xpbd:
             # Derive velocities from position change, skip integrate_positions
