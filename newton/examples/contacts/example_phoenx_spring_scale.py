@@ -193,28 +193,30 @@ class Example:
         self.total_mass = platform_mass + NUM_CUBES * cube_mass
 
         # --- Rendering arrays ---
-        all_handles = [h_platform] + self.cube_handles
-        self.num_render = len(all_handles)
         h2i = ss.body_store.handle_to_index.numpy()
-        rows_np = np.array([int(h2i[h]) for h in all_handles], dtype=np.int32)
-        self.handle_rows = wp.array(rows_np, dtype=wp.int32, device=device)
-        self.xforms = wp.zeros(self.num_render, dtype=wp.transform, device=device)
 
-        # Shapes for viewer
-        self.render_shapes = []
-        # Platform
-        self.render_shapes.append({
-            "body": 0,
-            "shape": newton.Cuboid(hx, hy, hz),
-            "color": (0.4, 0.6, 0.9),
-        })
-        # Cubes
-        for i in range(NUM_CUBES):
-            self.render_shapes.append({
-                "body": 1 + i,
-                "shape": newton.Cuboid(CUBE_HALF, CUBE_HALF, CUBE_HALF),
-                "color": (0.9, 0.5, 0.2),
-            })
+        # Platform (1 body)
+        self._platform_row = wp.array([self.row_platform], dtype=wp.int32, device=device)
+        self.platform_xform = wp.zeros(1, dtype=wp.transform, device=device)
+        self.platform_color = wp.array([wp.vec3(0.4, 0.6, 0.9)], dtype=wp.vec3, device=device)
+        self.platform_material = wp.array([wp.vec4(0.5, 0.3, 0.0, 0.0)], dtype=wp.vec4, device=device)
+
+        # Cubes (NUM_CUBES bodies)
+        self._cube_rows = wp.array(
+            [int(h2i[h]) for h in self.cube_handles], dtype=wp.int32, device=device,
+        )
+        self.cube_xforms = wp.zeros(NUM_CUBES, dtype=wp.transform, device=device)
+        self.cube_colors = wp.array(
+            [wp.vec3(0.9, 0.5, 0.2)] * NUM_CUBES, dtype=wp.vec3, device=device,
+        )
+        self.cube_materials = wp.array(
+            [wp.vec4(0.5, 0.3, 0.0, 0.0)] * NUM_CUBES, dtype=wp.vec4, device=device,
+        )
+
+        # Ground
+        self.ground_xform = wp.array([wp.transform_identity()], dtype=wp.transform, device=device)
+        self.ground_color = wp.array([wp.vec3(0.15, 0.15, 0.18)], dtype=wp.vec3, device=device)
+        self.ground_material = wp.array([wp.vec4(0.5, 0.5, 1.0, 0.0)], dtype=wp.vec4, device=device)
 
         # CUDA graph capture
         self.graph = None
@@ -262,31 +264,62 @@ class Example:
         self.viewer.begin_frame(self.sim_time)
 
         bs = self.ss.body_store
+        d = self.device
+        hx = float(PLATFORM_HALF[0])
+        hy = float(PLATFORM_HALF[1])
+        hz = float(PLATFORM_HALF[2])
+
+        # Build platform transform
         wp.launch(
             _build_xforms_kernel,
-            dim=self.num_render,
+            dim=1,
             inputs=[
-                self.handle_rows,
+                self._platform_row,
                 bs.column_of("position"),
                 bs.column_of("orientation"),
-                self.xforms,
-                self.num_render,
+                self.platform_xform,
+                1,
             ],
-            device=self.device,
+            device=d,
         )
-        wp.synchronize_device(self.device)
-        xforms_np = self.xforms.numpy()
+        # Build cube transforms
+        wp.launch(
+            _build_xforms_kernel,
+            dim=NUM_CUBES,
+            inputs=[
+                self._cube_rows,
+                bs.column_of("position"),
+                bs.column_of("orientation"),
+                self.cube_xforms,
+                NUM_CUBES,
+            ],
+            device=d,
+        )
 
-        for i, info in enumerate(self.render_shapes):
-            p = xforms_np[i][:3]
-            q = xforms_np[i][3:]
-            self.viewer.log_shapes(
-                name=f"body_{i}",
-                shape=info["shape"],
-                pos=p,
-                rot=q,
-                color=info["color"],
-            )
+        self.viewer.log_shapes(
+            "/platform",
+            newton.GeoType.BOX,
+            (hx, hy, hz),
+            self.platform_xform,
+            self.platform_color,
+            self.platform_material,
+        )
+        self.viewer.log_shapes(
+            "/cubes",
+            newton.GeoType.BOX,
+            (CUBE_HALF, CUBE_HALF, CUBE_HALF),
+            self.cube_xforms,
+            self.cube_colors,
+            self.cube_materials,
+        )
+        self.viewer.log_shapes(
+            "/ground",
+            newton.GeoType.PLANE,
+            (50.0, 50.0),
+            self.ground_xform,
+            self.ground_color,
+            self.ground_material,
+        )
 
         self.viewer.end_frame()
 
