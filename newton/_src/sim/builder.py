@@ -9659,6 +9659,7 @@ class ModelBuilder:
                         sdf_target_voxel_size,
                         effective_max_resolution,
                         tuple(shape_scale),
+                        sdf_tex_fmt,
                     )
 
                 if cache_key is not None:
