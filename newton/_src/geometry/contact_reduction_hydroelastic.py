@@ -407,8 +407,8 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 continue
 
             # === Compute stiffness and optional features based on entry type ===
-            # Normal bin entries (bin_id 0-19): have aggregate force, use aggregate stiffness
-            # Voxel bin entries (bin_id 20+): no aggregate force, use per-contact stiffness
+            # Normal bin entries (bin_id 0-11): have aggregate force, use aggregate stiffness
+            # Voxel bin entries (bin_id 12+): no aggregate force, use per-contact stiffness
             agg_force_vec = agg_force[entry_idx]
             agg_force_mag = wp.length(agg_force_vec)
             use_aggregate_stiffness = agg_force_mag > wp.static(EPS_LARGE)
