@@ -137,7 +137,7 @@ def write_contact_simple(
         writer_data.contact_tangent[index] = wp.normalize(world_x - wp.dot(world_x, normal) * normal)
 
 
-def create_narrow_phase_primitive_kernel(writer_func: Any):
+def create_narrow_phase_primitive_kernel(writer_func: Any, enable_backward: bool = False):
     """
     Create a kernel for fast analytical collision detection of primitive shapes.
 
@@ -148,12 +148,14 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
 
     Args:
         writer_func: Contact writer function (e.g., write_contact_simple)
+        enable_backward: When True, generate the adjoint kernel so that
+            ``wp.Tape`` can back-propagate through this kernel.
 
     Returns:
         A warp kernel for primitive collision detection
     """
 
-    @wp.kernel(enable_backward=False, module="unique")
+    @wp.kernel(enable_backward=enable_backward, module="unique")
     def narrow_phase_primitive_kernel(
         candidate_pair: wp.array(dtype=wp.vec2i),
         candidate_pair_count: wp.array(dtype=int),
@@ -605,7 +607,11 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
 
 
 def create_narrow_phase_kernel_gjk_mpr(
-    external_aabb: bool, writer_func: Any, support_func: Any = None, post_process_contact: Any = None
+    external_aabb: bool,
+    writer_func: Any,
+    support_func: Any = None,
+    post_process_contact: Any = None,
+    enable_backward: bool = False,
 ):
     """
     Create a GJK/MPR narrow phase kernel for complex convex shape collisions.
@@ -618,9 +624,17 @@ def create_narrow_phase_kernel_gjk_mpr(
 
     The remaining pairs are complex convex-convex (plane-box, plane-cylinder,
     plane-cone, box-box, cylinder-cylinder, etc.) that need GJK/MPR.
+
+    Args:
+        external_aabb: Whether AABBs are provided externally.
+        writer_func: Contact writer function.
+        support_func: Optional support mapping function override.
+        post_process_contact: Optional contact post-processing function override.
+        enable_backward: When True, generate the adjoint kernel so that
+            ``wp.Tape`` can back-propagate through this kernel.
     """
 
-    @wp.kernel(enable_backward=False, module="unique")
+    @wp.kernel(enable_backward=enable_backward, module="unique")
     def narrow_phase_kernel_gjk_mpr(
         candidate_pair: wp.array(dtype=wp.vec2i),
         candidate_pair_count: wp.array(dtype=int),
@@ -1381,6 +1395,7 @@ class NarrowPhase:
         has_meshes: bool = True,
         has_heightfields: bool = False,
         use_lean_gjk_mpr: bool = False,
+        enable_backward: bool = False,
     ) -> None:
         """
         Initialize NarrowPhase with pre-allocated buffers.
@@ -1404,6 +1419,9 @@ class NarrowPhase:
                 Defaults to True for safety. Set to False when constructing from a model with no meshes.
             has_heightfields: Whether the scene contains any heightfield shapes (GeoType.HFIELD). When True,
                 heightfield collision buffers and kernels are allocated. Defaults to False.
+            enable_backward: When True, generate adjoint kernels for the primitive
+                and GJK/MPR narrow-phase kernels so that ``wp.Tape`` can
+                back-propagate through convex collision detection.
         """
         self.max_candidate_pairs = max_candidate_pairs
         self.max_triangle_pairs = max_triangle_pairs
@@ -1453,7 +1471,7 @@ class NarrowPhase:
 
         # Create the appropriate kernel variants
         # Primitive kernel handles lightweight primitives and routes remaining pairs
-        self.primitive_kernel = create_narrow_phase_primitive_kernel(writer_func)
+        self.primitive_kernel = create_narrow_phase_primitive_kernel(writer_func, enable_backward=enable_backward)
         # GJK/MPR kernel handles remaining convex-convex pairs
         if use_lean_gjk_mpr:
             # Use lean support function (CONVEX_MESH, BOX, SPHERE only) and lean post-processing
@@ -1463,9 +1481,12 @@ class NarrowPhase:
                 writer_func,
                 support_func=support_map_lean,
                 post_process_contact=post_process_minkowski_only,
+                enable_backward=enable_backward,
             )
         else:
-            self.narrow_phase_kernel = create_narrow_phase_kernel_gjk_mpr(self.external_aabb, writer_func)
+            self.narrow_phase_kernel = create_narrow_phase_kernel_gjk_mpr(
+                self.external_aabb, writer_func, enable_backward=enable_backward
+            )
         # Create triangle contacts kernel when meshes or heightfields are present
         if has_meshes or has_heightfields:
             self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func)
@@ -1520,6 +1541,9 @@ class NarrowPhase:
 
         # Pre-allocate all intermediate buffers.
         # Counters live in one consolidated array for efficient zeroing.
+        # All counter slots and pair buffers are always allocated (possibly
+        # empty) so that kernel argument lists never contain None -- this is
+        # required for ``wp.Tape`` to walk the adjoint of recorded launches.
         with wp.ScopedDevice(device):
             has_mesh_like = has_meshes or has_heightfields
             n = 0  # counter index
@@ -1527,47 +1551,39 @@ class NarrowPhase:
             n += 1
             sdf_sdf_idx = n
             n += 1
-            mesh_like_idx = n if has_mesh_like else None
-            n += 2 if has_mesh_like else 0  # mesh_like pairs, triangle pairs
-            mesh_only_idx = n if has_meshes else None
-            n += 3 if has_meshes else 0  # mesh_plane, mesh_plane_vtx, mesh_mesh
+            mesh_like_idx = n
+            n += 2  # mesh_like pairs, triangle pairs
+            mesh_only_idx = n
+            n += 3  # mesh_plane, mesh_plane_vtx, mesh_mesh
             c = wp.zeros(n, dtype=wp.int32, device=device)
             self._counter_array = c
 
             self.gjk_candidate_pairs_count = c[gjk_idx : gjk_idx + 1]
             self.shape_pairs_sdf_sdf_count = c[sdf_sdf_idx : sdf_sdf_idx + 1]
-            self.shape_pairs_mesh_count = c[mesh_like_idx : mesh_like_idx + 1] if has_mesh_like else None
-            self.triangle_pairs_count = c[mesh_like_idx + 1 : mesh_like_idx + 2] if has_mesh_like else None
-            self.shape_pairs_mesh_plane_count = c[mesh_only_idx : mesh_only_idx + 1] if has_meshes else None
-            self.mesh_plane_vertex_total_count = c[mesh_only_idx + 1 : mesh_only_idx + 2] if has_meshes else None
-            self.shape_pairs_mesh_mesh_count = c[mesh_only_idx + 2 : mesh_only_idx + 3] if has_meshes else None
+            self.shape_pairs_mesh_count = c[mesh_like_idx : mesh_like_idx + 1]
+            self.triangle_pairs_count = c[mesh_like_idx + 1 : mesh_like_idx + 2]
+            self.shape_pairs_mesh_plane_count = c[mesh_only_idx : mesh_only_idx + 1]
+            self.mesh_plane_vertex_total_count = c[mesh_only_idx + 1 : mesh_only_idx + 2]
+            self.shape_pairs_mesh_mesh_count = c[mesh_only_idx + 2 : mesh_only_idx + 3]
 
-            # Pair and work buffers
+            # Pair and work buffers -- always allocated (size 0 when not needed)
             self.gjk_candidate_pairs = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
 
-            self.shape_pairs_mesh = (
-                wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device) if has_mesh_like else None
-            )
-            self.triangle_pairs = (
-                wp.zeros(max_triangle_pairs, dtype=wp.vec3i, device=device) if has_meshes or has_heightfields else None
-            )
-            self.shape_pairs_mesh_plane = (
-                wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device) if has_meshes else None
-            )
-            self.shape_pairs_mesh_plane_cumsum = (
-                wp.zeros(max_candidate_pairs, dtype=wp.int32, device=device) if has_meshes else None
-            )
-            self.shape_pairs_mesh_mesh = (
-                wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device) if has_meshes else None
-            )
+            _mesh_pair_count = max_candidate_pairs if has_mesh_like else 0
+            self.shape_pairs_mesh = wp.zeros(_mesh_pair_count, dtype=wp.vec2i, device=device)
+            _tri_pair_count = max_triangle_pairs if (has_meshes or has_heightfields) else 0
+            self.triangle_pairs = wp.zeros(_tri_pair_count, dtype=wp.vec3i, device=device)
+            _mesh_only_count = max_candidate_pairs if has_meshes else 0
+            self.shape_pairs_mesh_plane = wp.zeros(_mesh_only_count, dtype=wp.vec2i, device=device)
+            self.shape_pairs_mesh_plane_cumsum = wp.zeros(_mesh_only_count, dtype=wp.int32, device=device)
+            self.shape_pairs_mesh_mesh = wp.zeros(_mesh_only_count, dtype=wp.vec2i, device=device)
 
             self.empty_tangent = None
 
             if hydroelastic_sdf is not None:
                 self.shape_pairs_sdf_sdf = wp.zeros(hydroelastic_sdf.max_num_shape_pairs, dtype=wp.vec2i, device=device)
             else:
-                # Empty arrays for when hydroelastic is disabled
-                self.shape_pairs_sdf_sdf = None
+                self.shape_pairs_sdf_sdf = wp.zeros(0, dtype=wp.vec2i, device=device)
 
         # Fixed thread count for kernel launches
         # Use a reasonable minimum for GPU occupancy (256 blocks = 32K threads)
@@ -1986,7 +2002,7 @@ class NarrowPhase:
                 writer_data,
             )
 
-        # Verify no collision pipeline buffers overflowed
+        # Verify no collision pipeline buffers overflowed (debug-only, never on tape)
         wp.launch(
             kernel=verify_narrow_phase_buffers,
             dim=[1],
@@ -1996,19 +2012,20 @@ class NarrowPhase:
                 self.gjk_candidate_pairs_count,
                 self.gjk_candidate_pairs.shape[0],
                 self.shape_pairs_mesh_count,
-                self.shape_pairs_mesh.shape[0] if self.shape_pairs_mesh is not None else 0,
+                self.shape_pairs_mesh.shape[0],
                 self.triangle_pairs_count,
-                self.triangle_pairs.shape[0] if self.triangle_pairs is not None else 0,
+                self.triangle_pairs.shape[0],
                 self.shape_pairs_mesh_plane_count,
-                self.shape_pairs_mesh_plane.shape[0] if self.shape_pairs_mesh_plane is not None else 0,
+                self.shape_pairs_mesh_plane.shape[0],
                 self.shape_pairs_mesh_mesh_count,
-                self.shape_pairs_mesh_mesh.shape[0] if self.shape_pairs_mesh_mesh is not None else 0,
+                self.shape_pairs_mesh_mesh.shape[0],
                 self.shape_pairs_sdf_sdf_count,
-                self.shape_pairs_sdf_sdf.shape[0] if self.shape_pairs_sdf_sdf is not None else 0,
+                self.shape_pairs_sdf_sdf.shape[0],
                 writer_data.contact_count,
                 writer_data.contact_max,
             ],
             device=device,
+            record_tape=False,
         )
 
     def launch(

@@ -80,11 +80,11 @@ class Contacts:
         Args:
             rigid_contact_max: Maximum number of rigid contacts
             soft_contact_max: Maximum number of soft contacts
-            requires_grad: Whether **soft** contact arrays require gradients for differentiable
-                simulation.  Rigid contact arrays are always allocated without gradients because
-                the narrow phase kernels do not support backward passes.  Soft contact arrays
-                (body_pos, body_vel, normal) are allocated with ``requires_grad`` so that
-                gradient-based optimisation can flow through particle-shape contacts.
+            requires_grad: Whether contact arrays require gradients for differentiable
+                simulation.  When True, rigid contact geometry arrays (point0, point1,
+                offset0, offset1, normal) and soft contact arrays (body_pos, body_vel,
+                normal) are allocated with ``requires_grad`` so that gradient-based
+                optimisation can flow through both rigid and particle-shape contacts.
             device: Device to allocate buffers on
             per_contact_shape_properties: Enable per-contact stiffness/damping/friction arrays
             clear_buffers: If True, clear() will zero all contact buffers (slower but conservative).
@@ -103,19 +103,20 @@ class Contacts:
             # Create sliced views for individual counters (no additional allocation)
             self.rigid_contact_count = self._counter_array[0:1]
 
-            # rigid contacts — never requires_grad (narrow phase has enable_backward=False)
+            # rigid contacts — geometry arrays get requires_grad when differentiable
+            # collision is enabled; integer index arrays never need gradients.
             self.rigid_contact_point_id = wp.zeros(rigid_contact_max, dtype=wp.int32)
             self.rigid_contact_shape0 = wp.full(rigid_contact_max, -1, dtype=wp.int32)
             self.rigid_contact_shape1 = wp.full(rigid_contact_max, -1, dtype=wp.int32)
-            self.rigid_contact_point0 = wp.zeros(rigid_contact_max, dtype=wp.vec3)
+            self.rigid_contact_point0 = wp.zeros(rigid_contact_max, dtype=wp.vec3, requires_grad=requires_grad)
             """Contact point on shape 0 [m], shape (rigid_contact_max,), dtype :class:`vec3`."""
-            self.rigid_contact_point1 = wp.zeros(rigid_contact_max, dtype=wp.vec3)
+            self.rigid_contact_point1 = wp.zeros(rigid_contact_max, dtype=wp.vec3, requires_grad=requires_grad)
             """Contact point on shape 1 [m], shape (rigid_contact_max,), dtype :class:`vec3`."""
-            self.rigid_contact_offset0 = wp.zeros(rigid_contact_max, dtype=wp.vec3)
+            self.rigid_contact_offset0 = wp.zeros(rigid_contact_max, dtype=wp.vec3, requires_grad=requires_grad)
             """Contact offset on shape 0 [m], shape (rigid_contact_max,), dtype :class:`vec3`."""
-            self.rigid_contact_offset1 = wp.zeros(rigid_contact_max, dtype=wp.vec3)
+            self.rigid_contact_offset1 = wp.zeros(rigid_contact_max, dtype=wp.vec3, requires_grad=requires_grad)
             """Contact offset on shape 1 [m], shape (rigid_contact_max,), dtype :class:`vec3`."""
-            self.rigid_contact_normal = wp.zeros(rigid_contact_max, dtype=wp.vec3)
+            self.rigid_contact_normal = wp.zeros(rigid_contact_max, dtype=wp.vec3, requires_grad=requires_grad)
             """Contact normal pointing from shape 0 toward shape 1 (A-to-B) [unitless], shape (rigid_contact_max,), dtype :class:`vec3`."""
             self.rigid_contact_margin0 = wp.zeros(rigid_contact_max, dtype=wp.float32)
             """Contact margin for shape 0 [m], shape (rigid_contact_max,), dtype float."""
@@ -135,11 +136,11 @@ class Contacts:
                 self.rigid_contact_friction = wp.zeros(rigid_contact_max, dtype=wp.float32)
                 """Per-contact friction coefficient [dimensionless], shape (rigid_contact_max,), dtype float."""
             else:
-                self.rigid_contact_stiffness = None
+                self.rigid_contact_stiffness = wp.zeros(0, dtype=wp.float32)
                 """Per-contact stiffness [N/m], shape (rigid_contact_max,), dtype float."""
-                self.rigid_contact_damping = None
+                self.rigid_contact_damping = wp.zeros(0, dtype=wp.float32)
                 """Per-contact damping [N·s/m], shape (rigid_contact_max,), dtype float."""
-                self.rigid_contact_friction = None
+                self.rigid_contact_friction = wp.zeros(0, dtype=wp.float32)
                 """Per-contact friction coefficient [dimensionless], shape (rigid_contact_max,), dtype float."""
 
             # soft contacts — requires_grad flows through here for differentiable simulation
