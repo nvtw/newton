@@ -381,6 +381,19 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
 
         last_search_dir = wp.vec3(1.0, 0.0, 0.0)
 
+        # Polyak acceleration state (Coal: "Collision Detection Accelerated",
+        # HAL-03662157).  GJK is a Frank-Wolfe algorithm; applying Polyak
+        # momentum to the search direction reduces iteration count ~2x.
+        # Polyak is preferred over Nesterov on GPU because it needs no
+        # normalize calls and adds minimal register pressure.
+        # Momentum starts at iteration >= 4 so the simplex has a solid
+        # foundation: overlap detection is robust, and the first vertices
+        # closely match vanilla GJK, preserving normal accuracy for
+        # near-contacts (important for friction stability).
+        polyak_dir = v
+        use_polyak = bool(True)
+        iteration = int(0)
+
         while iter_count > 0:
             iter_count -= 1
 
@@ -391,11 +404,16 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
                 point_a, point_b = simplex_get_closest(simplex_v, simplex_barycentric, simplex_usage_mask)
                 return False, point_a, point_b, normal, distance
 
-            # Determine search direction with fallback for near-zero cases
+            # Determine search direction with Polyak acceleration.
             used_fallback = bool(False)
-            search_dir = -v
-            if dist_sq < 1.0e-12:
-                # Near-zero direction: use fallback to avoid numerical issues
+            if use_polyak and iteration >= 4:
+                momentum = 1.0 / float(iteration + 1)
+                polyak_dir = momentum * polyak_dir + (1.0 - momentum) * v
+                search_dir = -polyak_dir
+            else:
+                polyak_dir = v
+                search_dir = -v
+            if wp.length_sq(search_dir) < 1.0e-12:
                 search_dir = wp.vec3(1.0, 0.0, 0.0)
                 used_fallback = bool(True)
             # Track last search direction for robust normal fallback
@@ -408,6 +426,14 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
             # Skip check when using fallback direction to avoid premature exit
             # Use BtoA directly (Minkowski difference)
             w_v = w.BtoA
+
+            # Polyak deactivation: when the duality gap is small, stop
+            # momentum to let vanilla GJK converge precisely.
+            if use_polyak and iteration >= 4:
+                duality_gap = 2.0 * wp.dot(v, v - w_v)
+                if duality_gap <= COLLIDE_EPSILON * wp.sqrt(dist_sq):
+                    use_polyak = bool(False)
+
             if not used_fallback:
                 delta_dist = wp.dot(v, v - w_v)
                 if delta_dist < COLLIDE_EPSILON * wp.sqrt(dist_sq):
@@ -487,6 +513,7 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
 
             v = new_v
             dist_sq = wp.length_sq(v)
+            iteration += 1
 
         distance = wp.sqrt(dist_sq)
         # Compute closest points first
