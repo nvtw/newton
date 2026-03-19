@@ -386,7 +386,7 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
         # momentum to the search direction can reduce iteration count up to
         # 5x on non-strictly-convex shapes (boxes, convex meshes).
         # Uses the normalized variant from Coal which is robust for shapes
-        # with flat faces.  Momentum starts at iteration >= 4 so the simplex
+        # with flat faces.  Momentum starts at iteration >= 3 so the simplex
         # has a solid foundation: overlap detection is robust, and the first
         # vertices closely match vanilla GJK, preserving normal accuracy for
         # near-contacts (important for friction stability).
@@ -409,7 +409,7 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
             # Uses the normalized variant which is robust for non-strictly-convex
             # shapes (flat faces on boxes and convex meshes).
             used_fallback = bool(False)
-            if use_nesterov and iteration >= 4:
+            if use_nesterov and iteration >= 3:
                 momentum = float(iteration + 2) / float(iteration + 3)
                 y = momentum * v + (1.0 - momentum) * w_prev
                 y_len = wp.length(y)
@@ -438,7 +438,7 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
 
             # Nesterov deactivation: when the duality gap is small, stop
             # momentum to let vanilla GJK converge precisely.
-            if use_nesterov and iteration >= 4:
+            if use_nesterov and iteration >= 3:
                 duality_gap = 2.0 * wp.dot(v, v - w_v)
                 if duality_gap <= COLLIDE_EPSILON * wp.sqrt(dist_sq):
                     use_nesterov = bool(False)
