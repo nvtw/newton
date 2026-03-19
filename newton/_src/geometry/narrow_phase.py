@@ -61,8 +61,10 @@ from ..geometry.sdf_contact import (
 from ..geometry.sdf_hydroelastic import HydroelasticSDF
 from ..geometry.sdf_texture import TextureSDFData
 from ..geometry.support_function import (
+    GenericShapeData,
     SupportMapDataProvider,
     extract_shape_data,
+    pack_mesh_ptr,
     support_map_lean,
 )
 from ..geometry.types import GeoType
@@ -139,6 +141,7 @@ def write_contact_simple(
 
 _PAIR_SKIP = int(0)
 _PAIR_PRIMITIVE = int(1)
+_PAIR_GJK = int(2)
 
 
 @wp.func(enable_backward=False)
@@ -681,9 +684,180 @@ def create_narrow_phase_kernel_gjk_mpr(
 
     The remaining pairs are complex convex-convex (plane-box, plane-cylinder,
     plane-cone, box-box, cylinder-cylinder, etc.) that need GJK/MPR.
+
+    The kernel is differentiable: routing logic and bounding sphere checks run
+    inside a ``wp.func(enable_backward=False)`` helper so that only the GJK/MPR
+    contact geometry computation and writer generate adjoint code.
+
+    Args:
+        external_aabb: Whether AABBs are provided externally (True) or computed on the fly
+        writer_func: Contact writer function
+        support_func: Support mapping function (defaults to support_map)
+        post_process_contact: Post-processing function for contacts
     """
 
-    @wp.kernel(enable_backward=False, module="unique")
+    @wp.func(enable_backward=False)
+    def _classify_gjk_pair(
+        t: int,
+        candidate_pair: wp.array(dtype=wp.vec2i),
+        num_work_items: int,
+        shape_types: wp.array(dtype=int),
+        shape_data: wp.array(dtype=wp.vec4),
+        shape_source: wp.array(dtype=wp.uint64),
+        shape_gap: wp.array(dtype=float),
+        shape_collision_radius: wp.array(dtype=float),
+        shape_transform: wp.array(dtype=wp.transform),
+        shape_aabb_lower: wp.array(dtype=wp.vec3),
+        shape_aabb_upper: wp.array(dtype=wp.vec3),
+    ):
+        """Classify a GJK/MPR candidate pair and perform early rejection.
+
+        Reads non-differentiable shape data (types, scale, margin, gap, source)
+        and performs bounding sphere overlap checks for infinite plane pairs.
+        Transform reads here are in a non-differentiable context; the kernel body
+        re-reads transforms separately for gradient flow.
+
+        Returns:
+            Tuple of (shape_a, shape_b, type_a, type_b, scale_a, scale_b,
+            aux_a, aux_b, margin_offset_a, margin_offset_b, gap_sum,
+            is_inf_plane_a, is_inf_plane_b, bsphere_radius_a, bsphere_radius_b,
+            pair_type) where pair_type is _PAIR_SKIP or _PAIR_GJK.
+        """
+        skip = (
+            int(0), int(0),
+            int(0), int(0),
+            wp.vec3(), wp.vec3(),
+            wp.vec3(), wp.vec3(),
+            float(0.0), float(0.0),
+            float(0.0),
+            int(0), int(0),
+            float(0.0), float(0.0),
+            _PAIR_SKIP,
+        )
+
+        if t >= num_work_items:
+            return skip
+
+        pair = candidate_pair[t]
+        shape_a = pair[0]
+        shape_b = pair[1]
+
+        if shape_a == shape_b or shape_a < 0 or shape_b < 0:
+            return skip
+
+        # Read non-differentiable shape data
+        type_a = shape_types[shape_a]
+        type_b = shape_types[shape_b]
+
+        data_a = shape_data[shape_a]
+        data_b = shape_data[shape_b]
+        scale_a = wp.vec3(data_a[0], data_a[1], data_a[2])
+        scale_b = wp.vec3(data_b[0], data_b[1], data_b[2])
+        margin_offset_a = data_a[3]
+        margin_offset_b = data_b[3]
+
+        aux_a = wp.vec3(0.0, 0.0, 0.0)
+        if type_a == GeoType.CONVEX_MESH:
+            aux_a = pack_mesh_ptr(shape_source[shape_a])
+        aux_b = wp.vec3(0.0, 0.0, 0.0)
+        if type_b == GeoType.CONVEX_MESH:
+            aux_b = pack_mesh_ptr(shape_source[shape_b])
+
+        gap_sum = shape_gap[shape_a] + shape_gap[shape_b]
+
+        # Infinite plane detection
+        is_inf_plane_a = int(0)
+        if type_a == GeoType.PLANE and scale_a[0] == 0.0 and scale_a[1] == 0.0:
+            is_inf_plane_a = int(1)
+        is_inf_plane_b = int(0)
+        if type_b == GeoType.PLANE and scale_b[0] == 0.0 and scale_b[1] == 0.0:
+            is_inf_plane_b = int(1)
+
+        if is_inf_plane_a != 0 and is_inf_plane_b != 0:
+            return skip
+
+        # Bounding sphere check for infinite plane pairs (reads transforms
+        # in non-diff context — kernel body re-reads for gradient flow)
+        bsphere_radius_a = float(0.0)
+        bsphere_radius_b = float(0.0)
+        has_infinite_plane = is_inf_plane_a != 0 or is_inf_plane_b != 0
+
+        if has_infinite_plane:
+            pos_a, quat_a, shape_data_a, _sA, _mA = extract_shape_data(
+                shape_a, shape_transform, shape_types, shape_data, shape_source
+            )
+            pos_b, quat_b, shape_data_b, _sB, _mB = extract_shape_data(
+                shape_b, shape_transform, shape_types, shape_data, shape_source
+            )
+
+            if wp.static(external_aabb):
+                aabb_a_lower = shape_aabb_lower[shape_a]
+                aabb_a_upper = shape_aabb_upper[shape_a]
+                aabb_b_lower = shape_aabb_lower[shape_b]
+                aabb_b_upper = shape_aabb_upper[shape_b]
+            if wp.static(not external_aabb):
+                gap_a = shape_gap[shape_a]
+                gap_b = shape_gap[shape_b]
+                gap_vec_a = wp.vec3(gap_a, gap_a, gap_a)
+                gap_vec_b = wp.vec3(gap_b, gap_b, gap_b)
+
+                if is_inf_plane_a != 0:
+                    radius_a = shape_collision_radius[shape_a]
+                    half_extents_a = wp.vec3(radius_a, radius_a, radius_a)
+                    aabb_a_lower = pos_a - half_extents_a - gap_vec_a
+                    aabb_a_upper = pos_a + half_extents_a + gap_vec_a
+                else:
+                    data_provider = SupportMapDataProvider()
+                    aabb_a_lower, aabb_a_upper = compute_tight_aabb_from_support(
+                        shape_data_a, quat_a, pos_a, data_provider
+                    )
+                    aabb_a_lower = aabb_a_lower - gap_vec_a
+                    aabb_a_upper = aabb_a_upper + gap_vec_a
+
+                if is_inf_plane_b != 0:
+                    radius_b = shape_collision_radius[shape_b]
+                    half_extents_b = wp.vec3(radius_b, radius_b, radius_b)
+                    aabb_b_lower = pos_b - half_extents_b - gap_vec_b
+                    aabb_b_upper = pos_b + half_extents_b + gap_vec_b
+                else:
+                    data_provider = SupportMapDataProvider()
+                    aabb_b_lower, aabb_b_upper = compute_tight_aabb_from_support(
+                        shape_data_b, quat_b, pos_b, data_provider
+                    )
+                    aabb_b_lower = aabb_b_lower - gap_vec_b
+                    aabb_b_upper = aabb_b_upper + gap_vec_b
+
+            bsphere_center_a, bsphere_radius_a = compute_bounding_sphere_from_aabb(aabb_a_lower, aabb_a_upper)
+            bsphere_center_b, bsphere_radius_b = compute_bounding_sphere_from_aabb(aabb_b_lower, aabb_b_upper)
+
+            if not check_infinite_plane_bsphere_overlap(
+                shape_data_a,
+                shape_data_b,
+                pos_a,
+                pos_b,
+                quat_a,
+                quat_b,
+                bsphere_center_a,
+                bsphere_center_b,
+                bsphere_radius_a,
+                bsphere_radius_b,
+            ):
+                return skip
+
+        result = (
+            shape_a, shape_b,
+            type_a, type_b,
+            scale_a, scale_b,
+            aux_a, aux_b,
+            margin_offset_a, margin_offset_b,
+            gap_sum,
+            is_inf_plane_a, is_inf_plane_b,
+            bsphere_radius_a, bsphere_radius_b,
+            _PAIR_GJK,
+        )
+        return result
+
+    @wp.kernel(module="unique")
     def narrow_phase_kernel_gjk_mpr(
         candidate_pair: wp.array(dtype=wp.vec2i),
         candidate_pair_count: wp.array(dtype=int),
@@ -708,113 +882,58 @@ def create_narrow_phase_kernel_gjk_mpr(
 
         num_work_items = wp.min(candidate_pair.shape[0], candidate_pair_count[0])
 
-        # Early exit if no work (fast path for primitive-only scenes)
         if num_work_items == 0:
             return
 
         for t in range(tid, num_work_items, total_num_threads):
-            # Get shape pair (already sorted by primitive kernel)
-            pair = candidate_pair[t]
-            shape_a = pair[0]
-            shape_b = pair[1]
-
-            # Safety checks
-            if shape_a == shape_b or shape_a < 0 or shape_b < 0:
-                continue
-
-            # Get shape types (already sorted: type_a <= type_b)
-            type_a = shape_types[shape_a]
-            type_b = shape_types[shape_b]
-
-            # Extract shape data
-            pos_a, quat_a, shape_data_a, scale_a, margin_offset_a = extract_shape_data(
-                shape_a, shape_transform, shape_types, shape_data, shape_source
-            )
-            pos_b, quat_b, shape_data_b, scale_b, margin_offset_b = extract_shape_data(
-                shape_b, shape_transform, shape_types, shape_data, shape_source
+            (
+                shape_a, shape_b,
+                type_a, type_b,
+                scale_a, scale_b,
+                aux_a, aux_b,
+                margin_offset_a, margin_offset_b,
+                gap_sum,
+                is_inf_plane_a, is_inf_plane_b,
+                bsphere_radius_a, bsphere_radius_b,
+                pair_type,
+            ) = _classify_gjk_pair(
+                t, candidate_pair, num_work_items,
+                shape_types, shape_data, shape_source, shape_gap,
+                shape_collision_radius, shape_transform,
+                shape_aabb_lower, shape_aabb_upper,
             )
 
-            # Check for infinite planes
-            is_infinite_plane_a = (type_a == GeoType.PLANE) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
-            is_infinite_plane_b = (type_b == GeoType.PLANE) and (scale_b[0] == 0.0 and scale_b[1] == 0.0)
-
-            # Early exit: both infinite planes can't collide
-            if is_infinite_plane_a and is_infinite_plane_b:
+            if pair_type == _PAIR_SKIP:
                 continue
 
-            # Bounding sphere check is only needed for infinite plane pairs.
-            # For non-plane pairs with external AABBs, SAP already verified AABB overlap.
-            bsphere_radius_a = float(0.0)
-            bsphere_radius_b = float(0.0)
-            has_infinite_plane = is_infinite_plane_a or is_infinite_plane_b
+            # =================================================================
+            # Differentiable from here: read transforms (carry body_q gradients)
+            # =================================================================
+            X_a = shape_transform[shape_a]
+            X_b = shape_transform[shape_b]
+            pos_a = wp.transform_get_translation(X_a)
+            pos_b = wp.transform_get_translation(X_b)
+            quat_a = wp.transform_get_rotation(X_a)
+            quat_b = wp.transform_get_rotation(X_b)
 
-            if has_infinite_plane:
-                # Compute or fetch AABBs for bounding sphere overlap check
-                if wp.static(external_aabb):
-                    aabb_a_lower = shape_aabb_lower[shape_a]
-                    aabb_a_upper = shape_aabb_upper[shape_a]
-                    aabb_b_lower = shape_aabb_lower[shape_b]
-                    aabb_b_upper = shape_aabb_upper[shape_b]
-                if wp.static(not external_aabb):
-                    gap_a = shape_gap[shape_a]
-                    gap_b = shape_gap[shape_b]
-                    gap_vec_a = wp.vec3(gap_a, gap_a, gap_a)
-                    gap_vec_b = wp.vec3(gap_b, gap_b, gap_b)
+            # Reconstruct GenericShapeData structs from routing data
+            shape_data_a = GenericShapeData()
+            shape_data_a.shape_type = type_a
+            shape_data_a.scale = scale_a
+            shape_data_a.auxiliary = aux_a
 
-                    # Shape A AABB
-                    if is_infinite_plane_a:
-                        radius_a = shape_collision_radius[shape_a]
-                        half_extents_a = wp.vec3(radius_a, radius_a, radius_a)
-                        aabb_a_lower = pos_a - half_extents_a - gap_vec_a
-                        aabb_a_upper = pos_a + half_extents_a + gap_vec_a
-                    else:
-                        data_provider = SupportMapDataProvider()
-                        aabb_a_lower, aabb_a_upper = compute_tight_aabb_from_support(
-                            shape_data_a, quat_a, pos_a, data_provider
-                        )
-                        aabb_a_lower = aabb_a_lower - gap_vec_a
-                        aabb_a_upper = aabb_a_upper + gap_vec_a
+            shape_data_b = GenericShapeData()
+            shape_data_b.shape_type = type_b
+            shape_data_b.scale = scale_b
+            shape_data_b.auxiliary = aux_b
 
-                    # Shape B AABB
-                    if is_infinite_plane_b:
-                        radius_b = shape_collision_radius[shape_b]
-                        half_extents_b = wp.vec3(radius_b, radius_b, radius_b)
-                        aabb_b_lower = pos_b - half_extents_b - gap_vec_b
-                        aabb_b_upper = pos_b + half_extents_b + gap_vec_b
-                    else:
-                        data_provider = SupportMapDataProvider()
-                        aabb_b_lower, aabb_b_upper = compute_tight_aabb_from_support(
-                            shape_data_b, quat_b, pos_b, data_provider
-                        )
-                        aabb_b_lower = aabb_b_lower - gap_vec_b
-                        aabb_b_upper = aabb_b_upper + gap_vec_b
-
-                # Compute bounding spheres and check for overlap (early rejection)
-                bsphere_center_a, bsphere_radius_a = compute_bounding_sphere_from_aabb(aabb_a_lower, aabb_a_upper)
-                bsphere_center_b, bsphere_radius_b = compute_bounding_sphere_from_aabb(aabb_b_lower, aabb_b_upper)
-
-                if not check_infinite_plane_bsphere_overlap(
-                    shape_data_a,
-                    shape_data_b,
-                    pos_a,
-                    pos_b,
-                    quat_a,
-                    quat_b,
-                    bsphere_center_a,
-                    bsphere_center_b,
-                    bsphere_radius_a,
-                    bsphere_radius_b,
-                ):
-                    continue
-
-            # Compute pairwise gap sum for contact detection
-            gap_a = shape_gap[shape_a]
-            gap_b = shape_gap[shape_b]
-            gap_sum = gap_a + gap_b
-
-            # Find and write contacts using GJK/MPR
+            # GJK/MPR contact computation (fully differentiable)
             wp.static(
-                create_find_contacts(writer_func, support_func=support_func, post_process_contact=post_process_contact)
+                create_find_contacts(
+                    writer_func,
+                    support_func=support_func,
+                    post_process_contact=post_process_contact,
+                )
             )(
                 pos_a,
                 pos_b,
@@ -822,8 +941,8 @@ def create_narrow_phase_kernel_gjk_mpr(
                 quat_b,
                 shape_data_a,
                 shape_data_b,
-                is_infinite_plane_a,
-                is_infinite_plane_b,
+                is_inf_plane_a != 0,
+                is_inf_plane_b != 0,
                 bsphere_radius_a,
                 bsphere_radius_b,
                 gap_sum,

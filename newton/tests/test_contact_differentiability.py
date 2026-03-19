@@ -470,6 +470,25 @@ def test_grad_sphere_sphere_xpbd(test, device):
         np.testing.assert_allclose(analytic, numeric, atol=5e-2, rtol=1e-1)
 
 
+def test_grad_box_box_xpbd(test, device):
+    """Box-box through GJK/MPR with differentiable collision inside the tape."""
+    with wp.ScopedDevice(device):
+        model, solver = _build_scene_two_bodies_xpbd(
+            "box", {"hx": 0.15, "hy": 0.15, "hz": 0.15}, (0.0, 0.0, 0.0),
+            "box", {"hx": 0.15, "hy": 0.15, "hz": 0.15}, (0.28, 0.0, 0.0),
+        )
+        state_0 = model.state(requires_grad=True)
+        contacts = model.contacts()
+        loss = wp.zeros(1, dtype=float, requires_grad=True)
+        target = wp.vec3(-0.5, 0.0, 0.0)
+        dt = 1.0 / 60.0
+
+        numeric, analytic = _check_grad_body_q_xpbd(
+            model, solver, state_0, contacts, dt, target, body_idx=0, loss=loss,
+        )
+        np.testing.assert_allclose(analytic, numeric, atol=1e-1, rtol=2e-1)
+
+
 def test_grad_optimization_converges_xpbd(test, device):
     """Run a few gradient-descent steps with XPBD and verify the loss decreases."""
     with wp.ScopedDevice(device):
@@ -524,6 +543,7 @@ add_function_test(TestContactDifferentiability, "test_grad_optimization_converge
 add_function_test(TestContactDifferentiability, "test_grad_sphere_on_plane_xpbd", test_grad_sphere_on_plane_xpbd, devices=get_selected_cuda_test_devices(), check_output=False)
 add_function_test(TestContactDifferentiability, "test_grad_box_on_plane_xpbd", test_grad_box_on_plane_xpbd, devices=get_selected_cuda_test_devices(), check_output=False)
 add_function_test(TestContactDifferentiability, "test_grad_sphere_sphere_xpbd", test_grad_sphere_sphere_xpbd, devices=get_selected_cuda_test_devices(), check_output=False)
+add_function_test(TestContactDifferentiability, "test_grad_box_box_xpbd", test_grad_box_box_xpbd, devices=get_selected_cuda_test_devices(), check_output=False)
 add_function_test(TestContactDifferentiability, "test_grad_optimization_converges_xpbd", test_grad_optimization_converges_xpbd, devices=get_selected_cuda_test_devices(), check_output=False)
 
 
