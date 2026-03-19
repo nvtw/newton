@@ -388,13 +388,13 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
         # Uses the normalized variant from Coal which is robust for shapes
         # with flat faces.
         #
-        # Momentum starts at iteration >= 3 because with fewer simplex
-        # vertices, the momentum direction can degenerate (same support
-        # twice, triggering the duplicate check).  Coal handles this via
-        # removeVertex+continue, but on GPU any extra branch in the hot
-        # loop kills occupancy.  After 3 vanilla iterations the simplex
-        # spans enough directions that Nesterov always produces fresh
-        # support queries.
+        # Momentum starts at iteration >= 3: with fewer vertices the two
+        # length() calls per Nesterov iteration cost more than they save
+        # (simplex projection on 1-2 vertices is trivial).  When Nesterov
+        # is active the convergence and duplicate checks deactivate
+        # momentum instead of breaking — the (possibly stale) vertex is
+        # added harmlessly and the next vanilla iteration terminates
+        # normally.
         nesterov_dir = v
         w_prev = v
         use_nesterov = bool(True)
@@ -447,7 +447,6 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
                     use_nesterov = bool(False)
 
             # Check for convergence using Frank-Wolfe duality gap
-            # Skip check when using fallback direction to avoid premature exit
             if not used_fallback:
                 delta_dist = wp.dot(v, v - w_v)
                 if delta_dist < COLLIDE_EPSILON * wp.sqrt(dist_sq):
@@ -457,7 +456,6 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
             is_duplicate = bool(False)
             for i in range(4):
                 if (simplex_usage_mask & (wp.uint32(1) << wp.uint32(i))) != wp.uint32(0):
-                    # Compare BtoA vectors directly
                     if wp.length_sq(simplex_v[2 * i + 1] - w_v) < COLLIDE_EPSILON * COLLIDE_EPSILON:
                         is_duplicate = bool(True)
                         break
