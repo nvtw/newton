@@ -381,17 +381,18 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
 
         last_search_dir = wp.vec3(1.0, 0.0, 0.0)
 
-        # Polyak acceleration state (Coal: "Collision Detection Accelerated",
-        # HAL-03662157).  GJK is a Frank-Wolfe algorithm; applying Polyak
-        # momentum to the search direction reduces iteration count ~2x.
-        # Polyak is preferred over Nesterov on GPU because it needs no
-        # normalize calls and adds minimal register pressure.
-        # Momentum starts at iteration >= 4 so the simplex has a solid
-        # foundation: overlap detection is robust, and the first vertices
-        # closely match vanilla GJK, preserving normal accuracy for
+        # Nesterov acceleration state (Coal: "Collision Detection Accelerated",
+        # HAL-03662157).  GJK is a Frank-Wolfe algorithm; applying Nesterov
+        # momentum to the search direction can reduce iteration count up to
+        # 5x on non-strictly-convex shapes (boxes, convex meshes).
+        # Uses the normalized variant from Coal which is robust for shapes
+        # with flat faces.  Momentum starts at iteration >= 4 so the simplex
+        # has a solid foundation: overlap detection is robust, and the first
+        # vertices closely match vanilla GJK, preserving normal accuracy for
         # near-contacts (important for friction stability).
-        polyak_dir = v
-        use_polyak = bool(True)
+        nesterov_dir = v
+        w_prev = v
+        use_nesterov = bool(True)
         iteration = int(0)
 
         while iter_count > 0:
@@ -404,14 +405,22 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
                 point_a, point_b = simplex_get_closest(simplex_v, simplex_barycentric, simplex_usage_mask)
                 return False, point_a, point_b, normal, distance
 
-            # Determine search direction with Polyak acceleration.
+            # Determine search direction with Nesterov acceleration.
+            # Uses the normalized variant which is robust for non-strictly-convex
+            # shapes (flat faces on boxes and convex meshes).
             used_fallback = bool(False)
-            if use_polyak and iteration >= 4:
-                momentum = 1.0 / float(iteration + 1)
-                polyak_dir = momentum * polyak_dir + (1.0 - momentum) * v
-                search_dir = -polyak_dir
+            if use_nesterov and iteration >= 4:
+                momentum = float(iteration + 2) / float(iteration + 3)
+                y = momentum * v + (1.0 - momentum) * w_prev
+                y_len = wp.length(y)
+                nd_len = wp.length(nesterov_dir)
+                if y_len > EPSILON and nd_len > EPSILON:
+                    nesterov_dir = momentum * (nesterov_dir / nd_len) + (1.0 - momentum) * (y / y_len)
+                    search_dir = -nesterov_dir
+                else:
+                    search_dir = -v
             else:
-                polyak_dir = v
+                nesterov_dir = v
                 search_dir = -v
             if wp.length_sq(search_dir) < 1.0e-12:
                 search_dir = wp.vec3(1.0, 0.0, 0.0)
@@ -427,12 +436,12 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
             # Use BtoA directly (Minkowski difference)
             w_v = w.BtoA
 
-            # Polyak deactivation: when the duality gap is small, stop
+            # Nesterov deactivation: when the duality gap is small, stop
             # momentum to let vanilla GJK converge precisely.
-            if use_polyak and iteration >= 4:
+            if use_nesterov and iteration >= 4:
                 duality_gap = 2.0 * wp.dot(v, v - w_v)
                 if duality_gap <= COLLIDE_EPSILON * wp.sqrt(dist_sq):
-                    use_polyak = bool(False)
+                    use_nesterov = bool(False)
 
             if not used_fallback:
                 delta_dist = wp.dot(v, v - w_v)
@@ -513,6 +522,7 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
 
             v = new_v
             dist_sq = wp.length_sq(v)
+            w_prev = w_v
             iteration += 1
 
         distance = wp.sqrt(dist_sq)
