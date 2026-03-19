@@ -320,7 +320,7 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
 
         return point_a, point_b
 
-    @wp.func
+    @wp.func(enable_backward=False)
     def solve_closest_distance_core(
         geom_a: Any,
         geom_b: Any,

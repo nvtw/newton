@@ -214,7 +214,7 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
     else:
         _support_map_b, minkowski_support, geometric_center = create_support_map_function(support_func)
 
-    @wp.func
+    @wp.func(enable_backward=False)
     def solve_mpr_core(
         geom_a: Any,
         geom_b: Any,
