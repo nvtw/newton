@@ -83,9 +83,11 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
             data_provider,
         )
 
-        if not collision:
+        if collision:
+            signed_distance = -penetration + enlarge
+        else:
             # GJK fallback for separated shapes -- proven accurate normals/distances.
-            _separated, point_a, point_b, normal, _dist = wp.static(solve_gjk.core)(
+            _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
                 geom_a,
                 geom_b,
                 relative_orientation_b,
@@ -98,9 +100,6 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
         # transform so gradients flow to both body poses.
         point_b_local = _to_b_frame(point_b, relative_orientation_b, relative_position_b)
         point_b = wp.quat_rotate(relative_orientation_b, point_b_local) + relative_position_b
-        signed_distance = wp.dot(point_b - point_a, normal)
-        if collision:
-            signed_distance = signed_distance + enlarge
 
         if skip_multi_contact or signed_distance > contact_threshold:
             # Transform to world space only for the single-contact early-out.
@@ -182,9 +181,11 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
             data_provider,
         )
 
-        if not collision:
+        if collision:
+            signed_distance = -penetration + enlarge
+        else:
             # GJK fallback for separated shapes.
-            _separated, point_a, point_b, normal, _dist = wp.static(solve_gjk.core)(
+            _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
                 geom_a,
                 geom_b,
                 relative_orientation_b,
@@ -199,9 +200,6 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
         # the relative pose at convergence.
         point_b_local = _to_b_frame(point_b, relative_orientation_b, relative_position_b)
         point_b = wp.quat_rotate(relative_orientation_b, point_b_local) + relative_position_b
-        signed_distance = wp.dot(point_b - point_a, normal)
-        if collision:
-            signed_distance = signed_distance + enlarge
 
         # Transform results back to world space (once).
         point = 0.5 * (point_a + point_b)
