@@ -137,6 +137,195 @@ def write_contact_simple(
         writer_data.contact_tangent[index] = wp.normalize(world_x - wp.dot(world_x, normal) * normal)
 
 
+_PAIR_SKIP = int(0)
+_PAIR_PRIMITIVE = int(1)
+
+
+@wp.func(enable_backward=False)
+def _classify_and_route_pair(
+    t: int,
+    candidate_pair: wp.array(dtype=wp.vec2i),
+    num_work_items: int,
+    shape_types: wp.array(dtype=int),
+    shape_data: wp.array(dtype=wp.vec4),
+    shape_source: wp.array(dtype=wp.uint64),
+    shape_flags: wp.array(dtype=wp.int32),
+    shape_gap: wp.array(dtype=float),
+    gjk_candidate_pairs: wp.array(dtype=wp.vec2i),
+    gjk_candidate_pairs_count: wp.array(dtype=int),
+    shape_pairs_mesh: wp.array(dtype=wp.vec2i),
+    shape_pairs_mesh_count: wp.array(dtype=int),
+    shape_pairs_mesh_plane: wp.array(dtype=wp.vec2i),
+    shape_pairs_mesh_plane_cumsum: wp.array(dtype=int),
+    shape_pairs_mesh_plane_count: wp.array(dtype=int),
+    mesh_plane_vertex_total_count: wp.array(dtype=int),
+    shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
+    shape_pairs_mesh_mesh_count: wp.array(dtype=int),
+    shape_pairs_sdf_sdf: wp.array(dtype=wp.vec2i),
+    shape_pairs_sdf_sdf_count: wp.array(dtype=int),
+):
+    """Classify a candidate pair and route non-primitive pairs to specialized buffers.
+
+    Performs all discrete routing decisions (hydroelastic, heightfield, mesh, GJK)
+    and reads non-differentiable shape data (scale, margin, gap). Transform reads
+    are deferred to the caller so gradients can flow through body poses.
+
+    Returns:
+        Tuple of (shape_a, shape_b, type_a, type_b, scale_a, scale_b,
+        margin_offset_a, margin_offset_b, gap_sum, radius_eff_a, radius_eff_b,
+        pair_type) where pair_type is _PAIR_SKIP or _PAIR_PRIMITIVE.
+    """
+    skip = (
+        int(0), int(0), int(0), int(0),
+        wp.vec3(), wp.vec3(), float(0.0), float(0.0),
+        float(0.0), float(0.0), float(0.0), _PAIR_SKIP,
+    )
+
+    if t >= num_work_items:
+        return skip
+
+    pair = candidate_pair[t]
+    shape_a = pair[0]
+    shape_b = pair[1]
+
+    if shape_a == shape_b or shape_a < 0 or shape_b < 0:
+        return skip
+
+    type_a = shape_types[shape_a]
+    type_b = shape_types[shape_b]
+
+    if type_a > type_b:
+        shape_a, shape_b = shape_b, shape_a
+        type_a, type_b = type_b, type_a
+
+    # --- Hydroelastic routing ---
+    is_hydro_a = (shape_flags[shape_a] & ShapeFlags.HYDROELASTIC) != 0
+    is_hydro_b = (shape_flags[shape_b] & ShapeFlags.HYDROELASTIC) != 0
+    if is_hydro_a and is_hydro_b and shape_pairs_sdf_sdf:
+        idx = wp.atomic_add(shape_pairs_sdf_sdf_count, 0, 1)
+        if idx < shape_pairs_sdf_sdf.shape[0]:
+            shape_pairs_sdf_sdf[idx] = wp.vec2i(shape_a, shape_b)
+        return skip
+
+    # Read non-differentiable shape data (scale, margin, gap)
+    data_a = shape_data[shape_a]
+    data_b = shape_data[shape_b]
+    scale_a = wp.vec3(data_a[0], data_a[1], data_a[2])
+    scale_b = wp.vec3(data_b[0], data_b[1], data_b[2])
+    margin_offset_a = data_a[3]
+    margin_offset_b = data_b[3]
+    gap_sum = shape_gap[shape_a] + shape_gap[shape_b]
+
+    # --- Heightfield routing ---
+    is_hfield_a = type_a == GeoType.HFIELD
+    is_hfield_b = type_b == GeoType.HFIELD
+
+    if is_hfield_a or is_hfield_b:
+        is_mesh_like_a = type_a == GeoType.MESH or is_hfield_a
+        is_mesh_like_b = type_b == GeoType.MESH or is_hfield_b
+
+        if is_mesh_like_a and is_mesh_like_b:
+            if is_hfield_a and is_hfield_b:
+                return skip
+            if is_hfield_b:
+                encoded_a = shape_b | SHAPE_PAIR_HFIELD_BIT
+                encoded_b = shape_a
+            elif is_hfield_a:
+                encoded_a = shape_a | SHAPE_PAIR_HFIELD_BIT
+                encoded_b = shape_b
+            else:
+                encoded_a = shape_a
+                encoded_b = shape_b
+            idx = wp.atomic_add(shape_pairs_mesh_mesh_count, 0, 1)
+            if idx < shape_pairs_mesh_mesh.shape[0]:
+                shape_pairs_mesh_mesh[idx] = wp.vec2i(encoded_a, encoded_b)
+            return skip
+
+        if is_hfield_a:
+            hf_pair = wp.vec2i(shape_a, shape_b)
+        else:
+            hf_pair = wp.vec2i(shape_b, shape_a)
+        idx = wp.atomic_add(shape_pairs_mesh_count, 0, 1)
+        if idx < shape_pairs_mesh.shape[0]:
+            shape_pairs_mesh[idx] = hf_pair
+        return skip
+
+    # --- Mesh routing ---
+    is_mesh_a = type_a == GeoType.MESH
+    is_mesh_b = type_b == GeoType.MESH
+    is_plane_a = type_a == GeoType.PLANE
+    is_infinite_plane_a = is_plane_a and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
+
+    if is_mesh_a and is_mesh_b:
+        idx = wp.atomic_add(shape_pairs_mesh_mesh_count, 0, 1)
+        if idx < shape_pairs_mesh_mesh.shape[0]:
+            shape_pairs_mesh_mesh[idx] = wp.vec2i(shape_a, shape_b)
+        return skip
+
+    if is_infinite_plane_a and is_mesh_b:
+        mesh_id = shape_source[shape_b]
+        if mesh_id != wp.uint64(0):
+            mesh_obj = wp.mesh_get(mesh_id)
+            vertex_count = mesh_obj.points.shape[0]
+            mesh_plane_idx = wp.atomic_add(shape_pairs_mesh_plane_count, 0, 1)
+            if mesh_plane_idx < shape_pairs_mesh_plane.shape[0]:
+                shape_pairs_mesh_plane[mesh_plane_idx] = wp.vec2i(shape_b, shape_a)
+                cumulative_count_before = wp.atomic_add(mesh_plane_vertex_total_count, 0, vertex_count)
+                shape_pairs_mesh_plane_cumsum[mesh_plane_idx] = cumulative_count_before + vertex_count
+        return skip
+
+    if is_mesh_a or is_mesh_b:
+        idx = wp.atomic_add(shape_pairs_mesh_count, 0, 1)
+        if idx < shape_pairs_mesh.shape[0]:
+            shape_pairs_mesh[idx] = wp.vec2i(shape_a, shape_b)
+        return skip
+
+    # --- Check if pair matches a primitive collision pattern ---
+    is_sphere_a = type_a == GeoType.SPHERE
+    is_capsule_a = type_a == GeoType.CAPSULE
+    is_primitive = False
+    if is_plane_a:
+        is_primitive = (
+            type_b == GeoType.SPHERE
+            or type_b == GeoType.CAPSULE
+            or type_b == GeoType.ELLIPSOID
+            or type_b == GeoType.CYLINDER
+            or type_b == GeoType.BOX
+        )
+    elif is_sphere_a:
+        is_primitive = (
+            type_b == GeoType.SPHERE
+            or type_b == GeoType.CAPSULE
+            or type_b == GeoType.CYLINDER
+            or type_b == GeoType.BOX
+        )
+    elif is_capsule_a:
+        is_primitive = type_b == GeoType.CAPSULE
+
+    if not is_primitive:
+        idx = wp.atomic_add(gjk_candidate_pairs_count, 0, 1)
+        if idx < gjk_candidate_pairs.shape[0]:
+            gjk_candidate_pairs[idx] = wp.vec2i(shape_a, shape_b)
+        return skip
+
+    # Compute effective radii (non-differentiable model parameters)
+    radius_eff_a = float(0.0)
+    radius_eff_b = float(0.0)
+    if is_sphere_a or is_capsule_a:
+        radius_eff_a = scale_a[0]
+    is_sphere_b = type_b == GeoType.SPHERE
+    is_capsule_b = type_b == GeoType.CAPSULE
+    if is_sphere_b or is_capsule_b:
+        radius_eff_b = scale_b[0]
+
+    result = (
+        shape_a, shape_b, type_a, type_b,
+        scale_a, scale_b, margin_offset_a, margin_offset_b,
+        gap_sum, radius_eff_a, radius_eff_b, _PAIR_PRIMITIVE,
+    )
+    return result
+
+
 def create_narrow_phase_primitive_kernel(writer_func: Any):
     """
     Create a kernel for fast analytical collision detection of primitive shapes.
@@ -146,6 +335,10 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
     instead of iterative GJK/MPR. Remaining pairs are routed to specialized buffers
     for mesh handling or to the GJK/MPR kernel for complex convex pairs.
 
+    The kernel is differentiable: routing logic runs inside a
+    ``wp.func(enable_backward=False)`` helper so that only the contact geometry
+    computation and writer generate adjoint code.
+
     Args:
         writer_func: Contact writer function (e.g., write_contact_simple)
 
@@ -153,7 +346,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
         A warp kernel for primitive collision detection
     """
 
-    @wp.kernel(enable_backward=False, module="unique")
+    @wp.kernel(module="unique")
     def narrow_phase_primitive_kernel(
         candidate_pair: wp.array(dtype=wp.vec2i),
         candidate_pair_count: wp.array(dtype=int),
@@ -199,136 +392,36 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             return
 
         for t in range(tid, num_work_items, total_num_threads):
-            # Get shape pair
-            pair = candidate_pair[t]
-            shape_a = pair[0]
-            shape_b = pair[1]
+            # Non-differentiable: classify pair and route non-primitive pairs
+            (
+                shape_a, shape_b, type_a, type_b,
+                scale_a, scale_b, margin_offset_a, margin_offset_b,
+                gap_sum, radius_eff_a, radius_eff_b, pair_type,
+            ) = _classify_and_route_pair(
+                t, candidate_pair, num_work_items,
+                shape_types, shape_data, shape_source, shape_flags, shape_gap,
+                gjk_candidate_pairs, gjk_candidate_pairs_count,
+                shape_pairs_mesh, shape_pairs_mesh_count,
+                shape_pairs_mesh_plane, shape_pairs_mesh_plane_cumsum,
+                shape_pairs_mesh_plane_count, mesh_plane_vertex_total_count,
+                shape_pairs_mesh_mesh, shape_pairs_mesh_mesh_count,
+                shape_pairs_sdf_sdf, shape_pairs_sdf_sdf_count,
+            )
 
-            # Safety: ignore self-collision and invalid pairs
-            if shape_a == shape_b or shape_a < 0 or shape_b < 0:
+            if pair_type == _PAIR_SKIP:
                 continue
 
-            # Get shape types
-            type_a = shape_types[shape_a]
-            type_b = shape_types[shape_b]
-
-            # Sort shapes by type to ensure consistent collision handling order
-            if type_a > type_b:
-                shape_a, shape_b = shape_b, shape_a
-                type_a, type_b = type_b, type_a
-
-            # Check if both shapes are hydroelastic - route to SDF-SDF pipeline
-            is_hydro_a = (shape_flags[shape_a] & ShapeFlags.HYDROELASTIC) != 0
-            is_hydro_b = (shape_flags[shape_b] & ShapeFlags.HYDROELASTIC) != 0
-            if is_hydro_a and is_hydro_b and shape_pairs_sdf_sdf:
-                idx = wp.atomic_add(shape_pairs_sdf_sdf_count, 0, 1)
-                if idx < shape_pairs_sdf_sdf.shape[0]:
-                    shape_pairs_sdf_sdf[idx] = wp.vec2i(shape_a, shape_b)
-                continue
-
-            # Get shape data
-            data_a = shape_data[shape_a]
-            data_b = shape_data[shape_b]
-            scale_a = wp.vec3(data_a[0], data_a[1], data_a[2])
-            scale_b = wp.vec3(data_b[0], data_b[1], data_b[2])
-            margin_offset_a = data_a[3]
-            margin_offset_b = data_b[3]
-
-            # Get transforms
+            # =================================================================
+            # Differentiable from here: read transforms (carry body_q gradients)
+            # =================================================================
             X_a = shape_transform[shape_a]
             X_b = shape_transform[shape_b]
             pos_a = wp.transform_get_translation(X_a)
             pos_b = wp.transform_get_translation(X_b)
             quat_a = wp.transform_get_rotation(X_a)
             quat_b = wp.transform_get_rotation(X_b)
-            gap_a = shape_gap[shape_a]
-            gap_b = shape_gap[shape_b]
-            gap_sum = gap_a + gap_b
 
-            # =====================================================================
-            # Route heightfield pairs.
-            # Heightfield-vs-mesh and heightfield-vs-heightfield go through the
-            # mesh-mesh SDF kernel (on-the-fly triangle + SDF evaluation).
-            # Other heightfield combinations (convex, plane) use the dedicated
-            # heightfield midphase with GJK/MPR per cell.
-            # =====================================================================
-            is_hfield_a = type_a == GeoType.HFIELD
-            is_hfield_b = type_b == GeoType.HFIELD
-
-            if is_hfield_a or is_hfield_b:
-                is_mesh_like_a = type_a == GeoType.MESH or is_hfield_a
-                is_mesh_like_b = type_b == GeoType.MESH or is_hfield_b
-
-                if is_mesh_like_a and is_mesh_like_b:
-                    # Heightfield-vs-heightfield is unsupported in this path.
-                    if is_hfield_a and is_hfield_b:
-                        continue
-                    # Normalize order so heightfield (if present) is always pair[0],
-                    # and mark pair[0] with a high-bit flag consumed by the SDF kernel.
-                    if is_hfield_b:
-                        encoded_a = shape_b | SHAPE_PAIR_HFIELD_BIT
-                        encoded_b = shape_a
-                    elif is_hfield_a:
-                        encoded_a = shape_a | SHAPE_PAIR_HFIELD_BIT
-                        encoded_b = shape_b
-                    else:
-                        encoded_a = shape_a
-                        encoded_b = shape_b
-                    idx = wp.atomic_add(shape_pairs_mesh_mesh_count, 0, 1)
-                    if idx < shape_pairs_mesh_mesh.shape[0]:
-                        shape_pairs_mesh_mesh[idx] = wp.vec2i(encoded_a, encoded_b)
-                    continue
-
-                # All other heightfield pairs: route through mesh midphase + GJK/MPR.
-                # Normalize so the heightfield is always pair[0].
-                if is_hfield_a:
-                    hf_pair = wp.vec2i(shape_a, shape_b)
-                else:
-                    hf_pair = wp.vec2i(shape_b, shape_a)
-                idx = wp.atomic_add(shape_pairs_mesh_count, 0, 1)
-                if idx < shape_pairs_mesh.shape[0]:
-                    shape_pairs_mesh[idx] = hf_pair
-                continue
-
-            # =====================================================================
-            # Route mesh pairs to specialized buffers
-            # =====================================================================
-            is_mesh_a = type_a == GeoType.MESH
-            is_mesh_b = type_b == GeoType.MESH
             is_plane_a = type_a == GeoType.PLANE
-            is_infinite_plane_a = is_plane_a and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
-
-            # Mesh-mesh collision
-            if is_mesh_a and is_mesh_b:
-                idx = wp.atomic_add(shape_pairs_mesh_mesh_count, 0, 1)
-                if idx < shape_pairs_mesh_mesh.shape[0]:
-                    shape_pairs_mesh_mesh[idx] = wp.vec2i(shape_a, shape_b)
-                continue
-
-            # Mesh-plane collision (infinite plane only)
-            if is_infinite_plane_a and is_mesh_b:
-                mesh_id = shape_source[shape_b]
-                if mesh_id != wp.uint64(0):
-                    mesh_obj = wp.mesh_get(mesh_id)
-                    vertex_count = mesh_obj.points.shape[0]
-                    mesh_plane_idx = wp.atomic_add(shape_pairs_mesh_plane_count, 0, 1)
-                    if mesh_plane_idx < shape_pairs_mesh_plane.shape[0]:
-                        # Store (mesh, plane)
-                        shape_pairs_mesh_plane[mesh_plane_idx] = wp.vec2i(shape_b, shape_a)
-                        cumulative_count_before = wp.atomic_add(mesh_plane_vertex_total_count, 0, vertex_count)
-                        shape_pairs_mesh_plane_cumsum[mesh_plane_idx] = cumulative_count_before + vertex_count
-                continue
-
-            # Mesh-convex collision
-            if is_mesh_a or is_mesh_b:
-                idx = wp.atomic_add(shape_pairs_mesh_count, 0, 1)
-                if idx < shape_pairs_mesh.shape[0]:
-                    shape_pairs_mesh[idx] = wp.vec2i(shape_a, shape_b)
-                continue
-
-            # =====================================================================
-            # Handle lightweight primitives analytically
-            # =====================================================================
             is_sphere_a = type_a == GeoType.SPHERE
             is_sphere_b = type_b == GeoType.SPHERE
             is_capsule_a = type_a == GeoType.CAPSULE
@@ -337,18 +430,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             is_cylinder_b = type_b == GeoType.CYLINDER
             is_box_b = type_b == GeoType.BOX
 
-            # Compute effective radii for spheres and capsules
-            # (radius that can be represented as Minkowski sum with a sphere)
-            radius_eff_a = float(0.0)
-            radius_eff_b = float(0.0)
-            if is_sphere_a or is_capsule_a:
-                radius_eff_a = scale_a[0]
-            if is_sphere_b or is_capsule_b:
-                radius_eff_b = scale_b[0]
-
             # Initialize contact result storage (up to 4 contacts).
-            # Distances default to MAXVAL so unused slots are automatically
-            # excluded by the unified num_contacts count after the if/elif chain.
             contact_dist_0 = float(MAXVAL)
             contact_dist_1 = float(MAXVAL)
             contact_dist_2 = float(MAXVAL)
@@ -519,7 +601,6 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 + int(contact_dist_3 < MAXVAL)
             )
             if num_contacts > 0:
-                # Prepare contact data (shared fields for both contacts)
                 contact_data = ContactData()
                 contact_data.contact_normal_a_to_b = contact_normal
                 contact_data.radius_eff_a = radius_eff_a
@@ -530,7 +611,6 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 contact_data.shape_b = shape_b
                 contact_data.gap_sum = gap_sum
 
-                # Check margin for all possible contacts
                 contact_0_valid = False
                 if contact_dist_0 < MAXVAL:
                     contact_data.contact_point_center = contact_pos_0
@@ -555,51 +635,34 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                     contact_data.contact_distance = contact_dist_3
                     contact_3_valid = contact_passes_gap_check(contact_data)
 
-                # Count valid contacts and allocate consecutive indices
                 num_valid = int(contact_0_valid) + int(contact_1_valid) + int(contact_2_valid) + int(contact_3_valid)
                 if num_valid > 0:
                     base_index = wp.atomic_add(writer_data.contact_count, 0, num_valid)
-                    # Do not invoke the writer callback for overflowing batches.
-                    # This keeps user-provided writers safe while still preserving
-                    # overflow visibility via contact_count > contact_max.
                     if base_index + num_valid > writer_data.contact_max:
                         continue
 
-                    # Write first contact if valid
                     if contact_0_valid:
                         contact_data.contact_point_center = contact_pos_0
                         contact_data.contact_distance = contact_dist_0
                         writer_func(contact_data, writer_data, base_index)
                         base_index += 1
 
-                    # Write second contact if valid
                     if contact_1_valid:
                         contact_data.contact_point_center = contact_pos_1
                         contact_data.contact_distance = contact_dist_1
                         writer_func(contact_data, writer_data, base_index)
                         base_index += 1
 
-                    # Write third contact if valid
                     if contact_2_valid:
                         contact_data.contact_point_center = contact_pos_2
                         contact_data.contact_distance = contact_dist_2
                         writer_func(contact_data, writer_data, base_index)
                         base_index += 1
 
-                    # Write fourth contact if valid
                     if contact_3_valid:
                         contact_data.contact_point_center = contact_pos_3
                         contact_data.contact_distance = contact_dist_3
                         writer_func(contact_data, writer_data, base_index)
-
-                continue
-
-            # =====================================================================
-            # Route remaining pairs to GJK/MPR kernel
-            # =====================================================================
-            idx = wp.atomic_add(gjk_candidate_pairs_count, 0, 1)
-            if idx < gjk_candidate_pairs.shape[0]:
-                gjk_candidate_pairs[idx] = wp.vec2i(shape_a, shape_b)
 
     return narrow_phase_primitive_kernel
 
@@ -1520,54 +1583,44 @@ class NarrowPhase:
 
         # Pre-allocate all intermediate buffers.
         # Counters live in one consolidated array for efficient zeroing.
+        # All counter/pair arrays are always allocated (zero-length when the
+        # feature is absent) so the differentiable primitive kernel never passes
+        # None to wp.launch, which would break wp.Tape backward.
         with wp.ScopedDevice(device):
             has_mesh_like = has_meshes or has_heightfields
-            n = 0  # counter index
-            gjk_idx = n
-            n += 1
-            sdf_sdf_idx = n
-            n += 1
-            mesh_like_idx = n if has_mesh_like else None
-            n += 2 if has_mesh_like else 0  # mesh_like pairs, triangle pairs
-            mesh_only_idx = n if has_meshes else None
-            n += 3 if has_meshes else 0  # mesh_plane, mesh_plane_vtx, mesh_mesh
-            c = wp.zeros(n, dtype=wp.int32, device=device)
+            gjk_idx = 0
+            sdf_sdf_idx = 1
+            mesh_like_idx = 2
+            mesh_only_idx = 4
+            num_counters = 7  # gjk, sdf_sdf, mesh_pairs, tri_pairs, mesh_plane, mesh_plane_vtx, mesh_mesh
+            c = wp.zeros(num_counters, dtype=wp.int32, device=device)
             self._counter_array = c
 
             self.gjk_candidate_pairs_count = c[gjk_idx : gjk_idx + 1]
             self.shape_pairs_sdf_sdf_count = c[sdf_sdf_idx : sdf_sdf_idx + 1]
-            self.shape_pairs_mesh_count = c[mesh_like_idx : mesh_like_idx + 1] if has_mesh_like else None
-            self.triangle_pairs_count = c[mesh_like_idx + 1 : mesh_like_idx + 2] if has_mesh_like else None
-            self.shape_pairs_mesh_plane_count = c[mesh_only_idx : mesh_only_idx + 1] if has_meshes else None
-            self.mesh_plane_vertex_total_count = c[mesh_only_idx + 1 : mesh_only_idx + 2] if has_meshes else None
-            self.shape_pairs_mesh_mesh_count = c[mesh_only_idx + 2 : mesh_only_idx + 3] if has_meshes else None
+            self.shape_pairs_mesh_count = c[mesh_like_idx : mesh_like_idx + 1]
+            self.triangle_pairs_count = c[mesh_like_idx + 1 : mesh_like_idx + 2]
+            self.shape_pairs_mesh_plane_count = c[mesh_only_idx : mesh_only_idx + 1]
+            self.mesh_plane_vertex_total_count = c[mesh_only_idx + 1 : mesh_only_idx + 2]
+            self.shape_pairs_mesh_mesh_count = c[mesh_only_idx + 2 : mesh_only_idx + 3]
 
-            # Pair and work buffers
+            # Pair and work buffers (zero-length when the feature is absent)
             self.gjk_candidate_pairs = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
 
-            self.shape_pairs_mesh = (
-                wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device) if has_mesh_like else None
+            mesh_like_cap = max_candidate_pairs if has_mesh_like else 0
+            mesh_only_cap = max_candidate_pairs if has_meshes else 0
+            self.shape_pairs_mesh = wp.zeros(mesh_like_cap, dtype=wp.vec2i, device=device)
+            self.triangle_pairs = wp.zeros(
+                max_triangle_pairs if has_mesh_like else 0, dtype=wp.vec3i, device=device
             )
-            self.triangle_pairs = (
-                wp.zeros(max_triangle_pairs, dtype=wp.vec3i, device=device) if has_meshes or has_heightfields else None
-            )
-            self.shape_pairs_mesh_plane = (
-                wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device) if has_meshes else None
-            )
-            self.shape_pairs_mesh_plane_cumsum = (
-                wp.zeros(max_candidate_pairs, dtype=wp.int32, device=device) if has_meshes else None
-            )
-            self.shape_pairs_mesh_mesh = (
-                wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device) if has_meshes else None
-            )
+            self.shape_pairs_mesh_plane = wp.zeros(mesh_only_cap, dtype=wp.vec2i, device=device)
+            self.shape_pairs_mesh_plane_cumsum = wp.zeros(mesh_only_cap, dtype=wp.int32, device=device)
+            self.shape_pairs_mesh_mesh = wp.zeros(mesh_only_cap, dtype=wp.vec2i, device=device)
 
             self.empty_tangent = None
 
-            if hydroelastic_sdf is not None:
-                self.shape_pairs_sdf_sdf = wp.zeros(hydroelastic_sdf.max_num_shape_pairs, dtype=wp.vec2i, device=device)
-            else:
-                # Empty arrays for when hydroelastic is disabled
-                self.shape_pairs_sdf_sdf = None
+            sdf_sdf_cap = hydroelastic_sdf.max_num_shape_pairs if hydroelastic_sdf is not None else 0
+            self.shape_pairs_sdf_sdf = wp.zeros(sdf_sdf_cap, dtype=wp.vec2i, device=device)
 
         # Fixed thread count for kernel launches
         # Use a reasonable minimum for GPU occupancy (256 blocks = 32K threads)
