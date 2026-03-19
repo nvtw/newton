@@ -489,6 +489,105 @@ def test_grad_box_box_xpbd(test, device):
         np.testing.assert_allclose(analytic, numeric, atol=1e-1, rtol=2e-1)
 
 
+def test_grad_box_box_body_b_xpbd(test, device):
+    """Check gradient of body B in a box-box (GJK/MPR) collision.
+
+    This verifies the Envelope Theorem replay: gradients must flow through
+    the collision detection to body B's pose, not just body A's.
+    """
+    with wp.ScopedDevice(device):
+        model, solver = _build_scene_two_bodies_xpbd(
+            "box", {"hx": 0.15, "hy": 0.15, "hz": 0.15}, (0.0, 0.0, 0.0),
+            "box", {"hx": 0.15, "hy": 0.15, "hz": 0.15}, (0.28, 0.0, 0.0),
+        )
+        state_0 = model.state(requires_grad=True)
+        contacts = model.contacts()
+        loss = wp.zeros(1, dtype=float, requires_grad=True)
+        target = wp.vec3(0.8, 0.0, 0.0)
+        dt = 1.0 / 60.0
+
+        numeric, analytic = _check_grad_body_q_xpbd(
+            model, solver, state_0, contacts, dt, target, body_idx=1, loss=loss,
+        )
+        np.testing.assert_allclose(analytic, numeric, atol=1e-1, rtol=2e-1)
+
+
+def test_grad_box_box_separated_xpbd(test, device):
+    """Two separated boxes within the contact gap — exercises the GJK path.
+
+    When shapes don't overlap, MPR returns no collision and the GJK fallback
+    computes the speculative contact.  This verifies the Envelope Theorem
+    replay for the GJK branch (as opposed to the MPR branch tested above).
+    """
+    with wp.ScopedDevice(device):
+        model, solver = _build_scene_two_bodies_xpbd(
+            "box", {"hx": 0.15, "hy": 0.15, "hz": 0.15}, (0.0, 0.0, 0.0),
+            "box", {"hx": 0.15, "hy": 0.15, "hz": 0.15}, (0.35, 0.0, 0.0),
+        )
+        state_0 = model.state(requires_grad=True)
+        contacts = model.contacts()
+        loss = wp.zeros(1, dtype=float, requires_grad=True)
+        target = wp.vec3(-0.5, 0.0, 0.0)
+        dt = 1.0 / 60.0
+
+        numeric, analytic = _check_grad_body_q_xpbd(
+            model, solver, state_0, contacts, dt, target, body_idx=0, loss=loss,
+        )
+        np.testing.assert_allclose(analytic, numeric, atol=1e-1, rtol=2e-1)
+
+
+def test_grad_capsule_capsule_xpbd(test, device):
+    """Capsule-capsule through GJK/MPR — different support function than box."""
+    with wp.ScopedDevice(device):
+        model, solver = _build_scene_two_bodies_xpbd(
+            "capsule", {"radius": 0.1, "half_height": 0.2}, (0.0, 0.0, 0.0),
+            "capsule", {"radius": 0.1, "half_height": 0.2}, (0.18, 0.0, 0.0),
+        )
+        state_0 = model.state(requires_grad=True)
+        contacts = model.contacts()
+        loss = wp.zeros(1, dtype=float, requires_grad=True)
+        target = wp.vec3(-0.5, 0.0, 0.0)
+        dt = 1.0 / 60.0
+
+        numeric, analytic = _check_grad_body_q_xpbd(
+            model, solver, state_0, contacts, dt, target, body_idx=0, loss=loss,
+        )
+        np.testing.assert_allclose(analytic, numeric, atol=1e-1, rtol=2e-1)
+
+
+def test_grad_box_box_rotated_xpbd(test, device):
+    """Rotated box-box with off-axis contact normal.
+
+    Tests gradient flow through orientation-dependent relative transforms,
+    ensuring the Envelope Theorem replay handles non-trivial rotations.
+    """
+    with wp.ScopedDevice(device):
+        rot_45 = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 0.785)
+        builder = newton.ModelBuilder()
+        builder.default_shape_cfg = newton.ModelBuilder.ShapeConfig(ke=1.0e4, kd=1.0e1, mu=0.5)
+
+        body_a = builder.add_body(xform=wp.transform((0.0, 0.0, 0.0), rot_45))
+        body_b = builder.add_body(xform=wp.transform((0.35, 0.1, 0.0), wp.quat_identity()))
+
+        builder.add_shape_box(body=body_a, hx=0.15, hy=0.15, hz=0.15)
+        builder.add_shape_box(body=body_b, hx=0.15, hy=0.15, hz=0.15)
+
+        model = builder.finalize(requires_grad=True)
+        model.set_gravity((0.0, 0.0, 0.0))
+        solver = newton.solvers.SolverXPBD(model)
+
+        state_0 = model.state(requires_grad=True)
+        contacts = model.contacts()
+        loss = wp.zeros(1, dtype=float, requires_grad=True)
+        target = wp.vec3(-0.5, -0.3, 0.0)
+        dt = 1.0 / 60.0
+
+        numeric, analytic = _check_grad_body_q_xpbd(
+            model, solver, state_0, contacts, dt, target, body_idx=0, loss=loss,
+        )
+        np.testing.assert_allclose(analytic, numeric, atol=1e-1, rtol=2e-1)
+
+
 def test_grad_optimization_converges_xpbd(test, device):
     """Run a few gradient-descent steps with XPBD and verify the loss decreases."""
     with wp.ScopedDevice(device):
@@ -544,6 +643,10 @@ add_function_test(TestContactDifferentiability, "test_grad_sphere_on_plane_xpbd"
 add_function_test(TestContactDifferentiability, "test_grad_box_on_plane_xpbd", test_grad_box_on_plane_xpbd, devices=get_selected_cuda_test_devices(), check_output=False)
 add_function_test(TestContactDifferentiability, "test_grad_sphere_sphere_xpbd", test_grad_sphere_sphere_xpbd, devices=get_selected_cuda_test_devices(), check_output=False)
 add_function_test(TestContactDifferentiability, "test_grad_box_box_xpbd", test_grad_box_box_xpbd, devices=get_selected_cuda_test_devices(), check_output=False)
+add_function_test(TestContactDifferentiability, "test_grad_box_box_body_b_xpbd", test_grad_box_box_body_b_xpbd, devices=get_selected_cuda_test_devices(), check_output=False)
+add_function_test(TestContactDifferentiability, "test_grad_box_box_separated_xpbd", test_grad_box_box_separated_xpbd, devices=get_selected_cuda_test_devices(), check_output=False)
+add_function_test(TestContactDifferentiability, "test_grad_capsule_capsule_xpbd", test_grad_capsule_capsule_xpbd, devices=get_selected_cuda_test_devices(), check_output=False)
+add_function_test(TestContactDifferentiability, "test_grad_box_box_rotated_xpbd", test_grad_box_box_rotated_xpbd, devices=get_selected_cuda_test_devices(), check_output=False)
 add_function_test(TestContactDifferentiability, "test_grad_optimization_converges_xpbd", test_grad_optimization_converges_xpbd, devices=get_selected_cuda_test_devices(), check_output=False)
 
 

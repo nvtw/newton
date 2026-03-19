@@ -35,6 +35,12 @@ from .multicontact import create_build_manifold
 from .simplex_solver import create_solve_closest_distance
 
 
+@wp.func(enable_backward=False)
+def _to_b_frame(point_a_frame: wp.vec3, rel_orient: wp.quat, rel_pos: wp.vec3) -> wp.vec3:
+    """Convert a point from shape-A's local frame to shape-B's local frame."""
+    return wp.quat_rotate_inv(rel_orient, point_a_frame - rel_pos)
+
+
 def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_process_contact: Any):
     """Factory: fused MPR+GJK multi-contact solver with shared support code."""
 
@@ -77,11 +83,9 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
             data_provider,
         )
 
-        if collision:
-            signed_distance = -penetration + enlarge
-        else:
+        if not collision:
             # GJK fallback for separated shapes -- proven accurate normals/distances.
-            _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
+            _separated, point_a, point_b, normal, _dist = wp.static(solve_gjk.core)(
                 geom_a,
                 geom_b,
                 relative_orientation_b,
@@ -89,6 +93,14 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
                 sum_of_contact_offsets,
                 data_provider,
             )
+
+        # Envelope Theorem: replay point_b through the differentiable relative
+        # transform so gradients flow to both body poses.
+        point_b_local = _to_b_frame(point_b, relative_orientation_b, relative_position_b)
+        point_b = wp.quat_rotate(relative_orientation_b, point_b_local) + relative_position_b
+        signed_distance = wp.dot(point_b - point_a, normal)
+        if collision:
+            signed_distance = signed_distance + enlarge
 
         if skip_multi_contact or signed_distance > contact_threshold:
             # Transform to world space only for the single-contact early-out.
@@ -170,11 +182,9 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
             data_provider,
         )
 
-        if collision:
-            signed_distance = -penetration + enlarge
-        else:
+        if not collision:
             # GJK fallback for separated shapes.
-            _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
+            _separated, point_a, point_b, normal, _dist = wp.static(solve_gjk.core)(
                 geom_a,
                 geom_b,
                 relative_orientation_b,
@@ -182,6 +192,16 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
                 sum_of_contact_offsets,
                 data_provider,
             )
+
+        # Envelope Theorem: replay point_b through the differentiable relative
+        # transform so gradients flow to both body poses.  The solve is
+        # non-differentiable but the contact geometry depends smoothly on
+        # the relative pose at convergence.
+        point_b_local = _to_b_frame(point_b, relative_orientation_b, relative_position_b)
+        point_b = wp.quat_rotate(relative_orientation_b, point_b_local) + relative_position_b
+        signed_distance = wp.dot(point_b - point_a, normal)
+        if collision:
+            signed_distance = signed_distance + enlarge
 
         # Transform results back to world space (once).
         point = 0.5 * (point_a + point_b)
