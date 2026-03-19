@@ -62,30 +62,26 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
         relative_orientation_b = wp.quat_inverse(orientation_a) * orientation_b
         relative_position_b = wp.quat_rotate_inv(orientation_a, position_b - position_a)
 
-        # GJK first with Nesterov acceleration and a small negative extend.
-        # The negative extend shrinks both shapes by enlarge/2, so overlaps
-        # up to enlarge appear as separations to GJK.  This lets the
-        # Nesterov-accelerated GJK handle separated AND near-contact shapes
-        # in one pass.  MPR only runs for deep penetrations (> enlarge).
-        # At the transition boundary (actual penetration ≈ enlarge), both
-        # algorithms report signed_distance ≈ -enlarge, avoiding jitter.
+        # Enlarge a little bit to avoid contact flickering when the signed distance is close to 0.
+        # This ensures MPR consistently detects resting contacts, preventing alternation between
+        # MPR and GJK across frames for near-touching shapes.
         enlarge = 1e-4
-        _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
+        # MPR with small inflate for overlapping shapes.
+        # Exits early (few support queries) when shapes are separated.
+        collision, point_a, point_b, normal, penetration = wp.static(solve_mpr.core)(
             geom_a,
             geom_b,
             relative_orientation_b,
             relative_position_b,
-            sum_of_contact_offsets - enlarge,
+            sum_of_contact_offsets + enlarge,
             data_provider,
         )
 
-        if _separated:
-            # GJK handled it -- undo the shrinkage in the distance.
-            # Midpoint and normal are unaffected (shrinkage cancels in midpoint).
-            signed_distance = signed_distance - enlarge
+        if collision:
+            signed_distance = -penetration + enlarge
         else:
-            # Deep overlap beyond enlarge -- MPR for penetration depth.
-            collision, point_a, point_b, normal, penetration = wp.static(solve_mpr.core)(
+            # GJK fallback for separated shapes -- Nesterov-accelerated.
+            _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
                 geom_a,
                 geom_b,
                 relative_orientation_b,
@@ -93,10 +89,6 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
                 sum_of_contact_offsets,
                 data_provider,
             )
-            if collision:
-                signed_distance = -penetration
-            else:
-                signed_distance = 0.0
 
         if skip_multi_contact or signed_distance > contact_threshold:
             # Transform to world space only for the single-contact early-out.
@@ -164,22 +156,25 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
         relative_orientation_b = wp.quat_inverse(orientation_a) * orientation_b
         relative_position_b = wp.quat_rotate_inv(orientation_a, position_b - position_a)
 
-        # GJK first with Nesterov acceleration and a small negative extend.
-        # See solve_convex_multi_contact for the full rationale.
+        # Enlarge a little bit to avoid contact flickering when the signed distance is close to 0.
+        # This ensures MPR consistently detects resting contacts, preventing alternation between
+        # MPR and GJK across frames for near-touching shapes.
         enlarge = 1e-4
-        _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
+        # MPR with small inflate for overlapping shapes.
+        collision, point_a, point_b, normal, penetration = wp.static(solve_mpr.core)(
             geom_a,
             geom_b,
             relative_orientation_b,
             relative_position_b,
-            sum_of_contact_offsets - enlarge,
+            sum_of_contact_offsets + enlarge,
             data_provider,
         )
 
-        if _separated:
-            signed_distance = signed_distance - enlarge
+        if collision:
+            signed_distance = -penetration + enlarge
         else:
-            collision, point_a, point_b, normal, penetration = wp.static(solve_mpr.core)(
+            # GJK fallback for separated shapes -- Nesterov-accelerated.
+            _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
                 geom_a,
                 geom_b,
                 relative_orientation_b,
@@ -187,10 +182,6 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
                 sum_of_contact_offsets,
                 data_provider,
             )
-            if collision:
-                signed_distance = -penetration
-            else:
-                signed_distance = 0.0
 
         # Transform results back to world space (once).
         point = 0.5 * (point_a + point_b)

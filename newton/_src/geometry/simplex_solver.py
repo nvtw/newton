@@ -386,10 +386,15 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
         # momentum to the search direction can reduce iteration count up to
         # 5x on non-strictly-convex shapes (boxes, convex meshes).
         # Uses the normalized variant from Coal which is robust for shapes
-        # with flat faces.  Momentum starts at iteration >= 3 so the simplex
-        # has a solid foundation: overlap detection is robust, and the first
-        # vertices closely match vanilla GJK, preserving normal accuracy for
-        # near-contacts (important for friction stability).
+        # with flat faces.
+        #
+        # Momentum starts at iteration >= 3 because with fewer simplex
+        # vertices, the momentum direction can degenerate (same support
+        # twice, triggering the duplicate check).  Coal handles this via
+        # removeVertex+continue, but on GPU any extra branch in the hot
+        # loop kills occupancy.  After 3 vanilla iterations the simplex
+        # spans enough directions that Nesterov always produces fresh
+        # support queries.
         nesterov_dir = v
         w_prev = v
         use_nesterov = bool(True)
@@ -431,8 +436,6 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
             # Get support point in search direction
             w = minkowski_support(geom_a, geom_b, search_dir, orientation_b, position_b, extend, data_provider)
 
-            # Check for convergence using Frank-Wolfe duality gap
-            # Skip check when using fallback direction to avoid premature exit
             # Use BtoA directly (Minkowski difference)
             w_v = w.BtoA
 
@@ -443,6 +446,8 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
                 if duality_gap <= COLLIDE_EPSILON * wp.sqrt(dist_sq):
                     use_nesterov = bool(False)
 
+            # Check for convergence using Frank-Wolfe duality gap
+            # Skip check when using fallback direction to avoid premature exit
             if not used_fallback:
                 delta_dist = wp.dot(v, v - w_v)
                 if delta_dist < COLLIDE_EPSILON * wp.sqrt(dist_sq):
