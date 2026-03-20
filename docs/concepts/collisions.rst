@@ -93,7 +93,7 @@ descriptors that decouple the solver from the underlying shape complexity. A mes
 contain hundreds of thousands of triangles, but the collision pipeline distills the
 interaction into a manageable number of contacts that the solver can process efficiently.
 
-Each contact stores:
+Each contact carries the following geometric data:
 
 .. figure:: ../images/contact_model.svg
    :alt: Contact geometry: normal, contact points, contact distance
@@ -102,8 +102,9 @@ Each contact stores:
 
    A contact between two shapes (A and B). The **contact normal** (blue, unit length)
    points from shape A to shape B. **Body-frame contact points** (yellow) are stored in
-   each body's local frame. The **contact center** (red) and **contact distance** encode
-   the signed separation or penetration depth.
+   each body's local frame. The **contact midpoint** (red) — the average of the two
+   world-space contact points — is not stored but is useful for visualization and
+   debugging. The **contact distance** encodes the signed separation or penetration depth.
 
 - **Contact normal** — a unit vector pointing from shape A toward shape B.
 - **Body-frame contact points** — the contact location on each shape
