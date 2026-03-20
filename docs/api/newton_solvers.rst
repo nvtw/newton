@@ -393,11 +393,6 @@ control, or model arrays. In practice, this starts by calling
     initial_velocity_grad = state_in.particle_qd.grad.numpy()
     assert float(initial_velocity_grad[0, 0]) < 0.0
 
-For rigid-body contact differentiation, Newton can also provide gradients of
-contact distance, world-space contact points, and (optionally) normal direction
-with respect to body poses.  See :ref:`Differentiable Contacts` in the
-collisions guide for details.
-
 See the `DiffSim examples on GitHub`_ for the current reference workflows.
 
 .. _DiffSim examples on GitHub: https://github.com/newton-physics/newton/tree/main/newton/examples/diffsim
