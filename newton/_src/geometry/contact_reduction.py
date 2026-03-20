@@ -57,14 +57,14 @@ import warp as wp
 #   "icosahedron"  -> 20 bins  (finer normal resolution)
 #   "octahedron"   ->  8 bins  (cheaper, coarser)
 #   "hexahedron"   ->  6 bins  (cheapest, coarsest)
-NORMAL_BINNING_POLYHEDRON = "dodecahedron"
+NORMAL_BINNING_POLYHEDRON = "icosahedron"
 
 # Scan directions per normal bin (2D extremes on each face plane).
 # Range 3-6. More directions = more accurate convex hull but more slots.
-NUM_SPATIAL_DIRECTIONS = 5
+NUM_SPATIAL_DIRECTIONS = 6
 
 # Voxel-based depth slots for spatial coverage.
-NUM_VOXEL_DEPTH_SLOTS = 50
+NUM_VOXEL_DEPTH_SLOTS = 100
 # =====================================================================
 
 # Hard architectural limit — keeps per-pair indices representable in 8 bits.

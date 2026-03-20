@@ -452,7 +452,7 @@ class Example:
             self.model,
             solver="newton",
             integrator="implicitfast",
-            iterations=20,
+            iterations=15,
             ls_iterations=100,
             nconmax=8000,
             njmax=16000,
@@ -587,14 +587,14 @@ class Example:
                 if solimp_attr is not None:
                     if solimp_attr.values is None:
                         solimp_attr.values = {}
-                    solimp_attr.values[shape_idx] = (0.7, 0.97, 0.0005, 0.5, 2.0)
+                    solimp_attr.values[shape_idx] = (0.6, 0.95, 0.00075, 0.5, 2.5)
 
     def add_bricks(self, scene):
         brick_cfg = newton.ModelBuilder.ShapeConfig(
             density=BRICK_DENSITY,
             ke=BRICK_KE,
             kd=BRICK_KD,
-            mu=1.0,
+            mu=0.7,
             margin=BRICK_MARGIN,
             gap=SDF_MARGIN,
         )
@@ -625,7 +625,7 @@ class Example:
             if solimp_attr is not None:
                 if solimp_attr.values is None:
                     solimp_attr.values = {}
-                solimp_attr.values[shape_idx] = (0.7, 0.97, 0.0005, 0.5, 2.0)
+                solimp_attr.values[shape_idx] = (0.6, 0.95, 0.00075, 0.5, 2.5)
             self.brick_bodies.append(body)
 
     # -- IK ------------------------------------------------------------------
