@@ -132,21 +132,13 @@ class Contacts:
             # is True.  Populated by the post-processing kernel in
             # :mod:`newton._src.geometry.differentiable_contacts`.
             if requires_grad:
-                self.rigid_contact_diff_distance = wp.zeros(
-                    rigid_contact_max, dtype=wp.float32, requires_grad=True
-                )
+                self.rigid_contact_diff_distance = wp.zeros(rigid_contact_max, dtype=wp.float32, requires_grad=True)
                 """Differentiable signed distance [m], shape (rigid_contact_max,), dtype float."""
-                self.rigid_contact_diff_normal = wp.zeros(
-                    rigid_contact_max, dtype=wp.vec3, requires_grad=True
-                )
+                self.rigid_contact_diff_normal = wp.zeros(rigid_contact_max, dtype=wp.vec3, requires_grad=True)
                 """Contact normal (A-to-B, world frame) [unitless], shape (rigid_contact_max,), dtype :class:`vec3`."""
-                self.rigid_contact_diff_point0_world = wp.zeros(
-                    rigid_contact_max, dtype=wp.vec3, requires_grad=True
-                )
+                self.rigid_contact_diff_point0_world = wp.zeros(rigid_contact_max, dtype=wp.vec3, requires_grad=True)
                 """World-space contact point on shape 0 [m], shape (rigid_contact_max,), dtype :class:`vec3`."""
-                self.rigid_contact_diff_point1_world = wp.zeros(
-                    rigid_contact_max, dtype=wp.vec3, requires_grad=True
-                )
+                self.rigid_contact_diff_point1_world = wp.zeros(rigid_contact_max, dtype=wp.vec3, requires_grad=True)
                 """World-space contact point on shape 1 [m], shape (rigid_contact_max,), dtype :class:`vec3`."""
             else:
                 self.rigid_contact_diff_distance = None

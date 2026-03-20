@@ -48,6 +48,30 @@ from __future__ import annotations
 import warp as wp
 
 
+@wp.func
+def _slerp_midpoint(q_a: wp.quat, q_b: wp.quat) -> wp.quat:
+    """Geodesic midpoint of two quaternions (specialised ``slerp`` at ``t = 0.5``).
+
+    For the general ``t`` the slerp formula
+    ``sin((1-t)θ) / sin(θ) · q_a + sin(tθ) / sin(θ) · q_b`` has a ``0/0``
+    singularity at ``θ = 0`` (identical orientations) whose automatic adjoint
+    in Warp produces zero gradients.
+
+    At ``t = 0.5`` the two coefficients are equal,
+    ``sin(θ/2) / sin(θ) = 1 / (2 cos(θ/2))``, so the result simplifies to
+    ``normalize((q_a + q_b) / (2 cos(θ/2)))``.  Since normalization removes
+    positive scalars this is **algebraically identical** to
+    ``normalize(q_a + q_b)`` — no approximation involved.  The sum
+    ``q_a + q_b`` has magnitude ``2 cos(θ/2)`` which is ``2`` when ``θ = 0``
+    (not zero), so the gradient of ``normalize`` is well-defined everywhere
+    except when the quaternions are antipodal (``θ = π``), which the
+    hemisphere-flip below prevents.
+    """
+    if wp.dot(q_a, q_b) < 0.0:
+        q_b = -q_b
+    return wp.normalize(q_a + q_b)
+
+
 @wp.kernel
 def differentiable_contact_augment_kernel(
     body_q: wp.array(dtype=wp.transform),
@@ -169,7 +193,7 @@ def _contact_normal_to_avg_frame_kernel(
     if body_b >= 0:
         q_b = wp.transform_get_rotation(body_q[body_b])
 
-    q_avg = wp.quat_slerp(q_a, q_b, 0.5)
+    q_avg = _slerp_midpoint(q_a, q_b)
     q_avg_inv = wp.quat_inverse(q_avg)
 
     out_normal_local[tid] = wp.quat_rotate(q_avg_inv, contact_normal[tid])
@@ -249,7 +273,7 @@ def differentiable_contact_augment_rotation_invariant_kernel(
 
     q_a = wp.transform_get_rotation(X_wb_a)
     q_b = wp.transform_get_rotation(X_wb_b)
-    q_avg = wp.quat_slerp(q_a, q_b, 0.5)
+    q_avg = _slerp_midpoint(q_a, q_b)
     n = wp.quat_rotate(q_avg, contact_normal_local[tid])
 
     thickness = contact_margin0[tid] + contact_margin1[tid]

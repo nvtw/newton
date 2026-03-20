@@ -914,4 +914,3 @@ class CollisionPipeline:
                 ],
                 device=self.device,
             )
-
