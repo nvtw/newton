@@ -1634,6 +1634,9 @@ class NarrowPhase:
         """
         Launch narrow phase collision detection with a custom contact writer struct.
 
+        All internal kernel launches use ``record_tape=False`` so that calls
+        are safe inside a :class:`warp.Tape` context.
+
         Args:
             candidate_pair: Array of potentially colliding shape pairs from broad phase
             candidate_pair_count: Single-element array containing the number of candidate pairs
@@ -1692,6 +1695,7 @@ class NarrowPhase:
             ],
             device=device,
             block_dim=self.block_dim,
+            record_tape=False,
         )
 
         # Stage 2: Launch GJK/MPR kernel for remaining convex pairs
@@ -1716,6 +1720,7 @@ class NarrowPhase:
             ],
             device=device,
             block_dim=self.block_dim,
+            record_tape=False,
         )
 
         # Skip mesh/heightfield kernels when no meshes or heightfields are present
@@ -1740,6 +1745,7 @@ class NarrowPhase:
                     ],
                     device=device,
                     block_dim=self.block_dim,
+                    record_tape=False,
                 )
 
             # Launch midphase: finds overlapping triangles for both mesh and heightfield pairs
@@ -1766,6 +1772,7 @@ class NarrowPhase:
                 ],
                 device=device,
                 block_dim=self.tile_size_mesh_convex,
+                record_tape=False,
             )
 
             # Launch contact processing for triangle pairs
@@ -1788,6 +1795,7 @@ class NarrowPhase:
                             self.mesh_plane_block_offsets,
                         ],
                         device=device,
+                        record_tape=False,
                     )
                     wp.launch_tiled(
                         kernel=self.mesh_plane_contacts_kernel,
@@ -1808,6 +1816,7 @@ class NarrowPhase:
                         ],
                         device=device,
                         block_dim=self.tile_size_mesh_plane,
+                        record_tape=False,
                     )
 
                 # Mesh/heightfield-triangle contacts → same global reducer
@@ -1830,6 +1839,7 @@ class NarrowPhase:
                     ],
                     device=device,
                     block_dim=self.block_dim,
+                    record_tape=False,
                 )
             else:
                 # Direct contact processing without reduction
@@ -1852,6 +1862,7 @@ class NarrowPhase:
                     ],
                     device=device,
                     block_dim=self.block_dim,
+                    record_tape=False,
                 )
 
             # Register mesh-plane/mesh-triangle contacts in hashtable BEFORE mesh-mesh.
@@ -1870,6 +1881,7 @@ class NarrowPhase:
                     ],
                     device=device,
                     block_dim=self.block_dim,
+                    record_tape=False,
                 )
 
             # Launch mesh-mesh contact processing kernel on CUDA.
@@ -1894,6 +1906,7 @@ class NarrowPhase:
                             self.mesh_mesh_block_offsets,
                         ],
                         device=device,
+                        record_tape=False,
                     )
 
                     wp.launch_tiled(
@@ -1920,6 +1933,7 @@ class NarrowPhase:
                         ],
                         device=device,
                         block_dim=self.tile_size_mesh_mesh,
+                        record_tape=False,
                     )
                 else:
                     # Non-reduce fallback: direct contact write, no dynamic allocation
@@ -1946,6 +1960,7 @@ class NarrowPhase:
                         ],
                         device=device,
                         block_dim=self.tile_size_mesh_mesh,
+                        record_tape=False,
                     )
 
             # Export reduced contacts from hashtable
@@ -1971,6 +1986,7 @@ class NarrowPhase:
                     ],
                     device=device,
                     block_dim=self.block_dim,
+                    record_tape=False,
                 )
         if self.hydroelastic_sdf is not None:
             self.hydroelastic_sdf.launch(
@@ -2009,6 +2025,7 @@ class NarrowPhase:
                 writer_data.contact_max,
             ],
             device=device,
+            record_tape=False,
         )
 
     def launch(

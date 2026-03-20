@@ -25,7 +25,10 @@ from ..geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from ..geometry.broad_phase_sap import BroadPhaseSAP
 from ..geometry.collision_core import compute_tight_aabb_from_support
 from ..geometry.contact_data import ContactData
-from ..geometry.differentiable_contacts import launch_differentiable_contact_augment
+from ..geometry.differentiable_contacts import (
+    launch_differentiable_contact_augment,
+    launch_differentiable_contact_augment_rotation_invariant,
+)
 from ..geometry.kernels import create_soft_contacts
 from ..geometry.narrow_phase import NarrowPhase
 from ..geometry.sdf_hydroelastic import HydroelasticSDF
@@ -151,7 +154,7 @@ def write_contact(
         writer_data.out_friction[index] = contact_data.contact_friction_scale
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def compute_shape_aabbs(
     body_q: wp.array(dtype=wp.transform),
     shape_transform: wp.array(dtype=wp.transform),
@@ -223,7 +226,7 @@ def compute_shape_aabbs(
         aabb_upper[shape_id] = aabb_max_world + margin_vec
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def prepare_geom_data_kernel(
     shape_transform: wp.array(dtype=wp.transform),
     shape_body: wp.array(dtype=int),
@@ -399,6 +402,7 @@ class CollisionPipeline:
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
         requires_grad: bool | None = None,
+        enable_contact_normal_gradients: bool = True,
         broad_phase: Literal["nxn", "sap", "explicit"]
         | BroadPhaseAllPairs
         | BroadPhaseSAP
@@ -427,6 +431,11 @@ class CollisionPipeline:
                 If None, computed as shape_count * particle_count.
             soft_contact_margin: Margin for soft contact generation. Defaults to 0.01.
             requires_grad: Whether to enable gradient computation. If None, uses model.requires_grad.
+            enable_contact_normal_gradients: When ``True`` (and ``requires_grad``
+                is also ``True``), use the rotation-invariant augmentation that
+                makes contact normals differentiable with respect to body
+                orientations.  Slightly more expensive than the default mode
+                which only provides gradients through contact points and distance.
             broad_phase:
                 Either a broad phase mode string ("explicit", "nxn", "sap") or
                 a prebuilt broad phase instance for expert usage.
@@ -477,6 +486,7 @@ class CollisionPipeline:
         self.device = device
         self.reduce_contacts = reduce_contacts
         self.requires_grad = requires_grad
+        self.enable_contact_normal_gradients = enable_contact_normal_gradients
         self.soft_contact_margin = soft_contact_margin
 
         using_expert_components = broad_phase_instance is not None or narrow_phase is not None
@@ -683,14 +693,25 @@ class CollisionPipeline:
         *,
         soft_contact_margin: float | None = None,
     ):
-        """
-        Run the collision pipeline using NarrowPhase.
+        """Run the collision pipeline using NarrowPhase.
+
+        Safe to call inside a :class:`wp.Tape` context.  The non-differentiable
+        broad-phase and narrow-phase kernels are launched with tape recording
+        hardcode ``record_tape=False`` internally.  The differentiable kernels
+        (soft-contact generation and rigid-contact augmentation) are recorded on
+        the tape so that gradients flow through ``state.body_q`` and
+        ``state.particle_q``.
+
+        When ``requires_grad=True``, the differentiable rigid-contact arrays
+        (``contacts.rigid_contact_diff_*``) are populated by a lightweight
+        augmentation kernel that reconstructs world-space contact points from
+        the frozen narrow-phase output through the body transforms.
 
         Args:
             state: The current simulation state.
             contacts: The contacts buffer to populate (will be cleared first).
-            soft_contact_margin: Margin for soft contact generation. If None, uses the value from construction.
-
+            soft_contact_margin: Margin for soft contact generation.
+                If ``None``, uses the value from construction.
         """
 
         contacts.clear()
@@ -704,8 +725,11 @@ class CollisionPipeline:
         soft_contact_margin = soft_contact_margin if soft_contact_margin is not None else self.soft_contact_margin
 
         # Rigid contact detection -- broad phase + narrow phase.
-        # Narrow-phase kernels use enable_backward=False so they are never recorded
-        # on a wp.Tape even when requires_grad is True.
+        # These kernels hardcode record_tape=False internally so they are
+        # never captured on an active wp.Tape.  The differentiable
+        # augmentation and soft-contact kernels that follow are tape-safe
+        # and recorded normally.
+
         # Compute AABBs for all shapes (already expanded by per-shape effective gaps)
         wp.launch(
             kernel=compute_shape_aabbs,
@@ -726,6 +750,7 @@ class CollisionPipeline:
                 self.narrow_phase.shape_aabb_upper,
             ],
             device=self.device,
+            record_tape=False,
         )
 
         # Run broad phase (AABBs are already expanded by effective gaps, so pass None)
@@ -786,6 +811,7 @@ class CollisionPipeline:
                 self.geom_transform,
             ],
             device=self.device,
+            record_tape=False,
         )
 
         # Create ContactWriterData struct for custom contact writing
@@ -833,6 +859,24 @@ class CollisionPipeline:
             device=self.device,
         )
 
+        # Differentiable contact augmentation: reconstruct world-space contact
+        # quantities through body_q so that gradients flow via wp.Tape.
+        if self.requires_grad and contacts.rigid_contact_diff_distance is not None:
+            if self.enable_contact_normal_gradients:
+                launch_differentiable_contact_augment_rotation_invariant(
+                    contacts=contacts,
+                    body_q=state.body_q,
+                    shape_body=model.shape_body,
+                    device=self.device,
+                )
+            else:
+                launch_differentiable_contact_augment(
+                    contacts=contacts,
+                    body_q=state.body_q,
+                    shape_body=model.shape_body,
+                    device=self.device,
+                )
+
         # Generate soft contacts for particles and shapes
         particle_count = len(state.particle_q) if state.particle_q else 0
         if state.particle_q and model.shape_count > 0:
@@ -871,40 +915,3 @@ class CollisionPipeline:
                 device=self.device,
             )
 
-    def eval_differentiable_contacts(
-        self,
-        state: State,
-        contacts: Contacts,
-    ):
-        """Populate differentiable rigid-contact arrays from frozen narrow-phase output.
-
-        This launches a lightweight kernel (``enable_backward=True``) that
-        reconstructs world-space contact points from body-local storage through
-        the **differentiable** body transforms ``state.body_q``, and computes
-        signed penetration distance as ``d = dot(n, bx_b - bx_a) - thickness``.
-
-        Call this **inside** a :class:`wp.Tape` context after :meth:`collide`
-        so that ``body_q`` gradients are recorded::
-
-            pipeline.collide(state, contacts)
-            with wp.Tape() as tape:
-                pipeline.eval_differentiable_contacts(state, contacts)
-                # ... compute loss from contacts.rigid_contact_diff_distance ...
-            tape.backward(...)
-
-        Requires ``requires_grad=True`` on the pipeline (and therefore on the
-        ``Contacts`` object).  Does nothing when the differentiable arrays are
-        not allocated.
-
-        Args:
-            state: Current simulation state (``body_q`` must have ``requires_grad=True``).
-            contacts: Contacts buffer previously populated by :meth:`collide`.
-        """
-        if contacts.rigid_contact_diff_distance is None:
-            return
-        launch_differentiable_contact_augment(
-            contacts=contacts,
-            body_q=state.body_q,
-            shape_body=self.model.shape_body,
-            device=self.device,
-        )
