@@ -16,8 +16,10 @@ import warp as wp
 
 from newton._src.geometry.contact_reduction import (
     DODECAHEDRON_FACE_NORMALS,
+    MAX_CONTACTS_PER_PAIR,
     NUM_NORMAL_BINS,
     NUM_SPATIAL_DIRECTIONS,
+    NUM_VOXEL_DEPTH_SLOTS,
     compute_num_reduction_slots,
     get_slot,
 )
@@ -88,10 +90,10 @@ def test_constants(test, device):
 
 
 def test_compute_num_reduction_slots(test, device):
-    """Test compute_num_reduction_slots calculation."""
-    # Formula: 12 bins * (5 directions + 1 max-depth) + 50 voxel slots
-    # 12 * 6 + 50 = 72 + 50 = 122
-    test.assertEqual(compute_num_reduction_slots(), 122)
+    """Test compute_num_reduction_slots and MAX_CONTACTS_PER_PAIR ceiling."""
+    expected = NUM_NORMAL_BINS * (NUM_SPATIAL_DIRECTIONS + 1) + NUM_VOXEL_DEPTH_SLOTS
+    test.assertEqual(compute_num_reduction_slots(), expected)
+    test.assertLessEqual(compute_num_reduction_slots(), MAX_CONTACTS_PER_PAIR)
 
 
 # =============================================================================

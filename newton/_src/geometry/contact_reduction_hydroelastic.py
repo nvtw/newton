@@ -221,7 +221,7 @@ def get_reduce_hydroelastic_contacts_kernel(skip_aggregates: bool = False):
             voxel_group = voxel_idx // voxels_per_group
             voxel_local_slot = voxel_idx % voxels_per_group
 
-            voxel_bin_id = NUM_NORMAL_BINS + voxel_group
+            voxel_bin_id = wp.static(NUM_NORMAL_BINS) + voxel_group
             voxel_key = make_contact_key(shape_a, shape_b, voxel_bin_id)
 
             voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)

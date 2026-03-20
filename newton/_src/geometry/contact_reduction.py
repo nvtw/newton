@@ -5,7 +5,16 @@
 
 This module provides constants, helper functions, and shared-memory utilities
 used by the contact reduction system. The reduction selects a representative
-subset (up to 122 contacts per pair) that preserves simulation stability.
+subset (up to ``MAX_CONTACTS_PER_PAIR`` contacts per shape pair) that preserves
+simulation stability.
+
+**Configuration:**
+
+Edit the constants in the "Contact Reduction Configuration" block below to
+tune the reduction. All values are plain Python integers evaluated at module
+import time and consumed via ``wp.static()`` in kernels, so there is zero
+runtime overhead. Changing them requires restarting the process (standard Warp
+kernel-caching behavior).
 
 **Contact Reduction Strategy Overview:**
 
@@ -15,31 +24,23 @@ stability while keeping memory and computation bounded.
 
 The reduction uses three complementary strategies:
 
-1. **Spatial Extreme Slots (60 total = 12 bins x 5 directions)**
+1. **Spatial Extreme Slots** (``NUM_NORMAL_BINS`` x ``NUM_SPATIAL_DIRECTIONS``)
 
-   For each of 12 normal bins (dodecahedron faces), finds the 5 most extreme
-   contacts in 2D scan directions on the face plane. This builds the convex
+   For each normal bin (polyhedron face), finds the most extreme contacts in
+   evenly-spaced 2D scan directions on the face plane. This builds the convex
    hull / support polygon boundary, critical for stable stacking.
 
-2. **Per-Bin Max-Depth Slots (12 total = 12 bins x 1)**
+2. **Per-Bin Max-Depth Slots** (``NUM_NORMAL_BINS`` x 1)
 
    Each normal bin tracks its deepest contact unconditionally. This ensures
    deeply penetrating contacts from any normal direction are never dropped.
    Critical for gear-like contacts with varied normal orientations.
 
-3. **Voxel-Based Depth Slots (50 total)**
+3. **Voxel-Based Depth Slots** (``NUM_VOXEL_DEPTH_SLOTS``)
 
    The mesh is divided into a virtual voxel grid. Each voxel independently
    tracks its deepest contact, providing spatial coverage and preventing
    sudden contact jumps when different mesh regions become deepest.
-
-**Slot Calculation:**
-
-::
-
-    Per-bin slots:  12 bins x (5 spatial + 1 max-depth) = 72 slots
-    Voxel slots:    50 slots
-    Total:          122 slots per shape pair
 
 See Also:
     :class:`GlobalContactReducer` in ``contact_reduction_global.py`` for the
@@ -47,6 +48,47 @@ See Also:
 """
 
 import warp as wp
+
+# =====================================================================
+# Contact Reduction Configuration
+# =====================================================================
+# Polyhedron for normal binning.  Determines NUM_NORMAL_BINS.
+#   "dodecahedron" -> 12 bins  (default, good balance)
+#   "icosahedron"  -> 20 bins  (finer normal resolution)
+#   "octahedron"   ->  8 bins  (cheaper, coarser)
+#   "hexahedron"   ->  6 bins  (cheapest, coarsest)
+NORMAL_BINNING_POLYHEDRON = "dodecahedron"
+
+# Scan directions per normal bin (2D extremes on each face plane).
+# Range 3-6. More directions = more accurate convex hull but more slots.
+NUM_SPATIAL_DIRECTIONS = 5
+
+# Voxel-based depth slots for spatial coverage.
+NUM_VOXEL_DEPTH_SLOTS = 50
+# =====================================================================
+
+# Hard architectural limit — keeps per-pair indices representable in 8 bits.
+MAX_CONTACTS_PER_PAIR = 255
+
+# ---------------------------------------------------------------------------
+# Derived constants (do not edit — computed from the config above)
+# ---------------------------------------------------------------------------
+_POLYHEDRON_BINS = {
+    "hexahedron": 6,
+    "octahedron": 8,
+    "dodecahedron": 12,
+    "icosahedron": 20,
+}
+
+NUM_NORMAL_BINS = _POLYHEDRON_BINS[NORMAL_BINNING_POLYHEDRON]
+
+_total_slots = NUM_NORMAL_BINS * (NUM_SPATIAL_DIRECTIONS + 1) + NUM_VOXEL_DEPTH_SLOTS
+
+assert _total_slots <= MAX_CONTACTS_PER_PAIR, (
+    f"Total reduction slots ({_total_slots}) exceed MAX_CONTACTS_PER_PAIR "
+    f"({MAX_CONTACTS_PER_PAIR}). Reduce NUM_SPATIAL_DIRECTIONS, "
+    f"NUM_VOXEL_DEPTH_SLOTS, or switch to a coarser polyhedron."
+)
 
 
 # http://stereopsis.com/radix.html
@@ -66,133 +108,178 @@ __syncthreads();
 def synchronize(): ...
 
 
-_mat12x3 = wp.types.matrix(shape=(12, 3), dtype=wp.float32)
+# =====================================================================
+# Polyhedron face normals
+# =====================================================================
+# Each polyhedron is stored as a flat tuple of (x, y, z) triples.
+# Only the selected polyhedron is compiled into a Warp matrix constant.
+
+# fmt: off
+_HEXAHEDRON_NORMALS = (
+    1.0,  0.0,  0.0,
+   -1.0,  0.0,  0.0,
+    0.0,  1.0,  0.0,
+    0.0, -1.0,  0.0,
+    0.0,  0.0,  1.0,
+    0.0,  0.0, -1.0,
+)
+
+_OCTAHEDRON_NORMALS = (
+    0.57735027,  0.57735027,  0.57735027,
+    0.57735027,  0.57735027, -0.57735027,
+   -0.57735027,  0.57735027,  0.57735027,
+   -0.57735027,  0.57735027, -0.57735027,
+    0.57735027, -0.57735027,  0.57735027,
+    0.57735027, -0.57735027, -0.57735027,
+   -0.57735027, -0.57735027,  0.57735027,
+   -0.57735027, -0.57735027, -0.57735027,
+)
 
 # Dodecahedron face normals (= normalised icosahedron vertices).
-# Ordered: top group (0-3, Y > 0), equatorial (4-7, Y = 0), bottom group (8-11, Y < 0).
-# a = 1/sqrt(1+phi^2) ≈ 0.52573111, b = phi/sqrt(1+phi^2) ≈ 0.85065081, phi = (1+sqrt5)/2.
-DODECAHEDRON_FACE_NORMALS = _mat12x3(
+# Ordered: top group (0-3, Y > 0), equatorial (4-7, Y = 0),
+# bottom group (8-11, Y < 0).
+# a = 1/sqrt(1+phi^2) ~ 0.52573111, b = phi/sqrt(1+phi^2) ~ 0.85065081
+_DODECAHEDRON_NORMALS = (
     # Top group (faces 0-3, Y > 0)
-    0.52573111,
-    0.85065081,
-    0.0,
-    -0.52573111,
-    0.85065081,
-    0.0,
-    0.0,
-    0.52573111,
-    0.85065081,
-    0.0,
-    0.52573111,
-    -0.85065081,
+    0.52573111,  0.85065081,  0.0,
+   -0.52573111,  0.85065081,  0.0,
+    0.0,         0.52573111,  0.85065081,
+    0.0,         0.52573111, -0.85065081,
     # Equatorial band (faces 4-7, Y = 0)
-    0.85065081,
-    0.0,
-    0.52573111,
-    0.85065081,
-    0.0,
-    -0.52573111,
-    -0.85065081,
-    0.0,
-    0.52573111,
-    -0.85065081,
-    0.0,
-    -0.52573111,
+    0.85065081,  0.0,         0.52573111,
+    0.85065081,  0.0,        -0.52573111,
+   -0.85065081,  0.0,         0.52573111,
+   -0.85065081,  0.0,        -0.52573111,
     # Bottom group (faces 8-11, Y < 0)
-    0.0,
-    -0.52573111,
-    0.85065081,
-    0.0,
-    -0.52573111,
-    -0.85065081,
-    0.52573111,
-    -0.85065081,
-    0.0,
-    -0.52573111,
-    -0.85065081,
-    0.0,
+    0.0,        -0.52573111,  0.85065081,
+    0.0,        -0.52573111, -0.85065081,
+    0.52573111, -0.85065081,  0.0,
+   -0.52573111, -0.85065081,  0.0,
+)
+
+# Icosahedron face normals (20 faces).
+# Top cap (0-4, Y ~ +0.79), bottom cap (5-9, Y ~ -0.79),
+# equatorial belt (10-19, |Y| ~ 0.19).
+_ICOSAHEDRON_NORMALS = (
+    0.49112338,  0.79465455,  0.35682216,
+   -0.18759243,  0.79465450,  0.57735026,
+   -0.60706190,  0.79465450,  0.0,
+   -0.18759237,  0.79465450, -0.57735026,
+    0.49112340,  0.79465455, -0.35682210,
+    0.18759249, -0.79465440,  0.57735026,
+   -0.49112338, -0.79465450,  0.35682213,
+   -0.49112338, -0.79465455, -0.35682213,
+    0.18759243, -0.79465440, -0.57735026,
+    0.60706200, -0.79465440,  0.0,
+    0.98224690, -0.18759257,  0.0,
+    0.79465440,  0.18759239, -0.57735030,
+    0.30353096, -0.18759252,  0.93417233,
+    0.79465440,  0.18759243,  0.57735030,
+   -0.79465450, -0.18759249,  0.57735030,
+   -0.30353105,  0.18759243,  0.93417240,
+   -0.79465440, -0.18759240, -0.57735030,
+   -0.98224690,  0.18759254,  0.0,
+    0.30353096, -0.18759250, -0.93417233,
+   -0.30353084,  0.18759246, -0.93417240,
+)
+# fmt: on
+
+_POLYHEDRON_NORMALS_DATA = {
+    "hexahedron": _HEXAHEDRON_NORMALS,
+    "octahedron": _OCTAHEDRON_NORMALS,
+    "dodecahedron": _DODECAHEDRON_NORMALS,
+    "icosahedron": _ICOSAHEDRON_NORMALS,
+}
+
+_face_normals_mat_type = wp.types.matrix(shape=(NUM_NORMAL_BINS, 3), dtype=wp.float32)
+FACE_NORMALS = _face_normals_mat_type(*_POLYHEDRON_NORMALS_DATA[NORMAL_BINNING_POLYHEDRON])
+
+# Backward-compatible alias used by tests.
+DODECAHEDRON_FACE_NORMALS = (
+    _face_normals_mat_type(*_DODECAHEDRON_NORMALS)
+    if NORMAL_BINNING_POLYHEDRON == "dodecahedron"
+    else wp.types.matrix(shape=(12, 3), dtype=wp.float32)(*_DODECAHEDRON_NORMALS)
 )
 
 
 @wp.func
 def get_slot(normal: wp.vec3) -> int:
-    """Returns the index of the dodecahedron face that best matches the normal.
+    """Return the normal-bin index whose face normal best matches *normal*.
 
-    Uses Y-component to select search region:
-    - Faces 0-3: top group (Y ≈ +0.851 / +0.526)
-    - Faces 4-7: equatorial band (Y = 0)
-    - Faces 8-11: bottom group (Y ≈ -0.526 / -0.851)
+    When the dodecahedron polyhedron is selected the search is accelerated by
+    partitioning faces into top / equatorial / bottom groups based on the
+    Y-component. For all other polyhedra a full linear scan is used (still
+    fast: at most 20 dot products).
 
     Args:
-        normal: Normal vector to match
+        normal: Normal vector to match.
 
     Returns:
-        Index of the best matching dodecahedron face (0-11)
+        Index of the best matching face in ``FACE_NORMALS``.
     """
-    up_dot = normal[1]
+    if wp.static(NORMAL_BINNING_POLYHEDRON == "dodecahedron"):
+        up_dot = normal[1]
 
-    # Conservative thresholds: only skip regions when clearly in a polar cap.
-    # Top/bottom faces have Y ≈ ±0.851 / ±0.526, equatorial faces have Y = 0.
-    # Threshold 0.65 ensures we don't miss better matches in adjacent regions.
-    # Face layout: 0-3 = top group, 4-7 = equatorial, 8-11 = bottom group.
-    if up_dot > 0.65:
-        # Clearly pointing up - only check top group (4 faces)
-        start_idx = 0
-        end_idx = 4
-    elif up_dot < -0.65:
-        # Clearly pointing down - only check bottom group (4 faces)
-        start_idx = 8
-        end_idx = 12
-    elif up_dot >= 0.0:
-        # Leaning up - check top group + equatorial (8 faces)
-        start_idx = 0
-        end_idx = 8
+        # Conservative thresholds: only skip regions when clearly in a polar cap.
+        # Face layout: 0-3 = top group, 4-7 = equatorial, 8-11 = bottom group.
+        if up_dot > 0.65:
+            start_idx = 0
+            end_idx = 4
+        elif up_dot < -0.65:
+            start_idx = 8
+            end_idx = 12
+        elif up_dot >= 0.0:
+            start_idx = 0
+            end_idx = 8
+        else:
+            start_idx = 4
+            end_idx = 12
+
+        best_slot = start_idx
+        max_dot = wp.dot(normal, FACE_NORMALS[start_idx])
+
+        for i in range(start_idx + 1, end_idx):
+            d = wp.dot(normal, FACE_NORMALS[i])
+            if d > max_dot:
+                max_dot = d
+                best_slot = i
+
+        return best_slot
     else:
-        # Leaning down - check equatorial + bottom group (8 faces)
-        start_idx = 4
-        end_idx = 12
-
-    best_slot = start_idx
-    max_dot = wp.dot(normal, DODECAHEDRON_FACE_NORMALS[start_idx])
-
-    for i in range(start_idx + 1, end_idx):
-        d = wp.dot(normal, DODECAHEDRON_FACE_NORMALS[i])
-        if d > max_dot:
-            max_dot = d
-            best_slot = i
-
-    return best_slot
+        best_slot = 0
+        max_dot = wp.dot(normal, FACE_NORMALS[0])
+        for i in range(1, wp.static(NUM_NORMAL_BINS)):
+            d = wp.dot(normal, FACE_NORMALS[i])
+            if d > max_dot:
+                max_dot = d
+                best_slot = i
+        return best_slot
 
 
 @wp.func
 def project_point_to_plane(bin_normal_idx: wp.int32, point: wp.vec3) -> wp.vec2:
-    """Project a 3D point onto the 2D plane of a dodecahedron face.
+    """Project a 3D point onto the 2D plane of a normal-bin face.
 
-    Creates a local 2D coordinate system on the face plane using the face normal
-    and constructs orthonormal basis vectors u and v.
+    Creates a local 2D coordinate system on the face plane using the face
+    normal and constructs orthonormal basis vectors u and v.
 
     Args:
-        bin_normal_idx: Index of the dodecahedron face (0-11)
-        point: 3D point to project
+        bin_normal_idx: Index of the face in ``FACE_NORMALS``.
+        point: 3D point to project.
 
     Returns:
-        2D coordinates of the point in the face's local coordinate system
+        2D coordinates of the point in the face's local coordinate system.
     """
-    face_normal = DODECAHEDRON_FACE_NORMALS[bin_normal_idx]
+    face_normal = FACE_NORMALS[bin_normal_idx]
 
-    # Create orthonormal basis on the plane
-    # Choose reference vector that's not parallel to normal
     if wp.abs(face_normal[1]) < 0.9:
         ref = wp.vec3(0.0, 1.0, 0.0)
     else:
         ref = wp.vec3(1.0, 0.0, 0.0)
 
-    # u = normalize(ref - dot(ref, normal) * normal)
     u = wp.normalize(ref - wp.dot(ref, face_normal) * face_normal)
-    # v = cross(normal, u)
     v = wp.cross(face_normal, u)
 
-    # Project point onto u and v axes
     return wp.vec2(wp.dot(point, u), wp.dot(point, v))
 
 
@@ -201,27 +288,21 @@ def get_spatial_direction_2d(dir_idx: int) -> wp.vec2:
     """Get evenly-spaced 2D direction for spatial binning.
 
     Args:
-        dir_idx: Direction index in the range 0..NUM_SPATIAL_DIRECTIONS-1
+        dir_idx: Direction index in the range 0..NUM_SPATIAL_DIRECTIONS-1.
 
     Returns:
-        Unit 2D vector at angle (dir_idx * 2pi / NUM_SPATIAL_DIRECTIONS)
+        Unit 2D vector at angle ``dir_idx * 2pi / NUM_SPATIAL_DIRECTIONS``.
     """
-    angle = float(dir_idx) * (2.0 * wp.pi / 5.0)
+    angle = float(dir_idx) * (2.0 * wp.pi / float(wp.static(NUM_SPATIAL_DIRECTIONS)))
     return wp.vec2(wp.cos(angle), wp.sin(angle))
 
 
-NUM_SPATIAL_DIRECTIONS = 5  # Evenly-spaced 2D directions (72 degrees apart)
-NUM_NORMAL_BINS = 12  # Dodecahedron faces
-NUM_VOXEL_DEPTH_SLOTS = 50  # Voxel-based depth slots for spatial coverage
-
-
 def compute_num_reduction_slots() -> int:
-    """Compute the number of reduction slots.
+    """Total reduction slots per shape pair.
 
     Returns:
-        Total number of reduction slots:
-        - 12 normal bins * (5 spatial directions + 1 max-depth) (per-bin slots)
-        - + 50 voxel-based depth slots (deepest contact per voxel region)
+        ``NUM_NORMAL_BINS * (NUM_SPATIAL_DIRECTIONS + 1) + NUM_VOXEL_DEPTH_SLOTS``,
+        guaranteed to be at most ``MAX_CONTACTS_PER_PAIR`` (255).
     """
     return NUM_NORMAL_BINS * (NUM_SPATIAL_DIRECTIONS + 1) + NUM_VOXEL_DEPTH_SLOTS
 
