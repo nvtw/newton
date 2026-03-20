@@ -406,9 +406,9 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
                 momentum = float(iteration + 2) / float(iteration + 3)
                 y = momentum * v + (1.0 - momentum) * w_prev
                 y_len = wp.length(y)
-                nd_len = wp.length(nesterov_dir)
-                if y_len > EPSILON and nd_len > EPSILON:
-                    nesterov_dir = momentum * (nesterov_dir / nd_len) + (1.0 - momentum) * (y / y_len)
+                ndir_len = wp.length(nesterov_dir)
+                if y_len > EPSILON and ndir_len > EPSILON:
+                    nesterov_dir = momentum * (nesterov_dir / ndir_len) + (1.0 - momentum) * (y / y_len)
                     search_dir = -nesterov_dir
                 else:
                     search_dir = -v
