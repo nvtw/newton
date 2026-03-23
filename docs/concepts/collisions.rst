@@ -1220,10 +1220,13 @@ and is consumed by the solver :meth:`~newton.solvers.SolverBase.step` method for
    * - ``rigid_contact_shape0``, ``rigid_contact_shape1``
      - Indices of colliding shapes.
    * - ``rigid_contact_point0``, ``rigid_contact_point1``
-     - Contact point on each shape (body frame).
+     - Contact point on each shape (body frame). This is the narrow-phase contact
+       location used by the solver for the normal constraint and lever-arm computation.
    * - ``rigid_contact_offset0``, ``rigid_contact_offset1``
-     - Surface-thickness vector per shape (body frame). Used internally by the solver
-       to adjust the friction anchor for rotational effects of margin and effective radius.
+     - Surface-thickness vector per shape (body frame), pointing from the contact point
+       toward the opposing shape along the normal with magnitude
+       ``effective_radius + margin``. The solver uses ``point + offset`` as the anchor
+       for friction and restitution impulses.
    * - ``rigid_contact_normal``
      - Contact normal, pointing from shape 0 toward shape 1 (world frame).
    * - ``rigid_contact_margin0``, ``rigid_contact_margin1``
