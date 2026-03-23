@@ -106,10 +106,9 @@ Each contact carries the following geometric data:
    world-space contact points — is not stored but is useful for visualization and
    debugging. The **contact distance** encodes the signed separation or penetration depth.
 
-- **Contact normal** — a unit vector pointing from shape A toward shape B.
-- **Body-frame contact points** — the contact location on each shape
-  (``rigid_contact_point0/1``), stored in the body's local coordinate frame so the
-  solver can cheaply reproject them into world space as bodies move.
+- **Contact normal** (world frame) — a unit vector pointing from shape A toward shape B.
+- **Contact points** (body frame) — the contact location on each shape
+  (``rigid_contact_point0/1``), stored in the parent body's local coordinate frame.
 - **Contact distance** — the signed separation between the two contact points along the
   normal. Negative values indicate penetration.
 
@@ -126,9 +125,9 @@ MuJoCo Warp Integration
 built-in collision pipeline that handles convex primitive contacts. For many use cases
 this is sufficient and requires no extra setup.
 
-However, Newton's collision pipeline can **replace** MuJoCo's contact generation by
-setting ``use_mujoco_contacts=False``, enabling SDF-based mesh-mesh contacts and
-hydroelastic contacts that MuJoCo's built-in pipeline does not support.
+Newton's collision pipeline can also **replace** MuJoCo's contact generation, enabling
+SDF-based mesh-mesh contacts and hydroelastic contacts that MuJoCo's built-in pipeline
+does not support.
 
 Examples:
 
@@ -139,7 +138,8 @@ Examples:
 - **Robot manipulation with SDF** —
   :github:`newton/examples/contacts/example_brick_stacking.py`
 
-See :ref:`Solver Integration` for the full code pattern.
+See :ref:`Solver Integration` for the full code pattern showing how to configure
+this.
 
 .. _Collision Pipeline:
 
@@ -787,8 +787,14 @@ Narrow Phase Algorithms
 -----------------------
 
 After broad phase identifies candidate pairs, the narrow phase generates contact points.
+The algorithm used depends on the shape types in each pair.
 
-**MPR (Minkowski Portal Refinement) and GJK — convex and support-function shapes**
+.. _Convex Primitive Contacts:
+
+Convex Primitive Contacts
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+**MPR (Minkowski Portal Refinement) and GJK**
 
 MPR is the primary algorithm for convex shape pairs. It uses support mapping functions to
 find the closest points between shapes via Minkowski difference sampling. Works with all
@@ -796,9 +802,11 @@ convex primitives (sphere, box, capsule, cylinder, cone, ellipsoid) and convex m
 Newton uses MPR for penetration depth computation (not EPA); GJK handles the
 separated-shapes distance query.
 
-**Multi-contact Generation**
+**Multi-contact generation**
 
-For shape pairs, multiple contact points are generated for stable stacking and resting contacts. The collision pipeline estimates buffer sizes based on the model; you can override this value with ``rigid_contact_max`` when instantiating the pipeline.
+For convex primitive pairs, multiple contact points are generated for stable stacking and
+resting contacts. The collision pipeline estimates buffer sizes based on the model; you
+can override this value with ``rigid_contact_max`` when instantiating the pipeline.
 
 .. _Mesh Collisions:
 
@@ -1212,13 +1220,14 @@ and is consumed by the solver :meth:`~newton.solvers.SolverBase.step` method for
    * - ``rigid_contact_shape0``, ``rigid_contact_shape1``
      - Indices of colliding shapes.
    * - ``rigid_contact_point0``, ``rigid_contact_point1``
-     - Body-frame contact points on each shape.
+     - Contact point on each shape (body frame).
    * - ``rigid_contact_offset0``, ``rigid_contact_offset1``
-     - Contact point offsets in body-local space.
+     - Surface-thickness vector per shape (body frame). Used internally by the solver
+       to adjust the friction anchor for rotational effects of margin and effective radius.
    * - ``rigid_contact_normal``
-     - Contact normal direction (from shape0 to shape1).
+     - Contact normal, pointing from shape 0 toward shape 1 (world frame).
    * - ``rigid_contact_margin0``, ``rigid_contact_margin1``
-     - Shape margin offsets at each contact point.
+     - Per-shape thickness: effective radius + margin (scalar).
 
 **Soft contacts (particle-shape):**
 
