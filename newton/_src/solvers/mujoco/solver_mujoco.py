@@ -2989,7 +2989,7 @@ class SolverMuJoCo(SolverBase):
             self._create_inverse_shape_mapping()
 
         # Zero nacon before the kernel — the kernel uses atomic_add to count
-        # only the contacts that survive weld-based filtering.
+        # only the contacts that survive immovable-pair filtering.
         self.mjw_data.nacon.zero_()
 
         bodies_per_world = self.model.body_count // self.model.world_count
@@ -2999,6 +2999,7 @@ class SolverMuJoCo(SolverBase):
             inputs=[
                 state_in.body_q,
                 model.shape_body,
+                model.body_flags,
                 self.mjw_model.geom_bodyid,
                 self.mjw_model.body_weldid,
                 self.mjw_model.geom_condim,

@@ -199,6 +199,7 @@ def quat_xyzw_to_wxyz(q: wp.quat) -> wp.quat:
 def convert_newton_contacts_to_mjwarp_kernel(
     body_q: wp.array(dtype=wp.transform),
     shape_body: wp.array(dtype=int),
+    body_flags: wp.array(dtype=int),
     # Model:
     geom_bodyid: wp.array(dtype=int),
     body_weldid: wp.array(dtype=int),
@@ -274,20 +275,40 @@ def convert_newton_contacts_to_mjwarp_kernel(
     if shape_a < 0 or shape_b < 0:
         return
 
-    # Replicate MuJoCo's weld-based self-collision filter: skip contacts where
-    # both geoms belong to bodies in the same weld group (e.g. ground plane vs
-    # a fixed-base link, both welded to the world body).  Without this check the
-    # solver sees invweight=0 for both sides, producing efc_D ~ 1/MJ_MINVAL
-    # which freezes all downstream DOFs.
+    # --- Filter contacts that would produce degenerate efc_D values ----------
+    # A body is "immovable" from the MuJoCo solver's perspective when it
+    # contributes zero (or near-zero) invweight.  Three cases:
+    #
+    #  1. Static shapes (body < 0) — no MuJoCo body at all.
+    #  2. Kinematic bodies (BodyFlags.KINEMATIC) — Newton sets armature=1e10
+    #     on their DOFs, giving near-zero invweight even though MuJoCo still
+    #     sees DOFs (body_weldid != 0).
+    #  3. Fixed-root bodies welded to the world body — MuJoCo merges them
+    #     into weld group 0, so they share body_weldid with the ground plane
+    #     and have zero invweight.
+    #
+    # We check Newton body_flags for cases 1-2, and MuJoCo body_weldid for
+    # case 3.  A contact is skipped when both sides are immovable.
+
     geom_a = newton_shape_to_mjc_geom[shape_a]
     geom_b = newton_shape_to_mjc_geom[shape_b]
-    mj_body_a = geom_bodyid[geom_a]
-    mj_body_b = geom_bodyid[geom_b]
-    if body_weldid[mj_body_a] == body_weldid[mj_body_b]:
-        return
 
     body_a = shape_body[shape_a]
     body_b = shape_body[shape_b]
+
+    a_immovable = body_a < 0 or (body_flags[body_a] & 2) != 0  # BodyFlags.KINEMATIC = 1 << 1
+    b_immovable = body_b < 0 or (body_flags[body_b] & 2) != 0
+
+    if not (a_immovable and b_immovable):
+        # Also check MuJoCo weld groups for fixed-root bodies
+        mj_body_a = geom_bodyid[geom_a]
+        mj_body_b = geom_bodyid[geom_b]
+        if body_weldid[mj_body_a] == body_weldid[mj_body_b]:
+            a_immovable = True
+            b_immovable = True
+
+    if a_immovable and b_immovable:
+        return
 
     X_wb_a = wp.transform_identity()
     X_wb_b = wp.transform_identity()
