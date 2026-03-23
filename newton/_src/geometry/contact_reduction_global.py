@@ -211,7 +211,7 @@ def reduction_insert_slot(
 # Key is (shape_a, shape_b, bin_id) - NO slot_id (slots are handled via values_per_key)
 # - Bits 0-26:   shape_a (27 bits, up to ~134M shapes)
 # - Bits 27-54:  shape_b (28 bits, up to ~268M shapes)
-# - Bits 55-62:  bin_id (8 bits, 0-255, supports normal bins 0-11 + voxel groups 12-20)
+# - Bits 55-62:  bin_id (8 bits, 0-255, supports normal bins + voxel groups)
 # - Bit 63:      unused (kept 0 for signed/unsigned compatibility)
 # Total: 63 bits used
 
@@ -230,7 +230,7 @@ def make_contact_key(shape_a: int, shape_b: int, bin_id: int) -> wp.uint64:
     Args:
         shape_a: First shape index
         shape_b: Second shape index
-        bin_id: Bin index (0-11 for normal bins, 12-20 for voxel groups)
+        bin_id: Bin index (``0..NUM_NORMAL_BINS-1`` for normal bins, higher for voxel groups)
 
     Returns:
         64-bit key for hashtable lookup (only 63 bits used)
@@ -473,7 +473,7 @@ class GlobalContactReducer:
 
     Attributes:
         capacity: Maximum number of contacts that can be stored
-        values_per_key: Number of value slots per hashtable entry (6)
+        values_per_key: Number of value slots per hashtable entry (``NUM_SPATIAL_DIRECTIONS + 1``)
         position_depth: vec4 array storing position.xyz and depth
         normal: vec2 array storing octahedral-encoded contact normal
         shape_pairs: vec2i array storing (shape_a, shape_b) per contact
@@ -707,10 +707,10 @@ def reduce_contact_in_hashtable(
     ht_capacity = reducer_data.ht_capacity
 
     # === Part 1: Normal-binned reduction (spatial extremes + max-depth per bin) ===
-    # Get dodecahedron bin from normal
+    # Get normal bin from polyhedron face matching
     bin_id = get_slot(normal)
 
-    # Project position to 2D plane of the dodecahedron face
+    # Project position to 2D plane of the polyhedron face
     pos_2d = project_point_to_plane(bin_id, position)
 
     # Key is (shape_a, shape_b, bin_id)
@@ -1032,7 +1032,7 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
     """Create a kernel that exports reduced contacts using a custom writer function.
 
     The kernel processes one hashtable ENTRY per thread (not one value slot).
-    Each entry has VALUES_PER_KEY value slots (6: 5 spatial + 1 max-depth).
+    Each entry has VALUES_PER_KEY value slots (``NUM_SPATIAL_DIRECTIONS`` spatial + 1 max-depth).
     The thread reads all slots, collects unique contact IDs, and exports each
     unique contact once.
 
