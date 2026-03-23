@@ -210,9 +210,6 @@ class Contacts:
                 self.rigid_contact_diff_point0_world.zero_()
                 self.rigid_contact_diff_point1_world.zero_()
 
-            if hasattr(self, "_normal_avg_frame") and self._normal_avg_frame is not None:
-                self._normal_avg_frame.zero_()
-
             if self.per_contact_shape_properties:
                 self.rigid_contact_stiffness.zero_()
                 self.rigid_contact_damping.zero_()

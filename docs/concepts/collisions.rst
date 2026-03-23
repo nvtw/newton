@@ -1182,16 +1182,8 @@ gradient-based optimisation and reinforcement-learning workflows.
    * - ``rigid_contact_diff_point1_world``
      - World-space contact point on shape 1 [m].
 
-**Two augmentation modes** are available, controlled by
-``enable_contact_normal_gradients`` on :class:`~newton.CollisionPipeline`:
-
-- ``True`` (default) — **rotation-invariant** mode.  The frozen normal is
-  expressed in the slerp-midpoint frame of the two body orientations (off-tape),
-  then rotated back to world space through the differentiable ``body_q``.  This
-  makes both the contact normal and distance differentiable with respect to body
-  orientations.
-- ``False`` — **standard** mode.  Gradients flow through contact points and
-  distance only; the normal direction is frozen.  Slightly cheaper.
+Gradients flow through the contact points and distance; the normal direction is
+treated as a frozen constant.
 
 .. testsetup:: diff-contacts
 
@@ -1206,7 +1198,7 @@ gradient-based optimisation and reinforcement-learning workflows.
     builder.add_ground_plane()
     model = builder.finalize(requires_grad=True)
 
-    pipeline = newton.CollisionPipeline(model, enable_contact_normal_gradients=True)
+    pipeline = newton.CollisionPipeline(model)
     contacts = pipeline.contacts()
     state = model.state(requires_grad=True)
 

@@ -174,70 +174,6 @@ def test_collide_outside_tape(test, device):
         test.assertTrue(np.any(diff_dist < 0.0))
 
 
-def test_normal_gradients_enabled(test, device):
-    """Rotation-invariant path produces non-zero normal gradients w.r.t. body orientation."""
-    with wp.ScopedDevice(device):
-        builder = newton.ModelBuilder(gravity=0.0)
-        # Sphere at identity orientation on a ground plane — the most common
-        # and previously degenerate case (q_a = q_b = identity).  With the
-        # _slerp_midpoint fix this must now produce non-zero orientation
-        # gradients through diff_normal.
-        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.3)))
-        builder.add_shape_sphere(body=body, radius=0.5)
-        builder.add_ground_plane()
-        model = builder.finalize(device=device, requires_grad=True)
-
-        pipeline = newton.CollisionPipeline(model, enable_contact_normal_gradients=True)
-        contacts = pipeline.contacts()
-        state = model.state(requires_grad=True)
-
-        with wp.Tape() as tape:
-            pipeline.collide(state, contacts)
-
-        count = contacts.rigid_contact_count.numpy()[0]
-        test.assertGreater(count, 0, "Expected contact between sphere and ground")
-
-        n_max = contacts.rigid_contact_max
-        tape.backward(grads={contacts.rigid_contact_diff_normal: wp.ones((n_max,), dtype=wp.vec3, device=device)})
-
-        grad_q = tape.gradients.get(state.body_q)
-        test.assertIsNotNone(grad_q, "body_q gradient should exist for normal output")
-        grad_np = grad_q.numpy()
-        orientation_grad = grad_np[0, 3:]
-        test.assertFalse(
-            np.allclose(orientation_grad, 0.0),
-            f"Expected non-zero orientation gradients through diff_normal, got {orientation_grad}",
-        )
-
-
-def test_normal_gradients_disabled(test, device):
-    """Standard path (enable_contact_normal_gradients=False) produces zero normal orientation gradients."""
-    with wp.ScopedDevice(device):
-        builder = newton.ModelBuilder(gravity=0.0)
-        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.3)))
-        builder.add_shape_sphere(body=body, radius=0.5)
-        builder.add_ground_plane()
-        model = builder.finalize(device=device, requires_grad=True)
-
-        pipeline = newton.CollisionPipeline(model, enable_contact_normal_gradients=False)
-        contacts = pipeline.contacts()
-        state = model.state(requires_grad=True)
-
-        with wp.Tape() as tape:
-            pipeline.collide(state, contacts)
-
-        n_max = contacts.rigid_contact_max
-        tape.backward(grads={contacts.rigid_contact_diff_normal: wp.ones((n_max,), dtype=wp.vec3, device=device)})
-
-        grad_q = tape.gradients.get(state.body_q)
-        if grad_q is not None:
-            grad_np = grad_q.numpy()
-            test.assertTrue(
-                np.allclose(grad_np, 0.0),
-                f"Expected zero gradients when normal gradients disabled, got {grad_np}",
-            )
-
-
 def test_two_body_contact(test, device):
     """Two dynamic bodies in contact both receive non-zero gradients."""
     with wp.ScopedDevice(device):
@@ -439,12 +375,6 @@ add_function_test(
 )
 add_function_test(TestDifferentiableContacts, "test_gradient_direction", test_gradient_direction, devices=devices)
 add_function_test(TestDifferentiableContacts, "test_collide_outside_tape", test_collide_outside_tape, devices=devices)
-add_function_test(
-    TestDifferentiableContacts, "test_normal_gradients_enabled", test_normal_gradients_enabled, devices=devices
-)
-add_function_test(
-    TestDifferentiableContacts, "test_normal_gradients_disabled", test_normal_gradients_disabled, devices=devices
-)
 add_function_test(TestDifferentiableContacts, "test_two_body_contact", test_two_body_contact, devices=devices)
 add_function_test(
     TestDifferentiableContacts, "test_world_points_correctness", test_world_points_correctness, devices=devices

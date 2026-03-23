@@ -12,10 +12,7 @@ from ..geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from ..geometry.broad_phase_sap import BroadPhaseSAP
 from ..geometry.collision_core import compute_tight_aabb_from_support
 from ..geometry.contact_data import ContactData
-from ..geometry.differentiable_contacts import (
-    launch_differentiable_contact_augment,
-    launch_differentiable_contact_augment_rotation_invariant,
-)
+from ..geometry.differentiable_contacts import launch_differentiable_contact_augment
 from ..geometry.kernels import create_soft_contacts
 from ..geometry.narrow_phase import NarrowPhase
 from ..geometry.sdf_hydroelastic import HydroelasticSDF
@@ -389,7 +386,6 @@ class CollisionPipeline:
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
         requires_grad: bool | None = None,
-        enable_contact_normal_gradients: bool = True,
         broad_phase: Literal["nxn", "sap", "explicit"]
         | BroadPhaseAllPairs
         | BroadPhaseSAP
@@ -418,11 +414,6 @@ class CollisionPipeline:
                 If None, computed as shape_count * particle_count.
             soft_contact_margin: Margin for soft contact generation. Defaults to 0.01.
             requires_grad: Whether to enable gradient computation. If None, uses model.requires_grad.
-            enable_contact_normal_gradients: When ``True`` (and ``requires_grad``
-                is also ``True``), use the rotation-invariant augmentation that
-                makes contact normals differentiable with respect to body
-                orientations.  Slightly more expensive than the default mode
-                which only provides gradients through contact points and distance.
             broad_phase:
                 Either a broad phase mode string ("explicit", "nxn", "sap") or
                 a prebuilt broad phase instance for expert usage.
@@ -473,7 +464,6 @@ class CollisionPipeline:
         self.device = device
         self.reduce_contacts = reduce_contacts
         self.requires_grad = requires_grad
-        self.enable_contact_normal_gradients = enable_contact_normal_gradients
         self.soft_contact_margin = soft_contact_margin
 
         using_expert_components = broad_phase_instance is not None or narrow_phase is not None
@@ -849,20 +839,12 @@ class CollisionPipeline:
         # Differentiable contact augmentation: reconstruct world-space contact
         # quantities through body_q so that gradients flow via wp.Tape.
         if self.requires_grad and contacts.rigid_contact_diff_distance is not None:
-            if self.enable_contact_normal_gradients:
-                launch_differentiable_contact_augment_rotation_invariant(
-                    contacts=contacts,
-                    body_q=state.body_q,
-                    shape_body=model.shape_body,
-                    device=self.device,
-                )
-            else:
-                launch_differentiable_contact_augment(
-                    contacts=contacts,
-                    body_q=state.body_q,
-                    shape_body=model.shape_body,
-                    device=self.device,
-                )
+            launch_differentiable_contact_augment(
+                contacts=contacts,
+                body_q=state.body_q,
+                shape_body=model.shape_body,
+                device=self.device,
+            )
 
         # Generate soft contacts for particles and shapes
         particle_count = len(state.particle_q) if state.particle_q else 0
