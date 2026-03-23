@@ -16,6 +16,11 @@ import time and consumed via ``wp.static()`` in kernels, so there is zero
 runtime overhead. Changing them requires restarting the process (standard Warp
 kernel-caching behavior).
 
+.. note::
+   Only the default ``"icosahedron"`` polyhedron configuration is currently
+   tested on CI. Other polyhedra (dodecahedron, octahedron, hexahedron) are
+   functional but should be considered experimental.
+
 **Contact Reduction Strategy Overview:**
 
 When complex meshes collide, thousands of triangle pairs may generate contacts.
@@ -53,10 +58,14 @@ import warp as wp
 # Contact Reduction Configuration
 # =====================================================================
 # Polyhedron for normal binning.  Determines NUM_NORMAL_BINS.
-#   "dodecahedron" -> 12 bins  (default, good balance)
-#   "icosahedron"  -> 20 bins  (finer normal resolution)
+#   "icosahedron"  -> 20 bins  (default, finer normal resolution)
+#   "dodecahedron" -> 12 bins  (good balance)
 #   "octahedron"   ->  8 bins  (cheaper, coarser)
 #   "hexahedron"   ->  6 bins  (cheapest, coarsest)
+#
+# NOTE: Only the default "icosahedron" configuration is currently tested
+# on CI. Other polyhedra are functional but should be considered
+# experimental. Use at your own discretion.
 NORMAL_BINNING_POLYHEDRON = "icosahedron"
 
 # Scan directions per normal bin (2D extremes on each face plane).
