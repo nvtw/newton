@@ -378,11 +378,14 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
         #
         # Momentum starts at iteration >= 3: with fewer vertices the two
         # length() calls per Nesterov iteration cost more than they save
-        # (simplex projection on 1-2 vertices is trivial).  When Nesterov
-        # is active the convergence and duplicate checks deactivate
-        # momentum instead of breaking — the (possibly stale) vertex is
-        # added harmlessly and the next vanilla iteration terminates
-        # normally.
+        # (simplex projection on 1-2 vertices is trivial).  When the
+        # Nesterov duality gap is small, momentum is deactivated, but
+        # the Frank-Wolfe convergence check right after fires in the
+        # same iteration and breaks immediately (delta_dist is half of
+        # duality_gap, so it is always below the same threshold).  This
+        # is intentional: the gap is already within COLLIDE_EPSILON
+        # tolerance, so an extra vanilla iteration would not improve
+        # the result.
         nesterov_dir = v
         w_prev = v
         use_nesterov = bool(True)
