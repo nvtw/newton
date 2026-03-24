@@ -1772,9 +1772,9 @@ class ViewerBase(ABC):
             shape_mat = self._transform_to_mat44(shape_xf)
             if body_idx >= 0 and body_q is not None:
                 body_mat = self._transform_to_mat44(body_q[body_idx])
-                b = body_mat.reshape(4, 4, order="F")
-                s = shape_mat.reshape(4, 4, order="F")
-                world_mat = (b @ s).ravel(order="F")
+                bm = body_mat.reshape(4, 4, order="F")
+                sm = shape_mat.reshape(4, 4, order="F")
+                world_mat = (bm @ sm).ravel(order="F")
             else:
                 world_mat = shape_mat
             self.log_wireframe_shape(name, None, world_mat, hidden=False)
