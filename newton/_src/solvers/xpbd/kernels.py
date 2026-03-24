@@ -2074,6 +2074,7 @@ def solve_body_contact_positions(
     shape_material_mu_torsional: wp.array(dtype=float),
     shape_material_mu_rolling: wp.array(dtype=float),
     relaxation: float,
+    max_depenetration_velocity: float,
     dt: float,
     # outputs
     deltas: wp.array(dtype=wp.spatial_vector),
@@ -2183,6 +2184,25 @@ def solve_body_contact_positions(
     lambda_n = compute_contact_constraint_delta(
         d, X_wb_a, X_wb_b, m_inv_a, m_inv_b, I_inv_a, I_inv_b, -n, n, angular_a, angular_b, relaxation, dt
     )
+
+    # Clamp the resulting separation velocity at this contact point to
+    # prevent violent impulses from contacts that appear with deep
+    # penetration (e.g. due to mesh contact flickering between frames).
+    if max_depenetration_velocity > 0.0:
+        v_a_pt = velocity_at_point(body_qd[body_a], r_a) if body_a >= 0 else wp.vec3(0.0)
+        v_b_pt = velocity_at_point(body_qd[body_b], r_b) if body_b >= 0 else wp.vec3(0.0)
+        d_dot = wp.dot(n, v_b_pt - v_a_pt)
+        w = wp.length_sq(n) * (m_inv_a + m_inv_b)
+        q_a = wp.transform_get_rotation(X_wb_a)
+        q_b = wp.transform_get_rotation(X_wb_b)
+        ra = wp.quat_rotate_inv(q_a, angular_a)
+        rb = wp.quat_rotate_inv(q_b, angular_b)
+        w += wp.dot(ra, I_inv_a * ra) + wp.dot(rb, I_inv_b * rb)
+        if w > 0.0:
+            v_after = d_dot + lambda_n * w
+            if v_after > max_depenetration_velocity:
+                lambda_n = (max_depenetration_velocity - d_dot) / w
+                lambda_n = wp.max(lambda_n, 0.0)
 
     lin_delta_a = -n * lambda_n
     lin_delta_b = n * lambda_n

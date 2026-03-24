@@ -34,8 +34,8 @@ RAMP_LENGTH = 20.0
 RAMP_WIDTH = 5.0
 RAMP_THICKNESS = 0.5
 
-USE_MESH_CUBES = False
-USE_SDF = False
+USE_MESH_CUBES = True
+USE_SDF = True
 SDF_MAX_RESOLUTION = 256
 
 MAX_STEPS = 2000
@@ -212,6 +212,8 @@ class Example:
         self._terminate_requested = False
         self.last_perf_step = 0
         self.last_perf_time = time.perf_counter()
+        self._spike_count = 0  # steps where max_lin > 2 m/s (after step 1000)
+        self._settled_max_lin = 0.0  # worst max_lin in last 500 steps
 
         if ENABLE_KERNEL_TIMING:
             self.graph = None
@@ -276,9 +278,21 @@ class Example:
             self.last_perf_step = self.step_count
             self.last_perf_time = now
 
+        # Track jitter metrics (after wrecking ball settles)
+        if self.step_count > 1000 and self.step_count % PRINT_INTERVAL == 0:
+            max_lin, _, _, _ = self._cube_velocity_stats()
+            if max_lin > 2.0:
+                self._spike_count += 1
+            if self.step_count > MAX_STEPS - 500:
+                self._settled_max_lin = max(self._settled_max_lin, max_lin)
+
         if self.step_count >= MAX_STEPS and not self._terminate_requested:
             self._terminate_requested = True
             print(f"Reached {MAX_STEPS} steps, stopping.")
+            print(
+                f"Jitter: {self._spike_count} spikes (>2 m/s after step 1000), "
+                f"settled max = {self._settled_max_lin:.4f} m/s"
+            )
 
     def _print_kernel_timing_report(self):
         if self._exit_report_printed:

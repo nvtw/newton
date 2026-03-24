@@ -76,6 +76,7 @@ class SolverXPBD(SolverBase):
         joint_linear_compliance: float = 0.0,
         joint_angular_compliance: float = 0.0,
         rigid_contact_relaxation: float = 0.8,
+        rigid_contact_max_depenetration_velocity: float = 2.0,
         rigid_contact_con_weighting: bool = True,
         angular_damping: float = 0.0,
         enable_restitution: bool = False,
@@ -92,6 +93,7 @@ class SolverXPBD(SolverBase):
         self.joint_angular_compliance = joint_angular_compliance
 
         self.rigid_contact_relaxation = rigid_contact_relaxation
+        self.rigid_contact_max_depenetration_velocity = rigid_contact_max_depenetration_velocity
         self.rigid_contact_con_weighting = rigid_contact_con_weighting
 
         self.angular_damping = angular_damping
@@ -496,6 +498,7 @@ class SolverXPBD(SolverBase):
                                 model.shape_material_mu_torsional,
                                 model.shape_material_mu_rolling,
                                 self.rigid_contact_relaxation,
+                                self.rigid_contact_max_depenetration_velocity,
                                 dt,
                             ],
                             outputs=[
