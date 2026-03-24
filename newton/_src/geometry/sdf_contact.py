@@ -1116,8 +1116,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         heightfield_data: wp.array(dtype=HeightfieldData),
         heightfield_elevations: wp.array(dtype=wp.float32),
         block_offsets: wp.array(dtype=wp.int32),
-        mesh_edge_ownership: wp.array(dtype=wp.uint8),
-        shape_tri_start: wp.array(dtype=wp.int32),
         reducer_data: GlobalContactReducerData,
         total_num_blocks: int,
     ):
@@ -1286,66 +1284,19 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         v1 = vertex_cache[t * 3 + 1]
                         v2 = vertex_cache[t * 3 + 2]
 
-                        dist_unscaled, point_unscaled, direction_unscaled, vtx_dists = do_triangle_sdf_collision(
-                            texture_sdf,
-                            mesh_id_sdf,
-                            v0,
-                            v1,
-                            v2,
-                            use_bvh_for_sdf,
-                            sdf_is_hfield,
-                            hfd_sdf,
-                            heightfield_elevations,
-                        )
+                        # Edge contacts: golden section search on each edge.
+                        # Each edge emits one contact at the deepest point.
+                        # Vertex SDF values are passed to golden_section_edge_search
+                        # which reuses them as the interval endpoints.
+                        d0 = sample_sdf_value(texture_sdf, mesh_id_sdf, use_bvh_for_sdf, sdf_is_hfield, hfd_sdf, heightfield_elevations, v0)
+                        d1 = sample_sdf_value(texture_sdf, mesh_id_sdf, use_bvh_for_sdf, sdf_is_hfield, hfd_sdf, heightfield_elevations, v1)
+                        d2 = sample_sdf_value(texture_sdf, mesh_id_sdf, use_bvh_for_sdf, sdf_is_hfield, hfd_sdf, heightfield_elevations, v2)
 
-                        dist, direction = scale_sdf_result_to_world(
-                            dist_unscaled, direction_unscaled, sdf_scale, inv_sdf_scale, min_sdf_scale
-                        )
-                        point = wp.cw_mul(point_unscaled, sdf_scale)
-
-                        if dist < contact_threshold:
-                            point_world = wp.transform_point(X_sdf_ws, point)
-
-                            direction_world = wp.transform_vector(X_sdf_ws, direction)
-                            direction_len = wp.length(direction_world)
-                            if direction_len > 0.0:
-                                direction_world = direction_world / direction_len
-                            else:
-                                fallback_dir = point_world - wp.transform_get_translation(X_sdf_ws)
-                                fallback_len = wp.length(fallback_dir)
-                                if fallback_len > 0.0:
-                                    direction_world = fallback_dir / fallback_len
-                                else:
-                                    direction_world = wp.vec3(0.0, 1.0, 0.0)
-
-                            contact_normal = -direction_world if mode == 0 else direction_world
-
-                            export_and_reduce_contact_centered(
-                                pair[0],
-                                pair[1],
-                                point_world,
-                                contact_normal,
-                                dist,
-                                point_world - midpoint,
-                                X_ws_tri,
-                                aabb_lower_tri,
-                                aabb_upper_tri,
-                                voxel_res_tri,
-                                reducer_data,
-                            )
-
-                        # Edge contacts: golden section on owned edges only.
-                        # The ownership mask ensures each shared edge is
-                        # processed exactly once (by the lowest-index triangle).
-                        tri_idx = selected_triangles[t]
-                        own_mask = mesh_edge_ownership[shape_tri_start[tri_shape] + tri_idx]
                         for edge_i in range(3):
-                            if (own_mask & wp.uint8(1 << edge_i)) == wp.uint8(0):
-                                continue
                             ea = v0 if edge_i == 0 else (v1 if edge_i == 1 else v2)
                             eb = v1 if edge_i == 0 else (v2 if edge_i == 1 else v0)
-                            fa_e = vtx_dists[edge_i]
-                            fb_e = vtx_dists[1 if edge_i == 0 else (2 if edge_i == 1 else 0)]
+                            fa_e = d0 if edge_i == 0 else (d1 if edge_i == 1 else d2)
+                            fb_e = d1 if edge_i == 0 else (d2 if edge_i == 1 else d0)
                             if fa_e * min_sdf_scale >= contact_threshold and fb_e * min_sdf_scale >= contact_threshold:
                                 continue
                             edge_dist, edge_pt = golden_section_edge_search(
