@@ -12,6 +12,7 @@ newton.viewer
    :toctree: _generated
    :nosignatures:
 
+   SDFMarginMode
    ViewerBase
    ViewerFile
    ViewerGL

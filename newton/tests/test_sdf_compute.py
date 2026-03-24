@@ -22,7 +22,9 @@ import newton
 from newton import GeoType, Mesh
 from newton._src.geometry.sdf_utils import (
     SDFData,
+    compute_isomesh,
     compute_offset_mesh,
+    compute_offset_mesh_analytical,
     compute_sdf_from_shape,
     sample_sdf_extrapolated,
     sample_sdf_grad_extrapolated,
@@ -1358,6 +1360,202 @@ class TestComputeOffsetMesh(unittest.TestCase):
                 0.3 + off * 0.5,
                 f"Mesh offset extent along axis {i} ({extent[i]:.3f}) too small",
             )
+
+
+@unittest.skipUnless(_cuda_available, "wp.Volume requires CUDA device")
+class TestExtractIsomesh(unittest.TestCase):
+    """Test SDF.extract_isomesh and compute_isomesh with isovalue parameter.
+
+    Uses a box mesh with a pre-built SDF.  Validates that every vertex of the
+    extracted isosurface sits at the correct signed distance from the original
+    box, measured with the analytical box SDF as ground truth.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        wp.init()
+        cls.half_extents = (0.3, 0.3, 0.3)
+        cls.mesh = create_box_mesh(cls.half_extents)
+        cls.mesh.build_sdf(max_resolution=64)
+
+    @staticmethod
+    def _box_sdf(v, hx, hy, hz):
+        q = np.abs(v) - np.array([hx, hy, hz])
+        return float(np.linalg.norm(np.maximum(q, 0.0)) + min(max(q[0], q[1], q[2]), 0.0))
+
+    def _assert_box_vertices_at_isovalue(self, iso_mesh, isovalue, atol=0.03):
+        """Assert every vertex of *iso_mesh* sits at *isovalue* from the box surface."""
+        hx, hy, hz = self.half_extents
+        verts = iso_mesh.vertices
+        errors = np.array([abs(self._box_sdf(v, hx, hy, hz) - isovalue) for v in verts])
+        max_err = float(errors.max())
+        self.assertLess(
+            max_err,
+            atol,
+            f"Max vertex SDF error {max_err:.4f} exceeds {atol} for isovalue={isovalue} (mean {errors.mean():.4f})",
+        )
+
+    def test_extract_isomesh_zero_isovalue(self):
+        """extract_isomesh at isovalue=0: every vertex should be on the original box surface."""
+        sdf = self.mesh.sdf
+        self.assertIsNotNone(sdf)
+        result = sdf.extract_isomesh(isovalue=0.0)
+        self.assertIsNotNone(result)
+        self.assertGreater(result.vertices.shape[0], 0)
+        self._assert_box_vertices_at_isovalue(result, 0.0)
+
+    def test_extract_isomesh_positive_isovalue(self):
+        """extract_isomesh at positive isovalue: vertices at the inflated distance."""
+        sdf = self.mesh.sdf
+        self.assertIsNotNone(sdf)
+        offset = 0.04
+        result = sdf.extract_isomesh(isovalue=offset)
+        self.assertIsNotNone(result)
+        self.assertGreater(result.vertices.shape[0], 0)
+        self._assert_box_vertices_at_isovalue(result, offset)
+
+    def test_extract_isomesh_returns_none_outside_band(self):
+        """extract_isomesh at isovalue far outside the narrow band returns None."""
+        sdf = self.mesh.sdf
+        self.assertIsNotNone(sdf)
+        result = sdf.extract_isomesh(isovalue=10.0)
+        self.assertIsNone(result)
+
+    def test_compute_isomesh_with_isovalue(self):
+        """compute_isomesh with non-zero isovalue: vertices at the offset distance."""
+        sdf = self.mesh.sdf
+        self.assertIsNotNone(sdf)
+        sparse_vol = sdf.sparse_volume
+        self.assertIsNotNone(sparse_vol)
+        offset = 0.04
+        result = compute_isomesh(sparse_vol, isovalue=offset)
+        self.assertIsNotNone(result)
+        self.assertGreater(result.vertices.shape[0], 0)
+        self._assert_box_vertices_at_isovalue(result, offset)
+
+    def test_compute_offset_mesh_with_prebuilt_sdf(self):
+        """compute_offset_mesh via pre-built SDF: vertices at the offset distance."""
+        offset = 0.04
+        result = compute_offset_mesh(GeoType.MESH, shape_geo=self.mesh, offset=offset)
+        self.assertIsNotNone(result)
+        self.assertGreater(result.vertices.shape[0], 0)
+        self._assert_box_vertices_at_isovalue(result, offset)
+
+    def test_isovalue_changes_surface_consistently(self):
+        """Larger isovalue produces a strictly larger mesh than smaller isovalue."""
+        sdf = self.mesh.sdf
+        self.assertIsNotNone(sdf)
+        mesh_small = sdf.extract_isomesh(isovalue=0.02)
+        mesh_large = sdf.extract_isomesh(isovalue=0.06)
+        self.assertIsNotNone(mesh_small)
+        self.assertIsNotNone(mesh_large)
+        extent_small = np.max(np.abs(mesh_small.vertices), axis=0)
+        extent_large = np.max(np.abs(mesh_large.vertices), axis=0)
+        for i in range(3):
+            self.assertGreater(
+                extent_large[i],
+                extent_small[i],
+                f"Larger isovalue should produce larger extent on axis {i}: "
+                f"{extent_large[i]:.4f} vs {extent_small[i]:.4f}",
+            )
+
+
+@unittest.skipUnless(_cuda_available, "wp.Volume requires CUDA device")
+class TestComputeOffsetMeshAdditionalPrimitives(unittest.TestCase):
+    """Test compute_offset_mesh for primitives not covered by TestComputeOffsetMesh.
+
+    Adds analytical SDF references for ellipsoid and cone, validating vertex
+    positions with the same rigour as ``TestComputeOffsetMesh._assert_vertices_at_offset``.
+    """
+
+    @staticmethod
+    def _analytical_sdf(v, shape_type, shape_scale):
+        """Evaluate analytical SDF for a primitive at point *v*."""
+        if shape_type == GeoType.ELLIPSOID:
+            rx, ry, rz = shape_scale[:3]
+            eps = 1e-8
+            r = np.array([max(abs(rx), eps), max(abs(ry), eps), max(abs(rz), eps)])
+            q0 = v / r
+            q1 = v / (r * r)
+            k0 = np.linalg.norm(q0)
+            k1 = np.linalg.norm(q1)
+            if k1 > eps:
+                return float(k0 * (k0 - 1.0) / k1)
+            return float(-min(r))
+        if shape_type == GeoType.CONE:
+            bottom_r, hh = shape_scale[0], shape_scale[1]
+            top_r = 0.0
+            # cone SDF with Z up-axis
+            r_xy = np.linalg.norm(v[:2])
+            q = np.array([r_xy, v[2]])
+            k1 = np.array([top_r, hh])
+            k2 = np.array([top_r - bottom_r, 2.0 * hh])
+            if q[1] < 0.0:
+                ca = np.array([q[0] - min(q[0], bottom_r), abs(q[1]) - hh])
+            else:
+                ca = np.array([q[0] - min(q[0], top_r), abs(q[1]) - hh])
+            denom = np.dot(k2, k2)
+            t = 0.0
+            if denom > 0.0:
+                t = float(np.clip(np.dot(k1 - q, k2) / denom, 0.0, 1.0))
+            cb = q - k1 + k2 * t
+            sign = -1.0 if cb[0] < 0.0 and ca[1] < 0.0 else 1.0
+            return float(sign * np.sqrt(min(np.dot(ca, ca), np.dot(cb, cb))))
+        return None
+
+    def _assert_vertices_at_offset(self, mesh, shape_type, shape_scale, offset, atol=None):
+        """Assert every vertex is approximately *offset* from the base surface."""
+        if atol is None:
+            atol = offset * 0.15 + 0.02
+        max_err = 0.0
+        for v in mesh.vertices:
+            d = self._analytical_sdf(v, shape_type, shape_scale)
+            if d is None:
+                continue
+            max_err = max(max_err, abs(d - offset))
+        self.assertLess(
+            max_err,
+            atol,
+            f"Max vertex distance error {max_err:.4f} exceeds {atol:.4f} "
+            f"for shape {shape_type}, scale {shape_scale}, offset {offset}",
+        )
+
+    def test_ellipsoid_offset(self):
+        """Ellipsoid offset mesh: every vertex at the correct signed distance."""
+        sx, sy, sz = 0.4, 0.3, 0.2
+        off = 0.3
+        mesh = compute_offset_mesh(GeoType.ELLIPSOID, shape_scale=(sx, sy, sz), offset=off)
+        self.assertIsNotNone(mesh)
+        self.assertGreater(mesh.vertices.shape[0], 0)
+        self._assert_vertices_at_offset(mesh, GeoType.ELLIPSOID, (sx, sy, sz), off)
+
+    def test_cone_offset(self):
+        """Cone offset mesh: every vertex at the correct signed distance."""
+        r, hh = 0.25, 0.4
+        off = 0.3
+        mesh = compute_offset_mesh(GeoType.CONE, shape_scale=(r, hh, 0.0), offset=off)
+        self.assertIsNotNone(mesh)
+        self.assertGreater(mesh.vertices.shape[0], 0)
+        self._assert_vertices_at_offset(mesh, GeoType.CONE, (r, hh, 0.0), off)
+
+    def test_compute_offset_mesh_analytical_unsupported_type(self):
+        """compute_offset_mesh_analytical returns None for non-analytical types."""
+        result = compute_offset_mesh_analytical(GeoType.MESH, shape_scale=(1, 1, 1), offset=0.1)
+        self.assertIsNone(result)
+
+    def test_compute_isomesh_empty_volume(self):
+        """compute_isomesh with isovalue far from any surface returns None."""
+        box_mesh = create_box_mesh((0.2, 0.2, 0.2))
+        _, sparse_vol, _, _ = compute_sdf_from_shape(
+            shape_geo=box_mesh,
+            shape_type=GeoType.MESH,
+            shape_margin=0.0,
+            max_resolution=16,
+            narrow_band_distance=(-0.05, 0.05),
+        )
+        self.assertIsNotNone(sparse_vol)
+        result = compute_isomesh(sparse_vol, isovalue=10.0)
+        self.assertIsNone(result)
 
 
 class TestSDFNonUniformScaleBrickPyramid(unittest.TestCase):

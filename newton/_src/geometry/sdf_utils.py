@@ -1375,6 +1375,9 @@ def compute_offset_mesh_analytical(
     if shape_type not in _ANALYTICAL_SDF_TYPES:
         return None
 
+    if device is None:
+        device = "cuda:0"
+
     with wp.ScopedDevice(device):
         min_ext_list, max_ext_list = get_primitive_extents(shape_type, shape_scale)
 
