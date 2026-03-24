@@ -1644,6 +1644,8 @@ class NarrowPhase:
         shape_heightfield_index: wp.array(dtype=wp.int32, ndim=1) | None = None,
         heightfield_data: wp.array(dtype=HeightfieldData, ndim=1) | None = None,
         heightfield_elevations: wp.array(dtype=wp.float32, ndim=1) | None = None,
+        mesh_edge_ownership: wp.array(dtype=wp.uint8, ndim=1) | None = None,
+        shape_tri_start: wp.array(dtype=wp.int32, ndim=1) | None = None,
         writer_data: Any,
         device: Devicelike | None = None,  # Device to launch on
     ) -> None:
@@ -1927,6 +1929,8 @@ class NarrowPhase:
                             heightfield_data,
                             heightfield_elevations,
                             self.mesh_mesh_block_offsets,
+                            mesh_edge_ownership,
+                            shape_tri_start,
                             reducer_data,
                             self.num_mesh_mesh_blocks,
                         ],

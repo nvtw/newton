@@ -1116,6 +1116,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         heightfield_data: wp.array(dtype=HeightfieldData),
         heightfield_elevations: wp.array(dtype=wp.float32),
         block_offsets: wp.array(dtype=wp.int32),
+        mesh_edge_ownership: wp.array(dtype=wp.uint8),
+        shape_tri_start: wp.array(dtype=wp.int32),
         reducer_data: GlobalContactReducerData,
         total_num_blocks: int,
     ):
@@ -1332,9 +1334,14 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 reducer_data,
                             )
 
-                        # Edge contacts: golden section on the 3 triangle edges.
-                        # Vertices are already in SDF unscaled space from the cache.
+                        # Edge contacts: golden section on owned edges only.
+                        # The ownership mask ensures each shared edge is
+                        # processed exactly once (by the lowest-index triangle).
+                        tri_idx = selected_triangles[t]
+                        own_mask = mesh_edge_ownership[shape_tri_start[tri_shape] + tri_idx]
                         for edge_i in range(3):
+                            if (own_mask & wp.uint8(1 << edge_i)) == wp.uint8(0):
+                                continue
                             ea = v0 if edge_i == 0 else (v1 if edge_i == 1 else v2)
                             eb = v1 if edge_i == 0 else (v2 if edge_i == 1 else v0)
                             fa_e = vtx_dists[edge_i]

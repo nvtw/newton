@@ -172,6 +172,7 @@ class Mesh:
         self.sdf = sdf
 
         self._edges = None
+        self._edge_ownership = None
 
         if compute_inertia:
             self.mass, self.com, self.inertia, _ = compute_inertia_mesh(1.0, vertices, indices, is_solid=is_solid)
@@ -196,6 +197,34 @@ class Mesh:
                     edge_set.add((min(a, b), max(a, b)))
             self._edges = np.array(sorted(edge_set), dtype=np.int32)
         return self._edges
+
+    @property
+    def edge_ownership(self) -> np.ndarray:
+        """Per-triangle edge ownership mask, shape (T,), dtype uint8.
+
+        Bit *i* (0-2) is set when the triangle owns edge *i* (the edge
+        from vertex *i* to vertex *(i+1) % 3*).  Ownership goes to the
+        triangle with the lowest index among all triangles sharing that
+        edge.  This allows each edge to be processed exactly once during
+        collision detection.
+        """
+        if self._edge_ownership is None:
+            indices = self._indices.reshape(-1, 3)
+            n_tris = len(indices)
+            ownership = np.full(n_tris, 0x7, dtype=np.uint8)  # all 3 bits set
+            edge_first_tri: dict[tuple[int, int], int] = {}
+            for tri_idx in range(n_tris):
+                for e in range(3):
+                    a = int(indices[tri_idx, e])
+                    b = int(indices[tri_idx, (e + 1) % 3])
+                    key = (min(a, b), max(a, b))
+                    if key in edge_first_tri:
+                        # Another triangle already owns this edge
+                        ownership[tri_idx] &= np.uint8(0xFF ^ (1 << e))
+                    else:
+                        edge_first_tri[key] = tri_idx
+            self._edge_ownership = ownership
+        return self._edge_ownership
 
     @staticmethod
     def create_sphere(

@@ -9412,6 +9412,29 @@ class ModelBuilder:
             m.shape_edge_start = wp.array(shape_edge_start, dtype=wp.int32, device=device)
             m.shape_edge_count = wp.array(shape_edge_count, dtype=wp.int32, device=device)
 
+            # Build per-triangle edge ownership masks
+            all_ownership = []
+            shape_tri_start = []
+            tri_offset = 0
+            ownership_cache = {}
+            for stype, ssrc in zip(self.shape_type, self.shape_source, strict=True):
+                if stype == GeoType.MESH and ssrc is not None:
+                    geo_hash = hash(ssrc)
+                    if geo_hash not in ownership_cache:
+                        own = ssrc.edge_ownership  # (T,) uint8
+                        ownership_cache[geo_hash] = (tri_offset, own)
+                        all_ownership.extend(own.tolist())
+                        tri_offset += len(own)
+                    shape_tri_start.append(ownership_cache[geo_hash][0])
+                else:
+                    shape_tri_start.append(0)
+
+            if all_ownership:
+                m.mesh_edge_ownership = wp.array(all_ownership, dtype=wp.uint8, device=device)
+            else:
+                m.mesh_edge_ownership = wp.zeros(1, dtype=wp.uint8, device=device)
+            m.shape_tri_start = wp.array(shape_tri_start, dtype=wp.int32, device=device)
+
             m.shape_material_ke = wp.array(self.shape_material_ke, dtype=wp.float32, requires_grad=requires_grad)
             m.shape_material_kd = wp.array(self.shape_material_kd, dtype=wp.float32, requires_grad=requires_grad)
             m.shape_material_kf = wp.array(self.shape_material_kf, dtype=wp.float32, requires_grad=requires_grad)

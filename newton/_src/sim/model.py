@@ -231,6 +231,12 @@ class Model:
         """Per-shape start offset (in edges, not indices) into mesh_edge_indices."""
         self.shape_edge_count: wp.array(dtype=wp.int32) | None = None
         """Per-shape number of edges."""
+        self.mesh_edge_ownership: wp.array(dtype=wp.uint8) | None = None
+        """Per-triangle edge ownership bitmask for all mesh shapes.
+        Bit i (0-2) set means the triangle owns edge i.  Indexed by
+        shape_tri_start[shape] + tri_idx within that shape's mesh."""
+        self.shape_tri_start: wp.array(dtype=wp.int32) | None = None
+        """Per-shape start offset (in triangles) into mesh_edge_ownership."""
 
         # Shape geometry properties
         self.shape_type: wp.array(dtype=wp.int32) | None = None
