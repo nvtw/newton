@@ -22,6 +22,7 @@
 - Add MPM beam twist, snow ball, and viscous coiling examples
 - Add support for textures in `SensorTiledCamera` via `Config.enable_textures`
 - Add `enable_ambient_lighting` and `enable_particles` options to `SensorTiledCamera.Config`
+- Add `compute_offset_mesh` for extracting offset surface meshes from any collision shape, and `SDFMarginMode` viewer toggle to visualize SDF margin/gap wireframes in the GL viewer (#1856)
 
 ### Changed
 

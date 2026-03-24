@@ -1262,6 +1262,7 @@ class TestComputeOffsetMesh(unittest.TestCase):
             atol = offset * 0.15 + 0.02
 
         verts = mesh.vertices
+        self.assertGreater(len(verts), 0, "Offset mesh has no vertices")
         max_err = 0.0
         for v in verts:
             d = self._analytical_sdf(v, shape_type, shape_scale)
@@ -1312,6 +1313,7 @@ class TestComputeOffsetMesh(unittest.TestCase):
         off = 0.7
         mesh = compute_offset_mesh(GeoType.SPHERE, shape_scale=(r, r, r), offset=off, device=self.device)
         self.assertIsNotNone(mesh)
+        self.assertGreater(mesh.vertices.shape[0], 0)
         dists = np.linalg.norm(mesh.vertices, axis=1)
         expected_radius = r + off
         np.testing.assert_allclose(dists, expected_radius, atol=0.05)
@@ -1345,9 +1347,10 @@ class TestComputeOffsetMesh(unittest.TestCase):
     def test_zero_offset(self):
         """Zero offset should produce a mesh approximating the original surface."""
         mesh = compute_offset_mesh(GeoType.SPHERE, shape_scale=(0.5, 0.5, 0.5), offset=0.0, device=self.device)
-        if mesh is not None:
-            dists = np.linalg.norm(mesh.vertices, axis=1)
-            np.testing.assert_allclose(dists, 0.5, atol=0.03)
+        self.assertIsNotNone(mesh)
+        self.assertGreater(mesh.vertices.shape[0], 0)
+        dists = np.linalg.norm(mesh.vertices, axis=1)
+        np.testing.assert_allclose(dists, 0.5, atol=0.03)
 
     def test_mesh_shape_large_offset(self):
         """Mesh (box geometry) with large offset."""
@@ -1511,6 +1514,7 @@ class TestComputeOffsetMeshAdditionalPrimitives(unittest.TestCase):
         """Assert every vertex is approximately *offset* from the base surface."""
         if atol is None:
             atol = offset * 0.15 + 0.02
+        self.assertGreater(len(mesh.vertices), 0, "Offset mesh has no vertices")
         max_err = 0.0
         for v in mesh.vertices:
             d = self._analytical_sdf(v, shape_type, shape_scale)

@@ -856,6 +856,9 @@ class ViewerGL(ViewerBase):
 
     @override
     def clear_wireframe_vbo_cache(self):
+        for obj in self.wireframe_shapes.values():
+            obj.destroy()
+        self.wireframe_shapes.clear()
         for owner in self._wireframe_vbo_owners.values():
             owner.destroy()
         self._wireframe_vbo_owners.clear()
