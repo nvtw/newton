@@ -99,17 +99,21 @@ class Contacts:
             self.rigid_contact_point1 = wp.zeros(rigid_contact_max, dtype=wp.vec3)
             """Body-frame contact point on shape 1 [m], shape (rigid_contact_max,), dtype :class:`vec3`."""
             self.rigid_contact_offset0 = wp.zeros(rigid_contact_max, dtype=wp.vec3)
-            """Surface-thickness vector for shape 0 in body frame [m], shape (rigid_contact_max,), dtype :class:`vec3`.
+            """Body-frame friction anchor offset for shape 0 [m], shape (rigid_contact_max,), dtype :class:`vec3`.
 
-            Points from the contact point toward the opposing shape along the normal with
-            magnitude ``effective_radius + margin``.  Used by the solver to adjust
-            contact anchors for friction and restitution impulses."""
+            Equal to the contact normal scaled by ``effective_radius + margin`` and
+            expressed in shape 0's body frame. Combined with
+            ``rigid_contact_point0`` to form a shifted friction anchor that accounts
+            for rotational effects of finite contact thickness in tangential friction
+            calculations."""
             self.rigid_contact_offset1 = wp.zeros(rigid_contact_max, dtype=wp.vec3)
-            """Surface-thickness vector for shape 1 in body frame [m], shape (rigid_contact_max,), dtype :class:`vec3`.
+            """Body-frame friction anchor offset for shape 1 [m], shape (rigid_contact_max,), dtype :class:`vec3`.
 
-            Points from the contact point toward the opposing shape along the normal with
-            magnitude ``effective_radius + margin``.  Used by the solver to adjust
-            contact anchors for friction and restitution impulses."""
+            Equal to the contact normal scaled by ``effective_radius + margin`` and
+            expressed in shape 1's body frame. Combined with
+            ``rigid_contact_point1`` to form a shifted friction anchor that accounts
+            for rotational effects of finite contact thickness in tangential friction
+            calculations."""
             self.rigid_contact_normal = wp.zeros(rigid_contact_max, dtype=wp.vec3)
             """Contact normal pointing from shape 0 toward shape 1 (A-to-B) [unitless], shape (rigid_contact_max,), dtype :class:`vec3`."""
             self.rigid_contact_margin0 = wp.zeros(rigid_contact_max, dtype=wp.float32)
