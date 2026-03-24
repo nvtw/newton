@@ -783,6 +783,8 @@ void main()
     vec4 s = gl_in[0].gl_Position;
     vec4 e = gl_in[1].gl_Position;
 
+    if (s.w <= 0.0 || e.w <= 0.0) return;
+
     vec2 s_ndc = s.xy / s.w;
     vec2 e_ndc = e.xy / e.w;
     float s_depth = s.z / s.w;
