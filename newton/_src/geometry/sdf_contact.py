@@ -1116,9 +1116,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         heightfield_data: wp.array(dtype=HeightfieldData),
         heightfield_elevations: wp.array(dtype=wp.float32),
         block_offsets: wp.array(dtype=wp.int32),
-        mesh_edge_indices: wp.array(dtype=wp.int32),
-        shape_edge_start: wp.array(dtype=wp.int32),
-        shape_edge_count: wp.array(dtype=wp.int32),
         reducer_data: GlobalContactReducerData,
         total_num_blocks: int,
     ):
@@ -1335,59 +1332,46 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 reducer_data,
                             )
 
+                        # Edge contacts: golden section on the 3 triangle edges.
+                        # Vertices are already in SDF unscaled space from the cache.
+                        for edge_i in range(3):
+                            ea = v0 if edge_i == 0 else (v1 if edge_i == 1 else v2)
+                            eb = v1 if edge_i == 0 else (v2 if edge_i == 1 else v0)
+                            fa_e = vtx_dists[edge_i]
+                            fb_e = vtx_dists[1 if edge_i == 0 else (2 if edge_i == 1 else 0)]
+                            if fa_e * min_sdf_scale >= contact_threshold and fb_e * min_sdf_scale >= contact_threshold:
+                                continue
+                            edge_dist, edge_pt = golden_section_edge_search(
+                                texture_sdf, mesh_id_sdf, use_bvh_for_sdf,
+                                sdf_is_hfield, hfd_sdf, heightfield_elevations,
+                                ea, eb, fa_e, fb_e,
+                            )
+                            edge_dist_s = edge_dist * min_sdf_scale
+                            if edge_dist_s < contact_threshold:
+                                _, edge_grad = sample_sdf_point(
+                                    texture_sdf, mesh_id_sdf, use_bvh_for_sdf,
+                                    sdf_is_hfield, hfd_sdf, heightfield_elevations,
+                                    edge_pt,
+                                )
+                                _, edge_dir = scale_sdf_result_to_world(
+                                    edge_dist, edge_grad, sdf_scale, inv_sdf_scale, min_sdf_scale,
+                                )
+                                edge_pt_w = wp.transform_point(X_sdf_ws, wp.cw_mul(edge_pt, sdf_scale))
+                                edge_dir_w = wp.transform_vector(X_sdf_ws, edge_dir)
+                                edge_dir_len = wp.length(edge_dir_w)
+                                if edge_dir_len > 0.0:
+                                    edge_dir_w = edge_dir_w / edge_dir_len
+                                edge_n = -edge_dir_w if mode == 0 else edge_dir_w
+                                export_and_reduce_contact_centered(
+                                    pair[0], pair[1], edge_pt_w, edge_n,
+                                    edge_dist_s, edge_pt_w - midpoint,
+                                    X_ws_tri, aabb_lower_tri, aabb_upper_tri,
+                                    voxel_res_tri, reducer_data,
+                                )
+
                     synchronize()
                     if t == 0:
                         selected_triangles[tri_capacity] = 0
                     synchronize()
-
-                # Edge contacts: golden section search over precomputed
-                # unique edges.  Each edge is processed once (not per-triangle).
-                if not tri_is_hfield:
-                    e_start = shape_edge_start[tri_shape]
-                    e_count = shape_edge_count[tri_shape]
-                    mesh_obj = wp.mesh_get(mesh_id_tri)
-                    for ei in range(t, e_count, wp.block_dim()):
-                        vi0 = mesh_edge_indices[(e_start + ei) * 2]
-                        vi1 = mesh_edge_indices[(e_start + ei) * 2 + 1]
-                        ea_local = wp.cw_mul(wp.transform_point(X_mesh_to_sdf, wp.cw_mul(wp.vec3(mesh_obj.points[vi0]), mesh_scale_tri)), inv_sdf_scale)
-                        eb_local = wp.cw_mul(wp.transform_point(X_mesh_to_sdf, wp.cw_mul(wp.vec3(mesh_obj.points[vi1]), mesh_scale_tri)), inv_sdf_scale)
-                        # Cull: bounding sphere of edge vs SDF AABB
-                        edge_center = (ea_local + eb_local) * 0.5
-                        edge_radius = wp.length(ea_local - eb_local) * 0.5
-                        if not sdf_is_hfield and not use_bvh_for_sdf:
-                            clamped_c = wp.min(wp.max(edge_center, texture_sdf.sdf_box_lower), texture_sdf.sdf_box_upper)
-                            if wp.length_sq(edge_center - clamped_c) > (edge_radius + contact_threshold_unscaled) * (edge_radius + contact_threshold_unscaled):
-                                continue
-                        fa_e = sample_sdf_value(texture_sdf, mesh_id_sdf, use_bvh_for_sdf, sdf_is_hfield, hfd_sdf, heightfield_elevations, ea_local)
-                        fb_e = sample_sdf_value(texture_sdf, mesh_id_sdf, use_bvh_for_sdf, sdf_is_hfield, hfd_sdf, heightfield_elevations, eb_local)
-                        if fa_e * min_sdf_scale >= contact_threshold and fb_e * min_sdf_scale >= contact_threshold:
-                            continue
-                        edge_dist, edge_pt = golden_section_edge_search(
-                            texture_sdf, mesh_id_sdf, use_bvh_for_sdf,
-                            sdf_is_hfield, hfd_sdf, heightfield_elevations,
-                            ea_local, eb_local, fa_e, fb_e,
-                        )
-                        edge_dist_s = edge_dist * min_sdf_scale
-                        if edge_dist_s < contact_threshold:
-                            _, edge_grad = sample_sdf_point(
-                                texture_sdf, mesh_id_sdf, use_bvh_for_sdf,
-                                sdf_is_hfield, hfd_sdf, heightfield_elevations,
-                                edge_pt,
-                            )
-                            _, edge_dir = scale_sdf_result_to_world(
-                                edge_dist, edge_grad, sdf_scale, inv_sdf_scale, min_sdf_scale,
-                            )
-                            edge_pt_w = wp.transform_point(X_sdf_ws, wp.cw_mul(edge_pt, sdf_scale))
-                            edge_dir_w = wp.transform_vector(X_sdf_ws, edge_dir)
-                            edge_dir_len = wp.length(edge_dir_w)
-                            if edge_dir_len > 0.0:
-                                edge_dir_w = edge_dir_w / edge_dir_len
-                            edge_n = -edge_dir_w if mode == 0 else edge_dir_w
-                            export_and_reduce_contact_centered(
-                                pair[0], pair[1], edge_pt_w, edge_n,
-                                edge_dist_s, edge_pt_w - midpoint,
-                                X_ws_tri, aabb_lower_tri, aabb_upper_tri,
-                                voxel_res_tri, reducer_data,
-                            )
 
     return mesh_sdf_collision_global_reduce_kernel
