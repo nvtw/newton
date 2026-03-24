@@ -869,20 +869,22 @@ def apply_body_deltas(
     v1 = v0 + dp
     w1 = w0 + dw1
 
-    # Limit velocity gain from constraint resolution to prevent energy
-    # injection from flickering contacts.  The gain budget scales with dt
-    # so it works correctly for any timestep or substep count.
-    max_gain = 100.0 * dt  # ~10× gravity-step of speed gain per pass
-    v0_len = wp.length(v0)
-    v1_len = wp.length(v1)
-    max_v = v0_len + max_gain
-    if v1_len > max_v and v1_len > 0.0:
-        v1 = v1 * (max_v / v1_len)
-    w0_len = wp.length(w0)
-    w1_len = wp.length(w1)
-    max_w = w0_len + max_gain * 10.0
-    if w1_len > max_w and w1_len > 0.0:
-        w1 = w1 * (max_w / w1_len)
+    # Limit velocity gain from contact constraint resolution to prevent
+    # energy injection from flickering contacts.  Only active for contact
+    # passes (constraint_inv_weights is non-null), not for joint passes.
+    # The gain budget scales with dt for any timestep or substep count.
+    if constraint_inv_weights:
+        max_gain = 100.0 * dt
+        v0_len = wp.length(v0)
+        v1_len = wp.length(v1)
+        max_v = v0_len + max_gain
+        if v1_len > max_v and v1_len > 0.0:
+            v1 = v1 * (max_v / v1_len)
+        w0_len = wp.length(w0)
+        w1_len = wp.length(w1)
+        max_w = w0_len + max_gain * 10.0
+        if w1_len > max_w and w1_len > 0.0:
+            w1 = w1 * (max_w / w1_len)
 
     # XXX this improves gradient stability
     if wp.length(v1) < 1e-4:
