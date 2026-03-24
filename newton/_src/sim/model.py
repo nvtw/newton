@@ -224,6 +224,14 @@ class Model:
         self.shape_gap: wp.array(dtype=wp.float32) | None = None
         """Shape additional contact detection gap [m], shape [shape_count], float."""
 
+        # Mesh edge data for SDF edge contacts
+        self.mesh_edge_indices: wp.array(dtype=wp.int32) | None = None
+        """Flat array of edge vertex index pairs (v0, v1, v0, v1, ...) for all mesh shapes."""
+        self.shape_edge_start: wp.array(dtype=wp.int32) | None = None
+        """Per-shape start offset (in edges, not indices) into mesh_edge_indices."""
+        self.shape_edge_count: wp.array(dtype=wp.int32) | None = None
+        """Per-shape number of edges."""
+
         # Shape geometry properties
         self.shape_type: wp.array(dtype=wp.int32) | None = None
         """Shape geometry type, shape [shape_count], int32."""

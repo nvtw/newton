@@ -9381,6 +9381,37 @@ class ModelBuilder:
 
             m.shape_source = self.shape_source  # used for rendering
 
+            # Build mesh edge arrays for SDF edge contacts
+            all_edge_indices = []
+            shape_edge_start = []
+            shape_edge_count = []
+            edge_offset = 0
+            edge_cache = {}  # deduplicate edges for shared meshes
+            for stype, ssrc in zip(self.shape_type, self.shape_source, strict=True):
+                if stype == GeoType.MESH and ssrc is not None:
+                    geo_hash = hash(ssrc)
+                    if geo_hash not in edge_cache:
+                        edges = ssrc.edges  # (E, 2) int32 array
+                        start = edge_offset
+                        count = len(edges)
+                        edge_cache[geo_hash] = (start, count)
+                        for e in edges:
+                            all_edge_indices.append(int(e[0]))
+                            all_edge_indices.append(int(e[1]))
+                        edge_offset += count
+                    shape_edge_start.append(edge_cache[geo_hash][0])
+                    shape_edge_count.append(edge_cache[geo_hash][1])
+                else:
+                    shape_edge_start.append(0)
+                    shape_edge_count.append(0)
+
+            if all_edge_indices:
+                m.mesh_edge_indices = wp.array(all_edge_indices, dtype=wp.int32, device=device)
+            else:
+                m.mesh_edge_indices = wp.zeros(1, dtype=wp.int32, device=device)
+            m.shape_edge_start = wp.array(shape_edge_start, dtype=wp.int32, device=device)
+            m.shape_edge_count = wp.array(shape_edge_count, dtype=wp.int32, device=device)
+
             m.shape_material_ke = wp.array(self.shape_material_ke, dtype=wp.float32, requires_grad=requires_grad)
             m.shape_material_kd = wp.array(self.shape_material_kd, dtype=wp.float32, requires_grad=requires_grad)
             m.shape_material_kf = wp.array(self.shape_material_kf, dtype=wp.float32, requires_grad=requires_grad)

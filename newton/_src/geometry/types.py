@@ -171,12 +171,31 @@ class Mesh:
         self._texture_hash = None
         self.sdf = sdf
 
+        self._edges = None
+
         if compute_inertia:
             self.mass, self.com, self.inertia, _ = compute_inertia_mesh(1.0, vertices, indices, is_solid=is_solid)
         else:
             self.inertia = wp.mat33(np.eye(3))
             self.mass = 1.0
             self.com = wp.vec3()
+
+    @property
+    def edges(self) -> np.ndarray:
+        """Unique edge vertex index pairs, shape (E, 2), dtype int32.
+
+        Computed lazily from the triangle indices.  Each edge appears once
+        with the smaller vertex index first.
+        """
+        if self._edges is None:
+            indices = self._indices.reshape(-1, 3)
+            edge_set = set()
+            for tri in indices:
+                for i in range(3):
+                    a, b = int(tri[i]), int(tri[(i + 1) % 3])
+                    edge_set.add((min(a, b), max(a, b)))
+            self._edges = np.array(sorted(edge_set), dtype=np.int32)
+        return self._edges
 
     @staticmethod
     def create_sphere(
