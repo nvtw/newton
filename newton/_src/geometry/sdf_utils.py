@@ -238,7 +238,7 @@ class SDF:
                     return result
 
         if self.sparse_volume is not None:
-            return compute_isomesh(self.sparse_volume, isovalue=isovalue)
+            return compute_isomesh(self.sparse_volume, isovalue=isovalue, device=device)
 
         return None
 
@@ -963,7 +963,7 @@ def compute_sdf_from_shape(
     )
 
 
-def compute_isomesh(volume: wp.Volume, isovalue: float = 0.0) -> Mesh | None:
+def compute_isomesh(volume: wp.Volume, isovalue: float = 0.0, device: Devicelike | None = None) -> Mesh | None:
     """Compute an isosurface mesh from a sparse SDF volume.
 
     Uses a two-pass approach to minimize memory allocation:
@@ -975,11 +975,16 @@ def compute_isomesh(volume: wp.Volume, isovalue: float = 0.0) -> Mesh | None:
         volume: The SDF volume.
         isovalue: Surface level to extract [m].  ``0.0`` gives the
             zero-isosurface; positive values extract an outward offset surface.
+        device: CUDA device for GPU allocations.  When ``None``, uses the
+            current :class:`wp.ScopedDevice` or the Warp default device.
 
     Returns:
         Mesh object containing the isosurface mesh.
     """
-    device = wp.get_device()
+    if device is not None:
+        device = wp.get_device(device)
+    else:
+        device = wp.get_device()
     mc_tables = get_mc_tables(device)
 
     tile_points = volume.get_tiles()
@@ -1065,18 +1070,24 @@ def compute_offset_mesh(
         )
 
     # Reuse existing SDF on the mesh when available (avoids building a
-    # NanoVDB volume from scratch).  The stored SDF has shape_margin=0 so
-    # extracting at isovalue=offset yields the inflated surface.
+    # NanoVDB volume from scratch).  This assumes the stored SDF was built
+    # with shape_margin=0 (default) so that extracting at isovalue=offset
+    # yields the correct inflated surface.  The fallback path below uses
+    # bake_scale=True, so we skip the shortcut when scale hasn't been baked
+    # AND the caller requests non-unit scale — otherwise the extracted
+    # vertices would be in unscaled mesh-local space.
     if shape_geo is not None:
         existing_sdf = getattr(shape_geo, "sdf", None)
         if existing_sdf is not None:
-            result = existing_sdf.extract_isomesh(isovalue=offset, device=device)
-            if result is not None:
-                return result
+            scale_ok = existing_sdf.data.scale_baked or all(abs(s - 1.0) < 1e-6 for s in shape_scale)
+            if scale_ok:
+                result = existing_sdf.extract_isomesh(isovalue=offset, device=device)
+                if result is not None:
+                    return result
 
     padding = max(abs(offset) * 0.5, 0.02)
     narrow_band = (-abs(offset) - padding, abs(offset) + padding)
-    margin = max(abs(offset) + padding, 0.05)
+    margin = max(padding, 0.05)
 
     _sdf_data, sparse_volume, _coarse_volume, _block_coords = _compute_sdf_from_shape_impl(
         shape_type=shape_type,
@@ -1093,7 +1104,7 @@ def compute_offset_mesh(
     if sparse_volume is None:
         return None
 
-    return compute_isomesh(sparse_volume)
+    return compute_isomesh(sparse_volume, device=device)
 
 
 @wp.kernel(enable_backward=False)
@@ -1376,14 +1387,14 @@ def compute_offset_mesh_analytical(
         return None
 
     if device is None:
-        device = "cuda:0"
+        cur = wp.get_device()
+        device = cur if cur.is_cuda else "cuda:0"
 
     with wp.ScopedDevice(device):
         min_ext_list, max_ext_list = get_primitive_extents(shape_type, shape_scale)
 
         padding = max(abs(offset) * 0.5, 0.02)
-        aabb_margin = max(abs(offset) + padding, 0.05)
-        total_expansion = aabb_margin + offset
+        total_expansion = max(abs(offset) + padding, 0.05)
 
         min_ext = np.array(min_ext_list, dtype=np.float64) - total_expansion
         max_ext = np.array(max_ext_list, dtype=np.float64) + total_expansion
