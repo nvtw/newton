@@ -208,6 +208,40 @@ class SDF:
         if int(self.data.coarse_sdf_ptr) == 0 and self.coarse_volume is not None:
             raise ValueError("SDFData coarse pointer is empty but coarse_volume is set.")
 
+    def extract_isomesh(self, isovalue: float = 0.0, device: "Devicelike | None" = None) -> "Mesh | None":
+        """Extract an isosurface mesh at the requested isovalue.
+
+        Prefers the texture SDF path when available (avoids NanoVDB volume
+        indirection); falls back to the NanoVDB sparse volume.
+
+        Args:
+            isovalue: Surface level to extract [m].  ``0.0`` gives the
+                original surface; positive values give an outward offset.
+            device: CUDA device.  When ``None`` uses the current device.
+
+        Returns:
+            :class:`Mesh` or ``None`` when the SDF has no data or the
+            isovalue falls outside the stored narrow band.
+        """
+        if self.texture_data is not None and self._coarse_texture is not None:
+            from .sdf_texture import TextureSDFData, compute_isomesh_from_texture_sdf  # noqa: PLC0415
+
+            with wp.ScopedDevice(device):
+                tex_arr = wp.array([self.texture_data], dtype=TextureSDFData, device=device)
+                ct = self._coarse_texture
+                coarse_dims = (ct.width - 1, ct.height - 1, ct.depth - 1)
+                slots = self.texture_data.subgrid_start_slots
+                result = compute_isomesh_from_texture_sdf(
+                    tex_arr, 0, slots, coarse_dims, device=device, isovalue=isovalue
+                )
+                if result is not None:
+                    return result
+
+        if self.sparse_volume is not None:
+            return compute_isomesh(self.sparse_volume, isovalue=isovalue)
+
+        return None
+
     def __copy__(self) -> "SDF":
         """Return self; SDF runtime handles are immutable and shared."""
         return self
@@ -929,8 +963,8 @@ def compute_sdf_from_shape(
     )
 
 
-def compute_isomesh(volume: wp.Volume) -> Mesh | None:
-    """Compute an isosurface mesh from an SDFData struct.
+def compute_isomesh(volume: wp.Volume, isovalue: float = 0.0) -> Mesh | None:
+    """Compute an isosurface mesh from a sparse SDF volume.
 
     Uses a two-pass approach to minimize memory allocation:
     1. First pass: count actual triangles produced
@@ -939,6 +973,8 @@ def compute_isomesh(volume: wp.Volume) -> Mesh | None:
 
     Args:
         volume: The SDF volume.
+        isovalue: Surface level to extract [m].  ``0.0`` gives the
+            zero-isosurface; positive values extract an outward offset surface.
 
     Returns:
         Mesh object containing the isosurface mesh.
@@ -946,7 +982,6 @@ def compute_isomesh(volume: wp.Volume) -> Mesh | None:
     device = wp.get_device()
     mc_tables = get_mc_tables(device)
 
-    # Get allocated tile points from the sparse volume
     tile_points = volume.get_tiles()
     tile_points_wp = wp.array(tile_points, dtype=wp.vec3i, device=device)
     num_tiles = tile_points.shape[0]
@@ -954,12 +989,11 @@ def compute_isomesh(volume: wp.Volume) -> Mesh | None:
     if num_tiles == 0:
         return None
 
-    # Pass 1: Count faces (no vertex allocation needed)
     face_count = wp.zeros((1,), dtype=int, device=device)
     wp.launch(
         count_isomesh_faces_kernel,
         dim=(num_tiles, 8, 8, 8),
-        inputs=[volume.id, tile_points_wp, mc_tables[0], mc_tables[3]],
+        inputs=[volume.id, tile_points_wp, mc_tables[0], mc_tables[3], float(isovalue)],
         outputs=[face_count],
         device=device,
     )
@@ -968,17 +1002,15 @@ def compute_isomesh(volume: wp.Volume) -> Mesh | None:
     if num_faces == 0:
         return None
 
-    # Allocate exact memory needed (not worst-case 5*voxels)
     max_verts = 3 * num_faces
     verts = wp.empty((max_verts,), dtype=wp.vec3, device=device)
     face_normals = wp.empty((num_faces,), dtype=wp.vec3, device=device)
 
-    # Pass 2: Generate vertices with exact allocation
     face_count.zero_()
     wp.launch(
         generate_isomesh_kernel,
         dim=(num_tiles, 8, 8, 8),
-        inputs=[volume.id, tile_points_wp, mc_tables[0], mc_tables[4], mc_tables[3]],
+        inputs=[volume.id, tile_points_wp, mc_tables[0], mc_tables[4], mc_tables[3], float(isovalue)],
         outputs=[face_count, verts, face_normals],
         device=device,
     )
@@ -986,7 +1018,6 @@ def compute_isomesh(volume: wp.Volume) -> Mesh | None:
     verts_np = verts.numpy()
     faces_np = np.arange(3 * num_faces).reshape(-1, 3)
 
-    # reverse order of triangles indices for correctly displayed normals
     faces_np = faces_np[:, ::-1]
     return Mesh(verts_np, faces_np)
 
@@ -1003,7 +1034,10 @@ def compute_offset_mesh(
 
     For primitive shapes with analytical SDFs (sphere, box, capsule, cylinder,
     ellipsoid, cone) this evaluates the SDF directly on a dense grid, avoiding
-    NanoVDB volume construction.  For mesh shapes the NanoVDB path is used.
+    NanoVDB volume construction.  For mesh / convex-mesh shapes with a
+    pre-built :class:`SDF` (via :meth:`Mesh.build_sdf`), the existing volume
+    or texture SDF is reused.  Only when no pre-built SDF is available does
+    this fall back to constructing a temporary NanoVDB volume.
 
     Args:
         shape_type: Geometry type identifier from :class:`GeoType`.
@@ -1029,6 +1063,16 @@ def compute_offset_mesh(
             max_resolution=max_resolution,
             device=device,
         )
+
+    # Reuse existing SDF on the mesh when available (avoids building a
+    # NanoVDB volume from scratch).  The stored SDF has shape_margin=0 so
+    # extracting at isovalue=offset yields the inflated surface.
+    if shape_geo is not None:
+        existing_sdf = getattr(shape_geo, "sdf", None)
+        if existing_sdf is not None:
+            result = existing_sdf.extract_isomesh(isovalue=offset, device=device)
+            if result is not None:
+                return result
 
     padding = max(abs(offset) * 0.5, 0.02)
     narrow_band = (-abs(offset) - padding, abs(offset) + padding)
@@ -1058,6 +1102,7 @@ def count_isomesh_faces_kernel(
     tile_points: wp.array(dtype=wp.vec3i),
     tri_range_table: wp.array(dtype=wp.int32),
     corner_offsets_table: wp.array(dtype=wp.vec3ub),
+    isovalue: wp.float32,
     face_count: wp.array(dtype=int),
 ):
     """Count isosurface faces without generating vertices (first pass of two-pass approach).
@@ -1065,13 +1110,11 @@ def count_isomesh_faces_kernel(
     """
     tile_idx, local_x, local_y, local_z = wp.tid()
 
-    # Get the tile origin and compute global voxel coordinates
     tile_origin = tile_points[tile_idx]
     x_id = tile_origin[0] + local_x
     y_id = tile_origin[1] + local_y
     z_id = tile_origin[2] + local_z
 
-    isovalue = 0.0
     cube_idx = wp.int32(0)
     for i in range(8):
         corner_offset = wp.vec3i(corner_offsets_table[i])
@@ -1101,6 +1144,7 @@ def generate_isomesh_kernel(
     tri_range_table: wp.array(dtype=wp.int32),
     flat_edge_verts_table: wp.array(dtype=wp.vec2ub),
     corner_offsets_table: wp.array(dtype=wp.vec3ub),
+    isovalue: wp.float32,
     face_count: wp.array(dtype=int),
     vertices: wp.array(dtype=wp.vec3),
     face_normals: wp.array(dtype=wp.vec3),
@@ -1110,13 +1154,11 @@ def generate_isomesh_kernel(
     """
     tile_idx, local_x, local_y, local_z = wp.tid()
 
-    # Get the tile origin and compute global voxel coordinates
     tile_origin = tile_points[tile_idx]
     x_id = tile_origin[0] + local_x
     y_id = tile_origin[1] + local_y
     z_id = tile_origin[2] + local_z
 
-    isovalue = 0.0
     cube_idx = wp.int32(0)
     corner_vals = vec8f()
     for i in range(8):
@@ -1132,10 +1174,9 @@ def generate_isomesh_kernel(
         if v < isovalue:
             cube_idx |= 1 << i
 
-    # look up the tri range for the cube index
     tri_range_start = tri_range_table[cube_idx]
     tri_range_end = tri_range_table[cube_idx + 1]
-    num_verts = tri_range_end - tri_range_start  # number of intersected edges
+    num_verts = tri_range_end - tri_range_start
 
     num_faces = num_verts // 3
     out_idx_faces = wp.atomic_add(face_count, 0, num_faces)
@@ -1155,6 +1196,7 @@ def generate_isomesh_kernel(
             x_id,
             y_id,
             z_id,
+            isovalue,
         )
         vertices[3 * out_idx_faces + 3 * fi + 0] = wp.vec3(face_verts[0])
         vertices[3 * out_idx_faces + 3 * fi + 1] = wp.vec3(face_verts[1])
