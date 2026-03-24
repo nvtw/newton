@@ -610,86 +610,20 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
                 d1 = texture_sample_sdf(texture_sdf, v1)
                 d2 = texture_sample_sdf(texture_sdf, v2)
 
+        # Select the deepest of the 4 sample points.  The golden section
+        # edge search in the caller handles the triangle boundary; this
+        # function only provides the best vertex/centroid as a seed contact.
         if d0 < d1 and d0 < d2 and d0 < dist:
             p = v0
-            uvw = wp.vec3(1.0, 0.0, 0.0)
         elif d1 < d2 and d1 < dist:
             p = v1
-            uvw = wp.vec3(0.0, 1.0, 0.0)
         elif d2 < dist:
             p = v2
-            uvw = wp.vec3(0.0, 0.0, 1.0)
-        else:
-            uvw = wp.vec3(third, third, third)
 
-        difference = wp.sqrt(
-            wp.max(
-                wp.length_sq(v0 - p),
-                wp.max(wp.length_sq(v1 - p), wp.length_sq(v2 - p)),
-            )
+        dist, sdf_gradient = sample_sdf_point(
+            texture_sdf, sdf_mesh_id, use_bvh_for_sdf,
+            sdf_is_heightfield, hfd_sdf, elevation_data, p,
         )
-
-        difference = wp.max(difference, 1e-8)
-
-        # Relaxed from 1e-3 to 3e-3: the tighter tolerance required more
-        # iterations that pushed float32 precision limits, hurting convergence
-        # without measurably improving contact quality.
-        tolerance_sq = 3e-3 * 3e-3
-
-        sdf_gradient = wp.vec3(0.0, 0.0, 0.0)
-        step = 1.0 / (2.0 * difference)
-
-        for _iter in range(16):
-            if wp.static(enable_heightfields):
-                if sdf_is_heightfield:
-                    _, sdf_gradient = sample_sdf_grad_heightfield(hfd_sdf, elevation_data, p)
-                elif use_bvh_for_sdf:
-                    _, sdf_gradient = sample_sdf_grad_using_mesh(sdf_mesh_id, p)
-                else:
-                    _, sdf_gradient = texture_sample_sdf_grad(texture_sdf, p)
-            else:
-                if use_bvh_for_sdf:
-                    _, sdf_gradient = sample_sdf_grad_using_mesh(sdf_mesh_id, p)
-                else:
-                    _, sdf_gradient = texture_sample_sdf_grad(texture_sdf, p)
-
-            grad_len = wp.length(sdf_gradient)
-            if grad_len == 0.0:
-                # Arbitrary non-axis-aligned unit vector to break symmetry
-                sdf_gradient = wp.vec3(0.571846586, 0.705545099, 0.418566116)
-                grad_len = 1.0
-
-            sdf_gradient = sdf_gradient / grad_len
-
-            dfdu = wp.dot(sdf_gradient, v0 - p)
-            dfdv = wp.dot(sdf_gradient, v1 - p)
-            dfdw = wp.dot(sdf_gradient, v2 - p)
-
-            new_uvw = wp.vec3(uvw[0] - step * dfdu, uvw[1] - step * dfdv, uvw[2] - step * dfdw)
-
-            step = step * 0.8
-
-            new_uvw = closest_pt_point_bary_triangle(new_uvw)
-
-            p = v0 * new_uvw[0] + v1 * new_uvw[1] + v2 * new_uvw[2]
-
-            if wp.length_sq(uvw - new_uvw) < tolerance_sq:
-                break
-
-            uvw = new_uvw
-
-        if wp.static(enable_heightfields):
-            if sdf_is_heightfield:
-                dist, sdf_gradient = sample_sdf_grad_heightfield(hfd_sdf, elevation_data, p)
-            elif use_bvh_for_sdf:
-                dist, sdf_gradient = sample_sdf_grad_using_mesh(sdf_mesh_id, p)
-            else:
-                dist, sdf_gradient = texture_sample_sdf_grad(texture_sdf, p)
-        else:
-            if use_bvh_for_sdf:
-                dist, sdf_gradient = sample_sdf_grad_using_mesh(sdf_mesh_id, p)
-            else:
-                dist, sdf_gradient = texture_sample_sdf_grad(texture_sdf, p)
 
         return dist, p, sdf_gradient, wp.vec3(d0, d1, d2)
 
