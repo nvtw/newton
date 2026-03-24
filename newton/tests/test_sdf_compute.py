@@ -1229,6 +1229,8 @@ class TestComputeOffsetMesh(unittest.TestCase):
     the offset pushes the surface well beyond the original shape AABB.
     """
 
+    device = "cuda:0"
+
     @staticmethod
     def _analytical_sdf(v, shape_type, shape_scale):
         """Evaluate analytical SDF for a primitive at point v using NumPy."""
@@ -1277,21 +1279,21 @@ class TestComputeOffsetMesh(unittest.TestCase):
 
     def test_box_small_offset(self):
         """Box with a small offset that stays within the original AABB."""
-        mesh = compute_offset_mesh(GeoType.BOX, shape_scale=(0.5, 0.35, 0.25), offset=0.05)
+        mesh = compute_offset_mesh(GeoType.BOX, shape_scale=(0.5, 0.35, 0.25), offset=0.05, device=self.device)
         self.assertIsNotNone(mesh)
         self.assertGreater(mesh.vertices.shape[0], 0)
         self._assert_vertices_at_offset(mesh, GeoType.BOX, (0.5, 0.35, 0.25), 0.05)
 
     def test_box_large_offset(self):
         """Box with an offset larger than its smallest half-extent."""
-        mesh = compute_offset_mesh(GeoType.BOX, shape_scale=(0.5, 0.35, 0.25), offset=0.5)
+        mesh = compute_offset_mesh(GeoType.BOX, shape_scale=(0.5, 0.35, 0.25), offset=0.5, device=self.device)
         self.assertIsNotNone(mesh)
         self.assertGreater(mesh.vertices.shape[0], 0)
         self._assert_vertices_at_offset(mesh, GeoType.BOX, (0.5, 0.35, 0.25), 0.5)
 
     def test_box_very_large_offset(self):
         """Box with an offset much larger than the shape itself."""
-        mesh = compute_offset_mesh(GeoType.BOX, shape_scale=(0.2, 0.2, 0.2), offset=1.0)
+        mesh = compute_offset_mesh(GeoType.BOX, shape_scale=(0.2, 0.2, 0.2), offset=1.0, device=self.device)
         self.assertIsNotNone(mesh)
         self.assertGreater(mesh.vertices.shape[0], 0)
         self._assert_vertices_at_offset(mesh, GeoType.BOX, (0.2, 0.2, 0.2), 1.0)
@@ -1308,7 +1310,7 @@ class TestComputeOffsetMesh(unittest.TestCase):
         """Sphere with a large offset — surface should be roughly spherical."""
         r = 0.3
         off = 0.7
-        mesh = compute_offset_mesh(GeoType.SPHERE, shape_scale=(r, r, r), offset=off)
+        mesh = compute_offset_mesh(GeoType.SPHERE, shape_scale=(r, r, r), offset=off, device=self.device)
         self.assertIsNotNone(mesh)
         dists = np.linalg.norm(mesh.vertices, axis=1)
         expected_radius = r + off
@@ -1318,7 +1320,7 @@ class TestComputeOffsetMesh(unittest.TestCase):
         """Capsule with offset exceeding its radius."""
         r, hh = 0.2, 0.4
         off = 0.6
-        mesh = compute_offset_mesh(GeoType.CAPSULE, shape_scale=(r, hh, 0.0), offset=off)
+        mesh = compute_offset_mesh(GeoType.CAPSULE, shape_scale=(r, hh, 0.0), offset=off, device=self.device)
         self.assertIsNotNone(mesh)
         self._assert_vertices_at_offset(mesh, GeoType.CAPSULE, (r, hh, 0.0), off)
 
@@ -1326,23 +1328,23 @@ class TestComputeOffsetMesh(unittest.TestCase):
         """Cylinder with offset exceeding its radius."""
         r, hh = 0.3, 0.5
         off = 0.8
-        mesh = compute_offset_mesh(GeoType.CYLINDER, shape_scale=(r, hh, 0.0), offset=off)
+        mesh = compute_offset_mesh(GeoType.CYLINDER, shape_scale=(r, hh, 0.0), offset=off, device=self.device)
         self.assertIsNotNone(mesh)
         self._assert_vertices_at_offset(mesh, GeoType.CYLINDER, (r, hh, 0.0), off)
 
     def test_plane_returns_none(self):
         """Plane should return None (not supported)."""
-        mesh = compute_offset_mesh(GeoType.PLANE, shape_scale=(1.0, 1.0, 1.0), offset=0.1)
+        mesh = compute_offset_mesh(GeoType.PLANE, shape_scale=(1.0, 1.0, 1.0), offset=0.1, device=self.device)
         self.assertIsNone(mesh)
 
     def test_hfield_returns_none(self):
         """Heightfield should return None (not supported)."""
-        mesh = compute_offset_mesh(GeoType.HFIELD, shape_scale=(1.0, 1.0, 1.0), offset=0.1)
+        mesh = compute_offset_mesh(GeoType.HFIELD, shape_scale=(1.0, 1.0, 1.0), offset=0.1, device=self.device)
         self.assertIsNone(mesh)
 
     def test_zero_offset(self):
         """Zero offset should produce a mesh approximating the original surface."""
-        mesh = compute_offset_mesh(GeoType.SPHERE, shape_scale=(0.5, 0.5, 0.5), offset=0.0)
+        mesh = compute_offset_mesh(GeoType.SPHERE, shape_scale=(0.5, 0.5, 0.5), offset=0.0, device=self.device)
         if mesh is not None:
             dists = np.linalg.norm(mesh.vertices, axis=1)
             np.testing.assert_allclose(dists, 0.5, atol=0.03)
@@ -1351,7 +1353,7 @@ class TestComputeOffsetMesh(unittest.TestCase):
         """Mesh (box geometry) with large offset."""
         box_mesh = create_box_mesh((0.3, 0.3, 0.3))
         off = 0.5
-        mesh = compute_offset_mesh(GeoType.MESH, shape_geo=box_mesh, offset=off)
+        mesh = compute_offset_mesh(GeoType.MESH, shape_geo=box_mesh, offset=off, device=self.device)
         self.assertIsNotNone(mesh)
         extent = np.max(np.abs(mesh.vertices), axis=0)
         for i in range(3):
@@ -1468,6 +1470,8 @@ class TestComputeOffsetMeshAdditionalPrimitives(unittest.TestCase):
     positions with the same rigour as ``TestComputeOffsetMesh._assert_vertices_at_offset``.
     """
 
+    device = "cuda:0"
+
     @staticmethod
     def _analytical_sdf(v, shape_type, shape_scale):
         """Evaluate analytical SDF for a primitive at point *v*."""
@@ -1524,7 +1528,7 @@ class TestComputeOffsetMeshAdditionalPrimitives(unittest.TestCase):
         """Ellipsoid offset mesh: every vertex at the correct signed distance."""
         sx, sy, sz = 0.4, 0.3, 0.2
         off = 0.3
-        mesh = compute_offset_mesh(GeoType.ELLIPSOID, shape_scale=(sx, sy, sz), offset=off)
+        mesh = compute_offset_mesh(GeoType.ELLIPSOID, shape_scale=(sx, sy, sz), offset=off, device=self.device)
         self.assertIsNotNone(mesh)
         self.assertGreater(mesh.vertices.shape[0], 0)
         self._assert_vertices_at_offset(mesh, GeoType.ELLIPSOID, (sx, sy, sz), off)
@@ -1533,14 +1537,14 @@ class TestComputeOffsetMeshAdditionalPrimitives(unittest.TestCase):
         """Cone offset mesh: every vertex at the correct signed distance."""
         r, hh = 0.25, 0.4
         off = 0.3
-        mesh = compute_offset_mesh(GeoType.CONE, shape_scale=(r, hh, 0.0), offset=off)
+        mesh = compute_offset_mesh(GeoType.CONE, shape_scale=(r, hh, 0.0), offset=off, device=self.device)
         self.assertIsNotNone(mesh)
         self.assertGreater(mesh.vertices.shape[0], 0)
         self._assert_vertices_at_offset(mesh, GeoType.CONE, (r, hh, 0.0), off)
 
     def test_compute_offset_mesh_analytical_unsupported_type(self):
         """compute_offset_mesh_analytical returns None for non-analytical types."""
-        result = compute_offset_mesh_analytical(GeoType.MESH, shape_scale=(1, 1, 1), offset=0.1)
+        result = compute_offset_mesh_analytical(GeoType.MESH, shape_scale=(1, 1, 1), offset=0.1, device=self.device)
         self.assertIsNone(result)
 
     def test_compute_isomesh_empty_volume(self):

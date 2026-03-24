@@ -1622,12 +1622,24 @@ class ViewerBase(ABC):
             "/model/inertia_boxes", self._inertia_box_points0, self._inertia_box_points1, self._inertia_box_colors
         )
 
-    def _compute_shape_offset_mesh(self, shape_idx: int, mode: SDFMarginMode) -> newton.Mesh | None:
+    def _compute_shape_offset_mesh(
+        self,
+        shape_idx: int,
+        mode: SDFMarginMode,
+        margin_np: np.ndarray,
+        gap_np: np.ndarray,
+        type_np: np.ndarray,
+        scale_np: np.ndarray,
+    ) -> newton.Mesh | None:
         """Compute the offset isosurface mesh for a collision shape.
 
         Args:
             shape_idx: Index of the shape in the model.
             mode: Which offset to use (MARGIN or MARGIN_GAP).
+            margin_np: Pre-snapshotted ``shape_margin`` host array.
+            gap_np: Pre-snapshotted ``shape_gap`` host array.
+            type_np: Pre-snapshotted ``shape_type`` host array.
+            scale_np: Pre-snapshotted ``shape_scale`` host array.
 
         Returns:
             Mesh for the offset surface, or ``None`` if unavailable.
@@ -1635,8 +1647,6 @@ class ViewerBase(ABC):
         if self.model is None or mode == SDFMarginMode.OFF:
             return None
 
-        margin_np = self.model.shape_margin.numpy()
-        gap_np = self.model.shape_gap.numpy()
         shape_margin_val = float(margin_np[shape_idx])
 
         if mode == SDFMarginMode.MARGIN:
@@ -1647,8 +1657,8 @@ class ViewerBase(ABC):
         if offset < 0.0:
             return None
 
-        geo_type = int(self.model.shape_type.numpy()[shape_idx])
-        geo_scale = [float(v) for v in self.model.shape_scale.numpy()[shape_idx]]
+        geo_type = int(type_np[shape_idx])
+        geo_scale = [float(v) for v in scale_np[shape_idx]]
         geo_src = self.model.shape_source[shape_idx]
 
         # Replicated meshes share the same SDF object via Mesh.__deepcopy__,
@@ -1726,6 +1736,10 @@ class ViewerBase(ABC):
         shape_flags = self.model.shape_flags.numpy()
         shape_world = self.model.shape_world.numpy()
         shape_transform = self.model.shape_transform.numpy()
+        margin_np = self.model.shape_margin.numpy()
+        gap_np = self.model.shape_gap.numpy()
+        type_np = self.model.shape_type.numpy()
+        scale_np = self.model.shape_scale.numpy()
         shape_count = len(shape_body)
 
         for s in range(shape_count):
@@ -1734,7 +1748,7 @@ class ViewerBase(ABC):
             if not (shape_flags[s] & int(newton.ShapeFlags.COLLIDE_SHAPES)):
                 continue
 
-            offset_mesh = self._compute_shape_offset_mesh(s, mode)
+            offset_mesh = self._compute_shape_offset_mesh(s, mode, margin_np, gap_np, type_np, scale_np)
             if offset_mesh is None:
                 continue
 

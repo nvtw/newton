@@ -392,6 +392,7 @@ class ViewerGL(ViewerBase):
         # Render object and line caches (path -> GL object)
         self.objects = {}
         self.lines = {}
+        self._destroy_all_wireframes()
         self.wireframe_shapes = {}
         self._wireframe_vbo_owners: dict[int, WireframeShapeGL] = {}
 
@@ -833,11 +834,10 @@ class ViewerGL(ViewerBase):
 
             vbo_key = id(vertex_data)
             owner = self._wireframe_vbo_owners.get(vbo_key)
-            if owner is not None:
-                obj = WireframeShapeGL.create_shared(owner)
-            else:
-                obj = WireframeShapeGL(vertex_data)
-                self._wireframe_vbo_owners[vbo_key] = obj
+            if owner is None:
+                owner = WireframeShapeGL(vertex_data)
+                self._wireframe_vbo_owners[vbo_key] = owner
+            obj = WireframeShapeGL.create_shared(owner)
             obj.hidden = hidden
             if world_matrix is not None:
                 obj.world_matrix = world_matrix.astype(np.float32)
@@ -847,8 +847,17 @@ class ViewerGL(ViewerBase):
             if world_matrix is not None:
                 existing.world_matrix = world_matrix.astype(np.float32)
 
+    def _destroy_all_wireframes(self):
+        """Destroy all wireframe GL resources (visible shapes and VBO owners)."""
+        for obj in getattr(self, "wireframe_shapes", {}).values():
+            obj.destroy()
+        for owner in getattr(self, "_wireframe_vbo_owners", {}).values():
+            owner.destroy()
+
     @override
     def clear_wireframe_vbo_cache(self):
+        for owner in self._wireframe_vbo_owners.values():
+            owner.destroy()
         self._wireframe_vbo_owners.clear()
 
     @override
