@@ -143,12 +143,10 @@ class ViewerBase(ABC):
         self._sdf_isomesh_populated: bool = False
         self._shape_sdf_index_host: nparray | None = None
 
-        # SDF margin wireframe visualization
-        self._sdf_margin_mesh_cache: dict[tuple[int, int], newton.Mesh | None] = {}
-        self._sdf_margin_line_starts: wp.array | None = None
-        self._sdf_margin_line_ends: wp.array | None = None
-        self._sdf_margin_line_colors: wp.array | None = None
-        self._sdf_margin_mode_cached: SDFMarginMode = SDFMarginMode.OFF
+        # SDF margin visualization (wireframe edges)
+        self._sdf_margin_mesh_cache: dict[int, newton.Mesh | None] = {}
+        self._sdf_margin_edge_cache: dict[int, tuple[np.ndarray, int, np.ndarray]] = {}
+        self._sdf_margin_cached_mode: SDFMarginMode = SDFMarginMode.OFF
 
     def set_model(self, model: newton.Model | None, max_worlds: int | None = None):
         """
@@ -457,7 +455,7 @@ class ViewerBase(ABC):
             )
 
         self._log_inertia_boxes(state)
-        self._log_sdf_margin_meshes(state)
+        self._log_sdf_margin_wireframes(state)
 
         self._log_triangles(state)
         self._log_particles(state)
@@ -963,6 +961,26 @@ class ViewerBase(ABC):
             colors: Per-line colors as a Warp array, or a single RGB triplet.
             width: Line width in rendered scene units.
             hidden: Whether the line batch should be hidden.
+        """
+        pass
+
+    def log_wireframe_shape(  # noqa: B027
+        self,
+        name: str,
+        vertex_data: np.ndarray | None,
+        world_matrix: np.ndarray | None,
+        hidden: bool = False,
+    ):
+        """Log a wireframe shape for rendering via the geometry-shader line pipeline.
+
+        Args:
+            name: Unique path/name for the wireframe shape.
+            vertex_data: ``(N, 6)`` float32 array of interleaved ``[px,py,pz, cr,cg,cb]``
+                line-segment vertices (pairs).  Pass ``None`` to keep existing
+                geometry and only update the transform.
+            world_matrix: 4x4 float32 model-to-world matrix, or ``None`` to
+                keep the current matrix.
+            hidden: Whether the wireframe shape should be hidden.
         """
         pass
 
@@ -1616,7 +1634,7 @@ class ViewerBase(ABC):
         else:
             offset = shape_margin_val + float(gap_np[shape_idx])
 
-        if offset <= 0.0:
+        if offset < 0.0:
             return None
 
         geo_type = int(self.model.shape_type.numpy()[shape_idx])
@@ -1641,143 +1659,125 @@ class ViewerBase(ABC):
         self._sdf_margin_mesh_cache[cache_key_hash] = mesh
         return mesh
 
-    def _log_sdf_margin_meshes(self, state: newton.State):
-        """Render SDF margin/gap offset surfaces as wireframe lines."""
-        line_name = "/model/sdf_margin"
+    @staticmethod
+    def _extract_wireframe_edges(mesh: newton.Mesh, color: tuple[float, float, float]) -> np.ndarray:
+        """Extract deduplicated edges from a mesh and return interleaved vertex data.
+
+        Args:
+            mesh: Source mesh.
+            color: RGB colour tuple applied to every vertex.
+
+        Returns:
+            ``(E*2, 6)`` float32 array — pairs of ``[px, py, pz, cr, cg, cb]``.
+        """
+        verts = np.asarray(mesh.vertices, dtype=np.float32).reshape(-1, 3)
+        indices = np.asarray(mesh.indices, dtype=np.int32).reshape(-1, 3)
+
+        edge_set: set[tuple[int, int]] = set()
+        for tri in indices:
+            i0, i1, i2 = int(tri[0]), int(tri[1]), int(tri[2])
+            edge_set.add((min(i0, i1), max(i0, i1)))
+            edge_set.add((min(i1, i2), max(i1, i2)))
+            edge_set.add((min(i2, i0), max(i2, i0)))
+
+        num_edges = len(edge_set)
+        data = np.empty((num_edges * 2, 6), dtype=np.float32)
+        cr, cg, cb = color
+        idx = 0
+        for a, b in edge_set:
+            pa = verts[a]
+            pb = verts[b]
+            data[idx] = [pa[0], pa[1], pa[2], cr, cg, cb]
+            data[idx + 1] = [pb[0], pb[1], pb[2], cr, cg, cb]
+            idx += 2
+        return data
+
+    def _populate_sdf_margin_edges(self):
+        """Compute offset meshes and extract wireframe edge data for every collision shape."""
+        if self.model is None:
+            return
+
         mode = self.sdf_margin_mode
-
-        if mode == SDFMarginMode.OFF or self.model is None:
-            self.log_lines(line_name, None, None, None)
-            self._sdf_margin_mode_cached = mode
-            return
-
-        if not wp.is_cuda_available():
-            self.log_lines(line_name, None, None, None)
-            return
-
-        self._sdf_margin_mode_cached = mode
+        if mode == SDFMarginMode.MARGIN:
+            color_rgb = (1.0, 0.9, 0.0)
+        else:
+            color_rgb = (1.0, 0.5, 0.0)
 
         shape_body = self.model.shape_body.numpy()
         shape_flags = self.model.shape_flags.numpy()
         shape_world = self.model.shape_world.numpy()
+        shape_transform = self.model.shape_transform.numpy()
         shape_count = len(shape_body)
-
-        all_starts = []
-        all_ends = []
-
-        body_q_np = state.body_q.numpy() if state.body_q is not None else None
-        shape_transform_np = self.model.shape_transform.numpy()
 
         for s in range(shape_count):
             if not self._should_render_world(shape_world[s]):
                 continue
-
-            is_collision = shape_flags[s] & int(newton.ShapeFlags.COLLIDE_SHAPES)
-            if not is_collision:
+            if not (shape_flags[s] & int(newton.ShapeFlags.COLLIDE_SHAPES)):
                 continue
 
-            mesh = self._compute_shape_offset_mesh(s, mode)
-            if mesh is None:
+            offset_mesh = self._compute_shape_offset_mesh(s, mode)
+            if offset_mesh is None:
                 continue
 
-            verts = mesh.vertices
-            indices = mesh.indices.reshape(-1, 3)
+            vertex_data = self._extract_wireframe_edges(offset_mesh, color_rgb)
+            body_idx = int(shape_body[s])
+            shape_xf = shape_transform[s].copy()
+            self._sdf_margin_edge_cache[s] = (vertex_data, body_idx, shape_xf)
 
-            edges_a = np.concatenate([indices[:, 0], indices[:, 1], indices[:, 2]])
-            edges_b = np.concatenate([indices[:, 1], indices[:, 2], indices[:, 0]])
-            edge_pairs = np.stack([np.minimum(edges_a, edges_b), np.maximum(edges_a, edges_b)], axis=1)
-            unique_edges = np.unique(edge_pairs, axis=0)
+    @staticmethod
+    def _transform_to_mat44(tf: np.ndarray) -> np.ndarray:
+        """Convert a 7-element Warp transform ``[tx,ty,tz, qx,qy,qz,qw]`` to a flat column-major 4x4 matrix.
 
-            p0 = verts[unique_edges[:, 0]]
-            p1 = verts[unique_edges[:, 1]]
+        Returns a shape ``(16,)`` float32 array laid out column-by-column
+        (OpenGL convention), matching the format used by pyglet ``Mat4``.
+        """
+        px, py, pz = float(tf[0]), float(tf[1]), float(tf[2])
+        qx, qy, qz, qw = float(tf[3]), float(tf[4]), float(tf[5]), float(tf[6])
+        x2, y2, z2 = 2 * qx * qx, 2 * qy * qy, 2 * qz * qz
+        xy, xz, yz = 2 * qx * qy, 2 * qx * qz, 2 * qy * qz
+        wx, wy, wz = 2 * qw * qx, 2 * qw * qy, 2 * qw * qz
+        # fmt: off
+        return np.array([
+            1 - y2 - z2,  xy + wz,      xz - wy,      0,   # column 0
+            xy - wz,      1 - x2 - z2,  yz + wx,       0,   # column 1
+            xz + wy,      yz - wx,       1 - x2 - y2,  0,   # column 2
+            px,            py,            pz,            1,   # column 3
+        ], dtype=np.float32)
+        # fmt: on
 
-            local_xform = shape_transform_np[s]
-            local_p = np.array([local_xform[0], local_xform[1], local_xform[2]], dtype=np.float32)
-            local_q = np.array([local_xform[3], local_xform[4], local_xform[5], local_xform[6]], dtype=np.float32)
+    def _log_sdf_margin_wireframes(self, state: newton.State):
+        """Update and render SDF margin wireframe edges."""
+        mode = self.sdf_margin_mode
+        visible = mode != SDFMarginMode.OFF
 
-            parent = int(shape_body[s])
-            if parent >= 0 and body_q_np is not None:
-                body_xform = body_q_np[parent]
-                body_p = np.array([body_xform[0], body_xform[1], body_xform[2]], dtype=np.float32)
-                body_q = np.array([body_xform[3], body_xform[4], body_xform[5], body_xform[6]], dtype=np.float32)
-                world_p, world_q = self._compose_transforms(body_p, body_q, local_p, local_q)
-            else:
-                world_p, world_q = local_p, local_q
+        if visible and (mode != self._sdf_margin_cached_mode or self.model_changed):
+            self._sdf_margin_edge_cache.clear()
+            self._populate_sdf_margin_edges()
+            self._sdf_margin_cached_mode = mode
 
-            if self.world_offsets is not None:
-                w = int(shape_world[s])
-                if w < self.world_offsets.shape[0]:
-                    offset_np = self.world_offsets.numpy()[w]
-                    world_p = world_p + offset_np
+            for s, (vertex_data, _body_idx, _shape_xf) in self._sdf_margin_edge_cache.items():
+                name = f"/model/sdf_margin_wf/{s}"
+                self.log_wireframe_shape(name, vertex_data, np.eye(4, dtype=np.float32).ravel(order="F"), hidden=False)
 
-            p0_world = self._rotate_points(p0, world_q) + world_p
-            p1_world = self._rotate_points(p1, world_q) + world_p
-
-            all_starts.append(p0_world)
-            all_ends.append(p1_world)
-
-        if not all_starts:
-            self.log_lines(line_name, None, None, None)
+        if not visible:
+            for s in list(self._sdf_margin_edge_cache.keys()):
+                name = f"/model/sdf_margin_wf/{s}"
+                self.log_wireframe_shape(name, None, None, hidden=True)
             return
 
-        starts_np = np.concatenate(all_starts, axis=0).astype(np.float32)
-        ends_np = np.concatenate(all_ends, axis=0).astype(np.float32)
-        num_lines = len(starts_np)
+        body_q = state.body_q.numpy() if state is not None else None
 
-        if mode == SDFMarginMode.MARGIN:
-            color = (1.0, 0.9, 0.0)
-        else:
-            color = (1.0, 0.5, 0.0)
-
-        colors_np = np.tile(np.array(color, dtype=np.float32), (num_lines, 1))
-
-        self._sdf_margin_line_starts = wp.array(starts_np, dtype=wp.vec3, device=self.device)
-        self._sdf_margin_line_ends = wp.array(ends_np, dtype=wp.vec3, device=self.device)
-        self._sdf_margin_line_colors = wp.array(colors_np, dtype=wp.vec3, device=self.device)
-
-        self.log_lines(
-            line_name, self._sdf_margin_line_starts, self._sdf_margin_line_ends, self._sdf_margin_line_colors
-        )
-
-    @staticmethod
-    def _compose_transforms(
-        p1: np.ndarray, q1: np.ndarray, p2: np.ndarray, q2: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Compose two transforms (p1,q1) * (p2,q2) using Hamilton quaternion convention."""
-        rp = ViewerBase._quat_rotate(q1, p2) + p1
-        rq = ViewerBase._quat_mul(q1, q2)
-        return rp, rq
-
-    @staticmethod
-    def _quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        """Multiply two quaternions [x, y, z, w]."""
-        ax, ay, az, aw = a
-        bx, by, bz, bw = b
-        return np.array(
-            [
-                aw * bx + ax * bw + ay * bz - az * by,
-                aw * by - ax * bz + ay * bw + az * bx,
-                aw * bz + ax * by - ay * bx + az * bw,
-                aw * bw - ax * bx - ay * by - az * bz,
-            ],
-            dtype=np.float32,
-        )
-
-    @staticmethod
-    def _quat_rotate(q: np.ndarray, v: np.ndarray) -> np.ndarray:
-        """Rotate a 3D vector by a quaternion [x, y, z, w]."""
-        qv = q[:3]
-        qw = q[3]
-        t = 2.0 * np.cross(qv, v)
-        return v + qw * t + np.cross(qv, t)
-
-    @staticmethod
-    def _rotate_points(pts: np.ndarray, q: np.ndarray) -> np.ndarray:
-        """Rotate an array of 3D points by a quaternion [x, y, z, w]."""
-        qv = q[:3]
-        qw = q[3]
-        t = 2.0 * np.cross(qv, pts)
-        return pts + qw * t + np.cross(qv, t)
+        for s, (_vertex_data, body_idx, shape_xf) in self._sdf_margin_edge_cache.items():
+            name = f"/model/sdf_margin_wf/{s}"
+            shape_mat = self._transform_to_mat44(shape_xf)
+            if body_idx >= 0 and body_q is not None:
+                body_mat = self._transform_to_mat44(body_q[body_idx])
+                b = body_mat.reshape(4, 4, order="F")
+                s = shape_mat.reshape(4, 4, order="F")
+                world_mat = (b @ s).ravel(order="F")
+            else:
+                world_mat = shape_mat
+            self.log_wireframe_shape(name, None, world_mat, hidden=False)
 
     def _log_joints(self, state: newton.State):
         """

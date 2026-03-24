@@ -16,6 +16,7 @@ from ...utils.texture import normalize_texture
 from .shaders import (
     FrameShader,
     ShaderLine,
+    ShaderLineWireframe,
     ShaderShape,
     ShaderSky,
     ShadowShader,
@@ -492,6 +493,69 @@ class LinesGL:
             gl.glBindVertexArray(0)
 
 
+class WireframeShapeGL:
+    """Per-shape wireframe edge data rendered via GL_LINES with a geometry shader.
+
+    Stores interleaved (position, color) vertex data in model space.
+    The World matrix is set per-shape by the caller before drawing.
+    """
+
+    def __init__(self, vertex_data: np.ndarray):
+        """Create a wireframe shape from interleaved vertex data.
+
+        Args:
+            vertex_data: ``(N, 6)`` float32 array with columns
+                ``[px, py, pz, cr, cg, cb]``.  N must be even (pairs of
+                line-segment endpoints).
+        """
+        gl = RendererGL.gl
+        self.num_vertices = len(vertex_data)
+        self.hidden = False
+        self.world_matrix = np.eye(4, dtype=np.float32)
+
+        vertex_byte_size = 6 * 4  # 3 floats pos + 3 floats color
+
+        self.vao = gl.GLuint()
+        gl.glGenVertexArrays(1, self.vao)
+        gl.glBindVertexArray(self.vao)
+
+        self.vbo = gl.GLuint()
+        gl.glGenBuffers(1, self.vbo)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.vbo)
+
+        data = vertex_data.astype(np.float32)
+        gl.glBufferData(gl.GL_ARRAY_BUFFER, data.nbytes, data.ctypes.data, gl.GL_STATIC_DRAW)
+
+        # position (location 0)
+        gl.glVertexAttribPointer(0, 3, gl.GL_FLOAT, gl.GL_FALSE, vertex_byte_size, ctypes.c_void_p(0))
+        gl.glEnableVertexAttribArray(0)
+
+        # color (location 1)
+        gl.glVertexAttribPointer(1, 3, gl.GL_FLOAT, gl.GL_FALSE, vertex_byte_size, ctypes.c_void_p(3 * 4))
+        gl.glEnableVertexAttribArray(1)
+
+        gl.glBindVertexArray(0)
+
+    def destroy(self):
+        """Free GL resources."""
+        gl = RendererGL.gl
+        try:
+            if hasattr(self, "vao"):
+                gl.glDeleteVertexArrays(1, self.vao)
+            if hasattr(self, "vbo"):
+                gl.glDeleteBuffers(1, self.vbo)
+        except Exception:
+            pass
+
+    def render(self):
+        if self.hidden or self.num_vertices == 0:
+            return
+        gl = RendererGL.gl
+        gl.glBindVertexArray(self.vao)
+        gl.glDrawArrays(gl.GL_LINES, 0, self.num_vertices)
+        gl.glBindVertexArray(0)
+
+
 @wp.kernel
 def update_vbo_transforms(
     instance_transforms: wp.array(dtype=wp.transform),
@@ -897,6 +961,7 @@ class RendererGL:
         self.draw_fps = True
         self.draw_shadows = True
         self.draw_wireframe = False
+        self.wireframe_line_width = 1.5  # pixels
 
         self.background_color = (68.0 / 255.0, 161.0 / 255.0, 255.0 / 255.0)
 
@@ -1053,6 +1118,7 @@ class RendererGL:
         self._frame_shader = FrameShader(gl)
         self._sky_shader = ShaderSky(gl)
         self._line_shader = ShaderLine(gl)
+        self._wireframe_shader = ShaderLineWireframe(gl)
 
         if not headless:
             self._setup_window_callbacks()
@@ -1114,7 +1180,7 @@ class RendererGL:
                 # This is a non-fatal error that can be safely ignored
                 pass
 
-    def render(self, camera, objects, lines=None):
+    def render(self, camera, objects, lines=None, wireframe_shapes=None):
         gl = RendererGL.gl
         self._make_current()
 
@@ -1177,6 +1243,9 @@ class RendererGL:
         # Render lines after main scene but before MSAA resolve
         if lines:
             self._render_lines(lines)
+
+        if wireframe_shapes:
+            self._render_wireframe_shapes(wireframe_shapes)
 
         # ------------------------------------------------------------------
         # If MSAA is enabled, resolve the multi-sample buffer into texture FBO
@@ -1756,6 +1825,29 @@ class RendererGL:
                 if hasattr(line_obj, "render"):
                     line_obj.render()
 
+        check_gl_error()
+
+    def _render_wireframe_shapes(self, wireframe_shapes):
+        """Render wireframe shapes using the geometry-shader line expansion."""
+        gl = RendererGL.gl
+        inv_asp = float(self._screen_height) / float(max(self._screen_width, 1))
+        clip_width = self.wireframe_line_width * 2.0 / max(self._screen_height, 1)
+
+        gl.glEnable(gl.GL_DEPTH_TEST)
+        gl.glDisable(gl.GL_CULL_FACE)
+        gl.glEnable(gl.GL_BLEND)
+        gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+
+        with self._wireframe_shader:
+            self._wireframe_shader.update_frame(
+                self._view_matrix, self._projection_matrix, inv_asp, line_width=clip_width
+            )
+            for shape in wireframe_shapes.values():
+                if not shape.hidden and shape.num_vertices > 0:
+                    self._wireframe_shader.set_world(shape.world_matrix)
+                    shape.render()
+
+        gl.glDisable(gl.GL_BLEND)
         check_gl_error()
 
     def _draw_objects(self, objects):
