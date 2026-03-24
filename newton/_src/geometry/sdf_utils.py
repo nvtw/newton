@@ -1001,17 +1001,16 @@ def compute_offset_mesh(
 ) -> Mesh | None:
     """Compute the offset (Minkowski-inflated) isosurface mesh of a shape.
 
-    Builds a temporary NanoVDB SDF volume for the shape with the requested
-    offset baked in, then extracts the zero-isosurface via marching cubes.
-    For a box this naturally produces rounded corners and edges.
+    For primitive shapes with analytical SDFs (sphere, box, capsule, cylinder,
+    ellipsoid, cone) this evaluates the SDF directly on a dense grid, avoiding
+    NanoVDB volume construction.  For mesh shapes the NanoVDB path is used.
 
     Args:
         shape_type: Geometry type identifier from :class:`GeoType`.
         shape_geo: Source mesh geometry when *shape_type* is :attr:`GeoType.MESH`.
         shape_scale: Shape scale factors [unitless].
         offset: Outward surface offset [m].  Use ``0`` for the original surface.
-        max_resolution: Maximum sparse-grid dimension [voxels].  Must be
-            divisible by 8.
+        max_resolution: Maximum grid dimension [voxels].
         device: CUDA device for GPU allocations.
 
     Returns:
@@ -1021,6 +1020,15 @@ def compute_offset_mesh(
     """
     if shape_type in (GeoType.PLANE, GeoType.HFIELD):
         return None
+
+    if shape_type in _ANALYTICAL_SDF_TYPES:
+        return compute_offset_mesh_analytical(
+            shape_type=shape_type,
+            shape_scale=shape_scale,
+            offset=offset,
+            max_resolution=max_resolution,
+            device=device,
+        )
 
     padding = max(abs(offset) * 0.5, 0.02)
     narrow_band = (-abs(offset) - padding, abs(offset) + padding)
@@ -1152,3 +1160,251 @@ def generate_isomesh_kernel(
         vertices[3 * out_idx_faces + 3 * fi + 1] = wp.vec3(face_verts[1])
         vertices[3 * out_idx_faces + 3 * fi + 2] = wp.vec3(face_verts[2])
         face_normals[out_idx_faces + fi] = normal
+
+
+# ---------------------------------------------------------------------------
+# Dense-grid analytical marching cubes for primitive shapes
+# ---------------------------------------------------------------------------
+# These kernels skip NanoVDB volume construction entirely and evaluate the
+# analytical SDF on a flat dense grid, which is significantly faster for
+# primitives (sphere, box, capsule, cylinder, ellipsoid, cone).
+# ---------------------------------------------------------------------------
+
+_ANALYTICAL_SDF_TYPES = frozenset(
+    {
+        GeoType.SPHERE,
+        GeoType.BOX,
+        GeoType.CAPSULE,
+        GeoType.CYLINDER,
+        GeoType.ELLIPSOID,
+        GeoType.CONE,
+    }
+)
+
+
+@wp.kernel(enable_backward=False)
+def _populate_dense_sdf_kernel(
+    shape_type: wp.int32,
+    shape_scale: wp.vec3,
+    origin: wp.vec3,
+    voxel_size: wp.vec3,
+    ny: wp.int32,
+    nz: wp.int32,
+    shape_offset: wp.float32,
+    sdf_values: wp.array(dtype=wp.float32),
+):
+    """Evaluate analytical SDF at every point of a dense regular grid."""
+    x, y, z = wp.tid()
+    pos = wp.vec3(
+        origin[0] + float(x) * voxel_size[0],
+        origin[1] + float(y) * voxel_size[1],
+        origin[2] + float(z) * voxel_size[2],
+    )
+    d = float(1.0e6)
+    if shape_type == GeoType.SPHERE:
+        d = sdf_sphere(pos, shape_scale[0])
+    elif shape_type == GeoType.BOX:
+        d = sdf_box(pos, shape_scale[0], shape_scale[1], shape_scale[2])
+    elif shape_type == GeoType.CAPSULE:
+        d = sdf_capsule(pos, shape_scale[0], shape_scale[1], int(Axis.Z))
+    elif shape_type == GeoType.CYLINDER:
+        d = sdf_cylinder(pos, shape_scale[0], shape_scale[1], int(Axis.Z))
+    elif shape_type == GeoType.ELLIPSOID:
+        d = sdf_ellipsoid(pos, shape_scale)
+    elif shape_type == GeoType.CONE:
+        d = sdf_cone(pos, shape_scale[0], shape_scale[1], int(Axis.Z))
+    sdf_values[x * ny * nz + y * nz + z] = d - shape_offset
+
+
+@wp.kernel(enable_backward=False)
+def _count_dense_mc_faces_kernel(
+    sdf_values: wp.array(dtype=wp.float32),
+    ny: wp.int32,
+    nz: wp.int32,
+    tri_range_table: wp.array(dtype=wp.int32),
+    corner_offsets_table: wp.array(dtype=wp.vec3ub),
+    face_count: wp.array(dtype=int),
+):
+    """Count marching-cubes faces on a dense SDF grid (first MC pass)."""
+    x, y, z = wp.tid()
+    cube_idx = wp.int32(0)
+    for i in range(8):
+        co = wp.vec3i(corner_offsets_table[i])
+        v = sdf_values[(x + co[0]) * ny * nz + (y + co[1]) * nz + (z + co[2])]
+        if v < 0.0:
+            cube_idx |= 1 << i
+    tri_start = tri_range_table[cube_idx]
+    tri_end = tri_range_table[cube_idx + 1]
+    num_faces = (tri_end - tri_start) // 3
+    if num_faces > 0:
+        wp.atomic_add(face_count, 0, num_faces)
+
+
+@wp.kernel(enable_backward=False)
+def _generate_dense_mc_kernel(
+    sdf_values: wp.array(dtype=wp.float32),
+    ny: wp.int32,
+    nz: wp.int32,
+    origin: wp.vec3,
+    voxel_size: wp.vec3,
+    tri_range_table: wp.array(dtype=wp.int32),
+    flat_edge_verts_table: wp.array(dtype=wp.vec2ub),
+    corner_offsets_table: wp.array(dtype=wp.vec3ub),
+    face_count: wp.array(dtype=int),
+    vertices: wp.array(dtype=wp.vec3),
+    face_normals: wp.array(dtype=wp.vec3),
+):
+    """Generate marching-cubes vertices on a dense SDF grid (second MC pass)."""
+    x, y, z = wp.tid()
+    cube_idx = wp.int32(0)
+    corner_vals = vec8f()
+    for i in range(8):
+        co = wp.vec3i(corner_offsets_table[i])
+        v = sdf_values[(x + co[0]) * ny * nz + (y + co[1]) * nz + (z + co[2])]
+        corner_vals[i] = v
+        if v < 0.0:
+            cube_idx |= 1 << i
+
+    tri_start = tri_range_table[cube_idx]
+    tri_end = tri_range_table[cube_idx + 1]
+    num_verts = tri_end - tri_start
+    num_faces = num_verts // 3
+    out_idx = wp.atomic_add(face_count, 0, num_faces)
+    if num_verts == 0:
+        return
+
+    base = wp.vec3(float(x), float(y), float(z))
+    for fi in range(5):
+        if fi >= num_faces:
+            return
+        face_verts = wp.mat33f()
+        for vi in range(3):
+            ev = wp.vec2i(flat_edge_verts_table[tri_start + 3 * fi + vi])
+            val_0 = wp.float32(corner_vals[ev[0]])
+            val_1 = wp.float32(corner_vals[ev[1]])
+            p_0 = wp.vec3f(corner_offsets_table[ev[0]])
+            p_1 = wp.vec3f(corner_offsets_table[ev[1]])
+            val_diff = val_1 - val_0
+            if wp.abs(val_diff) < 1e-8:
+                p = 0.5 * (p_0 + p_1)
+            else:
+                t = (0.0 - val_0) / val_diff
+                p = p_0 + t * (p_1 - p_0)
+            local = base + p
+            face_verts[vi] = wp.vec3(
+                origin[0] + local[0] * voxel_size[0],
+                origin[1] + local[1] * voxel_size[1],
+                origin[2] + local[2] * voxel_size[2],
+            )
+        n = wp.cross(face_verts[1] - face_verts[0], face_verts[2] - face_verts[0])
+        normal = wp.normalize(n)
+        vertices[3 * out_idx + 3 * fi + 0] = wp.vec3(face_verts[0])
+        vertices[3 * out_idx + 3 * fi + 1] = wp.vec3(face_verts[1])
+        vertices[3 * out_idx + 3 * fi + 2] = wp.vec3(face_verts[2])
+        face_normals[out_idx + fi] = normal
+
+
+def compute_offset_mesh_analytical(
+    shape_type: int,
+    shape_scale: Sequence[float] = (1.0, 1.0, 1.0),
+    offset: float = 0.0,
+    max_resolution: int = 48,
+    device: Devicelike | None = None,
+) -> Mesh | None:
+    """Compute the offset isosurface mesh for a primitive via direct analytical SDF evaluation.
+
+    Unlike :func:`compute_offset_mesh` this skips NanoVDB volume construction
+    and evaluates the analytical SDF on a dense regular grid before running
+    marching cubes.  This is faster for primitive shapes.
+
+    Args:
+        shape_type: Geometry type identifier from :class:`GeoType`.  Must be a
+            primitive with an analytical SDF (sphere, box, capsule, cylinder,
+            ellipsoid, or cone).
+        shape_scale: Shape scale factors [unitless].
+        offset: Outward surface offset [m].  Use ``0`` for the original surface.
+        max_resolution: Maximum grid dimension [voxels].
+        device: CUDA device for GPU allocations.
+
+    Returns:
+        A :class:`Mesh` representing the offset isosurface, or ``None`` when
+        the shape type is unsupported or the mesh would be empty.
+    """
+    if shape_type not in _ANALYTICAL_SDF_TYPES:
+        return None
+
+    with wp.ScopedDevice(device):
+        min_ext_list, max_ext_list = get_primitive_extents(shape_type, shape_scale)
+
+        padding = max(abs(offset) * 0.5, 0.02)
+        aabb_margin = max(abs(offset) + padding, 0.05)
+        total_expansion = aabb_margin + offset
+
+        min_ext = np.array(min_ext_list, dtype=np.float64) - total_expansion
+        max_ext = np.array(max_ext_list, dtype=np.float64) + total_expansion
+        ext = max_ext - min_ext
+
+        max_extent = float(np.max(ext))
+        voxel_target = max_extent / max_resolution
+        grid_dims = np.maximum(np.round(ext / voxel_target).astype(int), 2)
+        actual_voxel_size = ext / (grid_dims - 1)
+
+        nx, ny, nz = int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2])
+
+        sdf_values = wp.empty((nx * ny * nz,), dtype=wp.float32, device=device)
+        wp.launch(
+            _populate_dense_sdf_kernel,
+            dim=(nx, ny, nz),
+            inputs=[
+                int(shape_type),
+                wp.vec3(float(shape_scale[0]), float(shape_scale[1]), float(shape_scale[2])),
+                wp.vec3(float(min_ext[0]), float(min_ext[1]), float(min_ext[2])),
+                wp.vec3(float(actual_voxel_size[0]), float(actual_voxel_size[1]), float(actual_voxel_size[2])),
+                ny,
+                nz,
+                float(offset),
+            ],
+            outputs=[sdf_values],
+            device=device,
+        )
+
+        mc_tables = get_mc_tables(device)
+
+        face_count = wp.zeros((1,), dtype=int, device=device)
+        wp.launch(
+            _count_dense_mc_faces_kernel,
+            dim=(nx - 1, ny - 1, nz - 1),
+            inputs=[sdf_values, ny, nz, mc_tables[0], mc_tables[3]],
+            outputs=[face_count],
+            device=device,
+        )
+
+        num_faces = int(face_count.numpy()[0])
+        if num_faces == 0:
+            return None
+
+        verts = wp.empty((3 * num_faces,), dtype=wp.vec3, device=device)
+        face_normals_out = wp.empty((num_faces,), dtype=wp.vec3, device=device)
+
+        face_count.zero_()
+        wp.launch(
+            _generate_dense_mc_kernel,
+            dim=(nx - 1, ny - 1, nz - 1),
+            inputs=[
+                sdf_values,
+                ny,
+                nz,
+                wp.vec3(float(min_ext[0]), float(min_ext[1]), float(min_ext[2])),
+                wp.vec3(float(actual_voxel_size[0]), float(actual_voxel_size[1]), float(actual_voxel_size[2])),
+                mc_tables[0],
+                mc_tables[4],
+                mc_tables[3],
+            ],
+            outputs=[face_count, verts, face_normals_out],
+            device=device,
+        )
+
+        verts_np = verts.numpy()
+        faces_np = np.arange(3 * num_faces).reshape(-1, 3)
+        faces_np = faces_np[:, ::-1]
+        return Mesh(verts_np, faces_np)
