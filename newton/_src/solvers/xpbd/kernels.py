@@ -2201,6 +2201,27 @@ def solve_body_contact_positions(
         d, X_wb_a, X_wb_b, m_inv_a, m_inv_b, I_inv_a, I_inv_b, -n, n, angular_a, angular_b, relaxation, dt
     )
 
+    # Contact damping: reduce the normal velocity to prevent bounce energy
+    # from contacts that should be inelastic.  The relative normal velocity
+    # at the contact point is projected and a fraction is removed.  This
+    # is equivalent to zero-restitution clamping in impulse-based solvers.
+    v_a_contact = wp.vec3(0.0)
+    v_b_contact = wp.vec3(0.0)
+    if body_a >= 0:
+        v_a_contact = velocity_at_point(body_qd[body_a], r_a)
+    if body_b >= 0:
+        v_b_contact = velocity_at_point(body_qd[body_b], r_b)
+    vn_rel = wp.dot(n, v_b_contact - v_a_contact)
+    # If separating (vn_rel > 0), dampen to prevent bounce
+    if vn_rel > 0.0:
+        damping_lambda = compute_contact_constraint_delta(
+            vn_rel * dt, X_wb_a, X_wb_b, m_inv_a, m_inv_b, I_inv_a, I_inv_b,
+            -n, n, angular_a, angular_b, 0.5, dt,
+        )
+        # Only dampen (don't attract)
+        damping_lambda = wp.min(damping_lambda, 0.0)
+        lambda_n = lambda_n + damping_lambda
+
     lin_delta_a = -n * lambda_n
     lin_delta_b = n * lambda_n
     ang_delta_a = angular_a * lambda_n
