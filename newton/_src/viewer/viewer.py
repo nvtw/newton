@@ -144,13 +144,13 @@ class ViewerBase(ABC):
         self._shape_sdf_index_host: nparray | None = None
 
         # SDF margin visualization (wireframe edges).
-        # Mesh cache: keyed by (geo_type, geo_scale, geo_src_id, offset) hash.
+        # Mesh cache: keyed by (geo_type, geo_scale, geo_src_id, offset).
         # Vertex-data cache: keyed by (id(mesh), color) — avoids redundant
         #   edge extraction when the same mesh appears on multiple shapes.
         # Edge caches: per-mode dict of
         #   {shape_idx: (vertex_data, body_idx, shape_xf, world_idx)}.
         # Keeping separate per-mode caches lets mode toggling reuse GPU VBOs.
-        self._sdf_margin_mesh_cache: dict[int, newton.Mesh | None] = {}
+        self._sdf_margin_mesh_cache: dict[tuple, newton.Mesh | None] = {}
         self._sdf_margin_vdata_cache: dict[tuple, np.ndarray] = {}
         self._sdf_margin_edge_caches: dict[SDFMarginMode, dict[int, tuple[np.ndarray, int, np.ndarray, int]]] = {}
 
@@ -1665,10 +1665,9 @@ class ViewerBase(ABC):
         # so keying on id(sdf) deduplicates across worlds.
         geo_identity = id(getattr(geo_src, "sdf", None) or geo_src) if geo_src is not None else 0
         cache_key = (geo_type, tuple(geo_scale), geo_identity, offset)
-        cache_key_hash = hash(cache_key)
 
-        if cache_key_hash in self._sdf_margin_mesh_cache:
-            return self._sdf_margin_mesh_cache[cache_key_hash]
+        if cache_key in self._sdf_margin_mesh_cache:
+            return self._sdf_margin_mesh_cache[cache_key]
 
         from ..geometry.sdf_utils import compute_offset_mesh  # noqa: PLC0415
 
@@ -1679,7 +1678,7 @@ class ViewerBase(ABC):
             offset=offset,
             device=self.device,
         )
-        self._sdf_margin_mesh_cache[cache_key_hash] = mesh
+        self._sdf_margin_mesh_cache[cache_key] = mesh
         return mesh
 
     @staticmethod
