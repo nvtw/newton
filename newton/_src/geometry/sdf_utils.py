@@ -991,6 +991,59 @@ def compute_isomesh(volume: wp.Volume) -> Mesh | None:
     return Mesh(verts_np, faces_np)
 
 
+def compute_offset_mesh(
+    shape_type: int,
+    shape_geo: Mesh | None = None,
+    shape_scale: Sequence[float] = (1.0, 1.0, 1.0),
+    offset: float = 0.0,
+    max_resolution: int = 48,
+    device: Devicelike | None = None,
+) -> Mesh | None:
+    """Compute the offset (Minkowski-inflated) isosurface mesh of a shape.
+
+    Builds a temporary NanoVDB SDF volume for the shape with the requested
+    offset baked in, then extracts the zero-isosurface via marching cubes.
+    For a box this naturally produces rounded corners and edges.
+
+    Args:
+        shape_type: Geometry type identifier from :class:`GeoType`.
+        shape_geo: Source mesh geometry when *shape_type* is :attr:`GeoType.MESH`.
+        shape_scale: Shape scale factors [unitless].
+        offset: Outward surface offset [m].  Use ``0`` for the original surface.
+        max_resolution: Maximum sparse-grid dimension [voxels].  Must be
+            divisible by 8.
+        device: CUDA device for GPU allocations.
+
+    Returns:
+        A :class:`Mesh` representing the offset isosurface, or ``None`` when
+        the shape type is unsupported (plane, heightfield) or the resulting
+        mesh would be empty.
+    """
+    if shape_type in (GeoType.PLANE, GeoType.HFIELD):
+        return None
+
+    padding = max(abs(offset) * 0.5, 0.02)
+    narrow_band = (-abs(offset) - padding, abs(offset) + padding)
+    margin = max(abs(offset) + padding, 0.05)
+
+    _sdf_data, sparse_volume, _coarse_volume, _block_coords = _compute_sdf_from_shape_impl(
+        shape_type=shape_type,
+        shape_geo=shape_geo,
+        shape_scale=shape_scale,
+        shape_margin=offset,
+        narrow_band_distance=narrow_band,
+        margin=margin,
+        max_resolution=max_resolution,
+        bake_scale=True,
+        device=device,
+    )
+
+    if sparse_volume is None:
+        return None
+
+    return compute_isomesh(sparse_volume)
+
+
 @wp.kernel(enable_backward=False)
 def count_isomesh_faces_kernel(
     sdf: wp.uint64,

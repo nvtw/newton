@@ -22,6 +22,7 @@ import newton
 from newton import GeoType, Mesh
 from newton._src.geometry.sdf_utils import (
     SDFData,
+    compute_offset_mesh,
     compute_sdf_from_shape,
     sample_sdf_extrapolated,
     sample_sdf_grad_extrapolated,
@@ -1216,6 +1217,147 @@ class TestSDFPublicApi(unittest.TestCase):
         sdf_idx = int(model.shape_sdf_index.numpy()[0])
         self.assertGreaterEqual(sdf_idx, 0)
         self.assertGreater(model.texture_sdf_data.shape[0], sdf_idx)
+
+
+@unittest.skipUnless(_cuda_available, "wp.Volume requires CUDA device")
+class TestComputeOffsetMesh(unittest.TestCase):
+    """Test compute_offset_mesh for various shapes and offset magnitudes.
+
+    Validates that the offset isosurface is geometrically correct even when
+    the offset pushes the surface well beyond the original shape AABB.
+    """
+
+    @staticmethod
+    def _analytical_sdf(v, shape_type, shape_scale):
+        """Evaluate analytical SDF for a primitive at point v using NumPy."""
+        if shape_type == GeoType.SPHERE:
+            return np.linalg.norm(v) - shape_scale[0]
+        if shape_type == GeoType.BOX:
+            q = np.abs(v) - np.array(shape_scale[:3])
+            return float(np.linalg.norm(np.maximum(q, 0.0)) + min(max(q[0], q[1], q[2]), 0.0))
+        if shape_type == GeoType.CAPSULE:
+            r, hh = shape_scale[0], shape_scale[1]
+            pz = max(-hh, min(float(v[2]), hh))
+            return np.linalg.norm(v - np.array([0, 0, pz])) - r
+        if shape_type == GeoType.CYLINDER:
+            r, hh = shape_scale[0], shape_scale[1]
+            dxy = np.linalg.norm(v[:2]) - r
+            dz = abs(v[2]) - hh
+            return float(np.linalg.norm(np.maximum([dxy, dz], 0.0)) + min(max(dxy, dz), 0.0))
+        return None
+
+    def _assert_vertices_at_offset(self, mesh, shape_type, shape_scale, offset, atol=None):
+        """Assert every vertex of *mesh* is approximately *offset* from the base surface.
+
+        For each vertex **v**, computes the analytical SDF of the un-inflated
+        shape.  That distance should be approximately equal to *offset* because
+        ``compute_offset_mesh`` bakes the offset into the SDF volume so the
+        zero-isosurface sits where ``sdf(v) == offset``.
+        """
+        if atol is None:
+            atol = offset * 0.15 + 0.02
+
+        verts = mesh.vertices
+        max_err = 0.0
+        for v in verts:
+            d = self._analytical_sdf(v, shape_type, shape_scale)
+            if d is None:
+                continue
+            err = abs(d - offset)
+            max_err = max(max_err, err)
+
+        self.assertLess(
+            max_err,
+            atol,
+            f"Max vertex distance error {max_err:.4f} exceeds tolerance {atol:.4f} "
+            f"for shape {shape_type}, scale {shape_scale}, offset {offset}",
+        )
+
+    def test_box_small_offset(self):
+        """Box with a small offset that stays within the original AABB."""
+        mesh = compute_offset_mesh(GeoType.BOX, shape_scale=(0.5, 0.35, 0.25), offset=0.05)
+        self.assertIsNotNone(mesh)
+        self.assertGreater(mesh.vertices.shape[0], 0)
+        self._assert_vertices_at_offset(mesh, GeoType.BOX, (0.5, 0.35, 0.25), 0.05)
+
+    def test_box_large_offset(self):
+        """Box with an offset larger than its smallest half-extent."""
+        mesh = compute_offset_mesh(GeoType.BOX, shape_scale=(0.5, 0.35, 0.25), offset=0.5)
+        self.assertIsNotNone(mesh)
+        self.assertGreater(mesh.vertices.shape[0], 0)
+        self._assert_vertices_at_offset(mesh, GeoType.BOX, (0.5, 0.35, 0.25), 0.5)
+
+    def test_box_very_large_offset(self):
+        """Box with an offset much larger than the shape itself."""
+        mesh = compute_offset_mesh(GeoType.BOX, shape_scale=(0.2, 0.2, 0.2), offset=1.0)
+        self.assertIsNotNone(mesh)
+        self.assertGreater(mesh.vertices.shape[0], 0)
+        self._assert_vertices_at_offset(mesh, GeoType.BOX, (0.2, 0.2, 0.2), 1.0)
+
+        extent = np.max(np.abs(mesh.vertices), axis=0)
+        for i in range(3):
+            self.assertGreater(
+                extent[i],
+                0.2 + 0.8,
+                f"Offset mesh extent along axis {i} ({extent[i]:.3f}) should exceed shape_scale + offset = {0.2 + 1.0}",
+            )
+
+    def test_sphere_large_offset(self):
+        """Sphere with a large offset — surface should be roughly spherical."""
+        r = 0.3
+        off = 0.7
+        mesh = compute_offset_mesh(GeoType.SPHERE, shape_scale=(r, r, r), offset=off)
+        self.assertIsNotNone(mesh)
+        dists = np.linalg.norm(mesh.vertices, axis=1)
+        expected_radius = r + off
+        np.testing.assert_allclose(dists, expected_radius, atol=0.05)
+
+    def test_capsule_large_offset(self):
+        """Capsule with offset exceeding its radius."""
+        r, hh = 0.2, 0.4
+        off = 0.6
+        mesh = compute_offset_mesh(GeoType.CAPSULE, shape_scale=(r, hh, 0.0), offset=off)
+        self.assertIsNotNone(mesh)
+        self._assert_vertices_at_offset(mesh, GeoType.CAPSULE, (r, hh, 0.0), off)
+
+    def test_cylinder_large_offset(self):
+        """Cylinder with offset exceeding its radius."""
+        r, hh = 0.3, 0.5
+        off = 0.8
+        mesh = compute_offset_mesh(GeoType.CYLINDER, shape_scale=(r, hh, 0.0), offset=off)
+        self.assertIsNotNone(mesh)
+        self._assert_vertices_at_offset(mesh, GeoType.CYLINDER, (r, hh, 0.0), off)
+
+    def test_plane_returns_none(self):
+        """Plane should return None (not supported)."""
+        mesh = compute_offset_mesh(GeoType.PLANE, shape_scale=(1.0, 1.0, 1.0), offset=0.1)
+        self.assertIsNone(mesh)
+
+    def test_hfield_returns_none(self):
+        """Heightfield should return None (not supported)."""
+        mesh = compute_offset_mesh(GeoType.HFIELD, shape_scale=(1.0, 1.0, 1.0), offset=0.1)
+        self.assertIsNone(mesh)
+
+    def test_zero_offset(self):
+        """Zero offset should produce a mesh approximating the original surface."""
+        mesh = compute_offset_mesh(GeoType.SPHERE, shape_scale=(0.5, 0.5, 0.5), offset=0.0)
+        if mesh is not None:
+            dists = np.linalg.norm(mesh.vertices, axis=1)
+            np.testing.assert_allclose(dists, 0.5, atol=0.03)
+
+    def test_mesh_shape_large_offset(self):
+        """Mesh (box geometry) with large offset."""
+        box_mesh = create_box_mesh((0.3, 0.3, 0.3))
+        off = 0.5
+        mesh = compute_offset_mesh(GeoType.MESH, shape_geo=box_mesh, offset=off)
+        self.assertIsNotNone(mesh)
+        extent = np.max(np.abs(mesh.vertices), axis=0)
+        for i in range(3):
+            self.assertGreater(
+                extent[i],
+                0.3 + off * 0.5,
+                f"Mesh offset extent along axis {i} ({extent[i]:.3f}) too small",
+            )
 
 
 class TestSDFNonUniformScaleBrickPyramid(unittest.TestCase):
