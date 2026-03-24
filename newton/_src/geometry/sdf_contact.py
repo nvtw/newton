@@ -527,7 +527,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
         fc = sample_sdf_value(texture_sdf, sdf_mesh_id, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf, elevation_data, pc)
         fd = sample_sdf_value(texture_sdf, sdf_mesh_id, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf, elevation_data, pd)
 
-        for _gs_iter in range(4):
+        for _gs_iter in range(6):
             if fc < fd:
                 b = d
                 d = c
@@ -1285,13 +1285,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         v2 = vertex_cache[t * 3 + 2]
 
                         # Edge contacts: golden section search on each edge.
-                        # Each edge emits one contact at the deepest point.
-                        # Vertex SDF values are passed to golden_section_edge_search
-                        # which reuses them as the interval endpoints.
+                        # Vertex SDF values are pre-computed and shared across
+                        # the 3 edges (each vertex is an endpoint of 2 edges).
                         d0 = sample_sdf_value(texture_sdf, mesh_id_sdf, use_bvh_for_sdf, sdf_is_hfield, hfd_sdf, heightfield_elevations, v0)
                         d1 = sample_sdf_value(texture_sdf, mesh_id_sdf, use_bvh_for_sdf, sdf_is_hfield, hfd_sdf, heightfield_elevations, v1)
                         d2 = sample_sdf_value(texture_sdf, mesh_id_sdf, use_bvh_for_sdf, sdf_is_hfield, hfd_sdf, heightfield_elevations, v2)
-
                         for edge_i in range(3):
                             ea = v0 if edge_i == 0 else (v1 if edge_i == 1 else v2)
                             eb = v1 if edge_i == 0 else (v2 if edge_i == 1 else v0)
