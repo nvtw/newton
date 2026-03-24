@@ -183,6 +183,7 @@ class Example:
             self.model,
             iterations=XPBD_ITERATIONS,
             rigid_contact_relaxation=XPBD_CONTACT_RELAXATION,
+            rigid_contact_max_depenetration_velocity=5.0,
         )
 
         self.state_0 = self.model.state()
