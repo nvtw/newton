@@ -498,22 +498,21 @@ class WireframeShapeGL:
 
     Stores interleaved (position, color) vertex data in model space.
     The World matrix is set per-shape by the caller before drawing.
+
+    Multiple instances can share the same VAO/VBO when created via
+    :meth:`create_shared`.  Only the *owner* (``_owns_gl == True``)
+    deletes the GL resources on :meth:`destroy`.
     """
 
     def __init__(self, vertex_data: np.ndarray):
-        """Create a wireframe shape from interleaved vertex data.
-
-        Args:
-            vertex_data: ``(N, 6)`` float32 array with columns
-                ``[px, py, pz, cr, cg, cb]``.  N must be even (pairs of
-                line-segment endpoints).
-        """
+        """Create a wireframe shape that owns its GL resources."""
         gl = RendererGL.gl
         self.num_vertices = len(vertex_data)
         self.hidden = False
         self.world_matrix = np.eye(4, dtype=np.float32)
+        self._owns_gl = True
 
-        vertex_byte_size = 6 * 4  # 3 floats pos + 3 floats color
+        vertex_byte_size = 6 * 4
 
         self.vao = gl.GLuint()
         gl.glGenVertexArrays(1, self.vao)
@@ -526,18 +525,29 @@ class WireframeShapeGL:
         data = vertex_data.astype(np.float32)
         gl.glBufferData(gl.GL_ARRAY_BUFFER, data.nbytes, data.ctypes.data, gl.GL_STATIC_DRAW)
 
-        # position (location 0)
         gl.glVertexAttribPointer(0, 3, gl.GL_FLOAT, gl.GL_FALSE, vertex_byte_size, ctypes.c_void_p(0))
         gl.glEnableVertexAttribArray(0)
-
-        # color (location 1)
         gl.glVertexAttribPointer(1, 3, gl.GL_FLOAT, gl.GL_FALSE, vertex_byte_size, ctypes.c_void_p(3 * 4))
         gl.glEnableVertexAttribArray(1)
 
         gl.glBindVertexArray(0)
 
+    @classmethod
+    def create_shared(cls, owner: "WireframeShapeGL") -> "WireframeShapeGL":
+        """Create an instance that shares *owner*'s VAO/VBO."""
+        obj = cls.__new__(cls)
+        obj.vao = owner.vao
+        obj.vbo = owner.vbo
+        obj.num_vertices = owner.num_vertices
+        obj.hidden = False
+        obj.world_matrix = np.eye(4, dtype=np.float32)
+        obj._owns_gl = False
+        return obj
+
     def destroy(self):
-        """Free GL resources."""
+        """Free GL resources if this instance owns them."""
+        if not getattr(self, "_owns_gl", False):
+            return
         gl = RendererGL.gl
         try:
             if hasattr(self, "vao"):

@@ -393,6 +393,7 @@ class ViewerGL(ViewerBase):
         self.objects = {}
         self.lines = {}
         self.wireframe_shapes = {}
+        self._wireframe_vbo_owners: dict[int, WireframeShapeGL] = {}
 
         # Interactive picking and wind force helpers
         self.picking = None
@@ -830,7 +831,13 @@ class ViewerGL(ViewerBase):
                 existing.destroy()
             from .gl.opengl import WireframeShapeGL  # noqa: PLC0415
 
-            obj = WireframeShapeGL(vertex_data)
+            vbo_key = id(vertex_data)
+            owner = self._wireframe_vbo_owners.get(vbo_key)
+            if owner is not None:
+                obj = WireframeShapeGL.create_shared(owner)
+            else:
+                obj = WireframeShapeGL(vertex_data)
+                self._wireframe_vbo_owners[vbo_key] = obj
             obj.hidden = hidden
             if world_matrix is not None:
                 obj.world_matrix = world_matrix.astype(np.float32)
@@ -839,6 +846,10 @@ class ViewerGL(ViewerBase):
             existing.hidden = hidden
             if world_matrix is not None:
                 existing.world_matrix = world_matrix.astype(np.float32)
+
+    @override
+    def clear_wireframe_vbo_cache(self):
+        self._wireframe_vbo_owners.clear()
 
     @override
     def log_points(

@@ -143,10 +143,16 @@ class ViewerBase(ABC):
         self._sdf_isomesh_populated: bool = False
         self._shape_sdf_index_host: nparray | None = None
 
-        # SDF margin visualization (wireframe edges)
+        # SDF margin visualization (wireframe edges).
+        # Mesh cache: keyed by (geo_type, geo_scale, geo_src_id, offset) hash.
+        # Vertex-data cache: keyed by (id(mesh), color) — avoids redundant
+        #   edge extraction when the same mesh appears on multiple shapes.
+        # Edge caches: per-mode dict of
+        #   {shape_idx: (vertex_data, body_idx, shape_xf, world_idx)}.
+        # Keeping separate per-mode caches lets mode toggling reuse GPU VBOs.
         self._sdf_margin_mesh_cache: dict[int, newton.Mesh | None] = {}
-        self._sdf_margin_edge_cache: dict[int, tuple[np.ndarray, int, np.ndarray]] = {}
-        self._sdf_margin_cached_mode: SDFMarginMode = SDFMarginMode.OFF
+        self._sdf_margin_vdata_cache: dict[tuple, np.ndarray] = {}
+        self._sdf_margin_edge_caches: dict[SDFMarginMode, dict[int, tuple[np.ndarray, int, np.ndarray, int]]] = {}
 
     def set_model(self, model: newton.Model | None, max_worlds: int | None = None):
         """
@@ -984,6 +990,10 @@ class ViewerBase(ABC):
         """
         pass
 
+    def clear_wireframe_vbo_cache(self):  # noqa: B027
+        """Clear the shared wireframe VBO cache (overridden by GL viewer)."""
+        pass
+
     @abstractmethod
     def log_points(
         self,
@@ -1641,7 +1651,10 @@ class ViewerBase(ABC):
         geo_scale = [float(v) for v in self.model.shape_scale.numpy()[shape_idx]]
         geo_src = self.model.shape_source[shape_idx]
 
-        cache_key = (geo_type, tuple(geo_scale), id(geo_src), offset)
+        # Replicated meshes share the same SDF object via Mesh.__deepcopy__,
+        # so keying on id(sdf) deduplicates across worlds.
+        geo_identity = id(getattr(geo_src, "sdf", None) or geo_src) if geo_src is not None else 0
+        cache_key = (geo_type, tuple(geo_scale), geo_identity, offset)
         cache_key_hash = hash(cache_key)
 
         if cache_key_hash in self._sdf_margin_mesh_cache:
@@ -1692,12 +1705,18 @@ class ViewerBase(ABC):
             idx += 2
         return data
 
-    def _populate_sdf_margin_edges(self):
-        """Compute offset meshes and extract wireframe edge data for every collision shape."""
+    def _populate_sdf_margin_edges(
+        self,
+        mode: SDFMarginMode,
+        target: dict[int, tuple[np.ndarray, int, np.ndarray, int]],
+    ):
+        """Compute offset meshes and extract wireframe edge data for every collision shape.
+
+        Results are written into *target* (keyed by shape index).
+        """
         if self.model is None:
             return
 
-        mode = self.sdf_margin_mode
         if mode == SDFMarginMode.MARGIN:
             color_rgb = (1.0, 0.9, 0.0)
         else:
@@ -1719,10 +1738,16 @@ class ViewerBase(ABC):
             if offset_mesh is None:
                 continue
 
-            vertex_data = self._extract_wireframe_edges(offset_mesh, color_rgb)
+            vd_key = (id(offset_mesh), color_rgb)
+            vertex_data = self._sdf_margin_vdata_cache.get(vd_key)
+            if vertex_data is None:
+                vertex_data = self._extract_wireframe_edges(offset_mesh, color_rgb)
+                self._sdf_margin_vdata_cache[vd_key] = vertex_data
+
             body_idx = int(shape_body[s])
+            world_idx = int(shape_world[s])
             shape_xf = shape_transform[s].copy()
-            self._sdf_margin_edge_cache[s] = (vertex_data, body_idx, shape_xf)
+            target[s] = (vertex_data, body_idx, shape_xf, world_idx)
 
     @staticmethod
     def _transform_to_mat44(tf: np.ndarray) -> np.ndarray:
@@ -1750,25 +1775,40 @@ class ViewerBase(ABC):
         mode = self.sdf_margin_mode
         visible = mode != SDFMarginMode.OFF
 
-        if visible and (mode != self._sdf_margin_cached_mode or self.model_changed):
-            self._sdf_margin_edge_cache.clear()
-            self._populate_sdf_margin_edges()
-            self._sdf_margin_cached_mode = mode
+        if self.model_changed:
+            self._sdf_margin_edge_caches.clear()
+            self._sdf_margin_mesh_cache.clear()
+            self._sdf_margin_vdata_cache.clear()
+            self.clear_wireframe_vbo_cache()
 
-            for s, (vertex_data, _body_idx, _shape_xf) in self._sdf_margin_edge_cache.items():
-                name = f"/model/sdf_margin_wf/{s}"
-                self.log_wireframe_shape(name, vertex_data, np.eye(4, dtype=np.float32).ravel(order="F"), hidden=False)
+        if visible:
+            edge_cache = self._sdf_margin_edge_caches.get(mode)
+            if edge_cache is None:
+                edge_cache = {}
+                self._populate_sdf_margin_edges(mode, edge_cache)
+                self._sdf_margin_edge_caches[mode] = edge_cache
+
+                identity = np.eye(4, dtype=np.float32).ravel(order="F")
+                for s, (vertex_data, _body_idx, _shape_xf, _world_idx) in edge_cache.items():
+                    name = f"/model/sdf_margin_wf/{mode.value}/{s}"
+                    self.log_wireframe_shape(name, vertex_data, identity, hidden=False)
+
+        # Hide inactive modes, show active mode
+        for cached_mode, cached_edges in self._sdf_margin_edge_caches.items():
+            hidden = not visible or cached_mode != mode
+            for s in cached_edges:
+                name = f"/model/sdf_margin_wf/{cached_mode.value}/{s}"
+                self.log_wireframe_shape(name, None, None, hidden=hidden)
 
         if not visible:
-            for s in list(self._sdf_margin_edge_cache.keys()):
-                name = f"/model/sdf_margin_wf/{s}"
-                self.log_wireframe_shape(name, None, None, hidden=True)
             return
 
+        # Update world transforms for the active mode
         body_q = state.body_q.numpy() if state is not None else None
+        offsets_np = self.world_offsets.numpy() if self.world_offsets is not None else None
 
-        for s, (_vertex_data, body_idx, shape_xf) in self._sdf_margin_edge_cache.items():
-            name = f"/model/sdf_margin_wf/{s}"
+        for s, (_vertex_data, body_idx, shape_xf, world_idx) in edge_cache.items():
+            name = f"/model/sdf_margin_wf/{mode.value}/{s}"
             shape_mat = self._transform_to_mat44(shape_xf)
             if body_idx >= 0 and body_q is not None:
                 body_mat = self._transform_to_mat44(body_q[body_idx])
@@ -1776,7 +1816,11 @@ class ViewerBase(ABC):
                 sm = shape_mat.reshape(4, 4, order="F")
                 world_mat = (bm @ sm).ravel(order="F")
             else:
-                world_mat = shape_mat
+                world_mat = shape_mat.copy()
+            if offsets_np is not None and world_idx >= 0:
+                world_mat[12] += offsets_np[world_idx][0]
+                world_mat[13] += offsets_np[world_idx][1]
+                world_mat[14] += offsets_np[world_idx][2]
             self.log_wireframe_shape(name, None, world_mat, hidden=False)
 
     def _log_joints(self, state: newton.State):
