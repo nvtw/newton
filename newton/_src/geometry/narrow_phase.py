@@ -42,6 +42,7 @@ from ..geometry.contact_reduction_global import (
 )
 from ..geometry.flags import ShapeFlags
 from ..geometry.sdf_contact import (
+    compute_block_counts_from_weights,
     compute_mesh_mesh_block_offsets_scan,
     create_narrow_phase_process_mesh_mesh_contacts_kernel,
 )
@@ -995,8 +996,6 @@ def compute_mesh_plane_block_offsets_scan(
     device: str | None = None,
 ):
     """Compute mesh-plane block offsets using parallel kernels and array_scan."""
-    from .sdf_contact import compute_block_counts_from_weights
-
     n = block_counts.shape[0]
     # Step 1: compute per-pair vertex counts in parallel
     wp.launch(
