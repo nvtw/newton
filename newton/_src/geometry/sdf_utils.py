@@ -1046,7 +1046,8 @@ def compute_offset_mesh(
 
     Args:
         shape_type: Geometry type identifier from :class:`GeoType`.
-        shape_geo: Source mesh geometry when *shape_type* is :attr:`GeoType.MESH`.
+        shape_geo: Source mesh geometry when *shape_type* is
+            :attr:`GeoType.MESH` or :attr:`GeoType.CONVEX_MESH`.
         shape_scale: Shape scale factors [unitless].
         offset: Outward surface offset [m].  Use ``0`` for the original surface.
         max_resolution: Maximum grid dimension [voxels].

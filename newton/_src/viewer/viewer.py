@@ -24,8 +24,13 @@ class SDFMarginMode(enum.IntEnum):
     """Controls which offset surface is visualized for SDF debug wireframes."""
 
     OFF = 0
+    """Do not draw SDF margin debug wireframes."""
+
     MARGIN = 1
+    """Wireframe at ``shape_margin`` only."""
+
     MARGIN_GAP = 2
+    """Wireframe at ``shape_margin`` + ``shape_gap`` (outer contact threshold), not gap alone."""
 
 
 class ViewerBase(ABC):
