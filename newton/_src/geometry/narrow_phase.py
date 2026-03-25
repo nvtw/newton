@@ -1175,7 +1175,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
         """
         block_id, t = wp.tid()
 
-        pair_count = shape_pairs_mesh_plane_count[0]
+        pair_count = wp.min(shape_pairs_mesh_plane_count[0], shape_pairs_mesh_plane.shape[0])
         total_combos = block_offsets[pair_count]
 
         # Grid stride loop over (pair, sub-block) combos for multi-block load balancing.
@@ -1614,6 +1614,7 @@ class NarrowPhase:
             self.mesh_plane_weight_prefix_sums = wp.zeros(n, dtype=wp.int32, device=device)
         else:
             self.num_mesh_mesh_blocks = self.num_tile_blocks
+            self.mesh_mesh_target_blocks = self.num_tile_blocks
             self.mesh_mesh_block_offsets = None
             self.mesh_mesh_block_counts = None
             self.mesh_mesh_weight_prefix_sums = None
