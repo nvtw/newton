@@ -1301,6 +1301,11 @@ additional set of **differentiable** rigid-contact arrays that participate in
 distance and world-space contact points with respect to body poses
 (``state.body_q``).
 
+.. note::
+   Rigid-contact differentiability is **experimental**.  Accuracy and fitness for
+   real-world optimisation or learning workflows should be validated case by case
+   before relying on these gradients.
+
 Making the full narrow-phase pipeline differentiable end-to-end would be
 prohibitively expensive and numerically fragile — iterative GJK/MPR solvers,
 BVH traversals, and discrete contact-set changes all introduce discontinuities

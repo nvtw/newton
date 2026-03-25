@@ -82,6 +82,10 @@ class Contacts:
                 and safe since solvers only read up to contact_count.
             requested_attributes: Set of extended contact attribute names to allocate.
                 See :attr:`EXTENDED_ATTRIBUTES` for available options.
+
+        .. note::
+            The ``rigid_contact_diff_*`` arrays allocated when ``requires_grad=True`` are
+            **experimental**; see :meth:`newton.CollisionPipeline.collide`.
         """
         self.per_contact_shape_properties = per_contact_shape_properties
         self.clear_buffers = clear_buffers

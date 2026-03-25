@@ -373,6 +373,12 @@ class CollisionPipeline:
         - Optional hydroelastic contact model for compliant surfaces
 
     For most users, construct with ``CollisionPipeline(model, ...)``.
+
+    .. note::
+        Differentiable rigid contacts (the ``rigid_contact_diff_*`` arrays when
+        ``requires_grad`` is enabled) are **experimental**. The narrow phase stays
+        frozen and gradients are a tangent approximation; validate accuracy and
+        usefulness on your workflow before relying on them in optimisation loops.
     """
 
     def __init__(
@@ -424,6 +430,11 @@ class CollisionPipeline:
                 "nxn"/"sap" modes, ignored.
             sdf_hydroelastic_config: Configuration for
                 hydroelastic collision handling. Defaults to None.
+
+        .. note::
+            When ``requires_grad`` is true (explicitly or via ``model.requires_grad``),
+            rigid-contact autodiff via ``rigid_contact_diff_*`` is **experimental**;
+            see :meth:`collide`.
         """
         mode_from_broad_phase: str | None = None
         broad_phase_instance: BroadPhaseAllPairs | BroadPhaseSAP | BroadPhaseExplicit | None = None
@@ -633,8 +644,16 @@ class CollisionPipeline:
         """
         Allocate and return a new :class:`newton.Contacts` object for this pipeline.
 
+        The returned buffer uses this pipeline's ``requires_grad`` flag (resolved at
+        construction from the argument or ``model.requires_grad``).
+
         Returns:
             A newly allocated contacts buffer sized for this pipeline.
+
+        .. note::
+            If ``requires_grad`` is true, ``rigid_contact_diff_*`` arrays may be
+            allocated; rigid-contact differentiability is **experimental** (see
+            :meth:`collide`).
         """
         contacts = Contacts(
             self.rigid_contact_max,
@@ -683,6 +702,10 @@ class CollisionPipeline:
         (``contacts.rigid_contact_diff_*``) are populated by a lightweight
         augmentation kernel that reconstructs world-space contact points from
         the frozen narrow-phase output through the body transforms.
+
+        .. note::
+            This rigid-contact gradient path is **experimental**: usefulness and
+            numerical behaviour are still being assessed across real-world scenarios.
 
         Args:
             state: The current simulation state.
