@@ -1005,7 +1005,7 @@ def compute_mesh_plane_block_offsets_scan(
             shape_pairs_mesh_plane,
             shape_pairs_mesh_plane_count,
             shape_source,
-            block_counts,
+            block_counts,  # reuse as temp storage for vert counts
         ],
         device=device,
     )
@@ -1017,11 +1017,11 @@ def compute_mesh_plane_block_offsets_scan(
         dim=n,
         inputs=[
             weight_prefix_sums,
-            block_counts,
+            block_counts,  # still holds vert counts
             shape_pairs_mesh_plane_count,
             shape_pairs_mesh_plane.shape[0],
             target_blocks,
-            block_offsets,
+            block_offsets,  # reuse as temp for block counts
         ],
         device=device,
     )
@@ -1619,9 +1619,9 @@ class NarrowPhase:
             self.mesh_mesh_weight_prefix_sums = None
             self.num_mesh_plane_blocks = self.num_tile_blocks
             self.mesh_plane_target_blocks = self.num_tile_blocks
-            self.mesh_plane_block_offsets = wp.zeros(max_candidate_pairs + 1, dtype=wp.int32, device=device)
-            self.mesh_plane_block_counts = wp.zeros(max_candidate_pairs + 1, dtype=wp.int32, device=device)
-            self.mesh_plane_weight_prefix_sums = wp.zeros(max_candidate_pairs + 1, dtype=wp.int32, device=device)
+            self.mesh_plane_block_offsets = None
+            self.mesh_plane_block_counts = None
+            self.mesh_plane_weight_prefix_sums = None
 
     def launch_custom_write(
         self,

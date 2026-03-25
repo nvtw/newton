@@ -709,11 +709,12 @@ def compute_mesh_mesh_tri_counts(
     heightfield_data: wp.array(dtype=HeightfieldData),
     tri_counts: wp.array(dtype=wp.int32),
 ):
-    """Compute per-pair triangle counts in parallel.
+    """Compute per-pair triangle counts for mesh-mesh (or heightfield-mesh) pairs.
 
-    Each thread handles one slot in the tri_counts array.  Slots beyond
-    ``pair_count`` are zeroed so that a subsequent ``array_scan`` over the
-    full array produces correct prefix sums.
+    Sums the triangle counts of both shapes in each pair — each shape may be
+    a triangle mesh or a heightfield.  Each thread handles one slot in the
+    ``tri_counts`` array.  Slots beyond ``pair_count`` are zeroed so that a
+    subsequent ``array_scan`` over the full array produces correct prefix sums.
     """
     i = wp.tid()
     pair_count = wp.min(shape_pairs_mesh_mesh_count[0], shape_pairs_mesh_mesh.shape[0])
@@ -767,7 +768,10 @@ def compute_block_counts_from_weights(
         weight_per_block = wp.max(256, total_weight // target_blocks)
 
     w = int(weights[i])
-    blocks = wp.max(1, (w + weight_per_block - 1) // weight_per_block)
+    if weight_per_block > 0:
+        blocks = wp.max(1, (w + weight_per_block - 1) // weight_per_block)
+    else:
+        blocks = 1
     block_counts[i] = wp.int32(blocks)
 
 
@@ -783,11 +787,11 @@ def compute_mesh_mesh_block_offsets_scan(
     weight_prefix_sums: wp.array,
     device: str | None = None,
 ):
-    """Compute block offsets using parallel kernels and array_scan.
+    """Compute mesh-mesh block offsets using parallel kernels and array_scan.
 
-    Replaces the single-threaded ``compute_mesh_mesh_block_offsets`` kernel
-    with a parallel pipeline: per-pair triangle counts → inclusive scan →
-    adaptive block counts → exclusive scan into ``block_offsets``.
+    Runs a four-stage parallel pipeline: per-pair triangle counts →
+    inclusive scan → adaptive block counts → exclusive scan into
+    ``block_offsets``.
     """
     n = block_counts.shape[0]
     # Step 1: compute per-pair triangle counts in parallel
