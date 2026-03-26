@@ -26,13 +26,16 @@ Example usage:
     ```
 """
 
-from .viewer import SDFMarginMode, ViewerBase
+from .viewer import ViewerBase
 from .viewer_file import ViewerFile
 from .viewer_gl import ViewerGL
 from .viewer_null import ViewerNull
 from .viewer_rerun import ViewerRerun
 from .viewer_usd import ViewerUSD
 from .viewer_viser import ViewerViser
+
+SDFMarginMode = ViewerBase.SDFMarginMode
+"""Backward-compatible alias; prefer :class:`ViewerBase.SDFMarginMode`."""
 
 __all__ = [
     "SDFMarginMode",

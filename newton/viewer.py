@@ -3,7 +3,6 @@
 
 # Import all viewer classes (they handle missing dependencies at instantiation time)
 from ._src.viewer import (
-    SDFMarginMode,
     ViewerBase,
     ViewerFile,
     ViewerGL,
@@ -12,6 +11,9 @@ from ._src.viewer import (
     ViewerUSD,
     ViewerViser,
 )
+
+# Export SDFMarginMode for backward compatibility
+SDFMarginMode = ViewerBase.SDFMarginMode
 
 __all__ = [
     "SDFMarginMode",

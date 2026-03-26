@@ -20,20 +20,19 @@ from ..core.types import MAXVAL, Axis, nparray
 from .kernels import compute_hydro_contact_surface_lines, estimate_world_extents
 
 
-class SDFMarginMode(enum.IntEnum):
-    """Controls which offset surface is visualized for SDF debug wireframes."""
-
-    OFF = 0
-    """Do not draw SDF margin debug wireframes."""
-
-    MARGIN = 1
-    """Wireframe at ``shape_margin`` only."""
-
-    MARGIN_GAP = 2
-    """Wireframe at ``shape_margin`` + ``shape_gap`` (outer contact threshold), not gap alone."""
-
-
 class ViewerBase(ABC):
+    class SDFMarginMode(enum.IntEnum):
+        """Controls which offset surface is visualized for SDF debug wireframes."""
+
+        OFF = 0
+        """Do not draw SDF margin debug wireframes."""
+
+        MARGIN = 1
+        """Wireframe at ``shape_margin`` only."""
+
+        MARGIN_GAP = 2
+        """Wireframe at ``shape_margin`` + ``shape_gap`` (outer contact threshold), not gap alone."""
+
     def __init__(self):
         """Initialize shared viewer state and rendering caches."""
         self.time = 0.0
@@ -124,7 +123,7 @@ class ViewerBase(ABC):
         self.show_static = False
         self.show_inertia_boxes = False
         self.show_hydro_contact_surface = False
-        self.sdf_margin_mode: SDFMarginMode = SDFMarginMode.OFF
+        self.sdf_margin_mode: ViewerBase.SDFMarginMode = ViewerBase.SDFMarginMode.OFF
 
         self.gaussians_max_points = 100_000  # Max number of points to visualize per gaussian
 
@@ -157,7 +156,9 @@ class ViewerBase(ABC):
         # Keeping separate per-mode caches lets mode toggling reuse GPU VBOs.
         self._sdf_margin_mesh_cache: dict[tuple, newton.Mesh | None] = {}
         self._sdf_margin_vdata_cache: dict[tuple, np.ndarray] = {}
-        self._sdf_margin_edge_caches: dict[SDFMarginMode, dict[int, tuple[np.ndarray, int, np.ndarray, int]]] = {}
+        self._sdf_margin_edge_caches: dict[
+            ViewerBase.SDFMarginMode, dict[int, tuple[np.ndarray, int, np.ndarray, int]]
+        ] = {}
 
     def set_model(self, model: newton.Model | None, max_worlds: int | None = None):
         """
@@ -1630,7 +1631,7 @@ class ViewerBase(ABC):
     def _compute_shape_offset_mesh(
         self,
         shape_idx: int,
-        mode: SDFMarginMode,
+        mode: ViewerBase.SDFMarginMode,
         margin_np: np.ndarray,
         gap_np: np.ndarray,
         type_np: np.ndarray,
@@ -1649,12 +1650,12 @@ class ViewerBase(ABC):
         Returns:
             Mesh for the offset surface, or ``None`` if unavailable.
         """
-        if self.model is None or mode == SDFMarginMode.OFF:
+        if self.model is None or mode == self.SDFMarginMode.OFF:
             return None
 
         shape_margin_val = float(margin_np[shape_idx])
 
-        if mode == SDFMarginMode.MARGIN:
+        if mode == self.SDFMarginMode.MARGIN:
             offset = shape_margin_val
         else:
             offset = shape_margin_val + float(gap_np[shape_idx])
@@ -1721,7 +1722,7 @@ class ViewerBase(ABC):
 
     def _populate_sdf_margin_edges(
         self,
-        mode: SDFMarginMode,
+        mode: ViewerBase.SDFMarginMode,
         target: dict[int, tuple[np.ndarray, int, np.ndarray, int]],
     ):
         """Compute offset meshes and extract wireframe edge data for every collision shape.
@@ -1731,7 +1732,7 @@ class ViewerBase(ABC):
         if self.model is None:
             return
 
-        if mode == SDFMarginMode.MARGIN:
+        if mode == self.SDFMarginMode.MARGIN:
             color_rgb = (1.0, 0.9, 0.0)
         else:
             color_rgb = (1.0, 0.5, 0.0)
@@ -1791,7 +1792,7 @@ class ViewerBase(ABC):
     def _log_sdf_margin_wireframes(self, state: newton.State):
         """Update and render SDF margin wireframe edges."""
         mode = self.sdf_margin_mode
-        visible = mode != SDFMarginMode.OFF
+        visible = mode != self.SDFMarginMode.OFF
 
         if self.model_changed:
             self._sdf_margin_edge_caches.clear()

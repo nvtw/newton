@@ -2003,14 +2003,12 @@ class ViewerGL(ViewerBase):
                     show_collision = self.show_collision
                     changed, self.show_collision = imgui.checkbox("Show Collision", show_collision)
 
-                    # SDF margin wireframe mode
-                    from .viewer import SDFMarginMode  # noqa: PLC0415
-
+                    # Gap + margin wireframe mode
                     _sdf_margin_labels = ["Off", "Margin", "Margin + Gap"]
-                    _, new_sdf_idx = imgui.combo("SDF Margin", int(self.sdf_margin_mode), _sdf_margin_labels)
-                    self.sdf_margin_mode = SDFMarginMode(new_sdf_idx)
+                    _, new_sdf_idx = imgui.combo("Gap + Margin", int(self.sdf_margin_mode), _sdf_margin_labels)
+                    self.sdf_margin_mode = self.SDFMarginMode(new_sdf_idx)
 
-                    if self.sdf_margin_mode != SDFMarginMode.OFF:
+                    if self.sdf_margin_mode != self.SDFMarginMode.OFF:
                         _, self.renderer.wireframe_line_width = imgui.slider_float(
                             "Line Width (px)", self.renderer.wireframe_line_width, 0.5, 5.0
                         )
