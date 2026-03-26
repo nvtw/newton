@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -420,30 +420,6 @@ def _body_position_loss_kernel(
     loss[0] = wp.dot(delta, delta)
 
 
-def _multistep_forward(model, solver, pipeline, sim_substeps, sim_dt, target, device):
-    """Run a multi-step forward pass and return the scalar loss value.
-
-    Shared by the tape-based analytical path and the finite-difference
-    perturbation evaluations so both exercise identical physics.
-    """
-    control = model.control()
-    states = [model.state(requires_grad=False) for _ in range(sim_substeps + 1)]
-    loss = wp.zeros(1, dtype=float, device=device)
-
-    for t in range(sim_substeps):
-        states[t].clear_forces()
-        contacts = pipeline.contacts()
-        pipeline.collide(states[t], contacts)
-        solver.step(states[t], states[t + 1], control, contacts, sim_dt)
-
-    wp.launch(
-        _body_position_loss_kernel,
-        dim=1,
-        inputs=[states[-1].body_q, target],
-        outputs=[loss],
-        device=device,
-    )
-    return loss.numpy()[0]
 
 
 def test_multistep_gradient_flow(test, device):

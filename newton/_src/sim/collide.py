@@ -378,7 +378,7 @@ class CollisionPipeline:
         Differentiable rigid contacts (the ``rigid_contact_diff_*`` arrays when
         ``requires_grad`` is enabled) are **experimental**. The narrow phase stays
         frozen and gradients are a tangent approximation; validate accuracy and
-        usefulness on your workflow before relying on them in optimisation loops.
+        usefulness on your workflow before relying on them in optimization loops.
     """
 
     def __init__(
@@ -693,7 +693,7 @@ class CollisionPipeline:
 
         Safe to call inside a :class:`wp.Tape` context.  The non-differentiable
         broad-phase and narrow-phase kernels are launched with tape recording
-        hardcode ``record_tape=False`` internally.  The differentiable kernels
+        hardcoded ``record_tape=False`` internally.  The differentiable kernels
         (soft-contact generation and rigid-contact augmentation) are recorded on
         the tape so that gradients flow through ``state.body_q`` and
         ``state.particle_q``.

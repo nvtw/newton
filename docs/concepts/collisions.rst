@@ -1303,7 +1303,7 @@ distance and world-space contact points with respect to body poses
 
 .. note::
    Rigid-contact differentiability is **experimental**.  Accuracy and fitness for
-   real-world optimisation or learning workflows should be validated case by case
+   real-world optimization or learning workflows should be validated case by case
    before relying on these gradients.
 
 Making the full narrow-phase pipeline differentiable end-to-end would be
@@ -1315,7 +1315,7 @@ it re-reads the contact geometry produced by the narrow phase (body-local
 points, world normal, margins) and reconstructs the world-space quantities
 through the differentiable ``body_q``.  The result is a first-order
 tangent-plane approximation that is cheap, stable, and sufficient for most
-gradient-based optimisation and reinforcement-learning workflows.
+gradient-based optimization and reinforcement-learning workflows.
 
 **Differentiable arrays** (allocated only when ``requires_grad=True``):
 
@@ -1369,7 +1369,7 @@ treated as a frozen constant.
    The standard (non-differentiable) rigid-contact arrays
    (``rigid_contact_point0``, ``rigid_contact_normal``, etc.) are unaffected and
    remain available for solvers.  The ``rigid_contact_diff_*`` arrays are an
-   additional output intended for gradient-based optimisation and ML workflows.
+   additional output intended for gradient-based optimization and ML workflows.
 
 .. _Creating Contacts:
 

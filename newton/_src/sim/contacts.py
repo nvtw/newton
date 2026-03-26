@@ -69,7 +69,7 @@ class Contacts:
             soft_contact_max: Maximum number of soft contacts
             requires_grad: Whether contact arrays require gradients for differentiable
                 simulation.  When ``True``, soft contact arrays (body_pos, body_vel, normal)
-                are allocated with gradients so that gradient-based optimisation can flow
+                are allocated with gradients so that gradient-based optimization can flow
                 through particle-shape contacts, **and** additional differentiable rigid
                 contact arrays are allocated (``rigid_contact_diff_*``) that provide
                 first-order gradients of contact distance and world-space points with
@@ -137,7 +137,7 @@ class Contacts:
             if requires_grad:
                 self.rigid_contact_diff_distance = wp.zeros(rigid_contact_max, dtype=wp.float32, requires_grad=True)
                 """Differentiable signed distance [m], shape (rigid_contact_max,), dtype float."""
-                self.rigid_contact_diff_normal = wp.zeros(rigid_contact_max, dtype=wp.vec3, requires_grad=True)
+                self.rigid_contact_diff_normal = wp.zeros(rigid_contact_max, dtype=wp.vec3, requires_grad=False)
                 """Contact normal (A-to-B, world frame) [unitless], shape (rigid_contact_max,), dtype :class:`vec3`."""
                 self.rigid_contact_diff_point0_world = wp.zeros(rigid_contact_max, dtype=wp.vec3, requires_grad=True)
                 """World-space contact point on shape 0 [m], shape (rigid_contact_max,), dtype :class:`vec3`."""
@@ -145,9 +145,13 @@ class Contacts:
                 """World-space contact point on shape 1 [m], shape (rigid_contact_max,), dtype :class:`vec3`."""
             else:
                 self.rigid_contact_diff_distance = None
+                """Differentiable signed distance [m], shape (rigid_contact_max,), dtype float."""
                 self.rigid_contact_diff_normal = None
+                """Contact normal (A-to-B, world frame) [unitless], shape (rigid_contact_max,), dtype :class:`vec3`."""
                 self.rigid_contact_diff_point0_world = None
+                """World-space contact point on shape 0 [m], shape (rigid_contact_max,), dtype :class:`vec3`."""
                 self.rigid_contact_diff_point1_world = None
+                """World-space contact point on shape 1 [m], shape (rigid_contact_max,), dtype :class:`vec3`."""
 
             # contact stiffness/damping/friction (only allocated if per_contact_shape_properties is enabled)
             if self.per_contact_shape_properties:
