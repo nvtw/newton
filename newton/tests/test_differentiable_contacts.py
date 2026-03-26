@@ -420,8 +420,6 @@ def _body_position_loss_kernel(
     loss[0] = wp.dot(delta, delta)
 
 
-
-
 def test_multistep_gradient_flow(test, device):
     """Multi-step tape gradient of position loss w.r.t. initial z matches finite differences."""
     with wp.ScopedDevice(device):
