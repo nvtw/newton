@@ -419,28 +419,34 @@ def get_triangle_from_heightfield(
 @wp.func
 def get_edge_from_mesh(
     mesh_id: wp.uint64,
+    mesh_edge_indices: wp.array(dtype=wp.vec2i),
+    edge_range: wp.vec2i,
     mesh_scale: wp.vec3,
     X_mesh_ws: wp.transform,
     edge_idx: int,
 ) -> tuple[wp.vec3, wp.vec3]:
     """Extract an edge from a mesh and transform it to world space.
 
-    Reads the edge vertex indices from ``mesh.edges`` (flat array of pairs)
-    and returns both endpoints in world space after applying scale and transform.
+    Reads the edge vertex pair from the packed ``mesh_edge_indices`` array
+    using the per-shape ``edge_range`` offset, and returns both endpoints
+    in world space after applying scale and transform.
 
     Args:
         mesh_id: The mesh ID (use wp.mesh_get to retrieve the mesh object)
+        mesh_edge_indices: Packed array of all mesh edge vertex pairs.
+        edge_range: ``(start, count)`` slice for this shape into ``mesh_edge_indices``.
         mesh_scale: Scale to apply to mesh vertices (component-wise)
         X_mesh_ws: Mesh world-space transform (position and rotation)
-        edge_idx: Edge index in the mesh (0-based)
+        edge_idx: Edge index within this shape (0-based)
 
     Returns:
         Tuple of (v0_world, v1_world) - the two edge endpoints in world space.
     """
     mesh = wp.mesh_get(mesh_id)
+    edge = mesh_edge_indices[edge_range[0] + edge_idx]
 
-    idx0 = mesh.edges[edge_idx * 2 + 0]
-    idx1 = mesh.edges[edge_idx * 2 + 1]
+    idx0 = edge[0]
+    idx1 = edge[1]
 
     v0_local = wp.cw_mul(mesh.points[idx0], mesh_scale)
     v1_local = wp.cw_mul(mesh.points[idx1], mesh_scale)
@@ -560,13 +566,13 @@ def get_triangle_count(shape_type: int, mesh_id: wp.uint64, hfd: HeightfieldData
 
 
 @wp.func
-def get_edge_count(shape_type: int, mesh_id: wp.uint64, hfd: HeightfieldData) -> int:
+def get_edge_count(shape_type: int, edge_range: wp.vec2i, hfd: HeightfieldData) -> int:
     """Return the number of edges for a mesh or heightfield shape."""
     if shape_type == GeoType.HFIELD:
         if hfd.nrow <= 1 or hfd.ncol <= 1:
             return 0
         return hfd.nrow * (hfd.ncol - 1) + (hfd.nrow - 1) * hfd.ncol + (hfd.nrow - 1) * (hfd.ncol - 1)
-    return wp.mesh_get(mesh_id).edges.shape[0] // 2
+    return edge_range[1]
 
 
 def _create_sdf_contact_funcs(enable_heightfields: bool):
@@ -762,6 +768,8 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
         mesh_scale: wp.vec3,
         mesh_to_sdf_transform: wp.transform,
         mesh_id: wp.uint64,
+        mesh_edge_indices: wp.array(dtype=wp.vec2i),
+        edge_range: wp.vec2i,
         texture_sdf: TextureSDFData,
         sdf_mesh_id: wp.uint64,
         buffer: wp.array(dtype=wp.int32),
@@ -825,11 +833,11 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
                         )
                     else:
                         v0_scaled, v1_scaled = get_edge_from_mesh(
-                            mesh_id, mesh_scale, mesh_to_sdf_transform, edge_idx
+                            mesh_id, mesh_edge_indices, edge_range, mesh_scale, mesh_to_sdf_transform, edge_idx
                         )
                 else:
                     v0_scaled, v1_scaled = get_edge_from_mesh(
-                        mesh_id, mesh_scale, mesh_to_sdf_transform, edge_idx
+                        mesh_id, mesh_edge_indices, edge_range, mesh_scale, mesh_to_sdf_transform, edge_idx
                     )
                 v0 = wp.cw_mul(v0_scaled, inv_sdf_scale)
                 v1 = wp.cw_mul(v1_scaled, inv_sdf_scale)
@@ -875,7 +883,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
 def compute_mesh_mesh_edge_counts(
     shape_pairs_mesh_mesh: wp.array(dtype=wp.vec2i),
     shape_pairs_mesh_mesh_count: wp.array(dtype=int),
-    shape_source: wp.array(dtype=wp.uint64),
+    shape_edge_range: wp.array(dtype=wp.vec2i),
     shape_heightfield_index: wp.array(dtype=wp.int32),
     heightfield_data: wp.array(dtype=HeightfieldData),
     edge_counts: wp.array(dtype=wp.int32),
@@ -902,11 +910,9 @@ def compute_mesh_mesh_edge_counts(
         shape_idx = pair[mode]
         if is_hfield:
             hfd = heightfield_data[shape_heightfield_index[shape_idx]]
-            pair_edges += get_edge_count(GeoType.HFIELD, wp.uint64(0), hfd)
+            pair_edges += get_edge_count(GeoType.HFIELD, wp.vec2i(-1, 0), hfd)
         else:
-            mesh_id = shape_source[shape_idx]
-            if mesh_id != wp.uint64(0):
-                pair_edges += wp.mesh_get(mesh_id).edges.shape[0] // 2
+            pair_edges += shape_edge_range[shape_idx][1]
     edge_counts[i] = wp.int32(pair_edges)
 
 
@@ -949,7 +955,7 @@ def compute_block_counts_from_weights(
 def compute_mesh_mesh_block_offsets_scan(
     shape_pairs_mesh_mesh: wp.array,
     shape_pairs_mesh_mesh_count: wp.array,
-    shape_source: wp.array,
+    shape_edge_range: wp.array,
     shape_heightfield_index: wp.array,
     heightfield_data: wp.array,
     target_blocks: int,
@@ -972,10 +978,10 @@ def compute_mesh_mesh_block_offsets_scan(
         inputs=[
             shape_pairs_mesh_mesh,
             shape_pairs_mesh_mesh_count,
-            shape_source,
+            shape_edge_range,
             shape_heightfield_index,
             heightfield_data,
-            block_counts,  # reuse as temp storage for tri counts
+            block_counts,  # reuse as temp storage for edge counts
         ],
         device=device,
     )
@@ -1022,6 +1028,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         shape_heightfield_index: wp.array(dtype=wp.int32),
         heightfield_data: wp.array(dtype=HeightfieldData),
         heightfield_elevations: wp.array(dtype=wp.float32),
+        mesh_edge_indices: wp.array(dtype=wp.vec2i),
+        shape_edge_range: wp.array(dtype=wp.vec2i),
         writer_data: Any,
         total_num_blocks: int,
     ):
@@ -1135,7 +1143,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     selected_edges[edge_capacity + 1] = 0
                 synchronize()
 
-                num_edges = get_edge_count(tri_type, mesh_id_tri, hfd_tri)
+                edge_range_tri = shape_edge_range[tri_shape]
+                num_edges = get_edge_count(tri_type, edge_range_tri, hfd_tri)
 
                 while selected_edges[edge_capacity + 1] < num_edges:
                     find_interesting_edges(
@@ -1143,6 +1152,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         mesh_scale_tri,
                         X_mesh_to_sdf,
                         mesh_id_tri,
+                        mesh_edge_indices,
+                        edge_range_tri,
                         texture_sdf,
                         mesh_id_sdf,
                         selected_edges,
@@ -1243,6 +1254,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         shape_heightfield_index: wp.array(dtype=wp.int32),
         heightfield_data: wp.array(dtype=HeightfieldData),
         heightfield_elevations: wp.array(dtype=wp.float32),
+        mesh_edge_indices: wp.array(dtype=wp.vec2i),
+        shape_edge_range: wp.array(dtype=wp.vec2i),
         block_offsets: wp.array(dtype=wp.int32),
         reducer_data: GlobalContactReducerData,
         total_num_blocks: int,
@@ -1373,7 +1386,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     dtype=wp.vec3,
                 )
 
-                num_edges = get_edge_count(tri_type, mesh_id_tri, hfd_tri)
+                edge_range_tri = shape_edge_range[tri_shape]
+                num_edges = get_edge_count(tri_type, edge_range_tri, hfd_tri)
                 chunk_size = (num_edges + blocks_for_pair - 1) // blocks_for_pair
                 edge_start = block_in_pair * chunk_size
                 edge_end = wp.min(edge_start + chunk_size, num_edges)
@@ -1389,6 +1403,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         mesh_scale_tri,
                         X_mesh_to_sdf,
                         mesh_id_tri,
+                        mesh_edge_indices,
+                        edge_range_tri,
                         texture_sdf,
                         mesh_id_sdf,
                         selected_edges,
