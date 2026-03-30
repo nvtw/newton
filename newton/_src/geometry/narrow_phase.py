@@ -994,6 +994,7 @@ def compute_mesh_plane_block_offsets_scan(
     block_counts: wp.array,
     weight_prefix_sums: wp.array,
     device: str | None = None,
+    record_tape: bool = True,
 ):
     """Compute mesh-plane block offsets using parallel kernels and array_scan."""
     n = block_counts.shape[0]
@@ -1008,6 +1009,7 @@ def compute_mesh_plane_block_offsets_scan(
             block_counts,  # reuse as temp storage for vert counts
         ],
         device=device,
+        record_tape=record_tape,
     )
     # Step 2: inclusive scan to get total
     wp.utils.array_scan(block_counts, weight_prefix_sums, inclusive=True)
@@ -1024,6 +1026,7 @@ def compute_mesh_plane_block_offsets_scan(
             block_offsets,  # reuse as temp for block counts
         ],
         device=device,
+        record_tape=record_tape,
     )
     # Step 4: exclusive scan of block counts → block_offsets
     wp.utils.array_scan(block_offsets, block_offsets, inclusive=False)
