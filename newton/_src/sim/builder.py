@@ -75,6 +75,28 @@ else:
     UsdStage = Any
 
 
+def _extract_mesh_edges(mesh) -> list[tuple[int, int]]:
+    """Extract unique edges from a mesh with geometric vertex deduplication.
+
+    Returns a sorted list of ``(v0, v1)`` index pairs referencing ``mesh.vertices``.
+    """
+    verts = mesh.vertices
+    indices_np = mesh.indices
+    rounded = np.round(verts, decimals=7)
+    _, canonical = np.unique(rounded, axis=0, return_inverse=True)
+    edge_set: set[tuple[int, int]] = set()
+    edge_repr: dict[tuple[int, int], tuple[int, int]] = {}
+    for j in range(0, len(indices_np), 3):
+        tri = indices_np[j : j + 3]
+        for a, b in ((0, 1), (1, 2), (0, 2)):
+            ci, cj = int(canonical[tri[a]]), int(canonical[tri[b]])
+            key = (min(ci, cj), max(ci, cj))
+            if key not in edge_set:
+                edge_set.add(key)
+                edge_repr[key] = (int(tri[a]), int(tri[b]))
+    return sorted(edge_repr[k] for k in sorted(edge_set))
+
+
 class ModelBuilder:
     """A helper class for building simulation models at runtime.
 
@@ -9879,6 +9901,43 @@ class ModelBuilder:
                 wp.array(np.concatenate(elevation_chunks), dtype=wp.float32, device=device)
                 if elevation_chunks
                 else wp.zeros(1, dtype=wp.float32, device=device)
+            )
+
+            # ---------------------
+            # mesh edges (packed array + per-shape slice)
+
+            shape_edge_ranges = []
+            all_edges = []
+            edge_offset = 0
+            edge_cache = {}  # mesh python id → (start, count)
+
+            for i in range(len(self.shape_type)):
+                if self.shape_type[i] == GeoType.MESH and self.shape_source[i] is not None:
+                    mesh = self.shape_source[i]
+                    mesh_key = id(mesh)
+                    if mesh_key in edge_cache:
+                        shape_edge_ranges.append(edge_cache[mesh_key])
+                    else:
+                        edges = _extract_mesh_edges(mesh)
+                        start = edge_offset
+                        count = len(edges)
+                        all_edges.extend(edges)
+                        edge_offset += count
+                        entry = (start, count)
+                        edge_cache[mesh_key] = entry
+                        shape_edge_ranges.append(entry)
+                else:
+                    shape_edge_ranges.append((-1, 0))
+
+            m.shape_edge_range = wp.array(
+                shape_edge_ranges if shape_edge_ranges else [(-1, 0)],
+                dtype=wp.vec2i,
+                device=device,
+            )
+            m.mesh_edge_indices = (
+                wp.array(all_edges, dtype=wp.vec2i, device=device)
+                if all_edges
+                else wp.zeros(1, dtype=wp.vec2i, device=device)
             )
 
             # ---------------------

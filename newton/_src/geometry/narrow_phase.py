@@ -1568,6 +1568,8 @@ class NarrowPhase:
             )
 
             self.empty_tangent = None
+            self._empty_edge_indices = wp.zeros(1, dtype=wp.vec2i, device=device)
+            self._empty_edge_range = wp.full(max(max_candidate_pairs, 1), (-1, 0), dtype=wp.vec2i, device=device)
 
             if hydroelastic_sdf is not None:
                 self.shape_pairs_sdf_sdf = wp.zeros(hydroelastic_sdf.max_num_shape_pairs, dtype=wp.vec2i, device=device)
@@ -1644,6 +1646,8 @@ class NarrowPhase:
         shape_heightfield_index: wp.array(dtype=wp.int32, ndim=1) | None = None,
         heightfield_data: wp.array(dtype=HeightfieldData, ndim=1) | None = None,
         heightfield_elevations: wp.array(dtype=wp.float32, ndim=1) | None = None,
+        mesh_edge_indices: wp.array(dtype=wp.vec2i, ndim=1) | None = None,
+        shape_edge_range: wp.array(dtype=wp.vec2i, ndim=1) | None = None,
         writer_data: Any,
         device: Devicelike | None = None,  # Device to launch on
     ) -> None:
@@ -1665,6 +1669,8 @@ class NarrowPhase:
             shape_collision_aabb_lower: Local-space AABB lower bounds for each shape (for voxel binning)
             shape_collision_aabb_upper: Local-space AABB upper bounds for each shape (for voxel binning)
             shape_voxel_resolution: Voxel grid resolution for each shape (for voxel binning)
+            mesh_edge_indices: Packed array of mesh edge vertex pairs for all shapes.
+            shape_edge_range: Per-shape (start, count) into mesh_edge_indices.
             writer_data: Custom struct instance for contact writing (type must match the custom writer function)
             device: Device to launch on
         """
@@ -1891,6 +1897,10 @@ class NarrowPhase:
             # as well as on-the-fly heightfield evaluation via heightfield_data.
             if texture_sdf_data is None:
                 texture_sdf_data = wp.zeros(0, dtype=TextureSDFData, device=device)
+            if mesh_edge_indices is None:
+                mesh_edge_indices = self._empty_edge_indices
+            if shape_edge_range is None:
+                shape_edge_range = self._empty_edge_range
 
             if wp.get_device(device).is_cuda and self.mesh_mesh_contacts_kernel is not None:
                 if self.reduce_contacts and self.mesh_mesh_block_offsets is not None:
@@ -1898,7 +1908,7 @@ class NarrowPhase:
                     compute_mesh_mesh_block_offsets_scan(
                         shape_pairs_mesh_mesh=self.shape_pairs_mesh_mesh,
                         shape_pairs_mesh_mesh_count=self.shape_pairs_mesh_mesh_count,
-                        shape_source=shape_source,
+                        shape_edge_range=shape_edge_range,
                         shape_heightfield_index=shape_heightfield_index,
                         heightfield_data=heightfield_data,
                         target_blocks=self.mesh_mesh_target_blocks,
@@ -1926,6 +1936,8 @@ class NarrowPhase:
                             shape_heightfield_index,
                             heightfield_data,
                             heightfield_elevations,
+                            mesh_edge_indices,
+                            shape_edge_range,
                             self.mesh_mesh_block_offsets,
                             reducer_data,
                             self.num_mesh_mesh_blocks,
@@ -1953,6 +1965,8 @@ class NarrowPhase:
                             shape_heightfield_index,
                             heightfield_data,
                             heightfield_elevations,
+                            mesh_edge_indices,
+                            shape_edge_range,
                             writer_data,
                             self.num_tile_blocks,
                         ],
@@ -2086,6 +2100,8 @@ class NarrowPhase:
         # shape_local_aabb_lower/upper.
         shape_local_aabb_lower = kwargs.pop("shape_local_aabb_lower", None)
         shape_local_aabb_upper = kwargs.pop("shape_local_aabb_upper", None)
+        mesh_edge_indices = kwargs.pop("mesh_edge_indices", None)
+        shape_edge_range = kwargs.pop("shape_edge_range", None)
         if kwargs:
             unknown_keys = sorted(kwargs.keys())
             if len(unknown_keys) == 1:
@@ -2141,6 +2157,8 @@ class NarrowPhase:
             shape_collision_aabb_lower=shape_collision_aabb_lower,
             shape_collision_aabb_upper=shape_collision_aabb_upper,
             shape_voxel_resolution=shape_voxel_resolution,
+            mesh_edge_indices=mesh_edge_indices,
+            shape_edge_range=shape_edge_range,
             writer_data=writer_data,
             device=device,
         )
