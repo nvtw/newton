@@ -16,13 +16,16 @@ from newton._src.geometry.utils import compute_shape_radius
 class TestMeshShapeAABB(unittest.TestCase):
     """Verify that broadphase AABBs for mesh shapes are tight (not bounding-sphere)."""
 
-    def _build_model_with_mesh_at(self, mesh, body_pos, body_quat=None):
+    def _build_model_with_mesh_at(self, mesh, body_pos, body_quat=None, scale=None):
         """Helper: build a model with a single mesh shape on a free body."""
         if body_quat is None:
             body_quat = wp.quat_identity()
         builder = newton.ModelBuilder()
         body = builder.add_body(xform=wp.transform(body_pos, body_quat))
-        builder.add_shape_mesh(body=body, mesh=mesh)
+        kwargs = {}
+        if scale is not None:
+            kwargs["scale"] = scale
+        builder.add_shape_mesh(body=body, mesh=mesh, **kwargs)
         builder.add_ground_plane()
         model = builder.finalize()
         return model
@@ -114,6 +117,24 @@ class TestMeshShapeAABB(unittest.TestCase):
         np.testing.assert_allclose(hi[0] - lo[0], 2 * hy + 2 * margin, atol=0.02)
         np.testing.assert_allclose(hi[1] - lo[1], 2 * hx + 2 * margin, atol=0.02)
         np.testing.assert_allclose(hi[2] - lo[2], 2 * hz + 2 * margin, atol=0.02)
+
+    def test_nonuniform_scale_mesh_aabb(self):
+        """Non-uniform scale should be baked into the local AABB by the builder."""
+        hx, hy, hz = 1.0, 1.0, 1.0
+        mesh = Mesh.create_box(hx, hy, hz, compute_inertia=True)
+        sx, sy, sz = 2.0, 0.5, 3.0
+        pos = wp.vec3(0.0, 0.0, 5.0)
+        model = self._build_model_with_mesh_at(mesh, pos, scale=(sx, sy, sz))
+        lo, hi = self._get_shape_aabb(model)
+
+        margin = model.shape_margin.numpy()[0] + model.shape_gap.numpy()[0]
+
+        np.testing.assert_allclose(lo[0], pos[0] - hx * sx - margin, atol=1e-4)
+        np.testing.assert_allclose(hi[0], pos[0] + hx * sx + margin, atol=1e-4)
+        np.testing.assert_allclose(lo[1], pos[1] - hy * sy - margin, atol=1e-4)
+        np.testing.assert_allclose(hi[1], pos[1] + hy * sy + margin, atol=1e-4)
+        np.testing.assert_allclose(lo[2], pos[2] - hz * sz - margin, atol=1e-4)
+        np.testing.assert_allclose(hi[2], pos[2] + hz * sz + margin, atol=1e-4)
 
 
 class TestHeightfieldBoundingSphere(unittest.TestCase):
