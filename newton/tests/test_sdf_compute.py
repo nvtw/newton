@@ -228,7 +228,6 @@ def sample_sdf_at_points(volume, points_np: np.ndarray) -> np.ndarray:
         dim=n_points,
         inputs=[volume.id, points, values],
     )
-    wp.synchronize()
 
     return values.numpy()
 
@@ -245,7 +244,6 @@ def sample_sdf_with_gradient(volume, points_np: np.ndarray) -> tuple[np.ndarray,
         dim=n_points,
         inputs=[volume.id, points, values, gradients],
     )
-    wp.synchronize()
 
     return values.numpy(), gradients.numpy()
 
@@ -802,7 +800,6 @@ def sample_extrapolated_at_points(sdf_data: SDFData, points_np: np.ndarray) -> n
         dim=n_points,
         inputs=[sdf_data, points, values],
     )
-    wp.synchronize()
 
     return values.numpy()
 
@@ -819,7 +816,6 @@ def sample_extrapolated_with_gradient(sdf_data: SDFData, points_np: np.ndarray) 
         dim=n_points,
         inputs=[sdf_data, points, values, gradients],
     )
-    wp.synchronize()
 
     return values.numpy(), gradients.numpy()
 
