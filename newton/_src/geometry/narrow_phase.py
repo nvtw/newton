@@ -2100,6 +2100,8 @@ class NarrowPhase:
         # shape_local_aabb_lower/upper.
         shape_local_aabb_lower = kwargs.pop("shape_local_aabb_lower", None)
         shape_local_aabb_upper = kwargs.pop("shape_local_aabb_upper", None)
+        mesh_edge_indices = kwargs.pop("mesh_edge_indices", None)
+        shape_edge_range = kwargs.pop("shape_edge_range", None)
         if kwargs:
             unknown_keys = sorted(kwargs.keys())
             if len(unknown_keys) == 1:
@@ -2155,6 +2157,8 @@ class NarrowPhase:
             shape_collision_aabb_lower=shape_collision_aabb_lower,
             shape_collision_aabb_upper=shape_collision_aabb_upper,
             shape_voxel_resolution=shape_voxel_resolution,
+            mesh_edge_indices=mesh_edge_indices,
+            shape_edge_range=shape_edge_range,
             writer_data=writer_data,
             device=device,
         )
