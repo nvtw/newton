@@ -283,12 +283,11 @@ def convert_newton_contacts_to_mjwarp_kernel(
     #  2. Kinematic bodies (BodyFlags.KINEMATIC) — Newton sets armature=1e10
     #     on their DOFs, giving near-zero invweight even though MuJoCo still
     #     sees DOFs (body_weldid != 0).
-    #  3. Fixed-root bodies welded to the world body — MuJoCo merges them
-    #     into weld group 0, so they share body_weldid with the ground plane
-    #     and have zero invweight.
+    #  3. Fixed-root bodies welded to the world body (body_weldid == 0) —
+    #     MuJoCo merges them into weld group 0, giving zero invweight.
     #
-    # We check Newton body_flags for cases 1-2, and MuJoCo body_weldid for
-    # case 3.  A contact is skipped when both sides are immovable.
+    # Each body is classified independently; a contact is skipped when both
+    # sides are immovable.
 
     geom_a = newton_shape_to_mjc_geom[shape_a]
     geom_b = newton_shape_to_mjc_geom[shape_b]
@@ -296,16 +295,11 @@ def convert_newton_contacts_to_mjwarp_kernel(
     body_a = shape_body[shape_a]
     body_b = shape_body[shape_b]
 
-    a_immovable = body_a < 0 or (body_flags[body_a] & 2) != 0  # BodyFlags.KINEMATIC = 1 << 1
-    b_immovable = body_b < 0 or (body_flags[body_b] & 2) != 0
+    mj_body_a = geom_bodyid[geom_a]
+    mj_body_b = geom_bodyid[geom_b]
 
-    if not (a_immovable and b_immovable):
-        # Also check MuJoCo weld groups for fixed-root bodies
-        mj_body_a = geom_bodyid[geom_a]
-        mj_body_b = geom_bodyid[geom_b]
-        if body_weldid[mj_body_a] == body_weldid[mj_body_b]:
-            a_immovable = True
-            b_immovable = True
+    a_immovable = body_a < 0 or (body_flags[body_a] & BodyFlags.KINEMATIC) != 0 or body_weldid[mj_body_a] == 0
+    b_immovable = body_b < 0 or (body_flags[body_b] & BodyFlags.KINEMATIC) != 0 or body_weldid[mj_body_b] == 0
 
     if a_immovable and b_immovable:
         return
