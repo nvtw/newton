@@ -317,19 +317,32 @@ class TestHeightfield(unittest.TestCase):
         expected_radius = np.sqrt(4.0**2 + 3.0**2 + ((2.0 - 0.0) / 2) ** 2)
         self.assertAlmostEqual(radius, expected_radius, places=5)
 
-    def test_heightfield_finalize(self):
-        """Test heightfield finalization to Warp array."""
+    def test_heightfield_create_elevation_array(self):
+        """Test create_elevation_array returns a wp.array with correct shape."""
         nrow, ncol = 5, 5
         elevation_data = np.random.default_rng(42).random((nrow, ncol)).astype(np.float32)
 
         hfield = Heightfield(data=elevation_data, nrow=nrow, ncol=ncol, hx=2.0, hy=2.0)
 
-        ptr = hfield.finalize()
+        arr = hfield.create_elevation_array()
+        self.assertIsInstance(arr, wp.array)
+        self.assertEqual(len(arr.shape), 1)
+        self.assertEqual(arr.shape[0], nrow * ncol)
+        self.assertIsNotNone(hfield.warp_array)
+        self.assertIs(arr, hfield.warp_array)
+
+    def test_heightfield_finalize_deprecated(self):
+        """Test that finalize() still works but emits a DeprecationWarning."""
+        nrow, ncol = 5, 5
+        elevation_data = np.random.default_rng(42).random((nrow, ncol)).astype(np.float32)
+
+        hfield = Heightfield(data=elevation_data, nrow=nrow, ncol=ncol, hx=2.0, hy=2.0)
+
+        with self.assertWarns(DeprecationWarning):
+            ptr = hfield.finalize()
         self.assertIsInstance(ptr, int)
         self.assertGreater(ptr, 0)
         self.assertIsNotNone(hfield.warp_array)
-
-        # Finalized array should be 1D (flattened)
         self.assertEqual(len(hfield.warp_array.shape), 1)
         self.assertEqual(hfield.warp_array.shape[0], nrow * ncol)
 

@@ -9450,7 +9450,11 @@ class ModelBuilder:
             for geo in self.shape_source:
                 geo_hash = hash(geo)  # avoid repeated hash computations
                 if geo:
-                    if geo_hash not in finalized_geos:
+                    if isinstance(geo, Heightfield):
+                        # Heightfields use table indirection (shape_heightfield_index /
+                        # heightfield_data / heightfield_elevations), not shape_source_ptr.
+                        geo_sources.append(0)
+                    elif geo_hash not in finalized_geos:
                         if isinstance(geo, Mesh):
                             finalized_geos[geo_hash] = geo.finalize(device=device)
                         elif isinstance(geo, Gaussian):
@@ -9458,7 +9462,9 @@ class ModelBuilder:
                             gaussians.append(geo.finalize(device=device))
                         else:
                             finalized_geos[geo_hash] = geo.finalize()
-                    geo_sources.append(finalized_geos[geo_hash])
+                        geo_sources.append(finalized_geos[geo_hash])
+                    else:
+                        geo_sources.append(finalized_geos[geo_hash])
                 else:
                     # add null pointer
                     geo_sources.append(0)

@@ -42,8 +42,11 @@
 - Replace verbose Apache 2.0 boilerplate with two-line SPDX-only license headers across all source and documentation files
 - Add `custom_attributes` argument to `ModelBuilder.add_shape_convex_hull()`
 - Improve wrench preservation in hydroelastic contacts with contact reduction.
+- Stop storing heightfield buffer pointers in `Model.shape_source_ptr`; heightfield collision data is accessed exclusively via `Model.shape_heightfield_index` / `Model.heightfield_data` / `Model.heightfield_elevations`
 
 ### Deprecated
+
+- Deprecate `Heightfield.finalize()` in favor of `Heightfield.create_elevation_array()` which returns a `wp.array` instead of a raw pointer
 
 - Deprecate `SensorContact.net_force` in favor of `SensorContact.total_force` and `SensorContact.force_matrix`
 - Deprecate `SensorContact(include_total=...)` in favor of `SensorContact(measure_total=...)`

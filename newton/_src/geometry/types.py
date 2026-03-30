@@ -1548,20 +1548,48 @@ class Heightfield:
         self.max_z = d_max
         self._cached_hash = None
 
-    def finalize(self, device: Devicelike = None, requires_grad: bool = False) -> wp.uint64:
+    def create_elevation_array(self, device: Devicelike = None, requires_grad: bool = False) -> wp.array:
+        """Allocate a flat Warp array of the normalized [0, 1] elevation data.
+
+        This is the preferred way to obtain a device-side copy of the
+        heightfield elevations.  ``ModelBuilder.finalize`` does **not** call
+        this method; it builds its own compact elevation buffer instead.
+
+        Args:
+            device: Device on which to allocate the array.
+            requires_grad: If True, the array is allocated with gradient tracking.
+
+        Returns:
+            1-D ``wp.array(dtype=wp.float32)`` of length ``nrow * ncol``.
         """
-        Construct a simulation-ready Warp array from the heightfield data and return its ID.
+        with wp.ScopedDevice(device):
+            self.warp_array = wp.array(self._data.flatten(), requires_grad=requires_grad, dtype=wp.float32)
+            return self.warp_array
+
+    def finalize(self, device: Devicelike = None, requires_grad: bool = False) -> wp.uint64:
+        """Construct a simulation-ready Warp array and return its raw pointer.
+
+        .. deprecated::
+            Use :meth:`create_elevation_array` instead, which returns a
+            ``wp.array`` rather than a raw pointer.  ``ModelBuilder.finalize``
+            no longer calls this method; heightfield collision data is stored
+            via ``Model.shape_heightfield_index`` / ``Model.heightfield_data``
+            / ``Model.heightfield_elevations``.
 
         Args:
             device: Device on which to allocate heightfield buffers.
             requires_grad: If True, data is allocated with gradient tracking.
 
         Returns:
-            The ID (pointer) of the simulation-ready Warp array.
+            The raw pointer of the allocated Warp array.
         """
-        with wp.ScopedDevice(device):
-            self.warp_array = wp.array(self._data.flatten(), requires_grad=requires_grad, dtype=wp.float32)
-            return self.warp_array.ptr
+        warnings.warn(
+            "Heightfield.finalize() is deprecated. Use Heightfield.create_elevation_array() "
+            "which returns a wp.array instead of a raw pointer.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.create_elevation_array(device=device, requires_grad=requires_grad).ptr
 
     @override
     def __hash__(self) -> int:
