@@ -9624,8 +9624,17 @@ class ModelBuilder:
                         aabb_upper = np.array([r, r, half_height])
                         nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
+                    elif shape_type == GeoType.HFIELD and shape_src is not None:
+                        hx = shape_src.hx * shape_scale[0]
+                        hy = shape_src.hy * shape_scale[1]
+                        z_lo = shape_src.min_z * shape_scale[2]
+                        z_hi = shape_src.max_z * shape_scale[2]
+                        aabb_lower = np.array([-hx, -hy, z_lo])
+                        aabb_upper = np.array([hx, hy, z_hi])
+                        nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
+
                     else:
-                        # Other shapes (PLANE, HFIELD, etc.): use default unit cube with 1x1x1 voxel grid
+                        # Other shapes (PLANE, etc.): use default unit cube with 1x1x1 voxel grid
                         aabb_lower = np.array([-1.0, -1.0, -1.0])
                         aabb_upper = np.array([1.0, 1.0, 1.0])
                         nx, ny, nz = 1, 1, 1
