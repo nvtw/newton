@@ -1479,15 +1479,18 @@ class TestExtractIsomesh(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertGreater(result.vertices.shape[0], 0)
 
-        # Vertices should sit at ~margin_val from the base box surface,
-        # NOT at 2*margin_val (which would happen without the correction).
+        # Vertices should sit at ~margin_val (0.04) from the base box surface.
+        # Without the shape_margin correction the surface would be at
+        # 2*margin_val = 0.08, giving errors of ~0.04.  A tolerance of 0.025
+        # catches that regression while allowing marching-cubes discretization.
         errors = np.array([abs(self._box_sdf(v, hx, hy, hz) - margin_val) for v in result.vertices])
         max_err = float(errors.max())
         self.assertLess(
             max_err,
-            0.04,
+            0.025,
             f"Sparse fallback with shape_margin: max vertex error {max_err:.4f} "
-            f"exceeds tolerance (shape_margin={margin_val})",
+            f"exceeds tolerance 0.025 (shape_margin={margin_val}). "
+            f"Mean error: {float(errors.mean()):.4f}",
         )
 
 
@@ -1581,26 +1584,33 @@ class TestComputeOffsetMeshAdditionalPrimitives(unittest.TestCase):
         """A 1 mm sphere should still produce a valid offset mesh with adaptive resolution."""
         r = 0.001
         off = 0.0005
+        expected_radius = r + off  # 0.0015
         mesh = compute_offset_mesh(GeoType.SPHERE, shape_scale=(r, r, r), offset=off, device=self.device)
         self.assertIsNotNone(mesh, "Tiny sphere offset mesh should not be None with adaptive resolution")
         self.assertGreater(mesh.vertices.shape[0], 0)
         dists = np.linalg.norm(mesh.vertices, axis=1)
-        np.testing.assert_allclose(dists, r + off, atol=0.001)
+        # Tolerance is 15% of expected radius — tight enough to catch a
+        # coarse-grid failure while allowing for marching-cubes discretization.
+        np.testing.assert_allclose(dists, expected_radius, atol=expected_radius * 0.15)
 
     def test_convex_mesh_offset_mesh(self):
-        """compute_offset_mesh with CONVEX_MESH should produce a valid mesh."""
-        box_mesh = create_box_mesh((0.3, 0.3, 0.3))
+        """compute_offset_mesh with CONVEX_MESH produces a geometrically correct offset surface."""
+        hx, hy, hz = 0.3, 0.3, 0.3
+        box_mesh = create_box_mesh((hx, hy, hz))
         off = 0.1
         mesh = compute_offset_mesh(GeoType.CONVEX_MESH, shape_geo=box_mesh, offset=off, device=self.device)
         self.assertIsNotNone(mesh)
         self.assertGreater(mesh.vertices.shape[0], 0)
-        extent = np.max(np.abs(mesh.vertices), axis=0)
-        for i in range(3):
-            self.assertGreater(
-                extent[i],
-                0.3 + off * 0.5,
-                f"Convex mesh offset extent along axis {i} ({extent[i]:.3f}) too small",
-            )
+        max_err = 0.0
+        for v in mesh.vertices:
+            q = np.abs(v) - np.array([hx, hy, hz])
+            box_dist = float(np.linalg.norm(np.maximum(q, 0.0)) + min(max(q[0], q[1], q[2]), 0.0))
+            max_err = max(max_err, abs(box_dist - off))
+        self.assertLess(
+            max_err,
+            off * 0.15 + 0.02,
+            f"CONVEX_MESH offset mesh: max vertex distance error {max_err:.4f} for offset {off}",
+        )
 
     def test_compute_isomesh_empty_volume(self):
         """compute_isomesh with isovalue far from any surface returns None."""
