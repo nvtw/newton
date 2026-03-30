@@ -75,6 +75,28 @@ else:
     UsdStage = Any
 
 
+def _extract_mesh_edges(mesh) -> list[tuple[int, int]]:
+    """Extract unique edges from a mesh with geometric vertex deduplication.
+
+    Returns a sorted list of ``(v0, v1)`` index pairs referencing ``mesh.vertices``.
+    """
+    verts = mesh.vertices
+    indices_np = mesh.indices
+    rounded = np.round(verts, decimals=7)
+    _, canonical = np.unique(rounded, axis=0, return_inverse=True)
+    edge_set: set[tuple[int, int]] = set()
+    edge_repr: dict[tuple[int, int], tuple[int, int]] = {}
+    for j in range(0, len(indices_np), 3):
+        tri = indices_np[j : j + 3]
+        for a, b in ((0, 1), (1, 2), (0, 2)):
+            ci, cj = int(canonical[tri[a]]), int(canonical[tri[b]])
+            key = (min(ci, cj), max(ci, cj))
+            if key not in edge_set:
+                edge_set.add(key)
+                edge_repr[key] = (int(tri[a]), int(tri[b]))
+    return sorted(edge_repr[k] for k in sorted(edge_set))
+
+
 class ModelBuilder:
     """A helper class for building simulation models at runtime.
 
@@ -9896,21 +9918,7 @@ class ModelBuilder:
                     if mesh_key in edge_cache:
                         shape_edge_ranges.append(edge_cache[mesh_key])
                     else:
-                        verts = mesh.vertices
-                        indices_np = mesh.indices
-                        rounded = np.round(verts, decimals=7)
-                        _, canonical = np.unique(rounded, axis=0, return_inverse=True)
-                        edge_set = set()
-                        edge_repr = {}
-                        for j in range(0, len(indices_np), 3):
-                            tri = indices_np[j : j + 3]
-                            for a, b in ((0, 1), (1, 2), (0, 2)):
-                                ci, cj = int(canonical[tri[a]]), int(canonical[tri[b]])
-                                key = (min(ci, cj), max(ci, cj))
-                                if key not in edge_set:
-                                    edge_set.add(key)
-                                    edge_repr[key] = (int(tri[a]), int(tri[b]))
-                        edges = sorted(edge_repr[k] for k in sorted(edge_set))
+                        edges = _extract_mesh_edges(mesh)
                         start = edge_offset
                         count = len(edges)
                         all_edges.extend(edges)

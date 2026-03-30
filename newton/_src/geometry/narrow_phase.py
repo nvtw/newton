@@ -1568,6 +1568,8 @@ class NarrowPhase:
             )
 
             self.empty_tangent = None
+            self._empty_edge_indices = wp.zeros(1, dtype=wp.vec2i, device=device)
+            self._empty_edge_range = wp.full(max(max_candidate_pairs, 1), (-1, 0), dtype=wp.vec2i, device=device)
 
             if hydroelastic_sdf is not None:
                 self.shape_pairs_sdf_sdf = wp.zeros(hydroelastic_sdf.max_num_shape_pairs, dtype=wp.vec2i, device=device)
@@ -1895,6 +1897,10 @@ class NarrowPhase:
             # as well as on-the-fly heightfield evaluation via heightfield_data.
             if texture_sdf_data is None:
                 texture_sdf_data = wp.zeros(0, dtype=TextureSDFData, device=device)
+            if mesh_edge_indices is None:
+                mesh_edge_indices = self._empty_edge_indices
+            if shape_edge_range is None:
+                shape_edge_range = self._empty_edge_range
 
             if wp.get_device(device).is_cuda and self.mesh_mesh_contacts_kernel is not None:
                 if self.reduce_contacts and self.mesh_mesh_block_offsets is not None:
