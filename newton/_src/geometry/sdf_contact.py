@@ -647,7 +647,9 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
         x = float(0.5)
         w = float(0.5)
         v_brent = float(0.5)
-        fx = _sample_sdf_at_t(texture_sdf, sdf_mesh_id, v0, v1, 0.5, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf, elevation_data)
+        fx = _sample_sdf_at_t(
+            texture_sdf, sdf_mesh_id, v0, v1, 0.5, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf, elevation_data
+        )
         fw = fx
         fv = fx
         d_step = float(0.0)
@@ -703,7 +705,9 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
                 else:
                     u = x - tol
 
-            fu = _sample_sdf_at_t(texture_sdf, sdf_mesh_id, v0, v1, u, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf, elevation_data)
+            fu = _sample_sdf_at_t(
+                texture_sdf, sdf_mesh_id, v0, v1, u, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf, elevation_data
+            )
 
             # Update bracket
             if fu <= fx:
@@ -732,8 +736,12 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
                     fv = fu
 
         # Also check endpoints and pick overall best
-        f0 = _sample_sdf_at_t(texture_sdf, sdf_mesh_id, v0, v1, 0.0, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf, elevation_data)
-        f1 = _sample_sdf_at_t(texture_sdf, sdf_mesh_id, v0, v1, 1.0, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf, elevation_data)
+        f0 = _sample_sdf_at_t(
+            texture_sdf, sdf_mesh_id, v0, v1, 0.0, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf, elevation_data
+        )
+        f1 = _sample_sdf_at_t(
+            texture_sdf, sdf_mesh_id, v0, v1, 1.0, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf, elevation_data
+        )
         best_t = x
         best_f = fx
         if f0 < best_f:
