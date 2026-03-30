@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,8 @@ from ..core.types import MAXVAL, Axis, Devicelike
 from .kernels import sdf_box, sdf_capsule, sdf_cone, sdf_cylinder, sdf_ellipsoid, sdf_sphere
 from .sdf_mc import get_mc_tables, int_to_vec3f, mc_calc_face, vec8f
 from .types import GeoType, Mesh
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .sdf_texture import TextureSDFData
@@ -171,6 +174,7 @@ class SDF:
         block_coords: np.ndarray | Sequence[wp.vec3us] | None = None,
         texture_block_coords: Sequence[wp.vec3us] | None = None,
         texture_data: "TextureSDFData | None" = None,
+        shape_margin: float = 0.0,
         _coarse_texture: wp.Texture3D | None = None,
         _subgrid_texture: wp.Texture3D | None = None,
         _internal: bool = False,
@@ -185,6 +189,7 @@ class SDF:
         self.block_coords = block_coords
         self.texture_block_coords = texture_block_coords
         self.texture_data = texture_data
+        self.shape_margin = shape_margin
         # Keep texture references alive to prevent GC
         self._coarse_texture = _coarse_texture
         self._subgrid_texture = _subgrid_texture
@@ -238,7 +243,12 @@ class SDF:
                     return result
 
         if self.sparse_volume is not None:
-            return compute_isomesh(self.sparse_volume, isovalue=isovalue, device=device)
+            # The sparse volume has shape_margin already baked in (subtracted
+            # from every SDF value), so its zero-isosurface sits at
+            # shape_margin from the base geometry.  Compensate so callers get
+            # the surface at the requested isovalue from the base geometry.
+            corrected_isovalue = isovalue - self.shape_margin if self.shape_margin else isovalue
+            return compute_isomesh(self.sparse_volume, isovalue=corrected_isovalue, device=device)
 
         return None
 
@@ -404,6 +414,7 @@ class SDF:
             block_coords=block_coords,
             texture_block_coords=tex_block_coords,
             texture_data=texture_data,
+            shape_margin=shape_margin,
             _coarse_texture=coarse_texture,
             _subgrid_texture=subgrid_texture,
             _internal=True,
@@ -421,6 +432,7 @@ class SDF:
         half_extents: Sequence[float] | None = None,
         background_value: float = MAXVAL,
         scale_baked: bool = False,
+        shape_margin: float = 0.0,
         texture_data: "TextureSDFData | None" = None,
     ) -> "SDF":
         """Create an SDF from precomputed runtime resources."""
@@ -445,6 +457,7 @@ class SDF:
             sparse_volume=sparse_volume,
             coarse_volume=coarse_volume,
             block_coords=block_coords,
+            shape_margin=shape_margin,
             texture_data=texture_data,
             _internal=True,
         )
@@ -1086,12 +1099,21 @@ def compute_offset_mesh(
                 if result is not None:
                     return result
 
+    if shape_type not in (GeoType.MESH, GeoType.CONVEX_MESH):
+        raise ValueError(
+            f"compute_offset_mesh: unsupported shape type {shape_type} "
+            f"without an analytical SDF or a pre-built SDF on the geometry."
+        )
+
+    if shape_geo is None:
+        raise ValueError("shape_geo must be provided for mesh/convex-mesh offset meshing.")
+
     padding = max(abs(offset) * 0.5, 0.02)
     narrow_band = (-abs(offset) - padding, abs(offset) + padding)
     margin = max(padding, 0.05)
 
     _sdf_data, sparse_volume, _coarse_volume, _block_coords = _compute_sdf_from_shape_impl(
-        shape_type=shape_type,
+        shape_type=GeoType.MESH,
         shape_geo=shape_geo,
         shape_scale=shape_scale,
         shape_margin=offset,
@@ -1401,8 +1423,18 @@ def compute_offset_mesh_analytical(
         max_ext = np.array(max_ext_list, dtype=np.float64) + total_expansion
         ext = max_ext - min_ext
 
+        # Adaptively increase resolution when the expansion dominates the
+        # shape extents (e.g. a 1 mm sphere with 0.05 m expansion).  This
+        # ensures at least ~4 voxels span the smallest shape dimension.
+        shape_ext = np.array(max_ext_list, dtype=np.float64) - np.array(min_ext_list, dtype=np.float64)
+        min_shape_dim = float(np.min(shape_ext))
+        if min_shape_dim > 0.0:
+            effective_resolution = max(max_resolution, int(np.ceil(float(np.max(ext)) / min_shape_dim * 4)))
+        else:
+            effective_resolution = max_resolution
+
         max_extent = float(np.max(ext))
-        voxel_target = max_extent / max_resolution
+        voxel_target = max_extent / effective_resolution
         grid_dims = np.maximum(np.round(ext / voxel_target).astype(int), 2)
         actual_voxel_size = ext / (grid_dims - 1)
 
@@ -1438,6 +1470,17 @@ def compute_offset_mesh_analytical(
 
         num_faces = int(face_count.numpy()[0])
         if num_faces == 0:
+            logger.warning(
+                "compute_offset_mesh_analytical: marching cubes produced no faces for shape type %d "
+                "with scale %s and offset %.4g (grid %dx%dx%d). "
+                "The shape may be too small for the grid resolution.",
+                shape_type,
+                shape_scale,
+                offset,
+                nx,
+                ny,
+                nz,
+            )
             return None
 
         verts = wp.empty((3 * num_faces,), dtype=wp.vec3, device=device)
