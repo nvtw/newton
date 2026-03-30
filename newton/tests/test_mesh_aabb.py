@@ -89,12 +89,14 @@ class TestMeshShapeAABB(unittest.TestCase):
 
         table_hi = pipeline.narrow_phase.shape_aabb_upper.numpy()[0]
         margin = model.shape_margin.numpy()[0] + model.shape_gap.numpy()[0]
-        self.assertLess(table_hi[2], table_half[2] * 2 + margin + 0.01,
-                        "Table AABB upper-z should be close to 0.1, not inflated by bounding sphere")
+        self.assertLess(
+            table_hi[2],
+            table_half[2] * 2 + margin + 0.01,
+            "Table AABB upper-z should be close to 0.1, not inflated by bounding sphere",
+        )
 
         gripper_lo = pipeline.narrow_phase.shape_aabb_lower.numpy()[1]
-        self.assertGreater(gripper_lo[2], table_hi[2],
-                           "Gripper and table AABBs should not overlap in z")
+        self.assertGreater(gripper_lo[2], table_hi[2], "Gripper and table AABBs should not overlap in z")
 
     def test_rotated_mesh_aabb(self):
         """A rotated mesh AABB should still tightly bound the geometry."""
@@ -139,16 +141,18 @@ class TestHeightfieldBoundingSphere(unittest.TestCase):
         hf = Heightfield(data=data, nrow=nrow, ncol=ncol, hx=3.0, hy=4.0, min_z=-8.0, max_z=2.0)
         radius = compute_shape_radius(GeoType.HFIELD, (1.0, 1.0, 1.0), hf)
 
-        corners = np.array([
-            [-3.0, -4.0, -8.0],
-            [3.0, -4.0, -8.0],
-            [-3.0, 4.0, -8.0],
-            [3.0, 4.0, -8.0],
-            [-3.0, -4.0, 2.0],
-            [3.0, -4.0, 2.0],
-            [-3.0, 4.0, 2.0],
-            [3.0, 4.0, 2.0],
-        ])
+        corners = np.array(
+            [
+                [-3.0, -4.0, -8.0],
+                [3.0, -4.0, -8.0],
+                [-3.0, 4.0, -8.0],
+                [3.0, 4.0, -8.0],
+                [-3.0, -4.0, 2.0],
+                [3.0, -4.0, 2.0],
+                [-3.0, 4.0, 2.0],
+                [3.0, 4.0, 2.0],
+            ]
+        )
         dists = np.linalg.norm(corners, axis=1)
         self.assertGreaterEqual(radius, np.max(dists) - 1e-6)
 

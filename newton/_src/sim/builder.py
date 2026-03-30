@@ -9558,24 +9558,18 @@ class ModelBuilder:
                     if shape_type == GeoType.MESH and shape_src is not None:
                         # Compute local AABB from mesh vertices
                         vertices = shape_src.vertices
-                        aabb_lower = vertices.min(axis=0)
-                        aabb_upper = vertices.max(axis=0)
-
-                        # Apply scale to get the actual local-space bounds
-                        aabb_lower = aabb_lower * np.array(shape_scale)
-                        aabb_upper = aabb_upper * np.array(shape_scale)
+                        lo = vertices.min(axis=0) * np.array(shape_scale)
+                        hi = vertices.max(axis=0) * np.array(shape_scale)
+                        aabb_lower = np.minimum(lo, hi)
+                        aabb_upper = np.maximum(lo, hi)
 
                         nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
                     elif shape_type == GeoType.CONVEX_MESH and shape_src is not None:
-                        # Compute local AABB from convex mesh vertices (similar to MESH)
-                        vertices = shape_src.vertices
-                        aabb_lower = vertices.min(axis=0)
-                        aabb_upper = vertices.max(axis=0)
-
-                        # Apply scale to get the actual local-space bounds
-                        aabb_lower = aabb_lower * np.array(shape_scale)
-                        aabb_upper = aabb_upper * np.array(shape_scale)
+                        lo = shape_src.vertices.min(axis=0) * np.array(shape_scale)
+                        hi = shape_src.vertices.max(axis=0) * np.array(shape_scale)
+                        aabb_lower = np.minimum(lo, hi)
+                        aabb_upper = np.maximum(lo, hi)
 
                         nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
@@ -9625,12 +9619,12 @@ class ModelBuilder:
                         nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
                     elif shape_type == GeoType.HFIELD and shape_src is not None:
-                        hx = shape_src.hx * shape_scale[0]
-                        hy = shape_src.hy * shape_scale[1]
+                        hx = abs(shape_src.hx * shape_scale[0])
+                        hy = abs(shape_src.hy * shape_scale[1])
                         z_lo = shape_src.min_z * shape_scale[2]
                         z_hi = shape_src.max_z * shape_scale[2]
-                        aabb_lower = np.array([-hx, -hy, z_lo])
-                        aabb_upper = np.array([hx, hy, z_hi])
+                        aabb_lower = np.array([-hx, -hy, min(z_lo, z_hi)])
+                        aabb_upper = np.array([hx, hy, max(z_lo, z_hi)])
                         nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
                     else:

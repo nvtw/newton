@@ -192,19 +192,14 @@ def compute_shape_aabbs(
         aabb_lower[shape_id] = pos - half_extents - margin_vec
         aabb_upper[shape_id] = pos + half_extents + margin_vec
     elif is_mesh or is_hfield:
-        # Tight local AABB transformed to world space
+        # Tight local AABB transformed to world space.
+        # Scale is already baked into shape_collision_aabb by the builder,
+        # so we only need to handle the rotation here.
         local_lo = shape_collision_aabb_lower[shape_id]
         local_hi = shape_collision_aabb_upper[shape_id]
 
-        # Apply scale (handle negative scale by re-sorting per component)
-        s = scale
-        slo = wp.cw_mul(local_lo, s)
-        shi = wp.cw_mul(local_hi, s)
-        scaled_lo = wp.min(slo, shi)
-        scaled_hi = wp.max(slo, shi)
-
-        center = (scaled_lo + scaled_hi) * 0.5
-        half = (scaled_hi - scaled_lo) * 0.5
+        center = (local_lo + local_hi) * 0.5
+        half = (local_hi - local_lo) * 0.5
 
         # Rotate center to world frame
         world_center = wp.quat_rotate(orientation, center) + pos
