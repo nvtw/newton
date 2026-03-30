@@ -1552,14 +1552,20 @@ class USDImporter:
         is_mesh_shape = False
         if geom_type == self.UsdPhysics.ObjectType.CapsuleShape:
             # TODO: axis = geom_spec.axis, how can we use this?
-            shape = CapsuleShape(radius=geom_spec.radius, half_height=geom_spec.halfHeight)
+            shape = CapsuleShape(
+                radius=distance_unit * geom_spec.radius,
+                half_height=distance_unit * geom_spec.halfHeight,
+            )
 
         elif geom_type == self.UsdPhysics.ObjectType.Capsule1Shape:
             raise NotImplementedError("Capsule1Shape is not yet supported.")
 
         elif geom_type == self.UsdPhysics.ObjectType.ConeShape:
             # TODO: axis = geom_spec.axis, how can we use this?
-            shape = ConeShape(radius=geom_spec.radius, half_height=geom_spec.halfHeight)
+            shape = ConeShape(
+                radius=distance_unit * geom_spec.radius,
+                half_height=distance_unit * geom_spec.halfHeight,
+            )
 
         elif geom_type == self.UsdPhysics.ObjectType.CubeShape:
             he = distance_unit * vec3f(geom_spec.halfExtents)
@@ -1567,7 +1573,10 @@ class USDImporter:
 
         elif geom_type == self.UsdPhysics.ObjectType.CylinderShape:
             # TODO: axis = geom_spec.axis, how can we use this?
-            shape = CylinderShape(radius=geom_spec.radius, half_height=geom_spec.halfHeight)
+            shape = CylinderShape(
+                radius=distance_unit * geom_spec.radius,
+                half_height=distance_unit * geom_spec.halfHeight,
+            )
 
         elif geom_type == self.UsdPhysics.ObjectType.Cylinder1Shape:
             raise NotImplementedError("Cylinder1Shape is not yet supported.")

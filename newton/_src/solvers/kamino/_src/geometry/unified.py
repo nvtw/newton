@@ -103,8 +103,10 @@ def convert_geom_params_to_newton_scale(geo_type: int32, params: vec4f) -> vec3f
     Convert geometry params to Newton shape scale.
 
     Since Kamino now stores Newton's :class:`GeoType` and parameter convention
-    directly, this is mostly a passthrough.  The only special case is
-    :attr:`GeoType.PLANE`, where params hold the plane normal (not a scale).
+    directly, this is mostly a passthrough.  Special cases are
+    :attr:`GeoType.PLANE` (params hold the plane normal, not a scale) and
+    :attr:`GeoType.MESH` / :attr:`GeoType.HFIELD` (scale is unused).
+    :attr:`GeoType.CONVEX_MESH` retains its per-mesh scale from params.
 
     Args:
         geo_type: The Newton :class:`GeoType` integer value.
@@ -117,7 +119,7 @@ def convert_geom_params_to_newton_scale(geo_type: int32, params: vec4f) -> vec3f
 
     if geo_type == GeoType.PLANE:
         scale = vec3f(0.0, 0.0, 0.0)
-    elif geo_type == GeoType.MESH or geo_type == GeoType.CONVEX_MESH or geo_type == GeoType.HFIELD:
+    elif geo_type == GeoType.MESH or geo_type == GeoType.HFIELD:
         scale = vec3f(0.0, 0.0, 0.0)
 
     return scale

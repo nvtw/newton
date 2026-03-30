@@ -1615,6 +1615,18 @@ def make_shape_initial_position(name: str, dims: tuple, is_top: bool = True) -> 
     if shape_type is None:
         raise ValueError(f"Unsupported shape name: {name}")
 
+    expected_len = {
+        GeoType.SPHERE: 1,
+        GeoType.CYLINDER: 2,
+        GeoType.CONE: 2,
+        GeoType.CAPSULE: 2,
+        GeoType.BOX: 3,
+        GeoType.ELLIPSOID: 3,
+        GeoType.PLANE: 4,
+    }.get(shape_type)
+    if expected_len is not None and len(dims) != expected_len:
+        raise ValueError(f"Invalid dimensions for shape '{name}': expected {expected_len} values, got {len(dims)}")
+
     # Compute the initial position along z-axis that places the shape just above.
     # Dimensions use Newton convention (half-extents, half-heights).
     if shape_type == GeoType.SPHERE:

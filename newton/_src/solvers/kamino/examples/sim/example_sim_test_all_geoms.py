@@ -55,6 +55,7 @@ class Example:
             GeoType.MESH,  # NOTE: Currently not supported any pipeline
             GeoType.CONVEX_MESH,  # NOTE: Currently not supported any pipeline
             GeoType.HFIELD,  # NOTE: Currently not supported any pipeline
+            GeoType.GAUSSIAN,  # NOTE: Render-only, no collision shape pairs
         ]
 
         # Generate a list of all supported shape-pair combinations for the configured pipeline

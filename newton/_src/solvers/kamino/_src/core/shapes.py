@@ -75,17 +75,17 @@ def is_explicit_geo_type(geo_type: GeoType) -> bool:
 class ShapeDescriptor(ABC, Descriptor):
     """Abstract base class for all shape descriptors."""
 
-    def __init__(self, type: GeoType, name: str = "", uid: str | None = None):
+    def __init__(self, geo_type: GeoType, name: str = "", uid: str | None = None):
         """
         Initialize the shape descriptor.
 
         Args:
-            type: The geometry type from Newton's :class:`GeoType`.
+            geo_type: The geometry type from Newton's :class:`GeoType`.
             name: The name of the shape descriptor.
             uid: Optional unique identifier of the shape descriptor.
         """
         super().__init__(name, uid)
-        self._type: GeoType = type
+        self._type: GeoType = geo_type
 
     @override
     def __hash__(self) -> int:
