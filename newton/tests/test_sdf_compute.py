@@ -21,6 +21,7 @@ import warp as wp
 import newton
 from newton import GeoType, Mesh
 from newton._src.geometry.sdf_utils import (
+    SDF,
     SDFData,
     compute_isomesh,
     compute_offset_mesh,
@@ -1460,6 +1461,35 @@ class TestExtractIsomesh(unittest.TestCase):
                 f"{extent_large[i]:.4f} vs {extent_small[i]:.4f}",
             )
 
+    def test_extract_isomesh_sparse_fallback_with_shape_margin(self):
+        """Sparse-volume fallback in extract_isomesh compensates for baked shape_margin."""
+        hx, hy, hz = 0.3, 0.3, 0.3
+        margin_val = 0.04
+        mesh = create_box_mesh((hx, hy, hz))
+        sdf = SDF.create_from_mesh(mesh, shape_margin=margin_val, max_resolution=64)
+        self.assertIsNotNone(sdf)
+        self.assertEqual(sdf.shape_margin, margin_val)
+
+        # Force sparse-volume fallback by clearing texture data
+        sdf.texture_data = None
+        sdf._coarse_texture = None
+        sdf._subgrid_texture = None
+
+        result = sdf.extract_isomesh(isovalue=margin_val)
+        self.assertIsNotNone(result)
+        self.assertGreater(result.vertices.shape[0], 0)
+
+        # Vertices should sit at ~margin_val from the base box surface,
+        # NOT at 2*margin_val (which would happen without the correction).
+        errors = np.array([abs(self._box_sdf(v, hx, hy, hz) - margin_val) for v in result.vertices])
+        max_err = float(errors.max())
+        self.assertLess(
+            max_err,
+            0.04,
+            f"Sparse fallback with shape_margin: max vertex error {max_err:.4f} "
+            f"exceeds tolerance (shape_margin={margin_val})",
+        )
+
 
 @unittest.skipUnless(_cuda_available, "wp.Volume requires CUDA device")
 class TestComputeOffsetMeshAdditionalPrimitives(unittest.TestCase):
@@ -1546,6 +1576,31 @@ class TestComputeOffsetMeshAdditionalPrimitives(unittest.TestCase):
         """compute_offset_mesh_analytical returns None for non-analytical types."""
         result = compute_offset_mesh_analytical(GeoType.MESH, shape_scale=(1, 1, 1), offset=0.1, device=self.device)
         self.assertIsNone(result)
+
+    def test_tiny_sphere_offset_mesh(self):
+        """A 1 mm sphere should still produce a valid offset mesh with adaptive resolution."""
+        r = 0.001
+        off = 0.0005
+        mesh = compute_offset_mesh(GeoType.SPHERE, shape_scale=(r, r, r), offset=off, device=self.device)
+        self.assertIsNotNone(mesh, "Tiny sphere offset mesh should not be None with adaptive resolution")
+        self.assertGreater(mesh.vertices.shape[0], 0)
+        dists = np.linalg.norm(mesh.vertices, axis=1)
+        np.testing.assert_allclose(dists, r + off, atol=0.001)
+
+    def test_convex_mesh_offset_mesh(self):
+        """compute_offset_mesh with CONVEX_MESH should produce a valid mesh."""
+        box_mesh = create_box_mesh((0.3, 0.3, 0.3))
+        off = 0.1
+        mesh = compute_offset_mesh(GeoType.CONVEX_MESH, shape_geo=box_mesh, offset=off, device=self.device)
+        self.assertIsNotNone(mesh)
+        self.assertGreater(mesh.vertices.shape[0], 0)
+        extent = np.max(np.abs(mesh.vertices), axis=0)
+        for i in range(3):
+            self.assertGreater(
+                extent[i],
+                0.3 + off * 0.5,
+                f"Convex mesh offset extent along axis {i} ({extent[i]:.3f}) too small",
+            )
 
     def test_compute_isomesh_empty_volume(self):
         """compute_isomesh with isovalue far from any surface returns None."""
