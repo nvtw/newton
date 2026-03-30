@@ -34,11 +34,7 @@ from .viewer_rerun import ViewerRerun
 from .viewer_usd import ViewerUSD
 from .viewer_viser import ViewerViser
 
-SDFMarginMode = ViewerBase.SDFMarginMode
-"""Backward-compatible alias; prefer :class:`ViewerBase.SDFMarginMode`."""
-
 __all__ = [
-    "SDFMarginMode",
     "ViewerBase",
     "ViewerFile",
     "ViewerGL",

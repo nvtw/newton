@@ -12,11 +12,7 @@ from ._src.viewer import (
     ViewerViser,
 )
 
-# Export SDFMarginMode for backward compatibility
-SDFMarginMode = ViewerBase.SDFMarginMode
-
 __all__ = [
-    "SDFMarginMode",
     "ViewerBase",
     "ViewerFile",
     "ViewerGL",
