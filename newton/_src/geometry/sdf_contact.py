@@ -12,9 +12,13 @@ from ..utils.heightfield import HeightfieldData, sample_sdf_grad_heightfield, sa
 
 # Handle both direct execution and module import
 from .contact_reduction import (
+    create_shared_memory_pointer_block_dim_mul_func,
     get_shared_memory_pointer_block_dim_plus_2_ints,
     synchronize,
 )
+
+# Shared memory for caching midpoint SDF values from culling (1 float per edge slot).
+_get_shared_memory_sdf_cache = create_shared_memory_pointer_block_dim_mul_func(1)
 from .contact_reduction_global import GlobalContactReducerData, export_and_reduce_contact_centered
 
 
@@ -299,6 +303,8 @@ def add_to_shared_buffer_atomic(
     add_edge: bool,
     edge_idx: int,
     buffer: wp.array(dtype=wp.int32),
+    sdf_cache: wp.array(dtype=float),
+    sdf_value: float,
 ):
     """Add an edge index to a shared memory buffer using atomic operations.
 
@@ -312,6 +318,8 @@ def add_to_shared_buffer_atomic(
         add_edge: Whether this thread wants to add an edge
         edge_idx: The edge index to add (only used if add_edge is True)
         buffer: Shared memory buffer for edge indices
+        sdf_cache: Shared memory for cached midpoint SDF values
+        sdf_value: SDF value at the edge midpoint (from culling)
     """
     capacity = wp.block_dim()
     idx = -1
@@ -320,6 +328,7 @@ def add_to_shared_buffer_atomic(
         idx = wp.atomic_add(buffer, capacity, 1)
         if idx < capacity:
             buffer[idx] = edge_idx
+            sdf_cache[idx] = sdf_value
 
     if thread_id == 0:
         buffer[capacity + 1] += capacity
@@ -603,6 +612,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
         sdf_mesh_id: wp.uint64,
         v0: wp.vec3,
         v1: wp.vec3,
+        midpoint_sdf: float,
         use_bvh_for_sdf: bool,
         sdf_is_heightfield: bool,
         hfd_sdf: HeightfieldData,
@@ -610,30 +620,28 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
     ) -> tuple[float, wp.vec3]:
         """Find the deepest point on an edge relative to an SDF volume.
 
-        Uses Brent's method (6 iterations) to minimize the SDF value along the
+        Uses Brent's method (5 iterations) to minimize the SDF value along the
         edge parameterized as ``p(t) = v0 + t * edge_dir`` for t in [0, 1].
-        Brent's method combines inverse parabolic interpolation with golden
-        section fallback for robust convergence.
+        The initial midpoint SDF value is provided by the caller (cached from
+        culling) to avoid a redundant evaluation.
 
         After the interior search, evaluates the more promising endpoint
         (the one closer to the unconverged bracket boundary) so that vertex
         contacts at edge corners are not missed.
 
         Returns:
-            Tuple of (distance, contact_point, contact_direction).
+            Tuple of (distance, contact_point).
         """
         golden = 0.3819660112501051  # (3 - sqrt(5)) / 2
         edge_dir = v1 - v0
 
-        # Initialize Brent's method at the midpoint
+        # Initialize Brent's method at the midpoint (SDF value from culling)
         a = float(0.0)
         b = float(1.0)
         x = float(0.5)
         w = float(0.5)
         v_brent = float(0.5)
-        fx = _sample_sdf_at_t(
-            texture_sdf, sdf_mesh_id, v0, edge_dir, 0.5, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf, elevation_data
-        )
+        fx = midpoint_sdf
         fw = fx
         fv = fx
         d_step = float(0.0)
@@ -759,12 +767,15 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
         hfd_edge: HeightfieldData,
         hfd_sdf: HeightfieldData,
         elevation_data: wp.array(dtype=wp.float32),
+        sdf_cache: wp.array(dtype=float),
     ):
         """Midphase edge culling for mesh-SDF collision.
 
         Determines which edges are close enough to the SDF to potentially
         generate contacts.  Accepted edge indices are written to the shared
-        ``buffer``; the consumer re-fetches vertices from global memory
+        ``buffer``; the midpoint SDF value is cached in ``sdf_cache`` so
+        that Brent's method can skip its initial evaluation. The consumer
+        re-fetches vertices from global memory
         (relying on L2 cache locality from this culling pass).
 
         Buffer layout: [0..block_dim-1] = edge indices, [block_dim] = count,
@@ -786,8 +797,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
             base_edge_idx = buffer[capacity + 1]
             edge_idx = base_edge_idx + thread_id
             add_edge = False
-            v0 = wp.vec3(0.0, 0.0, 0.0)
-            v1 = wp.vec3(0.0, 0.0, 0.0)
+            midpoint_sdf = float(0.0)
 
             if edge_idx < edge_end:
                 if wp.static(enable_heightfields):
@@ -810,11 +820,11 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
                 threshold = bounding_sphere_radius + contact_distance
 
                 if sdf_is_heightfield:
-                    sdf_dist = sample_sdf_heightfield(hfd_sdf, elevation_data, bounding_sphere_center)
-                    add_edge = sdf_dist <= threshold
+                    midpoint_sdf = sample_sdf_heightfield(hfd_sdf, elevation_data, bounding_sphere_center)
+                    add_edge = midpoint_sdf <= threshold
                 elif use_bvh_for_sdf:
-                    sdf_dist = sample_sdf_using_mesh(sdf_mesh_id, bounding_sphere_center, 1.01 * threshold)
-                    add_edge = sdf_dist <= threshold
+                    midpoint_sdf = sample_sdf_using_mesh(sdf_mesh_id, bounding_sphere_center, 1.01 * threshold)
+                    add_edge = midpoint_sdf <= threshold
                 else:
                     culling_radius = threshold
                     clamped = wp.min(wp.max(bounding_sphere_center, sdf_aabb_lower), sdf_aabb_upper)
@@ -822,8 +832,8 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
                     if aabb_dist_sq > culling_radius * culling_radius:
                         add_edge = False
                     else:
-                        sdf_dist = texture_sample_sdf(texture_sdf, bounding_sphere_center)
-                        add_edge = sdf_dist <= culling_radius
+                        midpoint_sdf = texture_sample_sdf(texture_sdf, bounding_sphere_center)
+                        add_edge = midpoint_sdf <= culling_radius
 
             synchronize()  # Ensure all threads have read base_edge_idx before any writes
             add_to_shared_buffer_atomic(
@@ -831,6 +841,8 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
                 add_edge,
                 edge_idx,
                 buffer,
+                sdf_cache,
+                midpoint_sdf,
             )
             # add_to_shared_buffer_atomic ends with sync, buffer is consistent for next while check
 
@@ -1095,6 +1107,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     shape=(wp.block_dim() + 2,),
                     dtype=wp.int32,
                 )
+                sdf_cache = wp.array(
+                    ptr=_get_shared_memory_sdf_cache(),
+                    shape=(wp.block_dim(),),
+                    dtype=float,
+                )
                 if t == 0:
                     selected_edges[edge_capacity] = 0
                     selected_edges[edge_capacity + 1] = 0
@@ -1123,14 +1140,15 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         hfd_tri,
                         hfd_sdf,
                         heightfield_elevations,
+                        sdf_cache,
                     )
 
                     has_edge = t < selected_edges[edge_capacity]
                     synchronize()
 
                     if has_edge:
-                        # Re-fetch vertices from global memory (L2-cached from culling)
                         edge_idx = selected_edges[t]
+                        cached_sdf = sdf_cache[t]
                         if wp.static(enable_heightfields):
                             if tri_type == GeoType.HFIELD:
                                 v0s, v1s = get_edge_from_heightfield(
@@ -1154,18 +1172,43 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             mesh_id_sdf,
                             v0,
                             v1,
+                            cached_sdf,
                             use_bvh_for_sdf,
                             sdf_is_hfield,
                             hfd_sdf,
                             heightfield_elevations,
                         )
 
-                        dist, direction = scale_sdf_result_to_world(
-                            dist_unscaled, direction_unscaled, sdf_scale, inv_sdf_scale, min_sdf_scale
-                        )
-                        point = wp.cw_mul(point_unscaled, sdf_scale)
+                        # Quick threshold check before computing the gradient
+                        dist_approx = dist_unscaled * min_sdf_scale
+                        if dist_approx < contact_threshold:
+                            if wp.static(enable_heightfields):
+                                if sdf_is_hfield:
+                                    dist_unscaled, direction_unscaled = sample_sdf_grad_heightfield(
+                                        hfd_sdf, heightfield_elevations, point_unscaled
+                                    )
+                                elif use_bvh_for_sdf:
+                                    dist_unscaled, direction_unscaled = sample_sdf_grad_using_mesh(
+                                        mesh_id_sdf, point_unscaled
+                                    )
+                                else:
+                                    dist_unscaled, direction_unscaled = texture_sample_sdf_grad(
+                                        texture_sdf, point_unscaled
+                                    )
+                            else:
+                                if use_bvh_for_sdf:
+                                    dist_unscaled, direction_unscaled = sample_sdf_grad_using_mesh(
+                                        mesh_id_sdf, point_unscaled
+                                    )
+                                else:
+                                    dist_unscaled, direction_unscaled = texture_sample_sdf_grad(
+                                        texture_sdf, point_unscaled
+                                    )
 
-                        if dist < contact_threshold:
+                            dist, direction = scale_sdf_result_to_world(
+                                dist_unscaled, direction_unscaled, sdf_scale, inv_sdf_scale, min_sdf_scale
+                            )
+                            point = wp.cw_mul(point_unscaled, sdf_scale)
                             point_world = wp.transform_point(X_sdf_ws, point)
 
                             direction_world = wp.transform_vector(X_sdf_ws, direction)
@@ -1353,6 +1396,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     shape=(wp.block_dim() + 2,),
                     dtype=wp.int32,
                 )
+                sdf_cache = wp.array(
+                    ptr=_get_shared_memory_sdf_cache(),
+                    shape=(wp.block_dim(),),
+                    dtype=float,
+                )
                 edge_range_tri = shape_edge_range[tri_shape]
                 num_edges = get_edge_count(tri_type, edge_range_tri, hfd_tri)
                 chunk_size = (num_edges + blocks_for_pair - 1) // blocks_for_pair
@@ -1384,6 +1432,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         hfd_tri,
                         hfd_sdf,
                         heightfield_elevations,
+                        sdf_cache,
                     )
 
                     has_edge = t < selected_edges[edge_capacity]
@@ -1391,6 +1440,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                     if has_edge:
                         edge_idx = selected_edges[t]
+                        cached_sdf = sdf_cache[t]
                         if wp.static(enable_heightfields):
                             if tri_type == GeoType.HFIELD:
                                 v0s, v1s = get_edge_from_heightfield(
@@ -1414,6 +1464,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             mesh_id_sdf,
                             v0,
                             v1,
+                            cached_sdf,
                             use_bvh_for_sdf,
                             sdf_is_hfield,
                             hfd_sdf,
