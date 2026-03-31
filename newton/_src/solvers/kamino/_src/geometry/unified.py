@@ -291,10 +291,10 @@ def _convert_geom_data_kamino_to_newton(
     """
     Converts Kamino geometry data to Newton-compatible format.
 
-    Converts geometry params to Newton scale and computes the per-shape
-    stores the per-geometry surface margin offset in ``geom_data.w``, applies
-    a default floor to the per-geometry detection gap, and computes the
-    bounding-sphere radius used for AABB fallback (planes, meshes, heightfields).
+    Converts geometry params to Newton scale, stores the per-geometry surface
+    margin offset in ``geom_data.w``, applies a default floor to the
+    per-geometry detection gap, and computes the bounding-sphere radius used
+    for AABB fallback (planes, meshes, heightfields).
     """
     # Retrieve the geometry index from the thread grid
     gid = wp.tid()

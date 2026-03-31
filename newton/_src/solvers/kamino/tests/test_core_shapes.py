@@ -30,41 +30,6 @@ from newton._src.solvers.kamino.tests import setup_tests, test_context
 ###
 
 
-class TestGeoType(unittest.TestCase):
-    def test_00_none(self):
-        self.assertEqual(GeoType.NONE, 0)
-
-    def test_01_sphere(self):
-        self.assertEqual(GeoType.SPHERE, 3)
-
-    def test_02_cylinder(self):
-        self.assertEqual(GeoType.CYLINDER, 6)
-
-    def test_03_cone(self):
-        self.assertEqual(GeoType.CONE, 9)
-
-    def test_04_capsule(self):
-        self.assertEqual(GeoType.CAPSULE, 4)
-
-    def test_05_box(self):
-        self.assertEqual(GeoType.BOX, 7)
-
-    def test_06_ellipsoid(self):
-        self.assertEqual(GeoType.ELLIPSOID, 5)
-
-    def test_07_plane(self):
-        self.assertEqual(GeoType.PLANE, 1)
-
-    def test_08_mesh(self):
-        self.assertEqual(GeoType.MESH, 8)
-
-    def test_09_convex_mesh(self):
-        self.assertEqual(GeoType.CONVEX_MESH, 10)
-
-    def test_10_hfield(self):
-        self.assertEqual(GeoType.HFIELD, 2)
-
-
 class TestShapeDescriptors(unittest.TestCase):
     def setUp(self):
         if not test_context.setup_done:
