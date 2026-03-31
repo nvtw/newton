@@ -27,7 +27,6 @@ import newton
 from newton._src.geometry.flags import ShapeFlags
 from newton._src.geometry.narrow_phase import NarrowPhase
 from newton._src.geometry.types import GeoType
-from newton._src.sim.builder import _extract_mesh_edges
 
 
 def check_normal_direction(pos_a, pos_b, normal, tolerance=1e-5):
@@ -1459,7 +1458,7 @@ class TestNarrowPhase(unittest.TestCase):
             contact_count = wp.zeros(1, dtype=int)
 
             # Build edge arrays for the mesh shapes
-            edges = _extract_mesh_edges(box_mesh)
+            edges = box_mesh.edges
             mesh_edge_indices = wp.array(edges, dtype=wp.vec2i, device=device)
             num_edges = len(edges)
             # Both shapes share the same mesh edges

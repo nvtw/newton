@@ -75,38 +75,6 @@ else:
     UsdStage = Any
 
 
-def _extract_mesh_edges(mesh) -> np.ndarray:
-    """Extract unique edges from a mesh with geometric vertex deduplication.
-
-    Returns an (N, 2) int32 array of vertex index pairs referencing ``mesh.vertices``.
-    """
-    indices_np = mesh.indices.reshape(-1, 3)
-    num_tris = len(indices_np)
-
-    # Build canonical vertex ids by rounding positions
-    rounded = np.round(mesh.vertices, decimals=7)
-    _, canonical = np.unique(rounded, axis=0, return_inverse=True)
-
-    # All 3 edges per triangle: (v0,v1), (v1,v2), (v0,v2)
-    orig_edges = np.empty((num_tris * 3, 2), dtype=np.int32)
-    orig_edges[0::3, 0] = indices_np[:, 0]
-    orig_edges[0::3, 1] = indices_np[:, 1]
-    orig_edges[1::3, 0] = indices_np[:, 1]
-    orig_edges[1::3, 1] = indices_np[:, 2]
-    orig_edges[2::3, 0] = indices_np[:, 0]
-    orig_edges[2::3, 1] = indices_np[:, 2]
-
-    # Canonical edges with consistent (min, max) ordering for dedup
-    c0 = canonical[orig_edges[:, 0]]
-    c1 = canonical[orig_edges[:, 1]]
-    canon_edges = np.column_stack((np.minimum(c0, c1), np.maximum(c0, c1)))
-
-    # Deduplicate: keep first occurrence of each canonical edge
-    _, first_idx = np.unique(canon_edges, axis=0, return_index=True)
-    first_idx.sort()  # preserve triangle-order locality
-    return orig_edges[first_idx]
-
-
 class ModelBuilder:
     """A helper class for building simulation models at runtime.
 
@@ -9924,7 +9892,7 @@ class ModelBuilder:
                     if mesh_key in edge_cache:
                         shape_edge_ranges.append(edge_cache[mesh_key])
                     else:
-                        edges = _extract_mesh_edges(mesh)
+                        edges = mesh.edges  # lazily computed and cached on the Mesh
                         start = edge_offset
                         count = len(edges)
                         edge_chunks.append(edges)
