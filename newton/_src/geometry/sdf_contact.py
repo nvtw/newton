@@ -740,9 +740,9 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
                     v_brent = u
                     fv = fu
 
-        # Check the more promising endpoint: pick the one closer to the
-        # bracket boundary that did NOT move inward (if the minimum is at
-        # a corner, Brent's bracket stays pinned to that side).
+        # Check the more promising endpoint: pick the one the best point
+        # is closer to — if the minimum is at an edge corner, Brent's
+        # bracket stays pinned to that side.
         best_t = x
         best_f = fx
         check_t = 0.0 if x < 0.5 else 1.0
@@ -752,7 +752,6 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
         )
         if f_end < best_f:
             best_t = check_t
-            best_f = f_end
 
         p = v0 + edge_dir * best_t
 
