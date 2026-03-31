@@ -169,37 +169,6 @@ def post_process_minkowski_only(
 
 
 @wp.func
-def post_process_mesh_triangle_contact(
-    contact_data: ContactData,
-    shape_a: GenericShapeData,
-    pos_a_adjusted: wp.vec3,
-    rot_a: wp.quat,
-    shape_b: GenericShapeData,
-    pos_b_adjusted: wp.vec3,
-    rot_b: wp.quat,
-) -> ContactData:
-    """Post-processor for mesh triangle contacts: standard processing plus back-face culling.
-
-    After Minkowski and axial adjustments, checks whether the contact normal
-    is consistent with the triangle face normal.  If the contact would push
-    shape B *into* the mesh (inverted normal), the contact is rejected by
-    setting its distance to a large positive value so the writer discards it.
-    """
-    contact_data = post_process_axial_on_discrete_contact(
-        contact_data, shape_a, pos_a_adjusted, rot_a, shape_b, pos_b_adjusted, rot_b
-    )
-
-    # Back-face culling: reject contacts whose normal points into the mesh.
-    # shape_a.scale = B-A, shape_a.auxiliary = C-A for TRIANGLE shapes.
-    if shape_a.shape_type == int(GeoTypeEx.TRIANGLE):
-        face_normal = wp.cross(shape_a.scale, shape_a.auxiliary)
-        if wp.dot(face_normal, contact_data.contact_normal_a_to_b) < 0.0:
-            contact_data.contact_distance = 1.0e6
-
-    return contact_data
-
-
-@wp.func
 def post_process_axial_on_discrete_contact(
     contact_data: ContactData,
     shape_a: GenericShapeData,
