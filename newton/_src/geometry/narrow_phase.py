@@ -18,6 +18,7 @@ from ..geometry.collision_core import (
     create_find_contacts,
     get_triangle_shape_from_mesh,
     mesh_vs_convex_midphase,
+    post_process_mesh_triangle_contact,
     post_process_minkowski_only,
 )
 from ..geometry.collision_primitive import (
@@ -49,7 +50,6 @@ from ..geometry.sdf_contact import (
 from ..geometry.sdf_hydroelastic import HydroelasticSDF
 from ..geometry.sdf_texture import TextureSDFData
 from ..geometry.support_function import (
-    GeoTypeEx,
     SupportMapDataProvider,
     extract_shape_data,
     support_map_lean,
@@ -939,14 +939,6 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
             else:
                 quat_a = wp.quat_identity()
 
-            # Back-face culling for flat triangles (meshes): skip when the
-            # convex center is behind the triangle face.  TRIANGLE_PRISM
-            # (heightfields) handles this via its extruded support function.
-            if shape_data_a.shape_type == int(GeoTypeEx.TRIANGLE):
-                face_normal = wp.cross(shape_data_a.scale, shape_data_a.auxiliary)
-                if wp.dot(face_normal, pos_b - pos_a) < 0.0:
-                    continue
-
             # Extract margin offset for shape A (signed distance padding)
             margin_offset_a = shape_data[shape_a][3]
 
@@ -955,8 +947,16 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
             gap_b = shape_gap[shape_b]
             gap_sum = gap_a + gap_b
 
-            # Compute and write contacts using GJK/MPR with standard post-processing
-            wp.static(create_compute_gjk_mpr_contacts(writer_func))(
+            # Compute contacts with post-GJK/MPR back-face culling.
+            # post_process_mesh_triangle_contact checks the resulting contact
+            # normal against the triangle face normal and rejects contacts
+            # that would push the shape into the mesh (inverted normals).
+            wp.static(
+                create_compute_gjk_mpr_contacts(
+                    writer_func,
+                    post_process_contact=post_process_mesh_triangle_contact,
+                )
+            )(
                 shape_data_a,
                 shape_data_b,
                 quat_a,

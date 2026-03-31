@@ -66,6 +66,7 @@ from ..utils.heightfield import HeightfieldData, get_triangle_shape_from_heightf
 from .collision_core import (
     create_compute_gjk_mpr_contacts,
     get_triangle_shape_from_mesh,
+    post_process_mesh_triangle_contact,
 )
 from .contact_data import ContactData
 from .contact_reduction import (
@@ -78,7 +79,7 @@ from .contact_reduction import (
     get_spatial_direction_2d,
     project_point_to_plane,
 )
-from .support_function import GeoTypeEx, extract_shape_data
+from .support_function import extract_shape_data
 from .types import GeoType
 
 # Fixed beta threshold for contact reduction - small positive value to avoid flickering
@@ -1284,14 +1285,6 @@ def mesh_triangle_contacts_to_reducer_kernel(
         else:
             quat_a = wp.quat_identity()
 
-        # Back-face culling for flat triangles (meshes): skip when the
-        # convex center is behind the triangle face.  TRIANGLE_PRISM
-        # (heightfields) handles this via its extruded support function.
-        if shape_data_a.shape_type == int(GeoTypeEx.TRIANGLE):
-            face_normal = wp.cross(shape_data_a.scale, shape_data_a.auxiliary)
-            if wp.dot(face_normal, pos_b - pos_a) < 0.0:
-                continue
-
         # Extract margin offset for shape A (signed distance padding)
         margin_offset_a = shape_data[shape_a][3]
 
@@ -1300,8 +1293,16 @@ def mesh_triangle_contacts_to_reducer_kernel(
         gap_b = shape_gap[shape_b]
         gap_sum = gap_a + gap_b
 
-        # Compute and write contacts using GJK/MPR
-        wp.static(create_compute_gjk_mpr_contacts(write_contact_to_reducer))(
+        # Compute contacts with post-GJK/MPR back-face culling.
+        # post_process_mesh_triangle_contact checks the resulting contact
+        # normal against the triangle face normal and rejects contacts
+        # that would push the shape into the mesh (inverted normals).
+        wp.static(
+            create_compute_gjk_mpr_contacts(
+                write_contact_to_reducer,
+                post_process_contact=post_process_mesh_triangle_contact,
+            )
+        )(
             shape_data_a,
             shape_data_b,
             quat_a,
