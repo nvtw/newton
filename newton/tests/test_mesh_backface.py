@@ -25,6 +25,8 @@ import warp as wp
 import newton
 from newton._src.geometry.types import GeoType
 
+_cuda_available = wp.is_cuda_available()
+
 
 def _make_flat_ground_mesh(size=5.0, z=0.0):
     """Create a flat ground mesh (two triangles) at height *z*.
@@ -197,6 +199,7 @@ def _step_sim(model, cp, solver, s0, s1, ctrl, dt=0.005, substeps=1):
 # ======================================================================
 
 
+@unittest.skipUnless(_cuda_available, "Mesh collision pipeline requires CUDA device")
 class TestMeshBackfaceCulling(unittest.TestCase):
     """Verify back-face contacts are culled for all convex types."""
 
@@ -399,6 +402,7 @@ class TestMeshBackfaceCulling(unittest.TestCase):
 # ======================================================================
 
 
+@unittest.skipUnless(_cuda_available, "Mesh collision pipeline requires CUDA device")
 class TestMeshBackfaceSimulation(unittest.TestCase):
     """Full simulation tests: shapes on mesh terrain should not produce NaN."""
 
@@ -548,6 +552,7 @@ def _build_heightfield_scene(shape_type, shape_pos, shape_scale=None, rough=Fals
     return model, cp, solver, s0, s1, ctrl
 
 
+@unittest.skipUnless(_cuda_available, "Collision pipeline requires CUDA device")
 class TestHeightfieldPrism(unittest.TestCase):
     """Test heightfield triangle prism extrusion prevents back-face trapping."""
 
@@ -678,6 +683,7 @@ def _build_heightfield_scene_xform(
     return model, cp, solver, s0, s1, ctrl
 
 
+@unittest.skipUnless(_cuda_available, "Collision pipeline requires CUDA device")
 class TestHeightfieldPrismSteepAndRotated(unittest.TestCase):
     """Tests with sharp inter-cell edges and rotated heightfields.
 
