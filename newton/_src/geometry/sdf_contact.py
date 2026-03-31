@@ -659,9 +659,9 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
         d_step = float(0.0)
         e_step = float(0.0)
 
-        for _iter in range(6):
+        for _iter in range(5):
             m = 0.5 * (a + b)
-            tol = 5.6e-3 * wp.abs(x) + 1.0e-10
+            tol = 1.0e-2 * wp.abs(x) + 1.0e-8
             tol2 = 2.0 * tol
 
             if wp.abs(x - m) <= tol2 - 0.5 * (b - a):
@@ -740,18 +740,20 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
                     v_brent = u
                     fv = fu
 
-        # Check the more promising endpoint: pick the one the best point
-        # is closer to — if the minimum is at an edge corner, Brent's
-        # bracket stays pinned to that side.
+        # Check the closer endpoint only when Brent converged near a
+        # boundary (x < 0.2 or x > 0.8).  When solidly interior the
+        # bracket has moved both boundaries inward, so the endpoint
+        # cannot beat the interior minimum.
         best_t = x
         best_f = fx
-        check_t = 0.0 if x < 0.5 else 1.0
-        f_end = _sample_sdf_at_t(
-            texture_sdf, sdf_mesh_id, v0, edge_dir, check_t, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf,
-            elevation_data,
-        )
-        if f_end < best_f:
-            best_t = check_t
+        if x < 0.2 or x > 0.8:
+            check_t = 0.0 if x < 0.5 else 1.0
+            f_end = _sample_sdf_at_t(
+                texture_sdf, sdf_mesh_id, v0, edge_dir, check_t, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf,
+                elevation_data,
+            )
+            if f_end < best_f:
+                best_t = check_t
 
         p = v0 + edge_dir * best_t
 
