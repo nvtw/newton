@@ -16,10 +16,10 @@ from .contact_reduction import (
     get_shared_memory_pointer_block_dim_plus_2_ints,
     synchronize,
 )
+from .contact_reduction_global import GlobalContactReducerData, export_and_reduce_contact_centered
 
 # Shared memory for caching midpoint SDF values from culling (1 float per edge slot).
 _get_shared_memory_sdf_cache = create_shared_memory_pointer_block_dim_mul_func(1)
-from .contact_reduction_global import GlobalContactReducerData, export_and_reduce_contact_centered
 
 
 @wp.func
@@ -698,7 +698,14 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
                     u = x - tol
 
             fu = _sample_sdf_at_t(
-                texture_sdf, sdf_mesh_id, v0, edge_dir, u, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf,
+                texture_sdf,
+                sdf_mesh_id,
+                v0,
+                edge_dir,
+                u,
+                use_bvh_for_sdf,
+                sdf_is_heightfield,
+                hfd_sdf,
                 elevation_data,
             )
 
@@ -737,7 +744,14 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
         if x < 0.2 or x > 0.8:
             check_t = 0.0 if x < 0.5 else 1.0
             f_end = _sample_sdf_at_t(
-                texture_sdf, sdf_mesh_id, v0, edge_dir, check_t, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf,
+                texture_sdf,
+                sdf_mesh_id,
+                v0,
+                edge_dir,
+                check_t,
+                use_bvh_for_sdf,
+                sdf_is_heightfield,
+                hfd_sdf,
                 elevation_data,
             )
             if f_end < best_f:
@@ -1156,13 +1170,21 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 )
                             else:
                                 v0s, v1s = get_edge_from_mesh(
-                                    mesh_id_tri, mesh_edge_indices, edge_range_tri,
-                                    mesh_scale_tri, X_mesh_to_sdf, edge_idx,
+                                    mesh_id_tri,
+                                    mesh_edge_indices,
+                                    edge_range_tri,
+                                    mesh_scale_tri,
+                                    X_mesh_to_sdf,
+                                    edge_idx,
                                 )
                         else:
                             v0s, v1s = get_edge_from_mesh(
-                                mesh_id_tri, mesh_edge_indices, edge_range_tri,
-                                mesh_scale_tri, X_mesh_to_sdf, edge_idx,
+                                mesh_id_tri,
+                                mesh_edge_indices,
+                                edge_range_tri,
+                                mesh_scale_tri,
+                                X_mesh_to_sdf,
+                                edge_idx,
                             )
                         v0 = wp.cw_mul(v0s, inv_sdf_scale)
                         v1 = wp.cw_mul(v1s, inv_sdf_scale)
@@ -1448,13 +1470,21 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 )
                             else:
                                 v0s, v1s = get_edge_from_mesh(
-                                    mesh_id_tri, mesh_edge_indices, edge_range_tri,
-                                    mesh_scale_tri, X_mesh_to_sdf, edge_idx,
+                                    mesh_id_tri,
+                                    mesh_edge_indices,
+                                    edge_range_tri,
+                                    mesh_scale_tri,
+                                    X_mesh_to_sdf,
+                                    edge_idx,
                                 )
                         else:
                             v0s, v1s = get_edge_from_mesh(
-                                mesh_id_tri, mesh_edge_indices, edge_range_tri,
-                                mesh_scale_tri, X_mesh_to_sdf, edge_idx,
+                                mesh_id_tri,
+                                mesh_edge_indices,
+                                edge_range_tri,
+                                mesh_scale_tri,
+                                X_mesh_to_sdf,
+                                edge_idx,
                             )
                         v0 = wp.cw_mul(v0s, inv_sdf_scale)
                         v1 = wp.cw_mul(v1s, inv_sdf_scale)

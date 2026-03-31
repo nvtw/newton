@@ -89,9 +89,12 @@ def _extract_mesh_edges(mesh) -> np.ndarray:
 
     # All 3 edges per triangle: (v0,v1), (v1,v2), (v0,v2)
     orig_edges = np.empty((num_tris * 3, 2), dtype=np.int32)
-    orig_edges[0::3, 0] = indices_np[:, 0]; orig_edges[0::3, 1] = indices_np[:, 1]
-    orig_edges[1::3, 0] = indices_np[:, 1]; orig_edges[1::3, 1] = indices_np[:, 2]
-    orig_edges[2::3, 0] = indices_np[:, 0]; orig_edges[2::3, 1] = indices_np[:, 2]
+    orig_edges[0::3, 0] = indices_np[:, 0]
+    orig_edges[0::3, 1] = indices_np[:, 1]
+    orig_edges[1::3, 0] = indices_np[:, 1]
+    orig_edges[1::3, 1] = indices_np[:, 2]
+    orig_edges[2::3, 0] = indices_np[:, 0]
+    orig_edges[2::3, 1] = indices_np[:, 2]
 
     # Canonical edges with consistent (min, max) ordering for dedup
     c0 = canonical[orig_edges[:, 0]]
