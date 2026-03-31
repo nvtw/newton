@@ -75,26 +75,33 @@ else:
     UsdStage = Any
 
 
-def _extract_mesh_edges(mesh) -> list[tuple[int, int]]:
+def _extract_mesh_edges(mesh) -> np.ndarray:
     """Extract unique edges from a mesh with geometric vertex deduplication.
 
-    Returns a sorted list of ``(v0, v1)`` index pairs referencing ``mesh.vertices``.
+    Returns an (N, 2) int32 array of vertex index pairs referencing ``mesh.vertices``.
     """
-    verts = mesh.vertices
-    indices_np = mesh.indices
-    rounded = np.round(verts, decimals=7)
+    indices_np = mesh.indices.reshape(-1, 3)
+    num_tris = len(indices_np)
+
+    # Build canonical vertex ids by rounding positions
+    rounded = np.round(mesh.vertices, decimals=7)
     _, canonical = np.unique(rounded, axis=0, return_inverse=True)
-    edge_set: set[tuple[int, int]] = set()
-    edge_repr: dict[tuple[int, int], tuple[int, int]] = {}
-    for j in range(0, len(indices_np), 3):
-        tri = indices_np[j : j + 3]
-        for a, b in ((0, 1), (1, 2), (0, 2)):
-            ci, cj = int(canonical[tri[a]]), int(canonical[tri[b]])
-            key = (min(ci, cj), max(ci, cj))
-            if key not in edge_set:
-                edge_set.add(key)
-                edge_repr[key] = (int(tri[a]), int(tri[b]))
-    return sorted(edge_repr[k] for k in sorted(edge_set))
+
+    # All 3 edges per triangle: (v0,v1), (v1,v2), (v0,v2)
+    orig_edges = np.empty((num_tris * 3, 2), dtype=np.int32)
+    orig_edges[0::3, 0] = indices_np[:, 0]; orig_edges[0::3, 1] = indices_np[:, 1]
+    orig_edges[1::3, 0] = indices_np[:, 1]; orig_edges[1::3, 1] = indices_np[:, 2]
+    orig_edges[2::3, 0] = indices_np[:, 0]; orig_edges[2::3, 1] = indices_np[:, 2]
+
+    # Canonical edges with consistent (min, max) ordering for dedup
+    c0 = canonical[orig_edges[:, 0]]
+    c1 = canonical[orig_edges[:, 1]]
+    canon_edges = np.column_stack((np.minimum(c0, c1), np.maximum(c0, c1)))
+
+    # Deduplicate: keep first occurrence of each canonical edge
+    _, first_idx = np.unique(canon_edges, axis=0, return_index=True)
+    first_idx.sort()  # preserve triangle-order locality
+    return orig_edges[first_idx]
 
 
 class ModelBuilder:
@@ -9903,7 +9910,7 @@ class ModelBuilder:
             # mesh edges (packed array + per-shape slice)
 
             shape_edge_ranges = []
-            all_edges = []
+            edge_chunks = []
             edge_offset = 0
             edge_cache = {}  # mesh python id → (start, count)
 
@@ -9917,7 +9924,7 @@ class ModelBuilder:
                         edges = _extract_mesh_edges(mesh)
                         start = edge_offset
                         count = len(edges)
-                        all_edges.extend(edges)
+                        edge_chunks.append(edges)
                         edge_offset += count
                         entry = (start, count)
                         edge_cache[mesh_key] = entry
@@ -9931,8 +9938,8 @@ class ModelBuilder:
                 device=device,
             )
             m.mesh_edge_indices = (
-                wp.array(all_edges, dtype=wp.vec2i, device=device)
-                if all_edges
+                wp.array(np.concatenate(edge_chunks), dtype=wp.vec2i, device=device)
+                if edge_chunks
                 else wp.zeros(1, dtype=wp.vec2i, device=device)
             )
 

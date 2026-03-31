@@ -630,7 +630,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
     ) -> tuple[float, wp.vec3, wp.vec3]:
         """Compute the deepest contact between an edge and an SDF volume.
 
-        Uses Brent's method (6 iterations) to minimize the SDF value along the
+        Uses Brent's method (5 iterations) to minimize the SDF value along the
         edge parameterized as ``p(t) = v0*(1-t) + v1*t`` for t in [0, 1].
         Brent's method combines inverse parabolic interpolation with golden
         section fallback for robust convergence.
@@ -655,7 +655,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
         d_step = float(0.0)
         e_step = float(0.0)
 
-        for _iter in range(6):
+        for _iter in range(5):
             m = 0.5 * (a + b)
             tol = 5.6e-3 * wp.abs(x) + 1.0e-10
             tol2 = 2.0 * tol
@@ -735,23 +735,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
                     v_brent = u
                     fv = fu
 
-        # Also check endpoints and pick overall best
-        f0 = _sample_sdf_at_t(
-            texture_sdf, sdf_mesh_id, v0, v1, 0.0, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf, elevation_data
-        )
-        f1 = _sample_sdf_at_t(
-            texture_sdf, sdf_mesh_id, v0, v1, 1.0, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf, elevation_data
-        )
-        best_t = x
-        best_f = fx
-        if f0 < best_f:
-            best_t = 0.0
-            best_f = f0
-        if f1 < best_f:
-            best_t = 1.0
-            best_f = f1
-
-        p = v0 * (1.0 - best_t) + v1 * best_t
+        p = v0 * (1.0 - x) + v1 * x
 
         # One gradient call at the final point for contact normal
         sdf_gradient = wp.vec3(0.0, 0.0, 0.0)
