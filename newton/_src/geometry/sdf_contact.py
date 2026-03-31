@@ -595,15 +595,15 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
         texture_sdf: TextureSDFData,
         sdf_mesh_id: wp.uint64,
         v0: wp.vec3,
-        v1: wp.vec3,
+        edge_dir: wp.vec3,
         tt: float,
         use_bvh_for_sdf: bool,
         sdf_is_heightfield: bool,
         hfd_sdf: HeightfieldData,
         elevation_data: wp.array(dtype=wp.float32),
     ) -> float:
-        """Sample SDF at the point ``v0*(1-tt) + v1*tt``."""
-        pp = v0 * (1.0 - tt) + v1 * tt
+        """Sample SDF at the point ``v0 + tt * edge_dir``."""
+        pp = v0 + edge_dir * tt
         if wp.static(enable_heightfields):
             if sdf_is_heightfield:
                 return sample_sdf_heightfield(hfd_sdf, elevation_data, pp)
@@ -630,32 +630,36 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
     ) -> tuple[float, wp.vec3, wp.vec3]:
         """Compute the deepest contact between an edge and an SDF volume.
 
-        Uses Brent's method (5 iterations) to minimize the SDF value along the
-        edge parameterized as ``p(t) = v0*(1-t) + v1*t`` for t in [0, 1].
+        Uses Brent's method (6 iterations) to minimize the SDF value along the
+        edge parameterized as ``p(t) = v0 + t * edge_dir`` for t in [0, 1].
         Brent's method combines inverse parabolic interpolation with golden
         section fallback for robust convergence.
+
+        After the interior search, evaluates the more promising endpoint
+        (the one closer to the unconverged bracket boundary) so that vertex
+        contacts at edge corners are not missed.
 
         Returns:
             Tuple of (distance, contact_point, contact_direction).
         """
-        # Golden ratio constant
         golden = 0.3819660112501051  # (3 - sqrt(5)) / 2
+        edge_dir = v1 - v0
 
-        # Initialize Brent's method
+        # Initialize Brent's method at the midpoint
         a = float(0.0)
         b = float(1.0)
         x = float(0.5)
         w = float(0.5)
         v_brent = float(0.5)
         fx = _sample_sdf_at_t(
-            texture_sdf, sdf_mesh_id, v0, v1, 0.5, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf, elevation_data
+            texture_sdf, sdf_mesh_id, v0, edge_dir, 0.5, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf, elevation_data
         )
         fw = fx
         fv = fx
         d_step = float(0.0)
         e_step = float(0.0)
 
-        for _iter in range(5):
+        for _iter in range(6):
             m = 0.5 * (a + b)
             tol = 5.6e-3 * wp.abs(x) + 1.0e-10
             tol2 = 2.0 * tol
@@ -706,7 +710,8 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
                     u = x - tol
 
             fu = _sample_sdf_at_t(
-                texture_sdf, sdf_mesh_id, v0, v1, u, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf, elevation_data
+                texture_sdf, sdf_mesh_id, v0, edge_dir, u, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf,
+                elevation_data,
             )
 
             # Update bracket
@@ -735,7 +740,21 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
                     v_brent = u
                     fv = fu
 
-        p = v0 * (1.0 - x) + v1 * x
+        # Check the more promising endpoint: pick the one closer to the
+        # bracket boundary that did NOT move inward (if the minimum is at
+        # a corner, Brent's bracket stays pinned to that side).
+        best_t = x
+        best_f = fx
+        check_t = 0.0 if x < 0.5 else 1.0
+        f_end = _sample_sdf_at_t(
+            texture_sdf, sdf_mesh_id, v0, edge_dir, check_t, use_bvh_for_sdf, sdf_is_heightfield, hfd_sdf,
+            elevation_data,
+        )
+        if f_end < best_f:
+            best_t = check_t
+            best_f = f_end
+
+        p = v0 + edge_dir * best_t
 
         # One gradient call at the final point for contact normal
         sdf_gradient = wp.vec3(0.0, 0.0, 0.0)
