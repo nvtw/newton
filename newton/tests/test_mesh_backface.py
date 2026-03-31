@@ -49,8 +49,14 @@ def _make_valley_mesh(width=2.0, depth=0.5, length=2.0):
     hl = length / 2.0
     vertices = np.array(
         [
-            [-hw, -hl, depth], [0.0, -hl, 0.0], [0.0, hl, 0.0], [-hw, hl, depth],
-            [0.0, -hl, 0.0], [hw, -hl, depth], [hw, hl, depth], [0.0, hl, 0.0],
+            [-hw, -hl, depth],
+            [0.0, -hl, 0.0],
+            [0.0, hl, 0.0],
+            [-hw, hl, depth],
+            [0.0, -hl, 0.0],
+            [hw, -hl, depth],
+            [hw, hl, depth],
+            [0.0, hl, 0.0],
         ],
         dtype=np.float32,
     )
@@ -160,8 +166,13 @@ def _build_sim_scene(mesh, shape_type, shape_pos, shape_scale=None, shape_rot=No
 
     model = builder.finalize()
     solver = newton.solvers.SolverMuJoCo(
-        model, use_mujoco_contacts=False, solver="newton",
-        ls_iterations=20, njmax=1024, nconmax=256, integrator="implicitfast",
+        model,
+        use_mujoco_contacts=False,
+        solver="newton",
+        ls_iterations=20,
+        njmax=1024,
+        nconmax=256,
+        integrator="implicitfast",
     )
     cp = newton.CollisionPipeline(model, broad_phase="explicit", max_triangle_pairs=100_000)
     s0 = model.state()
@@ -196,7 +207,11 @@ class TestMeshBackfaceCulling(unittest.TestCase):
     def _assert_front_face_contacts(self, shape_type, shape_scale=None, shape_rot=None):
         mesh = _make_flat_ground_mesh(z=0.0)
         model, cp, state = _build_collision_only(
-            mesh, shape_type, shape_pos=(0.0, 0.0, 0.05), shape_scale=shape_scale, shape_rot=shape_rot,
+            mesh,
+            shape_type,
+            shape_pos=(0.0, 0.0, 0.05),
+            shape_scale=shape_scale,
+            shape_rot=shape_rot,
         )
         contacts = _collide(model, cp, state)
         normals = _get_contact_normals(contacts)
@@ -227,7 +242,11 @@ class TestMeshBackfaceCulling(unittest.TestCase):
     def _assert_back_face_culled(self, shape_type, shape_scale=None, shape_rot=None):
         mesh = _make_flat_ground_mesh(z=0.0)
         model, cp, state = _build_collision_only(
-            mesh, shape_type, shape_pos=(0.0, 0.0, -0.05), shape_scale=shape_scale, shape_rot=shape_rot,
+            mesh,
+            shape_type,
+            shape_pos=(0.0, 0.0, -0.05),
+            shape_scale=shape_scale,
+            shape_rot=shape_rot,
         )
         contacts = _collide(model, cp, state)
         normals = _get_contact_normals(contacts)
@@ -236,7 +255,8 @@ class TestMeshBackfaceCulling(unittest.TestCase):
         if len(normals) > 0:
             min_nz = normals[:, 2].min()
             self.assertGreater(
-                min_nz, -0.3,
+                min_nz,
+                -0.3,
                 f"{shape_type.name}: back-face contact with inverted normal z={min_nz:.4f}",
             )
 
@@ -277,7 +297,10 @@ class TestMeshBackfaceCulling(unittest.TestCase):
         """Sphere far below mesh should get zero contacts."""
         mesh = _make_flat_ground_mesh(z=0.0)
         model, cp, state = _build_collision_only(
-            mesh, GeoType.SPHERE, shape_pos=(0.0, 0.0, -0.5), shape_scale=(0.1,),
+            mesh,
+            GeoType.SPHERE,
+            shape_pos=(0.0, 0.0, -0.5),
+            shape_scale=(0.1,),
         )
         contacts = _collide(model, cp, state)
         count = contacts.rigid_contact_count.numpy()[0]
@@ -287,7 +310,10 @@ class TestMeshBackfaceCulling(unittest.TestCase):
         """Box far below mesh should get zero contacts."""
         mesh = _make_flat_ground_mesh(z=0.0)
         model, cp, state = _build_collision_only(
-            mesh, GeoType.BOX, shape_pos=(0.0, 0.0, -0.5), shape_scale=(0.1, 0.1, 0.1),
+            mesh,
+            GeoType.BOX,
+            shape_pos=(0.0, 0.0, -0.5),
+            shape_scale=(0.1, 0.1, 0.1),
         )
         contacts = _collide(model, cp, state)
         count = contacts.rigid_contact_count.numpy()[0]
@@ -301,7 +327,10 @@ class TestMeshBackfaceCulling(unittest.TestCase):
         """Sphere in valley: all contact normals should have positive z."""
         mesh = _make_valley_mesh(width=2.0, depth=0.5, length=2.0)
         model, cp, state = _build_collision_only(
-            mesh, GeoType.SPHERE, shape_pos=(0.0, 0.0, 0.08), shape_scale=(0.1,),
+            mesh,
+            GeoType.SPHERE,
+            shape_pos=(0.0, 0.0, 0.08),
+            shape_scale=(0.1,),
         )
         contacts = _collide(model, cp, state)
         normals = _get_contact_normals(contacts)
@@ -314,7 +343,10 @@ class TestMeshBackfaceCulling(unittest.TestCase):
         """Box in valley: contact normals should not have strongly negative z."""
         mesh = _make_valley_mesh(width=2.0, depth=0.5, length=2.0)
         model, cp, state = _build_collision_only(
-            mesh, GeoType.BOX, shape_pos=(0.0, 0.0, 0.08), shape_scale=(0.08, 0.08, 0.08),
+            mesh,
+            GeoType.BOX,
+            shape_pos=(0.0, 0.0, 0.08),
+            shape_scale=(0.08, 0.08, 0.08),
         )
         contacts = _collide(model, cp, state)
         normals = _get_contact_normals(contacts)
@@ -331,7 +363,10 @@ class TestMeshBackfaceCulling(unittest.TestCase):
     def _assert_no_nan_in_contacts(self, shape_type, pos, shape_scale=None):
         mesh = _make_flat_ground_mesh(z=0.0)
         model, cp, state = _build_collision_only(
-            mesh, shape_type, shape_pos=pos, shape_scale=shape_scale,
+            mesh,
+            shape_type,
+            shape_pos=pos,
+            shape_scale=shape_scale,
         )
         contacts = _collide(model, cp, state)
         normals = _get_contact_normals(contacts)
@@ -339,14 +374,22 @@ class TestMeshBackfaceCulling(unittest.TestCase):
             self.assertFalse(np.any(np.isnan(normals)), f"{shape_type.name}: NaN in contact normals")
 
     def test_no_nan_front_face(self):
-        for st, sc in [(GeoType.SPHERE, (0.1,)), (GeoType.BOX, (0.1, 0.1, 0.1)),
-                       (GeoType.CAPSULE, (0.05, 0.15)), (GeoType.ELLIPSOID, (0.1, 0.15, 0.08))]:
+        for st, sc in [
+            (GeoType.SPHERE, (0.1,)),
+            (GeoType.BOX, (0.1, 0.1, 0.1)),
+            (GeoType.CAPSULE, (0.05, 0.15)),
+            (GeoType.ELLIPSOID, (0.1, 0.15, 0.08)),
+        ]:
             with self.subTest(shape_type=st.name):
                 self._assert_no_nan_in_contacts(st, (0.0, 0.0, 0.05), sc)
 
     def test_no_nan_back_face(self):
-        for st, sc in [(GeoType.SPHERE, (0.1,)), (GeoType.BOX, (0.1, 0.1, 0.1)),
-                       (GeoType.CAPSULE, (0.05, 0.15)), (GeoType.ELLIPSOID, (0.1, 0.15, 0.08))]:
+        for st, sc in [
+            (GeoType.SPHERE, (0.1,)),
+            (GeoType.BOX, (0.1, 0.1, 0.1)),
+            (GeoType.CAPSULE, (0.05, 0.15)),
+            (GeoType.ELLIPSOID, (0.1, 0.15, 0.08)),
+        ]:
             with self.subTest(shape_type=st.name):
                 self._assert_no_nan_in_contacts(st, (0.0, 0.0, -0.05), sc)
 
@@ -363,7 +406,10 @@ class TestMeshBackfaceSimulation(unittest.TestCase):
         """Run simulation and assert no NaN appears in joint state."""
         mesh = _make_box_ground_mesh(z=0.0)
         model, cp, solver, s0, s1, ctrl = _build_sim_scene(
-            mesh, shape_type, shape_pos=shape_pos, shape_scale=shape_scale,
+            mesh,
+            shape_type,
+            shape_pos=shape_pos,
+            shape_scale=shape_scale,
         )
         for _ in range(n_frames):
             s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, dt=dt, substeps=substeps)
@@ -386,7 +432,10 @@ class TestMeshBackfaceSimulation(unittest.TestCase):
         """Fast-falling sphere should not produce NaN after mesh impact."""
         mesh = _make_box_ground_mesh(z=0.0)
         model, cp, solver, s0, s1, ctrl = _build_sim_scene(
-            mesh, GeoType.SPHERE, shape_pos=(0.0, 0.0, 1.0), shape_scale=(0.1,),
+            mesh,
+            GeoType.SPHERE,
+            shape_pos=(0.0, 0.0, 1.0),
+            shape_scale=(0.1,),
         )
         # High downward velocity
         qd = s0.joint_qd.numpy()
@@ -403,7 +452,10 @@ class TestMeshBackfaceSimulation(unittest.TestCase):
         # Valley mesh needs 3D extent for MuJoCo
         mesh = _make_box_ground_mesh(z=0.0)  # use flat ground as proxy
         model, cp, solver, s0, s1, ctrl = _build_sim_scene(
-            mesh, GeoType.SPHERE, shape_pos=(0.0, 0.0, 0.15), shape_scale=(0.1,),
+            mesh,
+            GeoType.SPHERE,
+            shape_pos=(0.0, 0.0, 0.15),
+            shape_scale=(0.1,),
         )
         for _ in range(200):
             s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=5)
@@ -428,7 +480,10 @@ class TestMeshBackfaceSimulation(unittest.TestCase):
         ]:
             with self.subTest(shape_type=shape_type.name):
                 model, cp, solver, s0, s1, ctrl = _build_sim_scene(
-                    mesh, shape_type, shape_pos=(0.0, 0.0, z_start), shape_scale=scale,
+                    mesh,
+                    shape_type,
+                    shape_pos=(0.0, 0.0, z_start),
+                    shape_scale=scale,
                 )
                 for step in range(100):
                     s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=5)
@@ -477,8 +532,13 @@ def _build_heightfield_scene(shape_type, shape_pos, shape_scale=None, rough=Fals
 
     model = builder.finalize()
     solver = newton.solvers.SolverMuJoCo(
-        model, use_mujoco_contacts=False, solver="newton",
-        ls_iterations=20, njmax=1024, nconmax=256, integrator="implicitfast",
+        model,
+        use_mujoco_contacts=False,
+        solver="newton",
+        ls_iterations=20,
+        njmax=1024,
+        nconmax=256,
+        integrator="implicitfast",
     )
     cp = newton.CollisionPipeline(model, broad_phase="explicit", max_triangle_pairs=100_000)
     s0 = model.state()
@@ -494,7 +554,9 @@ class TestHeightfieldPrism(unittest.TestCase):
     def test_sphere_on_flat_heightfield(self):
         """Sphere dropped on flat heightfield should settle without NaN."""
         model, cp, solver, s0, s1, ctrl = _build_heightfield_scene(
-            GeoType.SPHERE, shape_pos=(0.0, 0.0, 0.5), shape_scale=(0.1,),
+            GeoType.SPHERE,
+            shape_pos=(0.0, 0.0, 0.5),
+            shape_scale=(0.1,),
         )
         for _ in range(100):
             s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=5)
@@ -503,7 +565,9 @@ class TestHeightfieldPrism(unittest.TestCase):
     def test_box_on_flat_heightfield(self):
         """Box dropped on flat heightfield should settle without NaN."""
         model, cp, solver, s0, s1, ctrl = _build_heightfield_scene(
-            GeoType.BOX, shape_pos=(0.0, 0.0, 0.5), shape_scale=(0.1, 0.1, 0.1),
+            GeoType.BOX,
+            shape_pos=(0.0, 0.0, 0.5),
+            shape_scale=(0.1, 0.1, 0.1),
         )
         for _ in range(100):
             s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=5)
@@ -512,7 +576,10 @@ class TestHeightfieldPrism(unittest.TestCase):
     def test_sphere_on_rough_heightfield(self):
         """Sphere on rough heightfield should not produce NaN."""
         model, cp, solver, s0, s1, ctrl = _build_heightfield_scene(
-            GeoType.SPHERE, shape_pos=(0.0, 0.0, 1.0), shape_scale=(0.1,), rough=True,
+            GeoType.SPHERE,
+            shape_pos=(0.0, 0.0, 1.0),
+            shape_scale=(0.1,),
+            rough=True,
         )
         for _ in range(200):
             s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=5)
@@ -521,7 +588,10 @@ class TestHeightfieldPrism(unittest.TestCase):
     def test_capsule_on_rough_heightfield(self):
         """Capsule on rough heightfield should not produce NaN."""
         model, cp, solver, s0, s1, ctrl = _build_heightfield_scene(
-            GeoType.CAPSULE, shape_pos=(0.0, 0.0, 1.0), shape_scale=(0.05, 0.15), rough=True,
+            GeoType.CAPSULE,
+            shape_pos=(0.0, 0.0, 1.0),
+            shape_scale=(0.05, 0.15),
+            rough=True,
         )
         for _ in range(200):
             s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=5)
@@ -534,7 +604,9 @@ class TestHeightfieldPrism(unittest.TestCase):
         back out, or at minimum not trap it with inverted normals.
         """
         model, cp, solver, s0, s1, ctrl = _build_heightfield_scene(
-            GeoType.SPHERE, shape_pos=(0.0, 0.0, -0.05), shape_scale=(0.1,),
+            GeoType.SPHERE,
+            shape_pos=(0.0, 0.0, -0.05),
+            shape_scale=(0.1,),
         )
         for _ in range(50):
             s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=5)
@@ -543,7 +615,10 @@ class TestHeightfieldPrism(unittest.TestCase):
     def test_high_velocity_sphere_on_heightfield(self):
         """Fast-falling sphere on heightfield should not produce NaN."""
         model, cp, solver, s0, s1, ctrl = _build_heightfield_scene(
-            GeoType.SPHERE, shape_pos=(0.0, 0.0, 1.0), shape_scale=(0.1,), rough=True,
+            GeoType.SPHERE,
+            shape_pos=(0.0, 0.0, 1.0),
+            shape_scale=(0.1,),
+            rough=True,
         )
         qd = s0.joint_qd.numpy()
         qd[2] = -10.0
@@ -555,7 +630,17 @@ class TestHeightfieldPrism(unittest.TestCase):
 
 
 def _build_heightfield_scene_xform(
-    shape_type, shape_pos, shape_scale, hfield_xform, elevation, nrow, ncol, hx, hy, min_z, max_z,
+    shape_type,
+    shape_pos,
+    shape_scale,
+    hfield_xform,
+    elevation,
+    nrow,
+    ncol,
+    hx,
+    hy,
+    min_z,
+    max_z,
 ):
     """Build scene with a heightfield at an arbitrary transform."""
     builder = newton.ModelBuilder()
@@ -577,8 +662,13 @@ def _build_heightfield_scene_xform(
 
     model = builder.finalize()
     solver = newton.solvers.SolverMuJoCo(
-        model, use_mujoco_contacts=False, solver="newton",
-        ls_iterations=20, njmax=1024, nconmax=256, integrator="implicitfast",
+        model,
+        use_mujoco_contacts=False,
+        solver="newton",
+        ls_iterations=20,
+        njmax=1024,
+        nconmax=256,
+        integrator="implicitfast",
     )
     cp = newton.CollisionPipeline(model, broad_phase="explicit", max_triangle_pairs=100_000)
     s0 = model.state()
@@ -626,7 +716,12 @@ class TestHeightfieldPrismSteepAndRotated(unittest.TestCase):
             shape_scale=(0.15,),
             hfield_xform=wp.transform_identity(),
             elevation=elevation,
-            nrow=nrow, ncol=ncol, hx=2.0, hy=2.0, min_z=0.0, max_z=2.0,
+            nrow=nrow,
+            ncol=ncol,
+            hx=2.0,
+            hy=2.0,
+            min_z=0.0,
+            max_z=2.0,
         )
         for _ in range(100):
             s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=5)
@@ -642,7 +737,12 @@ class TestHeightfieldPrismSteepAndRotated(unittest.TestCase):
             shape_scale=(0.1, 0.1, 0.1),
             hfield_xform=wp.transform_identity(),
             elevation=elevation,
-            nrow=nrow, ncol=ncol, hx=2.0, hy=2.0, min_z=0.0, max_z=2.0,
+            nrow=nrow,
+            ncol=ncol,
+            hx=2.0,
+            hy=2.0,
+            min_z=0.0,
+            max_z=2.0,
         )
         for _ in range(100):
             s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=5)
@@ -670,7 +770,12 @@ class TestHeightfieldPrismSteepAndRotated(unittest.TestCase):
             shape_scale=(0.1,),
             hfield_xform=hfield_xform,
             elevation=elevation,
-            nrow=nrow, ncol=ncol, hx=3.0, hy=3.0, min_z=0.0, max_z=0.5,
+            nrow=nrow,
+            ncol=ncol,
+            hx=3.0,
+            hy=3.0,
+            min_z=0.0,
+            max_z=0.5,
         )
         for _ in range(200):
             s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=5)
@@ -696,7 +801,12 @@ class TestHeightfieldPrismSteepAndRotated(unittest.TestCase):
             shape_scale=(0.08, 0.15),
             hfield_xform=hfield_xform,
             elevation=elevation,
-            nrow=nrow, ncol=ncol, hx=2.0, hy=2.0, min_z=0.0, max_z=2.0,
+            nrow=nrow,
+            ncol=ncol,
+            hx=2.0,
+            hy=2.0,
+            min_z=0.0,
+            max_z=2.0,
         )
         for _ in range(200):
             s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=5)
