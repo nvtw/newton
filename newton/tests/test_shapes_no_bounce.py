@@ -4,9 +4,9 @@
 """
 Test that shapes falling onto a ground plane never exceed their initial z position.
 
-This test replicates the scene from example_basic_shapes6_2.py and verifies that
-during 200 simulation steps, no shape's z position ever exceeds its initial value.
-This catches issues like shapes bouncing upward due to contact instabilities.
+This test verifies that during 200 simulation steps, no shape's z position ever
+exceeds its initial value.  This catches issues like shapes bouncing upward due
+to contact instabilities.
 """
 
 import unittest
@@ -22,7 +22,7 @@ def test_shapes_never_exceed_initial_z(test, device):
     """
     Test that shapes falling onto a ground mesh never exceed their initial z position.
 
-    Scene setup matches example_basic_shapes6_2.py exactly:
+    Scene setup:
     - 2-triangle ground plane mesh
     - 4x4x8 grid of mixed shapes (sphere, box, capsule, cylinder, cone, icosahedron)
     - XPBD solver with iterations=2, rigid_contact_relaxation=0.8, angular_damping=0.0
@@ -123,7 +123,7 @@ def test_shapes_never_exceed_initial_z(test, device):
 
     ico_mesh = newton.Mesh(ico_vertices, ico_indices, normals=ico_normals)
 
-    # 3D grid of shapes (same as example_basic_shapes6_2.py)
+    # 3D grid of shapes
     grid_size_x = 4
     grid_size_y = 4
     grid_size_z = 8
@@ -221,14 +221,11 @@ def test_shapes_never_exceed_initial_z(test, device):
 
         # Check that no body has z position exceeding the threshold
         body_q = state_0.body_q.numpy()
-        for body_idx in range(model.body_count):
-            current_z = body_q[body_idx][2]
-            threshold_z = height_thresholds[body_idx]
-            test.assertLessEqual(
-                current_z,
-                threshold_z,
-                f"Step {step + 1}: Body {body_idx} z={current_z:.4f} exceeds threshold z={threshold_z:.4f}",
-            )
+        current_z = body_q[: model.body_count, 2]
+        test.assertTrue(
+            np.all(current_z <= height_thresholds),
+            f"Step {step + 1}: max z={current_z.max():.4f} exceeds threshold",
+        )
 
 
 class TestShapesNoBounce(unittest.TestCase):
