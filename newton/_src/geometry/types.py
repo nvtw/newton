@@ -668,6 +668,7 @@ class Mesh:
         shape_margin: float = 0.0,
         scale: tuple[float, float, float] | None = None,
         texture_format: str = "uint16",
+        use_winding_number: bool = True,
     ) -> "SDF":
         """Build and attach an SDF for this mesh.
 
@@ -697,6 +698,12 @@ class Mesh:
                 normalized textures (half the memory of float32).
                 ``"float32"`` stores full-precision values. ``"uint8"`` uses
                 8-bit textures for minimum memory at lower precision.
+            use_winding_number: If ``True`` (default), use generalized winding
+                number for inside/outside classification during SDF
+                construction. Accurate for non-watertight meshes but O(n) per
+                query. If ``False``, use ray-cast sign determination which is
+                faster and more robust than pseudo-normals for meshes with
+                inconsistent winding.
 
         Returns:
             The attached :class:`SDF` instance.
@@ -723,6 +730,7 @@ class Mesh:
             shape_margin=shape_margin,
             scale=scale,
             texture_format=texture_format,
+            use_winding_number=use_winding_number,
         )
         return self.sdf
 

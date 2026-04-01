@@ -24,7 +24,7 @@ from __future__ import annotations
 import numpy as np
 import warp as wp
 
-from .sdf_utils import get_distance_to_mesh
+from .sdf_utils import get_distance_to_mesh, get_distance_to_mesh_raycast
 
 # Sentinel values for subgrid indirection slots.
 # Plain int so wp.static() works in kernels; numpy casts on assignment.
@@ -101,385 +101,414 @@ def _id_to_xyz(idx: int, size_x: int, size_y: int) -> wp.vec3i:
     return wp.vec3i(x, y, z)
 
 
-@wp.kernel
-def _check_subgrid_occupied_kernel(
-    mesh: wp.uint64,
-    subgrid_centers: wp.array(dtype=wp.vec3),
-    threshold: wp.vec2f,
-    winding_threshold: float,
-    subgrid_required: wp.array(dtype=wp.int32),
-):
-    """Mark subgrids that overlap the narrow band by checking mesh SDF at center."""
-    tid = wp.tid()
-    sample_pos = subgrid_centers[tid]
-
-    signed_distance = get_distance_to_mesh(mesh, sample_pos, 10000.0, winding_threshold)
-    is_occupied = wp.bool(False)
-    if wp.sign(signed_distance) > 0.0:
-        is_occupied = signed_distance < threshold[1]
-    else:
-        is_occupied = signed_distance > threshold[0]
-
-    if is_occupied:
-        subgrid_required[tid] = 1
-    else:
-        subgrid_required[tid] = 0
-
-
-@wp.kernel
-def _check_subgrid_linearity_kernel(
-    mesh: wp.uint64,
-    background_sdf: wp.array(dtype=float),
-    subgrid_required: wp.array(dtype=wp.int32),
-    subgrid_is_linear: wp.array(dtype=wp.int32),
-    cells_per_subgrid: int,
-    min_corner: wp.vec3,
-    cell_size: wp.vec3,
-    winding_threshold: float,
-    num_subgrids_x: int,
-    num_subgrids_y: int,
-    bg_size_x: int,
-    bg_size_y: int,
-    bg_size_z: int,
-    error_threshold: float,
-):
-    """Demote occupied subgrids whose SDF is well-approximated by the coarse grid.
-
-    For each occupied subgrid, queries the mesh SDF at every fine-grid sample
-    and compares against the trilinearly interpolated coarse/background SDF.
-    Subgrids where the maximum absolute error is below *error_threshold* are
-    marked as linear (``subgrid_is_linear[tid] = 1``) and removed from
-    ``subgrid_required`` so no subgrid texture data is allocated for them.
-    """
-    tid = wp.tid()
-    if subgrid_required[tid] == 0:
-        return
-
-    coords = _id_to_xyz(tid, num_subgrids_x, num_subgrids_y)
-    block_x = coords[0]
-    block_y = coords[1]
-    block_z = coords[2]
-
-    s = 1.0 / float(cells_per_subgrid)
-    samples_per_dim = cells_per_subgrid + 1
-    max_abs_error = float(0.0)
-
-    for lz in range(samples_per_dim):
-        for ly in range(samples_per_dim):
-            for lx in range(samples_per_dim):
-                gx = block_x * cells_per_subgrid + lx
-                gy = block_y * cells_per_subgrid + ly
-                gz = block_z * cells_per_subgrid + lz
-
-                pos = min_corner + wp.vec3(
-                    float(gx) * cell_size[0],
-                    float(gy) * cell_size[1],
-                    float(gz) * cell_size[2],
-                )
-                mesh_val = get_distance_to_mesh(mesh, pos, 10000.0, winding_threshold)
-
-                coarse_fx = float(block_x) + float(lx) * s
-                coarse_fy = float(block_y) + float(ly) * s
-                coarse_fz = float(block_z) + float(lz) * s
-
-                x0 = int(wp.floor(coarse_fx))
-                y0 = int(wp.floor(coarse_fy))
-                z0 = int(wp.floor(coarse_fz))
-                x0 = wp.clamp(x0, 0, bg_size_x - 2)
-                y0 = wp.clamp(y0, 0, bg_size_y - 2)
-                z0 = wp.clamp(z0, 0, bg_size_z - 2)
-
-                tx = wp.clamp(coarse_fx - float(x0), 0.0, 1.0)
-                ty = wp.clamp(coarse_fy - float(y0), 0.0, 1.0)
-                tz = wp.clamp(coarse_fz - float(z0), 0.0, 1.0)
-
-                v000 = background_sdf[_idx3d(x0, y0, z0, bg_size_x, bg_size_y)]
-                v100 = background_sdf[_idx3d(x0 + 1, y0, z0, bg_size_x, bg_size_y)]
-                v010 = background_sdf[_idx3d(x0, y0 + 1, z0, bg_size_x, bg_size_y)]
-                v110 = background_sdf[_idx3d(x0 + 1, y0 + 1, z0, bg_size_x, bg_size_y)]
-                v001 = background_sdf[_idx3d(x0, y0, z0 + 1, bg_size_x, bg_size_y)]
-                v101 = background_sdf[_idx3d(x0 + 1, y0, z0 + 1, bg_size_x, bg_size_y)]
-                v011 = background_sdf[_idx3d(x0, y0 + 1, z0 + 1, bg_size_x, bg_size_y)]
-                v111 = background_sdf[_idx3d(x0 + 1, y0 + 1, z0 + 1, bg_size_x, bg_size_y)]
-
-                c00 = v000 * (1.0 - tx) + v100 * tx
-                c10 = v010 * (1.0 - tx) + v110 * tx
-                c01 = v001 * (1.0 - tx) + v101 * tx
-                c11 = v011 * (1.0 - tx) + v111 * tx
-                c0 = c00 * (1.0 - ty) + c10 * ty
-                c1 = c01 * (1.0 - ty) + c11 * ty
-                coarse_val = c0 * (1.0 - tz) + c1 * tz
-
-                max_abs_error = wp.max(max_abs_error, wp.abs(mesh_val - coarse_val))
-
-    if max_abs_error < error_threshold:
-        subgrid_is_linear[tid] = 1
-        subgrid_required[tid] = 0
-
-
-@wp.kernel
-def _build_coarse_sdf_from_mesh_kernel(
-    mesh: wp.uint64,
-    background_sdf: wp.array(dtype=float),
-    min_corner: wp.vec3,
-    cell_size: wp.vec3,
-    cells_per_subgrid: int,
-    bg_size_x: int,
-    bg_size_y: int,
-    bg_size_z: int,
-    winding_threshold: float,
-):
-    """Populate background SDF by querying mesh at subgrid corner positions."""
-    tid = wp.tid()
-
-    total_bg = bg_size_x * bg_size_y * bg_size_z
-    if tid >= total_bg:
-        return
-
-    coords = _id_to_xyz(tid, bg_size_x, bg_size_y)
-    x_block = coords[0]
-    y_block = coords[1]
-    z_block = coords[2]
-
-    pos = min_corner + wp.vec3(
-        float(x_block * cells_per_subgrid) * cell_size[0],
-        float(y_block * cells_per_subgrid) * cell_size[1],
-        float(z_block * cells_per_subgrid) * cell_size[2],
-    )
-
-    background_sdf[tid] = get_distance_to_mesh(mesh, pos, 10000.0, winding_threshold)
-
-
-@wp.kernel
-def _populate_subgrid_texture_float32_kernel(
-    mesh: wp.uint64,
-    subgrid_required: wp.array(dtype=wp.int32),
-    subgrid_addresses: wp.array(dtype=wp.int32),
-    subgrid_start_slots: wp.array(dtype=wp.uint32, ndim=3),
-    subgrid_texture: wp.array(dtype=float),
-    cells_per_subgrid: int,
-    min_corner: wp.vec3,
-    cell_size: wp.vec3,
-    winding_threshold: float,
-    num_subgrids_x: int,
-    num_subgrids_y: int,
-    num_subgrids_z: int,
-    tex_blocks_per_dim: int,
-    tex_size: int,
-):
-    """Populate subgrid texture by querying mesh SDF (float32 version)."""
-    tid = wp.tid()
-
-    total_subgrids = num_subgrids_x * num_subgrids_y * num_subgrids_z
-    samples_per_dim = cells_per_subgrid + 1
-    samples_per_subgrid = samples_per_dim * samples_per_dim * samples_per_dim
-
-    subgrid_idx = tid // samples_per_subgrid
-    local_sample = tid - subgrid_idx * samples_per_subgrid
-
-    if subgrid_idx >= total_subgrids:
-        return
-    if subgrid_required[subgrid_idx] == 0:
-        return
-
-    subgrid_coords = _id_to_xyz(subgrid_idx, num_subgrids_x, num_subgrids_y)
-    block_x = subgrid_coords[0]
-    block_y = subgrid_coords[1]
-    block_z = subgrid_coords[2]
-
-    local_coords = _id_to_xyz(local_sample, samples_per_dim, samples_per_dim)
-    lx = local_coords[0]
-    ly = local_coords[1]
-    lz = local_coords[2]
-
-    gx = block_x * cells_per_subgrid + lx
-    gy = block_y * cells_per_subgrid + ly
-    gz = block_z * cells_per_subgrid + lz
-
-    pos = min_corner + wp.vec3(
-        float(gx) * cell_size[0],
-        float(gy) * cell_size[1],
-        float(gz) * cell_size[2],
-    )
-    sdf_val = get_distance_to_mesh(mesh, pos, 10000.0, winding_threshold)
-
-    address = subgrid_addresses[subgrid_idx]
-    if address < 0:
-        return
-
-    addr_coords = _id_to_xyz(address, tex_blocks_per_dim, tex_blocks_per_dim)
-    addr_x = addr_coords[0]
-    addr_y = addr_coords[1]
-    addr_z = addr_coords[2]
-
-    if local_sample == 0:
-        start_slot = wp.uint32(addr_x) | (wp.uint32(addr_y) << wp.uint32(10)) | (wp.uint32(addr_z) << wp.uint32(20))
-        subgrid_start_slots[block_x, block_y, block_z] = start_slot
-
-    tex_x = addr_x * samples_per_dim + lx
-    tex_y = addr_y * samples_per_dim + ly
-    tex_z = addr_z * samples_per_dim + lz
-
-    tex_idx = _idx3d(tex_x, tex_y, tex_z, tex_size, tex_size)
-    subgrid_texture[tex_idx] = sdf_val
-
-
-@wp.kernel
-def _populate_subgrid_texture_uint16_kernel(
-    mesh: wp.uint64,
-    subgrid_required: wp.array(dtype=wp.int32),
-    subgrid_addresses: wp.array(dtype=wp.int32),
-    subgrid_start_slots: wp.array(dtype=wp.uint32, ndim=3),
-    subgrid_texture: wp.array(dtype=wp.uint16),
-    cells_per_subgrid: int,
-    min_corner: wp.vec3,
-    cell_size: wp.vec3,
-    winding_threshold: float,
-    num_subgrids_x: int,
-    num_subgrids_y: int,
-    num_subgrids_z: int,
-    tex_blocks_per_dim: int,
-    tex_size: int,
-    sdf_min: float,
-    sdf_range_inv: float,
-):
-    """Populate subgrid texture by querying mesh SDF (uint16 quantized version)."""
-    tid = wp.tid()
-
-    total_subgrids = num_subgrids_x * num_subgrids_y * num_subgrids_z
-    samples_per_dim = cells_per_subgrid + 1
-    samples_per_subgrid = samples_per_dim * samples_per_dim * samples_per_dim
-
-    subgrid_idx = tid // samples_per_subgrid
-    local_sample = tid - subgrid_idx * samples_per_subgrid
-
-    if subgrid_idx >= total_subgrids:
-        return
-    if subgrid_required[subgrid_idx] == 0:
-        return
-
-    subgrid_coords = _id_to_xyz(subgrid_idx, num_subgrids_x, num_subgrids_y)
-    block_x = subgrid_coords[0]
-    block_y = subgrid_coords[1]
-    block_z = subgrid_coords[2]
-
-    local_coords = _id_to_xyz(local_sample, samples_per_dim, samples_per_dim)
-    lx = local_coords[0]
-    ly = local_coords[1]
-    lz = local_coords[2]
-
-    gx = block_x * cells_per_subgrid + lx
-    gy = block_y * cells_per_subgrid + ly
-    gz = block_z * cells_per_subgrid + lz
-
-    pos = min_corner + wp.vec3(
-        float(gx) * cell_size[0],
-        float(gy) * cell_size[1],
-        float(gz) * cell_size[2],
-    )
-    sdf_val = get_distance_to_mesh(mesh, pos, 10000.0, winding_threshold)
-
-    address = subgrid_addresses[subgrid_idx]
-    if address < 0:
-        return
-
-    addr_coords = _id_to_xyz(address, tex_blocks_per_dim, tex_blocks_per_dim)
-    addr_x = addr_coords[0]
-    addr_y = addr_coords[1]
-    addr_z = addr_coords[2]
-
-    if local_sample == 0:
-        start_slot = wp.uint32(addr_x) | (wp.uint32(addr_y) << wp.uint32(10)) | (wp.uint32(addr_z) << wp.uint32(20))
-        subgrid_start_slots[block_x, block_y, block_z] = start_slot
-
-    tex_x = addr_x * samples_per_dim + lx
-    tex_y = addr_y * samples_per_dim + ly
-    tex_z = addr_z * samples_per_dim + lz
-
-    v_normalized = wp.clamp((sdf_val - sdf_min) * sdf_range_inv, 0.0, 1.0)
-    quantized = wp.uint16(v_normalized * 65535.0)
-
-    tex_idx = _idx3d(tex_x, tex_y, tex_z, tex_size, tex_size)
-    subgrid_texture[tex_idx] = quantized
-
-
-@wp.kernel
-def _populate_subgrid_texture_uint8_kernel(
-    mesh: wp.uint64,
-    subgrid_required: wp.array(dtype=wp.int32),
-    subgrid_addresses: wp.array(dtype=wp.int32),
-    subgrid_start_slots: wp.array(dtype=wp.uint32, ndim=3),
-    subgrid_texture: wp.array(dtype=wp.uint8),
-    cells_per_subgrid: int,
-    min_corner: wp.vec3,
-    cell_size: wp.vec3,
-    winding_threshold: float,
-    num_subgrids_x: int,
-    num_subgrids_y: int,
-    num_subgrids_z: int,
-    tex_blocks_per_dim: int,
-    tex_size: int,
-    sdf_min: float,
-    sdf_range_inv: float,
-):
-    """Populate subgrid texture by querying mesh SDF (uint8 quantized version)."""
-    tid = wp.tid()
-
-    total_subgrids = num_subgrids_x * num_subgrids_y * num_subgrids_z
-    samples_per_dim = cells_per_subgrid + 1
-    samples_per_subgrid = samples_per_dim * samples_per_dim * samples_per_dim
-
-    subgrid_idx = tid // samples_per_subgrid
-    local_sample = tid - subgrid_idx * samples_per_subgrid
-
-    if subgrid_idx >= total_subgrids:
-        return
-    if subgrid_required[subgrid_idx] == 0:
-        return
-
-    subgrid_coords = _id_to_xyz(subgrid_idx, num_subgrids_x, num_subgrids_y)
-    block_x = subgrid_coords[0]
-    block_y = subgrid_coords[1]
-    block_z = subgrid_coords[2]
-
-    local_coords = _id_to_xyz(local_sample, samples_per_dim, samples_per_dim)
-    lx = local_coords[0]
-    ly = local_coords[1]
-    lz = local_coords[2]
-
-    gx = block_x * cells_per_subgrid + lx
-    gy = block_y * cells_per_subgrid + ly
-    gz = block_z * cells_per_subgrid + lz
-
-    pos = min_corner + wp.vec3(
-        float(gx) * cell_size[0],
-        float(gy) * cell_size[1],
-        float(gz) * cell_size[2],
-    )
-    sdf_val = get_distance_to_mesh(mesh, pos, 10000.0, winding_threshold)
-
-    address = subgrid_addresses[subgrid_idx]
-    if address < 0:
-        return
-
-    addr_coords = _id_to_xyz(address, tex_blocks_per_dim, tex_blocks_per_dim)
-    addr_x = addr_coords[0]
-    addr_y = addr_coords[1]
-    addr_z = addr_coords[2]
-
-    if local_sample == 0:
-        start_slot = wp.uint32(addr_x) | (wp.uint32(addr_y) << wp.uint32(10)) | (wp.uint32(addr_z) << wp.uint32(20))
-        subgrid_start_slots[block_x, block_y, block_z] = start_slot
-
-    tex_x = addr_x * samples_per_dim + lx
-    tex_y = addr_y * samples_per_dim + ly
-    tex_z = addr_z * samples_per_dim + lz
-
-    v_normalized = wp.clamp((sdf_val - sdf_min) * sdf_range_inv, 0.0, 1.0)
-    quantized = wp.uint8(v_normalized * 255.0)
-
-    tex_idx = _idx3d(tex_x, tex_y, tex_z, tex_size, tex_size)
-    subgrid_texture[tex_idx] = quantized
+def _make_check_subgrid_occupied_kernel(use_winding_number: bool):
+    @wp.kernel
+    def _check_subgrid_occupied_kernel(
+        mesh: wp.uint64,
+        subgrid_centers: wp.array(dtype=wp.vec3),
+        threshold: wp.vec2f,
+        winding_threshold: float,
+        subgrid_required: wp.array(dtype=wp.int32),
+    ):
+        """Mark subgrids that overlap the narrow band by checking mesh SDF at center."""
+        tid = wp.tid()
+        sample_pos = subgrid_centers[tid]
+
+        if wp.static(use_winding_number):
+            signed_distance = get_distance_to_mesh(mesh, sample_pos, 10000.0, winding_threshold)
+        else:
+            signed_distance = get_distance_to_mesh_raycast(mesh, sample_pos, 10000.0)
+        is_occupied = wp.bool(False)
+        if wp.sign(signed_distance) > 0.0:
+            is_occupied = signed_distance < threshold[1]
+        else:
+            is_occupied = signed_distance > threshold[0]
+
+        if is_occupied:
+            subgrid_required[tid] = 1
+        else:
+            subgrid_required[tid] = 0
+
+    return _check_subgrid_occupied_kernel
+
+
+def _make_check_subgrid_linearity_kernel(use_winding_number: bool):
+    @wp.kernel
+    def _check_subgrid_linearity_kernel(
+        mesh: wp.uint64,
+        background_sdf: wp.array(dtype=float),
+        subgrid_required: wp.array(dtype=wp.int32),
+        subgrid_is_linear: wp.array(dtype=wp.int32),
+        cells_per_subgrid: int,
+        min_corner: wp.vec3,
+        cell_size: wp.vec3,
+        winding_threshold: float,
+        num_subgrids_x: int,
+        num_subgrids_y: int,
+        bg_size_x: int,
+        bg_size_y: int,
+        bg_size_z: int,
+        error_threshold: float,
+    ):
+        """Demote occupied subgrids whose SDF is well-approximated by the coarse grid."""
+        tid = wp.tid()
+        if subgrid_required[tid] == 0:
+            return
+
+        coords = _id_to_xyz(tid, num_subgrids_x, num_subgrids_y)
+        block_x = coords[0]
+        block_y = coords[1]
+        block_z = coords[2]
+
+        s = 1.0 / float(cells_per_subgrid)
+        samples_per_dim = cells_per_subgrid + 1
+        max_abs_error = float(0.0)
+
+        for lz in range(samples_per_dim):
+            for ly in range(samples_per_dim):
+                for lx in range(samples_per_dim):
+                    gx = block_x * cells_per_subgrid + lx
+                    gy = block_y * cells_per_subgrid + ly
+                    gz = block_z * cells_per_subgrid + lz
+
+                    pos = min_corner + wp.vec3(
+                        float(gx) * cell_size[0],
+                        float(gy) * cell_size[1],
+                        float(gz) * cell_size[2],
+                    )
+                    if wp.static(use_winding_number):
+                        mesh_val = get_distance_to_mesh(mesh, pos, 10000.0, winding_threshold)
+                    else:
+                        mesh_val = get_distance_to_mesh_raycast(mesh, pos, 10000.0)
+
+                    coarse_fx = float(block_x) + float(lx) * s
+                    coarse_fy = float(block_y) + float(ly) * s
+                    coarse_fz = float(block_z) + float(lz) * s
+
+                    x0 = int(wp.floor(coarse_fx))
+                    y0 = int(wp.floor(coarse_fy))
+                    z0 = int(wp.floor(coarse_fz))
+                    x0 = wp.clamp(x0, 0, bg_size_x - 2)
+                    y0 = wp.clamp(y0, 0, bg_size_y - 2)
+                    z0 = wp.clamp(z0, 0, bg_size_z - 2)
+
+                    tx = wp.clamp(coarse_fx - float(x0), 0.0, 1.0)
+                    ty = wp.clamp(coarse_fy - float(y0), 0.0, 1.0)
+                    tz = wp.clamp(coarse_fz - float(z0), 0.0, 1.0)
+
+                    v000 = background_sdf[_idx3d(x0, y0, z0, bg_size_x, bg_size_y)]
+                    v100 = background_sdf[_idx3d(x0 + 1, y0, z0, bg_size_x, bg_size_y)]
+                    v010 = background_sdf[_idx3d(x0, y0 + 1, z0, bg_size_x, bg_size_y)]
+                    v110 = background_sdf[_idx3d(x0 + 1, y0 + 1, z0, bg_size_x, bg_size_y)]
+                    v001 = background_sdf[_idx3d(x0, y0, z0 + 1, bg_size_x, bg_size_y)]
+                    v101 = background_sdf[_idx3d(x0 + 1, y0, z0 + 1, bg_size_x, bg_size_y)]
+                    v011 = background_sdf[_idx3d(x0, y0 + 1, z0 + 1, bg_size_x, bg_size_y)]
+                    v111 = background_sdf[_idx3d(x0 + 1, y0 + 1, z0 + 1, bg_size_x, bg_size_y)]
+
+                    c00 = v000 * (1.0 - tx) + v100 * tx
+                    c10 = v010 * (1.0 - tx) + v110 * tx
+                    c01 = v001 * (1.0 - tx) + v101 * tx
+                    c11 = v011 * (1.0 - tx) + v111 * tx
+                    c0 = c00 * (1.0 - ty) + c10 * ty
+                    c1 = c01 * (1.0 - ty) + c11 * ty
+                    coarse_val = c0 * (1.0 - tz) + c1 * tz
+
+                    max_abs_error = wp.max(max_abs_error, wp.abs(mesh_val - coarse_val))
+
+        if max_abs_error < error_threshold:
+            subgrid_is_linear[tid] = 1
+            subgrid_required[tid] = 0
+
+    return _check_subgrid_linearity_kernel
+
+
+def _make_build_coarse_sdf_from_mesh_kernel(use_winding_number: bool):
+    @wp.kernel
+    def _build_coarse_sdf_from_mesh_kernel(
+        mesh: wp.uint64,
+        background_sdf: wp.array(dtype=float),
+        min_corner: wp.vec3,
+        cell_size: wp.vec3,
+        cells_per_subgrid: int,
+        bg_size_x: int,
+        bg_size_y: int,
+        bg_size_z: int,
+        winding_threshold: float,
+    ):
+        """Populate background SDF by querying mesh at subgrid corner positions."""
+        tid = wp.tid()
+
+        total_bg = bg_size_x * bg_size_y * bg_size_z
+        if tid >= total_bg:
+            return
+
+        coords = _id_to_xyz(tid, bg_size_x, bg_size_y)
+        x_block = coords[0]
+        y_block = coords[1]
+        z_block = coords[2]
+
+        pos = min_corner + wp.vec3(
+            float(x_block * cells_per_subgrid) * cell_size[0],
+            float(y_block * cells_per_subgrid) * cell_size[1],
+            float(z_block * cells_per_subgrid) * cell_size[2],
+        )
+
+        if wp.static(use_winding_number):
+            background_sdf[tid] = get_distance_to_mesh(mesh, pos, 10000.0, winding_threshold)
+        else:
+            background_sdf[tid] = get_distance_to_mesh_raycast(mesh, pos, 10000.0)
+
+    return _build_coarse_sdf_from_mesh_kernel
+
+
+def _make_populate_subgrid_texture_float32_kernel(use_winding_number: bool):
+    @wp.kernel
+    def _populate_subgrid_texture_float32_kernel(
+        mesh: wp.uint64,
+        subgrid_required: wp.array(dtype=wp.int32),
+        subgrid_addresses: wp.array(dtype=wp.int32),
+        subgrid_start_slots: wp.array(dtype=wp.uint32, ndim=3),
+        subgrid_texture: wp.array(dtype=float),
+        cells_per_subgrid: int,
+        min_corner: wp.vec3,
+        cell_size: wp.vec3,
+        winding_threshold: float,
+        num_subgrids_x: int,
+        num_subgrids_y: int,
+        num_subgrids_z: int,
+        tex_blocks_per_dim: int,
+        tex_size: int,
+    ):
+        """Populate subgrid texture by querying mesh SDF (float32 version)."""
+        tid = wp.tid()
+
+        total_subgrids = num_subgrids_x * num_subgrids_y * num_subgrids_z
+        samples_per_dim = cells_per_subgrid + 1
+        samples_per_subgrid = samples_per_dim * samples_per_dim * samples_per_dim
+
+        subgrid_idx = tid // samples_per_subgrid
+        local_sample = tid - subgrid_idx * samples_per_subgrid
+
+        if subgrid_idx >= total_subgrids:
+            return
+        if subgrid_required[subgrid_idx] == 0:
+            return
+
+        subgrid_coords = _id_to_xyz(subgrid_idx, num_subgrids_x, num_subgrids_y)
+        block_x = subgrid_coords[0]
+        block_y = subgrid_coords[1]
+        block_z = subgrid_coords[2]
+
+        local_coords = _id_to_xyz(local_sample, samples_per_dim, samples_per_dim)
+        lx = local_coords[0]
+        ly = local_coords[1]
+        lz = local_coords[2]
+
+        gx = block_x * cells_per_subgrid + lx
+        gy = block_y * cells_per_subgrid + ly
+        gz = block_z * cells_per_subgrid + lz
+
+        pos = min_corner + wp.vec3(
+            float(gx) * cell_size[0],
+            float(gy) * cell_size[1],
+            float(gz) * cell_size[2],
+        )
+        if wp.static(use_winding_number):
+            sdf_val = get_distance_to_mesh(mesh, pos, 10000.0, winding_threshold)
+        else:
+            sdf_val = get_distance_to_mesh_raycast(mesh, pos, 10000.0)
+
+        address = subgrid_addresses[subgrid_idx]
+        if address < 0:
+            return
+
+        addr_coords = _id_to_xyz(address, tex_blocks_per_dim, tex_blocks_per_dim)
+        addr_x = addr_coords[0]
+        addr_y = addr_coords[1]
+        addr_z = addr_coords[2]
+
+        if local_sample == 0:
+            start_slot = wp.uint32(addr_x) | (wp.uint32(addr_y) << wp.uint32(10)) | (wp.uint32(addr_z) << wp.uint32(20))
+            subgrid_start_slots[block_x, block_y, block_z] = start_slot
+
+        tex_x = addr_x * samples_per_dim + lx
+        tex_y = addr_y * samples_per_dim + ly
+        tex_z = addr_z * samples_per_dim + lz
+
+        tex_idx = _idx3d(tex_x, tex_y, tex_z, tex_size, tex_size)
+        subgrid_texture[tex_idx] = sdf_val
+
+    return _populate_subgrid_texture_float32_kernel
+
+
+def _make_populate_subgrid_texture_uint16_kernel(use_winding_number: bool):
+    @wp.kernel
+    def _populate_subgrid_texture_uint16_kernel(
+        mesh: wp.uint64,
+        subgrid_required: wp.array(dtype=wp.int32),
+        subgrid_addresses: wp.array(dtype=wp.int32),
+        subgrid_start_slots: wp.array(dtype=wp.uint32, ndim=3),
+        subgrid_texture: wp.array(dtype=wp.uint16),
+        cells_per_subgrid: int,
+        min_corner: wp.vec3,
+        cell_size: wp.vec3,
+        winding_threshold: float,
+        num_subgrids_x: int,
+        num_subgrids_y: int,
+        num_subgrids_z: int,
+        tex_blocks_per_dim: int,
+        tex_size: int,
+        sdf_min: float,
+        sdf_range_inv: float,
+    ):
+        """Populate subgrid texture by querying mesh SDF (uint16 quantized version)."""
+        tid = wp.tid()
+
+        total_subgrids = num_subgrids_x * num_subgrids_y * num_subgrids_z
+        samples_per_dim = cells_per_subgrid + 1
+        samples_per_subgrid = samples_per_dim * samples_per_dim * samples_per_dim
+
+        subgrid_idx = tid // samples_per_subgrid
+        local_sample = tid - subgrid_idx * samples_per_subgrid
+
+        if subgrid_idx >= total_subgrids:
+            return
+        if subgrid_required[subgrid_idx] == 0:
+            return
+
+        subgrid_coords = _id_to_xyz(subgrid_idx, num_subgrids_x, num_subgrids_y)
+        block_x = subgrid_coords[0]
+        block_y = subgrid_coords[1]
+        block_z = subgrid_coords[2]
+
+        local_coords = _id_to_xyz(local_sample, samples_per_dim, samples_per_dim)
+        lx = local_coords[0]
+        ly = local_coords[1]
+        lz = local_coords[2]
+
+        gx = block_x * cells_per_subgrid + lx
+        gy = block_y * cells_per_subgrid + ly
+        gz = block_z * cells_per_subgrid + lz
+
+        pos = min_corner + wp.vec3(
+            float(gx) * cell_size[0],
+            float(gy) * cell_size[1],
+            float(gz) * cell_size[2],
+        )
+        if wp.static(use_winding_number):
+            sdf_val = get_distance_to_mesh(mesh, pos, 10000.0, winding_threshold)
+        else:
+            sdf_val = get_distance_to_mesh_raycast(mesh, pos, 10000.0)
+
+        address = subgrid_addresses[subgrid_idx]
+        if address < 0:
+            return
+
+        addr_coords = _id_to_xyz(address, tex_blocks_per_dim, tex_blocks_per_dim)
+        addr_x = addr_coords[0]
+        addr_y = addr_coords[1]
+        addr_z = addr_coords[2]
+
+        if local_sample == 0:
+            start_slot = wp.uint32(addr_x) | (wp.uint32(addr_y) << wp.uint32(10)) | (wp.uint32(addr_z) << wp.uint32(20))
+            subgrid_start_slots[block_x, block_y, block_z] = start_slot
+
+        tex_x = addr_x * samples_per_dim + lx
+        tex_y = addr_y * samples_per_dim + ly
+        tex_z = addr_z * samples_per_dim + lz
+
+        v_normalized = wp.clamp((sdf_val - sdf_min) * sdf_range_inv, 0.0, 1.0)
+        quantized = wp.uint16(v_normalized * 65535.0)
+
+        tex_idx = _idx3d(tex_x, tex_y, tex_z, tex_size, tex_size)
+        subgrid_texture[tex_idx] = quantized
+
+    return _populate_subgrid_texture_uint16_kernel
+
+
+def _make_populate_subgrid_texture_uint8_kernel(use_winding_number: bool):
+    @wp.kernel
+    def _populate_subgrid_texture_uint8_kernel(
+        mesh: wp.uint64,
+        subgrid_required: wp.array(dtype=wp.int32),
+        subgrid_addresses: wp.array(dtype=wp.int32),
+        subgrid_start_slots: wp.array(dtype=wp.uint32, ndim=3),
+        subgrid_texture: wp.array(dtype=wp.uint8),
+        cells_per_subgrid: int,
+        min_corner: wp.vec3,
+        cell_size: wp.vec3,
+        winding_threshold: float,
+        num_subgrids_x: int,
+        num_subgrids_y: int,
+        num_subgrids_z: int,
+        tex_blocks_per_dim: int,
+        tex_size: int,
+        sdf_min: float,
+        sdf_range_inv: float,
+    ):
+        """Populate subgrid texture by querying mesh SDF (uint8 quantized version)."""
+        tid = wp.tid()
+
+        total_subgrids = num_subgrids_x * num_subgrids_y * num_subgrids_z
+        samples_per_dim = cells_per_subgrid + 1
+        samples_per_subgrid = samples_per_dim * samples_per_dim * samples_per_dim
+
+        subgrid_idx = tid // samples_per_subgrid
+        local_sample = tid - subgrid_idx * samples_per_subgrid
+
+        if subgrid_idx >= total_subgrids:
+            return
+        if subgrid_required[subgrid_idx] == 0:
+            return
+
+        subgrid_coords = _id_to_xyz(subgrid_idx, num_subgrids_x, num_subgrids_y)
+        block_x = subgrid_coords[0]
+        block_y = subgrid_coords[1]
+        block_z = subgrid_coords[2]
+
+        local_coords = _id_to_xyz(local_sample, samples_per_dim, samples_per_dim)
+        lx = local_coords[0]
+        ly = local_coords[1]
+        lz = local_coords[2]
+
+        gx = block_x * cells_per_subgrid + lx
+        gy = block_y * cells_per_subgrid + ly
+        gz = block_z * cells_per_subgrid + lz
+
+        pos = min_corner + wp.vec3(
+            float(gx) * cell_size[0],
+            float(gy) * cell_size[1],
+            float(gz) * cell_size[2],
+        )
+        if wp.static(use_winding_number):
+            sdf_val = get_distance_to_mesh(mesh, pos, 10000.0, winding_threshold)
+        else:
+            sdf_val = get_distance_to_mesh_raycast(mesh, pos, 10000.0)
+
+        address = subgrid_addresses[subgrid_idx]
+        if address < 0:
+            return
+
+        addr_coords = _id_to_xyz(address, tex_blocks_per_dim, tex_blocks_per_dim)
+        addr_x = addr_coords[0]
+        addr_y = addr_coords[1]
+        addr_z = addr_coords[2]
+
+        if local_sample == 0:
+            start_slot = wp.uint32(addr_x) | (wp.uint32(addr_y) << wp.uint32(10)) | (wp.uint32(addr_z) << wp.uint32(20))
+            subgrid_start_slots[block_x, block_y, block_z] = start_slot
+
+        tex_x = addr_x * samples_per_dim + lx
+        tex_y = addr_y * samples_per_dim + ly
+        tex_z = addr_z * samples_per_dim + lz
+
+        v_normalized = wp.clamp((sdf_val - sdf_min) * sdf_range_inv, 0.0, 1.0)
+        quantized = wp.uint8(v_normalized * 255.0)
+
+        tex_idx = _idx3d(tex_x, tex_y, tex_z, tex_size, tex_size)
+        subgrid_texture[tex_idx] = quantized
+
+    return _populate_subgrid_texture_uint8_kernel
 
 
 # ============================================================================
@@ -905,6 +934,7 @@ def build_sparse_sdf_from_mesh(
     winding_threshold: float = 0.5,
     linearization_error_threshold: float | None = None,
     device: str = "cuda",
+    use_winding_number: bool = True,
 ) -> dict:
     """Build sparse SDF texture representation by querying mesh directly.
 
@@ -912,7 +942,7 @@ def build_sparse_sdf_from_mesh(
     occupancy at centers, then populate only occupied subgrids.
 
     Args:
-        mesh: Warp mesh with ``support_winding_number=True``.
+        mesh: Warp mesh.
         grid_size_x: fine grid X dimension [sample].
         grid_size_y: fine grid Y dimension [sample].
         grid_size_z: fine grid Z dimension [sample].
@@ -928,6 +958,8 @@ def build_sparse_sdf_from_mesh(
             data is omitted.  ``None`` auto-computes from domain extents,
             ``0.0`` disables the optimization.
         device: Warp device string.
+        use_winding_number: If ``True``, use generalized winding number for
+            inside/outside. If ``False``, use faster ray-cast sign.
 
     Returns:
         Dictionary with all sparse SDF data.
@@ -953,10 +985,15 @@ def build_sparse_sdf_from_mesh(
     bg_size_z = d + 1
     total_bg = bg_size_x * bg_size_y * bg_size_z
 
+    # Select kernel variants based on sign method
+    _coarse_kernel = _make_build_coarse_sdf_from_mesh_kernel(use_winding_number)
+    _occupy_kernel = _make_check_subgrid_occupied_kernel(use_winding_number)
+    _linearity_kernel = _make_check_subgrid_linearity_kernel(use_winding_number)
+
     background_sdf = wp.zeros(total_bg, dtype=float, device=device)
 
     wp.launch(
-        _build_coarse_sdf_from_mesh_kernel,
+        _coarse_kernel,
         dim=total_bg,
         inputs=[
             mesh.id,
@@ -993,7 +1030,7 @@ def build_sparse_sdf_from_mesh(
     subgrid_required = wp.zeros(total_subgrids, dtype=wp.int32, device=device)
 
     wp.launch(
-        _check_subgrid_occupied_kernel,
+        _occupy_kernel,
         dim=total_subgrids,
         inputs=[mesh.id, subgrid_centers_gpu, threshold, winding_threshold, subgrid_required],
         device=device,
@@ -1016,7 +1053,7 @@ def build_sparse_sdf_from_mesh(
     subgrid_is_linear = wp.zeros(total_subgrids, dtype=wp.int32, device=device)
     if linearization_error_threshold > 0.0:
         wp.launch(
-            _check_subgrid_linearity_kernel,
+            _linearity_kernel,
             dim=total_subgrids,
             inputs=[
                 mesh.id,
@@ -1078,9 +1115,10 @@ def build_sparse_sdf_from_mesh(
         sdf_range_inv = 1.0 / sdf_range
 
         if quantization_mode == QuantizationMode.FLOAT32:
+            _pop_kernel = _make_populate_subgrid_texture_float32_kernel(use_winding_number)
             subgrid_texture_gpu = wp.zeros(total_tex_samples, dtype=float, device=device)
             wp.launch(
-                _populate_subgrid_texture_float32_kernel,
+                _pop_kernel,
                 dim=total_work,
                 inputs=[
                     mesh.id,
@@ -1105,9 +1143,10 @@ def build_sparse_sdf_from_mesh(
             subgrid_texture_data = subgrid_texture_gpu.numpy().reshape((tex_size, tex_size, tex_size))
 
         elif quantization_mode == QuantizationMode.UINT16:
+            _pop_kernel = _make_populate_subgrid_texture_uint16_kernel(use_winding_number)
             subgrid_texture_gpu = wp.zeros(total_tex_samples, dtype=wp.uint16, device=device)
             wp.launch(
-                _populate_subgrid_texture_uint16_kernel,
+                _pop_kernel,
                 dim=total_work,
                 inputs=[
                     mesh.id,
@@ -1134,9 +1173,10 @@ def build_sparse_sdf_from_mesh(
             subgrid_texture_data = subgrid_texture_gpu.numpy().reshape((tex_size, tex_size, tex_size))
 
         elif quantization_mode == QuantizationMode.UINT8:
+            _pop_kernel = _make_populate_subgrid_texture_uint8_kernel(use_winding_number)
             subgrid_texture_gpu = wp.zeros(total_tex_samples, dtype=wp.uint8, device=device)
             wp.launch(
-                _populate_subgrid_texture_uint8_kernel,
+                _pop_kernel,
                 dim=total_work,
                 inputs=[
                     mesh.id,
@@ -1274,6 +1314,7 @@ def create_texture_sdf_from_mesh(
     winding_threshold: float = 0.5,
     scale_baked: bool = False,
     device: str | None = None,
+    use_winding_number: bool = True,
 ) -> tuple[TextureSDFData, wp.Texture3D, wp.Texture3D, list]:
     """Create texture SDF from a Warp mesh.
 
@@ -1281,7 +1322,7 @@ def create_texture_sdf_from_mesh(
     parameters of :func:`~newton._src.geometry.sdf_utils._compute_sdf_from_shape_impl`.
 
     Args:
-        mesh: Warp mesh with ``support_winding_number=True``.
+        mesh: Warp mesh.
         margin: extra AABB padding [m].
         narrow_band_range: signed narrow-band distance range [m] as ``(inner, outer)``.
         max_resolution: maximum grid dimension [voxel].
@@ -1290,6 +1331,8 @@ def create_texture_sdf_from_mesh(
         winding_threshold: winding number threshold for inside/outside classification.
         scale_baked: whether shape scale was baked into the mesh vertices.
         device: Warp device string. ``None`` uses the mesh's device.
+        use_winding_number: If ``True``, use generalized winding number for
+            inside/outside. If ``False``, use faster ray-cast sign.
 
     Returns:
         Tuple of ``(texture_sdf, coarse_texture, subgrid_texture, block_coords)``.
@@ -1332,6 +1375,7 @@ def create_texture_sdf_from_mesh(
         quantization_mode=quantization_mode,
         winding_threshold=winding_threshold,
         device=device,
+        use_winding_number=use_winding_number,
     )
 
     sdf_params, coarse_tex, subgrid_tex = create_sparse_sdf_textures(sparse_data, device)

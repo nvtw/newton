@@ -233,6 +233,7 @@ class SDF:
         margin: float = 0.05,
         shape_margin: float = 0.0,
         scale: tuple[float, float, float] | None = None,
+        use_winding_number: bool = True,
     ) -> "SDF":
         """Create an SDF from triangle mesh points and indices.
 
@@ -249,6 +250,9 @@ class SDF:
             margin: Extra AABB padding [m] added before discretization.
             shape_margin: Shape margin offset [m] to subtract from SDF values.
             scale: Scale factors ``(sx, sy, sz)`` to bake into the SDF.
+            use_winding_number: If ``True`` (default), use generalized winding
+                number for inside/outside classification. If ``False``, use
+                faster ray-cast sign determination.
 
         Returns:
             A validated :class:`SDF` runtime handle with sparse/coarse volumes.
@@ -263,6 +267,7 @@ class SDF:
             margin=margin,
             shape_margin=shape_margin,
             scale=scale,
+            use_winding_number=use_winding_number,
         )
 
     @staticmethod
@@ -277,6 +282,7 @@ class SDF:
         shape_margin: float = 0.0,
         scale: tuple[float, float, float] | None = None,
         texture_format: str = "uint16",
+        use_winding_number: bool = True,
     ) -> "SDF":
         """Create an SDF from a mesh in local mesh coordinates.
 
@@ -305,6 +311,11 @@ class SDF:
                 (default) uses 16-bit normalized textures for half the memory
                 of ``"float32"`` with negligible precision loss. ``"uint8"``
                 uses 8-bit textures for minimum memory.
+            use_winding_number: If ``True`` (default), use generalized winding
+                number for inside/outside classification. Accurate for
+                non-watertight meshes but O(n) per query. If ``False``, use
+                ray-cast sign determination which is faster and more robust
+                than pseudo-normals for meshes with inconsistent winding.
 
         Returns:
             A validated :class:`SDF` runtime handle with sparse/coarse volumes.
@@ -323,6 +334,7 @@ class SDF:
             max_resolution=effective_max_resolution if effective_max_resolution is not None else 64,
             bake_scale=bake_scale,
             device=device,
+            use_winding_number=use_winding_number,
         )
 
         # Build texture SDF alongside NanoVDB
@@ -346,7 +358,11 @@ class SDF:
                 verts = mesh.vertices * np.array(effective_scale)[None, :]
                 pos = wp.array(verts, dtype=wp.vec3)
                 indices = wp.array(mesh.indices, dtype=wp.int32)
-                tex_mesh = wp.Mesh(points=pos, indices=indices, support_winding_number=True)
+                tex_mesh = wp.Mesh(
+                    points=pos,
+                    indices=indices,
+                    support_winding_number=use_winding_number,
+                )
 
                 signed_volume = compute_mesh_signed_volume(pos, indices)
                 winding_threshold = 0.5 if signed_volume >= 0.0 else -0.5
@@ -360,6 +376,7 @@ class SDF:
                     quantization_mode=qmode,
                     winding_threshold=winding_threshold,
                     scale_baked=bake_scale,
+                    use_winding_number=use_winding_number,
                 )
                 wp.synchronize()
 
@@ -480,30 +497,56 @@ def get_distance_to_mesh(mesh: wp.uint64, point: wp.vec3, max_dist: wp.float32, 
     return max_dist
 
 
-@wp.kernel
-def sdf_from_mesh_kernel(
-    mesh: wp.uint64,
-    sdf: wp.uint64,
-    tile_points: wp.array(dtype=wp.vec3i),
-    shape_margin: wp.float32,
-    winding_threshold: wp.float32,
-):
-    """
-    Populate SDF grid from triangle mesh.
-    Only processes specified tiles. Launch with dim=(num_tiles, 8, 8, 8).
-    """
-    tile_idx, local_x, local_y, local_z = wp.tid()
+@wp.func
+def get_distance_to_mesh_raycast(mesh: wp.uint64, point: wp.vec3, max_dist: wp.float32):
+    """Signed distance using ray-cast sign determination.
 
-    # Get the tile origin and compute global voxel coordinates
-    tile_origin = tile_points[tile_idx]
-    x_id = tile_origin[0] + local_x
-    y_id = tile_origin[1] + local_y
-    z_id = tile_origin[2] + local_z
+    Faster than :func:`get_distance_to_mesh` (winding number) while being
+    more robust than pseudo-normal sign for meshes with inconsistent winding.
+    Uses multiple ray-casts to vote on inside/outside classification.
+    """
+    res = wp.mesh_query_point(mesh, point, max_dist)
+    if res.result:
+        closest = wp.mesh_eval_position(mesh, res.face, res.u, res.v)
+        sign = -1.0
+        if res.sign >= 0.0:
+            sign = 1.0
+        return sign * wp.length(closest - point)
+    return max_dist
 
-    sample_pos = wp.volume_index_to_world(sdf, int_to_vec3f(x_id, y_id, z_id))
-    signed_distance = get_distance_to_mesh(mesh, sample_pos, 10000.0, winding_threshold)
-    signed_distance -= shape_margin
-    wp.volume_store(sdf, x_id, y_id, z_id, signed_distance)
+
+def _make_sdf_from_mesh_kernel(use_winding_number: bool):
+    @wp.kernel
+    def sdf_from_mesh_kernel(
+        mesh: wp.uint64,
+        sdf: wp.uint64,
+        tile_points: wp.array(dtype=wp.vec3i),
+        shape_margin: wp.float32,
+        winding_threshold: wp.float32,
+    ):
+        """Populate SDF grid from triangle mesh.
+        Only processes specified tiles. Launch with dim=(num_tiles, 8, 8, 8).
+        """
+        tile_idx, local_x, local_y, local_z = wp.tid()
+
+        tile_origin = tile_points[tile_idx]
+        x_id = tile_origin[0] + local_x
+        y_id = tile_origin[1] + local_y
+        z_id = tile_origin[2] + local_z
+
+        sample_pos = wp.volume_index_to_world(sdf, int_to_vec3f(x_id, y_id, z_id))
+        if wp.static(use_winding_number):
+            signed_distance = get_distance_to_mesh(mesh, sample_pos, 10000.0, winding_threshold)
+        else:
+            signed_distance = get_distance_to_mesh_raycast(mesh, sample_pos, 10000.0)
+        signed_distance -= shape_margin
+        wp.volume_store(sdf, x_id, y_id, z_id, signed_distance)
+
+    return sdf_from_mesh_kernel
+
+
+sdf_from_mesh_kernel = _make_sdf_from_mesh_kernel(use_winding_number=True)
+sdf_from_mesh_kernel_raycast = _make_sdf_from_mesh_kernel(use_winding_number=False)
 
 
 @wp.kernel(enable_backward=False)
@@ -543,24 +586,34 @@ def sdf_from_primitive_kernel(
     wp.volume_store(sdf, x_id, y_id, z_id, signed_distance)
 
 
-@wp.kernel
-def check_tile_occupied_mesh_kernel(
-    mesh: wp.uint64,
-    tile_points: wp.array(dtype=wp.vec3f),
-    threshold: wp.vec2f,
-    winding_threshold: wp.float32,
-    tile_occupied: wp.array(dtype=bool),
-):
-    tid = wp.tid()
-    sample_pos = tile_points[tid]
+def _make_check_tile_occupied_mesh_kernel(use_winding_number: bool):
+    @wp.kernel
+    def check_tile_occupied_mesh_kernel(
+        mesh: wp.uint64,
+        tile_points: wp.array(dtype=wp.vec3f),
+        threshold: wp.vec2f,
+        winding_threshold: wp.float32,
+        tile_occupied: wp.array(dtype=bool),
+    ):
+        tid = wp.tid()
+        sample_pos = tile_points[tid]
 
-    signed_distance = get_distance_to_mesh(mesh, sample_pos, 10000.0, winding_threshold)
-    is_occupied = wp.bool(False)
-    if wp.sign(signed_distance) > 0.0:
-        is_occupied = signed_distance < threshold[1]
-    else:
-        is_occupied = signed_distance > threshold[0]
-    tile_occupied[tid] = is_occupied
+        if wp.static(use_winding_number):
+            signed_distance = get_distance_to_mesh(mesh, sample_pos, 10000.0, winding_threshold)
+        else:
+            signed_distance = get_distance_to_mesh_raycast(mesh, sample_pos, 10000.0)
+        is_occupied = wp.bool(False)
+        if wp.sign(signed_distance) > 0.0:
+            is_occupied = signed_distance < threshold[1]
+        else:
+            is_occupied = signed_distance > threshold[0]
+        tile_occupied[tid] = is_occupied
+
+    return check_tile_occupied_mesh_kernel
+
+
+check_tile_occupied_mesh_kernel = _make_check_tile_occupied_mesh_kernel(use_winding_number=True)
+check_tile_occupied_mesh_kernel_raycast = _make_check_tile_occupied_mesh_kernel(use_winding_number=False)
 
 
 @wp.kernel(enable_backward=False)
@@ -644,6 +697,7 @@ def _compute_sdf_from_shape_impl(
     bake_scale: bool = False,
     verbose: bool = False,
     device: Devicelike | None = None,
+    use_winding_number: bool = True,
 ) -> tuple[SDFData, wp.Volume | None, wp.Volume | None, Sequence[wp.vec3us]]:
     """Compute sparse and coarse SDF volumes for a shape.
 
@@ -664,6 +718,8 @@ def _compute_sdf_from_shape_impl(
         verbose: Print debug info.
         device: CUDA device for all GPU allocations. When ``None``, uses the
             current :class:`wp.ScopedDevice` or the Warp default device.
+        use_winding_number: If ``True``, use generalized winding number for
+            inside/outside. If ``False``, use faster ray-cast sign.
 
     Returns:
         Tuple of (sdf_data, sparse_volume, coarse_volume, block_coords) where:
@@ -702,7 +758,7 @@ def _compute_sdf_from_shape_impl(
             pos = wp.array(verts, dtype=wp.vec3)
             indices = wp.array(shape_geo.indices, dtype=wp.int32)
 
-            mesh = wp.Mesh(points=pos, indices=indices, support_winding_number=True)
+            mesh = wp.Mesh(points=pos, indices=indices, support_winding_number=use_winding_number)
             m_id = mesh.id
 
             # Compute winding threshold based on mesh volume sign
@@ -762,9 +818,14 @@ def _compute_sdf_from_shape_impl(
         tile_radius = np.linalg.norm(4 * actual_voxel_size)
         threshold = wp.vec2f(narrow_band_distance[0] - tile_radius, narrow_band_distance[1] + tile_radius)
 
+        _occupy_kernel = (
+            check_tile_occupied_mesh_kernel if use_winding_number else check_tile_occupied_mesh_kernel_raycast
+        )
+        _sdf_kernel = sdf_from_mesh_kernel if use_winding_number else sdf_from_mesh_kernel_raycast
+
         if shape_type == GeoType.MESH:
             wp.launch(
-                check_tile_occupied_mesh_kernel,
+                _occupy_kernel,
                 dim=(len(tile_points)),
                 inputs=[m_id, tile_center_points_world, threshold, winding_threshold],
                 outputs=[tile_occupied],
@@ -795,7 +856,7 @@ def _compute_sdf_from_shape_impl(
         num_allocated_tiles = len(tile_points)
         if shape_type == GeoType.MESH:
             wp.launch(
-                sdf_from_mesh_kernel,
+                _sdf_kernel,
                 dim=(num_allocated_tiles, 8, 8, 8),
                 inputs=[m_id, sparse_volume.id, tile_points_wp, shape_margin, winding_threshold],
             )
@@ -825,7 +886,7 @@ def _compute_sdf_from_shape_impl(
         # Populate the coarse volume with SDF values (single tile)
         if shape_type == GeoType.MESH:
             wp.launch(
-                sdf_from_mesh_kernel,
+                _sdf_kernel,
                 dim=(1, 8, 8, 8),
                 inputs=[m_id, coarse_volume.id, coarse_tile_points_wp, shape_margin, winding_threshold],
             )
@@ -874,6 +935,7 @@ def compute_sdf_from_shape(
     bake_scale: bool = False,
     verbose: bool = False,
     device: Devicelike | None = None,
+    use_winding_number: bool = True,
 ) -> tuple[SDFData, wp.Volume | None, wp.Volume | None, Sequence[wp.vec3us]]:
     """Compute sparse and coarse SDF volumes for a shape.
 
@@ -894,6 +956,8 @@ def compute_sdf_from_shape(
         verbose: If ``True``, print debug information during SDF construction.
         device: CUDA device for SDF allocation. When ``None``, uses the
             current :class:`wp.ScopedDevice` or the Warp default device.
+        use_winding_number: If ``True``, use generalized winding number for
+            inside/outside. If ``False``, use faster ray-cast sign.
 
     Returns:
         Tuple ``(sdf_data, sparse_volume, coarse_volume, block_coords)``.
@@ -901,7 +965,6 @@ def compute_sdf_from_shape(
     if shape_type == GeoType.MESH:
         if shape_geo is None:
             raise ValueError("shape_geo must be provided for GeoType.MESH.")
-        # Canonical mesh path: use SDF.create_from_mesh for all mesh SDF generation.
         sdf = SDF.create_from_mesh(
             shape_geo,
             device=device,
@@ -911,6 +974,7 @@ def compute_sdf_from_shape(
             margin=margin,
             shape_margin=shape_margin,
             scale=tuple(shape_scale) if bake_scale else None,
+            use_winding_number=use_winding_number,
         )
         return sdf.to_kernel_data(), sdf.sparse_volume, sdf.coarse_volume, (sdf.block_coords or [])
 
@@ -926,6 +990,7 @@ def compute_sdf_from_shape(
         bake_scale=bake_scale,
         verbose=verbose,
         device=device,
+        use_winding_number=use_winding_number,
     )
 
 
