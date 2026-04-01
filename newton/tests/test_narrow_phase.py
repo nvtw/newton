@@ -1980,5 +1980,135 @@ class TestBufferOverflowWarnings(unittest.TestCase):
         # Warning capture via wp.printf is optional; counter/capacity check above is authoritative.
 
 
+class TestMPREnlargeCorrection(TestNarrowPhase):
+    """Verify that the anti-flicker enlarge in MPR does not bias returned distances or contact points."""
+
+    def test_box_box_touching_penetration_accuracy(self):
+        """Two boxes with a small known overlap must report the correct penetration depth.
+
+        Box A: half-extents 0.5, centered at origin  -> face at z = +0.5
+        Box B: half-extents 0.5, centered at z = 0.99 -> face at z = 0.49
+        Geometric overlap along Z = 0.01, so expected penetration = -0.01.
+
+        The MPR anti-flicker enlarge (1e-4) inflates support points.  Without
+        correction the deepest contact distance is off by -1e-4.  This test
+        uses a tolerance tight enough (5e-5) to catch that error.
+        """
+        overlap = 0.01
+        gap = 1.0 - overlap  # distance between centers along Z
+        geom_list = [
+            {"type": GeoType.BOX, "transform": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]), "data": ([0.5, 0.5, 0.5], 0.0)},
+            {
+                "type": GeoType.BOX,
+                "transform": ([0.0, 0.0, gap], [0.0, 0.0, 0.0, 1.0]),
+                "data": ([0.5, 0.5, 0.5], 0.0),
+            },
+        ]
+
+        count, _pairs, _positions, _normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+
+        self.assertGreater(count, 0, "Overlapping boxes must generate at least one contact")
+
+        expected_penetration = -overlap
+        deepest = min(penetrations[:count])
+
+        self.assertAlmostEqual(
+            float(deepest),
+            expected_penetration,
+            delta=5e-5,
+            msg=f"Deepest penetration {deepest} should match geometric truth {expected_penetration} (tolerance 5e-5)",
+        )
+
+    def test_box_box_just_touching_zero_penetration(self):
+        """Two boxes whose faces are exactly coincident must report penetration ~0.
+
+        Box A face at z = +0.5, Box B face at z = +0.5 (center at z = 1.0).
+        Expected penetration = 0.  An uncorrected enlarge would report ~-1e-4.
+        """
+        geom_list = [
+            {
+                "type": GeoType.BOX,
+                "transform": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
+                "data": ([0.5, 0.5, 0.5], 0.0),
+                "cutoff": 0.01,
+            },
+            {
+                "type": GeoType.BOX,
+                "transform": ([0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]),
+                "data": ([0.5, 0.5, 0.5], 0.0),
+                "cutoff": 0.01,
+            },
+        ]
+
+        count, _pairs, _positions, _normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+
+        self.assertGreater(count, 0, "Touching boxes must generate at least one contact")
+
+        deepest = min(penetrations[:count])
+
+        self.assertAlmostEqual(
+            float(deepest),
+            0.0,
+            delta=5e-5,
+            msg=f"Touching boxes should have penetration ~0, got {deepest} (tolerance 5e-5)",
+        )
+
+    def test_box_box_contact_point_on_surface(self):
+        """Contact points reconstructed from center + distance must lie on the true box surfaces.
+
+        Uses the same overlap scenario as test_box_box_touching_penetration_accuracy.
+        For each contact, the reconstructed surface points (center +/- d/2 * normal)
+        should be within 5e-5 of the respective box faces.
+        """
+        overlap = 0.05
+        gap = 1.0 - overlap
+        box_a_pos = np.array([0.0, 0.0, 0.0])
+        box_a_size = np.array([0.5, 0.5, 0.5])
+        box_b_pos = np.array([0.0, 0.0, gap])
+        box_b_size = np.array([0.5, 0.5, 0.5])
+
+        geom_list = [
+            {
+                "type": GeoType.BOX,
+                "transform": (box_a_pos.tolist(), [0.0, 0.0, 0.0, 1.0]),
+                "data": (box_a_size.tolist(), 0.0),
+            },
+            {
+                "type": GeoType.BOX,
+                "transform": (box_b_pos.tolist(), [0.0, 0.0, 0.0, 1.0]),
+                "data": (box_b_size.tolist(), 0.0),
+            },
+        ]
+
+        count, _pairs, positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        self.assertGreater(count, 0)
+
+        for i in range(count):
+            if penetrations[i] >= 0.0:
+                continue
+            n = normals[i]
+            d = penetrations[i]
+            center = positions[i]
+
+            surface_a = center - n * (d / 2.0)
+            surface_b = center + n * (d / 2.0)
+
+            dist_a = distance_point_to_box(surface_a, box_a_pos, np.eye(3), box_a_size)
+            dist_b = distance_point_to_box(surface_b, box_b_pos, np.eye(3), box_b_size)
+
+            self.assertAlmostEqual(
+                float(dist_a),
+                0.0,
+                delta=5e-5,
+                msg=f"Contact {i}: surface point A is {dist_a} from box A surface (should be ~0)",
+            )
+            self.assertAlmostEqual(
+                float(dist_b),
+                0.0,
+                delta=5e-5,
+                msg=f"Contact {i}: surface point B is {dist_b} from box B surface (should be ~0)",
+            )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=True)

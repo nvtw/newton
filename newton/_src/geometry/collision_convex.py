@@ -67,6 +67,12 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
 
         if collision:
             signed_distance = -penetration + enlarge
+            # Undo the inflate on the witness points so downstream consumers
+            # (manifold builder, contact writer) see true-surface positions.
+            # The midpoint 0.5*(point_a + point_b) is unchanged (corrections cancel).
+            half_enlarge = enlarge * 0.5
+            point_a = point_a - normal * half_enlarge
+            point_b = point_b + normal * half_enlarge
         else:
             # GJK fallback for separated shapes -- Nesterov-accelerated.
             _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
@@ -160,6 +166,9 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
 
         if collision:
             signed_distance = -penetration + enlarge
+            half_enlarge = enlarge * 0.5
+            point_a = point_a - normal * half_enlarge
+            point_b = point_b + normal * half_enlarge
         else:
             # GJK fallback for separated shapes -- Nesterov-accelerated.
             _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
