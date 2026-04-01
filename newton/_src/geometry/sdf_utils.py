@@ -1425,7 +1425,10 @@ def compute_offset_mesh_analytical(
 
         # Adaptively increase resolution when the expansion dominates the
         # shape extents (e.g. a 1 mm sphere with 0.05 m expansion).  This
-        # ensures at least ~4 voxels span the smallest shape dimension.
+        # ensures at least ~4 voxels span the smallest shape dimension while
+        # capping total memory via a voxel budget (default ~4M voxels ≈ 16 MB
+        # of float32) so thin/flat shapes don't cause OOM.
+        max_voxel_budget = 4_000_000
         shape_ext = np.array(max_ext_list, dtype=np.float64) - np.array(min_ext_list, dtype=np.float64)
         min_shape_dim = float(np.min(shape_ext))
         if min_shape_dim > 0.0:
@@ -1436,6 +1439,23 @@ def compute_offset_mesh_analytical(
         max_extent = float(np.max(ext))
         voxel_target = max_extent / effective_resolution
         grid_dims = np.maximum(np.round(ext / voxel_target).astype(int), 2)
+
+        total_voxels = int(np.prod(grid_dims))
+        if total_voxels > max_voxel_budget:
+            scale_factor = (max_voxel_budget / total_voxels) ** (1.0 / 3.0)
+            grid_dims = np.maximum(np.round(grid_dims * scale_factor).astype(int), 2)
+            logger.warning(
+                "compute_offset_mesh_analytical: clamped grid from %d voxels to %dx%dx%d (%d voxels) "
+                "for shape type %d with scale %s. Visualization may be lower-fidelity for this shape.",
+                total_voxels,
+                grid_dims[0],
+                grid_dims[1],
+                grid_dims[2],
+                int(np.prod(grid_dims)),
+                shape_type,
+                shape_scale,
+            )
+
         actual_voxel_size = ext / (grid_dims - 1)
 
         nx, ny, nz = int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2])
