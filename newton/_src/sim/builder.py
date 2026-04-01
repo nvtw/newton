@@ -9886,7 +9886,11 @@ class ModelBuilder:
             edge_cache = {}  # mesh python id → (start, count)
 
             for i in range(len(self.shape_type)):
-                if self.shape_type[i] == GeoType.MESH and self.shape_source[i] is not None:
+                if (
+                    self.shape_type[i] == GeoType.MESH
+                    and self.shape_source[i] is not None
+                    and (self.shape_flags[i] & ShapeFlags.COLLIDE_SHAPES)
+                ):
                     mesh = self.shape_source[i]
                     mesh_key = id(mesh)
                     if mesh_key in edge_cache:
