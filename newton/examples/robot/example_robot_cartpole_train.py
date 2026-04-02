@@ -21,6 +21,7 @@ import newton
 import newton.examples
 from newton._src.ppo import ActorCritic, PPOTrainer
 from newton._src.robot_env import RobotEnv
+from newton._src.training_monitor import TrainingMonitor
 from newton._src.warp_nn import export_to_onnx
 
 # ---------------------------------------------------------------------------
@@ -236,6 +237,7 @@ class Example:
         self.obs = None
 
         self.viewer.set_model(self.env.model)
+        self.monitor = TrainingMonitor(self.viewer)
 
     def step(self):
         if self.training and self.update_idx < self.total_updates:
@@ -244,8 +246,10 @@ class Example:
             self.trainer.update()
             self.update_idx += 1
 
+            stats = self.trainer.get_stats()
+            self.monitor.log(stats)
+
             if self.update_idx % 5 == 0:
-                stats = self.trainer.get_stats()
                 steps = self.update_idx * self.steps_per_update
                 print(
                     f"Update {self.update_idx}/{self.total_updates} | steps={steps}"
