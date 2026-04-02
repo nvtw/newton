@@ -39,7 +39,6 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
         orientation_b: wp.quat,
         position_a: wp.vec3,
         position_b: wp.vec3,
-        combined_margin: float,
         data_provider: Any,
         contact_threshold: float,
         skip_multi_contact: bool,
@@ -61,7 +60,7 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
             geom_b,
             relative_orientation_b,
             relative_position_b,
-            combined_margin + enlarge,
+            enlarge,
             data_provider,
         )
 
@@ -74,13 +73,13 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
             point_a = point_a - normal * half_enlarge
             point_b = point_b + normal * half_enlarge
         else:
-            # GJK fallback for separated shapes -- Nesterov-accelerated.
+            # GJK fallback for separated shapes -- no Minkowski inflate needed.
             _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
                 geom_a,
                 geom_b,
                 relative_orientation_b,
                 relative_position_b,
-                combined_margin,
+                0.0,
                 data_provider,
             )
 
@@ -140,7 +139,6 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
         orientation_b: wp.quat,
         position_a: wp.vec3,
         position_b: wp.vec3,
-        combined_margin: float,
         data_provider: Any,
         contact_threshold: float,
         writer_data: Any,
@@ -160,7 +158,7 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
             geom_b,
             relative_orientation_b,
             relative_position_b,
-            combined_margin + enlarge,
+            enlarge,
             data_provider,
         )
 
@@ -170,13 +168,13 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
             point_a = point_a - normal * half_enlarge
             point_b = point_b + normal * half_enlarge
         else:
-            # GJK fallback for separated shapes -- Nesterov-accelerated.
+            # GJK fallback for separated shapes -- no Minkowski inflate needed.
             _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
                 geom_a,
                 geom_b,
                 relative_orientation_b,
                 relative_position_b,
-                combined_margin,
+                0.0,
                 data_provider,
             )
 
