@@ -1024,6 +1024,25 @@ class PPOTrainer:
         self._n_samples = n_samples
         self._batch_size = batch_size
 
+        # Profiling (opt-in, near-zero overhead when disabled)
+        self.profile = False
+        self._evt_sim_start: wp.Event | None = None
+        self._evt_sim_end: wp.Event | None = None
+        self._evt_ppo_start: wp.Event | None = None
+        self._evt_ppo_end: wp.Event | None = None
+        self._time_sim_ms = 0.0
+        self._time_ppo_ms = 0.0
+
+    def enable_profiling(self) -> None:
+        """Create CUDA timing events.  Call once before the training loop."""
+        self.profile = True
+        self._evt_sim_start = wp.Event(enable_timing=True)
+        self._evt_sim_end = wp.Event(enable_timing=True)
+        self._evt_ppo_start = wp.Event(enable_timing=True)
+        self._evt_ppo_end = wp.Event(enable_timing=True)
+        self._time_sim_ms = 0.0
+        self._time_ppo_ms = 0.0
+
     def collect_rollouts(self, env: Any, obs: wp.array | None = None) -> tuple[wp.array, wp.array]:
         """Run the policy in *env* for ``num_steps`` and fill the buffer.
 
@@ -1038,13 +1057,31 @@ class PPOTrainer:
         if obs is None:
             obs = env.reset()
         buf = self.buffer
+        p = self.profile
 
         for t in range(buf.num_steps):
+            if p:
+                wp.record_event(self._evt_ppo_start)
             self.obs_normalizer.update_and_normalize(obs, self._norm_obs)
             actions, log_probs, values = self.ac.act(self._norm_obs, self._rng_counter)
+            if p:
+                wp.record_event(self._evt_ppo_end)
+                self._time_ppo_ms += wp.get_event_elapsed_time(self._evt_ppo_start, self._evt_ppo_end)
+                wp.record_event(self._evt_sim_start)
 
             next_obs, rewards, dones = env.step(actions)
+
+            if p:
+                wp.record_event(self._evt_sim_end)
+                self._time_sim_ms += wp.get_event_elapsed_time(self._evt_sim_start, self._evt_sim_end)
+                wp.record_event(self._evt_ppo_start)
+
             buf.insert(t, self._norm_obs, actions, self.ac._act_pre_tanh, log_probs, rewards, dones, values)
+
+            if p:
+                wp.record_event(self._evt_ppo_end)
+                self._time_ppo_ms += wp.get_event_elapsed_time(self._evt_ppo_start, self._evt_ppo_end)
+
             obs = next_obs
 
         self.obs_normalizer.normalize(obs, self._norm_obs)
@@ -1079,15 +1116,16 @@ class PPOTrainer:
         Returns:
             Average loss (single scalar readback for logging).
         """
+        p = self.profile
+        if p:
+            wp.record_event(self._evt_ppo_start)
+
         self.buffer.flatten()
         self._normalize_advantages()
 
         n_samples = self._n_samples
         batch_size = self._batch_size
         device = self.ac._device
-
-        # Note: self._loss holds the loss from the last mini-batch.
-        # Use get_stats() after update() to read it back.
 
         for _epoch in range(self.num_epochs):
             wp.launch(
@@ -1191,6 +1229,10 @@ class PPOTrainer:
 
                 tape.zero()
 
+        if p:
+            wp.record_event(self._evt_ppo_end)
+            self._time_ppo_ms += wp.get_event_elapsed_time(self._evt_ppo_start, self._evt_ppo_end)
+
     def _clip_grad_norm(self, grads: list[wp.array]) -> None:
         device = self.ac._device
         self._grad_norm_sq.zero_()
@@ -1211,11 +1253,17 @@ class PPOTrainer:
         graph) to retrieve diagnostics.  All readbacks are in this single
         method so the training loop itself remains graph-capture safe.
         """
-        return {
+        stats = {
             "loss": float(self._loss.numpy()[0]),
             "mean_reward": self.buffer.mean_reward(),
             "alpha": float(np.exp(self._log_alpha.numpy()[0])),
         }
+        if self.profile:
+            stats["sim_ms"] = self._time_sim_ms
+            stats["ppo_ms"] = self._time_ppo_ms
+            self._time_sim_ms = 0.0
+            self._time_ppo_ms = 0.0
+        return stats
 
     def train(self, env: Any, total_timesteps: int, log_interval: int = 1) -> None:
         """Main training loop."""
