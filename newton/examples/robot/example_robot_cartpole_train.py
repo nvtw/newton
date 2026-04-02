@@ -4,9 +4,9 @@
 ###########################################################################
 # Example Robot Cartpole Train
 #
-# Trains a double-pendulum cartpole balancing policy from scratch using
-# the built-in PPO trainer.  The cart must keep both poles upright
-# despite random perturbation forces applied every few steps.
+# Trains an inverted pendulum (cart-pole) balancing policy from scratch.
+# The cart slides on a rail and must keep a single unactuated pole upright.
+# Built from primitives -- no external asset files needed.
 #
 # Command: python -m newton.examples robot_cartpole_train
 #
@@ -14,18 +14,16 @@
 
 from __future__ import annotations
 
-import numpy as np
 import warp as wp
 
 import newton
 import newton.examples
 from newton._src.ppo import ActorCritic, PPOTrainer, _increment_counter_kernel
 from newton._src.robot_env import RobotEnv
-from newton._src.training_monitor import TrainingMonitor
 from newton._src.warp_nn import export_to_onnx
 
-_Q_STRIDE = 3
-_QD_STRIDE = 3
+_Q_STRIDE = 2  # cart_pos, pole_angle
+_QD_STRIDE = 2  # cart_vel, pole_angular_vel
 _MAX_EPISODE_LENGTH = 500
 
 
@@ -36,12 +34,15 @@ _MAX_EPISODE_LENGTH = 500
 
 @wp.kernel
 def _compute_obs_kernel(joint_q: wp.array[float], joint_qd: wp.array[float], obs: wp.array2d[float]):
+    """Obs = [cart_pos, sin(pole_angle), cos(pole_angle), cart_vel, pole_vel]."""
     env = wp.tid()
-    q_off = env * _Q_STRIDE
-    qd_off = env * _QD_STRIDE
-    for j in range(3):
-        obs[env, j] = joint_q[q_off + j]
-        obs[env, 3 + j] = joint_qd[qd_off + j]
+    q = env * _Q_STRIDE
+    qd = env * _QD_STRIDE
+    obs[env, 0] = joint_q[q]
+    obs[env, 1] = wp.sin(joint_q[q + 1])
+    obs[env, 2] = wp.cos(joint_q[q + 1])
+    obs[env, 3] = joint_qd[qd]
+    obs[env, 4] = joint_qd[qd + 1]
 
 
 @wp.kernel
@@ -53,25 +54,21 @@ def _compute_rewards_kernel(
     dones: wp.array[float],
 ):
     env = wp.tid()
-    q_off = env * _Q_STRIDE
-    qd_off = env * _QD_STRIDE
+    q = env * _Q_STRIDE
+    qd = env * _QD_STRIDE
+    cart_pos = joint_q[q]
+    pole_angle = joint_q[q + 1]
+    cart_vel = joint_qd[qd]
+    pole_vel = joint_qd[qd + 1]
 
-    cart_pos = joint_q[q_off + 0]
-    pole1_angle = joint_q[q_off + 1]
-    pole2_angle = joint_q[q_off + 2]
-    cart_vel = joint_qd[qd_off + 0]
-    pole1_vel = joint_qd[qd_off + 1]
-    pole2_vel = joint_qd[qd_off + 2]
-
-    upright1 = wp.cos(pole1_angle)
-    upright2 = wp.cos(pole1_angle + pole2_angle)
-    vel_penalty = 0.001 * (cart_vel * cart_vel + pole1_vel * pole1_vel + pole2_vel * pole2_vel)
-    rewards[env] = 1.0 + 0.5 * (upright1 + upright2) - 0.01 * cart_pos * cart_pos - vel_penalty
+    # Reward: pole upright + cart centered + small velocity penalty
+    upright = wp.cos(pole_angle)
+    rewards[env] = upright - 0.01 * cart_pos * cart_pos - 0.001 * (cart_vel * cart_vel + pole_vel * pole_vel)
 
     terminated = float(0.0)
-    if wp.abs(cart_pos) > 2.5:
+    if wp.abs(cart_pos) > 2.4:
         terminated = 1.0
-    if upright1 < 0.0:  # pole1 > 90 degrees
+    if upright < -0.5:  # pole > ~120 degrees from vertical
         terminated = 1.0
     if episode_lengths[env] >= _MAX_EPISODE_LENGTH:
         terminated = 1.0
@@ -82,23 +79,6 @@ def _compute_rewards_kernel(
 def _apply_actions_kernel(actions: wp.array2d[float], joint_target_pos: wp.array[float]):
     env = wp.tid()
     joint_target_pos[env * _QD_STRIDE] = actions[env, 0] * 5.0
-
-
-@wp.kernel
-def _apply_perturbation_kernel(
-    joint_qd: wp.array[float],
-    rng_counter: wp.array[int],
-    num_envs: int,
-):
-    """Apply random velocity kicks to pole joints every call."""
-    env = wp.tid()
-    seed = rng_counter[0]
-    rng = wp.rand_init(seed, env * 7 + 12345)
-    qd_off = env * _QD_STRIDE
-    # Random kick to pole1 angular velocity
-    joint_qd[qd_off + 1] = joint_qd[qd_off + 1] + (wp.randf(rng) - 0.5) * 0.5
-    # Random kick to pole2 angular velocity
-    joint_qd[qd_off + 2] = joint_qd[qd_off + 2] + (wp.randf(rng) - 0.5) * 0.3
 
 
 @wp.kernel
@@ -113,15 +93,32 @@ def _reset_envs_kernel(
 ):
     env = wp.tid()
     if dones[env] > 0.5:
-        q_off = env * _Q_STRIDE
-        qd_off = env * _QD_STRIDE
+        q = env * _Q_STRIDE
+        qd = env * _QD_STRIDE
         seed = rng_counter[0]
-        rng = wp.rand_init(seed, env * 10)
+        rng = wp.rand_init(seed, env * 7)
+        # Small random perturbation on all joints
         for i in range(wp.static(_Q_STRIDE)):
-            joint_q[q_off + i] = initial_q[i] + (wp.randf(rng) - 0.5) * 0.2
+            joint_q[q + i] = initial_q[i] + (wp.randf(rng) - 0.5) * 0.1
         for i in range(wp.static(_QD_STRIDE)):
-            joint_qd[qd_off + i] = initial_qd[i]
+            joint_qd[qd + i] = (wp.randf(rng) - 0.5) * 0.2
         episode_lengths[env] = 0
+
+
+@wp.kernel
+def _apply_perturbation_kernel(
+    joint_qd: wp.array[float],
+    rng_counter: wp.array[int],
+    kick_prob: float,
+    kick_strength: float,
+):
+    """Random velocity kicks to a subset of envs each step."""
+    env = wp.tid()
+    seed = rng_counter[0]
+    rng = wp.rand_init(seed, env * 7 + 12345)
+    if wp.randf(rng) < kick_prob:
+        qd = env * _QD_STRIDE
+        joint_qd[qd + 1] = joint_qd[qd + 1] + (wp.randf(rng) - 0.5) * kick_strength
 
 
 # ---------------------------------------------------------------------------
@@ -130,66 +127,55 @@ def _reset_envs_kernel(
 
 
 class CartpoleEnv(RobotEnv):
-    obs_dim = 6
+    obs_dim = 5  # cart_pos, sin(angle), cos(angle), cart_vel, pole_vel
     act_dim = 1
-    sim_substeps = 10
-    sim_dt = 1.0 / 60.0 / 10
+    sim_substeps = 4
+    sim_dt = 1.0 / 60.0 / 4
     max_episode_length = _MAX_EPISODE_LENGTH
     use_collisions = False
 
-    def __init__(self, num_envs: int, device: str | None = None, seed: int = 123):
-        super().__init__(num_envs, device=device, seed=seed)
-        self._step_count = 0
-
     def build_robot(self, builder):
-        builder.default_shape_cfg.density = 100.0
-        builder.default_joint_cfg.armature = 0.1
-        builder.add_usd(
-            newton.examples.get_asset("cartpole.usda"),
-            enable_self_collisions=False,
-            collapse_fixed_joints=True,
+        # Cart: slides along Y axis
+        cart = builder.add_link()
+        builder.add_shape_box(cart, hx=0.3, hy=0.15, hz=0.1)
+        j0 = builder.add_joint_prismatic(
+            parent=-1, child=cart, axis=(0.0, 1.0, 0.0),
+            target_ke=500.0, target_kd=50.0,
         )
-        body_armature = 0.1
-        for body in range(builder.body_count):
-            inertia_np = np.asarray(builder.body_inertia[body], dtype=np.float32).reshape(3, 3)
-            inertia_np += np.eye(3, dtype=np.float32) * body_armature
-            builder.body_inertia[body] = wp.mat33(inertia_np)
-        builder.joint_q[-3:] = [0.0, 0.0, 0.0]
-        builder.joint_target_ke[0] = 100.0
-        builder.joint_target_kd[0] = 10.0
+
+        # Pole: hinges on the cart, unactuated
+        pole = builder.add_link()
+        builder.add_shape_box(pole, hx=0.04, hy=0.04, hz=0.5)
+        j1 = builder.add_joint_revolute(
+            parent=cart, child=pole, axis=(1.0, 0.0, 0.0),
+            parent_xform=wp.transform(p=(0.0, 0.0, 0.1), q=wp.quat_identity()),
+            child_xform=wp.transform(p=(0.0, 0.0, -0.5), q=wp.quat_identity()),
+            target_ke=0.0, target_kd=0.05,
+        )
+        builder.add_articulation([j0, j1])
 
     def compute_obs(self):
-        wp.launch(
-            _compute_obs_kernel, dim=self.num_envs,
-            inputs=[self.state.joint_q, self.state.joint_qd, self.obs], device=self.device,
-        )
+        wp.launch(_compute_obs_kernel, dim=self.num_envs,
+                  inputs=[self.state.joint_q, self.state.joint_qd, self.obs], device=self.device)
 
     def compute_reward(self):
-        wp.launch(
-            _compute_rewards_kernel, dim=self.num_envs,
-            inputs=[self.state.joint_q, self.state.joint_qd, self.episode_lengths,
-                    self.rewards, self.dones], device=self.device,
-        )
+        wp.launch(_compute_rewards_kernel, dim=self.num_envs,
+                  inputs=[self.state.joint_q, self.state.joint_qd,
+                          self.episode_lengths, self.rewards, self.dones], device=self.device)
 
     def apply_actions(self, actions):
         wp.launch(_apply_actions_kernel, dim=self.num_envs,
                   inputs=[actions, self.control.joint_target_pos], device=self.device)
-        # Apply random perturbation every 5 steps to create instability
-        self._step_count += 1
-        if self._step_count % 5 == 0:
-            wp.launch(_increment_counter_kernel, dim=1, inputs=[self.rng_counter], device=self.device)
-            wp.launch(
-                _apply_perturbation_kernel, dim=self.num_envs,
-                inputs=[self.state.joint_qd, self.rng_counter, self.num_envs], device=self.device,
-            )
+        # Random perturbation kicks to ~10% of envs
+        wp.launch(_increment_counter_kernel, dim=1, inputs=[self.rng_counter], device=self.device)
+        wp.launch(_apply_perturbation_kernel, dim=self.num_envs,
+                  inputs=[self.state.joint_qd, self.rng_counter, 0.1, 2.0], device=self.device)
 
     def reset_done_envs(self):
-        wp.launch(
-            _reset_envs_kernel, dim=self.num_envs,
-            inputs=[self.dones, self.initial_joint_q, self.initial_joint_qd,
-                    self.state.joint_q, self.state.joint_qd,
-                    self.episode_lengths, self.rng_counter], device=self.device,
-        )
+        wp.launch(_reset_envs_kernel, dim=self.num_envs,
+                  inputs=[self.dones, self.initial_joint_q, self.initial_joint_qd,
+                          self.state.joint_q, self.state.joint_qd,
+                          self.episode_lengths, self.rng_counter], device=self.device)
 
 
 # ---------------------------------------------------------------------------
@@ -213,9 +199,9 @@ class Example:
         self.env = CartpoleEnv(num_envs, device=str(self.device))
 
         self.ac = ActorCritic(
-            obs_dim=6, act_dim=1, hidden_sizes=[64, 64],
+            obs_dim=5, act_dim=1, hidden_sizes=[64, 64],
             activation="elu", init_log_std=-0.5,
-            bounded_actions=True, layer_norm=True,
+            bounded_actions=True, layer_norm=False,
             device=str(self.device), seed=42,
         )
         num_steps = 64
@@ -233,7 +219,6 @@ class Example:
         self.obs = None
 
         self.viewer.set_model(self.env.model)
-        self.monitor = TrainingMonitor(self.viewer)
 
     def step(self):
         if self.training and self.update_idx < self.total_updates:
@@ -242,10 +227,8 @@ class Example:
             self.trainer.update()
             self.update_idx += 1
 
-            stats = self.trainer.get_stats()
-            self.monitor.log(stats)
-
             if self.update_idx % 5 == 0:
+                stats = self.trainer.get_stats()
                 steps = self.update_idx * self.steps_per_update
                 print(
                     f"Update {self.update_idx}/{self.total_updates} | steps={steps}"
@@ -254,7 +237,7 @@ class Example:
 
             if self.update_idx >= self.total_updates:
                 self.training = False
-                export_to_onnx(self.ac.actor, obs_dim=6, path=self.onnx_path)
+                export_to_onnx(self.ac.actor, obs_dim=5, path=self.onnx_path)
                 print(f"Training complete. Policy saved to {self.onnx_path}")
         else:
             if self.obs is None:

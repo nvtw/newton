@@ -535,48 +535,6 @@ def _exec_identity(
     shapes[op.outputs[0]] = shapes[op.inputs[0]]
 
 
-@wp.kernel
-def _layer_norm_kernel(
-    x: wp.array2d[float],
-    gamma: wp.array[float],
-    beta: wp.array[float],
-    out: wp.array2d[float],
-    width: int,
-    eps: float,
-):
-    """Per-row layer normalization for inference."""
-    i = wp.tid()
-    mu = float(0.0)
-    for j in range(width):
-        mu = mu + x[i, j]
-    mu = mu / float(width)
-    var = float(0.0)
-    for j in range(width):
-        d = x[i, j] - mu
-        var = var + d * d
-    var = var / float(width)
-    inv_std = 1.0 / wp.sqrt(var + eps)
-    for j in range(width):
-        out[i, j] = gamma[j] * (x[i, j] - mu) * inv_std + beta[j]
-
-
-def _exec_layer_norm(
-    op: _Op,
-    tensors: dict[str, wp.array],
-    shapes: dict[str, tuple[int, ...]],
-    device: wp.context.Device,
-) -> None:
-    x = tensors[op.inputs[0]]
-    gamma = tensors[op.inputs[1]]
-    beta = tensors[op.inputs[2]]
-    x_shape = shapes[op.inputs[0]]
-    eps = float(op.attrs.get("epsilon", 1e-5))
-    out = tensors[op.outputs[0]]
-    M, N = x_shape
-    wp.launch(_layer_norm_kernel, dim=M, inputs=[x, gamma, beta, out, N, eps], device=device)
-    shapes[op.outputs[0]] = x_shape
-
-
 _OP_DISPATCH: dict[str, Any] = {
     "Gemm": _exec_gemm,
     "MatMul": _exec_matmul,

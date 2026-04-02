@@ -197,6 +197,16 @@ class RobotEnv(ABC):
         self.dones.zero_()
 
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
+
+        # Desynchronize episodes by randomizing the initial episode counter.
+        # Envs will hit max_episode_length at different times, preventing
+        # the synchronized-reset problem that destroys PPO value estimates.
+        if self.max_episode_length > 1:
+            stagger = np.random.default_rng(42).integers(
+                0, self.max_episode_length, size=self.num_envs
+            ).astype(np.int32)
+            wp.copy(self.episode_lengths, wp.array(stagger, dtype=wp.int32, device=self.device))
+
         self.compute_obs()
         return self.obs
 

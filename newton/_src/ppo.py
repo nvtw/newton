@@ -558,7 +558,7 @@ class ActorCritic:
         act_dim: int,
         hidden_sizes: list[int] | None = None,
         activation: str = "elu",
-        layer_norm: bool = True,
+        layer_norm: bool = False,
         init_log_std: float = 0.0,
         bounded_actions: bool = True,
         device: str | None = None,

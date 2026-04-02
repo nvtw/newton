@@ -4,9 +4,7 @@
 """Live training dashboard for the Newton OpenGL viewer.
 
 Displays PPO training curves (reward, loss, entropy coefficient) as
-scrolling line plots inside the viewer's ImGui overlay.  Inspired by
-TensorBoard but zero-dependency -- uses only ImGui's built-in
-``plot_lines``.
+scrolling line plots inside the viewer's ImGui overlay.
 
 Usage::
 
@@ -25,118 +23,107 @@ from typing import Any
 import numpy as np
 
 
+class _RingPlot:
+    """Fixed-size ring buffer with cached plot data."""
+
+    __slots__ = ("_buf", "_n", "_head", "_dirty", "_plot", "_lo", "_hi", "_last")
+
+    def __init__(self, n: int):
+        self._buf = np.zeros(n, dtype=np.float32)
+        self._n = n
+        self._head = 0
+        self._dirty = False
+        self._plot = np.zeros(n, dtype=np.float32)
+        self._lo = 0.0
+        self._hi = 1e-8
+        self._last = 0.0
+
+    def push(self, v: float) -> None:
+        self._buf[self._head % self._n] = v
+        self._head += 1
+        self._last = v
+        self._dirty = True
+
+    def get_plot(self) -> tuple[np.ndarray, float, float, float]:
+        """Return (array, lo, hi, last) -- recomputes only when dirty."""
+        if self._dirty:
+            n = min(self._head, self._n)
+            if self._head <= self._n:
+                self._plot[:n] = self._buf[:n]
+                if n < self._n:
+                    self._plot[n:] = 0.0
+            else:
+                start = self._head % self._n
+                self._plot[:] = np.roll(self._buf, -start)
+            self._lo = float(self._plot[:n].min())
+            self._hi = float(self._plot[:n].max()) + 1e-8
+            self._dirty = False
+        return self._plot, self._lo, self._hi, self._last
+
+
 class TrainingMonitor:
     """Live training dashboard rendered in the Newton OpenGL viewer.
 
     Call :meth:`log` after each PPO update with the dict from
-    ``PPOTrainer.get_stats()``.  The monitor auto-registers itself as
-    a viewer UI callback.
+    ``PPOTrainer.get_stats()``.
 
     Args:
-        viewer: A Newton viewer instance (``ViewerGL`` or similar).
-            If ``None`` or if the viewer has no UI, rendering is silently
-            skipped.
+        viewer: A Newton viewer instance.  If ``None``, rendering is skipped.
         history_len: Number of data points to keep per metric.
-        update_title: Show update counter and steps in the title bar.
     """
 
     def __init__(self, viewer: Any = None, history_len: int = 500):
         self._viewer = viewer
-        self._n = history_len
         self._update_count = 0
+        self._reward = _RingPlot(history_len)
+        self._loss = _RingPlot(history_len)
+        self._alpha = _RingPlot(history_len)
 
-        # Ring buffers for each metric
-        self._reward = np.zeros(history_len, dtype=np.float32)
-        self._loss = np.zeros(history_len, dtype=np.float32)
-        self._alpha = np.zeros(history_len, dtype=np.float32)
-        self._head = 0  # next write position
-
-        # Register with viewer
         if viewer is not None and hasattr(viewer, "register_ui_callback"):
             viewer.register_ui_callback(self._render, "free")
 
     def log(self, stats: dict[str, float]) -> None:
-        """Record one training update's statistics.
-
-        Args:
-            stats: Dict from ``PPOTrainer.get_stats()``.  Expected keys:
-                ``mean_reward``, ``loss``, ``alpha``.
-        """
-        i = self._head % self._n
-        self._reward[i] = stats.get("mean_reward", 0.0)
-        self._loss[i] = stats.get("loss", 0.0)
-        self._alpha[i] = stats.get("alpha", 0.0)
-        self._head += 1
+        """Record one training update's statistics."""
+        self._reward.push(stats.get("mean_reward", 0.0))
+        self._loss.push(stats.get("loss", 0.0))
+        self._alpha.push(stats.get("alpha", 0.0))
         self._update_count += 1
 
     def _render(self, imgui: Any) -> None:
-        """ImGui callback -- draws the dashboard window."""
         if self._viewer is None or not hasattr(self._viewer, "ui") or not self._viewer.ui.is_available:
             return
 
         io = self._viewer.ui.io
-        w = 380
-        h = 520
+        w, h = 380, 520
         imgui.set_next_window_pos(imgui.ImVec2(io.display_size[0] - w - 10, 10))
         imgui.set_next_window_size(imgui.ImVec2(w, h))
 
-        flags = imgui.WindowFlags_.no_resize.value
-        if not imgui.begin(f"Training  [update {self._update_count}]", flags=flags):
+        if not imgui.begin(f"Training  [update {self._update_count}]", flags=imgui.WindowFlags_.no_resize.value):
             imgui.end()
             return
 
-        n = min(self._head, self._n)
-        if n == 0:
+        if self._update_count == 0:
             imgui.text("Waiting for first update...")
             imgui.end()
             return
 
-        # Get the data in chronological order
-        if self._head <= self._n:
-            reward = self._reward[:n]
-            loss = self._loss[:n]
-            alpha = self._alpha[:n]
-        else:
-            start = self._head % self._n
-            reward = np.roll(self._reward, -start)
-            loss = np.roll(self._loss, -start)
-            alpha = np.roll(self._alpha, -start)
-
         avail_w = imgui.get_content_region_avail().x
         plot_h = 120
 
-        # -- Reward --
-        imgui.text(f"Mean Reward:  {reward[-1]:.3f}")
-        imgui.plot_lines(
-            "##reward",
-            reward,
-            graph_size=(avail_w, plot_h),
-            scale_min=float(np.min(reward)),
-            scale_max=float(np.max(reward)) + 1e-8,
-        )
+        arr, lo, hi, last = self._reward.get_plot()
+        imgui.text(f"Mean Reward:  {last:.3f}")
+        imgui.plot_lines("##reward", arr, graph_size=(avail_w, plot_h), scale_min=lo, scale_max=hi)
 
         imgui.spacing()
 
-        # -- Loss --
-        imgui.text(f"Loss:  {loss[-1]:.4f}")
-        imgui.plot_lines(
-            "##loss",
-            loss,
-            graph_size=(avail_w, plot_h),
-            scale_min=0.0,
-            scale_max=float(np.max(loss)) + 1e-8,
-        )
+        arr, lo, hi, last = self._loss.get_plot()
+        imgui.text(f"Loss:  {last:.4f}")
+        imgui.plot_lines("##loss", arr, graph_size=(avail_w, plot_h), scale_min=0.0, scale_max=hi)
 
         imgui.spacing()
 
-        # -- Alpha (entropy coefficient) --
-        imgui.text(f"Alpha:  {alpha[-1]:.5f}")
-        imgui.plot_lines(
-            "##alpha",
-            alpha,
-            graph_size=(avail_w, plot_h),
-            scale_min=0.0,
-            scale_max=float(np.max(alpha)) + 1e-8,
-        )
+        arr, lo, hi, last = self._alpha.get_plot()
+        imgui.text(f"Alpha:  {last:.5f}")
+        imgui.plot_lines("##alpha", arr, graph_size=(avail_w, plot_h), scale_min=0.0, scale_max=hi)
 
         imgui.end()

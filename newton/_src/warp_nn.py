@@ -71,30 +71,6 @@ _ACTIVATION_KERNELS = {
 }
 
 
-@wp.kernel
-def _layer_norm_kernel(
-    x: wp.array2d[float],
-    gamma: wp.array[float],
-    beta: wp.array[float],
-    out: wp.array2d[float],
-    width: int,
-):
-    """Per-row layer normalization: out[i] = gamma * (x[i] - mean) / std + beta."""
-    i = wp.tid()
-    mu = float(0.0)
-    for j in range(width):
-        mu = mu + x[i, j]
-    mu = mu / float(width)
-    var = float(0.0)
-    for j in range(width):
-        d = x[i, j] - mu
-        var = var + d * d
-    var = var / float(width)
-    inv_std = 1.0 / wp.sqrt(var + 1.0e-5)
-    for j in range(width):
-        out[i, j] = gamma[j] * (x[i, j] - mu) * inv_std + beta[j]
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -125,9 +101,6 @@ class WarpMLP:
     Args:
         layer_sizes: Sequence of layer widths, e.g. ``[48, 128, 128, 128, 12]``.
         activation: Activation function name (``"elu"``, ``"relu"``, ``"tanh"``).
-        layer_norm: Apply layer normalization after each hidden layer
-            (before the activation).  Stabilises training and reduces
-            sensitivity to input scale.
         device: Warp device string.
         output_gain: Orthogonal init gain for the last layer (0.01 is common
             for policy heads).
@@ -138,22 +111,18 @@ class WarpMLP:
         self,
         layer_sizes: list[int],
         activation: str = "elu",
-        layer_norm: bool = True,
         device: str | None = None,
         output_gain: float = 1.0,
         seed: int | None = None,
     ):
         self._device = wp.get_device(device)
         self._activation = activation
-        self._layer_norm = layer_norm
         self._act_kernel = _ACTIVATION_KERNELS.get(activation)
         if self._act_kernel is None:
             raise ValueError(f"Unknown activation '{activation}', choose from {list(_ACTIVATION_KERNELS)}")
 
         self.weights: list[wp.array] = []
         self.biases: list[wp.array] = []
-        self.ln_gammas: list[wp.array] = []
-        self.ln_betas: list[wp.array] = []
         self._intermediates: list[wp.array] = []
 
         num_layers = len(layer_sizes) - 1
@@ -165,17 +134,6 @@ class WarpMLP:
             b_np = np.zeros(fan_out, dtype=np.float32)
             self.weights.append(wp.array(w_np, dtype=wp.float32, device=self._device, requires_grad=True))
             self.biases.append(wp.array(b_np, dtype=wp.float32, device=self._device, requires_grad=True))
-            if layer_norm and i < num_layers - 1:
-                self.ln_gammas.append(
-                    wp.array(
-                        np.ones(fan_out, dtype=np.float32), dtype=wp.float32, device=self._device, requires_grad=True
-                    )
-                )
-                self.ln_betas.append(
-                    wp.array(
-                        np.zeros(fan_out, dtype=np.float32), dtype=wp.float32, device=self._device, requires_grad=True
-                    )
-                )
 
         self._layer_sizes = layer_sizes
 
@@ -195,7 +153,6 @@ class WarpMLP:
             self.alloc_intermediates(batch)
 
         inp = x
-        ln_idx = 0
         for i, (w, b, out) in enumerate(zip(self.weights, self.biases, self._intermediates, strict=True)):
             M, K = batch, self._layer_sizes[i]
             N = self._layer_sizes[i + 1]
@@ -209,14 +166,6 @@ class WarpMLP:
 
             is_last = i == len(self.weights) - 1
             if not is_last:
-                if self._layer_norm:
-                    wp.launch(
-                        _layer_norm_kernel,
-                        dim=M,
-                        inputs=[out, self.ln_gammas[ln_idx], self.ln_betas[ln_idx], out, N],
-                        device=self._device,
-                    )
-                    ln_idx += 1
                 if self._activation == "elu":
                     wp.launch(self._act_kernel, dim=(M, N), inputs=[out, out, 1.0], device=self._device)
                 else:
@@ -229,40 +178,28 @@ class WarpMLP:
     def parameters(self) -> list[wp.array]:
         """Flat list of all trainable parameter arrays."""
         params = []
-        ln_idx = 0
-        for i, (w, b) in enumerate(zip(self.weights, self.biases, strict=True)):
+        for w, b in zip(self.weights, self.biases, strict=True):
             params.append(w.flatten())
             params.append(b)
-            if self._layer_norm and i < len(self.weights) - 1:
-                params.append(self.ln_gammas[ln_idx])
-                params.append(self.ln_betas[ln_idx])
-                ln_idx += 1
         return params
 
     def grad_arrays(self) -> list[wp.array]:
         """Flat list of gradient arrays matching :meth:`parameters`."""
         grads = []
-        ln_idx = 0
-        for i, (w, b) in enumerate(zip(self.weights, self.biases, strict=True)):
+        for w, b in zip(self.weights, self.biases, strict=True):
             grads.append(w.grad.flatten())
             grads.append(b.grad)
-            if self._layer_norm and i < len(self.weights) - 1:
-                grads.append(self.ln_gammas[ln_idx].grad)
-                grads.append(self.ln_betas[ln_idx].grad)
-                ln_idx += 1
         return grads
 
 
 def clone_for_batch(source: WarpMLP, batch: int) -> WarpMLP:
-    """Create a WarpMLP that shares weights/LN params but has its own intermediates."""
+    """Create a WarpMLP that shares weights but has its own intermediates."""
     clone = WarpMLP.__new__(WarpMLP)
     clone.__dict__.update(source.__dict__)
     clone._intermediates = []
     clone.alloc_intermediates(batch)
     clone.weights = source.weights
     clone.biases = source.biases
-    clone.ln_gammas = source.ln_gammas
-    clone.ln_betas = source.ln_betas
     return clone
 
 
@@ -288,7 +225,6 @@ def export_to_onnx(actor: WarpMLP, obs_dim: int, path: str) -> None:
     activation_map = {"elu": "Elu", "relu": "Relu", "tanh": "Tanh"}
     onnx_act = activation_map.get(actor._activation, "Elu")
 
-    ln_idx = 0
     for i, (w, b) in enumerate(zip(actor.weights, actor.biases, strict=True)):
         w_name = f"actor.{i * 2}.weight"
         b_name = f"actor.{i * 2}.bias"
@@ -301,17 +237,6 @@ def export_to_onnx(actor: WarpMLP, obs_dim: int, path: str) -> None:
 
         is_last = i == len(actor.weights) - 1
         if not is_last:
-            if actor._layer_norm and ln_idx < len(actor.ln_gammas):
-                gamma_name = f"actor.ln{ln_idx}.gamma"
-                beta_name = f"actor.ln{ln_idx}.beta"
-                ln_out = f"/actor/ln{ln_idx}/output"
-                initializers.append(numpy_helper.from_array(actor.ln_gammas[ln_idx].numpy(), name=gamma_name))
-                initializers.append(numpy_helper.from_array(actor.ln_betas[ln_idx].numpy(), name=beta_name))
-                nodes.append(
-                    helper.make_node("LayerNormalization", [prev_output, gamma_name, beta_name], [ln_out], epsilon=1e-5)
-                )
-                prev_output = ln_out
-                ln_idx += 1
             act_out = f"/actor/{i * 2 + 1}/{onnx_act}_output_0"
             nodes.append(helper.make_node(onnx_act, [prev_output], [act_out]))
             prev_output = act_out
