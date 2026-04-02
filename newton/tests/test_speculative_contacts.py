@@ -5,7 +5,6 @@
 
 import unittest
 
-import numpy as np
 import warp as wp
 
 import newton
@@ -250,14 +249,42 @@ devices = get_cuda_test_devices()
 if not devices:
     devices = [wp.get_device("cpu")]
 
-add_function_test(TestSpeculativeContacts, "test_speculative_disabled_no_contacts", test_speculative_disabled_no_contacts, devices=devices)
-add_function_test(TestSpeculativeContacts, "test_speculative_enabled_catches_fast_object", test_speculative_enabled_catches_fast_object, devices=devices)
-add_function_test(TestSpeculativeContacts, "test_speculative_diverging_no_contacts", test_speculative_diverging_no_contacts, devices=devices)
-add_function_test(TestSpeculativeContacts, "test_speculative_max_extension_clamp", test_speculative_max_extension_clamp, devices=devices)
-add_function_test(TestSpeculativeContacts, "test_speculative_dt_override", test_speculative_dt_override, devices=devices)
-add_function_test(TestSpeculativeContacts, "test_speculative_angular_velocity", test_speculative_angular_velocity, devices=devices)
-add_function_test(TestSpeculativeContacts, "test_speculative_tunneling_without", test_speculative_tunneling_without, devices=devices)
-add_function_test(TestSpeculativeContacts, "test_speculative_tunneling_with", test_speculative_tunneling_with, devices=devices)
+add_function_test(
+    TestSpeculativeContacts,
+    "test_speculative_disabled_no_contacts",
+    test_speculative_disabled_no_contacts,
+    devices=devices,
+)
+add_function_test(
+    TestSpeculativeContacts,
+    "test_speculative_enabled_catches_fast_object",
+    test_speculative_enabled_catches_fast_object,
+    devices=devices,
+)
+add_function_test(
+    TestSpeculativeContacts,
+    "test_speculative_diverging_no_contacts",
+    test_speculative_diverging_no_contacts,
+    devices=devices,
+)
+add_function_test(
+    TestSpeculativeContacts,
+    "test_speculative_max_extension_clamp",
+    test_speculative_max_extension_clamp,
+    devices=devices,
+)
+add_function_test(
+    TestSpeculativeContacts, "test_speculative_dt_override", test_speculative_dt_override, devices=devices
+)
+add_function_test(
+    TestSpeculativeContacts, "test_speculative_angular_velocity", test_speculative_angular_velocity, devices=devices
+)
+add_function_test(
+    TestSpeculativeContacts, "test_speculative_tunneling_without", test_speculative_tunneling_without, devices=devices
+)
+add_function_test(
+    TestSpeculativeContacts, "test_speculative_tunneling_with", test_speculative_tunneling_with, devices=devices
+)
 
 
 if __name__ == "__main__":
