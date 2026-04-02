@@ -123,10 +123,10 @@ _ACTIVATION_KERNELS = {
 }
 
 
-def _orthogonal_init(shape: tuple[int, int], gain: float = 1.0) -> np.ndarray:
+def _orthogonal_init(shape: tuple[int, int], gain: float = 1.0, seed: int | None = None) -> np.ndarray:
     """Orthogonal weight initialization (standard for PPO)."""
     rows, cols = shape
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(seed)
     flat = rng.standard_normal((max(rows, cols), min(rows, cols))).astype(np.float32)
     q, r = np.linalg.qr(flat)
     q *= np.sign(np.diag(r))
@@ -153,6 +153,7 @@ class WarpMLP:
         activation: str = "elu",
         device: str | None = None,
         output_gain: float = 1.0,
+        seed: int | None = None,
     ):
         self._device = wp.get_device(device)
         self._activation = activation
@@ -167,7 +168,8 @@ class WarpMLP:
         for i in range(len(layer_sizes) - 1):
             fan_in, fan_out = layer_sizes[i], layer_sizes[i + 1]
             gain = output_gain if i == len(layer_sizes) - 2 else math.sqrt(2.0)
-            w_np = _orthogonal_init((fan_out, fan_in), gain=gain)
+            layer_seed = None if seed is None else seed + i
+            w_np = _orthogonal_init((fan_out, fan_in), gain=gain, seed=layer_seed)
             b_np = np.zeros(fan_out, dtype=np.float32)
             self.weights.append(wp.array(w_np, dtype=wp.float32, device=self._device, requires_grad=True))
             self.biases.append(wp.array(b_np, dtype=wp.float32, device=self._device, requires_grad=True))
@@ -241,18 +243,24 @@ LOG2PI = wp.constant(float(math.log(2.0 * math.pi)))
 
 
 @wp.kernel
+def _increment_counter_kernel(counter: wp.array[int]):
+    """Increment a single-element counter on device (graph-capture safe)."""
+    counter[0] = counter[0] + 1
+
+
+@wp.kernel
 def _sample_actions_kernel(
     mean: wp.array2d[float],
     log_std: wp.array[float],
-    seed: int,
-    step_offset: int,
+    rng_counter: wp.array[int],
     actions: wp.array2d[float],
     log_probs: wp.array[float],
 ):
     """Sample from N(mean, diag(exp(log_std)^2)) using on-device RNG."""
     i, j = wp.tid()
     act_dim = log_std.shape[0]
-    rng = wp.rand_init(seed, step_offset * (mean.shape[0] * act_dim) + i * act_dim + j)
+    step_offset = rng_counter[0]
+    rng = wp.rand_init(42, step_offset * (mean.shape[0] * act_dim) + i * act_dim + j)
     noise = wp.randn(rng)
     std = wp.exp(log_std[j])
     a = mean[i, j] + std * noise
@@ -449,33 +457,24 @@ def _inv_std_kernel(var_sum: wp.array[float], n: float, out: wp.array[float]):
 
 
 # ---------------------------------------------------------------------------
-# On-device Fisher-Yates shuffle
+# On-device shuffle via random-key sort
 # ---------------------------------------------------------------------------
 
 
 @wp.kernel
-def _fisher_yates_step_kernel(
-    arr: wp.array[int],
-    seed: int,
-    epoch_offset: int,
+def _generate_random_keys_kernel(
+    keys: wp.array[float],
+    indices: wp.array[int],
+    rng_counter: wp.array[int],
     n: int,
-    i: int,
 ):
-    """One step of Fisher-Yates: swap arr[i] with arr[j] where j in [i, n)."""
-    rng = wp.rand_init(seed, epoch_offset + i)
-    j = i + int(wp.randf(rng) * float(n - i))
-    if j >= n:
-        j = n - 1
-    tmp = arr[i]
-    arr[i] = arr[j]
-    arr[j] = tmp
-
-
-@wp.kernel
-def _iota_kernel(arr: wp.array[int]):
-    """Fill ``arr[i] = i``."""
+    """Generate random sort keys and identity indices for GPU shuffle."""
     i = wp.tid()
-    arr[i] = i
+    if i < n:
+        epoch_offset = rng_counter[0]
+        rng = wp.rand_init(42, epoch_offset * n + i)
+        keys[i] = wp.randf(rng)
+        indices[i] = i
 
 
 # ---------------------------------------------------------------------------
@@ -561,6 +560,7 @@ class ActorCritic:
         activation: str = "elu",
         init_log_std: float = 0.0,
         device: str | None = None,
+        seed: int | None = None,
     ):
         if hidden_sizes is None:
             hidden_sizes = [128, 128, 128]
@@ -568,8 +568,14 @@ class ActorCritic:
         self.obs_dim = obs_dim
         self.act_dim = act_dim
 
-        self.actor = WarpMLP([obs_dim, *hidden_sizes, act_dim], activation=activation, device=device, output_gain=0.01)
-        self.critic = WarpMLP([obs_dim, *hidden_sizes, 1], activation=activation, device=device, output_gain=1.0)
+        actor_seed = None if seed is None else seed
+        critic_seed = None if seed is None else seed + 1000
+        self.actor = WarpMLP(
+            [obs_dim, *hidden_sizes, act_dim], activation=activation, device=device, output_gain=0.01, seed=actor_seed
+        )
+        self.critic = WarpMLP(
+            [obs_dim, *hidden_sizes, 1], activation=activation, device=device, output_gain=1.0, seed=critic_seed
+        )
         self.log_std = wp.array(
             np.full(act_dim, init_log_std, dtype=np.float32),
             dtype=wp.float32,
@@ -617,12 +623,16 @@ class ActorCritic:
     def act(
         self,
         obs: wp.array,
-        seed: int,
-        step_offset: int,
+        rng_counter: wp.array,
     ) -> tuple[wp.array, wp.array, wp.array]:
         """Forward actor + critic, sample actions using on-device RNG.
 
         Uses pre-allocated buffers from :meth:`alloc_buffers`.
+
+        Args:
+            obs: Observations, shape ``(batch, obs_dim)``.
+            rng_counter: Single-element ``wp.array[int]`` counter on device.
+                Incremented after each call to produce fresh random samples.
 
         Returns:
             ``(actions, log_probs, values)`` -- all on device, pre-allocated.
@@ -637,9 +647,10 @@ class ActorCritic:
         wp.launch(
             _sample_actions_kernel,
             dim=(batch, self.act_dim),
-            inputs=[mean, self.log_std, seed, step_offset, self._act_actions, self._act_log_probs],
+            inputs=[mean, self.log_std, rng_counter, self._act_actions, self._act_log_probs],
             device=self._device,
         )
+        wp.launch(_increment_counter_kernel, dim=1, inputs=[rng_counter], device=self._device)
 
         values = values_2d.flatten()
         return self._act_actions, self._act_log_probs, values
@@ -779,18 +790,42 @@ class RolloutBuffer:
         wp.launch(
             _gae_kernel,
             dim=self.num_envs,
-            inputs=[self.rewards, self.values, self.dones, last_values, self.advantages, self.returns, gamma, gae_lambda, self.num_steps],
+            inputs=[
+                self.rewards,
+                self.values,
+                self.dones,
+                last_values,
+                self.advantages,
+                self.returns,
+                gamma,
+                gae_lambda,
+                self.num_steps,
+            ],
             device=self._device,
         )
 
     def flatten(self) -> None:
         d = self._device
         ne = self.num_envs
-        wp.launch(_flatten_3d_to_2d, dim=(self.num_steps, ne, self.obs_dim), inputs=[self.observations, self.flat_obs, ne], device=d)
-        wp.launch(_flatten_3d_to_2d, dim=(self.num_steps, ne, self.act_dim), inputs=[self.actions, self.flat_actions, ne], device=d)
-        wp.launch(_flatten_2d_to_1d, dim=(self.num_steps, ne), inputs=[self.log_probs, self.flat_log_probs, ne], device=d)
+        wp.launch(
+            _flatten_3d_to_2d,
+            dim=(self.num_steps, ne, self.obs_dim),
+            inputs=[self.observations, self.flat_obs, ne],
+            device=d,
+        )
+        wp.launch(
+            _flatten_3d_to_2d,
+            dim=(self.num_steps, ne, self.act_dim),
+            inputs=[self.actions, self.flat_actions, ne],
+            device=d,
+        )
+        wp.launch(
+            _flatten_2d_to_1d, dim=(self.num_steps, ne), inputs=[self.log_probs, self.flat_log_probs, ne], device=d
+        )
         wp.launch(_flatten_2d_to_1d, dim=(self.num_steps, ne), inputs=[self.values, self.flat_values, ne], device=d)
-        wp.launch(_flatten_2d_to_1d, dim=(self.num_steps, ne), inputs=[self.advantages, self.flat_advantages, ne], device=d)
+        wp.launch(
+            _flatten_2d_to_1d, dim=(self.num_steps, ne), inputs=[self.advantages, self.flat_advantages, ne], device=d
+        )
         wp.launch(_flatten_2d_to_1d, dim=(self.num_steps, ne), inputs=[self.returns, self.flat_returns, ne], device=d)
 
 
@@ -857,10 +892,11 @@ class PPOTrainer:
         self.num_epochs = num_epochs
         self.num_minibatches = num_minibatches
         self.num_steps = num_steps
-        self.seed = seed
-        self._global_step = 0
 
         device = actor_critic._device
+
+        # On-device RNG counter (graph-capture safe)
+        self._rng_counter = wp.array([seed], dtype=wp.int32, device=device)
         n_samples = num_steps * num_envs
         batch_size = n_samples // num_minibatches
 
@@ -888,8 +924,9 @@ class PPOTrainer:
         self._inv_std_buf = wp.zeros(1, dtype=wp.float32, device=device)
         self._sum_reducer = _ArraySum(n_samples, device=str(device))
 
-        # -- Shuffle index array --
-        self._indices = wp.zeros(n_samples, dtype=wp.int32, device=device)
+        # -- Shuffle arrays (2x capacity required by radix_sort_pairs) --
+        self._shuffle_keys = wp.zeros(2 * n_samples, dtype=wp.float32, device=device)
+        self._indices = wp.zeros(2 * n_samples, dtype=wp.int32, device=device)
 
         # -- Mini-batch gather buffers --
         self._mb_obs = wp.zeros((batch_size, actor_critic.obs_dim), dtype=wp.float32, device=device, requires_grad=True)
@@ -905,26 +942,33 @@ class PPOTrainer:
         self._n_samples = n_samples
         self._batch_size = batch_size
 
-    def collect_rollouts(self, env: Any) -> wp.array:
+    def collect_rollouts(self, env: Any, obs: wp.array | None = None) -> tuple[wp.array, wp.array]:
         """Run the policy in *env* for ``num_steps`` and fill the buffer.
 
+        Args:
+            env: Vectorized environment.
+            obs: Current observations.  When ``None`` the environment is
+                reset to obtain initial observations.
+
         Returns:
-            Critic values for the last observation (for GAE bootstrapping).
+            ``(last_values, obs)`` -- critic bootstrap values and the
+            current observation tensor (pass back on the next call to
+            avoid resetting the environment).
         """
-        obs = env.reset()
+        if obs is None:
+            obs = env.reset()
         buf = self.buffer
 
         for t in range(buf.num_steps):
-            actions, log_probs, values = self.ac.act(obs, self.seed, self._global_step)
-            self._global_step += 1
+            actions, log_probs, values = self.ac.act(obs, self._rng_counter)
 
             next_obs, rewards, dones = env.step(actions)
             buf.insert(t, obs, actions, log_probs, rewards, dones, values)
             obs = next_obs
 
-        # Bootstrap value for last obs (zero noise -> deterministic mean, but we only need the critic value)
-        _, _, last_values = self.ac.act(obs, self.seed, self._global_step)
-        return last_values
+        # Bootstrap value for last obs
+        _, _, last_values = self.ac.act(obs, self._rng_counter)
+        return last_values, obs
 
     def _normalize_advantages(self) -> None:
         """Normalize flat_advantages -> _norm_adv entirely on device."""
@@ -944,7 +988,9 @@ class PPOTrainer:
         wp.launch(_inv_std_kernel, dim=1, inputs=[self._var_result, float(n), self._inv_std_buf], device=d)
 
         # out = (adv - mean) * inv_std
-        wp.launch(_normalize_adv_kernel, dim=n, inputs=[src, self._mean_buf, self._inv_std_buf, self._norm_adv], device=d)
+        wp.launch(
+            _normalize_adv_kernel, dim=n, inputs=[src, self._mean_buf, self._inv_std_buf, self._norm_adv], device=d
+        )
 
     def update(self) -> float:
         """Run PPO update epochs on the filled buffer.
@@ -959,31 +1005,54 @@ class PPOTrainer:
         batch_size = self._batch_size
         device = self.ac._device
 
-        # Reset indices to [0, 1, ..., n-1]
-        wp.launch(_iota_kernel, dim=n_samples, inputs=[self._indices], device=device)
-
         total_loss = 0.0
         num_updates = 0
 
-        for epoch in range(self.num_epochs):
-            # Fisher-Yates shuffle on device
-            for i in range(n_samples - 1):
-                wp.launch(
-                    _fisher_yates_step_kernel,
-                    dim=1,
-                    inputs=[self._indices, self.seed, self._global_step * self.num_epochs + epoch, n_samples, i],
-                    device=device,
-                )
+        for _epoch in range(self.num_epochs):
+            # GPU shuffle: generate random keys, then radix sort indices by key
+            wp.launch(
+                _generate_random_keys_kernel,
+                dim=n_samples,
+                inputs=[self._shuffle_keys, self._indices, self._rng_counter, n_samples],
+                device=device,
+            )
+            wp.launch(_increment_counter_kernel, dim=1, inputs=[self._rng_counter], device=device)
+            wp.utils.radix_sort_pairs(self._shuffle_keys, self._indices, n_samples)
 
             for mb_idx in range(self.num_minibatches):
                 offset = mb_idx * batch_size
 
                 # Gather mini-batch on device using offset into shuffled indices
-                wp.launch(_gather_2d_offset, dim=(batch_size, self.ac.obs_dim), inputs=[self.buffer.flat_obs, self._indices, offset, self._mb_obs], device=device)
-                wp.launch(_gather_2d_offset, dim=(batch_size, self.ac.act_dim), inputs=[self.buffer.flat_actions, self._indices, offset, self._mb_act], device=device)
-                wp.launch(_gather_1d_offset, dim=batch_size, inputs=[self.buffer.flat_log_probs, self._indices, offset, self._mb_old_lp], device=device)
-                wp.launch(_gather_1d_offset, dim=batch_size, inputs=[self._norm_adv, self._indices, offset, self._mb_adv], device=device)
-                wp.launch(_gather_1d_offset, dim=batch_size, inputs=[self.buffer.flat_returns, self._indices, offset, self._mb_ret], device=device)
+                wp.launch(
+                    _gather_2d_offset,
+                    dim=(batch_size, self.ac.obs_dim),
+                    inputs=[self.buffer.flat_obs, self._indices, offset, self._mb_obs],
+                    device=device,
+                )
+                wp.launch(
+                    _gather_2d_offset,
+                    dim=(batch_size, self.ac.act_dim),
+                    inputs=[self.buffer.flat_actions, self._indices, offset, self._mb_act],
+                    device=device,
+                )
+                wp.launch(
+                    _gather_1d_offset,
+                    dim=batch_size,
+                    inputs=[self.buffer.flat_log_probs, self._indices, offset, self._mb_old_lp],
+                    device=device,
+                )
+                wp.launch(
+                    _gather_1d_offset,
+                    dim=batch_size,
+                    inputs=[self._norm_adv, self._indices, offset, self._mb_adv],
+                    device=device,
+                )
+                wp.launch(
+                    _gather_1d_offset,
+                    dim=batch_size,
+                    inputs=[self.buffer.flat_returns, self._indices, offset, self._mb_ret],
+                    device=device,
+                )
 
                 self._loss.zero_()
 
@@ -993,7 +1062,19 @@ class PPOTrainer:
                     wp.launch(
                         _ppo_loss_kernel,
                         dim=batch_size,
-                        inputs=[self._mb_old_lp, new_lp, self._mb_adv, vals, self._mb_ret, ent, self.clip_ratio, self.value_coef, self.entropy_coef, self._loss, batch_size],
+                        inputs=[
+                            self._mb_old_lp,
+                            new_lp,
+                            self._mb_adv,
+                            vals,
+                            self._mb_ret,
+                            ent,
+                            self.clip_ratio,
+                            self.value_coef,
+                            self.entropy_coef,
+                            self._loss,
+                            batch_size,
+                        ],
                         device=device,
                     )
 
@@ -1035,8 +1116,9 @@ class PPOTrainer:
         num_updates = total_timesteps // steps_per_update
         total_steps = 0
 
+        obs = None
         for update_idx in range(num_updates):
-            last_values = self.collect_rollouts(env)
+            last_values, obs = self.collect_rollouts(env, obs)
             self.buffer.compute_gae(last_values, self.gamma, self.gae_lambda)
             avg_loss = self.update()
             total_steps += steps_per_update
@@ -1077,9 +1159,7 @@ def export_actor_to_onnx(actor: WarpMLP, obs_dim: int, path: str) -> None:
         initializers.append(numpy_helper.from_array(w_np, name=w_name))
         initializers.append(numpy_helper.from_array(b_np, name=b_name))
 
-        nodes.append(
-            helper.make_node("Gemm", [prev_output, w_name, b_name], [gemm_out], alpha=1.0, beta=1.0, transB=1)
-        )
+        nodes.append(helper.make_node("Gemm", [prev_output, w_name, b_name], [gemm_out], alpha=1.0, beta=1.0, transB=1))
 
         is_last = i == len(actor.weights) - 1
         if not is_last:

@@ -87,7 +87,8 @@ class TestActorCritic(unittest.TestCase):
         batch = 8
         ac.alloc_buffers(rollout_batch=batch, minibatch_size=4)
         obs = wp.array(np.random.default_rng(0).standard_normal((batch, 16)).astype(np.float32), device="cpu")
-        actions, log_probs, values = ac.act(obs, seed=42, step_offset=0)
+        rng_counter = wp.array([42], dtype=wp.int32, device="cpu")
+        actions, log_probs, values = ac.act(obs, rng_counter=rng_counter)
         self.assertEqual(actions.shape, (batch, 4))
         self.assertEqual(log_probs.shape, (batch,))
         self.assertEqual(values.shape, (batch,))
