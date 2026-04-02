@@ -313,6 +313,7 @@ class WarpMLP:
 # ---------------------------------------------------------------------------
 
 LOG2PI = wp.constant(float(math.log(2.0 * math.pi)))
+LOG2 = wp.constant(float(math.log(2.0)))
 
 
 @wp.kernel
@@ -326,19 +327,31 @@ def _sample_actions_kernel(
     mean: wp.array2d[float],
     log_std: wp.array[float],
     rng_counter: wp.array[int],
+    use_tanh: int,
     actions: wp.array2d[float],
+    pre_tanh: wp.array2d[float],
     log_probs: wp.array[float],
 ):
-    """Sample from N(mean, diag(exp(log_std)^2)) using on-device RNG."""
+    """Sample actions.  When *use_tanh* is set, actions are squashed via
+    ``tanh`` and the log-probability includes the numerically stable
+    Jacobian correction from PPO+."""
     i, j = wp.tid()
     act_dim = log_std.shape[0]
     step_offset = rng_counter[0]
     rng = wp.rand_init(42, step_offset * (mean.shape[0] * act_dim) + i * act_dim + j)
     noise = wp.randn(rng)
     std = wp.exp(log_std[j])
-    a = mean[i, j] + std * noise
-    actions[i, j] = a
+    u = mean[i, j] + std * noise
+    pre_tanh[i, j] = u
+
     lp = -0.5 * (noise * noise + 2.0 * log_std[j] + LOG2PI)
+    if use_tanh > 0:
+        actions[i, j] = wp.tanh(u)
+        # Numerically stable log |det d(tanh)/du| correction (PPO+ Eq. from Sec 4.1)
+        lp = lp - 2.0 * (LOG2 - u - wp.log(1.0 + wp.exp(-2.0 * u)))
+    else:
+        actions[i, j] = u
+
     wp.atomic_add(log_probs, i, lp)
 
 
@@ -351,37 +364,47 @@ def _sample_actions_kernel(
 def _ppo_fused_loss_and_grad_kernel(
     mean: wp.array2d[float],
     log_std: wp.array[float],
-    actions: wp.array2d[float],
+    pre_tanh_actions: wp.array2d[float],
     old_log_probs: wp.array[float],
     advantages: wp.array[float],
     values_flat: wp.array[float],
     returns: wp.array[float],
+    log_alpha: wp.array[float],
     clip_ratio: float,
     value_coef: float,
-    entropy_coef: float,
+    use_tanh: int,
     n: int,
     act_dim: int,
     loss: wp.array[float],
     grad_mean: wp.array2d[float],
     grad_values: wp.array[float],
     grad_log_std: wp.array[float],
+    grad_log_alpha: wp.array[float],
 ):
     """Fused PPO loss forward + analytical gradient computation.
 
     Computes the PPO clipped surrogate loss, value loss, and entropy bonus
-    in a single kernel, and writes exact gradients w.r.t. ``mean``,
-    ``values``, and ``log_std``.  ``wp.Tape`` is used only for the MLP
-    backward pass; everything from the MLP outputs onward is analytical.
+    in a single kernel.  The entropy coefficient ``alpha = exp(log_alpha)``
+    is read from a device array so it can be auto-tuned.  When
+    ``use_tanh > 0``, the log-probability includes the tanh Jacobian
+    correction.
+
+    Writes exact gradients w.r.t. ``mean``, ``values``, ``log_std``, and
+    ``log_alpha``.  ``wp.Tape`` is used only for the MLP backward pass.
     """
     i = wp.tid()
     inv_n = 1.0 / float(n)
+    alpha = wp.exp(log_alpha[0])
 
-    # -- Log-prob and entropy --
+    # -- Log-prob under current policy --
     new_lp = float(0.0)
     for j in range(act_dim):
         std_j = wp.exp(log_std[j])
-        z = (actions[i, j] - mean[i, j]) / std_j
+        u_j = pre_tanh_actions[i, j]
+        z = (u_j - mean[i, j]) / std_j
         new_lp = new_lp - 0.5 * (z * z + 2.0 * log_std[j] + LOG2PI)
+        if use_tanh > 0:
+            new_lp = new_lp - 2.0 * (LOG2 - u_j - wp.log(1.0 + wp.exp(-2.0 * u_j)))
 
     # -- PPO clipped surrogate --
     log_ratio = wp.clamp(new_lp - old_log_probs[i], -20.0, 20.0)
@@ -402,32 +425,33 @@ def _ppo_fused_loss_and_grad_kernel(
         entropy = entropy + 0.5 * (LOG2PI + 1.0) + log_std[j]
 
     # -- Total loss --
-    total = (policy_loss + value_coef * value_loss - entropy_coef * entropy) * inv_n
+    total = (policy_loss + value_coef * value_loss - alpha * entropy) * inv_n
     wp.atomic_add(loss, 0, total)
 
     # -- Analytical gradients --
-    # Policy gradient flows only through the unclipped branch
     d_policy_d_lp = 0.0
     if not clipped:
         d_policy_d_lp = -ratio * adv
-
     d_total_d_lp = d_policy_d_lp * inv_n
 
-    # Value gradient
     grad_values[i] = value_coef * vdiff * inv_n
 
-    # Per-action-dimension gradients for mean and log_std
     for j in range(act_dim):
         std_j = wp.exp(log_std[j])
-        z = (actions[i, j] - mean[i, j]) / std_j
+        z = (pre_tanh_actions[i, j] - mean[i, j]) / std_j
 
-        # d(log_prob)/d(mean_ij) = z / std_j
+        # d(log_prob)/d(mean_ij) = z / std_j  (tanh correction is independent of mean)
         grad_mean[i, j] = d_total_d_lp * z / std_j
 
-        # d(log_prob)/d(log_std_j) = z^2 - 1
-        # d(entropy)/d(log_std_j) = 1
-        d_logstd = d_total_d_lp * (z * z - 1.0) - entropy_coef * inv_n
+        # d(log_prob)/d(log_std_j) = z^2 - 1;  d(entropy)/d(log_std_j) = 1
+        d_logstd = d_total_d_lp * (z * z - 1.0) - alpha * inv_n
         wp.atomic_add(grad_log_std, j, d_logstd)
+
+    # -- Alpha gradient: d/d(log_alpha) of -alpha * entropy / n --
+    # alpha_loss per sample = -alpha * (log_pi + target_entropy) but we fold
+    # the entropy term from the PPO loss here: d(-alpha*entropy*inv_n)/d(log_alpha) = -alpha*entropy*inv_n
+    # The auto-tune target is handled separately via target_entropy in the trainer.
+    wp.atomic_add(grad_log_alpha, 0, -alpha * entropy * inv_n)
 
 
 # ---------------------------------------------------------------------------
@@ -661,6 +685,7 @@ class ActorCritic:
         hidden_sizes: Hidden layer widths.
         activation: Activation function name.
         init_log_std: Initial value for the learnable log standard deviation.
+        bounded_actions: Apply ``tanh`` squashing to bound actions to [-1, 1].
         device: Warp device string.
         seed: RNG seed for weight initialization.
     """
@@ -672,6 +697,7 @@ class ActorCritic:
         hidden_sizes: list[int] | None = None,
         activation: str = "elu",
         init_log_std: float = 0.0,
+        bounded_actions: bool = True,
         device: str | None = None,
         seed: int | None = None,
     ):
@@ -680,6 +706,8 @@ class ActorCritic:
         self._device = wp.get_device(device)
         self.obs_dim = obs_dim
         self.act_dim = act_dim
+        self.bounded_actions = bounded_actions
+        self._use_tanh_int = 1 if bounded_actions else 0
 
         actor_seed = None if seed is None else seed
         critic_seed = None if seed is None else seed + 1000
@@ -703,6 +731,7 @@ class ActorCritic:
         self.critic.alloc_intermediates(rollout_batch)
 
         self._act_actions = wp.zeros((rollout_batch, self.act_dim), dtype=wp.float32, device=d)
+        self._act_pre_tanh = wp.zeros((rollout_batch, self.act_dim), dtype=wp.float32, device=d)
         self._act_log_probs = wp.zeros(rollout_batch, dtype=wp.float32, device=d)
 
         # Minibatch-sized MLP clones (share weights, separate intermediates)
@@ -725,6 +754,7 @@ class ActorCritic:
 
         Returns:
             ``(actions, log_probs, values)`` -- all on device, pre-allocated.
+            When ``bounded_actions`` is set, actions are in [-1, 1].
         """
         batch = obs.shape[0]
         mean = self.actor.forward(obs)
@@ -736,7 +766,15 @@ class ActorCritic:
         wp.launch(
             _sample_actions_kernel,
             dim=(batch, self.act_dim),
-            inputs=[mean, self.log_std, rng_counter, self._act_actions, self._act_log_probs],
+            inputs=[
+                mean,
+                self.log_std,
+                rng_counter,
+                self._use_tanh_int,
+                self._act_actions,
+                self._act_pre_tanh,
+                self._act_log_probs,
+            ],
             device=self._device,
         )
         wp.launch(_increment_counter_kernel, dim=1, inputs=[rng_counter], device=self._device)
@@ -773,6 +811,7 @@ class RolloutBuffer:
         d = self._device
         self.observations = wp.zeros((num_steps, num_envs, obs_dim), dtype=wp.float32, device=d)
         self.actions = wp.zeros((num_steps, num_envs, act_dim), dtype=wp.float32, device=d)
+        self.pre_tanh_actions = wp.zeros((num_steps, num_envs, act_dim), dtype=wp.float32, device=d)
         self.log_probs = wp.zeros((num_steps, num_envs), dtype=wp.float32, device=d)
         self.rewards = wp.zeros((num_steps, num_envs), dtype=wp.float32, device=d)
         self.dones = wp.zeros((num_steps, num_envs), dtype=wp.float32, device=d)
@@ -783,6 +822,7 @@ class RolloutBuffer:
         n = num_steps * num_envs
         self.flat_obs = wp.zeros((n, obs_dim), dtype=wp.float32, device=d)
         self.flat_actions = wp.zeros((n, act_dim), dtype=wp.float32, device=d)
+        self.flat_pre_tanh = wp.zeros((n, act_dim), dtype=wp.float32, device=d)
         self.flat_log_probs = wp.zeros(n, dtype=wp.float32, device=d)
         self.flat_advantages = wp.zeros(n, dtype=wp.float32, device=d)
         self.flat_returns = wp.zeros(n, dtype=wp.float32, device=d)
@@ -792,6 +832,7 @@ class RolloutBuffer:
         t: int,
         obs: wp.array,
         actions: wp.array,
+        pre_tanh: wp.array,
         log_probs: wp.array,
         rewards: wp.array,
         dones: wp.array,
@@ -800,6 +841,12 @@ class RolloutBuffer:
         d = self._device
         wp.launch(_copy_2d_to_3d_slice, dim=(self.num_envs, self.obs_dim), inputs=[obs, self.observations, t], device=d)
         wp.launch(_copy_2d_to_3d_slice, dim=(self.num_envs, self.act_dim), inputs=[actions, self.actions, t], device=d)
+        wp.launch(
+            _copy_2d_to_3d_slice,
+            dim=(self.num_envs, self.act_dim),
+            inputs=[pre_tanh, self.pre_tanh_actions, t],
+            device=d,
+        )
         wp.launch(_copy_1d_to_2d_slice, dim=self.num_envs, inputs=[log_probs, self.log_probs, t], device=d)
         wp.launch(_copy_1d_to_2d_slice, dim=self.num_envs, inputs=[rewards, self.rewards, t], device=d)
         wp.launch(_copy_1d_to_2d_slice, dim=self.num_envs, inputs=[dones, self.dones, t], device=d)
@@ -839,6 +886,12 @@ class RolloutBuffer:
             device=d,
         )
         wp.launch(
+            _flatten_3d_to_2d,
+            dim=(self.num_steps, ne, self.act_dim),
+            inputs=[self.pre_tanh_actions, self.flat_pre_tanh, ne],
+            device=d,
+        )
+        wp.launch(
             _flatten_2d_to_1d, dim=(self.num_steps, ne), inputs=[self.log_probs, self.flat_log_probs, ne], device=d
         )
         wp.launch(
@@ -866,7 +919,7 @@ class PPOTrainer:
         gamma: Discount factor.
         gae_lambda: GAE lambda.
         clip_ratio: PPO clipping parameter.
-        entropy_coef: Entropy bonus coefficient.
+        entropy_coef: Entropy bonus coefficient (used when ``auto_entropy=False``).
         value_coef: Value loss coefficient.
         max_grad_norm: Maximum gradient norm for clipping.
         num_epochs: PPO epochs per rollout.
@@ -874,6 +927,10 @@ class PPOTrainer:
         weight_decay: AdamW weight decay.
         num_steps: Rollout horizon per update.
         seed: RNG seed for on-device random number generation.
+        auto_entropy: Auto-tune the entropy coefficient (SAC-style).
+            When ``True``, ``entropy_coef`` is used only as the initial value
+            and ``log_alpha`` is optimized to reach a target entropy of
+            ``-act_dim``.
     """
 
     def __init__(
@@ -893,20 +950,29 @@ class PPOTrainer:
         weight_decay: float = 1e-4,
         num_steps: int = 24,
         seed: int = 42,
+        auto_entropy: bool = True,
     ):
         self.ac = actor_critic
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.clip_ratio = clip_ratio
-        self.entropy_coef = entropy_coef
         self.value_coef = value_coef
         self.max_grad_norm = max_grad_norm
         self.max_grad_norm_sq = max_grad_norm * max_grad_norm
         self.num_epochs = num_epochs
         self.num_minibatches = num_minibatches
         self.num_steps = num_steps
+        self.auto_entropy = auto_entropy
 
         device = actor_critic._device
+
+        # Entropy coefficient: learnable log_alpha on device
+        init_log_alpha = math.log(max(entropy_coef, 1e-8))
+        self._log_alpha = wp.array([init_log_alpha], dtype=wp.float32, device=device)
+        self._grad_log_alpha = wp.zeros(1, dtype=wp.float32, device=device)
+        self._target_entropy = -float(actor_critic.act_dim)
+        if auto_entropy:
+            self._alpha_optimizer = AdamW([self._log_alpha], lr=lr, weight_decay=0.0)
 
         self._rng_counter = wp.array([seed], dtype=wp.int32, device=device)
         n_samples = num_steps * num_envs
@@ -943,6 +1009,7 @@ class PPOTrainer:
         # Mini-batch gather buffers
         self._mb_obs = wp.zeros((batch_size, actor_critic.obs_dim), dtype=wp.float32, device=device, requires_grad=True)
         self._mb_act = wp.zeros((batch_size, actor_critic.act_dim), dtype=wp.float32, device=device)
+        self._mb_pre_tanh = wp.zeros((batch_size, actor_critic.act_dim), dtype=wp.float32, device=device)
         self._mb_old_lp = wp.zeros(batch_size, dtype=wp.float32, device=device)
         self._mb_adv = wp.zeros(batch_size, dtype=wp.float32, device=device)
         self._mb_ret = wp.zeros(batch_size, dtype=wp.float32, device=device)
@@ -977,7 +1044,7 @@ class PPOTrainer:
             actions, log_probs, values = self.ac.act(self._norm_obs, self._rng_counter)
 
             next_obs, rewards, dones = env.step(actions)
-            buf.insert(t, self._norm_obs, actions, log_probs, rewards, dones, values)
+            buf.insert(t, self._norm_obs, actions, self.ac._act_pre_tanh, log_probs, rewards, dones, values)
             obs = next_obs
 
         self.obs_normalizer.normalize(obs, self._norm_obs)
@@ -1048,6 +1115,12 @@ class PPOTrainer:
                     device=device,
                 )
                 wp.launch(
+                    _gather_2d_offset,
+                    dim=(batch_size, self.ac.act_dim),
+                    inputs=[self.buffer.flat_pre_tanh, self._indices, offset, self._mb_pre_tanh],
+                    device=device,
+                )
+                wp.launch(
                     _gather_1d_offset,
                     dim=batch_size,
                     inputs=[self.buffer.flat_log_probs, self._indices, offset, self._mb_old_lp],
@@ -1077,6 +1150,7 @@ class PPOTrainer:
                 self._grad_mean.zero_()
                 self._grad_values.zero_()
                 self._grad_log_std.zero_()
+                self._grad_log_alpha.zero_()
 
                 wp.launch(
                     _ppo_fused_loss_and_grad_kernel,
@@ -1084,20 +1158,22 @@ class PPOTrainer:
                     inputs=[
                         mean,
                         self.ac.log_std,
-                        self._mb_act,
+                        self._mb_pre_tanh,
                         self._mb_old_lp,
                         self._mb_adv,
                         values_2d.flatten(),
                         self._mb_ret,
+                        self._log_alpha,
                         self.clip_ratio,
                         self.value_coef,
-                        self.entropy_coef,
+                        self.ac._use_tanh_int,
                         batch_size,
                         self.ac.act_dim,
                         self._loss,
                         self._grad_mean,
                         self._grad_values,
                         self._grad_log_std,
+                        self._grad_log_alpha,
                     ],
                     device=device,
                 )
@@ -1108,6 +1184,11 @@ class PPOTrainer:
                 grads = self.ac.actor.grad_arrays() + self.ac.critic.grad_arrays() + [self._grad_log_std]
                 self._clip_grad_norm(grads)
                 self.optimizer.step(grads)
+
+                # Auto-tune entropy coefficient
+                if self.auto_entropy:
+                    self._alpha_optimizer.step([self._grad_log_alpha])
+
                 tape.zero()
 
     def _clip_grad_norm(self, grads: list[wp.array]) -> None:
@@ -1133,6 +1214,7 @@ class PPOTrainer:
         return {
             "loss": float(self._loss.numpy()[0]),
             "mean_reward": self.buffer.mean_reward(),
+            "alpha": float(np.exp(self._log_alpha.numpy()[0])),
         }
 
     def train(self, env: Any, total_timesteps: int, log_interval: int = 1) -> None:

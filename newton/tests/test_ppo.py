@@ -99,10 +99,12 @@ class TestRolloutBuffer(unittest.TestCase):
         buf = RolloutBuffer(num_envs=4, num_steps=8, obs_dim=16, act_dim=4, device="cpu")
         rng = np.random.default_rng(0)
         for t in range(8):
+            act = wp.array(rng.standard_normal((4, 4)).astype(np.float32), device="cpu")
             buf.insert(
                 t=t,
                 obs=wp.array(rng.standard_normal((4, 16)).astype(np.float32), device="cpu"),
-                actions=wp.array(rng.standard_normal((4, 4)).astype(np.float32), device="cpu"),
+                actions=act,
+                pre_tanh=act,
                 log_probs=wp.array(rng.standard_normal(4).astype(np.float32), device="cpu"),
                 rewards=wp.array(rng.standard_normal(4).astype(np.float32), device="cpu"),
                 dones=wp.zeros(4, dtype=wp.float32, device="cpu"),
@@ -115,10 +117,12 @@ class TestRolloutBuffer(unittest.TestCase):
     def test_gae(self):
         buf = RolloutBuffer(num_envs=2, num_steps=4, obs_dim=4, act_dim=2, device="cpu")
         for t in range(4):
+            act = wp.array(np.zeros((2, 2), dtype=np.float32), device="cpu")
             buf.insert(
                 t=t,
                 obs=wp.array(np.zeros((2, 4), dtype=np.float32), device="cpu"),
-                actions=wp.array(np.zeros((2, 2), dtype=np.float32), device="cpu"),
+                actions=act,
+                pre_tanh=act,
                 log_probs=wp.zeros(2, dtype=wp.float32, device="cpu"),
                 rewards=wp.array(np.ones(2, dtype=np.float32), device="cpu"),
                 dones=wp.zeros(2, dtype=wp.float32, device="cpu"),

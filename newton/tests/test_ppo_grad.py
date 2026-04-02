@@ -117,9 +117,11 @@ class TestPPOLossKernelGradients(unittest.TestCase):
         returns = wp.array(np.full(batch, 36.0, dtype=np.float32), device=device)
 
         loss = wp.zeros(1, dtype=wp.float32, device=device)
+        log_alpha = wp.array([np.log(0.01).astype(np.float32)], dtype=wp.float32, device=device)
         grad_mean = wp.zeros((batch, act_dim), dtype=wp.float32, device=device)
         grad_values = wp.zeros(batch, dtype=wp.float32, device=device)
         grad_log_std = wp.zeros(act_dim, dtype=wp.float32, device=device)
+        grad_log_alpha = wp.zeros(1, dtype=wp.float32, device=device)
 
         tape = wp.Tape()
         with tape:
@@ -137,15 +139,17 @@ class TestPPOLossKernelGradients(unittest.TestCase):
                 advantages,
                 values_2d.flatten(),
                 returns,
+                log_alpha,
                 0.2,
                 0.5,
-                0.01,
+                ac._use_tanh_int,
                 batch,
                 act_dim,
                 loss,
                 grad_mean,
                 grad_values,
                 grad_log_std,
+                grad_log_alpha,
             ],
             device=device,
         )
@@ -204,7 +208,7 @@ class TestPPOLossKernelGradients(unittest.TestCase):
             rewards = wp.array((rng.standard_normal(num_envs).astype(np.float32) * 0.3 + 2.0), device=device)
             dones = wp.zeros(num_envs, dtype=wp.float32, device=device)
             values = wp.array(np.full(num_envs, 0.24, dtype=np.float32), device=device)
-            buf.insert(t, obs, actions, log_probs, rewards, dones, values)
+            buf.insert(t, obs, actions, actions, log_probs, rewards, dones, values)
 
         last_vals = wp.array(np.full(num_envs, 0.24, dtype=np.float32), device=device)
         buf.compute_gae(last_vals, 0.99, 0.95)
