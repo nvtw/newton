@@ -777,6 +777,7 @@ class Mesh:
     def vertices(self, value):
         self._vertices = np.array(value, dtype=np.float32).reshape(-1, 3)
         self._cached_hash = None
+        self._edges = None
 
     @property
     def indices(self):
@@ -792,9 +793,13 @@ class Mesh:
     def edges(self) -> np.ndarray:
         """Unique edge vertex pairs, shape (N, 2), with geometric deduplication.
 
-        Computed lazily on first access and cached. Invalidated when indices change.
+        Computed lazily on first access and cached. Invalidated when vertices or
+        indices change.
         """
         if self._edges is None:
+            if self._indices.size == 0 or self._vertices.size == 0:
+                self._edges = np.empty((0, 2), dtype=np.int32)
+                return self._edges
             tris = self._indices.reshape(-1, 3)
             n = len(tris)
             # Canonical vertex ids via quantized int64 keys (fast 1-D unique)
