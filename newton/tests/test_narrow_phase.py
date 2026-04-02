@@ -86,6 +86,22 @@ def distance_point_to_box(point, box_pos, box_rot, box_size):
     return np.linalg.norm(local_point - clamped)
 
 
+def signed_distance_to_box_surface(point, box_pos, box_size):
+    """Signed distance from *point* to the surface of an axis-aligned box.
+
+    Returns negative for interior points, zero on the surface, positive outside.
+
+    Args:
+        point: Point to check (world space).
+        box_pos: Box center position.
+        box_size: Box half-extents.
+    """
+    local = np.abs(point - box_pos) - box_size
+    outside = np.maximum(local, 0.0)
+    inside = min(np.max(local), 0.0)
+    return np.linalg.norm(outside) + inside
+
+
 def distance_point_to_capsule(point, capsule_pos, capsule_axis, capsule_radius, capsule_half_length):
     """Calculate distance from a point to a capsule surface."""
     segment = capsule_axis * capsule_half_length
@@ -164,14 +180,14 @@ def check_surface_reconstruction(contact_pos, normal, penetration_depth, dist_fu
     return dist_to_surface_a < tolerance and dist_to_surface_b < tolerance
 
 
-class TestNarrowPhase(unittest.TestCase):
-    """Test NarrowPhase collision detection API with various primitive pairs."""
+class _NarrowPhaseSetupMixin:
+    """Shared setUp and helpers for narrow-phase test classes.
+
+    Not a TestCase itself, so unittest will not discover it.
+    """
 
     def setUp(self):
-        """Set up narrow phase instance for tests."""
-        # Use reasonable buffer sizes for tests
-        # Tests typically use small numbers of shapes (< 100)
-        max_pairs = 10000  # Conservative estimate for test scenarios
+        max_pairs = 10000
         self.narrow_phase = NarrowPhase(
             max_candidate_pairs=max_pairs,
             max_triangle_pairs=100000,
@@ -231,17 +247,13 @@ class TestNarrowPhase(unittest.TestCase):
             elif geo_type == int(GeoType.CAPSULE) or geo_type == int(GeoType.CYLINDER) or geo_type == int(GeoType.CONE):
                 geom_collision_radius[i] = scale_array[0] + scale_array[1]
             elif geo_type == int(GeoType.ELLIPSOID):
-                # Bounding sphere radius is the largest semi-axis
                 geom_collision_radius[i] = max(scale_array[0], scale_array[1], scale_array[2])
             elif geo_type == int(GeoType.PLANE):
                 if scale_array[0] > 0.0 and scale_array[1] > 0.0:
-                    # finite plane
                     geom_collision_radius[i] = np.linalg.norm(scale_array)
                 else:
-                    # infinite plane
                     geom_collision_radius[i] = 1.0e6
             else:
-                # Default for other types (mesh, etc.)
                 geom_collision_radius[i] = np.linalg.norm(scale_array) if len(scale_array) >= 3 else 10.0
 
         return (
@@ -251,13 +263,11 @@ class TestNarrowPhase(unittest.TestCase):
             wp.array(geom_source, dtype=wp.uint64),
             wp.array(shape_gap, dtype=wp.float32),
             wp.array(geom_collision_radius, dtype=wp.float32),
-            wp.full(len(geom_list), -1, dtype=wp.int32),  # shape_sdf_index - no SDF for all shapes
-            wp.full(
-                len(geom_list), ShapeFlags.COLLIDE_SHAPES, dtype=wp.int32
-            ),  # shape_flags - collision enabled, no hydroelastic
-            wp.zeros(len(geom_list), dtype=wp.vec3),  # shape_collision_aabb_lower - dummy for non-mesh tests
-            wp.ones(len(geom_list), dtype=wp.vec3),  # shape_collision_aabb_upper - dummy for non-mesh tests
-            wp.full(len(geom_list), wp.vec3i(4, 4, 4), dtype=wp.vec3i),  # shape_voxel_resolution - dummy
+            wp.full(len(geom_list), -1, dtype=wp.int32),  # shape_sdf_index
+            wp.full(len(geom_list), ShapeFlags.COLLIDE_SHAPES, dtype=wp.int32),  # shape_flags
+            wp.zeros(len(geom_list), dtype=wp.vec3),  # shape_collision_aabb_lower
+            wp.ones(len(geom_list), dtype=wp.vec3),  # shape_collision_aabb_upper
+            wp.full(len(geom_list), wp.vec3i(4, 4, 4), dtype=wp.vec3i),  # shape_voxel_resolution
         )
 
     def _run_narrow_phase(self, geom_list, pairs):
@@ -284,12 +294,10 @@ class TestNarrowPhase(unittest.TestCase):
             shape_voxel_resolution,
         ) = self._create_geometry_arrays(geom_list)
 
-        # Create candidate pairs
         candidate_pair = wp.array(np.array(pairs, dtype=np.int32).reshape(-1, 2), dtype=wp.vec2i)
         candidate_pair_count = wp.array([len(pairs)], dtype=wp.int32)
 
-        # Allocate output arrays
-        max_contacts = len(pairs) * 10  # Allow multiple contacts per pair
+        max_contacts = len(pairs) * 10
         contact_pair = wp.zeros(max_contacts, dtype=wp.vec2i)
         contact_position = wp.zeros(max_contacts, dtype=wp.vec3)
         contact_normal = wp.zeros(max_contacts, dtype=wp.vec3)
@@ -297,7 +305,6 @@ class TestNarrowPhase(unittest.TestCase):
         contact_tangent = wp.zeros(max_contacts, dtype=wp.vec3)
         contact_count = wp.zeros(1, dtype=int)
 
-        # Launch narrow phase
         self.narrow_phase.launch(
             candidate_pair=candidate_pair,
             candidate_pair_count=candidate_pair_count,
@@ -322,7 +329,6 @@ class TestNarrowPhase(unittest.TestCase):
 
         wp.synchronize()
 
-        # Return numpy arrays
         count = contact_count.numpy()[0]
         return (
             count,
@@ -332,6 +338,10 @@ class TestNarrowPhase(unittest.TestCase):
             contact_penetration.numpy()[:count],
             contact_tangent.numpy()[:count],
         )
+
+
+class TestNarrowPhase(_NarrowPhaseSetupMixin, unittest.TestCase):
+    """Test NarrowPhase collision detection API with various primitive pairs."""
 
     def test_sphere_sphere_separated(self):
         """Test sphere-sphere collision when separated."""
@@ -1980,7 +1990,7 @@ class TestBufferOverflowWarnings(unittest.TestCase):
         # Warning capture via wp.printf is optional; counter/capacity check above is authoritative.
 
 
-class TestMPREnlargeCorrection(TestNarrowPhase):
+class TestMPREnlargeCorrection(_NarrowPhaseSetupMixin, unittest.TestCase):
     """Verify that the anti-flicker enlarge in MPR does not bias returned distances or contact points."""
 
     def test_box_box_touching_penetration_accuracy(self):
@@ -2083,6 +2093,7 @@ class TestMPREnlargeCorrection(TestNarrowPhase):
         count, _pairs, positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
         self.assertGreater(count, 0)
 
+        validated_count = 0
         for i in range(count):
             if penetrations[i] >= 0.0:
                 continue
@@ -2093,21 +2104,24 @@ class TestMPREnlargeCorrection(TestNarrowPhase):
             surface_a = center - n * (d / 2.0)
             surface_b = center + n * (d / 2.0)
 
-            dist_a = distance_point_to_box(surface_a, box_a_pos, np.eye(3), box_a_size)
-            dist_b = distance_point_to_box(surface_b, box_b_pos, np.eye(3), box_b_size)
+            sd_a = signed_distance_to_box_surface(surface_a, box_a_pos, box_a_size)
+            sd_b = signed_distance_to_box_surface(surface_b, box_b_pos, box_b_size)
 
             self.assertAlmostEqual(
-                float(dist_a),
+                float(sd_a),
                 0.0,
                 delta=5e-5,
-                msg=f"Contact {i}: surface point A is {dist_a} from box A surface (should be ~0)",
+                msg=f"Contact {i}: surface point A signed distance {sd_a} from box A surface (should be ~0)",
             )
             self.assertAlmostEqual(
-                float(dist_b),
+                float(sd_b),
                 0.0,
                 delta=5e-5,
-                msg=f"Contact {i}: surface point B is {dist_b} from box B surface (should be ~0)",
+                msg=f"Contact {i}: surface point B signed distance {sd_b} from box B surface (should be ~0)",
             )
+            validated_count += 1
+
+        self.assertGreater(validated_count, 0, "At least one penetrating contact must be validated")
 
 
 if __name__ == "__main__":
