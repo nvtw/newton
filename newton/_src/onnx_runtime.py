@@ -204,6 +204,7 @@ def _pick_tile_sizes(M: int, N: int, K: int) -> tuple[int, int, int]:
     tiles when the dimension is small to avoid excessive padding.  Max tile
     size is 32 to keep shared-memory usage reasonable.
     """
+
     def _best(dim: int, candidates: tuple[int, ...] = (32, 16, 8, 4)) -> int:
         for c in candidates:
             if dim >= c:
@@ -256,9 +257,7 @@ class OnnxRuntime:
 
         # -- 2. Record input / output names ----------------------------------
         initializer_names = {init.name for init in graph.initializer}
-        self.input_names: list[str] = [
-            inp.name for inp in graph.input if inp.name not in initializer_names
-        ]
+        self.input_names: list[str] = [inp.name for inp in graph.input if inp.name not in initializer_names]
         self.output_names: list[str] = [out.name for out in graph.output]
 
         # -- 3. Build op list ------------------------------------------------
@@ -425,7 +424,12 @@ def _exec_gemm(
         bias = tensors[op.inputs[2]]
         wp.launch(_bias_add_kernel, dim=(M, N), inputs=[out, bias, alpha, beta], device=device)
     elif alpha != 1.0:
-        wp.launch(_bias_add_kernel, dim=(M, N), inputs=[out, wp.zeros(N, dtype=wp.float32, device=device), alpha, 0.0], device=device)
+        wp.launch(
+            _bias_add_kernel,
+            dim=(M, N),
+            inputs=[out, wp.zeros(N, dtype=wp.float32, device=device), alpha, 0.0],
+            device=device,
+        )
 
     shapes[op.outputs[0]] = (M, N)
 

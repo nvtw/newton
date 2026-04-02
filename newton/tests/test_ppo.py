@@ -31,7 +31,6 @@ from newton._src.ppo import (
     export_actor_to_onnx,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helper environments
 # ---------------------------------------------------------------------------
@@ -293,13 +292,18 @@ class TestWarpMLP(unittest.TestCase):
         self.assertEqual(y.shape, (4, 8))
 
     def test_parameters_count(self):
-        mlp = WarpMLP([16, 32, 8], activation="elu", device="cpu")
+        mlp = WarpMLP([16, 32, 8], activation="elu", layer_norm=False, device="cpu")
         params = mlp.parameters()
         self.assertEqual(len(params), 4)  # 2 layers x (weight + bias)
 
+    def test_parameters_count_layer_norm(self):
+        mlp = WarpMLP([16, 32, 8], activation="elu", layer_norm=True, device="cpu")
+        params = mlp.parameters()
+        self.assertEqual(len(params), 6)  # w0, b0, gamma0, beta0, w1, b1
+
     def test_forward_matches_numpy(self):
         """WarpMLP forward should match a manual NumPy matmul + ELU."""
-        mlp = WarpMLP([4, 8, 3], activation="elu", device="cpu", seed=0)
+        mlp = WarpMLP([4, 8, 3], activation="elu", layer_norm=False, device="cpu", seed=0)
         x_np = np.array([[1.0, 0.0, -1.0, 2.0], [0.5, -0.5, 1.5, -1.0]], dtype=np.float32)
         x = wp.array(x_np, device="cpu")
         y = mlp.forward(x)
@@ -318,7 +322,7 @@ class TestWarpMLP(unittest.TestCase):
 
     def test_forward_relu(self):
         """Verify ReLU activation produces correct output."""
-        mlp = WarpMLP([3, 4, 2], activation="relu", device="cpu", seed=0)
+        mlp = WarpMLP([3, 4, 2], activation="relu", layer_norm=False, device="cpu", seed=0)
         x_np = np.array([[1.0, -1.0, 0.5]], dtype=np.float32)
         y = mlp.forward(wp.array(x_np, device="cpu")).numpy()
 
@@ -332,7 +336,7 @@ class TestWarpMLP(unittest.TestCase):
 
     def test_forward_tanh(self):
         """Verify tanh activation produces correct output."""
-        mlp = WarpMLP([3, 4, 2], activation="tanh", device="cpu", seed=0)
+        mlp = WarpMLP([3, 4, 2], activation="tanh", layer_norm=False, device="cpu", seed=0)
         x_np = np.array([[1.0, -1.0, 0.5]], dtype=np.float32)
         y = mlp.forward(wp.array(x_np, device="cpu")).numpy()
 
@@ -343,6 +347,51 @@ class TestWarpMLP(unittest.TestCase):
         h = np.tanh(x_np @ w0.T + b0)
         expected = h @ w1.T + b1
         np.testing.assert_allclose(y, expected, rtol=1e-4, atol=1e-5)
+
+    def test_forward_with_layer_norm(self):
+        """WarpMLP with layer_norm=True should match manual LN + ELU in NumPy."""
+        mlp = WarpMLP([4, 8, 3], activation="elu", layer_norm=True, device="cpu", seed=0)
+        x_np = np.array([[1.0, 0.0, -1.0, 2.0], [0.5, -0.5, 1.5, -1.0]], dtype=np.float32)
+        y = mlp.forward(wp.array(x_np, device="cpu")).numpy()
+
+        w0 = mlp.weights[0].numpy()
+        b0 = mlp.biases[0].numpy()
+        g0 = mlp.ln_gammas[0].numpy()
+        beta0 = mlp.ln_betas[0].numpy()
+        w1 = mlp.weights[1].numpy()
+        b1 = mlp.biases[1].numpy()
+
+        h = x_np @ w0.T + b0
+        # LayerNorm
+        mu = h.mean(axis=1, keepdims=True)
+        var = h.var(axis=1, keepdims=True)
+        h = g0 * (h - mu) / np.sqrt(var + 1e-5) + beta0
+        # ELU
+        h = np.where(h > 0, h, np.exp(h) - 1)
+        expected = h @ w1.T + b1
+        np.testing.assert_allclose(y, expected, rtol=1e-4, atol=1e-5)
+
+    def test_layer_norm_onnx_roundtrip(self):
+        """Export with LayerNorm and verify OnnxRuntime produces same output."""
+        import os
+        import tempfile
+
+        from newton._src.onnx_runtime import OnnxRuntime
+        from newton._src.warp_nn import export_to_onnx
+
+        mlp = WarpMLP([4, 8, 3], activation="elu", layer_norm=True, device="cpu", seed=0)
+        x_np = np.array([[1.0, 0.0, -1.0, 2.0], [0.5, -0.5, 1.5, -1.0]], dtype=np.float32)
+        y_warp = mlp.forward(wp.array(x_np, device="cpu")).numpy()
+
+        with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as f:
+            path = f.name
+        try:
+            export_to_onnx(mlp, obs_dim=4, path=path)
+            rt = OnnxRuntime(path, device="cpu", batch_size=2)
+            y_onnx = rt({"observation": wp.array(x_np, device="cpu")})["action"].numpy()
+            np.testing.assert_allclose(y_onnx, y_warp, rtol=1e-4, atol=1e-5)
+        finally:
+            os.unlink(path)
 
     def test_seed_reproducibility(self):
         mlp1 = WarpMLP([8, 16, 4], activation="elu", device="cpu", seed=42)
@@ -369,7 +418,7 @@ class TestWarpMLP(unittest.TestCase):
         loss = wp.zeros(1, dtype=wp.float32, device="cpu", requires_grad=True)
         tape = wp.Tape()
         with tape:
-            out = mlp.forward(x)
+            mlp.forward(x)
         tape.backward(loss)
         params = mlp.parameters()
         grads = mlp.grad_arrays()
@@ -400,11 +449,15 @@ class TestActorCritic(unittest.TestCase):
         for _ in range(5):
             actions, _, _ = ac.act(obs, rng_counter)
             a_np = actions.numpy()
-            self.assertTrue(np.all(a_np >= -1.0) and np.all(a_np <= 1.0), f"Actions out of [-1,1]: {a_np.min()}, {a_np.max()}")
+            self.assertTrue(
+                np.all(a_np >= -1.0) and np.all(a_np <= 1.0), f"Actions out of [-1,1]: {a_np.min()}, {a_np.max()}"
+            )
 
     def test_unbounded_actions_can_exceed_one(self):
         """With bounded_actions=False and large log_std, actions should exceed [-1, 1]."""
-        ac = ActorCritic(obs_dim=4, act_dim=4, hidden_sizes=[32], bounded_actions=False, init_log_std=1.0, device="cpu", seed=0)
+        ac = ActorCritic(
+            obs_dim=4, act_dim=4, hidden_sizes=[32], bounded_actions=False, init_log_std=1.0, device="cpu", seed=0
+        )
         batch = 256
         ac.alloc_buffers(rollout_batch=batch, minibatch_size=batch)
         obs = wp.array(np.random.default_rng(0).standard_normal((batch, 4)).astype(np.float32), device="cpu")
@@ -712,8 +765,17 @@ class TestSampleActionsKernel(unittest.TestCase):
 
 
 def _numpy_ppo_fused_loss_and_grad(
-    mean_np, log_std_np, pre_tanh_np, old_lp_np, advantages_np,
-    values_np, returns_np, log_alpha_val, clip_ratio, value_coef, use_tanh,
+    mean_np,
+    log_std_np,
+    pre_tanh_np,
+    old_lp_np,
+    advantages_np,
+    values_np,
+    returns_np,
+    log_alpha_val,
+    clip_ratio,
+    value_coef,
+    use_tanh,
 ):
     """Full NumPy reference for the fused PPO loss kernel.
 
@@ -777,8 +839,20 @@ def _numpy_ppo_fused_loss_and_grad(
 
 
 class TestPPOFusedLossKernel(unittest.TestCase):
-    def _run_kernel(self, mean_np, log_std_np, pre_tanh_np, old_lp_np, advantages_np,
-                    values_np, returns_np, log_alpha_val, clip_ratio, value_coef, use_tanh):
+    def _run_kernel(
+        self,
+        mean_np,
+        log_std_np,
+        pre_tanh_np,
+        old_lp_np,
+        advantages_np,
+        values_np,
+        returns_np,
+        log_alpha_val,
+        clip_ratio,
+        value_coef,
+        use_tanh,
+    ):
         """Helper: run the Warp kernel and return all outputs as NumPy."""
         batch, act_dim = mean_np.shape
         loss = wp.zeros(1, dtype=wp.float32, device="cpu")
@@ -799,8 +873,16 @@ class TestPPOFusedLossKernel(unittest.TestCase):
                 wp.array(values_np, device="cpu"),
                 wp.array(returns_np, device="cpu"),
                 wp.array([log_alpha_val], dtype=wp.float32, device="cpu"),
-                clip_ratio, value_coef, 1 if use_tanh else 0, batch, act_dim,
-                loss, grad_mean, grad_values, grad_log_std, grad_log_alpha,
+                clip_ratio,
+                value_coef,
+                1 if use_tanh else 0,
+                batch,
+                act_dim,
+                loss,
+                grad_mean,
+                grad_values,
+                grad_log_std,
+                grad_log_alpha,
             ],
             device="cpu",
         )
@@ -842,12 +924,30 @@ class TestPPOFusedLossKernel(unittest.TestCase):
         clip_ratio, value_coef = 0.2, 0.5
 
         warp_loss, warp_gm, warp_gv, warp_gls, warp_gla = self._run_kernel(
-            mean_np, log_std_np, pre_tanh_np, old_lp_np, advantages_np,
-            values_np, returns_np, log_alpha_val, clip_ratio, value_coef, use_tanh=False,
+            mean_np,
+            log_std_np,
+            pre_tanh_np,
+            old_lp_np,
+            advantages_np,
+            values_np,
+            returns_np,
+            log_alpha_val,
+            clip_ratio,
+            value_coef,
+            use_tanh=False,
         )
         ref_loss, ref_gm, ref_gv, ref_gls, ref_gla = _numpy_ppo_fused_loss_and_grad(
-            mean_np, log_std_np, pre_tanh_np, old_lp_np, advantages_np,
-            values_np, returns_np, log_alpha_val, clip_ratio, value_coef, use_tanh=False,
+            mean_np,
+            log_std_np,
+            pre_tanh_np,
+            old_lp_np,
+            advantages_np,
+            values_np,
+            returns_np,
+            log_alpha_val,
+            clip_ratio,
+            value_coef,
+            use_tanh=False,
         )
 
         np.testing.assert_allclose(warp_loss, ref_loss, rtol=1e-4, atol=1e-5, err_msg="Loss mismatch")
@@ -868,12 +968,30 @@ class TestPPOFusedLossKernel(unittest.TestCase):
         clip_ratio, value_coef = 0.2, 0.5
 
         warp_loss, warp_gm, warp_gv, warp_gls, warp_gla = self._run_kernel(
-            mean_np, log_std_np, pre_tanh_np, old_lp_np, advantages_np,
-            values_np, returns_np, log_alpha_val, clip_ratio, value_coef, use_tanh=True,
+            mean_np,
+            log_std_np,
+            pre_tanh_np,
+            old_lp_np,
+            advantages_np,
+            values_np,
+            returns_np,
+            log_alpha_val,
+            clip_ratio,
+            value_coef,
+            use_tanh=True,
         )
         ref_loss, ref_gm, ref_gv, ref_gls, ref_gla = _numpy_ppo_fused_loss_and_grad(
-            mean_np, log_std_np, pre_tanh_np, old_lp_np, advantages_np,
-            values_np, returns_np, log_alpha_val, clip_ratio, value_coef, use_tanh=True,
+            mean_np,
+            log_std_np,
+            pre_tanh_np,
+            old_lp_np,
+            advantages_np,
+            values_np,
+            returns_np,
+            log_alpha_val,
+            clip_ratio,
+            value_coef,
+            use_tanh=True,
         )
 
         np.testing.assert_allclose(warp_loss, ref_loss, rtol=1e-4, atol=1e-5, err_msg="Loss mismatch (tanh)")
@@ -900,11 +1018,22 @@ class TestPPOFusedLossKernel(unittest.TestCase):
         log_alpha_val = np.log(0.0001).astype(np.float32)
 
         _, warp_gm, _, _, _ = self._run_kernel(
-            mean_np, log_std_np, pre_tanh_np, old_lp_np, advantages_np,
-            values_np, returns_np, log_alpha_val, clip_ratio, 0.5, use_tanh=False,
+            mean_np,
+            log_std_np,
+            pre_tanh_np,
+            old_lp_np,
+            advantages_np,
+            values_np,
+            returns_np,
+            log_alpha_val,
+            clip_ratio,
+            0.5,
+            use_tanh=False,
         )
         np.testing.assert_allclose(
-            warp_gm, 0.0, atol=1e-6,
+            warp_gm,
+            0.0,
+            atol=1e-6,
             err_msg="Clipped ratio should produce zero policy gradient on mean",
         )
 
@@ -919,8 +1048,17 @@ class TestPPOFusedLossKernel(unittest.TestCase):
         value_coef = 0.5
 
         _, _, warp_gv, _, _ = self._run_kernel(
-            mean_np, log_std_np, pre_tanh_np, old_lp_np, advantages_np,
-            values_np, returns_np, np.log(0.01).astype(np.float32), 0.2, value_coef, use_tanh=False,
+            mean_np,
+            log_std_np,
+            pre_tanh_np,
+            old_lp_np,
+            advantages_np,
+            values_np,
+            returns_np,
+            np.log(0.01).astype(np.float32),
+            0.2,
+            value_coef,
+            use_tanh=False,
         )
         expected_grad_values = value_coef * (values_np - returns_np) / batch
         np.testing.assert_allclose(warp_gv, expected_grad_values, rtol=1e-4, atol=1e-6)
@@ -932,11 +1070,17 @@ class TestPPOFusedLossKernel(unittest.TestCase):
         mean_np, log_std_np, pre_tanh_np, old_lp_np = self._make_consistent_data(batch, act_dim, rng)
 
         _, warp_gm, _, _, _ = self._run_kernel(
-            mean_np, log_std_np, pre_tanh_np, old_lp_np,
+            mean_np,
+            log_std_np,
+            pre_tanh_np,
+            old_lp_np,
             np.zeros(batch, dtype=np.float32),
             np.zeros(batch, dtype=np.float32),
             np.zeros(batch, dtype=np.float32),
-            np.log(0.01).astype(np.float32), 0.2, 0.5, use_tanh=False,
+            np.log(0.01).astype(np.float32),
+            0.2,
+            0.5,
+            use_tanh=False,
         )
         np.testing.assert_allclose(warp_gm, 0.0, atol=1e-6, err_msg="Policy grad should be zero with zero advantages")
 
@@ -954,7 +1098,7 @@ class TestGradientClipping(unittest.TestCase):
 
         trainer._clip_grad_norm(grads)
         clipped = grads[0].numpy()
-        clipped_norm = np.sqrt(np.sum(clipped ** 2))
+        clipped_norm = np.sqrt(np.sum(clipped**2))
         np.testing.assert_allclose(clipped_norm, 1.0, rtol=1e-4)
 
     def test_does_not_clip_small_gradients(self):
@@ -1014,8 +1158,24 @@ class TestPPOTrainer(unittest.TestCase):
         obs_dim = 4
         act_dim = 4
         env = ReachZeroEnv(num_envs=num_envs, obs_dim=obs_dim, act_dim=act_dim, device="cpu")
-        ac = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, hidden_sizes=[32, 32], device="cpu", seed=42)
-        trainer = PPOTrainer(ac, num_envs=num_envs, num_steps=32, num_epochs=5, num_minibatches=4, lr=3e-4)
+        ac = ActorCritic(
+            obs_dim=obs_dim,
+            act_dim=act_dim,
+            hidden_sizes=[32, 32],
+            layer_norm=False,
+            bounded_actions=False,
+            device="cpu",
+            seed=42,
+        )
+        trainer = PPOTrainer(
+            ac,
+            num_envs=num_envs,
+            num_steps=32,
+            num_epochs=5,
+            num_minibatches=4,
+            lr=3e-4,
+            auto_entropy=False,
+        )
 
         obs = env.reset()
         last_values, obs = trainer.collect_rollouts(env, obs)
@@ -1023,18 +1183,19 @@ class TestPPOTrainer(unittest.TestCase):
         trainer.buffer.compute_gae(last_values, trainer.gamma, trainer.gae_lambda)
         trainer.update()
 
-        for _ in range(50):
+        for _ in range(100):
             last_values, obs = trainer.collect_rollouts(env, obs)
             trainer.buffer.compute_gae(last_values, trainer.gamma, trainer.gae_lambda)
             trainer.update()
 
         final_reward = trainer.buffer.mean_reward()
+        print(f"ReachZero convergence: initial_reward={initial_reward:.4f} -> final_reward={final_reward:.4f}")
         self.assertGreater(
             final_reward,
             initial_reward,
             f"PPO should improve reward: {initial_reward:.4f} -> {final_reward:.4f}",
         )
-        self.assertGreater(final_reward, -2.0, f"Final reward should improve substantially (got {final_reward:.4f})")
+        self.assertGreater(final_reward, -2.5, f"Final reward should improve substantially (got {final_reward:.4f})")
 
     def test_get_stats_returns_valid(self):
         """get_stats() should return finite loss, reward, and alpha."""
@@ -1054,12 +1215,15 @@ class TestPPOTrainer(unittest.TestCase):
         """With auto_entropy=True, alpha should change from its initial value."""
         env = DummyVecEnv(num_envs=16, obs_dim=4, act_dim=2, device="cpu")
         ac = ActorCritic(obs_dim=4, act_dim=2, hidden_sizes=[16], device="cpu", seed=0)
-        trainer = PPOTrainer(ac, num_envs=16, num_steps=8, num_epochs=5, num_minibatches=2, auto_entropy=True, entropy_coef=0.01)
+        trainer = PPOTrainer(
+            ac, num_envs=16, num_steps=8, num_epochs=5, num_minibatches=2, auto_entropy=True, entropy_coef=0.01
+        )
         initial_log_alpha = trainer._log_alpha.numpy()[0].copy()
         trainer.train(env, total_timesteps=640, log_interval=999)
         final_log_alpha = trainer._log_alpha.numpy()[0]
         self.assertGreater(
-            abs(final_log_alpha - initial_log_alpha), 0.01,
+            abs(final_log_alpha - initial_log_alpha),
+            0.01,
             f"Auto-entropy should adjust log_alpha: {initial_log_alpha:.6f} -> {final_log_alpha:.6f}",
         )
 

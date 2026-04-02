@@ -1,22 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Single-file PPO implementation backed by Warp kernels.
+"""PPO implementation backed by Warp kernels.
 
 Provides a complete Proximal Policy Optimization trainer for continuous
 action spaces using diagonal-Gaussian policies.  All computation runs on
-GPU via Warp -- no PyTorch dependency.  The tiled GEMM kernels from
-:mod:`newton._src.onnx_runtime` are reused for the MLP forward pass, and
-``wp.Tape`` handles automatic differentiation of the network layers.
+GPU via Warp -- no PyTorch dependency.
+
+Neural network building blocks live in :mod:`newton._src.warp_nn`.
 
 Typical workflow::
 
-    from newton._src.ppo import ActorCritic, PPOTrainer, export_actor_to_onnx
+    from newton._src.ppo import ActorCritic, PPOTrainer
+    from newton._src.warp_nn import export_to_onnx
 
     ac = ActorCritic(obs_dim=48, act_dim=12, device="cuda:0")
     trainer = PPOTrainer(ac)
     trainer.train(env, total_timesteps=1_000_000)
-    export_actor_to_onnx(ac.actor, obs_dim=48, path="policy.onnx")
+    export_to_onnx(ac.actor, obs_dim=48, path="policy.onnx")
 """
 
 from __future__ import annotations
@@ -26,20 +27,13 @@ import math
 from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
-import onnx
 import warp as wp
-from onnx import TensorProto, helper, numpy_helper
 
-from newton._src.onnx_runtime import (
-    _TILE_THREADS,
-    _bias_add_kernel,
-    _ceil_div,
-    _elu_kernel,
-    _make_tiled_gemm_transB_kernel,
-    _pick_tile_sizes,
-    _relu_kernel,
-    _tanh_kernel,
-)
+from newton._src.onnx_runtime import _ceil_div
+from newton._src.warp_nn import Network, WarpMLP, _orthogonal_init, clone_for_batch, export_to_onnx  # noqa: F401
+
+# Re-export for backward compat
+export_actor_to_onnx = export_to_onnx
 
 # ---------------------------------------------------------------------------
 # Running observation normalizer (Welford's online algorithm, on-device)
@@ -189,188 +183,6 @@ class AdamW:
 
 
 # ---------------------------------------------------------------------------
-# WarpMLP -- differentiable tiled MLP
-# ---------------------------------------------------------------------------
-
-_ACTIVATION_KERNELS = {
-    "elu": _elu_kernel,
-    "relu": _relu_kernel,
-    "tanh": _tanh_kernel,
-}
-
-
-@wp.kernel
-def _layer_norm_kernel(
-    x: wp.array2d[float],
-    gamma: wp.array[float],
-    beta: wp.array[float],
-    out: wp.array2d[float],
-    width: int,
-):
-    """Per-row layer normalization: out[i] = gamma * (x[i] - mean) / std + beta."""
-    i = wp.tid()
-    # Mean
-    mu = float(0.0)
-    for j in range(width):
-        mu = mu + x[i, j]
-    mu = mu / float(width)
-    # Variance
-    var = float(0.0)
-    for j in range(width):
-        d = x[i, j] - mu
-        var = var + d * d
-    var = var / float(width)
-    inv_std = 1.0 / wp.sqrt(var + 1.0e-5)
-    # Normalize + affine
-    for j in range(width):
-        out[i, j] = gamma[j] * (x[i, j] - mu) * inv_std + beta[j]
-
-
-def _orthogonal_init(shape: tuple[int, int], gain: float = 1.0, seed: int | None = None) -> np.ndarray:
-    """Orthogonal weight initialization (standard for PPO)."""
-    rows, cols = shape
-    rng = np.random.default_rng(seed)
-    n = max(rows, cols)
-    flat = rng.standard_normal((n, n)).astype(np.float32)
-    q, r = np.linalg.qr(flat)
-    q *= np.sign(np.diag(r))
-    return q[:rows, :cols] * gain
-
-
-class WarpMLP:
-    """Dense MLP with tiled GEMM forward pass and ``wp.Tape`` autodiff.
-
-    Weights are stored in ``(out_dim, in_dim)`` layout (transB=1 convention)
-    so the same tiled kernels used by :class:`OnnxRuntime` are reused here.
-
-    Args:
-        layer_sizes: Sequence of layer widths, e.g. ``[48, 128, 128, 128, 12]``.
-        activation: Activation function name (``"elu"``, ``"relu"``, ``"tanh"``).
-        layer_norm: Apply layer normalization after each hidden layer
-            (before the activation).  Stabilises training and reduces
-            sensitivity to input scale.
-        device: Warp device string.
-        output_gain: Orthogonal init gain for the last layer (0.01 is common for policy heads).
-        seed: RNG seed for weight initialization reproducibility.
-    """
-
-    def __init__(
-        self,
-        layer_sizes: list[int],
-        activation: str = "elu",
-        layer_norm: bool = True,
-        device: str | None = None,
-        output_gain: float = 1.0,
-        seed: int | None = None,
-    ):
-        self._device = wp.get_device(device)
-        self._activation = activation
-        self._layer_norm = layer_norm
-        self._act_kernel = _ACTIVATION_KERNELS.get(activation)
-        if self._act_kernel is None:
-            raise ValueError(f"Unknown activation '{activation}', choose from {list(_ACTIVATION_KERNELS)}")
-
-        self.weights: list[wp.array] = []
-        self.biases: list[wp.array] = []
-        # LayerNorm parameters (gamma, beta) per hidden layer -- not on the output layer
-        self.ln_gammas: list[wp.array] = []
-        self.ln_betas: list[wp.array] = []
-        self._intermediates: list[wp.array] = []
-
-        num_layers = len(layer_sizes) - 1
-        for i in range(num_layers):
-            fan_in, fan_out = layer_sizes[i], layer_sizes[i + 1]
-            gain = output_gain if i == num_layers - 1 else math.sqrt(2.0)
-            layer_seed = None if seed is None else seed + i
-            w_np = _orthogonal_init((fan_out, fan_in), gain=gain, seed=layer_seed)
-            b_np = np.zeros(fan_out, dtype=np.float32)
-            self.weights.append(wp.array(w_np, dtype=wp.float32, device=self._device, requires_grad=True))
-            self.biases.append(wp.array(b_np, dtype=wp.float32, device=self._device, requires_grad=True))
-            # LayerNorm on hidden layers only
-            if layer_norm and i < num_layers - 1:
-                self.ln_gammas.append(
-                    wp.array(np.ones(fan_out, dtype=np.float32), dtype=wp.float32, device=self._device, requires_grad=True)
-                )
-                self.ln_betas.append(
-                    wp.array(np.zeros(fan_out, dtype=np.float32), dtype=wp.float32, device=self._device, requires_grad=True)
-                )
-
-        self._layer_sizes = layer_sizes
-
-    def alloc_intermediates(self, batch: int) -> None:
-        """Pre-allocate intermediate buffers for a fixed batch size."""
-        needed = len(self.weights)
-        if len(self._intermediates) == needed and self._intermediates[0].shape[0] == batch:
-            return
-        self._intermediates = [
-            wp.zeros((batch, self._layer_sizes[i + 1]), dtype=wp.float32, device=self._device, requires_grad=True)
-            for i in range(needed)
-        ]
-
-    def forward(self, x: wp.array) -> wp.array:
-        batch = x.shape[0]
-        if not self._intermediates or self._intermediates[0].shape[0] != batch:
-            self.alloc_intermediates(batch)
-
-        inp = x
-        ln_idx = 0
-        for i, (w, b, out) in enumerate(zip(self.weights, self.biases, self._intermediates, strict=True)):
-            M, K = batch, self._layer_sizes[i]
-            N = self._layer_sizes[i + 1]
-            tile_m, tile_n, tile_k = _pick_tile_sizes(M, N, K)
-            grid = (_ceil_div(M, tile_m), _ceil_div(N, tile_n))
-            kernel = _make_tiled_gemm_transB_kernel(tile_m, tile_n, tile_k)
-
-            out.zero_()
-            wp.launch_tiled(kernel, dim=list(grid), inputs=[inp, w, out], block_dim=_TILE_THREADS, device=self._device)
-            wp.launch(_bias_add_kernel, dim=(M, N), inputs=[out, b, 1.0, 1.0], device=self._device)
-
-            is_last = i == len(self.weights) - 1
-            if not is_last:
-                # LayerNorm (before activation)
-                if self._layer_norm:
-                    gamma = self.ln_gammas[ln_idx]
-                    beta = self.ln_betas[ln_idx]
-                    wp.launch(_layer_norm_kernel, dim=M, inputs=[out, gamma, beta, out, N], device=self._device)
-                    ln_idx += 1
-                # Activation
-                if self._activation == "elu":
-                    wp.launch(self._act_kernel, dim=(M, N), inputs=[out, out, 1.0], device=self._device)
-                else:
-                    wp.launch(self._act_kernel, dim=(M, N), inputs=[out, out], device=self._device)
-
-            inp = out
-
-        return self._intermediates[-1]
-
-    def parameters(self) -> list[wp.array]:
-        """Return flat list of all trainable parameter arrays."""
-        params = []
-        ln_idx = 0
-        for i, (w, b) in enumerate(zip(self.weights, self.biases, strict=True)):
-            params.append(w.flatten())
-            params.append(b)
-            if self._layer_norm and i < len(self.weights) - 1:
-                params.append(self.ln_gammas[ln_idx])
-                params.append(self.ln_betas[ln_idx])
-                ln_idx += 1
-        return params
-
-    def grad_arrays(self) -> list[wp.array]:
-        """Return flat list of gradient arrays matching :meth:`parameters`."""
-        grads = []
-        ln_idx = 0
-        for i, (w, b) in enumerate(zip(self.weights, self.biases, strict=True)):
-            grads.append(w.grad.flatten())
-            grads.append(b.grad)
-            if self._layer_norm and i < len(self.weights) - 1:
-                grads.append(self.ln_gammas[ln_idx].grad)
-                grads.append(self.ln_betas[ln_idx].grad)
-                ln_idx += 1
-        return grads
-
-
-# ---------------------------------------------------------------------------
 # Gaussian action sampling (on-device via wp.rand_init / wp.randn)
 # ---------------------------------------------------------------------------
 
@@ -409,7 +221,6 @@ def _sample_actions_kernel(
     lp = -0.5 * (noise * noise + 2.0 * log_std[j] + LOG2PI)
     if use_tanh > 0:
         actions[i, j] = wp.tanh(u)
-        # Numerically stable log |det d(tanh)/du| correction (PPO+ Eq. from Sec 4.1)
         lp = lp - 2.0 * (LOG2 - u - wp.log(1.0 + wp.exp(-2.0 * u)))
     else:
         actions[i, j] = u
@@ -443,17 +254,7 @@ def _ppo_fused_loss_and_grad_kernel(
     grad_log_std: wp.array[float],
     grad_log_alpha: wp.array[float],
 ):
-    """Fused PPO loss forward + analytical gradient computation.
-
-    Computes the PPO clipped surrogate loss, value loss, and entropy bonus
-    in a single kernel.  The entropy coefficient ``alpha = exp(log_alpha)``
-    is read from a device array so it can be auto-tuned.  When
-    ``use_tanh > 0``, the log-probability includes the tanh Jacobian
-    correction.
-
-    Writes exact gradients w.r.t. ``mean``, ``values``, ``log_std``, and
-    ``log_alpha``.  ``wp.Tape`` is used only for the MLP backward pass.
-    """
+    """Fused PPO loss forward + analytical gradient computation."""
     i = wp.tid()
     inv_n = 1.0 / float(n)
     alpha = wp.exp(log_alpha[0])
@@ -481,7 +282,7 @@ def _ppo_fused_loss_and_grad_kernel(
     vdiff = values_flat[i] - returns[i]
     value_loss = 0.5 * vdiff * vdiff
 
-    # -- Entropy (diagonal Gaussian): sum_j (0.5 * log(2*pi*e) + log_std_j) --
+    # -- Entropy (diagonal Gaussian) --
     entropy = float(0.0)
     for j in range(act_dim):
         entropy = entropy + 0.5 * (LOG2PI + 1.0) + log_std[j]
@@ -501,18 +302,10 @@ def _ppo_fused_loss_and_grad_kernel(
     for j in range(act_dim):
         std_j = wp.exp(log_std[j])
         z = (pre_tanh_actions[i, j] - mean[i, j]) / std_j
-
-        # d(log_prob)/d(mean_ij) = z / std_j  (tanh correction is independent of mean)
         grad_mean[i, j] = d_total_d_lp * z / std_j
-
-        # d(log_prob)/d(log_std_j) = z^2 - 1;  d(entropy)/d(log_std_j) = 1
         d_logstd = d_total_d_lp * (z * z - 1.0) - alpha * inv_n
         wp.atomic_add(grad_log_std, j, d_logstd)
 
-    # -- Alpha gradient: d/d(log_alpha) of -alpha * entropy / n --
-    # alpha_loss per sample = -alpha * (log_pi + target_entropy) but we fold
-    # the entropy term from the PPO loss here: d(-alpha*entropy*inv_n)/d(log_alpha) = -alpha*entropy*inv_n
-    # The auto-tune target is handled separately via target_entropy in the trainer.
     wp.atomic_add(grad_log_alpha, 0, -alpha * entropy * inv_n)
 
 
@@ -668,7 +461,6 @@ def _generate_random_keys_kernel(
     rng_counter: wp.array[int],
     n: int,
 ):
-    """Generate random sort keys and identity indices for GPU shuffle."""
     i = wp.tid()
     if i < n:
         epoch_offset = rng_counter[0]
@@ -738,38 +530,25 @@ def _gae_kernel(
 # ---------------------------------------------------------------------------
 
 
-def _clone_mlp_for_batch(source: WarpMLP, batch: int) -> WarpMLP:
-    """Create a WarpMLP that shares weights/LN params but has its own intermediates."""
-    clone = WarpMLP.__new__(WarpMLP)
-    clone.__dict__.update(source.__dict__)
-    clone._intermediates = []
-    clone.alloc_intermediates(batch)
-    clone.weights = source.weights
-    clone.biases = source.biases
-    clone.ln_gammas = source.ln_gammas
-    clone.ln_betas = source.ln_betas
-    return clone
-
-
 class ActorCritic:
     """Gaussian actor-critic with separate MLP networks.
 
-    The default constructor builds standard :class:`WarpMLP` networks.
-    Pass pre-built ``actor`` / ``critic`` networks for full control over
-    architecture.  Any object with ``forward``, ``parameters``,
-    ``grad_arrays``, and ``alloc_intermediates`` methods works.
+    The default constructor builds standard :class:`~newton._src.warp_nn.WarpMLP`
+    networks.  Pass pre-built *actor* / *critic* implementing the
+    :class:`~newton._src.warp_nn.Network` protocol for full control over
+    architecture.
 
     Args:
         obs_dim: Observation vector dimension.
         act_dim: Action vector dimension.
-        hidden_sizes: Hidden layer widths (ignored when *actor*/*critic* are supplied).
+        hidden_sizes: Hidden layer widths (ignored when *actor*/*critic* supplied).
         activation: Activation function name.
         layer_norm: Apply layer normalization in the default MLP.
         init_log_std: Initial value for the learnable log standard deviation.
         bounded_actions: Apply ``tanh`` squashing to bound actions to [-1, 1].
         device: Warp device string.
         seed: RNG seed for weight initialization.
-        actor: Pre-built actor network (overrides *hidden_sizes*/*activation*/*layer_norm*).
+        actor: Pre-built actor network (overrides default construction).
         critic: Pre-built critic network.
     """
 
@@ -836,16 +615,14 @@ class ActorCritic:
         self._act_pre_tanh = wp.zeros((rollout_batch, self.act_dim), dtype=wp.float32, device=d)
         self._act_log_probs = wp.zeros(rollout_batch, dtype=wp.float32, device=d)
 
-        # Minibatch-sized MLP clones (share weights/LN params, separate intermediates)
-        self._actor_mb = _clone_mlp_for_batch(self.actor, minibatch_size)
-        self._critic_mb = _clone_mlp_for_batch(self.critic, minibatch_size)
+        self._actor_mb = clone_for_batch(self.actor, minibatch_size)
+        self._critic_mb = clone_for_batch(self.critic, minibatch_size)
 
     def act(self, obs: wp.array, rng_counter: wp.array) -> tuple[wp.array, wp.array, wp.array]:
         """Forward actor + critic, sample actions using on-device RNG.
 
         Returns:
             ``(actions, log_probs, values)`` -- all on device, pre-allocated.
-            When ``bounded_actions`` is set, actions are in [-1, 1].
         """
         batch = obs.shape[0]
         mean = self.actor.forward(obs)
@@ -1010,7 +787,7 @@ class PPOTrainer:
         gamma: Discount factor.
         gae_lambda: GAE lambda.
         clip_ratio: PPO clipping parameter.
-        entropy_coef: Entropy bonus coefficient (used when ``auto_entropy=False``).
+        entropy_coef: Entropy bonus coefficient (initial value when *auto_entropy*).
         value_coef: Value loss coefficient.
         max_grad_norm: Maximum gradient norm for clipping.
         num_epochs: PPO epochs per rollout.
@@ -1019,9 +796,6 @@ class PPOTrainer:
         num_steps: Rollout horizon per update.
         seed: RNG seed for on-device random number generation.
         auto_entropy: Auto-tune the entropy coefficient (SAC-style).
-            When ``True``, ``entropy_coef`` is used only as the initial value
-            and ``log_alpha`` is optimized to reach a target entropy of
-            ``-act_dim``.
     """
 
     def __init__(
@@ -1057,7 +831,6 @@ class PPOTrainer:
 
         device = actor_critic._device
 
-        # Entropy coefficient: learnable log_alpha on device
         init_log_alpha = math.log(max(entropy_coef, 1e-8))
         self._log_alpha = wp.array([init_log_alpha], dtype=wp.float32, device=device)
         self._grad_log_alpha = wp.zeros(1, dtype=wp.float32, device=device)
@@ -1084,7 +857,7 @@ class PPOTrainer:
 
         self.optimizer = AdamW(actor_critic.parameters(), lr=lr, weight_decay=weight_decay)
 
-        # Advantage normalization scratch (on-device, no readbacks)
+        # Advantage normalization scratch (on-device)
         self._norm_adv = wp.zeros(n_samples, dtype=wp.float32, device=device)
         self._sq_diff = wp.zeros(n_samples, dtype=wp.float32, device=device)
         self._sum_result = wp.zeros(1, dtype=wp.float32, device=device)
@@ -1137,11 +910,6 @@ class PPOTrainer:
     def collect_rollouts(self, env: Any, obs: wp.array | None = None) -> tuple[wp.array, wp.array]:
         """Run the policy in *env* for ``num_steps`` and fill the buffer.
 
-        Args:
-            env: Vectorized environment.
-            obs: Current observations.  Pass back the second return value
-                to avoid resetting the environment between rollouts.
-
         Returns:
             ``(last_values, obs)`` for GAE bootstrapping and next call.
         """
@@ -1185,28 +953,21 @@ class PPOTrainer:
         d = self.ac._device
         src = self.buffer.flat_advantages
 
-        # mean = sum(adv) / n
         self._sum_result.zero_()
         self._sum_reducer.compute(src, n, self._sum_result)
         wp.launch(_scale_scalar_kernel, dim=1, inputs=[self._sum_result, 1.0 / float(n), self._mean_buf], device=d)
 
-        # var = sum((adv - mean)^2) / n
         wp.launch(_sq_diff_kernel, dim=n, inputs=[src, self._mean_buf, self._sq_diff], device=d)
         self._var_result.zero_()
         self._sum_reducer.compute(self._sq_diff, n, self._var_result)
         wp.launch(_inv_std_kernel, dim=1, inputs=[self._var_result, float(n), self._inv_std_buf], device=d)
 
-        # out = (adv - mean) * inv_std
         wp.launch(
             _normalize_adv_kernel, dim=n, inputs=[src, self._mean_buf, self._inv_std_buf, self._norm_adv], device=d
         )
 
-    def update(self) -> float:
-        """Run PPO update epochs on the filled buffer.
-
-        Returns:
-            Average loss (single scalar readback for logging).
-        """
+    def update(self) -> None:
+        """Run PPO update epochs on the filled buffer."""
         p = self.profile
         if p:
             wp.record_event(self._evt_ppo_start)
@@ -1307,14 +1068,13 @@ class PPOTrainer:
                     device=device,
                 )
 
-                # Backward through MLPs using analytical gradients
+                # Backward through MLPs
                 tape.backward(grads={mean: self._grad_mean, values_2d: self._grad_values.reshape((batch_size, 1))})
 
                 grads = self.ac.actor.grad_arrays() + self.ac.critic.grad_arrays() + [self._grad_log_std]
                 self._clip_grad_norm(grads)
                 self.optimizer.step(grads)
 
-                # Auto-tune entropy coefficient
                 if self.auto_entropy:
                     self._alpha_optimizer.step([self._grad_log_alpha])
 
@@ -1340,9 +1100,7 @@ class PPOTrainer:
     def get_stats(self) -> dict[str, float]:
         """Read back training statistics from device arrays.
 
-        Call this **after** :meth:`update` completes (outside any captured
-        graph) to retrieve diagnostics.  All readbacks are in this single
-        method so the training loop itself remains graph-capture safe.
+        Call **after** :meth:`update` (outside any captured graph).
         """
         stats = {
             "loss": float(self._loss.numpy()[0]),
@@ -1375,73 +1133,6 @@ class PPOTrainer:
                     f"Update {update_idx + 1}/{num_updates} | steps={total_steps}"
                     f" | loss={stats['loss']:.4f} | mean_reward={stats['mean_reward']:.4f}"
                 )
-
-
-# ---------------------------------------------------------------------------
-# ONNX export
-# ---------------------------------------------------------------------------
-
-
-def export_actor_to_onnx(actor: WarpMLP, obs_dim: int, path: str) -> None:
-    """Export a trained :class:`WarpMLP` actor to ONNX format.
-
-    The exported model can be loaded by :class:`newton._src.onnx_runtime.OnnxRuntime`.
-
-    Args:
-        actor: The trained actor MLP.
-        obs_dim: Observation dimension (input width).
-        path: Output ``.onnx`` file path.
-    """
-    nodes = []
-    initializers = []
-    prev_output = "observation"
-
-    activation_map = {"elu": "Elu", "relu": "Relu", "tanh": "Tanh"}
-    onnx_act = activation_map.get(actor._activation, "Elu")
-
-    ln_idx = 0
-    for i, (w, b) in enumerate(zip(actor.weights, actor.biases, strict=True)):
-        w_name = f"actor.{i * 2}.weight"
-        b_name = f"actor.{i * 2}.bias"
-        gemm_out = f"/actor/{i * 2}/Gemm_output_0"
-
-        initializers.append(numpy_helper.from_array(w.numpy(), name=w_name))
-        initializers.append(numpy_helper.from_array(b.numpy(), name=b_name))
-        nodes.append(helper.make_node("Gemm", [prev_output, w_name, b_name], [gemm_out], alpha=1.0, beta=1.0, transB=1))
-        prev_output = gemm_out
-
-        is_last = i == len(actor.weights) - 1
-        if not is_last:
-            # LayerNorm (if present)
-            if actor._layer_norm and ln_idx < len(actor.ln_gammas):
-                gamma_name = f"actor.ln{ln_idx}.gamma"
-                beta_name = f"actor.ln{ln_idx}.beta"
-                ln_out = f"/actor/ln{ln_idx}/output"
-                initializers.append(numpy_helper.from_array(actor.ln_gammas[ln_idx].numpy(), name=gamma_name))
-                initializers.append(numpy_helper.from_array(actor.ln_betas[ln_idx].numpy(), name=beta_name))
-                nodes.append(
-                    helper.make_node("LayerNormalization", [prev_output, gamma_name, beta_name], [ln_out], epsilon=1e-5)
-                )
-                prev_output = ln_out
-                ln_idx += 1
-            # Activation
-            act_out = f"/actor/{i * 2 + 1}/{onnx_act}_output_0"
-            nodes.append(helper.make_node(onnx_act, [prev_output], [act_out]))
-            prev_output = act_out
-
-    nodes[-1].output[0] = "action"
-
-    graph = helper.make_graph(
-        nodes,
-        "actor",
-        [helper.make_tensor_value_info("observation", TensorProto.FLOAT, ["batch_size", obs_dim])],
-        [helper.make_tensor_value_info("action", TensorProto.FLOAT, ["batch_size", actor._layer_sizes[-1]])],
-        initializer=initializers,
-    )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
-    model.ir_version = 8
-    onnx.checker.check_model(model, full_check=False)
-    onnx.save(model, path)
 
 
 # ---------------------------------------------------------------------------

@@ -167,10 +167,14 @@ class WarpMLP:
             self.biases.append(wp.array(b_np, dtype=wp.float32, device=self._device, requires_grad=True))
             if layer_norm and i < num_layers - 1:
                 self.ln_gammas.append(
-                    wp.array(np.ones(fan_out, dtype=np.float32), dtype=wp.float32, device=self._device, requires_grad=True)
+                    wp.array(
+                        np.ones(fan_out, dtype=np.float32), dtype=wp.float32, device=self._device, requires_grad=True
+                    )
                 )
                 self.ln_betas.append(
-                    wp.array(np.zeros(fan_out, dtype=np.float32), dtype=wp.float32, device=self._device, requires_grad=True)
+                    wp.array(
+                        np.zeros(fan_out, dtype=np.float32), dtype=wp.float32, device=self._device, requires_grad=True
+                    )
                 )
 
         self._layer_sizes = layer_sizes
@@ -207,7 +211,8 @@ class WarpMLP:
             if not is_last:
                 if self._layer_norm:
                     wp.launch(
-                        _layer_norm_kernel, dim=M,
+                        _layer_norm_kernel,
+                        dim=M,
                         inputs=[out, self.ln_gammas[ln_idx], self.ln_betas[ln_idx], out, N],
                         device=self._device,
                     )
