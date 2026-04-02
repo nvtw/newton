@@ -199,6 +199,33 @@ _ACTIVATION_KERNELS = {
 }
 
 
+@wp.kernel
+def _layer_norm_kernel(
+    x: wp.array2d[float],
+    gamma: wp.array[float],
+    beta: wp.array[float],
+    out: wp.array2d[float],
+    width: int,
+):
+    """Per-row layer normalization: out[i] = gamma * (x[i] - mean) / std + beta."""
+    i = wp.tid()
+    # Mean
+    mu = float(0.0)
+    for j in range(width):
+        mu = mu + x[i, j]
+    mu = mu / float(width)
+    # Variance
+    var = float(0.0)
+    for j in range(width):
+        d = x[i, j] - mu
+        var = var + d * d
+    var = var / float(width)
+    inv_std = 1.0 / wp.sqrt(var + 1.0e-5)
+    # Normalize + affine
+    for j in range(width):
+        out[i, j] = gamma[j] * (x[i, j] - mu) * inv_std + beta[j]
+
+
 def _orthogonal_init(shape: tuple[int, int], gain: float = 1.0, seed: int | None = None) -> np.ndarray:
     """Orthogonal weight initialization (standard for PPO)."""
     rows, cols = shape
@@ -219,6 +246,9 @@ class WarpMLP:
     Args:
         layer_sizes: Sequence of layer widths, e.g. ``[48, 128, 128, 128, 12]``.
         activation: Activation function name (``"elu"``, ``"relu"``, ``"tanh"``).
+        layer_norm: Apply layer normalization after each hidden layer
+            (before the activation).  Stabilises training and reduces
+            sensitivity to input scale.
         device: Warp device string.
         output_gain: Orthogonal init gain for the last layer (0.01 is common for policy heads).
         seed: RNG seed for weight initialization reproducibility.
@@ -228,28 +258,42 @@ class WarpMLP:
         self,
         layer_sizes: list[int],
         activation: str = "elu",
+        layer_norm: bool = True,
         device: str | None = None,
         output_gain: float = 1.0,
         seed: int | None = None,
     ):
         self._device = wp.get_device(device)
         self._activation = activation
+        self._layer_norm = layer_norm
         self._act_kernel = _ACTIVATION_KERNELS.get(activation)
         if self._act_kernel is None:
             raise ValueError(f"Unknown activation '{activation}', choose from {list(_ACTIVATION_KERNELS)}")
 
         self.weights: list[wp.array] = []
         self.biases: list[wp.array] = []
+        # LayerNorm parameters (gamma, beta) per hidden layer -- not on the output layer
+        self.ln_gammas: list[wp.array] = []
+        self.ln_betas: list[wp.array] = []
         self._intermediates: list[wp.array] = []
 
-        for i in range(len(layer_sizes) - 1):
+        num_layers = len(layer_sizes) - 1
+        for i in range(num_layers):
             fan_in, fan_out = layer_sizes[i], layer_sizes[i + 1]
-            gain = output_gain if i == len(layer_sizes) - 2 else math.sqrt(2.0)
+            gain = output_gain if i == num_layers - 1 else math.sqrt(2.0)
             layer_seed = None if seed is None else seed + i
             w_np = _orthogonal_init((fan_out, fan_in), gain=gain, seed=layer_seed)
             b_np = np.zeros(fan_out, dtype=np.float32)
             self.weights.append(wp.array(w_np, dtype=wp.float32, device=self._device, requires_grad=True))
             self.biases.append(wp.array(b_np, dtype=wp.float32, device=self._device, requires_grad=True))
+            # LayerNorm on hidden layers only
+            if layer_norm and i < num_layers - 1:
+                self.ln_gammas.append(
+                    wp.array(np.ones(fan_out, dtype=np.float32), dtype=wp.float32, device=self._device, requires_grad=True)
+                )
+                self.ln_betas.append(
+                    wp.array(np.zeros(fan_out, dtype=np.float32), dtype=wp.float32, device=self._device, requires_grad=True)
+                )
 
         self._layer_sizes = layer_sizes
 
@@ -269,6 +313,7 @@ class WarpMLP:
             self.alloc_intermediates(batch)
 
         inp = x
+        ln_idx = 0
         for i, (w, b, out) in enumerate(zip(self.weights, self.biases, self._intermediates, strict=True)):
             M, K = batch, self._layer_sizes[i]
             N = self._layer_sizes[i + 1]
@@ -282,6 +327,13 @@ class WarpMLP:
 
             is_last = i == len(self.weights) - 1
             if not is_last:
+                # LayerNorm (before activation)
+                if self._layer_norm:
+                    gamma = self.ln_gammas[ln_idx]
+                    beta = self.ln_betas[ln_idx]
+                    wp.launch(_layer_norm_kernel, dim=M, inputs=[out, gamma, beta, out, N], device=self._device)
+                    ln_idx += 1
+                # Activation
                 if self._activation == "elu":
                     wp.launch(self._act_kernel, dim=(M, N), inputs=[out, out, 1.0], device=self._device)
                 else:
@@ -294,17 +346,27 @@ class WarpMLP:
     def parameters(self) -> list[wp.array]:
         """Return flat list of all trainable parameter arrays."""
         params = []
-        for w, b in zip(self.weights, self.biases, strict=True):
+        ln_idx = 0
+        for i, (w, b) in enumerate(zip(self.weights, self.biases, strict=True)):
             params.append(w.flatten())
             params.append(b)
+            if self._layer_norm and i < len(self.weights) - 1:
+                params.append(self.ln_gammas[ln_idx])
+                params.append(self.ln_betas[ln_idx])
+                ln_idx += 1
         return params
 
     def grad_arrays(self) -> list[wp.array]:
         """Return flat list of gradient arrays matching :meth:`parameters`."""
         grads = []
-        for w, b in zip(self.weights, self.biases, strict=True):
+        ln_idx = 0
+        for i, (w, b) in enumerate(zip(self.weights, self.biases, strict=True)):
             grads.append(w.grad.flatten())
             grads.append(b.grad)
+            if self._layer_norm and i < len(self.weights) - 1:
+                grads.append(self.ln_gammas[ln_idx].grad)
+                grads.append(self.ln_betas[ln_idx].grad)
+                ln_idx += 1
         return grads
 
 
@@ -676,18 +738,39 @@ def _gae_kernel(
 # ---------------------------------------------------------------------------
 
 
+def _clone_mlp_for_batch(source: WarpMLP, batch: int) -> WarpMLP:
+    """Create a WarpMLP that shares weights/LN params but has its own intermediates."""
+    clone = WarpMLP.__new__(WarpMLP)
+    clone.__dict__.update(source.__dict__)
+    clone._intermediates = []
+    clone.alloc_intermediates(batch)
+    clone.weights = source.weights
+    clone.biases = source.biases
+    clone.ln_gammas = source.ln_gammas
+    clone.ln_betas = source.ln_betas
+    return clone
+
+
 class ActorCritic:
     """Gaussian actor-critic with separate MLP networks.
+
+    The default constructor builds standard :class:`WarpMLP` networks.
+    Pass pre-built ``actor`` / ``critic`` networks for full control over
+    architecture.  Any object with ``forward``, ``parameters``,
+    ``grad_arrays``, and ``alloc_intermediates`` methods works.
 
     Args:
         obs_dim: Observation vector dimension.
         act_dim: Action vector dimension.
-        hidden_sizes: Hidden layer widths.
+        hidden_sizes: Hidden layer widths (ignored when *actor*/*critic* are supplied).
         activation: Activation function name.
+        layer_norm: Apply layer normalization in the default MLP.
         init_log_std: Initial value for the learnable log standard deviation.
         bounded_actions: Apply ``tanh`` squashing to bound actions to [-1, 1].
         device: Warp device string.
         seed: RNG seed for weight initialization.
+        actor: Pre-built actor network (overrides *hidden_sizes*/*activation*/*layer_norm*).
+        critic: Pre-built critic network.
     """
 
     def __init__(
@@ -696,10 +779,13 @@ class ActorCritic:
         act_dim: int,
         hidden_sizes: list[int] | None = None,
         activation: str = "elu",
+        layer_norm: bool = True,
         init_log_std: float = 0.0,
         bounded_actions: bool = True,
         device: str | None = None,
         seed: int | None = None,
+        actor: Any | None = None,
+        critic: Any | None = None,
     ):
         if hidden_sizes is None:
             hidden_sizes = [128, 128, 128]
@@ -709,14 +795,30 @@ class ActorCritic:
         self.bounded_actions = bounded_actions
         self._use_tanh_int = 1 if bounded_actions else 0
 
-        actor_seed = None if seed is None else seed
-        critic_seed = None if seed is None else seed + 1000
-        self.actor = WarpMLP(
-            [obs_dim, *hidden_sizes, act_dim], activation=activation, device=device, output_gain=0.01, seed=actor_seed
-        )
-        self.critic = WarpMLP(
-            [obs_dim, *hidden_sizes, 1], activation=activation, device=device, output_gain=1.0, seed=critic_seed
-        )
+        if actor is not None:
+            self.actor = actor
+        else:
+            actor_seed = None if seed is None else seed
+            self.actor = WarpMLP(
+                [obs_dim, *hidden_sizes, act_dim],
+                activation=activation,
+                layer_norm=layer_norm,
+                device=device,
+                output_gain=0.01,
+                seed=actor_seed,
+            )
+        if critic is not None:
+            self.critic = critic
+        else:
+            critic_seed = None if seed is None else seed + 1000
+            self.critic = WarpMLP(
+                [obs_dim, *hidden_sizes, 1],
+                activation=activation,
+                layer_norm=layer_norm,
+                device=device,
+                output_gain=1.0,
+                seed=critic_seed,
+            )
         self.log_std = wp.array(
             np.full(act_dim, init_log_std, dtype=np.float32),
             dtype=wp.float32,
@@ -734,20 +836,9 @@ class ActorCritic:
         self._act_pre_tanh = wp.zeros((rollout_batch, self.act_dim), dtype=wp.float32, device=d)
         self._act_log_probs = wp.zeros(rollout_batch, dtype=wp.float32, device=d)
 
-        # Minibatch-sized MLP clones (share weights, separate intermediates)
-        self._actor_mb = WarpMLP.__new__(WarpMLP)
-        self._actor_mb.__dict__.update(self.actor.__dict__)
-        self._actor_mb._intermediates = []
-        self._actor_mb.alloc_intermediates(minibatch_size)
-        self._actor_mb.weights = self.actor.weights
-        self._actor_mb.biases = self.actor.biases
-
-        self._critic_mb = WarpMLP.__new__(WarpMLP)
-        self._critic_mb.__dict__.update(self.critic.__dict__)
-        self._critic_mb._intermediates = []
-        self._critic_mb.alloc_intermediates(minibatch_size)
-        self._critic_mb.weights = self.critic.weights
-        self._critic_mb.biases = self.critic.biases
+        # Minibatch-sized MLP clones (share weights/LN params, separate intermediates)
+        self._actor_mb = _clone_mlp_for_batch(self.actor, minibatch_size)
+        self._critic_mb = _clone_mlp_for_batch(self.critic, minibatch_size)
 
     def act(self, obs: wp.array, rng_counter: wp.array) -> tuple[wp.array, wp.array, wp.array]:
         """Forward actor + critic, sample actions using on-device RNG.
@@ -1308,6 +1399,7 @@ def export_actor_to_onnx(actor: WarpMLP, obs_dim: int, path: str) -> None:
     activation_map = {"elu": "Elu", "relu": "Relu", "tanh": "Tanh"}
     onnx_act = activation_map.get(actor._activation, "Elu")
 
+    ln_idx = 0
     for i, (w, b) in enumerate(zip(actor.weights, actor.biases, strict=True)):
         w_name = f"actor.{i * 2}.weight"
         b_name = f"actor.{i * 2}.bias"
@@ -1316,14 +1408,26 @@ def export_actor_to_onnx(actor: WarpMLP, obs_dim: int, path: str) -> None:
         initializers.append(numpy_helper.from_array(w.numpy(), name=w_name))
         initializers.append(numpy_helper.from_array(b.numpy(), name=b_name))
         nodes.append(helper.make_node("Gemm", [prev_output, w_name, b_name], [gemm_out], alpha=1.0, beta=1.0, transB=1))
+        prev_output = gemm_out
 
         is_last = i == len(actor.weights) - 1
         if not is_last:
+            # LayerNorm (if present)
+            if actor._layer_norm and ln_idx < len(actor.ln_gammas):
+                gamma_name = f"actor.ln{ln_idx}.gamma"
+                beta_name = f"actor.ln{ln_idx}.beta"
+                ln_out = f"/actor/ln{ln_idx}/output"
+                initializers.append(numpy_helper.from_array(actor.ln_gammas[ln_idx].numpy(), name=gamma_name))
+                initializers.append(numpy_helper.from_array(actor.ln_betas[ln_idx].numpy(), name=beta_name))
+                nodes.append(
+                    helper.make_node("LayerNormalization", [prev_output, gamma_name, beta_name], [ln_out], epsilon=1e-5)
+                )
+                prev_output = ln_out
+                ln_idx += 1
+            # Activation
             act_out = f"/actor/{i * 2 + 1}/{onnx_act}_output_0"
-            nodes.append(helper.make_node(onnx_act, [gemm_out], [act_out]))
+            nodes.append(helper.make_node(onnx_act, [prev_output], [act_out]))
             prev_output = act_out
-        else:
-            prev_output = gemm_out
 
     nodes[-1].output[0] = "action"
 
