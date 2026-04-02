@@ -305,9 +305,6 @@ class OnnxRuntime:
             elif op.op_type == "Add":
                 out_shape = self._shapes[op.inputs[0]]
 
-            elif op.op_type == "LayerNormalization":
-                out_shape = self._shapes[op.inputs[0]]
-
             elif op.op_type == "Identity":
                 self._shapes[out_name] = self._shapes[op.inputs[0]]
                 continue
@@ -315,7 +312,7 @@ class OnnxRuntime:
             else:
                 raise NotImplementedError(
                     f"OnnxRuntime: unsupported op '{op.op_type}'.  "
-                    f"Supported: Gemm, MatMul, Elu, Relu, Tanh, Sigmoid, Add, Identity, LayerNormalization"
+                    f"Supported: Gemm, MatMul, Elu, Relu, Tanh, Sigmoid, Add, Identity"
                 )
 
             if out_name not in self._tensors:
@@ -544,5 +541,4 @@ _OP_DISPATCH: dict[str, Any] = {
     "Sigmoid": _exec_sigmoid,
     "Add": _exec_add,
     "Identity": _exec_identity,
-    "LayerNormalization": _exec_layer_norm,
 }

@@ -124,27 +124,6 @@ def _make_identity_graph(M, N):
     return graph
 
 
-def _make_layer_norm_graph(M, N, eps=1e-5, seed=0):
-    rng = np.random.default_rng(seed)
-    gamma_np = rng.standard_normal(N).astype(np.float32)
-    beta_np = rng.standard_normal(N).astype(np.float32)
-    inits = [
-        numpy_helper.from_array(gamma_np, name="gamma"),
-        numpy_helper.from_array(beta_np, name="beta"),
-    ]
-    node = helper.make_node(
-        "LayerNormalization", ["X", "gamma", "beta"], ["Y"],
-        epsilon=eps, axis=-1,
-    )
-    graph = helper.make_graph(
-        [node], "test_layer_norm",
-        [helper.make_tensor_value_info("X", TensorProto.FLOAT, [M, N])],
-        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [M, N])],
-        initializer=inits,
-    )
-    return graph, gamma_np, beta_np
-
-
 def _make_mlp_graph(layer_sizes, activation="Elu", seed=0):
     """Build a multi-layer Gemm+Activation graph (no activation on last layer)."""
     rng = np.random.default_rng(seed)
@@ -194,7 +173,7 @@ def _run_onnx(graph, x_np, batch_size=None):
     """Save graph to temp file, run through OnnxRuntime, return output NumPy array.
 
     Seeds the input shape into the runtime so that ops consuming the graph
-    input directly (activations, Identity, Add, LayerNorm) can preallocate.
+    input directly (activations, Identity, Add) can preallocate.
     """
     if batch_size is None:
         batch_size = x_np.shape[0]
@@ -214,7 +193,7 @@ def _run_onnx_seeded(graph, x_np, batch_size=None):
     """Like _run_onnx but seeds input shapes before construction.
 
     Needed for graphs where the first op directly consumes the graph input
-    (e.g. standalone activation, Identity, Add, LayerNorm) since the runtime
+    (e.g. standalone activation, Identity, Add) since the runtime
     only learns input shapes at call time, not during buffer preallocation.
     """
     if batch_size is None:
@@ -530,33 +509,6 @@ class TestIdentity(unittest.TestCase):
 
         result = _run_onnx_seeded(graph, x_np)
         np.testing.assert_array_equal(result, x_np)
-
-
-class TestLayerNorm(unittest.TestCase):
-    def test_layer_norm_matches_numpy(self):
-        """LayerNormalization should match NumPy reference."""
-        M, N = 4, 8
-        eps = 1e-5
-        graph, gamma_np, beta_np = _make_layer_norm_graph(M, N, eps=eps, seed=0)
-        rng = np.random.default_rng(1)
-        x_np = rng.standard_normal((M, N)).astype(np.float32) * 3 + 1
-
-        result = _run_onnx_seeded(graph, x_np)
-
-        mean = x_np.mean(axis=-1, keepdims=True)
-        var = x_np.var(axis=-1, keepdims=True)
-        expected = gamma_np * (x_np - mean) / np.sqrt(var + eps) + beta_np
-        np.testing.assert_allclose(result, expected, rtol=1e-4, atol=1e-5)
-
-    def test_layer_norm_constant_input(self):
-        """Constant input should produce beta (since normalized input is zero)."""
-        M, N = 2, 4
-        graph, gamma_np, beta_np = _make_layer_norm_graph(M, N, seed=42)
-        x_np = np.full((M, N), 5.0, dtype=np.float32)
-
-        result = _run_onnx_seeded(graph, x_np)
-        expected = np.tile(beta_np, (M, 1))
-        np.testing.assert_allclose(result, expected, rtol=1e-4, atol=1e-5)
 
 
 class TestMultiLayerMLP(unittest.TestCase):

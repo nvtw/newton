@@ -543,7 +543,6 @@ class ActorCritic:
         act_dim: Action vector dimension.
         hidden_sizes: Hidden layer widths (ignored when *actor*/*critic* supplied).
         activation: Activation function name.
-        layer_norm: Apply layer normalization in the default MLP.
         init_log_std: Initial value for the learnable log standard deviation.
         bounded_actions: Apply ``tanh`` squashing to bound actions to [-1, 1].
         device: Warp device string.
@@ -558,7 +557,6 @@ class ActorCritic:
         act_dim: int,
         hidden_sizes: list[int] | None = None,
         activation: str = "elu",
-        layer_norm: bool = False,
         init_log_std: float = 0.0,
         bounded_actions: bool = True,
         device: str | None = None,
@@ -581,7 +579,6 @@ class ActorCritic:
             self.actor = WarpMLP(
                 [obs_dim, *hidden_sizes, act_dim],
                 activation=activation,
-                layer_norm=layer_norm,
                 device=device,
                 output_gain=0.01,
                 seed=actor_seed,
@@ -593,7 +590,6 @@ class ActorCritic:
             self.critic = WarpMLP(
                 [obs_dim, *hidden_sizes, 1],
                 activation=activation,
-                layer_norm=layer_norm,
                 device=device,
                 output_gain=1.0,
                 seed=critic_seed,

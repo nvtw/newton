@@ -292,18 +292,13 @@ class TestWarpMLP(unittest.TestCase):
         self.assertEqual(y.shape, (4, 8))
 
     def test_parameters_count(self):
-        mlp = WarpMLP([16, 32, 8], activation="elu", layer_norm=False, device="cpu")
+        mlp = WarpMLP([16, 32, 8], activation="elu", device="cpu")
         params = mlp.parameters()
         self.assertEqual(len(params), 4)  # 2 layers x (weight + bias)
 
-    def test_parameters_count_layer_norm(self):
-        mlp = WarpMLP([16, 32, 8], activation="elu", layer_norm=True, device="cpu")
-        params = mlp.parameters()
-        self.assertEqual(len(params), 6)  # w0, b0, gamma0, beta0, w1, b1
-
     def test_forward_matches_numpy(self):
         """WarpMLP forward should match a manual NumPy matmul + ELU."""
-        mlp = WarpMLP([4, 8, 3], activation="elu", layer_norm=False, device="cpu", seed=0)
+        mlp = WarpMLP([4, 8, 3], activation="elu", device="cpu", seed=0)
         x_np = np.array([[1.0, 0.0, -1.0, 2.0], [0.5, -0.5, 1.5, -1.0]], dtype=np.float32)
         x = wp.array(x_np, device="cpu")
         y = mlp.forward(x)
@@ -322,7 +317,7 @@ class TestWarpMLP(unittest.TestCase):
 
     def test_forward_relu(self):
         """Verify ReLU activation produces correct output."""
-        mlp = WarpMLP([3, 4, 2], activation="relu", layer_norm=False, device="cpu", seed=0)
+        mlp = WarpMLP([3, 4, 2], activation="relu", device="cpu", seed=0)
         x_np = np.array([[1.0, -1.0, 0.5]], dtype=np.float32)
         y = mlp.forward(wp.array(x_np, device="cpu")).numpy()
 
@@ -336,7 +331,7 @@ class TestWarpMLP(unittest.TestCase):
 
     def test_forward_tanh(self):
         """Verify tanh activation produces correct output."""
-        mlp = WarpMLP([3, 4, 2], activation="tanh", layer_norm=False, device="cpu", seed=0)
+        mlp = WarpMLP([3, 4, 2], activation="tanh", device="cpu", seed=0)
         x_np = np.array([[1.0, -1.0, 0.5]], dtype=np.float32)
         y = mlp.forward(wp.array(x_np, device="cpu")).numpy()
 
@@ -347,51 +342,6 @@ class TestWarpMLP(unittest.TestCase):
         h = np.tanh(x_np @ w0.T + b0)
         expected = h @ w1.T + b1
         np.testing.assert_allclose(y, expected, rtol=1e-4, atol=1e-5)
-
-    def test_forward_with_layer_norm(self):
-        """WarpMLP with layer_norm=True should match manual LN + ELU in NumPy."""
-        mlp = WarpMLP([4, 8, 3], activation="elu", layer_norm=True, device="cpu", seed=0)
-        x_np = np.array([[1.0, 0.0, -1.0, 2.0], [0.5, -0.5, 1.5, -1.0]], dtype=np.float32)
-        y = mlp.forward(wp.array(x_np, device="cpu")).numpy()
-
-        w0 = mlp.weights[0].numpy()
-        b0 = mlp.biases[0].numpy()
-        g0 = mlp.ln_gammas[0].numpy()
-        beta0 = mlp.ln_betas[0].numpy()
-        w1 = mlp.weights[1].numpy()
-        b1 = mlp.biases[1].numpy()
-
-        h = x_np @ w0.T + b0
-        # LayerNorm
-        mu = h.mean(axis=1, keepdims=True)
-        var = h.var(axis=1, keepdims=True)
-        h = g0 * (h - mu) / np.sqrt(var + 1e-5) + beta0
-        # ELU
-        h = np.where(h > 0, h, np.exp(h) - 1)
-        expected = h @ w1.T + b1
-        np.testing.assert_allclose(y, expected, rtol=1e-4, atol=1e-5)
-
-    def test_layer_norm_onnx_roundtrip(self):
-        """Export with LayerNorm and verify OnnxRuntime produces same output."""
-        import os
-        import tempfile
-
-        from newton._src.onnx_runtime import OnnxRuntime
-        from newton._src.warp_nn import export_to_onnx
-
-        mlp = WarpMLP([4, 8, 3], activation="elu", layer_norm=True, device="cpu", seed=0)
-        x_np = np.array([[1.0, 0.0, -1.0, 2.0], [0.5, -0.5, 1.5, -1.0]], dtype=np.float32)
-        y_warp = mlp.forward(wp.array(x_np, device="cpu")).numpy()
-
-        with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as f:
-            path = f.name
-        try:
-            export_to_onnx(mlp, obs_dim=4, path=path)
-            rt = OnnxRuntime(path, device="cpu", batch_size=2)
-            y_onnx = rt({"observation": wp.array(x_np, device="cpu")})["action"].numpy()
-            np.testing.assert_allclose(y_onnx, y_warp, rtol=1e-4, atol=1e-5)
-        finally:
-            os.unlink(path)
 
     def test_seed_reproducibility(self):
         mlp1 = WarpMLP([8, 16, 4], activation="elu", device="cpu", seed=42)
@@ -1162,7 +1112,6 @@ class TestPPOTrainer(unittest.TestCase):
             obs_dim=obs_dim,
             act_dim=act_dim,
             hidden_sizes=[32, 32],
-            layer_norm=False,
             bounded_actions=False,
             device="cpu",
             seed=42,

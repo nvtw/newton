@@ -139,43 +139,74 @@ class CartpoleEnv(RobotEnv):
         cart = builder.add_link()
         builder.add_shape_box(cart, hx=0.3, hy=0.15, hz=0.1)
         j0 = builder.add_joint_prismatic(
-            parent=-1, child=cart, axis=(0.0, 1.0, 0.0),
-            target_ke=500.0, target_kd=50.0,
+            parent=-1,
+            child=cart,
+            axis=(0.0, 1.0, 0.0),
+            target_ke=500.0,
+            target_kd=50.0,
         )
 
         # Pole: hinges on the cart, unactuated
         pole = builder.add_link()
         builder.add_shape_box(pole, hx=0.04, hy=0.04, hz=0.5)
         j1 = builder.add_joint_revolute(
-            parent=cart, child=pole, axis=(1.0, 0.0, 0.0),
+            parent=cart,
+            child=pole,
+            axis=(1.0, 0.0, 0.0),
             parent_xform=wp.transform(p=(0.0, 0.0, 0.1), q=wp.quat_identity()),
             child_xform=wp.transform(p=(0.0, 0.0, -0.5), q=wp.quat_identity()),
-            target_ke=0.0, target_kd=0.05,
+            target_ke=0.0,
+            target_kd=0.05,
         )
         builder.add_articulation([j0, j1])
 
     def compute_obs(self):
-        wp.launch(_compute_obs_kernel, dim=self.num_envs,
-                  inputs=[self.state.joint_q, self.state.joint_qd, self.obs], device=self.device)
+        wp.launch(
+            _compute_obs_kernel,
+            dim=self.num_envs,
+            inputs=[self.state.joint_q, self.state.joint_qd, self.obs],
+            device=self.device,
+        )
 
     def compute_reward(self):
-        wp.launch(_compute_rewards_kernel, dim=self.num_envs,
-                  inputs=[self.state.joint_q, self.state.joint_qd,
-                          self.episode_lengths, self.rewards, self.dones], device=self.device)
+        wp.launch(
+            _compute_rewards_kernel,
+            dim=self.num_envs,
+            inputs=[self.state.joint_q, self.state.joint_qd, self.episode_lengths, self.rewards, self.dones],
+            device=self.device,
+        )
 
     def apply_actions(self, actions):
-        wp.launch(_apply_actions_kernel, dim=self.num_envs,
-                  inputs=[actions, self.control.joint_target_pos], device=self.device)
+        wp.launch(
+            _apply_actions_kernel,
+            dim=self.num_envs,
+            inputs=[actions, self.control.joint_target_pos],
+            device=self.device,
+        )
         # Random perturbation kicks to ~10% of envs
         wp.launch(_increment_counter_kernel, dim=1, inputs=[self.rng_counter], device=self.device)
-        wp.launch(_apply_perturbation_kernel, dim=self.num_envs,
-                  inputs=[self.state.joint_qd, self.rng_counter, 0.1, 2.0], device=self.device)
+        wp.launch(
+            _apply_perturbation_kernel,
+            dim=self.num_envs,
+            inputs=[self.state.joint_qd, self.rng_counter, 0.1, 2.0],
+            device=self.device,
+        )
 
     def reset_done_envs(self):
-        wp.launch(_reset_envs_kernel, dim=self.num_envs,
-                  inputs=[self.dones, self.initial_joint_q, self.initial_joint_qd,
-                          self.state.joint_q, self.state.joint_qd,
-                          self.episode_lengths, self.rng_counter], device=self.device)
+        wp.launch(
+            _reset_envs_kernel,
+            dim=self.num_envs,
+            inputs=[
+                self.dones,
+                self.initial_joint_q,
+                self.initial_joint_qd,
+                self.state.joint_q,
+                self.state.joint_qd,
+                self.episode_lengths,
+                self.rng_counter,
+            ],
+            device=self.device,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -199,17 +230,30 @@ class Example:
         self.env = CartpoleEnv(num_envs, device=str(self.device))
 
         self.ac = ActorCritic(
-            obs_dim=5, act_dim=1, hidden_sizes=[64, 64],
-            activation="elu", init_log_std=-0.5,
-            bounded_actions=True, layer_norm=False,
-            device=str(self.device), seed=42,
+            obs_dim=5,
+            act_dim=1,
+            hidden_sizes=[64, 64],
+            activation="elu",
+            init_log_std=-0.5,
+            bounded_actions=True,
+            device=str(self.device),
+            seed=42,
         )
         num_steps = 64
         self.trainer = PPOTrainer(
-            self.ac, num_envs, lr=3e-4, num_steps=num_steps, num_epochs=5,
-            num_minibatches=4, gamma=0.99, gae_lambda=0.95, clip_ratio=0.2,
-            entropy_coef=0.005, auto_entropy=False,
-            value_coef=0.5, max_grad_norm=1.0,
+            self.ac,
+            num_envs,
+            lr=3e-4,
+            num_steps=num_steps,
+            num_epochs=5,
+            num_minibatches=4,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_ratio=0.2,
+            entropy_coef=0.005,
+            auto_entropy=False,
+            value_coef=0.5,
+            max_grad_norm=1.0,
         )
 
         self.steps_per_update = num_envs * num_steps
