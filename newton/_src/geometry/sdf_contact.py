@@ -756,6 +756,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
             )
             if f_end < best_f:
                 best_t = check_t
+                best_f = f_end
 
         p = v0 + edge_dir * best_t
 

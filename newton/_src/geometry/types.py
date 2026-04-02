@@ -802,12 +802,9 @@ class Mesh:
                 return self._edges
             tris = self._indices.reshape(-1, 3)
             n = len(tris)
-            # Canonical vertex ids via quantized int64 keys (fast 1-D unique)
+            # Canonical vertex ids via quantized coordinates (overflow-safe)
             q = np.round(self._vertices * 1e7).astype(np.int64)
-            q -= q.min(axis=0)
-            span = q.max(axis=0) + 1
-            keys = q[:, 0] + q[:, 1] * span[0] + q[:, 2] * (span[0] * span[1])
-            _, canonical = np.unique(keys, return_inverse=True)
+            _, canonical = np.unique(q, axis=0, return_inverse=True)
             # Build edges with (min, max) canonical ordering, keep original indices
             c = canonical[tris]
             canon_edges = np.empty((n * 3, 2), dtype=np.int64)

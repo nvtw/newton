@@ -1571,8 +1571,12 @@ class NarrowPhase:
             )
 
             self.empty_tangent = None
+            # Sentinel edge buffers used when no edge data is provided.
+            # _empty_edge_range is indexed by shape id, so it must have one
+            # slot per shape (not per candidate pair).
+            num_shapes = shape_aabb_lower.shape[0] if shape_aabb_lower is not None else max_candidate_pairs
             self._empty_edge_indices = wp.zeros(1, dtype=wp.vec2i, device=device)
-            self._empty_edge_range = wp.full(max(max_candidate_pairs, 1), (-1, 0), dtype=wp.vec2i, device=device)
+            self._empty_edge_range = wp.full(max(num_shapes, 1), (-1, 0), dtype=wp.vec2i, device=device)
 
             if hydroelastic_sdf is not None:
                 self.shape_pairs_sdf_sdf = wp.zeros(hydroelastic_sdf.max_num_shape_pairs, dtype=wp.vec2i, device=device)
