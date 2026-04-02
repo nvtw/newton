@@ -93,17 +93,6 @@ class TestActorCritic(unittest.TestCase):
         self.assertEqual(log_probs.shape, (batch,))
         self.assertEqual(values.shape, (batch,))
 
-    def test_evaluate_shapes(self):
-        ac = ActorCritic(obs_dim=16, act_dim=4, hidden_sizes=[32, 32], device="cpu")
-        batch = 4
-        ac.alloc_buffers(rollout_batch=8, minibatch_size=batch)
-        obs = wp.array(np.random.default_rng(0).standard_normal((batch, 16)).astype(np.float32), device="cpu")
-        actions = wp.array(np.random.default_rng(1).standard_normal((batch, 4)).astype(np.float32), device="cpu")
-        log_probs, entropy, values = ac.evaluate(obs, actions)
-        self.assertEqual(log_probs.shape, (batch,))
-        self.assertEqual(entropy.shape, (batch,))
-        self.assertEqual(values.shape, (batch,))
-
 
 class TestRolloutBuffer(unittest.TestCase):
     def test_insert_and_flatten(self):

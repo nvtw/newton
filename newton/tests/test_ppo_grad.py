@@ -15,7 +15,7 @@ from newton._src.ppo import (
     AdamW,
     PPOTrainer,
     WarpMLP,
-    _ppo_loss_kernel,
+    _ppo_fused_loss_and_grad_kernel,
 )
 
 
@@ -100,40 +100,61 @@ class TestWarpMLPGradients(unittest.TestCase):
 class TestPPOLossKernelGradients(unittest.TestCase):
     """Test the PPO loss kernel for numerical stability."""
 
-    def test_ppo_loss_large_advantages(self):
-        """PPO loss should not NaN with large advantage values."""
+    def test_fused_kernel_large_advantages(self):
+        """Fused PPO kernel should not NaN with large advantage values."""
         device = "cuda:0" if wp.is_cuda_available() else "cpu"
         batch = 256
+        act_dim = 12
 
-        ac = ActorCritic(obs_dim=48, act_dim=12, hidden_sizes=[128, 128, 128], device=device, seed=42)
+        ac = ActorCritic(obs_dim=48, act_dim=act_dim, hidden_sizes=[128, 128, 128], device=device, seed=42)
         ac.alloc_buffers(rollout_batch=batch, minibatch_size=batch)
 
         rng = np.random.default_rng(42)
         obs = wp.array(rng.standard_normal((batch, 48)).astype(np.float32), device=device, requires_grad=True)
-        actions = wp.array(rng.standard_normal((batch, 12)).astype(np.float32) * 0.5, device=device)
+        actions = wp.array(rng.standard_normal((batch, act_dim)).astype(np.float32) * 0.5, device=device)
         old_lp = wp.array(rng.standard_normal(batch).astype(np.float32) * 2 - 10, device=device)
-        # Large advantages (realistic for ANYmal with value ~0 and return ~36)
         advantages = wp.array(rng.standard_normal(batch).astype(np.float32) * 10 + 20, device=device)
         returns = wp.array(np.full(batch, 36.0, dtype=np.float32), device=device)
 
-        loss = wp.zeros(1, dtype=wp.float32, device=device, requires_grad=True)
+        loss = wp.zeros(1, dtype=wp.float32, device=device)
+        grad_mean = wp.zeros((batch, act_dim), dtype=wp.float32, device=device)
+        grad_values = wp.zeros(batch, dtype=wp.float32, device=device)
+        grad_log_std = wp.zeros(act_dim, dtype=wp.float32, device=device)
 
         tape = wp.Tape()
         with tape:
-            new_lp, ent, vals = ac.evaluate(obs, actions)
-            wp.launch(
-                _ppo_loss_kernel,
-                dim=batch,
-                inputs=[old_lp, new_lp, advantages, vals, returns, ent, 0.2, 0.5, 0.01, loss, batch],
-                device=device,
-            )
-        tape.backward(loss)
+            mean = ac._actor_mb.forward(obs)
+            values_2d = ac._critic_mb.forward(obs)
+
+        wp.launch(
+            _ppo_fused_loss_and_grad_kernel,
+            dim=batch,
+            inputs=[
+                mean,
+                ac.log_std,
+                actions,
+                old_lp,
+                advantages,
+                values_2d.flatten(),
+                returns,
+                0.2,
+                0.5,
+                0.01,
+                batch,
+                act_dim,
+                loss,
+                grad_mean,
+                grad_values,
+                grad_log_std,
+            ],
+            device=device,
+        )
+        tape.backward(grads={mean: grad_mean, values_2d: grad_values.reshape((batch, 1))})
 
         loss_val = loss.numpy()[0]
-        grads = ac.grad_arrays()
-        has_nan_grad = any(np.any(np.isnan(g.numpy())) for g in grads)
+        has_nan_grad = any(np.any(np.isnan(w.grad.numpy())) for w in ac.actor.weights + ac.critic.weights)
 
-        print(f"PPO loss with large advantages: loss={loss_val:.4f}, nan_grad={has_nan_grad}")
+        print(f"Fused PPO with large advantages: loss={loss_val:.4f}, nan_grad={has_nan_grad}")
         self.assertFalse(np.isnan(loss_val), "PPO loss should not be NaN")
         self.assertFalse(has_nan_grad, "PPO gradients should not be NaN")
 
@@ -188,12 +209,15 @@ class TestPPOLossKernelGradients(unittest.TestCase):
         last_vals = wp.array(np.full(num_envs, 0.24, dtype=np.float32), device=device)
         buf.compute_gae(last_vals, 0.99, 0.95)
 
-        loss = trainer.update()
-        has_nan_loss = np.isnan(loss)
+        trainer.update()
+        stats = trainer.get_stats()
+        has_nan_loss = np.isnan(stats["loss"])
         has_nan_params = any(np.any(np.isnan(p.numpy())) for p in ac.parameters())
 
-        print(f"PPO update on ANYmal-like data: loss={loss:.4f}, nan_loss={has_nan_loss}, nan_params={has_nan_params}")
-        self.assertFalse(has_nan_loss, f"PPO update produced NaN loss: {loss}")
+        print(
+            f"PPO update on ANYmal-like data: loss={stats['loss']:.4f}, nan_loss={has_nan_loss}, nan_params={has_nan_params}"
+        )
+        self.assertFalse(has_nan_loss, f"PPO update produced NaN loss: {stats['loss']}")
         self.assertFalse(has_nan_params, "PPO update produced NaN parameters")
 
 

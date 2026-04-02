@@ -7,13 +7,7 @@ Provides a complete Proximal Policy Optimization trainer for continuous
 action spaces using diagonal-Gaussian policies.  All computation runs on
 GPU via Warp -- no PyTorch dependency.  The tiled GEMM kernels from
 :mod:`newton._src.onnx_runtime` are reused for the MLP forward pass, and
-``wp.Tape`` handles automatic differentiation.
-
-**Zero-allocation hot path**: every buffer used during rollout collection,
-GAE, advantage normalization, mini-batch shuffling, and the PPO update
-loop is pre-allocated once.  The only host round-trip is a single scalar
-readback for loss logging.  The pipeline is compatible with
-``wp.ScopedCapture`` / CUDA graph capture.
+``wp.Tape`` handles automatic differentiation of the network layers.
 
 Typical workflow::
 
@@ -78,24 +72,19 @@ def _normalize_obs_kernel(
     inv_std: wp.array[float],
     out: wp.array2d[float],
 ):
-    """Normalize observations: out = (obs - mean) * inv_std, clamped to [-10, 10]."""
+    """Normalize observations: out = clamp((obs - mean) * inv_std, -10, 10)."""
     i, j = wp.tid()
     out[i, j] = wp.clamp((obs[i, j] - mean[j]) * inv_std[j], -10.0, 10.0)
 
 
 @wp.kernel
 def _compute_inv_std_kernel(var: wp.array[float], count: wp.array[float], inv_std: wp.array[float]):
-    """Compute inv_std = 1 / sqrt(var / count + eps)."""
     j = wp.tid()
     inv_std[j] = 1.0 / wp.sqrt(var[j] / wp.max(count[j], 1.0) + 1.0e-8)
 
 
 class ObsNormalizer:
     """Running observation normalizer using Welford's online algorithm.
-
-    All buffers are pre-allocated on device.  Call :meth:`update_and_normalize`
-    during rollout collection to update statistics and normalize observations
-    in a single pass.
 
     Args:
         obs_dim: Observation vector dimension.
@@ -214,7 +203,6 @@ def _orthogonal_init(shape: tuple[int, int], gain: float = 1.0, seed: int | None
     """Orthogonal weight initialization (standard for PPO)."""
     rows, cols = shape
     rng = np.random.default_rng(seed)
-    # Generate a random matrix with at least as many rows as columns
     n = max(rows, cols)
     flat = rng.standard_normal((n, n)).astype(np.float32)
     q, r = np.linalg.qr(flat)
@@ -233,6 +221,7 @@ class WarpMLP:
         activation: Activation function name (``"elu"``, ``"relu"``, ``"tanh"``).
         device: Warp device string.
         output_gain: Orthogonal init gain for the last layer (0.01 is common for policy heads).
+        seed: RNG seed for weight initialization reproducibility.
     """
 
     def __init__(
@@ -265,11 +254,7 @@ class WarpMLP:
         self._layer_sizes = layer_sizes
 
     def alloc_intermediates(self, batch: int) -> None:
-        """Pre-allocate intermediate buffers for a fixed batch size.
-
-        Must be called once before the first :meth:`forward` call with that
-        batch size.  Calling again with the same size is a no-op.
-        """
+        """Pre-allocate intermediate buffers for a fixed batch size."""
         needed = len(self.weights)
         if len(self._intermediates) == needed and self._intermediates[0].shape[0] == batch:
             return
@@ -324,7 +309,7 @@ class WarpMLP:
 
 
 # ---------------------------------------------------------------------------
-# Gaussian distribution kernels (fully on-device via wp.rand_init / wp.randn)
+# Gaussian action sampling (on-device via wp.rand_init / wp.randn)
 # ---------------------------------------------------------------------------
 
 LOG2PI = wp.constant(float(math.log(2.0 * math.pi)))
@@ -357,34 +342,9 @@ def _sample_actions_kernel(
     wp.atomic_add(log_probs, i, lp)
 
 
-@wp.kernel
-def _log_prob_kernel(
-    mean: wp.array2d[float],
-    log_std: wp.array[float],
-    actions: wp.array2d[float],
-    log_probs: wp.array[float],
-):
-    """Compute log-prob of given actions under N(mean, diag(exp(log_std)^2))."""
-    i, j = wp.tid()
-    std = wp.exp(log_std[j])
-    diff = actions[i, j] - mean[i, j]
-    z = wp.clamp(diff / std, -8.0, 8.0)
-    lp = -0.5 * (z * z + 2.0 * log_std[j] + LOG2PI)
-    wp.atomic_add(log_probs, i, lp)
-
-
-@wp.kernel
-def _entropy_kernel(
-    log_std: wp.array[float],
-    entropy: wp.array[float],
-    act_dim: int,
-):
-    """Gaussian entropy per environment: sum_j (0.5 * log(2*pi*e) + log_std_j)."""
-    i = wp.tid()
-    ent = float(0.0)
-    for j in range(act_dim):
-        ent = ent + 0.5 * (LOG2PI + 1.0) + log_std[j]
-    entropy[i] = ent
+# ---------------------------------------------------------------------------
+# Fused PPO loss + analytical gradient kernel
+# ---------------------------------------------------------------------------
 
 
 @wp.kernel
@@ -409,84 +369,69 @@ def _ppo_fused_loss_and_grad_kernel(
     """Fused PPO loss forward + analytical gradient computation.
 
     Computes the PPO clipped surrogate loss, value loss, and entropy bonus
-    in a single kernel, and writes the exact gradients w.r.t. ``mean``,
-    ``values``, and ``log_std``.  This avoids ``wp.Tape`` autodiff through
-    ``atomic_add`` which can accumulate numerically unstable gradients
-    for shared parameters like ``log_std``.
+    in a single kernel, and writes exact gradients w.r.t. ``mean``,
+    ``values``, and ``log_std``.  ``wp.Tape`` is used only for the MLP
+    backward pass; everything from the MLP outputs onward is analytical.
     """
     i = wp.tid()
+    inv_n = 1.0 / float(n)
 
-    # -- Compute new log-prob and entropy --
+    # -- Log-prob and entropy --
     new_lp = float(0.0)
-    entropy = float(0.0)
     for j in range(act_dim):
         std_j = wp.exp(log_std[j])
-        diff = actions[i, j] - mean[i, j]
-        z = diff / std_j
-        z = wp.clamp(z, -8.0, 8.0)
-        new_lp = new_lp + (-0.5 * (z * z + 2.0 * log_std[j] + LOG2PI))
-        entropy = entropy + 0.5 * (LOG2PI + 1.0) + log_std[j]
+        z = (actions[i, j] - mean[i, j]) / std_j
+        new_lp = new_lp - 0.5 * (z * z + 2.0 * log_std[j] + LOG2PI)
 
-    # -- PPO clipped surrogate loss --
+    # -- PPO clipped surrogate --
     log_ratio = wp.clamp(new_lp - old_log_probs[i], -20.0, 20.0)
     ratio = wp.exp(log_ratio)
     adv = advantages[i]
     surr1 = ratio * adv
     surr2 = wp.clamp(ratio, 1.0 - clip_ratio, 1.0 + clip_ratio) * adv
-    use_clipped = float(0.0)
-    if surr2 < surr1:
-        use_clipped = 1.0
+    clipped = surr2 < surr1
     policy_loss = -wp.min(surr1, surr2)
 
     # -- Value loss --
-    vdiff = wp.clamp(values_flat[i] - returns[i], -10.0, 10.0)
+    vdiff = values_flat[i] - returns[i]
     value_loss = 0.5 * vdiff * vdiff
 
-    # -- Entropy loss --
-    ent_loss = -entropy
+    # -- Entropy (diagonal Gaussian): sum_j (0.5 * log(2*pi*e) + log_std_j) --
+    entropy = float(0.0)
+    for j in range(act_dim):
+        entropy = entropy + 0.5 * (LOG2PI + 1.0) + log_std[j]
 
-    # -- Total loss (forward) --
-    total = (policy_loss + value_coef * value_loss + entropy_coef * ent_loss) / float(n)
+    # -- Total loss --
+    total = (policy_loss + value_coef * value_loss - entropy_coef * entropy) * inv_n
     wp.atomic_add(loss, 0, total)
 
-    # -- Gradients --
-    inv_n = 1.0 / float(n)
-
-    # d_policy_loss / d_new_lp
-    if use_clipped > 0.5:
-        # Clipped branch: gradient is zero (ratio is clamped)
-        d_policy_d_lp = 0.0
-    else:
-        # Unclipped branch: d(-ratio * adv) / d_lp = -ratio * adv
+    # -- Analytical gradients --
+    # Policy gradient flows only through the unclipped branch
+    d_policy_d_lp = 0.0
+    if not clipped:
         d_policy_d_lp = -ratio * adv
 
     d_total_d_lp = d_policy_d_lp * inv_n
 
-    # d_value_loss / d_values[i]
-    d_val = value_coef * vdiff * inv_n
-    grad_values[i] = d_val
+    # Value gradient
+    grad_values[i] = value_coef * vdiff * inv_n
 
-    # d_total / d_mean[i, j] and d_total / d_log_std[j]
+    # Per-action-dimension gradients for mean and log_std
     for j in range(act_dim):
         std_j = wp.exp(log_std[j])
-        diff = actions[i, j] - mean[i, j]
-        z = diff / std_j
-        z = wp.clamp(z, -8.0, 8.0)
+        z = (actions[i, j] - mean[i, j]) / std_j
 
-        # d_new_lp / d_mean[i,j] = z / std_j  (since d(-0.5 z^2)/d_mean = z/std)
-        d_lp_d_mean = z / std_j
-        grad_mean[i, j] = d_total_d_lp * d_lp_d_mean
+        # d(log_prob)/d(mean_ij) = z / std_j
+        grad_mean[i, j] = d_total_d_lp * z / std_j
 
-        # d_new_lp / d_log_std[j] = z^2 - 1.0  (chain rule through exp)
-        d_lp_d_logstd = z * z - 1.0
-        # d_entropy / d_log_std[j] = 1.0
-        d_ent_d_logstd = 1.0
-        d_total_d_logstd = d_total_d_lp * d_lp_d_logstd + entropy_coef * (-d_ent_d_logstd) * inv_n
-        wp.atomic_add(grad_log_std, j, d_total_d_logstd)
+        # d(log_prob)/d(log_std_j) = z^2 - 1
+        # d(entropy)/d(log_std_j) = 1
+        d_logstd = d_total_d_lp * (z * z - 1.0) - entropy_coef * inv_n
+        wp.atomic_add(grad_log_std, j, d_logstd)
 
 
 # ---------------------------------------------------------------------------
-# Buffer copy / flatten / gather kernels (device-to-device, zero alloc)
+# Buffer copy / flatten / gather kernels
 # ---------------------------------------------------------------------------
 
 
@@ -515,25 +460,13 @@ def _flatten_2d_to_1d(src: wp.array2d[float], dst: wp.array[float], num_envs: in
 
 
 @wp.kernel
-def _gather_2d_offset(
-    src: wp.array2d[float],
-    indices: wp.array[int],
-    offset: int,
-    dst: wp.array2d[float],
-):
-    """Gather rows: ``dst[i, j] = src[indices[offset + i], j]``."""
+def _gather_2d_offset(src: wp.array2d[float], indices: wp.array[int], offset: int, dst: wp.array2d[float]):
     i, j = wp.tid()
     dst[i, j] = src[indices[offset + i], j]
 
 
 @wp.kernel
-def _gather_1d_offset(
-    src: wp.array[float],
-    indices: wp.array[int],
-    offset: int,
-    dst: wp.array[float],
-):
-    """Gather elements: ``dst[i] = src[indices[offset + i]]``."""
+def _gather_1d_offset(src: wp.array[float], indices: wp.array[int], offset: int, dst: wp.array[float]):
     i = wp.tid()
     dst[i] = src[indices[offset + i]]
 
@@ -583,8 +516,7 @@ class _ArraySum:
     def __init__(self, max_length: int, device: str | None = None):
         self._device = wp.get_device(device)
         ts = self.TILE_SIZE
-        n = max_length
-        num_blocks = _ceil_div(n, ts)
+        num_blocks = _ceil_div(max_length, ts)
         self._partial_a = wp.zeros(num_blocks, dtype=wp.float32, device=self._device)
         self._partial_b = wp.zeros(num_blocks, dtype=wp.float32, device=self._device)
         self._kernel = _make_block_sum_kernel(ts)
@@ -615,7 +547,6 @@ class _ArraySum:
 
 @wp.kernel
 def _sq_diff_kernel(src: wp.array[float], mean_val: wp.array[float], dst: wp.array[float]):
-    """``dst[i] = (src[i] - mean[0])^2``."""
     i = wp.tid()
     d = src[i] - mean_val[0]
     dst[i] = d * d
@@ -623,10 +554,7 @@ def _sq_diff_kernel(src: wp.array[float], mean_val: wp.array[float], dst: wp.arr
 
 @wp.kernel
 def _normalize_adv_kernel(
-    adv: wp.array[float],
-    mean_val: wp.array[float],
-    inv_std: wp.array[float],
-    out: wp.array[float],
+    adv: wp.array[float], mean_val: wp.array[float], inv_std: wp.array[float], out: wp.array[float]
 ):
     i = wp.tid()
     out[i] = (adv[i] - mean_val[0]) * inv_std[0]
@@ -681,7 +609,6 @@ def _grad_clip_if_needed_kernel(
     max_norm_sq: float,
     max_norm: float,
 ):
-    """Conditionally scale gradient element if total norm exceeds threshold."""
     i = wp.tid()
     nsq = norm_sq[0]
     if nsq > max_norm_sq:
@@ -690,39 +617,34 @@ def _grad_clip_if_needed_kernel(
 
 
 # ---------------------------------------------------------------------------
-# PPO loss kernel
+# GAE kernel
 # ---------------------------------------------------------------------------
 
 
 @wp.kernel
-def _ppo_loss_kernel(
-    old_log_probs: wp.array[float],
-    new_log_probs: wp.array[float],
-    advantages: wp.array[float],
-    new_values: wp.array[float],
-    returns: wp.array[float],
-    entropy: wp.array[float],
-    clip_ratio: float,
-    value_coef: float,
-    entropy_coef: float,
-    loss: wp.array[float],
-    n: int,
+def _gae_kernel(
+    rewards: wp.array2d[float],
+    values: wp.array2d[float],
+    dones: wp.array2d[float],
+    last_values: wp.array[float],
+    advantages: wp.array2d[float],
+    returns: wp.array2d[float],
+    gamma: float,
+    gae_lambda: float,
+    num_steps: int,
 ):
-    i = wp.tid()
-    log_ratio = new_log_probs[i] - old_log_probs[i]
-    # Clamp log-ratio to prevent exp() overflow (standard PPO safeguard)
-    log_ratio = wp.clamp(log_ratio, -20.0, 20.0)
-    ratio = wp.exp(log_ratio)
-    adv = advantages[i]
-    surr1 = ratio * adv
-    surr2 = wp.clamp(ratio, 1.0 - clip_ratio, 1.0 + clip_ratio) * adv
-    policy_loss = -wp.min(surr1, surr2)
-    # Clipped value loss (PPO2-style) for numerical stability
-    vdiff = wp.clamp(new_values[i] - returns[i], -10.0, 10.0)
-    value_loss = 0.5 * vdiff * vdiff
-    ent_loss = -entropy[i]
-    total = (policy_loss + value_coef * value_loss + entropy_coef * ent_loss) / float(n)
-    wp.atomic_add(loss, 0, total)
+    env = wp.tid()
+    last_gae = float(0.0)
+    for t in range(num_steps - 1, -1, -1):
+        if t == num_steps - 1:
+            next_val = last_values[env]
+        else:
+            next_val = values[t + 1, env]
+        next_non_terminal = 1.0 - dones[t, env]
+        delta = rewards[t, env] + gamma * next_val * next_non_terminal - values[t, env]
+        last_gae = delta + gamma * gae_lambda * next_non_terminal * last_gae
+        advantages[t, env] = last_gae
+        returns[t, env] = last_gae + values[t, env]
 
 
 # ---------------------------------------------------------------------------
@@ -740,6 +662,7 @@ class ActorCritic:
         activation: Activation function name.
         init_log_std: Initial value for the learnable log standard deviation.
         device: Warp device string.
+        seed: RNG seed for weight initialization.
     """
 
     def __init__(
@@ -774,28 +697,15 @@ class ActorCritic:
         )
 
     def alloc_buffers(self, rollout_batch: int, minibatch_size: int) -> None:
-        """Pre-allocate all internal buffers for known batch sizes.
-
-        Must be called once before training.  After this, :meth:`act` and
-        :meth:`evaluate` perform zero allocations.
-
-        Args:
-            rollout_batch: ``num_envs`` (batch size during rollout collection).
-            minibatch_size: Mini-batch size during PPO update.
-        """
+        """Pre-allocate all internal buffers for known batch sizes."""
         d = self._device
         self.actor.alloc_intermediates(rollout_batch)
         self.critic.alloc_intermediates(rollout_batch)
 
-        self._rb = rollout_batch
-        self._mb = minibatch_size
-
         self._act_actions = wp.zeros((rollout_batch, self.act_dim), dtype=wp.float32, device=d)
         self._act_log_probs = wp.zeros(rollout_batch, dtype=wp.float32, device=d)
 
-        self._eval_log_probs = wp.zeros(minibatch_size, dtype=wp.float32, device=d, requires_grad=True)
-        self._eval_entropy = wp.zeros(minibatch_size, dtype=wp.float32, device=d, requires_grad=True)
-
+        # Minibatch-sized MLP clones (share weights, separate intermediates)
         self._actor_mb = WarpMLP.__new__(WarpMLP)
         self._actor_mb.__dict__.update(self.actor.__dict__)
         self._actor_mb._intermediates = []
@@ -810,19 +720,8 @@ class ActorCritic:
         self._critic_mb.weights = self.critic.weights
         self._critic_mb.biases = self.critic.biases
 
-    def act(
-        self,
-        obs: wp.array,
-        rng_counter: wp.array,
-    ) -> tuple[wp.array, wp.array, wp.array]:
+    def act(self, obs: wp.array, rng_counter: wp.array) -> tuple[wp.array, wp.array, wp.array]:
         """Forward actor + critic, sample actions using on-device RNG.
-
-        Uses pre-allocated buffers from :meth:`alloc_buffers`.
-
-        Args:
-            obs: Observations, shape ``(batch, obs_dim)``.
-            rng_counter: Single-element ``wp.array[int]`` counter on device.
-                Incremented after each call to produce fresh random samples.
 
         Returns:
             ``(actions, log_probs, values)`` -- all on device, pre-allocated.
@@ -842,88 +741,19 @@ class ActorCritic:
         )
         wp.launch(_increment_counter_kernel, dim=1, inputs=[rng_counter], device=self._device)
 
-        values = values_2d.flatten()
-        return self._act_actions, self._act_log_probs, values
-
-    def evaluate(
-        self,
-        obs: wp.array,
-        actions: wp.array,
-    ) -> tuple[wp.array, wp.array, wp.array]:
-        """Recompute log_probs, entropy, and values for stored transitions.
-
-        Uses pre-allocated buffers from :meth:`alloc_buffers`.
-
-        Returns:
-            ``(log_probs, entropy, values)``
-        """
-        batch = obs.shape[0]
-        mean = self._actor_mb.forward(obs)
-        values_2d = self._critic_mb.forward(obs)
-
-        self._eval_log_probs.zero_()
-        self._eval_entropy.zero_()
-
-        wp.launch(
-            _log_prob_kernel,
-            dim=(batch, self.act_dim),
-            inputs=[mean, self.log_std, actions, self._eval_log_probs],
-            device=self._device,
-        )
-
-        wp.launch(
-            _entropy_kernel,
-            dim=batch,
-            inputs=[self.log_std, self._eval_entropy, self.act_dim],
-            device=self._device,
-        )
-
-        values = values_2d.flatten()
-        return self._eval_log_probs, self._eval_entropy, values
+        return self._act_actions, self._act_log_probs, values_2d.flatten()
 
     def parameters(self) -> list[wp.array]:
         return self.actor.parameters() + self.critic.parameters() + [self.log_std]
 
-    def grad_arrays(self) -> list[wp.array]:
-        return self.actor.grad_arrays() + self.critic.grad_arrays() + [self.log_std.grad]
-
 
 # ---------------------------------------------------------------------------
-# Rollout buffer with GAE (fully on-device, zero alloc)
+# Rollout buffer with GAE
 # ---------------------------------------------------------------------------
-
-
-@wp.kernel
-def _gae_kernel(
-    rewards: wp.array2d[float],
-    values: wp.array2d[float],
-    dones: wp.array2d[float],
-    last_values: wp.array[float],
-    advantages: wp.array2d[float],
-    returns: wp.array2d[float],
-    gamma: float,
-    gae_lambda: float,
-    num_steps: int,
-):
-    env = wp.tid()
-    last_gae = float(0.0)
-    for t in range(num_steps - 1, -1, -1):
-        if t == num_steps - 1:
-            next_val = last_values[env]
-        else:
-            next_val = values[t + 1, env]
-        next_non_terminal = 1.0 - dones[t, env]
-        delta = rewards[t, env] + gamma * next_val * next_non_terminal - values[t, env]
-        last_gae = delta + gamma * gae_lambda * next_non_terminal * last_gae
-        advantages[t, env] = last_gae
-        returns[t, env] = last_gae + values[t, env]
 
 
 class RolloutBuffer:
     """Fixed-size on-device rollout storage with GAE computation.
-
-    All data stays on the Warp device.  Insert uses device-to-device copy
-    kernels.  Zero allocations after construction.
 
     Args:
         num_envs: Number of parallel environments.
@@ -954,7 +784,6 @@ class RolloutBuffer:
         self.flat_obs = wp.zeros((n, obs_dim), dtype=wp.float32, device=d)
         self.flat_actions = wp.zeros((n, act_dim), dtype=wp.float32, device=d)
         self.flat_log_probs = wp.zeros(n, dtype=wp.float32, device=d)
-        self.flat_values = wp.zeros(n, dtype=wp.float32, device=d)
         self.flat_advantages = wp.zeros(n, dtype=wp.float32, device=d)
         self.flat_returns = wp.zeros(n, dtype=wp.float32, device=d)
 
@@ -1012,37 +841,23 @@ class RolloutBuffer:
         wp.launch(
             _flatten_2d_to_1d, dim=(self.num_steps, ne), inputs=[self.log_probs, self.flat_log_probs, ne], device=d
         )
-        wp.launch(_flatten_2d_to_1d, dim=(self.num_steps, ne), inputs=[self.values, self.flat_values, ne], device=d)
         wp.launch(
             _flatten_2d_to_1d, dim=(self.num_steps, ne), inputs=[self.advantages, self.flat_advantages, ne], device=d
         )
         wp.launch(_flatten_2d_to_1d, dim=(self.num_steps, ne), inputs=[self.returns, self.flat_returns, ne], device=d)
 
     def mean_reward(self) -> float:
-        """Return the mean per-step reward across all environments and steps.
-
-        Performs a single device-to-host readback.  Intended for logging
-        between updates, not inside the hot path.
-        """
+        """Mean per-step reward (single device-to-host readback for logging)."""
         return float(self.rewards.numpy().mean())
 
 
 # ---------------------------------------------------------------------------
-# PPOTrainer (fully on-device, zero-allocation hot path)
+# PPOTrainer
 # ---------------------------------------------------------------------------
 
 
 class PPOTrainer:
     """Proximal Policy Optimization trainer for continuous action spaces.
-
-    Every buffer is pre-allocated in :meth:`__init__` / :meth:`_alloc`.
-    The hot path (rollout collection, GAE, advantage normalization,
-    mini-batch shuffling, PPO update, gradient clipping) performs **zero
-    device memory allocations**, making it compatible with
-    ``wp.ScopedCapture`` / CUDA graph capture.
-
-    The only host round-trip is a single ``loss.numpy()`` readback for
-    logging (which can be removed if logging is disabled).
 
     Args:
         actor_critic: The :class:`ActorCritic` to train.
@@ -1093,12 +908,10 @@ class PPOTrainer:
 
         device = actor_critic._device
 
-        # On-device RNG counter (graph-capture safe)
         self._rng_counter = wp.array([seed], dtype=wp.int32, device=device)
         n_samples = num_steps * num_envs
         batch_size = n_samples // num_minibatches
 
-        # -- Rollout buffer --
         self.buffer = RolloutBuffer(
             num_envs=num_envs,
             num_steps=num_steps,
@@ -1107,17 +920,14 @@ class PPOTrainer:
             device=str(device),
         )
 
-        # -- Observation normalizer --
         self.obs_normalizer = ObsNormalizer(actor_critic.obs_dim, device=str(device))
         self._norm_obs = wp.zeros((num_envs, actor_critic.obs_dim), dtype=wp.float32, device=device)
 
-        # -- ActorCritic internal buffers --
         actor_critic.alloc_buffers(num_envs, batch_size)
 
-        # -- Optimizer --
         self.optimizer = AdamW(actor_critic.parameters(), lr=lr, weight_decay=weight_decay)
 
-        # -- Advantage normalization scratch --
+        # Advantage normalization scratch (on-device, no readbacks)
         self._norm_adv = wp.zeros(n_samples, dtype=wp.float32, device=device)
         self._sq_diff = wp.zeros(n_samples, dtype=wp.float32, device=device)
         self._sum_result = wp.zeros(1, dtype=wp.float32, device=device)
@@ -1126,22 +936,20 @@ class PPOTrainer:
         self._inv_std_buf = wp.zeros(1, dtype=wp.float32, device=device)
         self._sum_reducer = _ArraySum(n_samples, device=str(device))
 
-        # -- Shuffle arrays (2x capacity required by radix_sort_pairs) --
+        # Shuffle arrays (2x capacity required by radix_sort_pairs)
         self._shuffle_keys = wp.zeros(2 * n_samples, dtype=wp.float32, device=device)
         self._indices = wp.zeros(2 * n_samples, dtype=wp.int32, device=device)
 
-        # -- Mini-batch gather buffers --
+        # Mini-batch gather buffers
         self._mb_obs = wp.zeros((batch_size, actor_critic.obs_dim), dtype=wp.float32, device=device, requires_grad=True)
         self._mb_act = wp.zeros((batch_size, actor_critic.act_dim), dtype=wp.float32, device=device)
         self._mb_old_lp = wp.zeros(batch_size, dtype=wp.float32, device=device)
         self._mb_adv = wp.zeros(batch_size, dtype=wp.float32, device=device)
         self._mb_ret = wp.zeros(batch_size, dtype=wp.float32, device=device)
 
-        # -- Loss and gradient scratch --
+        # Loss and gradient scratch
         self._loss = wp.zeros(1, dtype=wp.float32, device=device, requires_grad=True)
         self._grad_norm_sq = wp.zeros(1, dtype=wp.float32, device=device)
-
-        # -- Analytical gradient buffers for fused PPO kernel --
         self._grad_mean = wp.zeros((batch_size, actor_critic.act_dim), dtype=wp.float32, device=device)
         self._grad_values = wp.zeros(batch_size, dtype=wp.float32, device=device)
         self._grad_log_std = wp.zeros(actor_critic.act_dim, dtype=wp.float32, device=device)
@@ -1154,13 +962,11 @@ class PPOTrainer:
 
         Args:
             env: Vectorized environment.
-            obs: Current observations.  When ``None`` the environment is
-                reset to obtain initial observations.
+            obs: Current observations.  Pass back the second return value
+                to avoid resetting the environment between rollouts.
 
         Returns:
-            ``(last_values, obs)`` -- critic bootstrap values and the
-            current observation tensor (pass back on the next call to
-            avoid resetting the environment).
+            ``(last_values, obs)`` for GAE bootstrapping and next call.
         """
         if obs is None:
             obs = env.reset()
@@ -1174,7 +980,6 @@ class PPOTrainer:
             buf.insert(t, self._norm_obs, actions, log_probs, rewards, dones, values)
             obs = next_obs
 
-        # Bootstrap value for last obs
         self.obs_normalizer.normalize(obs, self._norm_obs)
         _, _, last_values = self.ac.act(self._norm_obs, self._rng_counter)
         return last_values, obs
@@ -1214,11 +1019,10 @@ class PPOTrainer:
         batch_size = self._batch_size
         device = self.ac._device
 
-        total_loss = 0.0
-        num_updates = 0
+        # Note: self._loss holds the loss from the last mini-batch.
+        # Use get_stats() after update() to read it back.
 
         for _epoch in range(self.num_epochs):
-            # GPU shuffle: generate random keys, then radix sort indices by key
             wp.launch(
                 _generate_random_keys_kernel,
                 dim=n_samples,
@@ -1231,7 +1035,6 @@ class PPOTrainer:
             for mb_idx in range(self.num_minibatches):
                 offset = mb_idx * batch_size
 
-                # Gather mini-batch on device using offset into shuffled indices
                 wp.launch(
                     _gather_2d_offset,
                     dim=(batch_size, self.ac.obs_dim),
@@ -1263,19 +1066,18 @@ class PPOTrainer:
                     device=device,
                 )
 
-                # -- Forward pass: MLP under tape --
+                # Forward MLPs under tape
                 tape = wp.Tape()
                 with tape:
                     mean = self.ac._actor_mb.forward(self._mb_obs)
                     values_2d = self.ac._critic_mb.forward(self._mb_obs)
 
-                # -- Fused PPO loss + analytical gradients (no tape) --
+                # Fused PPO loss + analytical gradients
                 self._loss.zero_()
                 self._grad_mean.zero_()
                 self._grad_values.zero_()
                 self._grad_log_std.zero_()
 
-                values_flat = values_2d.flatten()
                 wp.launch(
                     _ppo_fused_loss_and_grad_kernel,
                     dim=batch_size,
@@ -1285,7 +1087,7 @@ class PPOTrainer:
                         self._mb_act,
                         self._mb_old_lp,
                         self._mb_adv,
-                        values_flat,
+                        values_2d.flatten(),
                         self._mb_ret,
                         self.clip_ratio,
                         self.value_coef,
@@ -1300,20 +1102,13 @@ class PPOTrainer:
                     device=device,
                 )
 
-                # -- Backward through MLPs using analytical gradients --
-                grad_values_2d = self._grad_values.reshape((batch_size, 1))
-                tape.backward(grads={mean: self._grad_mean, values_2d: grad_values_2d})
+                # Backward through MLPs using analytical gradients
+                tape.backward(grads={mean: self._grad_mean, values_2d: self._grad_values.reshape((batch_size, 1))})
 
-                # -- Collect all gradients including log_std --
                 grads = self.ac.actor.grad_arrays() + self.ac.critic.grad_arrays() + [self._grad_log_std]
                 self._clip_grad_norm(grads)
                 self.optimizer.step(grads)
                 tape.zero()
-
-                total_loss += self._loss.numpy()[0]
-                num_updates += 1
-
-        return total_loss / max(num_updates, 1)
 
     def _clip_grad_norm(self, grads: list[wp.array]) -> None:
         device = self.ac._device
@@ -1328,15 +1123,20 @@ class PPOTrainer:
                 device=device,
             )
 
-    def train(self, env: Any, total_timesteps: int, log_interval: int = 1) -> None:
-        """Main training loop.
+    def get_stats(self) -> dict[str, float]:
+        """Read back training statistics from device arrays.
 
-        Args:
-            env: Vectorized environment with ``num_envs``, ``obs_dim``, ``act_dim``
-                that returns ``wp.array`` tensors.
-            total_timesteps: Total environment steps to collect.
-            log_interval: Print stats every N updates.
+        Call this **after** :meth:`update` completes (outside any captured
+        graph) to retrieve diagnostics.  All readbacks are in this single
+        method so the training loop itself remains graph-capture safe.
         """
+        return {
+            "loss": float(self._loss.numpy()[0]),
+            "mean_reward": self.buffer.mean_reward(),
+        }
+
+    def train(self, env: Any, total_timesteps: int, log_interval: int = 1) -> None:
+        """Main training loop."""
         steps_per_update = self.buffer.num_envs * self.buffer.num_steps
         num_updates = total_timesteps // steps_per_update
         total_steps = 0
@@ -1345,14 +1145,14 @@ class PPOTrainer:
         for update_idx in range(num_updates):
             last_values, obs = self.collect_rollouts(env, obs)
             self.buffer.compute_gae(last_values, self.gamma, self.gae_lambda)
-            avg_loss = self.update()
+            self.update()
             total_steps += steps_per_update
 
             if (update_idx + 1) % log_interval == 0:
-                mean_rew = self.buffer.mean_reward()
+                stats = self.get_stats()
                 print(
                     f"Update {update_idx + 1}/{num_updates} | steps={total_steps}"
-                    f" | loss={avg_loss:.4f} | mean_reward={mean_rew:.4f}"
+                    f" | loss={stats['loss']:.4f} | mean_reward={stats['mean_reward']:.4f}"
                 )
 
 
@@ -1383,11 +1183,8 @@ def export_actor_to_onnx(actor: WarpMLP, obs_dim: int, path: str) -> None:
         b_name = f"actor.{i * 2}.bias"
         gemm_out = f"/actor/{i * 2}/Gemm_output_0"
 
-        w_np = w.numpy()
-        b_np = b.numpy()
-        initializers.append(numpy_helper.from_array(w_np, name=w_name))
-        initializers.append(numpy_helper.from_array(b_np, name=b_name))
-
+        initializers.append(numpy_helper.from_array(w.numpy(), name=w_name))
+        initializers.append(numpy_helper.from_array(b.numpy(), name=b_name))
         nodes.append(helper.make_node("Gemm", [prev_output, w_name, b_name], [gemm_out], alpha=1.0, beta=1.0, transB=1))
 
         is_last = i == len(actor.weights) - 1
@@ -1398,8 +1195,7 @@ def export_actor_to_onnx(actor: WarpMLP, obs_dim: int, path: str) -> None:
         else:
             prev_output = gemm_out
 
-    last_node = nodes[-1]
-    last_node.output[0] = "action"
+    nodes[-1].output[0] = "action"
 
     graph = helper.make_graph(
         nodes,
@@ -1421,10 +1217,7 @@ def export_actor_to_onnx(actor: WarpMLP, obs_dim: int, path: str) -> None:
 
 @runtime_checkable
 class VecEnv(Protocol):
-    """Minimal vectorized environment interface for PPO.
-
-    All arrays must be ``wp.array`` on the training device.
-    """
+    """Minimal vectorized environment interface for PPO."""
 
     num_envs: int
     obs_dim: int
@@ -1435,9 +1228,5 @@ class VecEnv(Protocol):
         ...
 
     def step(self, actions: wp.array) -> tuple[wp.array, wp.array, wp.array]:
-        """Step the environment.
-
-        Returns:
-            ``(obs, rewards, dones)`` -- all ``wp.array`` on device.
-        """
+        """Return ``(obs, rewards, dones)`` -- all ``wp.array`` on device."""
         ...

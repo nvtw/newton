@@ -682,16 +682,16 @@ class Example:
             # One PPO update per frame
             last_values, self.obs = self.trainer.collect_rollouts(self.env, self.obs)
             self.trainer.buffer.compute_gae(last_values, self.trainer.gamma, self.trainer.gae_lambda)
-            avg_loss = self.trainer.update()
+            self.trainer.update()
 
             self.update_idx += 1
             steps = self.update_idx * self.steps_per_update
 
             if self.update_idx % 10 == 0:
-                mean_rew = self.trainer.buffer.mean_reward()
+                stats = self.trainer.get_stats()
                 print(
                     f"Update {self.update_idx}/{self.total_updates} | steps={steps}"
-                    f" | loss={avg_loss:.4f} | mean_reward={mean_rew:.4f}"
+                    f" | loss={stats['loss']:.4f} | mean_reward={stats['mean_reward']:.4f}"
                 )
 
             if self.update_idx >= self.total_updates:
