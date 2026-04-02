@@ -155,6 +155,12 @@ def _sigmoid_kernel(x: wp.array2d[float], y: wp.array2d[float]):
 
 
 @wp.kernel
+def _clip_kernel(x: wp.array2d[float], y: wp.array2d[float], lo: float, hi: float):
+    i, j = wp.tid()
+    y[i, j] = wp.clamp(x[i, j], lo, hi)
+
+
+@wp.kernel
 def _add_2d_kernel(a: wp.array2d[float], b: wp.array2d[float], c: wp.array2d[float]):
     i, j = wp.tid()
     c[i, j] = a[i, j] + b[i, j]
@@ -165,6 +171,18 @@ def _add_broadcast_1d_kernel(a: wp.array2d[float], b: wp.array[float], c: wp.arr
     """Add with broadcast: ``c[i,j] = a[i,j] + b[j]``."""
     i, j = wp.tid()
     c[i, j] = a[i, j] + b[j]
+
+
+@wp.kernel
+def _sub_broadcast_1d_kernel(a: wp.array2d[float], b: wp.array[float], c: wp.array2d[float]):
+    i, j = wp.tid()
+    c[i, j] = a[i, j] - b[j]
+
+
+@wp.kernel
+def _mul_broadcast_1d_kernel(a: wp.array2d[float], b: wp.array[float], c: wp.array2d[float]):
+    i, j = wp.tid()
+    c[i, j] = a[i, j] * b[j]
 
 
 # ---------------------------------------------------------------------------
@@ -248,12 +266,17 @@ class OnnxRuntime:
 
         for init in graph.initializer:
             arr_np = numpy_helper.to_array(init).astype(np.float32)
-            if arr_np.ndim == 1:
+            if arr_np.ndim == 0:
+                # Scalar constant -- store as 1-element 1D array
+                wa = wp.array([float(arr_np)], dtype=wp.float32, device=self._device)
+                self._shapes[init.name] = (1,)
+            elif arr_np.ndim == 1:
                 wa = wp.array(arr_np, dtype=wp.float32, device=self._device)
+                self._shapes[init.name] = tuple(arr_np.shape)
             else:
                 wa = wp.array2d(arr_np, dtype=wp.float32, device=self._device)
+                self._shapes[init.name] = tuple(arr_np.shape)
             self._tensors[init.name] = wa
-            self._shapes[init.name] = tuple(arr_np.shape)
 
         # -- 2. Record input / output names ----------------------------------
         initializer_names = {init.name for init in graph.initializer}
@@ -275,7 +298,15 @@ class OnnxRuntime:
                 )
             )
 
-        # -- 4. Shape inference & buffer pre-allocation ----------------------
+        # -- 4. Register input shapes for pre-allocation ----------------------
+        for inp in graph.input:
+            if inp.name not in initializer_names and inp.name not in self._shapes:
+                dims = [d.dim_value for d in inp.type.tensor_type.shape.dim]
+                # Replace dynamic batch dim with the fixed batch_size
+                shape = tuple(batch_size if d == 0 else d for d in dims)
+                self._shapes[inp.name] = shape
+
+        # -- 5. Shape inference & buffer pre-allocation ----------------------
         self._preallocate_buffers(batch_size)
 
     # ------------------------------------------------------------------
@@ -302,7 +333,7 @@ class OnnxRuntime:
             elif op.op_type in ("Elu", "Relu", "Tanh", "Sigmoid"):
                 out_shape = self._shapes[op.inputs[0]]
 
-            elif op.op_type == "Add":
+            elif op.op_type in ("Add", "Sub", "Mul", "Clip"):
                 out_shape = self._shapes[op.inputs[0]]
 
             elif op.op_type == "Identity":
@@ -522,6 +553,59 @@ def _exec_add(
     shapes[op.outputs[0]] = a_shape
 
 
+def _exec_sub(
+    op: _Op,
+    tensors: dict[str, wp.array],
+    shapes: dict[str, tuple[int, ...]],
+    device: wp.context.Device,
+) -> None:
+    a = tensors[op.inputs[0]]
+    b = tensors[op.inputs[1]]
+    a_shape = shapes[op.inputs[0]]
+    b_shape = shapes[op.inputs[1]]
+    out = tensors[op.outputs[0]]
+    if len(b_shape) == 1:
+        wp.launch(_sub_broadcast_1d_kernel, dim=a_shape, inputs=[a, b, out], device=device)
+    else:
+        # For 2D-2D sub, use add with negation -- not needed for now
+        raise NotImplementedError("Sub with 2D operands not implemented")
+    shapes[op.outputs[0]] = a_shape
+
+
+def _exec_mul(
+    op: _Op,
+    tensors: dict[str, wp.array],
+    shapes: dict[str, tuple[int, ...]],
+    device: wp.context.Device,
+) -> None:
+    a = tensors[op.inputs[0]]
+    b = tensors[op.inputs[1]]
+    a_shape = shapes[op.inputs[0]]
+    b_shape = shapes[op.inputs[1]]
+    out = tensors[op.outputs[0]]
+    if len(b_shape) == 1:
+        wp.launch(_mul_broadcast_1d_kernel, dim=a_shape, inputs=[a, b, out], device=device)
+    else:
+        raise NotImplementedError("Mul with 2D operands not implemented")
+    shapes[op.outputs[0]] = a_shape
+
+
+def _exec_clip(
+    op: _Op,
+    tensors: dict[str, wp.array],
+    shapes: dict[str, tuple[int, ...]],
+    device: wp.context.Device,
+) -> None:
+    x = tensors[op.inputs[0]]
+    x_shape = shapes[op.inputs[0]]
+    out = tensors[op.outputs[0]]
+    lo = float(tensors[op.inputs[1]].numpy().item()) if len(op.inputs) > 1 and op.inputs[1] in tensors else -3.4e38
+    hi = float(tensors[op.inputs[2]].numpy().item()) if len(op.inputs) > 2 and op.inputs[2] in tensors else 3.4e38
+    # Reuse relu kernel pattern but with clamp
+    wp.launch(_clip_kernel, dim=x_shape, inputs=[x, out, lo, hi], device=device)
+    shapes[op.outputs[0]] = x_shape
+
+
 def _exec_identity(
     op: _Op,
     tensors: dict[str, wp.array],
@@ -540,5 +624,8 @@ _OP_DISPATCH: dict[str, Any] = {
     "Tanh": _exec_tanh,
     "Sigmoid": _exec_sigmoid,
     "Add": _exec_add,
+    "Sub": _exec_sub,
+    "Mul": _exec_mul,
+    "Clip": _exec_clip,
     "Identity": _exec_identity,
 }

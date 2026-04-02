@@ -208,19 +208,42 @@ def clone_for_batch(source: WarpMLP, batch: int) -> WarpMLP:
 # ---------------------------------------------------------------------------
 
 
-def export_to_onnx(actor: WarpMLP, obs_dim: int, path: str) -> None:
+def export_to_onnx(
+    actor: WarpMLP,
+    obs_dim: int,
+    path: str,
+    obs_mean: np.ndarray | None = None,
+    obs_inv_std: np.ndarray | None = None,
+) -> None:
     """Export a trained :class:`WarpMLP` actor to ONNX format.
 
     The exported model can be loaded by :class:`newton._src.onnx_runtime.OnnxRuntime`.
+    When *obs_mean* and *obs_inv_std* are provided, observation normalization
+    is baked into the model as ``(obs - mean) * inv_std`` so the runtime
+    does not need separate normalizer state.
 
     Args:
         actor: The trained actor MLP.
         obs_dim: Observation dimension (input width).
         path: Output ``.onnx`` file path.
+        obs_mean: Running mean from :class:`~newton._src.ppo.ObsNormalizer`.
+        obs_inv_std: Running inverse std from the normalizer.
     """
     nodes: list[Any] = []
     initializers = []
     prev_output = "observation"
+
+    # Bake observation normalization into the graph
+    if obs_mean is not None and obs_inv_std is not None:
+        initializers.append(numpy_helper.from_array(obs_mean.astype(np.float32), name="obs_mean"))
+        initializers.append(numpy_helper.from_array(obs_inv_std.astype(np.float32), name="obs_inv_std"))
+        nodes.append(helper.make_node("Sub", [prev_output, "obs_mean"], ["/norm/sub_output"]))
+        nodes.append(helper.make_node("Mul", ["/norm/sub_output", "obs_inv_std"], ["/norm/mul_output"]))
+        # Clamp to [-10, 10] via Clip
+        initializers.append(numpy_helper.from_array(np.float32(-10.0), name="clip_min"))
+        initializers.append(numpy_helper.from_array(np.float32(10.0), name="clip_max"))
+        nodes.append(helper.make_node("Clip", ["/norm/mul_output", "clip_min", "clip_max"], ["/norm/output"]))
+        prev_output = "/norm/output"
 
     activation_map = {"elu": "Elu", "relu": "Relu", "tanh": "Tanh"}
     onnx_act = activation_map.get(actor._activation, "Elu")

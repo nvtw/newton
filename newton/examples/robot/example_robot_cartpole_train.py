@@ -61,14 +61,19 @@ def _compute_rewards_kernel(
     cart_vel = joint_qd[qd]
     pole_vel = joint_qd[qd + 1]
 
-    # Reward: pole upright + cart centered + small velocity penalty
+    # Swing-up + balance reward (standard formulation).
+    # Upright bonus: cos(angle) ranges from -1 (hanging) to +1 (upright).
+    # Velocity penalty scales with how upright the pole is -- near the top
+    # angular velocity must be low (balance), but during swing-up it's OK.
     upright = wp.cos(pole_angle)
-    rewards[env] = upright - 0.01 * cart_pos * cart_pos - 0.001 * (cart_vel * cart_vel + pole_vel * pole_vel)
+    # upright_weight: 0 when hanging, 1 when upright
+    upright_weight = wp.max(upright, 0.0)
+    vel_penalty = upright_weight * 0.1 * pole_vel * pole_vel
+    rewards[env] = upright - vel_penalty - 0.5 * cart_pos * cart_pos
 
+    # Only terminate if cart escapes or episode timeout
     terminated = float(0.0)
-    if wp.abs(cart_pos) > 2.4:
-        terminated = 1.0
-    if upright < -0.5:  # pole > ~120 degrees from vertical
+    if wp.abs(cart_pos) > 2.0:
         terminated = 1.0
     if episode_lengths[env] >= _MAX_EPISODE_LENGTH:
         terminated = 1.0
@@ -78,7 +83,7 @@ def _compute_rewards_kernel(
 @wp.kernel
 def _apply_actions_kernel(actions: wp.array2d[float], joint_target_pos: wp.array[float]):
     env = wp.tid()
-    joint_target_pos[env * _QD_STRIDE] = actions[env, 0] * 5.0
+    joint_target_pos[env * _QD_STRIDE] = actions[env, 0] * 2.0
 
 
 @wp.kernel
@@ -159,6 +164,11 @@ class CartpoleEnv(RobotEnv):
             target_kd=0.05,
         )
         builder.add_articulation([j0, j1])
+
+        # Start with pole hanging down (angle = pi)
+        import math  # noqa: PLC0415
+
+        builder.joint_q[1] = math.pi
 
     def compute_obs(self):
         wp.launch(
@@ -281,7 +291,14 @@ class Example:
 
             if self.update_idx >= self.total_updates:
                 self.training = False
-                export_to_onnx(self.ac.actor, obs_dim=5, path=self.onnx_path)
+                norm = self.trainer.obs_normalizer
+                export_to_onnx(
+                    self.ac.actor,
+                    obs_dim=5,
+                    path=self.onnx_path,
+                    obs_mean=norm.mean.numpy(),
+                    obs_inv_std=norm.inv_std.numpy(),
+                )
                 print(f"Training complete. Policy saved to {self.onnx_path}")
         else:
             if self.obs is None:

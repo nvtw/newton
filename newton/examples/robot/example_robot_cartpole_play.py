@@ -37,7 +37,7 @@ def _compute_obs_kernel(joint_q: wp.array[float], joint_qd: wp.array[float], obs
 @wp.kernel
 def _apply_actions_kernel(actions: wp.array2d[float], joint_target_pos: wp.array[float]):
     env = wp.tid()
-    joint_target_pos[env * _QD_STRIDE] = actions[env, 0] * 5.0
+    joint_target_pos[env * _QD_STRIDE] = actions[env, 0] * 2.0
 
 
 class Example:
@@ -68,6 +68,11 @@ class Example:
         )
         builder.add_articulation([j0, j1])
 
+        # Start hanging down (must match training)
+        import math  # noqa: PLC0415
+
+        builder.joint_q[1] = math.pi
+
         self.model = builder.finalize(device=self.device)
         self.solver = newton.solvers.SolverMuJoCo(self.model)
         self.state_0 = self.model.state()
@@ -84,6 +89,7 @@ class Example:
     def step(self):
         wp.launch(_compute_obs_kernel, dim=1,
                   inputs=[self.state_0.joint_q, self.state_0.joint_qd, self.obs], device=self.device)
+        # Normalization is baked into the ONNX model
         act = self.policy({"observation": self.obs})["action"]
         wp.launch(_apply_actions_kernel, dim=1,
                   inputs=[act, self.control.joint_target_pos], device=self.device)
