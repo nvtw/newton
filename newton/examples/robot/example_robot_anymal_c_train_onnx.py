@@ -688,7 +688,11 @@ class Example:
             steps = self.update_idx * self.steps_per_update
 
             if self.update_idx % 10 == 0:
-                print(f"Update {self.update_idx}/{self.total_updates} | steps={steps} | loss={avg_loss:.4f}")
+                mean_rew = self.trainer.buffer.mean_reward()
+                print(
+                    f"Update {self.update_idx}/{self.total_updates} | steps={steps}"
+                    f" | loss={avg_loss:.4f} | mean_reward={mean_rew:.4f}"
+                )
 
             if self.update_idx >= self.total_updates:
                 self.training = False
@@ -698,7 +702,8 @@ class Example:
             # Inference: use deterministic policy (mean, no noise)
             if self.obs is None:
                 self.obs = self.env.reset()
-            mean = self.ac.actor.forward(self.obs)
+            self.trainer.obs_normalizer.normalize(self.obs, self.trainer._norm_obs)
+            mean = self.ac.actor.forward(self.trainer._norm_obs)
             self.obs, _, _ = self.env.step(mean)
 
     def render(self):
@@ -713,7 +718,7 @@ class Example:
     @staticmethod
     def create_parser():
         parser = newton.examples.create_parser()
-        parser.add_argument("--num-envs", type=int, default=64, help="Number of parallel environments.")
+        parser.add_argument("--num-envs", type=int, default=1024, help="Number of parallel environments.")
         parser.add_argument("--total-timesteps", type=int, default=1_000_000, help="Total training timesteps.")
         parser.add_argument("--onnx-output", type=str, default="anymal_c_trained.onnx", help="Output ONNX path.")
         return parser

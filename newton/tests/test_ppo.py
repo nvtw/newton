@@ -141,6 +141,44 @@ class TestRolloutBuffer(unittest.TestCase):
         self.assertTrue(np.all(adv > 0), "Advantages should be positive with positive rewards and zero values")
 
 
+@wp.kernel
+def _neg_action_sq_kernel(
+    actions: wp.array2d[float],
+    rewards: wp.array[float],
+):
+    """Reward = -sum(action^2). Optimal policy outputs zeros."""
+    env = wp.tid()
+    r = float(0.0)
+    for j in range(actions.shape[1]):
+        a = actions[env, j]
+        r = r - a * a
+    rewards[env] = r
+
+
+class ReachZeroEnv:
+    """Trivial env: reward = -sum(action^2). Optimal policy outputs zeros.
+
+    Observation is constant (all ones). No termination. This tests whether
+    PPO can learn to minimize action magnitude.
+    """
+
+    def __init__(self, num_envs: int = 64, obs_dim: int = 4, act_dim: int = 4, device: str = "cpu"):
+        self.num_envs = num_envs
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
+        self._device = device
+        self._obs = wp.ones((num_envs, obs_dim), dtype=wp.float32, device=device)
+        self._rewards = wp.zeros(num_envs, dtype=wp.float32, device=device)
+        self._dones = wp.zeros(num_envs, dtype=wp.float32, device=device)
+
+    def reset(self) -> wp.array:
+        return self._obs
+
+    def step(self, actions: wp.array) -> tuple[wp.array, wp.array, wp.array]:
+        wp.launch(_neg_action_sq_kernel, dim=self.num_envs, inputs=[actions, self._rewards], device=self._device)
+        return self._obs, self._rewards, self._dones
+
+
 class TestPPOTrainer(unittest.TestCase):
     def test_smoke_train(self):
         """Run a few PPO updates with a dummy env to ensure nothing crashes."""
@@ -148,6 +186,38 @@ class TestPPOTrainer(unittest.TestCase):
         ac = ActorCritic(obs_dim=16, act_dim=4, hidden_sizes=[32, 32], device="cpu")
         trainer = PPOTrainer(ac, num_envs=4, num_steps=8, num_epochs=2, num_minibatches=2)
         trainer.train(env, total_timesteps=32, log_interval=1)
+
+    def test_convergence_reach_zero(self):
+        """Verify PPO converges on a trivial env where optimal action = 0."""
+        num_envs = 64
+        obs_dim = 4
+        act_dim = 4
+        env = ReachZeroEnv(num_envs=num_envs, obs_dim=obs_dim, act_dim=act_dim, device="cpu")
+        ac = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, hidden_sizes=[32, 32], device="cpu", seed=42)
+        trainer = PPOTrainer(ac, num_envs=num_envs, num_steps=32, num_epochs=5, num_minibatches=4, lr=3e-4)
+
+        # Collect initial reward baseline
+        obs = env.reset()
+        last_values, obs = trainer.collect_rollouts(env, obs)
+        initial_reward = trainer.buffer.mean_reward()
+        trainer.buffer.compute_gae(last_values, trainer.gamma, trainer.gae_lambda)
+        trainer.update()
+
+        # Train for many updates
+        for _ in range(50):
+            last_values, obs = trainer.collect_rollouts(env, obs)
+            trainer.buffer.compute_gae(last_values, trainer.gamma, trainer.gae_lambda)
+            trainer.update()
+
+        final_reward = trainer.buffer.mean_reward()
+        print(f"ReachZero convergence: initial_reward={initial_reward:.4f} -> final_reward={final_reward:.4f}")
+
+        # Reward should improve significantly (closer to 0)
+        self.assertGreater(
+            final_reward,
+            initial_reward,
+            f"PPO should improve reward: {initial_reward:.4f} -> {final_reward:.4f}",
+        )
 
 
 class TestOnnxExport(unittest.TestCase):
