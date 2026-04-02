@@ -5,8 +5,8 @@
 # Example Robot Cartpole Train
 #
 # Trains a double-pendulum cartpole balancing policy from scratch using
-# the built-in PPO trainer and Warp kernels.  No PyTorch dependency.
-# This is a fast-converging validation scene for the PPO implementation.
+# the built-in PPO trainer.  The cart must keep both poles upright
+# despite random perturbation forces applied every few steps.
 #
 # Command: python -m newton.examples robot_cartpole_train
 #
@@ -19,14 +19,10 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton._src.ppo import ActorCritic, PPOTrainer
+from newton._src.ppo import ActorCritic, PPOTrainer, _increment_counter_kernel
 from newton._src.robot_env import RobotEnv
 from newton._src.training_monitor import TrainingMonitor
 from newton._src.warp_nn import export_to_onnx
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
 _Q_STRIDE = 3
 _QD_STRIDE = 3
@@ -69,17 +65,13 @@ def _compute_rewards_kernel(
 
     upright1 = wp.cos(pole1_angle)
     upright2 = wp.cos(pole1_angle + pole2_angle)
-    rewards[env] = (
-        upright1
-        + upright2
-        - 0.01 * cart_pos * cart_pos
-        - 0.001 * (cart_vel * cart_vel + pole1_vel * pole1_vel + pole2_vel * pole2_vel)
-    )
+    vel_penalty = 0.001 * (cart_vel * cart_vel + pole1_vel * pole1_vel + pole2_vel * pole2_vel)
+    rewards[env] = 1.0 + 0.5 * (upright1 + upright2) - 0.01 * cart_pos * cart_pos - vel_penalty
 
     terminated = float(0.0)
-    if wp.abs(cart_pos) > 3.0:
+    if wp.abs(cart_pos) > 2.5:
         terminated = 1.0
-    if upright1 < -0.2:
+    if upright1 < 0.0:  # pole1 > 90 degrees
         terminated = 1.0
     if episode_lengths[env] >= _MAX_EPISODE_LENGTH:
         terminated = 1.0
@@ -89,7 +81,24 @@ def _compute_rewards_kernel(
 @wp.kernel
 def _apply_actions_kernel(actions: wp.array2d[float], joint_target_pos: wp.array[float]):
     env = wp.tid()
-    joint_target_pos[env * _QD_STRIDE] = actions[env, 0] * 2.0
+    joint_target_pos[env * _QD_STRIDE] = actions[env, 0] * 5.0
+
+
+@wp.kernel
+def _apply_perturbation_kernel(
+    joint_qd: wp.array[float],
+    rng_counter: wp.array[int],
+    num_envs: int,
+):
+    """Apply random velocity kicks to pole joints every call."""
+    env = wp.tid()
+    seed = rng_counter[0]
+    rng = wp.rand_init(seed, env * 7 + 12345)
+    qd_off = env * _QD_STRIDE
+    # Random kick to pole1 angular velocity
+    joint_qd[qd_off + 1] = joint_qd[qd_off + 1] + (wp.randf(rng) - 0.5) * 0.5
+    # Random kick to pole2 angular velocity
+    joint_qd[qd_off + 2] = joint_qd[qd_off + 2] + (wp.randf(rng) - 0.5) * 0.3
 
 
 @wp.kernel
@@ -109,7 +118,7 @@ def _reset_envs_kernel(
         seed = rng_counter[0]
         rng = wp.rand_init(seed, env * 10)
         for i in range(wp.static(_Q_STRIDE)):
-            joint_q[q_off + i] = initial_q[i] + (wp.randf(rng) - 0.5) * 0.1
+            joint_q[q_off + i] = initial_q[i] + (wp.randf(rng) - 0.5) * 0.2
         for i in range(wp.static(_QD_STRIDE)):
             joint_qd[qd_off + i] = initial_qd[i]
         episode_lengths[env] = 0
@@ -128,6 +137,10 @@ class CartpoleEnv(RobotEnv):
     max_episode_length = _MAX_EPISODE_LENGTH
     use_collisions = False
 
+    def __init__(self, num_envs: int, device: str | None = None, seed: int = 123):
+        super().__init__(num_envs, device=device, seed=seed)
+        self._step_count = 0
+
     def build_robot(self, builder):
         builder.default_shape_cfg.density = 100.0
         builder.default_joint_cfg.armature = 0.1
@@ -141,48 +154,41 @@ class CartpoleEnv(RobotEnv):
             inertia_np = np.asarray(builder.body_inertia[body], dtype=np.float32).reshape(3, 3)
             inertia_np += np.eye(3, dtype=np.float32) * body_armature
             builder.body_inertia[body] = wp.mat33(inertia_np)
-        builder.joint_q[-3:] = [0.0, 0.3, 0.0]
-        builder.joint_target_ke[0] = 1000.0
-        builder.joint_target_kd[0] = 100.0
+        builder.joint_q[-3:] = [0.0, 0.0, 0.0]
+        builder.joint_target_ke[0] = 100.0
+        builder.joint_target_kd[0] = 10.0
 
     def compute_obs(self):
         wp.launch(
-            _compute_obs_kernel,
-            dim=self.num_envs,
-            inputs=[self.state.joint_q, self.state.joint_qd, self.obs],
-            device=self.device,
+            _compute_obs_kernel, dim=self.num_envs,
+            inputs=[self.state.joint_q, self.state.joint_qd, self.obs], device=self.device,
         )
 
     def compute_reward(self):
         wp.launch(
-            _compute_rewards_kernel,
-            dim=self.num_envs,
-            inputs=[self.state.joint_q, self.state.joint_qd, self.episode_lengths, self.rewards, self.dones],
-            device=self.device,
+            _compute_rewards_kernel, dim=self.num_envs,
+            inputs=[self.state.joint_q, self.state.joint_qd, self.episode_lengths,
+                    self.rewards, self.dones], device=self.device,
         )
 
     def apply_actions(self, actions):
-        wp.launch(
-            _apply_actions_kernel,
-            dim=self.num_envs,
-            inputs=[actions, self.control.joint_target_pos],
-            device=self.device,
-        )
+        wp.launch(_apply_actions_kernel, dim=self.num_envs,
+                  inputs=[actions, self.control.joint_target_pos], device=self.device)
+        # Apply random perturbation every 5 steps to create instability
+        self._step_count += 1
+        if self._step_count % 5 == 0:
+            wp.launch(_increment_counter_kernel, dim=1, inputs=[self.rng_counter], device=self.device)
+            wp.launch(
+                _apply_perturbation_kernel, dim=self.num_envs,
+                inputs=[self.state.joint_qd, self.rng_counter, self.num_envs], device=self.device,
+            )
 
     def reset_done_envs(self):
         wp.launch(
-            _reset_envs_kernel,
-            dim=self.num_envs,
-            inputs=[
-                self.dones,
-                self.initial_joint_q,
-                self.initial_joint_qd,
-                self.state.joint_q,
-                self.state.joint_qd,
-                self.episode_lengths,
-                self.rng_counter,
-            ],
-            device=self.device,
+            _reset_envs_kernel, dim=self.num_envs,
+            inputs=[self.dones, self.initial_joint_q, self.initial_joint_qd,
+                    self.state.joint_q, self.state.joint_qd,
+                    self.episode_lengths, self.rng_counter], device=self.device,
         )
 
 
@@ -197,40 +203,30 @@ class Example:
         self.device = wp.get_device()
         self.is_test = args is not None and args.test
 
-        num_envs = getattr(args, "num_envs", 1024)
-        total_timesteps = getattr(args, "total_timesteps", 500_000)
+        num_envs = getattr(args, "num_envs", 2048)
+        total_timesteps = getattr(args, "total_timesteps", 5_000_000)
         self.onnx_path = getattr(args, "onnx_output", "cartpole_trained.onnx")
 
         if self.is_test:
-            total_timesteps = min(total_timesteps, num_envs * 24 * 3)
+            total_timesteps = min(total_timesteps, num_envs * 64 * 3)
 
         self.env = CartpoleEnv(num_envs, device=str(self.device))
 
         self.ac = ActorCritic(
-            obs_dim=6,
-            act_dim=1,
-            hidden_sizes=[64, 64],
-            activation="elu",
-            init_log_std=-1.0,
-            device=str(self.device),
-            seed=42,
+            obs_dim=6, act_dim=1, hidden_sizes=[64, 64],
+            activation="elu", init_log_std=-0.5,
+            bounded_actions=True, layer_norm=True,
+            device=str(self.device), seed=42,
         )
+        num_steps = 64
         self.trainer = PPOTrainer(
-            self.ac,
-            num_envs,
-            lr=3e-4,
-            num_steps=32,
-            num_epochs=5,
-            num_minibatches=4,
-            gamma=0.99,
-            gae_lambda=0.95,
-            clip_ratio=0.2,
-            entropy_coef=0.01,
-            value_coef=0.5,
-            max_grad_norm=1.0,
+            self.ac, num_envs, lr=3e-4, num_steps=num_steps, num_epochs=5,
+            num_minibatches=4, gamma=0.99, gae_lambda=0.95, clip_ratio=0.2,
+            entropy_coef=0.005, auto_entropy=False,
+            value_coef=0.5, max_grad_norm=1.0,
         )
 
-        self.steps_per_update = num_envs * 32
+        self.steps_per_update = num_envs * num_steps
         self.total_updates = total_timesteps // self.steps_per_update
         self.update_idx = 0
         self.training = True
@@ -278,8 +274,8 @@ class Example:
     @staticmethod
     def create_parser():
         parser = newton.examples.create_parser()
-        parser.add_argument("--num-envs", type=int, default=1024)
-        parser.add_argument("--total-timesteps", type=int, default=500_000)
+        parser.add_argument("--num-envs", type=int, default=2048)
+        parser.add_argument("--total-timesteps", type=int, default=5_000_000)
         parser.add_argument("--onnx-output", type=str, default="cartpole_trained.onnx")
         return parser
 

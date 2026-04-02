@@ -106,7 +106,8 @@ class RobotEnv(ABC):
         # -- Replicate --
         builder = newton.ModelBuilder()
         builder.replicate(art, num_envs)
-        builder.add_ground_plane()
+        if self.use_collisions:
+            builder.add_ground_plane()
         self.model = builder.finalize(device=self.device)
 
         # -- Solver --
@@ -185,14 +186,17 @@ class RobotEnv(ABC):
             self.state_0.joint_qd,
             wp.array(np.tile(qd_np, self.num_envs).astype(np.float32), dtype=wp.float32, device=self.device),
         )
-        newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
         self.state = self.state_0
-
         self.episode_lengths.zero_()
-        self.dones.zero_()
         self.sim_time = 0.0
 
+        # Mark all envs as done so reset_done_envs applies perturbation
+        wp.copy(self.dones, wp.ones(self.num_envs, dtype=wp.float32, device=self.device))
         self.on_reset()
+        self.reset_done_envs()
+        self.dones.zero_()
+
+        newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
         self.compute_obs()
         return self.obs
 
