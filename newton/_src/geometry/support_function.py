@@ -378,3 +378,67 @@ def extract_shape_data(
         result.auxiliary = pack_mesh_ptr(shape_source[shape_idx])
 
     return position, orientation, result, scale, margin_offset
+
+
+@wp.func
+def closest_point_on_triangle(
+    p: wp.vec3,
+    tri_a: wp.vec3,
+    tri_b: wp.vec3,
+    tri_c: wp.vec3,
+) -> wp.vec3:
+    """
+    Closest point on a triangle to a query point.
+
+    Uses Voronoi-region tests with barycentric coordinates to handle
+    vertex, edge, and face regions without branching on degenerate normals.
+
+    Args:
+        p: Query point
+        tri_a: Triangle vertex A
+        tri_b: Triangle vertex B
+        tri_c: Triangle vertex C
+
+    Returns:
+        The closest point on the triangle to *p*.
+    """
+    ab = tri_b - tri_a
+    ac = tri_c - tri_a
+    ap = p - tri_a
+
+    d1 = wp.dot(ab, ap)
+    d2 = wp.dot(ac, ap)
+    if d1 <= 0.0 and d2 <= 0.0:
+        return tri_a
+
+    bp = p - tri_b
+    d3 = wp.dot(ab, bp)
+    d4 = wp.dot(ac, bp)
+    if d3 >= 0.0 and d4 <= d3:
+        return tri_b
+
+    cp = p - tri_c
+    d5 = wp.dot(ab, cp)
+    d6 = wp.dot(ac, cp)
+    if d6 >= 0.0 and d5 <= d6:
+        return tri_c
+
+    vc = d1 * d4 - d3 * d2
+    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+        v = d1 / (d1 - d3)
+        return tri_a + v * ab
+
+    vb = d5 * d2 - d1 * d6
+    if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+        w = d2 / (d2 - d6)
+        return tri_a + w * ac
+
+    va = d3 * d6 - d5 * d4
+    if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
+        w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+        return tri_b + w * (tri_c - tri_b)
+
+    denom = 1.0 / (va + vb + vc)
+    v = vb * denom
+    w = vc * denom
+    return tri_a + v * ab + w * ac

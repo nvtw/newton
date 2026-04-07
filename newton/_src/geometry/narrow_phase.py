@@ -14,7 +14,7 @@ from ..geometry.collision_core import (
     check_infinite_plane_bsphere_overlap,
     compute_bounding_sphere_from_aabb,
     compute_tight_aabb_from_support,
-    condition_triangle_for_convex,
+    condition_triangle_for_collision_detection,
     create_compute_gjk_mpr_contacts,
     create_find_contacts,
     get_triangle_shape_from_mesh,
@@ -881,6 +881,8 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
         shape_transform: wp.array[wp.transform],
         shape_source: wp.array[wp.uint64],
         shape_gap: wp.array[float],  # Per-shape contact gaps
+        shape_collision_aabb_lower: wp.array[wp.vec3],
+        shape_collision_aabb_upper: wp.array[wp.vec3],
         shape_heightfield_index: wp.array[wp.int32],
         heightfield_data: wp.array[HeightfieldData],
         heightfield_elevations: wp.array[wp.float32],
@@ -981,8 +983,31 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
             # Condition large/bad-aspect-ratio mesh triangles to a smaller
             # equivalent triangle near the convex bounding sphere.
             if shape_data_a.shape_type == int(GeoTypeEx.TRIANGLE):
-                shape_data_a, pos_a = condition_triangle_for_convex(
-                    shape_data_a, pos_a, shape_data_b, pos_b, quat_b, gap_sum
+                local_lo = shape_collision_aabb_lower[shape_b]
+                local_hi = shape_collision_aabb_upper[shape_b]
+                local_center = 0.5 * (local_lo + local_hi)
+                local_half = 0.5 * (local_hi - local_lo)
+                ws_center = pos_b + wp.quat_rotate(quat_b, local_center)
+                # Rotate each half-extent axis and sum absolute contributions
+                rot_mat = wp.quat_to_matrix(quat_b)
+                hx = (
+                    wp.abs(rot_mat[0, 0]) * local_half[0]
+                    + wp.abs(rot_mat[0, 1]) * local_half[1]
+                    + wp.abs(rot_mat[0, 2]) * local_half[2]
+                )
+                hy = (
+                    wp.abs(rot_mat[1, 0]) * local_half[0]
+                    + wp.abs(rot_mat[1, 1]) * local_half[1]
+                    + wp.abs(rot_mat[1, 2]) * local_half[2]
+                )
+                hz = (
+                    wp.abs(rot_mat[2, 0]) * local_half[0]
+                    + wp.abs(rot_mat[2, 1]) * local_half[1]
+                    + wp.abs(rot_mat[2, 2]) * local_half[2]
+                )
+                ws_half = wp.vec3(hx, hy, hz)
+                shape_data_a, pos_a = condition_triangle_for_collision_detection(
+                    shape_data_a, pos_a, ws_center - ws_half, ws_center + ws_half, gap_sum
                 )
 
             # Compute and write contacts using GJK/MPR with standard post-processing
@@ -1891,6 +1916,8 @@ class NarrowPhase:
                         shape_transform,
                         shape_source,
                         shape_gap,
+                        shape_collision_aabb_lower,
+                        shape_collision_aabb_upper,
                         shape_heightfield_index,
                         heightfield_data,
                         heightfield_elevations,
@@ -1914,6 +1941,8 @@ class NarrowPhase:
                         shape_transform,
                         shape_source,
                         shape_gap,
+                        shape_collision_aabb_lower,
+                        shape_collision_aabb_upper,
                         shape_heightfield_index,
                         heightfield_data,
                         heightfield_elevations,

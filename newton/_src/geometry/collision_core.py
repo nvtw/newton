@@ -1001,70 +1001,6 @@ def find_pair_from_cumulative_index(
 
 
 @wp.func
-def closest_point_on_triangle(
-    p: wp.vec3,
-    tri_a: wp.vec3,
-    tri_b: wp.vec3,
-    tri_c: wp.vec3,
-) -> wp.vec3:
-    """
-    Closest point on a triangle to a query point.
-
-    Uses Voronoi-region tests with barycentric coordinates to handle
-    vertex, edge, and face regions without branching on degenerate normals.
-
-    Args:
-        p: Query point
-        tri_a: Triangle vertex A
-        tri_b: Triangle vertex B
-        tri_c: Triangle vertex C
-
-    Returns:
-        The closest point on the triangle to *p*.
-    """
-    ab = tri_b - tri_a
-    ac = tri_c - tri_a
-    ap = p - tri_a
-
-    d1 = wp.dot(ab, ap)
-    d2 = wp.dot(ac, ap)
-    if d1 <= 0.0 and d2 <= 0.0:
-        return tri_a
-
-    bp = p - tri_b
-    d3 = wp.dot(ab, bp)
-    d4 = wp.dot(ac, bp)
-    if d3 >= 0.0 and d4 <= d3:
-        return tri_b
-
-    cp = p - tri_c
-    d5 = wp.dot(ab, cp)
-    d6 = wp.dot(ac, cp)
-    if d6 >= 0.0 and d5 <= d6:
-        return tri_c
-
-    vc = d1 * d4 - d3 * d2
-    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
-        v = d1 / (d1 - d3)
-        return tri_a + v * ab
-
-    vb = d5 * d2 - d1 * d6
-    if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
-        w = d2 / (d2 - d6)
-        return tri_a + w * ac
-
-    va = d3 * d6 - d5 * d4
-    if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
-        w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
-        return tri_b + w * (tri_c - tri_b)
-
-    denom = 1.0 / (va + vb + vc)
-    v = vb * denom
-    w = vc * denom
-    return tri_a + v * ab + w * ac
-
-
-@wp.func
 def get_triangle_shape_from_mesh(
     mesh_id: wp.uint64,
     mesh_scale: wp.vec3,
@@ -1163,12 +1099,11 @@ def _clip_edge_to_circle(
 
 
 @wp.func
-def condition_triangle_for_convex(
+def condition_triangle_for_collision_detection(
     tri_shape: GenericShapeData,
     v0_world: wp.vec3,
-    convex_shape: GenericShapeData,
-    convex_pos: wp.vec3,
-    convex_rot: wp.quat,
+    convex_aabb_lower: wp.vec3,
+    convex_aabb_upper: wp.vec3,
     gap: float,
 ) -> tuple[GenericShapeData, wp.vec3]:
     """
@@ -1184,27 +1119,21 @@ def condition_triangle_for_convex(
     Args:
         tri_shape: Triangle GenericShapeData (TRIANGLE type, scale=B-A, auxiliary=C-A)
         v0_world: World-space position of vertex A (triangle origin)
-        convex_shape: GenericShapeData of the convex shape
-        convex_pos: World-space position of the convex shape
-        convex_rot: World-space orientation of the convex shape
+        convex_aabb_lower: World-space AABB lower bound of the convex shape
+        convex_aabb_upper: World-space AABB upper bound of the convex shape
         gap: Contact gap used to inflate the bounding sphere [m]
 
     Returns:
         Possibly modified (tri_shape, v0_world).
     """
-    data_provider = SupportMapDataProvider()
-
     # Reconstruct triangle vertices in world space
     va = v0_world
     vb = v0_world + tri_shape.scale
     vc = v0_world + tri_shape.auxiliary
 
     # --- Compute bounding sphere of the convex AABB ---
-    aabb_lo, aabb_hi = compute_tight_aabb_from_support(
-        convex_shape, convex_rot, convex_pos, data_provider
-    )
-    sphere_center = 0.5 * (aabb_lo + aabb_hi)
-    half_diag = 0.5 * (aabb_hi - aabb_lo)
+    sphere_center = 0.5 * (convex_aabb_lower + convex_aabb_upper)
+    half_diag = 0.5 * (convex_aabb_upper - convex_aabb_lower)
     sphere_radius = wp.length(half_diag) + gap
 
     # --- Quick skip: if all vertices are within 2x the sphere radius we

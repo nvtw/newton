@@ -35,7 +35,7 @@ from typing import Any
 
 import warp as wp
 
-from .support_function import GeoTypeEx
+from .support_function import GeoTypeEx, closest_point_on_triangle
 
 
 @wp.struct
@@ -181,45 +181,12 @@ def create_support_map_function(support_func: Any):
         center_a = wp.vec3(0.0, 0.0, 0.0)
 
         if geom_a.shape_type == int(GeoTypeEx.TRIANGLE) or geom_a.shape_type == int(GeoTypeEx.TRIANGLE_PRISM):
-            tri_a = wp.vec3(0.0, 0.0, 0.0)
-            tri_b = geom_a.scale
-            tri_c = geom_a.auxiliary
-
-            ab = tri_b - tri_a
-            ac = tri_c - tri_a
-            ap = position_b - tri_a
-
-            d1 = wp.dot(ab, ap)
-            d2 = wp.dot(ac, ap)
-
-            bp = position_b - tri_b
-            d3 = wp.dot(ab, bp)
-            d4 = wp.dot(ac, bp)
-            cp = position_b - tri_c
-            d5 = wp.dot(ab, cp)
-            d6 = wp.dot(ac, cp)
-
-            vc = d1 * d4 - d3 * d2
-            vb = d5 * d2 - d1 * d6
-            va = d3 * d6 - d5 * d4
-
-            if d1 <= 0.0 and d2 <= 0.0:
-                center_a = tri_a
-            elif d3 >= 0.0 and d4 <= d3:
-                center_a = tri_b
-            elif d6 >= 0.0 and d5 <= d6:
-                center_a = tri_c
-            elif vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
-                center_a = tri_a + (d1 / (d1 - d3)) * ab
-            elif vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
-                center_a = tri_a + (d2 / (d2 - d6)) * ac
-            elif va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
-                center_a = tri_b + ((d4 - d3) / ((d4 - d3) + (d5 - d6))) * (tri_c - tri_b)
-            else:
-                denom = va + vb + vc
-                if denom > 1.0e-12:
-                    inv_d = 1.0 / denom
-                    center_a = tri_a + (vb * inv_d) * ab + (vc * inv_d) * ac
+            center_a = closest_point_on_triangle(
+                position_b,
+                wp.vec3(0.0, 0.0, 0.0),
+                geom_a.scale,
+                geom_a.auxiliary,
+            )
 
         center.B = position_b
         center.BtoA = center_a - position_b
