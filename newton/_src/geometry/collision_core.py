@@ -1102,26 +1102,32 @@ def _clip_edge_to_circle(
 def condition_triangle_for_collision_detection(
     tri_shape: GenericShapeData,
     v0_world: wp.vec3,
-    convex_aabb_lower: wp.vec3,
-    convex_aabb_upper: wp.vec3,
-    gap: float,
+    local_aabb_lower: wp.vec3,
+    local_aabb_upper: wp.vec3,
+    convex_position: wp.vec3,
+    convex_orientation: wp.quat,
+    inflate: float,
 ) -> tuple[GenericShapeData, wp.vec3]:
     """
     Replace a large triangle with a smaller, better-conditioned one that
     produces equivalent contacts for the given convex shape.
 
-    The convex's AABB bounding sphere is projected onto the triangle plane
-    to obtain a bounding circle.  Edges that intersect the circle keep their
-    line equation (shortened to the circle neighbourhood); edges entirely
-    outside are free to move toward the circle to improve the aspect ratio.
-    If the triangle is already small enough the original is returned unchanged.
+    The convex's local-space AABB bounding sphere (inflated by *inflate*)
+    is projected onto the triangle plane to obtain a bounding circle.
+    Edges that intersect the circle keep their line equation (shortened to
+    the circle neighbourhood); edges entirely outside are free to move
+    toward the circle to improve the aspect ratio.  If the triangle is
+    already small enough the original is returned unchanged.
 
     Args:
-        tri_shape: Triangle GenericShapeData (TRIANGLE type, scale=B-A, auxiliary=C-A)
-        v0_world: World-space position of vertex A (triangle origin)
-        convex_aabb_lower: World-space AABB lower bound of the convex shape
-        convex_aabb_upper: World-space AABB upper bound of the convex shape
-        gap: Contact gap used to inflate the bounding sphere [m]
+        tri_shape: Triangle GenericShapeData (TRIANGLE type, scale=B-A, auxiliary=C-A).
+        v0_world: World-space position of vertex A (triangle origin).
+        local_aabb_lower: Local-space AABB lower bound of the convex shape.
+        local_aabb_upper: Local-space AABB upper bound of the convex shape.
+        convex_position: World-space position of the convex shape.
+        convex_orientation: World-space orientation of the convex shape.
+        inflate: Extra radius to add to the bounding sphere [m].  Should
+            include the contact gap plus any margin offsets.
 
     Returns:
         Possibly modified (tri_shape, v0_world).
@@ -1131,10 +1137,31 @@ def condition_triangle_for_collision_detection(
     vb = v0_world + tri_shape.scale
     vc = v0_world + tri_shape.auxiliary
 
-    # --- Compute bounding sphere of the convex AABB ---
-    sphere_center = 0.5 * (convex_aabb_lower + convex_aabb_upper)
-    half_diag = 0.5 * (convex_aabb_upper - convex_aabb_lower)
-    sphere_radius = wp.length(half_diag) + gap
+    # --- Compute bounding sphere of the convex's world-space AABB ---
+    # We need the world AABB (not the local one) so that the bounding sphere
+    # is conservative for all orientations.  The world AABB half-extents are
+    # computed via the standard rotated-box formula (sum of absolute row
+    # contributions), and its half-diagonal gives the sphere radius.
+    local_center = 0.5 * (local_aabb_lower + local_aabb_upper)
+    local_half = 0.5 * (local_aabb_upper - local_aabb_lower)
+    sphere_center = convex_position + wp.quat_rotate(convex_orientation, local_center)
+    rot_mat = wp.quat_to_matrix(convex_orientation)
+    hx = (
+        wp.abs(rot_mat[0, 0]) * local_half[0]
+        + wp.abs(rot_mat[0, 1]) * local_half[1]
+        + wp.abs(rot_mat[0, 2]) * local_half[2]
+    )
+    hy = (
+        wp.abs(rot_mat[1, 0]) * local_half[0]
+        + wp.abs(rot_mat[1, 1]) * local_half[1]
+        + wp.abs(rot_mat[1, 2]) * local_half[2]
+    )
+    hz = (
+        wp.abs(rot_mat[2, 0]) * local_half[0]
+        + wp.abs(rot_mat[2, 1]) * local_half[1]
+        + wp.abs(rot_mat[2, 2]) * local_half[2]
+    )
+    sphere_radius = wp.length(wp.vec3(hx, hy, hz)) + inflate
 
     # --- Quick skip: if all vertices are within 2x the sphere radius we
     #     don't need conditioning (triangle is already small enough). ---

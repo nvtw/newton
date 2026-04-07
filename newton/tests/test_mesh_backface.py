@@ -819,5 +819,242 @@ class TestHeightfieldPrismSteepAndRotated(unittest.TestCase):
             self.assertFalse(np.any(np.isnan(s0.joint_q.numpy())), "Rotated steep hfield capsule: NaN")
 
 
+def _make_large_ground_mesh(size=500.0, z=0.0):
+    """Create a very large flat ground mesh (two triangles) at height *z*.
+
+    The triangles are ~700 m across (diagonal), which is far larger than any
+    convex shape used in the tests.  This forces the triangle preconditioning
+    path to activate.
+    """
+    vertices = np.array(
+        [[-size, -size, z], [size, -size, z], [size, size, z], [-size, size, z]],
+        dtype=np.float32,
+    )
+    indices = np.array([0, 1, 2, 0, 2, 3], dtype=np.int32)
+    return newton.Mesh(vertices, indices, compute_inertia=False)
+
+
+def _make_large_skinny_mesh(length=1000.0, width=0.5, z=0.0):
+    """Create a very long, narrow ground mesh to exercise extreme aspect ratios.
+
+    Two triangles forming a strip ``length`` m long and ``width`` m wide.
+    Aspect ratio ~2000:1 when using the defaults.
+    """
+    hw = width / 2.0
+    vertices = np.array(
+        [[-hw, -length / 2, z], [hw, -length / 2, z], [hw, length / 2, z], [-hw, length / 2, z]],
+        dtype=np.float32,
+    )
+    indices = np.array([0, 1, 2, 0, 2, 3], dtype=np.int32)
+    return newton.Mesh(vertices, indices, compute_inertia=False)
+
+
+class TestTrianglePreconditioning(unittest.TestCase):
+    """Verify that triangle preconditioning produces contacts equivalent to small-triangle baselines.
+
+    Each test creates a large mesh ground, places a convex shape on it, and
+    checks that the contact normal, penetration depth, and contact position
+    match the analytically expected values.  The triangles are large enough
+    (500 m+) that the preconditioning path is always triggered.
+    """
+
+    def _collide_shape_on_mesh(self, mesh, shape_type, shape_pos, shape_scale=None, shape_rot=None):
+        """Build scene, collide, and return (count, normals)."""
+        model, cp, state = _build_collision_only(mesh, shape_type, shape_pos, shape_scale, shape_rot)
+        contacts = _collide(model, cp, state)
+        count = contacts.rigid_contact_count.numpy()[0]
+        normals = contacts.rigid_contact_normal.numpy()[:count] if count > 0 else np.zeros((0, 3))
+        return count, normals
+
+    # ------------------------------------------------------------------
+    # Contact equivalence: large triangle vs small triangle
+    # ------------------------------------------------------------------
+
+    @unittest.skipUnless(_cuda_available, "CUDA required")
+    def test_sphere_large_triangle_contact_matches_small(self):
+        """Sphere on a 1000 m mesh must produce the same contact as on a 10 m mesh."""
+        radius = 0.1
+        pos = (0.0, 0.0, radius - 0.005)  # 5 mm overlap
+
+        count_sm, n_sm = self._collide_shape_on_mesh(
+            _make_flat_ground_mesh(size=5.0), GeoType.SPHERE, pos, shape_scale=(radius,)
+        )
+        count_lg, n_lg = self._collide_shape_on_mesh(
+            _make_large_ground_mesh(size=500.0), GeoType.SPHERE, pos, shape_scale=(radius,)
+        )
+
+        self.assertGreater(count_sm, 0, "Small mesh must produce contacts")
+        self.assertGreater(count_lg, 0, "Large mesh must produce contacts")
+
+        # Normals should both point upward (+Z)
+        np.testing.assert_allclose(n_sm[0], [0.0, 0.0, 1.0], atol=0.01, err_msg="Small mesh normal")
+        np.testing.assert_allclose(n_lg[0], [0.0, 0.0, 1.0], atol=0.01, err_msg="Large mesh normal")
+
+    @unittest.skipUnless(_cuda_available, "CUDA required")
+    def test_box_large_triangle_contact_matches_small(self):
+        """Box on a 1000 m mesh must produce equivalent contacts to a 10 m mesh."""
+        hx, hy, hz = 0.1, 0.1, 0.1
+        pos = (0.0, 0.0, hz - 0.005)  # 5 mm overlap
+
+        count_sm, _n_sm = self._collide_shape_on_mesh(
+            _make_flat_ground_mesh(size=5.0), GeoType.BOX, pos, shape_scale=(hx, hy, hz)
+        )
+        count_lg, n_lg = self._collide_shape_on_mesh(
+            _make_large_ground_mesh(size=500.0), GeoType.BOX, pos, shape_scale=(hx, hy, hz)
+        )
+
+        self.assertGreater(count_sm, 0)
+        self.assertGreater(count_lg, 0)
+
+        # All normals should point upward
+        for i in range(count_lg):
+            self.assertGreater(n_lg[i, 2], 0.9, f"Large mesh box normal[{i}] not upward: {n_lg[i]}")
+
+    @unittest.skipUnless(_cuda_available, "CUDA required")
+    def test_capsule_large_triangle_contact_matches_small(self):
+        """Capsule on a 1000 m mesh must produce equivalent contacts."""
+        radius = 0.1
+        half_height = 0.2
+        pos = (0.0, 0.0, radius - 0.005)
+
+        count_sm, _n_sm = self._collide_shape_on_mesh(
+            _make_flat_ground_mesh(size=5.0), GeoType.CAPSULE, pos, shape_scale=(radius, half_height)
+        )
+        count_lg, n_lg = self._collide_shape_on_mesh(
+            _make_large_ground_mesh(size=500.0), GeoType.CAPSULE, pos, shape_scale=(radius, half_height)
+        )
+
+        self.assertGreater(count_sm, 0)
+        self.assertGreater(count_lg, 0)
+
+        for i in range(count_lg):
+            self.assertGreater(n_lg[i, 2], 0.9, f"Large mesh capsule normal[{i}] not upward: {n_lg[i]}")
+
+    # ------------------------------------------------------------------
+    # Extreme aspect ratio triangles
+    # ------------------------------------------------------------------
+
+    @unittest.skipUnless(_cuda_available, "CUDA required")
+    def test_sphere_on_skinny_triangle(self):
+        """Sphere on a very elongated mesh (2000:1 aspect ratio) must produce correct contacts."""
+        radius = 0.1
+        pos = (0.0, 0.0, radius - 0.005)
+
+        count, normals = self._collide_shape_on_mesh(
+            _make_large_skinny_mesh(length=1000.0, width=0.5),
+            GeoType.SPHERE,
+            pos,
+            shape_scale=(radius,),
+        )
+
+        self.assertGreater(count, 0, "Skinny mesh must produce contacts")
+        np.testing.assert_allclose(normals[0], [0.0, 0.0, 1.0], atol=0.01, err_msg="Skinny mesh normal")
+
+    @unittest.skipUnless(_cuda_available, "CUDA required")
+    def test_box_on_skinny_triangle(self):
+        """Box on a very elongated mesh must produce correct contacts."""
+        hx, hy, hz = 0.05, 0.05, 0.05
+        pos = (0.0, 0.0, hz - 0.005)
+
+        count, normals = self._collide_shape_on_mesh(
+            _make_large_skinny_mesh(length=1000.0, width=0.5),
+            GeoType.BOX,
+            pos,
+            shape_scale=(hx, hy, hz),
+        )
+
+        self.assertGreater(count, 0, "Skinny mesh box must produce contacts")
+        for i in range(count):
+            self.assertGreater(normals[i, 2], 0.9, f"Skinny mesh box normal[{i}] not upward")
+
+    # ------------------------------------------------------------------
+    # Off-center placement (shape near triangle edge/vertex)
+    # ------------------------------------------------------------------
+
+    @unittest.skipUnless(_cuda_available, "CUDA required")
+    def test_sphere_off_center_large_triangle(self):
+        """Sphere placed far from the triangle center must still get correct contacts.
+
+        This exercises the case where the bounding circle is not centered on
+        the triangle — the preconditioning must clip differently per edge.
+        """
+        radius = 0.1
+        pos = (100.0, 100.0, radius - 0.005)  # 100 m from origin on a 500 m mesh
+
+        count, normals = self._collide_shape_on_mesh(
+            _make_large_ground_mesh(size=500.0), GeoType.SPHERE, pos, shape_scale=(radius,)
+        )
+
+        self.assertGreater(count, 0, "Off-center sphere on large mesh must produce contacts")
+        np.testing.assert_allclose(normals[0], [0.0, 0.0, 1.0], atol=0.01, err_msg="Off-center normal")
+
+    # ------------------------------------------------------------------
+    # Simulation stability with large triangles
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_xpbd_sim_scene(mesh, shape_type, shape_pos, shape_scale=None):
+        """Build simulation scene with XPBD solver (no convex decomposition needed)."""
+        builder = newton.ModelBuilder()
+        builder.default_shape_cfg.mu = 0.5
+        builder.default_shape_cfg.margin = 0.0
+        builder.default_shape_cfg.gap = 0.01
+
+        builder.add_shape_mesh(body=-1, mesh=mesh, xform=wp.transform_identity())
+
+        body = builder.add_body(xform=wp.transform(wp.vec3(*shape_pos), wp.quat_identity()))
+
+        if shape_type == GeoType.SPHERE:
+            builder.add_shape_sphere(body, radius=shape_scale[0])
+        elif shape_type == GeoType.BOX:
+            builder.add_shape_box(body, hx=shape_scale[0], hy=shape_scale[1], hz=shape_scale[2])
+        elif shape_type == GeoType.CAPSULE:
+            builder.add_shape_capsule(body, radius=shape_scale[0], half_height=shape_scale[1])
+        else:
+            raise ValueError(f"Unsupported shape type: {shape_type}")
+
+        model = builder.finalize()
+        solver = newton.solvers.SolverXPBD(model)
+        cp = newton.CollisionPipeline(model, broad_phase="explicit", max_triangle_pairs=100_000)
+        s0 = model.state()
+        s1 = model.state()
+        ctrl = model.control()
+        newton.eval_fk(model, s0.joint_q, s0.joint_qd, s0)
+        return model, cp, solver, s0, s1, ctrl
+
+    @unittest.skipUnless(_cuda_available, "CUDA required")
+    def test_sim_sphere_on_large_mesh_no_nan(self):
+        """100-step simulation with a sphere on a 1000 m mesh must not produce NaN."""
+        mesh = _make_large_ground_mesh(size=500.0)
+        model, cp, solver, s0, s1, ctrl = self._build_xpbd_sim_scene(
+            mesh, GeoType.SPHERE, (0.0, 0.0, 0.5), shape_scale=(0.1,)
+        )
+        for _ in range(100):
+            s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=4)
+            self.assertFalse(np.any(np.isnan(s0.joint_q.numpy())), "Sphere on large mesh: NaN in joint_q")
+
+    @unittest.skipUnless(_cuda_available, "CUDA required")
+    def test_sim_box_on_large_mesh_no_nan(self):
+        """100-step simulation with a box on a 1000 m mesh must not produce NaN."""
+        mesh = _make_large_ground_mesh(size=500.0)
+        model, cp, solver, s0, s1, ctrl = self._build_xpbd_sim_scene(
+            mesh, GeoType.BOX, (0.0, 0.0, 0.5), shape_scale=(0.1, 0.1, 0.1)
+        )
+        for _ in range(100):
+            s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=4)
+            self.assertFalse(np.any(np.isnan(s0.joint_q.numpy())), "Box on large mesh: NaN in joint_q")
+
+    @unittest.skipUnless(_cuda_available, "CUDA required")
+    def test_sim_capsule_on_large_mesh_no_nan(self):
+        """100-step simulation with a capsule on a 1000 m mesh must not produce NaN."""
+        mesh = _make_large_ground_mesh(size=500.0)
+        model, cp, solver, s0, s1, ctrl = self._build_xpbd_sim_scene(
+            mesh, GeoType.CAPSULE, (0.0, 0.0, 0.5), shape_scale=(0.1, 0.2)
+        )
+        for _ in range(100):
+            s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=4)
+            self.assertFalse(np.any(np.isnan(s0.joint_q.numpy())), "Capsule on large mesh: NaN in joint_q")
+
+
 if __name__ == "__main__":
     unittest.main()

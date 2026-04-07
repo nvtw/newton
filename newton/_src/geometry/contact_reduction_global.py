@@ -1327,30 +1327,14 @@ def mesh_triangle_contacts_to_reducer_kernel(
         # Condition large/bad-aspect-ratio mesh triangles to a smaller
         # equivalent triangle near the convex bounding sphere.
         if shape_data_a.shape_type == int(GeoTypeEx.TRIANGLE):
-            local_lo = shape_collision_aabb_lower[shape_b]
-            local_hi = shape_collision_aabb_upper[shape_b]
-            local_center = 0.5 * (local_lo + local_hi)
-            local_half = 0.5 * (local_hi - local_lo)
-            ws_center = pos_b + wp.quat_rotate(quat_b, local_center)
-            rot_mat = wp.quat_to_matrix(quat_b)
-            hx = (
-                wp.abs(rot_mat[0, 0]) * local_half[0]
-                + wp.abs(rot_mat[0, 1]) * local_half[1]
-                + wp.abs(rot_mat[0, 2]) * local_half[2]
-            )
-            hy = (
-                wp.abs(rot_mat[1, 0]) * local_half[0]
-                + wp.abs(rot_mat[1, 1]) * local_half[1]
-                + wp.abs(rot_mat[1, 2]) * local_half[2]
-            )
-            hz = (
-                wp.abs(rot_mat[2, 0]) * local_half[0]
-                + wp.abs(rot_mat[2, 1]) * local_half[1]
-                + wp.abs(rot_mat[2, 2]) * local_half[2]
-            )
-            ws_half = wp.vec3(hx, hy, hz)
             shape_data_a, pos_a = condition_triangle_for_collision_detection(
-                shape_data_a, pos_a, ws_center - ws_half, ws_center + ws_half, gap_sum
+                shape_data_a,
+                pos_a,
+                shape_collision_aabb_lower[shape_b],
+                shape_collision_aabb_upper[shape_b],
+                pos_b,
+                quat_b,
+                gap_sum + margin_offset_a + margin_offset_b,
             )
 
         # Compute and write contacts using GJK/MPR
