@@ -2123,6 +2123,294 @@ class TestMPREnlargeCorrection(_NarrowPhaseSetupMixin, unittest.TestCase):
 
         self.assertGreater(validated_count, 0, "At least one penetrating contact must be validated")
 
+    def test_box_box_small_thickness_penetration_accuracy(self):
+        """Two boxes with small thickness (0 < margin_sum < 1e-4) must report correct penetration.
+
+        Each box has thickness 2.5e-5, so margin_sum = 5e-5.
+        This exercises the ``0 < margin_sum < eps`` branch (enlarge = 2e-4).
+
+        Box A: half-extents 0.5, centered at origin  -> face at z = +0.5
+        Box B: half-extents 0.5, centered at z = 0.99 -> face at z = 0.49
+        Geometric overlap along Z = 0.01. The contact writer subtracts margin_sum
+        from the geometric distance, so expected penetration = -(overlap + margin_sum).
+        """
+        thickness = 2.5e-5
+        margin_sum = 2.0 * thickness
+        overlap = 0.01
+        gap = 1.0 - overlap
+        geom_list = [
+            {
+                "type": GeoType.BOX,
+                "transform": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
+                "data": ([0.5, 0.5, 0.5], thickness),
+            },
+            {
+                "type": GeoType.BOX,
+                "transform": ([0.0, 0.0, gap], [0.0, 0.0, 0.0, 1.0]),
+                "data": ([0.5, 0.5, 0.5], thickness),
+            },
+        ]
+
+        count, _pairs, _positions, _normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+
+        self.assertGreater(count, 0, "Overlapping boxes with small thickness must generate at least one contact")
+
+        expected_penetration = -(overlap + margin_sum)
+        deepest = min(penetrations[:count])
+
+        self.assertAlmostEqual(
+            float(deepest),
+            expected_penetration,
+            delta=5e-5,
+            msg=f"Small-thickness branch: deepest penetration {deepest} should match {expected_penetration}",
+        )
+
+    def test_box_box_large_thickness_penetration_accuracy(self):
+        """Two boxes with large thickness (margin_sum >= 1e-4) must report correct penetration.
+
+        Each box has thickness 0.005, so margin_sum = 0.01.
+        This exercises the ``margin_sum >= eps`` branch (enlarge = 0).
+
+        Box A: half-extents 0.5, centered at origin  -> face at z = +0.5
+        Box B: half-extents 0.5, centered at z = 0.99 -> face at z = 0.49
+        Geometric overlap along Z = 0.01. The contact writer subtracts margin_sum
+        from the geometric distance, so expected penetration = -(overlap + margin_sum).
+        """
+        thickness = 0.005
+        margin_sum = 2.0 * thickness
+        overlap = 0.01
+        gap = 1.0 - overlap
+        geom_list = [
+            {
+                "type": GeoType.BOX,
+                "transform": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
+                "data": ([0.5, 0.5, 0.5], thickness),
+            },
+            {
+                "type": GeoType.BOX,
+                "transform": ([0.0, 0.0, gap], [0.0, 0.0, 0.0, 1.0]),
+                "data": ([0.5, 0.5, 0.5], thickness),
+            },
+        ]
+
+        count, _pairs, _positions, _normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+
+        self.assertGreater(count, 0, "Overlapping boxes with large thickness must generate at least one contact")
+
+        expected_penetration = -(overlap + margin_sum)
+        deepest = min(penetrations[:count])
+
+        self.assertAlmostEqual(
+            float(deepest),
+            expected_penetration,
+            delta=5e-5,
+            msg=f"Large-thickness branch: deepest penetration {deepest} should match {expected_penetration}",
+        )
+
+    def test_box_box_small_thickness_contact_point_on_surface(self):
+        """Contact points with small thickness must lie on the true box surfaces.
+
+        Uses the same scenario as test_box_box_small_thickness_penetration_accuracy.
+        Each box has thickness 2.5e-5, so margin_sum = 5e-5 (enlarge = 2e-4 branch).
+
+        The contact writer outputs ``d = geometric_distance - margin_sum``, but the
+        contact center is the midpoint of the *geometric* witness points.  To
+        reconstruct the geometric surface points we use
+        ``(d + margin_sum) / 2`` as the half-distance from center.
+        """
+        thickness = 2.5e-5
+        margin_sum = 2.0 * thickness
+        overlap = 0.05
+        gap = 1.0 - overlap
+        box_a_pos = np.array([0.0, 0.0, 0.0])
+        box_a_size = np.array([0.5, 0.5, 0.5])
+        box_b_pos = np.array([0.0, 0.0, gap])
+        box_b_size = np.array([0.5, 0.5, 0.5])
+
+        geom_list = [
+            {
+                "type": GeoType.BOX,
+                "transform": (box_a_pos.tolist(), [0.0, 0.0, 0.0, 1.0]),
+                "data": (box_a_size.tolist(), thickness),
+            },
+            {
+                "type": GeoType.BOX,
+                "transform": (box_b_pos.tolist(), [0.0, 0.0, 0.0, 1.0]),
+                "data": (box_b_size.tolist(), thickness),
+            },
+        ]
+
+        count, _pairs, positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        self.assertGreater(count, 0)
+
+        validated_count = 0
+        for i in range(count):
+            if penetrations[i] >= 0.0:
+                continue
+            n = normals[i]
+            d = penetrations[i]
+            center = positions[i]
+            geo_half = (d + margin_sum) / 2.0
+
+            surface_a = center - n * geo_half
+            surface_b = center + n * geo_half
+
+            sd_a = signed_distance_to_box_surface(surface_a, box_a_pos, box_a_size)
+            sd_b = signed_distance_to_box_surface(surface_b, box_b_pos, box_b_size)
+
+            self.assertAlmostEqual(
+                float(sd_a),
+                0.0,
+                delta=5e-5,
+                msg=f"Contact {i}: surface point A signed distance {sd_a} from box A surface (should be ~0)",
+            )
+            self.assertAlmostEqual(
+                float(sd_b),
+                0.0,
+                delta=5e-5,
+                msg=f"Contact {i}: surface point B signed distance {sd_b} from box B surface (should be ~0)",
+            )
+            validated_count += 1
+
+        self.assertGreater(validated_count, 0, "At least one penetrating contact must be validated")
+
+    def test_box_box_large_thickness_contact_point_on_surface(self):
+        """Contact points with large thickness must lie on the true box surfaces.
+
+        Uses the same scenario as test_box_box_large_thickness_penetration_accuracy.
+        Each box has thickness 0.005, so margin_sum = 0.01 (enlarge = 0 branch).
+
+        See test_box_box_small_thickness_contact_point_on_surface for the
+        surface-reconstruction formula with non-zero margins.
+        """
+        thickness = 0.005
+        margin_sum = 2.0 * thickness
+        overlap = 0.05
+        gap = 1.0 - overlap
+        box_a_pos = np.array([0.0, 0.0, 0.0])
+        box_a_size = np.array([0.5, 0.5, 0.5])
+        box_b_pos = np.array([0.0, 0.0, gap])
+        box_b_size = np.array([0.5, 0.5, 0.5])
+
+        geom_list = [
+            {
+                "type": GeoType.BOX,
+                "transform": (box_a_pos.tolist(), [0.0, 0.0, 0.0, 1.0]),
+                "data": (box_a_size.tolist(), thickness),
+            },
+            {
+                "type": GeoType.BOX,
+                "transform": (box_b_pos.tolist(), [0.0, 0.0, 0.0, 1.0]),
+                "data": (box_b_size.tolist(), thickness),
+            },
+        ]
+
+        count, _pairs, positions, normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+        self.assertGreater(count, 0)
+
+        validated_count = 0
+        for i in range(count):
+            if penetrations[i] >= 0.0:
+                continue
+            n = normals[i]
+            d = penetrations[i]
+            center = positions[i]
+            geo_half = (d + margin_sum) / 2.0
+
+            surface_a = center - n * geo_half
+            surface_b = center + n * geo_half
+
+            sd_a = signed_distance_to_box_surface(surface_a, box_a_pos, box_a_size)
+            sd_b = signed_distance_to_box_surface(surface_b, box_b_pos, box_b_size)
+
+            self.assertAlmostEqual(
+                float(sd_a),
+                0.0,
+                delta=5e-5,
+                msg=f"Contact {i}: surface point A signed distance {sd_a} from box A surface (should be ~0)",
+            )
+            self.assertAlmostEqual(
+                float(sd_b),
+                0.0,
+                delta=5e-5,
+                msg=f"Contact {i}: surface point B signed distance {sd_b} from box B surface (should be ~0)",
+            )
+            validated_count += 1
+
+        self.assertGreater(validated_count, 0, "At least one penetrating contact must be validated")
+
+    def test_box_box_just_touching_small_thickness(self):
+        """Two boxes with small thickness whose faces are exactly coincident.
+
+        Each box has thickness 2.5e-5, so margin_sum = 5e-5 (enlarge = 2e-4 branch).
+        Geometric distance = 0, so expected output = -margin_sum.
+        """
+        thickness = 2.5e-5
+        margin_sum = 2.0 * thickness
+        geom_list = [
+            {
+                "type": GeoType.BOX,
+                "transform": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
+                "data": ([0.5, 0.5, 0.5], thickness),
+                "cutoff": 0.01,
+            },
+            {
+                "type": GeoType.BOX,
+                "transform": ([0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]),
+                "data": ([0.5, 0.5, 0.5], thickness),
+                "cutoff": 0.01,
+            },
+        ]
+
+        count, _pairs, _positions, _normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+
+        self.assertGreater(count, 0, "Touching boxes with small thickness must generate at least one contact")
+
+        deepest = min(penetrations[:count])
+
+        self.assertAlmostEqual(
+            float(deepest),
+            -margin_sum,
+            delta=5e-5,
+            msg=f"Touching boxes (small thickness) should have penetration ~{-margin_sum}, got {deepest}",
+        )
+
+    def test_box_box_just_touching_large_thickness(self):
+        """Two boxes with large thickness whose faces are exactly coincident.
+
+        Each box has thickness 0.005, so margin_sum = 0.01 (enlarge = 0 branch).
+        Geometric distance = 0, so expected output = -margin_sum.
+        """
+        thickness = 0.005
+        margin_sum = 2.0 * thickness
+        geom_list = [
+            {
+                "type": GeoType.BOX,
+                "transform": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
+                "data": ([0.5, 0.5, 0.5], thickness),
+                "cutoff": 0.01,
+            },
+            {
+                "type": GeoType.BOX,
+                "transform": ([0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]),
+                "data": ([0.5, 0.5, 0.5], thickness),
+                "cutoff": 0.01,
+            },
+        ]
+
+        count, _pairs, _positions, _normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+
+        self.assertGreater(count, 0, "Touching boxes with large thickness must generate at least one contact")
+
+        deepest = min(penetrations[:count])
+
+        self.assertAlmostEqual(
+            float(deepest),
+            -margin_sum,
+            delta=5e-5,
+            msg=f"Touching boxes (large thickness) should have penetration ~{-margin_sum}, got {deepest}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=True)
