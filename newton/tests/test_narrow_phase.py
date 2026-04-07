@@ -2066,8 +2066,8 @@ class TestMPREnlargeCorrection(_NarrowPhaseSetupMixin, unittest.TestCase):
     def test_box_box_contact_point_on_surface(self):
         """Contact points reconstructed from center + distance must lie on the true box surfaces.
 
-        Uses the same overlap scenario as test_box_box_touching_penetration_accuracy.
-        For each contact, the reconstructed surface points (center +/- d/2 * normal)
+        Uses a similar setup to test_box_box_touching_penetration_accuracy but with a larger overlap
+        (0.05 vs 0.01).  For each contact, the reconstructed surface points (center +/- d/2 * normal)
         should be within 5e-5 of the respective box faces.
         """
         overlap = 0.05
