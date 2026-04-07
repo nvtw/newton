@@ -35,6 +35,8 @@ from typing import Any
 
 import warp as wp
 
+from .support_function import GeoTypeEx, closest_point_on_triangle
+
 
 @wp.struct
 class Vert:
@@ -176,8 +178,33 @@ def create_support_map_function(support_func: Any):
         """
         center = Vert()
 
+        center_a = wp.vec3(0.0, 0.0, 0.0)
+
+        if geom_a.shape_type == int(GeoTypeEx.TRIANGLE) or geom_a.shape_type == int(GeoTypeEx.TRIANGLE_PRISM):
+            # Project shape B's center onto the triangle to get a starting
+            # point close to the contact region.  This dramatically improves
+            # MPR convergence for large triangles.
+            #
+            # When the projection lands exactly on an edge or vertex (e.g.
+            # when two mesh triangles share an edge and shape B is equidistant
+            # from both), the initial MPR direction degenerates to an in-plane
+            # vector.  A tiny nudge (1%) toward the centroid breaks the
+            # degeneracy while keeping the starting point near the contact.
+            tri_a = wp.vec3(0.0, 0.0, 0.0)
+            tri_b = geom_a.scale
+            tri_c = geom_a.auxiliary
+            # Use the closest point on the triangle to shape B's center as
+            # starting point — gives MPR a direction close to the true contact
+            # for large triangles.  Blend 1% toward the centroid to ensure the
+            # point is strictly interior: when shape B projects onto a shared
+            # mesh edge, the pure closest point gives an in-plane direction
+            # that makes MPR's initial portal ambiguous between adjacent faces.
+            proj = closest_point_on_triangle(position_b, tri_a, tri_b, tri_c)
+            centroid = (tri_a + tri_b + tri_c) / 3.0
+            center_a = proj + 0.01 * (centroid - proj)
+
         center.B = position_b
-        center.BtoA = wp.vec3(0.0, 0.0, 0.0) - position_b
+        center.BtoA = center_a - position_b
 
         return center
 
