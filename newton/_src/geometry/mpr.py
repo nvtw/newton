@@ -181,24 +181,25 @@ def create_support_map_function(support_func: Any):
         center_a = wp.vec3(0.0, 0.0, 0.0)
 
         if geom_a.shape_type == int(GeoTypeEx.TRIANGLE) or geom_a.shape_type == int(GeoTypeEx.TRIANGLE_PRISM):
-            # Project shape B's center onto the triangle to get a starting
-            # point close to the contact region.  This dramatically improves
+            # Project shape B's center onto the triangle for a starting
+            # point near the contact region — this dramatically improves
             # MPR convergence for large triangles.
             #
-            # When the projection lands exactly on an edge or vertex (e.g.
-            # when two mesh triangles share an edge and shape B is equidistant
-            # from both), the initial MPR direction degenerates to an in-plane
-            # vector.  A tiny nudge (1%) toward the centroid breaks the
-            # degeneracy while keeping the starting point near the contact.
+            # Blend 1% toward the centroid so the point is strictly in the
+            # face interior.  This does NOT prevent an MPR degeneracy (MPR
+            # works fine from an edge point); it improves *manifold quality*.
+            # When shape B projects onto a shared mesh edge, both adjacent
+            # triangles get the same v0, producing MPR witness points biased
+            # toward the edge.  The manifold builder (multicontact.py) uses
+            # these witness points as its center for perturbed support
+            # mapping, so edge-biased centers cause overlapping contact
+            # polygons across the two triangles instead of distinct ones —
+            # resulting in asymmetric force distribution and spurious torque.
+            # The 1% nudge gives each triangle a unique v0 pulled toward its
+            # own interior, yielding well-separated manifold centers.
             tri_a = wp.vec3(0.0, 0.0, 0.0)
             tri_b = geom_a.scale
             tri_c = geom_a.auxiliary
-            # Use the closest point on the triangle to shape B's center as
-            # starting point — gives MPR a direction close to the true contact
-            # for large triangles.  Blend 1% toward the centroid to ensure the
-            # point is strictly interior: when shape B projects onto a shared
-            # mesh edge, the pure closest point gives an in-plane direction
-            # that makes MPR's initial portal ambiguous between adjacent faces.
             proj = closest_point_on_triangle(position_b, tri_a, tri_b, tri_c)
             centroid = (tri_a + tri_b + tri_c) / 3.0
             center_a = proj + 0.01 * (centroid - proj)
@@ -282,13 +283,21 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
         v0 = geometric_center(geom_a, geom_b, orientation_b, position_b, data_provider)
 
         normal = v0.BtoA
-        if (
-            wp.abs(normal[0]) < NUMERIC_EPSILON
-            and wp.abs(normal[1]) < NUMERIC_EPSILON
-            and wp.abs(normal[2]) < NUMERIC_EPSILON
-        ):
-            # Any direction is fine - add small perturbation
-            v0.BtoA = wp.vec3(1e-05, 0.0, 0.0)
+        if wp.length_sq(normal) < NUMERIC_EPSILON:
+            # Centers coincide — probe three orthogonal directions and
+            # pick the one with the largest Minkowski support, giving
+            # MPR the most room to find a valid portal.
+            best_dot = float(-1.0e30)
+            best_dir = wp.vec3(1.0, 0.0, 0.0)
+            for axis_idx in range(3):
+                probe = wp.vec3(0.0, 0.0, 0.0)
+                probe[axis_idx] = 1.0
+                sv = minkowski_support(geom_a, geom_b, probe, orientation_b, position_b, extend, data_provider)
+                d = wp.dot(sv.BtoA, probe)
+                if d > best_dot:
+                    best_dot = d
+                    best_dir = probe
+            v0.BtoA = best_dir * 1e-05
 
         normal = -v0.BtoA
 
@@ -304,13 +313,28 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
         normal = wp.cross(v1.BtoA, v0.BtoA)
 
         if wp.length_sq(normal) < NUMERIC_EPSILON * NUMERIC_EPSILON:
-            normal = v1.BtoA - v0.BtoA
-            normal = wp.normalize(normal)
+            # v1 and v0 are collinear.  Try a perpendicular direction
+            # to escape the degenerate line before falling back to the
+            # early-out.  Pick the coordinate axis least aligned with
+            # v1.BtoA so the cross product is well-conditioned.
+            abs_x = wp.abs(v1.BtoA[0])
+            abs_y = wp.abs(v1.BtoA[1])
+            abs_z = wp.abs(v1.BtoA[2])
+            if abs_x <= abs_y and abs_x <= abs_z:
+                perp = wp.vec3(1.0, 0.0, 0.0)
+            elif abs_y <= abs_z:
+                perp = wp.vec3(0.0, 1.0, 0.0)
+            else:
+                perp = wp.vec3(0.0, 0.0, 1.0)
+            normal = wp.cross(v1.BtoA, perp)
 
-            temp1 = v1.BtoA
-            penetration = wp.dot(temp1, normal)
-
-            return True, point_a, point_b, normal, penetration
+            if wp.length_sq(normal) < NUMERIC_EPSILON * NUMERIC_EPSILON:
+                # Truly degenerate — fall back to original early-out
+                normal = v1.BtoA - v0.BtoA
+                normal = wp.normalize(normal)
+                temp1 = v1.BtoA
+                penetration = wp.dot(temp1, normal)
+                return True, point_a, point_b, normal, penetration
 
         # Second support point
         v2 = minkowski_support(geom_a, geom_b, normal, orientation_b, position_b, extend, data_provider)
