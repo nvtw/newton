@@ -441,12 +441,14 @@ class Example:
         scene.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(mu=0.75))
 
         self.model = scene.finalize()
-        self.model.rigid_contact_max = 16384
+
+        contact_max = 16384
+        self.model.rigid_contact_max = contact_max
 
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
             reduce_contacts=True,
-            rigid_contact_max=16384,
+            rigid_contact_max=contact_max,
             broad_phase="nxn",
         )
 
@@ -456,8 +458,8 @@ class Example:
             integrator="implicitfast",
             iterations=15,
             ls_iterations=100,
-            nconmax=16000,
-            njmax=32000,
+            nconmax=contact_max,
+            njmax=contact_max * 2,
             cone="elliptic",
             impratio=50.0,
             use_mujoco_contacts=False,
