@@ -807,6 +807,7 @@ class Mesh:
             q_contig = np.ascontiguousarray(q)
             void_verts = q_contig.view(np.dtype((np.void, q_contig.dtype.itemsize * q_contig.shape[1])))
             _, canonical = np.unique(void_verts, return_inverse=True)
+            canonical = canonical.ravel()
             # Build edges with (min, max) canonical ordering, keep original indices
             c = canonical[tris]
             canon_edges = np.empty((n * 3, 2), dtype=np.int64)
