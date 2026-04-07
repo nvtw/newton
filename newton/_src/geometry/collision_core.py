@@ -1190,7 +1190,7 @@ def condition_triangle_for_collision_detection(
         return tri_shape, v0_world
 
     # Circumradius of equilateral triangle tangent to a circle of radius r
-    # is 2r.  We use a generous safety factor (3×) so that conditioned
+    # is 2r.  We use a generous safety factor (3x) so that conditioned
     # triangle edges are well outside the shape's bounding sphere and don't
     # generate spurious edge contacts.
     circum_r = circle_radius * 3.0

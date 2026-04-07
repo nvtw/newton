@@ -924,7 +924,7 @@ class TestTrianglePreconditioning(unittest.TestCase):
         # Place off-diagonal: (-50, 50) is well inside one triangle
         pos = (-50.0, 50.0, hz - 0.005)
 
-        count_sm, n_sm = self._collide_shape_on_mesh(
+        count_sm, _n_sm = self._collide_shape_on_mesh(
             _make_flat_ground_mesh(size=500.0), GeoType.BOX, pos, shape_scale=(hx, hy, hz)
         )
         count_lg, n_lg = self._collide_shape_on_mesh(
