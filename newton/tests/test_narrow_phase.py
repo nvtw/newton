@@ -2000,7 +2000,6 @@ class TestBufferOverflowWarnings(unittest.TestCase):
         # Warning capture via wp.printf is optional; counter/capacity check above is authoritative.
 
 
-<<<<<<< HEAD
 class TestExtremeMeshTriangles(unittest.TestCase):
     """Test that MPR/GJK handles extreme triangle sizes and aspect ratios.
 
@@ -2238,8 +2237,6 @@ class TestExtremeMeshTriangles(unittest.TestCase):
         self._assert_all_shapes_contact(verts, inds, [5.0, 0.0], 0.15, "shared edge")
 
 
-=======
->>>>>>> 2fa48a177e12e9ca9c29056378da84c0bef91bac
 class TestMPREnlargeCorrection(_NarrowPhaseSetupMixin, unittest.TestCase):
     """Verify that the anti-flicker enlarge in MPR does not bias returned distances or contact points."""
 
