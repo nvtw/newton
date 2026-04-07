@@ -804,7 +804,9 @@ class Mesh:
             n = len(tris)
             # Canonical vertex ids via quantized coordinates (overflow-safe)
             q = np.round(self._vertices * 1e7).astype(np.int64)
-            _, canonical = np.unique(q, axis=0, return_inverse=True)
+            q_contig = np.ascontiguousarray(q)
+            void_verts = q_contig.view(np.dtype((np.void, q_contig.dtype.itemsize * q_contig.shape[1])))
+            _, canonical = np.unique(void_verts, return_inverse=True)
             # Build edges with (min, max) canonical ordering, keep original indices
             c = canonical[tris]
             canon_edges = np.empty((n * 3, 2), dtype=np.int64)
