@@ -4,7 +4,8 @@
 ###########################################################################
 # Example Basic Pendulum Play
 #
-# Loads a trained ONNX policy and replays it on a single double pendulum.
+# Loads a trained ONNX policy and replays it on the cartpole scene.
+# Normalization is baked into the ONNX -- just feed raw observations.
 #
 # Command: python -m newton.examples basic_pendulum_play
 #
@@ -12,15 +13,15 @@
 
 from __future__ import annotations
 
+import numpy as np
 import warp as wp
 
 import newton
 import newton.examples
 from newton._src.onnx_runtime import OnnxRuntime
 
-_Q_STRIDE = 2
-_QD_STRIDE = 2
-_HX = 1.0
+_Q_STRIDE = 3
+_QD_STRIDE = 3
 
 
 @wp.kernel
@@ -28,18 +29,20 @@ def _compute_obs_kernel(joint_q: wp.array[float], joint_qd: wp.array[float], obs
     env = wp.tid()
     q = env * _Q_STRIDE
     qd = env * _QD_STRIDE
-    obs[env, 0] = wp.sin(joint_q[q])
-    obs[env, 1] = wp.cos(joint_q[q])
-    obs[env, 2] = wp.sin(joint_q[q + 1])
-    obs[env, 3] = wp.cos(joint_q[q + 1])
-    obs[env, 4] = joint_qd[qd] * 0.1
-    obs[env, 5] = joint_qd[qd + 1] * 0.1
+    obs[env, 0] = joint_q[q]
+    obs[env, 1] = wp.sin(joint_q[q + 1])
+    obs[env, 2] = wp.cos(joint_q[q + 1])
+    obs[env, 3] = wp.sin(joint_q[q + 2])
+    obs[env, 4] = wp.cos(joint_q[q + 2])
+    obs[env, 5] = joint_qd[qd] * 0.1
+    obs[env, 6] = joint_qd[qd + 1] * 0.1
+    obs[env, 7] = joint_qd[qd + 2] * 0.1
 
 
 @wp.kernel
 def _apply_actions_kernel(actions: wp.array2d[float], joint_act: wp.array[float]):
     env = wp.tid()
-    joint_act[env * _QD_STRIDE] = actions[env, 0] * 50.0
+    joint_act[env * _QD_STRIDE] = actions[env, 0] * 200.0
 
 
 class Example:
@@ -48,32 +51,26 @@ class Example:
         self.device = wp.get_device()
         self.sim_time = 0.0
         self.sim_substeps = 10
-        self.sim_dt = 1.0 / 100.0 / 10
-        self.frame_dt = 1.0 / 100.0
+        self.sim_dt = 1.0 / 60.0 / 10
+        self.frame_dt = 1.0 / 60.0
 
         builder = newton.ModelBuilder()
         newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
-
-        hx, hy, hz = _HX, 0.1, 0.1
-        link_0 = builder.add_link()
-        builder.add_shape_box(link_0, hx=hx, hy=hy, hz=hz)
-        link_1 = builder.add_link()
-        builder.add_shape_box(link_1, hx=hx, hy=hy, hz=hz)
-
-        rot = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), -wp.pi * 0.5)
-        j0 = builder.add_joint_revolute(
-            parent=-1, child=link_0, axis=wp.vec3(0.0, 1.0, 0.0),
-            parent_xform=wp.transform(p=wp.vec3(0.0, 0.0, 5.0), q=rot),
-            child_xform=wp.transform(p=wp.vec3(-hx, 0.0, 0.0), q=wp.quat_identity()),
-            target_ke=0.0, target_kd=0.1,
+        builder.default_shape_cfg.density = 100.0
+        builder.default_joint_cfg.armature = 0.1
+        builder.add_usd(
+            newton.examples.get_asset("cartpole.usda"),
+            enable_self_collisions=False,
+            collapse_fixed_joints=True,
         )
-        j1 = builder.add_joint_revolute(
-            parent=link_0, child=link_1, axis=wp.vec3(0.0, 1.0, 0.0),
-            parent_xform=wp.transform(p=wp.vec3(hx, 0.0, 0.0), q=wp.quat_identity()),
-            child_xform=wp.transform(p=wp.vec3(-hx, 0.0, 0.0), q=wp.quat_identity()),
-            target_ke=0.0, target_kd=0.1,
-        )
-        builder.add_articulation([j0, j1], label="pendulum")
+        body_armature = 0.1
+        for body in range(builder.body_count):
+            inertia_np = np.asarray(builder.body_inertia[body], dtype=np.float32).reshape(3, 3)
+            inertia_np += np.eye(3, dtype=np.float32) * body_armature
+            builder.body_inertia[body] = wp.mat33(inertia_np)
+        builder.joint_q[-3:] = [0.0, 0.0, 0.0]
+        builder.joint_target_ke[0] = 500.0
+        builder.joint_target_kd[0] = 50.0
 
         self.model = builder.finalize(device=self.device)
         self.solver = newton.solvers.SolverMuJoCo(self.model)
@@ -86,7 +83,7 @@ class Example:
 
         policy_path = getattr(args, "policy", "pendulum_trained.onnx")
         self.policy = OnnxRuntime(policy_path, device=str(self.device), batch_size=1)
-        self.obs = wp.zeros((1, 6), dtype=wp.float32, device=self.device)
+        self.obs = wp.zeros((1, 8), dtype=wp.float32, device=self.device)
 
     def step(self):
         wp.launch(_compute_obs_kernel, dim=1,
