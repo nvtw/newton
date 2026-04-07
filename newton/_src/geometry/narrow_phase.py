@@ -53,7 +53,6 @@ from ..geometry.support_function import (
     GeoTypeEx,
     SupportMapDataProvider,
     extract_shape_data,
-    support_map,
     support_map_lean,
 )
 from ..geometry.types import GeoType
@@ -943,33 +942,14 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
             else:
                 quat_a = wp.quat_identity()
 
-            # Back-face culling for flat triangles (meshes).  Uses two
-            # support evaluations to find the AABB center of shape B along
-            # the face normal axis.  This is correct for all convex types
-            # including hulls whose origin may not be at the geometric
-            # center.  TRIANGLE_PRISM (heightfields) handles back-face
-            # culling via its extruded support function.
+            # Back-face culling: skip when the entire convex shape is behind
+            # the triangle face.  TRIANGLE_PRISM (heightfields) handles
+            # this via its extruded support function.
             if shape_data_a.shape_type == int(GeoTypeEx.TRIANGLE):
                 face_normal = wp.cross(shape_data_a.scale, shape_data_a.auxiliary)
-                local_dir = wp.quat_rotate_inv(quat_b, face_normal)
-                data_provider = SupportMapDataProvider()
-
-                # Front support: farthest point in +face_normal direction
-                local_front = support_map(shape_data_b, local_dir, data_provider)
-                world_front = pos_b + wp.quat_rotate(quat_b, local_front)
-                front_dist = wp.dot(face_normal, world_front - pos_a)
-
-                # Entire shape behind triangle → skip GJK entirely
-                if front_dist < 0.0:
-                    continue
-
-                # Back support: farthest point in -face_normal direction
-                local_back = support_map(shape_data_b, -local_dir, data_provider)
-                world_back = pos_b + wp.quat_rotate(quat_b, local_back)
-                back_dist = wp.dot(face_normal, world_back - pos_a)
-
-                # AABB center (along face normal) behind triangle → skip
-                if front_dist + back_dist < 0.0:
+                # Signed distance of shape B's center from triangle plane
+                center_dist = wp.dot(face_normal, pos_b - pos_a)
+                if center_dist < 0.0:
                     continue
 
             # Extract margin offset for shape A (signed distance padding)

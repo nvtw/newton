@@ -1190,8 +1190,10 @@ def condition_triangle_for_collision_detection(
         return tri_shape, v0_world
 
     # Circumradius of equilateral triangle tangent to a circle of radius r
-    # is 2r.  We use a small safety factor.
-    circum_r = circle_radius * 2.05
+    # is 2r.  We use a generous safety factor (3×) so that conditioned
+    # triangle edges are well outside the shape's bounding sphere and don't
+    # generate spurious edge contacts.
+    circum_r = circle_radius * 3.0
 
     new_va = va
     new_vb = vb
@@ -1233,7 +1235,7 @@ def condition_triangle_for_collision_detection(
 
         # Equilateral triangle circumscribing circle of radius r:
         #   inradius = r, circumradius = 2r, base half-width = r * sqrt(3)
-        r = circle_radius * 1.025  # small safety factor
+        r = circle_radius * 1.5  # small safety factor
         base_half = r * 1.7320508075688772  # sqrt(3)
 
         # Base edge at distance r from center (tangent to circle)
@@ -1278,7 +1280,7 @@ def condition_triangle_for_collision_detection(
         if wp.dot(outward, plane_center - pivot) < 0.0:
             outward = avg_dir
 
-        r = circle_radius * 1.025
+        r = circle_radius * 1.5
         tangent_center = plane_center + r * outward
 
         # Place the two free vertices symmetrically on the tangent line,

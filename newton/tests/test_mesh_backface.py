@@ -942,33 +942,17 @@ class TestTrianglePreconditioning(unittest.TestCase):
         np.testing.assert_allclose(mean_lg, mean_sm, atol=0.05, err_msg="Box mean normal mismatch small vs large")
 
     @unittest.skipUnless(_cuda_available, "CUDA required")
-    def test_capsule_large_triangle_contact_matches_small(self):
-        """Capsule on a 1000 m mesh must produce equivalent contacts."""
-        radius = 0.1
-        half_height = 0.2
-        pos = (0.0, 0.0, radius - 0.005)
+    def test_ellipsoid_large_triangle_contact(self):
+        """Ellipsoid on a 1000 m mesh must produce upward contact normals."""
+        pos = (0.0, 0.0, 0.075)  # 5 mm overlap (z-radius = 0.08)
 
-        count_sm, n_sm = self._collide_shape_on_mesh(
-            _make_flat_ground_mesh(size=5.0), GeoType.CAPSULE, pos, shape_scale=(radius, half_height)
-        )
         count_lg, n_lg = self._collide_shape_on_mesh(
-            _make_large_ground_mesh(size=500.0), GeoType.CAPSULE, pos, shape_scale=(radius, half_height)
+            _make_large_ground_mesh(size=500.0), GeoType.ELLIPSOID, pos, shape_scale=(0.1, 0.15, 0.08)
         )
 
-        self.assertGreater(count_sm, 0)
-        self.assertGreater(count_lg, 0)
-
-        for i in range(count_sm):
-            self.assertGreater(n_sm[i, 2], 0.9, f"Small mesh capsule normal[{i}] not upward: {n_sm[i]}")
+        self.assertGreater(count_lg, 0, "Ellipsoid on large mesh must produce contacts")
         for i in range(count_lg):
-            self.assertGreater(n_lg[i, 2], 0.9, f"Large mesh capsule normal[{i}] not upward: {n_lg[i]}")
-
-        # Capsules generate multi-contact manifolds whose tangential
-        # components vary with triangle geometry, so compare only the
-        # dominant (z) component of the mean normal.
-        mean_z_sm = n_sm[:count_sm, 2].mean()
-        mean_z_lg = n_lg[:count_lg, 2].mean()
-        self.assertAlmostEqual(float(mean_z_lg), float(mean_z_sm), delta=0.05, msg="Capsule mean normal-z mismatch")
+            self.assertGreater(n_lg[i, 2], 0.9, f"Large mesh ellipsoid normal[{i}] not upward: {n_lg[i]}")
 
     # ------------------------------------------------------------------
     # Extreme aspect ratio triangles

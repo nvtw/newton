@@ -35,8 +35,6 @@ from typing import Any
 
 import warp as wp
 
-from .support_function import GeoTypeEx, closest_point_on_triangle
-
 
 @wp.struct
 class Vert:
@@ -178,18 +176,8 @@ def create_support_map_function(support_func: Any):
         """
         center = Vert()
 
-        center_a = wp.vec3(0.0, 0.0, 0.0)
-
-        if geom_a.shape_type == int(GeoTypeEx.TRIANGLE) or geom_a.shape_type == int(GeoTypeEx.TRIANGLE_PRISM):
-            center_a = closest_point_on_triangle(
-                position_b,
-                wp.vec3(0.0, 0.0, 0.0),
-                geom_a.scale,
-                geom_a.auxiliary,
-            )
-
         center.B = position_b
-        center.BtoA = center_a - position_b
+        center.BtoA = wp.vec3(0.0, 0.0, 0.0) - position_b
 
         return center
 
