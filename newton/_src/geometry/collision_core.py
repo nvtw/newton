@@ -1001,6 +1001,70 @@ def find_pair_from_cumulative_index(
 
 
 @wp.func
+def closest_point_on_triangle(
+    p: wp.vec3,
+    tri_a: wp.vec3,
+    tri_b: wp.vec3,
+    tri_c: wp.vec3,
+) -> wp.vec3:
+    """
+    Closest point on a triangle to a query point.
+
+    Uses Voronoi-region tests with barycentric coordinates to handle
+    vertex, edge, and face regions without branching on degenerate normals.
+
+    Args:
+        p: Query point
+        tri_a: Triangle vertex A
+        tri_b: Triangle vertex B
+        tri_c: Triangle vertex C
+
+    Returns:
+        The closest point on the triangle to *p*.
+    """
+    ab = tri_b - tri_a
+    ac = tri_c - tri_a
+    ap = p - tri_a
+
+    d1 = wp.dot(ab, ap)
+    d2 = wp.dot(ac, ap)
+    if d1 <= 0.0 and d2 <= 0.0:
+        return tri_a
+
+    bp = p - tri_b
+    d3 = wp.dot(ab, bp)
+    d4 = wp.dot(ac, bp)
+    if d3 >= 0.0 and d4 <= d3:
+        return tri_b
+
+    cp = p - tri_c
+    d5 = wp.dot(ab, cp)
+    d6 = wp.dot(ac, cp)
+    if d6 >= 0.0 and d5 <= d6:
+        return tri_c
+
+    vc = d1 * d4 - d3 * d2
+    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+        v = d1 / (d1 - d3)
+        return tri_a + v * ab
+
+    vb = d5 * d2 - d1 * d6
+    if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+        w = d2 / (d2 - d6)
+        return tri_a + w * ac
+
+    va = d3 * d6 - d5 * d4
+    if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
+        w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+        return tri_b + w * (tri_c - tri_b)
+
+    denom = 1.0 / (va + vb + vc)
+    v = vb * denom
+    w = vc * denom
+    return tri_a + v * ab + w * ac
+
+
+@wp.func
 def get_triangle_shape_from_mesh(
     mesh_id: wp.uint64,
     mesh_scale: wp.vec3,
@@ -1050,6 +1114,213 @@ def get_triangle_shape_from_mesh(
     shape_data.auxiliary = v2_world - v0_world  # C - A
 
     return shape_data, v0_world
+
+
+@wp.func
+def _clip_edge_to_circle(
+    ea: wp.vec3,
+    eb: wp.vec3,
+    circle_center: wp.vec3,
+    radius_sq: float,
+) -> tuple[wp.vec3, wp.vec3, bool]:
+    """
+    Clip a triangle edge so that its endpoints move inward toward the circle
+    while preserving the line equation.  Returns the (possibly shortened)
+    segment and whether the edge intersects the circle at all.
+
+    All points are assumed to lie in the triangle plane.
+    """
+    d = eb - ea
+    f = ea - circle_center
+    a_coeff = wp.dot(d, d)
+    b_coeff = 2.0 * wp.dot(f, d)
+    c_coeff = wp.dot(f, f) - radius_sq
+
+    discriminant = b_coeff * b_coeff - 4.0 * a_coeff * c_coeff
+
+    if discriminant < 0.0 or a_coeff < 1.0e-20:
+        return ea, eb, False
+
+    sqrt_disc = wp.sqrt(discriminant)
+    inv_2a = 1.0 / (2.0 * a_coeff)
+    t1 = (-b_coeff - sqrt_disc) * inv_2a
+    t2 = (-b_coeff + sqrt_disc) * inv_2a
+
+    # The segment lives in t=[0,1].  The circle intersects the *line* at t1,t2.
+    # If the intersection interval [t1,t2] doesn't overlap [0,1] the edge misses.
+    if t2 < 0.0 or t1 > 1.0:
+        return ea, eb, False
+
+    # Clamp intersection parameters to the segment and use them as new endpoints
+    # so the edge is shortened to the part near the circle.
+    t_lo = wp.max(t1, 0.0)
+    t_hi = wp.min(t2, 1.0)
+
+    new_a = ea + t_lo * d
+    new_b = ea + t_hi * d
+
+    return new_a, new_b, True
+
+
+@wp.func
+def condition_triangle_for_convex(
+    tri_shape: GenericShapeData,
+    v0_world: wp.vec3,
+    convex_shape: GenericShapeData,
+    convex_pos: wp.vec3,
+    convex_rot: wp.quat,
+    gap: float,
+) -> tuple[GenericShapeData, wp.vec3]:
+    """
+    Replace a large triangle with a smaller, better-conditioned one that
+    produces equivalent contacts for the given convex shape.
+
+    The convex's AABB bounding sphere is projected onto the triangle plane
+    to obtain a bounding circle.  Edges that intersect the circle keep their
+    line equation (shortened to the circle neighbourhood); edges entirely
+    outside are free to move toward the circle to improve the aspect ratio.
+    If the triangle is already small enough the original is returned unchanged.
+
+    Args:
+        tri_shape: Triangle GenericShapeData (TRIANGLE type, scale=B-A, auxiliary=C-A)
+        v0_world: World-space position of vertex A (triangle origin)
+        convex_shape: GenericShapeData of the convex shape
+        convex_pos: World-space position of the convex shape
+        convex_rot: World-space orientation of the convex shape
+        gap: Contact gap used to inflate the bounding sphere [m]
+
+    Returns:
+        Possibly modified (tri_shape, v0_world).
+    """
+    data_provider = SupportMapDataProvider()
+
+    # Reconstruct triangle vertices in world space
+    va = v0_world
+    vb = v0_world + tri_shape.scale
+    vc = v0_world + tri_shape.auxiliary
+
+    # --- Compute bounding sphere of the convex AABB ---
+    aabb_lo, aabb_hi = compute_tight_aabb_from_support(
+        convex_shape, convex_rot, convex_pos, data_provider
+    )
+    sphere_center = 0.5 * (aabb_lo + aabb_hi)
+    half_diag = 0.5 * (aabb_hi - aabb_lo)
+    sphere_radius = wp.length(half_diag) + gap
+
+    # --- Quick skip: if all vertices are within 2x the sphere radius we
+    #     don't need conditioning (triangle is already small enough). ---
+    skip_threshold_sq = (2.0 * sphere_radius) * (2.0 * sphere_radius)
+    da = wp.length_sq(va - sphere_center)
+    db = wp.length_sq(vb - sphere_center)
+    dc = wp.length_sq(vc - sphere_center)
+    if da <= skip_threshold_sq and db <= skip_threshold_sq and dc <= skip_threshold_sq:
+        return tri_shape, v0_world
+
+    # --- Triangle plane ---
+    edge_ab = vb - va
+    edge_ac = vc - va
+    raw_normal = wp.cross(edge_ab, edge_ac)
+    normal_len_sq = wp.length_sq(raw_normal)
+    if normal_len_sq < 1.0e-20:
+        return tri_shape, v0_world
+    normal = raw_normal * (1.0 / wp.sqrt(normal_len_sq))
+
+    # Project sphere center onto triangle plane
+    dist_to_plane = wp.dot(sphere_center - va, normal)
+    plane_center = sphere_center - dist_to_plane * normal
+
+    # Circle radius on the plane (sphere sliced by the plane)
+    abs_dist = wp.abs(dist_to_plane)
+    if abs_dist >= sphere_radius:
+        return tri_shape, v0_world
+    circle_radius = wp.sqrt(sphere_radius * sphere_radius - dist_to_plane * dist_to_plane)
+    circle_radius_sq = circle_radius * circle_radius
+
+    # --- Classify vertices: inside the bounding circle? ---
+    a_inside = wp.length_sq(va - plane_center) <= circle_radius_sq
+    b_inside = wp.length_sq(vb - plane_center) <= circle_radius_sq
+    c_inside = wp.length_sq(vc - plane_center) <= circle_radius_sq
+
+    # --- Classify and clip each edge ---
+    new_ab_a, new_ab_b, ab_hits = _clip_edge_to_circle(va, vb, plane_center, circle_radius_sq)
+    new_bc_a, new_bc_b, bc_hits = _clip_edge_to_circle(vb, vc, plane_center, circle_radius_sq)
+    new_ca_a, new_ca_b, ca_hits = _clip_edge_to_circle(vc, va, plane_center, circle_radius_sq)
+
+    # --- Build replacement vertices ---
+    # Strategy: for each original vertex, if it is pinned (inside circle) keep it.
+    # Otherwise, if an adjacent edge intersects the circle, use the clipped
+    # endpoint closest to the original vertex.  If neither adjacent edge
+    # intersects, move the vertex to the tangent point on the circle closest
+    # to the original vertex (clamped to stay on the correct side of the
+    # intersecting edges).
+
+    new_va = va
+    new_vb = vb
+    new_vc = vc
+
+    if not a_inside:
+        if ab_hits and ca_hits:
+            new_va = 0.5 * (new_ab_a + new_ca_b)
+        elif ab_hits:
+            new_va = new_ab_a
+        elif ca_hits:
+            new_va = new_ca_b
+        else:
+            # Free vertex: project toward circle center
+            to_a = va - plane_center
+            to_a_len = wp.length(to_a)
+            if to_a_len > 1.0e-10:
+                new_va = plane_center + (to_a / to_a_len) * circle_radius
+            else:
+                new_va = plane_center + wp.normalize(edge_ab) * circle_radius
+
+    if not b_inside:
+        if ab_hits and bc_hits:
+            new_vb = 0.5 * (new_ab_b + new_bc_a)
+        elif ab_hits:
+            new_vb = new_ab_b
+        elif bc_hits:
+            new_vb = new_bc_a
+        else:
+            to_b = vb - plane_center
+            to_b_len = wp.length(to_b)
+            if to_b_len > 1.0e-10:
+                new_vb = plane_center + (to_b / to_b_len) * circle_radius
+            else:
+                new_vb = plane_center + wp.normalize(vb - va) * circle_radius
+
+    if not c_inside:
+        if bc_hits and ca_hits:
+            new_vc = 0.5 * (new_bc_b + new_ca_a)
+        elif bc_hits:
+            new_vc = new_bc_b
+        elif ca_hits:
+            new_vc = new_ca_a
+        else:
+            to_c = vc - plane_center
+            to_c_len = wp.length(to_c)
+            if to_c_len > 1.0e-10:
+                new_vc = plane_center + (to_c / to_c_len) * circle_radius
+            else:
+                new_vc = plane_center + wp.normalize(vc - va) * circle_radius
+
+    # --- Validate: replacement triangle must have non-zero area and
+    #     the same winding as the original. ---
+    new_edge_ab = new_vb - new_va
+    new_edge_ac = new_vc - new_va
+    new_normal = wp.cross(new_edge_ab, new_edge_ac)
+    if wp.dot(new_normal, raw_normal) <= 0.0:
+        return tri_shape, v0_world
+    if wp.length_sq(new_normal) < 1.0e-20:
+        return tri_shape, v0_world
+
+    # Pack back into GenericShapeData
+    out = GenericShapeData()
+    out.shape_type = tri_shape.shape_type
+    out.scale = new_vb - new_va
+    out.auxiliary = new_vc - new_va
+
+    return out, new_va
 
 
 # OBB collisions by Separating Axis Theorem

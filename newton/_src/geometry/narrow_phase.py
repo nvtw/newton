@@ -14,6 +14,7 @@ from ..geometry.collision_core import (
     check_infinite_plane_bsphere_overlap,
     compute_bounding_sphere_from_aabb,
     compute_tight_aabb_from_support,
+    condition_triangle_for_convex,
     create_compute_gjk_mpr_contacts,
     create_find_contacts,
     get_triangle_shape_from_mesh,
@@ -976,6 +977,13 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
             gap_a = shape_gap[shape_a]
             gap_b = shape_gap[shape_b]
             gap_sum = gap_a + gap_b
+
+            # Condition large/bad-aspect-ratio mesh triangles to a smaller
+            # equivalent triangle near the convex bounding sphere.
+            if shape_data_a.shape_type == int(GeoTypeEx.TRIANGLE):
+                shape_data_a, pos_a = condition_triangle_for_convex(
+                    shape_data_a, pos_a, shape_data_b, pos_b, quat_b, gap_sum
+                )
 
             # Compute and write contacts using GJK/MPR with standard post-processing
             wp.static(create_compute_gjk_mpr_contacts(writer_func))(
