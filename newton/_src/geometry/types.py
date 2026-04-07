@@ -1666,6 +1666,22 @@ class Gaussian:
             print(gaussian.count, gaussian.sh_degree)
     """
 
+    class SortingMode(enum.IntEnum):
+        """Sorting strategy for ordering Gaussian splat hits along a ray.
+
+        Controls how per-ray Gaussian intersections are depth-sorted before
+        front-to-back alpha compositing.
+        """
+
+        RAY_HIT_DISTANCE = 0
+        """Sort by closest-approach distance in the Gaussian's canonical space."""
+
+        CAMERA_DISTANCE = 1
+        """Sort by projection of the Gaussian center onto the ray direction."""
+
+        Z_DEPTH = 2
+        """Sort by camera-forward depth of the Gaussian center."""
+
     @wp.struct
     class Data:
         num_points: wp.int32
@@ -1675,6 +1691,7 @@ class Gaussian:
         sh_coeffs: wp.array2d[wp.float32]
         bvh_id: wp.uint64
         min_response: wp.float32
+        sorting_mode: wp.int32
 
     def __init__(
         self,
@@ -1685,6 +1702,7 @@ class Gaussian:
         sh_coeffs: np.ndarray | None = None,
         sh_degree: int | None = None,
         min_response: float = 0.1,
+        sorting_mode: SortingMode = SortingMode.RAY_HIT_DISTANCE,
     ):
         """Construct a Gaussian splat asset from arrays.
 
@@ -1701,6 +1719,9 @@ class Gaussian:
                 (``C = 3`` -> degree 0, ``C = 12`` -> degree 1, etc.).
             sh_degree: Spherical harmonic degree.
             min_response: Minimum response required for alpha testing.
+            sorting_mode: Sorting strategy for depth-ordering Gaussian
+                intersections along each ray before alpha compositing
+                (default: :attr:`SortingMode.RAY_HIT_DISTANCE`).
         """
 
         self._positions = np.ascontiguousarray(np.asarray(positions, dtype=np.float32).reshape(-1, 3))
@@ -1734,6 +1755,8 @@ class Gaussian:
         if not np.isfinite(min_response) or not (0.0 < min_response < 1.0):
             raise ValueError("min_response must be finite and in (0, 1)")
         self._min_response = float(min_response)
+
+        self._sorting_mode = sorting_mode
 
         self._cached_hash = None
         self._positions.setflags(write=False)
@@ -1795,6 +1818,11 @@ class Gaussian:
         """Min response, float."""
         return self._min_response
 
+    @property
+    def sorting_mode(self) -> SortingMode:
+        """Sorting mode, Gaussian.SortingMode."""
+        return self._sorting_mode
+
     def _find_sh_degree(self) -> int:
         """Spherical harmonics degree (0-3), inferred from *sh_coeffs* shape."""
         c = self._sh_coeffs.shape[1]
@@ -1828,6 +1856,7 @@ class Gaussian:
             self.warp_data.opacities = wp.array(self._opacities, dtype=wp.float32)
             self.warp_data.sh_coeffs = wp.array(self._sh_coeffs, dtype=wp.float32)
             self.warp_data.min_response = self.min_response
+            self.warp_data.sorting_mode = self.sorting_mode
             self.warp_data.num_points = self.warp_data.transforms.shape[0]
 
             lowers = wp.zeros(self.count, dtype=wp.vec3f)
@@ -2049,6 +2078,7 @@ class Gaussian:
                     self._opacities.data.tobytes(),
                     self._sh_coeffs.data.tobytes(),
                     float(self._min_response),
+                    int(self._sorting_mode),
                 )
             )
         return self._cached_hash
@@ -2064,4 +2094,5 @@ class Gaussian:
             and np.array_equal(self._opacities, other._opacities)
             and np.array_equal(self._sh_coeffs, other._sh_coeffs)
             and self._min_response == other._min_response
+            and self._sorting_mode == other._sorting_mode
         )

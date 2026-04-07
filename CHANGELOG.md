@@ -86,6 +86,7 @@
 
 ### Fixed
 
+- Fix GL viewer crash when enabling "Gap + Margin" for soft-body-only states with no rigid body transforms
 - Fix inertia validation spuriously inflating small but physically valid eigenvalues for lightweight components (< ~50 g) by using a relative threshold instead of an absolute 1e-6 cutoff
 - Restore keyboard camera movement while hovering gizmos so keyboard controls remain active when the pointer is over gizmos
 - Resolve USD asset references recursively in `resolve_usd_from_url` so nested stages are fully downloaded
@@ -123,6 +124,7 @@
 - Fix heightfield bounding-sphere radius underestimating Z extent for asymmetric height ranges (e.g. `min_z=0, max_z=10`)
 - Fix VBD self-contact barrier C2 discontinuity at `d = tau` caused by a factor-of-two error in the log-barrier coefficient
 - Fix fast inertia validation treating near-symmetric tensors within `np.allclose()` default tolerances as corrections, aligning CPU and GPU validation warnings
+- Fix URDF joint dynamics friction import so specified friction values are preserved during simulation
 
 ## [1.0.0] - 2026-03-10
 
