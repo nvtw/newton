@@ -962,12 +962,8 @@ class PPOTrainer:
             _normalize_adv_kernel, dim=n, inputs=[src, self._mean_buf, self._inv_std_buf, self._norm_adv], device=d
         )
 
-    def update(self) -> None:
-        """Run PPO update epochs on the filled buffer."""
-        p = self.profile
-        if p:
-            wp.record_event(self._evt_ppo_start)
-
+    def _run_update_body(self) -> None:
+        """Core PPO update logic.  Called directly or inside graph capture."""
         self.buffer.flatten()
         self._normalize_advantages()
 
@@ -1025,9 +1021,9 @@ class PPOTrainer:
                     device=device,
                 )
 
-                # Forward MLPs under tape
-                tape = wp.Tape()
-                with tape:
+                # Forward MLPs under tape (reuse tape to avoid memory leak)
+                self._tape.reset()
+                with self._tape:
                     mean = self.ac._actor_mb.forward(self._mb_obs)
                     values_2d = self.ac._critic_mb.forward(self._mb_obs)
 
@@ -1065,7 +1061,7 @@ class PPOTrainer:
                 )
 
                 # Backward through MLPs
-                tape.backward(grads={mean: self._grad_mean, values_2d: self._grad_values.reshape((batch_size, 1))})
+                self._tape.backward(grads={mean: self._grad_mean, values_2d: self._grad_values.reshape((batch_size, 1))})
 
                 grads = self.ac.actor.grad_arrays() + self.ac.critic.grad_arrays() + [self._grad_log_std]
                 self._clip_grad_norm(grads)
@@ -1074,7 +1070,32 @@ class PPOTrainer:
                 if self.auto_entropy:
                     self._alpha_optimizer.step([self._grad_log_alpha])
 
-                tape.zero()
+    def update(self) -> None:
+        """Run PPO update epochs on the filled buffer.
+
+        On the first CUDA call the entire update (flatten, normalize
+        advantages, shuffle, gather, forward, loss, backward, optimizer)
+        is captured as a single CUDA graph and replayed on subsequent
+        calls for maximum throughput.
+        """
+        p = self.profile
+        if p:
+            wp.record_event(self._evt_ppo_start)
+
+        if not hasattr(self, "_update_graph"):
+            self._tape = wp.Tape()
+            device = self.ac._device
+            if device.is_cuda:
+                with wp.ScopedCapture() as capture:
+                    self._run_update_body()
+                self._update_graph = capture.graph
+            else:
+                self._update_graph = None
+                self._run_update_body()
+        elif self._update_graph is not None:
+            wp.capture_launch(self._update_graph)
+        else:
+            self._run_update_body()
 
         if p:
             wp.record_event(self._evt_ppo_end)
