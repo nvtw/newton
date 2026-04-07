@@ -313,28 +313,13 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
         normal = wp.cross(v1.BtoA, v0.BtoA)
 
         if wp.length_sq(normal) < NUMERIC_EPSILON * NUMERIC_EPSILON:
-            # v1 and v0 are collinear.  Try a perpendicular direction
-            # to escape the degenerate line before falling back to the
-            # early-out.  Pick the coordinate axis least aligned with
-            # v1.BtoA so the cross product is well-conditioned.
-            abs_x = wp.abs(v1.BtoA[0])
-            abs_y = wp.abs(v1.BtoA[1])
-            abs_z = wp.abs(v1.BtoA[2])
-            if abs_x <= abs_y and abs_x <= abs_z:
-                perp = wp.vec3(1.0, 0.0, 0.0)
-            elif abs_y <= abs_z:
-                perp = wp.vec3(0.0, 1.0, 0.0)
-            else:
-                perp = wp.vec3(0.0, 0.0, 1.0)
-            normal = wp.cross(v1.BtoA, perp)
+            normal = v1.BtoA - v0.BtoA
+            normal = wp.normalize(normal)
 
-            if wp.length_sq(normal) < NUMERIC_EPSILON * NUMERIC_EPSILON:
-                # Truly degenerate — fall back to original early-out
-                normal = v1.BtoA - v0.BtoA
-                normal = wp.normalize(normal)
-                temp1 = v1.BtoA
-                penetration = wp.dot(temp1, normal)
-                return True, point_a, point_b, normal, penetration
+            temp1 = v1.BtoA
+            penetration = wp.dot(temp1, normal)
+
+            return True, point_a, point_b, normal, penetration
 
         # Second support point
         v2 = minkowski_support(geom_a, geom_b, normal, orientation_b, position_b, extend, data_provider)
