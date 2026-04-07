@@ -317,6 +317,86 @@ class TestConditionTriangleDirect(unittest.TestCase):
         np.testing.assert_allclose(new_vb, vb, atol=1e-5, err_msg="3-edge hit should return original vb")
         np.testing.assert_allclose(new_vc, vc, atol=1e-5, err_msg="3-edge hit should return original vc")
 
+    def test_one_edge_intersects(self):
+        """Shape near one edge of a large triangle (1-edge case).
+
+        Triangle: large right triangle. Shape placed close to edge AB (the
+        bottom edge at y=-500) so only that edge intersects the bounding circle.
+        The other two edges are far away.
+        """
+        s = 500.0
+        va = np.array([-s, -s, 0.0])
+        vb = np.array([s, -s, 0.0])
+        vc = np.array([0.0, s, 0.0])
+        # Place shape right next to the bottom edge (y=-500), but inside the triangle
+        convex_pos = np.array([0.0, -s + 0.15, 0.05])
+        convex_half = np.array([0.1, 0.1, 0.1])
+        inflate = 0.01
+
+        new_va, new_vb, new_vc = _run_conditioning(va, vb, vc, convex_pos, convex_half, inflate)
+
+        # Must produce a valid triangle
+        new_area = _triangle_area(new_va, new_vb, new_vc)
+        self.assertGreater(new_area, 0.0, "1-edge case must produce positive area")
+
+        # Must be much smaller than original
+        old_area = _triangle_area(va, vb, vc)
+        self.assertLess(new_area, old_area * 0.01, "1-edge output must be much smaller")
+
+        # Must contain the bounding circle
+        normal = _triangle_normal(new_va, new_vb, new_vc)
+        sphere_radius = np.linalg.norm(convex_half) + inflate
+        plane_center = convex_pos - np.dot(convex_pos - new_va, normal) * normal
+        dist_to_plane = abs(np.dot(convex_pos - new_va, normal))
+        circle_radius = np.sqrt(max(sphere_radius**2 - dist_to_plane**2, 0.0))
+
+        self.assertTrue(
+            _circle_contained_in_triangle(plane_center, circle_radius, new_va, new_vb, new_vc, normal),
+            "Bounding circle must be inside 1-edge conditioned triangle",
+        )
+
+        # Should have reasonable angles (equilateral target: 60°)
+        min_angle = _min_angle_deg(new_va, new_vb, new_vc)
+        self.assertGreater(min_angle, 30.0, f"1-edge case should have decent angles, got {min_angle:.1f}°")
+
+    def test_two_edges_intersect(self):
+        """Shape near a corner of a large triangle (2-edge case).
+
+        Place the shape close to vertex A where edges AB and CA both
+        intersect the bounding circle, but edge BC is far away.
+        """
+        s = 500.0
+        va = np.array([-s, -s, 0.0])
+        vb = np.array([s, -s, 0.0])
+        vc = np.array([0.0, s, 0.0])
+        # Place shape near vertex A (-500, -500)
+        convex_pos = np.array([-s + 0.2, -s + 0.2, 0.05])
+        convex_half = np.array([0.1, 0.1, 0.1])
+        inflate = 0.01
+
+        new_va, new_vb, new_vc = _run_conditioning(va, vb, vc, convex_pos, convex_half, inflate)
+
+        new_area = _triangle_area(new_va, new_vb, new_vc)
+        self.assertGreater(new_area, 0.0, "2-edge case must produce positive area")
+
+        old_area = _triangle_area(va, vb, vc)
+        self.assertLess(new_area, old_area * 0.01, "2-edge output must be much smaller")
+
+        # Must contain the bounding circle
+        normal = _triangle_normal(new_va, new_vb, new_vc)
+        sphere_radius = np.linalg.norm(convex_half) + inflate
+        plane_center = convex_pos - np.dot(convex_pos - new_va, normal) * normal
+        dist_to_plane = abs(np.dot(convex_pos - new_va, normal))
+        circle_radius = np.sqrt(max(sphere_radius**2 - dist_to_plane**2, 0.0))
+
+        self.assertTrue(
+            _circle_contained_in_triangle(plane_center, circle_radius, new_va, new_vb, new_vc, normal),
+            "Bounding circle must be inside 2-edge conditioned triangle",
+        )
+
+        min_angle = _min_angle_deg(new_va, new_vb, new_vc)
+        self.assertGreater(min_angle, 15.0, f"2-edge case should not be degenerate, got {min_angle:.1f}°")
+
     def test_rotated_convex(self):
         """Conditioning with a rotated convex AABB must still produce valid output."""
         s = 100.0

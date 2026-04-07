@@ -254,13 +254,14 @@ class TestMeshBackfaceCulling(unittest.TestCase):
         contacts = _collide(model, cp, state)
         normals = _get_contact_normals(contacts)
 
-        # Either no contacts, or no contacts with strongly inverted normals
+        # Back-face culling should produce zero contacts.  If any survive,
+        # their normals must not be inverted (pointing downward).
         if len(normals) > 0:
             min_nz = normals[:, 2].min()
             self.assertGreater(
                 min_nz,
-                -0.3,
-                f"{shape_type.name}: back-face contact with inverted normal z={min_nz:.4f}",
+                0.0,
+                f"{shape_type.name}: back-face contact has downward normal z={min_nz:.4f}",
             )
 
     def test_back_face_sphere(self):
@@ -452,15 +453,27 @@ class TestMeshBackfaceSimulation(unittest.TestCase):
             self.assertFalse(np.any(np.isnan(joint_q)), "High-velocity sphere: NaN")
 
     def test_sim_valley_sphere_no_nan(self):
-        """Sphere in valley should settle without NaN."""
-        # Valley mesh needs 3D extent for MuJoCo
-        mesh = _make_box_ground_mesh(z=0.0)  # use flat ground as proxy
-        model, cp, solver, s0, s1, ctrl = _build_sim_scene(
-            mesh,
-            GeoType.SPHERE,
-            shape_pos=(0.0, 0.0, 0.15),
-            shape_scale=(0.1,),
-        )
+        """Sphere in V-shaped valley should settle without NaN.
+
+        Uses XPBD solver directly since the valley mesh is a thin shell
+        that cannot be convex-decomposed by MuJoCo.
+        """
+        mesh = _make_valley_mesh(width=2.0, depth=0.5, length=2.0)
+        builder = newton.ModelBuilder()
+        builder.default_shape_cfg.mu = 0.5
+        builder.default_shape_cfg.margin = 0.0
+        builder.default_shape_cfg.gap = 0.01
+        builder.add_shape_mesh(body=-1, mesh=mesh, xform=wp.transform_identity())
+        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.15), wp.quat_identity()))
+        builder.add_shape_sphere(body, radius=0.1)
+        model = builder.finalize()
+        solver = newton.solvers.SolverXPBD(model)
+        cp = newton.CollisionPipeline(model, broad_phase="explicit", max_triangle_pairs=100_000)
+        s0 = model.state()
+        s1 = model.state()
+        ctrl = model.control()
+        newton.eval_fk(model, s0.joint_q, s0.joint_qd, s0)
+
         for _ in range(200):
             s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=5)
             joint_q = s0.joint_q.numpy()
@@ -557,7 +570,7 @@ class TestHeightfieldPrism(unittest.TestCase):
     """Test heightfield triangle prism extrusion prevents back-face trapping."""
 
     def test_sphere_on_flat_heightfield(self):
-        """Sphere dropped on flat heightfield should settle without NaN."""
+        """Sphere dropped on flat heightfield should settle without NaN and have upward contacts."""
         model, cp, solver, s0, s1, ctrl = _build_heightfield_scene(
             GeoType.SPHERE,
             shape_pos=(0.0, 0.0, 0.5),
@@ -567,8 +580,12 @@ class TestHeightfieldPrism(unittest.TestCase):
             s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=5)
             self.assertFalse(np.any(np.isnan(s0.joint_q.numpy())), "Flat hfield sphere: NaN")
 
+        # After settling, the sphere should be resting above the heightfield
+        final_z = s0.body_q.numpy()[0, 2]
+        self.assertGreater(final_z, -0.01, f"Sphere fell through flat heightfield: z={final_z:.4f}")
+
     def test_box_on_flat_heightfield(self):
-        """Box dropped on flat heightfield should settle without NaN."""
+        """Box dropped on flat heightfield should settle without NaN and stay above surface."""
         model, cp, solver, s0, s1, ctrl = _build_heightfield_scene(
             GeoType.BOX,
             shape_pos=(0.0, 0.0, 0.5),
@@ -578,8 +595,11 @@ class TestHeightfieldPrism(unittest.TestCase):
             s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=5)
             self.assertFalse(np.any(np.isnan(s0.joint_q.numpy())), "Flat hfield box: NaN")
 
+        final_z = s0.body_q.numpy()[0, 2]
+        self.assertGreater(final_z, -0.01, f"Box fell through flat heightfield: z={final_z:.4f}")
+
     def test_sphere_on_rough_heightfield(self):
-        """Sphere on rough heightfield should not produce NaN."""
+        """Sphere on rough heightfield should not produce NaN and stay above surface."""
         model, cp, solver, s0, s1, ctrl = _build_heightfield_scene(
             GeoType.SPHERE,
             shape_pos=(0.0, 0.0, 1.0),
@@ -589,6 +609,10 @@ class TestHeightfieldPrism(unittest.TestCase):
         for _ in range(200):
             s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=5)
             self.assertFalse(np.any(np.isnan(s0.joint_q.numpy())), "Rough hfield sphere: NaN")
+
+        # Sphere should not have fallen through the heightfield (min_z=0)
+        final_z = s0.body_q.numpy()[0, 2]
+        self.assertGreater(final_z, -0.5, f"Sphere fell through rough heightfield: z={final_z:.4f}")
 
     def test_capsule_on_rough_heightfield(self):
         """Capsule on rough heightfield should not produce NaN."""
@@ -896,7 +920,7 @@ class TestTrianglePreconditioning(unittest.TestCase):
         hx, hy, hz = 0.1, 0.1, 0.1
         pos = (0.0, 0.0, hz - 0.005)  # 5 mm overlap
 
-        count_sm, _n_sm = self._collide_shape_on_mesh(
+        count_sm, n_sm = self._collide_shape_on_mesh(
             _make_flat_ground_mesh(size=5.0), GeoType.BOX, pos, shape_scale=(hx, hy, hz)
         )
         count_lg, n_lg = self._collide_shape_on_mesh(
@@ -906,9 +930,16 @@ class TestTrianglePreconditioning(unittest.TestCase):
         self.assertGreater(count_sm, 0)
         self.assertGreater(count_lg, 0)
 
-        # All normals should point upward
+        # Both small and large mesh normals must point upward
+        for i in range(count_sm):
+            self.assertGreater(n_sm[i, 2], 0.9, f"Small mesh box normal[{i}] not upward: {n_sm[i]}")
         for i in range(count_lg):
             self.assertGreater(n_lg[i, 2], 0.9, f"Large mesh box normal[{i}] not upward: {n_lg[i]}")
+
+        # Mean normal direction must match between small and large mesh
+        mean_sm = n_sm[:count_sm].mean(axis=0)
+        mean_lg = n_lg[:count_lg].mean(axis=0)
+        np.testing.assert_allclose(mean_lg, mean_sm, atol=0.05, err_msg="Box mean normal mismatch small vs large")
 
     @unittest.skipUnless(_cuda_available, "CUDA required")
     def test_capsule_large_triangle_contact_matches_small(self):
@@ -917,7 +948,7 @@ class TestTrianglePreconditioning(unittest.TestCase):
         half_height = 0.2
         pos = (0.0, 0.0, radius - 0.005)
 
-        count_sm, _n_sm = self._collide_shape_on_mesh(
+        count_sm, n_sm = self._collide_shape_on_mesh(
             _make_flat_ground_mesh(size=5.0), GeoType.CAPSULE, pos, shape_scale=(radius, half_height)
         )
         count_lg, n_lg = self._collide_shape_on_mesh(
@@ -927,8 +958,17 @@ class TestTrianglePreconditioning(unittest.TestCase):
         self.assertGreater(count_sm, 0)
         self.assertGreater(count_lg, 0)
 
+        for i in range(count_sm):
+            self.assertGreater(n_sm[i, 2], 0.9, f"Small mesh capsule normal[{i}] not upward: {n_sm[i]}")
         for i in range(count_lg):
             self.assertGreater(n_lg[i, 2], 0.9, f"Large mesh capsule normal[{i}] not upward: {n_lg[i]}")
+
+        # Capsules generate multi-contact manifolds whose tangential
+        # components vary with triangle geometry, so compare only the
+        # dominant (z) component of the mean normal.
+        mean_z_sm = n_sm[:count_sm, 2].mean()
+        mean_z_lg = n_lg[:count_lg, 2].mean()
+        self.assertAlmostEqual(float(mean_z_lg), float(mean_z_sm), delta=0.05, msg="Capsule mean normal-z mismatch")
 
     # ------------------------------------------------------------------
     # Extreme aspect ratio triangles
