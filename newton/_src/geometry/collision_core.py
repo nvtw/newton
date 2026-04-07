@@ -1053,19 +1053,34 @@ def get_triangle_shape_from_mesh(
 
 
 @wp.func
-def _clip_edge_to_circle(
+def _edge_signed_distance(
+    ea: wp.vec3,
+    eb: wp.vec3,
+    point: wp.vec3,
+    face_normal: wp.vec3,
+) -> float:
+    """Signed in-plane distance from *point* to the line through *ea* → *eb*.
+
+    Positive when *point* is on the interior side of the edge (same side as
+    the face normal cross product convention).
+    """
+    edge = eb - ea
+    edge_len = wp.length(edge)
+    if edge_len < 1.0e-20:
+        return 0.0
+    # In-plane inward normal of the edge
+    inward = wp.cross(face_normal, edge / edge_len)
+    return wp.dot(inward, point - ea)
+
+
+@wp.func
+def _edge_intersects_circle(
     ea: wp.vec3,
     eb: wp.vec3,
     circle_center: wp.vec3,
     radius_sq: float,
-) -> tuple[wp.vec3, wp.vec3, bool]:
-    """
-    Clip a triangle edge so that its endpoints move inward toward the circle
-    while preserving the line equation.  Returns the (possibly shortened)
-    segment and whether the edge intersects the circle at all.
-
-    All points are assumed to lie in the triangle plane.
-    """
+) -> bool:
+    """Return True if the edge segment [ea, eb] intersects the circle."""
     d = eb - ea
     f = ea - circle_center
     a_coeff = wp.dot(d, d)
@@ -1075,27 +1090,14 @@ def _clip_edge_to_circle(
     discriminant = b_coeff * b_coeff - 4.0 * a_coeff * c_coeff
 
     if discriminant < 0.0 or a_coeff < 1.0e-20:
-        return ea, eb, False
+        return False
 
     sqrt_disc = wp.sqrt(discriminant)
     inv_2a = 1.0 / (2.0 * a_coeff)
     t1 = (-b_coeff - sqrt_disc) * inv_2a
     t2 = (-b_coeff + sqrt_disc) * inv_2a
 
-    # The segment lives in t=[0,1].  The circle intersects the *line* at t1,t2.
-    # If the intersection interval [t1,t2] doesn't overlap [0,1] the edge misses.
-    if t2 < 0.0 or t1 > 1.0:
-        return ea, eb, False
-
-    # Clamp intersection parameters to the segment and use them as new endpoints
-    # so the edge is shortened to the part near the circle.
-    t_lo = wp.max(t1, 0.0)
-    t_hi = wp.min(t2, 1.0)
-
-    new_a = ea + t_lo * d
-    new_b = ea + t_hi * d
-
-    return new_a, new_b, True
+    return t2 >= 0.0 and t1 <= 1.0
 
 
 @wp.func
@@ -1108,68 +1110,56 @@ def condition_triangle_for_collision_detection(
     convex_orientation: wp.quat,
     inflate: float,
 ) -> tuple[GenericShapeData, wp.vec3]:
-    """
-    Replace a large triangle with a smaller, better-conditioned one that
-    produces equivalent contacts for the given convex shape.
+    """Replace a large triangle with a smaller, better-conditioned one.
 
-    The convex's local-space AABB bounding sphere (inflated by *inflate*)
-    is projected onto the triangle plane to obtain a bounding circle.
-    Edges that intersect the circle keep their line equation (shortened to
-    the circle neighbourhood); edges entirely outside are free to move
-    toward the circle to improve the aspect ratio.  If the triangle is
-    already small enough the original is returned unchanged.
+    The convex's local AABB bounding sphere (inflated by *inflate*) is
+    projected onto the triangle plane to obtain a bounding circle.  The
+    replacement triangle is the smallest well-conditioned triangle that
+    contains the bounding circle, classified by how many original edges
+    intersect it:
+
+    - **3 edges intersect** — triangle is already small; return unchanged.
+    - **2 edges intersect** — keep those edges, place the third tangent to
+      the circle perpendicular to the mean of the other two edge directions.
+    - **1 edge intersects** — keep that edge, place the opposite vertex so
+      the result circumscribes the circle with equal base angles.
+    - **0 edges intersect** — create an equilateral triangle tangent to the
+      circle (numerically optimal).
+
+    In every case the replacement lies in the original triangle's plane,
+    preserves the face normal, and fully contains the bounding circle.
 
     Args:
-        tri_shape: Triangle GenericShapeData (TRIANGLE type, scale=B-A, auxiliary=C-A).
+        tri_shape: Triangle GenericShapeData (TRIANGLE type).
         v0_world: World-space position of vertex A (triangle origin).
         local_aabb_lower: Local-space AABB lower bound of the convex shape.
         local_aabb_upper: Local-space AABB upper bound of the convex shape.
         convex_position: World-space position of the convex shape.
         convex_orientation: World-space orientation of the convex shape.
-        inflate: Extra radius to add to the bounding sphere [m].  Should
-            include the contact gap plus any margin offsets.
+        inflate: Extra radius added to the bounding sphere [m].  Should
+            include contact gap plus margin offsets.
 
     Returns:
-        Possibly modified (tri_shape, v0_world).
+        Possibly modified ``(tri_shape, v0_world)``.
     """
     # Reconstruct triangle vertices in world space
     va = v0_world
     vb = v0_world + tri_shape.scale
     vc = v0_world + tri_shape.auxiliary
 
-    # --- Compute bounding sphere of the convex's world-space AABB ---
-    # We need the world AABB (not the local one) so that the bounding sphere
-    # is conservative for all orientations.  The world AABB half-extents are
-    # computed via the standard rotated-box formula (sum of absolute row
-    # contributions), and its half-diagonal gives the sphere radius.
+    # --- Bounding sphere of the convex AABB ---
     local_center = 0.5 * (local_aabb_lower + local_aabb_upper)
-    local_half = 0.5 * (local_aabb_upper - local_aabb_lower)
+    half_diag = 0.5 * (local_aabb_upper - local_aabb_lower)
     sphere_center = convex_position + wp.quat_rotate(convex_orientation, local_center)
-    rot_mat = wp.quat_to_matrix(convex_orientation)
-    hx = (
-        wp.abs(rot_mat[0, 0]) * local_half[0]
-        + wp.abs(rot_mat[0, 1]) * local_half[1]
-        + wp.abs(rot_mat[0, 2]) * local_half[2]
-    )
-    hy = (
-        wp.abs(rot_mat[1, 0]) * local_half[0]
-        + wp.abs(rot_mat[1, 1]) * local_half[1]
-        + wp.abs(rot_mat[1, 2]) * local_half[2]
-    )
-    hz = (
-        wp.abs(rot_mat[2, 0]) * local_half[0]
-        + wp.abs(rot_mat[2, 1]) * local_half[1]
-        + wp.abs(rot_mat[2, 2]) * local_half[2]
-    )
-    sphere_radius = wp.length(wp.vec3(hx, hy, hz)) + inflate
+    sphere_radius = wp.length(half_diag) + inflate
 
-    # --- Quick skip: if all vertices are within 2x the sphere radius we
-    #     don't need conditioning (triangle is already small enough). ---
+    # Quick skip: triangle already small enough
     skip_threshold_sq = (2.0 * sphere_radius) * (2.0 * sphere_radius)
-    da = wp.length_sq(va - sphere_center)
-    db = wp.length_sq(vb - sphere_center)
-    dc = wp.length_sq(vc - sphere_center)
-    if da <= skip_threshold_sq and db <= skip_threshold_sq and dc <= skip_threshold_sq:
+    if (
+        wp.length_sq(va - sphere_center) <= skip_threshold_sq
+        and wp.length_sq(vb - sphere_center) <= skip_threshold_sq
+        and wp.length_sq(vc - sphere_center) <= skip_threshold_sq
+    ):
         return tri_shape, v0_world
 
     # --- Triangle plane ---
@@ -1181,87 +1171,138 @@ def condition_triangle_for_collision_detection(
         return tri_shape, v0_world
     normal = raw_normal * (1.0 / wp.sqrt(normal_len_sq))
 
-    # Project sphere center onto triangle plane
+    # Project sphere center onto triangle plane → bounding circle
     dist_to_plane = wp.dot(sphere_center - va, normal)
     plane_center = sphere_center - dist_to_plane * normal
-
-    # Circle radius on the plane (sphere sliced by the plane)
-    abs_dist = wp.abs(dist_to_plane)
-    if abs_dist >= sphere_radius:
+    if wp.abs(dist_to_plane) >= sphere_radius:
         return tri_shape, v0_world
     circle_radius = wp.sqrt(sphere_radius * sphere_radius - dist_to_plane * dist_to_plane)
     circle_radius_sq = circle_radius * circle_radius
 
-    # --- Classify vertices: inside the bounding circle? ---
-    a_inside = wp.length_sq(va - plane_center) <= circle_radius_sq
-    b_inside = wp.length_sq(vb - plane_center) <= circle_radius_sq
-    c_inside = wp.length_sq(vc - plane_center) <= circle_radius_sq
+    # --- Count how many edges intersect the bounding circle ---
+    ab_hits = _edge_intersects_circle(va, vb, plane_center, circle_radius_sq)
+    bc_hits = _edge_intersects_circle(vb, vc, plane_center, circle_radius_sq)
+    ca_hits = _edge_intersects_circle(vc, va, plane_center, circle_radius_sq)
+    hit_count = int(ab_hits) + int(bc_hits) + int(ca_hits)
 
-    # --- Classify and clip each edge ---
-    new_ab_a, new_ab_b, ab_hits = _clip_edge_to_circle(va, vb, plane_center, circle_radius_sq)
-    new_bc_a, new_bc_b, bc_hits = _clip_edge_to_circle(vb, vc, plane_center, circle_radius_sq)
-    new_ca_a, new_ca_b, ca_hits = _clip_edge_to_circle(vc, va, plane_center, circle_radius_sq)
+    # 3 edges intersect → circle fits inside triangle, already small enough
+    if hit_count == 3:
+        return tri_shape, v0_world
 
-    # --- Build replacement vertices ---
-    # Strategy: for each original vertex, if it is pinned (inside circle) keep it.
-    # Otherwise, if an adjacent edge intersects the circle, use the clipped
-    # endpoint closest to the original vertex.  If neither adjacent edge
-    # intersects, move the vertex to the tangent point on the circle closest
-    # to the original vertex (clamped to stay on the correct side of the
-    # intersecting edges).
+    # Circumradius of equilateral triangle tangent to a circle of radius r
+    # is 2r.  We use a small safety factor.
+    circum_r = circle_radius * 2.05
 
     new_va = va
     new_vb = vb
     new_vc = vc
 
-    if not a_inside:
-        if ab_hits and ca_hits:
-            new_va = 0.5 * (new_ab_a + new_ca_b)
-        elif ab_hits:
-            new_va = new_ab_a
-        elif ca_hits:
-            new_va = new_ca_b
-        else:
-            # Free vertex: project toward circle center
-            to_a = va - plane_center
-            to_a_len = wp.length(to_a)
-            if to_a_len > 1.0e-10:
-                new_va = plane_center + (to_a / to_a_len) * circle_radius
-            else:
-                new_va = plane_center + wp.normalize(edge_ab) * circle_radius
+    if hit_count == 0:
+        # --- 0 edges: equilateral triangle tangent to the circle ---
+        # Pick two orthogonal directions in the triangle plane.
+        # Align one axis with the projection of an original edge for stability.
+        u = wp.normalize(edge_ab - wp.dot(edge_ab, normal) * normal)
+        v = wp.cross(normal, u)
 
-    if not b_inside:
-        if ab_hits and bc_hits:
-            new_vb = 0.5 * (new_ab_b + new_bc_a)
-        elif ab_hits:
-            new_vb = new_ab_b
+        # Equilateral triangle vertices at 120° intervals on circumscribed circle
+        # Angles: 90°, 210°, 330° (apex at top)
+        sqrt3_half = 0.86602540378  # sqrt(3)/2
+        new_va = plane_center + circum_r * (0.0 * u + 1.0 * v)
+        new_vb = plane_center + circum_r * (-sqrt3_half * u - 0.5 * v)
+        new_vc = plane_center + circum_r * (sqrt3_half * u - 0.5 * v)
+
+    elif hit_count == 1:
+        # --- 1 edge intersects: build equilateral triangle around circle ---
+        # The kept edge is tangent to the circle.  The apex sits on the
+        # perpendicular through the circle center at circumradius distance.
+        # Base half-width = inradius * sqrt(3) for an equilateral triangle.
+        if ab_hits:
+            e0 = va
+            e1 = vb
         elif bc_hits:
-            new_vb = new_bc_a
+            e0 = vb
+            e1 = vc
         else:
-            to_b = vb - plane_center
-            to_b_len = wp.length(to_b)
-            if to_b_len > 1.0e-10:
-                new_vb = plane_center + (to_b / to_b_len) * circle_radius
-            else:
-                new_vb = plane_center + wp.normalize(vb - va) * circle_radius
+            e0 = vc
+            e1 = va
 
-    if not c_inside:
-        if bc_hits and ca_hits:
-            new_vc = 0.5 * (new_bc_b + new_ca_a)
-        elif bc_hits:
-            new_vc = new_bc_b
-        elif ca_hits:
-            new_vc = new_ca_a
+        edge_dir = wp.normalize(e1 - e0)
+        inward = wp.cross(normal, edge_dir)
+        if wp.dot(inward, plane_center - e0) < 0.0:
+            inward = -inward
+
+        # Equilateral triangle circumscribing circle of radius r:
+        #   inradius = r, circumradius = 2r, base half-width = r * sqrt(3)
+        r = circle_radius * 1.025  # small safety factor
+        base_half = r * 1.7320508075688772  # sqrt(3)
+
+        # Base edge at distance r from center (tangent to circle)
+        base_center = plane_center - r * inward
+        new_va = base_center - base_half * edge_dir
+        new_vb = base_center + base_half * edge_dir
+        # Apex at circumradius = 2r from center
+        new_vc = plane_center + 2.0 * r * inward
+
+    else:
+        # --- 2 edges intersect: keep those, replace the non-intersecting edge ---
+        # The non-intersecting edge is replaced by a new edge tangent to the
+        # circle, oriented perpendicular to the average direction of the two
+        # kept edges.  The two kept edges share one vertex (the "pivot");
+        # the other two vertices are moved onto the new tangent line.
+        if not ab_hits:
+            # Kept edges: BC (B→C) and CA (C→A).  Pivot = C.
+            # Non-intersecting edge: AB.  Free vertices: A, B.
+            pivot = vc
+            dir0 = wp.normalize(vb - vc)  # BC direction
+            dir1 = wp.normalize(va - vc)  # CA direction
+        elif not bc_hits:
+            # Kept edges: AB (A→B) and CA (C→A).  Pivot = A.
+            pivot = va
+            dir0 = wp.normalize(vb - va)
+            dir1 = wp.normalize(vc - va)
         else:
-            to_c = vc - plane_center
-            to_c_len = wp.length(to_c)
-            if to_c_len > 1.0e-10:
-                new_vc = plane_center + (to_c / to_c_len) * circle_radius
-            else:
-                new_vc = plane_center + wp.normalize(vc - va) * circle_radius
+            # Kept edges: AB (A→B) and BC (B→C).  Pivot = B.
+            pivot = vb
+            dir0 = wp.normalize(va - vb)
+            dir1 = wp.normalize(vc - vb)
 
-    # --- Validate: replacement triangle must have non-zero area and
-    #     the same winding as the original. ---
+        # Average direction of the two kept edges (bisector from pivot)
+        avg_dir = wp.normalize(dir0 + dir1)
+        # The new edge direction is perpendicular to the bisector, in-plane
+        new_edge_dir = wp.cross(normal, avg_dir)
+
+        # The new edge is tangent to the circle: at distance circle_radius
+        # from center, on the opposite side of the pivot.
+        # Determine which side of center the pivot is on
+        outward = -avg_dir  # away from pivot
+        if wp.dot(outward, plane_center - pivot) < 0.0:
+            outward = avg_dir
+
+        r = circle_radius * 1.025
+        tangent_center = plane_center + r * outward
+
+        # Place the two free vertices symmetrically on the tangent line,
+        # at a half-width that ensures the triangle contains the circle.
+        # For safety, use the equilateral half-width: r * sqrt(3).
+        half_w = r * 1.7320508075688772
+
+        free_v0 = tangent_center - half_w * new_edge_dir
+        free_v1 = tangent_center + half_w * new_edge_dir
+
+        if not ab_hits:
+            new_va = free_v1
+            new_vb = free_v0
+            new_vc = pivot
+        elif not bc_hits:
+            new_va = pivot
+            new_vb = free_v0
+            new_vc = free_v1
+        else:
+            new_va = free_v0
+            new_vb = pivot
+            new_vc = free_v1
+
+    # --- Validate winding ---
     new_edge_ab = new_vb - new_va
     new_edge_ac = new_vc - new_va
     new_normal = wp.cross(new_edge_ab, new_edge_ac)
@@ -1270,7 +1311,6 @@ def condition_triangle_for_collision_detection(
     if wp.length_sq(new_normal) < 1.0e-20:
         return tri_shape, v0_world
 
-    # Pack back into GenericShapeData
     out = GenericShapeData()
     out.shape_type = tri_shape.shape_type
     out.scale = new_vb - new_va
