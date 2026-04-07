@@ -64,7 +64,6 @@ from newton._src.geometry.hashtable import (
 
 from ..utils.heightfield import HeightfieldData, get_triangle_shape_from_heightfield
 from .collision_core import (
-    condition_triangle_for_collision_detection,
     create_compute_gjk_mpr_contacts,
     get_triangle_shape_from_mesh,
 )
@@ -1222,8 +1221,6 @@ def mesh_triangle_contacts_to_reducer_kernel(
     shape_transform: wp.array[wp.transform],
     shape_source: wp.array[wp.uint64],
     shape_gap: wp.array[float],
-    shape_collision_aabb_lower: wp.array[wp.vec3],
-    shape_collision_aabb_upper: wp.array[wp.vec3],
     shape_heightfield_index: wp.array[wp.int32],
     heightfield_data: wp.array[HeightfieldData],
     heightfield_elevations: wp.array[wp.float32],
@@ -1303,19 +1300,6 @@ def mesh_triangle_contacts_to_reducer_kernel(
         gap_a = shape_gap[shape_a]
         gap_b = shape_gap[shape_b]
         gap_sum = gap_a + gap_b
-
-        # Condition large/bad-aspect-ratio mesh triangles to a smaller
-        # equivalent triangle near the convex bounding sphere.
-        if shape_data_a.shape_type == int(GeoTypeEx.TRIANGLE):
-            shape_data_a, pos_a = condition_triangle_for_collision_detection(
-                shape_data_a,
-                pos_a,
-                shape_collision_aabb_lower[shape_b],
-                shape_collision_aabb_upper[shape_b],
-                pos_b,
-                quat_b,
-                gap_sum + margin_offset_a + margin_offset_b,
-            )
 
         # Compute and write contacts using GJK/MPR
         wp.static(create_compute_gjk_mpr_contacts(write_contact_to_reducer))(
