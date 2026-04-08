@@ -335,7 +335,7 @@ class GeometriesModel:
     # Mesh / Heightfield Data (pass-through from Newton Model)
     ###
 
-    shape_heightfield_index: wp.array | None = None
+    heightfield_index: wp.array | None = None
     """Per-shape heightfield index (``-1`` for non-heightfield shapes)."""
 
     heightfield_data: wp.array | None = None
@@ -344,16 +344,16 @@ class GeometriesModel:
     heightfield_elevations: wp.array | None = None
     """Concatenated elevation samples for all heightfields."""
 
-    shape_collision_aabb_lower: wp.array | None = None
+    collision_aabb_lower: wp.array | None = None
     """Per-shape local-space collision AABB lower bounds."""
 
-    shape_collision_aabb_upper: wp.array | None = None
+    collision_aabb_upper: wp.array | None = None
     """Per-shape local-space collision AABB upper bounds."""
 
-    shape_voxel_resolution: wp.array | None = None
+    voxel_resolution: wp.array | None = None
     """Per-shape voxel resolution for mesh contact reduction."""
 
-    shape_collision_radius: wp.array | None = None
+    collision_radius: wp.array | None = None
     """Per-shape bounding-sphere radius for broadphase AABB computation."""
 
 

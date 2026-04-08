@@ -1322,13 +1322,13 @@ class ModelKamino:
                 collidable_pairs=model.shape_contact_pairs,
                 excluded_pairs=wp.array(sorted(model.shape_collision_filter_pairs), dtype=vec2i),
                 # Mesh / heightfield data pass-through from Newton model
-                shape_heightfield_index=model.shape_heightfield_index,
+                heightfield_index=model.shape_heightfield_index,
                 heightfield_data=model.heightfield_data,
                 heightfield_elevations=model.heightfield_elevations,
-                shape_collision_aabb_lower=model.shape_collision_aabb_lower,
-                shape_collision_aabb_upper=model.shape_collision_aabb_upper,
-                shape_voxel_resolution=model._shape_voxel_resolution,
-                shape_collision_radius=model.shape_collision_radius,
+                collision_aabb_lower=model.shape_collision_aabb_lower,
+                collision_aabb_upper=model.shape_collision_aabb_upper,
+                voxel_resolution=model._shape_voxel_resolution,
+                collision_radius=model.shape_collision_radius,
             )
 
             # Per-material properties

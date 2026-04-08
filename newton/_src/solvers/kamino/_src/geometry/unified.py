@@ -515,7 +515,7 @@ class CollisionPipelineUnifiedKamino:
             self.geom_type = wp.zeros(self._num_geoms, dtype=int32)
             self.geom_data = wp.zeros(self._num_geoms, dtype=vec4f)
             self.geom_collision_group = wp.array(geom_collision_group_list, dtype=int32)
-            self.shape_collision_radius = wp.zeros(self._num_geoms, dtype=float32)
+            self.collision_radius = wp.zeros(self._num_geoms, dtype=float32)
             self.shape_flags = wp.full(self._num_geoms, default_shape_flag, dtype=int32)
             self.shape_aabb_lower = wp.zeros(self._num_geoms, dtype=wp.vec3)
             self.shape_aabb_upper = wp.zeros(self._num_geoms, dtype=wp.vec3)
@@ -529,18 +529,18 @@ class CollisionPipelineUnifiedKamino:
         # otherwise use empty placeholder arrays that satisfy the narrow-phase interface.
         geoms = self._model.geoms
         if _has_explicit:
-            self.shape_collision_aabb_lower = geoms.shape_collision_aabb_lower
-            self.shape_collision_aabb_upper = geoms.shape_collision_aabb_upper
-            self.shape_voxel_resolution = geoms.shape_voxel_resolution
-            self.shape_heightfield_index = geoms.shape_heightfield_index
+            self.collision_aabb_lower = geoms.collision_aabb_lower
+            self.collision_aabb_upper = geoms.collision_aabb_upper
+            self.voxel_resolution = geoms.voxel_resolution
+            self.heightfield_index = geoms.heightfield_index
             self.heightfield_data = geoms.heightfield_data
             self.heightfield_elevations = geoms.heightfield_elevations
         else:
             with wp.ScopedDevice(self._device):
-                self.shape_collision_aabb_lower = wp.empty(shape=(0,), dtype=wp.vec3)
-                self.shape_collision_aabb_upper = wp.empty(shape=(0,), dtype=wp.vec3)
-                self.shape_voxel_resolution = wp.empty(shape=(0,), dtype=wp.vec3i)
-            self.shape_heightfield_index = None
+                self.collision_aabb_lower = wp.empty(shape=(0,), dtype=wp.vec3)
+                self.collision_aabb_upper = wp.empty(shape=(0,), dtype=wp.vec3)
+                self.voxel_resolution = wp.empty(shape=(0,), dtype=wp.vec3i)
+            self.heightfield_index = None
             self.heightfield_data = None
             self.heightfield_elevations = None
 
@@ -657,15 +657,15 @@ class CollisionPipelineUnifiedKamino:
                 self._model.geoms.gap,
                 self.geom_type,
                 self.geom_data,
-                self.shape_collision_radius,
+                self.collision_radius,
             ],
             device=self._device,
         )
 
         # Use Newton's precomputed collision radius when available (gives
         # tighter AABBs for meshes and heightfields than the 1e6 fallback).
-        if self._model.geoms.shape_collision_radius is not None:
-            self.shape_collision_radius.assign(self._model.geoms.shape_collision_radius)
+        if self._model.geoms.collision_radius is not None:
+            self.collision_radius.assign(self._model.geoms.collision_radius)
 
     def _update_geom_data(self, data: DataKamino, state: StateKamino):
         """
@@ -688,7 +688,7 @@ class CollisionPipelineUnifiedKamino:
                 self._model.geoms.offset,
                 self._model.geoms.margin,
                 self._model.geoms.gap,
-                self.shape_collision_radius,
+                self.collision_radius,
                 state.q_i,
             ],
             outputs=[
@@ -803,12 +803,12 @@ class CollisionPipelineUnifiedKamino:
             texture_sdf_data=self.shape_sdf_data,
             shape_sdf_index=self.shape_sdf_index,
             shape_gap=self._model.geoms.gap,
-            shape_collision_radius=self.shape_collision_radius,
+            shape_collision_radius=self.collision_radius,
             shape_flags=self.shape_flags,
-            shape_collision_aabb_lower=self.shape_collision_aabb_lower,
-            shape_collision_aabb_upper=self.shape_collision_aabb_upper,
-            shape_voxel_resolution=self.shape_voxel_resolution,
-            shape_heightfield_index=self.shape_heightfield_index,
+            shape_collision_aabb_lower=self.collision_aabb_lower,
+            shape_collision_aabb_upper=self.collision_aabb_upper,
+            shape_voxel_resolution=self.voxel_resolution,
+            shape_heightfield_index=self.heightfield_index,
             heightfield_data=self.heightfield_data,
             heightfield_elevations=self.heightfield_elevations,
             writer_data=writer_data,

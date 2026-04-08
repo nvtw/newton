@@ -455,7 +455,7 @@ class RigidBodySim:
         # Reset buffers
         self._reset_base_q_wp = wp.zeros(nw, dtype=transformf, device=self._device)
         self._reset_base_u_wp = wp.zeros(nw, dtype=vec6f, device=self._device)
-        self._reset_q_j = torch.zeros((nw, njc), device=self._torch_device)
+        self._reset_q_j = torch.zeros((nw, njd), device=self._torch_device)
         self._reset_dq_j = torch.zeros((nw, njd), device=self._torch_device)
         self._reset_base_q = wp.to_torch(self._reset_base_q_wp).reshape(nw, 7)
         self._reset_base_u = wp.to_torch(self._reset_base_u_wp).reshape(nw, 6)
