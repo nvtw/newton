@@ -652,9 +652,13 @@ class Example:
             gap=SDF_MARGIN,
         )
         # Invisible primitive colliders (box walls, floor slab, stud cylinders)
-        # that approximate the brick geometry for fast narrow-phase contact.
-        # The SDF mesh already contributes mass; density=0 keeps these
-        # collision-only so they don't double the brick's mass and inertia.
+        # approximate the brick geometry to make brick-brick contacts more robust,
+        # i.e. reduce interpenetration that can occur with the compliant SDF model
+        # when bricks move quickly or collide violently, outside the gentle Franka
+        # pick-and-place regime this example is designed around.
+        #
+        # Keep the proxies collision-only with zero density so they do not add to
+        # mass and inertia on top of the visible SDF mesh.
         collider_cfg = newton.ModelBuilder.ShapeConfig(
             density=0.0,
             ke=BRICK_KE,
@@ -704,7 +708,7 @@ class Example:
             mesh = _build_mesh_with_sdf(self.v_2x4, self.f_2x4, color=colors[i], scale=BRICK_SCALE)
             body = scene.add_body(xform=wp.transform(positions[i], rotations[i]), label=labels[i])
             shape_idx = scene.shape_count
-            scene.add_shape_mesh(body, mesh=mesh, cfg=brick_cfg)
+            #scene.add_shape_mesh(body, mesh=mesh, cfg=brick_cfg)
             if solimp_attr is not None:
                 if solimp_attr.values is None:
                     solimp_attr.values = {}
