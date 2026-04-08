@@ -10473,37 +10473,46 @@ class ModelBuilder:
         filters: set[tuple[int, int]] = model.shape_collision_filter_pairs
         contact_pairs: list[tuple[int, int]] = []
 
-        # Keep only colliding shapes (those with COLLIDE_SHAPES flag) and sort by world for optimization
+        # Keep only colliding shapes (those with COLLIDE_SHAPES flag)
         colliding_indices = [i for i, flag in enumerate(self.shape_flags) if flag & ShapeFlags.COLLIDE_SHAPES]
-        sorted_indices = sorted(colliding_indices, key=lambda i: self.shape_world[i])
 
-        # Iterate over all pairs of colliding shapes
-        for i1 in range(len(sorted_indices)):
-            s1 = sorted_indices[i1]
-            world1 = self.shape_world[s1]
-            collision_group1 = self.shape_collision_group[s1]
+        # Group shapes by world for efficient per-world pair generation.
+        # This avoids O(total_shapes²) iteration when many worlds exist.
+        from collections import defaultdict
 
-            for i2 in range(i1 + 1, len(sorted_indices)):
-                s2 = sorted_indices[i2]
-                world2 = self.shape_world[s2]
-                collision_group2 = self.shape_collision_group[s2]
+        world_shapes: dict[int, list[int]] = defaultdict(list)
+        for idx in colliding_indices:
+            world_shapes[self.shape_world[idx]].append(idx)
 
-                # Early break optimization: if both shapes are in non-global worlds and different worlds,
-                # they can never collide. Since shapes are sorted by world, all remaining shapes will also
-                # be in different worlds, so we can break early.
-                if world1 != -1 and world2 != -1 and world1 != world2:
-                    break
+        global_shapes = world_shapes.pop(-1, [])
 
-                # Apply the exact same filtering logic as test_world_and_group_pair kernel
-                if not self._test_world_and_group_pair(world1, world2, collision_group1, collision_group2):
+        # For each world: pair shapes within the world + with global shapes
+        for world_id, shapes in world_shapes.items():
+            combined = global_shapes + shapes
+            for i1 in range(len(combined)):
+                s1 = combined[i1]
+                cg1 = self.shape_collision_group[s1]
+                w1 = self.shape_world[s1]
+                for i2 in range(i1 + 1, len(combined)):
+                    s2 = combined[i2]
+                    cg2 = self.shape_collision_group[s2]
+                    w2 = self.shape_world[s2]
+                    if not self._test_world_and_group_pair(w1, w2, cg1, cg2):
+                        continue
+                    shape_a, shape_b = (min(s1, s2), max(s1, s2))
+                    if (shape_a, shape_b) not in filters:
+                        contact_pairs.append((shape_a, shape_b))
+
+        # Also pair global shapes with each other
+        for i1 in range(len(global_shapes)):
+            s1 = global_shapes[i1]
+            cg1 = self.shape_collision_group[s1]
+            for i2 in range(i1 + 1, len(global_shapes)):
+                s2 = global_shapes[i2]
+                cg2 = self.shape_collision_group[s2]
+                if not self._test_group_pair(cg1, cg2):
                     continue
-
-                if s1 > s2:
-                    shape_a, shape_b = s2, s1
-                else:
-                    shape_a, shape_b = s1, s2
-
-                # Skip if explicitly filtered
+                shape_a, shape_b = (min(s1, s2), max(s1, s2))
                 if (shape_a, shape_b) not in filters:
                     contact_pairs.append((shape_a, shape_b))
 

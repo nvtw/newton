@@ -146,11 +146,11 @@ conflicts = [
 ]
 
 [tool.uv.sources]
-warp-lang = { index = "nvidia" }
 torch = [
     { index = "pytorch-cu128", extra = "torch-cu12" },
     { index = "pytorch-cu130", extra = "torch-cu13" },
 ]
+warp-lang = { path = "../warp", editable = true }
 
 [dependency-groups]
 dev = ["asv>=0.6.4"]
