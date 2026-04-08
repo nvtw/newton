@@ -527,7 +527,23 @@ def create_narrow_phase_primitive_kernel(writer_func: Any, speculative: bool = F
                 contact_data.margin_b = margin_offset_b
                 contact_data.shape_a = shape_a
                 contact_data.shape_b = shape_b
-                contact_data.gap_sum = gap_sum
+
+                # Recompute gap_sum with directed approach speed now that the
+                # contact normal is available (the pre-routing gap_sum used
+                # undirected speed as a conservative candidate-generation bound).
+                directed_gap_sum = gap_a + gap_b
+                if wp.static(speculative):
+                    vel_rel = shape_lin_vel[shape_b] - shape_lin_vel[shape_a]
+                    v_approach = (
+                        -wp.dot(vel_rel, contact_normal)
+                        + shape_ang_speed_bound[shape_a]
+                        + shape_ang_speed_bound[shape_b]
+                    )
+                    directed_gap_sum = directed_gap_sum + wp.min(
+                        wp.max(v_approach * speculative_dt, 0.0),
+                        max_speculative_extension,
+                    )
+                contact_data.gap_sum = directed_gap_sum
 
                 # Check margin for all possible contacts
                 contact_0_valid = False

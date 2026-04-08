@@ -28,6 +28,12 @@ from ..sim.model import Model
 from ..sim.state import State
 
 
+def _validate_speculative_scalar(value: float, name: str) -> None:
+    """Raise ``ValueError`` for negative or non-finite speculative parameters."""
+    if not np.isfinite(value) or value < 0.0:
+        raise ValueError(f"{name} must be a non-negative finite number, got {value!r}")
+
+
 @dataclasses.dataclass
 class SpeculativeContactConfig:
     """Configuration for speculative contact detection.
@@ -45,6 +51,10 @@ class SpeculativeContactConfig:
 
     max_speculative_extension: float = 0.1
     collision_update_dt: float = 1.0 / 60.0
+
+    def __post_init__(self):
+        _validate_speculative_scalar(self.collision_update_dt, "collision_update_dt")
+        _validate_speculative_scalar(self.max_speculative_extension, "max_speculative_extension")
 
 
 @wp.struct
@@ -120,12 +130,14 @@ def write_contact(
     gap_b = writer_data.shape_gap[contact_data.shape_b]
     contact_gap = gap_a + gap_b
 
-    # Directed speculative gap extension: only extend for approaching pairs
+    # Directed speculative gap extension: only extend for approaching pairs.
+    # contact_normal_a_to_b points from A toward B, so approaching motion
+    # gives dot(vel_b - vel_a, n) < 0.  Negate to get a positive approach speed.
     if writer_data.speculative_dt > 0.0:
         vel_a = writer_data.shape_lin_vel[contact_data.shape_a]
         vel_b = writer_data.shape_lin_vel[contact_data.shape_b]
         v_approach = (
-            wp.dot(vel_b - vel_a, contact_normal_a_to_b)
+            -wp.dot(vel_b - vel_a, contact_normal_a_to_b)
             + writer_data.shape_ang_speed_bound[contact_data.shape_a]
             + writer_data.shape_ang_speed_bound[contact_data.shape_b]
         )
@@ -200,6 +212,7 @@ def _create_compute_shape_aabbs(speculative: bool):
         shape_lin_vel: wp.array[wp.vec3],
         shape_ang_speed_bound: wp.array[float],
         speculative_dt: float,
+        max_speculative_extension: float,
         # outputs
         aabb_lower: wp.array[wp.vec3],
         aabb_upper: wp.array[wp.vec3],
@@ -273,9 +286,12 @@ def _create_compute_shape_aabbs(speculative: bool):
                 v = shape_lin_vel[shape_id]
                 vel_dt = v * speculative_dt
                 ang_ext = shape_ang_speed_bound[shape_id] * speculative_dt
+                ext_neg = wp.max(-vel_dt, wp.vec3(0.0, 0.0, 0.0))
+                ext_pos = wp.max(vel_dt, wp.vec3(0.0, 0.0, 0.0))
                 ang_vec = wp.vec3(ang_ext, ang_ext, ang_ext)
-                lo = lo - wp.max(-vel_dt, wp.vec3(0.0, 0.0, 0.0)) - ang_vec
-                hi = hi + wp.max(vel_dt, wp.vec3(0.0, 0.0, 0.0)) + ang_vec
+                cap = wp.vec3(max_speculative_extension, max_speculative_extension, max_speculative_extension)
+                lo = lo - wp.min(ext_neg + ang_vec, cap)
+                hi = hi + wp.min(ext_pos + ang_vec, cap)
 
             aabb_lower[shape_id] = lo
             aabb_upper[shape_id] = hi
@@ -302,9 +318,12 @@ def _create_compute_shape_aabbs(speculative: bool):
                 v = shape_lin_vel[shape_id]
                 vel_dt = v * speculative_dt
                 ang_ext = shape_ang_speed_bound[shape_id] * speculative_dt
+                ext_neg = wp.max(-vel_dt, wp.vec3(0.0, 0.0, 0.0))
+                ext_pos = wp.max(vel_dt, wp.vec3(0.0, 0.0, 0.0))
                 ang_vec = wp.vec3(ang_ext, ang_ext, ang_ext)
-                lo = lo - wp.max(-vel_dt, wp.vec3(0.0, 0.0, 0.0)) - ang_vec
-                hi = hi + wp.max(vel_dt, wp.vec3(0.0, 0.0, 0.0)) + ang_vec
+                cap = wp.vec3(max_speculative_extension, max_speculative_extension, max_speculative_extension)
+                lo = lo - wp.min(ext_neg + ang_vec, cap)
+                hi = hi + wp.min(ext_pos + ang_vec, cap)
 
             aabb_lower[shape_id] = lo
             aabb_upper[shape_id] = hi
@@ -901,6 +920,8 @@ class CollisionPipeline:
         if self._speculative_enabled:
             cfg = self.speculative_config
             speculative_dt = dt if dt is not None else cfg.collision_update_dt
+            if dt is not None:
+                _validate_speculative_scalar(dt, "dt")
             max_speculative_extension = cfg.max_speculative_extension
         else:
             speculative_dt = 0.0
@@ -952,6 +973,7 @@ class CollisionPipeline:
                 self._shape_lin_vel,
                 self._shape_ang_speed_bound,
                 speculative_dt,
+                max_speculative_extension,
             ],
             outputs=[
                 self.narrow_phase.shape_aabb_lower,
