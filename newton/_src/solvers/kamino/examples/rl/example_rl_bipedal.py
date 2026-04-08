@@ -168,6 +168,7 @@ BALL_POSITIONS = [
 
 def _make_balls_fn(num_balls: int = 1):
     """Return a callback that adds *num_balls* pushable spheres."""
+    num_balls = max(0, min(num_balls, len(BALL_POSITIONS)))
     positions = BALL_POSITIONS[:num_balls]
 
     def _add_balls(robot_builder):

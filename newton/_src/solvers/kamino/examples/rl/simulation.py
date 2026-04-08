@@ -84,6 +84,8 @@ class SimulatorFromNewton:
             self._newton_state = newton_model.state()
             self._newton_contacts = newton_model.contacts()
             per_world = max(1024, newton_model.rigid_contact_max // max(newton_model.world_count, 1))
+            if config.collision_detector.max_contacts_per_world is not None:
+                per_world = min(per_world, config.collision_detector.max_contacts_per_world)
             world_max = [per_world] * newton_model.world_count
             self._contacts = ContactsKamino(capacity=world_max, device=self._device)
         else:
