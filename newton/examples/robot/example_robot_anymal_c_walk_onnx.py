@@ -191,7 +191,8 @@ class Example:
             self.contacts = self.model.contacts()
 
         # Load the ONNX policy via the lightweight OnnxRuntime
-        policy_path = str(Path(__file__).resolve().parent.parent.parent / "_src" / "anymal_c_walking_policy.onnx")
+        default_policy = str(Path(__file__).resolve().parent.parent.parent / "_src" / "anymal_c_walking_policy.onnx")
+        policy_path = getattr(args, "policy", None) or default_policy
         self.policy = OnnxRuntime(policy_path, device=str(self.device))
 
         self.joint_pos_initial = self.state_0.joint_q.numpy()[7:].reshape(1, 12).astype(np.float32)
@@ -310,6 +311,7 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         newton.examples.add_mujoco_contacts_arg(parser)
+        parser.add_argument("--policy", type=str, default=None, help="Path to a custom ONNX policy file.")
         return parser
 
 
