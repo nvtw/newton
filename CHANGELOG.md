@@ -36,6 +36,7 @@
 - Add `total_force_friction` and `force_matrix_friction` to `SensorContact` for tangential (friction) force decomposition
 - Add `compute_normals` and `compute_uvs` optional arguments to `Mesh.create_heightfield()` and `Mesh.create_terrain()`
 - Add RJ45 plug-socket insertion example with SDF contacts, latch joint, and interactive gizmo
+- Add `SpeculativeContactConfig` and speculative contact support in `CollisionPipeline` to detect contacts for fast-moving objects before they tunnel through thin geometry
 
 ### Changed
 

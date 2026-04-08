@@ -41,16 +41,15 @@ class SpeculativeContactConfig:
     When passed to :class:`CollisionPipeline`, AABBs and gap thresholds are
     expanded based on per-shape velocity so that contacts which will occur
     within the next collision update interval are detected early.
-
-    Attributes:
-        max_speculative_extension: Maximum speculative gap extension [m].
-            Clamps ``vel * dt`` to prevent excessively large AABBs.
-        collision_update_dt: Default time interval between collision updates [s].
-            Can be overridden per-call via ``CollisionPipeline.collide(dt=...)``.
     """
 
     max_speculative_extension: float = 0.1
+    """Maximum speculative gap extension [m].  Clamps ``vel * dt`` to
+    prevent excessively large AABBs."""
+
     collision_update_dt: float = 1.0 / 60.0
+    """Default time interval between collision updates [s].  Can be
+    overridden per-call via ``CollisionPipeline.collide(dt=...)``."""
 
     def __post_init__(self):
         _validate_speculative_scalar(self.collision_update_dt, "collision_update_dt")
