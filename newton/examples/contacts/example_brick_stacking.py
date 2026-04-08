@@ -708,7 +708,7 @@ class Example:
             mesh = _build_mesh_with_sdf(self.v_2x4, self.f_2x4, color=colors[i], scale=BRICK_SCALE)
             body = scene.add_body(xform=wp.transform(positions[i], rotations[i]), label=labels[i])
             shape_idx = scene.shape_count
-            #scene.add_shape_mesh(body, mesh=mesh, cfg=brick_cfg)
+            scene.add_shape_mesh(body, mesh=mesh, cfg=brick_cfg)
             if solimp_attr is not None:
                 if solimp_attr.values is None:
                     solimp_attr.values = {}
