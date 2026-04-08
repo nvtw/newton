@@ -651,8 +651,12 @@ class Example:
             margin=BRICK_MARGIN,
             gap=SDF_MARGIN,
         )
+        # Invisible primitive colliders (box walls, floor slab, stud cylinders)
+        # that approximate the brick geometry for fast narrow-phase contact.
+        # The SDF mesh already contributes mass; density=0 keeps these
+        # collision-only so they don't double the brick's mass and inertia.
         collider_cfg = newton.ModelBuilder.ShapeConfig(
-            density=BRICK_DENSITY,
+            density=0.0,
             ke=BRICK_KE,
             kd=BRICK_KD,
             mu=0.7,
