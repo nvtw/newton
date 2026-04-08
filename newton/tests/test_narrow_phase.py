@@ -29,6 +29,8 @@ from newton._src.geometry.flags import ShapeFlags
 from newton._src.geometry.narrow_phase import NarrowPhase
 from newton._src.geometry.types import GeoType
 
+_cuda_available = wp.is_cuda_available()
+
 
 def check_normal_direction(pos_a, pos_b, normal, tolerance=1e-5):
     """Check that normal points from shape A toward shape B."""
@@ -2000,6 +2002,7 @@ class TestBufferOverflowWarnings(unittest.TestCase):
         # Warning capture via wp.printf is optional; counter/capacity check above is authoritative.
 
 
+@unittest.skipUnless(_cuda_available, "Mesh-convex tiled BVH queries require CUDA")
 class TestExtremeMeshTriangles(unittest.TestCase):
     """Test that MPR/GJK handles extreme triangle sizes and aspect ratios.
 
@@ -2011,10 +2014,10 @@ class TestExtremeMeshTriangles(unittest.TestCase):
 
     def setUp(self):
         self.narrow_phase = NarrowPhase(
-            max_candidate_pairs=10000,
-            max_triangle_pairs=100000,
+            max_candidate_pairs=100000,
+            max_triangle_pairs=1000000,
             reduce_contacts=False,
-            device=None,
+            device="cuda:0",
         )
 
     # All convex shape types with their GeoType, scale, and label.
