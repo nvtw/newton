@@ -36,6 +36,7 @@
 - Add `total_force_friction` and `force_matrix_friction` to `SensorContact` for tangential (friction) force decomposition
 - Add `compute_normals` and `compute_uvs` optional arguments to `Mesh.create_heightfield()` and `Mesh.create_terrain()`
 - Add RJ45 plug-socket insertion example with SDF contacts, latch joint, and interactive gizmo
+- Add `TRIANGLE_PRISM` support-function type for heightfield triangles, extruding 1 m along the heightfield's local -Z so GJK/MPR naturally resolves shapes on the back side
 
 ### Changed
 
@@ -130,6 +131,8 @@
 - Fix forward-kinematics child-origin linear velocity for articulated translated joints
 - Fix URDF joint dynamics friction import so specified friction values are preserved during simulation
 - Fix duplicate Reset button in brick stacking example when using the example browser
+- Fix mesh-convex back-face contacts generating inverted normals that trap shapes inside meshes and cause solver divergence (NaN)
+- Fix MPR convergence failure on large and extreme-aspect-ratio mesh triangles by projecting the starting point onto the triangle nearest the convex center
 
 ## [1.0.0] - 2026-03-10
 

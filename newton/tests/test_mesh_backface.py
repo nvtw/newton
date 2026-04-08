@@ -445,7 +445,7 @@ class TestMeshBackfaceSimulation(unittest.TestCase):
         # High downward velocity
         qd = s0.joint_qd.numpy()
         qd[2] = -10.0
-        s0.joint_qd = wp.array(qd, dtype=wp.float32)
+        s0.joint_qd = wp.array(qd, dtype=wp.float32, device=s0.joint_qd.device)
 
         for _ in range(50):
             s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=10)
@@ -546,6 +546,8 @@ def _build_heightfield_scene(shape_type, shape_pos, shape_scale=None, rough=Fals
         radius = shape_scale[0] if shape_scale else 0.1
         half_height = shape_scale[1] if shape_scale else 0.2
         builder.add_shape_capsule(body, radius=radius, half_height=half_height)
+    else:
+        raise ValueError(f"Unsupported shape type: {shape_type}")
 
     model = builder.finalize()
     solver = newton.solvers.SolverMuJoCo(
@@ -651,7 +653,7 @@ class TestHeightfieldPrism(unittest.TestCase):
         )
         qd = s0.joint_qd.numpy()
         qd[2] = -10.0
-        s0.joint_qd = wp.array(qd, dtype=wp.float32)
+        s0.joint_qd = wp.array(qd, dtype=wp.float32, device=s0.joint_qd.device)
 
         for _ in range(50):
             s0, s1, _ = _step_sim(model, cp, solver, s0, s1, ctrl, substeps=10)
@@ -688,6 +690,8 @@ def _build_heightfield_scene_xform(
         builder.add_shape_box(body, hx=shape_scale[0], hy=shape_scale[1], hz=shape_scale[2])
     elif shape_type == GeoType.CAPSULE:
         builder.add_shape_capsule(body, radius=shape_scale[0], half_height=shape_scale[1])
+    else:
+        raise ValueError(f"Unsupported shape type: {shape_type}")
 
     model = builder.finalize()
     solver = newton.solvers.SolverMuJoCo(
