@@ -3000,10 +3000,15 @@ class SolverMuJoCo(SolverBase):
         if self.newton_shape_to_mjc_geom is None:
             self._create_inverse_shape_mapping()
 
+        # The kernel only produces valid output for tid < naconmax (the full
+        # path clamps count and rejects cid >= naconmax).  Launching more
+        # threads than naconmax wastes GPU resources, so cap the grid size.
+        launch_dim = min(contacts.rigid_contact_max, self.mjw_data.naconmax)
+
         # Lazy-allocate fast-path buffers on first call
         if self._contact_tid_to_cid is None:
             self._contact_tid_to_cid = wp.full(
-                contacts.rigid_contact_max, -1, dtype=wp.int32, device=model.device
+                launch_dim, -1, dtype=wp.int32, device=model.device
             )
             self._last_contact_generation = wp.zeros(1, dtype=wp.int32, device=model.device)
             self._last_nacon_count = wp.zeros(1, dtype=wp.int32, device=model.device)
@@ -3015,7 +3020,7 @@ class SolverMuJoCo(SolverBase):
         bodies_per_world = self.model.body_count // self.model.world_count
         wp.launch(
             convert_newton_contacts_to_mjwarp_kernel,
-            dim=(contacts.rigid_contact_max,),
+            dim=(launch_dim,),
             inputs=[
                 state_in.body_q,
                 model.shape_body,
