@@ -225,7 +225,12 @@ class Contacts:
         self._counter_array.zero_()
 
         # Bump generation so solvers know the contact set changed (graph-capture safe)
-        wp.launch(_increment_contact_generation, dim=1, inputs=[self.contact_generation], device=self.contact_generation.device)
+        wp.launch(
+            _increment_contact_generation,
+            dim=1,
+            inputs=[self.contact_generation],
+            device=self.contact_generation.device,
+        )
 
         if self.clear_buffers:
             # Conservative path: clear all buffers (7-10 kernel launches)

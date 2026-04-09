@@ -2920,6 +2920,15 @@ class SolverMuJoCo(SolverBase):
         self.use_mujoco_cpu = use_mujoco_cpu
         if separate_worlds is None:
             separate_worlds = not use_mujoco_cpu and model.world_count > 1
+        # Lazy-allocated buffers for the fast-path contact conversion optimisation.
+        # See _convert_contacts_to_mjwarp / convert_newton_contacts_to_mjwarp_kernel.
+        # Initialised before _convert_to_mjc because notify_model_changed (called
+        # during conversion) may call _invalidate_contact_fast_path.
+        self._contact_tid_to_cid: wp.array | None = None
+        self._last_contact_generation: wp.array | None = None
+        self._last_nacon_count: wp.array | None = None
+        self._last_contacts_id: int | None = None
+
         with wp.ScopedTimer("convert_model_to_mujoco", active=False):
             self._convert_to_mjc(
                 model,
@@ -2952,12 +2961,6 @@ class SolverMuJoCo(SolverBase):
             )
         self.update_data_interval = update_data_interval
         self._step = 0
-
-        # Lazy-allocated buffers for the fast-path contact conversion optimisation.
-        # See _convert_contacts_to_mjwarp / convert_newton_contacts_to_mjwarp_kernel.
-        self._contact_tid_to_cid: wp.array | None = None
-        self._last_contact_generation: wp.array | None = None
-        self._last_nacon_count: wp.array | None = None
 
         if self.mjw_model is not None:
             self.mjw_model.opt.run_collision_detection = use_mujoco_contacts
@@ -3006,6 +3009,17 @@ class SolverMuJoCo(SolverBase):
                 print("Setting model.sensor_rne_postconstraint True")
             m.sensor_rne_postconstraint = True
 
+    def _invalidate_contact_fast_path(self):
+        """Force the next contact conversion to take the full path.
+
+        Called when cached MJWarp contact fields (friction, solref, solimp,
+        etc.) may be stale — e.g. after :meth:`notify_model_changed` updates
+        geom properties.
+        """
+        if self._last_contact_generation is not None:
+            self._last_contact_generation.zero_()
+            self._last_nacon_count.zero_()
+
     def _convert_contacts_to_mjwarp(self, model: Model, state_in: State, contacts: Contacts):
         # Ensure the inverse shape mapping exists (lazy creation)
         if self.newton_shape_to_mjc_geom is None:
@@ -3016,11 +3030,21 @@ class SolverMuJoCo(SolverBase):
         # threads than naconmax wastes GPU resources, so cap the grid size.
         launch_dim = min(contacts.rigid_contact_max, self.mjw_data.naconmax)
 
-        # Lazy-allocate fast-path buffers on first call
-        if self._contact_tid_to_cid is None:
-            self._contact_tid_to_cid = wp.full(launch_dim, -1, dtype=wp.int32, device=model.device)
+        # Lazy-allocate fast-path buffers; reallocate if launch_dim grew
+        # (e.g. a different Contacts object with a larger rigid_contact_max).
+        # Also invalidate when the Contacts instance changes — a different
+        # object's contact_generation could coincidentally match our cached
+        # last_contact_generation while containing entirely different data.
+        contacts_id = id(contacts.contact_generation)
+        needs_realloc = self._contact_tid_to_cid is None or self._contact_tid_to_cid.shape[0] < launch_dim
+        contacts_changed = self._last_contacts_id != contacts_id
+
+        if needs_realloc or contacts_changed:
+            if needs_realloc:
+                self._contact_tid_to_cid = wp.full(launch_dim, -1, dtype=wp.int32, device=model.device)
             self._last_contact_generation = wp.zeros(1, dtype=wp.int32, device=model.device)
             self._last_nacon_count = wp.zeros(1, dtype=wp.int32, device=model.device)
+            self._last_contacts_id = contacts_id
 
         # Zero nacon before the kernel — the full path uses atomic_add to count
         # contacts; the fast path restores the count from last_nacon_count.
@@ -3127,6 +3151,7 @@ class SolverMuJoCo(SolverBase):
         if flags & SolverNotifyFlags.SHAPE_PROPERTIES:
             self._update_geom_properties()
             self._update_pair_properties()
+            self._invalidate_contact_fast_path()
         if flags & SolverNotifyFlags.MODEL_PROPERTIES:
             self._update_model_properties()
         if flags & SolverNotifyFlags.CONSTRAINT_PROPERTIES:
