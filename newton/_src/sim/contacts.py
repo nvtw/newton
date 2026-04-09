@@ -101,7 +101,7 @@ class Contacts:
             # Create sliced views for individual counters (no additional allocation)
             self.rigid_contact_count = self._counter_array[0:1]
 
-            self.contact_generation = wp.zeros(1, dtype=wp.int32)
+            self.contact_generation = wp.zeros(1, dtype=wp.int32, device=device)
             """Device-side generation counter, incremented each time :meth:`clear` is called.
 
             Solvers can compare this against a cached value to detect whether the
@@ -225,7 +225,7 @@ class Contacts:
         self._counter_array.zero_()
 
         # Bump generation so solvers know the contact set changed (graph-capture safe)
-        wp.launch(_increment_contact_generation, dim=1, inputs=[self.contact_generation])
+        wp.launch(_increment_contact_generation, dim=1, inputs=[self.contact_generation], device=self.contact_generation.device)
 
         if self.clear_buffers:
             # Conservative path: clear all buffers (7-10 kernel launches)
