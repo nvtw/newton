@@ -11,6 +11,7 @@ contacts data directly into Kamino's respective format.
 
 from typing import Literal
 
+import numpy as np
 import warp as wp
 
 # Newton imports
@@ -464,8 +465,18 @@ class CollisionPipelineUnifiedKamino:
         # Get geometry count from model
         self._num_geoms: int = self._model.geoms.num_geoms
 
-        # Compute the maximum possible number of geom pairs (worst-case, needed for NXN/SAP)
-        self._max_shape_pairs: int = (self._num_geoms * (self._num_geoms - 1)) // 2
+        # Compute the maximum possible number of geom pairs per world and sum
+        # them.  The naive global formula N*(N-1)/2 is O(W^2 * S^2) for W
+        # worlds with S shapes each; the per-world sum is O(W * S^2).
+        if self._model.geoms.wid is not None:
+            wid_np = self._model.geoms.wid.numpy()
+            per_world_pairs = 0
+            for uid in np.unique(wid_np):
+                n = int(np.count_nonzero(wid_np == uid))
+                per_world_pairs += (n * (n - 1)) // 2
+            self._max_shape_pairs: int = per_world_pairs
+        else:
+            self._max_shape_pairs: int = (self._num_geoms * (self._num_geoms - 1)) // 2
         self._max_contacts: int = self._max_shape_pairs * self._max_contacts_per_pair
 
         # Override max contacts if specified explicitly
