@@ -7,6 +7,11 @@ import warp as wp
 from warp import DeviceLike as Devicelike
 
 
+@wp.kernel
+def _increment_contact_generation(generation: wp.array[wp.int32]):
+    generation[0] = generation[0] + 1
+
+
 class Contacts:
     """
     Stores contact information for rigid and soft body collisions, to be consumed by a solver.
@@ -95,6 +100,12 @@ class Contacts:
             self._counter_array = wp.zeros(2, dtype=wp.int32)
             # Create sliced views for individual counters (no additional allocation)
             self.rigid_contact_count = self._counter_array[0:1]
+
+            self.contact_generation = wp.zeros(1, dtype=wp.int32)
+            """Device-side generation counter, incremented each time :meth:`clear` is called.
+
+            Solvers can compare this against a cached value to detect whether the
+            contact set changed since the last conversion pass."""
 
             # rigid contacts — never requires_grad (narrow phase has enable_backward=False)
             self.rigid_contact_point_id = wp.zeros(rigid_contact_max, dtype=wp.int32)
@@ -212,6 +223,9 @@ class Contacts:
         """
         # Clear all counters with a single kernel launch (consolidated counter array)
         self._counter_array.zero_()
+
+        # Bump generation so solvers know the contact set changed (graph-capture safe)
+        wp.launch(_increment_contact_generation, dim=1, inputs=[self.contact_generation])
 
         if self.clear_buffers:
             # Conservative path: clear all buffers (7-10 kernel launches)

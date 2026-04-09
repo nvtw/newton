@@ -38,6 +38,7 @@ from .kernels import (
     apply_mjc_qfrc_kernel,
     convert_mj_coords_to_warp_kernel,
     convert_newton_contacts_to_mjwarp_kernel,
+    _snapshot_nacon_count,
     convert_qfrc_actuator_from_mj_kernel,
     convert_rigid_forces_from_mj_kernel,
     convert_solref,
@@ -2941,6 +2942,12 @@ class SolverMuJoCo(SolverBase):
         self.update_data_interval = update_data_interval
         self._step = 0
 
+        # Lazy-allocated buffers for the fast-path contact conversion optimisation.
+        # See _convert_contacts_to_mjwarp / convert_newton_contacts_to_mjwarp_kernel.
+        self._contact_tid_to_cid: wp.array | None = None
+        self._last_contact_generation: wp.array | None = None
+        self._last_nacon_count: wp.array | None = None
+
         if self.mjw_model is not None:
             self.mjw_model.opt.run_collision_detection = use_mujoco_contacts
 
@@ -2993,8 +3000,16 @@ class SolverMuJoCo(SolverBase):
         if self.newton_shape_to_mjc_geom is None:
             self._create_inverse_shape_mapping()
 
-        # Zero nacon before the kernel — the kernel uses atomic_add to count
-        # only the contacts that survive immovable-pair filtering.
+        # Lazy-allocate fast-path buffers on first call
+        if self._contact_tid_to_cid is None:
+            self._contact_tid_to_cid = wp.full(
+                contacts.rigid_contact_max, -1, dtype=wp.int32, device=model.device
+            )
+            self._last_contact_generation = wp.zeros(1, dtype=wp.int32, device=model.device)
+            self._last_nacon_count = wp.zeros(1, dtype=wp.int32, device=model.device)
+
+        # Zero nacon before the kernel — the full path uses atomic_add to count
+        # contacts; the fast path restores the count from last_nacon_count.
         self.mjw_data.nacon.zero_()
 
         bodies_per_world = self.model.body_count // self.model.world_count
@@ -3048,6 +3063,30 @@ class SolverMuJoCo(SolverBase):
                 # Data to clear
                 self.mjw_data.nworld,
                 self.mjw_data.ncollision,
+                # Fast-path generation tracking
+                contacts.contact_generation,
+                self._last_contact_generation,
+                self._contact_tid_to_cid,
+                self._last_nacon_count,
+            ],
+            device=model.device,
+        )
+
+        # Snapshot the final nacon count and generation so the fast path can
+        # restore them on subsequent substeps.  Runs as a separate dim=1
+        # kernel AFTER the main kernel completes so that:
+        #  - nacon_out has its final value (from atomic_add on full path, or
+        #    restored from last_nacon_count on fast path)
+        #  - last_contact_generation is only updated after ALL threads in the
+        #    main kernel have read it (avoids a cross-block race)
+        wp.launch(
+            _snapshot_nacon_count,
+            dim=1,
+            inputs=[
+                self.mjw_data.nacon,
+                self._last_nacon_count,
+                contacts.contact_generation,
+                self._last_contact_generation,
             ],
             device=model.device,
         )
