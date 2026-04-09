@@ -32,13 +32,13 @@ from ...utils.import_utils import string_to_warp
 from ..flags import SolverNotifyFlags
 from ..solver import SolverBase
 from .kernels import (
+    _snapshot_nacon_count,
     apply_mjc_body_f_kernel,
     apply_mjc_control_kernel,
     apply_mjc_free_joint_f_to_body_f_kernel,
     apply_mjc_qfrc_kernel,
     convert_mj_coords_to_warp_kernel,
     convert_newton_contacts_to_mjwarp_kernel,
-    _snapshot_nacon_count,
     convert_qfrc_actuator_from_mj_kernel,
     convert_rigid_forces_from_mj_kernel,
     convert_solref,
@@ -3007,9 +3007,7 @@ class SolverMuJoCo(SolverBase):
 
         # Lazy-allocate fast-path buffers on first call
         if self._contact_tid_to_cid is None:
-            self._contact_tid_to_cid = wp.full(
-                launch_dim, -1, dtype=wp.int32, device=model.device
-            )
+            self._contact_tid_to_cid = wp.full(launch_dim, -1, dtype=wp.int32, device=model.device)
             self._last_contact_generation = wp.zeros(1, dtype=wp.int32, device=model.device)
             self._last_nacon_count = wp.zeros(1, dtype=wp.int32, device=model.device)
 
