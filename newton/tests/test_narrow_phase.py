@@ -2048,7 +2048,6 @@ class TestExtremeMeshTriangles(unittest.TestCase):
             np.array(vertices, dtype=np.float32),
             np.array(indices, dtype=np.int32),
         )
-        mesh_id = mesh.finalize()
         device = self.narrow_phase.device if self.narrow_phase.device is not None else wp.get_device()
 
         n_shapes = len(self.CONVEX_SHAPES)
@@ -2056,6 +2055,7 @@ class TestExtremeMeshTriangles(unittest.TestCase):
         rows = (n_shapes + cols - 1) // cols
 
         with wp.ScopedDevice(device):
+            mesh_id = mesh.finalize()
             geom_list = [
                 {
                     "type": GeoType.MESH,

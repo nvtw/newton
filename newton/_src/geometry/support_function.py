@@ -404,6 +404,28 @@ def closest_point_on_triangle(
     """
     ab = tri_b - tri_a
     ac = tri_c - tri_a
+
+    # Guard degenerate triangles: if the triangle has near-zero area, fall
+    # back to the closest point on the longest non-degenerate edge (or the
+    # nearest vertex when fully collapsed).
+    ab_sq = wp.dot(ab, ab)
+    ac_sq = wp.dot(ac, ac)
+    EPS2 = 1.0e-20
+    if wp.dot(wp.cross(ab, ac), wp.cross(ab, ac)) < EPS2:
+        bc = tri_c - tri_b
+        bc_sq = wp.dot(bc, bc)
+        if ab_sq >= ac_sq and ab_sq >= bc_sq:
+            if ab_sq < EPS2:
+                return tri_a
+            t = wp.clamp(wp.dot(p - tri_a, ab) / ab_sq, 0.0, 1.0)
+            return tri_a + t * ab
+        elif ac_sq >= bc_sq:
+            t = wp.clamp(wp.dot(p - tri_a, ac) / ac_sq, 0.0, 1.0)
+            return tri_a + t * ac
+        else:
+            t = wp.clamp(wp.dot(p - tri_b, bc) / bc_sq, 0.0, 1.0)
+            return tri_b + t * bc
+
     ap = p - tri_a
 
     d1 = wp.dot(ab, ap)

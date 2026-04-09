@@ -247,22 +247,17 @@ class TestMeshBackfaceCulling(unittest.TestCase):
         model, cp, state = _build_collision_only(
             mesh,
             shape_type,
-            shape_pos=(0.0, 0.0, -0.05),
+            shape_pos=(0.0, 0.0, -0.5),
             shape_scale=shape_scale,
             shape_rot=shape_rot,
         )
         contacts = _collide(model, cp, state)
-        normals = _get_contact_normals(contacts)
-
-        # Back-face culling should produce zero contacts.  If any survive,
-        # their normals must not be inverted (pointing downward).
-        if len(normals) > 0:
-            min_nz = normals[:, 2].min()
-            self.assertGreater(
-                min_nz,
-                0.0,
-                f"{shape_type.name}: back-face contact has downward normal z={min_nz:.4f}",
-            )
+        count = contacts.rigid_contact_count.numpy()[0]
+        self.assertEqual(
+            count,
+            0,
+            f"{shape_type.name}: shape fully below mesh should produce zero contacts, got {count}",
+        )
 
     def test_back_face_sphere(self):
         self._assert_back_face_culled(GeoType.SPHERE, shape_scale=(0.1,))
@@ -922,14 +917,17 @@ class TestTrianglePreconditioning(unittest.TestCase):
     def test_box_large_triangle_contact_matches_small(self):
         """Box on a 1000 m mesh must produce equivalent contacts to a 10 m mesh.
 
-        Box is placed off the mesh diagonal to avoid the mesh-seam edge contact.
+        The small mesh (size=5) acts as a control where triangle preconditioning
+        is not needed.  Box is placed off the mesh diagonal to avoid the
+        mesh-seam edge contact.
         """
         hx, hy, hz = 0.1, 0.1, 0.1
-        # Place off-diagonal: (-50, 50) is well inside one triangle
-        pos = (-50.0, 50.0, hz - 0.005)
+        # Place off-diagonal so the box is well inside one triangle for both
+        # the small (size=5) and large (size=500) meshes.
+        pos = (-1.0, 1.0, hz - 0.005)
 
         count_sm, _n_sm = self._collide_shape_on_mesh(
-            _make_flat_ground_mesh(size=500.0), GeoType.BOX, pos, shape_scale=(hx, hy, hz)
+            _make_flat_ground_mesh(size=5.0), GeoType.BOX, pos, shape_scale=(hx, hy, hz)
         )
         count_lg, n_lg = self._collide_shape_on_mesh(
             _make_large_ground_mesh(size=500.0), GeoType.BOX, pos, shape_scale=(hx, hy, hz)
