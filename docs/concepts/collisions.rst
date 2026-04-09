@@ -1117,9 +1117,10 @@ At each ``collide()`` call the pipeline:
 2. Expands each shape AABB by the clamped velocity contribution (capped by
    ``max_speculative_extension``) so the broad phase returns candidate pairs
    that are about to collide.
-3. In the narrow phase, widens the contact gap using the **directed** approach
-   speed along the contact normal, so only genuinely approaching pairs are
-   accepted.
+3. In the narrow phase, recomputes the contact gap using the normal-projected
+   approach speed of the relative linear velocity **plus** per-shape
+   angular-speed bounds (clamped by ``max_speculative_extension``), so only
+   genuinely approaching pairs are accepted.
 
 The ``collision_update_dt`` can be overridden per call:
 
