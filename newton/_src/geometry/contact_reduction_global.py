@@ -242,11 +242,24 @@ def make_contact_key(shape_a: int, shape_b: int, bin_id: int) -> wp.uint64:
     return key
 
 
-# Bit budget for make_contact_value / make_preprune_probe (total 64 bits):
-#   score:       32 - SCORE_SHIFT = 22 bits  (bits 63-42)
-#   fingerprint: FINGERPRINT_BITS = 22 bits  (bits 41-20)
-#   contact_id:  CONTACT_ID_BITS  = 20 bits  (bits 19-0)
-# Mantissa precision after truncation: 23 - SCORE_SHIFT = 13 bits ≈ 1.2e-4 relative.
+# ---------------------------------------------------------------------------
+# Contact value packing
+# ---------------------------------------------------------------------------
+# Two packing modes exist — **fast** (default) and **deterministic**.
+# Because ``wp.static()`` does not eliminate dead branches inside
+# ``@wp.func`` (Warp still compiles both arms), we define each variant
+# as a standalone function and assign one to the module-level names
+# ``make_contact_value`` / ``make_preprune_probe`` / ``unpack_contact_id``
+# at import time.  Call ``enable_deterministic_contact_packing()`` before
+# the first kernel launch to switch to the deterministic variants.
+#
+# **Fast** — ``(float_flip(score) << 32) | contact_id``.
+#   Full 32-bit score precision, no fingerprint. Contact_id in low 32 bits.
+#
+# **Deterministic** — ``(float_flip(score)>>10 << 42) | (fp << 20) | (id & 0xFFFFF)``.
+#   22-bit score, 22-bit fingerprint tiebreaker, 20-bit contact_id.
+# ---------------------------------------------------------------------------
+
 FINGERPRINT_BITS = wp.constant(wp.uint64(22))
 CONTACT_ID_BITS = wp.constant(wp.uint64(20))
 CONTACT_ID_MASK = wp.constant(wp.uint64((1 << 20) - 1))
@@ -254,62 +267,33 @@ FINGERPRINT_MASK = wp.constant(wp.uint64((1 << 22) - 1))
 SCORE_SHIFT = 10
 
 
+# -- Fast (non-deterministic) variants -------------------------------------
+
 @wp.func
-def make_contact_value(score: float, fingerprint: int, contact_id: int) -> wp.uint64:
-    """Pack score, fingerprint, and contact_id into a uint64 for ``atomic_max``.
+def _make_contact_value_fast(score: float, fingerprint: int, contact_id: int) -> wp.uint64:
+    """Pack score + contact_id with full precision (fingerprint ignored)."""
+    return (wp.uint64(float_flip(score)) << wp.uint64(32)) | wp.uint64(contact_id)
 
-    This packing enables **deterministic contact reduction**: multiple GPU
-    threads propose contacts for the same reduction slot via ``atomic_max``.
-    By encoding a deterministic fingerprint (derived from geometry) above
-    the non-deterministic contact_id, the ``atomic_max`` winner is always
-    the same regardless of thread scheduling.
 
-    ::
+@wp.func
+def _make_preprune_probe_fast(score: float, fingerprint: int) -> wp.uint64:
+    """Pre-prune probe — fast variant (ceiling value for given score)."""
+    return (wp.uint64(float_flip(score)) << wp.uint64(32)) | wp.uint64(0xFFFFFFFF)
 
-        63        42 41        20 19          0
-        ┌──────────┬────────────┬──────────────┐
-        │  score   │ fingerprint│  contact_id  │
-        │ (22 bit) │  (22 bit)  │   (20 bit)   │
-        └──────────┴────────────┴──────────────┘
 
-    **Score (bits 63-42, 22 bits)** — ``float_flip(score) >> 10``.
-    ``float_flip`` reinterprets the IEEE-754 float as an order-preserving
-    uint32 (see http://stereopsis.com/radix.html).  The right-shift by
-    ``SCORE_SHIFT`` (10) discards the 10 least-significant bits of the
-    mantissa, keeping 1 sign-equivalent + 8 exponent + 13 mantissa = 22
-    bits.  This gives ~2^-13 ≈ 1.2e-4 relative precision — sufficient to
-    distinguish contacts whose spatial projection scores or negated depths
-    differ by more than ~0.1 mm at 1 m scale.
+@wp.func_native("""
+return static_cast<int32_t>(packed & 0xFFFFFFFFull);
+""")
+def _unpack_contact_id_fast(packed: wp.uint64) -> int:
+    """Extract contact_id (low 32 bits) — fast variant."""
+    ...
 
-    Typical score ranges:
 
-    - Spatial direction scores ``dot(pos_2d, dir_2d)``: [-10, +10] m
-      (position is measured from the midpoint of the two shapes).
-    - Depth scores ``-depth``: [0.0001, 0.1] m.
+# -- Deterministic variants ------------------------------------------------
 
-    **Fingerprint (bits 41-20, 22 bits)** — deterministic tiebreaker
-    derived from geometry (edge index | mode/source tag bits).  When two
-    contacts have the same truncated score, the fingerprint breaks the tie
-    so that ``atomic_max`` always picks the same winner regardless of
-    thread scheduling.
-
-    **Contact ID (bits 19-0, 20 bits)** — buffer slot assigned by
-    ``atomic_add``.  Non-deterministic, but only matters when both score
-    and fingerprint are identical, which requires two geometrically
-    identical contacts — an impossible case.
-
-    The cascade ``score > fingerprint > contact_id`` means ``atomic_max``
-    on this uint64 selects the contact with the best score, breaking ties
-    deterministically via fingerprint.
-
-    Args:
-        score: Spatial projection score or negated depth [m]. Higher is better.
-        fingerprint: Deterministic contact identifier (e.g. ``(edge_idx << 2) | (mode << 1)``).
-        contact_id: Index into the contact buffer (from ``atomic_add``).
-
-    Returns:
-        64-bit packed value for hashtable ``atomic_max`` comparison.
-    """
+@wp.func
+def _make_contact_value_det(score: float, fingerprint: int, contact_id: int) -> wp.uint64:
+    """Pack score + fingerprint + contact_id for deterministic atomic_max."""
     return (
         (wp.uint64(float_flip(score) >> wp.uint32(wp.static(SCORE_SHIFT))) << wp.uint64(42))
         | ((wp.uint64(fingerprint) & FINGERPRINT_MASK) << CONTACT_ID_BITS)
@@ -318,27 +302,8 @@ def make_contact_value(score: float, fingerprint: int, contact_id: int) -> wp.ui
 
 
 @wp.func
-def make_preprune_probe(score: float, fingerprint: int) -> wp.uint64:
-    """Build a deterministic pre-prune probe for ``export_and_reduce_contact_centered``.
-
-    Packs the score and fingerprint with ``CONTACT_ID_MASK`` (all 1s) in the
-    contact_id field, creating the *ceiling* value for this (score, fingerprint)
-    pair.  The pre-prune comparison ``stored < probe`` is then true whenever
-    the stored value can be beaten by a contact with this score and fingerprint,
-    regardless of what ``contact_id`` it receives from ``atomic_add``.
-
-    This makes the pre-prune decision depend only on deterministic quantities
-    (score and fingerprint), never on the non-deterministic contact_id.  In
-    non-deterministic mode the cheaper floor probe ``make_contact_value(score, 0, 0)``
-    is used instead.
-
-    Args:
-        score: Spatial projection score or negated depth [m].
-        fingerprint: Deterministic contact identifier.
-
-    Returns:
-        64-bit ceiling probe for pre-prune comparison.
-    """
+def _make_preprune_probe_det(score: float, fingerprint: int) -> wp.uint64:
+    """Pre-prune probe — deterministic variant (score + fingerprint ceiling)."""
     return (
         (wp.uint64(float_flip(score) >> wp.uint32(wp.static(SCORE_SHIFT))) << wp.uint64(42))
         | ((wp.uint64(fingerprint) & FINGERPRINT_MASK) << CONTACT_ID_BITS)
@@ -349,9 +314,32 @@ def make_preprune_probe(score: float, fingerprint: int) -> wp.uint64:
 @wp.func_native("""
 return static_cast<int32_t>(packed & 0xFFFFFull);
 """)
-def unpack_contact_id(packed: wp.uint64) -> int:
-    """Extract contact_id (low 20 bits) from packed value."""
+def _unpack_contact_id_det(packed: wp.uint64) -> int:
+    """Extract contact_id (low 20 bits) — deterministic variant."""
     ...
+
+
+# -- Active aliases (fast by default) --------------------------------------
+# These module-level names are what all callers import.  They start as the
+# fast variants and are swapped to the deterministic variants by
+# ``enable_deterministic_contact_packing()`` before the first kernel launch.
+
+make_contact_value = _make_contact_value_fast
+make_preprune_probe = _make_preprune_probe_fast
+unpack_contact_id = _unpack_contact_id_fast
+
+
+def enable_deterministic_contact_packing() -> None:
+    """Switch to the deterministic contact-value packing.
+
+    Must be called **before** the first kernel launch.  Swaps the
+    module-level ``make_contact_value``, ``make_preprune_probe``, and
+    ``unpack_contact_id`` to the deterministic implementations.
+    """
+    global make_contact_value, make_preprune_probe, unpack_contact_id  # noqa: PLW0603
+    make_contact_value = _make_contact_value_det
+    make_preprune_probe = _make_preprune_probe_det
+    unpack_contact_id = _unpack_contact_id_det
 
 
 @wp.func
@@ -626,6 +614,8 @@ class GlobalContactReducer:
         self.device = device
         self.store_hydroelastic_data = store_hydroelastic_data
         self.deterministic = deterministic
+        if deterministic:
+            enable_deterministic_contact_packing()
 
         self.values_per_key = NUM_SPATIAL_DIRECTIONS + 1
 
