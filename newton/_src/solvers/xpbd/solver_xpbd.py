@@ -258,7 +258,7 @@ class SolverXPBD(SolverBase):
             rigid_contact_inv_weight_init = None
 
             if contacts.force is not None:
-                contact_impulse = wp.zeros(contacts.rigid_contact_max, dtype=wp.spatial_vector, device=model.device)
+                contact_impulse = wp.zeros(contacts.rigid_contact_max, dtype=wp.vec3, device=model.device)
 
         if control is None:
             control = model.control(clone_variables=False)
@@ -574,9 +574,7 @@ class SolverXPBD(SolverBase):
 
                         body_q, body_qd = self._apply_body_deltas(model, state_in, state_out, body_deltas, dt)
 
-            # Stash per-contact impulse and weighting state for update_contacts().
             self._contact_impulse = contact_impulse
-            self._contact_inv_weight = rigid_contact_inv_weight
             self._last_dt = dt
 
             if model.particle_count:
@@ -692,8 +690,9 @@ class SolverXPBD(SolverBase):
     def update_contacts(self, contacts: Contacts, state: State | None = None) -> None:
         """Populate ``contacts.force`` from XPBD contact impulses accumulated during the last :meth:`step`.
 
-        Each entry in ``contacts.force`` is a spatial wrench (force [N] and torque [N·m])
-        exerted on body0 by body1, referenced to the center of mass of body0 in world frame.
+        Only the linear force component is written; the torque component is
+        zero.  Downstream consumers such as :class:`SensorContact` compute
+        moments from the contact point and force direction themselves.
 
         Args:
             contacts: :class:`Contacts` object whose :attr:`~Contacts.force` buffer will be written.
