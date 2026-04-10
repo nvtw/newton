@@ -310,18 +310,6 @@ def make_contact_value(score: float, fingerprint: int, contact_id: int) -> wp.ui
     Returns:
         64-bit packed value for hashtable ``atomic_max`` comparison.
     """
-    if wp.uint64(fingerprint) > FINGERPRINT_MASK:
-        wp.printf(
-            "WARNING: fingerprint overflow: fingerprint=%d exceeds 22-bit max (%d)\n",
-            fingerprint,
-            int(FINGERPRINT_MASK),
-        )
-    if wp.uint64(contact_id) > CONTACT_ID_MASK:
-        wp.printf(
-            "WARNING: contact_id overflow: contact_id=%d exceeds 20-bit max (%d)\n",
-            contact_id,
-            int(CONTACT_ID_MASK),
-        )
     return (
         (wp.uint64(float_flip(score) >> wp.uint32(wp.static(SCORE_SHIFT))) << wp.uint64(42))
         | ((wp.uint64(fingerprint) & FINGERPRINT_MASK) << CONTACT_ID_BITS)

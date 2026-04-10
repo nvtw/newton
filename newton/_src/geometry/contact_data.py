@@ -65,15 +65,6 @@ def make_contact_sort_key(shape_a: int, shape_b: int, sort_sub_key: int) -> wp.i
         [42:23] shape_b  (20 bits)
         [22:0]  sort_sub_key (23 bits — encodes edge/triangle index + mesh-side bit)
     """
-    if sort_sub_key > 0x7FFFFF:
-        wp.printf(
-            "WARNING: sort_sub_key overflow: %d exceeds 23-bit max (8388607)\n",
-            sort_sub_key,
-        )
-    if shape_a > 0xFFFFF:
-        wp.printf("WARNING: shape_a overflow: %d exceeds 20-bit max\n", shape_a)
-    if shape_b > 0xFFFFF:
-        wp.printf("WARNING: shape_b overflow: %d exceeds 20-bit max\n", shape_b)
     return (
         (wp.int64(shape_a) << wp.int64(43))
         | (wp.int64(shape_b) << wp.int64(23))
