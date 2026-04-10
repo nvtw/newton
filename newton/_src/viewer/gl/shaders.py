@@ -737,9 +737,12 @@ void main()
     float s_depth = s.z / s.w;
     float e_depth = e.z / e.w;
 
-    vec2 dir = e_ndc - s_ndc;
-    vec2 right = normalize(vec2(dir.y, -dir.x));
-    right.x = right.x * inv_asp_ratio;
+    // Compute perpendicular in screen (aspect-corrected) space so line
+    // width is uniform on non-square viewports.
+    vec2 dir_ndc = e_ndc - s_ndc;
+    vec2 dir_scr = vec2(dir_ndc.x / inv_asp_ratio, dir_ndc.y);
+    vec2 right_scr = normalize(vec2(dir_scr.y, -dir_scr.x));
+    vec2 right = vec2(right_scr.x * inv_asp_ratio, right_scr.y);
 
     vec3 color = 0.5 * (vertexColor[0] + vertexColor[1]);
     vec2 xy = 0.5 * line_width * right;
@@ -841,8 +844,11 @@ void main()
     float s_depth = s.z / s.w;
     float e_depth = e.z / e.w;
 
-    vec2 dir = e_ndc - s_ndc;
-    float len = length(dir);
+    // Work in screen space (aspect-corrected) so arrows look correct on
+    // non-square viewports.  screen_x = ndc_x / inv_asp_ratio.
+    vec2 dir_ndc = e_ndc - s_ndc;
+    vec2 dir_scr = vec2(dir_ndc.x / inv_asp_ratio, dir_ndc.y);
+    float len = length(dir_scr);
 
     vec3 color = 0.5 * (vertexColor[0] + vertexColor[1]);
 
@@ -858,9 +864,11 @@ void main()
         return;
     }
 
-    vec2 fwd = dir / len;
-    vec2 right = vec2(fwd.y, -fwd.x);
-    right.x *= inv_asp_ratio;
+    // fwd/right in screen space, then convert offsets back to NDC (scale x by inv_asp_ratio)
+    vec2 fwd_scr = dir_scr / len;
+    vec2 right_scr = vec2(fwd_scr.y, -fwd_scr.x);
+    vec2 fwd   = vec2(fwd_scr.x * inv_asp_ratio, fwd_scr.y);
+    vec2 right = vec2(right_scr.x * inv_asp_ratio, right_scr.y);
 
     // Triangle 1+2: line body quad
     vec2 xy = 0.5 * line_width * right;
@@ -876,10 +884,7 @@ void main()
     EndPrimitive();
 
     // Triangle 3: arrowhead at endpoint
-    vec2 fwd_asp = fwd;
-    fwd_asp.x *= inv_asp_ratio;
-
-    vec2 tip    = e_ndc + fwd_asp * arrow_size;
+    vec2 tip    = e_ndc + fwd * arrow_size;
     vec2 base_l = e_ndc - right * arrow_size * 0.5;
     vec2 base_r = e_ndc + right * arrow_size * 0.5;
 

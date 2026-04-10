@@ -406,8 +406,15 @@ class ViewerGL(ViewerBase):
         and whenever the current model is discarded.
         """
         # Render object and line caches (path -> GL object)
+        for obj in getattr(self, "objects", {}).values():
+            if hasattr(obj, "destroy"):
+                obj.destroy()
         self.objects = {}
+        for obj in getattr(self, "lines", {}).values():
+            obj.destroy()
         self.lines = {}
+        for obj in getattr(self, "arrows", {}).values():
+            obj.destroy()
         self.arrows = {}
         self._destroy_all_wireframes()
         self.wireframe_shapes = {}
@@ -581,7 +588,8 @@ class ViewerGL(ViewerBase):
         current_names = {s.name for s in self._shape_instances.values()}
         stale = [k for k, v in self.objects.items() if isinstance(v, MeshInstancerGL) and k not in current_names]
         for k in stale:
-            del self.objects[k]
+            obj = self.objects.pop(k)
+            del obj
 
         shape_scale = self.model.shape_scale
         if shape_scale.device != self.device:
@@ -728,8 +736,10 @@ class ViewerGL(ViewerBase):
             resized = True
         elif transform_count > instancer.num_instances:
             new_capacity = max(transform_count, instancer.num_instances * 2)
+            old = instancer
             instancer = MeshInstancerGL(new_capacity, self.objects[mesh])
             self.objects[name] = instancer
+            del old
             resized = True
 
         needs_update = resized or not hidden
@@ -887,6 +897,7 @@ class ViewerGL(ViewerBase):
             self.lines[name] = LinesGL(max_lines, self.device, hidden=hidden)
 
         self.lines[name].update(starts, ends, colors)
+        self.lines[name].hidden = hidden
 
     @override
     def log_arrows(
@@ -938,6 +949,7 @@ class ViewerGL(ViewerBase):
             self.arrows[name] = LinesGL(max_arrows, self.device, hidden=hidden)
 
         self.arrows[name].update(starts, ends, colors)
+        self.arrows[name].hidden = hidden
 
     @override
     def log_wireframe_shape(
@@ -1032,6 +1044,7 @@ class ViewerGL(ViewerBase):
             old = self.objects[name]
             new_capacity = max(num_points, old.num_instances * 2)
             self.objects[name] = MeshInstancerGL(new_capacity, self._point_mesh)
+            del old
             object_recreated = True
 
         if radii is None:
@@ -1136,8 +1149,10 @@ class ViewerGL(ViewerBase):
             self.objects[name].cast_shadow = False
             recreated = True
         elif n > self.objects[name].num_instances:
-            self.objects[name] = MeshInstancerGL(max(n, self.objects[name].num_instances * 2), self._gaussian_mesh)
+            old = self.objects[name]
+            self.objects[name] = MeshInstancerGL(max(n, old.num_instances * 2), self._gaussian_mesh)
             self.objects[name].cast_shadow = False
+            del old
             recreated = True
 
         instancer = self.objects[name]
