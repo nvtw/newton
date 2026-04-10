@@ -47,9 +47,7 @@ def _gather_vec3(src: wp.array[wp.vec3], dst: wp.array[wp.vec3], perm: wp.array[
 
 
 @wp.kernel(enable_backward=False)
-def _gather_int64(
-    src: wp.array[wp.int64], dst: wp.array[wp.int64], perm: wp.array[wp.int32], count: wp.array[int]
-):
+def _gather_int64(src: wp.array[wp.int64], dst: wp.array[wp.int64], perm: wp.array[wp.int32], count: wp.array[int]):
     i = wp.tid()
     if i >= count[0]:
         return
@@ -215,9 +213,7 @@ class ContactSorter:
 
 
 @wp.kernel(enable_backward=False)
-def _gather_vec2i(
-    src: wp.array[wp.vec2i], dst: wp.array[wp.vec2i], perm: wp.array[wp.int32], count: wp.array[int]
-):
+def _gather_vec2i(src: wp.array[wp.vec2i], dst: wp.array[wp.vec2i], perm: wp.array[wp.int32], count: wp.array[int]):
     i = wp.tid()
     if i >= count[0]:
         return
