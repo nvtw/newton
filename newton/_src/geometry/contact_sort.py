@@ -6,6 +6,10 @@
 Provides the machinery to reorder contact arrays into a canonical,
 deterministic order after the narrow-phase collision pipeline has
 written contacts in GPU-scheduling-dependent order.
+
+The sort always operates over the full pre-allocated buffer (for CUDA
+graph capture compatibility).  Unused slots beyond ``contact_count``
+are filled with ``0x7FFFFFFFFFFFFFFF`` so they sort to the end.
 """
 
 from __future__ import annotations
@@ -14,12 +18,26 @@ import warp as wp
 
 from ..core.types import Devicelike
 
+# Sentinel key for unused contact slots.  ``radix_sort_pairs`` treats
+# keys as signed int64, so ``0x7FFF…`` (max positive int64) sorts last.
+SORT_KEY_SENTINEL = wp.constant(wp.int64(0x7FFFFFFFFFFFFFFF))
+
 
 @wp.kernel(enable_backward=False)
-def _init_identity_indices(indices: wp.array[wp.int32]):
-    """Fill *indices* with the identity permutation [0, 1, …, N-1]."""
-    i = wp.tid()
-    indices[i] = wp.int32(i)
+def _prepare_sort(
+    contact_count: wp.array[int],
+    sort_keys_src: wp.array[wp.int64],
+    sort_keys_dst: wp.array[wp.int64],
+    sort_indices: wp.array[wp.int32],
+):
+    """Copy active keys and init identity indices; fill unused slots with sentinel."""
+    tid = wp.tid()
+    if tid < contact_count[0]:
+        sort_keys_dst[tid] = sort_keys_src[tid]
+        sort_indices[tid] = wp.int32(tid)
+    else:
+        sort_keys_dst[tid] = SORT_KEY_SENTINEL
+        sort_indices[tid] = wp.int32(tid)
 
 
 @wp.kernel(enable_backward=False)
@@ -47,7 +65,7 @@ def _gather_vec3(src: wp.array[wp.vec3], dst: wp.array[wp.vec3], perm: wp.array[
 
 
 @wp.kernel(enable_backward=False)
-def _gather_int64(src: wp.array[wp.int64], dst: wp.array[wp.int64], perm: wp.array[wp.int32], count: wp.array[int]):
+def _gather_vec2i(src: wp.array[wp.vec2i], dst: wp.array[wp.vec2i], perm: wp.array[wp.int32], count: wp.array[int]):
     i = wp.tid()
     if i >= count[0]:
         return
@@ -58,16 +76,22 @@ class ContactSorter:
     """Sort contact arrays into a deterministic canonical order.
 
     Pre-allocates double-buffer arrays and permutation indices at construction
-    time so that the per-frame :meth:`sort` call is allocation-free.
+    time so that the per-frame :meth:`sort` call is allocation-free and fully
+    CUDA-graph-capturable (no host synchronization).
+
+    The radix sort always runs over the full *capacity* buffer.  Slots beyond
+    the active ``contact_count`` are filled with a sentinel key
+    (``0x7FFFFFFFFFFFFFFF``) so they sort to the end and the gather kernels
+    skip them via the ``contact_count`` guard.
     """
 
     def __init__(self, capacity: int, *, per_contact_shape_properties: bool = False, device: Devicelike = None):
         with wp.ScopedDevice(device):
             self._capacity = capacity
-            self._sort_indices = wp.zeros(capacity, dtype=wp.int32)
-            self._sort_keys_copy = wp.zeros(capacity, dtype=wp.int64)
+            # radix_sort_pairs uses the second half as scratch, so allocate 2x.
+            self._sort_indices = wp.zeros(2 * capacity, dtype=wp.int32)
+            self._sort_keys_copy = wp.zeros(2 * capacity, dtype=wp.int64)
 
-            # Double buffers for gather (one per dtype used by contact arrays)
             self._buf_int = wp.zeros(capacity, dtype=wp.int32)
             self._buf_float = wp.zeros(capacity, dtype=float)
             self._buf_vec3 = wp.zeros(capacity, dtype=wp.vec3)
@@ -93,6 +117,8 @@ class ContactSorter:
     ) -> None:
         """Sort contacts written through the simplified narrow-phase writer.
 
+        Fully graph-capturable — no host synchronization.
+
         Args:
             sort_keys: Per-contact int64 sort keys (filled by the writer).
             contact_count: Single-element int array with the active contact count.
@@ -103,23 +129,14 @@ class ContactSorter:
             contact_tangent: Optional vec3 tangent array.
             device: Device to launch on.
         """
-        n = min(int(contact_count.numpy()[0]), self._capacity)
-        if n <= 0:
-            return
+        self._sort_and_permute(sort_keys, contact_count, device=device)
 
-        self._sort_and_permute(sort_keys, n, device=device)
-
-        self._gather_array_vec3(contact_position, n, contact_count, device)
-        self._gather_array_vec3(contact_normal, n, contact_count, device)
-        self._gather_array_float(contact_penetration, n, contact_count, device)
-        # contact_pair is vec2i — we gather each component via int views would be complex;
-        # instead gather both ints of the pair via a dedicated approach.
-        # Since vec2i has the same size as 2 ints, we treat each element pair separately.
-        # Simpler: swap the array after gather using a vec3 buffer trick won't work.
-        # Let's just use a dedicated kernel for vec2i.
-        self._gather_array_vec2i(contact_pair, n, contact_count, device)
+        self._gather_array_vec3(contact_position, contact_count, device)
+        self._gather_array_vec3(contact_normal, contact_count, device)
+        self._gather_array_float(contact_penetration, contact_count, device)
+        self._gather_array_vec2i(contact_pair, contact_count, device)
         if contact_tangent is not None and contact_tangent.shape[0] > 0:
-            self._gather_array_vec3(contact_tangent, n, contact_count, device)
+            self._gather_array_vec3(contact_tangent, contact_count, device)
 
     def sort_full(
         self,
@@ -143,6 +160,8 @@ class ContactSorter:
     ) -> None:
         """Sort contacts written through the full collide.py writer.
 
+        Fully graph-capturable — no host synchronization.
+
         Args:
             sort_keys: Per-contact int64 sort keys (filled by the writer).
             contact_count: Single-element int array with the active contact count.
@@ -161,60 +180,61 @@ class ContactSorter:
             friction: Optional float per-contact friction.
             device: Device to launch on.
         """
-        n = min(int(contact_count.numpy()[0]), self._capacity)
-        if n <= 0:
-            return
+        self._sort_and_permute(sort_keys, contact_count, device=device)
 
-        self._sort_and_permute(sort_keys, n, device=device)
-
-        self._gather_array_int(shape0, n, contact_count, device)
-        self._gather_array_int(shape1, n, contact_count, device)
-        self._gather_array_vec3(point0, n, contact_count, device)
-        self._gather_array_vec3(point1, n, contact_count, device)
-        self._gather_array_vec3(offset0, n, contact_count, device)
-        self._gather_array_vec3(offset1, n, contact_count, device)
-        self._gather_array_vec3(normal, n, contact_count, device)
-        self._gather_array_float(margin0, n, contact_count, device)
-        self._gather_array_float(margin1, n, contact_count, device)
-        self._gather_array_int(tids, n, contact_count, device)
+        self._gather_array_int(shape0, contact_count, device)
+        self._gather_array_int(shape1, contact_count, device)
+        self._gather_array_vec3(point0, contact_count, device)
+        self._gather_array_vec3(point1, contact_count, device)
+        self._gather_array_vec3(offset0, contact_count, device)
+        self._gather_array_vec3(offset1, contact_count, device)
+        self._gather_array_vec3(normal, contact_count, device)
+        self._gather_array_float(margin0, contact_count, device)
+        self._gather_array_float(margin1, contact_count, device)
+        self._gather_array_int(tids, contact_count, device)
         if self._has_shape_props:
             if stiffness is not None and stiffness.shape[0] > 0:
-                self._gather_array_float(stiffness, n, contact_count, device)
+                self._gather_array_float(stiffness, contact_count, device)
             if damping is not None and damping.shape[0] > 0:
-                self._gather_array_float(damping, n, contact_count, device)
+                self._gather_array_float(damping, contact_count, device)
             if friction is not None and friction.shape[0] > 0:
-                self._gather_array_float(friction, n, contact_count, device)
+                self._gather_array_float(friction, contact_count, device)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _sort_and_permute(self, sort_keys: wp.array, n: int, *, device: Devicelike = None) -> None:
-        """Run radix sort on *sort_keys* and produce the permutation in ``_sort_indices``."""
-        wp.launch(_init_identity_indices, dim=n, inputs=[self._sort_indices], device=device)
-        wp.copy(self._sort_keys_copy, sort_keys, count=n)
+    def _sort_and_permute(self, sort_keys: wp.array, contact_count: wp.array, *, device: Devicelike = None) -> None:
+        """Prepare keys (sentinel-fill unused slots), then radix-sort over the full buffer."""
+        n = self._capacity
+        wp.launch(
+            _prepare_sort,
+            dim=n,
+            inputs=[contact_count, sort_keys, self._sort_keys_copy, self._sort_indices],
+            device=device,
+        )
         wp.utils.radix_sort_pairs(self._sort_keys_copy, self._sort_indices, n)
 
-    def _gather_array_int(self, arr: wp.array, n: int, count: wp.array, device: Devicelike) -> None:
-        wp.copy(self._buf_int, arr, count=n)
-        wp.launch(_gather_int, dim=n, inputs=[self._buf_int, arr, self._sort_indices, count], device=device)
+    def _gather_array_int(self, arr: wp.array, count: wp.array, device: Devicelike) -> None:
+        wp.copy(self._buf_int, arr, count=self._capacity)
+        wp.launch(
+            _gather_int, dim=self._capacity, inputs=[self._buf_int, arr, self._sort_indices, count], device=device
+        )
 
-    def _gather_array_float(self, arr: wp.array, n: int, count: wp.array, device: Devicelike) -> None:
-        wp.copy(self._buf_float, arr, count=n)
-        wp.launch(_gather_float, dim=n, inputs=[self._buf_float, arr, self._sort_indices, count], device=device)
+    def _gather_array_float(self, arr: wp.array, count: wp.array, device: Devicelike) -> None:
+        wp.copy(self._buf_float, arr, count=self._capacity)
+        wp.launch(
+            _gather_float, dim=self._capacity, inputs=[self._buf_float, arr, self._sort_indices, count], device=device
+        )
 
-    def _gather_array_vec3(self, arr: wp.array, n: int, count: wp.array, device: Devicelike) -> None:
-        wp.copy(self._buf_vec3, arr, count=n)
-        wp.launch(_gather_vec3, dim=n, inputs=[self._buf_vec3, arr, self._sort_indices, count], device=device)
+    def _gather_array_vec3(self, arr: wp.array, count: wp.array, device: Devicelike) -> None:
+        wp.copy(self._buf_vec3, arr, count=self._capacity)
+        wp.launch(
+            _gather_vec3, dim=self._capacity, inputs=[self._buf_vec3, arr, self._sort_indices, count], device=device
+        )
 
-    def _gather_array_vec2i(self, arr: wp.array, n: int, count: wp.array, device: Devicelike) -> None:
-        wp.copy(self._buf_vec2i, arr, count=n)
-        wp.launch(_gather_vec2i, dim=n, inputs=[self._buf_vec2i, arr, self._sort_indices, count], device=device)
-
-
-@wp.kernel(enable_backward=False)
-def _gather_vec2i(src: wp.array[wp.vec2i], dst: wp.array[wp.vec2i], perm: wp.array[wp.int32], count: wp.array[int]):
-    i = wp.tid()
-    if i >= count[0]:
-        return
-    dst[i] = src[perm[i]]
+    def _gather_array_vec2i(self, arr: wp.array, count: wp.array, device: Devicelike) -> None:
+        wp.copy(self._buf_vec2i, arr, count=self._capacity)
+        wp.launch(
+            _gather_vec2i, dim=self._capacity, inputs=[self._buf_vec2i, arr, self._sort_indices, count], device=device
+        )
