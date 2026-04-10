@@ -293,7 +293,7 @@ def _sample_continuous_dev_kernel(
 
     for h in range(num_actions):
         mean = logits[agent, h]
-        log_std = wp.clamp(logstd[h], -5.0, 0.5)
+        log_std = logstd[h]
         std = wp.exp(log_std)
 
         noise = wp.randn(state)
@@ -422,7 +422,7 @@ def _compute_cont_logprobs_kernel(
     total = float(0.0)
     for h in range(num_actions):
         mean = logits[i, h]
-        log_std = wp.clamp(logstd[h], -5.0, 0.5)
+        log_std = logstd[h]
         std = wp.exp(log_std)
         diff = actions[i, h] - mean
         normalized = diff / std
@@ -567,6 +567,13 @@ class PPOConfig:
     continuous: bool = False
     init_logstd: float = 0.0
 
+    # Adaptive LR (RSL-RL style: adjust LR based on KL divergence)
+    desired_kl: float = 0.0  # 0 = disabled; typical: 0.01
+    lr_adapt_factor: float = 1.5  # scale factor for LR adjustment
+
+    # Network
+    activation: str = "elu"
+
     # Observation normalization
     normalize_obs: bool = False
 
@@ -649,10 +656,11 @@ class PPOTrainer:
         policy = SimpleMLP(OBS, H, ACT + 1,
                            max_batch=max(N, MB), device=device, seed=cfg.seed,
                            continuous=is_cont, num_actions=ACT,
-                           init_logstd=cfg.init_logstd)
+                           init_logstd=cfg.init_logstd, activation=cfg.activation)
         params = policy.parameters()
 
         d_lr = wp.array([cfg.lr], dtype=float, device=device)
+        _h_lr = wp.array([cfg.lr], dtype=float, device="cpu")  # host staging for adaptive LR
         if cfg.optimizer == "adamw":
             optimizer = AdamW(
                 params, lr=cfg.lr, weight_decay=0.0,
@@ -914,11 +922,6 @@ class PPOTrainer:
                 grads.append(loss_bufs.grad_logstd)
             optimizer.step(grads)
 
-            # Clamp logstd parameter to prevent entropy explosion
-            if is_cont and policy.logstd is not None:
-                wp.launch(_clamp_1d_kernel, dim=ACT,
-                          inputs=[policy.logstd, -5.0, 0.5], device=device)
-
             # Write back updated values and importance ratios to flat buffers
             # so the next minibatch's GAE uses fresh estimates (matches C++)
             wp.launch(_scatter_values_kernel, dim=MB,
@@ -1060,6 +1063,18 @@ class PPOTrainer:
                 sps = total_steps / elapsed
                 loss_np = loss_bufs.loss_reduced.numpy()
                 avg_ret = np.mean(recent_returns) if recent_returns else 0.0
+
+                # Adaptive LR based on KL divergence (RSL-RL style)
+                if cfg.desired_kl > 0:
+                    approx_kl = float(loss_np[5])  # column 5 = approx_kl
+                    if approx_kl > cfg.desired_kl * 2.0:
+                        cur_lr = _h_lr.numpy()[0] / cfg.lr_adapt_factor
+                        _h_lr.numpy()[0] = max(cur_lr, 1e-5)
+                        wp.copy(d_lr, _h_lr)
+                    elif approx_kl < cfg.desired_kl / 2.0:
+                        cur_lr = _h_lr.numpy()[0] * cfg.lr_adapt_factor
+                        _h_lr.numpy()[0] = min(cur_lr, 1e-2)
+                        wp.copy(d_lr, _h_lr)
 
                 if fmt_ret is not None:
                     ret_str = fmt_ret(avg_ret, best_return, loss_np, sps)

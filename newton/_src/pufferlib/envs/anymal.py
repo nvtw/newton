@@ -40,9 +40,10 @@ _MAX_EPISODE_LENGTH = 1000
 _LAB_TO_MUJOCO = [0, 6, 3, 9, 1, 7, 4, 10, 2, 8, 5, 11]
 _MUJOCO_TO_LAB = [0, 4, 8, 2, 6, 10, 1, 5, 9, 3, 7, 11]
 
-# Reward scales (matching IsaacLab defaults with boosted tracking).
-_LIN_VEL_REWARD_SCALE = 1.0
-_YAW_RATE_REWARD_SCALE = 0.5
+# Reward scales — alive bonus + high tracking drives locomotion.
+_ALIVE_BONUS = 1.0
+_LIN_VEL_REWARD_SCALE = 5.0
+_YAW_RATE_REWARD_SCALE = 2.0
 _Z_VEL_REWARD_SCALE = -2.0
 _ANG_VEL_REWARD_SCALE = -0.05
 _JOINT_TORQUE_REWARD_SCALE = -2.5e-5
@@ -211,7 +212,7 @@ def _compute_rewards_kernel(
     cmd_vy = commands[env, 1]
     cmd_yaw = commands[env, 2]
 
-    # 1. Linear velocity tracking (exp mapping)
+    # 1. Linear velocity tracking (exp mapping, standard IsaacLab formulation)
     lin_vel_err = (cmd_vx - vel_bx) * (cmd_vx - vel_bx) + (cmd_vy - vel_by) * (cmd_vy - vel_by)
     track_lin_vel = wp.exp(-lin_vel_err / 0.25)
 
@@ -283,9 +284,10 @@ def _compute_rewards_kernel(
     # 10. Flat orientation penalty
     flat_orientation_l2 = grav_bx * grav_bx + grav_by * grav_by
 
-    # Combine all reward terms (no frame_dt scaling -- PufferLib handles discounting)
+    # Combine all reward terms: alive bonus + tracking + penalties
     reward = (
-        track_lin_vel * _LIN_VEL_REWARD_SCALE
+        _ALIVE_BONUS
+        + track_lin_vel * _LIN_VEL_REWARD_SCALE
         + track_ang_vel * _YAW_RATE_REWARD_SCALE
         + z_vel_l2 * _Z_VEL_REWARD_SCALE
         + ang_vel_xy_l2 * _ANG_VEL_REWARD_SCALE
@@ -351,15 +353,31 @@ def _reset_envs_kernel(
     foot_air_time: wp.array2d[float],
     foot_was_contact: wp.array2d[float],
     running_return: wp.array[float],
+    seed_arr: wp.array[int],
 ):
+    """Reset done envs with randomized initial state (matching IsaacLab).
+
+    Adds small noise to joint positions (±0.25 rad) and velocities (±0.1 rad/s)
+    to break correlations between environments.  Uses seed_arr for deterministic
+    randomization compatible with CUDA graph capture.
+    """
     env = wp.tid()
     if dones[env] > 0.5:
         q_off = env * _Q_STRIDE
         qd_off = env * _QD_STRIDE
-        for i in range(wp.static(_Q_STRIDE)):
+        rng = wp.rand_init(seed_arr[0], env * 31 + 7)
+        # Reset base position/orientation (no noise on free joint)
+        for i in range(7):
             joint_q[q_off + i] = initial_q[i]
-        for i in range(wp.static(_QD_STRIDE)):
-            joint_qd[qd_off + i] = initial_qd[i]
+        # Reset joint positions with small noise
+        for i in range(12):
+            joint_q[q_off + 7 + i] = initial_q[7 + i] + wp.randf(rng, -0.25, 0.25)
+        # Reset base velocity (no noise)
+        for i in range(6):
+            joint_qd[qd_off + i] = 0.0
+        # Reset joint velocities with small noise
+        for i in range(12):
+            joint_qd[qd_off + 6 + i] = wp.randf(rng, -0.1, 0.1)
         episode_lengths[env] = 0
         running_return[env] = 0.0
         for i in range(12):
@@ -734,6 +752,7 @@ class AnymalEnv:
                 self.foot_air_time,
                 self.foot_was_contact,
                 self._running_return,
+                seed_arr,
             ],
             device=d,
         )

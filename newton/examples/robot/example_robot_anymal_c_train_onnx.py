@@ -64,7 +64,7 @@ class Example:
             horizon=24,
             obs_dim=48,
             num_actions=12,
-            hidden=128,
+            hidden=256,
             total_timesteps=total_timesteps,
             seed=42,
             optimizer="adamw",

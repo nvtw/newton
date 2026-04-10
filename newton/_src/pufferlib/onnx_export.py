@@ -57,18 +57,21 @@ def export_policy_to_onnx(
         nodes.append(helper.make_node("Clip", ["/norm/mul", "clip_min", "clip_max"], ["/norm/out"]))
         prev_output = "/norm/out"
 
-    # Layer 1: x @ w1^T -> ReLU
+    # Determine ONNX activation op matching the training network
+    act_op = "Elu" if getattr(policy, "_activation", "relu") == "elu" else "Relu"
+
+    # Layer 1: x @ w1^T -> activation
     w1 = policy.w1.numpy()  # (hidden, obs_dim)
     initializers.append(numpy_helper.from_array(w1.astype(np.float32), name="w1"))
     nodes.append(helper.make_node("Gemm", [prev_output, "w1"], ["pre_h1"], alpha=1.0, beta=0.0, transB=1))
-    nodes.append(helper.make_node("Relu", ["pre_h1"], ["h1"]))
+    nodes.append(helper.make_node(act_op, ["pre_h1"], ["h1"]))
     prev_output = "h1"
 
-    # Layer 2: h1 @ w2^T -> ReLU
+    # Layer 2: h1 @ w2^T -> activation
     w2 = policy.w2.numpy()  # (hidden, hidden)
     initializers.append(numpy_helper.from_array(w2.astype(np.float32), name="w2"))
     nodes.append(helper.make_node("Gemm", [prev_output, "w2"], ["pre_h2"], alpha=1.0, beta=0.0, transB=1))
-    nodes.append(helper.make_node("Relu", ["pre_h2"], ["h2"]))
+    nodes.append(helper.make_node(act_op, ["pre_h2"], ["h2"]))
     prev_output = "h2"
 
     # Layer 3: h2 @ w3^T (decoder, out_dim = num_actions + 1)

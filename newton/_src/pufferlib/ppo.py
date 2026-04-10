@@ -111,7 +111,7 @@ def sample_actions_continuous_kernel(
 
     for h in range(num_actions):
         mean = logits[agent, h]
-        log_std = wp.clamp(logstd[h], -5.0, 0.5)
+        log_std = logstd[h]
         std = wp.exp(log_std)
 
         noise = wp.randn(state)
@@ -489,7 +489,7 @@ def ppo_loss_continuous_kernel(
 
     for h in range(num_actions):
         mean = logits[idx, h]
-        log_std = wp.clamp(logstd[h], -5.0, 0.5)
+        log_std = logstd[h]
         std = wp.exp(log_std)
         action = actions[idx, h]
 
