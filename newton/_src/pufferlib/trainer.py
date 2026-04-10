@@ -1038,10 +1038,24 @@ class PPOTrainer:
             total_steps += batch_size
 
             # All GPU — flatten + minibatch updates
+            # Structured as epochs of minibatches with per-epoch KL adaptation
             wp.capture_launch(flatten_graph)
-            for _mb in range(num_minibatches):
-                wp.capture_launch(gae_graph)
-                wp.capture_launch(mb_graph)
+            mbs_per_epoch = max(1, batch_size // MB)
+            num_epochs_ppo = max(1, num_minibatches // mbs_per_epoch)
+            for _epoch in range(num_epochs_ppo):
+                for _mb in range(mbs_per_epoch):
+                    wp.capture_launch(gae_graph)
+                    wp.capture_launch(mb_graph)
+                # Per-epoch KL check (matches RSL-RL's per-epoch adaptation)
+                if cfg.desired_kl > 0:
+                    _kl_np = loss_bufs.loss_reduced.numpy()
+                    approx_kl = float(_kl_np[5])
+                    if approx_kl > cfg.desired_kl * 2.0:
+                        _h_lr.numpy()[0] = max(_h_lr.numpy()[0] / cfg.lr_adapt_factor, 1e-5)
+                        wp.copy(d_lr, _h_lr)
+                    elif approx_kl < cfg.desired_kl / 2.0:
+                        _h_lr.numpy()[0] = min(_h_lr.numpy()[0] * cfg.lr_adapt_factor, 1e-2)
+                        wp.copy(d_lr, _h_lr)
 
             # --- Only sync with host at log intervals ---
             should_log = total_steps >= cfg.total_timesteps
@@ -1064,17 +1078,7 @@ class PPOTrainer:
                 loss_np = loss_bufs.loss_reduced.numpy()
                 avg_ret = np.mean(recent_returns) if recent_returns else 0.0
 
-                # Adaptive LR based on KL divergence (RSL-RL style)
-                if cfg.desired_kl > 0:
-                    approx_kl = float(loss_np[5])  # column 5 = approx_kl
-                    if approx_kl > cfg.desired_kl * 2.0:
-                        cur_lr = _h_lr.numpy()[0] / cfg.lr_adapt_factor
-                        _h_lr.numpy()[0] = max(cur_lr, 1e-5)
-                        wp.copy(d_lr, _h_lr)
-                    elif approx_kl < cfg.desired_kl / 2.0:
-                        cur_lr = _h_lr.numpy()[0] * cfg.lr_adapt_factor
-                        _h_lr.numpy()[0] = min(cur_lr, 1e-2)
-                        wp.copy(d_lr, _h_lr)
+                # (Adaptive LR is applied every iteration above)
 
                 if fmt_ret is not None:
                     ret_str = fmt_ret(avg_ret, best_return, loss_np, sps)

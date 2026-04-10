@@ -74,9 +74,10 @@ def main():
     def log_fn(avg_ret, best_ret, loss_np, sps):
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
         watts = gpu_power()
+        kl = loss_np[5] if len(loss_np) > 5 else 0
         return (
             f"Ret {avg_ret:8.1f} | Best {best_ret:8.1f} | "
-            f"Ent {loss_np[3]:7.4f} | PG {loss_np[1]:9.5f} | VF {loss_np[2]:8.4f} | "
+            f"Ent {loss_np[3]:7.4f} | KL {kl:8.5f} | "
             f"SPS {sps:>9,.0f} | GPU {watts:.0f}W | RSS {rss}MB"
         )
 
@@ -108,7 +109,7 @@ def main():
         minibatch_size=max(N * 24 // 4, 4096),
         # Continuous action space
         continuous=True,
-        init_logstd=-1.0,
+        init_logstd=0.0,  # RSL-RL default: start with std=1.0
         # Observation normalization (critical for locomotion)
         normalize_obs=True,
         reward_clamp=30.0,
