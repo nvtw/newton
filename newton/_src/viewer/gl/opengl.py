@@ -1857,8 +1857,11 @@ class RendererGL:
         identity = np.eye(4, dtype=np.float32)
         with self._wireframe_shader:
             self._wireframe_shader.update_frame(
-                self._view_matrix, self._projection_matrix, inv_asp,
-                line_width=clip_width, alpha=1.0,
+                self._view_matrix,
+                self._projection_matrix,
+                inv_asp,
+                line_width=clip_width,
+                alpha=1.0,
             )
             self._wireframe_shader.set_world(identity)
             for line_obj in lines.values():
@@ -1883,8 +1886,12 @@ class RendererGL:
         identity = np.eye(4, dtype=np.float32)
         with self._arrow_shader:
             self._arrow_shader.update_frame(
-                self._view_matrix, self._projection_matrix, inv_asp,
-                line_width=clip_width, arrow_size=clip_arrow, alpha=1.0,
+                self._view_matrix,
+                self._projection_matrix,
+                inv_asp,
+                line_width=clip_width,
+                arrow_size=clip_arrow,
+                alpha=1.0,
             )
             self._arrow_shader.set_world(identity)
             for arrow_obj in arrows.values():
