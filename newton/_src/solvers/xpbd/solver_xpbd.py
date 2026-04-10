@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import math
+
 import warp as wp
 
 from ...core.types import override
@@ -25,6 +27,72 @@ from .kernels import (
     solve_tetrahedra,
     update_body_velocities,
 )
+from .pbf_kernels import (
+    apply_damping,
+    apply_pbf_deltas,
+    apply_vorticity,
+    calculate_density,
+    finalize_pbf_velocities,
+    solve_density,
+    vorticity_confinement,
+)
+
+
+def _calculate_rest_density(rest_distance: float, h: float) -> tuple[float, float, float]:
+    """Compute rest density, density constraint scale, and surface constraint scale.
+
+    Ported from PhysX ``CalculateRestDensity`` — generates a tight sphere packing
+    within radius *h* at spacing *rest_distance*, then evaluates the SPH spiky
+    kernel over those neighbors to obtain the rest density that the density
+    constraint should target.
+
+    Returns:
+        ``(rest_density, density_constraint_scale, surface_constraint_scale)``
+    """
+    if rest_distance <= 0.0:
+        return 0.0, 1.0, 1.0
+
+    inv_h = 1.0 / h
+    k_w = 15.0 / (math.pi * h * h * h)
+    k_dw = 30.0 / (math.pi * h * h * h * h)
+
+    sqrt_075 = math.sqrt(0.75)
+    dim = int(math.ceil(h / rest_distance))
+
+    rho = 0.0
+    rho_deriv = 0.0
+    a = 0.0
+    b = 0.0
+
+    for z in range(-dim, dim + 1):
+        for y in range(-dim, dim + 1):
+            for x in range(-dim, dim + 1):
+                offset = rest_distance * 0.5 if ((y + z) & 1) else 0.0
+                xpos = x * rest_distance + offset
+                ypos = y * sqrt_075 * rest_distance
+                zpos = z * sqrt_075 * rest_distance
+
+                d_sq = xpos * xpos + ypos * ypos + zpos * zpos
+                if d_sq == 0.0:
+                    continue
+                d = math.sqrt(d_sq)
+                if d > h:
+                    continue
+
+                q = d * inv_h
+                w = k_w * (1.0 - q) * (1.0 - q)
+                dw = -k_dw * (1.0 - q)
+
+                rho += w
+                rho_deriv += dw * dw
+
+                if ypos <= 0.0:
+                    cos_theta = ypos / d
+                    a += dw * cos_theta
+                    b -= d * cos_theta
+
+    surface_deriv = a / b if b != 0.0 else 1.0
+    return rho, rho_deriv, surface_deriv
 
 
 class SolverXPBD(SolverBase):
@@ -79,6 +147,22 @@ class SolverXPBD(SolverBase):
         rigid_contact_con_weighting: bool = True,
         angular_damping: float = 0.0,
         enable_restitution: bool = False,
+        # Position-Based Fluids parameters (set pbf_particle_contact_distance to enable)
+        pbf_particle_contact_distance: float | None = None,
+        pbf_fluid_rest_distance: float | None = None,
+        pbf_relaxation: float = 1.0,
+        pbf_viscosity: float = 0.0,
+        pbf_cohesion: float = 0.0,
+        pbf_surface_tension: float = 0.0,
+        pbf_vorticity_confinement: float = 0.0,
+        pbf_friction: float = 0.0,
+        pbf_particle_friction_scale: float = 1.0,
+        pbf_solid_rest_distance: float = 0.0,
+        pbf_cfl_coefficient: float = 1.0,
+        pbf_adhesion: float = 0.0,
+        pbf_particle_adhesion_scale: float = 1.0,
+        pbf_adhesion_radius_scale: float = 0.0,
+        pbf_damping: float = 0.0,
     ):
         super().__init__(model=model)
         self.iterations = iterations
@@ -110,6 +194,77 @@ class SolverXPBD(SolverBase):
             # reserve space for the particle hash grid
             with wp.ScopedDevice(model.device):
                 model.particle_grid.reserve(model.particle_count)
+
+        # --- PBF setup ---
+        self.pbf_enabled = pbf_particle_contact_distance is not None
+        if self.pbf_enabled:
+            h = pbf_particle_contact_distance
+            self.pbf_contact_distance_sq = h * h
+            self.pbf_inv_radius = 1.0 / h
+            self.pbf_spiky1 = 15.0 / (math.pi * h * h * h)
+            self.pbf_spiky2 = 30.0 / (math.pi * h * h * h * h)
+
+            fluid_rest_dist = pbf_fluid_rest_distance if pbf_fluid_rest_distance is not None else h * 0.6
+            rest_density, density_constraint_scale, surface_constraint_scale = _calculate_rest_density(
+                fluid_rest_dist, h
+            )
+            self.pbf_rest_density = rest_density
+            self.pbf_lambda_scale = 1.0 / density_constraint_scale
+
+            self.pbf_relaxation = pbf_relaxation
+            self.pbf_viscosity = pbf_viscosity
+            self.pbf_friction = pbf_friction
+            self.pbf_particle_friction_scale = pbf_particle_friction_scale
+            self.pbf_solid_rest_distance = pbf_solid_rest_distance
+            self.pbf_cfl_coefficient = pbf_cfl_coefficient
+            self.pbf_particle_contact_distance = h
+            self.pbf_damping = pbf_damping
+            self.pbf_vorticity_confinement = pbf_vorticity_confinement
+
+            inv_rest_density = 1.0 / rest_density if rest_density > 0.0 else 0.0
+
+            # Derive surface tension and cohesion following PhysX exactly:
+            #   surfaceTension = invRestDensity * mat.surfaceTension / surfaceConstraintScale
+            #   cohesion = mat.cohesion * particleContactDistance
+            if surface_constraint_scale != 0.0:
+                self.pbf_surface_tension = inv_rest_density * pbf_surface_tension / surface_constraint_scale
+            else:
+                self.pbf_surface_tension = pbf_surface_tension
+            self.pbf_cohesion = pbf_cohesion * h
+
+            # Adhesion parameters (following PhysX PBDMaterial)
+            self.pbf_adhesion = pbf_adhesion * pbf_particle_adhesion_scale
+            self.pbf_adhesion_radius_scale = pbf_adhesion_radius_scale
+            srd = pbf_solid_rest_distance
+            self.pbf_cohesion_radius = srd * pbf_adhesion_radius_scale if pbf_adhesion_radius_scale > 0.0 else 0.0
+            if self.pbf_cohesion_radius > srd and srd > 0.0:
+                self.pbf_inv_aura = 1.0 / (self.pbf_cohesion_radius - srd)
+            else:
+                self.pbf_inv_aura = 0.0
+
+            # Cohesion kernel coefficients from PhysX:
+            # W_cohesion(d) = c1*(d/h)^3 + c2*(d/h)^2 - 1
+            # With rest = fluidRestDistance / particleContactDistance:
+            #   c1 = -(1 + rest) / rest^2
+            #   c2 = (rest^2 + rest + 1) / rest^2
+            rest_ratio = fluid_rest_dist / h if h > 0.0 else 1.0
+            rest_sq = rest_ratio * rest_ratio
+            if rest_sq > 0.0:
+                self.pbf_cohesion1 = -(1.0 + rest_ratio) / rest_sq
+                self.pbf_cohesion2 = (rest_sq + rest_ratio + 1.0) / rest_sq
+            else:
+                self.pbf_cohesion1 = -2.0
+                self.pbf_cohesion2 = 3.0
+
+            n = model.particle_count
+            self._pbf_densities = wp.zeros(n, dtype=float, device=model.device)
+            self._pbf_surface_normals = wp.zeros(n, dtype=wp.vec3, device=model.device)
+            self._pbf_deltas = wp.zeros(n, dtype=wp.vec3, device=model.device)
+            self._pbf_weights = wp.zeros(n, dtype=float, device=model.device)
+            self._pbf_accum_delta = wp.zeros(n, dtype=wp.vec3, device=model.device)
+            if pbf_vorticity_confinement > 0.0:
+                self._pbf_curl = wp.zeros(n, dtype=wp.vec3, device=model.device)
+                self._pbf_curl_mag = wp.zeros(n, dtype=float, device=model.device)
 
     @override
     def notify_model_changed(self, flags: int) -> None:
@@ -272,9 +427,16 @@ class SolverXPBD(SolverBase):
                 # Build/update the particle hash grid for particle-particle contact queries
                 if model.particle_count > 1 and model.particle_grid is not None:
                     # Search radius must cover the maximum interaction distance used by the contact query
-                    search_radius = model.particle_max_radius * 2.0 + model.particle_cohesion
+                    grid_search_radius = model.particle_max_radius * 2.0 + model.particle_cohesion
+                    if self.pbf_enabled:
+                        grid_search_radius = max(grid_search_radius, self.pbf_particle_contact_distance)
+                        if self.pbf_cohesion_radius > 0.0:
+                            grid_search_radius = max(grid_search_radius, self.pbf_cohesion_radius)
                     with wp.ScopedDevice(model.device):
-                        model.particle_grid.build(state_out.particle_q, radius=search_radius)
+                        model.particle_grid.build(state_out.particle_q, radius=grid_search_radius)
+
+                if self.pbf_enabled:
+                    self._pbf_accum_delta.zero_()
 
             if model.body_count:
                 body_q = state_out.body_q
@@ -339,6 +501,89 @@ class SolverXPBD(SolverBase):
                             particle_deltas = wp.zeros_like(particle_deltas)
                         else:
                             particle_deltas.zero_()
+
+                        # --- PBF density calculation ---
+                        if self.pbf_enabled and model.particle_grid is not None:
+                            # Rebuild hash grid each iteration so neighbor
+                            # queries reflect the corrected positions.
+                            if i > 0:
+                                with wp.ScopedDevice(model.device):
+                                    model.particle_grid.build(particle_q, radius=grid_search_radius)
+
+                            self._pbf_densities.zero_()
+                            self._pbf_surface_normals.zero_()
+                            wp.launch(
+                                kernel=calculate_density,
+                                dim=model.particle_count,
+                                inputs=[
+                                    model.particle_grid.id,
+                                    particle_q,
+                                    model.particle_flags,
+                                    self.pbf_contact_distance_sq,
+                                    self.pbf_inv_radius,
+                                    self.pbf_spiky1,
+                                    self.pbf_spiky2,
+                                    self.pbf_rest_density,
+                                    self.pbf_lambda_scale,
+                                    self.pbf_surface_tension,
+                                ],
+                                outputs=[self._pbf_densities, self._pbf_surface_normals],
+                                device=model.device,
+                            )
+
+                            # Compute displacement from predicted position for viscosity/CFL
+                            pbf_delta_pos = self._pbf_accum_delta
+
+                            self._pbf_deltas.zero_()
+                            self._pbf_weights.zero_()
+                            wp.launch(
+                                kernel=solve_density,
+                                dim=model.particle_count,
+                                inputs=[
+                                    model.particle_grid.id,
+                                    particle_q,
+                                    model.particle_flags,
+                                    model.particle_inv_mass,
+                                    self._pbf_densities,
+                                    self._pbf_surface_normals,
+                                    pbf_delta_pos,
+                                    self.pbf_contact_distance_sq,
+                                    self.pbf_inv_radius,
+                                    self.pbf_spiky1,
+                                    self.pbf_spiky2,
+                                    self.pbf_solid_rest_distance,
+                                    self.pbf_friction,
+                                    self.pbf_particle_friction_scale,
+                                    self.pbf_viscosity,
+                                    1.0 / self.pbf_rest_density,
+                                    self.pbf_cohesion,
+                                    self.pbf_cohesion1,
+                                    self.pbf_cohesion2,
+                                    self.pbf_surface_tension,
+                                    self.pbf_cfl_coefficient,
+                                    self.pbf_adhesion,
+                                    self.pbf_cohesion_radius,
+                                    self.pbf_inv_aura,
+                                    1.0,  # coefficient
+                                    dt,
+                                ],
+                                outputs=[self._pbf_deltas, self._pbf_weights],
+                                device=model.device,
+                            )
+
+                            wp.launch(
+                                kernel=apply_pbf_deltas,
+                                dim=model.particle_count,
+                                inputs=[
+                                    particle_q,
+                                    model.particle_flags,
+                                    self._pbf_deltas,
+                                    self._pbf_weights,
+                                    self.pbf_relaxation,
+                                ],
+                                outputs=[self._pbf_accum_delta],
+                                device=model.device,
+                            )
 
                         # particle-rigid body contacts (besides ground plane)
                         if model.shape_count:
@@ -566,6 +811,81 @@ class SolverXPBD(SolverBase):
                         )
 
                         body_q, body_qd = self._apply_body_deltas(model, state_in, state_out, body_deltas, dt)
+
+            # --- PBF post-iteration passes ---
+            if self.pbf_enabled and model.particle_count and model.particle_grid is not None:
+                # Rebuild grid for the post-iteration neighbor queries
+                with wp.ScopedDevice(model.device):
+                    model.particle_grid.build(particle_q, radius=grid_search_radius)
+
+                # Vorticity confinement (optional)
+                if self.pbf_vorticity_confinement > 0.0:
+                    self._pbf_curl.zero_()
+                    self._pbf_curl_mag.zero_()
+                    wp.launch(
+                        kernel=vorticity_confinement,
+                        dim=model.particle_count,
+                        inputs=[
+                            model.particle_grid.id,
+                            particle_q,
+                            particle_qd,
+                            model.particle_flags,
+                            self.pbf_contact_distance_sq,
+                            self.pbf_inv_radius,
+                            self.pbf_spiky2,
+                        ],
+                        outputs=[self._pbf_curl, self._pbf_curl_mag],
+                        device=model.device,
+                    )
+
+                    wp.launch(
+                        kernel=apply_vorticity,
+                        dim=model.particle_count,
+                        inputs=[
+                            model.particle_grid.id,
+                            particle_q,
+                            model.particle_flags,
+                            self._pbf_curl,
+                            self._pbf_curl_mag,
+                            self.pbf_contact_distance_sq,
+                            self.pbf_inv_radius,
+                            self.pbf_spiky2,
+                            self.pbf_vorticity_confinement,
+                            1.0 / self.pbf_rest_density,
+                            dt,
+                        ],
+                        outputs=[particle_qd],
+                        device=model.device,
+                    )
+
+                # Velocity damping (used e.g. for snow settling)
+                if self.pbf_damping > 0.0:
+                    wp.launch(
+                        kernel=apply_damping,
+                        dim=model.particle_count,
+                        inputs=[
+                            particle_qd,
+                            model.particle_flags,
+                            self.pbf_damping,
+                            dt,
+                        ],
+                        device=model.device,
+                    )
+
+                # Recompute fluid particle velocities from position change
+                wp.launch(
+                    kernel=finalize_pbf_velocities,
+                    dim=model.particle_count,
+                    inputs=[
+                        particle_q,
+                        self.particle_q_init,
+                        model.particle_flags,
+                        dt,
+                        model.particle_max_velocity,
+                    ],
+                    outputs=[particle_qd],
+                    device=model.device,
+                )
 
             if model.particle_count:
                 if particle_q.ptr != state_out.particle_q.ptr:

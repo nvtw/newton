@@ -13,6 +13,9 @@ class ParticleFlags(IntEnum):
     ACTIVE = 1 << 0
     """Indicates that the particle is active."""
 
+    FLUID = 1 << 1
+    """Indicates that the particle is a fluid particle (used by position-based fluids)."""
+
 
 # Shape flags
 class ShapeFlags(IntEnum):

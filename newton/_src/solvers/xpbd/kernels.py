@@ -259,8 +259,14 @@ def solve_particle_particle_contacts(
 
     delta = wp.vec3(0.0)
 
+    is_fluid_i = (particle_flags[i] & ParticleFlags.FLUID) != 0
+
     while wp.hash_grid_query_next(query, index):
         if (particle_flags[index] & ParticleFlags.ACTIVE) != 0 and index != i:
+            # Skip fluid-fluid pairs — handled by PBF density constraint
+            if is_fluid_i and (particle_flags[index] & ParticleFlags.FLUID) != 0:
+                continue
+
             # compute distance to point
             n = x - particle_x[index]
             d = wp.length(n)
