@@ -297,6 +297,24 @@ def make_contact_value(score: float, fingerprint: int, contact_id: int) -> wp.ui
     )
 
 
+@wp.func
+def make_preprune_probe(score: float, fingerprint: int) -> wp.uint64:
+    """Build a pre-prune probe with the given score/fingerprint and max contact_id.
+
+    The probe represents the *ceiling* for this (score, fingerprint) pair.
+    ``stored < probe`` is true whenever the stored value can be beaten by a
+    contact with this score and fingerprint, regardless of what contact_id it
+    receives.  This makes the pre-prune deterministic: the decision depends
+    only on the deterministic score and fingerprint, never on the
+    non-deterministic contact_id.
+    """
+    return (
+        (wp.uint64(float_flip(score) >> wp.uint32(SCORE_SHIFT)) << wp.uint64(42))
+        | ((wp.uint64(fingerprint) & FINGERPRINT_MASK) << CONTACT_ID_BITS)
+        | CONTACT_ID_MASK
+    )
+
+
 @wp.func_native("""
 return static_cast<int32_t>(packed & 0xFFFFFull);
 """)
@@ -961,14 +979,16 @@ def export_and_reduce_contact_centered(
     entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
 
     # === Pre-prune normal bin: non-atomic reads ===
-    # Skip when deterministic: the non-atomic reads of ht_values race with
-    # concurrent atomic_max writes, so a contact that *would* win a slot can
-    # see a stale value and be permanently discarded.  Disabling the
-    # pre-prune ensures every candidate competes in the atomic_max.
-    might_win = reducer_data.deterministic != 0
+    # In deterministic mode we use make_preprune_probe (score + fingerprint +
+    # max contact_id) so the prune decision never depends on the non-deterministic
+    # contact_id.  In non-deterministic mode we use the cheaper floor probe.
+    might_win = False
 
-    if entry_idx >= 0 and not might_win:
-        max_depth_probe = make_contact_value(-depth, 0, 0)
+    if entry_idx >= 0:
+        if reducer_data.deterministic != 0:
+            max_depth_probe = make_preprune_probe(-depth, fingerprint)
+        else:
+            max_depth_probe = make_contact_value(-depth, 0, 0)
         if reducer_data.ht_values[wp.static(NUM_SPATIAL_DIRECTIONS) * ht_capacity + entry_idx] < max_depth_probe:
             might_win = True
 
@@ -977,7 +997,10 @@ def export_and_reduce_contact_centered(
                 if not might_win:
                     dir_2d = get_spatial_direction_2d(dir_i)
                     score = wp.dot(pos_2d, dir_2d)
-                    probe = make_contact_value(score, 0, 0)
+                    if reducer_data.deterministic != 0:
+                        probe = make_preprune_probe(score, fingerprint)
+                    else:
+                        probe = make_contact_value(score, 0, 0)
                     if reducer_data.ht_values[dir_i * ht_capacity + entry_idx] < probe:
                         might_win = True
 
@@ -996,7 +1019,10 @@ def export_and_reduce_contact_centered(
     if not might_win:
         voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
         if voxel_entry_idx >= 0:
-            voxel_probe = make_contact_value(-depth, 0, 0)
+            if reducer_data.deterministic != 0:
+                voxel_probe = make_preprune_probe(-depth, fingerprint)
+            else:
+                voxel_probe = make_contact_value(-depth, 0, 0)
             if reducer_data.ht_values[voxel_local_slot * ht_capacity + voxel_entry_idx] < voxel_probe:
                 might_win = True
 
