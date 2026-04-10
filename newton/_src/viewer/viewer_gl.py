@@ -408,6 +408,7 @@ class ViewerGL(ViewerBase):
         # Render object and line caches (path -> GL object)
         self.objects = {}
         self.lines = {}
+        self.arrows = {}
         self._destroy_all_wireframes()
         self.wireframe_shapes = {}
         self._wireframe_vbo_owners: dict[int, WireframeShapeGL] = {}
@@ -886,6 +887,57 @@ class ViewerGL(ViewerBase):
             self.lines[name] = LinesGL(max_lines, self.device, hidden=hidden)
 
         self.lines[name].update(starts, ends, colors)
+
+    @override
+    def log_arrows(
+        self,
+        name: str,
+        starts: wp.array[wp.vec3] | None,
+        ends: wp.array[wp.vec3] | None,
+        colors: (wp.array[wp.vec3] | wp.array[wp.float32] | tuple[float, float, float] | list[float] | None),
+        width: float = 0.01,
+        hidden: bool = False,
+    ):
+        """Log arrow data for rendering (wide line + arrowhead per segment).
+
+        Args:
+            name: Unique identifier for the arrow batch.
+            starts: Array of arrow start positions (shape: [N, 3]) or None for empty.
+            ends: Array of arrow end positions / arrowhead tips (shape: [N, 3]) or None for empty.
+            colors: Array of arrow colors (shape: [N, 3]) or tuple/list of RGB or None for empty.
+            width: The width of the arrow lines.
+            hidden: Whether the arrows are initially hidden.
+        """
+        if starts is None or ends is None or colors is None:
+            if name in self.arrows:
+                self.arrows[name].update(None, None, None)
+            return
+
+        assert isinstance(starts, wp.array)
+        assert isinstance(ends, wp.array)
+        num_arrows = len(starts)
+        assert len(ends) == num_arrows, "Number of arrow ends must match arrow begins"
+
+        if isinstance(colors, tuple | list):
+            if num_arrows > 0:
+                color_vec = wp.vec3(*colors)
+                colors = wp.zeros(num_arrows, dtype=wp.vec3, device=self.device)
+                colors.fill_(color_vec)
+            else:
+                colors = wp.array([], dtype=wp.vec3, device=self.device)
+
+        assert isinstance(colors, wp.array)
+        assert len(colors) == num_arrows, "Number of arrow colors must match arrow begins"
+
+        if name not in self.arrows:
+            max_arrows = max(num_arrows, 1000)
+            self.arrows[name] = LinesGL(max_arrows, self.device, hidden=hidden)
+        elif num_arrows > self.arrows[name].max_lines:
+            self.arrows[name].destroy()
+            max_arrows = max(num_arrows, self.arrows[name].max_lines * 2)
+            self.arrows[name] = LinesGL(max_arrows, self.device, hidden=hidden)
+
+        self.arrows[name].update(starts, ends, colors)
 
     @override
     def log_wireframe_shape(
@@ -1383,7 +1435,7 @@ class ViewerGL(ViewerBase):
             return
 
         # Render the scene and present it
-        self.renderer.render(self.camera, self.objects, self.lines, self.wireframe_shapes)
+        self.renderer.render(self.camera, self.objects, self.lines, self.wireframe_shapes, self.arrows)
 
         # Always update FPS tracking, even if UI is hidden
         self._update_fps()
@@ -2104,6 +2156,14 @@ class ViewerGL(ViewerBase):
                     show_contacts = self.show_contacts
                     changed, self.show_contacts = imgui.checkbox("Show Contacts", show_contacts)
 
+                    if self.show_contacts:
+                        _, self.renderer.arrow_line_width = imgui.slider_float(
+                            "Arrow Line Width (px)", self.renderer.arrow_line_width, 0.5, 5.0
+                        )
+                        _, self.renderer.arrow_head_size = imgui.slider_float(
+                            "Arrow Head Size (px)", self.renderer.arrow_head_size, 2.0, 20.0
+                        )
+
                     # Particle visualization
                     show_particles = self.show_particles
                     changed, self.show_particles = imgui.checkbox("Show Particles", show_particles)
@@ -2131,7 +2191,7 @@ class ViewerGL(ViewerBase):
 
                     if self.sdf_margin_mode != self.SDFMarginMode.OFF:
                         _, self.renderer.wireframe_line_width = imgui.slider_float(
-                            "Line Width (px)", self.renderer.wireframe_line_width, 0.5, 5.0
+                            "Wireframe Width (px)", self.renderer.wireframe_line_width, 0.5, 5.0
                         )
 
                     # Visual geometry toggle

@@ -31,35 +31,6 @@ void main() { }
 """
 
 
-line_vertex_shader = """
-#version 330 core
-layout (location = 0) in vec3 aPos;
-layout (location = 1) in vec3 aColor;
-
-uniform mat4 view;
-uniform mat4 projection;
-
-out vec3 vertexColor;
-
-void main()
-{
-    vertexColor = aColor;
-    gl_Position = projection * view * vec4(aPos, 1.0);
-}
-"""
-
-line_fragment_shader = """
-#version 330 core
-in vec3 vertexColor;
-out vec4 FragColor;
-
-void main()
-{
-    FragColor = vec4(vertexColor, 1.0);
-}
-"""
-
-
 shape_vertex_shader = """
 #version 330 core
 layout (location = 0) in vec3 aPos;
@@ -723,30 +694,6 @@ class FrameShader(ShaderGL):
             self._gl.glUniform1i(self.loc_texture, texture_unit)
 
 
-class ShaderLine(ShaderGL):
-    """Simple shader for rendering lines with per-vertex colors."""
-
-    def __init__(self, gl):
-        super().__init__()
-        from pyglet.graphics.shader import Shader, ShaderProgram
-
-        self._gl = gl
-        self.shader_program = ShaderProgram(
-            Shader(line_vertex_shader, "vertex"), Shader(line_fragment_shader, "fragment")
-        )
-
-        # Get uniform locations
-        with self:
-            self.loc_view = self._get_uniform_location("view")
-            self.loc_projection = self._get_uniform_location("projection")
-
-    def update(self, view_matrix: np.ndarray, projection_matrix: np.ndarray):
-        """Update view and projection matrices for line rendering."""
-        with self:
-            self._gl.glUniformMatrix4fv(self.loc_view, 1, self._gl.GL_FALSE, arr_pointer(view_matrix))
-            self._gl.glUniformMatrix4fv(self.loc_projection, 1, self._gl.GL_FALSE, arr_pointer(projection_matrix))
-
-
 wireframe_vertex_shader = """
 #version 330 core
 layout (location = 0) in vec3 aPos;
@@ -829,7 +776,7 @@ void main()
 """
 
 
-class ShaderLineWireframe(ShaderGL):
+class ShaderLine(ShaderGL):
     """Geometry-shader-based line renderer that expands GL_LINES into screen-space quads."""
 
     def __init__(self, gl):
@@ -864,6 +811,124 @@ class ShaderLineWireframe(ShaderGL):
         self._gl.glUniformMatrix4fv(self.loc_projection, 1, self._gl.GL_FALSE, arr_pointer(projection_matrix))
         self._gl.glUniform1f(self.loc_inv_asp_ratio, float(inv_asp_ratio))
         self._gl.glUniform1f(self.loc_line_width, float(line_width))
+        self._gl.glUniform1f(self.loc_alpha, float(alpha))
+
+    def set_world(self, world: np.ndarray):
+        """Set the per-shape world matrix uniform."""
+        self._gl.glUniformMatrix4fv(self.loc_world, 1, self._gl.GL_FALSE, arr_pointer(world))
+
+
+arrow_geometry_shader = """
+#version 330 core
+layout (lines) in;
+layout (triangle_strip, max_vertices = 9) out;
+
+in vec3 vertexColor[2];
+out vec3 lineColor;
+
+uniform float inv_asp_ratio;
+uniform float line_width;
+uniform float arrow_size;
+
+void main()
+{
+    vec4 s = gl_in[0].gl_Position;
+    vec4 e = gl_in[1].gl_Position;
+    if (s.w <= 0.0 || e.w <= 0.0) return;
+
+    vec2 s_ndc = s.xy / s.w;
+    vec2 e_ndc = e.xy / e.w;
+    float s_depth = s.z / s.w;
+    float e_depth = e.z / e.w;
+
+    vec2 dir = e_ndc - s_ndc;
+    float len = length(dir);
+
+    vec3 color = 0.5 * (vertexColor[0] + vertexColor[1]);
+
+    // Degenerate case: line points into/out of screen
+    if (len < 1e-6) {
+        float r = arrow_size * 0.4;
+        vec2 up = vec2(0.0, r);
+        vec2 rt = vec2(r * inv_asp_ratio, 0.0);
+        gl_Position = vec4(e_ndc + up, e_depth, 1); lineColor = color; EmitVertex();
+        gl_Position = vec4(e_ndc - rt, e_depth, 1); lineColor = color; EmitVertex();
+        gl_Position = vec4(e_ndc + rt, e_depth, 1); lineColor = color; EmitVertex();
+        EndPrimitive();
+        return;
+    }
+
+    vec2 fwd = dir / len;
+    vec2 right = vec2(fwd.y, -fwd.x);
+    right.x *= inv_asp_ratio;
+
+    // Triangle 1+2: line body quad
+    vec2 xy = 0.5 * line_width * right;
+
+    gl_Position = vec4(s_ndc - xy, s_depth, 1); lineColor = color; EmitVertex();
+    gl_Position = vec4(e_ndc + xy, e_depth, 1); lineColor = color; EmitVertex();
+    gl_Position = vec4(s_ndc + xy, s_depth, 1); lineColor = color; EmitVertex();
+    EndPrimitive();
+
+    gl_Position = vec4(s_ndc - xy, s_depth, 1); lineColor = color; EmitVertex();
+    gl_Position = vec4(e_ndc - xy, e_depth, 1); lineColor = color; EmitVertex();
+    gl_Position = vec4(e_ndc + xy, e_depth, 1); lineColor = color; EmitVertex();
+    EndPrimitive();
+
+    // Triangle 3: arrowhead at endpoint
+    vec2 fwd_asp = fwd;
+    fwd_asp.x *= inv_asp_ratio;
+
+    vec2 tip    = e_ndc + fwd_asp * arrow_size;
+    vec2 base_l = e_ndc - right * arrow_size * 0.5;
+    vec2 base_r = e_ndc + right * arrow_size * 0.5;
+
+    gl_Position = vec4(tip,    e_depth, 1); lineColor = color; EmitVertex();
+    gl_Position = vec4(base_l, e_depth, 1); lineColor = color; EmitVertex();
+    gl_Position = vec4(base_r, e_depth, 1); lineColor = color; EmitVertex();
+    EndPrimitive();
+}
+"""
+
+
+class ShaderArrow(ShaderGL):
+    """Geometry-shader-based arrow renderer: wide line + arrowhead triangle per segment."""
+
+    def __init__(self, gl):
+        super().__init__()
+        from pyglet.graphics.shader import Shader, ShaderProgram
+
+        self._gl = gl
+        self.shader_program = ShaderProgram(
+            Shader(wireframe_vertex_shader, "vertex"),
+            Shader(arrow_geometry_shader, "geometry"),
+            Shader(wireframe_fragment_shader, "fragment"),
+        )
+
+        with self:
+            self.loc_view = self._get_uniform_location("view")
+            self.loc_projection = self._get_uniform_location("projection")
+            self.loc_world = self._get_uniform_location("world")
+            self.loc_inv_asp_ratio = self._get_uniform_location("inv_asp_ratio")
+            self.loc_line_width = self._get_uniform_location("line_width")
+            self.loc_arrow_size = self._get_uniform_location("arrow_size")
+            self.loc_alpha = self._get_uniform_location("alpha")
+
+    def update_frame(
+        self,
+        view_matrix: np.ndarray,
+        projection_matrix: np.ndarray,
+        inv_asp_ratio: float,
+        line_width: float = 0.003,
+        arrow_size: float = 0.01,
+        alpha: float = 1.0,
+    ):
+        """Set per-frame uniforms (call once before rendering all arrow batches)."""
+        self._gl.glUniformMatrix4fv(self.loc_view, 1, self._gl.GL_FALSE, arr_pointer(view_matrix))
+        self._gl.glUniformMatrix4fv(self.loc_projection, 1, self._gl.GL_FALSE, arr_pointer(projection_matrix))
+        self._gl.glUniform1f(self.loc_inv_asp_ratio, float(inv_asp_ratio))
+        self._gl.glUniform1f(self.loc_line_width, float(line_width))
+        self._gl.glUniform1f(self.loc_arrow_size, float(arrow_size))
         self._gl.glUniform1f(self.loc_alpha, float(alpha))
 
     def set_world(self, world: np.ndarray):
