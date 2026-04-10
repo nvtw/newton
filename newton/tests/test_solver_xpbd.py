@@ -605,6 +605,48 @@ def test_xpbd_contact_force_zero_when_no_contact(test, device):
         np.testing.assert_allclose(forces, 0.0, atol=1e-6, err_msg="No contact force expected in free-fall")
 
 
+def test_xpbd_contact_force_zero_when_not_touching(test, device):
+    """A sphere near a ground plane with a large gap: contact pair exists but force is zero."""
+    radius = 0.25
+    gap = 1.0
+    # Place sphere so it's within the gap (contact pair generated) but not penetrating.
+    # Ground is at z=0, sphere center at z = radius + 0.5*gap (well above surface).
+    z = radius + 0.5 * gap
+
+    builder = newton.ModelBuilder()
+    builder.default_shape_cfg.gap = gap
+    builder.add_ground_plane()
+    body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, z), wp.quat_identity()))
+    builder.add_shape_sphere(body=body, radius=radius)
+    model = builder.finalize(device=device)
+    model.set_gravity(wp.vec3(0.0, 0.0, 0.0))
+    model.request_contact_attributes("force")
+
+    solver = newton.solvers.SolverXPBD(model, iterations=2)
+    state_in = model.state()
+    state_out = model.state()
+    control = model.control()
+    contacts = model.contacts()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
+
+    state_in.clear_forces()
+    model.collide(state_in, contacts)
+
+    ncontacts = int(contacts.rigid_contact_count.numpy()[0])
+    test.assertGreater(ncontacts, 0, "Gap should cause a contact pair to be generated")
+
+    solver.step(state_in, state_out, control, contacts, 1.0 / 60.0)
+    solver.update_contacts(contacts, state_out)
+
+    forces = contacts.force.numpy()[:ncontacts, :3]
+    np.testing.assert_allclose(
+        forces,
+        0.0,
+        atol=1e-6,
+        err_msg="Contact pair within gap but not touching should report zero force",
+    )
+
+
 def test_xpbd_update_contacts_requires_force_attribute(test, device):
     """update_contacts should raise ValueError when contacts.force is not allocated."""
     builder = newton.ModelBuilder()
@@ -697,6 +739,14 @@ add_function_test(
     TestSolverXPBD,
     "test_xpbd_contact_force_zero_when_no_contact",
     test_xpbd_contact_force_zero_when_no_contact,
+    devices=devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestSolverXPBD,
+    "test_xpbd_contact_force_zero_when_not_touching",
+    test_xpbd_contact_force_zero_when_not_touching,
     devices=devices,
     check_output=False,
 )
