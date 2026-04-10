@@ -242,10 +242,11 @@ def make_contact_key(shape_a: int, shape_b: int, bin_id: int) -> wp.uint64:
     return key
 
 
-FINGERPRINT_BITS = wp.constant(wp.uint64(12))
+FINGERPRINT_BITS = wp.constant(wp.uint64(22))
 CONTACT_ID_BITS = wp.constant(wp.uint64(20))
 CONTACT_ID_MASK = wp.constant(wp.uint64((1 << 20) - 1))
-FINGERPRINT_MASK = wp.constant(wp.uint64((1 << 12) - 1))
+FINGERPRINT_MASK = wp.constant(wp.uint64((1 << 22) - 1))
+SCORE_SHIFT = wp.constant(wp.uint64(10))
 
 
 @wp.func
@@ -253,25 +254,44 @@ def make_contact_value(score: float, fingerprint: int, contact_id: int) -> wp.ui
     """Pack score, fingerprint, and contact_id into hashtable value for atomic max.
 
     Bit layout (64 bits total):
-        [63:32] float_flip(score) — dominates comparison
-        [31:20] fingerprint (12 bits) — deterministic tiebreaker (triangle/edge/vertex index)
+        [63:42] float_flip(score) >> 10 (22 bits) — dominates comparison
+        [41:20] fingerprint (22 bits) — deterministic tiebreaker (edge/triangle index + tag bits)
         [19:0]  contact_id (20 bits) — buffer slot for export
 
-    When two contacts have the same score, the fingerprint (derived from
-    geometry, e.g. triangle index) breaks the tie deterministically.  Only
-    when both score and fingerprint match does the contact_id matter —
-    which requires two geometrically identical contacts, an impossible case.
+    The score is truncated to its 22 most-significant bits.  Since
+    ``float_flip`` produces an order-preserving uint32, dropping the low
+    10 bits loses ~3 decimal digits of precision — more than enough to
+    distinguish spatially different contacts while freeing 10 extra bits
+    for the fingerprint.
+
+    When two contacts have the same truncated score, the fingerprint
+    (derived from geometry, e.g. edge index | mode bit) breaks the tie
+    deterministically.  Only when both score and fingerprint match does
+    the contact_id matter — which requires two geometrically identical
+    contacts, an impossible case.
 
     Args:
         score: Spatial projection score or negated depth (higher is better)
-        fingerprint: Deterministic contact identifier (e.g. triangle index)
+        fingerprint: Deterministic contact identifier (e.g. edge index with tag bits)
         contact_id: Index into the contact buffer
 
     Returns:
         64-bit value for hashtable (atomic max will select highest score)
     """
+    if wp.uint64(fingerprint) > FINGERPRINT_MASK:
+        wp.printf(
+            "WARNING: fingerprint overflow: fingerprint=%d exceeds 22-bit max (%d)\n",
+            fingerprint,
+            int(FINGERPRINT_MASK),
+        )
+    if wp.uint64(contact_id) > CONTACT_ID_MASK:
+        wp.printf(
+            "WARNING: contact_id overflow: contact_id=%d exceeds 20-bit max (%d)\n",
+            contact_id,
+            int(CONTACT_ID_MASK),
+        )
     return (
-        (wp.uint64(float_flip(score)) << wp.uint64(32))
+        (wp.uint64(float_flip(score) >> wp.uint32(SCORE_SHIFT)) << wp.uint64(42))
         | ((wp.uint64(fingerprint) & FINGERPRINT_MASK) << CONTACT_ID_BITS)
         | (wp.uint64(contact_id) & CONTACT_ID_MASK)
     )
@@ -398,6 +418,13 @@ class GlobalContactReducerData:
     ht_insert_failures: wp.array[wp.int32]
     ht_capacity: int
     ht_values_per_key: int
+
+    # When non-zero, skip the speculative pre-prune in
+    # export_and_reduce_contact_centered so that every candidate contact
+    # is buffered and competes in the atomic_max reduction.  The pre-prune
+    # uses non-atomic reads of ht_values which are racy with concurrent
+    # atomic_max writes, causing thread-scheduling-dependent pruning.
+    deterministic: int
 
 
 @wp.kernel(enable_backward=False)
@@ -533,6 +560,7 @@ class GlobalContactReducer:
         device: str | None = None,
         store_hydroelastic_data: bool = False,
         store_moment_data: bool = False,
+        deterministic: bool = False,
     ):
         """Initialize the global contact reducer.
 
@@ -542,10 +570,13 @@ class GlobalContactReducer:
             store_hydroelastic_data: If True, allocate arrays for contact_area and entry_k_eff
             store_moment_data: If True, allocate moment accumulator arrays for friction
                 moment matching. Only needed when ``moment_matching=True``.
+            deterministic: If True, disable the speculative pre-prune optimization
+                so that every candidate contact competes in the atomic_max reduction.
         """
         self.capacity = capacity
         self.device = device
         self.store_hydroelastic_data = store_hydroelastic_data
+        self.deterministic = deterministic
 
         self.values_per_key = NUM_SPATIAL_DIRECTIONS + 1
 
@@ -696,6 +727,7 @@ class GlobalContactReducer:
         data.ht_insert_failures = self.ht_insert_failures
         data.ht_capacity = self.hashtable.capacity
         data.ht_values_per_key = self.values_per_key
+        data.deterministic = 1 if self.deterministic else 0
         return data
 
 
@@ -929,10 +961,13 @@ def export_and_reduce_contact_centered(
     entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
 
     # === Pre-prune normal bin: non-atomic reads ===
-    might_win = False
+    # Skip when deterministic: the non-atomic reads of ht_values race with
+    # concurrent atomic_max writes, so a contact that *would* win a slot can
+    # see a stale value and be permanently discarded.  Disabling the
+    # pre-prune ensures every candidate competes in the atomic_max.
+    might_win = reducer_data.deterministic != 0
 
-    if entry_idx >= 0:
-        # Check max-depth slot first (cheapest — no direction computation)
+    if entry_idx >= 0 and not might_win:
         max_depth_probe = make_contact_value(-depth, 0, 0)
         if reducer_data.ht_values[wp.static(NUM_SPATIAL_DIRECTIONS) * ht_capacity + entry_idx] < max_depth_probe:
             might_win = True
@@ -1350,5 +1385,5 @@ def mesh_triangle_contacts_to_reducer_kernel(
             margin_offset_a,
             margin_offset_b,
             reducer_data,
-            tri_idx,
+            (tri_idx << 1) | 1,
         )

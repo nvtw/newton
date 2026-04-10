@@ -982,7 +982,7 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
                 margin_offset_a,
                 margin_offset_b,
                 writer_data,
-                tri_idx,
+                (tri_idx << 1) | 1,
             )
 
     return narrow_phase_process_mesh_triangle_contacts_kernel
@@ -1556,7 +1556,9 @@ class NarrowPhase:
             # Slot layout: NUM_SPATIAL_DIRECTIONS spatial + 1 max-depth = VALUES_PER_KEY slots per key
             self.export_reduced_contacts_kernel = create_export_reduced_contacts_kernel(writer_func)
             # Global contact reducer for all mesh contact types
-            self.global_contact_reducer = GlobalContactReducer(max_triangle_pairs, device=device)
+            self.global_contact_reducer = GlobalContactReducer(
+                max_triangle_pairs, device=device, deterministic=deterministic
+            )
         else:
             self.export_reduced_contacts_kernel = None
             self.global_contact_reducer = None

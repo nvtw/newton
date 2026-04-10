@@ -1259,7 +1259,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             contact_data.shape_a = pair[0]
                             contact_data.shape_b = pair[1]
                             contact_data.gap_sum = gap_sum
-                            contact_data.sort_sub_key = (edge_idx << 1) | mode
+                            contact_data.sort_sub_key = (edge_idx << 2) | (mode << 1)
 
                             writer_func(contact_data, writer_data, -1)
 
@@ -1555,7 +1555,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 point_world,
                                 contact_normal,
                                 dist,
-                                edge_idx,
+                                (edge_idx << 2) | (mode << 1),
                                 point_world - midpoint,
                                 X_ws_tri,
                                 aabb_lower_tri,
