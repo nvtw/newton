@@ -853,7 +853,7 @@ class ViewerGL(ViewerBase):
         """Log line data for rendering.
 
         Lines are drawn as screen-space quads whose pixel width is set by
-        :pyattr:`RendererGL.line_width`.  The *width* parameter is currently
+        :attr:`RendererGL.line_width`.  The *width* parameter is currently
         unused and reserved for future world-space width support.
 
         Args:

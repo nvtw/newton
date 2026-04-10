@@ -1846,7 +1846,7 @@ class RendererGL:
         """Render all line objects using the geometry-shader wide-line pipeline."""
         gl = RendererGL.gl
         inv_asp = float(self._screen_height) / float(max(self._screen_width, 1))
-        clip_width = self.line_width * 2.0 / max(self._screen_height, 1)
+        clip_width = max(0.0, self.line_width) * 2.0 / max(self._screen_height, 1)
 
         gl.glEnable(gl.GL_DEPTH_TEST)
         gl.glDisable(gl.GL_CULL_FACE)
@@ -1874,8 +1874,9 @@ class RendererGL:
         """Render arrow batches (wide line + arrowhead triangle per segment)."""
         gl = RendererGL.gl
         inv_asp = float(self._screen_height) / float(max(self._screen_width, 1))
-        clip_width = (2.0 * self.arrow_scale) * 2.0 / max(self._screen_height, 1)
-        clip_arrow = (8.0 * self.arrow_scale) * 2.0 / max(self._screen_height, 1)
+        scale = max(0.0, self.arrow_scale)
+        clip_width = (2.0 * scale) * 2.0 / max(self._screen_height, 1)
+        clip_arrow = (8.0 * scale) * 2.0 / max(self._screen_height, 1)
 
         gl.glEnable(gl.GL_DEPTH_TEST)
         gl.glDisable(gl.GL_CULL_FACE)
