@@ -242,41 +242,73 @@ def make_contact_key(shape_a: int, shape_b: int, bin_id: int) -> wp.uint64:
     return key
 
 
+# Bit budget for make_contact_value / make_preprune_probe (total 64 bits):
+#   score:       32 - SCORE_SHIFT = 22 bits  (bits 63-42)
+#   fingerprint: FINGERPRINT_BITS = 22 bits  (bits 41-20)
+#   contact_id:  CONTACT_ID_BITS  = 20 bits  (bits 19-0)
+# Mantissa precision after truncation: 23 - SCORE_SHIFT = 13 bits ≈ 1.2e-4 relative.
 FINGERPRINT_BITS = wp.constant(wp.uint64(22))
 CONTACT_ID_BITS = wp.constant(wp.uint64(20))
 CONTACT_ID_MASK = wp.constant(wp.uint64((1 << 20) - 1))
 FINGERPRINT_MASK = wp.constant(wp.uint64((1 << 22) - 1))
-SCORE_SHIFT = wp.constant(wp.uint64(10))
+SCORE_SHIFT = 10
 
 
 @wp.func
 def make_contact_value(score: float, fingerprint: int, contact_id: int) -> wp.uint64:
-    """Pack score, fingerprint, and contact_id into hashtable value for atomic max.
+    """Pack score, fingerprint, and contact_id into a uint64 for ``atomic_max``.
 
-    Bit layout (64 bits total):
-        [63:42] float_flip(score) >> 10 (22 bits) — dominates comparison
-        [41:20] fingerprint (22 bits) — deterministic tiebreaker (edge/triangle index + tag bits)
-        [19:0]  contact_id (20 bits) — buffer slot for export
+    This packing enables **deterministic contact reduction**: multiple GPU
+    threads propose contacts for the same reduction slot via ``atomic_max``.
+    By encoding a deterministic fingerprint (derived from geometry) above
+    the non-deterministic contact_id, the ``atomic_max`` winner is always
+    the same regardless of thread scheduling.
 
-    The score is truncated to its 22 most-significant bits.  Since
-    ``float_flip`` produces an order-preserving uint32, dropping the low
-    10 bits loses ~3 decimal digits of precision — more than enough to
-    distinguish spatially different contacts while freeing 10 extra bits
-    for the fingerprint.
+    ::
 
-    When two contacts have the same truncated score, the fingerprint
-    (derived from geometry, e.g. edge index | mode bit) breaks the tie
-    deterministically.  Only when both score and fingerprint match does
-    the contact_id matter — which requires two geometrically identical
-    contacts, an impossible case.
+        63        42 41        20 19          0
+        ┌──────────┬────────────┬──────────────┐
+        │  score   │ fingerprint│  contact_id  │
+        │ (22 bit) │  (22 bit)  │   (20 bit)   │
+        └──────────┴────────────┴──────────────┘
+
+    **Score (bits 63-42, 22 bits)** — ``float_flip(score) >> 10``.
+    ``float_flip`` reinterprets the IEEE-754 float as an order-preserving
+    uint32 (see http://stereopsis.com/radix.html).  The right-shift by
+    ``SCORE_SHIFT`` (10) discards the 10 least-significant bits of the
+    mantissa, keeping 1 sign-equivalent + 8 exponent + 13 mantissa = 22
+    bits.  This gives ~2^-13 ≈ 1.2e-4 relative precision — sufficient to
+    distinguish contacts whose spatial projection scores or negated depths
+    differ by more than ~0.1 mm at 1 m scale.
+
+    Typical score ranges:
+
+    - Spatial direction scores ``dot(pos_2d, dir_2d)``: [-10, +10] m
+      (position is measured from the midpoint of the two shapes).
+    - Depth scores ``-depth``: [0.0001, 0.1] m.
+
+    **Fingerprint (bits 41-20, 22 bits)** — deterministic tiebreaker
+    derived from geometry (edge index | mode/source tag bits).  When two
+    contacts have the same truncated score, the fingerprint breaks the tie
+    so that ``atomic_max`` always picks the same winner regardless of
+    thread scheduling.
+
+    **Contact ID (bits 19-0, 20 bits)** — buffer slot assigned by
+    ``atomic_add``.  Non-deterministic, but only matters when both score
+    and fingerprint are identical, which requires two geometrically
+    identical contacts — an impossible case.
+
+    The cascade ``score > fingerprint > contact_id`` means ``atomic_max``
+    on this uint64 selects the contact with the best score, breaking ties
+    deterministically via fingerprint.
 
     Args:
-        score: Spatial projection score or negated depth (higher is better)
-        fingerprint: Deterministic contact identifier (e.g. edge index with tag bits)
-        contact_id: Index into the contact buffer
+        score: Spatial projection score or negated depth [m]. Higher is better.
+        fingerprint: Deterministic contact identifier (e.g. ``(edge_idx << 2) | (mode << 1)``).
+        contact_id: Index into the contact buffer (from ``atomic_add``).
 
     Returns:
-        64-bit value for hashtable (atomic max will select highest score)
+        64-bit packed value for hashtable ``atomic_max`` comparison.
     """
     if wp.uint64(fingerprint) > FINGERPRINT_MASK:
         wp.printf(
@@ -291,7 +323,7 @@ def make_contact_value(score: float, fingerprint: int, contact_id: int) -> wp.ui
             int(CONTACT_ID_MASK),
         )
     return (
-        (wp.uint64(float_flip(score) >> wp.uint32(SCORE_SHIFT)) << wp.uint64(42))
+        (wp.uint64(float_flip(score) >> wp.uint32(wp.static(SCORE_SHIFT))) << wp.uint64(42))
         | ((wp.uint64(fingerprint) & FINGERPRINT_MASK) << CONTACT_ID_BITS)
         | (wp.uint64(contact_id) & CONTACT_ID_MASK)
     )
@@ -299,17 +331,28 @@ def make_contact_value(score: float, fingerprint: int, contact_id: int) -> wp.ui
 
 @wp.func
 def make_preprune_probe(score: float, fingerprint: int) -> wp.uint64:
-    """Build a pre-prune probe with the given score/fingerprint and max contact_id.
+    """Build a deterministic pre-prune probe for ``export_and_reduce_contact_centered``.
 
-    The probe represents the *ceiling* for this (score, fingerprint) pair.
-    ``stored < probe`` is true whenever the stored value can be beaten by a
-    contact with this score and fingerprint, regardless of what contact_id it
-    receives.  This makes the pre-prune deterministic: the decision depends
-    only on the deterministic score and fingerprint, never on the
-    non-deterministic contact_id.
+    Packs the score and fingerprint with ``CONTACT_ID_MASK`` (all 1s) in the
+    contact_id field, creating the *ceiling* value for this (score, fingerprint)
+    pair.  The pre-prune comparison ``stored < probe`` is then true whenever
+    the stored value can be beaten by a contact with this score and fingerprint,
+    regardless of what ``contact_id`` it receives from ``atomic_add``.
+
+    This makes the pre-prune decision depend only on deterministic quantities
+    (score and fingerprint), never on the non-deterministic contact_id.  In
+    non-deterministic mode the cheaper floor probe ``make_contact_value(score, 0, 0)``
+    is used instead.
+
+    Args:
+        score: Spatial projection score or negated depth [m].
+        fingerprint: Deterministic contact identifier.
+
+    Returns:
+        64-bit ceiling probe for pre-prune comparison.
     """
     return (
-        (wp.uint64(float_flip(score) >> wp.uint32(SCORE_SHIFT)) << wp.uint64(42))
+        (wp.uint64(float_flip(score) >> wp.uint32(wp.static(SCORE_SHIFT))) << wp.uint64(42))
         | ((wp.uint64(fingerprint) & FINGERPRINT_MASK) << CONTACT_ID_BITS)
         | CONTACT_ID_MASK
     )

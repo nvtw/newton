@@ -9,7 +9,9 @@ import numpy as np
 import warp as wp
 
 from newton._src.geometry.contact_data import ContactData
+from newton._src.geometry.contact_reduction import float_flip, ifloat_flip
 from newton._src.geometry.contact_reduction_global import (
+    SCORE_SHIFT,
     GlobalContactReducer,
     GlobalContactReducerData,
     create_export_reduced_contacts_kernel,
@@ -868,6 +870,166 @@ def test_centered_pre_pruning_reduces_buffer_usage(test, device):
 
 
 # =============================================================================
+# Float-flip precision tests
+# =============================================================================
+
+
+@wp.kernel(enable_backward=False)
+def float_flip_roundtrip_kernel(
+    values_in: wp.array[float],
+    values_out: wp.array[float],
+    truncated_out: wp.array[wp.uint32],
+    score_shift: int,
+):
+    """Apply float_flip, clear low bits, then ifloat_flip to measure precision loss."""
+    tid = wp.tid()
+    f = values_in[tid]
+    flipped = float_flip(f)
+    truncated = (flipped >> wp.uint32(score_shift)) << wp.uint32(score_shift)
+    reconstructed = ifloat_flip(truncated)
+    values_out[tid] = reconstructed
+    truncated_out[tid] = truncated
+
+
+class TestFloatFlipPrecision(unittest.TestCase):
+    """Test float_flip / ifloat_flip roundtrip precision with the SCORE_SHIFT used in contact reduction."""
+
+    pass
+
+
+def test_float_flip_roundtrip_precision(test, device):
+    """Validate that ifloat_flip((float_flip(f) >> SCORE_SHIFT) << SCORE_SHIFT) preserves
+    order and maintains relative precision ~2^-(23-SCORE_SHIFT)."""
+    score_shift = SCORE_SHIFT
+    mantissa_bits_kept = 23 - score_shift
+    max_relative_error = 2.0 ** (-mantissa_bits_kept)  # ~1.22e-4
+
+    # --- Build test values spanning actual score ranges ---
+    # Depth scores: -depth in [0.0001, 0.1]
+    depth_scores = np.linspace(0.0001, 0.1, 200, dtype=np.float32)
+    # Spatial scores: dot(pos_2d, dir_2d) in [-10, +10]
+    spatial_scores = np.linspace(-10.0, 10.0, 600, dtype=np.float32)
+    # Dense sweep around 1.0 to probe distinguishability
+    dense_sweep = np.linspace(0.999, 1.001, 100, dtype=np.float32)
+    # Edge cases
+    edge_cases = np.array(
+        [0.0, -0.0, 1e-6, -1e-6, 1e-4, -1e-4, 1.0, -1.0, 100.0, -100.0],
+        dtype=np.float32,
+    )
+
+    all_values = np.concatenate([depth_scores, spatial_scores, dense_sweep, edge_cases])
+    n = len(all_values)
+
+    values_in = wp.array(all_values, dtype=float, device=device)
+    values_out = wp.zeros(n, dtype=float, device=device)
+    truncated_out = wp.zeros(n, dtype=wp.uint32, device=device)
+
+    wp.launch(
+        float_flip_roundtrip_kernel,
+        dim=n,
+        inputs=[values_in, values_out, truncated_out, score_shift],
+        device=device,
+    )
+
+    orig = all_values
+    recon = values_out.numpy()
+    trunc = truncated_out.numpy()
+
+    # --- 1. Roundtrip for +0.0 (positive zero roundtrips exactly;
+    #     -0.0 maps to a tiny negative via float_flip, which is fine) ---
+    pos_zero_mask = (orig == 0.0) & ~np.signbit(orig)
+    if np.any(pos_zero_mask):
+        test.assertTrue(
+            np.all(recon[pos_zero_mask] == 0.0),
+            "Positive zero must roundtrip exactly",
+        )
+
+    # --- 2. Relative error bound ---
+    nonzero_mask = np.abs(orig) > 1e-30
+    rel_err = np.abs(recon[nonzero_mask] - orig[nonzero_mask]) / np.abs(orig[nonzero_mask])
+    worst_rel = float(np.max(rel_err))
+    test.assertLessEqual(
+        worst_rel,
+        max_relative_error,
+        f"Worst relative error {worst_rel:.6e} exceeds 2^-{mantissa_bits_kept} = {max_relative_error:.6e}",
+    )
+
+    # --- 3. Order preservation (monotonicity) ---
+    sorted_idx = np.argsort(orig)
+    sorted_orig = orig[sorted_idx]
+    sorted_trunc = trunc[sorted_idx]
+    violations = 0
+    for i in range(len(sorted_orig) - 1):
+        if sorted_orig[i] < sorted_orig[i + 1] and sorted_trunc[i] > sorted_trunc[i + 1]:
+            violations += 1
+    test.assertEqual(violations, 0, f"Order violations: {violations}")
+
+    # --- 4. Distinguishability at the precision floor ---
+    # Two values separated by more than 2^-(mantissa_bits_kept) relative
+    # to their magnitude must produce different truncated values.
+    base = np.float32(1.0)
+    eps_distinguishable = np.float32(2.0 ** (-mantissa_bits_kept + 1))  # 2x the LSB
+    pair = np.array([base, base + eps_distinguishable], dtype=np.float32)
+    pair_in = wp.array(pair, dtype=float, device=device)
+    pair_out = wp.zeros(2, dtype=float, device=device)
+    pair_trunc = wp.zeros(2, dtype=wp.uint32, device=device)
+    wp.launch(
+        float_flip_roundtrip_kernel,
+        dim=2,
+        inputs=[pair_in, pair_out, pair_trunc, score_shift],
+        device=device,
+    )
+    t = pair_trunc.numpy()
+    test.assertNotEqual(
+        int(t[0]),
+        int(t[1]),
+        f"Values {pair[0]} and {pair[1]} (eps={eps_distinguishable:.6e}) "
+        f"must produce different truncated values",
+    )
+
+    # --- 5. Sign correctness: all negatives map below all positives ---
+    neg_mask = orig < 0
+    pos_mask = orig > 0
+    if np.any(neg_mask) and np.any(pos_mask):
+        max_neg_trunc = int(np.max(trunc[neg_mask]))
+        min_pos_trunc = int(np.min(trunc[pos_mask]))
+        test.assertLess(
+            max_neg_trunc,
+            min_pos_trunc,
+            "All negative truncated values must be less than all positive truncated values",
+        )
+
+
+def test_float_flip_exact_inverse(test, device):
+    """Verify ifloat_flip(float_flip(f)) == f exactly (no truncation)."""
+    values = np.array(
+        [0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 3.14159, -2.71828, 1e-6, -1e-6, 1e6, -1e6, 42.0],
+        dtype=np.float32,
+    )
+    n = len(values)
+    values_in = wp.array(values, dtype=float, device=device)
+    values_out = wp.zeros(n, dtype=float, device=device)
+    truncated_out = wp.zeros(n, dtype=wp.uint32, device=device)
+
+    # Use score_shift=0 for exact roundtrip (no bits cleared)
+    wp.launch(
+        float_flip_roundtrip_kernel,
+        dim=n,
+        inputs=[values_in, values_out, truncated_out, 0],
+        device=device,
+    )
+
+    orig = values
+    recon = values_out.numpy()
+    for i in range(n):
+        test.assertEqual(
+            orig[i],
+            recon[i],
+            f"Exact roundtrip failed for {orig[i]}: got {recon[i]}",
+        )
+
+
+# =============================================================================
 # Test registration
 # =============================================================================
 
@@ -917,6 +1079,18 @@ add_function_test(
     TestKeyConstruction,
     "test_oct_encode_decode_roundtrip",
     test_oct_encode_decode_roundtrip,
+    devices=devices,
+)
+add_function_test(
+    TestFloatFlipPrecision,
+    "test_float_flip_roundtrip_precision",
+    test_float_flip_roundtrip_precision,
+    devices=devices,
+)
+add_function_test(
+    TestFloatFlipPrecision,
+    "test_float_flip_exact_inverse",
+    test_float_flip_exact_inverse,
     devices=devices,
 )
 

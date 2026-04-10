@@ -109,6 +109,15 @@ return i ^ mask;
 def float_flip(f: float) -> wp.uint32: ...
 
 
+# Inverse of float_flip: convert an order-preserving uint32 back to float.
+@wp.func_native("""
+uint32_t mask = ((u >> 31) - 1) | 0x80000000;
+uint32_t i = u ^ mask;
+return reinterpret_cast<float&>(i);
+""")
+def ifloat_flip(u: wp.uint32) -> float: ...
+
+
 @wp.func_native("""
 #if defined(__CUDA_ARCH__)
 __syncthreads();
