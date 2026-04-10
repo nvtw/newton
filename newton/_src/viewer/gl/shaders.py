@@ -739,10 +739,11 @@ void main()
 
     // Compute perpendicular in screen (aspect-corrected) space so line
     // width is uniform on non-square viewports.
+    float safe_asp = max(inv_asp_ratio, 1e-6);
     vec2 dir_ndc = e_ndc - s_ndc;
-    vec2 dir_scr = vec2(dir_ndc.x / inv_asp_ratio, dir_ndc.y);
+    vec2 dir_scr = vec2(dir_ndc.x / safe_asp, dir_ndc.y);
     vec2 right_scr = normalize(vec2(dir_scr.y, -dir_scr.x));
-    vec2 right = vec2(right_scr.x * inv_asp_ratio, right_scr.y);
+    vec2 right = vec2(right_scr.x * safe_asp, right_scr.y);
 
     vec3 color = 0.5 * (vertexColor[0] + vertexColor[1]);
     vec2 xy = 0.5 * line_width * right;
@@ -846,8 +847,9 @@ void main()
 
     // Work in screen space (aspect-corrected) so arrows look correct on
     // non-square viewports.  screen_x = ndc_x / inv_asp_ratio.
+    float safe_asp = max(inv_asp_ratio, 1e-6);
     vec2 dir_ndc = e_ndc - s_ndc;
-    vec2 dir_scr = vec2(dir_ndc.x / inv_asp_ratio, dir_ndc.y);
+    vec2 dir_scr = vec2(dir_ndc.x / safe_asp, dir_ndc.y);
     float len = length(dir_scr);
 
     vec3 color = 0.5 * (vertexColor[0] + vertexColor[1]);
@@ -856,7 +858,7 @@ void main()
     if (len < 1e-6) {
         float r = arrow_size * 0.4;
         vec2 up = vec2(0.0, r);
-        vec2 rt = vec2(r * inv_asp_ratio, 0.0);
+        vec2 rt = vec2(r * safe_asp, 0.0);
         gl_Position = vec4(e_ndc + up, e_depth, 1); lineColor = color; EmitVertex();
         gl_Position = vec4(e_ndc - rt, e_depth, 1); lineColor = color; EmitVertex();
         gl_Position = vec4(e_ndc + rt, e_depth, 1); lineColor = color; EmitVertex();
@@ -864,11 +866,11 @@ void main()
         return;
     }
 
-    // fwd/right in screen space, then convert offsets back to NDC (scale x by inv_asp_ratio)
+    // fwd/right in screen space, then convert offsets back to NDC (scale x by safe_asp)
     vec2 fwd_scr = dir_scr / len;
     vec2 right_scr = vec2(fwd_scr.y, -fwd_scr.x);
-    vec2 fwd   = vec2(fwd_scr.x * inv_asp_ratio, fwd_scr.y);
-    vec2 right = vec2(right_scr.x * inv_asp_ratio, right_scr.y);
+    vec2 fwd   = vec2(fwd_scr.x * safe_asp, fwd_scr.y);
+    vec2 right = vec2(right_scr.x * safe_asp, right_scr.y);
 
     // Triangle 1+2: line body quad
     vec2 xy = 0.5 * line_width * right;

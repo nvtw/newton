@@ -597,8 +597,11 @@ class ViewerBase(ABC):
         self._log_com(state)
 
     def log_contacts(self, contacts: newton.Contacts, state: newton.State):
-        """
-        Creates line segments along contact normals for rendering.
+        """Render contact normals as arrows.
+
+        Each active rigid contact is drawn as an arrow from the contact point
+        along the contact normal.  When ``show_contacts`` is ``False`` the
+        arrow batch is cleared.
 
         Args:
             contacts: The contacts to render.
@@ -1083,15 +1086,21 @@ class ViewerBase(ABC):
         width: float = 0.01,
         hidden: bool = False,
     ):
-        """
-        Log line segments for rendering.
+        """Log line segments for rendering.
+
+        Lines are rendered as screen-space quads whose pixel width is
+        controlled by the renderer (e.g. ``RendererGL.line_width``).
+        The *width* parameter is currently unused and reserved for
+        future world-space width support.
 
         Args:
             name: Unique path/name for the line batch.
             starts: Optional line start points as a Warp vec3 array.
             ends: Optional line end points as a Warp vec3 array.
             colors: Per-line colors as a Warp array, or a single RGB triplet.
-            width: Line width in rendered scene units.
+            width: Reserved for future use (world-space line width).
+                Currently ignored; line width is set in screen-space pixels
+                via the renderer.
             hidden: Whether the line batch should be hidden.
         """
         pass
@@ -1108,7 +1117,7 @@ class ViewerBase(ABC):
         """Log arrow segments (line + arrowhead) for rendering.
 
         The GL viewer renders these with a dedicated arrow shader that draws
-        a wide line plus a fixed-pixel-size arrowhead triangle per segment.
+        a screen-space quad line body plus a triangular arrowhead per segment.
         Other backends fall back to :meth:`log_lines`.
 
         Args:
@@ -1116,7 +1125,9 @@ class ViewerBase(ABC):
             starts: Optional arrow start points as a Warp vec3 array.
             ends: Optional arrow end points (arrowhead tip) as a Warp vec3 array.
             colors: Per-arrow colors as a Warp array, or a single RGB triplet.
-            width: Line width in rendered scene units.
+            width: Reserved for future use (world-space line width).
+                Currently ignored; arrow size is set in screen-space pixels
+                via the renderer (e.g. ``RendererGL.arrow_scale``).
             hidden: Whether the arrow batch should be hidden.
         """
         self.log_lines(name, starts, ends, colors, width=width, hidden=hidden)
@@ -2027,7 +2038,6 @@ class ViewerBase(ABC):
             state: Current simulation state
         """
         if not self.show_joints:
-            # Pass None to hide joints - renderer will handle creating empty arrays
             self.log_lines("/model/joints", None, None, None)
             return
 

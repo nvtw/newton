@@ -850,15 +850,20 @@ class ViewerGL(ViewerBase):
         width: float = 0.01,
         hidden: bool = False,
     ):
-        """
-        Log line data for rendering.
+        """Log line data for rendering.
+
+        Lines are drawn as screen-space quads whose pixel width is set by
+        :pyattr:`RendererGL.line_width`.  The *width* parameter is currently
+        unused and reserved for future world-space width support.
 
         Args:
             name: Unique identifier for the line batch.
             starts: Array of line start positions (shape: [N, 3]) or None for empty.
             ends: Array of line end positions (shape: [N, 3]) or None for empty.
             colors: Array of line colors (shape: [N, 3]) or tuple/list of RGB or None for empty.
-            width: The width of the lines.
+            width: Reserved for future use (world-space line width).
+                Currently ignored; pixel width is controlled by
+                ``RendererGL.line_width``.
             hidden: Whether the lines are initially hidden.
         """
         # Handle empty logs by resetting the LinesGL object
@@ -909,14 +914,19 @@ class ViewerGL(ViewerBase):
         width: float = 0.01,
         hidden: bool = False,
     ):
-        """Log arrow data for rendering (wide line + arrowhead per segment).
+        """Log arrow data for rendering (screen-space quad line + arrowhead per segment).
+
+        Arrow size is controlled in screen-space pixels by
+        ``RendererGL.arrow_scale``.
 
         Args:
             name: Unique identifier for the arrow batch.
             starts: Array of arrow start positions (shape: [N, 3]) or None for empty.
             ends: Array of arrow end positions / arrowhead tips (shape: [N, 3]) or None for empty.
             colors: Array of arrow colors (shape: [N, 3]) or tuple/list of RGB or None for empty.
-            width: The width of the arrow lines.
+            width: Reserved for future use (world-space line width).
+                Currently ignored; pixel dimensions are controlled by
+                ``RendererGL.arrow_scale``.
             hidden: Whether the arrows are initially hidden.
         """
         if starts is None or ends is None or colors is None:
@@ -2172,11 +2182,8 @@ class ViewerGL(ViewerBase):
                     changed, self.show_contacts = imgui.checkbox("Show Contacts", show_contacts)
 
                     if self.show_contacts:
-                        _, self.renderer.arrow_line_width = imgui.slider_float(
-                            "Arrow Line Width (px)", self.renderer.arrow_line_width, 0.5, 5.0
-                        )
-                        _, self.renderer.arrow_head_size = imgui.slider_float(
-                            "Arrow Head Size (px)", self.renderer.arrow_head_size, 2.0, 20.0
+                        _, self.renderer.arrow_scale = imgui.slider_float(
+                            "Arrow Scale", self.renderer.arrow_scale, 0.25, 5.0
                         )
 
                     # Particle visualization
