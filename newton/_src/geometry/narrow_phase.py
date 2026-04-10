@@ -36,7 +36,7 @@ from ..geometry.contact_data import SHAPE_PAIR_HFIELD_BIT, ContactData, contact_
 from ..geometry.contact_reduction_global import (
     GlobalContactReducer,
     create_export_reduced_contacts_kernel,
-    mesh_triangle_contacts_to_reducer_kernel,
+    create_mesh_triangle_contacts_to_reducer_kernel,
     reduce_buffered_contacts_kernel,
     write_contact_to_reducer,
 )
@@ -807,115 +807,140 @@ def create_narrow_phase_kernel_gjk_mpr(
     return narrow_phase_kernel_gjk_mpr
 
 
-@wp.kernel(enable_backward=False)
-def narrow_phase_find_mesh_triangle_overlaps_kernel(
-    shape_types: wp.array[int],
-    shape_transform: wp.array[wp.transform],
-    shape_source: wp.array[wp.uint64],
-    shape_gap: wp.array[float],  # Per-shape contact gaps
-    shape_data: wp.array[wp.vec4],  # Shape data (scale xyz, margin w)
-    shape_collision_radius: wp.array[float],
-    shape_heightfield_index: wp.array[wp.int32],
-    heightfield_data: wp.array[HeightfieldData],
-    shape_pairs_mesh: wp.array[wp.vec2i],
-    shape_pairs_mesh_count: wp.array[int],
-    total_num_threads: int,
-    # outputs
-    triangle_pairs: wp.array[wp.vec3i],  # (shape_a, shape_b, triangle_idx)
-    triangle_pairs_count: wp.array[int],
-):
-    """Find triangles that overlap with a convex shape for mesh and heightfield pairs.
+def _create_find_mesh_triangle_overlaps_kernel(speculative: bool):
+    """Factory for the midphase kernel that finds mesh/heightfield triangle overlaps.
 
-    For mesh pairs, uses a tiled BVH query. For heightfield pairs, projects the
-    convex shape's bounding sphere onto the heightfield grid and emits triangle
-    pairs for each overlapping cell.
-
-    Outputs triples of ``(mesh_or_hfield_shape, other_shape, triangle_idx)``.
+    When *speculative* is True the kernel reads per-shape velocity arrays and
+    expands the BVH query AABB by the speculative margin so that triangles
+    about to be hit are included as candidates.
     """
-    tid, j = wp.tid()
 
-    num_mesh_pairs = shape_pairs_mesh_count[0]
+    @wp.kernel(enable_backward=False)
+    def narrow_phase_find_mesh_triangle_overlaps_kernel(
+        shape_types: wp.array[int],
+        shape_transform: wp.array[wp.transform],
+        shape_source: wp.array[wp.uint64],
+        shape_gap: wp.array[float],  # Per-shape contact gaps
+        shape_data: wp.array[wp.vec4],  # Shape data (scale xyz, margin w)
+        shape_collision_radius: wp.array[float],
+        shape_heightfield_index: wp.array[wp.int32],
+        heightfield_data: wp.array[HeightfieldData],
+        shape_pairs_mesh: wp.array[wp.vec2i],
+        shape_pairs_mesh_count: wp.array[int],
+        total_num_threads: int,
+        shape_lin_vel: wp.array[wp.vec3],
+        shape_ang_speed_bound: wp.array[float],
+        speculative_dt: float,
+        max_speculative_extension: float,
+        # outputs
+        triangle_pairs: wp.array[wp.vec3i],  # (shape_a, shape_b, triangle_idx)
+        triangle_pairs_count: wp.array[int],
+    ):
+        """Find triangles that overlap with a convex shape for mesh and heightfield pairs.
 
-    # Strided loop over mesh pairs
-    for i in range(tid, num_mesh_pairs, total_num_threads):
-        pair = shape_pairs_mesh[i]
-        shape_a = pair[0]
-        shape_b = pair[1]
+        For mesh pairs, uses a tiled BVH query. For heightfield pairs, projects the
+        convex shape's bounding sphere onto the heightfield grid and emits triangle
+        pairs for each overlapping cell.
 
-        type_a = shape_types[shape_a]
-        type_b = shape_types[shape_b]
+        Outputs triples of ``(mesh_or_hfield_shape, other_shape, triangle_idx)``.
+        """
+        tid, j = wp.tid()
 
-        # -----------------------------------------------------------------
-        # Heightfield-vs-convex midphase (grid cell lookup)
-        # Pairs are normalized so the heightfield is always shape_a.
-        # -----------------------------------------------------------------
-        if type_a == GeoType.HFIELD:
-            # Only run on j==0; the j dimension is for tiled BVH queries (mesh only).
-            if j != 0:
+        num_mesh_pairs = shape_pairs_mesh_count[0]
+
+        # Strided loop over mesh pairs
+        for i in range(tid, num_mesh_pairs, total_num_threads):
+            pair = shape_pairs_mesh[i]
+            shape_a = pair[0]
+            shape_b = pair[1]
+
+            type_a = shape_types[shape_a]
+            type_b = shape_types[shape_b]
+
+            # -----------------------------------------------------------------
+            # Heightfield-vs-convex midphase (grid cell lookup)
+            # Pairs are normalized so the heightfield is always shape_a.
+            # -----------------------------------------------------------------
+            if type_a == GeoType.HFIELD:
+                # Only run on j==0; the j dimension is for tiled BVH queries (mesh only).
+                if j != 0:
+                    continue
+                hfd = heightfield_data[shape_heightfield_index[shape_a]]
+                heightfield_vs_convex_midphase(
+                    shape_a,
+                    shape_b,
+                    hfd,
+                    shape_transform,
+                    shape_collision_radius,
+                    shape_gap,
+                    triangle_pairs,
+                    triangle_pairs_count,
+                )
                 continue
-            hfd = heightfield_data[shape_heightfield_index[shape_a]]
-            heightfield_vs_convex_midphase(
-                shape_a,
-                shape_b,
-                hfd,
-                shape_transform,
-                shape_collision_radius,
-                shape_gap,
+
+            # -----------------------------------------------------------------
+            # Mesh-vs-convex midphase (BVH query)
+            # -----------------------------------------------------------------
+            mesh_shape = -1
+            non_mesh_shape = -1
+
+            if type_a == GeoType.MESH and type_b != GeoType.MESH:
+                mesh_shape = shape_a
+                non_mesh_shape = shape_b
+            elif type_b == GeoType.MESH and type_a != GeoType.MESH:
+                mesh_shape = shape_b
+                non_mesh_shape = shape_a
+            else:
+                # Mesh-mesh collision not supported in this path
+                continue
+
+            # Get mesh BVH ID and mesh transform
+            mesh_id = shape_source[mesh_shape]
+            if mesh_id == wp.uint64(0):
+                continue
+
+            # Get mesh world transform
+            X_mesh_ws = shape_transform[mesh_shape]
+
+            # Get non-mesh shape world transform
+            X_ws = shape_transform[non_mesh_shape]
+
+            # Use per-shape contact gaps for consistent pairwise thresholding.
+            gap_non_mesh = shape_gap[non_mesh_shape]
+            gap_mesh = shape_gap[mesh_shape]
+            gap_sum = gap_non_mesh + gap_mesh
+
+            if wp.static(speculative):
+                vel_rel = shape_lin_vel[non_mesh_shape] - shape_lin_vel[mesh_shape]
+                rel_speed = (
+                    wp.length(vel_rel) + shape_ang_speed_bound[mesh_shape] + shape_ang_speed_bound[non_mesh_shape]
+                )
+                gap_sum = gap_sum + wp.min(rel_speed * speculative_dt, max_speculative_extension)
+
+            # Call mesh_vs_convex_midphase with the shape_data and pair gap sum.
+            mesh_vs_convex_midphase(
+                j,
+                mesh_shape,
+                non_mesh_shape,
+                X_mesh_ws,
+                X_ws,
+                mesh_id,
+                shape_types,
+                shape_data,
+                shape_source,
+                gap_sum,
                 triangle_pairs,
                 triangle_pairs_count,
             )
-            continue
 
-        # -----------------------------------------------------------------
-        # Mesh-vs-convex midphase (BVH query)
-        # -----------------------------------------------------------------
-        mesh_shape = -1
-        non_mesh_shape = -1
-
-        if type_a == GeoType.MESH and type_b != GeoType.MESH:
-            mesh_shape = shape_a
-            non_mesh_shape = shape_b
-        elif type_b == GeoType.MESH and type_a != GeoType.MESH:
-            mesh_shape = shape_b
-            non_mesh_shape = shape_a
-        else:
-            # Mesh-mesh collision not supported in this path
-            continue
-
-        # Get mesh BVH ID and mesh transform
-        mesh_id = shape_source[mesh_shape]
-        if mesh_id == wp.uint64(0):
-            continue
-
-        # Get mesh world transform
-        X_mesh_ws = shape_transform[mesh_shape]
-
-        # Get non-mesh shape world transform
-        X_ws = shape_transform[non_mesh_shape]
-
-        # Use per-shape contact gaps for consistent pairwise thresholding.
-        gap_non_mesh = shape_gap[non_mesh_shape]
-        gap_mesh = shape_gap[mesh_shape]
-        gap_sum = gap_non_mesh + gap_mesh
-
-        # Call mesh_vs_convex_midphase with the shape_data and pair gap sum.
-        mesh_vs_convex_midphase(
-            j,
-            mesh_shape,
-            non_mesh_shape,
-            X_mesh_ws,
-            X_ws,
-            mesh_id,
-            shape_types,
-            shape_data,
-            shape_source,
-            gap_sum,
-            triangle_pairs,
-            triangle_pairs_count,
-        )
+    return narrow_phase_find_mesh_triangle_overlaps_kernel
 
 
-def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
+_find_mesh_triangle_overlaps = _create_find_mesh_triangle_overlaps_kernel(speculative=False)
+_find_mesh_triangle_overlaps_speculative = _create_find_mesh_triangle_overlaps_kernel(speculative=True)
+
+
+def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any, speculative: bool = False):
     @wp.kernel(enable_backward=False, module="unique")
     def narrow_phase_process_mesh_triangle_contacts_kernel(
         shape_types: wp.array[int],
@@ -930,6 +955,10 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
         triangle_pairs_count: wp.array[int],
         writer_data: Any,
         total_num_threads: int,
+        shape_lin_vel: wp.array[wp.vec3],
+        shape_ang_speed_bound: wp.array[float],
+        speculative_dt: float,
+        max_speculative_extension: float,
     ):
         """
         Process triangle pairs to generate contacts using GJK/MPR.
@@ -1000,6 +1029,11 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
             gap_a = shape_gap[shape_a]
             gap_b = shape_gap[shape_b]
             gap_sum = gap_a + gap_b
+
+            if wp.static(speculative):
+                vel_rel = shape_lin_vel[shape_b] - shape_lin_vel[shape_a]
+                rel_speed = wp.length(vel_rel) + shape_ang_speed_bound[shape_a] + shape_ang_speed_bound[shape_b]
+                gap_sum = gap_sum + wp.min(rel_speed * speculative_dt, max_speculative_extension)
 
             # Compute and write contacts using GJK/MPR with standard post-processing
             wp.static(create_compute_gjk_mpr_contacts(writer_func))(
@@ -1096,6 +1130,7 @@ def compute_mesh_plane_block_offsets_scan(
 def create_narrow_phase_process_mesh_plane_contacts_kernel(
     writer_func: Any,
     reduce_contacts: bool = False,
+    speculative: bool = False,
 ):
     """
     Create a mesh-plane collision kernel.
@@ -1103,6 +1138,8 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
     Args:
         writer_func: Contact writer function (e.g., write_contact_simple)
         reduce_contacts: If True, return multi-block load-balanced variant for global reduction.
+        speculative: When True, extends ``gap_sum`` by a scalar speculative
+            margin derived from per-shape velocity arrays.
 
     Returns:
         A warp kernel that processes mesh-plane collisions
@@ -1121,6 +1158,10 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
         shape_pairs_mesh_plane_count: wp.array[int],
         writer_data: Any,
         total_num_blocks: int,
+        shape_lin_vel: wp.array[wp.vec3],
+        shape_ang_speed_bound: wp.array[float],
+        speculative_dt: float,
+        max_speculative_extension: float,
     ):
         """
         Process mesh-plane collisions without contact reduction.
@@ -1168,6 +1209,13 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
             gap_mesh = shape_gap[mesh_shape]
             gap_plane = shape_gap[plane_shape]
             gap_sum = gap_mesh + gap_plane
+
+            if wp.static(speculative):
+                vel_rel = shape_lin_vel[plane_shape] - shape_lin_vel[mesh_shape]
+                rel_speed = (
+                    wp.length(vel_rel) + shape_ang_speed_bound[mesh_shape] + shape_ang_speed_bound[plane_shape]
+                )
+                gap_sum = gap_sum + wp.min(rel_speed * speculative_dt, max_speculative_extension)
 
             # Strided loop over vertices across all threads in the launch
             total_num_threads = total_num_blocks * wp.block_dim()
@@ -1227,6 +1275,10 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
         block_offsets: wp.array[wp.int32],
         writer_data: Any,
         total_num_blocks: int,
+        shape_lin_vel: wp.array[wp.vec3],
+        shape_ang_speed_bound: wp.array[float],
+        speculative_dt: float,
+        max_speculative_extension: float,
     ):
         """Process mesh-plane collisions with dynamic load balancing.
 
@@ -1299,6 +1351,13 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
             gap_mesh = shape_gap[mesh_shape]
             gap_plane = shape_gap[plane_shape]
             gap_sum = gap_mesh + gap_plane
+
+            if wp.static(speculative):
+                vel_rel = shape_lin_vel[plane_shape] - shape_lin_vel[mesh_shape]
+                rel_speed = (
+                    wp.length(vel_rel) + shape_ang_speed_bound[mesh_shape] + shape_ang_speed_bound[plane_shape]
+                )
+                gap_sum = gap_sum + wp.min(rel_speed * speculative_dt, max_speculative_extension)
 
             # Process this block's chunk of vertices — write contacts directly
             # to the global reducer buffer (no per-block shared memory reduction).
@@ -1548,9 +1607,15 @@ class NarrowPhase:
             )
         # Create triangle contacts kernel when meshes or heightfields are present
         if has_meshes or has_heightfields:
-            self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func)
+            self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(
+                writer_func, speculative=speculative
+            )
+            self.mesh_triangle_overlaps_kernel = (
+                _find_mesh_triangle_overlaps_speculative if speculative else _find_mesh_triangle_overlaps
+            )
         else:
             self.mesh_triangle_contacts_kernel = None
+            self.mesh_triangle_overlaps_kernel = _find_mesh_triangle_overlaps
 
         # Create mesh-specific kernels only when has_meshes=True
         if has_meshes:
@@ -1561,10 +1626,12 @@ class NarrowPhase:
                 self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(
                     write_contact_to_reducer,
                     reduce_contacts=True,
+                    speculative=speculative,
                 )
             else:
                 self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(
                     writer_func,
+                    speculative=speculative,
                 )
             # Only create mesh-mesh SDF kernel on CUDA (uses __shared__ memory via func_native)
             if is_gpu_device:
@@ -1573,11 +1640,13 @@ class NarrowPhase:
                         write_contact_to_reducer,
                         enable_heightfields=has_heightfields,
                         reduce_contacts=True,
+                        speculative=speculative,
                     )
                 else:
                     self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         writer_func,
                         enable_heightfields=has_heightfields,
+                        speculative=speculative,
                     )
             else:
                 self.mesh_mesh_contacts_kernel = None
@@ -1590,10 +1659,14 @@ class NarrowPhase:
             # Global contact reducer uses hardcoded BETA_THRESHOLD (0.1mm) same as shared-memory reduction
             # Slot layout: NUM_SPATIAL_DIRECTIONS spatial + 1 max-depth = VALUES_PER_KEY slots per key
             self.export_reduced_contacts_kernel = create_export_reduced_contacts_kernel(writer_func)
+            self.mesh_triangle_to_reducer_kernel = create_mesh_triangle_contacts_to_reducer_kernel(
+                speculative=speculative
+            )
             # Global contact reducer for all mesh contact types
             self.global_contact_reducer = GlobalContactReducer(max_triangle_pairs, device=device)
         else:
             self.export_reduced_contacts_kernel = None
+            self.mesh_triangle_to_reducer_kernel = None
             self.global_contact_reducer = None
 
         self.hydroelastic_sdf = hydroelastic_sdf
@@ -1860,6 +1933,10 @@ class NarrowPhase:
                         self.shape_pairs_mesh_plane_count,
                         writer_data,
                         self.num_tile_blocks,
+                        _slv,
+                        _sasb,
+                        speculative_dt,
+                        max_speculative_extension,
                     ],
                     device=device,
                     block_dim=self.block_dim,
@@ -1869,7 +1946,7 @@ class NarrowPhase:
             # Launch midphase: finds overlapping triangles for both mesh and heightfield pairs
             second_dim = self.tile_size_mesh_convex if ENABLE_TILE_BVH_QUERY else 1
             wp.launch(
-                kernel=narrow_phase_find_mesh_triangle_overlaps_kernel,
+                kernel=self.mesh_triangle_overlaps_kernel,
                 dim=[self.num_tile_blocks, second_dim],
                 inputs=[
                     shape_types,
@@ -1883,6 +1960,10 @@ class NarrowPhase:
                     self.shape_pairs_mesh,
                     self.shape_pairs_mesh_count,
                     self.num_tile_blocks,
+                    _slv,
+                    _sasb,
+                    speculative_dt,
+                    max_speculative_extension,
                 ],
                 outputs=[
                     self.triangle_pairs,
@@ -1929,6 +2010,10 @@ class NarrowPhase:
                             self.mesh_plane_block_offsets,
                             reducer_data,
                             self.num_mesh_plane_blocks,
+                            _slv,
+                            _sasb,
+                            speculative_dt,
+                            max_speculative_extension,
                         ],
                         device=device,
                         block_dim=self.tile_size_mesh_plane,
@@ -1937,7 +2022,7 @@ class NarrowPhase:
 
                 # Mesh/heightfield-triangle contacts → same global reducer
                 wp.launch(
-                    kernel=mesh_triangle_contacts_to_reducer_kernel,
+                    kernel=self.mesh_triangle_to_reducer_kernel,
                     dim=self.total_num_threads,
                     inputs=[
                         shape_types,
@@ -1952,6 +2037,10 @@ class NarrowPhase:
                         self.triangle_pairs_count,
                         reducer_data,
                         self.total_num_threads,
+                        _slv,
+                        _sasb,
+                        speculative_dt,
+                        max_speculative_extension,
                     ],
                     device=device,
                     block_dim=self.block_dim,
@@ -1975,6 +2064,10 @@ class NarrowPhase:
                         self.triangle_pairs_count,
                         writer_data,
                         self.total_num_threads,
+                        _slv,
+                        _sasb,
+                        speculative_dt,
+                        max_speculative_extension,
                     ],
                     device=device,
                     block_dim=self.block_dim,
@@ -2050,6 +2143,10 @@ class NarrowPhase:
                             self.mesh_mesh_block_offsets,
                             reducer_data,
                             self.num_mesh_mesh_blocks,
+                            _slv,
+                            _sasb,
+                            speculative_dt,
+                            max_speculative_extension,
                         ],
                         device=device,
                         block_dim=self.tile_size_mesh_mesh,
@@ -2079,6 +2176,10 @@ class NarrowPhase:
                             shape_edge_range,
                             writer_data,
                             self.num_tile_blocks,
+                            _slv,
+                            _sasb,
+                            speculative_dt,
+                            max_speculative_extension,
                         ],
                         device=device,
                         block_dim=self.tile_size_mesh_mesh,

@@ -5,6 +5,7 @@
 
 import unittest
 
+import numpy as np
 import warp as wp
 
 import newton
@@ -241,6 +242,193 @@ def test_speculative_tunneling_with(test, device):
     )
 
 
+def _make_thin_wall_mesh(hx=0.02, hy=1.0, hz=1.0):
+    """Return a :class:`newton.Mesh` representing a thin box (wall).
+
+    The wall is centred at the origin with half-extents ``(hx, hy, hz)``.
+    Winding is CCW when viewed from the +X side so that the face normals
+    point outward.
+    """
+    verts = np.array(
+        [
+            [-hx, -hy, -hz],
+            [hx, -hy, -hz],
+            [hx, hy, -hz],
+            [-hx, hy, -hz],
+            [-hx, -hy, hz],
+            [hx, -hy, hz],
+            [hx, hy, hz],
+            [-hx, hy, hz],
+        ],
+        dtype=np.float32,
+    )
+    tris = np.array(
+        [
+            # -X face
+            0, 3, 7,  0, 7, 4,
+            # +X face
+            1, 5, 6,  1, 6, 2,
+            # -Y face
+            0, 4, 5,  0, 5, 1,
+            # +Y face
+            3, 2, 6,  3, 6, 7,
+            # -Z face
+            0, 1, 2,  0, 2, 3,
+            # +Z face
+            4, 7, 6,  4, 6, 5,
+        ],
+        dtype=np.int32,
+    )
+    return newton.Mesh(verts, tris, compute_inertia=False)
+
+
+# -- Sphere vs mesh wall (mesh-triangle path) --------------------------------
+
+
+def _run_sphere_vs_mesh_wall_sim(device, speculative_config, num_frames=5):
+    """Simulate a fast sphere aimed at a thin *mesh* wall.
+
+    Same geometry as ``_run_sphere_vs_thin_box_sim`` but the wall is a
+    triangle mesh instead of a primitive box, exercising the mesh-triangle
+    contact path.
+    """
+    builder = newton.ModelBuilder(gravity=0.0)
+    builder.rigid_gap = 0.0
+
+    sphere_body = builder.add_body(xform=wp.transform(wp.vec3(-2.0, 0.0, 0.0)))
+    builder.add_shape_sphere(sphere_body, radius=0.25)
+    builder.body_qd[-1] = (50.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    wall_mesh = _make_thin_wall_mesh()
+    builder.add_shape_mesh(body=-1, mesh=wall_mesh, xform=wp.transform_identity())
+
+    model = builder.finalize(device=device)
+
+    pipeline = newton.CollisionPipeline(
+        model,
+        broad_phase="nxn",
+        speculative_config=speculative_config,
+    )
+    contacts = pipeline.contacts()
+    solver = newton.solvers.SolverXPBD(model)
+
+    state_0 = model.state()
+    state_1 = model.state()
+    control = model.control()
+    frame_dt = 1.0 / 60.0
+
+    for _ in range(num_frames):
+        pipeline.collide(state_0, contacts, dt=frame_dt)
+        state_0.clear_forces()
+        solver.step(state_0, state_1, control, contacts, frame_dt)
+        state_0, state_1 = state_1, state_0
+
+    body_q = state_0.body_q.numpy()
+    return float(body_q[0][0])
+
+
+def test_speculative_tunneling_mesh_wall_without(test, device):
+    """Without speculative contacts the sphere tunnels through the mesh wall."""
+    final_x = _run_sphere_vs_mesh_wall_sim(device, speculative_config=None)
+    test.assertGreater(
+        final_x,
+        0.5,
+        f"Sphere should tunnel through the mesh wall (final x={final_x:.3f})",
+    )
+
+
+def test_speculative_tunneling_mesh_wall_with(test, device):
+    """With speculative contacts the sphere is stopped by the mesh wall."""
+    config = newton.SpeculativeContactConfig(
+        max_speculative_extension=2.0,
+        collision_update_dt=1.0 / 60.0,
+    )
+    final_x = _run_sphere_vs_mesh_wall_sim(device, speculative_config=config)
+    test.assertLess(
+        final_x,
+        -0.2,
+        f"Sphere should be stopped by the mesh wall (final x={final_x:.3f})",
+    )
+
+
+# -- Mesh box vs mesh wall (mesh-mesh SDF path) ------------------------------
+
+
+def _run_mesh_box_vs_mesh_wall_sim(device, speculative_config, num_frames=10):
+    """Simulate a fast mesh box aimed at a thin mesh wall.
+
+    Both the projectile and the wall are triangle meshes with SDFs,
+    exercising the mesh-mesh SDF contact path.  Same geometry as the
+    sphere-vs-primitive-box test (wall half-thickness 0.02 m).
+
+    Uses ``max_resolution=256`` so the SDF has enough voxels across the
+    0.04 m wall, and 8 XPBD iterations because mesh-mesh SDF contacts
+    have zero effective radii (unlike sphere contacts) and need more
+    solver work to fully resolve the large speculative gap.
+    """
+    builder = newton.ModelBuilder(gravity=0.0)
+    builder.rigid_gap = 0.0
+
+    box_mesh = newton.Mesh.create_box(0.25, compute_normals=False, compute_uvs=False)
+    box_mesh.build_sdf(device=device, max_resolution=256)
+
+    box_body = builder.add_body(xform=wp.transform(wp.vec3(-2.0, 0.0, 0.0)))
+    builder.add_shape_mesh(box_body, mesh=box_mesh)
+    builder.body_qd[-1] = (50.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    wall_mesh = _make_thin_wall_mesh()
+    wall_mesh.build_sdf(device=device, max_resolution=256)
+    builder.add_shape_mesh(body=-1, mesh=wall_mesh, xform=wp.transform_identity())
+
+    model = builder.finalize(device=device)
+
+    pipeline = newton.CollisionPipeline(
+        model,
+        broad_phase="nxn",
+        speculative_config=speculative_config,
+    )
+    contacts = pipeline.contacts()
+    solver = newton.solvers.SolverXPBD(model, iterations=8)
+
+    state_0 = model.state()
+    state_1 = model.state()
+    control = model.control()
+    frame_dt = 1.0 / 60.0
+
+    for _ in range(num_frames):
+        pipeline.collide(state_0, contacts, dt=frame_dt)
+        state_0.clear_forces()
+        solver.step(state_0, state_1, control, contacts, frame_dt)
+        state_0, state_1 = state_1, state_0
+
+    body_q = state_0.body_q.numpy()
+    return float(body_q[0][0])
+
+
+def test_speculative_tunneling_mesh_mesh_without(test, device):
+    """Without speculative contacts the mesh box tunnels through the mesh wall."""
+    final_x = _run_mesh_box_vs_mesh_wall_sim(device, speculative_config=None)
+    test.assertGreater(
+        final_x,
+        0.5,
+        f"Mesh box should tunnel through the mesh wall (final x={final_x:.3f})",
+    )
+
+
+def test_speculative_tunneling_mesh_mesh_with(test, device):
+    """With speculative contacts the mesh box is stopped by the mesh wall."""
+    config = newton.SpeculativeContactConfig(
+        max_speculative_extension=2.0,
+        collision_update_dt=1.0 / 60.0,
+    )
+    final_x = _run_mesh_box_vs_mesh_wall_sim(device, speculative_config=config)
+    test.assertLess(
+        final_x,
+        -0.2,
+        f"Mesh box should be stopped by the mesh wall (final x={final_x:.3f})",
+    )
+
+
 class TestSpeculativeContacts(unittest.TestCase):
     pass
 
@@ -284,6 +472,30 @@ add_function_test(
 )
 add_function_test(
     TestSpeculativeContacts, "test_speculative_tunneling_with", test_speculative_tunneling_with, devices=devices
+)
+add_function_test(
+    TestSpeculativeContacts,
+    "test_speculative_tunneling_mesh_wall_without",
+    test_speculative_tunneling_mesh_wall_without,
+    devices=devices,
+)
+add_function_test(
+    TestSpeculativeContacts,
+    "test_speculative_tunneling_mesh_wall_with",
+    test_speculative_tunneling_mesh_wall_with,
+    devices=devices,
+)
+add_function_test(
+    TestSpeculativeContacts,
+    "test_speculative_tunneling_mesh_mesh_without",
+    test_speculative_tunneling_mesh_mesh_without,
+    devices=devices,
+)
+add_function_test(
+    TestSpeculativeContacts,
+    "test_speculative_tunneling_mesh_mesh_with",
+    test_speculative_tunneling_mesh_mesh_with,
+    devices=devices,
 )
 
 
