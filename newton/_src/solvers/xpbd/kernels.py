@@ -2078,6 +2078,7 @@ def solve_body_contact_positions(
     # outputs
     deltas: wp.array[wp.spatial_vector],
     contact_inv_weight: wp.array[float],
+    contact_impulse: wp.array[wp.spatial_vector],
 ):
     tid = wp.tid()
 
@@ -2284,6 +2285,37 @@ def solve_body_contact_positions(
         wp.atomic_add(deltas, body_a, wp.spatial_vector(lin_delta_a, ang_delta_a))
     if body_b >= 0:
         wp.atomic_add(deltas, body_b, wp.spatial_vector(lin_delta_b, ang_delta_b))
+
+    if contact_impulse:
+        # Accumulate per-contact impulse as spatial wrench on body0 at its COM (world frame).
+        # lin_delta_a already contains the full linear impulse contribution (normal + friction +
+        # torsion + rolling) from this iteration.  Torque at body0 COM = r_a × force.
+        r_a_com = bx_a - wp.transform_point(X_wb_a, com_a)
+        torque_on_a = wp.cross(r_a_com, lin_delta_a)
+        wp.atomic_add(contact_impulse, tid, wp.spatial_vector(lin_delta_a, torque_on_a))
+
+
+@wp.kernel
+def convert_contact_impulse_to_force(
+    contact_count: wp.array[int],
+    contact_impulse: wp.array[wp.spatial_vector],
+    dt: float,
+    # output
+    contact_force: wp.array[wp.spatial_vector],
+):
+    """Convert accumulated per-contact impulse to force in ``contacts.force`` format.
+
+    The XPBD lambda convention used in this solver already absorbs one power
+    of ``dt`` (see ``compute_contact_constraint_delta``), so dividing the
+    accumulated impulse by the substep ``dt`` yields force [N].
+    """
+    tid = wp.tid()
+    count = contact_count[0]
+    if tid >= count:
+        contact_force[tid] = wp.spatial_vector()
+        return
+
+    contact_force[tid] = contact_impulse[tid] * (1.0 / dt)
 
 
 @wp.kernel

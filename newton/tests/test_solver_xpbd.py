@@ -466,6 +466,168 @@ def test_articulation_contact_drift(test, device):
     )
 
 
+def test_xpbd_contact_force_sphere_on_plane(test, device):
+    """A sphere resting on a ground plane must report contact force equal to its weight."""
+    radius = 0.25
+    density = 1000.0
+    mass = density * (4.0 / 3.0) * np.pi * radius**3
+    gravity = 9.81
+
+    builder = newton.ModelBuilder()
+    builder.default_shape_cfg.density = density
+    builder.add_ground_plane()
+    body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, radius), wp.quat_identity()))
+    builder.add_shape_sphere(body=body, radius=radius)
+    model = builder.finalize(device=device)
+    model.request_contact_attributes("force")
+
+    solver = newton.solvers.SolverXPBD(model, iterations=32)
+    state_in = model.state()
+    state_out = model.state()
+    control = model.control()
+    contacts = model.contacts()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
+
+    dt = 1.0 / 60.0
+    num_substeps = 8
+    sub_dt = dt / num_substeps
+    settle_steps = 120
+    avg_steps = 60
+
+    for _ in range(settle_steps):
+        for _ in range(num_substeps):
+            state_in.clear_forces()
+            model.collide(state_in, contacts)
+            solver.step(state_in, state_out, control, contacts, sub_dt)
+            state_in, state_out = state_out, state_in
+
+    force_acc = np.zeros(3)
+    for _ in range(avg_steps):
+        for _ in range(num_substeps):
+            state_in.clear_forces()
+            model.collide(state_in, contacts)
+            solver.step(state_in, state_out, control, contacts, sub_dt)
+            state_in, state_out = state_out, state_in
+        solver.update_contacts(contacts, state_in)
+        ncontacts = int(contacts.rigid_contact_count.numpy()[0])
+        if ncontacts > 0:
+            f = contacts.force.numpy()[:ncontacts, :3]
+            force_acc += np.sum(f, axis=0)
+
+    avg_force = force_acc / avg_steps
+    expected_fz = mass * gravity
+    np.testing.assert_allclose(avg_force[2], -expected_fz, rtol=0.05, err_msg="Vertical contact force should match -mg")
+    np.testing.assert_allclose(avg_force[0], 0.0, atol=0.5, err_msg="Horizontal X force should be ~0")
+    np.testing.assert_allclose(avg_force[1], 0.0, atol=0.5, err_msg="Horizontal Y force should be ~0")
+
+
+def test_xpbd_contact_force_heavy_sphere_on_plane(test, device):
+    """A heavier sphere on a ground plane -- force must still match mg (single contact)."""
+    radius = 0.5
+    density = 2000.0
+    mass = density * (4.0 / 3.0) * np.pi * radius**3
+    gravity = 9.81
+
+    builder = newton.ModelBuilder()
+    builder.default_shape_cfg.density = density
+    builder.add_ground_plane()
+    body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, radius), wp.quat_identity()))
+    builder.add_shape_sphere(body=body, radius=radius)
+    model = builder.finalize(device=device)
+    model.request_contact_attributes("force")
+
+    solver = newton.solvers.SolverXPBD(model, iterations=32)
+    state_in = model.state()
+    state_out = model.state()
+    control = model.control()
+    contacts = model.contacts()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
+
+    dt = 1.0 / 60.0
+    num_substeps = 8
+    sub_dt = dt / num_substeps
+    settle_steps = 120
+    avg_steps = 60
+
+    for _ in range(settle_steps):
+        for _ in range(num_substeps):
+            state_in.clear_forces()
+            model.collide(state_in, contacts)
+            solver.step(state_in, state_out, control, contacts, sub_dt)
+            state_in, state_out = state_out, state_in
+
+    force_acc = np.zeros(3)
+    for _ in range(avg_steps):
+        for _ in range(num_substeps):
+            state_in.clear_forces()
+            model.collide(state_in, contacts)
+            solver.step(state_in, state_out, control, contacts, sub_dt)
+            state_in, state_out = state_out, state_in
+        solver.update_contacts(contacts, state_in)
+        ncontacts = int(contacts.rigid_contact_count.numpy()[0])
+        if ncontacts > 0:
+            f = contacts.force.numpy()[:ncontacts, :3]
+            force_acc += np.sum(f, axis=0)
+
+    avg_force = force_acc / avg_steps
+    expected_fz = mass * gravity
+    np.testing.assert_allclose(avg_force[2], -expected_fz, rtol=0.05, err_msg="Vertical contact force should match -mg")
+    np.testing.assert_allclose(avg_force[0], 0.0, atol=0.5, err_msg="Horizontal X force should be ~0")
+    np.testing.assert_allclose(avg_force[1], 0.0, atol=0.5, err_msg="Horizontal Y force should be ~0")
+
+
+def test_xpbd_contact_force_zero_when_no_contact(test, device):
+    """A sphere in free-fall (no ground) should produce zero contact force."""
+    radius = 0.25
+
+    builder = newton.ModelBuilder()
+    body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 5.0), wp.quat_identity()))
+    builder.add_shape_sphere(body=body, radius=radius)
+    model = builder.finalize(device=device)
+    model.request_contact_attributes("force")
+
+    solver = newton.solvers.SolverXPBD(model, iterations=2)
+    state_in = model.state()
+    state_out = model.state()
+    control = model.control()
+    contacts = model.contacts()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
+
+    dt = 1.0 / 60.0
+    state_in.clear_forces()
+    model.collide(state_in, contacts)
+    solver.step(state_in, state_out, control, contacts, dt)
+    solver.update_contacts(contacts, state_out)
+
+    ncontacts = int(contacts.rigid_contact_count.numpy()[0])
+    if ncontacts > 0:
+        forces = contacts.force.numpy()[:ncontacts]
+        np.testing.assert_allclose(forces, 0.0, atol=1e-6, err_msg="No contact force expected in free-fall")
+
+
+def test_xpbd_update_contacts_requires_force_attribute(test, device):
+    """update_contacts should raise ValueError when contacts.force is not allocated."""
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.25), wp.quat_identity()))
+    builder.add_shape_sphere(body=body, radius=0.25)
+    model = builder.finalize(device=device)
+
+    solver = newton.solvers.SolverXPBD(model, iterations=2)
+    state_in = model.state()
+    state_out = model.state()
+    control = model.control()
+    contacts = model.contacts()
+
+    state_in.clear_forces()
+    model.collide(state_in, contacts)
+    solver.step(state_in, state_out, control, contacts, 1.0 / 60.0)
+
+    test.assertIsNone(contacts.force)
+    with test.assertRaises(ValueError):
+        solver.update_contacts(contacts)
+
+
 devices = get_test_devices(mode="basic")
 
 
@@ -511,6 +673,38 @@ add_function_test(
     TestSolverXPBD,
     "test_articulation_contact_drift",
     test_articulation_contact_drift,
+    devices=devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestSolverXPBD,
+    "test_xpbd_contact_force_sphere_on_plane",
+    test_xpbd_contact_force_sphere_on_plane,
+    devices=devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestSolverXPBD,
+    "test_xpbd_contact_force_heavy_sphere_on_plane",
+    test_xpbd_contact_force_heavy_sphere_on_plane,
+    devices=devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestSolverXPBD,
+    "test_xpbd_contact_force_zero_when_no_contact",
+    test_xpbd_contact_force_zero_when_no_contact,
+    devices=devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestSolverXPBD,
+    "test_xpbd_update_contacts_requires_force_attribute",
+    test_xpbd_update_contacts_requires_force_attribute,
     devices=devices,
     check_output=False,
 )

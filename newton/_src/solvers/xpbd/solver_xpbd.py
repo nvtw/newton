@@ -15,6 +15,7 @@ from .kernels import (
     apply_particle_shape_restitution,
     apply_rigid_restitution,
     bending_constraint,
+    convert_contact_impulse_to_force,
     copy_kinematic_body_state_kernel,
     solve_body_contact_positions,
     solve_body_joints,
@@ -249,10 +250,15 @@ class SolverXPBD(SolverBase):
 
         rigid_contact_inv_weight = None
 
+        contact_impulse = None
+
         if contacts:
             if self.rigid_contact_con_weighting:
                 rigid_contact_inv_weight = wp.zeros(model.body_count, dtype=float, device=model.device)
             rigid_contact_inv_weight_init = None
+
+            if contacts.force is not None:
+                contact_impulse = wp.zeros(contacts.rigid_contact_max, dtype=wp.spatial_vector, device=model.device)
 
         if control is None:
             control = model.control(clone_variables=False)
@@ -501,6 +507,7 @@ class SolverXPBD(SolverBase):
                             outputs=[
                                 body_deltas,
                                 rigid_contact_inv_weight,
+                                contact_impulse,
                             ],
                             device=model.device,
                         )
@@ -566,6 +573,11 @@ class SolverXPBD(SolverBase):
                         )
 
                         body_q, body_qd = self._apply_body_deltas(model, state_in, state_out, body_deltas, dt)
+
+            # Stash per-contact impulse and weighting state for update_contacts().
+            self._contact_impulse = contact_impulse
+            self._contact_inv_weight = rigid_contact_inv_weight
+            self._last_dt = dt
 
             if model.particle_count:
                 if particle_q.ptr != state_out.particle_q.ptr:
@@ -675,3 +687,38 @@ class SolverXPBD(SolverBase):
 
             if model.body_count:
                 self.copy_kinematic_body_state(model, state_in, state_out)
+
+    @override
+    def update_contacts(self, contacts: Contacts, state: State | None = None) -> None:
+        """Populate ``contacts.force`` from XPBD contact impulses accumulated during the last :meth:`step`.
+
+        Each entry in ``contacts.force`` is a spatial wrench (force [N] and torque [N·m])
+        exerted on body0 by body1, referenced to the center of mass of body0 in world frame.
+
+        Args:
+            contacts: :class:`Contacts` object whose :attr:`~Contacts.force` buffer will be written.
+                Must have been created with ``"force"`` in its requested attributes.
+            state: Unused (accepted for API compatibility with :class:`SolverBase`).
+
+        Raises:
+            ValueError: If ``contacts.force`` is ``None`` (not requested) or if no step has been run yet.
+        """
+        if contacts.force is None:
+            raise ValueError(
+                "contacts.force is not allocated. Call model.request_contact_attributes('force') "
+                "before creating the Contacts object."
+            )
+        if not hasattr(self, "_contact_impulse") or self._contact_impulse is None:
+            raise ValueError("No contact impulse data available. Call step() before update_contacts().")
+
+        wp.launch(
+            kernel=convert_contact_impulse_to_force,
+            dim=contacts.rigid_contact_max,
+            inputs=[
+                contacts.rigid_contact_count,
+                self._contact_impulse,
+                self._last_dt,
+            ],
+            outputs=[contacts.force],
+            device=self.model.device,
+        )
