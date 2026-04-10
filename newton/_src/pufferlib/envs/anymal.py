@@ -40,10 +40,10 @@ _MAX_EPISODE_LENGTH = 1000
 _LAB_TO_MUJOCO = [0, 6, 3, 9, 1, 7, 4, 10, 2, 8, 5, 11]
 _MUJOCO_TO_LAB = [0, 4, 8, 2, 6, 10, 1, 5, 9, 3, 7, 11]
 
-# Reward scales — alive bonus + high tracking drives locomotion.
-_ALIVE_BONUS = 1.0
-_LIN_VEL_REWARD_SCALE = 5.0
-_YAW_RATE_REWARD_SCALE = 2.0
+# Reward scales matching IsaacLab AnymalCFlatEnvCfg exactly.
+# All terms are multiplied by frame_dt in the reward kernel.
+_LIN_VEL_REWARD_SCALE = 1.0
+_YAW_RATE_REWARD_SCALE = 0.5
 _Z_VEL_REWARD_SCALE = -2.0
 _ANG_VEL_REWARD_SCALE = -0.05
 _JOINT_TORQUE_REWARD_SCALE = -2.5e-5
@@ -284,10 +284,9 @@ def _compute_rewards_kernel(
     # 10. Flat orientation penalty
     flat_orientation_l2 = grav_bx * grav_bx + grav_by * grav_by
 
-    # Combine all reward terms: alive bonus + tracking + penalties
+    # Combine all reward terms (no dt scaling — KL-adaptive LR handles stability)
     reward = (
-        _ALIVE_BONUS
-        + track_lin_vel * _LIN_VEL_REWARD_SCALE
+        track_lin_vel * _LIN_VEL_REWARD_SCALE
         + track_ang_vel * _YAW_RATE_REWARD_SCALE
         + z_vel_l2 * _Z_VEL_REWARD_SCALE
         + ang_vel_xy_l2 * _ANG_VEL_REWARD_SCALE

@@ -93,7 +93,7 @@ def main():
         optimizer="adamw",
         lr=1e-3,
         anneal_lr=False,
-        desired_kl=0.01,  # RSL-RL default: adapt LR to maintain KL ≈ 0.01
+        desired_kl=0.008,  # Tighter than RSL-RL default to prevent entropy drift
         activation="elu",
         # PPO hyperparams (RSL-RL defaults)
         gamma=0.99,
@@ -101,7 +101,7 @@ def main():
         clip_coef=0.2,
         vf_coef=1.0,
         vf_clip_coef=0.2,
-        ent_coef=0.01,
+        ent_coef=0.005,
         max_grad_norm=1.0,
         momentum=0.9,
         # 5 epochs of 4 minibatches (RSL-RL default)
@@ -112,7 +112,7 @@ def main():
         init_logstd=0.0,  # RSL-RL default: start with std=1.0
         # Observation normalization (critical for locomotion)
         normalize_obs=True,
-        reward_clamp=30.0,
+        reward_clamp=10.0,
         # Display
         env_name="ANYmal C Walk",
         best_return_init=-1e9,
