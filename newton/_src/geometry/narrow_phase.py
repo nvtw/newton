@@ -33,7 +33,6 @@ from ..geometry.collision_primitive import (
     collide_sphere_sphere,
 )
 from ..geometry.contact_data import SHAPE_PAIR_HFIELD_BIT, ContactData, contact_passes_gap_check, make_contact_sort_key
-from ..geometry.contact_sort import ContactSorter
 from ..geometry.contact_reduction_global import (
     GlobalContactReducer,
     create_export_reduced_contacts_kernel,
@@ -41,6 +40,7 @@ from ..geometry.contact_reduction_global import (
     reduce_buffered_contacts_kernel,
     write_contact_to_reducer,
 )
+from ..geometry.contact_sort import ContactSorter
 from ..geometry.flags import ShapeFlags
 from ..geometry.sdf_contact import (
     compute_block_counts_from_weights,

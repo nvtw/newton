@@ -983,8 +983,7 @@ def test_float_flip_roundtrip_precision(test, device):
     test.assertNotEqual(
         int(t[0]),
         int(t[1]),
-        f"Values {pair[0]} and {pair[1]} (eps={eps_distinguishable:.6e}) "
-        f"must produce different truncated values",
+        f"Values {pair[0]} and {pair[1]} (eps={eps_distinguishable:.6e}) must produce different truncated values",
     )
 
     # --- 5. Sign correctness: all negatives map below all positives ---
