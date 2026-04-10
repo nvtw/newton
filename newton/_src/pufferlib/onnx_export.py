@@ -60,26 +60,43 @@ def export_policy_to_onnx(
     # Determine ONNX activation op matching the training network
     act_op = "Elu" if getattr(policy, "_activation", "relu") == "elu" else "Relu"
 
-    # Layer 1: x @ w1^T -> activation
-    w1 = policy.w1.numpy()  # (hidden, obs_dim)
-    initializers.append(numpy_helper.from_array(w1.astype(np.float32), name="w1"))
-    nodes.append(helper.make_node("Gemm", [prev_output, "w1"], ["pre_h1"], alpha=1.0, beta=0.0, transB=1))
-    nodes.append(helper.make_node(act_op, ["pre_h1"], ["h1"]))
-    prev_output = "h1"
+    # Build layers dynamically from the policy's weight list
+    weights = policy._weights
+    biases = getattr(policy, "_biases", [None] * len(weights))
+    num_layers = len(weights)
 
-    # Layer 2: h1 @ w2^T -> activation
-    w2 = policy.w2.numpy()  # (hidden, hidden)
-    initializers.append(numpy_helper.from_array(w2.astype(np.float32), name="w2"))
-    nodes.append(helper.make_node("Gemm", [prev_output, "w2"], ["pre_h2"], alpha=1.0, beta=0.0, transB=1))
-    nodes.append(helper.make_node(act_op, ["pre_h2"], ["h2"]))
-    prev_output = "h2"
+    for i in range(num_layers):
+        w_np = weights[i].numpy().astype(np.float32)
+        is_last = (i == num_layers - 1)
 
-    # Layer 3: h2 @ w3^T (decoder, out_dim = num_actions + 1)
-    # Strip value column: only take first num_actions columns of w3
-    w3_full = policy.w3.numpy()  # (num_actions + 1, hidden)
-    w3_actor = w3_full[:num_actions, :]  # (num_actions, hidden)
-    initializers.append(numpy_helper.from_array(w3_actor.astype(np.float32), name="w3"))
-    nodes.append(helper.make_node("Gemm", [prev_output, "w3"], ["action"], alpha=1.0, beta=0.0, transB=1))
+        # For the last layer, strip the value column (keep only action dims)
+        if is_last:
+            w_np = w_np[:num_actions, :]
+
+        w_name = f"w{i}"
+        out_name = "action" if is_last else f"h{i}"
+        gemm_out = f"pre_{out_name}" if not is_last else out_name
+
+        initializers.append(numpy_helper.from_array(w_np, name=w_name))
+
+        if biases[i] is not None:
+            b_np = biases[i].numpy().astype(np.float32)
+            if is_last:
+                b_np = b_np[:num_actions]
+            b_name = f"b{i}"
+            initializers.append(numpy_helper.from_array(b_np, name=b_name))
+            nodes.append(helper.make_node("Gemm", [prev_output, w_name, b_name], [gemm_out],
+                                          alpha=1.0, beta=1.0, transB=1))
+        else:
+            nodes.append(helper.make_node("Gemm", [prev_output, w_name], [gemm_out],
+                                          alpha=1.0, beta=0.0, transB=1))
+
+        if not is_last:
+            act_out = f"h{i}"
+            nodes.append(helper.make_node(act_op, [gemm_out], [act_out]))
+            prev_output = act_out
+        else:
+            prev_output = out_name
 
     graph = helper.make_graph(
         nodes,
@@ -101,8 +118,8 @@ def save_checkpoint(policy: SimpleMLP, path: str) -> None:
         "w2": policy.w2.numpy(),
         "w3": policy.w3.numpy(),
     }
-    if policy.logstd is not None:
-        weights["logstd"] = policy.logstd.numpy()
+    if policy.std is not None:
+        weights["std"] = policy.std.numpy()
     np.savez(path, **weights)
 
 
@@ -114,5 +131,5 @@ def load_checkpoint(policy: SimpleMLP, path: str) -> None:
     wp.copy(policy.w1, wp.array(data["w1"], dtype=float, device=policy.device))
     wp.copy(policy.w2, wp.array(data["w2"], dtype=float, device=policy.device))
     wp.copy(policy.w3, wp.array(data["w3"], dtype=float, device=policy.device))
-    if "logstd" in data and policy.logstd is not None:
-        wp.copy(policy.logstd, wp.array(data["logstd"], dtype=float, device=policy.device))
+    if "std" in data and policy.std is not None:
+        wp.copy(policy.std, wp.array(data["std"], dtype=float, device=policy.device))

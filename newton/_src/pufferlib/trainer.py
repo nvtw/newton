@@ -284,7 +284,10 @@ def _sample_continuous_dev_kernel(
     logprobs: wp.array(dtype=float, ndim=1),
     seed_arr: wp.array(dtype=int, ndim=1),
 ):
-    """Sample continuous actions from N(mean, exp(logstd)), reading seed from device array."""
+    """Sample continuous actions from N(mean, std), reading seed from device array.
+
+    Uses scalar std parameterization (RSL-RL default).
+    """
     agent = wp.tid()
     state = wp.rand_init(seed_arr[0], agent)
 
@@ -293,14 +296,13 @@ def _sample_continuous_dev_kernel(
 
     for h in range(num_actions):
         mean = logits[agent, h]
-        log_std = logstd[h]
-        std = wp.exp(log_std)
+        std = logstd[h]  # scalar std (not log)
 
         noise = wp.randn(state)
         action = mean + std * noise
 
         normalized = (action - mean) / std
-        log_prob = -0.5 * normalized * normalized - 0.5 * LOG_2PI - log_std
+        log_prob = -0.5 * normalized * normalized - 0.5 * LOG_2PI - wp.log(std)
 
         actions[agent, h] = action
         total_logp = total_logp + log_prob
@@ -416,17 +418,16 @@ def _compute_cont_logprobs_kernel(
     num_actions: int,
     logprobs: wp.array(dtype=float, ndim=1),
 ):
-    """Compute log probabilities for continuous actions from current policy output."""
+    """Compute log probabilities for continuous actions (scalar std parameterization)."""
     i = wp.tid()
     LOG_2PI = 1.8378770664093453
     total = float(0.0)
     for h in range(num_actions):
         mean = logits[i, h]
-        log_std = logstd[h]
-        std = wp.exp(log_std)
+        std = logstd[h]  # scalar std
         diff = actions[i, h] - mean
         normalized = diff / std
-        total = total + (-0.5 * normalized * normalized - 0.5 * LOG_2PI - log_std)
+        total = total + (-0.5 * normalized * normalized - 0.5 * LOG_2PI - wp.log(std))
     logprobs[i] = total
 
 
@@ -573,6 +574,8 @@ class PPOConfig:
 
     # Network
     activation: str = "elu"
+    num_hidden_layers: int = 2
+    use_bias: bool = False
 
     # Observation normalization
     normalize_obs: bool = False
@@ -656,7 +659,8 @@ class PPOTrainer:
         policy = SimpleMLP(OBS, H, ACT + 1,
                            max_batch=max(N, MB), device=device, seed=cfg.seed,
                            continuous=is_cont, num_actions=ACT,
-                           init_logstd=cfg.init_logstd, activation=cfg.activation)
+                           init_logstd=cfg.init_logstd, activation=cfg.activation,
+                           num_hidden_layers=cfg.num_hidden_layers, use_bias=cfg.use_bias)
         params = policy.parameters()
 
         d_lr = wp.array([cfg.lr], dtype=float, device=device)
@@ -750,7 +754,7 @@ class PPOTrainer:
                       inputs=[policy._out, ACT, values_scratch], device=device)
             if is_cont:
                 wp.launch(_sample_continuous_dev_kernel, dim=N,
-                          inputs=[policy._out, policy.logstd, ACT,
+                          inputs=[policy._out, policy.std, ACT,
                                   actions_scratch, logprobs_scratch, d_seed],
                           device=device)
             else:
@@ -869,7 +873,7 @@ class PPOTrainer:
 
             if is_cont:
                 wp.launch(ppo_loss_continuous_kernel, dim=MB,
-                          inputs=[dec_out, policy.logstd, mb_actions, mb_logprobs,
+                          inputs=[dec_out, policy.std, mb_actions, mb_logprobs,
                                   mb_advantages_buf,
                                   mb_values_pred, mb_old_values, mb_returns_buf,
                                   ACT,
@@ -908,7 +912,7 @@ class PPOTrainer:
             # writes back ratio from the current forward pass, not post-update)
             if is_cont:
                 wp.launch(_compute_cont_logprobs_kernel, dim=MB,
-                          inputs=[dec_out, policy.logstd, mb_actions, ACT,
+                          inputs=[dec_out, policy.std, mb_actions, ACT,
                                   mb_new_logprobs],
                           device=device)
             else:
@@ -921,6 +925,12 @@ class PPOTrainer:
             if is_cont:
                 grads.append(loss_bufs.grad_logstd)
             optimizer.step(grads)
+
+            # Clamp scalar std to stay positive (min 0.01, max 10.0)
+            # Clamp std to [0.2, 2.0] to prevent collapse/explosion
+            if is_cont and policy.std is not None:
+                wp.launch(_clamp_1d_kernel, dim=ACT,
+                          inputs=[policy.std, 0.2, 2.0], device=device)
 
             # Write back updated values and importance ratios to flat buffers
             # so the next minibatch's GAE uses fresh estimates (matches C++)

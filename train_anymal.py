@@ -86,7 +86,7 @@ def main():
         horizon=24,
         obs_dim=48,
         num_actions=12,
-        hidden=256,
+        hidden=128,  # 3×128 with biases = IsaacLab architecture
         total_timesteps=args.steps,
         seed=args.seed,
         # Optimizer: AdamW matching RSL-RL defaults + adaptive LR
@@ -95,13 +95,15 @@ def main():
         anneal_lr=False,
         desired_kl=0.008,  # Tighter than RSL-RL default to prevent entropy drift
         activation="elu",
+        num_hidden_layers=3,
+        use_bias=True,
         # PPO hyperparams (RSL-RL defaults)
         gamma=0.99,
         gae_lambda=0.95,
         clip_coef=0.2,
         vf_coef=1.0,
         vf_clip_coef=0.2,
-        ent_coef=0.005,
+        ent_coef=0.003,
         max_grad_norm=1.0,
         momentum=0.9,
         # 5 epochs of 4 minibatches (RSL-RL default)
@@ -109,10 +111,10 @@ def main():
         minibatch_size=max(N * 24 // 4, 4096),
         # Continuous action space
         continuous=True,
-        init_logstd=0.0,  # RSL-RL default: start with std=1.0
+        init_logstd=-1.2,  # → init_std≈0.3 (gentle for MuJoCo: 3σ=0.9rad offset)
         # Observation normalization (critical for locomotion)
-        normalize_obs=True,
-        reward_clamp=10.0,
+        normalize_obs=False,  # IsaacLab pre-trained policy uses raw obs
+        reward_clamp=10.0,  # only_positive clips to [0, ~1.5], clamp at 10 for safety
         # Display
         env_name="ANYmal C Walk",
         best_return_init=-1e9,

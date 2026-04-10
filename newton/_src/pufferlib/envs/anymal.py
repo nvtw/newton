@@ -40,18 +40,20 @@ _MAX_EPISODE_LENGTH = 1000
 _LAB_TO_MUJOCO = [0, 6, 3, 9, 1, 7, 4, 10, 2, 8, 5, 11]
 _MUJOCO_TO_LAB = [0, 4, 8, 2, 6, 10, 1, 5, 9, 3, 7, 11]
 
-# Reward scales matching IsaacLab AnymalCFlatEnvCfg exactly.
-# All terms are multiplied by frame_dt in the reward kernel.
+# Reward scales matching RSL-RL legged_gym AnymalCFlat exactly.
+# All terms multiplied by frame_dt. Total reward clipped to >= 0 (only_positive_rewards).
 _LIN_VEL_REWARD_SCALE = 1.0
 _YAW_RATE_REWARD_SCALE = 0.5
+_FWD_VEL_REWARD_SCALE = 2.0  # direct linear reward for moving at commanded velocity
 _Z_VEL_REWARD_SCALE = -2.0
 _ANG_VEL_REWARD_SCALE = -0.05
-_JOINT_TORQUE_REWARD_SCALE = -2.5e-5
+_JOINT_TORQUE_REWARD_SCALE = -0.000025
 _JOINT_ACCEL_REWARD_SCALE = -2.5e-7
-_ACTION_RATE_REWARD_SCALE = -0.01
-_FEET_AIR_TIME_REWARD_SCALE = 0.5
+_DOF_VEL_REWARD_SCALE = -0.01  # penalize joint velocity (reduces jittering)
+_ACTION_RATE_REWARD_SCALE = -0.05  # increased to smooth actions
+_FEET_AIR_TIME_REWARD_SCALE = 2.0
 _UNDESIRED_CONTACT_REWARD_SCALE = -1.0
-_FLAT_ORIENTATION_REWARD_SCALE = -5.0
+_FLAT_ORIENTATION_REWARD_SCALE = -2.0
 
 _ACTION_SCALE = 0.5
 _FRAME_DT = 0.02  # sim_dt(0.005) * substeps(4)
@@ -155,10 +157,11 @@ def _compute_obs_kernel(
     obs[env, 11] = commands[env, 2]
 
     # Joint positions (deviation from default) and velocities -- reordered
-    for j in range(12):
-        mj = lab_to_mujoco[j]
-        obs[env, 12 + mj] = joint_q[q_off + 7 + j] - joint_pos_initial[j]
-        obs[env, 24 + mj] = joint_qd[qd_off + 6 + j]
+    # Uses gather pattern: obs[k] = joint[lab_to_mujoco[k]] (matching walk_onnx)
+    for k in range(12):
+        src = lab_to_mujoco[k]
+        obs[env, 12 + k] = joint_q[q_off + 7 + src] - joint_pos_initial[src]
+        obs[env, 24 + k] = joint_qd[qd_off + 6 + src]
 
     # Previous actions
     for j in range(12):
@@ -212,9 +215,14 @@ def _compute_rewards_kernel(
     cmd_vy = commands[env, 1]
     cmd_yaw = commands[env, 2]
 
-    # 1. Linear velocity tracking (exp mapping, standard IsaacLab formulation)
+    # 1. Linear velocity tracking (exp mapping)
     lin_vel_err = (cmd_vx - vel_bx) * (cmd_vx - vel_bx) + (cmd_vy - vel_by) * (cmd_vy - vel_by)
     track_lin_vel = wp.exp(-lin_vel_err / 0.25)
+
+    # 1b. Direct forward velocity reward (breaks standing optimum)
+    # vel_bx is forward velocity in body frame, cmd_vx is commanded forward velocity
+    # Positive when moving in commanded direction, negative when standing/moving backward
+    fwd_vel_reward = vel_bx * cmd_vx + vel_by * cmd_vy
 
     # 2. Yaw rate tracking (exp mapping)
     yaw_err = (cmd_yaw - avel_bz) * (cmd_yaw - avel_bz)
@@ -284,14 +292,22 @@ def _compute_rewards_kernel(
     # 10. Flat orientation penalty
     flat_orientation_l2 = grav_bx * grav_bx + grav_by * grav_by
 
-    # Combine all reward terms (no dt scaling — KL-adaptive LR handles stability)
+    # --- Joint velocity penalty (discourages jittering) ---
+    dof_vel_l2 = float(0.0)
+    for j in range(12):
+        vel_j = joint_qd[qd_off + 6 + j]
+        dof_vel_l2 = dof_vel_l2 + vel_j * vel_j
+
+    # Combine all reward terms (no dt scaling)
     reward = (
         track_lin_vel * _LIN_VEL_REWARD_SCALE
+        + fwd_vel_reward * _FWD_VEL_REWARD_SCALE
         + track_ang_vel * _YAW_RATE_REWARD_SCALE
         + z_vel_l2 * _Z_VEL_REWARD_SCALE
         + ang_vel_xy_l2 * _ANG_VEL_REWARD_SCALE
         + torque_l2 * _JOINT_TORQUE_REWARD_SCALE
         + accel_l2 * _JOINT_ACCEL_REWARD_SCALE
+        + dof_vel_l2 * _DOF_VEL_REWARD_SCALE
         + action_rate_l2 * _ACTION_RATE_REWARD_SCALE
         + feet_air_reward * _FEET_AIR_TIME_REWARD_SCALE
         + undesired_contacts * _UNDESIRED_CONTACT_REWARD_SCALE
@@ -321,10 +337,14 @@ def _apply_actions_kernel(
     joint_pos_initial: wp.array[float],
     joint_target_pos: wp.array[float],
 ):
-    """Map network output to joint targets (matching IsaacLab: no tanh squashing)."""
+    """Map network output to joint targets (matching walk_onnx gather pattern).
+
+    walk_onnx: rearranged[j] = act[mujoco_to_lab[j]]; target[j] = initial[j] + 0.5*rearranged[j]
+    So: target[j] = initial[j] + 0.5 * act[mujoco_to_lab[j]]
+    """
     env, j = wp.tid()
-    lab_j = mujoco_to_lab[j]
-    joint_target_pos[env * _QD_STRIDE + 6 + lab_j] = joint_pos_initial[lab_j] + _ACTION_SCALE * actions[env, j]
+    src = mujoco_to_lab[j]  # which action index maps to this joint
+    joint_target_pos[env * _QD_STRIDE + 6 + j] = joint_pos_initial[j] + _ACTION_SCALE * actions[env, src]
 
 
 @wp.kernel

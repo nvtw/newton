@@ -91,13 +91,16 @@ def sample_actions_continuous_kernel(
     logprobs: wp.array(dtype=float, ndim=1),
     seed: int,
 ):
-    """Sample continuous actions from N(mean, exp(logstd)).
+    """Sample continuous actions from N(mean, std).
+
+    Uses scalar std parameterization (RSL-RL default) instead of logstd.
+    The entropy gradient w.r.t. std is 1/std which self-stabilizes.
 
     One thread per agent.
 
     Args:
         logits: (B, num_actions) means from the decoder.
-        logstd: (num_actions,) shared log standard deviations.
+        logstd: (num_actions,) shared standard deviations (scalar, NOT log).
         num_actions: action dimensionality.
         actions: (B, num_actions) output sampled actions.
         logprobs: (B,) output total log-probability.
@@ -111,14 +114,13 @@ def sample_actions_continuous_kernel(
 
     for h in range(num_actions):
         mean = logits[agent, h]
-        log_std = logstd[h]
-        std = wp.exp(log_std)
+        std = logstd[h]  # scalar std (not log)
 
         noise = wp.randn(state)
         action = mean + std * noise
 
         normalized = (action - mean) / std
-        log_prob = -0.5 * normalized * normalized - 0.5 * LOG_2PI - log_std
+        log_prob = -0.5 * normalized * normalized - 0.5 * LOG_2PI - wp.log(std)
 
         actions[agent, h] = action
         total_logp = total_logp + log_prob
@@ -483,17 +485,17 @@ def ppo_loss_continuous_kernel(
 
     grad_values[idx] = dL * vf_coef * d_val_pred
 
-    # --- Policy loss (continuous) ---
+    # --- Policy loss (continuous, scalar std parameterization) ---
     total_new_logp = float(0.0)
     total_entropy = float(0.0)
 
     for h in range(num_actions):
         mean = logits[idx, h]
-        log_std = logstd[h]
-        std = wp.exp(log_std)
+        std = logstd[h]  # scalar std param (NOT log)
         action = actions[idx, h]
 
         normalized = (action - mean) / std
+        log_std = wp.log(std)
         new_logp = -0.5 * normalized * normalized - HALF_LOG_2PI - log_std
         entropy = HALF_1_PLUS_LOG_2PI + log_std
 
@@ -518,17 +520,21 @@ def ppo_loss_continuous_kernel(
     d_new_logp = wa * d_pg * ratio
     d_entropy = dL * (-ent_coef)
 
-    # Per-action gradients
+    # Per-action gradients (scalar std parameterization)
+    # d(log_prob)/d(mean) = (action - mean) / var  (same as before)
+    # d(log_prob)/d(std)  = ((action - mean)^2 / var - 1) / std  (extra 1/std factor!)
+    # d(entropy)/d(std)   = 1/std  (key stabilizer: decreases with growing std)
     for h2 in range(num_actions):
         mean2 = logits[idx, h2]
-        log_std2 = logstd[h2]
-        std2 = wp.exp(log_std2)
+        std2 = logstd[h2]  # scalar std
         action2 = actions[idx, h2]
         diff = action2 - mean2
         var = std2 * std2
+        inv_std = 1.0 / std2
 
         grad_logits[idx, h2] = d_new_logp * diff / var
-        grad_logstd_scratch[idx, h2] = d_new_logp * (diff * diff / var - 1.0) + d_entropy
+        # Gradient w.r.t. std (NOT logstd): includes 1/std factor
+        grad_logstd_scratch[idx, h2] = d_new_logp * (diff * diff / var - 1.0) * inv_std + d_entropy * inv_std
 
     # Write per-thread loss components (reduced separately via tile_sum)
     total_loss = (pg_loss + vf_coef * v_loss - ent_coef * total_entropy) * dL
