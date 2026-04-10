@@ -1614,7 +1614,7 @@ class NarrowPhase:
                 self._sort_key_array = wp.zeros(max_candidate_pairs, dtype=wp.int64, device=device)
                 self._contact_sorter = ContactSorter(max_candidate_pairs, device=device)
             else:
-                self._sort_key_array = None
+                self._sort_key_array = wp.zeros(0, dtype=wp.int64, device=device)
                 self._contact_sorter = None
             # Sentinel edge buffers used when no edge data is provided.
             # _empty_edge_range is indexed by shape id, so it must have one
@@ -2198,6 +2198,12 @@ class NarrowPhase:
 
         # Clear external contact count (internal counters are cleared in launch_custom_write)
         contact_count.zero_()
+
+        # Ensure sort-key buffer and sorter match the contact output capacity
+        if self.deterministic and self._sort_key_array.shape[0] < contact_max:
+            dev = self._sort_key_array.device
+            self._sort_key_array = wp.zeros(contact_max, dtype=wp.int64, device=dev)
+            self._contact_sorter = ContactSorter(contact_max, device=dev)
 
         # Create ContactWriterData struct
         sort_key_arr = self._sort_key_array if self.deterministic else self._empty_sort_key

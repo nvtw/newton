@@ -66,8 +66,8 @@ def make_contact_sort_key(shape_a: int, shape_b: int, sort_sub_key: int) -> wp.i
         [22:0]  sort_sub_key (23 bits — encodes edge/triangle index + mesh-side bit)
     """
     return (
-        (wp.int64(shape_a) << wp.int64(43))
-        | (wp.int64(shape_b) << wp.int64(23))
+        ((wp.int64(shape_a) & wp.int64(0xFFFFF)) << wp.int64(43))
+        | ((wp.int64(shape_b) & wp.int64(0xFFFFF)) << wp.int64(23))
         | (wp.int64(sort_sub_key) & wp.int64(0x7FFFFF))
     )
 

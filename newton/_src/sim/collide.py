@@ -721,7 +721,7 @@ class CollisionPipeline:
                 rigid_contact_max, per_contact_shape_properties=per_contact_props, device=device
             )
         else:
-            self._sort_key_array = None
+            self._sort_key_array = wp.zeros(0, dtype=wp.int64, device=device)
             self._contact_sorter = None
 
     @property
