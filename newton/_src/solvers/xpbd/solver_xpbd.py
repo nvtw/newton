@@ -258,7 +258,7 @@ class SolverXPBD(SolverBase):
             rigid_contact_inv_weight_init = None
 
             if contacts.force is not None:
-                contact_impulse = wp.zeros(contacts.rigid_contact_max, dtype=wp.vec3, device=model.device)
+                contact_impulse = wp.zeros(contacts.rigid_contact_max, dtype=wp.spatial_vector, device=model.device)
 
         if control is None:
             control = model.control(clone_variables=False)
@@ -575,6 +575,7 @@ class SolverXPBD(SolverBase):
                         body_q, body_qd = self._apply_body_deltas(model, state_in, state_out, body_deltas, dt)
 
             self._contact_impulse = contact_impulse
+            self._contact_impulse_capacity = contacts.rigid_contact_max if contacts is not None else 0
             self._last_dt = dt
 
             if model.particle_count:
@@ -690,17 +691,20 @@ class SolverXPBD(SolverBase):
     def update_contacts(self, contacts: Contacts, state: State | None = None) -> None:
         """Populate ``contacts.force`` from XPBD contact impulses accumulated during the last :meth:`step`.
 
-        Only the linear force component is written; the torque component is
-        zero.  Downstream consumers such as :class:`SensorContact` compute
-        moments from the contact point and force direction themselves.
+        Both force [N] and torque [N·m] components are written.  The torque
+        includes torsional and rolling friction contributions that cannot be
+        reconstructed from the linear force alone.
 
         Args:
             contacts: :class:`Contacts` object whose :attr:`~Contacts.force` buffer will be written.
-                Must have been created with ``"force"`` in its requested attributes.
+                Must have been created with ``"force"`` in its requested attributes and must
+                match the :class:`Contacts` instance (same ``rigid_contact_max``) passed to
+                the preceding :meth:`step`.
             state: Unused (accepted for API compatibility with :class:`SolverBase`).
 
         Raises:
-            ValueError: If ``contacts.force`` is ``None`` (not requested) or if no step has been run yet.
+            ValueError: If ``contacts.force`` is ``None`` (not requested), if no step has been run yet,
+                or if the contacts capacity does not match the one used in the last :meth:`step`.
         """
         if contacts.force is None:
             raise ValueError(
@@ -709,6 +713,12 @@ class SolverXPBD(SolverBase):
             )
         if not hasattr(self, "_contact_impulse") or self._contact_impulse is None:
             raise ValueError("No contact impulse data available. Call step() before update_contacts().")
+        if contacts.rigid_contact_max != self._contact_impulse_capacity:
+            raise ValueError(
+                f"Contacts capacity mismatch: update_contacts() received rigid_contact_max="
+                f"{contacts.rigid_contact_max}, but step() used {self._contact_impulse_capacity}. "
+                f"Pass the same Contacts instance to both step() and update_contacts()."
+            )
 
         wp.launch(
             kernel=convert_contact_impulse_to_force,

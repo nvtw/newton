@@ -2078,7 +2078,7 @@ def solve_body_contact_positions(
     # outputs
     deltas: wp.array[wp.spatial_vector],
     contact_inv_weight: wp.array[float],
-    contact_impulse: wp.array[wp.vec3],
+    contact_impulse: wp.array[wp.spatial_vector],
 ):
     tid = wp.tid()
 
@@ -2287,24 +2287,24 @@ def solve_body_contact_positions(
         wp.atomic_add(deltas, body_b, wp.spatial_vector(lin_delta_b, ang_delta_b))
 
     if contact_impulse:
-        contact_impulse[tid] = contact_impulse[tid] + lin_delta_a
+        wp.atomic_add(contact_impulse, tid, wp.spatial_vector(lin_delta_a, ang_delta_a))
 
 
 @wp.kernel
 def convert_contact_impulse_to_force(
     contact_count: wp.array[int],
-    contact_impulse: wp.array[wp.vec3],
+    contact_impulse: wp.array[wp.spatial_vector],
     dt: float,
     # output
     contact_force: wp.array[wp.spatial_vector],
 ):
-    """Convert accumulated per-contact linear impulse to ``contacts.force`` spatial vectors.
+    """Convert accumulated per-contact spatial impulse to ``contacts.force`` spatial vectors.
 
     The XPBD lambda convention used in this solver already absorbs one power
     of ``dt`` (see ``compute_contact_constraint_delta``), so dividing the
-    accumulated impulse by the substep ``dt`` yields force [N].  The torque
-    component is left zero; downstream consumers such as :class:`SensorContact`
-    compute moments from the contact point and force direction themselves.
+    accumulated impulse by the substep ``dt`` yields force [N] and torque [N·m].
+    The linear component includes normal and friction forces; the angular
+    component includes torsional and rolling friction torques.
     """
     tid = wp.tid()
     count = contact_count[0]
@@ -2312,8 +2312,11 @@ def convert_contact_impulse_to_force(
         contact_force[tid] = wp.spatial_vector()
         return
 
-    f = contact_impulse[tid] * (1.0 / dt)
-    contact_force[tid] = wp.spatial_vector(f, wp.vec3(0.0))
+    inv_dt = 1.0 / dt
+    impulse = contact_impulse[tid]
+    f = wp.spatial_top(impulse) * inv_dt
+    tau = wp.spatial_bottom(impulse) * inv_dt
+    contact_force[tid] = wp.spatial_vector(f, tau)
 
 
 @wp.kernel
