@@ -11,7 +11,8 @@ import warp as wp
 from ..geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from ..geometry.broad_phase_sap import BroadPhaseSAP
 from ..geometry.collision_core import compute_tight_aabb_from_support
-from ..geometry.contact_data import ContactData
+from ..geometry.contact_data import ContactData, make_contact_sort_key
+from ..geometry.contact_sort import ContactSorter
 from ..geometry.differentiable_contacts import launch_differentiable_contact_augment
 from ..geometry.flags import ShapeFlags
 from ..geometry.kernels import create_soft_contacts
@@ -54,6 +55,7 @@ class ContactWriterData:
     out_stiffness: wp.array[float]
     out_damping: wp.array[float]
     out_friction: wp.array[float]
+    out_sort_key: wp.array[wp.int64]
 
 
 @wp.func
@@ -137,6 +139,11 @@ def write_contact(
         writer_data.out_stiffness[index] = contact_data.contact_stiffness
         writer_data.out_damping[index] = contact_data.contact_damping
         writer_data.out_friction[index] = contact_data.contact_friction_scale
+
+    if writer_data.out_sort_key.shape[0] > 0:
+        writer_data.out_sort_key[index] = make_contact_sort_key(
+            contact_data.shape_a, contact_data.shape_b, contact_data.sort_sub_key
+        )
 
 
 @wp.kernel(enable_backward=False)
@@ -470,6 +477,7 @@ class CollisionPipeline:
         | None = None,
         narrow_phase: NarrowPhase | None = None,
         sdf_hydroelastic_config: HydroelasticSDF.Config | None = None,
+        deterministic: bool = False,
     ):
         """
         Initialize the CollisionPipeline (expert API).
@@ -501,6 +509,9 @@ class CollisionPipeline:
                 "nxn"/"sap" modes, ignored.
             sdf_hydroelastic_config: Configuration for
                 hydroelastic collision handling. Defaults to None.
+            deterministic: Sort contacts after the narrow phase so that results
+                are independent of GPU thread scheduling.  Adds a radix sort +
+                gather pass.  Hydroelastic contacts are not yet covered.
 
         .. note::
             When ``requires_grad`` is true (explicitly or via ``model.requires_grad``),
@@ -669,6 +680,7 @@ class CollisionPipeline:
                 has_meshes=has_meshes,
                 has_heightfields=has_heightfields,
                 use_lean_gjk_mpr=use_lean_gjk_mpr,
+                deterministic=deterministic,
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
 
@@ -700,6 +712,17 @@ class CollisionPipeline:
         self.soft_contact_margin = soft_contact_margin
         self._soft_contact_max = soft_contact_max
         self.requires_grad = requires_grad
+        self.deterministic = deterministic
+        if deterministic:
+            per_contact_props = self.narrow_phase.hydroelastic_sdf is not None
+            with wp.ScopedDevice(device):
+                self._sort_key_array = wp.zeros(rigid_contact_max, dtype=wp.int64, device=device)
+            self._contact_sorter = ContactSorter(
+                rigid_contact_max, per_contact_shape_properties=per_contact_props, device=device
+            )
+        else:
+            self._sort_key_array = None
+            self._contact_sorter = None
 
     @property
     def rigid_contact_max(self) -> int:
@@ -908,6 +931,7 @@ class CollisionPipeline:
         writer_data.out_stiffness = contacts.rigid_contact_stiffness
         writer_data.out_damping = contacts.rigid_contact_damping
         writer_data.out_friction = contacts.rigid_contact_friction
+        writer_data.out_sort_key = self._sort_key_array
 
         # Run narrow phase with custom contact writer (writes directly to Contacts format)
         self.narrow_phase.launch_custom_write(
@@ -933,6 +957,26 @@ class CollisionPipeline:
             writer_data=writer_data,
             device=self.device,
         )
+
+        if self.deterministic and self._contact_sorter is not None:
+            self._contact_sorter.sort_full(
+                self._sort_key_array,
+                contacts.rigid_contact_count,
+                shape0=contacts.rigid_contact_shape0,
+                shape1=contacts.rigid_contact_shape1,
+                point0=contacts.rigid_contact_point0,
+                point1=contacts.rigid_contact_point1,
+                offset0=contacts.rigid_contact_offset0,
+                offset1=contacts.rigid_contact_offset1,
+                normal=contacts.rigid_contact_normal,
+                margin0=contacts.rigid_contact_margin0,
+                margin1=contacts.rigid_contact_margin1,
+                tids=contacts.rigid_contact_tids,
+                stiffness=contacts.rigid_contact_stiffness,
+                damping=contacts.rigid_contact_damping,
+                friction=contacts.rigid_contact_friction,
+                device=self.device,
+            )
 
         # Differentiable contact augmentation: reconstruct world-space contact
         # quantities through body_q so that gradients flow via wp.Tape.

@@ -37,6 +37,7 @@ class ContactData:
         contact_stiffness: Contact stiffness. 0.0 means no stiffness was set.
         contact_damping: Contact damping scale. 0.0 means no damping was set.
         contact_friction_scale: Friction scaling factor. 0.0 means no friction was set.
+        sort_sub_key: Sub-key for deterministic contact sorting (encodes edge/triangle/vertex index).
     """
 
     contact_point_center: wp.vec3
@@ -52,6 +53,23 @@ class ContactData:
     contact_stiffness: float
     contact_damping: float
     contact_friction_scale: float
+    sort_sub_key: int
+
+
+@wp.func
+def make_contact_sort_key(shape_a: int, shape_b: int, sort_sub_key: int) -> wp.int64:
+    """Build a 64-bit sort key for deterministic contact ordering.
+
+    Layout (bit 63 kept zero so int64 order matches uint64 order):
+        [62:43] shape_a  (20 bits)
+        [42:23] shape_b  (20 bits)
+        [22:0]  sort_sub_key (23 bits — encodes edge/triangle index + mesh-side bit)
+    """
+    return (
+        (wp.int64(shape_a) << wp.int64(43))
+        | (wp.int64(shape_b) << wp.int64(23))
+        | (wp.int64(sort_sub_key) & wp.int64(0x7FFFFF))
+    )
 
 
 @wp.func

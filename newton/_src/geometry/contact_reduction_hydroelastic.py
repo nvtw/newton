@@ -137,8 +137,8 @@ def export_hydroelastic_contact_to_buffer(
     Returns:
         Contact ID if successfully stored, -1 if buffer full
     """
-    # Use base function to store common contact data
-    contact_id = export_contact_to_buffer(shape_a, shape_b, position, normal, depth, reducer_data)
+    # Use base function to store common contact data (fingerprint=0: hydroelastic excluded from determinism)
+    contact_id = export_contact_to_buffer(shape_a, shape_b, position, normal, depth, 0, reducer_data)
 
     if contact_id >= 0:
         # Store hydroelastic-specific data (k_eff is stored per entry, not per contact)
@@ -223,10 +223,10 @@ def get_reduce_hydroelastic_contacts_kernel():
                     for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
                         dir_2d = get_spatial_direction_2d(dir_i)
                         score = wp.dot(pos_2d_centered, dir_2d) * pen_weight
-                        value = make_contact_value(score, i)
+                        value = make_contact_value(score, 0, i)
                         reduction_update_slot(entry_idx, dir_i, value, reducer_data.ht_values, ht_capacity)
 
-                max_depth_value = make_contact_value(-depth, i)
+                max_depth_value = make_contact_value(-depth, 0, i)
                 reduction_update_slot(
                     entry_idx,
                     wp.static(NUM_SPATIAL_DIRECTIONS),
@@ -263,7 +263,7 @@ def get_reduce_hydroelastic_contacts_kernel():
                 reducer_data.entry_k_eff[voxel_entry_idx] = _effective_stiffness(
                     shape_material_k_hydro[shape_a], shape_material_k_hydro[shape_b]
                 )
-                voxel_value = make_contact_value(-depth, i)
+                voxel_value = make_contact_value(-depth, 0, i)
                 reduction_update_slot(
                     voxel_entry_idx,
                     voxel_local_slot,
