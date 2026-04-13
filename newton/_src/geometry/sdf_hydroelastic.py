@@ -943,7 +943,7 @@ def broadphase_collision_pairs_scatter(
 ):
     offset = wp.tid()
     total_blocks = wp.min(block_broad_collide_count[0], max_num_blocks_broad)
-    pair_count = shape_pairs_sdf_sdf_count[0]
+    pair_count = wp.min(shape_pairs_sdf_sdf_count[0], block_start_prefix.shape[0])
     if pair_count == 0:
         return
 
