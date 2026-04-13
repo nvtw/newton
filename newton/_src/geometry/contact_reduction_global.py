@@ -260,12 +260,13 @@ def make_contact_key(shape_a: int, shape_b: int, bin_id: int) -> wp.uint64:
 #   22-bit score, 22-bit fingerprint tiebreaker, 20-bit contact_id.
 # ---------------------------------------------------------------------------
 
-# FINGERPRINT_BITS matches the 23-bit sort_sub_key in make_contact_sort_key so that
-# two contacts distinguishable by the final sort key never alias during atomic_max.
-FINGERPRINT_BITS = wp.constant(wp.uint64(23))
-CONTACT_ID_BITS = wp.constant(wp.uint64(19))
-CONTACT_ID_MASK = wp.constant(wp.uint64((1 << 19) - 1))
-FINGERPRINT_MASK = wp.constant(wp.uint64((1 << 23) - 1))
+# 22-bit fingerprint is wide enough to distinguish any two contacts that share
+# the same truncated score within a single reduction slot.  The remaining 20
+# bits for contact_id support up to 1,048,575 buffered contacts.
+FINGERPRINT_BITS = wp.constant(wp.uint64(22))
+CONTACT_ID_BITS = wp.constant(wp.uint64(20))
+CONTACT_ID_MASK = wp.constant(wp.uint64((1 << 20) - 1))
+FINGERPRINT_MASK = wp.constant(wp.uint64((1 << 22) - 1))
 SCORE_SHIFT = 10
 
 
@@ -331,10 +332,10 @@ def _make_contact_value_det(score: float, fingerprint: int, contact_id: int) -> 
 
     ::
 
-        63        42 41        19 18          0
+        63        42 41        20 19          0
         ┌──────────┬────────────┬──────────────┐
         │  score   │ fingerprint│  contact_id  │
-        │ (22 bit) │  (23 bit)  │   (19 bit)   │
+        │ (22 bit) │  (22 bit)  │   (20 bit)   │
         └──────────┴────────────┴──────────────┘
 
     **Score (bits 63-42, 22 bits)** — ``float_flip(score) >> 10``.
@@ -350,12 +351,14 @@ def _make_contact_value_det(score: float, fingerprint: int, contact_id: int) -> 
     derived from geometry (edge index | mode/source tag bits).  When two
     contacts have the same truncated score, the fingerprint breaks the tie
     so that ``atomic_max`` always picks the same winner regardless of
-    thread scheduling.
+    thread scheduling.  22 bits (4M values) is wide enough to distinguish
+    any two contacts within a single reduction slot.
 
     **Contact ID (bits 19-0, 20 bits)** — buffer slot assigned by
-    ``atomic_add``.  Non-deterministic, but only matters when both score
-    and fingerprint are identical, which requires two geometrically
-    identical contacts — an impossible case.
+    ``atomic_add``.  20 bits supports up to 1,048,575 buffered contacts.
+    Non-deterministic, but only matters when both score and fingerprint
+    are identical, which requires two geometrically identical contacts —
+    an impossible case.
 
     The cascade ``score > fingerprint > contact_id`` means ``atomic_max``
     on this uint64 selects the contact with the best score, breaking ties
@@ -394,10 +397,10 @@ def _make_preprune_probe_det(score: float, fingerprint: int) -> wp.uint64:
 
 
 @wp.func_native("""
-return static_cast<int32_t>(packed & 0x7FFFFull);
+return static_cast<int32_t>(packed & 0xFFFFFull);
 """)
 def _unpack_contact_id_det(packed: wp.uint64) -> int:
-    """Extract contact_id (low 19 bits) — deterministic variant."""
+    """Extract contact_id (low 20 bits) — deterministic variant."""
     ...
 
 
@@ -692,6 +695,14 @@ class GlobalContactReducer:
             deterministic: If True, disable the speculative pre-prune optimization
                 so that every candidate contact competes in the atomic_max reduction.
         """
+        max_det_contacts = (1 << int(CONTACT_ID_BITS)) - 1
+        if deterministic and capacity > max_det_contacts:
+            raise ValueError(
+                f"Deterministic contact packing supports at most {max_det_contacts} "
+                f"buffered contacts ({int(CONTACT_ID_BITS)}-bit contact_id), "
+                f"but capacity={capacity}. Reduce max_triangle_pairs or disable "
+                f"deterministic mode."
+            )
         self.capacity = capacity
         self.device = device
         self.store_hydroelastic_data = store_hydroelastic_data

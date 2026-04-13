@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
 """Deterministic contact sorting via radix sort on per-contact keys.
@@ -76,8 +76,8 @@ class ContactSorter:
     """Sort contact arrays into a deterministic canonical order.
 
     Pre-allocates double-buffer arrays and permutation indices at construction
-    time so that the per-frame :meth:`sort` call is allocation-free and fully
-    CUDA-graph-capturable (no host synchronization).
+    time so that the per-frame :meth:`sort_simple` / :meth:`sort_full` calls
+    are allocation-free and fully CUDA-graph-capturable (no host synchronization).
 
     The radix sort always runs over the full *capacity* buffer.  Slots beyond
     the active ``contact_count`` are filled with a sentinel key
