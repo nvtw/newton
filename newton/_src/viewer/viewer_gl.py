@@ -886,6 +886,8 @@ class ViewerGL(ViewerBase):
             else:
                 # Handle zero lines case
                 colors = wp.array([], dtype=wp.vec3, device=self.device)
+        elif isinstance(colors, wp.array) and colors.dtype == wp.float32:
+            colors = colors.reshape((num_lines, 3)).view(dtype=wp.vec3)
 
         assert isinstance(colors, wp.array)
         assert len(colors) == num_lines, "Number of line colors must match line begins"
@@ -946,6 +948,8 @@ class ViewerGL(ViewerBase):
                 colors.fill_(color_vec)
             else:
                 colors = wp.array([], dtype=wp.vec3, device=self.device)
+        elif isinstance(colors, wp.array) and colors.dtype == wp.float32:
+            colors = colors.reshape((num_arrows, 3)).view(dtype=wp.vec3)
 
         assert isinstance(colors, wp.array)
         assert len(colors) == num_arrows, "Number of arrow colors must match arrow begins"
