@@ -8,6 +8,7 @@ from ...sim import Contacts, Control, Model, State
 from ..flags import SolverNotifyFlags
 from ..solver import SolverBase
 from .kernels import (
+    accumulate_weighted_contact_impulse,
     apply_body_delta_velocities,
     apply_body_deltas,
     apply_joint_forces,
@@ -251,6 +252,7 @@ class SolverXPBD(SolverBase):
         rigid_contact_inv_weight = None
 
         contact_impulse = None
+        contact_impulse_iter = None
 
         if contacts:
             if self.rigid_contact_con_weighting:
@@ -259,6 +261,7 @@ class SolverXPBD(SolverBase):
 
             if contacts.force is not None:
                 contact_impulse = wp.zeros(contacts.rigid_contact_max, dtype=wp.spatial_vector, device=model.device)
+                contact_impulse_iter = wp.zeros(contacts.rigid_contact_max, dtype=wp.spatial_vector, device=model.device)
 
         if control is None:
             control = model.control(clone_variables=False)
@@ -477,6 +480,9 @@ class SolverXPBD(SolverBase):
                         if self.rigid_contact_con_weighting:
                             rigid_contact_inv_weight.zero_()
 
+                        if contact_impulse_iter is not None:
+                            contact_impulse_iter.zero_()
+
                         wp.launch(
                             kernel=solve_body_contact_positions,
                             dim=contacts.rigid_contact_max,
@@ -507,10 +513,26 @@ class SolverXPBD(SolverBase):
                             outputs=[
                                 body_deltas,
                                 rigid_contact_inv_weight,
-                                contact_impulse,
+                                contact_impulse_iter,
                             ],
                             device=model.device,
                         )
+
+                        if contact_impulse_iter is not None:
+                            wp.launch(
+                                kernel=accumulate_weighted_contact_impulse,
+                                dim=contacts.rigid_contact_max,
+                                inputs=[
+                                    contacts.rigid_contact_count,
+                                    contact_impulse_iter,
+                                    contacts.rigid_contact_shape0,
+                                    contacts.rigid_contact_shape1,
+                                    model.shape_body,
+                                    rigid_contact_inv_weight,
+                                ],
+                                outputs=[contact_impulse],
+                                device=model.device,
+                            )
 
                         # if model.rigid_contact_count.numpy()[0] > 0:
                         #     print("rigid_contact_count:", model.rigid_contact_count.numpy().flatten())
@@ -719,6 +741,8 @@ class SolverXPBD(SolverBase):
                 f"{contacts.rigid_contact_max}, but step() used {self._contact_impulse_capacity}. "
                 f"Pass the same Contacts instance to both step() and update_contacts()."
             )
+
+        contacts.force.zero_()
 
         wp.launch(
             kernel=convert_contact_impulse_to_force,

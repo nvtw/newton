@@ -466,10 +466,8 @@ def test_articulation_contact_drift(test, device):
     )
 
 
-def test_xpbd_contact_force_sphere_on_plane(test, device):
+def _test_xpbd_contact_force_sphere_on_plane(test, device, radius, density):
     """A sphere resting on a ground plane must report contact force equal to its weight."""
-    radius = 0.25
-    density = 1000.0
     mass = density * (4.0 / 3.0) * np.pi * radius**3
     gravity = 9.81
 
@@ -519,24 +517,39 @@ def test_xpbd_contact_force_sphere_on_plane(test, device):
     np.testing.assert_allclose(avg_force[2], -expected_fz, rtol=0.05, err_msg="Vertical contact force should match -mg")
     np.testing.assert_allclose(avg_force[0], 0.0, atol=0.5, err_msg="Horizontal X force should be ~0")
     np.testing.assert_allclose(avg_force[1], 0.0, atol=0.5, err_msg="Horizontal Y force should be ~0")
+
+
+def test_xpbd_contact_force_sphere_on_plane(test, device):
+    _test_xpbd_contact_force_sphere_on_plane(test, device, radius=0.25, density=1000.0)
 
 
 def test_xpbd_contact_force_heavy_sphere_on_plane(test, device):
-    """A heavier sphere on a ground plane -- force must still match mg (single contact)."""
-    radius = 0.5
-    density = 2000.0
-    mass = density * (4.0 / 3.0) * np.pi * radius**3
+    _test_xpbd_contact_force_sphere_on_plane(test, device, radius=0.5, density=2000.0)
+
+
+def test_xpbd_contact_force_box_on_plane(test, device):
+    """A box on a ground plane has multiple contact points; total force must equal mg, not N*mg.
+
+    This specifically tests the fix for the N× contact force inflation bug when
+    ``rigid_contact_con_weighting`` is enabled (the default).  A box generates 4
+    bottom-face contacts, so without the fix the summed force would be ~4× the
+    true weight.
+    """
+    hx, hy, hz = 0.5, 0.5, 0.5
+    density = 1000.0
+    volume = (2.0 * hx) * (2.0 * hy) * (2.0 * hz)
+    mass = density * volume
     gravity = 9.81
 
     builder = newton.ModelBuilder()
     builder.default_shape_cfg.density = density
     builder.add_ground_plane()
-    body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, radius), wp.quat_identity()))
-    builder.add_shape_sphere(body=body, radius=radius)
+    body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, hz), wp.quat_identity()))
+    builder.add_shape_box(body=body, hx=hx, hy=hy, hz=hz)
     model = builder.finalize(device=device)
     model.request_contact_attributes("force")
 
-    solver = newton.solvers.SolverXPBD(model, iterations=32)
+    solver = newton.solvers.SolverXPBD(model, iterations=32, rigid_contact_con_weighting=True)
     state_in = model.state()
     state_out = model.state()
     control = model.control()
@@ -565,15 +578,19 @@ def test_xpbd_contact_force_heavy_sphere_on_plane(test, device):
             state_in, state_out = state_out, state_in
         solver.update_contacts(contacts, state_in)
         ncontacts = int(contacts.rigid_contact_count.numpy()[0])
+        test.assertGreater(ncontacts, 1, "Box should generate multiple contact points")
         if ncontacts > 0:
             f = contacts.force.numpy()[:ncontacts, :3]
             force_acc += np.sum(f, axis=0)
 
     avg_force = force_acc / avg_steps
     expected_fz = mass * gravity
-    np.testing.assert_allclose(avg_force[2], -expected_fz, rtol=0.05, err_msg="Vertical contact force should match -mg")
-    np.testing.assert_allclose(avg_force[0], 0.0, atol=0.5, err_msg="Horizontal X force should be ~0")
-    np.testing.assert_allclose(avg_force[1], 0.0, atol=0.5, err_msg="Horizontal Y force should be ~0")
+    np.testing.assert_allclose(
+        avg_force[2], -expected_fz, rtol=0.10,
+        err_msg="Total vertical contact force over multiple contacts should match -mg, not N*mg",
+    )
+    np.testing.assert_allclose(avg_force[0], 0.0, atol=1.0, err_msg="Horizontal X force should be ~0")
+    np.testing.assert_allclose(avg_force[1], 0.0, atol=1.0, err_msg="Horizontal Y force should be ~0")
 
 
 def test_xpbd_contact_force_zero_when_no_contact(test, device):
@@ -731,6 +748,14 @@ add_function_test(
     TestSolverXPBD,
     "test_xpbd_contact_force_heavy_sphere_on_plane",
     test_xpbd_contact_force_heavy_sphere_on_plane,
+    devices=devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestSolverXPBD,
+    "test_xpbd_contact_force_box_on_plane",
+    test_xpbd_contact_force_box_on_plane,
     devices=devices,
     check_output=False,
 )

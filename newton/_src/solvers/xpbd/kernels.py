@@ -2291,6 +2291,57 @@ def solve_body_contact_positions(
 
 
 @wp.kernel
+def accumulate_weighted_contact_impulse(
+    contact_count: wp.array[int],
+    contact_impulse_iter: wp.array[wp.spatial_vector],
+    contact_shape0: wp.array[int],
+    contact_shape1: wp.array[int],
+    shape_body: wp.array[int],
+    constraint_inv_weight: wp.array[float],
+    # output (accumulated across iterations)
+    contact_impulse: wp.array[wp.spatial_vector],
+):
+    """Scale per-contact impulse from one iteration by 1/N and accumulate.
+
+    ``constraint_inv_weight[body]`` holds the number of active contacts on
+    each body for the current iteration.  Dividing the raw impulse by that
+    count mirrors the 1/N scaling that ``apply_body_deltas`` applies, so the
+    accumulated impulse reflects the actual correction applied to the body.
+
+    Both bodies are checked; the larger contact count is used so that the
+    reported force is correct regardless of which body is dynamic.
+    """
+    tid = wp.tid()
+    count = contact_count[0]
+    if tid >= count:
+        return
+
+    impulse = contact_impulse_iter[tid]
+
+    weight = 1.0
+    if constraint_inv_weight:
+        inv_w = 0.0
+        shape_a = contact_shape0[tid]
+        if shape_a >= 0:
+            body_a = shape_body[shape_a]
+            if body_a >= 0:
+                inv_w = wp.max(inv_w, constraint_inv_weight[body_a])
+        shape_b = contact_shape1[tid]
+        if shape_b >= 0:
+            body_b = shape_body[shape_b]
+            if body_b >= 0:
+                inv_w = wp.max(inv_w, constraint_inv_weight[body_b])
+        if inv_w > 0.0:
+            weight = 1.0 / inv_w
+
+    scaled = wp.spatial_vector(
+        wp.spatial_top(impulse) * weight,
+        wp.spatial_bottom(impulse) * weight,
+    )
+    wp.atomic_add(contact_impulse, tid, scaled)
+
+
+@wp.kernel
 def convert_contact_impulse_to_force(
     contact_count: wp.array[int],
     contact_impulse: wp.array[wp.spatial_vector],
@@ -2305,6 +2356,10 @@ def convert_contact_impulse_to_force(
     accumulated impulse by the substep ``dt`` yields force [N] and torque [N·m].
     The linear component includes normal and friction forces; the angular
     component includes torsional and rolling friction torques.
+
+    The impulse is expected to already include the 1/N contact-weighting
+    correction (applied by ``accumulate_weighted_contact_impulse`` each
+    iteration).
     """
     tid = wp.tid()
     count = contact_count[0]
