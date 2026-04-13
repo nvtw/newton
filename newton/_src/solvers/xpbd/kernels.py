@@ -2304,12 +2304,16 @@ def accumulate_weighted_contact_impulse(
     """Scale per-contact impulse from one iteration by 1/N and accumulate.
 
     ``constraint_inv_weight[body]`` holds the number of active contacts on
-    each body for the current iteration.  Dividing the raw impulse by that
-    count mirrors the 1/N scaling that ``apply_body_deltas`` applies, so the
-    accumulated impulse reflects the actual correction applied to the body.
+    each body for the current iteration.  ``apply_body_deltas`` divides the
+    positional correction by that count, so the raw impulse stored per contact
+    is N times too large relative to what was actually applied.
 
-    Both bodies are checked; the larger contact count is used so that the
-    reported force is correct regardless of which body is dynamic.
+    When only one body is dynamic (the other is kinematic / ground), the
+    weight is simply ``1/N_dynamic``.  When both bodies are dynamic the
+    solver applies ``1/N_a`` to body A and ``1/N_b`` to body B, so there is
+    no single exact scalar.  We use the harmonic mean ``2/(N_a + N_b)`` which
+    is symmetric with respect to body ordering and reduces to ``1/N`` when
+    both counts are equal.
     """
     tid = wp.tid()
     count = contact_count[0]
@@ -2320,19 +2324,26 @@ def accumulate_weighted_contact_impulse(
 
     weight = 1.0
     if constraint_inv_weight:
-        inv_w = 0.0
+        n_a = 0.0
+        n_b = 0.0
         shape_a = contact_shape0[tid]
         if shape_a >= 0:
             body_a = shape_body[shape_a]
             if body_a >= 0:
-                inv_w = wp.max(inv_w, constraint_inv_weight[body_a])
+                n_a = constraint_inv_weight[body_a]
         shape_b = contact_shape1[tid]
         if shape_b >= 0:
             body_b = shape_body[shape_b]
             if body_b >= 0:
-                inv_w = wp.max(inv_w, constraint_inv_weight[body_b])
-        if inv_w > 0.0:
-            weight = 1.0 / inv_w
+                n_b = constraint_inv_weight[body_b]
+        n_sum = n_a + n_b
+        if n_sum > 0.0:
+            if n_a == 0.0:
+                weight = 1.0 / n_b
+            elif n_b == 0.0:
+                weight = 1.0 / n_a
+            else:
+                weight = 2.0 / n_sum
 
     scaled = wp.spatial_vector(
         wp.spatial_top(impulse) * weight,

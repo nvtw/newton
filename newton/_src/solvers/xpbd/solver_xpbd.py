@@ -39,6 +39,16 @@ class SolverXPBD(SolverBase):
     After constructing :class:`Model`, :class:`State`, and :class:`Control` (optional) objects, this time-integrator
     may be used to advance the simulation state forward in time.
 
+    Limitations:
+        **Momentum conservation** -- When ``rigid_contact_con_weighting`` is
+        enabled (the default), each body's positional correction is divided by
+        its number of active contacts.  This improves convergence for stacking
+        scenarios but means the solver does not conserve momentum at contacts.
+        Reported per-contact forces (see :meth:`update_contacts`) are
+        approximate: for contacts between two dynamic bodies the force is
+        computed using the harmonic mean of the two bodies' contact counts,
+        which is symmetric but not exact.
+
     Joint limitations:
         - Supported joint types: PRISMATIC, REVOLUTE, BALL, FIXED, FREE, DISTANCE, D6.
           CABLE joints are not supported.
@@ -261,7 +271,9 @@ class SolverXPBD(SolverBase):
 
             if contacts.force is not None:
                 contact_impulse = wp.zeros(contacts.rigid_contact_max, dtype=wp.spatial_vector, device=model.device)
-                contact_impulse_iter = wp.zeros(contacts.rigid_contact_max, dtype=wp.spatial_vector, device=model.device)
+                contact_impulse_iter = wp.zeros(
+                    contacts.rigid_contact_max, dtype=wp.spatial_vector, device=model.device
+                )
 
         if control is None:
             control = model.control(clone_variables=False)
@@ -716,6 +728,16 @@ class SolverXPBD(SolverBase):
         Both force [N] and torque [N·m] components are written.  The torque
         includes torsional and rolling friction contributions that cannot be
         reconstructed from the linear force alone.
+
+        When ``rigid_contact_con_weighting`` is enabled, the raw per-contact
+        impulse is scaled to reflect the ``1/N`` correction that
+        ``apply_body_deltas`` applies.  For contacts between a dynamic and a
+        kinematic body, ``N`` is the dynamic body's contact count.  For
+        contacts between two dynamic bodies, the harmonic mean
+        ``2/(N_a + N_b)`` is used so that the reported force is symmetric with
+        respect to body ordering.  This is an approximation -- the solver
+        applies ``1/N_a`` and ``1/N_b`` independently to each side, so no
+        single scalar can exactly represent both.
 
         Args:
             contacts: :class:`Contacts` object whose :attr:`~Contacts.force` buffer will be written.

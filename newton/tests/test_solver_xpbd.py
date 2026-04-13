@@ -530,9 +530,9 @@ def test_xpbd_contact_force_heavy_sphere_on_plane(test, device):
 def test_xpbd_contact_force_box_on_plane(test, device):
     """A box on a ground plane has multiple contact points; total force must equal mg, not N*mg.
 
-    This specifically tests the fix for the N× contact force inflation bug when
+    This specifically tests the fix for the N*contact force inflation bug when
     ``rigid_contact_con_weighting`` is enabled (the default).  A box generates 4
-    bottom-face contacts, so without the fix the summed force would be ~4× the
+    bottom-face contacts, so without the fix the summed force would be ~4x the
     true weight.
     """
     hx, hy, hz = 0.5, 0.5, 0.5
@@ -586,11 +586,117 @@ def test_xpbd_contact_force_box_on_plane(test, device):
     avg_force = force_acc / avg_steps
     expected_fz = mass * gravity
     np.testing.assert_allclose(
-        avg_force[2], -expected_fz, rtol=0.10,
+        avg_force[2],
+        -expected_fz,
+        rtol=0.10,
         err_msg="Total vertical contact force over multiple contacts should match -mg, not N*mg",
     )
     np.testing.assert_allclose(avg_force[0], 0.0, atol=1.0, err_msg="Horizontal X force should be ~0")
     np.testing.assert_allclose(avg_force[1], 0.0, atol=1.0, err_msg="Horizontal Y force should be ~0")
+
+
+def test_xpbd_contact_force_mini_pyramid(test, device):
+    """Two-layer pyramid: ground reaction forces must reflect stacked weight.
+
+    Layout (Z-up):
+        - Ground plane at z=0 (shape 0, body -1)
+        - Two bottom cubes (bodies 0, 1) side-by-side on the ground
+        - One top cube (body 2) centered on top of both
+
+    All cubes have the same mass m.  At steady state the ground pushes up on
+    each bottom cube with 1.5*mg (own weight + half the top cube).
+
+    Only ground-contact forces are checked here.  Inter-body forces between
+    dynamic bodies are under-reported by the per-body contact weighting
+    scheme (``rigid_contact_con_weighting``) because a body's weight mixes
+    contacts from different pairs.
+    """
+    h = 0.5
+    density = 1000.0
+    volume = (2.0 * h) ** 3
+    mass = density * volume
+    gravity = 9.81
+    mg = mass * gravity
+
+    builder = newton.ModelBuilder()
+    builder.default_shape_cfg.density = density
+    builder.add_ground_plane()
+
+    b0 = builder.add_body(xform=wp.transform(wp.vec3(-h, 0.0, h), wp.quat_identity()))
+    builder.add_shape_box(body=b0, hx=h, hy=h, hz=h)
+    b1 = builder.add_body(xform=wp.transform(wp.vec3(h, 0.0, h), wp.quat_identity()))
+    builder.add_shape_box(body=b1, hx=h, hy=h, hz=h)
+    b2 = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 3.0 * h), wp.quat_identity()))
+    builder.add_shape_box(body=b2, hx=h, hy=h, hz=h)
+
+    model = builder.finalize(device=device)
+    model.request_contact_attributes("force")
+
+    solver = newton.solvers.SolverXPBD(model, iterations=32, rigid_contact_con_weighting=True)
+    state_in = model.state()
+    state_out = model.state()
+    control = model.control()
+    contacts = model.contacts()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
+
+    dt = 1.0 / 60.0
+    num_substeps = 8
+    sub_dt = dt / num_substeps
+    settle_steps = 200
+    avg_steps = 60
+
+    for _ in range(settle_steps):
+        for _ in range(num_substeps):
+            state_in.clear_forces()
+            model.collide(state_in, contacts)
+            solver.step(state_in, state_out, control, contacts, sub_dt)
+            state_in, state_out = state_out, state_in
+
+    shape_body_np = model.shape_body.numpy()
+    ground_shape = 0
+
+    ground_fz_on_b0 = 0.0
+    ground_fz_on_b1 = 0.0
+
+    for _ in range(avg_steps):
+        for _ in range(num_substeps):
+            state_in.clear_forces()
+            model.collide(state_in, contacts)
+            solver.step(state_in, state_out, control, contacts, sub_dt)
+            state_in, state_out = state_out, state_in
+        solver.update_contacts(contacts, state_in)
+
+        nc = int(contacts.rigid_contact_count.numpy()[0])
+        if nc == 0:
+            continue
+        forces = contacts.force.numpy()[:nc, :3]
+        s0 = contacts.rigid_contact_shape0.numpy()[:nc]
+        s1 = contacts.rigid_contact_shape1.numpy()[:nc]
+        for ci in range(nc):
+            if s0[ci] != ground_shape:
+                continue
+            fz = forces[ci, 2]
+            body_b = shape_body_np[s1[ci]] if s1[ci] >= 0 else -1
+            if body_b == b0:
+                ground_fz_on_b0 += -fz
+            elif body_b == b1:
+                ground_fz_on_b1 += -fz
+
+    ground_fz_on_b0 /= avg_steps
+    ground_fz_on_b1 /= avg_steps
+
+    np.testing.assert_allclose(
+        ground_fz_on_b0,
+        1.5 * mg,
+        rtol=0.15,
+        err_msg=f"Ground reaction on bottom cube 0 should be ~1.5*mg={1.5 * mg:.0f}, got {ground_fz_on_b0:.0f}",
+    )
+    np.testing.assert_allclose(
+        ground_fz_on_b1,
+        1.5 * mg,
+        rtol=0.15,
+        err_msg=f"Ground reaction on bottom cube 1 should be ~1.5*mg={1.5 * mg:.0f}, got {ground_fz_on_b1:.0f}",
+    )
 
 
 def test_xpbd_contact_force_zero_when_no_contact(test, device):
@@ -756,6 +862,14 @@ add_function_test(
     TestSolverXPBD,
     "test_xpbd_contact_force_box_on_plane",
     test_xpbd_contact_force_box_on_plane,
+    devices=devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestSolverXPBD,
+    "test_xpbd_contact_force_mini_pyramid",
+    test_xpbd_contact_force_mini_pyramid,
     devices=devices,
     check_output=False,
 )
