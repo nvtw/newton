@@ -8,12 +8,15 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.geometry.contact_data import ContactData
+from newton._src.geometry.contact_data import ContactData, make_contact_sort_key
 from newton._src.geometry.contact_reduction import float_flip, ifloat_flip
 from newton._src.geometry.contact_reduction_global import (
     SCORE_SHIFT,
     GlobalContactReducer,
     GlobalContactReducerData,
+    _make_contact_value_det,
+    _make_preprune_probe_det,
+    _unpack_contact_id_det,
     create_export_reduced_contacts_kernel,
     decode_oct,
     encode_oct,
@@ -1029,6 +1032,272 @@ def test_float_flip_exact_inverse(test, device):
 
 
 # =============================================================================
+# make_contact_sort_key tests
+# =============================================================================
+
+
+class TestMakeContactSortKey(unittest.TestCase):
+    """Test make_contact_sort_key bit layout and ordering."""
+
+    pass
+
+
+@wp.kernel(enable_backward=False)
+def _sort_key_kernel(
+    shape_a: wp.array[int],
+    shape_b: wp.array[int],
+    sub_key: wp.array[int],
+    keys_out: wp.array[wp.int64],
+):
+    tid = wp.tid()
+    keys_out[tid] = make_contact_sort_key(shape_a[tid], shape_b[tid], sub_key[tid])
+
+
+def test_sort_key_bit_layout(test, device):
+    """Verify that make_contact_sort_key produces correct lexicographic ordering."""
+    # Pairs ordered lexicographically: (shape_a, shape_b, sub_key)
+    # Each successive entry should produce a strictly larger key.
+    sa = wp.array([0, 0, 0, 1, 1], dtype=int, device=device)
+    sb = wp.array([0, 0, 1, 0, 0], dtype=int, device=device)
+    sk = wp.array([0, 1, 0, 0, 1], dtype=int, device=device)
+    keys = wp.zeros(5, dtype=wp.int64, device=device)
+    wp.launch(_sort_key_kernel, dim=5, inputs=[sa, sb, sk, keys], device=device)
+
+    keys_np = keys.numpy()
+    for i in range(len(keys_np) - 1):
+        test.assertLess(
+            keys_np[i],
+            keys_np[i + 1],
+            f"Key[{i}]={keys_np[i]} should be < Key[{i + 1}]={keys_np[i + 1]}",
+        )
+
+
+def test_sort_key_overflow_masking(test, device):
+    """Verify that values exceeding bit widths are masked (not corrupting other fields)."""
+    # shape_a with 21 bits set (exceeds 20-bit field) — high bit should be masked
+    large_a = (1 << 21) | 5  # bit 20 set + low bits
+    sa = wp.array([large_a, 5], dtype=int, device=device)
+    sb = wp.array([0, 0], dtype=int, device=device)
+    sk = wp.array([0, 0], dtype=int, device=device)
+    keys = wp.zeros(2, dtype=wp.int64, device=device)
+    wp.launch(_sort_key_kernel, dim=2, inputs=[sa, sb, sk, keys], device=device)
+
+    keys_np = keys.numpy()
+    # After masking to 20 bits, large_a & 0xFFFFF == 5, so both keys should be equal
+    test.assertEqual(keys_np[0], keys_np[1], "Overflow bits should be masked away")
+
+
+# =============================================================================
+# Deterministic packing function tests
+# =============================================================================
+
+
+class TestDeterministicPacking(unittest.TestCase):
+    """Test deterministic contact value packing and unpacking."""
+
+    pass
+
+
+@wp.kernel(enable_backward=False)
+def _det_pack_unpack_kernel(
+    scores: wp.array[float],
+    fingerprints: wp.array[int],
+    contact_ids: wp.array[int],
+    packed_out: wp.array[wp.uint64],
+    unpacked_ids_out: wp.array[int],
+):
+    tid = wp.tid()
+    packed = _make_contact_value_det(scores[tid], fingerprints[tid], contact_ids[tid])
+    packed_out[tid] = packed
+    unpacked_ids_out[tid] = _unpack_contact_id_det(packed)
+
+
+def test_det_pack_unpack_roundtrip(test, device):
+    """Verify contact_id survives pack/unpack roundtrip in deterministic mode."""
+    n = 5
+    scores = wp.array([0.1, 0.5, -0.01, 1.0, 0.0], dtype=float, device=device)
+    fps = wp.array([0, 100, 999999, 42, 0], dtype=int, device=device)
+    ids = wp.array([0, 1, 1048575, 500, 12345], dtype=int, device=device)
+    packed = wp.zeros(n, dtype=wp.uint64, device=device)
+    unpacked = wp.zeros(n, dtype=int, device=device)
+
+    wp.launch(_det_pack_unpack_kernel, dim=n, inputs=[scores, fps, ids, packed, unpacked], device=device)
+
+    ids_np = ids.numpy()
+    unpacked_np = unpacked.numpy()
+    for i in range(n):
+        expected = ids_np[i] & ((1 << 20) - 1)
+        test.assertEqual(
+            unpacked_np[i],
+            expected,
+            f"Roundtrip failed for contact_id={ids_np[i]}: got {unpacked_np[i]}, expected {expected}",
+        )
+
+
+def test_det_packing_score_dominates(test, device):
+    """Verify that higher score always produces a larger packed value."""
+    n = 2
+    # Same fingerprint and contact_id, different scores
+    scores = wp.array([0.1, 0.5], dtype=float, device=device)
+    fps = wp.array([42, 42], dtype=int, device=device)
+    ids = wp.array([10, 10], dtype=int, device=device)
+    packed = wp.zeros(n, dtype=wp.uint64, device=device)
+    unpacked = wp.zeros(n, dtype=int, device=device)
+
+    wp.launch(_det_pack_unpack_kernel, dim=n, inputs=[scores, fps, ids, packed, unpacked], device=device)
+
+    packed_np = packed.numpy()
+    test.assertLess(packed_np[0], packed_np[1], "Higher score should produce larger packed value")
+
+
+def test_det_packing_fingerprint_breaks_tie(test, device):
+    """Verify that fingerprint breaks ties when scores are equal."""
+    n = 2
+    # Same score and contact_id, different fingerprints
+    scores = wp.array([0.5, 0.5], dtype=float, device=device)
+    fps = wp.array([10, 20], dtype=int, device=device)
+    ids = wp.array([5, 5], dtype=int, device=device)
+    packed = wp.zeros(n, dtype=wp.uint64, device=device)
+    unpacked = wp.zeros(n, dtype=int, device=device)
+
+    wp.launch(_det_pack_unpack_kernel, dim=n, inputs=[scores, fps, ids, packed, unpacked], device=device)
+
+    packed_np = packed.numpy()
+    test.assertNotEqual(packed_np[0], packed_np[1], "Different fingerprints should produce different packed values")
+    test.assertLess(packed_np[0], packed_np[1], "Higher fingerprint should produce larger packed value")
+
+
+@wp.kernel(enable_backward=False)
+def _det_preprune_probe_kernel(
+    scores: wp.array[float],
+    fingerprints: wp.array[int],
+    probes_out: wp.array[wp.uint64],
+):
+    tid = wp.tid()
+    probes_out[tid] = _make_preprune_probe_det(scores[tid], fingerprints[tid])
+
+
+def test_det_preprune_probe_is_ceiling(test, device):
+    """Verify that the preprune probe is >= any packed value with the same score and fingerprint."""
+    n = 1
+    score = wp.array([0.5], dtype=float, device=device)
+    fp = wp.array([42], dtype=int, device=device)
+    probe = wp.zeros(n, dtype=wp.uint64, device=device)
+    wp.launch(_det_preprune_probe_kernel, dim=n, inputs=[score, fp, probe], device=device)
+
+    # Pack with same score/fp but various contact_ids
+    ids_to_test = [0, 1, 100, 500000, (1 << 20) - 1]
+    for cid in ids_to_test:
+        ids_arr = wp.array([cid], dtype=int, device=device)
+        packed = wp.zeros(1, dtype=wp.uint64, device=device)
+        unpacked = wp.zeros(1, dtype=int, device=device)
+        wp.launch(_det_pack_unpack_kernel, dim=1, inputs=[score, fp, ids_arr, packed, unpacked], device=device)
+
+        probe_val = int(probe.numpy()[0])
+        packed_val = int(packed.numpy()[0])
+        test.assertGreaterEqual(
+            probe_val,
+            packed_val,
+            f"Preprune probe should be >= packed value for contact_id={cid}",
+        )
+
+
+# =============================================================================
+# End-to-end deterministic test
+# =============================================================================
+
+
+class TestDeterministicEndToEnd(unittest.TestCase):
+    """End-to-end test that deterministic mode produces identical contacts across runs."""
+
+    pass
+
+
+def test_deterministic_identical_across_runs(test, device):
+    """Create a deterministic reducer, collide the same scene N times, assert identical winners.
+
+    Compares winning contacts by their geometric content (position, depth,
+    fingerprint) rather than buffer contact IDs, since IDs are assigned by
+    atomic_add and vary between runs.
+    """
+    if str(device) == "cpu":
+        return  # Deterministic mode is primarily for GPU
+
+    num_runs = 5
+    all_contact_sets = []
+
+    for _ in range(num_runs):
+        reducer = GlobalContactReducer(capacity=500, device=device, deterministic=True)
+        reducer_data = reducer.get_data_struct()
+
+        @wp.kernel(enable_backward=False)
+        def store_contacts_det_kernel(reducer_data: GlobalContactReducerData):
+            tid = wp.tid()
+            x = float(tid % 10) - 5.0
+            z = float(tid // 10) - 5.0
+            depth = -0.001 * float((tid * 7 + 3) % 20 + 1)
+            fingerprint = tid * 3 + 1
+
+            X_ws = wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity())
+            export_and_reduce_contact_centered(
+                shape_a=0,
+                shape_b=1,
+                position=wp.vec3(x, 0.0, z),
+                normal=wp.vec3(0.0, 1.0, 0.0),
+                depth=depth,
+                fingerprint=fingerprint,
+                centered_position=wp.vec3(x, 0.0, z),
+                X_ws_voxel_shape=X_ws,
+                aabb_lower_voxel=wp.vec3(-10.0, -5.0, -10.0),
+                aabb_upper_voxel=wp.vec3(10.0, 5.0, 10.0),
+                voxel_res=wp.vec3i(4, 4, 4),
+                reducer_data=reducer_data,
+            )
+
+        wp.launch(store_contacts_det_kernel, dim=100, inputs=[reducer_data], device=device)
+
+        # Extract winning contacts by geometric content (not by contact ID)
+        values = reducer.ht_values.numpy()
+        capacity = reducer.hashtable.capacity
+        active_slots_np = reducer.hashtable.active_slots.numpy()
+        count = active_slots_np[capacity]
+        pd_np = reducer.position_depth.numpy()
+        fp_np = reducer.contact_fingerprints.numpy()
+
+        seen_ids = set()
+        contact_set = set()
+        for i in range(count):
+            entry_idx = active_slots_np[i]
+            for slot in range(reducer.values_per_key):
+                val = values[slot * capacity + entry_idx]
+                if val != 0:
+                    contact_id = int(val & ((1 << 20) - 1))
+                    if contact_id not in seen_ids:
+                        seen_ids.add(contact_id)
+                        pd = pd_np[contact_id]
+                        fp = int(fp_np[contact_id])
+                        # Round to avoid floating-point noise from storage
+                        key = (
+                            round(float(pd[0]), 5),
+                            round(float(pd[1]), 5),
+                            round(float(pd[2]), 5),
+                            round(float(pd[3]), 5),
+                            fp,
+                        )
+                        contact_set.add(key)
+
+        all_contact_sets.append(contact_set)
+
+    # All runs should produce identical geometric contact sets
+    for run_idx in range(1, num_runs):
+        test.assertEqual(
+            all_contact_sets[0],
+            all_contact_sets[run_idx],
+            f"Run 0 and run {run_idx} produced different winning contacts",
+        )
+
+
+# =============================================================================
 # Test registration
 # =============================================================================
 
@@ -1090,6 +1359,40 @@ add_function_test(
     TestFloatFlipPrecision,
     "test_float_flip_exact_inverse",
     test_float_flip_exact_inverse,
+    devices=devices,
+)
+
+# make_contact_sort_key tests
+add_function_test(TestMakeContactSortKey, "test_sort_key_bit_layout", test_sort_key_bit_layout, devices=devices)
+add_function_test(
+    TestMakeContactSortKey, "test_sort_key_overflow_masking", test_sort_key_overflow_masking, devices=devices
+)
+
+# Deterministic packing tests
+add_function_test(
+    TestDeterministicPacking, "test_det_pack_unpack_roundtrip", test_det_pack_unpack_roundtrip, devices=devices
+)
+add_function_test(
+    TestDeterministicPacking, "test_det_packing_score_dominates", test_det_packing_score_dominates, devices=devices
+)
+add_function_test(
+    TestDeterministicPacking,
+    "test_det_packing_fingerprint_breaks_tie",
+    test_det_packing_fingerprint_breaks_tie,
+    devices=devices,
+)
+add_function_test(
+    TestDeterministicPacking,
+    "test_det_preprune_probe_is_ceiling",
+    test_det_preprune_probe_is_ceiling,
+    devices=devices,
+)
+
+# End-to-end deterministic test
+add_function_test(
+    TestDeterministicEndToEnd,
+    "test_deterministic_identical_across_runs",
+    test_deterministic_identical_across_runs,
     devices=devices,
 )
 

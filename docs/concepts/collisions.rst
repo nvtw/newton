@@ -1653,8 +1653,9 @@ This enables two mechanisms:
    a 64-bit key encoding ``(shape_a, shape_b, sub_key)`` via a radix sort +
    gather pass.
 
-The overhead is small (one radix sort + gather over the contact buffer per
-frame) and the sort is fully CUDA-graph-capturable.
+The overhead is small: fingerprint storage per contact, modified packing in
+the reduction, and one radix sort + gather pass per frame.  The sort is
+fully CUDA-graph-capturable.
 
 .. note::
 

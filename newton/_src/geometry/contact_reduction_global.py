@@ -267,6 +267,8 @@ FINGERPRINT_BITS = wp.constant(wp.uint64(22))
 CONTACT_ID_BITS = wp.constant(wp.uint64(20))
 CONTACT_ID_MASK = wp.constant(wp.uint64((1 << 20) - 1))
 FINGERPRINT_MASK = wp.constant(wp.uint64((1 << 22) - 1))
+# Plain Python int (not wp.constant) because it is used inside wp.static()
+# which requires a Python-level value for compile-time evaluation.
 SCORE_SHIFT = 10
 
 
@@ -352,7 +354,10 @@ def _make_contact_value_det(score: float, fingerprint: int, contact_id: int) -> 
     contacts have the same truncated score, the fingerprint breaks the tie
     so that ``atomic_max`` always picks the same winner regardless of
     thread scheduling.  22 bits (4M values) is wide enough to distinguish
-    any two contacts within a single reduction slot.
+    any two contacts within a single reduction slot.  SDF contacts encode
+    ``(edge_idx << 2) | (mode << 1)`` so meshes with more than ~1M edges
+    will overflow the fingerprint field, causing non-deterministic
+    tiebreaking for those contacts.
 
     **Contact ID (bits 19-0, 20 bits)** — buffer slot assigned by
     ``atomic_add``.  20 bits supports up to 1,048,575 buffered contacts.
@@ -420,6 +425,16 @@ def enable_deterministic_contact_packing() -> None:
     Must be called **before** the first kernel launch.  Swaps the
     module-level ``make_contact_value``, ``make_preprune_probe``, and
     ``unpack_contact_id`` to the deterministic implementations.
+
+    .. warning::
+
+       This mutates process-global state.  Once called, **all**
+       ``GlobalContactReducer`` instances (including non-deterministic ones
+       created afterward) will use 22-bit scores and 20-bit contact IDs.
+       Modules that imported the fast variants via ``from ... import``
+       before this call (e.g. ``contact_reduction_hydroelastic``) retain
+       their original bindings — this is intentional because hydroelastic
+       contacts are not yet covered by deterministic ordering.
     """
     global make_contact_value, make_preprune_probe, unpack_contact_id  # noqa: PLW0603
     make_contact_value = _make_contact_value_det
@@ -541,11 +556,10 @@ class GlobalContactReducerData:
     ht_capacity: int
     ht_values_per_key: int
 
-    # When non-zero, skip the speculative pre-prune in
-    # export_and_reduce_contact_centered so that every candidate contact
-    # is buffered and competes in the atomic_max reduction.  The pre-prune
-    # uses non-atomic reads of ht_values which are racy with concurrent
-    # atomic_max writes, causing thread-scheduling-dependent pruning.
+    # When non-zero, replace the speculative pre-prune probe with a
+    # deterministic variant (make_preprune_probe) so that the prune
+    # decision depends only on score and fingerprint, never on the
+    # non-deterministic contact_id.
     deterministic: int
 
 
@@ -692,8 +706,9 @@ class GlobalContactReducer:
             store_hydroelastic_data: If True, allocate arrays for contact_area and entry_k_eff
             store_moment_data: If True, allocate moment accumulator arrays for friction
                 moment matching. Only needed when ``moment_matching=True``.
-            deterministic: If True, disable the speculative pre-prune optimization
-                so that every candidate contact competes in the atomic_max reduction.
+            deterministic: If True, use deterministic fingerprint-based tiebreaking
+                in contact reduction and replace the pre-prune probe with a
+                deterministic variant.
         """
         max_det_contacts = (1 << int(CONTACT_ID_BITS)) - 1
         if deterministic and capacity > max_det_contacts:
