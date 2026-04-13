@@ -313,6 +313,12 @@ def convert_newton_contacts_to_mjwarp_kernel(
         mj_body_a = geom_bodyid[geom_a]
         mj_body_b = geom_bodyid[geom_b]
 
+        # A body is "immovable" in three cases:
+        #  1. body < 0 → static shape (no body)
+        #  2. BodyFlags.KINEMATIC → kinematic body (e.g. armature=1e10)
+        #  3. body_weldid == 0 → fixed root body (worldbody)
+        # Pairs where both sides are immovable produce degenerate efc_D values
+        # in MuJoCo's solver, so we skip them.
         a_immovable = body_a < 0 or (body_flags[body_a] & BodyFlags.KINEMATIC) != 0 or body_weldid[mj_body_a] == 0
         b_immovable = body_b < 0 or (body_flags[body_b] & BodyFlags.KINEMATIC) != 0 or body_weldid[mj_body_b] == 0
 
@@ -330,6 +336,9 @@ def convert_newton_contacts_to_mjwarp_kernel(
         bx_a = wp.transform_point(X_wb_a, rigid_contact_point0[tid])
         bx_b = wp.transform_point(X_wb_b, rigid_contact_point1[tid])
 
+        # rigid_contact_margin0/1 = radius_eff + shape_margin per shape.
+        # Subtract shape_margin so dist is the surface-to-surface distance;
+        # shape_margin is handled by geom_margin (MuJoCo's includemargin).
         radius_eff = (rigid_contact_margin0[tid] - shape_margin[shape_a]) + (
             rigid_contact_margin1[tid] - shape_margin[shape_b]
         )
@@ -359,6 +368,10 @@ def convert_newton_contacts_to_mjwarp_kernel(
             worldid,
         )
 
+        # Convert Newton per-contact stiffness/damping to MuJoCo solref
+        # (timeconst, dampratio).  solimp is set to approximate a linear
+        # force-displacement relationship at rest, compensating for impedance
+        # scaling.  See https://mujoco.readthedocs.io/en/latest/modeling.html#solver-parameters
         if rigid_contact_stiffness:
             contact_ke = rigid_contact_stiffness[tid]
             if contact_ke > 0.0:
@@ -423,6 +436,10 @@ def convert_newton_contacts_to_mjwarp_kernel(
         # Subsequent substeps with the same contact set.  Only dist, pos,
         # and efc_address need updating; all other MJWarp fields are still
         # valid from the full pass.
+        #
+        # NOTE: rigid_contact_normal is computed once by the narrow phase
+        # and is invariant across substeps.  The fast path is only correct
+        # when collide() has not been called since the last full pass.
 
         if tid == 0:
             ncollision_out[0] = 0
@@ -460,9 +477,9 @@ def convert_newton_contacts_to_mjwarp_kernel(
             contact_efc_address_out[cid, i] = -1
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _snapshot_nacon_count(
-    nacon: wp.array[int],
+    nacon: wp.array[wp.int32],
     last_nacon_count: wp.array[wp.int32],
     contact_generation: wp.array[wp.int32],
     last_contact_generation: wp.array[wp.int32],

@@ -6,10 +6,18 @@ from __future__ import annotations
 import warp as wp
 from warp import DeviceLike as Devicelike
 
+GENERATION_SENTINEL = -1
+"""Value reserved as an impossible generation; the increment kernel skips it."""
 
-@wp.kernel
+
+@wp.kernel(enable_backward=False)
 def _increment_contact_generation(generation: wp.array[wp.int32]):
-    generation[0] = generation[0] + 1
+    g = generation[0]
+    if g == 2147483647:
+        g = 0
+    else:
+        g = g + 1
+    generation[0] = g
 
 
 class Contacts:
@@ -101,7 +109,7 @@ class Contacts:
             # Create sliced views for individual counters (no additional allocation)
             self.rigid_contact_count = self._counter_array[0:1]
 
-            self.contact_generation = wp.zeros(1, dtype=wp.int32, device=device)
+            self.contact_generation = wp.zeros(1, dtype=wp.int32)
             """Device-side generation counter, incremented each time :meth:`clear` is called.
 
             Solvers can compare this against a cached value to detect whether the
@@ -215,7 +223,7 @@ class Contacts:
         Clear contact data, resetting counts and optionally clearing all buffers.
 
         By default (clear_buffers=False), only resets contact counts. This is highly optimized,
-        requiring just 1 kernel launch. Collision detection overwrites all data up to the new
+        requiring just 2 kernel launches. Collision detection overwrites all data up to the new
         contact_count, and solvers only read up to count, so clearing stale data is unnecessary.
 
         If clear_buffers=True (conservative mode), performs full buffer clearing with sentinel
@@ -230,6 +238,7 @@ class Contacts:
             dim=1,
             inputs=[self.contact_generation],
             device=self.contact_generation.device,
+            record_tape=False,
         )
 
         if self.clear_buffers:

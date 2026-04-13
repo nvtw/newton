@@ -25,6 +25,7 @@ from ...sim import (
     ModelBuilder,
     State,
 )
+from ...sim.contacts import GENERATION_SENTINEL as _GENERATION_SENTINEL
 from ...sim.graph_coloring import color_graph, plot_graph
 from ...utils import topological_sort
 from ...utils.benchmark import event_scope
@@ -2924,9 +2925,9 @@ class SolverMuJoCo(SolverBase):
         # See _convert_contacts_to_mjwarp / convert_newton_contacts_to_mjwarp_kernel.
         # Initialised before _convert_to_mjc because notify_model_changed (called
         # during conversion) may call _invalidate_contact_fast_path.
-        self._contact_tid_to_cid: wp.array | None = None
-        self._last_contact_generation: wp.array | None = None
-        self._last_nacon_count: wp.array | None = None
+        self._contact_tid_to_cid: wp.array[wp.int32] | None = None
+        self._last_contact_generation: wp.array[wp.int32] | None = None
+        self._last_nacon_count: wp.array[wp.int32] | None = None
         self._last_contacts_id: int | None = None
 
         with wp.ScopedTimer("convert_model_to_mujoco", active=False):
@@ -3017,7 +3018,7 @@ class SolverMuJoCo(SolverBase):
         geom properties.
         """
         if self._last_contact_generation is not None:
-            self._last_contact_generation.zero_()
+            self._last_contact_generation.fill_(_GENERATION_SENTINEL)
             self._last_nacon_count.zero_()
 
     def _convert_contacts_to_mjwarp(self, model: Model, state_in: State, contacts: Contacts):
@@ -3042,7 +3043,7 @@ class SolverMuJoCo(SolverBase):
         if needs_realloc or contacts_changed:
             if needs_realloc:
                 self._contact_tid_to_cid = wp.full(launch_dim, -1, dtype=wp.int32, device=model.device)
-            self._last_contact_generation = wp.zeros(1, dtype=wp.int32, device=model.device)
+            self._last_contact_generation = wp.full(1, _GENERATION_SENTINEL, dtype=wp.int32, device=model.device)
             self._last_nacon_count = wp.zeros(1, dtype=wp.int32, device=model.device)
             self._last_contacts_id = contacts_id
 
@@ -3143,6 +3144,7 @@ class SolverMuJoCo(SolverBase):
             self._update_joint_properties()
         if flags & SolverNotifyFlags.BODY_PROPERTIES:
             self._update_body_properties()
+            self._invalidate_contact_fast_path()
             need_const_0 = True
         if flags & SolverNotifyFlags.JOINT_DOF_PROPERTIES:
             self._update_joint_dof_properties()
