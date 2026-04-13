@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import warnings
+
 from typing import Any
 
 import warp as wp
@@ -1438,18 +1438,8 @@ class NarrowPhase:
         self.has_meshes = has_meshes
         self.has_heightfields = has_heightfields
 
-        # Warn when running on CPU with meshes: mesh-mesh SDF contacts require CUDA
-        is_gpu_device = wp.get_device(device).is_cuda
-        if has_meshes and not is_gpu_device:
-            warnings.warn(
-                "NarrowPhase running on CPU: mesh-mesh contacts will be skipped "
-                "(SDF-based mesh-mesh collision requires CUDA). "
-                "Use a CUDA device for full mesh-mesh contact support.",
-                stacklevel=2,
-            )
-
-        # Contact reduction requires GPU and meshes
-        if reduce_contacts and not (is_gpu_device and has_meshes):
+        # Contact reduction requires meshes
+        if reduce_contacts and not has_meshes:
             self.reduce_contacts = False
 
         # Determine if we're using external AABBs
@@ -1512,21 +1502,17 @@ class NarrowPhase:
                 self.mesh_plane_contacts_kernel = create_narrow_phase_process_mesh_plane_contacts_kernel(
                     writer_func,
                 )
-            # Only create mesh-mesh SDF kernel on CUDA (uses __shared__ memory via func_native)
-            if is_gpu_device:
-                if self.reduce_contacts:
-                    self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
-                        write_contact_to_reducer,
-                        enable_heightfields=has_heightfields,
-                        reduce_contacts=True,
-                    )
-                else:
-                    self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
-                        writer_func,
-                        enable_heightfields=has_heightfields,
-                    )
+            if self.reduce_contacts:
+                self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
+                    write_contact_to_reducer,
+                    enable_heightfields=has_heightfields,
+                    reduce_contacts=True,
+                )
             else:
-                self.mesh_mesh_contacts_kernel = None
+                self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
+                    writer_func,
+                    enable_heightfields=has_heightfields,
+                )
         else:
             self.mesh_plane_contacts_kernel = None
             self.mesh_mesh_contacts_kernel = None
@@ -1623,8 +1609,8 @@ class NarrowPhase:
         self.num_tile_blocks = num_blocks
 
         # Dynamic block allocation for mesh-mesh and mesh-plane contacts
-        if device_obj.is_cuda and self.reduce_contacts:
-            target_blocks = device_obj.sm_count * 4
+        if self.reduce_contacts:
+            target_blocks = device_obj.sm_count * 4 if device_obj.is_cuda else 64
             n = max_candidate_pairs + 1
             # Mesh-mesh
             self.num_mesh_mesh_blocks = target_blocks
@@ -1938,7 +1924,7 @@ class NarrowPhase:
             if shape_edge_range is None:
                 shape_edge_range = self._empty_edge_range
 
-            if wp.get_device(device).is_cuda and self.mesh_mesh_contacts_kernel is not None:
+            if self.mesh_mesh_contacts_kernel is not None:
                 if self.reduce_contacts and self.mesh_mesh_block_offsets is not None:
                     # Mesh-mesh contacts → buffer + inline hashtable registration
                     compute_mesh_mesh_block_offsets_scan(

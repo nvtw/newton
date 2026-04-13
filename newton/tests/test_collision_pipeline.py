@@ -12,7 +12,7 @@ import newton
 from newton import GeoType
 from newton._src.sim.collide import _compute_per_world_shape_pairs_max, _estimate_rigid_contact_max
 from newton.examples import test_body_state
-from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
+from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
 
 
 class TestLevel(IntFlag):
@@ -206,7 +206,7 @@ class CollisionSetup:
             )
 
 
-devices = get_cuda_test_devices(mode="basic")
+devices = get_test_devices(mode="basic")
 
 
 class TestCollisionPipeline(unittest.TestCase):
@@ -424,15 +424,35 @@ def test_mesh_mesh_bvh_vs_bvh(_test, device, broad_phase: str):
     )
 
 
-# Add mesh-mesh SDF mode tests for all broad phase modes
-mesh_mesh_sdf_tests = [
+# Mesh-mesh SDF mode tests: tests that call build_sdf() need wp.Volume (CUDA-only),
+# while BVH-only tests can run on any device.
+cuda_devices = get_cuda_test_devices(mode="basic")
+
+mesh_mesh_sdf_tests_cuda = [
     ("sdf_vs_sdf", test_mesh_mesh_sdf_vs_sdf),
     ("sdf_vs_bvh", test_mesh_mesh_sdf_vs_bvh),
     ("bvh_vs_sdf", test_mesh_mesh_bvh_vs_sdf),
+]
+mesh_mesh_sdf_tests_all = [
     ("bvh_vs_bvh", test_mesh_mesh_bvh_vs_bvh),
 ]
 
-for mode_name, test_func in mesh_mesh_sdf_tests:
+for mode_name, test_func in mesh_mesh_sdf_tests_cuda:
+    for broad_phase_name, broad_phase in [
+        ("explicit", "explicit"),
+        ("nxn", "nxn"),
+        ("sap", "sap"),
+    ]:
+        add_function_test(
+            TestCollisionPipeline,
+            f"test_mesh_mesh_{mode_name}_{broad_phase_name}",
+            test_func,
+            devices=cuda_devices,
+            broad_phase=broad_phase,
+            check_output=False,
+        )
+
+for mode_name, test_func in mesh_mesh_sdf_tests_all:
     for broad_phase_name, broad_phase in [
         ("explicit", "explicit"),
         ("nxn", "nxn"),
@@ -444,7 +464,7 @@ for mode_name, test_func in mesh_mesh_sdf_tests:
             test_func,
             devices=devices,
             broad_phase=broad_phase,
-            check_output=False,  # Disable output checking due to Warp module loading messages
+            check_output=False,
         )
 
 
