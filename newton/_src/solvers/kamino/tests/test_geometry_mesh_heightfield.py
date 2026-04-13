@@ -22,6 +22,8 @@ from newton._src.solvers.kamino._src.solver_kamino_impl import SolverKaminoImpl
 from newton._src.solvers.kamino._src.utils import logger as msg
 from newton._src.solvers.kamino.tests import setup_tests, test_context
 
+_cuda_available = wp.is_cuda_available()
+
 ###
 # Scene Builders
 ###
@@ -452,6 +454,7 @@ class TestNewtonCollisionPathMeshHeightfield(unittest.TestCase):
             # Signed distance should be non-positive (penetrating or touching)
             self.assertLessEqual(gapfunc[i, 3], 0.01, f"Contact {i}: distance should be <= 0")
 
+    @unittest.skipUnless(_cuda_available, "mesh collision requires CUDA")
     def test_02_newton_to_kamino_mesh(self):
         """Mesh box contacts survive Newton->Kamino conversion with correct geometry."""
         builder = _build_sphere_on_mesh_box()
@@ -477,6 +480,7 @@ class TestNewtonCollisionPathMeshHeightfield(unittest.TestCase):
             # Contact on mesh top face should be near z = BOX_HALF = 0.5
             self.assertAlmostEqual(pos_a[i, 2], BOX_HALF, delta=0.1, msg=f"Contact {i}: z should be near mesh top face")
 
+    @unittest.skipUnless(_cuda_available, "mesh collision requires CUDA")
     def test_03_newton_to_kamino_mixed(self):
         """Mixed scene: both primitive-plane and mesh contacts converted correctly."""
         builder = _build_mixed_scene()
@@ -496,6 +500,7 @@ class TestNewtonCollisionPathMeshHeightfield(unittest.TestCase):
             len(dynamic_bodies), 2, f"Should have contacts for >=2 different bodies, got {dynamic_bodies}"
         )
 
+    @unittest.skipUnless(_cuda_available, "mesh collision requires CUDA")
     def test_04_no_contacts_when_separated(self):
         """Sphere far above mesh box must produce zero contacts after conversion."""
         builder = _build_sphere_on_mesh_box(sphere_z=BOX_HALF + SPHERE_RADIUS + 2.0)
@@ -508,6 +513,7 @@ class TestNewtonCollisionPathMeshHeightfield(unittest.TestCase):
         self.assertEqual(nc, 0, "Separated shapes should produce 0 Kamino contacts")
 
 
+@unittest.skipUnless(_cuda_available, "Kamino solver requires CUDA")
 class TestSolverWithMeshHeightfield(unittest.TestCase):
     """Tests Kamino solver produces physically correct behavior with mesh/heightfield contacts.
 

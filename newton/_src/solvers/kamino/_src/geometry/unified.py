@@ -521,9 +521,13 @@ class CollisionPipelineUnifiedKamino:
             | ShapeFlags.COLLIDE_PARTICLES  # Enable shape-particle collision
         )
 
-        # Detect whether the model contains mesh, convex mesh, or heightfield shapes
+        # Detect whether the model contains mesh, convex mesh, or heightfield shapes.
+        # Keep mesh and heightfield flags separate: heightfield-only scenes should not
+        # trigger mesh-only kernel setup (mesh-mesh SDF contacts require CUDA).
         geom_type_np = self._model.geoms.type.numpy()
-        _has_explicit = any(int(t) in (GeoType.MESH, GeoType.CONVEX_MESH, GeoType.HFIELD) for t in geom_type_np)
+        _has_meshes = any(int(t) in (GeoType.MESH, GeoType.CONVEX_MESH) for t in geom_type_np)
+        _has_heightfields = any(int(t) == GeoType.HFIELD for t in geom_type_np)
+        _has_explicit = _has_meshes or _has_heightfields
 
         # Allocate internal data needed by the pipeline that
         # the Kamino model and data do not yet provide
@@ -579,7 +583,8 @@ class CollisionPipelineUnifiedKamino:
             shape_aabb_lower=self.shape_aabb_lower,
             shape_aabb_upper=self.shape_aabb_upper,
             contact_writer_warp_func=write_contact_unified_kamino,
-            has_meshes=_has_explicit,
+            has_meshes=_has_meshes,
+            has_heightfields=_has_heightfields,
         )
 
         # Convert geometry data from Kamino to Newton format
