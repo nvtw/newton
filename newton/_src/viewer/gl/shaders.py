@@ -872,23 +872,24 @@ void main()
     vec2 fwd   = vec2(fwd_scr.x * safe_asp, fwd_scr.y);
     vec2 right = vec2(right_scr.x * safe_asp, right_scr.y);
 
-    // Triangle 1+2: line body quad
+    // Shorten the line body so it ends at the arrowhead base
     vec2 xy = 0.5 * line_width * right;
+    vec2 e_body = e_ndc - fwd * arrow_size;
 
-    gl_Position = vec4(s_ndc - xy, s_depth, 1); lineColor = color; EmitVertex();
-    gl_Position = vec4(e_ndc + xy, e_depth, 1); lineColor = color; EmitVertex();
-    gl_Position = vec4(s_ndc + xy, s_depth, 1); lineColor = color; EmitVertex();
+    gl_Position = vec4(s_ndc  - xy, s_depth, 1); lineColor = color; EmitVertex();
+    gl_Position = vec4(e_body + xy, e_depth, 1); lineColor = color; EmitVertex();
+    gl_Position = vec4(s_ndc  + xy, s_depth, 1); lineColor = color; EmitVertex();
     EndPrimitive();
 
-    gl_Position = vec4(s_ndc - xy, s_depth, 1); lineColor = color; EmitVertex();
-    gl_Position = vec4(e_ndc - xy, e_depth, 1); lineColor = color; EmitVertex();
-    gl_Position = vec4(e_ndc + xy, e_depth, 1); lineColor = color; EmitVertex();
+    gl_Position = vec4(s_ndc  - xy, s_depth, 1); lineColor = color; EmitVertex();
+    gl_Position = vec4(e_body - xy, e_depth, 1); lineColor = color; EmitVertex();
+    gl_Position = vec4(e_body + xy, e_depth, 1); lineColor = color; EmitVertex();
     EndPrimitive();
 
-    // Triangle 3: arrowhead at endpoint
-    vec2 tip    = e_ndc + fwd * arrow_size;
-    vec2 base_l = e_ndc - right * arrow_size * 0.5;
-    vec2 base_r = e_ndc + right * arrow_size * 0.5;
+    // Triangle 3: arrowhead with tip exactly at the endpoint
+    vec2 tip    = e_ndc;
+    vec2 base_l = e_body - right * arrow_size * 0.5;
+    vec2 base_r = e_body + right * arrow_size * 0.5;
 
     gl_Position = vec4(tip,    e_depth, 1); lineColor = color; EmitVertex();
     gl_Position = vec4(base_l, e_depth, 1); lineColor = color; EmitVertex();
