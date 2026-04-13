@@ -1629,6 +1629,37 @@ Custom collision properties can be authored in USD:
 
 See :doc:`custom_attributes` and :doc:`usd_parsing` for details.
 
+.. _Deterministic Contacts:
+
+Deterministic Contact Ordering
+------------------------------
+
+GPU thread scheduling is non-deterministic, so the order in which contacts are
+written to the output buffer can vary between runs.  Pass ``deterministic=True``
+to :class:`~CollisionPipeline` (or :class:`~geometry.NarrowPhase`) to guarantee
+a reproducible contact order:
+
+.. code-block:: python
+
+    pipeline = newton.CollisionPipeline(model, deterministic=True)
+
+This enables two mechanisms:
+
+1. **Fingerprint tiebreaking** — each contact carries a geometry-derived
+   fingerprint (triangle/edge index) that is used as a deterministic tiebreaker
+   in the ``atomic_max`` contact reduction, so the reduction winner is
+   independent of thread scheduling.
+2. **Radix sort** — after the narrow phase, all contact arrays are reordered by
+   a 64-bit key encoding ``(shape_a, shape_b, sub_key)`` via a radix sort +
+   gather pass.
+
+The overhead is small (one radix sort + gather over the contact buffer per
+frame) and the sort is fully CUDA-graph-capturable.
+
+.. note::
+
+   Hydroelastic contacts are not yet covered by deterministic ordering.
+
 .. _Performance:
 
 Performance
