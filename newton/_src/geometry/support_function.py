@@ -168,9 +168,16 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
             if direction[2] < 0.0:
                 result = result + wp.vec3(0.0, 0.0, -1.0)
     elif geom.shape_type == GeoType.BOX:
-        sx = 1.0 if direction[0] >= 0.0 else -1.0
-        sy = 1.0 if direction[1] >= 0.0 else -1.0
-        sz = 1.0 if direction[2] >= 0.0 else -1.0
+        # Use a relative deadband so near-zero direction components
+        # (from quaternion rotation noise ~1e-14) cannot flip the sign
+        # and select a different box vertex.  For face-aligned queries
+        # the non-primary components are zero; any vertex on that face
+        # is an equally valid support point, so biasing toward +1 is
+        # correct and keeps MPR's initial portal construction stable.
+        threshold = 1.0e-10 * wp.length(direction)
+        sx = 1.0 if direction[0] >= -threshold else -1.0
+        sy = 1.0 if direction[1] >= -threshold else -1.0
+        sz = 1.0 if direction[2] >= -threshold else -1.0
 
         result = wp.vec3(sx * geom.scale[0], sy * geom.scale[1], sz * geom.scale[2])
 
@@ -317,9 +324,10 @@ def support_map_lean(geom: GenericShapeData, direction: wp.vec3, data_provider: 
         result = wp.cw_mul(mesh.points[best_idx], geom.scale)
 
     elif geom.shape_type == GeoType.BOX:
-        sx = 1.0 if direction[0] >= 0.0 else -1.0
-        sy = 1.0 if direction[1] >= 0.0 else -1.0
-        sz = 1.0 if direction[2] >= 0.0 else -1.0
+        threshold = 1.0e-10 * wp.length(direction)
+        sx = 1.0 if direction[0] >= -threshold else -1.0
+        sy = 1.0 if direction[1] >= -threshold else -1.0
+        sz = 1.0 if direction[2] >= -threshold else -1.0
         result = wp.vec3(sx * geom.scale[0], sy * geom.scale[1], sz * geom.scale[2])
 
     elif geom.shape_type == GeoType.SPHERE:
