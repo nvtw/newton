@@ -62,7 +62,8 @@ def measure(scene_fn, num_worlds, num_steps=50, warmup=10):
     s_out = model.state()
     cfg = Box3DConfig(num_substeps=4, num_velocity_iters=1, num_relaxation_iters=1,
                       contact_hertz=30.0, joint_hertz=60.0,
-                      linear_damping=0.1, angular_damping=0.1)
+                      linear_damping=0.1, angular_damping=0.1,
+                      enable_graph=True)
     solver = newton.solvers.SolverBox3D(model, config=cfg)
     pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
     contacts = pipeline.contacts()
