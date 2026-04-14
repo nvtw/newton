@@ -1239,14 +1239,37 @@ def test_deterministic_pipeline_500_steps(test, device):
                     f"Contact count mismatch at frame {_frame} substep {_sub}: {count_a} vs {count_b}",
                 )
                 if count_a > 0:
+                    # Also compare sort keys to distinguish ordering vs value issues
+                    keys_a = pipeline_a._sort_key_array.numpy()[:count_a]
+                    keys_b = pipeline_b._sort_key_array.numpy()[:count_a]
+                    keys_match = np.array_equal(keys_a, keys_b)
+
                     for name in checked_arrays:
                         a = getattr(contacts_a, name).numpy()[:count_a]
                         b = getattr(contacts_b, name).numpy()[:count_a]
-                        test.assertTrue(
-                            np.array_equal(a, b),
-                            f"Determinism failure in {name} at frame {_frame} substep {_sub} "
-                            f"({int(np.count_nonzero(a != b))} elements differ, {count_a} contacts)",
-                        )
+                        if not np.array_equal(a, b):
+                            diff_mask = a != b
+                            diff_indices = np.argwhere(diff_mask)
+                            msg = (
+                                f"Determinism failure in {name} at frame {_frame} substep {_sub} "
+                                f"({int(np.count_nonzero(diff_mask))} elements differ, {count_a} contacts)\n"
+                                f"  sort_keys_match={keys_match}\n"
+                            )
+                            for raw_idx in diff_indices[:5]:
+                                tidx = tuple(raw_idx)
+                                msg += f"  [{tidx}]: a={a[tidx]!r}  b={b[tidx]!r}  diff={float(a[tidx]) - float(b[tidx]):.18e}\n"
+                            if not keys_match:
+                                key_diff = np.argwhere(keys_a != keys_b)
+                                msg += f"  sort_key diffs at indices: {key_diff[:10].flatten().tolist()}\n"
+                                for ki in key_diff[:5].flatten():
+                                    msg += f"    key[{ki}]: a=0x{keys_a[ki]:016x}  b=0x{keys_b[ki]:016x}\n"
+                            # Show shape pairs for differing contacts
+                            s0_a = contacts_a.rigid_contact_shape0.numpy()[:count_a]
+                            s1_a = contacts_a.rigid_contact_shape1.numpy()[:count_a]
+                            for idx in diff_indices[:5]:
+                                ci = idx[0] if len(idx) > 1 else int(idx)
+                                msg += f"  contact[{ci}]: shapes=({s0_a[ci]}, {s1_a[ci]}), key_a=0x{keys_a[ci]:016x}\n"
+                            test.assertTrue(False, msg)
                 total_checks += 1
 
                 solver.step(state_0, state_1, control, contacts_a, sim_dt)

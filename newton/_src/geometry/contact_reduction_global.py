@@ -1324,7 +1324,9 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
     # Define vector type for tracking exported contact IDs
     exported_ids_vec = wp.types.vector(length=VALUES_PER_KEY, dtype=wp.int32)
 
-    @wp.kernel(enable_backward=False, module="unique")
+    _module = f"export_reduced_contacts_{writer_func.__name__}"
+
+    @wp.kernel(enable_backward=False, module=_module)
     def export_reduced_contacts_kernel(
         # Hashtable arrays
         ht_keys: wp.array[wp.uint64],
