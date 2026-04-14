@@ -29,7 +29,7 @@ from .convert import (
     convert_contacts_to_box3d,
     convert_joints_to_box3d,
 )
-from .kernels_integrate import integrate_positions_2d, integrate_velocities_2d
+from .kernels_integrate import integrate_positions_2d, integrate_velocities_2d, update_world_inertia_2d
 from .kernels_solve import contact_solve_kernel
 from .kernels_store import store_impulses_2d
 
@@ -284,7 +284,8 @@ class SolverBox3D(SolverBase):
                 outputs=[
                     buf.body_pos, buf.body_ori, buf.body_vel, buf.body_ang_vel,
                     buf.body_inv_mass, buf.body_inv_inertia, buf.body_com,
-                    buf.body_delta_pos, buf.bodies_per_world,
+                    buf.body_delta_pos, buf.body_inv_inertia_body,
+                    buf.bodies_per_world,
                 ],
                 device=device,
             )
@@ -470,7 +471,20 @@ class SolverBox3D(SolverBase):
             is_first = sub == 0
             is_last = sub == cfg.num_substeps - 1
 
-            # 4a. Integrate velocities
+            # 4a. Update world-frame inertia from current orientation
+            if sub > 0:
+                wp.launch(
+                    update_world_inertia_2d,
+                    dim=(W, max_bodies),
+                    inputs=[
+                        buf.body_ori, buf.body_inv_mass,
+                        buf.body_inv_inertia_body, buf.body_inv_inertia,
+                        buf.bodies_per_world,
+                    ],
+                    device=device,
+                )
+
+            # 4b. Integrate velocities
             wp.launch(
                 integrate_velocities_2d,
                 dim=(W, max_bodies),

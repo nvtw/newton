@@ -44,6 +44,8 @@ class SolverBuffers:
         self.body_inv_inertia = wp.zeros((W, B), dtype=wp.mat33, device=device)
         self.body_com = wp.zeros((W, B), dtype=wp.vec3, device=device)
         self.body_delta_pos = wp.zeros((W, B), dtype=wp.vec3, device=device)
+        self.body_inv_inertia_body = wp.zeros((W, B), dtype=wp.mat33, device=device)
+        """Body-frame inverse inertia (constant). Used to recompute world-frame each substep."""
 
         # ── Raw contacts (before coloring, 2-D: [world, contact]) ────
         self.raw_body_a = wp.zeros((W, C), dtype=wp.int32, device=device)

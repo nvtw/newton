@@ -45,6 +45,7 @@ def convert_bodies_to_box3d(
     out_inv_inertia: wp.array2d(dtype=wp.mat33),
     out_com: wp.array2d(dtype=wp.vec3),
     out_delta_pos: wp.array2d(dtype=wp.vec3),
+    out_inv_inertia_body: wp.array2d(dtype=wp.mat33),
     out_bodies_per_world: wp.array[wp.int32],
 ):
     """Convert Newton body state to Box3D 2-D layout.
@@ -89,10 +90,12 @@ def convert_bodies_to_box3d(
         )
     else:
         out_inv_mass[world, local_idx] = body_inv_mass[global_idx]
-        # Rotate body-frame inverse inertia to world frame:
+        # Store body-frame inverse inertia (constant)
+        I_body_inv = body_inv_inertia[global_idx]
+        out_inv_inertia_body[world, local_idx] = I_body_inv
+        # Rotate to world frame for initial substep:
         # I_world^{-1} = R * I_body^{-1} * R^T
         R = wp.quat_to_matrix(ori)
-        I_body_inv = body_inv_inertia[global_idx]
         out_inv_inertia[world, local_idx] = R * I_body_inv * wp.transpose(R)
 
     # Zero delta-pos for substep tracking

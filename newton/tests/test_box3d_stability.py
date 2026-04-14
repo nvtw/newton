@@ -340,7 +340,7 @@ def test_bridge_chain_20(test, device):
     """
     builder = newton.ModelBuilder()
 
-    link_count = 20
+    link_count = 20  # solver2d uses 160, reduced for test speed
     xbase = -10.0
     height = 10.0
     body_indices = []

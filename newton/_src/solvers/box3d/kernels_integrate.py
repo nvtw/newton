@@ -74,6 +74,33 @@ def _quat_integrate(q: wp.quat, w: wp.vec3, dt: float) -> wp.quat:
 
 
 @wp.kernel
+def update_world_inertia_2d(
+    body_ori: wp.array2d(dtype=wp.quat),
+    body_inv_mass: wp.array2d(dtype=float),
+    body_inv_inertia_body: wp.array2d(dtype=wp.mat33),
+    body_inv_inertia_world: wp.array2d(dtype=wp.mat33),
+    bodies_per_world: wp.array[wp.int32],
+):
+    """Recompute world-frame inverse inertia from current orientation.
+
+    ``I_world^{-1} = R @ I_body^{-1} @ R^T``
+
+    Launched with ``dim = (num_worlds, max_bodies_per_world)``.
+    """
+    wid, tid = wp.tid()
+    num_bodies = bodies_per_world[wid]
+    if tid >= num_bodies:
+        return
+    im = body_inv_mass[wid, tid]
+    if im <= 0.0:
+        return
+    ori = body_ori[wid, tid]
+    R = wp.quat_to_matrix(ori)
+    I_body_inv = body_inv_inertia_body[wid, tid]
+    body_inv_inertia_world[wid, tid] = R * I_body_inv * wp.transpose(R)
+
+
+@wp.kernel
 def integrate_positions_2d(
     body_pos: wp.array2d(dtype=wp.vec3),
     body_ori: wp.array2d(dtype=wp.quat),
