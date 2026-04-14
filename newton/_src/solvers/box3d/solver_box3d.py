@@ -492,6 +492,7 @@ class SolverBox3D(SolverBase):
         # ── 4. Substep loop ─────────────────────────────────────────
         max_bodies = cfg.max_bodies_per_world
 
+        gx, gy, gz = float(gravity_vec[0]), float(gravity_vec[1]), float(gravity_vec[2])
         for sub in range(cfg.num_substeps):
             is_first = sub == 0
             is_last = sub == cfg.num_substeps - 1
@@ -509,20 +510,8 @@ class SolverBox3D(SolverBase):
                     device=device,
                 )
 
-            # 4b. Integrate velocities
-            wp.launch(
-                integrate_velocities_2d,
-                dim=(W, max_bodies),
-                inputs=[
-                    buf.body_vel, buf.body_ang_vel, buf.body_inv_mass,
-                    buf.bodies_per_world, gravity_vec,
-                    cfg.linear_damping, cfg.angular_damping, sub_dt,
-                ],
-                device=device,
-            )
-
-            # 4b. Biased contact+joint solve (+ warm start on first substep)
-            for _ in range(cfg.num_velocity_iters):
+            # 4b. Biased contact+joint solve (velocity integration fused into 1st iter)
+            for vi in range(cfg.num_velocity_iters):
                 wp.launch_tiled(
                     contact_solve_kernel,
                     dim=[W],
@@ -541,13 +530,15 @@ class SolverBox3D(SolverBase):
                         buf.color_offsets,
                         max_bodies, cfg.max_colors,
                         1,  # use_bias
-                        1,  # warm_start (Box2D warm-starts every substep)
-                        0,  # no restitution yet
+                        1,  # warm_start
+                        0,  # no restitution
                         inv_sub_dt,
                         soft.bias_rate, soft.mass_scale, soft.impulse_scale,
                         soft_static.bias_rate, soft_static.mass_scale,
                         soft_static.impulse_scale,
                         cfg.contact_speed, cfg.restitution_threshold,
+                        1 if vi == 0 else 0,  # fused velocity integration on first iter only
+                        gx, gy, gz, cfg.linear_damping, cfg.angular_damping,
                         # Joint parameters
                         buf.body_pos, buf.body_ori,
                         buf.j_body_a, buf.j_body_b, buf.j_type,
@@ -606,6 +597,7 @@ class SolverBox3D(SolverBase):
                         soft_static.bias_rate, soft_static.mass_scale,
                         soft_static.impulse_scale,
                         cfg.contact_speed, cfg.restitution_threshold,
+                        0, 0.0, 0.0, 0.0, 0.0, 0.0,  # no velocity integration
                         # Joint parameters
                         buf.body_pos, buf.body_ori,
                         buf.j_body_a, buf.j_body_b, buf.j_type,
@@ -651,6 +643,7 @@ class SolverBox3D(SolverBase):
                 soft_static.bias_rate, soft_static.mass_scale,
                 soft_static.impulse_scale,
                 cfg.contact_speed, cfg.restitution_threshold,
+                0, 0.0, 0.0, 0.0, 0.0, 0.0,  # no velocity integration in restitution
                 buf.body_pos, buf.body_ori,
                 buf.j_body_a, buf.j_body_b, buf.j_type,
                 buf.j_local_anchor_a, buf.j_local_anchor_b,

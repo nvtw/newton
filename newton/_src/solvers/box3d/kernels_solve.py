@@ -31,10 +31,20 @@ _MAX_SMEM_BODIES = 1024
 _CONTACT_SOLVE_SNIPPET = r"""
     __shared__ float smem[""" + str(_MAX_SMEM_BODIES * 6) + r"""];
 
-    // Load velocities into shared memory
+    // Load velocities into shared memory (optionally integrate velocity first)
     for (int b = tid; b < num_bodies; b += blockDim.x) {
         auto v = *wp::address(body_vel, wid, b);
         auto w = *wp::address(body_ang_vel, wid, b);
+        if (do_int_vel > 0) {
+            float im = *wp::address(inv_m, wid, b);
+            if (im > 0.0f) {
+                // Box2D-style: gravity delta undamped, velocity damped
+                float ld = 1.0f / (1.0f + sub_dt * lin_damp);
+                float ad = 1.0f / (1.0f + sub_dt * ang_damp);
+                v[0] = gx*sub_dt + v[0]*ld; v[1] = gy*sub_dt + v[1]*ld; v[2] = gz*sub_dt + v[2]*ld;
+                w[0] *= ad; w[1] *= ad; w[2] *= ad;
+            }
+        }
         float* s = smem + b * 6;
         s[0] = v[0]; s[1] = v[1]; s[2] = v[2];
         s[3] = w[0]; s[4] = w[1]; s[5] = w[2];
@@ -688,6 +698,9 @@ def _contact_solve_native(
     static_is: float,
     contact_speed: float,
     rest_thresh: float,
+    do_int_vel: int,
+    gx: float, gy: float, gz: float,
+    lin_damp: float, ang_damp: float,
     # Joint parameters
     body_pos: wp.array2d(dtype=wp.vec3),
     body_ori: wp.array2d(dtype=wp.quat),
@@ -760,6 +773,9 @@ def contact_solve_kernel(
     static_is: float,
     contact_speed: float,
     rest_thresh: float,
+    do_int_vel: int,
+    gx: float, gy: float, gz: float,
+    lin_damp: float, ang_damp: float,
     # Joint parameters
     body_pos: wp.array2d(dtype=wp.vec3),
     body_ori: wp.array2d(dtype=wp.quat),
@@ -802,6 +818,7 @@ def contact_solve_kernel(
         inv_sub_dt, bias_rate, mass_scale, impulse_scale,
         static_br, static_ms, static_is,
         contact_speed, rest_thresh,
+        do_int_vel, gx, gy, gz, lin_damp, ang_damp,
         body_pos, body_ori,
         j_ba, j_bb, j_type, j_la, j_lb, j_ha, j_li, j_ai,
         j_ms_arr, j_mmt,
