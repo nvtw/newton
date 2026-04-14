@@ -26,7 +26,9 @@ from newton._src.solvers.box3d.constraint_funcs import (
     solve_contact_normal,
     solve_restitution,
 )
+from newton._src.solvers.box3d.coloring import color_joints_cpu
 from newton._src.solvers.box3d.joint_funcs import (
+    _skew_outer_diag,
     _solve_symmetric_3x3,
     solve_fixed_angular,
     solve_revolute_angular,
@@ -1005,6 +1007,246 @@ def test_fixed_angular_correction(test, device):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Skew outer diagonal (direct test of _skew_outer_diag)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@wp.kernel
+def _test_skew_outer_kernel(
+    r: wp.vec3, inv_I: wp.mat33,
+    out: wp.array[wp.mat33],
+):
+    tid = wp.tid()
+    out[tid] = _skew_outer_diag(r, inv_I)
+
+
+def test_skew_outer_diag_identity_inertia(test, device):
+    """_skew_outer_diag with identity inertia matches numpy [r]_x^T @ I^-1 @ [r]_x."""
+    r_val = np.array([1.0, 2.0, 3.0])
+    inv_I_val = np.eye(3)
+
+    # Compute reference with numpy
+    def skew(v):
+        return np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    rx = skew(r_val)
+    expected = rx.T @ inv_I_val @ rx
+
+    out = wp.zeros(1, dtype=wp.mat33, device=device)
+    wp.launch(
+        _test_skew_outer_kernel, dim=1,
+        inputs=[wp.vec3(*r_val.tolist()), wp.mat33(*inv_I_val.flatten().tolist())],
+        outputs=[out], device=device,
+    )
+    result = out.numpy()[0]
+    np.testing.assert_allclose(result, expected, atol=1e-4)
+
+
+def test_skew_outer_diag_non_diagonal_inertia(test, device):
+    """_skew_outer_diag with non-diagonal inertia matches numpy reference."""
+    r_val = np.array([0.5, -0.3, 0.8])
+    # Symmetric positive-definite inverse inertia
+    inv_I_val = np.array([[2.0, 0.5, 0.1], [0.5, 3.0, 0.2], [0.1, 0.2, 1.5]])
+
+    def skew(v):
+        return np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    rx = skew(r_val)
+    expected = rx.T @ inv_I_val @ rx
+
+    out = wp.zeros(1, dtype=wp.mat33, device=device)
+    wp.launch(
+        _test_skew_outer_kernel, dim=1,
+        inputs=[wp.vec3(*r_val.tolist()), wp.mat33(*inv_I_val.flatten().tolist())],
+        outputs=[out], device=device,
+    )
+    result = out.numpy()[0]
+    np.testing.assert_allclose(result, expected, atol=1e-4)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Revolute P2P with lever arms + bias (exercises full K-matrix + bias)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_revolute_p2p_with_lever_arms_biased(test, device):
+    """P2P with non-zero lever arms and bias exercises _skew_outer_diag and softness."""
+    out = wp.zeros(1, dtype=wp.vec3, device=device)
+    inv_I = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    # Bodies separated: A at origin, B at (0,0,0) but anchors create 1m gap along x
+    # r_a = (0.5, 0, 0), r_b = (-0.5, 0, 0)
+    # separation = (0.5 + (-0.5)) - (0 + 0.5) = ... need actual positions
+    # Let's use: pos_A=(0,0,0), pos_B=(2,0,0), r_a=(0.5,0,0), r_b=(-0.5,0,0)
+    # anchor_A_world = (0.5, 0, 0), anchor_B_world = (1.5, 0, 0)
+    # separation = (1.5,0,0) - (0.5,0,0) = (1,0,0)
+    wp.launch(
+        _test_revolute_p2p_kernel, dim=1,
+        inputs=[
+            wp.vec3(0.0, 0.0, 0.0), wp.vec3(0.0, 0.0, 0.0),  # vel/angvel A
+            wp.vec3(0.0, 0.0, 0.0), wp.vec3(0.0, 0.0, 0.0),  # vel/angvel B
+            wp.vec3(0.5, 0.0, 0.0), wp.vec3(-0.5, 0.0, 0.0),  # r_a, r_b
+            wp.vec3(1.0, 0.0, 0.0),  # separation (anchor gap)
+            1.0, inv_I, 1.0, inv_I,
+            wp.vec3(0.0, 0.0, 0.0),  # accumulated impulse
+            10.0, 0.8, 0.2, 1,       # softness, use_bias=1
+        ],
+        outputs=[out], device=device,
+    )
+    result = out.numpy()[0]
+
+    # Hand computation:
+    # Cdot = (0,0,0), bias = 10.0 * (1,0,0) = (10,0,0), ms=0.8, isv=0.2
+    # K = 2*I + [r_a]^T I^-1 [r_a] + [r_b]^T I^-1 [r_b]
+    # r_a = (0.5,0,0): [r_a]^T [r_a] = diag(0, 0.25, 0.25)
+    # r_b = (-0.5,0,0): [r_b]^T [r_b] = diag(0, 0.25, 0.25)
+    # K = diag(2, 2.5, 2.5)
+    # K^-1 rhs = K^-1 (0 + (10,0,0)) = (5, 0, 0)
+    # impulse = -0.8 * (5,0,0) - 0.2 * (0,0,0) = (-4, 0, 0)
+    np.testing.assert_allclose(result, [-4.0, 0.0, 0.0], atol=1e-4)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Revolute angular with use_bias=1
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_revolute_angular_biased(test, device):
+    """Revolute angular with use_bias=1 tests softness application."""
+    out = wp.zeros(1, dtype=wp.vec3, device=device)
+    inv_I = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    wp.launch(
+        _test_revolute_angular_kernel, dim=1,
+        inputs=[
+            wp.vec3(0.0, 0.0, 0.0),
+            wp.vec3(2.0, 0.0, 0.0),  # B rotating around X
+            wp.vec3(0.0, 1.0, 0.0),  # hinge Y
+            inv_I, inv_I,
+            wp.vec2(1.0, 0.0),  # accumulated impulse (1.0 on b1)
+            10.0, 0.8, 0.2, 1,  # use_bias=1
+        ],
+        outputs=[out], device=device,
+    )
+    result = out.numpy()[0]
+    # h=(0,1,0), b1=(0,0,1), b2=(1,0,0) (same basis as before)
+    # dw=(2,0,0), k1=k2=2, am1=am2=0.5
+    # cdot1=dot((2,0,0),(0,0,1))=0 → i1 = -0.8*0.5*0 - 0.2*1.0 = -0.2
+    # cdot2=dot((2,0,0),(1,0,0))=2 → i2 = -0.8*0.5*2 - 0.2*0.0 = -0.8
+    # result = -0.2*(0,0,1) + -0.8*(1,0,0) = (-0.8, 0, -0.2)
+    np.testing.assert_allclose(result, [-0.8, 0.0, -0.2], atol=1e-5)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Revolute limit with is_upper=1
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_revolute_limit_upper_violated(test, device):
+    """Upper limit (is_upper=1) with violation flips velocity sign correctly."""
+    out = wp.zeros(1, dtype=float, device=device)
+    inv_I = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    # Body B rotating at 1 rad/s along hinge, upper limit violated
+    wp.launch(
+        _test_revolute_limit_kernel, dim=1,
+        inputs=[
+            wp.vec3(0.0, 0.0, 0.0),
+            wp.vec3(0.0, 1.0, 0.0),  # B rotating around Y (hinge)
+            wp.vec3(0.0, 1.0, 0.0),  # hinge Y
+            inv_I, inv_I,
+            0.0,       # limit_impulse
+            -0.1,      # angle_error < 0 (violated)
+            10.0, 0.8, 0.2,
+            240.0, 1, 1,  # use_bias=1, is_upper=1
+        ],
+        outputs=[out], device=device,
+    )
+    delta = float(out.numpy()[0])
+    # k = dot((0,1,0), 2*(0,1,0)) = 2, am = 0.5
+    # cdot = dot(B-A, h) = dot((0,1,0)-(0,0,0), (0,1,0)) = 1
+    # is_upper=1: cdot flipped → cdot = -1
+    # bias = 0.8 * 10 * (-0.1) = -0.8, ms=0.8, isv=0.2
+    # impulse = -0.8 * 0.5 * (-1 + (-0.8)) - 0.2*0 = -0.8*0.5*(-1.8) = 0.72
+    # new = max(0 + 0.72, 0) = 0.72
+    test.assertAlmostEqual(delta, 0.72, places=3)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Effective mass with non-diagonal inertia
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_effective_mass_non_diagonal_inertia(test, device):
+    """Non-diagonal inertia tensor changes effective mass vs diagonal case."""
+    # Body A: inv_inertia with off-diagonal terms
+    inv_I_a = wp.mat33(2.0, 0.5, 0.0, 0.5, 2.0, 0.0, 0.0, 0.0, 1.0)
+    inv_I_zero = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    r_a = wp.vec3(0.0, 0.0, 1.0)  # lever arm along z
+    r_b = wp.vec3(0.0, 0.0, 0.0)
+    d = wp.vec3(0.0, 1.0, 0.0)  # normal along y
+    out = wp.zeros(1, dtype=float, device=device)
+    wp.launch(
+        _test_effective_mass_kernel, dim=1,
+        inputs=[1.0, inv_I_a, 0.0, inv_I_zero, r_a, r_b, d],
+        outputs=[out], device=device,
+    )
+    result = float(out.numpy()[0])
+
+    # numpy reference:
+    # rn_a = cross((0,0,1), (0,1,0)) = (-1,0,0)
+    # inv_I * (-1,0,0) = (-2, -0.5, 0)
+    # cross((-2,-0.5,0), (0,0,1)) = (-0.5, 2, 0)  -- no, let me recompute
+    # Actually: cross(inv_I * rn_a, r_a) where rn_a = cross(r_a, d)
+    # rn_a = cross((0,0,1), (0,1,0)) = (-1, 0, 0)
+    # inv_I * rn_a = inv_I * (-1,0,0) = (-2, -0.5, 0)
+    # cross((-2,-0.5,0), (0,0,1)) = (-0.5, 2, 0)  -- wait:
+    # cross(a, b) = (a1*b2-a2*b1, a2*b0-a0*b2, a0*b1-a1*b0)
+    # cross((-2,-0.5,0), (0,0,1)) = (-0.5*1 - 0*0, 0*0 - (-2)*1, (-2)*0 - (-0.5)*0) = (-0.5, 2, 0)
+    # dot((0,1,0), (-0.5, 2, 0)) = 2.0
+    # K = 1.0 + 2.0 = 3.0, eff_mass = 1/3
+    expected = 1.0 / 3.0
+    test.assertAlmostEqual(result, expected, places=4)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Color joints CPU test
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_color_joints_cpu_basic(test, device):
+    """CPU joint coloring produces valid non-conflicting colors."""
+    # 4 joints forming a chain: 0-1, 1-2, 2-3, 3-0 (cycle)
+    body_a = np.array([0, 1, 2, 3], dtype=np.int32)
+    body_b = np.array([1, 2, 3, 0], dtype=np.int32)
+    order, offsets, num_colors = color_joints_cpu(body_a, body_b, 4, 4)
+
+    # A 4-cycle needs at least 2 colors
+    test.assertGreaterEqual(num_colors, 2)
+    test.assertEqual(len(order), 4)
+    test.assertEqual(int(offsets[-1]), 4)
+
+    # Verify no two joints in the same color share a body
+    for c in range(num_colors):
+        start = int(offsets[c])
+        end = int(offsets[c + 1])
+        bodies_in_color = set()
+        for ji in range(start, end):
+            orig_j = int(order[ji])
+            a, b = int(body_a[orig_j]), int(body_b[orig_j])
+            test.assertNotIn(a, bodies_in_color, f"Body {a} appears twice in color {c}")
+            test.assertNotIn(b, bodies_in_color, f"Body {b} appears twice in color {c}")
+            bodies_in_color.add(a)
+            bodies_in_color.add(b)
+
+
+def test_color_joints_cpu_ground(test, device):
+    """Ground body (-1) doesn't cause conflicts between joints."""
+    # Two joints both connected to ground — should be same color
+    body_a = np.array([-1, -1], dtype=np.int32)
+    body_b = np.array([0, 1], dtype=np.int32)
+    order, offsets, num_colors = color_joints_cpu(body_a, body_b, 2, 2)
+
+    # Both joints connect to ground + different dynamic bodies → 1 color
+    test.assertEqual(num_colors, 1)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Additional tests for coverage gaps
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -1101,6 +1343,7 @@ add_function_test(TestBox3DConstraintFuncs, "test_effective_mass_equal_masses", 
 add_function_test(TestBox3DConstraintFuncs, "test_effective_mass_static_body", test_effective_mass_static_body, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_effective_mass_with_lever_arm", test_effective_mass_with_lever_arm, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_effective_mass_two_lever_arms", test_effective_mass_two_lever_arms, devices=devices)
+add_function_test(TestBox3DConstraintFuncs, "test_effective_mass_non_diagonal_inertia", test_effective_mass_non_diagonal_inertia, devices=devices)
 
 # Normal impulse
 add_function_test(TestBox3DConstraintFuncs, "test_normal_impulse_penetrating", test_normal_impulse_penetrating, devices=devices)
@@ -1133,13 +1376,19 @@ add_function_test(TestBox3DConstraintFuncs, "test_solve_3x3_identity", test_solv
 add_function_test(TestBox3DConstraintFuncs, "test_solve_3x3_diagonal", test_solve_3x3_diagonal, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_solve_3x3_off_diagonal", test_solve_3x3_off_diagonal, devices=devices)
 
+# Skew outer diag
+add_function_test(TestBox3DConstraintFuncs, "test_skew_outer_diag_identity_inertia", test_skew_outer_diag_identity_inertia, devices=devices)
+add_function_test(TestBox3DConstraintFuncs, "test_skew_outer_diag_non_diagonal_inertia", test_skew_outer_diag_non_diagonal_inertia, devices=devices)
+
 # Revolute point-to-point
 add_function_test(TestBox3DConstraintFuncs, "test_revolute_p2p_coincident_relaxation", test_revolute_p2p_coincident_relaxation, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_revolute_p2p_velocity_correction", test_revolute_p2p_velocity_correction, devices=devices)
+add_function_test(TestBox3DConstraintFuncs, "test_revolute_p2p_with_lever_arms_biased", test_revolute_p2p_with_lever_arms_biased, devices=devices)
 
 # Revolute angular
 add_function_test(TestBox3DConstraintFuncs, "test_revolute_angular_aligned", test_revolute_angular_aligned, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_revolute_angular_correction", test_revolute_angular_correction, devices=devices)
+add_function_test(TestBox3DConstraintFuncs, "test_revolute_angular_biased", test_revolute_angular_biased, devices=devices)
 
 # Revolute motor
 add_function_test(TestBox3DConstraintFuncs, "test_revolute_motor_speed_tracking", test_revolute_motor_speed_tracking, devices=devices)
@@ -1148,10 +1397,15 @@ add_function_test(TestBox3DConstraintFuncs, "test_revolute_motor_torque_clamp", 
 # Revolute limits
 add_function_test(TestBox3DConstraintFuncs, "test_revolute_limit_within_range", test_revolute_limit_within_range, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_revolute_limit_violated", test_revolute_limit_violated, devices=devices)
+add_function_test(TestBox3DConstraintFuncs, "test_revolute_limit_upper_violated", test_revolute_limit_upper_violated, devices=devices)
 
 # Fixed joint
 add_function_test(TestBox3DConstraintFuncs, "test_fixed_angular_zero_velocity", test_fixed_angular_zero_velocity, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_fixed_angular_correction", test_fixed_angular_correction, devices=devices)
+
+# Color joints CPU (no device needed, but run in both for consistency)
+add_function_test(TestBox3DConstraintFuncs, "test_color_joints_cpu_basic", test_color_joints_cpu_basic, devices=devices)
+add_function_test(TestBox3DConstraintFuncs, "test_color_joints_cpu_ground", test_color_joints_cpu_ground, devices=devices)
 
 
 if __name__ == "__main__":
