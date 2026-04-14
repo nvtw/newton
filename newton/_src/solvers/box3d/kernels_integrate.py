@@ -41,13 +41,11 @@ def integrate_velocities_2d(
     v = body_vel[wid, tid]
     w = body_ang_vel[wid, tid]
 
-    # Gravity
-    v = v + gravity * sub_dt
-
-    # Damping (Padé approximation of exponential decay)
+    # Following Box2D: v_new = gravity_delta + damping * v_old
+    # Gravity delta is NOT damped; only existing velocity is damped.
     ld = 1.0 / (1.0 + sub_dt * linear_damping)
     ad = 1.0 / (1.0 + sub_dt * angular_damping)
-    v = v * ld
+    v = gravity * sub_dt + v * ld
     w = w * ad
 
     body_vel[wid, tid] = v

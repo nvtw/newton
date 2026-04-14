@@ -119,22 +119,24 @@ _CONTACT_SOLVE_SNIPPET = r"""
             float vrz = (vbz + wbx*rb[1]-wby*rb[0]) - (vaz + wax*ra[1]-way*ra[0]);
             float vn = vrx*n[0] + vry*n[1] + vrz*n[2];
 
-            // Bias
+            // Bias — following Box2D: speculative bias always, soft bias only when use_bias
             float velocityBias = 0.f, ms = 1.f, isv = 0.f;
-            if (use_bias > 0) {
+            {
                 float base_sep = *wp::address(c_sep, wid, ci);
                 float dpax=0,dpay=0,dpaz=0,dpbx=0,dpby=0,dpbz=0;
                 if (a >= 0) { auto dp = *wp::address(delta_pos,wid,a); dpax=dp[0];dpay=dp[1];dpaz=dp[2]; }
                 if (bi >= 0) { auto dp = *wp::address(delta_pos,wid,bi); dpbx=dp[0];dpby=dp[1];dpbz=dp[2]; }
                 float sep = base_sep + (dpbx-dpax)*n[0] + (dpby-dpay)*n[1] + (dpbz-dpaz)*n[2];
 
-                int is_s = *wp::address(c_is_static, wid, ci);
-                float br_val = is_s ? static_br : bias_rate;
-                float ms_val = is_s ? static_ms : mass_scale;
-                float is_val = is_s ? static_is : impulse_scale;
                 if (sep > 0.f) {
+                    // Speculative: always active (even during relaxation)
                     velocityBias = sep * inv_sub_dt;
-                } else {
+                } else if (use_bias > 0) {
+                    // Soft position correction: only during biased pass
+                    int is_s = *wp::address(c_is_static, wid, ci);
+                    float br_val = is_s ? static_br : bias_rate;
+                    float ms_val = is_s ? static_ms : mass_scale;
+                    float is_val = is_s ? static_is : impulse_scale;
                     velocityBias = fmaxf(ms_val * br_val * sep, -contact_speed);
                     ms = ms_val;
                     isv = is_val;

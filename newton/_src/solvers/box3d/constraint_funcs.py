@@ -201,16 +201,15 @@ def solve_contact_normal(
     ms = 1.0
     isv = 0.0
 
-    if use_bias != 0:
-        if separation > 0.0:
-            # Speculative contact — prevent tunnelling
-            velocity_bias = separation * inv_sub_dt
-        else:
-            # Penetrating — soft position correction
-            velocity_bias = wp.max(mass_scale * bias_rate * separation, -contact_speed)
-            ms = mass_scale
-            isv = impulse_scale
-    # else: relaxation pass — no bias, ms=1, isv=0
+    if separation > 0.0:
+        # Speculative contact — always active (even during relaxation)
+        velocity_bias = separation * inv_sub_dt
+    elif use_bias != 0:
+        # Penetrating — soft position correction (only during biased pass)
+        velocity_bias = wp.max(mass_scale * bias_rate * separation, -contact_speed)
+        ms = mass_scale
+        isv = impulse_scale
+    # else: relaxation pass with penetrating contact — no bias, ms=1, isv=0
 
     impulse = -normal_mass * (ms * vn + velocity_bias) - isv * lambda_n
     new_lambda = wp.max(lambda_n + impulse, 0.0)

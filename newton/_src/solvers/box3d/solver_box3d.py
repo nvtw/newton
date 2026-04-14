@@ -539,7 +539,7 @@ class SolverBox3D(SolverBase):
                         buf.color_offsets,
                         max_bodies, cfg.max_colors,
                         1,  # use_bias
-                        1 if is_first else 0,  # warm_start
+                        1,  # warm_start (Box2D warm-starts every substep)
                         0,  # no restitution yet
                         inv_sub_dt,
                         soft.bias_rate, soft.mass_scale, soft.impulse_scale,
@@ -598,7 +598,7 @@ class SolverBox3D(SolverBase):
                         max_bodies, cfg.max_colors,
                         0,  # no bias (relaxation)
                         0,  # no warm start
-                        1 if is_last else 0,  # restitution on last substep
+                        0,  # no restitution during substeps
                         inv_sub_dt,
                         soft.bias_rate, soft.mass_scale, soft.impulse_scale,
                         soft_static.bias_rate, soft_static.mass_scale,
@@ -622,6 +622,50 @@ class SolverBox3D(SolverBase):
                     block_dim=cfg.block_dim,
                     device=device,
                 )
+
+        # ── 5. Restitution pass (after all substeps, following Box2D) ──
+        wp.launch_tiled(
+            contact_solve_kernel,
+            dim=[W],
+            inputs=[
+                buf.body_vel, buf.body_ang_vel,
+                buf.body_inv_mass, buf.body_inv_inertia,
+                buf.body_delta_pos,
+                buf.c_body_a, buf.c_body_b,
+                buf.c_normal, buf.c_tangent1, buf.c_tangent2,
+                buf.c_r_a, buf.c_r_b, buf.c_base_sep,
+                buf.c_normal_mass, buf.c_tangent1_mass, buf.c_tangent2_mass,
+                buf.c_friction, buf.c_restitution, buf.c_rel_vel_normal,
+                buf.c_normal_impulse, buf.c_friction1_impulse,
+                buf.c_friction2_impulse, buf.c_total_normal_impulse,
+                buf.c_is_static,
+                buf.color_offsets,
+                max_bodies, cfg.max_colors,
+                0,  # no bias
+                0,  # no warm start
+                1,  # restitution ON
+                inv_sub_dt,
+                soft.bias_rate, soft.mass_scale, soft.impulse_scale,
+                soft_static.bias_rate, soft_static.mass_scale,
+                soft_static.impulse_scale,
+                cfg.contact_speed, cfg.restitution_threshold,
+                buf.body_pos, buf.body_ori,
+                buf.j_body_a, buf.j_body_b, buf.j_type,
+                buf.j_local_anchor_a, buf.j_local_anchor_b,
+                buf.j_hinge_axis_local,
+                buf.j_linear_impulse, buf.j_angular_impulse,
+                buf.j_motor_speed, buf.j_max_motor_torque,
+                buf.j_limit_lower, buf.j_limit_upper,
+                buf.j_limit_enabled,
+                buf.j_lower_impulse, buf.j_upper_impulse,
+                buf.joint_color_offsets,
+                0, 0,  # no joints during restitution
+                soft_joint.bias_rate, soft_joint.mass_scale,
+                soft_joint.impulse_scale, sub_dt,
+            ],
+            block_dim=cfg.block_dim,
+            device=device,
+        )
 
     # ──────────────────────────────────────────────────────────────────
     # Model change notification
