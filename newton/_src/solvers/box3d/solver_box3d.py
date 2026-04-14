@@ -269,23 +269,28 @@ class SolverBox3D(SolverBase):
         device = model.device
         W = self._num_worlds
 
-        sub_dt = dt / float(cfg.num_substeps)
-        inv_sub_dt = 1.0 / sub_dt if sub_dt > 0.0 else 0.0
+        # Cache step-invariant computations (recompute only when dt changes)
+        if not hasattr(self, '_cached_dt') or self._cached_dt != dt:
+            self._cached_dt = dt
+            sub_dt = dt / float(cfg.num_substeps)
+            inv_sub_dt = 1.0 / sub_dt if sub_dt > 0.0 else 0.0
+            self._cached_sub_dt = sub_dt
+            self._cached_inv_sub_dt = inv_sub_dt
+            self._cached_soft = compute_softness(cfg.contact_hertz, cfg.contact_damping_ratio, sub_dt)
+            self._cached_soft_static = compute_softness(
+                cfg.contact_hertz * cfg.static_hertz_scale, cfg.contact_damping_ratio, sub_dt)
+            self._cached_soft_joint = compute_softness(cfg.joint_hertz, cfg.joint_damping_ratio, sub_dt)
+            gravity_np = model.gravity.numpy().flatten()[:3]
+            self._cached_gravity = wp.vec3(float(gravity_np[0]), float(gravity_np[1]), float(gravity_np[2]))
 
-        # Softness parameters (computed per step, constant across substeps)
-        soft = compute_softness(cfg.contact_hertz, cfg.contact_damping_ratio, sub_dt)
-        soft_static = compute_softness(
-            cfg.contact_hertz * cfg.static_hertz_scale,
-            cfg.contact_damping_ratio,
-            sub_dt,
-        )
-        soft_joint = compute_softness(cfg.joint_hertz, cfg.joint_damping_ratio, sub_dt)
-
+        sub_dt = self._cached_sub_dt
+        inv_sub_dt = self._cached_inv_sub_dt
+        soft = self._cached_soft
+        soft_static = self._cached_soft_static
+        soft_joint = self._cached_soft_joint
+        gravity_vec = self._cached_gravity
         num_joints = model.joint_count
         num_joint_colors = self._num_joint_colors
-
-        gravity_np = model.gravity.numpy().flatten()[:3]
-        gravity_vec = wp.vec3(float(gravity_np[0]), float(gravity_np[1]), float(gravity_np[2]))
 
         # ── 1. Convert bodies Newton → Box3D ────────────────────────
         buf.bodies_per_world.zero_()
