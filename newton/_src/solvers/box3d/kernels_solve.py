@@ -363,60 +363,40 @@ _CONTACT_SOLVE_SNIPPET = r"""
                     jms = jmass_scale; jisv = jimpulse_scale;
                 }
 
-                // Build K (using mat33 inertia, [r]^T I^-1 [r] pattern)
-                float rA2 = jrax*jrax+jray*jray+jraz*jraz;
-                float rB2 = jrbx*jrbx+jrby*jrby+jrbz*jrbz;
-
-                // K_rot_A = [rA]_x^T @ IA^-1 @ [rA]_x (computed explicitly)
-                // Diagonal: K_rot_A[i][i] = sum_j(IA^-1[i][j] * rA_perp_j) where rA_perp uses rA2 - rA[i]^2
-                // Off-diagonal similarly. For simplicity, use the identity:
-                // K = (mA+mB)*I + [rA]^T IA^-1 [rA] + [rB]^T IB^-1 [rB]
-                // [r]^T I^-1 [r] entries:
-                // (i,j) = sum_k sum_l eps_ikm * I^-1_kl * eps_jln * r_m * r_n
-                // This simplifies to: K_rot[i][j] = I^-1 . (r^2 delta_ij - r_i r_j) trace trick
+                // Build K = (mA+mB)*I + [rA]_x^T @ IA^-1 @ [rA]_x + [rB]_x^T @ IB^-1 @ [rB]_x
+                // Following Box2D's approach: K_rot[i][j] = dot(cross(r, e_i), I^-1 * cross(r, e_j))
+                // Compute via: s_j = I^-1 @ [r]_x column j, then K_rot[i][j] = dot([r]_x^T row i, s_j)
+                // [r]_x cols: c0=(0,rz,-ry), c1=(-rz,0,rx), c2=(ry,-rx,0)
+                // [r]_x^T rows (= -[r]_x rows): r0=(0,rz,-ry), r1=(-rz,0,rx), r2=(ry,-rx,0)
 
                 float d = jima + jimb;
-                // For each body: K_rot = I^-1 * (r^2 * I_3 - r * r^T)
-                // K_rot[i][j] = sum_k I^-1[i][k] * (r^2 * delta[k][j] - r[k]*r[j])
-
                 float K00 = d, K01 = 0, K02 = 0, K11 = d, K12 = 0, K22 = d;
-                if (ja >= 0) {
-                    for (int i = 0; i < 3; i++) {
-                        float ri[3] = {jrax, jray, jraz};
-                        for (int j = i; j < 3; j++) {
-                            float rr = (i == j) ? rA2 - ri[i]*ri[j] : -ri[i]*ri[j];
-                            float val = 0;
-                            for (int k = 0; k < 3; k++) {
-                                float rk_term = (k == j) ? rA2 - ri[k]*ri[j] : -ri[k]*ri[j];
-                                val += jiia.data[i][k] * rk_term;
-                            }
-                            if (i==0 && j==0) K00 += val;
-                            else if (i==0 && j==1) K01 += val;
-                            else if (i==0 && j==2) K02 += val;
-                            else if (i==1 && j==1) K11 += val;
-                            else if (i==1 && j==2) K12 += val;
-                            else if (i==2 && j==2) K22 += val;
-                        }
-                    }
+
+                // Macro to add [r]_x^T @ I^-1 @ [r]_x contribution for one body
+                #define ADD_SKEW_K(rx,ry,rz,II) { \
+                    /* s0 = II @ (0, rz, -ry) */ \
+                    float s0x = II.data[0][1]*rz - II.data[0][2]*ry; \
+                    float s0y = II.data[1][1]*rz - II.data[1][2]*ry; \
+                    float s0z = II.data[2][1]*rz - II.data[2][2]*ry; \
+                    /* s1 = II @ (-rz, 0, rx) */ \
+                    float s1x = -II.data[0][0]*rz + II.data[0][2]*rx; \
+                    float s1y = -II.data[1][0]*rz + II.data[1][2]*rx; \
+                    float s1z = -II.data[2][0]*rz + II.data[2][2]*rx; \
+                    /* s2 = II @ (ry, -rx, 0) */ \
+                    float s2x = II.data[0][0]*ry - II.data[0][1]*rx; \
+                    float s2y = II.data[1][0]*ry - II.data[1][1]*rx; \
+                    float s2z = II.data[2][0]*ry - II.data[2][1]*rx; \
+                    /* [r]_x^T rows: r0=(0,rz,-ry), r1=(-rz,0,rx), r2=(ry,-rx,0) */ \
+                    K00 += rz*s0y - ry*s0z; \
+                    K01 += rz*s1y - ry*s1z; \
+                    K02 += rz*s2y - ry*s2z; \
+                    K11 += -rz*s1x + rx*s1z; \
+                    K12 += -rz*s2x + rx*s2z; \
+                    K22 += ry*s2x - rx*s2y; \
                 }
-                if (jbi >= 0) {
-                    for (int i = 0; i < 3; i++) {
-                        float ri[3] = {jrbx, jrby, jrbz};
-                        for (int j = i; j < 3; j++) {
-                            float val = 0;
-                            for (int k = 0; k < 3; k++) {
-                                float rk_term = (k == j) ? rB2 - ri[k]*ri[j] : -ri[k]*ri[j];
-                                val += jiib.data[i][k] * rk_term;
-                            }
-                            if (i==0 && j==0) K00 += val;
-                            else if (i==0 && j==1) K01 += val;
-                            else if (i==0 && j==2) K02 += val;
-                            else if (i==1 && j==1) K11 += val;
-                            else if (i==1 && j==2) K12 += val;
-                            else if (i==2 && j==2) K22 += val;
-                        }
-                    }
-                }
+                if (ja >= 0) { ADD_SKEW_K(jrax, jray, jraz, jiia) }
+                if (jbi >= 0) { ADD_SKEW_K(jrbx, jrby, jrbz, jiib) }
+                #undef ADD_SKEW_K
 
                 float rx = cdx+jbx, ry = cdy+jby, rz = cdz+jbz;
                 float det = K00*(K11*K22-K12*K12) - K01*(K01*K22-K12*K02) + K02*(K01*K12-K11*K02);
