@@ -3971,6 +3971,93 @@ class TestMuJoCoSolverNewtonContacts(unittest.TestCase):
         self.assertEqual(n_stale, 0, f"{n_stale}/{inactive.sum()} inactive contacts have stale efc_address")
 
 
+class TestFrictionPriority(unittest.TestCase):
+    """Verify that contact friction respects geom priority.
+
+    When two geoms have different priorities, the higher-priority geom's
+    friction should be used directly (not the element-wise max).
+    """
+
+    def _build_model(self, priority_a, friction_a, priority_b, friction_b):
+        builder = newton.ModelBuilder()
+        SolverMuJoCo.register_custom_attributes(builder)
+
+        cfg_a = newton.ModelBuilder.ShapeConfig(ke=1e4, kd=1000.0, mu=friction_a)
+        cfg_b = newton.ModelBuilder.ShapeConfig(ke=1e4, kd=1000.0, mu=friction_b)
+
+        body_a = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.3), wp.quat_identity()))
+        builder.add_shape_box(
+            body=body_a,
+            hx=0.2,
+            hy=0.2,
+            hz=0.1,
+            cfg=cfg_a,
+            custom_attributes={"mujoco:geom_priority": priority_a},
+        )
+
+        body_b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.1), wp.quat_identity()))
+        builder.add_shape_box(
+            body=body_b,
+            hx=0.5,
+            hy=0.5,
+            hz=0.1,
+            cfg=cfg_b,
+            custom_attributes={"mujoco:geom_priority": priority_b},
+        )
+
+        model = builder.finalize()
+        return model
+
+    def _get_contact_friction(self, model):
+        try:
+            solver = SolverMuJoCo(model, use_mujoco_contacts=False, njmax=200, nconmax=200)
+        except ImportError as e:
+            self.skipTest(f"MuJoCo or deps not installed: {e}")
+
+        contacts = model.contacts()
+        state_in = model.state()
+        state_out = model.state()
+        control = model.control()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
+        model.collide(state_in, contacts)
+        solver.step(state_in, state_out, control, contacts, 0.002)
+
+        nacon = solver.mjw_data.nacon.numpy()[0]
+        self.assertGreater(nacon, 0, "No contacts generated")
+        return solver.mjw_data.contact.friction.numpy()[:nacon]
+
+    def test_higher_priority_friction_used(self):
+        """Contact friction should come from the higher-priority geom."""
+        hi_mu = 0.3
+        lo_mu = 0.9
+        model = self._build_model(priority_a=5, friction_a=hi_mu, priority_b=0, friction_b=lo_mu)
+        friction = self._get_contact_friction(model)
+
+        for i in range(len(friction)):
+            self.assertAlmostEqual(
+                float(friction[i, 0]),
+                hi_mu,
+                places=5,
+                msg=f"Contact {i}: slide friction should be {hi_mu} (high-priority geom), got {friction[i, 0]}",
+            )
+
+    def test_equal_priority_uses_max(self):
+        """When priorities are equal, contact friction should be the element-wise max."""
+        mu_a = 0.2
+        mu_b = 0.8
+        model = self._build_model(priority_a=0, friction_a=mu_a, priority_b=0, friction_b=mu_b)
+        friction = self._get_contact_friction(model)
+
+        expected = max(mu_a, mu_b)
+        for i in range(len(friction)):
+            self.assertAlmostEqual(
+                float(friction[i, 0]),
+                expected,
+                places=5,
+                msg=f"Contact {i}: slide friction should be max({mu_a}, {mu_b})={expected}, got {friction[i, 0]}",
+            )
+
+
 class TestImmovableContactFiltering(unittest.TestCase):
     """Verify that contacts between two immovable bodies are filtered out.
 

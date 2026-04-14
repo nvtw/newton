@@ -122,7 +122,7 @@ def contact_params(
     geoms: wp.vec2i,
     worldid: int,
 ):
-    # See function contact_params in mujoco_warp, file collision_primitive.py
+    # See function contact_params in mujoco_warp, file collision_core.py
 
     g1 = geoms[0]
     g2 = geoms[1]
@@ -130,31 +130,38 @@ def contact_params(
     p1 = geom_priority[g1]
     p2 = geom_priority[g2]
 
-    solmix1 = geom_solmix[worldid, g1]
-    solmix2 = geom_solmix[worldid, g2]
+    condim1 = geom_condim[g1]
+    condim2 = geom_condim[g2]
 
-    mix = solmix1 / (solmix1 + solmix2)
-    mix = wp.where((solmix1 < MJ_MINVAL) and (solmix2 < MJ_MINVAL), 0.5, mix)
-    mix = wp.where((solmix1 < MJ_MINVAL) and (solmix2 >= MJ_MINVAL), 0.0, mix)
-    mix = wp.where((solmix1 >= MJ_MINVAL) and (solmix2 < MJ_MINVAL), 1.0, mix)
-    mix = wp.where(p1 == p2, mix, wp.where(p1 > p2, 1.0, 0.0))
+    if p1 > p2:
+        mix = 1.0
+        condim = condim1
+        resolved_friction = geom_friction[worldid, g1]
+    elif p2 > p1:
+        mix = 0.0
+        condim = condim2
+        resolved_friction = geom_friction[worldid, g2]
+    else:
+        solmix1 = geom_solmix[worldid, g1]
+        solmix2 = geom_solmix[worldid, g2]
+        mix = solmix1 / (solmix1 + solmix2)
+        mix = wp.where((solmix1 < MJ_MINVAL) and (solmix2 < MJ_MINVAL), 0.5, mix)
+        mix = wp.where((solmix1 < MJ_MINVAL) and (solmix2 >= MJ_MINVAL), 0.0, mix)
+        mix = wp.where((solmix1 >= MJ_MINVAL) and (solmix2 < MJ_MINVAL), 1.0, mix)
+        condim = wp.max(condim1, condim2)
+        resolved_friction = wp.max(geom_friction[worldid, g1], geom_friction[worldid, g2])
+
+    friction = vec5(
+        resolved_friction[0],
+        resolved_friction[0],
+        resolved_friction[1],
+        resolved_friction[2],
+        resolved_friction[2],
+    )
 
     # Sum margins for consistency with thickness summing
     margin = geom_margin[worldid, g1] + geom_margin[worldid, g2]
     gap = geom_gap[worldid, g1] + geom_gap[worldid, g2]
-
-    condim1 = geom_condim[g1]
-    condim2 = geom_condim[g2]
-    condim = wp.where(p1 == p2, wp.max(condim1, condim2), wp.where(p1 > p2, condim1, condim2))
-
-    max_geom_friction = wp.max(geom_friction[worldid, g1], geom_friction[worldid, g2])
-    friction = vec5(
-        max_geom_friction[0],
-        max_geom_friction[0],
-        max_geom_friction[1],
-        max_geom_friction[2],
-        max_geom_friction[2],
-    )
 
     if geom_solref[worldid, g1].x > 0.0 and geom_solref[worldid, g2].x > 0.0:
         solref = mix * geom_solref[worldid, g1] + (1.0 - mix) * geom_solref[worldid, g2]
