@@ -69,7 +69,7 @@ def measure(scene_fn, num_worlds, num_steps=50, warmup=10):
                       max_contacts_per_world=1024,
                       max_colors=32)
     solver = newton.solvers.SolverBox3D(model, config=cfg)
-    pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=False)
+    pipeline = newton.CollisionPipeline(model, broad_phase="explicit", contact_matching=False)
     contacts = pipeline.contacts()
     dt = 1.0 / 60.0
     for _ in range(warmup):
