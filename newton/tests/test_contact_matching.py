@@ -378,6 +378,76 @@ def test_match_index_valid_after_sort(test, device):
         test.assertEqual(len(np.unique(matched)), len(matched), "Matched indices must be unique")
 
 
+def test_dynamic_body_world_transform(test, device):
+    """Two dynamic spheres (no ground plane) must produce identity match.
+
+    This exercises the ``body_q[bid]`` world-space transform path in both the
+    match and save kernels (bid != -1), which the ground-plane tests skip.
+    """
+    with wp.ScopedDevice(device):
+        builder = newton.ModelBuilder()
+        ba = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0)))
+        builder.add_shape_sphere(body=ba, radius=0.1)
+        bb = builder.add_body(xform=wp.transform(wp.vec3(0.19, 0.0, 0.0)))
+        builder.add_shape_sphere(body=bb, radius=0.1)
+
+        model = builder.finalize(device=device)
+        state = model.state()
+
+        # Verify shape0 is a dynamic body (not ground).
+        sb = model.shape_body.numpy()
+        test.assertNotEqual(sb[0], -1, "shape0 should be a dynamic body in this test")
+
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
+        contacts = pipeline.contacts()
+
+        count1 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count1, 0)
+
+        # Frame 2: identical state → identity match.
+        count2 = _collide_once(pipeline, state, contacts)
+        test.assertEqual(count1, count2)
+        match_idx = contacts.rigid_contact_match_index.numpy()[:count2]
+        np.testing.assert_array_equal(
+            match_idx,
+            np.arange(count2, dtype=np.int32),
+            err_msg="Dynamic-body stable scene must produce identity match",
+        )
+
+
+def test_box_on_plane_multiple_contacts(test, device):
+    """A box on a plane produces multiple contacts per shape pair (sub_keys 0-3).
+
+    This verifies matching works when a single shape pair generates several
+    contacts with distinct sort sub-keys, and that the identity invariant
+    holds for all of them.
+    """
+    with wp.ScopedDevice(device):
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.15)))
+        builder.add_shape_box(body=b, hx=0.1, hy=0.1, hz=0.1)
+
+        model = builder.finalize(device=device)
+        state = model.state()
+
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
+        contacts = pipeline.contacts()
+
+        count1 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count1, 1, "Box on plane should produce multiple contacts")
+
+        # Frame 2: identical state → identity match for all contacts.
+        count2 = _collide_once(pipeline, state, contacts)
+        test.assertEqual(count1, count2)
+        match_idx = contacts.rigid_contact_match_index.numpy()[:count2]
+        np.testing.assert_array_equal(
+            match_idx,
+            np.arange(count2, dtype=np.int32),
+            err_msg="Box multi-contact stable scene must produce identity match",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Register tests
 # ---------------------------------------------------------------------------
@@ -422,6 +492,12 @@ add_function_test(
 )
 add_function_test(
     TestContactMatching, "test_match_index_valid_after_sort", test_match_index_valid_after_sort, devices=devices
+)
+add_function_test(
+    TestContactMatching, "test_dynamic_body_world_transform", test_dynamic_body_world_transform, devices=devices
+)
+add_function_test(
+    TestContactMatching, "test_box_on_plane_multiple_contacts", test_box_on_plane_multiple_contacts, devices=devices
 )
 
 if __name__ == "__main__":
