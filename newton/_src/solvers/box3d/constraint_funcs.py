@@ -201,8 +201,9 @@ def solve_contact_normal(
     ms = 1.0
     isv = 0.0
 
-    if separation > 0.0:
-        # Speculative contact — always active (even during relaxation)
+    if separation > 0.005:
+        # Speculative contact — always active (even during relaxation).
+        # Small slop (5mm) prevents jitter from floating-point separation noise.
         velocity_bias = separation * inv_sub_dt
     elif use_bias != 0:
         # Penetrating — soft position correction (only during biased pass)

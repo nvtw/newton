@@ -227,8 +227,12 @@ def convert_contacts_to_box3d(
 
     r_a = wp.vec3(0.0, 0.0, 0.0)
     r_b = wp.vec3(0.0, 0.0, 0.0)
-    contact_world_a = wp.vec3(0.0, 0.0, 0.0)
-    contact_world_b = wp.vec3(0.0, 0.0, 0.0)
+    # Friction anchor world positions (using offset for friction anchor)
+    anchor_world_a = wp.vec3(0.0, 0.0, 0.0)
+    anchor_world_b = wp.vec3(0.0, 0.0, 0.0)
+    # Surface contact world positions (using point WITHOUT offset, for separation)
+    surface_world_a = wp.vec3(0.0, 0.0, 0.0)
+    surface_world_b = wp.vec3(0.0, 0.0, 0.0)
 
     if b0_global >= 0:
         q0 = body_q[b0_global]
@@ -236,11 +240,12 @@ def convert_contacts_to_box3d(
         pos0 = wp.transform_get_translation(q0)
         com0 = body_com[b0_global]
         com_world0 = pos0 + wp.quat_rotate(ori0, com0)
-        contact_world_a = pos0 + wp.quat_rotate(ori0, p0 + off0)
-        r_a = contact_world_a - com_world0
+        anchor_world_a = pos0 + wp.quat_rotate(ori0, p0 + off0)
+        surface_world_a = pos0 + wp.quat_rotate(ori0, p0)
+        r_a = anchor_world_a - com_world0
     else:
-        # Ground / static shape with no body — point is already world-space
-        contact_world_a = p0 + off0
+        anchor_world_a = p0 + off0
+        surface_world_a = p0
 
     if b1_global >= 0:
         q1 = body_q[b1_global]
@@ -248,19 +253,22 @@ def convert_contacts_to_box3d(
         pos1 = wp.transform_get_translation(q1)
         com1 = body_com[b1_global]
         com_world1 = pos1 + wp.quat_rotate(ori1, com1)
-        contact_world_b = pos1 + wp.quat_rotate(ori1, p1 + off1)
-        r_b = contact_world_b - com_world1
+        anchor_world_b = pos1 + wp.quat_rotate(ori1, p1 + off1)
+        surface_world_b = pos1 + wp.quat_rotate(ori1, p1)
+        r_b = anchor_world_b - com_world1
     else:
-        contact_world_b = p1 + off1
+        anchor_world_b = p1 + off1
+        surface_world_b = p1
 
     out_r_a[world, slot] = r_a
     out_r_b[world, slot] = r_b
 
-    # Base separation: signed distance (negative = penetrating).
-    # sep = dot(contact_world_b - contact_world_a, normal) - (margin0 + margin1)
+    # Base separation: signed distance between surfaces (negative = penetrating).
+    # Uses body-frame contact points (WITHOUT friction offsets) for geometry,
+    # then subtracts margins (effective radii) to get surface-to-surface distance.
     margin0 = rigid_contact_margin0[ci]
     margin1 = rigid_contact_margin1[ci]
-    sep = wp.dot(contact_world_b - contact_world_a, normal) - (margin0 + margin1)
+    sep = wp.dot(surface_world_b - surface_world_a, normal) - (margin0 + margin1)
     out_base_sep[world, slot] = sep
 
     # Material: geometric mean friction, max restitution

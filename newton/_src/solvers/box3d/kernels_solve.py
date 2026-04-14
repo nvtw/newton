@@ -128,8 +128,9 @@ _CONTACT_SOLVE_SNIPPET = r"""
                 if (bi >= 0) { auto dp = *wp::address(delta_pos,wid,bi); dpbx=dp[0];dpby=dp[1];dpbz=dp[2]; }
                 float sep = base_sep + (dpbx-dpax)*n[0] + (dpby-dpay)*n[1] + (dpbz-dpaz)*n[2];
 
-                if (sep > 0.f) {
-                    // Speculative: always active (even during relaxation)
+                if (sep > 0.005f) {
+                    // Speculative: always active (even during relaxation).
+                    // Small slop (5mm) prevents jitter from floating-point separation noise.
                     velocityBias = sep * inv_sub_dt;
                 } else if (use_bias > 0) {
                     // Soft position correction: only during biased pass
