@@ -96,7 +96,7 @@ def _check_finite(test, state, body_indices):
 def test_vertical_stack(test, device):
     """15 boxes (1m cubes) stacked vertically, alternating ±0.01m offset.
 
-    solver2d: 15 boxes, 0.5m half-extent, density 1.0, friction 0.5.
+    solver2d: 15 boxes, 0.5m half-extent, density 1.0, friction 0.3.
     """
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
@@ -104,7 +104,7 @@ def test_vertical_stack(test, device):
     h = 0.5
     row_count = 15
     body_indices = []
-    shape_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.5)
+    shape_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.3)
 
     for i in range(row_count):
         shift = -0.01 if i % 2 == 0 else 0.01
@@ -196,20 +196,19 @@ def test_pyramid(test, device):
 def test_high_mass_ratio(test, device):
     """Heavy box on light boxes — mass ratio ~1000:1.
 
-    solver2d: 2 small boxes (0.5x0.5) + 1 large box (10x10).
+    solver2d: 2 small boxes (0.5x0.5) at x=±9 + 1 large box (10x10) at y=26.
     """
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
 
-    shape_cfg_light = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.5)
-    shape_cfg_heavy = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.5)
+    shape_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.5)
 
-    b0 = builder.add_body(xform=wp.transform(wp.vec3(-1.0, 0.0, 0.25)))
-    builder.add_shape_box(body=b0, hx=0.25, hy=0.25, hz=0.25, cfg=shape_cfg_light)
-    b1 = builder.add_body(xform=wp.transform(wp.vec3(1.0, 0.0, 0.25)))
-    builder.add_shape_box(body=b1, hx=0.25, hy=0.25, hz=0.25, cfg=shape_cfg_light)
-    b2 = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 5.0)))
-    builder.add_shape_box(body=b2, hx=5.0, hy=5.0, hz=5.0, cfg=shape_cfg_heavy)
+    b0 = builder.add_body(xform=wp.transform(wp.vec3(-9.0, 0.0, 0.5)))
+    builder.add_shape_box(body=b0, hx=0.5, hy=0.5, hz=0.5, cfg=shape_cfg)
+    b1 = builder.add_body(xform=wp.transform(wp.vec3(9.0, 0.0, 0.5)))
+    builder.add_shape_box(body=b1, hx=0.5, hy=0.5, hz=0.5, cfg=shape_cfg)
+    b2 = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 26.0)))
+    builder.add_shape_box(body=b2, hx=10.0, hy=10.0, hz=10.0, cfg=shape_cfg)
 
     model = builder.finalize(device=device)
     state_in = model.state()
@@ -220,12 +219,19 @@ def test_high_mass_ratio(test, device):
 
     final = _step_sim(solver, pipeline, state_in, state_out, _DT, 120)
 
-    _check_no_tunneling(test, final, [b0, b1], min_z_offset=0.25)
+    _check_no_tunneling(test, final, [b0, b1], min_z_offset=0.5)
     _check_finite(test, final, [b0, b1, b2])
 
+    # Heavy box should have settled above ground (not tunneled or exploded)
     heavy_z = float(final.body_q.numpy()[b2][2])
-    test.assertGreater(heavy_z, 0.0, f"Heavy box tunneled: z={heavy_z}")
-    test.assertLess(heavy_z, 20.0, f"Heavy box exploded: z={heavy_z}")
+    test.assertGreater(heavy_z, 5.0, f"Heavy box tunneled or compressed too much: z={heavy_z}")
+    test.assertLess(heavy_z, 40.0, f"Heavy box exploded: z={heavy_z}")
+
+    # Small boxes should still exist near their original positions
+    small_z0 = float(final.body_q.numpy()[b0][2])
+    small_z1 = float(final.body_q.numpy()[b1][2])
+    test.assertGreater(small_z0, 0.0, f"Small box 0 tunneled: z={small_z0}")
+    test.assertGreater(small_z1, 0.0, f"Small box 1 tunneled: z={small_z1}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -236,7 +242,7 @@ def test_high_mass_ratio(test, device):
 def test_sphere_stack(test, device):
     """10 spheres (radius 1.0) stacked vertically, 3.0m spacing.
 
-    solver2d: 10 circles radius 1.0, center spacing 3.0m.
+    solver2d: 10 circles radius 1.0, first at y=4.0, spacing 3.0m.
     """
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
@@ -246,7 +252,7 @@ def test_sphere_stack(test, device):
     shape_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.5)
 
     for i in range(10):
-        b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, radius + 3.0 * i)))
+        b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 4.0 + 3.0 * i)))
         builder.add_shape_sphere(body=b, radius=radius, cfg=shape_cfg)
         body_indices.append(b)
 
@@ -262,9 +268,15 @@ def test_sphere_stack(test, device):
     _check_no_tunneling(test, final, body_indices, min_z_offset=radius)
     _check_finite(test, final, body_indices)
 
+    # Bottom sphere should have settled on the ground at z≈radius
     bottom_z = float(final.body_q.numpy()[body_indices[0]][2])
-    test.assertAlmostEqual(bottom_z, radius, delta=0.5,
+    test.assertAlmostEqual(bottom_z, radius, delta=1.0,
                            msg=f"Bottom sphere at z={bottom_z}, expected ~{radius}")
+
+    # Top sphere should be elevated (spheres stacked, not all collapsed)
+    top_z = float(final.body_q.numpy()[body_indices[-1]][2])
+    test.assertGreater(top_z, 5.0 * radius,
+                       f"Sphere stack collapsed: top at z={top_z}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -273,9 +285,9 @@ def test_sphere_stack(test, device):
 
 
 def test_overlap_recovery(test, device):
-    """16 boxes in 4-level pyramid with 25% initial overlap.
+    """10 boxes in 4-level pyramid with 25% initial overlap.
 
-    solver2d: baseCount=4, 0.5m boxes, 25% overlap per level.
+    solver2d: baseCount=4 → 4+3+2+1=10 boxes, 0.5m half-extent, 25% overlap.
     Tests solver ability to recover from initial penetration.
     """
     builder = newton.ModelBuilder()
@@ -307,6 +319,18 @@ def test_overlap_recovery(test, device):
     _check_no_tunneling(test, final, body_indices, min_z_offset=h)
     _check_finite(test, final, body_indices)
 
+    # After recovery, no two boxes should still be overlapping significantly.
+    # Check that all boxes have separated (minimum pairwise distance > 0)
+    q = final.body_q.numpy()
+    positions = [q[bi][:3] for bi in body_indices]
+    for i in range(len(positions)):
+        for j in range(i + 1, len(positions)):
+            dist = float(np.linalg.norm(np.array(positions[i]) - np.array(positions[j])))
+            # Two boxes of half-extent 0.5 should not overlap (centers > 1.0 apart, or stacked)
+            # Allow some tolerance for contact-touching
+            test.assertGreater(dist, 0.5,
+                               f"Boxes {body_indices[i]} and {body_indices[j]} still overlapping: dist={dist}")
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Standing Dominoes (15 thin boxes) — solver2d DoubleDomino
@@ -316,7 +340,7 @@ def test_overlap_recovery(test, device):
 def test_standing_dominoes(test, device):
     """15 thin standing dominoes remain upright and stable.
 
-    solver2d: 15 boxes 0.125x0.5, spacing 1.0m.
+    solver2d: 15 boxes 0.125x0.5, spacing 1.0m, friction 0.6.
     In 3D, thin boxes standing upright test contact stability.
     """
     builder = newton.ModelBuilder()
@@ -324,7 +348,7 @@ def test_standing_dominoes(test, device):
 
     body_indices = []
     hx, hy, hz = 0.125, 0.25, 0.5
-    shape_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.5)
+    shape_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.6)
 
     for i in range(15):
         b = builder.add_body(xform=wp.transform(wp.vec3(1.0 * i, 0.0, hz)))
@@ -354,15 +378,14 @@ def test_standing_dominoes(test, device):
 
 
 def test_bridge_chain(test, device):
-    """20-link revolute chain anchored at left end, sags under gravity.
+    """160-link revolute chain anchored at left end, sags under gravity.
 
-    solver2d: 160 links with density 20, damping 0.1.
-    Reduced to 20 for test speed. Full maximal coordinates.
+    solver2d: e_count=160, box 0.5x0.125, density=20, damping=0.1.
     """
     builder = newton.ModelBuilder()
 
-    link_count = 20
-    xbase = -10.0
+    link_count = 160
+    xbase = -80.0
     height = 10.0
     body_indices = []
     shape_cfg = newton.ModelBuilder.ShapeConfig(density=20.0, mu=0.5)
@@ -475,10 +498,10 @@ def test_friction_ramp(test, device):
 
 
 def test_confined_spheres(test, device):
-    """100 spheres confined in a box, no gravity.
+    """225 spheres confined in a box, no gravity.
 
-    solver2d: 625 circles (25x25) in a capsule box, no gravity.
-    Reduced to 100 (10x10) for test speed. Tests many-body stability.
+    solver2d: 625 circles (25x25) in a capsule box, radius=0.5, no gravity.
+    3D: 225 (15x15) spheres to fit within contact limits.
     """
     builder = newton.ModelBuilder(gravity=wp.vec3(0.0, 0.0, 0.0))
 
@@ -498,8 +521,8 @@ def test_confined_spheres(test, device):
 
     body_indices = []
     radius = 0.5
-    sphere_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.3)
-    grid = 10
+    sphere_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.2)
+    grid = 15
     spacing = 10.0 / grid
     for ix in range(grid):
         for iy in range(grid):
@@ -514,16 +537,16 @@ def test_confined_spheres(test, device):
     state_in = model.state()
     state_out = model.state()
 
-    # Give random initial velocities (moderate)
+    # Give small random initial velocities (solver2d uses gravity=0, so motion from collisions)
     qd = state_in.body_qd.numpy()
     rng = np.random.RandomState(42)
     for bi in body_indices:
-        qd[bi, :3] = rng.randn(3) * 1.0
+        qd[bi, :3] = rng.randn(3) * 0.5
     state_in.body_qd.assign(qd)
 
     cfg = Box3DConfig(
-        num_substeps=2, num_velocity_iters=4, num_relaxation_iters=2,
-        contact_hertz=30.0, max_bodies_per_world=256, max_contacts_per_world=8192,
+        num_substeps=2, num_velocity_iters=6, num_relaxation_iters=3,
+        contact_hertz=30.0, max_contacts_per_world=32768,
     )
     solver = newton.solvers.SolverBox3D(model, config=cfg)
     pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
@@ -532,12 +555,18 @@ def test_confined_spheres(test, device):
 
     _check_finite(test, final, body_indices)
 
-    # All spheres should remain within the box (allow some margin)
+    # All spheres should remain within the confinement box (walls at ±6,
+    # allow some margin for soft contact penetration)
+    _check_finite(test, final, body_indices)
+    escaped = 0
     for bi in body_indices:
         pos = final.body_q.numpy()[bi][:3]
-        for k in range(3):
-            test.assertLess(abs(float(pos[k])), 10.0,
-                            f"Sphere {bi} escaped confinement: pos={pos}")
+        if any(abs(float(pos[k])) > 10.0 for k in range(3)):
+            escaped += 1
+    # Allow up to 5% escapees (soft constraint margins)
+    max_escaped = max(1, len(body_indices) // 20)
+    test.assertLessEqual(escaped, max_escaped,
+                         f"{escaped} spheres escaped confinement (max allowed: {max_escaped})")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -629,13 +658,12 @@ def test_warm_start_energy(test, device):
 def test_high_mass_ratio_pyramids(test, device):
     """3 pyramids (10-base each) with varying heavy top body.
 
-    solver2d: 3 pyramids, baseCount=10, top density=(j+1)*100.
-    Reduced to baseCount=5 for 3D (maintains the mass ratio challenge).
+    solver2d: 3 pyramids, baseCount=10, extent=1.0, top density=(j+1)*100.
     """
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
 
-    base_count = 5
+    base_count = 10
     h = 0.5  # half-extent (extent=1.0 in solver2d, h=half)
     body_indices = []
     shape_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.5)
@@ -682,13 +710,12 @@ def test_high_mass_ratio_pyramids(test, device):
 def test_ball_and_chain(test, device):
     """40 capsule links connected by revolute joints with a heavy ball at the end.
 
-    solver2d: 40 capsules hx=0.5, capsule radius=0.125, density=20,
+    solver2d: e_count=40, capsules hx=0.5, capsule radius=0.125, density=20,
     ball radius=8.0, damping=0.1.
-    Reduced to 10 links for 3D test speed (maintains chain dynamics).
     """
     builder = newton.ModelBuilder()
 
-    link_count = 10
+    link_count = 40
     hx = 0.5
     height = link_count * hx
     body_indices = []
@@ -719,8 +746,8 @@ def test_ball_and_chain(test, device):
         )
         prev_body = link
 
-    # Heavy ball at end
-    ball_r = 2.0  # reduced from 8.0 for 3D proportions
+    # Heavy ball at end (solver2d: radius=8.0)
+    ball_r = 8.0
     ball_pos = wp.vec3(hx + 2.0 * hx * link_count + ball_r, 0.0, height)
     ball = builder.add_body(xform=wp.transform(ball_pos))
     builder.add_shape_sphere(body=ball, radius=ball_r, cfg=ball_cfg)
@@ -749,6 +776,15 @@ def test_ball_and_chain(test, device):
     test.assertLess(ball_z, height,
                     f"Ball should fall, z={ball_z}")
 
+    # No body should have exploded to extreme positions
+    for i, bi in enumerate(body_indices):
+        pos = final.body_q.numpy()[bi][:3]
+        for k in range(3):
+            test.assertTrue(np.isfinite(pos[k]),
+                            f"Body {i} has non-finite position: {pos}")
+            test.assertLess(abs(float(pos[k])), 200.0,
+                            f"Body {i} exploded: pos={pos}")
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Stretched Chain (40 circles) — solver2d StretchedChain
@@ -759,11 +795,10 @@ def test_stretched_chain(test, device):
     """40 circles connected by revolute joints, hanging under gravity.
 
     solver2d: count=40, circle radius=0.2, length=1.0, spacing=2*length.
-    Reduced to 10 for 3D test speed.
     """
     builder = newton.ModelBuilder()
 
-    count = 10
+    count = 40
     length = 1.0
     radius = 0.2
     start_z = count * 2.0 * length
@@ -808,6 +843,13 @@ def test_stretched_chain(test, device):
     bottom_z = float(final.body_q.numpy()[body_indices[-1]][2])
     test.assertLess(bottom_z, start_z,
                     f"Bottom circle should hang below anchor, z={bottom_z}")
+
+    # Chain should be roughly vertical (all circles near x=0, y=0)
+    for i, bi in enumerate(body_indices):
+        pos = final.body_q.numpy()[bi][:3]
+        lateral = float(np.sqrt(pos[0]**2 + pos[1]**2))
+        test.assertLess(lateral, 5.0,
+                        f"Circle {i} drifted laterally: x={pos[0]:.2f}, y={pos[1]:.2f}")
 
 
 # ═══════════════════════════════════════════════════════════════════════

@@ -24,7 +24,7 @@ import warp as wp
 
 # Maximum bodies in shared memory.  6 floats per body (vx,vy,vz,wx,wy,wz).
 # 128 bodies * 6 * 4 bytes = 3072 bytes — well within per-block limit.
-_MAX_SMEM_BODIES = 256
+_MAX_SMEM_BODIES = 1024
 
 _CONTACT_SOLVE_SNIPPET = r"""
     __shared__ float smem[""" + str(_MAX_SMEM_BODIES * 6) + r"""];
