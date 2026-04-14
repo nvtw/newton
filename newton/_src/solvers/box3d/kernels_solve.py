@@ -285,7 +285,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
         __syncthreads();
     }
 
-    // ═══ Store velocities back to global ═══
+    // ═══ Store velocities shared → global ═══
     for (int b = tid; b < num_bodies; b += blockDim.x) {
         float* s = smem + b * 6;
         wp::vec_t<3,float> v; v[0]=s[0];v[1]=s[1];v[2]=s[2];
@@ -293,6 +293,298 @@ _CONTACT_SOLVE_SNIPPET = r"""
         wp::vec_t<3,float> w; w[0]=s[3];w[1]=s[4];w[2]=s[5];
         *wp::address(body_ang_vel, wid, b) = w;
     }
+    __syncthreads();
+
+    // ═══ Joint solve (colored, global memory) ═══
+    #define QROT(qx,qy,qz,qw, vx,vy,vz, rx,ry,rz) { \
+        float _cx=(qy)*(vz)-(qz)*(vy); float _cy=(qz)*(vx)-(qx)*(vz); float _cz=(qx)*(vy)-(qy)*(vx); \
+        (rx)=(vx)+2.f*((qw)*_cx+(qy)*_cz-(qz)*_cy); \
+        (ry)=(vy)+2.f*((qw)*_cy+(qz)*_cx-(qx)*_cz); \
+        (rz)=(vz)+2.f*((qw)*_cz+(qx)*_cy-(qy)*_cx); }
+
+    if (num_joints > 0) {
+        for (int jc = 0; jc < max_jcolors; jc++) {
+            int jstart = *wp::address(jc_off, wid, jc);
+            int jend   = *wp::address(jc_off, wid, jc + 1);
+            if (tid < jend - jstart) {
+                int ji = jstart + tid;
+                int ja = *wp::address(j_ba, wid, ji);
+                int jbi = *wp::address(j_bb, wid, ji);
+                int jtype = *wp::address(j_type, wid, ji);
+
+                float jima=0,jimb=0;
+                float jvax=0,jvay=0,jvaz=0,jwax=0,jway=0,jwaz=0;
+                float jvbx=0,jvby=0,jvbz=0,jwbx=0,jwby=0,jwbz=0;
+                float qax=0,qay=0,qaz=0,qaw=1;
+                float qbx=0,qby=0,qbz=0,qbw=1;
+                wp::mat_t<3,3,float> jiia, jiib;
+
+                if (ja >= 0) {
+                    jima = *wp::address(inv_m, wid, ja);
+                    jiia = *wp::address(inv_I, wid, ja);
+                    auto v = *wp::address(body_vel, wid, ja); jvax=v[0]; jvay=v[1]; jvaz=v[2];
+                    auto w = *wp::address(body_ang_vel, wid, ja); jwax=w[0]; jway=w[1]; jwaz=w[2];
+                    auto q = *wp::address(body_ori, wid, ja); qax=q[0]; qay=q[1]; qaz=q[2]; qaw=q[3];
+                }
+                if (jbi >= 0) {
+                    jimb = *wp::address(inv_m, wid, jbi);
+                    jiib = *wp::address(inv_I, wid, jbi);
+                    auto v = *wp::address(body_vel, wid, jbi); jvbx=v[0]; jvby=v[1]; jvbz=v[2];
+                    auto w = *wp::address(body_ang_vel, wid, jbi); jwbx=w[0]; jwby=w[1]; jwbz=w[2];
+                    auto q = *wp::address(body_ori, wid, jbi); qbx=q[0]; qby=q[1]; qbz=q[2]; qbw=q[3];
+                }
+
+                // Compute world-space anchor offsets
+                auto la = *wp::address(j_la, wid, ji);
+                float jrax, jray, jraz;
+                QROT(qax,qay,qaz,qaw, la[0],la[1],la[2], jrax,jray,jraz);
+                auto lb = *wp::address(j_lb, wid, ji);
+                float jrbx, jrby, jrbz;
+                QROT(qbx,qby,qbz,qbw, lb[0],lb[1],lb[2], jrbx,jrby,jrbz);
+
+                // ── Point-to-point (3x3 K solve) ──
+                float cdx = (jvbx+jwby*jrbz-jwbz*jrby) - (jvax+jway*jraz-jwaz*jray);
+                float cdy = (jvby+jwbz*jrbx-jwbx*jrbz) - (jvay+jwaz*jrax-jwax*jraz);
+                float cdz = (jvbz+jwbx*jrby-jwby*jrbx) - (jvaz+jwax*jray-jway*jrax);
+
+                float jbx=0, jby=0, jbz=0, jms=1.f, jisv=0.f;
+                if (use_bias > 0) {
+                    auto pA = *wp::address(body_pos, wid, ja >= 0 ? ja : 0);
+                    auto pB = *wp::address(body_pos, wid, jbi >= 0 ? jbi : 0);
+                    float sx = (ja >= 0 ? pA[0] : 0.f) + jrax;
+                    float sy = (ja >= 0 ? pA[1] : 0.f) + jray;
+                    float sz = (ja >= 0 ? pA[2] : 0.f) + jraz;
+                    float ex = (jbi >= 0 ? pB[0] : 0.f) + jrbx;
+                    float ey = (jbi >= 0 ? pB[1] : 0.f) + jrby;
+                    float ez = (jbi >= 0 ? pB[2] : 0.f) + jrbz;
+                    jbx = jbias_rate * (ex - sx);
+                    jby = jbias_rate * (ey - sy);
+                    jbz = jbias_rate * (ez - sz);
+                    jms = jmass_scale; jisv = jimpulse_scale;
+                }
+
+                // Build K (using mat33 inertia, [r]^T I^-1 [r] pattern)
+                float rA2 = jrax*jrax+jray*jray+jraz*jraz;
+                float rB2 = jrbx*jrbx+jrby*jrby+jrbz*jrbz;
+
+                // K_rot_A = [rA]_x^T @ IA^-1 @ [rA]_x (computed explicitly)
+                // Diagonal: K_rot_A[i][i] = sum_j(IA^-1[i][j] * rA_perp_j) where rA_perp uses rA2 - rA[i]^2
+                // Off-diagonal similarly. For simplicity, use the identity:
+                // K = (mA+mB)*I + [rA]^T IA^-1 [rA] + [rB]^T IB^-1 [rB]
+                // [r]^T I^-1 [r] entries:
+                // (i,j) = sum_k sum_l eps_ikm * I^-1_kl * eps_jln * r_m * r_n
+                // This simplifies to: K_rot[i][j] = I^-1 . (r^2 delta_ij - r_i r_j) trace trick
+
+                float d = jima + jimb;
+                // For each body: K_rot = I^-1 * (r^2 * I_3 - r * r^T)
+                // K_rot[i][j] = sum_k I^-1[i][k] * (r^2 * delta[k][j] - r[k]*r[j])
+
+                float K00 = d, K01 = 0, K02 = 0, K11 = d, K12 = 0, K22 = d;
+                if (ja >= 0) {
+                    for (int i = 0; i < 3; i++) {
+                        float ri[3] = {jrax, jray, jraz};
+                        for (int j = i; j < 3; j++) {
+                            float rr = (i == j) ? rA2 - ri[i]*ri[j] : -ri[i]*ri[j];
+                            float val = 0;
+                            for (int k = 0; k < 3; k++) {
+                                float rk_term = (k == j) ? rA2 - ri[k]*ri[j] : -ri[k]*ri[j];
+                                val += jiia.data[i][k] * rk_term;
+                            }
+                            if (i==0 && j==0) K00 += val;
+                            else if (i==0 && j==1) K01 += val;
+                            else if (i==0 && j==2) K02 += val;
+                            else if (i==1 && j==1) K11 += val;
+                            else if (i==1 && j==2) K12 += val;
+                            else if (i==2 && j==2) K22 += val;
+                        }
+                    }
+                }
+                if (jbi >= 0) {
+                    for (int i = 0; i < 3; i++) {
+                        float ri[3] = {jrbx, jrby, jrbz};
+                        for (int j = i; j < 3; j++) {
+                            float val = 0;
+                            for (int k = 0; k < 3; k++) {
+                                float rk_term = (k == j) ? rB2 - ri[k]*ri[j] : -ri[k]*ri[j];
+                                val += jiib.data[i][k] * rk_term;
+                            }
+                            if (i==0 && j==0) K00 += val;
+                            else if (i==0 && j==1) K01 += val;
+                            else if (i==0 && j==2) K02 += val;
+                            else if (i==1 && j==1) K11 += val;
+                            else if (i==1 && j==2) K12 += val;
+                            else if (i==2 && j==2) K22 += val;
+                        }
+                    }
+                }
+
+                float rx = cdx+jbx, ry = cdy+jby, rz = cdz+jbz;
+                float det = K00*(K11*K22-K12*K12) - K01*(K01*K22-K12*K02) + K02*(K01*K12-K11*K02);
+                if (fabsf(det) > 1e-12f) {
+                    float id = 1.f/det;
+                    float I00=(K11*K22-K12*K12)*id, I01=(K02*K12-K01*K22)*id, I02=(K01*K12-K02*K11)*id;
+                    float I11=(K00*K22-K02*K02)*id, I12=(K01*K02-K00*K12)*id;
+                    float I22=(K00*K11-K01*K01)*id;
+                    float svx=I00*rx+I01*ry+I02*rz, svy=I01*rx+I11*ry+I12*rz, svz=I02*rx+I12*ry+I22*rz;
+
+                    auto li = *wp::address(j_li, wid, ji);
+                    float ix = -jms*svx - jisv*li[0];
+                    float iy = -jms*svy - jisv*li[1];
+                    float iz = -jms*svz - jisv*li[2];
+                    wp::vec_t<3,float> nli; nli[0]=li[0]+ix; nli[1]=li[1]+iy; nli[2]=li[2]+iz;
+                    *wp::address(j_li, wid, ji) = nli;
+
+                    // Apply linear impulse
+                    if (ja >= 0) {
+                        jvax -= jima*ix; jvay -= jima*iy; jvaz -= jima*iz;
+                        float cx=jray*iz-jraz*iy, cy=jraz*ix-jrax*iz, cz=jrax*iy-jray*ix;
+                        jwax -= jiia.data[0][0]*cx+jiia.data[0][1]*cy+jiia.data[0][2]*cz;
+                        jway -= jiia.data[1][0]*cx+jiia.data[1][1]*cy+jiia.data[1][2]*cz;
+                        jwaz -= jiia.data[2][0]*cx+jiia.data[2][1]*cy+jiia.data[2][2]*cz;
+                    }
+                    if (jbi >= 0) {
+                        jvbx += jimb*ix; jvby += jimb*iy; jvbz += jimb*iz;
+                        float cx=jrby*iz-jrbz*iy, cy=jrbz*ix-jrbx*iz, cz=jrbx*iy-jrby*ix;
+                        jwbx += jiib.data[0][0]*cx+jiib.data[0][1]*cy+jiib.data[0][2]*cz;
+                        jwby += jiib.data[1][0]*cx+jiib.data[1][1]*cy+jiib.data[1][2]*cz;
+                        jwbz += jiib.data[2][0]*cx+jiib.data[2][1]*cy+jiib.data[2][2]*cz;
+                    }
+                }
+
+                // ── Angular constraint (REVOLUTE: 2 DOF ⊥ hinge, FIXED: 3 DOF) ──
+                if (jtype == 1 || jtype == 3) {  // REVOLUTE=1 or FIXED=3
+                    auto ha = *wp::address(j_ha, wid, ji);
+                    float whx, why, whz;
+                    // Rotate hinge axis to world frame (use child body orientation)
+                    QROT(qbx,qby,qbz,qbw, ha[0],ha[1],ha[2], whx,why,whz);
+
+                    auto ai = *wp::address(j_ai, wid, ji);
+                    float dwx = jwbx-jwax, dwy = jwby-jway, dwz = jwbz-jwaz;
+
+                    // Combined angular inertia
+                    wp::mat_t<3,3,float> k_ang;
+                    for (int r=0; r<3; r++) for (int c=0; c<3; c++)
+                        k_ang.data[r][c] = (ja>=0 ? jiia.data[r][c] : 0) + (jbi>=0 ? jiib.data[r][c] : 0);
+
+                    if (jtype == 1) {
+                        // REVOLUTE: constrain 2 DOF perpendicular to hinge
+                        float b1x,b1y,b1z;
+                        if (fabsf(why) < 0.9f) { b1x=whz; b1y=0; b1z=-whx; }
+                        else { b1x=0; b1y=-whz; b1z=why; }
+                        float bl = sqrtf(b1x*b1x+b1y*b1y+b1z*b1z);
+                        if (bl > 1e-8f) { float iv=1.f/bl; b1x*=iv; b1y*=iv; b1z*=iv; }
+                        float b2x=why*b1z-whz*b1y, b2y=whz*b1x-whx*b1z, b2z=whx*b1y-why*b1x;
+
+                        // Effective angular mass along each basis
+                        float kb1x=k_ang.data[0][0]*b1x+k_ang.data[0][1]*b1y+k_ang.data[0][2]*b1z;
+                        float kb1y=k_ang.data[1][0]*b1x+k_ang.data[1][1]*b1y+k_ang.data[1][2]*b1z;
+                        float kb1z=k_ang.data[2][0]*b1x+k_ang.data[2][1]*b1y+k_ang.data[2][2]*b1z;
+                        float k1 = b1x*kb1x+b1y*kb1y+b1z*kb1z;
+                        float kb2x=k_ang.data[0][0]*b2x+k_ang.data[0][1]*b2y+k_ang.data[0][2]*b2z;
+                        float kb2y=k_ang.data[1][0]*b2x+k_ang.data[1][1]*b2y+k_ang.data[1][2]*b2z;
+                        float kb2z=k_ang.data[2][0]*b2x+k_ang.data[2][1]*b2y+k_ang.data[2][2]*b2z;
+                        float k2 = b2x*kb2x+b2y*kb2y+b2z*kb2z;
+
+                        float am1 = k1 > 0 ? 1.f/k1 : 0;
+                        float am2 = k2 > 0 ? 1.f/k2 : 0;
+
+                        float i1 = -jms*am1*(dwx*b1x+dwy*b1y+dwz*b1z) - jisv*ai[0];
+                        float i2 = -jms*am2*(dwx*b2x+dwy*b2y+dwz*b2z) - jisv*ai[1];
+                        float apx=i1*b1x+i2*b2x, apy=i1*b1y+i2*b2y, apz=i1*b1z+i2*b2z;
+
+                        if (ja >= 0) {
+                            jwax -= jiia.data[0][0]*apx+jiia.data[0][1]*apy+jiia.data[0][2]*apz;
+                            jway -= jiia.data[1][0]*apx+jiia.data[1][1]*apy+jiia.data[1][2]*apz;
+                            jwaz -= jiia.data[2][0]*apx+jiia.data[2][1]*apy+jiia.data[2][2]*apz;
+                        }
+                        if (jbi >= 0) {
+                            jwbx += jiib.data[0][0]*apx+jiib.data[0][1]*apy+jiib.data[0][2]*apz;
+                            jwby += jiib.data[1][0]*apx+jiib.data[1][1]*apy+jiib.data[1][2]*apz;
+                            jwbz += jiib.data[2][0]*apx+jiib.data[2][1]*apy+jiib.data[2][2]*apz;
+                        }
+
+                        // Motor on hinge axis
+                        float mspd = *wp::address(j_ms_arr, wid, ji);
+                        float mmt = *wp::address(j_mmt, wid, ji);
+                        float mi_val = ai[2];
+                        if (mmt > 0) {
+                            float kh_x=k_ang.data[0][0]*whx+k_ang.data[0][1]*why+k_ang.data[0][2]*whz;
+                            float kh_y=k_ang.data[1][0]*whx+k_ang.data[1][1]*why+k_ang.data[1][2]*whz;
+                            float kh_z=k_ang.data[2][0]*whx+k_ang.data[2][1]*why+k_ang.data[2][2]*whz;
+                            float kh = whx*kh_x+why*kh_y+whz*kh_z;
+                            if (kh > 0) {
+                                float am = 1.f/kh;
+                                float cdm = (jwbx-jwax)*whx+(jwby-jway)*why+(jwbz-jwaz)*whz - mspd;
+                                float mimp = -am*cdm;
+                                float max_i = sub_dt*mmt;
+                                float new_mi = fminf(fmaxf(mi_val+mimp,-max_i),max_i);
+                                mimp = new_mi - mi_val; mi_val = new_mi;
+                                if (ja >= 0) {
+                                    jwax -= jiia.data[0][0]*mimp*whx+jiia.data[0][1]*mimp*why+jiia.data[0][2]*mimp*whz;
+                                    jway -= jiia.data[1][0]*mimp*whx+jiia.data[1][1]*mimp*why+jiia.data[1][2]*mimp*whz;
+                                    jwaz -= jiia.data[2][0]*mimp*whx+jiia.data[2][1]*mimp*why+jiia.data[2][2]*mimp*whz;
+                                }
+                                if (jbi >= 0) {
+                                    jwbx += jiib.data[0][0]*mimp*whx+jiib.data[0][1]*mimp*why+jiib.data[0][2]*mimp*whz;
+                                    jwby += jiib.data[1][0]*mimp*whx+jiib.data[1][1]*mimp*why+jiib.data[1][2]*mimp*whz;
+                                    jwbz += jiib.data[2][0]*mimp*whx+jiib.data[2][1]*mimp*why+jiib.data[2][2]*mimp*whz;
+                                }
+                            }
+                        }
+                        wp::vec_t<3,float> nai; nai[0]=ai[0]+i1; nai[1]=ai[1]+i2; nai[2]=mi_val;
+                        *wp::address(j_ai, wid, ji) = nai;
+
+                    } else {
+                        // FIXED: constrain all 3 angular DOF
+                        // Solve k_ang @ impulse = -(jms * dw) - jisv * accumulated
+                        float r0 = jms*dwx, r1 = jms*dwy, r2 = jms*dwz;
+                        float det_a = k_ang.data[0][0]*(k_ang.data[1][1]*k_ang.data[2][2]-k_ang.data[1][2]*k_ang.data[1][2])
+                                    - k_ang.data[0][1]*(k_ang.data[0][1]*k_ang.data[2][2]-k_ang.data[1][2]*k_ang.data[0][2])
+                                    + k_ang.data[0][2]*(k_ang.data[0][1]*k_ang.data[1][2]-k_ang.data[1][1]*k_ang.data[0][2]);
+                        if (fabsf(det_a) > 1e-12f) {
+                            float ida = 1.f/det_a;
+                            float a00=(k_ang.data[1][1]*k_ang.data[2][2]-k_ang.data[1][2]*k_ang.data[1][2])*ida;
+                            float a01=(k_ang.data[0][2]*k_ang.data[1][2]-k_ang.data[0][1]*k_ang.data[2][2])*ida;
+                            float a02=(k_ang.data[0][1]*k_ang.data[1][2]-k_ang.data[0][2]*k_ang.data[1][1])*ida;
+                            float a11=(k_ang.data[0][0]*k_ang.data[2][2]-k_ang.data[0][2]*k_ang.data[0][2])*ida;
+                            float a12=(k_ang.data[0][1]*k_ang.data[0][2]-k_ang.data[0][0]*k_ang.data[1][2])*ida;
+                            float a22=(k_ang.data[0][0]*k_ang.data[1][1]-k_ang.data[0][1]*k_ang.data[0][1])*ida;
+                            float sx = a00*r0+a01*r1+a02*r2;
+                            float sy = a01*r0+a11*r1+a12*r2;
+                            float sz = a02*r0+a12*r1+a22*r2;
+                            float ix = -sx - jisv*ai[0];
+                            float iy = -sy - jisv*ai[1];
+                            float iz = -sz - jisv*ai[2];
+                            if (ja >= 0) {
+                                jwax -= jiia.data[0][0]*ix+jiia.data[0][1]*iy+jiia.data[0][2]*iz;
+                                jway -= jiia.data[1][0]*ix+jiia.data[1][1]*iy+jiia.data[1][2]*iz;
+                                jwaz -= jiia.data[2][0]*ix+jiia.data[2][1]*iy+jiia.data[2][2]*iz;
+                            }
+                            if (jbi >= 0) {
+                                jwbx += jiib.data[0][0]*ix+jiib.data[0][1]*iy+jiib.data[0][2]*iz;
+                                jwby += jiib.data[1][0]*ix+jiib.data[1][1]*iy+jiib.data[1][2]*iz;
+                                jwbz += jiib.data[2][0]*ix+jiib.data[2][1]*iy+jiib.data[2][2]*iz;
+                            }
+                            wp::vec_t<3,float> nai; nai[0]=ai[0]+ix; nai[1]=ai[1]+iy; nai[2]=ai[2]+iz;
+                            *wp::address(j_ai, wid, ji) = nai;
+                        }
+                    }
+                }
+
+                // Write back velocities
+                if (ja >= 0) {
+                    wp::vec_t<3,float> v; v[0]=jvax;v[1]=jvay;v[2]=jvaz; *wp::address(body_vel,wid,ja)=v;
+                    wp::vec_t<3,float> w; w[0]=jwax;w[1]=jway;w[2]=jwaz; *wp::address(body_ang_vel,wid,ja)=w;
+                }
+                if (jbi >= 0) {
+                    wp::vec_t<3,float> v; v[0]=jvbx;v[1]=jvby;v[2]=jvbz; *wp::address(body_vel,wid,jbi)=v;
+                    wp::vec_t<3,float> w; w[0]=jwbx;w[1]=jwby;w[2]=jwbz; *wp::address(body_ang_vel,wid,jbi)=w;
+                }
+            }
+            __syncthreads();
+        }
+    }
+    #undef QROT
 """
 
 
@@ -337,6 +629,26 @@ def _contact_solve_native(
     static_is: float,
     contact_speed: float,
     rest_thresh: float,
+    # Joint parameters
+    body_pos: wp.array2d(dtype=wp.vec3),
+    body_ori: wp.array2d(dtype=wp.quat),
+    j_ba: wp.array2d(dtype=wp.int32),
+    j_bb: wp.array2d(dtype=wp.int32),
+    j_type: wp.array2d(dtype=wp.int32),
+    j_la: wp.array2d(dtype=wp.vec3),
+    j_lb: wp.array2d(dtype=wp.vec3),
+    j_ha: wp.array2d(dtype=wp.vec3),
+    j_li: wp.array2d(dtype=wp.vec3),
+    j_ai: wp.array2d(dtype=wp.vec3),
+    j_ms_arr: wp.array2d(dtype=float),
+    j_mmt: wp.array2d(dtype=float),
+    jc_off: wp.array2d(dtype=wp.int32),
+    num_joints: int,
+    max_jcolors: int,
+    jbias_rate: float,
+    jmass_scale: float,
+    jimpulse_scale: float,
+    sub_dt: float,
     wid: int,
     tid: int,
 ):
@@ -384,8 +696,28 @@ def contact_solve_kernel(
     static_is: float,
     contact_speed: float,
     rest_thresh: float,
+    # Joint parameters
+    body_pos: wp.array2d(dtype=wp.vec3),
+    body_ori: wp.array2d(dtype=wp.quat),
+    j_ba: wp.array2d(dtype=wp.int32),
+    j_bb: wp.array2d(dtype=wp.int32),
+    j_type: wp.array2d(dtype=wp.int32),
+    j_la: wp.array2d(dtype=wp.vec3),
+    j_lb: wp.array2d(dtype=wp.vec3),
+    j_ha: wp.array2d(dtype=wp.vec3),
+    j_li: wp.array2d(dtype=wp.vec3),
+    j_ai: wp.array2d(dtype=wp.vec3),
+    j_ms_arr: wp.array2d(dtype=float),
+    j_mmt: wp.array2d(dtype=float),
+    jc_off: wp.array2d(dtype=wp.int32),
+    num_joints: int,
+    max_jcolors: int,
+    jbias_rate: float,
+    jmass_scale: float,
+    jimpulse_scale: float,
+    sub_dt_val: float,
 ):
-    """Fused contact solve: shared-memory colored Gauss-Seidel.
+    """Fused contact + joint solve: shared-memory colored Gauss-Seidel.
 
     Launched with ``wp.launch_tiled(dim=[num_worlds], block_dim=block_dim)``.
     """
@@ -401,5 +733,10 @@ def contact_solve_kernel(
         inv_sub_dt, bias_rate, mass_scale, impulse_scale,
         static_br, static_ms, static_is,
         contact_speed, rest_thresh,
+        body_pos, body_ori,
+        j_ba, j_bb, j_type, j_la, j_lb, j_ha, j_li, j_ai,
+        j_ms_arr, j_mmt, jc_off,
+        num_joints, max_jcolors,
+        jbias_rate, jmass_scale, jimpulse_scale, sub_dt_val,
         wid, tid,
     )

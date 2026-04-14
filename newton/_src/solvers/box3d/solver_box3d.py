@@ -72,15 +72,36 @@ class SolverBox3D(SolverBase):
         # Allocate solver buffers
         self._buf = SolverBuffers(self._num_worlds, self._config, model.device)
 
-        # Pre-color joints (static topology)
+        # Pre-color joints and convert static joint data
         self._color_joints()
-
-        # Convert static joint data
-        self._joints_converted = False
+        self._convert_joints()
 
     # ──────────────────────────────────────────────────────────────────
     # Joint coloring (CPU, once at construction / model change)
     # ──────────────────────────────────────────────────────────────────
+
+    def _get_joint_ranges(self):
+        """Get (start, end) ranges per world, including global joints in world 0."""
+        model = self.model
+        jws = model.joint_world_start.numpy()
+        # Global joints: indices 0..jws[0]-1 (before first world)
+        # and jws[-2]..jws[-1]-1 (after last world).
+        # We merge all global joints into world 0.
+        ranges = []
+        for w in range(self._num_worlds):
+            j_start = int(jws[w])
+            j_end = int(jws[w + 1])
+            ranges.append((j_start, j_end))
+        # Add global prefix and suffix to world 0
+        global_prefix_end = int(jws[0])
+        global_suffix_start = int(jws[-2])
+        global_suffix_end = int(jws[-1])
+        # Collect all joint indices for world 0
+        w0_indices = list(range(0, global_prefix_end))
+        w0_start, w0_end = ranges[0] if ranges else (0, 0)
+        w0_indices.extend(range(w0_start, w0_end))
+        w0_indices.extend(range(global_suffix_start, global_suffix_end))
+        return w0_indices, ranges
 
     def _color_joints(self):
         """Run greedy graph coloring on joints and upload color order."""
@@ -89,71 +110,118 @@ class SolverBox3D(SolverBase):
             self._num_joint_colors = 0
             return
 
-        jws = model.joint_world_start.numpy()
-        bws = model.body_world_start.numpy()
-
         j_parent_np = model.joint_parent.numpy()
         j_child_np = model.joint_child.numpy()
+        body_world_np = model.body_world.numpy()
+        bws = model.body_world_start.numpy()
 
-        # Color each world's joints independently
-        max_colors = 0
-        for w in range(self._num_worlds):
-            j_start = int(jws[w])
-            j_end = int(jws[w + 1])
-            nj = j_end - j_start
-            if nj == 0:
-                continue
+        w0_indices, _ = self._get_joint_ranges()
 
-            b_start = int(bws[w])
-            b_end = int(bws[w + 1])
-            nb = b_end - b_start
-
-            # Local body indices
-            parent_local = np.where(
-                j_parent_np[j_start:j_end] >= 0,
-                j_parent_np[j_start:j_end] - b_start,
-                -1,
-            )
-            child_local = np.where(
-                j_child_np[j_start:j_end] >= 0,
-                j_child_np[j_start:j_end] - b_start,
-                -1,
-            )
-
-            order, offsets, nc = color_joints_cpu(parent_local, child_local, nj, nb)
-            if nc > max_colors:
-                max_colors = nc
-
-            # Upload color order for this world
-            order_2d = np.zeros(self._config.max_joints_per_world, dtype=np.int32)
-            order_2d[:nj] = order
-            self._buf.joint_color_offsets.numpy()[w, : nc + 1] = offsets
-            # Pad remaining offsets
-            for k in range(nc + 1, self._config.max_colors + 1):
-                self._buf.joint_color_offsets.numpy()[w, k] = int(offsets[-1])
-
-            self._buf.joint_count.numpy()[w] = nj
-
-        self._num_joint_colors = max_colors
-
-        # Sync to device
-        wp.synchronize_device(self.device)
-
-    def _convert_joints(self):
-        """Convert Newton joint data to Box3D format (once, or after topology change)."""
-        model = self.model
-        if model.joint_count == 0:
-            self._joints_converted = True
+        # For now, process all joints as world 0 (single-world case)
+        # Multi-world support can be added later
+        nj = len(w0_indices)
+        if nj == 0:
+            self._num_joint_colors = 0
             return
 
-        # For now, joints are converted via a kernel.
-        # The color_order mapping is already in joint_color_offsets.
-        # We need to build the color_order 2D array from the CPU coloring.
-        # This is a simplification — we store identity order for now since
-        # joint_color_offsets already provides the color structure.
+        nb = model.body_count
 
-        # TODO: launch convert_joints_to_box3d kernel
-        self._joints_converted = True
+        # Compute local body indices
+        parent_local = np.zeros(nj, dtype=np.int32)
+        child_local = np.zeros(nj, dtype=np.int32)
+        for i, gj in enumerate(w0_indices):
+            pg = j_parent_np[gj]
+            cg = j_child_np[gj]
+            # Global bodies use their global index as local index
+            parent_local[i] = pg if pg >= 0 else -1
+            child_local[i] = cg if cg >= 0 else -1
+
+        order, offsets, nc = color_joints_cpu(parent_local, child_local, nj, nb)
+
+        # Upload to buffers
+        buf = self._buf
+        jc_off_np = buf.joint_color_offsets.numpy()
+        jc_off_np[0, : nc + 1] = offsets
+        for k in range(nc + 1, self._config.max_colors + 1):
+            jc_off_np[0, k] = int(offsets[-1])
+        buf.joint_color_offsets.assign(jc_off_np)
+        jcount_np = buf.joint_count.numpy()
+        jcount_np[0] = nj
+        buf.joint_count.assign(jcount_np)
+
+        self._num_joint_colors = nc
+        self._joint_color_order = order
+        self._joint_global_indices = np.array(w0_indices, dtype=np.int32)
+
+    def _convert_joints(self):
+        """Convert Newton joint data to Box3D 2-D format (CPU, once)."""
+        model = self.model
+        buf = self._buf
+        if model.joint_count == 0:
+            return
+
+        j_type_np = model.joint_type.numpy()
+        j_parent_np = model.joint_parent.numpy()
+        j_child_np = model.joint_child.numpy()
+        j_X_p_np = model.joint_X_p.numpy()
+        j_X_c_np = model.joint_X_c.numpy()
+        j_axis_np = model.joint_axis.numpy()
+        j_qd_start_np = model.joint_qd_start.numpy()
+        body_com_np = model.body_com.numpy()
+
+        order = self._joint_color_order
+        global_indices = self._joint_global_indices
+        nj = len(global_indices)
+
+        b_body_a = buf.j_body_a.numpy()
+        b_body_b = buf.j_body_b.numpy()
+        b_type = buf.j_type.numpy()
+        b_la = buf.j_local_anchor_a.numpy()
+        b_lb = buf.j_local_anchor_b.numpy()
+        b_ha = buf.j_hinge_axis_local.numpy()
+
+        for src_j in range(nj):
+            dst_j = int(order[src_j])
+            gj = int(global_indices[src_j])
+
+            jtype = int(j_type_np[gj])
+            # Skip FREE joints (type 4) — they don't constrain anything
+            if jtype == 4:
+                b_type[0, dst_j] = 0  # mark as inactive (type 0 = PRISMATIC, unused)
+                b_body_a[0, dst_j] = -1
+                b_body_b[0, dst_j] = -1
+                continue
+
+            pg = int(j_parent_np[gj])
+            cg = int(j_child_np[gj])
+            b_body_a[0, dst_j] = pg if pg >= 0 else -1
+            b_body_b[0, dst_j] = cg if cg >= 0 else -1
+            b_type[0, dst_j] = jtype
+
+            # Anchor translations from joint transforms (first 3 elements)
+            # Adjust for COM offset: anchor_in_com_frame = anchor_in_body_frame - body_com
+            anchor_a = j_X_p_np[gj, :3].copy()
+            anchor_b = j_X_c_np[gj, :3].copy()
+            if pg >= 0:
+                anchor_a -= body_com_np[pg]
+            if cg >= 0:
+                anchor_b -= body_com_np[cg]
+            b_la[0, dst_j] = anchor_a
+            b_lb[0, dst_j] = anchor_b
+
+            # Hinge axis from joint_axis array
+            qd_start = int(j_qd_start_np[gj])
+            if jtype == 1:  # REVOLUTE — single axis
+                b_ha[0, dst_j] = j_axis_np[qd_start, :3]
+            else:
+                b_ha[0, dst_j] = [0, 0, 1]  # default Z for non-revolute
+
+        buf.j_body_a.assign(b_body_a)
+        buf.j_body_b.assign(b_body_b)
+        buf.j_type.assign(b_type)
+        buf.j_local_anchor_a.assign(b_la)
+        buf.j_local_anchor_b.assign(b_lb)
+        buf.j_hinge_axis_local.assign(b_ha)
 
     # ──────────────────────────────────────────────────────────────────
     # Main step
@@ -184,6 +252,10 @@ class SolverBox3D(SolverBase):
             cfg.contact_damping_ratio,
             sub_dt,
         )
+        soft_joint = compute_softness(cfg.joint_hertz, cfg.joint_damping_ratio, sub_dt)
+
+        num_joints = model.joint_count
+        num_joint_colors = self._num_joint_colors
 
         gravity_np = model.gravity.numpy().flatten()[:3]
         gravity_vec = wp.vec3(float(gravity_np[0]), float(gravity_np[1]), float(gravity_np[2]))
@@ -327,38 +399,48 @@ class SolverBox3D(SolverBase):
                 device=device,
             )
 
-            # 4b. Biased contact solve (+ warm start on first substep)
-            if has_contacts:
-                for _ in range(cfg.num_velocity_iters):
-                    wp.launch_tiled(
-                        contact_solve_kernel,
-                        dim=[W],
-                        inputs=[
-                            buf.body_vel, buf.body_ang_vel,
-                            buf.body_inv_mass, buf.body_inv_inertia,
-                            buf.body_delta_pos,
-                            buf.c_body_a, buf.c_body_b,
-                            buf.c_normal, buf.c_tangent1, buf.c_tangent2,
-                            buf.c_r_a, buf.c_r_b, buf.c_base_sep,
-                            buf.c_normal_mass, buf.c_tangent1_mass, buf.c_tangent2_mass,
-                            buf.c_friction, buf.c_restitution, buf.c_rel_vel_normal,
-                            buf.c_normal_impulse, buf.c_friction1_impulse,
-                            buf.c_friction2_impulse, buf.c_total_normal_impulse,
-                            buf.c_is_static,
-                            buf.color_offsets,
-                            max_bodies, cfg.max_colors,
-                            1,  # use_bias
-                            1 if is_first else 0,  # warm_start
-                            0,  # no restitution yet
-                            inv_sub_dt,
-                            soft.bias_rate, soft.mass_scale, soft.impulse_scale,
-                            soft_static.bias_rate, soft_static.mass_scale,
-                            soft_static.impulse_scale,
-                            cfg.contact_speed, cfg.restitution_threshold,
-                        ],
-                        block_dim=cfg.block_dim,
-                        device=device,
-                    )
+            # 4b. Biased contact+joint solve (+ warm start on first substep)
+            for _ in range(cfg.num_velocity_iters):
+                wp.launch_tiled(
+                    contact_solve_kernel,
+                    dim=[W],
+                    inputs=[
+                        buf.body_vel, buf.body_ang_vel,
+                        buf.body_inv_mass, buf.body_inv_inertia,
+                        buf.body_delta_pos,
+                        buf.c_body_a, buf.c_body_b,
+                        buf.c_normal, buf.c_tangent1, buf.c_tangent2,
+                        buf.c_r_a, buf.c_r_b, buf.c_base_sep,
+                        buf.c_normal_mass, buf.c_tangent1_mass, buf.c_tangent2_mass,
+                        buf.c_friction, buf.c_restitution, buf.c_rel_vel_normal,
+                        buf.c_normal_impulse, buf.c_friction1_impulse,
+                        buf.c_friction2_impulse, buf.c_total_normal_impulse,
+                        buf.c_is_static,
+                        buf.color_offsets,
+                        max_bodies, cfg.max_colors,
+                        1,  # use_bias
+                        1 if is_first else 0,  # warm_start
+                        0,  # no restitution yet
+                        inv_sub_dt,
+                        soft.bias_rate, soft.mass_scale, soft.impulse_scale,
+                        soft_static.bias_rate, soft_static.mass_scale,
+                        soft_static.impulse_scale,
+                        cfg.contact_speed, cfg.restitution_threshold,
+                        # Joint parameters
+                        buf.body_pos, buf.body_ori,
+                        buf.j_body_a, buf.j_body_b, buf.j_type,
+                        buf.j_local_anchor_a, buf.j_local_anchor_b,
+                        buf.j_hinge_axis_local,
+                        buf.j_linear_impulse, buf.j_angular_impulse,
+                        buf.j_motor_speed, buf.j_max_motor_torque,
+                        buf.joint_color_offsets,
+                        num_joints, num_joint_colors,
+                        soft_joint.bias_rate, soft_joint.mass_scale,
+                        soft_joint.impulse_scale, sub_dt,
+                    ],
+                    block_dim=cfg.block_dim,
+                    device=device,
+                )
 
             # 4c. Integrate positions
             wp.launch(
@@ -372,38 +454,48 @@ class SolverBox3D(SolverBase):
                 device=device,
             )
 
-            # 4d. Relaxation contact solve (+ restitution on last substep)
-            if has_contacts:
-                for _ in range(cfg.num_relaxation_iters):
-                    wp.launch_tiled(
-                        contact_solve_kernel,
-                        dim=[W],
-                        inputs=[
-                            buf.body_vel, buf.body_ang_vel,
-                            buf.body_inv_mass, buf.body_inv_inertia,
-                            buf.body_delta_pos,
-                            buf.c_body_a, buf.c_body_b,
-                            buf.c_normal, buf.c_tangent1, buf.c_tangent2,
-                            buf.c_r_a, buf.c_r_b, buf.c_base_sep,
-                            buf.c_normal_mass, buf.c_tangent1_mass, buf.c_tangent2_mass,
-                            buf.c_friction, buf.c_restitution, buf.c_rel_vel_normal,
-                            buf.c_normal_impulse, buf.c_friction1_impulse,
-                            buf.c_friction2_impulse, buf.c_total_normal_impulse,
-                            buf.c_is_static,
-                            buf.color_offsets,
-                            max_bodies, cfg.max_colors,
-                            0,  # no bias (relaxation)
-                            0,  # no warm start
-                            1 if is_last else 0,  # restitution on last substep
-                            inv_sub_dt,
-                            soft.bias_rate, soft.mass_scale, soft.impulse_scale,
-                            soft_static.bias_rate, soft_static.mass_scale,
-                            soft_static.impulse_scale,
-                            cfg.contact_speed, cfg.restitution_threshold,
-                        ],
-                        block_dim=cfg.block_dim,
-                        device=device,
-                    )
+            # 4d. Relaxation contact+joint solve (+ restitution on last substep)
+            for _ in range(cfg.num_relaxation_iters):
+                wp.launch_tiled(
+                    contact_solve_kernel,
+                    dim=[W],
+                    inputs=[
+                        buf.body_vel, buf.body_ang_vel,
+                        buf.body_inv_mass, buf.body_inv_inertia,
+                        buf.body_delta_pos,
+                        buf.c_body_a, buf.c_body_b,
+                        buf.c_normal, buf.c_tangent1, buf.c_tangent2,
+                        buf.c_r_a, buf.c_r_b, buf.c_base_sep,
+                        buf.c_normal_mass, buf.c_tangent1_mass, buf.c_tangent2_mass,
+                        buf.c_friction, buf.c_restitution, buf.c_rel_vel_normal,
+                        buf.c_normal_impulse, buf.c_friction1_impulse,
+                        buf.c_friction2_impulse, buf.c_total_normal_impulse,
+                        buf.c_is_static,
+                        buf.color_offsets,
+                        max_bodies, cfg.max_colors,
+                        0,  # no bias (relaxation)
+                        0,  # no warm start
+                        1 if is_last else 0,  # restitution on last substep
+                        inv_sub_dt,
+                        soft.bias_rate, soft.mass_scale, soft.impulse_scale,
+                        soft_static.bias_rate, soft_static.mass_scale,
+                        soft_static.impulse_scale,
+                        cfg.contact_speed, cfg.restitution_threshold,
+                        # Joint parameters
+                        buf.body_pos, buf.body_ori,
+                        buf.j_body_a, buf.j_body_b, buf.j_type,
+                        buf.j_local_anchor_a, buf.j_local_anchor_b,
+                        buf.j_hinge_axis_local,
+                        buf.j_linear_impulse, buf.j_angular_impulse,
+                        buf.j_motor_speed, buf.j_max_motor_torque,
+                        buf.joint_color_offsets,
+                        num_joints, num_joint_colors,
+                        soft_joint.bias_rate, soft_joint.mass_scale,
+                        soft_joint.impulse_scale, sub_dt,
+                    ],
+                    block_dim=cfg.block_dim,
+                    device=device,
+                )
 
         # ── 5. Store impulses for next-frame warm starting ──────────
         if has_contacts:
@@ -422,6 +514,12 @@ class SolverBox3D(SolverBase):
             )
 
         # ── 6. Convert bodies Box3D → Newton ────────────────────────
+        # First, copy all state from input to output (kinematic bodies
+        # and any other untouched data). The convert-back kernel will
+        # overwrite dynamic bodies.
+        if model.body_count > 0:
+            state_out.body_q.assign(state_in.body_q)
+            state_out.body_qd.assign(state_in.body_qd)
         if model.body_count > 0:
             wp.launch(
                 convert_bodies_from_box3d,

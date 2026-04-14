@@ -422,7 +422,7 @@ def test_effective_mass_with_lever_arm(test, device):
 
 
 def test_normal_impulse_penetrating(test, device):
-    """Penetrating contact with bias produces positive impulse."""
+    """Penetrating contact with bias produces exact impulse from Box2D formula."""
     out = wp.zeros(1, dtype=float, device=device)
     # Bodies approaching at 1 m/s, penetrating 0.01 m
     wp.launch(
@@ -442,7 +442,13 @@ def test_normal_impulse_penetrating(test, device):
         outputs=[out], device=device,
     )
     delta = float(out.numpy()[0])
-    test.assertGreater(delta, 0.0, "Penetrating contact should produce positive impulse")
+    # Hand computation:
+    # sep = -0.01 <= 0, so penetrating path:
+    # velocity_bias = max(0.8 * 10.0 * (-0.01), -10.0) = max(-0.08, -10) = -0.08
+    # ms = 0.8, isv = 0.2
+    # impulse = -1.0 * (0.8 * (-1.0) + (-0.08)) - 0.2 * 0.0 = -1.0 * (-0.88) = 0.88
+    # new_lambda = max(0 + 0.88, 0) = 0.88, delta = 0.88
+    test.assertAlmostEqual(delta, 0.88, places=4)
 
 
 def test_normal_impulse_separating(test, device):
@@ -816,7 +822,7 @@ def test_revolute_angular_aligned(test, device):
 
 
 def test_revolute_angular_correction(test, device):
-    """Relative angular velocity perpendicular to hinge is corrected."""
+    """Relative angular velocity perpendicular to hinge is corrected with exact magnitude."""
     out = wp.zeros(1, dtype=wp.vec3, device=device)
     inv_I = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
     # Body B rotating around X at 2 rad/s, hinge along Y
@@ -828,16 +834,21 @@ def test_revolute_angular_correction(test, device):
             wp.vec3(0.0, 1.0, 0.0),  # hinge along Y
             inv_I, inv_I,
             wp.vec2(0.0, 0.0),
-            10.0, 1.0, 0.0, 0,  # relaxation
+            10.0, 1.0, 0.0, 0,  # relaxation: ms=1, is=0
         ],
         outputs=[out], device=device,
     )
     result = out.numpy()[0]
-    # dw = (2,0,0), projected onto b1 perpendicular to Y
-    # Should produce impulse opposing the X rotation
-    test.assertNotAlmostEqual(float(np.linalg.norm(result)), 0.0, places=3)
-    # Impulse should be perpendicular to hinge axis
-    test.assertAlmostEqual(float(np.dot(result, [0, 1, 0])), 0.0, places=5)
+    # Hand computation:
+    # h = (0,1,0). abs(h[1])=1 >= 0.9, so b1 = (0, -h[2], h[1]) = (0,0,1)
+    # b2 = cross(h, b1) = cross((0,1,0),(0,0,1)) = (1,0,0)
+    # dw = (2,0,0), k_ang = 2*I
+    # k1 = dot(b1, 2*b1) = 2, am1 = 0.5
+    # k2 = dot(b2, 2*b2) = 2, am2 = 0.5
+    # cdot1 = dot((2,0,0), (0,0,1)) = 0 → i1 = 0
+    # cdot2 = dot((2,0,0), (1,0,0)) = 2 → i2 = -1.0 * 0.5 * 2 = -1.0
+    # result = 0*(0,0,1) + (-1)*(1,0,0) = (-1, 0, 0)
+    np.testing.assert_allclose(result, [-1.0, 0.0, 0.0], atol=1e-5)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -920,7 +931,7 @@ def test_revolute_limit_within_range(test, device):
 
 
 def test_revolute_limit_violated(test, device):
-    """Limit violated (angle_error < 0) produces corrective impulse."""
+    """Limit violated (angle_error < 0) produces exact corrective impulse."""
     out = wp.zeros(1, dtype=float, device=device)
     inv_I = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
     wp.launch(
@@ -937,11 +948,16 @@ def test_revolute_limit_violated(test, device):
         outputs=[out], device=device,
     )
     delta = float(out.numpy()[0])
-    # bias = 0.8 * 10.0 * (-0.1) = -0.8
-    # cdot = 0, am = 0.5
+    # Hand computation:
+    # angle_error = -0.1 <= 0, so bias path:
+    # bias = mass_scale * bias_rate * angle_error = 0.8 * 10.0 * (-0.1) = -0.8
+    # ms = 0.8, isv = 0.2
+    # k = dot(h, (inv_I_a + inv_I_b) * h) = dot((0,1,0), 2*(0,1,0)) = 2
+    # am = 1/2 = 0.5
+    # cdot = dot((0,0,0)-(0,0,0), (0,1,0)) = 0 (lower limit, is_upper=0)
     # impulse = -0.8 * 0.5 * (0 + (-0.8)) - 0.2 * 0 = 0.32
     # new = max(0 + 0.32, 0) = 0.32
-    test.assertGreater(delta, 0.0)
+    test.assertAlmostEqual(delta, 0.32, places=4)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -989,6 +1005,84 @@ def test_fixed_angular_correction(test, device):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Additional tests for coverage gaps
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_solve_3x3_off_diagonal(test, device):
+    """3x3 solve with off-diagonal entries tests cofactor computation."""
+    # K = [[4, 2, 1], [2, 5, 3], [1, 3, 6]]  (symmetric positive definite)
+    # rhs = (1, 2, 3)
+    # Solve via numpy for reference:
+    K = np.array([[4, 2, 1], [2, 5, 3], [1, 3, 6]], dtype=np.float64)
+    rhs = np.array([1, 2, 3], dtype=np.float64)
+    expected = np.linalg.solve(K, rhs)
+
+    out = wp.zeros(1, dtype=wp.vec3, device=device)
+    wp.launch(
+        _test_solve_3x3_kernel, dim=1,
+        inputs=[4.0, 2.0, 1.0, 5.0, 3.0, 6.0, 1.0, 2.0, 3.0],
+        outputs=[out], device=device,
+    )
+    result = out.numpy()[0]
+    np.testing.assert_allclose(result, expected, atol=1e-4)
+
+
+def test_normal_impulse_deep_penetration_clamp(test, device):
+    """Deep penetration: velocity_bias clamped by contact_speed."""
+    out = wp.zeros(1, dtype=float, device=device)
+    wp.launch(
+        _test_normal_impulse_kernel, dim=1,
+        inputs=[
+            0.0,      # vn: zero relative velocity
+            -10.0,    # separation: deeply penetrating
+            0.0,      # lambda_n
+            1.0,      # normal_mass
+            10.0,     # bias_rate
+            0.8,      # mass_scale
+            0.2,      # impulse_scale
+            240.0,    # inv_sub_dt
+            2.0,      # contact_speed = 2.0 (the clamp)
+            1,        # use_bias
+        ],
+        outputs=[out], device=device,
+    )
+    delta = float(out.numpy()[0])
+    # Hand computation:
+    # sep = -10.0, unclamped bias = 0.8 * 10.0 * (-10.0) = -80.0
+    # clamped: max(-80.0, -2.0) = -2.0  ← contact_speed clamp is binding
+    # ms = 0.8, isv = 0.2
+    # impulse = -1.0 * (0.8 * 0.0 + (-2.0)) - 0.2 * 0.0 = 2.0
+    test.assertAlmostEqual(delta, 2.0, places=4)
+
+
+def test_effective_mass_two_lever_arms(test, device):
+    """Both bodies have non-zero lever arms — tests full K formula."""
+    inv_mass = 1.0
+    inv_I = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    r_a = wp.vec3(0.0, 0.0, 1.0)
+    r_b = wp.vec3(0.0, 0.0, -1.0)
+    d = wp.vec3(0.0, 1.0, 0.0)
+    out = wp.zeros(1, dtype=float, device=device)
+    wp.launch(
+        _test_effective_mass_kernel, dim=1,
+        inputs=[inv_mass, inv_I, inv_mass, inv_I, r_a, r_b, d],
+        outputs=[out], device=device,
+    )
+    result = float(out.numpy()[0])
+    # cross(r_a, d) = cross((0,0,1),(0,1,0)) = (-1,0,0)
+    # inv_I * (-1,0,0) = (-1,0,0)
+    # cross((-1,0,0), (0,0,1)) = (0,1,0)
+    # dot((0,1,0), (0,1,0)) = 1.0  (body A contribution)
+    # cross(r_b, d) = cross((0,0,-1),(0,1,0)) = (1,0,0)
+    # inv_I * (1,0,0) = (1,0,0)
+    # cross((1,0,0), (0,0,-1)) = (0,1,0)
+    # dot((0,1,0), (0,1,0)) = 1.0  (body B contribution)
+    # K = 1 + 1 + 1 + 1 = 4, effective_mass = 0.25
+    test.assertAlmostEqual(result, 0.25, places=5)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Register all tests
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -1006,6 +1100,7 @@ add_function_test(TestBox3DConstraintFuncs, "test_tangent_basis_arbitrary_normal
 add_function_test(TestBox3DConstraintFuncs, "test_effective_mass_equal_masses", test_effective_mass_equal_masses, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_effective_mass_static_body", test_effective_mass_static_body, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_effective_mass_with_lever_arm", test_effective_mass_with_lever_arm, devices=devices)
+add_function_test(TestBox3DConstraintFuncs, "test_effective_mass_two_lever_arms", test_effective_mass_two_lever_arms, devices=devices)
 
 # Normal impulse
 add_function_test(TestBox3DConstraintFuncs, "test_normal_impulse_penetrating", test_normal_impulse_penetrating, devices=devices)
@@ -1013,6 +1108,7 @@ add_function_test(TestBox3DConstraintFuncs, "test_normal_impulse_separating", te
 add_function_test(TestBox3DConstraintFuncs, "test_normal_impulse_clamp_nonnegative", test_normal_impulse_clamp_nonnegative, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_normal_impulse_relaxation_no_bias", test_normal_impulse_relaxation_no_bias, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_normal_impulse_speculative", test_normal_impulse_speculative, devices=devices)
+add_function_test(TestBox3DConstraintFuncs, "test_normal_impulse_deep_penetration_clamp", test_normal_impulse_deep_penetration_clamp, devices=devices)
 
 # Friction
 add_function_test(TestBox3DConstraintFuncs, "test_friction_within_cone", test_friction_within_cone, devices=devices)
@@ -1035,6 +1131,7 @@ add_function_test(TestBox3DConstraintFuncs, "test_restitution_zero_coeff", test_
 # 3x3 solve
 add_function_test(TestBox3DConstraintFuncs, "test_solve_3x3_identity", test_solve_3x3_identity, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_solve_3x3_diagonal", test_solve_3x3_diagonal, devices=devices)
+add_function_test(TestBox3DConstraintFuncs, "test_solve_3x3_off_diagonal", test_solve_3x3_off_diagonal, devices=devices)
 
 # Revolute point-to-point
 add_function_test(TestBox3DConstraintFuncs, "test_revolute_p2p_coincident_relaxation", test_revolute_p2p_coincident_relaxation, devices=devices)
