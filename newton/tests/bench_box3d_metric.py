@@ -60,7 +60,7 @@ def measure(scene_fn, num_worlds, num_steps=50, warmup=10):
     model = scene.finalize(device=device)
     s_in = model.state()
     s_out = model.state()
-    cfg = Box3DConfig(num_substeps=2, num_velocity_iters=1, num_relaxation_iters=1,
+    cfg = Box3DConfig(num_substeps=1, num_velocity_iters=2, num_relaxation_iters=2,
                       contact_hertz=30.0, joint_hertz=60.0,
                       linear_damping=0.1, angular_damping=0.1,
                       enable_graph=True,
