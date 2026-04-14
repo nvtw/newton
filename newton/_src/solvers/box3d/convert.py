@@ -89,7 +89,11 @@ def convert_bodies_to_box3d(
         )
     else:
         out_inv_mass[world, local_idx] = body_inv_mass[global_idx]
-        out_inv_inertia[world, local_idx] = body_inv_inertia[global_idx]
+        # Rotate body-frame inverse inertia to world frame:
+        # I_world^{-1} = R * I_body^{-1} * R^T
+        R = wp.quat_to_matrix(ori)
+        I_body_inv = body_inv_inertia[global_idx]
+        out_inv_inertia[world, local_idx] = R * I_body_inv * wp.transpose(R)
 
     # Zero delta-pos for substep tracking
     out_delta_pos[world, local_idx] = wp.vec3(0.0, 0.0, 0.0)
@@ -220,6 +224,8 @@ def convert_contacts_to_box3d(
 
     r_a = wp.vec3(0.0, 0.0, 0.0)
     r_b = wp.vec3(0.0, 0.0, 0.0)
+    contact_world_a = wp.vec3(0.0, 0.0, 0.0)
+    contact_world_b = wp.vec3(0.0, 0.0, 0.0)
 
     if b0_global >= 0:
         q0 = body_q[b0_global]
@@ -227,8 +233,11 @@ def convert_contacts_to_box3d(
         pos0 = wp.transform_get_translation(q0)
         com0 = body_com[b0_global]
         com_world0 = pos0 + wp.quat_rotate(ori0, com0)
-        contact_world0 = pos0 + wp.quat_rotate(ori0, p0 + off0)
-        r_a = contact_world0 - com_world0
+        contact_world_a = pos0 + wp.quat_rotate(ori0, p0 + off0)
+        r_a = contact_world_a - com_world0
+    else:
+        # Ground / static shape with no body — point is already world-space
+        contact_world_a = p0 + off0
 
     if b1_global >= 0:
         q1 = body_q[b1_global]
@@ -236,17 +245,19 @@ def convert_contacts_to_box3d(
         pos1 = wp.transform_get_translation(q1)
         com1 = body_com[b1_global]
         com_world1 = pos1 + wp.quat_rotate(ori1, com1)
-        contact_world1 = pos1 + wp.quat_rotate(ori1, p1 + off1)
-        r_b = contact_world1 - com_world1
+        contact_world_b = pos1 + wp.quat_rotate(ori1, p1 + off1)
+        r_b = contact_world_b - com_world1
+    else:
+        contact_world_b = p1 + off1
 
     out_r_a[world, slot] = r_a
     out_r_b[world, slot] = r_b
 
     # Base separation: signed distance (negative = penetrating).
-    # sep = dot(world_point_1 - world_point_0, normal) - (margin0 + margin1)
+    # sep = dot(contact_world_b - contact_world_a, normal) - (margin0 + margin1)
     margin0 = rigid_contact_margin0[ci]
     margin1 = rigid_contact_margin1[ci]
-    sep = wp.dot(r_b - r_a, normal) - (margin0 + margin1)
+    sep = wp.dot(contact_world_b - contact_world_a, normal) - (margin0 + margin1)
     out_base_sep[world, slot] = sep
 
     # Material: geometric mean friction, max restitution

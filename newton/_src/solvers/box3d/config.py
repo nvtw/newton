@@ -93,7 +93,7 @@ class Box3DConfig:
     angular_damping: float = 0.05
     restitution_threshold: float = 1.0
     contact_speed: float = 10.0
-    max_bodies_per_world: int = 128
+    max_bodies_per_world: int = 256
     max_contacts_per_world: int = 2048
     max_joints_per_world: int = 256
     max_colors: int = 48

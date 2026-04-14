@@ -147,35 +147,25 @@ def test_pendulum_revolute(test, device):
     """A revolute joint pendulum swings and the anchor stays near the pivot."""
     builder = newton.ModelBuilder()
 
-    # Use link-based construction for proper articulation
-    pivot = builder.add_link()
+    # Maximal-coordinate construction (no articulations)
+    pivot = builder.add_body(
+        xform=wp.transform(wp.vec3(0.0, 0.0, 2.0)),
+        is_kinematic=True,
+    )
     builder.add_shape_sphere(body=pivot, radius=0.05)
-    bob = builder.add_link()
+    bob = builder.add_body(xform=wp.transform(wp.vec3(1.0, 0.0, 2.0)))
     builder.add_shape_sphere(body=bob, radius=0.1)
 
-    # Free joint for pivot (will be kinematic)
-    j0 = builder.add_joint_free(child=pivot)
-    # Revolute joint along Y axis (hinge), bob hangs 1m from pivot
-    j1 = builder.add_joint_revolute(
-        parent=pivot,
-        child=bob,
+    builder.add_joint_revolute(
+        parent=pivot, child=bob,
         parent_xform=wp.transform_identity(),
         child_xform=wp.transform(wp.vec3(-1.0, 0.0, 0.0)),
         axis=newton.Axis.Y,
     )
-    builder.add_articulation([j0, j1])
-
-    # Make pivot kinematic
-    builder.body_flags[pivot] = newton.BodyFlags.KINEMATIC
 
     model = builder.finalize(device=device)
     state_in = model.state()
     state_out = model.state()
-
-    # Set initial pivot position
-    state_in.body_q.numpy()[pivot] = [0, 0, 2, 0, 0, 0, 1]
-    state_in.body_q.numpy()[bob] = [1, 0, 2, 0, 0, 0, 1]
-    state_in.body_q.assign(state_in.body_q.numpy())
 
     cfg = Box3DConfig(num_substeps=4, joint_hertz=60.0)
     solver = newton.solvers.SolverBox3D(model, config=cfg)
@@ -207,29 +197,20 @@ def test_fixed_joint(test, device):
     """Two bodies connected by a fixed joint maintain constant relative position."""
     builder = newton.ModelBuilder()
 
-    b0 = builder.add_link()
+    b0 = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 5.0)))
     builder.add_shape_sphere(body=b0, radius=0.1)
-    b1 = builder.add_link()
+    b1 = builder.add_body(xform=wp.transform(wp.vec3(1.0, 0.0, 5.0)))
     builder.add_shape_sphere(body=b1, radius=0.1)
 
-    # Free joint for b0, fixed joint for b1
-    j0 = builder.add_joint_free(child=b0)
-    j1 = builder.add_joint_fixed(
-        parent=b0,
-        child=b1,
+    builder.add_joint_fixed(
+        parent=b0, child=b1,
         parent_xform=wp.transform(wp.vec3(1.0, 0.0, 0.0)),
         child_xform=wp.transform_identity(),
     )
-    builder.add_articulation([j0, j1])
 
     model = builder.finalize(device=device)
     state_in = model.state()
     state_out = model.state()
-
-    # Set initial positions
-    state_in.body_q.numpy()[b0] = [0, 0, 5, 0, 0, 0, 1]
-    state_in.body_q.numpy()[b1] = [1, 0, 5, 0, 0, 0, 1]
-    state_in.body_q.assign(state_in.body_q.numpy())
 
     cfg = Box3DConfig(num_substeps=4, joint_hertz=60.0)
     solver = newton.solvers.SolverBox3D(model, config=cfg)
