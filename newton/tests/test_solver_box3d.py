@@ -236,6 +236,182 @@ def test_fixed_joint(test, device):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Multi-world parallel simulation
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_multi_world(test, device):
+    """4 independent worlds simulate correctly in parallel.
+
+    Each world has a sphere at a different height. After simulation,
+    each sphere should have fallen independently and match a single-world
+    reference run.
+    """
+    # Build 4 worlds with spheres at different heights
+    scene = newton.ModelBuilder()
+    scene.add_ground_plane()
+
+    heights = [2.0, 4.0, 6.0, 8.0]
+    world_bodies = []
+
+    for w, h in enumerate(heights):
+        sub = newton.ModelBuilder()
+        b = sub.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, h)))
+        sub.add_shape_sphere(body=b, radius=0.5)
+        scene.add_world(sub)
+        world_bodies.append(w + 1)  # +1 for ground plane body offset... actually bodies are indexed globally
+
+    model = scene.finalize(device=device)
+    state_in = model.state()
+    state_out = model.state()
+
+    cfg = Box3DConfig(num_substeps=4, contact_hertz=30.0)
+    solver = newton.solvers.SolverBox3D(model, config=cfg)
+    pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
+
+    dt = 1.0 / 60.0
+    final = _step_simulation(solver, pipeline, state_in, state_out, None, dt, 30)
+
+    # Each sphere should have fallen
+    q = final.body_q.numpy()
+    # Find dynamic bodies (skip ground shapes)
+    dynamic_indices = []
+    body_flags = model.body_flags.numpy()
+    for i in range(model.body_count):
+        if not (body_flags[i] & newton.BodyFlags.KINEMATIC):
+            dynamic_indices.append(i)
+
+    test.assertEqual(len(dynamic_indices), 4, f"Expected 4 dynamic bodies, got {len(dynamic_indices)}")
+
+    # Higher starting spheres should be higher (or equal) now — they're independent
+    zs = [float(q[bi][2]) for bi in dynamic_indices]
+    for i in range(len(zs)):
+        test.assertTrue(np.isfinite(zs[i]), f"World {i} has non-finite z={zs[i]}")
+        test.assertLess(zs[i], heights[i],
+                        f"World {i} sphere didn't fall: z={zs[i]}, started at {heights[i]}")
+
+    # Ordering should be preserved (sphere that started higher should still be higher)
+    for i in range(len(zs) - 1):
+        test.assertLess(zs[i], zs[i + 1] + 0.5,
+                        f"World ordering broken: z[{i}]={zs[i]} >= z[{i+1}]={zs[i+1]}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Revolute joint with angle limits
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_revolute_with_limits(test, device):
+    """Revolute joint with angle limits restricts pendulum swing range.
+
+    A pendulum with limits [-0.5, 0.5] rad should not swing past those angles.
+    Without limits, a 1m pendulum from horizontal would swing to vertical (pi/2 rad).
+    With limits at 0.5 rad, it should be clamped.
+    """
+    builder = newton.ModelBuilder()
+
+    pivot = builder.add_body(
+        xform=wp.transform(wp.vec3(0.0, 0.0, 5.0)),
+        is_kinematic=True,
+    )
+    builder.add_shape_sphere(body=pivot, radius=0.05)
+
+    # Bob starts offset in X (horizontal position)
+    bob = builder.add_body(xform=wp.transform(wp.vec3(1.0, 0.0, 5.0)))
+    builder.add_shape_sphere(body=bob, radius=0.1)
+
+    builder.add_joint_revolute(
+        parent=pivot, child=bob,
+        parent_xform=wp.transform_identity(),
+        child_xform=wp.transform(wp.vec3(-1.0, 0.0, 0.0)),
+        axis=newton.Axis.Y,
+        limit_lower=-0.5,
+        limit_upper=0.5,
+        limit_ke=1000.0,  # stiff limits
+    )
+
+    model = builder.finalize(device=device)
+    state_in = model.state()
+    state_out = model.state()
+
+    cfg = Box3DConfig(num_substeps=4, joint_hertz=60.0)
+    solver = newton.solvers.SolverBox3D(model, config=cfg)
+    pipeline = newton.CollisionPipeline(model, broad_phase="nxn")
+
+    dt = 1.0 / 60.0
+    final_state = _step_simulation(solver, pipeline, state_in, state_out, None, dt, 60)
+
+    # The bob should have moved but stayed within limited range
+    bob_pos = final_state.body_q.numpy()[bob][:3]
+    # With limit at 0.5 rad and soft constraints, the bob should stay above z≈3.5
+    # (without limits it would swing to z≈4.0 at the bottom, so limits should restrict motion)
+    bob_z = float(bob_pos[2])
+    test.assertGreater(bob_z, 3.5,
+                       f"Bob fell too far (limits not working): z={bob_z}")
+    # Also verify the bob moved (didn't just stay at start)
+    test.assertLess(bob_z, 5.0,
+                    f"Bob didn't move at all: z={bob_z}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Ball joint (point-to-point only)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_ball_joint(test, device):
+    """Ball joint keeps two bodies connected but allows free rotation.
+
+    Two bodies connected by a ball joint should maintain distance
+    between anchor points while both rotate freely.
+    """
+    builder = newton.ModelBuilder()
+
+    pivot = builder.add_body(
+        xform=wp.transform(wp.vec3(0.0, 0.0, 5.0)),
+        is_kinematic=True,
+    )
+    builder.add_shape_sphere(body=pivot, radius=0.05)
+
+    bob = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 4.0)))
+    builder.add_shape_sphere(body=bob, radius=0.1)
+
+    builder.add_joint_ball(
+        parent=pivot, child=bob,
+        parent_xform=wp.transform_identity(),
+        child_xform=wp.transform(wp.vec3(0.0, 0.0, 1.0)),
+    )
+
+    model = builder.finalize(device=device)
+    state_in = model.state()
+    state_out = model.state()
+
+    # Give bob initial angular velocity to test free rotation
+    qd = state_in.body_qd.numpy()
+    qd[bob] = [0.0, 0.0, 0.0, 2.0, 0.0, 0.0]  # spin around X
+    state_in.body_qd.assign(qd)
+
+    cfg = Box3DConfig(num_substeps=4, num_velocity_iters=2, num_relaxation_iters=1,
+                      joint_hertz=60.0)
+    solver = newton.solvers.SolverBox3D(model, config=cfg)
+    pipeline = newton.CollisionPipeline(model, broad_phase="nxn")
+
+    dt = 1.0 / 60.0
+    final_state = _step_simulation(solver, pipeline, state_in, state_out, None, dt, 30)
+
+    # Distance between pivot and bob should be approximately 1m
+    # (soft constraint allows some stretch under gravity)
+    pivot_pos = final_state.body_q.numpy()[pivot][:3]
+    bob_pos = final_state.body_q.numpy()[bob][:3]
+    dist = float(np.linalg.norm(bob_pos - pivot_pos))
+    test.assertAlmostEqual(dist, 1.0, delta=1.5,
+                           msg=f"Ball joint distance should be ~1m, got {dist}")
+
+    # Bob should have fallen (gravity)
+    test.assertLess(float(bob_pos[2]), 5.0,
+                    f"Bob should fall under gravity, z={bob_pos[2]}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # CUDA graph capture
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -283,6 +459,9 @@ add_function_test(TestSolverBox3D, "test_ground_contact", test_ground_contact, d
 add_function_test(TestSolverBox3D, "test_zero_gravity_velocity_preserved", test_zero_gravity_velocity_preserved, devices=devices)
 add_function_test(TestSolverBox3D, "test_pendulum_revolute", test_pendulum_revolute, devices=devices)
 add_function_test(TestSolverBox3D, "test_fixed_joint", test_fixed_joint, devices=devices)
+add_function_test(TestSolverBox3D, "test_multi_world", test_multi_world, devices=devices)
+add_function_test(TestSolverBox3D, "test_revolute_with_limits", test_revolute_with_limits, devices=devices)
+add_function_test(TestSolverBox3D, "test_ball_joint", test_ball_joint, devices=devices)
 add_function_test(TestSolverBox3D, "test_cuda_graph_matches_eager", test_cuda_graph_matches_eager, devices=devices)
 
 

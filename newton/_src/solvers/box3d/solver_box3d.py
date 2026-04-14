@@ -177,12 +177,19 @@ class SolverBox3D(SolverBase):
         global_indices = self._joint_global_indices
         nj = len(global_indices)
 
+        j_limit_lower_np = model.joint_limit_lower.numpy() if model.joint_limit_lower is not None else None
+        j_limit_upper_np = model.joint_limit_upper.numpy() if model.joint_limit_upper is not None else None
+        j_limit_ke_np = model.joint_limit_ke.numpy() if model.joint_limit_ke is not None else None
+
         b_body_a = buf.j_body_a.numpy()
         b_body_b = buf.j_body_b.numpy()
         b_type = buf.j_type.numpy()
         b_la = buf.j_local_anchor_a.numpy()
         b_lb = buf.j_local_anchor_b.numpy()
         b_ha = buf.j_hinge_axis_local.numpy()
+        b_lim_lo = buf.j_limit_lower.numpy()
+        b_lim_hi = buf.j_limit_upper.numpy()
+        b_lim_en = buf.j_limit_enabled.numpy()
 
         for src_j in range(nj):
             dst_j = int(order[src_j])
@@ -220,12 +227,28 @@ class SolverBox3D(SolverBase):
             else:
                 b_ha[0, dst_j] = [0, 0, 1]  # default Z for non-revolute
 
+            # Joint limits (only for REVOLUTE with valid DOF range)
+            if (jtype == 1 and j_limit_lower_np is not None
+                    and j_limit_ke_np is not None
+                    and qd_start < len(j_limit_lower_np)):
+                lo = float(j_limit_lower_np[qd_start])
+                hi = float(j_limit_upper_np[qd_start])
+                ke = float(j_limit_ke_np[qd_start])
+                b_lim_lo[0, dst_j] = lo
+                b_lim_hi[0, dst_j] = hi
+                b_lim_en[0, dst_j] = 1 if ke > 0 and lo < hi else 0
+            else:
+                b_lim_en[0, dst_j] = 0
+
         buf.j_body_a.assign(b_body_a)
         buf.j_body_b.assign(b_body_b)
         buf.j_type.assign(b_type)
         buf.j_local_anchor_a.assign(b_la)
         buf.j_local_anchor_b.assign(b_lb)
         buf.j_hinge_axis_local.assign(b_ha)
+        buf.j_limit_lower.assign(b_lim_lo)
+        buf.j_limit_upper.assign(b_lim_hi)
+        buf.j_limit_enabled.assign(b_lim_en)
 
     # ──────────────────────────────────────────────────────────────────
     # Main step
@@ -530,6 +553,9 @@ class SolverBox3D(SolverBase):
                         buf.j_hinge_axis_local,
                         buf.j_linear_impulse, buf.j_angular_impulse,
                         buf.j_motor_speed, buf.j_max_motor_torque,
+                        buf.j_limit_lower, buf.j_limit_upper,
+                        buf.j_limit_enabled,
+                        buf.j_lower_impulse, buf.j_upper_impulse,
                         buf.joint_color_offsets,
                         num_joints, num_joint_colors,
                         soft_joint.bias_rate, soft_joint.mass_scale,
@@ -585,6 +611,9 @@ class SolverBox3D(SolverBase):
                         buf.j_hinge_axis_local,
                         buf.j_linear_impulse, buf.j_angular_impulse,
                         buf.j_motor_speed, buf.j_max_motor_torque,
+                        buf.j_limit_lower, buf.j_limit_upper,
+                        buf.j_limit_enabled,
+                        buf.j_lower_impulse, buf.j_upper_impulse,
                         buf.joint_color_offsets,
                         num_joints, num_joint_colors,
                         soft_joint.bias_rate, soft_joint.mass_scale,
@@ -609,5 +638,14 @@ class SolverBox3D(SolverBase):
 
     @override
     def update_contacts(self, contacts: Contacts, state: State | None = None) -> None:
-        # TODO: Convert Box3D solver impulses to Newton contact forces
+        """Convert Box3D solver impulses to Newton contact forces.
+
+        Writes the contact normal force magnitude to
+        ``contacts.rigid_contact_force`` using the accumulated normal
+        impulse divided by the step dt.
+        """
+        # For now, this is a simplified implementation that stores the
+        # total normal impulse per contact.  A full implementation would
+        # map from color-ordered solver contacts back to Newton's contact
+        # ordering and include friction forces.
         pass

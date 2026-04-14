@@ -511,8 +511,71 @@ _CONTACT_SOLVE_SNIPPET = r"""
                                 }
                             }
                         }
+                        // Limits on hinge axis (if enabled)
+                        int lim_en = *wp::address(j_lim_en, wid, ji);
+                        if (lim_en > 0) {
+                            float kh_x2=k_ang.data[0][0]*whx+k_ang.data[0][1]*why+k_ang.data[0][2]*whz;
+                            float kh_y2=k_ang.data[1][0]*whx+k_ang.data[1][1]*why+k_ang.data[1][2]*whz;
+                            float kh_z2=k_ang.data[2][0]*whx+k_ang.data[2][1]*why+k_ang.data[2][2]*whz;
+                            float kh2 = whx*kh_x2+why*kh_y2+whz*kh_z2;
+                            if (kh2 > 0) {
+                                float am_lim = 1.f/kh2;
+                                // Compute joint angle around hinge axis from quaternions
+                                // relQ = conj(qA) * qB; angle = 2*atan2(dot(relQ.xyz, h_local), relQ.w)
+                                // But we have world-frame h. Use: angle = 2*atan2(dot(relQ.xyz, h_world_A), relQ.w)
+                                // where relQ = conj(qA_world) * qB_world
+                                float rqx = qaw*qbx - qax*qbw - qay*qbz + qaz*qby;
+                                float rqy = qaw*qby + qax*qbz - qay*qbw - qaz*qbx;
+                                float rqz = qaw*qbz - qax*qby + qay*qbx - qaz*qbw;
+                                float rqw = qaw*qbw + qax*qbx + qay*qby + qaz*qbz;
+                                float joint_angle = 2.f * atan2f(rqx*whx+rqy*why+rqz*whz, rqw);
+
+                                float lo = *wp::address(j_lim_lo, wid, ji);
+                                float hi = *wp::address(j_lim_hi, wid, ji);
+                                float lo_imp = *wp::address(j_lo_imp, wid, ji);
+                                float hi_imp = *wp::address(j_hi_imp, wid, ji);
+
+                                // Lower limit
+                                { float C_lo = joint_angle - lo;
+                                  float bias_lo=0, ms_lo=1.f, is_lo=0.f;
+                                  if (C_lo > 0.f) { bias_lo = C_lo * inv_sub_dt; }
+                                  else if (use_bias > 0) { bias_lo=jms*jbias_rate*C_lo; ms_lo=jms; is_lo=jisv; }
+                                  float cdot_lo = (jwbx-jwax)*whx+(jwby-jway)*why+(jwbz-jwaz)*whz;
+                                  float imp_lo = -ms_lo*am_lim*(cdot_lo+bias_lo) - is_lo*lo_imp;
+                                  float new_lo = fmaxf(lo_imp+imp_lo, 0.f); imp_lo=new_lo-lo_imp; lo_imp=new_lo;
+                                  if (ja>=0){jwax-=jiia.data[0][0]*imp_lo*whx+jiia.data[0][1]*imp_lo*why+jiia.data[0][2]*imp_lo*whz;
+                                             jway-=jiia.data[1][0]*imp_lo*whx+jiia.data[1][1]*imp_lo*why+jiia.data[1][2]*imp_lo*whz;
+                                             jwaz-=jiia.data[2][0]*imp_lo*whx+jiia.data[2][1]*imp_lo*why+jiia.data[2][2]*imp_lo*whz;}
+                                  if (jbi>=0){jwbx+=jiib.data[0][0]*imp_lo*whx+jiib.data[0][1]*imp_lo*why+jiib.data[0][2]*imp_lo*whz;
+                                              jwby+=jiib.data[1][0]*imp_lo*whx+jiib.data[1][1]*imp_lo*why+jiib.data[1][2]*imp_lo*whz;
+                                              jwbz+=jiib.data[2][0]*imp_lo*whx+jiib.data[2][1]*imp_lo*why+jiib.data[2][2]*imp_lo*whz;} }
+
+                                // Upper limit (signs flipped)
+                                { float C_hi = hi - joint_angle;
+                                  float bias_hi=0, ms_hi=1.f, is_hi=0.f;
+                                  if (C_hi > 0.f) { bias_hi = C_hi * inv_sub_dt; }
+                                  else if (use_bias > 0) { bias_hi=jms*jbias_rate*C_hi; ms_hi=jms; is_hi=jisv; }
+                                  float cdot_hi = -((jwbx-jwax)*whx+(jwby-jway)*why+(jwbz-jwaz)*whz);
+                                  float imp_hi = -ms_hi*am_lim*(cdot_hi+bias_hi) - is_hi*hi_imp;
+                                  float new_hi = fmaxf(hi_imp+imp_hi, 0.f); imp_hi=new_hi-hi_imp; hi_imp=new_hi;
+                                  if (ja>=0){jwax+=jiia.data[0][0]*imp_hi*whx+jiia.data[0][1]*imp_hi*why+jiia.data[0][2]*imp_hi*whz;
+                                             jway+=jiia.data[1][0]*imp_hi*whx+jiia.data[1][1]*imp_hi*why+jiia.data[1][2]*imp_hi*whz;
+                                             jwaz+=jiia.data[2][0]*imp_hi*whx+jiia.data[2][1]*imp_hi*why+jiia.data[2][2]*imp_hi*whz;}
+                                  if (jbi>=0){jwbx-=jiib.data[0][0]*imp_hi*whx+jiib.data[0][1]*imp_hi*why+jiib.data[0][2]*imp_hi*whz;
+                                              jwby-=jiib.data[1][0]*imp_hi*whx+jiib.data[1][1]*imp_hi*why+jiib.data[1][2]*imp_hi*whz;
+                                              jwbz-=jiib.data[2][0]*imp_hi*whx+jiib.data[2][1]*imp_hi*why+jiib.data[2][2]*imp_hi*whz;} }
+
+                                *wp::address(j_lo_imp, wid, ji) = lo_imp;
+                                *wp::address(j_hi_imp, wid, ji) = hi_imp;
+                            }
+                        }
+
                         wp::vec_t<3,float> nai; nai[0]=ai[0]+i1; nai[1]=ai[1]+i2; nai[2]=mi_val;
                         *wp::address(j_ai, wid, ji) = nai;
+
+                    } else if (jtype == 2) {
+                        // BALL: no angular constraint (only P2P from above)
+                        // Nothing additional to do
 
                     } else {
                         // FIXED: constrain all 3 angular DOF
@@ -622,6 +685,11 @@ def _contact_solve_native(
     j_ai: wp.array2d(dtype=wp.vec3),
     j_ms_arr: wp.array2d(dtype=float),
     j_mmt: wp.array2d(dtype=float),
+    j_lim_lo: wp.array2d(dtype=float),
+    j_lim_hi: wp.array2d(dtype=float),
+    j_lim_en: wp.array2d(dtype=wp.int32),
+    j_lo_imp: wp.array2d(dtype=float),
+    j_hi_imp: wp.array2d(dtype=float),
     jc_off: wp.array2d(dtype=wp.int32),
     num_joints: int,
     max_jcolors: int,
@@ -689,6 +757,11 @@ def contact_solve_kernel(
     j_ai: wp.array2d(dtype=wp.vec3),
     j_ms_arr: wp.array2d(dtype=float),
     j_mmt: wp.array2d(dtype=float),
+    j_lim_lo: wp.array2d(dtype=float),
+    j_lim_hi: wp.array2d(dtype=float),
+    j_lim_en: wp.array2d(dtype=wp.int32),
+    j_lo_imp: wp.array2d(dtype=float),
+    j_hi_imp: wp.array2d(dtype=float),
     jc_off: wp.array2d(dtype=wp.int32),
     num_joints: int,
     max_jcolors: int,
@@ -715,7 +788,9 @@ def contact_solve_kernel(
         contact_speed, rest_thresh,
         body_pos, body_ori,
         j_ba, j_bb, j_type, j_la, j_lb, j_ha, j_li, j_ai,
-        j_ms_arr, j_mmt, jc_off,
+        j_ms_arr, j_mmt,
+        j_lim_lo, j_lim_hi, j_lim_en, j_lo_imp, j_hi_imp,
+        jc_off,
         num_joints, max_jcolors,
         jbias_rate, jmass_scale, jimpulse_scale, sub_dt_val,
         wid, tid,
