@@ -296,7 +296,7 @@ class SolverBox3D(SolverBase):
         num_joint_colors = self._num_joint_colors
 
         # ── 1. Convert bodies Newton → Box3D ────────────────────────
-        buf.bodies_per_world.zero_()
+        # bodies_per_world and contact_count are zeroed inside the convert kernel
         if body_count > 0:
             wp.launch(
                 convert_bodies_to_box3d,
@@ -317,15 +317,13 @@ class SolverBox3D(SolverBase):
                     buf.body_inv_mass, buf.body_inv_inertia, buf.body_com,
                     buf.body_delta_pos, buf.body_inv_inertia_body,
                     buf.bodies_per_world,
+                    buf.contact_count, W,
                 ],
                 device=device,
             )
 
         # ── 2. Convert contacts Newton → Box3D ─────────────────────
         has_contacts = contacts is not None and body_count > 0
-
-        # Zero per-world contact counts
-        buf.contact_count.zero_()
 
         if has_contacts:
             has_matching = contacts.contact_matching and contacts.rigid_contact_match_index is not None

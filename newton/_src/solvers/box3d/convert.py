@@ -48,13 +48,22 @@ def convert_bodies_to_box3d(
     out_delta_pos: wp.array2d(dtype=wp.vec3),
     out_inv_inertia_body: wp.array2d(dtype=mat3sym),
     out_bodies_per_world: wp.array[wp.int32],
+    contact_count_to_zero: wp.array[wp.int32],
+    num_worlds_to_zero: int,
 ):
     """Convert Newton body state to Box3D 2-D layout.
 
-    Launched with ``dim = total_body_count``.  Each thread converts one
-    body, determining its world and local index from *body_world_start*.
+    Also zeros ``contact_count`` and ``bodies_per_world`` arrays (fused
+    to eliminate 2 separate kernel launches).
+
+    Launched with ``dim = total_body_count``.
     """
     global_idx = wp.tid()
+
+    # Fused zero: each thread zeros one world's counters
+    if global_idx < num_worlds_to_zero:
+        contact_count_to_zero[global_idx] = 0
+        out_bodies_per_world[global_idx] = 0
 
     # Determine world and local index.
     # Bodies with world == -1 (global) are mapped to world 0.
