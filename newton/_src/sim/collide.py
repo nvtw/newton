@@ -737,6 +737,7 @@ class CollisionPipeline:
         if contact_matching:
             self._contact_matcher = ContactMatcher(
                 rigid_contact_max,
+                sorter=self._contact_sorter,
                 pos_threshold=contact_matching_pos_threshold,
                 normal_dot_threshold=contact_matching_normal_dot_threshold,
                 contact_report=contact_report,

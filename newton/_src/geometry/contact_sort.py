@@ -219,7 +219,9 @@ class ContactSorter:
             self._simple_normal_buf = wp.zeros(capacity, dtype=wp.vec3)
             self._simple_penetration_buf = wp.zeros(capacity, dtype=float)
             self._simple_tangent_buf = wp.zeros(capacity, dtype=wp.vec3)
-            self._simple_match_index_buf = wp.zeros(capacity, dtype=wp.int32)
+            # Simple-path match_index scratch — allocated on demand (1 element
+            # as a dummy so Warp struct fields are always valid).
+            self._simple_match_index_buf = wp.zeros(1, dtype=wp.int32)
 
             # Scratch buffers for the full gather (CollisionPipeline.collide path).
             self._full_shape0_buf = wp.zeros(capacity, dtype=wp.int32)

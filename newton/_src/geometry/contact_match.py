@@ -15,13 +15,29 @@ and normal-direction thresholds.  The result is a per-contact match index:
 - ``>= 0``: index of the matched contact in the previous frame's sorted buffer.
 - ``MATCH_NOT_FOUND (-1)``: new contact with no prior correspondence.
 - ``MATCH_BROKEN (-2)``: key matched but position/normal thresholds exceeded.
+
+Memory efficiency
+-----------------
+The matcher reuses the :class:`ContactSorter`'s existing scratch buffers
+(``_full_point0_buf``, ``_full_normal_buf``) to store previous-frame
+world-space positions and normals between frames.  This works because
+matching runs *before* sorting each frame (so the scratch data is still
+intact), and the save step runs *after* sorting (overwriting the scratch
+with the new sorted data).  The only additional per-contact allocation is
+the ``_prev_sorted_keys`` buffer (8 bytes/contact) since the sorter's key
+buffer is overwritten by ``_prepare_sort`` each frame.
 """
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import warp as wp
 
 from ..core.types import Devicelike
+
+if TYPE_CHECKING:
+    from .contact_sort import ContactSorter
 
 MATCH_NOT_FOUND = wp.constant(wp.int32(-1))
 """Sentinel: no matching key found in last frame's contacts."""
@@ -69,7 +85,7 @@ def _binary_search_int64(
 class _MatchData:
     """Bundled arrays for the contact match kernel."""
 
-    # Previous frame (sorted)
+    # Previous frame (sorted) — pos/normal reuse ContactSorter scratch buffers
     prev_keys: wp.array[wp.int64]
     prev_pos_world: wp.array[wp.vec3]
     prev_normal: wp.array[wp.vec3]
@@ -93,6 +109,7 @@ class _MatchData:
     # Thresholds
     pos_threshold_sq: float
     normal_dot_threshold: float
+    has_report: int
 
 
 @wp.kernel(enable_backward=False)
@@ -149,7 +166,8 @@ def _match_contacts_kernel(data: _MatchData):
 
     if best_idx >= 0:
         data.match_index[tid] = wp.int32(best_idx)
-        wp.atomic_max(data.prev_was_matched, best_idx, wp.int32(1))
+        if data.has_report != 0:
+            wp.atomic_max(data.prev_was_matched, best_idx, wp.int32(1))
     else:
         # Key matched but thresholds not met.
         data.match_index[tid] = MATCH_BROKEN
@@ -248,8 +266,16 @@ class ContactMatcher:
         matcher.save_sorted_state(...)  # after sorting
         matcher.build_report(...)  # optional
 
+    Memory is minimised by reusing the *sorter*'s existing scratch buffers
+    for the previous-frame world-space positions and normals.  The only
+    new per-contact allocation is the sorted-key cache (8 bytes/contact).
+    When ``contact_report`` is disabled, the ``prev_was_matched`` flag
+    array (4 bytes/contact) is also skipped.
+
     Args:
         capacity: Maximum number of contacts (must match :class:`ContactSorter`).
+        sorter: The :class:`ContactSorter` whose scratch buffers will be
+            reused for storing previous-frame positions and normals.
         pos_threshold: World-space distance threshold [m].  Contacts whose
             positions moved more than this between frames are considered broken.
         normal_dot_threshold: Minimum dot product between old and new contact
@@ -262,6 +288,7 @@ class ContactMatcher:
         self,
         capacity: int,
         *,
+        sorter: ContactSorter,
         pos_threshold: float = 0.02,
         normal_dot_threshold: float = 0.9,
         contact_report: bool = False,
@@ -271,24 +298,24 @@ class ContactMatcher:
             self._capacity = capacity
             self._pos_threshold_sq = pos_threshold * pos_threshold
             self._normal_dot_threshold = normal_dot_threshold
+            self._sorter = sorter
 
-            # Previous frame sorted state.
+            # Only buffer we must own: sorted keys survive across frames
+            # (_sort_keys_copy is overwritten by _prepare_sort each frame).
             self._prev_sorted_keys = wp.zeros(capacity, dtype=wp.int64)
-            self._prev_pos_world = wp.zeros(capacity, dtype=wp.vec3)
-            self._prev_normal = wp.zeros(capacity, dtype=wp.vec3)
             self._prev_count = wp.zeros(1, dtype=wp.int32)
-
-            # Per-old-contact "was matched" flags (zeroed each frame).
-            self._prev_was_matched = wp.zeros(capacity, dtype=wp.int32)
 
             # Contact report (optional).
             self._has_report = contact_report
             if contact_report:
+                self._prev_was_matched = wp.zeros(capacity, dtype=wp.int32)
                 self._new_contact_indices = wp.zeros(capacity, dtype=wp.int32)
                 self._new_contact_count = wp.zeros(1, dtype=wp.int32)
                 self._broken_contact_indices = wp.zeros(capacity, dtype=wp.int32)
                 self._broken_contact_count = wp.zeros(1, dtype=wp.int32)
             else:
+                # Dummy zero-length arrays so the Warp struct is always valid.
+                self._prev_was_matched = wp.zeros(1, dtype=wp.int32)
                 self._new_contact_indices = wp.zeros(0, dtype=wp.int32)
                 self._new_contact_count = wp.zeros(0, dtype=wp.int32)
                 self._broken_contact_indices = wp.zeros(0, dtype=wp.int32)
@@ -373,12 +400,14 @@ class ContactMatcher:
                 Written directly (no intermediate copy).
             device: Device to launch on.
         """
-        self._prev_was_matched.zero_()
+        if self._has_report:
+            self._prev_was_matched.zero_()
 
         data = _MatchData()
         data.prev_keys = self._prev_sorted_keys
-        data.prev_pos_world = self._prev_pos_world
-        data.prev_normal = self._prev_normal
+        # Reuse sorter scratch buffers for prev-frame world-space data.
+        data.prev_pos_world = self._sorter._full_point0_buf
+        data.prev_normal = self._sorter._full_normal_buf
         data.prev_count = self._prev_count
         data.new_keys = sort_keys
         data.new_point0 = point0
@@ -391,6 +420,7 @@ class ContactMatcher:
         data.prev_was_matched = self._prev_was_matched
         data.pos_threshold_sq = self._pos_threshold_sq
         data.normal_dot_threshold = self._normal_dot_threshold
+        data.has_report = 1 if self._has_report else 0
 
         wp.launch(_match_contacts_kernel, dim=self._capacity, inputs=[data], device=device)
 
@@ -409,6 +439,11 @@ class ContactMatcher:
         """Save current frame's sorted contacts for next-frame matching.
 
         Must be called **after** :meth:`ContactSorter.sort_full`.
+
+        World-space positions and normals are written into the sorter's scratch
+        buffers (``_full_point0_buf``, ``_full_normal_buf``), which are idle
+        between frames.  Sorted keys go to an owned buffer since the sorter's
+        key buffer is overwritten by ``_prepare_sort`` each frame.
 
         Args:
             sorted_keys: Sorted int64 keys (use :attr:`ContactSorter.sorted_keys_view`).
@@ -429,8 +464,9 @@ class ContactMatcher:
         data.body_q = body_q
         data.shape_body = shape_body
         data.dst_keys = self._prev_sorted_keys
-        data.dst_pos_world = self._prev_pos_world
-        data.dst_normal = self._prev_normal
+        # Write world-space positions and normals into sorter's scratch buffers.
+        data.dst_pos_world = self._sorter._full_point0_buf
+        data.dst_normal = self._sorter._full_normal_buf
         data.dst_count = self._prev_count
 
         wp.launch(_save_sorted_state_kernel, dim=self._capacity, inputs=[data], device=device)
