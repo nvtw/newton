@@ -624,6 +624,18 @@ class SolverBox3D(SolverBase):
                 )
 
         # ── 5. Restitution pass (after all substeps, following Box2D) ──
+        if not cfg.enable_restitution:
+            # Store impulses and return early
+            wp.launch(
+                store_impulses_2d,
+                dim=(W, cfg.max_contacts_per_world),
+                inputs=[buf.c_normal_impulse, buf.c_friction1_impulse,
+                        buf.c_friction2_impulse, buf.contact_count],
+                outputs=[buf.prev_normal_impulse, buf.prev_friction1_impulse,
+                         buf.prev_friction2_impulse, buf.prev_contact_count],
+                device=device,
+            )
+            return
         wp.launch_tiled(
             contact_solve_kernel,
             dim=[W],

@@ -98,6 +98,9 @@ class Box3DConfig:
     max_joints_per_world: int = 1024
     max_colors: int = 64
     block_dim: int = 128
+    enable_restitution: bool = True
+    """Enable the post-substep restitution pass.  Disable for scenes
+    where no shapes have restitution > 0 to save one kernel launch."""
     enable_graph: bool = False
     """Enable CUDA graph capture for the solver-internal kernels.
 
