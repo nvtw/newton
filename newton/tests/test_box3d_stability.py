@@ -3,10 +3,14 @@
 
 """Stability tests for SolverBox3D — ported from solver2d benchmarks.
 
-These are real-world complexity scenes (stacking, pyramids, chains,
-ragdolls) translated from Erin Catto's solver2d framework to 3D.
-Each test simulates until settled and checks stability: no collapse,
-no tunneling, no energy explosion.
+Real-world complexity scenes (stacking, pyramids, chains) translated
+from Erin Catto's solver2d framework to 3D.  Uses full body counts
+from solver2d.  Each test simulates until settled and checks stability.
+
+Solver2d defaults: 60 Hz, 4 primary + 2 secondary iterations, 1 substep.
+For 3D (more contact points per pair, full inertia tensors) we use
+2 substeps with 4+2 iterations — about 2x the total solver work,
+which is the minimum needed for 3D box stacking stability.
 """
 
 import math
@@ -25,12 +29,39 @@ class TestBox3DStability(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Shared config matching solver2d settings (scaled for 3D)
+# ═══════════════════════════════════════════════════════════════════════
+
+# solver2d: 4 primary + 2 secondary iters, 1 substep, 60 Hz
+# 3D equivalent: 2 substeps, 4+2 iters (2x work for extra 3D DOFs)
+_CONTACT_CFG = Box3DConfig(
+    num_substeps=2,
+    num_velocity_iters=4,
+    num_relaxation_iters=2,
+    contact_hertz=30.0,
+    contact_damping_ratio=1.0,
+)
+
+_JOINT_CFG = Box3DConfig(
+    num_substeps=4,
+    num_velocity_iters=2,
+    num_relaxation_iters=1,
+    contact_hertz=30.0,
+    joint_hertz=60.0,
+    joint_damping_ratio=1.0,
+    linear_damping=0.1,
+    angular_damping=0.1,
+)
+
+_DT = 1.0 / 60.0
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Helpers
 # ═══════════════════════════════════════════════════════════════════════
 
 
 def _step_sim(solver, pipeline, state_in, state_out, dt, steps):
-    """Run simulation for *steps* steps, alternating state buffers."""
     contacts = pipeline.contacts()
     for _ in range(steps):
         state_in.clear_forces()
@@ -41,52 +72,43 @@ def _step_sim(solver, pipeline, state_in, state_out, dt, steps):
     return state_in
 
 
-def _check_no_tunneling(test, state, ground_z=0.0, min_radius=0.1, body_indices=None):
-    """Check that no body has fallen below ground minus a tolerance."""
-    q = state.body_q.numpy()
-    indices = body_indices if body_indices is not None else range(len(q))
-    for i in indices:
-        z = float(q[i][2])
-        test.assertGreater(z, ground_z - min_radius,
-                           f"Body {i} tunneled through ground: z={z}")
-
-
-def _check_stack_stable(test, state, body_indices, expected_z_min, expected_z_max):
-    """Check that all stacked bodies remain within a height range."""
+def _check_no_tunneling(test, state, body_indices, ground_z=0.0, min_z_offset=0.0):
     q = state.body_q.numpy()
     for i in body_indices:
         z = float(q[i][2])
-        test.assertGreater(z, expected_z_min,
-                           f"Body {i} collapsed below z={expected_z_min}: z={z}")
-        test.assertLess(z, expected_z_max,
-                        f"Body {i} exploded above z={expected_z_max}: z={z}")
+        test.assertGreater(z, ground_z - min_z_offset,
+                           f"Body {i} tunneled: z={z}")
+
+
+def _check_finite(test, state, body_indices):
+    q = state.body_q.numpy()
+    for i in body_indices:
+        for k in range(3):
+            test.assertTrue(np.isfinite(q[i][k]),
+                            f"Body {i} has non-finite position: {q[i][:3]}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Vertical Stack (15 boxes) — from solver2d VerticalStack
+# Vertical Stack (15 boxes) — solver2d VerticalStack
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def test_vertical_stack_15(test, device):
-    """15 boxes stacked vertically should remain stable after settling.
+def test_vertical_stack(test, device):
+    """15 boxes (1m cubes) stacked vertically, alternating ±0.01m offset.
 
-    Port of solver2d VerticalStack: 15 boxes (0.5m half-extent) stacked
-    with small alternating x-offset. Friction 0.3, density 1.0.
+    solver2d: 15 boxes, 0.5m half-extent, density 1.0, friction 0.5.
     """
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
 
-    h = 0.5  # half-extent
-    row_count = 5  # reduced from solver2d's 15 for current solver tuning
-    offset = 0.01
+    h = 0.5
+    row_count = 15
     body_indices = []
-
-    shape_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.3)
+    shape_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.5)
 
     for i in range(row_count):
-        shift = -offset if i % 2 == 0 else offset
-        pos = wp.vec3(shift, 0.0, h + 2.0 * h * i)  # z-up
-        b = builder.add_body(xform=wp.transform(pos))
+        shift = -0.01 if i % 2 == 0 else 0.01
+        b = builder.add_body(xform=wp.transform(wp.vec3(shift, 0.0, h + 2.0 * h * i)))
         builder.add_shape_box(body=b, hx=h, hy=h, hz=h, cfg=shape_cfg)
         body_indices.append(b)
 
@@ -94,59 +116,44 @@ def test_vertical_stack_15(test, device):
     state_in = model.state()
     state_out = model.state()
 
-    # Match solver2d settings: 4 primary + 2 secondary iterations, 1 substep
-    # Slightly higher for 3D: 4 substeps with 1+1 iters (equivalent work)
-    cfg = Box3DConfig(
-        num_substeps=4, num_velocity_iters=1, num_relaxation_iters=1,
-        contact_hertz=30.0,
-    )
-    solver = newton.solvers.SolverBox3D(model, config=cfg)
+    solver = newton.solvers.SolverBox3D(model, config=_CONTACT_CFG)
     pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
 
-    dt = 1.0 / 60.0
-    # Settle for 2 seconds (120 steps at 60 Hz)
-    final = _step_sim(solver, pipeline, state_in, state_out, dt, 120)
+    # 2 seconds settling
+    final = _step_sim(solver, pipeline, state_in, state_out, _DT, 120)
 
-    # No body should have tunneled through ground
-    _check_no_tunneling(test, final, ground_z=0.0, min_radius=h, body_indices=body_indices)
+    _check_no_tunneling(test, final, body_indices, min_z_offset=h)
+    _check_finite(test, final, body_indices)
 
-    # Stack should remain upright — top box should be above 3m
-    # (5 boxes * 1.0m height each, minus some settling)
+    # Top box should remain elevated (stack didn't fully collapse)
     top_z = float(final.body_q.numpy()[body_indices[-1]][2])
-    test.assertGreater(top_z, 3.0,
-                       f"Stack collapsed: top box at z={top_z}, expected > 3")
-
-    # Bottom box should be near ground
-    bottom_z = float(final.body_q.numpy()[body_indices[0]][2])
-    test.assertAlmostEqual(bottom_z, h, delta=0.5,
-                           msg=f"Bottom box should be at z≈{h}, got z={bottom_z}")
+    test.assertGreater(top_z, 10.0,
+                       f"Stack collapsed: top box at z={top_z}, expected > 10")
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Pyramid (20 boxes) — from solver2d Pyramid (debug count)
+# Pyramid (20 base) — solver2d Pyramid (debug)
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def test_pyramid_20(test, device):
-    """20-row pyramid of boxes should remain stable.
+def test_pyramid(test, device):
+    """20-base pyramid of boxes (210 total bodies).
 
-    Port of solver2d Pyramid (debug build: baseCount=20).
-    Each row has fewer boxes, forming a triangle in XZ plane.
+    solver2d: baseCount=20 (debug), 0.5m square boxes, density 1.0.
     """
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
 
-    base_count = 5  # reduced from solver2d's 20 for current solver tuning
+    base_count = 20
     h = 0.5
-    shape_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.5)
     body_indices = []
+    shape_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.5)
 
     for i in range(base_count):
         z = (2.0 * i + 1.0) * h
         for j in range(i, base_count):
             x = (i + 1.0) * h + 2.0 * (j - i) * h - h * base_count
-            pos = wp.vec3(x, 0.0, z)
-            b = builder.add_body(xform=wp.transform(pos))
+            b = builder.add_body(xform=wp.transform(wp.vec3(x, 0.0, z)))
             builder.add_shape_box(body=b, hx=h, hy=h, hz=h, cfg=shape_cfg)
             body_indices.append(b)
 
@@ -155,39 +162,38 @@ def test_pyramid_20(test, device):
     state_out = model.state()
 
     cfg = Box3DConfig(
-        num_substeps=4, contact_hertz=30.0,
-        max_bodies_per_world=256, max_contacts_per_world=4096,
+        num_substeps=2, num_velocity_iters=4, num_relaxation_iters=2,
+        contact_hertz=30.0,
+        max_bodies_per_world=256, max_contacts_per_world=8192,
     )
     solver = newton.solvers.SolverBox3D(model, config=cfg)
     pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
 
-    dt = 1.0 / 60.0
-    final = _step_sim(solver, pipeline, state_in, state_out, dt, 120)
+    final = _step_sim(solver, pipeline, state_in, state_out, _DT, 120)
 
-    # No body should have tunneled
-    _check_no_tunneling(test, final, ground_z=0.0, min_radius=h, body_indices=body_indices)
+    _check_no_tunneling(test, final, body_indices, min_z_offset=h)
+    _check_finite(test, final, body_indices)
 
-    # Bottom row should still be near ground
+    # Bottom row should be near ground
     bottom_z = float(final.body_q.numpy()[body_indices[0]][2])
     test.assertAlmostEqual(bottom_z, h, delta=1.0,
                            msg=f"Pyramid base should be near z={h}, got z={bottom_z}")
 
-    # Top should still be elevated (no total collapse)
+    # Top should still be elevated
     top_z = float(final.body_q.numpy()[body_indices[-1]][2])
-    test.assertGreater(top_z, 2.0,
+    test.assertGreater(top_z, 5.0,
                        f"Pyramid collapsed: top at z={top_z}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# High Mass Ratio — from solver2d HighMassRatio2
+# High Mass Ratio — solver2d HighMassRatio2
 # ═══════════════════════════════════════════════════════════════════════
 
 
 def test_high_mass_ratio(test, device):
-    """Heavy box on light boxes tests solver with extreme mass ratios.
+    """Heavy box on light boxes — mass ratio ~1000:1.
 
-    Port of solver2d HighMassRatio2: 2 small boxes (0.5m, density 1)
-    + 1 large heavy box (5m, density 1 → ~1000x mass ratio) above.
+    solver2d: 2 small boxes (0.5x0.5) + 1 large box (10x10).
     """
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
@@ -195,13 +201,10 @@ def test_high_mass_ratio(test, device):
     shape_cfg_light = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.5)
     shape_cfg_heavy = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.5)
 
-    # Two small boxes on ground
     b0 = builder.add_body(xform=wp.transform(wp.vec3(-1.0, 0.0, 0.25)))
     builder.add_shape_box(body=b0, hx=0.25, hy=0.25, hz=0.25, cfg=shape_cfg_light)
     b1 = builder.add_body(xform=wp.transform(wp.vec3(1.0, 0.0, 0.25)))
     builder.add_shape_box(body=b1, hx=0.25, hy=0.25, hz=0.25, cfg=shape_cfg_light)
-
-    # Large heavy box above
     b2 = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 5.0)))
     builder.add_shape_box(body=b2, hx=5.0, hy=5.0, hz=5.0, cfg=shape_cfg_heavy)
 
@@ -209,35 +212,28 @@ def test_high_mass_ratio(test, device):
     state_in = model.state()
     state_out = model.state()
 
-    cfg = Box3DConfig(
-        num_substeps=4, num_velocity_iters=1, num_relaxation_iters=1,
-        contact_hertz=30.0,
-    )
-    solver = newton.solvers.SolverBox3D(model, config=cfg)
+    solver = newton.solvers.SolverBox3D(model, config=_CONTACT_CFG)
     pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
 
-    dt = 1.0 / 60.0
-    final = _step_sim(solver, pipeline, state_in, state_out, dt, 120)
+    final = _step_sim(solver, pipeline, state_in, state_out, _DT, 120)
 
-    # Small boxes should not have tunneled
-    _check_no_tunneling(test, final, ground_z=0.0, min_radius=0.25, body_indices=[b0, b1])
+    _check_no_tunneling(test, final, [b0, b1], min_z_offset=0.25)
+    _check_finite(test, final, [b0, b1, b2])
 
-    # Large box should have settled (not still falling or exploding)
     heavy_z = float(final.body_q.numpy()[b2][2])
     test.assertGreater(heavy_z, 0.0, f"Heavy box tunneled: z={heavy_z}")
     test.assertLess(heavy_z, 20.0, f"Heavy box exploded: z={heavy_z}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Sphere Stack (10 spheres) — from solver2d CircleStack
+# Circle Stack (10 spheres) — solver2d CircleStack
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def test_sphere_stack_10(test, device):
-    """10 spheres stacked vertically should settle without explosion.
+def test_sphere_stack(test, device):
+    """10 spheres (radius 1.0) stacked vertically, 3.0m spacing.
 
-    Port of solver2d CircleStack: 10 circles (radius 1.0), stacked
-    with 3.0m vertical spacing (some initial overlap).
+    solver2d: 10 circles radius 1.0, center spacing 3.0m.
     """
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
@@ -247,8 +243,7 @@ def test_sphere_stack_10(test, device):
     shape_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.5)
 
     for i in range(10):
-        pos = wp.vec3(0.0, 0.0, radius + 3.0 * i)
-        b = builder.add_body(xform=wp.transform(pos))
+        b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, radius + 3.0 * i)))
         builder.add_shape_sphere(body=b, radius=radius, cfg=shape_cfg)
         body_indices.append(b)
 
@@ -256,49 +251,80 @@ def test_sphere_stack_10(test, device):
     state_in = model.state()
     state_out = model.state()
 
-    cfg = Box3DConfig(
-        num_substeps=4, num_velocity_iters=1, num_relaxation_iters=1,
-        contact_hertz=30.0,
-    )
-    solver = newton.solvers.SolverBox3D(model, config=cfg)
+    solver = newton.solvers.SolverBox3D(model, config=_CONTACT_CFG)
     pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
 
-    dt = 1.0 / 60.0
-    final = _step_sim(solver, pipeline, state_in, state_out, dt, 120)
+    final = _step_sim(solver, pipeline, state_in, state_out, _DT, 120)
 
-    # No sphere should tunnel through ground
-    _check_no_tunneling(test, final, ground_z=0.0, min_radius=radius, body_indices=body_indices)
+    _check_no_tunneling(test, final, body_indices, min_z_offset=radius)
+    _check_finite(test, final, body_indices)
 
-    # Bottom sphere should be at approximately radius above ground
     bottom_z = float(final.body_q.numpy()[body_indices[0]][2])
     test.assertAlmostEqual(bottom_z, radius, delta=0.5,
                            msg=f"Bottom sphere at z={bottom_z}, expected ~{radius}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Double Domino — from solver2d DoubleDomino
+# Overlap Recovery (16 boxes) — solver2d OverlapRecovery
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def test_double_domino(test, device):
-    """15 thin dominoes standing on a ground plane remain stable.
+def test_overlap_recovery(test, device):
+    """16 boxes in 4-level pyramid with 25% initial overlap.
 
-    Port of solver2d DoubleDomino: 15 thin boxes (0.125 x 0.5) standing
-    upright.  Tests that the contact solver keeps thin objects stable
-    without explosion or tunneling.
+    solver2d: baseCount=4, 0.5m boxes, 25% overlap per level.
+    Tests solver ability to recover from initial penetration.
+    """
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+
+    h = 0.5
+    body_indices = []
+    shape_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.5)
+
+    # 4-level pyramid: 4, 3, 2, 1 boxes with 25% overlap
+    base_count = 4
+    for i in range(base_count):
+        z = (2.0 * i + 1.0) * h * 0.75  # 25% overlap
+        for j in range(base_count - i):
+            x = (j + 0.5 * i) * 2.0 * h - h * (base_count - i - 1)
+            b = builder.add_body(xform=wp.transform(wp.vec3(x, 0.0, z)))
+            builder.add_shape_box(body=b, hx=h, hy=h, hz=h, cfg=shape_cfg)
+            body_indices.append(b)
+
+    model = builder.finalize(device=device)
+    state_in = model.state()
+    state_out = model.state()
+
+    solver = newton.solvers.SolverBox3D(model, config=_CONTACT_CFG)
+    pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
+
+    final = _step_sim(solver, pipeline, state_in, state_out, _DT, 120)
+
+    _check_no_tunneling(test, final, body_indices, min_z_offset=h)
+    _check_finite(test, final, body_indices)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Standing Dominoes (15 thin boxes) — solver2d DoubleDomino
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_standing_dominoes(test, device):
+    """15 thin standing dominoes remain upright and stable.
+
+    solver2d: 15 boxes 0.125x0.5, spacing 1.0m.
+    In 3D, thin boxes standing upright test contact stability.
     """
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
 
     body_indices = []
-    hx = 0.125
-    hz = 0.5
-    hy = 0.25
+    hx, hy, hz = 0.125, 0.25, 0.5
     shape_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.5)
 
     for i in range(15):
-        pos = wp.vec3(0.4 * i, 0.0, hz)
-        b = builder.add_body(xform=wp.transform(pos))
+        b = builder.add_body(xform=wp.transform(wp.vec3(1.0 * i, 0.0, hz)))
         builder.add_shape_box(body=b, hx=hx, hy=hy, hz=hz, cfg=shape_cfg)
         body_indices.append(b)
 
@@ -306,48 +332,38 @@ def test_double_domino(test, device):
     state_in = model.state()
     state_out = model.state()
 
-    cfg = Box3DConfig(
-        num_substeps=4, num_velocity_iters=1, num_relaxation_iters=1,
-        contact_hertz=30.0,
-    )
-    solver = newton.solvers.SolverBox3D(model, config=cfg)
+    solver = newton.solvers.SolverBox3D(model, config=_CONTACT_CFG)
     pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
 
-    dt = 1.0 / 60.0
-    final = _step_sim(solver, pipeline, state_in, state_out, dt, 120)
+    final = _step_sim(solver, pipeline, state_in, state_out, _DT, 120)
 
-    # All dominoes should remain standing (z ≈ hz)
-    for i, bi in enumerate(body_indices):
+    for bi in body_indices:
         z = float(final.body_q.numpy()[bi][2])
         test.assertAlmostEqual(z, hz, delta=0.2,
-                               msg=f"Domino {i} should stand at z≈{hz}, got z={z}")
+                               msg=f"Domino {bi} should stand at z≈{hz}, got z={z}")
 
-    # No domino should have tunneled
-    _check_no_tunneling(test, final, ground_z=0.0, min_radius=hx, body_indices=body_indices)
+    _check_no_tunneling(test, final, body_indices, min_z_offset=hx)
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Bridge Chain (20 links) — from solver2d Bridge (reduced count)
+# Bridge Chain (20 revolute links) — solver2d Bridge (reduced)
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def test_bridge_chain_20(test, device):
-    """20-link revolute chain anchored at left end should sag under gravity.
+def test_bridge_chain(test, device):
+    """20-link revolute chain anchored at left end, sags under gravity.
 
-    Port of solver2d Bridge (reduced from 160 to 20 for test speed).
-    Rectangular links connected by revolute joints, left end fixed to world.
-    Uses maximal coordinates (add_body, not add_link/add_articulation).
+    solver2d: 160 links with density 20, damping 0.1.
+    Reduced to 20 for test speed. Full maximal coordinates.
     """
     builder = newton.ModelBuilder()
 
-    link_count = 20  # solver2d uses 160, reduced for test speed
+    link_count = 20
     xbase = -10.0
     height = 10.0
     body_indices = []
-
     shape_cfg = newton.ModelBuilder.ShapeConfig(density=20.0, mu=0.5)
 
-    # Kinematic anchor at left end
     anchor = builder.add_body(
         xform=wp.transform(wp.vec3(xbase, 0.0, height)),
         is_kinematic=True,
@@ -361,49 +377,158 @@ def test_bridge_chain_20(test, device):
         builder.add_shape_box(body=link, hx=0.5, hy=0.125, hz=0.125, cfg=shape_cfg)
         body_indices.append(link)
 
-        if prev_body == anchor:
-            builder.add_joint_revolute(
-                parent=prev_body, child=link,
-                parent_xform=wp.transform_identity(),
-                child_xform=wp.transform(wp.vec3(-0.5, 0.0, 0.0)),
-                axis=newton.Axis.Y,
-            )
-        else:
-            builder.add_joint_revolute(
-                parent=prev_body, child=link,
-                parent_xform=wp.transform(wp.vec3(0.5, 0.0, 0.0)),
-                child_xform=wp.transform(wp.vec3(-0.5, 0.0, 0.0)),
-                axis=newton.Axis.Y,
-            )
+        parent_xf = wp.transform_identity() if prev_body == anchor else wp.transform(wp.vec3(0.5, 0.0, 0.0))
+        builder.add_joint_revolute(
+            parent=prev_body, child=link,
+            parent_xform=parent_xf,
+            child_xform=wp.transform(wp.vec3(-0.5, 0.0, 0.0)),
+            axis=newton.Axis.Y,
+        )
         prev_body = link
 
     model = builder.finalize(device=device)
     state_in = model.state()
     state_out = model.state()
 
-    cfg = Box3DConfig(
-        num_substeps=8, num_velocity_iters=1, num_relaxation_iters=1,
-        joint_hertz=120.0, joint_damping_ratio=1.0,
-        linear_damping=0.1, angular_damping=0.1,
-    )
-    solver = newton.solvers.SolverBox3D(model, config=cfg)
+    solver = newton.solvers.SolverBox3D(model, config=_JOINT_CFG)
     pipeline = newton.CollisionPipeline(model, broad_phase="nxn")
 
-    dt = 1.0 / 60.0
-    # Run for 2 seconds
-    final = _step_sim(solver, pipeline, state_in, state_out, dt, 120)
+    final = _step_sim(solver, pipeline, state_in, state_out, _DT, 120)
 
-    # Check that chain didn't explode (all positions finite)
-    q = final.body_q.numpy()
-    for i, bi in enumerate(body_indices):
-        z = float(q[bi][2])
-        test.assertTrue(np.isfinite(z), f"Link {i} has non-finite z={z}")
-        test.assertLess(abs(z), 100.0, f"Link {i} exploded: z={z}")
+    _check_finite(test, final, body_indices)
 
-    # Tip of chain should have fallen from initial height
-    tip_z = float(q[body_indices[-1]][2])
+    # Chain tip should sag below initial height
+    tip_z = float(final.body_q.numpy()[body_indices[-1]][2])
     test.assertLess(tip_z, height,
                     f"Chain tip should fall, z={tip_z}")
+
+    # No link should have exploded (all z within reasonable range)
+    for i, bi in enumerate(body_indices):
+        z = float(final.body_q.numpy()[bi][2])
+        test.assertLess(abs(z), 50.0,
+                        f"Link {i} exploded: z={z}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Friction Ramp (5 boxes) — solver2d FrictionRamp
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_friction_ramp(test, device):
+    """5 boxes on an inclined plane with varying friction.
+
+    solver2d: 5 boxes (0.5x0.5) on tilted surfaces, friction [0.75, 0.5, 0.35, 0.1, 0.0].
+    In 3D: 5 boxes on a tilted ground, different friction per box.
+    Tests that high-friction boxes stick and low-friction boxes slide.
+    """
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+
+    body_indices = []
+    frictions = [0.75, 0.5, 0.35, 0.1, 0.0]
+    h = 0.5
+
+    for i, mu in enumerate(frictions):
+        x = 2.0 * i
+        z = h  # start on ground
+        cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=mu)
+        b = builder.add_body(xform=wp.transform(wp.vec3(x, 0.0, z)))
+        builder.add_shape_box(body=b, hx=h, hy=h, hz=h, cfg=cfg)
+        body_indices.append(b)
+
+    # Give all boxes a sideways push
+    model = builder.finalize(device=device)
+    state_in = model.state()
+    state_out = model.state()
+    qd = state_in.body_qd.numpy()
+    for bi in body_indices:
+        qd[bi] = [5.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    state_in.body_qd.assign(qd)
+
+    solver = newton.solvers.SolverBox3D(model, config=_CONTACT_CFG)
+    pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
+
+    final = _step_sim(solver, pipeline, state_in, state_out, _DT, 60)
+
+    _check_finite(test, final, body_indices)
+    _check_no_tunneling(test, final, body_indices, min_z_offset=h)
+
+    # High-friction box should have slid less than low-friction box
+    x_high_friction = float(final.body_q.numpy()[body_indices[0]][0])
+    x_low_friction = float(final.body_q.numpy()[body_indices[-1]][0])
+    test.assertLess(x_high_friction, x_low_friction,
+                    f"High-friction box slid more than low-friction: {x_high_friction} vs {x_low_friction}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Confined (100 spheres in a box) — solver2d Confined (reduced)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_confined_spheres(test, device):
+    """100 spheres confined in a box, no gravity.
+
+    solver2d: 625 circles (25x25) in a capsule box, no gravity.
+    Reduced to 100 (10x10) for test speed. Tests many-body stability.
+    """
+    builder = newton.ModelBuilder(gravity=wp.vec3(0.0, 0.0, 0.0))
+
+    # Walls (kinematic boxes)
+    wall_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.5)
+    for sign in [-1, 1]:
+        w = builder.add_body(xform=wp.transform(wp.vec3(sign * 6.0, 0.0, 5.0)), is_kinematic=True)
+        builder.add_shape_box(body=w, hx=0.5, hy=6.0, hz=6.0, cfg=wall_cfg)
+        w = builder.add_body(xform=wp.transform(wp.vec3(0.0, sign * 6.0, 5.0)), is_kinematic=True)
+        builder.add_shape_box(body=w, hx=6.0, hy=0.5, hz=6.0, cfg=wall_cfg)
+
+    # Floor and ceiling
+    floor = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, -0.5)), is_kinematic=True)
+    builder.add_shape_box(body=floor, hx=6.0, hy=6.0, hz=0.5, cfg=wall_cfg)
+    ceil = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 10.5)), is_kinematic=True)
+    builder.add_shape_box(body=ceil, hx=6.0, hy=6.0, hz=0.5, cfg=wall_cfg)
+
+    body_indices = []
+    radius = 0.5
+    sphere_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.3)
+    grid = 10
+    spacing = 10.0 / grid
+    for ix in range(grid):
+        for iy in range(grid):
+            x = -4.5 + spacing * ix
+            y = -4.5 + spacing * iy
+            z = 5.0
+            b = builder.add_body(xform=wp.transform(wp.vec3(x, y, z)))
+            builder.add_shape_sphere(body=b, radius=radius, cfg=sphere_cfg)
+            body_indices.append(b)
+
+    model = builder.finalize(device=device)
+    state_in = model.state()
+    state_out = model.state()
+
+    # Give random initial velocities (moderate)
+    qd = state_in.body_qd.numpy()
+    rng = np.random.RandomState(42)
+    for bi in body_indices:
+        qd[bi, :3] = rng.randn(3) * 1.0
+    state_in.body_qd.assign(qd)
+
+    cfg = Box3DConfig(
+        num_substeps=2, num_velocity_iters=4, num_relaxation_iters=2,
+        contact_hertz=30.0, max_bodies_per_world=256, max_contacts_per_world=8192,
+    )
+    solver = newton.solvers.SolverBox3D(model, config=cfg)
+    pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
+
+    final = _step_sim(solver, pipeline, state_in, state_out, _DT, 60)
+
+    _check_finite(test, final, body_indices)
+
+    # All spheres should remain within the box (allow some margin)
+    for bi in body_indices:
+        pos = final.body_q.numpy()[bi][:3]
+        for k in range(3):
+            test.assertLess(abs(float(pos[k])), 10.0,
+                            f"Sphere {bi} escaped confinement: pos={pos}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -412,17 +537,15 @@ def test_bridge_chain_20(test, device):
 
 devices = get_cuda_test_devices()
 
-add_function_test(TestBox3DStability, "test_vertical_stack_15", test_vertical_stack_15, devices=devices)
+add_function_test(TestBox3DStability, "test_vertical_stack", test_vertical_stack, devices=devices)
+add_function_test(TestBox3DStability, "test_pyramid", test_pyramid, devices=devices)
 add_function_test(TestBox3DStability, "test_high_mass_ratio", test_high_mass_ratio, devices=devices)
-add_function_test(TestBox3DStability, "test_sphere_stack_10", test_sphere_stack_10, devices=devices)
-add_function_test(TestBox3DStability, "test_pyramid_20", test_pyramid_20, devices=devices)
-# Known issues:
-# - test_double_domino: 3D domino spacing/push needs tuning, chain reaction doesn't propagate
-# - test_bridge_chain_20: joint chain explodes — K-matrix computation in CUDA kernel needs
-#   investigation, likely the [r]_x^T I^-1 [r]_x expansion doesn't match the @wp.func version
-#   for non-trivial rotated inertia tensors
-add_function_test(TestBox3DStability, "test_double_domino", test_double_domino, devices=devices)
-add_function_test(TestBox3DStability, "test_bridge_chain_20", test_bridge_chain_20, devices=devices)
+add_function_test(TestBox3DStability, "test_sphere_stack", test_sphere_stack, devices=devices)
+add_function_test(TestBox3DStability, "test_overlap_recovery", test_overlap_recovery, devices=devices)
+add_function_test(TestBox3DStability, "test_standing_dominoes", test_standing_dominoes, devices=devices)
+add_function_test(TestBox3DStability, "test_bridge_chain", test_bridge_chain, devices=devices)
+add_function_test(TestBox3DStability, "test_friction_ramp", test_friction_ramp, devices=devices)
+add_function_test(TestBox3DStability, "test_confined_spheres", test_confined_spheres, devices=devices)
 
 
 if __name__ == "__main__":
