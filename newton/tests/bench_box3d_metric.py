@@ -73,14 +73,14 @@ def measure(scene_fn, num_worlds, num_steps=50, warmup=10):
     contacts = pipeline.contacts()
     dt = 1.0 / 60.0
     for _ in range(warmup):
-        contacts.clear()
+        s_in.clear_forces(); contacts.clear()
         pipeline.collide(s_in, contacts)
         solver.step(s_in, s_out, None, contacts, dt)
         s_in, s_out = s_out, s_in
     wp.synchronize_device(device)
     t0 = time.perf_counter()
     for _ in range(num_steps):
-        contacts.clear()
+        s_in.clear_forces(); contacts.clear()
         pipeline.collide(s_in, contacts)
         solver.step(s_in, s_out, None, contacts, dt)
         s_in, s_out = s_out, s_in
