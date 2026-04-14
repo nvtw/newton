@@ -305,29 +305,40 @@ class TestUnifiedPipelineMeshHeightfield(unittest.TestCase):
             msg.reset_log_level()
 
     def test_01_sphere_on_flat_heightfield(self):
-        """Sphere touching flat heightfield: 1 contact, normal=(0,0,1), position at z=0."""
+        """Sphere touching flat heightfield: 2 contacts (one per cell triangle), normal=(0,0,1), position at z=0."""
         _, model, data, state = _finalize_and_get_kamino(_build_sphere_on_heightfield(), self.default_device)
         contacts = _run_unified_pipeline(model, data, state, self.default_device)
 
         nc = int(contacts.model_active_contacts.numpy()[0])
-        self.assertEqual(nc, 1, f"Sphere-on-flat-heightfield should produce exactly 1 contact, got {nc}")
+        # A sphere centered over a heightfield cell touches both triangles in that cell,
+        # producing 2 contacts on a flat surface.
+        self.assertEqual(nc, 2, f"Sphere-on-flat-heightfield should produce 2 contacts (1 per triangle), got {nc}")
 
-        gapfunc = contacts.gapfunc.numpy()[0]
-        normal = gapfunc[:3]
-        signed_dist = gapfunc[3]
+        gapfunc = contacts.gapfunc.numpy()[:nc]
+        pos_a = contacts.position_A.numpy()[:nc]
 
-        # Normal must be (0, 0, 1) for a flat heightfield
-        np.testing.assert_allclose(normal, [0.0, 0.0, 1.0], atol=0.05, err_msg="Normal must point up")
+        for i in range(nc):
+            normal = gapfunc[i, :3]
+            signed_dist = gapfunc[i, 3]
 
-        # Signed distance: sphere center is at z=R, surface at z=0, so distance ≈ 0
-        self.assertLessEqual(signed_dist, 0.01, f"Signed distance should be near zero, got {signed_dist}")
-        self.assertGreaterEqual(signed_dist, -0.01, f"Signed distance should be near zero, got {signed_dist}")
+            # Normal must be (0, 0, 1) for a flat heightfield
+            np.testing.assert_allclose(normal, [0.0, 0.0, 1.0], atol=0.05, err_msg=f"Contact {i}: normal must point up")
 
-        # Contact point on the heightfield side (position_A) should be near (0, 0, 0)
-        pos_a = contacts.position_A.numpy()[0]
-        np.testing.assert_allclose(
-            pos_a[2], 0.0, atol=0.02, err_msg=f"Heightfield contact z should be ≈ 0, got {pos_a[2]}"
-        )
+            # Signed distance: sphere center is at z=R, surface at z=0, so distance ≈ 0
+            self.assertLessEqual(
+                signed_dist, 0.01, f"Contact {i}: signed distance should be near zero, got {signed_dist}"
+            )
+            self.assertGreaterEqual(
+                signed_dist, -0.01, f"Contact {i}: signed distance should be near zero, got {signed_dist}"
+            )
+
+            # Contact point on the heightfield side (position_A) should be near (0, 0, 0)
+            np.testing.assert_allclose(
+                pos_a[i, 2],
+                0.0,
+                atol=0.02,
+                err_msg=f"Contact {i}: heightfield contact z should be ≈ 0, got {pos_a[i, 2]}",
+            )
 
     def test_02_box_on_flat_heightfield(self):
         """Box resting on flat heightfield: >=4 contacts, all at z ≈ 0."""
@@ -375,7 +386,7 @@ class TestUnifiedPipelineMeshHeightfield(unittest.TestCase):
             self.assertGreater(normal[2], 0.7, f"Contact {i}: normal z={normal[2]}, expected mostly up")
 
     def test_04_multi_world_heightfield(self):
-        """Multi-world sphere-on-heightfield: each world gets exactly 1 contact."""
+        """Multi-world sphere-on-heightfield: each world gets exactly 2 contacts (1 per triangle)."""
         num_worlds = 3
         _, model, data, state = _finalize_and_get_kamino(
             _build_multi_world_heightfield(num_worlds), self.default_device
@@ -383,11 +394,12 @@ class TestUnifiedPipelineMeshHeightfield(unittest.TestCase):
         contacts = _run_unified_pipeline(model, data, state, self.default_device)
 
         nc = int(contacts.model_active_contacts.numpy()[0])
-        self.assertEqual(nc, num_worlds, f"Expected {num_worlds} contacts (1 per world), got {nc}")
+        expected_total = 2 * num_worlds  # 2 contacts per sphere (one per cell triangle)
+        self.assertEqual(nc, expected_total, f"Expected {expected_total} contacts (2 per world), got {nc}")
 
         world_counts = contacts.world_active_contacts.numpy()[:num_worlds]
         for w in range(num_worlds):
-            self.assertEqual(int(world_counts[w]), 1, f"World {w}: expected 1 contact, got {world_counts[w]}")
+            self.assertEqual(int(world_counts[w]), 2, f"World {w}: expected 2 contacts, got {world_counts[w]}")
 
     def test_05_no_contacts_when_separated(self):
         """Sphere far above heightfield must produce zero contacts."""
