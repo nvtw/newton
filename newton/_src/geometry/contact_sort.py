@@ -40,36 +40,141 @@ def _prepare_sort(
         sort_indices[tid] = wp.int32(tid)
 
 
-@wp.kernel(enable_backward=False)
-def _gather_int(src: wp.array[wp.int32], dst: wp.array[wp.int32], perm: wp.array[wp.int32], count: wp.array[int]):
-    i = wp.tid()
-    if i >= count[0]:
-        return
-    dst[i] = src[perm[i]]
+# -----------------------------------------------------------------------
+# Structs + fused backup/gather kernels for the two contact layouts.
+#
+# Each layout has ONE struct holding both the live arrays and their
+# scratch-buffer counterparts, plus two kernels:
+#   _backup_*  — copies only active contacts into the scratch buffers
+#   _gather_*  — permuted write-back from scratch into the live arrays
+# This replaces the previous N x wp.copy + N x kernel-launch pattern
+# with 2 kernel launches total (backup + gather) regardless of how
+# many arrays are being sorted.
+# -----------------------------------------------------------------------
+
+
+@wp.struct
+class _SimpleContactArrays:
+    """Live + scratch arrays for the simplified narrow-phase contact layout."""
+
+    pair: wp.array[wp.vec2i]
+    position: wp.array[wp.vec3]
+    normal: wp.array[wp.vec3]
+    penetration: wp.array[float]
+    tangent: wp.array[wp.vec3]
+    pair_buf: wp.array[wp.vec2i]
+    position_buf: wp.array[wp.vec3]
+    normal_buf: wp.array[wp.vec3]
+    penetration_buf: wp.array[float]
+    tangent_buf: wp.array[wp.vec3]
+    has_tangent: int
 
 
 @wp.kernel(enable_backward=False)
-def _gather_float(src: wp.array[float], dst: wp.array[float], perm: wp.array[wp.int32], count: wp.array[int]):
+def _backup_simple_kernel(data: _SimpleContactArrays, count: wp.array[int]):
+    """Copy active contacts into scratch buffers."""
     i = wp.tid()
     if i >= count[0]:
         return
-    dst[i] = src[perm[i]]
+    data.pair_buf[i] = data.pair[i]
+    data.position_buf[i] = data.position[i]
+    data.normal_buf[i] = data.normal[i]
+    data.penetration_buf[i] = data.penetration[i]
+    if data.has_tangent != 0:
+        data.tangent_buf[i] = data.tangent[i]
 
 
 @wp.kernel(enable_backward=False)
-def _gather_vec3(src: wp.array[wp.vec3], dst: wp.array[wp.vec3], perm: wp.array[wp.int32], count: wp.array[int]):
+def _gather_simple_kernel(data: _SimpleContactArrays, perm: wp.array[wp.int32], count: wp.array[int]):
+    """Permuted write-back from scratch into live arrays."""
     i = wp.tid()
     if i >= count[0]:
         return
-    dst[i] = src[perm[i]]
+    p = perm[i]
+    data.pair[i] = data.pair_buf[p]
+    data.position[i] = data.position_buf[p]
+    data.normal[i] = data.normal_buf[p]
+    data.penetration[i] = data.penetration_buf[p]
+    if data.has_tangent != 0:
+        data.tangent[i] = data.tangent_buf[p]
+
+
+@wp.struct
+class _FullContactArrays:
+    """Live + scratch arrays for the full CollisionPipeline contact layout."""
+
+    shape0: wp.array[wp.int32]
+    shape1: wp.array[wp.int32]
+    point0: wp.array[wp.vec3]
+    point1: wp.array[wp.vec3]
+    offset0: wp.array[wp.vec3]
+    offset1: wp.array[wp.vec3]
+    normal: wp.array[wp.vec3]
+    margin0: wp.array[float]
+    margin1: wp.array[float]
+    tids: wp.array[wp.int32]
+    stiffness: wp.array[float]
+    damping: wp.array[float]
+    friction: wp.array[float]
+    shape0_buf: wp.array[wp.int32]
+    shape1_buf: wp.array[wp.int32]
+    point0_buf: wp.array[wp.vec3]
+    point1_buf: wp.array[wp.vec3]
+    offset0_buf: wp.array[wp.vec3]
+    offset1_buf: wp.array[wp.vec3]
+    normal_buf: wp.array[wp.vec3]
+    margin0_buf: wp.array[float]
+    margin1_buf: wp.array[float]
+    tids_buf: wp.array[wp.int32]
+    stiffness_buf: wp.array[float]
+    damping_buf: wp.array[float]
+    friction_buf: wp.array[float]
+    has_shape_props: int
 
 
 @wp.kernel(enable_backward=False)
-def _gather_vec2i(src: wp.array[wp.vec2i], dst: wp.array[wp.vec2i], perm: wp.array[wp.int32], count: wp.array[int]):
+def _backup_full_kernel(data: _FullContactArrays, count: wp.array[int]):
+    """Copy active contacts into scratch buffers."""
     i = wp.tid()
     if i >= count[0]:
         return
-    dst[i] = src[perm[i]]
+    data.shape0_buf[i] = data.shape0[i]
+    data.shape1_buf[i] = data.shape1[i]
+    data.point0_buf[i] = data.point0[i]
+    data.point1_buf[i] = data.point1[i]
+    data.offset0_buf[i] = data.offset0[i]
+    data.offset1_buf[i] = data.offset1[i]
+    data.normal_buf[i] = data.normal[i]
+    data.margin0_buf[i] = data.margin0[i]
+    data.margin1_buf[i] = data.margin1[i]
+    data.tids_buf[i] = data.tids[i]
+    if data.has_shape_props != 0:
+        data.stiffness_buf[i] = data.stiffness[i]
+        data.damping_buf[i] = data.damping[i]
+        data.friction_buf[i] = data.friction[i]
+
+
+@wp.kernel(enable_backward=False)
+def _gather_full_kernel(data: _FullContactArrays, perm: wp.array[wp.int32], count: wp.array[int]):
+    """Permuted write-back from scratch into live arrays."""
+    i = wp.tid()
+    if i >= count[0]:
+        return
+    p = perm[i]
+    data.shape0[i] = data.shape0_buf[p]
+    data.shape1[i] = data.shape1_buf[p]
+    data.point0[i] = data.point0_buf[p]
+    data.point1[i] = data.point1_buf[p]
+    data.offset0[i] = data.offset0_buf[p]
+    data.offset1[i] = data.offset1_buf[p]
+    data.normal[i] = data.normal_buf[p]
+    data.margin0[i] = data.margin0_buf[p]
+    data.margin1[i] = data.margin1_buf[p]
+    data.tids[i] = data.tids_buf[p]
+    if data.has_shape_props != 0:
+        data.stiffness[i] = data.stiffness_buf[p]
+        data.damping[i] = data.damping_buf[p]
+        data.friction[i] = data.friction_buf[p]
 
 
 class ContactSorter:
@@ -92,12 +197,34 @@ class ContactSorter:
             self._sort_indices = wp.zeros(2 * capacity, dtype=wp.int32)
             self._sort_keys_copy = wp.zeros(2 * capacity, dtype=wp.int64)
 
-            self._buf_int = wp.zeros(capacity, dtype=wp.int32)
-            self._buf_float = wp.zeros(capacity, dtype=float)
-            self._buf_vec3 = wp.zeros(capacity, dtype=wp.vec3)
-            self._buf_vec2i = wp.zeros(capacity, dtype=wp.vec2i)
-
             self._has_shape_props = per_contact_shape_properties
+
+            # Scratch buffers for the simple gather (NarrowPhase.launch path).
+            self._simple_pair_buf = wp.zeros(capacity, dtype=wp.vec2i)
+            self._simple_position_buf = wp.zeros(capacity, dtype=wp.vec3)
+            self._simple_normal_buf = wp.zeros(capacity, dtype=wp.vec3)
+            self._simple_penetration_buf = wp.zeros(capacity, dtype=float)
+            self._simple_tangent_buf = wp.zeros(capacity, dtype=wp.vec3)
+
+            # Scratch buffers for the full gather (CollisionPipeline.collide path).
+            self._full_shape0_buf = wp.zeros(capacity, dtype=wp.int32)
+            self._full_shape1_buf = wp.zeros(capacity, dtype=wp.int32)
+            self._full_point0_buf = wp.zeros(capacity, dtype=wp.vec3)
+            self._full_point1_buf = wp.zeros(capacity, dtype=wp.vec3)
+            self._full_offset0_buf = wp.zeros(capacity, dtype=wp.vec3)
+            self._full_offset1_buf = wp.zeros(capacity, dtype=wp.vec3)
+            self._full_normal_buf = wp.zeros(capacity, dtype=wp.vec3)
+            self._full_margin0_buf = wp.zeros(capacity, dtype=float)
+            self._full_margin1_buf = wp.zeros(capacity, dtype=float)
+            self._full_tids_buf = wp.zeros(capacity, dtype=wp.int32)
+            if per_contact_shape_properties:
+                self._full_stiffness_buf = wp.zeros(capacity, dtype=float)
+                self._full_damping_buf = wp.zeros(capacity, dtype=float)
+                self._full_friction_buf = wp.zeros(capacity, dtype=float)
+            else:
+                self._full_stiffness_buf = wp.zeros(0, dtype=float)
+                self._full_damping_buf = wp.zeros(0, dtype=float)
+                self._full_friction_buf = wp.zeros(0, dtype=float)
 
     # ------------------------------------------------------------------
     # Public API
@@ -129,14 +256,26 @@ class ContactSorter:
             contact_tangent: Optional vec3 tangent array.
             device: Device to launch on.
         """
+        n = self._capacity
         self._sort_and_permute(sort_keys, contact_count, device=device)
 
-        self._gather_array_vec3(contact_position, contact_count, device)
-        self._gather_array_vec3(contact_normal, contact_count, device)
-        self._gather_array_float(contact_penetration, contact_count, device)
-        self._gather_array_vec2i(contact_pair, contact_count, device)
-        if contact_tangent is not None and contact_tangent.shape[0] > 0:
-            self._gather_array_vec3(contact_tangent, contact_count, device)
+        has_tangent = contact_tangent is not None and contact_tangent.shape[0] > 0
+
+        data = _SimpleContactArrays()
+        data.pair = contact_pair
+        data.position = contact_position
+        data.normal = contact_normal
+        data.penetration = contact_penetration
+        data.tangent = contact_tangent if has_tangent else self._simple_tangent_buf
+        data.pair_buf = self._simple_pair_buf
+        data.position_buf = self._simple_position_buf
+        data.normal_buf = self._simple_normal_buf
+        data.penetration_buf = self._simple_penetration_buf
+        data.tangent_buf = self._simple_tangent_buf
+        data.has_tangent = 1 if has_tangent else 0
+
+        wp.launch(_backup_simple_kernel, dim=n, inputs=[data, contact_count], device=device)
+        wp.launch(_gather_simple_kernel, dim=n, inputs=[data, self._sort_indices, contact_count], device=device)
 
     def sort_full(
         self,
@@ -180,25 +319,46 @@ class ContactSorter:
             friction: Optional float per-contact friction.
             device: Device to launch on.
         """
+        n = self._capacity
         self._sort_and_permute(sort_keys, contact_count, device=device)
 
-        self._gather_array_int(shape0, contact_count, device)
-        self._gather_array_int(shape1, contact_count, device)
-        self._gather_array_vec3(point0, contact_count, device)
-        self._gather_array_vec3(point1, contact_count, device)
-        self._gather_array_vec3(offset0, contact_count, device)
-        self._gather_array_vec3(offset1, contact_count, device)
-        self._gather_array_vec3(normal, contact_count, device)
-        self._gather_array_float(margin0, contact_count, device)
-        self._gather_array_float(margin1, contact_count, device)
-        self._gather_array_int(tids, contact_count, device)
-        if self._has_shape_props:
-            if stiffness is not None and stiffness.shape[0] > 0:
-                self._gather_array_float(stiffness, contact_count, device)
-            if damping is not None and damping.shape[0] > 0:
-                self._gather_array_float(damping, contact_count, device)
-            if friction is not None and friction.shape[0] > 0:
-                self._gather_array_float(friction, contact_count, device)
+        has_props = self._has_shape_props
+
+        data = _FullContactArrays()
+        data.shape0 = shape0
+        data.shape1 = shape1
+        data.point0 = point0
+        data.point1 = point1
+        data.offset0 = offset0
+        data.offset1 = offset1
+        data.normal = normal
+        data.margin0 = margin0
+        data.margin1 = margin1
+        data.tids = tids
+        data.stiffness = (
+            stiffness if has_props and stiffness is not None and stiffness.shape[0] > 0 else self._full_stiffness_buf
+        )
+        data.damping = damping if has_props and damping is not None and damping.shape[0] > 0 else self._full_damping_buf
+        data.friction = (
+            friction if has_props and friction is not None and friction.shape[0] > 0 else self._full_friction_buf
+        )
+        data.shape0_buf = self._full_shape0_buf
+        data.shape1_buf = self._full_shape1_buf
+        data.point0_buf = self._full_point0_buf
+        data.point1_buf = self._full_point1_buf
+        data.offset0_buf = self._full_offset0_buf
+        data.offset1_buf = self._full_offset1_buf
+        data.normal_buf = self._full_normal_buf
+        data.margin0_buf = self._full_margin0_buf
+        data.margin1_buf = self._full_margin1_buf
+        data.tids_buf = self._full_tids_buf
+        data.stiffness_buf = self._full_stiffness_buf
+        data.damping_buf = self._full_damping_buf
+        data.friction_buf = self._full_friction_buf
+        data.has_shape_props = 1 if has_props else 0
+
+        wp.launch(_backup_full_kernel, dim=n, inputs=[data, contact_count], device=device)
+        wp.launch(_gather_full_kernel, dim=n, inputs=[data, self._sort_indices, contact_count], device=device)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -214,27 +374,3 @@ class ContactSorter:
             device=device,
         )
         wp.utils.radix_sort_pairs(self._sort_keys_copy, self._sort_indices, n)
-
-    def _gather_array_int(self, arr: wp.array, count: wp.array, device: Devicelike) -> None:
-        wp.copy(self._buf_int, arr, count=self._capacity)
-        wp.launch(
-            _gather_int, dim=self._capacity, inputs=[self._buf_int, arr, self._sort_indices, count], device=device
-        )
-
-    def _gather_array_float(self, arr: wp.array, count: wp.array, device: Devicelike) -> None:
-        wp.copy(self._buf_float, arr, count=self._capacity)
-        wp.launch(
-            _gather_float, dim=self._capacity, inputs=[self._buf_float, arr, self._sort_indices, count], device=device
-        )
-
-    def _gather_array_vec3(self, arr: wp.array, count: wp.array, device: Devicelike) -> None:
-        wp.copy(self._buf_vec3, arr, count=self._capacity)
-        wp.launch(
-            _gather_vec3, dim=self._capacity, inputs=[self._buf_vec3, arr, self._sort_indices, count], device=device
-        )
-
-    def _gather_array_vec2i(self, arr: wp.array, count: wp.array, device: Devicelike) -> None:
-        wp.copy(self._buf_vec2i, arr, count=self._capacity)
-        wp.launch(
-            _gather_vec2i, dim=self._capacity, inputs=[self._buf_vec2i, arr, self._sort_indices, count], device=device
-        )
