@@ -102,7 +102,12 @@ _CONTACT_SOLVE_SNIPPET = r"""
         __syncthreads();
     }
 
-    // ═══ Colored contact solve ═══
+    // ═══ Fused iteration loop: num_bias_iters biased + num_relax_iters relaxation ═══
+    int total_iters = num_bias_iters + num_relax_iters;
+    for (int iter = 0; iter < total_iters; iter++) {
+        int cur_use_bias = (iter < num_bias_iters) ? 1 : 0;
+
+    // Colored contact solve (one pass)
     for (int color = 0; color < max_colors; color++) {
         int cstart = *wp::address(color_offsets, wid, color);
         int cend = *wp::address(color_offsets, wid, color + 1);
@@ -142,9 +147,8 @@ _CONTACT_SOLVE_SNIPPET = r"""
 
                 if (sep > 0.005f) {
                     // Speculative: always active (even during relaxation).
-                    // Small slop (5mm) prevents jitter from floating-point separation noise.
                     velocityBias = sep * inv_sub_dt;
-                } else if (use_bias > 0) {
+                } else if (cur_use_bias > 0) {
                     // Soft position correction: only during biased pass
                     int is_s = *wp::address(c_is_static, wid, ci);
                     float br_val = is_s ? static_br : bias_rate;
@@ -248,6 +252,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
         }
         __syncthreads();
     }
+    } // end iteration loop
 
     // ═══ Restitution (last substep only) ═══
     if (do_restitution > 0) {
@@ -701,6 +706,8 @@ def _contact_solve_native(
     do_int_vel: int,
     gx: float, gy: float, gz: float,
     lin_damp: float, ang_damp: float,
+    num_bias_iters: int,
+    num_relax_iters: int,
     # Joint parameters
     body_pos: wp.array2d(dtype=wp.vec3),
     body_ori: wp.array2d(dtype=wp.quat),
@@ -776,6 +783,8 @@ def contact_solve_kernel(
     do_int_vel: int,
     gx: float, gy: float, gz: float,
     lin_damp: float, ang_damp: float,
+    num_bias_iters: int,
+    num_relax_iters: int,
     # Joint parameters
     body_pos: wp.array2d(dtype=wp.vec3),
     body_ori: wp.array2d(dtype=wp.quat),
@@ -819,6 +828,7 @@ def contact_solve_kernel(
         static_br, static_ms, static_is,
         contact_speed, rest_thresh,
         do_int_vel, gx, gy, gz, lin_damp, ang_damp,
+        num_bias_iters, num_relax_iters,
         body_pos, body_ori,
         j_ba, j_bb, j_type, j_la, j_lb, j_ha, j_li, j_ai,
         j_ms_arr, j_mmt,
