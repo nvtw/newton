@@ -9,7 +9,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.geometry.contact_data import ContactData, make_contact_sort_key
-from newton._src.geometry.contact_reduction import float_flip, ifloat_flip
+from newton._src.geometry.contact_reduction import float_flip
 from newton._src.geometry.contact_reduction_global import (
     SCORE_SHIFT,
     GlobalContactReducer,
@@ -875,6 +875,14 @@ def test_centered_pre_pruning_reduces_buffer_usage(test, device):
 # =============================================================================
 # Float-flip precision tests
 # =============================================================================
+
+
+@wp.func_native("""
+uint32_t mask = ((u >> 31) - 1) | 0x80000000;
+uint32_t i = u ^ mask;
+return reinterpret_cast<float&>(i);
+""")
+def ifloat_flip(u: wp.uint32) -> float: ...
 
 
 @wp.kernel(enable_backward=False)

@@ -1636,7 +1636,7 @@ Deterministic Contact Ordering
 
 GPU thread scheduling is non-deterministic, so the order in which contacts are
 written to the output buffer can vary between runs.  Pass ``deterministic=True``
-to :class:`~CollisionPipeline` (or :class:`~geometry.NarrowPhase`) to guarantee
+to :class:`~newton.CollisionPipeline` (or :class:`~newton.geometry.NarrowPhase`) to guarantee
 a reproducible contact order:
 
 .. code-block:: python

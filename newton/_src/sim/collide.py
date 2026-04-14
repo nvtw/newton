@@ -573,6 +573,12 @@ class CollisionPipeline:
                     self.shape_pairs_excluded.shape[0] if self.shape_pairs_excluded is not None else 0
                 )
 
+            if deterministic and not narrow_phase.deterministic:
+                raise ValueError(
+                    "CollisionPipeline(deterministic=True) requires a deterministic "
+                    "NarrowPhase. Either omit narrow_phase or construct it with "
+                    "deterministic=True."
+                )
             if narrow_phase.max_candidate_pairs < self.shape_pairs_max:
                 raise ValueError(
                     "Provided narrow_phase.max_candidate_pairs is too small for this model and broad phase mode "
