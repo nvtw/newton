@@ -587,6 +587,7 @@ def test_export_reduced_contacts_kernel(test, device):
             shape_gap,
             writer_data,
             total_threads,
+            0,  # deterministic=0 (fast packing)
         ],
         device=device,
     )
