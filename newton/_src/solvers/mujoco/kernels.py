@@ -27,9 +27,15 @@ vec11 = wp.types.vector(length=11, dtype=wp.float32)
 
 # Constants
 MJ_MINVAL = 2.220446049250313e-16
+MJ_MINMU = 1e-5
 
 
 # Utility functions
+@wp.func
+def safe_div(x: float, y: float) -> float:
+    return x / wp.where(y != 0.0, y, MJ_MINVAL)
+
+
 @wp.func
 def orthogonals(a: wp.vec3):
     y = wp.vec3(0.0, 1.0, 0.0)
@@ -144,7 +150,7 @@ def contact_params(
     else:
         solmix1 = geom_solmix[worldid, g1]
         solmix2 = geom_solmix[worldid, g2]
-        mix = solmix1 / (solmix1 + solmix2)
+        mix = safe_div(solmix1, solmix1 + solmix2)
         mix = wp.where((solmix1 < MJ_MINVAL) and (solmix2 < MJ_MINVAL), 0.5, mix)
         mix = wp.where((solmix1 < MJ_MINVAL) and (solmix2 >= MJ_MINVAL), 0.0, mix)
         mix = wp.where((solmix1 >= MJ_MINVAL) and (solmix2 < MJ_MINVAL), 1.0, mix)
@@ -152,11 +158,11 @@ def contact_params(
         resolved_friction = wp.max(geom_friction[worldid, g1], geom_friction[worldid, g2])
 
     friction = vec5(
-        resolved_friction[0],
-        resolved_friction[0],
-        resolved_friction[1],
-        resolved_friction[2],
-        resolved_friction[2],
+        wp.max(MJ_MINMU, resolved_friction[0]),
+        wp.max(MJ_MINMU, resolved_friction[0]),
+        wp.max(MJ_MINMU, resolved_friction[1]),
+        wp.max(MJ_MINMU, resolved_friction[2]),
+        wp.max(MJ_MINMU, resolved_friction[2]),
     )
 
     # Sum margins for consistency with thickness summing

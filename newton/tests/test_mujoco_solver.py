@@ -4026,36 +4026,37 @@ class TestFrictionPriority(unittest.TestCase):
         self.assertGreater(nacon, 0, "No contacts generated")
         return solver.mjw_data.contact.friction.numpy()[:nacon]
 
-    def test_higher_priority_friction_used(self):
-        """Contact friction should come from the higher-priority geom."""
-        hi_mu = 0.3
-        lo_mu = 0.9
-        model = self._build_model(priority_a=5, friction_a=hi_mu, priority_b=0, friction_b=lo_mu)
-        friction = self._get_contact_friction(model)
-
-        for i in range(len(friction)):
-            self.assertAlmostEqual(
-                float(friction[i, 0]),
-                hi_mu,
-                places=5,
-                msg=f"Contact {i}: slide friction should be {hi_mu} (high-priority geom), got {friction[i, 0]}",
-            )
-
-    def test_equal_priority_uses_max(self):
-        """When priorities are equal, contact friction should be the element-wise max."""
-        mu_a = 0.2
-        mu_b = 0.8
-        model = self._build_model(priority_a=0, friction_a=mu_a, priority_b=0, friction_b=mu_b)
-        friction = self._get_contact_friction(model)
-
-        expected = max(mu_a, mu_b)
+    def _assert_slide_friction(self, friction, expected, label):
         for i in range(len(friction)):
             self.assertAlmostEqual(
                 float(friction[i, 0]),
                 expected,
                 places=5,
-                msg=f"Contact {i}: slide friction should be max({mu_a}, {mu_b})={expected}, got {friction[i, 0]}",
+                msg=f"{label}: contact {i} slide friction should be {expected}, got {friction[i, 0]}",
             )
+
+    def test_higher_priority_friction_used(self):
+        """Contact friction should come from the higher-priority geom, regardless of operand order."""
+        hi_mu = 0.3
+        lo_mu = 0.9
+
+        model_a = self._build_model(priority_a=5, friction_a=hi_mu, priority_b=0, friction_b=lo_mu)
+        self._assert_slide_friction(self._get_contact_friction(model_a), hi_mu, "high-priority on body A")
+
+        model_b = self._build_model(priority_a=0, friction_a=lo_mu, priority_b=5, friction_b=hi_mu)
+        self._assert_slide_friction(self._get_contact_friction(model_b), hi_mu, "high-priority on body B")
+
+    def test_equal_priority_uses_max(self):
+        """When priorities are equal, contact friction should be the element-wise max, regardless of operand order."""
+        mu_lo = 0.2
+        mu_hi = 0.8
+        expected = mu_hi
+
+        model_a = self._build_model(priority_a=0, friction_a=mu_hi, priority_b=0, friction_b=mu_lo)
+        self._assert_slide_friction(self._get_contact_friction(model_a), expected, "larger mu on body A")
+
+        model_b = self._build_model(priority_a=0, friction_a=mu_lo, priority_b=0, friction_b=mu_hi)
+        self._assert_slide_friction(self._get_contact_friction(model_b), expected, "larger mu on body B")
 
 
 class TestImmovableContactFiltering(unittest.TestCase):
