@@ -66,10 +66,15 @@ def make_contact_sort_key(shape_a: int, shape_b: int, sort_sub_key: int) -> wp.i
         [42:23] shape_b      (20 bits, max 1,048,575 shapes)
         [22:0]  sort_sub_key (23 bits, max 8,388,607)
 
-    Values exceeding these bit widths are silently masked.  For
-    ``sort_sub_key``, SDF contacts encode ``(edge_idx << 2) | (mode << 1)``
-    and mesh-triangle contacts encode ``(tri_idx << 1) | 1``, so meshes
-    with more than ~4M triangles will overflow the sub-key field.
+    Values exceeding these bit widths are silently masked.  The effective
+    limits depend on upstream bit consumption in each contact path:
+
+    - Mesh-triangle contacts: ``(tri_idx << 1) | 1`` — 22 effective bits
+      for ``tri_idx`` (~4M triangles).  When expanded by the multi-contact
+      path (``<< 3 | i``), this drops to 19 effective bits (~524K triangles).
+    - SDF contacts: ``(edge_idx << 2) | (mode << 1)`` — 21 effective bits
+      for ``edge_idx`` (~2M edges).  After multi-contact expansion
+      (``<< 3``), 18 effective bits (~262K edges).
     """
     return (
         ((wp.int64(shape_a) & wp.int64(0xFFFFF)) << wp.int64(43))
