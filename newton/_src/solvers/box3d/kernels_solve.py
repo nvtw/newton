@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import warp as wp
 
+from .mat3sym import mat3sym
+
 # Maximum bodies in shared memory.  6 floats per body (vx,vy,vz,wx,wy,wz).
 # 128 bodies * 6 * 4 bytes = 3072 bytes — well within per-block limit.
 _MAX_SMEM_BODIES = 1024
@@ -67,9 +69,9 @@ _CONTACT_SOLVE_SNIPPET = r"""
                 float cx = ra[1]*pz - ra[2]*py;
                 float cy = ra[2]*px - ra[0]*pz;
                 float cz = ra[0]*py - ra[1]*px;
-                sa[3] -= iia.data[0][0]*cx + iia.data[0][1]*cy + iia.data[0][2]*cz;
-                sa[4] -= iia.data[1][0]*cx + iia.data[1][1]*cy + iia.data[1][2]*cz;
-                sa[5] -= iia.data[2][0]*cx + iia.data[2][1]*cy + iia.data[2][2]*cz;
+                sa[3] -= iia.m00*cx + iia.m01*cy + iia.m02*cz;
+                sa[4] -= iia.m01*cx + iia.m11*cy + iia.m12*cz;
+                sa[5] -= iia.m02*cx + iia.m12*cy + iia.m22*cz;
             }
             int bi = *wp::address(c_body_b, wid, ci);
             if (bi >= 0) {
@@ -81,9 +83,9 @@ _CONTACT_SOLVE_SNIPPET = r"""
                 float cx = rb[1]*pz - rb[2]*py;
                 float cy = rb[2]*px - rb[0]*pz;
                 float cz = rb[0]*py - rb[1]*px;
-                sb[3] += iib.data[0][0]*cx + iib.data[0][1]*cy + iib.data[0][2]*cz;
-                sb[4] += iib.data[1][0]*cx + iib.data[1][1]*cy + iib.data[1][2]*cz;
-                sb[5] += iib.data[2][0]*cx + iib.data[2][1]*cy + iib.data[2][2]*cz;
+                sb[3] += iib.m00*cx + iib.m01*cy + iib.m02*cz;
+                sb[4] += iib.m01*cx + iib.m11*cy + iib.m12*cz;
+                sb[5] += iib.m02*cx + iib.m12*cy + iib.m22*cz;
             }
             *wp::address(c_tni, wid, ci) = ni;
         }
@@ -159,18 +161,18 @@ _CONTACT_SOLVE_SNIPPET = r"""
                 float* sa = smem+a*6;
                 sa[0] -= ima*px; sa[1] -= ima*py; sa[2] -= ima*pz;
                 float cx=ra[1]*pz-ra[2]*py, cy=ra[2]*px-ra[0]*pz, cz=ra[0]*py-ra[1]*px;
-                sa[3] -= iia.data[0][0]*cx+iia.data[0][1]*cy+iia.data[0][2]*cz;
-                sa[4] -= iia.data[1][0]*cx+iia.data[1][1]*cy+iia.data[1][2]*cz;
-                sa[5] -= iia.data[2][0]*cx+iia.data[2][1]*cy+iia.data[2][2]*cz;
+                sa[3] -= iia.m00*cx+iia.m01*cy+iia.m02*cz;
+                sa[4] -= iia.m01*cx+iia.m11*cy+iia.m12*cz;
+                sa[5] -= iia.m02*cx+iia.m12*cy+iia.m22*cz;
             }
             if (bi >= 0) {
                 auto iib = *wp::address(inv_I, wid, bi);
                 float* sb = smem+bi*6;
                 sb[0] += imb*px; sb[1] += imb*py; sb[2] += imb*pz;
                 float cx=rb[1]*pz-rb[2]*py, cy=rb[2]*px-rb[0]*pz, cz=rb[0]*py-rb[1]*px;
-                sb[3] += iib.data[0][0]*cx+iib.data[0][1]*cy+iib.data[0][2]*cz;
-                sb[4] += iib.data[1][0]*cx+iib.data[1][1]*cy+iib.data[1][2]*cz;
-                sb[5] += iib.data[2][0]*cx+iib.data[2][1]*cy+iib.data[2][2]*cz;
+                sb[3] += iib.m00*cx+iib.m01*cy+iib.m02*cz;
+                sb[4] += iib.m01*cx+iib.m11*cy+iib.m12*cz;
+                sb[5] += iib.m02*cx+iib.m12*cy+iib.m22*cz;
             }
 
             // ═══ Friction (2 tangent directions) ═══
@@ -197,15 +199,15 @@ _CONTACT_SOLVE_SNIPPET = r"""
               if (a>=0) { auto iia=*wp::address(inv_I,wid,a); float*sa=smem+a*6;
                 sa[0]-=ima*p1x;sa[1]-=ima*p1y;sa[2]-=ima*p1z;
                 float cx=ra[1]*p1z-ra[2]*p1y,cy=ra[2]*p1x-ra[0]*p1z,cz=ra[0]*p1y-ra[1]*p1x;
-                sa[3]-=iia.data[0][0]*cx+iia.data[0][1]*cy+iia.data[0][2]*cz;
-                sa[4]-=iia.data[1][0]*cx+iia.data[1][1]*cy+iia.data[1][2]*cz;
-                sa[5]-=iia.data[2][0]*cx+iia.data[2][1]*cy+iia.data[2][2]*cz; }
+                sa[3]-=iia.m00*cx+iia.m01*cy+iia.m02*cz;
+                sa[4]-=iia.m01*cx+iia.m11*cy+iia.m12*cz;
+                sa[5]-=iia.m02*cx+iia.m12*cy+iia.m22*cz; }
               if (bi>=0) { auto iib=*wp::address(inv_I,wid,bi); float*sb=smem+bi*6;
                 sb[0]+=imb*p1x;sb[1]+=imb*p1y;sb[2]+=imb*p1z;
                 float cx=rb[1]*p1z-rb[2]*p1y,cy=rb[2]*p1x-rb[0]*p1z,cz=rb[0]*p1y-rb[1]*p1x;
-                sb[3]+=iib.data[0][0]*cx+iib.data[0][1]*cy+iib.data[0][2]*cz;
-                sb[4]+=iib.data[1][0]*cx+iib.data[1][1]*cy+iib.data[1][2]*cz;
-                sb[5]+=iib.data[2][0]*cx+iib.data[2][1]*cy+iib.data[2][2]*cz; } }
+                sb[3]+=iib.m00*cx+iib.m01*cy+iib.m02*cz;
+                sb[4]+=iib.m01*cx+iib.m11*cy+iib.m12*cz;
+                sb[5]+=iib.m02*cx+iib.m12*cy+iib.m22*cz; } }
 
             // Re-read for tangent 2
             if (a>=0) { float*sa=smem+a*6; vax=sa[0];vay=sa[1];vaz=sa[2];wax=sa[3];way=sa[4];waz=sa[5]; }
@@ -224,15 +226,15 @@ _CONTACT_SOLVE_SNIPPET = r"""
               if (a>=0) { auto iia=*wp::address(inv_I,wid,a); float*sa=smem+a*6;
                 sa[0]-=ima*p2x;sa[1]-=ima*p2y;sa[2]-=ima*p2z;
                 float cx=ra[1]*p2z-ra[2]*p2y,cy=ra[2]*p2x-ra[0]*p2z,cz=ra[0]*p2y-ra[1]*p2x;
-                sa[3]-=iia.data[0][0]*cx+iia.data[0][1]*cy+iia.data[0][2]*cz;
-                sa[4]-=iia.data[1][0]*cx+iia.data[1][1]*cy+iia.data[1][2]*cz;
-                sa[5]-=iia.data[2][0]*cx+iia.data[2][1]*cy+iia.data[2][2]*cz; }
+                sa[3]-=iia.m00*cx+iia.m01*cy+iia.m02*cz;
+                sa[4]-=iia.m01*cx+iia.m11*cy+iia.m12*cz;
+                sa[5]-=iia.m02*cx+iia.m12*cy+iia.m22*cz; }
               if (bi>=0) { auto iib=*wp::address(inv_I,wid,bi); float*sb=smem+bi*6;
                 sb[0]+=imb*p2x;sb[1]+=imb*p2y;sb[2]+=imb*p2z;
                 float cx=rb[1]*p2z-rb[2]*p2y,cy=rb[2]*p2x-rb[0]*p2z,cz=rb[0]*p2y-rb[1]*p2x;
-                sb[3]+=iib.data[0][0]*cx+iib.data[0][1]*cy+iib.data[0][2]*cz;
-                sb[4]+=iib.data[1][0]*cx+iib.data[1][1]*cy+iib.data[1][2]*cz;
-                sb[5]+=iib.data[2][0]*cx+iib.data[2][1]*cy+iib.data[2][2]*cz; } }
+                sb[3]+=iib.m00*cx+iib.m01*cy+iib.m02*cz;
+                sb[4]+=iib.m01*cx+iib.m11*cy+iib.m12*cz;
+                sb[5]+=iib.m02*cx+iib.m12*cy+iib.m22*cz; } }
         }
         __syncthreads();
     }
@@ -276,15 +278,15 @@ _CONTACT_SOLVE_SNIPPET = r"""
             if (a>=0) { auto iia=*wp::address(inv_I,wid,a); float*sa=smem+a*6;
                 sa[0]-=ima*px;sa[1]-=ima*py;sa[2]-=ima*pz;
                 float cx=ra[1]*pz-ra[2]*py,cy=ra[2]*px-ra[0]*pz,cz=ra[0]*py-ra[1]*px;
-                sa[3]-=iia.data[0][0]*cx+iia.data[0][1]*cy+iia.data[0][2]*cz;
-                sa[4]-=iia.data[1][0]*cx+iia.data[1][1]*cy+iia.data[1][2]*cz;
-                sa[5]-=iia.data[2][0]*cx+iia.data[2][1]*cy+iia.data[2][2]*cz; }
+                sa[3]-=iia.m00*cx+iia.m01*cy+iia.m02*cz;
+                sa[4]-=iia.m01*cx+iia.m11*cy+iia.m12*cz;
+                sa[5]-=iia.m02*cx+iia.m12*cy+iia.m22*cz; }
             if (bi>=0) { auto iib=*wp::address(inv_I,wid,bi); float*sb=smem+bi*6;
                 sb[0]+=imb*px;sb[1]+=imb*py;sb[2]+=imb*pz;
                 float cx=rb[1]*pz-rb[2]*py,cy=rb[2]*px-rb[0]*pz,cz=rb[0]*py-rb[1]*px;
-                sb[3]+=iib.data[0][0]*cx+iib.data[0][1]*cy+iib.data[0][2]*cz;
-                sb[4]+=iib.data[1][0]*cx+iib.data[1][1]*cy+iib.data[1][2]*cz;
-                sb[5]+=iib.data[2][0]*cx+iib.data[2][1]*cy+iib.data[2][2]*cz; } }
+                sb[3]+=iib.m00*cx+iib.m01*cy+iib.m02*cz;
+                sb[4]+=iib.m01*cx+iib.m11*cy+iib.m12*cz;
+                sb[5]+=iib.m02*cx+iib.m12*cy+iib.m22*cz; } }
         __syncthreads();
     }
 
@@ -320,7 +322,10 @@ _CONTACT_SOLVE_SNIPPET = r"""
                 float jvbx=0,jvby=0,jvbz=0,jwbx=0,jwby=0,jwbz=0;
                 float qax=0,qay=0,qaz=0,qaw=1;
                 float qbx=0,qby=0,qbz=0,qbw=1;
-                wp::mat_t<3,3,float> jiia, jiib;
+                // Read a dummy mat3sym to get the correct type, then zero it
+                auto jiia = *wp::address(inv_I, wid, 0);
+                jiia.m00=0;jiia.m01=0;jiia.m02=0;jiia.m11=0;jiia.m12=0;jiia.m22=0;
+                auto jiib = jiia;
 
                 if (ja >= 0) {
                     jima = *wp::address(inv_m, wid, ja);
@@ -377,18 +382,18 @@ _CONTACT_SOLVE_SNIPPET = r"""
 
                 // Macro to add [r]_x^T @ I^-1 @ [r]_x contribution for one body
                 #define ADD_SKEW_K(rx,ry,rz,II) { \
-                    /* s0 = II @ (0, rz, -ry) */ \
-                    float s0x = II.data[0][1]*rz - II.data[0][2]*ry; \
-                    float s0y = II.data[1][1]*rz - II.data[1][2]*ry; \
-                    float s0z = II.data[2][1]*rz - II.data[2][2]*ry; \
+                    /* s0 = II @ (0, rz, -ry) — mat3sym: symmetric, so [1][0]=m01 etc */ \
+                    float s0x = II.m01*rz - II.m02*ry; \
+                    float s0y = II.m11*rz - II.m12*ry; \
+                    float s0z = II.m12*rz - II.m22*ry; \
                     /* s1 = II @ (-rz, 0, rx) */ \
-                    float s1x = -II.data[0][0]*rz + II.data[0][2]*rx; \
-                    float s1y = -II.data[1][0]*rz + II.data[1][2]*rx; \
-                    float s1z = -II.data[2][0]*rz + II.data[2][2]*rx; \
+                    float s1x = -II.m00*rz + II.m02*rx; \
+                    float s1y = -II.m01*rz + II.m12*rx; \
+                    float s1z = -II.m02*rz + II.m22*rx; \
                     /* s2 = II @ (ry, -rx, 0) */ \
-                    float s2x = II.data[0][0]*ry - II.data[0][1]*rx; \
-                    float s2y = II.data[1][0]*ry - II.data[1][1]*rx; \
-                    float s2z = II.data[2][0]*ry - II.data[2][1]*rx; \
+                    float s2x = II.m00*ry - II.m01*rx; \
+                    float s2y = II.m01*ry - II.m11*rx; \
+                    float s2z = II.m02*ry - II.m12*rx; \
                     /* [r]_x^T rows: r0=(0,rz,-ry), r1=(-rz,0,rx), r2=(ry,-rx,0) */ \
                     K00 += rz*s0y - ry*s0z; \
                     K01 += rz*s1y - ry*s1z; \
@@ -421,16 +426,16 @@ _CONTACT_SOLVE_SNIPPET = r"""
                     if (ja >= 0) {
                         jvax -= jima*ix; jvay -= jima*iy; jvaz -= jima*iz;
                         float cx=jray*iz-jraz*iy, cy=jraz*ix-jrax*iz, cz=jrax*iy-jray*ix;
-                        jwax -= jiia.data[0][0]*cx+jiia.data[0][1]*cy+jiia.data[0][2]*cz;
-                        jway -= jiia.data[1][0]*cx+jiia.data[1][1]*cy+jiia.data[1][2]*cz;
-                        jwaz -= jiia.data[2][0]*cx+jiia.data[2][1]*cy+jiia.data[2][2]*cz;
+                        jwax -= jiia.m00*cx+jiia.m01*cy+jiia.m02*cz;
+                        jway -= jiia.m01*cx+jiia.m11*cy+jiia.m12*cz;
+                        jwaz -= jiia.m02*cx+jiia.m12*cy+jiia.m22*cz;
                     }
                     if (jbi >= 0) {
                         jvbx += jimb*ix; jvby += jimb*iy; jvbz += jimb*iz;
                         float cx=jrby*iz-jrbz*iy, cy=jrbz*ix-jrbx*iz, cz=jrbx*iy-jrby*ix;
-                        jwbx += jiib.data[0][0]*cx+jiib.data[0][1]*cy+jiib.data[0][2]*cz;
-                        jwby += jiib.data[1][0]*cx+jiib.data[1][1]*cy+jiib.data[1][2]*cz;
-                        jwbz += jiib.data[2][0]*cx+jiib.data[2][1]*cy+jiib.data[2][2]*cz;
+                        jwbx += jiib.m00*cx+jiib.m01*cy+jiib.m02*cz;
+                        jwby += jiib.m01*cx+jiib.m11*cy+jiib.m12*cz;
+                        jwbz += jiib.m02*cx+jiib.m12*cy+jiib.m22*cz;
                     }
                 }
 
@@ -444,10 +449,18 @@ _CONTACT_SOLVE_SNIPPET = r"""
                     auto ai = *wp::address(j_ai, wid, ji);
                     float dwx = jwbx-jwax, dwy = jwby-jway, dwz = jwbz-jwaz;
 
-                    // Combined angular inertia
+                    // Combined angular inertia (from mat3sym — symmetric, so only 6 values)
+                    float ka00 = (ja>=0 ? jiia.m00 : 0) + (jbi>=0 ? jiib.m00 : 0);
+                    float ka01 = (ja>=0 ? jiia.m01 : 0) + (jbi>=0 ? jiib.m01 : 0);
+                    float ka02 = (ja>=0 ? jiia.m02 : 0) + (jbi>=0 ? jiib.m02 : 0);
+                    float ka11 = (ja>=0 ? jiia.m11 : 0) + (jbi>=0 ? jiib.m11 : 0);
+                    float ka12 = (ja>=0 ? jiia.m12 : 0) + (jbi>=0 ? jiib.m12 : 0);
+                    float ka22 = (ja>=0 ? jiia.m22 : 0) + (jbi>=0 ? jiib.m22 : 0);
+                    // Build as mat_t for existing code that uses .data[][]
                     wp::mat_t<3,3,float> k_ang;
-                    for (int r=0; r<3; r++) for (int c=0; c<3; c++)
-                        k_ang.data[r][c] = (ja>=0 ? jiia.data[r][c] : 0) + (jbi>=0 ? jiib.data[r][c] : 0);
+                    k_ang.data[0][0]=ka00; k_ang.data[0][1]=ka01; k_ang.data[0][2]=ka02;
+                    k_ang.data[1][0]=ka01; k_ang.data[1][1]=ka11; k_ang.data[1][2]=ka12;
+                    k_ang.data[2][0]=ka02; k_ang.data[2][1]=ka12; k_ang.data[2][2]=ka22;
 
                     if (jtype == 1) {
                         // REVOLUTE: constrain 2 DOF perpendicular to hinge
@@ -476,14 +489,14 @@ _CONTACT_SOLVE_SNIPPET = r"""
                         float apx=i1*b1x+i2*b2x, apy=i1*b1y+i2*b2y, apz=i1*b1z+i2*b2z;
 
                         if (ja >= 0) {
-                            jwax -= jiia.data[0][0]*apx+jiia.data[0][1]*apy+jiia.data[0][2]*apz;
-                            jway -= jiia.data[1][0]*apx+jiia.data[1][1]*apy+jiia.data[1][2]*apz;
-                            jwaz -= jiia.data[2][0]*apx+jiia.data[2][1]*apy+jiia.data[2][2]*apz;
+                            jwax -= jiia.m00*apx+jiia.m01*apy+jiia.m02*apz;
+                            jway -= jiia.m01*apx+jiia.m11*apy+jiia.m12*apz;
+                            jwaz -= jiia.m02*apx+jiia.m12*apy+jiia.m22*apz;
                         }
                         if (jbi >= 0) {
-                            jwbx += jiib.data[0][0]*apx+jiib.data[0][1]*apy+jiib.data[0][2]*apz;
-                            jwby += jiib.data[1][0]*apx+jiib.data[1][1]*apy+jiib.data[1][2]*apz;
-                            jwbz += jiib.data[2][0]*apx+jiib.data[2][1]*apy+jiib.data[2][2]*apz;
+                            jwbx += jiib.m00*apx+jiib.m01*apy+jiib.m02*apz;
+                            jwby += jiib.m01*apx+jiib.m11*apy+jiib.m12*apz;
+                            jwbz += jiib.m02*apx+jiib.m12*apy+jiib.m22*apz;
                         }
 
                         // Motor on hinge axis
@@ -503,14 +516,14 @@ _CONTACT_SOLVE_SNIPPET = r"""
                                 float new_mi = fminf(fmaxf(mi_val+mimp,-max_i),max_i);
                                 mimp = new_mi - mi_val; mi_val = new_mi;
                                 if (ja >= 0) {
-                                    jwax -= jiia.data[0][0]*mimp*whx+jiia.data[0][1]*mimp*why+jiia.data[0][2]*mimp*whz;
-                                    jway -= jiia.data[1][0]*mimp*whx+jiia.data[1][1]*mimp*why+jiia.data[1][2]*mimp*whz;
-                                    jwaz -= jiia.data[2][0]*mimp*whx+jiia.data[2][1]*mimp*why+jiia.data[2][2]*mimp*whz;
+                                    jwax -= jiia.m00*mimp*whx+jiia.m01*mimp*why+jiia.m02*mimp*whz;
+                                    jway -= jiia.m01*mimp*whx+jiia.m11*mimp*why+jiia.m12*mimp*whz;
+                                    jwaz -= jiia.m02*mimp*whx+jiia.m12*mimp*why+jiia.m22*mimp*whz;
                                 }
                                 if (jbi >= 0) {
-                                    jwbx += jiib.data[0][0]*mimp*whx+jiib.data[0][1]*mimp*why+jiib.data[0][2]*mimp*whz;
-                                    jwby += jiib.data[1][0]*mimp*whx+jiib.data[1][1]*mimp*why+jiib.data[1][2]*mimp*whz;
-                                    jwbz += jiib.data[2][0]*mimp*whx+jiib.data[2][1]*mimp*why+jiib.data[2][2]*mimp*whz;
+                                    jwbx += jiib.m00*mimp*whx+jiib.m01*mimp*why+jiib.m02*mimp*whz;
+                                    jwby += jiib.m01*mimp*whx+jiib.m11*mimp*why+jiib.m12*mimp*whz;
+                                    jwbz += jiib.m02*mimp*whx+jiib.m12*mimp*why+jiib.m22*mimp*whz;
                                 }
                             }
                         }
@@ -546,12 +559,12 @@ _CONTACT_SOLVE_SNIPPET = r"""
                                   float cdot_lo = (jwbx-jwax)*whx+(jwby-jway)*why+(jwbz-jwaz)*whz;
                                   float imp_lo = -ms_lo*am_lim*(cdot_lo+bias_lo) - is_lo*lo_imp;
                                   float new_lo = fmaxf(lo_imp+imp_lo, 0.f); imp_lo=new_lo-lo_imp; lo_imp=new_lo;
-                                  if (ja>=0){jwax-=jiia.data[0][0]*imp_lo*whx+jiia.data[0][1]*imp_lo*why+jiia.data[0][2]*imp_lo*whz;
-                                             jway-=jiia.data[1][0]*imp_lo*whx+jiia.data[1][1]*imp_lo*why+jiia.data[1][2]*imp_lo*whz;
-                                             jwaz-=jiia.data[2][0]*imp_lo*whx+jiia.data[2][1]*imp_lo*why+jiia.data[2][2]*imp_lo*whz;}
-                                  if (jbi>=0){jwbx+=jiib.data[0][0]*imp_lo*whx+jiib.data[0][1]*imp_lo*why+jiib.data[0][2]*imp_lo*whz;
-                                              jwby+=jiib.data[1][0]*imp_lo*whx+jiib.data[1][1]*imp_lo*why+jiib.data[1][2]*imp_lo*whz;
-                                              jwbz+=jiib.data[2][0]*imp_lo*whx+jiib.data[2][1]*imp_lo*why+jiib.data[2][2]*imp_lo*whz;} }
+                                  if (ja>=0){jwax-=jiia.m00*imp_lo*whx+jiia.m01*imp_lo*why+jiia.m02*imp_lo*whz;
+                                             jway-=jiia.m01*imp_lo*whx+jiia.m11*imp_lo*why+jiia.m12*imp_lo*whz;
+                                             jwaz-=jiia.m02*imp_lo*whx+jiia.m12*imp_lo*why+jiia.m22*imp_lo*whz;}
+                                  if (jbi>=0){jwbx+=jiib.m00*imp_lo*whx+jiib.m01*imp_lo*why+jiib.m02*imp_lo*whz;
+                                              jwby+=jiib.m01*imp_lo*whx+jiib.m11*imp_lo*why+jiib.m12*imp_lo*whz;
+                                              jwbz+=jiib.m02*imp_lo*whx+jiib.m12*imp_lo*why+jiib.m22*imp_lo*whz;} }
 
                                 // Upper limit (signs flipped)
                                 { float C_hi = hi - joint_angle;
@@ -561,12 +574,12 @@ _CONTACT_SOLVE_SNIPPET = r"""
                                   float cdot_hi = -((jwbx-jwax)*whx+(jwby-jway)*why+(jwbz-jwaz)*whz);
                                   float imp_hi = -ms_hi*am_lim*(cdot_hi+bias_hi) - is_hi*hi_imp;
                                   float new_hi = fmaxf(hi_imp+imp_hi, 0.f); imp_hi=new_hi-hi_imp; hi_imp=new_hi;
-                                  if (ja>=0){jwax+=jiia.data[0][0]*imp_hi*whx+jiia.data[0][1]*imp_hi*why+jiia.data[0][2]*imp_hi*whz;
-                                             jway+=jiia.data[1][0]*imp_hi*whx+jiia.data[1][1]*imp_hi*why+jiia.data[1][2]*imp_hi*whz;
-                                             jwaz+=jiia.data[2][0]*imp_hi*whx+jiia.data[2][1]*imp_hi*why+jiia.data[2][2]*imp_hi*whz;}
-                                  if (jbi>=0){jwbx-=jiib.data[0][0]*imp_hi*whx+jiib.data[0][1]*imp_hi*why+jiib.data[0][2]*imp_hi*whz;
-                                              jwby-=jiib.data[1][0]*imp_hi*whx+jiib.data[1][1]*imp_hi*why+jiib.data[1][2]*imp_hi*whz;
-                                              jwbz-=jiib.data[2][0]*imp_hi*whx+jiib.data[2][1]*imp_hi*why+jiib.data[2][2]*imp_hi*whz;} }
+                                  if (ja>=0){jwax+=jiia.m00*imp_hi*whx+jiia.m01*imp_hi*why+jiia.m02*imp_hi*whz;
+                                             jway+=jiia.m01*imp_hi*whx+jiia.m11*imp_hi*why+jiia.m12*imp_hi*whz;
+                                             jwaz+=jiia.m02*imp_hi*whx+jiia.m12*imp_hi*why+jiia.m22*imp_hi*whz;}
+                                  if (jbi>=0){jwbx-=jiib.m00*imp_hi*whx+jiib.m01*imp_hi*why+jiib.m02*imp_hi*whz;
+                                              jwby-=jiib.m01*imp_hi*whx+jiib.m11*imp_hi*why+jiib.m12*imp_hi*whz;
+                                              jwbz-=jiib.m02*imp_hi*whx+jiib.m12*imp_hi*why+jiib.m22*imp_hi*whz;} }
 
                                 *wp::address(j_lo_imp, wid, ji) = lo_imp;
                                 *wp::address(j_hi_imp, wid, ji) = hi_imp;
@@ -602,14 +615,14 @@ _CONTACT_SOLVE_SNIPPET = r"""
                             float iy = -sy - jisv*ai[1];
                             float iz = -sz - jisv*ai[2];
                             if (ja >= 0) {
-                                jwax -= jiia.data[0][0]*ix+jiia.data[0][1]*iy+jiia.data[0][2]*iz;
-                                jway -= jiia.data[1][0]*ix+jiia.data[1][1]*iy+jiia.data[1][2]*iz;
-                                jwaz -= jiia.data[2][0]*ix+jiia.data[2][1]*iy+jiia.data[2][2]*iz;
+                                jwax -= jiia.m00*ix+jiia.m01*iy+jiia.m02*iz;
+                                jway -= jiia.m01*ix+jiia.m11*iy+jiia.m12*iz;
+                                jwaz -= jiia.m02*ix+jiia.m12*iy+jiia.m22*iz;
                             }
                             if (jbi >= 0) {
-                                jwbx += jiib.data[0][0]*ix+jiib.data[0][1]*iy+jiib.data[0][2]*iz;
-                                jwby += jiib.data[1][0]*ix+jiib.data[1][1]*iy+jiib.data[1][2]*iz;
-                                jwbz += jiib.data[2][0]*ix+jiib.data[2][1]*iy+jiib.data[2][2]*iz;
+                                jwbx += jiib.m00*ix+jiib.m01*iy+jiib.m02*iz;
+                                jwby += jiib.m01*ix+jiib.m11*iy+jiib.m12*iz;
+                                jwbz += jiib.m02*ix+jiib.m12*iy+jiib.m22*iz;
                             }
                             wp::vec_t<3,float> nai; nai[0]=ai[0]+ix; nai[1]=ai[1]+iy; nai[2]=ai[2]+iz;
                             *wp::address(j_ai, wid, ji) = nai;
@@ -639,7 +652,7 @@ def _contact_solve_native(
     body_vel: wp.array2d(dtype=wp.vec3),
     body_ang_vel: wp.array2d(dtype=wp.vec3),
     inv_m: wp.array2d(dtype=float),
-    inv_I: wp.array2d(dtype=wp.mat33),
+    inv_I: wp.array2d(dtype=mat3sym),
     delta_pos: wp.array2d(dtype=wp.vec3),
     c_body_a: wp.array2d(dtype=wp.int32),
     c_body_b: wp.array2d(dtype=wp.int32),
@@ -711,7 +724,7 @@ def contact_solve_kernel(
     body_vel: wp.array2d(dtype=wp.vec3),
     body_ang_vel: wp.array2d(dtype=wp.vec3),
     inv_m: wp.array2d(dtype=float),
-    inv_I: wp.array2d(dtype=wp.mat33),
+    inv_I: wp.array2d(dtype=mat3sym),
     delta_pos: wp.array2d(dtype=wp.vec3),
     c_body_a: wp.array2d(dtype=wp.int32),
     c_body_b: wp.array2d(dtype=wp.int32),

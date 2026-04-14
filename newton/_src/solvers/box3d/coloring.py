@@ -16,6 +16,7 @@ from __future__ import annotations
 import numpy as np
 import warp as wp
 
+from .mat3sym import mat3sym, mat3sym_to_mat33
 from .constraint_funcs import (
     compute_contact_effective_mass,
     compute_relative_velocity,
@@ -339,7 +340,7 @@ def prepare_contact_masses_2d(
     body_vel: wp.array2d(dtype=wp.vec3),
     body_ang_vel: wp.array2d(dtype=wp.vec3),
     body_inv_mass: wp.array2d(dtype=float),
-    body_inv_inertia: wp.array2d(dtype=wp.mat33),
+    body_inv_inertia: wp.array2d(dtype=mat3sym),
     contact_count: wp.array[wp.int32],
     max_contacts: int,
     # Outputs
@@ -375,6 +376,7 @@ def prepare_contact_masses_2d(
     ii_a = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     im_b = 0.0
     ii_b = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    # Will convert from mat3sym below
     va = wp.vec3(0.0, 0.0, 0.0)
     wa = wp.vec3(0.0, 0.0, 0.0)
     vb = wp.vec3(0.0, 0.0, 0.0)
@@ -382,12 +384,12 @@ def prepare_contact_masses_2d(
 
     if a >= 0:
         im_a = body_inv_mass[wid, a]
-        ii_a = body_inv_inertia[wid, a]
+        ii_a = mat3sym_to_mat33(body_inv_inertia[wid, a])
         va = body_vel[wid, a]
         wa = body_ang_vel[wid, a]
     if b >= 0:
         im_b = body_inv_mass[wid, b]
-        ii_b = body_inv_inertia[wid, b]
+        ii_b = mat3sym_to_mat33(body_inv_inertia[wid, b])
         vb = body_vel[wid, b]
         wb = body_ang_vel[wid, b]
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 import warp as wp
 
 from ...sim import BodyFlags
+from .mat3sym import mat3sym, mat3sym_from_mat33, mat3sym_zero
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -42,10 +43,10 @@ def convert_bodies_to_box3d(
     out_vel: wp.array2d(dtype=wp.vec3),
     out_ang_vel: wp.array2d(dtype=wp.vec3),
     out_inv_mass: wp.array2d(dtype=float),
-    out_inv_inertia: wp.array2d(dtype=wp.mat33),
+    out_inv_inertia: wp.array2d(dtype=mat3sym),
     out_com: wp.array2d(dtype=wp.vec3),
     out_delta_pos: wp.array2d(dtype=wp.vec3),
-    out_inv_inertia_body: wp.array2d(dtype=wp.mat33),
+    out_inv_inertia_body: wp.array2d(dtype=mat3sym),
     out_bodies_per_world: wp.array[wp.int32],
 ):
     """Convert Newton body state to Box3D 2-D layout.
@@ -85,18 +86,19 @@ def convert_bodies_to_box3d(
     flags = body_flags[global_idx]
     if (flags & BodyFlags.KINEMATIC) != 0:
         out_inv_mass[world, local_idx] = 0.0
-        out_inv_inertia[world, local_idx] = wp.mat33(
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-        )
+        out_inv_inertia[world, local_idx] = mat3sym_zero()
+        out_inv_inertia_body[world, local_idx] = mat3sym_zero()
     else:
         out_inv_mass[world, local_idx] = body_inv_mass[global_idx]
-        # Store body-frame inverse inertia (constant)
+        # Store body-frame inverse inertia as mat3sym (constant)
         I_body_inv = body_inv_inertia[global_idx]
-        out_inv_inertia_body[world, local_idx] = I_body_inv
+        I_body_sym = mat3sym_from_mat33(I_body_inv)
+        out_inv_inertia_body[world, local_idx] = I_body_sym
         # Rotate to world frame for initial substep:
         # I_world^{-1} = R * I_body^{-1} * R^T
         R = wp.quat_to_matrix(ori)
-        out_inv_inertia[world, local_idx] = R * I_body_inv * wp.transpose(R)
+        I_world = R * I_body_inv * wp.transpose(R)
+        out_inv_inertia[world, local_idx] = mat3sym_from_mat33(I_world)
 
     # Zero delta-pos for substep tracking
     out_delta_pos[world, local_idx] = wp.vec3(0.0, 0.0, 0.0)

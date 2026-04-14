@@ -17,6 +17,7 @@ from __future__ import annotations
 import warp as wp
 
 from .config import Box3DConfig
+from .mat3sym import mat3sym
 
 
 class SolverBuffers:
@@ -41,10 +42,10 @@ class SolverBuffers:
         self.body_vel = wp.zeros((W, B), dtype=wp.vec3, device=device)
         self.body_ang_vel = wp.zeros((W, B), dtype=wp.vec3, device=device)
         self.body_inv_mass = wp.zeros((W, B), dtype=float, device=device)
-        self.body_inv_inertia = wp.zeros((W, B), dtype=wp.mat33, device=device)
+        self.body_inv_inertia = wp.zeros((W, B), dtype=mat3sym, device=device)
         self.body_com = wp.zeros((W, B), dtype=wp.vec3, device=device)
         self.body_delta_pos = wp.zeros((W, B), dtype=wp.vec3, device=device)
-        self.body_inv_inertia_body = wp.zeros((W, B), dtype=wp.mat33, device=device)
+        self.body_inv_inertia_body = wp.zeros((W, B), dtype=mat3sym, device=device)
         """Body-frame inverse inertia (constant). Used to recompute world-frame each substep."""
 
         # ── Raw contacts (before coloring, 2-D: [world, contact]) ────

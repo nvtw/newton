@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import warp as wp
 
+from .mat3sym import mat3sym, mat3sym_from_mat33, mat3sym_to_mat33
+
 
 @wp.kernel
 def integrate_velocities_2d(
@@ -75,8 +77,8 @@ def _quat_integrate(q: wp.quat, w: wp.vec3, dt: float) -> wp.quat:
 def update_world_inertia_2d(
     body_ori: wp.array2d(dtype=wp.quat),
     body_inv_mass: wp.array2d(dtype=float),
-    body_inv_inertia_body: wp.array2d(dtype=wp.mat33),
-    body_inv_inertia_world: wp.array2d(dtype=wp.mat33),
+    body_inv_inertia_body: wp.array2d(dtype=mat3sym),
+    body_inv_inertia_world: wp.array2d(dtype=mat3sym),
     bodies_per_world: wp.array[wp.int32],
 ):
     """Recompute world-frame inverse inertia from current orientation.
@@ -94,8 +96,10 @@ def update_world_inertia_2d(
         return
     ori = body_ori[wid, tid]
     R = wp.quat_to_matrix(ori)
-    I_body_inv = body_inv_inertia_body[wid, tid]
-    body_inv_inertia_world[wid, tid] = R * I_body_inv * wp.transpose(R)
+    I_body_sym = body_inv_inertia_body[wid, tid]
+    I_body_mat = mat3sym_to_mat33(I_body_sym)
+    I_world_mat = R * I_body_mat * wp.transpose(R)
+    body_inv_inertia_world[wid, tid] = mat3sym_from_mat33(I_world_mat)
 
 
 @wp.kernel
