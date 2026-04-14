@@ -97,7 +97,7 @@ class Box3DConfig:
     max_contacts_per_world: int = 8192
     max_joints_per_world: int = 1024
     max_colors: int = 64
-    block_dim: int = 256
+    block_dim: int = 128
     enable_graph: bool = False
     """Enable CUDA graph capture for the solver-internal kernels.
 
