@@ -497,20 +497,7 @@ class SolverBox3D(SolverBase):
             is_first = sub == 0
             is_last = sub == cfg.num_substeps - 1
 
-            # 4a. Update world-frame inertia from current orientation
-            if sub > 0:
-                wp.launch(
-                    update_world_inertia_2d,
-                    dim=(W, max_bodies),
-                    inputs=[
-                        buf.body_ori, buf.body_inv_mass,
-                        buf.body_inv_inertia_body, buf.body_inv_inertia,
-                        buf.bodies_per_world,
-                    ],
-                    device=device,
-                )
-
-            # 4b. Biased contact+joint solve (velocity integration fused into 1st iter)
+            # 4b. Biased contact+joint solve (vel integration + inertia update fused)
             wp.launch_tiled(
                     contact_solve_kernel,
                     dim=[W],
@@ -540,6 +527,8 @@ class SolverBox3D(SolverBase):
                     gx, gy, gz, cfg.linear_damping, cfg.angular_damping,
                     1,  # fused position integration (after all iters)
                     cfg.num_velocity_iters,  # solve_iters
+                    1 if sub > 0 else 0,  # update inertia (skip first substep — already rotated in convert)
+                    buf.body_inv_inertia_body,
                         # Joint parameters
                         buf.body_pos, buf.body_ori,
                         buf.j_body_a, buf.j_body_b, buf.j_type,
@@ -589,6 +578,7 @@ class SolverBox3D(SolverBase):
                         cfg.contact_speed, cfg.restitution_threshold,
                     0, 0.0, 0.0, 0.0, 0.0, 0.0, 0,  # no vel/pos integration
                     cfg.num_relaxation_iters,  # solve_iters
+                    0, buf.body_inv_inertia_body,  # no inertia update in relax
                     # Joint parameters
                         buf.body_pos, buf.body_ori,
                         buf.j_body_a, buf.j_body_b, buf.j_type,
@@ -636,6 +626,7 @@ class SolverBox3D(SolverBase):
                 cfg.contact_speed, cfg.restitution_threshold,
                 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0,  # no vel/pos integration in restitution
                 1,  # solve_iters
+                0, buf.body_inv_inertia_body,  # no inertia update
                 buf.body_pos, buf.body_ori,
                 buf.j_body_a, buf.j_body_b, buf.j_type,
                 buf.j_local_anchor_a, buf.j_local_anchor_b,

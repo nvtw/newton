@@ -31,6 +31,39 @@ _MAX_SMEM_BODIES = 1024
 _CONTACT_SOLVE_SNIPPET = r"""
     __shared__ float smem[""" + str(_MAX_SMEM_BODIES * 6) + r"""];
 
+    // Optionally rotate body-frame inertia to world frame (fused from update_world_inertia_2d)
+    if (do_update_inertia > 0) {
+        for (int b = tid; b < num_bodies; b += blockDim.x) {
+            float im = *wp::address(inv_m, wid, b);
+            if (im > 0.0f) {
+                auto q = *wp::address(body_ori, wid, b);
+                auto ib = *wp::address(inv_I_body, wid, b);
+                // R = quat_to_matrix(q); I_world = R * I_body * R^T
+                // Expand using mat3sym: only 6 unique values needed
+                float xx=q[0]*q[0],yy=q[1]*q[1],zz=q[2]*q[2],ww=q[3]*q[3];
+                float xy=q[0]*q[1],xz=q[0]*q[2],xw=q[0]*q[3],yz=q[1]*q[2],yw=q[1]*q[3],zw=q[2]*q[3];
+                // Rotation matrix columns
+                float r00=ww+xx-yy-zz, r01=2*(xy-zw),     r02=2*(xz+yw);
+                float r10=2*(xy+zw),     r11=ww-xx+yy-zz, r12=2*(yz-xw);
+                float r20=2*(xz-yw),     r21=2*(yz+xw),     r22=ww-xx-yy+zz;
+                // M = R * Ib (Ib is symmetric: ib.m00,m01,m02,m11,m12,m22)
+                float m00=r00*ib.m00+r01*ib.m01+r02*ib.m02, m01=r00*ib.m01+r01*ib.m11+r02*ib.m12, m02=r00*ib.m02+r01*ib.m12+r02*ib.m22;
+                float m10=r10*ib.m00+r11*ib.m01+r12*ib.m02, m11=r10*ib.m01+r11*ib.m11+r12*ib.m12, m12=r10*ib.m02+r11*ib.m12+r12*ib.m22;
+                float m20=r20*ib.m00+r21*ib.m01+r22*ib.m02, m21=r20*ib.m01+r21*ib.m11+r22*ib.m12, m22=r20*ib.m02+r21*ib.m12+r22*ib.m22;
+                // Iw = M * R^T (result is symmetric)
+                auto iw = *wp::address(inv_I, wid, b);
+                iw.m00=m00*r00+m01*r01+m02*r02;
+                iw.m01=m00*r10+m01*r11+m02*r12;
+                iw.m02=m00*r20+m01*r21+m02*r22;
+                iw.m11=m10*r10+m11*r11+m12*r12;
+                iw.m12=m10*r20+m11*r21+m12*r22;
+                iw.m22=m20*r20+m21*r21+m22*r22;
+                *wp::address(inv_I, wid, b) = iw;
+            }
+        }
+        __syncthreads();
+    }
+
     // Load velocities into shared memory (optionally integrate velocity first)
     for (int b = tid; b < num_bodies; b += blockDim.x) {
         auto v = *wp::address(body_vel, wid, b);
@@ -734,6 +767,8 @@ def _contact_solve_native(
     lin_damp: float, ang_damp: float,
     do_int_pos: int,
     solve_iters: int,
+    do_update_inertia: int,
+    inv_I_body: wp.array2d(dtype=mat3sym),
     # Joint parameters
     body_pos: wp.array2d(dtype=wp.vec3),
     body_ori: wp.array2d(dtype=wp.quat),
@@ -811,6 +846,8 @@ def contact_solve_kernel(
     lin_damp: float, ang_damp: float,
     do_int_pos: int,
     solve_iters: int,
+    do_update_inertia: int,
+    inv_I_body: wp.array2d(dtype=mat3sym),
     # Joint parameters
     body_pos: wp.array2d(dtype=wp.vec3),
     body_ori: wp.array2d(dtype=wp.quat),
@@ -854,6 +891,7 @@ def contact_solve_kernel(
         static_br, static_ms, static_is,
         contact_speed, rest_thresh,
         do_int_vel, gx, gy, gz, lin_damp, ang_damp, do_int_pos, solve_iters,
+        do_update_inertia, inv_I_body,
         body_pos, body_ori,
         j_ba, j_bb, j_type, j_la, j_lb, j_ha, j_li, j_ai,
         j_ms_arr, j_mmt,
