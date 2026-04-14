@@ -263,11 +263,14 @@ class SolverBox3D(SolverBase):
         contacts: Contacts | None,
         dt: float,
     ) -> None:
+        # Cache frequently accessed attributes to avoid Python dict lookups
         model = self.model
         cfg = self._config
         buf = self._buf
-        device = model.device
+        device = self.device
         W = self._num_worlds
+        body_count = model.body_count
+        particle_count = model.particle_count
 
         # Cache step-invariant computations (recompute only when dt changes)
         if not hasattr(self, '_cached_dt') or self._cached_dt != dt:
@@ -294,10 +297,10 @@ class SolverBox3D(SolverBase):
 
         # ── 1. Convert bodies Newton → Box3D ────────────────────────
         buf.bodies_per_world.zero_()
-        if model.body_count > 0:
+        if body_count > 0:
             wp.launch(
                 convert_bodies_to_box3d,
-                dim=model.body_count,
+                dim=body_count,
                 inputs=[
                     state_in.body_q,
                     state_in.body_qd,
@@ -319,7 +322,7 @@ class SolverBox3D(SolverBase):
             )
 
         # ── 2. Convert contacts Newton → Box3D ─────────────────────
-        has_contacts = contacts is not None and model.shape_count > 0
+        has_contacts = contacts is not None and body_count > 0
 
         # Zero per-world contact counts
         buf.contact_count.zero_()
@@ -407,10 +410,10 @@ class SolverBox3D(SolverBase):
         # ── 7. Convert bodies Box3D → Newton ────────────────────────
         # The convert-back kernel writes ALL bodies (kinematic included)
         # from Box3D buffers, eliminating the need for a prior assign.
-        if model.body_count > 0:
+        if body_count > 0:
             wp.launch(
                 convert_bodies_from_box3d,
-                dim=model.body_count,
+                dim=body_count,
                 inputs=[
                     buf.body_pos, buf.body_ori, buf.body_vel, buf.body_ang_vel,
                     buf.body_com,
@@ -422,7 +425,7 @@ class SolverBox3D(SolverBase):
             )
 
         # Copy particle state through unchanged
-        if model.particle_count > 0:
+        if particle_count > 0:
             state_out.particle_q.assign(state_in.particle_q)
             state_out.particle_qd.assign(state_in.particle_qd)
 
