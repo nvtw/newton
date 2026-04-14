@@ -9,7 +9,6 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.geometry.contact_match import ContactMatcher  # noqa: F401
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
 
 
@@ -23,9 +22,10 @@ class TestContactMatching(unittest.TestCase):
 
 
 def _build_simple_scene(device):
-    """Build a scene with spheres resting on a ground plane.
+    """Build a scene with 3 spheres resting on a ground plane.
 
-    Returns (model, state) with 3 spheres at different positions on the plane.
+    Returns (model, state).  Spheres at x = -0.5, 0.0, 0.5, all at z = radius
+    so they touch the plane.
     """
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
@@ -52,7 +52,7 @@ def _collide_once(pipeline, state, contacts):
 
 
 def test_first_frame_all_not_found(test, device):
-    """First frame: no previous data, all contacts should be MATCH_NOT_FOUND."""
+    """First frame: prev_count is 0, so every contact must get MATCH_NOT_FOUND."""
     with wp.ScopedDevice(device):
         model, state = _build_simple_scene(device)
         pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
@@ -68,8 +68,14 @@ def test_first_frame_all_not_found(test, device):
         )
 
 
-def test_stable_scene_all_matched(test, device):
-    """Stable scene: same state across two frames, all contacts should match."""
+def test_stable_scene_identity_match(test, device):
+    """Stable scene: deterministic sort + identical state means match_index[i] == i.
+
+    This is the strongest possible invariant: each sorted contact maps to the
+    same sorted position in the previous frame.  It verifies binary search,
+    position/normal threshold acceptance, sort permutation of match_index,
+    and the save-then-match round-trip through the sorter's scratch buffers.
+    """
     with wp.ScopedDevice(device):
         model, state = _build_simple_scene(device)
         pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
@@ -79,43 +85,62 @@ def test_stable_scene_all_matched(test, device):
         count1 = _collide_once(pipeline, state, contacts)
         test.assertGreater(count1, 0)
 
-        # Frame 2: same state, should match all contacts.
+        # Frame 2: identical state.
         count2 = _collide_once(pipeline, state, contacts)
-        test.assertEqual(count1, count2, "Contact count should be stable between identical frames")
+        test.assertEqual(count1, count2, "Contact count must be stable between identical frames")
 
         match_idx = contacts.rigid_contact_match_index.numpy()[:count2]
-        matched = match_idx >= 0
-        test.assertTrue(
-            np.all(matched),
-            f"Stable scene should match all contacts. Unmatched count: {np.sum(~matched)}, "
-            f"unique values: {np.unique(match_idx[~matched])}",
+        expected = np.arange(count2, dtype=np.int32)
+        np.testing.assert_array_equal(
+            match_idx,
+            expected,
+            err_msg="Stable scene: match_index[i] must be i (identity mapping)",
         )
 
 
-def test_new_contact_detection(test, device):
-    """Adding a new sphere produces new (unmatched) contacts."""
+def test_stable_scene_identity_across_three_frames(test, device):
+    """Identity match must hold across 3+ frames, not just the first pair."""
     with wp.ScopedDevice(device):
-        # Start with 2 spheres resting on the ground plane.
+        model, state = _build_simple_scene(device)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
+        contacts = pipeline.contacts()
+
+        _collide_once(pipeline, state, contacts)  # frame 1
+        for frame in range(2, 5):
+            count = _collide_once(pipeline, state, contacts)
+            match_idx = contacts.rigid_contact_match_index.numpy()[:count]
+            expected = np.arange(count, dtype=np.int32)
+            np.testing.assert_array_equal(
+                match_idx,
+                expected,
+                err_msg=f"Frame {frame}: match_index must be identity",
+            )
+
+
+def test_new_contact_detection(test, device):
+    """A new sphere that enters the scene produces MATCH_NOT_FOUND,
+    while existing contacts keep their identity match.
+    """
+    with wp.ScopedDevice(device):
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
         for x in (-0.5, 0.5):
             b = builder.add_body(xform=wp.transform(wp.vec3(x, 0.0, 0.1)))
             builder.add_shape_sphere(body=b, radius=0.1)
-        # Third sphere starts far away (no contacts).
+        # Third sphere far away — no contacts in frame 1.
         b3 = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 10.0)))
         builder.add_shape_sphere(body=b3, radius=0.1)
 
         model = builder.finalize(device=device)
         state = model.state()
-
         pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
         contacts = pipeline.contacts()
 
-        # Frame 1: only 2 spheres in contact.
+        # Frame 1: 2 sphere-plane contacts.
         count1 = _collide_once(pipeline, state, contacts)
         test.assertGreater(count1, 0)
 
-        # Move third sphere down to touch the ground plane for frame 2.
+        # Move third sphere to ground for frame 2.
         q = state.body_q.numpy()
         q[2][0:3] = [0.0, 0.0, 0.1]
         state.body_q = wp.array(q, dtype=wp.transform, device=device)
@@ -124,68 +149,197 @@ def test_new_contact_detection(test, device):
         test.assertGreater(count2, count1, "More contacts expected with third sphere on ground")
 
         match_idx = contacts.rigid_contact_match_index.numpy()[:count2]
-        has_new = np.any(match_idx == -1)
-        test.assertTrue(has_new, "New sphere should produce MATCH_NOT_FOUND contacts")
 
-        has_matched = np.any(match_idx >= 0)
-        test.assertTrue(has_matched, "Original spheres should still have matched contacts")
+        n_new = np.sum(match_idx == -1)
+        n_matched = np.sum(match_idx >= 0)
+        test.assertGreater(n_new, 0, "New sphere should produce MATCH_NOT_FOUND contacts")
+        test.assertEqual(n_matched, count1, f"All {count1} old contacts should still match, got {n_matched}")
+
+        # Matched indices must be unique (no two new contacts claim the same old).
+        matched_vals = match_idx[match_idx >= 0]
+        test.assertEqual(len(np.unique(matched_vals)), len(matched_vals), "Matched indices must be unique")
 
 
-def test_broken_contact_pos_threshold(test, device):
-    """Moving a body far between frames should produce MATCH_BROKEN contacts."""
+def test_broken_pos_threshold_all_contacts(test, device):
+    """Moving all spheres beyond pos_threshold must break ALL contacts (not just some)."""
     with wp.ScopedDevice(device):
         model, state = _build_simple_scene(device)
         pipeline = newton.CollisionPipeline(
             model,
             broad_phase="nxn",
             contact_matching=True,
-            contact_matching_pos_threshold=0.001,  # very tight threshold
+            contact_matching_pos_threshold=0.001,  # 1 mm — very tight
         )
         contacts = pipeline.contacts()
 
-        # Frame 1.
         count1 = _collide_once(pipeline, state, contacts)
         test.assertGreater(count1, 0)
 
-        # Nudge all bodies slightly (more than 0.001 m threshold).
+        # Shift all dynamic bodies by 1 cm (10x the threshold).
         q = state.body_q.numpy()
         for i in range(len(q)):
-            q[i][0] += 0.01  # 1 cm shift in x
+            q[i][0] += 0.01
         state.body_q = wp.array(q, dtype=wp.transform, device=device)
 
-        # Frame 2.
         count2 = _collide_once(pipeline, state, contacts)
-        test.assertGreater(count2, 0)
-
         match_idx = contacts.rigid_contact_match_index.numpy()[:count2]
-        has_broken = np.any(match_idx == -2)
+
+        # Every contact should be MATCH_BROKEN (-2) because key matches but
+        # position drifted beyond threshold.
         test.assertTrue(
-            has_broken,
-            f"Expected MATCH_BROKEN with tight threshold. Unique values: {np.unique(match_idx)}",
+            np.all(match_idx == -2),
+            f"All contacts should be MATCH_BROKEN. Unique values: {np.unique(match_idx)}",
         )
 
 
-def test_contact_report(test, device):
-    """Contact report should list new and broken contact indices."""
+def test_within_pos_threshold_still_matches(test, device):
+    """Moving spheres less than pos_threshold must still produce matches."""
+    with wp.ScopedDevice(device):
+        model, state = _build_simple_scene(device)
+        pipeline = newton.CollisionPipeline(
+            model,
+            broad_phase="nxn",
+            contact_matching=True,
+            contact_matching_pos_threshold=0.1,  # 10 cm — generous
+        )
+        contacts = pipeline.contacts()
+
+        count1 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count1, 0)
+
+        # Shift all dynamic bodies by 1 cm (well within 10 cm threshold).
+        q = state.body_q.numpy()
+        for i in range(len(q)):
+            q[i][0] += 0.01
+        state.body_q = wp.array(q, dtype=wp.transform, device=device)
+
+        count2 = _collide_once(pipeline, state, contacts)
+        match_idx = contacts.rigid_contact_match_index.numpy()[:count2]
+
+        test.assertTrue(
+            np.all(match_idx >= 0),
+            f"All contacts should match within generous threshold. Unique: {np.unique(match_idx)}",
+        )
+
+
+def test_broken_normal_threshold(test, device):
+    """Moving a sphere so the contact normal direction changes beyond threshold
+    produces MATCH_BROKEN.
+
+    Two spheres (radius 0.1) overlap in frame 1 along x-axis (normal ≈ (1,0,0)).
+    In frame 2, sphere B moves so they overlap along y-axis (normal ≈ (0,1,0)).
+    Same shape pair / sub_key, generous pos_threshold, but dot((1,0,0), (0,1,0)) = 0
+    which is below any reasonable normal_dot_threshold → MATCH_BROKEN.
+    """
+    with wp.ScopedDevice(device):
+        builder = newton.ModelBuilder()
+        # Two spheres overlapping along x-axis.
+        ba = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0)))
+        builder.add_shape_sphere(body=ba, radius=0.1)
+        bb = builder.add_body(xform=wp.transform(wp.vec3(0.19, 0.0, 0.0)))
+        builder.add_shape_sphere(body=bb, radius=0.1)
+
+        model = builder.finalize(device=device)
+        state = model.state()
+
+        pipeline = newton.CollisionPipeline(
+            model,
+            broad_phase="nxn",
+            contact_matching=True,
+            contact_matching_pos_threshold=10.0,  # very generous — ignore position
+            contact_matching_normal_dot_threshold=0.5,  # cos(60°) — perpendicular normals break
+        )
+        contacts = pipeline.contacts()
+
+        count1 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count1, 0, "Overlapping spheres must produce contacts")
+
+        # Move sphere B so they overlap along y-axis instead.
+        q = state.body_q.numpy()
+        q[1][0:3] = [0.0, 0.19, 0.0]
+        state.body_q = wp.array(q, dtype=wp.transform, device=device)
+
+        count2 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count2, 0, "Repositioned spheres must still produce contacts")
+
+        match_idx = contacts.rigid_contact_match_index.numpy()[:count2]
+        test.assertTrue(
+            np.all(match_idx == -2),
+            f"Normal changed ~90°, all should be MATCH_BROKEN. Unique: {np.unique(match_idx)}",
+        )
+
+
+def test_contact_report_indices_correct(test, device):
+    """Contact report indices must be consistent with match_index values."""
     with wp.ScopedDevice(device):
         model, state = _build_simple_scene(device)
         pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True, contact_report=True)
         contacts = pipeline.contacts()
+        matcher = pipeline.contact_matcher
 
         # Frame 1: all contacts are new.
         count1 = _collide_once(pipeline, state, contacts)
         test.assertGreater(count1, 0)
 
-        matcher = pipeline.contact_matcher
-        new_count = matcher.new_contact_count.numpy()[0]
-        test.assertEqual(new_count, count1, "First frame: all contacts should be reported as new")
+        new_count1 = matcher.new_contact_count.numpy()[0]
+        test.assertEqual(new_count1, count1, "First frame: all contacts should be new")
 
-        # Frame 2: stable scene, no new or broken contacts.
+        # Verify new_contact_indices point to valid sorted positions.
+        new_indices1 = matcher.new_contact_indices.numpy()[:new_count1]
+        test.assertTrue(np.all(new_indices1 >= 0) and np.all(new_indices1 < count1))
+
+        # Verify new_contact_indices match the actual -1 positions in match_index.
+        match_idx1 = contacts.rigid_contact_match_index.numpy()[:count1]
+        expected_new = np.where(match_idx1 < 0)[0].astype(np.int32)
+        np.testing.assert_array_equal(
+            np.sort(new_indices1),
+            np.sort(expected_new),
+            err_msg="new_contact_indices must match positions where match_index < 0",
+        )
+
+        # Frame 2: stable scene — no new, no broken.
         _collide_once(pipeline, state, contacts)
-        new_count2 = matcher.new_contact_count.numpy()[0]
-        broken_count2 = matcher.broken_contact_count.numpy()[0]
-        test.assertEqual(new_count2, 0, f"Stable scene: expected 0 new contacts, got {new_count2}")
-        test.assertEqual(broken_count2, 0, f"Stable scene: expected 0 broken contacts, got {broken_count2}")
+        test.assertEqual(matcher.new_contact_count.numpy()[0], 0)
+        test.assertEqual(matcher.broken_contact_count.numpy()[0], 0)
+
+
+def test_contact_report_broken_indices(test, device):
+    """Broken contact report must list old contacts that disappeared."""
+    with wp.ScopedDevice(device):
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        for x in (-0.5, 0.5):
+            b = builder.add_body(xform=wp.transform(wp.vec3(x, 0.0, 0.1)))
+            builder.add_shape_sphere(body=b, radius=0.1)
+
+        model = builder.finalize(device=device)
+        state = model.state()
+
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True, contact_report=True)
+        contacts = pipeline.contacts()
+        matcher = pipeline.contact_matcher
+
+        # Frame 1: 2 sphere-plane contacts.
+        count1 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count1, 0)
+
+        # Frame 2: move one sphere far away so its contact disappears.
+        q = state.body_q.numpy()
+        q[1][0:3] = [0.5, 0.0, 10.0]  # second sphere flies away
+        state.body_q = wp.array(q, dtype=wp.transform, device=device)
+
+        count2 = _collide_once(pipeline, state, contacts)
+        test.assertLess(count2, count1, "Fewer contacts after removing a sphere")
+
+        broken_count = matcher.broken_contact_count.numpy()[0]
+        test.assertGreater(broken_count, 0, "Should have broken contacts from the removed sphere")
+
+        # Broken indices must be valid positions in the OLD sorted buffer.
+        broken_indices = matcher.broken_contact_indices.numpy()[:broken_count]
+        test.assertTrue(
+            np.all(broken_indices >= 0) and np.all(broken_indices < count1),
+            f"Broken indices must be in [0, {count1}), got: {broken_indices}",
+        )
 
 
 def test_deterministic_implied(test, device):
@@ -193,39 +347,35 @@ def test_deterministic_implied(test, device):
     with wp.ScopedDevice(device):
         model, _state = _build_simple_scene(device)
         pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
-        test.assertTrue(pipeline.deterministic, "contact_matching should imply deterministic")
+        test.assertTrue(pipeline.deterministic)
         test.assertIsNotNone(pipeline.contact_matcher)
 
 
-def test_match_index_survives_sort(test, device):
-    """match_index values should be correctly permuted during sorting."""
+def test_matching_disabled_no_allocation(test, device):
+    """contact_matching=False: match_index should be None."""
+    with wp.ScopedDevice(device):
+        model, _state = _build_simple_scene(device)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", deterministic=True)
+        contacts = pipeline.contacts()
+        test.assertIsNone(contacts.rigid_contact_match_index)
+        test.assertIsNone(pipeline.contact_matcher)
+
+
+def test_match_index_valid_after_sort(test, device):
+    """After sorting, match indices must be in valid range and unique."""
     with wp.ScopedDevice(device):
         model, state = _build_simple_scene(device)
         pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
         contacts = pipeline.contacts()
 
-        # Frame 1: populate.
-        _collide_once(pipeline, state, contacts)
+        _collide_once(pipeline, state, contacts)  # frame 1
+        count = _collide_once(pipeline, state, contacts)  # frame 2
 
-        # Frame 2: check that match indices are valid.
-        count = _collide_once(pipeline, state, contacts)
         match_idx = contacts.rigid_contact_match_index.numpy()[:count]
+        matched = match_idx[match_idx >= 0]
 
-        # All matched indices should be in valid range.
-        matched_mask = match_idx >= 0
-        if np.any(matched_mask):
-            matched_vals = match_idx[matched_mask]
-            test.assertTrue(
-                np.all(matched_vals < count),
-                f"Matched indices should be < contact count ({count}), max found: {matched_vals.max()}",
-            )
-            # No duplicates among matched indices (each old contact matches at most one new).
-            unique_matched = np.unique(matched_vals)
-            test.assertEqual(
-                len(unique_matched),
-                len(matched_vals),
-                "Matched indices should be unique (no two contacts match same old contact)",
-            )
+        test.assertTrue(np.all(matched < count), f"Indices must be < {count}, max: {matched.max()}")
+        test.assertEqual(len(np.unique(matched)), len(matched), "Matched indices must be unique")
 
 
 # ---------------------------------------------------------------------------
@@ -237,15 +387,41 @@ devices = get_cuda_test_devices()
 add_function_test(
     TestContactMatching, "test_first_frame_all_not_found", test_first_frame_all_not_found, devices=devices
 )
-add_function_test(TestContactMatching, "test_stable_scene_all_matched", test_stable_scene_all_matched, devices=devices)
+add_function_test(
+    TestContactMatching, "test_stable_scene_identity_match", test_stable_scene_identity_match, devices=devices
+)
+add_function_test(
+    TestContactMatching,
+    "test_stable_scene_identity_across_three_frames",
+    test_stable_scene_identity_across_three_frames,
+    devices=devices,
+)
 add_function_test(TestContactMatching, "test_new_contact_detection", test_new_contact_detection, devices=devices)
 add_function_test(
-    TestContactMatching, "test_broken_contact_pos_threshold", test_broken_contact_pos_threshold, devices=devices
+    TestContactMatching,
+    "test_broken_pos_threshold_all_contacts",
+    test_broken_pos_threshold_all_contacts,
+    devices=devices,
 )
-add_function_test(TestContactMatching, "test_contact_report", test_contact_report, devices=devices)
+add_function_test(
+    TestContactMatching,
+    "test_within_pos_threshold_still_matches",
+    test_within_pos_threshold_still_matches,
+    devices=devices,
+)
+add_function_test(TestContactMatching, "test_broken_normal_threshold", test_broken_normal_threshold, devices=devices)
+add_function_test(
+    TestContactMatching, "test_contact_report_indices_correct", test_contact_report_indices_correct, devices=devices
+)
+add_function_test(
+    TestContactMatching, "test_contact_report_broken_indices", test_contact_report_broken_indices, devices=devices
+)
 add_function_test(TestContactMatching, "test_deterministic_implied", test_deterministic_implied, devices=devices)
 add_function_test(
-    TestContactMatching, "test_match_index_survives_sort", test_match_index_survives_sort, devices=devices
+    TestContactMatching, "test_matching_disabled_no_allocation", test_matching_disabled_no_allocation, devices=devices
+)
+add_function_test(
+    TestContactMatching, "test_match_index_valid_after_sort", test_match_index_valid_after_sort, devices=devices
 )
 
 if __name__ == "__main__":

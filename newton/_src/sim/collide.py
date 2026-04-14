@@ -1011,8 +1011,15 @@ class CollisionPipeline:
                 device=self.device,
             )
 
-        # Save sorted state for next-frame contact matching.
+        # Build the contact report before saving state, because save
+        # overwrites _prev_count and the report needs the old value.
         if self._contact_matcher is not None:
+            if self._contact_matcher.has_report:
+                self._contact_matcher.build_report(
+                    contacts.rigid_contact_match_index,
+                    contacts.rigid_contact_count,
+                    device=self.device,
+                )
             self._contact_matcher.save_sorted_state(
                 sorted_keys=self._contact_sorter.sorted_keys_view,
                 contact_count=contacts.rigid_contact_count,
@@ -1023,12 +1030,6 @@ class CollisionPipeline:
                 shape_body=model.shape_body,
                 device=self.device,
             )
-            if self._contact_matcher.has_report:
-                self._contact_matcher.build_report(
-                    contacts.rigid_contact_match_index,
-                    contacts.rigid_contact_count,
-                    device=self.device,
-                )
 
         # Differentiable contact augmentation: reconstruct world-space contact
         # quantities through body_q so that gradients flow via wp.Tape.
