@@ -76,6 +76,20 @@ class SolverBox3D(SolverBase):
         self._color_joints()
         self._convert_joints()
 
+        # Pre-compute bodies_per_world from body_world_start (constant topology)
+        import numpy as np
+        bws = model.body_world_start.numpy()
+        bw_np = model.body_world.numpy() if model.body_world is not None else np.array([])
+        bpw = np.zeros(self._num_worlds, dtype=np.int32)
+        for gi in range(model.body_count):
+            w = int(bw_np[gi]) if gi < len(bw_np) else -1
+            if w < 0:
+                w = 0  # global bodies → world 0
+            if w < self._num_worlds:
+                bpw[w] += 1
+        self._buf.bodies_per_world.assign(bpw)
+        self._bodies_per_world_cached = True
+
         # CUDA graph state
         self._graph: wp.Graph | None = None
         self._graph_dt: float = 0.0
@@ -296,7 +310,7 @@ class SolverBox3D(SolverBase):
         num_joint_colors = self._num_joint_colors
 
         # ── 1. Convert bodies Newton → Box3D ────────────────────────
-        buf.bodies_per_world.zero_()
+        # bodies_per_world is pre-computed at construction (topology is constant)
         if body_count > 0:
             wp.launch(
                 convert_bodies_to_box3d,
