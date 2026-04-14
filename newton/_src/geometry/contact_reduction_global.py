@@ -1108,19 +1108,16 @@ def export_and_reduce_contact_centered(
     entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
 
     # === Pre-prune normal bin: non-atomic reads ===
-    # In deterministic mode, skip pre-pruning entirely.  The non-atomic
-    # slot reads race with concurrent atomic_max writes from other threads,
-    # so the prune/keep decision depends on GPU thread scheduling.  Two
-    # pipeline instances processing the same state can therefore prune
-    # different contacts, leading to different reducer winners and
-    # non-deterministic output.  Disabling the optimisation in
-    # deterministic mode ensures every candidate reaches the hashtable
-    # competition, where the atomic_max + fingerprint tiebreaker
-    # guarantees a unique, scheduling-independent winner.
-    might_win = reducer_data.deterministic != 0  # skip pre-prune when deterministic
+    # In deterministic mode we use make_preprune_probe (score + fingerprint +
+    # max contact_id) so the prune decision never depends on the non-deterministic
+    # contact_id.  In non-deterministic mode we use the cheaper floor probe.
+    might_win = False
 
-    if not might_win and entry_idx >= 0:
-        max_depth_probe = make_contact_value(-depth, 0, 0)
+    if entry_idx >= 0:
+        if reducer_data.deterministic != 0:
+            max_depth_probe = make_preprune_probe(-depth, fingerprint)
+        else:
+            max_depth_probe = make_contact_value(-depth, 0, 0)
         if reducer_data.ht_values[wp.static(NUM_SPATIAL_DIRECTIONS) * ht_capacity + entry_idx] < max_depth_probe:
             might_win = True
 
@@ -1129,7 +1126,10 @@ def export_and_reduce_contact_centered(
                 if not might_win:
                     dir_2d = get_spatial_direction_2d(dir_i)
                     score = wp.dot(pos_2d, dir_2d)
-                    probe = make_contact_value(score, 0, 0)
+                    if reducer_data.deterministic != 0:
+                        probe = make_preprune_probe(score, fingerprint)
+                    else:
+                        probe = make_contact_value(score, 0, 0)
                     if reducer_data.ht_values[dir_i * ht_capacity + entry_idx] < probe:
                         might_win = True
 
@@ -1148,7 +1148,10 @@ def export_and_reduce_contact_centered(
     if not might_win:
         voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
         if voxel_entry_idx >= 0:
-            voxel_probe = make_contact_value(-depth, 0, 0)
+            if reducer_data.deterministic != 0:
+                voxel_probe = make_preprune_probe(-depth, fingerprint)
+            else:
+                voxel_probe = make_contact_value(-depth, 0, 0)
             if reducer_data.ht_values[voxel_local_slot * ht_capacity + voxel_entry_idx] < voxel_probe:
                 might_win = True
 
@@ -1321,7 +1324,9 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
     # Define vector type for tracking exported contact IDs
     exported_ids_vec = wp.types.vector(length=VALUES_PER_KEY, dtype=wp.int32)
 
-    @wp.kernel(enable_backward=False, module="unique")
+    _module = f"export_reduced_contacts_{writer_func.__name__}"
+
+    @wp.kernel(enable_backward=False, module=_module)
     def export_reduced_contacts_kernel(
         # Hashtable arrays
         ht_keys: wp.array[wp.uint64],

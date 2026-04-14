@@ -148,8 +148,9 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
     Returns:
         A warp kernel for primitive collision detection
     """
+    _module = f"narrow_phase_primitive_{writer_func.__name__}"
 
-    @wp.kernel(enable_backward=False, module="unique")
+    @wp.kernel(enable_backward=False, module=_module)
     def narrow_phase_primitive_kernel(
         candidate_pair: wp.array[wp.vec2i],
         candidate_pair_count: wp.array[int],
@@ -619,8 +620,11 @@ def create_narrow_phase_kernel_gjk_mpr(
     The remaining pairs are complex convex-convex (plane-box, plane-cylinder,
     plane-cone, box-box, cylinder-cylinder, etc.) that need GJK/MPR.
     """
+    _sf = support_func.__name__ if support_func is not None else "default"
+    _ppc = post_process_contact.__name__ if post_process_contact is not None else "default"
+    _module = f"narrow_phase_gjk_mpr_{external_aabb}_{writer_func.__name__}_{_sf}_{_ppc}"
 
-    @wp.kernel(enable_backward=False, module="unique")
+    @wp.kernel(enable_backward=False, module=_module)
     def narrow_phase_kernel_gjk_mpr(
         candidate_pair: wp.array[wp.vec2i],
         candidate_pair_count: wp.array[int],
@@ -883,7 +887,9 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
 
 
 def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
-    @wp.kernel(enable_backward=False, module="unique")
+    _module = f"narrow_phase_mesh_tri_{writer_func.__name__}"
+
+    @wp.kernel(enable_backward=False, module=_module)
     def narrow_phase_process_mesh_triangle_contacts_kernel(
         shape_types: wp.array[int],
         shape_data: wp.array[wp.vec4],
@@ -1075,8 +1081,9 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
     Returns:
         A warp kernel that processes mesh-plane collisions
     """
+    _module = f"narrow_phase_mesh_plane_{writer_func.__name__}_{reduce_contacts}"
 
-    @wp.kernel(enable_backward=False, module="unique")
+    @wp.kernel(enable_backward=False, module=_module)
     def narrow_phase_process_mesh_plane_contacts_kernel(
         shape_data: wp.array[wp.vec4],
         shape_transform: wp.array[wp.transform],
@@ -1182,7 +1189,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
     if not reduce_contacts:
         return narrow_phase_process_mesh_plane_contacts_kernel
 
-    @wp.kernel(enable_backward=False, module="unique")
+    @wp.kernel(enable_backward=False, module=_module)
     def narrow_phase_process_mesh_plane_contacts_reduce_kernel(
         shape_data: wp.array[wp.vec4],
         shape_transform: wp.array[wp.transform],

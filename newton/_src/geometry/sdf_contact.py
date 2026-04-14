@@ -313,11 +313,6 @@ def add_to_shared_buffer_atomic(
     - [block_dim]: Current count of edges in buffer
     - [block_dim+1]: Progress counter (edges processed so far)
 
-    When more edges pass culling than the buffer can hold, excess edges
-    are silently dropped.  Progress always advances forward so that no
-    edge range is examined twice — this prevents duplicate contacts that
-    would cause non-deterministic tiebreaking in the contact reducer.
-
     Args:
         thread_id: The calling thread's index within the thread block
         add_edge: Whether this thread wants to add an edge
@@ -342,6 +337,9 @@ def add_to_shared_buffer_atomic(
 
     if thread_id == 0 and buffer[capacity] > capacity:
         buffer[capacity] = capacity
+
+    if add_edge and idx >= capacity:
+        wp.atomic_min(buffer, capacity + 1, edge_idx)
 
     synchronize()  # SYNC 2: All corrections complete, buffer consistent
 
@@ -1004,7 +1002,16 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 ):
     find_interesting_edges, do_edge_sdf_collision = _create_sdf_contact_funcs(enable_heightfields)
 
-    @wp.kernel(enable_backward=False, module="unique")
+    # Derive a stable module name from the factory arguments so that
+    # identical configurations share the compiled CUDA kernel.  This is
+    # critical for deterministic contact generation: two CollisionPipeline
+    # instances with the same writer_func must execute the exact same
+    # compiled code, otherwise FMA-fusion or register-allocation
+    # differences between independent JIT compilations can produce subtly
+    # different floating-point results, breaking bit-exact reproducibility.
+    _module = f"sdf_contact_{writer_func.__name__}_{enable_heightfields}_{reduce_contacts}"
+
+    @wp.kernel(enable_backward=False, module=_module)
     def mesh_sdf_collision_kernel(
         shape_data: wp.array[wp.vec4],
         shape_transform: wp.array[wp.transform],
@@ -1280,7 +1287,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     # but contacts are written directly to global buffer + hashtable.
     # =========================================================================
 
-    @wp.kernel(enable_backward=False, module="unique")
+    @wp.kernel(enable_backward=False, module=_module)
     def mesh_sdf_collision_global_reduce_kernel(
         shape_data: wp.array[wp.vec4],
         shape_transform: wp.array[wp.transform],
