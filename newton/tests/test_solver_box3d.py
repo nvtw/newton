@@ -255,6 +255,43 @@ def test_fixed_joint(test, device):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# CUDA graph capture
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_cuda_graph_matches_eager(test, device):
+    """CUDA graph capture produces identical results to eager execution."""
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 2.0)))
+    builder.add_shape_sphere(body=b, radius=0.5)
+
+    model = builder.finalize(device=device)
+
+    # Run eager (no graph)
+    cfg_eager = Box3DConfig(num_substeps=4, enable_graph=False)
+    solver_eager = newton.solvers.SolverBox3D(model, config=cfg_eager)
+    pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
+    state_eager_in = model.state()
+    state_eager_out = model.state()
+    final_eager = _step_simulation(solver_eager, pipeline, state_eager_in, state_eager_out, None, 1.0 / 60.0, 30)
+    pos_eager = final_eager.body_q.numpy()[0].copy()
+
+    # Run with graph
+    cfg_graph = Box3DConfig(num_substeps=4, enable_graph=True)
+    solver_graph = newton.solvers.SolverBox3D(model, config=cfg_graph)
+    pipeline2 = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
+    state_graph_in = model.state()
+    state_graph_out = model.state()
+    final_graph = _step_simulation(solver_graph, pipeline2, state_graph_in, state_graph_out, None, 1.0 / 60.0, 30)
+    pos_graph = final_graph.body_q.numpy()[0].copy()
+
+    # Results should be very close (floating point may differ slightly due to graph optimization)
+    np.testing.assert_allclose(pos_graph[:3], pos_eager[:3], atol=0.01,
+                               err_msg=f"Graph and eager positions differ: graph={pos_graph[:3]}, eager={pos_eager[:3]}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Register tests
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -265,6 +302,7 @@ add_function_test(TestSolverBox3D, "test_ground_contact", test_ground_contact, d
 add_function_test(TestSolverBox3D, "test_zero_gravity_velocity_preserved", test_zero_gravity_velocity_preserved, devices=devices)
 add_function_test(TestSolverBox3D, "test_pendulum_revolute", test_pendulum_revolute, devices=devices)
 add_function_test(TestSolverBox3D, "test_fixed_joint", test_fixed_joint, devices=devices)
+add_function_test(TestSolverBox3D, "test_cuda_graph_matches_eager", test_cuda_graph_matches_eager, devices=devices)
 
 
 if __name__ == "__main__":

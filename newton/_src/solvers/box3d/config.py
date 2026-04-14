@@ -98,3 +98,11 @@ class Box3DConfig:
     max_joints_per_world: int = 256
     max_colors: int = 48
     block_dim: int = 128
+    enable_graph: bool = False
+    """Enable CUDA graph capture for the solver-internal kernels.
+
+    When enabled, the first call to :meth:`~SolverBox3D.step` captures a
+    CUDA graph of the solve loop (coloring, integration, contact/joint
+    solve, impulse store).  Subsequent calls replay the graph with zero
+    Python overhead.  Requires that ``dt`` stays constant between steps.
+    """

@@ -76,6 +76,10 @@ class SolverBox3D(SolverBase):
         self._color_joints()
         self._convert_joints()
 
+        # CUDA graph state
+        self._graph: wp.Graph | None = None
+        self._graph_dt: float = 0.0
+
     # ──────────────────────────────────────────────────────────────────
     # Joint coloring (CPU, once at construction / model change)
     # ──────────────────────────────────────────────────────────────────
@@ -335,6 +339,85 @@ class SolverBox3D(SolverBase):
                 device=device,
             )
 
+        # ── 3-5. Solve (optionally graph-captured) ──────────────────
+        if cfg.enable_graph:
+            if self._graph is None or self._graph_dt != dt:
+                self._graph_dt = dt
+                wp.capture_begin(device=device, force_module_load=True)
+                try:
+                    self._launch_solve_kernels(
+                        W, cfg, buf, device, sub_dt, inv_sub_dt,
+                        gravity_vec, soft, soft_static, soft_joint,
+                        num_joints, num_joint_colors, has_contacts,
+                    )
+                finally:
+                    self._graph = wp.capture_end(device=device)
+            wp.capture_launch(self._graph)
+        else:
+            self._launch_solve_kernels(
+                W, cfg, buf, device, sub_dt, inv_sub_dt,
+                gravity_vec, soft, soft_static, soft_joint,
+                num_joints, num_joint_colors, has_contacts,
+            )
+
+        # ── 6. Store impulses for next-frame warm starting ──────────
+        wp.launch(
+            store_impulses_2d,
+            dim=(W, cfg.max_contacts_per_world),
+            inputs=[
+                buf.c_normal_impulse, buf.c_friction1_impulse,
+                buf.c_friction2_impulse, buf.contact_count,
+            ],
+            outputs=[
+                buf.prev_normal_impulse, buf.prev_friction1_impulse,
+                buf.prev_friction2_impulse, buf.prev_contact_count,
+            ],
+            device=device,
+        )
+
+        # ── 7. Convert bodies Box3D → Newton ────────────────────────
+        # First, copy all state from input to output (kinematic bodies
+        # and any other untouched data). The convert-back kernel will
+        # overwrite dynamic bodies.
+        if model.body_count > 0:
+            state_out.body_q.assign(state_in.body_q)
+            state_out.body_qd.assign(state_in.body_qd)
+        if model.body_count > 0:
+            wp.launch(
+                convert_bodies_from_box3d,
+                dim=model.body_count,
+                inputs=[
+                    buf.body_pos, buf.body_ori, buf.body_vel, buf.body_ang_vel,
+                    buf.body_com,
+                    model.body_world, model.body_world_start,
+                    model.body_flags, model.body_com, W,
+                ],
+                outputs=[state_out.body_q, state_out.body_qd],
+                device=device,
+            )
+
+        # Copy particle state through unchanged
+        if model.particle_count > 0:
+            state_out.particle_q.assign(state_in.particle_q)
+            state_out.particle_qd.assign(state_in.particle_qd)
+
+    def _launch_solve_kernels(
+        self,
+        W: int,
+        cfg: Box3DConfig,
+        buf: SolverBuffers,
+        device: wp.Device,
+        sub_dt: float,
+        inv_sub_dt: float,
+        gravity_vec: wp.vec3,
+        soft: Softness,
+        soft_static: Softness,
+        soft_joint: Softness,
+        num_joints: int,
+        num_joint_colors: int,
+        has_contacts: bool,
+    ) -> None:
+        """Launch the graph-capturable solve kernels (steps 3-5)."""
         # ── 3. Graph-color contacts + prepare masses ────────────────
         if has_contacts:
             wp.launch_tiled(
@@ -497,48 +580,6 @@ class SolverBox3D(SolverBase):
                     device=device,
                 )
 
-        # ── 5. Store impulses for next-frame warm starting ──────────
-        if has_contacts:
-            wp.launch(
-                store_impulses_2d,
-                dim=(W, cfg.max_contacts_per_world),
-                inputs=[
-                    buf.c_normal_impulse, buf.c_friction1_impulse,
-                    buf.c_friction2_impulse, buf.contact_count,
-                ],
-                outputs=[
-                    buf.prev_normal_impulse, buf.prev_friction1_impulse,
-                    buf.prev_friction2_impulse, buf.prev_contact_count,
-                ],
-                device=device,
-            )
-
-        # ── 6. Convert bodies Box3D → Newton ────────────────────────
-        # First, copy all state from input to output (kinematic bodies
-        # and any other untouched data). The convert-back kernel will
-        # overwrite dynamic bodies.
-        if model.body_count > 0:
-            state_out.body_q.assign(state_in.body_q)
-            state_out.body_qd.assign(state_in.body_qd)
-        if model.body_count > 0:
-            wp.launch(
-                convert_bodies_from_box3d,
-                dim=model.body_count,
-                inputs=[
-                    buf.body_pos, buf.body_ori, buf.body_vel, buf.body_ang_vel,
-                    buf.body_com,
-                    model.body_world, model.body_world_start,
-                    model.body_flags, model.body_com, W,
-                ],
-                outputs=[state_out.body_q, state_out.body_qd],
-                device=device,
-            )
-
-        # Copy particle state through unchanged
-        if model.particle_count > 0:
-            state_out.particle_q.assign(state_in.particle_q)
-            state_out.particle_qd.assign(state_in.particle_qd)
-
     # ──────────────────────────────────────────────────────────────────
     # Model change notification
     # ──────────────────────────────────────────────────────────────────
@@ -549,7 +590,8 @@ class SolverBox3D(SolverBase):
             self._refresh_kinematic_state()
         if flags & SolverNotifyFlags.JOINT_PROPERTIES:
             self._color_joints()
-            self._joints_converted = False
+            self._convert_joints()
+        self._graph = None  # invalidate CUDA graph
 
     @override
     def update_contacts(self, contacts: Contacts, state: State | None = None) -> None:
