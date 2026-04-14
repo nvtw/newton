@@ -66,7 +66,7 @@ def measure(scene_fn, num_worlds, num_steps=50, warmup=10):
                       enable_graph=True,
                       max_bodies_per_world=128,
                       max_joints_per_world=128,
-                      max_contacts_per_world=1024,
+                      max_contacts_per_world=256,
                       max_colors=32)
     solver = newton.solvers.SolverBox3D(model, config=cfg)
     pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=False)
