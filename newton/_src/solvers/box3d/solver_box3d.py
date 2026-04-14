@@ -384,22 +384,7 @@ class SolverBox3D(SolverBase):
                 num_joints, num_joint_colors, has_contacts,
             )
 
-        # ── 6. Store impulses for next-frame warm starting ──────────
-        wp.launch(
-            store_impulses_2d,
-            dim=(W, cfg.max_contacts_per_world),
-            inputs=[
-                buf.c_normal_impulse, buf.c_friction1_impulse,
-                buf.c_friction2_impulse, buf.contact_count,
-            ],
-            outputs=[
-                buf.prev_normal_impulse, buf.prev_friction1_impulse,
-                buf.prev_friction2_impulse, buf.prev_contact_count,
-            ],
-            device=device,
-        )
-
-        # ── 7. Convert bodies Box3D → Newton ────────────────────────
+        # ── 6. Convert bodies Box3D → Newton ────────────────────────
         # First, copy all state from input to output (kinematic bodies
         # and any other untouched data). The convert-back kernel will
         # overwrite dynamic bodies.
@@ -664,6 +649,21 @@ class SolverBox3D(SolverBase):
                 soft_joint.impulse_scale, sub_dt,
             ],
             block_dim=cfg.block_dim,
+            device=device,
+        )
+
+        # ── Store impulses for next-frame warm starting ──────────────
+        wp.launch(
+            store_impulses_2d,
+            dim=(W, cfg.max_contacts_per_world),
+            inputs=[
+                buf.c_normal_impulse, buf.c_friction1_impulse,
+                buf.c_friction2_impulse, buf.contact_count,
+            ],
+            outputs=[
+                buf.prev_normal_impulse, buf.prev_friction1_impulse,
+                buf.prev_friction2_impulse, buf.prev_contact_count,
+            ],
             device=device,
         )
 
