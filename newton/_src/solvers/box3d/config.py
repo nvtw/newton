@@ -94,7 +94,7 @@ class Box3DConfig:
     restitution_threshold: float = 1.0
     contact_speed: float = 10.0
     max_bodies_per_world: int = 1024
-    max_contacts_per_world: int = 8192
+    max_contacts_per_world: int = 4096
     max_joints_per_world: int = 1024
     max_colors: int = 64
     block_dim: int = 128
