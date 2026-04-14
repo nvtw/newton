@@ -313,6 +313,11 @@ def add_to_shared_buffer_atomic(
     - [block_dim]: Current count of edges in buffer
     - [block_dim+1]: Progress counter (edges processed so far)
 
+    When more edges pass culling than the buffer can hold, excess edges
+    are silently dropped.  Progress always advances forward so that no
+    edge range is examined twice — this prevents duplicate contacts that
+    would cause non-deterministic tiebreaking in the contact reducer.
+
     Args:
         thread_id: The calling thread's index within the thread block
         add_edge: Whether this thread wants to add an edge
@@ -337,9 +342,6 @@ def add_to_shared_buffer_atomic(
 
     if thread_id == 0 and buffer[capacity] > capacity:
         buffer[capacity] = capacity
-
-    if add_edge and idx >= capacity:
-        wp.atomic_min(buffer, capacity + 1, edge_idx)
 
     synchronize()  # SYNC 2: All corrections complete, buffer consistent
 
