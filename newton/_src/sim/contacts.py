@@ -73,6 +73,7 @@ class Contacts:
         per_contact_shape_properties: bool = False,
         clear_buffers: bool = False,
         requested_attributes: set[str] | None = None,
+        contact_matching: bool = False,
     ):
         """
         Initialize Contacts storage.
@@ -95,6 +96,9 @@ class Contacts:
                 and safe since solvers only read up to contact_count.
             requested_attributes: Set of extended contact attribute names to allocate.
                 See :attr:`EXTENDED_ATTRIBUTES` for available options.
+            contact_matching: Allocate a per-contact match index array
+                (:attr:`rigid_contact_match_index`) that stores frame-to-frame
+                contact correspondences filled by :class:`ContactMatcher`.
 
         .. note::
             The ``rigid_contact_diff_*`` arrays allocated when ``requires_grad=True`` are
@@ -188,6 +192,18 @@ class Contacts:
                 self.rigid_contact_friction = None
                 """Per-contact friction coefficient [dimensionless], shape (rigid_contact_max,), dtype float."""
 
+            # Contact matching index — filled by ContactMatcher when contact_matching is enabled.
+            self.contact_matching = contact_matching
+            if contact_matching:
+                self.rigid_contact_match_index = wp.full(rigid_contact_max, -1, dtype=wp.int32)
+                """Per-contact match index from :class:`ContactMatcher`.
+
+                Values: ``>= 0`` matched old contact index, ``-1`` new contact,
+                ``-2`` key matched but thresholds exceeded (broken).
+                Shape (rigid_contact_max,), dtype int32."""
+            else:
+                self.rigid_contact_match_index = None
+
             # soft contacts — requires_grad flows through here for differentiable simulation
             self.soft_contact_count = self._counter_array[1:2]
             self.soft_contact_particle = wp.full(soft_contact_max, -1, dtype=int)
@@ -262,6 +278,9 @@ class Contacts:
                 self.rigid_contact_stiffness.zero_()
                 self.rigid_contact_damping.zero_()
                 self.rigid_contact_friction.zero_()
+
+            if self.rigid_contact_match_index is not None:
+                self.rigid_contact_match_index.fill_(-1)
 
             self.soft_contact_particle.fill_(-1)
             self.soft_contact_shape.fill_(-1)
