@@ -537,11 +537,13 @@ def test_confined_spheres(test, device):
     state_in = model.state()
     state_out = model.state()
 
-    # Give small random initial velocities (solver2d uses gravity=0, so motion from collisions)
+    # Give deterministic initial velocities (all spheres push inward)
     qd = state_in.body_qd.numpy()
-    rng = np.random.RandomState(42)
     for bi in body_indices:
-        qd[bi, :3] = rng.randn(3) * 0.5
+        pos = state_in.body_q.numpy()[bi][:3]
+        # Push toward center
+        dir_to_center = -pos / (np.linalg.norm(pos) + 1e-6)
+        qd[bi, :3] = dir_to_center * 0.3
     state_in.body_qd.assign(qd)
 
     cfg = Box3DConfig(

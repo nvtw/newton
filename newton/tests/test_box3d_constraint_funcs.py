@@ -1007,6 +1007,184 @@ def test_fixed_angular_correction(test, device):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Softness: hand-computed (not mirror)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_softness_hand_computed(test, device):
+    """Softness with hertz=30, zeta=1.0, h=1/240: verify against manual calculation."""
+    out = wp.zeros(1, dtype=wp.vec3, device=device)
+    h = 1.0 / 240.0  # 4 substeps at 60Hz
+    wp.launch(_test_softness_kernel, dim=1, inputs=[30.0, 1.0, h], outputs=[out], device=device)
+    result = out.numpy()[0]
+    # omega = 2*pi*30 = 188.4956; a1 = 2 + h*omega = 2.78540; a2 = h*omega*a1 = 2.18712
+    # a3 = 1/3.18712 = 0.31376; bias_rate = omega/a1 = 67.672; mass_scale = a2*a3 = 0.68624
+    test.assertAlmostEqual(float(result[0]), 67.672, delta=0.01)  # bias_rate
+    test.assertAlmostEqual(float(result[1]), 0.6862, delta=0.001)  # mass_scale
+    test.assertAlmostEqual(float(result[2]), 0.3138, delta=0.001)  # impulse_scale
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Tangent basis: verify specific output vectors
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_tangent_basis_z_up_exact(test, device):
+    """Tangent basis for Z-up normal should produce X and Y as tangents."""
+    normal = wp.vec3(0.0, 0.0, 1.0)
+    r0 = wp.zeros(1, dtype=wp.vec3, device=device)
+    r1 = wp.zeros(1, dtype=wp.vec3, device=device)
+    r2 = wp.zeros(1, dtype=wp.vec3, device=device)
+    wp.launch(_test_tangent_basis_kernel, dim=1, inputs=[normal], outputs=[r0, r1, r2], device=device)
+    n = r0.numpy()[0]
+    t1 = r1.numpy()[0]
+    t2 = r2.numpy()[0]
+    np.testing.assert_allclose(n, [0, 0, 1], atol=1e-6)
+    np.testing.assert_allclose(t1, [1, 0, 0], atol=1e-6)
+    np.testing.assert_allclose(t2, [0, 1, 0], atol=1e-6)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Fixed angular with off-diagonal inertia and multi-axis dw
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_fixed_angular_off_diagonal_inertia(test, device):
+    """Fixed angular correction with non-diagonal inertia, verified against numpy."""
+    # Non-diagonal symmetric positive definite inv_inertia
+    inv_I_np = np.array([[2.0, 0.5, 0.0], [0.5, 3.0, 0.0], [0.0, 0.0, 1.5]])
+    inv_I = wp.mat33(*inv_I_np.flatten().tolist())
+    dw = np.array([1.0, -0.5, 0.3])
+
+    # k_ang = inv_I_a + inv_I_b = 2 * inv_I_np (same body inertia)
+    k_ang = 2.0 * inv_I_np
+    sol = np.linalg.solve(k_ang, dw)  # ms=1, isv=0 for relaxation
+    expected = -sol  # impulse = -K^-1 @ dw
+
+    out = wp.zeros(1, dtype=wp.vec3, device=device)
+    wp.launch(
+        _test_fixed_angular_kernel, dim=1,
+        inputs=[
+            wp.vec3(0.0, 0.0, 0.0),
+            wp.vec3(*dw.tolist()),
+            inv_I, inv_I,
+            wp.vec3(0.0, 0.0, 0.0),
+            10.0, 1.0, 0.0, 0,  # relaxation
+        ],
+        outputs=[out], device=device,
+    )
+    result = out.numpy()[0]
+    np.testing.assert_allclose(result, expected, atol=1e-4)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Revolute P2P with both non-zero lever arms in different directions
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_revolute_p2p_asymmetric_levers(test, device):
+    """P2P with asymmetric lever arms, verified against numpy K-matrix solve."""
+    inv_I_a = np.eye(3) * 2.0
+    inv_I_b = np.eye(3) * 1.0
+    r_a = np.array([0.3, 0.0, 0.5])
+    r_b = np.array([-0.2, 0.4, 0.0])
+    inv_mass_a, inv_mass_b = 1.0, 0.5
+    vel_a = np.array([0.5, -0.3, 0.0])
+    vel_b = np.array([-0.2, 0.1, 0.4])
+    ang_a = np.array([0.0, 0.1, -0.1])
+    ang_b = np.array([0.2, 0.0, 0.3])
+
+    # Build K in numpy
+    def skew(v):
+        return np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    K = (inv_mass_a + inv_mass_b) * np.eye(3)
+    K += skew(r_a).T @ inv_I_a @ skew(r_a)
+    K += skew(r_b).T @ inv_I_b @ skew(r_b)
+
+    Cdot = (vel_b + np.cross(ang_b, r_b)) - (vel_a + np.cross(ang_a, r_a))
+    sol = np.linalg.solve(K, Cdot)
+    expected = -sol  # ms=1, isv=0 for relaxation
+
+    out = wp.zeros(1, dtype=wp.vec3, device=device)
+    wp.launch(
+        _test_revolute_p2p_kernel, dim=1,
+        inputs=[
+            wp.vec3(*vel_a.tolist()), wp.vec3(*ang_a.tolist()),
+            wp.vec3(*vel_b.tolist()), wp.vec3(*ang_b.tolist()),
+            wp.vec3(*r_a.tolist()), wp.vec3(*r_b.tolist()),
+            wp.vec3(0.0, 0.0, 0.0),  # separation=0 (relaxation)
+            inv_mass_a, wp.mat33(*inv_I_a.flatten().tolist()),
+            inv_mass_b, wp.mat33(*inv_I_b.flatten().tolist()),
+            wp.vec3(0.0, 0.0, 0.0),  # accumulated
+            10.0, 1.0, 0.0, 0,  # relaxation
+        ],
+        outputs=[out], device=device,
+    )
+    result = out.numpy()[0]
+    np.testing.assert_allclose(result, expected, atol=1e-3)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Restitution with accumulated lambda_n > 0
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_restitution_with_accumulated_impulse(test, device):
+    """Restitution with pre-existing accumulated impulse, verify clamp behavior."""
+    out = wp.zeros(1, dtype=float, device=device)
+    wp.launch(
+        _test_restitution_kernel, dim=1,
+        inputs=[
+            -2.0,  # vn: still approaching (post-solve residual)
+            -8.0,  # pre_vel: was approaching fast
+            3.0,   # lambda_n: already has accumulated impulse
+            5.0,   # total_ni: active contact
+            1.0,   # normal_mass
+            0.5,   # restitution
+            1.0,   # threshold
+        ],
+        outputs=[out], device=device,
+    )
+    delta = float(out.numpy()[0])
+    # impulse = -1.0 * (-2.0 + 0.5 * (-8.0)) = -1.0 * (-6.0) = 6.0
+    # new_lambda = max(3.0 + 6.0, 0) = 9.0
+    # delta = 9.0 - 3.0 = 6.0
+    test.assertAlmostEqual(delta, 6.0, places=4)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Normal impulse: speculative during relaxation (Box2D fix)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_normal_impulse_speculative_relaxation(test, device):
+    """Speculative contacts apply bias even during relaxation (use_bias=0).
+
+    This matches Box2D where speculative bias is always active.
+    """
+    out = wp.zeros(1, dtype=float, device=device)
+    wp.launch(
+        _test_normal_impulse_kernel, dim=1,
+        inputs=[
+            -5.0,   # vn: approaching fast
+            0.02,   # separation: speculative gap
+            0.0,    # lambda_n
+            1.0,    # normal_mass
+            10.0, 0.8, 0.2,
+            240.0,  # inv_sub_dt
+            10.0,
+            0,      # use_bias = 0 (relaxation!)
+        ],
+        outputs=[out], device=device,
+    )
+    delta = float(out.numpy()[0])
+    # Speculative: bias = 0.02 * 240 = 4.8, ms=1, isv=0 (even in relaxation)
+    # impulse = -1.0 * (1.0 * (-5.0) + 4.8) = 0.2
+    # new_lambda = max(0 + 0.2, 0) = 0.2
+    test.assertAlmostEqual(delta, 0.2, places=4)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Skew outer diagonal (direct test of _skew_outer_diag)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -1333,10 +1511,12 @@ devices = get_test_devices()
 # Softness
 add_function_test(TestBox3DConstraintFuncs, "test_softness_critical_damping", test_softness_critical_damping, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_softness_zero_hertz", test_softness_zero_hertz, devices=devices)
+add_function_test(TestBox3DConstraintFuncs, "test_softness_hand_computed", test_softness_hand_computed, devices=devices)
 
 # Tangent basis
 add_function_test(TestBox3DConstraintFuncs, "test_tangent_basis_y_up", test_tangent_basis_y_up, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_tangent_basis_arbitrary_normal", test_tangent_basis_arbitrary_normal, devices=devices)
+add_function_test(TestBox3DConstraintFuncs, "test_tangent_basis_z_up_exact", test_tangent_basis_z_up_exact, devices=devices)
 
 # Effective mass
 add_function_test(TestBox3DConstraintFuncs, "test_effective_mass_equal_masses", test_effective_mass_equal_masses, devices=devices)
@@ -1352,6 +1532,7 @@ add_function_test(TestBox3DConstraintFuncs, "test_normal_impulse_clamp_nonnegati
 add_function_test(TestBox3DConstraintFuncs, "test_normal_impulse_relaxation_no_bias", test_normal_impulse_relaxation_no_bias, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_normal_impulse_speculative", test_normal_impulse_speculative, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_normal_impulse_deep_penetration_clamp", test_normal_impulse_deep_penetration_clamp, devices=devices)
+add_function_test(TestBox3DConstraintFuncs, "test_normal_impulse_speculative_relaxation", test_normal_impulse_speculative_relaxation, devices=devices)
 
 # Friction
 add_function_test(TestBox3DConstraintFuncs, "test_friction_within_cone", test_friction_within_cone, devices=devices)
@@ -1370,6 +1551,7 @@ add_function_test(TestBox3DConstraintFuncs, "test_apply_impulse_with_torque", te
 add_function_test(TestBox3DConstraintFuncs, "test_restitution_bouncing", test_restitution_bouncing, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_restitution_slow_approach_no_bounce", test_restitution_slow_approach_no_bounce, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_restitution_zero_coeff", test_restitution_zero_coeff, devices=devices)
+add_function_test(TestBox3DConstraintFuncs, "test_restitution_with_accumulated_impulse", test_restitution_with_accumulated_impulse, devices=devices)
 
 # 3x3 solve
 add_function_test(TestBox3DConstraintFuncs, "test_solve_3x3_identity", test_solve_3x3_identity, devices=devices)
@@ -1384,6 +1566,7 @@ add_function_test(TestBox3DConstraintFuncs, "test_skew_outer_diag_non_diagonal_i
 add_function_test(TestBox3DConstraintFuncs, "test_revolute_p2p_coincident_relaxation", test_revolute_p2p_coincident_relaxation, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_revolute_p2p_velocity_correction", test_revolute_p2p_velocity_correction, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_revolute_p2p_with_lever_arms_biased", test_revolute_p2p_with_lever_arms_biased, devices=devices)
+add_function_test(TestBox3DConstraintFuncs, "test_revolute_p2p_asymmetric_levers", test_revolute_p2p_asymmetric_levers, devices=devices)
 
 # Revolute angular
 add_function_test(TestBox3DConstraintFuncs, "test_revolute_angular_aligned", test_revolute_angular_aligned, devices=devices)
@@ -1402,6 +1585,7 @@ add_function_test(TestBox3DConstraintFuncs, "test_revolute_limit_upper_violated"
 # Fixed joint
 add_function_test(TestBox3DConstraintFuncs, "test_fixed_angular_zero_velocity", test_fixed_angular_zero_velocity, devices=devices)
 add_function_test(TestBox3DConstraintFuncs, "test_fixed_angular_correction", test_fixed_angular_correction, devices=devices)
+add_function_test(TestBox3DConstraintFuncs, "test_fixed_angular_off_diagonal_inertia", test_fixed_angular_off_diagonal_inertia, devices=devices)
 
 # Color joints CPU (no device needed, but run in both for consistency)
 add_function_test(TestBox3DConstraintFuncs, "test_color_joints_cpu_basic", test_color_joints_cpu_basic, devices=devices)
