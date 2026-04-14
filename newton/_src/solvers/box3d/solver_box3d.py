@@ -511,8 +511,7 @@ class SolverBox3D(SolverBase):
                 )
 
             # 4b. Biased contact+joint solve (velocity integration fused into 1st iter)
-            for vi in range(cfg.num_velocity_iters):
-                wp.launch_tiled(
+            wp.launch_tiled(
                     contact_solve_kernel,
                     dim=[W],
                     inputs=[
@@ -537,9 +536,10 @@ class SolverBox3D(SolverBase):
                         soft_static.bias_rate, soft_static.mass_scale,
                         soft_static.impulse_scale,
                         cfg.contact_speed, cfg.restitution_threshold,
-                        1 if vi == 0 else 0,  # fused velocity integration on first iter only
-                        gx, gy, gz, cfg.linear_damping, cfg.angular_damping,
-                        1 if vi == cfg.num_velocity_iters - 1 else 0,  # fused position integration on last iter
+                    1,  # fused velocity integration
+                    gx, gy, gz, cfg.linear_damping, cfg.angular_damping,
+                    1,  # fused position integration (after all iters)
+                    cfg.num_velocity_iters,  # solve_iters
                         # Joint parameters
                         buf.body_pos, buf.body_ori,
                         buf.j_body_a, buf.j_body_b, buf.j_type,
@@ -562,8 +562,7 @@ class SolverBox3D(SolverBase):
             # Position integration is now fused into the last biased iteration above.
 
             # 4c. Relaxation contact+joint solve (+ restitution on last substep)
-            for _ in range(cfg.num_relaxation_iters):
-                wp.launch_tiled(
+            wp.launch_tiled(
                     contact_solve_kernel,
                     dim=[W],
                     inputs=[
@@ -588,8 +587,9 @@ class SolverBox3D(SolverBase):
                         soft_static.bias_rate, soft_static.mass_scale,
                         soft_static.impulse_scale,
                         cfg.contact_speed, cfg.restitution_threshold,
-                        0, 0.0, 0.0, 0.0, 0.0, 0.0, 0,  # no vel/pos integration
-                        # Joint parameters
+                    0, 0.0, 0.0, 0.0, 0.0, 0.0, 0,  # no vel/pos integration
+                    cfg.num_relaxation_iters,  # solve_iters
+                    # Joint parameters
                         buf.body_pos, buf.body_ori,
                         buf.j_body_a, buf.j_body_b, buf.j_type,
                         buf.j_local_anchor_a, buf.j_local_anchor_b,
@@ -635,6 +635,7 @@ class SolverBox3D(SolverBase):
                 soft_static.impulse_scale,
                 cfg.contact_speed, cfg.restitution_threshold,
                 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0,  # no vel/pos integration in restitution
+                1,  # solve_iters
                 buf.body_pos, buf.body_ori,
                 buf.j_body_a, buf.j_body_b, buf.j_type,
                 buf.j_local_anchor_a, buf.j_local_anchor_b,

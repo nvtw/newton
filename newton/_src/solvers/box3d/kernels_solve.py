@@ -102,7 +102,8 @@ _CONTACT_SOLVE_SNIPPET = r"""
         __syncthreads();
     }
 
-    // ═══ Colored contact solve ═══
+    // ═══ Colored contact solve (solve_iters iterations) ═══
+    for (int _si = 0; _si < solve_iters; _si++) {
     for (int color = 0; color < max_colors; color++) {
         int cstart = *wp::address(color_offsets, wid, color);
         int cend = *wp::address(color_offsets, wid, color + 1);
@@ -299,6 +300,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
                 sb[5]+=iib.m02*cx+iib.m12*cy+iib.m22*cz; } }
         __syncthreads();
     }
+    } // end solve_iters
 
     // ═══ Store velocities shared → global ═══
     for (int b = tid; b < num_bodies; b += blockDim.x) {
@@ -731,6 +733,7 @@ def _contact_solve_native(
     gx: float, gy: float, gz: float,
     lin_damp: float, ang_damp: float,
     do_int_pos: int,
+    solve_iters: int,
     # Joint parameters
     body_pos: wp.array2d(dtype=wp.vec3),
     body_ori: wp.array2d(dtype=wp.quat),
@@ -807,6 +810,7 @@ def contact_solve_kernel(
     gx: float, gy: float, gz: float,
     lin_damp: float, ang_damp: float,
     do_int_pos: int,
+    solve_iters: int,
     # Joint parameters
     body_pos: wp.array2d(dtype=wp.vec3),
     body_ori: wp.array2d(dtype=wp.quat),
@@ -849,7 +853,7 @@ def contact_solve_kernel(
         inv_sub_dt, bias_rate, mass_scale, impulse_scale,
         static_br, static_ms, static_is,
         contact_speed, rest_thresh,
-        do_int_vel, gx, gy, gz, lin_damp, ang_damp, do_int_pos,
+        do_int_vel, gx, gy, gz, lin_damp, ang_damp, do_int_pos, solve_iters,
         body_pos, body_ori,
         j_ba, j_bb, j_type, j_la, j_lb, j_ha, j_li, j_ai,
         j_ms_arr, j_mmt,
