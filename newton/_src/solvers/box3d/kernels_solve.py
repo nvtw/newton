@@ -654,6 +654,35 @@ _CONTACT_SOLVE_SNIPPET = r"""
         }
     }
     #undef QROT
+
+    // ═══ Inline position integration (if do_int_pos > 0) ═══
+    if (do_int_pos > 0) {
+        for (int b = tid; b < num_bodies; b += blockDim.x) {
+            float im = *wp::address(inv_m, wid, b);
+            if (im > 0.0f) {
+                auto v = *wp::address(body_vel, wid, b);
+                auto p = *wp::address(body_pos, wid, b);
+                p[0]+=v[0]*sub_dt; p[1]+=v[1]*sub_dt; p[2]+=v[2]*sub_dt;
+                *wp::address(body_pos, wid, b) = p;
+                auto dp = *wp::address(delta_pos, wid, b);
+                dp[0]+=v[0]*sub_dt; dp[1]+=v[1]*sub_dt; dp[2]+=v[2]*sub_dt;
+                *wp::address(delta_pos, wid, b) = dp;
+                // Quaternion integration
+                auto q = *wp::address(body_ori, wid, b);
+                auto w = *wp::address(body_ang_vel, wid, b);
+                float hx=w[0]*sub_dt*0.5f,hy=w[1]*sub_dt*0.5f,hz=w[2]*sub_dt*0.5f;
+                float dqx= hx*q[3]+hy*q[2]-hz*q[1];
+                float dqy=-hx*q[2]+hy*q[3]+hz*q[0];
+                float dqz= hx*q[1]-hy*q[0]+hz*q[3];
+                float dqw=-hx*q[0]-hy*q[1]-hz*q[2];
+                q[0]+=dqx;q[1]+=dqy;q[2]+=dqz;q[3]+=dqw;
+                float ql=sqrtf(q[0]*q[0]+q[1]*q[1]+q[2]*q[2]+q[3]*q[3]);
+                if(ql>1e-8f){float iv=1.0f/ql;q[0]*=iv;q[1]*=iv;q[2]*=iv;q[3]*=iv;}
+                *wp::address(body_ori, wid, b) = q;
+            }
+        }
+        __syncthreads();
+    }
 """
 
 
@@ -701,6 +730,7 @@ def _contact_solve_native(
     do_int_vel: int,
     gx: float, gy: float, gz: float,
     lin_damp: float, ang_damp: float,
+    do_int_pos: int,
     # Joint parameters
     body_pos: wp.array2d(dtype=wp.vec3),
     body_ori: wp.array2d(dtype=wp.quat),
@@ -776,6 +806,7 @@ def contact_solve_kernel(
     do_int_vel: int,
     gx: float, gy: float, gz: float,
     lin_damp: float, ang_damp: float,
+    do_int_pos: int,
     # Joint parameters
     body_pos: wp.array2d(dtype=wp.vec3),
     body_ori: wp.array2d(dtype=wp.quat),
@@ -818,7 +849,7 @@ def contact_solve_kernel(
         inv_sub_dt, bias_rate, mass_scale, impulse_scale,
         static_br, static_ms, static_is,
         contact_speed, rest_thresh,
-        do_int_vel, gx, gy, gz, lin_damp, ang_damp,
+        do_int_vel, gx, gy, gz, lin_damp, ang_damp, do_int_pos,
         body_pos, body_ori,
         j_ba, j_bb, j_type, j_la, j_lb, j_ha, j_li, j_ai,
         j_ms_arr, j_mmt,
