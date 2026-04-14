@@ -51,7 +51,7 @@ def build_chain():
     return b
 
 
-def measure(scene_fn, num_worlds, num_steps=50, warmup=10):
+def measure(scene_fn, num_worlds, num_steps=100, warmup=20):
     scene = newton.ModelBuilder()
     scene.add_ground_plane()
     sub = scene_fn()
