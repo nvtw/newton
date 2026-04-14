@@ -510,70 +510,12 @@ class SolverBox3D(SolverBase):
                     device=device,
                 )
 
-            # 4b. Fused biased+relaxation contact+joint solve (all iters in one kernel)
-            wp.launch_tiled(
-                contact_solve_kernel,
-                dim=[W],
-                inputs=[
-                    buf.body_vel, buf.body_ang_vel,
-                    buf.body_inv_mass, buf.body_inv_inertia,
-                    buf.body_delta_pos,
-                    buf.c_body_a, buf.c_body_b,
-                    buf.c_normal, buf.c_tangent1, buf.c_tangent2,
-                    buf.c_r_a, buf.c_r_b, buf.c_base_sep,
-                    buf.c_normal_mass, buf.c_tangent1_mass, buf.c_tangent2_mass,
-                    buf.c_friction, buf.c_restitution, buf.c_rel_vel_normal,
-                    buf.c_normal_impulse, buf.c_friction1_impulse,
-                    buf.c_friction2_impulse, buf.c_total_normal_impulse,
-                    buf.c_is_static,
-                    buf.color_offsets,
-                    max_bodies, cfg.max_colors,
-                    1,  # use_bias (for first num_bias_iters)
-                    1,  # warm_start
-                    0,  # no restitution in main solve
-                    inv_sub_dt,
-                    soft.bias_rate, soft.mass_scale, soft.impulse_scale,
-                    soft_static.bias_rate, soft_static.mass_scale,
-                    soft_static.impulse_scale,
-                    cfg.contact_speed, cfg.restitution_threshold,
-                    1,  # fused velocity integration
-                    gx, gy, gz, cfg.linear_damping, cfg.angular_damping,
-                    cfg.num_velocity_iters, cfg.num_relaxation_iters,
-                    # Joint parameters
-                    buf.body_pos, buf.body_ori,
-                    buf.j_body_a, buf.j_body_b, buf.j_type,
-                    buf.j_local_anchor_a, buf.j_local_anchor_b,
-                    buf.j_hinge_axis_local,
-                    buf.j_linear_impulse, buf.j_angular_impulse,
-                    buf.j_motor_speed, buf.j_max_motor_torque,
-                    buf.j_limit_lower, buf.j_limit_upper,
-                    buf.j_limit_enabled,
-                    buf.j_lower_impulse, buf.j_upper_impulse,
-                    buf.joint_color_offsets,
-                    num_joints, num_joint_colors,
-                    soft_joint.bias_rate, soft_joint.mass_scale,
-                    soft_joint.impulse_scale, sub_dt,
-                ],
-                block_dim=cfg.block_dim,
-                device=device,
-            )
-
-            # 4c. Integrate positions
-            wp.launch(
-                integrate_positions_2d,
-                dim=(W, max_bodies),
-                inputs=[
-                    buf.body_pos, buf.body_ori, buf.body_vel,
-                    buf.body_ang_vel, buf.body_inv_mass,
-                    buf.body_delta_pos, buf.bodies_per_world, sub_dt,
-                ],
-                device=device,
-            )
-
-            # Relaxation is now fused inside the biased solve kernel above.
-            # (The kernel loops internally: num_bias_iters biased + num_relax_iters relaxation)
-            if False:  # REMOVED — was separate relaxation loop
-                wp.launch_tiled(contact_solve_kernel, dim=[W], inputs=[
+            # 4b. Biased contact+joint solve (velocity integration fused into 1st iter)
+            for vi in range(cfg.num_velocity_iters):
+                wp.launch_tiled(
+                    contact_solve_kernel,
+                    dim=[W],
+                    inputs=[
                         buf.body_vel, buf.body_ang_vel,
                         buf.body_inv_mass, buf.body_inv_inertia,
                         buf.body_delta_pos,
@@ -587,13 +529,75 @@ class SolverBox3D(SolverBase):
                         buf.c_is_static,
                         buf.color_offsets,
                         max_bodies, cfg.max_colors,
-                        0, 0, 0, inv_sub_dt,
+                        1,  # use_bias
+                        1,  # warm_start
+                        0,  # no restitution
+                        inv_sub_dt,
                         soft.bias_rate, soft.mass_scale, soft.impulse_scale,
                         soft_static.bias_rate, soft_static.mass_scale,
                         soft_static.impulse_scale,
                         cfg.contact_speed, cfg.restitution_threshold,
-                        0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                        0, 0,
+                        1 if vi == 0 else 0,  # fused velocity integration on first iter only
+                        gx, gy, gz, cfg.linear_damping, cfg.angular_damping,
+                        # Joint parameters
+                        buf.body_pos, buf.body_ori,
+                        buf.j_body_a, buf.j_body_b, buf.j_type,
+                        buf.j_local_anchor_a, buf.j_local_anchor_b,
+                        buf.j_hinge_axis_local,
+                        buf.j_linear_impulse, buf.j_angular_impulse,
+                        buf.j_motor_speed, buf.j_max_motor_torque,
+                        buf.j_limit_lower, buf.j_limit_upper,
+                        buf.j_limit_enabled,
+                        buf.j_lower_impulse, buf.j_upper_impulse,
+                        buf.joint_color_offsets,
+                        num_joints, num_joint_colors,
+                        soft_joint.bias_rate, soft_joint.mass_scale,
+                        soft_joint.impulse_scale, sub_dt,
+                    ],
+                    block_dim=cfg.block_dim,
+                    device=device,
+                )
+
+            # 4c. Integrate positions
+            wp.launch(
+                integrate_positions_2d,
+                dim=(W, max_bodies),
+                inputs=[
+                    buf.body_pos, buf.body_ori, buf.body_vel,
+                    buf.body_ang_vel, buf.body_inv_mass,
+                    buf.body_delta_pos, buf.bodies_per_world, sub_dt,
+                ],
+                device=device,
+            )
+
+            # 4d. Relaxation contact+joint solve (+ restitution on last substep)
+            for _ in range(cfg.num_relaxation_iters):
+                wp.launch_tiled(
+                    contact_solve_kernel,
+                    dim=[W],
+                    inputs=[
+                        buf.body_vel, buf.body_ang_vel,
+                        buf.body_inv_mass, buf.body_inv_inertia,
+                        buf.body_delta_pos,
+                        buf.c_body_a, buf.c_body_b,
+                        buf.c_normal, buf.c_tangent1, buf.c_tangent2,
+                        buf.c_r_a, buf.c_r_b, buf.c_base_sep,
+                        buf.c_normal_mass, buf.c_tangent1_mass, buf.c_tangent2_mass,
+                        buf.c_friction, buf.c_restitution, buf.c_rel_vel_normal,
+                        buf.c_normal_impulse, buf.c_friction1_impulse,
+                        buf.c_friction2_impulse, buf.c_total_normal_impulse,
+                        buf.c_is_static,
+                        buf.color_offsets,
+                        max_bodies, cfg.max_colors,
+                        0,  # no bias (relaxation)
+                        0,  # no warm start
+                        0,  # no restitution during substeps
+                        inv_sub_dt,
+                        soft.bias_rate, soft.mass_scale, soft.impulse_scale,
+                        soft_static.bias_rate, soft_static.mass_scale,
+                        soft_static.impulse_scale,
+                        cfg.contact_speed, cfg.restitution_threshold,
+                        0, 0.0, 0.0, 0.0, 0.0, 0.0,  # no velocity integration
                         # Joint parameters
                         buf.body_pos, buf.body_ori,
                         buf.j_body_a, buf.j_body_b, buf.j_type,
@@ -640,7 +644,6 @@ class SolverBox3D(SolverBase):
                 soft_static.impulse_scale,
                 cfg.contact_speed, cfg.restitution_threshold,
                 0, 0.0, 0.0, 0.0, 0.0, 0.0,  # no velocity integration in restitution
-                1, 0,  # 1 bias iter (restitution), 0 relax
                 buf.body_pos, buf.body_ori,
                 buf.j_body_a, buf.j_body_b, buf.j_type,
                 buf.j_local_anchor_a, buf.j_local_anchor_b,
