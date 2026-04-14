@@ -902,11 +902,13 @@ class CollisionPipeline:
         writer_data.out_stiffness = contacts.rigid_contact_stiffness
         writer_data.out_damping = contacts.rigid_contact_damping
         writer_data.out_friction = contacts.rigid_contact_friction
-        if self.deterministic and contacts.rigid_contact_max > self._sort_key_array.shape[0]:
+        if self.deterministic and contacts.rigid_contact_max != self._sort_key_array.shape[0]:
             raise ValueError(
-                f"Contacts buffer capacity ({contacts.rigid_contact_max}) exceeds the "
+                f"Contacts buffer capacity ({contacts.rigid_contact_max}) does not match the "
                 f"deterministic sort buffer size ({self._sort_key_array.shape[0]}). "
-                f"Create the CollisionPipeline with a larger rigid_contact_max."
+                f"The sorter operates over fixed-capacity buffers for CUDA graph capture "
+                f"compatibility, so the sizes must match exactly. Use CollisionPipeline.contacts() "
+                f"or pass matching rigid_contact_max."
             )
         writer_data.out_sort_key = self._sort_key_array
 

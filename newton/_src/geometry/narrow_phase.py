@@ -2202,11 +2202,12 @@ class NarrowPhase:
         # Verify sort-key buffer and sorter match the contact output capacity.
         # Raising instead of silently reallocating keeps this path
         # CUDA-graph-capturable and consistent with CollisionPipeline.collide().
-        if self.deterministic and self._sort_key_array.shape[0] < contact_max:
+        if self.deterministic and self._sort_key_array.shape[0] != contact_max:
             raise ValueError(
-                f"Contact output capacity ({contact_max}) exceeds the "
+                f"Contact output capacity ({contact_max}) does not match the "
                 f"deterministic sort buffer size ({self._sort_key_array.shape[0]}). "
-                f"Create NarrowPhase with a larger max_candidate_pairs or reduce contact_max."
+                f"The sorter operates over fixed-capacity buffers for CUDA graph capture "
+                f"compatibility, so the sizes must match exactly."
             )
 
         # Create ContactWriterData struct
