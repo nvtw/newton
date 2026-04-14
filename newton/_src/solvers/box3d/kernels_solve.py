@@ -102,7 +102,49 @@ _CONTACT_SOLVE_SNIPPET = r"""
         __syncthreads();
     }
 
-    // ═══ Colored contact solve ═══
+    // ═══ Multi-iteration contact solve: num_bias_iters biased, pos_integrate, num_relax_iters relax ═══
+    int total_solve_iters = num_bias_iters + num_relax_iters;
+    for (int solve_iter = 0; solve_iter < total_solve_iters; solve_iter++) {
+        int cur_use_bias = (solve_iter < num_bias_iters) ? 1 : 0;
+
+        // Position integration: after ALL biased iters, before first relaxation iter
+        if (solve_iter == num_bias_iters && do_int_pos > 0) {
+            // First store velocities from shared to global (joints need them)
+            for (int b = tid; b < num_bodies; b += blockDim.x) {
+                float* s = smem + b * 6;
+                wp::vec_t<3,float> v; v[0]=s[0];v[1]=s[1];v[2]=s[2];
+                *wp::address(body_vel, wid, b) = v;
+                wp::vec_t<3,float> w; w[0]=s[3];w[1]=s[4];w[2]=s[5];
+                *wp::address(body_ang_vel, wid, b) = w;
+            }
+            __syncthreads();
+            // Inline position integration
+            for (int b = tid; b < num_bodies; b += blockDim.x) {
+                float im = *wp::address(inv_m, wid, b);
+                if (im > 0.0f) {
+                    auto v = *wp::address(body_vel, wid, b);
+                    auto p = *wp::address(body_pos, wid, b);
+                    p[0]+=v[0]*sub_dt; p[1]+=v[1]*sub_dt; p[2]+=v[2]*sub_dt;
+                    *wp::address(body_pos, wid, b) = p;
+                    auto dp = *wp::address(delta_pos, wid, b);
+                    dp[0]+=v[0]*sub_dt; dp[1]+=v[1]*sub_dt; dp[2]+=v[2]*sub_dt;
+                    *wp::address(delta_pos, wid, b) = dp;
+                    auto q = *wp::address(body_ori, wid, b);
+                    auto w2 = *wp::address(body_ang_vel, wid, b);
+                    float hx=w2[0]*sub_dt*0.5f,hy=w2[1]*sub_dt*0.5f,hz=w2[2]*sub_dt*0.5f;
+                    float dqx= hx*q[3]+hy*q[2]-hz*q[1];
+                    float dqy=-hx*q[2]+hy*q[3]+hz*q[0];
+                    float dqz= hx*q[1]-hy*q[0]+hz*q[3];
+                    float dqw=-hx*q[0]-hy*q[1]-hz*q[2];
+                    q[0]+=dqx;q[1]+=dqy;q[2]+=dqz;q[3]+=dqw;
+                    float ql=sqrtf(q[0]*q[0]+q[1]*q[1]+q[2]*q[2]+q[3]*q[3]);
+                    if(ql>1e-8f){float iv=1.0f/ql;q[0]*=iv;q[1]*=iv;q[2]*=iv;q[3]*=iv;}
+                    *wp::address(body_ori, wid, b) = q;
+                }
+            }
+            __syncthreads();
+        }
+
     for (int color = 0; color < max_colors; color++) {
         int cstart = *wp::address(color_offsets, wid, color);
         int cend = *wp::address(color_offsets, wid, color + 1);
@@ -144,7 +186,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
                     // Speculative: always active (even during relaxation).
                     // Small slop (5mm) prevents jitter from floating-point separation noise.
                     velocityBias = sep * inv_sub_dt;
-                } else if (use_bias > 0) {
+                } else if (cur_use_bias > 0) {
                     // Soft position correction: only during biased pass
                     int is_s = *wp::address(c_is_static, wid, ci);
                     float br_val = is_s ? static_br : bias_rate;
@@ -248,6 +290,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
         }
         __syncthreads();
     }
+    // (iteration loop continues through velocity store + joint solve below)
 
     // ═══ Restitution (last substep only) ═══
     if (do_restitution > 0) {
@@ -366,7 +409,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
                 float cdz = (jvbz+jwbx*jrby-jwby*jrbx) - (jvaz+jwax*jray-jway*jrax);
 
                 float jbx=0, jby=0, jbz=0, jms=1.f, jisv=0.f;
-                if (use_bias > 0) {
+                if (cur_use_bias > 0) {
                     auto pA = *wp::address(body_pos, wid, ja >= 0 ? ja : 0);
                     auto pB = *wp::address(body_pos, wid, jbi >= 0 ? jbi : 0);
                     float sx = (ja >= 0 ? pA[0] : 0.f) + jrax;
@@ -565,7 +608,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
                                 { float C_lo = joint_angle - lo;
                                   float bias_lo=0, ms_lo=1.f, is_lo=0.f;
                                   if (C_lo > 0.f) { bias_lo = C_lo * inv_sub_dt; }
-                                  else if (use_bias > 0) { bias_lo=jms*jbias_rate*C_lo; ms_lo=jms; is_lo=jisv; }
+                                  else if (cur_use_bias > 0) { bias_lo=jms*jbias_rate*C_lo; ms_lo=jms; is_lo=jisv; }
                                   float cdot_lo = (jwbx-jwax)*whx+(jwby-jway)*why+(jwbz-jwaz)*whz;
                                   float imp_lo = -ms_lo*am_lim*(cdot_lo+bias_lo) - is_lo*lo_imp;
                                   float new_lo = fmaxf(lo_imp+imp_lo, 0.f); imp_lo=new_lo-lo_imp; lo_imp=new_lo;
@@ -580,7 +623,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
                                 { float C_hi = hi - joint_angle;
                                   float bias_hi=0, ms_hi=1.f, is_hi=0.f;
                                   if (C_hi > 0.f) { bias_hi = C_hi * inv_sub_dt; }
-                                  else if (use_bias > 0) { bias_hi=jms*jbias_rate*C_hi; ms_hi=jms; is_hi=jisv; }
+                                  else if (cur_use_bias > 0) { bias_hi=jms*jbias_rate*C_hi; ms_hi=jms; is_hi=jisv; }
                                   float cdot_hi = -((jwbx-jwax)*whx+(jwby-jway)*why+(jwbz-jwaz)*whz);
                                   float imp_hi = -ms_hi*am_lim*(cdot_hi+bias_hi) - is_hi*hi_imp;
                                   float new_hi = fmaxf(hi_imp+imp_hi, 0.f); imp_hi=new_hi-hi_imp; hi_imp=new_hi;
@@ -654,6 +697,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
         }
     }
     #undef QROT
+    } // end multi-iteration solve loop (bias + relax, with joints)
 
     // ═══ Inline position integration (if do_int_pos > 0) ═══
     if (do_int_pos > 0) {
@@ -731,6 +775,8 @@ def _contact_solve_native(
     gx: float, gy: float, gz: float,
     lin_damp: float, ang_damp: float,
     do_int_pos: int,
+    num_bias_iters: int,
+    num_relax_iters: int,
     # Joint parameters
     body_pos: wp.array2d(dtype=wp.vec3),
     body_ori: wp.array2d(dtype=wp.quat),
@@ -807,6 +853,8 @@ def contact_solve_kernel(
     gx: float, gy: float, gz: float,
     lin_damp: float, ang_damp: float,
     do_int_pos: int,
+    num_bias_iters: int,
+    num_relax_iters: int,
     # Joint parameters
     body_pos: wp.array2d(dtype=wp.vec3),
     body_ori: wp.array2d(dtype=wp.quat),
@@ -850,6 +898,7 @@ def contact_solve_kernel(
         static_br, static_ms, static_is,
         contact_speed, rest_thresh,
         do_int_vel, gx, gy, gz, lin_damp, ang_damp, do_int_pos,
+        num_bias_iters, num_relax_iters,
         body_pos, body_ori,
         j_ba, j_bb, j_type, j_la, j_lb, j_ha, j_li, j_ai,
         j_ms_arr, j_mmt,
