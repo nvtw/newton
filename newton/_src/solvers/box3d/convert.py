@@ -324,10 +324,8 @@ def convert_bodies_from_box3d(
     """
     global_idx = wp.tid()
 
-    # Skip kinematic bodies — they were not modified
-    flags = body_flags[global_idx]
-    if (flags & BodyFlags.KINEMATIC) != 0:
-        return
+    # Write ALL bodies (including kinematic — their state is unchanged in Box3D
+    # buffers, so this is equivalent to copy + selective overwrite but in one kernel)
 
     # Find world + local index
     w_raw = body_world_arr[global_idx]

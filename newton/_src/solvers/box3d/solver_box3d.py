@@ -400,12 +400,8 @@ class SolverBox3D(SolverBase):
         )
 
         # ── 7. Convert bodies Box3D → Newton ────────────────────────
-        # First, copy all state from input to output (kinematic bodies
-        # and any other untouched data). The convert-back kernel will
-        # overwrite dynamic bodies.
-        if model.body_count > 0:
-            state_out.body_q.assign(state_in.body_q)
-            state_out.body_qd.assign(state_in.body_qd)
+        # The convert-back kernel writes ALL bodies (kinematic included)
+        # from Box3D buffers, eliminating the need for a prior assign.
         if model.body_count > 0:
             wp.launch(
                 convert_bodies_from_box3d,
