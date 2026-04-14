@@ -402,6 +402,7 @@ See the `DiffSim examples on GitHub`_ for the current reference workflows.
 # solver types
 from ._src.solvers import (
     SolverBase,
+    SolverBox3D,
     SolverFeatherstone,
     SolverImplicitMPM,
     SolverKamino,
@@ -416,8 +417,13 @@ from ._src.solvers import (
 # solver flags
 from ._src.solvers.flags import SolverNotifyFlags
 
+# solver configs
+from ._src.solvers.box3d.config import Box3DConfig
+
 __all__ = [
+    "Box3DConfig",
     "SolverBase",
+    "SolverBox3D",
     "SolverFeatherstone",
     "SolverImplicitMPM",
     "SolverKamino",
