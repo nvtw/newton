@@ -65,7 +65,7 @@ def measure(scene_fn, num_worlds, num_steps=50, warmup=10):
                       linear_damping=0.1, angular_damping=0.1,
                       enable_graph=True,
                       max_bodies_per_world=64,
-                      max_joints_per_world=48,
+                      max_joints_per_world=64,
                       max_contacts_per_world=1024,
                       max_colors=16,
                       block_dim=96)
