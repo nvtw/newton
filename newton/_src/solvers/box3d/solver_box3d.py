@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""SolverBox3D — Box2D v3 TGS-Soft solver ported to 3-D for Newton.
+"""SolverBox3D -- Box2D v3 TGS-Soft solver ported to 3-D for Newton.
 
 A GPU-parallel rigid-body solver designed for AI training, using one
 CUDA thread block per world and colored Gauss-Seidel for race-free
@@ -27,6 +27,7 @@ from .convert import (
     convert_bodies_from_box3d,
     convert_bodies_to_box3d,
     convert_contacts_to_box3d,
+    convert_impulses_to_contact_force,
     convert_joints_to_box3d,
 )
 from .kernels_integrate import integrate_positions_2d, integrate_velocities_2d, update_world_inertia_2d
@@ -80,9 +81,9 @@ class SolverBox3D(SolverBase):
         self._graph: wp.Graph | None = None
         self._graph_dt: float = 0.0
 
-    # ──────────────────────────────────────────────────────────────────
+    # -----------------------------------------------------------------
     # Joint coloring (CPU, once at construction / model change)
-    # ──────────────────────────────────────────────────────────────────
+    # -----------------------------------------------------------------
 
     def _get_joint_ranges(self):
         """Get (start, end) ranges per world, including global joints in world 0."""
@@ -196,7 +197,7 @@ class SolverBox3D(SolverBase):
             gj = int(global_indices[src_j])
 
             jtype = int(j_type_np[gj])
-            # Skip FREE joints (type 4) — they don't constrain anything
+            # Skip FREE joints (type 4) -- they don't constrain anything
             if jtype == 4:
                 b_type[0, dst_j] = 0  # mark as inactive (type 0 = PRISMATIC, unused)
                 b_body_a[0, dst_j] = -1
@@ -222,7 +223,7 @@ class SolverBox3D(SolverBase):
 
             # Hinge axis from joint_axis array
             qd_start = int(j_qd_start_np[gj])
-            if jtype == 1:  # REVOLUTE — single axis
+            if jtype == 1:  # REVOLUTE -- single axis
                 b_ha[0, dst_j] = j_axis_np[qd_start, :3]
             else:
                 b_ha[0, dst_j] = [0, 0, 1]  # default Z for non-revolute
@@ -250,9 +251,9 @@ class SolverBox3D(SolverBase):
         buf.j_limit_upper.assign(b_lim_hi)
         buf.j_limit_enabled.assign(b_lim_en)
 
-    # ──────────────────────────────────────────────────────────────────
+    # -----------------------------------------------------------------
     # Main step
-    # ──────────────────────────────────────────────────────────────────
+    # -----------------------------------------------------------------
 
     @override
     def step(
@@ -295,7 +296,7 @@ class SolverBox3D(SolverBase):
         num_joints = model.joint_count
         num_joint_colors = self._num_joint_colors
 
-        # ── 1. Convert bodies Newton → Box3D ────────────────────────
+        # -- 1. Convert bodies Newton -> Box3D ----------------------
         # bodies_per_world and contact_count are zeroed inside the convert kernel
         if body_count > 0:
             wp.launch(
@@ -322,7 +323,7 @@ class SolverBox3D(SolverBase):
                 device=device,
             )
 
-        # ── 2. Convert contacts Newton → Box3D ─────────────────────
+        # -- 2. Convert contacts Newton -> Box3D -------------------
         has_contacts = contacts is not None and body_count > 0
 
         if has_contacts:
@@ -365,11 +366,15 @@ class SolverBox3D(SolverBase):
                     buf.raw_normal_impulse, buf.raw_friction1_impulse,
                     buf.raw_friction2_impulse,
                     buf.contact_count,
+                    buf.raw_to_newton,
                 ],
                 device=device,
             )
 
-        # ── 3-5. Solve (optionally graph-captured) ──────────────────
+        self._last_dt = dt
+        self._last_contacts_max = contacts.rigid_contact_max if has_contacts else 0
+
+        # -- 3-5. Solve (optionally graph-captured) ----------------
         if cfg.enable_graph:
             if self._graph is None or self._graph_dt != dt:
                 self._graph_dt = dt
@@ -390,7 +395,7 @@ class SolverBox3D(SolverBase):
                 num_joints, num_joint_colors, has_contacts,
             )
 
-        # ── 6. Store impulses for next-frame warm starting ──────────
+        # -- 6. Store impulses for next-frame warm starting ----------
         wp.launch(
             store_impulses_2d,
             dim=(W, cfg.max_contacts_per_world),
@@ -405,7 +410,7 @@ class SolverBox3D(SolverBase):
             device=device,
         )
 
-        # ── 7. Convert bodies Box3D → Newton ────────────────────────
+        # -- 7. Convert bodies Box3D -> Newton ----------------------
         # The convert-back kernel writes ALL bodies (kinematic included)
         # from Box3D buffers, eliminating the need for a prior assign.
         if body_count > 0:
@@ -444,7 +449,7 @@ class SolverBox3D(SolverBase):
         has_contacts: bool,
     ) -> None:
         """Launch the graph-capturable solve kernels (steps 3-5)."""
-        # ── 3. Graph-color contacts + prepare masses ────────────────
+        # -- 3. Graph-color contacts + prepare masses ----------------
         if has_contacts:
             wp.launch_tiled(
                 coloring_prepare_kernel,
@@ -463,6 +468,7 @@ class SolverBox3D(SolverBase):
                     buf.c_total_normal_impulse, buf.c_is_static,
                     buf.contact_count, buf.color_offsets,
                     buf.color_body_mask, buf.color_to_raw,
+                    buf.color_slot_to_raw,
                     buf.bodies_per_world, buf.body_inv_mass,
                     cfg.max_colors,
                 ],
@@ -489,7 +495,7 @@ class SolverBox3D(SolverBase):
                 device=device,
             )
 
-        # ── 4. Substep loop ─────────────────────────────────────────
+        # -- 4. Substep loop -----------------------------------------
         max_bodies = cfg.max_bodies_per_world
 
         gx, gy, gz = float(gravity_vec[0]), float(gravity_vec[1]), float(gravity_vec[2])
@@ -598,7 +604,7 @@ class SolverBox3D(SolverBase):
                     device=device,
                 )
 
-        # ── 5. Restitution pass (after all substeps, following Box2D) ──
+        # -- 5. Restitution pass (after all substeps, following Box2D) --
         wp.launch_tiled(
             contact_solve_kernel,
             dim=[W],
@@ -645,9 +651,9 @@ class SolverBox3D(SolverBase):
             device=device,
         )
 
-    # ──────────────────────────────────────────────────────────────────
+    # -----------------------------------------------------------------
     # Model change notification
-    # ──────────────────────────────────────────────────────────────────
+    # -----------------------------------------------------------------
 
     @override
     def notify_model_changed(self, flags: int) -> None:
@@ -660,14 +666,55 @@ class SolverBox3D(SolverBase):
 
     @override
     def update_contacts(self, contacts: Contacts, state: State | None = None) -> None:
-        """Convert Box3D solver impulses to Newton contact forces.
+        """Populate ``contacts.force`` from Box3D solver impulses accumulated during the last :meth:`step`.
 
-        Writes the contact normal force magnitude to
-        ``contacts.rigid_contact_force`` using the accumulated normal
-        impulse divided by the step dt.
+        Normal and friction impulses are converted to force [N] and torque [N*m]
+        by dividing the per-substep impulse by ``sub_dt`` (= ``dt / num_substeps``).  The torque is
+        computed at body 0's center of mass via ``cross(r_a, F)``.
+
+        Args:
+            contacts: :class:`Contacts` object whose :attr:`~Contacts.force` buffer will be written.
+                Must have been created with ``"force"`` in its requested attributes and must
+                match the :class:`Contacts` instance (same ``rigid_contact_max``) passed to
+                the preceding :meth:`step`.
+            state: Unused (accepted for API compatibility with :class:`SolverBase`).
+
+        Raises:
+            ValueError: If ``contacts.force`` is ``None`` (not requested), if no step has been run yet,
+                or if the contacts capacity does not match the one used in the last :meth:`step`.
         """
-        # For now, this is a simplified implementation that stores the
-        # total normal impulse per contact.  A full implementation would
-        # map from color-ordered solver contacts back to Newton's contact
-        # ordering and include friction forces.
-        pass
+        if contacts.force is None:
+            raise ValueError(
+                "contacts.force is not allocated. Call model.request_contact_attributes('force') "
+                "before creating the Contacts object."
+            )
+        if not hasattr(self, "_last_dt") or self._last_dt is None:
+            raise ValueError("No solver data available. Call step() before update_contacts().")
+        if contacts.rigid_contact_max != self._last_contacts_max:
+            raise ValueError(
+                f"Contacts capacity mismatch: update_contacts() received rigid_contact_max="
+                f"{contacts.rigid_contact_max}, but step() used {self._last_contacts_max}. "
+                f"Pass the same Contacts instance to both step() and update_contacts()."
+            )
+
+        contacts.force.zero_()
+
+        buf = self._buf
+        sub_dt = self._last_dt / float(self._config.num_substeps)
+        inv_sub_dt = 1.0 / sub_dt if sub_dt > 0.0 else 0.0
+
+        wp.launch(
+            convert_impulses_to_contact_force,
+            dim=(self._num_worlds, self._config.max_contacts_per_world),
+            inputs=[
+                buf.c_normal_impulse, buf.c_friction1_impulse,
+                buf.c_friction2_impulse,
+                buf.c_normal, buf.c_tangent1, buf.c_tangent2,
+                buf.c_r_a,
+                buf.color_slot_to_raw, buf.raw_to_newton,
+                buf.contact_count,
+                inv_sub_dt,
+            ],
+            outputs=[contacts.force],
+            device=self.device,
+        )

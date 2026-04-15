@@ -978,6 +978,12 @@ class CollisionPipeline:
 
         # Match contacts against previous frame before sorting.
         if self._contact_matcher is not None:
+            if contacts.rigid_contact_match_index is None:
+                raise ValueError(
+                    "CollisionPipeline has contact_matching enabled but the Contacts "
+                    "buffer was created without contact_matching=True. "
+                    "Use pipeline.contacts() to create a compatible buffer."
+                )
             self._contact_matcher.match(
                 sort_keys=self._sort_key_array,
                 contact_count=contacts.rigid_contact_count,

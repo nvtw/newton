@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Integration tests for SolverBox3D — full pipeline with Newton collision."""
+"""Integration tests for SolverBox3D -- full pipeline with Newton collision."""
 
 import unittest
 
@@ -17,9 +17,9 @@ class TestSolverBox3D(unittest.TestCase):
     pass
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 # Helpers
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 
 
 def _step_simulation(solver, pipeline, state_in, state_out, control, dt, steps):
@@ -34,9 +34,9 @@ def _step_simulation(solver, pipeline, state_in, state_out, control, dt, steps):
     return state_in  # last written state
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 # Free fall (no contacts)
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 
 
 def test_free_fall(test, device):
@@ -69,9 +69,9 @@ def test_free_fall(test, device):
                            msg=f"Free fall z={z}, expected ~{expected_z}")
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 # Ground contact — sphere settles at y=radius
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 
 
 def test_ground_contact(test, device):
@@ -100,9 +100,9 @@ def test_ground_contact(test, device):
                            msg=f"Sphere should rest at z≈0.5, got z={z}")
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 # Zero gravity — velocity preserved
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 
 
 def test_zero_gravity_velocity_preserved(test, device):
@@ -138,9 +138,9 @@ def test_zero_gravity_velocity_preserved(test, device):
     test.assertAlmostEqual(float(qd[0]), 10.0, delta=0.3, msg=f"vx should be ~10, got {qd[0]}")
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 # Pendulum — revolute joint test
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 
 
 def test_pendulum_revolute(test, device):
@@ -188,9 +188,9 @@ def test_pendulum_revolute(test, device):
                            msg=f"Pendulum length should be ~1m, got {dist}")
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 # Fixed joint — two bodies stay rigidly connected
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 
 
 def test_fixed_joint(test, device):
@@ -235,9 +235,9 @@ def test_fixed_joint(test, device):
                            msg=f"Fixed joint distance should be ~1m, got {dist}")
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 # Multi-world parallel simulation
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 
 
 def test_multi_world(test, device):
@@ -296,9 +296,9 @@ def test_multi_world(test, device):
                         f"World ordering broken: z[{i}]={zs[i]} >= z[{i+1}]={zs[i+1]}")
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 # Revolute joint with angle limits
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 
 
 def test_revolute_with_limits(test, device):
@@ -353,9 +353,9 @@ def test_revolute_with_limits(test, device):
                     f"Bob didn't move at all: z={bob_z}")
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 # Ball joint (point-to-point only)
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 
 
 def test_ball_joint(test, device):
@@ -411,9 +411,9 @@ def test_ball_joint(test, device):
                     f"Bob should fall under gravity, z={bob_pos[2]}")
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 # CUDA graph capture
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 
 
 def test_cuda_graph_matches_eager(test, device):
@@ -448,9 +448,126 @@ def test_cuda_graph_matches_eager(test, device):
                                err_msg=f"Graph and eager positions differ: graph={pos_graph[:3]}, eager={pos_eager[:3]}")
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
+# Contact force reporting (update_contacts)
+# =====================================================================
+
+
+def _run_contact_force_test(test, device, build_fn, expected_mass, *, settle_steps=120, avg_steps=60):
+    """Shared helper: settle an object, then average the reported contact force.
+
+    Args:
+        build_fn: Callable(builder) that adds shapes and returns nothing.
+            A ground plane is added automatically.
+        expected_mass: Expected mass of the dynamic body [kg].
+    """
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    build_fn(builder)
+
+    model = builder.finalize(device=device)
+    model.request_contact_attributes("force")
+
+    cfg = Box3DConfig(num_substeps=8, num_velocity_iters=4, num_relaxation_iters=4,
+                      enable_graph=False)
+    solver = newton.solvers.SolverBox3D(model, config=cfg)
+    pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
+
+    state_in = model.state()
+    state_out = model.state()
+    contacts = pipeline.contacts()
+    dt = 1.0 / 60.0
+
+    for _ in range(settle_steps):
+        state_in.clear_forces()
+        contacts.clear()
+        pipeline.collide(state_in, contacts)
+        solver.step(state_in, state_out, None, contacts, dt)
+        state_in, state_out = state_out, state_in
+
+    force_acc = np.zeros(3)
+    for _ in range(avg_steps):
+        state_in.clear_forces()
+        contacts.clear()
+        pipeline.collide(state_in, contacts)
+        solver.step(state_in, state_out, None, contacts, dt)
+        state_in, state_out = state_out, state_in
+        solver.update_contacts(contacts, state_in)
+        nc = int(contacts.rigid_contact_count.numpy()[0])
+        if nc > 0:
+            f = contacts.force.numpy()[:nc, :3]
+            force_acc += np.sum(f, axis=0)
+
+    avg_force = force_acc / avg_steps
+    gravity = 9.81
+    expected_fz = expected_mass * gravity
+
+    np.testing.assert_allclose(
+        avg_force[2], -expected_fz, rtol=0.10,
+        err_msg=f"Vertical contact force should match -mg ({-expected_fz:.2f} N), got {avg_force[2]:.2f} N",
+    )
+    np.testing.assert_allclose(avg_force[0], 0.0, atol=1.0, err_msg="Horizontal X force should be ~0")
+    np.testing.assert_allclose(avg_force[1], 0.0, atol=1.0, err_msg="Horizontal Y force should be ~0")
+
+    return avg_force
+
+
+def test_contact_force_sphere_on_plane(test, device):
+    """A sphere resting on a ground plane must report contact force equal to its weight."""
+    radius = 0.25
+    density = 1000.0
+    mass = density * (4.0 / 3.0) * np.pi * radius**3
+
+    def build(builder):
+        builder.default_shape_cfg.density = density
+        b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, radius), wp.quat_identity()))
+        builder.add_shape_sphere(body=b, radius=radius)
+
+    _run_contact_force_test(test, device, build, mass)
+
+
+def test_contact_force_box_on_plane(test, device):
+    """A box on a ground plane: total contact force over multiple contacts equals mg."""
+    hx, hy, hz = 0.5, 0.5, 0.5
+    density = 1000.0
+    mass = density * (2.0 * hx) * (2.0 * hy) * (2.0 * hz)
+
+    def build(builder):
+        builder.default_shape_cfg.density = density
+        b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, hz), wp.quat_identity()))
+        builder.add_shape_box(body=b, hx=hx, hy=hy, hz=hz)
+
+    _run_contact_force_test(test, device, build, mass)
+
+
+def test_update_contacts_requires_force_attribute(test, device):
+    """update_contacts should raise ValueError when contacts.force is not allocated."""
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.25), wp.quat_identity()))
+    builder.add_shape_sphere(body=b, radius=0.25)
+    model = builder.finalize(device=device)
+
+    solver = newton.solvers.SolverBox3D(model)
+    pipeline = newton.CollisionPipeline(model, broad_phase="nxn")
+
+    state_in = model.state()
+    state_out = model.state()
+    contacts = pipeline.contacts()
+
+    state_in.clear_forces()
+    contacts.clear()
+    pipeline.collide(state_in, contacts)
+    solver.step(state_in, state_out, None, contacts, 1.0 / 60.0)
+
+    test.assertIsNone(contacts.force)
+    with test.assertRaises(ValueError):
+        solver.update_contacts(contacts)
+
+
+# =====================================================================
 # Register tests
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 
 devices = get_cuda_test_devices()
 
@@ -463,6 +580,9 @@ add_function_test(TestSolverBox3D, "test_multi_world", test_multi_world, devices
 add_function_test(TestSolverBox3D, "test_revolute_with_limits", test_revolute_with_limits, devices=devices)
 add_function_test(TestSolverBox3D, "test_ball_joint", test_ball_joint, devices=devices)
 add_function_test(TestSolverBox3D, "test_cuda_graph_matches_eager", test_cuda_graph_matches_eager, devices=devices)
+add_function_test(TestSolverBox3D, "test_contact_force_sphere_on_plane", test_contact_force_sphere_on_plane, devices=devices)
+add_function_test(TestSolverBox3D, "test_contact_force_box_on_plane", test_contact_force_box_on_plane, devices=devices)
+add_function_test(TestSolverBox3D, "test_update_contacts_requires_force_attribute", test_update_contacts_requires_force_attribute, devices=devices, check_output=False)
 
 
 if __name__ == "__main__":

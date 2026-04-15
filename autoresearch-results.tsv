@@ -1,0 +1,6 @@
+# metric_direction: lower_is_better
+iteration	commit	metric	delta	guard	guard-metric	status	description
+0	-	23.483	0.0	pass	-	baseline	2000 worlds × 20-pyramid, pre-fusion
+1	2a4f448b	19.382	-4.101	pass	-	keep	fuse contact iterations (6+3→1+1 launches) — 17.5% faster
+2	9144fd85	14.419	-4.963	pass	-	keep	iteration fusion + block_dim=48 — 38.6% faster than baseline
+3	8d736941	14.388	-0.031	pass	-	keep	fuse inertia rotation into solve kernel

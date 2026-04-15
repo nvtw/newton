@@ -4,7 +4,7 @@
 """Fused contact + joint solve kernel for the Box3D solver.
 
 Uses ``@wp.func_native`` with shared memory for body velocities and
-``__syncthreads()`` barriers between graph colors — colored Gauss-Seidel
+``__syncthreads()`` barriers between graph colors -- colored Gauss-Seidel
 within a single CUDA thread block per world.
 
 The kernel handles:
@@ -25,7 +25,7 @@ import warp as wp
 from .mat3sym import mat3sym
 
 # Maximum bodies in shared memory.  6 floats per body (vx,vy,vz,wx,wy,wz).
-# 128 bodies * 6 * 4 bytes = 3072 bytes — well within per-block limit.
+# 128 bodies * 6 * 4 bytes = 3072 bytes -- well within per-block limit.
 _MAX_SMEM_BODIES = 1024
 
 _CONTACT_SOLVE_SNIPPET = r"""
@@ -86,7 +86,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
 
     int total_c = *wp::address(color_offsets, wid, max_colors);
 
-    // ═══ Warm start (first substep only) ═══
+    // === Warm start (first substep only) ===
     if (do_warm_start > 0) {
         for (int ci = tid; ci < total_c; ci += blockDim.x) {
             float ni = *wp::address(c_ni, wid, ci);
@@ -135,7 +135,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
         __syncthreads();
     }
 
-    // ═══ Colored contact solve (solve_iters iterations) ═══
+    // === Colored contact solve (solve_iters iterations) ===
     for (int _si = 0; _si < solve_iters; _si++) {
     for (int color = 0; color < max_colors; color++) {
         int cstart = *wp::address(color_offsets, wid, color);
@@ -165,7 +165,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
             float vrz = (vbz + wbx*rb[1]-wby*rb[0]) - (vaz + wax*ra[1]-way*ra[0]);
             float vn = vrx*n[0] + vry*n[1] + vrz*n[2];
 
-            // Bias — following Box2D: speculative bias always, soft bias only when use_bias
+            // Bias -- following Box2D: speculative bias always, soft bias only when use_bias
             float velocityBias = 0.f, ms = 1.f, isv = 0.f;
             {
                 float base_sep = *wp::address(c_sep, wid, ci);
@@ -219,7 +219,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
                 sb[5] += iib.m02*cx+iib.m12*cy+iib.m22*cz;
             }
 
-            // ═══ Friction (2 tangent directions) ═══
+            // === Friction (2 tangent directions) ===
             float maxF = friction * newL;
             auto t1 = *wp::address(c_tangent1, wid, ci);
             auto t2 = *wp::address(c_tangent2, wid, ci);
@@ -283,7 +283,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
         __syncthreads();
     }
 
-    // ═══ Restitution (last substep only) ═══
+    // === Restitution (last substep only) ===
     if (do_restitution > 0) {
         for (int ci = tid; ci < total_c; ci += blockDim.x) {
             float rest = *wp::address(c_rest, wid, ci);
@@ -335,7 +335,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
     }
     } // end solve_iters
 
-    // ═══ Store velocities shared → global ═══
+    // === Store velocities shared -> global ===
     for (int b = tid; b < num_bodies; b += blockDim.x) {
         float* s = smem + b * 6;
         wp::vec_t<3,float> v; v[0]=s[0];v[1]=s[1];v[2]=s[2];
@@ -345,7 +345,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
     }
     __syncthreads();
 
-    // ═══ Joint solve (colored, global memory) ═══
+    // === Joint solve (colored, global memory) ===
     #define QROT(qx,qy,qz,qw, vx,vy,vz, rx,ry,rz) { \
         float _cx=(qy)*(vz)-(qz)*(vy); float _cy=(qz)*(vx)-(qx)*(vz); float _cz=(qx)*(vy)-(qy)*(vx); \
         (rx)=(vx)+2.f*((qw)*_cx+(qy)*_cz-(qz)*_cy); \
@@ -395,7 +395,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
                 float jrbx, jrby, jrbz;
                 QROT(qbx,qby,qbz,qbw, lb[0],lb[1],lb[2], jrbx,jrby,jrbz);
 
-                // ── Point-to-point (3x3 K solve) ──
+                // -- Point-to-point (3x3 K solve) --
                 float cdx = (jvbx+jwby*jrbz-jwbz*jrby) - (jvax+jway*jraz-jwaz*jray);
                 float cdy = (jvby+jwbz*jrbx-jwbx*jrbz) - (jvay+jwaz*jrax-jwax*jraz);
                 float cdz = (jvbz+jwbx*jrby-jwby*jrbx) - (jvaz+jwax*jray-jway*jrax);
@@ -427,7 +427,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
 
                 // Macro to add [r]_x^T @ I^-1 @ [r]_x contribution for one body
                 #define ADD_SKEW_K(rx,ry,rz,II) { \
-                    /* s0 = II @ (0, rz, -ry) — mat3sym: symmetric, so [1][0]=m01 etc */ \
+                    /* s0 = II @ (0, rz, -ry) -- mat3sym: symmetric, so [1][0]=m01 etc */ \
                     float s0x = II.m01*rz - II.m02*ry; \
                     float s0y = II.m11*rz - II.m12*ry; \
                     float s0z = II.m12*rz - II.m22*ry; \
@@ -484,7 +484,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
                     }
                 }
 
-                // ── Angular constraint (REVOLUTE: 2 DOF ⊥ hinge, FIXED: 3 DOF) ──
+                // -- Angular constraint (REVOLUTE: 2 DOF perp hinge, FIXED: 3 DOF) --
                 if (jtype == 1 || jtype == 3) {  // REVOLUTE=1 or FIXED=3
                     auto ha = *wp::address(j_ha, wid, ji);
                     float whx, why, whz;
@@ -494,7 +494,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
                     auto ai = *wp::address(j_ai, wid, ji);
                     float dwx = jwbx-jwax, dwy = jwby-jway, dwz = jwbz-jwaz;
 
-                    // Combined angular inertia (from mat3sym — symmetric, so only 6 values)
+                    // Combined angular inertia (from mat3sym -- symmetric, so only 6 values)
                     float ka00 = (ja>=0 ? jiia.m00 : 0) + (jbi>=0 ? jiib.m00 : 0);
                     float ka01 = (ja>=0 ? jiia.m01 : 0) + (jbi>=0 ? jiib.m01 : 0);
                     float ka02 = (ja>=0 ? jiia.m02 : 0) + (jbi>=0 ? jiib.m02 : 0);
@@ -690,7 +690,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
     }
     #undef QROT
 
-    // ═══ Inline position integration (if do_int_pos > 0) ═══
+    // === Inline position integration (if do_int_pos > 0) ===
     if (do_int_pos > 0) {
         for (int b = tid; b < num_bodies; b += blockDim.x) {
             float im = *wp::address(inv_m, wid, b);
