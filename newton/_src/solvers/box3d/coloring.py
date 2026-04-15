@@ -24,9 +24,9 @@ from .constraint_funcs import (
 )
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 # CPU joint coloring (called once at construction)
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 
 
 def color_joints_cpu(
@@ -79,25 +79,25 @@ def color_joints_cpu(
     return order, offsets, num_colors
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 # GPU contact coloring + preparation kernel
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 
 # The coloring + prepare is done in a single tiled kernel:
 #   Phase 1 (thread 0): greedy-color raw contacts, build color_offsets.
-#   Phase 2 (all threads): scatter raw contacts → color-ordered solver arrays,
+#   Phase 2 (all threads): scatter raw contacts -> color-ordered solver arrays,
 #           compute tangent basis, effective masses, pre-solve relative velocity.
 
 _COLORING_PREPARE_SNIPPET = r"""
     int nc = *wp::address(contact_count, wid);
 
-    // ── Phase 1: greedy coloring (thread 0 only) ──────────────────
+    // -- Phase 1: greedy coloring (thread 0 only) ------------------
 
     // temp_order[i] stores the destination slot for raw contact i
     // We reuse the color_to_raw buffer as temp scratch for the per-contact color.
     // After coloring, we compute a prefix sum to get offsets then scatter.
 
-    // Per-body color bitmask (in global memory — color_body_mask array)
+    // Per-body color bitmask (in global memory -- color_body_mask array)
     if (tid == 0) {
         int nb = *wp::address(bodies_per_world, wid);
 
@@ -164,12 +164,12 @@ _COLORING_PREPARE_SNIPPET = r"""
     }
     __syncthreads();
 
-    // ── Phase 2: scatter + prepare (all threads) ──────────────────
+    // -- Phase 2: scatter + prepare (all threads) ------------------
 
     for (int c = tid; c < nc; c += blockDim.x) {
         int dest = *wp::address(color_to_raw, wid, c);
 
-        // Scatter raw → color-ordered
+        // Scatter raw -> color-ordered
         int a = *wp::address(raw_body_a, wid, c);
         int b = *wp::address(raw_body_b, wid, c);
         *wp::address(c_body_a, wid, dest) = a;
@@ -203,26 +203,15 @@ _COLORING_PREPARE_SNIPPET = r"""
         }
         *wp::address(c_is_static, wid, dest) = is_static;
 
-        // Remember raw→color mapping for impulse store-back
-        // color_to_raw[c] already has dest, but we need the reverse:
-        // we want: for each color-ordered slot, what raw index?
-        // Actually we need: for each color-ordered slot, what raw index (for storing back).
-        // We store dest → c (inverse mapping). But color_to_raw is written above.
-        // Overwrite: color_to_raw[dest] = c (reverse mapping)
-        // This is safe because dest is unique per c.
     }
     __syncthreads();
 
-    // Fix up the reverse mapping: we need color_to_raw[dest] = raw_index
-    // But we already wrote color_to_raw[c] = dest above.
-    // To get reverse, we do a second pass.
+    // Build reverse mapping: color_slot_to_raw[dest] = raw_index (c).
+    // color_to_raw[c] still holds dest (the forward raw-to-color mapping).
+    // color_slot_to_raw is a separate buffer so there are no read/write races.
     for (int c = tid; c < nc; c += blockDim.x) {
-        // c is the raw index, color_to_raw[c] was the dest
-        // We need to invert this. Use c_body_a as temp? No.
-        // Actually, let's store the raw index in a separate temp.
-        // For now, we won't need the reverse mapping in the solve kernel.
-        // The store kernel can iterate raw contacts directly.
-        // Skip reverse mapping here.
+        int dest = *wp::address(color_to_raw, wid, c);
+        *wp::address(color_slot_to_raw, wid, dest) = c;
     }
     __syncthreads();
 """
@@ -261,6 +250,7 @@ def _coloring_prepare_native(
     color_offsets: wp.array2d(dtype=wp.int32),
     color_body_mask: wp.array2d(dtype=wp.int64),
     color_to_raw: wp.array2d(dtype=wp.int32),
+    color_slot_to_raw: wp.array2d(dtype=wp.int32),
     bodies_per_world: wp.array[wp.int32],
     body_inv_mass: wp.array2d(dtype=float),
     max_colors: int,
@@ -303,6 +293,7 @@ def coloring_prepare_kernel(
     color_offsets: wp.array2d(dtype=wp.int32),
     color_body_mask: wp.array2d(dtype=wp.int64),
     color_to_raw: wp.array2d(dtype=wp.int32),
+    color_slot_to_raw: wp.array2d(dtype=wp.int32),
     bodies_per_world: wp.array[wp.int32],
     body_inv_mass: wp.array2d(dtype=float),
     max_colors: int,
@@ -320,14 +311,15 @@ def coloring_prepare_kernel(
         c_base_sep, c_friction, c_restitution,
         c_ni, c_fi1, c_fi2, c_tni, c_is_static,
         contact_count, color_offsets, color_body_mask, color_to_raw,
+        color_slot_to_raw,
         bodies_per_world, body_inv_mass, max_colors,
         wid, tid,
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 # Contact effective-mass + tangent basis computation
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
 
 
 @wp.kernel

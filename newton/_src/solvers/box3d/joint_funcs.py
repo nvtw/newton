@@ -12,9 +12,9 @@ Port of Box2D v3 joint formulations to 3-D with full ``mat33`` inertia.
 
 Supported joint types
 ---------------------
-* **Revolute** — 3-D hinge: point-to-point (3 DOF) + angular lock
+* **Revolute** -- 3-D hinge: point-to-point (3 DOF) + angular lock
   perpendicular to hinge axis (2 DOF) + optional motor (1 DOF).
-* **Fixed** (weld) — full rigid lock: point-to-point (3 DOF) + full
+* **Fixed** (weld) -- full rigid lock: point-to-point (3 DOF) + full
   angular lock (3 DOF).
 """
 
@@ -111,7 +111,7 @@ def _skew_outer_diag(r: wp.vec3, inv_I: wp.mat33) -> wp.mat33:
     #
     # Let c_i = inv_I @ (r x e_i)  for standard basis e_i
     # Then K_{ij} = (r x e_i) . c_j = (r x e_i) . (inv_I @ (r x e_j))
-    # But that's K = [r]_x^T @ inv_I @ [r]_x — exactly what we want.
+    # But that's K = [r]_x^T @ inv_I @ [r]_x -- exactly what we want.
 
     # r x e_0 = (0, r[2], -r[1])
     s0 = inv_I * wp.vec3(0.0, r[2], -r[1])
@@ -139,7 +139,7 @@ def _skew_outer_diag(r: wp.vec3, inv_I: wp.mat33) -> wp.mat33:
 
 
 # ---------------------------------------------------------------------------
-# Revolute joint — point-to-point (3 DOF)
+# Revolute joint -- point-to-point (3 DOF)
 # ---------------------------------------------------------------------------
 
 
@@ -228,7 +228,7 @@ def solve_revolute_point_to_point(
 
 
 # ---------------------------------------------------------------------------
-# Revolute joint — angular constraint perpendicular to hinge (2 DOF)
+# Revolute joint -- angular constraint perpendicular to hinge (2 DOF)
 # ---------------------------------------------------------------------------
 
 
@@ -264,7 +264,7 @@ def solve_revolute_angular(
         inv_inertia_a: World-frame inverse inertia of body A [1/(kg m^2)].
         inv_inertia_b: World-frame inverse inertia of body B [1/(kg m^2)].
         angular_impulse: Accumulated 2-D angular impulse ``(b1, b2)`` [N m s].
-        bias_rate: Softness bias rate [1/s] (unused for angular — no position error tracked).
+        bias_rate: Softness bias rate [1/s] (unused for angular -- no position error tracked).
         mass_scale: Softness mass scale [dimensionless].
         impulse_scale: Softness impulse scale [dimensionless].
         use_bias: 1 for biased pass, 0 for relaxation.
@@ -295,7 +295,7 @@ def solve_revolute_angular(
         ms = mass_scale
         isv = impulse_scale
 
-    # Solve each DOF independently (diagonal approximation — the two
+    # Solve each DOF independently (diagonal approximation -- the two
     # perpendicular directions are decoupled for symmetric inertia)
     k1 = wp.dot(b1, k_ang * b1)
     k2 = wp.dot(b2, k_ang * b2)
@@ -317,7 +317,7 @@ def solve_revolute_angular(
 
 
 # ---------------------------------------------------------------------------
-# Revolute joint — motor (1 DOF)
+# Revolute joint -- motor (1 DOF)
 # ---------------------------------------------------------------------------
 
 
@@ -368,7 +368,7 @@ def solve_revolute_motor(
 
 
 # ---------------------------------------------------------------------------
-# Revolute joint — hinge-axis limit (1 DOF)
+# Revolute joint -- hinge-axis limit (1 DOF)
 # ---------------------------------------------------------------------------
 
 
@@ -425,7 +425,7 @@ def solve_revolute_limit(
     isv = 0.0
 
     if angle_error > 0.0:
-        # Speculative — limit not yet reached
+        # Speculative -- limit not yet reached
         bias = angle_error * inv_sub_dt
     elif use_bias != 0:
         bias = mass_scale * bias_rate * angle_error
@@ -443,7 +443,7 @@ def solve_revolute_limit(
 
 
 # ---------------------------------------------------------------------------
-# Fixed (weld) joint — angular lock (3 DOF)
+# Fixed (weld) joint -- angular lock (3 DOF)
 # ---------------------------------------------------------------------------
 
 

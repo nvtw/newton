@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Newton ↔ Box3D format conversion kernels.
+"""Newton <-> Box3D format conversion kernels.
 
 Newton stores bodies in flat 1-D arrays (all worlds concatenated) with
 ``wp.transform`` for pose and ``wp.spatial_vector`` for velocity.
@@ -20,9 +20,9 @@ from ...sim import BodyFlags
 from .mat3sym import mat3sym, mat3sym_from_mat33, mat3sym_zero
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Newton → Box3D  (bodies)
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
+# Newton -> Box3D  (bodies)
+# =====================================================================
 
 
 @wp.kernel
@@ -91,7 +91,7 @@ def convert_bodies_to_box3d(
     out_vel[world, local_idx] = wp.spatial_top(qd)
     out_ang_vel[world, local_idx] = wp.spatial_bottom(qd)
 
-    # Kinematic bodies → zero inverse mass/inertia
+    # Kinematic bodies -> zero inverse mass/inertia
     flags = body_flags[global_idx]
     if (flags & BodyFlags.KINEMATIC) != 0:
         out_inv_mass[world, local_idx] = 0.0
@@ -116,9 +116,9 @@ def convert_bodies_to_box3d(
     wp.atomic_add(out_bodies_per_world, world, 1)
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Newton → Box3D  (contacts)
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
+# Newton -> Box3D  (contacts)
+# =====================================================================
 
 
 @wp.kernel
@@ -164,6 +164,7 @@ def convert_contacts_to_box3d(
     out_fi1: wp.array2d(dtype=float),
     out_fi2: wp.array2d(dtype=float),
     out_contact_count: wp.array[wp.int32],
+    out_raw_to_newton: wp.array2d(dtype=wp.int32),
 ):
     """Convert Newton contacts to Box3D raw-contact format.
 
@@ -304,11 +305,12 @@ def convert_contacts_to_box3d(
     out_ni[world, slot] = ni
     out_fi1[world, slot] = fi1
     out_fi2[world, slot] = fi2
+    out_raw_to_newton[world, slot] = ci
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Box3D → Newton  (bodies)
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
+# Box3D -> Newton  (bodies)
+# =====================================================================
 
 
 @wp.kernel
@@ -335,7 +337,7 @@ def convert_bodies_from_box3d(
     """
     global_idx = wp.tid()
 
-    # Write ALL bodies (including kinematic — their state is unchanged in Box3D
+    # Write ALL bodies (including kinematic -- their state is unchanged in Box3D
     # buffers, so this is equivalent to copy + selective overwrite but in one kernel)
 
     # Find world + local index
@@ -360,9 +362,9 @@ def convert_bodies_from_box3d(
     out_body_qd[global_idx] = wp.spatial_vector(vel, ang_vel)
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Newton → Box3D  (joints)
-# ═══════════════════════════════════════════════════════════════════════
+# =====================================================================
+# Newton -> Box3D  (joints)
+# =====================================================================
 
 
 @wp.kernel
@@ -411,7 +413,7 @@ def convert_joints_to_box3d(
     jtype = joint_type[global_idx]
     out_type[world, slot] = jtype
 
-    # Parent/child body → local indices
+    # Parent/child body -> local indices
     parent_global = joint_parent[global_idx]
     child_global = joint_child[global_idx]
     bws = body_world_start[world]
@@ -446,3 +448,66 @@ def convert_joints_to_box3d(
     if ke > 0.0 and lo < hi:
         enabled = 1
     out_limit_enabled[world, slot] = enabled
+
+
+# =====================================================================
+# Box3D -> Newton  (contact forces)
+# =====================================================================
+
+
+@wp.kernel
+def convert_impulses_to_contact_force(
+    # Color-ordered solver impulses (2-D: [world, color_slot])
+    c_normal_impulse: wp.array2d(dtype=float),
+    c_friction1_impulse: wp.array2d(dtype=float),
+    c_friction2_impulse: wp.array2d(dtype=float),
+    c_normal: wp.array2d(dtype=wp.vec3),
+    c_tangent1: wp.array2d(dtype=wp.vec3),
+    c_tangent2: wp.array2d(dtype=wp.vec3),
+    c_r_a: wp.array2d(dtype=wp.vec3),
+    # Index mappings
+    color_slot_to_raw: wp.array2d(dtype=wp.int32),
+    raw_to_newton: wp.array2d(dtype=wp.int32),
+    contact_count: wp.array[wp.int32],
+    inv_dt: float,
+    # Output (Newton flat 1-D)
+    contact_force: wp.array[wp.spatial_vector],
+):
+    """Convert Box3D color-ordered impulses to Newton ``contacts.force``.
+
+    Launched with ``dim = (num_worlds, max_contacts_per_world)``.
+
+    For each active color-ordered contact slot, reconstructs the 3-D force
+    vector from the normal and two friction impulse components, divides by
+    ``sub_dt`` to get force [N], and computes the torque at body 0's COM via
+    ``cross(r_a, F)``.  The result is written to the Newton flat
+    ``contacts.force`` array using the index chain:
+    color_slot -> raw_slot -> Newton index.
+
+    Sign convention: the force is that exerted *on body 0 by body 1*.
+    The solver subtracts impulse from body A's velocity along the normal
+    (which points A->B), so the force on body 0 is opposite to the impulse
+    direction along the normal.
+    """
+    wid, ci = wp.tid()
+    nc = contact_count[wid]
+    if ci >= nc:
+        return
+
+    raw_idx = color_slot_to_raw[wid, ci]
+    newton_idx = raw_to_newton[wid, raw_idx]
+
+    n = c_normal[wid, ci]
+    t1 = c_tangent1[wid, ci]
+    t2 = c_tangent2[wid, ci]
+    r_a = c_r_a[wid, ci]
+
+    ni = c_normal_impulse[wid, ci]
+    fi1 = c_friction1_impulse[wid, ci]
+    fi2 = c_friction2_impulse[wid, ci]
+
+    # Force on body 0: the solver applies P = imp * direction and
+    # *subtracts* it from body A, so the force on A is -P/dt.
+    f = -(n * ni + t1 * fi1 + t2 * fi2) * inv_dt
+    tau = wp.cross(r_a, f)
+    contact_force[newton_idx] = wp.spatial_vector(f, tau)

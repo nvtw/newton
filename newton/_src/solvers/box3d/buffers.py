@@ -36,7 +36,7 @@ class SolverBuffers:
         J = cfg.max_joints_per_world
         K = cfg.max_colors
 
-        # ── Body state (2-D: [world, body]) ──────────────────────────
+        # -- Body state (2-D: [world, body]) --------------------------
         self.body_pos = wp.zeros((W, B), dtype=wp.vec3, device=device)
         self.body_ori = wp.zeros((W, B), dtype=wp.quat, device=device)
         self.body_vel = wp.zeros((W, B), dtype=wp.vec3, device=device)
@@ -48,7 +48,7 @@ class SolverBuffers:
         self.body_inv_inertia_body = wp.zeros((W, B), dtype=mat3sym, device=device)
         """Body-frame inverse inertia (constant). Used to recompute world-frame each substep."""
 
-        # ── Raw contacts (before coloring, 2-D: [world, contact]) ────
+        # -- Raw contacts (before coloring, 2-D: [world, contact]) ----
         self.raw_body_a = wp.zeros((W, C), dtype=wp.int32, device=device)
         self.raw_body_b = wp.zeros((W, C), dtype=wp.int32, device=device)
         self.raw_normal = wp.zeros((W, C), dtype=wp.vec3, device=device)
@@ -61,7 +61,7 @@ class SolverBuffers:
         self.raw_friction1_impulse = wp.zeros((W, C), dtype=float, device=device)
         self.raw_friction2_impulse = wp.zeros((W, C), dtype=float, device=device)
 
-        # ── Colored contact solver arrays (ordered by color) ─────────
+        # -- Colored contact solver arrays (ordered by color) ---------
         self.c_body_a = wp.zeros((W, C), dtype=wp.int32, device=device)
         self.c_body_b = wp.zeros((W, C), dtype=wp.int32, device=device)
         self.c_normal = wp.zeros((W, C), dtype=wp.vec3, device=device)
@@ -82,21 +82,25 @@ class SolverBuffers:
         self.c_rel_vel_normal = wp.zeros((W, C), dtype=float, device=device)
         self.c_is_static = wp.zeros((W, C), dtype=wp.int32, device=device)
 
-        # ── Contact coloring ─────────────────────────────────────────
+        # -- Contact coloring -----------------------------------------
         self.contact_count = wp.zeros(W, dtype=wp.int32, device=device)
         self.color_offsets = wp.zeros((W, K + 1), dtype=wp.int32, device=device)
         # Scratch for coloring (per-body bitmask)
         self.color_body_mask = wp.zeros((W, B), dtype=wp.int64, device=device)
 
-        # ── Warm starting (previous-frame impulses, in sort order) ───
+        # -- Warm starting (previous-frame impulses, in sort order) ---
         self.prev_normal_impulse = wp.zeros((W, C), dtype=float, device=device)
         self.prev_friction1_impulse = wp.zeros((W, C), dtype=float, device=device)
         self.prev_friction2_impulse = wp.zeros((W, C), dtype=float, device=device)
         self.prev_contact_count = wp.zeros(W, dtype=wp.int32, device=device)
-        # Mapping from color-ordered to raw order (for storing impulses back)
+        # Forward mapping: color_to_raw[world, raw_index] = color_dest_slot
         self.color_to_raw = wp.zeros((W, C), dtype=wp.int32, device=device)
+        # Reverse mapping: color_slot_to_raw[world, color_slot] = raw_index
+        self.color_slot_to_raw = wp.zeros((W, C), dtype=wp.int32, device=device)
+        # Mapping from raw per-world slot back to Newton's flat contact index
+        self.raw_to_newton = wp.zeros((W, C), dtype=wp.int32, device=device)
 
-        # ── Joint solver arrays (pre-colored, 2-D: [world, joint]) ───
+        # -- Joint solver arrays (pre-colored, 2-D: [world, joint]) ---
         self.j_body_a = wp.zeros((W, J), dtype=wp.int32, device=device)
         self.j_body_b = wp.zeros((W, J), dtype=wp.int32, device=device)
         self.j_type = wp.zeros((W, J), dtype=wp.int32, device=device)
@@ -114,9 +118,9 @@ class SolverBuffers:
         self.j_lower_impulse = wp.zeros((W, J), dtype=float, device=device)
         self.j_upper_impulse = wp.zeros((W, J), dtype=float, device=device)
 
-        # ── Joint coloring ───────────────────────────────────────────
+        # -- Joint coloring -------------------------------------------
         self.joint_count = wp.zeros(W, dtype=wp.int32, device=device)
         self.joint_color_offsets = wp.zeros((W, K + 1), dtype=wp.int32, device=device)
 
-        # ── Per-world body counts ────────────────────────────────────
+        # -- Per-world body counts ------------------------------------
         self.bodies_per_world = wp.zeros(W, dtype=wp.int32, device=device)

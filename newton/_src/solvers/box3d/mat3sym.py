@@ -8,7 +8,7 @@ Storing as ``mat3sym`` saves 33% memory bandwidth on reads/writes,
 which matters for the contact/joint solve kernels that read inertia
 for every constraint.
 
-Layout: ``(m00, m01, m02, m11, m12, m22)`` — upper triangle, row-major.
+Layout: ``(m00, m01, m02, m11, m12, m22)`` -- upper triangle, row-major.
 
     [[m00, m01, m02],
      [m01, m11, m12],

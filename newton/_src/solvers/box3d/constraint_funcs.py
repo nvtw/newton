@@ -4,7 +4,7 @@
 """Testable contact-constraint math for the Box3D TGS-Soft solver.
 
 Every function in this module is a pure ``@wp.func`` operating on scalars
-and vectors — no array indexing, no shared memory.  This makes them
+and vectors -- no array indexing, no shared memory.  This makes them
 callable from a trivial ``@wp.kernel`` wrapper for unit testing while
 the production fused-solve kernel reimplements the same math inline
 inside a ``@wp.func_native`` CUDA snippet with shared memory.
@@ -64,10 +64,10 @@ def compute_tangent_basis(normal: wp.vec3) -> wp.mat33:
     tangent-pair construction.
 
     Args:
-        normal: Unit contact normal (A → B) [dimensionless].
+        normal: Unit contact normal (A -> B) [dimensionless].
     """
     n = normal
-    # Duff et al. 2017 — pick the axis with the smaller component
+    # Duff et al. 2017 -- pick the axis with the smaller component
     sign = 1.0
     if n[2] < 0.0:
         sign = -1.0
@@ -202,15 +202,15 @@ def solve_contact_normal(
     isv = 0.0
 
     if separation > 0.005:
-        # Speculative contact — always active (even during relaxation).
+        # Speculative contact -- always active (even during relaxation).
         # Small slop (5mm) prevents jitter from floating-point separation noise.
         velocity_bias = separation * inv_sub_dt
     elif use_bias != 0:
-        # Penetrating — soft position correction (only during biased pass)
+        # Penetrating -- soft position correction (only during biased pass)
         velocity_bias = wp.max(mass_scale * bias_rate * separation, -contact_speed)
         ms = mass_scale
         isv = impulse_scale
-    # else: relaxation pass with penetrating contact — no bias, ms=1, isv=0
+    # else: relaxation pass with penetrating contact -- no bias, ms=1, isv=0
 
     impulse = -normal_mass * (ms * vn + velocity_bias) - isv * lambda_n
     new_lambda = wp.max(lambda_n + impulse, 0.0)
