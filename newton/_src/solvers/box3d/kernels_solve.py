@@ -174,10 +174,34 @@ _CONTACT_SOLVE_SNIPPET = r"""
             float velocityBias = 0.f, ms = 1.f, isv = 0.f;
             {
                 float base_sep = *wp::address(c_sep, wid, ci);
-                float dpax=0,dpay=0,dpaz=0,dpbx=0,dpby=0,dpbz=0;
-                if (a >= 0) { auto dp = *wp::address(delta_pos,wid,a); dpax=dp[0];dpay=dp[1];dpaz=dp[2]; }
-                if (bi >= 0) { auto dp = *wp::address(delta_pos,wid,bi); dpbx=dp[0];dpby=dp[1];dpbz=dp[2]; }
-                float sep = base_sep + (dpbx-dpax)*n[0] + (dpby-dpay)*n[1] + (dpbz-dpaz)*n[2];
+                // Separation update: Box2D formula with deltaPosition AND deltaRotation.
+                // ds = (dpB - dpA) + (rot(dqB, rB) - rot(dqA, rA))
+                // sep = baseSep + dot(ds, normal)
+                float dsx=0,dsy=0,dsz=0;
+                if (a >= 0) {
+                    auto dp = *wp::address(delta_pos,wid,a);
+                    auto dqa = *wp::address(delta_quat,wid,a);
+                    // Rotate anchor rA by delta quaternion: rot(dq, r)
+                    float ax=ra[0],ay=ra[1],az=ra[2];
+                    float qx=dqa[0],qy=dqa[1],qz=dqa[2],qw=dqa[3];
+                    float tx=2.0f*(qy*az-qz*ay), ty=2.0f*(qz*ax-qx*az), tz=2.0f*(qx*ay-qy*ax);
+                    float rax=ax+qw*tx+qy*tz-qz*ty, ray=ay+qw*ty+qz*tx-qx*tz, raz=az+qw*tz+qx*ty-qy*tx;
+                    dsx -= dp[0] + rax;
+                    dsy -= dp[1] + ray;
+                    dsz -= dp[2] + raz;
+                }
+                if (bi >= 0) {
+                    auto dp = *wp::address(delta_pos,wid,bi);
+                    auto dqb = *wp::address(delta_quat,wid,bi);
+                    float bx=rb[0],by=rb[1],bz=rb[2];
+                    float qx=dqb[0],qy=dqb[1],qz=dqb[2],qw=dqb[3];
+                    float tx=2.0f*(qy*bz-qz*by), ty=2.0f*(qz*bx-qx*bz), tz=2.0f*(qx*by-qy*bx);
+                    float rbx=bx+qw*tx+qy*tz-qz*ty, rby=by+qw*ty+qz*tx-qx*tz, rbz=bz+qw*tz+qx*ty-qy*tx;
+                    dsx += dp[0] + rbx;
+                    dsy += dp[1] + rby;
+                    dsz += dp[2] + rbz;
+                }
+                float sep = base_sep + dsx*n[0] + dsy*n[1] + dsz*n[2];
 
                 if (sep > 0.0f) {
                     // Speculative: always active (even during relaxation).
@@ -708,7 +732,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
                 auto dp = *wp::address(delta_pos, wid, b);
                 dp[0]+=v[0]*sub_dt; dp[1]+=v[1]*sub_dt; dp[2]+=v[2]*sub_dt;
                 *wp::address(delta_pos, wid, b) = dp;
-                // Quaternion integration
+                // Quaternion integration for body orientation
                 auto q = *wp::address(body_ori, wid, b);
                 auto w = *wp::address(body_ang_vel, wid, b);
                 float hx=w[0]*sub_dt*0.5f,hy=w[1]*sub_dt*0.5f,hz=w[2]*sub_dt*0.5f;
@@ -720,6 +744,17 @@ _CONTACT_SOLVE_SNIPPET = r"""
                 float ql=sqrtf(q[0]*q[0]+q[1]*q[1]+q[2]*q[2]+q[3]*q[3]);
                 if(ql>1e-8f){float iv=1.0f/ql;q[0]*=iv;q[1]*=iv;q[2]*=iv;q[3]*=iv;}
                 *wp::address(body_ori, wid, b) = q;
+                // Accumulate delta quaternion (Box2D: deltaRotation)
+                // dq_new = quat_from_omega * dq_old (linearized integration)
+                auto dq = *wp::address(delta_quat, wid, b);
+                float ex= hx*dq[3]+hy*dq[2]-hz*dq[1];
+                float ey=-hx*dq[2]+hy*dq[3]+hz*dq[0];
+                float ez= hx*dq[1]-hy*dq[0]+hz*dq[3];
+                float ew=-hx*dq[0]-hy*dq[1]-hz*dq[2];
+                dq[0]+=ex;dq[1]+=ey;dq[2]+=ez;dq[3]+=ew;
+                float dl=sqrtf(dq[0]*dq[0]+dq[1]*dq[1]+dq[2]*dq[2]+dq[3]*dq[3]);
+                if(dl>1e-8f){float iv=1.0f/dl;dq[0]*=iv;dq[1]*=iv;dq[2]*=iv;dq[3]*=iv;}
+                *wp::address(delta_quat, wid, b) = dq;
             }
         }
         __syncthreads();
@@ -734,6 +769,7 @@ def _contact_solve_native(
     inv_m: wp.array2d(dtype=float),
     inv_I: wp.array2d(dtype=mat3sym),
     delta_pos: wp.array2d(dtype=wp.vec3),
+    delta_quat: wp.array2d(dtype=wp.quat),
     c_body_a: wp.array2d(dtype=wp.int32),
     c_body_b: wp.array2d(dtype=wp.int32),
     c_normal: wp.array2d(dtype=wp.vec3),
@@ -815,6 +851,7 @@ def contact_solve_kernel(
     inv_m: wp.array2d(dtype=float),
     inv_I: wp.array2d(dtype=mat3sym),
     delta_pos: wp.array2d(dtype=wp.vec3),
+    delta_quat: wp.array2d(dtype=wp.quat),
     c_body_a: wp.array2d(dtype=wp.int32),
     c_body_b: wp.array2d(dtype=wp.int32),
     c_normal: wp.array2d(dtype=wp.vec3),
@@ -890,7 +927,7 @@ def contact_solve_kernel(
     """
     wid, tid = wp.tid()
     _contact_solve_native(
-        body_vel, body_ang_vel, inv_m, inv_I, delta_pos,
+        body_vel, body_ang_vel, inv_m, inv_I, delta_pos, delta_quat,
         c_body_a, c_body_b, c_normal, c_tangent1, c_tangent2,
         c_r_a, c_r_b, c_sep, c_nmass, c_t1m, c_t2m,
         c_fric, c_rest, c_rvel,

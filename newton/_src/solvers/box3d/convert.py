@@ -46,6 +46,7 @@ def convert_bodies_to_box3d(
     out_inv_inertia: wp.array2d(dtype=mat3sym),
     out_com: wp.array2d(dtype=wp.vec3),
     out_delta_pos: wp.array2d(dtype=wp.vec3),
+    out_delta_quat: wp.array2d(dtype=wp.quat),
     out_inv_inertia_body: wp.array2d(dtype=mat3sym),
     out_bodies_per_world: wp.array[wp.int32],
     contact_count_to_zero: wp.array[wp.int32],
@@ -109,8 +110,9 @@ def convert_bodies_to_box3d(
         I_world = R * I_body_inv * wp.transpose(R)
         out_inv_inertia[world, local_idx] = mat3sym_from_mat33(I_world)
 
-    # Zero delta-pos for substep tracking
+    # Zero delta-pos and identity delta-quat for substep tracking
     out_delta_pos[world, local_idx] = wp.vec3(0.0, 0.0, 0.0)
+    out_delta_quat[world, local_idx] = wp.quat(0.0, 0.0, 0.0, 1.0)
 
     # Atomically count bodies per world
     wp.atomic_add(out_bodies_per_world, world, 1)
@@ -275,13 +277,13 @@ def convert_contacts_to_box3d(
     out_r_a[world, slot] = r_a
     out_r_b[world, slot] = r_b
 
-    # Base separation: signed distance between surfaces (negative = penetrating).
-    # Uses body-frame contact points (WITHOUT friction offsets) for geometry,
-    # then subtracts margins (effective radii) to get surface-to-surface distance.
+    # Base separation following Box2D: baseSep = sep_initial - dot(rB - rA, normal).
+    # During substeps the solve kernel adds back dot(rot(dqB, rB) - rot(dqA, rA) + dpB - dpA, normal),
+    # so at the start (dp=0, dq=identity) the full separation equals sep_initial.
     margin0 = rigid_contact_margin0[ci]
     margin1 = rigid_contact_margin1[ci]
-    sep = wp.dot(surface_world_b - surface_world_a, normal) - (margin0 + margin1)
-    out_base_sep[world, slot] = sep
+    sep_initial = wp.dot(surface_world_b - surface_world_a, normal) - (margin0 + margin1)
+    out_base_sep[world, slot] = sep_initial - wp.dot(r_b - r_a, normal)
 
     # Material: geometric mean friction, max restitution
     mu0 = shape_material_mu[s0]

@@ -322,7 +322,8 @@ class SolverBox3D(SolverBase):
                 outputs=[
                     buf.body_pos, buf.body_ori, buf.body_vel, buf.body_ang_vel,
                     buf.body_inv_mass, buf.body_inv_inertia, buf.body_com,
-                    buf.body_delta_pos, buf.body_inv_inertia_body,
+                    buf.body_delta_pos, buf.body_delta_quat,
+                    buf.body_inv_inertia_body,
                     buf.bodies_per_world,
                     buf.contact_count, W,
                 ],
@@ -520,7 +521,7 @@ class SolverBox3D(SolverBase):
                     inputs=[
                         buf.body_vel, buf.body_ang_vel,
                         buf.body_inv_mass, buf.body_inv_inertia,
-                        buf.body_delta_pos,
+                        buf.body_delta_pos, buf.body_delta_quat,
                         buf.c_body_a, buf.c_body_b,
                         buf.c_normal, buf.c_tangent1, buf.c_tangent2,
                         buf.c_r_a, buf.c_r_b, buf.c_base_sep,
@@ -574,7 +575,7 @@ class SolverBox3D(SolverBase):
                     inputs=[
                         buf.body_vel, buf.body_ang_vel,
                         buf.body_inv_mass, buf.body_inv_inertia,
-                        buf.body_delta_pos,
+                        buf.body_delta_pos, buf.body_delta_quat,
                         buf.c_body_a, buf.c_body_b,
                         buf.c_normal, buf.c_tangent1, buf.c_tangent2,
                         buf.c_r_a, buf.c_r_b, buf.c_base_sep,
@@ -623,7 +624,7 @@ class SolverBox3D(SolverBase):
             inputs=[
                 buf.body_vel, buf.body_ang_vel,
                 buf.body_inv_mass, buf.body_inv_inertia,
-                buf.body_delta_pos,
+                buf.body_delta_pos, buf.body_delta_quat,
                 buf.c_body_a, buf.c_body_b,
                 buf.c_normal, buf.c_tangent1, buf.c_tangent2,
                 buf.c_r_a, buf.c_r_b, buf.c_base_sep,
