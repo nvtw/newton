@@ -1253,6 +1253,10 @@ and is consumed by the solver :meth:`~solvers.SolverBase.step` method for contac
      - Contact normal, pointing from shape 0 toward shape 1 (world frame).
    * - ``rigid_contact_margin0``, ``rigid_contact_margin1``
      - Per-shape thickness: effective radius + margin (scalar).
+   * - ``rigid_contact_match_index``
+     - Per-contact frame-to-frame match result (int32). ``>= 0``: matched old
+       index, ``-1``: new, ``-2``: broken.  Only allocated when
+       ``contact_matching=True``. See :ref:`Contact Matching`.
 
 **Soft contacts (particle-shape):**
 
@@ -1668,6 +1672,91 @@ fully CUDA-graph-capturable.
 .. note::
 
    Hydroelastic contacts are not yet covered by deterministic ordering.
+
+.. _Contact Matching:
+
+Contact Matching
+----------------
+
+Contact matching tracks contacts across frames, identifying which contacts
+persist, which are new, and which have broken.  Enable it with
+``contact_matching=True`` on :class:`~CollisionPipeline` (this implies
+``deterministic=True``):
+
+.. testsetup:: contact-matching
+
+    import warp as wp
+    import newton
+
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    body = builder.add_body(xform=wp.transform((0.0, 0.0, 2.0), wp.quat_identity()))
+    builder.add_shape_sphere(body, radius=0.5)
+    model = builder.finalize()
+    state = model.state()
+
+.. testcode:: contact-matching
+
+    pipeline = newton.CollisionPipeline(
+        model,
+        contact_matching=True,
+        contact_matching_pos_threshold=0.02,       # metres
+        contact_matching_normal_dot_threshold=0.9,  # cos(~25°)
+    )
+    contacts = pipeline.contacts()
+
+    pipeline.collide(state, contacts)
+
+    # Per-contact match index (int32):
+    #   >= 0 : index of the matched contact in the previous frame
+    #     -1 : new contact (no match found)
+    #     -2 : key matched but position/normal thresholds exceeded (broken)
+    match_idx = contacts.rigid_contact_match_index.numpy()
+
+Each frame, the matcher binary-searches the current contacts against the
+previous frame's sorted keys, then verifies candidates against a world-space
+position distance threshold and a normal dot-product threshold.  The sort key
+encodes ``(shape_a, shape_b, sub_key)`` so only contacts between the same shape
+pair are compared.
+
+**Thresholds**
+
+- ``contact_matching_pos_threshold`` — maximum world-space distance [m] a
+  contact may move between frames and still be considered the same contact.
+- ``contact_matching_normal_dot_threshold`` — minimum dot product between old
+  and new contact normals.  Below this the contact is reported as broken even
+  if the key and position match.
+
+.. _Contact Reports:
+
+Contact Reports
+^^^^^^^^^^^^^^^
+
+Pass ``contact_report=True`` to also collect compact index lists of new and
+broken contacts each frame:
+
+.. testcode:: contact-matching
+
+    pipeline = newton.CollisionPipeline(
+        model,
+        contact_matching=True,
+        contact_report=True,
+    )
+    contacts = pipeline.contacts()
+    pipeline.collide(state, contacts)
+
+    matcher = pipeline.contact_matcher
+
+    n_new = matcher.new_contact_count.numpy()[0]
+    new_indices = matcher.new_contact_indices.numpy()[:n_new]
+
+    n_broken = matcher.broken_contact_count.numpy()[0]
+    broken_indices = matcher.broken_contact_indices.numpy()[:n_broken]
+
+``new_contact_indices`` holds indices into the current frame's sorted contact
+buffer where ``match_index < 0``.  ``broken_contact_indices`` holds indices
+into the *previous* frame's sorted buffer for contacts that no current contact
+matched.
 
 .. _Performance:
 
