@@ -1429,6 +1429,7 @@ class NarrowPhase:
         has_heightfields: bool = False,
         use_lean_gjk_mpr: bool = False,
         deterministic: bool = False,
+        contact_max: int | None = None,
     ) -> None:
         """
         Initialize NarrowPhase with pre-allocated buffers.
@@ -1455,6 +1456,11 @@ class NarrowPhase:
             deterministic: Sort contacts after the narrow phase so that results are
                 independent of GPU thread scheduling.  Adds a radix sort + gather
                 pass.  Hydroelastic contacts are not yet covered.
+            contact_max: Maximum number of contacts for the deterministic sort buffer.
+                Must match the ``contact_pair`` array size passed to :meth:`launch`.
+                Defaults to ``max_candidate_pairs``.  Set this to a larger value when
+                a single candidate pair can emit multiple contacts (e.g. up to 4 for
+                primitive multi-contact paths).
         """
         self.max_candidate_pairs = max_candidate_pairs
         self.max_triangle_pairs = max_triangle_pairs
@@ -1617,9 +1623,10 @@ class NarrowPhase:
 
             self.empty_tangent = None
             self._empty_sort_key = wp.zeros(0, dtype=wp.int64, device=device)
+            det_capacity = contact_max if contact_max is not None else max_candidate_pairs
             if deterministic:
-                self._sort_key_array = wp.zeros(max_candidate_pairs, dtype=wp.int64, device=device)
-                self._contact_sorter = ContactSorter(max_candidate_pairs, device=device)
+                self._sort_key_array = wp.zeros(det_capacity, dtype=wp.int64, device=device)
+                self._contact_sorter = ContactSorter(det_capacity, device=device)
             else:
                 self._sort_key_array = wp.zeros(0, dtype=wp.int64, device=device)
                 self._contact_sorter = None
@@ -2069,6 +2076,7 @@ class NarrowPhase:
                         shape_gap,
                         writer_data,
                         self.total_num_threads,
+                        int(self.global_contact_reducer.deterministic),
                     ],
                     device=device,
                     block_dim=self.block_dim,
