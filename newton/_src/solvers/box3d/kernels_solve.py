@@ -86,53 +86,58 @@ _CONTACT_SOLVE_SNIPPET = r"""
 
     int total_c = *wp::address(color_offsets, wid, max_colors);
 
-    // === Warm start (first substep only) ===
+    // === Warm start (colored to avoid race conditions on shared memory) ===
     if (do_warm_start > 0) {
-        for (int ci = tid; ci < total_c; ci += blockDim.x) {
-            float ni = *wp::address(c_ni, wid, ci);
-            float fi1 = *wp::address(c_fi1, wid, ci);
-            float fi2 = *wp::address(c_fi2, wid, ci);
-            if (ni == 0.f && fi1 == 0.f && fi2 == 0.f) continue;
+        for (int color = 0; color < max_colors; color++) {
+            int cstart = *wp::address(color_offsets, wid, color);
+            int cend = *wp::address(color_offsets, wid, color + 1);
+            if (tid < cend - cstart) {
+                int ci = cstart + tid;
+                float ni = *wp::address(c_ni, wid, ci);
+                float fi1 = *wp::address(c_fi1, wid, ci);
+                float fi2 = *wp::address(c_fi2, wid, ci);
+                if (ni != 0.f || fi1 != 0.f || fi2 != 0.f) {
+                    auto n = *wp::address(c_normal, wid, ci);
+                    auto t1 = *wp::address(c_tangent1, wid, ci);
+                    auto t2 = *wp::address(c_tangent2, wid, ci);
+                    float px = ni*n[0] + fi1*t1[0] + fi2*t2[0];
+                    float py = ni*n[1] + fi1*t1[1] + fi2*t2[1];
+                    float pz = ni*n[2] + fi1*t1[2] + fi2*t2[2];
 
-            auto n = *wp::address(c_normal, wid, ci);
-            auto t1 = *wp::address(c_tangent1, wid, ci);
-            auto t2 = *wp::address(c_tangent2, wid, ci);
-            float px = ni*n[0] + fi1*t1[0] + fi2*t2[0];
-            float py = ni*n[1] + fi1*t1[1] + fi2*t2[1];
-            float pz = ni*n[2] + fi1*t1[2] + fi2*t2[2];
-
-            int a = *wp::address(c_body_a, wid, ci);
-            if (a >= 0) {
-                float ima = *wp::address(inv_m, wid, a);
-                auto iia = *wp::address(inv_I, wid, a);
-                auto ra = *wp::address(c_r_a, wid, ci);
-                float* sa = smem + a * 6;
-                sa[0] -= ima*px; sa[1] -= ima*py; sa[2] -= ima*pz;
-                // angular: inv_I * cross(r, P)
-                float cx = ra[1]*pz - ra[2]*py;
-                float cy = ra[2]*px - ra[0]*pz;
-                float cz = ra[0]*py - ra[1]*px;
-                sa[3] -= iia.m00*cx + iia.m01*cy + iia.m02*cz;
-                sa[4] -= iia.m01*cx + iia.m11*cy + iia.m12*cz;
-                sa[5] -= iia.m02*cx + iia.m12*cy + iia.m22*cz;
+                    int a = *wp::address(c_body_a, wid, ci);
+                    if (a >= 0) {
+                        float ima = *wp::address(inv_m, wid, a);
+                        auto iia = *wp::address(inv_I, wid, a);
+                        auto ra = *wp::address(c_r_a, wid, ci);
+                        float* sa = smem + a * 6;
+                        sa[0] -= ima*px; sa[1] -= ima*py; sa[2] -= ima*pz;
+                        float cx = ra[1]*pz - ra[2]*py;
+                        float cy = ra[2]*px - ra[0]*pz;
+                        float cz = ra[0]*py - ra[1]*px;
+                        sa[3] -= iia.m00*cx + iia.m01*cy + iia.m02*cz;
+                        sa[4] -= iia.m01*cx + iia.m11*cy + iia.m12*cz;
+                        sa[5] -= iia.m02*cx + iia.m12*cy + iia.m22*cz;
+                    }
+                    int bi = *wp::address(c_body_b, wid, ci);
+                    if (bi >= 0) {
+                        float imb = *wp::address(inv_m, wid, bi);
+                        auto iib = *wp::address(inv_I, wid, bi);
+                        auto rb = *wp::address(c_r_b, wid, ci);
+                        float* sb = smem + bi * 6;
+                        sb[0] += imb*px; sb[1] += imb*py; sb[2] += imb*pz;
+                        float cx = rb[1]*pz - rb[2]*py;
+                        float cy = rb[2]*px - rb[0]*pz;
+                        float cz = rb[0]*py - rb[1]*px;
+                        sb[3] += iib.m00*cx + iib.m01*cy + iib.m02*cz;
+                        sb[4] += iib.m01*cx + iib.m11*cy + iib.m12*cz;
+                        sb[5] += iib.m02*cx + iib.m12*cy + iib.m22*cz;
+                    }
+                    // Box2D: totalNormalImpulse += normalImpulse (accumulates)
+                    *wp::address(c_tni, wid, ci) = *wp::address(c_tni, wid, ci) + ni;
+                }
             }
-            int bi = *wp::address(c_body_b, wid, ci);
-            if (bi >= 0) {
-                float imb = *wp::address(inv_m, wid, bi);
-                auto iib = *wp::address(inv_I, wid, bi);
-                auto rb = *wp::address(c_r_b, wid, ci);
-                float* sb = smem + bi * 6;
-                sb[0] += imb*px; sb[1] += imb*py; sb[2] += imb*pz;
-                float cx = rb[1]*pz - rb[2]*py;
-                float cy = rb[2]*px - rb[0]*pz;
-                float cz = rb[0]*py - rb[1]*px;
-                sb[3] += iib.m00*cx + iib.m01*cy + iib.m02*cz;
-                sb[4] += iib.m01*cx + iib.m11*cy + iib.m12*cz;
-                sb[5] += iib.m02*cx + iib.m12*cy + iib.m22*cz;
-            }
-            *wp::address(c_tni, wid, ci) = ni;
+            __syncthreads();
         }
-        __syncthreads();
     }
 
     // === Colored contact solve (solve_iters iterations) ===
@@ -174,9 +179,8 @@ _CONTACT_SOLVE_SNIPPET = r"""
                 if (bi >= 0) { auto dp = *wp::address(delta_pos,wid,bi); dpbx=dp[0];dpby=dp[1];dpbz=dp[2]; }
                 float sep = base_sep + (dpbx-dpax)*n[0] + (dpby-dpay)*n[1] + (dpbz-dpaz)*n[2];
 
-                if (sep > 0.005f) {
+                if (sep > 0.0f) {
                     // Speculative: always active (even during relaxation).
-                    // Small slop (5mm) prevents jitter from floating-point separation noise.
                     velocityBias = sep * inv_sub_dt;
                 } else if (use_bias > 0) {
                     // Soft position correction: only during biased pass
@@ -239,6 +243,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
               float i1 = -t1M*vt;
               float nL = fminf(fmaxf(lam+i1,-maxF),maxF); i1=nL-lam;
               *wp::address(c_fi1,wid,ci) = nL;
+              *wp::address(c_tfi1,wid,ci) = *wp::address(c_tfi1,wid,ci) + i1;
               float p1x=i1*t1[0],p1y=i1*t1[1],p1z=i1*t1[2];
               if (a>=0) { auto iia=*wp::address(inv_I,wid,a); float*sa=smem+a*6;
                 sa[0]-=ima*p1x;sa[1]-=ima*p1y;sa[2]-=ima*p1z;
@@ -266,6 +271,7 @@ _CONTACT_SOLVE_SNIPPET = r"""
               float i2 = -t2M*vt;
               float nL = fminf(fmaxf(lam+i2,-maxF),maxF); i2=nL-lam;
               *wp::address(c_fi2,wid,ci) = nL;
+              *wp::address(c_tfi2,wid,ci) = *wp::address(c_tfi2,wid,ci) + i2;
               float p2x=i2*t2[0],p2y=i2*t2[1],p2z=i2*t2[2];
               if (a>=0) { auto iia=*wp::address(inv_I,wid,a); float*sa=smem+a*6;
                 sa[0]-=ima*p2x;sa[1]-=ima*p2y;sa[2]-=ima*p2z;
@@ -746,6 +752,8 @@ def _contact_solve_native(
     c_fi1: wp.array2d(dtype=float),
     c_fi2: wp.array2d(dtype=float),
     c_tni: wp.array2d(dtype=float),
+    c_tfi1: wp.array2d(dtype=float),
+    c_tfi2: wp.array2d(dtype=float),
     c_is_static: wp.array2d(dtype=wp.int32),
     color_offsets: wp.array2d(dtype=wp.int32),
     num_bodies: int,
@@ -825,6 +833,8 @@ def contact_solve_kernel(
     c_fi1: wp.array2d(dtype=float),
     c_fi2: wp.array2d(dtype=float),
     c_tni: wp.array2d(dtype=float),
+    c_tfi1: wp.array2d(dtype=float),
+    c_tfi2: wp.array2d(dtype=float),
     c_is_static: wp.array2d(dtype=wp.int32),
     color_offsets: wp.array2d(dtype=wp.int32),
     num_bodies: int,
@@ -884,7 +894,7 @@ def contact_solve_kernel(
         c_body_a, c_body_b, c_normal, c_tangent1, c_tangent2,
         c_r_a, c_r_b, c_sep, c_nmass, c_t1m, c_t2m,
         c_fric, c_rest, c_rvel,
-        c_ni, c_fi1, c_fi2, c_tni, c_is_static,
+        c_ni, c_fi1, c_fi2, c_tni, c_tfi1, c_tfi2, c_is_static,
         color_offsets, num_bodies, max_colors,
         use_bias, do_warm_start, do_restitution,
         inv_sub_dt, bias_rate, mass_scale, impulse_scale,

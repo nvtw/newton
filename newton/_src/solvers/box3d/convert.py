@@ -457,10 +457,10 @@ def convert_joints_to_box3d(
 
 @wp.kernel
 def convert_impulses_to_contact_force(
-    # Color-ordered solver impulses (2-D: [world, color_slot])
-    c_normal_impulse: wp.array2d(dtype=float),
-    c_friction1_impulse: wp.array2d(dtype=float),
-    c_friction2_impulse: wp.array2d(dtype=float),
+    # Total impulses accumulated across all substeps (2-D: [world, color_slot])
+    c_total_normal_impulse: wp.array2d(dtype=float),
+    c_total_friction1_impulse: wp.array2d(dtype=float),
+    c_total_friction2_impulse: wp.array2d(dtype=float),
     c_normal: wp.array2d(dtype=wp.vec3),
     c_tangent1: wp.array2d(dtype=wp.vec3),
     c_tangent2: wp.array2d(dtype=wp.vec3),
@@ -473,21 +473,16 @@ def convert_impulses_to_contact_force(
     # Output (Newton flat 1-D)
     contact_force: wp.array[wp.spatial_vector],
 ):
-    """Convert Box3D color-ordered impulses to Newton ``contacts.force``.
+    """Convert Box3D total impulses to Newton ``contacts.force``.
 
     Launched with ``dim = (num_worlds, max_contacts_per_world)``.
 
-    For each active color-ordered contact slot, reconstructs the 3-D force
-    vector from the normal and two friction impulse components, divides by
-    ``sub_dt`` to get force [N], and computes the torque at body 0's COM via
-    ``cross(r_a, F)``.  The result is written to the Newton flat
-    ``contacts.force`` array using the index chain:
-    color_slot -> raw_slot -> Newton index.
+    Uses the *total* impulse accumulated across all substeps (warm-start
+    applications + solve deltas), matching Box2D's ``totalNormalImpulse``
+    approach.  Divides by the full step ``dt`` (not ``sub_dt``) to obtain
+    force [N].
 
     Sign convention: the force is that exerted *on body 0 by body 1*.
-    The solver subtracts impulse from body A's velocity along the normal
-    (which points A->B), so the force on body 0 is opposite to the impulse
-    direction along the normal.
     """
     wid, ci = wp.tid()
     nc = contact_count[wid]
@@ -502,12 +497,12 @@ def convert_impulses_to_contact_force(
     t2 = c_tangent2[wid, ci]
     r_a = c_r_a[wid, ci]
 
-    ni = c_normal_impulse[wid, ci]
-    fi1 = c_friction1_impulse[wid, ci]
-    fi2 = c_friction2_impulse[wid, ci]
+    tni = c_total_normal_impulse[wid, ci]
+    tfi1 = c_total_friction1_impulse[wid, ci]
+    tfi2 = c_total_friction2_impulse[wid, ci]
 
     # Force on body 0: the solver applies P = imp * direction and
     # *subtracts* it from body A, so the force on A is -P/dt.
-    f = -(n * ni + t1 * fi1 + t2 * fi2) * inv_dt
+    f = -(n * tni + t1 * tfi1 + t2 * tfi2) * inv_dt
     tau = wp.cross(r_a, f)
     contact_force[newton_idx] = wp.spatial_vector(f, tau)

@@ -79,6 +79,8 @@ class SolverBuffers:
         self.c_friction1_impulse = wp.zeros((W, C), dtype=float, device=device)
         self.c_friction2_impulse = wp.zeros((W, C), dtype=float, device=device)
         self.c_total_normal_impulse = wp.zeros((W, C), dtype=float, device=device)
+        self.c_total_friction1_impulse = wp.zeros((W, C), dtype=float, device=device)
+        self.c_total_friction2_impulse = wp.zeros((W, C), dtype=float, device=device)
         self.c_rel_vel_normal = wp.zeros((W, C), dtype=float, device=device)
         self.c_is_static = wp.zeros((W, C), dtype=wp.int32, device=device)
 

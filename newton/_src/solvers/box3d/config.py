@@ -85,14 +85,14 @@ class Box3DConfig:
     num_velocity_iters: int = 1
     num_relaxation_iters: int = 1
     contact_hertz: float = 30.0
-    contact_damping_ratio: float = 1.0
+    contact_damping_ratio: float = 10.0  # Box2D v3 default
     joint_hertz: float = 60.0
     joint_damping_ratio: float = 1.0
     static_hertz_scale: float = 2.0
     linear_damping: float = 0.0
     angular_damping: float = 0.05
     restitution_threshold: float = 1.0
-    contact_speed: float = 10.0
+    contact_speed: float = 3.0  # Box2D v3 default
     max_bodies_per_world: int = 1024
     max_contacts_per_world: int = 4096
     max_joints_per_world: int = 1024

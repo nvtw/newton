@@ -192,6 +192,8 @@ _COLORING_PREPARE_SNIPPET = r"""
         *wp::address(c_fi1, wid, dest) = *wp::address(raw_fi1, wid, c);
         *wp::address(c_fi2, wid, dest) = *wp::address(raw_fi2, wid, c);
         *wp::address(c_tni, wid, dest) = 0.0f;
+        *wp::address(c_tfi1, wid, dest) = 0.0f;
+        *wp::address(c_tfi2, wid, dest) = 0.0f;
 
         // Is static (one body is ground or kinematic)
         int is_static = 0;
@@ -244,6 +246,8 @@ def _coloring_prepare_native(
     c_fi1: wp.array2d(dtype=float),
     c_fi2: wp.array2d(dtype=float),
     c_tni: wp.array2d(dtype=float),
+    c_tfi1: wp.array2d(dtype=float),
+    c_tfi2: wp.array2d(dtype=float),
     c_is_static: wp.array2d(dtype=wp.int32),
     # Coloring arrays
     contact_count: wp.array[wp.int32],
@@ -287,6 +291,8 @@ def coloring_prepare_kernel(
     c_fi1: wp.array2d(dtype=float),
     c_fi2: wp.array2d(dtype=float),
     c_tni: wp.array2d(dtype=float),
+    c_tfi1: wp.array2d(dtype=float),
+    c_tfi2: wp.array2d(dtype=float),
     c_is_static: wp.array2d(dtype=wp.int32),
     # Coloring arrays
     contact_count: wp.array[wp.int32],
@@ -309,7 +315,7 @@ def coloring_prepare_kernel(
         raw_ni, raw_fi1, raw_fi2,
         c_body_a, c_body_b, c_normal, c_r_a, c_r_b,
         c_base_sep, c_friction, c_restitution,
-        c_ni, c_fi1, c_fi2, c_tni, c_is_static,
+        c_ni, c_fi1, c_fi2, c_tni, c_tfi1, c_tfi2, c_is_static,
         contact_count, color_offsets, color_body_mask, color_to_raw,
         color_slot_to_raw,
         bodies_per_world, body_inv_mass, max_colors,

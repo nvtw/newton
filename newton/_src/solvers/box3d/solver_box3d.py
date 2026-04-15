@@ -77,9 +77,17 @@ class SolverBox3D(SolverBase):
         self._color_joints()
         self._convert_joints()
 
+        # Cache gravity at construction (avoid .numpy() during graph capture)
+        self._cache_gravity()
+
         # CUDA graph state
         self._graph: wp.Graph | None = None
         self._graph_dt: float = 0.0
+
+    def _cache_gravity(self) -> None:
+        """Cache gravity vector from model (call at init and after model changes)."""
+        gravity_np = self.model.gravity.numpy().flatten()[:3]
+        self._cached_gravity = wp.vec3(float(gravity_np[0]), float(gravity_np[1]), float(gravity_np[2]))
 
     # -----------------------------------------------------------------
     # Joint coloring (CPU, once at construction / model change)
@@ -273,7 +281,7 @@ class SolverBox3D(SolverBase):
         body_count = model.body_count
         particle_count = model.particle_count
 
-        # Cache step-invariant computations (recompute only when dt changes)
+        # Cache dt-dependent computations (recompute only when dt changes)
         if not hasattr(self, '_cached_dt') or self._cached_dt != dt:
             self._cached_dt = dt
             sub_dt = dt / float(cfg.num_substeps)
@@ -284,8 +292,6 @@ class SolverBox3D(SolverBase):
             self._cached_soft_static = compute_softness(
                 cfg.contact_hertz * cfg.static_hertz_scale, cfg.contact_damping_ratio, sub_dt)
             self._cached_soft_joint = compute_softness(cfg.joint_hertz, cfg.joint_damping_ratio, sub_dt)
-            gravity_np = model.gravity.numpy().flatten()[:3]
-            self._cached_gravity = wp.vec3(float(gravity_np[0]), float(gravity_np[1]), float(gravity_np[2]))
 
         sub_dt = self._cached_sub_dt
         inv_sub_dt = self._cached_inv_sub_dt
@@ -401,7 +407,8 @@ class SolverBox3D(SolverBase):
             dim=(W, cfg.max_contacts_per_world),
             inputs=[
                 buf.c_normal_impulse, buf.c_friction1_impulse,
-                buf.c_friction2_impulse, buf.contact_count,
+                buf.c_friction2_impulse, buf.color_slot_to_raw,
+                buf.contact_count,
             ],
             outputs=[
                 buf.prev_normal_impulse, buf.prev_friction1_impulse,
@@ -465,7 +472,10 @@ class SolverBox3D(SolverBase):
                     buf.c_friction, buf.c_restitution,
                     buf.c_normal_impulse, buf.c_friction1_impulse,
                     buf.c_friction2_impulse,
-                    buf.c_total_normal_impulse, buf.c_is_static,
+                    buf.c_total_normal_impulse,
+                    buf.c_total_friction1_impulse,
+                    buf.c_total_friction2_impulse,
+                    buf.c_is_static,
                     buf.contact_count, buf.color_offsets,
                     buf.color_body_mask, buf.color_to_raw,
                     buf.color_slot_to_raw,
@@ -518,11 +528,12 @@ class SolverBox3D(SolverBase):
                         buf.c_friction, buf.c_restitution, buf.c_rel_vel_normal,
                         buf.c_normal_impulse, buf.c_friction1_impulse,
                         buf.c_friction2_impulse, buf.c_total_normal_impulse,
+                        buf.c_total_friction1_impulse, buf.c_total_friction2_impulse,
                         buf.c_is_static,
                         buf.color_offsets,
                         max_bodies, cfg.max_colors,
                         1,  # use_bias
-                        1,  # warm_start
+                        1,  # warm_start (Box2D v3: warm start every substep)
                         0,  # no restitution
                         inv_sub_dt,
                         soft.bias_rate, soft.mass_scale, soft.impulse_scale,
@@ -571,6 +582,7 @@ class SolverBox3D(SolverBase):
                         buf.c_friction, buf.c_restitution, buf.c_rel_vel_normal,
                         buf.c_normal_impulse, buf.c_friction1_impulse,
                         buf.c_friction2_impulse, buf.c_total_normal_impulse,
+                        buf.c_total_friction1_impulse, buf.c_total_friction2_impulse,
                         buf.c_is_static,
                         buf.color_offsets,
                         max_bodies, cfg.max_colors,
@@ -619,6 +631,7 @@ class SolverBox3D(SolverBase):
                 buf.c_friction, buf.c_restitution, buf.c_rel_vel_normal,
                 buf.c_normal_impulse, buf.c_friction1_impulse,
                 buf.c_friction2_impulse, buf.c_total_normal_impulse,
+                buf.c_total_friction1_impulse, buf.c_total_friction2_impulse,
                 buf.c_is_static,
                 buf.color_offsets,
                 max_bodies, cfg.max_colors,
@@ -662,15 +675,17 @@ class SolverBox3D(SolverBase):
         if flags & SolverNotifyFlags.JOINT_PROPERTIES:
             self._color_joints()
             self._convert_joints()
+        if flags & SolverNotifyFlags.MODEL_PROPERTIES:
+            self._cache_gravity()
         self._graph = None  # invalidate CUDA graph
 
     @override
     def update_contacts(self, contacts: Contacts, state: State | None = None) -> None:
         """Populate ``contacts.force`` from Box3D solver impulses accumulated during the last :meth:`step`.
 
-        Normal and friction impulses are converted to force [N] and torque [N*m]
-        by dividing the per-substep impulse by ``sub_dt`` (= ``dt / num_substeps``).  The torque is
-        computed at body 0's center of mass via ``cross(r_a, F)``.
+        Uses the *total* impulse accumulated across all substeps (warm-start
+        applications + solve deltas), divided by the full step ``dt`` to obtain
+        force [N].  This matches Box2D's ``totalNormalImpulse`` approach.
 
         Args:
             contacts: :class:`Contacts` object whose :attr:`~Contacts.force` buffer will be written.
@@ -700,20 +715,19 @@ class SolverBox3D(SolverBase):
         contacts.force.zero_()
 
         buf = self._buf
-        sub_dt = self._last_dt / float(self._config.num_substeps)
-        inv_sub_dt = 1.0 / sub_dt if sub_dt > 0.0 else 0.0
+        inv_dt = 1.0 / self._last_dt if self._last_dt > 0.0 else 0.0
 
         wp.launch(
             convert_impulses_to_contact_force,
             dim=(self._num_worlds, self._config.max_contacts_per_world),
             inputs=[
-                buf.c_normal_impulse, buf.c_friction1_impulse,
-                buf.c_friction2_impulse,
+                buf.c_total_normal_impulse, buf.c_total_friction1_impulse,
+                buf.c_total_friction2_impulse,
                 buf.c_normal, buf.c_tangent1, buf.c_tangent2,
                 buf.c_r_a,
                 buf.color_slot_to_raw, buf.raw_to_newton,
                 buf.contact_count,
-                inv_sub_dt,
+                inv_dt,
             ],
             outputs=[contacts.force],
             device=self.device,

@@ -566,11 +566,271 @@ def test_update_contacts_requires_force_attribute(test, device):
 
 
 # =====================================================================
+# Pyramid scene — boxes stacked in pyramid formation
+# =====================================================================
+
+
+def test_pyramid_boxes_settle(test, device):
+    """A small pyramid of boxes should settle and remain stable.
+
+    This tests the full contact pipeline with multiple body-to-body contacts.
+    The pyramid has no external forces, so it should settle and stay stable
+    indefinitely (within numerical tolerance).
+    """
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+
+    cube_half = 0.4
+    cube_spacing = 2.1 * cube_half
+    pyramid_size = 3  # Small pyramid: 6 boxes total (3 + 2 + 1)
+
+    box_count = 0
+    body_indices = []
+
+    for level in range(pyramid_size):
+        num_cubes_in_row = pyramid_size - level
+        row_width = (num_cubes_in_row - 1) * cube_spacing
+        for i in range(num_cubes_in_row):
+            x_pos = -row_width / 2 + i * cube_spacing
+            z_pos = level * cube_spacing + cube_half
+            body = builder.add_body(
+                xform=wp.transform(p=wp.vec3(x_pos, 0.0, z_pos), q=wp.quat_identity()),
+            )
+            builder.add_shape_box(body, hx=cube_half, hy=cube_half, hz=cube_half)
+            body_indices.append(body)
+            box_count += 1
+
+    model = builder.finalize(device=device)
+    state_in = model.state()
+    state_out = model.state()
+
+    # Store initial positions for comparison
+    initial_positions = state_in.body_q.numpy()[:, :3].copy()
+
+    cfg = Box3DConfig(
+        num_substeps=4,
+        num_velocity_iters=2,
+        num_relaxation_iters=2,
+        contact_hertz=30.0,
+        max_bodies_per_world=max(1024, box_count + 10),
+        max_contacts_per_world=max(4096, box_count * 8),
+    )
+    solver = newton.solvers.SolverBox3D(model, config=cfg)
+    pipeline = newton.CollisionPipeline(model, broad_phase="sap", contact_matching=True)
+
+    dt = 1.0 / 60.0
+
+    # Run for 2 seconds to let it settle
+    final = _step_simulation(solver, pipeline, state_in, state_out, None, dt, 120)
+
+    # Verify simulation didn't explode (all positions finite)
+    final_q = final.body_q.numpy()
+    test.assertTrue(np.all(np.isfinite(final_q)), "Simulation produced non-finite values")
+
+    # ----------------------------------------------------------------
+    # Strict stability check: no box should have moved more than 0.5m
+    # from initial position (settling + small numerical drift allowed)
+    # ----------------------------------------------------------------
+    max_allowed_displacement = 0.5
+    for idx in body_indices:
+        current_pos = final_q[idx, :3]
+        initial_pos = initial_positions[idx]
+        displacement = float(np.linalg.norm(current_pos - initial_pos))
+        test.assertLess(
+            displacement, max_allowed_displacement,
+            f"Body {idx} displaced {displacement:.4f} m - pyramid may be exploding!"
+        )
+
+    # ----------------------------------------------------------------
+    # All boxes must be above ground (z > 0)
+    # ----------------------------------------------------------------
+    for idx in body_indices:
+        z = float(final_q[idx, 2])
+        test.assertGreater(z, 0.0, f"Body {idx} fell through ground: z={z}")
+
+    # ----------------------------------------------------------------
+    # Boxes should not be interpenetrating badly (stack should be intact)
+    # Check that z-ordering is roughly preserved
+    # ----------------------------------------------------------------
+    # Bottom row (level 0) should have z close to cube_half
+    # Middle row (level 1) should have z close to cube_half + cube_spacing
+    # Top row (level 2) should have z close to cube_half + 2*cube_spacing
+    level_0_indices = body_indices[0:3]  # first 3 boxes
+    level_1_indices = body_indices[3:5]  # next 2 boxes
+    level_2_indices = body_indices[5:6]  # top box
+
+    avg_z_0 = float(np.mean([final_q[i, 2] for i in level_0_indices]))
+    avg_z_1 = float(np.mean([final_q[i, 2] for i in level_1_indices]))
+    avg_z_2 = float(np.mean([final_q[i, 2] for i in level_2_indices]))
+
+    # Each level should be higher than the previous
+    test.assertGreater(avg_z_1, avg_z_0 + cube_half,
+                       f"Level ordering broken: level1 z={avg_z_1} not above level0 z={avg_z_0}")
+    test.assertGreater(avg_z_2, avg_z_1 + cube_half,
+                       f"Level ordering broken: level2 z={avg_z_2} not above level1 z={avg_z_1}")
+
+
+def test_pyramid_long_term_stability(test, device):
+    """Test that the pyramid stays stable over a longer simulation (5 seconds).
+
+    An exploding/unstable pyramid will show bodies flying apart over time.
+    """
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+
+    cube_half = 0.4
+    cube_spacing = 2.1 * cube_half
+    pyramid_size = 3
+
+    body_indices = []
+
+    for level in range(pyramid_size):
+        num_cubes_in_row = pyramid_size - level
+        row_width = (num_cubes_in_row - 1) * cube_spacing
+        for i in range(num_cubes_in_row):
+            x_pos = -row_width / 2 + i * cube_spacing
+            z_pos = level * cube_spacing + cube_half
+            body = builder.add_body(
+                xform=wp.transform(p=wp.vec3(x_pos, 0.0, z_pos), q=wp.quat_identity()),
+            )
+            builder.add_shape_box(body, hx=cube_half, hy=cube_half, hz=cube_half)
+            body_indices.append(body)
+
+    model = builder.finalize(device=device)
+    state_in = model.state()
+    state_out = model.state()
+    control = model.control()
+
+    cfg = Box3DConfig(
+        num_substeps=4,
+        num_velocity_iters=2,
+        num_relaxation_iters=2,
+        contact_hertz=30.0,
+        max_bodies_per_world=1024,
+        max_contacts_per_world=4096,
+    )
+    solver = newton.solvers.SolverBox3D(model, config=cfg)
+    pipeline = newton.CollisionPipeline(model, broad_phase="sap", contact_matching=True)
+    contacts = pipeline.contacts()
+
+    dt = 1.0 / 60.0
+    total_steps = 300  # 5 seconds of simulation
+
+    initial_positions = state_in.body_q.numpy()[:, :3].copy()
+
+    # Run simulation
+    for _ in range(total_steps):
+        state_in.clear_forces()
+        contacts.clear()
+        pipeline.collide(state_in, contacts)
+        solver.step(state_in, state_out, control, contacts, dt)
+        state_in, state_out = state_out, state_in
+
+    # Check final state
+    final_q = state_in.body_q.numpy()
+
+    # All positions must be finite
+    test.assertTrue(np.all(np.isfinite(final_q)), "Simulation exploded - non-finite values")
+
+    # Measure max displacement from initial position
+    max_displacement = 0.0
+    for idx in body_indices:
+        displacement = float(np.linalg.norm(final_q[idx, :3] - initial_positions[idx]))
+        max_displacement = max(max_displacement, displacement)
+
+    # After 5 seconds of settling, no box should have moved more than 0.5m
+    test.assertLess(
+        max_displacement, 0.5,
+        f"Pyramid unstable: max displacement = {max_displacement:.4f} m"
+    )
+
+    # All boxes should be above ground
+    for idx in body_indices:
+        z = float(final_q[idx, 2])
+        test.assertGreater(z, 0.0, f"Body {idx} fell through ground: z={z}")
+
+
+def test_large_pyramid_stability(test, device):
+    """Test a larger pyramid (10 rows, 55 boxes) similar to the example.
+
+    This tests that the solver can handle more significant stacking loads.
+    """
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+
+    cube_half = 0.4
+    cube_spacing = 2.1 * cube_half
+    pyramid_size = 10  # 55 boxes total
+
+    body_indices = []
+    box_count = 0
+
+    for level in range(pyramid_size):
+        num_cubes_in_row = pyramid_size - level
+        row_width = (num_cubes_in_row - 1) * cube_spacing
+        for i in range(num_cubes_in_row):
+            x_pos = -row_width / 2 + i * cube_spacing
+            z_pos = level * cube_spacing + cube_half
+            body = builder.add_body(
+                xform=wp.transform(p=wp.vec3(x_pos, 0.0, z_pos), q=wp.quat_identity()),
+            )
+            builder.add_shape_box(body, hx=cube_half, hy=cube_half, hz=cube_half)
+            body_indices.append(body)
+            box_count += 1
+
+    model = builder.finalize(device=device)
+    state_in = model.state()
+    state_out = model.state()
+
+    initial_positions = state_in.body_q.numpy()[:, :3].copy()
+
+    # Use parameters similar to the example
+    cfg = Box3DConfig(
+        num_substeps=10,
+        num_velocity_iters=1,
+        num_relaxation_iters=4,
+        contact_hertz=30.0,
+        max_bodies_per_world=max(1024, box_count + 10),
+        max_contacts_per_world=max(4096, box_count * 8),
+    )
+    solver = newton.solvers.SolverBox3D(model, config=cfg)
+    pipeline = newton.CollisionPipeline(model, broad_phase="sap", contact_matching=True)
+
+    dt = 1.0 / 100.0  # 100 fps like the example
+    final = _step_simulation(solver, pipeline, state_in, state_out, None, dt, 200)
+
+    final_q = final.body_q.numpy()
+
+    # All positions must be finite
+    test.assertTrue(np.all(np.isfinite(final_q)), "Simulation exploded - non-finite values")
+
+    # Measure max displacement - allow more for larger pyramid due to settling
+    max_displacement = 0.0
+    for idx in body_indices:
+        displacement = float(np.linalg.norm(final_q[idx, :3] - initial_positions[idx]))
+        max_displacement = max(max_displacement, displacement)
+
+    # Larger pyramid can settle more, allow 1.0m displacement
+    test.assertLess(
+        max_displacement, 1.0,
+        f"Large pyramid unstable: max displacement = {max_displacement:.4f} m"
+    )
+
+    # All boxes should be above ground
+    for idx in body_indices:
+        z = float(final_q[idx, 2])
+        test.assertGreater(z, 0.0, f"Body {idx} fell through ground: z={z}")
+
+
+# =====================================================================
 # Register tests
 # =====================================================================
 
 devices = get_cuda_test_devices()
 
+add_function_test(TestSolverBox3D, "test_pyramid_boxes_settle", test_pyramid_boxes_settle, devices=devices)
+add_function_test(TestSolverBox3D, "test_pyramid_long_term_stability", test_pyramid_long_term_stability, devices=devices)
+add_function_test(TestSolverBox3D, "test_large_pyramid_stability", test_large_pyramid_stability, devices=devices)
 add_function_test(TestSolverBox3D, "test_free_fall", test_free_fall, devices=devices)
 add_function_test(TestSolverBox3D, "test_ground_contact", test_ground_contact, devices=devices)
 add_function_test(TestSolverBox3D, "test_zero_gravity_velocity_preserved", test_zero_gravity_velocity_preserved, devices=devices)
