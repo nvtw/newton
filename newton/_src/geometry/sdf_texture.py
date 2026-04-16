@@ -115,6 +115,85 @@ def _query_mesh_sdf(
     return get_distance_to_mesh(mesh, point, max_dist, winding_threshold)
 
 
+@wp.func
+def _interp_coarse_sdf(
+    background_sdf: wp.array[float],
+    block_x: int,
+    block_y: int,
+    block_z: int,
+    lx: int,
+    ly: int,
+    lz: int,
+    inv_cells_per_subgrid: float,
+    bg_size_x: int,
+    bg_size_y: int,
+    bg_size_z: int,
+) -> float:
+    """Trilinear interpolation of the coarse/background SDF at a fine sample."""
+    coarse_fx = float(block_x) + float(lx) * inv_cells_per_subgrid
+    coarse_fy = float(block_y) + float(ly) * inv_cells_per_subgrid
+    coarse_fz = float(block_z) + float(lz) * inv_cells_per_subgrid
+
+    x0 = wp.clamp(int(wp.floor(coarse_fx)), 0, bg_size_x - 2)
+    y0 = wp.clamp(int(wp.floor(coarse_fy)), 0, bg_size_y - 2)
+    z0 = wp.clamp(int(wp.floor(coarse_fz)), 0, bg_size_z - 2)
+
+    tx = wp.clamp(coarse_fx - float(x0), 0.0, 1.0)
+    ty = wp.clamp(coarse_fy - float(y0), 0.0, 1.0)
+    tz = wp.clamp(coarse_fz - float(z0), 0.0, 1.0)
+
+    v000 = background_sdf[_idx3d(x0, y0, z0, bg_size_x, bg_size_y)]
+    v100 = background_sdf[_idx3d(x0 + 1, y0, z0, bg_size_x, bg_size_y)]
+    v010 = background_sdf[_idx3d(x0, y0 + 1, z0, bg_size_x, bg_size_y)]
+    v110 = background_sdf[_idx3d(x0 + 1, y0 + 1, z0, bg_size_x, bg_size_y)]
+    v001 = background_sdf[_idx3d(x0, y0, z0 + 1, bg_size_x, bg_size_y)]
+    v101 = background_sdf[_idx3d(x0 + 1, y0, z0 + 1, bg_size_x, bg_size_y)]
+    v011 = background_sdf[_idx3d(x0, y0 + 1, z0 + 1, bg_size_x, bg_size_y)]
+    v111 = background_sdf[_idx3d(x0 + 1, y0 + 1, z0 + 1, bg_size_x, bg_size_y)]
+
+    c00 = v000 * (1.0 - tx) + v100 * tx
+    c10 = v010 * (1.0 - tx) + v110 * tx
+    c01 = v001 * (1.0 - tx) + v101 * tx
+    c11 = v011 * (1.0 - tx) + v111 * tx
+    c0 = c00 * (1.0 - ty) + c10 * ty
+    c1 = c01 * (1.0 - ty) + c11 * ty
+    return c0 * (1.0 - tz) + c1 * tz
+
+
+@wp.func
+def _is_in_narrow_band(signed_distance: float, threshold: wp.vec2f) -> wp.bool:
+    """Check if a signed distance lies within the narrow band."""
+    if wp.sign(signed_distance) > 0.0:
+        return signed_distance < threshold[1]
+    return signed_distance > threshold[0]
+
+
+@wp.func
+def _write_subgrid_slot(
+    subgrid_start_slots: wp.array3d[wp.uint32],
+    address: int,
+    tex_blocks_per_dim: int,
+    block_x: int,
+    block_y: int,
+    block_z: int,
+    local_sample: int,
+) -> wp.vec3i:
+    """Resolve texture block address to 3D offset and write the indirection slot.
+
+    Returns the block address as ``(addr_x, addr_y, addr_z)`` for the caller
+    to combine with the local sample offset.
+    """
+    addr_coords = _id_to_xyz(address, tex_blocks_per_dim, tex_blocks_per_dim)
+    if local_sample == 0:
+        start_slot = (
+            wp.uint32(addr_coords[0])
+            | (wp.uint32(addr_coords[1]) << wp.uint32(10))
+            | (wp.uint32(addr_coords[2]) << wp.uint32(20))
+        )
+        subgrid_start_slots[block_x, block_y, block_z] = start_slot
+    return addr_coords
+
+
 @wp.kernel
 def _check_subgrid_occupied_kernel(
     mesh: wp.uint64,
@@ -138,13 +217,7 @@ def _check_subgrid_occupied_kernel(
     )
 
     signed_distance = _query_mesh_sdf(mesh, sample_pos, 10000.0, winding_threshold, use_parity)
-    is_occupied = wp.bool(False)
-    if wp.sign(signed_distance) > 0.0:
-        is_occupied = signed_distance < threshold[1]
-    else:
-        is_occupied = signed_distance > threshold[0]
-
-    if is_occupied:
+    if _is_in_narrow_band(signed_distance, threshold):
         subgrid_required[tid] = 1
     else:
         subgrid_required[tid] = 0
@@ -185,7 +258,7 @@ def _check_subgrid_linearity_kernel(
     block_y = coords[1]
     block_z = coords[2]
 
-    s = 1.0 / float(cells_per_subgrid)
+    inv_cpsg = 1.0 / float(cells_per_subgrid)
     samples_per_dim = cells_per_subgrid + 1
     max_abs_error = float(0.0)
 
@@ -202,39 +275,10 @@ def _check_subgrid_linearity_kernel(
                     float(gz) * cell_size[2],
                 )
                 mesh_val = _query_mesh_sdf(mesh, pos, 10000.0, winding_threshold, use_parity)
-
-                coarse_fx = float(block_x) + float(lx) * s
-                coarse_fy = float(block_y) + float(ly) * s
-                coarse_fz = float(block_z) + float(lz) * s
-
-                x0 = int(wp.floor(coarse_fx))
-                y0 = int(wp.floor(coarse_fy))
-                z0 = int(wp.floor(coarse_fz))
-                x0 = wp.clamp(x0, 0, bg_size_x - 2)
-                y0 = wp.clamp(y0, 0, bg_size_y - 2)
-                z0 = wp.clamp(z0, 0, bg_size_z - 2)
-
-                tx = wp.clamp(coarse_fx - float(x0), 0.0, 1.0)
-                ty = wp.clamp(coarse_fy - float(y0), 0.0, 1.0)
-                tz = wp.clamp(coarse_fz - float(z0), 0.0, 1.0)
-
-                v000 = background_sdf[_idx3d(x0, y0, z0, bg_size_x, bg_size_y)]
-                v100 = background_sdf[_idx3d(x0 + 1, y0, z0, bg_size_x, bg_size_y)]
-                v010 = background_sdf[_idx3d(x0, y0 + 1, z0, bg_size_x, bg_size_y)]
-                v110 = background_sdf[_idx3d(x0 + 1, y0 + 1, z0, bg_size_x, bg_size_y)]
-                v001 = background_sdf[_idx3d(x0, y0, z0 + 1, bg_size_x, bg_size_y)]
-                v101 = background_sdf[_idx3d(x0 + 1, y0, z0 + 1, bg_size_x, bg_size_y)]
-                v011 = background_sdf[_idx3d(x0, y0 + 1, z0 + 1, bg_size_x, bg_size_y)]
-                v111 = background_sdf[_idx3d(x0 + 1, y0 + 1, z0 + 1, bg_size_x, bg_size_y)]
-
-                c00 = v000 * (1.0 - tx) + v100 * tx
-                c10 = v010 * (1.0 - tx) + v110 * tx
-                c01 = v001 * (1.0 - tx) + v101 * tx
-                c11 = v011 * (1.0 - tx) + v111 * tx
-                c0 = c00 * (1.0 - ty) + c10 * ty
-                c1 = c01 * (1.0 - ty) + c11 * ty
-                coarse_val = c0 * (1.0 - tz) + c1 * tz
-
+                coarse_val = _interp_coarse_sdf(
+                    background_sdf, block_x, block_y, block_z, lx, ly, lz,
+                    inv_cpsg, bg_size_x, bg_size_y, bg_size_z,
+                )
                 max_abs_error = wp.max(max_abs_error, wp.abs(mesh_val - coarse_val))
 
     if max_abs_error < error_threshold:
@@ -334,20 +378,8 @@ def _populate_subgrid_texture_float32_kernel(
     if address < 0:
         return
 
-    addr_coords = _id_to_xyz(address, tex_blocks_per_dim, tex_blocks_per_dim)
-    addr_x = addr_coords[0]
-    addr_y = addr_coords[1]
-    addr_z = addr_coords[2]
-
-    if local_sample == 0:
-        start_slot = wp.uint32(addr_x) | (wp.uint32(addr_y) << wp.uint32(10)) | (wp.uint32(addr_z) << wp.uint32(20))
-        subgrid_start_slots[block_x, block_y, block_z] = start_slot
-
-    tex_x = addr_x * samples_per_dim + lx
-    tex_y = addr_y * samples_per_dim + ly
-    tex_z = addr_z * samples_per_dim + lz
-
-    tex_idx = _idx3d(tex_x, tex_y, tex_z, tex_size, tex_size)
+    ac = _write_subgrid_slot(subgrid_start_slots, address, tex_blocks_per_dim, block_x, block_y, block_z, local_sample)
+    tex_idx = _idx3d(ac[0] * samples_per_dim + lx, ac[1] * samples_per_dim + ly, ac[2] * samples_per_dim + lz, tex_size, tex_size)
     subgrid_texture[tex_idx] = sdf_val
 
 
@@ -411,24 +443,10 @@ def _populate_subgrid_texture_uint16_kernel(
     if address < 0:
         return
 
-    addr_coords = _id_to_xyz(address, tex_blocks_per_dim, tex_blocks_per_dim)
-    addr_x = addr_coords[0]
-    addr_y = addr_coords[1]
-    addr_z = addr_coords[2]
-
-    if local_sample == 0:
-        start_slot = wp.uint32(addr_x) | (wp.uint32(addr_y) << wp.uint32(10)) | (wp.uint32(addr_z) << wp.uint32(20))
-        subgrid_start_slots[block_x, block_y, block_z] = start_slot
-
-    tex_x = addr_x * samples_per_dim + lx
-    tex_y = addr_y * samples_per_dim + ly
-    tex_z = addr_z * samples_per_dim + lz
-
+    ac = _write_subgrid_slot(subgrid_start_slots, address, tex_blocks_per_dim, block_x, block_y, block_z, local_sample)
+    tex_idx = _idx3d(ac[0] * samples_per_dim + lx, ac[1] * samples_per_dim + ly, ac[2] * samples_per_dim + lz, tex_size, tex_size)
     v_normalized = wp.clamp((sdf_val - sdf_min) * sdf_range_inv, 0.0, 1.0)
-    quantized = wp.uint16(v_normalized * 65535.0)
-
-    tex_idx = _idx3d(tex_x, tex_y, tex_z, tex_size, tex_size)
-    subgrid_texture[tex_idx] = quantized
+    subgrid_texture[tex_idx] = wp.uint16(v_normalized * 65535.0)
 
 
 @wp.kernel
@@ -491,24 +509,10 @@ def _populate_subgrid_texture_uint8_kernel(
     if address < 0:
         return
 
-    addr_coords = _id_to_xyz(address, tex_blocks_per_dim, tex_blocks_per_dim)
-    addr_x = addr_coords[0]
-    addr_y = addr_coords[1]
-    addr_z = addr_coords[2]
-
-    if local_sample == 0:
-        start_slot = wp.uint32(addr_x) | (wp.uint32(addr_y) << wp.uint32(10)) | (wp.uint32(addr_z) << wp.uint32(20))
-        subgrid_start_slots[block_x, block_y, block_z] = start_slot
-
-    tex_x = addr_x * samples_per_dim + lx
-    tex_y = addr_y * samples_per_dim + ly
-    tex_z = addr_z * samples_per_dim + lz
-
+    ac = _write_subgrid_slot(subgrid_start_slots, address, tex_blocks_per_dim, block_x, block_y, block_z, local_sample)
+    tex_idx = _idx3d(ac[0] * samples_per_dim + lx, ac[1] * samples_per_dim + ly, ac[2] * samples_per_dim + lz, tex_size, tex_size)
     v_normalized = wp.clamp((sdf_val - sdf_min) * sdf_range_inv, 0.0, 1.0)
-    quantized = wp.uint8(v_normalized * 255.0)
-
-    tex_idx = _idx3d(tex_x, tex_y, tex_z, tex_size, tex_size)
-    subgrid_texture[tex_idx] = quantized
+    subgrid_texture[tex_idx] = wp.uint8(v_normalized * 255.0)
 
 
 # ============================================================================
@@ -611,61 +615,10 @@ def _check_subgrid_occupied_unsigned_kernel(
         mesh, sample_pos, 10000.0, sign_grid, gx, gy, gz, sign_size_x, sign_size_y, sign_size_z
     )
 
-    is_occupied = wp.bool(False)
-    if wp.sign(signed_distance) > 0.0:
-        is_occupied = signed_distance < threshold[1]
-    else:
-        is_occupied = signed_distance > threshold[0]
-
-    if is_occupied:
+    if _is_in_narrow_band(signed_distance, threshold):
         subgrid_required[tid] = 1
     else:
         subgrid_required[tid] = 0
-
-
-@wp.func
-def _interp_coarse_sdf(
-    background_sdf: wp.array[float],
-    block_x: int,
-    block_y: int,
-    block_z: int,
-    lx: int,
-    ly: int,
-    lz: int,
-    inv_cells_per_subgrid: float,
-    bg_size_x: int,
-    bg_size_y: int,
-    bg_size_z: int,
-) -> float:
-    """Trilinear interpolation of the coarse/background SDF at a fine sample."""
-    coarse_fx = float(block_x) + float(lx) * inv_cells_per_subgrid
-    coarse_fy = float(block_y) + float(ly) * inv_cells_per_subgrid
-    coarse_fz = float(block_z) + float(lz) * inv_cells_per_subgrid
-
-    x0 = wp.clamp(int(wp.floor(coarse_fx)), 0, bg_size_x - 2)
-    y0 = wp.clamp(int(wp.floor(coarse_fy)), 0, bg_size_y - 2)
-    z0 = wp.clamp(int(wp.floor(coarse_fz)), 0, bg_size_z - 2)
-
-    tx = wp.clamp(coarse_fx - float(x0), 0.0, 1.0)
-    ty = wp.clamp(coarse_fy - float(y0), 0.0, 1.0)
-    tz = wp.clamp(coarse_fz - float(z0), 0.0, 1.0)
-
-    v000 = background_sdf[_idx3d(x0, y0, z0, bg_size_x, bg_size_y)]
-    v100 = background_sdf[_idx3d(x0 + 1, y0, z0, bg_size_x, bg_size_y)]
-    v010 = background_sdf[_idx3d(x0, y0 + 1, z0, bg_size_x, bg_size_y)]
-    v110 = background_sdf[_idx3d(x0 + 1, y0 + 1, z0, bg_size_x, bg_size_y)]
-    v001 = background_sdf[_idx3d(x0, y0, z0 + 1, bg_size_x, bg_size_y)]
-    v101 = background_sdf[_idx3d(x0 + 1, y0, z0 + 1, bg_size_x, bg_size_y)]
-    v011 = background_sdf[_idx3d(x0, y0 + 1, z0 + 1, bg_size_x, bg_size_y)]
-    v111 = background_sdf[_idx3d(x0 + 1, y0 + 1, z0 + 1, bg_size_x, bg_size_y)]
-
-    c00 = v000 * (1.0 - tx) + v100 * tx
-    c10 = v010 * (1.0 - tx) + v110 * tx
-    c01 = v001 * (1.0 - tx) + v101 * tx
-    c11 = v011 * (1.0 - tx) + v111 * tx
-    c0 = c00 * (1.0 - ty) + c10 * ty
-    c1 = c01 * (1.0 - ty) + c11 * ty
-    return c0 * (1.0 - tz) + c1 * tz
 
 
 @wp.kernel
@@ -737,20 +690,8 @@ def _fused_populate_unsigned_float32_kernel(
     if address < 0:
         return
 
-    addr_coords = _id_to_xyz(address, tex_blocks_per_dim, tex_blocks_per_dim)
-    addr_x = addr_coords[0]
-    addr_y = addr_coords[1]
-    addr_z = addr_coords[2]
-
-    if local_sample == 0:
-        start_slot = wp.uint32(addr_x) | (wp.uint32(addr_y) << wp.uint32(10)) | (wp.uint32(addr_z) << wp.uint32(20))
-        subgrid_start_slots[block_x, block_y, block_z] = start_slot
-
-    tex_x = addr_x * samples_per_dim + lx
-    tex_y = addr_y * samples_per_dim + ly
-    tex_z = addr_z * samples_per_dim + lz
-
-    tex_idx = _idx3d(tex_x, tex_y, tex_z, tex_size, tex_size)
+    ac = _write_subgrid_slot(subgrid_start_slots, address, tex_blocks_per_dim, block_x, block_y, block_z, local_sample)
+    tex_idx = _idx3d(ac[0] * samples_per_dim + lx, ac[1] * samples_per_dim + ly, ac[2] * samples_per_dim + lz, tex_size, tex_size)
     subgrid_texture[tex_idx] = sdf_val
 
     if check_linearity != 0:
@@ -832,24 +773,10 @@ def _fused_populate_unsigned_uint16_kernel(
     if address < 0:
         return
 
-    addr_coords = _id_to_xyz(address, tex_blocks_per_dim, tex_blocks_per_dim)
-    addr_x = addr_coords[0]
-    addr_y = addr_coords[1]
-    addr_z = addr_coords[2]
-
-    if local_sample == 0:
-        start_slot = wp.uint32(addr_x) | (wp.uint32(addr_y) << wp.uint32(10)) | (wp.uint32(addr_z) << wp.uint32(20))
-        subgrid_start_slots[block_x, block_y, block_z] = start_slot
-
-    tex_x = addr_x * samples_per_dim + lx
-    tex_y = addr_y * samples_per_dim + ly
-    tex_z = addr_z * samples_per_dim + lz
-
+    ac = _write_subgrid_slot(subgrid_start_slots, address, tex_blocks_per_dim, block_x, block_y, block_z, local_sample)
+    tex_idx = _idx3d(ac[0] * samples_per_dim + lx, ac[1] * samples_per_dim + ly, ac[2] * samples_per_dim + lz, tex_size, tex_size)
     v_normalized = wp.clamp((sdf_val - sdf_min) * sdf_range_inv, 0.0, 1.0)
-    quantized = wp.uint16(v_normalized * 65535.0)
-
-    tex_idx = _idx3d(tex_x, tex_y, tex_z, tex_size, tex_size)
-    subgrid_texture[tex_idx] = quantized
+    subgrid_texture[tex_idx] = wp.uint16(v_normalized * 65535.0)
 
     if check_linearity != 0:
         inv_cpsg = 1.0 / float(cells_per_subgrid)
@@ -930,24 +857,10 @@ def _fused_populate_unsigned_uint8_kernel(
     if address < 0:
         return
 
-    addr_coords = _id_to_xyz(address, tex_blocks_per_dim, tex_blocks_per_dim)
-    addr_x = addr_coords[0]
-    addr_y = addr_coords[1]
-    addr_z = addr_coords[2]
-
-    if local_sample == 0:
-        start_slot = wp.uint32(addr_x) | (wp.uint32(addr_y) << wp.uint32(10)) | (wp.uint32(addr_z) << wp.uint32(20))
-        subgrid_start_slots[block_x, block_y, block_z] = start_slot
-
-    tex_x = addr_x * samples_per_dim + lx
-    tex_y = addr_y * samples_per_dim + ly
-    tex_z = addr_z * samples_per_dim + lz
-
+    ac = _write_subgrid_slot(subgrid_start_slots, address, tex_blocks_per_dim, block_x, block_y, block_z, local_sample)
+    tex_idx = _idx3d(ac[0] * samples_per_dim + lx, ac[1] * samples_per_dim + ly, ac[2] * samples_per_dim + lz, tex_size, tex_size)
     v_normalized = wp.clamp((sdf_val - sdf_min) * sdf_range_inv, 0.0, 1.0)
-    quantized = wp.uint8(v_normalized * 255.0)
-
-    tex_idx = _idx3d(tex_x, tex_y, tex_z, tex_size, tex_size)
-    subgrid_texture[tex_idx] = quantized
+    subgrid_texture[tex_idx] = wp.uint8(v_normalized * 255.0)
 
     if check_linearity != 0:
         inv_cpsg = 1.0 / float(cells_per_subgrid)
