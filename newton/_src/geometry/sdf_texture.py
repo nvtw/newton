@@ -550,12 +550,10 @@ def _scanline_sign_kernel(
 ):
     """Fill sign for one (y, z) column by marching a ray along +x.
 
-    For each column, casts a ray from outside the domain along +x, recording
-    every surface crossing.  The sign flips at each crossing (parity rule for
-    watertight meshes).
-
-    Algorithm reference: signed variant inspired by Inigo Quilez's Shadertoy
-    implementation (MIT license).
+    For each column, casts a ray from outside the domain along +x and walks
+    voxels left-to-right, flipping the sign at each surface crossing (parity
+    rule for watertight meshes).  The ray march is interleaved with the voxel
+    walk so no scratch buffer is needed.
     """
     tid = wp.tid()
     total_cols = size_y * size_z
@@ -572,39 +570,32 @@ def _scanline_sign_kernel(
     )
     ray_d = wp.vec3(1.0, 0.0, 0.0)
     max_t = float(size_x + 2) * cell_size[0]
-
-    crossing_ts = wp.vector(dtype=float, length=512)
-    num_crossings = int(0)
-    t_start = float(0.0)
     eps = cell_size[0] * 0.01
 
-    for _iter in range(512):
-        query = wp.mesh_query_ray(mesh, ray_o + ray_d * t_start, ray_d, max_t - t_start)
-        if query.result:
-            t_hit = t_start + query.t
-            if num_crossings < 512:
-                crossing_ts[num_crossings] = t_hit
-                num_crossings = num_crossings + 1
-            t_start = t_hit + eps
-        else:
-            break
-
-    crossing_idx = int(0)
     sign = SIGN_OUTSIDE
+    t_start = float(0.0)
+    next_hit = float(-1.0)
+    has_next = False
+
+    query = wp.mesh_query_ray(mesh, ray_o, ray_d, max_t)
+    if query.result:
+        next_hit = query.t
+        has_next = True
 
     for ix in range(size_x):
-        voxel_t = (float(ix) * cell_size[0]) + cell_size[0]
+        voxel_t = (float(ix) + 1.0) * cell_size[0]
 
-        for _c in range(512):
-            if crossing_idx >= num_crossings:
-                break
-            if crossing_ts[crossing_idx] > voxel_t:
-                break
+        while has_next and next_hit <= voxel_t:
             if sign == SIGN_OUTSIDE:
                 sign = SIGN_INSIDE
             else:
                 sign = SIGN_OUTSIDE
-            crossing_idx = crossing_idx + 1
+            t_start = next_hit + eps
+            has_next = False
+            q2 = wp.mesh_query_ray(mesh, ray_o + ray_d * t_start, ray_d, max_t - t_start)
+            if q2.result:
+                next_hit = t_start + q2.t
+                has_next = True
 
         sign_grid[_idx3d(ix, iy, iz, size_x, size_y)] = sign
 
