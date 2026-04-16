@@ -78,7 +78,6 @@
 - Add RJ45 plug-socket insertion example with SDF contacts, latch joint, and interactive gizmo
 - Add `SpeculativeContactConfig` and speculative contact support in `CollisionPipeline` to detect contacts for fast-moving objects before they tunnel through thin geometry
 - Add `TRIANGLE_PRISM` support-function type for heightfield triangles, extruding 1 m along the heightfield's local -Z so GJK/MPR naturally resolves shapes on the back side
-- Add `ViewerGL.log_scalar()` for live scalar time-series plots in the viewer
 
 ### Changed
 

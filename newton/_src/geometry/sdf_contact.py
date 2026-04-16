@@ -39,10 +39,7 @@ def _query_mesh_face_normal(
     sign = float(0.0)
     res = wp.mesh_query_point_sign_normal(mesh_id, point_local, max_dist, sign, face_index, face_u, face_v)
     if res:
-        n = wp.mesh_eval_face_normal(mesh_id, face_index)
-        if sign < 0.0:
-            n = -n
-        return n
+        return wp.mesh_eval_face_normal(mesh_id, face_index)
     return wp.vec3(0.0, 1.0, 0.0)
 
 
@@ -1034,7 +1031,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     # compiled code, otherwise FMA-fusion or register-allocation
     # differences between independent JIT compilations can produce subtly
     # different floating-point results, breaking bit-exact reproducibility.
-    _module = f"sdf_contact_{writer_func.__name__}_{enable_heightfields}_{reduce_contacts}"
+    _module = f"sdf_contact_{writer_func.__name__}_{enable_heightfields}_{reduce_contacts}_{speculative}"
 
     @wp.kernel(enable_backward=False, module=_module)
     def mesh_sdf_collision_kernel(

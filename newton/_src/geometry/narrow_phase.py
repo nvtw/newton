@@ -150,7 +150,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any, speculative: bool = F
     Returns:
         A warp kernel for primitive collision detection
     """
-    _module = f"narrow_phase_primitive_{writer_func.__name__}"
+    _module = f"narrow_phase_primitive_{writer_func.__name__}_{speculative}"
 
     @wp.kernel(enable_backward=False, module=_module)
     def narrow_phase_primitive_kernel(
@@ -658,7 +658,7 @@ def create_narrow_phase_kernel_gjk_mpr(
     """
     _sf = support_func.__name__ if support_func is not None else "default"
     _ppc = post_process_contact.__name__ if post_process_contact is not None else "default"
-    _module = f"narrow_phase_gjk_mpr_{external_aabb}_{writer_func.__name__}_{_sf}_{_ppc}"
+    _module = f"narrow_phase_gjk_mpr_{external_aabb}_{writer_func.__name__}_{_sf}_{_ppc}_{speculative}"
 
     @wp.kernel(enable_backward=False, module=_module)
     def narrow_phase_kernel_gjk_mpr(
@@ -957,7 +957,7 @@ _find_mesh_triangle_overlaps_speculative = _create_find_mesh_triangle_overlaps_k
 
 
 def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any, speculative: bool = False):
-    _module = f"narrow_phase_mesh_tri_{writer_func.__name__}"
+    _module = f"narrow_phase_mesh_tri_{writer_func.__name__}_{speculative}"
 
     @wp.kernel(enable_backward=False, module=_module)
     def narrow_phase_process_mesh_triangle_contacts_kernel(
@@ -1163,7 +1163,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
     Returns:
         A warp kernel that processes mesh-plane collisions
     """
-    _module = f"narrow_phase_mesh_plane_{writer_func.__name__}_{reduce_contacts}"
+    _module = f"narrow_phase_mesh_plane_{writer_func.__name__}_{reduce_contacts}_{speculative}"
 
     @wp.kernel(enable_backward=False, module=_module)
     def narrow_phase_process_mesh_plane_contacts_kernel(
