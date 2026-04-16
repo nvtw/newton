@@ -146,6 +146,130 @@ def write_contact(
         )
 
 
+@wp.func
+def _compute_shape_world_aabb(
+    body_q: wp.array[wp.transform],
+    shape_transform: wp.array[wp.transform],
+    shape_body: wp.array[int],
+    shape_collision_aabb_lower: wp.array[wp.vec3],
+    shape_collision_aabb_upper: wp.array[wp.vec3],
+    shape_margin: wp.array[float],
+    shape_gap: wp.array[float],
+    shape_id: int,
+) -> tuple[wp.vec3, wp.vec3]:
+    """Compute world-space AABB from pre-computed local AABB + body transform."""
+    rigid_id = shape_body[shape_id]
+    if rigid_id == -1:
+        X_ws = shape_transform[shape_id]
+    else:
+        X_ws = wp.transform_multiply(body_q[rigid_id], shape_transform[shape_id])
+
+    pos = wp.transform_get_translation(X_ws)
+    q = wp.transform_get_rotation(X_ws)
+
+    effective_gap = shape_margin[shape_id] + shape_gap[shape_id]
+    margin_vec = wp.vec3(effective_gap, effective_gap, effective_gap)
+
+    local_lo = shape_collision_aabb_lower[shape_id]
+    local_hi = shape_collision_aabb_upper[shape_id]
+    center = (local_lo + local_hi) * 0.5
+    half = (local_hi - local_lo) * 0.5
+
+    world_center = wp.quat_rotate(q, center) + pos
+    r0 = wp.quat_rotate(q, wp.vec3(1.0, 0.0, 0.0))
+    r1 = wp.quat_rotate(q, wp.vec3(0.0, 1.0, 0.0))
+    r2 = wp.quat_rotate(q, wp.vec3(0.0, 0.0, 1.0))
+    world_half = wp.vec3(
+        wp.abs(r0[0]) * half[0] + wp.abs(r1[0]) * half[1] + wp.abs(r2[0]) * half[2],
+        wp.abs(r0[1]) * half[0] + wp.abs(r1[1]) * half[1] + wp.abs(r2[1]) * half[2],
+        wp.abs(r0[2]) * half[0] + wp.abs(r1[2]) * half[1] + wp.abs(r2[2]) * half[2],
+    )
+    return world_center - world_half - margin_vec, world_center + world_half + margin_vec
+
+
+@wp.kernel(enable_backward=False)
+def fused_geom_broadphase_explicit(
+    body_q: wp.array[wp.transform],
+    shape_transform: wp.array[wp.transform],
+    shape_body: wp.array[int],
+    shape_scale: wp.array[wp.vec3],
+    shape_margin: wp.array[float],
+    shape_gap: wp.array[float],
+    shape_collision_aabb_lower: wp.array[wp.vec3],
+    shape_collision_aabb_upper: wp.array[wp.vec3],
+    contact_counters: wp.array[wp.int32],
+    contact_generation: wp.array[wp.int32],
+    broad_phase_pair_count: wp.array[wp.int32],
+    num_contact_counters: int,
+    precomputed_pairs: wp.array[wp.vec2i],
+    pair_count: int,
+    shape_count: int,
+    geom_data: wp.array[wp.vec4],
+    geom_xform: wp.array[wp.transform],
+    candidate_pair: wp.array[wp.vec2i],
+    max_candidate_pair: int,
+):
+    """Fused kernel: geom data + counter init + inline AABB broadphase.
+
+    Replaces ``compute_shape_aabbs`` + ``contacts.clear()`` + ``broad_phase``
+    with a single kernel launch for the EXPLICIT broad phase mode.
+    """
+    tid = wp.tid()
+
+    if tid == 0:
+        for c in range(num_contact_counters):
+            contact_counters[c] = 0
+        g = contact_generation[0]
+        if g >= 2147483647:
+            g = 0
+        else:
+            g = g + 1
+        contact_generation[0] = g
+        broad_phase_pair_count[0] = 0
+
+    # Geom data for shapes (first shape_count threads)
+    if tid < shape_count:
+        rigid_id = shape_body[tid]
+        if rigid_id == -1:
+            X_ws = shape_transform[tid]
+        else:
+            X_ws = wp.transform_multiply(body_q[rigid_id], shape_transform[tid])
+        scale = shape_scale[tid]
+        margin = shape_margin[tid]
+        geom_data[tid] = wp.vec4(scale[0], scale[1], scale[2], margin)
+        geom_xform[tid] = X_ws
+
+    # Broadphase overlap test for pairs
+    if tid < pair_count:
+        pair = precomputed_pairs[tid]
+        s1 = pair[0]
+        s2 = pair[1]
+
+        lo1, hi1 = _compute_shape_world_aabb(
+            body_q, shape_transform, shape_body,
+            shape_collision_aabb_lower, shape_collision_aabb_upper,
+            shape_margin, shape_gap, s1,
+        )
+        lo2, hi2 = _compute_shape_world_aabb(
+            body_q, shape_transform, shape_body,
+            shape_collision_aabb_lower, shape_collision_aabb_upper,
+            shape_margin, shape_gap, s2,
+        )
+
+        overlap = (
+            lo1[0] <= hi2[0]
+            and hi1[0] >= lo2[0]
+            and lo1[1] <= hi2[1]
+            and hi1[1] >= lo2[1]
+            and lo1[2] <= hi2[2]
+            and hi1[2] >= lo2[2]
+        )
+        if overlap:
+            pairid = wp.atomic_add(broad_phase_pair_count, 0, 1)
+            if pairid < max_candidate_pair:
+                candidate_pair[pairid] = pair
+
+
 @wp.kernel(enable_backward=False)
 def compute_shape_aabbs(
     body_q: wp.array[wp.transform],
@@ -812,94 +936,111 @@ class CollisionPipeline:
                 If ``None``, uses the value from construction.
         """
 
+        model = self.model
+        soft_contact_margin = soft_contact_margin if soft_contact_margin is not None else self.soft_contact_margin
+
         # Counter zeroing and generation bump are fused into compute_shape_aabbs.
         # Only call contacts.clear() if clear_buffers mode is enabled (debug path).
         if contacts.clear_buffers:
             contacts.clear()
 
-        model = self.model
-        # update any additional parameters
-        soft_contact_margin = soft_contact_margin if soft_contact_margin is not None else self.soft_contact_margin
-
         # Rigid contact detection -- broad phase + narrow phase.
         # These kernels hardcode record_tape=False internally so they are
-        # never captured on an active wp.Tape.  The differentiable
-        # augmentation and soft-contact kernels that follow are tape-safe
-        # and recorded normally.
+        # never captured on an active wp.Tape.
 
-        # Compute AABBs for all shapes, zero counters, bump generation.
-        # Fuses contacts.clear() + broad_phase_pair_count.zero_() + AABB update.
-        wp.launch(
-            kernel=compute_shape_aabbs,
-            dim=model.shape_count,
-            inputs=[
-                state.body_q,
-                model.shape_transform,
-                model.shape_body,
-                model.shape_type,
-                model.shape_scale,
-                model.shape_collision_radius,
-                model.shape_source_ptr,
-                model.shape_margin,
-                model.shape_gap,
-                model.shape_collision_aabb_lower,
-                model.shape_collision_aabb_upper,
-                contacts._counter_array,
-                contacts.contact_generation,
-                self.broad_phase_pair_count,
-                contacts._counter_array.shape[0],
-            ],
-            outputs=[
-                self.narrow_phase.shape_aabb_lower,
-                self.narrow_phase.shape_aabb_upper,
-                self.geom_data,
-                self.geom_transform,
-            ],
-            device=self.device,
-            record_tape=False,
-        )
-
-        # Run broad phase (AABBs are already expanded by effective gaps, so pass None)
-        if isinstance(self.broad_phase, BroadPhaseAllPairs):
-            self.broad_phase.launch(
-                self.narrow_phase.shape_aabb_lower,
-                self.narrow_phase.shape_aabb_upper,
-                None,  # AABBs are pre-expanded, no additional margin needed
-                model.shape_collision_group,
-                model.shape_world,
-                model.shape_count,
-                self.broad_phase_shape_pairs,
-                self.broad_phase_pair_count,
+        if isinstance(self.broad_phase, BroadPhaseExplicit):
+            # EXPLICIT mode: single fused kernel replaces compute_shape_aabbs +
+            # contacts.clear() + broad_phase.  Geom data, counter init, and
+            # inline AABB overlap all in one launch.
+            pair_count = len(self.shape_pairs_filtered)
+            wp.launch(
+                kernel=fused_geom_broadphase_explicit,
+                dim=max(model.shape_count, pair_count),
+                inputs=[
+                    state.body_q,
+                    model.shape_transform,
+                    model.shape_body,
+                    model.shape_scale,
+                    model.shape_margin,
+                    model.shape_gap,
+                    model.shape_collision_aabb_lower,
+                    model.shape_collision_aabb_upper,
+                    contacts._counter_array,
+                    contacts.contact_generation,
+                    self.broad_phase_pair_count,
+                    contacts._counter_array.shape[0],
+                    self.shape_pairs_filtered,
+                    pair_count,
+                    model.shape_count,
+                ],
+                outputs=[
+                    self.geom_data,
+                    self.geom_transform,
+                    self.broad_phase_shape_pairs,
+                    self.broad_phase_shape_pairs.shape[0],
+                ],
                 device=self.device,
-                filter_pairs=self.shape_pairs_excluded,
-                num_filter_pairs=self.shape_pairs_excluded_count,
+                record_tape=False,
             )
-        elif isinstance(self.broad_phase, BroadPhaseSAP):
-            self.broad_phase.launch(
-                self.narrow_phase.shape_aabb_lower,
-                self.narrow_phase.shape_aabb_upper,
-                None,  # AABBs are pre-expanded, no additional margin needed
-                model.shape_collision_group,
-                model.shape_world,
-                model.shape_count,
-                self.broad_phase_shape_pairs,
-                self.broad_phase_pair_count,
+        else:
+            # NxN/SAP modes: traditional AABB kernel + separate broad phase
+            wp.launch(
+                kernel=compute_shape_aabbs,
+                dim=model.shape_count,
+                inputs=[
+                    state.body_q,
+                    model.shape_transform,
+                    model.shape_body,
+                    model.shape_type,
+                    model.shape_scale,
+                    model.shape_collision_radius,
+                    model.shape_source_ptr,
+                    model.shape_margin,
+                    model.shape_gap,
+                    model.shape_collision_aabb_lower,
+                    model.shape_collision_aabb_upper,
+                    contacts._counter_array,
+                    contacts.contact_generation,
+                    self.broad_phase_pair_count,
+                    contacts._counter_array.shape[0],
+                ],
+                outputs=[
+                    self.narrow_phase.shape_aabb_lower,
+                    self.narrow_phase.shape_aabb_upper,
+                    self.geom_data,
+                    self.geom_transform,
+                ],
                 device=self.device,
-                filter_pairs=self.shape_pairs_excluded,
-                num_filter_pairs=self.shape_pairs_excluded_count,
+                record_tape=False,
             )
-        else:  # BroadPhaseExplicit
-            self.broad_phase.launch(
-                self.narrow_phase.shape_aabb_lower,
-                self.narrow_phase.shape_aabb_upper,
-                None,  # AABBs are pre-expanded, no additional margin needed
-                self.shape_pairs_filtered,
-                len(self.shape_pairs_filtered),
-                self.broad_phase_shape_pairs,
-                self.broad_phase_pair_count,
-                device=self.device,
-                skip_count_zero=True,  # Already zeroed by compute_shape_aabbs
-            )
+            if isinstance(self.broad_phase, BroadPhaseAllPairs):
+                self.broad_phase.launch(
+                    self.narrow_phase.shape_aabb_lower,
+                    self.narrow_phase.shape_aabb_upper,
+                    None,
+                    model.shape_collision_group,
+                    model.shape_world,
+                    model.shape_count,
+                    self.broad_phase_shape_pairs,
+                    self.broad_phase_pair_count,
+                    device=self.device,
+                    filter_pairs=self.shape_pairs_excluded,
+                    num_filter_pairs=self.shape_pairs_excluded_count,
+                )
+            elif isinstance(self.broad_phase, BroadPhaseSAP):
+                self.broad_phase.launch(
+                    self.narrow_phase.shape_aabb_lower,
+                    self.narrow_phase.shape_aabb_upper,
+                    None,
+                    model.shape_collision_group,
+                    model.shape_world,
+                    model.shape_count,
+                    self.broad_phase_shape_pairs,
+                    self.broad_phase_pair_count,
+                    device=self.device,
+                    filter_pairs=self.shape_pairs_excluded,
+                    num_filter_pairs=self.shape_pairs_excluded_count,
+                )
 
         # Create ContactWriterData struct for custom contact writing
         writer_data = ContactWriterData()
