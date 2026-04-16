@@ -1661,8 +1661,7 @@ class NarrowPhase:
             max_blocks_limit = 256
 
         candidate_blocks = (max_candidate_pairs + self.block_dim - 1) // self.block_dim
-        # 1 block per SM minimum — enough for full occupancy while reducing idle-thread overhead
-        min_blocks = device_obj.sm_count if device_obj.is_cuda else 256
+        min_blocks = 256  # 32K threads minimum for reasonable GPU occupancy on CUDA
         num_blocks = max(min_blocks, min(candidate_blocks, max_blocks_limit))
         self.total_num_threads = self.block_dim * num_blocks
         self.num_tile_blocks = num_blocks
