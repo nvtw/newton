@@ -321,6 +321,7 @@ class SDF:
         shape_margin: float = 0.0,
         scale: tuple[float, float, float] | None = None,
         texture_format: str = "uint16",
+        use_parity: bool = False,
     ) -> "SDF":
         """Create an SDF from a mesh in local mesh coordinates.
 
@@ -349,6 +350,9 @@ class SDF:
                 (default) uses 16-bit normalized textures for half the memory
                 of ``"float32"`` with negligible precision loss. ``"uint8"``
                 uses 8-bit textures for minimum memory.
+            use_parity: use ``mesh_query_point_sign_parity`` for
+                inside/outside classification instead of winding numbers.
+                Cheaper but requires a watertight mesh.
 
         Returns:
             A validated :class:`SDF` runtime handle with sparse/coarse volumes.
@@ -393,7 +397,7 @@ class SDF:
                 indices = wp.array(mesh.indices, dtype=wp.int32)
 
                 winding_threshold = 0.5
-                if is_watertight:
+                if is_watertight or use_parity:
                     tex_mesh = wp.Mesh(points=pos, indices=indices)
                 else:
                     tex_mesh = wp.Mesh(points=pos, indices=indices, support_winding_number=True)
@@ -410,6 +414,7 @@ class SDF:
                     winding_threshold=winding_threshold,
                     scale_baked=bake_scale,
                     watertight=is_watertight,
+                    use_parity=use_parity,
                 )
                 wp.synchronize()
 
@@ -530,6 +535,20 @@ def get_distance_to_mesh(mesh: wp.uint64, point: wp.vec3, max_dist: wp.float32, 
         if winding_threshold < 0.0:
             sign = -sign
         return sign * wp.length(vec_to_surface)
+    return max_dist
+
+
+@wp.func
+def get_distance_to_mesh_parity(mesh: wp.uint64, point: wp.vec3, max_dist: wp.float32):
+    """Signed distance using parity-based ray-cast for inside/outside classification.
+
+    Cheaper than :func:`get_distance_to_mesh` (no winding-number accumulation)
+    but requires a watertight mesh for correct results.
+    """
+    res = wp.mesh_query_point_sign_parity(mesh, point, max_dist)
+    if res.result:
+        closest = wp.mesh_eval_position(mesh, res.face, res.u, res.v)
+        return res.sign * wp.length(closest - point)
     return max_dist
 
 
