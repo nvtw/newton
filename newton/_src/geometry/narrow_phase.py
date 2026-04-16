@@ -1643,24 +1643,13 @@ class NarrowPhase:
                 # Empty arrays for when hydroelastic is disabled
                 self.shape_pairs_sdf_sdf = None
 
-        # Secondary CUDA stream for overlapping independent kernel groups.
-        # GJK/MPR is independent of the mesh pipeline and can run concurrently.
-        # The event pair provides GPU-side synchronization compatible with CUDA
-        # graph capture.
-        device_obj = wp.get_device(device)
-        if device_obj.is_cuda:
-            self._gjk_stream = wp.Stream(device)
-            self._primitive_done_event = wp.Event(device)
-            self._gjk_done_event = wp.Event(device)
-        else:
-            self._gjk_stream = None
-            self._primitive_done_event = None
-            self._gjk_done_event = None
-
         # Fixed thread count for kernel launches
         # Use a reasonable minimum for GPU occupancy (256 blocks = 32K threads)
         # but scale with expected workload to avoid massive overprovisioning.
         # 256 blocks provides good occupancy on most GPUs (2-4 blocks per SM).
+
+        # Query GPU properties to compute appropriate thread limits
+        device_obj = wp.get_device(device)
         if device_obj.is_cuda:
             # Use 4 blocks per SM as a reasonable upper bound for occupancy
             # This balances parallelism with resource utilization
@@ -1797,61 +1786,30 @@ class NarrowPhase:
             record_tape=False,
         )
 
-        # Stage 2: Launch GJK/MPR kernel for remaining convex pairs.
-        # GJK/MPR is independent of the mesh pipeline (they read different
-        # intermediate buffers and write contacts via atomics) so it runs on a
-        # secondary CUDA stream to overlap with the mesh work that follows.
-        gjk_stream = self._gjk_stream
-        if gjk_stream is not None:
-            default_stream = wp.get_stream(device)
-            # Record event after primitive kernel completes (GJK/MPR reads its output).
-            default_stream.record_event(self._primitive_done_event)
-            gjk_stream.wait_event(self._primitive_done_event)
-            wp.launch(
-                kernel=self.narrow_phase_kernel,
-                dim=self.total_num_threads,
-                inputs=[
-                    self.gjk_candidate_pairs,
-                    self.gjk_candidate_pairs_count,
-                    shape_types,
-                    shape_data,
-                    shape_transform,
-                    shape_source,
-                    shape_gap,
-                    shape_collision_radius,
-                    self.shape_aabb_lower,
-                    self.shape_aabb_upper,
-                    writer_data,
-                    self.total_num_threads,
-                ],
-                device=device,
-                stream=gjk_stream,
-                block_dim=self.block_dim,
-                record_tape=False,
-            )
-            gjk_stream.record_event(self._gjk_done_event)
-        else:
-            wp.launch(
-                kernel=self.narrow_phase_kernel,
-                dim=self.total_num_threads,
-                inputs=[
-                    self.gjk_candidate_pairs,
-                    self.gjk_candidate_pairs_count,
-                    shape_types,
-                    shape_data,
-                    shape_transform,
-                    shape_source,
-                    shape_gap,
-                    shape_collision_radius,
-                    self.shape_aabb_lower,
-                    self.shape_aabb_upper,
-                    writer_data,
-                    self.total_num_threads,
-                ],
-                device=device,
-                block_dim=self.block_dim,
-                record_tape=False,
-            )
+        # Stage 2: Launch GJK/MPR kernel for remaining convex pairs
+        # These are pairs that couldn't be handled analytically (box, cylinder, cone, convex hull, etc.)
+        # All routing has been done by the primitive kernel, so this kernel just does GJK/MPR.
+        wp.launch(
+            kernel=self.narrow_phase_kernel,
+            dim=self.total_num_threads,
+            inputs=[
+                self.gjk_candidate_pairs,
+                self.gjk_candidate_pairs_count,
+                shape_types,
+                shape_data,
+                shape_transform,
+                shape_source,
+                shape_gap,
+                shape_collision_radius,
+                self.shape_aabb_lower,
+                self.shape_aabb_upper,
+                writer_data,
+                self.total_num_threads,
+            ],
+            device=device,
+            block_dim=self.block_dim,
+            record_tape=False,
+        )
 
         # Skip mesh/heightfield kernels when no meshes or heightfields are present
         if self.has_meshes or self.has_heightfields:
@@ -2137,10 +2095,6 @@ class NarrowPhase:
                 self.shape_pairs_sdf_sdf_count,
                 writer_data,
             )
-
-        # Wait for GJK/MPR stream to finish before verification reads contact_count.
-        if self._gjk_stream is not None:
-            wp.get_stream(device).wait_event(self._gjk_done_event)
 
         # Verify no collision pipeline buffers overflowed
         wp.launch(
