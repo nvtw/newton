@@ -683,18 +683,8 @@ def create_narrow_phase_kernel_gjk_mpr(
             if is_infinite_plane_a and is_infinite_plane_b:
                 continue
 
-            # Quick center-distance rejection for non-plane pairs.
-            # length(scale) is a conservative bounding sphere radius (exact for boxes,
-            # tight for most convex shapes). Skips the expensive MPR/GJK solve when
-            # shapes are clearly separated despite AABB overlap.
-            if not is_infinite_plane_a and not is_infinite_plane_b:
-                gap_a = shape_gap[shape_a]
-                gap_b = shape_gap[shape_b]
-                threshold = wp.length(scale_a) + wp.length(scale_b) + gap_a + gap_b + margin_offset_a + margin_offset_b
-                dist_sq = wp.length_sq(pos_b - pos_a)
-                if dist_sq > threshold * threshold:
-                    continue
-
+            # Bounding sphere check is only needed for infinite plane pairs.
+            # For non-plane pairs with external AABBs, SAP already verified AABB overlap.
             bsphere_radius_a = float(0.0)
             bsphere_radius_b = float(0.0)
             has_infinite_plane = is_infinite_plane_a or is_infinite_plane_b
