@@ -410,6 +410,7 @@ class BroadPhaseExplicit:
         candidate_pair: wp.array[wp.vec2i],  # Array to store overlapping shape pairs
         candidate_pair_count: wp.array[int],
         device: Devicelike | None = None,  # Device to launch on
+        skip_count_zero: bool = False,  # Skip candidate_pair_count.zero_() if already zeroed
     ) -> None:
         """Launch the explicit pairs broad phase collision detection.
 
@@ -434,7 +435,8 @@ class BroadPhaseExplicit:
 
         max_candidate_pair = candidate_pair.shape[0]
 
-        candidate_pair_count.zero_()
+        if not skip_count_zero:
+            candidate_pair_count.zero_()
 
         if device is None:
             device = shape_lower.device

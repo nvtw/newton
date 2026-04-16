@@ -898,6 +898,7 @@ class CollisionPipeline:
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
                 device=self.device,
+                skip_count_zero=True,  # Already zeroed by compute_shape_aabbs
             )
 
         # Create ContactWriterData struct for custom contact writing
