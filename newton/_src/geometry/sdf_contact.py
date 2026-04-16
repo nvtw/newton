@@ -1275,7 +1275,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     synchronize()
                     if t == 0:
                         selected_edges[edge_capacity] = 0
-                    synchronize()
+                    # No sync needed here: find_interesting_edges starts with
+                    # synchronize() which ensures all threads see the reset.
 
     # Return early if contact reduction is disabled
     if not reduce_contacts:
@@ -1576,6 +1577,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     synchronize()
                     if t == 0:
                         selected_edges[edge_capacity] = 0
-                    synchronize()
+                    # No sync needed here: find_interesting_edges starts with
+                    # synchronize() which ensures all threads see the reset.
 
     return mesh_sdf_collision_global_reduce_kernel
