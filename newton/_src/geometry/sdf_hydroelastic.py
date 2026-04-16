@@ -55,7 +55,14 @@ from .contact_reduction_hydroelastic import (
     export_hydroelastic_contact_to_buffer,
 )
 from .hashtable import hashtable_find_or_insert
-from .sdf_mc import get_mc_tables, get_triangle_fraction
+from .sdf_mc import (
+    MC_DEGENERATE_N_SQ_EPS,
+    MC_EDGE_CLAMP_MAX,
+    MC_EDGE_CLAMP_MIN,
+    MC_EDGE_VAL_DIFF_EPS,
+    get_mc_tables,
+    get_triangle_fraction,
+)
 from .sdf_texture import TextureSDFData, texture_sample_sdf, texture_sample_sdf_at_voxel
 from .utils import scan_with_total
 
@@ -132,15 +139,15 @@ def mc_calc_face_texture(
         p_0 = wp.vec3f(corner_offsets_table[v_idx_from])
         p_1 = wp.vec3f(corner_offsets_table[v_idx_to])
         val_diff = wp.float32(val_1 - val_0)
-        if wp.abs(val_diff) < 1.0e-10:
+        if wp.abs(val_diff) < wp.static(MC_EDGE_VAL_DIFF_EPS):
             t = float(0.5)
         else:
             # Clamp t away from cube corners to prevent vertex collapse when
             # corner values are near zero (e.g. at SDF ridge boundaries where
             # both shapes share the same nearest face).  Without the clamp,
-            # t ≈ 0 or t ≈ 1 places multiple vertices at the same corner,
+            # t close to 0 or 1 places multiple vertices at the same corner,
             # producing degenerate (zero-area) triangles.
-            t = wp.clamp((0.0 - val_0) / val_diff, 0.02, 0.98)
+            t = wp.clamp((0.0 - val_0) / val_diff, wp.static(MC_EDGE_CLAMP_MIN), wp.static(MC_EDGE_CLAMP_MAX))
         p = p_0 + t * (p_1 - p_0)
         vol_idx = p + int_to_vec3f(x_id, y_id, z_id)
         local_pos = sdf_a.sdf_box_lower + wp.cw_mul(vol_idx, sdf_a.voxel_size)
@@ -155,7 +162,7 @@ def mc_calc_face_texture(
 
     n = wp.cross(face_verts[1] - face_verts[0], face_verts[2] - face_verts[0])
     n_sq = wp.dot(n, n)
-    if n_sq < 1.0e-30:
+    if n_sq < wp.static(MC_DEGENERATE_N_SQ_EPS):
         # Degenerate triangle — return zero area with a valid (non-NaN) normal.
         area = 0.0
         normal = wp.vec3(0.0, 0.0, 1.0)
@@ -1532,6 +1539,8 @@ def get_generate_contacts_kernel(
                     y_id,
                     z_id,
                 )
+                if area <= 0.0:
+                    continue
                 # Accumulate stats per normal bin
                 if pen_depth < 0.0:
                     bin_id = get_slot(normal)

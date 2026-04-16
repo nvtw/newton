@@ -1238,7 +1238,7 @@ add_function_test(
 
 
 def test_no_degenerate_triangles_deep_penetration(test, device):
-    """Verify marching cubes produces no zero-area triangles under deep interpenetration.
+    """Verify marching cubes produces no zero-area triangles and fewer than 2% near-degenerate triangles under deep interpenetration.
 
     Two hydroelastic boxes with controlled overlap are tested at multiple
     penetration depths and stiffness ratios.  The isosurface should be free
@@ -1268,6 +1268,7 @@ def test_no_degenerate_triangles_deep_penetration(test, device):
         (0.05, 1e10, 1e10, "equal stiffness 25% overlap"),
         (0.10, 1e10, 1e10, "equal stiffness 50% overlap"),
         (0.15, 1e10, 1e10, "equal stiffness 75% overlap"),
+        (0.19, 1e10, 1e10, "equal stiffness 95% overlap"),
         (0.10, 1e10, 1e8, "asymmetric stiffness 50% overlap"),
     ]
 
