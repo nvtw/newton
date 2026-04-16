@@ -593,8 +593,6 @@ def _clear_active_kernel(
     # Counter arrays to zero (merged from _zero_count_and_contacts_kernel)
     contact_count: wp.array[wp.int32],
     ht_insert_failures: wp.array[wp.int32],
-    # Generation counter for exported_flags deduplication (avoids full-array zero)
-    dedup_generation: wp.array[wp.int32],
     ht_capacity: int,
     values_per_key: int,
     num_threads: int,
@@ -610,19 +608,11 @@ def _clear_active_kernel(
     """
     tid = wp.tid()
 
-    # Thread 0 zeros the counters and bumps the dedup generation.
+    # Thread 0 zeros the counters (previously a separate kernel launch)
     if tid == 0:
         ht_active_slots[ht_capacity] = 0
         contact_count[0] = 0
         ht_insert_failures[0] = 0
-        # Bump dedup generation (wraps before overflow so exported_flags
-        # values from old frames never alias the current generation)
-        g = dedup_generation[0]
-        if g >= 2147483646:
-            g = 1
-        else:
-            g = g + 1
-        dedup_generation[0] = g
 
     # Read count from GPU - stored at active_slots[capacity]
     count = ht_active_slots[ht_capacity]
@@ -757,10 +747,8 @@ class GlobalContactReducer:
             self.contact_area = wp.zeros(0, dtype=wp.float32, device=device)
             self.contact_nbin_entry = wp.zeros(0, dtype=wp.int32, device=device)
 
-        # Per-contact dedup flags for cross-entry deduplication during export.
-        # Uses generation-based stamping so the array never needs a full zero.
+        # Per-contact dedup flags for cross-entry deduplication during export
         self.exported_flags = wp.zeros(capacity, dtype=wp.int32, device=device)
-        self._dedup_generation = wp.ones(1, dtype=wp.int32, device=device)
 
         # Atomic counter for contact allocation
         self.contact_count = wp.zeros(1, dtype=wp.int32, device=device)
@@ -828,7 +816,7 @@ class GlobalContactReducer:
         # Use fixed thread count for efficient GPU utilization
         num_threads = min(1024, self.hashtable.capacity)
 
-        # Single kernel clears entries, zeros counters, and bumps dedup generation
+        # Single kernel clears entries and zeros counters
         wp.launch(
             _clear_active_kernel,
             dim=num_threads,
@@ -847,7 +835,6 @@ class GlobalContactReducer:
                 self.agg_moment2_reduced,
                 self.contact_count,
                 self.ht_insert_failures,
-                self._dedup_generation,
                 self.hashtable.capacity,
                 self.values_per_key,
                 num_threads,
@@ -1345,10 +1332,8 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
         normal: wp.array[wp.vec2],  # Octahedral-encoded
         shape_pairs: wp.array[wp.vec2i],
         contact_fingerprints: wp.array[wp.int32],
-        # Generation-based dedup: avoids zeroing the large flags array each frame.
-        # A contact is already-exported when its flag == dedup_generation.
+        # Global dedup flags: one int per buffer contact, for cross-entry deduplication
         exported_flags: wp.array[wp.int32],
-        dedup_generation: wp.array[wp.int32],
         # Shape data for extracting margin and effective radius
         shape_types: wp.array[int],
         shape_data: wp.array[wp.vec4],
@@ -1365,12 +1350,10 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
 
         Uses grid stride loop to iterate over active hashtable ENTRIES.
         For each entry, reads all value slots, collects unique contact IDs,
-        and exports each unique contact once. Uses generation-stamped flags
-        for cross-entry deduplication — avoids zeroing the large flags array.
+        and exports each unique contact once. Uses atomic flags per contact_id
+        for cross-entry deduplication (same contact winning multiple entries).
         """
         tid = wp.tid()
-
-        gen = dedup_generation[0]
 
         # Get number of active entries (stored at index = ht_capacity)
         ht_capacity = ht_keys.shape[0]
@@ -1408,10 +1391,10 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
                 exported_ids[num_exported] = contact_id
                 num_exported = num_exported + 1
 
-                # Cross-entry dedup via generation stamp: first thread to set
-                # the flag to the current generation wins the export.
-                old_gen = wp.atomic_max(exported_flags, contact_id, gen)
-                if old_gen >= gen:
+                # Cross-entry dedup: same contact can win slots in different entries
+                # (e.g., normal-bin AND voxel entry). Atomic flag per contact_id.
+                old_flag = wp.atomic_add(exported_flags, contact_id, 1)
+                if old_flag > 0:
                     continue
 
                 # Unpack contact data
