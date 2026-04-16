@@ -198,8 +198,7 @@ def compute_shape_aabbs(
     # Check if this is an infinite plane, mesh, or heightfield
     scale = shape_scale[shape_id]
     is_infinite_plane = (geo_type == GeoType.PLANE) and (scale[0] == 0.0 and scale[1] == 0.0)
-    is_mesh = geo_type == GeoType.MESH
-    is_hfield = geo_type == GeoType.HFIELD
+    has_local_aabb = geo_type == GeoType.MESH or geo_type == GeoType.HFIELD or geo_type == GeoType.CONVEX_MESH
 
     if is_infinite_plane:
         # Bounding sphere fallback for infinite planes
@@ -207,7 +206,7 @@ def compute_shape_aabbs(
         half_extents = wp.vec3(radius, radius, radius)
         aabb_lower[shape_id] = pos - half_extents - margin_vec
         aabb_upper[shape_id] = pos + half_extents + margin_vec
-    elif is_mesh or is_hfield:
+    elif has_local_aabb:
         # Tight local AABB transformed to world space.
         # Scale is already baked into shape_collision_aabb by the builder,
         # so we only need to handle the rotation here.
