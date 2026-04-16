@@ -651,6 +651,7 @@ def create_narrow_phase_kernel_gjk_mpr(
     The remaining pairs are complex convex-convex (plane-box, plane-cylinder,
     plane-cone, box-box, cylinder-cylinder, etc.) that need GJK/MPR.
 
+
     Args:
         speculative: When True, extends ``gap_sum`` by a scalar speculative
             margin derived from per-shape velocity arrays.
