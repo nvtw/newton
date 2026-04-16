@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
 import warp as wp
 
 UNRESOLVED = wp.constant(wp.vec3i(-1, -1, -1))
@@ -43,6 +42,12 @@ SIGN_INSIDE = wp.constant(wp.int32(-1))
 @wp.func
 def _jfa_idx(x: int, y: int, z: int, sx: int, sy: int) -> int:
     return z * sx * sy + y * sx + x
+
+
+@wp.kernel
+def _init_unresolved_kernel(dst: wp.array[wp.vec3i]):
+    """Fill every element with ``(-1, -1, -1)`` (unresolved sentinel)."""
+    dst[wp.tid()] = UNRESOLVED
 
 
 # ---- Phase 1: scanline sign fill ----
@@ -256,13 +261,109 @@ def _extract_sdf_kernel(
 # ---- Host-side orchestration ----
 
 
+class JFABuffers:
+    """Pre-allocated GPU buffers for the JFA pipeline.
+
+    Separating allocation from kernel launches allows the compute phase to
+    run inside ``wp.ScopedCapture`` for CUDA graph recording.
+    """
+
+    def __init__(
+        self,
+        grid_size_x: int,
+        grid_size_y: int,
+        grid_size_z: int,
+        device: str = "cuda",
+    ):
+        total = grid_size_x * grid_size_y * grid_size_z
+        self.sign_grid = wp.zeros(total, dtype=wp.int32, device=device)
+        self.closest_a = wp.zeros(total, dtype=wp.vec3i, device=device)
+        self.closest_b = wp.zeros(total, dtype=wp.vec3i, device=device)
+        self.sdf_out = wp.zeros(total, dtype=float, device=device)
+        self.total = total
+
+
+def _launch_jfa_kernels(
+    mesh: wp.Mesh,
+    grid_size_x: int,
+    grid_size_y: int,
+    grid_size_z: int,
+    min_corner_wp: wp.vec3,
+    cell_size_wp: wp.vec3,
+    buffers: JFABuffers,
+    device: str = "cuda",
+) -> None:
+    """Launch all JFA kernels into *buffers* — safe to call inside ``wp.ScopedCapture``.
+
+    All GPU memory must be pre-allocated in *buffers*; this function performs
+    only kernel launches with no allocations or CPU-GPU transfers.
+    """
+    total = buffers.total
+
+    # Phase 1: scanline sign fill
+    num_cols = grid_size_y * grid_size_z
+    wp.launch(
+        _scanline_sign_kernel,
+        dim=num_cols,
+        inputs=[mesh.id, buffers.sign_grid, min_corner_wp, cell_size_wp, grid_size_x, grid_size_y, grid_size_z],
+        device=device,
+    )
+
+    # Phase 2: seed boundary voxels
+    wp.launch(_init_unresolved_kernel, dim=total, inputs=[buffers.closest_a], device=device)
+    wp.launch(
+        _seed_boundary_kernel,
+        dim=total,
+        inputs=[buffers.sign_grid, buffers.closest_a, grid_size_x, grid_size_y, grid_size_z],
+        device=device,
+    )
+
+    # Phase 3: JFA passes with ping-pong buffers
+    max_dim = max(grid_size_x, grid_size_y, grid_size_z)
+    num_passes = max(1, int(math.ceil(math.log2(max_dim))))
+
+    a_src = True
+    for i in range(num_passes):
+        step = 1 << (num_passes - 1 - i)
+        s = buffers.closest_a if a_src else buffers.closest_b
+        d = buffers.closest_b if a_src else buffers.closest_a
+        wp.launch(
+            _jfa_pass_kernel,
+            dim=total,
+            inputs=[s, d, step, grid_size_x, grid_size_y, grid_size_z],
+            device=device,
+        )
+        a_src = not a_src
+
+    # JFA+1 and JFA+2 refinement passes
+    for extra_step in (2, 1):
+        s = buffers.closest_a if a_src else buffers.closest_b
+        d = buffers.closest_b if a_src else buffers.closest_a
+        wp.launch(
+            _jfa_pass_kernel,
+            dim=total,
+            inputs=[s, d, extra_step, grid_size_x, grid_size_y, grid_size_z],
+            device=device,
+        )
+        a_src = not a_src
+
+    # Phase 4: extract signed distance
+    final = buffers.closest_a if a_src else buffers.closest_b
+    wp.launch(
+        _extract_sdf_kernel,
+        dim=total,
+        inputs=[buffers.sign_grid, final, buffers.sdf_out, cell_size_wp, grid_size_x, grid_size_y, grid_size_z],
+        device=device,
+    )
+
+
 def compute_dense_sdf_jfa(
     mesh: wp.Mesh,
     grid_size_x: int,
     grid_size_y: int,
     grid_size_z: int,
-    cell_size: np.ndarray,
-    min_corner: np.ndarray,
+    cell_size,
+    min_corner,
     device: str = "cuda",
 ) -> wp.array:
     """Compute a dense signed distance field using scanline sign + 3D JFA.
@@ -286,65 +387,18 @@ def compute_dense_sdf_jfa(
         ``wp.array[float]`` of length ``grid_size_x * grid_size_y * grid_size_z``
         containing the signed distance at each voxel (row-major XYZ order).
     """
-    total = grid_size_x * grid_size_y * grid_size_z
     mc = wp.vec3(float(min_corner[0]), float(min_corner[1]), float(min_corner[2]))
     cs = wp.vec3(float(cell_size[0]), float(cell_size[1]), float(cell_size[2]))
 
-    sign_grid = wp.zeros(total, dtype=wp.int32, device=device)
-
-    # Phase 1: scanline sign fill (one ray per Y*Z column)
-    num_cols = grid_size_y * grid_size_z
-    wp.launch(
-        _scanline_sign_kernel, dim=num_cols,
-        inputs=[mesh.id, sign_grid, mc, cs, grid_size_x, grid_size_y, grid_size_z],
+    buffers = JFABuffers(grid_size_x, grid_size_y, grid_size_z, device=device)
+    _launch_jfa_kernels(
+        mesh,
+        grid_size_x,
+        grid_size_y,
+        grid_size_z,
+        mc,
+        cs,
+        buffers,
         device=device,
     )
-
-    # Phase 2: seed boundary voxels
-    unresolved_np = np.full((total, 3), -1, dtype=np.int32)
-    closest_a = wp.array(unresolved_np, dtype=wp.vec3i, device=device)
-    wp.launch(
-        _seed_boundary_kernel, dim=total,
-        inputs=[sign_grid, closest_a, grid_size_x, grid_size_y, grid_size_z],
-        device=device,
-    )
-
-    # Phase 3: JFA passes with ping-pong buffers
-    closest_b = wp.zeros(total, dtype=wp.vec3i, device=device)
-
-    max_dim = max(grid_size_x, grid_size_y, grid_size_z)
-    num_passes = max(1, int(math.ceil(math.log2(max_dim))))
-
-    a_src = True
-    for i in range(num_passes):
-        step = 1 << (num_passes - 1 - i)
-        s = closest_a if a_src else closest_b
-        d = closest_b if a_src else closest_a
-        wp.launch(
-            _jfa_pass_kernel, dim=total,
-            inputs=[s, d, step, grid_size_x, grid_size_y, grid_size_z],
-            device=device,
-        )
-        a_src = not a_src
-
-    # JFA+1 and JFA+2 refinement passes
-    for extra_step in (2, 1):
-        s = closest_a if a_src else closest_b
-        d = closest_b if a_src else closest_a
-        wp.launch(
-            _jfa_pass_kernel, dim=total,
-            inputs=[s, d, extra_step, grid_size_x, grid_size_y, grid_size_z],
-            device=device,
-        )
-        a_src = not a_src
-
-    # Phase 4: extract signed distance
-    sdf_out = wp.zeros(total, dtype=float, device=device)
-    final = closest_a if a_src else closest_b
-    wp.launch(
-        _extract_sdf_kernel, dim=total,
-        inputs=[sign_grid, final, sdf_out, cs, grid_size_x, grid_size_y, grid_size_z],
-        device=device,
-    )
-
-    return sdf_out
+    return buffers.sdf_out

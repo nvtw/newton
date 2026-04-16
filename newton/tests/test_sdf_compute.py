@@ -20,6 +20,7 @@ import warp as wp
 
 import newton
 from newton import GeoType, Mesh
+from newton._src.geometry.sdf_texture import TextureSDFData, texture_sample_sdf
 from newton._src.geometry.sdf_utils import (
     SDF,
     SDFData,
@@ -30,7 +31,6 @@ from newton._src.geometry.sdf_utils import (
     sample_sdf_extrapolated,
     sample_sdf_grad_extrapolated,
 )
-from newton._src.geometry.sdf_texture import TextureSDFData, texture_sample_sdf
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
 
 # Skip all tests in this module if CUDA is not available
@@ -321,8 +321,8 @@ class TestComputeSDF(unittest.TestCase):
 
         test_points = np.array(
             [
-                [0.0, 0.0, 0.0],   # Center
-                [0.2, 0.2, 0.2],   # Interior
+                [0.0, 0.0, 0.0],  # Center
+                [0.2, 0.2, 0.2],  # Interior
                 [-0.2, -0.2, -0.2],
             ],
             dtype=np.float32,
@@ -339,7 +339,7 @@ class TestComputeSDF(unittest.TestCase):
         test_points = np.array(
             [
                 [0.45, 0.0, 0.0],  # Just inside +X face
-                [0.0, 0.0, 0.0],   # Center
+                [0.0, 0.0, 0.0],  # Center
             ],
             dtype=np.float32,
         )
@@ -1616,6 +1616,150 @@ class TestSDFWatertightFastPath(unittest.TestCase):
         self.assertGreater(float(vals[1]), 0.0, "Point outside box should have positive SDF")
 
         mesh.clear_sdf()
+
+    def test_torus_watertight_sign_grid(self):
+        """Non-convex torus: sign mismatches should be < 5% of sampled points.
+
+        JFA's scanline sign fill can differ from winding numbers at a few
+        boundary voxels on complex non-convex geometry.  We allow up to 5%
+        mismatches (all near the surface) while catching gross errors.
+        """
+        mesh = _create_torus_mesh(major_r=0.4, minor_r=0.15, n_major=24, n_minor=12)
+        self.assertTrue(mesh.is_watertight, "Torus mesh should be watertight")
+
+        mesh._is_watertight = False
+        sdf_winding = SDF.create_from_mesh(mesh, max_resolution=32, texture_format="float32")
+        mesh._is_watertight = None
+
+        mesh._is_watertight = True
+        sdf_fast = SDF.create_from_mesh(mesh, max_resolution=32, texture_format="float32")
+        mesh._is_watertight = None
+
+        pts = []
+        for z in np.linspace(-0.7, 0.7, 10):
+            for y in np.linspace(-0.7, 0.7, 10):
+                for x in np.linspace(-0.7, 0.7, 10):
+                    pts.append([x, y, z])
+        pts_np = np.array(pts, dtype=np.float32)
+
+        vals_w = _sample_texture_sdf_at_points(sdf_winding, pts_np)
+        vals_f = _sample_texture_sdf_at_points(sdf_fast, pts_np)
+
+        sign_w = np.sign(vals_w)
+        sign_f = np.sign(vals_f)
+        mismatches = int(np.sum(sign_w != sign_f))
+        max_allowed = int(0.05 * len(pts))
+        self.assertLessEqual(
+            mismatches,
+            max_allowed,
+            f"{mismatches}/{len(pts)} voxels ({mismatches / len(pts) * 100:.1f}%) have sign mismatch on torus "
+            f"(tolerance: {max_allowed}, 5%)",
+        )
+        mesh.clear_sdf()
+
+    def test_watertight_distance_accuracy_sphere(self):
+        """Distance error between fast and winding paths should be within 5 voxel-sizes.
+
+        JFA propagates distances approximately (via flood fill), so exact agreement
+        with per-voxel BVH queries is not expected.  Five voxel-sizes is generous
+        enough to accommodate JFA rounding while catching large-scale failures.
+        """
+        mesh = create_sphere_mesh(0.5, subdivisions=2)
+        res = 32
+
+        mesh._is_watertight = False
+        sdf_w = SDF.create_from_mesh(mesh, max_resolution=res, texture_format="float32")
+        mesh._is_watertight = None
+
+        mesh._is_watertight = True
+        sdf_f = SDF.create_from_mesh(mesh, max_resolution=res, texture_format="float32")
+        mesh._is_watertight = None
+
+        pts = []
+        for z in np.linspace(-0.6, 0.6, 12):
+            for y in np.linspace(-0.6, 0.6, 12):
+                for x in np.linspace(-0.6, 0.6, 12):
+                    pts.append([x, y, z])
+        pts_np = np.array(pts, dtype=np.float32)
+
+        vals_w = _sample_texture_sdf_at_points(sdf_w, pts_np)
+        vals_f = _sample_texture_sdf_at_points(sdf_f, pts_np)
+
+        points_np = mesh.vertices
+        extent = np.max(points_np, axis=0) - np.min(points_np, axis=0)
+        voxel_size = float(np.max(extent)) / res
+
+        max_err = float(np.max(np.abs(vals_w - vals_f)))
+        self.assertLess(
+            max_err,
+            5.0 * voxel_size,
+            f"Max distance error {max_err:.6f} exceeds 5*voxel_size={5.0 * voxel_size:.6f}",
+        )
+        mesh.clear_sdf()
+
+    def test_watertight_distance_accuracy_box(self):
+        """Distance error between fast and winding paths should be within 5 voxel-sizes."""
+        mesh = create_box_mesh((0.4, 0.3, 0.5))
+        res = 32
+
+        mesh._is_watertight = False
+        sdf_w = SDF.create_from_mesh(mesh, max_resolution=res, texture_format="float32")
+        mesh._is_watertight = None
+
+        mesh._is_watertight = True
+        sdf_f = SDF.create_from_mesh(mesh, max_resolution=res, texture_format="float32")
+        mesh._is_watertight = None
+
+        pts = []
+        for z in np.linspace(-0.6, 0.6, 12):
+            for y in np.linspace(-0.4, 0.4, 12):
+                for x in np.linspace(-0.5, 0.5, 12):
+                    pts.append([x, y, z])
+        pts_np = np.array(pts, dtype=np.float32)
+
+        vals_w = _sample_texture_sdf_at_points(sdf_w, pts_np)
+        vals_f = _sample_texture_sdf_at_points(sdf_f, pts_np)
+
+        points_np = mesh.vertices
+        extent = np.max(points_np, axis=0) - np.min(points_np, axis=0)
+        voxel_size = float(np.max(extent)) / res
+
+        max_err = float(np.max(np.abs(vals_w - vals_f)))
+        self.assertLess(
+            max_err,
+            5.0 * voxel_size,
+            f"Max distance error {max_err:.6f} exceeds 5*voxel_size={5.0 * voxel_size:.6f}",
+        )
+        mesh.clear_sdf()
+
+
+def _create_torus_mesh(major_r: float = 0.4, minor_r: float = 0.15, n_major: int = 24, n_minor: int = 12) -> Mesh:
+    """Create a watertight torus mesh centered at the origin (non-convex)."""
+    verts = []
+    for i in range(n_major):
+        theta = 2.0 * np.pi * i / n_major
+        ct, st = np.cos(theta), np.sin(theta)
+        for j in range(n_minor):
+            phi = 2.0 * np.pi * j / n_minor
+            cp, sp = np.cos(phi), np.sin(phi)
+            r = major_r + minor_r * cp
+            verts.append([r * ct, minor_r * sp, r * st])
+    verts = np.array(verts, dtype=np.float32)
+
+    faces = []
+    for i in range(n_major):
+        i_next = (i + 1) % n_major
+        for j in range(n_minor):
+            j_next = (j + 1) % n_minor
+            a = i * n_minor + j
+            b = i_next * n_minor + j
+            c = i_next * n_minor + j_next
+            d = i * n_minor + j_next
+            faces.append([a, b, c])
+            faces.append([a, c, d])
+    indices = np.array(faces, dtype=np.int32).flatten()
+
+    return Mesh(verts, indices)
 
 
 # Register CUDA-only tests using the standard pattern
