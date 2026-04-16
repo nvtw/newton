@@ -535,22 +535,8 @@ def _populate_subgrid_texture_uint8_kernel(
 # ============================================================================
 
 
-@wp.func
-def _parity_signed_distance(mesh: wp.uint64, point: wp.vec3, max_dist: float) -> float:
-    """Signed distance using parity-based inside/outside classification.
-
-    Single BVH traversal returns both the closest point and the sign.
-    Requires a watertight mesh.
-    """
-    res = wp.mesh_query_point_sign_parity(mesh, point, max_dist)
-    if res.result:
-        cp = wp.mesh_eval_position(mesh, res.face, res.u, res.v)
-        return res.sign * wp.length(cp - point)
-    return max_dist
-
-
 @wp.kernel
-def _build_coarse_sdf_unsigned_kernel(
+def _build_coarse_sdf_parity_kernel(
     mesh: wp.uint64,
     background_sdf: wp.array[float],
     min_corner: wp.vec3,
@@ -576,11 +562,11 @@ def _build_coarse_sdf_unsigned_kernel(
         float(gy) * cell_size[1],
         float(gz) * cell_size[2],
     )
-    background_sdf[tid] = _parity_signed_distance(mesh, pos, 10000.0)
+    background_sdf[tid] = get_distance_to_mesh_parity(mesh, pos, 10000.0)
 
 
 @wp.kernel
-def _check_subgrid_occupied_unsigned_kernel(
+def _check_subgrid_occupied_parity_kernel(
     mesh: wp.uint64,
     threshold: wp.vec2f,
     subgrid_required: wp.array[wp.int32],
@@ -603,7 +589,7 @@ def _check_subgrid_occupied_unsigned_kernel(
         float(gy) * cell_size[1],
         float(gz) * cell_size[2],
     )
-    signed_distance = _parity_signed_distance(mesh, sample_pos, 10000.0)
+    signed_distance = get_distance_to_mesh_parity(mesh, sample_pos, 10000.0)
 
     if _is_in_narrow_band(signed_distance, threshold):
         subgrid_required[tid] = 1
@@ -612,7 +598,7 @@ def _check_subgrid_occupied_unsigned_kernel(
 
 
 @wp.kernel
-def _fused_populate_unsigned_float32_kernel(
+def _fused_populate_parity_float32_kernel(
     mesh: wp.uint64,
     background_sdf: wp.array[float],
     subgrid_occupied: wp.array[wp.int32],
@@ -667,7 +653,7 @@ def _fused_populate_unsigned_float32_kernel(
         float(gy) * cell_size[1],
         float(gz) * cell_size[2],
     )
-    sdf_val = _parity_signed_distance(mesh, pos, 10000.0)
+    sdf_val = get_distance_to_mesh_parity(mesh, pos, 10000.0)
 
     address = subgrid_addresses[subgrid_idx]
     if address < 0:
@@ -698,7 +684,7 @@ def _fused_populate_unsigned_float32_kernel(
 
 
 @wp.kernel
-def _fused_populate_unsigned_uint16_kernel(
+def _fused_populate_parity_uint16_kernel(
     mesh: wp.uint64,
     background_sdf: wp.array[float],
     subgrid_occupied: wp.array[wp.int32],
@@ -755,7 +741,7 @@ def _fused_populate_unsigned_uint16_kernel(
         float(gy) * cell_size[1],
         float(gz) * cell_size[2],
     )
-    sdf_val = _parity_signed_distance(mesh, pos, 10000.0)
+    sdf_val = get_distance_to_mesh_parity(mesh, pos, 10000.0)
 
     address = subgrid_addresses[subgrid_idx]
     if address < 0:
@@ -787,7 +773,7 @@ def _fused_populate_unsigned_uint16_kernel(
 
 
 @wp.kernel
-def _fused_populate_unsigned_uint8_kernel(
+def _fused_populate_parity_uint8_kernel(
     mesh: wp.uint64,
     background_sdf: wp.array[float],
     subgrid_occupied: wp.array[wp.int32],
@@ -844,7 +830,7 @@ def _fused_populate_unsigned_uint8_kernel(
         float(gy) * cell_size[1],
         float(gz) * cell_size[2],
     )
-    sdf_val = _parity_signed_distance(mesh, pos, 10000.0)
+    sdf_val = get_distance_to_mesh_parity(mesh, pos, 10000.0)
 
     address = subgrid_addresses[subgrid_idx]
     if address < 0:
@@ -913,20 +899,6 @@ def _sample_volume_at_positions_kernel(
 # ============================================================================
 # Texture Sampling Functions (wp.func, used by collision kernels)
 # ============================================================================
-
-
-@wp.func
-def apply_subgrid_start(start_slot: wp.uint32, local_f: wp.vec3, subgrid_samples_f: float) -> wp.vec3:
-    """Apply subgrid block offset to local coordinates."""
-    block_x = float(start_slot & wp.uint32(0x3FF))
-    block_y = float((start_slot >> wp.uint32(10)) & wp.uint32(0x3FF))
-    block_z = float((start_slot >> wp.uint32(20)) & wp.uint32(0x3FF))
-
-    return wp.vec3(
-        local_f[0] + block_x * subgrid_samples_f,
-        local_f[1] + block_y * subgrid_samples_f,
-        local_f[2] + block_z * subgrid_samples_f,
-    )
 
 
 @wp.func
@@ -1340,9 +1312,9 @@ def build_sparse_sdf_from_mesh(
             which an occupied subgrid is considered linear and its high-res
             data is omitted.  ``None`` auto-computes from domain extents,
             ``0.0`` disables the optimization.
-        watertight: use the fast unsigned-BVH path (scanline ray-march
-            for sign classification, unsigned BVH queries for exact mesh
-            distance).
+        watertight: use the fast parity-based path
+            (:func:`wp.mesh_query_point_sign_parity` per sample, no dense
+            sign grid).
         use_parity: when ``True`` and *watertight* is ``False``, use
             :func:`wp.mesh_query_point_sign_parity` for inside/outside
             classification instead of the winding-number query.  Cheaper
@@ -1381,7 +1353,7 @@ def build_sparse_sdf_from_mesh(
     if watertight:
         background_sdf = wp.zeros(total_bg, dtype=float, device=device)
         wp.launch(
-            _build_coarse_sdf_unsigned_kernel,
+            _build_coarse_sdf_parity_kernel,
             dim=total_bg,
             inputs=[
                 mesh.id,
@@ -1399,7 +1371,7 @@ def build_sparse_sdf_from_mesh(
         subgrid_required = wp.zeros(total_subgrids, dtype=wp.int32, device=device)
         threshold = wp.vec2f(-narrow_band_thickness - subgrid_radius, narrow_band_thickness + subgrid_radius)
         wp.launch(
-            _check_subgrid_occupied_unsigned_kernel,
+            _check_subgrid_occupied_parity_kernel,
             dim=total_subgrids,
             inputs=[
                 mesh.id,
@@ -1576,7 +1548,7 @@ def build_sparse_sdf_from_mesh(
             subgrid_texture_gpu = wp.zeros(total_tex_samples, dtype=float, device=device)
             if watertight:
                 wp.launch(
-                    _fused_populate_unsigned_float32_kernel,
+                    _fused_populate_parity_float32_kernel,
                     dim=total_work,
                     inputs=[
                         *_fused_common,
@@ -1617,7 +1589,7 @@ def build_sparse_sdf_from_mesh(
             subgrid_texture_gpu = wp.zeros(total_tex_samples, dtype=wp.uint16, device=device)
             if watertight:
                 wp.launch(
-                    _fused_populate_unsigned_uint16_kernel,
+                    _fused_populate_parity_uint16_kernel,
                     dim=total_work,
                     inputs=[
                         *_fused_common,
@@ -1662,7 +1634,7 @@ def build_sparse_sdf_from_mesh(
             subgrid_texture_gpu = wp.zeros(total_tex_samples, dtype=wp.uint8, device=device)
             if watertight:
                 wp.launch(
-                    _fused_populate_unsigned_uint8_kernel,
+                    _fused_populate_parity_uint8_kernel,
                     dim=total_work,
                     inputs=[
                         *_fused_common,
@@ -1852,9 +1824,9 @@ def create_texture_sdf_from_mesh(
         quantization_mode: :class:`QuantizationMode` value.
         winding_threshold: winding number threshold for inside/outside classification.
         scale_baked: whether shape scale was baked into the mesh vertices.
-        watertight: use the fast unsigned-BVH path (scanline ray-march
-            for sign classification, unsigned BVH queries for exact mesh
-            distance).
+        watertight: use the fast parity-based path
+            (:func:`wp.mesh_query_point_sign_parity` per sample, no dense
+            sign grid).
         use_parity: when ``True`` and *watertight* is ``False``, use
             parity ray-cast instead of winding-number sign queries.
         device: Warp device string. ``None`` uses the mesh's device.
