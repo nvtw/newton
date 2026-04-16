@@ -654,10 +654,6 @@ def create_narrow_phase_kernel_gjk_mpr(
             return
 
         for t in range(tid, num_work_items, total_num_threads):
-            # Early exit when contact buffer is full (all threads can stop)
-            if writer_data.contact_count[0] >= writer_data.contact_max:
-                return
-
             # Get shape pair (already sorted by primitive kernel)
             pair = candidate_pair[t]
             shape_a = pair[0]
