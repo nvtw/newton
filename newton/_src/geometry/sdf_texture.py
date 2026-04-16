@@ -531,148 +531,27 @@ def _populate_subgrid_texture_uint8_kernel(
 
 
 # ============================================================================
-# Watertight Fast-Path Kernels (unsigned BVH distance + scanline sign grid)
+# Watertight Fast-Path Kernels (parity-based sign per point, no dense grid)
 # ============================================================================
-
-SIGN_OUTSIDE = wp.constant(wp.int32(1))
-SIGN_INSIDE = wp.constant(wp.int32(-1))
-
-
-@wp.kernel
-def _scanline_sign_kernel(
-    mesh: wp.uint64,
-    sign_grid: wp.array[wp.int32],
-    min_corner: wp.vec3,
-    cell_size: wp.vec3,
-    size_x: int,
-    size_y: int,
-    size_z: int,
-):
-    """Fill sign for one (y, z) column by marching a ray along +x.
-
-    For each column, casts a ray from outside the domain along +x and walks
-    voxels left-to-right, flipping the sign at each surface crossing (parity
-    rule for watertight meshes).  The ray march is interleaved with the voxel
-    walk so no scratch buffer is needed.
-    """
-    tid = wp.tid()
-    total_cols = size_y * size_z
-    if tid >= total_cols:
-        return
-
-    iz = tid // size_y
-    iy = tid - iz * size_y
-
-    ray_o = wp.vec3(
-        min_corner[0] - cell_size[0],
-        min_corner[1] + float(iy) * cell_size[1],
-        min_corner[2] + float(iz) * cell_size[2],
-    )
-    ray_d = wp.vec3(1.0, 0.0, 0.0)
-    max_t = float(size_x + 2) * cell_size[0]
-    eps = cell_size[0] * 0.01
-
-    sign = SIGN_OUTSIDE
-    t_start = float(0.0)
-    next_hit = float(-1.0)
-    has_next = False
-
-    query = wp.mesh_query_ray(mesh, ray_o, ray_d, max_t)
-    if query.result:
-        next_hit = query.t
-        has_next = True
-
-    for ix in range(size_x):
-        voxel_t = (float(ix) + 1.0) * cell_size[0]
-
-        while has_next and next_hit <= voxel_t:
-            if sign == SIGN_OUTSIDE:
-                sign = SIGN_INSIDE
-            else:
-                sign = SIGN_OUTSIDE
-            t_start = next_hit + eps
-            has_next = False
-            q2 = wp.mesh_query_ray(mesh, ray_o + ray_d * t_start, ray_d, max_t - t_start)
-            if q2.result:
-                next_hit = t_start + q2.t
-                has_next = True
-
-        sign_grid[_idx3d(ix, iy, iz, size_x, size_y)] = sign
-
-
-def _build_sign_grid(
-    mesh: wp.Mesh,
-    grid_size_x: int,
-    grid_size_y: int,
-    grid_size_z: int,
-    cell_size,
-    min_corner,
-    device: str = "cuda",
-) -> wp.array:
-    """Build a per-voxel inside/outside sign grid via scanline ray-march.
-
-    Only requires a standard ``wp.Mesh`` -- no ``support_winding_number``.
-
-    Args:
-        mesh: Warp mesh.
-        grid_size_x: Grid X dimension [voxels].
-        grid_size_y: Grid Y dimension [voxels].
-        grid_size_z: Grid Z dimension [voxels].
-        cell_size: Voxel size per axis [m], shape ``(3,)``.
-        min_corner: Lower corner of the domain [m], shape ``(3,)``.
-        device: Warp device string.
-
-    Returns:
-        ``wp.array[wp.int32]`` of length ``grid_size_x * grid_size_y * grid_size_z``
-        with ``+1`` (outside) or ``-1`` (inside) per voxel.
-    """
-    mc = wp.vec3(float(min_corner[0]), float(min_corner[1]), float(min_corner[2]))
-    cs = wp.vec3(float(cell_size[0]), float(cell_size[1]), float(cell_size[2]))
-
-    total = grid_size_x * grid_size_y * grid_size_z
-    sign_grid = wp.zeros(total, dtype=wp.int32, device=device)
-
-    num_cols = grid_size_y * grid_size_z
-    wp.launch(
-        _scanline_sign_kernel,
-        dim=num_cols,
-        inputs=[mesh.id, sign_grid, mc, cs, grid_size_x, grid_size_y, grid_size_z],
-        device=device,
-    )
-    return sign_grid
 
 
 @wp.func
-def _unsigned_dist_with_sign(
-    mesh: wp.uint64,
-    point: wp.vec3,
-    max_dist: float,
-    sign_grid: wp.array[wp.int32],
-    gx: int,
-    gy: int,
-    gz: int,
-    size_x: int,
-    size_y: int,
-    size_z: int,
-) -> float:
-    """Unsigned BVH closest-point distance with sign from a pre-computed grid."""
-    query = wp.mesh_query_point_no_sign(mesh, point, max_dist)
-    if query.result:
-        cp = wp.mesh_eval_position(mesh, query.face, query.u, query.v)
-        dist = wp.length(cp - point)
-        sx = wp.clamp(gx, 0, size_x - 1)
-        sy = wp.clamp(gy, 0, size_y - 1)
-        sz = wp.clamp(gz, 0, size_z - 1)
-        idx = sz * size_x * size_y + sy * size_x + sx
-        sign = sign_grid[idx]
-        return wp.float32(sign) * dist
+def _parity_signed_distance(mesh: wp.uint64, point: wp.vec3, max_dist: float) -> float:
+    """Signed distance using parity-based inside/outside classification.
+
+    Single BVH traversal returns both the closest point and the sign.
+    Requires a watertight mesh.
+    """
+    res = wp.mesh_query_point_sign_parity(mesh, point, max_dist)
+    if res.result:
+        cp = wp.mesh_eval_position(mesh, res.face, res.u, res.v)
+        return res.sign * wp.length(cp - point)
     return max_dist
 
 
 @wp.kernel
 def _build_coarse_sdf_unsigned_kernel(
     mesh: wp.uint64,
-    sign_grid: wp.array[wp.int32],
     background_sdf: wp.array[float],
     min_corner: wp.vec3,
     cell_size: wp.vec3,
@@ -680,11 +559,8 @@ def _build_coarse_sdf_unsigned_kernel(
     bg_size_x: int,
     bg_size_y: int,
     bg_size_z: int,
-    sign_size_x: int,
-    sign_size_y: int,
-    sign_size_z: int,
 ):
-    """Populate background SDF using unsigned BVH distance + sign grid lookup."""
+    """Populate background SDF using parity-based signed distance."""
     tid = wp.tid()
     total_bg = bg_size_x * bg_size_y * bg_size_z
     if tid >= total_bg:
@@ -700,15 +576,12 @@ def _build_coarse_sdf_unsigned_kernel(
         float(gy) * cell_size[1],
         float(gz) * cell_size[2],
     )
-    background_sdf[tid] = _unsigned_dist_with_sign(
-        mesh, pos, 10000.0, sign_grid, gx, gy, gz, sign_size_x, sign_size_y, sign_size_z
-    )
+    background_sdf[tid] = _parity_signed_distance(mesh, pos, 10000.0)
 
 
 @wp.kernel
 def _check_subgrid_occupied_unsigned_kernel(
     mesh: wp.uint64,
-    sign_grid: wp.array[wp.int32],
     threshold: wp.vec2f,
     subgrid_required: wp.array[wp.int32],
     cells_per_subgrid: int,
@@ -716,11 +589,8 @@ def _check_subgrid_occupied_unsigned_kernel(
     num_subgrids_y: int,
     min_corner: wp.vec3,
     cell_size: wp.vec3,
-    sign_size_x: int,
-    sign_size_y: int,
-    sign_size_z: int,
 ):
-    """Mark subgrids that overlap the narrow band using unsigned BVH + sign grid."""
+    """Mark subgrids that overlap the narrow band using parity-based signed distance."""
     tid = wp.tid()
     coords = _id_to_xyz(tid, num_subgrids_x, num_subgrids_y)
     half = cells_per_subgrid // 2
@@ -733,9 +603,7 @@ def _check_subgrid_occupied_unsigned_kernel(
         float(gy) * cell_size[1],
         float(gz) * cell_size[2],
     )
-    signed_distance = _unsigned_dist_with_sign(
-        mesh, sample_pos, 10000.0, sign_grid, gx, gy, gz, sign_size_x, sign_size_y, sign_size_z
-    )
+    signed_distance = _parity_signed_distance(mesh, sample_pos, 10000.0)
 
     if _is_in_narrow_band(signed_distance, threshold):
         subgrid_required[tid] = 1
@@ -746,7 +614,6 @@ def _check_subgrid_occupied_unsigned_kernel(
 @wp.kernel
 def _fused_populate_unsigned_float32_kernel(
     mesh: wp.uint64,
-    sign_grid: wp.array[wp.int32],
     background_sdf: wp.array[float],
     subgrid_occupied: wp.array[wp.int32],
     subgrid_addresses: wp.array[wp.int32],
@@ -761,16 +628,12 @@ def _fused_populate_unsigned_float32_kernel(
     num_subgrids_z: int,
     tex_blocks_per_dim: int,
     tex_size: int,
-    sign_size_x: int,
-    sign_size_y: int,
-    sign_size_z: int,
     bg_size_x: int,
     bg_size_y: int,
     bg_size_z: int,
     check_linearity: wp.int32,
 ):
-    """Fused populate + linearity: one BVH query per sample, writes texture and
-    atomically accumulates linearity error (float32)."""
+    """Fused populate + linearity: one parity BVH query per sample (float32)."""
     tid = wp.tid()
 
     total_subgrids = num_subgrids_x * num_subgrids_y * num_subgrids_z
@@ -804,7 +667,7 @@ def _fused_populate_unsigned_float32_kernel(
         float(gy) * cell_size[1],
         float(gz) * cell_size[2],
     )
-    sdf_val = _unsigned_dist_with_sign(mesh, pos, 10000.0, sign_grid, gx, gy, gz, sign_size_x, sign_size_y, sign_size_z)
+    sdf_val = _parity_signed_distance(mesh, pos, 10000.0)
 
     address = subgrid_addresses[subgrid_idx]
     if address < 0:
@@ -837,7 +700,6 @@ def _fused_populate_unsigned_float32_kernel(
 @wp.kernel
 def _fused_populate_unsigned_uint16_kernel(
     mesh: wp.uint64,
-    sign_grid: wp.array[wp.int32],
     background_sdf: wp.array[float],
     subgrid_occupied: wp.array[wp.int32],
     subgrid_addresses: wp.array[wp.int32],
@@ -852,9 +714,6 @@ def _fused_populate_unsigned_uint16_kernel(
     num_subgrids_z: int,
     tex_blocks_per_dim: int,
     tex_size: int,
-    sign_size_x: int,
-    sign_size_y: int,
-    sign_size_z: int,
     bg_size_x: int,
     bg_size_y: int,
     bg_size_z: int,
@@ -896,7 +755,7 @@ def _fused_populate_unsigned_uint16_kernel(
         float(gy) * cell_size[1],
         float(gz) * cell_size[2],
     )
-    sdf_val = _unsigned_dist_with_sign(mesh, pos, 10000.0, sign_grid, gx, gy, gz, sign_size_x, sign_size_y, sign_size_z)
+    sdf_val = _parity_signed_distance(mesh, pos, 10000.0)
 
     address = subgrid_addresses[subgrid_idx]
     if address < 0:
@@ -930,7 +789,6 @@ def _fused_populate_unsigned_uint16_kernel(
 @wp.kernel
 def _fused_populate_unsigned_uint8_kernel(
     mesh: wp.uint64,
-    sign_grid: wp.array[wp.int32],
     background_sdf: wp.array[float],
     subgrid_occupied: wp.array[wp.int32],
     subgrid_addresses: wp.array[wp.int32],
@@ -945,9 +803,6 @@ def _fused_populate_unsigned_uint8_kernel(
     num_subgrids_z: int,
     tex_blocks_per_dim: int,
     tex_size: int,
-    sign_size_x: int,
-    sign_size_y: int,
-    sign_size_z: int,
     bg_size_x: int,
     bg_size_y: int,
     bg_size_z: int,
@@ -989,7 +844,7 @@ def _fused_populate_unsigned_uint8_kernel(
         float(gy) * cell_size[1],
         float(gz) * cell_size[2],
     )
-    sdf_val = _unsigned_dist_with_sign(mesh, pos, 10000.0, sign_grid, gx, gy, gz, sign_size_x, sign_size_y, sign_size_z)
+    sdf_val = _parity_signed_distance(mesh, pos, 10000.0)
 
     address = subgrid_addresses[subgrid_idx]
     if address < 0:
@@ -1521,18 +1376,15 @@ def build_sparse_sdf_from_mesh(
     subgrid_radius = float(np.linalg.norm(half_subgrid))
 
     # -------------------------------------------------------------------
-    # Watertight fast path: scanline sign grid + unsigned BVH distance
+    # Watertight fast path: parity-based signed distance (no dense grid)
     # -------------------------------------------------------------------
     if watertight:
-        sign_grid = _build_sign_grid(mesh, grid_size_x, grid_size_y, grid_size_z, cell_size, min_corner, device=device)
-
         background_sdf = wp.zeros(total_bg, dtype=float, device=device)
         wp.launch(
             _build_coarse_sdf_unsigned_kernel,
             dim=total_bg,
             inputs=[
                 mesh.id,
-                sign_grid,
                 background_sdf,
                 min_corner_wp,
                 cell_size_wp,
@@ -1540,9 +1392,6 @@ def build_sparse_sdf_from_mesh(
                 bg_size_x,
                 bg_size_y,
                 bg_size_z,
-                grid_size_x,
-                grid_size_y,
-                grid_size_z,
             ],
             device=device,
         )
@@ -1554,7 +1403,6 @@ def build_sparse_sdf_from_mesh(
             dim=total_subgrids,
             inputs=[
                 mesh.id,
-                sign_grid,
                 threshold,
                 subgrid_required,
                 subgrid_size,
@@ -1562,9 +1410,6 @@ def build_sparse_sdf_from_mesh(
                 h,
                 min_corner_wp,
                 cell_size_wp,
-                grid_size_x,
-                grid_size_y,
-                grid_size_z,
             ],
             device=device,
         )
@@ -1699,7 +1544,6 @@ def build_sparse_sdf_from_mesh(
         _fused_common = (
             [
                 mesh.id,
-                sign_grid,
                 background_sdf,
                 subgrid_occupied_gpu,
                 subgrid_addresses,
@@ -1719,9 +1563,6 @@ def build_sparse_sdf_from_mesh(
                 d,
                 tex_blocks_per_dim,
                 tex_size,
-                grid_size_x,
-                grid_size_y,
-                grid_size_z,
                 bg_size_x,
                 bg_size_y,
                 bg_size_z,
