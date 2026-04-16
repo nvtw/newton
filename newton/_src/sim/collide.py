@@ -198,7 +198,9 @@ def compute_shape_aabbs(
     # Check if this is an infinite plane, mesh, or heightfield
     scale = shape_scale[shape_id]
     is_infinite_plane = (geo_type == GeoType.PLANE) and (scale[0] == 0.0 and scale[1] == 0.0)
-    has_local_aabb = geo_type == GeoType.MESH or geo_type == GeoType.HFIELD or geo_type == GeoType.CONVEX_MESH
+    # All shapes except infinite planes have pre-computed local AABBs from the builder.
+    # Using the rotated-AABB path avoids per-frame support function evaluations.
+    has_local_aabb = not is_infinite_plane and geo_type != GeoType.PLANE
 
     if is_infinite_plane:
         # Bounding sphere fallback for infinite planes
