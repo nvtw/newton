@@ -670,6 +670,7 @@ class CollisionPipeline:
                 has_heightfields=has_heightfields,
                 use_lean_gjk_mpr=use_lean_gjk_mpr,
                 deterministic=deterministic,
+                verify_buffers=False,
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
 
