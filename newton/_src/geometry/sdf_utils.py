@@ -322,9 +322,12 @@ class SDF:
         scale: tuple[float, float, float] | None = None,
         texture_format: str = "uint16",
         use_parity: bool = False,
-        skip_volume: bool = False,
     ) -> "SDF":
         """Create an SDF from a mesh in local mesh coordinates.
+
+        The SDF is built entirely via the texture-based sparse construction
+        path.  NanoVDB volumes are **not** created; all downstream collision
+        and simulation code uses the texture SDF.
 
         Args:
             mesh: Source mesh geometry.
@@ -354,87 +357,58 @@ class SDF:
             use_parity: use ``mesh_query_point_sign_parity`` for
                 inside/outside classification instead of winding numbers.
                 Cheaper but requires a watertight mesh.
-            skip_volume: skip the NanoVDB sparse/coarse volume build.
-                The collision pipeline uses only the texture SDF, so this
-                is safe when the SDF will be used for collision only.
-                Reduces construction time significantly.
 
         Returns:
-            A validated :class:`SDF` runtime handle with sparse/coarse volumes.
+            A validated :class:`SDF` runtime handle.
         """
         effective_max_resolution = 64 if max_resolution is None and target_voxel_size is None else max_resolution
         bake_scale = scale is not None
         effective_scale = scale if scale is not None else (1.0, 1.0, 1.0)
         is_watertight = mesh.is_watertight
 
-        if skip_volume:
-            sdf_data = create_empty_sdf_data()
-            sparse_volume = None
-            coarse_volume = None
-            block_coords = []
-        else:
-            sdf_data, sparse_volume, coarse_volume, block_coords = _compute_sdf_from_shape_impl(
-                shape_type=GeoType.MESH,
-                shape_geo=mesh,
-                shape_scale=effective_scale,
-                shape_margin=shape_margin,
-                narrow_band_distance=narrow_band_range,
+        from .sdf_texture import QuantizationMode, create_texture_sdf_from_mesh  # noqa: PLC0415
+
+        _tex_fmt_map = {
+            "float32": QuantizationMode.FLOAT32,
+            "uint16": QuantizationMode.UINT16,
+            "uint8": QuantizationMode.UINT8,
+        }
+        if texture_format not in _tex_fmt_map:
+            raise ValueError(f"Unknown texture_format {texture_format!r}. Expected one of {list(_tex_fmt_map)}.")
+        qmode = _tex_fmt_map[texture_format]
+
+        with wp.ScopedDevice(device):
+            verts = mesh.vertices * np.array(effective_scale)[None, :]
+            pos = wp.array(verts, dtype=wp.vec3)
+            indices = wp.array(mesh.indices, dtype=wp.int32)
+
+            winding_threshold = 0.5
+            if is_watertight or use_parity:
+                tex_mesh = wp.Mesh(points=pos, indices=indices)
+            else:
+                tex_mesh = wp.Mesh(points=pos, indices=indices, support_winding_number=True)
+                signed_volume = compute_mesh_signed_volume(pos, indices)
+                winding_threshold = 0.5 if signed_volume >= 0.0 else -0.5
+
+            res = effective_max_resolution if effective_max_resolution is not None else 64
+            texture_data, coarse_texture, subgrid_texture, tex_block_coords = create_texture_sdf_from_mesh(
+                tex_mesh,
                 margin=margin,
-                target_voxel_size=target_voxel_size,
-                max_resolution=effective_max_resolution if effective_max_resolution is not None else 64,
-                bake_scale=bake_scale,
-                device=device,
+                narrow_band_range=narrow_band_range,
+                max_resolution=res,
+                quantization_mode=qmode,
+                winding_threshold=winding_threshold,
+                scale_baked=bake_scale,
+                watertight=is_watertight,
+                use_parity=use_parity,
             )
-
-        # Build texture SDF alongside NanoVDB
-        texture_data = None
-        coarse_texture = None
-        subgrid_texture = None
-        tex_block_coords = None
-        if wp.is_cuda_available():
-            from .sdf_texture import QuantizationMode, create_texture_sdf_from_mesh  # noqa: PLC0415
-
-            _tex_fmt_map = {
-                "float32": QuantizationMode.FLOAT32,
-                "uint16": QuantizationMode.UINT16,
-                "uint8": QuantizationMode.UINT8,
-            }
-            if texture_format not in _tex_fmt_map:
-                raise ValueError(f"Unknown texture_format {texture_format!r}. Expected one of {list(_tex_fmt_map)}.")
-            qmode = _tex_fmt_map[texture_format]
-
-            with wp.ScopedDevice(device):
-                verts = mesh.vertices * np.array(effective_scale)[None, :]
-                pos = wp.array(verts, dtype=wp.vec3)
-                indices = wp.array(mesh.indices, dtype=wp.int32)
-
-                winding_threshold = 0.5
-                if is_watertight or use_parity:
-                    tex_mesh = wp.Mesh(points=pos, indices=indices)
-                else:
-                    tex_mesh = wp.Mesh(points=pos, indices=indices, support_winding_number=True)
-                    signed_volume = compute_mesh_signed_volume(pos, indices)
-                    winding_threshold = 0.5 if signed_volume >= 0.0 else -0.5
-
-                res = effective_max_resolution if effective_max_resolution is not None else 64
-                texture_data, coarse_texture, subgrid_texture, tex_block_coords = create_texture_sdf_from_mesh(
-                    tex_mesh,
-                    margin=margin,
-                    narrow_band_range=narrow_band_range,
-                    max_resolution=res,
-                    quantization_mode=qmode,
-                    winding_threshold=winding_threshold,
-                    scale_baked=bake_scale,
-                    watertight=is_watertight,
-                    use_parity=use_parity,
-                )
-                wp.synchronize()
+            wp.synchronize()
 
         sdf = SDF(
-            data=sdf_data,
-            sparse_volume=sparse_volume,
-            coarse_volume=coarse_volume,
-            block_coords=block_coords,
+            data=create_empty_sdf_data(),
+            sparse_volume=None,
+            coarse_volume=None,
+            block_coords=[],
             texture_block_coords=tex_block_coords,
             texture_data=texture_data,
             shape_margin=shape_margin,

@@ -15,7 +15,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton import Mesh
+from newton import GeoType, Mesh
 from newton._src.geometry.sdf_texture import (
     QuantizationMode,
     TextureSDFData,
@@ -860,11 +860,19 @@ def test_texture_sdf_scale_baked(test, device):
 
 def test_texture_sdf_from_volume(test, device):
     """Build texture SDF from NanoVDB volumes and verify sampling."""
-    mesh = _create_box_mesh()
-    mesh.build_sdf(device=device, max_resolution=32, narrow_band_range=(-0.1, 0.1), margin=0.05)
+    from newton._src.geometry.sdf_utils import _compute_sdf_from_shape_impl  # noqa: PLC0415
 
-    sdf = mesh.sdf
-    sdf_data = sdf.to_kernel_data()
+    mesh = _create_box_mesh()
+    sdf_data, sparse_volume, coarse_volume, _ = _compute_sdf_from_shape_impl(
+        shape_type=GeoType.MESH,
+        shape_geo=mesh,
+        shape_scale=(1.0, 1.0, 1.0),
+        shape_margin=0.0,
+        narrow_band_distance=(-0.1, 0.1),
+        margin=0.05,
+        max_resolution=32,
+        device=device,
+    )
 
     min_ext = np.array(
         [
@@ -889,8 +897,8 @@ def test_texture_sdf_from_volume(test, device):
     )
 
     tex_sdf, coarse_tex, _subgrid_tex = create_texture_sdf_from_volume(
-        sdf.sparse_volume,
-        sdf.coarse_volume,
+        sparse_volume,
+        coarse_volume,
         min_ext=min_ext,
         max_ext=max_ext,
         voxel_size=voxel_size,
