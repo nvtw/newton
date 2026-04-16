@@ -1643,13 +1643,17 @@ class NarrowPhase:
                 # Empty arrays for when hydroelastic is disabled
                 self.shape_pairs_sdf_sdf = None
 
+        # Secondary CUDA stream so GJK/MPR can overlap with the mesh pipeline.
+        device_obj = wp.get_device(device)
+        if device_obj.is_cuda:
+            self._gjk_stream = wp.Stream(device)
+        else:
+            self._gjk_stream = None
+
         # Fixed thread count for kernel launches
         # Use a reasonable minimum for GPU occupancy (256 blocks = 32K threads)
         # but scale with expected workload to avoid massive overprovisioning.
         # 256 blocks provides good occupancy on most GPUs (2-4 blocks per SM).
-
-        # Query GPU properties to compute appropriate thread limits
-        device_obj = wp.get_device(device)
         if device_obj.is_cuda:
             # Use 4 blocks per SM as a reasonable upper bound for occupancy
             # This balances parallelism with resource utilization
@@ -1786,30 +1790,55 @@ class NarrowPhase:
             record_tape=False,
         )
 
-        # Stage 2: Launch GJK/MPR kernel for remaining convex pairs
-        # These are pairs that couldn't be handled analytically (box, cylinder, cone, convex hull, etc.)
-        # All routing has been done by the primitive kernel, so this kernel just does GJK/MPR.
-        wp.launch(
-            kernel=self.narrow_phase_kernel,
-            dim=self.total_num_threads,
-            inputs=[
-                self.gjk_candidate_pairs,
-                self.gjk_candidate_pairs_count,
-                shape_types,
-                shape_data,
-                shape_transform,
-                shape_source,
-                shape_gap,
-                shape_collision_radius,
-                self.shape_aabb_lower,
-                self.shape_aabb_upper,
-                writer_data,
-                self.total_num_threads,
-            ],
-            device=device,
-            block_dim=self.block_dim,
-            record_tape=False,
-        )
+        # Stage 2: Launch GJK/MPR kernel for remaining convex pairs.
+        # GJK/MPR reads gjk_candidate_pairs (written by primitive kernel) and
+        # writes contacts via atomics — independent of the mesh pipeline.
+        # Launch on a secondary stream so it overlaps with mesh work.
+        if self._gjk_stream is not None:
+            with wp.ScopedStream(self._gjk_stream):
+                wp.launch(
+                    kernel=self.narrow_phase_kernel,
+                    dim=self.total_num_threads,
+                    inputs=[
+                        self.gjk_candidate_pairs,
+                        self.gjk_candidate_pairs_count,
+                        shape_types,
+                        shape_data,
+                        shape_transform,
+                        shape_source,
+                        shape_gap,
+                        shape_collision_radius,
+                        self.shape_aabb_lower,
+                        self.shape_aabb_upper,
+                        writer_data,
+                        self.total_num_threads,
+                    ],
+                    device=device,
+                    block_dim=self.block_dim,
+                    record_tape=False,
+                )
+        else:
+            wp.launch(
+                kernel=self.narrow_phase_kernel,
+                dim=self.total_num_threads,
+                inputs=[
+                    self.gjk_candidate_pairs,
+                    self.gjk_candidate_pairs_count,
+                    shape_types,
+                    shape_data,
+                    shape_transform,
+                    shape_source,
+                    shape_gap,
+                    shape_collision_radius,
+                    self.shape_aabb_lower,
+                    self.shape_aabb_upper,
+                    writer_data,
+                    self.total_num_threads,
+                ],
+                device=device,
+                block_dim=self.block_dim,
+                record_tape=False,
+            )
 
         # Skip mesh/heightfield kernels when no meshes or heightfields are present
         if self.has_meshes or self.has_heightfields:
@@ -2095,6 +2124,10 @@ class NarrowPhase:
                 self.shape_pairs_sdf_sdf_count,
                 writer_data,
             )
+
+        # Join GJK stream before reading contact_count in verification.
+        if self._gjk_stream is not None:
+            wp.get_stream(device).wait_stream(self._gjk_stream)
 
         # Verify no collision pipeline buffers overflowed
         wp.launch(
