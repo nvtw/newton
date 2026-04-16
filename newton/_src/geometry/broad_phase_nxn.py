@@ -18,11 +18,33 @@ import warp as wp
 from ..core.types import Devicelike
 from .broad_phase_common import (
     check_aabb_overlap,
+    check_obb_overlap,
     is_pair_excluded,
     precompute_world_map,
     test_world_and_group_pair,
     write_pair,
 )
+
+
+@wp.kernel(enable_backward=False)
+def _nxn_broadphase_precomputed_pairs_obb(
+    obb_center: wp.array[wp.vec3],
+    obb_half: wp.array[wp.vec3],
+    geom_xform: wp.array[wp.transform],
+    nxn_shape_pair: wp.array[wp.vec2i],
+    candidate_pair: wp.array[wp.vec2i],
+    candidate_pair_count: wp.array[int],
+    max_candidate_pair: int,
+):
+    """Broad phase using pre-computed per-shape OBB data."""
+    elementid = wp.tid()
+    pair = nxn_shape_pair[elementid]
+    s1 = pair[0]
+    s2 = pair[1]
+    rot_a = wp.quat_to_matrix(wp.transform_get_rotation(geom_xform[s1]))
+    rot_b = wp.quat_to_matrix(wp.transform_get_rotation(geom_xform[s2]))
+    if check_obb_overlap(obb_center[s1], obb_half[s1], rot_a, obb_center[s2], obb_half[s2], rot_b):
+        write_pair(pair, candidate_pair, candidate_pair_count, max_candidate_pair)
 
 
 @wp.kernel(enable_backward=False)
@@ -456,6 +478,36 @@ class BroadPhaseExplicit:
                 candidate_pair,
                 candidate_pair_count,
                 max_candidate_pair,
+            ],
+            device=device,
+            record_tape=False,
+        )
+
+    def launch_obb(
+        self,
+        obb_center: wp.array[wp.vec3],
+        obb_half: wp.array[wp.vec3],
+        geom_xform: wp.array[wp.transform],
+        shape_pairs: wp.array[wp.vec2i],
+        shape_pair_count: int,
+        candidate_pair: wp.array[wp.vec2i],
+        candidate_pair_count: wp.array[int],
+        device: Devicelike | None = None,
+    ) -> None:
+        """Launch OBB-based broad phase using pre-computed per-shape OBB arrays."""
+        if device is None:
+            device = obb_center.device
+        wp.launch(
+            kernel=_nxn_broadphase_precomputed_pairs_obb,
+            dim=shape_pair_count,
+            inputs=[
+                obb_center,
+                obb_half,
+                geom_xform,
+                shape_pairs,
+                candidate_pair,
+                candidate_pair_count,
+                candidate_pair.shape[0],
             ],
             device=device,
             record_tape=False,
