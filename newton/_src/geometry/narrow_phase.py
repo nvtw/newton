@@ -683,26 +683,11 @@ def create_narrow_phase_kernel_gjk_mpr(
             if is_infinite_plane_a and is_infinite_plane_b:
                 continue
 
+            # Bounding sphere check is only needed for infinite plane pairs.
+            # For non-plane pairs with external AABBs, SAP already verified AABB overlap.
             bsphere_radius_a = float(0.0)
             bsphere_radius_b = float(0.0)
             has_infinite_plane = is_infinite_plane_a or is_infinite_plane_b
-
-            # Bounding sphere early rejection: tighter than AABB overlap.
-            # For non-plane pairs the broad phase only checked AABBs; a sphere
-            # check rejects diagonal-overlap false positives cheaply.
-            if wp.static(external_aabb) and not has_infinite_plane:
-                center_a, rad_a = compute_bounding_sphere_from_aabb(
-                    shape_aabb_lower[shape_a], shape_aabb_upper[shape_a]
-                )
-                center_b, rad_b = compute_bounding_sphere_from_aabb(
-                    shape_aabb_lower[shape_b], shape_aabb_upper[shape_b]
-                )
-                dist_sq = wp.length_sq(center_b - center_a)
-                r_sum = rad_a + rad_b
-                if dist_sq > r_sum * r_sum:
-                    continue
-                bsphere_radius_a = rad_a
-                bsphere_radius_b = rad_b
 
             if has_infinite_plane:
                 # Compute or fetch AABBs for bounding sphere overlap check
