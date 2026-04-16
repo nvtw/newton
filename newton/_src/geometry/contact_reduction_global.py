@@ -590,19 +590,29 @@ def _clear_active_kernel(
     agg_moment_unreduced: wp.array[wp.float32],
     agg_moment_reduced: wp.array[wp.float32],
     agg_moment2_reduced: wp.array[wp.float32],
+    # Counter arrays to zero (merged from _zero_count_and_contacts_kernel)
+    contact_count: wp.array[wp.int32],
+    ht_insert_failures: wp.array[wp.int32],
     ht_capacity: int,
     values_per_key: int,
     num_threads: int,
 ):
-    """Kernel to clear active hashtable entries (keys, values, and hydroelastic aggregates).
+    """Clear active hashtable entries and zero counters in one kernel launch.
 
     Uses grid-stride loop for efficient thread utilization.
     Each thread handles one value slot, with key and aggregate clearing done once per entry.
+    Thread 0 also zeros the active-slots count, contact count, and insert-failure counter.
 
     Memory layout for values is slot-major (SoA):
     [slot0_entry0, slot0_entry1, ..., slot0_entryN, slot1_entry0, ...]
     """
     tid = wp.tid()
+
+    # Thread 0 zeros the counters (previously a separate kernel launch)
+    if tid == 0:
+        ht_active_slots[ht_capacity] = 0
+        contact_count[0] = 0
+        ht_insert_failures[0] = 0
 
     # Read count from GPU - stored at active_slots[capacity]
     count = ht_active_slots[ht_capacity]
@@ -638,19 +648,6 @@ def _clear_active_kernel(
         value_idx = local_idx * ht_capacity + entry_idx
         ht_values[value_idx] = wp.uint64(0)
         i += num_threads
-
-
-@wp.kernel(enable_backward=False)
-def _zero_count_and_contacts_kernel(
-    ht_active_slots: wp.array[wp.int32],
-    contact_count: wp.array[wp.int32],
-    ht_insert_failures: wp.array[wp.int32],
-    ht_capacity: int,
-):
-    """Zero the active slots count and contact count."""
-    ht_active_slots[ht_capacity] = 0
-    contact_count[0] = 0
-    ht_insert_failures[0] = 0
 
 
 class GlobalContactReducer:
@@ -813,13 +810,13 @@ class GlobalContactReducer:
     def clear_active(self):
         """Clear only the active entries (efficient for sparse usage).
 
-        Uses a combined kernel that clears both hashtable keys, values, and aggregate force,
-        followed by a small kernel to zero the counters.
+        Uses a single kernel that clears hashtable keys, values, hydroelastic
+        aggregates, and counters — avoiding a second kernel launch for zeroing.
         """
         # Use fixed thread count for efficient GPU utilization
         num_threads = min(1024, self.hashtable.capacity)
 
-        # Single kernel clears keys, values, and hydroelastic aggregates for active entries
+        # Single kernel clears entries and zeros counters
         wp.launch(
             _clear_active_kernel,
             dim=num_threads,
@@ -836,22 +833,11 @@ class GlobalContactReducer:
                 self.agg_moment_unreduced,
                 self.agg_moment_reduced,
                 self.agg_moment2_reduced,
-                self.hashtable.capacity,
-                self.values_per_key,
-                num_threads,
-            ],
-            device=self.device,
-        )
-
-        # Zero the counts in a separate kernel
-        wp.launch(
-            _zero_count_and_contacts_kernel,
-            dim=1,
-            inputs=[
-                self.hashtable.active_slots,
                 self.contact_count,
                 self.ht_insert_failures,
                 self.hashtable.capacity,
+                self.values_per_key,
+                num_threads,
             ],
             device=self.device,
         )
