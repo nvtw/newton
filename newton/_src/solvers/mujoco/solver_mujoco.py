@@ -25,6 +25,7 @@ from ...sim import (
     ModelBuilder,
     State,
 )
+from ...sim.contacts import GENERATION_SENTINEL as _GENERATION_SENTINEL
 from ...sim.graph_coloring import color_graph, plot_graph
 from ...utils import topological_sort
 from ...utils.benchmark import event_scope
@@ -32,6 +33,7 @@ from ...utils.import_utils import string_to_warp
 from ..flags import SolverNotifyFlags
 from ..solver import SolverBase
 from .kernels import (
+    _snapshot_nacon_count,
     apply_mjc_body_f_kernel,
     apply_mjc_control_kernel,
     apply_mjc_free_joint_f_to_body_f_kernel,
@@ -2777,6 +2779,7 @@ class SolverMuJoCo(SolverBase):
         wind: tuple | None = None,
         magnetic: tuple | None = None,
         use_mujoco_cpu: bool = False,
+        enable_multiccd: bool = False,
         disable_contacts: bool = False,
         update_data_interval: int = 1,
         save_to_mjcf: str | None = None,
@@ -2815,6 +2818,7 @@ class SolverMuJoCo(SolverBase):
             wind: Wind velocity vector (x, y, z) for lift and drag forces. If None, uses model custom attribute or MuJoCo's default (0, 0, 0).
             magnetic: Global magnetic flux vector (x, y, z). If None, uses model custom attribute or MuJoCo's default (0, -0.5, 0).
             use_mujoco_cpu: If True, use the MuJoCo-C CPU backend instead of `mujoco_warp`.
+            enable_multiccd: If True, enable multi-CCD contact generation (up to 4 contact points per geom pair instead of 1). Note: geom pairs where either geom has ``margin > 0`` always produce a single contact regardless of this flag.
             disable_contacts: If True, disable contact computation in MuJoCo.
             update_data_interval: Frequency (in simulation steps) at which to update the MuJoCo Data object from the Newton state. If 0, Data is never updated after initialization.
             save_to_mjcf: Optional path to save the generated MJCF model file.
@@ -2913,15 +2917,28 @@ class SolverMuJoCo(SolverBase):
         self._viewer = None
         """Instance of the MuJoCo viewer for debugging."""
 
+        enableflags = 0
+        if enable_multiccd:
+            enableflags |= mujoco.mjtEnableBit.mjENBL_MULTICCD
         disableflags = 0
         if disable_contacts:
             disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT
         self.use_mujoco_cpu = use_mujoco_cpu
         if separate_worlds is None:
             separate_worlds = not use_mujoco_cpu and model.world_count > 1
+        # Lazy-allocated buffers for the fast-path contact conversion optimisation.
+        # See _convert_contacts_to_mjwarp / convert_newton_contacts_to_mjwarp_kernel.
+        # Initialised before _convert_to_mjc because notify_model_changed (called
+        # during conversion) may call _invalidate_contact_fast_path.
+        self._contact_tid_to_cid: wp.array[wp.int32] | None = None
+        self._last_contact_generation: wp.array[wp.int32] | None = None
+        self._last_nacon_count: wp.array[wp.int32] | None = None
+        self._last_contacts_id: int | None = None
+
         with wp.ScopedTimer("convert_model_to_mujoco", active=False):
             self._convert_to_mjc(
                 model,
+                enableflags=enableflags,
                 disableflags=disableflags,
                 disable_contacts=disable_contacts,
                 separate_worlds=separate_worlds,
@@ -2999,19 +3016,51 @@ class SolverMuJoCo(SolverBase):
                 print("Setting model.sensor_rne_postconstraint True")
             m.sensor_rne_postconstraint = True
 
+    def _invalidate_contact_fast_path(self):
+        """Force the next contact conversion to take the full path.
+
+        Called when cached MJWarp contact fields (friction, solref, solimp,
+        etc.) may be stale — e.g. after :meth:`notify_model_changed` updates
+        geom properties.
+        """
+        if self._last_contact_generation is not None:
+            self._last_contact_generation.fill_(_GENERATION_SENTINEL)
+            self._last_nacon_count.zero_()
+
     def _convert_contacts_to_mjwarp(self, model: Model, state_in: State, contacts: Contacts):
         # Ensure the inverse shape mapping exists (lazy creation)
         if self.newton_shape_to_mjc_geom is None:
             self._create_inverse_shape_mapping()
 
-        # Zero nacon before the kernel — the kernel uses atomic_add to count
-        # only the contacts that survive immovable-pair filtering.
+        # The kernel only produces valid output for tid < naconmax (the full
+        # path clamps count and rejects cid >= naconmax).  Launching more
+        # threads than naconmax wastes GPU resources, so cap the grid size.
+        launch_dim = min(contacts.rigid_contact_max, self.mjw_data.naconmax)
+
+        # Lazy-allocate fast-path buffers; reallocate if launch_dim grew
+        # (e.g. a different Contacts object with a larger rigid_contact_max).
+        # Also invalidate when the Contacts instance changes — a different
+        # object's contact_generation could coincidentally match our cached
+        # last_contact_generation while containing entirely different data.
+        contacts_id = id(contacts.contact_generation)
+        needs_realloc = self._contact_tid_to_cid is None or self._contact_tid_to_cid.shape[0] < launch_dim
+        contacts_changed = self._last_contacts_id != contacts_id
+
+        if needs_realloc or contacts_changed:
+            if needs_realloc:
+                self._contact_tid_to_cid = wp.full(launch_dim, -1, dtype=wp.int32, device=model.device)
+            self._last_contact_generation = wp.full(1, _GENERATION_SENTINEL, dtype=wp.int32, device=model.device)
+            self._last_nacon_count = wp.zeros(1, dtype=wp.int32, device=model.device)
+            self._last_contacts_id = contacts_id
+
+        # Zero nacon before the kernel — the full path uses atomic_add to count
+        # contacts; the fast path restores the count from last_nacon_count.
         self.mjw_data.nacon.zero_()
 
         bodies_per_world = self.model.body_count // self.model.world_count
         wp.launch(
             convert_newton_contacts_to_mjwarp_kernel,
-            dim=(contacts.rigid_contact_max,),
+            dim=(launch_dim,),
             inputs=[
                 state_in.body_q,
                 model.shape_body,
@@ -3059,6 +3108,30 @@ class SolverMuJoCo(SolverBase):
                 # Data to clear
                 self.mjw_data.nworld,
                 self.mjw_data.ncollision,
+                # Fast-path generation tracking
+                contacts.contact_generation,
+                self._last_contact_generation,
+                self._contact_tid_to_cid,
+                self._last_nacon_count,
+            ],
+            device=model.device,
+        )
+
+        # Snapshot the final nacon count and generation so the fast path can
+        # restore them on subsequent substeps.  Runs as a separate dim=1
+        # kernel AFTER the main kernel completes so that:
+        #  - nacon_out has its final value (from atomic_add on full path, or
+        #    restored from last_nacon_count on fast path)
+        #  - last_contact_generation is only updated after ALL threads in the
+        #    main kernel have read it (avoids a cross-block race)
+        wp.launch(
+            _snapshot_nacon_count,
+            dim=1,
+            inputs=[
+                self.mjw_data.nacon,
+                self._last_nacon_count,
+                contacts.contact_generation,
+                self._last_contact_generation,
             ],
             device=model.device,
         )
@@ -3077,6 +3150,7 @@ class SolverMuJoCo(SolverBase):
             self._update_joint_properties()
         if flags & SolverNotifyFlags.BODY_PROPERTIES:
             self._update_body_properties()
+            self._invalidate_contact_fast_path()
             need_const_0 = True
         if flags & SolverNotifyFlags.JOINT_DOF_PROPERTIES:
             self._update_joint_dof_properties()
@@ -3085,6 +3159,7 @@ class SolverMuJoCo(SolverBase):
         if flags & SolverNotifyFlags.SHAPE_PROPERTIES:
             self._update_geom_properties()
             self._update_pair_properties()
+            self._invalidate_contact_fast_path()
         if flags & SolverNotifyFlags.MODEL_PROPERTIES:
             self._update_model_properties()
         if flags & SolverNotifyFlags.CONSTRAINT_PROPERTIES:
@@ -3646,6 +3721,7 @@ class SolverMuJoCo(SolverBase):
         nconmax: int | None = None,
         solver: int | str | None = None,
         integrator: int | str | None = None,
+        enableflags: int = 0,
         disableflags: int = 0,
         disable_contacts: bool = False,
         impratio: float | None = None,
@@ -3686,6 +3762,7 @@ class SolverMuJoCo(SolverBase):
             nconmax: Maximum number of contacts.
             solver: Constraint solver type ("cg" or "newton"). If None, uses model custom attribute or Newton's default ("newton").
             integrator: Integration method ("euler", "rk4", "implicit", "implicitfast"). If None, uses model custom attribute or Newton's default ("implicitfast").
+            enableflags: MuJoCo enable flags bitmask.
             disableflags: MuJoCo disable flags bitmask.
             disable_contacts: If True, disable contact computation.
             impratio: Impedance ratio for contacts. If None, uses model custom attribute or MuJoCo default (1.0).
@@ -3857,6 +3934,7 @@ class SolverMuJoCo(SolverBase):
             jacobian = mujoco.mjtJacobian.mjJAC_AUTO
 
         spec = mujoco.MjSpec()
+        spec.option.enableflags = enableflags
         spec.option.disableflags = disableflags
         spec.option.gravity = np.array([*model.gravity.numpy()[0]])
         spec.option.solver = solver
