@@ -159,23 +159,36 @@ def compute_shape_aabbs(
     shape_gap: wp.array[float],
     shape_collision_aabb_lower: wp.array[wp.vec3],
     shape_collision_aabb_upper: wp.array[wp.vec3],
+    # Fused counter arrays — zeroed by thread 0 to avoid separate kernel launches.
+    # Replaces contacts.clear() and broad_phase_pair_count.zero_().
+    contact_counters: wp.array[wp.int32],
+    contact_generation: wp.array[wp.int32],
+    broad_phase_pair_count: wp.array[wp.int32],
+    num_contact_counters: int,
     # outputs
     aabb_lower: wp.array[wp.vec3],
     aabb_upper: wp.array[wp.vec3],
     geom_data: wp.array[wp.vec4],
     geom_xform: wp.array[wp.transform],
 ):
-    """Compute AABBs and narrow-phase geometry data for each shape.
+    """Compute AABBs, narrow-phase geometry data, and zero collision counters.
 
-    Fuses AABB computation with narrow-phase data preparation so the
-    world transform (``body_q * shape_transform``) is computed once.
-
-    Uses support function for most shapes. Meshes and heightfields use the
-    pre-computed local AABB transformed to world frame. Infinite planes use
-    bounding sphere fallback.  AABBs are enlarged by per-shape effective gap
-    for contact detection.  Effective expansion is ``shape_margin + shape_gap``.
+    Fuses AABB computation, narrow-phase data preparation, contact counter
+    zeroing, and generation bumping into a single kernel launch.
     """
     shape_id = wp.tid()
+
+    # Thread 0: zero contact counters, bump generation, zero broad phase count.
+    if shape_id == 0:
+        for c in range(num_contact_counters):
+            contact_counters[c] = 0
+        g = contact_generation[0]
+        if g >= 2147483647:
+            g = 0
+        else:
+            g = g + 1
+        contact_generation[0] = g
+        broad_phase_pair_count[0] = 0
 
     rigid_id = shape_body[shape_id]
     geo_type = shape_type[shape_id]
@@ -799,11 +812,10 @@ class CollisionPipeline:
                 If ``None``, uses the value from construction.
         """
 
-        contacts.clear()
-        # TODO: validate contacts dimensions & compatibility
-
-        # Clear counters
-        self.broad_phase_pair_count.zero_()
+        # Counter zeroing and generation bump are fused into compute_shape_aabbs.
+        # Only call contacts.clear() if clear_buffers mode is enabled (debug path).
+        if contacts.clear_buffers:
+            contacts.clear()
 
         model = self.model
         # update any additional parameters
@@ -815,7 +827,8 @@ class CollisionPipeline:
         # augmentation and soft-contact kernels that follow are tape-safe
         # and recorded normally.
 
-        # Compute AABBs for all shapes (already expanded by per-shape effective gaps)
+        # Compute AABBs for all shapes, zero counters, bump generation.
+        # Fuses contacts.clear() + broad_phase_pair_count.zero_() + AABB update.
         wp.launch(
             kernel=compute_shape_aabbs,
             dim=model.shape_count,
@@ -831,6 +844,10 @@ class CollisionPipeline:
                 model.shape_gap,
                 model.shape_collision_aabb_lower,
                 model.shape_collision_aabb_upper,
+                contacts._counter_array,
+                contacts.contact_generation,
+                self.broad_phase_pair_count,
+                contacts._counter_array.shape[0],
             ],
             outputs=[
                 self.narrow_phase.shape_aabb_lower,
