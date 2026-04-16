@@ -867,6 +867,8 @@ def mesh_vs_convex_midphase(
     rigid_gap: float,
     triangle_pairs: wp.array[wp.vec3i],
     triangle_pairs_count: wp.array[int],
+    local_aabb_lower: wp.array[wp.vec3],
+    local_aabb_upper: wp.array[wp.vec3],
 ):
     """
     Perform mesh vs convex shape midphase collision detection.
@@ -897,31 +899,50 @@ def mesh_vs_convex_midphase(
     pos_in_mesh = wp.transform_get_translation(X_mesh_shape)
     orientation_in_mesh = wp.transform_get_rotation(X_mesh_shape)
 
-    # Create generic shape data for non-mesh shape
+    # Compute AABB of the non-mesh shape in mesh local space for BVH query.
     geo_type = shape_type[non_mesh_shape]
     data_vec4 = shape_data[non_mesh_shape]
     scale = wp.vec3(data_vec4[0], data_vec4[1], data_vec4[2])
 
-    generic_shape_data = GenericShapeData()
-    generic_shape_data.shape_type = geo_type
-    generic_shape_data.scale = scale
-    generic_shape_data.auxiliary = wp.vec3(0.0, 0.0, 0.0)
-
-    # For CONVEX_MESH, pack the mesh pointer
-    if geo_type == GeoType.CONVEX_MESH:
-        generic_shape_data.auxiliary = pack_mesh_ptr(shape_source_ptr[non_mesh_shape])
-
-    data_provider = SupportMapDataProvider()
-
-    # Compute tight AABB directly in mesh local space for optimal fit
-    aabb_lower, aabb_upper = compute_tight_aabb_from_support(
-        generic_shape_data, orientation_in_mesh, pos_in_mesh, data_provider
-    )
-
-    # Add small margin for contact detection
     margin_vec = wp.vec3(rigid_gap, rigid_gap, rigid_gap)
-    aabb_lower = aabb_lower - margin_vec
-    aabb_upper = aabb_upper + margin_vec
+
+    if geo_type == GeoType.CONVEX_MESH:
+        # Convex hulls: use pre-computed local AABB rotated to mesh space.
+        # Avoids iterating all hull vertices every frame.  The rotated AABB
+        # is slightly looser but the BVH handles that gracefully.
+        local_lo = local_aabb_lower[non_mesh_shape]
+        local_hi = local_aabb_upper[non_mesh_shape]
+        center = (local_lo + local_hi) * 0.5
+        half = (local_hi - local_lo) * 0.5
+
+        world_center = wp.quat_rotate(orientation_in_mesh, center) + pos_in_mesh
+
+        r0 = wp.quat_rotate(orientation_in_mesh, wp.vec3(1.0, 0.0, 0.0))
+        r1 = wp.quat_rotate(orientation_in_mesh, wp.vec3(0.0, 1.0, 0.0))
+        r2 = wp.quat_rotate(orientation_in_mesh, wp.vec3(0.0, 0.0, 1.0))
+
+        world_half = wp.vec3(
+            wp.abs(r0[0]) * half[0] + wp.abs(r1[0]) * half[1] + wp.abs(r2[0]) * half[2],
+            wp.abs(r0[1]) * half[0] + wp.abs(r1[1]) * half[1] + wp.abs(r2[1]) * half[2],
+            wp.abs(r0[2]) * half[0] + wp.abs(r1[2]) * half[1] + wp.abs(r2[2]) * half[2],
+        )
+
+        aabb_lower = world_center - world_half - margin_vec
+        aabb_upper = world_center + world_half + margin_vec
+    else:
+        # Other shapes (box, sphere, capsule, cylinder, cone): use tight
+        # support function AABB for optimal BVH pruning (O(1) per shape).
+        generic_shape_data = GenericShapeData()
+        generic_shape_data.shape_type = geo_type
+        generic_shape_data.scale = scale
+        generic_shape_data.auxiliary = wp.vec3(0.0, 0.0, 0.0)
+        data_provider = SupportMapDataProvider()
+
+        aabb_lower, aabb_upper = compute_tight_aabb_from_support(
+            generic_shape_data, orientation_in_mesh, pos_in_mesh, data_provider
+        )
+        aabb_lower = aabb_lower - margin_vec
+        aabb_upper = aabb_upper + margin_vec
 
     if wp.static(ENABLE_TILE_BVH_QUERY):
         # Query mesh BVH for overlapping triangles in mesh local space using tiled version
