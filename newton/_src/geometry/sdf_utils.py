@@ -356,6 +356,7 @@ class SDF:
         effective_max_resolution = 64 if max_resolution is None and target_voxel_size is None else max_resolution
         bake_scale = scale is not None
         effective_scale = scale if scale is not None else (1.0, 1.0, 1.0)
+        is_watertight = mesh.is_watertight
         sdf_data, sparse_volume, coarse_volume, block_coords = _compute_sdf_from_shape_impl(
             shape_type=GeoType.MESH,
             shape_geo=mesh,
@@ -390,10 +391,14 @@ class SDF:
                 verts = mesh.vertices * np.array(effective_scale)[None, :]
                 pos = wp.array(verts, dtype=wp.vec3)
                 indices = wp.array(mesh.indices, dtype=wp.int32)
-                tex_mesh = wp.Mesh(points=pos, indices=indices, support_winding_number=True)
 
-                signed_volume = compute_mesh_signed_volume(pos, indices)
-                winding_threshold = 0.5 if signed_volume >= 0.0 else -0.5
+                winding_threshold = 0.5
+                if is_watertight:
+                    tex_mesh = wp.Mesh(points=pos, indices=indices)
+                else:
+                    tex_mesh = wp.Mesh(points=pos, indices=indices, support_winding_number=True)
+                    signed_volume = compute_mesh_signed_volume(pos, indices)
+                    winding_threshold = 0.5 if signed_volume >= 0.0 else -0.5
 
                 res = effective_max_resolution if effective_max_resolution is not None else 64
                 texture_data, coarse_texture, subgrid_texture, tex_block_coords = create_texture_sdf_from_mesh(
@@ -404,6 +409,7 @@ class SDF:
                     quantization_mode=qmode,
                     winding_threshold=winding_threshold,
                     scale_baked=bake_scale,
+                    watertight=is_watertight,
                 )
                 wp.synchronize()
 
@@ -749,15 +755,13 @@ def _compute_sdf_from_shape_impl(
             pos = wp.array(verts, dtype=wp.vec3)
             indices = wp.array(shape_geo.indices, dtype=wp.int32)
 
+            winding_threshold = 0.5
             mesh = wp.Mesh(points=pos, indices=indices, support_winding_number=True)
-            m_id = mesh.id
-
-            # Compute winding threshold based on mesh volume sign
-            # Positive volume = correct winding (threshold 0.5), negative = inverted (threshold -0.5)
             signed_volume = compute_mesh_signed_volume(pos, indices)
             winding_threshold = 0.5 if signed_volume >= 0.0 else -0.5
             if verbose and signed_volume < 0:
                 print("Mesh has inverted winding (negative volume), using threshold -0.5")
+            m_id = mesh.id
 
             min_ext = np.min(verts, axis=0).tolist()
             max_ext = np.max(verts, axis=0).tolist()
@@ -837,8 +841,6 @@ def _compute_sdf_from_shape_impl(
             bg_value=SDF_BACKGROUND_VALUE,
         )
 
-        # populate the sparse volume with the sdf values
-        # Only process allocated tiles (num_tiles x 8x8x8)
         num_allocated_tiles = len(tile_points)
         if shape_type == GeoType.MESH:
             wp.launch(
@@ -869,7 +871,6 @@ def _compute_sdf_from_shape_impl(
             bg_value=SDF_BACKGROUND_VALUE,
         )
 
-        # Populate the coarse volume with SDF values (single tile)
         if shape_type == GeoType.MESH:
             wp.launch(
                 sdf_from_mesh_kernel,

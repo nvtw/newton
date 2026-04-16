@@ -30,6 +30,7 @@ from newton._src.geometry.sdf_utils import (
     sample_sdf_extrapolated,
     sample_sdf_grad_extrapolated,
 )
+from newton._src.geometry.sdf_texture import TextureSDFData, texture_sample_sdf
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
 
 # Skip all tests in this module if CUDA is not available
@@ -1739,6 +1740,184 @@ def test_brick_pyramid_stability(test, device):
         0.0,
         f"Top brick fell through ground: z = {final_top_pos[2]}",
     )
+
+
+class TestMeshIsWatertight(unittest.TestCase):
+    """Test the Mesh.is_watertight property."""
+
+    def test_box_mesh_is_watertight(self):
+        """A closed box mesh should be watertight."""
+        mesh = create_box_mesh((0.5, 0.5, 0.5))
+        self.assertTrue(mesh.is_watertight)
+
+    def test_sphere_mesh_is_watertight(self):
+        """A subdivided icosphere should be watertight."""
+        mesh = create_sphere_mesh(1.0, subdivisions=2)
+        self.assertTrue(mesh.is_watertight)
+
+    def test_open_mesh_is_not_watertight(self):
+        """A mesh missing a face should not be watertight."""
+        verts = np.array(
+            [[-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1], [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]],
+            dtype=np.float32,
+        )
+        # 5 faces of a cube (missing one face -> boundary edges)
+        indices = np.array(
+            [0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 2, 3, 7, 2, 7, 6, 0, 4, 7, 0, 7, 3],
+            dtype=np.int32,
+        )
+        mesh = Mesh(verts, indices, compute_inertia=False)
+        self.assertFalse(mesh.is_watertight)
+
+    def test_empty_mesh_is_not_watertight(self):
+        """An empty mesh should not be watertight."""
+        mesh = Mesh(np.zeros((0, 3), dtype=np.float32), np.zeros(0, dtype=np.int32), compute_inertia=False)
+        self.assertFalse(mesh.is_watertight)
+
+    def test_is_watertight_cache_invalidation(self):
+        """Changing vertices or indices should invalidate the cache."""
+        mesh = create_box_mesh((0.5, 0.5, 0.5))
+        self.assertTrue(mesh.is_watertight)
+        # Mutate vertices (keeps topology, should still be watertight)
+        mesh.vertices = mesh.vertices * 2.0
+        self.assertTrue(mesh.is_watertight)
+        # Remove some triangles to break watertightness
+        mesh.indices = mesh.indices[:30]  # 5 faces instead of 6
+        self.assertFalse(mesh.is_watertight)
+
+
+@wp.kernel
+def _sample_texture_sdf_kernel(
+    sdf: TextureSDFData,
+    query_points: wp.array[wp.vec3],
+    out_values: wp.array[float],
+):
+    tid = wp.tid()
+    out_values[tid] = texture_sample_sdf(sdf, query_points[tid])
+
+
+def _sample_texture_sdf_at_points(sdf_obj, points_np):
+    """Sample texture SDF at world-space points, returns numpy array of SDF values."""
+    n = len(points_np)
+    query_wp = wp.array(points_np.astype(np.float32), dtype=wp.vec3, device="cuda:0")
+    out_wp = wp.zeros(n, dtype=float, device="cuda:0")
+    wp.launch(
+        _sample_texture_sdf_kernel,
+        dim=n,
+        inputs=[sdf_obj.texture_data, query_wp, out_wp],
+        device="cuda:0",
+    )
+    return out_wp.numpy()
+
+
+@unittest.skipUnless(_cuda_available, "wp.Volume requires CUDA device")
+class TestSDFWatertightFastPath(unittest.TestCase):
+    """Test that the watertight JFA fast path produces consistent texture SDF values."""
+
+    device = "cuda:0"
+
+    def test_watertight_sdf_matches_winding_path(self):
+        """Texture SDF from watertight fast path should closely match the winding-number path."""
+        mesh = create_sphere_mesh(0.5, subdivisions=2)
+        self.assertTrue(mesh.is_watertight)
+
+        # Build SDF via normal (winding) path by forcing is_watertight to False
+        mesh._is_watertight = False
+        sdf_winding = SDF.create_from_mesh(mesh, max_resolution=32, texture_format="float32")
+        mesh._is_watertight = None  # reset cache
+
+        # Build SDF via watertight fast path
+        self.assertTrue(mesh.is_watertight)
+        sdf_fast = SDF.create_from_mesh(mesh, max_resolution=32, texture_format="float32")
+
+        self.assertIsNotNone(sdf_winding.texture_data, "Winding SDF should have texture data")
+        self.assertIsNotNone(sdf_fast.texture_data, "Fast SDF should have texture data")
+
+        test_points = np.array(
+            [
+                [0.0, 0.0, 0.0],  # center (inside)
+                [0.3, 0.0, 0.0],  # near surface (inside)
+                [0.6, 0.0, 0.0],  # outside
+                [0.0, 0.45, 0.0],  # near surface
+            ],
+            dtype=np.float32,
+        )
+
+        vals_winding = _sample_texture_sdf_at_points(sdf_winding, test_points)
+        vals_fast = _sample_texture_sdf_at_points(sdf_fast, test_points)
+
+        for i, pt in enumerate(test_points):
+            vw = float(vals_winding[i])
+            vf = float(vals_fast[i])
+            self.assertEqual(
+                np.sign(vw),
+                np.sign(vf),
+                msg=f"Sign mismatch at {pt}: winding={vw:.4f}, fast={vf:.4f}",
+            )
+            self.assertAlmostEqual(
+                vw,
+                vf,
+                delta=0.1,
+                msg=f"SDF mismatch at {pt}: winding={vw:.4f}, fast={vf:.4f}",
+            )
+
+        mesh.clear_sdf()
+
+    def test_sphere_watertight_sign_grid(self):
+        """Every voxel should have matching sign between fast-path and winding-path."""
+        mesh = create_sphere_mesh(0.5, subdivisions=2)
+
+        mesh._is_watertight = False
+        sdf_winding = SDF.create_from_mesh(mesh, max_resolution=16, texture_format="float32")
+        mesh._is_watertight = None
+
+        mesh._is_watertight = True
+        sdf_fast = SDF.create_from_mesh(mesh, max_resolution=16, texture_format="float32")
+        mesh._is_watertight = None
+
+        # Sample a grid of points spanning the SDF domain
+        pts = []
+        for z in np.linspace(-0.7, 0.7, 8):
+            for y in np.linspace(-0.7, 0.7, 8):
+                for x in np.linspace(-0.7, 0.7, 8):
+                    pts.append([x, y, z])
+        pts_np = np.array(pts, dtype=np.float32)
+
+        vals_w = _sample_texture_sdf_at_points(sdf_winding, pts_np)
+        vals_f = _sample_texture_sdf_at_points(sdf_fast, pts_np)
+
+        sign_w = np.sign(vals_w)
+        sign_f = np.sign(vals_f)
+        mismatches = np.sum(sign_w != sign_f)
+        self.assertEqual(
+            mismatches,
+            0,
+            f"{mismatches}/{len(pts)} voxels have sign mismatch between JFA and winding path",
+        )
+
+        mesh.clear_sdf()
+
+    def test_box_watertight_sdf_sign_correctness(self):
+        """Watertight SDF for a box should have correct inside/outside signs."""
+        mesh = create_box_mesh((0.5, 0.5, 0.5))
+        self.assertTrue(mesh.is_watertight)
+
+        sdf = SDF.create_from_mesh(mesh, max_resolution=32, texture_format="float32")
+        self.assertIsNotNone(sdf.texture_data, "SDF should have texture data")
+
+        test_points = np.array(
+            [
+                [0.0, 0.0, 0.0],  # center (inside)
+                [1.0, 0.0, 0.0],  # well outside
+            ],
+            dtype=np.float32,
+        )
+        vals = _sample_texture_sdf_at_points(sdf, test_points)
+
+        self.assertLess(float(vals[0]), 0.0, "Center of box should have negative SDF")
+        self.assertGreater(float(vals[1]), 0.0, "Point outside box should have positive SDF")
+
+        mesh.clear_sdf()
 
 
 # Register CUDA-only tests using the standard pattern
