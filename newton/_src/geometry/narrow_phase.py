@@ -1748,8 +1748,8 @@ class NarrowPhase:
         if device is None:
             device = self.device if self.device is not None else candidate_pair.device
 
-        # Clear all counters with a single kernel launch (consolidated counter array)
-        self._counter_array.zero_()
+        # Counters are zeroed by compute_shape_aabbs (fused by CollisionPipeline.collide).
+        # Callers outside CollisionPipeline must zero _counter_array before calling this method.
 
         # Stage 1: Launch primitive kernel for fast analytical collisions
         # This handles sphere-sphere, sphere-capsule, capsule-capsule, plane-sphere, plane-capsule
