@@ -791,6 +791,8 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
     shape_pairs_mesh: wp.array[wp.vec2i],
     shape_pairs_mesh_count: wp.array[int],
     total_num_threads: int,
+    shape_collision_aabb_lower: wp.array[wp.vec3],  # Pre-computed local AABB lower bounds
+    shape_collision_aabb_upper: wp.array[wp.vec3],  # Pre-computed local AABB upper bounds
     # outputs
     triangle_pairs: wp.array[wp.vec3i],  # (shape_a, shape_b, triangle_idx)
     triangle_pairs_count: wp.array[int],
@@ -883,6 +885,8 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
             gap_sum,
             triangle_pairs,
             triangle_pairs_count,
+            shape_collision_aabb_lower,
+            shape_collision_aabb_upper,
         )
 
 
@@ -1855,6 +1859,8 @@ class NarrowPhase:
                     self.shape_pairs_mesh,
                     self.shape_pairs_mesh_count,
                     self.num_tile_blocks,
+                    shape_collision_aabb_lower,
+                    shape_collision_aabb_upper,
                 ],
                 outputs=[
                     self.triangle_pairs,
