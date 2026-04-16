@@ -18,8 +18,6 @@ import warp as wp
 from ..core.types import Devicelike
 from .broad_phase_common import (
     check_aabb_overlap,
-    check_obb_overlap,
-    compute_world_obb,
     is_pair_excluded,
     precompute_world_map,
     test_world_and_group_pair,
@@ -66,50 +64,6 @@ def _nxn_broadphase_precomputed_pairs(
             candidate_pair_count,
             max_candidate_pair,
         )
-
-
-@wp.kernel(enable_backward=False)
-def _nxn_broadphase_precomputed_pairs_obb(
-    # Body and shape transforms for on-the-fly OBB computation
-    body_q: wp.array[wp.transform],
-    shape_transform: wp.array[wp.transform],
-    shape_body: wp.array[int],
-    # Local-space AABBs (pre-computed by builder)
-    local_aabb_lower: wp.array[wp.vec3],
-    local_aabb_upper: wp.array[wp.vec3],
-    # Per-shape gaps and margins for OBB inflation
-    shape_gap: wp.array[float],
-    shape_margin: wp.array[float],
-    # Precomputed pairs
-    nxn_shape_pair: wp.array[wp.vec2i],
-    # Output arrays
-    candidate_pair: wp.array[wp.vec2i],
-    candidate_pair_count: wp.array[int],
-    max_candidate_pair: int,
-):
-    """Broad phase using OBB overlap on precomputed pairs.
-
-    Computes oriented bounding boxes from local AABBs and body transforms,
-    avoiding the need for a separate world-space AABB update kernel.
-    """
-    elementid = wp.tid()
-
-    pair = nxn_shape_pair[elementid]
-    s1 = pair[0]
-    s2 = pair[1]
-
-    gap1 = shape_gap[s1] + shape_margin[s1]
-    gap2 = shape_gap[s2] + shape_margin[s2]
-
-    center_a, half_a, rot_a = compute_world_obb(
-        body_q, shape_transform, shape_body, local_aabb_lower[s1], local_aabb_upper[s1], s1, gap1
-    )
-    center_b, half_b, rot_b = compute_world_obb(
-        body_q, shape_transform, shape_body, local_aabb_lower[s2], local_aabb_upper[s2], s2, gap2
-    )
-
-    if check_obb_overlap(center_a, half_a, rot_a, center_b, half_b, rot_b):
-        write_pair(pair, candidate_pair, candidate_pair_count, max_candidate_pair)
 
 
 @wp.func
@@ -496,48 +450,6 @@ class BroadPhaseExplicit:
                 shape_lower,
                 shape_upper,
                 shape_gap,
-                shape_pairs,
-                candidate_pair,
-                candidate_pair_count,
-                max_candidate_pair,
-            ],
-            device=device,
-            record_tape=False,
-        )
-
-    def launch_obb(
-        self,
-        body_q: wp.array[wp.transform],
-        shape_transform: wp.array[wp.transform],
-        shape_body: wp.array[int],
-        local_aabb_lower: wp.array[wp.vec3],
-        local_aabb_upper: wp.array[wp.vec3],
-        shape_gap: wp.array[float],
-        shape_margin: wp.array[float],
-        shape_pairs: wp.array[wp.vec2i],
-        shape_pair_count: int,
-        candidate_pair: wp.array[wp.vec2i],
-        candidate_pair_count: wp.array[int],
-        device: Devicelike | None = None,
-    ) -> None:
-        """Launch OBB-based broad phase — avoids world-space AABB computation."""
-        max_candidate_pair = candidate_pair.shape[0]
-        candidate_pair_count.zero_()
-
-        if device is None:
-            device = body_q.device
-
-        wp.launch(
-            kernel=_nxn_broadphase_precomputed_pairs_obb,
-            dim=shape_pair_count,
-            inputs=[
-                body_q,
-                shape_transform,
-                shape_body,
-                local_aabb_lower,
-                local_aabb_upper,
-                shape_gap,
-                shape_margin,
                 shape_pairs,
                 candidate_pair,
                 candidate_pair_count,
