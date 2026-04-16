@@ -593,6 +593,9 @@ def _clear_active_kernel(
     # Counter arrays to zero (merged from _zero_count_and_contacts_kernel)
     contact_count: wp.array[wp.int32],
     ht_insert_failures: wp.array[wp.int32],
+    # Exported flags — cleared per contact_id to avoid full-array memset
+    exported_flags: wp.array[wp.int32],
+    deterministic_flag: int,
     ht_capacity: int,
     values_per_key: int,
     num_threads: int,
@@ -644,8 +647,15 @@ def _clear_active_kernel(
                     agg_moment_reduced[entry_idx] = 0.0
                     agg_moment2_reduced[entry_idx] = 0.0
 
-        # Clear this value slot (slot-major layout)
+        # Clear exported_flags for the contact_id stored in this slot,
+        # then clear the value slot.  This avoids the full-array memset
+        # on exported_flags that was previously done before export.
         value_idx = local_idx * ht_capacity + entry_idx
+        value = ht_values[value_idx]
+        if value != wp.uint64(0):
+            cid = unpack_contact_id(value, deterministic_flag)
+            if cid < exported_flags.shape[0]:
+                exported_flags[cid] = 0
         ht_values[value_idx] = wp.uint64(0)
         i += num_threads
 
@@ -835,6 +845,8 @@ class GlobalContactReducer:
                 self.agg_moment2_reduced,
                 self.contact_count,
                 self.ht_insert_failures,
+                self.exported_flags,
+                int(self.deterministic),
                 self.hashtable.capacity,
                 self.values_per_key,
                 num_threads,
