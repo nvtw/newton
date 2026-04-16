@@ -53,6 +53,7 @@ from ..geometry.support_function import (
     GeoTypeEx,
     SupportMapDataProvider,
     extract_shape_data,
+    support_map_gjk,
     support_map_lean,
 )
 from ..geometry.types import GeoType
@@ -1525,7 +1526,11 @@ class NarrowPhase:
                 post_process_contact=post_process_minkowski_only,
             )
         else:
-            self.narrow_phase_kernel = create_narrow_phase_kernel_gjk_mpr(self.external_aabb, writer_func)
+            # Use support_map_gjk which omits PLANE/TRIANGLE/TRIANGLE_PRISM
+            # branches to reduce compiled code size and I-cache pressure.
+            self.narrow_phase_kernel = create_narrow_phase_kernel_gjk_mpr(
+                self.external_aabb, writer_func, support_func=support_map_gjk
+            )
         # Create triangle contacts kernel when meshes or heightfields are present
         if has_meshes or has_heightfields:
             self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func)
