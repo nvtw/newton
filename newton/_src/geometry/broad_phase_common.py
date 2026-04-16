@@ -36,6 +36,117 @@ def check_aabb_overlap(
 
 
 @wp.func
+def compute_world_obb(
+    body_q: wp.array[wp.transform],
+    shape_transform: wp.array[wp.transform],
+    shape_body: wp.array[int],
+    local_lo: wp.vec3,
+    local_hi: wp.vec3,
+    shape_id: int,
+    gap: float,
+) -> tuple[wp.vec3, wp.vec3, wp.mat33]:
+    """Compute world-space OBB center, half-extents, and rotation from local AABB."""
+    rigid_id = shape_body[shape_id]
+    if rigid_id == -1:
+        X_ws = shape_transform[shape_id]
+    else:
+        X_ws = wp.transform_multiply(body_q[rigid_id], shape_transform[shape_id])
+
+    pos = wp.transform_get_translation(X_ws)
+    q = wp.transform_get_rotation(X_ws)
+    rot = wp.quat_to_matrix(q)
+
+    center_local = (local_lo + local_hi) * 0.5
+    half = (local_hi - local_lo) * 0.5 + wp.vec3(gap, gap, gap)
+
+    center_world = rot * center_local + pos
+    return center_world, half, rot
+
+
+@wp.func
+def check_obb_overlap(
+    center_a: wp.vec3,
+    half_a: wp.vec3,
+    rot_a: wp.mat33,
+    center_b: wp.vec3,
+    half_b: wp.vec3,
+    rot_b: wp.mat33,
+) -> bool:
+    """Separating Axis Theorem test for two oriented bounding boxes."""
+    # Relative transform: B in A's frame
+    d = center_b - center_a
+    # Rotation of B relative to A and its absolute value
+    # C[i][j] = dot(rot_a column i, rot_b column j)
+    c00 = wp.dot(wp.vec3(rot_a[0, 0], rot_a[1, 0], rot_a[2, 0]), wp.vec3(rot_b[0, 0], rot_b[1, 0], rot_b[2, 0]))
+    c01 = wp.dot(wp.vec3(rot_a[0, 0], rot_a[1, 0], rot_a[2, 0]), wp.vec3(rot_b[0, 1], rot_b[1, 1], rot_b[2, 1]))
+    c02 = wp.dot(wp.vec3(rot_a[0, 0], rot_a[1, 0], rot_a[2, 0]), wp.vec3(rot_b[0, 2], rot_b[1, 2], rot_b[2, 2]))
+    c10 = wp.dot(wp.vec3(rot_a[0, 1], rot_a[1, 1], rot_a[2, 1]), wp.vec3(rot_b[0, 0], rot_b[1, 0], rot_b[2, 0]))
+    c11 = wp.dot(wp.vec3(rot_a[0, 1], rot_a[1, 1], rot_a[2, 1]), wp.vec3(rot_b[0, 1], rot_b[1, 1], rot_b[2, 1]))
+    c12 = wp.dot(wp.vec3(rot_a[0, 1], rot_a[1, 1], rot_a[2, 1]), wp.vec3(rot_b[0, 2], rot_b[1, 2], rot_b[2, 2]))
+    c20 = wp.dot(wp.vec3(rot_a[0, 2], rot_a[1, 2], rot_a[2, 2]), wp.vec3(rot_b[0, 0], rot_b[1, 0], rot_b[2, 0]))
+    c21 = wp.dot(wp.vec3(rot_a[0, 2], rot_a[1, 2], rot_a[2, 2]), wp.vec3(rot_b[0, 1], rot_b[1, 1], rot_b[2, 1]))
+    c22 = wp.dot(wp.vec3(rot_a[0, 2], rot_a[1, 2], rot_a[2, 2]), wp.vec3(rot_b[0, 2], rot_b[1, 2], rot_b[2, 2]))
+
+    eps = 1.0e-6
+    ac00 = wp.abs(c00) + eps
+    ac01 = wp.abs(c01) + eps
+    ac02 = wp.abs(c02) + eps
+    ac10 = wp.abs(c10) + eps
+    ac11 = wp.abs(c11) + eps
+    ac12 = wp.abs(c12) + eps
+    ac20 = wp.abs(c20) + eps
+    ac21 = wp.abs(c21) + eps
+    ac22 = wp.abs(c22) + eps
+
+    # Project d onto A's axes
+    da0 = wp.dot(d, wp.vec3(rot_a[0, 0], rot_a[1, 0], rot_a[2, 0]))
+    da1 = wp.dot(d, wp.vec3(rot_a[0, 1], rot_a[1, 1], rot_a[2, 1]))
+    da2 = wp.dot(d, wp.vec3(rot_a[0, 2], rot_a[1, 2], rot_a[2, 2]))
+
+    # A's 3 axes
+    if wp.abs(da0) > half_a[0] + half_b[0] * ac00 + half_b[1] * ac01 + half_b[2] * ac02:
+        return False
+    if wp.abs(da1) > half_a[1] + half_b[0] * ac10 + half_b[1] * ac11 + half_b[2] * ac12:
+        return False
+    if wp.abs(da2) > half_a[2] + half_b[0] * ac20 + half_b[1] * ac21 + half_b[2] * ac22:
+        return False
+
+    # B's 3 axes
+    db0 = da0 * c00 + da1 * c10 + da2 * c20
+    db1 = da0 * c01 + da1 * c11 + da2 * c21
+    db2 = da0 * c02 + da1 * c12 + da2 * c22
+
+    if wp.abs(db0) > half_a[0] * ac00 + half_a[1] * ac10 + half_a[2] * ac20 + half_b[0]:
+        return False
+    if wp.abs(db1) > half_a[0] * ac01 + half_a[1] * ac11 + half_a[2] * ac21 + half_b[1]:
+        return False
+    if wp.abs(db2) > half_a[0] * ac02 + half_a[1] * ac12 + half_a[2] * ac22 + half_b[2]:
+        return False
+
+    # 9 cross-product axes (A_i x B_j)
+    if wp.abs(da2 * c10 - da1 * c20) > half_a[1] * ac20 + half_a[2] * ac10 + half_b[1] * ac02 + half_b[2] * ac01:
+        return False
+    if wp.abs(da2 * c11 - da1 * c21) > half_a[1] * ac21 + half_a[2] * ac11 + half_b[0] * ac02 + half_b[2] * ac00:
+        return False
+    if wp.abs(da2 * c12 - da1 * c22) > half_a[1] * ac22 + half_a[2] * ac12 + half_b[0] * ac01 + half_b[1] * ac00:
+        return False
+    if wp.abs(da0 * c20 - da2 * c00) > half_a[0] * ac20 + half_a[2] * ac00 + half_b[1] * ac12 + half_b[2] * ac11:
+        return False
+    if wp.abs(da0 * c21 - da2 * c01) > half_a[0] * ac21 + half_a[2] * ac01 + half_b[0] * ac12 + half_b[2] * ac10:
+        return False
+    if wp.abs(da0 * c22 - da2 * c02) > half_a[0] * ac22 + half_a[2] * ac02 + half_b[0] * ac11 + half_b[1] * ac10:
+        return False
+    if wp.abs(da1 * c00 - da0 * c10) > half_a[0] * ac10 + half_a[1] * ac00 + half_b[1] * ac22 + half_b[2] * ac21:
+        return False
+    if wp.abs(da1 * c01 - da0 * c11) > half_a[0] * ac11 + half_a[1] * ac01 + half_b[0] * ac22 + half_b[2] * ac20:
+        return False
+    if wp.abs(da1 * c02 - da0 * c12) > half_a[0] * ac12 + half_a[1] * ac02 + half_b[0] * ac21 + half_b[1] * ac20:
+        return False
+
+    return True
+
+
+@wp.func
 def binary_search(values: wp.array[Any], value: Any, lower: int, upper: int) -> int:
     while lower < upper:
         mid = (lower + upper) >> 1

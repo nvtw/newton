@@ -147,6 +147,34 @@ def write_contact(
 
 
 @wp.kernel(enable_backward=False)
+def prepare_narrow_phase_geom(
+    body_q: wp.array[wp.transform],
+    shape_transform: wp.array[wp.transform],
+    shape_body: wp.array[int],
+    shape_scale: wp.array[wp.vec3],
+    shape_margin: wp.array[float],
+    # outputs
+    geom_data: wp.array[wp.vec4],
+    geom_xform: wp.array[wp.transform],
+):
+    """Write narrow-phase geometry data (world transform + scale/margin).
+
+    Lightweight alternative to :func:`compute_shape_aabbs` used when the
+    broad phase works with OBBs and world-space AABBs are not needed.
+    """
+    shape_id = wp.tid()
+    rigid_id = shape_body[shape_id]
+    if rigid_id == -1:
+        X_ws = shape_transform[shape_id]
+    else:
+        X_ws = wp.transform_multiply(body_q[rigid_id], shape_transform[shape_id])
+    scale = shape_scale[shape_id]
+    margin = shape_margin[shape_id]
+    geom_data[shape_id] = wp.vec4(scale[0], scale[1], scale[2], margin)
+    geom_xform[shape_id] = X_ws
+
+
+@wp.kernel(enable_backward=False)
 def compute_shape_aabbs(
     body_q: wp.array[wp.transform],
     shape_transform: wp.array[wp.transform],
@@ -815,73 +843,107 @@ class CollisionPipeline:
         # augmentation and soft-contact kernels that follow are tape-safe
         # and recorded normally.
 
-        # Compute AABBs for all shapes (already expanded by per-shape effective gaps)
-        wp.launch(
-            kernel=compute_shape_aabbs,
-            dim=model.shape_count,
-            inputs=[
+        # For EXPLICIT broad phase with precomputed pairs, use OBB overlap
+        # directly from local AABBs + body transforms.  This avoids the
+        # separate world-space AABB update kernel entirely.
+        # For NxN/SAP broad phases, keep the traditional AABB approach since
+        # they rely on axis-aligned sorting/sweeping.
+        use_obb_broad_phase = isinstance(self.broad_phase, BroadPhaseExplicit)
+
+        if use_obb_broad_phase:
+            # Only compute narrow-phase geometry data (geom_data/geom_xform).
+            # World-space AABBs are NOT needed — the OBB broad phase works
+            # directly from local AABBs + body transforms.
+            wp.launch(
+                kernel=prepare_narrow_phase_geom,
+                dim=model.shape_count,
+                inputs=[
+                    state.body_q,
+                    model.shape_transform,
+                    model.shape_body,
+                    model.shape_scale,
+                    model.shape_margin,
+                ],
+                outputs=[
+                    self.geom_data,
+                    self.geom_transform,
+                ],
+                device=self.device,
+                record_tape=False,
+            )
+
+            # OBB broad phase — tests precomputed pairs with oriented bounding boxes
+            self.broad_phase.launch_obb(
                 state.body_q,
                 model.shape_transform,
                 model.shape_body,
-                model.shape_type,
-                model.shape_scale,
-                model.shape_collision_radius,
-                model.shape_source_ptr,
-                model.shape_margin,
-                model.shape_gap,
                 model.shape_collision_aabb_lower,
                 model.shape_collision_aabb_upper,
-            ],
-            outputs=[
-                self.narrow_phase.shape_aabb_lower,
-                self.narrow_phase.shape_aabb_upper,
-                self.geom_data,
-                self.geom_transform,
-            ],
-            device=self.device,
-            record_tape=False,
-        )
-
-        # Run broad phase (AABBs are already expanded by effective gaps, so pass None)
-        if isinstance(self.broad_phase, BroadPhaseAllPairs):
-            self.broad_phase.launch(
-                self.narrow_phase.shape_aabb_lower,
-                self.narrow_phase.shape_aabb_upper,
-                None,  # AABBs are pre-expanded, no additional margin needed
-                model.shape_collision_group,
-                model.shape_world,
-                model.shape_count,
-                self.broad_phase_shape_pairs,
-                self.broad_phase_pair_count,
-                device=self.device,
-                filter_pairs=self.shape_pairs_excluded,
-                num_filter_pairs=self.shape_pairs_excluded_count,
-            )
-        elif isinstance(self.broad_phase, BroadPhaseSAP):
-            self.broad_phase.launch(
-                self.narrow_phase.shape_aabb_lower,
-                self.narrow_phase.shape_aabb_upper,
-                None,  # AABBs are pre-expanded, no additional margin needed
-                model.shape_collision_group,
-                model.shape_world,
-                model.shape_count,
-                self.broad_phase_shape_pairs,
-                self.broad_phase_pair_count,
-                device=self.device,
-                filter_pairs=self.shape_pairs_excluded,
-                num_filter_pairs=self.shape_pairs_excluded_count,
-            )
-        else:  # BroadPhaseExplicit
-            self.broad_phase.launch(
-                self.narrow_phase.shape_aabb_lower,
-                self.narrow_phase.shape_aabb_upper,
-                None,  # AABBs are pre-expanded, no additional margin needed
+                model.shape_gap,
+                model.shape_margin,
                 self.shape_pairs_filtered,
                 len(self.shape_pairs_filtered),
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
                 device=self.device,
             )
+        else:
+            # Traditional AABB approach for NxN/SAP broad phases
+            wp.launch(
+                kernel=compute_shape_aabbs,
+                dim=model.shape_count,
+                inputs=[
+                    state.body_q,
+                    model.shape_transform,
+                    model.shape_body,
+                    model.shape_type,
+                    model.shape_scale,
+                    model.shape_collision_radius,
+                    model.shape_source_ptr,
+                    model.shape_margin,
+                    model.shape_gap,
+                    model.shape_collision_aabb_lower,
+                    model.shape_collision_aabb_upper,
+                ],
+                outputs=[
+                    self.narrow_phase.shape_aabb_lower,
+                    self.narrow_phase.shape_aabb_upper,
+                    self.geom_data,
+                    self.geom_transform,
+                ],
+                device=self.device,
+                record_tape=False,
+            )
+
+            # Run broad phase with world-space AABBs
+            if isinstance(self.broad_phase, BroadPhaseAllPairs):
+                self.broad_phase.launch(
+                    self.narrow_phase.shape_aabb_lower,
+                    self.narrow_phase.shape_aabb_upper,
+                    None,
+                    model.shape_collision_group,
+                    model.shape_world,
+                    model.shape_count,
+                    self.broad_phase_shape_pairs,
+                    self.broad_phase_pair_count,
+                    device=self.device,
+                    filter_pairs=self.shape_pairs_excluded,
+                    num_filter_pairs=self.shape_pairs_excluded_count,
+                )
+            elif isinstance(self.broad_phase, BroadPhaseSAP):
+                self.broad_phase.launch(
+                    self.narrow_phase.shape_aabb_lower,
+                    self.narrow_phase.shape_aabb_upper,
+                    None,
+                    model.shape_collision_group,
+                    model.shape_world,
+                    model.shape_count,
+                    self.broad_phase_shape_pairs,
+                    self.broad_phase_pair_count,
+                    device=self.device,
+                    filter_pairs=self.shape_pairs_excluded,
+                    num_filter_pairs=self.shape_pairs_excluded_count,
+                )
 
         # Create ContactWriterData struct for custom contact writing
         writer_data = ContactWriterData()
