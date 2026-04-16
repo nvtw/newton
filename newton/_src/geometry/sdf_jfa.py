@@ -34,9 +34,8 @@ import math
 import numpy as np
 import warp as wp
 
-UNRESOLVED = wp.constant(wp.int32(-1))
+UNRESOLVED = wp.constant(wp.vec3i(-1, -1, -1))
 
-# Sign values stored in the grid.
 SIGN_OUTSIDE = wp.constant(wp.int32(1))
 SIGN_INSIDE = wp.constant(wp.int32(-1))
 
@@ -59,10 +58,7 @@ def _scanline_sign_kernel(
     size_y: int,
     size_z: int,
 ):
-    """Fill sign for one (y, z) column by marching a ray along +x.
-
-    For watertight meshes the sign flips at each ray-mesh intersection.
-    """
+    """Fill sign for one (y, z) column by marching a ray along +x."""
     tid = wp.tid()
     total_cols = size_y * size_z
     if tid >= total_cols:
@@ -79,9 +75,6 @@ def _scanline_sign_kernel(
     ray_d = wp.vec3(1.0, 0.0, 0.0)
     max_t = float(size_x + 2) * cell_size[0]
 
-    # Collect intersection t-values by marching along the ray.
-    # We store up to 512 crossings; meshes with more crossings per column
-    # are extremely unlikely at typical SDF resolutions.
     crossing_ts = wp.vector(dtype=float, length=512)
     num_crossings = int(0)
     t_start = float(0.0)
@@ -98,15 +91,12 @@ def _scanline_sign_kernel(
         else:
             break
 
-    # Walk along x and assign sign.  The ray starts outside the mesh
-    # (origin is one cell before min_corner).
     crossing_idx = int(0)
     sign = SIGN_OUTSIDE
 
     for ix in range(size_x):
         voxel_t = (float(ix) * cell_size[0]) + cell_size[0]
 
-        # Advance past all crossings up to this voxel center.
         for _c in range(512):
             if crossing_idx >= num_crossings:
                 break
@@ -128,9 +118,7 @@ def _scanline_sign_kernel(
 @wp.kernel
 def _seed_boundary_kernel(
     sign_grid: wp.array[wp.int32],
-    closest_x: wp.array[wp.int32],
-    closest_y: wp.array[wp.int32],
-    closest_z: wp.array[wp.int32],
+    closest: wp.array[wp.vec3i],
     size_x: int,
     size_y: int,
     size_z: int,
@@ -163,9 +151,7 @@ def _seed_boundary_kernel(
         is_boundary = True
 
     if is_boundary:
-        closest_x[tid] = x
-        closest_y[tid] = y
-        closest_z[tid] = z
+        closest[tid] = wp.vec3i(x, y, z)
 
 
 # ---- Phase 3: JFA passes ----
@@ -173,12 +159,8 @@ def _seed_boundary_kernel(
 
 @wp.kernel
 def _jfa_pass_kernel(
-    cx_in: wp.array[wp.int32],
-    cy_in: wp.array[wp.int32],
-    cz_in: wp.array[wp.int32],
-    cx_out: wp.array[wp.int32],
-    cy_out: wp.array[wp.int32],
-    cz_out: wp.array[wp.int32],
+    src: wp.array[wp.vec3i],
+    dst: wp.array[wp.vec3i],
     step: int,
     size_x: int,
     size_y: int,
@@ -195,29 +177,31 @@ def _jfa_pass_kernel(
     py = pr // size_x
     px = pr - py * size_x
 
-    bx = cx_in[tid]
-    by = cy_in[tid]
-    bz = cz_in[tid]
+    best = src[tid]
+    bx = best[0]
+    by = best[1]
+    bz = best[2]
 
-    if bx != UNRESOLVED:
+    if bx != -1:
         best2 = float((px - bx) * (px - bx) + (py - by) * (py - by) + (pz - bz) * (pz - bz))
     else:
         best2 = 1.0e20
 
-    for dz in range(-1, 2):
-        for dy in range(-1, 2):
-            for dx in range(-1, 2):
-                qx = px + dx * step
-                qy = py + dy * step
-                qz = pz + dz * step
+    for ddz in range(-1, 2):
+        for ddy in range(-1, 2):
+            for ddx in range(-1, 2):
+                qx = px + ddx * step
+                qy = py + ddy * step
+                qz = pz + ddz * step
                 if qx < 0 or qx >= size_x or qy < 0 or qy >= size_y or qz < 0 or qz >= size_z:
                     continue
                 qi = _jfa_idx(qx, qy, qz, size_x, size_y)
-                nx = cx_in[qi]
-                if nx == UNRESOLVED:
+                nb = src[qi]
+                nx = nb[0]
+                if nx == -1:
                     continue
-                ny = cy_in[qi]
-                nz = cz_in[qi]
+                ny = nb[1]
+                nz = nb[2]
                 d2 = float((px - nx) * (px - nx) + (py - ny) * (py - ny) + (pz - nz) * (pz - nz))
                 if d2 < best2:
                     best2 = d2
@@ -225,9 +209,7 @@ def _jfa_pass_kernel(
                     by = ny
                     bz = nz
 
-    cx_out[tid] = bx
-    cy_out[tid] = by
-    cz_out[tid] = bz
+    dst[tid] = wp.vec3i(bx, by, bz)
 
 
 # ---- Phase 4: extract signed distance ----
@@ -236,9 +218,7 @@ def _jfa_pass_kernel(
 @wp.kernel
 def _extract_sdf_kernel(
     sign_grid: wp.array[wp.int32],
-    closest_x: wp.array[wp.int32],
-    closest_y: wp.array[wp.int32],
-    closest_z: wp.array[wp.int32],
+    closest: wp.array[wp.vec3i],
     sdf_out: wp.array[float],
     cell_size: wp.vec3,
     size_x: int,
@@ -256,18 +236,19 @@ def _extract_sdf_kernel(
     y = rem // size_x
     x = rem - y * size_x
 
-    cx = closest_x[tid]
-    cy = closest_y[tid]
-    cz = closest_z[tid]
+    c = closest[tid]
+    cx = c[0]
+    cy = c[1]
+    cz = c[2]
 
-    if cx == UNRESOLVED:
+    if cx == -1:
         sdf_out[tid] = float(sign_grid[tid]) * 10000.0
         return
 
-    dx = float(x - cx) * cell_size[0]
-    dy = float(y - cy) * cell_size[1]
-    dz = float(z - cz) * cell_size[2]
-    dist = wp.sqrt(dx * dx + dy * dy + dz * dz)
+    dx_val = float(x - cx) * cell_size[0]
+    dy_val = float(y - cy) * cell_size[1]
+    dz_val = float(z - cz) * cell_size[2]
+    dist = wp.sqrt(dx_val * dx_val + dy_val * dy_val + dz_val * dz_val)
 
     sdf_out[tid] = float(sign_grid[tid]) * dist
 
@@ -313,18 +294,23 @@ def compute_dense_sdf_jfa(
 
     # Phase 1: scanline sign fill (one ray per Y*Z column)
     num_cols = grid_size_y * grid_size_z
-    wp.launch(_scanline_sign_kernel, dim=num_cols, inputs=[mesh.id, sign_grid, mc, cs, grid_size_x, grid_size_y, grid_size_z], device=device)
+    wp.launch(
+        _scanline_sign_kernel, dim=num_cols,
+        inputs=[mesh.id, sign_grid, mc, cs, grid_size_x, grid_size_y, grid_size_z],
+        device=device,
+    )
 
     # Phase 2: seed boundary voxels
-    cx_a = wp.full(total, UNRESOLVED, dtype=wp.int32, device=device)
-    cy_a = wp.full(total, UNRESOLVED, dtype=wp.int32, device=device)
-    cz_a = wp.full(total, UNRESOLVED, dtype=wp.int32, device=device)
-    wp.launch(_seed_boundary_kernel, dim=total, inputs=[sign_grid, cx_a, cy_a, cz_a, grid_size_x, grid_size_y, grid_size_z], device=device)
+    unresolved_np = np.full((total, 3), -1, dtype=np.int32)
+    closest_a = wp.array(unresolved_np, dtype=wp.vec3i, device=device)
+    wp.launch(
+        _seed_boundary_kernel, dim=total,
+        inputs=[sign_grid, closest_a, grid_size_x, grid_size_y, grid_size_z],
+        device=device,
+    )
 
     # Phase 3: JFA passes with ping-pong buffers
-    cx_b = wp.zeros_like(cx_a)
-    cy_b = wp.zeros_like(cy_a)
-    cz_b = wp.zeros_like(cz_a)
+    closest_b = wp.zeros(total, dtype=wp.vec3i, device=device)
 
     max_dim = max(grid_size_x, grid_size_y, grid_size_z)
     num_passes = max(1, int(math.ceil(math.log2(max_dim))))
@@ -332,21 +318,33 @@ def compute_dense_sdf_jfa(
     a_src = True
     for i in range(num_passes):
         step = 1 << (num_passes - 1 - i)
-        src = (cx_a, cy_a, cz_a) if a_src else (cx_b, cy_b, cz_b)
-        dst = (cx_b, cy_b, cz_b) if a_src else (cx_a, cy_a, cz_a)
-        wp.launch(_jfa_pass_kernel, dim=total, inputs=[*src, *dst, step, grid_size_x, grid_size_y, grid_size_z], device=device)
+        s = closest_a if a_src else closest_b
+        d = closest_b if a_src else closest_a
+        wp.launch(
+            _jfa_pass_kernel, dim=total,
+            inputs=[s, d, step, grid_size_x, grid_size_y, grid_size_z],
+            device=device,
+        )
         a_src = not a_src
 
     # JFA+1 and JFA+2 refinement passes
     for extra_step in (2, 1):
-        src = (cx_a, cy_a, cz_a) if a_src else (cx_b, cy_b, cz_b)
-        dst = (cx_b, cy_b, cz_b) if a_src else (cx_a, cy_a, cz_a)
-        wp.launch(_jfa_pass_kernel, dim=total, inputs=[*src, *dst, extra_step, grid_size_x, grid_size_y, grid_size_z], device=device)
+        s = closest_a if a_src else closest_b
+        d = closest_b if a_src else closest_a
+        wp.launch(
+            _jfa_pass_kernel, dim=total,
+            inputs=[s, d, extra_step, grid_size_x, grid_size_y, grid_size_z],
+            device=device,
+        )
         a_src = not a_src
 
     # Phase 4: extract signed distance
     sdf_out = wp.zeros(total, dtype=float, device=device)
-    final = (cx_a, cy_a, cz_a) if a_src else (cx_b, cy_b, cz_b)
-    wp.launch(_extract_sdf_kernel, dim=total, inputs=[sign_grid, *final, sdf_out, cs, grid_size_x, grid_size_y, grid_size_z], device=device)
+    final = closest_a if a_src else closest_b
+    wp.launch(
+        _extract_sdf_kernel, dim=total,
+        inputs=[sign_grid, final, sdf_out, cs, grid_size_x, grid_size_y, grid_size_z],
+        device=device,
+    )
 
     return sdf_out

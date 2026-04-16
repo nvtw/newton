@@ -322,6 +322,7 @@ class SDF:
         scale: tuple[float, float, float] | None = None,
         texture_format: str = "uint16",
         use_parity: bool = False,
+        skip_volume: bool = False,
     ) -> "SDF":
         """Create an SDF from a mesh in local mesh coordinates.
 
@@ -353,6 +354,10 @@ class SDF:
             use_parity: use ``mesh_query_point_sign_parity`` for
                 inside/outside classification instead of winding numbers.
                 Cheaper but requires a watertight mesh.
+            skip_volume: skip the NanoVDB sparse/coarse volume build.
+                The collision pipeline uses only the texture SDF, so this
+                is safe when the SDF will be used for collision only.
+                Reduces construction time significantly.
 
         Returns:
             A validated :class:`SDF` runtime handle with sparse/coarse volumes.
@@ -361,18 +366,25 @@ class SDF:
         bake_scale = scale is not None
         effective_scale = scale if scale is not None else (1.0, 1.0, 1.0)
         is_watertight = mesh.is_watertight
-        sdf_data, sparse_volume, coarse_volume, block_coords = _compute_sdf_from_shape_impl(
-            shape_type=GeoType.MESH,
-            shape_geo=mesh,
-            shape_scale=effective_scale,
-            shape_margin=shape_margin,
-            narrow_band_distance=narrow_band_range,
-            margin=margin,
-            target_voxel_size=target_voxel_size,
-            max_resolution=effective_max_resolution if effective_max_resolution is not None else 64,
-            bake_scale=bake_scale,
-            device=device,
-        )
+
+        if skip_volume:
+            sdf_data = create_empty_sdf_data()
+            sparse_volume = None
+            coarse_volume = None
+            block_coords = []
+        else:
+            sdf_data, sparse_volume, coarse_volume, block_coords = _compute_sdf_from_shape_impl(
+                shape_type=GeoType.MESH,
+                shape_geo=mesh,
+                shape_scale=effective_scale,
+                shape_margin=shape_margin,
+                narrow_band_distance=narrow_band_range,
+                margin=margin,
+                target_voxel_size=target_voxel_size,
+                max_resolution=effective_max_resolution if effective_max_resolution is not None else 64,
+                bake_scale=bake_scale,
+                device=device,
+            )
 
         # Build texture SDF alongside NanoVDB
         texture_data = None
