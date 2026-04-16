@@ -20,6 +20,25 @@ def _increment_contact_generation(generation: wp.array[wp.int32]):
     generation[0] = g
 
 
+@wp.kernel(enable_backward=False)
+def _clear_counters_and_bump_generation(
+    counters: wp.array[wp.int32],
+    generation: wp.array[wp.int32],
+    num_counters: int,
+):
+    """Zero counter array and increment generation in one kernel launch."""
+    tid = wp.tid()
+    if tid < num_counters:
+        counters[tid] = 0
+    if tid == 0:
+        g = generation[0]
+        if g == 2147483647:
+            g = 0
+        else:
+            g = g + 1
+        generation[0] = g
+
+
 class Contacts:
     """
     Stores contact information for rigid and soft body collisions, to be consumed by a solver.
@@ -229,14 +248,12 @@ class Contacts:
         If clear_buffers=True (conservative mode), performs full buffer clearing with sentinel
         values and zeros. This requires 7-10 kernel launches but may be useful for debugging.
         """
-        # Clear all counters with a single kernel launch (consolidated counter array)
-        self._counter_array.zero_()
-
-        # Bump generation so solvers know the contact set changed (graph-capture safe)
+        # Clear all counters and bump generation in a single kernel launch.
+        num_counters = self._counter_array.shape[0]
         wp.launch(
-            _increment_contact_generation,
-            dim=1,
-            inputs=[self.contact_generation],
+            _clear_counters_and_bump_generation,
+            dim=max(num_counters, 1),
+            inputs=[self._counter_array, self.contact_generation, num_counters],
             device=self.contact_generation.device,
             record_tape=False,
         )
