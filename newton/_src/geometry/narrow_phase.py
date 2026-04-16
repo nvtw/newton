@@ -1231,9 +1231,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
 
             if wp.static(speculative):
                 vel_rel = shape_lin_vel[plane_shape] - shape_lin_vel[mesh_shape]
-                rel_speed = (
-                    wp.length(vel_rel) + shape_ang_speed_bound[mesh_shape] + shape_ang_speed_bound[plane_shape]
-                )
+                rel_speed = wp.length(vel_rel) + shape_ang_speed_bound[mesh_shape] + shape_ang_speed_bound[plane_shape]
                 gap_sum = gap_sum + wp.min(rel_speed * speculative_dt, max_speculative_extension)
 
             # Strided loop over vertices across all threads in the launch
@@ -1374,9 +1372,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
 
             if wp.static(speculative):
                 vel_rel = shape_lin_vel[plane_shape] - shape_lin_vel[mesh_shape]
-                rel_speed = (
-                    wp.length(vel_rel) + shape_ang_speed_bound[mesh_shape] + shape_ang_speed_bound[plane_shape]
-                )
+                rel_speed = wp.length(vel_rel) + shape_ang_speed_bound[mesh_shape] + shape_ang_speed_bound[plane_shape]
                 gap_sum = gap_sum + wp.min(rel_speed * speculative_dt, max_speculative_extension)
 
             # Process this block's chunk of vertices — write contacts directly
