@@ -160,13 +160,11 @@ def compute_shape_aabbs(
     shape_collision_aabb_lower: wp.array[wp.vec3],
     shape_collision_aabb_upper: wp.array[wp.vec3],
     # Fused counter arrays — zeroed by thread 0 to avoid separate kernel launches.
-    # Replaces contacts.clear(), broad_phase_pair_count.zero_(), and _counter_array.zero_().
+    # Replaces contacts.clear() and broad_phase_pair_count.zero_().
     contact_counters: wp.array[wp.int32],
     contact_generation: wp.array[wp.int32],
     broad_phase_pair_count: wp.array[wp.int32],
-    narrow_phase_counters: wp.array[wp.int32],
     num_contact_counters: int,
-    num_narrow_phase_counters: int,
     # outputs
     aabb_lower: wp.array[wp.vec3],
     aabb_upper: wp.array[wp.vec3],
@@ -180,13 +178,10 @@ def compute_shape_aabbs(
     """
     shape_id = wp.tid()
 
-    # Thread 0: zero all counters and bump generation.
-    # Fuses contacts.clear() + broad_phase_pair_count.zero_() + _counter_array.zero_().
+    # Thread 0: zero contact counters, bump generation, zero broad phase count.
     if shape_id == 0:
         for c in range(num_contact_counters):
             contact_counters[c] = 0
-        for c in range(num_narrow_phase_counters):
-            narrow_phase_counters[c] = 0
         g = contact_generation[0]
         if g >= 2147483647:
             g = 0
@@ -852,9 +847,7 @@ class CollisionPipeline:
                 contacts._counter_array,
                 contacts.contact_generation,
                 self.broad_phase_pair_count,
-                self.narrow_phase._counter_array,
                 contacts._counter_array.shape[0],
-                self.narrow_phase._counter_array.shape[0],
             ],
             outputs=[
                 self.narrow_phase.shape_aabb_lower,
