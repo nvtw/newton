@@ -159,6 +159,8 @@ def compute_shape_aabbs(
     shape_gap: wp.array[float],
     shape_collision_aabb_lower: wp.array[wp.vec3],
     shape_collision_aabb_upper: wp.array[wp.vec3],
+    # Counter to zero (avoids a separate memset kernel launch)
+    broad_phase_pair_count: wp.array[int],
     # outputs
     aabb_lower: wp.array[wp.vec3],
     aabb_upper: wp.array[wp.vec3],
@@ -176,6 +178,10 @@ def compute_shape_aabbs(
     for contact detection.  Effective expansion is ``shape_margin + shape_gap``.
     """
     shape_id = wp.tid()
+
+    # Zero broad phase counter (avoids a separate memset call)
+    if shape_id == 0:
+        broad_phase_pair_count[0] = 0
 
     rigid_id = shape_body[shape_id]
     geo_type = shape_type[shape_id]
@@ -801,9 +807,6 @@ class CollisionPipeline:
         contacts.clear()
         # TODO: validate contacts dimensions & compatibility
 
-        # Clear counters
-        self.broad_phase_pair_count.zero_()
-
         model = self.model
         # update any additional parameters
         soft_contact_margin = soft_contact_margin if soft_contact_margin is not None else self.soft_contact_margin
@@ -814,7 +817,8 @@ class CollisionPipeline:
         # augmentation and soft-contact kernels that follow are tape-safe
         # and recorded normally.
 
-        # Compute AABBs for all shapes (already expanded by per-shape effective gaps)
+        # Compute AABBs for all shapes (already expanded by per-shape effective gaps).
+        # Thread 0 also zeros broad_phase_pair_count (avoids a separate memset call).
         wp.launch(
             kernel=compute_shape_aabbs,
             dim=model.shape_count,
@@ -830,6 +834,7 @@ class CollisionPipeline:
                 model.shape_gap,
                 model.shape_collision_aabb_lower,
                 model.shape_collision_aabb_upper,
+                self.broad_phase_pair_count,
             ],
             outputs=[
                 self.narrow_phase.shape_aabb_lower,
