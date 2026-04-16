@@ -1510,7 +1510,7 @@ def _sample_texture_sdf_at_points(sdf_obj, points_np):
 
 @unittest.skipUnless(_cuda_available, "wp.Volume requires CUDA device")
 class TestSDFWatertightFastPath(unittest.TestCase):
-    """Test that the watertight JFA fast path produces consistent texture SDF values."""
+    """Test that the watertight unsigned-BVH fast path produces accurate texture SDF values."""
 
     device = "cuda:0"
 
@@ -1573,7 +1573,6 @@ class TestSDFWatertightFastPath(unittest.TestCase):
         sdf_fast = SDF.create_from_mesh(mesh, max_resolution=16, texture_format="float32")
         mesh._is_watertight = None
 
-        # Sample a grid of points spanning the SDF domain
         pts = []
         for z in np.linspace(-0.7, 0.7, 8):
             for y in np.linspace(-0.7, 0.7, 8):
@@ -1590,7 +1589,7 @@ class TestSDFWatertightFastPath(unittest.TestCase):
         self.assertEqual(
             mismatches,
             0,
-            f"{mismatches}/{len(pts)} voxels have sign mismatch between JFA and winding path",
+            f"{mismatches}/{len(pts)} voxels have sign mismatch between unsigned-BVH and winding path",
         )
 
         mesh.clear_sdf()
@@ -1620,7 +1619,7 @@ class TestSDFWatertightFastPath(unittest.TestCase):
     def test_torus_watertight_sign_grid(self):
         """Non-convex torus: sign mismatches should be < 5% of sampled points.
 
-        JFA's scanline sign fill can differ from winding numbers at a few
+        The scanline sign fill can differ from winding numbers at a few
         boundary voxels on complex non-convex geometry.  We allow up to 5%
         mismatches (all near the surface) while catching gross errors.
         """
@@ -1658,11 +1657,12 @@ class TestSDFWatertightFastPath(unittest.TestCase):
         mesh.clear_sdf()
 
     def test_watertight_distance_accuracy_sphere(self):
-        """Distance error between fast and winding paths should be within 5 voxel-sizes.
+        """Distance error between fast and winding paths should be within 0.5 voxel-sizes.
 
-        JFA propagates distances approximately (via flood fill), so exact agreement
-        with per-voxel BVH queries is not expected.  Five voxel-sizes is generous
-        enough to accommodate JFA rounding while catching large-scale failures.
+        The unsigned-BVH fast path uses exact mesh distance queries (same BVH
+        as the winding path) so distances should match closely.  Small
+        differences arise from the different sign methods affecting which
+        subgrids are allocated and how boundary voxels are classified.
         """
         mesh = create_sphere_mesh(0.5, subdivisions=2)
         res = 32
@@ -1692,13 +1692,13 @@ class TestSDFWatertightFastPath(unittest.TestCase):
         max_err = float(np.max(np.abs(vals_w - vals_f)))
         self.assertLess(
             max_err,
-            5.0 * voxel_size,
-            f"Max distance error {max_err:.6f} exceeds 5*voxel_size={5.0 * voxel_size:.6f}",
+            0.5 * voxel_size,
+            f"Max distance error {max_err:.6f} exceeds 0.5*voxel_size={0.5 * voxel_size:.6f}",
         )
         mesh.clear_sdf()
 
     def test_watertight_distance_accuracy_box(self):
-        """Distance error between fast and winding paths should be within 5 voxel-sizes."""
+        """Distance error between fast and winding paths should be within 0.5 voxel-sizes."""
         mesh = create_box_mesh((0.4, 0.3, 0.5))
         res = 32
 
@@ -1727,8 +1727,8 @@ class TestSDFWatertightFastPath(unittest.TestCase):
         max_err = float(np.max(np.abs(vals_w - vals_f)))
         self.assertLess(
             max_err,
-            5.0 * voxel_size,
-            f"Max distance error {max_err:.6f} exceeds 5*voxel_size={5.0 * voxel_size:.6f}",
+            0.5 * voxel_size,
+            f"Max distance error {max_err:.6f} exceeds 0.5*voxel_size={0.5 * voxel_size:.6f}",
         )
         mesh.clear_sdf()
 
