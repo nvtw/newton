@@ -1430,6 +1430,7 @@ class NarrowPhase:
         use_lean_gjk_mpr: bool = False,
         deterministic: bool = False,
         contact_max: int | None = None,
+        verify_buffers: bool = True,
     ) -> None:
         """
         Initialize NarrowPhase with pre-allocated buffers.
@@ -1469,6 +1470,7 @@ class NarrowPhase:
         self.has_meshes = has_meshes
         self.has_heightfields = has_heightfields
         self.deterministic = deterministic
+        self.verify_buffers = verify_buffers
 
         # Warn when running on CPU with meshes: mesh-mesh SDF contacts require CUDA
         is_gpu_device = wp.get_device(device).is_cuda
@@ -2057,8 +2059,7 @@ class NarrowPhase:
 
             # Export reduced contacts from hashtable
             if self.reduce_contacts:
-                # Zero exported_flags for cross-entry deduplication
-                self.global_contact_reducer.exported_flags.zero_()
+                # exported_flags cleared per-contact-id in _clear_active_kernel
                 wp.launch(
                     kernel=self.export_reduced_contacts_kernel,
                     dim=self.total_num_threads,
@@ -2097,30 +2098,31 @@ class NarrowPhase:
             )
 
         # Verify no collision pipeline buffers overflowed
-        wp.launch(
-            kernel=verify_narrow_phase_buffers,
-            dim=[1],
-            inputs=[
-                candidate_pair_count,
-                candidate_pair.shape[0],
-                self.gjk_candidate_pairs_count,
-                self.gjk_candidate_pairs.shape[0],
-                self.shape_pairs_mesh_count,
-                self.shape_pairs_mesh.shape[0] if self.shape_pairs_mesh is not None else 0,
-                self.triangle_pairs_count,
-                self.triangle_pairs.shape[0] if self.triangle_pairs is not None else 0,
-                self.shape_pairs_mesh_plane_count,
-                self.shape_pairs_mesh_plane.shape[0] if self.shape_pairs_mesh_plane is not None else 0,
-                self.shape_pairs_mesh_mesh_count,
-                self.shape_pairs_mesh_mesh.shape[0] if self.shape_pairs_mesh_mesh is not None else 0,
-                self.shape_pairs_sdf_sdf_count,
-                self.shape_pairs_sdf_sdf.shape[0] if self.shape_pairs_sdf_sdf is not None else 0,
-                writer_data.contact_count,
-                writer_data.contact_max,
-            ],
-            device=device,
-            record_tape=False,
-        )
+        if self.verify_buffers:
+            wp.launch(
+                kernel=verify_narrow_phase_buffers,
+                dim=[1],
+                inputs=[
+                    candidate_pair_count,
+                    candidate_pair.shape[0],
+                    self.gjk_candidate_pairs_count,
+                    self.gjk_candidate_pairs.shape[0],
+                    self.shape_pairs_mesh_count,
+                    self.shape_pairs_mesh.shape[0] if self.shape_pairs_mesh is not None else 0,
+                    self.triangle_pairs_count,
+                    self.triangle_pairs.shape[0] if self.triangle_pairs is not None else 0,
+                    self.shape_pairs_mesh_plane_count,
+                    self.shape_pairs_mesh_plane.shape[0] if self.shape_pairs_mesh_plane is not None else 0,
+                    self.shape_pairs_mesh_mesh_count,
+                    self.shape_pairs_mesh_mesh.shape[0] if self.shape_pairs_mesh_mesh is not None else 0,
+                    self.shape_pairs_sdf_sdf_count,
+                    self.shape_pairs_sdf_sdf.shape[0] if self.shape_pairs_sdf_sdf is not None else 0,
+                    writer_data.contact_count,
+                    writer_data.contact_max,
+                ],
+                device=device,
+                record_tape=False,
+            )
 
     def launch(
         self,
