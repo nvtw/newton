@@ -889,24 +889,15 @@ class CollisionPipeline:
                 num_filter_pairs=self.shape_pairs_excluded_count,
             )
         else:  # BroadPhaseExplicit
-            # Launch directly instead of via self.broad_phase.launch() to skip
-            # the redundant candidate_pair_count.zero_() — already zeroed above.
-            from ..geometry.broad_phase_nxn import _nxn_broadphase_precomputed_pairs  # noqa: PLC0415
-
-            wp.launch(
-                kernel=_nxn_broadphase_precomputed_pairs,
-                dim=len(self.shape_pairs_filtered),
-                inputs=[
-                    self.narrow_phase.shape_aabb_lower,
-                    self.narrow_phase.shape_aabb_upper,
-                    wp.empty(0, dtype=wp.float32, device=self.device),  # No extra gaps, AABBs pre-expanded
-                    self.shape_pairs_filtered,
-                    self.broad_phase_shape_pairs,
-                    self.broad_phase_pair_count,
-                    self.broad_phase_shape_pairs.shape[0],
-                ],
+            self.broad_phase.launch(
+                self.narrow_phase.shape_aabb_lower,
+                self.narrow_phase.shape_aabb_upper,
+                None,  # AABBs are pre-expanded, no additional margin needed
+                self.shape_pairs_filtered,
+                len(self.shape_pairs_filtered),
+                self.broad_phase_shape_pairs,
+                self.broad_phase_pair_count,
                 device=self.device,
-                record_tape=False,
             )
 
         # Create ContactWriterData struct for custom contact writing
