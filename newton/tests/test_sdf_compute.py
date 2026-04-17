@@ -1732,6 +1732,100 @@ class TestSDFWatertightFastPath(unittest.TestCase):
         )
         mesh.clear_sdf()
 
+    def test_use_parity_override_on_non_watertight_mesh(self):
+        """``use_parity=True`` should run the parity path even when auto-detection reports
+        the mesh as non-watertight, producing correct inside/outside signs for points
+        well clear of the missing face.
+        """
+        # Closed cube with its top face (+Y) removed: not watertight by topology,
+        # but parity rays along -Y still reach the interior so sign is recoverable
+        # for points inside the solid bulk.
+        verts = np.array(
+            [
+                [-0.5, -0.5, -0.5],
+                [0.5, -0.5, -0.5],
+                [0.5, 0.5, -0.5],
+                [-0.5, 0.5, -0.5],
+                [-0.5, -0.5, 0.5],
+                [0.5, -0.5, 0.5],
+                [0.5, 0.5, 0.5],
+                [-0.5, 0.5, 0.5],
+            ],
+            dtype=np.float32,
+        )
+        indices = np.array(
+            [
+                0, 2, 1, 0, 3, 2,  # -Z face
+                4, 5, 6, 4, 6, 7,  # +Z face
+                0, 1, 5, 0, 5, 4,  # -Y face
+                0, 4, 7, 0, 7, 3,  # -X face
+                1, 2, 6, 1, 6, 5,  # +X face
+                # +Y face omitted: mesh is open at the top.
+            ],
+            dtype=np.int32,
+        )
+        mesh = Mesh(verts, indices, compute_inertia=False)
+        self.assertFalse(mesh.is_watertight, "Open cube should auto-detect as non-watertight")
+
+        sdf_parity = SDF.create_from_mesh(
+            mesh, max_resolution=32, texture_format="float32", use_parity=True
+        )
+        self.assertIsNotNone(sdf_parity.texture_data, "SDF should have texture data")
+
+        test_points = np.array(
+            [
+                [0.0, -0.2, 0.0],  # well inside the bulk
+                [1.0, 0.0, 0.0],   # well outside in +X
+                [-1.0, -1.0, 0.0], # well outside on a corner
+            ],
+            dtype=np.float32,
+        )
+        vals = _sample_texture_sdf_at_points(sdf_parity, test_points)
+
+        self.assertLess(float(vals[0]), 0.0, "Point inside bulk should have negative SDF")
+        self.assertGreater(float(vals[1]), 0.0, "Point clearly outside should have positive SDF")
+        self.assertGreater(float(vals[2]), 0.0, "Corner point should have positive SDF")
+
+        mesh.clear_sdf()
+
+    def test_watertight_uint16_texture_format(self):
+        """Watertight path with ``texture_format='uint16'`` should produce a valid
+        quantized SDF matching the float32 result within the quantization bound.
+        """
+        mesh = create_box_mesh((0.5, 0.5, 0.5))
+        self.assertTrue(mesh.is_watertight)
+
+        sdf_f32 = SDF.create_from_mesh(mesh, max_resolution=32, texture_format="float32")
+        sdf_u16 = SDF.create_from_mesh(mesh, max_resolution=32, texture_format="uint16")
+
+        self.assertIsNotNone(sdf_f32.texture_data)
+        self.assertIsNotNone(sdf_u16.texture_data)
+
+        pts = []
+        for z in np.linspace(-0.6, 0.6, 8):
+            for y in np.linspace(-0.6, 0.6, 8):
+                for x in np.linspace(-0.6, 0.6, 8):
+                    pts.append([x, y, z])
+        pts_np = np.array(pts, dtype=np.float32)
+
+        vals_f32 = _sample_texture_sdf_at_points(sdf_f32, pts_np)
+        vals_u16 = _sample_texture_sdf_at_points(sdf_u16, pts_np)
+
+        # Sign should always agree outside a tight band around the surface.
+        # Inside the band, uint16 quantization error is bounded by narrow_band
+        # range / 2**16, so rely on signed value tolerance instead.
+        max_err = float(np.max(np.abs(vals_f32 - vals_u16)))
+        # Default narrow band is ±0.1 m; uint16 SNORM quantization has
+        # LSB ≈ 0.2 / 65535 ≈ 3e-6 m.  Allow 1e-3 m for rounding-plus-trilinear
+        # interpolation noise across texels.
+        self.assertLess(
+            max_err,
+            1e-3,
+            f"uint16 watertight SDF deviates by {max_err:.6f} from float32 reference",
+        )
+
+        mesh.clear_sdf()
+
 
 def _create_torus_mesh(major_r: float = 0.4, minor_r: float = 0.15, n_major: int = 24, n_minor: int = 12) -> Mesh:
     """Create a watertight torus mesh centered at the origin (non-convex)."""

@@ -225,8 +225,10 @@ class SDF:
     def extract_isomesh(self, isovalue: float = 0.0, device: "Devicelike | None" = None) -> "Mesh | None":
         """Extract an isosurface mesh at the requested isovalue.
 
-        Prefers the texture SDF path when available (avoids NanoVDB volume
-        indirection); falls back to the NanoVDB sparse volume.
+        Uses the texture SDF path for mesh-generated SDFs (the only path
+        populated by :meth:`create_from_mesh`).  For primitive SDFs built
+        via :meth:`create_from_data` with a NanoVDB ``sparse_volume``, the
+        fallback branch extracts from the sparse volume instead.
 
         Args:
             isovalue: Surface level to extract [m].  ``0.0`` gives the
