@@ -17,7 +17,7 @@
 
 ### Changed
 
-- Build mesh SDFs via the texture-based sparse path only; `SDF.create_from_mesh` no longer allocates NanoVDB sparse/coarse volumes. For mesh SDFs, `SDF.sparse_volume` / `SDF.coarse_volume` / `SDF.block_coords` are now `None` / `[]`, and `compute_sdf_from_shape(GeoType.MESH, ...)` returns `(kernel_data, None, None, [])` for those slots. Sample mesh SDFs via `SDF.texture_data` / `Model.texture_sdf_data` instead; call `_compute_sdf_from_shape_impl` directly when the legacy NanoVDB volumes are required.
+- Build mesh SDFs via the texture-based sparse path only; sample via `SDF.texture_data` instead of `SDF.sparse_volume` / `SDF.coarse_volume`.
 - Render all GL viewer lines (joints, contacts, wireframes) as geometry-shader quads instead of ``GL_LINES`` for uniform width across zoom levels and non-square viewports
 - Pin `mujoco` and `mujoco-warp` dependencies to `~=3.6.0`
 - Update default environment map texture in GL viewer (source: https://polyhaven.com/a/brown_photostudio_02)
