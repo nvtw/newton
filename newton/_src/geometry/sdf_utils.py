@@ -3,7 +3,7 @@
 
 import logging
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import warp as wp
@@ -23,6 +23,8 @@ from .sdf_mc import (
 from .types import GeoType, Mesh
 
 logger = logging.getLogger(__name__)
+
+SignMethod = Literal["auto", "parity", "winding"]
 
 if TYPE_CHECKING:
     from .sdf_texture import TextureSDFData
@@ -332,7 +334,7 @@ class SDF:
         shape_margin: float = 0.0,
         scale: tuple[float, float, float] | None = None,
         texture_format: str = "uint16",
-        use_parity: bool = False,
+        sign_method: SignMethod = "auto",
     ) -> "SDF":
         """Create an SDF from a mesh in local mesh coordinates.
 
@@ -365,17 +367,48 @@ class SDF:
                 (default) uses 16-bit normalized textures for half the memory
                 of ``"float32"`` with negligible precision loss. ``"uint8"``
                 uses 8-bit textures for minimum memory.
-            use_parity: use ``mesh_query_point_sign_parity`` for
-                inside/outside classification instead of winding numbers.
-                Cheaper but requires a watertight mesh.
+            sign_method: Inside/outside sign query strategy.
+
+                * ``"auto"`` (default): use parity rays if
+                  :attr:`Mesh.is_watertight` is ``True``, else fall back to
+                  winding numbers.
+                * ``"parity"``: always use ``wp.mesh_query_point_sign_parity``.
+                  Cheaper per sample but requires a watertight mesh; results on
+                  open meshes are undefined.
+                * ``"winding"``: always use
+                  ``wp.mesh_query_point_sign_winding_number``. Robust for
+                  general (possibly open or non-manifold) meshes but more
+                  expensive to build and query.
 
         Returns:
             A validated :class:`SDF` runtime handle.
+
+        Raises:
+            RuntimeError: if no CUDA device is available. The texture SDF build
+                pipeline requires CUDA kernels and 3D textures.
+            ValueError: if ``texture_format`` or ``sign_method`` is not one of
+                the supported values.
         """
+        if not wp.is_cuda_available():
+            raise RuntimeError(
+                "SDF.create_from_mesh requires a CUDA device: the texture SDF "
+                "build pipeline uses CUDA kernels and wp.Texture3D. "
+                "No CUDA-capable device was detected."
+            )
+
+        valid_sign_methods: tuple[SignMethod, ...] = ("auto", "parity", "winding")
+        if sign_method not in valid_sign_methods:
+            raise ValueError(f"Unknown sign_method {sign_method!r}. Expected one of {list(valid_sign_methods)}.")
+
         effective_max_resolution = 64 if max_resolution is None and target_voxel_size is None else max_resolution
         bake_scale = scale is not None
         effective_scale = scale if scale is not None else (1.0, 1.0, 1.0)
         is_watertight = mesh.is_watertight
+
+        if sign_method == "auto":
+            use_parity = is_watertight
+        else:
+            use_parity = sign_method == "parity"
 
         from .sdf_texture import QuantizationMode, create_texture_sdf_from_mesh  # noqa: PLC0415
 
@@ -394,7 +427,7 @@ class SDF:
             indices = wp.array(mesh.indices, dtype=wp.int32)
 
             winding_threshold = 0.5
-            if is_watertight or use_parity:
+            if use_parity:
                 tex_mesh = wp.Mesh(points=pos, indices=indices)
             else:
                 tex_mesh = wp.Mesh(points=pos, indices=indices, support_winding_number=True)
@@ -410,7 +443,6 @@ class SDF:
                 quantization_mode=qmode,
                 winding_threshold=winding_threshold,
                 scale_baked=bake_scale,
-                watertight=is_watertight,
                 use_parity=use_parity,
             )
             wp.synchronize()

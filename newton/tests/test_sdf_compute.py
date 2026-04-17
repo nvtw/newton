@@ -1732,10 +1732,10 @@ class TestSDFWatertightFastPath(unittest.TestCase):
         )
         mesh.clear_sdf()
 
-    def test_use_parity_override_on_non_watertight_mesh(self):
-        """``use_parity=True`` should run the parity path even when auto-detection reports
-        the mesh as non-watertight, producing correct inside/outside signs for points
-        well clear of the missing face.
+    def test_sign_method_parity_override_on_non_watertight_mesh(self):
+        """``sign_method='parity'`` should run the parity path even when auto-detection
+        reports the mesh as non-watertight, producing correct inside/outside signs for
+        points well clear of the missing face.
         """
         # Closed cube with its top face (+Y) removed: not watertight by topology,
         # but parity rays along -Y still reach the interior so sign is recoverable
@@ -1755,11 +1755,36 @@ class TestSDFWatertightFastPath(unittest.TestCase):
         )
         indices = np.array(
             [
-                0, 2, 1, 0, 3, 2,  # -Z face
-                4, 5, 6, 4, 6, 7,  # +Z face
-                0, 1, 5, 0, 5, 4,  # -Y face
-                0, 4, 7, 0, 7, 3,  # -X face
-                1, 2, 6, 1, 6, 5,  # +X face
+                0,
+                2,
+                1,
+                0,
+                3,
+                2,  # -Z face
+                4,
+                5,
+                6,
+                4,
+                6,
+                7,  # +Z face
+                0,
+                1,
+                5,
+                0,
+                5,
+                4,  # -Y face
+                0,
+                4,
+                7,
+                0,
+                7,
+                3,  # -X face
+                1,
+                2,
+                6,
+                1,
+                6,
+                5,  # +X face
                 # +Y face omitted: mesh is open at the top.
             ],
             dtype=np.int32,
@@ -1767,16 +1792,14 @@ class TestSDFWatertightFastPath(unittest.TestCase):
         mesh = Mesh(verts, indices, compute_inertia=False)
         self.assertFalse(mesh.is_watertight, "Open cube should auto-detect as non-watertight")
 
-        sdf_parity = SDF.create_from_mesh(
-            mesh, max_resolution=32, texture_format="float32", use_parity=True
-        )
+        sdf_parity = SDF.create_from_mesh(mesh, max_resolution=32, texture_format="float32", sign_method="parity")
         self.assertIsNotNone(sdf_parity.texture_data, "SDF should have texture data")
 
         test_points = np.array(
             [
                 [0.0, -0.2, 0.0],  # well inside the bulk
-                [1.0, 0.0, 0.0],   # well outside in +X
-                [-1.0, -1.0, 0.0], # well outside on a corner
+                [1.0, 0.0, 0.0],  # well outside in +X
+                [-1.0, -1.0, 0.0],  # well outside on a corner
             ],
             dtype=np.float32,
         )

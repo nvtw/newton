@@ -860,6 +860,19 @@ class Mesh:
         is suitable for the fast unsigned-distance SDF construction path.
         Computed lazily on first access and cached.  Invalidated when
         :attr:`vertices` or :attr:`indices` change.
+
+        .. note::
+
+           Vertex coincidence is tested on quantized float32 coordinates
+           rounded to the nearest 1e-7 m (100 nm fixed tolerance). Vertices
+           that differ by less than this bucket width are treated as the
+           same geometric vertex; sub-100 nm numerical noise is therefore
+           tolerated, but vertices split by a larger gap are reported as
+           distinct and can cause a topologically closed mesh to be flagged
+           non-watertight. This is an approximate check — false negatives
+           are safe (they fall back to the slower winding-number SDF path),
+           but callers relying on a strict guarantee should weld their
+           mesh vertices beforehand at the desired tolerance.
         """
         if self._is_watertight is None:
             if self._indices.size == 0 or self._vertices.size == 0:

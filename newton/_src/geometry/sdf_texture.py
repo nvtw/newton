@@ -969,7 +969,6 @@ def build_sparse_sdf_from_mesh(
     quantization_mode: int = QuantizationMode.UINT16,
     winding_threshold: float = 0.5,
     linearization_error_threshold: float | None = None,
-    watertight: bool = False,
     use_parity: bool = False,
     device: str = "cuda",
 ) -> dict:
@@ -983,7 +982,7 @@ def build_sparse_sdf_from_mesh(
 
     Args:
         mesh: Warp mesh.  Must have ``support_winding_number=True`` unless
-            *watertight* or *use_parity* is ``True``.
+            *use_parity* is ``True``.
         grid_size_x: fine grid X dimension [sample].
         grid_size_y: fine grid Y dimension [sample].
         grid_size_z: fine grid Z dimension [sample].
@@ -998,12 +997,10 @@ def build_sparse_sdf_from_mesh(
             which an occupied subgrid is considered linear and its high-res
             data is omitted.  ``None`` auto-computes from domain extents,
             ``0.0`` disables the optimization.
-        watertight: when ``True``, use parity-based inside/outside
-            classification (:func:`wp.mesh_query_point_sign_parity`)
-            instead of winding numbers.  Cheaper per-sample than the
-            winding-number query; requires a closed, manifold mesh.
-        use_parity: alias of *watertight* for callers that want to force
-            the parity-based sign test without relying on auto-detection.
+        use_parity: when ``True``, use parity-based inside/outside
+            classification (:func:`wp.mesh_query_point_sign_parity`) instead
+            of winding numbers. Cheaper per sample but requires a closed,
+            manifold mesh; results on open meshes are undefined.
         device: Warp device string.
 
     Returns:
@@ -1033,13 +1030,13 @@ def build_sparse_sdf_from_mesh(
     subgrid_radius = float(np.linalg.norm(half_subgrid))
 
     # -------------------------------------------------------------------
-    # Unified build: watertight meshes select parity-based sign queries
-    # (cheaper per-sample), non-watertight fall back to winding numbers.
+    # Unified build: *use_parity* selects the cheaper parity-based sign
+    # query (for watertight meshes), otherwise winding numbers are used.
     # Linearity is evaluated before the texture is sized so that subgrids
     # whose SDF is well-approximated by the coarse grid consume no
     # high-resolution texture memory.
     # -------------------------------------------------------------------
-    parity_flag = wp.int32(1 if (watertight or use_parity) else 0)
+    parity_flag = wp.int32(1 if use_parity else 0)
 
     background_sdf = wp.zeros(total_bg, dtype=float, device=device)
     wp.launch(
@@ -1273,6 +1270,11 @@ def build_sparse_sdf_from_mesh(
     # --- Single batch of host readbacks (all GPU work is complete) ---
     subgrid_occupied = subgrid_occupied_gpu.numpy()
 
+    # Tag subgrids demoted by the linearity pass with the sentinel SLOT_LINEAR
+    # so samplers fall back to coarse-grid interpolation and skip the (now
+    # absent) packed subgrid texture slot. Vectorized index math mirrors the
+    # row-major layout used when laying out subgrid_start_slots (bz outer,
+    # by middle, bx inner).
     is_linear_np = subgrid_is_linear.numpy()
     linear_mask = is_linear_np.astype(bool)
     if np.any(linear_mask):
@@ -1375,7 +1377,6 @@ def create_texture_sdf_from_mesh(
     quantization_mode: int = QuantizationMode.UINT16,
     winding_threshold: float = 0.5,
     scale_baked: bool = False,
-    watertight: bool = False,
     use_parity: bool = False,
     device: str | None = None,
 ) -> tuple[TextureSDFData, wp.Texture3D, wp.Texture3D, list]:
@@ -1386,7 +1387,7 @@ def create_texture_sdf_from_mesh(
 
     Args:
         mesh: Warp mesh.  Must have ``support_winding_number=True`` unless
-            *watertight* or *use_parity* is ``True``.
+            *use_parity* is ``True``.
         margin: extra AABB padding [m].
         narrow_band_range: signed narrow-band distance range [m] as ``(inner, outer)``.
         max_resolution: maximum grid dimension [voxel].
@@ -1394,11 +1395,10 @@ def create_texture_sdf_from_mesh(
         quantization_mode: :class:`QuantizationMode` value.
         winding_threshold: winding number threshold for inside/outside classification.
         scale_baked: whether shape scale was baked into the mesh vertices.
-        watertight: when ``True``, use parity-based inside/outside
+        use_parity: when ``True``, use parity-based inside/outside
             classification (:func:`wp.mesh_query_point_sign_parity`).
-            Cheaper per-sample than winding numbers; requires a closed,
+            Cheaper per sample than winding numbers; requires a closed,
             manifold mesh.
-        use_parity: alias of *watertight*.
         device: Warp device string. ``None`` uses the mesh's device.
 
     Returns:
@@ -1441,7 +1441,6 @@ def create_texture_sdf_from_mesh(
         narrow_band_thickness=narrow_band_thickness,
         quantization_mode=quantization_mode,
         winding_threshold=winding_threshold,
-        watertight=watertight,
         use_parity=use_parity,
         device=device,
     )
@@ -1567,7 +1566,6 @@ def create_texture_sdf_from_volume(
         inputs=[sparse_volume.id, center_positions_gpu, center_sdf_gpu],
         device=device,
     )
-    wp.synchronize()
 
     center_sdf_np = center_sdf_gpu.numpy()
     threshold_inner = -narrow_band_thickness - subgrid_radius
@@ -1625,7 +1623,6 @@ def create_texture_sdf_from_volume(
                 inputs=[sparse_volume.id, all_positions_gpu, all_sdf_gpu],
                 device=device,
             )
-            wp.synchronize()
             all_sdf_np = all_sdf_gpu.numpy()
 
             samples_per_subgrid = samples_per_dim_lin**3
@@ -1757,7 +1754,6 @@ def create_texture_sdf_from_volume(
             inputs=[sparse_volume.id, texel_positions_gpu, texel_sdf_gpu],
             device=device,
         )
-        wp.synchronize()
 
         texel_sdf_np = texel_sdf_gpu.numpy()
 
@@ -1777,14 +1773,11 @@ def create_texture_sdf_from_volume(
                 inputs=[coarse_volume.id, outlier_gpu, outlier_sdf_gpu],
                 device=device,
             )
-            wp.synchronize()
             texel_sdf_np[outlier_mask] = outlier_sdf_gpu.numpy()
         flat_texture = subgrid_texture_data.ravel()
         for i in range(total_texel_work):
             flat_texture[texel_tex_indices[i]] = texel_sdf_np[i]
         subgrid_texture_data = flat_texture.reshape((tex_size, tex_size, tex_size))
-
-    wp.synchronize()
 
     # Write SLOT_LINEAR for subgrids that overlap the narrow band but were
     # demoted because their SDF is well-approximated by the coarse grid.
