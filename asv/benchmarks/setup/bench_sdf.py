@@ -11,7 +11,6 @@ from asv_runner.benchmarks.mark import skip_benchmark_if
 
 import newton
 
-
 # Subdivision 4 yields 20 * 4**4 = 5120 triangles, which is representative of
 # typical collision meshes used with SDF-based contact (YCB, nut-bolt, gears).
 _SPHERE_SUBDIVISIONS = 4
@@ -26,9 +25,18 @@ def _create_icosphere(radius: float, subdivisions: int) -> tuple[np.ndarray, np.
     phi = (1.0 + np.sqrt(5.0)) / 2.0
     verts = np.array(
         [
-            [-1, phi, 0], [1, phi, 0], [-1, -phi, 0], [1, -phi, 0],
-            [0, -1, phi], [0, 1, phi], [0, -1, -phi], [0, 1, -phi],
-            [phi, 0, -1], [phi, 0, 1], [-phi, 0, -1], [-phi, 0, 1],
+            [-1, phi, 0],
+            [1, phi, 0],
+            [-1, -phi, 0],
+            [1, -phi, 0],
+            [0, -1, phi],
+            [0, 1, phi],
+            [0, -1, -phi],
+            [0, 1, -phi],
+            [phi, 0, -1],
+            [phi, 0, 1],
+            [-phi, 0, -1],
+            [-phi, 0, 1],
         ],
         dtype=np.float32,
     )
@@ -36,10 +44,26 @@ def _create_icosphere(radius: float, subdivisions: int) -> tuple[np.ndarray, np.
 
     faces = np.array(
         [
-            [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
-            [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
-            [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
-            [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
+            [0, 11, 5],
+            [0, 5, 1],
+            [0, 1, 7],
+            [0, 7, 10],
+            [0, 10, 11],
+            [1, 5, 9],
+            [5, 11, 4],
+            [11, 10, 2],
+            [10, 7, 6],
+            [7, 1, 8],
+            [3, 9, 4],
+            [3, 4, 2],
+            [3, 2, 6],
+            [3, 6, 8],
+            [3, 8, 9],
+            [4, 9, 5],
+            [2, 4, 11],
+            [6, 2, 10],
+            [8, 6, 7],
+            [9, 8, 1],
         ],
         dtype=np.int32,
     )
@@ -93,9 +117,7 @@ class FastBuildSdf:
 
     def setup(self, max_resolution):
         wp.init()
-        self._vertices, self._indices = _create_icosphere(
-            radius=0.5, subdivisions=_SPHERE_SUBDIVISIONS
-        )
+        self._vertices, self._indices = _create_icosphere(radius=0.5, subdivisions=_SPHERE_SUBDIVISIONS)
 
         if wp.get_cuda_device_count() > 0:
             warm_mesh = newton.Mesh(self._vertices, self._indices, compute_inertia=False)
