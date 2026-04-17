@@ -17,7 +17,8 @@ is a per-contact match index:
 - ``>= 0``: index of the matched contact in the previous frame's sorted buffer.
 - ``MATCH_NOT_FOUND (-1)``: shape pair has no prior contacts.
 - ``MATCH_BROKEN (-2)``: shape pair exists but no contact within
-  position/normal thresholds.
+  position/normal thresholds, *or* a closer new contact won the same
+  prev contact in the uniqueness resolve pass.
 
 Why ignore sort_sub_key
 -----------------------
@@ -28,6 +29,27 @@ by one slot), even though the physical contact points stay essentially
 in place.  Matching on the full key would mark these contacts broken
 every frame.  Pair counts are small (a few manifold points per pair),
 so the linear scan inside the pair range is cheap.
+
+One-to-one match via packed atomic_min
+--------------------------------------
+A pair-range scan can have multiple new contacts pick the same prev
+contact as their closest.  To keep the mapping injective without
+sorting or CAS retries, the matcher uses a single ``wp.atomic_min`` per
+new contact on a per-prev ``int64`` claim word:
+
+    claim = (float_flip(dist_sq) << 32) | tid
+
+``float_flip`` reinterprets the non-negative ``dist_sq`` as a
+sortable ``uint32``, so the high 32 bits order claims by ascending
+distance; the low 32 bits hold the new contact index, breaking ties
+deterministically (smallest ``tid`` wins).  After the match kernel
+runs, a small finalize kernel reads ``prev_claim[best_idx]`` and
+demotes any new contact whose ``tid`` does not appear in the low bits
+to :data:`MATCH_BROKEN`.  Losers are *not* re-matched against a
+second-closest prev (kept for simplicity and speed).
+
+Cost: one ``int64[capacity]`` buffer, one ``wp.atomic_min`` per new
+contact, and one short finalize kernel launch.  No ``atomic_cas``.
 
 Memory efficiency
 -----------------
@@ -78,6 +100,12 @@ MATCH_BROKEN = wp.constant(wp.int32(-2))
 # ------------------------------------------------------------------
 
 
+# Sentinel value for unclaimed slots in ``_prev_claim``.  Larger than
+# any packed (flipped_dist << 32 | tid) any kernel will ever produce,
+# so the first ``atomic_min`` always wins.
+_CLAIM_SENTINEL = wp.constant(wp.int64(0x7FFFFFFFFFFFFFFF))
+
+
 @wp.func
 def _lower_bound_int64(
     lower: int,
@@ -98,6 +126,33 @@ def _lower_bound_int64(
         else:
             right = mid
     return left
+
+
+@wp.func_native("""
+uint32_t i = reinterpret_cast<uint32_t&>(f);
+uint32_t mask = (uint32_t)(-(int)(i >> 31)) | 0x80000000u;
+return i ^ mask;
+""")
+def _float_flip(f: float) -> wp.uint32:
+    """Reinterpret a 32-bit float as a sortable ``uint32`` (Stereopsis trick).
+
+    For non-negative floats this is a strictly monotone encoding, so
+    comparing the resulting ``uint32`` orders the original floats
+    correctly.  We only ever feed non-negative ``dist_sq`` values into
+    it, so the negative branch is unused here but kept generic.
+    """
+    ...
+
+
+@wp.func
+def _pack_claim(dist_sq: float, tid: int) -> wp.int64:
+    """Pack ``(dist_sq, tid)`` into a single int64 for ``atomic_min``.
+
+    High 32 bits: ``float_flip(dist_sq)`` — ascending by distance.
+    Low 32 bits:  ``tid`` — deterministic tie-break (smallest wins).
+    """
+    flipped = wp.int64(_float_flip(dist_sq))
+    return (flipped << wp.int64(32)) | wp.int64(tid)
 
 
 # ------------------------------------------------------------------
@@ -126,19 +181,23 @@ class _MatchData:
     body_q: wp.array[wp.transform]
     shape_body: wp.array[wp.int32]
 
-    # Outputs
+    # Per-prev claim word, packed (float_flip(dist_sq) << 32 | tid).
+    # Initialised to _CLAIM_SENTINEL each frame; race with atomic_min.
+    prev_claim: wp.array[wp.int64]
+
+    # Per-new candidate prev index (final value resolved in pass 2).
     match_index: wp.array[wp.int32]
-    prev_was_matched: wp.array[wp.int32]
 
     # Thresholds
     pos_threshold_sq: float
     normal_dot_threshold: float
-    has_report: int
 
 
 @wp.kernel(enable_backward=False)
 def _match_contacts_kernel(data: _MatchData):
-    """Match each new contact against the previous frame's sorted contacts."""
+    """Pass 1: pick each new contact's closest prev candidate and stake
+    a packed claim on it via ``wp.atomic_min``.
+    """
     tid = wp.tid()
     n_new = data.new_count[0]
     if tid >= n_new:
@@ -192,11 +251,42 @@ def _match_contacts_kernel(data: _MatchData):
 
     if best_idx >= 0:
         data.match_index[tid] = wp.int32(best_idx)
-        if data.has_report != 0:
-            wp.atomic_max(data.prev_was_matched, best_idx, wp.int32(1))
+        # Race for ownership of prev[best_idx] with a single atomic_min.
+        # Closest distance wins; ties resolved by lowest tid.
+        wp.atomic_min(data.prev_claim, best_idx, _pack_claim(best_dist_sq, tid))
     else:
         # Pair range exists but no contact within thresholds.
         data.match_index[tid] = MATCH_BROKEN
+
+
+@wp.kernel(enable_backward=False)
+def _resolve_claims_kernel(
+    match_index: wp.array[wp.int32],
+    prev_claim: wp.array[wp.int64],
+    prev_was_matched: wp.array[wp.int32],
+    new_count: wp.array[wp.int32],
+    has_report: int,
+):
+    """Pass 2: keep winners, demote losers to :data:`MATCH_BROKEN`.
+
+    The low 32 bits of ``prev_claim[cand]`` identify the winning
+    ``tid``; everyone else who staked a claim on the same ``cand``
+    becomes :data:`MATCH_BROKEN` (no second-closest fallback).
+    """
+    tid = wp.tid()
+    if tid >= new_count[0]:
+        return
+
+    cand = match_index[tid]
+    if cand < wp.int32(0):
+        return  # already MATCH_NOT_FOUND or MATCH_BROKEN
+
+    winner_tid = wp.int32(prev_claim[cand] & wp.int64(0xFFFFFFFF))
+    if winner_tid == wp.int32(tid):
+        if has_report != 0:
+            prev_was_matched[cand] = wp.int32(1)
+    else:
+        match_index[tid] = MATCH_BROKEN
 
 
 # ------------------------------------------------------------------
@@ -302,10 +392,12 @@ class ContactMatcher:
     the broken-contact enumeration.
 
     Memory is minimised by reusing the *sorter*'s existing scratch buffers
-    for the previous-frame world-space positions and normals.  The only
-    new per-contact allocation is the sorted-key cache (8 bytes/contact).
+    for the previous-frame world-space positions and normals.  The
+    matcher owns two small per-contact buffers in addition: the sorted
+    key cache (8 bytes/contact) and the per-prev claim word used by the
+    ``atomic_min`` race that keeps new→prev injective (8 bytes/contact).
     When ``contact_report`` is disabled, the ``prev_was_matched`` flag
-    array (4 bytes/contact) is also skipped.
+    array (4 bytes) is also skipped.
 
     .. note::
         Previous-frame state persists across :meth:`~newton.CollisionPipeline.collide`
@@ -351,6 +443,12 @@ class ContactMatcher:
             # for shape_a=0, shape_b=0, sub_key=0.
             self._prev_sorted_keys = wp.full(capacity, SORT_KEY_SENTINEL, dtype=wp.int64)
             self._prev_count = wp.zeros(1, dtype=wp.int32)
+
+            # Per-prev claim word for the atomic_min race that keeps the
+            # new→prev mapping injective (see module docstring).  Reset
+            # to _CLAIM_SENTINEL each frame; the low 32 bits of the
+            # surviving value identify the winning new contact ``tid``.
+            self._prev_claim = wp.empty(capacity, dtype=wp.int64)
 
             # Contact report (optional).
             self._has_report = contact_report
@@ -426,6 +524,10 @@ class ContactMatcher:
         if self._has_report:
             self._prev_was_matched.zero_()
 
+        # Reset the per-prev claim word to the sentinel so the first
+        # atomic_min from any contender wins.
+        self._prev_claim.fill_(_CLAIM_SENTINEL)
+
         data = _MatchData()
         data.prev_keys = self._prev_sorted_keys
         # Reuse sorter scratch buffers for prev-frame world-space data.
@@ -440,12 +542,23 @@ class ContactMatcher:
         data.body_q = body_q
         data.shape_body = shape_body
         data.match_index = match_index_out
-        data.prev_was_matched = self._prev_was_matched
+        data.prev_claim = self._prev_claim
         data.pos_threshold_sq = self._pos_threshold_sq
         data.normal_dot_threshold = self._normal_dot_threshold
-        data.has_report = 1 if self._has_report else 0
 
         wp.launch(_match_contacts_kernel, dim=self._capacity, inputs=[data], device=device)
+        wp.launch(
+            _resolve_claims_kernel,
+            dim=self._capacity,
+            inputs=[
+                match_index_out,
+                self._prev_claim,
+                self._prev_was_matched,
+                contact_count,
+                1 if self._has_report else 0,
+            ],
+            device=device,
+        )
 
     def save_sorted_state(
         self,
