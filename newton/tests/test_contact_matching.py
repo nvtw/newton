@@ -9,7 +9,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
+from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
 class TestContactMatching(unittest.TestCase):
@@ -480,7 +480,7 @@ def test_box_on_plane_multiple_contacts(test, device):
 # Register tests
 # ---------------------------------------------------------------------------
 
-devices = get_cuda_test_devices()
+devices = get_test_devices()
 
 add_function_test(
     TestContactMatching, "test_first_frame_all_not_found", test_first_frame_all_not_found, devices=devices

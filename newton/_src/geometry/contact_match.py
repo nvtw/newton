@@ -315,11 +315,6 @@ class ContactMatcher:
         Call :meth:`reset` after such discontinuities to zero ``_prev_count``
         so the next frame starts fresh with all ``MATCH_NOT_FOUND``.
 
-    .. note::
-        Requires a CUDA device.  The underlying :class:`ContactSorter`
-        depends on ``wp.utils.radix_sort_pairs``, which is CUDA-only in
-        practice, so the matcher is only supported on CUDA devices.
-
     Args:
         capacity: Maximum number of contacts (must match :class:`ContactSorter`).
         sorter: The :class:`ContactSorter` whose scratch buffers will be
@@ -330,7 +325,7 @@ class ContactMatcher:
             normals.  Below this the contact is considered broken.
         contact_report: Allocate the ``prev_was_matched`` flag array needed
             to enumerate broken contacts in :meth:`build_report`.
-        device: Device to allocate on.  Must be a CUDA device.
+        device: Device to allocate on.
     """
 
     def __init__(
@@ -344,14 +339,6 @@ class ContactMatcher:
         device: Devicelike = None,
     ):
         with wp.ScopedDevice(device):
-            resolved_device = wp.get_device()
-            if not resolved_device.is_cuda:
-                raise RuntimeError(
-                    "ContactMatcher requires a CUDA device; got "
-                    f"'{resolved_device}'.  The underlying ContactSorter relies "
-                    "on wp.utils.radix_sort_pairs, which is CUDA-only."
-                )
-
             self._capacity = capacity
             self._pos_threshold_sq = pos_threshold * pos_threshold
             self._normal_dot_threshold = normal_dot_threshold
