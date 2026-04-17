@@ -821,8 +821,10 @@ class CollisionPipeline:
 
         # Counter zeroing and generation bump are fused into compute_shape_aabbs.
         # Only call contacts.clear() if clear_buffers mode is enabled (debug path).
+        # Skip the generation bump here since compute_shape_aabbs will bump it immediately
+        # afterwards -- otherwise the generation would advance by 2 per collide() call.
         if contacts.clear_buffers:
-            contacts.clear()
+            contacts.clear(bump_generation=False)
 
         model = self.model
         # update any additional parameters

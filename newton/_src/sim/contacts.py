@@ -25,12 +25,13 @@ def _clear_counters_and_bump_generation(
     counters: wp.array[wp.int32],
     generation: wp.array[wp.int32],
     num_counters: int,
+    bump_generation: int,
 ):
-    """Zero counter array and increment generation in one kernel launch."""
+    """Zero counter array and optionally increment generation in one kernel launch."""
     tid = wp.tid()
     if tid < num_counters:
         counters[tid] = 0
-    if tid == 0:
+    if tid == 0 and bump_generation != 0:
         g = generation[0]
         if g == 2147483647:
             g = 0
@@ -237,7 +238,7 @@ class Contacts:
         self.rigid_contact_max = rigid_contact_max
         self.soft_contact_max = soft_contact_max
 
-    def clear(self):
+    def clear(self, bump_generation: bool = True):
         """
         Clear contact data, resetting counts and optionally clearing all buffers.
 
@@ -248,13 +249,19 @@ class Contacts:
 
         If clear_buffers=True (conservative mode), performs full buffer clearing with sentinel
         values and zeros. This requires several additional kernel launches but may be useful for debugging.
+
+        Args:
+            bump_generation: If True (default), increment ``contact_generation`` to invalidate
+                previously-observed contact data. Callers that will immediately re-bump the
+                generation via another fused kernel (e.g. :func:`compute_shape_aabbs`) can pass
+                ``False`` to avoid an unnecessary double-bump per collision pass.
         """
-        # Clear all counters and bump generation in a single kernel launch.
+        # Clear all counters and (optionally) bump generation in a single kernel launch.
         num_counters = self._counter_array.shape[0]
         wp.launch(
             _clear_counters_and_bump_generation,
             dim=max(num_counters, 1),
-            inputs=[self._counter_array, self.contact_generation, num_counters],
+            inputs=[self._counter_array, self.contact_generation, num_counters, int(bump_generation)],
             device=self.contact_generation.device,
             record_tape=False,
         )
