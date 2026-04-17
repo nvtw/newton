@@ -26,6 +26,13 @@ intact), and the save step runs *after* sorting (overwriting the scratch
 with the new sorted data).  The only additional per-contact allocation is
 the ``_prev_sorted_keys`` buffer (8 bytes/contact) since the sorter's key
 buffer is overwritten by ``_prepare_sort`` each frame.
+
+Per-frame call order (inside :class:`~newton.CollisionPipeline`)::
+
+    matcher.match(...)  # before ContactSorter.sort_full()
+    sorter.sort_full(...)  # match_index is permuted with contacts
+    matcher.build_report(...)  # optional; must precede save_sorted_state
+    matcher.save_sorted_state(...)  # after sorting and report
 """
 
 from __future__ import annotations
@@ -258,13 +265,17 @@ def _collect_broken_contacts_kernel(
 class ContactMatcher:
     """Frame-to-frame contact matching using binary search on sorted keys.
 
+    Internal helper owned by :class:`~newton.CollisionPipeline`.  All user-visible
+    results (match index, new/broken index lists) are surfaced on the
+    :class:`~newton.Contacts` container; this class only owns cross-frame state.
+
     Pre-allocates all buffers at construction time for CUDA graph capture
     compatibility.  The typical per-frame call sequence is::
 
         matcher.match(...)  # before ContactSorter.sort_full()
         sorter.sort_full(...)  # match_index is permuted with contacts
-        matcher.save_sorted_state(...)  # after sorting
-        matcher.build_report(...)  # optional
+        matcher.build_report(...)  # optional; must precede save_sorted_state
+        matcher.save_sorted_state(...)  # after sorting and report
 
     Memory is minimised by reusing the *sorter*'s existing scratch buffers
     for the previous-frame world-space positions and normals.  The only
@@ -280,7 +291,8 @@ class ContactMatcher:
             positions moved more than this between frames are considered broken.
         normal_dot_threshold: Minimum dot product between old and new contact
             normals.  Below this the contact is considered broken.
-        contact_report: Allocate buffers for new/broken contact index lists.
+        contact_report: Allocate the ``prev_was_matched`` flag array needed
+            to enumerate broken contacts in :meth:`build_report`.
         device: Device to allocate on.
     """
 
@@ -309,17 +321,9 @@ class ContactMatcher:
             self._has_report = contact_report
             if contact_report:
                 self._prev_was_matched = wp.zeros(capacity, dtype=wp.int32)
-                self._new_contact_indices = wp.zeros(capacity, dtype=wp.int32)
-                self._new_contact_count = wp.zeros(1, dtype=wp.int32)
-                self._broken_contact_indices = wp.zeros(capacity, dtype=wp.int32)
-                self._broken_contact_count = wp.zeros(1, dtype=wp.int32)
             else:
-                # Dummy zero-length arrays so the Warp struct is always valid.
+                # Dummy single-element array so the Warp struct is always valid.
                 self._prev_was_matched = wp.zeros(1, dtype=wp.int32)
-                self._new_contact_indices = wp.zeros(0, dtype=wp.int32)
-                self._new_contact_count = wp.zeros(0, dtype=wp.int32)
-                self._broken_contact_indices = wp.zeros(0, dtype=wp.int32)
-                self._broken_contact_count = wp.zeros(0, dtype=wp.int32)
 
     # ------------------------------------------------------------------
     # Properties
@@ -334,38 +338,6 @@ class ContactMatcher:
     def prev_contact_count(self) -> wp.array:
         """Device-side previous frame contact count (single-element int32)."""
         return self._prev_count
-
-    @property
-    def new_contact_indices(self) -> wp.array:
-        """Indices of new contacts in the current sorted buffer.
-
-        Only valid after :meth:`build_report`.
-        """
-        return self._new_contact_indices
-
-    @property
-    def new_contact_count(self) -> wp.array:
-        """Device-side count of new contacts (single-element int32).
-
-        Only valid after :meth:`build_report`.
-        """
-        return self._new_contact_count
-
-    @property
-    def broken_contact_indices(self) -> wp.array:
-        """Indices of broken contacts in the previous frame's sorted buffer.
-
-        Only valid after :meth:`build_report`.
-        """
-        return self._broken_contact_indices
-
-    @property
-    def broken_contact_count(self) -> wp.array:
-        """Device-side count of broken contacts (single-element int32).
-
-        Only valid after :meth:`build_report`.
-        """
-        return self._broken_contact_count
 
     # ------------------------------------------------------------------
     # Public methods
@@ -475,37 +447,50 @@ class ContactMatcher:
         self,
         match_index: wp.array,
         contact_count: wp.array,
+        new_indices: wp.array,
+        new_count: wp.array,
+        broken_indices: wp.array,
+        broken_count: wp.array,
         *,
         device: Devicelike = None,
     ) -> None:
         """Build new/broken contact index lists (optional, post-sort).
 
-        After this call, :attr:`new_contact_indices` / :attr:`new_contact_count`
-        hold indices of contacts in the current sorted buffer that have no
-        prior match (``match_index < 0``), and :attr:`broken_contact_indices` /
-        :attr:`broken_contact_count` hold indices of old contacts that were not
-        matched by any new contact.
+        Must be called **after** :meth:`ContactSorter.sort_full` and **before**
+        :meth:`save_sorted_state` (``save_sorted_state`` overwrites
+        ``_prev_count``, which this method reads to bound the broken-contact
+        enumeration).
+
+        After this call, ``new_indices`` / ``new_count`` hold indices of
+        contacts in the current sorted buffer that have no prior match
+        (``match_index < 0``), and ``broken_indices`` / ``broken_count`` hold
+        indices of old contacts that were not matched by any new contact.
 
         Args:
             match_index: Sorted match_index array (from :class:`Contacts`).
             contact_count: Single-element int array with active contact count.
+            new_indices: Output array to receive new-contact indices.
+            new_count: Single-element output counter for new contacts.
+            broken_indices: Output array to receive broken-contact indices
+                (indexing the previous frame's sorted buffer).
+            broken_count: Single-element output counter for broken contacts.
             device: Device to launch on.
         """
         if not self._has_report:
             return
 
-        self._new_contact_count.zero_()
-        self._broken_contact_count.zero_()
+        new_count.zero_()
+        broken_count.zero_()
 
         wp.launch(
             _collect_new_contacts_kernel,
             dim=self._capacity,
-            inputs=[match_index, contact_count, self._new_contact_indices, self._new_contact_count],
+            inputs=[match_index, contact_count, new_indices, new_count],
             device=device,
         )
         wp.launch(
             _collect_broken_contacts_kernel,
             dim=self._capacity,
-            inputs=[self._prev_was_matched, self._prev_count, self._broken_contact_indices, self._broken_contact_count],
+            inputs=[self._prev_was_matched, self._prev_count, broken_indices, broken_count],
             device=device,
         )

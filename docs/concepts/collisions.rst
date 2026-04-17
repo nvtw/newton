@@ -1257,6 +1257,14 @@ and is consumed by the solver :meth:`~solvers.SolverBase.step` method for contac
      - Per-contact frame-to-frame match result (int32). ``>= 0``: matched old
        index, ``-1``: new, ``-2``: broken.  Only allocated when
        ``contact_matching=True``. See :ref:`Contact Matching`.
+   * - ``rigid_contact_new_indices``, ``rigid_contact_new_count``
+     - Compact index list of new contacts in the current sorted buffer (where
+       ``match_index < 0``). Only allocated when ``contact_report=True``.
+       See :ref:`Contact Reports`.
+   * - ``rigid_contact_broken_indices``, ``rigid_contact_broken_count``
+     - Compact index list of contacts from the previous frame that no current
+       contact matched. Only allocated when ``contact_report=True``.
+       See :ref:`Contact Reports`.
 
 **Soft contacts (particle-shape):**
 
@@ -1745,18 +1753,16 @@ broken contacts each frame:
     contacts = pipeline.contacts()
     pipeline.collide(state, contacts)
 
-    matcher = pipeline.contact_matcher
+    n_new = contacts.rigid_contact_new_count.numpy()[0]
+    new_indices = contacts.rigid_contact_new_indices.numpy()[:n_new]
 
-    n_new = matcher.new_contact_count.numpy()[0]
-    new_indices = matcher.new_contact_indices.numpy()[:n_new]
+    n_broken = contacts.rigid_contact_broken_count.numpy()[0]
+    broken_indices = contacts.rigid_contact_broken_indices.numpy()[:n_broken]
 
-    n_broken = matcher.broken_contact_count.numpy()[0]
-    broken_indices = matcher.broken_contact_indices.numpy()[:n_broken]
-
-``new_contact_indices`` holds indices into the current frame's sorted contact
-buffer where ``match_index < 0``.  ``broken_contact_indices`` holds indices
-into the *previous* frame's sorted buffer for contacts that no current contact
-matched.
+``rigid_contact_new_indices`` holds indices into the current frame's sorted
+contact buffer where ``match_index < 0``.  ``rigid_contact_broken_indices``
+holds indices into the *previous* frame's sorted buffer for contacts that no
+current contact matched.
 
 .. _Performance:
 

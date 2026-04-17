@@ -508,9 +508,11 @@ class CollisionPipeline:
                 between frames are considered broken.
             contact_matching_normal_dot_threshold: Minimum dot product between
                 old and new contact normals for a match.
-            contact_report: Allocate buffers for new/broken contact index lists
-                on the :class:`ContactMatcher`.  Only used when
-                ``contact_matching=True``.
+            contact_report: Allocate buffers on the :class:`Contacts` container
+                (``rigid_contact_new_indices``, ``rigid_contact_new_count``,
+                ``rigid_contact_broken_indices``, ``rigid_contact_broken_count``)
+                populated each frame with new and broken contact indices.
+                Only used when ``contact_matching=True``.
 
         .. note::
             When ``requires_grad`` is true (explicitly or via ``model.requires_grad``),
@@ -734,6 +736,7 @@ class CollisionPipeline:
             self._contact_sorter = None
 
         self.contact_matching = contact_matching
+        self.contact_report = contact_report
         if contact_matching:
             self._contact_matcher = ContactMatcher(
                 rigid_contact_max,
@@ -755,11 +758,6 @@ class CollisionPipeline:
     def soft_contact_max(self) -> int:
         """Maximum soft contact buffer capacity used by this pipeline."""
         return self._soft_contact_max
-
-    @property
-    def contact_matcher(self) -> ContactMatcher | None:
-        """The :class:`ContactMatcher` instance, or ``None`` if contact matching is disabled."""
-        return self._contact_matcher
 
     def contacts(self) -> Contacts:
         """
@@ -784,6 +782,7 @@ class CollisionPipeline:
             per_contact_shape_properties=self.narrow_phase.hydroelastic_sdf is not None,
             requested_attributes=self.model.get_requested_contact_attributes(),
             contact_matching=self.contact_matching,
+            contact_report=self.contact_report,
         )
 
         # attach custom attributes with assignment==CONTACT
@@ -1021,9 +1020,19 @@ class CollisionPipeline:
         # overwrites _prev_count and the report needs the old value.
         if self._contact_matcher is not None:
             if self._contact_matcher.has_report:
+                if contacts.rigid_contact_new_indices is None:
+                    raise ValueError(
+                        "CollisionPipeline has contact_report enabled but the Contacts "
+                        "buffer was created without contact_report=True. "
+                        "Use pipeline.contacts() to create a compatible buffer."
+                    )
                 self._contact_matcher.build_report(
                     contacts.rigid_contact_match_index,
                     contacts.rigid_contact_count,
+                    contacts.rigid_contact_new_indices,
+                    contacts.rigid_contact_new_count,
+                    contacts.rigid_contact_broken_indices,
+                    contacts.rigid_contact_broken_count,
                     device=self.device,
                 )
             self._contact_matcher.save_sorted_state(

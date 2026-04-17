@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for frame-to-frame contact matching via ContactMatcher."""
+"""Tests for frame-to-frame contact matching."""
 
 import unittest
 
@@ -275,17 +275,16 @@ def test_contact_report_indices_correct(test, device):
         model, state = _build_simple_scene(device)
         pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True, contact_report=True)
         contacts = pipeline.contacts()
-        matcher = pipeline.contact_matcher
 
         # Frame 1: all contacts are new.
         count1 = _collide_once(pipeline, state, contacts)
         test.assertGreater(count1, 0)
 
-        new_count1 = matcher.new_contact_count.numpy()[0]
+        new_count1 = contacts.rigid_contact_new_count.numpy()[0]
         test.assertEqual(new_count1, count1, "First frame: all contacts should be new")
 
         # Verify new_contact_indices point to valid sorted positions.
-        new_indices1 = matcher.new_contact_indices.numpy()[:new_count1]
+        new_indices1 = contacts.rigid_contact_new_indices.numpy()[:new_count1]
         test.assertTrue(np.all(new_indices1 >= 0) and np.all(new_indices1 < count1))
 
         # Verify new_contact_indices match the actual -1 positions in match_index.
@@ -294,13 +293,13 @@ def test_contact_report_indices_correct(test, device):
         np.testing.assert_array_equal(
             np.sort(new_indices1),
             np.sort(expected_new),
-            err_msg="new_contact_indices must match positions where match_index < 0",
+            err_msg="rigid_contact_new_indices must match positions where match_index < 0",
         )
 
         # Frame 2: stable scene — no new, no broken.
         _collide_once(pipeline, state, contacts)
-        test.assertEqual(matcher.new_contact_count.numpy()[0], 0)
-        test.assertEqual(matcher.broken_contact_count.numpy()[0], 0)
+        test.assertEqual(contacts.rigid_contact_new_count.numpy()[0], 0)
+        test.assertEqual(contacts.rigid_contact_broken_count.numpy()[0], 0)
 
 
 def test_contact_report_broken_indices(test, device):
@@ -317,7 +316,6 @@ def test_contact_report_broken_indices(test, device):
 
         pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True, contact_report=True)
         contacts = pipeline.contacts()
-        matcher = pipeline.contact_matcher
 
         # Frame 1: 2 sphere-plane contacts.
         count1 = _collide_once(pipeline, state, contacts)
@@ -331,11 +329,11 @@ def test_contact_report_broken_indices(test, device):
         count2 = _collide_once(pipeline, state, contacts)
         test.assertLess(count2, count1, "Fewer contacts after removing a sphere")
 
-        broken_count = matcher.broken_contact_count.numpy()[0]
+        broken_count = contacts.rigid_contact_broken_count.numpy()[0]
         test.assertGreater(broken_count, 0, "Should have broken contacts from the removed sphere")
 
         # Broken indices must be valid positions in the OLD sorted buffer.
-        broken_indices = matcher.broken_contact_indices.numpy()[:broken_count]
+        broken_indices = contacts.rigid_contact_broken_indices.numpy()[:broken_count]
         test.assertTrue(
             np.all(broken_indices >= 0) and np.all(broken_indices < count1),
             f"Broken indices must be in [0, {count1}), got: {broken_indices}",
@@ -348,17 +346,19 @@ def test_deterministic_implied(test, device):
         model, _state = _build_simple_scene(device)
         pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
         test.assertTrue(pipeline.deterministic)
-        test.assertIsNotNone(pipeline.contact_matcher)
+        test.assertTrue(pipeline.contact_matching)
 
 
 def test_matching_disabled_no_allocation(test, device):
-    """contact_matching=False: match_index should be None."""
+    """contact_matching=False: match_index and report arrays should be None."""
     with wp.ScopedDevice(device):
         model, _state = _build_simple_scene(device)
         pipeline = newton.CollisionPipeline(model, broad_phase="nxn", deterministic=True)
         contacts = pipeline.contacts()
         test.assertIsNone(contacts.rigid_contact_match_index)
-        test.assertIsNone(pipeline.contact_matcher)
+        test.assertIsNone(contacts.rigid_contact_new_indices)
+        test.assertIsNone(contacts.rigid_contact_broken_indices)
+        test.assertFalse(pipeline.contact_matching)
 
 
 def test_match_index_valid_after_sort(test, device):
