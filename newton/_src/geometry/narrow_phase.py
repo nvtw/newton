@@ -1462,6 +1462,13 @@ class NarrowPhase:
                 Defaults to ``max_candidate_pairs``.  Set this to a larger value when
                 a single candidate pair can emit multiple contacts (e.g. up to 4 for
                 primitive multi-contact paths).
+            verify_buffers: When True (the default), launch a dim=[1] diagnostic
+                kernel at the end of :meth:`launch` that prints a warning if any
+                intermediate pair buffer (GJK, mesh-plane, mesh-mesh, triangle
+                pairs, SDF) or the final rigid contact buffer overflowed during
+                this frame.  Disable (``False``) to save one kernel launch per
+                frame once buffer sizes are known to be adequate; overflows will
+                then silently drop candidate pairs and contacts.
         """
         self.max_candidate_pairs = max_candidate_pairs
         self.max_triangle_pairs = max_triangle_pairs

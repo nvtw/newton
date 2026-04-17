@@ -109,9 +109,9 @@ class Contacts:
             device: Device to allocate buffers on
             per_contact_shape_properties: Enable per-contact stiffness/damping/friction arrays
             clear_buffers: If True, clear() will zero all contact buffers (slower but conservative).
-                If False (default), clear() only resets counts, relying on collision detection
-                to overwrite active contacts. This is much faster (86-90% fewer kernel launches)
-                and safe since solvers only read up to contact_count.
+                If False (default), clear() only resets counts in a single fused kernel launch,
+                relying on collision detection to overwrite active contacts. This is much faster
+                than the conservative path and safe since solvers only read up to contact_count.
             requested_attributes: Set of extended contact attribute names to allocate.
                 See :attr:`EXTENDED_ATTRIBUTES` for available options.
 
@@ -242,11 +242,12 @@ class Contacts:
         Clear contact data, resetting counts and optionally clearing all buffers.
 
         By default (clear_buffers=False), only resets contact counts. This is highly optimized,
-        requiring just 2 kernel launches. Collision detection overwrites all data up to the new
+        requiring just a single fused kernel launch that zeroes all counters and bumps the
+        generation counter. Collision detection overwrites all data up to the new
         contact_count, and solvers only read up to count, so clearing stale data is unnecessary.
 
         If clear_buffers=True (conservative mode), performs full buffer clearing with sentinel
-        values and zeros. This requires 7-10 kernel launches but may be useful for debugging.
+        values and zeros. This requires several additional kernel launches but may be useful for debugging.
         """
         # Clear all counters and bump generation in a single kernel launch.
         num_counters = self._counter_array.shape[0]
@@ -259,8 +260,8 @@ class Contacts:
         )
 
         if self.clear_buffers:
-            # Conservative path: clear all buffers (7-10 kernel launches)
-            # This is slower but may be useful for debugging or special cases
+            # Conservative path: clear all buffers with sentinel values and zeros.
+            # Slower than the fast path but may be useful for debugging or special cases.
             self.rigid_contact_shape0.fill_(-1)
             self.rigid_contact_shape1.fill_(-1)
             self.rigid_contact_tids.fill_(-1)

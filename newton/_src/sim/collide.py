@@ -177,12 +177,13 @@ def compute_shape_aabbs(
     """
     shape_id = wp.tid()
 
-    # Thread 0: zero contact counters, bump generation, zero broad phase count.
+    # Thread 0: zero contact counters, bump contact generation, and zero the
+    # broad phase candidate-pair count in a single fused step.
     if shape_id == 0:
         for c in range(num_contact_counters):
             contact_counters[c] = 0
         g = contact_generation[0]
-        if g >= 2147483647:
+        if g == 2147483647:
             g = 0
         else:
             g = g + 1
@@ -472,6 +473,7 @@ class CollisionPipeline:
         narrow_phase: NarrowPhase | None = None,
         sdf_hydroelastic_config: HydroelasticSDF.Config | None = None,
         deterministic: bool = False,
+        verify_buffers: bool = True,
     ):
         """
         Initialize the CollisionPipeline (expert API).
@@ -506,6 +508,14 @@ class CollisionPipeline:
             deterministic: Sort contacts after the narrow phase so that results
                 are independent of GPU thread scheduling.  Adds a radix sort +
                 gather pass.  Hydroelastic contacts are not yet covered.
+            verify_buffers: Run a dim=[1] diagnostic kernel at the end of the
+                narrow phase that prints warnings when any intermediate
+                candidate-pair buffer (GJK, mesh, triangle, SDF) or the final
+                rigid contact buffer overflows.  Defaults to ``True`` so users
+                are informed when ``rigid_contact_max`` / ``max_triangle_pairs``
+                / ``shape_pairs_max`` need to be raised.  Disable in hot loops
+                (e.g. inside CUDA graph capture) to save a kernel launch once
+                buffers are known to be adequately sized.
 
         .. note::
             When ``requires_grad`` is true (explicitly or via ``model.requires_grad``),
@@ -681,7 +691,7 @@ class CollisionPipeline:
                 has_heightfields=has_heightfields,
                 use_lean_gjk_mpr=use_lean_gjk_mpr,
                 deterministic=deterministic,
-                verify_buffers=False,
+                verify_buffers=verify_buffers,
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
 
@@ -870,6 +880,7 @@ class CollisionPipeline:
                 device=self.device,
                 filter_pairs=self.shape_pairs_excluded,
                 num_filter_pairs=self.shape_pairs_excluded_count,
+                skip_count_zero=True,  # Already zeroed by compute_shape_aabbs
             )
         elif isinstance(self.broad_phase, BroadPhaseSAP):
             self.broad_phase.launch(
@@ -884,6 +895,7 @@ class CollisionPipeline:
                 device=self.device,
                 filter_pairs=self.shape_pairs_excluded,
                 num_filter_pairs=self.shape_pairs_excluded_count,
+                skip_count_zero=True,  # Already zeroed by compute_shape_aabbs
             )
         else:  # BroadPhaseExplicit
             self.broad_phase.launch(
