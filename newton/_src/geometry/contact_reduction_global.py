@@ -601,21 +601,23 @@ def _clear_active_kernel(
 
     Uses grid-stride loop for efficient thread utilization.
     Each thread handles one value slot, with key and aggregate clearing done once per entry.
-    Thread 0 also zeros contact_count, ht_insert_failures, and the active-slots count,
-    avoiding a second kernel launch.
+    Thread 0 also zeros contact_count and ht_insert_failures (no other thread in this
+    kernel reads them, so there is no race). The active-slots count stored at
+    ``ht_active_slots[ht_capacity]`` must NOT be reset here: every thread reads it
+    at the top of the kernel and we have no cross-block barrier, so a follow-up
+    kernel launch (``_zero_active_count_kernel``) is used to zero it safely.
 
     Memory layout for values is slot-major (SoA):
     [slot0_entry0, slot0_entry1, ..., slot0_entryN, slot1_entry0, ...]
     """
     tid = wp.tid()
 
-    # Thread 0 zeros counters not read by this kernel.
-    # ht_active_slots[ht_capacity] is zeroed AFTER reading it (see below).
     if tid == 0:
         contact_count[0] = 0
         ht_insert_failures[0] = 0
 
-    # Read count from GPU - stored at active_slots[capacity]
+    # Read count from GPU - stored at active_slots[capacity].
+    # All threads read this before it is modified by the follow-up zeroing kernel.
     count = ht_active_slots[ht_capacity]
 
     # Total work items: count entries * values_per_key slots per entry
@@ -650,10 +652,20 @@ def _clear_active_kernel(
         ht_values[value_idx] = wp.uint64(0)
         i += num_threads
 
-    # Thread 0 zeros active_slots count after the loop (all threads have
-    # already cached `count` in a register before reaching this point).
-    if tid == 0:
-        ht_active_slots[ht_capacity] = 0
+
+@wp.kernel(enable_backward=False)
+def _zero_active_count_kernel(
+    ht_active_slots: wp.array[wp.int32],
+    ht_capacity: int,
+):
+    """Zero the active-slots count after ``_clear_active_kernel`` has finished.
+
+    Launched as a separate kernel to obtain a grid-wide ordering guarantee:
+    every thread of ``_clear_active_kernel`` has retired before this kernel
+    starts, so we cannot race with any in-flight reads of
+    ``ht_active_slots[ht_capacity]``.
+    """
+    ht_active_slots[ht_capacity] = 0
 
 
 class GlobalContactReducer:
@@ -816,13 +828,23 @@ class GlobalContactReducer:
     def clear_active(self):
         """Clear only the active entries (efficient for sparse usage).
 
-        Uses a single kernel that clears hashtable keys, values, hydroelastic
-        aggregates, and counters — avoiding a second kernel launch for zeroing.
+        Uses two kernel launches (mirroring ``HashTable.clear_active``):
+
+        1. ``_clear_active_kernel`` clears hashtable keys, values, hydroelastic
+           aggregates, and per-step counters (``contact_count``,
+           ``ht_insert_failures``).
+        2. ``_zero_active_count_kernel`` zeroes ``ht_active_slots[ht_capacity]``.
+
+        The second kernel is needed because every thread of the first kernel
+        reads ``ht_active_slots[ht_capacity]`` to size its grid-stride loop,
+        and CUDA provides no intra-launch grid-wide barrier. Zeroing that slot
+        from inside the first kernel would race with threads in
+        later-scheduled blocks (or even later-issued warps/lanes under
+        independent thread scheduling), causing some entries to be skipped.
         """
         # Use fixed thread count for efficient GPU utilization
         num_threads = min(1024, self.hashtable.capacity)
 
-        # Single kernel clears entries and zeros counters
         wp.launch(
             _clear_active_kernel,
             dim=num_threads,
@@ -845,6 +867,15 @@ class GlobalContactReducer:
                 self.values_per_key,
                 num_threads,
             ],
+            device=self.device,
+        )
+        # Zero the active-slots count in a separate kernel so the write is
+        # ordered (by the CUDA kernel-launch boundary) after every read in
+        # `_clear_active_kernel`.
+        wp.launch(
+            _zero_active_count_kernel,
+            dim=1,
+            inputs=[self.hashtable.active_slots, self.hashtable.capacity],
             device=self.device,
         )
 
