@@ -1733,13 +1733,16 @@ class TestSDFWatertightFastPath(unittest.TestCase):
         mesh.clear_sdf()
 
     def test_sign_method_parity_override_on_non_watertight_mesh(self):
-        """``sign_method='parity'`` should run the parity path even when auto-detection
-        reports the mesh as non-watertight, producing correct inside/outside signs for
-        points well clear of the missing face.
+        """``sign_method='parity'`` should still build a texture-backed SDF even when
+        auto-detection reports the mesh as non-watertight.
+
+        The API documents that parity-sign results on non-watertight meshes are
+        undefined, so this test only verifies that the override runs the parity
+        path to completion and produces a populated SDF.  It intentionally does
+        not assert specific inside/outside signs, which would lock undefined
+        behavior into the test contract.
         """
-        # Closed cube with its top face (+Y) removed: not watertight by topology,
-        # but parity rays along -Y still reach the interior so sign is recoverable
-        # for points inside the solid bulk.
+        # Closed cube with its top face (+Y) removed: not watertight by topology.
         verts = np.array(
             [
                 [-0.5, -0.5, -0.5],
@@ -1794,20 +1797,7 @@ class TestSDFWatertightFastPath(unittest.TestCase):
 
         sdf_parity = SDF.create_from_mesh(mesh, max_resolution=32, texture_format="float32", sign_method="parity")
         self.assertIsNotNone(sdf_parity.texture_data, "SDF should have texture data")
-
-        test_points = np.array(
-            [
-                [0.0, -0.2, 0.0],  # well inside the bulk
-                [1.0, 0.0, 0.0],  # well outside in +X
-                [-1.0, -1.0, 0.0],  # well outside on a corner
-            ],
-            dtype=np.float32,
-        )
-        vals = _sample_texture_sdf_at_points(sdf_parity, test_points)
-
-        self.assertLess(float(vals[0]), 0.0, "Point inside bulk should have negative SDF")
-        self.assertGreater(float(vals[1]), 0.0, "Point clearly outside should have positive SDF")
-        self.assertGreater(float(vals[2]), 0.0, "Corner point should have positive SDF")
+        self.assertFalse(sdf_parity.is_empty(), "Texture-backed SDF should not report as empty")
 
         mesh.clear_sdf()
 

@@ -214,8 +214,8 @@ class SDF:
         return self.texture_data
 
     def is_empty(self) -> bool:
-        """Return True when this SDF has no sparse/coarse payload."""
-        return int(self.data.sparse_sdf_ptr) == 0 and int(self.data.coarse_sdf_ptr) == 0
+        """Return True when this SDF has no sparse/coarse or texture payload."""
+        return int(self.data.sparse_sdf_ptr) == 0 and int(self.data.coarse_sdf_ptr) == 0 and self.texture_data is None
 
     def validate(self) -> None:
         """Validate consistency of kernel pointers and owned volumes."""
