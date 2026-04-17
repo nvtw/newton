@@ -8,25 +8,26 @@ normals) and the current frame's unsorted contacts, this module finds
 correspondences using the deterministic sort key from
 :func:`~newton._src.geometry.contact_data.make_contact_sort_key`.
 
-For each new contact the matcher performs a binary search on last frame's
-sorted keys, then verifies candidates against world-space position distance
-and normal-direction thresholds.  The result is a per-contact match index:
+For each new contact the matcher binary-searches the previous frame's
+sorted keys for the ``(shape_a, shape_b)`` pair range — ignoring the
+``sort_sub_key`` bits — then picks the closest previous contact in that
+range whose normal also passes the dot-product threshold.  The result
+is a per-contact match index:
 
 - ``>= 0``: index of the matched contact in the previous frame's sorted buffer.
-- ``MATCH_NOT_FOUND (-1)``: new contact with no prior correspondence.
-- ``MATCH_BROKEN (-2)``: key matched but position/normal thresholds exceeded.
+- ``MATCH_NOT_FOUND (-1)``: shape pair has no prior contacts.
+- ``MATCH_BROKEN (-2)``: shape pair exists but no contact within
+  position/normal thresholds.
 
-Key-uniqueness assumption
--------------------------
-Matching assumes the sort keys produced by
-:func:`~newton._src.geometry.contact_data.make_contact_sort_key` are unique
-per active contact.  ``make_contact_sort_key`` silently masks overflow, so
-scenes that exceed the bit budgets documented there (e.g. more than ~524K
-mesh-triangle contacts after multi-contact expansion) can collide two keys
-onto the same value.  When that happens, two new contacts will binary-search
-to the same old range and may pick the same ``best_idx``, producing
-duplicate ``match_index`` values.  The invariant is inherited from the sort
-key itself; if you need to diagnose duplicate matches, start there.
+Why ignore sort_sub_key
+-----------------------
+Multi-contact manifolds (e.g. box-box face-face) can rotate the
+``sort_sub_key`` assignment across frames when their internal generation
+order shifts (e.g. the Sutherland-Hodgman clip's starting vertex moves
+by one slot), even though the physical contact points stay essentially
+in place.  Matching on the full key would mark these contacts broken
+every frame.  Pair counts are small (a few manifold points per pair),
+so the linear scan inside the pair range is cheap.
 
 Memory efficiency
 -----------------
@@ -78,16 +79,15 @@ MATCH_BROKEN = wp.constant(wp.int32(-2))
 
 
 @wp.func
-def _binary_search_int64(
+def _lower_bound_int64(
     lower: int,
     upper: int,
     target: wp.int64,
     keys: wp.array[wp.int64],
 ) -> int:
-    """Lower-bound binary search on a sorted int64 array.
+    """First index in ``keys[lower:upper]`` whose value is >= *target*.
 
-    Returns the index of the first occurrence of *target*, or ``-1``
-    if *target* is not present in ``keys[lower:upper]``.
+    Returns ``upper`` if no such index exists.
     """
     left = lower
     right = upper
@@ -97,8 +97,6 @@ def _binary_search_int64(
             left = mid + 1
         else:
             right = mid
-    if left >= upper or keys[left] != target:
-        return -1
     return left
 
 
@@ -162,22 +160,26 @@ def _match_contacts_kernel(data: _MatchData):
         new_pos_w = wp.transform_point(data.body_q[bid], data.new_point0[tid])
     new_n = data.new_normal[tid]
 
-    # Binary search for the first old contact with matching key.
-    start = _binary_search_int64(0, n_old, target_key, data.prev_keys)
+    # Binary search the [range_lo, range_hi) interval of prev contacts
+    # sharing the same (shape_a, shape_b) pair.  We ignore sort_sub_key
+    # because for multi-contact manifolds (e.g. box-box face-face) the
+    # sub-key assignment is not stable across frames; matching by the
+    # exact key would spuriously break stable contacts.  Pair counts are
+    # small (<= a few manifold points), so a linear scan inside the
+    # range is cheap.
+    pair_prefix = target_key & wp.int64(~0x7FFFFF)
+    pair_end = pair_prefix + wp.int64(0x800000)  # 1 << 23
+    range_lo = _lower_bound_int64(0, n_old, pair_prefix, data.prev_keys)
+    range_hi = _lower_bound_int64(range_lo, n_old, pair_end, data.prev_keys)
 
-    if start == -1:
+    if range_lo >= range_hi:
         data.match_index[tid] = MATCH_NOT_FOUND
         return
 
-    # Linear scan through contacts sharing the same key.
+    # Closest-point match within the pair range, gated by normal dot.
     best_idx = int(-1)
     best_dist_sq = float(data.pos_threshold_sq)
-    k = int(0)
-    while start + k < n_old:
-        old_idx = start + k
-        if data.prev_keys[old_idx] != target_key:
-            break
-
+    for old_idx in range(range_lo, range_hi):
         old_pos = data.prev_pos_world[old_idx]
         diff = new_pos_w - old_pos
         dist_sq = wp.dot(diff, diff)
@@ -188,14 +190,12 @@ def _match_contacts_kernel(data: _MatchData):
             best_dist_sq = dist_sq
             best_idx = old_idx
 
-        k += 1
-
     if best_idx >= 0:
         data.match_index[tid] = wp.int32(best_idx)
         if data.has_report != 0:
             wp.atomic_max(data.prev_was_matched, best_idx, wp.int32(1))
     else:
-        # Key matched but thresholds not met.
+        # Pair range exists but no contact within thresholds.
         data.match_index[tid] = MATCH_BROKEN
 
 
