@@ -232,9 +232,28 @@ class SDF:
         via :meth:`create_from_data` with a NanoVDB ``sparse_volume``, the
         fallback branch extracts from the sparse volume instead.
 
+        The ``isovalue`` argument is always interpreted in raw mesh-distance
+        units: ``0.0`` yields the base geometry surface regardless of how
+        the SDF was constructed, and positive values give an outward
+        offset.  Both storage backends are normalized to this convention:
+
+        * Texture SDFs store unmodified signed distance ``d`` (the texture
+          builder does not bake ``shape_margin``), so the requested
+          isovalue is forwarded as-is to the isomesh extractor.
+        * NanoVDB sparse volumes built via :class:`_compute_sdf_from_shape_impl`
+          store ``d - shape_margin``.  The extractor compensates with
+          ``corrected_isovalue = isovalue - shape_margin`` so external
+          behavior matches the texture path.
+
+        As a consequence, :attr:`shape_margin` is only consulted on the
+        legacy sparse-volume branch; on the texture branch it is stored
+        for backward compatibility with callers that introspect the SDF
+        but has no effect on the extracted surface.
+
         Args:
-            isovalue: Surface level to extract [m].  ``0.0`` gives the
-                original surface; positive values give an outward offset.
+            isovalue: Surface level to extract [m] in base geometry
+                distance units.  ``0.0`` gives the original surface;
+                positive values give an outward offset.
             device: CUDA device.  When ``None`` uses the current device.
 
         Returns:
@@ -249,6 +268,8 @@ class SDF:
                 ct = self._coarse_texture
                 coarse_dims = (ct.width - 1, ct.height - 1, ct.depth - 1)
                 slots = self.texture_data.subgrid_start_slots
+                # Texture SDF stores raw mesh distance (shape_margin is not
+                # baked in), so forward isovalue directly.  See class docstring.
                 result = compute_isomesh_from_texture_sdf(
                     tex_arr, 0, slots, coarse_dims, device=device, isovalue=isovalue
                 )
@@ -256,10 +277,9 @@ class SDF:
                     return result
 
         if self.sparse_volume is not None:
-            # The sparse volume has shape_margin already baked in (subtracted
-            # from every SDF value), so its zero-isosurface sits at
-            # shape_margin from the base geometry.  Compensate so callers get
-            # the surface at the requested isovalue from the base geometry.
+            # Legacy NanoVDB sparse volumes (produced by
+            # _compute_sdf_from_shape_impl) store d - shape_margin, so
+            # compensate to match the texture branch semantics above.
             corrected_isovalue = isovalue - self.shape_margin if self.shape_margin else isovalue
             return compute_isomesh(self.sparse_volume, isovalue=corrected_isovalue, device=device)
 
@@ -445,7 +465,6 @@ class SDF:
                 scale_baked=bake_scale,
                 use_parity=use_parity,
             )
-            wp.synchronize()
 
         sdf = SDF(
             data=create_empty_sdf_data(),
