@@ -260,6 +260,24 @@ def _match_contacts_kernel(data: _MatchData):
 
 
 @wp.kernel(enable_backward=False)
+def _clear_prev_claim_kernel(
+    prev_claim: wp.array[wp.int64],
+    prev_count: wp.array[wp.int32],
+):
+    """Reset only the active prefix of the claim buffer to ``_CLAIM_SENTINEL``.
+
+    Launched with ``capacity`` threads so the per-frame launch fits a
+    static CUDA graph, but each thread guards on ``prev_count[0]`` so we
+    only touch the (typically much smaller) range of slots that ``match``
+    will actually race on.  Slots beyond ``prev_count`` are never read
+    by either kernel, so leaving them stale is safe.
+    """
+    i = wp.tid()
+    if i < prev_count[0]:
+        prev_claim[i] = _CLAIM_SENTINEL
+
+
+@wp.kernel(enable_backward=False)
 def _resolve_claims_kernel(
     match_index: wp.array[wp.int32],
     prev_claim: wp.array[wp.int64],
@@ -524,9 +542,17 @@ class ContactMatcher:
         if self._has_report:
             self._prev_was_matched.zero_()
 
-        # Reset the per-prev claim word to the sentinel so the first
-        # atomic_min from any contender wins.
-        self._prev_claim.fill_(_CLAIM_SENTINEL)
+        # Reset only the active prefix of the claim buffer.  Launching
+        # ``capacity`` threads keeps the call shape constant for graph
+        # capture, but the kernel guards on ``prev_count`` so we touch
+        # the minimum bytes — important for sparsely-loaded pipelines
+        # where ``capacity >> prev_count``.
+        wp.launch(
+            _clear_prev_claim_kernel,
+            dim=self._capacity,
+            inputs=[self._prev_claim, self._prev_count],
+            device=device,
+        )
 
         data = _MatchData()
         data.prev_keys = self._prev_sorted_keys
