@@ -1760,9 +1760,15 @@ broken contacts each frame:
     broken_indices = contacts.rigid_contact_broken_indices.numpy()[:n_broken]
 
 ``rigid_contact_new_indices`` holds indices into the current frame's sorted
-contact buffer where ``match_index < 0``.  ``rigid_contact_broken_indices``
-holds indices into the *previous* frame's sorted buffer for contacts that no
-current contact matched.
+contact buffer for every contact with ``match_index < 0``.  This includes both
+genuinely new contacts (``MATCH_NOT_FOUND``, ``match_index == -1``) and
+threshold-broken contacts whose sort key matched a previous-frame contact but
+whose position or normal exceeded the configured thresholds
+(``MATCH_BROKEN``, ``match_index == -2``).  Inspect
+``contacts.rigid_contact_match_index`` to distinguish the two cases.
+
+``rigid_contact_broken_indices`` holds indices into the *previous* frame's
+sorted buffer for contacts that no current contact matched.
 
 .. _Performance:
 

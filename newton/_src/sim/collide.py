@@ -519,6 +519,17 @@ class CollisionPipeline:
             rigid-contact autodiff via ``rigid_contact_diff_*`` is **experimental**;
             see :meth:`collide`.
         """
+        if contact_matching_pos_threshold < 0.0:
+            raise ValueError(
+                f"contact_matching_pos_threshold must be non-negative, got {contact_matching_pos_threshold}"
+            )
+        if not -1.0 <= contact_matching_normal_dot_threshold <= 1.0:
+            raise ValueError(
+                f"contact_matching_normal_dot_threshold must be in [-1, 1], got {contact_matching_normal_dot_threshold}"
+            )
+        if contact_report and not contact_matching:
+            raise ValueError("contact_report=True requires contact_matching=True")
+
         # contact_matching implies deterministic sorting.
         if contact_matching:
             deterministic = True

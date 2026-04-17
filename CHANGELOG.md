@@ -10,6 +10,7 @@
 - Add `ViewerGL.log_scalar()` for live scalar time-series plots in the viewer
 - Add `deterministic` flag to `CollisionPipeline` and `NarrowPhase` for GPU-thread-scheduling-independent contact ordering via radix sort and deterministic fingerprint tiebreaking in contact reduction
 - Add `ViewerBase.log_arrows()` for arrow rendering (wide line + arrowhead) in the GL viewer with a dedicated geometry shader
+- Add frame-to-frame contact matching via `CollisionPipeline(contact_matching=True)` with configurable position and normal thresholds. With `contact_report=True`, new and broken contact index lists are exposed as `contacts.rigid_contact_new_indices` / `rigid_contact_new_count` / `rigid_contact_broken_indices` / `rigid_contact_broken_count`
 - Add `enable_multiccd` parameter to `SolverMuJoCo` for multi-CCD contact generation (up to 4 contact points per geom pair)
 - Add `ViewerViser.log_scalar()` for live scalar time-series plots via uPlot
 
@@ -79,11 +80,6 @@
 - Export `ViewerBase` from `newton.viewer` public API
 - Add `custom_attributes` argument to `ModelBuilder.add_shape_convex_hull()`
 - Add RJ45 plug-socket insertion example with SDF contacts, latch joint, and interactive gizmo
-- Add `TRIANGLE_PRISM` support-function type for heightfield triangles, extruding 1 m along the heightfield's local -Z so GJK/MPR naturally resolves shapes on the back side
-- Add `ViewerGL.log_scalar()` for live scalar time-series plots in the viewer
-- Add `deterministic` flag to `CollisionPipeline` and `NarrowPhase` for GPU-thread-scheduling-independent contact ordering via radix sort and deterministic fingerprint tiebreaking in contact reduction
-- Add `ViewerBase.log_arrows()` for arrow rendering (wide line + arrowhead) in the GL viewer with a dedicated geometry shader
-- Add frame-to-frame contact matching via `CollisionPipeline(contact_matching=True)` with configurable position and normal thresholds. With `contact_report=True`, new and broken contact index lists are exposed as `contacts.rigid_contact_new_indices` / `rigid_contact_new_count` / `rigid_contact_broken_indices` / `rigid_contact_broken_count`
 
 ### Changed
 
