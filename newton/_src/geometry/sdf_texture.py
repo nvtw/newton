@@ -580,15 +580,15 @@ def _check_subgrid_occupied_parity_kernel(
     """Mark subgrids that overlap the narrow band using parity-based signed distance."""
     tid = wp.tid()
     coords = _id_to_xyz(tid, num_subgrids_x, num_subgrids_y)
-    half = cells_per_subgrid // 2
-    gx = coords[0] * cells_per_subgrid + half
-    gy = coords[1] * cells_per_subgrid + half
-    gz = coords[2] * cells_per_subgrid + half
+    half = float(cells_per_subgrid) * 0.5
+    gx = float(coords[0] * cells_per_subgrid) + half
+    gy = float(coords[1] * cells_per_subgrid) + half
+    gz = float(coords[2] * cells_per_subgrid) + half
 
     sample_pos = min_corner + wp.vec3(
-        float(gx) * cell_size[0],
-        float(gy) * cell_size[1],
-        float(gz) * cell_size[2],
+        gx * cell_size[0],
+        gy * cell_size[1],
+        gz * cell_size[2],
     )
     signed_distance = get_distance_to_mesh_parity(mesh, sample_pos, 10000.0)
 
@@ -1584,7 +1584,6 @@ def build_sparse_sdf_from_mesh(
                 )
             final_sdf_min = 0.0
             final_sdf_range = 1.0
-            subgrid_texture_data = subgrid_texture_gpu.numpy().reshape((tex_size, tex_size, tex_size))
 
         elif quantization_mode == QuantizationMode.UINT16:
             subgrid_texture_gpu = wp.zeros(total_tex_samples, dtype=wp.uint16, device=device)
@@ -1629,7 +1628,6 @@ def build_sparse_sdf_from_mesh(
                 )
             final_sdf_min = global_sdf_min
             final_sdf_range = sdf_range
-            subgrid_texture_data = subgrid_texture_gpu.numpy().reshape((tex_size, tex_size, tex_size))
 
         elif quantization_mode == QuantizationMode.UINT8:
             subgrid_texture_gpu = wp.zeros(total_tex_samples, dtype=wp.uint8, device=device)
@@ -1674,12 +1672,12 @@ def build_sparse_sdf_from_mesh(
                 )
             final_sdf_min = global_sdf_min
             final_sdf_range = sdf_range
-            subgrid_texture_data = subgrid_texture_gpu.numpy().reshape((tex_size, tex_size, tex_size))
 
         else:
             raise ValueError(f"Unknown quantization mode: {quantization_mode}")
 
-        # Apply linearity decision for watertight fused path
+        # Apply linearity decision for watertight fused path. Must run before any
+        # .numpy() readback so it is not serialized behind a host/device stall.
         if watertight and check_linearity != 0:
             wp.launch(
                 _apply_linearity_kernel,
@@ -1694,7 +1692,7 @@ def build_sparse_sdf_from_mesh(
                 device=device,
             )
 
-        wp.synchronize()
+        subgrid_texture_data = subgrid_texture_gpu.numpy().reshape((tex_size, tex_size, tex_size))
         subgrid_start_slots = subgrid_start_slots_gpu.numpy()
 
     # --- Single batch of host readbacks (all GPU work is complete) ---
