@@ -161,56 +161,84 @@ def test_new_contact_detection(test, device):
 
 
 def test_broken_pos_threshold_all_contacts(test, device):
-    """Moving all spheres beyond pos_threshold must break ALL contacts (not just some)."""
+    """Moving all spheres beyond pos_threshold must break ALL contacts (not just some).
+
+    Uses the default :attr:`CollisionPipeline.contact_matching_pos_threshold` so
+    the test follows any future retune of the default.  ``contact_report=True``
+    lets us close the loop and verify each broken new contact has a matching
+    entry in ``rigid_contact_broken_indices`` (the old contact was also
+    reported as broken — broken-on-both-sides).
+    """
     with wp.ScopedDevice(device):
         model, state = _build_simple_scene(device)
         pipeline = newton.CollisionPipeline(
             model,
             broad_phase="nxn",
             contact_matching=True,
-            contact_matching_pos_threshold=0.001,  # 1 mm — very tight
+            contact_report=True,
         )
         contacts = pipeline.contacts()
 
         count1 = _collide_once(pipeline, state, contacts)
         test.assertGreater(count1, 0)
 
-        # Shift all dynamic bodies by 1 cm (10x the threshold).
+        # Shift all dynamic bodies along x by 0.2 m — well above the default
+        # (0.02 m) pos_threshold but small enough to keep them on the plane.
         q = state.body_q.numpy()
         for i in range(len(q)):
-            q[i][0] += 0.01
+            q[i][0] += 0.2
         state.body_q = wp.array(q, dtype=wp.transform, device=device)
 
         count2 = _collide_once(pipeline, state, contacts)
         match_idx = contacts.rigid_contact_match_index.numpy()[:count2]
 
-        # Every contact should be MATCH_BROKEN (-2) because key matches but
+        # Every new contact should be MATCH_BROKEN (-2): key matches but
         # position drifted beyond threshold.
         test.assertTrue(
-            np.all(match_idx == -2),
+            np.all(match_idx == newton.geometry.MATCH_BROKEN),
             f"All contacts should be MATCH_BROKEN. Unique values: {np.unique(match_idx)}",
+        )
+
+        # And every old contact should appear in broken_contact_indices:
+        # if the new side is broken, the old side must also be broken
+        # (nothing matched it).
+        broken_count = contacts.rigid_contact_broken_count.numpy()[0]
+        test.assertEqual(
+            broken_count,
+            count1,
+            f"All {count1} old contacts should be reported as broken, got {broken_count}",
+        )
+        broken_indices = contacts.rigid_contact_broken_indices.numpy()[:broken_count]
+        np.testing.assert_array_equal(
+            np.sort(broken_indices),
+            np.arange(count1, dtype=np.int32),
+            err_msg="broken_contact_indices must enumerate every old contact",
         )
 
 
 def test_within_pos_threshold_still_matches(test, device):
-    """Moving spheres less than pos_threshold must still produce matches."""
+    """Moving spheres less than pos_threshold must still produce matches.
+
+    Uses the default :attr:`CollisionPipeline.contact_matching_pos_threshold`
+    (0.02 m) so the test follows any future retune of the default.
+    """
     with wp.ScopedDevice(device):
         model, state = _build_simple_scene(device)
         pipeline = newton.CollisionPipeline(
             model,
             broad_phase="nxn",
             contact_matching=True,
-            contact_matching_pos_threshold=0.1,  # 10 cm — generous
         )
         contacts = pipeline.contacts()
 
         count1 = _collide_once(pipeline, state, contacts)
         test.assertGreater(count1, 0)
 
-        # Shift all dynamic bodies by 1 cm (well within 10 cm threshold).
+        # Shift all dynamic bodies along x by 0.002 m — an order of magnitude
+        # below the default (0.02 m) pos_threshold.
         q = state.body_q.numpy()
         for i in range(len(q)):
-            q[i][0] += 0.01
+            q[i][0] += 0.002
         state.body_q = wp.array(q, dtype=wp.transform, device=device)
 
         count2 = _collide_once(pipeline, state, contacts)
@@ -218,7 +246,7 @@ def test_within_pos_threshold_still_matches(test, device):
 
         test.assertTrue(
             np.all(match_idx >= 0),
-            f"All contacts should match within generous threshold. Unique: {np.unique(match_idx)}",
+            f"All contacts should match within default threshold. Unique: {np.unique(match_idx)}",
         )
 
 

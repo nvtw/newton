@@ -10,7 +10,7 @@
 - Add `ViewerGL.log_scalar()` for live scalar time-series plots in the viewer
 - Add `deterministic` flag to `CollisionPipeline` and `NarrowPhase` for GPU-thread-scheduling-independent contact ordering via radix sort and deterministic fingerprint tiebreaking in contact reduction
 - Add `ViewerBase.log_arrows()` for arrow rendering (wide line + arrowhead) in the GL viewer with a dedicated geometry shader
-- Add frame-to-frame contact matching via `CollisionPipeline(contact_matching=True)` with configurable position and normal thresholds. With `contact_report=True`, new and broken contact index lists are exposed as `contacts.rigid_contact_new_indices` / `rigid_contact_new_count` / `rigid_contact_broken_indices` / `rigid_contact_broken_count`
+- Add frame-to-frame contact matching via `CollisionPipeline(contact_matching=True)` with configurable position and normal thresholds. With `contact_report=True`, new and broken contact index lists are exposed as `contacts.rigid_contact_new_indices` / `rigid_contact_new_count` / `rigid_contact_broken_indices` / `rigid_contact_broken_count`. Sentinel values for `contacts.rigid_contact_match_index` are re-exported as `newton.geometry.MATCH_NOT_FOUND` (``-1``) and `newton.geometry.MATCH_BROKEN` (``-2``)
 - Add `enable_multiccd` parameter to `SolverMuJoCo` for multi-CCD contact generation (up to 4 contact points per geom pair)
 - Add `ViewerViser.log_scalar()` for live scalar time-series plots via uPlot
 

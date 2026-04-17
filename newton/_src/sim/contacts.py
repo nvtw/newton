@@ -209,8 +209,10 @@ class Contacts:
                 self.rigid_contact_match_index = wp.full(rigid_contact_max, -1, dtype=wp.int32)
                 """Per-contact match index from frame-to-frame matching.
 
-                Values: ``>= 0`` matched old contact index, ``-1`` new contact,
-                ``-2`` key matched but thresholds exceeded (broken).
+                Values: ``>= 0`` matched old contact index;
+                :data:`newton.geometry.MATCH_NOT_FOUND` (``-1``) new contact;
+                :data:`newton.geometry.MATCH_BROKEN` (``-2``) key matched but
+                position/normal thresholds exceeded.
                 Shape (rigid_contact_max,), dtype int32."""
             else:
                 self.rigid_contact_match_index = None

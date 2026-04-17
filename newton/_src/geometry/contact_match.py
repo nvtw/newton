@@ -16,16 +16,28 @@ and normal-direction thresholds.  The result is a per-contact match index:
 - ``MATCH_NOT_FOUND (-1)``: new contact with no prior correspondence.
 - ``MATCH_BROKEN (-2)``: key matched but position/normal thresholds exceeded.
 
+Key-uniqueness assumption
+-------------------------
+Matching assumes the sort keys produced by
+:func:`~newton._src.geometry.contact_data.make_contact_sort_key` are unique
+per active contact.  ``make_contact_sort_key`` silently masks overflow, so
+scenes that exceed the bit budgets documented there (e.g. more than ~524K
+mesh-triangle contacts after multi-contact expansion) can collide two keys
+onto the same value.  When that happens, two new contacts will binary-search
+to the same old range and may pick the same ``best_idx``, producing
+duplicate ``match_index`` values.  The invariant is inherited from the sort
+key itself; if you need to diagnose duplicate matches, start there.
+
 Memory efficiency
 -----------------
 The matcher reuses the :class:`ContactSorter`'s existing scratch buffers
-(``_full_point0_buf``, ``_full_normal_buf``) to store previous-frame
-world-space positions and normals between frames.  This works because
-matching runs *before* sorting each frame (so the scratch data is still
-intact), and the save step runs *after* sorting (overwriting the scratch
-with the new sorted data).  The only additional per-contact allocation is
-the ``_prev_sorted_keys`` buffer (8 bytes/contact) since the sorter's key
-buffer is overwritten by ``_prepare_sort`` each frame.
+(:attr:`ContactSorter.scratch_pos_world`, :attr:`ContactSorter.scratch_normal`)
+to store previous-frame world-space positions and normals between frames.
+This works because matching runs *before* sorting each frame (so the
+scratch data is still intact), and the save step runs *after* sorting
+(overwriting the scratch with the new sorted data).  The only additional
+per-contact allocation is the ``_prev_sorted_keys`` buffer (8 bytes/contact)
+since the sorter's key buffer is overwritten by ``_prepare_sort`` each frame.
 
 Per-frame call order (inside :class:`~newton.CollisionPipeline`)::
 
@@ -33,6 +45,12 @@ Per-frame call order (inside :class:`~newton.CollisionPipeline`)::
     sorter.sort_full(...)  # match_index is permuted with contacts
     matcher.build_report(...)  # optional; must precede save_sorted_state
     matcher.save_sorted_state(...)  # after sorting and report
+
+The ``build_report`` / ``save_sorted_state`` ordering is load-bearing:
+``save_sorted_state`` overwrites ``_prev_count`` with the current frame's
+count, while ``build_report`` reads the *old* ``_prev_count`` to bound the
+broken-contact enumeration.  Swapping the two silently narrows the
+broken-contact scan to the current frame's active range.
 """
 
 from __future__ import annotations
@@ -42,6 +60,7 @@ from typing import TYPE_CHECKING
 import warp as wp
 
 from ..core.types import Devicelike
+from .contact_sort import SORT_KEY_SENTINEL
 
 if TYPE_CHECKING:
     from .contact_sort import ContactSorter
@@ -277,11 +296,29 @@ class ContactMatcher:
         matcher.build_report(...)  # optional; must precede save_sorted_state
         matcher.save_sorted_state(...)  # after sorting and report
 
+    The ``build_report`` → ``save_sorted_state`` order is required:
+    ``save_sorted_state`` overwrites ``_prev_count`` with the current frame's
+    count, while ``build_report`` reads the *old* ``_prev_count`` to bound
+    the broken-contact enumeration.
+
     Memory is minimised by reusing the *sorter*'s existing scratch buffers
     for the previous-frame world-space positions and normals.  The only
     new per-contact allocation is the sorted-key cache (8 bytes/contact).
     When ``contact_report`` is disabled, the ``prev_was_matched`` flag
     array (4 bytes/contact) is also skipped.
+
+    .. note::
+        Previous-frame state persists across :meth:`~newton.CollisionPipeline.collide`
+        calls — that is the whole point.  But in RL-style workflows where a
+        user resets or teleports all bodies between episodes, the stale
+        previous-frame data will produce spurious matches on the next frame.
+        Call :meth:`reset` after such discontinuities to zero ``_prev_count``
+        so the next frame starts fresh with all ``MATCH_NOT_FOUND``.
+
+    .. note::
+        Requires a CUDA device.  The underlying :class:`ContactSorter`
+        depends on ``wp.utils.radix_sort_pairs``, which is CUDA-only in
+        practice, so the matcher is only supported on CUDA devices.
 
     Args:
         capacity: Maximum number of contacts (must match :class:`ContactSorter`).
@@ -293,7 +330,7 @@ class ContactMatcher:
             normals.  Below this the contact is considered broken.
         contact_report: Allocate the ``prev_was_matched`` flag array needed
             to enumerate broken contacts in :meth:`build_report`.
-        device: Device to allocate on.
+        device: Device to allocate on.  Must be a CUDA device.
     """
 
     def __init__(
@@ -307,6 +344,14 @@ class ContactMatcher:
         device: Devicelike = None,
     ):
         with wp.ScopedDevice(device):
+            resolved_device = wp.get_device()
+            if not resolved_device.is_cuda:
+                raise RuntimeError(
+                    "ContactMatcher requires a CUDA device; got "
+                    f"'{resolved_device}'.  The underlying ContactSorter relies "
+                    "on wp.utils.radix_sort_pairs, which is CUDA-only."
+                )
+
             self._capacity = capacity
             self._pos_threshold_sq = pos_threshold * pos_threshold
             self._normal_dot_threshold = normal_dot_threshold
@@ -314,7 +359,10 @@ class ContactMatcher:
 
             # Only buffer we must own: sorted keys survive across frames
             # (_sort_keys_copy is overwritten by _prepare_sort each frame).
-            self._prev_sorted_keys = wp.zeros(capacity, dtype=wp.int64)
+            # Init with the sort-key sentinel so a debugger dump of the buffer
+            # before the first save_sorted_state does not look like valid keys
+            # for shape_a=0, shape_b=0, sub_key=0.
+            self._prev_sorted_keys = wp.full(capacity, SORT_KEY_SENTINEL, dtype=wp.int64)
             self._prev_count = wp.zeros(1, dtype=wp.int32)
 
             # Contact report (optional).
@@ -338,6 +386,22 @@ class ContactMatcher:
     def prev_contact_count(self) -> wp.array:
         """Device-side previous frame contact count (single-element int32)."""
         return self._prev_count
+
+    def reset(self) -> None:
+        """Clear cross-frame state so the next frame starts fresh.
+
+        Use this after any discontinuity that invalidates the previous
+        frame's contacts — e.g. resetting an RL environment, teleporting
+        bodies, or loading a new scene.  After ``reset()`` the next call to
+        :meth:`match` produces all :data:`MATCH_NOT_FOUND` and
+        :meth:`build_report` reports zero broken contacts.
+
+        Zeroing ``_prev_count`` is sufficient to short-circuit both paths;
+        the previous-frame key and position buffers are not touched, but
+        they will not be read because both kernels gate on ``_prev_count``
+        / ``prev_count``.
+        """
+        self._prev_count.zero_()
 
     # ------------------------------------------------------------------
     # Public methods
@@ -378,8 +442,8 @@ class ContactMatcher:
         data = _MatchData()
         data.prev_keys = self._prev_sorted_keys
         # Reuse sorter scratch buffers for prev-frame world-space data.
-        data.prev_pos_world = self._sorter._full_point0_buf
-        data.prev_normal = self._sorter._full_normal_buf
+        data.prev_pos_world = self._sorter.scratch_pos_world
+        data.prev_normal = self._sorter.scratch_normal
         data.prev_count = self._prev_count
         data.new_keys = sort_keys
         data.new_point0 = point0
@@ -413,9 +477,10 @@ class ContactMatcher:
         Must be called **after** :meth:`ContactSorter.sort_full`.
 
         World-space positions and normals are written into the sorter's scratch
-        buffers (``_full_point0_buf``, ``_full_normal_buf``), which are idle
-        between frames.  Sorted keys go to an owned buffer since the sorter's
-        key buffer is overwritten by ``_prepare_sort`` each frame.
+        buffers (:attr:`ContactSorter.scratch_pos_world`,
+        :attr:`ContactSorter.scratch_normal`), which are idle between frames.
+        Sorted keys go to an owned buffer since the sorter's key buffer is
+        overwritten by ``_prepare_sort`` each frame.
 
         Args:
             sorted_keys: Sorted int64 keys (use :attr:`ContactSorter.sorted_keys_view`).
@@ -437,8 +502,8 @@ class ContactMatcher:
         data.shape_body = shape_body
         data.dst_keys = self._prev_sorted_keys
         # Write world-space positions and normals into sorter's scratch buffers.
-        data.dst_pos_world = self._sorter._full_point0_buf
-        data.dst_normal = self._sorter._full_normal_buf
+        data.dst_pos_world = self._sorter.scratch_pos_world
+        data.dst_normal = self._sorter.scratch_normal
         data.dst_count = self._prev_count
 
         wp.launch(_save_sorted_state_kernel, dim=self._capacity, inputs=[data], device=device)
