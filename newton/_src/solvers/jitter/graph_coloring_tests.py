@@ -70,6 +70,7 @@ def _run_partitioner(
     partition_data_concat = wp.zeros(2 * max_num_interactions, dtype=wp.int64)
     partition_data_elements = wp.zeros(max_num_interactions, dtype=wp.int32)
     interaction_id_to_partition = wp.zeros(max_num_interactions, dtype=wp.int32)
+    removed_marker_array = wp.zeros(max_num_interactions, dtype=wp.int32)
 
     # Random values per element -- used as Luby MIS priorities. These must be
     # pairwise distinct for the algorithm to avoid ties (which would allow two
@@ -107,6 +108,7 @@ def _run_partitioner(
         partition_data_concat=partition_data_concat,
         partition_data_elements=partition_data_elements,
         interaction_id_to_partition=interaction_id_to_partition,
+        removed_marker_array=removed_marker_array,
         random_values=random_values_arr,
         adjacency_section_end_indices=adjacency_section_end_indices,
         vertex_to_adjacent_elements=vertex_to_adjacent_elements,
