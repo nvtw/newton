@@ -1,6 +1,25 @@
 import warp as wp
 
-from newton._src.solvers.jitter.scan_and_sort import scan_variable_length, sort_variable_length_int
+from newton._src.solvers.jitter.scan_and_sort import scan_variable_length, sort_variable_length_int64
+
+# Bit layout of partition_data_concat entries (wp.int64):
+#   bits  0..31  : element id (tid)
+#   bits 32..61  : color + 1  (partitioned tag, 1..~1e9)
+#   bit  62      : unpartitioned marker (set by the adjacency-store kernel;
+#                  cleared as soon as the element is assigned a color)
+#
+# We use int64 so that the encoding supports an essentially unlimited number
+# of partitions. The previous int32 encoding packed color+1 into bits 26..30
+# and used bit 30 as the unpartitioned marker; that made "color+1 == 16" alias
+# the marker bit, silently double-assigning elements once more than 15
+# partitions were needed.
+_COLOR_SHIFT = wp.constant(wp.int64(32))
+_ID_MASK = wp.constant(wp.int64((1 << 32) - 1))
+_UNPARTITIONED = wp.constant(wp.int64(1 << 62))
+# Mask for bits 0..61 (everything except the unpartitioned marker). Used in
+# place of `~_UNPARTITIONED` because Warp's codegen does not reliably emit a
+# 64-bit bitwise NOT for int64 constants.
+_TAG_MASK = wp.constant(wp.int64((1 << 62) - 1))
 
 MAX_BODIES = wp.constant(8)
 
@@ -118,7 +137,7 @@ def partitioning_adjacency_store_kernel(
     # ContactPartitionsGpu fields (unpacked):
     adjacency_section_end_indices: wp.array[int],
     vertex_to_adjacent_elements: wp.array[int],
-    partition_data_concat: wp.array[int],
+    partition_data_concat: wp.array[wp.int64],
     removed_marker_array: wp.array[int],
     # Remaining PartitioningArgs fields:
     elements: wp.array[ElementInteractionData],
@@ -137,16 +156,15 @@ def partitioning_adjacency_store_kernel(
         index = wp.atomic_add(adjacency_section_end_indices, vertex, 1)
         vertex_to_adjacent_elements[index] = tid
 
-    # Assign high value such that unpartitioned (overflow) elements end up at
-    # the end when sorting. Bits 26..30 must remain zero -- there the
-    # partition id (color) will be written.
-    partition_data_concat[tid] = (1 << 30) | tid
+    # Assign a high value so unpartitioned (overflow) elements sort to the end.
+    # Bits 32..61 stay zero until the coloring kernel fills in (color + 1).
+    partition_data_concat[tid] = _UNPARTITIONED | wp.int64(tid)
     removed_marker_array[tid] = -1
 
 
 @wp.func
 def contact_partitions_is_removed(
-    removed: wp.array[int],
+    removed: wp.array[wp.int64],
     i: int,
     color: int,
     helper: wp.array[int],
@@ -156,9 +174,13 @@ def contact_partitions_is_removed(
     if helper[i] >= helper_low and helper[i] < helper_high:
         return True
 
-    rem = removed[i] & (~(1 << 30))
-    rem = rem >> 26
-    not_removed = rem == 0 or rem == color + 1
+    # Strip the unpartitioned marker (bit 62) and extract bits 32..61
+    # (color + 1). The element is "not removed" iff it is still unpartitioned
+    # (color+1 == 0 after stripping the marker) or belongs to the current
+    # partition being built (color+1 == color + 1).
+    rem = removed[i] & _TAG_MASK
+    rem = rem >> _COLOR_SHIFT
+    not_removed = rem == wp.int64(0) or rem == wp.int64(color + 1)
     return not not_removed
 
 
@@ -175,7 +197,7 @@ def contact_partitions_get_random_value(
 @wp.kernel
 def partitioning_coloring_kernel(
     # ContactPartitionsGpu fields (unpacked):
-    partition_data_concat: wp.array[int],
+    partition_data_concat: wp.array[wp.int64],
     partition_ends: wp.array[int],
     max_used_color: wp.array[int],
     removed_marker_array: wp.array[int],
@@ -255,11 +277,10 @@ def partitioning_coloring_kernel(
                 ):
                     removed_marker_array[neighbor] = luby_marker
 
-        # Debug check from C#: partitionDataConcat[tid] should still be (1<<30)|tid
-        # at this point. Skipped here (Warp has no host-side VALIDATION_ASSERT in
-        # kernels); can be added via wp.printf if needed during bring-up.
+        # Debug check from C#: partitionDataConcat[tid] should still be the
+        # unpartitioned marker at this point. Skipped here.
 
-        partition_data_concat[tid] = ((color_copy + 1) << 26) | tid
+        partition_data_concat[tid] = (wp.int64(color_copy + 1) << _COLOR_SHIFT) | wp.int64(tid)
 
         wp.atomic_add(partition_ends, color_copy, 1)
 
@@ -272,7 +293,7 @@ def partitioning_adjacency_finalize_pre_sort_kernel(
     has_additional_partition: wp.array[int],
     max_used_color: wp.array[int],
     max_num_partitions: int,
-    partition_data_concat: wp.array[int],
+    partition_data_concat: wp.array[wp.int64],
     interaction_id_to_partition: wp.array[int],
     # Remaining PartitioningArgs fields:
     num_elements: wp.array[int],
@@ -296,19 +317,22 @@ def partitioning_adjacency_finalize_pre_sort_kernel(
 
         if has_additional_partition[0] == 1:
             partition_ends[max_num_partitions] = num_elements[0]
-            # Debug check from C#: num_partitions[0] should equal
-            # max_num_partitions here. Skipped (see coloring kernel note).
 
     if tid >= num_elements[0]:
         return
 
-    interaction_id_to_partition[tid] = wp.min(max_num_partitions, (partition_data_concat[tid] >> 26) - 1)
+    # Bit 62 (unpartitioned marker) also falls in the ">> 32" window; strip it
+    # first so overflow elements get mapped to max_num_partitions (clamped).
+    tagged = partition_data_concat[tid] & _TAG_MASK
+    color_plus_one = int(tagged >> _COLOR_SHIFT)
+    interaction_id_to_partition[tid] = wp.min(max_num_partitions, color_plus_one - 1)
 
 
 @wp.kernel
 def partitioning_adjacency_finalize_post_sort_kernel(
     # ContactPartitionsGpu fields (unpacked):
-    partition_data_concat: wp.array[int],
+    partition_data_concat: wp.array[wp.int64],
+    partition_data_elements: wp.array[int],
     # Remaining PartitioningArgs fields:
     num_elements: wp.array[int],
 ):
@@ -317,7 +341,9 @@ def partitioning_adjacency_finalize_post_sort_kernel(
     if tid >= num_elements[0]:
         return
 
-    partition_data_concat[tid] &= (1 << 26) - 1
+    # Strip color bits and overflow marker, keeping only the element id in
+    # the low 32 bits. Write into the int32 output buffer used by callers.
+    partition_data_elements[tid] = int(partition_data_concat[tid] & _ID_MASK)
 
 
 def maximal_independent_set_partitioning(
@@ -332,7 +358,8 @@ def maximal_independent_set_partitioning(
     has_additional_partition: wp.array[int],
     max_used_color: wp.array[int],
     max_num_partitions: int,
-    partition_data_concat: wp.array[int],
+    partition_data_concat: wp.array[wp.int64],
+    partition_data_elements: wp.array[int],
     interaction_id_to_partition: wp.array[int],
     removed_marker_array: wp.array[int],
     random_values: wp.array[int],
@@ -421,14 +448,14 @@ def maximal_independent_set_partitioning(
     )
 
     # C#: sort.sort((uint*)partitionDataConcat.As<uint>(), 32, stream, numElements)
-    # Keys-only uint32 sort in C#. We use int32 here because partition_data_concat
-    # values are non-negative (top bit stays clear), so signed order == unsigned order.
-    sort_variable_length_int(partition_data_concat, partition_data_concat_sort_values, num_elements)
+    # We widened partition_data_concat to int64 to fit (color+1) in bits 32..61;
+    # signed int64 order == unsigned int64 order here because bit 63 stays clear.
+    sort_variable_length_int64(partition_data_concat, partition_data_concat_sort_values, num_elements)
 
     wp.launch(
         partitioning_adjacency_finalize_post_sort_kernel,
         dim=max_num_interactions,
-        inputs=[partition_data_concat, num_elements],
+        inputs=[partition_data_concat, partition_data_elements, num_elements],
     )
 
     # C# #if DEBUG ValidatePartitions(...) -- not translated.
@@ -482,9 +509,13 @@ class ContactPartitioner:
         self._adjacency_section_end_indices = wp.zeros(max_num_nodes, dtype=wp.int32, device=device)
         self._vertex_to_adjacent_elements = wp.zeros(max_num_interactions * int(MAX_BODIES), dtype=wp.int32, device=device)
 
-        # 2*N ping-pong buffer required by Warp's radix sort.
-        self._partition_data_concat = wp.zeros(2 * max_num_interactions, dtype=wp.int32, device=device)
+        # 2*N ping-pong buffer required by Warp's radix sort. int64 so the
+        # (unpartitioned_marker | color_plus_one | tid) packing is lossless
+        # for any realistic partition count.
+        self._partition_data_concat = wp.zeros(2 * max_num_interactions, dtype=wp.int64, device=device)
         self._partition_data_concat_sort_values = wp.zeros(2 * max_num_interactions, dtype=wp.int32, device=device)
+        # int32 element-id view, filled by the post-sort finalize kernel.
+        self._partition_data_elements = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
 
     def launch(
         self,
@@ -509,6 +540,7 @@ class ContactPartitioner:
             max_used_color=self._max_used_color,
             max_num_partitions=self.max_num_partitions,
             partition_data_concat=self._partition_data_concat,
+            partition_data_elements=self._partition_data_elements,
             interaction_id_to_partition=self._interaction_id_to_partition,
             removed_marker_array=self._removed_marker_array,
             random_values=self._random_values,
@@ -541,10 +573,10 @@ class ContactPartitioner:
 
     @property
     def partition_data_concat(self) -> wp.array:
-        """Sorted, concatenated element ids grouped by partition. Length
-        ``2 * max_num_interactions`` (ping-pong); only the first
-        ``num_elements[0]`` entries are meaningful."""
-        return self._partition_data_concat
+        """Sorted, concatenated element ids grouped by partition (int32).
+        Length ``max_num_interactions``; only the first ``num_elements[0]``
+        entries are meaningful."""
+        return self._partition_data_elements
 
     @property
     def interaction_id_to_partition(self) -> wp.array:

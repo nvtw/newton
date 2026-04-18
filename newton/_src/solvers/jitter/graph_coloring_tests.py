@@ -66,7 +66,9 @@ def _run_partitioner(
     num_partitions_arr = wp.zeros(1, dtype=wp.int32)
     has_additional_partition = wp.zeros(1, dtype=wp.int32)
     max_used_color = wp.zeros(1, dtype=wp.int32)
-    partition_data_concat = wp.zeros(2 * max_num_interactions, dtype=wp.int32)
+    # Sort key buffer (int64 packed marker|color|tid) + its int32 element-id view.
+    partition_data_concat = wp.zeros(2 * max_num_interactions, dtype=wp.int64)
+    partition_data_elements = wp.zeros(max_num_interactions, dtype=wp.int32)
     interaction_id_to_partition = wp.zeros(max_num_interactions, dtype=wp.int32)
     removed_marker_array = wp.zeros(max_num_interactions, dtype=wp.int32)
 
@@ -104,6 +106,7 @@ def _run_partitioner(
         max_used_color=max_used_color,
         max_num_partitions=max_num_partitions,
         partition_data_concat=partition_data_concat,
+        partition_data_elements=partition_data_elements,
         interaction_id_to_partition=interaction_id_to_partition,
         removed_marker_array=removed_marker_array,
         random_values=random_values_arr,
@@ -119,7 +122,7 @@ def _run_partitioner(
         "has_additional_partition": int(has_additional_partition.numpy()[0]),
         "max_used_color": int(max_used_color.numpy()[0]),
         "partition_ends": partition_ends.numpy(),
-        "partition_data_concat": partition_data_concat.numpy()[: max_num_interactions],
+        "partition_data_concat": partition_data_elements.numpy()[:max_num_interactions],
         "interaction_id_to_partition": interaction_id_to_partition.numpy(),
         "max_num_partitions": max_num_partitions,
     }
