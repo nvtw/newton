@@ -22,6 +22,7 @@ from newton._src.solvers.jitter.graph_coloring import (
     ElementInteractionData,
     maximal_independent_set_partitioning,
 )
+from newton._src.solvers.jitter.graph_coloring_incremental import IncrementalContactPartitioner
 
 
 def _build_elements_array(elements_bodies: list[list[int]], capacity: int) -> wp.array:
@@ -94,6 +95,8 @@ def _run_partitioner(
 
     # Sort scratch (key-value pairs, 2*N each).
     partition_data_concat_sort_values = wp.zeros(2 * max_num_interactions, dtype=wp.int32)
+    # 1-element device array feeding the per-color loop inside the partitioner.
+    color_arr = wp.zeros(1, dtype=wp.int32)
 
     maximal_independent_set_partitioning(
         elements=elements,
@@ -113,6 +116,7 @@ def _run_partitioner(
         vertex_to_adjacent_elements=vertex_to_adjacent_elements,
         max_num_contacts=max_num_contacts,
         partition_data_concat_sort_values=partition_data_concat_sort_values,
+        color_arr=color_arr,
     )
 
     return {
@@ -312,7 +316,7 @@ def _generate_stress_workload(
         k = per_elem_count[i]
         bodies[i, :k] = rng.choice(num_bodies, size=k, replace=False)
 
-    for hub, ref in zip(hub_ids, hub_refs):
+    for hub, ref in zip(hub_ids, hub_refs, strict=True):
         elems = rng.choice(num_elements, size=int(min(ref, num_elements)), replace=False)
         for e in elems:
             if hub in bodies[e]:
@@ -514,6 +518,204 @@ class TestGraphColoringStress(unittest.TestCase):
             bodies_per_elem=(2, 3),
             budgets=[21, 42, 84, 85, 86, 87, 170, 340],
         )
+
+
+def _run_incremental_to_completion(
+    bodies_np: np.ndarray,
+    num_bodies: int,
+    device,
+    seed: int = 0,
+) -> dict:
+    """Run :class:`IncrementalContactPartitioner` until every element is
+    colored. Returns the accumulated per-partition element lists alongside
+    the final ``interaction_id_to_partition``."""
+    num_elements = bodies_np.shape[0]
+    elements_arr = _make_stress_elements_array(bodies_np, device)
+    num_elements_arr = wp.array([num_elements], dtype=wp.int32, device=device)
+
+    p = IncrementalContactPartitioner(
+        max_num_interactions=num_elements,
+        max_num_nodes=num_bodies,
+        device=device,
+        seed=seed,
+    )
+    p.reset(elements_arr, num_elements_arr)
+
+    partitions: list[np.ndarray] = []
+    # Hard upper bound on the number of colours; prevents infinite loops if
+    # the implementation regresses. JP needs <= Delta+1 <= MAX_BODIES*num_elements.
+    max_launches = num_elements + 1
+    launches = 0
+    while True:
+        if int(p.num_remaining.numpy()[0]) == 0:
+            break
+        p.launch()
+        count = int(p.partition_count.numpy()[0])
+        ids = p.partition_element_ids.numpy()[:count].copy()
+        partitions.append(ids)
+        launches += 1
+        if launches > max_launches:
+            raise AssertionError(f"incremental partitioner did not terminate after {launches} launches")
+
+    return {
+        "partitions": partitions,
+        "interaction_id_to_partition": p.interaction_id_to_partition.numpy().copy(),
+        "num_remaining": int(p.num_remaining.numpy()[0]),
+        "current_color": int(p.current_color.numpy()[0]),
+        "launches": launches,
+    }
+
+
+class TestIncrementalGraphColoring(unittest.TestCase):
+    """Tests for the one-partition-per-launch incremental partitioner."""
+
+    def _workload(self, **kwargs) -> np.ndarray:
+        return _generate_stress_workload(seed=0, **kwargs)
+
+    def test_small_disjoint_graph(self):
+        # Four non-conflicting elements all fit into partition 0.
+        bodies_np = np.array(
+            [
+                [0, 1, -1, -1, -1, -1, -1, -1],
+                [2, 3, -1, -1, -1, -1, -1, -1],
+                [4, 5, -1, -1, -1, -1, -1, -1],
+                [6, 7, -1, -1, -1, -1, -1, -1],
+            ],
+            dtype=np.int32,
+        )
+        device = wp.get_preferred_device()
+        result = _run_incremental_to_completion(bodies_np, num_bodies=8, device=device)
+        self.assertEqual(result["num_remaining"], 0)
+        self.assertEqual(result["launches"], 1)
+        self.assertEqual(len(result["partitions"]), 1)
+        self.assertEqual(sorted(result["partitions"][0].tolist()), [0, 1, 2, 3])
+
+    def test_small_clique_graph(self):
+        # Clique: every element touches body 0. Each needs its own colour.
+        bodies_np = np.full((4, 8), -1, dtype=np.int32)
+        for i in range(4):
+            bodies_np[i, 0] = 0
+            bodies_np[i, 1] = i + 1
+        device = wp.get_preferred_device()
+        result = _run_incremental_to_completion(bodies_np, num_bodies=5, device=device)
+        self.assertEqual(result["num_remaining"], 0)
+        self.assertEqual(result["launches"], 4)
+        # Every partition holds exactly one element.
+        for part in result["partitions"]:
+            self.assertEqual(len(part), 1)
+
+    def _validate_incremental_partitions(
+        self,
+        bodies_np: np.ndarray,
+        partitions: list[np.ndarray],
+        interaction_id_to_partition: np.ndarray,
+    ) -> None:
+        """Every partition must be an independent set, every element assigned
+        exactly once, and ``interaction_id_to_partition`` consistent with the
+        per-call lists."""
+        num_elements = bodies_np.shape[0]
+        seen = np.zeros(num_elements, dtype=bool)
+        for color, part in enumerate(partitions):
+            used_bodies: set[int] = set()
+            for raw_eid in part:
+                eid = int(raw_eid)
+                self.assertFalse(seen[eid], msg=f"element {eid} assigned twice")
+                seen[eid] = True
+                self.assertEqual(
+                    int(interaction_id_to_partition[eid]),
+                    color,
+                    msg=f"element {eid}: interaction_id_to_partition mismatch",
+                )
+                for b in bodies_np[eid]:
+                    if b < 0:
+                        continue
+                    self.assertNotIn(
+                        int(b),
+                        used_bodies,
+                        msg=f"partition {color}: body {int(b)} shared (elem {eid})",
+                    )
+                    used_bodies.add(int(b))
+        self.assertTrue(seen.all(), msg="not every element got a partition")
+
+    def test_stress_per_call_independent_set(self):
+        bodies_np = _generate_stress_workload(
+            num_elements=5_000,
+            num_bodies=2_000,
+            high_deg_nodes=10,
+            high_deg_refs=(20, 30),
+            bodies_per_elem=(2, 3),
+            seed=0,
+        )
+        device = wp.get_preferred_device()
+        result = _run_incremental_to_completion(bodies_np, num_bodies=2_000, device=device)
+        self._validate_incremental_partitions(
+            bodies_np, result["partitions"], result["interaction_id_to_partition"]
+        )
+
+    def test_stress_determinism(self):
+        bodies_np = _generate_stress_workload(
+            num_elements=5_000,
+            num_bodies=2_000,
+            high_deg_nodes=10,
+            high_deg_refs=(20, 30),
+            bodies_per_elem=(2, 3),
+            seed=0,
+        )
+        device = wp.get_preferred_device()
+        r1 = _run_incremental_to_completion(bodies_np, num_bodies=2_000, device=device, seed=0)
+        r2 = _run_incremental_to_completion(bodies_np, num_bodies=2_000, device=device, seed=0)
+
+        self.assertEqual(r1["launches"], r2["launches"])
+        self.assertTrue(
+            np.array_equal(r1["interaction_id_to_partition"], r2["interaction_id_to_partition"]),
+            msg="interaction_id_to_partition differed between runs",
+        )
+        for color, (p1, p2) in enumerate(zip(r1["partitions"], r2["partitions"], strict=True)):
+            self.assertTrue(
+                np.array_equal(p1, p2),
+                msg=f"partition {color} element-id list differs between runs",
+            )
+
+    def test_matches_batch_interaction_id_to_partition(self):
+        # For a budget large enough to avoid overflow, the batch partitioner
+        # assigns the same colour to each element as the incremental version
+        # (both are deterministic and use the same JP priorities).
+        bodies_np = _generate_stress_workload(
+            num_elements=5_000,
+            num_bodies=2_000,
+            high_deg_nodes=10,
+            high_deg_refs=(20, 30),
+            bodies_per_elem=(2, 3),
+            seed=0,
+        )
+        device = wp.get_preferred_device()
+
+        # Incremental.
+        inc = _run_incremental_to_completion(bodies_np, num_bodies=2_000, device=device, seed=0)
+
+        # Batch with a budget high enough to avoid overflow.
+        num_elements = bodies_np.shape[0]
+        num_elements_arr = wp.array([num_elements], dtype=wp.int32, device=device)
+        elements_arr = _make_stress_elements_array(bodies_np, device)
+        batch = ContactPartitioner(
+            max_num_interactions=num_elements,
+            max_num_nodes=2_000,
+            max_num_partitions=128,
+            device=device,
+            seed=0,
+        )
+        batch.launch(elements_arr, num_elements_arr)
+        batch_id_to_partition = batch.interaction_id_to_partition.numpy()
+
+        self.assertEqual(int(batch.has_additional_partition.numpy()[0]), 0)
+        # Both paths use the same JP priorities + the same tie-breaking, so the
+        # per-element colour must agree.
+        self.assertTrue(
+            np.array_equal(inc["interaction_id_to_partition"], batch_id_to_partition),
+            msg="incremental and batch disagree on element -> partition assignment",
+        )
+        # Number of colours used should also match.
+        self.assertEqual(inc["launches"], int(batch.num_partitions.numpy()[0]))
 
 
 if __name__ == "__main__":
