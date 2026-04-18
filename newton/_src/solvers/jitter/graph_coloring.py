@@ -138,7 +138,6 @@ def partitioning_adjacency_store_kernel(
     adjacency_section_end_indices: wp.array[int],
     vertex_to_adjacent_elements: wp.array[int],
     partition_data_concat: wp.array[wp.int64],
-    removed_marker_array: wp.array[int],
     # Remaining PartitioningArgs fields:
     elements: wp.array[ElementInteractionData],
     num_elements: wp.array[int],
@@ -159,29 +158,24 @@ def partitioning_adjacency_store_kernel(
     # Assign a high value so unpartitioned (overflow) elements sort to the end.
     # Bits 32..61 stay zero until the coloring kernel fills in (color + 1).
     partition_data_concat[tid] = _UNPARTITIONED | wp.int64(tid)
-    removed_marker_array[tid] = -1
 
 
 @wp.func
 def contact_partitions_is_removed(
-    removed: wp.array[wp.int64],
+    partition_data_concat: wp.array[wp.int64],
     i: int,
     color: int,
-    helper: wp.array[int],
-    helper_low: int,
-    helper_high: int,
 ) -> bool:
-    if helper[i] >= helper_low and helper[i] < helper_high:
-        return True
-
-    # Strip the unpartitioned marker (bit 62) and extract bits 32..61
-    # (color + 1). The element is "not removed" iff it is still unpartitioned
-    # (color+1 == 0 after stripping the marker) or belongs to the current
-    # partition being built (color+1 == color + 1).
-    rem = removed[i] & _TAG_MASK
+    """Returns True iff element ``i`` is settled for the current Jones-Plassmann
+    round at partition ``color``. An element is settled iff it was colored in
+    an *earlier* round; elements colored this round are treated as conflicting
+    so races between concurrent writers are resolved by priority.
+    """
+    rem = partition_data_concat[i] & _TAG_MASK
     rem = rem >> _COLOR_SHIFT
-    not_removed = rem == wp.int64(0) or rem == wp.int64(color + 1)
-    return not not_removed
+    # Unpartitioned OR just-committed-this-round → still "active" (conflicting).
+    # Only elements colored in a previous round are removed.
+    return rem != wp.int64(0) and rem != wp.int64(color + 1)
 
 
 @wp.func
@@ -200,7 +194,6 @@ def partitioning_coloring_kernel(
     partition_data_concat: wp.array[wp.int64],
     partition_ends: wp.array[int],
     max_used_color: wp.array[int],
-    removed_marker_array: wp.array[int],
     random_values: wp.array[int],
     adjacency_section_end_indices: wp.array[int],
     vertex_to_adjacent_elements: wp.array[int],
@@ -210,9 +203,10 @@ def partitioning_coloring_kernel(
     num_elements: wp.array[int],
     section_marker_single_el_arr: wp.array[int],
     color: int,
-    luby_base: int,
-    luby_marker: int,
 ):
+    # Jones-Plassmann independent-set pass: a vertex joins partition `color`
+    # iff its priority is strictly greater than all *uncolored* neighbours'
+    # priorities. One kernel launch per color — no luby double-pass required.
     tid = wp.tid()
 
     if tid >= num_elements[0]:
@@ -221,9 +215,7 @@ def partitioning_coloring_kernel(
     color_copy = color
     section_marker = section_marker_single_el_arr[0]
 
-    if contact_partitions_is_removed(
-        partition_data_concat, tid, color_copy, removed_marker_array, luby_base, luby_marker
-    ):
+    if contact_partitions_is_removed(partition_data_concat, tid, color_copy):
         return
 
     if max_used_color[0] != color_copy:
@@ -248,40 +240,19 @@ def partitioning_coloring_kernel(
         end = adjacency_section_end_indices[v]
         for k in range(start, end):
             neighbor = vertex_to_adjacent_elements[k]
-            if not contact_partitions_is_removed(
-                partition_data_concat, neighbor, color_copy, removed_marker_array, luby_base, luby_marker
+            if neighbor == tid:
+                continue
+            if contact_partitions_is_removed(partition_data_concat, neighbor, color_copy):
+                continue
+            if (
+                contact_partitions_get_random_value(random_values, neighbor, section_marker, max_num_contacts)
+                > self_prio
             ):
-                if (
-                    contact_partitions_get_random_value(random_values, neighbor, section_marker, max_num_contacts)
-                    > self_prio
-                ):
-                    is_local_max = False
-                    break
-
-    if is_local_max:
-        removed_marker_array[tid] = luby_marker
-        for j in range(MAX_BODIES):
-            v = element_interaction_data_get(el, j)
-            if v < 0:
+                is_local_max = False
                 break
 
-            if v > 0:
-                start = adjacency_section_end_indices[v - 1]
-            else:
-                start = 0
-            end = adjacency_section_end_indices[v]
-            for k in range(start, end):
-                neighbor = vertex_to_adjacent_elements[k]
-                if not contact_partitions_is_removed(
-                    partition_data_concat, neighbor, color_copy, removed_marker_array, luby_base, luby_marker
-                ):
-                    removed_marker_array[neighbor] = luby_marker
-
-        # Debug check from C#: partitionDataConcat[tid] should still be the
-        # unpartitioned marker at this point. Skipped here.
-
+    if is_local_max:
         partition_data_concat[tid] = (wp.int64(color_copy + 1) << _COLOR_SHIFT) | wp.int64(tid)
-
         wp.atomic_add(partition_ends, color_copy, 1)
 
 
@@ -361,7 +332,6 @@ def maximal_independent_set_partitioning(
     partition_data_concat: wp.array[wp.int64],
     partition_data_elements: wp.array[int],
     interaction_id_to_partition: wp.array[int],
-    removed_marker_array: wp.array[int],
     random_values: wp.array[int],
     adjacency_section_end_indices: wp.array[int],
     vertex_to_adjacent_elements: wp.array[int],
@@ -398,39 +368,30 @@ def maximal_independent_set_partitioning(
             adjacency_section_end_indices,
             vertex_to_adjacent_elements,
             partition_data_concat,
-            removed_marker_array,
             elements,
             num_elements,
         ],
     )
 
-    num_luby_iterations = 2
-
+    # Jones-Plassmann: one MIS kernel launch per color.
     for color in range(max_num_partitions):
-        luby_base = num_luby_iterations * color
-        for luby in range(num_luby_iterations):
-            luby_marker = num_luby_iterations * color + luby
-
-            wp.launch(
-                partitioning_coloring_kernel,
-                dim=max_num_interactions,
-                inputs=[
-                    partition_data_concat,
-                    partition_ends,
-                    max_used_color,
-                    removed_marker_array,
-                    random_values,
-                    adjacency_section_end_indices,
-                    vertex_to_adjacent_elements,
-                    max_num_contacts,
-                    elements,
-                    num_elements,
-                    section_marker_single_el_arr,
-                    color,
-                    luby_base,
-                    luby_marker,
-                ],
-            )
+        wp.launch(
+            partitioning_coloring_kernel,
+            dim=max_num_interactions,
+            inputs=[
+                partition_data_concat,
+                partition_ends,
+                max_used_color,
+                random_values,
+                adjacency_section_end_indices,
+                vertex_to_adjacent_elements,
+                max_num_contacts,
+                elements,
+                num_elements,
+                section_marker_single_el_arr,
+                color,
+            ],
+        )
 
     wp.launch(
         partitioning_adjacency_finalize_pre_sort_kernel,
@@ -505,7 +466,6 @@ class ContactPartitioner:
         self._has_additional_partition = wp.zeros(1, dtype=wp.int32, device=device)
         self._max_used_color = wp.zeros(1, dtype=wp.int32, device=device)
         self._interaction_id_to_partition = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
-        self._removed_marker_array = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
         self._adjacency_section_end_indices = wp.zeros(max_num_nodes, dtype=wp.int32, device=device)
         self._vertex_to_adjacent_elements = wp.zeros(max_num_interactions * int(MAX_BODIES), dtype=wp.int32, device=device)
 
@@ -542,7 +502,6 @@ class ContactPartitioner:
             partition_data_concat=self._partition_data_concat,
             partition_data_elements=self._partition_data_elements,
             interaction_id_to_partition=self._interaction_id_to_partition,
-            removed_marker_array=self._removed_marker_array,
             random_values=self._random_values,
             adjacency_section_end_indices=self._adjacency_section_end_indices,
             vertex_to_adjacent_elements=self._vertex_to_adjacent_elements,
