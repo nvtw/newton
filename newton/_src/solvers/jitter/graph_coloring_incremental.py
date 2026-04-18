@@ -27,6 +27,7 @@ import warp as wp
 
 from newton._src.solvers.jitter.graph_coloring_common import (
     MAX_BODIES,
+    TILE_SCAN_BLOCK_DIM,
     ElementInteractionData,
     incremental_advance_kernel,
     incremental_compact_kernel,
@@ -38,6 +39,7 @@ from newton._src.solvers.jitter.graph_coloring_common import (
     partitioning_adjacency_store_kernel,
     partitioning_coloring_kernel,
     partitioning_prepare_kernel,
+    tile_scan_exclusive_block_kernel,
 )
 from newton._src.solvers.jitter.scan_and_sort import scan_variable_length
 
@@ -66,11 +68,18 @@ class IncrementalContactPartitioner:
         max_num_nodes: int,
         device: wp.DeviceLike = None,
         seed: int = 0,
+        use_tile_scan: bool = False,
     ) -> None:
         self.max_num_interactions = max_num_interactions
         self.max_num_nodes = max_num_nodes
         # C# convention: max_num_contacts == max_num_interactions in single-section mode.
         self.max_num_contacts = max_num_interactions
+        # When True, :meth:`launch` uses a single-block tile-scan kernel
+        # (graph-capture safe, no implicit allocations) instead of
+        # ``wp.utils.array_scan``. Flag/offset buffers are padded to a
+        # multiple of ``TILE_SCAN_BLOCK_DIM`` so the fixed-size tile loads
+        # never read past the end of the allocation.
+        self.use_tile_scan = use_tile_scan
 
         import numpy as np  # noqa: PLC0415
 
@@ -96,9 +105,21 @@ class IncrementalContactPartitioner:
         # Per-element color (-1 until assigned).
         self._interaction_id_to_partition = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
 
-        # Per-call compaction scratch / outputs.
-        self._flags = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
-        self._offsets = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
+        # Per-call compaction scratch / outputs. When tile-scan is enabled,
+        # the flag/offset buffers are rounded up to a multiple of the tile
+        # size so ``wp.tile_load`` never reads past the allocation. The
+        # padded tail stays zero-filled (incremental_zero_int_kernel only
+        # writes up to num_elements[0], but the initial wp.zeros guarantees
+        # the tail is zero for the lifetime of the object).
+        if use_tile_scan:
+            tile_dim = int(TILE_SCAN_BLOCK_DIM)
+            padded_len = ((max_num_interactions + tile_dim - 1) // tile_dim) * tile_dim
+            padded_len = max(padded_len, tile_dim)
+        else:
+            padded_len = max_num_interactions
+        self._scan_len = padded_len
+        self._flags = wp.zeros(padded_len, dtype=wp.int32, device=device)
+        self._offsets = wp.zeros(padded_len, dtype=wp.int32, device=device)
         self._partition_element_ids = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
 
         # Scalar device-side loop state (1-element arrays).
@@ -246,7 +267,17 @@ class IncrementalContactPartitioner:
 
         # 3. Exclusive prefix scan of flags -> offsets. Deterministic, which is
         #    what gives the partitioner byte-for-byte repeatable outputs.
-        wp.utils.array_scan(self._flags, self._offsets, inclusive=False)
+        if self.use_tile_scan:
+            # Single-block tile scan: graph-capture safe (no implicit
+            # allocations) but sequential across the grid-stride tail.
+            wp.launch_tiled(
+                tile_scan_exclusive_block_kernel,
+                dim=[1],
+                inputs=[self._flags, self._offsets],
+                block_dim=int(TILE_SCAN_BLOCK_DIM),
+            )
+        else:
+            wp.utils.array_scan(self._flags, self._offsets, inclusive=False)
 
         # 4. Compact: write partition_element_ids[offsets[tid]] = tid for
         #    flagged threads, update interaction_id_to_partition, publish count.

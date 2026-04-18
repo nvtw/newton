@@ -384,3 +384,62 @@ def set_int_array_kernel(arr: wp.array[int], value: int):
     # Tiny helper used by batch launcher to push the host-side color counter
     # into the device array consumed by ``partitioning_coloring_kernel``.
     arr[0] = value
+
+
+# Block size for the single-block tile-scan kernel. 1024 = largest CUDA block
+# that Warp supports reliably, keeps the running-prefix sequential tail short.
+TILE_SCAN_BLOCK_DIM = wp.constant(1024)
+
+
+@wp.kernel
+def tile_scan_exclusive_block_kernel(
+    input: wp.array[int],
+    output: wp.array[int],
+):
+    """Single-block exclusive prefix scan over the entire ``input`` array.
+
+    Launched with ``dim=[1]`` and ``block_dim=TILE_SCAN_BLOCK_DIM``. The
+    block walks ``input`` in a grid-stride loop, scanning one tile of
+    ``TILE_SCAN_BLOCK_DIM`` elements per iteration and threading a
+    running-prefix accumulator across tiles.
+
+    Callers are responsible for padding ``input`` and ``output`` to a
+    multiple of ``TILE_SCAN_BLOCK_DIM`` and for zero-initialising any
+    padded tail (so scans of sparsely-filled flag arrays are still
+    correct on the leading ``num_elements`` prefix).
+
+    This is an allocation-free alternative to :func:`wp.utils.array_scan`
+    that is safe to invoke inside a ``wp.capture_while`` body.
+    """
+    # ``wp.tid()`` inside a launch_tiled kernel returns the block index; to
+    # get the lane/thread index within the block we use ``wp.tid_lane()`` via
+    # the standard (block, lane) unpacking below.
+    _block, lane = wp.tid()
+
+    n = input.shape[0]
+
+    # Per-thread running (inclusive) prefix carried between tiles. All threads
+    # in the block hold the same value thanks to the block-wide ``tile_sum``
+    # below (``tile_sum`` returns a 1-element tile whose scalar is visible
+    # identically to every lane).
+    running = int(0)
+
+    offset = int(0)
+    while offset < n:
+        a = wp.tile_load(input, shape=TILE_SCAN_BLOCK_DIM, offset=offset)
+        # Tile-wide exclusive scan of the current 1024-element window. Each
+        # lane ends up owning one element: ``s[lane]`` is the exclusive-scan
+        # value for position ``offset + lane``.
+        s = wp.tile_scan_exclusive(a)
+        # Shift by the running prefix accumulated over previous tiles and
+        # scatter back to the output array one element per lane. Storing
+        # lane-wise (instead of wp.tile_store) lets us mix the SIMT scalar
+        # ``running`` with the tile-resident scan result without needing a
+        # tile broadcast.
+        output[offset + lane] = s[lane] + running
+        # Advance the running prefix by the *inclusive* sum of this tile.
+        # ``tile_sum`` is a block-wide reduction so all lanes observe the
+        # same ``block_sum[0]`` and therefore the same ``running`` value.
+        block_sum = wp.tile_sum(a)
+        running = running + block_sum[0]
+        offset = offset + TILE_SCAN_BLOCK_DIM

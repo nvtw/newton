@@ -676,6 +676,176 @@ class TestIncrementalGraphColoring(unittest.TestCase):
                 msg=f"partition {color} element-id list differs between runs",
             )
 
+    def _eager_incremental_reference(
+        self,
+        bodies_np: np.ndarray,
+        num_bodies: int,
+        device,
+        seed: int = 0,
+    ) -> dict:
+        """Run the incremental partitioner in eager mode and return the final
+        per-element colour assignment and the number of launches. This serves
+        as the ground truth when validating graph-captured runs."""
+        return _run_incremental_to_completion(bodies_np, num_bodies, device, seed=seed)
+
+    def _run_capture_while_once(
+        self,
+        bodies_np: np.ndarray,
+        num_bodies: int,
+        device,
+        seed: int = 0,
+    ) -> dict:
+        """Build a graph that runs ``wp.capture_while`` on the partitioner's
+        ``num_remaining`` counter, launch it, and return the resulting state."""
+        num_elements = bodies_np.shape[0]
+        elements_arr = _make_stress_elements_array(bodies_np, device)
+        num_elements_arr = wp.array([num_elements], dtype=wp.int32, device=device)
+
+        p = IncrementalContactPartitioner(
+            max_num_interactions=num_elements,
+            max_num_nodes=num_bodies,
+            device=device,
+            seed=seed,
+            use_tile_scan=True,
+        )
+        p.reset(elements_arr, num_elements_arr)
+
+        # Capture a graph whose body repeats ``launch()`` as long as there are
+        # still-uncolored elements. ``num_remaining`` is the device-side
+        # condition array; ``incremental_advance_kernel`` decrements it every
+        # iteration, so the loop terminates when every element is colored.
+        # ``use_tile_scan=True`` routes the per-call scan through a
+        # single-block tile-scan kernel, which -- unlike ``wp.utils.array_scan``
+        # -- performs no implicit device allocations and is therefore a valid
+        # graph-capture body.
+        with wp.ScopedCapture() as capture:
+            wp.capture_while(
+                p.num_remaining,
+                p.launch,
+            )
+        wp.capture_launch(capture.graph)
+        wp.synchronize_device(device)
+
+        return {
+            "interaction_id_to_partition": p.interaction_id_to_partition.numpy().copy(),
+            "num_remaining": int(p.num_remaining.numpy()[0]),
+            "current_color": int(p.current_color.numpy()[0]),
+        }
+
+    @unittest.skipUnless(
+        wp.get_device().is_cuda and wp.is_conditional_graph_supported(),
+        "Conditional graph nodes not supported",
+    )
+    def test_stress_capture_while(self):
+        # Medium stress workload: run the partitioner inside a captured graph
+        # driven by ``wp.capture_while`` on the device-side ``num_remaining``
+        # counter, and verify the colouring matches the eager reference.
+        bodies_np = _generate_stress_workload(
+            num_elements=5_000,
+            num_bodies=2_000,
+            high_deg_nodes=10,
+            high_deg_refs=(20, 30),
+            bodies_per_elem=(2, 3),
+            seed=0,
+        )
+        device = wp.get_preferred_device()
+
+        eager = self._eager_incremental_reference(bodies_np, 2_000, device, seed=0)
+        captured = self._run_capture_while_once(bodies_np, 2_000, device, seed=0)
+
+        self.assertEqual(captured["num_remaining"], 0)
+        self.assertEqual(captured["current_color"], eager["launches"])
+        self.assertTrue(
+            np.array_equal(
+                captured["interaction_id_to_partition"],
+                eager["interaction_id_to_partition"],
+            ),
+            msg="graph-captured run disagrees with eager run on element -> partition assignment",
+        )
+
+    @unittest.skipUnless(
+        wp.get_device().is_cuda and wp.is_conditional_graph_supported(),
+        "Conditional graph nodes not supported",
+    )
+    def test_capture_while_determinism(self):
+        # Run the captured graph twice with identical inputs and the same seed;
+        # the outputs must match byte-for-byte.
+        bodies_np = _generate_stress_workload(
+            num_elements=5_000,
+            num_bodies=2_000,
+            high_deg_nodes=10,
+            high_deg_refs=(20, 30),
+            bodies_per_elem=(2, 3),
+            seed=0,
+        )
+        device = wp.get_preferred_device()
+
+        r1 = self._run_capture_while_once(bodies_np, 2_000, device, seed=0)
+        r2 = self._run_capture_while_once(bodies_np, 2_000, device, seed=0)
+
+        self.assertEqual(r1["num_remaining"], 0)
+        self.assertEqual(r2["num_remaining"], 0)
+        self.assertEqual(r1["current_color"], r2["current_color"])
+        self.assertTrue(
+            np.array_equal(r1["interaction_id_to_partition"], r2["interaction_id_to_partition"]),
+            msg="graph-captured runs produced different results for identical inputs",
+        )
+
+    @unittest.skipUnless(
+        wp.get_device().is_cuda and wp.is_conditional_graph_supported(),
+        "Conditional graph nodes not supported",
+    )
+    def test_capture_while_relaunch(self):
+        # Capture once, launch twice (after resetting element state between
+        # launches). The graph must be re-usable and produce the same output
+        # each time -- the key operational requirement for physics engines
+        # that rebuild the partitioner each frame.
+        bodies_np = _generate_stress_workload(
+            num_elements=2_000,
+            num_bodies=800,
+            high_deg_nodes=5,
+            high_deg_refs=(20, 30),
+            bodies_per_elem=(2, 3),
+            seed=0,
+        )
+        device = wp.get_preferred_device()
+
+        num_elements = bodies_np.shape[0]
+        elements_arr = _make_stress_elements_array(bodies_np, device)
+        num_elements_arr = wp.array([num_elements], dtype=wp.int32, device=device)
+
+        p = IncrementalContactPartitioner(
+            max_num_interactions=num_elements,
+            max_num_nodes=800,
+            device=device,
+            seed=0,
+            use_tile_scan=True,
+        )
+        p.reset(elements_arr, num_elements_arr)
+
+        with wp.ScopedCapture() as capture:
+            wp.capture_while(p.num_remaining, p.launch)
+
+        wp.capture_launch(capture.graph)
+        wp.synchronize_device(device)
+        first_assignment = p.interaction_id_to_partition.numpy().copy()
+        first_color = int(p.current_color.numpy()[0])
+
+        # Reset to the same state and re-run the captured graph. Reset writes
+        # to the same pre-allocated buffers the graph references, so the graph
+        # is still valid.
+        p.reset(elements_arr, num_elements_arr)
+        wp.capture_launch(capture.graph)
+        wp.synchronize_device(device)
+        second_assignment = p.interaction_id_to_partition.numpy().copy()
+        second_color = int(p.current_color.numpy()[0])
+
+        self.assertEqual(first_color, second_color)
+        self.assertTrue(
+            np.array_equal(first_assignment, second_assignment),
+            msg="re-launch of the captured graph produced different output",
+        )
+
     def test_matches_batch_interaction_id_to_partition(self):
         # For a budget large enough to avoid overflow, the batch partitioner
         # assigns the same colour to each element as the incremental version
