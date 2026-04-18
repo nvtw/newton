@@ -18,6 +18,7 @@ import warp as wp
 
 from newton._src.solvers.jitter.graph_coloring import (
     MAX_BODIES,
+    ContactPartitioner,
     ElementInteractionData,
     maximal_independent_set_partitioning,
 )
@@ -285,6 +286,234 @@ class TestGraphColoring(unittest.TestCase):
             max_num_interactions=16,
         )
         _validate_partitions(elements_bodies, result, max_num_nodes=4)
+
+
+def _generate_stress_workload(
+    num_elements: int,
+    num_bodies: int,
+    high_deg_nodes: int,
+    high_deg_refs: tuple[int, int],
+    bodies_per_elem: tuple[int, int],
+    seed: int = 0,
+) -> np.ndarray:
+    """Build a synthetic element->bodies table with a few high-degree "hub"
+    vertices that force many pairwise conflicts."""
+    rng = np.random.default_rng(seed)
+    max_bodies = int(MAX_BODIES)
+
+    hub_ids = rng.choice(num_bodies, size=high_deg_nodes, replace=False)
+    hub_refs = rng.integers(high_deg_refs[0], high_deg_refs[1] + 1, size=high_deg_nodes)
+
+    per_elem_count = rng.integers(bodies_per_elem[0], bodies_per_elem[1] + 1, size=num_elements)
+    per_elem_count = np.minimum(per_elem_count, max_bodies)
+
+    bodies = np.full((num_elements, max_bodies), -1, dtype=np.int32)
+    for i in range(num_elements):
+        k = per_elem_count[i]
+        bodies[i, :k] = rng.choice(num_bodies, size=k, replace=False)
+
+    for hub, ref in zip(hub_ids, hub_refs):
+        elems = rng.choice(num_elements, size=int(min(ref, num_elements)), replace=False)
+        for e in elems:
+            if hub in bodies[e]:
+                continue
+            free = np.where(bodies[e] == -1)[0]
+            if len(free) > 0:
+                bodies[e, free[0]] = hub
+            else:
+                bodies[e, -1] = hub
+
+    # Deduplicate per-element bodies (safety net).
+    for i in range(num_elements):
+        uniq: list[int] = []
+        for b in bodies[i]:
+            if b >= 0 and int(b) not in uniq:
+                uniq.append(int(b))
+        row = np.full(max_bodies, -1, dtype=np.int32)
+        row[: len(uniq)] = uniq
+        bodies[i] = row
+
+    return bodies
+
+
+def _make_stress_elements_array(bodies_np: np.ndarray, device) -> wp.array:
+    num_elements = bodies_np.shape[0]
+    struct_dtype = np.dtype({"names": ["bodies"], "formats": [(np.int32, int(MAX_BODIES))], "offsets": [0], "itemsize": 32})
+    arr = np.zeros(num_elements, dtype=struct_dtype)
+    arr["bodies"] = bodies_np
+    return wp.from_numpy(arr, dtype=ElementInteractionData, device=device)
+
+
+def _validate_stress_partitions(
+    bodies_np: np.ndarray,
+    partition_ends: np.ndarray,
+    partition_data_concat: np.ndarray,
+    num_partitions: int,
+    has_additional: int,
+    max_num_partitions: int,
+) -> tuple[bool, str]:
+    """Verify that every non-overflow partition is an independent set and that
+    every element is assigned exactly once (including the overflow bucket)."""
+    num_elements = bodies_np.shape[0]
+    seen = np.zeros(num_elements, dtype=bool)
+
+    start = 0
+    for p in range(num_partitions):
+        end = int(partition_ends[p])
+        used_bodies: set[int] = set()
+        for k in range(start, end):
+            eid = int(partition_data_concat[k])
+            if eid < 0 or eid >= num_elements:
+                return False, f"partition {p}: bad element id {eid}"
+            if seen[eid]:
+                return False, f"partition {p}: element {eid} already assigned"
+            seen[eid] = True
+            for b in bodies_np[eid]:
+                if b < 0:
+                    continue
+                if int(b) in used_bodies:
+                    return False, f"partition {p}: body {int(b)} shared (elem {eid})"
+                used_bodies.add(int(b))
+        start = end
+
+    if has_additional:
+        end = int(partition_ends[max_num_partitions])
+        for k in range(start, end):
+            eid = int(partition_data_concat[k])
+            if 0 <= eid < num_elements:
+                seen[eid] = True
+
+    if not seen.all():
+        missing = np.where(~seen)[0][:5]
+        return False, f"elements not covered: {missing}"
+    return True, "ok"
+
+
+class TestGraphColoringStress(unittest.TestCase):
+    """Large-input stress tests for ``ContactPartitioner``.
+
+    Each case sweeps several ``max_num_partitions`` budgets and verifies that:
+      * every non-overflow partition is an independent set,
+      * every element is assigned exactly once, and
+      * two back-to-back runs with the same seed produce byte-identical output
+        on every buffer (determinism).
+
+    A correct colouring can always fit the elements within (Delta + 1) colours
+    where Delta is the max degree of the conflict graph, so the sweep covers
+    budgets both below and well above that bound.
+    """
+
+    def _run_once(
+        self,
+        bodies_np: np.ndarray,
+        num_bodies: int,
+        budget: int,
+        device,
+        seed: int = 0,
+    ) -> dict:
+        num_elements = bodies_np.shape[0]
+        num_elements_arr = wp.array([num_elements], dtype=wp.int32, device=device)
+        elements_arr = _make_stress_elements_array(bodies_np, device)
+        partitioner = ContactPartitioner(
+            max_num_interactions=num_elements,
+            max_num_nodes=num_bodies,
+            max_num_partitions=budget,
+            device=device,
+            seed=seed,
+        )
+        partitioner.launch(elements_arr, num_elements_arr)
+        return {
+            "num_partitions": partitioner.num_partitions.numpy().copy(),
+            "has_additional_partition": partitioner.has_additional_partition.numpy().copy(),
+            "partition_ends": partitioner.partition_ends.numpy().copy(),
+            "partition_data_concat": partitioner.partition_data_concat.numpy().copy(),
+            "interaction_id_to_partition": partitioner.interaction_id_to_partition.numpy().copy(),
+        }
+
+    def _run_case(
+        self,
+        num_elements: int,
+        num_bodies: int,
+        high_deg_nodes: int,
+        high_deg_refs: tuple[int, int],
+        bodies_per_elem: tuple[int, int],
+        budgets: list[int],
+        expect_empty_overflow: bool = True,
+    ) -> None:
+        device = wp.get_preferred_device()
+        bodies_np = _generate_stress_workload(
+            num_elements, num_bodies, high_deg_nodes, high_deg_refs, bodies_per_elem, seed=0
+        )
+
+        first_empty_overflow: int | None = None
+        for budget in budgets:
+            r1 = self._run_once(bodies_np, num_bodies, budget, device, seed=0)
+            r2 = self._run_once(bodies_np, num_bodies, budget, device, seed=0)
+
+            for key in (
+                "num_partitions",
+                "has_additional_partition",
+                "partition_ends",
+                "partition_data_concat",
+                "interaction_id_to_partition",
+            ):
+                self.assertTrue(
+                    np.array_equal(r1[key], r2[key]),
+                    msg=f"non-deterministic output for budget={budget}, field={key}",
+                )
+
+            ok, msg = _validate_stress_partitions(
+                bodies_np,
+                r1["partition_ends"],
+                r1["partition_data_concat"][:num_elements],
+                int(r1["num_partitions"][0]),
+                int(r1["has_additional_partition"][0]),
+                budget,
+            )
+            self.assertTrue(ok, msg=f"budget={budget}: {msg}")
+
+            if int(r1["has_additional_partition"][0]) == 0 and first_empty_overflow is None:
+                first_empty_overflow = budget
+
+        if expect_empty_overflow:
+            self.assertIsNotNone(
+                first_empty_overflow,
+                msg="no budget in the sweep produced an empty overflow partition",
+            )
+
+    def test_stress_small_hub_graph(self):
+        # 500 elements, 200 bodies, 5 high-degree hubs. Conflict-graph max
+        # degree is ~117 for this seed, so budgets straddle that bound and go
+        # well past it (the upper bound stresses out-of-bounds edges in the
+        # prepare kernel for the ``adjacency_section_end_indices`` buffer).
+        self._run_case(
+            num_elements=500,
+            num_bodies=200,
+            high_deg_nodes=5,
+            high_deg_refs=(20, 30),
+            bodies_per_elem=(2, 3),
+            budgets=[29, 58, 116, 117, 118, 119, 234, 468],
+        )
+
+    def test_stress_medium_hub_graph(self):
+        self._run_case(
+            num_elements=5_000,
+            num_bodies=2_000,
+            high_deg_nodes=10,
+            high_deg_refs=(20, 30),
+            bodies_per_elem=(2, 3),
+            budgets=[22, 44, 88, 89, 90, 91, 178, 356],
+        )
+
+    def test_stress_large_hub_graph(self):
+        self._run_case(
+            num_elements=50_000,
+            num_bodies=20_000,
+            high_deg_nodes=20,
+            high_deg_refs=(20, 30),
+            bodies_per_elem=(2, 3),
+            budgets=[21, 42, 84, 85, 86, 87, 170, 340],
+        )
 
 
 if __name__ == "__main__":

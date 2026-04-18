@@ -93,8 +93,7 @@ def partitioning_prepare_kernel(
     max_used_color: wp.array[int],
     adjacency_section_end_indices: wp.array[int],
     max_num_partitions: int,
-    # Remaining PartitioningArgs fields:
-    max_num_nodes: wp.array[int],
+    max_num_nodes: int,
 ):
     tid = wp.tid()
 
@@ -104,8 +103,7 @@ def partitioning_prepare_kernel(
     if tid == 0:
         max_used_color[0] = -1
 
-    total_num_work_packages = max_num_nodes[0]
-    if tid < total_num_work_packages:
+    if tid < max_num_nodes:
         adjacency_section_end_indices[tid] = 0
 
 
@@ -349,7 +347,7 @@ def maximal_independent_set_partitioning(
     wp.launch(
         partitioning_prepare_kernel,
         dim=prepare_dim,
-        inputs=[partition_ends, max_used_color, adjacency_section_end_indices, max_num_partitions, num_elements],
+        inputs=[partition_ends, max_used_color, adjacency_section_end_indices, max_num_partitions, max_num_nodes],
     )
 
     wp.launch(
