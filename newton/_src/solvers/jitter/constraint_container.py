@@ -37,6 +37,7 @@ from newton._src.solvers.jitter.data_packing import (
 __all__ = [
     "CONSTRAINT_BODY1_OFFSET",
     "CONSTRAINT_BODY2_OFFSET",
+    "CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET",
     "CONSTRAINT_TYPE_ANGULAR_MOTOR",
     "CONSTRAINT_TYPE_BALL_SOCKET",
     "CONSTRAINT_TYPE_D6",
@@ -135,6 +136,15 @@ CONSTRAINT_TYPE_PRISMATIC = wp.constant(wp.int32(6))
 #: drive -> velocity drive -> free axis without changing matrix shape.
 #: See :mod:`constraint_d6` for the derivation.
 CONSTRAINT_TYPE_D6 = wp.constant(wp.int32(7))
+#: "Actuated" variant of :data:`CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET`: the
+#: same 5-DoF Schur-complement lock plus an extra scalar PGS row that
+#: drives the free hinge axis with either a soft *position* (target
+#: angle, soft spring) or *velocity* (target rate, capped by a peak
+#: torque) setpoint and clamps the relative axial twist to a
+#: ``[min_angle, max_angle]`` interval (one-sided spring-damper limits,
+#: same Box2D / Bepu soft formulation as the rest of the solver). See
+#: :mod:`constraint_actuated_double_ball_socket` for the math.
+CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET = wp.constant(wp.int32(8))
 
 #: Dword offsets of the three header fields. By contract these are
 #: 0 / 1 / 2 for every constraint schema (enforced by

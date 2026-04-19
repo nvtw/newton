@@ -9,6 +9,12 @@
 # diamond column from the world anchor along -y), but every joint is now
 # a *motorized* hinge instead of a plain ball-socket.
 #
+# The chain joint type is chosen by the module-level ``JOINT_KIND``
+# (see :class:`JointKind` below) so the same scene can be used to
+# compare three implementations side by side: the fused motorized
+# ``HingeJoint``, the rank-5 fused two-anchor ``DoubleBallSocketHinge``,
+# and the generalized ``D6`` solved as a single revolute axis.
+#
 # Each hinge:
 #   * is a *fused* CONSTRAINT_TYPE_HINGE_JOINT -- a single column in the
 #     constraint container that packs the HingeAngle (locks the two
@@ -43,6 +49,7 @@
 #
 ###########################################################################
 
+import enum
 import math
 
 import numpy as np
@@ -52,14 +59,41 @@ import newton
 import newton.examples
 from newton._src.solvers.jitter.picking import JitterPicking, register_with_viewer_gl
 from newton._src.solvers.jitter.solver_jitter import pack_body_xforms_kernel
-from newton._src.solvers.jitter.world_builder import WorldBuilder
+from newton._src.solvers.jitter.world_builder import D6AxisDrive, WorldBuilder
 
-# When True, every joint is built with WorldBuilder.add_double_ball_socket_hinge
-# (rank-5 Schur-complement two-anchor hinge, no motor) instead of the fused
-# motorized HingeJoint. The motor / TARGET_VELOCITY / _MOTOR_MAX_FORCE
-# settings below are silently ignored in that mode -- the double-ball-socket
-# hinge has no driver yet.
-USE_DOUBLE_BALL_SOCKET = True
+
+class JointKind(enum.Enum):
+    """Which kind of "hinge between two cubes" the chain is built with.
+
+    All four modes lock the same 5 DoF (3 positional at the shared
+    corner, 2 angular orthogonal to the cube edge) and leave the same
+    1 DoF free (relative spin about the cube edge / world +z), but
+    they reach that constraint with different solver structures and
+    different feature sets:
+
+    * :attr:`HINGE_JOINT`           -- fused
+      ``CONSTRAINT_TYPE_HINGE_JOINT`` (BallSocket + HingeAngle +
+      AngularMotor in one column). The only mode that exposes the
+      ``TARGET_VELOCITY`` / ``_MOTOR_MAX_FORCE`` motor; the other
+      modes are silently ignored.
+    * :attr:`DOUBLE_BALL_SOCKET`    -- fused two-anchor ball-socket
+      ("rank-5 Schur" hinge, no motor). The hinge axis is implicit
+      in the line through the two anchors.
+    * :attr:`D6_REVOLUTE`           -- generalized D6 with 5 of the 6
+      axes locked and the free axis = body-1-local +z. One 6x6
+      Schur-complement solve per joint; no motor wired up here yet
+      (see the velocity-drive note in :mod:`constraint_d6`).
+    """
+
+    HINGE_JOINT = "hinge_joint"
+    DOUBLE_BALL_SOCKET = "double_ball_socket"
+    D6_REVOLUTE = "d6_revolute"
+
+
+# Selects which constraint type every joint in the chain is built
+# with. Switch this to compare solver behaviour / robustness across
+# the three implementations of "hinge between two cubes".
+JOINT_KIND = JointKind.D6_REVOLUTE
 
 NUM_CUBES = 10
 HALF_EXTENT = 0.5
@@ -139,12 +173,22 @@ class Example:
         # read the joint's combined reaction wrench (force + torque on
         # body 2, summed across the BallSocket / HingeAngle /
         # AngularMotor sub-contributions).
+        # D6 axis presets, hoisted out of the per-joint loop so the
+        # tuples are built once and reused across all NUM_HINGES
+        # joints. The free axis is angular[2] = body-1-local +z (the
+        # cube edge), which under the _DIAGONAL_QUAT rotation is
+        # parallel to world +z and so matches _HINGE_AXIS.
+        d6_lock = D6AxisDrive()
+        d6_free = D6AxisDrive(max_force=0.0)
+        d6_revolute_angular = (d6_lock, d6_lock, d6_free)
+        d6_revolute_linear = (d6_lock, d6_lock, d6_lock)
+
         self.hinge_handles = []
         for k in range(NUM_HINGES):
             body_a = world_body if k == 0 else cube_ids[k - 1]
             body_b = cube_ids[k]
             anchor = (0.0, -k * 2.0 * _DIAGONAL_HALF, 0.0)
-            if USE_DOUBLE_BALL_SOCKET:
+            if JOINT_KIND is JointKind.DOUBLE_BALL_SOCKET:
                 # Two anchors along the cube edge (world +z); the implicit
                 # hinge axis = anchor2 - anchor1 matches _HINGE_AXIS.
                 a1 = (anchor[0], anchor[1], anchor[2] - HALF_EXTENT)
@@ -157,7 +201,17 @@ class Example:
                         anchor2=a2,
                     )
                 )
-            else:
+            elif JOINT_KIND is JointKind.D6_REVOLUTE:
+                self.hinge_handles.append(
+                    b.add_d6(
+                        body1=body_a,
+                        body2=body_b,
+                        anchor=anchor,
+                        angular=d6_revolute_angular,
+                        linear=d6_revolute_linear,
+                    )
+                )
+            elif JOINT_KIND is JointKind.HINGE_JOINT:
                 self.hinge_handles.append(
                     b.add_hinge_joint(
                         body1=body_a,
@@ -169,6 +223,8 @@ class Example:
                         max_force=_MOTOR_MAX_FORCE,
                     )
                 )
+            else:
+                raise ValueError(f"unknown JOINT_KIND: {JOINT_KIND}")
 
         # substeps=1 here because we drive substepping ourselves from
         # simulate() (matches example_body_chain).
