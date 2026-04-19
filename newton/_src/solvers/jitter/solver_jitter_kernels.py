@@ -20,10 +20,12 @@ from newton._src.solvers.jitter.body import (
 from newton._src.solvers.jitter.constraint_angular_motor import (
     angular_motor_iterate,
     angular_motor_prepare_for_iteration,
+    angular_motor_world_wrench,
 )
 from newton._src.solvers.jitter.constraint_ball_socket import (
     ball_socket_iterate,
     ball_socket_prepare_for_iteration,
+    ball_socket_world_wrench,
 )
 from newton._src.solvers.jitter.constraint_container import (
     CONSTRAINT_TYPE_ANGULAR_MOTOR,
@@ -37,6 +39,7 @@ from newton._src.solvers.jitter.constraint_container import (
 from newton._src.solvers.jitter.constraint_hinge_angle import (
     hinge_angle_iterate,
     hinge_angle_prepare_for_iteration,
+    hinge_angle_world_wrench,
 )
 from newton._src.solvers.jitter.graph_coloring_common import (
     ElementInteractionData,
@@ -44,6 +47,7 @@ from newton._src.solvers.jitter.graph_coloring_common import (
 )
 
 __all__ = [
+    "_constraint_gather_wrenches_kernel",
     "_constraint_iterate_kernel",
     "_constraint_prepare_for_iteration_kernel",
     "_constraints_to_elements_kernel",
@@ -164,6 +168,43 @@ def _constraints_to_elements_kernel(
     b1 = constraint_get_body1(constraints, tid)
     b2 = constraint_get_body2(constraints, tid)
     elements[tid] = element_interaction_data_make(b1, b2, -1, -1, -1, -1, -1, -1)
+
+
+@wp.kernel
+def _constraint_gather_wrenches_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    num_constraints: wp.int32,
+    idt: wp.float32,
+    out: wp.array[wp.spatial_vector],
+):
+    """Dispatch the per-type ``world_wrench`` ``wp.func`` for every
+    constraint and write the result into ``out[cid]``.
+
+    ``out`` carries the *world-frame* wrench applied by the constraint
+    on its ``body2``: ``spatial_top = force [N]``,
+    ``spatial_bottom = torque [N·m]``. ``idt`` is ``1 / substep_dt`` so
+    the warm-started impulse is reported as the average force the
+    constraint exerted during the most recent substep.
+
+    No partitioning here -- each thread writes a unique slot, no body
+    state is mutated, so a flat one-thread-per-cid launch is enough.
+    """
+    cid = wp.tid()
+    if cid >= num_constraints:
+        return
+
+    t = constraint_get_type(constraints, cid)
+    force = wp.vec3f(0.0, 0.0, 0.0)
+    torque = wp.vec3f(0.0, 0.0, 0.0)
+    if t == CONSTRAINT_TYPE_BALL_SOCKET:
+        force, torque = ball_socket_world_wrench(constraints, cid, idt)
+    elif t == CONSTRAINT_TYPE_HINGE_ANGLE:
+        force, torque = hinge_angle_world_wrench(constraints, cid, idt)
+    elif t == CONSTRAINT_TYPE_ANGULAR_MOTOR:
+        force, torque = angular_motor_world_wrench(constraints, cid, bodies, idt)
+
+    out[cid] = wp.spatial_vector(force, torque)
 
 
 @wp.func

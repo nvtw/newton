@@ -90,6 +90,7 @@ __all__ = [
     "ball_socket_set_r1",
     "ball_socket_set_r2",
     "ball_socket_set_softness",
+    "ball_socket_world_wrench",
 ]
 
 
@@ -496,3 +497,23 @@ def ball_socket_iterate(
 
     bodies.velocity[b2] = velocity2 + inv_mass2 * lam
     bodies.angular_velocity[b2] = angular_velocity2 + inv_inertia2 @ (cr2 @ lam)
+
+
+@wp.func
+def ball_socket_world_wrench(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    idt: wp.float32,
+):
+    """World-frame wrench (force, torque) this constraint exerts on body2.
+
+    Force is the linear constraint impulse (``accumulated_impulse``)
+    divided by the substep ``dt`` (``idt = 1 / substep_dt``); torque is
+    that force's moment about body2's COM, using the cached lever arm
+    ``r2`` from the most recent ``prepare_for_iteration``.
+    """
+    acc = ball_socket_get_accumulated_impulse(constraints, cid)
+    r2 = ball_socket_get_r2(constraints, cid)
+    force = acc * idt
+    torque = wp.cross(r2, force)
+    return force, torque

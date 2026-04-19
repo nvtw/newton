@@ -109,6 +109,7 @@ __all__ = [
     "hinge_angle_set_min_angle",
     "hinge_angle_set_q0",
     "hinge_angle_set_softness",
+    "hinge_angle_world_wrench",
 ]
 
 
@@ -668,3 +669,23 @@ def hinge_angle_iterate(
     j_lam = jacobian @ lam
     bodies.angular_velocity[b1] = angular_velocity1 + inv_inertia1 @ j_lam
     bodies.angular_velocity[b2] = angular_velocity2 - inv_inertia2 @ j_lam
+
+
+@wp.func
+def hinge_angle_world_wrench(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    idt: wp.float32,
+):
+    """World-frame wrench (force, torque) this constraint exerts on body2.
+
+    Hinge constraints carry no positional component, so ``force`` is
+    zero. The torque is ``-jacobian @ accumulated_impulse / substep_dt``;
+    sign matches ``iterate``'s ``angular_velocity[b2] -= invI @ (J @ lam)``.
+    The cached ``jacobian`` from ``prepare_for_iteration`` is in world
+    frame, so no extra rotation is required.
+    """
+    acc = hinge_angle_get_accumulated_impulse(constraints, cid)
+    jacobian = hinge_angle_get_jacobian(constraints, cid)
+    torque = -(jacobian @ acc) * idt
+    return wp.vec3f(0.0, 0.0, 0.0), torque

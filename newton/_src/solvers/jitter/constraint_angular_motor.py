@@ -91,6 +91,7 @@ __all__ = [
     "angular_motor_set_max_force",
     "angular_motor_set_max_lambda",
     "angular_motor_set_velocity",
+    "angular_motor_world_wrench",
 ]
 
 
@@ -441,3 +442,27 @@ def angular_motor_iterate(
 
     bodies.angular_velocity[b1] = angular_velocity1 - inv_inertia1 @ (j1 * lam)
     bodies.angular_velocity[b2] = angular_velocity2 + inv_inertia2 @ (j2 * lam)
+
+
+@wp.func
+def angular_motor_world_wrench(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    idt: wp.float32,
+):
+    """World-frame wrench (force, torque) this motor exerts on body2.
+
+    Pure-angular constraint, so ``force`` is zero. Per ``iterate``,
+    body2 receives ``+j2 * acc`` of angular impulse, where ``j2`` is the
+    body2 motor axis transformed into world frame. Dividing by
+    ``substep_dt`` yields the torque applied during the most recent
+    substep.
+    """
+    b2 = angular_motor_get_body2(constraints, cid)
+    q2 = bodies.orientation[b2]
+    local_axis2 = angular_motor_get_local_axis2(constraints, cid)
+    j2 = wp.quat_rotate(q2, local_axis2)
+    acc = angular_motor_get_accumulated_impulse(constraints, cid)
+    torque = j2 * (acc * idt)
+    return wp.vec3f(0.0, 0.0, 0.0), torque

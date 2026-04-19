@@ -38,6 +38,7 @@ from newton._src.solvers.jitter.graph_coloring_incremental import (
     IncrementalContactPartitioner,
 )
 from newton._src.solvers.jitter.solver_jitter_kernels import (
+    _constraint_gather_wrenches_kernel,
     _constraint_iterate_kernel,
     _constraint_prepare_for_iteration_kernel,
     _constraints_to_elements_kernel,
@@ -266,6 +267,48 @@ class World:
                 kernel=_constraint_iterate_kernel,
                 idt=idt,
             )
+
+    def gather_constraint_wrenches(self, out: wp.array) -> None:
+        """Write per-constraint world-frame wrenches into ``out``.
+
+        Each ``out[cid]`` is a :class:`wp.spatial_vector` whose
+        ``spatial_top`` is the world-frame force [N] and whose
+        ``spatial_bottom`` is the world-frame torque [N·m] that
+        constraint exerts on its ``body2``. For purely-angular
+        constraints (hinge, motor) the force is zero; for the
+        ball-socket the torque is the moment of the anchor force about
+        body2's COM.
+
+        Force/torque are derived from each constraint's
+        ``accumulated_impulse`` divided by ``substep_dt`` -- i.e. the
+        average wrench the constraint applied during the most recent
+        substep. ``substep_dt`` is whichever value :meth:`step` last
+        set; calling this method before the first :meth:`step` returns
+        zeros (no impulse history yet).
+
+        Args:
+            out: Output buffer of dtype :class:`wp.spatial_vector` and
+                length at least :attr:`num_constraints`. Must live on
+                :attr:`device`.
+        """
+        if self.num_constraints == 0:
+            return
+        if self.substep_dt <= 0.0:
+            out.zero_()
+            return
+        idt = wp.float32(1.0 / self.substep_dt)
+        wp.launch(
+            _constraint_gather_wrenches_kernel,
+            dim=self.num_constraints,
+            inputs=[
+                self.constraints,
+                self.bodies,
+                wp.int32(self.num_constraints),
+                idt,
+                out,
+            ],
+            device=self.device,
+        )
 
     # ------------------------------------------------------------------
     # Coloring helpers (private)
