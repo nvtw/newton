@@ -31,6 +31,7 @@ import warp as wp
 
 import newton
 import newton.examples
+from newton._src.solvers.jitter.picking import JitterPicking, register_with_viewer_gl
 from newton._src.solvers.jitter.solver_jitter import pack_body_xforms_kernel
 from newton._src.solvers.jitter.world_builder import WorldBuilder
 
@@ -150,6 +151,15 @@ class Example:
         # Reused per frame so we don't allocate inside render().
         self._xforms = wp.zeros(NUM_BODIES, dtype=wp.transform, device=self.device)
 
+        # ---- Picking --------------------------------------------------
+        # Half-extents per body in body-local frame; (0, 0, 0) marks the
+        # world anchor as non-pickable. All cubes are unit -> half=0.5.
+        half_extents_np = np.zeros((NUM_BODIES, 3), dtype=np.float32)
+        half_extents_np[1:] = HALF_EXTENT
+        self._half_extents = wp.array(half_extents_np, dtype=wp.vec3f, device=self.device)
+        self.picking = JitterPicking(self.world, self._half_extents)
+        register_with_viewer_gl(self.viewer, self.picking)
+
         self.capture()
 
     def capture(self):
@@ -162,6 +172,14 @@ class Example:
 
     def simulate(self):
         for _ in range(self.sim_substeps):
+            # Re-inject the picking force every Jitter step. The force
+            # accumulator is consumed and zeroed at the end of each
+            # ``step()`` (Jitter's two-stage IntegrateForces split), so
+            # without re-injection the user would feel a 1-frame pulse
+            # rather than a continuous spring. Also a no-op kernel
+            # launch when nothing is picked, keeping the path graph-
+            # capture-friendly.
+            self.picking.apply_force()
             self.world.step(self.sim_dt)
 
     def step(self):
