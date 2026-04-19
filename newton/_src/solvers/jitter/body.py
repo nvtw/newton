@@ -39,6 +39,9 @@ matching the rest of Newton's solver stack.
 import warp as wp
 
 __all__ = [
+    "MOTION_DYNAMIC",
+    "MOTION_KINEMATIC",
+    "MOTION_STATIC",
     "BodyContainer",
     "RigidBodyData",
     "body_container_get",
@@ -47,23 +50,44 @@ __all__ = [
 ]
 
 
+# Motion types (mirrors Jitter2 ``MotionType``). Stored as int32 in the
+# container -- Warp structs can't hold Python enums, and we want this in
+# the constraint-solver hot path.
+MOTION_STATIC = wp.constant(0)
+MOTION_KINEMATIC = wp.constant(1)
+MOTION_DYNAMIC = wp.constant(2)
+
+
 @wp.struct
 class RigidBodyData:
     """Per-body state required by the constraint kernels.
 
-    This is the *value type* used inside ``@wp.func`` / ``@wp.kernel``
-    code: kernels gather a full :class:`RigidBodyData` from a
-    :class:`BodyContainer`, work with it locally, then scatter it back.
+    Mirrors the relevant subset of Jitter2's ``RigidBodyData``. Naming is
+    one-for-one in snake_case:
 
-    Field names use Newton's snake_case convention; the mapping to the
-    Jitter ``RigidBodyData`` field names is one-for-one:
+    Velocity-level state (read & written every constraint iteration):
+        * ``position``               <-> ``Position``
+        * ``velocity``               <-> ``Velocity``
+        * ``angular_velocity``       <-> ``AngularVelocity``
+        * ``orientation``            <-> ``Orientation``
 
-    * ``position``               <-> ``Position``
-    * ``velocity``               <-> ``Velocity``
-    * ``angular_velocity``       <-> ``AngularVelocity``
-    * ``orientation``            <-> ``Orientation``
-    * ``inverse_inertia_world``  <-> ``InverseInertiaWorld``
-    * ``inverse_mass``           <-> ``InverseMass``
+    Mass / inertia (rebuilt once per step from the body-frame inertia):
+        * ``inverse_inertia_world``  <-> ``InverseInertiaWorld`` (rotated)
+        * ``inverse_inertia``        <-> ``inverseInertia`` (body frame, constant)
+        * ``inverse_mass``           <-> ``InverseMass``
+
+    Per-step force accumulators + cached per-substep deltas (Jitter's
+    two-stage IntegrateForces split):
+        * ``force``                  <-> ``Force`` (cleared in _update_bodies)
+        * ``torque``                 <-> ``Torque`` (cleared in _update_bodies)
+        * ``delta_velocity``         <-> ``DeltaVelocity``
+        * ``delta_angular_velocity`` <-> ``DeltaAngularVelocity``
+
+    Damping + flags:
+        * ``linear_damping``         per-body multiplier applied in _update_bodies
+        * ``angular_damping``        per-body multiplier applied in _update_bodies
+        * ``affected_by_gravity``    0/1; gated in _update_bodies
+        * ``motion_type``            see ``MOTION_*`` constants
     """
 
     position: wp.vec3f
@@ -73,8 +97,20 @@ class RigidBodyData:
     orientation: wp.quatf
 
     inverse_inertia_world: wp.mat33f
+    inverse_inertia: wp.mat33f
 
     inverse_mass: wp.float32
+
+    force: wp.vec3f
+    torque: wp.vec3f
+    delta_velocity: wp.vec3f
+    delta_angular_velocity: wp.vec3f
+
+    linear_damping: wp.float32
+    angular_damping: wp.float32
+
+    affected_by_gravity: wp.int32
+    motion_type: wp.int32
 
 
 @wp.struct
@@ -97,8 +133,20 @@ class BodyContainer:
     orientation: wp.array[wp.quatf]
 
     inverse_inertia_world: wp.array[wp.mat33f]
+    inverse_inertia: wp.array[wp.mat33f]
 
     inverse_mass: wp.array[wp.float32]
+
+    force: wp.array[wp.vec3f]
+    torque: wp.array[wp.vec3f]
+    delta_velocity: wp.array[wp.vec3f]
+    delta_angular_velocity: wp.array[wp.vec3f]
+
+    linear_damping: wp.array[wp.float32]
+    angular_damping: wp.array[wp.float32]
+
+    affected_by_gravity: wp.array[wp.int32]
+    motion_type: wp.array[wp.int32]
 
 
 @wp.func
@@ -115,7 +163,16 @@ def body_container_get(c: BodyContainer, i: wp.int32) -> RigidBodyData:
     b.angular_velocity = c.angular_velocity[i]
     b.orientation = c.orientation[i]
     b.inverse_inertia_world = c.inverse_inertia_world[i]
+    b.inverse_inertia = c.inverse_inertia[i]
     b.inverse_mass = c.inverse_mass[i]
+    b.force = c.force[i]
+    b.torque = c.torque[i]
+    b.delta_velocity = c.delta_velocity[i]
+    b.delta_angular_velocity = c.delta_angular_velocity[i]
+    b.linear_damping = c.linear_damping[i]
+    b.angular_damping = c.angular_damping[i]
+    b.affected_by_gravity = c.affected_by_gravity[i]
+    b.motion_type = c.motion_type[i]
     return b
 
 
@@ -133,18 +190,34 @@ def body_container_set(c: BodyContainer, i: wp.int32, b: RigidBodyData):
     c.angular_velocity[i] = b.angular_velocity
     c.orientation[i] = b.orientation
     c.inverse_inertia_world[i] = b.inverse_inertia_world
+    c.inverse_inertia[i] = b.inverse_inertia
     c.inverse_mass[i] = b.inverse_mass
+    c.force[i] = b.force
+    c.torque[i] = b.torque
+    c.delta_velocity[i] = b.delta_velocity
+    c.delta_angular_velocity[i] = b.delta_angular_velocity
+    c.linear_damping[i] = b.linear_damping
+    c.angular_damping[i] = b.angular_damping
+    c.affected_by_gravity[i] = b.affected_by_gravity
+    c.motion_type[i] = b.motion_type
 
 
 def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyContainer:
     """Allocate a zero-initialized :class:`BodyContainer` for ``num_bodies``
     bodies on ``device``.
 
-    Quaternions are zero-initialized too (i.e. ``(0, 0, 0, 0)``); callers
-    that need identity rotations should overwrite the ``orientation``
-    array, e.g. ``c.orientation.fill_(wp.quatf(0.0, 0.0, 0.0, 1.0))``.
-    Same goes for inertia tensors / inverse masses, which the user is
-    responsible for filling in before any solver step.
+    Defaults match Jitter2's per-body defaults so callers only have to
+    fill in what's actually non-default:
+
+    * Quaternions zero-initialised -- callers that want identity
+      rotations should overwrite ``orientation`` (e.g. with
+      ``wp.quatf(0, 0, 0, 1)``).
+    * ``linear_damping`` / ``angular_damping`` = 1.0 (no damping).
+    * ``affected_by_gravity`` = 1.
+    * ``motion_type`` = ``MOTION_STATIC`` -- callers must set dynamic
+      bodies explicitly. (We default to static so a forgotten
+      initialisation produces obviously-frozen objects rather than
+      silently-broken dynamics with zero inertia.)
     """
     c = BodyContainer()
     c.position = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
@@ -152,5 +225,14 @@ def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyC
     c.angular_velocity = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
     c.orientation = wp.zeros(num_bodies, dtype=wp.quatf, device=device)
     c.inverse_inertia_world = wp.zeros(num_bodies, dtype=wp.mat33f, device=device)
+    c.inverse_inertia = wp.zeros(num_bodies, dtype=wp.mat33f, device=device)
     c.inverse_mass = wp.zeros(num_bodies, dtype=wp.float32, device=device)
+    c.force = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
+    c.torque = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
+    c.delta_velocity = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
+    c.delta_angular_velocity = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
+    c.linear_damping = wp.full(num_bodies, value=1.0, dtype=wp.float32, device=device)
+    c.angular_damping = wp.full(num_bodies, value=1.0, dtype=wp.float32, device=device)
+    c.affected_by_gravity = wp.full(num_bodies, value=1, dtype=wp.int32, device=device)
+    c.motion_type = wp.full(num_bodies, value=int(MOTION_STATIC), dtype=wp.int32, device=device)
     return c

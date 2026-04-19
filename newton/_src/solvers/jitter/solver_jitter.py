@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.solvers.jitter.body import BodyContainer, body_container_zeros
+from newton._src.solvers.jitter.body import (
+    BodyContainer,
+    body_container_zeros,
+)
 from newton._src.solvers.jitter.constraints import (
     BallSocketData,
     ball_socket_iterate_kernel,
@@ -27,84 +30,21 @@ from newton._src.solvers.jitter.constraints import (
 )
 from newton._src.solvers.jitter.graph_coloring_common import (
     ElementInteractionData,
-    element_interaction_data_make,
 )
 from newton._src.solvers.jitter.graph_coloring_incremental import (
     IncrementalContactPartitioner,
 )
+from newton._src.solvers.jitter.solver_jitter_kernels import (
+    _ball_socket_to_element_kernel,
+    _integrate_forces_kernel,
+    _integrate_velocities_kernel,
+    _update_bodies_kernel,
+    pack_body_xforms_kernel,
+)
 
-
-@wp.kernel
-def _ball_socket_to_element_kernel(
-    constraints: wp.array[BallSocketData],
-    num_constraints: wp.array[int],
-    elements: wp.array[ElementInteractionData],
-):
-    """Project each :class:`BallSocketData` into the partitioner's
-    :class:`ElementInteractionData` view: only the two body indices matter,
-    the remaining slots are filled with ``-1``."""
-    tid = wp.tid()
-    if tid >= num_constraints[0]:
-        return
-    c = constraints[tid]
-    elements[tid] = element_interaction_data_make(c.body1, c.body2, -1, -1, -1, -1, -1, -1)
-
-
-@wp.kernel
-def _integrate_forces_kernel(
-    bodies: BodyContainer,
-    gravity: wp.vec3f,
-    dt: wp.float32,
-):
-    """Mirrors Jitter2's IntegrateForces: ``v += g * dt`` for dynamic bodies.
-
-    Static bodies (``inverse_mass == 0``) are skipped so the world-anchor
-    body stays put.
-    """
-    i = wp.tid()
-    if bodies.inverse_mass[i] == 0.0:
-        return
-    bodies.velocity[i] = bodies.velocity[i] + gravity * dt
-
-
-@wp.kernel
-def _integrate_velocities_kernel(
-    bodies: BodyContainer,
-    dt: wp.float32,
-):
-    """Mirrors Jitter2's IntegrateVelocities: advance position + orientation.
-
-    Static bodies (``inverse_mass == 0``) are skipped so they remain fixed.
-    Orientation update uses the standard quaternion derivative
-    ``q' = 0.5 * omega_quat * q``; the result is renormalised so floating
-    point drift over many sub-steps doesn't blow up the rotation.
-    """
-    i = wp.tid()
-    if bodies.inverse_mass[i] == 0.0:
-        return
-
-    bodies.position[i] = bodies.position[i] + bodies.velocity[i] * dt
-
-    omega = bodies.angular_velocity[i]
-    q = bodies.orientation[i]
-    # omega_quat = (omega.x, omega.y, omega.z, 0)
-    omega_quat = wp.quatf(omega[0], omega[1], omega[2], 0.0)
-    dq = wp.mul(omega_quat, q) * 0.5
-    new_q = wp.quatf(q[0] + dq[0] * dt, q[1] + dq[1] * dt, q[2] + dq[2] * dt, q[3] + dq[3] * dt)
-    bodies.orientation[i] = wp.normalize(new_q)
-
-
-@wp.kernel
-def pack_body_xforms_kernel(
-    bodies: BodyContainer,
-    xforms: wp.array[wp.transform],
-):
-    """Pack ``(position, orientation)`` from a :class:`BodyContainer` into a
-    flat :class:`wp.transform` array suitable for ``viewer.log_shapes``.
-    Exposed at module scope so examples can render a Jitter ``World`` with
-    the standard Newton viewer without writing their own kernel."""
-    i = wp.tid()
-    xforms[i] = wp.transform(bodies.position[i], bodies.orientation[i])
+# pack_body_xforms_kernel is re-exported here so existing callers
+# (examples, viewer integration) keep importing it from solver_jitter.
+__all__ = ["World", "pack_body_xforms_kernel"]
 
 
 class World:
@@ -236,17 +176,19 @@ class World:
         """Mirrors ``ReorderContacts`` (regular solve mode)."""
 
     def _integrate_forces(self) -> None:
-        """Mirrors ``IntegrateForces``: applies gravity / external forces.
+        """Mirrors per-substep ``IntegrateForces``: add cached deltas.
 
-        Currently only constant gravity is applied; per-body external
-        forces / torques will hook in here later.
+        The actual force/torque/gravity assembly happens once per *step*
+        in :meth:`_foreach_active_body` -- this kernel just adds the
+        cached ``delta_velocity`` / ``delta_angular_velocity`` to the
+        live velocity, matching Jitter's two-stage split.
         """
         if self.num_bodies == 0:
             return
         wp.launch(
             _integrate_forces_kernel,
             dim=self.num_bodies,
-            inputs=[self.bodies, self.gravity, wp.float32(self.substep_dt)],
+            inputs=[self.bodies],
             device=self.device,
         )
 
@@ -354,7 +296,30 @@ class World:
         """Mirrors ``UpdateContacts``: refresh contact manifolds post-step."""
 
     def _foreach_active_body(self) -> None:
-        """Mirrors ``ForeachActiveBody``: per-body bookkeeping pass."""
+        """Mirrors ``ForeachActiveBody`` -> ``UpdateBodies``.
+
+        Runs once per step (not per substep) and matches Jitter's
+        ``RigidBody.Update``: applies damping, builds the per-substep
+        ``delta_velocity`` / ``delta_angular_velocity`` from accumulated
+        force / torque + gravity, zeros the force/torque accumulators,
+        and refreshes ``inverse_inertia_world`` from the current
+        orientation. The substep loop's :meth:`_integrate_forces` then
+        consumes the cached deltas.
+
+        Note: the very first ``step()`` after construction sees zero
+        deltas (the user hasn't called this yet), so the first substep
+        of the first step has no gravity. This matches Jitter's
+        behaviour exactly (``Update`` runs at the *end* of ``Step`` so
+        the deltas are prepared for the *next* call).
+        """
+        if self.num_bodies == 0:
+            return
+        wp.launch(
+            _update_bodies_kernel,
+            dim=self.num_bodies,
+            inputs=[self.bodies, self.gravity, wp.float32(self.substep_dt)],
+            device=self.device,
+        )
 
     def _broad_phase_update(self) -> None:
         """Mirrors ``DynamicTree.Update``: refit/rebuild the broad-phase tree."""

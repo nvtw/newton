@@ -4,11 +4,16 @@
 ###########################################################################
 # Example Jitter Body Chain
 #
-# Ten unit cubes laid out face-to-face along +x and connected with ball
-# joints in a zig-zag pattern: cube i's top-right-front corner is glued to
-# cube (i+1)'s bottom-left-back corner. Cube 0's bottom-left-back corner is
-# attached to a static "world" body so the chain hangs in mid-air. Gravity
-# (-y) pulls everything down and the joints keep the chain together.
+# Ten unit cubes arranged in a zig-zag along +x and connected with ball
+# joints at *diagonal* corners. Cube j's centre is placed at
+#   (2j+1)*h, +h if j even else -h, 0
+# so consecutive cubes share exactly one corner: the joint between cube
+# k-1 and cube k sits on the centerline at (2k*h, 0, 0), which is the
+# +x/-y (or +x/+y) corner of cube k-1 and the opposite -x/+y (or -x/-y)
+# corner of cube k. Cube 0's bottom-left-back corner (-h, -h, 0) is
+# anchored to a static "world" body at the origin so the chain hangs in
+# mid-air. Gravity (-y) pulls everything down and the joints keep the
+# zig-zag together.
 #
 # Run:  python -m newton._src.solvers.jitter.example_body_chain
 #
@@ -19,7 +24,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton._src.solvers.jitter.body import RigidBodyData
+from newton._src.solvers.jitter.body import MOTION_DYNAMIC, RigidBodyData
 from newton._src.solvers.jitter.constraints import BallSocketData, ball_socket_initialize
 from newton._src.solvers.jitter.solver_jitter import World, pack_body_xforms_kernel
 
@@ -54,40 +59,56 @@ class Example:
             device=self.device,
         )
 
-        # Body 0 is the static world anchor (inverse_mass = 0 -> the
-        # integration / constraint kernels both skip it).
+        # Body 0 is the static world anchor (motion_type = STATIC, default
+        # from body_container_zeros, so we leave it as-is). Cubes 1..N are
+        # dynamic: unit mass, identity body-frame inverse inertia (a unit
+        # cube of mass 1 has I = m * s^2 / 6 * I_3 = 1/6 * I_3, so
+        # I^-1 = 6 * I_3; using identity here keeps the demo's numbers
+        # round and is fine since it's an unstressed visual demo).
         positions = np.zeros((NUM_BODIES, 3), dtype=np.float32)
         orientations = np.tile(np.array([0, 0, 0, 1], dtype=np.float32), (NUM_BODIES, 1))
         inverse_mass = np.zeros(NUM_BODIES, dtype=np.float32)
-        # World inverse-inertia for unit-mass unit cubes is the identity *
-        # 1 / (m * (2*hx)^2 / 6) = 6 (for m=1, side=1). Using 1.0 is a
-        # decent visual default; constraints don't care about the exact
-        # value beyond non-zero.
-        inverse_inertia = np.zeros((NUM_BODIES, 3, 3), dtype=np.float32)
+        inverse_inertia_body = np.zeros((NUM_BODIES, 3, 3), dtype=np.float32)
+        motion_type = np.zeros(NUM_BODIES, dtype=np.int32)  # 0 = MOTION_STATIC
 
-        # Cube i (i = 1..NUM_CUBES) sits at x = (2*i - 1) * HALF_EXTENT
-        # so the cubes touch face-to-face along +x and the world anchor
-        # (origin) coincides with cube 0's -x face center.
+        # Body i = cube (i-1). Cube j sits at x = (2j+1)*h on the +x axis
+        # and alternates y = +h (j even) / -h (j odd), so consecutive
+        # cubes meet at exactly one diagonal corner on the y=0 line.
         for i in range(1, NUM_BODIES):
             cube_idx = i - 1
+            sign = 1.0 if cube_idx % 2 == 0 else -1.0
             positions[i, 0] = (2 * cube_idx + 1) * HALF_EXTENT  # 0.5, 1.5, 2.5, ...
+            positions[i, 1] = sign * HALF_EXTENT
             inverse_mass[i] = 1.0
-            inverse_inertia[i] = np.eye(3, dtype=np.float32)  # 1.0 on the diagonal
+            inverse_inertia_body[i] = np.eye(3, dtype=np.float32)
+            motion_type[i] = int(MOTION_DYNAMIC)
 
         self.world.bodies.position.assign(positions)
         self.world.bodies.orientation.assign(orientations)
         self.world.bodies.inverse_mass.assign(inverse_mass)
-        self.world.bodies.inverse_inertia_world.assign(inverse_inertia)
+        # inverse_inertia (body frame) is the persistent source of truth;
+        # _update_bodies_kernel rebuilds inverse_inertia_world from it
+        # each step. We seed inverse_inertia_world with the same value so
+        # the very first step (which runs before _update_bodies has a
+        # chance to fire) sees a non-zero world inertia.
+        self.world.bodies.inverse_inertia.assign(inverse_inertia_body)
+        self.world.bodies.inverse_inertia_world.assign(inverse_inertia_body)
+        self.world.bodies.motion_type.assign(motion_type)
 
         # ---- Build the ball-socket joints ----------------------------
-        # Constraint k anchors a corner shared between body k and body k+1
-        # (using 1-based body indices, so the world body is body 0).
-        # Anchor convention: cube i's top-right-front corner
-        # (+hx, +hy, +hz) coincides with cube (i+1)'s bottom-left-back
-        # corner (-hx, -hy, -hz) when both are positioned along +x with
-        # 2*HALF_EXTENT spacing. For the world->cube0 joint the anchor is
-        # cube 0's bottom-left-back corner (i.e. world origin offset
-        # (-hx, -hy, -hz) from cube 0).
+        # Joint k connects body k and body k+1 (body 0 = static world).
+        # Anchor convention:
+        #   * k = 0:  world (origin) ↔ cube 0's bottom-left-back corner
+        #             at world position (0, 0, 0) -- this is cube 0's
+        #             (-h, -h, 0) corner since cube 0 sits at (h, +h, 0).
+        #   * k ≥ 1:  cube (k-1) ↔ cube k. The two cubes are placed so
+        #             their shared corner sits on the centerline at
+        #             world position (2k*h, 0, 0). For cube k-1 (centred
+        #             at sign_{k-1}*h on y) this is its (+h, -sign_{k-1}*h, 0)
+        #             corner, and for cube k (sign_k = -sign_{k-1}) it's
+        #             the opposite (-h, -sign_k*h, 0) = (-h, +sign_{k-1}*h, 0)
+        #             corner -- diagonal corners of two diagonally
+        #             adjacent cubes.
         constraints_np = np.zeros(NUM_BALL_SOCKETS, dtype=BallSocketData.numpy_dtype())
         for k in range(NUM_BALL_SOCKETS):
             body_a = k  # 0 = world, 1..NUM_CUBES-1 = cubes
@@ -102,25 +123,10 @@ class Example:
             rbb.position = pos_b
             rbb.orientation = wp.quatf(0, 0, 0, 1)
 
-            # Shared anchor: world-space point where the corners meet.
-            # For k=0 (world->cube0): anchor at cube 0's -x/-y/-z corner
-            #     = pos_b + (-hx, -hy, -hz).
-            # For k>=1 (cube_(k-1)->cube_k): anchor at cube (k-1)'s
-            #     +hx/+hy/+hz corner = pos_a + (+hx, +hy, +hz),
-            # which equals cube k's -hx/-hy/-hz corner because the cubes
-            # are spaced by 2*hx along x and aligned in y/z.
             if k == 0:
-                anchor = wp.vec3f(
-                    float(positions[body_b, 0]) - HALF_EXTENT,
-                    float(positions[body_b, 1]) - HALF_EXTENT,
-                    float(positions[body_b, 2]) - HALF_EXTENT,
-                )
+                anchor = wp.vec3f(0.0, 0.0, 0.0)
             else:
-                anchor = wp.vec3f(
-                    float(positions[body_a, 0]) + HALF_EXTENT,
-                    float(positions[body_a, 1]) + HALF_EXTENT,
-                    float(positions[body_a, 2]) + HALF_EXTENT,
-                )
+                anchor = wp.vec3f(2.0 * k * HALF_EXTENT, 0.0, 0.0)
 
             data = BallSocketData()
             data.body1 = int(body_a)
