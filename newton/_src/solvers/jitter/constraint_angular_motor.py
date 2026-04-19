@@ -63,6 +63,7 @@ from newton._src.solvers.jitter.constraint_container import (
     read_float,
     read_int,
     read_vec3,
+    soft_constraint_coefficients,
     write_float,
     write_int,
     write_vec3,
@@ -75,9 +76,13 @@ __all__ = [
     "angular_motor_get_accumulated_impulse",
     "angular_motor_get_body1",
     "angular_motor_get_body2",
+    "angular_motor_get_damping_ratio",
     "angular_motor_get_effective_mass",
+    "angular_motor_get_hertz",
+    "angular_motor_get_impulse_coeff",
     "angular_motor_get_local_axis1",
     "angular_motor_get_local_axis2",
+    "angular_motor_get_mass_coeff",
     "angular_motor_get_max_force",
     "angular_motor_get_max_lambda",
     "angular_motor_get_velocity",
@@ -89,9 +94,13 @@ __all__ = [
     "angular_motor_set_accumulated_impulse",
     "angular_motor_set_body1",
     "angular_motor_set_body2",
+    "angular_motor_set_damping_ratio",
     "angular_motor_set_effective_mass",
+    "angular_motor_set_hertz",
+    "angular_motor_set_impulse_coeff",
     "angular_motor_set_local_axis1",
     "angular_motor_set_local_axis2",
+    "angular_motor_set_mass_coeff",
     "angular_motor_set_max_force",
     "angular_motor_set_max_lambda",
     "angular_motor_set_velocity",
@@ -138,13 +147,28 @@ class AngularMotorData:
     # Maximum motor torque [N*m]. The Iterate kernel converts this to a
     # per-step impulse cap ``max_lambda = max_force * dt = max_force / idt``
     # and clamps the accumulated impulse to ``[-max_lambda, max_lambda]``.
-    # Set to 0 by Initialize -- callers must override post-init for the
-    # motor to actually apply torque.
+    # ``max_force = 0`` -> disabled motor (max_lambda = 0 clamps the
+    # impulse to zero on every PGS pass).
     max_force: wp.float32
+
+    # User-facing soft-constraint knobs (Box2D v3 / Bepu / Nordby
+    # formulation; see :func:`soft_constraint_coefficients`). The motor
+    # carries no positional bias so ``hertz`` here only governs how fast
+    # the accumulated impulse decays toward the velocity setpoint -- in
+    # spring terms it's a velocity-target spring with this stiffness.
+    hertz: wp.float32
+    damping_ratio: wp.float32
 
     # Cached per-substep value of ``max_force / idt`` so Iterate doesn't
     # need to redo the divide every PGS pass.
     max_lambda: wp.float32
+
+    # Cached per-substep soft-constraint coefficients. ``mass_coeff``
+    # scales the velocity-error impulse; ``impulse_coeff`` damps the
+    # accumulated impulse. ``bias_rate`` is unused by this constraint
+    # (no positional separation) but kept for layout symmetry / debugging.
+    mass_coeff: wp.float32
+    impulse_coeff: wp.float32
 
     # Scalar effective mass (1-DoF constraint).
     effective_mass: wp.float32
@@ -166,7 +190,11 @@ _OFF_LOCAL_AXIS1 = wp.constant(dword_offset_of(AngularMotorData, "local_axis1"))
 _OFF_LOCAL_AXIS2 = wp.constant(dword_offset_of(AngularMotorData, "local_axis2"))
 _OFF_VELOCITY = wp.constant(dword_offset_of(AngularMotorData, "velocity"))
 _OFF_MAX_FORCE = wp.constant(dword_offset_of(AngularMotorData, "max_force"))
+_OFF_HERTZ = wp.constant(dword_offset_of(AngularMotorData, "hertz"))
+_OFF_DAMPING_RATIO = wp.constant(dword_offset_of(AngularMotorData, "damping_ratio"))
 _OFF_MAX_LAMBDA = wp.constant(dword_offset_of(AngularMotorData, "max_lambda"))
+_OFF_MASS_COEFF = wp.constant(dword_offset_of(AngularMotorData, "mass_coeff"))
+_OFF_IMPULSE_COEFF = wp.constant(dword_offset_of(AngularMotorData, "impulse_coeff"))
 _OFF_EFFECTIVE_MASS = wp.constant(dword_offset_of(AngularMotorData, "effective_mass"))
 _OFF_ACCUMULATED_IMPULSE = wp.constant(dword_offset_of(AngularMotorData, "accumulated_impulse"))
 
@@ -241,6 +269,26 @@ def angular_motor_set_max_force(c: ConstraintContainer, cid: wp.int32, v: wp.flo
 
 
 @wp.func
+def angular_motor_get_hertz(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_HERTZ, cid)
+
+
+@wp.func
+def angular_motor_set_hertz(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_HERTZ, cid, v)
+
+
+@wp.func
+def angular_motor_get_damping_ratio(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_DAMPING_RATIO, cid)
+
+
+@wp.func
+def angular_motor_set_damping_ratio(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_DAMPING_RATIO, cid, v)
+
+
+@wp.func
 def angular_motor_get_max_lambda(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
     return read_float(c, _OFF_MAX_LAMBDA, cid)
 
@@ -248,6 +296,26 @@ def angular_motor_get_max_lambda(c: ConstraintContainer, cid: wp.int32) -> wp.fl
 @wp.func
 def angular_motor_set_max_lambda(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
     write_float(c, _OFF_MAX_LAMBDA, cid, v)
+
+
+@wp.func
+def angular_motor_get_mass_coeff(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_MASS_COEFF, cid)
+
+
+@wp.func
+def angular_motor_set_mass_coeff(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_MASS_COEFF, cid, v)
+
+
+@wp.func
+def angular_motor_get_impulse_coeff(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_IMPULSE_COEFF, cid)
+
+
+@wp.func
+def angular_motor_set_impulse_coeff(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_IMPULSE_COEFF, cid, v)
 
 
 @wp.func
@@ -286,6 +354,8 @@ def angular_motor_initialize_kernel(
     world_axis2: wp.array[wp.vec3f],
     target_velocity: wp.array[wp.float32],
     max_force: wp.array[wp.float32],
+    hertz: wp.array[wp.float32],
+    damping_ratio: wp.array[wp.float32],
 ):
     """Pack one batch of angular-motor descriptors into ``constraints``.
 
@@ -314,6 +384,13 @@ def angular_motor_initialize_kernel(
         target_velocity: Target relative angular velocity [num_in_batch] [rad/s].
         max_force: Maximum motor torque [num_in_batch] [N*m]. Pass 0 for a
             disabled motor; a non-zero value enables it.
+        hertz: Soft-constraint natural frequency [num_in_batch] [Hz]. Set
+            to 0 for a perfectly stiff (rigid) motor; small positive
+            values yield a "soft" motor that gives in to large external
+            torques. See :func:`soft_constraint_coefficients`.
+        damping_ratio: Soft-constraint damping ratio [num_in_batch].
+            Typical critical-damping value is 1.0. See
+            :func:`soft_constraint_coefficients`.
     """
     tid = wp.tid()
     cid = cid_offset + tid
@@ -337,7 +414,11 @@ def angular_motor_initialize_kernel(
 
     angular_motor_set_velocity(constraints, cid, target_velocity[tid])
     angular_motor_set_max_force(constraints, cid, max_force[tid])
+    angular_motor_set_hertz(constraints, cid, hertz[tid])
+    angular_motor_set_damping_ratio(constraints, cid, damping_ratio[tid])
     angular_motor_set_max_lambda(constraints, cid, 0.0)
+    angular_motor_set_mass_coeff(constraints, cid, 1.0)
+    angular_motor_set_impulse_coeff(constraints, cid, 0.0)
     angular_motor_set_effective_mass(constraints, cid, 0.0)
     angular_motor_set_accumulated_impulse(constraints, cid, 0.0)
 
@@ -382,6 +463,8 @@ def angular_motor_prepare_for_iteration_at(
     local_axis1 = read_vec3(constraints, base_offset + _OFF_LOCAL_AXIS1, cid)
     local_axis2 = read_vec3(constraints, base_offset + _OFF_LOCAL_AXIS2, cid)
     max_force = read_float(constraints, base_offset + _OFF_MAX_FORCE, cid)
+    hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
+    damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
     acc = read_float(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid)
 
     # World-space Jacobian rows (the per-DoF axes).
@@ -390,13 +473,23 @@ def angular_motor_prepare_for_iteration_at(
 
     # Scalar effective mass for the 1-DoF constraint:
     #   m^-1 = j1 . (InvI1 * j1) + j2 . (InvI2 * j2)
+    # NOTE: kept *unsoftened* -- softness is applied in iterate via the
+    # Box2D/Bepu mass_coeff / impulse_coeff scalars below.
     eff_inv = wp.dot(inv_inertia1 @ j1, j1) + wp.dot(inv_inertia2 @ j2, j2)
     write_float(constraints, base_offset + _OFF_EFFECTIVE_MASS, cid, 1.0 / eff_inv)
 
     # Per-step impulse cap. C# writes ``1.0 / idt * MaxForce`` which is
     # just ``MaxForce * dt``; we use the same form for byte-for-byte
     # parity.
-    write_float(constraints, base_offset + _OFF_MAX_LAMBDA, cid, max_force / idt)
+    dt = 1.0 / idt
+    write_float(constraints, base_offset + _OFF_MAX_LAMBDA, cid, max_force * dt)
+
+    # Time-step-independent soft-constraint coefficients. The motor has
+    # no positional separation so ``bias_rate`` is unused (discarded);
+    # we only cache ``mass_coeff`` and ``impulse_coeff``.
+    _, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt)
+    write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
+    write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
 
     # Warm start: re-apply the previous solve's accumulated impulse.
     bodies.angular_velocity[b1] = bodies.angular_velocity[b1] - inv_inertia1 @ (j1 * acc)
@@ -432,6 +525,8 @@ def angular_motor_iterate_at(
     velocity = read_float(constraints, base_offset + _OFF_VELOCITY, cid)
     eff = read_float(constraints, base_offset + _OFF_EFFECTIVE_MASS, cid)
     max_lambda = read_float(constraints, base_offset + _OFF_MAX_LAMBDA, cid)
+    mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF, cid)
+    impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid)
     acc = read_float(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid)
 
     j1 = wp.quat_rotate(q1, local_axis1)
@@ -440,7 +535,9 @@ def angular_motor_iterate_at(
     # jv = -j1 . w1 + j2 . w2
     jv = -wp.dot(j1, angular_velocity1) + wp.dot(j2, angular_velocity2)
 
-    lam = -(jv - velocity) * eff
+    # Box2D/Bepu soft PGS step (no positional bias for a velocity motor):
+    #   lam = -mass_coeff * eff * (jv - velocity) - impulse_coeff * acc
+    lam = -mass_coeff * eff * (jv - velocity) - impulse_coeff * acc
 
     old_acc = acc
     acc = wp.clamp(acc + lam, -max_lambda, max_lambda)

@@ -46,6 +46,8 @@ import warp as wp
 from newton._src.solvers.jitter.body import BodyContainer
 from newton._src.solvers.jitter.constraint_container import (
     CONSTRAINT_TYPE_BALL_SOCKET,
+    DEFAULT_DAMPING_RATIO,
+    DEFAULT_HERTZ_LINEAR,
     ConstraintBodies,
     ConstraintContainer,
     assert_constraint_header,
@@ -55,6 +57,7 @@ from newton._src.solvers.jitter.constraint_container import (
     read_int,
     read_mat33,
     read_vec3,
+    soft_constraint_coefficients,
     write_float,
     write_int,
     write_mat33,
@@ -64,20 +67,21 @@ from newton._src.solvers.jitter.data_packing import dword_offset_of, num_dwords
 
 __all__ = [
     "BS_DWORDS",
-    "DEFAULT_LINEAR_BIAS",
-    "DEFAULT_LINEAR_SOFTNESS",
     "BallSocketData",
     "ball_socket_get_accumulated_impulse",
     "ball_socket_get_bias",
-    "ball_socket_get_bias_factor",
+    "ball_socket_get_bias_rate",
     "ball_socket_get_body1",
     "ball_socket_get_body2",
+    "ball_socket_get_damping_ratio",
     "ball_socket_get_effective_mass",
+    "ball_socket_get_hertz",
+    "ball_socket_get_impulse_coeff",
     "ball_socket_get_local_anchor1",
     "ball_socket_get_local_anchor2",
+    "ball_socket_get_mass_coeff",
     "ball_socket_get_r1",
     "ball_socket_get_r2",
-    "ball_socket_get_softness",
     "ball_socket_initialize_kernel",
     "ball_socket_iterate",
     "ball_socket_iterate_at",
@@ -85,26 +89,21 @@ __all__ = [
     "ball_socket_prepare_for_iteration_at",
     "ball_socket_set_accumulated_impulse",
     "ball_socket_set_bias",
-    "ball_socket_set_bias_factor",
+    "ball_socket_set_bias_rate",
     "ball_socket_set_body1",
     "ball_socket_set_body2",
+    "ball_socket_set_damping_ratio",
     "ball_socket_set_effective_mass",
+    "ball_socket_set_hertz",
+    "ball_socket_set_impulse_coeff",
     "ball_socket_set_local_anchor1",
     "ball_socket_set_local_anchor2",
+    "ball_socket_set_mass_coeff",
     "ball_socket_set_r1",
     "ball_socket_set_r2",
-    "ball_socket_set_softness",
     "ball_socket_world_wrench",
     "ball_socket_world_wrench_at",
 ]
-
-
-# ---------------------------------------------------------------------------
-# Constants (mirrors Jitter2.Dynamics.Constraints.Constraint)
-# ---------------------------------------------------------------------------
-
-DEFAULT_LINEAR_SOFTNESS = wp.constant(wp.float32(0.00001))
-DEFAULT_LINEAR_BIAS = wp.constant(wp.float32(0.2))
 
 
 # ---------------------------------------------------------------------------
@@ -143,10 +142,24 @@ class BallSocketData:
 
     r1: wp.vec3f
     r2: wp.vec3f
-    u: wp.vec3f
 
-    bias_factor: wp.float32
-    softness: wp.float32
+    # User-facing soft-constraint knobs (Box2D v3 / Bepu / Nordby
+    # formulation; see ``soft_constraint_coefficients`` in
+    # :mod:`constraint_container`). ``hertz`` is the undamped natural
+    # frequency [Hz]; ``damping_ratio`` is non-dimensional (1 = critical).
+    # Persisted across substeps; the three derived coefficients below
+    # are recomputed every prepare from the current substep dt.
+    hertz: wp.float32
+    damping_ratio: wp.float32
+
+    # Cached per-substep coefficients. ``bias_rate`` [1/s] times the
+    # positional separation gives the velocity-correction bias; the
+    # other two scale the unsoftened effective-mass impulse and the
+    # accumulated-impulse leak. Cleared/refilled in
+    # ``ball_socket_prepare_for_iteration_at``.
+    bias_rate: wp.float32
+    mass_coeff: wp.float32
+    impulse_coeff: wp.float32
 
     effective_mass: wp.mat33f
     accumulated_impulse: wp.vec3f
@@ -167,9 +180,11 @@ _OFF_LA1 = wp.constant(dword_offset_of(BallSocketData, "local_anchor1"))
 _OFF_LA2 = wp.constant(dword_offset_of(BallSocketData, "local_anchor2"))
 _OFF_R1 = wp.constant(dword_offset_of(BallSocketData, "r1"))
 _OFF_R2 = wp.constant(dword_offset_of(BallSocketData, "r2"))
-_OFF_U = wp.constant(dword_offset_of(BallSocketData, "u"))
-_OFF_BIAS_FACTOR = wp.constant(dword_offset_of(BallSocketData, "bias_factor"))
-_OFF_SOFTNESS = wp.constant(dword_offset_of(BallSocketData, "softness"))
+_OFF_HERTZ = wp.constant(dword_offset_of(BallSocketData, "hertz"))
+_OFF_DAMPING_RATIO = wp.constant(dword_offset_of(BallSocketData, "damping_ratio"))
+_OFF_BIAS_RATE = wp.constant(dword_offset_of(BallSocketData, "bias_rate"))
+_OFF_MASS_COEFF = wp.constant(dword_offset_of(BallSocketData, "mass_coeff"))
+_OFF_IMPULSE_COEFF = wp.constant(dword_offset_of(BallSocketData, "impulse_coeff"))
 _OFF_EFFECTIVE_MASS = wp.constant(dword_offset_of(BallSocketData, "effective_mass"))
 _OFF_ACCUMULATED_IMPULSE = wp.constant(dword_offset_of(BallSocketData, "accumulated_impulse"))
 _OFF_BIAS = wp.constant(dword_offset_of(BallSocketData, "bias"))
@@ -245,23 +260,53 @@ def ball_socket_set_r2(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
 
 
 @wp.func
-def ball_socket_get_bias_factor(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
-    return read_float(c, _OFF_BIAS_FACTOR, cid)
+def ball_socket_get_hertz(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_HERTZ, cid)
 
 
 @wp.func
-def ball_socket_set_bias_factor(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
-    write_float(c, _OFF_BIAS_FACTOR, cid, v)
+def ball_socket_set_hertz(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_HERTZ, cid, v)
 
 
 @wp.func
-def ball_socket_get_softness(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
-    return read_float(c, _OFF_SOFTNESS, cid)
+def ball_socket_get_damping_ratio(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_DAMPING_RATIO, cid)
 
 
 @wp.func
-def ball_socket_set_softness(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
-    write_float(c, _OFF_SOFTNESS, cid, v)
+def ball_socket_set_damping_ratio(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_DAMPING_RATIO, cid, v)
+
+
+@wp.func
+def ball_socket_get_bias_rate(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_BIAS_RATE, cid)
+
+
+@wp.func
+def ball_socket_set_bias_rate(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_BIAS_RATE, cid, v)
+
+
+@wp.func
+def ball_socket_get_mass_coeff(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_MASS_COEFF, cid)
+
+
+@wp.func
+def ball_socket_set_mass_coeff(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_MASS_COEFF, cid, v)
+
+
+@wp.func
+def ball_socket_get_impulse_coeff(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_IMPULSE_COEFF, cid)
+
+
+@wp.func
+def ball_socket_set_impulse_coeff(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_IMPULSE_COEFF, cid, v)
 
 
 @wp.func
@@ -307,25 +352,30 @@ def ball_socket_initialize_kernel(
     body1: wp.array[wp.int32],
     body2: wp.array[wp.int32],
     anchor: wp.array[wp.vec3f],
+    hertz: wp.array[wp.float32],
+    damping_ratio: wp.array[wp.float32],
 ):
     """Pack one batch of ball-socket descriptors into ``constraints``.
 
-    Direct port of ``BallSocket.Initialize`` (BallSocket.cs:65-80) plus
-    zero-initialisation of the derived/cached fields. Runs once per type
-    inside :meth:`WorldBuilder.finalize`; the per-batch input arrays
-    (``body1``, ``body2``, ``anchor``) live on the host in the builder
-    and get uploaded just for this kernel.
+    Mirrors ``BallSocket.Initialize`` (BallSocket.cs:65-80), but the
+    legacy ``bias_factor`` / ``softness`` knobs are replaced by
+    ``hertz`` / ``damping_ratio`` (Box2D v3 / Bepu / Nordby formulation;
+    see :func:`soft_constraint_coefficients` in
+    :mod:`constraint_container`). The three derived per-substep
+    coefficients are recomputed every prepare from the actual substep
+    ``dt``, which is what makes the joint behaviour time-step-independent.
 
     Args:
         constraints: Shared column-major constraint storage.
         bodies: Solver body container; this kernel only reads
             ``position`` / ``orientation`` of the two referenced bodies.
         cid_offset: Global cid of the first constraint in this batch.
-            Used so the same kernel can pack different ranges of the
-            container if the builder ever batches by type.
         body1: Body indices for body 1 [num_in_batch].
         body2: Body indices for body 2 [num_in_batch].
         anchor: World-space anchor points [num_in_batch] [m].
+        hertz: Per-constraint stiffness target [num_in_batch] [Hz].
+        damping_ratio: Per-constraint damping ratio [num_in_batch]
+            (1 = critically damped).
     """
     tid = wp.tid()
     cid = cid_offset + tid
@@ -354,8 +404,11 @@ def ball_socket_initialize_kernel(
     ball_socket_set_bias(constraints, cid, zero3)
     ball_socket_set_accumulated_impulse(constraints, cid, zero3)
 
-    ball_socket_set_bias_factor(constraints, cid, DEFAULT_LINEAR_BIAS)
-    ball_socket_set_softness(constraints, cid, DEFAULT_LINEAR_SOFTNESS)
+    ball_socket_set_hertz(constraints, cid, hertz[tid])
+    ball_socket_set_damping_ratio(constraints, cid, damping_ratio[tid])
+    ball_socket_set_bias_rate(constraints, cid, 0.0)
+    ball_socket_set_mass_coeff(constraints, cid, 1.0)
+    ball_socket_set_impulse_coeff(constraints, cid, 0.0)
 
     ball_socket_set_effective_mass(constraints, cid, wp.identity(3, dtype=wp.float32))
 
@@ -429,21 +482,33 @@ def ball_socket_prepare_for_iteration_at(
 
     # EffectiveMass = m1^-1 * I + cr1 * (InvI1 * cr1^T)
     #               + m2^-1 * I + cr2 * (InvI2 * cr2^T)
+    # Box2D v3 / Bepu soft-constraint formulation: keep the effective
+    # mass *unsoftened* here -- the softness scaling lives in
+    # ``mass_coeff`` and ``impulse_coeff`` instead, so the rigid case
+    # falls out naturally when ``hertz`` is large.
     eye3 = wp.identity(3, dtype=wp.float32)
     eff = inv_mass1 * eye3
     eff = eff + cr1 @ (inv_inertia1 @ wp.transpose(cr1))
     eff = eff + inv_mass2 * eye3
     eff = eff + cr2 @ (inv_inertia2 @ wp.transpose(cr2))
 
-    softness = read_float(constraints, base_offset + _OFF_SOFTNESS, cid) * idt
-    eff[0, 0] = eff[0, 0] + softness
-    eff[1, 1] = eff[1, 1] + softness
-    eff[2, 2] = eff[2, 2] + softness
-
     write_mat33(constraints, base_offset + _OFF_EFFECTIVE_MASS, cid, wp.inverse(eff))
 
-    bias_factor = read_float(constraints, base_offset + _OFF_BIAS_FACTOR, cid)
-    bias = (p2 - p1) * bias_factor * idt
+    # Recompute soft-constraint coefficients from the current substep dt.
+    # Using ``dt = 1 / idt`` keeps the solver dispatch signature unchanged
+    # while letting the joint behaviour stay invariant under dt changes.
+    dt = 1.0 / idt
+    hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
+    damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
+    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
+        hertz, damping_ratio, dt
+    )
+    write_float(constraints, base_offset + _OFF_BIAS_RATE, cid, bias_rate)
+    write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
+    write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
+
+    # Velocity-correction bias = bias_rate * positional separation.
+    bias = (p2 - p1) * bias_rate
     write_vec3(constraints, base_offset + _OFF_BIAS, cid, bias)
 
     # Warm start: re-apply the previous solve's accumulated impulse.
@@ -493,17 +558,21 @@ def ball_socket_iterate_at(
     cr2 = wp.skew(r2)
 
     acc = read_vec3(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid)
-    softness = read_float(constraints, base_offset + _OFF_SOFTNESS, cid)
     bias = read_vec3(constraints, base_offset + _OFF_BIAS, cid)
     eff = read_mat33(constraints, base_offset + _OFF_EFFECTIVE_MASS, cid)
-
-    softness_vector = acc * softness * idt
+    mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF, cid)
+    impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid)
 
     # jv = -v1 + cr1 * w1 + v2 - cr2 * w2
     jv = -velocity1 + cr1 @ angular_velocity1 + velocity2 - cr2 @ angular_velocity2
 
-    # lambda = -EffectiveMass * (jv + Bias + softnessVector)
-    lam = -(eff @ (jv + bias + softness_vector))
+    # Box2D v3 / Bepu soft-constraint PGS update:
+    #   lambda = -mass_coeff * EffectiveMass * (jv + bias)
+    #            - impulse_coeff * accumulated_impulse
+    # Setting (mass_coeff, impulse_coeff) = (1, 0) recovers the rigid
+    # plain-PGS update that the legacy ``softness`` formulation
+    # approached only asymptotically.
+    lam = -mass_coeff * (eff @ (jv + bias)) - impulse_coeff * acc
 
     write_vec3(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid, acc + lam)
 

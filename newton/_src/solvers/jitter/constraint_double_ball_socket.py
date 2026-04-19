@@ -84,6 +84,7 @@ from newton._src.solvers.jitter.constraint_container import (
     read_int,
     read_mat33,
     read_vec3,
+    soft_constraint_coefficients,
     write_float,
     write_int,
     write_mat33,
@@ -94,27 +95,28 @@ from newton._src.solvers.jitter.math_helpers import create_orthonormal
 
 __all__ = [
     "DBS_DWORDS",
-    "DEFAULT_LINEAR_BIAS",
-    "DEFAULT_LINEAR_SOFTNESS",
     "DoubleBallSocketData",
     "double_ball_socket_get_a1_inv",
     "double_ball_socket_get_accumulated_impulse1",
     "double_ball_socket_get_accumulated_impulse2",
     "double_ball_socket_get_bias1",
     "double_ball_socket_get_bias2",
-    "double_ball_socket_get_bias_factor",
+    "double_ball_socket_get_bias_rate",
     "double_ball_socket_get_body1",
     "double_ball_socket_get_body2",
+    "double_ball_socket_get_damping_ratio",
+    "double_ball_socket_get_hertz",
+    "double_ball_socket_get_impulse_coeff",
     "double_ball_socket_get_local_anchor1_b1",
     "double_ball_socket_get_local_anchor1_b2",
     "double_ball_socket_get_local_anchor2_b1",
     "double_ball_socket_get_local_anchor2_b2",
+    "double_ball_socket_get_mass_coeff",
     "double_ball_socket_get_r1_b1",
     "double_ball_socket_get_r1_b2",
     "double_ball_socket_get_r2_b1",
     "double_ball_socket_get_r2_b2",
     "double_ball_socket_get_s_inv",
-    "double_ball_socket_get_softness",
     "double_ball_socket_get_t1",
     "double_ball_socket_get_t2",
     "double_ball_socket_get_ut_ai",
@@ -128,42 +130,28 @@ __all__ = [
     "double_ball_socket_set_accumulated_impulse2",
     "double_ball_socket_set_bias1",
     "double_ball_socket_set_bias2",
-    "double_ball_socket_set_bias_factor",
+    "double_ball_socket_set_bias_rate",
     "double_ball_socket_set_body1",
     "double_ball_socket_set_body2",
+    "double_ball_socket_set_damping_ratio",
+    "double_ball_socket_set_hertz",
+    "double_ball_socket_set_impulse_coeff",
     "double_ball_socket_set_local_anchor1_b1",
     "double_ball_socket_set_local_anchor1_b2",
     "double_ball_socket_set_local_anchor2_b1",
     "double_ball_socket_set_local_anchor2_b2",
+    "double_ball_socket_set_mass_coeff",
     "double_ball_socket_set_r1_b1",
     "double_ball_socket_set_r1_b2",
     "double_ball_socket_set_r2_b1",
     "double_ball_socket_set_r2_b2",
     "double_ball_socket_set_s_inv",
-    "double_ball_socket_set_softness",
     "double_ball_socket_set_t1",
     "double_ball_socket_set_t2",
     "double_ball_socket_set_ut_ai",
     "double_ball_socket_world_wrench",
     "double_ball_socket_world_wrench_at",
 ]
-
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-#
-# The per-cid type tag (CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET) lives in
-# :mod:`constraint_container` so the central allowlist of constraint
-# types stays the single source of truth; we just re-import it here.
-
-#: Same defaults as the single ball-socket; positional softness is mostly
-#: there to keep the (already non-degenerate) 3x3 + 2x2 inverses well
-#: conditioned in the rare case that a user puts the two anchors right
-#: on top of each other (zero hinge length -- physically meaningless but
-#: shouldn't crash the solver).
-DEFAULT_LINEAR_SOFTNESS = wp.constant(wp.float32(0.00001))
-DEFAULT_LINEAR_BIAS = wp.constant(wp.float32(0.2))
 
 
 # ---------------------------------------------------------------------------
@@ -220,8 +208,24 @@ class DoubleBallSocketData:
     t1: wp.vec3f
     t2: wp.vec3f
 
-    bias_factor: wp.float32
-    softness: wp.float32
+    # User-facing soft-constraint knobs (Box2D v3 / Bepu / Nordby
+    # formulation; see :func:`soft_constraint_coefficients`). One pair
+    # is shared across both anchors -- both blocks of the Schur solve
+    # use the same ``hertz`` / ``damping_ratio`` since they're modelling
+    # the same physical hinge joint. ``hertz <= 0`` -> rigid joint
+    # (mass_coeff = 1, impulse_coeff = 0).
+    hertz: wp.float32
+    damping_ratio: wp.float32
+
+    # Cached per-substep soft-constraint coefficients (recomputed each
+    # ``prepare_for_iteration`` from the current ``dt`` and the user
+    # ``hertz`` / ``damping_ratio``). Same role as in the single
+    # ball-socket: ``mass_coeff`` scales the velocity-error impulse,
+    # ``impulse_coeff`` damps the accumulated impulse, ``bias_rate``
+    # multiplies the positional separation to form the velocity bias.
+    bias_rate: wp.float32
+    mass_coeff: wp.float32
+    impulse_coeff: wp.float32
 
     # Cached velocity-error bias vectors (anchor 1: 3-vector in world
     # frame; anchor 2: 2-vector in tangent basis stored in the first two
@@ -271,8 +275,11 @@ _OFF_R2_B1 = wp.constant(dword_offset_of(DoubleBallSocketData, "r2_b1"))
 _OFF_R2_B2 = wp.constant(dword_offset_of(DoubleBallSocketData, "r2_b2"))
 _OFF_T1 = wp.constant(dword_offset_of(DoubleBallSocketData, "t1"))
 _OFF_T2 = wp.constant(dword_offset_of(DoubleBallSocketData, "t2"))
-_OFF_BIAS_FACTOR = wp.constant(dword_offset_of(DoubleBallSocketData, "bias_factor"))
-_OFF_SOFTNESS = wp.constant(dword_offset_of(DoubleBallSocketData, "softness"))
+_OFF_HERTZ = wp.constant(dword_offset_of(DoubleBallSocketData, "hertz"))
+_OFF_DAMPING_RATIO = wp.constant(dword_offset_of(DoubleBallSocketData, "damping_ratio"))
+_OFF_BIAS_RATE = wp.constant(dword_offset_of(DoubleBallSocketData, "bias_rate"))
+_OFF_MASS_COEFF = wp.constant(dword_offset_of(DoubleBallSocketData, "mass_coeff"))
+_OFF_IMPULSE_COEFF = wp.constant(dword_offset_of(DoubleBallSocketData, "impulse_coeff"))
 _OFF_BIAS1 = wp.constant(dword_offset_of(DoubleBallSocketData, "bias1"))
 _OFF_BIAS2 = wp.constant(dword_offset_of(DoubleBallSocketData, "bias2"))
 _OFF_A1_INV = wp.constant(dword_offset_of(DoubleBallSocketData, "a1_inv"))
@@ -412,23 +419,53 @@ def double_ball_socket_set_t2(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f
 
 
 @wp.func
-def double_ball_socket_get_bias_factor(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
-    return read_float(c, _OFF_BIAS_FACTOR, cid)
+def double_ball_socket_get_hertz(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_HERTZ, cid)
 
 
 @wp.func
-def double_ball_socket_set_bias_factor(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
-    write_float(c, _OFF_BIAS_FACTOR, cid, v)
+def double_ball_socket_set_hertz(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_HERTZ, cid, v)
 
 
 @wp.func
-def double_ball_socket_get_softness(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
-    return read_float(c, _OFF_SOFTNESS, cid)
+def double_ball_socket_get_damping_ratio(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_DAMPING_RATIO, cid)
 
 
 @wp.func
-def double_ball_socket_set_softness(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
-    write_float(c, _OFF_SOFTNESS, cid, v)
+def double_ball_socket_set_damping_ratio(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_DAMPING_RATIO, cid, v)
+
+
+@wp.func
+def double_ball_socket_get_bias_rate(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_BIAS_RATE, cid)
+
+
+@wp.func
+def double_ball_socket_set_bias_rate(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_BIAS_RATE, cid, v)
+
+
+@wp.func
+def double_ball_socket_get_mass_coeff(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_MASS_COEFF, cid)
+
+
+@wp.func
+def double_ball_socket_set_mass_coeff(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_MASS_COEFF, cid, v)
+
+
+@wp.func
+def double_ball_socket_get_impulse_coeff(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_IMPULSE_COEFF, cid)
+
+
+@wp.func
+def double_ball_socket_set_impulse_coeff(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_IMPULSE_COEFF, cid, v)
 
 
 @wp.func
@@ -515,6 +552,8 @@ def double_ball_socket_initialize_kernel(
     body2: wp.array[wp.int32],
     anchor1: wp.array[wp.vec3f],
     anchor2: wp.array[wp.vec3f],
+    hertz: wp.array[wp.float32],
+    damping_ratio: wp.array[wp.float32],
 ):
     """Pack one batch of fused-hinge descriptors into ``constraints``.
 
@@ -572,8 +611,11 @@ def double_ball_socket_initialize_kernel(
     double_ball_socket_set_accumulated_impulse1(constraints, cid, zero3)
     double_ball_socket_set_accumulated_impulse2(constraints, cid, zero3)
 
-    double_ball_socket_set_bias_factor(constraints, cid, DEFAULT_LINEAR_BIAS)
-    double_ball_socket_set_softness(constraints, cid, DEFAULT_LINEAR_SOFTNESS)
+    double_ball_socket_set_hertz(constraints, cid, hertz[tid])
+    double_ball_socket_set_damping_ratio(constraints, cid, damping_ratio[tid])
+    double_ball_socket_set_bias_rate(constraints, cid, 0.0)
+    double_ball_socket_set_mass_coeff(constraints, cid, 1.0)
+    double_ball_socket_set_impulse_coeff(constraints, cid, 0.0)
 
     eye = wp.identity(3, dtype=wp.float32)
     double_ball_socket_set_a1_inv(constraints, cid, eye)
@@ -683,25 +725,20 @@ def double_ball_socket_prepare_for_iteration_at(
     cr2_b2 = wp.skew(r2_b2)
 
     eye3 = wp.identity(3, dtype=wp.float32)
-    softness = read_float(constraints, base_offset + _OFF_SOFTNESS, cid) * idt
 
-    # A1 = standard ball-socket effective mass at anchor 1 (+ softness on diag).
+    # A1 = standard ball-socket effective mass at anchor 1. NOTE: kept
+    # *unsoftened* -- softness is applied in iterate via the Box2D/Bepu
+    # mass_coeff / impulse_coeff scalars.
     a1 = inv_mass1 * eye3
     a1 = a1 + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr1_b1))
     a1 = a1 + inv_mass2 * eye3
     a1 = a1 + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr1_b2))
-    a1[0, 0] = a1[0, 0] + softness
-    a1[1, 1] = a1[1, 1] + softness
-    a1[2, 2] = a1[2, 2] + softness
 
-    # A2 = same at anchor 2 (+ softness on diag, will be projected to 2x2 below).
+    # A2 = same at anchor 2 (will be projected to 2x2 below).
     a2 = inv_mass1 * eye3
     a2 = a2 + cr2_b1 @ (inv_inertia1 @ wp.transpose(cr2_b1))
     a2 = a2 + inv_mass2 * eye3
     a2 = a2 + cr2_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
-    a2[0, 0] = a2[0, 0] + softness
-    a2[1, 1] = a2[1, 1] + softness
-    a2[2, 2] = a2[2, 2] + softness
 
     # B = cross-anchor coupling J1 M^{-1} J2^T.
     b_mat = (inv_mass1 + inv_mass2) * eye3
@@ -751,14 +788,25 @@ def double_ball_socket_prepare_for_iteration_at(
     write_mat33(constraints, base_offset + _OFF_UT_AI, cid, ut_ai)
     write_mat33(constraints, base_offset + _OFF_S_INV, cid, s_inv_packed)
 
-    # Bias terms (Baumgarte position drift -> velocity correction).
+    # Time-step-independent soft-constraint coefficients (Box2D v3 /
+    # Bepu / Nordby; see :func:`soft_constraint_coefficients`). The
+    # same (hertz, damping_ratio) pair governs both anchor blocks of
+    # the Schur solve since they're modelling the same physical hinge.
+    hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
+    damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
+    dt = 1.0 / idt
+    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt)
+    write_float(constraints, base_offset + _OFF_BIAS_RATE, cid, bias_rate)
+    write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
+    write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
+
+    # Bias terms (positional drift -> velocity correction).
     # Anchor 1: full 3-vector. Anchor 2: project drift onto (t1, t2),
     # store as the first two components of a vec3 with the third 0.
-    bias_factor = read_float(constraints, base_offset + _OFF_BIAS_FACTOR, cid)
-    bias1 = (p1_b2 - p1_b1) * bias_factor * idt
+    bias1 = (p1_b2 - p1_b1) * bias_rate
     drift2 = p2_b2 - p2_b1
-    bias2_t1 = wp.dot(t1, drift2) * bias_factor * idt
-    bias2_t2 = wp.dot(t2, drift2) * bias_factor * idt
+    bias2_t1 = wp.dot(t1, drift2) * bias_rate
+    bias2_t2 = wp.dot(t2, drift2) * bias_rate
     bias2 = wp.vec3f(bias2_t1, bias2_t2, 0.0)
     write_vec3(constraints, base_offset + _OFF_BIAS1, cid, bias1)
     write_vec3(constraints, base_offset + _OFF_BIAS2, cid, bias2)
@@ -828,15 +876,17 @@ def double_ball_socket_iterate_at(
     s_inv_packed = read_mat33(constraints, base_offset + _OFF_S_INV, cid)
     bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
     bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
-    softness = read_float(constraints, base_offset + _OFF_SOFTNESS, cid)
+    mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF, cid)
+    impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid)
 
     acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
     acc2_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
     # Project the world-frame anchor-2 accumulated impulse onto the
-    # current tangent basis so the softness term and the impulse update
-    # below stay self-consistent in tangent coordinates.
+    # current tangent basis so the impulse-coefficient damping below
+    # operates on the same coordinates as the impulse update itself.
     acc2_t1 = wp.dot(t1, acc2_world)
     acc2_t2 = wp.dot(t2, acc2_world)
+    acc2_tan = wp.vec2f(acc2_t1, acc2_t2)
 
     # Velocity error at anchor 1 (jv1 = -v1 + cr1_b1*w1 + v2 - cr1_b2*w2),
     # full 3-vector.
@@ -846,22 +896,23 @@ def double_ball_socket_iterate_at(
     jv2_world = -velocity1 + cr2_b1 @ angular_velocity1 + velocity2 - cr2_b2 @ angular_velocity2
     jv2_t1 = wp.dot(t1, jv2_world)
     jv2_t2 = wp.dot(t2, jv2_world)
+    jv2 = wp.vec2f(jv2_t1, jv2_t2)
+    bias2_tan = wp.vec2f(bias2[0], bias2[1])
 
-    # Soft-constraint contribution (matches single ball-socket: the
-    # softness term shrinks the cumulative impulse toward zero by
-    # adding ``softness * idt * acc`` to the right-hand side).
-    softness_idt = softness * idt
-    rhs1 = jv1 + bias1 + acc1 * softness_idt
-    rhs2_t1 = jv2_t1 + bias2[0] + acc2_t1 * softness_idt
-    rhs2_t2 = jv2_t2 + bias2[1] + acc2_t2 * softness_idt
-    rhs2 = wp.vec2f(rhs2_t1, rhs2_t2)
+    # Schur-complement solve, Box2D/Bepu soft form:
+    #   delta_lambda = -mass_coeff * K^{-1} (Jv + bias)
+    #                  - impulse_coeff * acc
+    # Block-eliminate (anchor 1 is the 3x3 block, anchor 2 the 2x2):
+    #   lam2_us = -S^{-1} ( rhs2 - U^T A1^{-1} rhs1 )
+    #   lam1_us = -A1^{-1} ( rhs1 + U lam2_us )
+    #   delta_lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
+    #   delta_lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
+    # We compute the unsoftened (`*_us`) increments first, then apply
+    # the per-iteration scaling so each block is solved with one
+    # consistent K^{-1} multiplication.
+    rhs1 = jv1 + bias1
+    rhs2 = jv2 + bias2_tan
 
-    # Schur-complement solve:
-    #   lambda2 = -S^{-1} ( rhs2 - U^T A1^{-1} rhs1 )
-    #   lambda1 = -A1^{-1} ( rhs1 + U lambda2 )
-    # ``ut_ai`` is the precomputed 3x3 with U^T A1^{-1} in the top-left
-    # 2x3; multiplying by rhs1 then taking the first two components
-    # gives the 2-vector U^T A1^{-1} rhs1.
     ut_ai_rhs1_3 = ut_ai @ rhs1
     ut_ai_rhs1 = wp.vec2f(ut_ai_rhs1_3[0], ut_ai_rhs1_3[1])
 
@@ -869,27 +920,30 @@ def double_ball_socket_iterate_at(
         s_inv_packed[0, 0], s_inv_packed[0, 1],
         s_inv_packed[1, 0], s_inv_packed[1, 1],
     )
-    lam2 = -(s_inv_22 @ (rhs2 - ut_ai_rhs1))
+    lam2_us = -(s_inv_22 @ (rhs2 - ut_ai_rhs1))
+    lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
 
-    # Re-expand lambda2 from tangent coordinates to a world 3-vector
-    # so we can fold it into the 3x3 anchor-1 equation and into the
-    # impulse application below.
+    # Re-expand lambda2 (and its unsoftened twin) from tangent
+    # coordinates to a world 3-vector so we can fold them into the
+    # 3x3 anchor-1 equation and into the impulse application below.
     lam2_world = lam2[0] * t1 + lam2[1] * t2
+    lam2_us_world = lam2_us[0] * t1 + lam2_us[1] * t2
 
-    # U lambda2 = B (T lambda2) = B lambda2_world. We don't have B
+    # U lam2_us = B (T lam2_us) = B lam2_us_world. We don't have B
     # cached separately (we packed U = B T into ut_ai indirectly),
-    # but we can reconstruct U lambda2 from the original Jacobian
-    # decomposition: it is exactly the cross-block contribution of
-    # the anchor-2 impulse to the anchor-1 row, i.e.
-    #     U lambda2 = (m1^{-1} + m2^{-1}) lambda2_world
-    #               + cr1_b1 I1^{-1} cr2_b1^T lambda2_world
-    #               + cr1_b2 I2^{-1} cr2_b2^T lambda2_world
+    # but we can reconstruct U lam2_us from the original Jacobian
+    # decomposition: it is exactly the cross-block contribution of the
+    # anchor-2 impulse to the anchor-1 row, i.e.
+    #     U lam = (m1^{-1} + m2^{-1}) lam_world
+    #           + cr1_b1 I1^{-1} cr2_b1^T lam_world
+    #           + cr1_b2 I2^{-1} cr2_b2^T lam_world
     # (Same structure as the B matrix in prepare_for_iteration.)
-    u_lam2 = (inv_mass1 + inv_mass2) * lam2_world
-    u_lam2 = u_lam2 + cr1_b1 @ (inv_inertia1 @ (wp.transpose(cr2_b1) @ lam2_world))
-    u_lam2 = u_lam2 + cr1_b2 @ (inv_inertia2 @ (wp.transpose(cr2_b2) @ lam2_world))
+    u_lam2_us = (inv_mass1 + inv_mass2) * lam2_us_world
+    u_lam2_us = u_lam2_us + cr1_b1 @ (inv_inertia1 @ (wp.transpose(cr2_b1) @ lam2_us_world))
+    u_lam2_us = u_lam2_us + cr1_b2 @ (inv_inertia2 @ (wp.transpose(cr2_b2) @ lam2_us_world))
 
-    lam1 = -(a1_inv @ (rhs1 + u_lam2))
+    lam1_us = -(a1_inv @ (rhs1 + u_lam2_us))
+    lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
 
     # Total per-body linear impulse is lam1 + lam2_world (anchor-1 +
     # anchor-2 in world coordinates); torque contributions split per

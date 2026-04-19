@@ -46,6 +46,11 @@ from newton._src.solvers.jitter.constraint_ball_socket import (
     ball_socket_initialize_kernel,
 )
 from newton._src.solvers.jitter.constraint_container import (
+    DEFAULT_DAMPING_RATIO,
+    DEFAULT_HERTZ_ANGULAR,
+    DEFAULT_HERTZ_LIMIT,
+    DEFAULT_HERTZ_LINEAR,
+    DEFAULT_HERTZ_MOTOR,
     ConstraintContainer,
     constraint_container_zeros,
 )
@@ -119,12 +124,18 @@ class BallSocketDescriptor:
 
     The ``anchor`` is a single point in *world* space; finalize() asks
     each body to express it in its own local frame (mirrors
-    ``BallSocket.Initialize``).
+    ``BallSocket.Initialize``). ``hertz`` and ``damping_ratio`` follow
+    the Box2D v3 / Bepu soft-constraint formulation: ``hertz`` is the
+    undamped natural frequency [Hz] of the joint as a virtual spring,
+    ``damping_ratio`` is non-dimensional (1 = critically damped). See
+    :func:`soft_constraint_coefficients`.
     """
 
     body1: int
     body2: int
     anchor: tuple[float, float, float]
+    hertz: float = float(DEFAULT_HERTZ_LINEAR)
+    damping_ratio: float = float(DEFAULT_DAMPING_RATIO)
 
 
 @dataclass
@@ -135,6 +146,12 @@ class HingeAngleDescriptor:
     transforms it into body 2's local frame, mirroring
     ``HingeAngle.Initialize``. ``min_angle`` / ``max_angle`` are in
     radians.
+
+    ``hertz_lock`` / ``damping_ratio_lock`` parametrise the perpendicular
+    -to-hinge angular lock (rows 0 / 1 of the Jacobian) as a Box2D / Bepu
+    soft-constraint pair; ``hertz_limit`` / ``damping_ratio_limit`` do
+    the same for the axial min / max limit (row 2). See
+    :func:`soft_constraint_coefficients` for the formulation.
     """
 
     body1: int
@@ -142,6 +159,10 @@ class HingeAngleDescriptor:
     axis: tuple[float, float, float]
     min_angle: float = -math.pi
     max_angle: float = math.pi
+    hertz_lock: float = float(DEFAULT_HERTZ_ANGULAR)
+    damping_ratio_lock: float = float(DEFAULT_DAMPING_RATIO)
+    hertz_limit: float = float(DEFAULT_HERTZ_LIMIT)
+    damping_ratio_limit: float = float(DEFAULT_DAMPING_RATIO)
 
 
 @dataclass
@@ -152,6 +173,12 @@ class AngularMotorDescriptor:
     space at construction time) toward ``target_velocity`` [rad/s] using
     at most ``max_force`` [N·m] of torque. ``max_force = 0`` (Jitter
     default) yields a *disabled* motor that does nothing.
+
+    ``hertz`` / ``damping_ratio`` follow the Box2D v3 / Bepu soft-
+    constraint formulation (see :func:`soft_constraint_coefficients`).
+    For a velocity motor ``hertz`` controls how aggressively the
+    accumulated impulse decays toward the velocity setpoint -- higher
+    values give a stiffer motor that tracks the target more tightly.
     """
 
     body1: int
@@ -159,6 +186,8 @@ class AngularMotorDescriptor:
     axis: tuple[float, float, float]
     target_velocity: float = 0.0
     max_force: float = 0.0
+    hertz: float = float(DEFAULT_HERTZ_MOTOR)
+    damping_ratio: float = float(DEFAULT_DAMPING_RATIO)
 
 
 @dataclass
@@ -187,6 +216,14 @@ class HingeJointDescriptor:
     max_angle: float = math.pi
     target_velocity: float = 0.0
     max_force: float = 0.0
+    hertz_linear: float = float(DEFAULT_HERTZ_LINEAR)
+    damping_ratio_linear: float = float(DEFAULT_DAMPING_RATIO)
+    hertz_lock: float = float(DEFAULT_HERTZ_ANGULAR)
+    damping_ratio_lock: float = float(DEFAULT_DAMPING_RATIO)
+    hertz_limit: float = float(DEFAULT_HERTZ_LIMIT)
+    damping_ratio_limit: float = float(DEFAULT_DAMPING_RATIO)
+    hertz_motor: float = float(DEFAULT_HERTZ_MOTOR)
+    damping_ratio_motor: float = float(DEFAULT_DAMPING_RATIO)
 
 
 @dataclass
@@ -222,12 +259,19 @@ class DoubleBallSocketHingeDescriptor:
 
     ``anchor1`` and ``anchor2`` are in *world* space at finalize() time
     and define the hinge axis as ``anchor2 - anchor1``.
+
+    ``hertz`` / ``damping_ratio`` follow the Box2D v3 / Bepu soft-
+    constraint formulation (see :func:`soft_constraint_coefficients`).
+    A single pair governs both anchor blocks of the Schur solve since
+    they're modelling the same physical hinge.
     """
 
     body1: int
     body2: int
     anchor1: tuple[float, float, float]
     anchor2: tuple[float, float, float]
+    hertz: float = float(DEFAULT_HERTZ_LINEAR)
+    damping_ratio: float = float(DEFAULT_DAMPING_RATIO)
 
 
 @dataclass
@@ -375,14 +419,30 @@ class WorldBuilder:
         body1: int,
         body2: int,
         anchor: tuple[float, float, float],
+        hertz: float = float(DEFAULT_HERTZ_LINEAR),
+        damping_ratio: float = float(DEFAULT_DAMPING_RATIO),
     ) -> int:
         """Append a ball-and-socket constraint and return its (per-type)
         index. Both ``body1`` and ``body2`` must be valid body indices
         (i.e. returned from one of the ``add_*_body`` methods or 0 for
-        the static world body)."""
+        the static world body).
+
+        Args:
+            body1: First body index.
+            body2: Second body index.
+            anchor: World-space anchor point [m].
+            hertz: Soft-constraint stiffness target [Hz]; lower values
+                make the joint more compliant. Defaults to
+                :data:`DEFAULT_HERTZ_LINEAR`.
+            damping_ratio: Non-dimensional damping ratio (1 is critical,
+                <1 underdamped, >1 overdamped). Defaults to
+                :data:`DEFAULT_DAMPING_RATIO`.
+        """
         self._validate_body(body1)
         self._validate_body(body2)
-        self._ball_sockets.append(BallSocketDescriptor(body1, body2, anchor))
+        self._ball_sockets.append(
+            BallSocketDescriptor(body1, body2, anchor, hertz, damping_ratio)
+        )
         return len(self._ball_sockets) - 1
 
     def add_hinge_angle(
@@ -392,16 +452,36 @@ class WorldBuilder:
         axis: tuple[float, float, float],
         min_angle: float = -math.pi,
         max_angle: float = math.pi,
+        hertz_lock: float = float(DEFAULT_HERTZ_ANGULAR),
+        damping_ratio_lock: float = float(DEFAULT_DAMPING_RATIO),
+        hertz_limit: float = float(DEFAULT_HERTZ_LIMIT),
+        damping_ratio_limit: float = float(DEFAULT_DAMPING_RATIO),
     ) -> int:
         """Append a stand-alone hinge-angle (2-DoF) constraint and return
         its per-type index. ``axis`` is interpreted in *world* space at
         finalize() time and snapshotted into body 2's local frame, just
         like ``HingeAngle.Initialize``. Limits are in radians; the
-        defaults (``+- pi``) effectively disable the limit."""
+        defaults (``+- pi``) effectively disable the limit.
+
+        ``hertz_lock`` / ``damping_ratio_lock`` set the soft-constraint
+        spring/damper for the two perpendicular angular DoFs (the lock
+        itself); ``hertz_limit`` / ``damping_ratio_limit`` do the same
+        for the axial min/max limit only.
+        """
         self._validate_body(body1)
         self._validate_body(body2)
         self._hinge_angles.append(
-            HingeAngleDescriptor(body1, body2, axis, min_angle, max_angle)
+            HingeAngleDescriptor(
+                body1,
+                body2,
+                axis,
+                min_angle,
+                max_angle,
+                hertz_lock,
+                damping_ratio_lock,
+                hertz_limit,
+                damping_ratio_limit,
+            )
         )
         return len(self._hinge_angles) - 1
 
@@ -412,15 +492,23 @@ class WorldBuilder:
         axis: tuple[float, float, float],
         target_velocity: float = 0.0,
         max_force: float = 0.0,
+        hertz: float = float(DEFAULT_HERTZ_MOTOR),
+        damping_ratio: float = float(DEFAULT_DAMPING_RATIO),
     ) -> int:
         """Append a stand-alone angular-velocity motor and return its
         per-type index. ``axis`` is in world space; ``target_velocity``
         in rad/s; ``max_force`` in N·m. ``max_force=0`` (the default)
-        gives a *disabled* motor that applies no torque."""
+        gives a *disabled* motor that applies no torque.
+
+        ``hertz`` / ``damping_ratio`` parametrise the velocity-tracking
+        spring/damper using the Box2D v3 / Bepu soft-constraint
+        formulation. See :class:`AngularMotorDescriptor`."""
         self._validate_body(body1)
         self._validate_body(body2)
         self._angular_motors.append(
-            AngularMotorDescriptor(body1, body2, axis, target_velocity, max_force)
+            AngularMotorDescriptor(
+                body1, body2, axis, target_velocity, max_force, hertz, damping_ratio
+            )
         )
         return len(self._angular_motors) - 1
 
@@ -435,6 +523,14 @@ class WorldBuilder:
         motor: bool = False,
         target_velocity: float = 0.0,
         max_force: float = 0.0,
+        hertz_linear: float = float(DEFAULT_HERTZ_LINEAR),
+        damping_ratio_linear: float = float(DEFAULT_DAMPING_RATIO),
+        hertz_lock: float = float(DEFAULT_HERTZ_ANGULAR),
+        damping_ratio_lock: float = float(DEFAULT_DAMPING_RATIO),
+        hertz_limit: float = float(DEFAULT_HERTZ_LIMIT),
+        damping_ratio_limit: float = float(DEFAULT_DAMPING_RATIO),
+        hertz_motor: float = float(DEFAULT_HERTZ_MOTOR),
+        damping_ratio_motor: float = float(DEFAULT_DAMPING_RATIO),
     ) -> HingeJointHandle:
         """Append a Jitter-style hinge joint and return its handle.
 
@@ -477,6 +573,14 @@ class WorldBuilder:
             max_angle=max_angle,
             target_velocity=tv,
             max_force=mf,
+            hertz_linear=hertz_linear,
+            damping_ratio_linear=damping_ratio_linear,
+            hertz_lock=hertz_lock,
+            damping_ratio_lock=damping_ratio_lock,
+            hertz_limit=hertz_limit,
+            damping_ratio_limit=damping_ratio_limit,
+            hertz_motor=hertz_motor,
+            damping_ratio_motor=damping_ratio_motor,
         )
         handle = HingeJointHandle(cid=-1)
         self._hinge_joint_descriptors.append(descriptor)
@@ -489,6 +593,8 @@ class WorldBuilder:
         body2: int,
         anchor1: tuple[float, float, float],
         anchor2: tuple[float, float, float],
+        hertz: float = float(DEFAULT_HERTZ_LINEAR),
+        damping_ratio: float = float(DEFAULT_DAMPING_RATIO),
     ) -> DoubleBallSocketHingeHandle:
         """Append a fused two-anchor "double ball-socket" hinge constraint
         and return its handle.
@@ -518,6 +624,8 @@ class WorldBuilder:
             body2=body2,
             anchor1=anchor1,
             anchor2=anchor2,
+            hertz=hertz,
+            damping_ratio=damping_ratio,
         )
         handle = DoubleBallSocketHingeHandle(cid=-1)
         self._double_ball_socket_hinge_descriptors.append(descriptor)
@@ -730,15 +838,30 @@ class WorldBuilder:
         body1 = np.asarray([d.body1 for d in self._ball_sockets], dtype=np.int32)
         body2 = np.asarray([d.body2 for d in self._ball_sockets], dtype=np.int32)
         anchor = np.asarray([d.anchor for d in self._ball_sockets], dtype=np.float32)
+        hertz = np.asarray([d.hertz for d in self._ball_sockets], dtype=np.float32)
+        damping_ratio = np.asarray(
+            [d.damping_ratio for d in self._ball_sockets], dtype=np.float32
+        )
 
         body1_d = wp.array(body1, dtype=wp.int32, device=device)
         body2_d = wp.array(body2, dtype=wp.int32, device=device)
         anchor_d = wp.array(anchor, dtype=wp.vec3f, device=device)
+        hertz_d = wp.array(hertz, dtype=wp.float32, device=device)
+        damping_ratio_d = wp.array(damping_ratio, dtype=wp.float32, device=device)
 
         wp.launch(
             ball_socket_initialize_kernel,
             dim=n,
-            inputs=[constraints, bodies, int(cid_offset), body1_d, body2_d, anchor_d],
+            inputs=[
+                constraints,
+                bodies,
+                int(cid_offset),
+                body1_d,
+                body2_d,
+                anchor_d,
+                hertz_d,
+                damping_ratio_d,
+            ],
             device=device,
         )
 
@@ -756,12 +879,30 @@ class WorldBuilder:
         axis = np.asarray([d.axis for d in self._hinge_angles], dtype=np.float32)
         min_angle = np.asarray([d.min_angle for d in self._hinge_angles], dtype=np.float32)
         max_angle = np.asarray([d.max_angle for d in self._hinge_angles], dtype=np.float32)
+        hertz_lock = np.asarray(
+            [d.hertz_lock for d in self._hinge_angles], dtype=np.float32
+        )
+        damping_ratio_lock = np.asarray(
+            [d.damping_ratio_lock for d in self._hinge_angles], dtype=np.float32
+        )
+        hertz_limit = np.asarray(
+            [d.hertz_limit for d in self._hinge_angles], dtype=np.float32
+        )
+        damping_ratio_limit = np.asarray(
+            [d.damping_ratio_limit for d in self._hinge_angles], dtype=np.float32
+        )
 
         body1_d = wp.array(body1, dtype=wp.int32, device=device)
         body2_d = wp.array(body2, dtype=wp.int32, device=device)
         axis_d = wp.array(axis, dtype=wp.vec3f, device=device)
         min_angle_d = wp.array(min_angle, dtype=wp.float32, device=device)
         max_angle_d = wp.array(max_angle, dtype=wp.float32, device=device)
+        hertz_lock_d = wp.array(hertz_lock, dtype=wp.float32, device=device)
+        damping_ratio_lock_d = wp.array(damping_ratio_lock, dtype=wp.float32, device=device)
+        hertz_limit_d = wp.array(hertz_limit, dtype=wp.float32, device=device)
+        damping_ratio_limit_d = wp.array(
+            damping_ratio_limit, dtype=wp.float32, device=device
+        )
 
         wp.launch(
             hinge_angle_initialize_kernel,
@@ -775,6 +916,10 @@ class WorldBuilder:
                 axis_d,
                 min_angle_d,
                 max_angle_d,
+                hertz_lock_d,
+                damping_ratio_lock_d,
+                hertz_limit_d,
+                damping_ratio_limit_d,
             ],
             device=device,
         )
@@ -800,6 +945,12 @@ class WorldBuilder:
         max_force = np.asarray(
             [d.max_force for d in self._angular_motors], dtype=np.float32
         )
+        hertz = np.asarray(
+            [d.hertz for d in self._angular_motors], dtype=np.float32
+        )
+        damping_ratio = np.asarray(
+            [d.damping_ratio for d in self._angular_motors], dtype=np.float32
+        )
 
         body1_d = wp.array(body1, dtype=wp.int32, device=device)
         body2_d = wp.array(body2, dtype=wp.int32, device=device)
@@ -807,6 +958,8 @@ class WorldBuilder:
         axis2_d = wp.array(axis, dtype=wp.vec3f, device=device)
         target_velocity_d = wp.array(target_velocity, dtype=wp.float32, device=device)
         max_force_d = wp.array(max_force, dtype=wp.float32, device=device)
+        hertz_d = wp.array(hertz, dtype=wp.float32, device=device)
+        damping_ratio_d = wp.array(damping_ratio, dtype=wp.float32, device=device)
 
         wp.launch(
             angular_motor_initialize_kernel,
@@ -821,6 +974,8 @@ class WorldBuilder:
                 axis2_d,
                 target_velocity_d,
                 max_force_d,
+                hertz_d,
+                damping_ratio_d,
             ],
             device=device,
         )
@@ -865,6 +1020,34 @@ class WorldBuilder:
         max_force = np.asarray(
             [d.max_force for d in self._hinge_joint_descriptors], dtype=np.float32
         )
+        hertz_linear = np.asarray(
+            [d.hertz_linear for d in self._hinge_joint_descriptors], dtype=np.float32
+        )
+        damping_ratio_linear = np.asarray(
+            [d.damping_ratio_linear for d in self._hinge_joint_descriptors],
+            dtype=np.float32,
+        )
+        hertz_lock = np.asarray(
+            [d.hertz_lock for d in self._hinge_joint_descriptors], dtype=np.float32
+        )
+        damping_ratio_lock = np.asarray(
+            [d.damping_ratio_lock for d in self._hinge_joint_descriptors],
+            dtype=np.float32,
+        )
+        hertz_limit = np.asarray(
+            [d.hertz_limit for d in self._hinge_joint_descriptors], dtype=np.float32
+        )
+        damping_ratio_limit = np.asarray(
+            [d.damping_ratio_limit for d in self._hinge_joint_descriptors],
+            dtype=np.float32,
+        )
+        hertz_motor = np.asarray(
+            [d.hertz_motor for d in self._hinge_joint_descriptors], dtype=np.float32
+        )
+        damping_ratio_motor = np.asarray(
+            [d.damping_ratio_motor for d in self._hinge_joint_descriptors],
+            dtype=np.float32,
+        )
 
         body1_d = wp.array(body1, dtype=wp.int32, device=device)
         body2_d = wp.array(body2, dtype=wp.int32, device=device)
@@ -874,6 +1057,22 @@ class WorldBuilder:
         max_angle_d = wp.array(max_angle, dtype=wp.float32, device=device)
         target_velocity_d = wp.array(target_velocity, dtype=wp.float32, device=device)
         max_force_d = wp.array(max_force, dtype=wp.float32, device=device)
+        hertz_linear_d = wp.array(hertz_linear, dtype=wp.float32, device=device)
+        damping_ratio_linear_d = wp.array(
+            damping_ratio_linear, dtype=wp.float32, device=device
+        )
+        hertz_lock_d = wp.array(hertz_lock, dtype=wp.float32, device=device)
+        damping_ratio_lock_d = wp.array(
+            damping_ratio_lock, dtype=wp.float32, device=device
+        )
+        hertz_limit_d = wp.array(hertz_limit, dtype=wp.float32, device=device)
+        damping_ratio_limit_d = wp.array(
+            damping_ratio_limit, dtype=wp.float32, device=device
+        )
+        hertz_motor_d = wp.array(hertz_motor, dtype=wp.float32, device=device)
+        damping_ratio_motor_d = wp.array(
+            damping_ratio_motor, dtype=wp.float32, device=device
+        )
 
         wp.launch(
             hinge_joint_initialize_kernel,
@@ -890,6 +1089,14 @@ class WorldBuilder:
                 max_angle_d,
                 target_velocity_d,
                 max_force_d,
+                hertz_linear_d,
+                damping_ratio_linear_d,
+                hertz_lock_d,
+                damping_ratio_lock_d,
+                hertz_limit_d,
+                damping_ratio_limit_d,
+                hertz_motor_d,
+                damping_ratio_motor_d,
             ],
             device=device,
         )
@@ -922,11 +1129,21 @@ class WorldBuilder:
         anchor2 = np.asarray(
             [d.anchor2 for d in self._double_ball_socket_hinge_descriptors], dtype=np.float32
         )
+        hertz = np.asarray(
+            [d.hertz for d in self._double_ball_socket_hinge_descriptors],
+            dtype=np.float32,
+        )
+        damping_ratio = np.asarray(
+            [d.damping_ratio for d in self._double_ball_socket_hinge_descriptors],
+            dtype=np.float32,
+        )
 
         body1_d = wp.array(body1, dtype=wp.int32, device=device)
         body2_d = wp.array(body2, dtype=wp.int32, device=device)
         anchor1_d = wp.array(anchor1, dtype=wp.vec3f, device=device)
         anchor2_d = wp.array(anchor2, dtype=wp.vec3f, device=device)
+        hertz_d = wp.array(hertz, dtype=wp.float32, device=device)
+        damping_ratio_d = wp.array(damping_ratio, dtype=wp.float32, device=device)
 
         wp.launch(
             double_ball_socket_initialize_kernel,
@@ -939,6 +1156,8 @@ class WorldBuilder:
                 body2_d,
                 anchor1_d,
                 anchor2_d,
+                hertz_d,
+                damping_ratio_d,
             ],
             device=device,
         )

@@ -44,6 +44,11 @@ __all__ = [
     "CONSTRAINT_TYPE_HINGE_JOINT",
     "CONSTRAINT_TYPE_INVALID",
     "CONSTRAINT_TYPE_OFFSET",
+    "DEFAULT_DAMPING_RATIO",
+    "DEFAULT_HERTZ_ANGULAR",
+    "DEFAULT_HERTZ_LINEAR",
+    "DEFAULT_HERTZ_LIMIT",
+    "DEFAULT_HERTZ_MOTOR",
     "ConstraintBodies",
     "ConstraintContainer",
     "assert_constraint_header",
@@ -60,6 +65,7 @@ __all__ = [
     "read_mat33",
     "read_quat",
     "read_vec3",
+    "soft_constraint_coefficients",
     "write_float",
     "write_int",
     "write_mat33",
@@ -386,3 +392,96 @@ def constraint_bodies_make(b1: wp.int32, b2: wp.int32) -> ConstraintBodies:
     bp.b1 = b1
     bp.b2 = b2
     return bp
+
+
+# ---------------------------------------------------------------------------
+# Soft-constraint coefficients (Box2D v3 / Bepu / Nordby formulation)
+# ---------------------------------------------------------------------------
+#
+# All bilateral joints in this solver share one formulation of "softness":
+# the user specifies an undamped natural frequency ``hertz`` (Hz) and a
+# non-dimensional ``damping_ratio`` (1 = critically damped) and the per-
+# substep PGS coefficients are computed from those plus the current
+# substep ``dt``. This makes the joint behaviour
+#
+#   * mass-independent  (the body inertia drops out of the spring math),
+#   * time-step-independent (recomputed every prepare from the actual dt),
+#
+# which is the textbook fix for the "world-anchor joint goes unstable
+# when you halve the substep" failure mode of plain Baumgarte / fixed-
+# CFM solvers. See Box2D's solver2d post for the derivation:
+# https://box2d.org/posts/2024/02/solver2d/  (the "Soft Constraints"
+# section). The three returned coefficients plug straight into PGS:
+#
+#     incremental_lambda = -mass_coeff * effective_mass * (jv + bias_rate * separation)
+#                          - impulse_coeff * accumulated_impulse
+#
+# Equivalently, the second term replaces the legacy ``softness * idt *
+# accumulated_impulse`` "softness vector" -- it lets the accumulated
+# impulse leak away over time so the joint asymptotes to the spring-
+# damper response instead of the perfectly-rigid one.
+#
+# Recommended hertz: keep it at ~ (substep_rate / 4) or below
+# (Nyquist + a safety factor). For a 60Hz frame rate at 8 substeps that's
+# substep_rate = 480Hz, so hertz <= 120 stays comfortably stable. The
+# defaults below sit at hertz = 60 / 30 / 30, well inside that envelope
+# and rigid-feeling.
+
+#: Critically damped by default -- no overshoot, no underdamped ringing.
+DEFAULT_DAMPING_RATIO = wp.constant(wp.float32(1.0))
+#: Linear (positional) joint stiffness target. Translates to ~1mm sag
+#: under 100N for a unit-mass body at 60Hz substep rate.
+DEFAULT_HERTZ_LINEAR = wp.constant(wp.float32(60.0))
+#: Angular (rotational lock) joint stiffness. Lower than the linear knob
+#: because the angular Jacobian already inflates the response (skew-r
+#: lever arms multiply impulses), so the same hertz value would over-shoot.
+DEFAULT_HERTZ_ANGULAR = wp.constant(wp.float32(30.0))
+#: Hinge / cone limit stiffness. Same conservative value as the angular
+#: hinge so a body hitting its limit doesn't bounce.
+DEFAULT_HERTZ_LIMIT = wp.constant(wp.float32(30.0))
+#: Velocity-target motors don't carry a positional bias, so hertz here
+#: only modulates the impulse-coefficient (how aggressively the motor
+#: clamps to the target velocity). Slightly higher than the angular lock
+#: so motors feel responsive without ringing.
+DEFAULT_HERTZ_MOTOR = wp.constant(wp.float32(60.0))
+
+
+@wp.func
+def soft_constraint_coefficients(
+    hertz: wp.float32,
+    damping_ratio: wp.float32,
+    dt: wp.float32,
+):
+    """Map ``(hertz, damping_ratio, dt)`` to PGS soft-constraint coefficients.
+
+    Direct port of the formulation in
+    https://box2d.org/posts/2024/02/solver2d/ ("Soft Constraints",
+    pseudo-code block) which Erin Catto credits to Ross Nordby of Bepu.
+    The inputs are the user-facing knobs (independent of mass and
+    time step); the outputs feed straight into the PGS update.
+
+    Returns ``(bias_rate, mass_coeff, impulse_coeff)``:
+
+      * ``bias_rate``    [1/s] -- multiplies a positional separation
+        to produce a velocity-correction bias.
+      * ``mass_coeff``   [-]   -- scales the unsoftened ``effective_mass``
+        in the per-iteration impulse calculation, lies in ``[0, 1]``.
+      * ``impulse_coeff``[-]   -- damps the accumulated impulse term
+        ("softness leak"), also in ``[0, 1]``.
+
+    As ``hertz -> infinity`` (or ``dt -> 0``) ``mass_coeff -> 1`` and
+    ``impulse_coeff -> 0``, recovering the rigid-constraint PGS update.
+    Lowering ``hertz`` makes the joint progressively softer.
+
+    Setting ``hertz <= 0`` produces a *rigid* constraint:
+    ``bias_rate = 0``, ``mass_coeff = 1``, ``impulse_coeff = 0`` --
+    exactly the un-softened plain-PGS update.
+    """
+    if hertz <= 0.0:
+        return wp.float32(0.0), wp.float32(1.0), wp.float32(0.0)
+
+    omega = 2.0 * 3.14159265358979 * hertz
+    a1 = 2.0 * damping_ratio + omega * dt
+    a2 = dt * omega * a1
+    a3 = 1.0 / (1.0 + a2)
+    return omega / a1, a2 * a3, a3

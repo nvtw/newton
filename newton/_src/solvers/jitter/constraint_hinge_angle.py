@@ -49,6 +49,9 @@ import warp as wp
 from newton._src.solvers.jitter.body import BodyContainer
 from newton._src.solvers.jitter.constraint_container import (
     CONSTRAINT_TYPE_HINGE_ANGLE,
+    DEFAULT_DAMPING_RATIO,
+    DEFAULT_HERTZ_ANGULAR,
+    DEFAULT_HERTZ_LIMIT,
     ConstraintBodies,
     ConstraintContainer,
     assert_constraint_header,
@@ -59,6 +62,7 @@ from newton._src.solvers.jitter.constraint_container import (
     read_mat33,
     read_quat,
     read_vec3,
+    soft_constraint_coefficients,
     write_float,
     write_int,
     write_mat33,
@@ -72,27 +76,29 @@ from newton._src.solvers.jitter.math_helpers import (
 )
 
 __all__ = [
-    "DEFAULT_ANGULAR_BIAS",
-    "DEFAULT_ANGULAR_LIMIT_BIAS",
-    "DEFAULT_ANGULAR_LIMIT_SOFTNESS",
-    "DEFAULT_ANGULAR_SOFTNESS",
     "HA_DWORDS",
     "HingeAngleData",
     "hinge_angle_get_accumulated_impulse",
     "hinge_angle_get_axis",
     "hinge_angle_get_bias",
-    "hinge_angle_get_bias_factor",
+    "hinge_angle_get_bias_rate_lock",
+    "hinge_angle_get_bias_rate_limit",
     "hinge_angle_get_body1",
     "hinge_angle_get_body2",
     "hinge_angle_get_clamp",
+    "hinge_angle_get_damping_ratio_limit",
+    "hinge_angle_get_damping_ratio_lock",
     "hinge_angle_get_effective_mass",
+    "hinge_angle_get_hertz_limit",
+    "hinge_angle_get_hertz_lock",
+    "hinge_angle_get_impulse_coeff_lock",
+    "hinge_angle_get_impulse_coeff_limit",
     "hinge_angle_get_jacobian",
-    "hinge_angle_get_limit_bias",
-    "hinge_angle_get_limit_softness",
+    "hinge_angle_get_mass_coeff_limit",
+    "hinge_angle_get_mass_coeff_lock",
     "hinge_angle_get_max_angle",
     "hinge_angle_get_min_angle",
     "hinge_angle_get_q0",
-    "hinge_angle_get_softness",
     "hinge_angle_initialize_kernel",
     "hinge_angle_iterate",
     "hinge_angle_iterate_at",
@@ -101,33 +107,27 @@ __all__ = [
     "hinge_angle_set_accumulated_impulse",
     "hinge_angle_set_axis",
     "hinge_angle_set_bias",
-    "hinge_angle_set_bias_factor",
+    "hinge_angle_set_bias_rate_limit",
+    "hinge_angle_set_bias_rate_lock",
     "hinge_angle_set_body1",
     "hinge_angle_set_body2",
     "hinge_angle_set_clamp",
+    "hinge_angle_set_damping_ratio_limit",
+    "hinge_angle_set_damping_ratio_lock",
     "hinge_angle_set_effective_mass",
+    "hinge_angle_set_hertz_limit",
+    "hinge_angle_set_hertz_lock",
+    "hinge_angle_set_impulse_coeff_limit",
+    "hinge_angle_set_impulse_coeff_lock",
     "hinge_angle_set_jacobian",
-    "hinge_angle_set_limit_bias",
-    "hinge_angle_set_limit_softness",
+    "hinge_angle_set_mass_coeff_limit",
+    "hinge_angle_set_mass_coeff_lock",
     "hinge_angle_set_max_angle",
     "hinge_angle_set_min_angle",
     "hinge_angle_set_q0",
-    "hinge_angle_set_softness",
     "hinge_angle_world_wrench",
     "hinge_angle_world_wrench_at",
 ]
-
-
-# ---------------------------------------------------------------------------
-# Constants (mirrors Jitter2.Dynamics.Constraints.Constraint)
-# ---------------------------------------------------------------------------
-
-# Defaults from Constraint.cs:192-201. Exposed at module scope so callers
-# (e.g. the world builder) can override per-constraint if they want.
-DEFAULT_ANGULAR_SOFTNESS = wp.constant(wp.float32(0.001))
-DEFAULT_ANGULAR_BIAS = wp.constant(wp.float32(0.2))
-DEFAULT_ANGULAR_LIMIT_SOFTNESS = wp.constant(wp.float32(0.001))
-DEFAULT_ANGULAR_LIMIT_BIAS = wp.constant(wp.float32(0.1))
 
 # Clamp state values for the limit branch in PrepareForIteration /
 # Iterate. Match the C# meaning: 0 = within limits, 1 = clamped at max,
@@ -172,11 +172,33 @@ class HingeAngleData:
     min_angle: wp.float32
     max_angle: wp.float32
 
-    bias_factor: wp.float32
-    limit_bias: wp.float32
+    # User-facing soft-constraint knobs (Box2D v3 / Bepu / Nordby
+    # formulation; see :func:`soft_constraint_coefficients`). Two
+    # independent (hertz, damping_ratio) pairs:
+    #
+    #   * ``*_lock``  governs the two perpendicular-to-hinge angular
+    #     DoFs (rows 0/1 of the Jacobian) -- the "axis lock".
+    #   * ``*_limit`` governs the third (axial) DoF when the joint hits
+    #     a min/max angle limit (row 2 of the Jacobian, only active when
+    #     ``clamp != _CLAMP_NONE``).
+    #
+    # Persisted across substeps; the six derived per-substep
+    # coefficients below are recomputed every prepare from the current
+    # substep dt.
+    hertz_lock: wp.float32
+    damping_ratio_lock: wp.float32
+    hertz_limit: wp.float32
+    damping_ratio_limit: wp.float32
 
-    limit_softness: wp.float32
-    softness: wp.float32
+    # Cached per-substep coefficients for the lock pair (rows 0/1).
+    bias_rate_lock: wp.float32
+    mass_coeff_lock: wp.float32
+    impulse_coeff_lock: wp.float32
+
+    # Cached per-substep coefficients for the limit pair (row 2).
+    bias_rate_limit: wp.float32
+    mass_coeff_limit: wp.float32
+    impulse_coeff_limit: wp.float32
 
     # Hinge axis in body 2's local frame and the relative rest
     # orientation q0 = q2^* * q1 (set by Initialize from current body
@@ -206,10 +228,16 @@ _OFF_BODY1 = wp.constant(dword_offset_of(HingeAngleData, "body1"))
 _OFF_BODY2 = wp.constant(dword_offset_of(HingeAngleData, "body2"))
 _OFF_MIN_ANGLE = wp.constant(dword_offset_of(HingeAngleData, "min_angle"))
 _OFF_MAX_ANGLE = wp.constant(dword_offset_of(HingeAngleData, "max_angle"))
-_OFF_BIAS_FACTOR = wp.constant(dword_offset_of(HingeAngleData, "bias_factor"))
-_OFF_LIMIT_BIAS = wp.constant(dword_offset_of(HingeAngleData, "limit_bias"))
-_OFF_LIMIT_SOFTNESS = wp.constant(dword_offset_of(HingeAngleData, "limit_softness"))
-_OFF_SOFTNESS = wp.constant(dword_offset_of(HingeAngleData, "softness"))
+_OFF_HERTZ_LOCK = wp.constant(dword_offset_of(HingeAngleData, "hertz_lock"))
+_OFF_DAMPING_RATIO_LOCK = wp.constant(dword_offset_of(HingeAngleData, "damping_ratio_lock"))
+_OFF_HERTZ_LIMIT = wp.constant(dword_offset_of(HingeAngleData, "hertz_limit"))
+_OFF_DAMPING_RATIO_LIMIT = wp.constant(dword_offset_of(HingeAngleData, "damping_ratio_limit"))
+_OFF_BIAS_RATE_LOCK = wp.constant(dword_offset_of(HingeAngleData, "bias_rate_lock"))
+_OFF_MASS_COEFF_LOCK = wp.constant(dword_offset_of(HingeAngleData, "mass_coeff_lock"))
+_OFF_IMPULSE_COEFF_LOCK = wp.constant(dword_offset_of(HingeAngleData, "impulse_coeff_lock"))
+_OFF_BIAS_RATE_LIMIT = wp.constant(dword_offset_of(HingeAngleData, "bias_rate_limit"))
+_OFF_MASS_COEFF_LIMIT = wp.constant(dword_offset_of(HingeAngleData, "mass_coeff_limit"))
+_OFF_IMPULSE_COEFF_LIMIT = wp.constant(dword_offset_of(HingeAngleData, "impulse_coeff_limit"))
 _OFF_AXIS = wp.constant(dword_offset_of(HingeAngleData, "axis"))
 _OFF_Q0 = wp.constant(dword_offset_of(HingeAngleData, "q0"))
 _OFF_ACCUMULATED_IMPULSE = wp.constant(dword_offset_of(HingeAngleData, "accumulated_impulse"))
@@ -269,43 +297,103 @@ def hinge_angle_set_max_angle(c: ConstraintContainer, cid: wp.int32, v: wp.float
 
 
 @wp.func
-def hinge_angle_get_bias_factor(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
-    return read_float(c, _OFF_BIAS_FACTOR, cid)
+def hinge_angle_get_hertz_lock(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_HERTZ_LOCK, cid)
 
 
 @wp.func
-def hinge_angle_set_bias_factor(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
-    write_float(c, _OFF_BIAS_FACTOR, cid, v)
+def hinge_angle_set_hertz_lock(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_HERTZ_LOCK, cid, v)
 
 
 @wp.func
-def hinge_angle_get_limit_bias(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
-    return read_float(c, _OFF_LIMIT_BIAS, cid)
+def hinge_angle_get_damping_ratio_lock(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_DAMPING_RATIO_LOCK, cid)
 
 
 @wp.func
-def hinge_angle_set_limit_bias(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
-    write_float(c, _OFF_LIMIT_BIAS, cid, v)
+def hinge_angle_set_damping_ratio_lock(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_DAMPING_RATIO_LOCK, cid, v)
 
 
 @wp.func
-def hinge_angle_get_limit_softness(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
-    return read_float(c, _OFF_LIMIT_SOFTNESS, cid)
+def hinge_angle_get_hertz_limit(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_HERTZ_LIMIT, cid)
 
 
 @wp.func
-def hinge_angle_set_limit_softness(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
-    write_float(c, _OFF_LIMIT_SOFTNESS, cid, v)
+def hinge_angle_set_hertz_limit(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_HERTZ_LIMIT, cid, v)
 
 
 @wp.func
-def hinge_angle_get_softness(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
-    return read_float(c, _OFF_SOFTNESS, cid)
+def hinge_angle_get_damping_ratio_limit(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_DAMPING_RATIO_LIMIT, cid)
 
 
 @wp.func
-def hinge_angle_set_softness(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
-    write_float(c, _OFF_SOFTNESS, cid, v)
+def hinge_angle_set_damping_ratio_limit(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_DAMPING_RATIO_LIMIT, cid, v)
+
+
+@wp.func
+def hinge_angle_get_bias_rate_lock(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_BIAS_RATE_LOCK, cid)
+
+
+@wp.func
+def hinge_angle_set_bias_rate_lock(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_BIAS_RATE_LOCK, cid, v)
+
+
+@wp.func
+def hinge_angle_get_mass_coeff_lock(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_MASS_COEFF_LOCK, cid)
+
+
+@wp.func
+def hinge_angle_set_mass_coeff_lock(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_MASS_COEFF_LOCK, cid, v)
+
+
+@wp.func
+def hinge_angle_get_impulse_coeff_lock(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_IMPULSE_COEFF_LOCK, cid)
+
+
+@wp.func
+def hinge_angle_set_impulse_coeff_lock(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_IMPULSE_COEFF_LOCK, cid, v)
+
+
+@wp.func
+def hinge_angle_get_bias_rate_limit(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_BIAS_RATE_LIMIT, cid)
+
+
+@wp.func
+def hinge_angle_set_bias_rate_limit(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_BIAS_RATE_LIMIT, cid, v)
+
+
+@wp.func
+def hinge_angle_get_mass_coeff_limit(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_MASS_COEFF_LIMIT, cid)
+
+
+@wp.func
+def hinge_angle_set_mass_coeff_limit(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_MASS_COEFF_LIMIT, cid, v)
+
+
+@wp.func
+def hinge_angle_get_impulse_coeff_limit(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_IMPULSE_COEFF_LIMIT, cid)
+
+
+@wp.func
+def hinge_angle_set_impulse_coeff_limit(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_IMPULSE_COEFF_LIMIT, cid, v)
 
 
 @wp.func
@@ -393,6 +481,10 @@ def hinge_angle_initialize_kernel(
     world_axis: wp.array[wp.vec3f],
     min_angle_rad: wp.array[wp.float32],
     max_angle_rad: wp.array[wp.float32],
+    hertz_lock: wp.array[wp.float32],
+    damping_ratio_lock: wp.array[wp.float32],
+    hertz_limit: wp.array[wp.float32],
+    damping_ratio_limit: wp.array[wp.float32],
 ):
     """Pack one batch of hinge-angle descriptors into ``constraints``.
 
@@ -442,10 +534,16 @@ def hinge_angle_initialize_kernel(
     hinge_angle_set_body1(constraints, cid, b1)
     hinge_angle_set_body2(constraints, cid, b2)
 
-    hinge_angle_set_softness(constraints, cid, DEFAULT_ANGULAR_SOFTNESS)
-    hinge_angle_set_limit_softness(constraints, cid, DEFAULT_ANGULAR_LIMIT_SOFTNESS)
-    hinge_angle_set_bias_factor(constraints, cid, DEFAULT_ANGULAR_BIAS)
-    hinge_angle_set_limit_bias(constraints, cid, DEFAULT_ANGULAR_LIMIT_BIAS)
+    hinge_angle_set_hertz_lock(constraints, cid, hertz_lock[tid])
+    hinge_angle_set_damping_ratio_lock(constraints, cid, damping_ratio_lock[tid])
+    hinge_angle_set_hertz_limit(constraints, cid, hertz_limit[tid])
+    hinge_angle_set_damping_ratio_limit(constraints, cid, damping_ratio_limit[tid])
+    hinge_angle_set_bias_rate_lock(constraints, cid, 0.0)
+    hinge_angle_set_mass_coeff_lock(constraints, cid, 1.0)
+    hinge_angle_set_impulse_coeff_lock(constraints, cid, 0.0)
+    hinge_angle_set_bias_rate_limit(constraints, cid, 0.0)
+    hinge_angle_set_mass_coeff_limit(constraints, cid, 1.0)
+    hinge_angle_set_impulse_coeff_limit(constraints, cid, 0.0)
 
     hinge_angle_set_min_angle(constraints, cid, wp.sin(min_a * 0.5))
     hinge_angle_set_max_angle(constraints, cid, wp.sin(max_a * 0.5))
@@ -507,11 +605,30 @@ def hinge_angle_prepare_for_iteration_at(
 
     axis = read_vec3(constraints, base_offset + _OFF_AXIS, cid)
     q0 = read_quat(constraints, base_offset + _OFF_Q0, cid)
-    softness = read_float(constraints, base_offset + _OFF_SOFTNESS, cid)
-    limit_softness = read_float(constraints, base_offset + _OFF_LIMIT_SOFTNESS, cid)
     min_angle = read_float(constraints, base_offset + _OFF_MIN_ANGLE, cid)
     max_angle = read_float(constraints, base_offset + _OFF_MAX_ANGLE, cid)
     acc = read_vec3(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid)
+
+    # Recompute soft-constraint coefficients for both pairs from the
+    # current substep dt. Rows 0/1 (perpendicular-to-hinge lock) use the
+    # ``*_lock`` knobs, row 2 (axial limit) uses the ``*_limit`` knobs.
+    dt = 1.0 / idt
+    hertz_lock = read_float(constraints, base_offset + _OFF_HERTZ_LOCK, cid)
+    damping_ratio_lock = read_float(constraints, base_offset + _OFF_DAMPING_RATIO_LOCK, cid)
+    hertz_limit = read_float(constraints, base_offset + _OFF_HERTZ_LIMIT, cid)
+    damping_ratio_limit = read_float(constraints, base_offset + _OFF_DAMPING_RATIO_LIMIT, cid)
+    bias_rate_lock, mass_coeff_lock, impulse_coeff_lock = soft_constraint_coefficients(
+        hertz_lock, damping_ratio_lock, dt
+    )
+    bias_rate_limit, mass_coeff_limit, impulse_coeff_limit = soft_constraint_coefficients(
+        hertz_limit, damping_ratio_limit, dt
+    )
+    write_float(constraints, base_offset + _OFF_BIAS_RATE_LOCK, cid, bias_rate_lock)
+    write_float(constraints, base_offset + _OFF_MASS_COEFF_LOCK, cid, mass_coeff_lock)
+    write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LOCK, cid, impulse_coeff_lock)
+    write_float(constraints, base_offset + _OFF_BIAS_RATE_LIMIT, cid, bias_rate_limit)
+    write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, mass_coeff_limit)
+    write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, impulse_coeff_limit)
 
     # Two unit vectors perpendicular to the hinge axis. ``axis`` is
     # already unit length (initialise enforces this), and CreateOrthonormal
@@ -563,13 +680,11 @@ def hinge_angle_prepare_for_iteration_at(
     )
 
     # EffectiveMass = J^T * (InvI1 + InvI2) * J  (TransposedMultiply(J, M*J)).
+    # Box2D / Bepu soft-constraint formulation: keep this *unsoftened*;
+    # softness lives in the per-row mass_coeff / impulse_coeff scaling
+    # in the iterate path.
     inv_inertia_sum = inv_inertia1 + inv_inertia2
     eff = wp.transpose(jacobian) @ (inv_inertia_sum @ jacobian)
-
-    # Softness contribution: per-row softness on the diagonal.
-    eff[0, 0] = eff[0, 0] + softness * idt
-    eff[1, 1] = eff[1, 1] + softness * idt
-    eff[2, 2] = eff[2, 2] + limit_softness * idt
 
     clamp = _CLAMP_NONE
     if err_z > max_angle:
@@ -595,14 +710,12 @@ def hinge_angle_prepare_for_iteration_at(
         jacobian[2, 1] = 0.0
         jacobian[2, 2] = 0.0
 
-    # Final per-axis bias: x,y use bias_factor; z uses limit_bias.
-    bias_factor = read_float(constraints, base_offset + _OFF_BIAS_FACTOR, cid)
-    limit_bias = read_float(constraints, base_offset + _OFF_LIMIT_BIAS, cid)
-
+    # Per-axis velocity-correction bias: rows 0/1 use the lock bias_rate,
+    # row 2 uses the limit bias_rate. Both are already in 1/s units.
     bias = wp.vec3f(
-        err_x * idt * bias_factor,
-        err_y * idt * bias_factor,
-        err_z * idt * limit_bias,
+        err_x * bias_rate_lock,
+        err_y * bias_rate_lock,
+        err_z * bias_rate_limit,
     )
 
     # Persist all the prepared state.
@@ -646,20 +759,27 @@ def hinge_angle_iterate_at(
     eff = read_mat33(constraints, base_offset + _OFF_EFFECTIVE_MASS, cid)
     bias = read_vec3(constraints, base_offset + _OFF_BIAS, cid)
     acc = read_vec3(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid)
-    softness = read_float(constraints, base_offset + _OFF_SOFTNESS, cid)
-    limit_softness = read_float(constraints, base_offset + _OFF_LIMIT_SOFTNESS, cid)
+    mass_coeff_lock = read_float(constraints, base_offset + _OFF_MASS_COEFF_LOCK, cid)
+    impulse_coeff_lock = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LOCK, cid)
+    mass_coeff_limit = read_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid)
+    impulse_coeff_limit = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid)
     clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
 
     # jv = J^T * (w1 - w2)  (TransposedTransform(w, J) = J^T * w).
     jv = wp.transpose(jacobian) @ (angular_velocity1 - angular_velocity2)
 
-    softness_vec = wp.vec3f(
-        acc[0] * idt * softness,
-        acc[1] * idt * softness,
-        acc[2] * idt * limit_softness,
+    # Box2D / Bepu soft-constraint PGS update:
+    #   lambda = -mass_coeff * EffectiveMass * (jv + bias)
+    #            - impulse_coeff * accumulated_impulse
+    # Each row uses its own (mass_coeff, impulse_coeff) pair: rows 0/1
+    # are the perpendicular-to-hinge "lock" coefficients, row 2 is the
+    # axial "limit" coefficient.
+    lam_full = -(eff @ (jv + bias))
+    lam = wp.vec3f(
+        mass_coeff_lock * lam_full[0] - impulse_coeff_lock * acc[0],
+        mass_coeff_lock * lam_full[1] - impulse_coeff_lock * acc[1],
+        mass_coeff_limit * lam_full[2] - impulse_coeff_limit * acc[2],
     )
-
-    lam = -(eff @ (jv + bias + softness_vec))
 
     orig_acc = acc
     acc = acc + lam

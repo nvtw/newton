@@ -71,8 +71,6 @@ from newton._src.solvers.jitter.constraint_angular_motor import (
 )
 from newton._src.solvers.jitter.constraint_ball_socket import (
     BS_DWORDS,
-    DEFAULT_LINEAR_BIAS,
-    DEFAULT_LINEAR_SOFTNESS,
     BallSocketData,
     ball_socket_iterate_at,
     ball_socket_prepare_for_iteration_at,
@@ -94,10 +92,6 @@ from newton._src.solvers.jitter.constraint_container import (
     write_vec3,
 )
 from newton._src.solvers.jitter.constraint_hinge_angle import (
-    DEFAULT_ANGULAR_BIAS,
-    DEFAULT_ANGULAR_LIMIT_BIAS,
-    DEFAULT_ANGULAR_LIMIT_SOFTNESS,
-    DEFAULT_ANGULAR_SOFTNESS,
     HA_DWORDS,
     HingeAngleData,
     hinge_angle_iterate_at,
@@ -159,18 +153,35 @@ _BS_OFF_LA1 = wp.constant(dword_offset_of(BallSocketData, "local_anchor1"))
 _BS_OFF_LA2 = wp.constant(dword_offset_of(BallSocketData, "local_anchor2"))
 _BS_OFF_R1 = wp.constant(dword_offset_of(BallSocketData, "r1"))
 _BS_OFF_R2 = wp.constant(dword_offset_of(BallSocketData, "r2"))
-_BS_OFF_BIAS_FACTOR = wp.constant(dword_offset_of(BallSocketData, "bias_factor"))
-_BS_OFF_SOFTNESS = wp.constant(dword_offset_of(BallSocketData, "softness"))
+_BS_OFF_HERTZ = wp.constant(dword_offset_of(BallSocketData, "hertz"))
+_BS_OFF_DAMPING_RATIO = wp.constant(dword_offset_of(BallSocketData, "damping_ratio"))
+_BS_OFF_BIAS_RATE = wp.constant(dword_offset_of(BallSocketData, "bias_rate"))
+_BS_OFF_MASS_COEFF = wp.constant(dword_offset_of(BallSocketData, "mass_coeff"))
+_BS_OFF_IMPULSE_COEFF = wp.constant(dword_offset_of(BallSocketData, "impulse_coeff"))
 _BS_OFF_EFFECTIVE_MASS = wp.constant(dword_offset_of(BallSocketData, "effective_mass"))
 _BS_OFF_ACCUMULATED_IMPULSE = wp.constant(dword_offset_of(BallSocketData, "accumulated_impulse"))
 _BS_OFF_BIAS = wp.constant(dword_offset_of(BallSocketData, "bias"))
 
 _HA_OFF_MIN_ANGLE = wp.constant(dword_offset_of(HingeAngleData, "min_angle"))
 _HA_OFF_MAX_ANGLE = wp.constant(dword_offset_of(HingeAngleData, "max_angle"))
-_HA_OFF_BIAS_FACTOR = wp.constant(dword_offset_of(HingeAngleData, "bias_factor"))
-_HA_OFF_LIMIT_BIAS = wp.constant(dword_offset_of(HingeAngleData, "limit_bias"))
-_HA_OFF_LIMIT_SOFTNESS = wp.constant(dword_offset_of(HingeAngleData, "limit_softness"))
-_HA_OFF_SOFTNESS = wp.constant(dword_offset_of(HingeAngleData, "softness"))
+_HA_OFF_HERTZ_LOCK = wp.constant(dword_offset_of(HingeAngleData, "hertz_lock"))
+_HA_OFF_DAMPING_RATIO_LOCK = wp.constant(
+    dword_offset_of(HingeAngleData, "damping_ratio_lock")
+)
+_HA_OFF_HERTZ_LIMIT = wp.constant(dword_offset_of(HingeAngleData, "hertz_limit"))
+_HA_OFF_DAMPING_RATIO_LIMIT = wp.constant(
+    dword_offset_of(HingeAngleData, "damping_ratio_limit")
+)
+_HA_OFF_BIAS_RATE_LOCK = wp.constant(dword_offset_of(HingeAngleData, "bias_rate_lock"))
+_HA_OFF_MASS_COEFF_LOCK = wp.constant(dword_offset_of(HingeAngleData, "mass_coeff_lock"))
+_HA_OFF_IMPULSE_COEFF_LOCK = wp.constant(
+    dword_offset_of(HingeAngleData, "impulse_coeff_lock")
+)
+_HA_OFF_BIAS_RATE_LIMIT = wp.constant(dword_offset_of(HingeAngleData, "bias_rate_limit"))
+_HA_OFF_MASS_COEFF_LIMIT = wp.constant(dword_offset_of(HingeAngleData, "mass_coeff_limit"))
+_HA_OFF_IMPULSE_COEFF_LIMIT = wp.constant(
+    dword_offset_of(HingeAngleData, "impulse_coeff_limit")
+)
 _HA_OFF_AXIS = wp.constant(dword_offset_of(HingeAngleData, "axis"))
 _HA_OFF_Q0 = wp.constant(dword_offset_of(HingeAngleData, "q0"))
 _HA_OFF_ACCUMULATED_IMPULSE = wp.constant(dword_offset_of(HingeAngleData, "accumulated_impulse"))
@@ -183,7 +194,11 @@ _AM_OFF_LOCAL_AXIS1 = wp.constant(dword_offset_of(AngularMotorData, "local_axis1
 _AM_OFF_LOCAL_AXIS2 = wp.constant(dword_offset_of(AngularMotorData, "local_axis2"))
 _AM_OFF_VELOCITY = wp.constant(dword_offset_of(AngularMotorData, "velocity"))
 _AM_OFF_MAX_FORCE = wp.constant(dword_offset_of(AngularMotorData, "max_force"))
+_AM_OFF_HERTZ = wp.constant(dword_offset_of(AngularMotorData, "hertz"))
+_AM_OFF_DAMPING_RATIO = wp.constant(dword_offset_of(AngularMotorData, "damping_ratio"))
 _AM_OFF_MAX_LAMBDA = wp.constant(dword_offset_of(AngularMotorData, "max_lambda"))
+_AM_OFF_MASS_COEFF = wp.constant(dword_offset_of(AngularMotorData, "mass_coeff"))
+_AM_OFF_IMPULSE_COEFF = wp.constant(dword_offset_of(AngularMotorData, "impulse_coeff"))
 _AM_OFF_EFFECTIVE_MASS = wp.constant(dword_offset_of(AngularMotorData, "effective_mass"))
 _AM_OFF_ACCUMULATED_IMPULSE = wp.constant(dword_offset_of(AngularMotorData, "accumulated_impulse"))
 
@@ -210,6 +225,14 @@ def hinge_joint_initialize_kernel(
     max_angle_rad: wp.array[wp.float32],
     target_velocity: wp.array[wp.float32],
     max_force: wp.array[wp.float32],
+    hertz_linear: wp.array[wp.float32],
+    damping_ratio_linear: wp.array[wp.float32],
+    hertz_lock: wp.array[wp.float32],
+    damping_ratio_lock: wp.array[wp.float32],
+    hertz_limit: wp.array[wp.float32],
+    damping_ratio_limit: wp.array[wp.float32],
+    hertz_motor: wp.array[wp.float32],
+    damping_ratio_motor: wp.array[wp.float32],
 ):
     """Pack one batch of fused hinge-joint descriptors into ``constraints``.
 
@@ -244,6 +267,22 @@ def hinge_joint_initialize_kernel(
         max_force: Maximum motor torque [num_in_batch] [N*m]. Pass 0 for
             a passive (unmotorised) joint -- the AngularMotor sub then
             applies zero corrective impulse and acts as a no-op.
+        hertz_linear: Soft-constraint frequency for the BallSocket sub
+            [num_in_batch] [Hz].
+        damping_ratio_linear: Soft-constraint damping ratio for the
+            BallSocket sub [num_in_batch].
+        hertz_lock: Soft-constraint frequency for the HingeAngle's
+            perpendicular angular lock [num_in_batch] [Hz].
+        damping_ratio_lock: Soft-constraint damping ratio for the
+            HingeAngle lock [num_in_batch].
+        hertz_limit: Soft-constraint frequency for the HingeAngle's
+            axial min/max limit [num_in_batch] [Hz].
+        damping_ratio_limit: Soft-constraint damping ratio for the
+            HingeAngle limit [num_in_batch].
+        hertz_motor: Soft-constraint frequency for the AngularMotor
+            sub [num_in_batch] [Hz].
+        damping_ratio_motor: Soft-constraint damping ratio for the
+            AngularMotor [num_in_batch].
     """
     tid = wp.tid()
     cid = cid_offset + tid
@@ -277,8 +316,13 @@ def hinge_joint_initialize_kernel(
     write_vec3(constraints, _HJ_BS_BASE_C + _BS_OFF_LA2, cid, la2)
     write_vec3(constraints, _HJ_BS_BASE_C + _BS_OFF_R1, cid, zero3)
     write_vec3(constraints, _HJ_BS_BASE_C + _BS_OFF_R2, cid, zero3)
-    write_float(constraints, _HJ_BS_BASE_C + _BS_OFF_BIAS_FACTOR, cid, DEFAULT_LINEAR_BIAS)
-    write_float(constraints, _HJ_BS_BASE_C + _BS_OFF_SOFTNESS, cid, DEFAULT_LINEAR_SOFTNESS)
+    write_float(constraints, _HJ_BS_BASE_C + _BS_OFF_HERTZ, cid, hertz_linear[tid])
+    write_float(
+        constraints, _HJ_BS_BASE_C + _BS_OFF_DAMPING_RATIO, cid, damping_ratio_linear[tid]
+    )
+    write_float(constraints, _HJ_BS_BASE_C + _BS_OFF_BIAS_RATE, cid, 0.0)
+    write_float(constraints, _HJ_BS_BASE_C + _BS_OFF_MASS_COEFF, cid, 1.0)
+    write_float(constraints, _HJ_BS_BASE_C + _BS_OFF_IMPULSE_COEFF, cid, 0.0)
     write_mat33(constraints, _HJ_BS_BASE_C + _BS_OFF_EFFECTIVE_MASS, cid, eye3)
     write_vec3(constraints, _HJ_BS_BASE_C + _BS_OFF_ACCUMULATED_IMPULSE, cid, zero3)
     write_vec3(constraints, _HJ_BS_BASE_C + _BS_OFF_BIAS, cid, zero3)
@@ -286,10 +330,20 @@ def hinge_joint_initialize_kernel(
     # --- HingeAngle sub (base = BS_DWORDS) -----------------------------
     axis_local = wp.quat_rotate_inv(q2, w_axis)
     q0 = wp.quat_inverse(q2) * q1
-    write_float(constraints, _HJ_HA_BASE_C + _HA_OFF_SOFTNESS, cid, DEFAULT_ANGULAR_SOFTNESS)
-    write_float(constraints, _HJ_HA_BASE_C + _HA_OFF_LIMIT_SOFTNESS, cid, DEFAULT_ANGULAR_LIMIT_SOFTNESS)
-    write_float(constraints, _HJ_HA_BASE_C + _HA_OFF_BIAS_FACTOR, cid, DEFAULT_ANGULAR_BIAS)
-    write_float(constraints, _HJ_HA_BASE_C + _HA_OFF_LIMIT_BIAS, cid, DEFAULT_ANGULAR_LIMIT_BIAS)
+    write_float(constraints, _HJ_HA_BASE_C + _HA_OFF_HERTZ_LOCK, cid, hertz_lock[tid])
+    write_float(
+        constraints, _HJ_HA_BASE_C + _HA_OFF_DAMPING_RATIO_LOCK, cid, damping_ratio_lock[tid]
+    )
+    write_float(constraints, _HJ_HA_BASE_C + _HA_OFF_HERTZ_LIMIT, cid, hertz_limit[tid])
+    write_float(
+        constraints, _HJ_HA_BASE_C + _HA_OFF_DAMPING_RATIO_LIMIT, cid, damping_ratio_limit[tid]
+    )
+    write_float(constraints, _HJ_HA_BASE_C + _HA_OFF_BIAS_RATE_LOCK, cid, 0.0)
+    write_float(constraints, _HJ_HA_BASE_C + _HA_OFF_MASS_COEFF_LOCK, cid, 1.0)
+    write_float(constraints, _HJ_HA_BASE_C + _HA_OFF_IMPULSE_COEFF_LOCK, cid, 0.0)
+    write_float(constraints, _HJ_HA_BASE_C + _HA_OFF_BIAS_RATE_LIMIT, cid, 0.0)
+    write_float(constraints, _HJ_HA_BASE_C + _HA_OFF_MASS_COEFF_LIMIT, cid, 1.0)
+    write_float(constraints, _HJ_HA_BASE_C + _HA_OFF_IMPULSE_COEFF_LIMIT, cid, 0.0)
     write_float(constraints, _HJ_HA_BASE_C + _HA_OFF_MIN_ANGLE, cid, wp.sin(min_a * 0.5))
     write_float(constraints, _HJ_HA_BASE_C + _HA_OFF_MAX_ANGLE, cid, wp.sin(max_a * 0.5))
     write_vec3(constraints, _HJ_HA_BASE_C + _HA_OFF_AXIS, cid, axis_local)
@@ -309,7 +363,13 @@ def hinge_joint_initialize_kernel(
     write_vec3(constraints, _HJ_AM_BASE_C + _AM_OFF_LOCAL_AXIS2, cid, motor_local_axis2)
     write_float(constraints, _HJ_AM_BASE_C + _AM_OFF_VELOCITY, cid, target_vel)
     write_float(constraints, _HJ_AM_BASE_C + _AM_OFF_MAX_FORCE, cid, mf)
+    write_float(constraints, _HJ_AM_BASE_C + _AM_OFF_HERTZ, cid, hertz_motor[tid])
+    write_float(
+        constraints, _HJ_AM_BASE_C + _AM_OFF_DAMPING_RATIO, cid, damping_ratio_motor[tid]
+    )
     write_float(constraints, _HJ_AM_BASE_C + _AM_OFF_MAX_LAMBDA, cid, 0.0)
+    write_float(constraints, _HJ_AM_BASE_C + _AM_OFF_MASS_COEFF, cid, 1.0)
+    write_float(constraints, _HJ_AM_BASE_C + _AM_OFF_IMPULSE_COEFF, cid, 0.0)
     write_float(constraints, _HJ_AM_BASE_C + _AM_OFF_EFFECTIVE_MASS, cid, 0.0)
     write_float(constraints, _HJ_AM_BASE_C + _AM_OFF_ACCUMULATED_IMPULSE, cid, 0.0)
 
