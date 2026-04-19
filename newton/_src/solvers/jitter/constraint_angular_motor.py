@@ -55,8 +55,10 @@ import warp as wp
 from newton._src.solvers.jitter.body import BodyContainer
 from newton._src.solvers.jitter.constraint_container import (
     CONSTRAINT_TYPE_ANGULAR_MOTOR,
+    ConstraintBodies,
     ConstraintContainer,
     assert_constraint_header,
+    constraint_bodies_make,
     constraint_set_type,
     read_float,
     read_int,
@@ -81,7 +83,9 @@ __all__ = [
     "angular_motor_get_velocity",
     "angular_motor_initialize_kernel",
     "angular_motor_iterate",
+    "angular_motor_iterate_at",
     "angular_motor_prepare_for_iteration",
+    "angular_motor_prepare_for_iteration_at",
     "angular_motor_set_accumulated_impulse",
     "angular_motor_set_body1",
     "angular_motor_set_body2",
@@ -92,6 +96,7 @@ __all__ = [
     "angular_motor_set_max_lambda",
     "angular_motor_set_velocity",
     "angular_motor_world_wrench",
+    "angular_motor_world_wrench_at",
 ]
 
 
@@ -340,6 +345,131 @@ def angular_motor_initialize_kernel(
 # ---------------------------------------------------------------------------
 # Per-iteration math
 # ---------------------------------------------------------------------------
+#
+# Two access levels mirror the BallSocket / HingeAngle pattern:
+#
+# * ``*_at`` variants take an explicit ``base_offset`` (dword offset of
+#   the angular-motor sub-block within its column) and a
+#   :class:`ConstraintBodies` carrier with the body indices. Used by
+#   the fused :data:`CONSTRAINT_TYPE_HINGE_JOINT` constraint.
+# * The plain ``angular_motor_prepare_for_iteration`` /
+#   ``angular_motor_iterate`` / ``angular_motor_world_wrench`` are thin
+#   wrappers used by the unified dispatcher.
+
+
+@wp.func
+def angular_motor_prepare_for_iteration_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+    idt: wp.float32,
+):
+    """Composable ``PrepareForIterationAngularMotor`` (AngularMotor.cs:39).
+
+    See :func:`ball_socket_prepare_for_iteration_at` for the
+    ``base_offset`` / ``body_pair`` contract.
+    """
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+
+    q1 = bodies.orientation[b1]
+    q2 = bodies.orientation[b2]
+    inv_inertia1 = bodies.inverse_inertia_world[b1]
+    inv_inertia2 = bodies.inverse_inertia_world[b2]
+
+    local_axis1 = read_vec3(constraints, base_offset + _OFF_LOCAL_AXIS1, cid)
+    local_axis2 = read_vec3(constraints, base_offset + _OFF_LOCAL_AXIS2, cid)
+    max_force = read_float(constraints, base_offset + _OFF_MAX_FORCE, cid)
+    acc = read_float(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid)
+
+    # World-space Jacobian rows (the per-DoF axes).
+    j1 = wp.quat_rotate(q1, local_axis1)
+    j2 = wp.quat_rotate(q2, local_axis2)
+
+    # Scalar effective mass for the 1-DoF constraint:
+    #   m^-1 = j1 . (InvI1 * j1) + j2 . (InvI2 * j2)
+    eff_inv = wp.dot(inv_inertia1 @ j1, j1) + wp.dot(inv_inertia2 @ j2, j2)
+    write_float(constraints, base_offset + _OFF_EFFECTIVE_MASS, cid, 1.0 / eff_inv)
+
+    # Per-step impulse cap. C# writes ``1.0 / idt * MaxForce`` which is
+    # just ``MaxForce * dt``; we use the same form for byte-for-byte
+    # parity.
+    write_float(constraints, base_offset + _OFF_MAX_LAMBDA, cid, max_force / idt)
+
+    # Warm start: re-apply the previous solve's accumulated impulse.
+    bodies.angular_velocity[b1] = bodies.angular_velocity[b1] - inv_inertia1 @ (j1 * acc)
+    bodies.angular_velocity[b2] = bodies.angular_velocity[b2] + inv_inertia2 @ (j2 * acc)
+
+
+@wp.func
+def angular_motor_iterate_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+    idt: wp.float32,
+):
+    """Composable ``IterateAngularMotor`` (AngularMotor.cs:59).
+
+    See :func:`ball_socket_iterate_at` for the ``base_offset`` /
+    ``body_pair`` contract.
+    """
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+
+    angular_velocity1 = bodies.angular_velocity[b1]
+    angular_velocity2 = bodies.angular_velocity[b2]
+    inv_inertia1 = bodies.inverse_inertia_world[b1]
+    inv_inertia2 = bodies.inverse_inertia_world[b2]
+
+    q1 = bodies.orientation[b1]
+    q2 = bodies.orientation[b2]
+    local_axis1 = read_vec3(constraints, base_offset + _OFF_LOCAL_AXIS1, cid)
+    local_axis2 = read_vec3(constraints, base_offset + _OFF_LOCAL_AXIS2, cid)
+    velocity = read_float(constraints, base_offset + _OFF_VELOCITY, cid)
+    eff = read_float(constraints, base_offset + _OFF_EFFECTIVE_MASS, cid)
+    max_lambda = read_float(constraints, base_offset + _OFF_MAX_LAMBDA, cid)
+    acc = read_float(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid)
+
+    j1 = wp.quat_rotate(q1, local_axis1)
+    j2 = wp.quat_rotate(q2, local_axis2)
+
+    # jv = -j1 . w1 + j2 . w2
+    jv = -wp.dot(j1, angular_velocity1) + wp.dot(j2, angular_velocity2)
+
+    lam = -(jv - velocity) * eff
+
+    old_acc = acc
+    acc = wp.clamp(acc + lam, -max_lambda, max_lambda)
+    lam = acc - old_acc
+
+    write_float(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid, acc)
+
+    bodies.angular_velocity[b1] = angular_velocity1 - inv_inertia1 @ (j1 * lam)
+    bodies.angular_velocity[b2] = angular_velocity2 + inv_inertia2 @ (j2 * lam)
+
+
+@wp.func
+def angular_motor_world_wrench_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+    idt: wp.float32,
+):
+    """Composable angular-motor wrench on body2; see
+    :func:`angular_motor_world_wrench` for semantics."""
+    b2 = body_pair.b2
+    q2 = bodies.orientation[b2]
+    local_axis2 = read_vec3(constraints, base_offset + _OFF_LOCAL_AXIS2, cid)
+    j2 = wp.quat_rotate(q2, local_axis2)
+    acc = read_float(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid)
+    torque = j2 * (acc * idt)
+    return wp.vec3f(0.0, 0.0, 0.0), torque
 
 
 @wp.func
@@ -351,47 +481,12 @@ def angular_motor_prepare_for_iteration(
 ):
     """Direct port of ``PrepareForIterationAngularMotor`` (AngularMotor.cs:39).
 
-    Computes the world-space Jacobian rows ``j1 = q1 * local_axis1`` and
-    ``j2 = q2 * local_axis2``, the scalar effective mass
-    ``1 / (j1.(InvI1*j1) + j2.(InvI2*j2))``, the per-step impulse cap
-    ``max_lambda = max_force / idt``, and warm-starts the body angular
-    velocities with the cached accumulated impulse.
-
-    Only ``angular_velocity`` and ``inverse_inertia_world`` of the two
-    bodies are touched; positions and velocities are not used.
+    Thin wrapper: see :func:`angular_motor_prepare_for_iteration_at`.
     """
     b1 = angular_motor_get_body1(constraints, cid)
     b2 = angular_motor_get_body2(constraints, cid)
-
-    q1 = bodies.orientation[b1]
-    q2 = bodies.orientation[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
-
-    local_axis1 = angular_motor_get_local_axis1(constraints, cid)
-    local_axis2 = angular_motor_get_local_axis2(constraints, cid)
-    max_force = angular_motor_get_max_force(constraints, cid)
-    acc = angular_motor_get_accumulated_impulse(constraints, cid)
-
-    # World-space Jacobian rows (the per-DoF axes).
-    j1 = wp.quat_rotate(q1, local_axis1)
-    j2 = wp.quat_rotate(q2, local_axis2)
-
-    # Scalar effective mass for the 1-DoF constraint:
-    #   m^-1 = j1 . (InvI1 * j1) + j2 . (InvI2 * j2)
-    # Jitter writes this as ``Transform(j1, InvI1) * j1`` where the
-    # outer ``*`` between two JVectors is the dot product.
-    eff_inv = wp.dot(inv_inertia1 @ j1, j1) + wp.dot(inv_inertia2 @ j2, j2)
-    angular_motor_set_effective_mass(constraints, cid, 1.0 / eff_inv)
-
-    # Per-step impulse cap. C# writes ``1.0 / idt * MaxForce`` which is
-    # just ``MaxForce * dt``; we use the same form for byte-for-byte
-    # parity.
-    angular_motor_set_max_lambda(constraints, cid, max_force / idt)
-
-    # Warm start: re-apply the previous solve's accumulated impulse.
-    bodies.angular_velocity[b1] = bodies.angular_velocity[b1] - inv_inertia1 @ (j1 * acc)
-    bodies.angular_velocity[b2] = bodies.angular_velocity[b2] + inv_inertia2 @ (j2 * acc)
+    body_pair = constraint_bodies_make(b1, b2)
+    angular_motor_prepare_for_iteration_at(constraints, cid, 0, bodies, body_pair, idt)
 
 
 @wp.func
@@ -403,45 +498,12 @@ def angular_motor_iterate(
 ):
     """Direct port of ``IterateAngularMotor`` (AngularMotor.cs:59).
 
-    One PGS-style iteration on the scalar motor constraint: compute the
-    relative axial angular velocity, project to the corrective scalar
-    impulse, clamp the accumulated total to ``[-max_lambda, max_lambda]``,
-    and apply the velocity delta.
+    Thin wrapper: see :func:`angular_motor_iterate_at`.
     """
     b1 = angular_motor_get_body1(constraints, cid)
     b2 = angular_motor_get_body2(constraints, cid)
-
-    angular_velocity1 = bodies.angular_velocity[b1]
-    angular_velocity2 = bodies.angular_velocity[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
-
-    q1 = bodies.orientation[b1]
-    q2 = bodies.orientation[b2]
-    local_axis1 = angular_motor_get_local_axis1(constraints, cid)
-    local_axis2 = angular_motor_get_local_axis2(constraints, cid)
-    velocity = angular_motor_get_velocity(constraints, cid)
-    eff = angular_motor_get_effective_mass(constraints, cid)
-    max_lambda = angular_motor_get_max_lambda(constraints, cid)
-    acc = angular_motor_get_accumulated_impulse(constraints, cid)
-
-    j1 = wp.quat_rotate(q1, local_axis1)
-    j2 = wp.quat_rotate(q2, local_axis2)
-
-    # jv = -j1 . w1 + j2 . w2  (scalar projection of the relative
-    # angular velocity onto the motor axis; jitter signs).
-    jv = -wp.dot(j1, angular_velocity1) + wp.dot(j2, angular_velocity2)
-
-    lam = -(jv - velocity) * eff
-
-    old_acc = acc
-    acc = wp.clamp(acc + lam, -max_lambda, max_lambda)
-    lam = acc - old_acc
-
-    angular_motor_set_accumulated_impulse(constraints, cid, acc)
-
-    bodies.angular_velocity[b1] = angular_velocity1 - inv_inertia1 @ (j1 * lam)
-    bodies.angular_velocity[b2] = angular_velocity2 + inv_inertia2 @ (j2 * lam)
+    body_pair = constraint_bodies_make(b1, b2)
+    angular_motor_iterate_at(constraints, cid, 0, bodies, body_pair, idt)
 
 
 @wp.func
@@ -459,10 +521,7 @@ def angular_motor_world_wrench(
     ``substep_dt`` yields the torque applied during the most recent
     substep.
     """
+    b1 = angular_motor_get_body1(constraints, cid)
     b2 = angular_motor_get_body2(constraints, cid)
-    q2 = bodies.orientation[b2]
-    local_axis2 = angular_motor_get_local_axis2(constraints, cid)
-    j2 = wp.quat_rotate(q2, local_axis2)
-    acc = angular_motor_get_accumulated_impulse(constraints, cid)
-    torque = j2 * (acc * idt)
-    return wp.vec3f(0.0, 0.0, 0.0), torque
+    body_pair = constraint_bodies_make(b1, b2)
+    return angular_motor_world_wrench_at(constraints, cid, 0, bodies, body_pair, idt)

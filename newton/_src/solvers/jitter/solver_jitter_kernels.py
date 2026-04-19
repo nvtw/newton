@@ -30,16 +30,28 @@ from newton._src.solvers.jitter.constraint_ball_socket import (
 from newton._src.solvers.jitter.constraint_container import (
     CONSTRAINT_TYPE_ANGULAR_MOTOR,
     CONSTRAINT_TYPE_BALL_SOCKET,
+    CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET,
     CONSTRAINT_TYPE_HINGE_ANGLE,
+    CONSTRAINT_TYPE_HINGE_JOINT,
     ConstraintContainer,
     constraint_get_body1,
     constraint_get_body2,
     constraint_get_type,
 )
+from newton._src.solvers.jitter.constraint_double_ball_socket import (
+    double_ball_socket_iterate,
+    double_ball_socket_prepare_for_iteration,
+    double_ball_socket_world_wrench,
+)
 from newton._src.solvers.jitter.constraint_hinge_angle import (
     hinge_angle_iterate,
     hinge_angle_prepare_for_iteration,
     hinge_angle_world_wrench,
+)
+from newton._src.solvers.jitter.constraint_hinge_joint import (
+    hinge_joint_iterate,
+    hinge_joint_prepare_for_iteration,
+    hinge_joint_world_wrench,
 )
 from newton._src.solvers.jitter.graph_coloring_common import (
     ElementInteractionData,
@@ -114,6 +126,10 @@ def _constraint_prepare_for_iteration_kernel(
         hinge_angle_prepare_for_iteration(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_ANGULAR_MOTOR:
         angular_motor_prepare_for_iteration(constraints, cid, bodies, idt)
+    elif t == CONSTRAINT_TYPE_HINGE_JOINT:
+        hinge_joint_prepare_for_iteration(constraints, cid, bodies, idt)
+    elif t == CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET:
+        double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
 
 
 @wp.kernel
@@ -140,6 +156,10 @@ def _constraint_iterate_kernel(
         hinge_angle_iterate(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_ANGULAR_MOTOR:
         angular_motor_iterate(constraints, cid, bodies, idt)
+    elif t == CONSTRAINT_TYPE_HINGE_JOINT:
+        hinge_joint_iterate(constraints, cid, bodies, idt)
+    elif t == CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET:
+        double_ball_socket_iterate(constraints, cid, bodies, idt)
 
 
 @wp.kernel
@@ -203,6 +223,10 @@ def _constraint_gather_wrenches_kernel(
         force, torque = hinge_angle_world_wrench(constraints, cid, idt)
     elif t == CONSTRAINT_TYPE_ANGULAR_MOTOR:
         force, torque = angular_motor_world_wrench(constraints, cid, bodies, idt)
+    elif t == CONSTRAINT_TYPE_HINGE_JOINT:
+        force, torque = hinge_joint_world_wrench(constraints, cid, bodies, idt)
+    elif t == CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET:
+        force, torque = double_ball_socket_world_wrench(constraints, cid, idt)
 
     out[cid] = wp.spatial_vector(force, torque)
 

@@ -39,11 +39,15 @@ __all__ = [
     "CONSTRAINT_BODY2_OFFSET",
     "CONSTRAINT_TYPE_ANGULAR_MOTOR",
     "CONSTRAINT_TYPE_BALL_SOCKET",
+    "CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET",
     "CONSTRAINT_TYPE_HINGE_ANGLE",
+    "CONSTRAINT_TYPE_HINGE_JOINT",
     "CONSTRAINT_TYPE_INVALID",
     "CONSTRAINT_TYPE_OFFSET",
+    "ConstraintBodies",
     "ConstraintContainer",
     "assert_constraint_header",
+    "constraint_bodies_make",
     "constraint_container_zeros",
     "constraint_get_body1",
     "constraint_get_body2",
@@ -98,6 +102,17 @@ CONSTRAINT_TYPE_INVALID = wp.constant(wp.int32(0))
 CONSTRAINT_TYPE_BALL_SOCKET = wp.constant(wp.int32(1))
 CONSTRAINT_TYPE_HINGE_ANGLE = wp.constant(wp.int32(2))
 CONSTRAINT_TYPE_ANGULAR_MOTOR = wp.constant(wp.int32(3))
+#: Fused single-column hinge joint (HingeAngle + BallSocket + AngularMotor).
+#: A single PGS thread owns the (body1, body2) pair for the entire hinge,
+#: which lets the three sub-iterations share one body-data load and lets
+#: the partitioner colour one hinge per partition (instead of three),
+#: dramatically improving convergence on heavily-loaded chains.
+CONSTRAINT_TYPE_HINGE_JOINT = wp.constant(wp.int32(4))
+#: Fused two-anchor "double ball-socket" hinge: the entire 5-DoF joint
+#: solved as one column via a Schur-complement (3x3 + 2x2) instead of
+#: two redundant 3-row ball-sockets. See
+#: :mod:`constraint_double_ball_socket` for the math.
+CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET = wp.constant(wp.int32(5))
 
 #: Dword offsets of the three header fields. By contract these are
 #: 0 / 1 / 2 for every constraint schema (enforced by
@@ -320,7 +335,7 @@ def constraint_get_body1(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
 
 @wp.func
 def constraint_set_body1(c: ConstraintContainer, cid: wp.int32, b: wp.int32):
-    return write_int(c, CONSTRAINT_BODY1_OFFSET, cid, b)
+    write_int(c, CONSTRAINT_BODY1_OFFSET, cid, b)
 
 
 @wp.func
@@ -332,4 +347,42 @@ def constraint_get_body2(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
 
 @wp.func
 def constraint_set_body2(c: ConstraintContainer, cid: wp.int32, b: wp.int32):
-    return write_int(c, CONSTRAINT_BODY2_OFFSET, cid, b)
+    write_int(c, CONSTRAINT_BODY2_OFFSET, cid, b)
+
+
+# ---------------------------------------------------------------------------
+# Body-pair carrier for composable constraint funcs
+# ---------------------------------------------------------------------------
+#
+# When a *composite* constraint (e.g. the fused HingeJoint) wants to call
+# its sub-component ``*_at`` funcs, those sub-funcs must not re-fetch
+# body1 / body2 from the shared header (the composite's sub-blocks don't
+# carry their own body indices -- there's only one header per column).
+# Instead the composite reads the pair once and threads it through every
+# sub-call as a tiny carrier struct, which the compiler treats as two
+# scratch ints that stay in registers across the sequential sub-calls.
+
+
+@wp.struct
+class ConstraintBodies:
+    """Body indices of the (body1, body2) pair a constraint operates on.
+
+    Threaded through composable ``*_at`` constraint funcs so they can
+    address ``BodyContainer`` without going back to the constraint
+    column. Used by both the *direct* path (where the wrapper extracts
+    the pair from the column header and forwards it) and the *composite*
+    path (where the fused constraint reads the pair from its shared
+    header once and forwards the same instance to all sub-funcs).
+    """
+
+    b1: wp.int32
+    b2: wp.int32
+
+
+@wp.func
+def constraint_bodies_make(b1: wp.int32, b2: wp.int32) -> ConstraintBodies:
+    """Construct a :class:`ConstraintBodies` carrier from two body indices."""
+    bp = ConstraintBodies()
+    bp.b1 = b1
+    bp.b2 = b2
+    return bp

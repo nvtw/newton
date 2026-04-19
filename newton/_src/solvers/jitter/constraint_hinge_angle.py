@@ -49,8 +49,10 @@ import warp as wp
 from newton._src.solvers.jitter.body import BodyContainer
 from newton._src.solvers.jitter.constraint_container import (
     CONSTRAINT_TYPE_HINGE_ANGLE,
+    ConstraintBodies,
     ConstraintContainer,
     assert_constraint_header,
+    constraint_bodies_make,
     constraint_set_type,
     read_float,
     read_int,
@@ -93,7 +95,9 @@ __all__ = [
     "hinge_angle_get_softness",
     "hinge_angle_initialize_kernel",
     "hinge_angle_iterate",
+    "hinge_angle_iterate_at",
     "hinge_angle_prepare_for_iteration",
+    "hinge_angle_prepare_for_iteration_at",
     "hinge_angle_set_accumulated_impulse",
     "hinge_angle_set_axis",
     "hinge_angle_set_bias",
@@ -110,6 +114,7 @@ __all__ = [
     "hinge_angle_set_q0",
     "hinge_angle_set_softness",
     "hinge_angle_world_wrench",
+    "hinge_angle_world_wrench_at",
 ]
 
 
@@ -462,41 +467,51 @@ def hinge_angle_initialize_kernel(
 # ---------------------------------------------------------------------------
 # Per-iteration math (wp.func helpers + dispatch kernels)
 # ---------------------------------------------------------------------------
+#
+# Two access levels mirror the BallSocket pattern:
+#
+# * ``*_at`` variants take an explicit ``base_offset`` (dword offset of
+#   the hinge-angle sub-block within its column) and a
+#   :class:`ConstraintBodies` carrier with the body indices. The fused
+#   :data:`CONSTRAINT_TYPE_HINGE_JOINT` constraint calls these with
+#   ``base_offset = HJ_HA_BASE`` and the body pair read once from the
+#   fused header.
+# * The plain ``hinge_angle_prepare_for_iteration`` /
+#   ``hinge_angle_iterate`` / ``hinge_angle_world_wrench`` are thin
+#   wrappers used by the unified dispatcher; they read body1/body2 from
+#   their own column header and forward to the ``*_at`` variant with
+#   ``base_offset = 0``.
 
 
 @wp.func
-def hinge_angle_prepare_for_iteration(
+def hinge_angle_prepare_for_iteration_at(
     constraints: ConstraintContainer,
     cid: wp.int32,
+    base_offset: wp.int32,
     bodies: BodyContainer,
+    body_pair: ConstraintBodies,
     idt: wp.float32,
 ):
-    """Direct port of ``PrepareForIterationHingeAngle`` (HingeAngle.cs:109).
+    """Composable ``PrepareForIterationHingeAngle`` (HingeAngle.cs:109).
 
-    Builds the 3x3 angular Jacobian (rows: lock-axis-1, lock-axis-2,
-    hinge-axis), computes the effective mass with softness, picks up
-    the limit clamp state for the third row, and warm-starts the body
-    angular velocities with the cached accumulated impulse.
-
-    The translational part of a revolute joint is handled separately by
-    a co-located :class:`BallSocketData` -- this kernel only writes
-    angular velocities.
+    See :func:`ball_socket_prepare_for_iteration_at` for the
+    ``base_offset`` / ``body_pair`` contract.
     """
-    b1 = hinge_angle_get_body1(constraints, cid)
-    b2 = hinge_angle_get_body2(constraints, cid)
+    b1 = body_pair.b1
+    b2 = body_pair.b2
 
     q1 = bodies.orientation[b1]
     q2 = bodies.orientation[b2]
     inv_inertia1 = bodies.inverse_inertia_world[b1]
     inv_inertia2 = bodies.inverse_inertia_world[b2]
 
-    axis = hinge_angle_get_axis(constraints, cid)
-    q0 = hinge_angle_get_q0(constraints, cid)
-    softness = hinge_angle_get_softness(constraints, cid)
-    limit_softness = hinge_angle_get_limit_softness(constraints, cid)
-    min_angle = hinge_angle_get_min_angle(constraints, cid)
-    max_angle = hinge_angle_get_max_angle(constraints, cid)
-    acc = hinge_angle_get_accumulated_impulse(constraints, cid)
+    axis = read_vec3(constraints, base_offset + _OFF_AXIS, cid)
+    q0 = read_quat(constraints, base_offset + _OFF_Q0, cid)
+    softness = read_float(constraints, base_offset + _OFF_SOFTNESS, cid)
+    limit_softness = read_float(constraints, base_offset + _OFF_LIMIT_SOFTNESS, cid)
+    min_angle = read_float(constraints, base_offset + _OFF_MIN_ANGLE, cid)
+    max_angle = read_float(constraints, base_offset + _OFF_MAX_ANGLE, cid)
+    acc = read_vec3(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid)
 
     # Two unit vectors perpendicular to the hinge axis. ``axis`` is
     # already unit length (initialise enforces this), and CreateOrthonormal
@@ -581,8 +596,8 @@ def hinge_angle_prepare_for_iteration(
         jacobian[2, 2] = 0.0
 
     # Final per-axis bias: x,y use bias_factor; z uses limit_bias.
-    bias_factor = hinge_angle_get_bias_factor(constraints, cid)
-    limit_bias = hinge_angle_get_limit_bias(constraints, cid)
+    bias_factor = read_float(constraints, base_offset + _OFF_BIAS_FACTOR, cid)
+    limit_bias = read_float(constraints, base_offset + _OFF_LIMIT_BIAS, cid)
 
     bias = wp.vec3f(
         err_x * idt * bias_factor,
@@ -591,11 +606,11 @@ def hinge_angle_prepare_for_iteration(
     )
 
     # Persist all the prepared state.
-    hinge_angle_set_jacobian(constraints, cid, jacobian)
-    hinge_angle_set_effective_mass(constraints, cid, wp.inverse(eff))
-    hinge_angle_set_clamp(constraints, cid, clamp)
-    hinge_angle_set_bias(constraints, cid, bias)
-    hinge_angle_set_accumulated_impulse(constraints, cid, acc)
+    write_mat33(constraints, base_offset + _OFF_JACOBIAN, cid, jacobian)
+    write_mat33(constraints, base_offset + _OFF_EFFECTIVE_MASS, cid, wp.inverse(eff))
+    write_int(constraints, base_offset + _OFF_CLAMP, cid, clamp)
+    write_vec3(constraints, base_offset + _OFF_BIAS, cid, bias)
+    write_vec3(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid, acc)
 
     # Warm start: apply +- J * (InvI * acc) to the two body angular
     # velocities. C# writes the inner Transform first (Transform(acc, J)
@@ -606,34 +621,34 @@ def hinge_angle_prepare_for_iteration(
 
 
 @wp.func
-def hinge_angle_iterate(
+def hinge_angle_iterate_at(
     constraints: ConstraintContainer,
     cid: wp.int32,
+    base_offset: wp.int32,
     bodies: BodyContainer,
+    body_pair: ConstraintBodies,
     idt: wp.float32,
 ):
-    """Direct port of ``IterateHingeAngle`` (HingeAngle.cs:132).
+    """Composable ``IterateHingeAngle`` (HingeAngle.cs:132).
 
-    One PGS-style iteration on the angular Jacobian: project the current
-    velocity through the Jacobian, build the corrective impulse, clamp
-    the third axis against the limit (if active), and apply the velocity
-    delta to both body angular velocities.
+    See :func:`ball_socket_iterate_at` for the ``base_offset`` /
+    ``body_pair`` contract.
     """
-    b1 = hinge_angle_get_body1(constraints, cid)
-    b2 = hinge_angle_get_body2(constraints, cid)
+    b1 = body_pair.b1
+    b2 = body_pair.b2
 
     angular_velocity1 = bodies.angular_velocity[b1]
     angular_velocity2 = bodies.angular_velocity[b2]
     inv_inertia1 = bodies.inverse_inertia_world[b1]
     inv_inertia2 = bodies.inverse_inertia_world[b2]
 
-    jacobian = hinge_angle_get_jacobian(constraints, cid)
-    eff = hinge_angle_get_effective_mass(constraints, cid)
-    bias = hinge_angle_get_bias(constraints, cid)
-    acc = hinge_angle_get_accumulated_impulse(constraints, cid)
-    softness = hinge_angle_get_softness(constraints, cid)
-    limit_softness = hinge_angle_get_limit_softness(constraints, cid)
-    clamp = hinge_angle_get_clamp(constraints, cid)
+    jacobian = read_mat33(constraints, base_offset + _OFF_JACOBIAN, cid)
+    eff = read_mat33(constraints, base_offset + _OFF_EFFECTIVE_MASS, cid)
+    bias = read_vec3(constraints, base_offset + _OFF_BIAS, cid)
+    acc = read_vec3(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid)
+    softness = read_float(constraints, base_offset + _OFF_SOFTNESS, cid)
+    limit_softness = read_float(constraints, base_offset + _OFF_LIMIT_SOFTNESS, cid)
+    clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
 
     # jv = J^T * (w1 - w2)  (TransposedTransform(w, J) = J^T * w).
     jv = wp.transpose(jacobian) @ (angular_velocity1 - angular_velocity2)
@@ -662,13 +677,62 @@ def hinge_angle_iterate(
 
     lam = acc - orig_acc
 
-    hinge_angle_set_accumulated_impulse(constraints, cid, acc)
+    write_vec3(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid, acc)
 
     # Apply +-J * InvI * lambda. C# does Transform(lam, J) = J * lam,
     # then Transform(_, InvI) = InvI * _.
     j_lam = jacobian @ lam
     bodies.angular_velocity[b1] = angular_velocity1 + inv_inertia1 @ j_lam
     bodies.angular_velocity[b2] = angular_velocity2 - inv_inertia2 @ j_lam
+
+
+@wp.func
+def hinge_angle_world_wrench_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    idt: wp.float32,
+):
+    """Composable hinge-angle wrench on body2; see
+    :func:`hinge_angle_world_wrench` for semantics."""
+    acc = read_vec3(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid)
+    jacobian = read_mat33(constraints, base_offset + _OFF_JACOBIAN, cid)
+    torque = -(jacobian @ acc) * idt
+    return wp.vec3f(0.0, 0.0, 0.0), torque
+
+
+@wp.func
+def hinge_angle_prepare_for_iteration(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    idt: wp.float32,
+):
+    """Direct port of ``PrepareForIterationHingeAngle`` (HingeAngle.cs:109).
+
+    Thin wrapper: see :func:`hinge_angle_prepare_for_iteration_at`.
+    """
+    b1 = hinge_angle_get_body1(constraints, cid)
+    b2 = hinge_angle_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    hinge_angle_prepare_for_iteration_at(constraints, cid, 0, bodies, body_pair, idt)
+
+
+@wp.func
+def hinge_angle_iterate(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    idt: wp.float32,
+):
+    """Direct port of ``IterateHingeAngle`` (HingeAngle.cs:132).
+
+    Thin wrapper: see :func:`hinge_angle_iterate_at`.
+    """
+    b1 = hinge_angle_get_body1(constraints, cid)
+    b2 = hinge_angle_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    hinge_angle_iterate_at(constraints, cid, 0, bodies, body_pair, idt)
 
 
 @wp.func
@@ -685,7 +749,4 @@ def hinge_angle_world_wrench(
     The cached ``jacobian`` from ``prepare_for_iteration`` is in world
     frame, so no extra rotation is required.
     """
-    acc = hinge_angle_get_accumulated_impulse(constraints, cid)
-    jacobian = hinge_angle_get_jacobian(constraints, cid)
-    torque = -(jacobian @ acc) * idt
-    return wp.vec3f(0.0, 0.0, 0.0), torque
+    return hinge_angle_world_wrench_at(constraints, cid, 0, idt)

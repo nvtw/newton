@@ -49,16 +49,27 @@ from newton._src.solvers.jitter.constraint_container import (
     ConstraintContainer,
     constraint_container_zeros,
 )
+from newton._src.solvers.jitter.constraint_double_ball_socket import (
+    DBS_DWORDS,
+    double_ball_socket_initialize_kernel,
+)
 from newton._src.solvers.jitter.constraint_hinge_angle import (
     HA_DWORDS,
     hinge_angle_initialize_kernel,
+)
+from newton._src.solvers.jitter.constraint_hinge_joint import (
+    HJ_DWORDS,
+    hinge_joint_initialize_kernel,
 )
 from newton._src.solvers.jitter.solver_jitter import World
 
 __all__ = [
     "AngularMotorDescriptor",
     "BallSocketDescriptor",
+    "DoubleBallSocketHingeDescriptor",
+    "DoubleBallSocketHingeHandle",
     "HingeAngleDescriptor",
+    "HingeJointDescriptor",
     "HingeJointHandle",
     "RigidBodyDescriptor",
     "WorldBuilder",
@@ -151,26 +162,87 @@ class AngularMotorDescriptor:
 
 
 @dataclass
-class HingeJointHandle:
-    """Cids of the underlying constraints created by
-    :meth:`WorldBuilder.add_hinge_joint`.
+class HingeJointDescriptor:
+    """Plain-Python description of one fused hinge-joint constraint.
 
-    A Jitter-style hinge joint is the *composition* of three lower-level
-    constraints: a :class:`HingeAngle` (locks the 2 angular DoFs
-    orthogonal to the axis, optionally with limits), a
-    :class:`BallSocket` (locks the 3 translational DoFs at the hinge
-    centre), and an optional :class:`AngularMotor` (drives the relative
-    velocity along the axis). The handle records each component's *global*
-    cid in the shared :class:`ConstraintContainer` so callers can later
-    query forces / accumulated impulses for the individual components
-    via :meth:`World.gather_constraint_wrenches`.
+    A Jitter-style hinge joint composed of a HingeAngle (2-DoF angular
+    lock, optionally with limits), a BallSocket (3-DoF positional lock),
+    and an AngularMotor (drives the remaining axial DoF). All three
+    sub-constraints live in *one* column of the shared
+    :class:`ConstraintContainer` and are owned by a single PGS thread
+    -- see :mod:`newton._src.solvers.jitter.constraint_hinge_joint` for
+    why this fuses better than three separate constraints.
 
-    ``angular_motor_cid`` is ``-1`` for a passive (motor-less) joint.
+    ``hinge_center`` and ``hinge_axis`` are in *world* space at
+    finalize() time. Set ``max_force = 0.0`` for a passive (unmotorised)
+    joint -- the AngularMotor sub then applies zero corrective impulse
+    and acts as a no-op.
     """
 
-    hinge_angle_cid: int
-    ball_socket_cid: int
-    angular_motor_cid: int = -1
+    body1: int
+    body2: int
+    hinge_center: tuple[float, float, float]
+    hinge_axis: tuple[float, float, float]
+    min_angle: float = -math.pi
+    max_angle: float = math.pi
+    target_velocity: float = 0.0
+    max_force: float = 0.0
+
+
+@dataclass
+class HingeJointHandle:
+    """Global cid of the fused hinge-joint constraint created by
+    :meth:`WorldBuilder.add_hinge_joint`.
+
+    Returned with a sentinel cid (``-1``) at the time of the
+    ``add_hinge_joint`` call and rewritten in place by
+    :meth:`WorldBuilder.finalize` to the actual cid in the shared
+    :class:`ConstraintContainer`. Pass it to
+    :meth:`World.gather_constraint_wrenches` (indirectly via
+    ``wrenches[handle.cid]``) to read the fused joint's combined
+    reaction wrench -- the sum of its BallSocket / HingeAngle /
+    AngularMotor sub-contributions on body 2.
+    """
+
+    cid: int = -1
+
+
+@dataclass
+class DoubleBallSocketHingeDescriptor:
+    """Plain-Python description of one fused two-anchor (Schur-complement)
+    hinge constraint.
+
+    Locks 5 DoF (3 translational + 2 rotational) by anchoring two
+    points -- ``anchor1`` and ``anchor2`` -- on the line of the hinge
+    axis between the two bodies. The third rotational DoF (rotation
+    about the line through both anchors) stays free. Solved as one
+    rank-5 column via a 3x3 + 2x2 Schur complement, no quaternion math
+    and no parameter tuning, see
+    :mod:`newton._src.solvers.jitter.constraint_double_ball_socket`.
+
+    ``anchor1`` and ``anchor2`` are in *world* space at finalize() time
+    and define the hinge axis as ``anchor2 - anchor1``.
+    """
+
+    body1: int
+    body2: int
+    anchor1: tuple[float, float, float]
+    anchor2: tuple[float, float, float]
+
+
+@dataclass
+class DoubleBallSocketHingeHandle:
+    """Global cid of the fused double-ball-socket hinge constraint
+    created by :meth:`WorldBuilder.add_double_ball_socket_hinge`.
+
+    Returned with a sentinel cid (``-1``) and rewritten in place by
+    :meth:`WorldBuilder.finalize`. Pass to
+    :meth:`World.gather_constraint_wrenches` (via
+    ``wrenches[handle.cid]``) to read the joint's reaction wrench on
+    body 2.
+    """
+
+    cid: int = -1
 
 
 class WorldBuilder:
@@ -197,11 +269,16 @@ class WorldBuilder:
         self._ball_sockets: list[BallSocketDescriptor] = []
         self._hinge_angles: list[HingeAngleDescriptor] = []
         self._angular_motors: list[AngularMotorDescriptor] = []
-        # Composite hinge-joint handles to patch with global cids during
-        # finalize(); the user keeps the same object reference so they
-        # can read .hinge_angle_cid / .ball_socket_cid / .angular_motor_cid
-        # after finalize() returns.
-        self._hinge_joints: list[HingeJointHandle] = []
+        # Fused hinge-joint descriptors and their handles. The handle
+        # list is parallel to the descriptor list -- finalize() walks
+        # both to patch each handle with its global cid in place so the
+        # user-held reference becomes valid after finalize() returns.
+        self._hinge_joint_descriptors: list[HingeJointDescriptor] = []
+        self._hinge_joint_handles: list[HingeJointHandle] = []
+        # Fused two-anchor (Schur-complement) hinge descriptors. Same
+        # parallel-list pattern as the fused HingeJoint above.
+        self._double_ball_socket_hinge_descriptors: list[DoubleBallSocketHingeDescriptor] = []
+        self._double_ball_socket_hinge_handles: list[DoubleBallSocketHingeHandle] = []
 
     # ------------------------------------------------------------------
     # Body API
@@ -359,51 +436,92 @@ class WorldBuilder:
         target_velocity: float = 0.0,
         max_force: float = 0.0,
     ) -> HingeJointHandle:
-        """Append a Jitter-style hinge joint composed of a
-        :class:`HingeAngle` (2-DoF angular lock with optional limits), a
-        :class:`BallSocket` (3-DoF positional lock at ``hinge_center``),
-        and -- if ``motor`` is true -- an :class:`AngularMotor` driving
-        the relative axial velocity toward ``target_velocity`` with up
-        to ``max_force`` of torque.
+        """Append a Jitter-style hinge joint and return its handle.
+
+        Builds a *fused* :data:`CONSTRAINT_TYPE_HINGE_JOINT` constraint
+        that packs the HingeAngle (2-DoF angular lock with optional
+        limits), BallSocket (3-DoF positional lock at ``hinge_center``),
+        and AngularMotor (drives the axial velocity) into one column.
+        The single-thread fused dispatch typically converges noticeably
+        better than the same triple as three separate constraints --
+        see :mod:`newton._src.solvers.jitter.constraint_hinge_joint`
+        for the rationale.
 
         Mirrors Jitter2's ``HingeJoint`` constructor
         (``Jitter2/Dynamics/Joints/HingeJoint.cs``); the ``hasMotor``
-        flag is spelt ``motor`` here for Python ergonomics. The hinge
-        axis is automatically normalised; both ``hinge_center`` and
-        ``hinge_axis`` are in *world* space at finalize() time.
+        flag is spelt ``motor`` here for Python ergonomics. When
+        ``motor`` is false the AngularMotor sub stores ``max_force = 0``
+        and applies no torque, matching the C# ``hasMotor=false`` path.
+        Both ``hinge_center`` and ``hinge_axis`` are in *world* space at
+        finalize() time.
 
-        Returns a :class:`HingeJointHandle` carrying the *global* cids
-        of the underlying constraints in the shared
-        :class:`ConstraintContainer`, so callers can later read
-        per-component reaction forces from
-        :meth:`World.gather_constraint_wrenches`. ``angular_motor_cid``
-        is ``-1`` when ``motor=False``.
+        Returns a :class:`HingeJointHandle` whose ``cid`` field is
+        rewritten in place by :meth:`finalize` to the joint's global
+        cid in the shared :class:`ConstraintContainer`.
         """
         self._validate_body(body1)
         self._validate_body(body2)
 
-        # Append the components and remember which per-type indices
-        # belong to this hinge joint so finalize() can patch the
-        # returned handle with global cids after the layout is fixed.
-        ha_local = self.add_hinge_angle(body1, body2, hinge_axis, min_angle, max_angle)
-        bs_local = self.add_ball_socket(body1, body2, hinge_center)
-        am_local = -1
         if motor:
-            am_local = self.add_angular_motor(
-                body1, body2, hinge_axis, target_velocity, max_force
-            )
-
-        # The handle's fields are filled with the per-type indices for
-        # now; finalize() rewrites them in place to the global cids
-        # using the type ordering recorded in
-        # :meth:`_build_constraint_container`. We track the handle in
-        # _hinge_joints so we know which ones to patch.
-        handle = HingeJointHandle(
-            hinge_angle_cid=ha_local,
-            ball_socket_cid=bs_local,
-            angular_motor_cid=am_local,
+            mf = max_force
+            tv = target_velocity
+        else:
+            mf = 0.0
+            tv = 0.0
+        descriptor = HingeJointDescriptor(
+            body1=body1,
+            body2=body2,
+            hinge_center=hinge_center,
+            hinge_axis=hinge_axis,
+            min_angle=min_angle,
+            max_angle=max_angle,
+            target_velocity=tv,
+            max_force=mf,
         )
-        self._hinge_joints.append(handle)
+        handle = HingeJointHandle(cid=-1)
+        self._hinge_joint_descriptors.append(descriptor)
+        self._hinge_joint_handles.append(handle)
+        return handle
+
+    def add_double_ball_socket_hinge(
+        self,
+        body1: int,
+        body2: int,
+        anchor1: tuple[float, float, float],
+        anchor2: tuple[float, float, float],
+    ) -> DoubleBallSocketHingeHandle:
+        """Append a fused two-anchor "double ball-socket" hinge constraint
+        and return its handle.
+
+        Solves a single rank-5 column (3x3 + 2x2 Schur complement,
+        no quaternion math) that locks 3 translational + 2 rotational
+        DoF. The free rotational DoF is rotation about the line through
+        ``anchor1`` and ``anchor2``. Mathematically equivalent to two
+        independent ball-sockets at the same body pair but without the
+        rank deficiency / compliance leak of stacking two 3-row
+        Jacobians; see
+        :mod:`newton._src.solvers.jitter.constraint_double_ball_socket`
+        for the derivation.
+
+        Both anchors are interpreted in *world* space at
+        :meth:`finalize` time; the hinge axis is implicit in their
+        relative direction.
+
+        Returns a :class:`DoubleBallSocketHingeHandle` whose ``cid``
+        field is rewritten in place by :meth:`finalize` to the joint's
+        global cid in the shared :class:`ConstraintContainer`.
+        """
+        self._validate_body(body1)
+        self._validate_body(body2)
+        descriptor = DoubleBallSocketHingeDescriptor(
+            body1=body1,
+            body2=body2,
+            anchor1=anchor1,
+            anchor2=anchor2,
+        )
+        handle = DoubleBallSocketHingeHandle(cid=-1)
+        self._double_ball_socket_hinge_descriptors.append(descriptor)
+        self._double_ball_socket_hinge_handles.append(handle)
         return handle
 
     # ------------------------------------------------------------------
@@ -457,7 +575,10 @@ class WorldBuilder:
         self._ball_sockets = []
         self._hinge_angles = []
         self._angular_motors = []
-        self._hinge_joints = []
+        self._hinge_joint_descriptors = []
+        self._hinge_joint_handles = []
+        self._double_ball_socket_hinge_descriptors = []
+        self._double_ball_socket_hinge_handles = []
         return world
 
     # ------------------------------------------------------------------
@@ -533,29 +654,33 @@ class WorldBuilder:
     ) -> tuple[ConstraintContainer, int]:
         """Allocate the shared :class:`ConstraintContainer`, pack every
         constraint type into a contiguous cid range, and patch any
-        outstanding :class:`HingeJointHandle` with global cids.
+        outstanding :class:`HingeJointHandle` with their global cid.
 
-        Layout (must match :meth:`_hinge_joint_handle` resolution):
+        Layout:
 
-            * cids ``[0, n_ball)`` -> ball-sockets
-            * cids ``[n_ball, n_ball + n_hinge)`` -> hinge-angles
-            * cids ``[n_ball + n_hinge, total)`` -> angular-motors
+            * cids ``[0, n_ball)``                              -> ball-sockets
+            * cids ``[n_ball, +n_hinge)``                       -> hinge-angles
+            * cids ``[..., +n_motor)``                          -> angular-motors
+            * cids ``[..., +n_hinge_joint)``                    -> fused hinge-joints
+            * cids ``[..., +n_dbs_hinge)``                      -> fused double-ball-socket hinges
 
         The container's per-column dword count is ``max`` of all
         registered constraint schemas so any column can hold any type.
-        The unused trailing rows of the smaller types are simply ignored
-        by their kernels (per-type ``*_DWORDS`` constants only describe
-        the populated prefix).
+        The unused trailing rows of the smaller types are simply
+        ignored by their kernels (per-type ``*_DWORDS`` constants only
+        describe the populated prefix).
         """
         n_ball = len(self._ball_sockets)
         n_hinge = len(self._hinge_angles)
         n_motor = len(self._angular_motors)
-        total = n_ball + n_hinge + n_motor
+        n_hinge_joint = len(self._hinge_joint_descriptors)
+        n_dbs_hinge = len(self._double_ball_socket_hinge_descriptors)
+        total = n_ball + n_hinge + n_motor + n_hinge_joint + n_dbs_hinge
 
         # All types share the column-major storage so the unified
         # dispatcher in solver_jitter_kernels can index any column the
         # same way; size to the widest schema.
-        per_constraint_dwords = max(BS_DWORDS, HA_DWORDS, AM_DWORDS)
+        per_constraint_dwords = max(BS_DWORDS, HA_DWORDS, AM_DWORDS, HJ_DWORDS, DBS_DWORDS)
 
         # Always allocate at least 1 column so the wp.array2d shape is
         # non-degenerate; the kernels gate on cid bounds anyway.
@@ -568,6 +693,8 @@ class WorldBuilder:
         ball_socket_offset = 0
         hinge_angle_offset = n_ball
         angular_motor_offset = n_ball + n_hinge
+        hinge_joint_offset = n_ball + n_hinge + n_motor
+        dbs_hinge_offset = n_ball + n_hinge + n_motor + n_hinge_joint
 
         if n_ball > 0:
             self._init_ball_sockets(container, bodies, ball_socket_offset, device)
@@ -575,15 +702,19 @@ class WorldBuilder:
             self._init_hinge_angles(container, bodies, hinge_angle_offset, device)
         if n_motor > 0:
             self._init_angular_motors(container, bodies, angular_motor_offset, device)
+        if n_hinge_joint > 0:
+            self._init_hinge_joints(container, bodies, hinge_joint_offset, device)
+        if n_dbs_hinge > 0:
+            self._init_double_ball_socket_hinges(container, bodies, dbs_hinge_offset, device)
 
-        # Resolve hinge-joint handles in place. The handle currently
-        # holds per-type indices (filled in by add_hinge_joint); rewrite
-        # them as global cids using the layout above.
-        for h in self._hinge_joints:
-            h.hinge_angle_cid = hinge_angle_offset + h.hinge_angle_cid
-            h.ball_socket_cid = ball_socket_offset + h.ball_socket_cid
-            if h.angular_motor_cid >= 0:
-                h.angular_motor_cid = angular_motor_offset + h.angular_motor_cid
+        # Resolve fused-joint handles in place. Each handle was created
+        # with cid=-1 and is parallel to its descriptor list; rewrite
+        # to the joint's global cid so user-held references become
+        # valid after finalize() returns.
+        for i, h in enumerate(self._hinge_joint_handles):
+            h.cid = hinge_joint_offset + i
+        for i, h in enumerate(self._double_ball_socket_hinge_handles):
+            h.cid = dbs_hinge_offset + i
 
         return container, total
 
@@ -690,6 +821,124 @@ class WorldBuilder:
                 axis2_d,
                 target_velocity_d,
                 max_force_d,
+            ],
+            device=device,
+        )
+
+    def _init_hinge_joints(
+        self,
+        constraints: ConstraintContainer,
+        bodies: BodyContainer,
+        cid_offset: int,
+        device: wp.context.Device,
+    ) -> None:
+        """Pack the fused hinge-joint descriptors into ``constraints``.
+
+        One launch of :func:`hinge_joint_initialize_kernel` writes all
+        three sub-blocks (BallSocket / HingeAngle / AngularMotor) plus
+        the shared header into each fused column.
+        """
+        n = len(self._hinge_joint_descriptors)
+
+        body1 = np.asarray(
+            [d.body1 for d in self._hinge_joint_descriptors], dtype=np.int32
+        )
+        body2 = np.asarray(
+            [d.body2 for d in self._hinge_joint_descriptors], dtype=np.int32
+        )
+        anchor = np.asarray(
+            [d.hinge_center for d in self._hinge_joint_descriptors], dtype=np.float32
+        )
+        axis = np.asarray(
+            [d.hinge_axis for d in self._hinge_joint_descriptors], dtype=np.float32
+        )
+        min_angle = np.asarray(
+            [d.min_angle for d in self._hinge_joint_descriptors], dtype=np.float32
+        )
+        max_angle = np.asarray(
+            [d.max_angle for d in self._hinge_joint_descriptors], dtype=np.float32
+        )
+        target_velocity = np.asarray(
+            [d.target_velocity for d in self._hinge_joint_descriptors],
+            dtype=np.float32,
+        )
+        max_force = np.asarray(
+            [d.max_force for d in self._hinge_joint_descriptors], dtype=np.float32
+        )
+
+        body1_d = wp.array(body1, dtype=wp.int32, device=device)
+        body2_d = wp.array(body2, dtype=wp.int32, device=device)
+        anchor_d = wp.array(anchor, dtype=wp.vec3f, device=device)
+        axis_d = wp.array(axis, dtype=wp.vec3f, device=device)
+        min_angle_d = wp.array(min_angle, dtype=wp.float32, device=device)
+        max_angle_d = wp.array(max_angle, dtype=wp.float32, device=device)
+        target_velocity_d = wp.array(target_velocity, dtype=wp.float32, device=device)
+        max_force_d = wp.array(max_force, dtype=wp.float32, device=device)
+
+        wp.launch(
+            hinge_joint_initialize_kernel,
+            dim=n,
+            inputs=[
+                constraints,
+                bodies,
+                int(cid_offset),
+                body1_d,
+                body2_d,
+                anchor_d,
+                axis_d,
+                min_angle_d,
+                max_angle_d,
+                target_velocity_d,
+                max_force_d,
+            ],
+            device=device,
+        )
+
+    def _init_double_ball_socket_hinges(
+        self,
+        constraints: ConstraintContainer,
+        bodies: BodyContainer,
+        cid_offset: int,
+        device: wp.context.Device,
+    ) -> None:
+        """Pack the fused two-anchor hinge descriptors into ``constraints``.
+
+        One launch of :func:`double_ball_socket_initialize_kernel` writes
+        each fused column. The init kernel snapshots both world-space
+        anchors into each body's local frame; the hinge axis is implicit
+        in the line ``anchor1 -> anchor2``.
+        """
+        n = len(self._double_ball_socket_hinge_descriptors)
+
+        body1 = np.asarray(
+            [d.body1 for d in self._double_ball_socket_hinge_descriptors], dtype=np.int32
+        )
+        body2 = np.asarray(
+            [d.body2 for d in self._double_ball_socket_hinge_descriptors], dtype=np.int32
+        )
+        anchor1 = np.asarray(
+            [d.anchor1 for d in self._double_ball_socket_hinge_descriptors], dtype=np.float32
+        )
+        anchor2 = np.asarray(
+            [d.anchor2 for d in self._double_ball_socket_hinge_descriptors], dtype=np.float32
+        )
+
+        body1_d = wp.array(body1, dtype=wp.int32, device=device)
+        body2_d = wp.array(body2, dtype=wp.int32, device=device)
+        anchor1_d = wp.array(anchor1, dtype=wp.vec3f, device=device)
+        anchor2_d = wp.array(anchor2, dtype=wp.vec3f, device=device)
+
+        wp.launch(
+            double_ball_socket_initialize_kernel,
+            dim=n,
+            inputs=[
+                constraints,
+                bodies,
+                int(cid_offset),
+                body1_d,
+                body2_d,
+                anchor1_d,
+                anchor2_d,
             ],
             device=device,
         )

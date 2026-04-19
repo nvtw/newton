@@ -10,22 +10,30 @@
 # a *motorized* hinge instead of a plain ball-socket.
 #
 # Each hinge:
-#   * is composed -- at the WorldBuilder level -- of a HingeAngle (locks
-#     the two angular DoFs orthogonal to the axis), a BallSocket (locks
-#     the three positional DoFs at the shared corner), and an
-#     AngularMotor (drives the relative angular velocity along the axis
-#     toward zero), exactly like Jitter2's ``HingeJoint``;
+#   * is a *fused* CONSTRAINT_TYPE_HINGE_JOINT -- a single column in the
+#     constraint container that packs the HingeAngle (locks the two
+#     angular DoFs orthogonal to the axis), the BallSocket (locks the
+#     three positional DoFs at the shared corner), and the AngularMotor
+#     (drives the relative angular velocity along the axis) into one
+#     PGS-thread-owned slot. This converges noticeably better than three
+#     separate constraints touching the same body pair because the
+#     partitioner colours one fused joint per partition (instead of
+#     three) and the body data stays in registers across the three
+#     sub-iterations.
 #   * uses a hinge axis aligned with the *cube edge* that passes through
 #     the joint corner. With the 45-degree-about-z rotation the four
 #     vertical body-frame edges (the ones parallel to body z) all stay
 #     aligned with world ``+z``, so the world-space hinge axis is just
 #     ``(0, 0, 1)``;
-#   * runs in *velocity mode* with ``target_velocity = 0``: the motor
-#     fights any relative spin around the hinge axis and acts as a
-#     strong angular damper. This is not a position spring -- so a small
-#     residual angle can slowly drift -- but in the equilibrium pose
-#     gravity does not torque the chain about z, so the motors should
-#     stay near zero impulse and the chain hangs as before.
+#   * runs in *velocity mode* with a user-configurable target velocity
+#     (``TARGET_VELOCITY`` below). Default 0.0 makes the motor fight any
+#     relative spin around the hinge axis and act as a strong angular
+#     damper -- the chain hangs in equilibrium because gravity does not
+#     torque the chain about z. Set ``TARGET_VELOCITY`` to a nonzero
+#     value (rad/s) to spin the cubes about their hinges; with
+#     dynamic-only cubes (no positional restoring force) the chain will
+#     start swinging because the chain itself rotates around each motor
+#     axis.
 #     A position-mode (PD) motor will be added later.
 #
 # The picking, viewer, render, and ``test_final`` plumbing all match
@@ -45,6 +53,13 @@ import newton.examples
 from newton._src.solvers.jitter.picking import JitterPicking, register_with_viewer_gl
 from newton._src.solvers.jitter.solver_jitter import pack_body_xforms_kernel
 from newton._src.solvers.jitter.world_builder import WorldBuilder
+
+# When True, every joint is built with WorldBuilder.add_double_ball_socket_hinge
+# (rank-5 Schur-complement two-anchor hinge, no motor) instead of the fused
+# motorized HingeJoint. The motor / TARGET_VELOCITY / _MOTOR_MAX_FORCE
+# settings below are silently ignored in that mode -- the double-ball-socket
+# hinge has no driver yet.
+USE_DOUBLE_BALL_SOCKET = True
 
 NUM_CUBES = 10
 HALF_EXTENT = 0.5
@@ -68,11 +83,25 @@ _DIAGONAL_QUAT = (0.0, 0.0, math.sin(_HALF_ANGLE), math.cos(_HALF_ANGLE))
 # this is the world z axis.
 _HINGE_AXIS = (0.0, 0.0, 1.0)
 
-# Maximum motor torque [N·m]. Generous so the motor can hold zero
-# relative axial spin even under the (small) precession the chain feels
-# from PGS jitter; the motor is still velocity-mode so it doesn't fight
-# slow drift, only motion.
+# Maximum motor torque [N·m]. Generous so the motor can hold the
+# target relative axial spin even under the (small) precession the
+# chain feels from PGS jitter; the motor is still velocity-mode so it
+# doesn't fight slow drift, only motion.
 _MOTOR_MAX_FORCE = 50.0
+
+# User-configurable target relative angular velocity for every motor in
+# the chain [rad/s]. Each hinge drives the *relative* spin of body 2
+# vs. body 1 around the hinge axis toward this value.
+#
+#   * 0.0  -> hold pose (default; chain stays in equilibrium).
+#   * 0.5  -> mild continuous rotation; cubes precess about the chain.
+#   * 5.0  -> aggressive spin; the chain whips around quickly.
+#
+# Note: even a small nonzero value is felt by *every* hinge in the
+# chain, including the one connecting cube 0 to the static world body
+# (which acts as an infinite reaction sink), so the chain quickly
+# accumulates large angular momentum.
+TARGET_VELOCITY = 0.0
 
 
 class Example:
@@ -105,24 +134,41 @@ class Example:
         # One motorized hinge joint per junction. Joint k sits on the
         # world y axis at -k * 2 * h*sqrt(2) -- the meeting corner of
         # cube k-1 and cube k -- with the hinge axis along world z.
-        # Keep the handles around so callers can later read the
-        # per-component reaction wrenches via gather_constraint_wrenches.
+        # Each handle exposes the joint's global cid; pass it to
+        # World.gather_constraint_wrenches via wrenches[handle.cid] to
+        # read the joint's combined reaction wrench (force + torque on
+        # body 2, summed across the BallSocket / HingeAngle /
+        # AngularMotor sub-contributions).
         self.hinge_handles = []
         for k in range(NUM_HINGES):
             body_a = world_body if k == 0 else cube_ids[k - 1]
             body_b = cube_ids[k]
             anchor = (0.0, -k * 2.0 * _DIAGONAL_HALF, 0.0)
-            self.hinge_handles.append(
-                b.add_hinge_joint(
-                    body1=body_a,
-                    body2=body_b,
-                    hinge_center=anchor,
-                    hinge_axis=_HINGE_AXIS,
-                    motor=True,
-                    target_velocity=0.0,
-                    max_force=_MOTOR_MAX_FORCE,
+            if USE_DOUBLE_BALL_SOCKET:
+                # Two anchors along the cube edge (world +z); the implicit
+                # hinge axis = anchor2 - anchor1 matches _HINGE_AXIS.
+                a1 = (anchor[0], anchor[1], anchor[2] - HALF_EXTENT)
+                a2 = (anchor[0], anchor[1], anchor[2] + HALF_EXTENT)
+                self.hinge_handles.append(
+                    b.add_double_ball_socket_hinge(
+                        body1=body_a,
+                        body2=body_b,
+                        anchor1=a1,
+                        anchor2=a2,
+                    )
                 )
-            )
+            else:
+                self.hinge_handles.append(
+                    b.add_hinge_joint(
+                        body1=body_a,
+                        body2=body_b,
+                        hinge_center=anchor,
+                        hinge_axis=_HINGE_AXIS,
+                        motor=True,
+                        target_velocity=TARGET_VELOCITY,
+                        max_force=_MOTOR_MAX_FORCE,
+                    )
+                )
 
         # substeps=1 here because we drive substepping ourselves from
         # simulate() (matches example_body_chain).

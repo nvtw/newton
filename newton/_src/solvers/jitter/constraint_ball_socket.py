@@ -46,8 +46,10 @@ import warp as wp
 from newton._src.solvers.jitter.body import BodyContainer
 from newton._src.solvers.jitter.constraint_container import (
     CONSTRAINT_TYPE_BALL_SOCKET,
+    ConstraintBodies,
     ConstraintContainer,
     assert_constraint_header,
+    constraint_bodies_make,
     constraint_set_type,
     read_float,
     read_int,
@@ -78,7 +80,9 @@ __all__ = [
     "ball_socket_get_softness",
     "ball_socket_initialize_kernel",
     "ball_socket_iterate",
+    "ball_socket_iterate_at",
     "ball_socket_prepare_for_iteration",
+    "ball_socket_prepare_for_iteration_at",
     "ball_socket_set_accumulated_impulse",
     "ball_socket_set_bias",
     "ball_socket_set_bias_factor",
@@ -91,6 +95,7 @@ __all__ = [
     "ball_socket_set_r2",
     "ball_socket_set_softness",
     "ball_socket_world_wrench",
+    "ball_socket_world_wrench_at",
 ]
 
 
@@ -359,31 +364,42 @@ def ball_socket_initialize_kernel(
 # Per-iteration math
 # ---------------------------------------------------------------------------
 #
-# These two ``wp.func``s are the only per-type entry points the solver
-# needs at runtime. They share a fixed signature with the matching
-# helpers in every other constraint module
-# (``constraints, cid, bodies, idt``) so the unified dispatcher kernel
-# in :mod:`solver_jitter_kernels` can call any of them through an
-# ``if/elif`` cascade gated on the ``constraint_type`` tag.
+# Two access levels share the same math:
+#
+# * ``*_at`` variants take an explicit ``base_offset`` (dword offset of
+#   the ball-socket sub-block within its column) and a
+#   :class:`ConstraintBodies` carrier with the body indices. They are
+#   what the *fused* :data:`CONSTRAINT_TYPE_HINGE_JOINT` constraint
+#   calls when running its three sub-iterations sequentially on a
+#   shared column -- the fused header carries body1/body2 once and the
+#   sub-blocks contain only their per-body fields.
+# * The plain ``ball_socket_prepare_for_iteration`` /
+#   ``ball_socket_iterate`` / ``ball_socket_world_wrench`` are the
+#   *direct* entry points the unified dispatcher cascade uses. They are
+#   thin wrappers that read body1/body2 from this constraint's own
+#   header at the standard offsets and forward to the ``*_at`` variant
+#   with ``base_offset = 0``.
 
 
 @wp.func
-def ball_socket_prepare_for_iteration(
+def ball_socket_prepare_for_iteration_at(
     constraints: ConstraintContainer,
     cid: wp.int32,
+    base_offset: wp.int32,
     bodies: BodyContainer,
+    body_pair: ConstraintBodies,
     idt: wp.float32,
 ):
-    """Direct port of ``PrepareForIterationBallSocket`` (BallSocket.cs:130).
+    """Composable ``PrepareForIterationBallSocket`` (BallSocket.cs:130).
 
-    Reads ``body1`` / ``body2`` from the constraint to look up the two
-    bodies in the solver's :class:`BodyContainer`, recomputes the cached
-    lever arms / effective mass / bias, and applies warm-start impulses
-    to both bodies. Only the body fields actually consumed are loaded
-    and only ``velocity`` / ``angular_velocity`` are written back.
+    Reads/writes the ball-socket sub-block at column ``cid`` starting at
+    dword ``base_offset``. Body indices come from ``body_pair`` (the
+    fused-constraint header carries them once). When invoked as a
+    standalone constraint, ``base_offset = 0`` and ``body_pair`` is
+    populated from this same column's header.
     """
-    b1 = ball_socket_get_body1(constraints, cid)
-    b2 = ball_socket_get_body2(constraints, cid)
+    b1 = body_pair.b1
+    b2 = body_pair.b2
 
     orientation1 = bodies.orientation[b1]
     orientation2 = bodies.orientation[b2]
@@ -394,14 +410,14 @@ def ball_socket_prepare_for_iteration(
     inv_inertia1 = bodies.inverse_inertia_world[b1]
     inv_inertia2 = bodies.inverse_inertia_world[b2]
 
-    la1 = ball_socket_get_local_anchor1(constraints, cid)
-    la2 = ball_socket_get_local_anchor2(constraints, cid)
+    la1 = read_vec3(constraints, base_offset + _OFF_LA1, cid)
+    la2 = read_vec3(constraints, base_offset + _OFF_LA2, cid)
 
     # JVector.Transform(LocalAnchor, body.Orientation, out R)
     r1 = wp.quat_rotate(orientation1, la1)
     r2 = wp.quat_rotate(orientation2, la2)
-    ball_socket_set_r1(constraints, cid, r1)
-    ball_socket_set_r2(constraints, cid, r2)
+    write_vec3(constraints, base_offset + _OFF_R1, cid, r1)
+    write_vec3(constraints, base_offset + _OFF_R2, cid, r2)
 
     # World-space anchor positions on each body.
     p1 = position1 + r1
@@ -419,19 +435,19 @@ def ball_socket_prepare_for_iteration(
     eff = eff + inv_mass2 * eye3
     eff = eff + cr2 @ (inv_inertia2 @ wp.transpose(cr2))
 
-    softness = ball_socket_get_softness(constraints, cid) * idt
+    softness = read_float(constraints, base_offset + _OFF_SOFTNESS, cid) * idt
     eff[0, 0] = eff[0, 0] + softness
     eff[1, 1] = eff[1, 1] + softness
     eff[2, 2] = eff[2, 2] + softness
 
-    ball_socket_set_effective_mass(constraints, cid, wp.inverse(eff))
+    write_mat33(constraints, base_offset + _OFF_EFFECTIVE_MASS, cid, wp.inverse(eff))
 
-    bias_factor = ball_socket_get_bias_factor(constraints, cid)
+    bias_factor = read_float(constraints, base_offset + _OFF_BIAS_FACTOR, cid)
     bias = (p2 - p1) * bias_factor * idt
-    ball_socket_set_bias(constraints, cid, bias)
+    write_vec3(constraints, base_offset + _OFF_BIAS, cid, bias)
 
     # Warm start: re-apply the previous solve's accumulated impulse.
-    acc = ball_socket_get_accumulated_impulse(constraints, cid)
+    acc = read_vec3(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid)
 
     velocity1 = bodies.velocity[b1] - inv_mass1 * acc
     angular_velocity1 = bodies.angular_velocity[b1] - inv_inertia1 @ (cr1 @ acc)
@@ -446,22 +462,21 @@ def ball_socket_prepare_for_iteration(
 
 
 @wp.func
-def ball_socket_iterate(
+def ball_socket_iterate_at(
     constraints: ConstraintContainer,
     cid: wp.int32,
+    base_offset: wp.int32,
     bodies: BodyContainer,
+    body_pair: ConstraintBodies,
     idt: wp.float32,
 ):
-    """Direct port of ``IterateBallSocket`` (BallSocket.cs:199).
+    """Composable ``IterateBallSocket`` (BallSocket.cs:199).
 
-    One PGS-style iteration: build the constraint Jacobian-times-velocity,
-    project to find the corrective impulse ``lambda``, accumulate it, and
-    apply the matching velocity / angular-velocity deltas to the two bodies.
-    Only velocity / angular-velocity / inverse mass / inverse world-inertia
-    are touched -- positions and orientations are not needed here.
+    See :func:`ball_socket_prepare_for_iteration_at` for the
+    ``base_offset`` / ``body_pair`` contract.
     """
-    b1 = ball_socket_get_body1(constraints, cid)
-    b2 = ball_socket_get_body2(constraints, cid)
+    b1 = body_pair.b1
+    b2 = body_pair.b2
 
     velocity1 = bodies.velocity[b1]
     velocity2 = bodies.velocity[b2]
@@ -472,15 +487,15 @@ def ball_socket_iterate(
     inv_inertia1 = bodies.inverse_inertia_world[b1]
     inv_inertia2 = bodies.inverse_inertia_world[b2]
 
-    r1 = ball_socket_get_r1(constraints, cid)
-    r2 = ball_socket_get_r2(constraints, cid)
+    r1 = read_vec3(constraints, base_offset + _OFF_R1, cid)
+    r2 = read_vec3(constraints, base_offset + _OFF_R2, cid)
     cr1 = wp.skew(r1)
     cr2 = wp.skew(r2)
 
-    acc = ball_socket_get_accumulated_impulse(constraints, cid)
-    softness = ball_socket_get_softness(constraints, cid)
-    bias = ball_socket_get_bias(constraints, cid)
-    eff = ball_socket_get_effective_mass(constraints, cid)
+    acc = read_vec3(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid)
+    softness = read_float(constraints, base_offset + _OFF_SOFTNESS, cid)
+    bias = read_vec3(constraints, base_offset + _OFF_BIAS, cid)
+    eff = read_mat33(constraints, base_offset + _OFF_EFFECTIVE_MASS, cid)
 
     softness_vector = acc * softness * idt
 
@@ -490,13 +505,65 @@ def ball_socket_iterate(
     # lambda = -EffectiveMass * (jv + Bias + softnessVector)
     lam = -(eff @ (jv + bias + softness_vector))
 
-    ball_socket_set_accumulated_impulse(constraints, cid, acc + lam)
+    write_vec3(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid, acc + lam)
 
     bodies.velocity[b1] = velocity1 - inv_mass1 * lam
     bodies.angular_velocity[b1] = angular_velocity1 - inv_inertia1 @ (cr1 @ lam)
 
     bodies.velocity[b2] = velocity2 + inv_mass2 * lam
     bodies.angular_velocity[b2] = angular_velocity2 + inv_inertia2 @ (cr2 @ lam)
+
+
+@wp.func
+def ball_socket_world_wrench_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    idt: wp.float32,
+):
+    """Composable ball-socket wrench on body2; see
+    :func:`ball_socket_world_wrench` for semantics."""
+    acc = read_vec3(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid)
+    r2 = read_vec3(constraints, base_offset + _OFF_R2, cid)
+    force = acc * idt
+    torque = wp.cross(r2, force)
+    return force, torque
+
+
+@wp.func
+def ball_socket_prepare_for_iteration(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    idt: wp.float32,
+):
+    """Direct port of ``PrepareForIterationBallSocket`` (BallSocket.cs:130).
+
+    Thin wrapper: reads ``body1`` / ``body2`` from this column's header
+    and forwards to :func:`ball_socket_prepare_for_iteration_at` with
+    ``base_offset = 0``.
+    """
+    b1 = ball_socket_get_body1(constraints, cid)
+    b2 = ball_socket_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    ball_socket_prepare_for_iteration_at(constraints, cid, 0, bodies, body_pair, idt)
+
+
+@wp.func
+def ball_socket_iterate(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    idt: wp.float32,
+):
+    """Direct port of ``IterateBallSocket`` (BallSocket.cs:199).
+
+    Thin wrapper: see :func:`ball_socket_iterate_at`.
+    """
+    b1 = ball_socket_get_body1(constraints, cid)
+    b2 = ball_socket_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    ball_socket_iterate_at(constraints, cid, 0, bodies, body_pair, idt)
 
 
 @wp.func
@@ -512,8 +579,4 @@ def ball_socket_world_wrench(
     that force's moment about body2's COM, using the cached lever arm
     ``r2`` from the most recent ``prepare_for_iteration``.
     """
-    acc = ball_socket_get_accumulated_impulse(constraints, cid)
-    r2 = ball_socket_get_r2(constraints, cid)
-    force = acc * idt
-    torque = wp.cross(r2, force)
-    return force, torque
+    return ball_socket_world_wrench_at(constraints, cid, 0, idt)
