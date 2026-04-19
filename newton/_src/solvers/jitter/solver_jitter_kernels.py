@@ -17,6 +17,11 @@ from newton._src.solvers.jitter.body import (
     MOTION_STATIC,
     BodyContainer,
 )
+from newton._src.solvers.jitter.constraint_actuated_double_ball_socket import (
+    actuated_double_ball_socket_iterate,
+    actuated_double_ball_socket_prepare_for_iteration,
+    actuated_double_ball_socket_world_wrench,
+)
 from newton._src.solvers.jitter.constraint_angular_motor import (
     angular_motor_iterate,
     angular_motor_prepare_for_iteration,
@@ -28,6 +33,7 @@ from newton._src.solvers.jitter.constraint_ball_socket import (
     ball_socket_world_wrench,
 )
 from newton._src.solvers.jitter.constraint_container import (
+    CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET,
     CONSTRAINT_TYPE_ANGULAR_MOTOR,
     CONSTRAINT_TYPE_BALL_SOCKET,
     CONSTRAINT_TYPE_D6,
@@ -109,7 +115,7 @@ __all__ = [
 # :class:`World` or :class:`WorldBuilder` needed.
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _constraint_prepare_for_iteration_kernel(
     constraints: ConstraintContainer,
     bodies: BodyContainer,
@@ -142,13 +148,15 @@ def _constraint_prepare_for_iteration_kernel(
         hinge_joint_prepare_for_iteration(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET:
         double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+    elif t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
+        actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_PRISMATIC:
         prismatic_prepare_for_iteration(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_D6:
         d6_prepare_for_iteration(constraints, cid, bodies, idt)
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _constraint_iterate_kernel(
     constraints: ConstraintContainer,
     bodies: BodyContainer,
@@ -176,13 +184,15 @@ def _constraint_iterate_kernel(
         hinge_joint_iterate(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET:
         double_ball_socket_iterate(constraints, cid, bodies, idt)
+    elif t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
+        actuated_double_ball_socket_iterate(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_PRISMATIC:
         prismatic_iterate(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_D6:
         d6_iterate(constraints, cid, bodies, idt)
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _constraints_to_elements_kernel(
     constraints: ConstraintContainer,
     num_constraints: wp.array[wp.int32],
@@ -210,7 +220,7 @@ def _constraints_to_elements_kernel(
     elements[tid] = element_interaction_data_make(b1, b2, -1, -1, -1, -1, -1, -1)
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _constraint_gather_wrenches_kernel(
     constraints: ConstraintContainer,
     bodies: BodyContainer,
@@ -247,6 +257,8 @@ def _constraint_gather_wrenches_kernel(
         force, torque = hinge_joint_world_wrench(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET:
         force, torque = double_ball_socket_world_wrench(constraints, cid, idt)
+    elif t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
+        force, torque = actuated_double_ball_socket_world_wrench(constraints, cid, idt)
     elif t == CONSTRAINT_TYPE_PRISMATIC:
         force, torque = prismatic_world_wrench(constraints, cid, idt)
     elif t == CONSTRAINT_TYPE_D6:
@@ -276,7 +288,7 @@ def _rotation_quaternion(omega: wp.vec3f, dt: wp.float32) -> wp.quatf:
     return wp.quatf(omega[0] * s, omega[1] * s, omega[2] * s, wp.cos(half))
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _update_bodies_kernel(
     bodies: BodyContainer,
     gravity: wp.vec3f,
@@ -331,7 +343,7 @@ def _update_bodies_kernel(
     bodies.inverse_inertia_world[i] = r * bodies.inverse_inertia[i] * wp.transpose(r)
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _integrate_forces_kernel(bodies: BodyContainer):
     """Mirrors Jitter2's per-substep ``IntegrateForces``: just add the
     cached deltas built once per step in :func:`_update_bodies_kernel`.
@@ -348,7 +360,7 @@ def _integrate_forces_kernel(bodies: BodyContainer):
     bodies.angular_velocity[i] = bodies.angular_velocity[i] + bodies.delta_angular_velocity[i]
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _integrate_velocities_kernel(
     bodies: BodyContainer,
     dt: wp.float32,
@@ -372,7 +384,7 @@ def _integrate_velocities_kernel(
     bodies.orientation[i] = wp.normalize(q_rot * bodies.orientation[i])
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def pack_body_xforms_kernel(
     bodies: BodyContainer,
     xforms: wp.array[wp.transform],

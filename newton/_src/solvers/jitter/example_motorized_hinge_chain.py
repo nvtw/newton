@@ -59,7 +59,7 @@ import newton
 import newton.examples
 from newton._src.solvers.jitter.picking import JitterPicking, register_with_viewer_gl
 from newton._src.solvers.jitter.solver_jitter import pack_body_xforms_kernel
-from newton._src.solvers.jitter.world_builder import D6AxisDrive, WorldBuilder
+from newton._src.solvers.jitter.world_builder import D6AxisDrive, DriveMode, WorldBuilder
 
 
 class JointKind(enum.Enum):
@@ -83,17 +83,23 @@ class JointKind(enum.Enum):
       axes locked and the free axis = body-1-local +z. One 6x6
       Schur-complement solve per joint; no motor wired up here yet
       (see the velocity-drive note in :mod:`constraint_d6`).
+    * :attr:`ACTUATED_DOUBLE_BALL_SOCKET` -- same rank-5 Schur lock as
+      :attr:`DOUBLE_BALL_SOCKET` plus a soft scalar PGS row driving the
+      free axial twist with a velocity motor (``TARGET_VELOCITY`` /
+      ``_MOTOR_MAX_FORCE``). Functionally equivalent to
+      :attr:`HINGE_JOINT` but built on the two-anchor lock.
     """
 
     HINGE_JOINT = "hinge_joint"
     DOUBLE_BALL_SOCKET = "double_ball_socket"
     D6_REVOLUTE = "d6_revolute"
+    ACTUATED_DOUBLE_BALL_SOCKET = "actuated_double_ball_socket"
 
 
 # Selects which constraint type every joint in the chain is built
 # with. Switch this to compare solver behaviour / robustness across
 # the three implementations of "hinge between two cubes".
-JOINT_KIND = JointKind.D6_REVOLUTE
+JOINT_KIND = JointKind.ACTUATED_DOUBLE_BALL_SOCKET
 
 NUM_CUBES = 10
 HALF_EXTENT = 0.5
@@ -199,6 +205,23 @@ class Example:
                         body2=body_b,
                         anchor1=a1,
                         anchor2=a2,
+                    )
+                )
+            elif JOINT_KIND is JointKind.ACTUATED_DOUBLE_BALL_SOCKET:
+                # Same two-anchor lock as DOUBLE_BALL_SOCKET, with the
+                # axial twist now under a velocity drive (mirrors what
+                # HINGE_JOINT's AngularMotor sub-block does).
+                a1 = (anchor[0], anchor[1], anchor[2] - HALF_EXTENT)
+                a2 = (anchor[0], anchor[1], anchor[2] + HALF_EXTENT)
+                self.hinge_handles.append(
+                    b.add_actuated_double_ball_socket_hinge(
+                        body1=body_a,
+                        body2=body_b,
+                        anchor1=a1,
+                        anchor2=a2,
+                        drive_mode=DriveMode.VELOCITY,
+                        target_velocity=TARGET_VELOCITY,
+                        max_force_drive=_MOTOR_MAX_FORCE,
                     )
                 )
             elif JOINT_KIND is JointKind.D6_REVOLUTE:

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from enum import IntEnum
 
 import numpy as np
 import warp as wp
@@ -36,6 +37,13 @@ from newton._src.solvers.jitter.body import (
     MOTION_KINEMATIC,
     MOTION_STATIC,
     BodyContainer,
+)
+from newton._src.solvers.jitter.constraint_actuated_double_ball_socket import (
+    ADBS_DWORDS,
+    DRIVE_MODE_OFF,
+    DRIVE_MODE_POSITION,
+    DRIVE_MODE_VELOCITY,
+    actuated_double_ball_socket_initialize_kernel,
 )
 from newton._src.solvers.jitter.constraint_angular_motor import (
     AM_DWORDS,
@@ -77,6 +85,8 @@ from newton._src.solvers.jitter.constraint_prismatic import (
 from newton._src.solvers.jitter.solver_jitter import World
 
 __all__ = [
+    "ActuatedDoubleBallSocketHingeDescriptor",
+    "ActuatedDoubleBallSocketHingeHandle",
     "AngularMotorDescriptor",
     "BallSocketDescriptor",
     "D6AxisDrive",
@@ -84,6 +94,7 @@ __all__ = [
     "D6Handle",
     "DoubleBallSocketHingeDescriptor",
     "DoubleBallSocketHingeHandle",
+    "DriveMode",
     "HingeAngleDescriptor",
     "HingeJointDescriptor",
     "HingeJointHandle",
@@ -302,6 +313,76 @@ class DoubleBallSocketHingeHandle:
     cid: int = -1
 
 
+class DriveMode(IntEnum):
+    """Drive mode for an actuated joint's free DoF.
+
+    See :mod:`newton._src.solvers.jitter.constraint_actuated_double_ball_socket`
+    for the per-mode formulation. Values match the underlying
+    ``DRIVE_MODE_*`` Warp constants exactly so they can be passed
+    through ``np.int32`` arrays without translation.
+    """
+
+    OFF = int(DRIVE_MODE_OFF)
+    POSITION = int(DRIVE_MODE_POSITION)
+    VELOCITY = int(DRIVE_MODE_VELOCITY)
+
+
+@dataclass
+class ActuatedDoubleBallSocketHingeDescriptor:
+    """Plain-Python description of one *actuated* fused two-anchor hinge.
+
+    Identical 5-DoF positional lock as
+    :class:`DoubleBallSocketHingeDescriptor` (3 translational +
+    2 rotational, solved as a 3x3 + 2x2 Schur complement) plus a
+    scalar PGS row that controls the free axial DoF with either a
+    soft *position* or *velocity* drive and -- independently -- clamps
+    the relative axial twist to ``[min_angle, max_angle]`` via a
+    one-sided spring-damper.
+
+    ``anchor1`` and ``anchor2`` are in *world* space at finalize() time
+    and define the hinge axis as ``anchor2 - anchor1``.
+
+    All ``hertz`` / ``damping_ratio`` parameters follow the Box2D v3 /
+    Bepu / Nordby soft-constraint formulation; see
+    :func:`soft_constraint_coefficients`.
+
+    See :mod:`newton._src.solvers.jitter.constraint_actuated_double_ball_socket`
+    for the per-row math.
+    """
+
+    body1: int
+    body2: int
+    anchor1: tuple[float, float, float]
+    anchor2: tuple[float, float, float]
+    hertz: float = float(DEFAULT_HERTZ_LINEAR)
+    damping_ratio: float = float(DEFAULT_DAMPING_RATIO)
+    drive_mode: DriveMode = DriveMode.OFF
+    target_angle: float = 0.0
+    target_velocity: float = 0.0
+    max_force_drive: float = 0.0
+    hertz_drive: float = float(DEFAULT_HERTZ_MOTOR)
+    damping_ratio_drive: float = float(DEFAULT_DAMPING_RATIO)
+    min_angle: float = 0.0
+    max_angle: float = 0.0
+    hertz_limit: float = float(DEFAULT_HERTZ_LIMIT)
+    damping_ratio_limit: float = float(DEFAULT_DAMPING_RATIO)
+
+
+@dataclass
+class ActuatedDoubleBallSocketHingeHandle:
+    """Global cid of the actuated fused-hinge constraint created by
+    :meth:`WorldBuilder.add_actuated_double_ball_socket_hinge`.
+
+    Returned with a sentinel cid (``-1``) and rewritten in place by
+    :meth:`WorldBuilder.finalize`. Pass to
+    :meth:`World.gather_constraint_wrenches` (via
+    ``wrenches[handle.cid]``) to read the joint's reaction wrench on
+    body 2.
+    """
+
+    cid: int = -1
+
+
 @dataclass
 class PrismaticDescriptor:
     """Plain-Python description of one prismatic (sliding) joint.
@@ -498,6 +579,10 @@ class WorldBuilder:
         # parallel-list pattern as the fused HingeJoint above.
         self._double_ball_socket_hinge_descriptors: list[DoubleBallSocketHingeDescriptor] = []
         self._double_ball_socket_hinge_handles: list[DoubleBallSocketHingeHandle] = []
+        # Actuated fused two-anchor hinge descriptors (drive + limits on
+        # the axial DoF). Same parallel-list pattern.
+        self._actuated_dbs_hinge_descriptors: list[ActuatedDoubleBallSocketHingeDescriptor] = []
+        self._actuated_dbs_hinge_handles: list[ActuatedDoubleBallSocketHingeHandle] = []
         # Prismatic (sliding) joint descriptors. Same parallel-list
         # pattern as the fused-hinge variants above; finalize() walks
         # both lists to patch each handle with its global cid.
@@ -816,6 +901,101 @@ class WorldBuilder:
         self._double_ball_socket_hinge_handles.append(handle)
         return handle
 
+    def add_actuated_double_ball_socket_hinge(
+        self,
+        body1: int,
+        body2: int,
+        anchor1: tuple[float, float, float],
+        anchor2: tuple[float, float, float],
+        hertz: float = float(DEFAULT_HERTZ_LINEAR),
+        damping_ratio: float = float(DEFAULT_DAMPING_RATIO),
+        drive_mode: DriveMode = DriveMode.OFF,
+        target_angle: float = 0.0,
+        target_velocity: float = 0.0,
+        max_force_drive: float = 0.0,
+        hertz_drive: float = float(DEFAULT_HERTZ_MOTOR),
+        damping_ratio_drive: float = float(DEFAULT_DAMPING_RATIO),
+        min_angle: float = 0.0,
+        max_angle: float = 0.0,
+        hertz_limit: float = float(DEFAULT_HERTZ_LIMIT),
+        damping_ratio_limit: float = float(DEFAULT_DAMPING_RATIO),
+    ) -> ActuatedDoubleBallSocketHingeHandle:
+        """Append an *actuated* fused two-anchor hinge and return its handle.
+
+        Same 5-DoF positional lock as
+        :meth:`add_double_ball_socket_hinge` plus a soft scalar PGS row
+        on the free axial DoF that:
+
+        * (optional) drives the relative axial twist towards
+          ``target_angle`` [rad] (``drive_mode = DriveMode.POSITION``)
+          or the relative axial rate towards ``target_velocity``
+          [rad/s] (``drive_mode = DriveMode.VELOCITY``); a velocity
+          drive is capped at ``\u00b1 max_force_drive * dt`` per substep
+          [N*m], a position drive is bounded only by its soft-spring
+          stiffness (``hertz_drive`` / ``damping_ratio_drive``).
+        * (optional) clamps the relative axial twist to
+          ``[min_angle, max_angle]`` [rad] via a one-sided spring-
+          damper (``hertz_limit`` / ``damping_ratio_limit``).
+          ``min_angle == max_angle == 0`` disables the limit.
+
+        Drive and limit are independent and can be active
+        simultaneously; the limit always wins because it's unilateral.
+        See :mod:`newton._src.solvers.jitter.constraint_actuated_double_ball_socket`
+        for the math.
+
+        Args:
+            body1: Index of the first body.
+            body2: Index of the second body.
+            anchor1: First hinge anchor in *world* space at finalize()
+                time [m].
+            anchor2: Second hinge anchor in *world* space at finalize()
+                time [m]; the line ``anchor1 -> anchor2`` defines the
+                hinge axis.
+            hertz: Positional Schur block soft-constraint frequency [Hz].
+            damping_ratio: Positional Schur block damping ratio.
+            drive_mode: One of :class:`DriveMode`.
+            target_angle: Position-drive setpoint [rad].
+            target_velocity: Velocity-drive setpoint [rad/s].
+            max_force_drive: Velocity-drive torque cap [N*m]; ignored
+                in position-drive mode.
+            hertz_drive: Drive soft-constraint frequency [Hz].
+            damping_ratio_drive: Drive damping ratio.
+            min_angle: Lower angular limit [rad].
+            max_angle: Upper angular limit [rad];
+                ``min_angle == max_angle == 0`` disables the limit.
+            hertz_limit: Limit soft-constraint frequency [Hz].
+            damping_ratio_limit: Limit damping ratio.
+
+        Returns:
+            :class:`ActuatedDoubleBallSocketHingeHandle` whose ``cid``
+            is rewritten in place by :meth:`finalize` to the joint's
+            global cid.
+        """
+        self._validate_body(body1)
+        self._validate_body(body2)
+        descriptor = ActuatedDoubleBallSocketHingeDescriptor(
+            body1=body1,
+            body2=body2,
+            anchor1=anchor1,
+            anchor2=anchor2,
+            hertz=hertz,
+            damping_ratio=damping_ratio,
+            drive_mode=DriveMode(int(drive_mode)),
+            target_angle=target_angle,
+            target_velocity=target_velocity,
+            max_force_drive=max_force_drive,
+            hertz_drive=hertz_drive,
+            damping_ratio_drive=damping_ratio_drive,
+            min_angle=min_angle,
+            max_angle=max_angle,
+            hertz_limit=hertz_limit,
+            damping_ratio_limit=damping_ratio_limit,
+        )
+        handle = ActuatedDoubleBallSocketHingeHandle(cid=-1)
+        self._actuated_dbs_hinge_descriptors.append(descriptor)
+        self._actuated_dbs_hinge_handles.append(handle)
+        return handle
+
     def add_prismatic(
         self,
         body1: int,
@@ -1063,6 +1243,8 @@ class WorldBuilder:
         self._hinge_joint_handles = []
         self._double_ball_socket_hinge_descriptors = []
         self._double_ball_socket_hinge_handles = []
+        self._actuated_dbs_hinge_descriptors = []
+        self._actuated_dbs_hinge_handles = []
         self._prismatic_descriptors = []
         self._prismatic_handles = []
         self._d6_descriptors = []
@@ -1165,6 +1347,7 @@ class WorldBuilder:
         n_motor = len(self._angular_motors)
         n_hinge_joint = len(self._hinge_joint_descriptors)
         n_dbs_hinge = len(self._double_ball_socket_hinge_descriptors)
+        n_adbs_hinge = len(self._actuated_dbs_hinge_descriptors)
         n_prismatic = len(self._prismatic_descriptors)
         n_d6 = len(self._d6_descriptors)
         total = (
@@ -1173,6 +1356,7 @@ class WorldBuilder:
             + n_motor
             + n_hinge_joint
             + n_dbs_hinge
+            + n_adbs_hinge
             + n_prismatic
             + n_d6
         )
@@ -1181,7 +1365,14 @@ class WorldBuilder:
         # dispatcher in solver_jitter_kernels can index any column the
         # same way; size to the widest schema.
         per_constraint_dwords = max(
-            BS_DWORDS, HA_DWORDS, AM_DWORDS, HJ_DWORDS, DBS_DWORDS, PR_DWORDS, D6_DWORDS
+            BS_DWORDS,
+            HA_DWORDS,
+            AM_DWORDS,
+            HJ_DWORDS,
+            DBS_DWORDS,
+            ADBS_DWORDS,
+            PR_DWORDS,
+            D6_DWORDS,
         )
 
         # Always allocate at least 1 column so the wp.array2d shape is
@@ -1197,11 +1388,20 @@ class WorldBuilder:
         angular_motor_offset = n_ball + n_hinge
         hinge_joint_offset = n_ball + n_hinge + n_motor
         dbs_hinge_offset = n_ball + n_hinge + n_motor + n_hinge_joint
-        prismatic_offset = (
+        adbs_hinge_offset = (
             n_ball + n_hinge + n_motor + n_hinge_joint + n_dbs_hinge
         )
+        prismatic_offset = (
+            n_ball + n_hinge + n_motor + n_hinge_joint + n_dbs_hinge + n_adbs_hinge
+        )
         d6_offset = (
-            n_ball + n_hinge + n_motor + n_hinge_joint + n_dbs_hinge + n_prismatic
+            n_ball
+            + n_hinge
+            + n_motor
+            + n_hinge_joint
+            + n_dbs_hinge
+            + n_adbs_hinge
+            + n_prismatic
         )
 
         if n_ball > 0:
@@ -1214,6 +1414,10 @@ class WorldBuilder:
             self._init_hinge_joints(container, bodies, hinge_joint_offset, device)
         if n_dbs_hinge > 0:
             self._init_double_ball_socket_hinges(container, bodies, dbs_hinge_offset, device)
+        if n_adbs_hinge > 0:
+            self._init_actuated_double_ball_socket_hinges(
+                container, bodies, adbs_hinge_offset, device
+            )
         if n_prismatic > 0:
             self._init_prismatics(container, bodies, prismatic_offset, device)
         if n_d6 > 0:
@@ -1227,6 +1431,8 @@ class WorldBuilder:
             h.cid = hinge_joint_offset + i
         for i, h in enumerate(self._double_ball_socket_hinge_handles):
             h.cid = dbs_hinge_offset + i
+        for i, h in enumerate(self._actuated_dbs_hinge_handles):
+            h.cid = adbs_hinge_offset + i
         for i, h in enumerate(self._prismatic_handles):
             h.cid = prismatic_offset + i
         for i, h in enumerate(self._d6_handles):
@@ -1566,6 +1772,89 @@ class WorldBuilder:
                 anchor2_d,
                 hertz_d,
                 damping_ratio_d,
+            ],
+            device=device,
+        )
+
+    def _init_actuated_double_ball_socket_hinges(
+        self,
+        constraints: ConstraintContainer,
+        bodies: BodyContainer,
+        cid_offset: int,
+        device: wp.context.Device,
+    ) -> None:
+        """Pack the actuated fused two-anchor hinge descriptors.
+
+        Layered on top of :meth:`_init_double_ball_socket_hinges`: the
+        same per-anchor world->local snapshot, plus the per-actuator
+        drive + limit parameters. One launch of
+        :func:`actuated_double_ball_socket_initialize_kernel` writes
+        each fused column.
+        """
+        descs = self._actuated_dbs_hinge_descriptors
+        n = len(descs)
+
+        body1 = np.asarray([d.body1 for d in descs], dtype=np.int32)
+        body2 = np.asarray([d.body2 for d in descs], dtype=np.int32)
+        anchor1 = np.asarray([d.anchor1 for d in descs], dtype=np.float32)
+        anchor2 = np.asarray([d.anchor2 for d in descs], dtype=np.float32)
+        hertz = np.asarray([d.hertz for d in descs], dtype=np.float32)
+        damping_ratio = np.asarray([d.damping_ratio for d in descs], dtype=np.float32)
+        drive_mode = np.asarray([int(d.drive_mode) for d in descs], dtype=np.int32)
+        target_angle = np.asarray([d.target_angle for d in descs], dtype=np.float32)
+        target_velocity = np.asarray([d.target_velocity for d in descs], dtype=np.float32)
+        max_force_drive = np.asarray([d.max_force_drive for d in descs], dtype=np.float32)
+        hertz_drive = np.asarray([d.hertz_drive for d in descs], dtype=np.float32)
+        damping_ratio_drive = np.asarray(
+            [d.damping_ratio_drive for d in descs], dtype=np.float32
+        )
+        min_angle = np.asarray([d.min_angle for d in descs], dtype=np.float32)
+        max_angle = np.asarray([d.max_angle for d in descs], dtype=np.float32)
+        hertz_limit = np.asarray([d.hertz_limit for d in descs], dtype=np.float32)
+        damping_ratio_limit = np.asarray(
+            [d.damping_ratio_limit for d in descs], dtype=np.float32
+        )
+
+        body1_d = wp.array(body1, dtype=wp.int32, device=device)
+        body2_d = wp.array(body2, dtype=wp.int32, device=device)
+        anchor1_d = wp.array(anchor1, dtype=wp.vec3f, device=device)
+        anchor2_d = wp.array(anchor2, dtype=wp.vec3f, device=device)
+        hertz_d = wp.array(hertz, dtype=wp.float32, device=device)
+        damping_ratio_d = wp.array(damping_ratio, dtype=wp.float32, device=device)
+        drive_mode_d = wp.array(drive_mode, dtype=wp.int32, device=device)
+        target_angle_d = wp.array(target_angle, dtype=wp.float32, device=device)
+        target_velocity_d = wp.array(target_velocity, dtype=wp.float32, device=device)
+        max_force_drive_d = wp.array(max_force_drive, dtype=wp.float32, device=device)
+        hertz_drive_d = wp.array(hertz_drive, dtype=wp.float32, device=device)
+        damping_ratio_drive_d = wp.array(damping_ratio_drive, dtype=wp.float32, device=device)
+        min_angle_d = wp.array(min_angle, dtype=wp.float32, device=device)
+        max_angle_d = wp.array(max_angle, dtype=wp.float32, device=device)
+        hertz_limit_d = wp.array(hertz_limit, dtype=wp.float32, device=device)
+        damping_ratio_limit_d = wp.array(damping_ratio_limit, dtype=wp.float32, device=device)
+
+        wp.launch(
+            actuated_double_ball_socket_initialize_kernel,
+            dim=n,
+            inputs=[
+                constraints,
+                bodies,
+                int(cid_offset),
+                body1_d,
+                body2_d,
+                anchor1_d,
+                anchor2_d,
+                hertz_d,
+                damping_ratio_d,
+                drive_mode_d,
+                target_angle_d,
+                target_velocity_d,
+                max_force_drive_d,
+                hertz_drive_d,
+                damping_ratio_drive_d,
+                min_angle_d,
+                max_angle_d,
+                hertz_limit_d,
+                damping_ratio_limit_d,
             ],
             device=device,
         )
