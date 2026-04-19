@@ -1,83 +1,468 @@
- public struct AngularMotorData
- {
-     internal int _internal;
-     internal uint DispatchId;
-     internal ulong ConstraintId;
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+"""Warp port of Jitter2's AngularMotor constraint.
 
-     public JHandle<RigidBodyData> Body1;
-     public JHandle<RigidBodyData> Body2;
+Direct translation of ``Jitter2.Dynamics.Constraints.AngularMotor``
+(``C:/git3/jitterphysics2/src/Jitter2/Dynamics/Constraints/AngularMotor.cs``).
 
-     public JVector LocalAxis1;
-     public JVector LocalAxis2;
+AngularMotor is a 1-DoF *velocity* constraint that drives the relative
+angular velocity of body 1 and body 2 along a shared axis to a target
+``velocity``, capped by a per-step impulse derived from ``max_force``.
+It does not lock the axis (that's the job of HingeAngle); it merely
+applies torque toward the velocity setpoint as long as the resulting
+accumulated impulse stays within ``[-max_force * dt, +max_force * dt]``.
 
-     public Real Velocity;
-     public Real MaxForce;
-     public Real MaxLambda;
+Composition: a motorised revolute joint in Jitter is the triple
+``BallSocket + HingeAngle + AngularMotor`` -- the ball-socket locks
+the linear DoFs, the hinge locks the two angular DoFs perpendicular to
+the axis, and the motor drives the remaining axial DoF. Each piece is
+its own constraint in our solver too.
 
-     public Real EffectiveMass;
+Storage: same conventions as the other constraint files -- the
+``@wp.struct AngularMotorData`` is a *schema only*, used at module
+load to derive dword offsets into the shared
+:class:`ConstraintContainer` (column-major-by-cid). All runtime kernels
+read/write fields via the typed
+``angular_motor_get_* / angular_motor_set_*`` accessors.
 
-     public Real AccumulatedImpulse;
- }
+Initialisation: identical pattern to ball-socket / hinge-angle -- a
+kernel (:func:`angular_motor_initialize_kernel`) launched once by
+:meth:`WorldBuilder.finalize` snapshots the body orientations to derive
+``local_axis1 = q1^* * world_axis1`` and ``local_axis2 = q2^* * world_axis2``.
+The user-facing descriptor stays plain Python and just carries
+``(body1, body2, world_axis1, world_axis2, target_velocity, max_force)``.
+The two world axes are usually the same vector (a hinge axis), but the
+constraint allows different per-body axes for completeness.
 
-  public void Initialize(JVector axis1, JVector axis2)
- {
-     VerifyNotZero();
-     ref AngularMotorData data = ref Data;
-     ref RigidBodyData body1 = ref data.Body1.Data;
-     ref RigidBodyData body2 = ref data.Body2.Data;
+Note on ``EffectiveMass``: this is a *scalar* (1-DoF constraint), not a
+3x3 matrix. The PGS update collapses to a one-line scalar projection.
 
-     JVector.NormalizeInPlace(ref axis1);
-     JVector.NormalizeInPlace(ref axis2);
+Mapping summary:
 
-     JVector.ConjugatedTransform(axis1, body1.Orientation, out data.LocalAxis1);
-     JVector.ConjugatedTransform(axis2, body2.Orientation, out data.LocalAxis2);
+* ``JVector``                            -> ``wp.vec3f``
+* ``JQuaternion``                        -> ``wp.quatf``
+* ``JVector.Transform(v, q)``            -> ``wp.quat_rotate(q, v)``
+* ``JVector.ConjugatedTransform(v, q)``  -> ``wp.quat_rotate_inv(q, v)``
+* ``JVector.Transform(v, M)``            -> ``M @ v`` (column-vector)
+* ``JVector operator *(a, b)``           -> ``wp.dot(a, b)`` (Jitter overloads ``*`` as dot)
+* ``Math.Clamp(x, lo, hi)``              -> ``wp.clamp(x, lo, hi)``
+"""
 
-     data.MaxForce = 0;
-     data.Velocity = 0;
- }
+from __future__ import annotations
 
- public static void PrepareForIterationAngularMotor(ref ConstraintData constraint, Real idt)
-{
-    ref var data = ref Unsafe.As<ConstraintData, AngularMotorData>(ref constraint);
+import warp as wp
 
-    ref RigidBodyData body1 = ref data.Body1.Data;
-    ref RigidBodyData body2 = ref data.Body2.Data;
+from newton._src.solvers.jitter.body import BodyContainer
+from newton._src.solvers.jitter.constraint_container import (
+    ConstraintContainer,
+    read_float,
+    read_int,
+    read_vec3,
+    write_float,
+    write_int,
+    write_vec3,
+)
+from newton._src.solvers.jitter.data_packing import dword_offset_of, num_dwords
 
-    JVector.Transform(data.LocalAxis1, body1.Orientation, out JVector j1);
-    JVector.Transform(data.LocalAxis2, body2.Orientation, out JVector j2);
+__all__ = [
+    "AM_DWORDS",
+    "AngularMotorData",
+    "angular_motor_get_accumulated_impulse",
+    "angular_motor_get_body1",
+    "angular_motor_get_body2",
+    "angular_motor_get_effective_mass",
+    "angular_motor_get_local_axis1",
+    "angular_motor_get_local_axis2",
+    "angular_motor_get_max_force",
+    "angular_motor_get_max_lambda",
+    "angular_motor_get_velocity",
+    "angular_motor_initialize_kernel",
+    "angular_motor_iterate_kernel",
+    "angular_motor_prepare_for_iteration_kernel",
+    "angular_motor_set_accumulated_impulse",
+    "angular_motor_set_body1",
+    "angular_motor_set_body2",
+    "angular_motor_set_effective_mass",
+    "angular_motor_set_local_axis1",
+    "angular_motor_set_local_axis2",
+    "angular_motor_set_max_force",
+    "angular_motor_set_max_lambda",
+    "angular_motor_set_velocity",
+]
 
-    data.EffectiveMass = JVector.Transform(j1, body1.InverseInertiaWorld) * j1 +
-                         JVector.Transform(j2, body2.InverseInertiaWorld) * j2;
-    data.EffectiveMass = (Real)1.0 / data.EffectiveMass;
 
-    data.MaxLambda = (Real)1.0 / idt * data.MaxForce;
+# ---------------------------------------------------------------------------
+# Schema
+# ---------------------------------------------------------------------------
 
-    body1.AngularVelocity -= JVector.Transform(j1 * data.AccumulatedImpulse, body1.InverseInertiaWorld);
-    body2.AngularVelocity += JVector.Transform(j2 * data.AccumulatedImpulse, body2.InverseInertiaWorld);
-}
 
-public static void IterateAngularMotor(ref ConstraintData constraint, Real idt)
-{
-    ref var data = ref Unsafe.As<ConstraintData, AngularMotorData>(ref constraint);
+@wp.struct
+class AngularMotorData:
+    """Per-constraint dword-layout schema for an angular motor.
 
-    ref RigidBodyData body1 = ref constraint.Body1.Data;
-    ref RigidBodyData body2 = ref constraint.Body2.Data;
+    *Schema only.* Field order fixes dword offsets; runtime kernels
+    operate on the shared :class:`ConstraintContainer` via the typed
+    accessors below. Layout mirrors C#'s ``AngularMotorData``
+    field-for-field (minus the dispatch fields).
 
-    JVector.Transform(data.LocalAxis1, body1.Orientation, out JVector j1);
-    JVector.Transform(data.LocalAxis2, body2.Orientation, out JVector j2);
+    Fields are arranged in struct-natural order with no manual padding;
+    everything is 32-bit so the struct is dword-aligned end-to-end.
+    """
 
-    Real jv = -j1 * body1.AngularVelocity + j2 * body2.AngularVelocity;
+    body1: wp.int32
+    body2: wp.int32
 
-    Real lambda = -(jv - data.Velocity) * data.EffectiveMass;
+    local_axis1: wp.vec3f
+    local_axis2: wp.vec3f
 
-    Real oldAccumulated = data.AccumulatedImpulse;
+    # Target relative angular velocity along the (current world) axis
+    # [rad/s]. The motor drives ``-w1.axis + w2.axis`` toward this value
+    # subject to the per-step impulse cap.
+    velocity: wp.float32
 
-    data.AccumulatedImpulse += lambda;
+    # Maximum motor torque [N*m]. The Iterate kernel converts this to a
+    # per-step impulse cap ``max_lambda = max_force * dt = max_force / idt``
+    # and clamps the accumulated impulse to ``[-max_lambda, max_lambda]``.
+    # Set to 0 by Initialize -- callers must override post-init for the
+    # motor to actually apply torque.
+    max_force: wp.float32
 
-    data.AccumulatedImpulse = Math.Clamp(data.AccumulatedImpulse, -data.MaxLambda, data.MaxLambda);
+    # Cached per-substep value of ``max_force / idt`` so Iterate doesn't
+    # need to redo the divide every PGS pass.
+    max_lambda: wp.float32
 
-    lambda = data.AccumulatedImpulse - oldAccumulated;
+    # Scalar effective mass (1-DoF constraint).
+    effective_mass: wp.float32
 
-    body1.AngularVelocity -= JVector.Transform(j1 * lambda, body1.InverseInertiaWorld);
-    body2.AngularVelocity += JVector.Transform(j2 * lambda, body2.InverseInertiaWorld);
-}
+    accumulated_impulse: wp.float32
+
+
+# Dword offsets derived once from the schema. Each is a Python int;
+# wrapped in wp.constant so kernels can use them as compile-time literals.
+_OFF_BODY1 = wp.constant(dword_offset_of(AngularMotorData, "body1"))
+_OFF_BODY2 = wp.constant(dword_offset_of(AngularMotorData, "body2"))
+_OFF_LOCAL_AXIS1 = wp.constant(dword_offset_of(AngularMotorData, "local_axis1"))
+_OFF_LOCAL_AXIS2 = wp.constant(dword_offset_of(AngularMotorData, "local_axis2"))
+_OFF_VELOCITY = wp.constant(dword_offset_of(AngularMotorData, "velocity"))
+_OFF_MAX_FORCE = wp.constant(dword_offset_of(AngularMotorData, "max_force"))
+_OFF_MAX_LAMBDA = wp.constant(dword_offset_of(AngularMotorData, "max_lambda"))
+_OFF_EFFECTIVE_MASS = wp.constant(dword_offset_of(AngularMotorData, "effective_mass"))
+_OFF_ACCUMULATED_IMPULSE = wp.constant(dword_offset_of(AngularMotorData, "accumulated_impulse"))
+
+#: Total dword count of one angular-motor constraint. Used by the host-side
+#: container allocator to size ``ConstraintContainer.data``'s row count.
+AM_DWORDS: int = num_dwords(AngularMotorData)
+
+
+# ---------------------------------------------------------------------------
+# Typed accessors -- thin wrappers over column-major dword get/set
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def angular_motor_get_body1(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
+    return read_int(c, _OFF_BODY1, cid)
+
+
+@wp.func
+def angular_motor_set_body1(c: ConstraintContainer, cid: wp.int32, v: wp.int32):
+    write_int(c, _OFF_BODY1, cid, v)
+
+
+@wp.func
+def angular_motor_get_body2(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
+    return read_int(c, _OFF_BODY2, cid)
+
+
+@wp.func
+def angular_motor_set_body2(c: ConstraintContainer, cid: wp.int32, v: wp.int32):
+    write_int(c, _OFF_BODY2, cid, v)
+
+
+@wp.func
+def angular_motor_get_local_axis1(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
+    return read_vec3(c, _OFF_LOCAL_AXIS1, cid)
+
+
+@wp.func
+def angular_motor_set_local_axis1(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
+    write_vec3(c, _OFF_LOCAL_AXIS1, cid, v)
+
+
+@wp.func
+def angular_motor_get_local_axis2(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
+    return read_vec3(c, _OFF_LOCAL_AXIS2, cid)
+
+
+@wp.func
+def angular_motor_set_local_axis2(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
+    write_vec3(c, _OFF_LOCAL_AXIS2, cid, v)
+
+
+@wp.func
+def angular_motor_get_velocity(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_VELOCITY, cid)
+
+
+@wp.func
+def angular_motor_set_velocity(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_VELOCITY, cid, v)
+
+
+@wp.func
+def angular_motor_get_max_force(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_MAX_FORCE, cid)
+
+
+@wp.func
+def angular_motor_set_max_force(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_MAX_FORCE, cid, v)
+
+
+@wp.func
+def angular_motor_get_max_lambda(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_MAX_LAMBDA, cid)
+
+
+@wp.func
+def angular_motor_set_max_lambda(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_MAX_LAMBDA, cid, v)
+
+
+@wp.func
+def angular_motor_get_effective_mass(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_EFFECTIVE_MASS, cid)
+
+
+@wp.func
+def angular_motor_set_effective_mass(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_EFFECTIVE_MASS, cid, v)
+
+
+@wp.func
+def angular_motor_get_accumulated_impulse(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_ACCUMULATED_IMPULSE, cid)
+
+
+@wp.func
+def angular_motor_set_accumulated_impulse(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_ACCUMULATED_IMPULSE, cid, v)
+
+
+# ---------------------------------------------------------------------------
+# Initialization (kernel; mirrors host-side BallSocket init pattern)
+# ---------------------------------------------------------------------------
+
+
+@wp.kernel
+def angular_motor_initialize_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    cid_offset: wp.int32,
+    body1: wp.array[wp.int32],
+    body2: wp.array[wp.int32],
+    world_axis1: wp.array[wp.vec3f],
+    world_axis2: wp.array[wp.vec3f],
+    target_velocity: wp.array[wp.float32],
+    max_force: wp.array[wp.float32],
+):
+    """Pack one batch of angular-motor descriptors into ``constraints``.
+
+    Direct port of ``AngularMotor.Initialize`` (AngularMotor.cs:22-37)
+    plus zero-initialisation of the cached per-substep fields.
+
+    Snapshots the current body 1 / body 2 orientations to compute:
+
+      * ``local_axis1 = q1^* * world_axis1``
+      * ``local_axis2 = q2^* * world_axis2``
+
+    Both world axes are normalised before being moved into local frame
+    (matches Jitter's ``JVector.NormalizeInPlace``), so callers can
+    pass un-normalised vectors and still get a unit-length local axis.
+    For a typical hinge motor, ``world_axis1 == world_axis2`` -- the
+    same world-space direction expressed in each body's local frame.
+
+    Args:
+        constraints: Shared column-major constraint storage.
+        bodies: Solver body container; only orientations are read.
+        cid_offset: Global cid of the first constraint in this batch.
+        body1: Body indices for body 1 [num_in_batch].
+        body2: Body indices for body 2 [num_in_batch].
+        world_axis1: Motor axis on body 1 in *world* space [num_in_batch].
+        world_axis2: Motor axis on body 2 in *world* space [num_in_batch].
+        target_velocity: Target relative angular velocity [num_in_batch] [rad/s].
+        max_force: Maximum motor torque [num_in_batch] [N*m]. Pass 0 for a
+            disabled motor; a non-zero value enables it.
+    """
+    tid = wp.tid()
+    cid = cid_offset + tid
+
+    b1 = body1[tid]
+    b2 = body2[tid]
+    a1 = wp.normalize(world_axis1[tid])
+    a2 = wp.normalize(world_axis2[tid])
+
+    q1 = bodies.orientation[b1]
+    q2 = bodies.orientation[b2]
+
+    local_axis1 = wp.quat_rotate_inv(q1, a1)
+    local_axis2 = wp.quat_rotate_inv(q2, a2)
+
+    angular_motor_set_body1(constraints, cid, b1)
+    angular_motor_set_body2(constraints, cid, b2)
+    angular_motor_set_local_axis1(constraints, cid, local_axis1)
+    angular_motor_set_local_axis2(constraints, cid, local_axis2)
+
+    angular_motor_set_velocity(constraints, cid, target_velocity[tid])
+    angular_motor_set_max_force(constraints, cid, max_force[tid])
+    angular_motor_set_max_lambda(constraints, cid, 0.0)
+    angular_motor_set_effective_mass(constraints, cid, 0.0)
+    angular_motor_set_accumulated_impulse(constraints, cid, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Per-iteration math (wp.func helpers + dispatch kernels)
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def _angular_motor_prepare_for_iteration(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    idt: wp.float32,
+):
+    """Direct port of ``PrepareForIterationAngularMotor`` (AngularMotor.cs:39).
+
+    Computes the world-space Jacobian rows ``j1 = q1 * local_axis1`` and
+    ``j2 = q2 * local_axis2``, the scalar effective mass
+    ``1 / (j1.(InvI1*j1) + j2.(InvI2*j2))``, the per-step impulse cap
+    ``max_lambda = max_force / idt``, and warm-starts the body angular
+    velocities with the cached accumulated impulse.
+
+    Only ``angular_velocity`` and ``inverse_inertia_world`` of the two
+    bodies are touched; positions and velocities are not used.
+    """
+    b1 = angular_motor_get_body1(constraints, cid)
+    b2 = angular_motor_get_body2(constraints, cid)
+
+    q1 = bodies.orientation[b1]
+    q2 = bodies.orientation[b2]
+    inv_inertia1 = bodies.inverse_inertia_world[b1]
+    inv_inertia2 = bodies.inverse_inertia_world[b2]
+
+    local_axis1 = angular_motor_get_local_axis1(constraints, cid)
+    local_axis2 = angular_motor_get_local_axis2(constraints, cid)
+    max_force = angular_motor_get_max_force(constraints, cid)
+    acc = angular_motor_get_accumulated_impulse(constraints, cid)
+
+    # World-space Jacobian rows (the per-DoF axes).
+    j1 = wp.quat_rotate(q1, local_axis1)
+    j2 = wp.quat_rotate(q2, local_axis2)
+
+    # Scalar effective mass for the 1-DoF constraint:
+    #   m^-1 = j1 . (InvI1 * j1) + j2 . (InvI2 * j2)
+    # Jitter writes this as ``Transform(j1, InvI1) * j1`` where the
+    # outer ``*`` between two JVectors is the dot product.
+    eff_inv = wp.dot(inv_inertia1 @ j1, j1) + wp.dot(inv_inertia2 @ j2, j2)
+    angular_motor_set_effective_mass(constraints, cid, 1.0 / eff_inv)
+
+    # Per-step impulse cap. C# writes ``1.0 / idt * MaxForce`` which is
+    # just ``MaxForce * dt``; we use the same form for byte-for-byte
+    # parity.
+    angular_motor_set_max_lambda(constraints, cid, max_force / idt)
+
+    # Warm start: re-apply the previous solve's accumulated impulse.
+    bodies.angular_velocity[b1] = bodies.angular_velocity[b1] - inv_inertia1 @ (j1 * acc)
+    bodies.angular_velocity[b2] = bodies.angular_velocity[b2] + inv_inertia2 @ (j2 * acc)
+
+
+@wp.func
+def _angular_motor_iterate(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    idt: wp.float32,
+):
+    """Direct port of ``IterateAngularMotor`` (AngularMotor.cs:59).
+
+    One PGS-style iteration on the scalar motor constraint: compute the
+    relative axial angular velocity, project to the corrective scalar
+    impulse, clamp the accumulated total to ``[-max_lambda, max_lambda]``,
+    and apply the velocity delta.
+    """
+    b1 = angular_motor_get_body1(constraints, cid)
+    b2 = angular_motor_get_body2(constraints, cid)
+
+    angular_velocity1 = bodies.angular_velocity[b1]
+    angular_velocity2 = bodies.angular_velocity[b2]
+    inv_inertia1 = bodies.inverse_inertia_world[b1]
+    inv_inertia2 = bodies.inverse_inertia_world[b2]
+
+    q1 = bodies.orientation[b1]
+    q2 = bodies.orientation[b2]
+    local_axis1 = angular_motor_get_local_axis1(constraints, cid)
+    local_axis2 = angular_motor_get_local_axis2(constraints, cid)
+    velocity = angular_motor_get_velocity(constraints, cid)
+    eff = angular_motor_get_effective_mass(constraints, cid)
+    max_lambda = angular_motor_get_max_lambda(constraints, cid)
+    acc = angular_motor_get_accumulated_impulse(constraints, cid)
+
+    j1 = wp.quat_rotate(q1, local_axis1)
+    j2 = wp.quat_rotate(q2, local_axis2)
+
+    # jv = -j1 . w1 + j2 . w2  (scalar projection of the relative
+    # angular velocity onto the motor axis; jitter signs).
+    jv = -wp.dot(j1, angular_velocity1) + wp.dot(j2, angular_velocity2)
+
+    lam = -(jv - velocity) * eff
+
+    old_acc = acc
+    acc = wp.clamp(acc + lam, -max_lambda, max_lambda)
+    lam = acc - old_acc
+
+    angular_motor_set_accumulated_impulse(constraints, cid, acc)
+
+    bodies.angular_velocity[b1] = angular_velocity1 - inv_inertia1 @ (j1 * lam)
+    bodies.angular_velocity[b2] = angular_velocity2 + inv_inertia2 @ (j2 * lam)
+
+
+@wp.kernel
+def angular_motor_prepare_for_iteration_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    partition_element_ids: wp.array[wp.int32],
+    partition_count: wp.array[wp.int32],
+):
+    """Indirect launch over a single graph-coloring partition.
+
+    Same launch contract as the other constraint kernels:
+    ``partition_element_ids[tid]`` is the cid this thread should
+    process, threads with ``tid >= partition_count[0]`` early-out, and
+    the partitioner guarantees no two cids in the same partition share
+    a body so the per-thread RMW of ``bodies.angular_velocity`` is
+    race-free.
+    """
+    tid = wp.tid()
+    if tid >= partition_count[0]:
+        return
+    cid = partition_element_ids[tid]
+    _angular_motor_prepare_for_iteration(constraints, cid, bodies, idt)
+
+
+@wp.kernel
+def angular_motor_iterate_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    partition_element_ids: wp.array[wp.int32],
+    partition_count: wp.array[wp.int32],
+):
+    """Indirect launch over a single graph-coloring partition. See
+    :func:`angular_motor_prepare_for_iteration_kernel` for the contract."""
+    tid = wp.tid()
+    if tid >= partition_count[0]:
+        return
+    cid = partition_element_ids[tid]
+    _angular_motor_iterate(constraints, cid, bodies, idt)
