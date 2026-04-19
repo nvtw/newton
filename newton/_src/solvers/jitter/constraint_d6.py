@@ -2,129 +2,84 @@
 # SPDX-License-Identifier: Apache-2.0
 """6-DoF generalised ("D6") joint constraint.
 
-A single D6 owns *all* 6 relative DoF (3 angular + 3 linear) between
-body 1 and body 2 and configures each axis independently as one of:
+Pure port of Jolt's ``SixDOFConstraint``
+(``Jolt/Physics/Constraints/SixDOFConstraint.cpp``) and its
+sub-parts. Where the previous implementation tried to solve the joint
+as a single fused 6x6 Schur complement, this version follows Jolt
+verbatim and dispatches each block of axes to the smallest possible
+constraint primitive:
 
-* **Rigid lock**     -- ``hertz <= 0`` and ``max_force = +inf``. Plain
-  PGS lock; the axis is welded.
-* **Soft lock**      -- ``hertz > 0``, no targets. Spring-and-damper
-  restoring the rest pose with the Box2D / Bepu / Nordby implicit
-  formulation (see :func:`soft_constraint_coefficients`).
+* **Translation block**
+
+  - all 3 axes locked + no targets + no force caps -> a fused
+    :class:`PointConstraintPart` (3-DoF ball-socket; the standard
+    3x3 effective-mass solve).
+  - any other configuration (free axes, motors, force caps) -> three
+    independent :class:`AxisConstraintPart` 1-DoF rows, one per
+    body-1-local linear axis.
+
+* **Rotation block**
+
+  - all 3 axes locked + no targets + no torque caps -> a fused
+    :class:`RotationEulerConstraintPart` (3-DoF rotation lock with
+    quaternion-error linearisation).
+  - any other configuration -> three independent
+    :class:`AngleConstraintPart` 1-DoF rows, one per body-1-local
+    angular axis.
+
+The rationale is the same one Jolt gives in the file header: trying
+to fuse a partial-locked rotation block with a partial-locked
+translation block into one 6x6 system poisons the per-axis impulse
+clamp on free axes (the Schur back-substitution distributes a free
+axis's "missing" impulse over the other axes, which then over-shoot
+on the next iteration). Jolt sidesteps this entirely by solving each
+1-DoF row independently.
+
+Per-axis mode (``D6AxisDrive`` -> sub-part)
+-------------------------------------------
+Each of the 6 axes (3 angular + 3 linear) is independently
+configurable as:
+
+* **Rigid lock**     -- ``hertz <= 0`` and ``max_force = +inf``. The
+  axis is welded.
+* **Soft lock**      -- ``hertz > 0``, no targets. Spring + damper
+  restoring the rest pose with the soft-constraint formulation in
+  :class:`SpringPart` (Box2D / Bepu / Nordby implicit-Euler scheme).
 * **Position drive** -- ``hertz > 0``, ``target_position != 0``,
-  ``max_force`` finite. Implicit-PD drive that pulls the axis towards
-  the target with the soft-spring stiffness, capped at ``max_force``.
+  ``max_force`` finite. Implicit-PD drive that pulls the axis toward
+  the target with the soft-spring stiffness, capped at
+  ``max_force``.
 * **Velocity drive** -- ``hertz > 0``, ``target_velocity != 0``,
   ``max_force`` finite. Implicit-PD velocity-tracking drive ("motor"
   mode); ``hertz`` modulates how aggressively the impulse converges
   to the velocity setpoint.
-* **Free**           -- ``max_force = 0``. The accumulated impulse is
-  pinned to zero on every PGS pass regardless of ``hertz`` -- the
-  canonical way to mark an axis as un-constrained without changing
-  the matrix shape.
+* **Free**           -- ``max_force = 0``. The per-axis row is
+  *deactivated* (``effective_mass = 0``); no impulse is computed
+  or applied for that axis. This is the canonical way to leave an
+  axis unconstrained without changing the matrix shape.
 
 Position + velocity targets compose, yielding an over-damped spring
 with a steady-state velocity (e.g. "open the door at 1 rad/s while
 pulling it towards 90°").
 
-The math closely follows Jolt's ``SixDOFConstraint``
-(``Jolt/Physics/Constraints/SixDOFConstraint.cpp``) but is adapted to
-this codebase's solver style (single dispatched ``wp.func`` per
-constraint type, column-major dword storage, Box2D / Bepu soft
-constraints with no separate "position constraint" pass, ...). The
-biggest deviation is that we always use the *uniform* matrix shape
-(full 6x6 with per-axis softness/cap knobs) rather than dispatching
-to a smaller part when "all rotation locked" or "all translation
-locked"; uniform shape lets the PGS dispatcher stay branchless and
-keeps the warm-start state size constant across drive-mode switches.
-
-Why a 6x6 fused constraint instead of three cascaded ones?
-----------------------------------------------------------
-Same motivation as :mod:`constraint_prismatic` and
-:mod:`constraint_double_ball_socket`: solving the joint as one fused
-PGS thread converges much faster on chains because the angular and
-linear blocks are coupled (an angular impulse displaces the anchor
-laterally), so block-diagonal solving wastes iterations bouncing the
-cross-block residual. Single-thread fusion also lets the partitioner
-colour one D6 per partition (instead of three or six), so dense
-graphs of D6s (e.g. an articulated character) parallelise far better.
-
-Schur-complement solve (avoiding a 6x6 inverse)
------------------------------------------------
-Warp's ``wp.inverse`` overloads only cover 2x2 / 3x3 / 4x4. The 6x6
-effective mass is
-
-::
-
-    K = [ K_rot          K_rot_trans ]   in R^{6x6}
-        [ K_rot_trans^T  K_lin       ]
-
-with ``K_rot``, ``K_lin``, ``K_rot_trans`` each in R^{3x3}. We
-factor it via block-elimination using only two 3x3 inverses:
-
-::
-
-    S       = K_lin - K_rot_trans^T K_rot^{-1} K_rot_trans  # 3x3 Schur
-    lambda_lin = -S^{-1}     ( b_lin - K_rot_trans^T K_rot^{-1} b_rot )
-    lambda_rot = -K_rot^{-1} ( b_rot + K_rot_trans lambda_lin )
-
-We cache ``K_rot_inv``, ``S_inv``, and ``Kt_Ki = K_rot_trans^T
-K_rot^{-1}`` (all 3x3) in the constraint column, so ``iterate`` is
-just three small mat-vecs plus the impulse application -- no
-per-iter inverses.
-
 Constraint frame ("body-1 local")
 ---------------------------------
 The 6 axes are interpreted in *body 1's local frame*: the joint
-frame "rides" body 1 rigidly. The three world-frame axes are
-recomputed each prepare as ``e_k = R_1 e_k_local`` where
-``e_k_local`` is the body-1-local k-th axis (just the k-th column
-of the identity at init time, but stored explicitly so a future
-extension can reorient the constraint frame independently of body 1).
-Position targets are folded into the rest pose / rest anchor at
-:func:`d6_initialize_kernel` time so the runtime kernel doesn't
-branch on "is there a position target" (the per-axis bias is just
-``bias_rate * (current_pos - rest_pos_with_target)``).
+frame "rides" body 1 rigidly. The world-frame translation axes are
+recomputed each prepare as ``e_k = q1 * e_k_local``; the world-frame
+rotation axes for the per-axis :class:`AngleConstraintPart` rows are
+the same axes (Jolt also uses body 1's frame for rotation axes when
+no swing-twist limits are active). Position targets are folded into
+the rest pose / rest anchor at :func:`d6_initialize_kernel` time so
+the runtime kernel doesn't branch on "is there a position target".
 
-Per-axis caps (free axes / drives)
-----------------------------------
-Each axis carries an independent ``max_lambda = max_force * dt``.
-After the Schur solve produces the unconstrained ``lambda_*``
-3-vectors, we project them into the body-1-local axis basis,
-clamp each component independently against the per-axis cap, and
-re-expand back to world. ``max_force = 0`` therefore zeros out the
-component (free axis); ``max_force = +inf`` (passed as 1e30 by the
-descriptor) leaves the component untouched (rigid).
-
-Per-axis softness
------------------
-The Box2D v3 / Bepu / Nordby soft-constraint coefficients
-(``bias_rate, mass_coeff, impulse_coeff``) are per-axis: each block
-has 3 ``vec3f`` triples (one per axis). The PGS update scales each
-component independently:
-
-::
-
-    lambda_local[k] = mass_coeff[k] * lambda_unsoft_local[k]
-                      - impulse_coeff[k] * acc_local[k]
-
-Setting (``mass_coeff[k]``, ``impulse_coeff[k]``) = (1, 0)
-recovers a rigid plain-PGS update on axis ``k``.
-
-Mapping summary (deltas vs prismatic):
-* slide axes ``e1, e2, e3``  -> body-1-local frame (here just the
-                               three columns of identity, but
-                               carried explicitly for symmetry).
-* rest orientation ``q0``    -> ``q2^* * q1`` snapshotted at
-                               initialize, *with the angular
-                               position targets folded in* via
-                               left-multiplication by the
-                               target-rotation quaternion in
-                               body 1's frame.
-* rest anchor                -> per-body local-anchor offsets *with
-                               the linear position targets folded
-                               into body 1's local anchor* so
-                               "drive to rest pose" tracks the
-                               user-specified offset automatically.
+Mapping summary (Jolt -> this file):
+* ``PointConstraintPart``           -> :func:`_point_*` family
+* ``RotationEulerConstraintPart``   -> :func:`_euler_*` family
+* ``AxisConstraintPart``            -> :func:`_axis_*` family
+* ``AngleConstraintPart``           -> :func:`_angle_*` family
+* ``SpringPart``                    -> :func:`soft_constraint_coefficients`
+                                       in :mod:`constraint_container`
 """
 
 from __future__ import annotations
@@ -143,91 +98,21 @@ from newton._src.solvers.jitter.constraint_container import (
     read_mat33,
     read_quat,
     read_vec3,
-    soft_constraint_coefficients,
     write_int,
     write_mat33,
     write_quat,
     write_vec3,
 )
 from newton._src.solvers.jitter.data_packing import dword_offset_of, num_dwords
-from newton._src.solvers.jitter.math_helpers import (
-    qmatrix_project_multiply_left_right,
-)
 
 __all__ = [
     "D6_DWORDS",
     "D6Data",
-    "d6_get_accumulated_impulse_lin",
-    "d6_get_accumulated_impulse_rot",
-    "d6_get_axes_local_b1",
-    "d6_get_bias_lin",
-    "d6_get_bias_rate_ang",
-    "d6_get_bias_rate_lin",
-    "d6_get_bias_rot",
-    "d6_get_body1",
-    "d6_get_body2",
-    "d6_get_damping_ratio_ang",
-    "d6_get_damping_ratio_lin",
-    "d6_get_e_world",
-    "d6_get_hertz_ang",
-    "d6_get_hertz_lin",
-    "d6_get_impulse_coeff_ang",
-    "d6_get_impulse_coeff_lin",
-    "d6_get_j_rot",
-    "d6_get_k_rot_inv",
-    "d6_get_kt_ki",
-    "d6_get_local_anchor_b1",
-    "d6_get_local_anchor_b2",
-    "d6_get_mass_coeff_ang",
-    "d6_get_mass_coeff_lin",
-    "d6_get_max_force_ang",
-    "d6_get_max_force_lin",
-    "d6_get_max_lambda_ang",
-    "d6_get_max_lambda_lin",
-    "d6_get_q0",
-    "d6_get_r1",
-    "d6_get_r2",
-    "d6_get_s_inv",
-    "d6_get_target_velocity_ang",
-    "d6_get_target_velocity_lin",
     "d6_initialize_kernel",
     "d6_iterate",
     "d6_iterate_at",
     "d6_prepare_for_iteration",
     "d6_prepare_for_iteration_at",
-    "d6_set_accumulated_impulse_lin",
-    "d6_set_accumulated_impulse_rot",
-    "d6_set_axes_local_b1",
-    "d6_set_bias_lin",
-    "d6_set_bias_rate_ang",
-    "d6_set_bias_rate_lin",
-    "d6_set_bias_rot",
-    "d6_set_body1",
-    "d6_set_body2",
-    "d6_set_damping_ratio_ang",
-    "d6_set_damping_ratio_lin",
-    "d6_set_e_world",
-    "d6_set_hertz_ang",
-    "d6_set_hertz_lin",
-    "d6_set_impulse_coeff_ang",
-    "d6_set_impulse_coeff_lin",
-    "d6_set_j_rot",
-    "d6_set_k_rot_inv",
-    "d6_set_kt_ki",
-    "d6_set_local_anchor_b1",
-    "d6_set_local_anchor_b2",
-    "d6_set_mass_coeff_ang",
-    "d6_set_mass_coeff_lin",
-    "d6_set_max_force_ang",
-    "d6_set_max_force_lin",
-    "d6_set_max_lambda_ang",
-    "d6_set_max_lambda_lin",
-    "d6_set_q0",
-    "d6_set_r1",
-    "d6_set_r2",
-    "d6_set_s_inv",
-    "d6_set_target_velocity_ang",
-    "d6_set_target_velocity_lin",
     "d6_world_wrench",
     "d6_world_wrench_at",
 ]
@@ -236,27 +121,29 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
+#
+# Layout strategy: a single column packs *both* the fused mode (Point /
+# Euler) state *and* the per-axis mode (Axis x3 / Angle x3) state. The
+# ``trans_mode`` / ``rot_mode`` flags chosen at init time decide which
+# half of each block the iterate path actually uses; the unused half
+# stays at zero (effective_mass = 0 = "deactivated", same as Jolt's
+# ``Deactivate()``).
+#
+# Field naming follows Jolt's member naming (``mInvI1_R1X``,
+# ``mTotalLambda``, etc.) with the appropriate snake_case translation.
 
 
 @wp.struct
 class D6Data:
     """Per-constraint dword-layout schema for a D6 (6-DoF) joint.
 
-    *Schema only* (same conventions as :class:`BallSocketData` /
-    :class:`PrismaticData`). Field order fixes dword offsets;
-    runtime kernels read/write fields out of the shared
+    *Schema only*: the struct is never instantiated at runtime; we
+    derive its dword-offset table once at module load and the runtime
+    kernels read/write fields via the column-major
     :class:`ConstraintContainer`.
 
     The first three fields are the global constraint header
-    (``constraint_type``, ``body1``, ``body2`` at dwords 0/1/2),
-    enforced by :func:`assert_constraint_header`.
-
-    Per-axis knobs (one ``vec3f`` per (block, knob) pair, with the
-    three components addressing the three body-1-local axes) are
-    laid out so the kernel can load all three components of one knob
-    in a single :func:`read_vec3` call. Splitting "angular" from
-    "linear" into separate vec3 fields keeps the per-block soft-
-    constraint plumbing symmetric with the rest of the solver.
+    (``constraint_type``, ``body1``, ``body2``).
     """
 
     constraint_type: wp.int32
@@ -264,125 +151,166 @@ class D6Data:
     body1: wp.int32
     body2: wp.int32
 
-    # Anchor point in each body's local frame. The anchors are
-    # snapshotted from a shared world-space ``anchor`` at initialize,
-    # and the linear position targets are folded into ``local_anchor_b1``
-    # so that the "rest pose" (the configuration the bias drives the
-    # joint toward) reflects the user-specified target offsets.
+    # ---- Init-time constant state ------------------------------------
+    # Anchor in each body's local frame, snapshotted at init from a
+    # shared world-space anchor with the linear position targets folded
+    # into ``local_anchor_b1`` along the constraint frame so the
+    # runtime "rest pose" already includes the user-specified offset.
     local_anchor_b1: wp.vec3f
     local_anchor_b2: wp.vec3f
 
-    # Three body-1-local axes packed as the rows of a mat33. By default
-    # this is the 3x3 identity (the constraint frame coincides with
-    # body 1's local frame at init time); kept as a real matrix so a
-    # future extension can let the user specify an oriented constraint
-    # frame relative to body 1 without code changes.
-    axes_local_b1: wp.mat33f
+    # Constraint-to-body rotations. ``q_const_to_b1`` and
+    # ``q_const_to_b2`` are the quaternions that take a vector from
+    # the constraint frame to body 1 / body 2 local space. At init
+    # time both are identity (the constraint frame coincides with
+    # body 1's local frame); a future extension can let the user
+    # specify an oriented constraint frame relative to either body
+    # without touching the runtime path.
+    q_const_to_b1: wp.quatf
+    q_const_to_b2: wp.quatf
 
-    # Rest-pose relative orientation ``q0 = q2^* * q1_target`` where
-    # ``q1_target = q1 * q_target_in_b1`` folds the angular position
-    # targets (interpreted in body-1's constraint frame) into the rest
-    # pose. The angular bias drives the current ``q2^* q1`` back to
-    # this ``q0``, so a non-zero target rotation just shifts the
-    # equilibrium.
-    q0: wp.quatf
+    # Inverse of the initial relative orientation (body 1 to body 2
+    # in body 1 space), with the angular position targets folded in.
+    # Used by the ``Euler`` (full-locked rotation) path:
+    #   diff = q2 * q_inv_initial * q1^*
+    # is the rotational error quaternion that the rotation-lock part
+    # drives to identity. See Jolt's
+    # ``RotationEulerConstraintPart::SolvePositionConstraint``.
+    q_inv_initial_orientation: wp.quatf
 
-    # Cached per-substep world-space lever arms from each body's COM
-    # to the (shared) anchor point.
-    r1: wp.vec3f
-    r2: wp.vec3f
-
-    # Cached world-space constraint axes (recomputed each prepare as
-    # ``R_1 axes_local_b1``). Rows are the three world-frame axes.
-    e_world: wp.mat33f
-
-    # User-facing soft-constraint knobs (Box2D v3 / Bepu / Nordby
-    # formulation), one per axis. ``hertz_*[k] <= 0`` -> rigid for
-    # axis ``k``. Persisted across substeps; the per-substep
-    # coefficients below are recomputed every prepare.
+    # Per-axis user knobs. ``hertz_*[k] <= 0`` -> rigid for axis ``k``;
+    # ``max_force_*[k] = 0`` -> axis is *free* (per-axis row gets
+    # deactivated at prepare time). ``+inf`` is mapped to ``1e30`` by
+    # the host packer so the multiplication ``max_force * dt`` stays
+    # a well-defined float; the iterate path reads it as "no cap".
     hertz_ang: wp.vec3f
     damping_ratio_ang: wp.vec3f
     hertz_lin: wp.vec3f
     damping_ratio_lin: wp.vec3f
 
-    # Target relative angular and linear velocities, in body-1
-    # constraint coordinates. Compose with the position targets that
-    # were folded into ``q0`` / ``local_anchor_b1`` at initialize.
     target_velocity_ang: wp.vec3f
     target_velocity_lin: wp.vec3f
 
-    # Maximum per-axis force/torque (in body-1 constraint coords).
-    # ``max_force_*[k] = 0`` marks axis ``k`` as *free* (the per-axis
-    # clamp pins ``acc_local[k] = 0`` every iteration). A finite
-    # positive value caps the per-axis impulse at ``max_force * dt``.
-    # ``+inf`` is mapped to ``1e30`` by the host-side packer for a
-    # branch-free rigid-axis path.
     max_force_ang: wp.vec3f
     max_force_lin: wp.vec3f
 
-    # Cached per-substep ``max_force * dt`` per axis (in constraint
-    # coords). Recomputed every prepare from the current substep dt.
+    # ---- Dispatch flags (set at init from the per-axis knobs) -------
+    # ``trans_mode == 0``  -> Point fused 3-DoF lock (all 3 lin
+    #                         axes are rigid + no targets + no caps).
+    # ``trans_mode == 1``  -> three independent Axis 1-DoF rows.
+    #
+    # ``rot_mode == 0``    -> Euler fused 3-DoF lock.
+    # ``rot_mode == 1``    -> three independent Angle 1-DoF rows.
+    #
+    # Stored as wp.int32 so the schema layout is portable; only the
+    # low bit ever matters.
+    trans_mode: wp.int32
+    rot_mode: wp.int32
+
+    # ---- Per-substep cached state (recomputed every prepare) --------
+    # World-space lever arms (anchor minus body COM) for each body.
+    r1: wp.vec3f
+    r2: wp.vec3f
+
+    # World-space constraint axes. Rows of ``axes_world`` are the
+    # three world-frame axes (``e_k_world = q1 * q_const_to_b1
+    # * e_k_const``); rows are aligned with the per-axis fields below.
+    axes_world: wp.mat33f
+
+    # Per-substep impulse caps (``max_force * dt``) per axis. The
+    # iterate path reads these directly to clamp Lagrange multipliers
+    # in the per-axis Axis / Angle paths. Matches Jolt's pattern of
+    # passing ``inDeltaTime * inMaxForceLimit`` as the per-iter clamp.
     max_lambda_ang: wp.vec3f
     max_lambda_lin: wp.vec3f
 
-    # Cached per-substep soft-constraint coefficients per axis
-    # (recomputed every prepare). One ``vec3f`` per (block, coeff).
-    bias_rate_ang: wp.vec3f
-    mass_coeff_ang: wp.vec3f
-    impulse_coeff_ang: wp.vec3f
-    bias_rate_lin: wp.vec3f
-    mass_coeff_lin: wp.vec3f
-    impulse_coeff_lin: wp.vec3f
+    # ---- Point part state (used iff trans_mode == 0) -----------------
+    # ``mInvI1_R1X = InvI1 @ skew(r1)``, ``mInvI2_R2X = InvI2 @ skew(r2)``.
+    # ``effective_mass = (m1^-1 I + skew(r1) InvI1 skew(r1)^T + ...) ^-1``
+    # See Jolt ``PointConstraintPart::CalculateConstraintProperties``.
+    point_inv_i1_r1x: wp.mat33f
+    point_inv_i2_r2x: wp.mat33f
+    point_effective_mass: wp.mat33f
 
-    # Cached velocity-error bias vectors, expressed in body-1
-    # constraint coordinates. ``bias_rot[k] = bias_rate_ang[k] *
-    # angular_error_along_axis_k``; ``bias_lin[k] = bias_rate_lin[k] *
-    # linear_drift_along_axis_k``.
-    bias_rot: wp.vec3f
-    bias_lin: wp.vec3f
+    # Accumulated impulse for the point part (world-frame 3-vec).
+    point_total_lambda: wp.vec3f
 
-    # Cached angular Jacobian (3x3, world frame). Same convention as
-    # :mod:`constraint_prismatic`: rows are world-axis Jacobian rows
-    # in the *quaternion-axis* basis (carries the half-angle factor
-    # from the quaternion-error linearisation), so ``J^T (w1 - w2)``
-    # is the per-axis angular velocity error in that basis. To
-    # express the velocity error in the *constraint* axis basis (the
-    # one the per-axis caps and biases live in), we further project
-    # by the world-axis frame ``e_world``.
-    j_rot: wp.mat33f
+    # ---- Euler part state (used iff rot_mode == 0) -------------------
+    # ``effective_mass = (InvI1 + InvI2)^-1`` (3x3, world frame).
+    # Matches Jolt ``RotationEulerConstraintPart::CalculateConstraintProperties``.
+    euler_effective_mass: wp.mat33f
 
-    # Cached effective-mass blocks for the Schur-complement solve.
-    # ``k_rot_inv`` is the 3x3 inverse of the angular block (in
-    # constraint coordinates). ``kt_ki`` is the 3x3 product
-    # ``K_rot_trans^T K_rot^{-1}`` (also in constraint coords).
-    # ``s_inv`` is the 3x3 Schur-complement inverse.
-    k_rot_inv: wp.mat33f
-    kt_ki: wp.mat33f
-    s_inv: wp.mat33f
+    # Accumulated angular impulse for the euler part (world-frame
+    # angular impulse 3-vec). Body-frame "torque" basis -- the Jacobian
+    # for the euler part is just the identity.
+    euler_total_lambda: wp.vec3f
 
-    # Accumulated PGS impulses in *world* frame (linear) /
-    # *quaternion-axis* frame (angular), so warm-start is invariant
-    # under the constraint frame rotating with body 1 between
-    # substeps. The per-iter clamp projects them into the constraint
-    # axis basis, clamps, and re-expands.
-    accumulated_impulse_rot: wp.vec3f
-    accumulated_impulse_lin: wp.vec3f
+    # ---- Axis parts state (used iff trans_mode == 1) -----------------
+    # Three independent 1-DoF translation rows. The k-th row uses
+    # ``axes_world[k]`` as its world-space axis; per-axis cached
+    # quantities sit in three vec3f columns (componentwise across the
+    # three rows).
+    #
+    # axis_r1_plus_u_x_axis[k] = (r1 + u) x axes_world[k]
+    # axis_r2_x_axis[k]        = r2 x axes_world[k]
+    # axis_inv_i1_r1pu_x[k]    = InvI1 @ axis_r1_plus_u_x_axis[k]
+    # axis_inv_i2_r2_x[k]      = InvI2 @ axis_r2_x_axis[k]
+    axis_r1_plus_u_x_axis_0: wp.vec3f
+    axis_r1_plus_u_x_axis_1: wp.vec3f
+    axis_r1_plus_u_x_axis_2: wp.vec3f
+    axis_r2_x_axis_0: wp.vec3f
+    axis_r2_x_axis_1: wp.vec3f
+    axis_r2_x_axis_2: wp.vec3f
+    axis_inv_i1_r1pu_x_0: wp.vec3f
+    axis_inv_i1_r1pu_x_1: wp.vec3f
+    axis_inv_i1_r1pu_x_2: wp.vec3f
+    axis_inv_i2_r2_x_0: wp.vec3f
+    axis_inv_i2_r2_x_1: wp.vec3f
+    axis_inv_i2_r2_x_2: wp.vec3f
+
+    # Per-axis effective mass (= 0 if axis deactivated -- "free" axis,
+    # or zero summed inverse mass).
+    axis_effective_mass: wp.vec3f
+
+    # Per-axis spring state. ``spring_softness`` is gamma in Catto's
+    # GDC2011 formulation; ``spring_bias`` is the constant bias term
+    # ``b`` for the row's velocity constraint. For rigid axes both
+    # are zero (plain PGS update). See :func:`_calc_spring_props`.
+    axis_spring_softness: wp.vec3f
+    axis_spring_bias: wp.vec3f
+
+    # Per-axis accumulated impulse.
+    axis_total_lambda: wp.vec3f
+
+    # ---- Angle parts state (used iff rot_mode == 1) ------------------
+    # Three independent 1-DoF rotation rows. Same layout as the axis
+    # parts but no translation cross-term:
+    #   angle_inv_i1_axis[k] = InvI1 @ axes_world[k]
+    #   angle_inv_i2_axis[k] = InvI2 @ axes_world[k]
+    angle_inv_i1_axis_0: wp.vec3f
+    angle_inv_i1_axis_1: wp.vec3f
+    angle_inv_i1_axis_2: wp.vec3f
+    angle_inv_i2_axis_0: wp.vec3f
+    angle_inv_i2_axis_1: wp.vec3f
+    angle_inv_i2_axis_2: wp.vec3f
+    angle_effective_mass: wp.vec3f
+    angle_spring_softness: wp.vec3f
+    angle_spring_bias: wp.vec3f
+    angle_total_lambda: wp.vec3f
 
 
 assert_constraint_header(D6Data)
 
 
-# Dword offsets derived once from the schema. Each is a Python int;
-# wrapped in wp.constant so kernels can use them as compile-time literals.
+# Dword offsets derived once from the schema. Each is wrapped in
+# ``wp.constant`` so kernels can use them as compile-time literals.
 _OFF_BODY1 = wp.constant(dword_offset_of(D6Data, "body1"))
 _OFF_BODY2 = wp.constant(dword_offset_of(D6Data, "body2"))
 _OFF_LA_B1 = wp.constant(dword_offset_of(D6Data, "local_anchor_b1"))
 _OFF_LA_B2 = wp.constant(dword_offset_of(D6Data, "local_anchor_b2"))
-_OFF_AXES_LOCAL_B1 = wp.constant(dword_offset_of(D6Data, "axes_local_b1"))
-_OFF_Q0 = wp.constant(dword_offset_of(D6Data, "q0"))
-_OFF_R1 = wp.constant(dword_offset_of(D6Data, "r1"))
-_OFF_R2 = wp.constant(dword_offset_of(D6Data, "r2"))
-_OFF_E_WORLD = wp.constant(dword_offset_of(D6Data, "e_world"))
+_OFF_Q_CONST_TO_B1 = wp.constant(dword_offset_of(D6Data, "q_const_to_b1"))
+_OFF_Q_CONST_TO_B2 = wp.constant(dword_offset_of(D6Data, "q_const_to_b2"))
+_OFF_Q_INV_INIT = wp.constant(dword_offset_of(D6Data, "q_inv_initial_orientation"))
 _OFF_HERTZ_ANG = wp.constant(dword_offset_of(D6Data, "hertz_ang"))
 _OFF_DAMPING_ANG = wp.constant(dword_offset_of(D6Data, "damping_ratio_ang"))
 _OFF_HERTZ_LIN = wp.constant(dword_offset_of(D6Data, "hertz_lin"))
@@ -391,22 +319,55 @@ _OFF_TARGET_VEL_ANG = wp.constant(dword_offset_of(D6Data, "target_velocity_ang")
 _OFF_TARGET_VEL_LIN = wp.constant(dword_offset_of(D6Data, "target_velocity_lin"))
 _OFF_MAX_FORCE_ANG = wp.constant(dword_offset_of(D6Data, "max_force_ang"))
 _OFF_MAX_FORCE_LIN = wp.constant(dword_offset_of(D6Data, "max_force_lin"))
+_OFF_TRANS_MODE = wp.constant(dword_offset_of(D6Data, "trans_mode"))
+_OFF_ROT_MODE = wp.constant(dword_offset_of(D6Data, "rot_mode"))
+_OFF_R1 = wp.constant(dword_offset_of(D6Data, "r1"))
+_OFF_R2 = wp.constant(dword_offset_of(D6Data, "r2"))
+_OFF_AXES_WORLD = wp.constant(dword_offset_of(D6Data, "axes_world"))
 _OFF_MAX_LAMBDA_ANG = wp.constant(dword_offset_of(D6Data, "max_lambda_ang"))
 _OFF_MAX_LAMBDA_LIN = wp.constant(dword_offset_of(D6Data, "max_lambda_lin"))
-_OFF_BIAS_RATE_ANG = wp.constant(dword_offset_of(D6Data, "bias_rate_ang"))
-_OFF_MASS_COEFF_ANG = wp.constant(dword_offset_of(D6Data, "mass_coeff_ang"))
-_OFF_IMPULSE_COEFF_ANG = wp.constant(dword_offset_of(D6Data, "impulse_coeff_ang"))
-_OFF_BIAS_RATE_LIN = wp.constant(dword_offset_of(D6Data, "bias_rate_lin"))
-_OFF_MASS_COEFF_LIN = wp.constant(dword_offset_of(D6Data, "mass_coeff_lin"))
-_OFF_IMPULSE_COEFF_LIN = wp.constant(dword_offset_of(D6Data, "impulse_coeff_lin"))
-_OFF_BIAS_ROT = wp.constant(dword_offset_of(D6Data, "bias_rot"))
-_OFF_BIAS_LIN = wp.constant(dword_offset_of(D6Data, "bias_lin"))
-_OFF_J_ROT = wp.constant(dword_offset_of(D6Data, "j_rot"))
-_OFF_K_ROT_INV = wp.constant(dword_offset_of(D6Data, "k_rot_inv"))
-_OFF_KT_KI = wp.constant(dword_offset_of(D6Data, "kt_ki"))
-_OFF_S_INV = wp.constant(dword_offset_of(D6Data, "s_inv"))
-_OFF_ACC_IMP_ROT = wp.constant(dword_offset_of(D6Data, "accumulated_impulse_rot"))
-_OFF_ACC_IMP_LIN = wp.constant(dword_offset_of(D6Data, "accumulated_impulse_lin"))
+
+_OFF_POINT_INV_I1_R1X = wp.constant(dword_offset_of(D6Data, "point_inv_i1_r1x"))
+_OFF_POINT_INV_I2_R2X = wp.constant(dword_offset_of(D6Data, "point_inv_i2_r2x"))
+_OFF_POINT_EFF_MASS = wp.constant(dword_offset_of(D6Data, "point_effective_mass"))
+_OFF_POINT_TOTAL_LAMBDA = wp.constant(dword_offset_of(D6Data, "point_total_lambda"))
+
+_OFF_EULER_EFF_MASS = wp.constant(dword_offset_of(D6Data, "euler_effective_mass"))
+_OFF_EULER_TOTAL_LAMBDA = wp.constant(dword_offset_of(D6Data, "euler_total_lambda"))
+
+_OFF_AXIS_R1PU_X_0 = wp.constant(dword_offset_of(D6Data, "axis_r1_plus_u_x_axis_0"))
+_OFF_AXIS_R1PU_X_1 = wp.constant(dword_offset_of(D6Data, "axis_r1_plus_u_x_axis_1"))
+_OFF_AXIS_R1PU_X_2 = wp.constant(dword_offset_of(D6Data, "axis_r1_plus_u_x_axis_2"))
+_OFF_AXIS_R2_X_0 = wp.constant(dword_offset_of(D6Data, "axis_r2_x_axis_0"))
+_OFF_AXIS_R2_X_1 = wp.constant(dword_offset_of(D6Data, "axis_r2_x_axis_1"))
+_OFF_AXIS_R2_X_2 = wp.constant(dword_offset_of(D6Data, "axis_r2_x_axis_2"))
+_OFF_AXIS_INV_I1_R1PU_X_0 = wp.constant(dword_offset_of(D6Data, "axis_inv_i1_r1pu_x_0"))
+_OFF_AXIS_INV_I1_R1PU_X_1 = wp.constant(dword_offset_of(D6Data, "axis_inv_i1_r1pu_x_1"))
+_OFF_AXIS_INV_I1_R1PU_X_2 = wp.constant(dword_offset_of(D6Data, "axis_inv_i1_r1pu_x_2"))
+_OFF_AXIS_INV_I2_R2_X_0 = wp.constant(dword_offset_of(D6Data, "axis_inv_i2_r2_x_0"))
+_OFF_AXIS_INV_I2_R2_X_1 = wp.constant(dword_offset_of(D6Data, "axis_inv_i2_r2_x_1"))
+_OFF_AXIS_INV_I2_R2_X_2 = wp.constant(dword_offset_of(D6Data, "axis_inv_i2_r2_x_2"))
+_OFF_AXIS_EFF_MASS = wp.constant(dword_offset_of(D6Data, "axis_effective_mass"))
+_OFF_AXIS_SOFTNESS = wp.constant(dword_offset_of(D6Data, "axis_spring_softness"))
+_OFF_AXIS_BIAS = wp.constant(dword_offset_of(D6Data, "axis_spring_bias"))
+_OFF_AXIS_TOTAL_LAMBDA = wp.constant(dword_offset_of(D6Data, "axis_total_lambda"))
+
+_OFF_ANGLE_INV_I1_AXIS_0 = wp.constant(dword_offset_of(D6Data, "angle_inv_i1_axis_0"))
+_OFF_ANGLE_INV_I1_AXIS_1 = wp.constant(dword_offset_of(D6Data, "angle_inv_i1_axis_1"))
+_OFF_ANGLE_INV_I1_AXIS_2 = wp.constant(dword_offset_of(D6Data, "angle_inv_i1_axis_2"))
+_OFF_ANGLE_INV_I2_AXIS_0 = wp.constant(dword_offset_of(D6Data, "angle_inv_i2_axis_0"))
+_OFF_ANGLE_INV_I2_AXIS_1 = wp.constant(dword_offset_of(D6Data, "angle_inv_i2_axis_1"))
+_OFF_ANGLE_INV_I2_AXIS_2 = wp.constant(dword_offset_of(D6Data, "angle_inv_i2_axis_2"))
+_OFF_ANGLE_EFF_MASS = wp.constant(dword_offset_of(D6Data, "angle_effective_mass"))
+_OFF_ANGLE_SOFTNESS = wp.constant(dword_offset_of(D6Data, "angle_spring_softness"))
+_OFF_ANGLE_BIAS = wp.constant(dword_offset_of(D6Data, "angle_spring_bias"))
+_OFF_ANGLE_TOTAL_LAMBDA = wp.constant(dword_offset_of(D6Data, "angle_total_lambda"))
+
+# Trans / rot mode encoding (kept in sync with init kernel).
+_TRANS_MODE_POINT = wp.constant(0)
+_TRANS_MODE_AXIS = wp.constant(1)
+_ROT_MODE_EULER = wp.constant(0)
+_ROT_MODE_ANGLE = wp.constant(1)
 
 #: Total dword count of one D6 constraint. Used by the host-side
 #: container allocator to size ``ConstraintContainer.data``'s row count.
@@ -414,343 +375,295 @@ D6_DWORDS: int = num_dwords(D6Data)
 
 
 # ---------------------------------------------------------------------------
-# Typed accessors -- thin wrappers over column-major dword get/set
+# Spring helpers (port of Jolt SpringPart)
+# ---------------------------------------------------------------------------
+#
+# Jolt's SpringPart computes the per-row (softness, bias) pair from
+# the spring settings. We use the equivalent Box2D / Bepu helper
+# already in the codebase (:func:`soft_constraint_coefficients`),
+# but expose it through a thin wrapper that returns the Jolt-style
+# (softness, bias_with_spring) pair on top of a *separate* constant
+# bias (used for velocity-driven motors where the bias is just
+# ``-target_velocity``, not a position error).
+
+
+@wp.func
+def _calc_spring_props(
+    inv_eff_mass: wp.float32,
+    bias_constant: wp.float32,
+    position_error: wp.float32,
+    hertz: wp.float32,
+    damping_ratio: wp.float32,
+    dt: wp.float32,
+) -> wp.vec3f:
+    """Return ``(effective_mass, softness, bias)`` for a 1-DoF row.
+
+    Mirrors Jolt's ``SpringPart::CalculateSpringPropertiesWithFrequencyAndDamping``
+    but reuses our Box2D-formulated soft-constraint coefficients to
+    keep one source of truth for the implicit-Euler spring.
+
+    For a *rigid* row (``hertz <= 0``), the softness is 0 and the
+    bias is just ``bias_constant``; the effective mass is
+    ``1 / inv_eff_mass``. For a *soft* row, the softness is
+    ``1 / (dt * (c + dt * k))`` from Catto's GDC11 formulation, the
+    bias gets an extra ``dt * k * softness * position_error`` term,
+    and the effective mass becomes ``1 / (inv_eff_mass + softness)``.
+
+    Returned as a vec3 for kernel-friendly packing
+    (warp doesn't have multi-return tuples in functions cleanly).
+    """
+    if inv_eff_mass <= 0.0:
+        # Either both bodies are static along this axis, or the axis
+        # has zero summed inverse mass for some other reason. Mark
+        # the row deactivated.
+        return wp.vec3f(0.0, 0.0, 0.0)
+
+    if hertz <= 0.0:
+        # Plain rigid row.
+        return wp.vec3f(1.0 / inv_eff_mass, 0.0, bias_constant)
+
+    # Soft row: derive (k, c) from (frequency, damping_ratio) the
+    # Jolt way (k = m * omega^2, c = 2 * m * zeta * omega), then
+    # plug into Catto's softness formula. Equivalent to our
+    # ``soft_constraint_coefficients`` but with the bias_constant
+    # term added in.
+    # Compute a placeholder effective mass for the (k, c) recipe.
+    eff_mass_unsoft = 1.0 / inv_eff_mass
+    omega = 2.0 * 3.141592653589793 * hertz
+    k = eff_mass_unsoft * omega * omega
+    c = 2.0 * eff_mass_unsoft * damping_ratio * omega
+
+    softness = 1.0 / (dt * (c + dt * k))
+    bias = bias_constant + dt * k * softness * position_error
+    eff_mass = 1.0 / (inv_eff_mass + softness)
+    return wp.vec3f(eff_mass, softness, bias)
+
+
+# ---------------------------------------------------------------------------
+# PointConstraintPart helpers
 # ---------------------------------------------------------------------------
 
 
 @wp.func
-def d6_get_body1(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
-    return read_int(c, _OFF_BODY1, cid)
-
-
-@wp.func
-def d6_set_body1(c: ConstraintContainer, cid: wp.int32, v: wp.int32):
-    write_int(c, _OFF_BODY1, cid, v)
-
-
-@wp.func
-def d6_get_body2(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
-    return read_int(c, _OFF_BODY2, cid)
-
-
-@wp.func
-def d6_set_body2(c: ConstraintContainer, cid: wp.int32, v: wp.int32):
-    write_int(c, _OFF_BODY2, cid, v)
-
-
-@wp.func
-def d6_get_local_anchor_b1(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_LA_B1, cid)
-
-
-@wp.func
-def d6_set_local_anchor_b1(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_LA_B1, cid, v)
-
-
-@wp.func
-def d6_get_local_anchor_b2(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_LA_B2, cid)
-
-
-@wp.func
-def d6_set_local_anchor_b2(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_LA_B2, cid, v)
-
-
-@wp.func
-def d6_get_axes_local_b1(c: ConstraintContainer, cid: wp.int32) -> wp.mat33f:
-    return read_mat33(c, _OFF_AXES_LOCAL_B1, cid)
-
-
-@wp.func
-def d6_set_axes_local_b1(c: ConstraintContainer, cid: wp.int32, v: wp.mat33f):
-    write_mat33(c, _OFF_AXES_LOCAL_B1, cid, v)
-
-
-@wp.func
-def d6_get_q0(c: ConstraintContainer, cid: wp.int32) -> wp.quatf:
-    return read_quat(c, _OFF_Q0, cid)
-
-
-@wp.func
-def d6_set_q0(c: ConstraintContainer, cid: wp.int32, v: wp.quatf):
-    write_quat(c, _OFF_Q0, cid, v)
-
-
-@wp.func
-def d6_get_r1(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_R1, cid)
-
-
-@wp.func
-def d6_set_r1(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_R1, cid, v)
-
-
-@wp.func
-def d6_get_r2(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_R2, cid)
-
-
-@wp.func
-def d6_set_r2(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_R2, cid, v)
-
-
-@wp.func
-def d6_get_e_world(c: ConstraintContainer, cid: wp.int32) -> wp.mat33f:
-    return read_mat33(c, _OFF_E_WORLD, cid)
-
-
-@wp.func
-def d6_set_e_world(c: ConstraintContainer, cid: wp.int32, v: wp.mat33f):
-    write_mat33(c, _OFF_E_WORLD, cid, v)
-
-
-@wp.func
-def d6_get_hertz_ang(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_HERTZ_ANG, cid)
-
-
-@wp.func
-def d6_set_hertz_ang(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_HERTZ_ANG, cid, v)
-
-
-@wp.func
-def d6_get_damping_ratio_ang(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_DAMPING_ANG, cid)
-
-
-@wp.func
-def d6_set_damping_ratio_ang(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_DAMPING_ANG, cid, v)
-
-
-@wp.func
-def d6_get_hertz_lin(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_HERTZ_LIN, cid)
-
-
-@wp.func
-def d6_set_hertz_lin(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_HERTZ_LIN, cid, v)
-
-
-@wp.func
-def d6_get_damping_ratio_lin(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_DAMPING_LIN, cid)
-
-
-@wp.func
-def d6_set_damping_ratio_lin(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_DAMPING_LIN, cid, v)
-
-
-@wp.func
-def d6_get_target_velocity_ang(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_TARGET_VEL_ANG, cid)
-
-
-@wp.func
-def d6_set_target_velocity_ang(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_TARGET_VEL_ANG, cid, v)
-
-
-@wp.func
-def d6_get_target_velocity_lin(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_TARGET_VEL_LIN, cid)
-
-
-@wp.func
-def d6_set_target_velocity_lin(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_TARGET_VEL_LIN, cid, v)
-
-
-@wp.func
-def d6_get_max_force_ang(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_MAX_FORCE_ANG, cid)
-
-
-@wp.func
-def d6_set_max_force_ang(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_MAX_FORCE_ANG, cid, v)
-
-
-@wp.func
-def d6_get_max_force_lin(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_MAX_FORCE_LIN, cid)
-
-
-@wp.func
-def d6_set_max_force_lin(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_MAX_FORCE_LIN, cid, v)
-
-
-@wp.func
-def d6_get_max_lambda_ang(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_MAX_LAMBDA_ANG, cid)
-
-
-@wp.func
-def d6_set_max_lambda_ang(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_MAX_LAMBDA_ANG, cid, v)
-
-
-@wp.func
-def d6_get_max_lambda_lin(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_MAX_LAMBDA_LIN, cid)
-
-
-@wp.func
-def d6_set_max_lambda_lin(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_MAX_LAMBDA_LIN, cid, v)
-
-
-@wp.func
-def d6_get_bias_rate_ang(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_BIAS_RATE_ANG, cid)
-
-
-@wp.func
-def d6_set_bias_rate_ang(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_BIAS_RATE_ANG, cid, v)
-
-
-@wp.func
-def d6_get_mass_coeff_ang(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_MASS_COEFF_ANG, cid)
-
-
-@wp.func
-def d6_set_mass_coeff_ang(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_MASS_COEFF_ANG, cid, v)
-
-
-@wp.func
-def d6_get_impulse_coeff_ang(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_IMPULSE_COEFF_ANG, cid)
-
-
-@wp.func
-def d6_set_impulse_coeff_ang(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_IMPULSE_COEFF_ANG, cid, v)
-
-
-@wp.func
-def d6_get_bias_rate_lin(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_BIAS_RATE_LIN, cid)
-
-
-@wp.func
-def d6_set_bias_rate_lin(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_BIAS_RATE_LIN, cid, v)
-
-
-@wp.func
-def d6_get_mass_coeff_lin(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_MASS_COEFF_LIN, cid)
-
-
-@wp.func
-def d6_set_mass_coeff_lin(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_MASS_COEFF_LIN, cid, v)
-
-
-@wp.func
-def d6_get_impulse_coeff_lin(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_IMPULSE_COEFF_LIN, cid)
-
-
-@wp.func
-def d6_set_impulse_coeff_lin(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_IMPULSE_COEFF_LIN, cid, v)
-
-
-@wp.func
-def d6_get_bias_rot(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_BIAS_ROT, cid)
-
-
-@wp.func
-def d6_set_bias_rot(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_BIAS_ROT, cid, v)
-
-
-@wp.func
-def d6_get_bias_lin(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_BIAS_LIN, cid)
-
-
-@wp.func
-def d6_set_bias_lin(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_BIAS_LIN, cid, v)
-
-
-@wp.func
-def d6_get_j_rot(c: ConstraintContainer, cid: wp.int32) -> wp.mat33f:
-    return read_mat33(c, _OFF_J_ROT, cid)
-
-
-@wp.func
-def d6_set_j_rot(c: ConstraintContainer, cid: wp.int32, v: wp.mat33f):
-    write_mat33(c, _OFF_J_ROT, cid, v)
-
-
-@wp.func
-def d6_get_k_rot_inv(c: ConstraintContainer, cid: wp.int32) -> wp.mat33f:
-    return read_mat33(c, _OFF_K_ROT_INV, cid)
-
-
-@wp.func
-def d6_set_k_rot_inv(c: ConstraintContainer, cid: wp.int32, v: wp.mat33f):
-    write_mat33(c, _OFF_K_ROT_INV, cid, v)
-
-
-@wp.func
-def d6_get_kt_ki(c: ConstraintContainer, cid: wp.int32) -> wp.mat33f:
-    return read_mat33(c, _OFF_KT_KI, cid)
-
-
-@wp.func
-def d6_set_kt_ki(c: ConstraintContainer, cid: wp.int32, v: wp.mat33f):
-    write_mat33(c, _OFF_KT_KI, cid, v)
-
-
-@wp.func
-def d6_get_s_inv(c: ConstraintContainer, cid: wp.int32) -> wp.mat33f:
-    return read_mat33(c, _OFF_S_INV, cid)
-
-
-@wp.func
-def d6_set_s_inv(c: ConstraintContainer, cid: wp.int32, v: wp.mat33f):
-    write_mat33(c, _OFF_S_INV, cid, v)
-
-
-@wp.func
-def d6_get_accumulated_impulse_rot(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_ACC_IMP_ROT, cid)
-
-
-@wp.func
-def d6_set_accumulated_impulse_rot(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_ACC_IMP_ROT, cid, v)
-
-
-@wp.func
-def d6_get_accumulated_impulse_lin(c: ConstraintContainer, cid: wp.int32) -> wp.vec3f:
-    return read_vec3(c, _OFF_ACC_IMP_LIN, cid)
-
-
-@wp.func
-def d6_set_accumulated_impulse_lin(c: ConstraintContainer, cid: wp.int32, v: wp.vec3f):
-    write_vec3(c, _OFF_ACC_IMP_LIN, cid, v)
+def _point_calculate_properties(
+    r1: wp.vec3f,
+    r2: wp.vec3f,
+    inv_mass1: wp.float32,
+    inv_mass2: wp.float32,
+    inv_inertia1: wp.mat33f,
+    inv_inertia2: wp.mat33f,
+):
+    """Direct port of ``PointConstraintPart::CalculateConstraintProperties``.
+
+    Returns ``(effective_mass, inv_i1_r1x, inv_i2_r2x)``. The latter
+    two cache ``InvI * skew(r)`` for both bodies so that the velocity
+    /impulse paths can apply them directly without recomputing the
+    skew matrix.
+    """
+    eye3 = wp.identity(3, dtype=wp.float32)
+    r1x = wp.skew(r1)
+    r2x = wp.skew(r2)
+
+    inv_i1_r1x = inv_inertia1 @ r1x
+    inv_i2_r2x = inv_inertia2 @ r2x
+
+    # K = sum_b ( m_b^-1 I + skew(r_b) Inv_I_b skew(r_b)^T )
+    # Note: skew(r)^T = -skew(r), so skew(r) Inv_I skew(r)^T = -skew(r) Inv_I skew(r).
+    inv_eff_mass = (inv_mass1 + inv_mass2) * eye3
+    inv_eff_mass = inv_eff_mass + r1x @ (inv_inertia1 @ wp.transpose(r1x))
+    inv_eff_mass = inv_eff_mass + r2x @ (inv_inertia2 @ wp.transpose(r2x))
+
+    eff_mass = wp.inverse(inv_eff_mass)
+    return eff_mass, inv_i1_r1x, inv_i2_r2x
+
+
+@wp.func
+def _point_apply_velocity_step(
+    bodies: BodyContainer,
+    b1: wp.int32,
+    b2: wp.int32,
+    inv_mass1: wp.float32,
+    inv_mass2: wp.float32,
+    inv_i1_r1x: wp.mat33f,
+    inv_i2_r2x: wp.mat33f,
+    lam: wp.vec3f,
+):
+    """Apply ``lambda`` (world-frame linear impulse) to both bodies.
+
+    Mirrors ``PointConstraintPart::ApplyVelocityStep``:
+        v1' -= m1^-1 * lambda
+        w1' -= InvI1 * skew(r1) * lambda
+        v2' += m2^-1 * lambda
+        w2' += InvI2 * skew(r2) * lambda
+    """
+    bodies.velocity[b1] = bodies.velocity[b1] - inv_mass1 * lam
+    bodies.angular_velocity[b1] = bodies.angular_velocity[b1] - inv_i1_r1x @ lam
+    bodies.velocity[b2] = bodies.velocity[b2] + inv_mass2 * lam
+    bodies.angular_velocity[b2] = bodies.angular_velocity[b2] + inv_i2_r2x @ lam
+
+
+# ---------------------------------------------------------------------------
+# RotationEulerConstraintPart helpers
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def _euler_calculate_properties(
+    inv_inertia1: wp.mat33f,
+    inv_inertia2: wp.mat33f,
+) -> wp.mat33f:
+    """Direct port of ``RotationEulerConstraintPart::CalculateConstraintProperties``.
+
+    K = InvI1 + InvI2 (both world-frame); effective mass = K^-1.
+    Returns the 3x3 effective mass.
+    """
+    inv_eff_mass = inv_inertia1 + inv_inertia2
+    return wp.inverse(inv_eff_mass)
+
+
+@wp.func
+def _euler_apply_velocity_step(
+    bodies: BodyContainer,
+    b1: wp.int32,
+    b2: wp.int32,
+    inv_inertia1: wp.mat33f,
+    inv_inertia2: wp.mat33f,
+    lam: wp.vec3f,
+):
+    """Apply ``lambda`` (world-frame angular impulse) to both bodies.
+
+    Mirrors ``RotationEulerConstraintPart::ApplyVelocityStep``:
+        w1' -= InvI1 * lambda
+        w2' += InvI2 * lambda
+    """
+    bodies.angular_velocity[b1] = bodies.angular_velocity[b1] - inv_inertia1 @ lam
+    bodies.angular_velocity[b2] = bodies.angular_velocity[b2] + inv_inertia2 @ lam
+
+
+# ---------------------------------------------------------------------------
+# AxisConstraintPart helpers (1-DoF translation row)
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def _axis_calculate_inv_eff_mass(
+    r1_plus_u: wp.vec3f,
+    r2: wp.vec3f,
+    axis: wp.vec3f,
+    inv_mass1: wp.float32,
+    inv_mass2: wp.float32,
+    inv_inertia1: wp.mat33f,
+    inv_inertia2: wp.mat33f,
+):
+    """Port of ``AxisConstraintPart::CalculateInverseEffectiveMass``.
+
+    Returns ``(inv_eff_mass, r1_plus_u_x_axis, r2_x_axis,
+    inv_i1_r1pu_x_axis, inv_i2_r2_x_axis)``.
+
+    K = m1^-1 + (r1+u x axis).(InvI1 (r1+u x axis))
+        + m2^-1 + (r2 x axis).(InvI2 (r2 x axis))
+    """
+    r1pu_x = wp.cross(r1_plus_u, axis)
+    r2_x = wp.cross(r2, axis)
+    inv_i1_r1pu_x = inv_inertia1 @ r1pu_x
+    inv_i2_r2_x = inv_inertia2 @ r2_x
+    inv_eff_mass = (
+        inv_mass1
+        + inv_mass2
+        + wp.dot(r1pu_x, inv_i1_r1pu_x)
+        + wp.dot(r2_x, inv_i2_r2_x)
+    )
+    return inv_eff_mass, r1pu_x, r2_x, inv_i1_r1pu_x, inv_i2_r2_x
+
+
+@wp.func
+def _axis_apply_velocity_step(
+    bodies: BodyContainer,
+    b1: wp.int32,
+    b2: wp.int32,
+    inv_mass1: wp.float32,
+    inv_mass2: wp.float32,
+    axis: wp.vec3f,
+    inv_i1_r1pu_x: wp.vec3f,
+    inv_i2_r2_x: wp.vec3f,
+    lam: wp.float32,
+):
+    """Apply scalar ``lambda`` to both bodies along ``axis``.
+
+    Mirrors ``AxisConstraintPart::ApplyVelocityStep``:
+        v1' -= lam * m1^-1 * axis
+        w1' -= lam * InvI1 * (r1+u x axis)
+        v2' += lam * m2^-1 * axis
+        w2' += lam * InvI2 * (r2 x axis)
+    """
+    bodies.velocity[b1] = bodies.velocity[b1] - (lam * inv_mass1) * axis
+    bodies.angular_velocity[b1] = bodies.angular_velocity[b1] - lam * inv_i1_r1pu_x
+    bodies.velocity[b2] = bodies.velocity[b2] + (lam * inv_mass2) * axis
+    bodies.angular_velocity[b2] = bodies.angular_velocity[b2] + lam * inv_i2_r2_x
+
+
+# ---------------------------------------------------------------------------
+# AngleConstraintPart helpers (1-DoF rotation row)
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def _angle_calculate_inv_eff_mass(
+    axis: wp.vec3f,
+    inv_inertia1: wp.mat33f,
+    inv_inertia2: wp.mat33f,
+):
+    """Port of ``AngleConstraintPart::CalculateInverseEffectiveMass``.
+
+    Returns ``(inv_eff_mass, inv_i1_axis, inv_i2_axis)``.
+
+    K = axis.(InvI1 axis) + axis.(InvI2 axis)
+    """
+    inv_i1_axis = inv_inertia1 @ axis
+    inv_i2_axis = inv_inertia2 @ axis
+    inv_eff_mass = wp.dot(axis, inv_i1_axis) + wp.dot(axis, inv_i2_axis)
+    return inv_eff_mass, inv_i1_axis, inv_i2_axis
+
+
+@wp.func
+def _angle_apply_velocity_step(
+    bodies: BodyContainer,
+    b1: wp.int32,
+    b2: wp.int32,
+    inv_i1_axis: wp.vec3f,
+    inv_i2_axis: wp.vec3f,
+    lam: wp.float32,
+):
+    """Apply scalar ``lambda`` to both bodies as an angular impulse.
+
+    Mirrors ``AngleConstraintPart::ApplyVelocityStep``:
+        w1' -= lam * InvI1 * axis
+        w2' += lam * InvI2 * axis
+    """
+    bodies.angular_velocity[b1] = bodies.angular_velocity[b1] - lam * inv_i1_axis
+    bodies.angular_velocity[b2] = bodies.angular_velocity[b2] + lam * inv_i2_axis
 
 
 # ---------------------------------------------------------------------------
 # Initialization (kernel)
 # ---------------------------------------------------------------------------
+
+
+@wp.func
+def _is_axis_rigid(hertz: wp.float32, target_pos: wp.float32, max_force: wp.float32) -> bool:
+    """An axis is "rigid" iff hertz<=0 and no position target and no force cap.
+
+    These are the conditions Jolt's ``SixDOFConstraint`` uses to
+    decide between the fused (PointConstraintPart /
+    RotationEulerConstraintPart) and the per-axis dispatch
+    (AxisConstraintPart / AngleConstraintPart) paths.
+
+    "No force cap" means ``max_force >= 1e30`` -- the host packer
+    encodes ``+inf`` as ``1e30`` to keep ``max_force * dt`` well-
+    defined, and any axis with a smaller cap needs the per-axis path
+    so the per-iter clamp can saturate.
+    """
+    return hertz <= 0.0 and target_pos == 0.0 and max_force >= 1.0e29
 
 
 @wp.kernel
@@ -777,32 +690,19 @@ def d6_initialize_kernel(
     Snapshots the user's world-space anchor + per-axis target poses
     into the rest configuration so the runtime kernel sees a single
     (rest pose, current pose) error rather than separate "lock" and
-    "drive" terms. Specifically:
-
-    * The linear position targets ``target_position_lin`` (in body 1's
-      constraint frame) are added to body 1's local anchor so the
-      anchor-pair drift the linear bias drives to zero already
-      includes the target offset.
-    * The angular position targets ``target_position_ang`` (XYZ Euler
-      angles in body 1's constraint frame, applied as
-      ``q_target = qx * qy * qz``) are folded into the rest
-      orientation via ``q0 = q2^* * (q1 * q_target)`` so the angular
-      bias drives ``q2^* q1`` back to the offset rest pose.
-
-    The constraint frame is chosen as body 1's local frame at init
-    time (``axes_local_b1`` = identity); a future extension can make
-    this user-configurable without changing the runtime kernel.
+    "drive" terms. Also classifies each block (translation /
+    rotation) into one of the two dispatch modes (fused vs per-axis)
+    based on the per-axis knobs, and writes the resulting
+    ``trans_mode`` / ``rot_mode`` flags into the column.
 
     Args:
         constraints: Shared column-major constraint storage.
         bodies: Solver body container; reads ``position`` /
-            ``orientation`` of the two referenced bodies.
+            ``orientation`` to snapshot the per-body local anchors.
         cid_offset: Global cid of the first constraint in this batch.
         body1: Body indices for body 1 [num_in_batch].
         body2: Body indices for body 2 [num_in_batch].
-        anchor: World-space anchor point [num_in_batch] [m]. Both
-            bodies' local anchors are derived from this so they
-            coincide at rest (modulo the linear position target).
+        anchor: World-space anchor point [num_in_batch] [m].
         target_position_ang: Per-axis angular position targets
             [num_in_batch] [rad], interpreted as XYZ Euler in body 1's
             constraint frame.
@@ -810,11 +710,9 @@ def d6_initialize_kernel(
             [num_in_batch] [m], interpreted in body 1's constraint
             frame.
         target_velocity_ang: Per-axis angular velocity targets
-            [num_in_batch] [rad/s], interpreted in body 1's constraint
-            frame.
+            [num_in_batch] [rad/s].
         target_velocity_lin: Per-axis linear velocity targets
-            [num_in_batch] [m/s], interpreted in body 1's constraint
-            frame.
+            [num_in_batch] [m/s].
         hertz_ang: Per-axis angular soft-constraint stiffness
             [num_in_batch] [Hz]. ``hertz <= 0`` -> rigid axis.
         damping_ratio_ang: Per-axis angular damping ratios
@@ -823,8 +721,8 @@ def d6_initialize_kernel(
         damping_ratio_lin: Per-axis linear damping ratios
             [num_in_batch].
         max_force_ang: Per-axis angular force cap [num_in_batch]
-            [N*m]. ``0`` marks the axis as free; ``+inf`` (passed as
-            ``1e30`` by the host packer) is "rigid / no cap".
+            [N*m]. ``0`` -> axis is free; ``+inf`` (passed as ``1e30``
+            by the host packer) -> "rigid / no cap".
         max_force_lin: Per-axis linear force cap [num_in_batch] [N].
     """
     tid = wp.tid()
@@ -835,27 +733,26 @@ def d6_initialize_kernel(
     a_world = anchor[tid]
     tp_ang = target_position_ang[tid]
     tp_lin = target_position_lin[tid]
+    h_ang = hertz_ang[tid]
+    h_lin = hertz_lin[tid]
+    mf_ang = max_force_ang[tid]
+    mf_lin = max_force_lin[tid]
 
     pos1 = bodies.position[b1]
     pos2 = bodies.position[b2]
     q1 = bodies.orientation[b1]
     q2 = bodies.orientation[b2]
 
-    # Body-1 local anchor *with the linear position target folded in*
-    # along the constraint frame (which, at init time, is body 1's
-    # local frame -- identity ``axes_local_b1``). This lets the
-    # runtime kernel treat "drive to a non-zero offset" the same way
-    # as "rigid lock at the rest pose" -- the bias just measures
-    # against the shifted rest anchor.
+    # Body-1 local anchor with the linear position target folded in
+    # (along body 1's constraint frame, which is body 1's local frame
+    # at init time -- ``q_const_to_b1 = identity``).
     la_b1_rest = wp.quat_rotate_inv(q1, a_world - pos1)
     la_b1 = la_b1_rest + tp_lin
     la_b2 = wp.quat_rotate_inv(q2, a_world - pos2)
 
     # Build the angular target rotation in body 1's constraint frame
-    # as an XYZ Euler composition. We use a closed-form half-angle
-    # quaternion product instead of ``wp.quat_from_axis_angle`` calls
-    # to keep the kernel branchless and stay inside the per-thread
-    # arithmetic budget.
+    # as an XYZ Euler composition (closed-form half-angle quaternion
+    # product, branchless).
     half_x = tp_ang[0] * 0.5
     half_y = tp_ang[1] * 0.5
     half_z = tp_ang[2] * 0.5
@@ -864,106 +761,138 @@ def d6_initialize_kernel(
     qz = wp.quatf(0.0, 0.0, wp.sin(half_z), wp.cos(half_z))
     q_target = qx * qy * qz
 
-    # Rest-pose relative orientation with the angular target folded
-    # into body 1: q0 = q2^* * (q1 * q_target). So the runtime
-    # error quaternion ``q0 * q1^* * q2`` is identity exactly when
-    # body 2's orientation matches the user-specified target offset
-    # relative to body 1.
-    q1_target = q1 * q_target
-    q0 = wp.quat_inverse(q2) * q1_target
+    # Constraint-frame rotations: identity = constraint frame
+    # coincides with body's local frame. A future extension can let
+    # the user reorient the joint frame relative to either body
+    # without touching the runtime path.
+    q_id = wp.quatf(0.0, 0.0, 0.0, 1.0)
 
-    # Constraint-frame axes are body 1's identity at init time. We
-    # store them as a real matrix so a future extension can let the
-    # user reorient the constraint frame relative to body 1 without
-    # touching the runtime path -- the prepare just picks up the new
-    # axes.
-    eye3 = wp.identity(3, dtype=wp.float32)
+    # Inverse of initial relative orientation, with angular target
+    # folded in. Defined so the runtime ``diff = q2 * q_inv_initial *
+    # q1^*`` is identity exactly when body 2's orientation matches
+    # the user-specified target offset relative to body 1.
+    #
+    # Derivation (matching Jolt's
+    # ``RotationEulerConstraintPart::sGetInvInitialOrientation``):
+    #   target relation:       q2_target = q1 * q_target
+    #   inv_initial:            r0^-1 = q2_target^-1 * q1
+    #                                = (q1 * q_target)^-1 * q1
+    #                                = q_target^-1 * q1^-1 * q1
+    #                                = q_target^-1
+    # ... but only after we adopt Jolt's convention that q1 / q2 are
+    # measured *now*; with general initial rotations we need
+    # ``q_inv_init = q_target^-1 * q1^-1 * q2`` so the runtime error
+    # ``q2 * q_inv_init * q1^-1 = q2 * q_target^-1 * q1^-1 * q2 *
+    # q1^-1`` ... Let us just pick the same convention as before:
+    #   we want a rest pose ``q0`` such that the rotation error
+    #   ``q0 * q1^-1 * q2`` is identity at rest. Snapshot
+    #   ``q0 = q2^-1 * (q1 * q_target)``. Then for the Euler part
+    #   the equivalent ``q_inv_initial`` is ``q0^-1``.
+    q0 = wp.quat_inverse(q2) * (q1 * q_target)
+    q_inv_initial = wp.quat_inverse(q0)
 
-    constraint_set_type(constraints, cid, CONSTRAINT_TYPE_D6)
-    d6_set_body1(constraints, cid, b1)
-    d6_set_body2(constraints, cid, b2)
-    d6_set_local_anchor_b1(constraints, cid, la_b1)
-    d6_set_local_anchor_b2(constraints, cid, la_b2)
-    d6_set_axes_local_b1(constraints, cid, eye3)
-    d6_set_q0(constraints, cid, q0)
-
-    zero3 = wp.vec3f(0.0, 0.0, 0.0)
-    d6_set_r1(constraints, cid, zero3)
-    d6_set_r2(constraints, cid, zero3)
-    d6_set_e_world(constraints, cid, eye3)
-    d6_set_bias_rot(constraints, cid, zero3)
-    d6_set_bias_lin(constraints, cid, zero3)
-    d6_set_accumulated_impulse_rot(constraints, cid, zero3)
-    d6_set_accumulated_impulse_lin(constraints, cid, zero3)
-
-    d6_set_hertz_ang(constraints, cid, hertz_ang[tid])
-    d6_set_damping_ratio_ang(constraints, cid, damping_ratio_ang[tid])
-    d6_set_hertz_lin(constraints, cid, hertz_lin[tid])
-    d6_set_damping_ratio_lin(constraints, cid, damping_ratio_lin[tid])
-    d6_set_target_velocity_ang(constraints, cid, target_velocity_ang[tid])
-    d6_set_target_velocity_lin(constraints, cid, target_velocity_lin[tid])
-    d6_set_max_force_ang(constraints, cid, max_force_ang[tid])
-    d6_set_max_force_lin(constraints, cid, max_force_lin[tid])
-
-    d6_set_max_lambda_ang(constraints, cid, zero3)
-    d6_set_max_lambda_lin(constraints, cid, zero3)
-    d6_set_bias_rate_ang(constraints, cid, zero3)
-    d6_set_mass_coeff_ang(constraints, cid, wp.vec3f(1.0, 1.0, 1.0))
-    d6_set_impulse_coeff_ang(constraints, cid, zero3)
-    d6_set_bias_rate_lin(constraints, cid, zero3)
-    d6_set_mass_coeff_lin(constraints, cid, wp.vec3f(1.0, 1.0, 1.0))
-    d6_set_impulse_coeff_lin(constraints, cid, zero3)
-
-    d6_set_j_rot(constraints, cid, eye3)
-    d6_set_k_rot_inv(constraints, cid, eye3)
-    d6_set_kt_ki(constraints, cid, eye3)
-    d6_set_s_inv(constraints, cid, eye3)
-
-
-# ---------------------------------------------------------------------------
-# Per-iteration math
-# ---------------------------------------------------------------------------
-#
-# Symbol cheat-sheet (matches module-docstring derivation):
-#   r1, r2            : world-space lever arms (body 1 / body 2 -> anchor)
-#   cr1, cr2          : skew([r1]), skew([r2])
-#   e_world (3x3)     : rows = world-frame constraint axes
-#   E (3x3)           : same as e_world (just a more "matrix"-ish name)
-#   J_rot (3x3)       : world-frame angular Jacobian in quaternion-axis basis
-#                       (carries the half-angle factor)
-#   K_rot (3x3)       : angular block of the 6x6 effective mass, expressed
-#                       in body-1 *constraint* coordinates:
-#                       K_rot = E J_rot^T (I_1^{-1} + I_2^{-1}) J_rot E^T
-#   K_lin (3x3)       : translational block in constraint coords:
-#                       K_lin = E A E^T  where A is the standard ball-socket
-#                                        effective-mass at the anchor
-#   K_rt (3x3)        : cross block (constraint coords). Derived in prepare
-#                       below; comes from the angular impulse displacing
-#                       the anchor laterally.
-#   S = K_lin - K_rt^T K_rot^{-1} K_rt   : 3x3 Schur complement
-#
-# Soft-constraint scaling: per-axis triples (bias_rate, mass_coeff,
-# impulse_coeff) live in *constraint coordinates*. A "rigid" axis just
-# carries (mass_coeff[k], impulse_coeff[k]) = (1, 0) and a non-zero
-# bias_rate; a "free" axis has max_force = 0 so the per-axis clamp
-# pins its impulse to zero regardless of softness.
-
-
-@wp.func
-def _vec3_componentwise_clamp(v: wp.vec3f, m: wp.vec3f) -> wp.vec3f:
-    """Clamp each component of ``v`` to ``[-m[i], m[i]]``.
-
-    ``m`` is the per-axis impulse cap (``max_force * dt``). For a
-    "rigid" axis the cap is 1e30 (unlimited); for a "free" axis it
-    is 0 (impulse pinned to zero). The clamp is the only place
-    per-axis caps appear in the iterate path -- everything else is
-    componentwise-uniform soft PGS.
-    """
-    return wp.vec3f(
-        wp.clamp(v[0], -m[0], m[0]),
-        wp.clamp(v[1], -m[1], m[1]),
-        wp.clamp(v[2], -m[2], m[2]),
+    # ---- Classification: trans_mode and rot_mode --------------------
+    # Translation: PointConstraint iff every axis is rigid (hertz<=0,
+    # no position/velocity targets, and "no" force cap).
+    tv_ang = target_velocity_ang[tid]
+    tv_lin = target_velocity_lin[tid]
+    trans_rigid = (
+        _is_axis_rigid(h_lin[0], tp_lin[0], mf_lin[0])
+        and _is_axis_rigid(h_lin[1], tp_lin[1], mf_lin[1])
+        and _is_axis_rigid(h_lin[2], tp_lin[2], mf_lin[2])
+        and tv_lin[0] == 0.0
+        and tv_lin[1] == 0.0
+        and tv_lin[2] == 0.0
     )
+    rot_rigid = (
+        _is_axis_rigid(h_ang[0], tp_ang[0], mf_ang[0])
+        and _is_axis_rigid(h_ang[1], tp_ang[1], mf_ang[1])
+        and _is_axis_rigid(h_ang[2], tp_ang[2], mf_ang[2])
+        and tv_ang[0] == 0.0
+        and tv_ang[1] == 0.0
+        and tv_ang[2] == 0.0
+    )
+
+    if trans_rigid:
+        trans_mode_v = wp.int32(0)  # _TRANS_MODE_POINT
+    else:
+        trans_mode_v = wp.int32(1)  # _TRANS_MODE_AXIS
+
+    if rot_rigid:
+        rot_mode_v = wp.int32(0)  # _ROT_MODE_EULER
+    else:
+        rot_mode_v = wp.int32(1)  # _ROT_MODE_ANGLE
+
+    # ---- Write the column ------------------------------------------
+    constraint_set_type(constraints, cid, CONSTRAINT_TYPE_D6)
+    write_int(constraints, _OFF_BODY1, cid, b1)
+    write_int(constraints, _OFF_BODY2, cid, b2)
+    write_vec3(constraints, _OFF_LA_B1, cid, la_b1)
+    write_vec3(constraints, _OFF_LA_B2, cid, la_b2)
+    write_quat(constraints, _OFF_Q_CONST_TO_B1, cid, q_id)
+    write_quat(constraints, _OFF_Q_CONST_TO_B2, cid, q_id)
+    write_quat(constraints, _OFF_Q_INV_INIT, cid, q_inv_initial)
+
+    write_vec3(constraints, _OFF_HERTZ_ANG, cid, h_ang)
+    write_vec3(constraints, _OFF_DAMPING_ANG, cid, damping_ratio_ang[tid])
+    write_vec3(constraints, _OFF_HERTZ_LIN, cid, h_lin)
+    write_vec3(constraints, _OFF_DAMPING_LIN, cid, damping_ratio_lin[tid])
+    write_vec3(constraints, _OFF_TARGET_VEL_ANG, cid, tv_ang)
+    write_vec3(constraints, _OFF_TARGET_VEL_LIN, cid, tv_lin)
+    write_vec3(constraints, _OFF_MAX_FORCE_ANG, cid, mf_ang)
+    write_vec3(constraints, _OFF_MAX_FORCE_LIN, cid, mf_lin)
+    write_int(constraints, _OFF_TRANS_MODE, cid, trans_mode_v)
+    write_int(constraints, _OFF_ROT_MODE, cid, rot_mode_v)
+
+    # Zero out per-substep cached state and accumulated impulses.
+    zero3 = wp.vec3f(0.0, 0.0, 0.0)
+    zero33 = wp.mat33f(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    write_vec3(constraints, _OFF_R1, cid, zero3)
+    write_vec3(constraints, _OFF_R2, cid, zero3)
+    write_mat33(constraints, _OFF_AXES_WORLD, cid, wp.identity(3, dtype=wp.float32))
+    write_vec3(constraints, _OFF_MAX_LAMBDA_ANG, cid, zero3)
+    write_vec3(constraints, _OFF_MAX_LAMBDA_LIN, cid, zero3)
+
+    write_mat33(constraints, _OFF_POINT_INV_I1_R1X, cid, zero33)
+    write_mat33(constraints, _OFF_POINT_INV_I2_R2X, cid, zero33)
+    write_mat33(constraints, _OFF_POINT_EFF_MASS, cid, zero33)
+    write_vec3(constraints, _OFF_POINT_TOTAL_LAMBDA, cid, zero3)
+
+    write_mat33(constraints, _OFF_EULER_EFF_MASS, cid, zero33)
+    write_vec3(constraints, _OFF_EULER_TOTAL_LAMBDA, cid, zero3)
+
+    write_vec3(constraints, _OFF_AXIS_R1PU_X_0, cid, zero3)
+    write_vec3(constraints, _OFF_AXIS_R1PU_X_1, cid, zero3)
+    write_vec3(constraints, _OFF_AXIS_R1PU_X_2, cid, zero3)
+    write_vec3(constraints, _OFF_AXIS_R2_X_0, cid, zero3)
+    write_vec3(constraints, _OFF_AXIS_R2_X_1, cid, zero3)
+    write_vec3(constraints, _OFF_AXIS_R2_X_2, cid, zero3)
+    write_vec3(constraints, _OFF_AXIS_INV_I1_R1PU_X_0, cid, zero3)
+    write_vec3(constraints, _OFF_AXIS_INV_I1_R1PU_X_1, cid, zero3)
+    write_vec3(constraints, _OFF_AXIS_INV_I1_R1PU_X_2, cid, zero3)
+    write_vec3(constraints, _OFF_AXIS_INV_I2_R2_X_0, cid, zero3)
+    write_vec3(constraints, _OFF_AXIS_INV_I2_R2_X_1, cid, zero3)
+    write_vec3(constraints, _OFF_AXIS_INV_I2_R2_X_2, cid, zero3)
+    write_vec3(constraints, _OFF_AXIS_EFF_MASS, cid, zero3)
+    write_vec3(constraints, _OFF_AXIS_SOFTNESS, cid, zero3)
+    write_vec3(constraints, _OFF_AXIS_BIAS, cid, zero3)
+    write_vec3(constraints, _OFF_AXIS_TOTAL_LAMBDA, cid, zero3)
+
+    write_vec3(constraints, _OFF_ANGLE_INV_I1_AXIS_0, cid, zero3)
+    write_vec3(constraints, _OFF_ANGLE_INV_I1_AXIS_1, cid, zero3)
+    write_vec3(constraints, _OFF_ANGLE_INV_I1_AXIS_2, cid, zero3)
+    write_vec3(constraints, _OFF_ANGLE_INV_I2_AXIS_0, cid, zero3)
+    write_vec3(constraints, _OFF_ANGLE_INV_I2_AXIS_1, cid, zero3)
+    write_vec3(constraints, _OFF_ANGLE_INV_I2_AXIS_2, cid, zero3)
+    write_vec3(constraints, _OFF_ANGLE_EFF_MASS, cid, zero3)
+    write_vec3(constraints, _OFF_ANGLE_SOFTNESS, cid, zero3)
+    write_vec3(constraints, _OFF_ANGLE_BIAS, cid, zero3)
+    write_vec3(constraints, _OFF_ANGLE_TOTAL_LAMBDA, cid, zero3)
+
+
+# ---------------------------------------------------------------------------
+# Prepare-for-iteration
+# ---------------------------------------------------------------------------
 
 
 @wp.func
@@ -977,16 +906,13 @@ def d6_prepare_for_iteration_at(
 ):
     """Composable prepare pass for the D6 joint.
 
-    Recomputes world-space lever arms + constraint axes, builds the
-    three blocks of the 6x6 effective mass in *constraint*
-    coordinates, factors them via Schur complement, computes the
-    velocity-error bias for both blocks (with the per-axis position
-    targets already folded into the rest pose at init time), caches
-    the per-substep soft-constraint and impulse-cap coefficients,
-    and warm-starts the bodies with the cached accumulated impulses.
+    Recomputes world-space lever arms + constraint axes and dispatches
+    to the appropriate sub-part(s) based on the ``trans_mode`` and
+    ``rot_mode`` flags written at init. Then warm-starts the bodies
+    with the cached accumulated impulses for whichever parts are
+    active.
 
-    See module docstring for the derivation; see
-    :func:`ball_socket_prepare_for_iteration_at` for the
+    See :func:`ball_socket_prepare_for_iteration_at` for the
     ``base_offset`` / ``body_pair`` contract.
     """
     b1 = body_pair.b1
@@ -1003,197 +929,275 @@ def d6_prepare_for_iteration_at(
 
     la_b1 = read_vec3(constraints, base_offset + _OFF_LA_B1, cid)
     la_b2 = read_vec3(constraints, base_offset + _OFF_LA_B2, cid)
-    axes_local = read_mat33(constraints, base_offset + _OFF_AXES_LOCAL_B1, cid)
-    q0 = read_quat(constraints, base_offset + _OFF_Q0, cid)
-    acc_rot_in = read_vec3(constraints, base_offset + _OFF_ACC_IMP_ROT, cid)
-    acc_lin_in = read_vec3(constraints, base_offset + _OFF_ACC_IMP_LIN, cid)
+    q_const_to_b1 = read_quat(constraints, base_offset + _OFF_Q_CONST_TO_B1, cid)
 
-    # World-frame lever arms and anchor positions.
+    trans_mode_v = read_int(constraints, base_offset + _OFF_TRANS_MODE, cid)
+    rot_mode_v = read_int(constraints, base_offset + _OFF_ROT_MODE, cid)
+
+    dt = 1.0 / idt
+
+    # World-frame lever arms.
     r1 = wp.quat_rotate(q1, la_b1)
     r2 = wp.quat_rotate(q2, la_b2)
-    p1 = pos1 + r1
-    p2 = pos2 + r2
     write_vec3(constraints, base_offset + _OFF_R1, cid, r1)
     write_vec3(constraints, base_offset + _OFF_R2, cid, r2)
 
-    # World-frame constraint axes: rows of ``e_world`` are the three
-    # world-space axes ``e_k_world = R_1 axes_local_b1[k]``. We
-    # construct the matrix row-by-row so each row really is the
-    # rotated local axis (as opposed to e.g. ``R_1 axes_local^T``).
-    e_row0 = wp.quat_rotate(q1, wp.vec3f(axes_local[0, 0], axes_local[0, 1], axes_local[0, 2]))
-    e_row1 = wp.quat_rotate(q1, wp.vec3f(axes_local[1, 0], axes_local[1, 1], axes_local[1, 2]))
-    e_row2 = wp.quat_rotate(q1, wp.vec3f(axes_local[2, 0], axes_local[2, 1], axes_local[2, 2]))
-    e_world = wp.mat33f(
-        e_row0[0], e_row0[1], e_row0[2],
-        e_row1[0], e_row1[1], e_row1[2],
-        e_row2[0], e_row2[1], e_row2[2],
+    # World-frame constraint axes (rows of ``axes_world``). At init
+    # the constraint frame coincides with body 1's local frame, so the
+    # k-th world-axis is just ``q1 * e_k``. With a non-trivial
+    # ``q_const_to_b1`` it would be ``q1 * q_const_to_b1 * e_k``.
+    q_world_const = q1 * q_const_to_b1
+    e0_world = wp.quat_rotate(q_world_const, wp.vec3f(1.0, 0.0, 0.0))
+    e1_world = wp.quat_rotate(q_world_const, wp.vec3f(0.0, 1.0, 0.0))
+    e2_world = wp.quat_rotate(q_world_const, wp.vec3f(0.0, 0.0, 1.0))
+    axes_world = wp.mat33f(
+        e0_world[0], e0_world[1], e0_world[2],
+        e1_world[0], e1_world[1], e1_world[2],
+        e2_world[0], e2_world[1], e2_world[2],
     )
-    write_mat33(constraints, base_offset + _OFF_E_WORLD, cid, e_world)
+    write_mat33(constraints, base_offset + _OFF_AXES_WORLD, cid, axes_world)
 
-    # Soft-constraint coefficients per axis. Each component goes
-    # through :func:`soft_constraint_coefficients` independently so
-    # mixing rigid + soft + drive axes in one D6 falls out for free.
-    dt = 1.0 / idt
-    hertz_ang = read_vec3(constraints, base_offset + _OFF_HERTZ_ANG, cid)
-    damping_ang = read_vec3(constraints, base_offset + _OFF_DAMPING_ANG, cid)
-    hertz_lin = read_vec3(constraints, base_offset + _OFF_HERTZ_LIN, cid)
-    damping_lin = read_vec3(constraints, base_offset + _OFF_DAMPING_LIN, cid)
-
-    br_a0, mc_a0, ic_a0 = soft_constraint_coefficients(hertz_ang[0], damping_ang[0], dt)
-    br_a1, mc_a1, ic_a1 = soft_constraint_coefficients(hertz_ang[1], damping_ang[1], dt)
-    br_a2, mc_a2, ic_a2 = soft_constraint_coefficients(hertz_ang[2], damping_ang[2], dt)
-    br_l0, mc_l0, ic_l0 = soft_constraint_coefficients(hertz_lin[0], damping_lin[0], dt)
-    br_l1, mc_l1, ic_l1 = soft_constraint_coefficients(hertz_lin[1], damping_lin[1], dt)
-    br_l2, mc_l2, ic_l2 = soft_constraint_coefficients(hertz_lin[2], damping_lin[2], dt)
-    write_vec3(constraints, base_offset + _OFF_BIAS_RATE_ANG, cid, wp.vec3f(br_a0, br_a1, br_a2))
-    write_vec3(constraints, base_offset + _OFF_MASS_COEFF_ANG, cid, wp.vec3f(mc_a0, mc_a1, mc_a2))
-    write_vec3(constraints, base_offset + _OFF_IMPULSE_COEFF_ANG, cid, wp.vec3f(ic_a0, ic_a1, ic_a2))
-    write_vec3(constraints, base_offset + _OFF_BIAS_RATE_LIN, cid, wp.vec3f(br_l0, br_l1, br_l2))
-    write_vec3(constraints, base_offset + _OFF_MASS_COEFF_LIN, cid, wp.vec3f(mc_l0, mc_l1, mc_l2))
-    write_vec3(constraints, base_offset + _OFF_IMPULSE_COEFF_LIN, cid, wp.vec3f(ic_l0, ic_l1, ic_l2))
-
-    # Per-axis impulse caps for the iterate-path clamp. ``max_force *
-    # dt`` is the impulse the axis can apply over one substep.
+    # Per-substep impulse caps: Jolt clamps Lagrange multipliers in
+    # ``AxisConstraintPart::SolveVelocityConstraint`` against
+    # ``[-FLT_MAX, FLT_MAX]`` for hard constraints and
+    # ``[dt * minForce, dt * maxForce]`` for motors. We use a
+    # symmetric cap ``+/- max_force * dt``; ``max_force = 0`` (free
+    # axis) means the row will be deactivated, ``max_force = 1e30``
+    # (rigid) gives an effectively-infinite cap.
     max_force_ang = read_vec3(constraints, base_offset + _OFF_MAX_FORCE_ANG, cid)
     max_force_lin = read_vec3(constraints, base_offset + _OFF_MAX_FORCE_LIN, cid)
     write_vec3(constraints, base_offset + _OFF_MAX_LAMBDA_ANG, cid, max_force_ang * dt)
     write_vec3(constraints, base_offset + _OFF_MAX_LAMBDA_LIN, cid, max_force_lin * dt)
 
-    # ---- Angular Jacobian + error (same construction as prismatic) ----
-    # quat_e = q0 * q1^* * q2 -- error quaternion (identity when
-    # current ``q2^* q1`` matches the rest pose ``q0`` that was
-    # snapshotted at init time, *with the angular position targets
-    # already folded in*).
-    q1_inv = wp.quat_inverse(q1)
-    quat_e = q0 * q1_inv * q2
-    if quat_e[3] < 0.0:
-        sign = -1.0
+    # ---------------------------------------------------------------
+    # Translation block prepare
+    # ---------------------------------------------------------------
+    if trans_mode_v == _TRANS_MODE_POINT:
+        # All 3 lin axes are rigid + no targets + no caps -> fused
+        # PointConstraintPart. Same math as Jolt's
+        # ``PointConstraintPart::CalculateConstraintProperties``.
+        eff_mass, inv_i1_r1x, inv_i2_r2x = _point_calculate_properties(
+            r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
+        )
+        write_mat33(constraints, base_offset + _OFF_POINT_INV_I1_R1X, cid, inv_i1_r1x)
+        write_mat33(constraints, base_offset + _OFF_POINT_INV_I2_R2X, cid, inv_i2_r2x)
+        write_mat33(constraints, base_offset + _OFF_POINT_EFF_MASS, cid, eff_mass)
+        # Warm-start with cached lambda from previous step.
+        total_lambda_p = read_vec3(
+            constraints, base_offset + _OFF_POINT_TOTAL_LAMBDA, cid
+        )
+        _point_apply_velocity_step(
+            bodies, b1, b2, inv_mass1, inv_mass2, inv_i1_r1x, inv_i2_r2x, total_lambda_p
+        )
     else:
-        sign = 1.0
-    err_vec_world = wp.vec3f(quat_e[0] * sign, quat_e[1] * sign, quat_e[2] * sign)
+        # Per-axis Axis parts. Read in batch then process axis-by-axis
+        # via a small helper to keep the kernel readable.
+        u = (pos2 + r2) - (pos1 + r1)  # p2 - p1
+        r1_plus_u = r1 + u  # = p2 - x1
+        hertz_lin = read_vec3(constraints, base_offset + _OFF_HERTZ_LIN, cid)
+        damp_lin = read_vec3(constraints, base_offset + _OFF_DAMPING_LIN, cid)
+        max_force_lin_v = max_force_lin
+        eff_v = wp.vec3f(0.0, 0.0, 0.0)
+        soft_v = wp.vec3f(0.0, 0.0, 0.0)
+        bias_v = wp.vec3f(0.0, 0.0, 0.0)
 
-    # m0 = -1/2 * QMatrix.ProjectMultiplyLeftRight(q0 * q1^*, q2). The
-    # 1/2 here pairs with the unit-quaternion half-angle convention
-    # (same as :mod:`constraint_hinge_angle` and
-    # :mod:`constraint_prismatic`).
-    qq = q0 * q1_inv
-    m0 = qmatrix_project_multiply_left_right(qq, q2) * (-0.5 * sign)
-    j_rot = m0  # rows = world-axis Jacobian in quaternion-axis basis.
-    write_mat33(constraints, base_offset + _OFF_J_ROT, cid, j_rot)
+        # ---- axis 0 ----
+        if max_force_lin_v[0] > 0.0:
+            ax = e0_world
+            inv_eff, r1pu_x, r2_x, ii1, ii2 = _axis_calculate_inv_eff_mass(
+                r1_plus_u, r2, ax, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
+            )
+            # Position error along this axis.
+            c_err = wp.dot(u, ax)
+            props = _calc_spring_props(
+                inv_eff, 0.0, c_err, hertz_lin[0], damp_lin[0], dt
+            )
+            eff_v[0] = props[0]
+            soft_v[0] = props[1]
+            bias_v[0] = props[2]
+            write_vec3(constraints, base_offset + _OFF_AXIS_R1PU_X_0, cid, r1pu_x)
+            write_vec3(constraints, base_offset + _OFF_AXIS_R2_X_0, cid, r2_x)
+            write_vec3(constraints, base_offset + _OFF_AXIS_INV_I1_R1PU_X_0, cid, ii1)
+            write_vec3(constraints, base_offset + _OFF_AXIS_INV_I2_R2_X_0, cid, ii2)
 
-    # ---- 3x3 effective-mass blocks in *constraint coordinates* ----
-    # E = e_world (rows = world axes, columns = constraint axes when
-    # we transpose).
-    eye3 = wp.identity(3, dtype=wp.float32)
-    cr1 = wp.skew(r1)
-    cr2 = wp.skew(r2)
+        # ---- axis 1 ----
+        if max_force_lin_v[1] > 0.0:
+            ax = e1_world
+            inv_eff, r1pu_x, r2_x, ii1, ii2 = _axis_calculate_inv_eff_mass(
+                r1_plus_u, r2, ax, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
+            )
+            c_err = wp.dot(u, ax)
+            props = _calc_spring_props(
+                inv_eff, 0.0, c_err, hertz_lin[1], damp_lin[1], dt
+            )
+            eff_v[1] = props[0]
+            soft_v[1] = props[1]
+            bias_v[1] = props[2]
+            write_vec3(constraints, base_offset + _OFF_AXIS_R1PU_X_1, cid, r1pu_x)
+            write_vec3(constraints, base_offset + _OFF_AXIS_R2_X_1, cid, r2_x)
+            write_vec3(constraints, base_offset + _OFF_AXIS_INV_I1_R1PU_X_1, cid, ii1)
+            write_vec3(constraints, base_offset + _OFF_AXIS_INV_I2_R2_X_1, cid, ii2)
 
-    # Standard ball-socket A in world coords:
-    a_mat = inv_mass1 * eye3
-    a_mat = a_mat + cr1 @ (inv_inertia1 @ wp.transpose(cr1))
-    a_mat = a_mat + inv_mass2 * eye3
-    a_mat = a_mat + cr2 @ (inv_inertia2 @ wp.transpose(cr2))
+        # ---- axis 2 ----
+        if max_force_lin_v[2] > 0.0:
+            ax = e2_world
+            inv_eff, r1pu_x, r2_x, ii1, ii2 = _axis_calculate_inv_eff_mass(
+                r1_plus_u, r2, ax, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
+            )
+            c_err = wp.dot(u, ax)
+            props = _calc_spring_props(
+                inv_eff, 0.0, c_err, hertz_lin[2], damp_lin[2], dt
+            )
+            eff_v[2] = props[0]
+            soft_v[2] = props[1]
+            bias_v[2] = props[2]
+            write_vec3(constraints, base_offset + _OFF_AXIS_R1PU_X_2, cid, r1pu_x)
+            write_vec3(constraints, base_offset + _OFF_AXIS_R2_X_2, cid, r2_x)
+            write_vec3(constraints, base_offset + _OFF_AXIS_INV_I1_R1PU_X_2, cid, ii1)
+            write_vec3(constraints, base_offset + _OFF_AXIS_INV_I2_R2_X_2, cid, ii2)
 
-    # K_lin = E A E^T  (3x3 in constraint coords). With ``e_world``
-    # row-major storing constraint axes as rows, ``E A E^T = e_world @
-    # a_mat @ wp.transpose(e_world)``.
-    k_lin = e_world @ (a_mat @ wp.transpose(e_world))
+        write_vec3(constraints, base_offset + _OFF_AXIS_EFF_MASS, cid, eff_v)
+        write_vec3(constraints, base_offset + _OFF_AXIS_SOFTNESS, cid, soft_v)
+        write_vec3(constraints, base_offset + _OFF_AXIS_BIAS, cid, bias_v)
 
-    # K_rot in constraint coords:
-    #   K_rot = E (J_rot^T (InvI1 + InvI2) J_rot) E^T
-    # The inner ``J_rot^T M J_rot`` is the 3x3 angular block in the
-    # quaternion-axis basis (same as :mod:`constraint_prismatic`'s
-    # ``k_rot``); we then sandwich by E to express it in constraint
-    # axes (which is where the per-axis caps and biases live).
-    inv_inertia_sum = inv_inertia1 + inv_inertia2
-    j_rot_t = wp.transpose(j_rot)
-    k_rot_quat = j_rot_t @ (inv_inertia_sum @ j_rot)
-    k_rot = e_world @ (k_rot_quat @ wp.transpose(e_world))
-    k_rot_inv = wp.inverse(k_rot)
+        # Warm-start each active row.
+        total_lambda_a = read_vec3(
+            constraints, base_offset + _OFF_AXIS_TOTAL_LAMBDA, cid
+        )
+        if eff_v[0] > 0.0:
+            ii1 = read_vec3(constraints, base_offset + _OFF_AXIS_INV_I1_R1PU_X_0, cid)
+            ii2 = read_vec3(constraints, base_offset + _OFF_AXIS_INV_I2_R2_X_0, cid)
+            _axis_apply_velocity_step(
+                bodies, b1, b2, inv_mass1, inv_mass2, e0_world, ii1, ii2,
+                total_lambda_a[0],
+            )
+        if eff_v[1] > 0.0:
+            ii1 = read_vec3(constraints, base_offset + _OFF_AXIS_INV_I1_R1PU_X_1, cid)
+            ii2 = read_vec3(constraints, base_offset + _OFF_AXIS_INV_I2_R2_X_1, cid)
+            _axis_apply_velocity_step(
+                bodies, b1, b2, inv_mass1, inv_mass2, e1_world, ii1, ii2,
+                total_lambda_a[1],
+            )
+        if eff_v[2] > 0.0:
+            ii1 = read_vec3(constraints, base_offset + _OFF_AXIS_INV_I1_R1PU_X_2, cid)
+            ii2 = read_vec3(constraints, base_offset + _OFF_AXIS_INV_I2_R2_X_2, cid)
+            _axis_apply_velocity_step(
+                bodies, b1, b2, inv_mass1, inv_mass2, e2_world, ii1, ii2,
+                total_lambda_a[2],
+            )
 
-    # K_rt (3x3 cross block in constraint coords). Derivation: the
-    # *angular* impulse expressed in constraint axes ``a_local`` maps
-    # to a world-frame angular impulse ``E^T a_local`` on body 1
-    # (``-E^T a_local`` on body 2 modulo the half-angle linearisation
-    # already baked into J_rot), which the angular Jacobian then
-    # contracts against. The full closed form, mirroring
-    # :mod:`constraint_prismatic`'s 3x2 cross block but extended to
-    # all three constraint axes, is
-    #
-    #     K_rt[:, k] = E (J_rot^T (-InvI1 cr1^T + InvI2 cr2^T) E^T[:, k])
-    #
-    # i.e. column ``k`` of K_rt is the world-frame translational axis
-    # ``E^T[:, k]`` ran through the (linear -> angular -> Jacobian
-    # contraction -> projection back to constraint axes) chain.
-    cross_b1 = inv_inertia1 @ (wp.transpose(cr1) @ wp.transpose(e_world))  # 3x3
-    cross_b2 = inv_inertia2 @ (wp.transpose(cr2) @ wp.transpose(e_world))  # 3x3
-    cross_world = j_rot_t @ (-cross_b1 + cross_b2)  # 3x3 in quaternion-axis basis
-    k_rt = e_world @ cross_world  # 3x3 in constraint coords
+    # ---------------------------------------------------------------
+    # Rotation block prepare
+    # ---------------------------------------------------------------
+    if rot_mode_v == _ROT_MODE_EULER:
+        # All 3 ang axes are rigid -> fused RotationEulerConstraintPart.
+        eff_mass = _euler_calculate_properties(inv_inertia1, inv_inertia2)
+        write_mat33(constraints, base_offset + _OFF_EULER_EFF_MASS, cid, eff_mass)
+        total_lambda_e = read_vec3(
+            constraints, base_offset + _OFF_EULER_TOTAL_LAMBDA, cid
+        )
+        _euler_apply_velocity_step(
+            bodies, b1, b2, inv_inertia1, inv_inertia2, total_lambda_e
+        )
+    else:
+        # Per-axis Angle parts.
+        hertz_ang = read_vec3(constraints, base_offset + _OFF_HERTZ_ANG, cid)
+        damp_ang = read_vec3(constraints, base_offset + _OFF_DAMPING_ANG, cid)
+        max_force_ang_v = max_force_ang
+        eff_v = wp.vec3f(0.0, 0.0, 0.0)
+        soft_v = wp.vec3f(0.0, 0.0, 0.0)
+        bias_v = wp.vec3f(0.0, 0.0, 0.0)
 
-    # ---- Schur complement: S = K_lin - K_rt^T K_rot^{-1} K_rt ----
-    kt_ki = wp.transpose(k_rt) @ k_rot_inv
-    s_mat = k_lin - kt_ki @ k_rt
-    s_inv = wp.inverse(s_mat)
+        # Angular position error in body-1 constraint coords (only used
+        # for axes that have a position drive). Same derivation as
+        # Jolt's SetTargetOrientationCS / projected_diff path: the
+        # error angles per axis are ``2 * axis_world . diff.xyz``
+        # where ``diff`` is the relative-rotation quaternion.
+        # For our current API we don't have asymmetric limits, so the
+        # "constraint error" reduces to the rotation-from-rest along
+        # each constraint axis, which we compute from ``q_inv_init``.
+        q_inv_init = read_quat(constraints, base_offset + _OFF_Q_INV_INIT, cid)
+        diff = q2 * q_inv_init * wp.quat_inverse(q1)
+        if diff[3] < 0.0:
+            sign = -1.0
+        else:
+            sign = 1.0
+        diff_xyz = wp.vec3f(diff[0] * sign, diff[1] * sign, diff[2] * sign)
 
-    write_mat33(constraints, base_offset + _OFF_K_ROT_INV, cid, k_rot_inv)
-    write_mat33(constraints, base_offset + _OFF_KT_KI, cid, kt_ki)
-    write_mat33(constraints, base_offset + _OFF_S_INV, cid, s_inv)
+        # ---- axis 0 ----
+        if max_force_ang_v[0] > 0.0:
+            ax = e0_world
+            inv_eff, ii1, ii2 = _angle_calculate_inv_eff_mass(
+                ax, inv_inertia1, inv_inertia2
+            )
+            # Approximate angular error along this axis.
+            c_err = 2.0 * wp.dot(ax, diff_xyz)
+            props = _calc_spring_props(
+                inv_eff, 0.0, c_err, hertz_ang[0], damp_ang[0], dt
+            )
+            eff_v[0] = props[0]
+            soft_v[0] = props[1]
+            bias_v[0] = props[2]
+            write_vec3(constraints, base_offset + _OFF_ANGLE_INV_I1_AXIS_0, cid, ii1)
+            write_vec3(constraints, base_offset + _OFF_ANGLE_INV_I2_AXIS_0, cid, ii2)
 
-    # ---- Position-error biases in constraint coords ----
-    # Angular error vector lives in the quaternion-axis basis; project
-    # onto the world axes (rows of e_world) to get the per-constraint-
-    # axis component, then scale by the per-axis bias_rate.
-    err_local = e_world @ err_vec_world  # 3-vec in constraint coords
-    bias_rate_ang_v = wp.vec3f(br_a0, br_a1, br_a2)
-    bias_rot = wp.vec3f(
-        err_local[0] * bias_rate_ang_v[0],
-        err_local[1] * bias_rate_ang_v[1],
-        err_local[2] * bias_rate_ang_v[2],
-    )
-    write_vec3(constraints, base_offset + _OFF_BIAS_ROT, cid, bias_rot)
+        # ---- axis 1 ----
+        if max_force_ang_v[1] > 0.0:
+            ax = e1_world
+            inv_eff, ii1, ii2 = _angle_calculate_inv_eff_mass(
+                ax, inv_inertia1, inv_inertia2
+            )
+            c_err = 2.0 * wp.dot(ax, diff_xyz)
+            props = _calc_spring_props(
+                inv_eff, 0.0, c_err, hertz_ang[1], damp_ang[1], dt
+            )
+            eff_v[1] = props[0]
+            soft_v[1] = props[1]
+            bias_v[1] = props[2]
+            write_vec3(constraints, base_offset + _OFF_ANGLE_INV_I1_AXIS_1, cid, ii1)
+            write_vec3(constraints, base_offset + _OFF_ANGLE_INV_I2_AXIS_1, cid, ii2)
 
-    # Linear position error: per-axis projection of the world-space
-    # anchor drift ``p2 - p1`` onto the constraint axes. The linear
-    # position targets were already folded into ``la_b1`` at init
-    # time so the rest configuration has ``p2 - p1 = 0`` exactly when
-    # the bodies sit at their target offsets.
-    drift = p2 - p1
-    drift_local = e_world @ drift
-    bias_rate_lin_v = wp.vec3f(br_l0, br_l1, br_l2)
-    bias_lin = wp.vec3f(
-        drift_local[0] * bias_rate_lin_v[0],
-        drift_local[1] * bias_rate_lin_v[1],
-        drift_local[2] * bias_rate_lin_v[2],
-    )
-    write_vec3(constraints, base_offset + _OFF_BIAS_LIN, cid, bias_lin)
+        # ---- axis 2 ----
+        if max_force_ang_v[2] > 0.0:
+            ax = e2_world
+            inv_eff, ii1, ii2 = _angle_calculate_inv_eff_mass(
+                ax, inv_inertia1, inv_inertia2
+            )
+            c_err = 2.0 * wp.dot(ax, diff_xyz)
+            props = _calc_spring_props(
+                inv_eff, 0.0, c_err, hertz_ang[2], damp_ang[2], dt
+            )
+            eff_v[2] = props[0]
+            soft_v[2] = props[1]
+            bias_v[2] = props[2]
+            write_vec3(constraints, base_offset + _OFF_ANGLE_INV_I1_AXIS_2, cid, ii1)
+            write_vec3(constraints, base_offset + _OFF_ANGLE_INV_I2_AXIS_2, cid, ii2)
 
-    # ---- Warm start ----
-    # Same impulse-application formulas as :mod:`constraint_prismatic`
-    # (with the linear block extended from a 2-vec to a full 3-vec):
-    #   linear acc -> v1 -= m1^{-1} acc_lin, v2 += m2^{-1} acc_lin
-    #              -> w1 -= I1^{-1} (cr1 acc_lin), w2 += I2^{-1} (cr2 acc_lin)
-    #   angular acc -> w1 += I1^{-1} (J acc_rot_quat)
-    #               -> w2 -= I2^{-1} (J acc_rot_quat)
-    j_rot_acc_rot = j_rot @ acc_rot_in
+        write_vec3(constraints, base_offset + _OFF_ANGLE_EFF_MASS, cid, eff_v)
+        write_vec3(constraints, base_offset + _OFF_ANGLE_SOFTNESS, cid, soft_v)
+        write_vec3(constraints, base_offset + _OFF_ANGLE_BIAS, cid, bias_v)
 
-    velocity1 = bodies.velocity[b1] - inv_mass1 * acc_lin_in
-    angular_velocity1 = (
-        bodies.angular_velocity[b1]
-        - inv_inertia1 @ (cr1 @ acc_lin_in)
-        + inv_inertia1 @ j_rot_acc_rot
-    )
+        # Warm-start each active row.
+        total_lambda_g = read_vec3(
+            constraints, base_offset + _OFF_ANGLE_TOTAL_LAMBDA, cid
+        )
+        if eff_v[0] > 0.0:
+            ii1 = read_vec3(constraints, base_offset + _OFF_ANGLE_INV_I1_AXIS_0, cid)
+            ii2 = read_vec3(constraints, base_offset + _OFF_ANGLE_INV_I2_AXIS_0, cid)
+            _angle_apply_velocity_step(bodies, b1, b2, ii1, ii2, total_lambda_g[0])
+        if eff_v[1] > 0.0:
+            ii1 = read_vec3(constraints, base_offset + _OFF_ANGLE_INV_I1_AXIS_1, cid)
+            ii2 = read_vec3(constraints, base_offset + _OFF_ANGLE_INV_I2_AXIS_1, cid)
+            _angle_apply_velocity_step(bodies, b1, b2, ii1, ii2, total_lambda_g[1])
+        if eff_v[2] > 0.0:
+            ii1 = read_vec3(constraints, base_offset + _OFF_ANGLE_INV_I1_AXIS_2, cid)
+            ii2 = read_vec3(constraints, base_offset + _OFF_ANGLE_INV_I2_AXIS_2, cid)
+            _angle_apply_velocity_step(bodies, b1, b2, ii1, ii2, total_lambda_g[2])
 
-    velocity2 = bodies.velocity[b2] + inv_mass2 * acc_lin_in
-    angular_velocity2 = (
-        bodies.angular_velocity[b2]
-        + inv_inertia2 @ (cr2 @ acc_lin_in)
-        - inv_inertia2 @ j_rot_acc_rot
-    )
 
-    bodies.velocity[b1] = velocity1
-    bodies.angular_velocity[b1] = angular_velocity1
-    bodies.velocity[b2] = velocity2
-    bodies.angular_velocity[b2] = angular_velocity2
+# ---------------------------------------------------------------------------
+# Iterate (PGS step)
+# ---------------------------------------------------------------------------
 
 
 @wp.func
@@ -1207,164 +1211,243 @@ def d6_iterate_at(
 ):
     """Composable PGS iteration step for the D6 joint.
 
-    Solves the 6x6 system via Schur complement (two 3x3 inverses, all
-    cached in ``prepare``), applies per-axis softness scaling, clamps
-    each axis impulse to its ``max_force * dt`` cap, and applies the
-    resulting impulses to both bodies. See
+    Solves each active sub-part in the same order as Jolt's
+    ``SixDOFConstraint::SolveVelocityConstraint``: rotation parts
+    first, then translation parts. See
     :func:`ball_socket_iterate_at` for the ``base_offset`` /
     ``body_pair`` contract.
     """
     b1 = body_pair.b1
     b2 = body_pair.b2
 
-    velocity1 = bodies.velocity[b1]
-    velocity2 = bodies.velocity[b2]
-    angular_velocity1 = bodies.angular_velocity[b1]
-    angular_velocity2 = bodies.angular_velocity[b2]
     inv_mass1 = bodies.inverse_mass[b1]
     inv_mass2 = bodies.inverse_mass[b2]
     inv_inertia1 = bodies.inverse_inertia_world[b1]
     inv_inertia2 = bodies.inverse_inertia_world[b2]
 
-    r1 = read_vec3(constraints, base_offset + _OFF_R1, cid)
-    r2 = read_vec3(constraints, base_offset + _OFF_R2, cid)
-    e_world = read_mat33(constraints, base_offset + _OFF_E_WORLD, cid)
-    cr1 = wp.skew(r1)
-    cr2 = wp.skew(r2)
+    trans_mode_v = read_int(constraints, base_offset + _OFF_TRANS_MODE, cid)
+    rot_mode_v = read_int(constraints, base_offset + _OFF_ROT_MODE, cid)
+    axes_world = read_mat33(constraints, base_offset + _OFF_AXES_WORLD, cid)
+    e0_world = wp.vec3f(axes_world[0, 0], axes_world[0, 1], axes_world[0, 2])
+    e1_world = wp.vec3f(axes_world[1, 0], axes_world[1, 1], axes_world[1, 2])
+    e2_world = wp.vec3f(axes_world[2, 0], axes_world[2, 1], axes_world[2, 2])
 
-    j_rot = read_mat33(constraints, base_offset + _OFF_J_ROT, cid)
-    k_rot_inv = read_mat33(constraints, base_offset + _OFF_K_ROT_INV, cid)
-    kt_ki = read_mat33(constraints, base_offset + _OFF_KT_KI, cid)
-    s_inv = read_mat33(constraints, base_offset + _OFF_S_INV, cid)
-    bias_rot = read_vec3(constraints, base_offset + _OFF_BIAS_ROT, cid)
-    bias_lin = read_vec3(constraints, base_offset + _OFF_BIAS_LIN, cid)
+    # ----- Rotation block --------------------------------------------
+    if rot_mode_v == _ROT_MODE_EULER:
+        # Fused 3-DoF angular lock. lambda = K * (w1 - w2)
+        eff_mass = read_mat33(constraints, base_offset + _OFF_EULER_EFF_MASS, cid)
+        total_lambda = read_vec3(
+            constraints, base_offset + _OFF_EULER_TOTAL_LAMBDA, cid
+        )
+        w1_e = bodies.angular_velocity[b1]
+        w2_e = bodies.angular_velocity[b2]
+        lam_v = eff_mass @ (w1_e - w2_e)
+        total_lambda = total_lambda + lam_v
+        write_vec3(constraints, base_offset + _OFF_EULER_TOTAL_LAMBDA, cid, total_lambda)
+        _euler_apply_velocity_step(bodies, b1, b2, inv_inertia1, inv_inertia2, lam_v)
+    else:
+        # Per-axis 1-DoF rotations.
+        eff_v = read_vec3(constraints, base_offset + _OFF_ANGLE_EFF_MASS, cid)
+        soft_v = read_vec3(constraints, base_offset + _OFF_ANGLE_SOFTNESS, cid)
+        bias_v = read_vec3(constraints, base_offset + _OFF_ANGLE_BIAS, cid)
+        max_lambda_ang = read_vec3(
+            constraints, base_offset + _OFF_MAX_LAMBDA_ANG, cid
+        )
+        target_vel_ang = read_vec3(
+            constraints, base_offset + _OFF_TARGET_VEL_ANG, cid
+        )
+        total_lambda = read_vec3(
+            constraints, base_offset + _OFF_ANGLE_TOTAL_LAMBDA, cid
+        )
 
-    target_vel_ang = read_vec3(constraints, base_offset + _OFF_TARGET_VEL_ANG, cid)
-    target_vel_lin = read_vec3(constraints, base_offset + _OFF_TARGET_VEL_LIN, cid)
+        # ---- axis 0 ----
+        if eff_v[0] > 0.0:
+            ax = e0_world
+            ii1 = read_vec3(constraints, base_offset + _OFF_ANGLE_INV_I1_AXIS_0, cid)
+            ii2 = read_vec3(constraints, base_offset + _OFF_ANGLE_INV_I2_AXIS_0, cid)
+            w1 = bodies.angular_velocity[b1]
+            w2 = bodies.angular_velocity[b2]
+            jv = wp.dot(ax, w1 - w2) - target_vel_ang[0]
+            # bias_with_softness = softness * total_lambda + bias_const
+            bias_full = soft_v[0] * total_lambda[0] + bias_v[0]
+            lam_s = eff_v[0] * (jv - bias_full)
+            new_lambda = wp.clamp(
+                total_lambda[0] + lam_s, -max_lambda_ang[0], max_lambda_ang[0]
+            )
+            lam_s = new_lambda - total_lambda[0]
+            total_lambda[0] = new_lambda
+            _angle_apply_velocity_step(bodies, b1, b2, ii1, ii2, lam_s)
 
-    mass_coeff_ang = read_vec3(constraints, base_offset + _OFF_MASS_COEFF_ANG, cid)
-    impulse_coeff_ang = read_vec3(constraints, base_offset + _OFF_IMPULSE_COEFF_ANG, cid)
-    mass_coeff_lin = read_vec3(constraints, base_offset + _OFF_MASS_COEFF_LIN, cid)
-    impulse_coeff_lin = read_vec3(constraints, base_offset + _OFF_IMPULSE_COEFF_LIN, cid)
+        # ---- axis 1 ----
+        if eff_v[1] > 0.0:
+            ax = e1_world
+            ii1 = read_vec3(constraints, base_offset + _OFF_ANGLE_INV_I1_AXIS_1, cid)
+            ii2 = read_vec3(constraints, base_offset + _OFF_ANGLE_INV_I2_AXIS_1, cid)
+            w1 = bodies.angular_velocity[b1]
+            w2 = bodies.angular_velocity[b2]
+            jv = wp.dot(ax, w1 - w2) - target_vel_ang[1]
+            bias_full = soft_v[1] * total_lambda[1] + bias_v[1]
+            lam_s = eff_v[1] * (jv - bias_full)
+            new_lambda = wp.clamp(
+                total_lambda[1] + lam_s, -max_lambda_ang[1], max_lambda_ang[1]
+            )
+            lam_s = new_lambda - total_lambda[1]
+            total_lambda[1] = new_lambda
+            _angle_apply_velocity_step(bodies, b1, b2, ii1, ii2, lam_s)
 
-    max_lambda_ang = read_vec3(constraints, base_offset + _OFF_MAX_LAMBDA_ANG, cid)
-    max_lambda_lin = read_vec3(constraints, base_offset + _OFF_MAX_LAMBDA_LIN, cid)
+        # ---- axis 2 ----
+        if eff_v[2] > 0.0:
+            ax = e2_world
+            ii1 = read_vec3(constraints, base_offset + _OFF_ANGLE_INV_I1_AXIS_2, cid)
+            ii2 = read_vec3(constraints, base_offset + _OFF_ANGLE_INV_I2_AXIS_2, cid)
+            w1 = bodies.angular_velocity[b1]
+            w2 = bodies.angular_velocity[b2]
+            jv = wp.dot(ax, w1 - w2) - target_vel_ang[2]
+            bias_full = soft_v[2] * total_lambda[2] + bias_v[2]
+            lam_s = eff_v[2] * (jv - bias_full)
+            new_lambda = wp.clamp(
+                total_lambda[2] + lam_s, -max_lambda_ang[2], max_lambda_ang[2]
+            )
+            lam_s = new_lambda - total_lambda[2]
+            total_lambda[2] = new_lambda
+            _angle_apply_velocity_step(bodies, b1, b2, ii1, ii2, lam_s)
 
-    acc_rot_quat = read_vec3(constraints, base_offset + _OFF_ACC_IMP_ROT, cid)
-    acc_lin_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP_LIN, cid)
+        write_vec3(constraints, base_offset + _OFF_ANGLE_TOTAL_LAMBDA, cid, total_lambda)
 
-    # The persisted accumulated impulses live in world (linear) /
-    # quaternion-axis (angular) frames so warm-start stays valid even
-    # as the constraint frame rotates with body 1 between substeps.
-    # Project them into the constraint axis basis to do the per-axis
-    # soft-scaling and clamp on the same coordinates as the bias /
-    # cap.
-    acc_rot_local = e_world @ acc_rot_quat
-    acc_lin_local = e_world @ acc_lin_world
+    # ----- Translation block -----------------------------------------
+    if trans_mode_v == _TRANS_MODE_POINT:
+        # Fused 3-DoF ball-socket. lambda = K * (v1 - cross(r1, w1) -
+        #                                        v2 + cross(r2, w2))
+        eff_mass = read_mat33(constraints, base_offset + _OFF_POINT_EFF_MASS, cid)
+        inv_i1_r1x = read_mat33(
+            constraints, base_offset + _OFF_POINT_INV_I1_R1X, cid
+        )
+        inv_i2_r2x = read_mat33(
+            constraints, base_offset + _OFF_POINT_INV_I2_R2X, cid
+        )
+        r1 = read_vec3(constraints, base_offset + _OFF_R1, cid)
+        r2 = read_vec3(constraints, base_offset + _OFF_R2, cid)
+        v1 = bodies.velocity[b1]
+        w1 = bodies.angular_velocity[b1]
+        v2 = bodies.velocity[b2]
+        w2 = bodies.angular_velocity[b2]
+        jv_v = (v1 - wp.cross(r1, w1)) - (v2 - wp.cross(r2, w2))
+        lam_v = eff_mass @ jv_v
+        total_lambda_p = read_vec3(
+            constraints, base_offset + _OFF_POINT_TOTAL_LAMBDA, cid
+        )
+        total_lambda_p = total_lambda_p + lam_v
+        write_vec3(
+            constraints, base_offset + _OFF_POINT_TOTAL_LAMBDA, cid, total_lambda_p
+        )
+        _point_apply_velocity_step(
+            bodies, b1, b2, inv_mass1, inv_mass2, inv_i1_r1x, inv_i2_r2x, lam_v
+        )
+    else:
+        # Per-axis 1-DoF translations.
+        eff_v = read_vec3(constraints, base_offset + _OFF_AXIS_EFF_MASS, cid)
+        soft_v = read_vec3(constraints, base_offset + _OFF_AXIS_SOFTNESS, cid)
+        bias_v = read_vec3(constraints, base_offset + _OFF_AXIS_BIAS, cid)
+        max_lambda_lin = read_vec3(
+            constraints, base_offset + _OFF_MAX_LAMBDA_LIN, cid
+        )
+        target_vel_lin = read_vec3(
+            constraints, base_offset + _OFF_TARGET_VEL_LIN, cid
+        )
+        total_lambda = read_vec3(
+            constraints, base_offset + _OFF_AXIS_TOTAL_LAMBDA, cid
+        )
 
-    # ---- Velocity-error vectors in constraint coords ----
-    # Angular: jv_rot_quat = J^T (w1 - w2), then E to project onto
-    # constraint axes, then subtract the per-axis target velocity.
-    j_rot_t = wp.transpose(j_rot)
-    jv_rot_quat = j_rot_t @ (angular_velocity1 - angular_velocity2)
-    jv_rot_local = e_world @ jv_rot_quat
+        # ---- axis 0 ----
+        if eff_v[0] > 0.0:
+            ax = e0_world
+            r1pu_x = read_vec3(constraints, base_offset + _OFF_AXIS_R1PU_X_0, cid)
+            r2_x = read_vec3(constraints, base_offset + _OFF_AXIS_R2_X_0, cid)
+            ii1 = read_vec3(constraints, base_offset + _OFF_AXIS_INV_I1_R1PU_X_0, cid)
+            ii2 = read_vec3(constraints, base_offset + _OFF_AXIS_INV_I2_R2_X_0, cid)
+            v1 = bodies.velocity[b1]
+            w1 = bodies.angular_velocity[b1]
+            v2 = bodies.velocity[b2]
+            w2 = bodies.angular_velocity[b2]
+            jv = (
+                wp.dot(ax, v1 - v2)
+                + wp.dot(r1pu_x, w1)
+                - wp.dot(r2_x, w2)
+                - target_vel_lin[0]
+            )
+            bias_full = soft_v[0] * total_lambda[0] + bias_v[0]
+            lam_s = eff_v[0] * (jv - bias_full)
+            new_lambda = wp.clamp(
+                total_lambda[0] + lam_s, -max_lambda_lin[0], max_lambda_lin[0]
+            )
+            lam_s = new_lambda - total_lambda[0]
+            total_lambda[0] = new_lambda
+            _axis_apply_velocity_step(
+                bodies, b1, b2, inv_mass1, inv_mass2, ax, ii1, ii2, lam_s
+            )
 
-    # Linear: jv_lin_world = -v1 + cr1 w1 + v2 - cr2 w2, then E.
-    jv_lin_world = (
-        -velocity1
-        + cr1 @ angular_velocity1
-        + velocity2
-        - cr2 @ angular_velocity2
-    )
-    jv_lin_local = e_world @ jv_lin_world
+        # ---- axis 1 ----
+        if eff_v[1] > 0.0:
+            ax = e1_world
+            r1pu_x = read_vec3(constraints, base_offset + _OFF_AXIS_R1PU_X_1, cid)
+            r2_x = read_vec3(constraints, base_offset + _OFF_AXIS_R2_X_1, cid)
+            ii1 = read_vec3(constraints, base_offset + _OFF_AXIS_INV_I1_R1PU_X_1, cid)
+            ii2 = read_vec3(constraints, base_offset + _OFF_AXIS_INV_I2_R2_X_1, cid)
+            v1 = bodies.velocity[b1]
+            w1 = bodies.angular_velocity[b1]
+            v2 = bodies.velocity[b2]
+            w2 = bodies.angular_velocity[b2]
+            jv = (
+                wp.dot(ax, v1 - v2)
+                + wp.dot(r1pu_x, w1)
+                - wp.dot(r2_x, w2)
+                - target_vel_lin[1]
+            )
+            bias_full = soft_v[1] * total_lambda[1] + bias_v[1]
+            lam_s = eff_v[1] * (jv - bias_full)
+            new_lambda = wp.clamp(
+                total_lambda[1] + lam_s, -max_lambda_lin[1], max_lambda_lin[1]
+            )
+            lam_s = new_lambda - total_lambda[1]
+            total_lambda[1] = new_lambda
+            _axis_apply_velocity_step(
+                bodies, b1, b2, inv_mass1, inv_mass2, ax, ii1, ii2, lam_s
+            )
 
-    # ---- Right-hand sides (with bias and target velocity) ----
-    # The target-velocity entries enter as a setpoint shift on the
-    # velocity error: the ideal jv on a velocity-driven axis equals
-    # the target, so we subtract it from jv before the Schur solve.
-    rhs_rot = jv_rot_local - target_vel_ang + bias_rot
-    rhs_lin = jv_lin_local - target_vel_lin + bias_lin
+        # ---- axis 2 ----
+        if eff_v[2] > 0.0:
+            ax = e2_world
+            r1pu_x = read_vec3(constraints, base_offset + _OFF_AXIS_R1PU_X_2, cid)
+            r2_x = read_vec3(constraints, base_offset + _OFF_AXIS_R2_X_2, cid)
+            ii1 = read_vec3(constraints, base_offset + _OFF_AXIS_INV_I1_R1PU_X_2, cid)
+            ii2 = read_vec3(constraints, base_offset + _OFF_AXIS_INV_I2_R2_X_2, cid)
+            v1 = bodies.velocity[b1]
+            w1 = bodies.angular_velocity[b1]
+            v2 = bodies.velocity[b2]
+            w2 = bodies.angular_velocity[b2]
+            jv = (
+                wp.dot(ax, v1 - v2)
+                + wp.dot(r1pu_x, w1)
+                - wp.dot(r2_x, w2)
+                - target_vel_lin[2]
+            )
+            bias_full = soft_v[2] * total_lambda[2] + bias_v[2]
+            lam_s = eff_v[2] * (jv - bias_full)
+            new_lambda = wp.clamp(
+                total_lambda[2] + lam_s, -max_lambda_lin[2], max_lambda_lin[2]
+            )
+            lam_s = new_lambda - total_lambda[2]
+            total_lambda[2] = new_lambda
+            _axis_apply_velocity_step(
+                bodies, b1, b2, inv_mass1, inv_mass2, ax, ii1, ii2, lam_s
+            )
 
-    # ---- Schur-complement solve ----
-    # lambda_lin = -S^{-1} (rhs_lin - kt_ki @ rhs_rot)
-    # lambda_rot = -K_rot_inv (rhs_rot + K_rt @ lambda_lin)
-    #            = -K_rot_inv (rhs_rot + ((kt_ki K_rot)^T) @ lambda_lin)
-    # We can avoid recomputing K_rt by going through ``kt_ki @ K_rot``
-    # = K_rt^T, so K_rt = (kt_ki @ K_rot)^T -- but we also have direct
-    # access to ``kt_ki`` only, not K_rt. Easier: cache the back-
-    # substitution by re-deriving it from ``kt_ki`` and ``K_rot_inv``:
-    # since ``K_rt = K_rot @ kt_ki^T`` (by symmetry of K), the back-
-    # sub becomes
-    #   lambda_rot = -K_rot_inv (rhs_rot + K_rot kt_ki^T lambda_lin)
-    #              = -(K_rot_inv rhs_rot + kt_ki^T lambda_lin)
-    # which avoids touching ``K_rot`` directly.
-    lam_lin_unsoft_local = -(s_inv @ (rhs_lin - kt_ki @ rhs_rot))
-    lam_rot_unsoft_local = -(k_rot_inv @ rhs_rot + wp.transpose(kt_ki) @ lam_lin_unsoft_local)
+        write_vec3(constraints, base_offset + _OFF_AXIS_TOTAL_LAMBDA, cid, total_lambda)
 
-    # ---- Box2D v3 / Bepu soft-constraint scaling, per-axis ----
-    # Each axis scales independently:
-    #   lam_local[k] = mass_coeff[k] * lam_unsoft_local[k]
-    #                  - impulse_coeff[k] * acc_local[k]
-    # Setting (mass_coeff, impulse_coeff) = (1, 0) recovers a rigid
-    # plain-PGS update.
-    lam_rot_soft_local = wp.vec3f(
-        mass_coeff_ang[0] * lam_rot_unsoft_local[0] - impulse_coeff_ang[0] * acc_rot_local[0],
-        mass_coeff_ang[1] * lam_rot_unsoft_local[1] - impulse_coeff_ang[1] * acc_rot_local[1],
-        mass_coeff_ang[2] * lam_rot_unsoft_local[2] - impulse_coeff_ang[2] * acc_rot_local[2],
-    )
-    lam_lin_soft_local = wp.vec3f(
-        mass_coeff_lin[0] * lam_lin_unsoft_local[0] - impulse_coeff_lin[0] * acc_lin_local[0],
-        mass_coeff_lin[1] * lam_lin_unsoft_local[1] - impulse_coeff_lin[1] * acc_lin_local[1],
-        mass_coeff_lin[2] * lam_lin_unsoft_local[2] - impulse_coeff_lin[2] * acc_lin_local[2],
-    )
 
-    # ---- Per-axis impulse caps (free axes, drives) ----
-    # Update the per-axis accumulated impulse, clamp to cap, and
-    # back out the actual incremental ``lam_*`` that was applied.
-    # ``max_force = 0`` (free axis) -> clamp pins the component to 0;
-    # ``max_force = inf`` (rigid) -> clamp is a no-op; finite cap
-    # gives a saturating drive.
-    new_acc_rot_local = _vec3_componentwise_clamp(
-        acc_rot_local + lam_rot_soft_local, max_lambda_ang
-    )
-    new_acc_lin_local = _vec3_componentwise_clamp(
-        acc_lin_local + lam_lin_soft_local, max_lambda_lin
-    )
-    delta_acc_rot_local = new_acc_rot_local - acc_rot_local
-    delta_acc_lin_local = new_acc_lin_local - acc_lin_local
-
-    # ---- Project incremental impulses back to world / quaternion
-    # axes for the impulse-application step. ``e_world`` rows are the
-    # world axes, so ``E^T x_local`` is the world-frame vector
-    # corresponding to constraint-coords ``x_local``.
-    e_world_t = wp.transpose(e_world)
-    delta_acc_rot_quat = e_world_t @ delta_acc_rot_local
-    delta_acc_lin_world = e_world_t @ delta_acc_lin_local
-
-    # ---- Apply impulses to bodies (same convention as prismatic) ----
-    j_rot_lam_rot = j_rot @ delta_acc_rot_quat
-    bodies.velocity[b1] = velocity1 - inv_mass1 * delta_acc_lin_world
-    bodies.angular_velocity[b1] = (
-        angular_velocity1
-        - inv_inertia1 @ (cr1 @ delta_acc_lin_world)
-        + inv_inertia1 @ j_rot_lam_rot
-    )
-
-    bodies.velocity[b2] = velocity2 + inv_mass2 * delta_acc_lin_world
-    bodies.angular_velocity[b2] = (
-        angular_velocity2
-        + inv_inertia2 @ (cr2 @ delta_acc_lin_world)
-        - inv_inertia2 @ j_rot_lam_rot
-    )
-
-    # ---- Persist the updated accumulated impulses ----
-    # Re-expand the (clamped) per-axis local impulses back into the
-    # warm-start storage frames so the next prepare's warm-start sees
-    # exactly the same rotation-invariant impulse we just applied.
-    new_acc_rot_quat = e_world_t @ new_acc_rot_local
-    new_acc_lin_world = e_world_t @ new_acc_lin_local
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP_ROT, cid, new_acc_rot_quat)
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP_LIN, cid, new_acc_lin_world)
+# ---------------------------------------------------------------------------
+# World-frame wrench
+# ---------------------------------------------------------------------------
 
 
 @wp.func
@@ -1374,19 +1457,65 @@ def d6_world_wrench_at(
     base_offset: wp.int32,
     idt: wp.float32,
 ):
-    """Composable wrench on body 2; see :func:`d6_world_wrench`."""
-    acc_rot_quat = read_vec3(constraints, base_offset + _OFF_ACC_IMP_ROT, cid)
-    acc_lin_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP_LIN, cid)
+    """Composable wrench on body 2; see :func:`d6_world_wrench`.
+
+    Sums the contributions from whichever sub-parts are active. The
+    linear constraint force is the per-axis Lagrange multipliers
+    along their world axes (or the fused PointConstraint impulse) /
+    dt; the torque is the rotational Lagrange multipliers along
+    their world axes (or the fused EulerConstraint impulse) plus the
+    moment of the linear force about body 2's COM.
+    """
+    trans_mode_v = read_int(constraints, base_offset + _OFF_TRANS_MODE, cid)
+    rot_mode_v = read_int(constraints, base_offset + _OFF_ROT_MODE, cid)
+    axes_world = read_mat33(constraints, base_offset + _OFF_AXES_WORLD, cid)
+    e0_world = wp.vec3f(axes_world[0, 0], axes_world[0, 1], axes_world[0, 2])
+    e1_world = wp.vec3f(axes_world[1, 0], axes_world[1, 1], axes_world[1, 2])
+    e2_world = wp.vec3f(axes_world[2, 0], axes_world[2, 1], axes_world[2, 2])
     r2 = read_vec3(constraints, base_offset + _OFF_R2, cid)
-    j_rot = read_mat33(constraints, base_offset + _OFF_J_ROT, cid)
-    # Linear block: total constraint force on body 2 = acc_lin / dt.
-    force = acc_lin_world * idt
-    # Torque on body 2: world-frame angular impulse ``J acc_rot_quat``
-    # (negated for body 2; sign matches the iterate path) divided by
-    # ``dt``, plus the moment of the linear force about body 2's COM.
-    angular_impulse_world = j_rot @ acc_rot_quat
-    torque = wp.cross(r2, force) - angular_impulse_world * idt
+
+    force = wp.vec3f(0.0, 0.0, 0.0)
+    torque = wp.vec3f(0.0, 0.0, 0.0)
+
+    if trans_mode_v == _TRANS_MODE_POINT:
+        total_lambda_p = read_vec3(
+            constraints, base_offset + _OFF_POINT_TOTAL_LAMBDA, cid
+        )
+        force = total_lambda_p * idt
+    else:
+        total_lambda_a = read_vec3(
+            constraints, base_offset + _OFF_AXIS_TOTAL_LAMBDA, cid
+        )
+        force = (
+            (total_lambda_a[0] * idt) * e0_world
+            + (total_lambda_a[1] * idt) * e1_world
+            + (total_lambda_a[2] * idt) * e2_world
+        )
+
+    if rot_mode_v == _ROT_MODE_EULER:
+        total_lambda_e = read_vec3(
+            constraints, base_offset + _OFF_EULER_TOTAL_LAMBDA, cid
+        )
+        torque = total_lambda_e * idt
+    else:
+        total_lambda_g = read_vec3(
+            constraints, base_offset + _OFF_ANGLE_TOTAL_LAMBDA, cid
+        )
+        torque = (
+            (total_lambda_g[0] * idt) * e0_world
+            + (total_lambda_g[1] * idt) * e1_world
+            + (total_lambda_g[2] * idt) * e2_world
+        )
+
+    # Add moment of the linear force about body 2's COM. Sign matches
+    # ``hinge_angle_world_wrench_at`` / ``ball_socket_world_wrench_at``.
+    torque = torque + wp.cross(r2, force)
     return force, torque
+
+
+# ---------------------------------------------------------------------------
+# Direct entry-point wrappers (cid -> body indices via header)
+# ---------------------------------------------------------------------------
 
 
 @wp.func
@@ -1399,8 +1528,8 @@ def d6_prepare_for_iteration(
     """Direct prepare entry: reads body indices from the column header
     and forwards to :func:`d6_prepare_for_iteration_at` with
     ``base_offset = 0``."""
-    b1 = d6_get_body1(constraints, cid)
-    b2 = d6_get_body2(constraints, cid)
+    b1 = read_int(constraints, _OFF_BODY1, cid)
+    b2 = read_int(constraints, _OFF_BODY2, cid)
     body_pair = constraint_bodies_make(b1, b2)
     d6_prepare_for_iteration_at(constraints, cid, 0, bodies, body_pair, idt)
 
@@ -1413,8 +1542,8 @@ def d6_iterate(
     idt: wp.float32,
 ):
     """Direct iterate entry; see :func:`d6_iterate_at`."""
-    b1 = d6_get_body1(constraints, cid)
-    b2 = d6_get_body2(constraints, cid)
+    b1 = read_int(constraints, _OFF_BODY1, cid)
+    b2 = read_int(constraints, _OFF_BODY2, cid)
     body_pair = constraint_bodies_make(b1, b2)
     d6_iterate_at(constraints, cid, 0, bodies, body_pair, idt)
 
@@ -1429,8 +1558,8 @@ def d6_world_wrench(
 
     Force is the linear constraint impulse divided by the substep
     ``dt`` (``idt = 1 / substep_dt``); torque is that force's moment
-    about body 2's COM plus the angular block accumulated impulse /
-    dt. Per-axis caps show up here as saturated (``+/- max_force``)
-    components in the reported wrench, decomposed in the world frame.
+    about body 2's COM plus the angular impulse / dt. Per-axis caps
+    show up here as saturated (``+/- max_force``) components in the
+    reported wrench, decomposed in the world frame.
     """
     return d6_world_wrench_at(constraints, cid, 0, idt)

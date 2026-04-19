@@ -80,9 +80,11 @@ class JointKind(enum.Enum):
       ("rank-5 Schur" hinge, no motor). The hinge axis is implicit
       in the line through the two anchors.
     * :attr:`D6_REVOLUTE`           -- generalized D6 with 5 of the 6
-      axes locked and the free axis = body-1-local +z. One 6x6
-      Schur-complement solve per joint; no motor wired up here yet
-      (see the velocity-drive note in :mod:`constraint_d6`).
+      axes locked and the free axis = body-1-local +z. Internally
+      dispatches to a fused 3-DoF point-constraint (linear) plus
+      per-axis 1-DoF angle constraints (angular), Jolt-style; no
+      motor wired up here yet (see the velocity-drive note in
+      :mod:`constraint_d6`).
     * :attr:`ACTUATED_DOUBLE_BALL_SOCKET` -- same rank-5 Schur lock as
       :attr:`DOUBLE_BALL_SOCKET` plus a soft scalar PGS row driving the
       free axial twist with a velocity motor (``TARGET_VELOCITY`` /
@@ -99,7 +101,7 @@ class JointKind(enum.Enum):
 # Selects which constraint type every joint in the chain is built
 # with. Switch this to compare solver behaviour / robustness across
 # the three implementations of "hinge between two cubes".
-JOINT_KIND = JointKind.ACTUATED_DOUBLE_BALL_SOCKET
+JOINT_KIND = JointKind.D6_REVOLUTE
 
 NUM_CUBES = 10
 HALF_EXTENT = 0.5
