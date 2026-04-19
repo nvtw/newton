@@ -54,6 +54,10 @@ from newton._src.solvers.jitter.constraint_container import (
     ConstraintContainer,
     constraint_container_zeros,
 )
+from newton._src.solvers.jitter.constraint_d6 import (
+    D6_DWORDS,
+    d6_initialize_kernel,
+)
 from newton._src.solvers.jitter.constraint_double_ball_socket import (
     DBS_DWORDS,
     double_ball_socket_initialize_kernel,
@@ -66,16 +70,25 @@ from newton._src.solvers.jitter.constraint_hinge_joint import (
     HJ_DWORDS,
     hinge_joint_initialize_kernel,
 )
+from newton._src.solvers.jitter.constraint_prismatic import (
+    PR_DWORDS,
+    prismatic_initialize_kernel,
+)
 from newton._src.solvers.jitter.solver_jitter import World
 
 __all__ = [
     "AngularMotorDescriptor",
     "BallSocketDescriptor",
+    "D6AxisDrive",
+    "D6Descriptor",
+    "D6Handle",
     "DoubleBallSocketHingeDescriptor",
     "DoubleBallSocketHingeHandle",
     "HingeAngleDescriptor",
     "HingeJointDescriptor",
     "HingeJointHandle",
+    "PrismaticDescriptor",
+    "PrismaticHandle",
     "RigidBodyDescriptor",
     "WorldBuilder",
 ]
@@ -289,6 +302,168 @@ class DoubleBallSocketHingeHandle:
     cid: int = -1
 
 
+@dataclass
+class PrismaticDescriptor:
+    """Plain-Python description of one prismatic (sliding) joint.
+
+    Locks 5 DoF (3 rotational + 2 translational): the bodies must keep
+    their initial relative orientation and may only translate along the
+    user-supplied slide axis. Solved as one rank-5 column via a 3x3 +
+    2x2 Schur complement -- see
+    :mod:`newton._src.solvers.jitter.constraint_prismatic` for the
+    derivation.
+
+    ``anchor`` is a single point in *world* space at finalize() time
+    (snapshotted into each body's local frame); both lever arms
+    coincide at rest by construction. ``axis`` is a *world*-space
+    direction at finalize() time, snapshotted into body 1's local
+    frame so the slide direction "rides" body 1 rigidly (matches the
+    Bullet/ODE convention). ``axis`` need not be unit length -- the
+    init kernel normalises it.
+
+    ``hertz_*`` / ``damping_ratio_*`` follow the Box2D v3 / Bepu soft-
+    constraint formulation (see :func:`soft_constraint_coefficients`).
+    Two independent knob pairs because the angular and linear blocks
+    are physically distinct: tweak ``hertz_angular`` /
+    ``damping_ratio_angular`` to soften the rotational lock and
+    ``hertz_linear`` / ``damping_ratio_linear`` to soften the
+    perpendicular-translation lock.
+    """
+
+    body1: int
+    body2: int
+    anchor: tuple[float, float, float]
+    axis: tuple[float, float, float]
+    hertz_angular: float = float(DEFAULT_HERTZ_ANGULAR)
+    damping_ratio_angular: float = float(DEFAULT_DAMPING_RATIO)
+    hertz_linear: float = float(DEFAULT_HERTZ_LINEAR)
+    damping_ratio_linear: float = float(DEFAULT_DAMPING_RATIO)
+
+
+@dataclass
+class PrismaticHandle:
+    """Global cid of the prismatic joint created by
+    :meth:`WorldBuilder.add_prismatic`.
+
+    Returned with a sentinel cid (``-1``) and rewritten in place by
+    :meth:`WorldBuilder.finalize`. Pass to
+    :meth:`World.gather_constraint_wrenches` (via
+    ``wrenches[handle.cid]``) to read the joint's reaction wrench on
+    body 2 (linear constraint force + angular reaction torque, both in
+    world frame).
+    """
+
+    cid: int = -1
+
+
+@dataclass
+class D6AxisDrive:
+    """Per-axis configuration for one axis of a :class:`D6Descriptor`.
+
+    Each of the 6 axes (3 angular + 3 linear) is independently
+    configurable as:
+
+    * **Rigid lock**       -- ``hertz=0`` (default) and
+      ``max_force=math.inf`` (default). The default
+      ``D6AxisDrive()`` is a rigid lock; an unconfigured D6 is a
+      6-DoF rigid weld.
+    * **Soft lock**        -- ``hertz>0``, ``target_position=0``,
+      ``target_velocity=0``, ``max_force=inf``. A spring-and-damper
+      restoring the rest pose with the Box2D / Bepu / Nordby implicit
+      formulation.
+    * **Position drive**   -- ``hertz>0``, ``target_position!=0``,
+      ``max_force`` finite. Implicit-PD drive that pulls the axis
+      towards the target with the given soft-spring stiffness, capped
+      at ``max_force``.
+    * **Velocity drive**   -- ``hertz>0``, ``target_velocity!=0``,
+      ``max_force`` finite. Implicit-PD velocity-tracking drive (the
+      "motor" mode); ``hertz`` controls how aggressively the motor
+      tracks the setpoint.
+    * **Free**             -- ``max_force=0``. The accumulated impulse
+      is pinned to zero every PGS iteration regardless of ``hertz``;
+      this is the canonical way to mark an axis as un-constrained.
+
+    Position + velocity targets compose: setting both gives an
+    over-damped spring with a steady-state velocity (useful for
+    e.g. "open the door at 1 rad/s while pulling it towards 90°").
+
+    Units (per axis):
+        * Angular axes: ``target_position`` [rad], ``target_velocity``
+          [rad/s], ``max_force`` [N*m].
+        * Linear axes:  ``target_position`` [m],   ``target_velocity``
+          [m/s],   ``max_force`` [N].
+        * ``hertz`` is always [Hz]; ``damping_ratio`` is dimensionless
+          (1 = critically damped).
+    """
+
+    hertz: float = 0.0
+    damping_ratio: float = float(DEFAULT_DAMPING_RATIO)
+    target_position: float = 0.0
+    target_velocity: float = 0.0
+    max_force: float = math.inf
+
+
+_D6_RIGID_LOCK = D6AxisDrive()
+
+
+@dataclass
+class D6Descriptor:
+    """Plain-Python description of one 6-DoF generalised ("D6") joint.
+
+    A single D6 owns *all* 6 relative DoF of body 2 with respect to
+    body 1 and configures each axis independently via a
+    :class:`D6AxisDrive`. The default ``D6Descriptor`` (no per-axis
+    overrides) is a 6-DoF rigid weld at ``anchor``; pass non-default
+    drives to soften axes, add PD setpoints, cap forces, or free
+    individual axes.
+
+    Solved as one column with a 6x6 Schur complement (3x3 + 3x3 + 3x3
+    cross-block) -- see
+    :mod:`newton._src.solvers.jitter.constraint_d6` for the math.
+
+    The 3 angular axes and 3 linear axes are interpreted in *body 1's
+    local frame*: the joint frame "rides" body 1 rigidly. Position
+    targets are folded into the rest pose at finalize() time so the
+    runtime kernel never branches on "is there a position target".
+
+    ``anchor`` is in *world* space at finalize() time. The init
+    kernel snapshots it into both bodies' local frames; the linear
+    position targets are added on top of the body-1-local anchor so
+    that "drive to rest pose" tracks the user-specified offset
+    automatically.
+    """
+
+    body1: int
+    body2: int
+    anchor: tuple[float, float, float]
+    angular: tuple[D6AxisDrive, D6AxisDrive, D6AxisDrive] = (
+        _D6_RIGID_LOCK,
+        _D6_RIGID_LOCK,
+        _D6_RIGID_LOCK,
+    )
+    linear: tuple[D6AxisDrive, D6AxisDrive, D6AxisDrive] = (
+        _D6_RIGID_LOCK,
+        _D6_RIGID_LOCK,
+        _D6_RIGID_LOCK,
+    )
+
+
+@dataclass
+class D6Handle:
+    """Global cid of the D6 joint created by :meth:`WorldBuilder.add_d6`.
+
+    Returned with a sentinel cid (``-1``) and rewritten in place by
+    :meth:`WorldBuilder.finalize`. Pass to
+    :meth:`World.gather_constraint_wrenches` (via
+    ``wrenches[handle.cid]``) to read the joint's combined reaction
+    wrench on body 2 (linear constraint force + angular reaction
+    torque, both in world frame). Per-axis force/torque limits show up
+    as saturated (``+/- max_force``) components in the reported wrench.
+    """
+
+    cid: int = -1
+
+
 class WorldBuilder:
     """Append bodies and constraints, then materialise a :class:`World`.
 
@@ -323,6 +498,15 @@ class WorldBuilder:
         # parallel-list pattern as the fused HingeJoint above.
         self._double_ball_socket_hinge_descriptors: list[DoubleBallSocketHingeDescriptor] = []
         self._double_ball_socket_hinge_handles: list[DoubleBallSocketHingeHandle] = []
+        # Prismatic (sliding) joint descriptors. Same parallel-list
+        # pattern as the fused-hinge variants above; finalize() walks
+        # both lists to patch each handle with its global cid.
+        self._prismatic_descriptors: list[PrismaticDescriptor] = []
+        self._prismatic_handles: list[PrismaticHandle] = []
+        # 6-DoF generalised (D6) joint descriptors. Same parallel-list
+        # pattern as the prismatic.
+        self._d6_descriptors: list[D6Descriptor] = []
+        self._d6_handles: list[D6Handle] = []
 
     # ------------------------------------------------------------------
     # Body API
@@ -632,6 +816,198 @@ class WorldBuilder:
         self._double_ball_socket_hinge_handles.append(handle)
         return handle
 
+    def add_prismatic(
+        self,
+        body1: int,
+        body2: int,
+        anchor: tuple[float, float, float],
+        axis: tuple[float, float, float],
+        hertz_angular: float = float(DEFAULT_HERTZ_ANGULAR),
+        damping_ratio_angular: float = float(DEFAULT_DAMPING_RATIO),
+        hertz_linear: float = float(DEFAULT_HERTZ_LINEAR),
+        damping_ratio_linear: float = float(DEFAULT_DAMPING_RATIO),
+    ) -> PrismaticHandle:
+        """Append a prismatic (slider) joint and return its handle.
+
+        Locks 5 of the 6 relative DoF between ``body1`` and ``body2``:
+
+        * 3 rotational DoF -- the bodies must keep the same relative
+          orientation as at finalize() time.
+        * 2 translational DoF -- the bodies may only separate along
+          ``axis``; lateral drift is forced to zero.
+
+        The remaining (free) DoF is translation along the slide axis.
+        Solved as one rank-5 column via a 3x3 + 2x2 Schur complement
+        with separate Hertz/damping for the angular vs linear blocks
+        (Box2D v3 / Bepu / Nordby soft-constraint formulation). See
+        :mod:`newton._src.solvers.jitter.constraint_prismatic` for the
+        derivation.
+
+        Both ``anchor`` and ``axis`` are interpreted in *world* space
+        at :meth:`finalize` time. The init kernel snapshots ``anchor``
+        into both bodies' local frames (so they coincide at rest by
+        construction) and snapshots ``axis`` into body 1's local frame
+        (so the slide direction "rides" body 1 rigidly, matching the
+        Bullet/ODE convention). ``axis`` need not be unit length.
+
+        Args:
+            body1: First body index. The slide axis is fixed in this
+                body's local frame.
+            body2: Second body index.
+            anchor: World-space point through which the slide axis
+                passes [m]. Both bodies measure their lever arms from
+                this point; lateral drift of body 2's anchor relative
+                to body 1's anchor is what the 2-row linear-lock
+                constraint sees.
+            axis: World-space slide direction at finalize() time;
+                automatically normalised. The relative translation along
+                this direction is the joint's free DoF.
+            hertz_angular: Soft-constraint stiffness target [Hz] for
+                the 3-row rotational lock. Defaults to
+                :data:`DEFAULT_HERTZ_ANGULAR`. Set to 0 to make the
+                rotational lock perfectly rigid (rigid plain-PGS update).
+            damping_ratio_angular: Non-dimensional damping ratio for
+                the rotational lock. Defaults to
+                :data:`DEFAULT_DAMPING_RATIO` (critically damped).
+            hertz_linear: Soft-constraint stiffness target [Hz] for the
+                2-row perpendicular-translation lock. Defaults to
+                :data:`DEFAULT_HERTZ_LINEAR`. Set to 0 for a rigid
+                lateral lock.
+            damping_ratio_linear: Non-dimensional damping ratio for
+                the perpendicular-translation lock.
+
+        Returns:
+            A :class:`PrismaticHandle` whose ``cid`` field is rewritten
+            in place by :meth:`finalize` to the joint's global cid in
+            the shared :class:`ConstraintContainer`.
+        """
+        self._validate_body(body1)
+        self._validate_body(body2)
+        descriptor = PrismaticDescriptor(
+            body1=body1,
+            body2=body2,
+            anchor=anchor,
+            axis=axis,
+            hertz_angular=hertz_angular,
+            damping_ratio_angular=damping_ratio_angular,
+            hertz_linear=hertz_linear,
+            damping_ratio_linear=damping_ratio_linear,
+        )
+        handle = PrismaticHandle(cid=-1)
+        self._prismatic_descriptors.append(descriptor)
+        self._prismatic_handles.append(handle)
+        return handle
+
+    def add_d6(
+        self,
+        body1: int,
+        body2: int,
+        anchor: tuple[float, float, float],
+        *,
+        angular: tuple[D6AxisDrive, D6AxisDrive, D6AxisDrive] | None = None,
+        linear: tuple[D6AxisDrive, D6AxisDrive, D6AxisDrive] | None = None,
+    ) -> D6Handle:
+        """Append a 6-DoF generalised ("D6") joint and return its handle.
+
+        Owns *all* six relative DoF between ``body1`` and ``body2`` and
+        configures each axis independently via a :class:`D6AxisDrive`:
+        rigid lock, soft lock, position-PD drive, velocity-PD drive,
+        force-limited drive, or free axis. Solved as one column with a
+        6x6 Schur complement -- see
+        :mod:`newton._src.solvers.jitter.constraint_d6` for the math.
+
+        The default call ``b.add_d6(b1, b2, anchor)`` (no per-axis
+        overrides) is a 6-DoF *rigid weld*: all 6 axes default to
+        ``D6AxisDrive(hertz=0, max_force=inf)`` which collapses to a
+        plain-PGS rigid lock on every axis. Pass per-axis
+        :class:`D6AxisDrive` triples to soften axes, set position /
+        velocity targets, cap the force/torque per axis, or free
+        individual axes (``max_force=0``).
+
+        ``anchor`` is in *world* space at finalize() time. The 3
+        angular and 3 linear axes are interpreted in body-1's local
+        frame ("frame A" in PhysX D6 / Bullet 6Dof2 convention). All
+        position targets and velocity targets are in this body-1-local
+        frame.
+
+        Args:
+            body1: First body index. The joint frame rides this body
+                rigidly.
+            body2: Second body index. Driven against the joint frame
+                by the per-axis spec.
+            anchor: World-space anchor point [m]. Both bodies measure
+                their lever arms from this point at finalize() time.
+            angular: 3-tuple of :class:`D6AxisDrive` for the
+                (body-1-local) ``e_x``, ``e_y``, ``e_z`` angular axes.
+                ``None`` -> all-rigid (default).
+            linear: 3-tuple of :class:`D6AxisDrive` for the
+                (body-1-local) ``e_x``, ``e_y``, ``e_z`` linear axes.
+                ``None`` -> all-rigid (default).
+
+        Returns:
+            A :class:`D6Handle` whose ``cid`` field is rewritten in
+            place by :meth:`finalize` to the joint's global cid in
+            the shared :class:`ConstraintContainer`.
+
+        Examples:
+
+        Rigid weld (no kwargs needed)::
+
+            b.add_d6(b1, b2, anchor=(0.0, 0.0, 0.0))
+
+        Position-PD drive on the body-1-local +y angular axis (90 deg
+        target, 5 Hz spring, 10 N*m torque cap), other 5 axes rigid::
+
+            b.add_d6(
+                b1, b2, anchor=(0.0, 0.0, 0.0),
+                angular=(
+                    D6AxisDrive(),
+                    D6AxisDrive(hertz=5.0, target_position=math.pi/2,
+                                max_force=10.0),
+                    D6AxisDrive(),
+                ),
+            )
+
+        A "free hinge" about body-1-local +y (3 angular DoF: x and z
+        rigid, y free), positionally locked::
+
+            b.add_d6(
+                b1, b2, anchor=(0.0, 0.0, 0.0),
+                angular=(
+                    D6AxisDrive(),                        # rigid lock
+                    D6AxisDrive(max_force=0.0),           # FREE
+                    D6AxisDrive(),                        # rigid lock
+                ),
+            )
+        """
+        self._validate_body(body1)
+        self._validate_body(body2)
+
+        if angular is None:
+            angular = (_D6_RIGID_LOCK, _D6_RIGID_LOCK, _D6_RIGID_LOCK)
+        if linear is None:
+            linear = (_D6_RIGID_LOCK, _D6_RIGID_LOCK, _D6_RIGID_LOCK)
+        if len(angular) != 3:
+            raise ValueError(
+                f"D6 'angular' must be a 3-tuple of D6AxisDrive (got len={len(angular)})"
+            )
+        if len(linear) != 3:
+            raise ValueError(
+                f"D6 'linear' must be a 3-tuple of D6AxisDrive (got len={len(linear)})"
+            )
+
+        descriptor = D6Descriptor(
+            body1=body1,
+            body2=body2,
+            anchor=anchor,
+            angular=tuple(angular),
+            linear=tuple(linear),
+        )
+        handle = D6Handle(cid=-1)
+        self._d6_descriptors.append(descriptor)
+        self._d6_handles.append(handle)
+        return handle
+
     # ------------------------------------------------------------------
     # Finalisation
     # ------------------------------------------------------------------
@@ -687,6 +1063,10 @@ class WorldBuilder:
         self._hinge_joint_handles = []
         self._double_ball_socket_hinge_descriptors = []
         self._double_ball_socket_hinge_handles = []
+        self._prismatic_descriptors = []
+        self._prismatic_handles = []
+        self._d6_descriptors = []
+        self._d6_handles = []
         return world
 
     # ------------------------------------------------------------------
@@ -771,6 +1151,8 @@ class WorldBuilder:
             * cids ``[..., +n_motor)``                          -> angular-motors
             * cids ``[..., +n_hinge_joint)``                    -> fused hinge-joints
             * cids ``[..., +n_dbs_hinge)``                      -> fused double-ball-socket hinges
+            * cids ``[..., +n_prismatic)``                      -> prismatic (slider) joints
+            * cids ``[..., +n_d6)``                             -> D6 (6-DoF generalised) joints
 
         The container's per-column dword count is ``max`` of all
         registered constraint schemas so any column can hold any type.
@@ -783,12 +1165,24 @@ class WorldBuilder:
         n_motor = len(self._angular_motors)
         n_hinge_joint = len(self._hinge_joint_descriptors)
         n_dbs_hinge = len(self._double_ball_socket_hinge_descriptors)
-        total = n_ball + n_hinge + n_motor + n_hinge_joint + n_dbs_hinge
+        n_prismatic = len(self._prismatic_descriptors)
+        n_d6 = len(self._d6_descriptors)
+        total = (
+            n_ball
+            + n_hinge
+            + n_motor
+            + n_hinge_joint
+            + n_dbs_hinge
+            + n_prismatic
+            + n_d6
+        )
 
         # All types share the column-major storage so the unified
         # dispatcher in solver_jitter_kernels can index any column the
         # same way; size to the widest schema.
-        per_constraint_dwords = max(BS_DWORDS, HA_DWORDS, AM_DWORDS, HJ_DWORDS, DBS_DWORDS)
+        per_constraint_dwords = max(
+            BS_DWORDS, HA_DWORDS, AM_DWORDS, HJ_DWORDS, DBS_DWORDS, PR_DWORDS, D6_DWORDS
+        )
 
         # Always allocate at least 1 column so the wp.array2d shape is
         # non-degenerate; the kernels gate on cid bounds anyway.
@@ -803,6 +1197,12 @@ class WorldBuilder:
         angular_motor_offset = n_ball + n_hinge
         hinge_joint_offset = n_ball + n_hinge + n_motor
         dbs_hinge_offset = n_ball + n_hinge + n_motor + n_hinge_joint
+        prismatic_offset = (
+            n_ball + n_hinge + n_motor + n_hinge_joint + n_dbs_hinge
+        )
+        d6_offset = (
+            n_ball + n_hinge + n_motor + n_hinge_joint + n_dbs_hinge + n_prismatic
+        )
 
         if n_ball > 0:
             self._init_ball_sockets(container, bodies, ball_socket_offset, device)
@@ -814,6 +1214,10 @@ class WorldBuilder:
             self._init_hinge_joints(container, bodies, hinge_joint_offset, device)
         if n_dbs_hinge > 0:
             self._init_double_ball_socket_hinges(container, bodies, dbs_hinge_offset, device)
+        if n_prismatic > 0:
+            self._init_prismatics(container, bodies, prismatic_offset, device)
+        if n_d6 > 0:
+            self._init_d6s(container, bodies, d6_offset, device)
 
         # Resolve fused-joint handles in place. Each handle was created
         # with cid=-1 and is parallel to its descriptor list; rewrite
@@ -823,6 +1227,10 @@ class WorldBuilder:
             h.cid = hinge_joint_offset + i
         for i, h in enumerate(self._double_ball_socket_hinge_handles):
             h.cid = dbs_hinge_offset + i
+        for i, h in enumerate(self._prismatic_handles):
+            h.cid = prismatic_offset + i
+        for i, h in enumerate(self._d6_handles):
+            h.cid = d6_offset + i
 
         return container, total
 
@@ -1158,6 +1566,188 @@ class WorldBuilder:
                 anchor2_d,
                 hertz_d,
                 damping_ratio_d,
+            ],
+            device=device,
+        )
+
+    def _init_prismatics(
+        self,
+        constraints: ConstraintContainer,
+        bodies: BodyContainer,
+        cid_offset: int,
+        device: wp.context.Device,
+    ) -> None:
+        """Pack the prismatic-joint descriptors into ``constraints``.
+
+        One launch of :func:`prismatic_initialize_kernel` writes each
+        prismatic column. The init kernel snapshots ``anchor`` into
+        both bodies' local frames and ``axis`` into body 1's local
+        frame (normalising it on the fly), then snapshots the rest-pose
+        relative orientation ``q0 = q2^* q1`` so the runtime math
+        operates entirely on quantities that move rigidly with the
+        bodies.
+        """
+        n = len(self._prismatic_descriptors)
+
+        body1 = np.asarray(
+            [d.body1 for d in self._prismatic_descriptors], dtype=np.int32
+        )
+        body2 = np.asarray(
+            [d.body2 for d in self._prismatic_descriptors], dtype=np.int32
+        )
+        anchor = np.asarray(
+            [d.anchor for d in self._prismatic_descriptors], dtype=np.float32
+        )
+        axis = np.asarray(
+            [d.axis for d in self._prismatic_descriptors], dtype=np.float32
+        )
+        hertz_angular = np.asarray(
+            [d.hertz_angular for d in self._prismatic_descriptors], dtype=np.float32
+        )
+        damping_ratio_angular = np.asarray(
+            [d.damping_ratio_angular for d in self._prismatic_descriptors],
+            dtype=np.float32,
+        )
+        hertz_linear = np.asarray(
+            [d.hertz_linear for d in self._prismatic_descriptors], dtype=np.float32
+        )
+        damping_ratio_linear = np.asarray(
+            [d.damping_ratio_linear for d in self._prismatic_descriptors],
+            dtype=np.float32,
+        )
+
+        body1_d = wp.array(body1, dtype=wp.int32, device=device)
+        body2_d = wp.array(body2, dtype=wp.int32, device=device)
+        anchor_d = wp.array(anchor, dtype=wp.vec3f, device=device)
+        axis_d = wp.array(axis, dtype=wp.vec3f, device=device)
+        hertz_angular_d = wp.array(hertz_angular, dtype=wp.float32, device=device)
+        damping_ratio_angular_d = wp.array(
+            damping_ratio_angular, dtype=wp.float32, device=device
+        )
+        hertz_linear_d = wp.array(hertz_linear, dtype=wp.float32, device=device)
+        damping_ratio_linear_d = wp.array(
+            damping_ratio_linear, dtype=wp.float32, device=device
+        )
+
+        wp.launch(
+            prismatic_initialize_kernel,
+            dim=n,
+            inputs=[
+                constraints,
+                bodies,
+                int(cid_offset),
+                body1_d,
+                body2_d,
+                anchor_d,
+                axis_d,
+                hertz_angular_d,
+                damping_ratio_angular_d,
+                hertz_linear_d,
+                damping_ratio_linear_d,
+            ],
+            device=device,
+        )
+
+    def _init_d6s(
+        self,
+        constraints: ConstraintContainer,
+        bodies: BodyContainer,
+        cid_offset: int,
+        device: wp.context.Device,
+    ) -> None:
+        """Pack the D6 (6-DoF) descriptors into ``constraints``.
+
+        One launch of :func:`d6_initialize_kernel` writes each D6
+        column. Per-axis :class:`D6AxisDrive`s on the descriptor are
+        un-tupled into 6 ``vec3f`` arrays per knob (hertz_ang,
+        damping_ang, hertz_lin, damping_lin, max_force_ang,
+        max_force_lin, target_position_*, target_velocity_*) so the
+        kernel sees a flat per-cid layout. ``max_force = math.inf``
+        becomes a finite "huge" cap (1e30) to keep the per-axis clamp
+        well-defined inside the kernel without needing an explicit
+        "no clamp" branch.
+        """
+        n = len(self._d6_descriptors)
+        descriptors = self._d6_descriptors
+
+        body1 = np.asarray([d.body1 for d in descriptors], dtype=np.int32)
+        body2 = np.asarray([d.body2 for d in descriptors], dtype=np.int32)
+        anchor = np.asarray([d.anchor for d in descriptors], dtype=np.float32)
+
+        # Per-axis knob arrays, one row per cid, three components per
+        # row (the three body-1-local axes).
+        target_position_ang = np.zeros((n, 3), dtype=np.float32)
+        target_position_lin = np.zeros((n, 3), dtype=np.float32)
+        target_velocity_ang = np.zeros((n, 3), dtype=np.float32)
+        target_velocity_lin = np.zeros((n, 3), dtype=np.float32)
+        hertz_ang = np.zeros((n, 3), dtype=np.float32)
+        damping_ang = np.zeros((n, 3), dtype=np.float32)
+        hertz_lin = np.zeros((n, 3), dtype=np.float32)
+        damping_lin = np.zeros((n, 3), dtype=np.float32)
+        max_force_ang = np.zeros((n, 3), dtype=np.float32)
+        max_force_lin = np.zeros((n, 3), dtype=np.float32)
+
+        # Cap "infinite" max_force at a large finite number so the
+        # iterate-path clamp stays a well-defined float operation.
+        # 1e30 is far above any realistic per-substep impulse but well
+        # under float32's ~3.4e38 ceiling so multiplications inside
+        # the kernel can't overflow.
+        _HUGE_FORCE = 1.0e30
+
+        for i, d in enumerate(descriptors):
+            for k in range(3):
+                a = d.angular[k]
+                lin = d.linear[k]
+
+                target_position_ang[i, k] = a.target_position
+                target_position_lin[i, k] = lin.target_position
+                target_velocity_ang[i, k] = a.target_velocity
+                target_velocity_lin[i, k] = lin.target_velocity
+                hertz_ang[i, k] = a.hertz
+                damping_ang[i, k] = a.damping_ratio
+                hertz_lin[i, k] = lin.hertz
+                damping_lin[i, k] = lin.damping_ratio
+                max_force_ang[i, k] = (
+                    _HUGE_FORCE if math.isinf(a.max_force) else a.max_force
+                )
+                max_force_lin[i, k] = (
+                    _HUGE_FORCE if math.isinf(lin.max_force) else lin.max_force
+                )
+
+        body1_d = wp.array(body1, dtype=wp.int32, device=device)
+        body2_d = wp.array(body2, dtype=wp.int32, device=device)
+        anchor_d = wp.array(anchor, dtype=wp.vec3f, device=device)
+        target_position_ang_d = wp.array(target_position_ang, dtype=wp.vec3f, device=device)
+        target_position_lin_d = wp.array(target_position_lin, dtype=wp.vec3f, device=device)
+        target_velocity_ang_d = wp.array(target_velocity_ang, dtype=wp.vec3f, device=device)
+        target_velocity_lin_d = wp.array(target_velocity_lin, dtype=wp.vec3f, device=device)
+        hertz_ang_d = wp.array(hertz_ang, dtype=wp.vec3f, device=device)
+        damping_ang_d = wp.array(damping_ang, dtype=wp.vec3f, device=device)
+        hertz_lin_d = wp.array(hertz_lin, dtype=wp.vec3f, device=device)
+        damping_lin_d = wp.array(damping_lin, dtype=wp.vec3f, device=device)
+        max_force_ang_d = wp.array(max_force_ang, dtype=wp.vec3f, device=device)
+        max_force_lin_d = wp.array(max_force_lin, dtype=wp.vec3f, device=device)
+
+        wp.launch(
+            d6_initialize_kernel,
+            dim=n,
+            inputs=[
+                constraints,
+                bodies,
+                int(cid_offset),
+                body1_d,
+                body2_d,
+                anchor_d,
+                target_position_ang_d,
+                target_position_lin_d,
+                target_velocity_ang_d,
+                target_velocity_lin_d,
+                hertz_ang_d,
+                damping_ang_d,
+                hertz_lin_d,
+                damping_lin_d,
+                max_force_ang_d,
+                max_force_lin_d,
             ],
             device=device,
         )

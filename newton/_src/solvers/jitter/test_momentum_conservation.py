@@ -26,6 +26,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.jitter.scene_registry import Scene, scene
 from newton._src.solvers.jitter.world_builder import WorldBuilder
 
 # ---------------------------------------------------------------------------
@@ -78,6 +79,36 @@ def _build_equilibrium_chain(device):
         substeps=SUBSTEPS,
         solver_iterations=SOLVER_ITERATIONS,
         device=device,
+    )
+
+
+@scene(
+    "Momentum: hanging chain (10 cubes, ball sockets)",
+    description=(
+        "Static equilibrium scene from test_momentum_conservation: "
+        "10 unit cubes rotated 45° about z, hanging straight down "
+        "from a world anchor through corner-to-corner ball sockets."
+    ),
+    tags=("momentum", "ball_socket"),
+)
+def build_equilibrium_chain_scene(device) -> Scene:
+    """Visualizer-facing wrapper that returns a :class:`Scene`.
+
+    Reuses :func:`_build_equilibrium_chain` so the test and the
+    visualizer always render identical geometry; if the test scene is
+    ever tweaked the visualization follows along automatically.
+    """
+    world = _build_equilibrium_chain(device)
+    # Body 0 is the static world anchor (kept invisible / non-pickable
+    # via zero half-extents); bodies 1..NUM_CUBES are unit cubes.
+    half_extents = np.zeros((NUM_CUBES + 1, 3), dtype=np.float32)
+    half_extents[1:] = HALF_EXTENT
+    return Scene(
+        world=world,
+        body_half_extents=half_extents,
+        frame_dt=1.0 / FPS,
+        substeps=SUBSTEPS,
+        description="Hanging chain of 10 cubes -- analytic-equilibrium pose.",
     )
 
 

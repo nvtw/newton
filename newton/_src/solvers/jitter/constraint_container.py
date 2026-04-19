@@ -39,15 +39,17 @@ __all__ = [
     "CONSTRAINT_BODY2_OFFSET",
     "CONSTRAINT_TYPE_ANGULAR_MOTOR",
     "CONSTRAINT_TYPE_BALL_SOCKET",
+    "CONSTRAINT_TYPE_D6",
     "CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET",
     "CONSTRAINT_TYPE_HINGE_ANGLE",
     "CONSTRAINT_TYPE_HINGE_JOINT",
     "CONSTRAINT_TYPE_INVALID",
     "CONSTRAINT_TYPE_OFFSET",
+    "CONSTRAINT_TYPE_PRISMATIC",
     "DEFAULT_DAMPING_RATIO",
     "DEFAULT_HERTZ_ANGULAR",
-    "DEFAULT_HERTZ_LINEAR",
     "DEFAULT_HERTZ_LIMIT",
+    "DEFAULT_HERTZ_LINEAR",
     "DEFAULT_HERTZ_MOTOR",
     "ConstraintBodies",
     "ConstraintContainer",
@@ -119,6 +121,20 @@ CONSTRAINT_TYPE_HINGE_JOINT = wp.constant(wp.int32(4))
 #: two redundant 3-row ball-sockets. See
 #: :mod:`constraint_double_ball_socket` for the math.
 CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET = wp.constant(wp.int32(5))
+#: Prismatic (sliding) joint -- 5-DoF lock (3 angular + 2 perpendicular-
+#: translation) solved as one column via a Schur-complement (3x3 + 2x2)
+#: with separate Hertz/damping for the angular vs linear blocks. See
+#: :mod:`constraint_prismatic` for the math.
+CONSTRAINT_TYPE_PRISMATIC = wp.constant(wp.int32(6))
+#: 6-DoF generalised joint (a.k.a. "D6") -- *all* 6 relative DoF (3 angular
+#: + 3 linear) solved as one column via a 6x6 Schur complement (3x3 + 3x3
+#: + 3x3 cross-block). Each axis carries an independent implicit-PD drive
+#: (position-target + velocity-target + force/torque cap), expressed via
+#: the Box2D / Bepu / Nordby ``soft_constraint_coefficients`` plumbing,
+#: so a single descriptor covers rigid weld -> soft lock -> position PD
+#: drive -> velocity drive -> free axis without changing matrix shape.
+#: See :mod:`constraint_d6` for the derivation.
+CONSTRAINT_TYPE_D6 = wp.constant(wp.int32(7))
 
 #: Dword offsets of the three header fields. By contract these are
 #: 0 / 1 / 2 for every constraint schema (enforced by
@@ -135,9 +151,9 @@ def assert_constraint_header(struct_type: object) -> None:
 
         @wp.struct
         class FooConstraintData:
-            constraint_type: wp.int32   # dword 0
-            body1:           wp.int32   # dword 1
-            body2:           wp.int32   # dword 2
+            constraint_type: wp.int32  # dword 0
+            body1: wp.int32  # dword 1
+            body2: wp.int32  # dword 2
             # ... type-specific fields ...
 
     Each per-type module calls this at import time with its schema. If a
@@ -275,9 +291,15 @@ def read_mat33(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.mat33
     convention.
     """
     return wp.mat33f(
-        c.data[off + 0, cid], c.data[off + 1, cid], c.data[off + 2, cid],
-        c.data[off + 3, cid], c.data[off + 4, cid], c.data[off + 5, cid],
-        c.data[off + 6, cid], c.data[off + 7, cid], c.data[off + 8, cid],
+        c.data[off + 0, cid],
+        c.data[off + 1, cid],
+        c.data[off + 2, cid],
+        c.data[off + 3, cid],
+        c.data[off + 4, cid],
+        c.data[off + 5, cid],
+        c.data[off + 6, cid],
+        c.data[off + 7, cid],
+        c.data[off + 8, cid],
     )
 
 
