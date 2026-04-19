@@ -8,26 +8,32 @@ now each phase is an empty member function on :class:`World` so the control
 flow / sub-stepping structure is in place and can be filled in piece by piece.
 
 Scope of this skeleton:
-    * Single constraint type: :class:`BallSocketData`.
-    * Regular solve mode only -- the deterministic / islands branch from C# is
-      intentionally dropped (can be reintroduced later if needed).
+    * Single constraint type so far (ball-socket); the constraint storage
+      design (:class:`ConstraintContainer`) is type-agnostic and ready
+      for hinge / motor / contact constraints when they land.
+    * Regular solve mode only -- the deterministic / islands branch from
+      C# is intentionally dropped (can be reintroduced later if needed).
     * No callbacks (PreStep / PostStep / PreSubStep / PostSubStep).
     * No tracing, no asserts, no SetTime instrumentation.
+
+Construction: the recommended path is to build the world via
+:class:`WorldBuilder` (see :mod:`world_builder`) which populates the
+:class:`BodyContainer` and :class:`ConstraintContainer`, computes
+per-type cid ranges, and hands the assembled state to
+:meth:`World.__init__`. Direct construction is supported for advanced
+callers that want to manage their own SoA arrays.
 """
 
 from __future__ import annotations
 
 import warp as wp
 
-from newton._src.solvers.jitter.body import (
-    BodyContainer,
-    body_container_zeros,
-)
-from newton._src.solvers.jitter.constraints import (
-    BallSocketData,
+from newton._src.solvers.jitter.body import BodyContainer
+from newton._src.solvers.jitter.constraint_ball_socket import (
     ball_socket_iterate_kernel,
     ball_socket_prepare_for_iteration_kernel,
 )
+from newton._src.solvers.jitter.constraint_container import ConstraintContainer
 from newton._src.solvers.jitter.graph_coloring_common import (
     ElementInteractionData,
 )
@@ -50,44 +56,68 @@ __all__ = ["World", "pack_body_xforms_kernel"]
 class World:
     """Warp port of Jitter2's ``World`` driver.
 
-    Holds the simulation's :class:`BodyContainer` and a flat array of
-    :class:`BallSocketData` constraints, and exposes a :meth:`step` method
-    that mirrors ``World.Step`` from Jitter2.
+    Holds the simulation's :class:`BodyContainer` and a single shared
+    :class:`ConstraintContainer` (column-major-by-cid dword storage),
+    plus the per-type cid ranges that say where each constraint type
+    lives in the container. Exposes a :meth:`step` method that mirrors
+    ``World.Step`` from Jitter2.
+
+    Constructed either directly (advanced) or, more commonly, through
+    :meth:`WorldBuilder.finalize`.
     """
 
     def __init__(
         self,
-        num_bodies: int,
+        bodies: BodyContainer,
+        constraints: ConstraintContainer,
         num_ball_sockets: int,
+        ball_socket_cid_offset: int = 0,
         substeps: int = 1,
         solver_iterations: int = 8,
         velocity_relaxations: int = 1,
         gravity: tuple[float, float, float] = (0.0, -9.81, 0.0),
         device: wp.context.Devicelike = None,
     ):
-        """Pre-allocate body / constraint containers.
+        """Take ownership of pre-built containers.
 
         Args:
-            num_bodies: Capacity of the :class:`BodyContainer`.
-            num_ball_sockets: Capacity of the ball-socket constraint array.
+            bodies: Pre-allocated and populated :class:`BodyContainer`.
+                Body 0 is conventionally the static world body
+                (created automatically by :class:`WorldBuilder`).
+            constraints: Pre-allocated and populated shared
+                :class:`ConstraintContainer`. Per-type ranges are
+                addressed via the ``*_cid_offset`` arguments.
+            num_ball_sockets: Number of ball-socket constraints stored
+                contiguously starting at ``ball_socket_cid_offset``.
+            ball_socket_cid_offset: First column index in
+                ``constraints.data`` that holds ball-socket state.
+                Today the entire container is ball-sockets, so this is
+                ``0``; reserved for future contact / motor types.
             substeps: Number of sub-steps per :meth:`step` call (mirrors
                 ``World.substeps``).
             solver_iterations: PGS iterations inside ``SolveVelocities``.
             velocity_relaxations: Relaxation passes inside ``RelaxVelocities``.
-            device: Warp device to allocate on.
+            gravity: World gravity vector applied in
+                :meth:`_foreach_active_body` to all bodies that have
+                ``affected_by_gravity != 0``.
+            device: Warp device to allocate the partitioner / element
+                view on. If ``None``, derived from ``bodies.position``.
         """
-        self.device = wp.get_device(device)
+        if device is None:
+            self.device = bodies.position.device
+        else:
+            self.device = wp.get_device(device)
 
-        self.bodies: BodyContainer = body_container_zeros(num_bodies, device=self.device)
-        self.ball_sockets: wp.array[BallSocketData] = wp.zeros(
-            num_ball_sockets, dtype=BallSocketData, device=self.device
-        )
+        self.bodies: BodyContainer = bodies
+        self.constraints: ConstraintContainer = constraints
+
+        self.num_bodies: int = int(bodies.position.shape[0])
+        self.num_ball_sockets: int = int(num_ball_sockets)
+        self.ball_socket_cid_offset: int = int(ball_socket_cid_offset)
 
         self.substeps = int(substeps)
         self.solver_iterations = int(solver_iterations)
         self.velocity_relaxations = int(velocity_relaxations)
-        self.num_bodies = int(num_bodies)
-        self.num_ball_sockets = int(num_ball_sockets)
         self.gravity = wp.vec3f(float(gravity[0]), float(gravity[1]), float(gravity[2]))
 
         # Mirror World.stepDt / invStepDt / substepDt -- populated by step().
@@ -96,26 +126,24 @@ class World:
         self.substep_dt: float = 0.0
 
         # ----- Coloring / partitioning infrastructure ------------------
-        # The partitioner consumes a flat ElementInteractionData array; we
-        # rebuild it from ``ball_sockets`` whenever the constraint topology
-        # changes. The "active count" is held in a 1-element device array so
-        # the partitioner sees the same source of truth (no host sync).
+        # The partitioner consumes a flat ElementInteractionData array.
+        # We rebuild it once per step() (driven by future contact/motor
+        # types whose topology varies frame-to-frame); for now it's just
+        # the static joint set so we still pay the rebuild every step
+        # rather than carrying a dirty flag.
         self._elements: wp.array[ElementInteractionData] = wp.zeros(
-            num_ball_sockets, dtype=ElementInteractionData, device=self.device
+            self.num_ball_sockets, dtype=ElementInteractionData, device=self.device
         )
         self._num_active_constraints: wp.array[int] = wp.array(
-            [num_ball_sockets], dtype=wp.int32, device=self.device
+            [self.num_ball_sockets], dtype=wp.int32, device=self.device
         )
         # tile-scan path keeps wp.capture_while bodies allocation-free.
         self._partitioner = IncrementalContactPartitioner(
-            max_num_interactions=num_ball_sockets,
-            max_num_nodes=num_bodies,
+            max_num_interactions=max(1, self.num_ball_sockets),
+            max_num_nodes=max(1, self.num_bodies),
             device=self.device,
             use_tile_scan=True,
         )
-        # Set on construction; callers will flip this back to True when they
-        # mutate constraint topology so _solve_velocities rebuilds elements.
-        self._elements_dirty: bool = True
 
     # ------------------------------------------------------------------
     # Public driver
@@ -145,6 +173,12 @@ class World:
 
         # Reorder contacts (regular solve mode only).
         self._reorder_contacts()
+
+        # Rebuild the partitioner's element view from the current
+        # constraint set every step. Cheap (one kernel per type, sized
+        # by that type's count) and lets future contact / motor types
+        # vary their topology freely between steps.
+        self._rebuild_elements()
 
         # Sub-stepping: integrate forces, solve, integrate velocities, relax.
         for _ in range(self.substeps):
@@ -209,10 +243,6 @@ class World:
         if self.num_ball_sockets == 0:
             return
 
-        if self._elements_dirty:
-            self._rebuild_elements()
-            self._elements_dirty = False
-
         idt = wp.float32(1.0 / self.substep_dt)
 
         # PrepareForIteration: one sweep over all partitions.
@@ -239,14 +269,25 @@ class World:
     # ------------------------------------------------------------------
 
     def _rebuild_elements(self) -> None:
-        """Project the current ``ball_sockets`` array into ``_elements`` so
-        the partitioner sees an up-to-date adjacency view. Cheap (one
-        kernel launch sized by ``num_ball_sockets``) so we just rerun it
-        whenever the dirty flag is set."""
+        """Project the current constraint set into ``_elements``.
+
+        Launched once per :meth:`step`. Today we only have one type
+        (ball-socket) so it's a single kernel; when contacts and motors
+        land each type gets its own per-type element-projection kernel
+        appended here, all writing into disjoint slices of
+        ``self._elements``.
+        """
+        if self.num_ball_sockets == 0:
+            return
         wp.launch(
             _ball_socket_to_element_kernel,
             dim=self.num_ball_sockets,
-            inputs=[self.ball_sockets, self._num_active_constraints, self._elements],
+            inputs=[
+                self.constraints,
+                self.ball_socket_cid_offset,
+                self._num_active_constraints,
+                self._elements,
+            ],
             device=self.device,
         )
 
@@ -266,7 +307,7 @@ class World:
             kernel,
             dim=self.num_ball_sockets,
             inputs=[
-                self.ball_sockets,
+                self.constraints,
                 self.bodies,
                 idt,
                 self._partitioner.partition_element_ids,

@@ -17,7 +17,11 @@ from newton._src.solvers.jitter.body import (
     MOTION_STATIC,
     BodyContainer,
 )
-from newton._src.solvers.jitter.constraints import BallSocketData
+from newton._src.solvers.jitter.constraint_ball_socket import (
+    ball_socket_get_body1,
+    ball_socket_get_body2,
+)
+from newton._src.solvers.jitter.constraint_container import ConstraintContainer
 from newton._src.solvers.jitter.graph_coloring_common import (
     ElementInteractionData,
     element_interaction_data_make,
@@ -35,18 +39,30 @@ __all__ = [
 
 @wp.kernel
 def _ball_socket_to_element_kernel(
-    constraints: wp.array[BallSocketData],
-    num_constraints: wp.array[int],
+    constraints: ConstraintContainer,
+    cid_offset: wp.int32,
+    num_constraints: wp.array[wp.int32],
     elements: wp.array[ElementInteractionData],
 ):
-    """Project each :class:`BallSocketData` into the partitioner's
-    :class:`ElementInteractionData` view: only the two body indices matter,
-    the remaining slots are filled with ``-1``."""
+    """Project a range of ball-socket constraints into the partitioner's
+    :class:`ElementInteractionData` view: only the two body indices
+    matter, the remaining slots are filled with ``-1``.
+
+    ``cid_offset`` is the global cid of the first ball-socket; ``tid``
+    indexes within the ball-socket sub-range so ``cid = cid_offset +
+    tid`` gives the column in the shared :class:`ConstraintContainer`,
+    while the partitioner sees a dense ``elements[tid]`` slot.
+
+    Launched once per :meth:`World.step` so contact constraints (which
+    will arrive next) can rebuild their element rows from scratch each
+    frame without coordinating with the joint constraints."""
     tid = wp.tid()
     if tid >= num_constraints[0]:
         return
-    c = constraints[tid]
-    elements[tid] = element_interaction_data_make(c.body1, c.body2, -1, -1, -1, -1, -1, -1)
+    cid = cid_offset + tid
+    b1 = ball_socket_get_body1(constraints, cid)
+    b2 = ball_socket_get_body2(constraints, cid)
+    elements[tid] = element_interaction_data_make(b1, b2, -1, -1, -1, -1, -1, -1)
 
 
 @wp.func
