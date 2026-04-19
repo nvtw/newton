@@ -24,6 +24,8 @@
 #
 ###########################################################################
 
+import math
+
 import numpy as np
 import warp as wp
 
@@ -31,6 +33,26 @@ import newton
 import newton.examples
 from newton._src.solvers.jitter.solver_jitter import pack_body_xforms_kernel
 from newton._src.solvers.jitter.world_builder import WorldBuilder
+
+# Toggle the initial state of the chain.
+#
+# False (default): zig-zag along +x with identity-oriented cubes touching
+#     diagonally on the y=0 centerline. Pretty starting pose; gravity
+#     immediately swings it into motion -- useful as a dynamics demo.
+#
+# True: cubes hang *straight down* from the world anchor with each cube
+#     rotated 45 degrees about z so its body-frame diagonal aligns with
+#     gravity. This is the static equilibrium configuration: in body
+#     frame the joints sit at ``(+h, +h, 0)`` (top corner) and
+#     ``(-h, -h, 0)`` (bottom corner); the 45-degree rotation puts both
+#     of those corners on the world y axis at distance ``h*sqrt(2)``
+#     from the cube centre, so adjacent cubes meet corner-to-corner
+#     along -y. Cube j's centre is at ``y = -(2j+1)*h*sqrt(2)``; joint k
+#     between cube k-1 and cube k sits at ``y = -k * 2*h*sqrt(2)``.
+#     Gravity is balanced by tension in the joints, so the chain just
+#     hangs there (modulo PGS jitter). Useful for verifying the solver
+#     doesn't drift from a known equilibrium.
+START_AT_EQUILIBRIUM = True
 
 NUM_CUBES = 10
 HALF_EXTENT = 0.5  # unit cube -> half-extent 0.5 on each axis
@@ -41,6 +63,15 @@ NUM_BALL_SOCKETS = NUM_CUBES  # 1 world->cube0 + 9 cube_i->cube_(i+1)
 # I = m*s^2/6 * I_3 = 1/6 * I_3 so I^-1 = 6 * I_3, but identity keeps
 # the demo numbers round and is fine for an unstressed visual test.
 _INV_INERTIA = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+
+
+# Quaternion for a 45-degree rotation about +z (xyzw convention; matches
+# Newton/Warp). After this rotation the body-frame diagonal corners
+# (+h, +h, 0) and (-h, -h, 0) end up on the world +y / -y axis at
+# distance h*sqrt(2) from the cube centre.
+_DIAGONAL_HALF = HALF_EXTENT * math.sqrt(2.0)
+_HALF_ANGLE = math.pi / 8.0  # half of 45 degrees
+_DIAGONAL_QUAT = (0.0, 0.0, math.sin(_HALF_ANGLE), math.cos(_HALF_ANGLE))
 
 
 class Example:
@@ -59,29 +90,53 @@ class Example:
         b = WorldBuilder()
         world_body = b.world_body  # body 0, auto-created static anchor
 
-        # Cube j sits at x = (2j+1)*h on +x and alternates y = +h (j even)
-        # / -h (j odd), so consecutive cubes meet at exactly one diagonal
-        # corner on the y=0 line.
         cube_ids: list[int] = []
-        for j in range(NUM_CUBES):
-            sign = 1.0 if j % 2 == 0 else -1.0
-            cube_ids.append(
-                b.add_dynamic_body(
-                    position=((2 * j + 1) * HALF_EXTENT, sign * HALF_EXTENT, 0.0),
-                    inverse_mass=1.0,
-                    inverse_inertia=_INV_INERTIA,
+        if START_AT_EQUILIBRIUM:
+            # Diamond-rotated cubes hanging straight down from origin.
+            # Cube j centre at (0, -(2j+1)*h*sqrt(2), 0), all share the
+            # same 45-degree-about-z orientation. Joints land on the
+            # world y axis between consecutive cubes.
+            for j in range(NUM_CUBES):
+                cube_ids.append(
+                    b.add_dynamic_body(
+                        position=(0.0, -(2 * j + 1) * _DIAGONAL_HALF, 0.0),
+                        orientation=_DIAGONAL_QUAT,
+                        inverse_mass=1.0,
+                        inverse_inertia=_INV_INERTIA,
+                    )
                 )
-            )
 
-        # Joint k anchors:
-        #   * k = 0 : world (origin) <-> cube 0's (-h, -h, 0) corner at (0,0,0)
-        #   * k>=1 : cube k-1 <-> cube k at (2*k*h, 0, 0) -- their shared
-        #            corner on the centerline.
-        for k in range(NUM_BALL_SOCKETS):
-            body_a = world_body if k == 0 else cube_ids[k - 1]
-            body_b = cube_ids[k]
-            anchor = (0.0, 0.0, 0.0) if k == 0 else (2.0 * k * HALF_EXTENT, 0.0, 0.0)
-            b.add_ball_socket(body_a, body_b, anchor)
+            for k in range(NUM_BALL_SOCKETS):
+                body_a = world_body if k == 0 else cube_ids[k - 1]
+                body_b = cube_ids[k]
+                # Joint k sits on the y axis at -k * 2 * h * sqrt(2):
+                # k = 0 is at the origin (the world anchor), and each
+                # subsequent joint is one full diagonal further down.
+                anchor = (0.0, -k * 2.0 * _DIAGONAL_HALF, 0.0)
+                b.add_ball_socket(body_a, body_b, anchor)
+        else:
+            # Cube j sits at x = (2j+1)*h on +x and alternates y = +h
+            # (j even) / -h (j odd), so consecutive cubes meet at
+            # exactly one diagonal corner on the y=0 line.
+            for j in range(NUM_CUBES):
+                sign = 1.0 if j % 2 == 0 else -1.0
+                cube_ids.append(
+                    b.add_dynamic_body(
+                        position=((2 * j + 1) * HALF_EXTENT, sign * HALF_EXTENT, 0.0),
+                        inverse_mass=1.0,
+                        inverse_inertia=_INV_INERTIA,
+                    )
+                )
+
+            # Joint k anchors:
+            #   * k = 0 : world (origin) <-> cube 0's (-h, -h, 0) corner at (0,0,0)
+            #   * k>=1 : cube k-1 <-> cube k at (2*k*h, 0, 0) -- their shared
+            #            corner on the centerline.
+            for k in range(NUM_BALL_SOCKETS):
+                body_a = world_body if k == 0 else cube_ids[k - 1]
+                body_b = cube_ids[k]
+                anchor = (0.0, 0.0, 0.0) if k == 0 else (2.0 * k * HALF_EXTENT, 0.0, 0.0)
+                b.add_ball_socket(body_a, body_b, anchor)
 
         # substeps=1 here because we drive substepping ourselves from
         # simulate() (matches the basic-pendulum pattern).
