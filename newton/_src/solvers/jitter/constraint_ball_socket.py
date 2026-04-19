@@ -45,7 +45,10 @@ import warp as wp
 
 from newton._src.solvers.jitter.body import BodyContainer
 from newton._src.solvers.jitter.constraint_container import (
+    CONSTRAINT_TYPE_BALL_SOCKET,
     ConstraintContainer,
+    assert_constraint_header,
+    constraint_set_type,
     read_float,
     read_int,
     read_mat33,
@@ -74,8 +77,8 @@ __all__ = [
     "ball_socket_get_r2",
     "ball_socket_get_softness",
     "ball_socket_initialize_kernel",
-    "ball_socket_iterate_kernel",
-    "ball_socket_prepare_for_iteration_kernel",
+    "ball_socket_iterate",
+    "ball_socket_prepare_for_iteration",
     "ball_socket_set_accumulated_impulse",
     "ball_socket_set_bias",
     "ball_socket_set_bias_factor",
@@ -117,7 +120,14 @@ class BallSocketData:
     Fields are arranged in struct-natural order with no manual padding;
     everything is 32-bit so the struct is dword-aligned end-to-end (see
     :func:`num_dwords` which asserts this).
+
+    The first field is the global ``constraint_type`` tag (mandatory
+    contract for every constraint schema -- see
+    :func:`assert_constraint_header`). It lets the dispatcher
+    read the type at a fixed offset without per-type knowledge.
     """
+
+    constraint_type: wp.int32
 
     body1: wp.int32
     body2: wp.int32
@@ -136,6 +146,12 @@ class BallSocketData:
     accumulated_impulse: wp.vec3f
     bias: wp.vec3f
 
+
+# Enforce the global constraint header contract (constraint_type / body1
+# / body2 at dwords 0 / 1 / 2) at import time so a future field reorder
+# fails loudly here instead of silently mis-tagging columns or
+# scrambling body indices at runtime.
+assert_constraint_header(BallSocketData)
 
 # Dword offsets derived once from the schema. Each is a Python int;
 # wrapped in wp.constant so kernels can use them as compile-time literals.
@@ -320,6 +336,7 @@ def ball_socket_initialize_kernel(
     la1 = wp.quat_rotate_inv(orient1, a - pos1)
     la2 = wp.quat_rotate_inv(orient2, a - pos2)
 
+    constraint_set_type(constraints, cid, CONSTRAINT_TYPE_BALL_SOCKET)
     ball_socket_set_body1(constraints, cid, b1)
     ball_socket_set_body2(constraints, cid, b2)
     ball_socket_set_local_anchor1(constraints, cid, la1)
@@ -338,12 +355,19 @@ def ball_socket_initialize_kernel(
 
 
 # ---------------------------------------------------------------------------
-# Per-iteration math (wp.func helpers + dispatch kernels)
+# Per-iteration math
 # ---------------------------------------------------------------------------
+#
+# These two ``wp.func``s are the only per-type entry points the solver
+# needs at runtime. They share a fixed signature with the matching
+# helpers in every other constraint module
+# (``constraints, cid, bodies, idt``) so the unified dispatcher kernel
+# in :mod:`solver_jitter_kernels` can call any of them through an
+# ``if/elif`` cascade gated on the ``constraint_type`` tag.
 
 
 @wp.func
-def _ball_socket_prepare_for_iteration(
+def ball_socket_prepare_for_iteration(
     constraints: ConstraintContainer,
     cid: wp.int32,
     bodies: BodyContainer,
@@ -421,7 +445,7 @@ def _ball_socket_prepare_for_iteration(
 
 
 @wp.func
-def _ball_socket_iterate(
+def ball_socket_iterate(
     constraints: ConstraintContainer,
     cid: wp.int32,
     bodies: BodyContainer,
@@ -472,45 +496,3 @@ def _ball_socket_iterate(
 
     bodies.velocity[b2] = velocity2 + inv_mass2 * lam
     bodies.angular_velocity[b2] = angular_velocity2 + inv_inertia2 @ (cr2 @ lam)
-
-
-@wp.kernel
-def ball_socket_prepare_for_iteration_kernel(
-    constraints: ConstraintContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    partition_element_ids: wp.array[wp.int32],
-    partition_count: wp.array[wp.int32],
-):
-    """Indirect launch over a single graph-coloring partition.
-
-    The launch is sized by the constraint *capacity*; each thread reads
-    ``partition_element_ids[tid]`` to find the actual constraint id it
-    should process. Threads with ``tid >= partition_count[0]`` early-out.
-
-    The partitioner guarantees that no two constraints in the same
-    partition share a body, so the per-thread read-modify-write of
-    ``bodies`` is race-free.
-    """
-    tid = wp.tid()
-    if tid >= partition_count[0]:
-        return
-    cid = partition_element_ids[tid]
-    _ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
-
-
-@wp.kernel
-def ball_socket_iterate_kernel(
-    constraints: ConstraintContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    partition_element_ids: wp.array[wp.int32],
-    partition_count: wp.array[wp.int32],
-):
-    """Indirect launch over a single graph-coloring partition. See
-    :func:`ball_socket_prepare_for_iteration_kernel` for the contract."""
-    tid = wp.tid()
-    if tid >= partition_count[0]:
-        return
-    cid = partition_element_ids[tid]
-    _ball_socket_iterate(constraints, cid, bodies, idt)

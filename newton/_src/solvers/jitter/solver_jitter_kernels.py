@@ -17,18 +17,36 @@ from newton._src.solvers.jitter.body import (
     MOTION_STATIC,
     BodyContainer,
 )
-from newton._src.solvers.jitter.constraint_ball_socket import (
-    ball_socket_get_body1,
-    ball_socket_get_body2,
+from newton._src.solvers.jitter.constraint_angular_motor import (
+    angular_motor_iterate,
+    angular_motor_prepare_for_iteration,
 )
-from newton._src.solvers.jitter.constraint_container import ConstraintContainer
+from newton._src.solvers.jitter.constraint_ball_socket import (
+    ball_socket_iterate,
+    ball_socket_prepare_for_iteration,
+)
+from newton._src.solvers.jitter.constraint_container import (
+    CONSTRAINT_TYPE_ANGULAR_MOTOR,
+    CONSTRAINT_TYPE_BALL_SOCKET,
+    CONSTRAINT_TYPE_HINGE_ANGLE,
+    ConstraintContainer,
+    constraint_get_body1,
+    constraint_get_body2,
+    constraint_get_type,
+)
+from newton._src.solvers.jitter.constraint_hinge_angle import (
+    hinge_angle_iterate,
+    hinge_angle_prepare_for_iteration,
+)
 from newton._src.solvers.jitter.graph_coloring_common import (
     ElementInteractionData,
     element_interaction_data_make,
 )
 
 __all__ = [
-    "_ball_socket_to_element_kernel",
+    "_constraint_iterate_kernel",
+    "_constraint_prepare_for_iteration_kernel",
+    "_constraints_to_elements_kernel",
     "_integrate_forces_kernel",
     "_integrate_velocities_kernel",
     "_rotation_quaternion",
@@ -37,31 +55,114 @@ __all__ = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Unified constraint dispatch
+# ---------------------------------------------------------------------------
+#
+# The solver no longer has per-type prepare/iterate kernels. Instead one
+# pair of *type-agnostic* dispatcher kernels reads the constraint_type
+# tag at the front of every column and routes to the correct ``wp.func``
+# via an ``if/elif`` cascade. Each branch compiles to a tight inlined
+# call (Warp inlines ``wp.func`` calls aggressively); the cascade adds
+# one int compare per branch in the worst case which is far cheaper
+# than the per-launch overhead of having one kernel per type.
+#
+# The build-time wiring is therefore:
+#
+#   * solver -> ``_constraint_prepare_for_iteration_kernel`` /
+#               ``_constraint_iterate_kernel``
+#   * dispatch kernel -> ``constraint_get_type(c, cid)`` -> per-type ``wp.func``
+#
+# Adding a new constraint type means: write its ``*_prepare_for_iteration``
+# / ``*_iterate`` ``wp.func`` (same ``constraints, cid, bodies, idt``
+# signature), add a ``CONSTRAINT_TYPE_FOO`` tag in
+# :mod:`constraint_container`, stamp it in the type's init kernel, and
+# add one ``elif`` branch to each dispatcher below. No change to
+# :class:`World` or :class:`WorldBuilder` needed.
+
+
 @wp.kernel
-def _ball_socket_to_element_kernel(
+def _constraint_prepare_for_iteration_kernel(
     constraints: ConstraintContainer,
-    cid_offset: wp.int32,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    partition_element_ids: wp.array[wp.int32],
+    partition_count: wp.array[wp.int32],
+):
+    """Dispatch the per-type ``prepare_for_iteration`` ``wp.func`` for
+    each cid in the current graph-coloring partition.
+
+    The launch is sized by the constraint *capacity*; threads with
+    ``tid >= partition_count[0]`` early-out. The partitioner guarantees
+    that no two cids in the same partition share a body, so the
+    per-thread RMW of the body container is race-free regardless of
+    which constraint type each thread happens to dispatch.
+    """
+    tid = wp.tid()
+    if tid >= partition_count[0]:
+        return
+    cid = partition_element_ids[tid]
+
+    t = constraint_get_type(constraints, cid)
+    if t == CONSTRAINT_TYPE_BALL_SOCKET:
+        ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+    elif t == CONSTRAINT_TYPE_HINGE_ANGLE:
+        hinge_angle_prepare_for_iteration(constraints, cid, bodies, idt)
+    elif t == CONSTRAINT_TYPE_ANGULAR_MOTOR:
+        angular_motor_prepare_for_iteration(constraints, cid, bodies, idt)
+
+
+@wp.kernel
+def _constraint_iterate_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    partition_element_ids: wp.array[wp.int32],
+    partition_count: wp.array[wp.int32],
+):
+    """Dispatch the per-type ``iterate`` ``wp.func`` for each cid in the
+    current graph-coloring partition. See
+    :func:`_constraint_prepare_for_iteration_kernel` for the launch
+    contract."""
+    tid = wp.tid()
+    if tid >= partition_count[0]:
+        return
+    cid = partition_element_ids[tid]
+
+    t = constraint_get_type(constraints, cid)
+    if t == CONSTRAINT_TYPE_BALL_SOCKET:
+        ball_socket_iterate(constraints, cid, bodies, idt)
+    elif t == CONSTRAINT_TYPE_HINGE_ANGLE:
+        hinge_angle_iterate(constraints, cid, bodies, idt)
+    elif t == CONSTRAINT_TYPE_ANGULAR_MOTOR:
+        angular_motor_iterate(constraints, cid, bodies, idt)
+
+
+@wp.kernel
+def _constraints_to_elements_kernel(
+    constraints: ConstraintContainer,
     num_constraints: wp.array[wp.int32],
     elements: wp.array[ElementInteractionData],
 ):
-    """Project a range of ball-socket constraints into the partitioner's
-    :class:`ElementInteractionData` view: only the two body indices
-    matter, the remaining slots are filled with ``-1``.
+    """Project every active constraint into the partitioner's
+    :class:`ElementInteractionData` view, regardless of type.
 
-    ``cid_offset`` is the global cid of the first ball-socket; ``tid``
-    indexes within the ball-socket sub-range so ``cid = cid_offset +
-    tid`` gives the column in the shared :class:`ConstraintContainer`,
-    while the partitioner sees a dense ``elements[tid]`` slot.
+    Only the two body indices are needed by the graph colourer; the
+    remaining slots are filled with ``-1``. This is the type-agnostic
+    successor to the previous per-type element-projection kernels:
+    because the constraint header (constraint_type, body1, body2) lives
+    at fixed dword offsets across every schema, a single kernel can
+    pull body1/body2 with :func:`constraint_get_body1` /
+    :func:`constraint_get_body2` without dispatching on type.
 
     Launched once per :meth:`World.step` so contact constraints (which
-    will arrive next) can rebuild their element rows from scratch each
+    arrive next) can rebuild their element rows from scratch each
     frame without coordinating with the joint constraints."""
     tid = wp.tid()
     if tid >= num_constraints[0]:
         return
-    cid = cid_offset + tid
-    b1 = ball_socket_get_body1(constraints, cid)
-    b2 = ball_socket_get_body2(constraints, cid)
+    b1 = constraint_get_body1(constraints, tid)
+    b2 = constraint_get_body2(constraints, tid)
     elements[tid] = element_interaction_data_make(b1, b2, -1, -1, -1, -1, -1, -1)
 
 

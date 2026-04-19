@@ -264,13 +264,12 @@ class WorldBuilder:
         device = wp.get_device(device)
 
         bodies = self._build_body_container(device)
-        constraints, cid_ranges = self._build_constraint_container(bodies, device)
+        constraints, num_constraints = self._build_constraint_container(bodies, device)
 
         world = World(
             bodies=bodies,
             constraints=constraints,
-            num_ball_sockets=cid_ranges["ball_socket_count"],
-            ball_socket_cid_offset=cid_ranges["ball_socket_offset"],
+            num_constraints=num_constraints,
             substeps=substeps,
             solver_iterations=solver_iterations,
             velocity_relaxations=velocity_relaxations,
@@ -354,18 +353,17 @@ class WorldBuilder:
         self,
         bodies: BodyContainer,
         device: wp.context.Device,
-    ) -> tuple[ConstraintContainer, dict]:
+    ) -> tuple[ConstraintContainer, int]:
         """Allocate the shared :class:`ConstraintContainer` and pack every
         constraint type into its own contiguous cid range.
 
-        Returns the container and a dict of ``{type}_offset / {type}_count``
-        cid ranges so :meth:`finalize` can pass the right slice arguments
-        to :class:`World`.
+        Returns the container and the total active constraint count.
+        Per-type cid ranges are no longer needed by :class:`World` (the
+        unified dispatcher routes per-cid via the type tag), but we
+        still pack each type into a contiguous range here so per-type
+        init kernels can be launched with a single ``cid_offset``.
         """
-        # Per-type counts. Today only ball-socket; when more types land
-        # add their counts/offsets here and bump num_dwords accordingly.
         n_ball = len(self._ball_sockets)
-
         total = n_ball
         # max() over registered type dword counts; today only one.
         per_constraint_dwords = BS_DWORDS
@@ -382,10 +380,7 @@ class WorldBuilder:
         if n_ball > 0:
             self._init_ball_sockets(container, bodies, ball_socket_offset, device)
 
-        return container, {
-            "ball_socket_offset": ball_socket_offset,
-            "ball_socket_count": n_ball,
-        }
+        return container, total
 
     def _init_ball_sockets(
         self,

@@ -8,9 +8,11 @@ now each phase is an empty member function on :class:`World` so the control
 flow / sub-stepping structure is in place and can be filled in piece by piece.
 
 Scope of this skeleton:
-    * Single constraint type so far (ball-socket); the constraint storage
-      design (:class:`ConstraintContainer`) is type-agnostic and ready
-      for hinge / motor / contact constraints when they land.
+    * Multiple constraint types (ball-socket, hinge-angle, angular-motor,
+      contacts when they land); the solver dispatches per-cid via the
+      type tag at the front of every column (see
+      :mod:`solver_jitter_kernels._constraint_*` kernels), so the
+      :class:`World` driver itself is type-agnostic.
     * Regular solve mode only -- the deterministic / islands branch from
       C# is intentionally dropped (can be reintroduced later if needed).
     * No callbacks (PreStep / PostStep / PreSubStep / PostSubStep).
@@ -18,10 +20,9 @@ Scope of this skeleton:
 
 Construction: the recommended path is to build the world via
 :class:`WorldBuilder` (see :mod:`world_builder`) which populates the
-:class:`BodyContainer` and :class:`ConstraintContainer`, computes
-per-type cid ranges, and hands the assembled state to
-:meth:`World.__init__`. Direct construction is supported for advanced
-callers that want to manage their own SoA arrays.
+:class:`BodyContainer` and :class:`ConstraintContainer` and hands the
+assembled state to :meth:`World.__init__`. Direct construction is
+supported for advanced callers that want to manage their own SoA arrays.
 """
 
 from __future__ import annotations
@@ -29,10 +30,6 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.jitter.body import BodyContainer
-from newton._src.solvers.jitter.constraint_ball_socket import (
-    ball_socket_iterate_kernel,
-    ball_socket_prepare_for_iteration_kernel,
-)
 from newton._src.solvers.jitter.constraint_container import ConstraintContainer
 from newton._src.solvers.jitter.graph_coloring_common import (
     ElementInteractionData,
@@ -41,7 +38,9 @@ from newton._src.solvers.jitter.graph_coloring_incremental import (
     IncrementalContactPartitioner,
 )
 from newton._src.solvers.jitter.solver_jitter_kernels import (
-    _ball_socket_to_element_kernel,
+    _constraint_iterate_kernel,
+    _constraint_prepare_for_iteration_kernel,
+    _constraints_to_elements_kernel,
     _integrate_forces_kernel,
     _integrate_velocities_kernel,
     _update_bodies_kernel,
@@ -57,10 +56,13 @@ class World:
     """Warp port of Jitter2's ``World`` driver.
 
     Holds the simulation's :class:`BodyContainer` and a single shared
-    :class:`ConstraintContainer` (column-major-by-cid dword storage),
-    plus the per-type cid ranges that say where each constraint type
-    lives in the container. Exposes a :meth:`step` method that mirrors
-    ``World.Step`` from Jitter2.
+    :class:`ConstraintContainer` (column-major-by-cid dword storage).
+    The driver is *type-agnostic*: it never names a specific constraint
+    kind, instead launching the unified
+    :func:`_constraint_prepare_for_iteration_kernel` /
+    :func:`_constraint_iterate_kernel` dispatchers that route per-cid on
+    the type tag at the front of every column. Exposes a :meth:`step`
+    method that mirrors ``World.Step`` from Jitter2.
 
     Constructed either directly (advanced) or, more commonly, through
     :meth:`WorldBuilder.finalize`.
@@ -70,8 +72,7 @@ class World:
         self,
         bodies: BodyContainer,
         constraints: ConstraintContainer,
-        num_ball_sockets: int,
-        ball_socket_cid_offset: int = 0,
+        num_constraints: int,
         substeps: int = 1,
         solver_iterations: int = 8,
         velocity_relaxations: int = 1,
@@ -85,14 +86,13 @@ class World:
                 Body 0 is conventionally the static world body
                 (created automatically by :class:`WorldBuilder`).
             constraints: Pre-allocated and populated shared
-                :class:`ConstraintContainer`. Per-type ranges are
-                addressed via the ``*_cid_offset`` arguments.
-            num_ball_sockets: Number of ball-socket constraints stored
-                contiguously starting at ``ball_socket_cid_offset``.
-            ball_socket_cid_offset: First column index in
-                ``constraints.data`` that holds ball-socket state.
-                Today the entire container is ball-sockets, so this is
-                ``0``; reserved for future contact / motor types.
+                :class:`ConstraintContainer`. Each column's type is
+                self-describing via its first dword (``constraint_type``
+                tag); the solver dispatches purely from that.
+            num_constraints: Total number of *active* constraint columns
+                (across all types). Must equal
+                ``constraints.data.shape[1]`` unless the container has
+                trailing unused capacity.
             substeps: Number of sub-steps per :meth:`step` call (mirrors
                 ``World.substeps``).
             solver_iterations: PGS iterations inside ``SolveVelocities``.
@@ -112,8 +112,7 @@ class World:
         self.constraints: ConstraintContainer = constraints
 
         self.num_bodies: int = int(bodies.position.shape[0])
-        self.num_ball_sockets: int = int(num_ball_sockets)
-        self.ball_socket_cid_offset: int = int(ball_socket_cid_offset)
+        self.num_constraints: int = int(num_constraints)
 
         self.substeps = int(substeps)
         self.solver_iterations = int(solver_iterations)
@@ -127,19 +126,18 @@ class World:
 
         # ----- Coloring / partitioning infrastructure ------------------
         # The partitioner consumes a flat ElementInteractionData array.
-        # We rebuild it once per step() (driven by future contact/motor
-        # types whose topology varies frame-to-frame); for now it's just
-        # the static joint set so we still pay the rebuild every step
-        # rather than carrying a dirty flag.
+        # We rebuild it once per step() so future contact / motor types
+        # whose topology varies frame-to-frame can be added without any
+        # dirty-flag plumbing.
         self._elements: wp.array[ElementInteractionData] = wp.zeros(
-            self.num_ball_sockets, dtype=ElementInteractionData, device=self.device
+            max(1, self.num_constraints), dtype=ElementInteractionData, device=self.device
         )
         self._num_active_constraints: wp.array[int] = wp.array(
-            [self.num_ball_sockets], dtype=wp.int32, device=self.device
+            [self.num_constraints], dtype=wp.int32, device=self.device
         )
         # tile-scan path keeps wp.capture_while bodies allocation-free.
         self._partitioner = IncrementalContactPartitioner(
-            max_num_interactions=max(1, self.num_ball_sockets),
+            max_num_interactions=max(1, self.num_constraints),
             max_num_nodes=max(1, self.num_bodies),
             device=self.device,
             use_tile_scan=True,
@@ -230,17 +228,22 @@ class World:
         """Mirrors ``SolveVelocities``: PGS over all constraints.
 
         Drives the :class:`IncrementalContactPartitioner` via
-        ``wp.capture_while`` -- one ``capture_while`` per sweep walks the
-        partitioner's ``num_remaining`` counter down to zero, launching
-        the supplied indirect ball-socket kernel once per partition.
+        ``wp.capture_while`` -- one ``capture_while`` per sweep walks
+        the partitioner's ``num_remaining`` counter down to zero,
+        launching the unified
+        :func:`_constraint_prepare_for_iteration_kernel` /
+        :func:`_constraint_iterate_kernel` dispatcher once per
+        partition. Each thread reads the per-cid type tag and routes to
+        the right ``wp.func`` -- the solver itself is type-agnostic.
 
-        ``capture_while`` works in both modes: standalone it captures and
-        launches its own little graph; under an outer ``wp.ScopedCapture``
-        it just adds a conditional-while node to the parent capture.
-        Either way, the caller controls the graph lifetime -- we never
-        capture or cache anything inside :class:`World`.
+        ``capture_while`` works in both modes: standalone it captures
+        and launches its own little graph; under an outer
+        ``wp.ScopedCapture`` it just adds a conditional-while node to
+        the parent capture. Either way, the caller controls the graph
+        lifetime -- we never capture or cache anything inside
+        :class:`World`.
         """
-        if self.num_ball_sockets == 0:
+        if self.num_constraints == 0:
             return
 
         idt = wp.float32(1.0 / self.substep_dt)
@@ -250,7 +253,7 @@ class World:
         wp.capture_while(
             self._partitioner.num_remaining,
             self._capture_partition_sweep,
-            kernel=ball_socket_prepare_for_iteration_kernel,
+            kernel=_constraint_prepare_for_iteration_kernel,
             idt=idt,
         )
 
@@ -260,7 +263,7 @@ class World:
             wp.capture_while(
                 self._partitioner.num_remaining,
                 self._capture_partition_sweep,
-                kernel=ball_socket_iterate_kernel,
+                kernel=_constraint_iterate_kernel,
                 idt=idt,
             )
 
@@ -269,22 +272,21 @@ class World:
     # ------------------------------------------------------------------
 
     def _rebuild_elements(self) -> None:
-        """Project the current constraint set into ``_elements``.
+        """Project every constraint's body pair into ``_elements``.
 
-        Launched once per :meth:`step`. Today we only have one type
-        (ball-socket) so it's a single kernel; when contacts and motors
-        land each type gets its own per-type element-projection kernel
-        appended here, all writing into disjoint slices of
-        ``self._elements``.
+        Launched once per :meth:`step`. The projection is type-agnostic:
+        :func:`_constraints_to_elements_kernel` reads body1/body2 from
+        the fixed-offset constraint header without dispatching on type,
+        so a single launch covers ball-sockets, hinges, motors, future
+        contacts, etc.
         """
-        if self.num_ball_sockets == 0:
+        if self.num_constraints == 0:
             return
         wp.launch(
-            _ball_socket_to_element_kernel,
-            dim=self.num_ball_sockets,
+            _constraints_to_elements_kernel,
+            dim=self.num_constraints,
             inputs=[
                 self.constraints,
-                self.ball_socket_cid_offset,
                 self._num_active_constraints,
                 self._elements,
             ],
@@ -297,15 +299,15 @@ class World:
         Per partition we (1) advance the partitioner one colour to publish
         a fresh independent set in
         ``partitioner.partition_element_ids[:partition_count[0]]``, then
-        (2) launch the supplied indirect ball-socket ``kernel`` over that
-        set. The launch is sized by the constraint capacity so the dim is
-        a Python-side constant; threads beyond ``partition_count[0]``
+        (2) launch the unified dispatch ``kernel`` over that set. The
+        launch is sized by the constraint capacity so the dim is a
+        Python-side constant; threads beyond ``partition_count[0]``
         early-out inside the kernel.
         """
         self._partitioner.launch()
         wp.launch(
             kernel,
-            dim=self.num_ball_sockets,
+            dim=self.num_constraints,
             inputs=[
                 self.constraints,
                 self.bodies,

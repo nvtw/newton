@@ -48,7 +48,10 @@ import warp as wp
 
 from newton._src.solvers.jitter.body import BodyContainer
 from newton._src.solvers.jitter.constraint_container import (
+    CONSTRAINT_TYPE_HINGE_ANGLE,
     ConstraintContainer,
+    assert_constraint_header,
+    constraint_set_type,
     read_float,
     read_int,
     read_mat33,
@@ -89,8 +92,8 @@ __all__ = [
     "hinge_angle_get_q0",
     "hinge_angle_get_softness",
     "hinge_angle_initialize_kernel",
-    "hinge_angle_iterate_kernel",
-    "hinge_angle_prepare_for_iteration_kernel",
+    "hinge_angle_iterate",
+    "hinge_angle_prepare_for_iteration",
     "hinge_angle_set_accumulated_impulse",
     "hinge_angle_set_axis",
     "hinge_angle_set_bias",
@@ -145,7 +148,13 @@ class HingeAngleData:
 
     Fields are arranged in struct-natural order with no manual padding;
     everything is 32-bit so the struct is dword-aligned end-to-end.
+
+    The first field is the global ``constraint_type`` tag (mandatory
+    contract for every constraint schema -- see
+    :func:`assert_constraint_header`).
     """
+
+    constraint_type: wp.int32
 
     # Body indices (replaces JHandle<RigidBodyData>).
     body1: wp.int32
@@ -178,6 +187,12 @@ class HingeAngleData:
     # Limit clamp state for the third axis: 0 / 1 / 2 (see _CLAMP_*).
     clamp: wp.int32
 
+
+# Enforce the global constraint header contract (constraint_type / body1
+# / body2 at dwords 0 / 1 / 2) at import time so a future field reorder
+# fails loudly here instead of silently mis-tagging columns or
+# scrambling body indices at runtime.
+assert_constraint_header(HingeAngleData)
 
 # Dword offsets derived once from the schema. Each is a Python int;
 # wrapped in wp.constant so kernels can use them as compile-time literals.
@@ -417,6 +432,7 @@ def hinge_angle_initialize_kernel(
     # (== q2^{-1} * q1 for unit quaternions).
     q0 = wp.quat_inverse(q2) * q1
 
+    constraint_set_type(constraints, cid, CONSTRAINT_TYPE_HINGE_ANGLE)
     hinge_angle_set_body1(constraints, cid, b1)
     hinge_angle_set_body2(constraints, cid, b2)
 
@@ -448,7 +464,7 @@ def hinge_angle_initialize_kernel(
 
 
 @wp.func
-def _hinge_angle_prepare_for_iteration(
+def hinge_angle_prepare_for_iteration(
     constraints: ConstraintContainer,
     cid: wp.int32,
     bodies: BodyContainer,
@@ -589,7 +605,7 @@ def _hinge_angle_prepare_for_iteration(
 
 
 @wp.func
-def _hinge_angle_iterate(
+def hinge_angle_iterate(
     constraints: ConstraintContainer,
     cid: wp.int32,
     bodies: BodyContainer,
@@ -652,44 +668,3 @@ def _hinge_angle_iterate(
     j_lam = jacobian @ lam
     bodies.angular_velocity[b1] = angular_velocity1 + inv_inertia1 @ j_lam
     bodies.angular_velocity[b2] = angular_velocity2 - inv_inertia2 @ j_lam
-
-
-@wp.kernel
-def hinge_angle_prepare_for_iteration_kernel(
-    constraints: ConstraintContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    partition_element_ids: wp.array[wp.int32],
-    partition_count: wp.array[wp.int32],
-):
-    """Indirect launch over a single graph-coloring partition.
-
-    Same launch contract as the ball-socket kernel:
-    ``partition_element_ids[tid]`` is the cid this thread should process,
-    threads with ``tid >= partition_count[0]`` early-out, and the
-    partitioner guarantees no two cids in the same partition share a
-    body so the per-thread RMW of ``bodies.angular_velocity`` is
-    race-free.
-    """
-    tid = wp.tid()
-    if tid >= partition_count[0]:
-        return
-    cid = partition_element_ids[tid]
-    _hinge_angle_prepare_for_iteration(constraints, cid, bodies, idt)
-
-
-@wp.kernel
-def hinge_angle_iterate_kernel(
-    constraints: ConstraintContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    partition_element_ids: wp.array[wp.int32],
-    partition_count: wp.array[wp.int32],
-):
-    """Indirect launch over a single graph-coloring partition. See
-    :func:`hinge_angle_prepare_for_iteration_kernel` for the contract."""
-    tid = wp.tid()
-    if tid >= partition_count[0]:
-        return
-    cid = partition_element_ids[tid]
-    _hinge_angle_iterate(constraints, cid, bodies, idt)

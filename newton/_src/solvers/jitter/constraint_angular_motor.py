@@ -54,7 +54,10 @@ import warp as wp
 
 from newton._src.solvers.jitter.body import BodyContainer
 from newton._src.solvers.jitter.constraint_container import (
+    CONSTRAINT_TYPE_ANGULAR_MOTOR,
     ConstraintContainer,
+    assert_constraint_header,
+    constraint_set_type,
     read_float,
     read_int,
     read_vec3,
@@ -77,8 +80,8 @@ __all__ = [
     "angular_motor_get_max_lambda",
     "angular_motor_get_velocity",
     "angular_motor_initialize_kernel",
-    "angular_motor_iterate_kernel",
-    "angular_motor_prepare_for_iteration_kernel",
+    "angular_motor_iterate",
+    "angular_motor_prepare_for_iteration",
     "angular_motor_set_accumulated_impulse",
     "angular_motor_set_body1",
     "angular_motor_set_body2",
@@ -107,7 +110,13 @@ class AngularMotorData:
 
     Fields are arranged in struct-natural order with no manual padding;
     everything is 32-bit so the struct is dword-aligned end-to-end.
+
+    The first field is the global ``constraint_type`` tag (mandatory
+    contract for every constraint schema -- see
+    :func:`assert_constraint_header`).
     """
+
+    constraint_type: wp.int32
 
     body1: wp.int32
     body2: wp.int32
@@ -136,6 +145,12 @@ class AngularMotorData:
 
     accumulated_impulse: wp.float32
 
+
+# Enforce the global constraint header contract (constraint_type / body1
+# / body2 at dwords 0 / 1 / 2) at import time so a future field reorder
+# fails loudly here instead of silently mis-tagging columns or
+# scrambling body indices at runtime.
+assert_constraint_header(AngularMotorData)
 
 # Dword offsets derived once from the schema. Each is a Python int;
 # wrapped in wp.constant so kernels can use them as compile-time literals.
@@ -308,6 +323,7 @@ def angular_motor_initialize_kernel(
     local_axis1 = wp.quat_rotate_inv(q1, a1)
     local_axis2 = wp.quat_rotate_inv(q2, a2)
 
+    constraint_set_type(constraints, cid, CONSTRAINT_TYPE_ANGULAR_MOTOR)
     angular_motor_set_body1(constraints, cid, b1)
     angular_motor_set_body2(constraints, cid, b2)
     angular_motor_set_local_axis1(constraints, cid, local_axis1)
@@ -321,12 +337,12 @@ def angular_motor_initialize_kernel(
 
 
 # ---------------------------------------------------------------------------
-# Per-iteration math (wp.func helpers + dispatch kernels)
+# Per-iteration math
 # ---------------------------------------------------------------------------
 
 
 @wp.func
-def _angular_motor_prepare_for_iteration(
+def angular_motor_prepare_for_iteration(
     constraints: ConstraintContainer,
     cid: wp.int32,
     bodies: BodyContainer,
@@ -378,7 +394,7 @@ def _angular_motor_prepare_for_iteration(
 
 
 @wp.func
-def _angular_motor_iterate(
+def angular_motor_iterate(
     constraints: ConstraintContainer,
     cid: wp.int32,
     bodies: BodyContainer,
@@ -425,44 +441,3 @@ def _angular_motor_iterate(
 
     bodies.angular_velocity[b1] = angular_velocity1 - inv_inertia1 @ (j1 * lam)
     bodies.angular_velocity[b2] = angular_velocity2 + inv_inertia2 @ (j2 * lam)
-
-
-@wp.kernel
-def angular_motor_prepare_for_iteration_kernel(
-    constraints: ConstraintContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    partition_element_ids: wp.array[wp.int32],
-    partition_count: wp.array[wp.int32],
-):
-    """Indirect launch over a single graph-coloring partition.
-
-    Same launch contract as the other constraint kernels:
-    ``partition_element_ids[tid]`` is the cid this thread should
-    process, threads with ``tid >= partition_count[0]`` early-out, and
-    the partitioner guarantees no two cids in the same partition share
-    a body so the per-thread RMW of ``bodies.angular_velocity`` is
-    race-free.
-    """
-    tid = wp.tid()
-    if tid >= partition_count[0]:
-        return
-    cid = partition_element_ids[tid]
-    _angular_motor_prepare_for_iteration(constraints, cid, bodies, idt)
-
-
-@wp.kernel
-def angular_motor_iterate_kernel(
-    constraints: ConstraintContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    partition_element_ids: wp.array[wp.int32],
-    partition_count: wp.array[wp.int32],
-):
-    """Indirect launch over a single graph-coloring partition. See
-    :func:`angular_motor_prepare_for_iteration_kernel` for the contract."""
-    tid = wp.tid()
-    if tid >= partition_count[0]:
-        return
-    cid = partition_element_ids[tid]
-    _angular_motor_iterate(constraints, cid, bodies, idt)

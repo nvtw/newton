@@ -29,13 +29,28 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.jitter.data_packing import (
+    dword_offset_of,
     reinterpret_float_as_int,
     reinterpret_int_as_float,
 )
 
 __all__ = [
+    "CONSTRAINT_BODY1_OFFSET",
+    "CONSTRAINT_BODY2_OFFSET",
+    "CONSTRAINT_TYPE_ANGULAR_MOTOR",
+    "CONSTRAINT_TYPE_BALL_SOCKET",
+    "CONSTRAINT_TYPE_HINGE_ANGLE",
+    "CONSTRAINT_TYPE_INVALID",
+    "CONSTRAINT_TYPE_OFFSET",
     "ConstraintContainer",
+    "assert_constraint_header",
     "constraint_container_zeros",
+    "constraint_get_body1",
+    "constraint_get_body2",
+    "constraint_get_type",
+    "constraint_set_body1",
+    "constraint_set_body2",
+    "constraint_set_type",
     "read_float",
     "read_int",
     "read_mat33",
@@ -47,6 +62,86 @@ __all__ = [
     "write_quat",
     "write_vec3",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Constraint header layout (type tag + body indices)
+# ---------------------------------------------------------------------------
+#
+# Every per-type constraint schema *must* start with the same three
+# dwords, in order:
+#
+#   dword 0: constraint_type  (wp.int32)
+#   dword 1: body1            (wp.int32)
+#   dword 2: body2            (wp.int32)
+#
+# Pinning this header lets the generic dispatcher and element-projection
+# kernels read the type tag + body pair from *any* column without
+# knowing which per-type schema packed it. The per-type ``*_get_body1``
+# / ``*_get_body2`` accessors stay (they're symmetric with the rest of
+# the per-type accessors) but they all collapse to the same load --
+# they're effectively aliases of :func:`constraint_get_body1` /
+# :func:`constraint_get_body2`.
+#
+# The contract is checked at import time by
+# :func:`assert_constraint_header` -- if a future edit reorders fields,
+# the importing module's ``import`` fails loudly instead of silently
+# corrupting body indices at runtime.
+#
+# Type tags: add new tags here -- monotonically increasing, no holes
+# -- and mirror the assignment in the per-type module's
+# ``constraint_set_type`` call. Don't reuse retired tag values; bump
+# the highest one instead so any stale persisted state shows up loudly.
+
+#: Sentinel for unwritten / cleared columns.
+CONSTRAINT_TYPE_INVALID = wp.constant(wp.int32(0))
+CONSTRAINT_TYPE_BALL_SOCKET = wp.constant(wp.int32(1))
+CONSTRAINT_TYPE_HINGE_ANGLE = wp.constant(wp.int32(2))
+CONSTRAINT_TYPE_ANGULAR_MOTOR = wp.constant(wp.int32(3))
+
+#: Dword offsets of the three header fields. By contract these are
+#: 0 / 1 / 2 for every constraint schema (enforced by
+#: :func:`assert_constraint_header`).
+CONSTRAINT_TYPE_OFFSET = wp.constant(wp.int32(0))
+CONSTRAINT_BODY1_OFFSET = wp.constant(wp.int32(1))
+CONSTRAINT_BODY2_OFFSET = wp.constant(wp.int32(2))
+
+
+def assert_constraint_header(struct_type: object) -> None:
+    """Validate the three-field constraint header contract.
+
+    Every per-type constraint schema must start with::
+
+        @wp.struct
+        class FooConstraintData:
+            constraint_type: wp.int32   # dword 0
+            body1:           wp.int32   # dword 1
+            body2:           wp.int32   # dword 2
+            # ... type-specific fields ...
+
+    Each per-type module calls this at import time with its schema. If a
+    future edit reorders or removes any of these three fields, the
+    importing module fails immediately with a clear error rather than
+    silently mis-routing constraint dispatch or scrambling body indices
+    at runtime.
+    """
+    expected = [("constraint_type", 0), ("body1", 1), ("body2", 2)]
+    for field, want in expected:
+        try:
+            got = dword_offset_of(struct_type, field)
+        except AttributeError as exc:
+            raise AttributeError(
+                f"{struct_type!r} is missing the mandatory header field "
+                f"{field!r} (every constraint schema must start with "
+                "constraint_type / body1 / body2 at dwords 0 / 1 / 2)."
+            ) from exc
+        if got != want:
+            raise ValueError(
+                f"{struct_type!r}.{field} must be at dword {want} of the "
+                f"schema (got {got}). The constraint header (constraint_type, "
+                "body1, body2) must occupy the first three dwords of every "
+                "constraint @wp.struct."
+            )
 
 
 @wp.struct
@@ -176,3 +271,65 @@ def write_mat33(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.mat3
     c.data[off + 6, cid] = v[2, 0]
     c.data[off + 7, cid] = v[2, 1]
     c.data[off + 8, cid] = v[2, 2]
+
+
+# ---------------------------------------------------------------------------
+# Generic header accessors -- valid for any constraint type
+# ---------------------------------------------------------------------------
+#
+# These intentionally do *not* import any per-type schema. The contract
+# (asserted at module load by ``assert_constraint_header``) is that
+# every schema's first three dwords are constraint_type / body1 / body2
+# in that order, so the dispatcher and element-projection kernels can
+# read them from any column without knowing which schema packed it.
+
+
+@wp.func
+def constraint_get_type(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
+    """Read the ``CONSTRAINT_TYPE_*`` tag of constraint ``cid``.
+
+    Works on any column regardless of which per-type init kernel packed
+    it. Used by the generic dispatch path to route each cid to the
+    right prepare/iterate ``wp.func``.
+    """
+    return read_int(c, CONSTRAINT_TYPE_OFFSET, cid)
+
+
+@wp.func
+def constraint_set_type(c: ConstraintContainer, cid: wp.int32, t: wp.int32):
+    """Write the ``CONSTRAINT_TYPE_*`` tag of constraint ``cid``.
+
+    Called from each per-type initialise kernel to stamp the column
+    with its type so :func:`constraint_get_type` can later route it.
+    """
+    write_int(c, CONSTRAINT_TYPE_OFFSET, cid, t)
+
+
+@wp.func
+def constraint_get_body1(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
+    """Read the body 1 index of constraint ``cid``.
+
+    Type-agnostic; works because every constraint schema is required to
+    place ``body1`` at dword 1 (see :func:`assert_constraint_header`).
+    Used by the unified element-projection kernel that builds the
+    partitioner's element view from the shared container without having
+    to dispatch on type.
+    """
+    return read_int(c, CONSTRAINT_BODY1_OFFSET, cid)
+
+
+@wp.func
+def constraint_set_body1(c: ConstraintContainer, cid: wp.int32, b: wp.int32):
+    return write_int(c, CONSTRAINT_BODY1_OFFSET, cid, b)
+
+
+@wp.func
+def constraint_get_body2(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
+    """Read the body 2 index of constraint ``cid``. See
+    :func:`constraint_get_body1` for the contract."""
+    return read_int(c, CONSTRAINT_BODY2_OFFSET, cid)
+
+
+@wp.func
+def constraint_set_body2(c: ConstraintContainer, cid: wp.int32, b: wp.int32):
+    return write_int(c, CONSTRAINT_BODY2_OFFSET, cid, b)
