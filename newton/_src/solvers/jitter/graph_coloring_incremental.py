@@ -252,13 +252,15 @@ class IncrementalContactPartitioner:
             ],
         )
 
-        # 2. Zero flags[0..num_elements[0]) then set flags[tid]=1 for
-        #    elements just committed to the current partition.
-        wp.launch(
-            incremental_zero_int_kernel,
-            dim=self.max_num_interactions,
-            inputs=[self._flags, self._num_elements],
-        )
+        # 2. Set flags[tid]=1 for elements just committed to the current
+        #    partition, 0 otherwise. The flag kernel unconditionally
+        #    writes every slot in ``[0, max_num_interactions)`` (the
+        #    ``tid >= n`` guard stores 0, the ``tid < n`` body stores 0
+        #    or 1), so no separate zero-pass is required -- the prior
+        #    ``incremental_zero_int_kernel`` launch was dead code.
+        #    Slots in ``[max_num_interactions, padded_len)`` stay at
+        #    their construction-time zeros for the lifetime of the
+        #    object (nothing else touches them).
         wp.launch(
             incremental_flag_kernel,
             dim=self.max_num_interactions,

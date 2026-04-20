@@ -34,6 +34,8 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+
 import numpy as np
 import warp as wp
 
@@ -48,6 +50,21 @@ from newton._src.solvers.jitter.world_builder import (
 )
 
 DEFAULT_LAYERS = 10
+
+# When True, the example runs exactly :data:`KERNEL_TIMING_FRAMES`
+# rendered frames under :func:`wp.timing_begin` / :func:`wp.timing_end`
+# instrumentation (per-kernel CUDA timings), prints a summary table on
+# exit, and asks the viewer to close. Requires a CUDA device -- on CPU
+# the flag is silently ignored and the example runs as usual.
+#
+# Because CUDA graphs do not provide per-kernel timings, enabling this
+# mode disables graph capture (``self.graph = None``) and drives each
+# frame through the eager :meth:`Example.simulate` path. Expect ~1 ms
+# of extra CPU overhead per frame from the timing API; this is the
+# overhead the benchmark is supposed to account for.
+ENABLE_KERNEL_TIMING = True
+KERNEL_TIMING_FRAMES = 200
+
 BOX_HALF = 0.5
 # Tight spacing produces a well-aligned pyramid; keep a small
 # horizontal gap so the broad phase doesn't produce spurious inter-
@@ -215,6 +232,19 @@ class Example:
         self.sim_substeps = 4
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.solver_iterations = 20
+        self._frame: int = 0
+
+        # ---- Optional per-kernel CUDA timing ---------------------------
+        # See the module-level ``ENABLE_KERNEL_TIMING`` comment. We
+        # snapshot both flags onto ``self`` so tweaking them from
+        # within the Example instance (e.g. a future CLI flag) stays
+        # trivially local.
+        self.enable_kernel_timing: bool = bool(ENABLE_KERNEL_TIMING)
+        self.kernel_timing_frames: int = int(KERNEL_TIMING_FRAMES)
+        self._timing_totals: dict[str, list[float]] = defaultdict(list)
+        self._timing_frame_count: int = 0
+        self._terminate_requested: bool = False
+        self._exit_report_printed: bool = False
 
         self.viewer = viewer
         self.device = wp.get_device()
@@ -268,12 +298,17 @@ class Example:
 
         # ---- Build the Jitter world mirroring Newton's body set -----
         builder, newton_to_jitter = _build_jitter_world_from_model(self.model)
-        # Upper bound on contact columns: every box/plane pair yields
-        # up to 4 contacts (= 1 column), and box/box pairs in a stack
-        # add roughly one column per horizontal+vertical contact. A
-        # safe envelope is "one column per contact", which is the
-        # coarsest bound the ingest pipeline needs.
-        max_contact_columns = max(16, rigid_contact_max)
+        # Upper bound on contact *columns* (not contacts). A column
+        # packs up to 6 contact points from the same shape pair, so
+        # ``ceil(rigid_contact_max / 6)`` is a tight worst case even
+        # for fully-packed mesh manifolds. Using ``rigid_contact_max``
+        # directly -- the old "one column per contact" bound -- made
+        # the graph-colouring grid sizes 4-6x larger than necessary
+        # because primitive contacts yield one column per pair (up to
+        # 5 contacts) in Newton's collision pipeline, so the partitioner
+        # kernels spent most of their time in threads that early-out
+        # against ``num_elements[0]``.
+        max_contact_columns = max(16, (rigid_contact_max + 5) // 6)
         num_shapes = int(self.model.shape_count)
         self.world = builder.finalize(
             substeps=1,
@@ -320,7 +355,13 @@ class Example:
         register_with_viewer_gl(self.viewer, self.picking)
 
         self.graph = None
-        self.capture()
+        # Per-kernel CUDA timings are only collected from *eager*
+        # kernel launches; a captured graph replays as one opaque
+        # operation. Skip capture when the flag is set so
+        # :func:`wp.timing_begin` / :func:`wp.timing_end` in
+        # :meth:`step` see the individual launches.
+        if not self.enable_kernel_timing:
+            self.capture()
 
     # ----------------------------------------------------------------
     # Simulation
@@ -409,13 +450,102 @@ class Example:
         )
 
     def step(self) -> None:
-        if self.graph is not None:
+        if self.enable_kernel_timing:
+            # Eager launches only -- graph replays collapse into a
+            # single opaque event. ``TIMING_KERNEL_BUILTIN`` captures
+            # Warp's internal ops (memset, memcpy, etc.) alongside our
+            # kernels so the summed total matches wall-clock.
+            wp.timing_begin(cuda_filter=wp.TIMING_KERNEL | wp.TIMING_KERNEL_BUILTIN)
+            self.simulate()
+            for result in wp.timing_end():
+                self._timing_totals[result.name].append(result.elapsed)
+            self._timing_frame_count += 1
+        elif self.graph is not None:
             wp.capture_launch(self.graph)
         else:
             self.simulate()
+
         self.sim_time += self.frame_dt
+        self._frame += 1
+
+        # Diagnostic: log how densely the PGS graph coloured the
+        # constraint set after the most recent substep. Printed every
+        # half-second (30 frames at 60 fps) -- the device-to-host copy
+        # in ``num_colors_used()`` is deliberately *not* captured into
+        # the CUDA graph, so this costs one extra ~10 us sync per print
+        # and is free on the frames in between.
+        if self._frame % 30 == 0:
+            print(
+                f"[pyramid] frame {self._frame:5d}  "
+                f"colors used by PGS: {self.world.num_colors_used()}"
+            )
+
+        # Auto-exit once enough frames have been instrumented. The
+        # actual ``viewer.close()`` call happens in :meth:`render` so
+        # we don't tear down from inside the simulation step.
+        if (
+            self.enable_kernel_timing
+            and self._timing_frame_count >= self.kernel_timing_frames
+            and not self._terminate_requested
+        ):
+            self._terminate_requested = True
+            print(
+                f"[pyramid] reached kernel-timing frame budget "
+                f"({self._timing_frame_count} frames); closing."
+            )
+
+    def _print_exit_benchmark_report(self) -> None:
+        """Print an aggregated per-kernel timing table.
+
+        No-op if :attr:`enable_kernel_timing` is off, if no frames were
+        instrumented, or if the report was already printed (guarded by
+        :attr:`_exit_report_printed`). Mirrors the table format of
+        :mod:`newton.examples.contacts.example_nut_bolt_sdf_benchmark`.
+        """
+        if self._exit_report_printed:
+            return
+        self._exit_report_printed = True
+        if self._timing_frame_count <= 0:
+            return
+
+        frame_count = self._timing_frame_count
+        width = 110
+        kernel_width = width - 30
+        print(f"\n{'=' * width}")
+        print(f"  Kernel timing report ({frame_count} frames)")
+        print(f"{'=' * width}")
+        print(f"{'Kernel':<{kernel_width}} {'Total ms':>10} {'Avg ms':>10} {'Count':>7}")
+        print(f"{'-' * kernel_width} {'-' * 10} {'-' * 10} {'-' * 7}")
+
+        grand_total = 0.0
+        rows = []
+        for name, times in self._timing_totals.items():
+            total = float(sum(times))
+            grand_total += total
+            rows.append((total, name, total / len(times), len(times)))
+        rows.sort(key=lambda row: row[0], reverse=True)
+
+        for total, name, avg, count in rows:
+            label = name if len(name) <= kernel_width else name[: kernel_width - 3] + "..."
+            print(f"{label:<{kernel_width}} {total:>10.3f} {avg:>10.4f} {count:>7}")
+
+        print(f"{'-' * kernel_width} {'-' * 10}")
+        print(f"{'TOTAL':<{kernel_width}} {grand_total:>10.3f}")
+        print(f"{'Per-frame average':<{kernel_width}} {grand_total / frame_count:>10.3f}")
+        print()
 
     def render(self) -> None:
+        # Kernel-timing benchmark just finished -- print the report
+        # and ask the viewer to close before spending further work on
+        # this frame's draw. ``render()`` is the right place to call
+        # ``viewer.close()`` because it's the outermost host-side
+        # operation per frame; tearing down earlier (e.g. from
+        # :meth:`step`) risks touching freed viewer state.
+        if self._terminate_requested and not self._exit_report_printed:
+            self._print_exit_benchmark_report()
+            self.viewer.close()
+            return
+
         # Pack Jitter body state into a transform array the viewer's
         # ``log_shapes`` can consume directly. We intentionally don't
         # use ``log_state`` -- the pyramid scene's articulation (one
@@ -489,3 +619,6 @@ if __name__ == "__main__":
     viewer, args = newton.examples.init(parser)
     example = Example(viewer, args)
     newton.examples.run(example, args)
+    # Print the report here too so manual Ctrl+C / window-close still
+    # yields the accumulated timings for whatever frames were captured.
+    example._print_exit_benchmark_report()

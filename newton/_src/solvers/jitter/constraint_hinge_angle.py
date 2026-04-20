@@ -656,13 +656,32 @@ def hinge_angle_prepare_for_iteration_at(
     qq = q0 * q1_inv
     m0 = qmatrix_project_multiply_left_right(qq, q2) * (-0.5)
 
-    # quat0.W < 0 -> flip both error and m0 so we always pick the
-    # short-rotation branch (avoids the 2pi wrap-around).
+    # quat0.W < 0 -> flip error, m0, **and the warm-start impulse** so we
+    # always pick the short-rotation branch (avoids the 2pi wrap-around).
+    #
+    # The accumulated impulse ``acc`` is persisted across substeps and is
+    # expressed in the sign convention of the Jacobian at the time it
+    # was written. Because the sign of ``m0`` (and hence of every row of
+    # the Jacobian ``J = m0^T @ {p0, p1, axis}``) flips on this branch,
+    # the previously-stored ``acc`` must flip alongside it; otherwise the
+    # warm-start ``J @ acc`` applies the impulse in the *wrong* direction
+    # on the first substep after ``quat0.W`` crosses zero, kicking the
+    # bodies with an un-physical pulse that the remaining iterations
+    # can't fully absorb (visible as a sudden angular-velocity burst on
+    # every half-revolution). Flipping ``acc`` keeps the stored impulse
+    # consistent with the flipped Jacobian, so the warm-start is
+    # direction-correct and the only residual is the sub-step numerical
+    # noise the iterate step already handles.
+    #
+    # NB: this is a genuine bug in upstream Jitter2's ``HingeAngle.cs``
+    # too (the reference also omits the ``acc`` flip). Covered by
+    # ``TestHingeAngle.test_wrap_around_does_not_inject_energy``.
     if quat0[3] < 0.0:
         err_x = -err_x
         err_y = -err_y
         err_z = -err_z
         m0 = m0 * (-1.0)
+        acc = -acc
 
     # Jacobian rows (column-vector convention used everywhere here):
     #   row k = (m0^T * row_k_axis)^T  -- C# stores the rows directly via

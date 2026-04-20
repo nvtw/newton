@@ -592,6 +592,37 @@ class World:
             device=self.device,
         )
 
+    def num_colors_used(self) -> int:
+        """Number of graph colors used by the last PGS partitioning sweep.
+
+        Diagnostic read-only accessor intended for sim inspection,
+        logging, and tuning: it answers "how many sequential partitions
+        did the PGS dispatcher fan out over in the most recent substep?".
+        Low values mean the constraint graph is loosely coupled and the
+        solver's per-iteration cost is nearly proportional to
+        ``num_constraints / num_colors``; high values indicate a densely
+        connected graph (stacks, grasped objects, long rigid loops) that
+        serialises more of the PGS work.
+
+        Graph-capture-safe by design: this performs a single device-to-
+        host int32 copy via ``.numpy()``, which implicitly synchronises
+        and cannot be captured into a CUDA graph. Call it *outside* any
+        :func:`wp.ScopedCapture` / :func:`wp.capture_launch` block --
+        typically once per frame from the host for logging. The copy
+        is a ~10 us round-trip; budget accordingly if you plan to poll
+        on every substep.
+
+        The value reflects the partitioner state after the most recent
+        :meth:`step` returns (i.e. the coloring produced by the last
+        substep of that step). Calling this before the first
+        :meth:`step` returns ``0``.
+
+        Returns:
+            Number of colors (>=0) used to partition the active
+            constraint graph in the last PGS sweep.
+        """
+        return int(self._partitioner.current_color.numpy()[0])
+
     def gather_contact_wrenches(self, out: wp.array) -> None:
         """Per-individual-contact force + torque from the last substep.
 
