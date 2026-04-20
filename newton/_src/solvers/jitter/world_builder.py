@@ -498,8 +498,11 @@ class D6Descriptor:
     drives to soften axes, add PD setpoints, cap forces, or free
     individual axes.
 
-    Solved as one column with a 6x6 Schur complement (3x3 + 3x3 + 3x3
-    cross-block) -- see
+    Internally dispatches the translation and rotation blocks to
+    specialized sub-parts at ``finalize()`` time -- a fused 3-DoF
+    point/euler constraint when every axis in the block is rigid, or
+    three independent 1-DoF axis/angle constraints otherwise (Jolt
+    ``SixDOFConstraint`` style). See
     :mod:`newton._src.solvers.jitter.constraint_d6` for the math.
 
     The 3 angular axes and 3 linear axes are interpreted in *body 1's
@@ -563,9 +566,20 @@ class WorldBuilder:
 
     def __init__(self):
         # Body 0 is the static world body; user calls to add_*_body
-        # start at index 1. We seed it with the canonical defaults
-        # (origin, identity rotation, MOTION_STATIC, no inertia).
-        self._bodies: list[RigidBodyDescriptor] = [RigidBodyDescriptor()]
+        # start at index 1. We seed it with the canonical static
+        # defaults (origin, identity rotation, MOTION_STATIC, zero
+        # inverse mass *and* zero inverse inertia, no gravity). The
+        # zero inertia is critical: constraints attached to the world
+        # body read ``inverse_inertia_world[0]`` for their effective-
+        # mass terms, and a non-zero value would split the impulse as
+        # if the world body were dynamic.
+        self._bodies: list[RigidBodyDescriptor] = [
+            RigidBodyDescriptor(
+                inverse_mass=0.0,
+                inverse_inertia=((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
+                affected_by_gravity=False,
+            )
+        ]
         self._ball_sockets: list[BallSocketDescriptor] = []
         self._hinge_angles: list[HingeAngleDescriptor] = []
         self._angular_motors: list[AngularMotorDescriptor] = []
@@ -1092,8 +1106,12 @@ class WorldBuilder:
         Owns *all* six relative DoF between ``body1`` and ``body2`` and
         configures each axis independently via a :class:`D6AxisDrive`:
         rigid lock, soft lock, position-PD drive, velocity-PD drive,
-        force-limited drive, or free axis. Solved as one column with a
-        6x6 Schur complement -- see
+        force-limited drive, or free axis. Internally dispatches each
+        block (translation / rotation) to specialized sub-parts at
+        ``finalize()`` time -- a fused 3-DoF point/euler constraint
+        when every axis in the block is rigid, or three independent
+        1-DoF axis/angle constraints otherwise (Jolt
+        ``SixDOFConstraint`` style). See
         :mod:`newton._src.solvers.jitter.constraint_d6` for the math.
 
         The default call ``b.add_d6(b1, b2, anchor)`` (no per-axis
@@ -1235,7 +1253,13 @@ class WorldBuilder:
 
         # Reset internal state so the builder can't accidentally leak
         # references into a second finalize call.
-        self._bodies = [RigidBodyDescriptor()]
+        self._bodies = [
+            RigidBodyDescriptor(
+                inverse_mass=0.0,
+                inverse_inertia=((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
+                affected_by_gravity=False,
+            )
+        ]
         self._ball_sockets = []
         self._hinge_angles = []
         self._angular_motors = []

@@ -68,16 +68,15 @@ def _build_anchored_hinge(
     the cube only sees the joint's reactions, which makes it easy to
     isolate motor / lock effects.
 
-    NOTE: we deliberately use :meth:`WorldBuilder.add_static_body`
-    rather than the auto-created ``world_body`` (index 0). The
-    auto-created world body is configured with ``inverse_mass=0`` but
-    *identity* ``inverse_inertia`` -- the angular-only constraints
-    (motor / hinge lock) compute their effective mass from
-    ``inverse_inertia_world``, so the world body acts as a unit-
-    inertia partner instead of a true rotational sink and the motor
-    impulse is split 50/50. ``add_static_body`` sets the inverse
-    inertia to zero properly, recovering the expected "infinite
-    sink" behaviour we want for these tests.
+    NOTE: this helper uses an explicit :meth:`WorldBuilder.add_static_body`
+    anchor; an exact parallel test (``test_hanging_pendulum_uses_world_body``
+    below) anchors directly to ``b.world_body`` so a regression in the
+    world-body inertia seed (which must be zero, not the default
+    identity) shows up as a different motor / lock effective mass. The
+    auto-created world body's inverse inertia is set to zero in
+    :meth:`WorldBuilder.__init__`; if a future change reverts that to
+    identity, the per-body-pair tests below will keep passing while the
+    ``world_body`` tests start failing.
     """
     b = WorldBuilder()
     anchor = b.add_static_body()
@@ -112,8 +111,8 @@ def _build_hanging_pendulum(device, *, motor: bool = False, target_velocity: flo
     The cube COM is at ``(0, -1, 0)``, the hinge centre is the origin
     and the hinge axis is +z. The cube can swing about +z (pendulum
     motion) but must keep its other angular DoF locked. See
-    :func:`_build_anchored_hinge` for the rationale behind using
-    ``add_static_body`` rather than ``world_body`` here.
+    :func:`_build_anchored_hinge` for the rationale behind also having
+    a parallel ``world_body`` test.
     """
     b = WorldBuilder()
     anchor = b.add_static_body()
@@ -240,6 +239,52 @@ class TestHingeJoint(unittest.TestCase):
                 0.05,
                 msg=f"motor leaked into perpendicular axis {k}: omega={omegas[cube]}",
             )
+
+    def test_motor_drive_to_target_via_world_body(self):
+        """Same as :meth:`test_motor_drive_to_target`, anchored to
+        :attr:`WorldBuilder.world_body` rather than an explicit static.
+
+        Locks in the fix that ``WorldBuilder.__init__`` seeds the
+        auto-created world body's ``inverse_inertia`` to zero. Before
+        the fix the world body had identity inertia and the motor
+        impulse split 50/50 between the cube and the (non-integrated)
+        world body, so the cube only reached half the requested
+        target velocity.
+        """
+        device = wp.get_preferred_device()
+        target = 1.5
+        b = WorldBuilder()
+        cube = b.add_dynamic_body(
+            position=(0.0, 0.0, 0.0),
+            inverse_mass=1.0,
+            inverse_inertia=_INV_INERTIA,
+            affected_by_gravity=False,
+        )
+        b.add_hinge_joint(
+            body1=b.world_body,
+            body2=cube,
+            hinge_center=(0.0, 0.0, 0.0),
+            hinge_axis=_HINGE_AXIS,
+            motor=True,
+            target_velocity=target,
+            max_force=20.0,
+        )
+        world = b.finalize(
+            substeps=SUBSTEPS, solver_iterations=SOLVER_ITERATIONS, device=device
+        )
+        self._step(world)
+
+        omegas = world.bodies.angular_velocity.numpy()
+        self.assertAlmostEqual(
+            omegas[cube, 2],
+            target,
+            delta=0.1,
+            msg=(
+                f"motor anchored to world_body failed to reach target "
+                f"{target}: omega_z={omegas[cube, 2]} "
+                f"(regression: world_body identity inertia bug)"
+            ),
+        )
 
     def test_motor_drive_to_target(self):
         """Motor at non-zero target reaches the target axial velocity.

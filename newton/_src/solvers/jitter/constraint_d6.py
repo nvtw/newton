@@ -996,10 +996,19 @@ def d6_prepare_for_iteration_at(
         r1_plus_u = r1 + u  # = p2 - x1
         hertz_lin = read_vec3(constraints, base_offset + _OFF_HERTZ_LIN, cid)
         damp_lin = read_vec3(constraints, base_offset + _OFF_DAMPING_LIN, cid)
+        target_velocity_lin_pre = read_vec3(
+            constraints, base_offset + _OFF_TARGET_VEL_LIN, cid
+        )
         max_force_lin_v = max_force_lin
         eff_v = wp.vec3f(0.0, 0.0, 0.0)
         soft_v = wp.vec3f(0.0, 0.0, 0.0)
         bias_v = wp.vec3f(0.0, 0.0, 0.0)
+
+        # See angular block above for bias derivation; for linear
+        # velocity motors the same convention applies. ``c_err`` is
+        # zeroed for axes with a non-zero ``target_velocity`` so the
+        # position spring doesn't fight the motor.
+        tv_lin_v = target_velocity_lin_pre
 
         # ---- axis 0 ----
         if max_force_lin_v[0] > 0.0:
@@ -1007,10 +1016,14 @@ def d6_prepare_for_iteration_at(
             inv_eff, r1pu_x, r2_x, ii1, ii2 = _axis_calculate_inv_eff_mass(
                 r1_plus_u, r2, ax, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
             )
-            # Position error along this axis.
             c_err = wp.dot(u, ax)
+            if tv_lin_v[0] != 0.0:
+                c_err = 0.0
+                hertz_eff = 0.0
+            else:
+                hertz_eff = hertz_lin[0]
             props = _calc_spring_props(
-                inv_eff, 0.0, c_err, hertz_lin[0], damp_lin[0], dt
+                inv_eff, -tv_lin_v[0], c_err, hertz_eff, damp_lin[0], dt
             )
             eff_v[0] = props[0]
             soft_v[0] = props[1]
@@ -1027,8 +1040,13 @@ def d6_prepare_for_iteration_at(
                 r1_plus_u, r2, ax, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
             )
             c_err = wp.dot(u, ax)
+            if tv_lin_v[1] != 0.0:
+                c_err = 0.0
+                hertz_eff = 0.0
+            else:
+                hertz_eff = hertz_lin[1]
             props = _calc_spring_props(
-                inv_eff, 0.0, c_err, hertz_lin[1], damp_lin[1], dt
+                inv_eff, -tv_lin_v[1], c_err, hertz_eff, damp_lin[1], dt
             )
             eff_v[1] = props[0]
             soft_v[1] = props[1]
@@ -1045,8 +1063,13 @@ def d6_prepare_for_iteration_at(
                 r1_plus_u, r2, ax, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
             )
             c_err = wp.dot(u, ax)
+            if tv_lin_v[2] != 0.0:
+                c_err = 0.0
+                hertz_eff = 0.0
+            else:
+                hertz_eff = hertz_lin[2]
             props = _calc_spring_props(
-                inv_eff, 0.0, c_err, hertz_lin[2], damp_lin[2], dt
+                inv_eff, -tv_lin_v[2], c_err, hertz_eff, damp_lin[2], dt
             )
             eff_v[2] = props[0]
             soft_v[2] = props[1]
@@ -1060,9 +1083,28 @@ def d6_prepare_for_iteration_at(
         write_vec3(constraints, base_offset + _OFF_AXIS_SOFTNESS, cid, soft_v)
         write_vec3(constraints, base_offset + _OFF_AXIS_BIAS, cid, bias_v)
 
-        # Warm-start each active row.
-        total_lambda_a = read_vec3(
+        # Warm-start each active row. As in the angular block above,
+        # we reset ``total_lambda`` to zero per-substep on
+        # velocity-motor axes so the per-substep impulse cap actually
+        # limits the per-substep applied force.
+        total_lambda_a_in = read_vec3(
             constraints, base_offset + _OFF_AXIS_TOTAL_LAMBDA, cid
+        )
+        if tv_lin_v[0] != 0.0:
+            tla0 = wp.float32(0.0)
+        else:
+            tla0 = total_lambda_a_in[0]
+        if tv_lin_v[1] != 0.0:
+            tla1 = wp.float32(0.0)
+        else:
+            tla1 = total_lambda_a_in[1]
+        if tv_lin_v[2] != 0.0:
+            tla2 = wp.float32(0.0)
+        else:
+            tla2 = total_lambda_a_in[2]
+        total_lambda_a = wp.vec3f(tla0, tla1, tla2)
+        write_vec3(
+            constraints, base_offset + _OFF_AXIS_TOTAL_LAMBDA, cid, total_lambda_a
         )
         if eff_v[0] > 0.0:
             ii1 = read_vec3(constraints, base_offset + _OFF_AXIS_INV_I1_R1PU_X_0, cid)
@@ -1103,6 +1145,9 @@ def d6_prepare_for_iteration_at(
         # Per-axis Angle parts.
         hertz_ang = read_vec3(constraints, base_offset + _OFF_HERTZ_ANG, cid)
         damp_ang = read_vec3(constraints, base_offset + _OFF_DAMPING_ANG, cid)
+        target_velocity_ang_pre = read_vec3(
+            constraints, base_offset + _OFF_TARGET_VEL_ANG, cid
+        )
         max_force_ang_v = max_force_ang
         eff_v = wp.vec3f(0.0, 0.0, 0.0)
         soft_v = wp.vec3f(0.0, 0.0, 0.0)
@@ -1124,16 +1169,39 @@ def d6_prepare_for_iteration_at(
             sign = 1.0
         diff_xyz = wp.vec3f(diff[0] * sign, diff[1] * sign, diff[2] * sign)
 
+        # Per-axis: ``c_err`` -> spring "Baumgarte" pull toward the
+        # rest pose / position target (the target is folded into
+        # ``q_inv_init`` so any rotation drift gives a non-zero
+        # ``diff_xyz``). The velocity bias is ``-target_velocity``
+        # (Jolt convention) so that ``lambda = eff * ((w1-w2).ax -
+        # (-target))`` drives ``(w2-w1).ax`` toward ``target``.
+        #
+        # Mirrors Jolt's split: an axis with a non-zero
+        # ``target_velocity`` is treated as a *velocity motor* (no
+        # position spring), so its ``c_err`` is forced to zero -- the
+        # spring would otherwise fight the motor and drag the
+        # steady-state velocity below the setpoint. An axis with
+        # ``target_velocity == 0`` and ``hertz > 0`` keeps ``c_err``
+        # active and behaves as a soft lock / position drive that
+        # restores to the (target-folded) rest pose.
+        tv_ang_v = target_velocity_ang_pre
+
         # ---- axis 0 ----
         if max_force_ang_v[0] > 0.0:
             ax = e0_world
             inv_eff, ii1, ii2 = _angle_calculate_inv_eff_mass(
                 ax, inv_inertia1, inv_inertia2
             )
-            # Approximate angular error along this axis.
             c_err = 2.0 * wp.dot(ax, diff_xyz)
+            # Velocity-motor rule (Jolt): rigid row + ``-target`` bias,
+            # ignore ``hertz`` and the position spring entirely.
+            if tv_ang_v[0] != 0.0:
+                c_err = 0.0
+                hertz_eff = 0.0
+            else:
+                hertz_eff = hertz_ang[0]
             props = _calc_spring_props(
-                inv_eff, 0.0, c_err, hertz_ang[0], damp_ang[0], dt
+                inv_eff, -tv_ang_v[0], c_err, hertz_eff, damp_ang[0], dt
             )
             eff_v[0] = props[0]
             soft_v[0] = props[1]
@@ -1148,8 +1216,13 @@ def d6_prepare_for_iteration_at(
                 ax, inv_inertia1, inv_inertia2
             )
             c_err = 2.0 * wp.dot(ax, diff_xyz)
+            if tv_ang_v[1] != 0.0:
+                c_err = 0.0
+                hertz_eff = 0.0
+            else:
+                hertz_eff = hertz_ang[1]
             props = _calc_spring_props(
-                inv_eff, 0.0, c_err, hertz_ang[1], damp_ang[1], dt
+                inv_eff, -tv_ang_v[1], c_err, hertz_eff, damp_ang[1], dt
             )
             eff_v[1] = props[0]
             soft_v[1] = props[1]
@@ -1164,8 +1237,13 @@ def d6_prepare_for_iteration_at(
                 ax, inv_inertia1, inv_inertia2
             )
             c_err = 2.0 * wp.dot(ax, diff_xyz)
+            if tv_ang_v[2] != 0.0:
+                c_err = 0.0
+                hertz_eff = 0.0
+            else:
+                hertz_eff = hertz_ang[2]
             props = _calc_spring_props(
-                inv_eff, 0.0, c_err, hertz_ang[2], damp_ang[2], dt
+                inv_eff, -tv_ang_v[2], c_err, hertz_eff, damp_ang[2], dt
             )
             eff_v[2] = props[0]
             soft_v[2] = props[1]
@@ -1177,9 +1255,34 @@ def d6_prepare_for_iteration_at(
         write_vec3(constraints, base_offset + _OFF_ANGLE_SOFTNESS, cid, soft_v)
         write_vec3(constraints, base_offset + _OFF_ANGLE_BIAS, cid, bias_v)
 
-        # Warm-start each active row.
-        total_lambda_g = read_vec3(
+        # Warm-start each active row. ``total_lambda`` is reset to
+        # zero per-substep on velocity-motor axes so the per-substep
+        # impulse cap (``max_force * dt``) actually limits the
+        # per-substep applied torque -- otherwise the cumulative
+        # warm-started impulse saturates against the cap and the
+        # motor stalls. Matches Jolt's pattern of calling
+        # ``Deactivate()`` on motor parts in ``ResetWarmStart()``.
+        total_lambda_g_in = read_vec3(
             constraints, base_offset + _OFF_ANGLE_TOTAL_LAMBDA, cid
+        )
+        # Warp: build a fresh vec3 with the kept components and zero
+        # out the motor-axis ones (indexed assignment to vec3 is not
+        # supported in Warp kernels).
+        if tv_ang_v[0] != 0.0:
+            tlg0 = wp.float32(0.0)
+        else:
+            tlg0 = total_lambda_g_in[0]
+        if tv_ang_v[1] != 0.0:
+            tlg1 = wp.float32(0.0)
+        else:
+            tlg1 = total_lambda_g_in[1]
+        if tv_ang_v[2] != 0.0:
+            tlg2 = wp.float32(0.0)
+        else:
+            tlg2 = total_lambda_g_in[2]
+        total_lambda_g = wp.vec3f(tlg0, tlg1, tlg2)
+        write_vec3(
+            constraints, base_offset + _OFF_ANGLE_TOTAL_LAMBDA, cid, total_lambda_g
         )
         if eff_v[0] > 0.0:
             ii1 = read_vec3(constraints, base_offset + _OFF_ANGLE_INV_I1_AXIS_0, cid)
@@ -1253,9 +1356,6 @@ def d6_iterate_at(
         max_lambda_ang = read_vec3(
             constraints, base_offset + _OFF_MAX_LAMBDA_ANG, cid
         )
-        target_vel_ang = read_vec3(
-            constraints, base_offset + _OFF_TARGET_VEL_ANG, cid
-        )
         total_lambda = read_vec3(
             constraints, base_offset + _OFF_ANGLE_TOTAL_LAMBDA, cid
         )
@@ -1267,7 +1367,13 @@ def d6_iterate_at(
             ii2 = read_vec3(constraints, base_offset + _OFF_ANGLE_INV_I2_AXIS_0, cid)
             w1 = bodies.angular_velocity[b1]
             w2 = bodies.angular_velocity[b2]
-            jv = wp.dot(ax, w1 - w2) - target_vel_ang[0]
+            # Constraint equation (Jolt convention): we want
+            # ``(w2 - w1) . ax = target_vel_ang[k]`` at steady state.
+            # Velocity row: ``J*v = ax . (w1 - w2)``; bias for a
+            # velocity motor is ``-target`` (folded into ``bias_v``
+            # at prepare time), so ``lambda = eff * (J*v - bias) =
+            # eff * (ax.(w1-w2) + target)`` drives the row to zero.
+            jv = wp.dot(ax, w1 - w2)
             # bias_with_softness = softness * total_lambda + bias_const
             bias_full = soft_v[0] * total_lambda[0] + bias_v[0]
             lam_s = eff_v[0] * (jv - bias_full)
@@ -1285,7 +1391,7 @@ def d6_iterate_at(
             ii2 = read_vec3(constraints, base_offset + _OFF_ANGLE_INV_I2_AXIS_1, cid)
             w1 = bodies.angular_velocity[b1]
             w2 = bodies.angular_velocity[b2]
-            jv = wp.dot(ax, w1 - w2) - target_vel_ang[1]
+            jv = wp.dot(ax, w1 - w2)
             bias_full = soft_v[1] * total_lambda[1] + bias_v[1]
             lam_s = eff_v[1] * (jv - bias_full)
             new_lambda = wp.clamp(
@@ -1302,7 +1408,7 @@ def d6_iterate_at(
             ii2 = read_vec3(constraints, base_offset + _OFF_ANGLE_INV_I2_AXIS_2, cid)
             w1 = bodies.angular_velocity[b1]
             w2 = bodies.angular_velocity[b2]
-            jv = wp.dot(ax, w1 - w2) - target_vel_ang[2]
+            jv = wp.dot(ax, w1 - w2)
             bias_full = soft_v[2] * total_lambda[2] + bias_v[2]
             lam_s = eff_v[2] * (jv - bias_full)
             new_lambda = wp.clamp(
@@ -1351,9 +1457,6 @@ def d6_iterate_at(
         max_lambda_lin = read_vec3(
             constraints, base_offset + _OFF_MAX_LAMBDA_LIN, cid
         )
-        target_vel_lin = read_vec3(
-            constraints, base_offset + _OFF_TARGET_VEL_LIN, cid
-        )
         total_lambda = read_vec3(
             constraints, base_offset + _OFF_AXIS_TOTAL_LAMBDA, cid
         )
@@ -1369,11 +1472,13 @@ def d6_iterate_at(
             w1 = bodies.angular_velocity[b1]
             v2 = bodies.velocity[b2]
             w2 = bodies.angular_velocity[b2]
+            # Linear velocity row, Jolt convention. Velocity-motor
+            # target is folded into ``bias_v[k]`` (= ``-target``) at
+            # prepare time, so this is just ``J*v``.
             jv = (
                 wp.dot(ax, v1 - v2)
                 + wp.dot(r1pu_x, w1)
                 - wp.dot(r2_x, w2)
-                - target_vel_lin[0]
             )
             bias_full = soft_v[0] * total_lambda[0] + bias_v[0]
             lam_s = eff_v[0] * (jv - bias_full)
@@ -1401,7 +1506,6 @@ def d6_iterate_at(
                 wp.dot(ax, v1 - v2)
                 + wp.dot(r1pu_x, w1)
                 - wp.dot(r2_x, w2)
-                - target_vel_lin[1]
             )
             bias_full = soft_v[1] * total_lambda[1] + bias_v[1]
             lam_s = eff_v[1] * (jv - bias_full)
@@ -1429,7 +1533,6 @@ def d6_iterate_at(
                 wp.dot(ax, v1 - v2)
                 + wp.dot(r1pu_x, w1)
                 - wp.dot(r2_x, w2)
-                - target_vel_lin[2]
             )
             bias_full = soft_v[2] * total_lambda[2] + bias_v[2]
             lam_s = eff_v[2] * (jv - bias_full)
