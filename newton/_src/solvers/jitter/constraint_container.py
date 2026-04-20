@@ -67,14 +67,18 @@ __all__ = [
     "read_float",
     "read_int",
     "read_mat33",
+    "read_mat44",
     "read_quat",
     "read_vec3",
+    "read_vec4",
     "soft_constraint_coefficients",
     "write_float",
     "write_int",
     "write_mat33",
+    "write_mat44",
     "write_quat",
     "write_vec3",
+    "write_vec4",
 ]
 
 
@@ -342,6 +346,61 @@ def write_mat33(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.mat3
     c.data[off + 6, cid] = v[2, 0]
     c.data[off + 7, cid] = v[2, 1]
     c.data[off + 8, cid] = v[2, 2]
+
+
+@wp.func
+def read_vec4(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.vec4f:
+    return wp.vec4f(
+        c.data[off + 0, cid],
+        c.data[off + 1, cid],
+        c.data[off + 2, cid],
+        c.data[off + 3, cid],
+    )
+
+
+@wp.func
+def write_vec4(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.vec4f):
+    c.data[off + 0, cid] = v[0]
+    c.data[off + 1, cid] = v[1]
+    c.data[off + 2, cid] = v[2]
+    c.data[off + 3, cid] = v[3]
+
+
+@wp.func
+def read_mat44(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.mat44f:
+    """Read a 4x4 matrix from 16 consecutive dwords, row-major.
+
+    Field stored as ``[m00, m01, m02, m03, m10, ..., m33]`` in struct
+    order; we reconstruct the ``wp.mat44f`` with the same convention.
+    Used by the prismatic-mode Schur cache in
+    :mod:`constraint_actuated_double_ball_socket`.
+    """
+    return wp.mat44f(
+        c.data[off + 0, cid],  c.data[off + 1, cid],  c.data[off + 2, cid],  c.data[off + 3, cid],
+        c.data[off + 4, cid],  c.data[off + 5, cid],  c.data[off + 6, cid],  c.data[off + 7, cid],
+        c.data[off + 8, cid],  c.data[off + 9, cid],  c.data[off + 10, cid], c.data[off + 11, cid],
+        c.data[off + 12, cid], c.data[off + 13, cid], c.data[off + 14, cid], c.data[off + 15, cid],
+    )
+
+
+@wp.func
+def write_mat44(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.mat44f):
+    c.data[off + 0, cid]  = v[0, 0]
+    c.data[off + 1, cid]  = v[0, 1]
+    c.data[off + 2, cid]  = v[0, 2]
+    c.data[off + 3, cid]  = v[0, 3]
+    c.data[off + 4, cid]  = v[1, 0]
+    c.data[off + 5, cid]  = v[1, 1]
+    c.data[off + 6, cid]  = v[1, 2]
+    c.data[off + 7, cid]  = v[1, 3]
+    c.data[off + 8, cid]  = v[2, 0]
+    c.data[off + 9, cid]  = v[2, 1]
+    c.data[off + 10, cid] = v[2, 2]
+    c.data[off + 11, cid] = v[2, 3]
+    c.data[off + 12, cid] = v[3, 0]
+    c.data[off + 13, cid] = v[3, 1]
+    c.data[off + 14, cid] = v[3, 2]
+    c.data[off + 15, cid] = v[3, 3]
 
 
 # ---------------------------------------------------------------------------

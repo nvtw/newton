@@ -38,10 +38,12 @@ import warp as wp
 
 from newton._src.solvers.jitter.body import BodyContainer
 from newton._src.solvers.jitter.constraint_container import (
+    CONSTRAINT_TYPE_CONTACT,
     ConstraintBodies,
     ConstraintContainer,
     assert_constraint_header,
     constraint_bodies_make,
+    constraint_get_type,
     read_float,
     read_int,
     read_vec3,
@@ -64,6 +66,9 @@ __all__ = [
     "contact_get_friction",
     "contact_iterate",
     "contact_iterate_at",
+    "contact_pair_wrench_kernel",
+    "contact_per_contact_wrench_kernel",
+    "contact_per_slot_wrench_at",
     "contact_prepare_for_iteration",
     "contact_prepare_for_iteration_at",
     "contact_set_active_mask",
@@ -954,3 +959,153 @@ def contact_world_wrench(
     contacts: ContactViews,
 ):
     return contact_world_wrench_at(constraints, cid, 0, idt, cc, contacts)
+
+
+# ---------------------------------------------------------------------------
+# Per-contact / per-column force reporting
+# ---------------------------------------------------------------------------
+#
+# Two granularity levels on top of ``contact_world_wrench_at``:
+#
+# 1. ``contact_per_contact_wrench_kernel`` -- one entry per individual
+#    contact ``k`` in the upstream :class:`Contacts` buffer. Index ``k``
+#    is the same index used by ``rigid_contact_normal[k]`` etc., so the
+#    output aligns 1:1 with Newton's contact arrays and can be zipped
+#    with ``rigid_contact_point0`` / ``_point1`` / ``_shape0`` / etc.
+#    Slots that are inactive (masked out of the column) leave
+#    ``out[k]`` untouched -- caller zeros the buffer first.
+#
+# 2. ``contact_pair_wrench_kernel`` -- one entry per contact column,
+#    summed across its up-to-six active slots. This is exactly
+#    ``contact_world_wrench_at`` broadcast as a dense launch, packaged
+#    alongside ``(body1, body2)`` so callers know which pair each
+#    wrench belongs to. When a shape-pair spans multiple columns
+#    (count > 6), each column reports its own partial sum and the
+#    caller sums adjacent ``body1 == body2`` entries.
+#
+# Both kernels launch over the contact cid range
+# ``[cid_base, cid_base + max_contact_columns)`` at fixed dim and
+# early-out on empty / non-contact cids. This makes them safe inside
+# ``wp.ScopedCapture``.
+
+
+@wp.func
+def contact_per_slot_wrench_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    slot: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+):
+    """World-frame wrench for one slot of a contact column.
+
+    ``force`` is the normal + tangential impulse the contact applied
+    to *body 2* during the most recent substep divided by ``dt``;
+    ``torque`` is the moment of that force about body 2's COM using
+    the cached lever arm ``r2``. Caller must have already verified
+    the slot is active.
+    """
+    base = _slot_base(base_offset, slot)
+    contact_first = contact_get_contact_first(constraints, cid)
+    k = contact_first + slot
+    n = contacts.rigid_contact_normal[k]
+    t1_dir = _slot_get_tangent1(constraints, cid, base)
+    t2_dir = _slot_get_tangent2(constraints, cid, base)
+    r2 = _slot_get_r2(constraints, cid, base)
+    lam_n = cc.normal_lambda[slot, cid]
+    lam_t1 = cc.tangent1_lambda[slot, cid]
+    lam_t2 = cc.tangent2_lambda[slot, cid]
+    imp = lam_n * n + lam_t1 * t1_dir + lam_t2 * t2_dir
+    force = imp * idt
+    torque = wp.cross(r2, force)
+    return force, torque
+
+
+@wp.kernel(enable_backward=False)
+def contact_per_contact_wrench_kernel(
+    constraints: ConstraintContainer,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    cid_base: wp.int32,
+    cid_capacity: wp.int32,
+    idt: wp.float32,
+    # out
+    out: wp.array[wp.spatial_vector],
+):
+    """Scatter per-slot wrenches into a per-rigid-contact output array.
+
+    Launch dim must be at least ``cid_capacity - cid_base`` (one
+    thread per potential contact column). Each thread iterates the
+    6 slots of its column; active slots write
+    ``out[rigid_contact_index] = spatial_vector(force, torque)``.
+    Inactive slots leave ``out`` untouched, so the caller is expected
+    to zero the buffer before the launch.
+    """
+    tid = wp.tid()
+    cid = cid_base + tid
+    if cid >= cid_capacity:
+        return
+    if constraint_get_type(constraints, cid) != CONSTRAINT_TYPE_CONTACT:
+        return
+    active_mask = contact_get_active_mask(constraints, cid)
+    contact_first = contact_get_contact_first(constraints, cid)
+    for slot in range(CONTACT_MAX_SLOTS):
+        if (active_mask & (wp.int32(1) << slot)) == 0:
+            continue
+        f, tau = contact_per_slot_wrench_at(constraints, cid, 0, slot, idt, cc, contacts)
+        out[contact_first + slot] = wp.spatial_vector(f, tau)
+
+
+@wp.kernel(enable_backward=False)
+def contact_pair_wrench_kernel(
+    constraints: ConstraintContainer,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    cid_base: wp.int32,
+    cid_capacity: wp.int32,
+    idt: wp.float32,
+    # out
+    wrenches: wp.array[wp.spatial_vector],
+    body1: wp.array[wp.int32],
+    body2: wp.array[wp.int32],
+    contact_count: wp.array[wp.int32],
+):
+    """Per-column summary: total wrench + ``(body1, body2)`` + contact count.
+
+    One output slot ``i = cid - cid_base`` per contact column. For
+    inactive columns (type != CONTACT) every output is zeroed so
+    callers can safely reduce without masking.
+
+    Launch dim must equal ``cid_capacity - cid_base``.
+    """
+    tid = wp.tid()
+    cid = cid_base + tid
+    if cid >= cid_capacity:
+        return
+    if constraint_get_type(constraints, cid) != CONSTRAINT_TYPE_CONTACT:
+        wrenches[tid] = wp.spatial_vector(
+            wp.vec3f(0.0, 0.0, 0.0), wp.vec3f(0.0, 0.0, 0.0)
+        )
+        body1[tid] = -1
+        body2[tid] = -1
+        contact_count[tid] = 0
+        return
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    active_mask = contact_get_active_mask(constraints, cid)
+    count = wp.int32(0)
+    force = wp.vec3f(0.0, 0.0, 0.0)
+    torque = wp.vec3f(0.0, 0.0, 0.0)
+    for slot in range(CONTACT_MAX_SLOTS):
+        if (active_mask & (wp.int32(1) << slot)) == 0:
+            continue
+        f, tau = contact_per_slot_wrench_at(constraints, cid, 0, slot, idt, cc, contacts)
+        force += f
+        torque += tau
+        count += 1
+    wrenches[tid] = wp.spatial_vector(force, torque)
+    body1[tid] = b1
+    body2[tid] = b2
+    contact_count[tid] = count

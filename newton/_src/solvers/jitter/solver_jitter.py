@@ -32,6 +32,8 @@ import warp as wp
 from newton._src.solvers.jitter.body import BodyContainer
 from newton._src.solvers.jitter.constraint_contact import (
     ContactViews,
+    contact_pair_wrench_kernel,
+    contact_per_contact_wrench_kernel,
     contact_views_make,
 )
 from newton._src.solvers.jitter.constraint_container import ConstraintContainer
@@ -587,6 +589,112 @@ class World:
                 contact_views,
             ],
             outputs=[out],
+            device=self.device,
+        )
+
+    def gather_contact_wrenches(self, out: wp.array) -> None:
+        """Per-individual-contact force + torque from the last substep.
+
+        Writes one :class:`wp.spatial_vector` per rigid contact index
+        ``k`` used by the upstream :class:`Contacts` buffer -- i.e.
+        ``out[k]`` corresponds 1:1 with
+        ``contacts.rigid_contact_normal[k]`` /
+        ``rigid_contact_point0[k]`` / ``rigid_contact_shape0[k]`` /
+        etc. Inactive indices (``k >= rigid_contact_count[0]`` or
+        slots masked out of the packed column) keep whatever was in
+        the buffer on entry, so the output must be zeroed first to
+        get a clean per-contact slice.
+
+        Each entry is the wrench body 2 (``contacts.rigid_contact_
+        shape1[k]``'s body) "felt" from this one contact during the
+        most recent substep:
+            ``spatial_top``    = force [N]  (along n + tangents)
+            ``spatial_bottom`` = torque [N·m] (``r2 x force``)
+
+        Force/torque are derived from the per-slot warm-started
+        impulse divided by ``substep_dt``; calling this before the
+        first :meth:`step` returns zeros (all impulses are zero).
+
+        Args:
+            out: :class:`wp.array` of ``wp.spatial_vector`` of length
+                at least :attr:`rigid_contact_max`, on :attr:`device`.
+
+        Graph-capture safe: launches one kernel at a fixed dim equal
+        to the contact cid capacity; nothing reads back to the host.
+        """
+        if self.max_contact_columns == 0:
+            out.zero_()
+            return
+        out.zero_()
+        if self.substep_dt <= 0.0 or self._contact_views is None:
+            return
+        idt = wp.float32(1.0 / self.substep_dt)
+        wp.launch(
+            contact_per_contact_wrench_kernel,
+            dim=self.max_contact_columns,
+            inputs=[
+                self.constraints,
+                self._contact_container,
+                self._contact_views,
+                wp.int32(self.joint_constraint_count),
+                wp.int32(self._constraint_capacity),
+                idt,
+            ],
+            outputs=[out],
+            device=self.device,
+        )
+
+    def gather_contact_pair_wrenches(
+        self,
+        wrenches: wp.array,
+        body1: wp.array,
+        body2: wp.array,
+        contact_count: wp.array,
+    ) -> None:
+        """Per-contact-column summary wrench and metadata.
+
+        Sums the per-slot wrench across the (up to 6) active contacts
+        in each packed column -- what body 2 "felt" from this group
+        of contacts during the last substep:
+            ``wrenches[i]`` = :class:`wp.spatial_vector(force, torque)`
+            ``body1[i]``    = Jitter body index of the pair's body 1
+                              (``-1`` for an inactive slot)
+            ``body2[i]``    = Jitter body index of body 2 (``-1`` for
+                              an inactive slot)
+            ``contact_count[i]`` = number of active contacts folded
+                                   into this entry
+
+        A single shape pair with > 6 contacts spans multiple adjacent
+        columns; each column reports its own partial sum. Aggregating
+        "by pair" then reduces to summing consecutive entries with
+        matching ``(body1, body2)``.
+
+        All four output arrays must be length
+        :attr:`max_contact_columns` and live on :attr:`device`.
+
+        Graph-capture safe: single fixed-dim launch, no host readbacks.
+        """
+        if self.max_contact_columns == 0:
+            return
+        if self.substep_dt <= 0.0 or self._contact_views is None:
+            wrenches.zero_()
+            body1.fill_(-1)
+            body2.fill_(-1)
+            contact_count.zero_()
+            return
+        idt = wp.float32(1.0 / self.substep_dt)
+        wp.launch(
+            contact_pair_wrench_kernel,
+            dim=self.max_contact_columns,
+            inputs=[
+                self.constraints,
+                self._contact_container,
+                self._contact_views,
+                wp.int32(self.joint_constraint_count),
+                wp.int32(self._constraint_capacity),
+                idt,
+            ],
+            outputs=[wrenches, body1, body2, contact_count],
             device=self.device,
         )
 
