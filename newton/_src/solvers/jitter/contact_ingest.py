@@ -43,6 +43,12 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.solvers.jitter.constraint_contact import (
+    CONTACT_MAX_SLOTS,
+    contact_set_active_mask,
+    contact_set_contact_first,
+    contact_set_friction,
+)
 from newton._src.solvers.jitter.constraint_container import (
     CONSTRAINT_BODY1_OFFSET,
     CONSTRAINT_BODY2_OFFSET,
@@ -50,12 +56,6 @@ from newton._src.solvers.jitter.constraint_container import (
     CONSTRAINT_TYPE_OFFSET,
     ConstraintContainer,
     write_int,
-)
-from newton._src.solvers.jitter.constraint_contact import (
-    CONTACT_MAX_SLOTS,
-    contact_set_active_mask,
-    contact_set_contact_first,
-    contact_set_friction,
 )
 from newton._src.solvers.jitter.contact_container import ContactContainer
 from newton._src.solvers.jitter.scan_and_sort import (

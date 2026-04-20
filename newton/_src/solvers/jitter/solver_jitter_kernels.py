@@ -32,6 +32,12 @@ from newton._src.solvers.jitter.constraint_ball_socket import (
     ball_socket_prepare_for_iteration,
     ball_socket_world_wrench,
 )
+from newton._src.solvers.jitter.constraint_contact import (
+    ContactViews,
+    contact_iterate,
+    contact_prepare_for_iteration,
+    contact_world_wrench,
+)
 from newton._src.solvers.jitter.constraint_container import (
     CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET,
     CONSTRAINT_TYPE_ANGULAR_MOTOR,
@@ -47,13 +53,6 @@ from newton._src.solvers.jitter.constraint_container import (
     constraint_get_body2,
     constraint_get_type,
 )
-from newton._src.solvers.jitter.constraint_contact import (
-    ContactViews,
-    contact_iterate,
-    contact_prepare_for_iteration,
-    contact_world_wrench,
-)
-from newton._src.solvers.jitter.contact_container import ContactContainer
 from newton._src.solvers.jitter.constraint_d6 import (
     d6_iterate,
     d6_prepare_for_iteration,
@@ -79,6 +78,7 @@ from newton._src.solvers.jitter.constraint_prismatic import (
     prismatic_prepare_for_iteration,
     prismatic_world_wrench,
 )
+from newton._src.solvers.jitter.contact_container import ContactContainer
 from newton._src.solvers.jitter.graph_coloring_common import (
     ElementInteractionData,
     element_interaction_data_make,

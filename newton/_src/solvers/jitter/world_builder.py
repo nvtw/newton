@@ -53,6 +53,7 @@ from newton._src.solvers.jitter.constraint_ball_socket import (
     BS_DWORDS,
     ball_socket_initialize_kernel,
 )
+from newton._src.solvers.jitter.constraint_contact import CONTACT_DWORDS
 from newton._src.solvers.jitter.constraint_container import (
     DEFAULT_DAMPING_RATIO,
     DEFAULT_HERTZ_ANGULAR,
@@ -62,7 +63,6 @@ from newton._src.solvers.jitter.constraint_container import (
     ConstraintContainer,
     constraint_container_zeros,
 )
-from newton._src.solvers.jitter.constraint_contact import CONTACT_DWORDS
 from newton._src.solvers.jitter.constraint_d6 import (
     D6_DWORDS,
     d6_initialize_kernel,

@@ -38,7 +38,6 @@ import warp as wp
 
 from newton._src.solvers.jitter.body import BodyContainer
 from newton._src.solvers.jitter.constraint_container import (
-    CONSTRAINT_TYPE_CONTACT,
     ConstraintBodies,
     ConstraintContainer,
     assert_constraint_header,
@@ -614,7 +613,20 @@ def contact_prepare_for_iteration_at(
     # Baumgarte-style positional bias rate. Hardcoded for v1 -- maps
     # to "recover full penetration over ~2 substeps". Box2D v3 uses
     # the same kind of knob (``contact_hertz`` in its demos).
-    bias_rate = wp.float32(0.2) * idt
+    #
+    # The bias term is signed so the same scalar handles both:
+    #   * Penetration (``gap < 0``): ``bias`` becomes positive, which
+    #     subtracts from ``-eff_n * (jv_n + bias)`` producing a
+    #     positive normal impulse that pushes the pair apart.
+    #   * Speculative separation (``gap > 0``): ``bias`` becomes
+    #     negative. The PGS row solves for a normal impulse whose
+    #     relative normal velocity equals ``-gap * idt`` -- i.e. just
+    #     enough approach to close the current gap in one substep.
+    #     Combined with the ``lam_n >= 0`` clamp this means "no push
+    #     as long as the pair isn't approaching faster than closing
+    #     the current gap", which is exactly Box2D's speculative
+    #     contact handling.
+    bias_factor = wp.float32(0.2)
     penetration_slop = wp.float32(0.005)
 
     # Accumulated warm-start impulse we'll apply to the bodies after
@@ -655,18 +667,30 @@ def contact_prepare_for_iteration_at(
             t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
         )
 
-        # Signed separation along the normal: positive when the
-        # contact points have already separated, negative under
-        # penetration (Newton's convention: normal goes from shape0
-        # to shape1). Surface thicknesses (margins) shrink the gap
-        # we target so the solver pushes until the rounded surfaces
-        # rest at zero overlap rather than the raw centres.
+        # Signed separation along the normal. The convention we
+        # inherit from Newton: ``rigid_contact_normal`` points from
+        # shape0 towards shape1, so ``gap = dot(p2 - p1, n)`` is
+        # positive when the pair is separated and negative under
+        # penetration. Surface thicknesses (margins) shrink the
+        # effective gap so the solver rests at zero *overlap of the
+        # rounded surfaces*, not at zero centre-to-centre separation.
         gap = wp.dot(p2_world - p1_world, n)
         margin_sum = contacts.rigid_contact_margin0[k] + contacts.rigid_contact_margin1[k]
-        penetration = margin_sum - gap
+        effective_gap = gap - margin_sum
+
+        # Unified bias: one scalar that encodes both speculative
+        # separation and Baumgarte-style penetration pushout. With a
+        # slop dead-zone so idle resting contacts don't drift the
+        # lambdas.
+        #   * effective_gap > slop  -> bias > 0, allow approach up
+        #                              to effective_gap/dt (speculative)
+        #   * -slop < eg <= slop    -> bias = 0, resting contact
+        #   * effective_gap < -slop -> bias < 0, Baumgarte pushout
         bias_val = wp.float32(0.0)
-        if penetration > penetration_slop:
-            bias_val = bias_rate * (penetration - penetration_slop)
+        if effective_gap > penetration_slop:
+            bias_val = bias_factor * effective_gap * idt
+        elif effective_gap < -penetration_slop:
+            bias_val = bias_factor * (effective_gap + penetration_slop) * idt
 
         _slot_set_r1(constraints, cid, base, r1)
         _slot_set_r2(constraints, cid, base, r2)
