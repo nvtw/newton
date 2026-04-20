@@ -30,7 +30,9 @@ from newton._src.solvers.jitter.body import MOTION_DYNAMIC, MOTION_STATIC
 from newton._src.solvers.jitter.picking import JitterPicking, register_with_viewer_gl
 from newton._src.solvers.jitter.solver_jitter import World
 from newton._src.solvers.jitter.world_builder import (
+    DriveMode,
     JointHandle,
+    JointMode,
     RigidBodyDescriptor,
     WorldBuilder,
 )
@@ -38,6 +40,7 @@ from newton._src.solvers.jitter.world_builder import (
 __all__ = [
     "WORLD_BODY",
     "DemoExample",
+    "build_jitter_joints_from_model",
     "build_jitter_world_from_model",
     "jitter_to_newton_kernel",
     "newton_to_jitter_kernel",
@@ -205,6 +208,234 @@ def build_jitter_world_from_model(
 
 
 # ---------------------------------------------------------------------------
+# Joint mirror (Newton Model -> Jitter WorldBuilder)
+# ---------------------------------------------------------------------------
+
+
+def _transform_point_np(xform: np.ndarray, p: np.ndarray) -> np.ndarray:
+    """Apply a Newton ``wp.transform`` (stored as 7 floats: px,py,pz,qx,qy,qz,qw)
+    to a 3-vector: ``xform.p + rotate(xform.q, p)``. Host-side NumPy so
+    joint mirroring stays on the CPU.
+    """
+    pos = xform[:3]
+    rot = xform[3:7]
+    return pos + _quat_rotate_np(rot, p)
+
+
+def _compose_transform_np(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Compose two Newton transforms stored as 7-floats (xyzw)."""
+    ap = a[:3]
+    aq = a[3:7]
+    bp = b[:3]
+    bq = b[3:7]
+    out_p = ap + _quat_rotate_np(aq, bp)
+    # Quat multiply (xyzw).
+    ax, ay, az, aw = float(aq[0]), float(aq[1]), float(aq[2]), float(aq[3])
+    bx, by, bz, bw = float(bq[0]), float(bq[1]), float(bq[2]), float(bq[3])
+    out_q = np.array(
+        [
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz,
+        ],
+        dtype=np.float32,
+    )
+    return np.concatenate([out_p, out_q])
+
+
+def build_jitter_joints_from_model(
+    model: newton.Model,
+    state: newton.State,
+    builder: WorldBuilder,
+    newton_to_jitter: dict[int, int],
+    *,
+    drive_mode: DriveMode = DriveMode.OFF,
+    max_force_drive: float = 0.0,
+    apply_joint_targets: bool = True,
+    skip_fixed: bool = True,
+) -> list[JointHandle]:
+    """Translate every articulation joint in ``model`` into Jitter joints.
+
+    Designed for scenes whose joints live on the
+    :class:`~newton.ModelBuilder` side (e.g. ``builder.add_urdf`` or
+    ``builder.add_mjcf``) rather than being queued manually via
+    :meth:`DemoExample.add_joint`. Intended to be called from a
+    subclass's :meth:`DemoExample.on_jitter_builder_ready` hook --
+    by then the Newton :class:`~newton.Model` is finalised, its
+    :class:`~newton.State` is filled by ``eval_fk``, and the Jitter
+    :class:`WorldBuilder` knows about every Newton body.
+
+    Mapping rules:
+
+    * ``FREE``: skipped. Jitter has no free-joint constraint -- the
+      child body is already an unconstrained dynamic rigid body, so
+      no builder entry is needed.
+    * ``REVOLUTE``: installed as :attr:`JointMode.REVOLUTE` with the
+      axis taken from ``model.joint_axis[joint_qd_start[j]]`` (parent
+      frame, rotated into world) and the shared anchor taken from
+      ``body_q[child] * joint_X_c[j]``. Limits are copied from
+      ``joint_limit_lower/upper``; ``drive_mode`` + ``target`` can
+      optionally drive the hinge towards ``joint_target_pos``.
+    * ``FIXED``: skipped by default (URDF scenes commonly use fixed
+      joints only to weld visual-only links that Newton may have
+      already merged into the parent body; we don't emit a weld).
+      Pass ``skip_fixed=False`` to raise instead.
+    * ``BALL``, ``PRISMATIC``, ``D6``, ``DISTANCE``, ``CABLE``: not
+      yet mapped -- raises :class:`NotImplementedError` for visibility.
+
+    Args:
+        model: Finalised Newton :class:`~newton.Model`.
+        state: Newton :class:`~newton.State` with ``body_q`` populated
+            (typically the result of :func:`newton.eval_fk`). World-space
+            anchors are derived from it.
+        builder: Jitter :class:`WorldBuilder` mirroring ``model``'s
+            bodies (produced by :func:`build_jitter_world_from_model`).
+        newton_to_jitter: Newton body index -> Jitter body index map
+            from :func:`build_jitter_world_from_model`. Newton bodies
+            with ``joint_parent == -1`` map to Jitter's world anchor.
+        drive_mode: Actuator mode for revolute joints. Defaults to
+            :attr:`DriveMode.OFF` (passive hinges matching URDF's
+            unactuated physics). Use :attr:`DriveMode.POSITION` to
+            turn on a PD drive toward ``joint_target_pos``.
+        max_force_drive: Per-substep torque cap for the drive [N*m].
+            Ignored when ``drive_mode`` is :attr:`DriveMode.OFF`.
+        apply_joint_targets: When ``True`` (default) and ``drive_mode``
+            is :attr:`DriveMode.POSITION`, use ``model.joint_target_pos``
+            as the per-joint setpoint. When ``False``, setpoint stays
+            at 0 for every joint.
+        skip_fixed: When ``True`` (default) ``FIXED`` joints are
+            silently skipped; ``False`` raises :class:`NotImplementedError`
+            so the caller can decide what to do.
+
+    Returns:
+        List of :class:`JointHandle` for every installed joint, in
+        iteration order over ``model.joint_type``.
+    """
+    body_q_np = state.body_q.numpy()
+    joint_type_np = model.joint_type.numpy()
+    joint_parent_np = model.joint_parent.numpy()
+    joint_child_np = model.joint_child.numpy()
+    joint_X_p_np = model.joint_X_p.numpy()
+    joint_X_c_np = model.joint_X_c.numpy()
+    joint_axis_np = model.joint_axis.numpy()
+    joint_qd_start_np = model.joint_qd_start.numpy()
+    joint_limit_lower_np = (
+        model.joint_limit_lower.numpy()
+        if model.joint_limit_lower is not None
+        else None
+    )
+    joint_limit_upper_np = (
+        model.joint_limit_upper.numpy()
+        if model.joint_limit_upper is not None
+        else None
+    )
+    joint_target_pos_np = (
+        model.joint_target_pos.numpy()
+        if model.joint_target_pos is not None
+        else None
+    )
+
+    def _to_jitter(newton_idx: int) -> int:
+        if newton_idx < 0:
+            return int(builder.world_body)
+        return int(newton_to_jitter[int(newton_idx)])
+
+    from newton import JointType  # local: avoid circular imports at module import
+
+    handles: list[JointHandle] = []
+    n = int(model.joint_count)
+    for j in range(n):
+        jt = int(joint_type_np[j])
+        if jt == int(JointType.FREE):
+            continue
+        if jt == int(JointType.FIXED):
+            if skip_fixed:
+                continue
+            raise NotImplementedError(
+                f"build_jitter_joints_from_model: JointType.FIXED at joint {j} "
+                "is not yet mapped to a Jitter weld."
+            )
+        if jt != int(JointType.REVOLUTE):
+            raise NotImplementedError(
+                f"build_jitter_joints_from_model: joint {j} has JointType "
+                f"{JointType(jt).name}; only REVOLUTE / FREE / FIXED are "
+                "currently supported."
+            )
+
+        parent = int(joint_parent_np[j])
+        child = int(joint_child_np[j])
+        X_c = np.asarray(joint_X_c_np[j], dtype=np.float32).reshape(-1)
+        X_p = np.asarray(joint_X_p_np[j], dtype=np.float32).reshape(-1)
+
+        # World-space anchor: use the child-side transform so we get
+        # the anchor exactly where the child body sits (the two anchors
+        # coincide at rest, but floating-point drift can make the
+        # parent-side point a hair off).
+        body_pose_c = np.asarray(body_q_np[child], dtype=np.float32).reshape(-1)
+        anchor_world = _transform_point_np(body_pose_c, X_c[:3])
+
+        # Hinge axis lives in the parent anchor frame. Rotate it to
+        # world via (body_q[parent] * joint_X_p).rotation, or -- if
+        # parent is the world -- straight through X_p.
+        qd_start = int(joint_qd_start_np[j])
+        axis_local = np.asarray(joint_axis_np[qd_start], dtype=np.float32)
+        if parent < 0:
+            parent_anchor_world = X_p
+        else:
+            body_pose_p = np.asarray(
+                body_q_np[parent], dtype=np.float32
+            ).reshape(-1)
+            parent_anchor_world = _compose_transform_np(body_pose_p, X_p)
+        axis_world = _quat_rotate_np(parent_anchor_world[3:7], axis_local)
+        # Normalise (URDF axes are already unit but belt-and-braces).
+        n_axis = float(np.linalg.norm(axis_world))
+        if n_axis > 1.0e-8:
+            axis_world = axis_world / n_axis
+
+        anchor1 = tuple(float(x) for x in anchor_world)
+        anchor2 = (
+            anchor1[0] + float(axis_world[0]),
+            anchor1[1] + float(axis_world[1]),
+            anchor1[2] + float(axis_world[2]),
+        )
+
+        lo = (
+            float(joint_limit_lower_np[qd_start])
+            if joint_limit_lower_np is not None
+            else 0.0
+        )
+        hi = (
+            float(joint_limit_upper_np[qd_start])
+            if joint_limit_upper_np is not None
+            else 0.0
+        )
+        target = 0.0
+        if (
+            apply_joint_targets
+            and drive_mode is DriveMode.POSITION
+            and joint_target_pos_np is not None
+        ):
+            target = float(joint_target_pos_np[qd_start])
+
+        handles.append(
+            builder.add_joint(
+                body1=_to_jitter(parent),
+                body2=_to_jitter(child),
+                anchor1=anchor1,
+                anchor2=anchor2,
+                mode=JointMode.REVOLUTE,
+                drive_mode=drive_mode,
+                target=target,
+                max_force_drive=max_force_drive,
+                min_value=lo,
+                max_value=hi,
+            )
+        )
+    return handles
+
+
+# ---------------------------------------------------------------------------
 # Reusable demo base class
 # ---------------------------------------------------------------------------
 
@@ -302,6 +533,27 @@ class DemoExample:
 
         Default is a no-op. Override to check that stacks stayed
         stacked, motors turned, etc.
+        """
+        return None
+
+    def on_jitter_builder_ready(
+        self,
+        builder: WorldBuilder,
+        newton_to_jitter: dict[int, int],
+    ) -> None:
+        """Optional: customise the Jitter :class:`WorldBuilder`.
+
+        Called from :meth:`finish_setup` right after the builder has
+        mirrored every Newton body and every queued
+        :meth:`pending_joints` / :meth:`add_collision_filter_pair` has
+        been installed, but *before* :meth:`WorldBuilder.finalize`.
+        Default is a no-op.
+
+        The typical use is mirroring Newton-side articulations (URDF,
+        MJCF, etc.) into the Jitter builder via
+        :func:`build_jitter_joints_from_model` -- by this point
+        ``self.model`` / ``self.state`` are finalised so world-space
+        anchors can be derived from them.
         """
         return None
 
@@ -414,6 +666,19 @@ class DemoExample:
         self.state = self.model.state()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
 
+        # Sync the FK-derived body poses back into ``model.body_q`` so
+        # :func:`build_jitter_world_from_model` spawns Jitter bodies
+        # at the same world transforms Newton's state is about to
+        # start from. For scenes built entirely through direct
+        # ``add_body(xform=...)`` calls this is a no-op (both arrays
+        # already agree); for articulations loaded via ``add_urdf`` /
+        # ``add_mjcf`` or overridden ``joint_q``, ``eval_fk`` changes
+        # the state without touching ``model.body_q``, so the Jitter
+        # mirror would otherwise spawn links at the zero-pose rest
+        # configuration and the articulation joints would explosively
+        # pull them together.
+        self.model.body_q.assign(self.state.body_q)
+
         builder, newton_to_jitter = build_jitter_world_from_model(self.model)
 
         def _to_jitter_body(newton_idx: int) -> int:
@@ -431,6 +696,16 @@ class DemoExample:
             jargs["body1"] = _to_jitter_body(int(jargs["body1"]))
             jargs["body2"] = _to_jitter_body(int(jargs["body2"]))
             self._joint_handles.append(builder.add_joint(**jargs))
+
+        # Subclass hook: the Newton model is finalised, its state is
+        # filled by eval_fk, the Jitter builder knows about every
+        # body, and ``pending_joints`` has been installed -- a
+        # convenient spot to mirror extra joints from the Newton
+        # :class:`ModelBuilder` (e.g. via
+        # :func:`build_jitter_joints_from_model` for URDF-loaded
+        # articulations) without the subclass having to reimplement
+        # the body translation map.
+        self.on_jitter_builder_ready(builder, newton_to_jitter)
 
         # Mirror queued body-pair collision filters onto the Jitter
         # builder. The same pairs were expanded to shape-level
