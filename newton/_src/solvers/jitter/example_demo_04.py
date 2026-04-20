@@ -25,13 +25,15 @@
 # this demo useful as a stress test for the solver's contact +
 # articulation interaction.
 #
-# Built-in collision filtering between limbs (Jitter's
-# ``IgnoreCollisionBetweenFilter``) is likewise not available in the
-# Newton ``CollisionPipeline`` we use, so limb pairs that the C# demo
-# masks out still interact through contacts. The ball-socket pins are
-# strong enough to keep adjacent parts from pushing each other apart,
-# but you will see more contact activity between e.g. torso and thigh
-# than the C# reference.
+# Jitter's ``IgnoreCollisionBetweenFilter`` maps onto
+# :meth:`DemoExample.add_collision_filter_pair`, which installs the
+# filter on both the Newton :class:`ModelBuilder` (so the broad
+# phase skips the pair) and the Jitter :class:`WorldBuilder` (so
+# any contact that still leaks through is dropped during ingest).
+# We register one filter per jointed pair -- adjacent limbs overlap
+# at the joint anchor and the resulting spurious contacts fight the
+# ball-socket / hinge positional constraint, which is why the C#
+# reference masks them out too.
 #
 # Layout -- a 2x2 grid of four ragdolls stacked to fall into each
 # other (reduced from 100 in C# to keep the contact counts manageable
@@ -321,6 +323,25 @@ class Example(DemoExample):
             lo_rad=ELBOW_RIGHT_MIN_RAD,
             hi_rad=ELBOW_RIGHT_MAX_RAD,
         )
+
+        # Mirror the C# reference's ``IgnoreCollisionBetweenFilter``
+        # -- one filter per jointed pair. Adjacent limbs overlap at
+        # the joint anchor, so without this the ball-socket / hinge
+        # fights a small but persistent contact impulse at every
+        # substep and the ragdoll visibly jitters.
+        jointed_pairs: list[tuple[int, int]] = [
+            (p.head, p.torso),
+            (p.torso, p.upper_leg_left),
+            (p.torso, p.upper_leg_right),
+            (p.upper_leg_left, p.lower_leg_left),
+            (p.upper_leg_right, p.lower_leg_right),
+            (p.torso, p.upper_arm_left),
+            (p.torso, p.upper_arm_right),
+            (p.upper_arm_left, p.lower_arm_left),
+            (p.upper_arm_right, p.lower_arm_right),
+        ]
+        for a, b in jointed_pairs:
+            self.add_collision_filter_pair(a, b)
 
         return p
 

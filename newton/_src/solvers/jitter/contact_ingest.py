@@ -201,6 +201,37 @@ def _contact_key_kernel(
         keys[tid] = wp.int32(0)
 
 
+@wp.func
+def _body_pair_filtered(
+    filter_keys: wp.array[wp.int64],
+    filter_count: wp.int32,
+    key: wp.int64,
+) -> wp.int32:
+    """Binary search ``filter_keys[0:filter_count]`` for ``key``.
+
+    Returns ``1`` if found, ``0`` otherwise. ``filter_keys`` is a
+    sorted int64 array of packed
+    ``min(body_a, body_b) * num_bodies + max(body_a, body_b)`` keys;
+    ``filter_count == 0`` short-circuits without touching the array
+    (which still carries a size-1 sentinel so the pointer is
+    non-null).
+    """
+    if filter_count <= wp.int32(0):
+        return wp.int32(0)
+    lo = wp.int32(0)
+    hi = filter_count
+    while lo < hi:
+        mid = (lo + hi) >> wp.int32(1)
+        v = filter_keys[mid]
+        if v < key:
+            lo = mid + wp.int32(1)
+        elif v > key:
+            hi = mid
+        else:
+            return wp.int32(1)
+    return wp.int32(0)
+
+
 # ---------------------------------------------------------------------------
 # Step 2: turn run_lengths into [pair_count, shape_a, shape_b, pair_columns].
 # ---------------------------------------------------------------------------
@@ -249,20 +280,51 @@ def _pair_metadata_kernel(
 @wp.kernel
 def _pair_columns_from_count_kernel(
     pair_count: wp.array[wp.int32],
+    pair_shape_a: wp.array[wp.int32],
+    pair_shape_b: wp.array[wp.int32],
     num_pairs: wp.array[wp.int32],
+    shape_body: wp.array[wp.int32],
+    num_bodies: wp.int32,
+    filter_keys: wp.array[wp.int64],
+    filter_count: wp.int32,
     # out
     pair_columns: wp.array[wp.int32],
 ):
-    """Compute ``pair_columns[p] = ceil(pair_count[p] / 6)`` for active pairs.
+    """Compute ``pair_columns[p] = ceil(pair_count[p] / 6)`` for active pairs,
+    collapsing filtered body pairs to zero columns.
+
+    For each active shape pair (``tid < num_pairs[0]``) we resolve
+    the two body ids via ``shape_body[pair_shape_{a,b}[p]]``, pack
+    them into the canonical ``(min, max)`` int64 key, and check the
+    sorted ``filter_keys`` array. Filtered pairs get
+    ``pair_columns[p] = 0`` so the downstream exclusive scan treats
+    them as taking zero output columns; :func:`_pair_source_idx_kernel`
+    then never maps any output column to that pair, so no contact
+    constraint is allocated or warm-started, and the dispatcher
+    never sees it.
 
     Split out from :func:`_pair_metadata_kernel` because that kernel
     already has ``pair_columns`` bound as an output for the tail
-    clear; keeping this in a separate launch makes both kernels'
+    clear; keeping the filter test here makes both kernels'
     access patterns read-only except for one output array.
     """
     tid = wp.tid()
     n = num_pairs[0]
     if tid >= n:
+        return
+    sa = pair_shape_a[tid]
+    sb = pair_shape_b[tid]
+    ba = shape_body[sa]
+    bb = shape_body[sb]
+    if ba <= bb:
+        lo = ba
+        hi = bb
+    else:
+        lo = bb
+        hi = ba
+    body_key = wp.int64(lo) * wp.int64(num_bodies) + wp.int64(hi)
+    if _body_pair_filtered(filter_keys, filter_count, body_key) == wp.int32(1):
+        pair_columns[tid] = wp.int32(0)
         return
     length = pair_count[tid]
     pair_columns[tid] = (length + CONTACT_MAX_SLOTS - 1) // CONTACT_MAX_SLOTS
@@ -582,6 +644,10 @@ def ingest_contacts(
     max_contact_columns: int,
     default_friction: float = 0.5,
     device: wp.DeviceLike = None,
+    *,
+    num_bodies: int = 0,
+    filter_keys: wp.array | None = None,
+    filter_count: int = 0,
 ) -> None:
     """Materialise contact columns for one step.
 
@@ -614,6 +680,17 @@ def ingest_contacts(
             contact column header. Per-pair lookups into the
             material tables are a future improvement.
         device: Warp device for the launches.
+        num_bodies: Total body count in the owning :class:`World`.
+            Used to pack the ``(min_body, max_body)`` pair into an
+            int64 key for the body-pair filter lookup.
+        filter_keys: Sorted ``wp.int64`` array of packed canonical
+            body-pair keys to ignore. May carry a trailing sentinel;
+            only the first ``filter_count`` entries are searched. The
+            array must always be non-null (size-1 sentinel array when
+            no filters are registered) to satisfy the kernel binding.
+        filter_count: Number of valid entries at the start of
+            ``filter_keys``. ``0`` short-circuits the filter and
+            matches the legacy (no-filter) behaviour exactly.
     """
     rigid_contact_max = int(contacts.rigid_contact_max)
 
@@ -653,11 +730,29 @@ def ingest_contacts(
         device=device,
     )
 
-    # Step 3b: pair_columns[p] = ceil(pair_count[p] / 6).
+    # Step 3b: pair_columns[p] = ceil(pair_count[p] / 6), or 0 for
+    # pairs that the body-pair collision filter excludes. Filtered
+    # pairs take zero output columns so the downstream scan + pack
+    # never touches them.
+    if filter_keys is None:
+        raise ValueError(
+            "ingest_contacts: filter_keys must be non-None (use a size-1 "
+            "sentinel array when no filters are registered; the kernel "
+            "signature has no null-pointer path)."
+        )
     wp.launch(
         kernel=_pair_columns_from_count_kernel,
         dim=rigid_contact_max,
-        inputs=[scratch.pair_count, scratch.num_pairs],
+        inputs=[
+            scratch.pair_count,
+            scratch.pair_shape_a,
+            scratch.pair_shape_b,
+            scratch.num_pairs,
+            shape_body,
+            int(num_bodies),
+            filter_keys,
+            int(filter_count),
+        ],
         outputs=[scratch.pair_columns],
         device=device,
     )

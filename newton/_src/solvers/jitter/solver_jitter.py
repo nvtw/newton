@@ -27,6 +27,9 @@ supported for advanced callers that want to manage their own SoA arrays.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
+import numpy as np
 import warp as wp
 
 from newton._src.solvers.jitter.body import BodyContainer
@@ -122,6 +125,7 @@ class World:
         rigid_contact_max: int = 0,
         num_shapes: int = 0,
         joint_constraint_count: int | None = None,
+        collision_filter_pairs: Iterable[tuple[int, int]] | None = None,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built containers.
@@ -149,6 +153,14 @@ class World:
                 ``num_shapes * num_shapes < 2**31``.
             joint_constraint_count: First cid reserved for contacts.
                 Defaults to ``num_constraints``.
+            collision_filter_pairs: Optional iterable of
+                ``(body_a, body_b)`` pairs whose contacts must be
+                ignored by the ingest pipeline (Jitter2's
+                ``IgnoreCollisionBetweenFilter``). Each pair is stored
+                in canonical order ``(min, max)`` and consulted by the
+                ingest kernel via binary search; filtered contacts are
+                dropped before any constraint column is allocated. May
+                be updated at runtime via :meth:`set_collision_filter_pairs`.
             device: Warp device. Defaults to ``bodies.position.device``.
         """
         if device is None:
@@ -233,6 +245,16 @@ class World:
         self._contact_views: ContactViews | None = None
         self._contact_views_placeholder: ContactViews = self._make_placeholder_contact_views()
 
+        # ----- Pairwise contact filter ----------------------------
+        # Sorted int64 array of packed ``min(a,b) * num_bodies + max(a,b)``
+        # keys consulted by the contact-ingest key kernel. A size-1
+        # sentinel array (``[INT64_MAX]``) stands in when no filters
+        # are registered so the kernel signature stays constant and
+        # launches always have a valid pointer to bind. See
+        # :meth:`set_collision_filter_pairs`.
+        self._collision_filter_keys: wp.array[wp.int64]
+        self._set_collision_filter_pairs_impl(collision_filter_pairs or ())
+
     # ------------------------------------------------------------------
     # Placeholder ContactViews helper
     # ------------------------------------------------------------------
@@ -264,6 +286,93 @@ class World:
             rigid_contact_margin1=dummy_float,
             shape_body=dummy_int,
         )
+
+    # ------------------------------------------------------------------
+    # Pairwise contact filter
+    # ------------------------------------------------------------------
+
+    def set_collision_filter_pairs(
+        self, pairs: Iterable[tuple[int, int]]
+    ) -> None:
+        """Replace the registered body-pair contact filter.
+
+        Each pair ``(a, b)`` instructs :meth:`step`'s contact ingest
+        to drop every upstream contact whose resolved
+        ``(shape_body[shape_a], shape_body[shape_b])`` matches in
+        either order -- no constraint column is allocated, no
+        warm-start is gathered, and the dispatcher never sees the
+        contact. Intended for self-collision suppression between
+        jointed limbs (Jitter2's ``IgnoreCollisionBetweenFilter``).
+
+        Pairs are stored canonically as ``(min, max)``; duplicates and
+        either argument order are idempotent. A self-pair ``(b, b)``
+        is rejected with :class:`ValueError`.
+
+        Not graph-capture-safe by itself (reallocates a device array),
+        but idempotent with :meth:`step`: call it outside any
+        :func:`wp.ScopedCapture` block whenever the filter set needs
+        to change. The kernel that consumes the filter launches at a
+        fixed dim (``rigid_contact_max``), so changing the filter list
+        does not require re-capturing the graph *if* the new list
+        fits in the pre-allocated array (the impl reallocates
+        unconditionally -- callers that do want capture compatibility
+        should set the filter once at world construction via
+        :meth:`WorldBuilder.add_collision_filter_pair`).
+
+        Args:
+            pairs: Iterable of ``(body_a, body_b)`` tuples. Empty
+                iterable clears the filter.
+        """
+        self._set_collision_filter_pairs_impl(pairs)
+
+    def _set_collision_filter_pairs_impl(
+        self, pairs: Iterable[tuple[int, int]]
+    ) -> None:
+        """Pack + upload the sorted filter key array.
+
+        Packs each canonicalised ``(a, b)`` into an int64 key
+        ``a * num_bodies + b`` and uploads the sorted array to the
+        device. The ingest kernel consults this array via binary
+        search. The always-allocated size-1 sentinel array (holding
+        ``INT64_MAX``) avoids a null-pointer special case in the
+        kernel when no filters are registered.
+        """
+        nb = int(self.num_bodies)
+        packed: list[int] = []
+        seen: set[tuple[int, int]] = set()
+        for a, b in pairs:
+            a_i = int(a)
+            b_i = int(b)
+            if a_i == b_i:
+                raise ValueError(
+                    f"collision filter pair must have two distinct bodies "
+                    f"(got both = {a_i})"
+                )
+            if not (0 <= a_i < nb and 0 <= b_i < nb):
+                raise IndexError(
+                    f"collision filter pair ({a_i}, {b_i}) out of range "
+                    f"[0, {nb}) for this World's body count"
+                )
+            lo = min(a_i, b_i)
+            hi = max(a_i, b_i)
+            key = (lo, hi)
+            if key in seen:
+                continue
+            seen.add(key)
+            packed.append(lo * nb + hi)
+
+        # Sorted for binary search. Include a trailing sentinel so the
+        # kernel can always dereference ``keys[0]`` safely even when
+        # the user registered no filters. The sentinel (INT64_MAX)
+        # never collides with a real packed body pair.
+        packed.sort()
+        if not packed:
+            arr = np.asarray([np.iinfo(np.int64).max], dtype=np.int64)
+        else:
+            arr = np.asarray(packed, dtype=np.int64)
+
+        self._collision_filter_keys = wp.array(arr, dtype=wp.int64, device=self.device)
+        self._collision_filter_count = int(len(packed))
 
     # ------------------------------------------------------------------
     # Public driver
@@ -463,6 +572,9 @@ class World:
             max_contact_columns=self.max_contact_columns,
             default_friction=0.5,
             device=self.device,
+            num_bodies=self.num_bodies,
+            filter_keys=self._collision_filter_keys,
+            filter_count=self._collision_filter_count,
         )
 
         # ---- Warm-start lambdas from the prev frame's state ----

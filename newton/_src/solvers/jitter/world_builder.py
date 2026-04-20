@@ -619,6 +619,11 @@ class WorldBuilder:
         self._d6_descriptors: list[D6Descriptor] = []
         self._d6_handles: list[D6Handle] = []
 
+        # Pairwise contact filtering: canonical (min, max) body-index
+        # tuples whose contacts the solver must ignore. See
+        # :meth:`add_collision_filter_pair`.
+        self._collision_filter_pairs: set[tuple[int, int]] = set()
+
     # ------------------------------------------------------------------
     # Body API
     # ------------------------------------------------------------------
@@ -1252,6 +1257,57 @@ class WorldBuilder:
         return handle
 
     # ------------------------------------------------------------------
+    # Pairwise contact filtering
+    # ------------------------------------------------------------------
+
+    def add_collision_filter_pair(self, body_a: int, body_b: int) -> None:
+        """Ignore contacts between bodies ``body_a`` and ``body_b``.
+
+        Mirrors Jitter2's ``IgnoreCollisionBetweenFilter`` and PhysX /
+        Bullet's per-body-pair contact mask. After :meth:`finalize`,
+        every contact emitted by the upstream collision pipeline whose
+        ``(shape_body[shape_a], shape_body[shape_b])`` pair matches any
+        registered filter (in either order) is dropped during ingest --
+        no constraint column is allocated, no warm-start is gathered,
+        and the dispatcher never sees it. The filter is the recommended
+        mechanism for suppressing self-collision between jointed limbs
+        of a ragdoll, sibling shapes on the same rigid body, etc.
+        (jointed bodies typically overlap at the joint anchor, and the
+        resulting spurious contacts fight the joint's positional
+        constraint).
+
+        The pair is stored in canonical order (``min(a, b), max(a, b)``)
+        so either argument order produces the same filter. Duplicate
+        registrations are idempotent.
+
+        ``body_a`` and ``body_b`` may be any two bodies registered with
+        this builder (including the static world body at index 0). A
+        self-pair ``(b, b)`` is rejected: a body can never generate
+        contacts with itself, so the filter would be a no-op and is
+        almost certainly a caller mistake.
+
+        Args:
+            body_a: First body index (``>= 0``, ``< num_bodies``).
+            body_b: Second body index (``>= 0``, ``< num_bodies``,
+                ``!= body_a``).
+
+        Raises:
+            IndexError: If either index is out of range for this
+                builder's body list.
+            ValueError: If ``body_a == body_b``.
+        """
+        self._validate_body(body_a)
+        self._validate_body(body_b)
+        if body_a == body_b:
+            raise ValueError(
+                f"add_collision_filter_pair: body_a and body_b must differ "
+                f"(got both = {body_a})"
+            )
+        self._collision_filter_pairs.add(
+            (min(int(body_a), int(body_b)), max(int(body_a), int(body_b)))
+        )
+
+    # ------------------------------------------------------------------
     # Finalisation
     # ------------------------------------------------------------------
 
@@ -1330,6 +1386,7 @@ class WorldBuilder:
             rigid_contact_max=rigid_contact_max,
             num_shapes=num_shapes,
             joint_constraint_count=num_constraints,
+            collision_filter_pairs=self._collision_filter_pairs,
             device=device,
         )
 
@@ -1353,6 +1410,7 @@ class WorldBuilder:
         self._prismatic_handles = []
         self._d6_descriptors = []
         self._d6_handles = []
+        self._collision_filter_pairs = set()
         return world
 
     # ------------------------------------------------------------------

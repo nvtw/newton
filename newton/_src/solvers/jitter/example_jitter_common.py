@@ -273,6 +273,14 @@ class DemoExample:
         # :meth:`register_body_extent` so :meth:`finish_setup` can
         # build Jitter's half-extents array.
         self._newton_body_extents: dict[int, tuple[float, float, float]] = {}
+        # Queued body-pair contact filters (Newton body indices).
+        # Mirrored twice at :meth:`finish_setup`: once into the Newton
+        # :class:`ModelBuilder` as shape-pair filters (so the broad
+        # phase never emits the contacts in the first place), and
+        # once into the Jitter :class:`WorldBuilder` as body-pair
+        # filters (so anything the broad phase *does* emit still gets
+        # dropped on the Jitter side -- defense in depth).
+        self._pending_collision_filters: list[tuple[int, int]] = []
 
     # ------------------------------------------------------------------
     # Hooks subclasses override
@@ -322,6 +330,51 @@ class DemoExample:
         """
         self.pending_joints.append(dict(kwargs))
 
+    def add_collision_filter_pair(
+        self, newton_body_a: int, newton_body_b: int
+    ) -> None:
+        """Ignore contacts between two Newton bodies.
+
+        Queues a body-pair collision filter using *Newton* body
+        indices (matches :meth:`add_joint`'s convention). Pass
+        :data:`WORLD_BODY` for the static world anchor. At
+        :meth:`finish_setup` time each queued pair is installed in
+        two places:
+
+        1. The Newton :class:`ModelBuilder` via
+           :meth:`~newton.ModelBuilder.add_shape_collision_filter_pair`
+           for every shape attached to body A crossed with every
+           shape attached to body B. The collision pipeline skips
+           these pairs in the broad phase, so filtered contacts
+           never enter the :class:`Contacts` buffer at all.
+        2. The Jitter :class:`WorldBuilder` via
+           :meth:`~newton._src.solvers.jitter.world_builder.WorldBuilder.add_collision_filter_pair`
+           using the translated Jitter body indices. This is
+           defence in depth: any contact the broad phase still
+           produces (e.g. because of a custom broad-phase mode
+           that doesn't honour the shape filter) is still dropped
+           on the Jitter side before a constraint column is
+           allocated.
+
+        Typical use is to suppress self-collision between jointed
+        limbs of a ragdoll -- adjacent limbs overlap at the joint
+        anchor and the spurious contacts fight the joint's
+        positional constraint, which makes the whole articulation
+        jitter.
+
+        Idempotent: duplicate or argument-order-reversed registrations
+        collapse to one canonical ``(min, max)`` pair.
+
+        Args:
+            newton_body_a: First Newton body index (or
+                :data:`WORLD_BODY` for the static world anchor).
+            newton_body_b: Second Newton body index (or
+                :data:`WORLD_BODY`).
+        """
+        self._pending_collision_filters.append(
+            (int(newton_body_a), int(newton_body_b))
+        )
+
     # ------------------------------------------------------------------
     # finish_setup: finalize Newton model + Jitter world, wire viewer
     # ------------------------------------------------------------------
@@ -329,6 +382,23 @@ class DemoExample:
     def finish_setup(self) -> None:
         """Finalise the Newton model, build the Jitter world, capture."""
         self.build_scene()
+
+        # Expand each queued body-pair filter into the Cartesian
+        # product of the two bodies' shapes and register them with
+        # the ModelBuilder *before* finalize(): the builder bakes
+        # ``shape_collision_filter_pairs`` into ``shape_contact_pairs``
+        # at finalize time, so any filter added after will be ignored
+        # by the broad phase. We still keep the list to mirror into
+        # the Jitter WorldBuilder below.
+        for newton_a, newton_b in self._pending_collision_filters:
+            shapes_a = self.model_builder.body_shapes.get(newton_a, [])
+            shapes_b = self.model_builder.body_shapes.get(newton_b, [])
+            for sa in shapes_a:
+                for sb in shapes_b:
+                    if sa == sb:
+                        continue
+                    self.model_builder.add_shape_collision_filter_pair(sa, sb)
+
         self.model = self.model_builder.finalize()
         print(
             f"[{self.config.title}] bodies={self.model.body_count} "
@@ -345,23 +415,34 @@ class DemoExample:
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
 
         builder, newton_to_jitter = build_jitter_world_from_model(self.model)
+
+        def _to_jitter_body(newton_idx: int) -> int:
+            """Translate a Newton body index (or :data:`WORLD_BODY`)
+            into the matching Jitter body index."""
+            if newton_idx == WORLD_BODY:
+                return int(builder.world_body)
+            return newton_to_jitter[int(newton_idx)]
+
         # Translate queued joints from Newton indices to Jitter
         # indices and install them in the builder.
         self._joint_handles: list[JointHandle] = []
         for jspec in self.pending_joints:
             jargs = dict(jspec)
-            # ``WORLD_BODY`` (= -1) maps to Jitter body 0 (the static
-            # world anchor created by :class:`WorldBuilder.__init__`);
-            # any other index is a Newton body we've already mirrored.
-            b1 = int(jargs["body1"])
-            b2 = int(jargs["body2"])
-            jargs["body1"] = (
-                int(builder.world_body) if b1 == WORLD_BODY else newton_to_jitter[b1]
-            )
-            jargs["body2"] = (
-                int(builder.world_body) if b2 == WORLD_BODY else newton_to_jitter[b2]
-            )
+            jargs["body1"] = _to_jitter_body(int(jargs["body1"]))
+            jargs["body2"] = _to_jitter_body(int(jargs["body2"]))
             self._joint_handles.append(builder.add_joint(**jargs))
+
+        # Mirror queued body-pair collision filters onto the Jitter
+        # builder. The same pairs were expanded to shape-level
+        # filters on the Newton ModelBuilder above; duplicating on
+        # the Jitter side is cheap and defends against any code path
+        # that bypasses the broad-phase shape filter.
+        for newton_a, newton_b in self._pending_collision_filters:
+            ja = _to_jitter_body(newton_a)
+            jb = _to_jitter_body(newton_b)
+            if ja == jb:
+                continue
+            builder.add_collision_filter_pair(ja, jb)
 
         # Budget: each Newton contact column holds up to 6 contact
         # points, so ``ceil(rigid_contact_max / 6)`` is a tight
