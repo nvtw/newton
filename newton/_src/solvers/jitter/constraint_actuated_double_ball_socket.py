@@ -1,20 +1,34 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""Unified revolute / prismatic joint with optional drive + limits.
+"""Unified ball-socket / revolute / prismatic joint with optional drive + limits.
 
 Despite the legacy module name, this file implements a *single* joint
-constraint that covers both revolute and prismatic behaviour via a
-runtime ``joint_mode`` tag. The old standalone
+constraint that covers ball-socket, revolute, and prismatic behaviour
+via a runtime ``joint_mode`` tag. The old standalone
 ``constraint_double_ball_socket`` and ``constraint_prismatic`` modules
-were folded in here -- their combined feature set (rank-5 lock +
-optional scalar drive / limit row) is a superset of either. Keeping one
-constraint type means one dispatcher arm, one graph-colouring tag, and
-the same body-data loads shared across the positional lock and the
-actuator row.
+were folded in here -- their combined feature set (rank-3/5 lock +
+optional scalar drive / limit row) is a superset of any one of them.
+Keeping one constraint type means one dispatcher arm, one graph-
+colouring tag, and the same body-data loads shared across the
+positional lock and the actuator row.
 
-The two modes differ only in which 5 DoF are locked and what "axial
+The three modes differ only in which DoF are locked and what "axial
 drive / axial limit" means -- everything else (soft-constraint plumbing,
 warm-starting, Schur block structure) is shared.
+
+Ball-socket (:data:`JOINT_MODE_BALL_SOCKET`)
+--------------------------------------------
+Locks only the 3 translational DoF at ``anchor1``; all 3 rotational
+DoF are free. Pure point-matching formulation, same anchor-1 math as
+the revolute / prismatic modes -- a single 3-row point-match constraint
+solved as one 3x3 direct solve (no Schur complement needed because
+there are no anchor-2 / anchor-3 rows).
+
+``anchor2`` is not used; the public API does not take it. No drive, no
+limit, no axial row -- a pair of bodies pinned together at one world
+point, free to rotate independently around it.
+
+See :func:`_ball_socket_prepare_at` for the math.
 
 Revolute (:data:`JOINT_MODE_REVOLUTE`)
 --------------------------------------
@@ -131,6 +145,7 @@ __all__ = [
     "DRIVE_MODE_OFF",
     "DRIVE_MODE_POSITION",
     "DRIVE_MODE_VELOCITY",
+    "JOINT_MODE_BALL_SOCKET",
     "JOINT_MODE_PRISMATIC",
     "JOINT_MODE_REVOLUTE",
     "actuated_double_ball_socket_initialize_kernel",
@@ -153,6 +168,9 @@ JOINT_MODE_REVOLUTE = wp.constant(wp.int32(0))
 #: Prismatic (slider) joint: locks 3 rotational + 2 translational DoF.
 #: The free DoF is translation along ``n_hat``.
 JOINT_MODE_PRISMATIC = wp.constant(wp.int32(1))
+#: Ball-socket joint: locks 3 translational DoF at ``anchor1``; all
+#: 3 rotational DoF are free. No ``anchor2``, no drive, no limit.
+JOINT_MODE_BALL_SOCKET = wp.constant(wp.int32(2))
 
 
 # ---------------------------------------------------------------------------
@@ -613,6 +631,151 @@ def _twist_error(
     if quat_e[3] < 0.0:
         err = -err
     return err
+
+
+# ---------------------------------------------------------------------------
+# Ball-socket mode math
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def _ball_socket_prepare_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+    idt: wp.float32,
+):
+    """Ball-socket prepare pass.
+
+    Strict subset of :func:`_revolute_prepare_at`: only the 3-row
+    anchor-1 lock is built. No anchor 2, no tangent basis, no axial
+    row, no Schur complement -- the effective mass is just the
+    anchor-1 3x3 block ``A1`` and the positional solve is a single
+    direct inverse. Warm-starts the 3-row positional impulse.
+    """
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+
+    orientation1 = bodies.orientation[b1]
+    orientation2 = bodies.orientation[b2]
+    position1 = bodies.position[b1]
+    position2 = bodies.position[b2]
+    inv_mass1 = bodies.inverse_mass[b1]
+    inv_mass2 = bodies.inverse_mass[b2]
+    inv_inertia1 = bodies.inverse_inertia_world[b1]
+    inv_inertia2 = bodies.inverse_inertia_world[b2]
+
+    la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
+    la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
+
+    r1_b1 = wp.quat_rotate(orientation1, la1_b1)
+    r1_b2 = wp.quat_rotate(orientation2, la1_b2)
+
+    write_vec3(constraints, base_offset + _OFF_R1_B1, cid, r1_b1)
+    write_vec3(constraints, base_offset + _OFF_R1_B2, cid, r1_b2)
+
+    p1_b1 = position1 + r1_b1
+    p1_b2 = position2 + r1_b2
+
+    cr1_b1 = wp.skew(r1_b1)
+    cr1_b2 = wp.skew(r1_b2)
+
+    eye3 = wp.identity(3, dtype=wp.float32)
+
+    a1 = inv_mass1 * eye3
+    a1 = a1 + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr1_b1))
+    a1 = a1 + inv_mass2 * eye3
+    a1 = a1 + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr1_b2))
+
+    a1_inv = wp.inverse(a1)
+    write_mat33(constraints, base_offset + _OFF_A1_INV, cid, a1_inv)
+
+    hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
+    damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
+    dt = 1.0 / idt
+    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt)
+    write_float(constraints, base_offset + _OFF_BIAS_RATE, cid, bias_rate)
+    write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
+    write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
+
+    bias1 = (p1_b2 - p1_b1) * bias_rate
+    write_vec3(constraints, base_offset + _OFF_BIAS1, cid, bias1)
+
+    # 3-DoF positional warm-start (only the anchor-1 impulse).
+    acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
+
+    velocity1 = bodies.velocity[b1] - inv_mass1 * acc1
+    angular_velocity1 = bodies.angular_velocity[b1] - inv_inertia1 @ (cr1_b1 @ acc1)
+    velocity2 = bodies.velocity[b2] + inv_mass2 * acc1
+    angular_velocity2 = bodies.angular_velocity[b2] + inv_inertia2 @ (cr1_b2 @ acc1)
+
+    bodies.velocity[b1] = velocity1
+    bodies.angular_velocity[b1] = angular_velocity1
+    bodies.velocity[b2] = velocity2
+    bodies.angular_velocity[b2] = angular_velocity2
+
+
+@wp.func
+def _ball_socket_iterate_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+    idt: wp.float32,
+):
+    """Ball-socket PGS iterate.
+
+    Single 3-row positional solve: ``lam1_us = -A1^-1 * (J v + bias)``
+    followed by the shared soft-constraint softening
+    ``lam1 = mass_coeff * lam1_us - impulse_coeff * acc1`` and the
+    usual ``acc1 += lam1`` warm-start update. No anchor-2 or anchor-3
+    rows, no axial block.
+    """
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+
+    velocity1 = bodies.velocity[b1]
+    velocity2 = bodies.velocity[b2]
+    angular_velocity1 = bodies.angular_velocity[b1]
+    angular_velocity2 = bodies.angular_velocity[b2]
+    inv_mass1 = bodies.inverse_mass[b1]
+    inv_mass2 = bodies.inverse_mass[b2]
+    inv_inertia1 = bodies.inverse_inertia_world[b1]
+    inv_inertia2 = bodies.inverse_inertia_world[b2]
+
+    r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
+    r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
+
+    cr1_b1 = wp.skew(r1_b1)
+    cr1_b2 = wp.skew(r1_b2)
+
+    a1_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
+    bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
+    mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF, cid)
+    impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid)
+
+    acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
+
+    jv1 = -velocity1 + cr1_b1 @ angular_velocity1 + velocity2 - cr1_b2 @ angular_velocity2
+    rhs1 = jv1 + bias1
+
+    lam1_us = -(a1_inv @ rhs1)
+    lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
+
+    velocity1 = velocity1 - inv_mass1 * lam1
+    angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ lam1)
+    velocity2 = velocity2 + inv_mass2 * lam1
+    angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1)
+
+    bodies.velocity[b1] = velocity1
+    bodies.angular_velocity[b1] = angular_velocity1
+    bodies.velocity[b2] = velocity2
+    bodies.angular_velocity[b2] = angular_velocity2
+
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1 + lam1)
 
 
 # ---------------------------------------------------------------------------
@@ -1530,15 +1693,17 @@ def actuated_double_ball_socket_prepare_for_iteration_at(
     """Composable prepare pass that dispatches on ``joint_mode``.
 
     Reads the per-constraint ``joint_mode`` tag and calls the
-    revolute or prismatic pre-iteration helper. See
-    :func:`_revolute_prepare_at` and :func:`_prismatic_prepare_at` for
-    the per-mode math.
+    ball-socket, revolute, or prismatic pre-iteration helper. See
+    :func:`_ball_socket_prepare_at`, :func:`_revolute_prepare_at`,
+    and :func:`_prismatic_prepare_at` for the per-mode math.
     """
     joint_mode = read_int(constraints, base_offset + _OFF_JOINT_MODE, cid)
     if joint_mode == JOINT_MODE_REVOLUTE:
         _revolute_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt)
-    else:
+    elif joint_mode == JOINT_MODE_PRISMATIC:
         _prismatic_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt)
+    else:
+        _ball_socket_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt)
 
 
 @wp.func
@@ -1554,8 +1719,10 @@ def actuated_double_ball_socket_iterate_at(
     joint_mode = read_int(constraints, base_offset + _OFF_JOINT_MODE, cid)
     if joint_mode == JOINT_MODE_REVOLUTE:
         _revolute_iterate_at(constraints, cid, base_offset, bodies, body_pair, idt)
-    else:
+    elif joint_mode == JOINT_MODE_PRISMATIC:
         _prismatic_iterate_at(constraints, cid, base_offset, bodies, body_pair, idt)
+    else:
+        _ball_socket_iterate_at(constraints, cid, base_offset, bodies, body_pair, idt)
 
 
 @wp.func
@@ -1568,9 +1735,11 @@ def actuated_double_ball_socket_world_wrench_at(
     """World-frame wrench the joint applies on body 2.
 
     Sums the anchor impulses (converted to force via ``idt``) and the
-    axial drive / limit contribution. Revolute reports the axial
-    impulse as a torque about ``-n_hat``; prismatic reports it as a
-    force along ``-n_hat`` (same sign convention as the iterate).
+    axial drive / limit contribution where applicable. Revolute reports
+    the axial impulse as a torque about ``-n_hat``; prismatic reports
+    it as a force along ``-n_hat`` (same sign convention as the
+    iterate). Ball-socket has no anchor-2/anchor-3 rows and no axial
+    block, so only the anchor-1 impulse contributes.
     """
     joint_mode = read_int(constraints, base_offset + _OFF_JOINT_MODE, cid)
     acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
@@ -1588,7 +1757,7 @@ def actuated_double_ball_socket_world_wrench_at(
         torque = wp.cross(r1_b2, acc1 * idt) + wp.cross(r2_b2, acc2 * idt)
         # Axial block is a torque about -n_hat.
         torque = torque - n_hat * ((acc_drive + acc_limit) * idt)
-    else:
+    elif joint_mode == JOINT_MODE_PRISMATIC:
         force = (acc1 + acc2 + acc3) * idt
         torque = (
             wp.cross(r1_b2, acc1 * idt)
@@ -1599,6 +1768,10 @@ def actuated_double_ball_socket_world_wrench_at(
         axial_force = n_hat * ((acc_drive + acc_limit) * idt)
         force = force - axial_force
         torque = torque - wp.cross(r1_b2, axial_force)
+    else:
+        # Ball-socket: only the anchor-1 impulse.
+        force = acc1 * idt
+        torque = wp.cross(r1_b2, acc1 * idt)
     return force, torque
 
 

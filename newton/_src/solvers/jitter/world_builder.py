@@ -43,6 +43,7 @@ from newton._src.solvers.jitter.constraint_actuated_double_ball_socket import (
     DRIVE_MODE_OFF,
     DRIVE_MODE_POSITION,
     DRIVE_MODE_VELOCITY,
+    JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
     actuated_double_ball_socket_initialize_kernel,
@@ -283,10 +284,11 @@ class DriveMode(IntEnum):
 class JointMode(IntEnum):
     """Which physical joint a :class:`JointDescriptor` materialises.
 
-    A single unified constraint schema (5-DoF positional lock + optional
-    scalar actuator row) covers both revolute (hinge) and prismatic
-    (slider) joints; the mode picks which pure-point formulation the
-    runtime kernel uses and what units the drive / limit are in.
+    A single unified constraint schema (3- or 5-DoF positional lock +
+    optional scalar actuator row) covers ball-socket, revolute (hinge),
+    and prismatic (slider) joints; the mode picks which pure-point
+    formulation the runtime kernel uses and what units the drive /
+    limit are in.
 
     See :mod:`newton._src.solvers.jitter.constraint_actuated_double_ball_socket`
     for the per-mode math. Values match the underlying
@@ -296,17 +298,24 @@ class JointMode(IntEnum):
 
     REVOLUTE = int(JOINT_MODE_REVOLUTE)
     PRISMATIC = int(JOINT_MODE_PRISMATIC)
+    BALL_SOCKET = int(JOINT_MODE_BALL_SOCKET)
 
 
 @dataclass
 class JointDescriptor:
-    """Plain-Python description of one unified revolute/prismatic joint.
+    """Plain-Python description of one unified ball-socket / revolute / prismatic joint.
 
-    A single 5-DoF pure-point positional lock (solved as one rank-5 PGS
-    column via a Schur complement) plus an *optional* scalar actuator
-    row that drives and/or clamps the free DoF. The ``mode`` selects
-    which physical joint this is:
+    A single pure-point positional lock (3-DoF for ball-socket, 5-DoF
+    for revolute / prismatic -- solved as a direct 3x3 inverse or a
+    rank-5 Schur complement) plus an *optional* scalar actuator row
+    that drives and/or clamps the free DoF (revolute / prismatic
+    only). The ``mode`` selects which physical joint this is:
 
+    * :attr:`JointMode.BALL_SOCKET` -- a single ball-socket. Locks 3
+      translational DoF at ``anchor1``; all 3 rotational DoF are free.
+      No ``anchor2``, no drive, no limit -- the two bodies are pinned
+      together at one world point and rotate independently. ``anchor2``
+      is ignored; drive / limit fields must be left at their defaults.
     * :attr:`JointMode.REVOLUTE` -- a double ball-socket hinge. Locks
       3 translational + 2 rotational DoF; the free DoF is rotation
       about the line through ``anchor1`` and ``anchor2``. The drive
@@ -320,31 +329,36 @@ class JointDescriptor:
       displacements [m] along the slide axis (measured from
       ``anchor1``) and ``max_force_drive`` as a linear force cap [N].
 
-    For *both* modes, ``anchor1`` and ``anchor2`` are two world-space
-    points on the joint axis at :meth:`finalize` time. The init kernel
-    snapshots them into each body's local frame; the line between them
-    defines the hinge / slide direction. For prismatic mode the init
-    kernel additionally auto-derives a third anchor (perpendicular to
-    the slide axis, at distance ``|anchor2 - anchor1|`` -- i.e. the
-    *rest length*) so the point-matching 2+2+1 formulation has a
-    non-degenerate twist-lock row without any user-visible API change.
+    For revolute and prismatic modes, ``anchor1`` and ``anchor2`` are
+    two world-space points on the joint axis at :meth:`finalize` time.
+    The init kernel snapshots them into each body's local frame; the
+    line between them defines the hinge / slide direction. For
+    prismatic mode the init kernel additionally auto-derives a third
+    anchor (perpendicular to the slide axis, at distance
+    ``|anchor2 - anchor1|`` -- i.e. the *rest length*) so the point-
+    matching 2+2+1 formulation has a non-degenerate twist-lock row
+    without any user-visible API change.
 
     Passing ``anchor2 = anchor1 + axis`` with a unit ``axis`` is the
     common convention -- it yields ``rest_length = 1 m`` and makes the
     slide / hinge axis independent of any scene-wide length unit.
 
+    For ball-socket mode ``anchor2`` is set to ``anchor1`` internally
+    (so the init kernel's axis snapshot is degenerate but harmless;
+    the runtime dispatch ignores anchor-2 state entirely).
+
     All ``hertz`` / ``damping_ratio`` parameters follow the Box2D v3 /
     Bepu / Nordby soft-constraint formulation; see
     :func:`soft_constraint_coefficients`. The default
     ``hertz = DEFAULT_HERTZ_LINEAR`` / critical damping applies to the
-    positional Schur block; the actuator (drive + limit) rows have
-    their own knobs.
+    positional block (3x3 for ball-socket, rank-5 Schur otherwise);
+    the actuator (drive + limit) rows have their own knobs.
 
     Leaving ``drive_mode = DriveMode.OFF`` and
     ``min_value == max_value == 0`` disables the actuator row entirely,
-    giving a *non-actuated* revolute or prismatic joint -- same
-    behaviour as the previous ``add_double_ball_socket_hinge`` and
-    ``add_prismatic`` entry points.
+    giving a *non-actuated* revolute or prismatic joint. Ball-socket
+    has no actuator row -- those fields are required to stay at their
+    defaults.
     """
 
     body1: int
@@ -873,7 +887,7 @@ class WorldBuilder:
         body1: int,
         body2: int,
         anchor1: tuple[float, float, float],
-        anchor2: tuple[float, float, float],
+        anchor2: tuple[float, float, float] | None = None,
         mode: JointMode = JointMode.REVOLUTE,
         hertz: float = float(DEFAULT_HERTZ_LINEAR),
         damping_ratio: float = float(DEFAULT_DAMPING_RATIO),
@@ -888,24 +902,36 @@ class WorldBuilder:
         hertz_limit: float = float(DEFAULT_HERTZ_LIMIT),
         damping_ratio_limit: float = float(DEFAULT_DAMPING_RATIO),
     ) -> JointHandle:
-        """Append a unified revolute / prismatic joint and return its handle.
+        """Append a unified ball-socket / revolute / prismatic joint and return its handle.
 
-        One entry point materialises either a 5-DoF hinge (revolute
-        mode -- double ball-socket) or a 5-DoF slider (prismatic mode
-        -- 2+2+1 tangent-plane triad) plus an optional scalar actuator
-        row that drives and/or clamps the free DoF. Both modes share
-        one constraint schema and one Warp kernel; the runtime picks
-        the per-mode prepare/iterate math from ``mode``.
+        One entry point materialises:
 
-        ``anchor1`` and ``anchor2`` are two world-space points on the
-        joint axis at :meth:`finalize` time. The line between them
-        defines the hinge axis (revolute) or slide direction
-        (prismatic). For a unit-length axis convention, pass
-        ``anchor2 = anchor1 + axis`` (yields ``rest_length = 1 m``
-        independent of scene units); any two distinct points work.
+        * a 3-DoF ball-socket (ball-socket mode -- single anchor, pure
+          point lock, all 3 rotations free, no drive / limit),
+        * a 5-DoF hinge (revolute mode -- double ball-socket), or
+        * a 5-DoF slider (prismatic mode -- 2+2+1 tangent-plane triad),
 
-        Leaving ``drive_mode = DriveMode.OFF`` and
-        ``min_value == max_value == 0`` disables the actuator row
+        plus an optional scalar actuator row (revolute / prismatic
+        only) that drives and/or clamps the free DoF. All three modes
+        share one constraint schema and one Warp kernel; the runtime
+        picks the per-mode prepare / iterate math from ``mode``.
+
+        For revolute and prismatic, ``anchor1`` and ``anchor2`` are
+        two world-space points on the joint axis at :meth:`finalize`
+        time. The line between them defines the hinge axis (revolute)
+        or slide direction (prismatic). For a unit-length axis
+        convention, pass ``anchor2 = anchor1 + axis`` (yields
+        ``rest_length = 1 m`` independent of scene units); any two
+        distinct points work.
+
+        For ball-socket, ``anchor2`` must be ``None`` (the default);
+        ``drive_mode`` / ``min_value`` / ``max_value`` must be left at
+        their defaults -- ball-socket has no actuator row, and passing
+        non-default values raises ``ValueError`` to fail loudly rather
+        than silently ignoring them.
+
+        For revolute / prismatic, leaving ``drive_mode = DriveMode.OFF``
+        and ``min_value == max_value == 0`` disables the actuator row
         entirely (non-actuated joint). Otherwise:
 
         * :attr:`DriveMode.POSITION` / :attr:`DriveMode.VELOCITY` on the
@@ -919,38 +945,48 @@ class WorldBuilder:
         Drive and limit are independent and can be active
         simultaneously; the limit always wins because it's unilateral.
         See :mod:`newton._src.solvers.jitter.constraint_actuated_double_ball_socket`
-        for the derivation of both modes.
+        for the derivation of all three modes.
 
         Args:
             body1: Index of the first body. For prismatic mode the
                 slide axis is snapshotted into this body's local frame.
             body2: Index of the second body.
             anchor1: First anchor in *world* space at finalize() time [m].
+                Both bodies are expected to coincide at this point at
+                finalize time (body positions / orientations are used
+                to derive the body-local snapshots).
             anchor2: Second anchor in *world* space at finalize() time [m];
-                the line ``anchor1 -> anchor2`` defines the joint axis.
-            mode: :attr:`JointMode.REVOLUTE` (hinge) or
+                the line ``anchor1 -> anchor2`` defines the joint axis
+                for revolute / prismatic modes. Must be ``None`` for
+                ball-socket (and is required for the other two modes).
+            mode: :attr:`JointMode.BALL_SOCKET`,
+                :attr:`JointMode.REVOLUTE` (hinge), or
                 :attr:`JointMode.PRISMATIC` (slider). Default revolute.
-            hertz: Positional Schur block soft-constraint frequency [Hz].
-            damping_ratio: Positional Schur block damping ratio.
-            drive_mode: One of :class:`DriveMode`.
+            hertz: Positional block soft-constraint frequency [Hz]
+                (3x3 block for ball-socket, rank-5 Schur otherwise).
+            damping_ratio: Positional block damping ratio.
+            drive_mode: One of :class:`DriveMode`. Must be
+                :attr:`DriveMode.OFF` for ball-socket.
             target: Position-drive setpoint. Units [rad] for revolute,
                 [m] for prismatic (measured from ``anchor1`` along the
-                axis).
+                axis). Ignored for ball-socket (must be 0).
             target_velocity: Velocity-drive setpoint. Units [rad/s] for
-                revolute, [m/s] for prismatic.
+                revolute, [m/s] for prismatic. Ignored for ball-socket
+                (must be 0).
             max_force_drive: Drive impulse cap, in torque [N*m] for
                 revolute or linear force [N] for prismatic. Active for
                 both :attr:`DriveMode.POSITION` and
                 :attr:`DriveMode.VELOCITY`: ``> 0`` clamps the
                 per-substep impulse to ``max_force_drive * dt``, ``0``
                 means *unlimited* for POSITION and *disables* the drive
-                for VELOCITY.
+                for VELOCITY. Must be 0 for ball-socket.
             hertz_drive: Drive soft-constraint frequency [Hz].
             damping_ratio_drive: Drive damping ratio.
             min_value: Lower limit. Units [rad] for revolute, [m] for
-                prismatic.
+                prismatic. Must be 0 for ball-socket.
             max_value: Upper limit. Same units as ``min_value``;
                 ``min_value == max_value == 0`` disables the limit.
+                Must be 0 for ball-socket.
             hertz_limit: Limit soft-constraint frequency [Hz].
             damping_ratio_limit: Limit damping ratio.
 
@@ -958,18 +994,65 @@ class WorldBuilder:
             A :class:`JointHandle` whose ``cid`` field is rewritten in
             place by :meth:`finalize` to the joint's global cid in the
             shared :class:`ConstraintContainer`.
+
+        Raises:
+            ValueError: If ``mode`` and the other arguments are
+                inconsistent -- e.g. ``anchor2`` missing in revolute /
+                prismatic mode, or drive / limit / ``anchor2`` set in
+                ball-socket mode.
         """
         self._validate_body(body1)
         self._validate_body(body2)
+
+        mode_enum = JointMode(int(mode))
+        drive_mode_enum = DriveMode(int(drive_mode))
+
+        if mode_enum is JointMode.BALL_SOCKET:
+            if anchor2 is not None:
+                raise ValueError(
+                    "add_joint(mode=JointMode.BALL_SOCKET) must not receive an "
+                    "``anchor2`` argument -- a ball-socket is a single-point pin."
+                )
+            if drive_mode_enum is not DriveMode.OFF:
+                raise ValueError(
+                    "add_joint(mode=JointMode.BALL_SOCKET) has no actuator row; "
+                    "``drive_mode`` must be DriveMode.OFF (got "
+                    f"{drive_mode_enum.name})."
+                )
+            if target != 0.0 or target_velocity != 0.0 or max_force_drive != 0.0:
+                raise ValueError(
+                    "add_joint(mode=JointMode.BALL_SOCKET) has no actuator row; "
+                    "``target`` / ``target_velocity`` / ``max_force_drive`` must "
+                    "be left at their defaults (0.0)."
+                )
+            if min_value != 0.0 or max_value != 0.0:
+                raise ValueError(
+                    "add_joint(mode=JointMode.BALL_SOCKET) has no limit row; "
+                    "``min_value`` / ``max_value`` must be left at their "
+                    "defaults (0.0)."
+                )
+            # Internally stash anchor2 = anchor1 so the shared init kernel
+            # (which unconditionally reads both anchors) has something valid
+            # to snapshot. The dispatcher's ball-socket branch ignores all
+            # anchor-2 state anyway.
+            anchor2_effective: tuple[float, float, float] = tuple(anchor1)  # type: ignore[assignment]
+        else:
+            if anchor2 is None:
+                raise ValueError(
+                    f"add_joint(mode={mode_enum.name}) requires an ``anchor2`` "
+                    "argument; the line anchor1 -> anchor2 defines the joint axis."
+                )
+            anchor2_effective = anchor2
+
         descriptor = JointDescriptor(
             body1=body1,
             body2=body2,
             anchor1=anchor1,
-            anchor2=anchor2,
-            mode=JointMode(int(mode)),
+            anchor2=anchor2_effective,
+            mode=mode_enum,
             hertz=hertz,
             damping_ratio=damping_ratio,
-            drive_mode=DriveMode(int(drive_mode)),
+            drive_mode=drive_mode_enum,
             target=target,
             target_velocity=target_velocity,
             max_force_drive=max_force_drive,

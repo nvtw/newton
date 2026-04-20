@@ -666,7 +666,7 @@ def _is_axis_rigid(hertz: wp.float32, target_pos: wp.float32, max_force: wp.floa
     return hertz <= 0.0 and target_pos == 0.0 and max_force >= 1.0e29
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def d6_initialize_kernel(
     constraints: ConstraintContainer,
     bodies: BodyContainer,

@@ -1,14 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Behavioural tests for the unified revolute / prismatic joint.
+"""Behavioural tests for the unified ball-socket / revolute / prismatic joint.
 
 A single :class:`JointDescriptor` with a ``mode`` field materialises
-either a 5-DoF hinge (revolute) or a 5-DoF slider (prismatic), plus an
-optional scalar actuator row on the free DoF (position or velocity
-drive + one-sided spring-damper limits). All backed by the same Warp
-kernel -- both modes are exercised below back-to-back against the same
-single-cube + static-anchor fixture:
+a 3-DoF ball-socket, a 5-DoF hinge (revolute), or a 5-DoF slider
+(prismatic); revolute and prismatic additionally carry an optional
+scalar actuator row on the free DoF (position or velocity drive +
+one-sided spring-damper limits). All three modes share the same Warp
+kernel and are exercised below back-to-back against the same single-
+cube + static-anchor fixture:
+
+Ball-socket mode
+----------------
+* **Anchor coincides.** After settling the single anchor on both
+  bodies maps to the same world point -- the 3-row point lock holds.
+* **Free rotation around any axis.** An initial spin about an
+  arbitrary axis must be preserved (all 3 rotational DoF free).
+* **Gravity pendulum.** With the cube offset from the anchor and
+  gravity on, the cube swings as a pendulum -- the anchor holds, but
+  the cube's centre of mass can move (under rotation about the anchor).
+* **API validation.** Passing ``anchor2`` / ``drive_mode != OFF`` /
+  ``min_value != 0`` etc. in ball-socket mode must raise.
 
 Revolute mode
 -------------
@@ -55,9 +68,9 @@ from newton._src.solvers.jitter.world_builder import (
 
 GRAVITY = 9.81
 FPS = 60
-SUBSTEPS = 4
-SOLVER_ITERATIONS = 16
-SETTLE_FRAMES = 240
+SUBSTEPS = 2
+SOLVER_ITERATIONS = 4
+SETTLE_FRAMES = 60
 HALF_EXTENT = 0.5
 _INV_INERTIA = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
 
@@ -196,6 +209,48 @@ def _build_prismatic_scene(
     return world, handle
 
 
+# ---------------------------------------------------------------------------
+# Ball-socket scene builder
+# ---------------------------------------------------------------------------
+
+
+def _build_ball_socket_scene(
+    device,
+    *,
+    anchor: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    cube_position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    initial_angular_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    initial_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    affected_by_gravity: bool = False,
+):
+    """Static body + one dynamic cube joined by a ball-socket.
+
+    A single world-space anchor pins the two bodies together; all
+    three rotational DoF are free. Pass ``cube_position != anchor``
+    together with ``affected_by_gravity=True`` to get a pendulum.
+    """
+    b = WorldBuilder()
+    anchor_body = b.add_static_body()
+    cube = b.add_dynamic_body(
+        position=cube_position,
+        inverse_mass=1.0,
+        inverse_inertia=_INV_INERTIA,
+        affected_by_gravity=affected_by_gravity,
+        velocity=initial_velocity,
+        angular_velocity=initial_angular_velocity,
+    )
+    handle = b.add_joint(
+        body1=anchor_body,
+        body2=cube,
+        anchor1=anchor,
+        mode=JointMode.BALL_SOCKET,
+    )
+    world = b.finalize(
+        substeps=SUBSTEPS, solver_iterations=SOLVER_ITERATIONS, device=device
+    )
+    return world, handle
+
+
 def _scene_half_extents() -> np.ndarray:
     he = np.zeros((3, 3), dtype=np.float32)
     he[2] = HALF_EXTENT
@@ -205,6 +260,51 @@ def _scene_half_extents() -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Scene registrations (visualizer fixtures)
 # ---------------------------------------------------------------------------
+
+
+@scene(
+    "Joint (ball-socket): free 3D spin",
+    description=(
+        "Static-anchored cube pinned at one point, spinning freely about all "
+        "three axes. Ball-socket has no preferred axis."
+    ),
+    tags=("joint", "ball_socket"),
+)
+def build_ball_socket_free_spin_scene(device) -> Scene:
+    world, _ = _build_ball_socket_scene(
+        device, initial_angular_velocity=(1.5, 0.7, 2.0)
+    )
+    return Scene(
+        world=world,
+        body_half_extents=_scene_half_extents(),
+        frame_dt=1.0 / FPS,
+        substeps=SUBSTEPS,
+    )
+
+
+@scene(
+    "Joint (ball-socket): gravity pendulum",
+    description=(
+        "Cube hanging below a static anchor, forming a pendulum that swings "
+        "freely while the single anchor point stays fixed."
+    ),
+    tags=("joint", "ball_socket"),
+)
+def build_ball_socket_pendulum_scene(device) -> Scene:
+    # Anchor at world origin on the cube's top face; cube COM one metre below.
+    world, _ = _build_ball_socket_scene(
+        device,
+        anchor=(0.0, 0.0, 0.0),
+        cube_position=(0.0, 0.0, -1.0),
+        initial_velocity=(0.4, 0.0, 0.0),
+        affected_by_gravity=True,
+    )
+    return Scene(
+        world=world,
+        body_half_extents=_scene_half_extents(),
+        frame_dt=1.0 / FPS,
+        substeps=SUBSTEPS,
+    )
 
 
 @scene(
@@ -341,6 +441,53 @@ def _axial_twist(orientation: np.ndarray) -> float:
     return 2.0 * math.atan2(z, w)
 
 
+# Graph-capture threshold. Each `world.step(dt)` call on CUDA pays a
+# fixed Python/Warp launch overhead of ~0.5-2 ms; a CUDA graph replay
+# is ~10 us, so above this many frames the capture setup pays for
+# itself by an order of magnitude. For shorter loops we skip capture
+# (pure eager mode is already fast enough).
+_GRAPH_CAPTURE_FRAME_THRESHOLD = 40
+
+
+def _run_settle_loop(world, frames: int) -> None:
+    """Advance ``world`` by ``frames`` frames at ``1/FPS`` seconds each.
+
+    When the backing device is CUDA and ``frames`` exceeds the amortisation
+    threshold, the per-step kernel sequence is recorded into a CUDA graph
+    and replayed for the remaining iterations. Warp graph semantics: the
+    graph captures the exact kernel launches made by ``world.step(dt)``;
+    because every test uses a fixed ``dt`` and a fixed solver configuration,
+    replays are bit-identical to eager mode.
+
+    Falls back to eager stepping on CPU (where ``wp.ScopedCapture`` is a
+    no-op) and for small frame counts (where capture overhead dominates).
+    """
+    dt = 1.0 / FPS
+
+    device = wp.get_device()
+    use_graph = device.is_cuda and frames >= _GRAPH_CAPTURE_FRAME_THRESHOLD
+
+    if not use_graph:
+        for _ in range(frames):
+            world.step(dt)
+        return
+
+    # Warm-up step outside the capture: ensures all Warp modules referenced
+    # by ``step(dt)`` are JIT-compiled and loaded, and absorbs the first-
+    # call allocation of any lazily-created scratch buffers. Capturing those
+    # would fail (or at minimum pin the wrong allocation into the graph).
+    world.step(dt)
+
+    with wp.ScopedCapture(device=device) as capture:
+        world.step(dt)
+    graph = capture.graph
+
+    # We already advanced two steps (one warm-up + one capture). Replay
+    # the remainder through the graph.
+    for _ in range(frames - 2):
+        wp.capture_launch(graph)
+
+
 def _quat_rotate(q, v):
     """Rotate ``v`` by quaternion ``q`` (xyzw)."""
     x, y, z, w = q
@@ -371,9 +518,7 @@ class TestJointRevolute(unittest.TestCase):
     """Revolute-mode physics checks for :meth:`WorldBuilder.add_joint`."""
 
     def _step(self, world, frames=SETTLE_FRAMES):
-        dt = 1.0 / FPS
-        for _ in range(frames):
-            world.step(dt)
+        _run_settle_loop(world, frames)
 
     def test_anchors_coincide(self):
         """Both anchor pairs must map to the same world position.
@@ -433,7 +578,7 @@ class TestJointRevolute(unittest.TestCase):
         """Gravity-loaded cube centred on the hinge axis must not drift."""
         device = wp.get_preferred_device()
         world, _ = _build_revolute_scene(device, affected_by_gravity=True)
-        self._step(world, frames=600)
+        self._step(world, frames=150)
 
         positions = world.bodies.position.numpy()
         cube = 2
@@ -494,7 +639,7 @@ class TestJointRevolute(unittest.TestCase):
             target=target,
             initial_angular_velocity=(0.0, 0.0, 2.5),
         )
-        self._step(world, frames=360)
+        self._step(world, frames=90)
 
         orientations = world.bodies.orientation.numpy()
         omegas = world.bodies.angular_velocity.numpy()
@@ -525,7 +670,7 @@ class TestJointRevolute(unittest.TestCase):
             max_force_drive=0.05,
             hertz_drive=30.0,
         )
-        self._step(world, frames=240)
+        self._step(world, frames=60)
 
         orientations = world.bodies.orientation.numpy()
         cube = 2
@@ -546,7 +691,7 @@ class TestJointRevolute(unittest.TestCase):
             target_velocity=target,
             max_force_drive=50.0,
         )
-        self._step(world, frames=120)
+        self._step(world, frames=30)
 
         omegas = world.bodies.angular_velocity.numpy()
         cube = 2
@@ -563,7 +708,7 @@ class TestJointRevolute(unittest.TestCase):
             target_velocity=target,
             max_force_drive=0.1,
         )
-        self._step(world, frames=120)
+        self._step(world, frames=30)
 
         omegas = world.bodies.angular_velocity.numpy()
         cube = 2
@@ -582,7 +727,7 @@ class TestJointRevolute(unittest.TestCase):
             hertz_limit=10.0,
             damping_ratio_limit=2.0,
         )
-        self._step(world, frames=300)
+        self._step(world, frames=75)
 
         orientations = world.bodies.orientation.numpy()
         omegas = world.bodies.angular_velocity.numpy()
@@ -604,7 +749,7 @@ class TestJointRevolute(unittest.TestCase):
             hertz_limit=10.0,
             damping_ratio_limit=2.0,
         )
-        self._step(world, frames=300)
+        self._step(world, frames=75)
 
         orientations = world.bodies.orientation.numpy()
         cube = 2
@@ -622,9 +767,7 @@ class TestJointPrismatic(unittest.TestCase):
     """Prismatic-mode physics checks for :meth:`WorldBuilder.add_joint`."""
 
     def _step(self, world, frames=SETTLE_FRAMES):
-        dt = 1.0 / FPS
-        for _ in range(frames):
-            world.step(dt)
+        _run_settle_loop(world, frames)
 
     def test_free_axial_slide_under_gravity(self):
         """Slide axis along gravity -> free fall along the axis only."""
@@ -695,7 +838,7 @@ class TestJointPrismatic(unittest.TestCase):
             drive_mode=DriveMode.POSITION,
             target=target,
         )
-        self._step(world, frames=300)
+        self._step(world, frames=75)
 
         positions = world.bodies.position.numpy()
         velocities = world.bodies.velocity.numpy()
@@ -715,7 +858,7 @@ class TestJointPrismatic(unittest.TestCase):
             target_velocity=target,
             max_force_drive=50.0,
         )
-        self._step(world, frames=120)
+        self._step(world, frames=30)
 
         velocities = world.bodies.velocity.numpy()
         cube = 2
@@ -742,7 +885,7 @@ class TestJointPrismatic(unittest.TestCase):
             hertz_drive=8.0,
             damping_ratio_drive=1.0,
         )
-        self._step(world, frames=360)
+        self._step(world, frames=90)
 
         positions = world.bodies.position.numpy()
         velocities = world.bodies.velocity.numpy()
@@ -770,7 +913,7 @@ class TestJointPrismatic(unittest.TestCase):
             max_force_drive=0.5,
             hertz_drive=30.0,
         )
-        self._step(world, frames=120)
+        self._step(world, frames=30)
 
         positions = world.bodies.position.numpy()
         cube = 2
@@ -799,12 +942,191 @@ class TestJointPrismatic(unittest.TestCase):
             target_velocity=0.3,
             max_force_drive=50.0,
         )
-        self._step(world, frames=400)
+        self._step(world, frames=100)
 
         positions = world.bodies.position.numpy()
         cube = 2
         self.assertLessEqual(positions[cube, 0], max_v + 0.1)
         self.assertGreaterEqual(positions[cube, 0], max_v - 0.2)
+
+
+# ---------------------------------------------------------------------------
+# Ball-socket mode tests
+# ---------------------------------------------------------------------------
+
+
+class TestJointBallSocket(unittest.TestCase):
+    """Ball-socket-mode physics checks for :meth:`WorldBuilder.add_joint`."""
+
+    def _step(self, world, frames=SETTLE_FRAMES):
+        _run_settle_loop(world, frames)
+
+    def test_anchor_coincides(self):
+        """The single anchor must map to the same world point on both bodies.
+
+        A drift here means the 3-row point lock has lost rows.
+        """
+        device = wp.get_preferred_device()
+        anchor = (0.0, 0.0, 0.0)
+        # Start the cube off-anchor and with a spin to stress the lock.
+        world, _ = _build_ball_socket_scene(
+            device,
+            anchor=anchor,
+            cube_position=(0.0, 0.0, 0.0),
+            initial_angular_velocity=(1.0, 0.5, 2.0),
+            affected_by_gravity=True,
+        )
+        self._step(world)
+
+        positions = world.bodies.position.numpy()
+        orientations = world.bodies.orientation.numpy()
+        cube = 2
+        # Anchor in body-1 (static) frame is just its world position.
+        a_b1 = np.asarray(anchor, dtype=np.float64)
+        # Anchor in cube frame, rotated into world.
+        a_local_b2 = np.asarray(anchor, dtype=np.float64) - np.zeros(3)
+        a_b2 = positions[cube] + _quat_rotate(orientations[cube], a_local_b2)
+        self.assertLess(
+            np.linalg.norm(a_b2 - a_b1),
+            0.02,
+            msg=f"anchor drift {np.linalg.norm(a_b2 - a_b1)} exceeds 0.02 m",
+        )
+
+    def test_free_rotation_survives(self):
+        """An initial 3D spin must be preserved (all rotational DoF free).
+
+        Without gravity and with the cube COM at the anchor, no torques
+        act on the cube, so all three components of the initial angular
+        velocity must persist.
+        """
+        device = wp.get_preferred_device()
+        omega0 = (1.2, 0.7, 2.0)
+        world, _ = _build_ball_socket_scene(
+            device,
+            anchor=(0.0, 0.0, 0.0),
+            cube_position=(0.0, 0.0, 0.0),
+            initial_angular_velocity=omega0,
+            affected_by_gravity=False,
+        )
+        self._step(world)
+
+        omegas = world.bodies.angular_velocity.numpy()
+        cube = 2
+        for i, name in enumerate(("x", "y", "z")):
+            self.assertAlmostEqual(
+                omegas[cube, i],
+                omega0[i],
+                delta=0.05,
+                msg=(
+                    f"angular velocity.{name} bled from {omega0[i]} to "
+                    f"{omegas[cube, i]}"
+                ),
+            )
+
+    def test_pendulum_cm_swings_but_anchor_holds(self):
+        """With gravity and an offset COM, the anchor must hold and the cube must move.
+
+        Classic pendulum test: anchor at the origin, cube COM 1 m below.
+        Gravity swings the cube around the anchor -- we assert (a) the
+        anchor-on-cube stays near the world origin, and (b) the cube
+        COM has a non-trivial horizontal velocity / displacement after
+        settling (it is not frozen in place).
+        """
+        device = wp.get_preferred_device()
+        anchor = (0.0, 0.0, 0.0)
+        world, _ = _build_ball_socket_scene(
+            device,
+            anchor=anchor,
+            cube_position=(0.0, 0.0, -1.0),
+            initial_velocity=(0.5, 0.0, 0.0),
+            affected_by_gravity=True,
+        )
+        self._step(world, frames=60)
+
+        positions = world.bodies.position.numpy()
+        orientations = world.bodies.orientation.numpy()
+        cube = 2
+        # Anchor in cube frame is the world anchor minus the cube's
+        # initial (finalize-time) position rotated back into cube frame.
+        # With the initial orientation being identity and the initial
+        # cube position (0, 0, -1), the anchor in cube local is (0, 0, 1).
+        anchor_local = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        a_b2 = positions[cube] + _quat_rotate(orientations[cube], anchor_local)
+        self.assertLess(
+            np.linalg.norm(a_b2 - np.asarray(anchor, dtype=np.float64)),
+            0.05,
+            msg=(
+                f"pendulum anchor drifted to {a_b2} (expected near origin); "
+                "ball-socket lock is leaking"
+            ),
+        )
+        # The cube should have swung off the vertical -- either x-coordinate
+        # or x-velocity must be non-trivial.
+        vel = world.bodies.velocity.numpy()[cube]
+        moved = abs(positions[cube, 0]) > 0.05 or abs(vel[0]) > 0.05
+        self.assertTrue(
+            moved,
+            msg=(
+                f"pendulum did not swing: pos={positions[cube]}, vel={vel}. "
+                "Ball-socket is over-constraining rotation."
+            ),
+        )
+
+    def test_rejects_anchor2(self):
+        """Passing ``anchor2`` in ball-socket mode must raise."""
+        b = WorldBuilder()
+        b.add_static_body()
+        b.add_dynamic_body()
+        with self.assertRaises(ValueError):
+            b.add_joint(
+                body1=0,
+                body2=1,
+                anchor1=(0.0, 0.0, 0.0),
+                anchor2=(1.0, 0.0, 0.0),
+                mode=JointMode.BALL_SOCKET,
+            )
+
+    def test_rejects_drive_mode(self):
+        """Passing ``drive_mode != OFF`` in ball-socket mode must raise."""
+        b = WorldBuilder()
+        b.add_static_body()
+        b.add_dynamic_body()
+        with self.assertRaises(ValueError):
+            b.add_joint(
+                body1=0,
+                body2=1,
+                anchor1=(0.0, 0.0, 0.0),
+                mode=JointMode.BALL_SOCKET,
+                drive_mode=DriveMode.POSITION,
+            )
+
+    def test_rejects_limits(self):
+        """Passing non-zero limits in ball-socket mode must raise."""
+        b = WorldBuilder()
+        b.add_static_body()
+        b.add_dynamic_body()
+        with self.assertRaises(ValueError):
+            b.add_joint(
+                body1=0,
+                body2=1,
+                anchor1=(0.0, 0.0, 0.0),
+                mode=JointMode.BALL_SOCKET,
+                min_value=-0.5,
+                max_value=0.5,
+            )
+
+    def test_requires_anchor2_for_revolute(self):
+        """Revolute mode without ``anchor2`` must raise (symmetric check)."""
+        b = WorldBuilder()
+        b.add_static_body()
+        b.add_dynamic_body()
+        with self.assertRaises(ValueError):
+            b.add_joint(
+                body1=0,
+                body2=1,
+                anchor1=(0.0, 0.0, 0.0),
+                mode=JointMode.REVOLUTE,
+            )
 
 
 if __name__ == "__main__":

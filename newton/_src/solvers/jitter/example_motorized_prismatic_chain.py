@@ -246,7 +246,6 @@ class Example:
                         anchor1=anchor,
                         anchor2=anchor2,
                         mode=JointMode.PRISMATIC,
-                        hertz=0.0,  # TEMP: try rigid lock
                         drive_mode=DRIVE_MODE,
                         target=TARGET_POSITION,
                         target_velocity=TARGET_VELOCITY,

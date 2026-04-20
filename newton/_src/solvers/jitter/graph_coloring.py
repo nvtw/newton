@@ -36,7 +36,7 @@ __all__ = [
 ]
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def partitioning_adjacency_finalize_pre_sort_kernel(
     partition_ends: wp.array[int],
     num_partitions: wp.array[int],
@@ -77,7 +77,7 @@ def partitioning_adjacency_finalize_pre_sort_kernel(
     interaction_id_to_partition[tid] = wp.min(max_num_partitions, color_plus_one - 1)
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def partitioning_adjacency_finalize_post_sort_kernel(
     partition_data_concat: wp.array[wp.int64],
     partition_data_elements: wp.array[int],

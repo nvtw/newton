@@ -15,6 +15,16 @@
 # mid-air. Gravity (-y) pulls everything down and the joints keep the
 # zig-zag together.
 #
+# The chain joint type is chosen by the module-level ``JOINT_KIND``
+# selector (:class:`JointKind`) so you can directly compare the three
+# ball-socket implementations available in jitter: the legacy fused
+# ball-socket, the unified ``ACTUATED_DOUBLE_BALL_SOCKET`` in
+# ball-socket mode (which we want to eventually consolidate all joints
+# onto), and the 6-DoF D6 configured as a ball-socket (rigid linear,
+# free angular). All three lock exactly the same 3 positional DoF at
+# the shared corner and leave all 3 rotational DoF free -- the only
+# differences are solver structure and feature set.
+#
 # Constructed via :class:`WorldBuilder` -- the recommended high-level
 # API. The builder packs descriptors into the SoA body container and
 # the column-major constraint container, then hands an assembled
@@ -24,6 +34,7 @@
 #
 ###########################################################################
 
+import enum
 import math
 
 import numpy as np
@@ -33,7 +44,46 @@ import newton
 import newton.examples
 from newton._src.solvers.jitter.picking import JitterPicking, register_with_viewer_gl
 from newton._src.solvers.jitter.solver_jitter import pack_body_xforms_kernel
-from newton._src.solvers.jitter.world_builder import WorldBuilder
+from newton._src.solvers.jitter.world_builder import (
+    D6AxisDrive,
+    JointMode,
+    WorldBuilder,
+)
+
+
+class JointKind(enum.Enum):
+    """Which kind of ball-socket the chain is built with.
+
+    All three modes lock the same 3 translational DoF at the shared
+    corner and leave all 3 rotational DoF free, but reach that
+    constraint with different solver structures:
+
+    * :attr:`BALL_SOCKET`                 -- fused
+      ``CONSTRAINT_TYPE_BALL_SOCKET`` (single 3x3 direct solve per
+      column, the oldest and most specialized path).
+    * :attr:`ACTUATED_DOUBLE_BALL_SOCKET` -- the unified joint in
+      :attr:`JointMode.BALL_SOCKET` mode: also a single 3x3 direct
+      solve per column, but shares one constraint schema / dispatch
+      arm with the revolute and prismatic modes of the same constraint
+      type. Intended to eventually replace the legacy
+      :attr:`BALL_SOCKET`.
+    * :attr:`D6_BALL_SOCKET`              -- generalized D6 with the
+      three linear axes rigidly locked and the three angular axes
+      free (``D6AxisDrive(max_force=0)``). Internally dispatches to
+      the fused 3-DoF point constraint for the linear block and three
+      1-DoF free axes for the angular block (Jolt ``SixDOFConstraint``
+      style).
+    """
+
+    BALL_SOCKET = "ball_socket"
+    ACTUATED_DOUBLE_BALL_SOCKET = "actuated_double_ball_socket"
+    D6_BALL_SOCKET = "d6_ball_socket"
+
+
+# Selects which constraint type every joint in the chain is built
+# with. Switch this to compare solver behaviour / robustness across
+# the three implementations of a ball-socket.
+JOINT_KIND = JointKind.ACTUATED_DOUBLE_BALL_SOCKET
 
 # Toggle the initial state of the chain.
 #
@@ -91,6 +141,46 @@ class Example:
         b = WorldBuilder()
         world_body = b.world_body  # body 0, auto-created static anchor
 
+        # Pre-build the all-rigid linear / all-free angular specs for
+        # the D6 ball-socket once -- same for every joint in the chain.
+        if JOINT_KIND is JointKind.D6_BALL_SOCKET:
+            d6_rigid_linear = (D6AxisDrive(), D6AxisDrive(), D6AxisDrive())
+            d6_free_angular = (
+                D6AxisDrive(max_force=0.0),
+                D6AxisDrive(max_force=0.0),
+                D6AxisDrive(max_force=0.0),
+            )
+        else:
+            d6_rigid_linear = None
+            d6_free_angular = None
+
+        def add_chain_joint(body_a: int, body_b: int, anchor: tuple[float, float, float]) -> None:
+            """Insert one ball-socket between ``body_a`` and ``body_b``.
+
+            Dispatches on :data:`JOINT_KIND` so the caller is spared the
+            per-kind book-keeping. All three branches produce the same
+            physical joint (3-DoF point lock, free rotations).
+            """
+            if JOINT_KIND is JointKind.BALL_SOCKET:
+                b.add_ball_socket(body_a, body_b, anchor)
+            elif JOINT_KIND is JointKind.ACTUATED_DOUBLE_BALL_SOCKET:
+                b.add_joint(
+                    body1=body_a,
+                    body2=body_b,
+                    anchor1=anchor,
+                    mode=JointMode.BALL_SOCKET,
+                )
+            elif JOINT_KIND is JointKind.D6_BALL_SOCKET:
+                b.add_d6(
+                    body1=body_a,
+                    body2=body_b,
+                    anchor=anchor,
+                    angular=d6_free_angular,
+                    linear=d6_rigid_linear,
+                )
+            else:
+                raise ValueError(f"unknown JOINT_KIND: {JOINT_KIND}")
+
         cube_ids: list[int] = []
         if START_AT_EQUILIBRIUM:
             # Diamond-rotated cubes hanging straight down from origin.
@@ -114,7 +204,7 @@ class Example:
                 # k = 0 is at the origin (the world anchor), and each
                 # subsequent joint is one full diagonal further down.
                 anchor = (0.0, -k * 2.0 * _DIAGONAL_HALF, 0.0)
-                b.add_ball_socket(body_a, body_b, anchor)
+                add_chain_joint(body_a, body_b, anchor)
         else:
             # Cube j sits at x = (2j+1)*h on +x and alternates y = +h
             # (j even) / -h (j odd), so consecutive cubes meet at
@@ -137,7 +227,7 @@ class Example:
                 body_a = world_body if k == 0 else cube_ids[k - 1]
                 body_b = cube_ids[k]
                 anchor = (0.0, 0.0, 0.0) if k == 0 else (2.0 * k * HALF_EXTENT, 0.0, 0.0)
-                b.add_ball_socket(body_a, body_b, anchor)
+                add_chain_joint(body_a, body_b, anchor)
 
         # substeps=1 here because we drive substepping ourselves from
         # simulate() (matches the basic-pendulum pattern).

@@ -98,7 +98,7 @@ def element_interaction_data_contains(d: ElementInteractionData, body_id: int) -
 # ---------------------------------------------------------------------------
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def partitioning_prepare_kernel(
     partition_ends: wp.array[int],
     max_used_color: wp.array[int],
@@ -119,7 +119,7 @@ def partitioning_prepare_kernel(
 
 
 # TODO: Is a bit heavy on atomics
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def partitioning_adjacency_count_kernel(
     adjacency_section_end_indices: wp.array[int],
     elements: wp.array[ElementInteractionData],
@@ -139,7 +139,7 @@ def partitioning_adjacency_count_kernel(
         wp.atomic_add(adjacency_section_end_indices, vertex, 1)
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def partitioning_adjacency_store_kernel(
     adjacency_section_end_indices: wp.array[int],
     vertex_to_adjacent_elements: wp.array[int],
@@ -200,7 +200,7 @@ def contact_partitions_get_random_value(
     return r
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def partitioning_coloring_kernel(
     partition_data_concat: wp.array[wp.int64],
     partition_ends: wp.array[int],
@@ -272,7 +272,7 @@ def partitioning_coloring_kernel(
 # ---------------------------------------------------------------------------
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def incremental_init_kernel(
     current_color: wp.array[int],
     num_remaining: wp.array[int],
@@ -287,7 +287,7 @@ def incremental_init_kernel(
     partition_count[0] = 0
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def incremental_fill_minus_one_kernel(
     arr: wp.array[int],
     num_elements: wp.array[int],
@@ -298,7 +298,7 @@ def incremental_fill_minus_one_kernel(
     arr[tid] = -1
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def incremental_zero_int_kernel(
     arr: wp.array[int],
     num_elements: wp.array[int],
@@ -309,7 +309,7 @@ def incremental_zero_int_kernel(
     arr[tid] = 0
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def incremental_flag_kernel(
     partition_data_concat: wp.array[wp.int64],
     current_color: wp.array[int],
@@ -335,7 +335,7 @@ def incremental_flag_kernel(
         flags[tid] = 0
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def incremental_compact_kernel(
     flags: wp.array[int],
     offsets: wp.array[int],
@@ -369,7 +369,7 @@ def incremental_compact_kernel(
         partition_count[0] = offsets[tid] + flags[tid]
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def incremental_advance_kernel(
     current_color: wp.array[int],
     num_remaining: wp.array[int],
@@ -379,7 +379,7 @@ def incremental_advance_kernel(
     current_color[0] = current_color[0] + 1
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def set_int_array_kernel(arr: wp.array[int], value: int):
     # Tiny helper used by batch launcher to push the host-side color counter
     # into the device array consumed by ``partitioning_coloring_kernel``.
@@ -391,7 +391,7 @@ def set_int_array_kernel(arr: wp.array[int], value: int):
 TILE_SCAN_BLOCK_DIM = wp.constant(1024)
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def tile_scan_exclusive_block_kernel(
     input: wp.array[int],
     output: wp.array[int],
