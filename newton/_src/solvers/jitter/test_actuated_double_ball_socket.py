@@ -59,6 +59,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.jitter._test_helpers import run_settle_loop
 from newton._src.solvers.jitter.scene_registry import Scene, scene
 from newton._src.solvers.jitter.world_builder import (
     DriveMode,
@@ -441,51 +442,13 @@ def _axial_twist(orientation: np.ndarray) -> float:
     return 2.0 * math.atan2(z, w)
 
 
-# Graph-capture threshold. Each `world.step(dt)` call on CUDA pays a
-# fixed Python/Warp launch overhead of ~0.5-2 ms; a CUDA graph replay
-# is ~10 us, so above this many frames the capture setup pays for
-# itself by an order of magnitude. For shorter loops we skip capture
-# (pure eager mode is already fast enough).
-_GRAPH_CAPTURE_FRAME_THRESHOLD = 40
-
-
 def _run_settle_loop(world, frames: int) -> None:
-    """Advance ``world`` by ``frames`` frames at ``1/FPS`` seconds each.
+    """Thin wrapper that fixes the timestep at ``1/FPS`` for this file.
 
-    When the backing device is CUDA and ``frames`` exceeds the amortisation
-    threshold, the per-step kernel sequence is recorded into a CUDA graph
-    and replayed for the remaining iterations. Warp graph semantics: the
-    graph captures the exact kernel launches made by ``world.step(dt)``;
-    because every test uses a fixed ``dt`` and a fixed solver configuration,
-    replays are bit-identical to eager mode.
-
-    Falls back to eager stepping on CPU (where ``wp.ScopedCapture`` is a
-    no-op) and for small frame counts (where capture overhead dominates).
+    Delegates to :func:`newton._src.solvers.jitter._test_helpers.run_settle_loop`,
+    which takes care of the CUDA graph-capture fast path.
     """
-    dt = 1.0 / FPS
-
-    device = wp.get_device()
-    use_graph = device.is_cuda and frames >= _GRAPH_CAPTURE_FRAME_THRESHOLD
-
-    if not use_graph:
-        for _ in range(frames):
-            world.step(dt)
-        return
-
-    # Warm-up step outside the capture: ensures all Warp modules referenced
-    # by ``step(dt)`` are JIT-compiled and loaded, and absorbs the first-
-    # call allocation of any lazily-created scratch buffers. Capturing those
-    # would fail (or at minimum pin the wrong allocation into the graph).
-    world.step(dt)
-
-    with wp.ScopedCapture(device=device) as capture:
-        world.step(dt)
-    graph = capture.graph
-
-    # We already advanced two steps (one warm-up + one capture). Replay
-    # the remainder through the graph.
-    for _ in range(frames - 2):
-        wp.capture_launch(graph)
+    run_settle_loop(world, frames, dt=1.0 / FPS)
 
 
 def _quat_rotate(q, v):

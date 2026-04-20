@@ -31,6 +31,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.jitter._test_helpers import run_settle_loop
 from newton._src.solvers.jitter.scene_registry import Scene, scene
 from newton._src.solvers.jitter.world_builder import WorldBuilder
 
@@ -38,7 +39,7 @@ GRAVITY = 9.81
 FPS = 60
 SUBSTEPS = 4
 SOLVER_ITERATIONS = 16
-SETTLE_FRAMES = 240  # 4 s @ 60 fps -- enough for warm-start to converge
+SETTLE_FRAMES = 120  # 2 s @ 60 fps -- PGS warm-start converges well within this
 HALF_EXTENT = 0.5
 _INV_INERTIA = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
 
@@ -98,8 +99,7 @@ class TestBallSocket(unittest.TestCase):
         """
         device = wp.get_preferred_device()
         world = _build_pendulum(device)
-        for _ in range(SETTLE_FRAMES):
-            world.step(1.0 / FPS)
+        run_settle_loop(world, SETTLE_FRAMES, dt=1.0 / FPS)
 
         # Cube top-face centre in body-local frame is (0, +HALF_EXTENT*2 - 1, 0)
         # = (0, 0, 0) measured from the cube COM at -1; rotate it by
@@ -141,8 +141,7 @@ class TestBallSocket(unittest.TestCase):
         """
         device = wp.get_preferred_device()
         world = _build_pendulum(device)
-        for _ in range(SETTLE_FRAMES):
-            world.step(1.0 / FPS)
+        run_settle_loop(world, SETTLE_FRAMES, dt=1.0 / FPS)
 
         out = wp.zeros(world.num_constraints, dtype=wp.spatial_vector, device=device)
         world.gather_constraint_wrenches(out)
@@ -191,8 +190,7 @@ class TestBallSocket(unittest.TestCase):
             substeps=SUBSTEPS, solver_iterations=SOLVER_ITERATIONS, device=device
         )
 
-        for _ in range(SETTLE_FRAMES):
-            world.step(1.0 / FPS)
+        run_settle_loop(world, SETTLE_FRAMES, dt=1.0 / FPS)
 
         omega_final = world.bodies.angular_velocity.numpy()[1]
         omega0_arr = np.asarray(omega0)

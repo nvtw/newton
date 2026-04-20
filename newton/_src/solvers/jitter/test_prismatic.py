@@ -33,6 +33,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.jitter._test_helpers import run_settle_loop
 from newton._src.solvers.jitter.scene_registry import Scene, scene
 from newton._src.solvers.jitter.world_builder import WorldBuilder
 
@@ -40,7 +41,7 @@ GRAVITY = 9.81
 FPS = 60
 SUBSTEPS = 4
 SOLVER_ITERATIONS = 16
-SETTLE_FRAMES = 240
+SETTLE_FRAMES = 120  # 2 s @ 60 fps -- PGS warm-start converges well within this
 HALF_EXTENT = 0.5
 _INV_INERTIA = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
 
@@ -120,9 +121,7 @@ class TestPrismatic(unittest.TestCase):
     """End-to-end physics checks for :func:`WorldBuilder.add_prismatic`."""
 
     def _step(self, world, frames=SETTLE_FRAMES):
-        dt = 1.0 / FPS
-        for _ in range(frames):
-            world.step(dt)
+        run_settle_loop(world, frames, dt=1.0 / FPS)
 
     def test_free_axial_slide_under_gravity(self):
         """Slide axis along gravity -> free fall along the axis only.
