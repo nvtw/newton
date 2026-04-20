@@ -397,8 +397,8 @@ class World:
         )
 
         # ---- Swap lambda buffers & forward maps ----
-        # After this, cc.prev_* holds last step's finished lambdas;
-        # cc.*_lambda is scratch for this step. Same for
+        # After this, cc.prev_lambdas holds last step's finished
+        # lambdas; cc.lambdas is scratch for this step. Same for
         # (slot_of_contact, cid_of_contact) -- prev holds last step's
         # map, cur is the clean slate the stamp kernel will fill.
         contact_container_swap_prev_current(self._contact_container)

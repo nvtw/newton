@@ -51,7 +51,16 @@ from newton._src.solvers.jitter.constraint_container import (
     write_int,
     write_vec3,
 )
-from newton._src.solvers.jitter.contact_container import MAX_SLOTS, ContactContainer
+from newton._src.solvers.jitter.contact_container import (
+    MAX_SLOTS,
+    ContactContainer,
+    cc_get_normal_lambda,
+    cc_get_tangent1_lambda,
+    cc_get_tangent2_lambda,
+    cc_set_normal_lambda,
+    cc_set_tangent1_lambda,
+    cc_set_tangent2_lambda,
+)
 from newton._src.solvers.jitter.data_packing import dword_offset_of, num_dwords
 
 __all__ = [
@@ -107,12 +116,17 @@ class _ContactSlotData:
     Body-local anchor points and world normals are *not* stored here --
     they're read straight out of the upstream ``Contacts`` buffer at
     each prepare (see :func:`contact_prepare_for_iteration_at`). This
-    makes TGS sub-step refresh free and keeps the column to a
-    reasonable ~100 dwords.
+    makes TGS sub-step refresh free and keeps the column slim.
 
-    All fields are recomputed fresh each prepare; there's no "persist
-    across substeps" state in the column. Warm-start impulses
-    (``*_lambda``) live in the parallel :class:`ContactContainer`.
+    Tangent directions are *also* not stored; they're rebuilt from
+    the (unit, substep-invariant) contact normal inside the iterate
+    kernel via :func:`_build_tangents`. The rebuild is deterministic
+    and bit-identical to the value `prepare` would have cached, so
+    the only cost is ~20 FLOPS per slot per iteration -- a win
+    against the 6 dwords / slot of storage it saves.
+
+    Warm-start impulses (``*_lambda``) live in the parallel
+    :class:`ContactContainer`.
     """
 
     #: Lever arm of the contact anchor on body 1 relative to body 1's
@@ -122,14 +136,6 @@ class _ContactSlotData:
     #: Lever arm of the contact anchor on body 2 relative to body 2's
     #: COM, in *world* space.
     r2: wp.vec3f
-
-    #: First friction tangent direction, world frame. Derived from
-    #: the contact normal each prepare via an arbitrary-axis
-    #: orthonormalisation (stable across frames because the pipeline's
-    #: normal is stable for persistent contacts).
-    tangent1: wp.vec3f
-    #: Second friction tangent. ``tangent2 = normal x tangent1``.
-    tangent2: wp.vec3f
 
     #: Scalar effective mass for the normal row (``1 / J M^-1 J^T``).
     #: Unsoftened; softness is applied at the iterate site via
@@ -235,8 +241,6 @@ _OFF_SLOT0 = wp.constant(dword_offset_of(ContactConstraintData, "slot0"))
 
 _OFF_SLOT_R1 = wp.constant(dword_offset_of(_ContactSlotData, "r1"))
 _OFF_SLOT_R2 = wp.constant(dword_offset_of(_ContactSlotData, "r2"))
-_OFF_SLOT_TANGENT1 = wp.constant(dword_offset_of(_ContactSlotData, "tangent1"))
-_OFF_SLOT_TANGENT2 = wp.constant(dword_offset_of(_ContactSlotData, "tangent2"))
 _OFF_SLOT_EFF_MASS_N = wp.constant(dword_offset_of(_ContactSlotData, "effective_mass_n"))
 _OFF_SLOT_EFF_MASS_T1 = wp.constant(dword_offset_of(_ContactSlotData, "effective_mass_t1"))
 _OFF_SLOT_EFF_MASS_T2 = wp.constant(dword_offset_of(_ContactSlotData, "effective_mass_t2"))
@@ -443,26 +447,6 @@ def _slot_set_r2(c: ConstraintContainer, cid: wp.int32, base: wp.int32, v: wp.ve
 
 
 @wp.func
-def _slot_get_tangent1(c: ConstraintContainer, cid: wp.int32, base: wp.int32) -> wp.vec3f:
-    return read_vec3(c, base + _OFF_SLOT_TANGENT1, cid)
-
-
-@wp.func
-def _slot_set_tangent1(c: ConstraintContainer, cid: wp.int32, base: wp.int32, v: wp.vec3f):
-    write_vec3(c, base + _OFF_SLOT_TANGENT1, cid, v)
-
-
-@wp.func
-def _slot_get_tangent2(c: ConstraintContainer, cid: wp.int32, base: wp.int32) -> wp.vec3f:
-    return read_vec3(c, base + _OFF_SLOT_TANGENT2, cid)
-
-
-@wp.func
-def _slot_set_tangent2(c: ConstraintContainer, cid: wp.int32, base: wp.int32, v: wp.vec3f):
-    write_vec3(c, base + _OFF_SLOT_TANGENT2, cid, v)
-
-
-@wp.func
 def _slot_get_eff_n(c: ConstraintContainer, cid: wp.int32, base: wp.int32) -> wp.float32:
     return read_float(c, base + _OFF_SLOT_EFF_MASS_N, cid)
 
@@ -593,8 +577,9 @@ def contact_prepare_for_iteration_at(
          ``bias_rate`` is the hard-contact constant
          ``CONTACT_BIAS_RATE`` scaled by how deep the penetration is).
       5. Applies the previously-gathered warm-start impulse
-         (``cc.normal_lambda[slot, cid]`` etc.) to both bodies'
-         velocities so the PGS loop starts from a converged guess.
+         (``cc_get_normal_lambda(cc, slot, cid)`` etc.) to both
+         bodies' velocities so the PGS loop starts from a converged
+         guess.
 
     Inactive slots (``active_mask`` bit clear) early-out with all
     per-slot fields left untouched -- the iterate kernel skips them
@@ -699,8 +684,6 @@ def contact_prepare_for_iteration_at(
 
         _slot_set_r1(constraints, cid, base, r1)
         _slot_set_r2(constraints, cid, base, r2)
-        _slot_set_tangent1(constraints, cid, base, t1_dir)
-        _slot_set_tangent2(constraints, cid, base, t2_dir)
         _slot_set_eff_n(constraints, cid, base, eff_n)
         _slot_set_eff_t1(constraints, cid, base, eff_t1)
         _slot_set_eff_t2(constraints, cid, base, eff_t2)
@@ -711,9 +694,9 @@ def contact_prepare_for_iteration_at(
         # the match_index before this prepare runs. Build the total
         # contact impulse in world space and accumulate for a single
         # per-body scatter at the end.
-        lam_n = cc.normal_lambda[slot, cid]
-        lam_t1 = cc.tangent1_lambda[slot, cid]
-        lam_t2 = cc.tangent2_lambda[slot, cid]
+        lam_n = cc_get_normal_lambda(cc, slot, cid)
+        lam_t1 = cc_get_tangent1_lambda(cc, slot, cid)
+        lam_t2 = cc_get_tangent2_lambda(cc, slot, cid)
 
         imp = lam_n * n + lam_t1 * t1_dir + lam_t2 * t2_dir
 
@@ -789,12 +772,15 @@ def contact_iterate_at(
         # slot. Normal is re-read from the upstream buffer (not cached
         # in the column) -- it's constant across substeps so the
         # per-iteration read is still cheap and keeps the column to a
-        # manageable size.
+        # manageable size. Tangents are rebuilt from the normal each
+        # iteration via :func:`_build_tangents` -- ~20 FLOPS, saves
+        # 6 dwords of storage per slot (and the per-slot write back
+        # in prepare). Deterministic on ``n``, so the rebuilt basis
+        # is bit-identical to what prepare would have cached.
         r1 = _slot_get_r1(constraints, cid, base)
         r2 = _slot_get_r2(constraints, cid, base)
         n = contacts.rigid_contact_normal[k]
-        t1_dir = _slot_get_tangent1(constraints, cid, base)
-        t2_dir = _slot_get_tangent2(constraints, cid, base)
+        t1_dir, t2_dir = _build_tangents(n)
         eff_n = _slot_get_eff_n(constraints, cid, base)
         eff_t1 = _slot_get_eff_t1(constraints, cid, base)
         eff_t2 = _slot_get_eff_t2(constraints, cid, base)
@@ -807,10 +793,10 @@ def contact_iterate_at(
         # ---- Normal row ----
         jv_n = wp.dot(vel_rel, n)
         d_lam_n = -eff_n * (jv_n + bias_val)
-        lam_n_old = cc.normal_lambda[slot, cid]
+        lam_n_old = cc_get_normal_lambda(cc, slot, cid)
         lam_n_new = wp.max(lam_n_old + d_lam_n, wp.float32(0.0))
         d_lam_n = lam_n_new - lam_n_old
-        cc.normal_lambda[slot, cid] = lam_n_new
+        cc_set_normal_lambda(cc, slot, cid, lam_n_new)
 
         # Apply the corrective impulse before touching the tangent
         # rows so the tangent JV sees the post-normal velocities
@@ -832,10 +818,10 @@ def contact_iterate_at(
         # ---- Tangent 1 row ----
         jv_t1 = wp.dot(vel_rel, t1_dir)
         d_lam_t1 = -eff_t1 * jv_t1
-        lam_t1_old = cc.tangent1_lambda[slot, cid]
+        lam_t1_old = cc_get_tangent1_lambda(cc, slot, cid)
         lam_t1_new = wp.clamp(lam_t1_old + d_lam_t1, -fric_limit, fric_limit)
         d_lam_t1 = lam_t1_new - lam_t1_old
-        cc.tangent1_lambda[slot, cid] = lam_t1_new
+        cc_set_tangent1_lambda(cc, slot, cid, lam_t1_new)
 
         imp_t1 = d_lam_t1 * t1_dir
         v1 -= inv_mass1 * imp_t1
@@ -848,10 +834,10 @@ def contact_iterate_at(
         # ---- Tangent 2 row ----
         jv_t2 = wp.dot(vel_rel, t2_dir)
         d_lam_t2 = -eff_t2 * jv_t2
-        lam_t2_old = cc.tangent2_lambda[slot, cid]
+        lam_t2_old = cc_get_tangent2_lambda(cc, slot, cid)
         lam_t2_new = wp.clamp(lam_t2_old + d_lam_t2, -fric_limit, fric_limit)
         d_lam_t2 = lam_t2_new - lam_t2_old
-        cc.tangent2_lambda[slot, cid] = lam_t2_new
+        cc_set_tangent2_lambda(cc, slot, cid, lam_t2_new)
 
         imp_t2 = d_lam_t2 * t2_dir
         v1 -= inv_mass1 * imp_t2
@@ -897,12 +883,11 @@ def contact_world_wrench_at(
         base = _slot_base(base_offset, slot)
         k = contact_first + slot
         n = contacts.rigid_contact_normal[k]
-        t1_dir = _slot_get_tangent1(constraints, cid, base)
-        t2_dir = _slot_get_tangent2(constraints, cid, base)
+        t1_dir, t2_dir = _build_tangents(n)
         r2 = _slot_get_r2(constraints, cid, base)
-        lam_n = cc.normal_lambda[slot, cid]
-        lam_t1 = cc.tangent1_lambda[slot, cid]
-        lam_t2 = cc.tangent2_lambda[slot, cid]
+        lam_n = cc_get_normal_lambda(cc, slot, cid)
+        lam_t1 = cc_get_tangent1_lambda(cc, slot, cid)
+        lam_t2 = cc_get_tangent2_lambda(cc, slot, cid)
         imp = lam_n * n + lam_t1 * t1_dir + lam_t2 * t2_dir
         f = imp * idt
         force += f
@@ -1011,12 +996,11 @@ def contact_per_slot_wrench_at(
     contact_first = contact_get_contact_first(constraints, cid)
     k = contact_first + slot
     n = contacts.rigid_contact_normal[k]
-    t1_dir = _slot_get_tangent1(constraints, cid, base)
-    t2_dir = _slot_get_tangent2(constraints, cid, base)
+    t1_dir, t2_dir = _build_tangents(n)
     r2 = _slot_get_r2(constraints, cid, base)
-    lam_n = cc.normal_lambda[slot, cid]
-    lam_t1 = cc.tangent1_lambda[slot, cid]
-    lam_t2 = cc.tangent2_lambda[slot, cid]
+    lam_n = cc_get_normal_lambda(cc, slot, cid)
+    lam_t1 = cc_get_tangent1_lambda(cc, slot, cid)
+    lam_t2 = cc_get_tangent2_lambda(cc, slot, cid)
     imp = lam_n * n + lam_t1 * t1_dir + lam_t2 * t2_dir
     force = imp * idt
     torque = wp.cross(r2, force)

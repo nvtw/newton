@@ -77,6 +77,10 @@ from newton._src.solvers.jitter.constraint_hinge_joint import (
     HJ_DWORDS,
     hinge_joint_initialize_kernel,
 )
+from newton._src.solvers.jitter.constraint_prismatic import (
+    PR_DWORDS,
+    prismatic_initialize_kernel,
+)
 from newton._src.solvers.jitter.solver_jitter import World
 
 __all__ = [
@@ -92,6 +96,8 @@ __all__ = [
     "JointDescriptor",
     "JointHandle",
     "JointMode",
+    "PrismaticDescriptor",
+    "PrismaticHandle",
     "RigidBodyDescriptor",
     "WorldBuilder",
 ]
@@ -377,6 +383,59 @@ class JointHandle:
 
 
 @dataclass
+class PrismaticDescriptor:
+    """Plain-Python description of one *legacy* standalone prismatic joint.
+
+    Represents a 5-DoF slider constraint implemented by
+    :mod:`newton._src.solvers.jitter.constraint_prismatic` -- 3
+    rotational rows + 2 perpendicular-translation rows, solved as one
+    PGS column via a 3x3 + 2x2 Schur complement with quaternion-error
+    rotational rows (not pure point-matching).
+
+    Kept alongside the newer unified :class:`JointDescriptor`
+    (``JointMode.PRISMATIC`` -- pure 2+2+1 point-matching formulation)
+    so callers can benchmark both implementations against each other;
+    see ``example_motorized_prismatic_chain`` for a side-by-side
+    comparison. New code should prefer :meth:`WorldBuilder.add_joint`.
+
+    The anchor is in *world* space at finalize() time; the init
+    kernel snapshots it into each body's local frame. The slide axis
+    is likewise a world-space direction at finalize() time and is
+    snapshotted into body 1's local frame (the slide direction "rides"
+    body 1).
+
+    ``hertz_angular`` / ``damping_ratio_angular`` set the soft-constraint
+    spring/damper for the 3-row rotational lock; the separate
+    ``hertz_linear`` / ``damping_ratio_linear`` knobs do the same for
+    the 2-row perpendicular-translation lock.
+    """
+
+    body1: int
+    body2: int
+    anchor: tuple[float, float, float]
+    axis: tuple[float, float, float]
+    hertz_angular: float = float(DEFAULT_HERTZ_ANGULAR)
+    damping_ratio_angular: float = float(DEFAULT_DAMPING_RATIO)
+    hertz_linear: float = float(DEFAULT_HERTZ_LINEAR)
+    damping_ratio_linear: float = float(DEFAULT_DAMPING_RATIO)
+
+
+@dataclass
+class PrismaticHandle:
+    """Global cid of a legacy prismatic created by :meth:`WorldBuilder.add_prismatic`.
+
+    Returned with a sentinel cid (``-1``) and rewritten in place by
+    :meth:`WorldBuilder.finalize`. Pass to
+    :meth:`World.gather_constraint_wrenches` (via
+    ``wrenches[handle.cid]``) to read the joint's combined reaction
+    wrench on body 2 (linear constraint force + angular torque, both
+    in world frame).
+    """
+
+    cid: int = -1
+
+
+@dataclass
 class D6AxisDrive:
     """Per-axis configuration for one axis of a :class:`D6Descriptor`.
 
@@ -535,6 +594,12 @@ class WorldBuilder:
         # the fused HingeJoint above.
         self._joint_descriptors: list[JointDescriptor] = []
         self._joint_handles: list[JointHandle] = []
+        # Legacy standalone prismatic joint descriptors. Kept alongside
+        # the unified ``_joint_descriptors`` (which covers prismatic
+        # via ``JointMode.PRISMATIC``) so callers can compare the two
+        # implementations. Same parallel-list pattern.
+        self._prismatic_descriptors: list[PrismaticDescriptor] = []
+        self._prismatic_handles: list[PrismaticHandle] = []
         # 6-DoF generalised (D6) joint descriptors. Same parallel-list
         # pattern.
         self._d6_descriptors: list[D6Descriptor] = []
@@ -873,9 +938,13 @@ class WorldBuilder:
                 axis).
             target_velocity: Velocity-drive setpoint. Units [rad/s] for
                 revolute, [m/s] for prismatic.
-            max_force_drive: Velocity-drive cap. Units [N*m] for
-                revolute, [N] for prismatic. Ignored in position-drive
-                mode.
+            max_force_drive: Drive impulse cap, in torque [N*m] for
+                revolute or linear force [N] for prismatic. Active for
+                both :attr:`DriveMode.POSITION` and
+                :attr:`DriveMode.VELOCITY`: ``> 0`` clamps the
+                per-substep impulse to ``max_force_drive * dt``, ``0``
+                means *unlimited* for POSITION and *disables* the drive
+                for VELOCITY.
             hertz_drive: Drive soft-constraint frequency [Hz].
             damping_ratio_drive: Drive damping ratio.
             min_value: Lower limit. Units [rad] for revolute, [m] for
@@ -914,6 +983,75 @@ class WorldBuilder:
         handle = JointHandle(cid=-1)
         self._joint_descriptors.append(descriptor)
         self._joint_handles.append(handle)
+        return handle
+
+    def add_prismatic(
+        self,
+        body1: int,
+        body2: int,
+        anchor: tuple[float, float, float],
+        axis: tuple[float, float, float],
+        hertz_angular: float = float(DEFAULT_HERTZ_ANGULAR),
+        damping_ratio_angular: float = float(DEFAULT_DAMPING_RATIO),
+        hertz_linear: float = float(DEFAULT_HERTZ_LINEAR),
+        damping_ratio_linear: float = float(DEFAULT_DAMPING_RATIO),
+    ) -> PrismaticHandle:
+        """Append a *legacy* standalone prismatic (slider) joint and return its handle.
+
+        Materialises a :data:`CONSTRAINT_TYPE_PRISMATIC` column: 5 DoF
+        locked (3 rotational + 2 perpendicular-translation), 1 free
+        (translation along ``axis``). The rotational block is
+        quaternion-error; the translational block is a tangent-plane
+        2-row point lock. See
+        :mod:`newton._src.solvers.jitter.constraint_prismatic` for the
+        math.
+
+        This entry point is kept alongside the newer unified
+        :meth:`add_joint` (with ``mode=JointMode.PRISMATIC``, which
+        uses a pure 2+2+1 point-matching formulation) so callers can
+        benchmark both implementations side-by-side. New code should
+        prefer :meth:`add_joint`.
+
+        ``anchor`` and ``axis`` are in *world* space at finalize()
+        time; the init kernel snapshots ``anchor`` into each body's
+        local frame and ``axis`` into body 1's local frame. ``axis``
+        does *not* have to be unit length -- the kernel normalises it.
+
+        Args:
+            body1: First body index. The slide direction "rides"
+                this body rigidly.
+            body2: Second body index.
+            anchor: World-space anchor point [m]. Lies on the slide
+                axis; both bodies' lever arms are measured from it.
+            axis: World-space slide direction; any non-zero vector.
+            hertz_angular: Rotational-lock stiffness [Hz]; applies to
+                the 3-row rotational block.
+            damping_ratio_angular: Rotational-lock damping ratio
+                (1 is critical).
+            hertz_linear: Perpendicular-translation lock stiffness
+                [Hz]; applies to the 2-row translational block.
+            damping_ratio_linear: Translational-lock damping ratio.
+
+        Returns:
+            A :class:`PrismaticHandle` whose ``cid`` field is
+            rewritten in place by :meth:`finalize` to the joint's
+            global cid.
+        """
+        self._validate_body(body1)
+        self._validate_body(body2)
+        descriptor = PrismaticDescriptor(
+            body1=body1,
+            body2=body2,
+            anchor=anchor,
+            axis=axis,
+            hertz_angular=hertz_angular,
+            damping_ratio_angular=damping_ratio_angular,
+            hertz_linear=hertz_linear,
+            damping_ratio_linear=damping_ratio_linear,
+        )
+        handle = PrismaticHandle(cid=-1)
+        self._prismatic_descriptors.append(descriptor)
+        self._prismatic_handles.append(handle)
         return handle
 
     def add_d6(
@@ -1128,6 +1266,8 @@ class WorldBuilder:
         self._hinge_joint_handles = []
         self._joint_descriptors = []
         self._joint_handles = []
+        self._prismatic_descriptors = []
+        self._prismatic_handles = []
         self._d6_descriptors = []
         self._d6_handles = []
         return world
@@ -1215,6 +1355,7 @@ class WorldBuilder:
             * cids ``[..., +n_motor)``                          -> angular-motors
             * cids ``[..., +n_hinge_joint)``                    -> fused hinge-joints
             * cids ``[..., +n_joint)``                          -> unified revolute/prismatic joints
+            * cids ``[..., +n_prismatic)``                      -> legacy standalone prismatic joints
             * cids ``[..., +n_d6)``                             -> D6 (6-DoF generalised) joints
 
         The container's per-column dword count is ``max`` of all
@@ -1228,6 +1369,7 @@ class WorldBuilder:
         n_motor = len(self._angular_motors)
         n_hinge_joint = len(self._hinge_joint_descriptors)
         n_joint = len(self._joint_descriptors)
+        n_prismatic = len(self._prismatic_descriptors)
         n_d6 = len(self._d6_descriptors)
         total = (
             n_ball
@@ -1235,6 +1377,7 @@ class WorldBuilder:
             + n_motor
             + n_hinge_joint
             + n_joint
+            + n_prismatic
             + n_d6
         )
 
@@ -1247,6 +1390,7 @@ class WorldBuilder:
             AM_DWORDS,
             HJ_DWORDS,
             ADBS_DWORDS,
+            PR_DWORDS,
             D6_DWORDS,
             CONTACT_DWORDS,
         )
@@ -1270,7 +1414,10 @@ class WorldBuilder:
         angular_motor_offset = n_ball + n_hinge
         hinge_joint_offset = n_ball + n_hinge + n_motor
         joint_offset = n_ball + n_hinge + n_motor + n_hinge_joint
-        d6_offset = n_ball + n_hinge + n_motor + n_hinge_joint + n_joint
+        prismatic_offset = n_ball + n_hinge + n_motor + n_hinge_joint + n_joint
+        d6_offset = (
+            n_ball + n_hinge + n_motor + n_hinge_joint + n_joint + n_prismatic
+        )
 
         if n_ball > 0:
             self._init_ball_sockets(container, bodies, ball_socket_offset, device)
@@ -1282,6 +1429,8 @@ class WorldBuilder:
             self._init_hinge_joints(container, bodies, hinge_joint_offset, device)
         if n_joint > 0:
             self._init_joints(container, bodies, joint_offset, device)
+        if n_prismatic > 0:
+            self._init_prismatics(container, bodies, prismatic_offset, device)
         if n_d6 > 0:
             self._init_d6s(container, bodies, d6_offset, device)
 
@@ -1293,6 +1442,8 @@ class WorldBuilder:
             h.cid = hinge_joint_offset + i
         for i, h in enumerate(self._joint_handles):
             h.cid = joint_offset + i
+        for i, h in enumerate(self._prismatic_handles):
+            h.cid = prismatic_offset + i
         for i, h in enumerate(self._d6_handles):
             h.cid = d6_offset + i
 
@@ -1658,6 +1809,73 @@ class WorldBuilder:
                 max_value_d,
                 hertz_limit_d,
                 damping_ratio_limit_d,
+            ],
+            device=device,
+        )
+
+    def _init_prismatics(
+        self,
+        constraints: ConstraintContainer,
+        bodies: BodyContainer,
+        cid_offset: int,
+        device: wp.context.Device,
+    ) -> None:
+        """Pack the legacy standalone prismatic descriptors into ``constraints``.
+
+        One launch of :func:`prismatic_initialize_kernel` writes every
+        column: snapshots the world-space anchor into each body's
+        local frame plus the slide axis into body 1's local frame, and
+        caches the rest-pose relative orientation ``q0 = q2^* * q1``
+        used by the quaternion-error rotational rows.
+        """
+        descs = self._prismatic_descriptors
+        n = len(descs)
+
+        body1 = np.asarray([d.body1 for d in descs], dtype=np.int32)
+        body2 = np.asarray([d.body2 for d in descs], dtype=np.int32)
+        anchor = np.asarray([d.anchor for d in descs], dtype=np.float32)
+        axis = np.asarray([d.axis for d in descs], dtype=np.float32)
+        hertz_angular = np.asarray(
+            [d.hertz_angular for d in descs], dtype=np.float32
+        )
+        damping_ratio_angular = np.asarray(
+            [d.damping_ratio_angular for d in descs], dtype=np.float32
+        )
+        hertz_linear = np.asarray(
+            [d.hertz_linear for d in descs], dtype=np.float32
+        )
+        damping_ratio_linear = np.asarray(
+            [d.damping_ratio_linear for d in descs], dtype=np.float32
+        )
+
+        body1_d = wp.array(body1, dtype=wp.int32, device=device)
+        body2_d = wp.array(body2, dtype=wp.int32, device=device)
+        anchor_d = wp.array(anchor, dtype=wp.vec3f, device=device)
+        axis_d = wp.array(axis, dtype=wp.vec3f, device=device)
+        hertz_angular_d = wp.array(hertz_angular, dtype=wp.float32, device=device)
+        damping_ratio_angular_d = wp.array(
+            damping_ratio_angular, dtype=wp.float32, device=device
+        )
+        hertz_linear_d = wp.array(hertz_linear, dtype=wp.float32, device=device)
+        damping_ratio_linear_d = wp.array(
+            damping_ratio_linear, dtype=wp.float32, device=device
+        )
+
+        wp.launch(
+            prismatic_initialize_kernel,
+            dim=n,
+            inputs=[
+                constraints,
+                bodies,
+                int(cid_offset),
+                body1_d,
+                body2_d,
+                anchor_d,
+                axis_d,
+                hertz_angular_d,
+                damping_ratio_angular_d,
+                hertz_linear_d,
+                damping_ratio_linear_d,
             ],
             device=device,
         )

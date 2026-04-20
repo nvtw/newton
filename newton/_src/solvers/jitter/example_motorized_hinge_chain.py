@@ -31,16 +31,19 @@
 #     vertical body-frame edges (the ones parallel to body z) all stay
 #     aligned with world ``+z``, so the world-space hinge axis is just
 #     ``(0, 0, 1)``;
-#   * runs in *velocity mode* with a user-configurable target velocity
-#     (``TARGET_VELOCITY`` below). Default 0.0 makes the motor fight any
-#     relative spin around the hinge axis and act as a strong angular
-#     damper -- the chain hangs in equilibrium because gravity does not
-#     torque the chain about z. Set ``TARGET_VELOCITY`` to a nonzero
-#     value (rad/s) to spin the cubes about their hinges; with
-#     dynamic-only cubes (no positional restoring force) the chain will
-#     start swinging because the chain itself rotates around each motor
-#     axis.
-#     A position-mode (PD) motor will be added later.
+#   * carries an *optional actuator* on the free axial spin, driven by
+#     the module-level ``DRIVE_MODE``:
+#       * :attr:`DriveMode.VELOCITY` (default) -- tracks ``TARGET_VELOCITY``
+#         [rad/s]. 0.0 makes the motor fight any relative spin around the
+#         hinge axis and act as a strong angular damper, so the chain
+#         hangs in equilibrium. Non-zero spins the cubes about their
+#         hinges; the chain itself starts swinging because each motor
+#         applies a net external torque about world z.
+#       * :attr:`DriveMode.POSITION` -- tracks ``TARGET_ANGLE`` [rad]
+#         with a critically damped soft-spring (ACTUATED_DOUBLE_BALL_SOCKET
+#         and D6_REVOLUTE kinds only). Non-zero twists the chain into a
+#         helix.
+#       * :attr:`DriveMode.OFF`      -- no motor, free-spin axis.
 #
 # The picking, viewer, render, and ``test_final`` plumbing all match
 # example_body_chain.py so the two examples can be compared side by side.
@@ -73,23 +76,22 @@ class JointKind(enum.Enum):
 
     * :attr:`HINGE_JOINT`           -- fused
       ``CONSTRAINT_TYPE_HINGE_JOINT`` (BallSocket + HingeAngle +
-      AngularMotor in one column). The only mode that exposes the
-      ``TARGET_VELOCITY`` / ``_MOTOR_MAX_FORCE`` motor; the other
-      modes are silently ignored.
+      AngularMotor in one column). Velocity-only motor
+      (``TARGET_VELOCITY`` / ``_MOTOR_MAX_FORCE``); position-drive
+      mode is silently ignored.
     * :attr:`DOUBLE_BALL_SOCKET`    -- fused two-anchor ball-socket
       ("rank-5 Schur" hinge, no motor). The hinge axis is implicit
       in the line through the two anchors.
     * :attr:`D6_REVOLUTE`           -- generalized D6 with 5 of the 6
       axes locked and the free axis = body-1-local +z. Internally
       dispatches to a fused 3-DoF point-constraint (linear) plus
-      per-axis 1-DoF angle constraints (angular), Jolt-style; no
-      motor wired up here yet (see the velocity-drive note in
-      :mod:`constraint_d6`).
+      per-axis 1-DoF angle constraints (angular), Jolt-style;
+      supports both velocity and position drives on the free axis.
     * :attr:`ACTUATED_DOUBLE_BALL_SOCKET` -- same rank-5 Schur lock as
       :attr:`DOUBLE_BALL_SOCKET` plus a soft scalar PGS row driving the
-      free axial twist with a velocity motor (``TARGET_VELOCITY`` /
-      ``_MOTOR_MAX_FORCE``). Functionally equivalent to
-      :attr:`HINGE_JOINT` but built on the two-anchor lock.
+      free axial twist. Supports both :attr:`DriveMode.VELOCITY`
+      (``TARGET_VELOCITY``) and :attr:`DriveMode.POSITION`
+      (``TARGET_ANGLE``); see ``DRIVE_MODE`` below.
     """
 
     HINGE_JOINT = "hinge_joint"
@@ -100,8 +102,29 @@ class JointKind(enum.Enum):
 
 # Selects which constraint type every joint in the chain is built
 # with. Switch this to compare solver behaviour / robustness across
-# the three implementations of "hinge between two cubes".
+# the four implementations of "hinge between two cubes".
 JOINT_KIND = JointKind.ACTUATED_DOUBLE_BALL_SOCKET
+
+# Selects how the motor drives the free axial spin. Only honoured by
+# the kinds that carry a motor row (``HINGE_JOINT``,
+# ``ACTUATED_DOUBLE_BALL_SOCKET``, and ``D6_REVOLUTE`` -- see each
+# kind's entry in :class:`JointKind`):
+#
+#   * :attr:`DriveMode.OFF`      -- no motor, free-spin axis.
+#   * :attr:`DriveMode.VELOCITY` -- velocity motor; tracks
+#     ``TARGET_VELOCITY`` [rad/s]. Supported by all three actuated
+#     kinds.
+#   * :attr:`DriveMode.POSITION` -- soft-spring position drive; pulls
+#     the axial angle towards ``TARGET_ANGLE`` [rad] with a critically
+#     damped spring. Only supported by :attr:`JointKind.ACTUATED_DOUBLE_BALL_SOCKET`
+#     and :attr:`JointKind.D6_REVOLUTE`; silently ignored by the other
+#     kinds (HingeJoint's AngularMotor sub-block is a direct
+#     Jitter2 port and is velocity-only).
+#
+# With the chain hanging in equilibrium along -y the axial spin is
+# initially zero; POSITION with a non-zero ``TARGET_ANGLE`` therefore
+# visibly twists the column into a helix.
+DRIVE_MODE = DriveMode.VELOCITY
 
 NUM_CUBES = 10
 HALF_EXTENT = 0.5
@@ -126,14 +149,22 @@ _DIAGONAL_QUAT = (0.0, 0.0, math.sin(_HALF_ANGLE), math.cos(_HALF_ANGLE))
 _HINGE_AXIS = (0.0, 0.0, 1.0)
 
 # Maximum motor torque [N·m]. Generous so the motor can hold the
-# target relative axial spin even under the (small) precession the
-# chain feels from PGS jitter; the motor is still velocity-mode so it
-# doesn't fight slow drift, only motion.
+# target state (velocity setpoint or position setpoint) even under
+# the (small) precession the chain feels from PGS jitter.
 _MOTOR_MAX_FORCE = 50.0
 
+# Position-drive soft-spring knobs (honoured only by
+# :attr:`DriveMode.POSITION`). Per-joint critical damping at 4 Hz;
+# as noted in :mod:`constraint_actuated_double_ball_socket`, the
+# chain as a coupled system has its own normal modes and is not
+# guaranteed to be critically damped at these per-joint settings.
+_HERTZ_DRIVE = 4.0
+_DAMPING_RATIO_DRIVE = 1.0
+
 # User-configurable target relative angular velocity for every motor in
-# the chain [rad/s]. Each hinge drives the *relative* spin of body 2
-# vs. body 1 around the hinge axis toward this value.
+# the chain [rad/s]. Honoured by :attr:`DriveMode.VELOCITY`. Each hinge
+# drives the *relative* spin of body 2 vs. body 1 around the hinge
+# axis toward this value.
 #
 #   * 0.0  -> hold pose (default; chain stays in equilibrium).
 #   * 0.5  -> mild continuous rotation; cubes precess about the chain.
@@ -144,6 +175,15 @@ _MOTOR_MAX_FORCE = 50.0
 # (which acts as an infinite reaction sink), so the chain quickly
 # accumulates large angular momentum.
 TARGET_VELOCITY = 0.0
+
+# User-configurable target relative axial angle for every hinge
+# [rad]. Honoured by :attr:`DriveMode.POSITION`. Each hinge pulls the
+# relative spin of body 2 vs. body 1 around the hinge axis towards
+# this value with a soft spring of stiffness ``_HERTZ_DRIVE``. Because
+# *each* joint in the chain carries the same target, non-zero values
+# compound down the chain (body k sits at ``k * TARGET_ANGLE`` world
+# angle if the chain is rigid), so the stack visibly coils.
+TARGET_ANGLE = 0.0
 
 
 class Example:
@@ -185,10 +225,28 @@ class Example:
         # tuples are built once and reused across all NUM_HINGES
         # joints. The free axis is angular[2] = body-1-local +z (the
         # cube edge), which under the _DIAGONAL_QUAT rotation is
-        # parallel to world +z and so matches _HINGE_AXIS.
+        # parallel to world +z and so matches _HINGE_AXIS. If the user
+        # asked for a motor the free axis becomes a position / velocity
+        # drive capped at ``_MOTOR_MAX_FORCE`` (Jolt-style 1-DoF
+        # AngleConstraintPart with a soft-spring drive row).
         d6_lock = D6AxisDrive()
-        d6_free = D6AxisDrive(max_force=0.0)
-        d6_revolute_angular = (d6_lock, d6_lock, d6_free)
+        if DRIVE_MODE is DriveMode.POSITION:
+            d6_axial = D6AxisDrive(
+                hertz=_HERTZ_DRIVE,
+                damping_ratio=_DAMPING_RATIO_DRIVE,
+                target_position=TARGET_ANGLE,
+                max_force=_MOTOR_MAX_FORCE,
+            )
+        elif DRIVE_MODE is DriveMode.VELOCITY:
+            d6_axial = D6AxisDrive(
+                hertz=_HERTZ_DRIVE,
+                damping_ratio=_DAMPING_RATIO_DRIVE,
+                target_velocity=TARGET_VELOCITY,
+                max_force=_MOTOR_MAX_FORCE,
+            )
+        else:  # DriveMode.OFF
+            d6_axial = D6AxisDrive(max_force=0.0)
+        d6_revolute_angular = (d6_lock, d6_lock, d6_axial)
         d6_revolute_linear = (d6_lock, d6_lock, d6_lock)
 
         self.hinge_handles = []
@@ -212,8 +270,9 @@ class Example:
                 )
             elif JOINT_KIND is JointKind.ACTUATED_DOUBLE_BALL_SOCKET:
                 # Same two-anchor lock as DOUBLE_BALL_SOCKET, with the
-                # axial twist now under a velocity drive (mirrors what
-                # HINGE_JOINT's AngularMotor sub-block does).
+                # axial twist now under either a position drive
+                # (``TARGET_ANGLE``) or a velocity drive
+                # (``TARGET_VELOCITY``), capped at ``_MOTOR_MAX_FORCE``.
                 a1 = (anchor[0], anchor[1], anchor[2] - HALF_EXTENT)
                 a2 = (anchor[0], anchor[1], anchor[2] + HALF_EXTENT)
                 self.hinge_handles.append(
@@ -223,9 +282,12 @@ class Example:
                         anchor1=a1,
                         anchor2=a2,
                         mode=JointMode.REVOLUTE,
-                        drive_mode=DriveMode.VELOCITY,
+                        drive_mode=DRIVE_MODE,
+                        target=TARGET_ANGLE,
                         target_velocity=TARGET_VELOCITY,
                         max_force_drive=_MOTOR_MAX_FORCE,
+                        hertz_drive=_HERTZ_DRIVE,
+                        damping_ratio_drive=_DAMPING_RATIO_DRIVE,
                     )
                 )
             elif JOINT_KIND is JointKind.D6_REVOLUTE:
@@ -239,13 +301,19 @@ class Example:
                     )
                 )
             elif JOINT_KIND is JointKind.HINGE_JOINT:
+                # Fused HingeJoint's AngularMotor sub-block is a direct
+                # Jitter2 port (velocity-only). ``DriveMode.POSITION``
+                # is silently downgraded to a free-spin axis here; use
+                # :attr:`JointKind.ACTUATED_DOUBLE_BALL_SOCKET` or
+                # :attr:`JointKind.D6_REVOLUTE` for position-PD drives.
+                has_motor = DRIVE_MODE is DriveMode.VELOCITY
                 self.hinge_handles.append(
                     b.add_hinge_joint(
                         body1=body_a,
                         body2=body_b,
                         hinge_center=anchor,
                         hinge_axis=_HINGE_AXIS,
-                        motor=True,
+                        motor=has_motor,
                         target_velocity=TARGET_VELOCITY,
                         max_force=_MOTOR_MAX_FORCE,
                     )

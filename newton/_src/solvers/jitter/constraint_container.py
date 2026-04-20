@@ -46,6 +46,7 @@ __all__ = [
     "CONSTRAINT_TYPE_HINGE_JOINT",
     "CONSTRAINT_TYPE_INVALID",
     "CONSTRAINT_TYPE_OFFSET",
+    "CONSTRAINT_TYPE_PRISMATIC",
     "DEFAULT_DAMPING_RATIO",
     "DEFAULT_HERTZ_ANGULAR",
     "DEFAULT_HERTZ_LIMIT",
@@ -120,6 +121,13 @@ CONSTRAINT_TYPE_ANGULAR_MOTOR = wp.constant(wp.int32(3))
 #: the partitioner colour one hinge per partition (instead of three),
 #: dramatically improving convergence on heavily-loaded chains.
 CONSTRAINT_TYPE_HINGE_JOINT = wp.constant(wp.int32(4))
+#: Legacy 5-DoF prismatic (slider) joint. Historically :mod:`constraint_prismatic`
+#: used a mixed quaternion-error + tangent-translation formulation (3 rotational
+#: rows + 2 tangent rows, 3x3 + 2x2 Schur). Kept around so users can compare
+#: against the newer pure-point ``CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET``
+#: prismatic mode side-by-side (see ``example_motorized_prismatic_chain``).
+#: New code should prefer the unified joint.
+CONSTRAINT_TYPE_PRISMATIC = wp.constant(wp.int32(6))
 #: 6-DoF generalised joint (a.k.a. "D6") -- *all* 6 relative DoF (3 angular
 #: + 3 linear) solved as one column via a 6x6 Schur complement (3x3 + 3x3
 #: + 3x3 cross-block). Each axis carries an independent implicit-PD drive

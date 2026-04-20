@@ -57,7 +57,15 @@ from newton._src.solvers.jitter.constraint_container import (
     ConstraintContainer,
     write_int,
 )
-from newton._src.solvers.jitter.contact_container import ContactContainer
+from newton._src.solvers.jitter.contact_container import (
+    ContactContainer,
+    cc_get_prev_normal_lambda,
+    cc_get_prev_tangent1_lambda,
+    cc_get_prev_tangent2_lambda,
+    cc_set_normal_lambda,
+    cc_set_tangent1_lambda,
+    cc_set_tangent2_lambda,
+)
 from newton._src.solvers.jitter.scan_and_sort import (
     RLE_SENTINEL_INT32,
     runlength_encode_variable_length,
@@ -442,7 +450,7 @@ def _contact_warmstart_gather_kernel(
     cid_base: wp.int32,
     cc: ContactContainer,
 ):
-    """Seed this frame's ``cc.normal_lambda`` etc. from the prev frame.
+    """Seed this frame's ``cc.lambdas`` slots from the prev frame.
 
     For each active slot of each current-frame contact column:
 
@@ -479,33 +487,29 @@ def _contact_warmstart_gather_kernel(
             # Inactive slot in this column -- clear so stale data
             # from a previous step doesn't leak into the prepare
             # kernel when it sums the warm-start impulse.
-            cc.normal_lambda[s, cid] = wp.float32(0.0)
-            cc.tangent1_lambda[s, cid] = wp.float32(0.0)
-            cc.tangent2_lambda[s, cid] = wp.float32(0.0)
-            cc.prev_contact_index[s, cid] = wp.int32(-1)
+            cc_set_normal_lambda(cc, s, cid, wp.float32(0.0))
+            cc_set_tangent1_lambda(cc, s, cid, wp.float32(0.0))
+            cc_set_tangent2_lambda(cc, s, cid, wp.float32(0.0))
             continue
         k = start_contact + s
         prev_k = rigid_contact_match_index[k]
         if prev_k < 0:
-            cc.normal_lambda[s, cid] = wp.float32(0.0)
-            cc.tangent1_lambda[s, cid] = wp.float32(0.0)
-            cc.tangent2_lambda[s, cid] = wp.float32(0.0)
-            cc.prev_contact_index[s, cid] = wp.int32(-1)
+            cc_set_normal_lambda(cc, s, cid, wp.float32(0.0))
+            cc_set_tangent1_lambda(cc, s, cid, wp.float32(0.0))
+            cc_set_tangent2_lambda(cc, s, cid, wp.float32(0.0))
             continue
 
         prev_slot = prev_slot_of_contact[prev_k]
         prev_cid = prev_cid_of_contact[prev_k]
         if prev_slot < 0 or prev_cid < 0:
-            cc.normal_lambda[s, cid] = wp.float32(0.0)
-            cc.tangent1_lambda[s, cid] = wp.float32(0.0)
-            cc.tangent2_lambda[s, cid] = wp.float32(0.0)
-            cc.prev_contact_index[s, cid] = prev_k
+            cc_set_normal_lambda(cc, s, cid, wp.float32(0.0))
+            cc_set_tangent1_lambda(cc, s, cid, wp.float32(0.0))
+            cc_set_tangent2_lambda(cc, s, cid, wp.float32(0.0))
             continue
 
-        cc.normal_lambda[s, cid] = cc.prev_normal_lambda[prev_slot, prev_cid]
-        cc.tangent1_lambda[s, cid] = cc.prev_tangent1_lambda[prev_slot, prev_cid]
-        cc.tangent2_lambda[s, cid] = cc.prev_tangent2_lambda[prev_slot, prev_cid]
-        cc.prev_contact_index[s, cid] = prev_k
+        cc_set_normal_lambda(cc, s, cid, cc_get_prev_normal_lambda(cc, prev_slot, prev_cid))
+        cc_set_tangent1_lambda(cc, s, cid, cc_get_prev_tangent1_lambda(cc, prev_slot, prev_cid))
+        cc_set_tangent2_lambda(cc, s, cid, cc_get_prev_tangent2_lambda(cc, prev_slot, prev_cid))
 
 
 @wp.kernel

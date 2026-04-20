@@ -474,6 +474,68 @@ class TestJointRevolute(unittest.TestCase):
         omegas = world.bodies.angular_velocity.numpy()
         self.assertLess(np.linalg.norm(omegas[cube]), 0.05)
 
+    def test_position_drive_holds_against_initial_spin(self):
+        """Position drive must damp an initial spin back to ``target``.
+
+        Gives the cube a sizeable initial axial angular velocity and
+        verifies the position drive pulls it back to the setpoint and
+        then holds there. This exercises the drive's role as an
+        implicit PD controller under a kinetic perturbation -- exactly
+        the scenario that motivated making ``max_force_drive`` clamp
+        POSITION-mode impulses, because without the clamp an
+        aggressive spin could push the PGS accumulator arbitrarily
+        far before the spring ever catches up.
+        """
+        device = wp.get_preferred_device()
+        target = 0.0
+        world, _ = _build_revolute_scene(
+            device,
+            drive_mode=DriveMode.POSITION,
+            target=target,
+            initial_angular_velocity=(0.0, 0.0, 2.5),
+        )
+        self._step(world, frames=360)
+
+        orientations = world.bodies.orientation.numpy()
+        omegas = world.bodies.angular_velocity.numpy()
+        cube = 2
+        twist = _axial_twist(orientations[cube])
+        self.assertAlmostEqual(twist, target, delta=0.05)
+        self.assertLess(abs(omegas[cube, 2]), 0.05)
+
+    def test_position_drive_respects_max_force(self):
+        """``max_force_drive`` must cap the POSITION-drive impulse.
+
+        With a tiny torque cap a POSITION drive physically cannot
+        exert enough torque to reach a far target -- the cap means
+        the per-substep impulse clamps at ``max_force_drive * dt``
+        regardless of the PD error, mirroring the well-known "stall
+        at the torque limit" behaviour of a real servo.
+
+        Previously ``max_force_drive`` was silently ignored in
+        POSITION mode and the drive saturated the target regardless
+        of the cap; this test guards against that regression.
+        """
+        device = wp.get_preferred_device()
+        target = 1.5
+        world, _ = _build_revolute_scene(
+            device,
+            drive_mode=DriveMode.POSITION,
+            target=target,
+            max_force_drive=0.05,
+            hertz_drive=30.0,
+        )
+        self._step(world, frames=240)
+
+        orientations = world.bodies.orientation.numpy()
+        cube = 2
+        twist = _axial_twist(orientations[cube])
+        self.assertLess(
+            twist,
+            target * 0.5,
+            msg=f"twist={twist} should stall well below target={target} with tiny max_force_drive",
+        )
+
     def test_velocity_drive_reaches_target(self):
         """Velocity drive must spin the cube up to ``target_velocity``."""
         device = wp.get_preferred_device()
@@ -659,6 +721,64 @@ class TestJointPrismatic(unittest.TestCase):
         cube = 2
         self.assertAlmostEqual(velocities[cube, 0], target, delta=0.1)
         self.assertLess(abs(velocities[cube, 1]) + abs(velocities[cube, 2]), 0.05)
+
+    def test_position_drive_holds_against_gravity(self):
+        """Position drive must hold the slide at ``target`` against gravity.
+
+        The slide axis is vertical (``+y``) and gravity pulls the
+        cube down along it. A stiff position drive at ``target=0``
+        must keep the cube near the anchor -- no free-fall -- and
+        stall at a small static offset where the spring torque
+        balances gravity.
+        """
+        device = wp.get_preferred_device()
+        world, _ = _build_prismatic_scene(
+            device,
+            axis=(0.0, 1.0, 0.0),
+            affected_by_gravity=True,
+            drive_mode=DriveMode.POSITION,
+            target=0.0,
+            max_force_drive=50.0,
+            hertz_drive=8.0,
+            damping_ratio_drive=1.0,
+        )
+        self._step(world, frames=360)
+
+        positions = world.bodies.position.numpy()
+        velocities = world.bodies.velocity.numpy()
+        cube = 2
+        self.assertLess(abs(positions[cube, 1]), 0.1)
+        self.assertLess(abs(positions[cube, 0]) + abs(positions[cube, 2]), 0.02)
+        self.assertLess(np.linalg.norm(velocities[cube]), 0.1)
+
+    def test_position_drive_respects_max_force(self):
+        """``max_force_drive`` must cap the POSITION-drive impulse.
+
+        The slide axis is vertical; with a tiny force cap the drive
+        physically cannot fight gravity -- the cube must drop well
+        below its ``target=0`` setpoint. Guards against the earlier
+        defect where POSITION mode ignored ``max_force_drive``
+        entirely.
+        """
+        device = wp.get_preferred_device()
+        world, _ = _build_prismatic_scene(
+            device,
+            axis=(0.0, 1.0, 0.0),
+            affected_by_gravity=True,
+            drive_mode=DriveMode.POSITION,
+            target=0.0,
+            max_force_drive=0.5,
+            hertz_drive=30.0,
+        )
+        self._step(world, frames=120)
+
+        positions = world.bodies.position.numpy()
+        cube = 2
+        self.assertLess(
+            positions[cube, 1],
+            -0.3,
+            msg=f"cube.y={positions[cube, 1]} should fall far below 0 under tiny max_force_drive",
+        )
 
     def test_upper_limit_clamps_slide(self):
         """Slide into the upper stop must clamp at ~``max_value`` [m]."""

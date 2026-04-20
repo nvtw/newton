@@ -49,6 +49,15 @@ all with tangent-plane projections. Pure point-matching formulation
   unit perpendicular to ``n_hat``. Projecting onto ``t2`` kills the
   last rotational DoF (rotation about ``n_hat``).
 
+  The tangent basis ``(t1, t2)`` is rebuilt every substep so that
+  ``t1`` points along the projection of the *current* anchor1 -> anchor3
+  vector perpendicular to ``n_hat``. That choice makes the anchor-3
+  scalar row the exact tangential velocity gate for rotation about
+  ``n_hat`` (unit gain) and is essential for block Gauss-Seidel
+  convergence in multi-joint chains: an arbitrary perpendicular would
+  introduce a ``cos(alpha)`` mismatch between joints sharing a body
+  and diverge the outer solver iterations.
+
 This yields a rank-5 system solved as a 4x4 + 1x1 Schur complement; the
 4x4 block is the stack of the two anchor-tangent pairs, the 1x1 is the
 scalar anchor-3 row. See :func:`_prismatic_prepare_at` for the math.
@@ -63,10 +72,14 @@ Three independent sub-blocks on the free DoF:
 
 * :data:`DRIVE_MODE_OFF`         -- no actuation, DoF is free.
 * :data:`DRIVE_MODE_POSITION`    -- soft spring towards ``target``
-                                    (rad or m).
+                                    (rad or m); ``max_force_drive`` caps
+                                    the per-substep impulse when > 0,
+                                    unlimited when 0.
 * :data:`DRIVE_MODE_VELOCITY`    -- soft tracking of ``target_velocity``
                                     (rad/s or m/s); ``max_force_drive``
-                                    caps the per-substep impulse.
+                                    caps the per-substep impulse and
+                                    ``max_force_drive == 0`` disables
+                                    the drive.
 
 Plus a one-sided ``[min_value, max_value]`` spring-damper limit
 (``min_value == max_value == 0`` disables it). Drive and limit share
@@ -945,7 +958,10 @@ def _revolute_iterate_at(
         lam_drive = mc_drive * lam_unsoft - ic_drive * acc_drive
         old_acc = acc_drive
         acc_drive = acc_drive + lam_drive
-        if drive_mode == DRIVE_MODE_VELOCITY:
+        # ``max_force_drive > 0`` caps the per-substep impulse for both
+        # drive modes (torque for revolute, force for prismatic); 0 means
+        # unlimited for POSITION and disables VELOCITY (guarded above).
+        if max_force_drive > 0.0:
             acc_drive = wp.clamp(acc_drive, -max_lambda_drive, max_lambda_drive)
         lam_drive = acc_drive - old_acc
         write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, acc_drive)
@@ -1068,7 +1084,24 @@ def _prismatic_prepare_at(
         n_hat = wp.vec3f(1.0, 0.0, 0.0)
     write_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid, n_hat)
 
-    t1 = create_orthonormal(n_hat)
+    # Tangent basis: t1 must be aligned with the anchor3 lever arm's
+    # component perpendicular to n_hat, so that rotation of body 2 around
+    # n_hat produces motion at anchor 3 along t2 with full gain. Using an
+    # arbitrary perpendicular (``create_orthonormal``) yields a ``cos(alpha)``
+    # gain mismatch that breaks Gauss-Seidel convergence in chains with
+    # two or more joints sharing a body. We use body 1's view of the
+    # anchor1 -> anchor3 direction (projected perpendicular to n_hat) as
+    # the t1 reference; this makes the anchor-3 scalar row the exact
+    # tangential velocity gate for rotation about n_hat.
+    anchor3_offset_b1 = r3_b1 - r1_b1
+    t1_raw = anchor3_offset_b1 - wp.dot(anchor3_offset_b1, n_hat) * n_hat
+    t1_len2 = wp.dot(t1_raw, t1_raw)
+    if t1_len2 > 1.0e-20:
+        t1 = t1_raw / wp.sqrt(t1_len2)
+    else:
+        # Fallback: anchor3 has drifted onto the axis (shouldn't happen
+        # since rest_length > 0 and bodies can't collapse).
+        t1 = create_orthonormal(n_hat)
     t2 = wp.cross(n_hat, t1)
     write_vec3(constraints, base_offset + _OFF_T1, cid, t1)
     write_vec3(constraints, base_offset + _OFF_T2, cid, t2)
@@ -1443,7 +1476,10 @@ def _prismatic_iterate_at(
         lam_drive = mc_drive * lam_unsoft - ic_drive * acc_drive
         old_acc = acc_drive
         acc_drive = acc_drive + lam_drive
-        if drive_mode == DRIVE_MODE_VELOCITY:
+        # ``max_force_drive > 0`` caps the per-substep impulse for both
+        # drive modes (torque for revolute, force for prismatic); 0 means
+        # unlimited for POSITION and disables VELOCITY (guarded above).
+        if max_force_drive > 0.0:
             acc_drive = wp.clamp(acc_drive, -max_lambda_drive, max_lambda_drive)
         lam_drive = acc_drive - old_acc
         write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, acc_drive)
