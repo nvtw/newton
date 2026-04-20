@@ -101,7 +101,7 @@ class JointKind(enum.Enum):
 # Selects which constraint type every joint in the chain is built
 # with. Switch this to compare solver behaviour / robustness across
 # the three implementations of "hinge between two cubes".
-JOINT_KIND = JointKind.D6_REVOLUTE
+JOINT_KIND = JointKind.DOUBLE_BALL_SOCKET
 
 NUM_CUBES = 10
 HALF_EXTENT = 0.5

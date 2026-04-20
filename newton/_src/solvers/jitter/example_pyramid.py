@@ -16,10 +16,10 @@
 #     layer 2:   ####
 #     ...
 #
-# Runs two gravity-settle stages: starting slightly above the ground
-# so contacts warm-start cleanly, then lets the tower come to rest.
-# :meth:`Example.test_final` asserts every cube is at rest within
-# 10 cm of its nominal grid position.
+# Runs under a single :class:`wp.ScopedCapture` covering the entire
+# per-frame step (collision detection + solver + state sync +
+# picking), exactly like :mod:`example_motorized_hinge_chain`. On
+# CPU the capture is skipped and the Python path is taken instead.
 #
 # The scene is built via ``newton.ModelBuilder`` + Newton's
 # ``CollisionPipeline`` (which produces the sorted, matched contact
@@ -40,6 +40,7 @@ import warp as wp
 import newton
 import newton.examples
 from newton._src.solvers.jitter.body import MOTION_DYNAMIC, MOTION_STATIC
+from newton._src.solvers.jitter.picking import JitterPicking, register_with_viewer_gl
 from newton._src.solvers.jitter.solver_jitter import pack_body_xforms_kernel
 from newton._src.solvers.jitter.world_builder import (
     RigidBodyDescriptor,
@@ -293,7 +294,13 @@ class Example:
         shape_body_jitter = np.where(shape_body_np < 0, 0, shape_body_np + 1)
         self._shape_body = wp.array(shape_body_jitter, dtype=wp.int32, device=self.device)
 
-        # ---- Viewer setup ------------------------------------------
+        # Initial sync so Jitter's body positions match the builder
+        # numbers *before* the first collide() runs inside a captured
+        # region (the graph replays whatever pointers we have now).
+        self._sync_newton_to_jitter()
+
+        # ---- Rendering scratch + viewer ----------------------------
+        self._xforms = wp.zeros(self.world.num_bodies, dtype=wp.transform, device=self.device)
         self.viewer.set_model(self.model)
         span = self.layers * BOX_SPACING
         self.viewer.set_camera(
@@ -301,27 +308,61 @@ class Example:
             pitch=-18.0,
             yaw=-55.0,
         )
-        self._xforms = wp.zeros(self.world.num_bodies, dtype=wp.transform, device=self.device)
+
+        # ---- Picking ----------------------------------------------
+        # Half-extents per Jitter body (index 0 = static world anchor,
+        # marked (0,0,0) so the ray cast ignores it). Every dynamic
+        # body is a unit cube with half=BOX_HALF.
+        half_extents_np = np.zeros((self.world.num_bodies, 3), dtype=np.float32)
+        half_extents_np[1:] = BOX_HALF
+        self._half_extents = wp.array(half_extents_np, dtype=wp.vec3f, device=self.device)
+        self.picking = JitterPicking(self.world, self._half_extents)
+        register_with_viewer_gl(self.viewer, self.picking)
+
+        self.graph = None
+        self.capture()
 
     # ----------------------------------------------------------------
     # Simulation
     # ----------------------------------------------------------------
 
+    def capture(self):
+        """Record a CUDA graph for the entire per-frame step.
+
+        Follows the ``example_motorized_hinge_chain`` pattern: run
+        ``simulate()`` once inside a :class:`wp.ScopedCapture` so
+        every subsequent frame boils down to one
+        :func:`wp.capture_launch`. All device-side machinery -- the
+        collision pipeline, the Newton<->Jitter sync, picking forces,
+        and the Jitter substep loop -- ends up inside the captured
+        graph. On CPU (non-CUDA) we fall back to running
+        ``simulate()`` directly.
+        """
+        if self.device.is_cuda:
+            with wp.ScopedCapture() as capture:
+                self.simulate()
+            self.graph = capture.graph
+        else:
+            self.graph = None
+
     def simulate(self) -> None:
-        """One render frame: refresh contacts, sub-step Jitter, sync state."""
-        # Push current Newton state into Jitter bodies. Done once per
-        # frame; during sub-stepping Jitter integrates internally.
+        """One rendered frame: sync state, collide, sub-step, sync back."""
         self._sync_newton_to_jitter()
 
-        # Newton's ``body_q`` already reflects the previous frame's
-        # Jitter result (we synced back at the end of the previous
-        # frame), so the collision pipeline sees the up-to-date
-        # transforms.
-        self.contacts = self.model.collide(
-            self.state, collision_pipeline=self.collision_pipeline
+        # Newton's ``body_q`` was refreshed by the previous frame's
+        # Jitter -> Newton sync, so the collision pipeline sees the
+        # up-to-date transforms.
+        self.model.collide(
+            self.state,
+            contacts=self.contacts,
+            collision_pipeline=self.collision_pipeline,
         )
 
         for _ in range(self.sim_substeps):
+            # Apply user drags on every substep so the spring stays
+            # stiff regardless of substep count (mirrors the hinge
+            # example).
+            self.picking.apply_force()
             self.world.step(
                 dt=self.sim_dt,
                 contacts=self.contacts,
@@ -368,10 +409,21 @@ class Example:
         )
 
     def step(self) -> None:
-        self.simulate()
+        if self.graph is not None:
+            wp.capture_launch(self.graph)
+        else:
+            self.simulate()
         self.sim_time += self.frame_dt
 
     def render(self) -> None:
+        # Pack Jitter body state into a transform array the viewer's
+        # ``log_shapes`` can consume directly. We intentionally don't
+        # use ``log_state`` -- the pyramid scene's articulation (one
+        # free joint per cube) means ``state.joint_q`` would need a
+        # forward-kinematics pass to stay consistent with ``body_q``
+        # after we wrote Jitter's pose back. ``log_shapes`` on the
+        # packed ``_xforms`` array just renders whatever poses we
+        # hand it, which is exactly what we want.
         wp.launch(
             pack_body_xforms_kernel,
             dim=self.world.num_bodies,
@@ -379,7 +431,13 @@ class Example:
             device=self.device,
         )
         self.viewer.begin_frame(self.sim_time)
-        self.viewer.log_state(self.state)
+        # Skip body 0 (the static world anchor -- no shape there).
+        self.viewer.log_shapes(
+            "/world/cubes",
+            newton.GeoType.BOX,
+            (BOX_HALF, BOX_HALF, BOX_HALF),
+            self._xforms[1:],
+        )
         self.viewer.log_contacts(self.contacts, self.state)
         self.viewer.end_frame()
 
