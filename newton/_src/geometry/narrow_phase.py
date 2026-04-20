@@ -1462,13 +1462,20 @@ class NarrowPhase:
                 Defaults to ``max_candidate_pairs``.  Set this to a larger value when
                 a single candidate pair can emit multiple contacts (e.g. up to 4 for
                 primitive multi-contact paths).
-            verify_buffers: When True (the default), launch a dim=[1] diagnostic
-                kernel at the end of :meth:`launch` that prints a warning if any
-                intermediate pair buffer (GJK, mesh-plane, mesh-mesh, triangle
-                pairs, SDF) or the final rigid contact buffer overflowed during
-                this frame.  Disable (``False``) to save one kernel launch per
-                frame once buffer sizes are known to be adequate; overflows will
-                then silently drop candidate pairs and contacts.
+            verify_buffers: When True (the default), launch a ``dim=[1]``
+                diagnostic kernel (:func:`verify_narrow_phase_buffers`) at the
+                end of :meth:`launch` that compares each public counter on this
+                class (``gjk_candidate_pairs_count``, ``shape_pairs_mesh_count``,
+                ``triangle_pairs_count``, ``shape_pairs_mesh_plane_count``,
+                ``shape_pairs_mesh_mesh_count``, ``shape_pairs_sdf_sdf_count``)
+                and the output ``contact_count`` against the capacity of its
+                backing array, printing ``wp.printf`` warnings on overflow.
+                Users who want a programmatic overflow hook can disable this and
+                read those counters themselves.  Overhead is one extra kernel
+                launch per collision pass (roughly a few µs of launch latency on
+                CUDA; the kernel body is a handful of scalar comparisons on one
+                thread).  Disable in hot loops or CUDA graph capture once buffer
+                sizes are known to be adequate.
         """
         self.max_candidate_pairs = max_candidate_pairs
         self.max_triangle_pairs = max_triangle_pairs

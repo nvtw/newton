@@ -512,14 +512,13 @@ class CollisionPipeline:
             deterministic: Sort contacts after the narrow phase so that results
                 are independent of GPU thread scheduling.  Adds a radix sort +
                 gather pass.  Hydroelastic contacts are not yet covered.
-            verify_buffers: Run a dim=[1] diagnostic kernel at the end of the
-                narrow phase that prints warnings when any intermediate
-                candidate-pair buffer (GJK, mesh, triangle, SDF) or the final
-                rigid contact buffer overflows.  Defaults to ``True`` so users
-                are informed when ``rigid_contact_max`` / ``max_triangle_pairs``
-                / ``shape_pairs_max`` need to be raised.  Disable in hot loops
-                (e.g. inside CUDA graph capture) to save a kernel launch once
-                buffers are known to be adequately sized.
+            verify_buffers: Run a ``dim=[1]`` diagnostic kernel at the end of
+                the narrow phase that prints warnings on any intermediate
+                candidate-pair or final rigid contact buffer overflow; see
+                :class:`NarrowPhase` for the full counter list.  Defaults to
+                ``True``.  Overhead is one extra kernel launch per collision
+                pass; disable in hot loops or CUDA graph capture once buffer
+                sizes are known to be adequate.
 
         .. note::
             When ``requires_grad`` is true (explicitly or via ``model.requires_grad``),
@@ -857,10 +856,10 @@ class CollisionPipeline:
                 model.shape_gap,
                 model.shape_collision_aabb_lower,
                 model.shape_collision_aabb_upper,
-                contacts._counter_array,
+                contacts.contact_counters,
                 contacts.contact_generation,
                 self.broad_phase_pair_count,
-                contacts._counter_array.shape[0],
+                contacts.contact_counters.shape[0],
             ],
             outputs=[
                 self.narrow_phase.shape_aabb_lower,

@@ -123,11 +123,13 @@ class Contacts:
         self.per_contact_shape_properties = per_contact_shape_properties
         self.clear_buffers = clear_buffers
         with wp.ScopedDevice(device):
-            # Consolidated counter array to minimize kernel launches for zeroing
-            # Layout: [rigid_contact_count, soft_contact_count]
-            self._counter_array = wp.zeros(2, dtype=wp.int32)
+            # Packed counter array [rigid_contact_count, soft_contact_count] so
+            # all counts can be zeroed together in one fused kernel launch.
+            # Every entry must be safe to reset to zero at the start of a
+            # collision pass.
+            self.contact_counters = wp.zeros(2, dtype=wp.int32)
             # Create sliced views for individual counters (no additional allocation)
-            self.rigid_contact_count = self._counter_array[0:1]
+            self.rigid_contact_count = self.contact_counters[0:1]
 
             self.contact_generation = wp.zeros(1, dtype=wp.int32)
             """Device-side generation counter, incremented each time :meth:`clear` is called.
@@ -209,7 +211,7 @@ class Contacts:
                 """Per-contact friction coefficient [dimensionless], shape (rigid_contact_max,), dtype float."""
 
             # soft contacts — requires_grad flows through here for differentiable simulation
-            self.soft_contact_count = self._counter_array[1:2]
+            self.soft_contact_count = self.contact_counters[1:2]
             self.soft_contact_particle = wp.full(soft_contact_max, -1, dtype=int)
             self.soft_contact_shape = wp.full(soft_contact_max, -1, dtype=int)
             self.soft_contact_body_pos = wp.zeros(soft_contact_max, dtype=wp.vec3, requires_grad=requires_grad)
@@ -257,11 +259,11 @@ class Contacts:
                 ``False`` to avoid an unnecessary double-bump per collision pass.
         """
         # Clear all counters and (optionally) bump generation in a single kernel launch.
-        num_counters = self._counter_array.shape[0]
+        num_counters = self.contact_counters.shape[0]
         wp.launch(
             _clear_counters_and_bump_generation,
             dim=max(num_counters, 1),
-            inputs=[self._counter_array, self.contact_generation, num_counters, int(bump_generation)],
+            inputs=[self.contact_counters, self.contact_generation, num_counters, int(bump_generation)],
             device=self.contact_generation.device,
             record_tape=False,
         )
