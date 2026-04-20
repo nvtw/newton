@@ -321,10 +321,12 @@ class Example:
             else:
                 raise ValueError(f"unknown JOINT_KIND: {JOINT_KIND}")
 
-        # substeps=1 here because we drive substepping ourselves from
-        # simulate() (matches example_body_chain).
+        # Substepping lives inside ``World.step`` now, so pass the
+        # substep count through and let the solver's step driver apply
+        # picking once per internal substep. Coloring runs once per
+        # full step and is reused across substeps + PGS iterations.
         self.world = b.finalize(
-            substeps=1,
+            substeps=self.sim_substeps,
             solver_iterations=8,
             device=self.device,
         )
@@ -352,9 +354,7 @@ class Example:
             self.graph = None
 
     def simulate(self):
-        for _ in range(self.sim_substeps):
-            self.picking.apply_force()
-            self.world.step(self.sim_dt)
+        self.world.step(self.frame_dt, picking=self.picking)
 
     def step(self):
         if self.graph:

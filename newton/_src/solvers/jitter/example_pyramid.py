@@ -62,7 +62,7 @@ DEFAULT_LAYERS = 10
 # frame through the eager :meth:`Example.simulate` path. Expect ~1 ms
 # of extra CPU overhead per frame from the timing API; this is the
 # overhead the benchmark is supposed to account for.
-ENABLE_KERNEL_TIMING = True
+ENABLE_KERNEL_TIMING = False
 KERNEL_TIMING_FRAMES = 200
 
 BOX_HALF = 0.5
@@ -310,8 +310,12 @@ class Example:
         # against ``num_elements[0]``.
         max_contact_columns = max(16, (rigid_contact_max + 5) // 6)
         num_shapes = int(self.model.shape_count)
+        # Substepping lives inside ``World.step`` -- pass the count so
+        # one ``world.step(frame_dt, ...)`` call per simulate() does
+        # every sub-integration. Coloring runs once per full step and
+        # is shared across all substeps + PGS iterations.
         self.world = builder.finalize(
-            substeps=1,
+            substeps=self.sim_substeps,
             solver_iterations=self.solver_iterations,
             gravity=(0.0, 0.0, -9.81),
             max_contact_columns=max_contact_columns,
@@ -399,16 +403,15 @@ class Example:
             collision_pipeline=self.collision_pipeline,
         )
 
-        for _ in range(self.sim_substeps):
-            # Apply user drags on every substep so the spring stays
-            # stiff regardless of substep count (mirrors the hinge
-            # example).
-            self.picking.apply_force()
-            self.world.step(
-                dt=self.sim_dt,
-                contacts=self.contacts,
-                shape_body=self._shape_body,
-            )
+        # ``World.step`` runs the internal substep loop, applying
+        # picking at the start of each substep so the spring stays
+        # stiff regardless of substep count.
+        self.world.step(
+            dt=self.frame_dt,
+            contacts=self.contacts,
+            shape_body=self._shape_body,
+            picking=self.picking,
+        )
 
         self._sync_jitter_to_newton()
 

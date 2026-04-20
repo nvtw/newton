@@ -280,7 +280,7 @@ class Example:
                 raise ValueError(f"unknown JOINT_KIND: {JOINT_KIND}")
 
         self.world = b.finalize(
-            substeps=1,
+            substeps=self.sim_substeps,
             solver_iterations=8,
             device=self.device,
         )
@@ -306,9 +306,7 @@ class Example:
             self.graph = None
 
     def simulate(self):
-        for _ in range(self.sim_substeps):
-            self.picking.apply_force()
-            self.world.step(self.sim_dt)
+        self.world.step(self.frame_dt, picking=self.picking)
 
     def step(self):
         if self.graph:

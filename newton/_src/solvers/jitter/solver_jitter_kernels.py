@@ -122,19 +122,45 @@ def _constraint_prepare_for_iteration_kernel(
     constraints: ConstraintContainer,
     bodies: BodyContainer,
     idt: wp.float32,
-    partition_element_ids: wp.array[wp.int32],
-    partition_count: wp.array[wp.int32],
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
     cc: ContactContainer,
     contacts: ContactViews,
 ):
     """Dispatch the per-type ``prepare_for_iteration`` ``wp.func`` for
-    each cid in the current graph-coloring partition.
+    each cid in the *current* colour of the CSR coloring layout.
 
-    The launch is sized by the constraint *capacity*; threads with
-    ``tid >= partition_count[0]`` early-out. The partitioner guarantees
-    that no two cids in the same partition share a body, so the
-    per-thread RMW of the body container is race-free regardless of
-    which constraint type each thread happens to dispatch.
+    Reads its work list from the shared CSR built once per ``step()``
+    by :meth:`IncrementalContactPartitioner.build_csr`:
+
+    * ``cursor = color_cursor[0]`` -- countdown from ``num_colors[0]``
+      to 0, decremented by this kernel as each colour completes.
+    * ``c = num_colors[0] - cursor`` -- index of the colour being
+      processed.
+    * ``start = color_starts[c]``, ``end = color_starts[c + 1]`` --
+      half-open range of ``element_ids_by_color`` belonging to
+      colour ``c``.
+
+    Per-thread ``tid`` picks up ``cid = element_ids_by_color[start + tid]``
+    when ``tid < end - start``; threads beyond that early-out. The
+    partitioner guarantees that no two cids in the same colour share
+    a body, so the per-thread RMW of the body container is race-free
+    regardless of which constraint type each thread happens to
+    dispatch.
+
+    The launch size is the constraint *capacity* (Python-side
+    constant) so the kernel is legal inside ``wp.capture_while``;
+    actual work per launch is bounded by the largest colour's
+    element count (usually << capacity).
+
+    After the work is done, thread 0 decrements ``color_cursor[0]``.
+    This is race-free because every thread reads ``cursor`` once at
+    the top into a per-thread register, and the only write happens
+    from thread 0 after every thread has finished its element work;
+    subsequent reads of ``color_cursor`` only occur in the next
+    captured kernel launch (after the implicit kernel-boundary sync).
 
     Follows PhoenX's "contacts are constraints" pattern: the contact
     branch takes the additional
@@ -145,27 +171,43 @@ def _constraint_prepare_for_iteration_kernel(
     Warp passes structs by reference.
     """
     tid = wp.tid()
-    if tid >= partition_count[0]:
-        return
-    cid = partition_element_ids[tid]
 
-    t = constraint_get_type(constraints, cid)
-    if t == CONSTRAINT_TYPE_BALL_SOCKET:
-        ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
-    elif t == CONSTRAINT_TYPE_HINGE_ANGLE:
-        hinge_angle_prepare_for_iteration(constraints, cid, bodies, idt)
-    elif t == CONSTRAINT_TYPE_ANGULAR_MOTOR:
-        angular_motor_prepare_for_iteration(constraints, cid, bodies, idt)
-    elif t == CONSTRAINT_TYPE_HINGE_JOINT:
-        hinge_joint_prepare_for_iteration(constraints, cid, bodies, idt)
-    elif t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
-        actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
-    elif t == CONSTRAINT_TYPE_PRISMATIC:
-        prismatic_prepare_for_iteration(constraints, cid, bodies, idt)
-    elif t == CONSTRAINT_TYPE_D6:
-        d6_prepare_for_iteration(constraints, cid, bodies, idt)
-    elif t == CONSTRAINT_TYPE_CONTACT:
-        contact_prepare_for_iteration(constraints, cid, bodies, idt, cc, contacts)
+    # Snapshot the sweep cursor once. Every thread participates so the
+    # implicit per-launch state is kept local to this grid; the only
+    # writer of ``color_cursor`` is thread 0 below.
+    cursor = color_cursor[0]
+    n_colors = num_colors[0]
+    c = n_colors - cursor
+
+    start = color_starts[c]
+    end = color_starts[c + 1]
+    count = end - start
+
+    if tid < count:
+        cid = element_ids_by_color[start + tid]
+
+        t = constraint_get_type(constraints, cid)
+        if t == CONSTRAINT_TYPE_BALL_SOCKET:
+            ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+        elif t == CONSTRAINT_TYPE_HINGE_ANGLE:
+            hinge_angle_prepare_for_iteration(constraints, cid, bodies, idt)
+        elif t == CONSTRAINT_TYPE_ANGULAR_MOTOR:
+            angular_motor_prepare_for_iteration(constraints, cid, bodies, idt)
+        elif t == CONSTRAINT_TYPE_HINGE_JOINT:
+            hinge_joint_prepare_for_iteration(constraints, cid, bodies, idt)
+        elif t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
+            actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+        elif t == CONSTRAINT_TYPE_PRISMATIC:
+            prismatic_prepare_for_iteration(constraints, cid, bodies, idt)
+        elif t == CONSTRAINT_TYPE_D6:
+            d6_prepare_for_iteration(constraints, cid, bodies, idt)
+        elif t == CONSTRAINT_TYPE_CONTACT:
+            contact_prepare_for_iteration(constraints, cid, bodies, idt, cc, contacts)
+
+    # Advance the per-sweep cursor by one colour. Thread 0 only; see
+    # the docstring for the race-freedom argument.
+    if tid == 0:
+        color_cursor[0] = cursor - 1
 
 
 @wp.kernel(enable_backward=False)
@@ -173,37 +215,51 @@ def _constraint_iterate_kernel(
     constraints: ConstraintContainer,
     bodies: BodyContainer,
     idt: wp.float32,
-    partition_element_ids: wp.array[wp.int32],
-    partition_count: wp.array[wp.int32],
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
     cc: ContactContainer,
     contacts: ContactViews,
 ):
     """Dispatch the per-type ``iterate`` ``wp.func`` for each cid in the
-    current graph-coloring partition. See
+    current CSR colour. See
     :func:`_constraint_prepare_for_iteration_kernel` for the launch
-    contract."""
+    contract and the cursor-decrement semantics.
+    """
     tid = wp.tid()
-    if tid >= partition_count[0]:
-        return
-    cid = partition_element_ids[tid]
 
-    t = constraint_get_type(constraints, cid)
-    if t == CONSTRAINT_TYPE_BALL_SOCKET:
-        ball_socket_iterate(constraints, cid, bodies, idt)
-    elif t == CONSTRAINT_TYPE_HINGE_ANGLE:
-        hinge_angle_iterate(constraints, cid, bodies, idt)
-    elif t == CONSTRAINT_TYPE_ANGULAR_MOTOR:
-        angular_motor_iterate(constraints, cid, bodies, idt)
-    elif t == CONSTRAINT_TYPE_HINGE_JOINT:
-        hinge_joint_iterate(constraints, cid, bodies, idt)
-    elif t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
-        actuated_double_ball_socket_iterate(constraints, cid, bodies, idt)
-    elif t == CONSTRAINT_TYPE_PRISMATIC:
-        prismatic_iterate(constraints, cid, bodies, idt)
-    elif t == CONSTRAINT_TYPE_D6:
-        d6_iterate(constraints, cid, bodies, idt)
-    elif t == CONSTRAINT_TYPE_CONTACT:
-        contact_iterate(constraints, cid, bodies, idt, cc, contacts)
+    cursor = color_cursor[0]
+    n_colors = num_colors[0]
+    c = n_colors - cursor
+
+    start = color_starts[c]
+    end = color_starts[c + 1]
+    count = end - start
+
+    if tid < count:
+        cid = element_ids_by_color[start + tid]
+
+        t = constraint_get_type(constraints, cid)
+        if t == CONSTRAINT_TYPE_BALL_SOCKET:
+            ball_socket_iterate(constraints, cid, bodies, idt)
+        elif t == CONSTRAINT_TYPE_HINGE_ANGLE:
+            hinge_angle_iterate(constraints, cid, bodies, idt)
+        elif t == CONSTRAINT_TYPE_ANGULAR_MOTOR:
+            angular_motor_iterate(constraints, cid, bodies, idt)
+        elif t == CONSTRAINT_TYPE_HINGE_JOINT:
+            hinge_joint_iterate(constraints, cid, bodies, idt)
+        elif t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
+            actuated_double_ball_socket_iterate(constraints, cid, bodies, idt)
+        elif t == CONSTRAINT_TYPE_PRISMATIC:
+            prismatic_iterate(constraints, cid, bodies, idt)
+        elif t == CONSTRAINT_TYPE_D6:
+            d6_iterate(constraints, cid, bodies, idt)
+        elif t == CONSTRAINT_TYPE_CONTACT:
+            contact_iterate(constraints, cid, bodies, idt, cc, contacts)
+
+    if tid == 0:
+        color_cursor[0] = cursor - 1
 
 
 @wp.kernel(enable_backward=False)

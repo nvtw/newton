@@ -145,8 +145,16 @@ class _LiveScene:
         self.device = device
         self.frame_dt = float(scene.frame_dt)
         self.substeps = max(int(scene.substeps), 1)
-        self.sim_dt = self.frame_dt / self.substeps
         self.sim_time = 0.0
+
+        # Scene builders default to ``substeps=1`` when calling
+        # ``WorldBuilder.finalize`` (substepping used to live in the
+        # visualizer). Now that ``World.step`` owns the substep loop
+        # internally, push the scene's desired substep count into the
+        # world so one ``world.step(frame_dt, ...)`` call per frame
+        # does the right amount of work. Cheap -- this is a plain int
+        # attribute on :class:`World`.
+        self.world.substeps = self.substeps
 
         num_bodies = scene.body_half_extents.shape[0]
         # One transform per body (filled by pack_body_xforms_kernel
@@ -177,9 +185,7 @@ class _LiveScene:
             self.graph = None
 
     def _simulate(self):
-        for _ in range(self.substeps):
-            self.picking.apply_force()
-            self.world.step(self.sim_dt)
+        self.world.step(self.frame_dt, picking=self.picking)
 
     def step(self):
         if self.graph is not None:

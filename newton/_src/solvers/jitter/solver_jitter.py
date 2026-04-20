@@ -269,13 +269,31 @@ class World:
     # Public driver
     # ------------------------------------------------------------------
 
-    def step(self, dt: float, contacts=None, shape_body=None) -> None:
+    def step(self, dt: float, contacts=None, shape_body=None, picking=None) -> None:
         """Advance the world by ``dt`` seconds.
 
         Direct port of ``World.Step`` (Jitter2/Dynamics/World.Step.cs:1-137).
         Tracing, asserts, SetTime and the multi-threaded thread-pool wake/sleep
         signalling are all dropped -- on Warp, parallelism is implicit in the
         kernel launches.
+
+        The internal control flow is:
+
+        1. Ingest contacts, rebuild the element view, **build the
+           graph coloring in CSR form once**
+           (:meth:`IncrementalContactPartitioner.build_csr`).
+        2. Substep loop (``self.substeps`` iterations). Each substep:
+           apply picking forces (if any), integrate forces, run the
+           PGS velocity solve (``self.solver_iterations`` iterations
+           reusing the shared CSR coloring), integrate velocities,
+           relax.
+
+        Coloring runs once per step rather than once per substep, and
+        is reused across every PGS iteration. This is valid because
+        the constraint graph's topology is frozen inside a step
+        (contacts are ingested before the loop, joints are static);
+        only the accumulated impulses change across iterations, and
+        those do not affect adjacency.
 
         Args:
             dt: Time step in seconds. Non-positive values no-op.
@@ -292,6 +310,13 @@ class World:
                 packed contact columns are cleared).
             shape_body: ``model.shape_body`` mapping (shape id ->
                 body id). Required when ``contacts`` is provided.
+            picking: Optional :class:`~newton._src.solvers.jitter.picking.JitterPicking`
+                instance. When provided, its
+                :meth:`~newton._src.solvers.jitter.picking.JitterPicking.apply_force`
+                is invoked at the start of every internal substep so
+                the spring stays stiff regardless of
+                :attr:`substeps`. Left at ``None`` for headless tests
+                and examples that don't support mouse picking.
         """
         if dt < 0.0:
             raise ValueError("Time step cannot be negative.")
@@ -319,8 +344,24 @@ class World:
         # type-agnostic).
         self._rebuild_elements()
 
-        # Sub-stepping: integrate forces, solve, integrate velocities, relax.
+        # Build the CSR graph coloring once for the entire step. The
+        # adjacency + colouring are reused by every substep + every
+        # PGS iteration below. ``reset`` rebuilds the adjacency (the
+        # active constraint set changed through contact ingest);
+        # ``build_csr`` drives JP to completion and materialises the
+        # flat element_ids_by_color / color_starts / num_colors
+        # layout the sweep kernels consume.
+        if self._constraint_capacity > 0:
+            self._partitioner.reset(self._elements, self._num_active_constraints)
+            self._partitioner.build_csr()
+
+        # Sub-stepping: picking, integrate forces, solve, integrate
+        # velocities, relax. Picking is applied first so its spring
+        # wrench is summed into the force accumulators before the
+        # force integration consumes them.
         for _ in range(self.substeps):
+            if picking is not None:
+                picking.apply_force()
             self._integrate_forces()
             self._solve_velocities(self.solver_iterations)
             self._integrate_velocities()
@@ -503,13 +544,16 @@ class World:
     def _solve_velocities(self, iterations: int) -> None:
         """Mirrors ``SolveVelocities``: PGS over all constraints.
 
-        Drives the :class:`IncrementalContactPartitioner` via
-        ``wp.capture_while`` -- one ``capture_while`` per sweep walks
-        the partitioner's ``num_remaining`` counter down to zero,
-        launching the unified
-        :func:`_constraint_prepare_for_iteration_kernel` /
-        :func:`_constraint_iterate_kernel` dispatcher once per
-        partition.
+        Consumes the CSR coloring produced once per :meth:`step` by
+        :meth:`IncrementalContactPartitioner.build_csr`. Each sweep --
+        one prepare + ``iterations`` iterates -- walks the CSR colour
+        by colour via ``wp.capture_while(color_cursor, ...)``:
+
+        * :meth:`~IncrementalContactPartitioner.begin_sweep` resets
+          the device-side ``color_cursor`` to ``num_colors``.
+        * The body kernel processes one colour's CSR slice and
+          decrements ``color_cursor`` by 1 before returning.
+        * Capture-while exits when the cursor hits 0.
 
         Contact constraints and joint constraints take the same path:
         the per-cid type tag in the column header drives per-thread
@@ -526,31 +570,24 @@ class World:
         idt = wp.float32(1.0 / self.substep_dt)
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
 
-        # PrepareForIteration: one sweep over all partitions. This is
-        # the first reset of the substep, so we do the full adjacency
-        # rebuild (count + scan + store) here.
-        self._partitioner.reset(self._elements, self._num_active_constraints)
+        # PrepareForIteration: one sweep over all colours.
+        self._partitioner.begin_sweep()
         wp.capture_while(
-            self._partitioner.num_remaining,
+            self._partitioner.color_cursor,
             self._capture_partition_sweep,
             kernel=_constraint_prepare_for_iteration_kernel,
             idt=idt,
             contact_views=contact_views,
         )
 
-        # Iterate: ``iterations`` sweeps over all partitions. The
-        # constraint graph does not change between PGS iterations --
-        # only the accumulated impulses evolve -- so the adjacency
-        # structure built by the prepare-sweep reset above is still
-        # valid. Use the cheap ``reset_loop_state_only`` path which
-        # skips ``partitioning_prepare_kernel``, the adjacency
-        # count/scan/store sequence, and falls back to a single fused
-        # launch that resets ``partition_data_concat`` and
-        # ``interaction_id_to_partition`` for [0, num_elements[0]).
+        # Iterate: ``iterations`` sweeps over all colours. The CSR is
+        # unchanged across iterations (graph topology is frozen for
+        # the whole step) -- we only need to reset the per-sweep
+        # ``color_cursor`` before each pass.
         for _ in range(iterations):
-            self._partitioner.reset_loop_state_only()
+            self._partitioner.begin_sweep()
             wp.capture_while(
-                self._partitioner.num_remaining,
+                self._partitioner.color_cursor,
                 self._capture_partition_sweep,
                 kernel=_constraint_iterate_kernel,
                 idt=idt,
@@ -622,16 +659,17 @@ class World:
         is a ~10 us round-trip; budget accordingly if you plan to poll
         on every substep.
 
-        The value reflects the partitioner state after the most recent
-        :meth:`step` returns (i.e. the coloring produced by the last
-        substep of that step). Calling this before the first
-        :meth:`step` returns ``0``.
+        The value reflects the coloring :meth:`step` built for the most
+        recent call -- one ``build_csr`` pass now runs once per step
+        and is reused across every substep + every PGS iteration, so
+        the returned number is the *shared* colour count for the whole
+        step. Calling this before the first :meth:`step` returns ``0``.
 
         Returns:
             Number of colors (>=0) used to partition the active
-            constraint graph in the last PGS sweep.
+            constraint graph in the last :meth:`step`.
         """
-        return int(self._partitioner.current_color.numpy()[0])
+        return int(self._partitioner.num_colors.numpy()[0])
 
     def gather_contact_wrenches(self, out: wp.array) -> None:
         """Per-individual-contact force + torque from the last substep.
@@ -774,15 +812,18 @@ class World:
     ) -> None:
         """Body of the ``wp.capture_while`` loop in :meth:`_solve_velocities`.
 
-        Per partition we (1) advance the partitioner one colour to publish
-        a fresh independent set in
-        ``partitioner.partition_element_ids[:partition_count[0]]``, then
-        (2) launch the unified dispatch ``kernel`` over that set. The
-        launch is sized by the constraint capacity so the dim is a
-        Python-side constant; threads beyond ``partition_count[0]``
-        early-out inside the kernel.
+        One colour per iteration of the enclosing ``capture_while``.
+        The constraint dispatch ``kernel`` reads the current colour's
+        CSR slice (via ``num_colors - color_cursor``), runs its
+        element work, and decrements ``color_cursor`` by 1 so the
+        next iteration processes the following colour. No
+        partitioner work happens here -- the CSR is prebuilt once per
+        :meth:`step`.
+
+        Launch dim stays at the full constraint capacity (Python-side
+        constant, required by ``capture_while``); threads beyond the
+        current colour's size early-out inside the kernel.
         """
-        self._partitioner.launch()
         views = contact_views if contact_views is not None else self._contact_views_placeholder
         wp.launch(
             kernel,
@@ -791,8 +832,10 @@ class World:
                 self.constraints,
                 self.bodies,
                 idt,
-                self._partitioner.partition_element_ids,
-                self._partitioner.partition_count,
+                self._partitioner.element_ids_by_color,
+                self._partitioner.color_starts,
+                self._partitioner.num_colors,
+                self._partitioner.color_cursor,
                 self._contact_container,
                 views,
             ],

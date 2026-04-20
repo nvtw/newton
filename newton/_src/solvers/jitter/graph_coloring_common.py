@@ -374,6 +374,40 @@ def incremental_init_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def incremental_init_csr_kernel(
+    current_color: wp.array[int],
+    num_remaining: wp.array[int],
+    num_colors: wp.array[int],
+    color_starts: wp.array[int],
+    num_elements: wp.array[int],
+):
+    # Single-thread launch: initialise the CSR coloring state before
+    # :meth:`IncrementalContactPartitioner.build_csr` begins. Clears
+    # ``color_starts[0] = 0`` so the first colour lays its elements
+    # down at slot 0 of ``element_ids_by_color``; zeroes
+    # ``num_colors`` so partial-state reads (e.g. from the optional
+    # diagnostic ``World.num_colors_used``) return a coherent value
+    # while the JP loop is still running.
+    current_color[0] = 0
+    num_remaining[0] = num_elements[0]
+    num_colors[0] = 0
+    color_starts[0] = 0
+
+
+@wp.kernel(enable_backward=False)
+def incremental_begin_sweep_kernel(
+    num_colors: wp.array[int],
+    color_cursor: wp.array[int],
+):
+    # Single-thread launch: copy ``num_colors`` into ``color_cursor``
+    # so the sweep-time capture_while has a fresh counter to decrement.
+    # Done as a kernel (rather than a host-side ``copy_``) so the setup
+    # can live inside a captured region when the caller wants to bake
+    # the whole substep into a CUDA graph.
+    color_cursor[0] = num_colors[0]
+
+
+@wp.kernel(enable_backward=False)
 def incremental_fill_minus_one_kernel(
     arr: wp.array[int],
     num_elements: wp.array[int],
@@ -733,3 +767,108 @@ def incremental_tile_compact_remaining_and_advance_kernel(
         partition_count[0] = committed_running
         num_remaining[0] = survivor_running
         current_color[0] = cc + 1
+
+
+@wp.kernel(enable_backward=False)
+def incremental_tile_compact_csr_and_advance_kernel(
+    partition_data_concat: wp.array[wp.int64],
+    remaining_ids: wp.array[int],
+    current_color: wp.array[int],
+    num_remaining: wp.array[int],
+    num_colors: wp.array[int],
+    element_ids_by_color: wp.array[int],
+    color_starts: wp.array[int],
+    interaction_id_to_partition: wp.array[int],
+):
+    """CSR variant of :func:`incremental_tile_compact_remaining_and_advance_kernel`.
+
+    Same per-tile algorithm (in-place compaction of ``remaining_ids``,
+    block-wide exclusive scans, lane-0 scalar publication) but the
+    committed-elements compacted output is appended to the CSR layout
+    ``element_ids_by_color`` at offset ``color_starts[cc]`` rather than
+    written into a one-shot ``partition_element_ids`` buffer. After
+    the last tile lane 0 additionally writes
+    ``color_starts[cc + 1] = color_starts[cc] + committed_running``
+    so the next colour -- and the final ``num_colors`` sentinel slot --
+    picks up the correct starting offset.
+
+    ``num_colors`` mirrors ``current_color`` as each colour completes
+    and is read by :class:`~newton._src.solvers.jitter.World` to drive
+    the sweep-time ``capture_while`` that replays the CSR colour by
+    colour across all PGS iterations and substeps of a ``step()``.
+
+    Race-free by the same argument as the non-CSR sibling: every lane
+    reads ``current_color[0]`` once at the top into ``cc``, and the
+    only writes to ``current_color``, ``color_starts[cc+1]``, and
+    ``num_colors`` happen from lane 0 after all reads have completed
+    across every tile.
+    """
+    _block, lane = wp.tid()
+
+    n = num_remaining[0]
+    cc = current_color[0]
+    # Base offset into the CSR buffer for this colour. Every lane
+    # captures it into a register up front so the later survivor scan's
+    # implicit block sync double-duties as a read barrier for it.
+    base = color_starts[cc]
+
+    committed_running = int(0)
+    survivor_running = int(0)
+
+    offset = int(0)
+    while offset < n:
+        slot = offset + lane
+
+        eid = int(0)
+        committed_flag = int(0)
+        survivor_flag = int(0)
+        if slot < n:
+            eid = remaining_ids[slot]
+            tagged = partition_data_concat[eid] & _TAG_MASK
+            color_plus_one = tagged >> _COLOR_SHIFT
+            if color_plus_one == wp.int64(cc + 1):
+                committed_flag = 1
+            else:
+                survivor_flag = 1
+
+        committed_tile = wp.tile(committed_flag)
+        committed_scan = wp.tile_scan_exclusive(committed_tile)
+        committed_local = wp.untile(committed_scan)
+
+        survivor_tile = wp.tile(survivor_flag)
+        survivor_scan = wp.tile_scan_exclusive(survivor_tile)
+        survivor_local = wp.untile(survivor_scan)
+
+        # Append committed elements into the CSR slice for colour cc.
+        # Writes target ``[base + committed_running, base + committed_running +
+        # tile_committed)`` which lies strictly inside this colour's CSR
+        # range; different colours write into disjoint ranges so there
+        # is no cross-kernel hazard.
+        if committed_flag == 1:
+            out_idx = base + committed_running + committed_local
+            element_ids_by_color[out_idx] = eid
+            interaction_id_to_partition[eid] = cc
+
+        if survivor_flag == 1:
+            out_idx = survivor_running + survivor_local
+            remaining_ids[out_idx] = eid
+
+        committed_total = wp.tile_sum(committed_tile)
+        survivor_total = wp.tile_sum(survivor_tile)
+        committed_running = committed_running + committed_total[0]
+        survivor_running = survivor_running + survivor_total[0]
+        offset = offset + TILE_SCAN_BLOCK_DIM
+
+    if lane == 0:
+        # Write this colour's end offset = next colour's start offset.
+        # ``color_starts[cc + 1]`` is guaranteed addressable because
+        # ``color_starts`` is sized ``MAX_COLORS + 1``.
+        color_starts[cc + 1] = base + committed_running
+        num_remaining[0] = survivor_running
+        current_color[0] = cc + 1
+        # ``num_colors`` trails ``current_color`` by one step and
+        # settles on the final colour count when the outer
+        # capture_while exits (i.e. when num_remaining hits 0). Writing
+        # it unconditionally every round keeps the bookkeeping simple;
+        # the last round's write is the one callers observe.
+        num_colors[0] = cc + 1

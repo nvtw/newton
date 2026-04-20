@@ -229,10 +229,12 @@ class Example:
                 anchor = (0.0, 0.0, 0.0) if k == 0 else (2.0 * k * HALF_EXTENT, 0.0, 0.0)
                 add_chain_joint(body_a, body_b, anchor)
 
-        # substeps=1 here because we drive substepping ourselves from
-        # simulate() (matches the basic-pendulum pattern).
+        # Substepping lives inside ``World.step`` now -- pass the
+        # count and let the solver apply picking once per internal
+        # substep. Coloring runs once per full step and is reused
+        # across all substeps + PGS iterations.
         self.world = b.finalize(
-            substeps=1,
+            substeps=self.sim_substeps,
             solver_iterations=8,
             device=self.device,
         )
@@ -261,16 +263,12 @@ class Example:
             self.graph = None
 
     def simulate(self):
-        for _ in range(self.sim_substeps):
-            # Re-inject the picking force every Jitter step. The force
-            # accumulator is consumed and zeroed at the end of each
-            # ``step()`` (Jitter's two-stage IntegrateForces split), so
-            # without re-injection the user would feel a 1-frame pulse
-            # rather than a continuous spring. Also a no-op kernel
-            # launch when nothing is picked, keeping the path graph-
-            # capture-friendly.
-            self.picking.apply_force()
-            self.world.step(self.sim_dt)
+        # ``World.step`` handles substepping internally and re-injects
+        # the picking spring force at the start of every substep --
+        # without re-injection the user would feel a one-frame pulse
+        # rather than a continuous pull (the force accumulator is
+        # consumed + zeroed by Jitter's two-stage IntegrateForces).
+        self.world.step(self.frame_dt, picking=self.picking)
 
     def step(self):
         if self.graph:
