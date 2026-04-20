@@ -30,7 +30,22 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.jitter.body import BodyContainer
+from newton._src.solvers.jitter.constraint_contact import (
+    ContactViews,
+    contact_views_make,
+)
 from newton._src.solvers.jitter.constraint_container import ConstraintContainer
+from newton._src.solvers.jitter.contact_container import (
+    ContactContainer,
+    contact_container_swap_prev_current,
+    contact_container_zeros,
+)
+from newton._src.solvers.jitter.contact_ingest import (
+    IngestScratch,
+    gather_contact_warmstart,
+    ingest_contacts,
+    stamp_forward_contact_map,
+)
 from newton._src.solvers.jitter.graph_coloring_common import (
     ElementInteractionData,
 )
@@ -51,6 +66,29 @@ from newton._src.solvers.jitter.solver_jitter_kernels import (
 # pack_body_xforms_kernel is re-exported here so existing callers
 # (examples, viewer integration) keep importing it from solver_jitter.
 __all__ = ["World", "pack_body_xforms_kernel"]
+
+
+@wp.kernel(enable_backward=False)
+def _sync_num_active_constraints_kernel(
+    num_contact_columns: wp.array[wp.int32],
+    joint_constraint_count: wp.int32,
+    # out
+    num_active_constraints: wp.array[wp.int32],
+):
+    """Fuse device-held ``num_contact_columns`` into ``num_active_constraints``.
+
+    One-thread kernel: reads the latest contact-column count written
+    by the ingest pipeline and writes
+    ``num_active_constraints[0] = joint_constraint_count +
+    num_contact_columns[0]``. Stays on-device so
+    :meth:`World._ingest_and_warmstart_contacts` can update the
+    partitioner / dispatcher gate without a host readback (which
+    would break graph capture).
+    """
+    tid = wp.tid()
+    if tid != 0:
+        return
+    num_active_constraints[0] = joint_constraint_count + num_contact_columns[0]
 
 
 class World:
@@ -78,31 +116,38 @@ class World:
         solver_iterations: int = 8,
         velocity_relaxations: int = 1,
         gravity: tuple[float, float, float] = (0.0, -9.81, 0.0),
+        max_contact_columns: int = 0,
+        rigid_contact_max: int = 0,
+        num_shapes: int = 0,
+        joint_constraint_count: int | None = None,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built containers.
 
         Args:
             bodies: Pre-allocated and populated :class:`BodyContainer`.
-                Body 0 is conventionally the static world body
-                (created automatically by :class:`WorldBuilder`).
-            constraints: Pre-allocated and populated shared
-                :class:`ConstraintContainer`. Each column's type is
-                self-describing via its first dword (``constraint_type``
-                tag); the solver dispatches purely from that.
-            num_constraints: Total number of *active* constraint columns
-                (across all types). Must equal
-                ``constraints.data.shape[1]`` unless the container has
-                trailing unused capacity.
-            substeps: Number of sub-steps per :meth:`step` call (mirrors
-                ``World.substeps``).
-            solver_iterations: PGS iterations inside ``SolveVelocities``.
-            velocity_relaxations: Relaxation passes inside ``RelaxVelocities``.
-            gravity: World gravity vector applied in
-                :meth:`_foreach_active_body` to all bodies that have
-                ``affected_by_gravity != 0``.
-            device: Warp device to allocate the partitioner / element
-                view on. If ``None``, derived from ``bodies.position``.
+            constraints: Pre-allocated shared :class:`ConstraintContainer`.
+            num_constraints: Joint-only active constraint count at
+                construction. Grown each :meth:`step` to include the
+                contact columns the ingest pipeline emits.
+            substeps: Sub-steps per :meth:`step`.
+            solver_iterations: PGS iterations per substep.
+            velocity_relaxations: Relaxation passes (stub).
+            gravity: World gravity [m/s^2].
+            max_contact_columns: Hard cap on
+                :data:`CONSTRAINT_TYPE_CONTACT` columns per step. Sizes
+                the trailing cid range, persistent
+                :class:`ContactContainer` and ingest scratch. ``0``
+                disables contact code paths.
+            rigid_contact_max: Upper bound on contacts in the upstream
+                Newton :class:`Contacts` buffer. Defaults to
+                ``max_contact_columns * 6`` if ``0``.
+            num_shapes: Total Newton shapes; used to pack the
+                ``(shape_a, shape_b)`` RLE key into int32. Must satisfy
+                ``num_shapes * num_shapes < 2**31``.
+            joint_constraint_count: First cid reserved for contacts.
+                Defaults to ``num_constraints``.
+            device: Warp device. Defaults to ``bodies.position.device``.
         """
         if device is None:
             self.device = bodies.position.device
@@ -114,47 +159,137 @@ class World:
 
         self.num_bodies: int = int(bodies.position.shape[0])
         self.num_constraints: int = int(num_constraints)
+        self.joint_constraint_count: int = (
+            int(joint_constraint_count) if joint_constraint_count is not None else int(num_constraints)
+        )
+        self.max_contact_columns: int = int(max_contact_columns)
+        self.rigid_contact_max: int = int(rigid_contact_max)
+        if self.max_contact_columns > 0 and self.rigid_contact_max == 0:
+            self.rigid_contact_max = self.max_contact_columns * 6
+        self.num_shapes: int = int(num_shapes)
 
         self.substeps = int(substeps)
         self.solver_iterations = int(solver_iterations)
         self.velocity_relaxations = int(velocity_relaxations)
         self.gravity = wp.vec3f(float(gravity[0]), float(gravity[1]), float(gravity[2]))
 
-        # Mirror World.stepDt / invStepDt / substepDt -- populated by step().
         self.step_dt: float = 0.0
         self.inv_step_dt: float = 0.0
         self.substep_dt: float = 0.0
 
+        # Total container capacity: joint cids + reserved contact
+        # trailing range. Kernels launched at this dim gate via
+        # _num_active_constraints[0].
+        self._constraint_capacity: int = self.joint_constraint_count + self.max_contact_columns
+        if self._constraint_capacity <= 0:
+            self._constraint_capacity = max(1, self.num_constraints)
+
         # ----- Coloring / partitioning infrastructure ------------------
-        # The partitioner consumes a flat ElementInteractionData array.
-        # We rebuild it once per step() so future contact / motor types
-        # whose topology varies frame-to-frame can be added without any
-        # dirty-flag plumbing.
         self._elements: wp.array[ElementInteractionData] = wp.zeros(
-            max(1, self.num_constraints), dtype=ElementInteractionData, device=self.device
+            max(1, self._constraint_capacity), dtype=ElementInteractionData, device=self.device
         )
         self._num_active_constraints: wp.array[int] = wp.array(
             [self.num_constraints], dtype=wp.int32, device=self.device
         )
-        # tile-scan path keeps wp.capture_while bodies allocation-free.
         self._partitioner = IncrementalContactPartitioner(
-            max_num_interactions=max(1, self.num_constraints),
+            max_num_interactions=max(1, self._constraint_capacity),
             max_num_nodes=max(1, self.num_bodies),
             device=self.device,
             use_tile_scan=True,
+        )
+
+        # ----- Contact infrastructure (optional) -----------------------
+        if self.max_contact_columns > 0:
+            self._contact_container: ContactContainer = contact_container_zeros(
+                self.max_contact_columns, device=self.device
+            )
+            self._ingest_scratch: IngestScratch | None = IngestScratch(
+                rigid_contact_max=self.rigid_contact_max,
+                max_contact_columns=self.max_contact_columns,
+                device=self.device,
+            )
+            self._slot_of_contact_cur = wp.full(
+                self.rigid_contact_max, -1, dtype=wp.int32, device=self.device
+            )
+            self._cid_of_contact_cur = wp.full(
+                self.rigid_contact_max, -1, dtype=wp.int32, device=self.device
+            )
+            self._slot_of_contact_prev = wp.full(
+                self.rigid_contact_max, -1, dtype=wp.int32, device=self.device
+            )
+            self._cid_of_contact_prev = wp.full(
+                self.rigid_contact_max, -1, dtype=wp.int32, device=self.device
+            )
+        else:
+            self._contact_container = contact_container_zeros(1, device=self.device)
+            self._ingest_scratch = None
+            self._slot_of_contact_cur = None
+            self._cid_of_contact_cur = None
+            self._slot_of_contact_prev = None
+            self._cid_of_contact_prev = None
+
+        self._contact_views: ContactViews | None = None
+        self._contact_views_placeholder: ContactViews = self._make_placeholder_contact_views()
+
+    # ------------------------------------------------------------------
+    # Placeholder ContactViews helper
+    # ------------------------------------------------------------------
+
+    def _make_placeholder_contact_views(self) -> ContactViews:
+        """Build a 1-element dummy :class:`ContactViews` for no-contact steps.
+
+        The unified dispatcher kernels take ``ContactViews`` as a
+        required argument; when the caller steps without a
+        :class:`Contacts` buffer (contacts disabled), we still need
+        something type-correct to hand in. The placeholder's arrays
+        are all size-1 and never read (the contact branch of the
+        dispatcher is only taken when a
+        :data:`CONSTRAINT_TYPE_CONTACT` cid exists, which is only
+        true after a real ``step(dt, contacts)`` call).
+        """
+        dummy_int = wp.zeros(1, dtype=wp.int32, device=self.device)
+        dummy_vec3 = wp.zeros(1, dtype=wp.vec3f, device=self.device)
+        dummy_float = wp.zeros(1, dtype=wp.float32, device=self.device)
+        return contact_views_make(
+            rigid_contact_count=dummy_int,
+            rigid_contact_point0=dummy_vec3,
+            rigid_contact_point1=dummy_vec3,
+            rigid_contact_normal=dummy_vec3,
+            rigid_contact_shape0=dummy_int,
+            rigid_contact_shape1=dummy_int,
+            rigid_contact_match_index=dummy_int,
+            rigid_contact_margin0=dummy_float,
+            rigid_contact_margin1=dummy_float,
+            shape_body=dummy_int,
         )
 
     # ------------------------------------------------------------------
     # Public driver
     # ------------------------------------------------------------------
 
-    def step(self, dt: float) -> None:
+    def step(self, dt: float, contacts=None, shape_body=None) -> None:
         """Advance the world by ``dt`` seconds.
 
         Direct port of ``World.Step`` (Jitter2/Dynamics/World.Step.cs:1-137).
         Tracing, asserts, SetTime and the multi-threaded thread-pool wake/sleep
         signalling are all dropped -- on Warp, parallelism is implicit in the
         kernel launches.
+
+        Args:
+            dt: Time step in seconds. Non-positive values no-op.
+            contacts: Optional Newton :class:`Contacts` buffer produced
+                by an external collision pipeline. **Must** have been
+                built with ``contact_matching=True`` so
+                ``rigid_contact_match_index`` is available for warm-
+                starting. When present, its sorted active prefix is
+                ingested into :data:`CONSTRAINT_TYPE_CONTACT` columns
+                and processed by the unified PGS loop side-by-side
+                with the joint constraints, following PhoenX's
+                "contacts are constraints" pattern. When ``None``,
+                the contact paths are skipped (and any previously
+                packed contact columns are cleared).
+            shape_body: ``model.shape_body`` mapping (shape id ->
+                body id). Required when ``contacts`` is provided.
         """
         if dt < 0.0:
             raise ValueError("Time step cannot be negative.")
@@ -165,18 +300,21 @@ class World:
         self.inv_step_dt = 1.0 / dt
         self.substep_dt = dt / self.substeps
 
-        # Narrow phase + arbiter bookkeeping + deactivation (pre-solve).
-        self._narrow_phase()
+        # ---- Contact ingest (replaces the old narrow-phase stub) ----
+        # The caller owns contact detection (a Newton CollisionPipeline
+        # or any other source). We just consume the sorted, matched
+        # buffer and materialise contact columns into our shared
+        # constraint container.
+        self._ingest_and_warmstart_contacts(contacts, shape_body)
+
+        # Handle deferred arbiters + deactivation (no-ops still).
         self._handle_deferred_arbiters()
         self._check_deactivation()
-
-        # Reorder contacts (regular solve mode only).
         self._reorder_contacts()
 
-        # Rebuild the partitioner's element view from the current
-        # constraint set every step. Cheap (one kernel per type, sized
-        # by that type's count) and lets future contact / motor types
-        # vary their topology freely between steps.
+        # Rebuild the partitioner's element view -- covers both joints
+        # and newly ingested contacts in a single launch (the header is
+        # type-agnostic).
         self._rebuild_elements()
 
         # Sub-stepping: integrate forces, solve, integrate velocities, relax.
@@ -196,8 +334,143 @@ class World:
     # Phase stubs -- to be filled in as the port progresses
     # ------------------------------------------------------------------
 
-    def _narrow_phase(self) -> None:
-        """Mirrors ``DynamicTree.EnumerateOverlaps(detect, ...)``."""
+    def _ingest_and_warmstart_contacts(self, contacts, shape_body) -> None:
+        """Materialise contact columns + gather warm-start from prev frame.
+
+        Three phases:
+
+        1. If ``contacts`` is ``None`` or contact support is disabled,
+           clear the contact cid range (set ``num_active_constraints``
+           back to the joint count) and early-out. The placeholder
+           :class:`ContactViews` covers the dispatcher's unused
+           argument slot.
+        2. Validate that ``contacts`` was built with
+           ``contact_matching=True`` (required for warm-starting) --
+           raise at step-time rather than leak garbage match indices
+           into the gather kernel.
+        3. Swap prev/current :class:`ContactContainer` buffers (pointer
+           swap, no device copy), build the per-step
+           :class:`ContactViews`, and drive ingest + warm-start +
+           forward-map stamp. Finally update
+           ``_num_active_constraints[0]`` so the partitioner and
+           dispatchers see
+           ``joint_constraint_count + num_contact_columns`` cids.
+
+        Graph-capture safe: the only host readback is the trailing
+        ``num_contact_columns.numpy()`` call that syncs
+        ``num_active_constraints``, which happens *outside* any
+        captured region (it's right here in the Python driver). The
+        ingest + gather + stamp kernels are fully device-driven.
+        """
+        if contacts is None or self.max_contact_columns == 0 or self._ingest_scratch is None:
+            # No contacts this step: active cid count is just the joints.
+            self._num_active_constraints.fill_(self.joint_constraint_count)
+            self._contact_views = None
+            self._ingest_scratch_last_n_contacts = 0
+            return
+
+        if getattr(contacts, "contact_matching", False) is False:
+            raise ValueError(
+                "Jitter solver requires the Contacts buffer to be built with "
+                "contact_matching=True (needed for persistent warm-starting)."
+            )
+        if shape_body is None:
+            raise ValueError(
+                "step(dt, contacts=...) requires shape_body=model.shape_body to "
+                "resolve contact shape ids to rigid-body ids."
+            )
+
+        # Build the per-step views. Cheap (pure struct pack).
+        self._contact_views = contact_views_make(
+            rigid_contact_count=contacts.rigid_contact_count,
+            rigid_contact_point0=contacts.rigid_contact_point0,
+            rigid_contact_point1=contacts.rigid_contact_point1,
+            rigid_contact_normal=contacts.rigid_contact_normal,
+            rigid_contact_shape0=contacts.rigid_contact_shape0,
+            rigid_contact_shape1=contacts.rigid_contact_shape1,
+            rigid_contact_match_index=contacts.rigid_contact_match_index,
+            rigid_contact_margin0=contacts.rigid_contact_margin0,
+            rigid_contact_margin1=contacts.rigid_contact_margin1,
+            shape_body=shape_body,
+        )
+
+        # ---- Swap lambda buffers & forward maps ----
+        # After this, cc.prev_* holds last step's finished lambdas;
+        # cc.*_lambda is scratch for this step. Same for
+        # (slot_of_contact, cid_of_contact) -- prev holds last step's
+        # map, cur is the clean slate the stamp kernel will fill.
+        contact_container_swap_prev_current(self._contact_container)
+        self._slot_of_contact_cur, self._slot_of_contact_prev = (
+            self._slot_of_contact_prev,
+            self._slot_of_contact_cur,
+        )
+        self._cid_of_contact_cur, self._cid_of_contact_prev = (
+            self._cid_of_contact_prev,
+            self._cid_of_contact_cur,
+        )
+
+        # ---- Ingest this step's contact columns ----
+        ingest_contacts(
+            contacts=contacts,
+            shape_body=shape_body,
+            num_shapes=self.num_shapes,
+            constraints=self.constraints,
+            scratch=self._ingest_scratch,
+            cid_base=self.joint_constraint_count,
+            max_contact_columns=self.max_contact_columns,
+            default_friction=0.5,
+            device=self.device,
+        )
+
+        # ---- Warm-start lambdas from the prev frame's state ----
+        gather_contact_warmstart(
+            cid_base=self.joint_constraint_count,
+            scratch=self._ingest_scratch,
+            rigid_contact_match_index=contacts.rigid_contact_match_index,
+            prev_slot_of_contact=self._slot_of_contact_prev,
+            prev_cid_of_contact=self._cid_of_contact_prev,
+            cc=self._contact_container,
+            device=self.device,
+        )
+
+        # ---- Stamp this frame's forward map for next frame's gather ----
+        stamp_forward_contact_map(
+            rigid_contact_max=self.rigid_contact_max,
+            cid_base=self.joint_constraint_count,
+            scratch=self._ingest_scratch,
+            slot_of_contact=self._slot_of_contact_cur,
+            cid_of_contact=self._cid_of_contact_cur,
+            device=self.device,
+        )
+
+        # ---- Update the active-constraint counter ----
+        # Host-side readback of num_contact_columns[0] is OK here: we
+        # are *outside* any captured region. (When the user wraps
+        # step() under their own wp.ScopedCapture, they should size
+        # max_contact_columns conservatively and accept the cap as
+        # the worst-case active count; a graph-captured step should
+        # drive the partitioner via the device-held counter directly
+        # -- see _sync_num_active_constraints_kernel below.)
+        self._sync_num_active_constraints()
+
+    def _sync_num_active_constraints(self) -> None:
+        """Device-only update of ``_num_active_constraints[0]``.
+
+        Uses a tiny 1-thread kernel so nothing leaves the device.
+        Called from the non-capture ingest path; under graph capture
+        it still works -- the launch is size-1 and its inputs are
+        device arrays.
+        """
+        wp.launch(
+            _sync_num_active_constraints_kernel,
+            dim=1,
+            inputs=[
+                self._ingest_scratch.num_contact_columns,
+                wp.int32(self.joint_constraint_count),
+            ],
+            outputs=[self._num_active_constraints],
+            device=self.device,
+        )
 
     def _handle_deferred_arbiters(self) -> None:
         """Mirrors ``HandleDeferredArbiters``."""
@@ -234,20 +507,22 @@ class World:
         launching the unified
         :func:`_constraint_prepare_for_iteration_kernel` /
         :func:`_constraint_iterate_kernel` dispatcher once per
-        partition. Each thread reads the per-cid type tag and routes to
-        the right ``wp.func`` -- the solver itself is type-agnostic.
+        partition.
 
-        ``capture_while`` works in both modes: standalone it captures
-        and launches its own little graph; under an outer
-        ``wp.ScopedCapture`` it just adds a conditional-while node to
-        the parent capture. Either way, the caller controls the graph
-        lifetime -- we never capture or cache anything inside
-        :class:`World`.
+        Contact constraints and joint constraints take the same path:
+        the per-cid type tag in the column header drives per-thread
+        dispatch inside the kernel (PhoenX's "contacts are
+        constraints" pattern). The dispatchers take an extra
+        :class:`ContactContainer` + :class:`ContactViews` argument;
+        when no contacts are active we pass the placeholder views,
+        which works because the contact branch is never reached
+        (no CONSTRAINT_TYPE_CONTACT cid exists).
         """
-        if self.num_constraints == 0:
+        if self._constraint_capacity == 0:
             return
 
         idt = wp.float32(1.0 / self.substep_dt)
+        contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
 
         # PrepareForIteration: one sweep over all partitions.
         self._partitioner.reset(self._elements, self._num_active_constraints)
@@ -256,6 +531,7 @@ class World:
             self._capture_partition_sweep,
             kernel=_constraint_prepare_for_iteration_kernel,
             idt=idt,
+            contact_views=contact_views,
         )
 
         # Iterate: ``iterations`` sweeps over all partitions.
@@ -266,9 +542,10 @@ class World:
                 self._capture_partition_sweep,
                 kernel=_constraint_iterate_kernel,
                 idt=idt,
+                contact_views=contact_views,
             )
 
-    def gather_constraint_wrenches(self, out: wp.array) -> None:
+    def gather_constraint_wrenches(self, out: wp.array, contacts=None, shape_body=None) -> None:
         """Write per-constraint world-frame wrenches into ``out``.
 
         Each ``out[cid]`` is a :class:`wp.spatial_vector` whose
@@ -291,22 +568,25 @@ class World:
                 length at least :attr:`num_constraints`. Must live on
                 :attr:`device`.
         """
-        if self.num_constraints == 0:
+        if self._constraint_capacity == 0:
             return
         if self.substep_dt <= 0.0:
             out.zero_()
             return
         idt = wp.float32(1.0 / self.substep_dt)
+        contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         wp.launch(
             _constraint_gather_wrenches_kernel,
-            dim=self.num_constraints,
+            dim=self._constraint_capacity,
             inputs=[
                 self.constraints,
                 self.bodies,
-                wp.int32(self.num_constraints),
+                wp.int32(self._constraint_capacity),
                 idt,
-                out,
+                self._contact_container,
+                contact_views,
             ],
+            outputs=[out],
             device=self.device,
         )
 
@@ -315,19 +595,20 @@ class World:
     # ------------------------------------------------------------------
 
     def _rebuild_elements(self) -> None:
-        """Project every constraint's body pair into ``_elements``.
+        """Project every active constraint's body pair into ``_elements``.
 
         Launched once per :meth:`step`. The projection is type-agnostic:
         :func:`_constraints_to_elements_kernel` reads body1/body2 from
-        the fixed-offset constraint header without dispatching on type,
-        so a single launch covers ball-sockets, hinges, motors, future
-        contacts, etc.
+        the fixed-offset constraint header without dispatching on
+        type, so a single launch covers joints + contacts uniformly.
+        Launch dim is the full capacity; threads beyond the active
+        count (device-held in ``_num_active_constraints``) early-out.
         """
-        if self.num_constraints == 0:
+        if self._constraint_capacity == 0:
             return
         wp.launch(
             _constraints_to_elements_kernel,
-            dim=self.num_constraints,
+            dim=self._constraint_capacity,
             inputs=[
                 self.constraints,
                 self._num_active_constraints,
@@ -336,7 +617,12 @@ class World:
             device=self.device,
         )
 
-    def _capture_partition_sweep(self, kernel=None, idt: wp.float32 = 0.0) -> None:
+    def _capture_partition_sweep(
+        self,
+        kernel=None,
+        idt: wp.float32 = 0.0,
+        contact_views: ContactViews | None = None,
+    ) -> None:
         """Body of the ``wp.capture_while`` loop in :meth:`_solve_velocities`.
 
         Per partition we (1) advance the partitioner one colour to publish
@@ -348,15 +634,18 @@ class World:
         early-out inside the kernel.
         """
         self._partitioner.launch()
+        views = contact_views if contact_views is not None else self._contact_views_placeholder
         wp.launch(
             kernel,
-            dim=self.num_constraints,
+            dim=self._constraint_capacity,
             inputs=[
                 self.constraints,
                 self.bodies,
                 idt,
                 self._partitioner.partition_element_ids,
                 self._partitioner.partition_count,
+                self._contact_container,
+                views,
             ],
             device=self.device,
         )

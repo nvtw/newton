@@ -62,6 +62,7 @@ from newton._src.solvers.jitter.constraint_container import (
     ConstraintContainer,
     constraint_container_zeros,
 )
+from newton._src.solvers.jitter.constraint_contact import CONTACT_DWORDS
 from newton._src.solvers.jitter.constraint_d6 import (
     D6_DWORDS,
     d6_initialize_kernel,
@@ -1216,6 +1217,9 @@ class WorldBuilder:
         solver_iterations: int = 8,
         velocity_relaxations: int = 1,
         gravity: tuple[float, float, float] = (0.0, -9.81, 0.0),
+        max_contact_columns: int = 0,
+        rigid_contact_max: int = 0,
+        num_shapes: int = 0,
         device: wp.context.Devicelike = None,
     ) -> World:
         """Allocate GPU storage and build a ready-to-step :class:`World`.
@@ -1232,13 +1236,43 @@ class WorldBuilder:
             velocity_relaxations: Relaxation passes (currently a stub
                 inside ``World``).
             gravity: World gravity vector [m/s^2].
+            max_contact_columns: Upper bound on the number of
+                :data:`CONSTRAINT_TYPE_CONTACT` columns the solver
+                will ever pack per step. Sized by the user to match
+                the worst-case shape-pair + slot-split count
+                (``max_contact_pairs * ceil(max_contacts_per_pair /
+                6)``). Sets aside that many trailing cids in the
+                shared :class:`ConstraintContainer` and allocates the
+                parallel :class:`~newton._src.solvers.jitter.contact_container.ContactContainer`
+                for persistent lambdas. ``0`` disables the contact
+                code paths entirely.
+            rigid_contact_max: Upper bound on the number of *contacts*
+                (not columns) the upstream Newton :class:`Contacts`
+                buffer can hold. Sizes the forward ``(slot, cid)``
+                lookup tables used by warm-starting. Defaults to
+                ``max_contact_columns * 6`` if left at ``0`` --
+                matches the worst case where every column is fully
+                packed.
+            num_shapes: Total number of Newton shapes in the model.
+                Only used to pack the ``(shape_a, shape_b)`` RLE key
+                into int32 during ingest; must satisfy
+                ``num_shapes * num_shapes < 2**31``. Ignored when
+                ``max_contact_columns == 0``.
             device: Warp device. ``None`` selects the current default
                 device (typically ``cuda:0``).
         """
         device = wp.get_device(device)
 
         bodies = self._build_body_container(device)
-        constraints, num_constraints = self._build_constraint_container(bodies, device)
+        constraints, num_constraints = self._build_constraint_container(
+            bodies, device, max_contact_columns=max_contact_columns
+        )
+
+        if max_contact_columns > 0 and rigid_contact_max == 0:
+            # Default: assume every column could hold a full 6-contact
+            # slot set. This is the worst case; user can override to
+            # whatever they actually allocated on their Contacts.
+            rigid_contact_max = max_contact_columns * 6
 
         world = World(
             bodies=bodies,
@@ -1248,6 +1282,10 @@ class WorldBuilder:
             solver_iterations=solver_iterations,
             velocity_relaxations=velocity_relaxations,
             gravity=gravity,
+            max_contact_columns=max_contact_columns,
+            rigid_contact_max=rigid_contact_max,
+            num_shapes=num_shapes,
+            joint_constraint_count=num_constraints,
             device=device,
         )
 
@@ -1345,6 +1383,7 @@ class WorldBuilder:
         self,
         bodies: BodyContainer,
         device: wp.context.Device,
+        max_contact_columns: int = 0,
     ) -> tuple[ConstraintContainer, int]:
         """Allocate the shared :class:`ConstraintContainer`, pack every
         constraint type into a contiguous cid range, and patch any
@@ -1397,12 +1436,19 @@ class WorldBuilder:
             ADBS_DWORDS,
             PR_DWORDS,
             D6_DWORDS,
+            CONTACT_DWORDS,
         )
 
-        # Always allocate at least 1 column so the wp.array2d shape is
-        # non-degenerate; the kernels gate on cid bounds anyway.
+        # Reserve trailing capacity for contact columns. They live at
+        # cids [total, total + max_contact_columns) and are fully
+        # overwritten by the ingest pipeline every
+        # :meth:`World.step`; the initial zero-init doesn't matter
+        # (except that constraint_type=0 stays outside any of the
+        # live CONSTRAINT_TYPE_* tags so the dispatcher no-ops on
+        # unused trailing cids).
+        num_columns = max(1, total + int(max_contact_columns))
         container = constraint_container_zeros(
-            num_constraints=max(1, total),
+            num_constraints=num_columns,
             num_dwords=per_constraint_dwords,
             device=device,
         )

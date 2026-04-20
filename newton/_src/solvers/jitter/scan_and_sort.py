@@ -73,3 +73,119 @@ def sort_variable_length_float(keys: wp.array[float], values: wp.array[int], act
     count = keys.shape[0] // 2
     wp.launch(_mask_tail_float, dim=count, inputs=[keys, active_length])
     wp.utils.radix_sort_pairs(keys, values, count)
+
+
+# ---------------------------------------------------------------------------
+# Variable-length run-length encoding.
+# Wrapper around ``wp.utils.runlength_encode`` that stays graph-capture
+# compatible when the number of "active" input values is only known on
+# the device. Same trick as the sort wrappers: stamp the tail with a
+# sentinel so the full-size RLE call folds the inactive tail into a
+# single trailing run, then drop that run on-device by decrementing
+# ``run_count`` if its last ``run_value`` equals the sentinel.
+#
+# All kernels here run at fixed launch size determined host-side at
+# wrapper-call time, making the whole sequence safe to record once and
+# replay any number of times inside a captured CUDA graph.
+# ---------------------------------------------------------------------------
+
+
+#: Sentinel used by :func:`runlength_encode_variable_length` to mark
+#: tail entries. ``INT32_MAX`` is never a legal key in any current
+#: caller (keys are ``shape_a * num_shapes + shape_b`` with
+#: ``num_shapes * num_shapes < INT32_MAX`` enforced at world build).
+RLE_SENTINEL_INT32: int = 2147483647
+
+
+@wp.kernel
+def _rle_mask_tail_int(
+    values: wp.array[wp.int32],
+    active_length: wp.array[wp.int32],
+    sentinel: wp.int32,
+):
+    tid = wp.tid()
+    if tid >= active_length[0]:
+        values[tid] = sentinel
+
+
+@wp.kernel
+def _rle_drop_sentinel_tail_kernel(
+    run_values: wp.array[wp.int32],
+    run_count: wp.array[wp.int32],
+    sentinel: wp.int32,
+):
+    """If the last RLE run is the sentinel tail, shave it off in-place.
+
+    Single-thread kernel -- we only need to inspect one element of
+    ``run_count`` / ``run_values``. The body is branch-heavy but the
+    per-step cost is negligible (one thread, one global load, one
+    store) compared to the RLE itself.
+    """
+    tid = wp.tid()
+    if tid != 0:
+        return
+    n = run_count[0]
+    if n <= 0:
+        return
+    if run_values[n - 1] == sentinel:
+        run_count[0] = n - 1
+
+
+def runlength_encode_variable_length(
+    values: wp.array,
+    active_length: wp.array,
+    run_values: wp.array,
+    run_lengths: wp.array,
+    run_count: wp.array,
+    sentinel: int = RLE_SENTINEL_INT32,
+) -> None:
+    """Graph-capture-safe RLE where ``active_length`` lives on device.
+
+    ``values.shape[0]`` is treated as the fixed launch / RLE size.
+    Inputs past ``active_length[0]`` get overwritten with ``sentinel``
+    before the RLE call so they collapse into a single trailing run
+    that we then drop in-place; the net effect is identical to
+    calling :func:`wp.utils.runlength_encode` with
+    ``value_count = active_length[0]`` (which isn't supported because
+    the underlying CUB routine takes ``value_count`` as a host int).
+
+    After this call:
+
+    * ``run_values[0:run_count[0]]`` holds the unique values of
+      ``values[0:active_length[0]]`` in order of first appearance.
+    * ``run_lengths[0:run_count[0]]`` holds the matching run lengths.
+    * ``run_count[0]`` is the number of runs.
+
+    Args:
+        values: Input array. ``int32`` only. **Modified in place**
+            (tail entries past ``active_length[0]`` are overwritten
+            with ``sentinel``).
+        active_length: 1-element device array holding the valid prefix
+            length of ``values``. Read, not written.
+        run_values: Output unique-values array, size >= values.shape[0].
+        run_lengths: Output run-lengths array, size >= values.shape[0].
+        run_count: 1-element device array receiving the total run
+            count (after sentinel-tail removal).
+        sentinel: Value to stamp into the tail and drop from the
+            output. Must not appear anywhere in the legitimate input.
+    """
+    n = values.shape[0]
+    wp.launch(
+        _rle_mask_tail_int,
+        dim=n,
+        inputs=[values, active_length, int(sentinel)],
+        device=values.device,
+    )
+    wp.utils.runlength_encode(
+        values,
+        run_values=run_values,
+        run_lengths=run_lengths,
+        run_count=run_count,
+        value_count=n,
+    )
+    wp.launch(
+        _rle_drop_sentinel_tail_kernel,
+        dim=1,
+        inputs=[run_values, run_count, int(sentinel)],
+        device=values.device,
+    )

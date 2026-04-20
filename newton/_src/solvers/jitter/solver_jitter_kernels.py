@@ -36,6 +36,7 @@ from newton._src.solvers.jitter.constraint_container import (
     CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET,
     CONSTRAINT_TYPE_ANGULAR_MOTOR,
     CONSTRAINT_TYPE_BALL_SOCKET,
+    CONSTRAINT_TYPE_CONTACT,
     CONSTRAINT_TYPE_D6,
     CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET,
     CONSTRAINT_TYPE_HINGE_ANGLE,
@@ -46,6 +47,13 @@ from newton._src.solvers.jitter.constraint_container import (
     constraint_get_body2,
     constraint_get_type,
 )
+from newton._src.solvers.jitter.constraint_contact import (
+    ContactViews,
+    contact_iterate,
+    contact_prepare_for_iteration,
+    contact_world_wrench,
+)
+from newton._src.solvers.jitter.contact_container import ContactContainer
 from newton._src.solvers.jitter.constraint_d6 import (
     d6_iterate,
     d6_prepare_for_iteration,
@@ -122,6 +130,8 @@ def _constraint_prepare_for_iteration_kernel(
     idt: wp.float32,
     partition_element_ids: wp.array[wp.int32],
     partition_count: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
 ):
     """Dispatch the per-type ``prepare_for_iteration`` ``wp.func`` for
     each cid in the current graph-coloring partition.
@@ -131,6 +141,14 @@ def _constraint_prepare_for_iteration_kernel(
     that no two cids in the same partition share a body, so the
     per-thread RMW of the body container is race-free regardless of
     which constraint type each thread happens to dispatch.
+
+    Follows PhoenX's "contacts are constraints" pattern: the contact
+    branch takes the additional
+    :class:`~newton._src.solvers.jitter.contact_container.ContactContainer`
+    and :class:`~newton._src.solvers.jitter.constraint_contact.ContactViews`
+    arguments; joint-only branches ignore them. The two extra struct
+    arguments are essentially free for non-contact dispatch because
+    Warp passes structs by reference.
     """
     tid = wp.tid()
     if tid >= partition_count[0]:
@@ -154,6 +172,8 @@ def _constraint_prepare_for_iteration_kernel(
         prismatic_prepare_for_iteration(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_D6:
         d6_prepare_for_iteration(constraints, cid, bodies, idt)
+    elif t == CONSTRAINT_TYPE_CONTACT:
+        contact_prepare_for_iteration(constraints, cid, bodies, idt, cc, contacts)
 
 
 @wp.kernel(enable_backward=False)
@@ -163,6 +183,8 @@ def _constraint_iterate_kernel(
     idt: wp.float32,
     partition_element_ids: wp.array[wp.int32],
     partition_count: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
 ):
     """Dispatch the per-type ``iterate`` ``wp.func`` for each cid in the
     current graph-coloring partition. See
@@ -190,6 +212,8 @@ def _constraint_iterate_kernel(
         prismatic_iterate(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_D6:
         d6_iterate(constraints, cid, bodies, idt)
+    elif t == CONSTRAINT_TYPE_CONTACT:
+        contact_iterate(constraints, cid, bodies, idt, cc, contacts)
 
 
 @wp.kernel(enable_backward=False)
@@ -226,6 +250,8 @@ def _constraint_gather_wrenches_kernel(
     bodies: BodyContainer,
     num_constraints: wp.int32,
     idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
     out: wp.array[wp.spatial_vector],
 ):
     """Dispatch the per-type ``world_wrench`` ``wp.func`` for every
@@ -263,6 +289,8 @@ def _constraint_gather_wrenches_kernel(
         force, torque = prismatic_world_wrench(constraints, cid, idt)
     elif t == CONSTRAINT_TYPE_D6:
         force, torque = d6_world_wrench(constraints, cid, idt)
+    elif t == CONSTRAINT_TYPE_CONTACT:
+        force, torque = contact_world_wrench(constraints, cid, idt, cc, contacts)
 
     out[cid] = wp.spatial_vector(force, torque)
 
