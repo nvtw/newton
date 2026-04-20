@@ -44,10 +44,8 @@ from newton._src.solvers.jitter.constraint_container import (
     CONSTRAINT_TYPE_BALL_SOCKET,
     CONSTRAINT_TYPE_CONTACT,
     CONSTRAINT_TYPE_D6,
-    CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET,
     CONSTRAINT_TYPE_HINGE_ANGLE,
     CONSTRAINT_TYPE_HINGE_JOINT,
-    CONSTRAINT_TYPE_PRISMATIC,
     ConstraintContainer,
     constraint_get_body1,
     constraint_get_body2,
@@ -58,11 +56,6 @@ from newton._src.solvers.jitter.constraint_d6 import (
     d6_prepare_for_iteration,
     d6_world_wrench,
 )
-from newton._src.solvers.jitter.constraint_double_ball_socket import (
-    double_ball_socket_iterate,
-    double_ball_socket_prepare_for_iteration,
-    double_ball_socket_world_wrench,
-)
 from newton._src.solvers.jitter.constraint_hinge_angle import (
     hinge_angle_iterate,
     hinge_angle_prepare_for_iteration,
@@ -72,11 +65,6 @@ from newton._src.solvers.jitter.constraint_hinge_joint import (
     hinge_joint_iterate,
     hinge_joint_prepare_for_iteration,
     hinge_joint_world_wrench,
-)
-from newton._src.solvers.jitter.constraint_prismatic import (
-    prismatic_iterate,
-    prismatic_prepare_for_iteration,
-    prismatic_world_wrench,
 )
 from newton._src.solvers.jitter.contact_container import ContactContainer
 from newton._src.solvers.jitter.graph_coloring_common import (
@@ -164,12 +152,8 @@ def _constraint_prepare_for_iteration_kernel(
         angular_motor_prepare_for_iteration(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_HINGE_JOINT:
         hinge_joint_prepare_for_iteration(constraints, cid, bodies, idt)
-    elif t == CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET:
-        double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
         actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
-    elif t == CONSTRAINT_TYPE_PRISMATIC:
-        prismatic_prepare_for_iteration(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_D6:
         d6_prepare_for_iteration(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_CONTACT:
@@ -204,12 +188,8 @@ def _constraint_iterate_kernel(
         angular_motor_iterate(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_HINGE_JOINT:
         hinge_joint_iterate(constraints, cid, bodies, idt)
-    elif t == CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET:
-        double_ball_socket_iterate(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
         actuated_double_ball_socket_iterate(constraints, cid, bodies, idt)
-    elif t == CONSTRAINT_TYPE_PRISMATIC:
-        prismatic_iterate(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_D6:
         d6_iterate(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_CONTACT:
@@ -281,12 +261,8 @@ def _constraint_gather_wrenches_kernel(
         force, torque = angular_motor_world_wrench(constraints, cid, bodies, idt)
     elif t == CONSTRAINT_TYPE_HINGE_JOINT:
         force, torque = hinge_joint_world_wrench(constraints, cid, bodies, idt)
-    elif t == CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET:
-        force, torque = double_ball_socket_world_wrench(constraints, cid, idt)
     elif t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
         force, torque = actuated_double_ball_socket_world_wrench(constraints, cid, idt)
-    elif t == CONSTRAINT_TYPE_PRISMATIC:
-        force, torque = prismatic_world_wrench(constraints, cid, idt)
     elif t == CONSTRAINT_TYPE_D6:
         force, torque = d6_world_wrench(constraints, cid, idt)
     elif t == CONSTRAINT_TYPE_CONTACT:

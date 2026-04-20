@@ -42,12 +42,10 @@ __all__ = [
     "CONSTRAINT_TYPE_BALL_SOCKET",
     "CONSTRAINT_TYPE_CONTACT",
     "CONSTRAINT_TYPE_D6",
-    "CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET",
     "CONSTRAINT_TYPE_HINGE_ANGLE",
     "CONSTRAINT_TYPE_HINGE_JOINT",
     "CONSTRAINT_TYPE_INVALID",
     "CONSTRAINT_TYPE_OFFSET",
-    "CONSTRAINT_TYPE_PRISMATIC",
     "DEFAULT_DAMPING_RATIO",
     "DEFAULT_HERTZ_ANGULAR",
     "DEFAULT_HERTZ_LIMIT",
@@ -122,16 +120,6 @@ CONSTRAINT_TYPE_ANGULAR_MOTOR = wp.constant(wp.int32(3))
 #: the partitioner colour one hinge per partition (instead of three),
 #: dramatically improving convergence on heavily-loaded chains.
 CONSTRAINT_TYPE_HINGE_JOINT = wp.constant(wp.int32(4))
-#: Fused two-anchor "double ball-socket" hinge: the entire 5-DoF joint
-#: solved as one column via a Schur-complement (3x3 + 2x2) instead of
-#: two redundant 3-row ball-sockets. See
-#: :mod:`constraint_double_ball_socket` for the math.
-CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET = wp.constant(wp.int32(5))
-#: Prismatic (sliding) joint -- 5-DoF lock (3 angular + 2 perpendicular-
-#: translation) solved as one column via a Schur-complement (3x3 + 2x2)
-#: with separate Hertz/damping for the angular vs linear blocks. See
-#: :mod:`constraint_prismatic` for the math.
-CONSTRAINT_TYPE_PRISMATIC = wp.constant(wp.int32(6))
 #: 6-DoF generalised joint (a.k.a. "D6") -- *all* 6 relative DoF (3 angular
 #: + 3 linear) solved as one column via a 6x6 Schur complement (3x3 + 3x3
 #: + 3x3 cross-block). Each axis carries an independent implicit-PD drive
@@ -141,13 +129,15 @@ CONSTRAINT_TYPE_PRISMATIC = wp.constant(wp.int32(6))
 #: drive -> velocity drive -> free axis without changing matrix shape.
 #: See :mod:`constraint_d6` for the derivation.
 CONSTRAINT_TYPE_D6 = wp.constant(wp.int32(7))
-#: "Actuated" variant of :data:`CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET`: the
-#: same 5-DoF Schur-complement lock plus an extra scalar PGS row that
-#: drives the free hinge axis with either a soft *position* (target
-#: angle, soft spring) or *velocity* (target rate, capped by a peak
-#: torque) setpoint and clamps the relative axial twist to a
-#: ``[min_angle, max_angle]`` interval (one-sided spring-damper limits,
-#: same Box2D / Bepu soft formulation as the rest of the solver). See
+#: Unified revolute / prismatic joint: a 5-DoF pure-point positional lock
+#: (expressed as a double ball-socket in revolute mode or a 2+2+1
+#: tangent-plane triad in prismatic mode, both solved as one PGS column
+#: via a rank-5 Schur complement) plus an optional scalar actuator row
+#: that drives the free axis with a soft *position* or *velocity*
+#: setpoint and clamps it to a ``[min_value, max_value]`` interval (one-
+#: sided spring-damper limits, Box2D / Bepu soft formulation). Limits /
+#: drive are interpreted as angles [rad] in revolute mode and as
+#: displacements [m] in prismatic mode. See
 #: :mod:`constraint_actuated_double_ball_socket` for the math.
 CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET = wp.constant(wp.int32(8))
 #: Rigid-rigid contact constraint -- packs up to **6 contacts** belonging to

@@ -1,30 +1,40 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Behavioural tests for the *actuated* DoubleBallSocket hinge joint.
+"""Behavioural tests for the unified revolute / prismatic joint.
 
-ActuatedDoubleBallSocket extends the parent DBS rank-5 column (3
-translational + 2 rotational locked DoF) with one extra scalar PGS row
-on the free axial twist. The extra row supports three independent
-sub-features, each exercised here against a single-cube + static-anchor
-scene:
+A single :class:`JointDescriptor` with a ``mode`` field materialises
+either a 5-DoF hinge (revolute) or a 5-DoF slider (prismatic), plus an
+optional scalar actuator row on the free DoF (position or velocity
+drive + one-sided spring-damper limits). All backed by the same Warp
+kernel -- both modes are exercised below back-to-back against the same
+single-cube + static-anchor fixture:
 
-* **Position drive** -- soft spring towards ``target_angle``. The cube
-  must come to rest near the requested twist.
-* **Velocity drive** -- soft tracker for ``target_velocity``. The cube
-  must reach steady-state spin near the requested rate, and a small
-  ``max_force_drive`` must visibly cap that rate (saturate before the
-  setpoint).
-* **Angular limits** -- one-sided spring-damper on the relative twist
-  confined to ``[min_angle, max_angle]``. A cube spinning into the
-  upper stop must clamp at ~``max_angle``; one spinning into the
-  lower stop must clamp at ~``min_angle``.
+Revolute mode
+-------------
+* **Anchors coincide.** With body 1 static, both anchor-pairs must map
+  to the same world point after settling (the rank-5 positional lock
+  holds).
+* **Free axial spin survives.** Pure axial spin must persist: rotating
+  about the hinge line moves neither anchor, so the lock applies no
+  impulse.
+* **Transverse spin is locked out.** An initial omega.x must decay to
+  ~0 -- the locked 2 rotational DoF absorb it.
+* **Position / velocity drive, drive-force cap, angular limits.**
+  Same sub-features that the original actuated hinge exposed.
 
-Drive + limit can coexist; the limit always wins because it is
-unilateral. We also verify that ``DriveMode.OFF`` with no limit
-reproduces the parent DBS's free-axial-spin behaviour (back-to-back
-sanity check that the actuator block does not leak impulses when both
-features are disabled).
+Prismatic mode
+--------------
+* **Free axial slide under gravity.** Gravity along the slide axis
+  produces analytic free-fall along that axis only; lateral drift
+  stays at zero.
+* **Perpendicular gravity held.** Gravity orthogonal to the slide
+  axis must not move the body -- the lateral lock absorbs the full
+  weight.
+* **Angular lock.** An initial spin about an arbitrary axis must
+  decay to zero; the 3 angular DoF are locked.
+* **Linear drive + limits.** Position / velocity drive and linear
+  ``[min_value, max_value]`` limits on the slide DoF.
 
 All scenes are registered with :func:`scene` so the test visualizer
 can replay them interactively.
@@ -37,7 +47,11 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.jitter.scene_registry import Scene, scene
-from newton._src.solvers.jitter.world_builder import DriveMode, WorldBuilder
+from newton._src.solvers.jitter.world_builder import (
+    DriveMode,
+    JointMode,
+    WorldBuilder,
+)
 
 GRAVITY = 9.81
 FPS = 60
@@ -47,52 +61,132 @@ SETTLE_FRAMES = 240
 HALF_EXTENT = 0.5
 _INV_INERTIA = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
 
+# Both anchors lie on the joint axis (world +z) so the line through
+# them defines the hinge / slide axis directly.
 _ANCHOR1 = (0.0, 0.0, -HALF_EXTENT)
 _ANCHOR2 = (0.0, 0.0, +HALF_EXTENT)
 
 
-def _build_actuated_scene(
+# ---------------------------------------------------------------------------
+# Revolute scene builder
+# ---------------------------------------------------------------------------
+
+
+def _build_revolute_scene(
     device,
     *,
     initial_angular_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    affected_by_gravity: bool = False,
+    cube_position: tuple[float, float, float] = (0.0, 0.0, 0.0),
     drive_mode: DriveMode = DriveMode.OFF,
-    target_angle: float = 0.0,
+    target: float = 0.0,
     target_velocity: float = 0.0,
     max_force_drive: float = 0.0,
     hertz_drive: float = 8.0,
     damping_ratio_drive: float = 1.0,
-    min_angle: float = 0.0,
-    max_angle: float = 0.0,
+    min_value: float = 0.0,
+    max_value: float = 0.0,
     hertz_limit: float = 30.0,
     damping_ratio_limit: float = 1.0,
 ):
-    """Static body + one dynamic cube joined by an actuated DBS hinge.
+    """Static body + one dynamic cube joined by a revolute joint.
 
-    Cube COM sits at the origin (anchor centre). The hinge axis is
-    world ``+z`` because the two anchors lie at ``(0, 0, +/- HALF_EXTENT)``.
+    The hinge axis is world ``+z`` because the two anchors lie at
+    ``(0, 0, +/- HALF_EXTENT)``. Cube COM defaults to the origin
+    (anchor centre); pass ``cube_position=(0, -1, 0)`` for the
+    gravity-pendulum scene.
     """
+    b = WorldBuilder()
+    anchor_body = b.add_static_body()
+    cube = b.add_dynamic_body(
+        position=cube_position,
+        inverse_mass=1.0,
+        inverse_inertia=_INV_INERTIA,
+        affected_by_gravity=affected_by_gravity,
+        angular_velocity=initial_angular_velocity,
+    )
+    handle = b.add_joint(
+        body1=anchor_body,
+        body2=cube,
+        anchor1=_ANCHOR1,
+        anchor2=_ANCHOR2,
+        mode=JointMode.REVOLUTE,
+        drive_mode=drive_mode,
+        target=target,
+        target_velocity=target_velocity,
+        max_force_drive=max_force_drive,
+        hertz_drive=hertz_drive,
+        damping_ratio_drive=damping_ratio_drive,
+        min_value=min_value,
+        max_value=max_value,
+        hertz_limit=hertz_limit,
+        damping_ratio_limit=damping_ratio_limit,
+    )
+    world = b.finalize(
+        substeps=SUBSTEPS, solver_iterations=SOLVER_ITERATIONS, device=device
+    )
+    return world, handle
+
+
+# ---------------------------------------------------------------------------
+# Prismatic scene builder
+# ---------------------------------------------------------------------------
+
+
+def _build_prismatic_scene(
+    device,
+    *,
+    axis: tuple[float, float, float],
+    affected_by_gravity: bool = True,
+    initial_angular_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    drive_mode: DriveMode = DriveMode.OFF,
+    target: float = 0.0,
+    target_velocity: float = 0.0,
+    max_force_drive: float = 0.0,
+    hertz_drive: float = 8.0,
+    damping_ratio_drive: float = 1.0,
+    min_value: float = 0.0,
+    max_value: float = 0.0,
+    hertz_limit: float = 30.0,
+    damping_ratio_limit: float = 1.0,
+):
+    """Static body + one dynamic cube joined by a prismatic joint.
+
+    The slide axis is whatever the caller passes in (must be unit
+    length). We derive the two anchors as
+    ``anchor1 = origin`` and ``anchor2 = anchor1 + axis`` so the
+    rest length is ``1 m``, matching the convention the unified joint
+    encourages (see :class:`JointDescriptor`).
+    """
+    anchor1 = (0.0, 0.0, 0.0)
+    anchor2 = (
+        anchor1[0] + axis[0],
+        anchor1[1] + axis[1],
+        anchor1[2] + axis[2],
+    )
     b = WorldBuilder()
     anchor_body = b.add_static_body()
     cube = b.add_dynamic_body(
         position=(0.0, 0.0, 0.0),
         inverse_mass=1.0,
         inverse_inertia=_INV_INERTIA,
-        affected_by_gravity=False,
+        affected_by_gravity=affected_by_gravity,
         angular_velocity=initial_angular_velocity,
     )
-    handle = b.add_actuated_double_ball_socket_hinge(
+    handle = b.add_joint(
         body1=anchor_body,
         body2=cube,
-        anchor1=_ANCHOR1,
-        anchor2=_ANCHOR2,
+        anchor1=anchor1,
+        anchor2=anchor2,
+        mode=JointMode.PRISMATIC,
         drive_mode=drive_mode,
-        target_angle=target_angle,
+        target=target,
         target_velocity=target_velocity,
         max_force_drive=max_force_drive,
         hertz_drive=hertz_drive,
         damping_ratio_drive=damping_ratio_drive,
-        min_angle=min_angle,
-        max_angle=max_angle,
+        min_value=min_value,
+        max_value=max_value,
         hertz_limit=hertz_limit,
         damping_ratio_limit=damping_ratio_limit,
     )
@@ -108,19 +202,39 @@ def _scene_half_extents() -> np.ndarray:
     return he
 
 
+# ---------------------------------------------------------------------------
+# Scene registrations (visualizer fixtures)
+# ---------------------------------------------------------------------------
+
+
 @scene(
-    "ActuatedDBS: position drive",
+    "Joint (revolute): free axial spin",
+    description="Static-anchored cube spinning freely about the hinge axis.",
+    tags=("joint", "revolute"),
+)
+def build_revolute_axial_spin_scene(device) -> Scene:
+    world, _ = _build_revolute_scene(device, initial_angular_velocity=(0.0, 0.0, 2.0))
+    return Scene(
+        world=world,
+        body_half_extents=_scene_half_extents(),
+        frame_dt=1.0 / FPS,
+        substeps=SUBSTEPS,
+    )
+
+
+@scene(
+    "Joint (revolute): position drive",
     description=(
         "Static-anchored cube driven to a +0.7 rad axial twist by a soft "
         "position drive."
     ),
-    tags=("actuated_double_ball_socket",),
+    tags=("joint", "revolute", "actuated"),
 )
-def build_adbs_position_drive_scene(device) -> Scene:
-    world, _ = _build_actuated_scene(
+def build_revolute_position_drive_scene(device) -> Scene:
+    world, _ = _build_revolute_scene(
         device,
         drive_mode=DriveMode.POSITION,
-        target_angle=0.7,
+        target=0.7,
     )
     return Scene(
         world=world,
@@ -131,15 +245,15 @@ def build_adbs_position_drive_scene(device) -> Scene:
 
 
 @scene(
-    "ActuatedDBS: velocity drive",
+    "Joint (revolute): velocity drive",
     description=(
         "Static-anchored cube driven to 1.5 rad/s axial spin by a soft "
         "velocity drive (max_force=20 N*m)."
     ),
-    tags=("actuated_double_ball_socket",),
+    tags=("joint", "revolute", "actuated"),
 )
-def build_adbs_velocity_drive_scene(device) -> Scene:
-    world, _ = _build_actuated_scene(
+def build_revolute_velocity_drive_scene(device) -> Scene:
+    world, _ = _build_revolute_scene(
         device,
         drive_mode=DriveMode.VELOCITY,
         target_velocity=1.5,
@@ -154,19 +268,19 @@ def build_adbs_velocity_drive_scene(device) -> Scene:
 
 
 @scene(
-    "ActuatedDBS: limit clamp",
+    "Joint (revolute): limit clamp",
     description=(
         "Cube spinning into the upper +0.5 rad stop; the unilateral "
         "spring-damper must clamp the twist at ~+0.5 rad."
     ),
-    tags=("actuated_double_ball_socket",),
+    tags=("joint", "revolute", "actuated"),
 )
-def build_adbs_limit_scene(device) -> Scene:
-    world, _ = _build_actuated_scene(
+def build_revolute_limit_scene(device) -> Scene:
+    world, _ = _build_revolute_scene(
         device,
         initial_angular_velocity=(0.0, 0.0, 0.6),
-        min_angle=-0.5,
-        max_angle=0.5,
+        min_value=-0.5,
+        max_value=0.5,
         hertz_limit=10.0,
         damping_ratio_limit=2.0,
     )
@@ -178,6 +292,41 @@ def build_adbs_limit_scene(device) -> Scene:
     )
 
 
+@scene(
+    "Joint (prismatic): vertical slider (gravity along axis)",
+    description="Static body + cube on a +y prismatic; cube falls freely along +y.",
+    tags=("joint", "prismatic"),
+)
+def build_prismatic_vertical_slider_scene(device) -> Scene:
+    world, _ = _build_prismatic_scene(device, axis=(0.0, 1.0, 0.0))
+    return Scene(
+        world=world,
+        body_half_extents=_scene_half_extents(),
+        frame_dt=1.0 / FPS,
+        substeps=SUBSTEPS,
+    )
+
+
+@scene(
+    "Joint (prismatic): horizontal slider (gravity perpendicular to axis)",
+    description="Cube on a +x prismatic with gravity along -y; the lateral lock holds it.",
+    tags=("joint", "prismatic"),
+)
+def build_prismatic_horizontal_slider_scene(device) -> Scene:
+    world, _ = _build_prismatic_scene(device, axis=(1.0, 0.0, 0.0))
+    return Scene(
+        world=world,
+        body_half_extents=_scene_half_extents(),
+        frame_dt=1.0 / FPS,
+        substeps=SUBSTEPS,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
 def _axial_twist(orientation: np.ndarray) -> float:
     """Return the signed axial twist of ``orientation`` about world +z.
 
@@ -186,34 +335,75 @@ def _axial_twist(orientation: np.ndarray) -> float:
     axial component of body 2's quaternion in xyzw form: ``2 *
     atan2(z, w)`` (standard z-axis swing-twist decomposition for the
     case where the swing is ~zero, which it must be because the
-    parent DBS lock kills the off-axis rotational DoF).
+    revolute lock kills the off-axis rotational DoF).
     """
     x, y, z, w = orientation
     return 2.0 * math.atan2(z, w)
 
 
-class TestActuatedDoubleBallSocket(unittest.TestCase):
-    """End-to-end physics checks for
-    :func:`WorldBuilder.add_actuated_double_ball_socket_hinge`."""
+def _quat_rotate(q, v):
+    """Rotate ``v`` by quaternion ``q`` (xyzw)."""
+    x, y, z, w = q
+    rot = np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+    return rot @ np.asarray(v, dtype=np.float64)
+
+
+def _quat_relative_angle(q):
+    """Return the rotation angle of unit quaternion ``q`` (xyzw) [rad]."""
+    w = abs(float(q[3]))
+    w = min(1.0, max(-1.0, w))
+    return 2.0 * math.acos(w)
+
+
+# ---------------------------------------------------------------------------
+# Revolute mode tests
+# ---------------------------------------------------------------------------
+
+
+class TestJointRevolute(unittest.TestCase):
+    """Revolute-mode physics checks for :meth:`WorldBuilder.add_joint`."""
 
     def _step(self, world, frames=SETTLE_FRAMES):
         dt = 1.0 / FPS
         for _ in range(frames):
             world.step(dt)
 
-    def test_off_mode_preserves_axial_spin(self):
-        """``DriveMode.OFF`` with no limit must not bleed axial spin.
+    def test_anchors_coincide(self):
+        """Both anchor pairs must map to the same world position.
 
-        Drops back to the parent DBS behaviour: the cube spinning
-        purely about +z keeps spinning at the same rate -- the
-        actuator block is a no-op in this configuration.
+        A drift here means the rank-5 lock has lost rows.
         """
         device = wp.get_preferred_device()
+        world, _ = _build_revolute_scene(
+            device, initial_angular_velocity=(0.5, 0.0, 0.0)
+        )
+        self._step(world)
+
+        positions = world.bodies.position.numpy()
+        orientations = world.bodies.orientation.numpy()
+        cube = 2
+
+        a1_b1 = np.asarray(_ANCHOR1, dtype=np.float64)
+        a2_b1 = np.asarray(_ANCHOR2, dtype=np.float64)
+        a1_b2 = positions[cube] + _quat_rotate(orientations[cube], _ANCHOR1)
+        a2_b2 = positions[cube] + _quat_rotate(orientations[cube], _ANCHOR2)
+
+        self.assertLess(np.linalg.norm(a1_b2 - a1_b1), 0.02)
+        self.assertLess(np.linalg.norm(a2_b2 - a2_b1), 0.02)
+
+    def test_free_axial_rotation(self):
+        """Pure axial spin must survive untouched."""
+        device = wp.get_preferred_device()
         omega_axial = 2.0
-        world, _ = _build_actuated_scene(
-            device,
-            initial_angular_velocity=(0.0, 0.0, omega_axial),
-            drive_mode=DriveMode.OFF,
+        world, _ = _build_revolute_scene(
+            device, initial_angular_velocity=(0.0, 0.0, omega_axial)
         )
         self._step(world)
 
@@ -223,62 +413,72 @@ class TestActuatedDoubleBallSocket(unittest.TestCase):
             omegas[cube, 2],
             omega_axial,
             delta=0.05,
-            msg=f"axial spin bled with OFF drive: {omegas[cube, 2]}",
+            msg=f"axial spin bled to {omegas[cube, 2]}",
         )
-        self.assertLess(
-            math.hypot(omegas[cube, 0], omegas[cube, 1]),
-            0.02,
-            msg=f"perpendicular spin appeared: {omegas[cube]}",
+        self.assertLess(math.hypot(omegas[cube, 0], omegas[cube, 1]), 0.02)
+
+    def test_perpendicular_spin_is_locked_out(self):
+        """Transverse omega.x must decay to ~0 -- nowhere for it to go."""
+        device = wp.get_preferred_device()
+        world, _ = _build_revolute_scene(
+            device, initial_angular_velocity=(2.0, 0.0, 0.0)
         )
+        self._step(world)
+
+        omegas = world.bodies.angular_velocity.numpy()
+        cube = 2
+        self.assertLess(abs(omegas[cube, 0]), 0.05)
+
+    def test_hangs_under_gravity(self):
+        """Gravity-loaded cube centred on the hinge axis must not drift."""
+        device = wp.get_preferred_device()
+        world, _ = _build_revolute_scene(device, affected_by_gravity=True)
+        self._step(world, frames=600)
+
+        positions = world.bodies.position.numpy()
+        cube = 2
+        self.assertLess(np.linalg.norm(positions[cube]), 0.02)
+
+    def test_off_mode_preserves_axial_spin(self):
+        """``DriveMode.OFF`` with no limit must not bleed axial spin."""
+        device = wp.get_preferred_device()
+        omega_axial = 2.0
+        world, _ = _build_revolute_scene(
+            device,
+            initial_angular_velocity=(0.0, 0.0, omega_axial),
+            drive_mode=DriveMode.OFF,
+        )
+        self._step(world)
+
+        omegas = world.bodies.angular_velocity.numpy()
+        cube = 2
+        self.assertAlmostEqual(omegas[cube, 2], omega_axial, delta=0.05)
+        self.assertLess(math.hypot(omegas[cube, 0], omegas[cube, 1]), 0.02)
 
     def test_position_drive_reaches_target(self):
-        """Position drive must seat the cube near ``target_angle``.
-
-        Soft spring with ``hertz_drive=8`` at zero load should
-        converge well within a quarter-second; we wait the full
-        settle window to give the damping ratio room to kill the
-        residual oscillation.
-        """
+        """Position drive must seat the cube near ``target``."""
         device = wp.get_preferred_device()
         target = 0.7
-        world, _ = _build_actuated_scene(
+        world, _ = _build_revolute_scene(
             device,
             drive_mode=DriveMode.POSITION,
-            target_angle=target,
-            hertz_drive=8.0,
-            damping_ratio_drive=1.0,
+            target=target,
         )
         self._step(world)
 
         orientations = world.bodies.orientation.numpy()
         cube = 2
         twist = _axial_twist(orientations[cube])
-        self.assertAlmostEqual(
-            twist,
-            target,
-            delta=0.05,
-            msg=f"position drive landed at {twist:.3f} rad, expected {target}",
-        )
-        # Body must be at rest (the spring/damper killed the
-        # transient).
+        self.assertAlmostEqual(twist, target, delta=0.05)
+
         omegas = world.bodies.angular_velocity.numpy()
-        self.assertLess(
-            np.linalg.norm(omegas[cube]),
-            0.05,
-            msg=f"position drive left residual spin: {omegas[cube]}",
-        )
+        self.assertLess(np.linalg.norm(omegas[cube]), 0.05)
 
     def test_velocity_drive_reaches_target(self):
-        """Velocity drive must spin the cube up to ``target_velocity``.
-
-        With a generous ``max_force_drive`` the drive should saturate
-        the cube to ~``target_velocity`` within a fraction of a
-        second; check both that the steady-state rate is close and
-        that the perpendicular components stay locked at zero.
-        """
+        """Velocity drive must spin the cube up to ``target_velocity``."""
         device = wp.get_preferred_device()
         target = 1.5
-        world, _ = _build_actuated_scene(
+        world, _ = _build_revolute_scene(
             device,
             drive_mode=DriveMode.VELOCITY,
             target_velocity=target,
@@ -288,31 +488,14 @@ class TestActuatedDoubleBallSocket(unittest.TestCase):
 
         omegas = world.bodies.angular_velocity.numpy()
         cube = 2
-        self.assertAlmostEqual(
-            omegas[cube, 2],
-            target,
-            delta=0.1,
-            msg=f"velocity drive at {omegas[cube, 2]:.3f}, expected {target}",
-        )
-        self.assertLess(
-            math.hypot(omegas[cube, 0], omegas[cube, 1]),
-            0.02,
-            msg=f"perpendicular spin appeared: {omegas[cube]}",
-        )
+        self.assertAlmostEqual(omegas[cube, 2], target, delta=0.1)
+        self.assertLess(math.hypot(omegas[cube, 0], omegas[cube, 1]), 0.02)
 
     def test_velocity_drive_force_cap_saturates(self):
-        """A tiny ``max_force_drive`` must cap the steady-state spin.
-
-        With ``max_force_drive`` set so that the per-substep impulse
-        cap is well below what's needed to overcome the implicit
-        soft-spring damping at ``target_velocity``, the cube cannot
-        reach the setpoint -- it converges to a much smaller axial
-        rate. We just check that the resulting axial spin is
-        strictly below the target by a wide margin.
-        """
+        """A tiny ``max_force_drive`` must cap the steady-state spin."""
         device = wp.get_preferred_device()
         target = 5.0
-        world, _ = _build_actuated_scene(
+        world, _ = _build_revolute_scene(
             device,
             drive_mode=DriveMode.VELOCITY,
             target_velocity=target,
@@ -322,39 +505,18 @@ class TestActuatedDoubleBallSocket(unittest.TestCase):
 
         omegas = world.bodies.angular_velocity.numpy()
         cube = 2
-        self.assertLess(
-            abs(omegas[cube, 2]),
-            target * 0.5,
-            msg=(
-                f"force cap failed: omega_z={omegas[cube, 2]:.3f} "
-                f"approached target {target}"
-            ),
-        )
-        # Even saturated, the drive must still be pushing in the
-        # right sign (positive target -> positive axial velocity).
-        self.assertGreater(
-            omegas[cube, 2],
-            0.001,
-            msg=f"capped drive went the wrong way: omega_z={omegas[cube, 2]}",
-        )
+        self.assertLess(abs(omegas[cube, 2]), target * 0.5)
+        self.assertGreater(omegas[cube, 2], 0.001)
 
     def test_upper_limit_clamps_twist(self):
-        """A spin into the upper stop must clamp at ~``max_angle``.
-
-        Cube starts with a gentle axial spin (no drive); the
-        unilateral limit row engages once the twist exceeds
-        ``max_angle`` and brings the cube to rest near the stop.
-        We use a gentle initial velocity + a critically-damped soft
-        limit so the body seats against the stop without bouncing
-        back through ``min_angle``.
-        """
+        """Spin into the upper stop must clamp at ~``max_value``."""
         device = wp.get_preferred_device()
-        max_a = 0.5
-        world, _ = _build_actuated_scene(
+        max_v = 0.5
+        world, _ = _build_revolute_scene(
             device,
             initial_angular_velocity=(0.0, 0.0, 0.5),
-            min_angle=-2.0,
-            max_angle=max_a,
+            min_value=-2.0,
+            max_value=max_v,
             hertz_limit=10.0,
             damping_ratio_limit=2.0,
         )
@@ -364,34 +526,19 @@ class TestActuatedDoubleBallSocket(unittest.TestCase):
         omegas = world.bodies.angular_velocity.numpy()
         cube = 2
         twist = _axial_twist(orientations[cube])
-        # Soft limit -> some over/under-shoot is OK; we just need the
-        # steady-state to sit near the stop, not back through zero.
-        self.assertLessEqual(
-            twist,
-            max_a + 0.1,
-            msg=f"limit failed: twist={twist:.3f} > {max_a} + slop",
-        )
-        self.assertGreaterEqual(
-            twist,
-            max_a - 0.2,
-            msg=f"limit overshot back: twist={twist:.3f} < {max_a} - slop",
-        )
-        # Critical damping kills the spin within the settle window.
-        self.assertLess(
-            abs(omegas[cube, 2]),
-            0.2,
-            msg=f"limit didn't damp spin: omega_z={omegas[cube, 2]}",
-        )
+        self.assertLessEqual(twist, max_v + 0.1)
+        self.assertGreaterEqual(twist, max_v - 0.2)
+        self.assertLess(abs(omegas[cube, 2]), 0.2)
 
     def test_lower_limit_clamps_twist(self):
-        """Symmetric check: spin into the lower stop must clamp at ~``min_angle``."""
+        """Symmetric: spin into the lower stop must clamp at ~``min_value``."""
         device = wp.get_preferred_device()
-        min_a = -0.5
-        world, _ = _build_actuated_scene(
+        min_v = -0.5
+        world, _ = _build_revolute_scene(
             device,
             initial_angular_velocity=(0.0, 0.0, -0.5),
-            min_angle=min_a,
-            max_angle=2.0,
+            min_value=min_v,
+            max_value=2.0,
             hertz_limit=10.0,
             damping_ratio_limit=2.0,
         )
@@ -400,16 +547,144 @@ class TestActuatedDoubleBallSocket(unittest.TestCase):
         orientations = world.bodies.orientation.numpy()
         cube = 2
         twist = _axial_twist(orientations[cube])
-        self.assertGreaterEqual(
-            twist,
-            min_a - 0.1,
-            msg=f"lower limit failed: twist={twist:.3f} < {min_a} - slop",
+        self.assertGreaterEqual(twist, min_v - 0.1)
+        self.assertLessEqual(twist, min_v + 0.2)
+
+
+# ---------------------------------------------------------------------------
+# Prismatic mode tests
+# ---------------------------------------------------------------------------
+
+
+class TestJointPrismatic(unittest.TestCase):
+    """Prismatic-mode physics checks for :meth:`WorldBuilder.add_joint`."""
+
+    def _step(self, world, frames=SETTLE_FRAMES):
+        dt = 1.0 / FPS
+        for _ in range(frames):
+            world.step(dt)
+
+    def test_free_axial_slide_under_gravity(self):
+        """Slide axis along gravity -> free fall along the axis only."""
+        device = wp.get_preferred_device()
+        world, _ = _build_prismatic_scene(device, axis=(0.0, 1.0, 0.0))
+
+        frames = 120  # 2 s
+        t = frames / FPS
+        self._step(world, frames=frames)
+
+        positions = world.bodies.position.numpy()
+        velocities = world.bodies.velocity.numpy()
+        cube = 2
+
+        expected_y = -0.5 * GRAVITY * t * t
+        self.assertAlmostEqual(
+            positions[cube, 1],
+            expected_y,
+            delta=0.05 * abs(expected_y),
         )
-        self.assertLessEqual(
-            twist,
-            min_a + 0.2,
-            msg=f"lower limit overshot back: twist={twist:.3f} > {min_a} + slop",
+        self.assertLess(abs(positions[cube, 0]), 0.02)
+        self.assertLess(abs(positions[cube, 2]), 0.02)
+        self.assertLess(abs(velocities[cube, 0]) + abs(velocities[cube, 2]), 0.05)
+
+    def test_perpendicular_gravity_held(self):
+        """Slide axis perpendicular to gravity -> body holds in place."""
+        device = wp.get_preferred_device()
+        world, _ = _build_prismatic_scene(device, axis=(1.0, 0.0, 0.0))
+        self._step(world)
+
+        positions = world.bodies.position.numpy()
+        cube = 2
+        self.assertLess(np.linalg.norm(positions[cube]), 0.05)
+
+    def test_angular_lock_holds(self):
+        """Initial angular velocity must be killed by the angular lock."""
+        device = wp.get_preferred_device()
+        world, _ = _build_prismatic_scene(
+            device,
+            axis=(0.0, 0.0, 1.0),
+            affected_by_gravity=False,
+            initial_angular_velocity=(0.6, -0.4, 0.3),
         )
+        self._step(world)
+
+        omegas = world.bodies.angular_velocity.numpy()
+        orientations = world.bodies.orientation.numpy()
+        cube = 2
+
+        self.assertLess(np.linalg.norm(omegas[cube]), 0.05)
+        rot_angle = _quat_relative_angle(orientations[cube])
+        self.assertLess(rot_angle, math.radians(2.0))
+
+    def test_position_drive_reaches_target(self):
+        """Linear position drive must seat the cube near ``target`` [m].
+
+        The slide axis is world +x; the drive pulls the cube towards
+        ``target`` metres from the ``anchor1`` position along that
+        axis. After settling, the cube's x coordinate must land at
+        approximately ``target``.
+        """
+        device = wp.get_preferred_device()
+        target = 0.4
+        world, _ = _build_prismatic_scene(
+            device,
+            axis=(1.0, 0.0, 0.0),
+            affected_by_gravity=False,
+            drive_mode=DriveMode.POSITION,
+            target=target,
+        )
+        self._step(world, frames=300)
+
+        positions = world.bodies.position.numpy()
+        velocities = world.bodies.velocity.numpy()
+        cube = 2
+        self.assertAlmostEqual(positions[cube, 0], target, delta=0.05)
+        self.assertLess(np.linalg.norm(velocities[cube]), 0.05)
+
+    def test_velocity_drive_reaches_target(self):
+        """Linear velocity drive must push cube to ``target_velocity`` [m/s]."""
+        device = wp.get_preferred_device()
+        target = 0.6
+        world, _ = _build_prismatic_scene(
+            device,
+            axis=(1.0, 0.0, 0.0),
+            affected_by_gravity=False,
+            drive_mode=DriveMode.VELOCITY,
+            target_velocity=target,
+            max_force_drive=50.0,
+        )
+        self._step(world, frames=120)
+
+        velocities = world.bodies.velocity.numpy()
+        cube = 2
+        self.assertAlmostEqual(velocities[cube, 0], target, delta=0.1)
+        self.assertLess(abs(velocities[cube, 1]) + abs(velocities[cube, 2]), 0.05)
+
+    def test_upper_limit_clamps_slide(self):
+        """Slide into the upper stop must clamp at ~``max_value`` [m]."""
+        device = wp.get_preferred_device()
+        max_v = 0.3
+        # Push the cube in +x with an initial velocity; the one-sided
+        # linear spring must seat it at ~max_v.
+        world, _ = _build_prismatic_scene(
+            device,
+            axis=(1.0, 0.0, 0.0),
+            affected_by_gravity=False,
+            initial_angular_velocity=(0.0, 0.0, 0.0),
+            min_value=-2.0,
+            max_value=max_v,
+            hertz_limit=10.0,
+            damping_ratio_limit=2.0,
+            drive_mode=DriveMode.VELOCITY,
+            target_velocity=0.3,
+            max_force_drive=50.0,
+        )
+        self._step(world, frames=400)
+
+        positions = world.bodies.position.numpy()
+        cube = 2
+        self.assertLessEqual(positions[cube, 0], max_v + 0.1)
+        self.assertGreaterEqual(positions[cube, 0], max_v - 0.2)
 
 
 if __name__ == "__main__":

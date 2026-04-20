@@ -43,6 +43,8 @@ from newton._src.solvers.jitter.constraint_actuated_double_ball_socket import (
     DRIVE_MODE_OFF,
     DRIVE_MODE_POSITION,
     DRIVE_MODE_VELOCITY,
+    JOINT_MODE_PRISMATIC,
+    JOINT_MODE_REVOLUTE,
     actuated_double_ball_socket_initialize_kernel,
 )
 from newton._src.solvers.jitter.constraint_angular_motor import (
@@ -67,10 +69,6 @@ from newton._src.solvers.jitter.constraint_d6 import (
     D6_DWORDS,
     d6_initialize_kernel,
 )
-from newton._src.solvers.jitter.constraint_double_ball_socket import (
-    DBS_DWORDS,
-    double_ball_socket_initialize_kernel,
-)
 from newton._src.solvers.jitter.constraint_hinge_angle import (
     HA_DWORDS,
     hinge_angle_initialize_kernel,
@@ -79,28 +77,21 @@ from newton._src.solvers.jitter.constraint_hinge_joint import (
     HJ_DWORDS,
     hinge_joint_initialize_kernel,
 )
-from newton._src.solvers.jitter.constraint_prismatic import (
-    PR_DWORDS,
-    prismatic_initialize_kernel,
-)
 from newton._src.solvers.jitter.solver_jitter import World
 
 __all__ = [
-    "ActuatedDoubleBallSocketHingeDescriptor",
-    "ActuatedDoubleBallSocketHingeHandle",
     "AngularMotorDescriptor",
     "BallSocketDescriptor",
     "D6AxisDrive",
     "D6Descriptor",
     "D6Handle",
-    "DoubleBallSocketHingeDescriptor",
-    "DoubleBallSocketHingeHandle",
     "DriveMode",
     "HingeAngleDescriptor",
     "HingeJointDescriptor",
     "HingeJointHandle",
-    "PrismaticDescriptor",
-    "PrismaticHandle",
+    "JointDescriptor",
+    "JointHandle",
+    "JointMode",
     "RigidBodyDescriptor",
     "WorldBuilder",
 ]
@@ -269,51 +260,6 @@ class HingeJointHandle:
     cid: int = -1
 
 
-@dataclass
-class DoubleBallSocketHingeDescriptor:
-    """Plain-Python description of one fused two-anchor (Schur-complement)
-    hinge constraint.
-
-    Locks 5 DoF (3 translational + 2 rotational) by anchoring two
-    points -- ``anchor1`` and ``anchor2`` -- on the line of the hinge
-    axis between the two bodies. The third rotational DoF (rotation
-    about the line through both anchors) stays free. Solved as one
-    rank-5 column via a 3x3 + 2x2 Schur complement, no quaternion math
-    and no parameter tuning, see
-    :mod:`newton._src.solvers.jitter.constraint_double_ball_socket`.
-
-    ``anchor1`` and ``anchor2`` are in *world* space at finalize() time
-    and define the hinge axis as ``anchor2 - anchor1``.
-
-    ``hertz`` / ``damping_ratio`` follow the Box2D v3 / Bepu soft-
-    constraint formulation (see :func:`soft_constraint_coefficients`).
-    A single pair governs both anchor blocks of the Schur solve since
-    they're modelling the same physical hinge.
-    """
-
-    body1: int
-    body2: int
-    anchor1: tuple[float, float, float]
-    anchor2: tuple[float, float, float]
-    hertz: float = float(DEFAULT_HERTZ_LINEAR)
-    damping_ratio: float = float(DEFAULT_DAMPING_RATIO)
-
-
-@dataclass
-class DoubleBallSocketHingeHandle:
-    """Global cid of the fused double-ball-socket hinge constraint
-    created by :meth:`WorldBuilder.add_double_ball_socket_hinge`.
-
-    Returned with a sentinel cid (``-1``) and rewritten in place by
-    :meth:`WorldBuilder.finalize`. Pass to
-    :meth:`World.gather_constraint_wrenches` (via
-    ``wrenches[handle.cid]``) to read the joint's reaction wrench on
-    body 2.
-    """
-
-    cid: int = -1
-
-
 class DriveMode(IntEnum):
     """Drive mode for an actuated joint's free DoF.
 
@@ -328,111 +274,103 @@ class DriveMode(IntEnum):
     VELOCITY = int(DRIVE_MODE_VELOCITY)
 
 
+class JointMode(IntEnum):
+    """Which physical joint a :class:`JointDescriptor` materialises.
+
+    A single unified constraint schema (5-DoF positional lock + optional
+    scalar actuator row) covers both revolute (hinge) and prismatic
+    (slider) joints; the mode picks which pure-point formulation the
+    runtime kernel uses and what units the drive / limit are in.
+
+    See :mod:`newton._src.solvers.jitter.constraint_actuated_double_ball_socket`
+    for the per-mode math. Values match the underlying
+    ``JOINT_MODE_*`` Warp constants exactly so they can be passed
+    through ``np.int32`` arrays without translation.
+    """
+
+    REVOLUTE = int(JOINT_MODE_REVOLUTE)
+    PRISMATIC = int(JOINT_MODE_PRISMATIC)
+
+
 @dataclass
-class ActuatedDoubleBallSocketHingeDescriptor:
-    """Plain-Python description of one *actuated* fused two-anchor hinge.
+class JointDescriptor:
+    """Plain-Python description of one unified revolute/prismatic joint.
 
-    Identical 5-DoF positional lock as
-    :class:`DoubleBallSocketHingeDescriptor` (3 translational +
-    2 rotational, solved as a 3x3 + 2x2 Schur complement) plus a
-    scalar PGS row that controls the free axial DoF with either a
-    soft *position* or *velocity* drive and -- independently -- clamps
-    the relative axial twist to ``[min_angle, max_angle]`` via a
-    one-sided spring-damper.
+    A single 5-DoF pure-point positional lock (solved as one rank-5 PGS
+    column via a Schur complement) plus an *optional* scalar actuator
+    row that drives and/or clamps the free DoF. The ``mode`` selects
+    which physical joint this is:
 
-    ``anchor1`` and ``anchor2`` are in *world* space at finalize() time
-    and define the hinge axis as ``anchor2 - anchor1``.
+    * :attr:`JointMode.REVOLUTE` -- a double ball-socket hinge. Locks
+      3 translational + 2 rotational DoF; the free DoF is rotation
+      about the line through ``anchor1`` and ``anchor2``. The drive
+      and limit, if active, interpret ``target`` / ``min_value`` /
+      ``max_value`` as angles [rad] and ``max_force_drive`` as a torque
+      cap [N*m].
+    * :attr:`JointMode.PRISMATIC` -- a slider. Locks 3 rotational + 2
+      translational DoF; the free DoF is translation along the line
+      through ``anchor1`` and ``anchor2``. The drive and limit, if
+      active, interpret ``target`` / ``min_value`` / ``max_value`` as
+      displacements [m] along the slide axis (measured from
+      ``anchor1``) and ``max_force_drive`` as a linear force cap [N].
+
+    For *both* modes, ``anchor1`` and ``anchor2`` are two world-space
+    points on the joint axis at :meth:`finalize` time. The init kernel
+    snapshots them into each body's local frame; the line between them
+    defines the hinge / slide direction. For prismatic mode the init
+    kernel additionally auto-derives a third anchor (perpendicular to
+    the slide axis, at distance ``|anchor2 - anchor1|`` -- i.e. the
+    *rest length*) so the point-matching 2+2+1 formulation has a
+    non-degenerate twist-lock row without any user-visible API change.
+
+    Passing ``anchor2 = anchor1 + axis`` with a unit ``axis`` is the
+    common convention -- it yields ``rest_length = 1 m`` and makes the
+    slide / hinge axis independent of any scene-wide length unit.
 
     All ``hertz`` / ``damping_ratio`` parameters follow the Box2D v3 /
     Bepu / Nordby soft-constraint formulation; see
-    :func:`soft_constraint_coefficients`.
+    :func:`soft_constraint_coefficients`. The default
+    ``hertz = DEFAULT_HERTZ_LINEAR`` / critical damping applies to the
+    positional Schur block; the actuator (drive + limit) rows have
+    their own knobs.
 
-    See :mod:`newton._src.solvers.jitter.constraint_actuated_double_ball_socket`
-    for the per-row math.
+    Leaving ``drive_mode = DriveMode.OFF`` and
+    ``min_value == max_value == 0`` disables the actuator row entirely,
+    giving a *non-actuated* revolute or prismatic joint -- same
+    behaviour as the previous ``add_double_ball_socket_hinge`` and
+    ``add_prismatic`` entry points.
     """
 
     body1: int
     body2: int
     anchor1: tuple[float, float, float]
     anchor2: tuple[float, float, float]
+    mode: JointMode = JointMode.REVOLUTE
     hertz: float = float(DEFAULT_HERTZ_LINEAR)
     damping_ratio: float = float(DEFAULT_DAMPING_RATIO)
     drive_mode: DriveMode = DriveMode.OFF
-    target_angle: float = 0.0
+    target: float = 0.0
     target_velocity: float = 0.0
     max_force_drive: float = 0.0
     hertz_drive: float = float(DEFAULT_HERTZ_MOTOR)
     damping_ratio_drive: float = float(DEFAULT_DAMPING_RATIO)
-    min_angle: float = 0.0
-    max_angle: float = 0.0
+    min_value: float = 0.0
+    max_value: float = 0.0
     hertz_limit: float = float(DEFAULT_HERTZ_LIMIT)
     damping_ratio_limit: float = float(DEFAULT_DAMPING_RATIO)
 
 
 @dataclass
-class ActuatedDoubleBallSocketHingeHandle:
-    """Global cid of the actuated fused-hinge constraint created by
-    :meth:`WorldBuilder.add_actuated_double_ball_socket_hinge`.
+class JointHandle:
+    """Global cid of a unified joint created by :meth:`WorldBuilder.add_joint`.
 
     Returned with a sentinel cid (``-1``) and rewritten in place by
     :meth:`WorldBuilder.finalize`. Pass to
     :meth:`World.gather_constraint_wrenches` (via
     ``wrenches[handle.cid]``) to read the joint's reaction wrench on
-    body 2.
-    """
-
-    cid: int = -1
-
-
-@dataclass
-class PrismaticDescriptor:
-    """Plain-Python description of one prismatic (sliding) joint.
-
-    Locks 5 DoF (3 rotational + 2 translational): the bodies must keep
-    their initial relative orientation and may only translate along the
-    user-supplied slide axis. Solved as one rank-5 column via a 3x3 +
-    2x2 Schur complement -- see
-    :mod:`newton._src.solvers.jitter.constraint_prismatic` for the
-    derivation.
-
-    ``anchor`` is a single point in *world* space at finalize() time
-    (snapshotted into each body's local frame); both lever arms
-    coincide at rest by construction. ``axis`` is a *world*-space
-    direction at finalize() time, snapshotted into body 1's local
-    frame so the slide direction "rides" body 1 rigidly (matches the
-    Bullet/ODE convention). ``axis`` need not be unit length -- the
-    init kernel normalises it.
-
-    ``hertz_*`` / ``damping_ratio_*`` follow the Box2D v3 / Bepu soft-
-    constraint formulation (see :func:`soft_constraint_coefficients`).
-    Two independent knob pairs because the angular and linear blocks
-    are physically distinct: tweak ``hertz_angular`` /
-    ``damping_ratio_angular`` to soften the rotational lock and
-    ``hertz_linear`` / ``damping_ratio_linear`` to soften the
-    perpendicular-translation lock.
-    """
-
-    body1: int
-    body2: int
-    anchor: tuple[float, float, float]
-    axis: tuple[float, float, float]
-    hertz_angular: float = float(DEFAULT_HERTZ_ANGULAR)
-    damping_ratio_angular: float = float(DEFAULT_DAMPING_RATIO)
-    hertz_linear: float = float(DEFAULT_HERTZ_LINEAR)
-    damping_ratio_linear: float = float(DEFAULT_DAMPING_RATIO)
-
-
-@dataclass
-class PrismaticHandle:
-    """Global cid of the prismatic joint created by
-    :meth:`WorldBuilder.add_prismatic`.
-
-    Returned with a sentinel cid (``-1``) and rewritten in place by
-    :meth:`WorldBuilder.finalize`. Pass to
-    :meth:`World.gather_constraint_wrenches` (via
-    ``wrenches[handle.cid]``) to read the joint's reaction wrench on
-    body 2 (linear constraint force + angular reaction torque, both in
-    world frame).
+    body 2 (linear force + angular torque, both in world frame). In
+    prismatic mode the axial impulse shows up on the force component;
+    in revolute mode it shows up on the torque component.
     """
 
     cid: int = -1
@@ -590,21 +528,15 @@ class WorldBuilder:
         # user-held reference becomes valid after finalize() returns.
         self._hinge_joint_descriptors: list[HingeJointDescriptor] = []
         self._hinge_joint_handles: list[HingeJointHandle] = []
-        # Fused two-anchor (Schur-complement) hinge descriptors. Same
-        # parallel-list pattern as the fused HingeJoint above.
-        self._double_ball_socket_hinge_descriptors: list[DoubleBallSocketHingeDescriptor] = []
-        self._double_ball_socket_hinge_handles: list[DoubleBallSocketHingeHandle] = []
-        # Actuated fused two-anchor hinge descriptors (drive + limits on
-        # the axial DoF). Same parallel-list pattern.
-        self._actuated_dbs_hinge_descriptors: list[ActuatedDoubleBallSocketHingeDescriptor] = []
-        self._actuated_dbs_hinge_handles: list[ActuatedDoubleBallSocketHingeHandle] = []
-        # Prismatic (sliding) joint descriptors. Same parallel-list
-        # pattern as the fused-hinge variants above; finalize() walks
-        # both lists to patch each handle with its global cid.
-        self._prismatic_descriptors: list[PrismaticDescriptor] = []
-        self._prismatic_handles: list[PrismaticHandle] = []
+        # Unified revolute / prismatic joint descriptors. One list
+        # serves both modes -- the single ``actuated_double_ball_socket``
+        # Warp kernel dispatches on ``JointMode`` at runtime, so there
+        # is no per-mode ingestion path. Same parallel-list pattern as
+        # the fused HingeJoint above.
+        self._joint_descriptors: list[JointDescriptor] = []
+        self._joint_handles: list[JointHandle] = []
         # 6-DoF generalised (D6) joint descriptors. Same parallel-list
-        # pattern as the prismatic.
+        # pattern.
         self._d6_descriptors: list[D6Descriptor] = []
         self._d6_handles: list[D6Handle] = []
 
@@ -871,226 +803,117 @@ class WorldBuilder:
         self._hinge_joint_handles.append(handle)
         return handle
 
-    def add_double_ball_socket_hinge(
+    def add_joint(
         self,
         body1: int,
         body2: int,
         anchor1: tuple[float, float, float],
         anchor2: tuple[float, float, float],
-        hertz: float = float(DEFAULT_HERTZ_LINEAR),
-        damping_ratio: float = float(DEFAULT_DAMPING_RATIO),
-    ) -> DoubleBallSocketHingeHandle:
-        """Append a fused two-anchor "double ball-socket" hinge constraint
-        and return its handle.
-
-        Solves a single rank-5 column (3x3 + 2x2 Schur complement,
-        no quaternion math) that locks 3 translational + 2 rotational
-        DoF. The free rotational DoF is rotation about the line through
-        ``anchor1`` and ``anchor2``. Mathematically equivalent to two
-        independent ball-sockets at the same body pair but without the
-        rank deficiency / compliance leak of stacking two 3-row
-        Jacobians; see
-        :mod:`newton._src.solvers.jitter.constraint_double_ball_socket`
-        for the derivation.
-
-        Both anchors are interpreted in *world* space at
-        :meth:`finalize` time; the hinge axis is implicit in their
-        relative direction.
-
-        Returns a :class:`DoubleBallSocketHingeHandle` whose ``cid``
-        field is rewritten in place by :meth:`finalize` to the joint's
-        global cid in the shared :class:`ConstraintContainer`.
-        """
-        self._validate_body(body1)
-        self._validate_body(body2)
-        descriptor = DoubleBallSocketHingeDescriptor(
-            body1=body1,
-            body2=body2,
-            anchor1=anchor1,
-            anchor2=anchor2,
-            hertz=hertz,
-            damping_ratio=damping_ratio,
-        )
-        handle = DoubleBallSocketHingeHandle(cid=-1)
-        self._double_ball_socket_hinge_descriptors.append(descriptor)
-        self._double_ball_socket_hinge_handles.append(handle)
-        return handle
-
-    def add_actuated_double_ball_socket_hinge(
-        self,
-        body1: int,
-        body2: int,
-        anchor1: tuple[float, float, float],
-        anchor2: tuple[float, float, float],
+        mode: JointMode = JointMode.REVOLUTE,
         hertz: float = float(DEFAULT_HERTZ_LINEAR),
         damping_ratio: float = float(DEFAULT_DAMPING_RATIO),
         drive_mode: DriveMode = DriveMode.OFF,
-        target_angle: float = 0.0,
+        target: float = 0.0,
         target_velocity: float = 0.0,
         max_force_drive: float = 0.0,
         hertz_drive: float = float(DEFAULT_HERTZ_MOTOR),
         damping_ratio_drive: float = float(DEFAULT_DAMPING_RATIO),
-        min_angle: float = 0.0,
-        max_angle: float = 0.0,
+        min_value: float = 0.0,
+        max_value: float = 0.0,
         hertz_limit: float = float(DEFAULT_HERTZ_LIMIT),
         damping_ratio_limit: float = float(DEFAULT_DAMPING_RATIO),
-    ) -> ActuatedDoubleBallSocketHingeHandle:
-        """Append an *actuated* fused two-anchor hinge and return its handle.
+    ) -> JointHandle:
+        """Append a unified revolute / prismatic joint and return its handle.
 
-        Same 5-DoF positional lock as
-        :meth:`add_double_ball_socket_hinge` plus a soft scalar PGS row
-        on the free axial DoF that:
+        One entry point materialises either a 5-DoF hinge (revolute
+        mode -- double ball-socket) or a 5-DoF slider (prismatic mode
+        -- 2+2+1 tangent-plane triad) plus an optional scalar actuator
+        row that drives and/or clamps the free DoF. Both modes share
+        one constraint schema and one Warp kernel; the runtime picks
+        the per-mode prepare/iterate math from ``mode``.
 
-        * (optional) drives the relative axial twist towards
-          ``target_angle`` [rad] (``drive_mode = DriveMode.POSITION``)
-          or the relative axial rate towards ``target_velocity``
-          [rad/s] (``drive_mode = DriveMode.VELOCITY``); a velocity
-          drive is capped at ``\u00b1 max_force_drive * dt`` per substep
-          [N*m], a position drive is bounded only by its soft-spring
-          stiffness (``hertz_drive`` / ``damping_ratio_drive``).
-        * (optional) clamps the relative axial twist to
-          ``[min_angle, max_angle]`` [rad] via a one-sided spring-
-          damper (``hertz_limit`` / ``damping_ratio_limit``).
-          ``min_angle == max_angle == 0`` disables the limit.
+        ``anchor1`` and ``anchor2`` are two world-space points on the
+        joint axis at :meth:`finalize` time. The line between them
+        defines the hinge axis (revolute) or slide direction
+        (prismatic). For a unit-length axis convention, pass
+        ``anchor2 = anchor1 + axis`` (yields ``rest_length = 1 m``
+        independent of scene units); any two distinct points work.
+
+        Leaving ``drive_mode = DriveMode.OFF`` and
+        ``min_value == max_value == 0`` disables the actuator row
+        entirely (non-actuated joint). Otherwise:
+
+        * :attr:`DriveMode.POSITION` / :attr:`DriveMode.VELOCITY` on the
+          free DoF, capped by ``max_force_drive`` (torque [N*m] for
+          revolute, force [N] for prismatic), with its own soft-spring
+          plumbing (``hertz_drive`` / ``damping_ratio_drive``).
+        * One-sided ``[min_value, max_value]`` spring-damper limits on
+          the same DoF (``min_value == max_value == 0`` disables). Units
+          are rad for revolute and m for prismatic.
 
         Drive and limit are independent and can be active
         simultaneously; the limit always wins because it's unilateral.
         See :mod:`newton._src.solvers.jitter.constraint_actuated_double_ball_socket`
-        for the math.
+        for the derivation of both modes.
 
         Args:
-            body1: Index of the first body.
+            body1: Index of the first body. For prismatic mode the
+                slide axis is snapshotted into this body's local frame.
             body2: Index of the second body.
-            anchor1: First hinge anchor in *world* space at finalize()
-                time [m].
-            anchor2: Second hinge anchor in *world* space at finalize()
-                time [m]; the line ``anchor1 -> anchor2`` defines the
-                hinge axis.
+            anchor1: First anchor in *world* space at finalize() time [m].
+            anchor2: Second anchor in *world* space at finalize() time [m];
+                the line ``anchor1 -> anchor2`` defines the joint axis.
+            mode: :attr:`JointMode.REVOLUTE` (hinge) or
+                :attr:`JointMode.PRISMATIC` (slider). Default revolute.
             hertz: Positional Schur block soft-constraint frequency [Hz].
             damping_ratio: Positional Schur block damping ratio.
             drive_mode: One of :class:`DriveMode`.
-            target_angle: Position-drive setpoint [rad].
-            target_velocity: Velocity-drive setpoint [rad/s].
-            max_force_drive: Velocity-drive torque cap [N*m]; ignored
-                in position-drive mode.
+            target: Position-drive setpoint. Units [rad] for revolute,
+                [m] for prismatic (measured from ``anchor1`` along the
+                axis).
+            target_velocity: Velocity-drive setpoint. Units [rad/s] for
+                revolute, [m/s] for prismatic.
+            max_force_drive: Velocity-drive cap. Units [N*m] for
+                revolute, [N] for prismatic. Ignored in position-drive
+                mode.
             hertz_drive: Drive soft-constraint frequency [Hz].
             damping_ratio_drive: Drive damping ratio.
-            min_angle: Lower angular limit [rad].
-            max_angle: Upper angular limit [rad];
-                ``min_angle == max_angle == 0`` disables the limit.
+            min_value: Lower limit. Units [rad] for revolute, [m] for
+                prismatic.
+            max_value: Upper limit. Same units as ``min_value``;
+                ``min_value == max_value == 0`` disables the limit.
             hertz_limit: Limit soft-constraint frequency [Hz].
             damping_ratio_limit: Limit damping ratio.
 
         Returns:
-            :class:`ActuatedDoubleBallSocketHingeHandle` whose ``cid``
-            is rewritten in place by :meth:`finalize` to the joint's
-            global cid.
+            A :class:`JointHandle` whose ``cid`` field is rewritten in
+            place by :meth:`finalize` to the joint's global cid in the
+            shared :class:`ConstraintContainer`.
         """
         self._validate_body(body1)
         self._validate_body(body2)
-        descriptor = ActuatedDoubleBallSocketHingeDescriptor(
+        descriptor = JointDescriptor(
             body1=body1,
             body2=body2,
             anchor1=anchor1,
             anchor2=anchor2,
+            mode=JointMode(int(mode)),
             hertz=hertz,
             damping_ratio=damping_ratio,
             drive_mode=DriveMode(int(drive_mode)),
-            target_angle=target_angle,
+            target=target,
             target_velocity=target_velocity,
             max_force_drive=max_force_drive,
             hertz_drive=hertz_drive,
             damping_ratio_drive=damping_ratio_drive,
-            min_angle=min_angle,
-            max_angle=max_angle,
+            min_value=min_value,
+            max_value=max_value,
             hertz_limit=hertz_limit,
             damping_ratio_limit=damping_ratio_limit,
         )
-        handle = ActuatedDoubleBallSocketHingeHandle(cid=-1)
-        self._actuated_dbs_hinge_descriptors.append(descriptor)
-        self._actuated_dbs_hinge_handles.append(handle)
-        return handle
-
-    def add_prismatic(
-        self,
-        body1: int,
-        body2: int,
-        anchor: tuple[float, float, float],
-        axis: tuple[float, float, float],
-        hertz_angular: float = float(DEFAULT_HERTZ_ANGULAR),
-        damping_ratio_angular: float = float(DEFAULT_DAMPING_RATIO),
-        hertz_linear: float = float(DEFAULT_HERTZ_LINEAR),
-        damping_ratio_linear: float = float(DEFAULT_DAMPING_RATIO),
-    ) -> PrismaticHandle:
-        """Append a prismatic (slider) joint and return its handle.
-
-        Locks 5 of the 6 relative DoF between ``body1`` and ``body2``:
-
-        * 3 rotational DoF -- the bodies must keep the same relative
-          orientation as at finalize() time.
-        * 2 translational DoF -- the bodies may only separate along
-          ``axis``; lateral drift is forced to zero.
-
-        The remaining (free) DoF is translation along the slide axis.
-        Solved as one rank-5 column via a 3x3 + 2x2 Schur complement
-        with separate Hertz/damping for the angular vs linear blocks
-        (Box2D v3 / Bepu / Nordby soft-constraint formulation). See
-        :mod:`newton._src.solvers.jitter.constraint_prismatic` for the
-        derivation.
-
-        Both ``anchor`` and ``axis`` are interpreted in *world* space
-        at :meth:`finalize` time. The init kernel snapshots ``anchor``
-        into both bodies' local frames (so they coincide at rest by
-        construction) and snapshots ``axis`` into body 1's local frame
-        (so the slide direction "rides" body 1 rigidly, matching the
-        Bullet/ODE convention). ``axis`` need not be unit length.
-
-        Args:
-            body1: First body index. The slide axis is fixed in this
-                body's local frame.
-            body2: Second body index.
-            anchor: World-space point through which the slide axis
-                passes [m]. Both bodies measure their lever arms from
-                this point; lateral drift of body 2's anchor relative
-                to body 1's anchor is what the 2-row linear-lock
-                constraint sees.
-            axis: World-space slide direction at finalize() time;
-                automatically normalised. The relative translation along
-                this direction is the joint's free DoF.
-            hertz_angular: Soft-constraint stiffness target [Hz] for
-                the 3-row rotational lock. Defaults to
-                :data:`DEFAULT_HERTZ_ANGULAR`. Set to 0 to make the
-                rotational lock perfectly rigid (rigid plain-PGS update).
-            damping_ratio_angular: Non-dimensional damping ratio for
-                the rotational lock. Defaults to
-                :data:`DEFAULT_DAMPING_RATIO` (critically damped).
-            hertz_linear: Soft-constraint stiffness target [Hz] for the
-                2-row perpendicular-translation lock. Defaults to
-                :data:`DEFAULT_HERTZ_LINEAR`. Set to 0 for a rigid
-                lateral lock.
-            damping_ratio_linear: Non-dimensional damping ratio for
-                the perpendicular-translation lock.
-
-        Returns:
-            A :class:`PrismaticHandle` whose ``cid`` field is rewritten
-            in place by :meth:`finalize` to the joint's global cid in
-            the shared :class:`ConstraintContainer`.
-        """
-        self._validate_body(body1)
-        self._validate_body(body2)
-        descriptor = PrismaticDescriptor(
-            body1=body1,
-            body2=body2,
-            anchor=anchor,
-            axis=axis,
-            hertz_angular=hertz_angular,
-            damping_ratio_angular=damping_ratio_angular,
-            hertz_linear=hertz_linear,
-            damping_ratio_linear=damping_ratio_linear,
-        )
-        handle = PrismaticHandle(cid=-1)
-        self._prismatic_descriptors.append(descriptor)
-        self._prismatic_handles.append(handle)
+        handle = JointHandle(cid=-1)
+        self._joint_descriptors.append(descriptor)
+        self._joint_handles.append(handle)
         return handle
 
     def add_d6(
@@ -1303,12 +1126,8 @@ class WorldBuilder:
         self._angular_motors = []
         self._hinge_joint_descriptors = []
         self._hinge_joint_handles = []
-        self._double_ball_socket_hinge_descriptors = []
-        self._double_ball_socket_hinge_handles = []
-        self._actuated_dbs_hinge_descriptors = []
-        self._actuated_dbs_hinge_handles = []
-        self._prismatic_descriptors = []
-        self._prismatic_handles = []
+        self._joint_descriptors = []
+        self._joint_handles = []
         self._d6_descriptors = []
         self._d6_handles = []
         return world
@@ -1395,8 +1214,7 @@ class WorldBuilder:
             * cids ``[n_ball, +n_hinge)``                       -> hinge-angles
             * cids ``[..., +n_motor)``                          -> angular-motors
             * cids ``[..., +n_hinge_joint)``                    -> fused hinge-joints
-            * cids ``[..., +n_dbs_hinge)``                      -> fused double-ball-socket hinges
-            * cids ``[..., +n_prismatic)``                      -> prismatic (slider) joints
+            * cids ``[..., +n_joint)``                          -> unified revolute/prismatic joints
             * cids ``[..., +n_d6)``                             -> D6 (6-DoF generalised) joints
 
         The container's per-column dword count is ``max`` of all
@@ -1409,18 +1227,14 @@ class WorldBuilder:
         n_hinge = len(self._hinge_angles)
         n_motor = len(self._angular_motors)
         n_hinge_joint = len(self._hinge_joint_descriptors)
-        n_dbs_hinge = len(self._double_ball_socket_hinge_descriptors)
-        n_adbs_hinge = len(self._actuated_dbs_hinge_descriptors)
-        n_prismatic = len(self._prismatic_descriptors)
+        n_joint = len(self._joint_descriptors)
         n_d6 = len(self._d6_descriptors)
         total = (
             n_ball
             + n_hinge
             + n_motor
             + n_hinge_joint
-            + n_dbs_hinge
-            + n_adbs_hinge
-            + n_prismatic
+            + n_joint
             + n_d6
         )
 
@@ -1432,9 +1246,7 @@ class WorldBuilder:
             HA_DWORDS,
             AM_DWORDS,
             HJ_DWORDS,
-            DBS_DWORDS,
             ADBS_DWORDS,
-            PR_DWORDS,
             D6_DWORDS,
             CONTACT_DWORDS,
         )
@@ -1457,22 +1269,8 @@ class WorldBuilder:
         hinge_angle_offset = n_ball
         angular_motor_offset = n_ball + n_hinge
         hinge_joint_offset = n_ball + n_hinge + n_motor
-        dbs_hinge_offset = n_ball + n_hinge + n_motor + n_hinge_joint
-        adbs_hinge_offset = (
-            n_ball + n_hinge + n_motor + n_hinge_joint + n_dbs_hinge
-        )
-        prismatic_offset = (
-            n_ball + n_hinge + n_motor + n_hinge_joint + n_dbs_hinge + n_adbs_hinge
-        )
-        d6_offset = (
-            n_ball
-            + n_hinge
-            + n_motor
-            + n_hinge_joint
-            + n_dbs_hinge
-            + n_adbs_hinge
-            + n_prismatic
-        )
+        joint_offset = n_ball + n_hinge + n_motor + n_hinge_joint
+        d6_offset = n_ball + n_hinge + n_motor + n_hinge_joint + n_joint
 
         if n_ball > 0:
             self._init_ball_sockets(container, bodies, ball_socket_offset, device)
@@ -1482,14 +1280,8 @@ class WorldBuilder:
             self._init_angular_motors(container, bodies, angular_motor_offset, device)
         if n_hinge_joint > 0:
             self._init_hinge_joints(container, bodies, hinge_joint_offset, device)
-        if n_dbs_hinge > 0:
-            self._init_double_ball_socket_hinges(container, bodies, dbs_hinge_offset, device)
-        if n_adbs_hinge > 0:
-            self._init_actuated_double_ball_socket_hinges(
-                container, bodies, adbs_hinge_offset, device
-            )
-        if n_prismatic > 0:
-            self._init_prismatics(container, bodies, prismatic_offset, device)
+        if n_joint > 0:
+            self._init_joints(container, bodies, joint_offset, device)
         if n_d6 > 0:
             self._init_d6s(container, bodies, d6_offset, device)
 
@@ -1499,12 +1291,8 @@ class WorldBuilder:
         # valid after finalize() returns.
         for i, h in enumerate(self._hinge_joint_handles):
             h.cid = hinge_joint_offset + i
-        for i, h in enumerate(self._double_ball_socket_hinge_handles):
-            h.cid = dbs_hinge_offset + i
-        for i, h in enumerate(self._actuated_dbs_hinge_handles):
-            h.cid = adbs_hinge_offset + i
-        for i, h in enumerate(self._prismatic_handles):
-            h.cid = prismatic_offset + i
+        for i, h in enumerate(self._joint_handles):
+            h.cid = joint_offset + i
         for i, h in enumerate(self._d6_handles):
             h.cid = d6_offset + i
 
@@ -1785,83 +1573,25 @@ class WorldBuilder:
             device=device,
         )
 
-    def _init_double_ball_socket_hinges(
+    def _init_joints(
         self,
         constraints: ConstraintContainer,
         bodies: BodyContainer,
         cid_offset: int,
         device: wp.context.Device,
     ) -> None:
-        """Pack the fused two-anchor hinge descriptors into ``constraints``.
+        """Pack the unified revolute/prismatic joint descriptors.
 
-        One launch of :func:`double_ball_socket_initialize_kernel` writes
-        each fused column. The init kernel snapshots both world-space
-        anchors into each body's local frame; the hinge axis is implicit
-        in the line ``anchor1 -> anchor2``.
-        """
-        n = len(self._double_ball_socket_hinge_descriptors)
-
-        body1 = np.asarray(
-            [d.body1 for d in self._double_ball_socket_hinge_descriptors], dtype=np.int32
-        )
-        body2 = np.asarray(
-            [d.body2 for d in self._double_ball_socket_hinge_descriptors], dtype=np.int32
-        )
-        anchor1 = np.asarray(
-            [d.anchor1 for d in self._double_ball_socket_hinge_descriptors], dtype=np.float32
-        )
-        anchor2 = np.asarray(
-            [d.anchor2 for d in self._double_ball_socket_hinge_descriptors], dtype=np.float32
-        )
-        hertz = np.asarray(
-            [d.hertz for d in self._double_ball_socket_hinge_descriptors],
-            dtype=np.float32,
-        )
-        damping_ratio = np.asarray(
-            [d.damping_ratio for d in self._double_ball_socket_hinge_descriptors],
-            dtype=np.float32,
-        )
-
-        body1_d = wp.array(body1, dtype=wp.int32, device=device)
-        body2_d = wp.array(body2, dtype=wp.int32, device=device)
-        anchor1_d = wp.array(anchor1, dtype=wp.vec3f, device=device)
-        anchor2_d = wp.array(anchor2, dtype=wp.vec3f, device=device)
-        hertz_d = wp.array(hertz, dtype=wp.float32, device=device)
-        damping_ratio_d = wp.array(damping_ratio, dtype=wp.float32, device=device)
-
-        wp.launch(
-            double_ball_socket_initialize_kernel,
-            dim=n,
-            inputs=[
-                constraints,
-                bodies,
-                int(cid_offset),
-                body1_d,
-                body2_d,
-                anchor1_d,
-                anchor2_d,
-                hertz_d,
-                damping_ratio_d,
-            ],
-            device=device,
-        )
-
-    def _init_actuated_double_ball_socket_hinges(
-        self,
-        constraints: ConstraintContainer,
-        bodies: BodyContainer,
-        cid_offset: int,
-        device: wp.context.Device,
-    ) -> None:
-        """Pack the actuated fused two-anchor hinge descriptors.
-
-        Layered on top of :meth:`_init_double_ball_socket_hinges`: the
-        same per-anchor world->local snapshot, plus the per-actuator
-        drive + limit parameters. One launch of
+        Same ingestion path for both modes: the init kernel branches on
+        the per-constraint ``joint_mode`` field, auto-deriving the
+        prismatic third anchor from ``|anchor2 - anchor1|`` when
+        needed. One launch of
         :func:`actuated_double_ball_socket_initialize_kernel` writes
-        each fused column.
+        every joint column; a non-actuated joint is just one with
+        ``drive_mode = DRIVE_MODE_OFF`` and
+        ``min_value == max_value == 0``.
         """
-        descs = self._actuated_dbs_hinge_descriptors
+        descs = self._joint_descriptors
         n = len(descs)
 
         body1 = np.asarray([d.body1 for d in descs], dtype=np.int32)
@@ -1870,16 +1600,17 @@ class WorldBuilder:
         anchor2 = np.asarray([d.anchor2 for d in descs], dtype=np.float32)
         hertz = np.asarray([d.hertz for d in descs], dtype=np.float32)
         damping_ratio = np.asarray([d.damping_ratio for d in descs], dtype=np.float32)
+        joint_mode = np.asarray([int(d.mode) for d in descs], dtype=np.int32)
         drive_mode = np.asarray([int(d.drive_mode) for d in descs], dtype=np.int32)
-        target_angle = np.asarray([d.target_angle for d in descs], dtype=np.float32)
+        target = np.asarray([d.target for d in descs], dtype=np.float32)
         target_velocity = np.asarray([d.target_velocity for d in descs], dtype=np.float32)
         max_force_drive = np.asarray([d.max_force_drive for d in descs], dtype=np.float32)
         hertz_drive = np.asarray([d.hertz_drive for d in descs], dtype=np.float32)
         damping_ratio_drive = np.asarray(
             [d.damping_ratio_drive for d in descs], dtype=np.float32
         )
-        min_angle = np.asarray([d.min_angle for d in descs], dtype=np.float32)
-        max_angle = np.asarray([d.max_angle for d in descs], dtype=np.float32)
+        min_value = np.asarray([d.min_value for d in descs], dtype=np.float32)
+        max_value = np.asarray([d.max_value for d in descs], dtype=np.float32)
         hertz_limit = np.asarray([d.hertz_limit for d in descs], dtype=np.float32)
         damping_ratio_limit = np.asarray(
             [d.damping_ratio_limit for d in descs], dtype=np.float32
@@ -1891,14 +1622,15 @@ class WorldBuilder:
         anchor2_d = wp.array(anchor2, dtype=wp.vec3f, device=device)
         hertz_d = wp.array(hertz, dtype=wp.float32, device=device)
         damping_ratio_d = wp.array(damping_ratio, dtype=wp.float32, device=device)
+        joint_mode_d = wp.array(joint_mode, dtype=wp.int32, device=device)
         drive_mode_d = wp.array(drive_mode, dtype=wp.int32, device=device)
-        target_angle_d = wp.array(target_angle, dtype=wp.float32, device=device)
+        target_d = wp.array(target, dtype=wp.float32, device=device)
         target_velocity_d = wp.array(target_velocity, dtype=wp.float32, device=device)
         max_force_drive_d = wp.array(max_force_drive, dtype=wp.float32, device=device)
         hertz_drive_d = wp.array(hertz_drive, dtype=wp.float32, device=device)
         damping_ratio_drive_d = wp.array(damping_ratio_drive, dtype=wp.float32, device=device)
-        min_angle_d = wp.array(min_angle, dtype=wp.float32, device=device)
-        max_angle_d = wp.array(max_angle, dtype=wp.float32, device=device)
+        min_value_d = wp.array(min_value, dtype=wp.float32, device=device)
+        max_value_d = wp.array(max_value, dtype=wp.float32, device=device)
         hertz_limit_d = wp.array(hertz_limit, dtype=wp.float32, device=device)
         damping_ratio_limit_d = wp.array(damping_ratio_limit, dtype=wp.float32, device=device)
 
@@ -1915,94 +1647,17 @@ class WorldBuilder:
                 anchor2_d,
                 hertz_d,
                 damping_ratio_d,
+                joint_mode_d,
                 drive_mode_d,
-                target_angle_d,
+                target_d,
                 target_velocity_d,
                 max_force_drive_d,
                 hertz_drive_d,
                 damping_ratio_drive_d,
-                min_angle_d,
-                max_angle_d,
+                min_value_d,
+                max_value_d,
                 hertz_limit_d,
                 damping_ratio_limit_d,
-            ],
-            device=device,
-        )
-
-    def _init_prismatics(
-        self,
-        constraints: ConstraintContainer,
-        bodies: BodyContainer,
-        cid_offset: int,
-        device: wp.context.Device,
-    ) -> None:
-        """Pack the prismatic-joint descriptors into ``constraints``.
-
-        One launch of :func:`prismatic_initialize_kernel` writes each
-        prismatic column. The init kernel snapshots ``anchor`` into
-        both bodies' local frames and ``axis`` into body 1's local
-        frame (normalising it on the fly), then snapshots the rest-pose
-        relative orientation ``q0 = q2^* q1`` so the runtime math
-        operates entirely on quantities that move rigidly with the
-        bodies.
-        """
-        n = len(self._prismatic_descriptors)
-
-        body1 = np.asarray(
-            [d.body1 for d in self._prismatic_descriptors], dtype=np.int32
-        )
-        body2 = np.asarray(
-            [d.body2 for d in self._prismatic_descriptors], dtype=np.int32
-        )
-        anchor = np.asarray(
-            [d.anchor for d in self._prismatic_descriptors], dtype=np.float32
-        )
-        axis = np.asarray(
-            [d.axis for d in self._prismatic_descriptors], dtype=np.float32
-        )
-        hertz_angular = np.asarray(
-            [d.hertz_angular for d in self._prismatic_descriptors], dtype=np.float32
-        )
-        damping_ratio_angular = np.asarray(
-            [d.damping_ratio_angular for d in self._prismatic_descriptors],
-            dtype=np.float32,
-        )
-        hertz_linear = np.asarray(
-            [d.hertz_linear for d in self._prismatic_descriptors], dtype=np.float32
-        )
-        damping_ratio_linear = np.asarray(
-            [d.damping_ratio_linear for d in self._prismatic_descriptors],
-            dtype=np.float32,
-        )
-
-        body1_d = wp.array(body1, dtype=wp.int32, device=device)
-        body2_d = wp.array(body2, dtype=wp.int32, device=device)
-        anchor_d = wp.array(anchor, dtype=wp.vec3f, device=device)
-        axis_d = wp.array(axis, dtype=wp.vec3f, device=device)
-        hertz_angular_d = wp.array(hertz_angular, dtype=wp.float32, device=device)
-        damping_ratio_angular_d = wp.array(
-            damping_ratio_angular, dtype=wp.float32, device=device
-        )
-        hertz_linear_d = wp.array(hertz_linear, dtype=wp.float32, device=device)
-        damping_ratio_linear_d = wp.array(
-            damping_ratio_linear, dtype=wp.float32, device=device
-        )
-
-        wp.launch(
-            prismatic_initialize_kernel,
-            dim=n,
-            inputs=[
-                constraints,
-                bodies,
-                int(cid_offset),
-                body1_d,
-                body2_d,
-                anchor_d,
-                axis_d,
-                hertz_angular_d,
-                damping_ratio_angular_d,
-                hertz_linear_d,
-                damping_ratio_linear_d,
             ],
             device=device,
         )

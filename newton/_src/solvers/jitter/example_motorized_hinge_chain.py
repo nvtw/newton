@@ -59,7 +59,7 @@ import newton
 import newton.examples
 from newton._src.solvers.jitter.picking import JitterPicking, register_with_viewer_gl
 from newton._src.solvers.jitter.solver_jitter import pack_body_xforms_kernel
-from newton._src.solvers.jitter.world_builder import D6AxisDrive, DriveMode, WorldBuilder
+from newton._src.solvers.jitter.world_builder import D6AxisDrive, DriveMode, JointMode, WorldBuilder
 
 
 class JointKind(enum.Enum):
@@ -101,7 +101,7 @@ class JointKind(enum.Enum):
 # Selects which constraint type every joint in the chain is built
 # with. Switch this to compare solver behaviour / robustness across
 # the three implementations of "hinge between two cubes".
-JOINT_KIND = JointKind.DOUBLE_BALL_SOCKET
+JOINT_KIND = JointKind.ACTUATED_DOUBLE_BALL_SOCKET
 
 NUM_CUBES = 10
 HALF_EXTENT = 0.5
@@ -202,11 +202,12 @@ class Example:
                 a1 = (anchor[0], anchor[1], anchor[2] - HALF_EXTENT)
                 a2 = (anchor[0], anchor[1], anchor[2] + HALF_EXTENT)
                 self.hinge_handles.append(
-                    b.add_double_ball_socket_hinge(
+                    b.add_joint(
                         body1=body_a,
                         body2=body_b,
                         anchor1=a1,
                         anchor2=a2,
+                        mode=JointMode.REVOLUTE,
                     )
                 )
             elif JOINT_KIND is JointKind.ACTUATED_DOUBLE_BALL_SOCKET:
@@ -216,11 +217,12 @@ class Example:
                 a1 = (anchor[0], anchor[1], anchor[2] - HALF_EXTENT)
                 a2 = (anchor[0], anchor[1], anchor[2] + HALF_EXTENT)
                 self.hinge_handles.append(
-                    b.add_actuated_double_ball_socket_hinge(
+                    b.add_joint(
                         body1=body_a,
                         body2=body_b,
                         anchor1=a1,
                         anchor2=a2,
+                        mode=JointMode.REVOLUTE,
                         drive_mode=DriveMode.VELOCITY,
                         target_velocity=TARGET_VELOCITY,
                         max_force_drive=_MOTOR_MAX_FORCE,

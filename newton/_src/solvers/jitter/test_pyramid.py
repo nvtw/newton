@@ -97,99 +97,134 @@ class TestPyramidSettle(unittest.TestCase):
         ex = _run_pyramid(layers=10, frames=self.SETTLE_FRAMES)
         ex.test_final()
 
-    def test_ground_reaction_balances_weight(self):
-        """Total vertical ground reaction must equal the stack's weight.
+    def test_settled_pyramid_force_report(self):
+        """Contact forces on a settled 5-layer pyramid must satisfy
+        static equilibrium for every body individually.
 
-        At rest the sum of all contact forces the plane applies to the
-        cubes must cancel gravity exactly, modulo PGS discretisation
-        error. We check the Z component of the sum of per-contact
-        forces reported by :meth:`World.gather_contact_wrenches` for
-        every contact whose ``shape0`` is the plane (shape id 0 in
-        this scene).
+        After 3 s of settle the stack is at rest. Newton's second law
+        at zero acceleration requires, for every dynamic body ``b``:
 
-        Also cross-checks that the per-pair summary kernel
-        (:meth:`World.gather_contact_pair_wrenches`) agrees with the
-        per-contact kernel: summing both should yield the same total.
+            F_up(b) - F_down(b) - m_b * g == 0
+
+        where
+
+            F_up(b)   = sum of contact-normal Fz from pairs where b
+                        is ``body2`` (things below pushing ``b`` up)
+            F_down(b) = sum of contact-normal Fz from pairs where b
+                        is ``body1`` (what ``b`` pushes down onto
+                        things below -- equivalently the reaction b
+                        feels from its upper neighbours is the
+                        opposite sign, so we count the +Fz applied to
+                        those neighbours here)
+
+        This is the strongest per-body check possible for a
+        multi-body stack because it does *not* depend on how PGS
+        distributes load between symmetric siblings (that
+        distribution is mathematically indeterminate for aligned,
+        rigid cubes and changes with warm-start / iteration count).
+        Only the *per-body* sums are uniquely determined, and those
+        are what we pin.
+
+        The test also cross-checks:
+          * the top cube has ``F_down == 0`` (nothing rests on it),
+          * every vertical contact has non-negative normal force
+            (Signorini),
+          * the per-pair summary kernel agrees with the per-contact
+            kernel (consistency between the two report APIs).
         """
         g = 9.81
         ex = _run_pyramid(layers=5, frames=self.SETTLE_FRAMES)
 
-        # ---- total weight we expect to see pushed back by the ground ----
-        inv_mass = ex.world.bodies.inverse_mass.numpy()
-        # Jitter body 0 is the static anchor (inv_mass == 0). Skip it.
-        masses = np.where(inv_mass[1:] > 0.0, 1.0 / np.maximum(inv_mass[1:], 1e-30), 0.0)
-        total_weight = float(masses.sum() * g)
-        self.assertGreater(total_weight, 0.0)
+        # Confirm the stack is actually at rest -- otherwise F = m*a
+        # rather than F = m*g and the balance below is meaningless.
+        velocities = ex.world.bodies.velocity.numpy()
+        v_max = float(np.linalg.norm(velocities[1:], axis=1).max())
+        self.assertLess(v_max, 1e-2, f"stack hasn't settled (max |v|={v_max:.4f})")
 
-        # ---- per-contact wrenches --------------------------------------
-        per_contact = wp.zeros(
-            ex.world.rigid_contact_max,
-            dtype=wp.spatial_vector,
-            device=ex.device,
-        )
-        ex.world.gather_contact_wrenches(per_contact)
-        wrenches = per_contact.numpy()
-        # ``wp.spatial_vector`` is packed as 6 floats; top 3 are force,
-        # bottom 3 are torque (the convention we chose in
-        # ``gather_constraint_wrenches``).
-        forces = wrenches[:, :3]
+        inv_m = ex.world.bodies.inverse_mass.numpy()
+        mass = np.where(inv_m > 0.0, 1.0 / np.maximum(inv_m, 1e-30), 0.0)
+        weight = mass * g  # indexed by Jitter body id
 
-        # Which contacts touch the ground plane? The plane is shape 0.
-        contacts = ex.contacts
-        n_active = int(contacts.rigid_contact_count.numpy()[0])
-        self.assertGreater(n_active, 0, "no active contacts after settle")
-        shape0 = contacts.rigid_contact_shape0.numpy()[:n_active]
-        shape1 = contacts.rigid_contact_shape1.numpy()[:n_active]
-        ground_mask = np.zeros(forces.shape[0], dtype=bool)
-        for k in range(n_active):
-            if shape0[k] == 0 or shape1[k] == 0:
-                ground_mask[k] = True
-
-        ground_force = forces[ground_mask].sum(axis=0)
-        # The ground pushes up (+z) on body 2 of each contact. Body 2
-        # is the *cube* for every ground contact we collected (shape 0
-        # is the plane, so it is always shape0/body 1), so the +Z
-        # component should be ~total_weight.
-        self.assertGreater(
-            float(ground_force[2]),
-            0.5 * total_weight,
-            msg=f"ground reaction too low: {ground_force} vs weight {total_weight}",
-        )
-        self.assertLess(
-            abs(float(ground_force[2]) - total_weight) / total_weight,
-            0.10,
-            msg=(
-                f"ground reaction Z ({ground_force[2]:.3f} N) does not "
-                f"match weight ({total_weight:.3f} N)"
-            ),
-        )
-
-        # ---- per-pair summary should agree -----------------------------
+        # ---- per-contact-column wrenches --------------------------------
         n_cols = ex.world.max_contact_columns
-        pair_wrenches = wp.zeros(n_cols, dtype=wp.spatial_vector, device=ex.device)
+        pair_w = wp.zeros(n_cols, dtype=wp.spatial_vector, device=ex.device)
         pair_b1 = wp.zeros(n_cols, dtype=wp.int32, device=ex.device)
         pair_b2 = wp.zeros(n_cols, dtype=wp.int32, device=ex.device)
         pair_count = wp.zeros(n_cols, dtype=wp.int32, device=ex.device)
-        ex.world.gather_contact_pair_wrenches(
-            pair_wrenches, pair_b1, pair_b2, pair_count
-        )
-        pw = pair_wrenches.numpy()[:, :3]
-        pc = pair_count.numpy()
-        # Totals across all *active* columns must equal the total
-        # over all per-contact entries, within float slop.
-        total_pair_force = pw[pc > 0].sum(axis=0)
-        total_per_contact_force = forces.sum(axis=0)
-        np.testing.assert_allclose(
-            total_pair_force,
-            total_per_contact_force,
-            rtol=1e-3,
-            atol=1e-2,
-            err_msg="per-pair and per-contact totals disagree",
+        ex.world.gather_contact_pair_wrenches(pair_w, pair_b1, pair_b2, pair_count)
+
+        pw = pair_w.numpy()[:, :3]
+        b1_np = pair_b1.numpy()
+        b2_np = pair_b2.numpy()
+        active = pair_count.numpy() > 0
+        self.assertGreater(int(active.sum()), 0, "no active contact pairs")
+
+        # ---- per-body vertical balance ----------------------------------
+        # Residual budget: warm-start lag + one PGS sweep's worth of
+        # slack. Empirically < 5 N on a 9810 N weight -- we grant
+        # 50 N (0.5% of one cube's weight).
+        BALANCE_TOL = 50.0
+
+        residuals = []
+        for b in range(1, ex.world.num_bodies):
+            sel_up = active & (b2_np == b)
+            sel_dn = active & (b1_np == b)
+            f_up = float(pw[sel_up, 2].sum())
+            f_dn = float(pw[sel_dn, 2].sum())
+            net = f_up - f_dn
+            resid = net - float(weight[b])
+            residuals.append(resid)
+            self.assertLess(
+                abs(resid),
+                BALANCE_TOL,
+                msg=(
+                    f"body {b}: vertical imbalance {resid:.3f} N "
+                    f"(F_up={f_up:.1f}, F_down={f_dn:.1f}, "
+                    f"m*g={weight[b]:.1f})"
+                ),
+            )
+
+        # ---- apex cube has nothing resting on it -----------------------
+        # In a 5-layer pyramid body 15 is the top cube. Nothing sits
+        # above it, so its F_down must be zero.
+        apex = ex.world.num_bodies - 1
+        sel_apex_dn = active & (b1_np == apex)
+        self.assertAlmostEqual(
+            float(pw[sel_apex_dn, 2].sum()),
+            0.0,
+            delta=1.0,
+            msg="apex cube should have zero downward contact force",
         )
 
-        # Active columns' contact counts should add up to the active
-        # contacts reported by the CollisionPipeline.
-        self.assertEqual(int(pc.sum()), n_active)
+        # ---- Signorini: no vertical contact may pull -------------------
+        per = wp.zeros(ex.world.rigid_contact_max, dtype=wp.spatial_vector, device=ex.device)
+        ex.world.gather_contact_wrenches(per)
+        contacts = ex.contacts
+        n_active = int(contacts.rigid_contact_count.numpy()[0])
+        nrm = contacts.rigid_contact_normal.numpy()[:n_active]
+        f_all = per.numpy()[:n_active, :3]
+        # Vertical contacts (box-on-box or box-on-plane) have |nz|
+        # close to 1. For them the reported Fz (= lambda_n * idt,
+        # times the +z normal) must be non-negative.
+        vert = np.abs(nrm[:, 2]) > 0.9
+        if vert.any():
+            self.assertGreaterEqual(
+                float(f_all[vert, 2].min()),
+                -1.0,
+                msg="vertical contact reported pulling (negative normal)",
+            )
+
+        # ---- cross-check per-pair vs per-contact totals ----------------
+        total_pair = pw[active].sum(axis=0)
+        total_percontact = f_all.sum(axis=0)
+        np.testing.assert_allclose(
+            total_pair,
+            total_percontact,
+            rtol=1e-3,
+            atol=1e-1,
+            err_msg="per-pair and per-contact totals disagree",
+        )
+        self.assertEqual(int(pair_count.numpy().sum()), n_active)
 
 
 if __name__ == "__main__":
