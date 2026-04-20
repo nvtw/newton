@@ -526,7 +526,9 @@ class World:
         idt = wp.float32(1.0 / self.substep_dt)
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
 
-        # PrepareForIteration: one sweep over all partitions.
+        # PrepareForIteration: one sweep over all partitions. This is
+        # the first reset of the substep, so we do the full adjacency
+        # rebuild (count + scan + store) here.
         self._partitioner.reset(self._elements, self._num_active_constraints)
         wp.capture_while(
             self._partitioner.num_remaining,
@@ -536,9 +538,17 @@ class World:
             contact_views=contact_views,
         )
 
-        # Iterate: ``iterations`` sweeps over all partitions.
+        # Iterate: ``iterations`` sweeps over all partitions. The
+        # constraint graph does not change between PGS iterations --
+        # only the accumulated impulses evolve -- so the adjacency
+        # structure built by the prepare-sweep reset above is still
+        # valid. Use the cheap ``reset_loop_state_only`` path which
+        # skips ``partitioning_prepare_kernel``, the adjacency
+        # count/scan/store sequence, and falls back to a single fused
+        # launch that resets ``partition_data_concat`` and
+        # ``interaction_id_to_partition`` for [0, num_elements[0]).
         for _ in range(iterations):
-            self._partitioner.reset(self._elements, self._num_active_constraints)
+            self._partitioner.reset_loop_state_only()
             wp.capture_while(
                 self._partitioner.num_remaining,
                 self._capture_partition_sweep,

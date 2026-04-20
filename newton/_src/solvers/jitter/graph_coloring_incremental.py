@@ -29,17 +29,15 @@ from newton._src.solvers.jitter.graph_coloring_common import (
     MAX_BODIES,
     TILE_SCAN_BLOCK_DIM,
     ElementInteractionData,
-    incremental_advance_kernel,
-    incremental_compact_kernel,
     incremental_fill_minus_one_kernel,
-    incremental_flag_kernel,
     incremental_init_kernel,
-    incremental_zero_int_kernel,
+    incremental_init_remaining_ids_kernel,
+    incremental_reset_loop_state_kernel,
+    incremental_tile_compact_remaining_and_advance_kernel,
     partitioning_adjacency_count_kernel,
     partitioning_adjacency_store_kernel,
-    partitioning_coloring_kernel,
+    partitioning_coloring_incremental_kernel,
     partitioning_prepare_kernel,
-    tile_scan_exclusive_block_kernel,
 )
 from newton._src.solvers.jitter.scan_and_sort import scan_variable_length
 
@@ -68,7 +66,7 @@ class IncrementalContactPartitioner:
         max_num_nodes: int,
         device: wp.DeviceLike = None,
         seed: int = 0,
-        use_tile_scan: bool = False,
+        use_tile_scan: bool = True,
     ) -> None:
         self.max_num_interactions = max_num_interactions
         self.max_num_nodes = max_num_nodes
@@ -121,6 +119,21 @@ class IncrementalContactPartitioner:
         self._flags = wp.zeros(padded_len, dtype=wp.int32, device=device)
         self._offsets = wp.zeros(padded_len, dtype=wp.int32, device=device)
         self._partition_element_ids = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
+
+        # Compact remaining-elements index buffer. Holds the raw ids
+        # of all still-active elements for the next JP round; updated
+        # in place by ``incremental_tile_compact_remaining_and_advance_kernel``
+        # after every round.
+        #
+        # In-place compaction is safe because the fused kernel packs
+        # survivors leftward (writes go to indices <= the indices they
+        # were read from); see the kernel docstring for the detailed
+        # correctness argument. Using a single buffer -- rather than a
+        # ping-pong pair with host-side swap -- is essential for CUDA
+        # graph capture, which freezes kernel arguments at record time
+        # and would bind the same physical buffer for every replayed
+        # iteration regardless of any Python-level swap.
+        self._remaining_ids = wp.zeros(padded_len, dtype=wp.int32, device=device)
 
         # Scalar device-side loop state (1-element arrays).
         self._current_color = wp.zeros(1, dtype=wp.int32, device=device)
@@ -207,12 +220,89 @@ class IncrementalContactPartitioner:
             inputs=[self._interaction_id_to_partition, num_elements],
         )
 
-        # 6. Initialize device-side loop state (current_color=0,
+        # 6. Initialize the compact remaining-ids index buffer with the
+        #    identity permutation so the first JP round visits every
+        #    active element in [0, num_elements[0]).
+        wp.launch(
+            incremental_init_remaining_ids_kernel,
+            dim=self.max_num_interactions,
+            inputs=[self._remaining_ids, num_elements],
+        )
+
+        # 7. Initialize device-side loop state (current_color=0,
         #    num_remaining=num_elements[0], partition_count=0).
         wp.launch(
             incremental_init_kernel,
             dim=1,
             inputs=[self._current_color, self._num_remaining, self._partition_count, num_elements],
+        )
+
+    def reset_loop_state_only(self) -> None:
+        """Fast reset that keeps the previously-built adjacency intact.
+
+        Safe to call in place of :meth:`reset` whenever the constraint
+        set -- i.e. ``elements`` and ``num_elements[0]`` -- has not
+        changed since the last :meth:`reset` call. This is the common
+        case in a PGS solver: between iterations within a substep only
+        the accumulated impulses change, the constraint graph itself is
+        fixed, so the expensive adjacency rebuild (prepare + count +
+        scan + store) can be skipped entirely.
+
+        The method only resets:
+
+        * ``partition_data_concat[tid] = _UNPARTITIONED | tid`` for
+          ``tid < num_elements[0]`` -- undoing the color tags the
+          previous ``launch()`` loop wrote.
+        * ``interaction_id_to_partition[tid] = -1`` so the per-element
+          assigned color reflects "unassigned" again.
+        * ``current_color``, ``num_remaining``, ``partition_count``
+          scalars (via the same ``incremental_init_kernel`` used by
+          :meth:`reset`).
+
+        :meth:`reset` must have been called at least once before this
+        method to populate the adjacency structure.
+        """
+        assert self._elements is not None and self._num_elements is not None, (
+            "reset() must be called before reset_loop_state_only()"
+        )
+
+        # Single fused launch that resets both per-element arrays the
+        # JP coloring pass consumes. Cheaper than two separate launches
+        # (one for partition_data_concat, one for
+        # interaction_id_to_partition) and touches exactly the active
+        # prefix, so the padded tails stay at their construction zeros.
+        wp.launch(
+            incremental_reset_loop_state_kernel,
+            dim=self.max_num_interactions,
+            inputs=[
+                self._partition_data_concat,
+                self._interaction_id_to_partition,
+                self._num_elements,
+            ],
+        )
+
+        # Reinitialise the compact remaining-ids buffer with the
+        # identity permutation so the first JP round after the reset
+        # visits every active element. The previous loop's contents
+        # are stale because ``partition_data_concat`` was just wiped;
+        # regenerating is strictly cheaper than trying to preserve them.
+        wp.launch(
+            incremental_init_remaining_ids_kernel,
+            dim=self.max_num_interactions,
+            inputs=[self._remaining_ids, self._num_elements],
+        )
+
+        # Re-initialise the device-side scalar loop state. This is the
+        # same kernel ``reset`` uses in its final step.
+        wp.launch(
+            incremental_init_kernel,
+            dim=1,
+            inputs=[
+                self._current_color,
+                self._num_remaining,
+                self._partition_count,
+                self._num_elements,
+            ],
         )
 
     def launch(self) -> None:
@@ -231,78 +321,73 @@ class IncrementalContactPartitioner:
         """
         assert self._elements is not None and self._num_elements is not None, "reset() must be called before launch()"
 
-        # 1. JP coloring pass for partition current_color[0].
-        # ``max_used_color`` is not consumed by the incremental API, so we
-        # reuse the prepare dummy to satisfy the shared kernel's signature.
+        # 1. JP coloring pass driven by the compact remaining-ids list.
+        #
+        # ``partitioning_coloring_incremental_kernel`` iterates over
+        # ``remaining_ids_front[0..num_remaining[0])`` instead of
+        # ``partition_data_concat[0..num_elements[0])``. Every lane now
+        # processes an element that is definitively still active, so
+        # warps are fully utilised and the adjacency walk runs across
+        # all lanes together -- this eliminates the thread-divergence
+        # cost that dominated the classic kernel as rounds progressed.
+        #
+        # Launch dim stays at ``max_num_interactions`` because the
+        # launch size must be a static constant under ``capture_while``
+        # (``num_remaining[0]`` lives on the device). Lanes beyond
+        # ``num_remaining[0]`` early-exit before any memory work; the
+        # warp-utilisation gain comes from the fact that the *active*
+        # lanes are packed contiguously in the launch grid, instead of
+        # scattered across the full [0, max_num_interactions) range.
         wp.launch(
-            partitioning_coloring_kernel,
+            partitioning_coloring_incremental_kernel,
             dim=self.max_num_interactions,
             inputs=[
                 self._partition_data_concat,
-                self._prepare_partition_ends_dummy,
-                self._prepare_max_used_color_dummy,
                 self._random_values,
                 self._adjacency_section_end_indices,
                 self._vertex_to_adjacent_elements,
                 self.max_num_contacts,
                 self._elements,
-                self._num_elements,
+                self._remaining_ids,
+                self._num_remaining,
                 self._section_marker,
                 self._current_color,
             ],
         )
 
-        # 2. Set flags[tid]=1 for elements just committed to the current
-        #    partition, 0 otherwise. The flag kernel unconditionally
-        #    writes every slot in ``[0, max_num_interactions)`` (the
-        #    ``tid >= n`` guard stores 0, the ``tid < n`` body stores 0
-        #    or 1), so no separate zero-pass is required -- the prior
-        #    ``incremental_zero_int_kernel`` launch was dead code.
-        #    Slots in ``[max_num_interactions, padded_len)`` stay at
-        #    their construction-time zeros for the lifetime of the
-        #    object (nothing else touches them).
-        wp.launch(
-            incremental_flag_kernel,
-            dim=self.max_num_interactions,
-            inputs=[self._partition_data_concat, self._current_color, self._flags, self._num_elements],
+        # 2. Fused in-place compaction of remaining_ids + commit the
+        #    current partition + advance device-side loop state.
+        #
+        # Four kernels collapsed into one single-block grid-stride
+        # launch. The fused kernel reads from and writes to the *same*
+        # ``remaining_ids`` buffer, packing survivors leftward into
+        # [0, survivor_running). Safe in place because every write
+        # lands at an index <= the index it read from; see the kernel
+        # docstring for the detailed argument.
+        #
+        # ``use_tile_scan`` is required because this compact path
+        # relies on ``wp.tile_scan_exclusive`` / ``wp.tile_sum``; the
+        # old non-tile fallback (``wp.utils.array_scan``) was removed
+        # when the remaining-ids buffer was introduced because it is
+        # not safe inside ``wp.capture_while`` anyway.
+        assert self.use_tile_scan, (
+            "IncrementalContactPartitioner.launch requires use_tile_scan=True. "
+            "The non-tile fallback was removed when the remaining-ids buffer was "
+            "introduced (wp.utils.array_scan cannot run inside wp.capture_while)."
         )
-
-        # 3. Exclusive prefix scan of flags -> offsets. Deterministic, which is
-        #    what gives the partitioner byte-for-byte repeatable outputs.
-        if self.use_tile_scan:
-            # Single-block tile scan: graph-capture safe (no implicit
-            # allocations) but sequential across the grid-stride tail.
-            wp.launch_tiled(
-                tile_scan_exclusive_block_kernel,
-                dim=[1],
-                inputs=[self._flags, self._offsets],
-                block_dim=int(TILE_SCAN_BLOCK_DIM),
-            )
-        else:
-            wp.utils.array_scan(self._flags, self._offsets, inclusive=False)
-
-        # 4. Compact: write partition_element_ids[offsets[tid]] = tid for
-        #    flagged threads, update interaction_id_to_partition, publish count.
-        wp.launch(
-            incremental_compact_kernel,
-            dim=self.max_num_interactions,
+        wp.launch_tiled(
+            incremental_tile_compact_remaining_and_advance_kernel,
+            dim=[1],
             inputs=[
-                self._flags,
-                self._offsets,
+                self._partition_data_concat,
+                self._remaining_ids,
                 self._current_color,
+                self._num_remaining,
+                self._partition_count,
                 self._partition_element_ids,
                 self._interaction_id_to_partition,
-                self._partition_count,
-                self._num_elements,
             ],
-        )
-
-        # 5. Advance device-side loop state: num_remaining -= partition_count,
-        #    current_color += 1.
-        wp.launch(
-            incremental_advance_kernel,
-            dim=1,
-            inputs=[self._current_color, self._num_remaining, self._partition_count],
+            block_dim=int(TILE_SCAN_BLOCK_DIM),
         )
 
     # ------------------------------------------------------------------

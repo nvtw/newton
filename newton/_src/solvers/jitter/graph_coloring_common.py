@@ -267,6 +267,92 @@ def partitioning_coloring_kernel(
         wp.atomic_add(partition_ends, color_copy, 1)
 
 
+@wp.kernel(enable_backward=False)
+def partitioning_coloring_incremental_kernel(
+    partition_data_concat: wp.array[wp.int64],
+    random_values: wp.array[int],
+    adjacency_section_end_indices: wp.array[int],
+    vertex_to_adjacent_elements: wp.array[int],
+    max_num_contacts: int,
+    elements: wp.array[ElementInteractionData],
+    remaining_ids: wp.array[int],
+    num_remaining: wp.array[int],
+    section_marker_single_el_arr: wp.array[int],
+    color_arr: wp.array[int],
+):
+    """Jones-Plassmann MIS pass iterating over a compact remaining-ids list.
+
+    Functionally identical to :func:`partitioning_coloring_kernel` but reads
+    the set of candidate elements from ``remaining_ids[0..num_remaining[0])``
+    instead of filtering ``[0, num_elements[0])`` via an ``is_removed``
+    check at the top of every thread.
+
+    Why this matters:
+
+    * **No thread divergence from self-filtering.** In the classic
+      kernel every lane must load ``partition_data_concat[tid]`` to
+      decide whether to bail. With a compact remaining list every
+      launched lane has real work -- warps stay fully utilised and the
+      adjacency walk (the hot inner loop) runs on all 32 lanes
+      together instead of a sparse subset.
+    * **Fewer spurious launches.** The launch grid is ``num_remaining``
+      rounded up to a tile, not ``max_num_interactions``. After a few
+      colour rounds this is already a sizeable cut.
+
+    Neighbours referenced via the adjacency list are still checked with
+    ``contact_partitions_is_removed`` because they can come from any
+    earlier round (and thus may or may not be settled); that filter is
+    cheap and unavoidable for correctness.
+    """
+    slot = wp.tid()
+
+    if slot >= num_remaining[0]:
+        return
+
+    tid = remaining_ids[slot]
+    color_copy = color_arr[0]
+    section_marker = section_marker_single_el_arr[0]
+
+    # Elements in the compact list are -- by construction -- not yet
+    # assigned, so the outer ``is_removed`` self-check that the classic
+    # kernel runs is redundant here and is skipped.
+
+    is_local_max = bool(True)
+
+    self_prio = contact_partitions_get_random_value(random_values, tid, section_marker, max_num_contacts)
+    el = elements[tid]
+
+    for j in range(MAX_BODIES):
+        if not is_local_max:
+            break
+        v = element_interaction_data_get(el, j)
+        if v < 0:
+            break
+
+        if v > 0:
+            start = adjacency_section_end_indices[v - 1]
+        else:
+            start = 0
+        end = adjacency_section_end_indices[v]
+        for k in range(start, end):
+            neighbor = vertex_to_adjacent_elements[k]
+            if neighbor == tid:
+                continue
+            # Neighbours come from the raw id space, so they may still
+            # belong to an earlier round's partition. Filter them out.
+            if contact_partitions_is_removed(partition_data_concat, neighbor, color_copy):
+                continue
+            if (
+                contact_partitions_get_random_value(random_values, neighbor, section_marker, max_num_contacts)
+                > self_prio
+            ):
+                is_local_max = False
+                break
+
+    if is_local_max:
+        partition_data_concat[tid] = (wp.int64(color_copy + 1) << _COLOR_SHIFT) | wp.int64(tid)
+
+
 # ---------------------------------------------------------------------------
 # Incremental-path helper kernels.
 # ---------------------------------------------------------------------------
@@ -296,6 +382,60 @@ def incremental_fill_minus_one_kernel(
     if tid >= num_elements[0]:
         return
     arr[tid] = -1
+
+
+@wp.kernel(enable_backward=False)
+def incremental_init_remaining_ids_kernel(
+    remaining_ids: wp.array[int],
+    num_elements: wp.array[int],
+):
+    """Initialise the compact remaining-ids index buffer: ``remaining_ids[i] = i``.
+
+    Written by :meth:`IncrementalContactPartitioner.reset` (and its
+    adjacency-preserving sibling :meth:`reset_loop_state_only`) so the
+    first JP round iterates over every active element. Subsequent
+    rounds overwrite this buffer from
+    :func:`incremental_tile_compact_remaining_and_advance_kernel`,
+    shrinking the list as elements get partitioned.
+    """
+    tid = wp.tid()
+    if tid >= num_elements[0]:
+        return
+    remaining_ids[tid] = tid
+
+
+@wp.kernel(enable_backward=False)
+def incremental_reset_loop_state_kernel(
+    partition_data_concat: wp.array[wp.int64],
+    interaction_id_to_partition: wp.array[int],
+    num_elements: wp.array[int],
+):
+    """Reset the per-element partitioner state that is consumed by the
+    JP coloring pass, without touching the adjacency structure.
+
+    Between PGS iterations the constraint set is unchanged -- only the
+    solver's accumulated impulses evolve -- so the expensive adjacency
+    rebuild (``partitioning_prepare_kernel`` +
+    ``partitioning_adjacency_count_kernel`` + exclusive scan +
+    ``partitioning_adjacency_store_kernel``) can be skipped entirely.
+    What *does* have to be reset is:
+
+    * ``partition_data_concat[tid] = _UNPARTITIONED | tid``, the
+      packed per-element (color, tid) tag the coloring kernel reads
+      and writes.
+    * ``interaction_id_to_partition[tid] = -1``, so callers that read
+      the per-element assigned color get a well-defined sentinel for
+      elements not yet touched by the current pass.
+
+    Fused into a single launch so the "skip-adjacency" reset path
+    costs one kernel launch instead of two (``partitioning_adjacency_store``'s
+    scatter half + ``incremental_fill_minus_one``).
+    """
+    tid = wp.tid()
+    if tid >= num_elements[0]:
+        return
+    partition_data_concat[tid] = _UNPARTITIONED | wp.int64(tid)
+    interaction_id_to_partition[tid] = -1
 
 
 @wp.kernel(enable_backward=False)
@@ -443,3 +583,153 @@ def tile_scan_exclusive_block_kernel(
         block_sum = wp.tile_sum(a)
         running = running + block_sum[0]
         offset = offset + TILE_SCAN_BLOCK_DIM
+
+
+@wp.kernel(enable_backward=False)
+def incremental_tile_compact_remaining_and_advance_kernel(
+    partition_data_concat: wp.array[wp.int64],
+    remaining_ids: wp.array[int],
+    current_color: wp.array[int],
+    num_remaining: wp.array[int],
+    partition_count: wp.array[int],
+    partition_element_ids: wp.array[int],
+    interaction_id_to_partition: wp.array[int],
+):
+    """Fused compact + remaining-list update + advance for one JP round.
+
+    Replaces four back-to-back kernels
+    (``incremental_flag_kernel`` -> tile scan -> ``incremental_compact_kernel``
+    -> ``incremental_advance_kernel``) with a single single-block
+    grid-stride launch and additionally maintains a compact **index
+    buffer** of still-active elements so the next round's coloring pass
+    only visits lanes that actually have work.
+
+    Why the compact index buffer matters
+    ------------------------------------
+
+    Before this optimisation, every colour round launched
+    ``partitioning_coloring_kernel`` with ``dim=max_num_interactions``.
+    Each lane loaded ``partition_data_concat[tid]`` and early-exited if
+    the element was already settled by an earlier round. At ~18 colours
+    per sweep the average warp therefore had only ~50% of lanes doing
+    real work, the rest stalled on the early-exit branch.
+
+    By compacting ``remaining_ids[0..num_remaining)`` in place here --
+    dropping the elements just committed to partition ``cc`` -- the
+    next round can drive ``partitioning_coloring_incremental_kernel``
+    over a dense work list. Every launched warp is fully utilised and
+    the hot adjacency walk runs on all 32 lanes together.
+
+    In-place update safety
+    ----------------------
+
+    The kernel reads from and writes to the *same* ``remaining_ids``
+    buffer. The compaction is correct because survivors are packed
+    leftward, i.e. every write goes to an index ``<=`` the index it
+    read from:
+
+    * Within a tile (1024 lanes), the exclusive-scan primitive acts as
+      an implicit block sync: every lane's read of
+      ``remaining_ids[offset+lane]`` completes before any lane's
+      survivor store executes.
+    * Across tiles: tile N writes survivors into indices ``[running,
+      running + tile_survivors)`` where ``running <= N*1024``
+      (survivors never exceed slots processed). Tile N+1 reads from
+      ``[(N+1)*1024, (N+2)*1024)``. Since
+      ``running + tile_survivors <= (N+1)*1024``, the writes stay
+      strictly below the next tile's read window.
+
+    Per-tile algorithm
+    ------------------
+
+    Each tile computes two per-lane 0/1 flags and two tile scans:
+
+    * ``committed_flag = 1`` iff the element was just coloured with
+      ``cc = current_color[0]``; its exclusive scan drives the
+      compacted write into ``partition_element_ids`` and indexes
+      ``interaction_id_to_partition``.
+    * ``survivor_flag = in_range ? 1 - committed_flag : 0``; its
+      exclusive scan drives the in-place compaction of
+      ``remaining_ids``.
+
+    Two running prefixes (``committed_running``, ``survivor_running``)
+    are threaded across tiles via ``wp.tile_sum``.
+
+    After the last tile, lane 0 publishes the totals and advances
+    ``current_color``. Race-free: every lane reads ``current_color[0]``
+    once into register ``cc`` at the top, and the only write happens
+    from lane 0 after all reads have completed in every tile.
+    """
+    _block, lane = wp.tid()
+
+    n = num_remaining[0]
+    cc = current_color[0]
+
+    # Running exclusive-prefix counts maintained identically on every
+    # lane via ``wp.tile_sum`` at the end of each tile iteration.
+    committed_running = int(0)
+    survivor_running = int(0)
+
+    offset = int(0)
+    while offset < n:
+        slot = offset + lane
+
+        # Per-lane: fetch the raw element id from the remaining list,
+        # check whether it was just committed to partition ``cc``. Out-
+        # of-range lanes contribute zero flags so tail tiles stay
+        # correct without a separate zero pass.
+        eid = int(0)
+        committed_flag = int(0)
+        survivor_flag = int(0)
+        if slot < n:
+            eid = remaining_ids[slot]
+            tagged = partition_data_concat[eid] & _TAG_MASK
+            color_plus_one = tagged >> _COLOR_SHIFT
+            if color_plus_one == wp.int64(cc + 1):
+                committed_flag = 1
+            else:
+                survivor_flag = 1
+
+        # Two exclusive scans over this tile. Each scan is a block-wide
+        # collective with implicit sync, so the two calls do not step
+        # on each other. The scans also synchronise all lanes' reads of
+        # ``remaining_ids[slot]`` above before any lane performs the
+        # in-place survivor store below, which is what makes the
+        # in-place compaction safe within a tile.
+        committed_tile = wp.tile(committed_flag)
+        committed_scan = wp.tile_scan_exclusive(committed_tile)
+        committed_local = wp.untile(committed_scan)
+
+        survivor_tile = wp.tile(survivor_flag)
+        survivor_scan = wp.tile_scan_exclusive(survivor_tile)
+        survivor_local = wp.untile(survivor_scan)
+
+        # Compact committed elements into partition_element_ids and
+        # record the colour. Only flagged lanes write.
+        if committed_flag == 1:
+            out_idx = committed_running + committed_local
+            partition_element_ids[out_idx] = eid
+            interaction_id_to_partition[eid] = cc
+
+        # In-place compaction of survivors. The destination index is
+        # always <= ``slot`` (the source index), so the store cannot
+        # clobber data still needed by the current tile. The running
+        # prefix is maintained identically on every lane.
+        if survivor_flag == 1:
+            out_idx = survivor_running + survivor_local
+            remaining_ids[out_idx] = eid
+
+        # Advance running prefixes via block-wide inclusive sums.
+        committed_total = wp.tile_sum(committed_tile)
+        survivor_total = wp.tile_sum(survivor_tile)
+        committed_running = committed_running + committed_total[0]
+        survivor_running = survivor_running + survivor_total[0]
+        offset = offset + TILE_SCAN_BLOCK_DIM
+
+    # Publish per-round totals and advance device-side loop state.
+    # All other lanes have finished reading ``current_color`` and
+    # ``num_remaining``; the writes below cannot race.
+    if lane == 0:
+        partition_count[0] = committed_running
+        num_remaining[0] = survivor_running
+        current_color[0] = cc + 1
