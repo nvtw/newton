@@ -798,6 +798,7 @@ class World:
             dim=self._constraint_capacity,
             inputs=[
                 self.constraints,
+                self.bodies,
                 self._num_active_constraints,
                 self._elements,
             ],

@@ -49,7 +49,7 @@ from newton._src.solvers.jitter.world_builder import (
     WorldBuilder,
 )
 
-DEFAULT_LAYERS = 10
+DEFAULT_LAYERS = 40
 
 # When True, the example runs exactly :data:`KERNEL_TIMING_FRAMES`
 # rendered frames under :func:`wp.timing_begin` / :func:`wp.timing_end`

@@ -265,6 +265,7 @@ def _constraint_iterate_kernel(
 @wp.kernel(enable_backward=False)
 def _constraints_to_elements_kernel(
     constraints: ConstraintContainer,
+    bodies: BodyContainer,
     num_constraints: wp.array[wp.int32],
     elements: wp.array[ElementInteractionData],
 ):
@@ -279,6 +280,12 @@ def _constraints_to_elements_kernel(
     pull body1/body2 with :func:`constraint_get_body1` /
     :func:`constraint_get_body2` without dispatching on type.
 
+    Static / kinematic bodies (``inverse_mass == 0``) are replaced with
+    ``-1`` so the graph colourer ignores them. This mirrors PhoenX's
+    ``AddIfNotKinematicOrStatic`` and is the reason e.g. N contacts
+    against the same ground plane can share a single colour: the
+    ground body is never surfaced as a dependency.
+
     Launched once per :meth:`World.step` so contact constraints (which
     arrive next) can rebuild their element rows from scratch each
     frame without coordinating with the joint constraints."""
@@ -287,6 +294,16 @@ def _constraints_to_elements_kernel(
         return
     b1 = constraint_get_body1(constraints, tid)
     b2 = constraint_get_body2(constraints, tid)
+    if b1 >= 0 and bodies.inverse_mass[b1] == 0.0:
+        b1 = -1
+    if b2 >= 0 and bodies.inverse_mass[b2] == 0.0:
+        b2 = -1
+    # Compact: non-negative IDs must come first so the adjacency loop
+    # (which stops on the first -1) doesn't miss a dynamic body when
+    # the static one happens to sit in slot 0.
+    if b1 < 0 and b2 >= 0:
+        b1 = b2
+        b2 = -1
     elements[tid] = element_interaction_data_make(b1, b2, -1, -1, -1, -1, -1, -1)
 
 
