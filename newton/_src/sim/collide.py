@@ -463,16 +463,17 @@ class CollisionPipeline:
     class ContactMatching(str, Enum):
         """Frame-to-frame contact matching mode for :class:`CollisionPipeline`.
 
-        Values:
-            DISABLED: No matching; no cross-frame state is kept.
-            LATEST: Match current contacts against the previous frame and
-                populate :attr:`Contacts.rigid_contact_match_index`, but keep
-                the current frame's fresh narrow-phase geometry.
-            STICKY: Match like ``LATEST``, then overwrite each matched
-                contact's body-frame ``point0`` / ``point1`` / ``offset0`` /
-                ``offset1`` and world-frame ``normal`` with the saved
-                previous-frame values.  Reduces frame-to-frame jitter on
-                persistent contacts — useful for stacking.
+        The available modes are:
+
+        - ``DISABLED``: No matching; no cross-frame state is kept.
+        - ``LATEST``: Match current contacts against the previous frame and
+          populate :attr:`Contacts.rigid_contact_match_index`, but keep the
+          current frame's fresh narrow-phase geometry.
+        - ``STICKY``: Match like ``LATEST``, then overwrite each matched
+          contact's body-frame ``point0`` / ``point1`` / ``offset0`` /
+          ``offset1`` and world-frame ``normal`` with the saved
+          previous-frame values.  Reduces frame-to-frame jitter on
+          persistent contacts — useful for stacking.
 
         See :ref:`Contact Matching` for details.
         """
