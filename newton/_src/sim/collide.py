@@ -503,8 +503,8 @@ class CollisionPipeline:
         deterministic: bool = False,
         contact_matching: Literal["disabled", "latest", "sticky"]
         | CollisionPipeline.ContactMatching = ContactMatching.DISABLED,
-        contact_matching_pos_threshold: float = 0.005,
-        contact_matching_normal_dot_threshold: float = 0.9,
+        contact_matching_pos_threshold: float = 0.0005,
+        contact_matching_normal_dot_threshold: float = 0.995,
         contact_report: bool = False,
         verify_buffers: bool = True,
     ):
