@@ -750,6 +750,17 @@ class World:
         idt = wp.float32(1.0 / self.substep_dt)
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
 
+        if self._single_block_sweep:
+            # Fast path: prepare runs once, iterate loops
+            # ``iterations`` times internally -- no ``capture_while``,
+            # no per-iteration relaunch. Two kernel launches per
+            # substep replace the ``1 + iterations`` legacy launches.
+            self._launch_single_block_prepare(self._prepare_kernel, idt, contact_views)
+            self._launch_single_block_iter(self._iterate_kernel, iterations, idt, contact_views)
+            return
+
+        # Full dispatcher path: per-colour multi-block launches driven
+        # by ``wp.capture_while`` over the shared colour cursor.
         # PrepareForIteration: one sweep over all colours.
         self._partitioner.begin_sweep()
         wp.capture_while(
@@ -991,23 +1002,13 @@ class World:
         idt: wp.float32 = 0.0,
         contact_views: ContactViews | None = None,
     ) -> None:
-        """Body of the ``wp.capture_while`` loop in :meth:`_solve_velocities`.
+        """Body of the ``wp.capture_while`` loop used by the full
+        dispatcher path (``enable_all_constraints=True``).
 
-        Two launch shapes depending on :attr:`_single_block_sweep`:
-
-        * Fast path (``True``): single-block launch with
-          ``dim = block_dim = _STRAGGLER_BLOCK_DIM``. The unified
-          kernel walks every remaining colour internally with
-          ``__syncthreads`` between colours and a block-stride loop
-          within each colour, zeroing the cursor on exit. One launch
-          per sweep, regardless of ``num_colors``.
-        * Full path (``False``): multi-block launch at
-          ``dim = constraint_capacity``. The kernel processes one
-          colour's CSR slice and decrements the cursor by 1; the
-          outer ``wp.capture_while`` handles the per-colour loop.
-
-        Threads beyond the active colour's ``count`` early-out
-        inside the kernel in both launch shapes.
+        Launches the per-colour multi-block kernel at
+        ``dim=constraint_capacity`` -- one colour per call, cursor
+        decremented inside the kernel so the outer ``capture_while``
+        exits when the colouring is exhausted.
         """
         views = contact_views if contact_views is not None else self._contact_views_placeholder
         inputs = [
@@ -1021,21 +1022,77 @@ class World:
             self._contact_container,
             views,
         ]
-        if self._single_block_sweep:
-            wp.launch(
-                kernel,
-                dim=_STRAGGLER_BLOCK_DIM,
-                inputs=inputs,
-                device=self.device,
-                block_dim=_STRAGGLER_BLOCK_DIM,
-            )
-        else:
-            wp.launch(
-                kernel,
-                dim=self._constraint_capacity,
-                inputs=inputs,
-                device=self.device,
-            )
+        wp.launch(
+            kernel,
+            dim=self._constraint_capacity,
+            inputs=inputs,
+            device=self.device,
+        )
+
+    def _launch_single_block_prepare(
+        self,
+        kernel,
+        idt: wp.float32,
+        contact_views: ContactViews | None,
+    ) -> None:
+        """Launch the fast-path prepare kernel once.
+
+        Prepare is once-per-substep (effective masses + warm-start
+        scatter); the kernel walks every colour internally, so a
+        single ``wp.launch`` replaces the old capture_while pattern.
+        """
+        views = contact_views if contact_views is not None else self._contact_views_placeholder
+        wp.launch(
+            kernel,
+            dim=_STRAGGLER_BLOCK_DIM,
+            block_dim=_STRAGGLER_BLOCK_DIM,
+            inputs=[
+                self.constraints,
+                self.bodies,
+                idt,
+                self._partitioner.element_ids_by_color,
+                self._partitioner.color_starts,
+                self._partitioner.num_colors,
+                self._contact_container,
+                views,
+            ],
+            device=self.device,
+        )
+
+    def _launch_single_block_iter(
+        self,
+        kernel,
+        num_iterations: int,
+        idt: wp.float32,
+        contact_views: ContactViews | None,
+    ) -> None:
+        """Launch an iterate / relax kernel that loops
+        ``num_iterations`` sweeps internally.
+
+        Replaces ``num_iterations`` separate ``wp.capture_while`` /
+        ``wp.launch`` calls with a single launch whose outer loop
+        is driven by a kernel scalar parameter. For the 40-layer
+        pyramid (20 PGS iters) this collapses 20 launches per
+        substep to 1, saving ~19 * launch_overhead per substep.
+        """
+        views = contact_views if contact_views is not None else self._contact_views_placeholder
+        wp.launch(
+            kernel,
+            dim=_STRAGGLER_BLOCK_DIM,
+            block_dim=_STRAGGLER_BLOCK_DIM,
+            inputs=[
+                self.constraints,
+                self.bodies,
+                idt,
+                self._partitioner.element_ids_by_color,
+                self._partitioner.color_starts,
+                self._partitioner.num_colors,
+                self._contact_container,
+                views,
+                wp.int32(num_iterations),
+            ],
+            device=self.device,
+        )
 
     def _integrate_velocities(self) -> None:
         """Mirrors ``IntegrateVelocities``: x += v*dt, q += 0.5*omega*q*dt."""
@@ -1073,6 +1130,12 @@ class World:
 
         idt = wp.float32(1.0 / self.substep_dt)
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
+
+        if self._single_block_sweep:
+            # Fast path: single launch running ``relaxations`` sweeps
+            # internally.
+            self._launch_single_block_iter(self._relax_kernel, relaxations, idt, contact_views)
+            return
 
         for _ in range(relaxations):
             self._partitioner.begin_sweep()
