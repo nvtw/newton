@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Literal
 
 import numpy as np
@@ -160,23 +161,36 @@ def compute_shape_aabbs(
     shape_gap: wp.array[float],
     shape_collision_aabb_lower: wp.array[wp.vec3],
     shape_collision_aabb_upper: wp.array[wp.vec3],
+    # Fused counter arrays — zeroed by thread 0 to avoid separate kernel launches.
+    contact_counters: wp.array[wp.int32],
+    contact_generation: wp.array[wp.int32],
+    broad_phase_pair_count: wp.array[wp.int32],
+    num_contact_counters: int,
     # outputs
     aabb_lower: wp.array[wp.vec3],
     aabb_upper: wp.array[wp.vec3],
     geom_data: wp.array[wp.vec4],
     geom_xform: wp.array[wp.transform],
 ):
-    """Compute AABBs and narrow-phase geometry data for each shape.
+    """Compute AABBs, narrow-phase geometry data, and zero collision counters.
 
-    Fuses AABB computation with narrow-phase data preparation so the
-    world transform (``body_q * shape_transform``) is computed once.
-
-    Uses support function for most shapes. Meshes and heightfields use the
-    pre-computed local AABB transformed to world frame. Infinite planes use
-    bounding sphere fallback.  AABBs are enlarged by per-shape effective gap
-    for contact detection.  Effective expansion is ``shape_margin + shape_gap``.
+    Fuses AABB computation, narrow-phase data preparation, contact counter
+    zeroing, and generation bumping into a single kernel launch.
     """
     shape_id = wp.tid()
+
+    # Thread 0: zero contact counters, bump contact generation, and zero the
+    # broad phase candidate-pair count in a single fused step.
+    if shape_id == 0:
+        for c in range(num_contact_counters):
+            contact_counters[c] = 0
+        g = contact_generation[0]
+        if g == 2147483647:
+            g = 0
+        else:
+            g = g + 1
+        contact_generation[0] = g
+        broad_phase_pair_count[0] = 0
 
     rigid_id = shape_body[shape_id]
     geo_type = shape_type[shape_id]
@@ -196,11 +210,10 @@ def compute_shape_aabbs(
     effective_gap = margin + shape_gap[shape_id]
     margin_vec = wp.vec3(effective_gap, effective_gap, effective_gap)
 
-    # Check if this is an infinite plane, mesh, or heightfield
+    # Check if this is an infinite plane or a shape with a pre-computed local AABB
     scale = shape_scale[shape_id]
     is_infinite_plane = (geo_type == GeoType.PLANE) and (scale[0] == 0.0 and scale[1] == 0.0)
-    is_mesh = geo_type == GeoType.MESH
-    is_hfield = geo_type == GeoType.HFIELD
+    has_local_aabb = geo_type == GeoType.MESH or geo_type == GeoType.HFIELD or geo_type == GeoType.CONVEX_MESH
 
     geom_scale = scale
 
@@ -210,8 +223,8 @@ def compute_shape_aabbs(
         half_extents = wp.vec3(radius, radius, radius)
         aabb_lower[shape_id] = pos - half_extents - margin_vec
         aabb_upper[shape_id] = pos + half_extents + margin_vec
-    elif is_mesh or is_hfield:
-        # Tight local AABB transformed to world space.
+    elif has_local_aabb:
+        # Pre-computed local AABB transformed to world space.
         # Scale is already baked into shape_collision_aabb by the builder,
         # so we only need to handle the rotation here.
         local_lo = shape_collision_aabb_lower[shape_id]
@@ -447,6 +460,28 @@ class CollisionPipeline:
         usefulness on your workflow before relying on them in optimization loops.
     """
 
+    class ContactMatching(str, Enum):
+        """Frame-to-frame contact matching mode for :class:`CollisionPipeline`.
+
+        The available modes are:
+
+        - ``DISABLED``: No matching; no cross-frame state is kept.
+        - ``LATEST``: Match current contacts against the previous frame and
+          populate :attr:`Contacts.rigid_contact_match_index`, but keep the
+          current frame's fresh narrow-phase geometry.
+        - ``STICKY``: Match like ``LATEST``, then overwrite each matched
+          contact's body-frame ``point0`` / ``point1`` / ``offset0`` /
+          ``offset1`` and world-frame ``normal`` with the saved
+          previous-frame values.  Reduces frame-to-frame jitter on
+          persistent contacts — useful for stacking.
+
+        See :ref:`Contact Matching` for details.
+        """
+
+        DISABLED = "disabled"
+        LATEST = "latest"
+        STICKY = "sticky"
+
     def __init__(
         self,
         model: Model,
@@ -466,10 +501,12 @@ class CollisionPipeline:
         narrow_phase: NarrowPhase | None = None,
         sdf_hydroelastic_config: HydroelasticSDF.Config | None = None,
         deterministic: bool = False,
-        contact_matching: bool = False,
-        contact_matching_pos_threshold: float = 0.02,
+        contact_matching: Literal["disabled", "latest", "sticky"]
+        | CollisionPipeline.ContactMatching = ContactMatching.DISABLED,
+        contact_matching_pos_threshold: float = 0.005,
         contact_matching_normal_dot_threshold: float = 0.9,
         contact_report: bool = False,
+        verify_buffers: bool = True,
     ):
         """
         Initialize the CollisionPipeline (expert API).
@@ -504,25 +541,46 @@ class CollisionPipeline:
             deterministic: Sort contacts after the narrow phase so that results
                 are independent of GPU thread scheduling.  Adds a radix sort +
                 gather pass.  Hydroelastic contacts are not yet covered.
-            contact_matching: Enable frame-to-frame contact matching.
-                Implies ``deterministic=True``.  Populates
-                :attr:`Contacts.rigid_contact_match_index` each frame.
+            contact_matching: Frame-to-frame contact matching mode.  Accepts
+                a string (``"disabled"`` / ``"latest"`` / ``"sticky"``) or the
+                equivalent :class:`CollisionPipeline.ContactMatching` enum
+                value.  Any non-disabled mode implies ``deterministic=True``
+                and populates :attr:`Contacts.rigid_contact_match_index`.
+                Defaults to ``"disabled"``.
             contact_matching_pos_threshold: World-space distance threshold [m]
-                for contact matching.  Contacts that moved more than this
-                between frames are considered broken.
+                between the previous and current contact midpoints
+                ``0.5 * (world(point0) + world(point1))``.  Contacts whose
+                midpoint moves more than this are considered broken.  Defaults
+                to ``0.005``.
             contact_matching_normal_dot_threshold: Minimum dot product between
                 old and new contact normals for a match.
-            contact_report: Allocate buffers on the :class:`Contacts` container
-                (``rigid_contact_new_indices``, ``rigid_contact_new_count``,
-                ``rigid_contact_broken_indices``, ``rigid_contact_broken_count``)
-                populated each frame with new and broken contact indices.
-                Only used when ``contact_matching=True``.
+            contact_report: Allocate ``rigid_contact_new_indices`` /
+                ``rigid_contact_new_count`` / ``rigid_contact_broken_indices``
+                / ``rigid_contact_broken_count`` on the :class:`Contacts`
+                container, populated each frame.  Requires a non-disabled
+                ``contact_matching`` mode.
+            verify_buffers: Run a ``dim=[1]`` diagnostic kernel at the end of
+                the narrow phase that prints warnings on any intermediate
+                candidate-pair or final rigid contact buffer overflow; see
+                :class:`NarrowPhase` for the full counter list.  Defaults to
+                ``True``.  Overhead is one extra kernel launch per collision
+                pass; disable in hot loops or CUDA graph capture once buffer
+                sizes are known to be adequate.
 
         .. note::
             When ``requires_grad`` is true (explicitly or via ``model.requires_grad``),
             rigid-contact autodiff via ``rigid_contact_diff_*`` is **experimental**;
             see :meth:`collide`.
         """
+        try:
+            contact_matching_mode = CollisionPipeline.ContactMatching(contact_matching)
+        except ValueError as exc:
+            allowed = ", ".join(repr(m.value) for m in CollisionPipeline.ContactMatching)
+            raise ValueError(
+                f"contact_matching must be a CollisionPipeline.ContactMatching value "
+                f"(one of {allowed}), got {contact_matching!r}"
+            ) from exc
+
         if contact_matching_pos_threshold < 0.0:
             raise ValueError(
                 f"contact_matching_pos_threshold must be non-negative, got {contact_matching_pos_threshold}"
@@ -531,11 +589,13 @@ class CollisionPipeline:
             raise ValueError(
                 f"contact_matching_normal_dot_threshold must be in [-1, 1], got {contact_matching_normal_dot_threshold}"
             )
-        if contact_report and not contact_matching:
-            raise ValueError("contact_report=True requires contact_matching=True")
+        matching_enabled = contact_matching_mode != CollisionPipeline.ContactMatching.DISABLED
+        matching_sticky = contact_matching_mode == CollisionPipeline.ContactMatching.STICKY
+        if contact_report and not matching_enabled:
+            raise ValueError('contact_report=True requires contact_matching != "disabled"')
 
-        # contact_matching implies deterministic sorting.
-        if contact_matching:
+        # Any non-disabled matching mode implies deterministic sorting.
+        if matching_enabled:
             deterministic = True
 
         mode_from_broad_phase: str | None = None
@@ -707,6 +767,7 @@ class CollisionPipeline:
                 has_heightfields=has_heightfields,
                 use_lean_gjk_mpr=use_lean_gjk_mpr,
                 deterministic=deterministic,
+                verify_buffers=verify_buffers,
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
 
@@ -739,8 +800,8 @@ class CollisionPipeline:
         self._soft_contact_max = soft_contact_max
         self.requires_grad = requires_grad
         self.deterministic = deterministic
+        per_contact_props = self.narrow_phase.hydroelastic_sdf is not None
         if deterministic:
-            per_contact_props = self.narrow_phase.hydroelastic_sdf is not None
             with wp.ScopedDevice(device):
                 self._sort_key_array = wp.zeros(rigid_contact_max, dtype=wp.int64, device=device)
             self._contact_sorter = ContactSorter(
@@ -750,15 +811,18 @@ class CollisionPipeline:
             self._sort_key_array = wp.zeros(0, dtype=wp.int64, device=device)
             self._contact_sorter = None
 
-        self.contact_matching = contact_matching
+        self.contact_matching = contact_matching_mode
+        self._matching_enabled = matching_enabled
+        self._matching_sticky = matching_sticky
         self.contact_report = contact_report
-        if contact_matching:
+        if matching_enabled:
             self._contact_matcher = ContactMatcher(
                 rigid_contact_max,
                 sorter=self._contact_sorter,
                 pos_threshold=contact_matching_pos_threshold,
                 normal_dot_threshold=contact_matching_normal_dot_threshold,
                 contact_report=contact_report,
+                sticky=matching_sticky,
                 device=device,
             )
         else:
@@ -796,7 +860,7 @@ class CollisionPipeline:
             device=self.model.device,
             per_contact_shape_properties=self.narrow_phase.hydroelastic_sdf is not None,
             requested_attributes=self.model.get_requested_contact_attributes(),
-            contact_matching=self.contact_matching,
+            contact_matching=self._matching_enabled,
             contact_report=self.contact_report,
         )
 
@@ -850,11 +914,12 @@ class CollisionPipeline:
                 If ``None``, uses the value from construction.
         """
 
-        contacts.clear()
-        # TODO: validate contacts dimensions & compatibility
-
-        # Clear counters
-        self.broad_phase_pair_count.zero_()
+        # Counter zeroing and generation bump are fused into compute_shape_aabbs.
+        # Only call contacts.clear() if clear_buffers mode is enabled (debug path).
+        # Skip the generation bump here since compute_shape_aabbs will bump it immediately
+        # afterwards -- otherwise the generation would advance by 2 per collide() call.
+        if contacts.clear_buffers:
+            contacts.clear(bump_generation=False)
 
         model = self.model
         # update any additional parameters
@@ -866,7 +931,8 @@ class CollisionPipeline:
         # augmentation and soft-contact kernels that follow are tape-safe
         # and recorded normally.
 
-        # Compute AABBs for all shapes (already expanded by per-shape effective gaps)
+        # Compute AABBs for all shapes, zero counters, bump generation.
+        # Fuses contacts.clear() + broad_phase_pair_count.zero_() + AABB update.
         wp.launch(
             kernel=compute_shape_aabbs,
             dim=model.shape_count,
@@ -882,6 +948,10 @@ class CollisionPipeline:
                 model.shape_gap,
                 model.shape_collision_aabb_lower,
                 model.shape_collision_aabb_upper,
+                contacts.contact_counters,
+                contacts.contact_generation,
+                self.broad_phase_pair_count,
+                contacts.contact_counters.shape[0],
             ],
             outputs=[
                 self.narrow_phase.shape_aabb_lower,
@@ -907,6 +977,7 @@ class CollisionPipeline:
                 device=self.device,
                 filter_pairs=self.shape_pairs_excluded,
                 num_filter_pairs=self.shape_pairs_excluded_count,
+                skip_count_zero=True,  # Already zeroed by compute_shape_aabbs
             )
         elif isinstance(self.broad_phase, BroadPhaseSAP):
             self.broad_phase.launch(
@@ -921,6 +992,7 @@ class CollisionPipeline:
                 device=self.device,
                 filter_pairs=self.shape_pairs_excluded,
                 num_filter_pairs=self.shape_pairs_excluded_count,
+                skip_count_zero=True,  # Already zeroed by compute_shape_aabbs
             )
         else:  # BroadPhaseExplicit
             self.broad_phase.launch(
@@ -932,6 +1004,7 @@ class CollisionPipeline:
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
                 device=self.device,
+                skip_count_zero=True,  # Already zeroed by compute_shape_aabbs
             )
 
         # Create ContactWriterData struct for custom contact writing
@@ -994,15 +1067,17 @@ class CollisionPipeline:
         if self._contact_matcher is not None:
             if contacts.rigid_contact_match_index is None:
                 raise ValueError(
-                    "CollisionPipeline has contact_matching enabled but the Contacts "
-                    "buffer was created without contact_matching=True. "
+                    "CollisionPipeline has contact_matching enabled but the "
+                    "Contacts buffer was created without contact_matching. "
                     "Use pipeline.contacts() to create a compatible buffer."
                 )
             self._contact_matcher.match(
                 sort_keys=self._sort_key_array,
                 contact_count=contacts.rigid_contact_count,
                 point0=contacts.rigid_contact_point0,
+                point1=contacts.rigid_contact_point1,
                 shape0=contacts.rigid_contact_shape0,
+                shape1=contacts.rigid_contact_shape1,
                 normal=contacts.rigid_contact_normal,
                 body_q=state.body_q,
                 shape_body=model.shape_body,
@@ -1031,6 +1106,23 @@ class CollisionPipeline:
                 device=self.device,
             )
 
+        # Sticky mode: overwrite matched rows with the saved previous-frame
+        # contact geometry.  Must run after sort_full (so match_index points at
+        # the sorted prev-frame layout *and* we target the final sorted rows)
+        # and before save_sorted_state (we save the record we actually used
+        # this frame, carrying the sticky history forward).
+        if self._matching_sticky:
+            self._contact_matcher.replay_matched(
+                contact_count=contacts.rigid_contact_count,
+                match_index=contacts.rigid_contact_match_index,
+                point0=contacts.rigid_contact_point0,
+                point1=contacts.rigid_contact_point1,
+                offset0=contacts.rigid_contact_offset0,
+                offset1=contacts.rigid_contact_offset1,
+                normal=contacts.rigid_contact_normal,
+                device=self.device,
+            )
+
         # Build the contact report before saving state, because save
         # overwrites _prev_count and the report needs the old value.
         if self._contact_matcher is not None:
@@ -1050,15 +1142,26 @@ class CollisionPipeline:
                     contacts.rigid_contact_broken_count,
                     device=self.device,
                 )
+            sticky_offsets: dict[str, wp.array] = (
+                {
+                    "sorted_offset0": contacts.rigid_contact_offset0,
+                    "sorted_offset1": contacts.rigid_contact_offset1,
+                }
+                if self._matching_sticky
+                else {}
+            )
             self._contact_matcher.save_sorted_state(
                 sorted_keys=self._contact_sorter.sorted_keys_view,
                 contact_count=contacts.rigid_contact_count,
                 sorted_point0=contacts.rigid_contact_point0,
+                sorted_point1=contacts.rigid_contact_point1,
                 sorted_shape0=contacts.rigid_contact_shape0,
+                sorted_shape1=contacts.rigid_contact_shape1,
                 sorted_normal=contacts.rigid_contact_normal,
                 body_q=state.body_q,
                 shape_body=model.shape_body,
                 device=self.device,
+                **sticky_offsets,
             )
 
         # Differentiable contact augmentation: reconstruct world-space contact
