@@ -109,12 +109,16 @@ from newton._src.solvers.jitter.graph_coloring_common import (
 )
 
 __all__ = [
+    "_STRAGGLER_BLOCK_DIM",
     "_constraint_gather_wrenches_kernel",
     "_constraint_iterate_fast_kernel",
+    "_constraint_iterate_fast_tail_kernel",
     "_constraint_iterate_kernel",
+    "_constraint_prepare_fast_tail_kernel",
     "_constraint_prepare_for_iteration_fast_kernel",
     "_constraint_prepare_for_iteration_kernel",
     "_constraint_relax_fast_kernel",
+    "_constraint_relax_fast_tail_kernel",
     "_constraint_relax_kernel",
     "_constraints_to_elements_kernel",
     "_integrate_forces_kernel",
@@ -530,6 +534,184 @@ def _constraint_relax_fast_kernel(
 
     if tid == 0:
         color_cursor[0] = cursor - 1
+
+
+# ---------------------------------------------------------------------------
+# Tail (straggler) kernels -- single-block, process many small colours
+# ---------------------------------------------------------------------------
+#
+# The per-colour dispatchers above are launched once per colour by the
+# ``wp.capture_while`` loop in :meth:`World._solve_velocities` /
+# :meth:`World._relax_velocities`. Each launch carries several
+# microseconds of kernel-launch overhead; for a 10-layer pyramid with
+# ~14 colours that's ~14 launches per sweep per iteration, and the
+# overhead adds up to a healthy fraction of wall-clock time.
+#
+# These "straggler" kernels amortise the launches over the whole tail
+# of the colouring. They run in a single thread block and loop over
+# colours internally, using ``__syncthreads`` between colours to make
+# the body-state updates from colour ``c`` visible to the threads
+# working colour ``c+1``. A single launch therefore does the work of
+# up to ``block_dim`` colours as long as every remaining colour has
+# ``<= block_dim`` elements.
+#
+# The per-colour kernel still covers the head of the colouring where
+# an individual colour can be larger than a block (multi-block launch
+# at ``constraint_capacity`` dim). The solver's capture_while body
+# invokes *both* every iteration: the per-colour handles the current
+# colour (decrements cursor by 1 regardless of size), then the
+# straggler opportunistically hoovers up any further small colours in
+# the same body-invocation. When the remaining colour count fits in a
+# single block's worth of work, the whole sweep collapses to one
+# body-invocation instead of ``num_colors``.
+
+
+_STRAGGLER_BLOCK_DIM: int = 128
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+__syncthreads();
+#endif
+""")
+def _sync_threads(): ...
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_iterate_fast_tail_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+):
+    """Single-block main-solve dispatcher that loops small colours.
+
+    Launched with ``dim=block_dim, 1 block``. Processes as many
+    remaining colours as fit within the block and exits when it
+    encounters a colour larger than the block -- the per-colour
+    kernel (launched alongside this one) handles those. The cursor
+    is written back at exit so the outer ``wp.capture_while`` sees
+    the progress we made.
+    """
+    tid = wp.tid()
+
+    cursor = color_cursor[0]
+    n_colors = num_colors[0]
+
+    while cursor > 0:
+        c = n_colors - cursor
+        start = color_starts[c]
+        end = color_starts[c + 1]
+        count = end - start
+        if count > _STRAGGLER_BLOCK_DIM:
+            break
+
+        if tid < count:
+            cid = element_ids_by_color[start + tid]
+            t = constraint_get_type(constraints, cid)
+            if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
+                actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, True)
+            elif t == CONSTRAINT_TYPE_CONTACT:
+                contact_iterate(constraints, cid, bodies, idt, cc, contacts, True)
+
+        _sync_threads()
+        cursor -= 1
+
+    if tid == 0:
+        color_cursor[0] = cursor
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_prepare_fast_tail_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+):
+    """Single-block prepare dispatcher (straggler variant).
+
+    See :func:`_constraint_iterate_fast_tail_kernel`.
+    """
+    tid = wp.tid()
+
+    cursor = color_cursor[0]
+    n_colors = num_colors[0]
+
+    while cursor > 0:
+        c = n_colors - cursor
+        start = color_starts[c]
+        end = color_starts[c + 1]
+        count = end - start
+        if count > _STRAGGLER_BLOCK_DIM:
+            break
+
+        if tid < count:
+            cid = element_ids_by_color[start + tid]
+            t = constraint_get_type(constraints, cid)
+            if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
+                actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+            elif t == CONSTRAINT_TYPE_CONTACT:
+                contact_prepare_for_iteration(constraints, cid, bodies, idt, cc, contacts)
+
+        _sync_threads()
+        cursor -= 1
+
+    if tid == 0:
+        color_cursor[0] = cursor
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_relax_fast_tail_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+):
+    """Single-block relax dispatcher (straggler variant).
+
+    See :func:`_constraint_iterate_fast_tail_kernel`.
+    """
+    tid = wp.tid()
+
+    cursor = color_cursor[0]
+    n_colors = num_colors[0]
+
+    while cursor > 0:
+        c = n_colors - cursor
+        start = color_starts[c]
+        end = color_starts[c + 1]
+        count = end - start
+        if count > _STRAGGLER_BLOCK_DIM:
+            break
+
+        if tid < count:
+            cid = element_ids_by_color[start + tid]
+            t = constraint_get_type(constraints, cid)
+            if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
+                actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, False)
+            elif t == CONSTRAINT_TYPE_CONTACT:
+                contact_iterate(constraints, cid, bodies, idt, cc, contacts, False)
+
+        _sync_threads()
+        cursor -= 1
+
+    if tid == 0:
+        color_cursor[0] = cursor
 
 
 @wp.kernel(enable_backward=False)
