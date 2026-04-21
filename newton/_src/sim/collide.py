@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Literal
 
 import numpy as np
@@ -459,6 +460,32 @@ class CollisionPipeline:
         usefulness on your workflow before relying on them in optimization loops.
     """
 
+    class ContactMatching(str, Enum):
+        """Frame-to-frame contact matching mode for :class:`CollisionPipeline`.
+
+        Values:
+            DISABLED: No matching.  :attr:`Contacts.rigid_contact_match_index`
+                is not allocated and no cross-frame state is kept.
+            LATEST: Match current contacts against the previous frame, but use
+                the current frame's freshly generated contact geometry in the
+                returned :class:`Contacts` buffer.  ``match_index`` is populated
+                so solvers/users can correlate across frames.
+            STICKY: Match like ``LATEST``, then overwrite each matched contact's
+                body-frame ``point0``/``point1`` and ``offset0``/``offset1``
+                along with its world-frame ``normal`` with the saved
+                previous-frame values.  Remaining contact fields (shape
+                indices, per-shape margins) are key-derived or per-shape
+                constants and so are already identical for a matched contact.
+                Unmatched contacts (:data:`~newton.geometry.MATCH_NOT_FOUND` /
+                :data:`~newton.geometry.MATCH_BROKEN`) pass through unchanged.
+                Reduces small frame-to-frame geometric jitter on persistent
+                contacts — useful for stacking.
+        """
+
+        DISABLED = "disabled"
+        LATEST = "latest"
+        STICKY = "sticky"
+
     def __init__(
         self,
         model: Model,
@@ -478,8 +505,9 @@ class CollisionPipeline:
         narrow_phase: NarrowPhase | None = None,
         sdf_hydroelastic_config: HydroelasticSDF.Config | None = None,
         deterministic: bool = False,
-        contact_matching: bool = False,
-        contact_matching_pos_threshold: float = 0.02,
+        contact_matching: Literal["disabled", "latest", "sticky"]
+        | CollisionPipeline.ContactMatching = ContactMatching.DISABLED,
+        contact_matching_pos_threshold: float = 0.005,
         contact_matching_normal_dot_threshold: float = 0.9,
         contact_report: bool = False,
         verify_buffers: bool = True,
@@ -517,19 +545,25 @@ class CollisionPipeline:
             deterministic: Sort contacts after the narrow phase so that results
                 are independent of GPU thread scheduling.  Adds a radix sort +
                 gather pass.  Hydroelastic contacts are not yet covered.
-            contact_matching: Enable frame-to-frame contact matching.
-                Implies ``deterministic=True``.  Populates
-                :attr:`Contacts.rigid_contact_match_index` each frame.
+            contact_matching: Frame-to-frame contact matching mode.  Accepts a
+                bare string (``"disabled"`` / ``"latest"`` / ``"sticky"``) or
+                the equivalent :class:`CollisionPipeline.ContactMatching` enum
+                value.  Defaults to ``"disabled"``.  Any non-disabled mode
+                implies ``deterministic=True`` and populates
+                :attr:`Contacts.rigid_contact_match_index` each frame.  See
+                :class:`CollisionPipeline.ContactMatching` for a description of
+                each mode.
             contact_matching_pos_threshold: World-space distance threshold [m]
                 for contact matching.  Contacts that moved more than this
-                between frames are considered broken.
+                between frames are considered broken.  Defaults to ``0.005``
+                (0.5 cm).
             contact_matching_normal_dot_threshold: Minimum dot product between
                 old and new contact normals for a match.
             contact_report: Allocate buffers on the :class:`Contacts` container
                 (``rigid_contact_new_indices``, ``rigid_contact_new_count``,
                 ``rigid_contact_broken_indices``, ``rigid_contact_broken_count``)
                 populated each frame with new and broken contact indices.
-                Only used when ``contact_matching=True``.
+                Requires ``contact_matching`` to be a non-disabled mode.
             verify_buffers: Run a ``dim=[1]`` diagnostic kernel at the end of
                 the narrow phase that prints warnings on any intermediate
                 candidate-pair or final rigid contact buffer overflow; see
@@ -543,6 +577,15 @@ class CollisionPipeline:
             rigid-contact autodiff via ``rigid_contact_diff_*`` is **experimental**;
             see :meth:`collide`.
         """
+        try:
+            contact_matching_mode = CollisionPipeline.ContactMatching(contact_matching)
+        except ValueError as exc:
+            allowed = ", ".join(repr(m.value) for m in CollisionPipeline.ContactMatching)
+            raise ValueError(
+                f"contact_matching must be a CollisionPipeline.ContactMatching value "
+                f"(one of {allowed}), got {contact_matching!r}"
+            ) from exc
+
         if contact_matching_pos_threshold < 0.0:
             raise ValueError(
                 f"contact_matching_pos_threshold must be non-negative, got {contact_matching_pos_threshold}"
@@ -551,11 +594,13 @@ class CollisionPipeline:
             raise ValueError(
                 f"contact_matching_normal_dot_threshold must be in [-1, 1], got {contact_matching_normal_dot_threshold}"
             )
-        if contact_report and not contact_matching:
-            raise ValueError("contact_report=True requires contact_matching=True")
+        matching_enabled = contact_matching_mode != CollisionPipeline.ContactMatching.DISABLED
+        matching_sticky = contact_matching_mode == CollisionPipeline.ContactMatching.STICKY
+        if contact_report and not matching_enabled:
+            raise ValueError('contact_report=True requires contact_matching != "disabled"')
 
-        # contact_matching implies deterministic sorting.
-        if contact_matching:
+        # Any non-disabled matching mode implies deterministic sorting.
+        if matching_enabled:
             deterministic = True
 
         mode_from_broad_phase: str | None = None
@@ -760,8 +805,8 @@ class CollisionPipeline:
         self._soft_contact_max = soft_contact_max
         self.requires_grad = requires_grad
         self.deterministic = deterministic
+        per_contact_props = self.narrow_phase.hydroelastic_sdf is not None
         if deterministic:
-            per_contact_props = self.narrow_phase.hydroelastic_sdf is not None
             with wp.ScopedDevice(device):
                 self._sort_key_array = wp.zeros(rigid_contact_max, dtype=wp.int64, device=device)
             self._contact_sorter = ContactSorter(
@@ -771,15 +816,18 @@ class CollisionPipeline:
             self._sort_key_array = wp.zeros(0, dtype=wp.int64, device=device)
             self._contact_sorter = None
 
-        self.contact_matching = contact_matching
+        self.contact_matching = contact_matching_mode
+        self._matching_enabled = matching_enabled
+        self._matching_sticky = matching_sticky
         self.contact_report = contact_report
-        if contact_matching:
+        if matching_enabled:
             self._contact_matcher = ContactMatcher(
                 rigid_contact_max,
                 sorter=self._contact_sorter,
                 pos_threshold=contact_matching_pos_threshold,
                 normal_dot_threshold=contact_matching_normal_dot_threshold,
                 contact_report=contact_report,
+                sticky=matching_sticky,
                 device=device,
             )
         else:
@@ -817,7 +865,7 @@ class CollisionPipeline:
             device=self.model.device,
             per_contact_shape_properties=self.narrow_phase.hydroelastic_sdf is not None,
             requested_attributes=self.model.get_requested_contact_attributes(),
-            contact_matching=self.contact_matching,
+            contact_matching=self._matching_enabled,
             contact_report=self.contact_report,
         )
 
@@ -1024,8 +1072,8 @@ class CollisionPipeline:
         if self._contact_matcher is not None:
             if contacts.rigid_contact_match_index is None:
                 raise ValueError(
-                    "CollisionPipeline has contact_matching enabled but the Contacts "
-                    "buffer was created without contact_matching=True. "
+                    "CollisionPipeline has contact_matching enabled but the "
+                    "Contacts buffer was created without contact_matching. "
                     "Use pipeline.contacts() to create a compatible buffer."
                 )
             self._contact_matcher.match(
@@ -1061,6 +1109,23 @@ class CollisionPipeline:
                 device=self.device,
             )
 
+        # Sticky mode: overwrite matched rows with the saved previous-frame
+        # contact geometry.  Must run after sort_full (so match_index points at
+        # the sorted prev-frame layout *and* we target the final sorted rows)
+        # and before save_sorted_state (we save the record we actually used
+        # this frame, carrying the sticky history forward).
+        if self._matching_sticky:
+            self._contact_matcher.replay_matched(
+                contact_count=contacts.rigid_contact_count,
+                match_index=contacts.rigid_contact_match_index,
+                point0=contacts.rigid_contact_point0,
+                point1=contacts.rigid_contact_point1,
+                offset0=contacts.rigid_contact_offset0,
+                offset1=contacts.rigid_contact_offset1,
+                normal=contacts.rigid_contact_normal,
+                device=self.device,
+            )
+
         # Build the contact report before saving state, because save
         # overwrites _prev_count and the report needs the old value.
         if self._contact_matcher is not None:
@@ -1080,16 +1145,31 @@ class CollisionPipeline:
                     contacts.rigid_contact_broken_count,
                     device=self.device,
                 )
-            self._contact_matcher.save_sorted_state(
-                sorted_keys=self._contact_sorter.sorted_keys_view,
-                contact_count=contacts.rigid_contact_count,
-                sorted_point0=contacts.rigid_contact_point0,
-                sorted_shape0=contacts.rigid_contact_shape0,
-                sorted_normal=contacts.rigid_contact_normal,
-                body_q=state.body_q,
-                shape_body=model.shape_body,
-                device=self.device,
-            )
+            if self._matching_sticky:
+                self._contact_matcher.save_sorted_state(
+                    sorted_keys=self._contact_sorter.sorted_keys_view,
+                    contact_count=contacts.rigid_contact_count,
+                    sorted_point0=contacts.rigid_contact_point0,
+                    sorted_shape0=contacts.rigid_contact_shape0,
+                    sorted_normal=contacts.rigid_contact_normal,
+                    sorted_point1=contacts.rigid_contact_point1,
+                    sorted_offset0=contacts.rigid_contact_offset0,
+                    sorted_offset1=contacts.rigid_contact_offset1,
+                    body_q=state.body_q,
+                    shape_body=model.shape_body,
+                    device=self.device,
+                )
+            else:
+                self._contact_matcher.save_sorted_state(
+                    sorted_keys=self._contact_sorter.sorted_keys_view,
+                    contact_count=contacts.rigid_contact_count,
+                    sorted_point0=contacts.rigid_contact_point0,
+                    sorted_shape0=contacts.rigid_contact_shape0,
+                    sorted_normal=contacts.rigid_contact_normal,
+                    body_q=state.body_q,
+                    shape_body=model.shape_body,
+                    device=self.device,
+                )
 
         # Differentiable contact augmentation: reconstruct world-space contact
         # quantities through body_q so that gradients flow via wp.Tape.

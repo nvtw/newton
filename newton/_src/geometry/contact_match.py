@@ -66,13 +66,19 @@ Per-frame call order (inside :class:`~newton.CollisionPipeline`)::
 
     matcher.match(...)  # before ContactSorter.sort_full()
     sorter.sort_full(...)  # match_index is permuted with contacts
+    matcher.replay_matched(...)  # sticky-only; overwrite matched rows
     matcher.build_report(...)  # optional; must precede save_sorted_state
-    matcher.save_sorted_state(...)  # after sorting and report
+    matcher.save_sorted_state(...)  # after sorting, replay, and report
 
 The ``build_report`` / ``save_sorted_state`` ordering is load-bearing:
 ``save_sorted_state`` overwrites ``_prev_count`` with the current frame's
 count, while ``build_report`` reads the *old* ``_prev_count`` to bound the
-broken-contact enumeration.  Swapping the two silently narrows the
+broken-contact enumeration.
+
+Sticky mode ordering: ``replay_matched`` must run after the sort so that
+``match_index[tid]`` points at the prev-frame sorted layout and the target
+rows are the final sorted ones, and before ``save_sorted_state`` so the
+record we carry forward is the post-replay record actually used this frame.  Swapping the two silently narrows the
 broken-contact scan to the current frame's active range.
 """
 
@@ -314,10 +320,20 @@ def _resolve_claims_kernel(
 
 @wp.struct
 class _SaveStateData:
-    """Bundled arrays for the save-sorted-state kernel."""
+    """Bundled arrays for the save-sorted-state kernel.
+
+    ``dst_point1`` / ``dst_offset0`` / ``dst_offset1`` are only consumed when
+    ``has_sticky != 0``.  When sticky is disabled the matcher passes the
+    same (dummy) array for all three ``src_point*`` / ``src_offset*`` slots
+    and the kernel's ``if has_sticky`` guard skips the extra writes, so
+    sticky-only columns need zero allocation in the non-sticky path.
+    """
 
     src_keys: wp.array[wp.int64]
     src_point0: wp.array[wp.vec3]
+    src_point1: wp.array[wp.vec3]
+    src_offset0: wp.array[wp.vec3]
+    src_offset1: wp.array[wp.vec3]
     src_shape0: wp.array[wp.int32]
     src_normal: wp.array[wp.vec3]
     src_count: wp.array[wp.int32]
@@ -328,7 +344,13 @@ class _SaveStateData:
     dst_keys: wp.array[wp.int64]
     dst_pos_world: wp.array[wp.vec3]
     dst_normal: wp.array[wp.vec3]
+    dst_point0_body: wp.array[wp.vec3]
+    dst_point1_body: wp.array[wp.vec3]
+    dst_offset0_body: wp.array[wp.vec3]
+    dst_offset1_body: wp.array[wp.vec3]
     dst_count: wp.array[wp.int32]
+
+    has_sticky: int
 
 
 @wp.kernel(enable_backward=False)
@@ -345,6 +367,66 @@ def _save_sorted_state_kernel(data: _SaveStateData):
         else:
             data.dst_pos_world[i] = wp.transform_point(data.body_q[bid], data.src_point0[i])
         data.dst_normal[i] = data.src_normal[i]
+        if data.has_sticky != 0:
+            data.dst_point0_body[i] = data.src_point0[i]
+            data.dst_point1_body[i] = data.src_point1[i]
+            data.dst_offset0_body[i] = data.src_offset0[i]
+            data.dst_offset1_body[i] = data.src_offset1[i]
+
+
+# ------------------------------------------------------------------
+# Sticky-mode replay (matched rows only)
+# ------------------------------------------------------------------
+#
+# Sticky mode preserves only the fields that actually change across frames
+# for a matched contact: the body-frame contact points (``point0``/``point1``)
+# and offsets (``offset0``/``offset1``), plus the world-frame normal (which
+# is already persisted for matching in ``prev_normal``, no extra allocation).
+#
+# Everything else is either key-derived or a per-shape constant that does
+# not change between frames, so the new frame's values are already correct:
+#
+# - ``shape0`` / ``shape1``  : implied by the sort key; identical by
+#   construction for matched contacts.
+# - ``margin0`` / ``margin1``: ``radius_eff + margin``, per-shape constant.
+# - ``stiffness`` / ``damping`` / ``friction``: per-shape constants, and
+#   contact matching for hydroelastic contacts (the only path that writes
+#   these) is not supported anyway.
+
+
+@wp.struct
+class _ReplayData:
+    """Bundled arrays for the sticky replay kernel."""
+
+    match_index: wp.array[wp.int32]
+    contact_count: wp.array[wp.int32]
+
+    prev_point0: wp.array[wp.vec3]
+    prev_point1: wp.array[wp.vec3]
+    prev_offset0: wp.array[wp.vec3]
+    prev_offset1: wp.array[wp.vec3]
+    prev_normal: wp.array[wp.vec3]
+
+    point0: wp.array[wp.vec3]
+    point1: wp.array[wp.vec3]
+    offset0: wp.array[wp.vec3]
+    offset1: wp.array[wp.vec3]
+    normal: wp.array[wp.vec3]
+
+
+@wp.kernel(enable_backward=False)
+def _replay_matched_kernel(data: _ReplayData):
+    tid = wp.tid()
+    if tid >= data.contact_count[0]:
+        return
+    idx = data.match_index[tid]
+    if idx < wp.int32(0):
+        return  # MATCH_NOT_FOUND or MATCH_BROKEN -- keep new-frame data.
+    data.point0[tid] = data.prev_point0[idx]
+    data.point1[tid] = data.prev_point1[idx]
+    data.offset0[tid] = data.prev_offset0[idx]
+    data.offset1[tid] = data.prev_offset1[idx]
+    data.normal[tid] = data.prev_normal[idx]
 
 
 # ------------------------------------------------------------------
@@ -401,8 +483,9 @@ class ContactMatcher:
 
         matcher.match(...)  # before ContactSorter.sort_full()
         sorter.sort_full(...)  # match_index is permuted with contacts
+        matcher.replay_matched(...)  # sticky-only; overwrites matched rows
         matcher.build_report(...)  # optional; must precede save_sorted_state
-        matcher.save_sorted_state(...)  # after sorting and report
+        matcher.save_sorted_state(...)  # after sorting, replay, and report
 
     The ``build_report`` → ``save_sorted_state`` order is required:
     ``save_sorted_state`` overwrites ``_prev_count`` with the current frame's
@@ -435,6 +518,14 @@ class ContactMatcher:
             normals.  Below this the contact is considered broken.
         contact_report: Allocate the ``prev_was_matched`` flag array needed
             to enumerate broken contacts in :meth:`build_report`.
+        sticky: Allocate four extra per-contact ``wp.vec3`` buffers
+            (``point0``/``point1``/``offset0``/``offset1``, body-frame) used
+            by :meth:`replay_matched` to overwrite matched contacts with
+            their previous-frame geometry.  The world-frame normal is
+            already persisted for matching so no extra allocation is
+            needed for it.  When ``False`` these attributes are ``None``,
+            no extra kernel launches are added, and the non-sticky launch
+            graph is identical to the pre-sticky design.
         device: Device to allocate on.
     """
 
@@ -443,9 +534,10 @@ class ContactMatcher:
         capacity: int,
         *,
         sorter: ContactSorter,
-        pos_threshold: float = 0.02,
+        pos_threshold: float = 0.005,
         normal_dot_threshold: float = 0.9,
         contact_report: bool = False,
+        sticky: bool = False,
         device: Devicelike = None,
     ):
         with wp.ScopedDevice(device):
@@ -476,6 +568,24 @@ class ContactMatcher:
                 # Dummy single-element array so the Warp struct is always valid.
                 self._prev_was_matched = wp.zeros(1, dtype=wp.int32)
 
+            # Sticky-mode buffers.  Only the body-frame point/offset pairs
+            # need preserving -- shape indices, margins, and per-shape
+            # properties are either key-derived or per-shape constants and
+            # so identical on the next frame for a matched contact.  The
+            # world-frame normal is already persisted in the sorter's
+            # scratch_normal for matching and is reused directly here.
+            self._sticky = sticky
+            if sticky:
+                self._prev_point0 = wp.zeros(capacity, dtype=wp.vec3)
+                self._prev_point1 = wp.zeros(capacity, dtype=wp.vec3)
+                self._prev_offset0 = wp.zeros(capacity, dtype=wp.vec3)
+                self._prev_offset1 = wp.zeros(capacity, dtype=wp.vec3)
+            else:
+                self._prev_point0 = None
+                self._prev_point1 = None
+                self._prev_offset0 = None
+                self._prev_offset1 = None
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -484,6 +594,11 @@ class ContactMatcher:
     def has_report(self) -> bool:
         """Whether the contact report buffers are allocated."""
         return self._has_report
+
+    @property
+    def is_sticky(self) -> bool:
+        """Whether sticky-mode full-record buffers are allocated."""
+        return self._sticky
 
     @property
     def prev_contact_count(self) -> wp.array:
@@ -596,6 +711,9 @@ class ContactMatcher:
         body_q: wp.array,
         shape_body: wp.array,
         *,
+        sorted_point1: wp.array | None = None,
+        sorted_offset0: wp.array | None = None,
+        sorted_offset1: wp.array | None = None,
         device: Devicelike = None,
     ) -> None:
         """Save current frame's sorted contacts for next-frame matching.
@@ -608,6 +726,12 @@ class ContactMatcher:
         Sorted keys go to an owned buffer since the sorter's key buffer is
         overwritten by ``_prepare_sort`` each frame.
 
+        When the matcher was built with ``sticky=True``, the body-frame
+        ``point0``/``point1``/``offset0``/``offset1`` columns are also
+        persisted for :meth:`replay_matched` in the same kernel launch.
+        These extra ``sorted_*`` keyword args are required in that case and
+        ignored otherwise.
+
         Args:
             sorted_keys: Sorted int64 keys (use :attr:`ContactSorter.sorted_keys_view`).
             contact_count: Single-element int array with active contact count.
@@ -616,6 +740,8 @@ class ContactMatcher:
             sorted_normal: Sorted contact normals.
             body_q: Body transforms (current frame).
             shape_body: Shape-to-body index map.
+            sorted_point1, sorted_offset0, sorted_offset1: Required when
+                sticky is enabled; ignored otherwise.
             device: Device to launch on.
         """
         data = _SaveStateData()
@@ -632,7 +758,87 @@ class ContactMatcher:
         data.dst_normal = self._sorter.scratch_normal
         data.dst_count = self._prev_count
 
+        if self._sticky:
+            if sorted_point1 is None or sorted_offset0 is None or sorted_offset1 is None:
+                raise ValueError("save_sorted_state requires sorted_point1/offset0/offset1 when sticky is enabled")
+            data.src_point1 = sorted_point1
+            data.src_offset0 = sorted_offset0
+            data.src_offset1 = sorted_offset1
+            data.dst_point0_body = self._prev_point0
+            data.dst_point1_body = self._prev_point1
+            data.dst_offset0_body = self._prev_offset0
+            data.dst_offset1_body = self._prev_offset1
+            data.has_sticky = 1
+        else:
+            # The struct requires a valid array for every field -- the
+            # kernel guards with has_sticky==0 and never reads/writes them.
+            data.src_point1 = sorted_point0
+            data.src_offset0 = sorted_point0
+            data.src_offset1 = sorted_point0
+            data.dst_point0_body = self._sorter.scratch_pos_world
+            data.dst_point1_body = self._sorter.scratch_pos_world
+            data.dst_offset0_body = self._sorter.scratch_pos_world
+            data.dst_offset1_body = self._sorter.scratch_pos_world
+            data.has_sticky = 0
+
         wp.launch(_save_sorted_state_kernel, dim=self._capacity, inputs=[data], device=device)
+
+    def replay_matched(
+        self,
+        contact_count: wp.array,
+        match_index: wp.array,
+        *,
+        point0: wp.array,
+        point1: wp.array,
+        offset0: wp.array,
+        offset1: wp.array,
+        normal: wp.array,
+        device: Devicelike = None,
+    ) -> None:
+        """Overwrite matched rows with the saved previous-frame contact geometry.
+
+        Only valid when the matcher was constructed with ``sticky=True``.  Must
+        be called **after** :meth:`ContactSorter.sort_full` (so ``match_index``
+        is permuted to the sorted layout and the target rows are the final
+        sorted ones) and **before** :meth:`save_sorted_state` (which overwrites
+        the prev-frame buffers with the current frame's post-replay record).
+
+        Unmatched rows (``match_index < 0`` -- :data:`MATCH_NOT_FOUND` or
+        :data:`MATCH_BROKEN`) are left untouched, so new contacts pass through
+        with their fresh narrow-phase geometry.
+
+        Only ``point0``/``point1``/``offset0``/``offset1``/``normal`` are
+        restored.  Every other contact field (``shape0``/``shape1``,
+        ``margin0``/``margin1``, ...) is either key-derived or per-shape
+        constant and so already identical to the previous frame's value for
+        a matched contact.
+
+        Args:
+            contact_count: Single-element int array with the active contact count.
+            match_index: Sorted match_index array (from :class:`Contacts`).
+            point0, point1, offset0, offset1, normal: Current-frame sorted
+                contact record to be overwritten on matched rows.
+            device: Device to launch on.
+        """
+        if not self._sticky:
+            raise ValueError("replay_matched requires the matcher to be constructed with sticky=True")
+
+        data = _ReplayData()
+        data.match_index = match_index
+        data.contact_count = contact_count
+        data.prev_point0 = self._prev_point0
+        data.prev_point1 = self._prev_point1
+        data.prev_offset0 = self._prev_offset0
+        data.prev_offset1 = self._prev_offset1
+        # Normal was already persisted as world-space for matching.
+        data.prev_normal = self._sorter.scratch_normal
+        data.point0 = point0
+        data.point1 = point1
+        data.offset0 = offset0
+        data.offset1 = offset1
+        data.normal = normal
+
+        wp.launch(_replay_matched_kernel, dim=self._capacity, inputs=[data], device=device)
 
     def build_report(
         self,
