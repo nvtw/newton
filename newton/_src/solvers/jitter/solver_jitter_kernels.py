@@ -111,13 +111,10 @@ from newton._src.solvers.jitter.graph_coloring_common import (
 __all__ = [
     "_STRAGGLER_BLOCK_DIM",
     "_constraint_gather_wrenches_kernel",
-    "_constraint_iterate_fast_kernel",
     "_constraint_iterate_fast_tail_kernel",
     "_constraint_iterate_kernel",
     "_constraint_prepare_fast_tail_kernel",
-    "_constraint_prepare_for_iteration_fast_kernel",
     "_constraint_prepare_for_iteration_kernel",
-    "_constraint_relax_fast_kernel",
     "_constraint_relax_fast_tail_kernel",
     "_constraint_relax_kernel",
     "_constraints_to_elements_kernel",
@@ -404,166 +401,33 @@ def _constraint_relax_kernel(
 # chain of compares.
 #
 # The fast-path kernels below ship only the two branches we actually
-# use. ``World.__init__`` takes a ``full_dispatch`` boolean that flips
-# between the full and fast variants at record time -- the selected
-# kernel is the one captured into the CUDA graph, so there's no runtime
-# branch overhead either way.
-
-
-@wp.kernel(enable_backward=False)
-def _constraint_prepare_for_iteration_fast_kernel(
-    constraints: ConstraintContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    element_ids_by_color: wp.array[wp.int32],
-    color_starts: wp.array[wp.int32],
-    num_colors: wp.array[wp.int32],
-    color_cursor: wp.array[wp.int32],
-    cc: ContactContainer,
-    contacts: ContactViews,
-):
-    """Fast-path prepare dispatcher.
-
-    Counterpart to :func:`_constraint_prepare_for_iteration_kernel`
-    that only dispatches to the two constraint types a typical scene
-    uses: :data:`CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET` (the
-    universal revolute / prismatic / ball-socket with drives + limits
-    via :func:`actuated_double_ball_socket_prepare_for_iteration`) and
-    :data:`CONSTRAINT_TYPE_CONTACT`. Any other constraint type stamped
-    into the container is silently skipped -- the caller is responsible
-    for opting into the full dispatcher when they need other types.
-    """
-    tid = wp.tid()
-
-    cursor = color_cursor[0]
-    n_colors = num_colors[0]
-    c = n_colors - cursor
-
-    start = color_starts[c]
-    end = color_starts[c + 1]
-    count = end - start
-
-    if tid < count:
-        cid = element_ids_by_color[start + tid]
-
-        t = constraint_get_type(constraints, cid)
-        if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
-            actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
-        elif t == CONSTRAINT_TYPE_CONTACT:
-            contact_prepare_for_iteration(constraints, cid, bodies, idt, cc, contacts)
-
-    if tid == 0:
-        color_cursor[0] = cursor - 1
-
-
-@wp.kernel(enable_backward=False)
-def _constraint_iterate_fast_kernel(
-    constraints: ConstraintContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    element_ids_by_color: wp.array[wp.int32],
-    color_starts: wp.array[wp.int32],
-    num_colors: wp.array[wp.int32],
-    color_cursor: wp.array[wp.int32],
-    cc: ContactContainer,
-    contacts: ContactViews,
-):
-    """Fast-path main-solve dispatcher (``use_bias=True``).
-
-    See :func:`_constraint_prepare_for_iteration_fast_kernel` for the
-    fast-path rationale.
-    """
-    tid = wp.tid()
-
-    cursor = color_cursor[0]
-    n_colors = num_colors[0]
-    c = n_colors - cursor
-
-    start = color_starts[c]
-    end = color_starts[c + 1]
-    count = end - start
-
-    if tid < count:
-        cid = element_ids_by_color[start + tid]
-
-        t = constraint_get_type(constraints, cid)
-        if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
-            actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, True)
-        elif t == CONSTRAINT_TYPE_CONTACT:
-            contact_iterate(constraints, cid, bodies, idt, cc, contacts, True)
-
-    if tid == 0:
-        color_cursor[0] = cursor - 1
-
-
-@wp.kernel(enable_backward=False)
-def _constraint_relax_fast_kernel(
-    constraints: ConstraintContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    element_ids_by_color: wp.array[wp.int32],
-    color_starts: wp.array[wp.int32],
-    num_colors: wp.array[wp.int32],
-    color_cursor: wp.array[wp.int32],
-    cc: ContactContainer,
-    contacts: ContactViews,
-):
-    """Fast-path relax dispatcher (``use_bias=False``).
-
-    See :func:`_constraint_prepare_for_iteration_fast_kernel` for the
-    fast-path rationale.
-    """
-    tid = wp.tid()
-
-    cursor = color_cursor[0]
-    n_colors = num_colors[0]
-    c = n_colors - cursor
-
-    start = color_starts[c]
-    end = color_starts[c + 1]
-    count = end - start
-
-    if tid < count:
-        cid = element_ids_by_color[start + tid]
-
-        t = constraint_get_type(constraints, cid)
-        if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
-            actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, False)
-        elif t == CONSTRAINT_TYPE_CONTACT:
-            contact_iterate(constraints, cid, bodies, idt, cc, contacts, False)
-
-    if tid == 0:
-        color_cursor[0] = cursor - 1
+# use. ``World.__init__`` takes an ``enable_all_constraints`` boolean
+# that flips between the full and fast variants at record time -- the
+# selected kernel is the one captured into the CUDA graph, so there's
+# no runtime branch overhead either way.
 
 
 # ---------------------------------------------------------------------------
-# Tail (straggler) kernels -- single-block, process many small colours
+# Fast-path unified single-block dispatchers
 # ---------------------------------------------------------------------------
 #
-# The per-colour dispatchers above are launched once per colour by the
-# ``wp.capture_while`` loop in :meth:`World._solve_velocities` /
-# :meth:`World._relax_velocities`. Each launch carries several
-# microseconds of kernel-launch overhead; for a 10-layer pyramid with
-# ~14 colours that's ~14 launches per sweep per iteration, and the
-# overhead adds up to a healthy fraction of wall-clock time.
+# The three ``_fast_tail`` kernels below replace the two-launch
+# (per-colour multi-block + single-block tail) scheme previously used by
+# the fast dispatcher. Each runs in a single thread block and walks the
+# *entire* remaining colour range internally: outer ``while cursor > 0``
+# loop with ``__syncthreads`` between colours so body-velocity writes
+# propagate, and a block-stride ``while base < count`` loop inside each
+# colour so colours larger than ``block_dim`` are still covered. One
+# launch per sweep replaces ``num_colors`` launches; the cursor is
+# zeroed on exit so the outer ``wp.capture_while`` terminates
+# immediately.
 #
-# These "straggler" kernels amortise the launches over the whole tail
-# of the colouring. They run in a single thread block and loop over
-# colours internally, using ``__syncthreads`` between colours to make
-# the body-state updates from colour ``c`` visible to the threads
-# working colour ``c+1``. A single launch therefore does the work of
-# up to ``block_dim`` colours as long as every remaining colour has
-# ``<= block_dim`` elements.
-#
-# The per-colour kernel still covers the head of the colouring where
-# an individual colour can be larger than a block (multi-block launch
-# at ``constraint_capacity`` dim). The solver's capture_while body
-# invokes *both* every iteration: the per-colour handles the current
-# colour (decrements cursor by 1 regardless of size), then the
-# straggler opportunistically hoovers up any further small colours in
-# the same body-invocation. When the remaining colour count fits in a
-# single block's worth of work, the whole sweep collapses to one
-# body-invocation instead of ``num_colors``.
+# The full dispatchers (``_constraint_prepare_for_iteration_kernel``
+# etc.) are still required for ``enable_all_constraints=True`` scenes
+# that wire constraint types beyond
+# :data:`CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET` +
+# :data:`CONSTRAINT_TYPE_CONTACT`; they follow the legacy per-colour
+# multi-block pattern.
 
 
 _STRAGGLER_BLOCK_DIM: int = 256

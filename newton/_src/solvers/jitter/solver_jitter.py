@@ -60,13 +60,10 @@ from newton._src.solvers.jitter.graph_coloring_incremental import (
 from newton._src.solvers.jitter.solver_jitter_kernels import (
     _STRAGGLER_BLOCK_DIM,
     _constraint_gather_wrenches_kernel,
-    _constraint_iterate_fast_kernel,
     _constraint_iterate_fast_tail_kernel,
     _constraint_iterate_kernel,
     _constraint_prepare_fast_tail_kernel,
-    _constraint_prepare_for_iteration_fast_kernel,
     _constraint_prepare_for_iteration_kernel,
-    _constraint_relax_fast_kernel,
     _constraint_relax_fast_tail_kernel,
     _constraint_relax_kernel,
     _constraints_to_elements_kernel,
@@ -214,22 +211,34 @@ class World:
         # ``CONSTRAINT_TYPE_ANGULAR_LIMIT``, etc.) must opt in to the
         # full dispatcher with ``enable_all_constraints=True`` or those
         # cids will be silently skipped by the sweep kernels.
+        # Two dispatch modes:
+        #
+        # * ``enable_all_constraints=True`` (full dispatcher):
+        #   multi-block per-colour launches at ``dim=constraint_capacity``.
+        #   One launch per colour; the outer ``wp.capture_while``
+        #   drives the colour cursor. Required for scenes that wire
+        #   anything beyond ``ACTUATED_DOUBLE_BALL_SOCKET`` + ``CONTACT``.
+        #
+        # * ``enable_all_constraints=False`` (fast dispatcher):
+        #   a single-block unified kernel that sweeps **every**
+        #   remaining colour in one launch using a block-stride loop
+        #   inside each colour and ``__syncthreads`` between colours.
+        #   The kernel zeroes the cursor on exit so the outer
+        #   ``wp.capture_while`` terminates after a single launch.
+        #   This replaces the per-colour multi-block path entirely
+        #   for fast-path workloads -- one launch per sweep instead
+        #   of ``num_colors``.
         self.enable_all_constraints: bool = bool(enable_all_constraints)
         if self.enable_all_constraints:
             self._prepare_kernel = _constraint_prepare_for_iteration_kernel
             self._iterate_kernel = _constraint_iterate_kernel
             self._relax_kernel = _constraint_relax_kernel
-            # No single-block tail for the full dispatcher yet.
-            self._prepare_tail_kernel = None
-            self._iterate_tail_kernel = None
-            self._relax_tail_kernel = None
+            self._single_block_sweep = False
         else:
-            self._prepare_kernel = _constraint_prepare_for_iteration_fast_kernel
-            self._iterate_kernel = _constraint_iterate_fast_kernel
-            self._relax_kernel = _constraint_relax_fast_kernel
-            self._prepare_tail_kernel = _constraint_prepare_fast_tail_kernel
-            self._iterate_tail_kernel = _constraint_iterate_fast_tail_kernel
-            self._relax_tail_kernel = _constraint_relax_fast_tail_kernel
+            self._prepare_kernel = _constraint_prepare_fast_tail_kernel
+            self._iterate_kernel = _constraint_iterate_fast_tail_kernel
+            self._relax_kernel = _constraint_relax_fast_tail_kernel
+            self._single_block_sweep = True
 
         self.step_dt: float = 0.0
         self.inv_step_dt: float = 0.0
@@ -747,7 +756,6 @@ class World:
             self._partitioner.color_cursor,
             self._capture_partition_sweep,
             kernel=self._prepare_kernel,
-            tail_kernel=self._prepare_tail_kernel,
             idt=idt,
             contact_views=contact_views,
         )
@@ -762,7 +770,6 @@ class World:
                 self._partitioner.color_cursor,
                 self._capture_partition_sweep,
                 kernel=self._iterate_kernel,
-                tail_kernel=self._iterate_tail_kernel,
                 idt=idt,
                 contact_views=contact_views,
             )
@@ -981,32 +988,26 @@ class World:
     def _capture_partition_sweep(
         self,
         kernel=None,
-        tail_kernel=None,
         idt: wp.float32 = 0.0,
         contact_views: ContactViews | None = None,
     ) -> None:
         """Body of the ``wp.capture_while`` loop in :meth:`_solve_velocities`.
 
-        One invocation processes **one or more** colours:
+        Two launch shapes depending on :attr:`_single_block_sweep`:
 
-        * The per-colour ``kernel`` runs first, at
-          ``dim=constraint_capacity``, and handles the current colour
-          no matter its size (multi-block launch covers arbitrarily
-          large colours). It decrements ``color_cursor`` by 1.
-        * When ``tail_kernel`` is non-None, it's then launched at a
-          single block of ``_STRAGGLER_BLOCK_DIM`` threads. The tail
-          kernel loops over colours internally, using
-          ``__syncthreads`` between them, and processes as many
-          *small* remaining colours (``<= _STRAGGLER_BLOCK_DIM``) as
-          it can in one launch. That amortises kernel-launch
-          overhead over the tail of the colouring -- a 14-colour
-          stack whose last 10 colours are tiny collapses from 14
-          launches per sweep down to ~5.
+        * Fast path (``True``): single-block launch with
+          ``dim = block_dim = _STRAGGLER_BLOCK_DIM``. The unified
+          kernel walks every remaining colour internally with
+          ``__syncthreads`` between colours and a block-stride loop
+          within each colour, zeroing the cursor on exit. One launch
+          per sweep, regardless of ``num_colors``.
+        * Full path (``False``): multi-block launch at
+          ``dim = constraint_capacity``. The kernel processes one
+          colour's CSR slice and decrements the cursor by 1; the
+          outer ``wp.capture_while`` handles the per-colour loop.
 
-        Launch dim of the per-colour kernel stays at the full
-        constraint capacity (Python-side constant, required by
-        ``capture_while``); threads beyond the current colour's size
-        early-out inside the kernel.
+        Threads beyond the active colour's ``count`` early-out
+        inside the kernel in both launch shapes.
         """
         views = contact_views if contact_views is not None else self._contact_views_placeholder
         inputs = [
@@ -1020,19 +1021,20 @@ class World:
             self._contact_container,
             views,
         ]
-        wp.launch(
-            kernel,
-            dim=self._constraint_capacity,
-            inputs=inputs,
-            device=self.device,
-        )
-        if tail_kernel is not None:
+        if self._single_block_sweep:
             wp.launch(
-                tail_kernel,
+                kernel,
                 dim=_STRAGGLER_BLOCK_DIM,
                 inputs=inputs,
                 device=self.device,
                 block_dim=_STRAGGLER_BLOCK_DIM,
+            )
+        else:
+            wp.launch(
+                kernel,
+                dim=self._constraint_capacity,
+                inputs=inputs,
+                device=self.device,
             )
 
     def _integrate_velocities(self) -> None:
@@ -1078,7 +1080,6 @@ class World:
                 self._partitioner.color_cursor,
                 self._capture_partition_sweep,
                 kernel=self._relax_kernel,
-                tail_kernel=self._relax_tail_kernel,
                 idt=idt,
                 contact_views=contact_views,
             )
