@@ -85,6 +85,7 @@ _GRAVITY_OFF = (0.0, 0.0, 0.0)
 
 def _finalize(builder: WorldBuilder, device, *, gravity):
     return builder.finalize(
+        enable_all_constraints=True,
         substeps=SUBSTEPS,
         solver_iterations=SOLVER_ITERATIONS,
         gravity=gravity,

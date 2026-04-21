@@ -98,6 +98,7 @@ def _build_anchored_hinge(
         max_force=max_force,
     )
     world = b.finalize(
+        enable_all_constraints=True,
         substeps=SUBSTEPS,
         solver_iterations=SOLVER_ITERATIONS,
         device=device,
@@ -133,6 +134,7 @@ def _build_hanging_pendulum(device, *, motor: bool = False, target_velocity: flo
         max_force=max_force,
     )
     return b.finalize(
+        enable_all_constraints=True,
         substeps=SUBSTEPS, solver_iterations=SOLVER_ITERATIONS, device=device
     ), handle
 
@@ -273,6 +275,7 @@ class TestHingeJoint(unittest.TestCase):
             max_force=20.0,
         )
         world = b.finalize(
+        enable_all_constraints=True,
             substeps=SUBSTEPS, solver_iterations=SOLVER_ITERATIONS, device=device
         )
         self._step(world)

@@ -97,6 +97,7 @@ def _build_anchored_d6(
         linear=linear,
     )
     world = b.finalize(
+        enable_all_constraints=True,
         substeps=SUBSTEPS,
         solver_iterations=SOLVER_ITERATIONS,
         device=device,
@@ -143,6 +144,7 @@ def _build_two_body_d6(
     )
     return (
         b.finalize(
+        enable_all_constraints=True,
             substeps=SUBSTEPS, solver_iterations=SOLVER_ITERATIONS, device=device
         ),
         b1,
@@ -714,6 +716,7 @@ class TestD6(unittest.TestCase):
                 angular=d6_angular, linear=d6_linear,
             )
         world = b.finalize(
+        enable_all_constraints=True,
             substeps=SUBSTEPS,
             solver_iterations=SOLVER_ITERATIONS,
             device=device,

@@ -59,8 +59,11 @@ from newton._src.solvers.jitter.graph_coloring_incremental import (
 )
 from newton._src.solvers.jitter.solver_jitter_kernels import (
     _constraint_gather_wrenches_kernel,
+    _constraint_iterate_fast_kernel,
     _constraint_iterate_kernel,
+    _constraint_prepare_for_iteration_fast_kernel,
     _constraint_prepare_for_iteration_kernel,
+    _constraint_relax_fast_kernel,
     _constraint_relax_kernel,
     _constraints_to_elements_kernel,
     _integrate_forces_kernel,
@@ -128,6 +131,7 @@ class World:
         joint_constraint_count: int | None = None,
         collision_filter_pairs: Iterable[tuple[int, int]] | None = None,
         default_friction: float = 0.5,
+        enable_all_constraints: bool = False,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built containers.
@@ -192,6 +196,29 @@ class World:
         self.velocity_relaxations = int(velocity_relaxations)
         self.gravity = wp.vec3f(float(gravity[0]), float(gravity[1]), float(gravity[2]))
         self.default_friction = float(default_friction)
+
+        # ----- Dispatcher selection ------------------------------------
+        # Fast-path kernels only dispatch for
+        # :data:`CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET` and
+        # :data:`CONSTRAINT_TYPE_CONTACT`. This covers
+        # revolute / prismatic / ball-socket joints with drives + limits
+        # (the universal joint :class:`WorldBuilder.add_joint` builds),
+        # plus contacts -- i.e. everything the current examples actually
+        # use. Scenes that wire one of the other
+        # :mod:`constraint_container` schemas (``CONSTRAINT_TYPE_D6``,
+        # ``CONSTRAINT_TYPE_HINGE_JOINT``, ``CONSTRAINT_TYPE_BALL_SOCKET``,
+        # ``CONSTRAINT_TYPE_ANGULAR_LIMIT``, etc.) must opt in to the
+        # full dispatcher with ``enable_all_constraints=True`` or those
+        # cids will be silently skipped by the sweep kernels.
+        self.enable_all_constraints: bool = bool(enable_all_constraints)
+        if self.enable_all_constraints:
+            self._prepare_kernel = _constraint_prepare_for_iteration_kernel
+            self._iterate_kernel = _constraint_iterate_kernel
+            self._relax_kernel = _constraint_relax_kernel
+        else:
+            self._prepare_kernel = _constraint_prepare_for_iteration_fast_kernel
+            self._iterate_kernel = _constraint_iterate_fast_kernel
+            self._relax_kernel = _constraint_relax_fast_kernel
 
         self.step_dt: float = 0.0
         self.inv_step_dt: float = 0.0
@@ -698,7 +725,7 @@ class World:
         wp.capture_while(
             self._partitioner.color_cursor,
             self._capture_partition_sweep,
-            kernel=_constraint_prepare_for_iteration_kernel,
+            kernel=self._prepare_kernel,
             idt=idt,
             contact_views=contact_views,
         )
@@ -712,7 +739,7 @@ class World:
             wp.capture_while(
                 self._partitioner.color_cursor,
                 self._capture_partition_sweep,
-                kernel=_constraint_iterate_kernel,
+                kernel=self._iterate_kernel,
                 idt=idt,
                 contact_views=contact_views,
             )
@@ -1008,7 +1035,7 @@ class World:
             wp.capture_while(
                 self._partitioner.color_cursor,
                 self._capture_partition_sweep,
-                kernel=_constraint_relax_kernel,
+                kernel=self._relax_kernel,
                 idt=idt,
                 contact_views=contact_views,
             )

@@ -77,6 +77,7 @@ def _build_prismatic_scene(
         axis=axis,
     )
     return b.finalize(
+        enable_all_constraints=True,
         substeps=SUBSTEPS, solver_iterations=SOLVER_ITERATIONS, device=device
     ), handle
 

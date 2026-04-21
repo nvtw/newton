@@ -82,6 +82,7 @@ def _build_two_body_hinge(
     )
     b.add_hinge_angle(1, 2, axis=_HINGE_AXIS, min_angle=min_angle, max_angle=max_angle)
     return b.finalize(
+        enable_all_constraints=True,
         substeps=SUBSTEPS,
         solver_iterations=SOLVER_ITERATIONS,
         device=device,

@@ -77,6 +77,7 @@ def _build_equilibrium_chain(device):
         b.add_ball_socket(body_a, body_b, anchor)
 
     return b.finalize(
+        enable_all_constraints=True,
         substeps=SUBSTEPS,
         solver_iterations=SOLVER_ITERATIONS,
         device=device,

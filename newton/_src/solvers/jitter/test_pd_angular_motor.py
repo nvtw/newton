@@ -169,6 +169,7 @@ def _build_revolute_pendulum(
     )
 
     world = b.finalize(
+        enable_all_constraints=True,
         substeps=SUBSTEPS,
         solver_iterations=SOLVER_ITERATIONS,
         gravity=gravity,
@@ -495,6 +496,7 @@ class TestPDAngularMotor(unittest.TestCase):
             # stiffness / damping default to 0 -> velocity path.
         )
         world = b.finalize(
+        enable_all_constraints=True,
             substeps=SUBSTEPS,
             solver_iterations=SOLVER_ITERATIONS,
             device=device,

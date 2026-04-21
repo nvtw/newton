@@ -69,6 +69,7 @@ def _build_pendulum(
     )
     b.add_ball_socket(world_body, cube, anchor=(0.0, 0.0, 0.0))
     return b.finalize(
+        enable_all_constraints=True,
         substeps=SUBSTEPS,
         solver_iterations=SOLVER_ITERATIONS,
         device=device,
@@ -191,6 +192,7 @@ class TestBallSocket(unittest.TestCase):
         )
         b.add_ball_socket(world_body, cube, anchor=(0.0, 0.0, 0.0))
         world = b.finalize(
+        enable_all_constraints=True,
             substeps=SUBSTEPS, solver_iterations=SOLVER_ITERATIONS, device=device
         )
 

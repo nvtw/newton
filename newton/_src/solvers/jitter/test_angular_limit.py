@@ -116,6 +116,7 @@ def _build_limited_pendulum(
     )
 
     world = b.finalize(
+        enable_all_constraints=True,
         substeps=SUBSTEPS,
         solver_iterations=SOLVER_ITERATIONS,
         gravity=gravity,

@@ -79,6 +79,7 @@ def _build_two_body_motor(
         max_force=max_force,
     )
     return b.finalize(
+        enable_all_constraints=True,
         substeps=SUBSTEPS,
         solver_iterations=SOLVER_ITERATIONS,
         device=device,

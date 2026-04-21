@@ -110,8 +110,12 @@ from newton._src.solvers.jitter.graph_coloring_common import (
 
 __all__ = [
     "_constraint_gather_wrenches_kernel",
+    "_constraint_iterate_fast_kernel",
     "_constraint_iterate_kernel",
+    "_constraint_prepare_for_iteration_fast_kernel",
     "_constraint_prepare_for_iteration_kernel",
+    "_constraint_relax_fast_kernel",
+    "_constraint_relax_kernel",
     "_constraints_to_elements_kernel",
     "_integrate_forces_kernel",
     "_integrate_velocities_kernel",
@@ -374,6 +378,153 @@ def _constraint_relax_kernel(
             prismatic_iterate(constraints, cid, bodies, idt, False)
         elif t == CONSTRAINT_TYPE_D6:
             d6_iterate(constraints, cid, bodies, idt, False)
+        elif t == CONSTRAINT_TYPE_CONTACT:
+            contact_iterate(constraints, cid, bodies, idt, cc, contacts, False)
+
+    if tid == 0:
+        color_cursor[0] = cursor - 1
+
+
+# ---------------------------------------------------------------------------
+# Fast-path dispatchers: actuated double-ball-socket joints + contact only
+# ---------------------------------------------------------------------------
+#
+# The "full" dispatchers above branch through a dozen joint types. In
+# practice the vast majority of Jitter scenes -- including everything
+# built by :class:`WorldBuilder.add_joint` today -- route all of their
+# joints through :data:`CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET`
+# (revolute / prismatic / ball-socket with optional drives + limits) +
+# contacts. For those scenes the other ten branches are dead code that
+# still takes register budget, hurts instruction-cache locality, and
+# slows per-thread dispatch because the final ``elif`` has to chase a
+# chain of compares.
+#
+# The fast-path kernels below ship only the two branches we actually
+# use. ``World.__init__`` takes a ``full_dispatch`` boolean that flips
+# between the full and fast variants at record time -- the selected
+# kernel is the one captured into the CUDA graph, so there's no runtime
+# branch overhead either way.
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_prepare_for_iteration_fast_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+):
+    """Fast-path prepare dispatcher.
+
+    Counterpart to :func:`_constraint_prepare_for_iteration_kernel`
+    that only dispatches to the two constraint types a typical scene
+    uses: :data:`CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET` (the
+    universal revolute / prismatic / ball-socket with drives + limits
+    via :func:`actuated_double_ball_socket_prepare_for_iteration`) and
+    :data:`CONSTRAINT_TYPE_CONTACT`. Any other constraint type stamped
+    into the container is silently skipped -- the caller is responsible
+    for opting into the full dispatcher when they need other types.
+    """
+    tid = wp.tid()
+
+    cursor = color_cursor[0]
+    n_colors = num_colors[0]
+    c = n_colors - cursor
+
+    start = color_starts[c]
+    end = color_starts[c + 1]
+    count = end - start
+
+    if tid < count:
+        cid = element_ids_by_color[start + tid]
+
+        t = constraint_get_type(constraints, cid)
+        if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
+            actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+        elif t == CONSTRAINT_TYPE_CONTACT:
+            contact_prepare_for_iteration(constraints, cid, bodies, idt, cc, contacts)
+
+    if tid == 0:
+        color_cursor[0] = cursor - 1
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_iterate_fast_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+):
+    """Fast-path main-solve dispatcher (``use_bias=True``).
+
+    See :func:`_constraint_prepare_for_iteration_fast_kernel` for the
+    fast-path rationale.
+    """
+    tid = wp.tid()
+
+    cursor = color_cursor[0]
+    n_colors = num_colors[0]
+    c = n_colors - cursor
+
+    start = color_starts[c]
+    end = color_starts[c + 1]
+    count = end - start
+
+    if tid < count:
+        cid = element_ids_by_color[start + tid]
+
+        t = constraint_get_type(constraints, cid)
+        if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
+            actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, True)
+        elif t == CONSTRAINT_TYPE_CONTACT:
+            contact_iterate(constraints, cid, bodies, idt, cc, contacts, True)
+
+    if tid == 0:
+        color_cursor[0] = cursor - 1
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_relax_fast_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+):
+    """Fast-path relax dispatcher (``use_bias=False``).
+
+    See :func:`_constraint_prepare_for_iteration_fast_kernel` for the
+    fast-path rationale.
+    """
+    tid = wp.tid()
+
+    cursor = color_cursor[0]
+    n_colors = num_colors[0]
+    c = n_colors - cursor
+
+    start = color_starts[c]
+    end = color_starts[c + 1]
+    count = end - start
+
+    if tid < count:
+        cid = element_ids_by_color[start + tid]
+
+        t = constraint_get_type(constraints, cid)
+        if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
+            actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, False)
         elif t == CONSTRAINT_TYPE_CONTACT:
             contact_iterate(constraints, cid, bodies, idt, cc, contacts, False)
 

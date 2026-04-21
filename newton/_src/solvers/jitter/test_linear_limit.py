@@ -101,6 +101,7 @@ def _build_limited_bob(
     )
 
     world = b.finalize(
+        enable_all_constraints=True,
         substeps=SUBSTEPS,
         solver_iterations=SOLVER_ITERATIONS,
         gravity=gravity,
