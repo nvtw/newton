@@ -493,6 +493,14 @@ class _ReplayData:
     offset0: wp.array[wp.vec3]
     offset1: wp.array[wp.vec3]
 
+    # Diagnostic: single-element int32 atomic counter incremented every
+    # time a matched row actually takes the replay branch (i.e. the
+    # persistent manifold was committed byte-for-byte to point0/point1
+    # and the persistent world-frame normal was written to normal).
+    # Matched rows that fail the drift guard keep their fresh
+    # narrow-phase data and are *not* counted.
+    replayed_count: wp.array[wp.int32]
+
 
 @wp.kernel(enable_backward=False)
 def _replay_matched_kernel(data: _ReplayData):
@@ -570,6 +578,7 @@ def _replay_matched_kernel(data: _ReplayData):
     data.point0[tid] = p0_old
     data.point1[tid] = p1_old
     data.normal[tid] = n_old
+    wp.atomic_add(data.replayed_count, 0, wp.int32(1))
 
     # Recompute body-frame friction offsets from (margin, n_persistent,
     # current body_q).  This matches the formula used by the narrow
@@ -740,9 +749,16 @@ class ContactMatcher:
             if sticky:
                 self._prev_point0 = wp.zeros(capacity, dtype=wp.vec3)
                 self._prev_point1 = wp.zeros(capacity, dtype=wp.vec3)
+                # Diagnostic counter: how many matched rows took the
+                # replay branch in the most recent ``replay_matched``
+                # call.  Single-element device array so it can be read
+                # from host via ``.numpy()`` without copying the whole
+                # contacts buffer.
+                self._replayed_count = wp.zeros(1, dtype=wp.int32)
             else:
                 self._prev_point0 = None
                 self._prev_point1 = None
+                self._replayed_count = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -762,6 +778,21 @@ class ContactMatcher:
     def prev_contact_count(self) -> wp.array:
         """Device-side previous frame contact count (single-element int32)."""
         return self._prev_count
+
+    @property
+    def replayed_count(self) -> wp.array | None:
+        """Device-side count of matched rows whose anchors+normal were
+        replayed byte-for-byte from the previous frame in the most recent
+        :meth:`replay_matched` call.
+
+        Returns ``None`` when sticky mode is disabled.  In sticky mode
+        this equals the number of matched rows minus the drift-guard
+        rejections, so a matched contact always falls into exactly one
+        of three buckets: (a) replayed from the previous frame,
+        (b) matched but kept-fresh because the persistent anchors had
+        drifted deeper than the fresh manifold, (c) broken.
+        """
+        return self._replayed_count
 
     def reset(self) -> None:
         """Clear cross-frame state so the next frame starts fresh.
@@ -994,6 +1025,13 @@ class ContactMatcher:
         if not self._sticky:
             raise ValueError("replay_matched requires the matcher to be constructed with sticky=True")
 
+        # Reset the diagnostic counter before the kernel launches: each
+        # matched row that actually commits the replay atomically bumps
+        # this, so after the launch it holds the number of 1:1 copies
+        # carried forward from the previous frame (see module comment
+        # above ``_replay_matched_kernel``).
+        self._replayed_count.zero_()
+
         data = _ReplayData()
         data.match_index = match_index
         data.contact_count = contact_count
@@ -1014,6 +1052,7 @@ class ContactMatcher:
         data.normal = normal
         data.offset0 = offset0
         data.offset1 = offset1
+        data.replayed_count = self._replayed_count
 
         wp.launch(_replay_matched_kernel, dim=self._capacity, inputs=[data], device=device)
 
