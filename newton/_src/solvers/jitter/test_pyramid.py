@@ -6,7 +6,7 @@
 This is the first end-to-end test for the Jitter solver's persistent
 contact path. It exercises:
 
-* :class:`CollisionPipeline` ingest with ``contact_matching=True``,
+* :class:`CollisionPipeline` ingest with ``contact_matching="sticky"``,
 * the ``(contact_first, contact_count)`` column packing in
   :class:`ConstraintContainer`,
 * frame-to-frame warm-starting via ``rigid_contact_match_index`` and

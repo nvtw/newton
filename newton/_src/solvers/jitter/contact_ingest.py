@@ -664,7 +664,8 @@ def ingest_contacts(
 
     Args:
         contacts: Newton :class:`Contacts` buffer. Must have been
-            built with ``contact_matching=True``.
+            built with a non-disabled ``contact_matching`` mode
+            (``"sticky"`` recommended for stable stacking).
         shape_body: ``model.shape_body`` array.
         num_shapes: Total shape count in the owning Newton model;
             only used to pack the (shape_a, shape_b) key into int32.

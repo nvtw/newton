@@ -412,9 +412,11 @@ class World:
             dt: Time step in seconds. Non-positive values no-op.
             contacts: Optional Newton :class:`Contacts` buffer produced
                 by an external collision pipeline. **Must** have been
-                built with ``contact_matching=True`` so
-                ``rigid_contact_match_index`` is available for warm-
-                starting. When present, its sorted active prefix is
+                built with a non-disabled ``contact_matching`` mode
+                (``"sticky"`` is strongly recommended -- and required
+                for stable stacking -- as it pins matched contacts'
+                anchors/normals frame-to-frame in addition to populating
+                ``rigid_contact_match_index`` for the warm-start gather). When present, its sorted active prefix is
                 ingested into :data:`CONSTRAINT_TYPE_CONTACT` columns
                 and processed by the unified PGS loop side-by-side
                 with the joint constraints, following PhoenX's
@@ -500,10 +502,11 @@ class World:
            back to the joint count) and early-out. The placeholder
            :class:`ContactViews` covers the dispatcher's unused
            argument slot.
-        2. Validate that ``contacts`` was built with
-           ``contact_matching=True`` (required for warm-starting) --
-           raise at step-time rather than leak garbage match indices
-           into the gather kernel.
+        2. Validate that ``contacts`` was built with a non-disabled
+           ``contact_matching`` mode (required for warm-starting; use
+           ``"sticky"`` for stable stacking) -- raise at step-time
+           rather than leak garbage match indices into the gather
+           kernel.
         3. Swap prev/current :class:`ContactContainer` buffers (pointer
            swap, no device copy), build the per-step
            :class:`ContactViews`, and drive ingest + warm-start +
@@ -528,7 +531,9 @@ class World:
         if getattr(contacts, "contact_matching", False) is False:
             raise ValueError(
                 "Jitter solver requires the Contacts buffer to be built with "
-                "contact_matching=True (needed for persistent warm-starting)."
+                "a non-disabled contact_matching mode (needed for persistent "
+                'warm-starting; use contact_matching="sticky" for stable '
+                "stacking)."
             )
         if shape_body is None:
             raise ValueError(

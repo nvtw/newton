@@ -157,6 +157,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.jitter.contact_matching_config import JITTER_CONTACT_MATCHING
 from newton._src.solvers.jitter.example_jitter_common import (
     build_jitter_world_from_model,
     jitter_to_newton_kernel,
@@ -251,7 +252,7 @@ class _JitterScene:
 
         if enable_contacts:
             self.collision_pipeline = newton.CollisionPipeline(
-                self.model, contact_matching=True
+                self.model, contact_matching=JITTER_CONTACT_MATCHING
             )
             self.contacts = self.collision_pipeline.contacts()
             rigid_contact_max = int(

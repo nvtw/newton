@@ -42,6 +42,7 @@ import warp as wp
 import newton
 import newton.examples
 from newton._src.solvers.jitter.body import MOTION_DYNAMIC, MOTION_STATIC
+from newton._src.solvers.jitter.contact_matching_config import JITTER_CONTACT_MATCHING
 from newton._src.solvers.jitter.picking import JitterPicking, register_with_viewer_gl
 from newton._src.solvers.jitter.solver_jitter import pack_body_xforms_kernel
 from newton._src.solvers.jitter.world_builder import (
@@ -284,11 +285,16 @@ class Example:
         )
 
         # ---- Collision pipeline ------------------------------------
-        # ``contact_matching=True`` is required for the Jitter solver
-        # (the warm-start gather kernel reads ``rigid_contact_match_index``).
+        # The matching mode is centralised in
+        # :mod:`newton._src.solvers.jitter.contact_matching_config` --
+        # the Jitter solver requires a non-disabled mode (warm-start
+        # gather reads ``rigid_contact_match_index``) and ``"sticky"``
+        # additionally pins matched contacts' anchors / normals frame-
+        # to-frame, which is the reason the pyramid stays stacked
+        # rather than wobbling apart.
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
-            contact_matching=True,
+            contact_matching=JITTER_CONTACT_MATCHING,
         )
         self.contacts = self.collision_pipeline.contacts()
         rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
