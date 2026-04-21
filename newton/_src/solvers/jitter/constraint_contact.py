@@ -54,7 +54,11 @@ from newton._src.solvers.jitter.constraint_container import (
 from newton._src.solvers.jitter.contact_container import (
     MAX_SLOTS,
     ContactContainer,
+    cc_get_local_p0,
+    cc_get_local_p1,
+    cc_get_normal,
     cc_get_normal_lambda,
+    cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
     cc_set_normal_lambda,
@@ -621,19 +625,6 @@ def contact_prepare_for_iteration_at(
     # Baumgarte-style positional bias rate. Hardcoded for v1 -- maps
     # to "recover full penetration over ~2 substeps". Box2D v3 uses
     # the same kind of knob (``contact_hertz`` in its demos).
-    #
-    # The bias term is signed so the same scalar handles both:
-    #   * Penetration (``gap < 0``): ``bias`` becomes positive, which
-    #     subtracts from ``-eff_n * (jv_n + bias)`` producing a
-    #     positive normal impulse that pushes the pair apart.
-    #   * Speculative separation (``gap > 0``): ``bias`` becomes
-    #     negative. The PGS row solves for a normal impulse whose
-    #     relative normal velocity equals ``-gap * idt`` -- i.e. just
-    #     enough approach to close the current gap in one substep.
-    #     Combined with the ``lam_n >= 0`` clamp this means "no push
-    #     as long as the pair isn't approaching faster than closing
-    #     the current gap", which is exactly Box2D's speculative
-    #     contact handling.
     bias_factor = wp.float32(0.2)
     penetration_slop = wp.float32(0.005)
 
@@ -651,21 +642,31 @@ def contact_prepare_for_iteration_at(
         base = _slot_base(base_offset, slot)
         k = contact_first + slot
 
-        # Body-local -> world for both anchors. Newton's
-        # ``rigid_contact_point0/1`` are *body-frame* relative to the
-        # body origin; Jitter's ``bodies.position`` == COM, so the
-        # transform + subtract gives the COM-relative lever arm.
-        local_p0 = contacts.rigid_contact_point0[k]
-        local_p1 = contacts.rigid_contact_point1[k]
+        # Pull the persistent contact frame from the ``ContactContainer``
+        # instead of Newton's per-frame narrow-phase output. Matched
+        # contacts carry their ``(normal, tangent1, local_p0, local_p1)``
+        # forward from the previous frame verbatim (see
+        # :func:`_contact_warmstart_gather_kernel`); fresh contacts were
+        # PhoenX-``Initialize``-d at gather time. Either way this slot's
+        # frame is fixed for the duration of the contact's lifetime,
+        # which is what makes the scalar ``lam_t1`` / ``lam_t2``
+        # warm-starts physically meaningful.
+        n = cc_get_normal(cc, slot, cid)
+        t1_dir = cc_get_tangent1(cc, slot, cid)
+        t2_dir = wp.cross(n, t1_dir)
+        local_p0 = cc_get_local_p0(cc, slot, cid)
+        local_p1 = cc_get_local_p1(cc, slot, cid)
+
+        # Body-local -> world. Re-projecting the persistent local
+        # anchors with the *current* orientations is PhoenX's
+        # ``UpdatePosition``: the contact is rigidly attached to its
+        # body-frame anchor, so the world-frame lever arm tracks any
+        # rotation the body has undergone since the contact was born.
         p1_world = position1 + wp.quat_rotate(orientation1, local_p0)
         p2_world = position2 + wp.quat_rotate(orientation2, local_p1)
 
         r1 = p1_world - position1
         r2 = p2_world - position2
-
-        n = contacts.rigid_contact_normal[k]
-
-        t1_dir, t2_dir = _build_tangents(n)
 
         eff_n = _effective_mass_scalar(n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
         eff_t1 = _effective_mass_scalar(
@@ -675,13 +676,13 @@ def contact_prepare_for_iteration_at(
             t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
         )
 
-        # Signed separation along the normal. The convention we
-        # inherit from Newton: ``rigid_contact_normal`` points from
-        # shape0 towards shape1, so ``gap = dot(p2 - p1, n)`` is
-        # positive when the pair is separated and negative under
-        # penetration. Surface thicknesses (margins) shrink the
-        # effective gap so the solver rests at zero *overlap of the
-        # rounded surfaces*, not at zero centre-to-centre separation.
+        # Signed separation along the *stored* normal. Under PhoenX's
+        # rigid-contact model the normal is fixed frame-to-frame, so
+        # the gap is measured against the original contact plane.
+        # Bodies that have since translated / rotated carry their
+        # anchors with them via the re-projection above; the gap
+        # therefore reflects the distance between the pair's original
+        # contact anchors in the current world pose.
         gap = wp.dot(p2_world - p1_world, n)
         margin_sum = contacts.rigid_contact_margin0[k] + contacts.rigid_contact_margin1[k]
         effective_gap = gap - margin_sum
@@ -793,21 +794,20 @@ def contact_iterate_at(
             continue
 
         base = _slot_base(base_offset, slot)
-        k = contact_first + slot
 
         # Geometry cached by ``prepare_for_iteration_at`` for this
-        # slot. Normal is re-read from the upstream buffer (not cached
-        # in the column) -- it's constant across substeps so the
-        # per-iteration read is still cheap and keeps the column to a
-        # manageable size. Tangents are rebuilt from the normal each
-        # iteration via :func:`_build_tangents` -- ~20 FLOPS, saves
-        # 6 dwords of storage per slot (and the per-slot write back
-        # in prepare). Deterministic on ``n``, so the rebuilt basis
-        # is bit-identical to what prepare would have cached.
+        # slot. Lever arms ``r1`` / ``r2`` come from the column (they
+        # depend on the substep's body orientation); the persistent
+        # contact frame ``(n, t1, t2)`` comes from the ``ContactContainer``
+        # (matched contacts carry it across frames, fresh contacts were
+        # PhoenX-``Initialize``-d at gather time). ``t2`` is
+        # ``cross(n, t1)`` -- stored ``t1`` is already unit, and
+        # ``cross`` preserves unit length given orthogonality.
         r1 = _slot_get_r1(constraints, cid, base)
         r2 = _slot_get_r2(constraints, cid, base)
-        n = contacts.rigid_contact_normal[k]
-        t1_dir, t2_dir = _build_tangents(n)
+        n = cc_get_normal(cc, slot, cid)
+        t1_dir = cc_get_tangent1(cc, slot, cid)
+        t2_dir = wp.cross(n, t1_dir)
         eff_n = _slot_get_eff_n(constraints, cid, base)
         eff_t1 = _slot_get_eff_t1(constraints, cid, base)
         eff_t2 = _slot_get_eff_t2(constraints, cid, base)
@@ -903,16 +903,15 @@ def contact_world_wrench_at(
     the pair during the most recent substep.
     """
     active_mask = contact_get_active_mask(constraints, cid)
-    contact_first = contact_get_contact_first(constraints, cid)
     force = wp.vec3f(0.0, 0.0, 0.0)
     torque = wp.vec3f(0.0, 0.0, 0.0)
     for slot in range(CONTACT_MAX_SLOTS):
         if (active_mask & (wp.int32(1) << slot)) == 0:
             continue
         base = _slot_base(base_offset, slot)
-        k = contact_first + slot
-        n = contacts.rigid_contact_normal[k]
-        t1_dir, t2_dir = _build_tangents(n)
+        n = cc_get_normal(cc, slot, cid)
+        t1_dir = cc_get_tangent1(cc, slot, cid)
+        t2_dir = wp.cross(n, t1_dir)
         r2 = _slot_get_r2(constraints, cid, base)
         lam_n = cc_get_normal_lambda(cc, slot, cid)
         lam_t1 = cc_get_tangent1_lambda(cc, slot, cid)
@@ -1023,10 +1022,9 @@ def contact_per_slot_wrench_at(
     the slot is active.
     """
     base = _slot_base(base_offset, slot)
-    contact_first = contact_get_contact_first(constraints, cid)
-    k = contact_first + slot
-    n = contacts.rigid_contact_normal[k]
-    t1_dir, t2_dir = _build_tangents(n)
+    n = cc_get_normal(cc, slot, cid)
+    t1_dir = cc_get_tangent1(cc, slot, cid)
+    t2_dir = wp.cross(n, t1_dir)
     r2 = _slot_get_r2(constraints, cid, base)
     lam_n = cc_get_normal_lambda(cc, slot, cid)
     lam_t1 = cc_get_tangent1_lambda(cc, slot, cid)

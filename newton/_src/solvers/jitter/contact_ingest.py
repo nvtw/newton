@@ -57,12 +57,22 @@ from newton._src.solvers.jitter.constraint_container import (
     ConstraintContainer,
     write_int,
 )
+from newton._src.solvers.jitter.body import BodyContainer
+from newton._src.solvers.jitter.constraint_contact import ContactViews
 from newton._src.solvers.jitter.contact_container import (
     ContactContainer,
+    cc_get_prev_local_p0,
+    cc_get_prev_local_p1,
+    cc_get_prev_normal,
     cc_get_prev_normal_lambda,
+    cc_get_prev_tangent1,
     cc_get_prev_tangent1_lambda,
     cc_get_prev_tangent2_lambda,
+    cc_set_local_p0,
+    cc_set_local_p1,
+    cc_set_normal,
     cc_set_normal_lambda,
+    cc_set_tangent1,
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
 )
@@ -499,36 +509,81 @@ def _contact_pack_columns_kernel(
 # ---------------------------------------------------------------------------
 
 
+@wp.func
+def _build_tangent1_from_velocity(n: wp.vec3f, dv: wp.vec3f) -> wp.vec3f:
+    """Build a unit tangent1 from the tangential relative velocity.
+
+    Mirrors PhoenX's ``RigidRigidContactManifoldFunctions::Initialize``
+    tangent frame: project the contact-point relative velocity onto the
+    contact plane and normalise. When there's no meaningful tangential
+    slide, fall back to a branch-free orthonormal seed (Duff et al.
+    2017) so the basis still varies smoothly with ``n``.
+
+    Aligning ``tangent1`` with the sliding direction means the friction
+    row pre-soaks the instantaneous direction impulses need to oppose
+    -- a fresh contact with tangential velocity immediately gets a
+    non-zero friction budget along the "right" axis instead of two
+    arbitrary orthogonal rows fighting each other for the first few
+    iterations.
+    """
+    v_n = wp.dot(dv, n) * n
+    v_t = dv - v_n
+    len_sq = wp.dot(v_t, v_t)
+    if len_sq > wp.float32(1.0e-12):
+        return v_t / wp.sqrt(len_sq)
+    # No slide -- fall back to a smooth orthonormal seed. Same Duff
+    # 2017 construction used by ``_build_tangents``, repeated here
+    # because this func lives in a different module and we want zero
+    # cross-module dependency for this hot kernel.
+    sign = wp.float32(1.0)
+    if n[2] < wp.float32(0.0):
+        sign = wp.float32(-1.0)
+    a = wp.float32(-1.0) / (sign + n[2])
+    return wp.vec3f(
+        wp.float32(1.0) + sign * n[0] * n[0] * a,
+        sign * n[0] * n[1] * a,
+        -sign * n[0],
+    )
+
+
 @wp.kernel
 def _contact_warmstart_gather_kernel(
     pair_source_idx: wp.array[wp.int32],
     pair_col_offset: wp.array[wp.int32],
     pair_first: wp.array[wp.int32],
     pair_count: wp.array[wp.int32],
+    pair_shape_a: wp.array[wp.int32],
+    pair_shape_b: wp.array[wp.int32],
     rigid_contact_match_index: wp.array[wp.int32],
     prev_slot_of_contact: wp.array[wp.int32],
     prev_cid_of_contact: wp.array[wp.int32],
     num_contact_columns: wp.array[wp.int32],
     cid_base: wp.int32,
+    bodies: BodyContainer,
+    contacts: ContactViews,
     cc: ContactContainer,
 ):
-    """Seed this frame's ``cc.lambdas`` slots from the prev frame.
+    """Seed this frame's ``cc.*`` slots from the prev frame (PhoenX model).
 
     For each active slot of each current-frame contact column:
 
-    * The contact's sorted-buffer index ``k`` is
-      ``pair_first[p] + col_in_pair * 6 + slot``.
+    * ``k = pair_first[p] + col_in_pair * 6 + slot`` is the contact's
+      sorted-buffer index.
     * ``prev_k = rigid_contact_match_index[k]`` is the index in the
       *previous* frame's sorted buffer that the matcher paired us
-      with, or :data:`MATCH_NOT_FOUND` / :data:`MATCH_BROKEN`
-      (both < 0).
-    * The prev-frame ingest stored, at sorted-buffer index ``prev_k``,
-      the ``(slot, cid)`` that held that contact's impulses. Look it
-      up via ``(prev_slot_of_contact, prev_cid_of_contact)`` which
-      was populated by the *previous* step's
-      :func:`stamp_forward_contact_map`. When both return a valid
-      (``>= 0``) previous location, copy the three lambdas across;
-      otherwise zero-init the slot (cold warm-start).
+      with, or :data:`MATCH_NOT_FOUND` / :data:`MATCH_BROKEN` (both
+      ``< 0``).
+    * When the matcher found a valid previous slot, copy **every**
+      persistent field (``lambdas, normal, tangent1, local_p0,
+      local_p1``) across from ``cc.prev_*``. This gives the PGS a
+      fixed-frame warm-start: the contact's ``(n, t1, t2)`` basis is
+      the one the previous frame's solution was written in, so the
+      scalar impulses stay physically meaningful.
+    * When there's no match -- contact is new or the prev point was
+      already claimed -- do PhoenX's ``Initialize`` dance: pull
+      ``normal`` and body-local anchors from the upstream buffer,
+      derive ``tangent1`` from the tangential relative velocity at
+      contact, and zero the impulses.
     """
     tid = wp.tid()
     if tid >= num_contact_columns[0]:
@@ -544,34 +599,69 @@ def _contact_warmstart_gather_kernel(
         slot_count = CONTACT_MAX_SLOTS
     start_contact = pair_first[p] + col_in_pair * CONTACT_MAX_SLOTS
 
+    # Resolve this column's body pair once -- both bodies are shared by
+    # every slot in the column.
+    sa = pair_shape_a[p]
+    sb = pair_shape_b[p]
+    b1 = contacts.shape_body[sa]
+    b2 = contacts.shape_body[sb]
+
     for s in range(CONTACT_MAX_SLOTS):
         if s >= slot_count:
-            # Inactive slot in this column -- clear so stale data
-            # from a previous step doesn't leak into the prepare
-            # kernel when it sums the warm-start impulse.
+            # Inactive slot -- zero everything so a stray read from
+            # the prepare/iterate kernels degrades into a no-op.
             cc_set_normal_lambda(cc, s, cid, wp.float32(0.0))
             cc_set_tangent1_lambda(cc, s, cid, wp.float32(0.0))
             cc_set_tangent2_lambda(cc, s, cid, wp.float32(0.0))
+            cc_set_normal(cc, s, cid, wp.vec3f(0.0, 0.0, 0.0))
+            cc_set_tangent1(cc, s, cid, wp.vec3f(0.0, 0.0, 0.0))
+            cc_set_local_p0(cc, s, cid, wp.vec3f(0.0, 0.0, 0.0))
+            cc_set_local_p1(cc, s, cid, wp.vec3f(0.0, 0.0, 0.0))
             continue
+
         k = start_contact + s
+
+        prev_slot = wp.int32(-1)
+        prev_cid = wp.int32(-1)
         prev_k = rigid_contact_match_index[k]
-        if prev_k < 0:
-            cc_set_normal_lambda(cc, s, cid, wp.float32(0.0))
-            cc_set_tangent1_lambda(cc, s, cid, wp.float32(0.0))
-            cc_set_tangent2_lambda(cc, s, cid, wp.float32(0.0))
+        if prev_k >= 0:
+            prev_slot = prev_slot_of_contact[prev_k]
+            prev_cid = prev_cid_of_contact[prev_k]
+
+        if prev_slot >= 0 and prev_cid >= 0:
+            # Matched -- carry the full PhoenX state forward.
+            cc_set_normal_lambda(cc, s, cid, cc_get_prev_normal_lambda(cc, prev_slot, prev_cid))
+            cc_set_tangent1_lambda(cc, s, cid, cc_get_prev_tangent1_lambda(cc, prev_slot, prev_cid))
+            cc_set_tangent2_lambda(cc, s, cid, cc_get_prev_tangent2_lambda(cc, prev_slot, prev_cid))
+            cc_set_normal(cc, s, cid, cc_get_prev_normal(cc, prev_slot, prev_cid))
+            cc_set_tangent1(cc, s, cid, cc_get_prev_tangent1(cc, prev_slot, prev_cid))
+            cc_set_local_p0(cc, s, cid, cc_get_prev_local_p0(cc, prev_slot, prev_cid))
+            cc_set_local_p1(cc, s, cid, cc_get_prev_local_p1(cc, prev_slot, prev_cid))
             continue
 
-        prev_slot = prev_slot_of_contact[prev_k]
-        prev_cid = prev_cid_of_contact[prev_k]
-        if prev_slot < 0 or prev_cid < 0:
-            cc_set_normal_lambda(cc, s, cid, wp.float32(0.0))
-            cc_set_tangent1_lambda(cc, s, cid, wp.float32(0.0))
-            cc_set_tangent2_lambda(cc, s, cid, wp.float32(0.0))
-            continue
+        # New contact -- initialize PhoenX-style from the upstream
+        # narrow-phase output. Body-local anchors map straight from
+        # Newton's per-contact point arrays (both are already in body-
+        # origin frame); the normal is world-frame; ``tangent1`` gets
+        # anchored to the sliding direction.
+        local_p0 = contacts.rigid_contact_point0[k]
+        local_p1 = contacts.rigid_contact_point1[k]
+        n = contacts.rigid_contact_normal[k]
 
-        cc_set_normal_lambda(cc, s, cid, cc_get_prev_normal_lambda(cc, prev_slot, prev_cid))
-        cc_set_tangent1_lambda(cc, s, cid, cc_get_prev_tangent1_lambda(cc, prev_slot, prev_cid))
-        cc_set_tangent2_lambda(cc, s, cid, cc_get_prev_tangent2_lambda(cc, prev_slot, prev_cid))
+        r1 = wp.quat_rotate(bodies.orientation[b1], local_p0)
+        r2 = wp.quat_rotate(bodies.orientation[b2], local_p1)
+        dv = (bodies.velocity[b2] + wp.cross(bodies.angular_velocity[b2], r2)) - (
+            bodies.velocity[b1] + wp.cross(bodies.angular_velocity[b1], r1)
+        )
+        t1 = _build_tangent1_from_velocity(n, dv)
+
+        cc_set_normal_lambda(cc, s, cid, wp.float32(0.0))
+        cc_set_tangent1_lambda(cc, s, cid, wp.float32(0.0))
+        cc_set_tangent2_lambda(cc, s, cid, wp.float32(0.0))
+        cc_set_normal(cc, s, cid, n)
+        cc_set_tangent1(cc, s, cid, t1)
+        cc_set_local_p0(cc, s, cid, local_p0)
+        cc_set_local_p1(cc, s, cid, local_p1)
 
 
 @wp.kernel
@@ -868,14 +958,21 @@ def gather_contact_warmstart(
     rigid_contact_match_index: wp.array,
     prev_slot_of_contact: wp.array,
     prev_cid_of_contact: wp.array,
+    bodies: BodyContainer,
+    contacts: ContactViews,
     cc: ContactContainer,
     device: wp.DeviceLike = None,
 ) -> None:
-    """Copy prev-frame lambdas into ``cc.*_lambda`` for the new columns.
+    """Copy prev-frame state into ``cc`` for matched slots; initialise
+    PhoenX-style for unmatched slots.
 
-    Called after the pointer-swap (``cc.prev_*`` now holds last
-    step's lambdas; ``cc.*_lambda`` is scratch) but before
-    :func:`contact_prepare_for_iteration_at`.
+    Called after the pointer-swap (``cc.prev_lambdas`` now holds last
+    step's persistent state; ``cc.lambdas`` is scratch) but before
+    :func:`contact_prepare_for_iteration_at`. The kernel handles both
+    the warm-start carry and the "new contact" initialise pass in one
+    launch so the full per-slot frame
+    (``lam_n, lam_t1, lam_t2, normal, tangent1, local_p0, local_p1``)
+    is populated before the first prepare sees the column.
     """
     wp.launch(
         kernel=_contact_warmstart_gather_kernel,
@@ -885,11 +982,15 @@ def gather_contact_warmstart(
             scratch.pair_col_offset,
             scratch.pair_first,
             scratch.pair_count,
+            scratch.pair_shape_a,
+            scratch.pair_shape_b,
             rigid_contact_match_index,
             prev_slot_of_contact,
             prev_cid_of_contact,
             scratch.num_contact_columns,
             int(cid_base),
+            bodies,
+            contacts,
         ],
         outputs=[cc],
         device=device,

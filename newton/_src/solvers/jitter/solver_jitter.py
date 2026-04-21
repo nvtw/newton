@@ -615,13 +615,23 @@ class World:
             filter_count=self._collision_filter_count,
         )
 
-        # ---- Warm-start lambdas from the prev frame's state ----
+        # ---- Warm-start + per-slot frame initialisation ----
+        # The gather kernel does double duty: matched slots carry their
+        # full PhoenX state forward from ``cc.prev_lambdas``, fresh
+        # slots are PhoenX-``Initialize``-d from the upstream buffer
+        # (normal straight from ``rigid_contact_normal``, body-local
+        # anchors straight from ``rigid_contact_point0/1``, ``tangent1``
+        # derived from the tangential relative velocity). After this
+        # call every active slot of every new column has a consistent
+        # ``(lam_n, lam_t1, lam_t2, n, t1, local_p0, local_p1)``.
         gather_contact_warmstart(
             cid_base=self.joint_constraint_count,
             scratch=self._ingest_scratch,
             rigid_contact_match_index=contacts.rigid_contact_match_index,
             prev_slot_of_contact=self._slot_of_contact_prev,
             prev_cid_of_contact=self._cid_of_contact_prev,
+            bodies=self.bodies,
+            contacts=self._contact_views,
             cc=self._contact_container,
             device=self.device,
         )
