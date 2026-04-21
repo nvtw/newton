@@ -70,6 +70,8 @@ __all__ = [
     "read_quat",
     "read_vec3",
     "read_vec4",
+    "pd_coefficients",
+    "pd_coefficients_pure_velocity",
     "soft_constraint_coefficients",
     "write_float",
     "write_int",
@@ -592,3 +594,129 @@ def soft_constraint_coefficients(
     a2 = dt * omega * a1
     a3 = 1.0 / (1.0 + a2)
     return omega / a1, a2 * a3, a3
+
+
+@wp.func
+def pd_coefficients(
+    stiffness: wp.float32,
+    damping: wp.float32,
+    position_error: wp.float32,
+    eff_mass_inv: wp.float32,
+    dt: wp.float32,
+):
+    """Map ``(k, c, C, M_inv, dt)`` to Jitter2 PGS spring-damper triple.
+
+    Implicit-Euler spring-damper formulation transcribed verbatim from
+    Jitter2's :class:`SpringConstraint.SetSpringParameters` (SoftBodies/
+    SpringConstraint.cs). The user specifies absolute physical gains
+    :math:`k` and :math:`c`:
+
+      * ``stiffness`` ``k`` in [N/m] for linear rows or [N*m/rad] for
+        angular rows -- the restoring force per unit position error.
+        The applied force on the constraint row is ``-k * C`` with
+        ``C`` the current position error.
+      * ``damping`` ``c`` in [N*s/m] or [N*m*s/rad] -- the viscous
+        force per unit relative velocity. The applied force is
+        ``-c * v_rel``.
+
+    unlike the Box2D / Bepu :func:`soft_constraint_coefficients` pair
+    ``(hertz, damping_ratio)`` which bake the effective mass into the
+    gains. For the same behaviour across bodies of different mass this
+    PD form must be *rescaled by mass*, but it lets the user directly
+    write "F = -k*x - c*v" without knowing ``m_eff`` up front.
+
+    Jitter2's ``SetSpringParameters`` stores two scalars:
+
+    .. code-block:: text
+
+        Softness   = 1 / (c + dt * k)
+        BiasFactor = dt * k * Softness
+
+    and then every substep computes (``idt = 1/dt``)
+
+    .. code-block:: text
+
+        # prepare
+        EffectiveMass = 1 / (M_inv + Softness * idt)
+        Bias          = C * BiasFactor * idt
+        # iterate
+        softScalar    = acc * Softness * idt
+        lambda        = -EffectiveMass * (jv + Bias + softScalar)
+
+    To keep the kernel side uniform we return the three scalars
+    ``(gamma, bias, eff_mass_softened)`` that absorb the ``idt``
+    factor so the iterate is a single PGS update:
+
+      * ``gamma``             = ``Softness * idt``  [s^-1]
+      * ``bias``              = ``C * BiasFactor * idt``  [m/s or rad/s]
+      * ``eff_mass_softened`` = ``1 / (M_inv + gamma)``  [kg or kg*m^2]
+
+    The iterate then reduces to
+
+    .. math::
+        \\lambda = -M_{\\text{eff,soft}}\\,
+            (J v - \\text{bias}_{\\text{signed}} + \\gamma \\lambda_{\\text{acc}})
+
+    with ``bias_signed`` sign-flipped by the caller to match the
+    constraint's Jacobian convention (see the per-joint prepare for
+    the sign rule).
+
+    At ``k = c = 0`` all three outputs are zero and the PGS row is a
+    no-op -- the caller's iterate guards on the "drive off" flag to
+    skip the solve entirely.
+
+    Args:
+        stiffness: Positional stiffness ``k``; expected non-negative.
+            ``0`` turns off the spring part (pure damper).
+        damping: Viscous damping ``c``; expected non-negative.
+            ``0`` turns off the damper (pure spring).
+        position_error: Current position error ``C = actual - target``
+            (rad for revolute, m for prismatic). Folded into ``bias``
+            per Jitter2 SpringConstraint.
+        eff_mass_inv: Reciprocal of the raw (unsoftened) Jacobian-
+            weighted effective mass of the constraint row (i.e.
+            ``J M^{-1} J^T``). ``0`` (both bodies static or Jacobian
+            null) short-circuits to all-zeros -- the PGS update is a
+            no-op.
+        dt: Substep time step [s]. Must be > 0.
+    """
+    if eff_mass_inv <= 0.0:
+        return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
+    if stiffness <= 0.0 and damping <= 0.0:
+        return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
+
+    # Jitter2 SetSpringParameters, but with k/c already in absolute
+    # units (Jitter2's version rescales by the edge m_eff; we let the
+    # caller decide that).
+    softness = wp.float32(1.0) / (damping + dt * stiffness)
+    bias_factor = dt * stiffness * softness
+    idt = wp.float32(1.0) / dt
+
+    # Fold the 1/dt scale into gamma and bias so the kernel iterate is
+    # identical to the pure-velocity-motor path modulo these two
+    # scalars.
+    gamma = softness * idt
+    bias = position_error * bias_factor * idt
+    eff_mass_soft = wp.float32(1.0) / (eff_mass_inv + gamma)
+    return gamma, bias, eff_mass_soft
+
+
+@wp.func
+def pd_coefficients_pure_velocity(
+    eff_mass_inv: wp.float32,
+):
+    """Jitter2 "pure velocity motor" triple when ``kp = kd = 0``.
+
+    Fallback for :attr:`DriveMode.VELOCITY` drives that don't specify
+    PD gains: the row becomes a *rigid* velocity constraint clamped
+    only by ``max_force_drive``. Matches Jitter2's
+    ``AngularMotor.PrepareForIteration`` branch when both stiffness
+    and damping are zero.
+
+    Returns ``(gamma, bias, eff_mass_soft)`` = ``(0, 0, 1/M_inv)`` so
+    the iterate collapses to
+    :math:`\\lambda = -M_{\\text{eff}}\\, (Jv - v_{\\text{target}})`.
+    """
+    if eff_mass_inv <= 0.0:
+        return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
+    return wp.float32(0.0), wp.float32(0.0), wp.float32(1.0) / eff_mass_inv

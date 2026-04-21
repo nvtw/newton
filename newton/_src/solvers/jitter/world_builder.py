@@ -107,14 +107,223 @@ __all__ = [
 _IDENTITY_INERTIA = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
 
 
+# Validation tolerances used by :func:`_validate_body_descriptor`. These
+# are intentionally *loose* -- the goal is to flag obviously-broken
+# descriptors (NaN, sign errors, static-body masses), not to quibble
+# about the last bit of float precision.
+_QUAT_NORM_TOL = 1e-3
+_INERTIA_SYMMETRY_TOL = 1e-5
+_INERTIA_POSDEF_TOL = -1e-8  # diag values slightly below 0 are OK (float noise)
+
+
+def _is_finite(x: float) -> bool:
+    """Return True iff ``x`` is a finite float (no NaN / +/-inf)."""
+    return math.isfinite(float(x))
+
+
+def _all_finite(seq) -> bool:
+    """Recursive finite-check for scalars / tuples / nested tuples."""
+    if isinstance(seq, (tuple, list)):
+        return all(_all_finite(v) for v in seq)
+    return _is_finite(seq)
+
+
+def _validate_body_descriptor(desc: "RigidBodyDescriptor", body_index: int) -> None:
+    """Reject obviously-broken :class:`RigidBodyDescriptor`s.
+
+    The historical failure mode this guards against: a caller silently
+    hands in a ``1/mass`` that disagrees with what they *think* the
+    body's mass is (e.g. Newton's ``ModelBuilder`` adding density-derived
+    shape mass on top of an explicit ``add_body(mass=...)`` argument).
+    Rather than let a bogus body slip onto the GPU and produce mystery
+    scale factors in later contact-force checks, we raise early with a
+    pointed error message identifying the offending body index and field.
+
+    Rules (matches Jitter2's RigidBody invariants):
+        - All numeric fields must be finite (no NaN / inf).
+        - ``inverse_mass >= 0``.
+        - ``inverse_inertia`` diagonal entries must be >= 0 (within a
+          float-noise tolerance) and the matrix must be symmetric.
+        - ``motion_type == DYNAMIC`` requires a strictly positive
+          ``inverse_mass`` AND at least one strictly positive diagonal
+          inertia term (otherwise the body can't respond to forces and
+          torques, which is surely not what the caller wants -- they
+          should have used ``add_static_body``/``add_kinematic_body``).
+        - ``motion_type == STATIC`` requires ``inverse_mass == 0`` and
+          a fully-zero ``inverse_inertia`` (non-zero values here are
+          silently ignored on the GPU -- fail loudly instead).
+        - Orientation quaternion must be (near-)unit length so the
+          solver's rotation pipeline stays well-defined.
+        - ``linear_damping`` / ``angular_damping`` in [0, 1] (Jitter2's
+          Update multiplies velocity by these every frame; values
+          outside that band either do nothing or blow up).
+    """
+    # Finite-check everything first so downstream checks don't have to
+    # second-guess NaN-polluted comparisons.
+    for name, val in (
+        ("position", desc.position),
+        ("orientation", desc.orientation),
+        ("inverse_mass", desc.inverse_mass),
+        ("inverse_inertia", desc.inverse_inertia),
+        ("linear_damping", desc.linear_damping),
+        ("angular_damping", desc.angular_damping),
+        ("velocity", desc.velocity),
+        ("angular_velocity", desc.angular_velocity),
+    ):
+        if not _all_finite(val):
+            raise ValueError(
+                f"add_body(body_index={body_index}): non-finite value in "
+                f"``{name}`` ({val!r}). NaN/inf fields are rejected to "
+                "prevent silent solver corruption."
+            )
+
+    motion_type = int(desc.motion_type)
+    inv_m = float(desc.inverse_mass)
+
+    if inv_m < 0.0:
+        raise ValueError(
+            f"add_body(body_index={body_index}): ``inverse_mass`` must be "
+            f">= 0 (got {inv_m}). Remember this is 1/mass, not mass."
+        )
+
+    inv_I = desc.inverse_inertia
+    if len(inv_I) != 3 or any(len(row) != 3 for row in inv_I):
+        raise ValueError(
+            f"add_body(body_index={body_index}): ``inverse_inertia`` must "
+            f"be a 3x3 nested tuple (got shape "
+            f"{(len(inv_I), len(inv_I[0]) if inv_I else 0)})."
+        )
+    # Symmetry + non-negative diagonal.
+    for i in range(3):
+        if float(inv_I[i][i]) < _INERTIA_POSDEF_TOL:
+            raise ValueError(
+                f"add_body(body_index={body_index}): "
+                f"``inverse_inertia[{i}][{i}]`` = {float(inv_I[i][i])} is "
+                "negative. Inverse inertia tensor must be positive "
+                "semi-definite."
+            )
+        for j in range(i + 1, 3):
+            a = float(inv_I[i][j])
+            b = float(inv_I[j][i])
+            if abs(a - b) > _INERTIA_SYMMETRY_TOL:
+                raise ValueError(
+                    f"add_body(body_index={body_index}): "
+                    f"``inverse_inertia`` is not symmetric: "
+                    f"[{i}][{j}]={a} but [{j}][{i}]={b}. Inertia tensors "
+                    "must be symmetric."
+                )
+
+    # Quaternion normalisation -- the solver assumes unit quaternions so
+    # a malformed one yields garbage rotations with no warning.
+    qx, qy, qz, qw = (
+        float(desc.orientation[0]),
+        float(desc.orientation[1]),
+        float(desc.orientation[2]),
+        float(desc.orientation[3]),
+    )
+    qn2 = qx * qx + qy * qy + qz * qz + qw * qw
+    if abs(qn2 - 1.0) > _QUAT_NORM_TOL:
+        raise ValueError(
+            f"add_body(body_index={body_index}): ``orientation`` quaternion "
+            f"has norm^2 = {qn2:.6f}, expected 1. Pass a normalized "
+            "quaternion (xyzw)."
+        )
+
+    # Damping scalars are dimensionless per-frame multipliers in Jitter2
+    # (velocity *= (1 - damping*dt) each step). Outside [0, 1] this is
+    # either a no-op sign error or an explosion.
+    for name, val in (
+        ("linear_damping", desc.linear_damping),
+        ("angular_damping", desc.angular_damping),
+    ):
+        f = float(val)
+        if f < 0.0 or f > 1.0:
+            raise ValueError(
+                f"add_body(body_index={body_index}): ``{name}`` = {f} out "
+                "of range [0, 1]."
+            )
+
+    # Motion-type cross-checks -- the main safety net.
+    if motion_type == int(MOTION_DYNAMIC):
+        if inv_m == 0.0:
+            raise ValueError(
+                f"add_body(body_index={body_index}): motion_type=DYNAMIC "
+                "requires a strictly positive ``inverse_mass`` (got 0, "
+                "i.e. infinite mass). Use ``add_static_body()`` for an "
+                "immovable body, or pass the correct mass."
+            )
+        # At least one axis must have finite inertia, else torques are
+        # silently discarded and the body spins freely.
+        diag_sum = sum(float(inv_I[i][i]) for i in range(3))
+        if diag_sum <= 0.0:
+            raise ValueError(
+                f"add_body(body_index={body_index}): motion_type=DYNAMIC "
+                "requires at least one positive diagonal entry in "
+                "``inverse_inertia`` (got all zeros, i.e. infinite "
+                "inertia). Use ``add_static_body()`` instead, or set "
+                "per-axis inverse inertias."
+            )
+    elif motion_type == int(MOTION_STATIC):
+        if inv_m != 0.0:
+            raise ValueError(
+                f"add_body(body_index={body_index}): motion_type=STATIC "
+                f"but ``inverse_mass`` = {inv_m} (expected 0). Static "
+                "bodies are immovable by definition -- did you mean "
+                "DYNAMIC?"
+            )
+        if any(float(inv_I[i][j]) != 0.0 for i in range(3) for j in range(3)):
+            raise ValueError(
+                f"add_body(body_index={body_index}): motion_type=STATIC "
+                "but ``inverse_inertia`` is non-zero. Static bodies must "
+                "have zero inverse inertia."
+            )
+        if any(float(v) != 0.0 for v in desc.velocity) or any(
+            float(v) != 0.0 for v in desc.angular_velocity
+        ):
+            raise ValueError(
+                f"add_body(body_index={body_index}): motion_type=STATIC "
+                "but ``velocity`` / ``angular_velocity`` is non-zero. "
+                "Static bodies never integrate -- use KINEMATIC for a "
+                "scripted-velocity body."
+            )
+    elif motion_type == int(MOTION_KINEMATIC):
+        if inv_m != 0.0:
+            raise ValueError(
+                f"add_body(body_index={body_index}): motion_type=KINEMATIC "
+                f"but ``inverse_mass`` = {inv_m} (expected 0). Kinematic "
+                "bodies follow user-scripted velocities and must be "
+                "treated as infinite-mass by the solver."
+            )
+    else:
+        raise ValueError(
+            f"add_body(body_index={body_index}): unknown motion_type "
+            f"{motion_type}. Expected one of "
+            f"{{STATIC={int(MOTION_STATIC)}, "
+            f"KINEMATIC={int(MOTION_KINEMATIC)}, "
+            f"DYNAMIC={int(MOTION_DYNAMIC)}}}."
+        )
+
+
+_ZERO_INERTIA = ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+
+
 @dataclass
 class RigidBodyDescriptor:
     """Plain-Python description of one rigid body.
 
     Mirrors the writable subset of Jitter2's ``RigidBody`` constructor
-    arguments. Defaults match Jitter (no damping, gravity on, identity
-    inertia) so a bare ``RigidBodyDescriptor()`` produces a
-    static-by-default body sitting at the origin.
+    arguments. Defaults produce a *valid static body* sitting at the
+    origin with no integration -- i.e. the caller can drop a bare
+    ``RigidBodyDescriptor()`` into :meth:`WorldBuilder.add_body` and the
+    body-descriptor validator will accept it.
+
+    Mass / inertia fields are intentionally *zero* by default so the
+    only way to get a dynamic body is to explicitly supply a non-zero
+    ``inverse_mass`` *and* ``inverse_inertia`` *and* flip ``motion_type``
+    to :data:`MOTION_DYNAMIC` (or, more readably, go through
+    :meth:`WorldBuilder.add_dynamic_body`). This matches Jitter2's
+    "opt-in dynamic" convention and prevents the class of bug where a
+    silently-infinite-inertia body fails to respond to torques.
 
     Units (where applicable):
         * ``position`` [m]
@@ -133,7 +342,7 @@ class RigidBodyDescriptor:
         tuple[float, float, float],
         tuple[float, float, float],
         tuple[float, float, float],
-    ] = _IDENTITY_INERTIA
+    ] = _ZERO_INERTIA
     linear_damping: float = 1.0
     angular_damping: float = 1.0
     affected_by_gravity: bool = True
@@ -347,18 +556,54 @@ class JointDescriptor:
     (so the init kernel's axis snapshot is degenerate but harmless;
     the runtime dispatch ignores anchor-2 state entirely).
 
-    All ``hertz`` / ``damping_ratio`` parameters follow the Box2D v3 /
-    Bepu / Nordby soft-constraint formulation; see
-    :func:`soft_constraint_coefficients`. The default
-    ``hertz = DEFAULT_HERTZ_LINEAR`` / critical damping applies to the
-    positional block (3x3 for ball-socket, rank-5 Schur otherwise);
-    the actuator (drive + limit) rows have their own knobs.
+    The positional block uses the Box2D v3 / Bepu / Nordby
+    soft-constraint formulation (see :func:`soft_constraint_coefficients`)
+    with mass-independent ``(hertz, damping_ratio)`` knobs. The
+    default ``hertz = DEFAULT_HERTZ_LINEAR`` / critical damping applies
+    to the positional block (3x3 for ball-socket, rank-5 Schur
+    otherwise).
 
-    Leaving ``drive_mode = DriveMode.OFF`` and
-    ``min_value == max_value == 0`` disables the actuator row entirely,
-    giving a *non-actuated* revolute or prismatic joint. Ball-socket
-    has no actuator row -- those fields are required to stay at their
-    defaults.
+    Actuator (drive) -- **normal PD, absolute SI gains**
+    ---------------------------------------------------
+    The drive row is a Jitter2-style implicit-Euler spring-damper:
+
+    .. math::
+
+        \\tau = -k_p\\, (x - x_{\\text{target}}) - k_d\\, (v -
+                 v_{\\text{target}})
+
+    parameterised by:
+
+      * :attr:`stiffness_drive` -- ``kp`` [N/m for prismatic, N*m/rad
+        for revolute]. Default ``0`` (drive off).
+      * :attr:`damping_drive`   -- ``kd`` [N*s/m or N*m*s/rad].
+        Default ``0``.
+
+    ``stiffness_drive == damping_drive == 0`` disables the drive row
+    entirely -- no impulse is applied even if ``drive_mode != OFF``.
+    That's the "drive off" idiom; use it to construct a free-DoF
+    revolute or prismatic joint.
+
+    Limit -- **dual convention**
+    ----------------------------
+    The one-sided ``[min_value, max_value]`` limit row accepts two
+    parameter conventions controlled by the *sign* of
+    :attr:`hertz_limit`:
+
+      * ``hertz_limit >= 0`` -- Box2D mass-independent knobs
+        ``(hertz, damping_ratio_limit)``; interpretation identical to
+        the positional block.
+      * ``hertz_limit <  0`` -- PD spring-damper with
+        ``|hertz_limit|`` as stiffness ``kp`` and
+        ``|damping_ratio_limit|`` as damping ``kd`` (same SI units
+        as the drive row). Same implicit-Euler math as the drive row
+        above.
+
+    Leaving ``drive_mode = DriveMode.OFF`` *and*
+    ``stiffness_drive == damping_drive == 0`` *and*
+    ``min_value == max_value == 0`` gives a *non-actuated* revolute
+    or prismatic joint. Ball-socket has no actuator row -- drive /
+    limit fields are required to stay at their defaults.
     """
 
     body1: int
@@ -372,8 +617,8 @@ class JointDescriptor:
     target: float = 0.0
     target_velocity: float = 0.0
     max_force_drive: float = 0.0
-    hertz_drive: float = float(DEFAULT_HERTZ_MOTOR)
-    damping_ratio_drive: float = float(DEFAULT_DAMPING_RATIO)
+    stiffness_drive: float = 0.0
+    damping_drive: float = 0.0
     min_value: float = 0.0
     max_value: float = 0.0
     hertz_limit: float = float(DEFAULT_HERTZ_LIMIT)
@@ -634,9 +879,20 @@ class WorldBuilder:
         return 0
 
     def add_body(self, descriptor: RigidBodyDescriptor) -> int:
-        """Append a fully-formed descriptor and return its body index."""
+        """Append a fully-formed descriptor and return its body index.
+
+        The descriptor is validated eagerly via
+        :func:`_validate_body_descriptor`; obvious errors (NaN fields,
+        negative inverse masses, DYNAMIC bodies with zero inverse mass,
+        STATIC bodies with non-zero mass / velocity, non-unit
+        quaternions, etc.) raise :class:`ValueError` here rather than
+        producing silent corruption deep inside the solver. Valid
+        descriptors are passed through unchanged.
+        """
+        next_index = len(self._bodies)
+        _validate_body_descriptor(descriptor, next_index)
         self._bodies.append(descriptor)
-        return len(self._bodies) - 1
+        return next_index
 
     def add_static_body(
         self,
@@ -900,8 +1156,8 @@ class WorldBuilder:
         target: float = 0.0,
         target_velocity: float = 0.0,
         max_force_drive: float = 0.0,
-        hertz_drive: float = float(DEFAULT_HERTZ_MOTOR),
-        damping_ratio_drive: float = float(DEFAULT_DAMPING_RATIO),
+        stiffness_drive: float = 0.0,
+        damping_drive: float = 0.0,
         min_value: float = 0.0,
         max_value: float = 0.0,
         hertz_limit: float = float(DEFAULT_HERTZ_LIMIT),
@@ -941,8 +1197,8 @@ class WorldBuilder:
 
         * :attr:`DriveMode.POSITION` / :attr:`DriveMode.VELOCITY` on the
           free DoF, capped by ``max_force_drive`` (torque [N*m] for
-          revolute, force [N] for prismatic), with its own soft-spring
-          plumbing (``hertz_drive`` / ``damping_ratio_drive``).
+          revolute, force [N] for prismatic), with an implicit-Euler
+          PD spring-damper (``stiffness_drive`` / ``damping_drive``).
         * One-sided ``[min_value, max_value]`` spring-damper limits on
           the same DoF (``min_value == max_value == 0`` disables). Units
           are rad for revolute and m for prismatic.
@@ -985,15 +1241,27 @@ class WorldBuilder:
                 per-substep impulse to ``max_force_drive * dt``, ``0``
                 means *unlimited* for POSITION and *disables* the drive
                 for VELOCITY. Must be 0 for ball-socket.
-            hertz_drive: Drive soft-constraint frequency [Hz].
-            damping_ratio_drive: Drive damping ratio.
+            stiffness_drive: Drive PD stiffness ``kp``; [N*m/rad] for
+                revolute or [N/m] for prismatic. Default ``0`` (drive
+                off -- no impulse even if ``drive_mode != OFF``).
+            damping_drive: Drive PD damping ``kd``; [N*m*s/rad] for
+                revolute or [N*s/m] for prismatic. Default ``0``.
+                See :class:`JointDescriptor` for the full PD spec.
             min_value: Lower limit. Units [rad] for revolute, [m] for
                 prismatic. Must be 0 for ball-socket.
             max_value: Upper limit. Same units as ``min_value``;
                 ``min_value == max_value == 0`` disables the limit.
                 Must be 0 for ball-socket.
-            hertz_limit: Limit soft-constraint frequency [Hz].
-            damping_ratio_limit: Limit damping ratio.
+            hertz_limit: Limit row frequency knob with *dual*
+                interpretation: ``>= 0`` selects the Box2D
+                ``(hertz, damping_ratio)`` convention; strictly
+                negative selects the PD convention with
+                ``kp = |hertz_limit|`` and
+                ``kd = |damping_ratio_limit|``. See
+                :class:`JointDescriptor`.
+            damping_ratio_limit: Box2D damping ratio (``hertz_limit
+                >= 0``) or absolute damping ``kd`` (``hertz_limit <
+                0``). See ``hertz_limit``.
 
         Returns:
             A :class:`JointHandle` whose ``cid`` field is rewritten in
@@ -1061,8 +1329,8 @@ class WorldBuilder:
             target=target,
             target_velocity=target_velocity,
             max_force_drive=max_force_drive,
-            hertz_drive=hertz_drive,
-            damping_ratio_drive=damping_ratio_drive,
+            stiffness_drive=stiffness_drive,
+            damping_drive=damping_drive,
             min_value=min_value,
             max_value=max_value,
             hertz_limit=hertz_limit,
@@ -1897,9 +2165,11 @@ class WorldBuilder:
         target = np.asarray([d.target for d in descs], dtype=np.float32)
         target_velocity = np.asarray([d.target_velocity for d in descs], dtype=np.float32)
         max_force_drive = np.asarray([d.max_force_drive for d in descs], dtype=np.float32)
-        hertz_drive = np.asarray([d.hertz_drive for d in descs], dtype=np.float32)
-        damping_ratio_drive = np.asarray(
-            [d.damping_ratio_drive for d in descs], dtype=np.float32
+        stiffness_drive = np.asarray(
+            [d.stiffness_drive for d in descs], dtype=np.float32
+        )
+        damping_drive = np.asarray(
+            [d.damping_drive for d in descs], dtype=np.float32
         )
         min_value = np.asarray([d.min_value for d in descs], dtype=np.float32)
         max_value = np.asarray([d.max_value for d in descs], dtype=np.float32)
@@ -1919,8 +2189,8 @@ class WorldBuilder:
         target_d = wp.array(target, dtype=wp.float32, device=device)
         target_velocity_d = wp.array(target_velocity, dtype=wp.float32, device=device)
         max_force_drive_d = wp.array(max_force_drive, dtype=wp.float32, device=device)
-        hertz_drive_d = wp.array(hertz_drive, dtype=wp.float32, device=device)
-        damping_ratio_drive_d = wp.array(damping_ratio_drive, dtype=wp.float32, device=device)
+        stiffness_drive_d = wp.array(stiffness_drive, dtype=wp.float32, device=device)
+        damping_drive_d = wp.array(damping_drive, dtype=wp.float32, device=device)
         min_value_d = wp.array(min_value, dtype=wp.float32, device=device)
         max_value_d = wp.array(max_value, dtype=wp.float32, device=device)
         hertz_limit_d = wp.array(hertz_limit, dtype=wp.float32, device=device)
@@ -1944,8 +2214,8 @@ class WorldBuilder:
                 target_d,
                 target_velocity_d,
                 max_force_drive_d,
-                hertz_drive_d,
-                damping_ratio_drive_d,
+                stiffness_drive_d,
+                damping_drive_d,
                 min_value_d,
                 max_value_d,
                 hertz_limit_d,

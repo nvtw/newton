@@ -143,6 +143,10 @@ def _quat_rotate_np(q: np.ndarray, v: np.ndarray) -> np.ndarray:
 
 def build_jitter_world_from_model(
     model: newton.Model,
+    *,
+    verbose: bool = False,
+    expected_masses: dict[int, float] | None = None,
+    mass_mismatch_tol: float = 1e-3,
 ) -> tuple[WorldBuilder, dict[int, int]]:
     """Mirror Newton's body set into a fresh :class:`WorldBuilder`.
 
@@ -150,6 +154,28 @@ def build_jitter_world_from_model(
     body ``i`` lands at Jitter body ``i + 1``; the returned map carries
     that shift so joints / pickers can translate Newton indices to
     Jitter's.
+
+    Args:
+        model: Finalized :class:`newton.Model` whose bodies should be
+            mirrored into Jitter.
+        verbose: If ``True``, print a per-body summary of the
+            ingested mass / principal-inertia / CoM. Handy when a
+            downstream contact-force or joint test returns unexpected
+            magnitudes -- run once with ``verbose=True`` and verify the
+            body's Newton-side mass matches what the scene builder
+            requested. (This would have caught the infamous
+            "``add_body(mass=2)`` silently became ``6.19 kg`` because
+            ``add_shape_sphere`` layered a density-derived mass on
+            top" bug immediately.)
+        expected_masses: Optional ``newton_body_index -> expected_mass``
+            dict. Any body whose ingested mass differs from its
+            expected value by more than ``mass_mismatch_tol`` (relative)
+            raises :class:`ValueError` during ingestion. Use this in
+            tests that depend on specific analytical masses (e.g.
+            contact-force or pendulum-period tests). Static bodies
+            (``inv_mass == 0``) skip this check.
+        mass_mismatch_tol: Relative tolerance for the
+            ``expected_masses`` comparison (default ``1e-3``).
 
     Returns:
         The populated builder (nothing finalized yet) and the
@@ -166,10 +192,37 @@ def build_jitter_world_from_model(
     )
     body_com_np = model.body_com.numpy()
 
+    # Cross-check the incoming Newton arrays so a malformed Model can't
+    # silently turn into a broken Jitter world. These are *internal*
+    # consistency asserts (shape mismatches would only ever happen from
+    # a bug in ModelBuilder), but since we hit NumPy here anyway, the
+    # extra check is essentially free.
+    n = int(model.body_count)
+    if body_inv_mass_np is not None and body_inv_mass_np.shape != (n,):
+        raise ValueError(
+            "build_jitter_world_from_model: "
+            f"``model.body_inv_mass`` shape {body_inv_mass_np.shape} "
+            f"does not match body_count = {n}."
+        )
+    if body_inv_inertia_np is not None and body_inv_inertia_np.shape != (n, 3, 3):
+        raise ValueError(
+            "build_jitter_world_from_model: "
+            f"``model.body_inv_inertia`` shape {body_inv_inertia_np.shape} "
+            f"does not match (body_count, 3, 3) = ({n}, 3, 3)."
+        )
+    if body_q_np.shape != (n, 7):
+        raise ValueError(
+            "build_jitter_world_from_model: "
+            f"``model.body_q`` shape {body_q_np.shape} does not match "
+            f"(body_count, 7) = ({n}, 7)."
+        )
+
     builder = WorldBuilder()
     newton_to_jitter: dict[int, int] = {}
 
-    for i in range(model.body_count):
+    summary_rows: list[str] = []
+
+    for i in range(n):
         inv_m = float(body_inv_mass_np[i]) if body_inv_mass_np is not None else 0.0
         inv_I = (
             body_inv_inertia_np[i]
@@ -180,17 +233,74 @@ def build_jitter_world_from_model(
         pose = body_q_np[i]
         origin_pos = pose[:3]
         rot = pose[3:7]  # xyzw
+
+        # Newton writes a non-unit quaternion occasionally (e.g. right
+        # after forward-kinematics on a freshly-appended URDF); renorm
+        # here so the downstream validator doesn't reject the body on a
+        # 1e-6 norm drift.
+        qn = float(np.linalg.norm(rot))
+        if qn > 0.0:
+            rot = rot / qn
+
         com_local = body_com_np[i]
         com_world = origin_pos + _quat_rotate_np(rot, com_local)
 
+        # Mass / inertia diagnostics. These land in the summary when
+        # ``verbose=True`` and feed the ``expected_masses`` check below.
+        if not is_static:
+            mass = 1.0 / inv_m
+            # Principal inertia ~ 1 / max_diag(inv_I); only really
+            # meaningful for diagonal inertias, which is Newton's
+            # default. For a fully-populated inverse-inertia matrix we
+            # still report the three diagonals for a quick eyeball.
+            diag_inv = np.array(
+                [float(inv_I[0, 0]), float(inv_I[1, 1]), float(inv_I[2, 2])]
+            )
+            principal_I = np.where(diag_inv > 0.0, 1.0 / np.maximum(diag_inv, 1e-30), 0.0)
+        else:
+            mass = float("inf")
+            principal_I = np.zeros(3, dtype=np.float64)
+
+        if expected_masses is not None and i in expected_masses and not is_static:
+            expected = float(expected_masses[i])
+            if expected <= 0.0:
+                raise ValueError(
+                    "build_jitter_world_from_model: "
+                    f"expected_masses[{i}] = {expected} must be positive."
+                )
+            rel_err = abs(mass - expected) / expected
+            if rel_err > mass_mismatch_tol:
+                raise ValueError(
+                    "build_jitter_world_from_model: Newton body "
+                    f"{i} has mass={mass:.6g} kg but "
+                    f"expected_masses[{i}]={expected:.6g} kg (rel_err="
+                    f"{rel_err * 100:.2f}% > {mass_mismatch_tol * 100:.2f}%). "
+                    "The most common cause: ``ModelBuilder.add_body(mass=M)`` "
+                    "was called, then ``add_shape_*(...)`` added a shape "
+                    "with default ``density=1000 kg/m^3`` which is "
+                    "integrated *on top of* M. Fix by passing "
+                    "``cfg=ModelBuilder.ShapeConfig(density=0.0)`` on the "
+                    "shape, or by setting the body's mass *after* shapes "
+                    "are added."
+                )
+
+        if verbose:
+            summary_rows.append(
+                f"  body[{i:3d}] motion={'STATIC' if is_static else 'DYNAMIC':7s}  "
+                f"mass={mass:>10.4g} kg  "
+                f"I_principal=({principal_I[0]:.4g}, "
+                f"{principal_I[1]:.4g}, {principal_I[2]:.4g}) kg*m^2  "
+                f"com_local=({float(com_local[0]):+.3f}, "
+                f"{float(com_local[1]):+.3f}, {float(com_local[2]):+.3f})"
+            )
+
         if is_static:
-            zero = np.zeros((3, 3), dtype=np.float32)
             desc = RigidBodyDescriptor(
                 position=tuple(com_world.tolist()),
                 orientation=tuple(rot.tolist()),
                 motion_type=int(MOTION_STATIC),
                 inverse_mass=0.0,
-                inverse_inertia=tuple(tuple(float(x) for x in r) for r in zero),
+                inverse_inertia=((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
                 affected_by_gravity=False,
             )
         else:
@@ -203,6 +313,16 @@ def build_jitter_world_from_model(
                 affected_by_gravity=True,
             )
         newton_to_jitter[i] = builder.add_body(desc)
+
+    if verbose:
+        header = (
+            f"build_jitter_world_from_model: ingested {n} body(ies) from "
+            f"newton.Model"
+        )
+        print(header)
+        print("-" * len(header))
+        for row in summary_rows:
+            print(row)
 
     return builder, newton_to_jitter
 
@@ -252,6 +372,8 @@ def build_jitter_joints_from_model(
     *,
     drive_mode: DriveMode = DriveMode.OFF,
     max_force_drive: float = 0.0,
+    stiffness_drive: float = 0.0,
+    damping_drive: float = 0.0,
     apply_joint_targets: bool = True,
     skip_fixed: bool = True,
 ) -> list[JointHandle]:
@@ -300,6 +422,15 @@ def build_jitter_joints_from_model(
             turn on a PD drive toward ``joint_target_pos``.
         max_force_drive: Per-substep torque cap for the drive [N*m].
             Ignored when ``drive_mode`` is :attr:`DriveMode.OFF`.
+        stiffness_drive: PD stiffness ``kp`` [N*m/rad] forwarded to
+            every revolute joint's unified drive (Jitter2 AngularMotor
+            PD). Defaults to ``0.0``. With both ``stiffness_drive`` and
+            ``damping_drive`` at ``0`` and ``drive_mode=VELOCITY``,
+            the drive degenerates to a pure velocity motor (rigid
+            target-velocity tracker clamped by ``max_force_drive``).
+        damping_drive: PD damping ``kd`` [N*m*s/rad] forwarded to every
+            revolute drive. Defaults to ``0.0``. Honoured for both
+            POSITION and VELOCITY drives.
         apply_joint_targets: When ``True`` (default) and ``drive_mode``
             is :attr:`DriveMode.POSITION`, use ``model.joint_target_pos``
             as the per-joint setpoint. When ``False``, setpoint stays
@@ -428,6 +559,8 @@ def build_jitter_joints_from_model(
                 drive_mode=drive_mode,
                 target=target,
                 max_force_drive=max_force_drive,
+                stiffness_drive=stiffness_drive,
+                damping_drive=damping_drive,
                 min_value=lo,
                 max_value=hi,
             )

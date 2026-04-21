@@ -96,8 +96,11 @@ def _build_revolute_scene(
     target: float = 0.0,
     target_velocity: float = 0.0,
     max_force_drive: float = 0.0,
-    hertz_drive: float = 8.0,
-    damping_ratio_drive: float = 1.0,
+    # Default PD gains chosen for the unit-inertia cube: omega_0 ~= 14
+    # rad/s (softer than the prior 8 Hz Box2D default but plenty
+    # responsive at 60 Hz*2 substeps), mildly overdamped.
+    stiffness_drive: float = 200.0,
+    damping_drive: float = 20.0,
     min_value: float = 0.0,
     max_value: float = 0.0,
     hertz_limit: float = 30.0,
@@ -129,8 +132,8 @@ def _build_revolute_scene(
         target=target,
         target_velocity=target_velocity,
         max_force_drive=max_force_drive,
-        hertz_drive=hertz_drive,
-        damping_ratio_drive=damping_ratio_drive,
+        stiffness_drive=stiffness_drive,
+        damping_drive=damping_drive,
         min_value=min_value,
         max_value=max_value,
         hertz_limit=hertz_limit,
@@ -157,8 +160,9 @@ def _build_prismatic_scene(
     target: float = 0.0,
     target_velocity: float = 0.0,
     max_force_drive: float = 0.0,
-    hertz_drive: float = 8.0,
-    damping_ratio_drive: float = 1.0,
+    # Unit-mass cube: omega_0 = sqrt(200) ~= 14 rad/s, ~70% damping.
+    stiffness_drive: float = 200.0,
+    damping_drive: float = 20.0,
     min_value: float = 0.0,
     max_value: float = 0.0,
     hertz_limit: float = 30.0,
@@ -197,8 +201,8 @@ def _build_prismatic_scene(
         target=target,
         target_velocity=target_velocity,
         max_force_drive=max_force_drive,
-        hertz_drive=hertz_drive,
-        damping_ratio_drive=damping_ratio_drive,
+        stiffness_drive=stiffness_drive,
+        damping_drive=damping_drive,
         min_value=min_value,
         max_value=max_value,
         hertz_limit=hertz_limit,
@@ -631,7 +635,8 @@ class TestJointRevolute(unittest.TestCase):
             drive_mode=DriveMode.POSITION,
             target=target,
             max_force_drive=0.05,
-            hertz_drive=30.0,
+            stiffness_drive=200.0,
+            damping_drive=20.0,
         )
         self._step(world, frames=60)
 
@@ -845,8 +850,8 @@ class TestJointPrismatic(unittest.TestCase):
             drive_mode=DriveMode.POSITION,
             target=0.0,
             max_force_drive=50.0,
-            hertz_drive=8.0,
-            damping_ratio_drive=1.0,
+            stiffness_drive=200.0,
+            damping_drive=20.0,
         )
         self._step(world, frames=90)
 
@@ -874,7 +879,8 @@ class TestJointPrismatic(unittest.TestCase):
             drive_mode=DriveMode.POSITION,
             target=0.0,
             max_force_drive=0.5,
-            hertz_drive=30.0,
+            stiffness_drive=500.0,
+            damping_drive=20.0,
         )
         self._step(world, frames=30)
 

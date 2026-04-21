@@ -154,12 +154,24 @@ _HINGE_AXIS = (0.0, 0.0, 1.0)
 _MOTOR_MAX_FORCE = 50.0
 
 # Position-drive soft-spring knobs (honoured only by
-# :attr:`DriveMode.POSITION`). Per-joint critical damping at 4 Hz;
-# as noted in :mod:`constraint_actuated_double_ball_socket`, the
+# :attr:`DriveMode.POSITION`). The unified ACTUATED_DOUBLE_BALL_SOCKET
+# drive is a straight Jitter2 AngularMotor PD: ``tau = kp*(theta -
+# theta*) + kd*theta_dot``. For unit-inertia cubes a 4 Hz critically
+# damped angular spring (Box2D convention: ``omega = 2*pi*hertz``,
+# ``zeta = 1``) maps to
+#
+#   kp = I * omega^2 = (2*pi*4)^2 ~= 631 N*m/rad
+#   kd = 2*I*zeta*omega = 2*(2*pi*4) ~= 50.3 N*m*s/rad
+#
+# As noted in :mod:`constraint_actuated_double_ball_socket`, the
 # chain as a coupled system has its own normal modes and is not
 # guaranteed to be critically damped at these per-joint settings.
+# The D6_REVOLUTE legacy drive still takes ``hertz`` /
+# ``damping_ratio``.
 _HERTZ_DRIVE = 4.0
 _DAMPING_RATIO_DRIVE = 1.0
+_STIFFNESS_DRIVE = (2.0 * math.pi * _HERTZ_DRIVE) ** 2  # kp [N*m/rad] for I=1
+_DAMPING_DRIVE = 2.0 * _DAMPING_RATIO_DRIVE * (2.0 * math.pi * _HERTZ_DRIVE)
 
 # User-configurable target relative angular velocity for every motor in
 # the chain [rad/s]. Honoured by :attr:`DriveMode.VELOCITY`. Each hinge
@@ -286,8 +298,8 @@ class Example:
                         target=TARGET_ANGLE,
                         target_velocity=TARGET_VELOCITY,
                         max_force_drive=_MOTOR_MAX_FORCE,
-                        hertz_drive=_HERTZ_DRIVE,
-                        damping_ratio_drive=_DAMPING_RATIO_DRIVE,
+                        stiffness_drive=_STIFFNESS_DRIVE,
+                        damping_drive=_DAMPING_DRIVE,
                     )
                 )
             elif JOINT_KIND is JointKind.D6_REVOLUTE:

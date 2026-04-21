@@ -57,6 +57,13 @@ JOINT_ARMATURE = 0.01
 # transfer function to Jitter's ``max_force_drive``. 50 Nm is plenty
 # for this small quadruped and keeps the drives from fighting the
 # impulse limits during the initial drop.
+#
+# Jitter uses the same ``kp`` / ``kd`` convention as XPBD's ``target_ke``
+# / ``target_kd`` (the Jitter2 AngularMotor PD: ``tau = kp*(theta -
+# theta*) + kd*theta_dot``), so we pass the basic_urdf gains through
+# directly. ``max_force_drive`` then clamps the per-substep impulse.
+DRIVE_STIFFNESS = 2000.0
+DRIVE_DAMPING = 1.0
 DRIVE_MAX_TORQUE = 50.0
 
 # Twelve stance targets, one per actuated joint (hip-abduct, hip-flex,
@@ -135,8 +142,10 @@ class Example(DemoExample):
         quadruped = newton.ModelBuilder()
         quadruped.default_joint_cfg.armature = JOINT_ARMATURE
         # ``target_ke`` / ``target_kd`` are XPBD-specific. We don't use
-        # them in Jitter (max_force_drive + hertz_drive cover the same
-        # role), but we keep the friction coefficient since Newton's
+        # them in Jitter (``max_force_drive`` + ``stiffness_drive`` /
+        # ``damping_drive`` cover the same role -- a Jitter2
+        # LinearMotor / AngularMotor PD clamped by a force cap), but
+        # we keep the friction coefficient since Newton's
         # CollisionPipeline does read it.
         quadruped.default_shape_cfg.mu = 1.0
 
@@ -210,6 +219,8 @@ class Example(DemoExample):
             newton_to_jitter,
             drive_mode=DriveMode.POSITION,
             max_force_drive=DRIVE_MAX_TORQUE,
+            stiffness_drive=DRIVE_STIFFNESS,
+            damping_drive=DRIVE_DAMPING,
             apply_joint_targets=True,
         )
 

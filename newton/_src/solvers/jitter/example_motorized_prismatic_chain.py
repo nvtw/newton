@@ -40,6 +40,7 @@
 ###########################################################################
 
 import enum
+import math
 
 import numpy as np
 import warp as wp
@@ -137,15 +138,25 @@ _REST_SPACING = 2.0 * HALF_EXTENT
 # explosion. Ignored by the passive-only PRISMATIC legacy kind.
 _DRIVE_MAX_FORCE = 200.0
 
-# Soft-drive knobs. ``hertz_drive = 8`` / ``damping_ratio_drive = 2``
-# gives a per-joint over-damped position spring at 8 Hz. We pick
-# ``damping_ratio > 1`` deliberately: the per-joint critical ratio
-# does *not* carry over to the chain's normal modes (see the analysis
-# in :mod:`constraint_actuated_double_ball_socket`), so over-damping
-# each joint is necessary to keep the collective chain modes from
-# oscillating under mouse-picking perturbations and gravity loading.
+# Soft-drive knobs. The unified ACTUATED_DOUBLE_BALL_SOCKET drive is a
+# straight Jitter2 LinearMotor / AngularMotor PD: ``tau = kp*(x - x*) +
+# kd*x_dot``. For unit-mass cubes an 8 Hz over-damped spring (Box2D
+# convention: ``omega = 2*pi*hertz``, ``zeta = 2``) maps to
+#
+#   kp = m * omega^2 = (2*pi*8)^2 ~= 2527 N/m
+#   kd = 2*m*zeta*omega = 2*2*(2*pi*8) ~= 201 N*s/m
+#
+# The damping ratio ``zeta > 1`` is deliberate: the per-joint critical
+# ratio does *not* carry over to the chain's normal modes (see the
+# analysis in :mod:`constraint_actuated_double_ball_socket`), so
+# over-damping each joint is necessary to keep the collective chain
+# modes from oscillating under mouse-picking perturbations and gravity
+# loading. The D6_PRISMATIC legacy drive still takes ``hertz`` /
+# ``damping_ratio`` -- we convert on the fly there.
 _HERTZ_DRIVE = 8.0
 _DAMPING_RATIO_DRIVE = 2.0
+_STIFFNESS_DRIVE = (2.0 * math.pi * _HERTZ_DRIVE) ** 2  # kp [N/m] for m=1
+_DAMPING_DRIVE = 2.0 * _DAMPING_RATIO_DRIVE * (2.0 * math.pi * _HERTZ_DRIVE)
 
 # Per-joint target displacement along +y relative to the joint's
 # anchor1 (i.e. body1's end of the slider) [m]. Zero = rest pose; >0
@@ -250,8 +261,8 @@ class Example:
                         target=TARGET_POSITION,
                         target_velocity=TARGET_VELOCITY,
                         max_force_drive=_DRIVE_MAX_FORCE,
-                        hertz_drive=_HERTZ_DRIVE,
-                        damping_ratio_drive=_DAMPING_RATIO_DRIVE,
+                        stiffness_drive=_STIFFNESS_DRIVE,
+                        damping_drive=_DAMPING_DRIVE,
                     )
                 )
             elif JOINT_KIND is JointKind.PRISMATIC:
