@@ -52,11 +52,14 @@ __all__ = [
     "CONSTRAINT_TYPE_LINEAR_MOTOR",
     "CONSTRAINT_TYPE_OFFSET",
     "CONSTRAINT_TYPE_PRISMATIC",
+    "BAUMGARTE_FACTOR",
     "DEFAULT_DAMPING_RATIO",
     "DEFAULT_HERTZ_ANGULAR",
     "DEFAULT_HERTZ_LIMIT",
     "DEFAULT_HERTZ_LINEAR",
     "DEFAULT_HERTZ_MOTOR",
+    "LINEAR_SLOP",
+    "MAX_LINEAR_CORRECTION",
     "ConstraintBodies",
     "ConstraintContainer",
     "assert_constraint_header",
@@ -75,6 +78,8 @@ __all__ = [
     "read_quat",
     "read_vec3",
     "read_vec4",
+    "baumgarte_bias_scalar",
+    "baumgarte_bias_vec3",
     "pd_coefficients",
     "soft_constraint_coefficients",
     "write_float",
@@ -592,19 +597,25 @@ def constraint_bodies_make(b1: wp.int32, b2: wp.int32) -> ConstraintBodies:
 #: Critically damped by default -- no overshoot, no underdamped ringing.
 DEFAULT_DAMPING_RATIO = wp.constant(wp.float32(1.0))
 #: Linear (positional) joint stiffness target. ``0`` means *rigid* (the
-#: PGS-default unsoftened update) -- matches Box2D / Jitter2 behaviour
-#: where joint anchors are hard constraints, not soft springs. A soft
-#: positional anchor at 60 Hz used to "leak" up to 70% of a paired
-#: drive/limit/spring impulse on bodies whose COM is offset from the
-#: hinge axis (the canonical lever-bob setup), which silently collapsed
-#: the effective stiffness to a fraction of the commanded ``kp``. Users
-#: who want a soft anchor (rope, breakable joint, compliant mount) can
-#: still set ``hertz`` to a positive value explicitly.
+#: PGS-default unsoftened update, with Box2D v2-style Baumgarte drift
+#: correction layered on top -- see :func:`baumgarte_bias_vec3`) --
+#: matches Box2D / Jitter2 behaviour where joint anchors are hard
+#: constraints rather than soft springs. A *soft* positional anchor
+#: (``hertz > 0``) leaks up to 70% of a paired drive/limit/spring impulse
+#: on bodies whose COM is offset from the hinge axis (the canonical
+#: lever-bob setup), which silently collapses the effective stiffness to
+#: a fraction of the commanded ``kp``; the rigid + Baumgarte default
+#: avoids that because it does *not* soften the ``mass_coeff`` /
+#: ``impulse_coeff`` pair -- the drift bias only enters the iterate as
+#: an extra additive velocity target. Users who want a soft anchor
+#: (rope, breakable joint, compliant mount) can still set ``hertz`` to
+#: a positive value explicitly to recover the compliant soft-constraint
+#: path.
 DEFAULT_HERTZ_LINEAR = wp.constant(wp.float32(0.0))
-#: Angular (rotational lock) joint stiffness. Same rigid default as the
-#: linear knob, for the same reason (a soft rotational lock leaks angular
-#: impulse from drive / limit rows). Override per-joint if a compliant
-#: rotational lock is intentional.
+#: Angular (rotational lock) joint stiffness. Same rigid + Baumgarte
+#: default as the linear knob, for the same reason (a soft rotational
+#: lock leaks angular impulse from drive / limit rows). Override
+#: per-joint if a compliant rotational lock is intentional.
 DEFAULT_HERTZ_ANGULAR = wp.constant(wp.float32(0.0))
 #: Hinge / cone limit stiffness. Same conservative value as the angular
 #: hinge so a body hitting its limit doesn't bounce.
@@ -655,6 +666,103 @@ def soft_constraint_coefficients(
     a2 = dt * omega * a1
     a3 = 1.0 / (1.0 + a2)
     return omega / a1, a2 * a3, a3
+
+
+# ---------------------------------------------------------------------------
+# Baumgarte positional stabilisation (Box2D v2 style)
+# ---------------------------------------------------------------------------
+#
+# The rigid PGS update (``soft_constraint_coefficients(hertz <= 0)``) zeroes
+# the *velocity* at every anchor but leaves any pre-existing positional
+# *separation* untouched -- nothing feeds the drift back into the iterate.
+# Under an external load (picking, large contact impulses, ...) the anchors
+# walk apart within a substep; on release the gap is frozen because the
+# constraint only sees ``Jv = 0`` from that point on.
+#
+# Box2D v2 / Bullet / ODE fix this with a Baumgarte velocity bias computed
+# directly from the drift (no softening, no impulse-coeff leak). In the
+# notation of the soft-constraint update,
+#
+#     incremental_lambda = -1 * effective_mass * (Jv + bias_rate * sep)
+#                          - 0 * accumulated_impulse
+#
+# with ``bias_rate = BAUMGARTE / dt`` and the raw ``sep`` passed through a
+# slop + max-correction clamp so (a) sub-millimetre drift doesn't produce
+# chattering impulses and (b) a huge accumulated drift can't eject bodies.
+# This is exactly the rigid PGS update of ``soft_constraint_coefficients``,
+# plus a non-leaky drift-correction term -- so paired drive / limit /
+# spring rows do *not* see the "soft anchor leaks 70% of the drive
+# impulse" behaviour that forced :data:`DEFAULT_HERTZ_LINEAR` to zero in
+# the first place.
+
+#: Baumgarte factor in ``[0, 1]``. Box2D v2's default. Larger -> faster
+#: drift correction per substep, but overshoot above ~0.4 makes the
+#: iterate oscillate. 0.2 absorbs the drift over a handful of substeps
+#: without visible ringing at the 60Hz / 8-substep baseline.
+BAUMGARTE_FACTOR = wp.constant(wp.float32(0.2))
+#: Below this separation the Baumgarte bias is zero. Keeps sub-millimetre
+#: PGS residuals from chattering into a never-settling velocity jitter.
+#: Matches Box2D's ``b2_linearSlop`` at unit scene scale (5 mm).
+LINEAR_SLOP = wp.constant(wp.float32(0.005))
+#: Upper bound on the per-substep positional correction [m]. Without this
+#: cap a body that has somehow ended up 5 metres outside its anchor (e.g.
+#: a tunnelled contact) would get a giant bias velocity and blow up on
+#: the next integrate pass. Matches Box2D's ``b2_maxLinearCorrection``.
+MAX_LINEAR_CORRECTION = wp.constant(wp.float32(0.2))
+
+
+@wp.func
+def baumgarte_bias_vec3(
+    drift: wp.vec3f,
+    dt: wp.float32,
+):
+    """Box2D v2-style positional bias for a 3-vector linear anchor drift.
+
+    ``drift`` is ``p_body2_anchor - p_body1_anchor`` expressed in the
+    world. The returned bias is the velocity the PGS iterate should drive
+    the relative anchor velocity towards in order to annihilate the drift
+    over roughly ``dt / BAUMGARTE_FACTOR`` seconds, with two safety nets:
+
+      * If ``|drift|`` is below :data:`LINEAR_SLOP` the bias is
+        identically zero. Sub-millimetre PGS residuals don't produce a
+        chattering correction.
+      * The corrected drift magnitude is clamped to
+        :data:`MAX_LINEAR_CORRECTION` so one massively-out-of-place
+        substep (e.g. a badly tunnelled contact) can't produce an
+        unbounded kick on the next integrate pass.
+
+    The caller (the per-joint prepare) feeds this bias into the iterate
+    in the same slot as :func:`soft_constraint_coefficients`'s
+    ``bias_rate * drift`` product, so the bias contributes a
+    **non-softened** corrective velocity to the rigid PGS update. At
+    ``|drift| = 0`` this is a no-op and the iterate matches the legacy
+    ``hertz = 0`` rigid path byte-for-byte.
+    """
+    mag = wp.length(drift)
+    if mag <= LINEAR_SLOP:
+        return wp.vec3f(0.0, 0.0, 0.0)
+    corrected = wp.min(mag - LINEAR_SLOP, MAX_LINEAR_CORRECTION)
+    scale = BAUMGARTE_FACTOR * corrected / (mag * dt)
+    return drift * scale
+
+
+@wp.func
+def baumgarte_bias_scalar(
+    drift: wp.float32,
+    dt: wp.float32,
+):
+    """Scalar analogue of :func:`baumgarte_bias_vec3`.
+
+    Used for 1-DoF positional anchors (e.g. the anchor-3 scalar-along-t2
+    row in the prismatic joint's 4+1 Schur split). Same slop + clamp +
+    ``BAUMGARTE_FACTOR / dt`` rule, with the sign preserved so positive
+    drift yields positive bias.
+    """
+    mag = wp.abs(drift)
+    if mag <= LINEAR_SLOP:
+        return wp.float32(0.0)
+    corrected = wp.min(mag - LINEAR_SLOP, MAX_LINEAR_CORRECTION)
+    return wp.sign(drift) * BAUMGARTE_FACTOR * corrected / dt
 
 
 @wp.func

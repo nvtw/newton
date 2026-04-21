@@ -151,6 +151,8 @@ from newton._src.solvers.jitter.constraint_container import (
     ConstraintBodies,
     ConstraintContainer,
     assert_constraint_header,
+    baumgarte_bias_scalar,
+    baumgarte_bias_vec3,
     constraint_bodies_make,
     constraint_set_type,
     pd_coefficients,
@@ -928,7 +930,17 @@ def _ball_socket_prepare_at(
     write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
     write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
 
-    bias1 = (p1_b2 - p1_b1) * bias_rate
+    # Positional bias: soft-constraint ``bias_rate * C`` when the user
+    # opted into a compliant anchor (``hertz > 0``), or a Box2D-v2-style
+    # Baumgarte drift correction when the anchor is rigid (``hertz <=
+    # 0``, the default). The rigid path keeps ``mass_coeff = 1`` and
+    # ``impulse_coeff = 0`` so it does *not* leak paired drive / limit
+    # impulses, unlike the compliant soft-anchor path.
+    drift1 = p1_b2 - p1_b1
+    if hertz > 0.0:
+        bias1 = drift1 * bias_rate
+    else:
+        bias1 = baumgarte_bias_vec3(drift1, dt)
     write_vec3(constraints, base_offset + _OFF_BIAS1, cid, bias1)
 
     # 3-DoF positional warm-start (only the anchor-1 impulse).
@@ -1130,10 +1142,30 @@ def _revolute_prepare_at(
     write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
     write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
 
-    bias1 = (p1_b2 - p1_b1) * bias_rate
+    # Positional bias: soft-constraint ``bias_rate * C`` when ``hertz >
+    # 0`` (compliant anchor), or Box2D-v2-style Baumgarte drift
+    # correction when rigid (``hertz <= 0``, the default). Anchor 1
+    # contributes the full 3-vector drift; anchor 2 only contributes
+    # its component in the tangent plane (the axial component is the
+    # free DoF and is driven / limited by the scalar row below). The
+    # rigid path's Baumgarte term is *not* softened -- ``mass_coeff =
+    # 1`` and ``impulse_coeff = 0`` -- so it does not leak paired drive
+    # or limit impulses.
+    drift1 = p1_b2 - p1_b1
     drift2 = p2_b2 - p2_b1
-    bias2_t1 = wp.dot(t1, drift2) * bias_rate
-    bias2_t2 = wp.dot(t2, drift2) * bias_rate
+    if hertz > 0.0:
+        bias1 = drift1 * bias_rate
+        bias2_t1 = wp.dot(t1, drift2) * bias_rate
+        bias2_t2 = wp.dot(t2, drift2) * bias_rate
+    else:
+        bias1 = baumgarte_bias_vec3(drift1, dt)
+        # Project the anchor-2 drift onto the tangent plane first, then
+        # Baumgarte-smooth the projected 2-vector (embedded as a
+        # planar vec3 so we can reuse ``baumgarte_bias_vec3``).
+        drift2_tan = wp.vec3f(wp.dot(t1, drift2), wp.dot(t2, drift2), 0.0)
+        bias2_tan = baumgarte_bias_vec3(drift2_tan, dt)
+        bias2_t1 = bias2_tan[0]
+        bias2_t2 = bias2_tan[1]
     bias2 = wp.vec3f(bias2_t1, bias2_t2, 0.0)
     write_vec3(constraints, base_offset + _OFF_BIAS1, cid, bias1)
     write_vec3(constraints, base_offset + _OFF_BIAS2, cid, bias2)
@@ -1643,14 +1675,28 @@ def _prismatic_prepare_at(
     write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
     write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
 
-    # Positional bias: tangent drift at each anchor, scalar drift at
-    # anchor 3 along t2.
+    # Positional bias: soft-constraint ``bias_rate * C`` when ``hertz >
+    # 0`` (compliant anchor), else Box2D-v2 Baumgarte drift correction
+    # (see :func:`baumgarte_bias_vec3`). Anchors 1/2 contribute their
+    # tangent-plane projections; anchor 3 contributes a single scalar
+    # along ``t2`` (the 5th locked DoF of the prismatic's 2+2+1 triad).
+    # The rigid path keeps ``mass_coeff = 1``, ``impulse_coeff = 0``,
+    # so Baumgarte feeds drift into the iterate *without* softening
+    # the 5-DoF lock -- paired drive / limit rows are not leaked.
     drift1 = p1_b2 - p1_b1
     drift2 = p2_b2 - p2_b1
     drift3 = p3_b2 - p3_b1
-    bias1 = wp.vec3f(wp.dot(t1, drift1) * bias_rate, wp.dot(t2, drift1) * bias_rate, 0.0)
-    bias2 = wp.vec3f(wp.dot(t1, drift2) * bias_rate, wp.dot(t2, drift2) * bias_rate, 0.0)
-    bias3 = wp.dot(t2, drift3) * bias_rate
+    drift1_tan = wp.vec3f(wp.dot(t1, drift1), wp.dot(t2, drift1), 0.0)
+    drift2_tan = wp.vec3f(wp.dot(t1, drift2), wp.dot(t2, drift2), 0.0)
+    drift3_s = wp.dot(t2, drift3)
+    if hertz > 0.0:
+        bias1 = drift1_tan * bias_rate
+        bias2 = drift2_tan * bias_rate
+        bias3 = drift3_s * bias_rate
+    else:
+        bias1 = baumgarte_bias_vec3(drift1_tan, dt)
+        bias2 = baumgarte_bias_vec3(drift2_tan, dt)
+        bias3 = baumgarte_bias_scalar(drift3_s, dt)
     write_vec3(constraints, base_offset + _OFF_BIAS1, cid, bias1)
     write_vec3(constraints, base_offset + _OFF_BIAS2, cid, bias2)
     write_float(constraints, base_offset + _OFF_BIAS3, cid, bias3)
