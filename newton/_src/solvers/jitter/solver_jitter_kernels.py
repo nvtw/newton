@@ -472,6 +472,13 @@ def _constraint_iterate_fast_tail_kernel(
     * Inner block-stride loop covers colours larger than
       ``block_dim``; each thread processes ``ceil(count / block_dim)``
       cids.
+
+    Prepare is kept in a separate kernel (see
+    :func:`_constraint_prepare_fast_tail_kernel`) even though it
+    could be fused -- an earlier version inlined the prepare phase
+    here and the register-pressure bump pushed occupancy down
+    enough to slow the iterate phase by ~15 %. Separate kernels
+    give each one a tighter register budget and better occupancy.
     """
     tid = wp.tid()
 
