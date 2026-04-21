@@ -127,6 +127,7 @@ class World:
         num_shapes: int = 0,
         joint_constraint_count: int | None = None,
         collision_filter_pairs: Iterable[tuple[int, int]] | None = None,
+        default_friction: float = 0.5,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built containers.
@@ -190,6 +191,7 @@ class World:
         self.solver_iterations = int(solver_iterations)
         self.velocity_relaxations = int(velocity_relaxations)
         self.gravity = wp.vec3f(float(gravity[0]), float(gravity[1]), float(gravity[2]))
+        self.default_friction = float(default_friction)
 
         self.step_dt: float = 0.0
         self.inv_step_dt: float = 0.0
@@ -579,7 +581,7 @@ class World:
             scratch=self._ingest_scratch,
             cid_base=self.joint_constraint_count,
             max_contact_columns=self.max_contact_columns,
-            default_friction=0.5,
+            default_friction=self.default_friction,
             device=self.device,
             num_bodies=self.num_bodies,
             filter_keys=self._collision_filter_keys,

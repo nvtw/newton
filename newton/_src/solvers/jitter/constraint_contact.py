@@ -741,6 +741,14 @@ def contact_iterate_at(
     using the *current* ``lambda_n``). Solving normal first stops the
     tangent clamp from under- or over-estimating the friction budget
     when the same slot is revisited over successive iterations.
+
+    ``use_bias`` follows the Box2D v3 TGS-soft pattern: ``True`` during
+    the main solve (positional drift + speculative separation push
+    velocity toward closing the gap), ``False`` during the relax pass
+    so the normal row enforces ``Jv = 0`` without re-injecting the
+    positional-correction velocity. Injecting bias every relax pass
+    is the main reason resting contacts drift sideways (the bias adds
+    a tangent-normal mix that friction then has to chase).
     """
     b1 = body_pair.b1
     b2 = body_pair.b2
@@ -786,6 +794,8 @@ def contact_iterate_at(
         eff_t1 = _slot_get_eff_t1(constraints, cid, base)
         eff_t2 = _slot_get_eff_t2(constraints, cid, base)
         bias_val = _slot_get_bias(constraints, cid, base)
+        if not use_bias:
+            bias_val = wp.float32(0.0)
 
         # Relative velocity at the contact point (of body 2 seen from
         # body 1). ``v_contact = v2 + w2 x r2 - v1 - w1 x r1``.

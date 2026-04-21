@@ -2098,6 +2098,7 @@ class WorldBuilder:
         max_contact_columns: int = 0,
         rigid_contact_max: int = 0,
         num_shapes: int = 0,
+        default_friction: float = 0.5,
         device: wp.context.Devicelike = None,
     ) -> World:
         """Allocate GPU storage and build a ready-to-step :class:`World`.
@@ -2165,6 +2166,7 @@ class WorldBuilder:
             num_shapes=num_shapes,
             joint_constraint_count=num_constraints,
             collision_filter_pairs=self._collision_filter_pairs,
+            default_friction=default_friction,
             device=device,
         )
 
